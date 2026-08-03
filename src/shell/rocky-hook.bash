@@ -34,7 +34,8 @@ __rocky_guard() {
     if [[ "$cmd" =~ $regex ]]; then
       printf '[Rocky] %s\n' "${msg:-dangerous command}" >&2
       ans=""
-      if read -r -p "[Rocky] you sure, question (y/n) " ans </dev/tty 2>/dev/null; then
+      printf '[Rocky] you sure, question (y/n) ' >&2
+      if read -r ans </dev/tty 2>/dev/null; then
         [[ "$ans" == "y" || "$ans" == "Y" ]] && return 0
         printf '[Rocky] good. command not run.\n' >&2
         return 1

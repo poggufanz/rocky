@@ -80,6 +80,7 @@ export function addHookBlock(content: string): string {
 
 export function removeHookBlock(content: string): string {
   if (!hasHookBlock(content)) return content;
+  if (!content.split("\n").some((l) => l.trim() === HOOK_END)) return content; // BEGIN without END: corrupt block, touch nothing
   const lines = content.split("\n");
   const out: string[] = [];
   let inside = false;

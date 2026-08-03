@@ -19,3 +19,9 @@ test("removeHookBlock strips block and leaves rest intact", () => {
   assert.ok(removed.includes("alias ll='ls -l'"));
   assert.equal(removeHookBlock(removed), removed, "idempotent on absent block");
 });
+
+test("removeHookBlock leaves content unchanged when END marker is missing", () => {
+  // BEGIN present, END hand-deleted: nothing may be stripped, the bashrc tail survives
+  const content = "# my bashrc\n# >>> rocky hook >>>\nalias ll='ls -l'\nexport EDITOR=vim\n";
+  assert.equal(removeHookBlock(content), content, "truncated block: return content byte-for-byte");
+});
