@@ -1,7 +1,7 @@
 {
   "name": "rocky-cli",
   "version": "0.1.0",
-  "description": "A blind Eridian engineer who lives in your terminal, never forgets an error, and makes sure you still understand your own code.",
+  "description": "A blind engineer who lives in your terminal, never forgets an error, and makes sure you still understand your own code.",
   "type": "module",
   "bin": {
     "rocky": "./dist/index.js"
@@ -10,8 +10,9 @@
     "dist"
   ],
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && mkdir -p dist/shell && (cp src/shell/*.bash src/shell/*.sh dist/shell/ 2>/dev/null || true)",
     "dev": "tsc --watch",
+    "test": "npm run build && node --test \"dist/test/*.test.js\" && if [ -f test/hook-smoke.bash ]; then bash test/hook-smoke.bash; fi",
     "prepublishOnly": "npm run build"
   },
   "engines": {
