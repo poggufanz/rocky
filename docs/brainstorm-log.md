@@ -120,3 +120,28 @@ berjudul *UniDebugger*; klaim Debug2Fix ">20%" hanya untuk model tertentu).
 - **Pagar scope yang dikunci**: "Rocky mendengar terminal, titik." Semua yang
   butuh mata (layar, aplikasi lain, aktivitas umum) berada di luar project ini
   secara permanen.
+
+## Sesi lanjutan 3 (3 Agu 2026): kombinasi vibe coding — provenance memory
+
+Ide baru: "Rocky remember everything that AI code and explain it, easily."
+Dipecah dua, verdict berbeda:
+
+- **"Remember everything AI codes"** → DITERIMA sebagai arah v0.5.
+  Provenance memory: Rocky mencatat kode mana lahir dari AI, kapan, sesi apa.
+  Deteksi feasible & offline: trailer commit `Co-Authored-By: Claude`
+  (Claude Code), marker `(aider)`, git diff journal; hook Claude Code bisa
+  lapor langsung. Unik di pasar, makin lama makin berharga, masih dalam pagar
+  "mendengar terminal" (git + terminal, tanpa mata).
+- **"Explain it easily" (Rocky menjelaskan kode ke user)** → DITOLAK dalam
+  bentuk mentahnya. Dua alasan: (1) bertentangan dengan landasan ilmiah
+  sendiri — Chi 1994 & Roediger 2006: yang *menjelaskan* itu paham, yang
+  *dijelaskan* itu kondisi lemah; (2) head-to-head dengan semua AI tool,
+  alasan persis rocky-fix dulu ditolak. Plus butuh LLM (wilayah BYOK).
+- **Sintesis yang diterima**: **comprehension debt tracker** — gabungan
+  provenance memory (baru) + `rocky explain` (sudah di roadmap). Rocky buta,
+  tak bisa baca kode; dia *ingat* apa yang AI bangun dan *menagih* user
+  menjelaskannya: "AI write 340 lines yesterday. you explain zero. explain
+  this one to me, question." LLM opsional hanya untuk pertanyaan lanjutan.
+- **Keputusan scope**: diparkir sebagai v0.5. Spec v0.2–v0.4
+  (hook+guard / watch / hull check) tetap terkunci; desain penuh setelah
+  v0.2 rilis.

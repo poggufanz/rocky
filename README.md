@@ -8,7 +8,7 @@
   ╱ ╱ ╲_╱ ╲ ╲             try, question
 ```
 
-**A blind Eridian engineer who lives in your terminal, never forgets an error, and makes sure you still understand your own code.**
+**A blind engineer who lives in your terminal, never forgets an error, and makes sure you still understand your own code.**
 
 Rocky is a terminal companion inspired by the alien engineer from Andy Weir's *Project Hail Mary*. Every AI tool on the market writes code *for* you. Rocky does the opposite job: he keeps track of what you and your AI have already been through, so the second time an error appears, the answer comes from your own history — not from twenty minutes of googling.
 
@@ -105,15 +105,16 @@ When things are serious, Rocky is serious. Diagnoses and fixes are printed plain
 Each phase is one facet of who Rocky is:
 
 - **v0.1 — his memory** (this release): `rocky run`, `rocky recall`, `rocky stats`. The error → fix loop, fully offline.
-- **v0.2 — his patience**: `rocky watch` — hand him a long build, migration, or download; he waits (he once waited 46 years), notifies you, and holds the logs if it dies.
-- **v0.3 — his diligence**: pre-push hull check — verifies that AI-added packages actually exist on the registry (hallucinated-package defense), wraps secret scanning, and asks one comprehension question about the riskiest line in the diff.
-- **v0.4 — his curiosity**: `rocky explain` — the blind rubber duck. You explain your diff to him; he asks follow-up questions. Backed by the self-explanation and retrieval-practice literature (see docs).
-- **v0.5 — his care**: ambient pet mode. He notices you've been at it for four hours, and he has opinions about your sleep.
+- **v0.2 — his ears**: bash shell hook — Rocky listens to every command, no `run` wrapper needed — plus the dangerous-command guard: `rm -rf` in strange places, force pushes, `curl | bash` are held until you answer `you sure, question`.
+- **v0.3 — his patience**: `rocky watch` — hand him a long build, migration, or download; he waits (he once waited 46 years), notifies you, and holds the logs if it dies.
+- **v0.4 — his diligence**: pre-push hull check — verifies that AI-added packages actually exist on the registry (hallucinated-package defense), wraps secret scanning, and asks one comprehension question about the riskiest line in the diff. The only feature that ever touches the network — npm registry only, nothing else, ever.
+- **v0.5 — his curiosity**: `rocky explain` + provenance memory — Rocky remembers which lines were written by AI and asks *you* to explain them: the comprehension-debt tracker. Backed by the self-explanation and retrieval-practice literature (see docs).
+- **later — his care**: ambient pet mode and the desktop pet window (deferred). He notices you've been at it for four hours, and he has opinions about your sleep.
 - **LLM layer (opt-in, BYOK)**: local via Ollama or your own OpenAI/Anthropic/Gemini key. Every feature keeps a useful degraded mode without it.
 
 ## Contributing
 
-Fully open source under MIT. Especially welcome: shell-hook integration (zsh/fish preexec) so Rocky can listen without the `run` wrapper, better fingerprinting for specific toolchains (pytest, cargo, gradle), and more of Rocky's dialogue — in character, please. He never uses emoji. He can't see them.
+Fully open source under MIT. Especially welcome: zsh/fish ports of the shell hook (bash ships first in v0.2), better fingerprinting for specific toolchains (pytest, cargo, gradle), and more of Rocky's dialogue — in character, please. He never uses emoji. He can't see them.
 
 ---
 
