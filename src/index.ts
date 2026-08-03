@@ -11,7 +11,7 @@
 
 import { run } from "./commands/run.js";
 import { recall } from "./commands/recall.js";
-import { hookFail, hookSuccess } from "./commands/hook.js";
+import { hookFail, hookInstall, hookStatus, hookSuccess, hookUninstall } from "./commands/hook.js";
 import { loadMemory, memoryPath } from "./core/memory.js";
 import { face, say } from "./ui/rocky.js";
 
@@ -25,6 +25,10 @@ usage:
   rocky recall "<query>"    ask Rocky's memory. matches words from the error
                             or the command.
   rocky stats               what Rocky holds in memory.
+  rocky hook install        put Rocky's ears in your bash. every command heard,
+                            failures remembered, dangerous commands questioned.
+  rocky hook uninstall      remove the ears. memory stays.
+  rocky hook status         are the ears in, question
 
 memory lives in ~/.rocky/memory.jsonl — local only, never uploaded.
 `;
@@ -40,6 +44,18 @@ async function main(): Promise<number> {
       return recall(arg);
     case "stats":
       return stats();
+    case "hook":
+      switch (rest[0]) {
+        case "install":
+          return hookInstall();
+        case "uninstall":
+          return hookUninstall();
+        case "status":
+          return hookStatus();
+        default:
+          say("hook needs install, uninstall, or status. which one, question");
+          return 2;
+      }
     case "_hookfail":
       return hookFail(rest[0] ?? "", Number(rest[1] ?? 1), rest[2] ?? process.cwd());
     case "_hooksuccess":
