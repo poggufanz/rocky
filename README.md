@@ -60,6 +60,30 @@ rocky stats
 
 Memory lives in `~/.rocky/memory.jsonl`. Local only. Nothing is uploaded, no telemetry, no account. It's a text file you can read, grep, and delete.
 
+## The ears (v0.2)
+
+Skip the wrapper entirely — let Rocky listen to your whole bash session:
+
+```bash
+rocky hook install    # adds one managed block to ~/.bashrc
+```
+
+From the next shell on: every failing command is remembered (no stderr — the
+hook hears command and exit code only; `rocky run` remains the deep-memory
+path). When a command succeeds where its program recently failed, the fix is
+linked automatically. And when a command looks catastrophic — `rm -rf` at a
+strange target, a force push, `curl | bash` — Rocky holds it:
+
+```
+[Rocky] this rm eat everything under target. bad bad.
+[Rocky] you sure, question (y/n)
+```
+
+Answer anything but `y` and the command never runs. Rules live in
+`~/.rocky/guard.rules` — plain text, edit freely, Rocky never overwrites an
+edited file. `ROCKY_OFF=1` makes him deaf for a session;
+`rocky hook uninstall` removes the block and keeps the memory.
+
 ## How the memory works
 
 1. **Fingerprinting** (`src/core/fingerprint.ts`) — stderr is noisy: paths, line numbers, timestamps, and addresses change between runs of the same bug. Rocky extracts the lines that carry meaning, masks the volatile parts (`/home/you/app/src/x.ts:41:7` becomes `<path>:#:#`), and hashes the result. Same bug, same fingerprint, every time.
