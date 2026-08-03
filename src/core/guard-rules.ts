@@ -23,8 +23,10 @@ export const DEFAULT_RULES: GuardRule[] = [
     message: "this rm eat everything under target. bad bad.",
   },
   {
-    // --force / -f but not --force-with-lease
-    pattern: "git[[:space:]]+push[[:space:]]+.*[[:space:]](--force|-f)([[:space:]]|$)",
+    // --force / -f but not --force-with-lease; flag may be first arg after
+    // push or later, so the space before it is alternated, not required twice
+    pattern:
+      "git[[:space:]]+push([[:space:]]+.*[[:space:]]|[[:space:]]+)(--force|-f)([[:space:]]|$)",
     message: "force push rewrite shared history. others lose work.",
   },
   {

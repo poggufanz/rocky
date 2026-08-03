@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { DEFAULT_RULES, renderGuardRules, rulesFileIsPristine } from "../core/guard-rules.js";
 
 test("renderGuardRules emits tab-separated rules with hash header", () => {
@@ -24,3 +25,28 @@ test("no rule field contains a tab or empty part", () => {
     assert.ok(r.pattern.length > 0 && r.message.length > 0);
   }
 });
+
+test("force-push rule matches -f as first argument (real bash [[ =~ ]])", () => {
+  // Patterns are bash EREs, so verify with bash itself, not JS RegExp.
+  const rule = DEFAULT_RULES.find((r) => r.message.includes("force push"));
+  assert.ok(rule, "force-push rule exists");
+  const cases: [string, boolean][] = [
+    ["git push -f", true],
+    ["git push -f origin main", true],
+    ["git push origin main --force", true],
+    ["git push --force", true],
+    ["git push --force-with-lease", false],
+    ["git push --force-with-lease origin main", false],
+    ["git push origin main", false],
+    ["git push -fd origin", false],
+  ];
+  for (const [cmd, expected] of cases) {
+    assert.equal(bashMatches(rule.pattern, cmd), expected, `bash match of ${JSON.stringify(cmd)} should be ${expected}`);
+  }
+});
+
+/** Run the rule through real bash [[ =~ ]] (exit 0 = match). */
+function bashMatches(regex: string, cmd: string): boolean {
+  const res = spawnSync("bash", ["-c", 'regex=$1; cmd=$2; [[ "$cmd" =~ $regex ]]', "bash", regex, cmd]);
+  return res.status === 0;
+}
