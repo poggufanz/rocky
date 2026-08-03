@@ -10,11 +10,11 @@
  * Indexing can come later if anyone's memory file gets huge.
  */
 
-import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
-import { fingerprint, signatureLines, similarity, tokens } from "./fingerprint.js";
+import { commandFingerprint, fingerprint, normalizeLine, signatureLines, similarity, tokens } from "./fingerprint.js";
 
 export interface FailureRecord {
   kind: "failure";
@@ -26,6 +26,7 @@ export interface FailureRecord {
   fingerprint: string;
   signature: string[];
   excerpt: string; // last raw lines of stderr, for display
+  origin?: "run" | "hook"; // absent = "run" (records predate the field)
   resolvedBy?: string; // id of the fix record, patched in memory at load time
 }
 
@@ -93,6 +94,7 @@ export function recordFailure(cmd: string, exitCode: number, stderr: string): Fa
     excerpt: lastLines(stderr, 4),
   };
   append(rec);
+  touchPending();
   return rec;
 }
 
@@ -172,4 +174,45 @@ function lastLines(text: string, n: number): string {
     .map((l) => l.trimEnd())
     .filter((l) => l.trim().length > 0);
   return lines.slice(-n).join("\n");
+}
+
+const PENDING_FILE = join(ROCKY_DIR, "pending");
+
+export function pendingPath(): string {
+  return PENDING_FILE;
+}
+
+/** Flag file: unresolved failures exist. Lets the bash hook skip spawning
+ *  node on successful commands unless a fix-link attempt is worth it. */
+export function touchPending(): void {
+  ensureDir();
+  writeFileSync(PENDING_FILE, "", "utf8");
+}
+
+export function hasUnresolvedRecent(records: MemoryRecord[], windowMs = 1000 * 60 * 60 * 48): boolean {
+  const cutoff = Date.now() - windowMs;
+  return records.some((r) => r.kind === "failure" && !r.resolvedBy && r.ts >= cutoff);
+}
+
+export function clearPendingIfResolved(records: MemoryRecord[]): void {
+  if (!hasUnresolvedRecent(records)) rmSync(PENDING_FILE, { force: true });
+}
+
+/** Failure heard through the shell hook: no stderr, shallow fingerprint. */
+export function recordHookFailure(cmd: string, exitCode: number, cwd: string): FailureRecord {
+  const rec: FailureRecord = {
+    kind: "failure",
+    id: randomUUID(),
+    ts: Date.now(),
+    cwd,
+    cmd,
+    exitCode,
+    fingerprint: commandFingerprint(cmd, exitCode),
+    signature: [normalizeLine(cmd)],
+    excerpt: `exit ${exitCode}`,
+    origin: "hook",
+  };
+  append(rec);
+  touchPending();
+  return rec;
 }
