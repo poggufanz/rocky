@@ -11,6 +11,7 @@
 
 import { run } from "./commands/run.js";
 import { recall } from "./commands/recall.js";
+import { hookFail, hookSuccess } from "./commands/hook.js";
 import { loadMemory, memoryPath } from "./core/memory.js";
 import { face, say } from "./ui/rocky.js";
 
@@ -39,6 +40,10 @@ async function main(): Promise<number> {
       return recall(arg);
     case "stats":
       return stats();
+    case "_hookfail":
+      return hookFail(rest[0] ?? "", Number(rest[1] ?? 1), rest[2] ?? process.cwd());
+    case "_hooksuccess":
+      return hookSuccess(rest[0] ?? "", rest[1] ?? process.cwd());
     case "--help":
     case "-h":
     case "help":

@@ -8,6 +8,8 @@
  *  - he is blind; he never says "I see". He hears, he remembers, he checks.
  */
 
+import { writeFileSync } from "node:fs";
+
 const useColor = process.stdout.isTTY && !process.env.NO_COLOR;
 
 const amber = (s: string) => (useColor ? `\u001b[33m${s}\u001b[0m` : s);
@@ -59,4 +61,24 @@ export function ago(ts: number): string {
   if (h < 24) return `${h} hour${h === 1 ? "" : "s"} ago`;
   const d = Math.floor(h / 24);
   return `${d} day${d === 1 ? "" : "s"} ago`;
+}
+
+/**
+ * Speak directly to the terminal from a background process (hook handlers
+ * are spawned disowned with stderr discarded). No tty — no words; never throw.
+ */
+export function sayTty(msg: string): void {
+  try {
+    writeFileSync("/dev/tty", `[Rocky] ${msg}\n`);
+  } catch {
+    /* no tty (tests, CI, detached session) — Rocky stays silent */
+  }
+}
+
+export function detailTty(msg: string): void {
+  try {
+    writeFileSync("/dev/tty", `    ${msg}\n`);
+  } catch {
+    /* silent */
+  }
 }
