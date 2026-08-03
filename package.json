@@ -1,0 +1,32 @@
+{
+  "name": "rocky-cli",
+  "version": "0.1.0",
+  "description": "A blind Eridian engineer who lives in your terminal, never forgets an error, and makes sure you still understand your own code.",
+  "type": "module",
+  "bin": {
+    "rocky": "./dist/index.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "prepublishOnly": "npm run build"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "cli",
+    "terminal-pet",
+    "developer-tools",
+    "error-memory",
+    "project-hail-mary"
+  ],
+  "license": "MIT",
+  "devDependencies": {
+    "typescript": "^5.5.0",
+    "@types/node": "^22.0.0"
+  }
+}
