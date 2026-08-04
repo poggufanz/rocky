@@ -266,5 +266,6 @@ test("non-item response overflow reaches the server internal-error boundary", as
   assert.deepEqual(JSON.parse(wire), {
     jsonrpc: "2.0", id: "overflow", error: { code: -32603, message: "Internal error" },
   });
+  assert.ok(wire.endsWith("\n"));
   assert.ok(Buffer.byteLength(wire, "utf8") <= MAX_RESPONSE_BYTES);
 });
