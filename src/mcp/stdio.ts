@@ -54,7 +54,14 @@ export class JsonLineDecoder {
       return;
     }
 
-    if (this.buffer.length + segment.length > this.maxLineBytes) {
+    const lineLength = this.buffer.length + segment.length;
+    const lastByte = segment.length > 0 ? segment.at(-1) : this.buffer.at(-1);
+    const trailingCarriageReturn = lastByte === 0x0d;
+    const framingCarriageReturn = terminated && trailingCarriageReturn;
+    const pendingCarriageReturn = !terminated && trailingCarriageReturn && lineLength === this.maxLineBytes + 1;
+    const contentLength = lineLength - (framingCarriageReturn ? 1 : 0);
+
+    if (contentLength > this.maxLineBytes && !pendingCarriageReturn) {
       this.buffer = Buffer.alloc(0);
       if (terminated) decoded.push({ kind: "too_large" });
       else this.discarding = true;
@@ -83,6 +90,8 @@ export class JsonLineDecoder {
 
 export class SerializedJsonWriter {
   private pending: Promise<void> = Promise.resolve();
+  private closeOutcome: "drained" | "timed_out" | undefined;
+  private closing: Promise<"drained" | "timed_out"> | undefined;
 
   constructor(private readonly output: Writable) {}
 
@@ -118,7 +127,23 @@ export class SerializedJsonWriter {
     return this.pending;
   }
 
-  async close(deadlineAt?: number): Promise<"drained" | "timed_out"> {
+  close(deadlineAt?: number): Promise<"drained" | "timed_out"> {
+    if (this.closeOutcome !== undefined) return Promise.resolve(this.closeOutcome);
+    if (this.closing !== undefined) return this.closing;
+
+    this.closing = this.waitForPending(deadlineAt);
+    void this.closing.then(
+      (outcome) => {
+        this.closeOutcome = outcome;
+      },
+      () => {
+        this.closing = undefined;
+      },
+    );
+    return this.closing;
+  }
+
+  private async waitForPending(deadlineAt?: number): Promise<"drained" | "timed_out"> {
     if (deadlineAt === undefined) {
       await this.pending;
       return "drained";

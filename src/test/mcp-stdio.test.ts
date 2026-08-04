@@ -87,6 +87,29 @@ test("decoder accepts a JSON line of exactly one MiB", () => {
   assert.equal((decoded[0].value as string).length, MAX_INPUT_LINE_BYTES - 2);
 });
 
+test("decoder accepts a max-sized CRLF-framed JSON line in one chunk", () => {
+  const decoder = new JsonLineDecoder();
+  const line = `"${"a".repeat(MAX_INPUT_LINE_BYTES - 2)}"`;
+
+  const decoded = decoder.push(`${line}\r\n`);
+  assert.equal(decoded.length, 1);
+  assert.equal(decoded[0]?.kind, "message");
+  if (decoded[0]?.kind !== "message") return;
+  assert.equal((decoded[0].value as string).length, MAX_INPUT_LINE_BYTES - 2);
+});
+
+test("decoder accepts a max-sized CRLF-framed JSON line split before newline", () => {
+  const decoder = new JsonLineDecoder();
+  const line = `"${"a".repeat(MAX_INPUT_LINE_BYTES - 2)}"`;
+
+  assert.deepEqual(decoder.push(`${line}\r`), []);
+  const decoded = decoder.push("\n");
+  assert.equal(decoded.length, 1);
+  assert.equal(decoded[0]?.kind, "message");
+  if (decoded[0]?.kind !== "message") return;
+  assert.equal((decoded[0].value as string).length, MAX_INPUT_LINE_BYTES - 2);
+});
+
 test("decoder rejects a JSON line larger than one MiB", () => {
   const decoder = new JsonLineDecoder();
   const line = `"${"a".repeat(MAX_INPUT_LINE_BYTES - 1)}"`;
@@ -102,6 +125,33 @@ test("oversized input discards until newline and then recovers", () => {
     { kind: "too_large" },
     { kind: "message", value: { x: 1 } },
   ]);
+});
+
+test("decoder retains one pending CR beyond its byte limit for a following newline", () => {
+  const decoder = new JsonLineDecoder(8);
+
+  assert.deepEqual(decoder.push('"123456"\r'), []);
+  assert.deepEqual(decoder.push("\n"), [
+    { kind: "message", value: "123456" },
+  ]);
+});
+
+test("decoder discards after a pending CR is followed by more input", () => {
+  const decoder = new JsonLineDecoder(8);
+
+  assert.deepEqual(decoder.push('"123456"\r'), []);
+  assert.deepEqual(decoder.push("x"), []);
+  assert.deepEqual(decoder.push('ignored\n{"x":1}\n'), [
+    { kind: "too_large" },
+    { kind: "message", value: { x: 1 } },
+  ]);
+});
+
+test("decoder reports oversized unterminated input on end", () => {
+  const decoder = new JsonLineDecoder(8);
+
+  assert.deepEqual(decoder.push("123456789"), []);
+  assert.deepEqual(decoder.end(), [{ kind: "too_large" }]);
 });
 
 test("serialized writer waits for drain and never interleaves lines", async () => {
@@ -135,7 +185,7 @@ test("serialized writer rejects write errors and removes listeners", async () =>
   assert.equal(output.listenerCount("error"), 0);
 });
 
-test("writer close returns timed_out at an absolute deadline without ending stdout", async () => {
+test("writer close stays timed_out without re-awaiting pending work", async () => {
   const output = new BackpressureWritable();
   let endCalls = 0;
   output.end = (() => {
@@ -146,6 +196,10 @@ test("writer close returns timed_out at an absolute deadline without ending stdo
   const pending = writer.write({ jsonrpc: "2.0", id: 1, result: {} });
 
   assert.equal(await writer.close(Date.now() + 20), "timed_out");
+  assert.equal(await Promise.race([
+    writer.close(),
+    new Promise<"still_waiting">((resolve) => setTimeout(() => resolve("still_waiting"), 20)),
+  ]), "timed_out");
   assert.equal(endCalls, 0);
   output.fail(new Error("cleanup"));
   await assert.rejects(pending, /cleanup/);
