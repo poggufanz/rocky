@@ -1,0 +1,494 @@
+import { posix, win32 } from "node:path";
+import type { Exposure } from "../core/config-read.js";
+import type {
+  InspectionResult,
+  McpRegistration,
+  SetupClientAdapter,
+  SetupResult,
+} from "./clients.js";
+import { atomicWriteJson, backupFile, readJsonObject } from "./json-config.js";
+import type { JsonReadResult } from "./json-config.js";
+import type { PlatformServices } from "./platform.js";
+import type { ProcessResult, ProcessRunner } from "./process.js";
+import { isIdenticalMcpRegistration, isOwnedRockyRegistration } from "./registration.js";
+
+const WSLPATH_TIMEOUT_MS = 10_000;
+const UNRESOLVED_CONFIG_DETAIL = "Claude Desktop config path is unresolved; use manual configuration";
+const POLICY_DETAIL = "Claude Desktop policy blocks config mutation";
+
+interface JsonObject {
+  [key: string]: unknown;
+}
+
+interface ConfigInspection {
+  public: InspectionResult;
+  read: JsonReadResult;
+  servers?: JsonObject;
+  snapshot?: unknown;
+}
+
+export interface ClaudeDesktopAdapterDependencies {
+  configPath?: string;
+  transformRegistration?: (registration: McpRegistration) => McpRegistration;
+  policyBlocked?: boolean;
+}
+
+export interface WslDesktopRegistrationInput {
+  /** Caller supplies paths only after injected discovery has verified they exist. */
+  exposure: Exposure;
+  windowsConfigPath?: string;
+  wslExecutable?: string;
+  distro?: string;
+  envExecutable?: string;
+  nodePath?: string;
+  entryPath?: string;
+  rockyHome?: string;
+}
+
+export interface MountedWindowsPathInput {
+  mountedPath?: string;
+  wslpathExecutable?: string;
+  runner: ProcessRunner;
+}
+
+export class WslManualConfigurationError extends Error {
+  readonly code = "WSL_MANUAL_CONFIGURATION_REQUIRED";
+
+  constructor() {
+    super("WSL Desktop bridge requires manual configuration because discovery is incomplete");
+    this.name = "WslManualConfigurationError";
+  }
+}
+
+function isObject(value: unknown): value is JsonObject {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function hasOwn(value: JsonObject, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(value, key);
+}
+
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((entry) => typeof entry === "string");
+}
+
+function isStringMap(value: unknown): value is Record<string, string> {
+  return isObject(value) && Object.values(value).every((entry) => typeof entry === "string");
+}
+
+function parseRegistration(value: unknown): McpRegistration | undefined {
+  if (!isObject(value)
+    || value.type !== "stdio"
+    || typeof value.command !== "string"
+    || value.command.length === 0
+    || !isStringArray(value.args)
+    || !isStringMap(value.env)) {
+    return undefined;
+  }
+  return {
+    name: "rocky",
+    command: value.command,
+    args: [...value.args],
+    env: { ...value.env },
+  };
+}
+
+function storedRegistration(registration: McpRegistration): JsonObject {
+  return {
+    type: "stdio",
+    command: registration.command,
+    args: [...registration.args],
+    env: { ...registration.env },
+  };
+}
+
+function sameStringArray(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length
+    && left.every((value, index) => value === right[index]);
+}
+
+function sameStringMap(
+  left: Readonly<Record<string, string>>,
+  right: Readonly<Record<string, string>>,
+): boolean {
+  const leftKeys = Object.keys(left).sort();
+  const rightKeys = Object.keys(right).sort();
+  return leftKeys.length === rightKeys.length
+    && leftKeys.every((key, index) => key === rightKeys[index] && left[key] === right[key]);
+}
+
+function isWslDesktopRegistration(registration: McpRegistration): boolean {
+  return Object.keys(registration.env).length === 0
+    && isWindowsAbsolute(registration.command)
+    && registration.args.length === 9
+    && registration.args[0] === "-d"
+    && registration.args[1] !== ""
+    && registration.args[2] === "--exec"
+    && registration.args[3] === "/usr/bin/env"
+    && (registration.args[4] === "ROCKY_MCP_EXPOSURE=sanitized"
+      || registration.args[4] === "ROCKY_MCP_EXPOSURE=raw")
+    && registration.args[5]?.startsWith("ROCKY_HOME=/") === true
+    && posix.isAbsolute(registration.args[6] ?? "")
+    && posix.isAbsolute(registration.args[7] ?? "")
+    && registration.args[8] === "mcp";
+}
+
+function sameWindowsCommand(left: string, right: string): boolean {
+  return win32.normalize(left).toLowerCase() === win32.normalize(right).toLowerCase();
+}
+
+function isIdenticalDesktopRegistration(
+  stored: McpRegistration,
+  expected: McpRegistration,
+): boolean {
+  if (!isWslDesktopRegistration(expected)) {
+    return isIdenticalMcpRegistration(stored, expected);
+  }
+  return sameWindowsCommand(stored.command, expected.command)
+    && sameStringArray(stored.args, expected.args)
+    && sameStringMap(stored.env, expected.env);
+}
+
+function isOwnedDesktopRegistration(
+  stored: McpRegistration,
+  expected: McpRegistration,
+): boolean {
+  if (!isWslDesktopRegistration(expected)) {
+    return isOwnedRockyRegistration(stored, expected);
+  }
+  return isWslDesktopRegistration(stored)
+    && sameWindowsCommand(stored.command, expected.command)
+    && stored.args.every((argument, index) => index === 4 || argument === expected.args[index]);
+}
+
+function inspectConfig(path: string, registration: McpRegistration): ConfigInspection {
+  const read = readJsonObject(path);
+  if (read.status === "invalid") {
+    return {
+      read,
+      public: { state: "unreadable", detail: "Unable to read Claude Desktop config" },
+    };
+  }
+
+  const existingServers = read.value.mcpServers;
+  if (existingServers !== undefined && !isObject(existingServers)) {
+    return {
+      read,
+      public: { state: "unreadable", detail: "Unable to read Claude Desktop config" },
+    };
+  }
+  const servers = existingServers ?? {};
+  if (!hasOwn(servers, "rocky")) {
+    return { read, servers, public: { state: "absent" } };
+  }
+
+  const snapshot = servers.rocky;
+  const parsed = parseRegistration(snapshot);
+  return parsed !== undefined && isIdenticalDesktopRegistration(parsed, registration)
+    ? { read, servers, snapshot, public: { state: "identical", snapshot } }
+    : { read, servers, snapshot, public: { state: "conflict", snapshot } };
+}
+
+function failed(detail: string, manualRegistration?: McpRegistration): SetupResult {
+  const result: SetupResult = { client: "claude-desktop", status: "failed", detail };
+  if (manualRegistration !== undefined) result.manualRegistration = manualRegistration;
+  return result;
+}
+
+function blocked(registration: McpRegistration): SetupResult {
+  return {
+    client: "claude-desktop",
+    status: "blocked-by-policy",
+    detail: POLICY_DETAIL,
+    manualRegistration: registration,
+  };
+}
+
+function mutationDetail(prefix: string, backupPath: string | undefined): string {
+  return backupPath === undefined ? prefix : `${prefix}; backup: ${backupPath}`;
+}
+
+function configIsUnchanged(path: string, prior: JsonReadResult): boolean {
+  const current = readJsonObject(path);
+  if (prior.status === "missing") return current.status === "missing";
+  return prior.status === "valid"
+    && current.status === "valid"
+    && prior.mode === current.mode
+    && prior.bytes.equals(current.bytes);
+}
+
+function writeMutation(
+  path: string,
+  inspection: ConfigInspection,
+  value: JsonObject,
+  status: "configured" | "removed",
+  registration: McpRegistration,
+): SetupResult {
+  let backupPath: string | undefined;
+  if (inspection.read.status === "valid") {
+    try {
+      backupPath = backupFile(path);
+    } catch {
+      return failed("Unable to back up Claude Desktop config", registration);
+    }
+  }
+
+  if (!configIsUnchanged(path, inspection.read)) {
+    return failed(
+      mutationDetail(
+        "Claude Desktop config changed during setup; retry or use manual configuration",
+        backupPath,
+      ),
+      registration,
+    );
+  }
+
+  try {
+    atomicWriteJson(path, value, {
+      mode: inspection.read.status === "valid" ? inspection.read.mode : undefined,
+    });
+  } catch {
+    return failed(
+      mutationDetail("Unable to write Claude Desktop config", backupPath),
+      registration,
+    );
+  }
+
+  const result: SetupResult = { client: "claude-desktop", status };
+  if (backupPath !== undefined) result.detail = `Claude Desktop config backup: ${backupPath}`;
+  return result;
+}
+
+function transformOrError(
+  transform: (registration: McpRegistration) => McpRegistration,
+  registration: McpRegistration,
+): { ok: true; registration: McpRegistration } | { ok: false; detail: string } {
+  try {
+    return { ok: true, registration: transform(registration) };
+  } catch (error) {
+    return {
+      ok: false,
+      detail: error instanceof WslManualConfigurationError
+        ? error.message
+        : "Claude Desktop registration cannot be resolved; use manual configuration",
+    };
+  }
+}
+
+export function resolveDesktopConfigPath(platform: PlatformServices): string | undefined {
+  if (platform.platform === "darwin" && posix.isAbsolute(platform.home)) {
+    return posix.join(
+      platform.home,
+      "Library",
+      "Application Support",
+      "Claude",
+      "claude_desktop_config.json",
+    );
+  }
+  if (platform.platform === "win32"
+    && platform.appData !== undefined
+    && isWindowsAbsolute(platform.appData)) {
+    return win32.join(platform.appData, "Claude", "claude_desktop_config.json");
+  }
+  return undefined;
+}
+
+export function createClaudeDesktopAdapter(
+  dependencies: ClaudeDesktopAdapterDependencies,
+): SetupClientAdapter {
+  const transform = dependencies.transformRegistration ?? ((registration) => registration);
+
+  function prepare(registration: McpRegistration):
+    | { ok: true; registration: McpRegistration; path: string }
+    | { ok: false; detail: string; manualRegistration?: McpRegistration } {
+    const transformed = transformOrError(transform, registration);
+    if (!transformed.ok) return transformed;
+    if (dependencies.configPath === undefined
+      || (!posix.isAbsolute(dependencies.configPath)
+        && !isWindowsAbsolute(dependencies.configPath))) {
+      return {
+        ok: false,
+        detail: UNRESOLVED_CONFIG_DETAIL,
+        manualRegistration: transformed.registration,
+      };
+    }
+    return { ok: true, registration: transformed.registration, path: dependencies.configPath };
+  }
+
+  return {
+    id: "claude-desktop",
+
+    async inspect(registration) {
+      const prepared = prepare(registration);
+      if (!prepared.ok) return { state: "blocked", detail: prepared.detail };
+      return inspectConfig(prepared.path, prepared.registration).public;
+    },
+
+    async configure(registration, replace) {
+      const prepared = prepare(registration);
+      if (!prepared.ok) return failed(prepared.detail, prepared.manualRegistration);
+      const inspection = inspectConfig(prepared.path, prepared.registration);
+      if (inspection.public.state === "identical") {
+        return { client: "claude-desktop", status: "already-configured" };
+      }
+      if (inspection.public.state === "unreadable") {
+        return failed("Unable to read Claude Desktop config", prepared.registration);
+      }
+      if (inspection.public.state === "conflict" && !replace) {
+        return {
+          client: "claude-desktop",
+          status: "requires-confirmation",
+          detail: "Claude Desktop already has a different rocky registration",
+          manualRegistration: prepared.registration,
+        };
+      }
+      if (dependencies.policyBlocked === true) return blocked(prepared.registration);
+
+      const servers = inspection.servers ?? {};
+      const config = inspection.read.status === "invalid" ? {} : inspection.read.value;
+      return writeMutation(
+        prepared.path,
+        inspection,
+        {
+          ...config,
+          mcpServers: {
+            ...servers,
+            rocky: storedRegistration(prepared.registration),
+          },
+        },
+        "configured",
+        prepared.registration,
+      );
+    },
+
+    async remove(registration) {
+      const prepared = prepare(registration);
+      if (!prepared.ok) return failed(prepared.detail, prepared.manualRegistration);
+      const inspection = inspectConfig(prepared.path, prepared.registration);
+      if (inspection.public.state === "absent") {
+        return { client: "claude-desktop", status: "not-configured" };
+      }
+      if (inspection.public.state === "unreadable") {
+        return failed("Unable to read Claude Desktop config");
+      }
+      const parsed = parseRegistration(inspection.snapshot);
+      if (parsed === undefined || !isOwnedDesktopRegistration(parsed, prepared.registration)) {
+        return failed("Claude Desktop rocky registration is not owned by Rocky");
+      }
+      if (dependencies.policyBlocked === true) return blocked(prepared.registration);
+
+      const servers = { ...(inspection.servers ?? {}) };
+      delete servers.rocky;
+      const config = inspection.read.status === "invalid" ? {} : inspection.read.value;
+      return writeMutation(
+        prepared.path,
+        inspection,
+        { ...config, mcpServers: servers },
+        "removed",
+        prepared.registration,
+      );
+    },
+
+    async check(registration) {
+      const prepared = prepare(registration);
+      if (!prepared.ok) return failed(prepared.detail, prepared.manualRegistration);
+      const inspection = inspectConfig(prepared.path, prepared.registration).public;
+      if (inspection.state === "identical") {
+        return { client: "claude-desktop", status: "healthy" };
+      }
+      if (inspection.state === "absent") {
+        return { client: "claude-desktop", status: "not-configured" };
+      }
+      if (inspection.state === "conflict") {
+        return failed("Claude Desktop has a different rocky registration", prepared.registration);
+      }
+      return failed("Unable to read Claude Desktop config");
+    },
+  };
+}
+
+function manualConfigurationRequired(): never {
+  throw new WslManualConfigurationError();
+}
+
+function isWindowsAbsolute(value: string): boolean {
+  return win32.isAbsolute(value)
+    && (/^[A-Za-z]:[\\/]/.test(value) || /^\\\\[^\\]+\\[^\\]+/.test(value));
+}
+
+function requireConfigAbsolute(value: string | undefined): string {
+  if (value === undefined || (!posix.isAbsolute(value) && !isWindowsAbsolute(value))) {
+    return manualConfigurationRequired();
+  }
+  return value;
+}
+
+function requireWindowsAbsolute(value: string | undefined): string {
+  if (value === undefined || !isWindowsAbsolute(value)) {
+    return manualConfigurationRequired();
+  }
+  return value;
+}
+
+function requireLinuxAbsolute(value: string | undefined): string {
+  if (value === undefined || !posix.isAbsolute(value)) return manualConfigurationRequired();
+  return value;
+}
+
+export function buildWslDesktopRegistration(input: WslDesktopRegistrationInput): McpRegistration {
+  requireConfigAbsolute(input.windowsConfigPath);
+  const command = requireWindowsAbsolute(input.wslExecutable);
+  if (win32.basename(command).toLowerCase() !== "wsl.exe") return manualConfigurationRequired();
+  const distro = input.distro?.trim();
+  if (distro === undefined || distro.length === 0) return manualConfigurationRequired();
+  const envExecutable = requireLinuxAbsolute(input.envExecutable);
+  if (envExecutable !== "/usr/bin/env") return manualConfigurationRequired();
+  const nodePath = requireLinuxAbsolute(input.nodePath);
+  const entryPath = requireLinuxAbsolute(input.entryPath);
+  const rockyHome = requireLinuxAbsolute(input.rockyHome);
+  if (input.exposure !== "sanitized" && input.exposure !== "raw") {
+    return manualConfigurationRequired();
+  }
+
+  return {
+    name: "rocky",
+    command,
+    args: [
+      "-d",
+      distro,
+      "--exec",
+      envExecutable,
+      `ROCKY_MCP_EXPOSURE=${input.exposure}`,
+      `ROCKY_HOME=${rockyHome}`,
+      nodePath,
+      entryPath,
+      "mcp",
+    ],
+    env: {},
+  };
+}
+
+export async function convertMountedWindowsPath(
+  input: MountedWindowsPathInput,
+): Promise<string> {
+  const mountedPath = requireLinuxAbsolute(input.mountedPath);
+  const wslpathExecutable = requireLinuxAbsolute(input.wslpathExecutable);
+  let result: ProcessResult;
+  try {
+    result = await input.runner.run(
+      wslpathExecutable,
+      ["-w", mountedPath],
+      { timeoutMs: WSLPATH_TIMEOUT_MS },
+    );
+  } catch {
+    return manualConfigurationRequired();
+  }
+  if (result.status !== 0 || result.error !== undefined) return manualConfigurationRequired();
+  const output = result.stdout.trim();
+  if (output.length === 0
+    || output.split(/\r?\n/).length !== 1
+    || !isWindowsAbsolute(output)) {
+    return manualConfigurationRequired();
+  }
+  return output;
+}
