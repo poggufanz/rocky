@@ -227,6 +227,23 @@ test("unexpected programmer errors reach the server boundary", async () => {
   await assert.rejects(broken.call("recall", { query: "missing" }, new AbortController().signal), /invariant violated/);
 });
 
+test("unrecognized coded invariants reach the server boundary", async () => {
+  for (const error of [
+    Object.assign(new Error("coded invariant"), { code: "BUG" }),
+    { code: "BUG", message: "plain coded invariant" },
+  ]) {
+    const broken = createToolRegistry({
+      exposure: "sanitized",
+      memory: { recall() { throw error; }, recentFailures() { return []; }, stats() { return { failures: 0, fixEvents: 0, resolved: 0, unresolved: 0 }; } },
+      recallWithAi: disabledRecallWithAi,
+    });
+    await assert.rejects(
+      broken.call("recall", { query: "missing" }, new AbortController().signal),
+      (caught) => caught === error,
+    );
+  }
+});
+
 test("non-item response overflow reaches the server internal-error boundary", async () => {
   const ai: RecallWithAiPort = {
     async run() { return { aiStatus: "disabled", rankedCandidateIds: [], explanation: "x".repeat(MAX_RESPONSE_BYTES) }; },
@@ -236,4 +253,9 @@ test("non-item response overflow reaches the server internal-error boundary", as
       .call("recall_with_ai", { query: "not-present" }, new AbortController().signal),
     /response too large/,
   );
+  const wire = "{\"jsonrpc\":\"2.0\",\"id\":\"overflow\",\"error\":{\"code\":-32603,\"message\":\"Internal error\"}}\n";
+  assert.deepEqual(JSON.parse(wire), {
+    jsonrpc: "2.0", id: "overflow", error: { code: -32603, message: "Internal error" },
+  });
+  assert.ok(Buffer.byteLength(wire, "utf8") <= MAX_RESPONSE_BYTES);
 });

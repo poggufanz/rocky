@@ -57,6 +57,9 @@ const ANNOTATIONS = {
   openWorldHint: false,
 } as const;
 const RESPONSE_CAP_BYTES = MAX_RESPONSE_BYTES - TOOL_ENVELOPE_RESERVE_BYTES;
+const MEMORY_OPERATIONAL_CODES = Object.freeze([
+  "EACCES", "EPERM", "ENOENT", "EIO", "EMFILE", "ENFILE", "ENOSPC", "EROFS", "EISDIR", "ENOTDIR",
+] as const);
 
 function objectArgs(args: unknown): Record<string, unknown> {
   if (typeof args !== "object" || args === null || Array.isArray(args)) throw new McpInvalidParamsError("invalid params");
@@ -202,8 +205,9 @@ function safeErrorResult(error: ToolExecutionError): ToolCallResult {
 }
 
 function hasOperationalCode(error: unknown): boolean {
-  return typeof error === "object" && error !== null && "code" in error &&
-    typeof (error as { code?: unknown }).code === "string";
+  if (typeof error !== "object" || error === null || !("code" in error)) return false;
+  const code = (error as { code?: unknown }).code;
+  return typeof code === "string" && (MEMORY_OPERATIONAL_CODES as readonly string[]).includes(code);
 }
 
 function readMemory<T>(operation: () => T): T {
