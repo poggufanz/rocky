@@ -1,6 +1,6 @@
 import { Buffer } from "node:buffer";
 import { homedir } from "node:os";
-import type { Exposure } from "../core/config.js";
+import type { Exposure } from "../core/config-read.js";
 import type { FailureRecord, FixRecord } from "../core/memory-read.js";
 import type { RecallHit, RecentFailureHit } from "../core/memory-query.js";
 

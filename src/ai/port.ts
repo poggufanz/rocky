@@ -1,4 +1,4 @@
-import type { Exposure } from "../core/config.js";
+import type { Exposure } from "../core/config-read.js";
 import type { RecallHit } from "../core/memory-query.js";
 
 export type AiAct = "known_fix" | "unresolved" | "ambiguous";

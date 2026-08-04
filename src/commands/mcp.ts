@@ -1,5 +1,5 @@
 import { disabledRecallWithAi } from "../ai/port.js";
-import { parseExposure } from "../core/config.js";
+import { parseExposure } from "../core/config-read.js";
 import { createMemoryQueries } from "../core/memory-query.js";
 import { loadMemory } from "../core/memory-read.js";
 import { runMcpStdio } from "../mcp/server.js";

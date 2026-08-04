@@ -1,5 +1,5 @@
 import { Buffer } from "node:buffer";
-import type { Exposure } from "../core/config.js";
+import type { Exposure } from "../core/config-read.js";
 import type { MemoryQueries, RecallQuery, RecentFailuresQuery, StatsQuery } from "../core/memory-query.js";
 import type { RecallAiOutcome, RecallWithAiPort } from "../ai/port.js";
 import { MAX_RESPONSE_BYTES, projectRecallHits, projectRecentFailures } from "./privacy.js";

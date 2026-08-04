@@ -84,13 +84,23 @@ function legacyRequest(id: string, method: string, params: Record<string, unknow
   return { jsonrpc: "2.0", id, method, params };
 }
 
+function waitForChildCompletion(child: ChildProcessWithoutNullStreams): Promise<{
+  code: number | null;
+  signal: NodeJS.Signals | null;
+}> {
+  return new Promise((resolve, reject) => {
+    child.once("error", reject);
+    child.once("close", (code, signal) => resolve({ code, signal }));
+  });
+}
+
 class McpCliProcess {
   readonly child: ChildProcessWithoutNullStreams;
   readonly stdoutLines: string[] = [];
   private readonly lineIterator: AsyncIterator<string>;
   private readonly stdoutChunks: Buffer[] = [];
   private readonly stderrChunks: Buffer[] = [];
-  private readonly exited: Promise<{ code: number | null; signal: NodeJS.Signals | null }>;
+  private readonly closed: Promise<{ code: number | null; signal: NodeJS.Signals | null }>;
 
   constructor(home: string, exposure = "sanitized") {
     this.child = spawn(process.execPath, [cli, "mcp"], {
@@ -101,10 +111,7 @@ class McpCliProcess {
     this.lineIterator = createInterface({ input: this.child.stdout, crlfDelay: Infinity })[Symbol.asyncIterator]();
     this.child.stdout.on("data", (chunk: Buffer) => this.stdoutChunks.push(Buffer.from(chunk)));
     this.child.stderr.on("data", (chunk: Buffer) => this.stderrChunks.push(Buffer.from(chunk)));
-    this.exited = new Promise((resolve, reject) => {
-      this.child.once("error", reject);
-      this.child.once("exit", (code, signal) => resolve({ code, signal }));
-    });
+    this.closed = waitForChildCompletion(this.child);
   }
 
   notify(message: Record<string, unknown>): void {
@@ -126,7 +133,7 @@ class McpCliProcess {
 
   async close(): Promise<{ code: number | null; signal: NodeJS.Signals | null }> {
     this.child.stdin.end();
-    return withTimeout(this.exited, 2_000, "MCP EOF exit");
+    return withTimeout(this.closed, 2_000, "MCP EOF close");
   }
 
   stderr(): string {
@@ -281,4 +288,38 @@ test("help advertises MCP as a stream-only command", () => {
   const result = spawnSync(process.execPath, [cli, "--help"], { cwd: repoRoot, encoding: "utf8" });
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /rocky mcp\s+serve read-only memory tools over stdio\./);
+});
+
+test("child completion waits for inherited stdout and stderr pipes before trailing-output audit", { timeout: 5_000 }, async () => {
+  const grandchildScript = [
+    "setTimeout(() => {",
+    "  process.stdout.write('trailing persona\\n');",
+    "  process.stderr.write('trailing diagnostic\\n');",
+    "}, 100);",
+  ].join("\n");
+  const childScript = [
+    "const { spawn } = require('node:child_process');",
+    `const tail = spawn(process.execPath, ['-e', ${JSON.stringify(grandchildScript)}], { detached: true, stdio: ['ignore', 1, 2] });`,
+    "tail.unref();",
+    "process.stdout.write('{\"jsonrpc\":\"2.0\"}\\n');",
+  ].join("\n");
+  const child = spawn(process.execPath, ["-e", childScript], { stdio: ["pipe", "pipe", "pipe"] });
+  let stdout = "";
+  let stderr = "";
+  let stdoutEnded = false;
+  let stderrEnded = false;
+  child.stdout.setEncoding("utf8");
+  child.stderr.setEncoding("utf8");
+  child.stdout.on("data", (chunk: string) => { stdout += chunk; });
+  child.stderr.on("data", (chunk: string) => { stderr += chunk; });
+  child.stdout.once("end", () => { stdoutEnded = true; });
+  child.stderr.once("end", () => { stderrEnded = true; });
+
+  const completed = await withTimeout(waitForChildCompletion(child), 2_000, "fixture child close");
+
+  assert.deepEqual(completed, { code: 0, signal: null });
+  assert.equal(stdoutEnded, true, "completion preceded stdout EOF");
+  assert.equal(stderrEnded, true, "completion preceded stderr EOF");
+  assert.match(stdout, /trailing persona\n$/);
+  assert.match(stderr, /trailing diagnostic\n$/);
 });
