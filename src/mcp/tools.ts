@@ -172,8 +172,12 @@ function isItem(value: unknown): value is { candidateId: string } {
 function pruneRefs(payload: Record<string, unknown>, removed: string): void {
   for (const key of ["rankedCandidateIds", "evidenceRefs"] as const) {
     const refs = payload[key];
-    if (Array.isArray(refs)) payload[key] = refs.filter((ref) => ref !== removed);
+    if (Array.isArray(refs)) payload[key] = refs.filter((ref) => candidateIdForRef(ref) !== removed);
   }
+}
+
+function candidateIdForRef(value: unknown): string | undefined {
+  return typeof value === "string" ? value.split(".")[0] : undefined;
 }
 
 function cappedResult(payload: object, isError = false): ToolCallResult {
@@ -185,7 +189,7 @@ function cappedResult(payload: object, isError = false): ToolCallResult {
     if (Buffer.byteLength(JSON.stringify(output), "utf8") <= RESPONSE_CAP_BYTES) return output;
     const items = copy.items;
     if (!Array.isArray(items) || items.length === 0) {
-      return buildResult({ error: { code: "internal_error", message: "response too large" } }, true);
+      throw new Error("response too large");
     }
     const removed = items.pop();
     if (isItem(removed)) pruneRefs(copy, removed.candidateId);
@@ -197,9 +201,27 @@ function safeErrorResult(error: ToolExecutionError): ToolCallResult {
   return cappedResult({ error: { code: error.safeCode, message: error.message } }, true);
 }
 
-function isOperationalFailure(error: unknown): error is Error {
-  return error instanceof Error && !(error instanceof TypeError || error instanceof ReferenceError ||
-    error instanceof RangeError || error instanceof SyntaxError || error instanceof EvalError);
+function hasOperationalCode(error: unknown): boolean {
+  return typeof error === "object" && error !== null && "code" in error &&
+    typeof (error as { code?: unknown }).code === "string";
+}
+
+function readMemory<T>(operation: () => T): T {
+  try {
+    return operation();
+  } catch (error) {
+    if (hasOperationalCode(error)) throw new ToolExecutionError("memory_unavailable", "memory unavailable");
+    throw error;
+  }
+}
+
+async function runAi<T>(operation: () => Promise<T>): Promise<T> {
+  try {
+    return await operation();
+  } catch (error) {
+    if (hasOperationalCode(error)) throw new ToolExecutionError("ai_unavailable", "AI unavailable");
+    throw error;
+  }
 }
 
 function mergeAi(payload: object, ai: RecallAiOutcome): Record<string, unknown> {
@@ -207,7 +229,8 @@ function mergeAi(payload: object, ai: RecallAiOutcome): Record<string, unknown> 
   const itemIds = Array.isArray(source.items) ? source.items.filter(isItem).map((item) => item.candidateId) : [];
   const ranked = [...ai.rankedCandidateIds.filter((id) => itemIds.includes(id))];
   for (const id of itemIds) if (!ranked.includes(id)) ranked.push(id);
-  return { ...source, ...ai, rankedCandidateIds: ranked };
+  const evidenceRefs = ai.evidenceRefs?.filter((ref) => itemIds.includes(candidateIdForRef(ref) ?? ""));
+  return { ...source, ...ai, rankedCandidateIds: ranked, ...(evidenceRefs === undefined ? {} : { evidenceRefs }) };
 }
 
 export function createToolRegistry(options: CreateToolRegistryOptions): McpToolRegistry {
@@ -220,21 +243,23 @@ export function createToolRegistry(options: CreateToolRegistryOptions): McpToolR
         switch (name) {
           case "recall": {
             const input = parseRecallArgs(args, options.exposure);
-            return cappedResult(projectRecallHits(options.memory.recall(input), options.exposure));
+            return cappedResult(projectRecallHits(readMemory(() => options.memory.recall(input)), options.exposure));
           }
           case "recent_failures": {
             const input = parseRecentArgs(args, options.exposure);
-            return cappedResult(projectRecentFailures(options.memory.recentFailures(input), options.exposure));
+            return cappedResult(projectRecentFailures(readMemory(() => options.memory.recentFailures(input)), options.exposure));
           }
           case "stats": {
             const input = parseStatsArgs(args, options.exposure);
-            return cappedResult({ exposure: options.exposure, ...options.memory.stats(input) });
+            return cappedResult({ exposure: options.exposure, ...readMemory(() => options.memory.stats(input)) });
           }
           case "recall_with_ai": {
             const input = parseRecallArgs(args, options.exposure, 10);
-            const hits = options.memory.recall(input);
+            const hits = readMemory(() => options.memory.recall(input));
             const projected = projectRecallHits(hits, options.exposure);
-            const ai = await options.recallWithAi.run({ query: input.query, hits: hits.slice(0, 5), exposure: options.exposure }, signal);
+            const ai = await runAi(() => options.recallWithAi.run(
+              { query: input.query, hits: hits.slice(0, 5), exposure: options.exposure }, signal,
+            ));
             return cappedResult(mergeAi(projected, ai));
           }
           default:
@@ -242,7 +267,7 @@ export function createToolRegistry(options: CreateToolRegistryOptions): McpToolR
         }
       } catch (error) {
         if (error instanceof McpInvalidParamsError) throw error;
-        if (isOperationalFailure(error)) return safeErrorResult(new ToolExecutionError("operation_failed", "tool operation failed"));
+        if (error instanceof ToolExecutionError) return safeErrorResult(error);
         throw error;
       }
     },

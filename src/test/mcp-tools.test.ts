@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import type { MemoryRecord } from "../core/memory-read.js";
 import { createMemoryQueries } from "../core/memory-query.js";
 import { disabledRecallWithAi, type RecallWithAiPort } from "../ai/port.js";
-import { createToolRegistry, McpInvalidParamsError, TOOL_ENVELOPE_RESERVE_BYTES } from "../mcp/tools.js";
+import { createToolRegistry, McpInvalidParamsError, ToolExecutionError, TOOL_ENVELOPE_RESERVE_BYTES } from "../mcp/tools.js";
 import { MAX_RESPONSE_BYTES } from "../mcp/privacy.js";
 
 const records: MemoryRecord[] = [
@@ -138,8 +138,29 @@ test("recall_with_ai keeps requested hits while limiting AI candidates to five",
   assert.deepEqual(observed, [5, 5]);
 });
 
-test("complete tool result cap removes whole trailing items and keeps both representations synchronized", async () => {
+test("AI refs only name candidates retained by projection and response capping", async () => {
   const field = "x".repeat(16 * 1024);
+  const projectionLimited: MemoryRecord[] = Array.from({ length: 5 }, (_, index) => ({
+    kind: "failure" as const, id: `projection-${index}`, ts: index, cwd: field, cmd: `needle ${field}`,
+    exitCode: 1, fingerprint: `projection-fp-${index}`, signature: [field], excerpt: field,
+  }));
+  const ai: RecallWithAiPort = {
+    async run() {
+      return { aiStatus: "disabled", rankedCandidateIds: ["c1", "c5"], evidenceRefs: ["c1.failure", "c5.fix"] };
+    },
+  };
+  const result = await createToolRegistry({
+    exposure: "raw", memory: createMemoryQueries(() => projectionLimited), recallWithAi: ai,
+  }).call("recall_with_ai", { query: "needle", limit: 5 }, new AbortController().signal);
+  const ids = new Set((result.structuredContent.items as { candidateId: string }[]).map((item) => item.candidateId));
+  const refs = result.structuredContent.evidenceRefs as string[];
+  assert.deepEqual(refs, ["c1.failure"]);
+  assert.ok(refs.every((ref) => ids.has(ref.split(".")[0])));
+  assert.equal(JSON.stringify(result).includes("c5"), false);
+});
+
+test("complete tool result cap removes whole trailing items and fits modern and legacy wire envelopes", async () => {
+  const field = "x".repeat(10 * 1024);
   const largeRecords: MemoryRecord[] = Array.from({ length: 10 }, (_, index) => ({
     kind: "failure" as const, id: `large-${index}`, ts: index, cwd: field, cmd: `needle ${field}`,
     exitCode: 1, fingerprint: `large-fp-${index}`, signature: [field], excerpt: field,
@@ -155,20 +176,64 @@ test("complete tool result cap removes whole trailing items and keeps both repre
   assert.deepEqual(candidateIds, itemIds);
   const modern = {
     jsonrpc: "2.0", id: "modern", result,
-    _meta: { protocolVersion: "2025-03-26", serverInfo: { name: "rocky", version: "0.2.1" }, complete: true },
+    resultType: "complete",
+    _meta: {
+      protocolVersion: "2026-07-28",
+      "io.modelcontextprotocol/serverInfo": { name: "rocky", version: "0.2.1" },
+    },
   };
   const legacy = { jsonrpc: "2.0", id: 1, result };
+  assert.ok(Buffer.byteLength(JSON.stringify(result), "utf8") > 480 * 1024);
   assert.ok(Buffer.byteLength(`${JSON.stringify(modern)}\n`, "utf8") <= MAX_RESPONSE_BYTES);
   assert.ok(Buffer.byteLength(`${JSON.stringify(legacy)}\n`, "utf8") <= MAX_RESPONSE_BYTES);
 });
 
-test("known-tool operational failures become safe error results", async () => {
+test("explicit operational failures become safe error results", async () => {
   const broken = createToolRegistry({
     exposure: "sanitized",
-    memory: { recall() { throw new Error("/private/config.json"); }, recentFailures() { return []; }, stats() { return { failures: 0, fixEvents: 0, resolved: 0, unresolved: 0 }; } },
+    memory: { recall() { throw new ToolExecutionError("memory_unavailable", "memory unavailable"); }, recentFailures() { return []; }, stats() { return { failures: 0, fixEvents: 0, resolved: 0, unresolved: 0 }; } },
     recallWithAi: disabledRecallWithAi,
   });
   const result = await broken.call("recall", { query: "missing" }, new AbortController().signal);
   assert.equal(result.isError, true);
   assert.doesNotMatch(JSON.stringify(result), /private|config/);
+});
+
+test("recognized storage failures are wrapped at the storage boundary", async () => {
+  const broken = createToolRegistry({
+    exposure: "sanitized",
+    memory: {
+      recall() {
+        const error = Object.assign(new Error("/private/config.json"), { code: "EACCES" });
+        throw error;
+      },
+      recentFailures() { return []; },
+      stats() { return { failures: 0, fixEvents: 0, resolved: 0, unresolved: 0 }; },
+    },
+    recallWithAi: disabledRecallWithAi,
+  });
+  const result = await broken.call("recall", { query: "missing" }, new AbortController().signal);
+  assert.equal(result.isError, true);
+  assert.equal((result.structuredContent.error as { code: string }).code, "memory_unavailable");
+  assert.doesNotMatch(JSON.stringify(result), /private|config/);
+});
+
+test("unexpected programmer errors reach the server boundary", async () => {
+  const broken = createToolRegistry({
+    exposure: "sanitized",
+    memory: { recall() { throw new Error("invariant violated"); }, recentFailures() { return []; }, stats() { return { failures: 0, fixEvents: 0, resolved: 0, unresolved: 0 }; } },
+    recallWithAi: disabledRecallWithAi,
+  });
+  await assert.rejects(broken.call("recall", { query: "missing" }, new AbortController().signal), /invariant violated/);
+});
+
+test("non-item response overflow reaches the server internal-error boundary", async () => {
+  const ai: RecallWithAiPort = {
+    async run() { return { aiStatus: "disabled", rankedCandidateIds: [], explanation: "x".repeat(MAX_RESPONSE_BYTES) }; },
+  };
+  await assert.rejects(
+    createToolRegistry({ exposure: "sanitized", memory: createMemoryQueries(() => records), recallWithAi: ai })
+      .call("recall_with_ai", { query: "not-present" }, new AbortController().signal),
+    /response too large/,
+  );
 });
