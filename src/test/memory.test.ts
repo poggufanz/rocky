@@ -1,4 +1,4 @@
-import { test } from "node:test";
+import { after, test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -6,7 +6,13 @@ import { join } from "node:path";
 import * as memory from "../core/memory.js";
 
 const home = mkdtempSync(join(tmpdir(), "rocky-mem-"));
+const originalRockyHome = process.env.ROCKY_HOME;
 process.env.ROCKY_HOME = home;
+
+after(() => {
+  if (originalRockyHome === undefined) delete process.env.ROCKY_HOME;
+  else process.env.ROCKY_HOME = originalRockyHome;
+});
 
 test("recordHookFailure writes an origin:hook record and touches pending", () => {
   const rec = memory.recordHookFailure("npm run build", 1, "/some/dir");
