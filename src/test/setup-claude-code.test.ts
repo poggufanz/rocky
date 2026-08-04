@@ -1,13 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import {
-  chmodSync,
+import fs, {
   mkdtempSync,
   readFileSync,
   readdirSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import type { ProcessResult, ProcessRunOptions, ProcessRunner } from "../setup/process.js";
@@ -301,7 +301,7 @@ test("rollback refuses unreadable or non-object current config without overwriti
   }
 });
 
-test("rollback atomic write failure leaves current unrelated config and reports manual recovery", async (t) => {
+test("rollback rename failure cleans its temp and reports manual recovery", async (t) => {
   const path = userConfig(t, { mcpServers: { rocky: rockyEntry("/old/node") } });
   const current = { theme: "keep", mcpServers: { other: { keep: true } } };
   const directory = dirname(path);
@@ -310,12 +310,15 @@ test("rollback atomic write failure leaves current unrelated config and reports 
       writeFileSync(path, `${JSON.stringify(current, null, 2)}\n`, { mode: 0o640 });
       return result(0);
     },
-    () => {
-      chmodSync(directory, 0o500);
-      return result(1, "", "ordinary add failure");
-    },
+    result(1, "", "ordinary add failure"),
   ]);
   const adapter = createClaudeCodeAdapter({ runner, executable: "/opt/claude", userConfigPath: path });
+  const originalRenameSync = fs.renameSync;
+  fs.renameSync = (oldPath, newPath) => {
+    if (String(newPath) === path) throw new Error("injected rollback rename failure");
+    originalRenameSync(oldPath, newPath);
+  };
+  syncBuiltinESMExports();
 
   try {
     const configured = await adapter.configure(registration, true);
@@ -323,8 +326,10 @@ test("rollback atomic write failure leaves current unrelated config and reports 
     assert.match(configured.detail ?? "", /manual recovery/i);
     assert.deepEqual(JSON.parse(readFileSync(path, "utf8")), current);
   } finally {
-    chmodSync(directory, 0o700);
+    fs.renameSync = originalRenameSync;
+    syncBuiltinESMExports();
   }
+  assert.equal(readdirSync(directory).some((name) => name.includes(".tmp-")), false);
 });
 
 test("failed add never overwrites a concurrent rocky entry and reports backup", async (t) => {
