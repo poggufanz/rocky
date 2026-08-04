@@ -10,10 +10,11 @@
     "dist"
   ],
   "scripts": {
-    "build": "tsc && mkdir -p dist/shell && (cp src/shell/*.bash src/shell/*.sh dist/shell/ 2>/dev/null || true)",
-    "dev": "tsc --watch",
-    "test": "npm run build && node --test \"dist/test/*.test.js\" && if [ -f test/hook-smoke.bash ]; then bash test/hook-smoke.bash; fi",
-    "prepublishOnly": "npm run build"
+    "build": "node scripts/build.mjs",
+    "dev": "tsc -p tsconfig.build.json --watch",
+    "test": "node scripts/test.mjs",
+    "prepack": "npm run build",
+    "prepublishOnly": "npm test"
   },
   "engines": {
     "node": ">=18"
@@ -28,6 +29,6 @@
   "license": "MIT",
   "devDependencies": {
     "typescript": "^5.5.0",
-    "@types/node": "^22.0.0"
+    "@types/node": "^18.19.0"
   }
 }
