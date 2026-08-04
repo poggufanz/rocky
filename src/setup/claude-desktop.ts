@@ -292,7 +292,7 @@ function writeMutation(
   if (inspection.read.status === "valid") {
     if (!mutationGuardUnchanged(guard)) return unsafeTopology(registration);
     try {
-      backupPath = backupFile(path);
+      backupPath = backupFile(path, new Date(), guard);
     } catch (error) {
       const detail = error instanceof BackupFileError && error.recoveryPath !== undefined
         ? `Unable to back up Claude Desktop config; manual recovery: ${error.recoveryPath}`

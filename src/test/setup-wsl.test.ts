@@ -762,6 +762,185 @@ test("native Desktop never cleans through topology rebound after publication col
   }
 });
 
+test("native Desktop does not create or advertise a backup after parent identity changes", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "rocky-native-backup-create-swap-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const parent = join(root, "Library", "Application Support", "Claude");
+  const displacedParent = `${parent}-prepared`;
+  const configPath = join(parent, "claude_desktop_config.json");
+  mkdirSync(parent, { recursive: true });
+  writeFileSync(configPath, '{"theme":"dark"}\n', "utf8");
+  const originalFstat = fs.fstatSync;
+  const originalLstat = fs.lstatSync;
+  let backupSourceRead = false;
+  let swapped = false;
+  (fs as unknown as { fstatSync: typeof fs.fstatSync }).fstatSync = ((fd, options?: unknown) => {
+    backupSourceRead = true;
+    return options === undefined
+      ? originalFstat(fd)
+      : originalFstat(fd, options as never);
+  }) as typeof fs.fstatSync;
+  (fs as unknown as { lstatSync: typeof fs.lstatSync }).lstatSync = ((path: fs.PathLike, options?: unknown) => {
+    if (backupSourceRead && !swapped && String(path) === root) {
+      fs.renameSync(parent, displacedParent);
+      mkdirSync(parent, { mode: 0o700 });
+      swapped = true;
+    }
+    return options === undefined
+      ? originalLstat(path)
+      : originalLstat(path, options as never);
+  }) as typeof fs.lstatSync;
+  syncBuiltinESMExports();
+
+  try {
+    const platform = createPlatformServices({
+      platform: "darwin",
+      home: root,
+      env: { PATH: "" },
+      isWsl: false,
+      claudeDesktopInstalled: true,
+    });
+    const adapters = await createProductionAdapters(
+      platform,
+      new FakeRunner({ status: 0, stdout: "", stderr: "" }),
+      completeRegistration,
+    );
+    const desktop = adapters.find(({ id }) => id === "claude-desktop");
+    assert.ok(desktop !== undefined);
+
+    const result = await desktop.configure(completeRegistration, false);
+
+    assert.equal(swapped, true);
+    assert.equal(result.status, "failed");
+    assert.doesNotMatch(result.detail ?? "", /backup-|ROCKY_HOME|\/home\/ada/i);
+    assert.deepEqual(fs.readdirSync(parent), []);
+    assert.deepEqual(
+      fs.readdirSync(displacedParent).filter((name) => name.includes(".backup-")),
+      [],
+    );
+    assert.equal(readFileSync(join(displacedParent, "claude_desktop_config.json"), "utf8"), '{"theme":"dark"}\n');
+  } finally {
+    (fs as unknown as { fstatSync: typeof fs.fstatSync }).fstatSync = originalFstat;
+    (fs as unknown as { lstatSync: typeof fs.lstatSync }).lstatSync = originalLstat;
+    syncBuiltinESMExports();
+  }
+});
+
+test("native Desktop backup cleanup never removes a rebound attacker file", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "rocky-native-backup-cleanup-swap-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const parent = join(root, "Library", "Application Support", "Claude");
+  const displacedParent = `${parent}-prepared`;
+  const configPath = join(parent, "claude_desktop_config.json");
+  const sentinel = "attacker-backup-sentinel\n";
+  mkdirSync(parent, { recursive: true });
+  writeFileSync(configPath, '{"theme":"dark"}\n', "utf8");
+  const originalFsync = fs.fsyncSync;
+  let reboundBackupPath: string | undefined;
+  (fs as unknown as { fsyncSync: typeof fs.fsyncSync }).fsyncSync = ((fd) => {
+    const backupName = fs.readdirSync(parent).find((name) => name.includes(".backup-"));
+    if (reboundBackupPath === undefined && backupName !== undefined) {
+      fs.renameSync(parent, displacedParent);
+      mkdirSync(parent, { mode: 0o700 });
+      reboundBackupPath = join(parent, backupName);
+      writeFileSync(reboundBackupPath, sentinel, "utf8");
+      throw new Error("injected backup durability failure");
+    }
+    return originalFsync(fd);
+  }) as typeof fs.fsyncSync;
+  syncBuiltinESMExports();
+
+  try {
+    const platform = createPlatformServices({
+      platform: "darwin",
+      home: root,
+      env: { PATH: "" },
+      isWsl: false,
+      claudeDesktopInstalled: true,
+    });
+    const adapters = await createProductionAdapters(
+      platform,
+      new FakeRunner({ status: 0, stdout: "", stderr: "" }),
+      completeRegistration,
+    );
+    const desktop = adapters.find(({ id }) => id === "claude-desktop");
+    assert.ok(desktop !== undefined);
+
+    const result = await desktop.configure(completeRegistration, false);
+
+    assert.equal(result.status, "failed");
+    assert.doesNotMatch(result.detail ?? "", /backup-|attacker-backup|ROCKY_HOME/i);
+    assert.ok(reboundBackupPath !== undefined);
+    assert.equal(readFileSync(reboundBackupPath, "utf8"), sentinel);
+    assert.equal(
+      fs.readdirSync(displacedParent).some((name) => name.includes(".backup-")),
+      true,
+    );
+  } finally {
+    (fs as unknown as { fsyncSync: typeof fs.fsyncSync }).fsyncSync = originalFsync;
+    syncBuiltinESMExports();
+  }
+});
+
+test("native Desktop manifest cleanup revalidates after probing a rebound temporary path", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "rocky-native-manifest-cleanup-swap-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const parent = join(root, "Library", "Application Support", "Claude");
+  const displacedParent = `${parent}-prepared`;
+  const originalLstat = fs.lstatSync;
+  const originalRename = fs.renameSync;
+  const sentinel = "attacker-manifest-sentinel\n";
+  let reboundManifestPath: string | undefined;
+  (fs as unknown as { renameSync: typeof fs.renameSync }).renameSync = ((oldPath, newPath) => {
+    if (String(oldPath).endsWith("manifest.tmp") && String(newPath).endsWith("manifest.json")) {
+      throw new Error("injected manifest rename failure");
+    }
+    return originalRename(oldPath, newPath);
+  }) as typeof fs.renameSync;
+  (fs as unknown as { lstatSync: typeof fs.lstatSync }).lstatSync = ((path: fs.PathLike, options?: unknown) => {
+    if (reboundManifestPath === undefined && String(path).endsWith("manifest.tmp")) {
+      const transactionName = basename(dirname(String(path)));
+      originalRename(parent, displacedParent);
+      mkdirSync(join(parent, transactionName), { recursive: true, mode: 0o700 });
+      reboundManifestPath = join(parent, transactionName, "manifest.tmp");
+      writeFileSync(reboundManifestPath, sentinel, "utf8");
+    }
+    return options === undefined
+      ? originalLstat(path)
+      : originalLstat(path, options as never);
+  }) as typeof fs.lstatSync;
+  syncBuiltinESMExports();
+
+  try {
+    const platform = createPlatformServices({
+      platform: "darwin",
+      home: root,
+      env: { PATH: "" },
+      isWsl: false,
+      claudeDesktopInstalled: true,
+    });
+    const adapters = await createProductionAdapters(
+      platform,
+      new FakeRunner({ status: 0, stdout: "", stderr: "" }),
+      completeRegistration,
+    );
+    const desktop = adapters.find(({ id }) => id === "claude-desktop");
+    assert.ok(desktop !== undefined);
+
+    const result = await desktop.configure(completeRegistration, false);
+
+    assert.equal(result.status, "failed");
+    assert.doesNotMatch(result.detail ?? "", /attacker-manifest|ROCKY_HOME|\/home\/ada/i);
+    assert.ok(reboundManifestPath !== undefined);
+    assert.equal(readFileSync(reboundManifestPath, "utf8"), sentinel);
+    assert.equal(existsSync(join(displacedParent, "claude_desktop_config.json")), false);
+  } finally {
+    (fs as unknown as { lstatSync: typeof fs.lstatSync }).lstatSync = originalLstat;
+    (fs as unknown as { renameSync: typeof fs.renameSync }).renameSync = originalRename;
+    syncBuiltinESMExports();
+  }
+});
+
 test("native Desktop parent preparation rejects linked and non-directory topology", async (t) => {
   const macRoot = mkdtempSync(join(tmpdir(), "rocky-native-topology-"));
   const linkedTarget = mkdtempSync(join(tmpdir(), "rocky-native-target-"));

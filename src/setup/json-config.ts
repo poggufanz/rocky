@@ -89,25 +89,64 @@ function backupTimestamp(now: Date): string {
   return now.toISOString().replaceAll("-", "").replaceAll(":", "").replace(".", "");
 }
 
-export function backupFile(path: string, now = new Date()): string {
+interface BackupIdentity {
+  dev: number;
+  ino: number;
+}
+
+function backupPathIsAuthoritative(
+  path: string,
+  identity: BackupIdentity | undefined,
+  guard: JsonMutationGuard | undefined,
+): boolean {
+  if (identity === undefined || !mutationGuardUnchanged(guard)) return false;
+  try {
+    const metadata = lstatSync(path);
+    return metadata.isFile()
+      && !metadata.isSymbolicLink()
+      && metadata.dev === identity.dev
+      && metadata.ino === identity.ino
+      && mutationGuardUnchanged(guard);
+  } catch {
+    return false;
+  }
+}
+
+export function backupFile(
+  path: string,
+  now = new Date(),
+  guard?: JsonMutationGuard,
+): string {
   const backupPath = `${path}.backup-${backupTimestamp(now)}`;
   let sourceDescriptor: number | undefined;
   let descriptor: number | undefined;
   let backupCreated = false;
+  let backupIdentity: BackupIdentity | undefined;
   try {
+    requireMutationGuard(guard);
     sourceDescriptor = openSync(path, "r");
     const bytes = readFileSync(sourceDescriptor);
     const mode = fstatSync(sourceDescriptor).mode & 0o777;
     closeSync(sourceDescriptor);
     sourceDescriptor = undefined;
+    requireMutationGuard(guard);
     descriptor = openSync(backupPath, "wx", 0o600);
     backupCreated = true;
+    if (guard !== undefined) {
+      const created = fstatSync(descriptor);
+      backupIdentity = { dev: created.dev, ino: created.ino };
+    }
+    requireMutationGuard(guard);
     writeFileSync(descriptor, bytes);
     fchmodSync(descriptor, mode);
     fsyncSync(descriptor);
     closeSync(descriptor);
     descriptor = undefined;
+    requireMutationGuard(guard);
     syncParentDirectory(backupPath);
+    if (guard !== undefined && !backupPathIsAuthoritative(backupPath, backupIdentity, guard)) {
+      throw new JsonMutationGuardChangedError();
+    }
     return backupPath;
   } catch {
     if (sourceDescriptor !== undefined) {
@@ -125,12 +164,21 @@ export function backupFile(path: string, now = new Date()): string {
       }
     }
     let recoveryPath: string | undefined;
-    if (backupCreated) {
+    const cleanupAllowed = guard === undefined
+      || backupPathIsAuthoritative(backupPath, backupIdentity, guard);
+    if (backupCreated && cleanupAllowed) {
       try {
+        requireMutationGuard(guard);
         rmSync(backupPath, { force: true });
+        requireMutationGuard(guard);
         syncParentDirectory(backupPath);
       } catch {
-        if (pathExists(backupPath)) recoveryPath = backupPath;
+        const authoritative = guard === undefined
+          ? pathExists(backupPath)
+          : backupPathIsAuthoritative(backupPath, backupIdentity, guard);
+        if (authoritative) {
+          recoveryPath = backupPath;
+        }
       }
     }
     throw new BackupFileError(recoveryPath);
@@ -360,6 +408,7 @@ function writeManifest(
     }
     if (mutationGuardUnchanged(guard) && pathExists(temporaryPath)) {
       try {
+        requireMutationGuard(guard);
         rmSync(temporaryPath, { force: true });
       } catch {
         // Caller reports a secret-free transaction recovery path.
