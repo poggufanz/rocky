@@ -13,6 +13,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { commandFingerprint } from "../core/fingerprint.js";
 import { renderGuardRules, rulesFileIsPristine } from "../core/guard-rules.js";
+import { resolveRockyPaths } from "../core/state-paths.js";
 import {
   clearPendingIfResolved,
   loadMemory,
@@ -86,7 +87,7 @@ export function removeHookBlock(content: string): string {
 }
 
 function rockyHome(): string {
-  return process.env.ROCKY_HOME ?? join(homedir(), ".rocky");
+  return resolveRockyPaths().home;
 }
 
 function bashrcPath(): string {

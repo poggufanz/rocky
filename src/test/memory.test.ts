@@ -1,14 +1,12 @@
-import { test, before } from "node:test";
+import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import * as memory from "../core/memory.js";
 
 const home = mkdtempSync(join(tmpdir(), "rocky-mem-"));
 process.env.ROCKY_HOME = home;
-
-// dynamic import AFTER env is set, so ROCKY_DIR points at the temp dir
-const memory = await import("../core/memory.js");
 
 test("recordHookFailure writes an origin:hook record and touches pending", () => {
   const rec = memory.recordHookFailure("npm run build", 1, "/some/dir");
@@ -42,4 +40,20 @@ test("clearPendingIfResolved removes flag only when nothing unresolved", () => {
   assert.equal(memory.hasUnresolvedRecent(records), false);
   memory.clearPendingIfResolved(records);
   assert.ok(!existsSync(memory.pendingPath()), "flag cleared when resolved");
+});
+
+test("memoryPath resolves ROCKY_HOME each time", () => {
+  const original = process.env.ROCKY_HOME;
+  try {
+    process.env.ROCKY_HOME = join(home, "one");
+    const first = memory.memoryPath();
+    process.env.ROCKY_HOME = join(home, "two");
+    const second = memory.memoryPath();
+    assert.notEqual(first, second);
+    assert.equal(first, join(home, "one", "memory.jsonl"));
+    assert.equal(second, join(home, "two", "memory.jsonl"));
+  } finally {
+    if (original === undefined) delete process.env.ROCKY_HOME;
+    else process.env.ROCKY_HOME = original;
+  }
 });

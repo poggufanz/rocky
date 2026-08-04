@@ -1,5 +1,6 @@
 import { similarity, tokens } from "./fingerprint.js";
-import type { FailureRecord, FixRecord, MemoryRecord } from "./memory.js";
+import { loadMemory } from "./memory-read.js";
+import type { FailureRecord, FixRecord, MemoryRecord } from "./memory-read.js";
 
 export interface RecallQuery { query: string; limit?: number; cwd?: string }
 export interface RecallHit { failure: FailureRecord; fix?: FixRecord; score: number }
@@ -74,7 +75,7 @@ export function recentUnresolvedFailures(
   );
 }
 
-export function createMemoryQueries(load: () => MemoryRecord[]): MemoryQueries {
+export function createMemoryQueries(load: () => MemoryRecord[] = loadMemory): MemoryQueries {
   return {
     recall: (input) => queryRecall(load(), input),
     recentFailures: (input = {}) => queryRecentFailures(load(), input),
