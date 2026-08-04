@@ -13,6 +13,7 @@ import { run } from "./commands/run.js";
 import { recall } from "./commands/recall.js";
 import { stats } from "./commands/stats.js";
 import { hookFail, hookInstall, hookStatus, hookSuccess, hookUninstall } from "./commands/hook.js";
+import { mcp } from "./commands/mcp.js";
 import { face, say } from "./ui/rocky.js";
 
 const HELP = `
@@ -25,6 +26,7 @@ usage:
   rocky recall "<query>"    ask Rocky's memory. matches words from the error
                             or the command.
   rocky stats               what Rocky holds in memory.
+  rocky mcp                 serve read-only memory tools over stdio.
   rocky hook install        put Rocky's ears in your bash. every command heard,
                             failures remembered, dangerous commands questioned.
   rocky hook uninstall      remove the ears. memory stays.
@@ -44,6 +46,8 @@ async function main(): Promise<number> {
       return recall(arg);
     case "stats":
       return stats();
+    case "mcp":
+      return mcp();
     case "hook":
       switch (rest[0]) {
         case "install":
@@ -74,9 +78,9 @@ async function main(): Promise<number> {
 }
 
 main().then(
-  (code) => process.exit(code),
-  (err) => {
-    say(`something break inside me. bad bad bad. ${String(err)}`);
-    process.exit(1);
-  }
+  (code) => { process.exitCode = code; },
+  (error) => {
+    say(`something break inside me. bad bad bad. ${String(error)}`);
+    process.exitCode = 1;
+  },
 );
