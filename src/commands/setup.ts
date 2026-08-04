@@ -1,0 +1,347 @@
+import { createInterface } from "node:readline/promises";
+import { basename, join, posix } from "node:path";
+import type {
+  InspectionResult,
+  McpRegistration,
+  SetupClientAdapter,
+  SetupClientId,
+  SetupMode,
+  SetupResult,
+} from "../setup/clients.js";
+import { createClaudeCodeAdapter } from "../setup/claude-code.js";
+import {
+  WslManualConfigurationError,
+  buildWslDesktopRegistration,
+  convertMountedWindowsPath,
+  createClaudeDesktopAdapter,
+  resolveDesktopConfigPath,
+} from "../setup/claude-desktop.js";
+import { createCodexAdapter } from "../setup/codex.js";
+import { checkMcpRegistration } from "../setup/health.js";
+import { SetupUsageError, parseSetupArgs } from "../setup/parser.js";
+import { createPlatformServices, type PlatformServices } from "../setup/platform.js";
+import { processRunner, type ProcessRunner } from "../setup/process.js";
+import { isEphemeralInstall, resolveMcpRegistration } from "../setup/registration.js";
+import { detail, say } from "../ui/rocky.js";
+
+export interface ConfirmationPort {
+  confirm(message: string): Promise<boolean>;
+}
+
+export interface SetupDependencies {
+  runner: ProcessRunner;
+  platform: PlatformServices;
+  adapters: readonly SetupClientAdapter[];
+  confirmation: ConfirmationPort;
+  nodePath?: string;
+  entryPath?: string;
+  rockyHome?: string;
+}
+
+interface ConfirmationInput {
+  isTTY?: boolean;
+  read?: (size?: number) => unknown;
+}
+
+export function createConfirmationPort(
+  input: ConfirmationInput = process.stdin,
+): ConfirmationPort {
+  return {
+    async confirm(message) {
+      if (input.isTTY !== true) return false;
+      const terminal = createInterface({
+        input: input as NodeJS.ReadStream,
+        output: process.stderr,
+        terminal: true,
+      });
+      try {
+        const answer = await terminal.question(`[Rocky] ${message} [y/N] `);
+        return answer.trim().toLowerCase() === "y" || answer.trim().toLowerCase() === "yes";
+      } finally {
+        terminal.close();
+      }
+    },
+  };
+}
+
+function unavailableAdapter(id: SetupClientId, unavailableDetail: string): SetupClientAdapter {
+  const skipped = (): SetupResult => ({ client: id, status: "skipped", detail: unavailableDetail });
+  return {
+    id,
+    async inspect() { return { state: "blocked", detail: unavailableDetail }; },
+    async configure() { return skipped(); },
+    async check() { return skipped(); },
+    async remove() { return skipped(); },
+  };
+}
+
+export async function createProductionAdapters(
+  platform: PlatformServices,
+  runner: ProcessRunner,
+  registration: McpRegistration,
+): Promise<readonly SetupClientAdapter[]> {
+  const common: SetupClientAdapter[] = [
+    createCodexAdapter({ runner, executable: platform.resolveExecutable("codex") }),
+    createClaudeCodeAdapter({
+      runner,
+      executable: platform.resolveExecutable("claude"),
+      userConfigPath: join(platform.home, ".claude.json"),
+    }),
+  ];
+  if (!platform.isWsl) {
+    const desktopPath = resolveDesktopConfigPath(platform);
+    common.push(desktopPath === undefined
+      ? unavailableAdapter("claude-desktop", "Claude Desktop config is not available on this host")
+      : createClaudeDesktopAdapter({ configPath: desktopPath }));
+    return common;
+  }
+
+  const configPaths = platform.wslDesktopConfigPaths ?? [];
+  const wslPaths = platform.wslExecutablePaths ?? [];
+  const wslpathPaths = platform.wslpathExecutablePaths ?? [];
+  const configPath = configPaths.length === 1 ? configPaths[0] : undefined;
+  const mountedWsl = wslPaths.length === 1 ? wslPaths[0] : undefined;
+  const wslpath = wslpathPaths.length === 1 ? wslpathPaths[0] : undefined;
+  const entryPath = registration.args.length === 2 && registration.args[1] === "mcp"
+    ? registration.args[0]
+    : undefined;
+  const exposure = registration.env.ROCKY_MCP_EXPOSURE;
+  const rockyHome = registration.env.ROCKY_HOME;
+  const distro = platform.wslDistro?.trim();
+  const complete = configPath !== undefined
+    && posix.isAbsolute(configPath)
+    && platform.fileExists(configPath)
+    && mountedWsl !== undefined
+    && posix.isAbsolute(mountedWsl)
+    && platform.fileExists(mountedWsl)
+    && wslpath !== undefined
+    && posix.isAbsolute(wslpath)
+    && platform.fileExists(wslpath)
+    && platform.fileExists("/usr/bin/env")
+    && posix.isAbsolute(registration.command)
+    && platform.fileExists(registration.command)
+    && entryPath !== undefined
+    && posix.isAbsolute(entryPath)
+    && platform.fileExists(entryPath)
+    && distro !== undefined
+    && distro.length > 0
+    && typeof rockyHome === "string"
+    && posix.isAbsolute(rockyHome)
+    && (exposure === "sanitized" || exposure === "raw");
+  if (!complete) {
+    common.push(unavailableAdapter(
+      "claude-desktop",
+      "WSL Desktop discovery is incomplete or ambiguous; use manual configuration",
+    ));
+    return common;
+  }
+
+  let bridge: McpRegistration;
+  try {
+    const windowsWsl = await convertMountedWindowsPath({
+      mountedPath: mountedWsl,
+      wslpathExecutable: wslpath,
+      runner,
+    });
+    bridge = buildWslDesktopRegistration({
+      exposure,
+      windowsConfigPath: configPath,
+      wslExecutable: windowsWsl,
+      distro,
+      envExecutable: "/usr/bin/env",
+      nodePath: registration.command,
+      entryPath,
+      rockyHome,
+    });
+  } catch (error) {
+    if (!(error instanceof WslManualConfigurationError)) throw error;
+    common.push(unavailableAdapter(
+      "claude-desktop",
+      "WSL Desktop discovery is incomplete or ambiguous; use manual configuration",
+    ));
+    return common;
+  }
+  common.push(createClaudeDesktopAdapter({
+    configPath,
+    transformRegistration: () => bridge,
+    mapHealthRegistration: (stored) => ({ ...stored, command: mountedWsl }),
+  }));
+  return common;
+}
+
+function printResult(result: SetupResult): void {
+  detail(`${result.client}: ${result.status}`);
+  if (result.detail !== undefined) detail(result.detail);
+}
+
+function skippedFromInspection(client: SetupClientId, inspection: InspectionResult): SetupResult {
+  if (inspection.state === "blocked") {
+    return { client, status: "skipped", detail: inspection.detail };
+  }
+  if (inspection.state === "unreadable") {
+    return { client, status: "failed", detail: inspection.detail ?? "Host registration cannot be read" };
+  }
+  return { client, status: "requires-confirmation" };
+}
+
+function exitCode(mode: SetupMode, results: readonly SetupResult[]): number {
+  if (mode === "configure") {
+    const successful = results.some(({ status }) => status === "configured" || status === "already-configured");
+    const allowed = results.every(({ status }) => status === "configured"
+      || status === "already-configured"
+      || status === "skipped");
+    return successful && allowed ? 0 : 1;
+  }
+  if (mode === "check") {
+    const testable = results.some(({ status }) => status === "healthy");
+    const allowed = results.every(({ status }) => status === "healthy" || status === "skipped");
+    return testable && allowed ? 0 : 1;
+  }
+  return results.every(({ status }) => status === "removed"
+    || status === "not-configured"
+    || status === "skipped") ? 0 : 1;
+}
+
+async function consentResults(
+  mode: Exclude<SetupMode, "check">,
+  adapters: readonly SetupClientAdapter[],
+  registration: McpRegistration,
+  confirmation: ConfirmationPort,
+): Promise<SetupResult[] | undefined> {
+  const inspections: Array<{ adapter: SetupClientAdapter; inspection: InspectionResult }> = [];
+  for (const adapter of adapters) {
+    inspections.push({ adapter, inspection: await adapter.inspect(registration) });
+  }
+  const requiresConsent = inspections.some(({ inspection }) => inspection.state !== "blocked"
+    && inspection.state !== "unreadable");
+  if (!requiresConsent) return inspections.map(({ adapter, inspection }) => skippedFromInspection(adapter.id, inspection));
+  const allowed = await confirmation.confirm(
+    mode === "configure" ? "configure MCP hosts now, question" : "remove Rocky from MCP hosts now, question",
+  );
+  if (allowed) return undefined;
+  const instruction = mode === "configure" ? "rocky setup --yes" : "rocky setup --remove --yes";
+  return inspections.map(({ adapter, inspection }) => {
+    const result = skippedFromInspection(adapter.id, inspection);
+    if (result.status === "requires-confirmation") {
+      result.detail = `Confirmation required; rerun with ${instruction}`;
+    }
+    return result;
+  });
+}
+
+async function invokeAdapters(
+  mode: SetupMode,
+  adapters: readonly SetupClientAdapter[],
+  registration: McpRegistration,
+  replace: boolean,
+  runner: ProcessRunner,
+): Promise<SetupResult[]> {
+  const results: SetupResult[] = [];
+  for (const adapter of adapters) {
+    if (mode === "configure") {
+      results.push(await adapter.configure(registration, replace));
+      continue;
+    }
+    if (mode === "remove") {
+      results.push(await adapter.remove(registration));
+      continue;
+    }
+    const inspected = await adapter.check(registration);
+    if (inspected.status !== "healthy") {
+      results.push(inspected);
+      continue;
+    }
+    if (inspected.healthRegistration === undefined) {
+      results.push({ client: inspected.client, status: "failed", detail: "Owned health registration is unavailable" });
+      continue;
+    }
+    const health = await checkMcpRegistration(inspected.healthRegistration, runner);
+    results.push(health.healthy
+      ? { client: inspected.client, status: "healthy", detail: health.detail }
+      : { client: inspected.client, status: "failed", detail: health.detail });
+  }
+  return results;
+}
+
+function defaultDependencies(): SetupDependencies {
+  return {
+    runner: processRunner,
+    platform: createPlatformServices(),
+    adapters: [],
+    confirmation: createConfirmationPort(),
+  };
+}
+
+export async function setup(argv: readonly string[], deps?: SetupDependencies): Promise<number> {
+  let options;
+  try {
+    options = parseSetupArgs(argv);
+  } catch (error) {
+    if (error instanceof SetupUsageError) {
+      say(`${error.message}. run rocky --help, question`);
+      return 2;
+    }
+    throw error;
+  }
+
+  const dependencies = deps ?? defaultDependencies();
+  let registration: McpRegistration;
+  try {
+    registration = resolveMcpRegistration({
+      exposure: options.exposure,
+      nodePath: dependencies.nodePath,
+      entryPath: dependencies.entryPath,
+      rockyHome: dependencies.rockyHome ?? process.env.ROCKY_HOME,
+      home: dependencies.platform.home,
+      fileExists: dependencies.platform.fileExists,
+    });
+  } catch {
+    say("MCP registration paths are not usable. setup stops. bad.");
+    return 1;
+  }
+
+  const entry = registration.args[0];
+  if (entry === undefined || isEphemeralInstall(entry)) {
+    say("ephemeral install cannot own durable host setup. install Rocky first.");
+    return 1;
+  }
+
+  if (options.mode === "configure") {
+    say("configured MCP host may forward selected projected memory.");
+    if (options.exposure === "raw") {
+      say("raw exposure includes working directories and stored stderr excerpts. bad bad if host shares them.");
+    }
+  }
+
+  const adapters = deps === undefined
+    ? await createProductionAdapters(dependencies.platform, dependencies.runner, registration)
+    : dependencies.adapters;
+  let results: SetupResult[] | undefined;
+  if (options.mode !== "check" && !options.yes) {
+    results = await consentResults(
+      options.mode,
+      adapters,
+      registration,
+      dependencies.confirmation,
+    );
+  }
+  results ??= await invokeAdapters(
+    options.mode,
+    adapters,
+    registration,
+    options.replace,
+    dependencies.runner,
+  );
+
+  say("host setup results follow.");
+  for (const result of results) printResult(result);
+
+  if (options.mode === "configure"
+    && dependencies.platform.shell !== undefined
+    && basename(dependencies.platform.shell) === "bash"
+    && !dependencies.platform.hasBashHook()) {
+    detail("next step: rocky hook install");
+  }
+
+  return exitCode(options.mode, results);
+}

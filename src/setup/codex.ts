@@ -324,11 +324,23 @@ export function createCodexAdapter(dependencies: CodexAdapterDependencies): Setu
     async check(registration) {
       if (executable === undefined) return skipped();
       const inspection = await readSnapshot(registration);
-      if (inspection.state === "identical") return { client: "codex", status: "healthy" };
       if (inspection.state === "absent") return { client: "codex", status: "not-configured" };
       if (inspection.state === "blocked") return skipped();
-      if (inspection.state === "conflict") {
-        return failed("Codex has a different rocky registration", registration);
+      if (inspection.state === "identical" || inspection.state === "conflict") {
+        const parsed = parseSnapshotValue(inspection.snapshot);
+        const restorable = snapshotToRestorableStdio(inspection.snapshot);
+        if (parsed.ok
+          && restorable.ok
+          && isOwnedRockyRegistration(parsed.value.registration, registration)) {
+          return {
+            client: "codex",
+            status: "healthy",
+            healthRegistration: parsed.value.registration,
+          };
+        }
+        if (inspection.state === "conflict") {
+          return failed("Codex has a different rocky registration", registration);
+        }
       }
       return failed("Unable to read Codex registration", registration);
     },

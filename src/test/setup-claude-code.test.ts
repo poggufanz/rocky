@@ -113,6 +113,26 @@ test("identical user registration is a no-op and healthy without human CLI inspe
   assert.deepEqual(runner.calls, []);
 });
 
+test("plain check returns exact owned raw registration for protocol health", async (t) => {
+  const storedRaw = {
+    ...registration,
+    env: { ...registration.env, ROCKY_MCP_EXPOSURE: "raw" },
+  };
+  const path = userConfig(t, { mcpServers: { rocky: {
+    type: "stdio",
+    command: storedRaw.command,
+    args: [...storedRaw.args],
+    env: { ...storedRaw.env },
+  } } });
+  const adapter = createClaudeCodeAdapter({ runner: new FakeRunner([]), executable: "/opt/claude", userConfigPath: path });
+
+  assert.deepEqual(await adapter.check(registration), {
+    client: "claude-code",
+    status: "healthy",
+    healthRegistration: storedRaw,
+  });
+});
+
 test("foreign registration requires confirmation and is not mutated", async (t) => {
   const path = userConfig(t, { mcpServers: { rocky: rockyEntry("/usr/bin/foreign") } });
   const runner = new FakeRunner([]);

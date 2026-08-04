@@ -184,6 +184,7 @@ test("identical registration is an inspectable no-op and healthy", async (t) => 
   assert.deepEqual(await adapter.check(registration), {
     client: "claude-desktop",
     status: "healthy",
+    healthRegistration: registration,
   });
   assert.deepEqual(readFileSync(path), originalBytes);
   assert.deepEqual(backupPaths(path), []);
@@ -371,6 +372,26 @@ test("managed policy blocks a required mutation but permits read-only identical 
   const identical = createClaudeDesktopAdapter({ configPath: identicalPath, policyBlocked: true });
   assert.equal((await identical.configure(registration, false)).status, "already-configured");
   assert.equal((await identical.check(registration)).status, "healthy");
+});
+
+test("plain Desktop check returns exact owned raw registration for local protocol health", async (t) => {
+  const storedRaw = {
+    ...registration,
+    env: { ...registration.env, ROCKY_MCP_EXPOSURE: "raw" },
+  };
+  const path = configPath(t, { mcpServers: { rocky: {
+    type: "stdio",
+    command: storedRaw.command,
+    args: [...storedRaw.args],
+    env: { ...storedRaw.env },
+  } } });
+  const adapter = createClaudeDesktopAdapter({ configPath: path });
+
+  assert.deepEqual(await adapter.check(registration), {
+    client: "claude-desktop",
+    status: "healthy",
+    healthRegistration: storedRaw,
+  });
 });
 
 test("atomic write failure preserves current config, keeps backup, and cleans temporary sibling", async (t) => {
@@ -1550,6 +1571,18 @@ test("WSL removal recognizes the same bridge identity across safe exposure chang
       ...bridge("sanitized"),
       command: "c:\\WINDOWS\\system32\\WSL.EXE",
     }),
+    mapHealthRegistration: (stored) => ({
+      ...stored,
+      command: "/mnt/c/Windows/System32/wsl.exe",
+    }),
+  });
+  assert.deepEqual(await defaultAdapter.check(registration), {
+    client: "claude-desktop",
+    status: "healthy",
+    healthRegistration: {
+      ...bridge("raw"),
+      command: "/mnt/c/Windows/System32/wsl.exe",
+    },
   });
   assert.equal((await defaultAdapter.remove(registration)).status, "removed");
 });

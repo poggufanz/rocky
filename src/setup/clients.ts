@@ -34,6 +34,7 @@ export interface SetupResult {
   status: SetupStatus;
   detail?: string;
   manualRegistration?: McpRegistration;
+  healthRegistration?: McpRegistration;
 }
 
 export interface InspectionResult {

@@ -484,8 +484,20 @@ test("remove and check use inspection results and exact remove argv", async () =
     codexCall(removeArgs),
   ]);
 
-  const checkRunner = new FakeRunner([result(0, JSON.stringify(completeSnapshot()))]);
+  const storedRawRegistration: McpRegistration = {
+    ...registration,
+    env: { ...registration.env, ROCKY_MCP_EXPOSURE: "raw" },
+  };
+  const checkRunner = new FakeRunner([result(0, JSON.stringify(completeSnapshot(
+    storedRawRegistration.command,
+    storedRawRegistration.args,
+    storedRawRegistration.env,
+  )))]);
   const checkAdapter = createCodexAdapter({ runner: checkRunner, executable: "/opt/codex" });
-  assert.deepEqual(await checkAdapter.check(registration), { client: "codex", status: "healthy" });
+  assert.deepEqual(await checkAdapter.check(registration), {
+    client: "codex",
+    status: "healthy",
+    healthRegistration: storedRawRegistration,
+  });
   assert.deepEqual(checkRunner.calls, [codexCall(getArgs)]);
 });

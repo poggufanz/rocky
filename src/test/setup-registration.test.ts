@@ -179,6 +179,90 @@ test("process runner aborts a timed-out child", async () => {
   assert.ok(Date.now() - started < 2_000);
 });
 
+test("interactive process session exchanges one JSON line at a time and merges environment overrides", async () => {
+  const runner = createProcessRunner();
+  assert.ok(runner.openSession !== undefined);
+  const script = [
+    "process.stdin.setEncoding('utf8');",
+    "let input = '';",
+    "process.stdin.on('data', chunk => {",
+    "  input += chunk;",
+    "  while (input.includes('\\n')) {",
+    "    const index = input.indexOf('\\n');",
+    "    const line = input.slice(0, index);",
+    "    input = input.slice(index + 1);",
+    "    const message = JSON.parse(line);",
+    "    process.stdout.write(JSON.stringify({ id: message.id, marker: process.env.ROCKY_TEST_MARKER }) + '\\n');",
+    "  }",
+    "});",
+  ].join("");
+  const session = await runner.openSession(process.execPath, ["-e", script], {
+    env: { ROCKY_TEST_MARKER: "merged" },
+  });
+
+  await session.writeLine(JSON.stringify({ id: "first" }));
+  assert.deepEqual(JSON.parse((await session.readLine()) ?? "null"), { id: "first", marker: "merged" });
+  await session.writeLine(JSON.stringify({ id: "second" }));
+  assert.deepEqual(JSON.parse((await session.readLine()) ?? "null"), { id: "second", marker: "merged" });
+  session.end();
+  const result = await session.wait();
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout, "");
+});
+
+test("interactive process session rejects an oversized unterminated stdout line and kills only its child", async () => {
+  const runner = createProcessRunner(128);
+  assert.ok(runner.openSession !== undefined);
+  const session = await runner.openSession(process.execPath, [
+    "-e",
+    "process.stdout.write('x'.repeat(1024));setInterval(() => {}, 1000)",
+  ]);
+
+  await assert.rejects(() => session.readLine(), /exceeds capture limit/i);
+  session.kill();
+  const result = await session.wait();
+
+  assert.equal(result.status === null || result.status > 0, true);
+});
+
+test("interactive process session bounds a final unterminated queued line", async () => {
+  const runner = createProcessRunner(1024);
+  assert.ok(runner.openSession !== undefined);
+  const script = "process.stdout.write(Array(64).fill('x').join('\\n') + '\\ntail')";
+  const session = await runner.openSession(process.execPath, ["-e", script]);
+
+  await session.wait();
+
+  await assert.rejects(() => session.readLine(), /exceeds capture limit/i);
+  assert.equal(await session.readLine(), undefined);
+});
+
+test("interactive process session handles child stdin EPIPE without an uncaught stream error", async () => {
+  const runner = createProcessRunner();
+  assert.ok(runner.openSession !== undefined);
+  const script = [
+    "import('node:fs').then(({closeSync}) => {",
+    "  closeSync(0);",
+    "  process.stdout.write('ready\\n');",
+    "});",
+    "setInterval(() => {}, 1000);",
+  ].join("");
+  const session = await runner.openSession(process.execPath, ["-e", script]);
+
+  assert.equal(await session.readLine(), "ready");
+  let writeError: unknown;
+  try {
+    await session.writeLine("probe");
+  } catch (error) {
+    writeError = error;
+  } finally {
+    session.kill();
+    await session.wait();
+  }
+  assert.ok(writeError instanceof Error);
+});
+
 test("native Windows executable discovery accepts exe and rejects cmd-only shims", () => {
   const directory = "C:\\Tools With Spaces";
   const executable = win32.join(directory, "codex.exe");

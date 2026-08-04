@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join, posix, win32 } from "node:path";
 
@@ -8,8 +8,13 @@ export interface PlatformServices {
   appData?: string;
   isWsl: boolean;
   wslDistro?: string;
+  shell?: string;
+  wslDesktopConfigPaths?: readonly string[];
+  wslExecutablePaths?: readonly string[];
+  wslpathExecutablePaths?: readonly string[];
   resolveExecutable(name: string): string | undefined;
   fileExists(path: string): boolean;
+  hasBashHook(): boolean;
 }
 
 export interface PlatformServiceOverrides {
@@ -20,6 +25,11 @@ export interface PlatformServiceOverrides {
   wslDistro?: string;
   env?: NodeJS.ProcessEnv;
   fileExists?: (path: string) => boolean;
+  listDirectory?: (path: string) => readonly string[];
+  bashHookInstalled?: boolean;
+  wslDesktopConfigPaths?: readonly string[];
+  wslExecutablePaths?: readonly string[];
+  wslpathExecutablePaths?: readonly string[];
 }
 
 function detectWsl(platform: NodeJS.Platform, env: NodeJS.ProcessEnv): boolean {
@@ -59,22 +69,74 @@ function resolveUnixExecutable(
   env: NodeJS.ProcessEnv,
   fileExists: (path: string) => boolean,
 ): string | undefined {
-  if (posix.isAbsolute(name) || isAbsolute(name)) return fileExists(name) ? name : undefined;
+  return resolveUnixExecutables(name, env, fileExists)[0];
+}
+
+function resolveUnixExecutables(
+  name: string,
+  env: NodeJS.ProcessEnv,
+  fileExists: (path: string) => boolean,
+): string[] {
+  if (posix.isAbsolute(name) || isAbsolute(name)) return fileExists(name) ? [name] : [];
+  const matches: string[] = [];
   for (const directory of (env.PATH ?? "").split(":")) {
     if (directory === "") continue;
     const candidate = posix.join(directory, name);
-    if (fileExists(candidate)) return candidate;
+    if (fileExists(candidate) && !matches.includes(candidate)) matches.push(candidate);
   }
-  return undefined;
+  return matches;
+}
+
+function listProfileDirectories(path: string): readonly string[] {
+  try {
+    return readdirSync(path, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => entry.name);
+  } catch {
+    return [];
+  }
+}
+
+function discoverWslDesktopConfigs(
+  listDirectory: (path: string) => readonly string[],
+  fileExists: (path: string) => boolean,
+): string[] {
+  const usersRoot = "/mnt/c/Users";
+  let profiles: readonly string[];
+  try {
+    profiles = listDirectory(usersRoot);
+  } catch {
+    return [];
+  }
+  const candidates: string[] = [];
+  for (const profile of profiles) {
+    if (profile.length === 0
+      || profile === "."
+      || profile === ".."
+      || profile.includes("/")
+      || profile.includes("\\")) continue;
+    const candidate = posix.join(
+      usersRoot,
+      profile,
+      "AppData",
+      "Roaming",
+      "Claude",
+      "claude_desktop_config.json",
+    );
+    if (fileExists(candidate) && !candidates.includes(candidate)) candidates.push(candidate);
+  }
+  return candidates;
 }
 
 export function createPlatformServices(overrides: PlatformServiceOverrides = {}): PlatformServices {
   const platform = overrides.platform ?? process.platform;
   const env = overrides.env ?? process.env;
   const fileExists = overrides.fileExists ?? existsSync;
+  const listDirectory = overrides.listDirectory ?? listProfileDirectories;
+  const home = overrides.home ?? homedir();
   const service: PlatformServices = {
     platform,
-    home: overrides.home ?? homedir(),
+    home,
     isWsl: overrides.isWsl ?? detectWsl(platform, env),
     resolveExecutable(name) {
       return platform === "win32"
@@ -82,12 +144,34 @@ export function createPlatformServices(overrides: PlatformServiceOverrides = {})
         : resolveUnixExecutable(name, env, fileExists);
     },
     fileExists,
+    hasBashHook() {
+      if (overrides.bashHookInstalled !== undefined) return overrides.bashHookInstalled;
+      try {
+        return readFileSync(join(home, ".bashrc"), "utf8").includes("# >>> rocky hook >>>");
+      } catch {
+        return false;
+      }
+    },
   };
   const appData = overrides.appData ?? env.APPDATA;
   if (appData !== undefined) service.appData = appData;
   const wslDistro = overrides.wslDistro ?? env.WSL_DISTRO_NAME;
   if (wslDistro !== undefined) service.wslDistro = wslDistro;
+  if (env.SHELL !== undefined) service.shell = env.SHELL;
+  if (service.isWsl) {
+    const discoveredConfigs = discoverWslDesktopConfigs(listDirectory, fileExists);
+    const explicitConfig = env.ROCKY_WSL_CLAUDE_CONFIG;
+    const desktopConfigs = overrides.wslDesktopConfigPaths ?? [...new Set([
+      ...discoveredConfigs,
+      ...(explicitConfig === undefined ? [] : [explicitConfig]),
+    ])];
+    service.wslDesktopConfigPaths = Object.freeze([...desktopConfigs]);
+    service.wslExecutablePaths = Object.freeze([
+      ...(overrides.wslExecutablePaths ?? resolveUnixExecutables("wsl.exe", env, fileExists)),
+    ]);
+    service.wslpathExecutablePaths = Object.freeze([
+      ...(overrides.wslpathExecutablePaths ?? resolveUnixExecutables("wslpath", env, fileExists)),
+    ]);
+  }
   return Object.freeze(service);
 }
-
-export const platformServices: PlatformServices = createPlatformServices();

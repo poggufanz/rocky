@@ -37,6 +37,7 @@ interface ConfigInspection {
 export interface ClaudeDesktopAdapterDependencies {
   configPath?: string;
   transformRegistration?: (registration: McpRegistration) => McpRegistration;
+  mapHealthRegistration?: (stored: McpRegistration) => McpRegistration;
   policyBlocked?: boolean;
 }
 
@@ -319,6 +320,25 @@ function transformOrError(
   }
 }
 
+function healthRegistrationOrError(
+  stored: McpRegistration,
+  map: ((stored: McpRegistration) => McpRegistration) | undefined,
+): { ok: true; registration: McpRegistration } | { ok: false } {
+  if (map === undefined) return { ok: true, registration: stored };
+  try {
+    const mapped = map(stored);
+    return mapped.name === "rocky"
+      && typeof mapped.command === "string"
+      && mapped.command.length > 0
+      && sameStringArray(mapped.args, stored.args)
+      && sameStringMap(mapped.env, stored.env)
+      ? { ok: true, registration: mapped }
+      : { ok: false };
+  } catch {
+    return { ok: false };
+  }
+}
+
 export function resolveDesktopConfigPath(platform: PlatformServices): string | undefined {
   if (platform.platform === "darwin" && posix.isAbsolute(platform.home)) {
     return posix.join(
@@ -447,17 +467,23 @@ export function createClaudeDesktopAdapter(
     async check(registration) {
       const prepared = prepare(registration);
       if (!prepared.ok) return failed(prepared.detail, prepared.manualRegistration);
-      const inspection = inspectConfig(prepared.path, prepared.registration).public;
-      if (inspection.state === "identical") {
-        return { client: "claude-desktop", status: "healthy" };
-      }
-      if (inspection.state === "absent") {
+      const inspection = inspectConfig(prepared.path, prepared.registration);
+      if (inspection.public.state === "absent") {
         return { client: "claude-desktop", status: "not-configured" };
       }
-      if (inspection.state === "conflict") {
+      if (inspection.public.state === "identical" || inspection.public.state === "conflict") {
+        const stored = parseRegistration(inspection.snapshot);
+        if (stored !== undefined && isOwnedDesktopRegistration(stored, prepared.registration)) {
+          const health = healthRegistrationOrError(stored, dependencies.mapHealthRegistration);
+          return health.ok
+            ? { client: "claude-desktop", status: "healthy", healthRegistration: health.registration }
+            : failed("Claude Desktop local health registration cannot be resolved");
+        }
+      }
+      if (inspection.public.state === "conflict") {
         return failed("Claude Desktop has a different rocky registration", prepared.registration);
       }
-      return failed(inspection.detail ?? "Unable to read Claude Desktop config");
+      return failed(inspection.public.detail ?? "Unable to read Claude Desktop config");
     },
   };
 }

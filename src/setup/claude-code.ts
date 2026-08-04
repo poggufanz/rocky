@@ -267,10 +267,15 @@ export function createClaudeCodeAdapter(
 
     async check(registration) {
       if (executable === undefined) return skipped();
-      const inspection = inspectUserConfig(userConfigPath, registration).public;
-      if (inspection.state === "identical") return { client: "claude-code", status: "healthy" };
-      if (inspection.state === "absent") return { client: "claude-code", status: "not-configured" };
-      if (inspection.state === "conflict") {
+      const inspection = inspectUserConfig(userConfigPath, registration);
+      if (inspection.public.state === "absent") return { client: "claude-code", status: "not-configured" };
+      if (inspection.public.state === "identical" || inspection.public.state === "conflict") {
+        const stored = parseRegistration(inspection.snapshot);
+        if (stored !== undefined && isOwnedRockyRegistration(stored, registration)) {
+          return { client: "claude-code", status: "healthy", healthRegistration: stored };
+        }
+      }
+      if (inspection.public.state === "conflict") {
         return failed("Claude Code has a different rocky registration", registration);
       }
       return failed("Unable to read Claude Code user config", registration);

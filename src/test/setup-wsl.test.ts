@@ -1,11 +1,17 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import type { ProcessResult, ProcessRunOptions, ProcessRunner } from "../setup/process.js";
 import {
   WslManualConfigurationError,
   buildWslDesktopRegistration,
   convertMountedWindowsPath,
 } from "../setup/claude-desktop.js";
+import { createPlatformServices } from "../setup/platform.js";
+import { createProductionAdapters } from "../commands/setup.js";
+import type { McpRegistration } from "../setup/clients.js";
 
 const completeInput = {
   exposure: "sanitized" as const,
@@ -184,4 +190,235 @@ test("mounted path conversion turns runner rejection into secret-free manual gui
         && !/fake-runner-secret/.test(candidate.message);
     },
   );
+});
+
+test("production WSL Desktop construction verifies every bridge input before conversion", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "rocky-wsl-production-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const configPath = join(root, "mnt/c/Users/Ada/AppData/Roaming/Claude/claude_desktop_config.json");
+  const mountedWsl = join(root, "mnt/c/Windows/System32/wsl.exe");
+  const wslpath = join(root, "usr/bin/wslpath");
+  const envPath = "/usr/bin/env";
+  const nodePath = join(root, "usr/bin/node");
+  const entryPath = join(root, "opt/rocky/dist/index.js");
+  const rockyHome = join(root, "home/ada/.rocky");
+  for (const path of [configPath, mountedWsl, wslpath, nodePath, entryPath]) {
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, path === configPath ? "{}\n" : "fixture", "utf8");
+  }
+  const existing = new Set([configPath, mountedWsl, wslpath, envPath, nodePath, entryPath]);
+  const platform = createPlatformServices({
+    platform: "linux",
+    home: join(root, "home/ada"),
+    env: { PATH: "" },
+    isWsl: true,
+    wslDistro: "Ubuntu-24.04",
+    wslDesktopConfigPaths: [configPath],
+    wslExecutablePaths: [mountedWsl],
+    wslpathExecutablePaths: [wslpath],
+    fileExists: (path) => existing.has(path),
+  });
+  const runner = new FakeRunner({
+    status: 0,
+    stdout: "C:\\Windows\\System32\\wsl.exe\r\n",
+    stderr: "",
+  });
+  const registration: McpRegistration = {
+    name: "rocky",
+    command: nodePath,
+    args: [entryPath, "mcp"],
+    env: { ROCKY_MCP_EXPOSURE: "raw", ROCKY_HOME: rockyHome },
+  };
+
+  const adapters = await createProductionAdapters(platform, runner, registration);
+  const desktop = adapters.find(({ id }) => id === "claude-desktop");
+  assert.ok(desktop !== undefined);
+  assert.equal((await desktop.configure(registration, false)).status, "configured");
+  assert.deepEqual(runner.calls, [{
+    command: wslpath,
+    args: ["-w", mountedWsl],
+    options: { timeoutMs: 10_000 },
+  }]);
+  assert.deepEqual(JSON.parse(readFileSync(configPath, "utf8")), {
+    mcpServers: {
+      rocky: {
+        type: "stdio",
+        command: "C:\\Windows\\System32\\wsl.exe",
+        args: [
+          "-d", "Ubuntu-24.04", "--exec", "/usr/bin/env",
+          "ROCKY_MCP_EXPOSURE=raw", `ROCKY_HOME=${rockyHome}`,
+          nodePath, entryPath, "mcp",
+        ],
+        env: {},
+      },
+    },
+  });
+  assert.deepEqual(await desktop.check({
+    ...registration,
+    env: { ...registration.env, ROCKY_MCP_EXPOSURE: "sanitized" },
+  }), {
+    client: "claude-desktop",
+    status: "healthy",
+    healthRegistration: {
+      name: "rocky",
+      command: mountedWsl,
+      args: [
+        "-d", "Ubuntu-24.04", "--exec", "/usr/bin/env",
+        "ROCKY_MCP_EXPOSURE=raw", `ROCKY_HOME=${rockyHome}`,
+        nodePath, entryPath, "mcp",
+      ],
+      env: {},
+    },
+  });
+});
+
+test("missing or ambiguous WSL discovery skips Desktop before conversion or builder mutation", async (t) => {
+  const baseRegistration: McpRegistration = {
+    name: "rocky",
+    command: "/usr/bin/node",
+    args: ["/opt/rocky/dist/index.js", "mcp"],
+    env: { ROCKY_MCP_EXPOSURE: "sanitized", ROCKY_HOME: "/home/ada/.rocky" },
+  };
+  const required = new Set([
+    "/mnt/c/config.json",
+    "/mnt/c/Windows/System32/wsl.exe",
+    "/usr/bin/wslpath",
+    "/usr/bin/env",
+    "/usr/bin/node",
+    "/opt/rocky/dist/index.js",
+  ]);
+  const cases: Array<{
+    name: string;
+    configPaths?: readonly string[];
+    wslPaths?: readonly string[];
+    wslpathPaths?: readonly string[];
+    distro?: string;
+    registration?: McpRegistration;
+    missing?: string;
+  }> = [
+    { name: "missing Desktop config", configPaths: [] },
+    { name: "ambiguous Desktop config", configPaths: ["/mnt/c/config.json", "/mnt/d/config.json"] },
+    { name: "missing wsl.exe", wslPaths: [] },
+    { name: "ambiguous wsl.exe", wslPaths: ["/mnt/c/Windows/System32/wsl.exe", "/mnt/d/wsl.exe"] },
+    { name: "missing wslpath", wslpathPaths: [] },
+    { name: "ambiguous wslpath", wslpathPaths: ["/usr/bin/wslpath", "/opt/bin/wslpath"] },
+    { name: "missing canonical env", missing: "/usr/bin/env" },
+    { name: "missing Node", missing: "/usr/bin/node" },
+    { name: "missing entry", missing: "/opt/rocky/dist/index.js" },
+    { name: "missing distro", distro: "" },
+    {
+      name: "relative Rocky home",
+      registration: { ...baseRegistration, env: { ...baseRegistration.env, ROCKY_HOME: "state/.rocky" } },
+    },
+  ];
+
+  for (const entry of cases) {
+    await t.test(entry.name, async () => {
+      const existing = new Set(required);
+      if (entry.missing !== undefined) existing.delete(entry.missing);
+      const platform = createPlatformServices({
+        platform: "linux",
+        home: "/home/ada",
+        env: { PATH: "" },
+        isWsl: true,
+        wslDistro: entry.distro ?? "Ubuntu-24.04",
+        wslDesktopConfigPaths: entry.configPaths ?? ["/mnt/c/config.json"],
+        wslExecutablePaths: entry.wslPaths ?? ["/mnt/c/Windows/System32/wsl.exe"],
+        wslpathExecutablePaths: entry.wslpathPaths ?? ["/usr/bin/wslpath"],
+        fileExists: (path) => existing.has(path),
+      });
+      const runner = new FakeRunner({ status: 0, stdout: "C:\\Windows\\System32\\wsl.exe\n", stderr: "" });
+
+      const adapters = await createProductionAdapters(
+        platform,
+        runner,
+        entry.registration ?? baseRegistration,
+      );
+      const desktop = adapters.find(({ id }) => id === "claude-desktop");
+      assert.ok(desktop !== undefined);
+      const result = await desktop.configure(entry.registration ?? baseRegistration, false);
+
+      assert.equal(result.status, "skipped");
+      assert.match(result.detail ?? "", /manual|unavailable|incomplete/i);
+      assert.deepEqual(runner.calls, []);
+    });
+  }
+});
+
+test("production WSL Desktop construction turns a non-wsl.exe conversion into manual setup", async () => {
+  const registration: McpRegistration = {
+    name: "rocky",
+    command: "/usr/bin/node",
+    args: ["/opt/rocky/dist/index.js", "mcp"],
+    env: { ROCKY_MCP_EXPOSURE: "sanitized", ROCKY_HOME: "/home/ada/.rocky" },
+  };
+  const existing = new Set([
+    "/mnt/c/config.json",
+    "/mnt/c/Windows/System32/wsl.exe",
+    "/usr/bin/wslpath",
+    "/usr/bin/env",
+    "/usr/bin/node",
+    "/opt/rocky/dist/index.js",
+  ]);
+  const platform = createPlatformServices({
+    platform: "linux",
+    home: "/home/ada",
+    env: { PATH: "" },
+    isWsl: true,
+    wslDistro: "Ubuntu-24.04",
+    wslDesktopConfigPaths: ["/mnt/c/config.json"],
+    wslExecutablePaths: ["/mnt/c/Windows/System32/wsl.exe"],
+    wslpathExecutablePaths: ["/usr/bin/wslpath"],
+    fileExists: (path) => existing.has(path),
+  });
+  const runner = new FakeRunner({
+    status: 0,
+    stdout: "C:\\Windows\\System32\\cmd.exe\n",
+    stderr: "fake-secret",
+  });
+
+  const adapters = await createProductionAdapters(platform, runner, registration);
+  const desktop = adapters.find(({ id }) => id === "claude-desktop");
+  assert.ok(desktop !== undefined);
+  const result = await desktop.configure(registration, false);
+
+  assert.equal(result.status, "skipped");
+  assert.match(result.detail ?? "", /manual|unavailable|incomplete/i);
+  assert.doesNotMatch(result.detail ?? "", /fake-secret|cmd\.exe/i);
+  assert.equal(runner.calls.length, 1);
+});
+
+test("production WSL discovery enumerates real mounted Windows profile config paths", () => {
+  const adaConfig = "/mnt/c/Users/Ada/AppData/Roaming/Claude/claude_desktop_config.json";
+  const listed: string[] = [];
+  const platform = createPlatformServices({
+    platform: "linux",
+    home: "/home/ada",
+    env: { PATH: "" },
+    isWsl: true,
+    listDirectory(path: string) {
+      listed.push(path);
+      return ["Ada", "Grace", "Public"];
+    },
+    fileExists: (path: string) => path === adaConfig,
+  });
+
+  assert.deepEqual(listed, ["/mnt/c/Users"]);
+  assert.deepEqual(platform.wslDesktopConfigPaths, [adaConfig]);
+});
+
+test("explicit WSL Desktop config is an additional deduplicated candidate", () => {
+  const discovered = "/mnt/c/Users/Ada/AppData/Roaming/Claude/claude_desktop_config.json";
+  const explicit = "/mnt/c/Users/Grace/AppData/Roaming/Claude/claude_desktop_config.json";
+  const existing = new Set([discovered, explicit]);
+  const platform = createPlatformServices({
+    platform: "linux",
+    home: "/home/ada",
+    env: { PATH: "", ROCKY_WSL_CLAUDE_CONFIG: explicit },
+    isWsl: true,
+    listDirectory: () => ["Ada"],
+    fileExists: (path: string) => existing.has(path),
+  });
+
+  assert.deepEqual(platform.wslDesktopConfigPaths, [discovered, explicit]);
 });

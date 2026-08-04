@@ -14,6 +14,7 @@ import { recall } from "./commands/recall.js";
 import { stats } from "./commands/stats.js";
 import { hookFail, hookInstall, hookStatus, hookSuccess, hookUninstall } from "./commands/hook.js";
 import { mcp } from "./commands/mcp.js";
+import { setup } from "./commands/setup.js";
 import { face, say } from "./ui/rocky.js";
 
 const HELP = `
@@ -27,6 +28,12 @@ usage:
                             or the command.
   rocky stats               what Rocky holds in memory.
   rocky mcp                 serve read-only memory tools over stdio.
+  rocky setup               configure detected MCP hosts with sanitized exposure.
+  rocky setup --check       verify owned host registrations and Rocky MCP tools.
+  rocky setup --remove      remove owned Rocky registrations from detected hosts.
+  rocky setup --replace     replace conflicting registrations after confirmation.
+  rocky setup --mcp-exposure sanitized|raw
+                            choose projected-memory exposure during configure.
   rocky hook install        put Rocky's ears in your bash. every command heard,
                             failures remembered, dangerous commands questioned.
   rocky hook uninstall      remove the ears. memory stays.
@@ -48,6 +55,8 @@ async function main(): Promise<number> {
       return stats();
     case "mcp":
       return mcp();
+    case "setup":
+      return setup(rest);
     case "hook":
       switch (rest[0]) {
         case "install":
