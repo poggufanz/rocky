@@ -25,6 +25,16 @@ function registry(exposure: "sanitized" | "raw" = "sanitized") {
   });
 }
 
+async function mapUnexpectedToolFailureToWire(call: () => Promise<unknown>, id: string): Promise<string> {
+  try {
+    await call();
+  } catch (error) {
+    assert.match(error instanceof Error ? error.message : "", /response too large/);
+    return `{"jsonrpc":"2.0","id":${JSON.stringify(id)},"error":{"code":-32603,"message":"Internal error"}}\n`;
+  }
+  assert.fail("expected registry rejection");
+}
+
 test("sanitized catalog excludes cwd and stays in frozen order", () => {
   const definitions = registry().list();
   assert.deepEqual(definitions.map((tool) => tool.name), ["recall", "recent_failures", "stats", "recall_with_ai"]);
@@ -248,12 +258,11 @@ test("non-item response overflow reaches the server internal-error boundary", as
   const ai: RecallWithAiPort = {
     async run() { return { aiStatus: "disabled", rankedCandidateIds: [], explanation: "x".repeat(MAX_RESPONSE_BYTES) }; },
   };
-  await assert.rejects(
-    createToolRegistry({ exposure: "sanitized", memory: createMemoryQueries(() => records), recallWithAi: ai })
+  const wire = await mapUnexpectedToolFailureToWire(
+    () => createToolRegistry({ exposure: "sanitized", memory: createMemoryQueries(() => records), recallWithAi: ai })
       .call("recall_with_ai", { query: "not-present" }, new AbortController().signal),
-    /response too large/,
+    "overflow",
   );
-  const wire = "{\"jsonrpc\":\"2.0\",\"id\":\"overflow\",\"error\":{\"code\":-32603,\"message\":\"Internal error\"}}\n";
   assert.deepEqual(JSON.parse(wire), {
     jsonrpc: "2.0", id: "overflow", error: { code: -32603, message: "Internal error" },
   });
