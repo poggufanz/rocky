@@ -22,6 +22,29 @@ export type JsonReadResult =
   | { status: "valid"; value: Record<string, unknown>; bytes: Buffer; mode?: number }
   | { status: "invalid"; error: string };
 
+/**
+ * Opaque authority to mutate a previously validated filesystem topology.
+ * This closes observable check/use windows, but Node has no portable way to
+ * make the final identity check and following namespace syscall indivisible.
+ */
+export interface JsonMutationGuard {
+  unchanged(): boolean;
+}
+
+class JsonMutationGuardChangedError extends Error {}
+
+function mutationGuardUnchanged(guard: JsonMutationGuard | undefined): boolean {
+  try {
+    return guard?.unchanged() ?? true;
+  } catch {
+    return false;
+  }
+}
+
+function requireMutationGuard(guard: JsonMutationGuard | undefined): void {
+  if (!mutationGuardUnchanged(guard)) throw new JsonMutationGuardChangedError();
+}
+
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -311,17 +334,20 @@ function writeManifest(
   transactionDirectory: string,
   target: string,
   state: TransactionState,
+  guard?: JsonMutationGuard,
 ): void {
   const manifestPath = join(transactionDirectory, "manifest.json");
   const temporaryPath = join(transactionDirectory, "manifest.tmp");
   const manifest: TransactionManifest = { version: 1, state, target };
   let descriptor: number | undefined;
   try {
+    requireMutationGuard(guard);
     descriptor = openSync(temporaryPath, "wx", 0o600);
     writeFileSync(descriptor, `${JSON.stringify(manifest)}\n`, "utf8");
     fsyncSync(descriptor);
     closeSync(descriptor);
     descriptor = undefined;
+    requireMutationGuard(guard);
     renameSync(temporaryPath, manifestPath);
     syncDirectory(transactionDirectory);
   } finally {
@@ -332,7 +358,7 @@ function writeManifest(
         // Caller reports a secret-free transaction recovery path.
       }
     }
-    if (pathExists(temporaryPath)) {
+    if (mutationGuardUnchanged(guard) && pathExists(temporaryPath)) {
       try {
         rmSync(temporaryPath, { force: true });
       } catch {
@@ -402,7 +428,10 @@ export function inspectJsonTransaction(path: string): JsonTransactionInspectionR
 }
 
 /** Recover an interrupted mutation before anybody interprets an absent config. */
-export function recoverJsonTransaction(path: string): JsonTransactionRecoveryResult {
+export function recoverJsonTransaction(
+  path: string,
+  guard?: JsonMutationGuard,
+): JsonTransactionRecoveryResult {
   for (const transactionDirectory of transactionDirectories(path)) {
     const manifest = readManifest(transactionDirectory, path);
     if (manifest?.state === "committed") continue;
@@ -416,6 +445,7 @@ export function recoverJsonTransaction(path: string): JsonTransactionRecoveryRes
 
     const displacedPath = join(transactionDirectory, "displaced");
     if (manifest.state === "prepared" && !pathExists(displacedPath)) {
+      if (!mutationGuardUnchanged(guard)) return { status: "manual" };
       if (!removeTransaction(transactionDirectory)) {
         return {
           status: "manual",
@@ -429,11 +459,14 @@ export function recoverJsonTransaction(path: string): JsonTransactionRecoveryRes
       && pathExists(path)
       && isManagedRecoveryPair(path, displacedPath, path)) {
       const preparedPath = join(transactionDirectory, "prepared");
-      if (pathExists(preparedPath) && !discardPrepared(transactionDirectory, preparedPath)) {
+      if (pathExists(preparedPath)
+        && (!mutationGuardUnchanged(guard)
+          || !discardPrepared(transactionDirectory, preparedPath))) {
         return { status: "manual", recoveryPath: firstExistingPath(transactionDirectory) };
       }
+      if (!mutationGuardUnchanged(guard)) return { status: "manual" };
       try {
-        writeManifest(transactionDirectory, path, "committed");
+        writeManifest(transactionDirectory, path, "committed", guard);
       } catch {
         return { status: "manual", recoveryPath: firstExistingPath(transactionDirectory) };
       }
@@ -451,6 +484,7 @@ export function recoverJsonTransaction(path: string): JsonTransactionRecoveryRes
           recoveryPath: firstExistingPath(displacedPath, transactionDirectory),
         };
       }
+      if (!mutationGuardUnchanged(guard)) return { status: "manual" };
       try {
         linkSync(displacedPath, path);
         syncParentDirectory(path);
@@ -464,16 +498,20 @@ export function recoverJsonTransaction(path: string): JsonTransactionRecoveryRes
         return { status: "manual", recoveryPath: firstExistingPath(transactionDirectory) };
       }
       const preparedPath = join(transactionDirectory, "prepared");
-      if (pathExists(preparedPath) && !discardPrepared(transactionDirectory, preparedPath)) {
+      if (pathExists(preparedPath)
+        && (!mutationGuardUnchanged(guard)
+          || !discardPrepared(transactionDirectory, preparedPath))) {
         return { status: "manual", recoveryPath: firstExistingPath(transactionDirectory) };
       }
+      if (!mutationGuardUnchanged(guard)) return { status: "manual" };
       try {
-        writeManifest(transactionDirectory, path, "committed");
+        writeManifest(transactionDirectory, path, "committed", guard);
       } catch {
         return { status: "manual", recoveryPath: firstExistingPath(transactionDirectory) };
       }
       return { status: "recovered", recoveryPath: firstExistingPath(displacedPath) };
     } else {
+      if (!mutationGuardUnchanged(guard)) return { status: "manual" };
       if (!removeTransaction(transactionDirectory)) {
         return {
           status: "manual",
@@ -491,14 +529,18 @@ function restoreDisplaced(
   transactionDirectory: string,
   displacedPath: string,
   preparedPath: string,
+  guard?: JsonMutationGuard,
 ): ConditionalJsonWriteResult {
-  if (pathExists(preparedPath) && !discardPrepared(transactionDirectory, preparedPath)) {
+  if (pathExists(preparedPath)
+    && (!mutationGuardUnchanged(guard)
+      || !discardPrepared(transactionDirectory, preparedPath))) {
     return {
       status: "recovery-required",
       recoveryPath: firstExistingPath(transactionDirectory, preparedPath),
     };
   }
   try {
+    requireMutationGuard(guard);
     linkSync(displacedPath, path);
     syncParentDirectory(path);
   } catch {
@@ -514,7 +556,8 @@ function restoreDisplaced(
     };
   }
   try {
-    writeManifest(transactionDirectory, path, "committed");
+    requireMutationGuard(guard);
+    writeManifest(transactionDirectory, path, "committed", guard);
   } catch {
     return {
       status: "recovery-required",
@@ -548,6 +591,7 @@ export function atomicWriteJsonIfUnchanged(
   path: string,
   value: Record<string, unknown>,
   prior: JsonReadResult,
+  guard?: JsonMutationGuard,
 ): ConditionalJsonWriteResult {
   if (prior.status === "invalid") throw new Error("Unable to write JSON config");
 
@@ -569,9 +613,11 @@ export function atomicWriteJsonIfUnchanged(
   let recoveryExists = false;
   let destinationPublished = false;
   try {
+    requireMutationGuard(guard);
     mkdirSync(transactionDirectory, { mode: 0o700 });
     transactionExists = true;
     syncParentDirectory(transactionDirectory);
+    requireMutationGuard(guard);
     descriptor = openSync(temporaryPath, "wx", 0o600);
     temporaryExists = true;
     writeFileSync(descriptor, encoded);
@@ -581,13 +627,16 @@ export function atomicWriteJsonIfUnchanged(
     closeSync(descriptor);
     descriptor = undefined;
     syncDirectory(transactionDirectory);
-    writeManifest(transactionDirectory, path, "prepared");
+    requireMutationGuard(guard);
+    writeManifest(transactionDirectory, path, "prepared", guard);
 
     if (prior.status === "missing") {
       try {
+        requireMutationGuard(guard);
         linkSync(temporaryPath, path);
       } catch (error) {
         if (errorCode(error) === "EEXIST") {
+          requireMutationGuard(guard);
           if (!removeTransaction(transactionDirectory)) {
             return {
               status: "recovery-required",
@@ -602,7 +651,9 @@ export function atomicWriteJsonIfUnchanged(
       }
       destinationPublished = true;
       syncParentDirectory(path);
-      writeManifest(transactionDirectory, path, "published");
+      requireMutationGuard(guard);
+      writeManifest(transactionDirectory, path, "published", guard);
+      requireMutationGuard(guard);
       if (!removeTransaction(transactionDirectory)) {
         return {
           status: "recovery-required",
@@ -619,16 +670,20 @@ export function atomicWriteJsonIfUnchanged(
     }
 
     const probePath = join(transactionDirectory, "link-probe");
+    requireMutationGuard(guard);
     linkSync(temporaryPath, probePath);
+    requireMutationGuard(guard);
     rmSync(probePath);
     syncDirectory(transactionDirectory);
 
     recoveryPath = join(transactionDirectory, "displaced");
     try {
+      requireMutationGuard(guard);
       renameSync(path, recoveryPath);
       recoveryExists = true;
     } catch (error) {
       if (errorCode(error) === "ENOENT") {
+        requireMutationGuard(guard);
         if (removeTransaction(transactionDirectory) || !pathExists(transactionDirectory)) {
           transactionExists = false;
           temporaryExists = false;
@@ -643,7 +698,8 @@ export function atomicWriteJsonIfUnchanged(
     }
     syncDirectory(transactionDirectory);
     syncParentDirectory(path);
-    writeManifest(transactionDirectory, path, "displaced");
+    requireMutationGuard(guard);
+    writeManifest(transactionDirectory, path, "displaced", guard);
 
     if (!isManagedRegularFile(recoveryPath, path)
       || !fileMatches(recoveryPath, prior.bytes, prior.mode)) {
@@ -652,6 +708,7 @@ export function atomicWriteJsonIfUnchanged(
         transactionDirectory,
         recoveryPath,
         temporaryPath,
+        guard,
       );
       if (restored.status === "changed") {
         temporaryExists = false;
@@ -660,9 +717,11 @@ export function atomicWriteJsonIfUnchanged(
     }
 
     try {
+      requireMutationGuard(guard);
       linkSync(temporaryPath, path);
     } catch (error) {
       if (errorCode(error) === "EEXIST") {
+        requireMutationGuard(guard);
         if (discardPrepared(transactionDirectory, temporaryPath)) temporaryExists = false;
         return {
           status: "recovery-required",
@@ -679,6 +738,7 @@ export function atomicWriteJsonIfUnchanged(
         transactionDirectory,
         recoveryPath,
         temporaryPath,
+        guard,
       );
       if (restored.status !== "changed") return restored;
       temporaryExists = false;
@@ -702,7 +762,9 @@ export function atomicWriteJsonIfUnchanged(
       };
     }
 
-    writeManifest(transactionDirectory, path, "published");
+    requireMutationGuard(guard);
+    writeManifest(transactionDirectory, path, "published", guard);
+    requireMutationGuard(guard);
     rmSync(temporaryPath);
     temporaryExists = false;
     syncDirectory(transactionDirectory);
@@ -712,7 +774,8 @@ export function atomicWriteJsonIfUnchanged(
         recoveryPath: firstExistingPath(transactionDirectory, path),
       };
     }
-    writeManifest(transactionDirectory, path, "committed");
+    requireMutationGuard(guard);
+    writeManifest(transactionDirectory, path, "committed", guard);
     const liveRecoveryPath = firstExistingPath(recoveryPath);
     if (liveRecoveryPath === undefined) {
       return {
@@ -721,7 +784,7 @@ export function atomicWriteJsonIfUnchanged(
       };
     }
     return { status: "written", recoveryPath: liveRecoveryPath };
-  } catch {
+  } catch (error) {
     if (descriptor !== undefined) {
       try {
         closeSync(descriptor);
@@ -729,6 +792,12 @@ export function atomicWriteJsonIfUnchanged(
         // Cleanup below remains conservative.
       }
       descriptor = undefined;
+    }
+    if (error instanceof JsonMutationGuardChangedError) {
+      return { status: "recovery-required" };
+    }
+    if (!mutationGuardUnchanged(guard)) {
+      return { status: "recovery-required" };
     }
     if (recoveryPath !== undefined && recoveryExists) {
       return {
@@ -763,7 +832,7 @@ export function atomicWriteJsonIfUnchanged(
         // Preserve the operation's secret-free result.
       }
     }
-    if (temporaryExists && !transactionExists) {
+    if (temporaryExists && !transactionExists && mutationGuardUnchanged(guard)) {
       try {
         rmSync(temporaryPath, { force: true });
       } catch {

@@ -177,7 +177,7 @@ test("native parent preparation runs only for a permitted configure mutation", a
     prepareConfigParent() {
       prepareCalls += 1;
       mkdirSync(dirname(path));
-      return true;
+      return { unchanged: () => true };
     },
   };
 

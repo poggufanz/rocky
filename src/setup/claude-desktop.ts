@@ -15,7 +15,7 @@ import {
   readJsonObject,
   recoverJsonTransaction,
 } from "./json-config.js";
-import type { JsonReadResult } from "./json-config.js";
+import type { JsonMutationGuard, JsonReadResult } from "./json-config.js";
 import type { PlatformServices } from "./platform.js";
 import type { ProcessResult, ProcessRunner } from "./process.js";
 import { isIdenticalMcpRegistration, isOwnedRockyRegistration } from "./registration.js";
@@ -37,7 +37,7 @@ interface ConfigInspection {
 
 export interface ClaudeDesktopAdapterDependencies {
   configPath?: string;
-  prepareConfigParent?: () => boolean;
+  prepareConfigParent?: () => JsonMutationGuard | undefined;
   transformRegistration?: (registration: McpRegistration) => McpRegistration;
   mapHealthRegistration?: (stored: McpRegistration) => McpRegistration;
   policyBlocked?: boolean;
@@ -52,7 +52,7 @@ interface NativeDesktopConfigPlan {
 
 export interface NativeDesktopConfig {
   configPath: string;
-  prepareConfigParent: () => boolean;
+  prepareConfigParent: () => JsonMutationGuard | undefined;
 }
 
 export interface WslDesktopRegistrationInput {
@@ -221,8 +221,12 @@ function inspectConfig(path: string, registration: McpRegistration): ConfigInspe
     : { read, servers, snapshot, public: { state: "conflict", snapshot } };
 }
 
-function recoverPendingMutation(path: string, registration: McpRegistration): SetupResult {
-  const recovery = recoverJsonTransaction(path);
+function recoverPendingMutation(
+  path: string,
+  registration: McpRegistration,
+  guard?: JsonMutationGuard,
+): SetupResult {
+  const recovery = recoverJsonTransaction(path, guard);
   const detail = recovery.status === "recovered"
     ? recovery.recoveryPath === undefined
       ? "Claude Desktop config transaction recovered; retry setup"
@@ -254,16 +258,39 @@ function mutationDetail(prefix: string, backupPath: string | undefined): string 
   return backupPath === undefined ? prefix : `${prefix}; backup: ${backupPath}`;
 }
 
+function mutationGuardUnchanged(guard: JsonMutationGuard | undefined): boolean {
+  try {
+    return guard?.unchanged() ?? true;
+  } catch {
+    return false;
+  }
+}
+
+function unsafeTopology(
+  registration: McpRegistration,
+  backupPath?: string,
+): SetupResult {
+  return failed(
+    mutationDetail(
+      "Claude Desktop config parent topology changed; use manual configuration",
+      backupPath,
+    ),
+    registration,
+  );
+}
+
 function writeMutation(
   path: string,
   inspection: ConfigInspection,
   value: JsonObject,
   status: "configured" | "removed",
   registration: McpRegistration,
+  guard?: JsonMutationGuard,
 ): SetupResult {
   let backupPath: string | undefined;
   let liveRecoveryPath: string | undefined;
   if (inspection.read.status === "valid") {
+    if (!mutationGuardUnchanged(guard)) return unsafeTopology(registration);
     try {
       backupPath = backupFile(path);
     } catch (error) {
@@ -272,10 +299,13 @@ function writeMutation(
         : "Unable to back up Claude Desktop config";
       return failed(detail, registration);
     }
+    if (!mutationGuardUnchanged(guard)) return unsafeTopology(registration, backupPath);
   }
 
   try {
-    const write = atomicWriteJsonIfUnchanged(path, value, inspection.read);
+    if (!mutationGuardUnchanged(guard)) return unsafeTopology(registration, backupPath);
+    const write = atomicWriteJsonIfUnchanged(path, value, inspection.read, guard);
+    if (!mutationGuardUnchanged(guard)) return unsafeTopology(registration, backupPath);
     if (write.status === "changed") {
       const changeDetail = write.recoveryPath === undefined
         ? "Claude Desktop config changed during setup; retry or use manual configuration"
@@ -385,7 +415,7 @@ function errorCode(error: unknown): string | undefined {
   return isObject(error) && typeof error.code === "string" ? error.code : undefined;
 }
 
-function prepareNativeConfigParent(plan: NativeDesktopConfigPlan): boolean {
+function prepareNativeConfigParent(plan: NativeDesktopConfigPlan): JsonMutationGuard | undefined {
   const retained: Array<{ path: string; dev: number; ino: number }> = [];
   const retainDirectory = (path: string): boolean => {
     try {
@@ -409,26 +439,28 @@ function prepareNativeConfigParent(plan: NativeDesktopConfigPlan): boolean {
     }
   });
 
-  if (!plan.pathApi.isAbsolute(plan.anchor) || !retainDirectory(plan.anchor)) return false;
+  if (!plan.pathApi.isAbsolute(plan.anchor) || !retainDirectory(plan.anchor)) return undefined;
   let current = plan.anchor;
   for (const component of plan.directoryComponents) {
     current = plan.pathApi.join(current, component);
     try {
       const metadata = lstatSync(current);
-      if (!metadata.isDirectory() || metadata.isSymbolicLink()) return false;
+      if (!metadata.isDirectory() || metadata.isSymbolicLink()) return undefined;
       retained.push({ path: current, dev: metadata.dev, ino: metadata.ino });
     } catch (error) {
-      if (errorCode(error) !== "ENOENT") return false;
+      if (errorCode(error) !== "ENOENT") return undefined;
       try {
         mkdirSync(current, { mode: 0o700 });
       } catch (mkdirError) {
-        if (errorCode(mkdirError) !== "EEXIST") return false;
+        if (errorCode(mkdirError) !== "EEXIST") return undefined;
       }
-      if (!retainDirectory(current)) return false;
-      if (!retainedUnchanged()) return false;
+      if (!retainDirectory(current)) return undefined;
+      if (!retainedUnchanged()) return undefined;
     }
   }
-  return retainedUnchanged();
+  return retainedUnchanged()
+    ? Object.freeze({ unchanged: retainedUnchanged })
+    : undefined;
 }
 
 export function resolveDesktopConfigPath(platform: PlatformServices): string | undefined {
@@ -481,7 +513,18 @@ export function createClaudeDesktopAdapter(
       if (!prepared.ok) return failed(prepared.detail, prepared.manualRegistration);
       if (inspectJsonTransaction(prepared.path).status === "pending") {
         if (dependencies.policyBlocked === true) return blocked(prepared.registration);
-        return recoverPendingMutation(prepared.path, prepared.registration);
+        if (dependencies.prepareConfigParent === undefined) {
+          return recoverPendingMutation(prepared.path, prepared.registration);
+        }
+        const guard = dependencies.prepareConfigParent();
+        if (guard === undefined || !mutationGuardUnchanged(guard)) {
+          return unsafeTopology(prepared.registration);
+        }
+        const freshTransaction = inspectJsonTransaction(prepared.path);
+        if (!mutationGuardUnchanged(guard)) return unsafeTopology(prepared.registration);
+        return freshTransaction.status === "pending"
+          ? recoverPendingMutation(prepared.path, prepared.registration, guard)
+          : failed("Claude Desktop config transaction changed; retry setup", prepared.registration);
       }
       const inspection = inspectConfig(prepared.path, prepared.registration);
       if (inspection.public.state === "identical") {
@@ -504,17 +547,25 @@ export function createClaudeDesktopAdapter(
       if (dependencies.policyBlocked === true) return blocked(prepared.registration);
 
       let currentInspection = inspection;
+      let mutationGuard: JsonMutationGuard | undefined;
       if (dependencies.prepareConfigParent !== undefined) {
-        if (!dependencies.prepareConfigParent()) {
+        mutationGuard = dependencies.prepareConfigParent();
+        if (mutationGuard === undefined || !mutationGuardUnchanged(mutationGuard)) {
           return failed(
             "Claude Desktop config parent topology is unsafe; use manual configuration",
             prepared.registration,
           );
         }
-        if (inspectJsonTransaction(prepared.path).status === "pending") {
-          return recoverPendingMutation(prepared.path, prepared.registration);
+        const freshTransaction = inspectJsonTransaction(prepared.path);
+        if (!mutationGuardUnchanged(mutationGuard)) {
+          return unsafeTopology(prepared.registration);
         }
+        if (freshTransaction.status === "pending") {
+          return recoverPendingMutation(prepared.path, prepared.registration, mutationGuard);
+        }
+        if (!mutationGuardUnchanged(mutationGuard)) return unsafeTopology(prepared.registration);
         currentInspection = inspectConfig(prepared.path, prepared.registration);
+        if (!mutationGuardUnchanged(mutationGuard)) return unsafeTopology(prepared.registration);
         if (currentInspection.public.state === "identical") {
           return { client: "claude-desktop", status: "already-configured" };
         }
@@ -548,6 +599,7 @@ export function createClaudeDesktopAdapter(
         },
         "configured",
         prepared.registration,
+        mutationGuard,
       );
     },
 

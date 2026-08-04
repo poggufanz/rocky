@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import {
+import fs, {
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -9,8 +9,9 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import type { ProcessResult, ProcessRunOptions, ProcessRunner } from "../setup/process.js";
 import {
   WslManualConfigurationError,
@@ -549,6 +550,215 @@ test("installed native Desktop is configurable before its first config file exis
         },
       });
     });
+  }
+});
+
+test("native Desktop rejects parent replacement during fresh inspection", async (t) => {
+  const macRoot = mkdtempSync(join(tmpdir(), "rocky-native-fresh-swap-"));
+  const windowsRoot = mkdtempSync(join(tmpdir(), "rocky-native-fresh-swap-"));
+  const attackerRoot = mkdtempSync(join(tmpdir(), "rocky-native-fresh-target-"));
+  t.after(() => rmSync(macRoot, { recursive: true, force: true }));
+  t.after(() => rmSync(windowsRoot, { recursive: true, force: true }));
+  t.after(() => rmSync(attackerRoot, { recursive: true, force: true }));
+  const cases = [
+    {
+      name: "macOS",
+      parent: join(macRoot, "Library", "Application Support", "Claude"),
+      platform: createPlatformServices({
+        platform: "darwin",
+        home: macRoot,
+        env: { PATH: "" },
+        isWsl: false,
+        claudeDesktopInstalled: true,
+      }),
+    },
+    {
+      name: "Windows",
+      parent: join(windowsRoot, "Claude"),
+      platform: createPlatformServices({
+        platform: "win32",
+        home: "C:\\Users\\Ada",
+        appData: windowsRoot,
+        env: { PATH: "" },
+        isWsl: false,
+        claudeDesktopInstalled: true,
+      }),
+    },
+  ];
+
+  for (const entry of cases) {
+    await t.test(entry.name, async () => {
+      const displacedParent = `${entry.parent}-prepared`;
+      const attackerTarget = join(attackerRoot, entry.name);
+      mkdirSync(attackerTarget);
+      const originalReaddir = fs.readdirSync;
+      let swapped = false;
+      fs.readdirSync = ((path: fs.PathLike, options?: unknown) => {
+        if (!swapped && String(path) === entry.parent && existsSync(entry.parent)) {
+          fs.renameSync(entry.parent, displacedParent);
+          symlinkSync(attackerTarget, entry.parent, "dir");
+          swapped = true;
+        }
+        return options === undefined
+          ? originalReaddir(path)
+          : originalReaddir(path, options as never);
+      }) as typeof fs.readdirSync;
+      syncBuiltinESMExports();
+
+      try {
+        const adapters = await createProductionAdapters(
+          entry.platform,
+          new FakeRunner({ status: 0, stdout: "", stderr: "" }),
+          completeRegistration,
+        );
+        const desktop = adapters.find(({ id }) => id === "claude-desktop");
+        assert.ok(desktop !== undefined);
+
+        const result = await desktop.configure(completeRegistration, false);
+
+        assert.equal(swapped, true);
+        assert.equal(result.status, "failed");
+        assert.doesNotMatch(result.detail ?? "", /fake-secret|ROCKY_HOME|\/home\/ada/i);
+        assert.deepEqual(originalReaddir(attackerTarget), []);
+        assert.deepEqual(originalReaddir(displacedParent), []);
+      } finally {
+        fs.readdirSync = originalReaddir;
+        syncBuiltinESMExports();
+      }
+    });
+  }
+});
+
+test("native Desktop revalidates parent inside writer before publication", async (t) => {
+  const macRoot = mkdtempSync(join(tmpdir(), "rocky-native-writer-swap-"));
+  const windowsRoot = mkdtempSync(join(tmpdir(), "rocky-native-writer-swap-"));
+  t.after(() => rmSync(macRoot, { recursive: true, force: true }));
+  t.after(() => rmSync(windowsRoot, { recursive: true, force: true }));
+  const cases = [
+    {
+      name: "macOS",
+      parent: join(macRoot, "Library", "Application Support", "Claude"),
+      configName: "claude_desktop_config.json",
+      platform: createPlatformServices({
+        platform: "darwin",
+        home: macRoot,
+        env: { PATH: "" },
+        isWsl: false,
+        claudeDesktopInstalled: true,
+      }),
+    },
+    {
+      name: "Windows",
+      parent: join(windowsRoot, "Claude"),
+      configName: "claude_desktop_config.json",
+      platform: createPlatformServices({
+        platform: "win32",
+        home: "C:\\Users\\Ada",
+        appData: windowsRoot,
+        env: { PATH: "" },
+        isWsl: false,
+        claudeDesktopInstalled: true,
+      }),
+    },
+  ];
+
+  for (const entry of cases) {
+    await t.test(entry.name, async () => {
+      const displacedParent = `${entry.parent}-prepared`;
+      const originalLstat = fs.lstatSync;
+      const originalReaddir = fs.readdirSync;
+      let swapped = false;
+      (fs as unknown as { lstatSync: typeof fs.lstatSync }).lstatSync = ((path: fs.PathLike, options?: unknown) => {
+        const transactionExists = existsSync(entry.parent)
+          && originalReaddir(entry.parent).some((name) => name.startsWith(`.${entry.configName}.transaction-`));
+        if (!swapped && transactionExists) {
+          fs.renameSync(entry.parent, displacedParent);
+          mkdirSync(entry.parent, { mode: 0o700 });
+          swapped = true;
+        }
+        return options === undefined
+          ? originalLstat(path)
+          : originalLstat(path, options as never);
+      }) as typeof fs.lstatSync;
+      syncBuiltinESMExports();
+
+      try {
+        const adapters = await createProductionAdapters(
+          entry.platform,
+          new FakeRunner({ status: 0, stdout: "", stderr: "" }),
+          completeRegistration,
+        );
+        const desktop = adapters.find(({ id }) => id === "claude-desktop");
+        assert.ok(desktop !== undefined);
+
+        const result = await desktop.configure(completeRegistration, false);
+
+        assert.equal(swapped, true);
+        assert.equal(result.status, "failed");
+        assert.doesNotMatch(result.detail ?? "", /fake-secret|ROCKY_HOME|\/home\/ada/i);
+        assert.deepEqual(originalReaddir(entry.parent), []);
+        assert.equal(existsSync(join(displacedParent, entry.configName)), false);
+        assert.equal(
+          originalReaddir(displacedParent).some((name) => name.startsWith(`.${entry.configName}.transaction-`)),
+          true,
+        );
+      } finally {
+        (fs as unknown as { lstatSync: typeof fs.lstatSync }).lstatSync = originalLstat;
+        syncBuiltinESMExports();
+      }
+    });
+  }
+});
+
+test("native Desktop never cleans through topology rebound after publication collision", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "rocky-native-cleanup-swap-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const parent = join(root, "Library", "Application Support", "Claude");
+  const displacedParent = `${parent}-prepared`;
+  const configPath = join(parent, "claude_desktop_config.json");
+  const sentinel = "attacker-sentinel\n";
+  const originalLink = fs.linkSync;
+  let sentinelPath: string | undefined;
+  (fs as unknown as { linkSync: typeof fs.linkSync }).linkSync = ((existingPath, newPath) => {
+    if (sentinelPath === undefined && String(newPath) === configPath) {
+      const transactionName = basename(dirname(String(existingPath)));
+      fs.renameSync(parent, displacedParent);
+      mkdirSync(join(parent, transactionName), { recursive: true, mode: 0o700 });
+      writeFileSync(configPath, "attacker-config\n", "utf8");
+      sentinelPath = join(parent, transactionName, "sentinel");
+      writeFileSync(sentinelPath, sentinel, "utf8");
+    }
+    return originalLink(existingPath, newPath);
+  }) as typeof fs.linkSync;
+  syncBuiltinESMExports();
+
+  try {
+    const platform = createPlatformServices({
+      platform: "darwin",
+      home: root,
+      env: { PATH: "" },
+      isWsl: false,
+      claudeDesktopInstalled: true,
+    });
+    const adapters = await createProductionAdapters(
+      platform,
+      new FakeRunner({ status: 0, stdout: "", stderr: "" }),
+      completeRegistration,
+    );
+    const desktop = adapters.find(({ id }) => id === "claude-desktop");
+    assert.ok(desktop !== undefined);
+
+    const result = await desktop.configure(completeRegistration, false);
+
+    assert.equal(result.status, "failed");
+    assert.doesNotMatch(result.detail ?? "", /attacker-config|attacker-sentinel|ROCKY_HOME/i);
+    assert.ok(sentinelPath !== undefined);
+    assert.equal(readFileSync(sentinelPath, "utf8"), sentinel);
+    assert.equal(readFileSync(configPath, "utf8"), "attacker-config\n");
+    assert.equal(existsSync(join(displacedParent, "claude_desktop_config.json")), false);
+  } finally {
+    (fs as unknown as { linkSync: typeof fs.linkSync }).linkSync = originalLink;
+    syncBuiltinESMExports();
   }
 });
 
