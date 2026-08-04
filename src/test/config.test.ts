@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import fs, { mkdtempSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadConfig, saveConfigAtomic } from "../core/config.js";
@@ -60,7 +61,16 @@ test("invalid config shapes are refused", () => {
 test("failed atomic write leaves no temp sibling", () => {
   const directory = mkdtempSync(join(tmpdir(), "rocky-config-"));
   const file = join(directory, "config.json");
-  mkdirSync(file);
-  assert.throws(() => saveConfigAtomic({ version: 1, ai: { enabled: false } }, file));
-  assert.deepEqual(readdirSync(directory), ["config.json"]);
+  const originalRenameSync = fs.renameSync;
+  fs.renameSync = () => {
+    throw new Error("injected rename failure");
+  };
+  syncBuiltinESMExports();
+  try {
+    assert.throws(() => saveConfigAtomic({ version: 1, ai: { enabled: false } }, file));
+  } finally {
+    fs.renameSync = originalRenameSync;
+    syncBuiltinESMExports();
+  }
+  assert.deepEqual(readdirSync(directory), []);
 });

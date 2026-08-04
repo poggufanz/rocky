@@ -1,4 +1,4 @@
-import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { dirname } from "node:path";
 import { resolveRockyPaths } from "./state-paths.js";
@@ -65,7 +65,7 @@ export function loadConfig(path = resolveRockyPaths().config): ConfigLoadResult 
 export function saveConfigAtomic(config: RockyConfigV1, path = resolveRockyPaths().config): { path: string } {
   if (parseConfig(config) === undefined) throw new Error("invalid config shape");
   const current = loadConfig(path);
-  if (current.status === "invalid" && !isDirectory(path)) throw new Error(`refusing to overwrite invalid config at ${path}`);
+  if (current.status === "invalid") throw new Error(`refusing to overwrite invalid config at ${path}`);
 
   mkdirSync(dirname(path), { recursive: true });
   const temp = `${path}.${randomBytes(16).toString("hex")}.tmp`;
@@ -95,12 +95,4 @@ export function saveConfigAtomic(config: RockyConfigV1, path = resolveRockyPaths
 
 function isMissing(error: unknown): boolean {
   return typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT";
-}
-
-function isDirectory(path: string): boolean {
-  try {
-    return statSync(path).isDirectory();
-  } catch {
-    return false;
-  }
 }
