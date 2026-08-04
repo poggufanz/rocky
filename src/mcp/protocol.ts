@@ -185,6 +185,9 @@ export function routeProtocolMessage(value: unknown, state: ProtocolState): Rout
       if (value.params !== undefined && !isRecord(value.params)) {
         return { kind: "notification", nextState: state };
       }
+      if (isRecord(value.params) && value.params._meta !== undefined && !isRecord(value.params._meta)) {
+        return { kind: "notification", nextState: state };
+      }
       return { kind: "notification", nextState: Object.freeze({ legacyPhase: "ready" }) };
     }
     return { kind: "notification", nextState: state };

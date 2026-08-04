@@ -232,6 +232,29 @@ test("malformed initialized notification cannot unlock legacy tools", () => {
   }
 });
 
+test("malformed initialized notification metadata cannot unlock legacy tools", () => {
+  const awaiting: ProtocolState = { legacyPhase: "awaiting_initialized" };
+  for (const _meta of [null, 1, []]) {
+    const routed = routeProtocolMessage({
+      jsonrpc: "2.0", method: "notifications/initialized", params: { _meta },
+    }, awaiting);
+    assert.deepEqual(routed, { kind: "notification", nextState: awaiting });
+  }
+});
+
+test("initialized notification accepts absent params or object metadata", () => {
+  const awaiting: ProtocolState = { legacyPhase: "awaiting_initialized" };
+  const valid = [
+    { jsonrpc: "2.0", method: "notifications/initialized" },
+    { jsonrpc: "2.0", method: "notifications/initialized", params: { _meta: { "com.example/trace": "trace-1" } } },
+  ];
+  for (const notification of valid) {
+    assert.deepEqual(routeProtocolMessage(notification, awaiting), {
+      kind: "notification", nextState: { legacyPhase: "ready" },
+    });
+  }
+});
+
 test("legacy lifecycle rejects duplicate initialize", () => {
   for (const legacyPhase of ["awaiting_initialized", "ready"] as const) {
     const response = errorOf(routeProtocolMessage(fixture("legacy/initialize-request.json"), { legacyPhase }));
