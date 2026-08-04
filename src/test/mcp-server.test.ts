@@ -255,6 +255,35 @@ test("duplicate live ID is rejected without replacing the original controller", 
   assert.equal(sent.length, 1);
 });
 
+test("duplicate live ID cannot commit a legacy state transition", async () => {
+  const original = deferred<ToolCallResult>();
+  let originalStarted = false;
+  const sent: JsonRpcResponse[] = [];
+  const server = serverWith(fakeRegistry({
+    recall: () => {
+      originalStarted = true;
+      return original.promise;
+    },
+  }), async (message) => { sent.push(message); });
+
+  server.accept(modernToolCall("same", "recall", { query: "one" }));
+  await waitFor(() => originalStarted);
+  server.accept(legacyInitialize("same"));
+  server.accept(modernRequest("after-duplicate", "tools/list"));
+  original.resolve(toolResult({ completed: true }));
+  await server.whenIdle();
+
+  assert.deepEqual(sent.find((message) => message.id === "after-duplicate"), {
+    jsonrpc: "2.0",
+    id: "after-duplicate",
+    result: {
+      tools: [],
+      resultType: "complete",
+      _meta: { "io.modelcontextprotocol/serverInfo": serverInfo },
+    },
+  });
+});
+
 test("cancellation after response enqueue does not retract the response", async () => {
   const releaseSend = deferred<void>();
   const sent: JsonRpcResponse[] = [];
@@ -451,6 +480,43 @@ test("close aborts every request, stops acceptance, and returns at its fixed dea
   server.accept(modernToolCall("after-close", "stats"));
   await new Promise<void>((resolve) => setImmediate(resolve));
   assert.equal(calls, 1);
+});
+
+test("input failure aborts active work, skips decoder EOF flush, and rethrows within the drain bound", async () => {
+  const releaseFailure = deferred<void>();
+  const inputError = new Error("input stream failed");
+  const output = new RecordingWritable();
+  const diagnostics = new RecordingWritable();
+  let signal: AbortSignal | undefined;
+  async function* rejectingInput(): AsyncGenerator<string> {
+    yield `${JSON.stringify(modernToolCall("active", "recall_with_ai", { query: "one" }))}\n{"partial":`;
+    await releaseFailure.promise;
+    throw inputError;
+  }
+  const running = runMcpStdio({
+    input: Readable.from(rejectingInput()),
+    output,
+    diagnostics,
+  }, {
+    serverInfo,
+    tools: fakeRegistry({
+      recall_with_ai: (_args, requestSignal) => {
+        signal = requestSignal;
+        return new Promise<ToolCallResult>(() => undefined);
+      },
+    }),
+  }, { drainTimeoutMs: 30 });
+
+  await waitFor(() => signal !== undefined);
+  const startedAt = Date.now();
+  releaseFailure.resolve();
+  await assert.rejects(running, (error) => error === inputError);
+  const elapsed = Date.now() - startedAt;
+
+  assert.equal(signal?.aborted, true);
+  assert.ok(elapsed < 500, `input failure cleanup exceeded fixed bound: ${elapsed}ms`);
+  assert.equal(output.text(), "");
+  assert.equal(diagnostics.text(), "");
 });
 
 test("runMcpStdio flushes EOF and aborts an active request without a late response", async () => {

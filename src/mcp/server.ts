@@ -143,12 +143,13 @@ export function createMcpMessageServer(deps: MessageServerDependencies): McpMess
     if (!accepting) return;
 
     const routed = routeProtocolMessage(value, protocolState);
-    protocolState = routed.nextState;
 
     switch (routed.kind) {
       case "notification":
+        protocolState = routed.nextState;
         return;
       case "cancel": {
+        protocolState = routed.nextState;
         const slot = inFlight.get(routed.requestId);
         if (slot === undefined) return;
         slot.cancelled = true;
@@ -156,6 +157,7 @@ export function createMcpMessageServer(deps: MessageServerDependencies): McpMess
         return;
       }
       case "error":
+        protocolState = routed.nextState;
         track(send(routed.response));
         return;
       case "request": {
@@ -164,6 +166,7 @@ export function createMcpMessageServer(deps: MessageServerDependencies): McpMess
           return;
         }
 
+        protocolState = routed.nextState;
         const slot: InFlightSlot = {
           controller: new AbortController(),
           cancelled: false,
@@ -266,16 +269,25 @@ export async function runMcpStdio(
     }
   };
 
-  for await (const chunk of streams.input) {
-    for (const decoded of decoder.push(inputChunk(chunk))) acceptDecoded(decoded);
-  }
-  for (const decoded of decoder.end()) acceptDecoded(decoded);
-
-  const deadlineAt = Date.now() + drainTimeoutMs;
-  await server.close(deadlineAt);
+  let inputFailed = false;
+  let inputFailure: unknown;
   try {
-    await writer.close(deadlineAt);
+    for await (const chunk of streams.input) {
+      for (const decoded of decoder.push(inputChunk(chunk))) acceptDecoded(decoded);
+    }
+    for (const decoded of decoder.end()) acceptDecoded(decoded);
   } catch (error) {
-    diagnostic(`MCP response write failed: ${unexpectedDetail(error)}`);
+    inputFailed = true;
+    inputFailure = error;
+  } finally {
+    const deadlineAt = Date.now() + drainTimeoutMs;
+    await server.close(deadlineAt);
+    try {
+      await writer.close(deadlineAt);
+    } catch (error) {
+      diagnostic(`MCP response write failed: ${unexpectedDetail(error)}`);
+    }
   }
+
+  if (inputFailed) throw inputFailure;
 }
