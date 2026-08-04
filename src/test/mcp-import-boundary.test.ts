@@ -74,9 +74,9 @@ const FILESYSTEM_MUTATIONS = new Set([
   "fchown", "fchownSync", "fdatasync", "fdatasyncSync", "fsync", "fsyncSync", "ftruncate",
   "ftruncateSync", "futimes", "futimesSync", "link", "linkSync", "lchmod", "lchmodSync",
   "lchown", "lchownSync", "lutimes", "lutimesSync", "mkdir", "mkdirSync", "mkdtemp",
-  "mkdtempSync", "open", "openSync", "rename", "renameSync", "rm", "rmSync", "rmdir",
+  "mkdtempSync", "open", "openSync", "promises", "rename", "renameSync", "rm", "rmSync", "rmdir",
   "rmdirSync", "symlink", "symlinkSync", "truncate", "truncateSync", "unlink", "unlinkSync",
-  "utimes", "utimesSync", "write", "writeFile", "writeFileSync", "writeSync",
+  "utimes", "utimesSync", "write", "writeFile", "writeFileSync", "writeSync", "writev", "writevSync",
 ]);
 
 function assertReadOnlyImport(imported: SourceImport, localPath: string): void {
@@ -176,4 +176,38 @@ test("MCP graph rejects direct node:fs mutation imports", () => {
     ),
     /filesystem mutation import reachable from write-entry\.ts: writeFileSync/,
   );
+});
+
+for (const fixture of [
+  { file: "fs-promises-entry.ts", capability: "promises" },
+  { file: "fs-writev-entry.ts", capability: "writev" },
+  { file: "fs-writev-sync-entry.ts", capability: "writevSync" },
+  { file: "fs-default-entry.ts", capability: "default" },
+  { file: "fs-namespace-entry.ts", capability: "*" },
+  { file: "fs-dynamic-entry.ts", capability: "*" },
+  { file: "fs-promises-dynamic-entry.ts", capability: "*" },
+] as const) {
+  test(`MCP graph rejects broad or writable filesystem capability from ${fixture.file}`, () => {
+    assert.throws(
+      () => assertReadOnlyGraph(
+        [join(boundaryFixtures, fixture.file)],
+        boundaryFixtures,
+        new Set([fixture.file]),
+      ),
+      (error: unknown) => {
+        assert.ok(error instanceof assert.AssertionError);
+        assert.equal(error.message.split("\n", 1)[0],
+          `filesystem mutation import reachable from ${fixture.file}: ${fixture.capability}`);
+        return true;
+      },
+    );
+  });
+}
+
+test("MCP graph allows explicitly named read-only node:fs functions", () => {
+  assert.doesNotThrow(() => assertReadOnlyGraph(
+    [join(boundaryFixtures, "fs-read-entry.ts")],
+    boundaryFixtures,
+    new Set(["fs-read-entry.ts"]),
+  ));
 });
