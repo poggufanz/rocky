@@ -184,6 +184,15 @@ function skippedFromInspection(client: SetupClientId, inspection: InspectionResu
   return { client, status: "requires-confirmation" };
 }
 
+function failedHostOperation(client: SetupClientId, detailMessage = "Host operation failed"): SetupResult {
+  return { client, status: "failed", detail: detailMessage };
+}
+
+interface ConsentOutcome {
+  results?: SetupResult[];
+  inspectionFailures: ReadonlyMap<SetupClientAdapter, SetupResult>;
+}
+
 function exitCode(mode: SetupMode, results: readonly SetupResult[]): number {
   if (mode === "configure") {
     const successful = results.some(({ status }) => status === "configured" || status === "already-configured");
@@ -207,26 +216,39 @@ async function consentResults(
   adapters: readonly SetupClientAdapter[],
   registration: McpRegistration,
   confirmation: ConfirmationPort,
-): Promise<SetupResult[] | undefined> {
-  const inspections: Array<{ adapter: SetupClientAdapter; inspection: InspectionResult }> = [];
+): Promise<ConsentOutcome> {
+  const inspections = new Map<SetupClientAdapter, InspectionResult>();
+  const inspectionFailures = new Map<SetupClientAdapter, SetupResult>();
   for (const adapter of adapters) {
-    inspections.push({ adapter, inspection: await adapter.inspect(registration) });
+    try {
+      inspections.set(adapter, await adapter.inspect(registration));
+    } catch {
+      inspectionFailures.set(adapter, failedHostOperation(adapter.id, "Host inspection failed"));
+    }
   }
-  const requiresConsent = inspections.some(({ inspection }) => inspection.state !== "blocked"
+  const orderedResults = (): SetupResult[] => adapters.map((adapter) => {
+    const failure = inspectionFailures.get(adapter);
+    if (failure !== undefined) return failure;
+    const inspection = inspections.get(adapter);
+    return inspection === undefined
+      ? failedHostOperation(adapter.id, "Host inspection failed")
+      : skippedFromInspection(adapter.id, inspection);
+  });
+  const requiresConsent = [...inspections.values()].some((inspection) => inspection.state !== "blocked"
     && inspection.state !== "unreadable");
-  if (!requiresConsent) return inspections.map(({ adapter, inspection }) => skippedFromInspection(adapter.id, inspection));
+  if (!requiresConsent) return { results: orderedResults(), inspectionFailures };
   const allowed = await confirmation.confirm(
     mode === "configure" ? "configure MCP hosts now, question" : "remove Rocky from MCP hosts now, question",
   );
-  if (allowed) return undefined;
+  if (allowed) return { inspectionFailures };
   const instruction = mode === "configure" ? "rocky setup --yes" : "rocky setup --remove --yes";
-  return inspections.map(({ adapter, inspection }) => {
-    const result = skippedFromInspection(adapter.id, inspection);
+  const results = orderedResults();
+  for (const result of results) {
     if (result.status === "requires-confirmation") {
       result.detail = `Confirmation required; rerun with ${instruction}`;
     }
-    return result;
-  });
+  }
+  return { results, inspectionFailures };
 }
 
 async function invokeAdapters(
@@ -235,30 +257,40 @@ async function invokeAdapters(
   registration: McpRegistration,
   replace: boolean,
   runner: ProcessRunner,
+  priorFailures: ReadonlyMap<SetupClientAdapter, SetupResult>,
 ): Promise<SetupResult[]> {
   const results: SetupResult[] = [];
   for (const adapter of adapters) {
-    if (mode === "configure") {
-      results.push(await adapter.configure(registration, replace));
+    const priorFailure = priorFailures.get(adapter);
+    if (priorFailure !== undefined) {
+      results.push(priorFailure);
       continue;
     }
-    if (mode === "remove") {
-      results.push(await adapter.remove(registration));
-      continue;
+    try {
+      if (mode === "configure") {
+        results.push(await adapter.configure(registration, replace));
+        continue;
+      }
+      if (mode === "remove") {
+        results.push(await adapter.remove(registration));
+        continue;
+      }
+      const inspected = await adapter.check(registration);
+      if (inspected.status !== "healthy") {
+        results.push(inspected);
+        continue;
+      }
+      if (inspected.healthRegistration === undefined) {
+        results.push({ client: inspected.client, status: "failed", detail: "Owned health registration is unavailable" });
+        continue;
+      }
+      const health = await checkMcpRegistration(inspected.healthRegistration, runner);
+      results.push(health.healthy
+        ? { client: inspected.client, status: "healthy", detail: health.detail }
+        : { client: inspected.client, status: "failed", detail: health.detail });
+    } catch {
+      results.push(failedHostOperation(adapter.id));
     }
-    const inspected = await adapter.check(registration);
-    if (inspected.status !== "healthy") {
-      results.push(inspected);
-      continue;
-    }
-    if (inspected.healthRegistration === undefined) {
-      results.push({ client: inspected.client, status: "failed", detail: "Owned health registration is unavailable" });
-      continue;
-    }
-    const health = await checkMcpRegistration(inspected.healthRegistration, runner);
-    results.push(health.healthy
-      ? { client: inspected.client, status: "healthy", detail: health.detail }
-      : { client: inspected.client, status: "failed", detail: health.detail });
   }
   return results;
 }
@@ -317,13 +349,16 @@ export async function setup(argv: readonly string[], deps?: SetupDependencies): 
     ? await createProductionAdapters(dependencies.platform, dependencies.runner, registration)
     : dependencies.adapters;
   let results: SetupResult[] | undefined;
+  let inspectionFailures: ReadonlyMap<SetupClientAdapter, SetupResult> = new Map();
   if (options.mode !== "check" && !options.yes) {
-    results = await consentResults(
+    const consent = await consentResults(
       options.mode,
       adapters,
       registration,
       dependencies.confirmation,
     );
+    results = consent.results;
+    inspectionFailures = consent.inspectionFailures;
   }
   results ??= await invokeAdapters(
     options.mode,
@@ -331,6 +366,7 @@ export async function setup(argv: readonly string[], deps?: SetupDependencies): 
     registration,
     options.replace,
     dependencies.runner,
+    inspectionFailures,
   );
 
   say("host setup results follow.");

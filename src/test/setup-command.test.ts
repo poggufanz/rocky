@@ -31,30 +31,34 @@ class FakeAdapter implements SetupClientAdapter {
   constructor(
     readonly id: SetupClientId,
     private readonly results: {
-      inspect?: InspectionResult;
-      configure?: SetupResult;
-      check?: SetupResult;
-      remove?: SetupResult;
+      inspect?: InspectionResult | Error;
+      configure?: SetupResult | Error;
+      check?: SetupResult | Error;
+      remove?: SetupResult | Error;
     },
   ) {}
 
   async inspect(registration: McpRegistration): Promise<InspectionResult> {
     this.calls.push({ method: "inspect", registration });
+    if (this.results.inspect instanceof Error) throw this.results.inspect;
     return this.results.inspect ?? { state: "absent" };
   }
 
   async configure(registration: McpRegistration, replace: boolean): Promise<SetupResult> {
     this.calls.push({ method: "configure", registration, replace });
+    if (this.results.configure instanceof Error) throw this.results.configure;
     return this.results.configure ?? { client: this.id, status: "configured" };
   }
 
   async check(registration: McpRegistration): Promise<SetupResult> {
     this.calls.push({ method: "check", registration });
+    if (this.results.check instanceof Error) throw this.results.check;
     return this.results.check ?? { client: this.id, status: "not-configured" };
   }
 
   async remove(registration: McpRegistration): Promise<SetupResult> {
     this.calls.push({ method: "remove", registration });
+    if (this.results.remove instanceof Error) throw this.results.remove;
     return this.results.remove ?? { client: this.id, status: "not-configured" };
   }
 }
@@ -104,6 +108,23 @@ class HealthyRunner implements ProcessRunner {
     const session = new HealthySession();
     this.sessions.push(session);
     return session;
+  }
+}
+
+class RejectingWaitSession extends HealthySession {
+  override async wait(): Promise<{ status: number; stdout: string; stderr: string }> {
+    throw new Error("probe-secret-must-not-leak");
+  }
+}
+
+class RejectingThenHealthyRunner implements ProcessRunner {
+  private opens = 0;
+
+  async run(): Promise<never> { throw new Error("batch process runner must not be used"); }
+
+  async openSession(): Promise<ProcessSession> {
+    this.opens += 1;
+    return this.opens === 1 ? new RejectingWaitSession() : new HealthySession();
   }
 }
 
@@ -288,6 +309,103 @@ test("configure and remove require ordinary consent with exact non-interactive r
       assert.match(output.stderr, mode === "configure" ? /rocky setup --yes/ : /rocky setup --remove --yes/);
     });
   }
+});
+
+test("consent inspection rejection becomes a safe failure and later hosts still configure", async () => {
+  const rejected = new FakeAdapter("codex", {
+    inspect: new Error("inspection-secret-must-not-leak"),
+  });
+  const later = new FakeAdapter("claude-code", { inspect: { state: "absent" } });
+  const output = await captureStderr(() => setup([], dependencies(
+    [rejected, later],
+    { confirmation: new FakeConfirmation(true) },
+  )));
+
+  assert.equal(output.code, 1);
+  assert.match(output.stderr, /codex: failed/);
+  assert.match(output.stderr, /claude-code: configured/);
+  assert.doesNotMatch(output.stderr, /inspection-secret-must-not-leak/);
+  assert.deepEqual(rejected.calls.map(({ method }) => method), ["inspect"]);
+  assert.deepEqual(later.calls.map(({ method }) => method), ["inspect", "configure"]);
+});
+
+test("per-host execution rejection is isolated in configure remove and check modes", async (t) => {
+  const cases = [
+    {
+      name: "configure",
+      argv: ["--yes"],
+      method: "configure" as const,
+      rejected: () => new FakeAdapter("codex", { configure: new Error("configure-secret-must-not-leak") }),
+      later: () => new FakeAdapter("claude-code", {
+        configure: { client: "claude-code", status: "configured" },
+      }),
+      laterStatus: "configured",
+      secret: "configure-secret-must-not-leak",
+    },
+    {
+      name: "remove",
+      argv: ["--remove", "--yes"],
+      method: "remove" as const,
+      rejected: () => new FakeAdapter("codex", { remove: new Error("remove-secret-must-not-leak") }),
+      later: () => new FakeAdapter("claude-code", {
+        remove: { client: "claude-code", status: "removed" },
+      }),
+      laterStatus: "removed",
+      secret: "remove-secret-must-not-leak",
+    },
+    {
+      name: "check",
+      argv: ["--check"],
+      method: "check" as const,
+      rejected: () => new FakeAdapter("codex", { check: new Error("check-secret-must-not-leak") }),
+      later: () => new FakeAdapter("claude-code", {
+        check: { client: "claude-code", status: "not-configured" },
+      }),
+      laterStatus: "not-configured",
+      secret: "check-secret-must-not-leak",
+    },
+  ];
+
+  for (const entry of cases) {
+    await t.test(entry.name, async () => {
+      const rejected = entry.rejected();
+      const later = entry.later();
+      const output = await captureStderr(() => setup(entry.argv, dependencies([rejected, later])));
+
+      assert.equal(output.code, 1);
+      assert.match(output.stderr, /codex: failed/);
+      assert.match(output.stderr, new RegExp(`claude-code: ${entry.laterStatus}`));
+      assert.doesNotMatch(output.stderr, new RegExp(entry.secret));
+      assert.deepEqual(rejected.calls.map(({ method }) => method), [entry.method]);
+      assert.deepEqual(later.calls.map(({ method }) => method), [entry.method]);
+    });
+  }
+});
+
+test("health probe rejection becomes a safe failure and later host is still probed and printed", async () => {
+  const healthRegistration = (command: string): McpRegistration => ({
+    name: "rocky",
+    command,
+    args: ["/opt/rocky/dist/index.js", "mcp"],
+    env: { ROCKY_MCP_EXPOSURE: "sanitized", ROCKY_HOME: rockyHome },
+  });
+  const rejected = new FakeAdapter("codex", {
+    check: { client: "codex", status: "healthy", healthRegistration: healthRegistration("/probe/rejected") },
+  });
+  const later = new FakeAdapter("claude-code", {
+    check: { client: "claude-code", status: "healthy", healthRegistration: healthRegistration("/probe/healthy") },
+  });
+  const output = await captureStderr(() => setup(["--check"], dependencies(
+    [rejected, later],
+    { runner: new RejectingThenHealthyRunner() },
+  )));
+
+  assert.equal(output.code, 1);
+  assert.match(output.stderr, /codex: failed/);
+  assert.match(output.stderr, /claude-code: healthy/);
+  assert.doesNotMatch(output.stderr, /probe-secret-must-not-leak/);
+  assert.deepEqual(rejected.calls.map(({ method }) => method), ["check"]);
+  assert.deepEqual(later.calls.map(({ method }) => method), ["check"]);
 });
 
 test("non-TTY confirmation port returns false without reading input", async () => {

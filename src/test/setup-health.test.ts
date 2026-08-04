@@ -351,6 +351,47 @@ test("discovery success without the requested modern version stays modern-unheal
   assert.equal(modern.waited, true);
 });
 
+test("every valid modern discovery success locks modern even when its result is incomplete", async (t) => {
+  const cases: Array<{ name: string; result: unknown }> = [
+    {
+      name: "missing tools capability",
+      result: {
+        supportedVersions: [MODERN_PROTOCOL_VERSION],
+        capabilities: {},
+      },
+    },
+    { name: "structurally incomplete result", result: {} },
+  ];
+
+  for (const entry of cases) {
+    await t.test(entry.name, async () => {
+      const modern = new FakeSession((message) => ({
+        jsonrpc: "2.0",
+        id: message.id,
+        result: entry.result,
+      }));
+      const sessions = [modern, healthyLegacySession()];
+      let opens = 0;
+      const runner = {
+        async run() { throw new Error("batch runner must not be used"); },
+        async openSession() {
+          const session = sessions[opens];
+          opens += 1;
+          if (session === undefined) throw new Error("unexpected probe child");
+          return session;
+        },
+      } satisfies ProcessRunner & { openSession(): Promise<FakeSession> };
+
+      const result = await checkMcpRegistration(registration, runner, 200);
+
+      assert.equal(result.healthy, false);
+      assert.equal(result.era, "modern");
+      assert.equal(opens, 1);
+      assert.deepEqual(modern.messages.map(({ method }) => method), ["server/discover"]);
+    });
+  }
+});
+
 test("method-not-found closes and awaits modern child before a fresh legacy lifecycle", async () => {
   const events: string[] = [];
   const modern = new StickyFakeSession((message) => ({

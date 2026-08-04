@@ -207,9 +207,13 @@ export async function checkMcpRegistration(
       await cleanup(session, deadlineAt);
       return { healthy: false, era: "modern", detail: "Rocky MCP modern protocol version is unsupported" };
     }
-    if (hasToolsCapability(discoveryResult)
-      && isObject(discoveryResult)
-      && Array.isArray(discoveryResult.supportedVersions)) {
+    if (Object.hasOwn(response, "result")) {
+      if (!isObject(discoveryResult)
+        || !Array.isArray(discoveryResult.supportedVersions)
+        || !hasToolsCapability(discoveryResult)) {
+        await cleanup(session, deadlineAt);
+        return { healthy: false, era: "modern", detail: "Rocky MCP modern discovery is incomplete" };
+      }
       if (!hasSupportedVersion(discoveryResult, MODERN_PROTOCOL_VERSION)) {
         await cleanup(session, deadlineAt);
         return {
