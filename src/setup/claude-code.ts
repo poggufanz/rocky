@@ -265,6 +265,12 @@ export function createClaudeCodeAdapter(
       if (executable === undefined) return skipped();
       const inspection = inspectUserConfig(userConfigPath, registration);
       if (inspection.public.state === "absent") {
+        if (!topologyUnchanged(userConfigPath, inspection.topology)) {
+          return failed(
+            "Claude Code user config topology changed; use manual registration",
+            registration,
+          );
+        }
         const added = await add(registration);
         if (succeeded(added)) return { client: "claude-code", status: "configured" };
         return isPolicyRefusal(added)

@@ -14,7 +14,7 @@ import {
   buildWslDesktopRegistration,
   convertMountedWindowsPath,
   createClaudeDesktopAdapter,
-  resolveDesktopConfigPath,
+  createNativeDesktopConfig,
 } from "../setup/claude-desktop.js";
 import { createCodexAdapter } from "../setup/codex.js";
 import { checkMcpRegistration } from "../setup/health.js";
@@ -97,12 +97,12 @@ export async function createProductionAdapters(
     }),
   ];
   if (!platform.isWsl) {
-    const desktopPath = resolveDesktopConfigPath(platform);
-    common.push(desktopPath === undefined
+    const desktop = createNativeDesktopConfig(platform);
+    common.push(desktop === undefined
       ? unavailableAdapter("claude-desktop", "Claude Desktop config is not available on this host")
       : !platform.hasClaudeDesktop()
         ? unavailableAdapter("claude-desktop", "Claude Desktop is not installed on this host")
-      : createClaudeDesktopAdapter({ configPath: desktopPath }));
+        : createClaudeDesktopAdapter(desktop));
     return common;
   }
 
@@ -190,9 +190,10 @@ function manualAddArguments(client: "codex" | "claude-code", registration: McpRe
   return args;
 }
 
-function printResult(result: SetupResult, desired: McpRegistration): void {
+function printResult(mode: SetupMode, result: SetupResult, desired: McpRegistration): void {
   detail(`${result.client}: ${result.status}`);
   if (result.detail !== undefined) detail(result.detail);
+  if (mode !== "configure") return;
   if (result.manualRegistration === undefined) return;
   if (!isIdenticalMcpRegistration(result.manualRegistration, desired)) {
     detail(`${result.client} manual registration unavailable; rerun setup for safe guidance`);
@@ -413,7 +414,7 @@ export async function setup(argv: readonly string[], deps?: SetupDependencies): 
   );
 
   say("host setup results follow.");
-  for (const result of results) printResult(result, registration);
+  for (const result of results) printResult(options.mode, result, registration);
 
   if (options.mode === "configure"
     && dependencies.platform.shell !== undefined

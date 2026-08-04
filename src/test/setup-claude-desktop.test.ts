@@ -167,6 +167,70 @@ test("configure creates a private missing config without inventing unrelated key
   assert.deepEqual(backupPaths(path), []);
 });
 
+test("native parent preparation runs only for a permitted configure mutation", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "rocky-native-prepare-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const path = join(root, "missing-parent", "claude_desktop_config.json");
+  let prepareCalls = 0;
+  const permittedDependencies = {
+    configPath: path,
+    prepareConfigParent() {
+      prepareCalls += 1;
+      mkdirSync(dirname(path));
+      return true;
+    },
+  };
+
+  const configured = await createClaudeDesktopAdapter(permittedDependencies)
+    .configure(registration, false);
+
+  assert.equal(configured.status, "configured");
+  assert.equal(prepareCalls, 1);
+  assert.equal(fs.existsSync(path), true);
+
+  const missingPath = join(root, "readonly-parent", "claude_desktop_config.json");
+  const forbiddenDependencies = {
+    configPath: missingPath,
+    prepareConfigParent() {
+      prepareCalls += 1;
+      throw new Error("must not prepare");
+    },
+  };
+  const readonly = createClaudeDesktopAdapter(forbiddenDependencies);
+  assert.equal((await readonly.inspect(registration)).state, "absent");
+  assert.equal((await readonly.check(registration)).status, "not-configured");
+  assert.equal((await readonly.remove(registration)).status, "not-configured");
+  const policyDependencies = { ...forbiddenDependencies, policyBlocked: true };
+  const policy = createClaudeDesktopAdapter(policyDependencies);
+  assert.equal((await policy.configure(registration, false)).status, "blocked-by-policy");
+
+  const identicalPath = configPath(t, { mcpServers: { rocky: storedRegistration() } });
+  const identicalDependencies = {
+    configPath: identicalPath,
+    prepareConfigParent: forbiddenDependencies.prepareConfigParent,
+  };
+  const identical = createClaudeDesktopAdapter(identicalDependencies);
+  assert.equal((await identical.configure(registration, false)).status, "already-configured");
+  assert.equal((await identical.check(registration)).status, "healthy");
+
+  const conflictPath = configPath(t, { mcpServers: { rocky: storedRegistration("/foreign/node") } });
+  const conflictDependencies = {
+    configPath: conflictPath,
+    prepareConfigParent: forbiddenDependencies.prepareConfigParent,
+  };
+  const conflict = createClaudeDesktopAdapter(conflictDependencies);
+  assert.equal((await conflict.configure(registration, false)).status, "requires-confirmation");
+
+  const ownedPath = configPath(t, { mcpServers: { rocky: storedRegistration() } });
+  const ownedDependencies = {
+    configPath: ownedPath,
+    prepareConfigParent: forbiddenDependencies.prepareConfigParent,
+  };
+  assert.equal((await createClaudeDesktopAdapter(ownedDependencies).remove(registration)).status, "removed");
+  assert.equal(prepareCalls, 1);
+  assert.equal(fs.existsSync(dirname(missingPath)), false);
+});
+
 test("identical registration is an inspectable no-op and healthy", async (t) => {
   const original = { theme: "dark", mcpServers: { rocky: storedRegistration() } };
   const path = configPath(t, original);

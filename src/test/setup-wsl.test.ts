@@ -1,6 +1,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import type { ProcessResult, ProcessRunOptions, ProcessRunner } from "../setup/process.js";
@@ -434,12 +442,17 @@ test("explicit WSL Desktop config is an additional deduplicated candidate", () =
 });
 
 test("native macOS and Windows skip Desktop when the client is absent", async (t) => {
+  const macRoot = mkdtempSync(join(tmpdir(), "rocky-native-absent-"));
+  const windowsRoot = mkdtempSync(join(tmpdir(), "rocky-native-absent-"));
+  t.after(() => rmSync(macRoot, { recursive: true, force: true }));
+  t.after(() => rmSync(windowsRoot, { recursive: true, force: true }));
   const cases = [
     {
       name: "macOS",
+      configParent: join(macRoot, "Library"),
       platform: createPlatformServices({
         platform: "darwin",
-        home: "/Users/Ada",
+        home: macRoot,
         env: { PATH: "" },
         isWsl: false,
         fileExists: () => false,
@@ -447,10 +460,11 @@ test("native macOS and Windows skip Desktop when the client is absent", async (t
     },
     {
       name: "Windows",
+      configParent: join(windowsRoot, "Claude"),
       platform: createPlatformServices({
         platform: "win32",
         home: "C:\\Users\\Ada",
-        appData: "C:\\Users\\Ada\\AppData\\Roaming",
+        appData: windowsRoot,
         env: { PATH: "", LOCALAPPDATA: "C:\\Users\\Ada\\AppData\\Local" },
         isWsl: false,
         fileExists: () => false,
@@ -469,21 +483,27 @@ test("native macOS and Windows skip Desktop when the client is absent", async (t
       assert.ok(desktop !== undefined);
 
       const inspected = await desktop.inspect(completeRegistration);
+      const configured = await desktop.configure(completeRegistration, false);
 
       assert.equal(inspected.state, "blocked");
       assert.match(inspected.detail ?? "", /not installed/i);
+      assert.equal(configured.status, "skipped");
+      assert.equal(existsSync(entry.configParent), false);
     });
   }
 });
 
 test("installed native Desktop is configurable before its first config file exists", async (t) => {
   const macRoot = mkdtempSync(join(tmpdir(), "rocky-native-desktop-"));
+  const windowsRoot = mkdtempSync(join(tmpdir(), "rocky-native-desktop-"));
   t.after(() => rmSync(macRoot, { recursive: true, force: true }));
+  t.after(() => rmSync(windowsRoot, { recursive: true, force: true }));
   const macApp = "/Applications/Claude.app";
   const windowsApp = "C:\\Users\\Ada\\AppData\\Local\\AnthropicClaude\\Claude.exe";
   const cases = [
     {
       name: "macOS",
+      configPath: join(macRoot, "Library", "Application Support", "Claude", "claude_desktop_config.json"),
       platform: createPlatformServices({
         platform: "darwin",
         home: macRoot,
@@ -494,10 +514,11 @@ test("installed native Desktop is configurable before its first config file exis
     },
     {
       name: "Windows",
+      configPath: join(windowsRoot, "Claude", "claude_desktop_config.json"),
       platform: createPlatformServices({
         platform: "win32",
         home: "C:\\Users\\Ada",
-        appData: "C:\\Users\\Ada\\AppData\\Roaming",
+        appData: windowsRoot,
         env: { PATH: "", LOCALAPPDATA: "C:\\Users\\Ada\\AppData\\Local" },
         isWsl: false,
         fileExists: (path) => path === windowsApp,
@@ -516,6 +537,73 @@ test("installed native Desktop is configurable before its first config file exis
       assert.ok(desktop !== undefined);
 
       assert.equal((await desktop.inspect(completeRegistration)).state, "absent");
+      assert.equal((await desktop.configure(completeRegistration, false)).status, "configured");
+      assert.deepEqual(JSON.parse(readFileSync(entry.configPath, "utf8")), {
+        mcpServers: {
+          rocky: {
+            type: "stdio",
+            command: completeRegistration.command,
+            args: [...completeRegistration.args],
+            env: { ...completeRegistration.env },
+          },
+        },
+      });
+    });
+  }
+});
+
+test("native Desktop parent preparation rejects linked and non-directory topology", async (t) => {
+  const macRoot = mkdtempSync(join(tmpdir(), "rocky-native-topology-"));
+  const linkedTarget = mkdtempSync(join(tmpdir(), "rocky-native-target-"));
+  const windowsRoot = mkdtempSync(join(tmpdir(), "rocky-native-topology-"));
+  t.after(() => rmSync(macRoot, { recursive: true, force: true }));
+  t.after(() => rmSync(linkedTarget, { recursive: true, force: true }));
+  t.after(() => rmSync(windowsRoot, { recursive: true, force: true }));
+
+  mkdirSync(join(linkedTarget, "Application Support", "Claude"), { recursive: true });
+  symlinkSync(linkedTarget, join(macRoot, "Library"));
+  writeFileSync(join(windowsRoot, "Claude"), "not-a-directory\n", "utf8");
+  const linkedConfig = join(linkedTarget, "Application Support", "Claude", "claude_desktop_config.json");
+  const cases = [
+    {
+      name: "macOS symlink",
+      platform: createPlatformServices({
+        platform: "darwin",
+        home: macRoot,
+        env: { PATH: "" },
+        isWsl: false,
+        claudeDesktopInstalled: true,
+      }),
+    },
+    {
+      name: "Windows non-directory",
+      platform: createPlatformServices({
+        platform: "win32",
+        home: "C:\\Users\\Ada",
+        appData: windowsRoot,
+        env: { PATH: "" },
+        isWsl: false,
+        claudeDesktopInstalled: true,
+      }),
+    },
+  ];
+
+  for (const entry of cases) {
+    await t.test(entry.name, async () => {
+      const adapters = await createProductionAdapters(
+        entry.platform,
+        new FakeRunner({ status: 0, stdout: "", stderr: "" }),
+        completeRegistration,
+      );
+      const desktop = adapters.find(({ id }) => id === "claude-desktop");
+      assert.ok(desktop !== undefined);
+
+      const configured = await desktop.configure(completeRegistration, false);
+
+      assert.equal(configured.status, "failed");
+      assert.match(configured.detail ?? "", /parent|topology|manual|read/i);
+      assert.equal(existsSync(linkedConfig), false);
+      assert.equal(readFileSync(join(windowsRoot, "Claude"), "utf8"), "not-a-directory\n");
     });
   }
 });

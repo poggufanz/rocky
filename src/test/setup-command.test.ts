@@ -471,6 +471,37 @@ test("manual registrations render as host-appropriate desired argv or config", a
   assert.match(output.stderr, new RegExp(rockyHome.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
 });
 
+test("remove and check never render manual instructions that add Rocky", async (t) => {
+  const desired: McpRegistration = {
+    name: "rocky",
+    command: nodePath,
+    args: [entryPath, "mcp"],
+    env: { ROCKY_MCP_EXPOSURE: "sanitized", ROCKY_HOME: rockyHome },
+  };
+  const cases = [
+    { name: "remove", argv: ["--remove", "--yes"], resultKey: "remove" },
+    { name: "check", argv: ["--check"], resultKey: "check" },
+  ] as const;
+
+  for (const entry of cases) {
+    await t.test(entry.name, async () => {
+      const result: SetupResult = {
+        client: "codex",
+        status: "failed",
+        detail: `${entry.name} requires manual action`,
+        manualRegistration: desired,
+      };
+      const adapter = new FakeAdapter("codex", { [entry.resultKey]: result });
+
+      const output = await captureStderr(() => setup(entry.argv, dependencies([adapter])));
+
+      assert.equal(output.code, 1);
+      assert.match(output.stderr, new RegExp(`${entry.name} requires manual action`, "i"));
+      assert.doesNotMatch(output.stderr, /manual argv|manual config|\["mcp","add"|mcpServers/i);
+    });
+  }
+});
+
 test("manual renderer refuses noncanonical snapshots and never prints their secrets", async () => {
   const unsafe: McpRegistration = {
     name: "rocky",

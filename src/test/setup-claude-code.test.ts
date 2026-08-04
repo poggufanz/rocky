@@ -105,6 +105,95 @@ test("new user registration uses exact official Claude add argv", async (t) => {
   assert.deepEqual(runner.calls, [claudeCall(addArgs)]);
 });
 
+test("absent registration rechecks config topology immediately before add", async (t) => {
+  const cases = [
+    { name: "missing to symlink", initial: "missing", mutation: "symlink" },
+    { name: "regular to symlink", initial: "regular", mutation: "symlink" },
+    { name: "regular to non-regular", initial: "regular", mutation: "directory" },
+    { name: "regular to multiple links", initial: "regular", mutation: "hard-link" },
+    { name: "regular to new inode", initial: "regular", mutation: "inode" },
+  ] as const;
+
+  for (const entry of cases) {
+    await t.test(entry.name, async (st) => {
+      const path = userConfig(st, entry.initial === "regular" ? { theme: "before" } : undefined);
+      const directory = dirname(path);
+      const target = join(directory, "race-target.json");
+      const alias = join(directory, "race-alias.json");
+      const targetBytes = '{"theme":"target","token":"topology-race-secret"}\n';
+      if (entry.mutation === "symlink") writeFileSync(target, targetBytes, "utf8");
+
+      const originalLstat = fs.lstatSync;
+      const originalStat = fs.statSync;
+      let mutated = false;
+      const mutate = () => {
+        if (mutated) return;
+        mutated = true;
+        if (entry.mutation === "symlink") {
+          if (entry.initial === "regular") rmSync(path);
+          symlinkSync(target, path);
+        } else if (entry.mutation === "directory") {
+          rmSync(path);
+          fs.mkdirSync(path);
+        } else if (entry.mutation === "hard-link") {
+          linkSync(path, alias);
+        } else {
+          writeFileSync(alias, '{"theme":"new-inode","token":"inode-race-secret"}\n', "utf8");
+          fs.renameSync(alias, path);
+        }
+      };
+
+      if (entry.initial === "missing") {
+        (fs as unknown as { lstatSync: typeof fs.lstatSync }).lstatSync = ((candidate: fs.PathLike) => {
+          try {
+            return originalLstat(candidate);
+          } catch (error) {
+            if (String(candidate) === path) mutate();
+            throw error;
+          }
+        }) as typeof fs.lstatSync;
+      } else {
+        (fs as unknown as { statSync: typeof fs.statSync }).statSync = ((candidate: fs.PathLike) => {
+          const metadata = originalStat(candidate);
+          if (String(candidate) === path) mutate();
+          return metadata;
+        }) as typeof fs.statSync;
+      }
+      syncBuiltinESMExports();
+
+      const runner = new FakeRunner([result(0)]);
+      try {
+        const configured = await createClaudeCodeAdapter({
+          runner,
+          executable: "/opt/claude",
+          userConfigPath: path,
+        }).configure(registration, false);
+
+        assert.equal(configured.status, "failed");
+        assert.match(configured.detail ?? "", /topology|changed|manual/i);
+        assert.doesNotMatch(configured.detail ?? "", /topology-race-secret|inode-race-secret/);
+        assert.deepEqual(runner.calls, []);
+      } finally {
+        (fs as unknown as { lstatSync: typeof fs.lstatSync }).lstatSync = originalLstat;
+        (fs as unknown as { statSync: typeof fs.statSync }).statSync = originalStat;
+        syncBuiltinESMExports();
+      }
+
+      if (entry.mutation === "symlink") {
+        assert.equal(lstatSync(path).isSymbolicLink(), true);
+        assert.equal(readFileSync(target, "utf8"), targetBytes);
+      } else if (entry.mutation === "directory") {
+        assert.equal(lstatSync(path).isDirectory(), true);
+      } else if (entry.mutation === "hard-link") {
+        assert.equal(lstatSync(path).nlink, 2);
+        assert.equal(readFileSync(alias, "utf8"), readFileSync(path, "utf8"));
+      } else {
+        assert.match(readFileSync(path, "utf8"), /inode-race-secret/);
+      }
+    });
+  }
+});
+
 test("identical user registration is a no-op and healthy without human CLI inspection", async (t) => {
   const path = userConfig(t, { mcpServers: { rocky: rockyEntry() } });
   const runner = new FakeRunner([]);

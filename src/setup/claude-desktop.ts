@@ -1,3 +1,4 @@
+import { lstatSync, mkdirSync } from "node:fs";
 import { posix, win32 } from "node:path";
 import type { Exposure } from "../core/config-read.js";
 import type {
@@ -36,9 +37,22 @@ interface ConfigInspection {
 
 export interface ClaudeDesktopAdapterDependencies {
   configPath?: string;
+  prepareConfigParent?: () => boolean;
   transformRegistration?: (registration: McpRegistration) => McpRegistration;
   mapHealthRegistration?: (stored: McpRegistration) => McpRegistration;
   policyBlocked?: boolean;
+}
+
+interface NativeDesktopConfigPlan {
+  anchor: string;
+  directoryComponents: readonly string[];
+  configPath: string;
+  pathApi: typeof posix;
+}
+
+export interface NativeDesktopConfig {
+  configPath: string;
+  prepareConfigParent: () => boolean;
 }
 
 export interface WslDesktopRegistrationInput {
@@ -339,22 +353,96 @@ function healthRegistrationOrError(
   }
 }
 
-export function resolveDesktopConfigPath(platform: PlatformServices): string | undefined {
+function nativeDesktopConfigPlan(platform: PlatformServices): NativeDesktopConfigPlan | undefined {
   if (platform.platform === "darwin" && posix.isAbsolute(platform.home)) {
-    return posix.join(
-      platform.home,
-      "Library",
-      "Application Support",
-      "Claude",
-      "claude_desktop_config.json",
-    );
+    const directoryComponents = ["Library", "Application Support", "Claude"] as const;
+    return {
+      anchor: platform.home,
+      directoryComponents,
+      configPath: posix.join(platform.home, ...directoryComponents, "claude_desktop_config.json"),
+      pathApi: posix,
+    };
   }
-  if (platform.platform === "win32"
-    && platform.appData !== undefined
-    && isWindowsAbsolute(platform.appData)) {
-    return win32.join(platform.appData, "Claude", "claude_desktop_config.json");
+  if (platform.platform === "win32" && platform.appData !== undefined) {
+    const pathApi = isWindowsAbsolute(platform.appData)
+      ? win32
+      : posix.isAbsolute(platform.appData)
+        ? posix
+        : undefined;
+    if (pathApi === undefined) return undefined;
+    const directoryComponents = ["Claude"] as const;
+    return {
+      anchor: platform.appData,
+      directoryComponents,
+      configPath: pathApi.join(platform.appData, ...directoryComponents, "claude_desktop_config.json"),
+      pathApi,
+    };
   }
   return undefined;
+}
+
+function errorCode(error: unknown): string | undefined {
+  return isObject(error) && typeof error.code === "string" ? error.code : undefined;
+}
+
+function prepareNativeConfigParent(plan: NativeDesktopConfigPlan): boolean {
+  const retained: Array<{ path: string; dev: number; ino: number }> = [];
+  const retainDirectory = (path: string): boolean => {
+    try {
+      const metadata = lstatSync(path);
+      if (!metadata.isDirectory() || metadata.isSymbolicLink()) return false;
+      retained.push({ path, dev: metadata.dev, ino: metadata.ino });
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  const retainedUnchanged = (): boolean => retained.every((expected) => {
+    try {
+      const metadata = lstatSync(expected.path);
+      return metadata.isDirectory()
+        && !metadata.isSymbolicLink()
+        && metadata.dev === expected.dev
+        && metadata.ino === expected.ino;
+    } catch {
+      return false;
+    }
+  });
+
+  if (!plan.pathApi.isAbsolute(plan.anchor) || !retainDirectory(plan.anchor)) return false;
+  let current = plan.anchor;
+  for (const component of plan.directoryComponents) {
+    current = plan.pathApi.join(current, component);
+    try {
+      const metadata = lstatSync(current);
+      if (!metadata.isDirectory() || metadata.isSymbolicLink()) return false;
+      retained.push({ path: current, dev: metadata.dev, ino: metadata.ino });
+    } catch (error) {
+      if (errorCode(error) !== "ENOENT") return false;
+      try {
+        mkdirSync(current, { mode: 0o700 });
+      } catch (mkdirError) {
+        if (errorCode(mkdirError) !== "EEXIST") return false;
+      }
+      if (!retainDirectory(current)) return false;
+      if (!retainedUnchanged()) return false;
+    }
+  }
+  return retainedUnchanged();
+}
+
+export function resolveDesktopConfigPath(platform: PlatformServices): string | undefined {
+  return nativeDesktopConfigPlan(platform)?.configPath;
+}
+
+export function createNativeDesktopConfig(platform: PlatformServices): NativeDesktopConfig | undefined {
+  const plan = nativeDesktopConfigPlan(platform);
+  return plan === undefined
+    ? undefined
+    : {
+      configPath: plan.configPath,
+      prepareConfigParent: () => prepareNativeConfigParent(plan),
+    };
 }
 
 export function createClaudeDesktopAdapter(
@@ -415,11 +503,42 @@ export function createClaudeDesktopAdapter(
       }
       if (dependencies.policyBlocked === true) return blocked(prepared.registration);
 
-      const servers = inspection.servers ?? {};
-      const config = inspection.read.status === "invalid" ? {} : inspection.read.value;
+      let currentInspection = inspection;
+      if (dependencies.prepareConfigParent !== undefined) {
+        if (!dependencies.prepareConfigParent()) {
+          return failed(
+            "Claude Desktop config parent topology is unsafe; use manual configuration",
+            prepared.registration,
+          );
+        }
+        if (inspectJsonTransaction(prepared.path).status === "pending") {
+          return recoverPendingMutation(prepared.path, prepared.registration);
+        }
+        currentInspection = inspectConfig(prepared.path, prepared.registration);
+        if (currentInspection.public.state === "identical") {
+          return { client: "claude-desktop", status: "already-configured" };
+        }
+        if (currentInspection.public.state === "unreadable") {
+          return failed(
+            currentInspection.public.detail ?? "Unable to read Claude Desktop config",
+            prepared.registration,
+          );
+        }
+        if (currentInspection.public.state === "conflict" && !replace) {
+          return {
+            client: "claude-desktop",
+            status: "requires-confirmation",
+            detail: "Claude Desktop already has a different rocky registration",
+            manualRegistration: prepared.registration,
+          };
+        }
+      }
+
+      const servers = currentInspection.servers ?? {};
+      const config = currentInspection.read.status === "invalid" ? {} : currentInspection.read.value;
       return writeMutation(
         prepared.path,
-        inspection,
+        currentInspection,
         {
           ...config,
           mcpServers: {
