@@ -41,6 +41,39 @@ test("strictest exposure never escalates either boundary", () => {
   assert.equal(strictestExposure("sanitized", "raw"), "sanitized");
 });
 
+test("privacy limits use the specified byte values", () => {
+  assert.equal(MAX_FIELD_BYTES, 16 * 1024);
+  assert.equal(MAX_RESPONSE_BYTES, 512 * 1024);
+});
+
+test("sanitized projection has exactly the allowlisted keys despite injected unknown data", () => {
+  const hit = {
+    failure: {
+      kind: "failure" as const, id: "persisted-id", ts: 11, cwd: "/private", cmd: "safe command",
+      exitCode: 1, fingerprint: "fp-keys", signature: ["safe signature"], excerpt: "private excerpt",
+      unknownSecret: "must-not-escape",
+    },
+    score: 1,
+    unknownTopLevel: "must-not-escape",
+  };
+  const item = projectRecallHits([hit as unknown as RecallHit], "sanitized").items[0];
+  assert.deepEqual(Object.keys(item).sort(), [
+    "candidateId", "command", "exitCode", "fingerprint", "hasFix", "origin", "signature", "timestamp", "truncatedFields",
+  ]);
+  assert.doesNotMatch(JSON.stringify(item), /persisted-id|private|must-not-escape/);
+});
+
+test("sanitized projection defaults a missing failure origin to run", () => {
+  const hit: RecallHit = {
+    failure: {
+      kind: "failure", id: "f-default-origin", ts: 12, cwd: "/work", cmd: "test", exitCode: 1,
+      fingerprint: "fp-default-origin", signature: [], excerpt: "failure",
+    },
+    score: 1,
+  };
+  assert.equal(projectRecallHits([hit], "sanitized").items[0].origin, "run");
+});
+
 test("redactor removes every sensitive boundary without relying on key casing", () => {
   const cases = [
     "api_key=abc123",
@@ -66,6 +99,12 @@ test("redactor removes every sensitive boundary without relying on key casing", 
     assert.notEqual(output, input, `expected redaction for ${input}`);
     assert.doesNotMatch(output, /abc123|super-secret|c2VjcmV0|hello|two words|equals-secret|abcdefghijklmnopqrstuvwxyz|deadbeef|Users|example\.test|\/opt\/private/);
   }
+});
+
+test("redactor removes composite private flags, UNC and quoted paths, and two-class base64", () => {
+  const input = "--private-key=super-secret --client-secret 'two words' \\\\server\\share\\private file.txt \"/opt/private folder/file.txt\" abcdef0123456789abcdef0123456789";
+  const output = redactText(input, "/home/ada");
+  assert.doesNotMatch(output, /super-secret|two words|server|share|private file|folder\/file|abcdef0123456789/);
 });
 
 test("normalization removes ASCII and bidi controls before output", () => {
@@ -133,6 +172,33 @@ test("projection caps individual string fields and complete signatures", () => {
   ]);
 });
 
+test("raw projection caps and detaches every fix field including failure IDs", () => {
+  const long = "z".repeat(MAX_FIELD_BYTES + 1);
+  const fix = Object.freeze({
+    kind: "fix" as const, id: long, ts: 51, cwd: long, cmd: long, failureIds: Object.freeze([long]),
+  });
+  const hit: RecallHit = {
+    failure: {
+      kind: "failure", id: "f-fix-cap", ts: 50, cwd: "/work", cmd: "fails", exitCode: 1,
+      fingerprint: "fp-fix-cap", signature: [], excerpt: "failure",
+    },
+    fix: fix as unknown as RecallHit["fix"], score: 1,
+  };
+  const item = projectRecallHits([hit], "raw").items[0];
+  const projectedFix = item.rawRecord?.fix;
+  assert.equal(Buffer.byteLength(item.fixCommand ?? "", "utf8"), MAX_FIELD_BYTES);
+  assert.equal(Buffer.byteLength(projectedFix?.id ?? "", "utf8"), MAX_FIELD_BYTES);
+  assert.equal(Buffer.byteLength(projectedFix?.cwd ?? "", "utf8"), MAX_FIELD_BYTES);
+  assert.equal(Buffer.byteLength(projectedFix?.cmd ?? "", "utf8"), MAX_FIELD_BYTES);
+  assert.equal(Buffer.byteLength((projectedFix?.failureIds ?? []).join("\n"), "utf8"), MAX_FIELD_BYTES);
+  assert.notEqual(projectedFix?.failureIds, fix.failureIds);
+  (projectedFix?.failureIds as string[])[0] = "changed";
+  assert.equal(fix.failureIds[0], long);
+  assert.deepEqual([...item.truncatedFields].sort(), [
+    "fixCommand", "rawRecord.fix.cmd", "rawRecord.fix.cwd", "rawRecord.fix.failureIds", "rawRecord.fix.id",
+  ]);
+});
+
 test("response cap omits a whole projected item and never exceeds its byte limit", () => {
   const field = "x".repeat(MAX_FIELD_BYTES);
   const hits: RecallHit[] = Array.from({ length: 20 }, (_, index) => ({
@@ -148,6 +214,50 @@ test("response cap omits a whole projected item and never exceeds its byte limit
   assert.ok(Buffer.byteLength(JSON.stringify(output), "utf8") <= MAX_RESPONSE_BYTES);
   const candidateIds = (output.items as readonly { candidateId: string }[]).map((item) => item.candidateId);
   assert.deepEqual(candidateIds, candidateIds.map((_, index) => `c${index + 1}`));
+});
+
+test("response cap omits the item that would make an untruncated response 524289 bytes", () => {
+  const full = "x.".repeat(MAX_FIELD_BYTES / 2);
+  const hits: RecallHit[] = Array.from({ length: 31 }, (_, index) => ({
+    failure: {
+      kind: "failure", id: `f-${index}`, ts: 1, cwd: "/work", cmd: full, exitCode: 1,
+      fingerprint: "fp", signature: [], excerpt: "failure",
+    },
+    score: 1,
+  }));
+  hits.push({
+    failure: {
+      kind: "failure", id: "f-31", ts: 1, cwd: "/work", cmd: "x.".repeat(5_819), exitCode: 1,
+      fingerprint: "fp", signature: [], excerpt: "failure",
+    },
+    score: 1,
+  });
+  const output = projectRecallHits(hits, "sanitized");
+  assert.equal(output.truncated, true);
+  assert.equal(output.items.length, 31);
+  assert.ok(Buffer.byteLength(JSON.stringify(output), "utf8") <= MAX_RESPONSE_BYTES);
+});
+
+test("response exactly at the cap stays complete with truncated false", () => {
+  const full = "x.".repeat(MAX_FIELD_BYTES / 2);
+  const hits: RecallHit[] = Array.from({ length: 31 }, (_, index) => ({
+    failure: {
+      kind: "failure", id: `f-exact-${index}`, ts: 1, cwd: "/work", cmd: full, exitCode: 1,
+      fingerprint: "fp", signature: [], excerpt: "failure",
+    },
+    score: 1,
+  }));
+  hits.push({
+    failure: {
+      kind: "failure", id: "f-exact-31", ts: 1, cwd: "/work", cmd: `${"x.".repeat(5_818)}x`, exitCode: 1,
+      fingerprint: "fp", signature: [], excerpt: "failure",
+    },
+    score: 1,
+  });
+  const output = projectRecallHits(hits, "sanitized");
+  assert.equal(output.truncated, false);
+  assert.equal(output.items.length, 32);
+  assert.equal(Buffer.byteLength(JSON.stringify(output), "utf8"), MAX_RESPONSE_BYTES);
 });
 
 test("recent and recall responses restart candidate IDs at c1", () => {

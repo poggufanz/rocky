@@ -67,27 +67,20 @@ export function redactText(value: string, rockyHome = process.env.ROCKY_HOME ?? 
   return redactHighEntropy(
     output
       .replace(/\b(?:https?|ftp):\/\/[^\s'"`]+/gi, "[redacted]")
+      .replace(/(["'])(?:\/[^\r\n]*?|[A-Za-z]:\\[^\r\n]*?|\\\\[^\r\n]*?)\1/g, "[redacted]")
+      .replace(/\\\\[^\\\s]+\\[^\s'"`]+/g, "[redacted]")
       .replace(/(?<![A-Za-z0-9])\/(?:[^\s'"`]+)/g, "[redacted]")
       .replace(/\b[A-Za-z]:\\(?:[^\s'"`\\]+\\)*[^\s'"`]*/g, "[redacted]")
       .replace(/\b(Bearer)\s+(?:"[^"]*"|'[^']*'|\S+)/gi, "$1 [redacted]")
       .replace(/\b(authorization|proxy-authorization)\s*:\s*(?:(?:Basic|Bearer|Token)\s+)?(?:"[^"]*"|'[^']*'|\S+)/gi, "$1: [redacted]")
       .replace(/(^|[\s;])([A-Za-z_][A-Za-z0-9_]*(?:key|token|secret|password|passwd|authorization|credential)[A-Za-z0-9_]*)\s*=\s*(?:"[^"]*"|'[^']*'|\S+)/gi, "$1$2=[redacted]")
-      .replace(/(--(?:api[-_]?key|token|password|passwd|secret|authorization|auth|credential)|-[pkt])(?:=(?:"[^"]*"|'[^']*'|\S+)|\s+(?:"[^"]*"|'[^']*'|\S+))/gi, "$1 [redacted]")
+      .replace(/(--[A-Za-z0-9_-]*(?:key|token|secret|password|passwd|authorization|auth|credential)[A-Za-z0-9_-]*|-[pkt])(?:=(?:"[^"]*"|'[^']*'|\S+)|\s+(?:"[^"]*"|'[^']*'|\S+))/gi, "$1 [redacted]")
       .replace(/\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|glpat-[A-Za-z0-9_-]{8,}|sk-[A-Za-z0-9_-]{20,}|xox[baprs]-[A-Za-z0-9-]{20,}|(?:AKIA|ASIA)[0-9A-Z]{16})\b/g, "[redacted]"),
   );
 }
 
 function redactHighEntropy(value: string): string {
-  return value.replace(/(?<![A-Za-z0-9+/_=-])[A-Za-z0-9+/_-]{32,}={0,2}(?![A-Za-z0-9+/_=-])/g, (token) =>
-    hasTokenEntropy(token) ? "[redacted]" : token,
-  );
-}
-
-function hasTokenEntropy(token: string): boolean {
-  const core = token.replace(/=+$/, "");
-  if (/^[A-Fa-f0-9]+$/.test(core)) return /[A-Fa-f]/.test(core) && /\d/.test(core);
-  const classes = [/[a-z]/.test(core), /[A-Z]/.test(core), /\d/.test(core), /[+/_-]/.test(core)].filter(Boolean).length;
-  return classes >= 3;
+  return value.replace(/(?<![A-Za-z0-9+/_=-])[A-Za-z0-9+/_-]{32,}={0,2}(?![A-Za-z0-9+/_=-])/g, "[redacted]");
 }
 
 function projectText(value: string, exposure: Exposure, path: string, truncation: Truncation): string {
@@ -201,7 +194,7 @@ function projectHits(hits: readonly SourceHit[], exposure: Exposure): { items: P
   let truncated = false;
   for (const hit of hits) {
     const item = projectHit(hit, exposure, `c${items.length + 1}`);
-    const prospective = { exposure, items: [...items, item], truncated: true };
+    const prospective = { exposure, items: [...items, item], truncated };
     if (Buffer.byteLength(JSON.stringify(prospective), "utf8") > MAX_RESPONSE_BYTES) {
       truncated = true;
       continue;
