@@ -21,12 +21,12 @@ test("hookFail records origin:hook failure and sets pending", () => {
 });
 
 test("hookSuccess links fix to recent same-base failure in same cwd and clears pending", () => {
-  process.chdir(cwd); // recentUnresolvedFailures matches on process.cwd()
   const code = hookSuccess("npm run build", cwd);
   assert.equal(code, 0);
   const records = memory.loadMemory();
   const fixes = records.filter((r) => r.kind === "fix");
   assert.equal(fixes.length, 1);
+  assert.equal(fixes[0].cwd, cwd);
   assert.ok(!existsSync(memory.pendingPath()), "pending cleared once resolved");
 });
 
@@ -35,4 +35,14 @@ test("hookSuccess with nothing to link records no fix", () => {
   hookSuccess("totally different-program", cwd);
   const afterCount = memory.loadMemory().filter((r) => r.kind === "fix").length;
   assert.equal(afterCount, beforeCount);
+});
+
+test("hookSuccess does not change process cwd", () => {
+  memory.recordHookFailure("another program", 1, cwd);
+  const before = process.cwd();
+  hookSuccess("another program", cwd);
+  assert.equal(process.cwd(), before);
+
+  const fixes = memory.loadMemory().filter((record) => record.kind === "fix");
+  assert.equal(fixes.at(-1)?.cwd, cwd);
 });

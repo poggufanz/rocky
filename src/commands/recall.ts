@@ -6,7 +6,8 @@
  * with their fixes, newest context first.
  */
 
-import { loadMemory, search } from "../core/memory.js";
+import { loadMemory } from "../core/memory.js";
+import { queryRecall } from "../core/memory-query.js";
 import { ago, detail, heading, say } from "../ui/rocky.js";
 
 export function recall(query: string): number {
@@ -21,7 +22,7 @@ export function recall(query: string): number {
     return 0;
   }
 
-  const hits = search(memory, query);
+  const hits = queryRecall(memory, { query });
   if (hits.length === 0) {
     say("I listen to memory. nothing match. maybe error is new, maybe words are different.");
     return 1;

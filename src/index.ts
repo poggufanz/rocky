@@ -11,8 +11,8 @@
 
 import { run } from "./commands/run.js";
 import { recall } from "./commands/recall.js";
+import { stats } from "./commands/stats.js";
 import { hookFail, hookInstall, hookStatus, hookSuccess, hookUninstall } from "./commands/hook.js";
-import { loadMemory, memoryPath } from "./core/memory.js";
 import { face, say } from "./ui/rocky.js";
 
 const HELP = `
@@ -71,20 +71,6 @@ async function main(): Promise<number> {
       say(`"${command}" is not command I know. run --help, question`);
       return 2;
   }
-}
-
-function stats(): number {
-  const memory = loadMemory();
-  const failures = memory.filter((r) => r.kind === "failure");
-  const fixes = memory.filter((r) => r.kind === "fix");
-  const resolved = failures.filter((f) => f.kind === "failure" && f.resolvedBy).length;
-  console.log(face());
-  say(`I remember ${failures.length} error${failures.length === 1 ? "" : "s"}. ${resolved} have fix. ${fixes.length} fix event${fixes.length === 1 ? "" : "s"} total.`);
-  say(`memory file: ${memoryPath()}`);
-  if (failures.length > resolved) {
-    say(`${failures.length - resolved} error${failures.length - resolved === 1 ? "" : "s"} still without fix. you fix, I remember. good trade.`);
-  }
-  return 0;
 }
 
 main().then(

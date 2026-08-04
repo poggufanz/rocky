@@ -15,13 +15,11 @@ import { commandFingerprint } from "../core/fingerprint.js";
 import { renderGuardRules, rulesFileIsPristine } from "../core/guard-rules.js";
 import {
   clearPendingIfResolved,
-  findByFingerprint,
-  getFix,
   loadMemory,
-  recentUnresolvedFailures,
   recordFix,
   recordHookFailure,
 } from "../core/memory.js";
+import { findByFingerprint, getFix, recentUnresolvedFailures } from "../core/memory-query.js";
 import { ago, detail, detailTty, say, sayTty } from "../ui/rocky.js";
 
 /** A command failed in the hooked shell. Record it; speak only if memory has something to say. */
@@ -48,15 +46,10 @@ export function hookFail(cmd: string, exitCode: number, cwd: string): number {
 
 /** A command succeeded while the pending flag existed. Try to link a fix. */
 export function hookSuccess(cmd: string, cwd: string): number {
-  try {
-    process.chdir(cwd); // recentUnresolvedFailures matches on process.cwd()
-  } catch {
-    /* cwd vanished — heuristic simply finds nothing */
-  }
   const memory = loadMemory();
-  const unresolved = recentUnresolvedFailures(memory, cmd);
+  const unresolved = recentUnresolvedFailures(memory, cmd, { cwd });
   if (unresolved.length > 0) {
-    recordFix(cmd, unresolved);
+    recordFix(cmd, unresolved, cwd);
     sayTty("command works now. you fix it. I remember the fix. good good good.");
   }
   clearPendingIfResolved(loadMemory());

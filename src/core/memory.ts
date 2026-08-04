@@ -14,7 +14,7 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileS
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
-import { commandFingerprint, fingerprint, normalizeLine, signatureLines, similarity, tokens } from "./fingerprint.js";
+import { commandFingerprint, fingerprint, normalizeLine, signatureLines } from "./fingerprint.js";
 
 export interface FailureRecord {
   kind: "failure";
@@ -98,74 +98,17 @@ export function recordFailure(cmd: string, exitCode: number, stderr: string): Fa
   return rec;
 }
 
-export function recordFix(cmd: string, failures: FailureRecord[]): FixRecord {
+export function recordFix(cmd: string, failures: FailureRecord[], cwd = process.cwd()): FixRecord {
   const rec: FixRecord = {
     kind: "fix",
     id: randomUUID(),
     ts: Date.now(),
-    cwd: process.cwd(),
+    cwd,
     cmd,
     failureIds: failures.map((f) => f.id),
   };
   append(rec);
   return rec;
-}
-
-/** All failures with this exact fingerprint, oldest first. */
-export function findByFingerprint(records: MemoryRecord[], fp: string): FailureRecord[] {
-  return records.filter((r): r is FailureRecord => r.kind === "failure" && r.fingerprint === fp);
-}
-
-export function getFix(records: MemoryRecord[], failure: FailureRecord): FixRecord | undefined {
-  if (!failure.resolvedBy) return undefined;
-  return records.find((r): r is FixRecord => r.kind === "fix" && r.id === failure.resolvedBy);
-}
-
-/**
- * Unresolved failures from the same working directory whose command shares a
- * base program with `cmd`, within `windowMs`. Used to link a success to the
- * failures it just fixed.
- */
-export function recentUnresolvedFailures(
-  records: MemoryRecord[],
-  cmd: string,
-  windowMs = 1000 * 60 * 60 * 48
-): FailureRecord[] {
-  const base = cmd.trim().split(/\s+/)[0];
-  const cutoff = Date.now() - windowMs;
-  return records.filter(
-    (r): r is FailureRecord =>
-      r.kind === "failure" &&
-      !r.resolvedBy &&
-      r.ts >= cutoff &&
-      r.cwd === process.cwd() &&
-      r.cmd.trim().split(/\s+/)[0] === base
-  );
-}
-
-export interface SearchHit {
-  failure: FailureRecord;
-  fix?: FixRecord;
-  score: number;
-}
-
-/** Fuzzy search over remembered failures. One hit per distinct error. */
-export function search(records: MemoryRecord[], query: string, limit = 3): SearchHit[] {
-  const q = tokens(query);
-  const best = new Map<string, SearchHit>(); // fingerprint -> best hit
-  for (const r of records) {
-    if (r.kind !== "failure") continue;
-    const bag = tokens([r.cmd, ...r.signature].join(" "));
-    const score = similarity(q, bag);
-    if (score <= 0.05) continue;
-    const hit: SearchHit = { failure: r, fix: getFix(records, r), score };
-    const prev = best.get(r.fingerprint);
-    // prefer an occurrence that has a fix; then the newer one
-    if (!prev || (!prev.fix && hit.fix) || (!!prev.fix === !!hit.fix && r.ts > prev.failure.ts)) {
-      best.set(r.fingerprint, hit);
-    }
-  }
-  return [...best.values()].sort((a, b) => b.score - a.score).slice(0, limit);
 }
 
 function lastLines(text: string, n: number): string {
