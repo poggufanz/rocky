@@ -10,6 +10,7 @@ import {
   atomicWriteJsonIfUnchanged,
   BackupFileError,
   backupFile,
+  inspectJsonTransaction,
   readJsonObject,
   recoverJsonTransaction,
 } from "./json-config.js";
@@ -168,13 +169,11 @@ function isOwnedDesktopRegistration(
 }
 
 function inspectConfig(path: string, registration: McpRegistration): ConfigInspection {
-  const recovery = recoverJsonTransaction(path);
-  if (recovery.status !== "clear") {
-    const detail = recovery.status === "recovered"
-      ? recovery.recoveryPath === undefined
-        ? "Claude Desktop config transaction recovered; retry setup"
-        : `Claude Desktop config transaction recovered; live recovery: ${recovery.recoveryPath}; retry setup`
-      : `Claude Desktop config update requires manual recovery: ${recovery.recoveryPath}`;
+  const transaction = inspectJsonTransaction(path);
+  if (transaction.status === "pending") {
+    const detail = transaction.recoveryPath === undefined
+      ? "Claude Desktop config update requires manual verification"
+      : `Claude Desktop config update requires manual recovery: ${transaction.recoveryPath}`;
     return {
       read: { status: "invalid", error: detail },
       public: { state: "unreadable", detail },
@@ -205,6 +204,20 @@ function inspectConfig(path: string, registration: McpRegistration): ConfigInspe
   return parsed !== undefined && isIdenticalDesktopRegistration(parsed, registration)
     ? { read, servers, snapshot, public: { state: "identical", snapshot } }
     : { read, servers, snapshot, public: { state: "conflict", snapshot } };
+}
+
+function recoverPendingMutation(path: string, registration: McpRegistration): SetupResult {
+  const recovery = recoverJsonTransaction(path);
+  const detail = recovery.status === "recovered"
+    ? recovery.recoveryPath === undefined
+      ? "Claude Desktop config transaction recovered; retry setup"
+      : `Claude Desktop config transaction recovered; live recovery: ${recovery.recoveryPath}; retry setup`
+    : recovery.status === "manual"
+      ? recovery.recoveryPath === undefined
+        ? "Claude Desktop config update requires manual verification"
+        : `Claude Desktop config update requires manual recovery: ${recovery.recoveryPath}`
+      : "Claude Desktop config transaction changed; retry setup";
+  return failed(detail, registration);
 }
 
 function failed(detail: string, manualRegistration?: McpRegistration): SetupResult {
@@ -358,6 +371,10 @@ export function createClaudeDesktopAdapter(
     async configure(registration, replace) {
       const prepared = prepare(registration);
       if (!prepared.ok) return failed(prepared.detail, prepared.manualRegistration);
+      if (inspectJsonTransaction(prepared.path).status === "pending") {
+        if (dependencies.policyBlocked === true) return blocked(prepared.registration);
+        return recoverPendingMutation(prepared.path, prepared.registration);
+      }
       const inspection = inspectConfig(prepared.path, prepared.registration);
       if (inspection.public.state === "identical") {
         return { client: "claude-desktop", status: "already-configured" };
@@ -398,6 +415,10 @@ export function createClaudeDesktopAdapter(
     async remove(registration) {
       const prepared = prepare(registration);
       if (!prepared.ok) return failed(prepared.detail, prepared.manualRegistration);
+      if (inspectJsonTransaction(prepared.path).status === "pending") {
+        if (dependencies.policyBlocked === true) return blocked(prepared.registration);
+        return recoverPendingMutation(prepared.path, prepared.registration);
+      }
       const inspection = inspectConfig(prepared.path, prepared.registration);
       if (inspection.public.state === "absent") {
         return { client: "claude-desktop", status: "not-configured" };

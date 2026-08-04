@@ -107,7 +107,7 @@ export function backupFile(path: string, now = new Date()): string {
         rmSync(backupPath, { force: true });
         syncParentDirectory(backupPath);
       } catch {
-        recoveryPath = backupPath;
+        if (pathExists(backupPath)) recoveryPath = backupPath;
       }
     }
     throw new BackupFileError(recoveryPath);
@@ -190,7 +190,11 @@ export type ConditionalJsonWriteResult =
 export type JsonTransactionRecoveryResult =
   | { status: "clear" }
   | { status: "recovered"; recoveryPath?: string }
-  | { status: "manual"; recoveryPath: string };
+  | { status: "manual"; recoveryPath?: string };
+
+export type JsonTransactionInspectionResult =
+  | { status: "clear" }
+  | { status: "pending"; recoveryPath?: string };
 
 type TransactionState = "prepared" | "displaced" | "published" | "committed";
 
@@ -224,6 +228,11 @@ function pathExists(path: string): boolean {
     if (errorCode(error) === "ENOENT") return false;
     return true;
   }
+}
+
+function firstExistingPath(...candidates: Array<string | undefined>): string | undefined {
+  return candidates.find((candidate): candidate is string =>
+    candidate !== undefined && pathExists(candidate));
 }
 
 function matchingCommittedRecoveryLinks(
@@ -374,13 +383,26 @@ function transactionDirectories(path: string): string[] {
   }
 }
 
+/** Report unfinished transactions without changing the target or artifacts. */
+export function inspectJsonTransaction(path: string): JsonTransactionInspectionResult {
+  for (const transactionDirectory of transactionDirectories(path)) {
+    if (readManifest(transactionDirectory, path)?.state === "committed") continue;
+    return { status: "pending", recoveryPath: firstExistingPath(transactionDirectory) };
+  }
+  return { status: "clear" };
+}
+
 /** Recover an interrupted mutation before anybody interprets an absent config. */
 export function recoverJsonTransaction(path: string): JsonTransactionRecoveryResult {
   for (const transactionDirectory of transactionDirectories(path)) {
     const manifest = readManifest(transactionDirectory, path);
     if (manifest?.state === "committed") continue;
     if (manifest === undefined) {
-      return { status: "manual", recoveryPath: transactionDirectory };
+      return { status: "manual", recoveryPath: firstExistingPath(transactionDirectory) };
+    }
+
+    if (manifest.state === "published") {
+      return { status: "manual", recoveryPath: firstExistingPath(transactionDirectory) };
     }
 
     const displacedPath = join(transactionDirectory, "displaced");
@@ -388,7 +410,7 @@ export function recoverJsonTransaction(path: string): JsonTransactionRecoveryRes
       if (!removeTransaction(transactionDirectory)) {
         return {
           status: "manual",
-          recoveryPath: pathExists(transactionDirectory) ? transactionDirectory : path,
+          recoveryPath: firstExistingPath(transactionDirectory, path),
         };
       }
       return { status: "recovered" };
@@ -399,48 +421,54 @@ export function recoverJsonTransaction(path: string): JsonTransactionRecoveryRes
       && isManagedRecoveryPair(path, displacedPath, path)) {
       const preparedPath = join(transactionDirectory, "prepared");
       if (pathExists(preparedPath) && !discardPrepared(transactionDirectory, preparedPath)) {
-        return { status: "manual", recoveryPath: transactionDirectory };
+        return { status: "manual", recoveryPath: firstExistingPath(transactionDirectory) };
       }
       try {
         writeManifest(transactionDirectory, path, "committed");
       } catch {
-        return { status: "manual", recoveryPath: transactionDirectory };
+        return { status: "manual", recoveryPath: firstExistingPath(transactionDirectory) };
       }
-      return { status: "recovered", recoveryPath: displacedPath };
+      return { status: "recovered", recoveryPath: firstExistingPath(displacedPath) };
     }
 
     if (pathExists(path)) {
-      return { status: "manual", recoveryPath: transactionDirectory };
+      return { status: "manual", recoveryPath: firstExistingPath(transactionDirectory) };
     }
 
     if (pathExists(displacedPath)) {
       if (!isManagedRegularFile(displacedPath, path)) {
-        return { status: "manual", recoveryPath: displacedPath };
+        return {
+          status: "manual",
+          recoveryPath: firstExistingPath(displacedPath, transactionDirectory),
+        };
       }
       try {
         linkSync(displacedPath, path);
         syncParentDirectory(path);
       } catch {
-        return { status: "manual", recoveryPath: displacedPath };
+        return {
+          status: "manual",
+          recoveryPath: firstExistingPath(displacedPath, transactionDirectory, path),
+        };
       }
       if (!isManagedRecoveryPair(path, displacedPath, path)) {
-        return { status: "manual", recoveryPath: transactionDirectory };
+        return { status: "manual", recoveryPath: firstExistingPath(transactionDirectory) };
       }
       const preparedPath = join(transactionDirectory, "prepared");
       if (pathExists(preparedPath) && !discardPrepared(transactionDirectory, preparedPath)) {
-        return { status: "manual", recoveryPath: transactionDirectory };
+        return { status: "manual", recoveryPath: firstExistingPath(transactionDirectory) };
       }
       try {
         writeManifest(transactionDirectory, path, "committed");
       } catch {
-        return { status: "manual", recoveryPath: transactionDirectory };
+        return { status: "manual", recoveryPath: firstExistingPath(transactionDirectory) };
       }
-      return { status: "recovered", recoveryPath: displacedPath };
+      return { status: "recovered", recoveryPath: firstExistingPath(displacedPath) };
     } else {
       if (!removeTransaction(transactionDirectory)) {
         return {
           status: "manual",
-          recoveryPath: pathExists(transactionDirectory) ? transactionDirectory : path,
+          recoveryPath: firstExistingPath(transactionDirectory, path),
         };
       }
       return { status: "recovered" };
@@ -456,23 +484,35 @@ function restoreDisplaced(
   preparedPath: string,
 ): ConditionalJsonWriteResult {
   if (pathExists(preparedPath) && !discardPrepared(transactionDirectory, preparedPath)) {
-    return { status: "recovery-required", recoveryPath: transactionDirectory };
+    return {
+      status: "recovery-required",
+      recoveryPath: firstExistingPath(transactionDirectory, preparedPath),
+    };
   }
   try {
     linkSync(displacedPath, path);
     syncParentDirectory(path);
   } catch {
-    return { status: "recovery-required", recoveryPath: displacedPath };
+    return {
+      status: "recovery-required",
+      recoveryPath: firstExistingPath(displacedPath, transactionDirectory, path),
+    };
   }
   if (!isManagedRecoveryPair(path, displacedPath, path)) {
-    return { status: "recovery-required", recoveryPath: transactionDirectory };
+    return {
+      status: "recovery-required",
+      recoveryPath: firstExistingPath(transactionDirectory, path),
+    };
   }
   try {
     writeManifest(transactionDirectory, path, "committed");
   } catch {
-    return { status: "recovery-required", recoveryPath: transactionDirectory };
+    return {
+      status: "recovery-required",
+      recoveryPath: firstExistingPath(transactionDirectory, path),
+    };
   }
-  return { status: "changed", recoveryPath: displacedPath };
+  return { status: "changed", recoveryPath: firstExistingPath(displacedPath) };
 }
 
 function discardPrepared(transactionDirectory: string, temporaryPath: string): boolean {
@@ -542,7 +582,7 @@ export function atomicWriteJsonIfUnchanged(
           if (!removeTransaction(transactionDirectory)) {
             return {
               status: "recovery-required",
-              recoveryPath: pathExists(transactionDirectory) ? transactionDirectory : path,
+              recoveryPath: firstExistingPath(transactionDirectory, path),
             };
           }
           transactionExists = false;
@@ -557,7 +597,7 @@ export function atomicWriteJsonIfUnchanged(
       if (!removeTransaction(transactionDirectory)) {
         return {
           status: "recovery-required",
-          recoveryPath: pathExists(transactionDirectory) ? transactionDirectory : path,
+          recoveryPath: firstExistingPath(transactionDirectory, path),
         };
       }
       transactionExists = false;
@@ -579,7 +619,17 @@ export function atomicWriteJsonIfUnchanged(
       renameSync(path, recoveryPath);
       recoveryExists = true;
     } catch (error) {
-      if (errorCode(error) === "ENOENT") return { status: "changed" };
+      if (errorCode(error) === "ENOENT") {
+        if (removeTransaction(transactionDirectory) || !pathExists(transactionDirectory)) {
+          transactionExists = false;
+          temporaryExists = false;
+          return { status: "changed" };
+        }
+        return {
+          status: "recovery-required",
+          recoveryPath: firstExistingPath(transactionDirectory, temporaryPath),
+        };
+      }
       throw error;
     }
     syncDirectory(transactionDirectory);
@@ -605,7 +655,15 @@ export function atomicWriteJsonIfUnchanged(
     } catch (error) {
       if (errorCode(error) === "EEXIST") {
         if (discardPrepared(transactionDirectory, temporaryPath)) temporaryExists = false;
-        return { status: "recovery-required", recoveryPath };
+        return {
+          status: "recovery-required",
+          recoveryPath: firstExistingPath(
+            recoveryPath,
+            transactionDirectory,
+            path,
+            temporaryPath,
+          ),
+        };
       }
       const restored = restoreDisplaced(
         path,
@@ -615,21 +673,45 @@ export function atomicWriteJsonIfUnchanged(
       );
       if (restored.status !== "changed") return restored;
       temporaryExists = false;
-      return { status: "recovery-required", recoveryPath: restored.recoveryPath };
+      return {
+        status: "recovery-required",
+        recoveryPath: firstExistingPath(
+          restored.recoveryPath,
+          recoveryPath,
+          transactionDirectory,
+          path,
+        ),
+      };
     }
 
     destinationPublished = true;
     syncParentDirectory(path);
     if (!fileMatches(path, encoded, prior.mode)) {
-      return { status: "recovery-required", recoveryPath };
+      return {
+        status: "recovery-required",
+        recoveryPath: firstExistingPath(recoveryPath, transactionDirectory, path),
+      };
     }
 
     writeManifest(transactionDirectory, path, "published");
     rmSync(temporaryPath);
     temporaryExists = false;
     syncDirectory(transactionDirectory);
+    if (!pathExists(recoveryPath)) {
+      return {
+        status: "recovery-required",
+        recoveryPath: firstExistingPath(transactionDirectory, path),
+      };
+    }
     writeManifest(transactionDirectory, path, "committed");
-    return { status: "written", recoveryPath };
+    const liveRecoveryPath = firstExistingPath(recoveryPath);
+    if (liveRecoveryPath === undefined) {
+      return {
+        status: "recovery-required",
+        recoveryPath: firstExistingPath(transactionDirectory, path),
+      };
+    }
+    return { status: "written", recoveryPath: liveRecoveryPath };
   } catch {
     if (descriptor !== undefined) {
       try {
@@ -640,12 +722,25 @@ export function atomicWriteJsonIfUnchanged(
       descriptor = undefined;
     }
     if (recoveryPath !== undefined && recoveryExists) {
-      return { status: "recovery-required", recoveryPath };
+      return {
+        status: "recovery-required",
+        recoveryPath: firstExistingPath(
+          recoveryPath,
+          transactionDirectory,
+          path,
+          temporaryPath,
+        ),
+      };
     }
     if (destinationPublished || (transactionExists && !removeTransaction(transactionDirectory))) {
       return {
         status: "recovery-required",
-        recoveryPath: pathExists(transactionDirectory) ? transactionDirectory : path,
+        recoveryPath: firstExistingPath(
+          recoveryPath,
+          transactionDirectory,
+          path,
+          temporaryPath,
+        ),
       };
     }
     transactionExists = false;

@@ -55,6 +55,24 @@ function backupPaths(path: string): string[] {
     .map((name) => join(dirname(path), name));
 }
 
+function crashTransaction(
+  path: string,
+  suffix: string,
+  state: "prepared" | "displaced" | "published" | "committed",
+  displacedBytes: Buffer,
+): string {
+  const transaction = join(dirname(path), `.${basename(path)}.transaction-${suffix}`);
+  mkdirSync(transaction, { mode: 0o700 });
+  writeFileSync(join(transaction, "displaced"), displacedBytes, { mode: 0o640 });
+  writeFileSync(join(transaction, "prepared"), "{\"mcpServers\":{}}\n", { mode: 0o600 });
+  writeFileSync(join(transaction, "manifest.json"), `${JSON.stringify({
+    version: 1,
+    state,
+    target: path,
+  })}\n`, { mode: 0o600 });
+  return transaction;
+}
+
 test("native Claude Desktop config paths are exact and unsupported hosts stay unresolved", () => {
   const mac = createPlatformServices({
     platform: "darwin",
@@ -489,6 +507,51 @@ test("failed backup cleanup reports its opaque secret-bearing artifact path", as
   }
 });
 
+test("backup parent-sync failure does not report a deleted Desktop recovery path", async (t) => {
+  const path = configPath(t, { theme: "dark" });
+  const originalOpen = fs.openSync;
+  const originalFsync = fs.fsyncSync;
+  const originalRm = fs.rmSync;
+  let backupDescriptor: number | undefined;
+  let backupPath: string | undefined;
+  let backupDeleted = false;
+  fs.openSync = ((target: fs.PathLike, flags: fs.OpenMode, mode?: fs.Mode) => {
+    const descriptor = originalOpen(target, flags, mode);
+    if (String(target).includes(".backup-")) {
+      backupDescriptor = descriptor;
+      backupPath = String(target);
+    }
+    return descriptor;
+  }) as typeof fs.openSync;
+  fs.fsyncSync = ((descriptor: number) => {
+    if (descriptor === backupDescriptor) throw new Error("fake Desktop backup fsync failure");
+    if (backupDeleted) throw new Error("fake Desktop parent fsync failure");
+    return originalFsync(descriptor);
+  }) as typeof fs.fsyncSync;
+  fs.rmSync = ((target: fs.PathLike, options?: fs.RmDirOptions) => {
+    const result = originalRm(target, options);
+    if (String(target) === backupPath) backupDeleted = true;
+    return result;
+  }) as typeof fs.rmSync;
+  syncBuiltinESMExports();
+
+  try {
+    const configured = await createClaudeDesktopAdapter({ configPath: path })
+      .configure(registration, false);
+
+    assert.equal(configured.status, "failed");
+    assert.match(configured.detail ?? "", /back up Claude Desktop config/i);
+    assert.doesNotMatch(configured.detail ?? "", /manual recovery|\.backup-/i);
+    assert.ok(backupPath);
+    assert.equal(fs.existsSync(backupPath), false);
+  } finally {
+    fs.openSync = originalOpen;
+    fs.fsyncSync = originalFsync;
+    fs.rmSync = originalRm;
+    syncBuiltinESMExports();
+  }
+});
+
 test("concurrent unrelated config change after backup is preserved instead of overwritten", async (t) => {
   const original = { theme: "dark", mcpServers: { other: { enabled: true } } };
   const concurrent = {
@@ -657,6 +720,161 @@ test("missing-config configure preserves a file created immediately before insta
   }
 });
 
+test("destination deletion before displacement cleans the prepared transaction", async (t) => {
+  const path = configPath(t, { theme: "dark", mcpServers: { other: {} } });
+  const originalRename = fs.renameSync;
+  let injected = false;
+  fs.renameSync = ((source: fs.PathLike, destination: fs.PathLike) => {
+    if (!injected && String(source) === path && basename(String(destination)) === "displaced") {
+      injected = true;
+      fs.unlinkSync(path);
+    }
+    return originalRename(source, destination);
+  }) as typeof fs.renameSync;
+  syncBuiltinESMExports();
+
+  try {
+    const configured = await createClaudeDesktopAdapter({ configPath: path })
+      .configure(registration, false);
+
+    assert.equal(injected, true);
+    assert.equal(configured.status, "failed");
+    assert.match(configured.detail ?? "", /changed|retry/i);
+    assert.equal(fs.existsSync(path), false);
+    assert.equal(
+      readdirSync(dirname(path)).some((name) => name.includes(".transaction-")),
+      false,
+    );
+  } finally {
+    fs.renameSync = originalRename;
+    syncBuiltinESMExports();
+  }
+});
+
+test("destination deletion reports an existing transaction when cleanup fails", async (t) => {
+  const path = configPath(t, { theme: "dark", mcpServers: { other: {} } });
+  const originalRename = fs.renameSync;
+  const originalRm = fs.rmSync;
+  let injected = false;
+  let retainedTransaction: string | undefined;
+  fs.renameSync = ((source: fs.PathLike, destination: fs.PathLike) => {
+    if (!injected && String(source) === path && basename(String(destination)) === "displaced") {
+      injected = true;
+      fs.unlinkSync(path);
+    }
+    return originalRename(source, destination);
+  }) as typeof fs.renameSync;
+  fs.rmSync = ((target: fs.PathLike, options?: fs.RmDirOptions) => {
+    if (String(target).includes(".transaction-") && options?.recursive === true) {
+      retainedTransaction = String(target);
+      throw Object.assign(new Error("fake transaction cleanup secret"), { code: "EACCES" });
+    }
+    return originalRm(target, options);
+  }) as typeof fs.rmSync;
+  syncBuiltinESMExports();
+
+  try {
+    const configured = await createClaudeDesktopAdapter({ configPath: path })
+      .configure(registration, false);
+
+    assert.equal(injected, true);
+    assert.equal(configured.status, "failed");
+    assert.match(configured.detail ?? "", /manual recovery/i);
+    assert.doesNotMatch(configured.detail ?? "", /fake transaction cleanup secret/i);
+    assert.ok(retainedTransaction);
+    assert.equal(fs.existsSync(retainedTransaction), true);
+    assert.match(
+      configured.detail ?? "",
+      new RegExp(retainedTransaction.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
+    );
+    assert.equal(fs.existsSync(path), false);
+  } finally {
+    fs.renameSync = originalRename;
+    fs.rmSync = originalRm;
+    syncBuiltinESMExports();
+  }
+});
+
+test("pre-publication cleanup never reports a target and transaction that were both removed", async (t) => {
+  const path = configPath(t);
+  const originalLink = fs.linkSync;
+  const originalRm = fs.rmSync;
+  let removedTransaction: string | undefined;
+  fs.linkSync = ((existingPath: fs.PathLike, newPath: fs.PathLike) => {
+    if (basename(String(existingPath)) === "prepared" && String(newPath) === path) {
+      throw Object.assign(new Error("fake pre-publication link secret"), { code: "EACCES" });
+    }
+    return originalLink(existingPath, newPath);
+  }) as typeof fs.linkSync;
+  fs.rmSync = ((target: fs.PathLike, options?: fs.RmDirOptions) => {
+    if (String(target).includes(".transaction-") && options?.recursive === true) {
+      removedTransaction = String(target);
+      originalRm(target, options);
+      throw new Error("fake post-delete sync secret");
+    }
+    return originalRm(target, options);
+  }) as typeof fs.rmSync;
+  syncBuiltinESMExports();
+
+  try {
+    const configured = await createClaudeDesktopAdapter({ configPath: path })
+      .configure(registration, false);
+
+    assert.equal(configured.status, "failed");
+    assert.match(configured.detail ?? "", /manual verification|write Claude Desktop config/i);
+    assert.doesNotMatch(configured.detail ?? "", /manual recovery|fake pre-publication|fake post-delete/i);
+    assert.equal(fs.existsSync(path), false);
+    assert.ok(removedTransaction);
+    assert.equal(fs.existsSync(removedTransaction), false);
+    assert.doesNotMatch(configured.detail ?? "", new RegExp(removedTransaction.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  } finally {
+    fs.linkSync = originalLink;
+    fs.rmSync = originalRm;
+    syncBuiltinESMExports();
+  }
+});
+
+test("failed in-process restore reports the surviving transaction instead of missing displaced file", async (t) => {
+  const path = configPath(t, { theme: "dark", mcpServers: { other: {} } });
+  const originalRename = fs.renameSync;
+  const originalLink = fs.linkSync;
+  let transaction: string | undefined;
+  let displacedPath: string | undefined;
+  fs.renameSync = ((source: fs.PathLike, destination: fs.PathLike) => {
+    if (String(source) === path && basename(String(destination)) === "displaced") {
+      writeFileSync(path, '{"theme":"concurrent"}\n', "utf8");
+    }
+    return originalRename(source, destination);
+  }) as typeof fs.renameSync;
+  fs.linkSync = ((existingPath: fs.PathLike, newPath: fs.PathLike) => {
+    if (basename(String(existingPath)) === "displaced" && String(newPath) === path) {
+      displacedPath = String(existingPath);
+      transaction = dirname(displacedPath);
+      fs.unlinkSync(displacedPath);
+    }
+    return originalLink(existingPath, newPath);
+  }) as typeof fs.linkSync;
+  syncBuiltinESMExports();
+
+  try {
+    const configured = await createClaudeDesktopAdapter({ configPath: path })
+      .configure(registration, false);
+
+    assert.equal(configured.status, "failed");
+    assert.match(configured.detail ?? "", /manual recovery/i);
+    assert.ok(transaction);
+    assert.ok(displacedPath);
+    assert.equal(fs.existsSync(transaction), true);
+    assert.equal(fs.existsSync(displacedPath), false);
+    assert.match(configured.detail ?? "", new RegExp(transaction.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+    assert.doesNotMatch(configured.detail ?? "", new RegExp(displacedPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  } finally {
+    fs.renameSync = originalRename;
+    fs.linkSync = originalLink;
+    syncBuiltinESMExports();
+  }
+});
+
 test("unsupported hard links abort before displacing an existing config", async (t) => {
   const original = {
     theme: "dark",
@@ -797,6 +1015,42 @@ test("post-displacement creator wins while prior config remains at reported reco
   }
 });
 
+test("post-displacement winner reports transaction when displaced recovery disappears", async (t) => {
+  const path = configPath(t, { theme: "dark", mcpServers: { other: {} } });
+  const concurrentBytes = Buffer.from('{"theme":"winner"}\n', "utf8");
+  const originalLink = fs.linkSync;
+  let transaction: string | undefined;
+  let displacedPath: string | undefined;
+  fs.linkSync = ((existingPath: fs.PathLike, newPath: fs.PathLike) => {
+    if (basename(String(existingPath)) === "prepared" && String(newPath) === path) {
+      transaction = dirname(String(existingPath));
+      displacedPath = join(transaction, "displaced");
+      fs.unlinkSync(displacedPath);
+      writeFileSync(path, concurrentBytes, { mode: 0o600 });
+    }
+    return originalLink(existingPath, newPath);
+  }) as typeof fs.linkSync;
+  syncBuiltinESMExports();
+
+  try {
+    const configured = await createClaudeDesktopAdapter({ configPath: path })
+      .configure(registration, false);
+
+    assert.equal(configured.status, "failed");
+    assert.match(configured.detail ?? "", /manual recovery/i);
+    assert.ok(transaction);
+    assert.ok(displacedPath);
+    assert.equal(fs.existsSync(transaction), true);
+    assert.equal(fs.existsSync(displacedPath), false);
+    assert.deepEqual(readFileSync(path), concurrentBytes);
+    assert.match(configured.detail ?? "", new RegExp(transaction.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+    assert.doesNotMatch(configured.detail ?? "", new RegExp(displacedPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  } finally {
+    fs.linkSync = originalLink;
+    syncBuiltinESMExports();
+  }
+});
+
 test("restore collision preserves current file and reports displaced concurrent recovery", async (t) => {
   const original = { theme: "dark", mcpServers: { other: { version: 1 } } };
   const displacedConcurrent = {
@@ -903,6 +1157,46 @@ test("held descriptor late write survives in reported committed recovery", async
   }
 });
 
+test("publication fails closed when live recovery disappears during commit", async (t) => {
+  const path = configPath(t, { theme: "dark", mcpServers: { other: {} } });
+  const originalRename = fs.renameSync;
+  let transaction: string | undefined;
+  let displacedPath: string | undefined;
+  fs.renameSync = ((source: fs.PathLike, destination: fs.PathLike) => {
+    if (basename(String(source)) === "manifest.tmp") {
+      const manifest = JSON.parse(readFileSync(String(source), "utf8")) as { state?: string };
+      if (manifest.state === "committed") {
+        transaction = dirname(String(source));
+        displacedPath = join(transaction, "displaced");
+        fs.unlinkSync(displacedPath);
+      }
+    }
+    return originalRename(source, destination);
+  }) as typeof fs.renameSync;
+  syncBuiltinESMExports();
+
+  try {
+    const configured = await createClaudeDesktopAdapter({ configPath: path })
+      .configure(registration, false);
+
+    assert.equal(configured.status, "failed");
+    assert.match(configured.detail ?? "", /manual recovery/i);
+    assert.ok(transaction);
+    assert.ok(displacedPath);
+    assert.equal(fs.existsSync(transaction), true);
+    assert.equal(fs.existsSync(displacedPath), false);
+    assert.match(configured.detail ?? "", new RegExp(transaction.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+    assert.doesNotMatch(configured.detail ?? "", new RegExp(displacedPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+    assert.equal(
+      (JSON.parse(readFileSync(path, "utf8")).mcpServers as Record<string, unknown>).rocky !== undefined,
+      true,
+    );
+  } finally {
+    fs.renameSync = originalRename;
+    syncBuiltinESMExports();
+  }
+});
+
 test("displacement fsyncs destination directory before source directory", async (t) => {
   const path = configPath(t, { theme: "dark" });
   const parent = dirname(path);
@@ -949,6 +1243,74 @@ test("displacement fsyncs destination directory before source directory", async 
     fs.fsyncSync = originalFsync;
     fs.renameSync = originalRename;
     syncBuiltinESMExports();
+  }
+});
+
+test("published transaction with absent target stays absent for manual recovery", async (t) => {
+  const path = configPath(t);
+  const displacedBytes = Buffer.from('{"secret":"fake-published-deletion-secret"}\n', "utf8");
+  const transaction = crashTransaction(path, "published-absent", "published", displacedBytes);
+
+  const configured = await createClaudeDesktopAdapter({ configPath: path })
+    .configure(registration, false);
+
+  assert.equal(configured.status, "failed");
+  assert.match(configured.detail ?? "", /manual recovery/i);
+  assert.doesNotMatch(configured.detail ?? "", /fake-published-deletion-secret/);
+  assert.equal(fs.existsSync(path), false);
+  assert.deepEqual(readFileSync(join(transaction, "displaced")), displacedBytes);
+  assert.equal(
+    JSON.parse(readFileSync(join(transaction, "manifest.json"), "utf8")).state,
+    "published",
+  );
+});
+
+test("inspect and check report pending recovery without mutating disk", async (t) => {
+  const path = configPath(t);
+  const displacedBytes = Buffer.from('{"secret":"fake-readonly-journal-secret"}\n', "utf8");
+  const transaction = crashTransaction(path, "readonly", "displaced", displacedBytes);
+  const beforeNames = readdirSync(transaction).sort();
+  const beforeManifest = readFileSync(join(transaction, "manifest.json"));
+  const adapter = createClaudeDesktopAdapter({ configPath: path });
+
+  const inspection = await adapter.inspect(registration);
+  const checked = await adapter.check(registration);
+
+  assert.equal(inspection.state, "unreadable");
+  assert.match(inspection.detail ?? "", /recovery/i);
+  assert.equal(checked.status, "failed");
+  assert.match(checked.detail ?? "", /recovery/i);
+  assert.doesNotMatch(`${inspection.detail}\n${checked.detail}`, /fake-readonly-journal-secret/);
+  assert.equal(fs.existsSync(path), false);
+  assert.deepEqual(readdirSync(transaction).sort(), beforeNames);
+  assert.deepEqual(readFileSync(join(transaction, "manifest.json")), beforeManifest);
+  assert.deepEqual(readFileSync(join(transaction, "displaced")), displacedBytes);
+});
+
+test("policy-blocked configure and remove leave pending recovery untouched", async (t) => {
+  for (const operation of ["configure", "remove"] as const) {
+    await t.test(operation, async (t) => {
+      const path = configPath(t);
+      const displacedBytes = Buffer.from(`${JSON.stringify({
+        secret: `fake-policy-${operation}-secret`,
+        mcpServers: { rocky: storedRegistration() },
+      })}\n`, "utf8");
+      const transaction = crashTransaction(path, `policy-${operation}`, "displaced", displacedBytes);
+      const beforeNames = readdirSync(transaction).sort();
+      const beforeManifest = readFileSync(join(transaction, "manifest.json"));
+      const adapter = createClaudeDesktopAdapter({ configPath: path, policyBlocked: true });
+
+      const result = operation === "configure"
+        ? await adapter.configure(registration, false)
+        : await adapter.remove(registration);
+
+      assert.equal(result.status, "blocked-by-policy");
+      assert.doesNotMatch(result.detail ?? "", new RegExp(`fake-policy-${operation}-secret`));
+      assert.equal(fs.existsSync(path), false);
+      assert.deepEqual(readdirSync(transaction).sort(), beforeNames);
+      assert.deepEqual(readFileSync(join(transaction, "manifest.json")), beforeManifest);
+      assert.deepEqual(readFileSync(join(transaction, "displaced")), displacedBytes);
+    });
   }
 });
 
@@ -1025,6 +1387,36 @@ test("restart recovery refuses a displaced symlink swapped in during publication
       JSON.parse(readFileSync(join(transaction, "manifest.json"), "utf8")).state,
       "displaced",
     );
+  } finally {
+    fs.linkSync = originalLink;
+    syncBuiltinESMExports();
+  }
+});
+
+test("failed restart restore reports surviving transaction instead of missing displaced file", async (t) => {
+  const path = configPath(t);
+  const displacedBytes = Buffer.from('{"theme":"dark"}\n', "utf8");
+  const transaction = crashTransaction(path, "restart-missing-displaced", "displaced", displacedBytes);
+  const displacedPath = join(transaction, "displaced");
+  const originalLink = fs.linkSync;
+  fs.linkSync = ((existingPath: fs.PathLike, newPath: fs.PathLike) => {
+    if (String(existingPath) === displacedPath && String(newPath) === path) {
+      fs.unlinkSync(displacedPath);
+    }
+    return originalLink(existingPath, newPath);
+  }) as typeof fs.linkSync;
+  syncBuiltinESMExports();
+
+  try {
+    const configured = await createClaudeDesktopAdapter({ configPath: path })
+      .configure(registration, false);
+
+    assert.equal(configured.status, "failed");
+    assert.match(configured.detail ?? "", /manual recovery/i);
+    assert.equal(fs.existsSync(transaction), true);
+    assert.equal(fs.existsSync(displacedPath), false);
+    assert.match(configured.detail ?? "", new RegExp(transaction.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+    assert.doesNotMatch(configured.detail ?? "", new RegExp(displacedPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   } finally {
     fs.linkSync = originalLink;
     syncBuiltinESMExports();

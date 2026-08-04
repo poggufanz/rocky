@@ -1,7 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import {
+import fs, {
   chmodSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -10,9 +11,15 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
-import { atomicWriteJson, backupFile, readJsonObject } from "../setup/json-config.js";
+import {
+  atomicWriteJson,
+  atomicWriteJsonIfUnchanged,
+  backupFile,
+  readJsonObject,
+} from "../setup/json-config.js";
 
 function temporaryDirectory(t: test.TestContext): string {
   const directory = mkdtempSync(join(tmpdir(), "rocky-json-config-"));
@@ -155,4 +162,58 @@ test("atomic JSON writer cleans its random temporary sibling after rename failur
   );
   assert.deepEqual(readdirSync(directory), [basename(path)]);
   assert.equal(statSync(path).isDirectory(), true);
+});
+
+test("conditional JSON results only report recovery artifacts that still exist", (t) => {
+  const directory = temporaryDirectory(t);
+  const successfulPath = join(directory, "successful.json");
+  const createdPath = join(directory, "created.json");
+  const racedPath = join(directory, "raced.json");
+  writeFileSync(successfulPath, '{"before":true}\n', "utf8");
+  writeFileSync(racedPath, '{"before":true}\n', "utf8");
+
+  const successfulPrior = readJsonObject(successfulPath);
+  const createdPrior = readJsonObject(createdPath);
+  const racedPrior = readJsonObject(racedPath);
+  assert.equal(successfulPrior.status, "valid");
+  assert.equal(createdPrior.status, "missing");
+  assert.equal(racedPrior.status, "valid");
+
+  const observations = [
+    {
+      scenario: "successful replacement",
+      result: atomicWriteJsonIfUnchanged(successfulPath, { after: true }, successfulPrior),
+    },
+    {
+      scenario: "successful creation",
+      result: atomicWriteJsonIfUnchanged(createdPath, { after: true }, createdPrior),
+    },
+  ];
+
+  const originalLink = fs.linkSync;
+  fs.linkSync = ((existingPath: fs.PathLike, newPath: fs.PathLike) => {
+    if (basename(existingPath.toString()) === "prepared" && newPath.toString() === racedPath) {
+      rmSync(join(dirname(existingPath.toString()), "displaced"));
+      writeFileSync(racedPath, '{"concurrent":true}\n', "utf8");
+    }
+    return originalLink(existingPath, newPath);
+  }) as typeof fs.linkSync;
+  syncBuiltinESMExports();
+  t.after(() => {
+    fs.linkSync = originalLink;
+    syncBuiltinESMExports();
+  });
+
+  observations.push({
+    scenario: "publication conflict after displaced recovery disappears",
+    result: atomicWriteJsonIfUnchanged(racedPath, { after: true }, racedPrior),
+  });
+
+  for (const { scenario, result } of observations) {
+    if (result.recoveryPath === undefined) continue;
+    assert.doesNotThrow(
+      () => lstatSync(result.recoveryPath!),
+      `${scenario} reported a missing recovery artifact`,
+    );
+  }
 });

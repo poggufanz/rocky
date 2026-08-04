@@ -218,6 +218,56 @@ test("replacement reports an owned backup artifact when durability and cleanup f
   }
 });
 
+test("replacement does not report a deleted backup after parent-sync failure", async (t) => {
+  const path = userConfig(t, { mcpServers: { rocky: rockyEntry("/old/node") } });
+  const originalOpen = fs.openSync;
+  const originalFsync = fs.fsyncSync;
+  const originalRm = fs.rmSync;
+  let backupDescriptor: number | undefined;
+  let backupPath: string | undefined;
+  let backupDeleted = false;
+  fs.openSync = ((target: fs.PathLike, flags: fs.OpenMode, mode?: fs.Mode) => {
+    const descriptor = originalOpen(target, flags, mode);
+    if (String(target).includes(".backup-")) {
+      backupDescriptor = descriptor;
+      backupPath = String(target);
+    }
+    return descriptor;
+  }) as typeof fs.openSync;
+  fs.fsyncSync = ((descriptor: number) => {
+    if (descriptor === backupDescriptor) throw new Error("fake Code backup fsync failure");
+    if (backupDeleted) throw new Error("fake Code parent fsync failure");
+    return originalFsync(descriptor);
+  }) as typeof fs.fsyncSync;
+  fs.rmSync = ((target: fs.PathLike, options?: fs.RmDirOptions) => {
+    const result = originalRm(target, options);
+    if (String(target) === backupPath) backupDeleted = true;
+    return result;
+  }) as typeof fs.rmSync;
+  syncBuiltinESMExports();
+
+  try {
+    const runner = new FakeRunner([]);
+    const configured = await createClaudeCodeAdapter({
+      runner,
+      executable: "/opt/claude",
+      userConfigPath: path,
+    }).configure(registration, true);
+
+    assert.equal(configured.status, "failed");
+    assert.match(configured.detail ?? "", /back up Claude Code user config/i);
+    assert.doesNotMatch(configured.detail ?? "", /manual recovery|\.backup-/i);
+    assert.ok(backupPath);
+    assert.equal(fs.existsSync(backupPath), false);
+    assert.deepEqual(runner.calls, []);
+  } finally {
+    fs.openSync = originalOpen;
+    fs.fsyncSync = originalFsync;
+    fs.rmSync = originalRm;
+    syncBuiltinESMExports();
+  }
+});
+
 test("replacement remove refusal stops before add and preserves config", async (t) => {
   const cases = [
     { name: "enterprise policy", response: result(1, "", "enterprise policy: remove-secret"), status: "blocked-by-policy" },
