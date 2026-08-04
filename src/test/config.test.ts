@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadConfig, saveConfigAtomic } from "../core/config.js";
@@ -59,9 +59,8 @@ test("invalid config shapes are refused", () => {
 
 test("failed atomic write leaves no temp sibling", () => {
   const directory = mkdtempSync(join(tmpdir(), "rocky-config-"));
-  const parent = join(directory, "not-a-directory");
-  writeFileSync(parent, "file", "utf8");
-  const file = join(parent, "config.json");
+  const file = join(directory, "config.json");
+  mkdirSync(file);
   assert.throws(() => saveConfigAtomic({ version: 1, ai: { enabled: false } }, file));
-  assert.deepEqual(readdirSync(directory), ["not-a-directory"]);
+  assert.deepEqual(readdirSync(directory), ["config.json"]);
 });
