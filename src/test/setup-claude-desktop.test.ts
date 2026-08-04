@@ -2,7 +2,11 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import fs, {
   chmodSync,
+  closeSync,
+  ftruncateSync,
   mkdtempSync,
+  mkdirSync,
+  openSync,
   readFileSync,
   readdirSync,
   rmSync,
@@ -356,10 +360,18 @@ test("atomic write failure preserves current config, keeps backup, and cleans te
   const path = configPath(t, original);
   const originalBytes = readFileSync(path);
   const originalRename = fs.renameSync;
+  const originalLink = fs.linkSync;
   fs.renameSync = ((source: fs.PathLike, destination: fs.PathLike) => {
     if (String(destination) === path) throw Object.assign(new Error("injected rename failure"), { code: "EACCES" });
     return originalRename(source, destination);
   }) as typeof fs.renameSync;
+  fs.linkSync = ((existingPath: fs.PathLike, newPath: fs.PathLike) => {
+    if (String(newPath) === path
+      && (String(existingPath).includes(".tmp-") || basename(String(existingPath)) === "prepared")) {
+      throw Object.assign(new Error("injected link failure"), { code: "EACCES" });
+    }
+    return originalLink(existingPath, newPath);
+  }) as typeof fs.linkSync;
   syncBuiltinESMExports();
 
   try {
@@ -367,7 +379,7 @@ test("atomic write failure preserves current config, keeps backup, and cleans te
     const configured = await adapter.configure(registration, false);
 
     assert.equal(configured.status, "failed");
-    assert.match(configured.detail ?? "", /write Claude Desktop config/i);
+    assert.match(configured.detail ?? "", /write Claude Desktop config|manual recovery/i);
     assert.doesNotMatch(configured.detail ?? "", /fake-write-secret|injected rename/);
     assert.deepEqual(configured.manualRegistration, registration);
     assert.deepEqual(readFileSync(path), originalBytes);
@@ -375,6 +387,104 @@ test("atomic write failure preserves current config, keeps backup, and cleans te
     assert.equal(readdirSync(dirname(path)).some((name) => name.includes(".tmp-")), false);
   } finally {
     fs.renameSync = originalRename;
+    fs.linkSync = originalLink;
+    syncBuiltinESMExports();
+  }
+});
+
+test("prepared write failure closes descriptor before Windows-like cleanup", async (t) => {
+  const path = configPath(t, { theme: "dark" });
+  const originalBytes = readFileSync(path);
+  const originalOpen = fs.openSync;
+  const originalClose = fs.closeSync;
+  const originalWrite = fs.writeFileSync;
+  const originalRm = fs.rmSync;
+  let preparedDescriptor: number | undefined;
+  let preparedOpen = false;
+  fs.openSync = ((target: fs.PathLike, flags: fs.OpenMode, mode?: fs.Mode) => {
+    const descriptor = originalOpen(target, flags, mode);
+    if (basename(String(target)) === "prepared") {
+      preparedDescriptor = descriptor;
+      preparedOpen = true;
+    }
+    return descriptor;
+  }) as typeof fs.openSync;
+  fs.closeSync = ((descriptor: number) => {
+    const result = originalClose(descriptor);
+    if (descriptor === preparedDescriptor) preparedOpen = false;
+    return result;
+  }) as typeof fs.closeSync;
+  fs.writeFileSync = ((target: fs.PathOrFileDescriptor, data: string | NodeJS.ArrayBufferView, options?: fs.WriteFileOptions) => {
+    if (target === preparedDescriptor) throw new Error("fake prepared write secret");
+    return originalWrite(target, data, options);
+  }) as typeof fs.writeFileSync;
+  fs.rmSync = ((target: fs.PathLike, options?: fs.RmDirOptions) => {
+    if (String(target).includes(".transaction-") && options?.recursive && preparedOpen) {
+      throw Object.assign(new Error("Windows busy"), { code: "EBUSY" });
+    }
+    return originalRm(target, options);
+  }) as typeof fs.rmSync;
+  syncBuiltinESMExports();
+
+  try {
+    const configured = await createClaudeDesktopAdapter({ configPath: path })
+      .configure(registration, false);
+
+    assert.equal(configured.status, "failed");
+    assert.match(configured.detail ?? "", /write Claude Desktop config/i);
+    assert.doesNotMatch(configured.detail ?? "", /fake prepared write secret|Windows busy/i);
+    assert.deepEqual(readFileSync(path), originalBytes);
+    assert.equal(readdirSync(dirname(path)).some((name) => name.includes(".transaction-")), false);
+  } finally {
+    fs.openSync = originalOpen;
+    fs.closeSync = originalClose;
+    fs.writeFileSync = originalWrite;
+    fs.rmSync = originalRm;
+    syncBuiltinESMExports();
+  }
+});
+
+test("failed backup cleanup reports its opaque secret-bearing artifact path", async (t) => {
+  const original = { secret: "fake-backup-artifact-secret", theme: "dark" };
+  const path = configPath(t, original);
+  const originalBytes = readFileSync(path);
+  const originalOpen = fs.openSync;
+  const originalFsync = fs.fsyncSync;
+  const originalRm = fs.rmSync;
+  let backupDescriptor: number | undefined;
+  let backupPath: string | undefined;
+  fs.openSync = ((target: fs.PathLike, flags: fs.OpenMode, mode?: fs.Mode) => {
+    const descriptor = originalOpen(target, flags, mode);
+    if (String(target).includes(".backup-")) {
+      backupDescriptor = descriptor;
+      backupPath = String(target);
+    }
+    return descriptor;
+  }) as typeof fs.openSync;
+  fs.fsyncSync = ((descriptor: number) => {
+    if (descriptor === backupDescriptor) throw new Error("fake backup fsync secret");
+    return originalFsync(descriptor);
+  }) as typeof fs.fsyncSync;
+  fs.rmSync = ((target: fs.PathLike, options?: fs.RmDirOptions) => {
+    if (String(target) === backupPath) throw Object.assign(new Error("fake backup rm secret"), { code: "EACCES" });
+    return originalRm(target, options);
+  }) as typeof fs.rmSync;
+  syncBuiltinESMExports();
+
+  try {
+    const configured = await createClaudeDesktopAdapter({ configPath: path })
+      .configure(registration, false);
+
+    assert.equal(configured.status, "failed");
+    assert.match(configured.detail ?? "", /manual recovery/i);
+    assert.ok(backupPath);
+    assert.match(configured.detail ?? "", new RegExp(backupPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+    assert.doesNotMatch(configured.detail ?? "", /fake-backup-artifact-secret|fake backup fsync|fake backup rm/i);
+    assert.deepEqual(readFileSync(backupPath), originalBytes);
+  } finally {
+    fs.openSync = originalOpen;
+    fs.fsyncSync = originalFsync;
+    fs.rmSync = originalRm;
     syncBuiltinESMExports();
   }
 });
@@ -389,11 +499,12 @@ test("concurrent unrelated config change after backup is preserved instead of ov
   const path = configPath(t, original);
   const originalBytes = readFileSync(path);
   const concurrentBytes = Buffer.from(`${JSON.stringify(concurrent, null, 2)}\n`, "utf8");
-  const originalCopy = fs.copyFileSync;
-  fs.copyFileSync = ((source: fs.PathLike, destination: fs.PathLike, mode?: number) => {
-    originalCopy(source, destination, mode);
-    if (String(source) === path) writeFileSync(path, concurrentBytes);
-  }) as typeof fs.copyFileSync;
+  const originalOpen = fs.openSync;
+  fs.openSync = ((target: fs.PathLike, flags: fs.OpenMode, mode?: fs.Mode) => {
+    const descriptor = originalOpen(target, flags, mode);
+    if (String(target).startsWith(`${path}.backup-`)) writeFileSync(path, concurrentBytes);
+    return descriptor;
+  }) as typeof fs.openSync;
   syncBuiltinESMExports();
 
   try {
@@ -409,9 +520,591 @@ test("concurrent unrelated config change after backup is preserved instead of ov
     assert.deepEqual(readFileSync(backups[0]!), originalBytes);
     assert.equal(readdirSync(dirname(path)).some((name) => name.includes(".tmp-")), false);
   } finally {
-    fs.copyFileSync = originalCopy;
+    fs.openSync = originalOpen;
     syncBuiltinESMExports();
   }
+});
+
+test("configure preserves an unrelated update injected immediately before replacement", async (t) => {
+  const original = { theme: "dark", mcpServers: { other: { enabled: true } } };
+  const concurrent = {
+    theme: "light",
+    secret: "fake-late-configure-secret",
+    mcpServers: { other: { enabled: false }, concurrent: { command: "/opt/new" } },
+  };
+  const path = configPath(t, original);
+  const originalBytes = readFileSync(path);
+  const concurrentBytes = Buffer.from(`${JSON.stringify(concurrent, null, 2)}\n`, "utf8");
+  const originalRename = fs.renameSync;
+  let injected = false;
+  fs.renameSync = ((source: fs.PathLike, destination: fs.PathLike) => {
+    if (!injected && (String(source) === path || String(destination) === path)) {
+      injected = true;
+      writeFileSync(path, concurrentBytes);
+      chmodSync(path, 0o600);
+    }
+    return originalRename(source, destination);
+  }) as typeof fs.renameSync;
+  syncBuiltinESMExports();
+
+  try {
+    const adapter = createClaudeDesktopAdapter({ configPath: path });
+    const configured = await adapter.configure(registration, false);
+
+    assert.equal(injected, true);
+    assert.equal(configured.status, "failed");
+    assert.match(configured.detail ?? "", /changed|recovery|manual|retry/i);
+    assert.doesNotMatch(configured.detail ?? "", /fake-late-configure-secret/);
+    assert.deepEqual(readFileSync(path), concurrentBytes);
+    assert.equal(statSync(path).mode & 0o777, 0o600);
+    const backups = backupPaths(path);
+    assert.equal(backups.length, 1);
+    assert.deepEqual(readFileSync(backups[0]!), originalBytes);
+    assert.match(configured.detail ?? "", /live recovery/i);
+    assert.equal(
+      readdirSync(dirname(path)).some((name) => name.includes(".transaction-")),
+      true,
+    );
+  } finally {
+    fs.renameSync = originalRename;
+    syncBuiltinESMExports();
+  }
+});
+
+test("remove preserves an unrelated update injected immediately before replacement", async (t) => {
+  const original = {
+    theme: "dark",
+    mcpServers: { other: { enabled: true }, rocky: storedRegistration() },
+  };
+  const concurrent = {
+    theme: "light",
+    secret: "fake-late-remove-secret",
+    mcpServers: { other: { enabled: false }, rocky: storedRegistration() },
+  };
+  const path = configPath(t, original);
+  const concurrentBytes = Buffer.from(`${JSON.stringify(concurrent, null, 2)}\n`, "utf8");
+  const originalRename = fs.renameSync;
+  let injected = false;
+  fs.renameSync = ((source: fs.PathLike, destination: fs.PathLike) => {
+    if (!injected && (String(source) === path || String(destination) === path)) {
+      injected = true;
+      writeFileSync(path, concurrentBytes);
+    }
+    return originalRename(source, destination);
+  }) as typeof fs.renameSync;
+  syncBuiltinESMExports();
+
+  try {
+    const adapter = createClaudeDesktopAdapter({ configPath: path });
+    const removed = await adapter.remove(registration);
+
+    assert.equal(injected, true);
+    assert.equal(removed.status, "failed");
+    assert.match(removed.detail ?? "", /changed|recovery|manual|retry/i);
+    assert.doesNotMatch(removed.detail ?? "", /fake-late-remove-secret/);
+    assert.deepEqual(readFileSync(path), concurrentBytes);
+    assert.equal(backupPaths(path).length, 1);
+    assert.match(removed.detail ?? "", /live recovery/i);
+    assert.equal(
+      readdirSync(dirname(path)).some((name) => name.includes(".transaction-")),
+      true,
+    );
+  } finally {
+    fs.renameSync = originalRename;
+    syncBuiltinESMExports();
+  }
+});
+
+test("missing-config configure preserves a file created immediately before installation", async (t) => {
+  const path = configPath(t);
+  const concurrent = { theme: "light", secret: "fake-late-create-secret" };
+  const concurrentBytes = Buffer.from(`${JSON.stringify(concurrent, null, 2)}\n`, "utf8");
+  const originalRename = fs.renameSync;
+  const originalLink = fs.linkSync;
+  let injected = false;
+  const inject = () => {
+    if (injected) return;
+    injected = true;
+    writeFileSync(path, concurrentBytes, { mode: 0o640 });
+    chmodSync(path, 0o640);
+  };
+  fs.renameSync = ((source: fs.PathLike, destination: fs.PathLike) => {
+    if (String(destination) === path) inject();
+    return originalRename(source, destination);
+  }) as typeof fs.renameSync;
+  fs.linkSync = ((existingPath: fs.PathLike, newPath: fs.PathLike) => {
+    if (String(newPath) === path) inject();
+    return originalLink(existingPath, newPath);
+  }) as typeof fs.linkSync;
+  syncBuiltinESMExports();
+
+  try {
+    const adapter = createClaudeDesktopAdapter({ configPath: path });
+    const configured = await adapter.configure(registration, false);
+
+    assert.equal(injected, true);
+    assert.equal(configured.status, "failed");
+    assert.match(configured.detail ?? "", /changed|recovery|manual|retry/i);
+    assert.doesNotMatch(configured.detail ?? "", /fake-late-create-secret/);
+    assert.deepEqual(readFileSync(path), concurrentBytes);
+    assert.equal(statSync(path).mode & 0o777, 0o640);
+    assert.deepEqual(backupPaths(path), []);
+    assert.deepEqual(readdirSync(dirname(path)), [basename(path)]);
+  } finally {
+    fs.renameSync = originalRename;
+    fs.linkSync = originalLink;
+    syncBuiltinESMExports();
+  }
+});
+
+test("unsupported hard links abort before displacing an existing config", async (t) => {
+  const original = {
+    theme: "dark",
+    secret: "fake-hard-link-secret",
+    mcpServers: { other: { enabled: true } },
+  };
+  const path = configPath(t, original);
+  const originalBytes = readFileSync(path);
+  const originalLink = fs.linkSync;
+  fs.linkSync = (() => {
+    throw Object.assign(new Error("hard links unsupported: fake-hard-link-secret"), { code: "EPERM" });
+  }) as typeof fs.linkSync;
+  syncBuiltinESMExports();
+
+  try {
+    const adapter = createClaudeDesktopAdapter({ configPath: path });
+    const configured = await adapter.configure(registration, false);
+
+    assert.equal(configured.status, "failed");
+    assert.match(configured.detail ?? "", /write Claude Desktop config/i);
+    assert.doesNotMatch(configured.detail ?? "", /fake-hard-link-secret|hard links unsupported/);
+    assert.deepEqual(readFileSync(path), originalBytes);
+    assert.equal(statSync(path).mode & 0o777, 0o640);
+    assert.equal(backupPaths(path).length, 1);
+    assert.equal(
+      readdirSync(dirname(path)).some((name) => name.includes(".transaction-")),
+      false,
+    );
+  } finally {
+    fs.linkSync = originalLink;
+    syncBuiltinESMExports();
+  }
+});
+
+test("a symlink swapped in at displacement is restored instead of overwritten", async (t) => {
+  const original = { theme: "dark", mcpServers: { other: { enabled: true } } };
+  const path = configPath(t, original);
+  const originalBytes = readFileSync(path);
+  const concurrentTarget = join(dirname(path), "concurrent-config.json");
+  writeFileSync(concurrentTarget, originalBytes, { mode: 0o640 });
+  const originalRename = fs.renameSync;
+  let injected = false;
+  fs.renameSync = ((source: fs.PathLike, destination: fs.PathLike) => {
+    if (!injected && String(source) === path && basename(String(destination)) === "displaced") {
+      injected = true;
+      fs.unlinkSync(path);
+      fs.symlinkSync(concurrentTarget, path);
+    }
+    return originalRename(source, destination);
+  }) as typeof fs.renameSync;
+  syncBuiltinESMExports();
+
+  try {
+    const configured = await createClaudeDesktopAdapter({ configPath: path })
+      .configure(registration, false);
+
+    assert.equal(injected, true);
+    assert.equal(configured.status, "failed");
+    assert.match(configured.detail ?? "", /changed|retry|manual recovery/i);
+    assert.equal(fs.lstatSync(path).isSymbolicLink(), true);
+    assert.equal(fs.readlinkSync(path), concurrentTarget);
+    assert.deepEqual(readFileSync(path), originalBytes);
+  } finally {
+    fs.renameSync = originalRename;
+    syncBuiltinESMExports();
+  }
+});
+
+test("cleanup failure after missing-config publication reports only a live path", async (t) => {
+  const path = configPath(t);
+  const originalRm = fs.rmSync;
+  let deletedTransaction: string | undefined;
+  fs.rmSync = ((target: fs.PathLike, options?: fs.RmDirOptions) => {
+    if (String(target).includes(".transaction-") && options?.recursive === true) {
+      deletedTransaction = String(target);
+      originalRm(target, options);
+      throw new Error("fake cleanup durability secret");
+    }
+    return originalRm(target, options);
+  }) as typeof fs.rmSync;
+  syncBuiltinESMExports();
+
+  try {
+    const configured = await createClaudeDesktopAdapter({ configPath: path })
+      .configure(registration, false);
+
+    assert.equal(configured.status, "failed");
+    assert.match(configured.detail ?? "", /manual recovery/i);
+    assert.match(configured.detail ?? "", new RegExp(path.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+    assert.doesNotMatch(configured.detail ?? "", /fake cleanup durability secret|transaction-/i);
+    assert.equal(deletedTransaction === undefined ? false : fs.existsSync(deletedTransaction), false);
+    assert.equal((JSON.parse(readFileSync(path, "utf8")).mcpServers as Record<string, unknown>).rocky !== undefined, true);
+  } finally {
+    fs.rmSync = originalRm;
+    syncBuiltinESMExports();
+  }
+});
+
+test("post-displacement creator wins while prior config remains at reported recovery path", async (t) => {
+  const original = { theme: "dark", mcpServers: { other: { enabled: true } } };
+  const concurrent = { theme: "light", secret: "fake-post-displacement-secret" };
+  const path = configPath(t, original);
+  const originalBytes = readFileSync(path);
+  const concurrentBytes = Buffer.from(`${JSON.stringify(concurrent, null, 2)}\n`, "utf8");
+  const originalLink = fs.linkSync;
+  let injected = false;
+  fs.linkSync = ((existingPath: fs.PathLike, newPath: fs.PathLike) => {
+    if (!injected && basename(String(existingPath)) === "prepared" && String(newPath) === path) {
+      injected = true;
+      writeFileSync(path, concurrentBytes, { mode: 0o600 });
+      chmodSync(path, 0o600);
+    }
+    return originalLink(existingPath, newPath);
+  }) as typeof fs.linkSync;
+  syncBuiltinESMExports();
+
+  try {
+    const adapter = createClaudeDesktopAdapter({ configPath: path });
+    const configured = await adapter.configure(registration, false);
+
+    assert.equal(injected, true);
+    assert.equal(configured.status, "failed");
+    assert.match(configured.detail ?? "", /manual recovery/i);
+    assert.doesNotMatch(configured.detail ?? "", /fake-post-displacement-secret/);
+    assert.deepEqual(readFileSync(path), concurrentBytes);
+    assert.equal(statSync(path).mode & 0o777, 0o600);
+    const transaction = readdirSync(dirname(path)).find((name) => name.includes(".transaction-"));
+    assert.ok(transaction);
+    const recoveryPath = join(dirname(path), transaction, "displaced");
+    assert.match(configured.detail ?? "", new RegExp(recoveryPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+    assert.deepEqual(readFileSync(recoveryPath), originalBytes);
+    assert.equal(statSync(recoveryPath).mode & 0o777, 0o640);
+    assert.deepEqual(readdirSync(dirname(recoveryPath)).sort(), ["displaced", "manifest.json"]);
+    assert.deepEqual(readFileSync(backupPaths(path)[0]!), originalBytes);
+  } finally {
+    fs.linkSync = originalLink;
+    syncBuiltinESMExports();
+  }
+});
+
+test("restore collision preserves current file and reports displaced concurrent recovery", async (t) => {
+  const original = { theme: "dark", mcpServers: { other: { version: 1 } } };
+  const displacedConcurrent = {
+    theme: "light",
+    secret: "fake-displaced-secret",
+    mcpServers: { other: { version: 2 } },
+  };
+  const currentConcurrent = {
+    theme: "contrast",
+    secret: "fake-current-secret",
+    mcpServers: { other: { version: 3 } },
+  };
+  const path = configPath(t, original);
+  const originalBytes = readFileSync(path);
+  const displacedBytes = Buffer.from(`${JSON.stringify(displacedConcurrent, null, 2)}\n`, "utf8");
+  const currentBytes = Buffer.from(`${JSON.stringify(currentConcurrent, null, 2)}\n`, "utf8");
+  const originalRename = fs.renameSync;
+  const originalLink = fs.linkSync;
+  let displacedInjected = false;
+  let currentInjected = false;
+  fs.renameSync = ((source: fs.PathLike, destination: fs.PathLike) => {
+    if (!displacedInjected && String(source) === path) {
+      displacedInjected = true;
+      writeFileSync(path, displacedBytes);
+    }
+    return originalRename(source, destination);
+  }) as typeof fs.renameSync;
+  fs.linkSync = ((existingPath: fs.PathLike, newPath: fs.PathLike) => {
+    if (!currentInjected && basename(String(existingPath)) === "displaced" && String(newPath) === path) {
+      currentInjected = true;
+      writeFileSync(path, currentBytes, { mode: 0o600 });
+      chmodSync(path, 0o600);
+    }
+    return originalLink(existingPath, newPath);
+  }) as typeof fs.linkSync;
+  syncBuiltinESMExports();
+
+  try {
+    const adapter = createClaudeDesktopAdapter({ configPath: path });
+    const configured = await adapter.configure(registration, false);
+
+    assert.equal(displacedInjected, true);
+    assert.equal(currentInjected, true);
+    assert.equal(configured.status, "failed");
+    assert.match(configured.detail ?? "", /manual recovery/i);
+    assert.doesNotMatch(configured.detail ?? "", /fake-displaced-secret|fake-current-secret/);
+    assert.deepEqual(readFileSync(path), currentBytes);
+    assert.equal(statSync(path).mode & 0o777, 0o600);
+    const transaction = readdirSync(dirname(path)).find((name) => name.includes(".transaction-"));
+    assert.ok(transaction);
+    const recoveryPath = join(dirname(path), transaction, "displaced");
+    assert.deepEqual(readFileSync(recoveryPath), displacedBytes);
+    assert.deepEqual(readFileSync(backupPaths(path)[0]!), originalBytes);
+    assert.deepEqual(readdirSync(dirname(recoveryPath)).sort(), ["displaced", "manifest.json"]);
+  } finally {
+    fs.renameSync = originalRename;
+    fs.linkSync = originalLink;
+    syncBuiltinESMExports();
+  }
+});
+
+test("held descriptor late write survives in reported committed recovery", async (t) => {
+  const original = { theme: "dark", mcpServers: { other: { version: 1 } } };
+  const late = {
+    theme: "late",
+    secret: "fake-held-descriptor-secret",
+    mcpServers: { other: { version: 2 }, held: { keep: true } },
+  };
+  const path = configPath(t, original);
+  const originalBytes = readFileSync(path);
+  const lateBytes = Buffer.from(`${JSON.stringify(late, null, 2)}\n`, "utf8");
+  const held = openSync(path, "r+");
+  const originalLink = fs.linkSync;
+  let injected = false;
+  fs.linkSync = ((existingPath: fs.PathLike, newPath: fs.PathLike) => {
+    if (!injected && basename(String(existingPath)) === "prepared" && String(newPath) === path) {
+      injected = true;
+      ftruncateSync(held, 0);
+      writeFileSync(held, lateBytes);
+    }
+    return originalLink(existingPath, newPath);
+  }) as typeof fs.linkSync;
+  syncBuiltinESMExports();
+
+  try {
+    const adapter = createClaudeDesktopAdapter({ configPath: path });
+    const configured = await adapter.configure(registration, false);
+
+    assert.equal(injected, true);
+    assert.equal(configured.status, "configured");
+    assert.match(configured.detail ?? "", /live recovery/i);
+    assert.doesNotMatch(configured.detail ?? "", /fake-held-descriptor-secret/);
+    assert.equal((JSON.parse(readFileSync(path, "utf8")).mcpServers as Record<string, unknown>).rocky !== undefined, true);
+    const transaction = readdirSync(dirname(path)).find((name) => name.includes(".transaction-"));
+    assert.ok(transaction);
+    const recoveryPath = join(dirname(path), transaction, "displaced");
+    assert.deepEqual(readFileSync(recoveryPath), lateBytes);
+    assert.deepEqual(readFileSync(backupPaths(path)[0]!), originalBytes);
+    assert.deepEqual(readdirSync(dirname(recoveryPath)).sort(), ["displaced", "manifest.json"]);
+  } finally {
+    closeSync(held);
+    fs.linkSync = originalLink;
+    syncBuiltinESMExports();
+  }
+});
+
+test("displacement fsyncs destination directory before source directory", async (t) => {
+  const path = configPath(t, { theme: "dark" });
+  const parent = dirname(path);
+  const originalOpen = fs.openSync;
+  const originalClose = fs.closeSync;
+  const originalFsync = fs.fsyncSync;
+  const originalRename = fs.renameSync;
+  const descriptors = new Map<number, string>();
+  const order: string[] = [];
+  let displaced = false;
+  fs.openSync = ((target: fs.PathLike, flags: fs.OpenMode, mode?: fs.Mode) => {
+    const descriptor = originalOpen(target, flags, mode);
+    descriptors.set(descriptor, String(target));
+    return descriptor;
+  }) as typeof fs.openSync;
+  fs.closeSync = ((descriptor: number) => {
+    descriptors.delete(descriptor);
+    return originalClose(descriptor);
+  }) as typeof fs.closeSync;
+  fs.renameSync = ((source: fs.PathLike, destination: fs.PathLike) => {
+    const result = originalRename(source, destination);
+    if (String(source) === path && basename(String(destination)) === "displaced") displaced = true;
+    return result;
+  }) as typeof fs.renameSync;
+  fs.fsyncSync = ((descriptor: number) => {
+    const target = descriptors.get(descriptor);
+    if (displaced && target !== undefined && fs.statSync(target).isDirectory()) {
+      if (target === parent) order.push("source");
+      else if (target.includes(".transaction-")) order.push("destination");
+    }
+    return originalFsync(descriptor);
+  }) as typeof fs.fsyncSync;
+  syncBuiltinESMExports();
+
+  try {
+    const configured = await createClaudeDesktopAdapter({ configPath: path })
+      .configure(registration, false);
+
+    assert.equal(configured.status, "configured");
+    assert.deepEqual(order.slice(0, 2), ["destination", "source"]);
+  } finally {
+    fs.openSync = originalOpen;
+    fs.closeSync = originalClose;
+    fs.fsyncSync = originalFsync;
+    fs.renameSync = originalRename;
+    syncBuiltinESMExports();
+  }
+});
+
+test("next invocation restores an absent target from a displaced crash transaction and stops", async (t) => {
+  const path = configPath(t);
+  const original = { theme: "dark", secret: "fake-crash-secret", mcpServers: { other: {} } };
+  const originalBytes = Buffer.from(`${JSON.stringify(original, null, 2)}\n`, "utf8");
+  const transaction = join(dirname(path), `.${basename(path)}.transaction-crash`);
+  mkdirSync(transaction, { mode: 0o700 });
+  writeFileSync(join(transaction, "displaced"), originalBytes, { mode: 0o640 });
+  writeFileSync(join(transaction, "manifest.json"), `${JSON.stringify({
+    version: 1,
+    state: "displaced",
+    target: path,
+  })}\n`, { mode: 0o600 });
+  const adapter = createClaudeDesktopAdapter({ configPath: path });
+
+  const configured = await adapter.configure(registration, false);
+
+  assert.equal(configured.status, "failed");
+  assert.match(configured.detail ?? "", /recovered|retry/i);
+  assert.doesNotMatch(configured.detail ?? "", /fake-crash-secret/);
+  assert.deepEqual(readFileSync(path), originalBytes);
+  assert.equal(statSync(path).mode & 0o777, 0o640);
+  assert.match(configured.detail ?? "", /live recovery/i);
+  assert.deepEqual(readFileSync(join(transaction, "displaced")), originalBytes);
+  assert.equal(
+    JSON.parse(readFileSync(join(transaction, "manifest.json"), "utf8")).state,
+    "committed",
+  );
+  assert.deepEqual(backupPaths(path), []);
+
+  const retried = await adapter.configure(registration, false);
+  assert.equal(retried.status, "configured");
+  assert.equal(
+    (JSON.parse(readFileSync(path, "utf8")).mcpServers as Record<string, unknown>).rocky !== undefined,
+    true,
+  );
+});
+
+test("restart recovery refuses a displaced symlink swapped in during publication", async (t) => {
+  const path = configPath(t);
+  const transaction = join(dirname(path), `.${basename(path)}.transaction-recovery-swap`);
+  const foreign = join(dirname(path), "foreign.json");
+  mkdirSync(transaction, { mode: 0o700 });
+  writeFileSync(foreign, "{\"secret\":\"fake-recovery-swap-secret\"}\n", { mode: 0o600 });
+  const displaced = join(transaction, "displaced");
+  writeFileSync(displaced, "{\"theme\":\"dark\"}\n", { mode: 0o640 });
+  writeFileSync(join(transaction, "manifest.json"), `${JSON.stringify({
+    version: 1,
+    state: "displaced",
+    target: path,
+  })}\n`, { mode: 0o600 });
+  const originalLink = fs.linkSync;
+  fs.linkSync = ((existingPath: fs.PathLike, newPath: fs.PathLike) => {
+    if (String(existingPath) === displaced && String(newPath) === path) {
+      fs.unlinkSync(displaced);
+      fs.symlinkSync(foreign, displaced);
+    }
+    return originalLink(existingPath, newPath);
+  }) as typeof fs.linkSync;
+  syncBuiltinESMExports();
+
+  try {
+    const configured = await createClaudeDesktopAdapter({ configPath: path })
+      .configure(registration, false);
+
+    assert.equal(configured.status, "failed");
+    assert.match(configured.detail ?? "", /manual recovery/i);
+    assert.doesNotMatch(configured.detail ?? "", /fake-recovery-swap-secret/);
+    assert.equal(fs.lstatSync(path).isSymbolicLink(), true);
+    assert.equal(fs.lstatSync(displaced).isSymbolicLink(), true);
+    assert.equal(
+      JSON.parse(readFileSync(join(transaction, "manifest.json"), "utf8")).state,
+      "displaced",
+    );
+  } finally {
+    fs.linkSync = originalLink;
+    syncBuiltinESMExports();
+  }
+});
+
+test("next invocation safely aborts a prepared transaction before inspecting config", async (t) => {
+  const original = { theme: "dark", secret: "fake-prepared-secret" };
+  const path = configPath(t, original);
+  const originalBytes = readFileSync(path);
+  const transaction = join(dirname(path), `.${basename(path)}.transaction-prepared`);
+  mkdirSync(transaction, { mode: 0o700 });
+  writeFileSync(join(transaction, "prepared"), "{\"mcpServers\":{}}\n", { mode: 0o600 });
+  writeFileSync(join(transaction, "manifest.json"), `${JSON.stringify({
+    version: 1,
+    state: "prepared",
+    target: path,
+  })}\n`, { mode: 0o600 });
+
+  const configured = await createClaudeDesktopAdapter({ configPath: path })
+    .configure(registration, false);
+
+  assert.equal(configured.status, "failed");
+  assert.match(configured.detail ?? "", /recovered|retry/i);
+  assert.doesNotMatch(configured.detail ?? "", /fake-prepared-secret/);
+  assert.deepEqual(readFileSync(path), originalBytes);
+  assert.equal(fs.existsSync(transaction), false);
+  assert.deepEqual(backupPaths(path), []);
+});
+
+test("next invocation recognizes a prepared crash with both names on the same inode", async (t) => {
+  const original = { theme: "dark", secret: "fake-both-names-secret" };
+  const path = configPath(t, original);
+  const transaction = join(dirname(path), `.${basename(path)}.transaction-both`);
+  mkdirSync(transaction, { mode: 0o700 });
+  fs.linkSync(path, join(transaction, "displaced"));
+  writeFileSync(join(transaction, "prepared"), "{\"mcpServers\":{}}\n", { mode: 0o600 });
+  writeFileSync(join(transaction, "manifest.json"), `${JSON.stringify({
+    version: 1,
+    state: "prepared",
+    target: path,
+  })}\n`, { mode: 0o600 });
+
+  const configured = await createClaudeDesktopAdapter({ configPath: path })
+    .configure(registration, false);
+
+  assert.equal(configured.status, "failed");
+  assert.match(configured.detail ?? "", /recovered|live recovery|retry/i);
+  assert.doesNotMatch(configured.detail ?? "", /fake-both-names-secret/);
+  assert.equal(
+    JSON.parse(readFileSync(join(transaction, "manifest.json"), "utf8")).state,
+    "committed",
+  );
+  assert.equal(fs.existsSync(join(transaction, "prepared")), false);
+});
+
+test("next invocation preserves ambiguous crash target and transaction for manual recovery", async (t) => {
+  const current = { theme: "light", secret: "fake-ambiguous-current" };
+  const displaced = { theme: "dark", secret: "fake-ambiguous-displaced" };
+  const path = configPath(t, current);
+  const currentBytes = readFileSync(path);
+  const displacedBytes = Buffer.from(`${JSON.stringify(displaced, null, 2)}\n`, "utf8");
+  const transaction = join(dirname(path), `.${basename(path)}.transaction-ambiguous`);
+  mkdirSync(transaction, { mode: 0o700 });
+  writeFileSync(join(transaction, "displaced"), displacedBytes, { mode: 0o640 });
+  writeFileSync(join(transaction, "manifest.json"), `${JSON.stringify({
+    version: 1,
+    state: "published",
+    target: path,
+  })}\n`, { mode: 0o600 });
+  const adapter = createClaudeDesktopAdapter({ configPath: path });
+
+  const configured = await adapter.configure(registration, true);
+
+  assert.equal(configured.status, "failed");
+  assert.match(configured.detail ?? "", /manual recovery/i);
+  assert.doesNotMatch(configured.detail ?? "", /fake-ambiguous-current|fake-ambiguous-displaced/);
+  assert.deepEqual(readFileSync(path), currentBytes);
+  assert.deepEqual(readFileSync(join(transaction, "displaced")), displacedBytes);
+  assert.deepEqual(backupPaths(path), []);
 });
 
 test("registration transform is used for storage, inspection, and removal", async (t) => {

@@ -165,6 +165,59 @@ test("replacement stops before remove when the full config backup cannot be crea
   assert.deepEqual(runner.calls, []);
 });
 
+test("replacement reports an owned backup artifact when durability and cleanup fail", async (t) => {
+  const original = {
+    secret: "fake-code-backup-artifact-secret",
+    mcpServers: { rocky: rockyEntry("/old/node") },
+  };
+  const path = userConfig(t, original);
+  const originalBytes = readFileSync(path);
+  const originalOpen = fs.openSync;
+  const originalFsync = fs.fsyncSync;
+  const originalRm = fs.rmSync;
+  let backupDescriptor: number | undefined;
+  let backupPath: string | undefined;
+  fs.openSync = ((target: fs.PathLike, flags: fs.OpenMode, mode?: fs.Mode) => {
+    const descriptor = originalOpen(target, flags, mode);
+    if (String(target).includes(".backup-")) {
+      backupDescriptor = descriptor;
+      backupPath = String(target);
+    }
+    return descriptor;
+  }) as typeof fs.openSync;
+  fs.fsyncSync = ((descriptor: number) => {
+    if (descriptor === backupDescriptor) throw new Error("fake code backup fsync secret");
+    return originalFsync(descriptor);
+  }) as typeof fs.fsyncSync;
+  fs.rmSync = ((target: fs.PathLike, options?: fs.RmDirOptions) => {
+    if (String(target) === backupPath) throw Object.assign(new Error("fake code backup rm secret"), { code: "EACCES" });
+    return originalRm(target, options);
+  }) as typeof fs.rmSync;
+  syncBuiltinESMExports();
+
+  try {
+    const runner = new FakeRunner([]);
+    const configured = await createClaudeCodeAdapter({
+      runner,
+      executable: "/opt/claude",
+      userConfigPath: path,
+    }).configure(registration, true);
+
+    assert.equal(configured.status, "failed");
+    assert.match(configured.detail ?? "", /manual recovery/i);
+    assert.ok(backupPath);
+    assert.match(configured.detail ?? "", new RegExp(backupPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+    assert.doesNotMatch(configured.detail ?? "", /fake-code-backup-artifact-secret|fake code backup/i);
+    assert.deepEqual(readFileSync(backupPath), originalBytes);
+    assert.deepEqual(runner.calls, []);
+  } finally {
+    fs.openSync = originalOpen;
+    fs.fsyncSync = originalFsync;
+    fs.rmSync = originalRm;
+    syncBuiltinESMExports();
+  }
+});
+
 test("replacement remove refusal stops before add and preserves config", async (t) => {
   const cases = [
     { name: "enterprise policy", response: result(1, "", "enterprise policy: remove-secret"), status: "blocked-by-policy" },

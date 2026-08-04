@@ -92,6 +92,19 @@ test("backup refuses a same-timestamp collision without changing existing bytes"
   assert.notDeepEqual(readFileSync(path), firstBackupBytes);
 });
 
+test("backup fsyncs a read-only source through its writable owned descriptor", (t) => {
+  const directory = temporaryDirectory(t);
+  const path = join(directory, "readonly.json");
+  const bytes = Buffer.from('{"token":"fake-readonly-secret"}\n', "utf8");
+  writeFileSync(path, bytes, { mode: 0o400 });
+  chmodSync(path, 0o400);
+
+  const backup = backupFile(path, new Date("2026-08-04T08:15:31.123Z"));
+
+  assert.deepEqual(readFileSync(backup), bytes);
+  assert.equal(statSync(backup).mode & 0o777, 0o400);
+});
+
 test("atomic JSON replacement preserves unrelated keys and prior permissions", (t) => {
   const directory = temporaryDirectory(t);
   const path = join(directory, "settings.json");

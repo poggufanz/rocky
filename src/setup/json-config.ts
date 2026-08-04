@@ -1,11 +1,14 @@
 import {
   closeSync,
-  constants,
-  copyFileSync,
   fchmodSync,
+  fstatSync,
   fsyncSync,
+  linkSync,
+  lstatSync,
+  mkdirSync,
   openSync,
   readFileSync,
+  readdirSync,
   renameSync,
   rmSync,
   statSync,
@@ -64,12 +67,57 @@ function backupTimestamp(now: Date): string {
 }
 
 export function backupFile(path: string, now = new Date()): string {
+  const backupPath = `${path}.backup-${backupTimestamp(now)}`;
+  let sourceDescriptor: number | undefined;
+  let descriptor: number | undefined;
+  let backupCreated = false;
   try {
-    const backupPath = `${path}.backup-${backupTimestamp(now)}`;
-    copyFileSync(path, backupPath, constants.COPYFILE_EXCL);
+    sourceDescriptor = openSync(path, "r");
+    const bytes = readFileSync(sourceDescriptor);
+    const mode = fstatSync(sourceDescriptor).mode & 0o777;
+    closeSync(sourceDescriptor);
+    sourceDescriptor = undefined;
+    descriptor = openSync(backupPath, "wx", 0o600);
+    backupCreated = true;
+    writeFileSync(descriptor, bytes);
+    fchmodSync(descriptor, mode);
+    fsyncSync(descriptor);
+    closeSync(descriptor);
+    descriptor = undefined;
+    syncParentDirectory(backupPath);
     return backupPath;
   } catch {
-    throw new Error("Unable to back up JSON config");
+    if (sourceDescriptor !== undefined) {
+      try {
+        closeSync(sourceDescriptor);
+      } catch {
+        // Preserve secret-free backup failure.
+      }
+    }
+    if (descriptor !== undefined) {
+      try {
+        closeSync(descriptor);
+      } catch {
+        // Preserve secret-free backup failure.
+      }
+    }
+    let recoveryPath: string | undefined;
+    if (backupCreated) {
+      try {
+        rmSync(backupPath, { force: true });
+        syncParentDirectory(backupPath);
+      } catch {
+        recoveryPath = backupPath;
+      }
+    }
+    throw new BackupFileError(recoveryPath);
+  }
+}
+
+export class BackupFileError extends Error {
+  constructor(readonly recoveryPath?: string) {
+    super("Unable to back up JSON config");
+    this.name = "BackupFileError";
   }
 }
 
@@ -131,5 +179,494 @@ export function atomicWriteJson(
         // Preserve the operation's secret-free error.
       }
     }
+  }
+}
+
+export type ConditionalJsonWriteResult =
+  | { status: "written"; recoveryPath?: string }
+  | { status: "changed"; recoveryPath?: string }
+  | { status: "recovery-required"; recoveryPath?: string };
+
+export type JsonTransactionRecoveryResult =
+  | { status: "clear" }
+  | { status: "recovered"; recoveryPath?: string }
+  | { status: "manual"; recoveryPath: string };
+
+type TransactionState = "prepared" | "displaced" | "published" | "committed";
+
+interface TransactionManifest {
+  version: 1;
+  state: TransactionState;
+  target: string;
+}
+
+function transactionPath(path: string): string {
+  return join(
+    dirname(path),
+    `.${basename(path)}.transaction-${process.pid}-${randomBytes(8).toString("hex")}`,
+  );
+}
+
+function fileMatches(path: string, bytes: Buffer, mode?: number): boolean {
+  try {
+    return readFileSync(path).equals(bytes)
+      && (mode === undefined || (statSync(path).mode & 0o777) === mode);
+  } catch {
+    return false;
+  }
+}
+
+function pathExists(path: string): boolean {
+  try {
+    lstatSync(path);
+    return true;
+  } catch (error) {
+    if (errorCode(error) === "ENOENT") return false;
+    return true;
+  }
+}
+
+function matchingCommittedRecoveryLinks(
+  transactionTarget: string,
+  metadata: NonNullable<ReturnType<typeof lstatSync>>,
+): number {
+  let managedLinks = 0;
+  for (const transactionDirectory of transactionDirectories(transactionTarget)) {
+    if (readManifest(transactionDirectory, transactionTarget)?.state !== "committed") continue;
+    try {
+      const recovery = lstatSync(join(transactionDirectory, "displaced"));
+      if (recovery.isFile()
+        && recovery.dev === metadata.dev
+        && recovery.ino === metadata.ino) {
+        managedLinks += 1;
+      }
+    } catch {
+      // A missing committed recovery cannot authorize an extra hard link.
+    }
+  }
+  return managedLinks;
+}
+
+function isManagedRegularFile(path: string, transactionTarget = path): boolean {
+  try {
+    const metadata = lstatSync(path);
+    if (!metadata.isFile()) return false;
+    return metadata.nlink === matchingCommittedRecoveryLinks(transactionTarget, metadata) + 1;
+  } catch {
+    return false;
+  }
+}
+
+function isManagedRecoveryPair(
+  path: string,
+  displacedPath: string,
+  transactionTarget: string,
+): boolean {
+  try {
+    const current = lstatSync(path);
+    const displaced = lstatSync(displacedPath);
+    if (!current.isFile()
+      || !displaced.isFile()
+      || current.dev !== displaced.dev
+      || current.ino !== displaced.ino) {
+      return false;
+    }
+    const expectedLinks = matchingCommittedRecoveryLinks(transactionTarget, current) + 2;
+    return current.nlink === expectedLinks && displaced.nlink === expectedLinks;
+  } catch {
+    return false;
+  }
+}
+
+function syncDirectory(path: string): void {
+  if (process.platform === "win32") return;
+  let descriptor: number | undefined;
+  try {
+    descriptor = openSync(path, "r");
+    fsyncSync(descriptor);
+  } finally {
+    if (descriptor !== undefined) closeSync(descriptor);
+  }
+}
+
+function writeManifest(
+  transactionDirectory: string,
+  target: string,
+  state: TransactionState,
+): void {
+  const manifestPath = join(transactionDirectory, "manifest.json");
+  const temporaryPath = join(transactionDirectory, "manifest.tmp");
+  const manifest: TransactionManifest = { version: 1, state, target };
+  let descriptor: number | undefined;
+  try {
+    descriptor = openSync(temporaryPath, "wx", 0o600);
+    writeFileSync(descriptor, `${JSON.stringify(manifest)}\n`, "utf8");
+    fsyncSync(descriptor);
+    closeSync(descriptor);
+    descriptor = undefined;
+    renameSync(temporaryPath, manifestPath);
+    syncDirectory(transactionDirectory);
+  } finally {
+    if (descriptor !== undefined) {
+      try {
+        closeSync(descriptor);
+      } catch {
+        // Caller reports a secret-free transaction recovery path.
+      }
+    }
+    if (pathExists(temporaryPath)) {
+      try {
+        rmSync(temporaryPath, { force: true });
+      } catch {
+        // Caller reports a secret-free transaction recovery path.
+      }
+    }
+  }
+}
+
+function readManifest(transactionDirectory: string, target: string): TransactionManifest | undefined {
+  try {
+    const parsed: unknown = JSON.parse(
+      readFileSync(join(transactionDirectory, "manifest.json"), "utf8"),
+    );
+    if (!isObject(parsed)
+      || parsed.version !== 1
+      || parsed.target !== target
+      || (parsed.state !== "prepared"
+        && parsed.state !== "displaced"
+        && parsed.state !== "published"
+        && parsed.state !== "committed")) {
+      return undefined;
+    }
+    return parsed as unknown as TransactionManifest;
+  } catch {
+    return undefined;
+  }
+}
+
+function removeTransaction(transactionDirectory: string): boolean {
+  try {
+    rmSync(transactionDirectory, { recursive: true });
+    syncParentDirectory(transactionDirectory);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function transactionDirectories(path: string): string[] {
+  const parent = dirname(path);
+  const prefix = `.${basename(path)}.transaction-`;
+  try {
+    return readdirSync(parent)
+      .filter((name) => name.startsWith(prefix))
+      .map((name) => join(parent, name))
+      .filter((candidate) => {
+        try {
+          return lstatSync(candidate).isDirectory();
+        } catch {
+          return false;
+        }
+      })
+      .sort();
+  } catch {
+    return [];
+  }
+}
+
+/** Recover an interrupted mutation before anybody interprets an absent config. */
+export function recoverJsonTransaction(path: string): JsonTransactionRecoveryResult {
+  for (const transactionDirectory of transactionDirectories(path)) {
+    const manifest = readManifest(transactionDirectory, path);
+    if (manifest?.state === "committed") continue;
+    if (manifest === undefined) {
+      return { status: "manual", recoveryPath: transactionDirectory };
+    }
+
+    const displacedPath = join(transactionDirectory, "displaced");
+    if (manifest.state === "prepared" && !pathExists(displacedPath)) {
+      if (!removeTransaction(transactionDirectory)) {
+        return {
+          status: "manual",
+          recoveryPath: pathExists(transactionDirectory) ? transactionDirectory : path,
+        };
+      }
+      return { status: "recovered" };
+    }
+
+    if (manifest.state === "prepared"
+      && pathExists(path)
+      && isManagedRecoveryPair(path, displacedPath, path)) {
+      const preparedPath = join(transactionDirectory, "prepared");
+      if (pathExists(preparedPath) && !discardPrepared(transactionDirectory, preparedPath)) {
+        return { status: "manual", recoveryPath: transactionDirectory };
+      }
+      try {
+        writeManifest(transactionDirectory, path, "committed");
+      } catch {
+        return { status: "manual", recoveryPath: transactionDirectory };
+      }
+      return { status: "recovered", recoveryPath: displacedPath };
+    }
+
+    if (pathExists(path)) {
+      return { status: "manual", recoveryPath: transactionDirectory };
+    }
+
+    if (pathExists(displacedPath)) {
+      if (!isManagedRegularFile(displacedPath, path)) {
+        return { status: "manual", recoveryPath: displacedPath };
+      }
+      try {
+        linkSync(displacedPath, path);
+        syncParentDirectory(path);
+      } catch {
+        return { status: "manual", recoveryPath: displacedPath };
+      }
+      if (!isManagedRecoveryPair(path, displacedPath, path)) {
+        return { status: "manual", recoveryPath: transactionDirectory };
+      }
+      const preparedPath = join(transactionDirectory, "prepared");
+      if (pathExists(preparedPath) && !discardPrepared(transactionDirectory, preparedPath)) {
+        return { status: "manual", recoveryPath: transactionDirectory };
+      }
+      try {
+        writeManifest(transactionDirectory, path, "committed");
+      } catch {
+        return { status: "manual", recoveryPath: transactionDirectory };
+      }
+      return { status: "recovered", recoveryPath: displacedPath };
+    } else {
+      if (!removeTransaction(transactionDirectory)) {
+        return {
+          status: "manual",
+          recoveryPath: pathExists(transactionDirectory) ? transactionDirectory : path,
+        };
+      }
+      return { status: "recovered" };
+    }
+  }
+  return { status: "clear" };
+}
+
+function restoreDisplaced(
+  path: string,
+  transactionDirectory: string,
+  displacedPath: string,
+  preparedPath: string,
+): ConditionalJsonWriteResult {
+  if (pathExists(preparedPath) && !discardPrepared(transactionDirectory, preparedPath)) {
+    return { status: "recovery-required", recoveryPath: transactionDirectory };
+  }
+  try {
+    linkSync(displacedPath, path);
+    syncParentDirectory(path);
+  } catch {
+    return { status: "recovery-required", recoveryPath: displacedPath };
+  }
+  if (!isManagedRecoveryPair(path, displacedPath, path)) {
+    return { status: "recovery-required", recoveryPath: transactionDirectory };
+  }
+  try {
+    writeManifest(transactionDirectory, path, "committed");
+  } catch {
+    return { status: "recovery-required", recoveryPath: transactionDirectory };
+  }
+  return { status: "changed", recoveryPath: displacedPath };
+}
+
+function discardPrepared(transactionDirectory: string, temporaryPath: string): boolean {
+  try {
+    rmSync(temporaryPath, { force: true });
+    syncDirectory(transactionDirectory);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Installs JSON only while the destination still matches the supplied read.
+ * Existing destinations are displaced before comparison so a late writer is
+ * preserved instead of being overwritten by a stale merge. Node 18 has no
+ * portable no-replace rename or pathname compare-and-swap. A private, fsynced
+ * phase journal makes interrupted displacement recoverable on the next run.
+ * Successful replacements retain the displaced inode as a reported live
+ * recovery so a writer with an already-open descriptor cannot lose data.
+ * Hard-link failure never falls back to an overwriting rename.
+ */
+export function atomicWriteJsonIfUnchanged(
+  path: string,
+  value: Record<string, unknown>,
+  prior: JsonReadResult,
+): ConditionalJsonWriteResult {
+  if (prior.status === "invalid") throw new Error("Unable to write JSON config");
+
+  let encoded: Buffer;
+  try {
+    const serialized = JSON.stringify(value, null, 2);
+    if (serialized === undefined) throw new Error("not serializable");
+    encoded = Buffer.from(`${serialized}\n`, "utf8");
+  } catch {
+    throw new Error("Unable to write JSON config");
+  }
+
+  const transactionDirectory = transactionPath(path);
+  const temporaryPath = join(transactionDirectory, "prepared");
+  let descriptor: number | undefined;
+  let transactionExists = false;
+  let temporaryExists = false;
+  let recoveryPath: string | undefined;
+  let recoveryExists = false;
+  let destinationPublished = false;
+  try {
+    mkdirSync(transactionDirectory, { mode: 0o700 });
+    transactionExists = true;
+    syncParentDirectory(transactionDirectory);
+    descriptor = openSync(temporaryPath, "wx", 0o600);
+    temporaryExists = true;
+    writeFileSync(descriptor, encoded);
+    const intendedMode = prior.status === "valid" ? prior.mode : undefined;
+    if (intendedMode !== undefined) fchmodSync(descriptor, intendedMode);
+    fsyncSync(descriptor);
+    closeSync(descriptor);
+    descriptor = undefined;
+    syncDirectory(transactionDirectory);
+    writeManifest(transactionDirectory, path, "prepared");
+
+    if (prior.status === "missing") {
+      try {
+        linkSync(temporaryPath, path);
+      } catch (error) {
+        if (errorCode(error) === "EEXIST") {
+          if (!removeTransaction(transactionDirectory)) {
+            return {
+              status: "recovery-required",
+              recoveryPath: pathExists(transactionDirectory) ? transactionDirectory : path,
+            };
+          }
+          transactionExists = false;
+          temporaryExists = false;
+          return { status: "changed" };
+        }
+        throw error;
+      }
+      destinationPublished = true;
+      syncParentDirectory(path);
+      writeManifest(transactionDirectory, path, "published");
+      if (!removeTransaction(transactionDirectory)) {
+        return {
+          status: "recovery-required",
+          recoveryPath: pathExists(transactionDirectory) ? transactionDirectory : path,
+        };
+      }
+      transactionExists = false;
+      temporaryExists = false;
+      return { status: "written" };
+    }
+
+    if (!isManagedRegularFile(path)) {
+      throw new Error("unsupported destination");
+    }
+
+    const probePath = join(transactionDirectory, "link-probe");
+    linkSync(temporaryPath, probePath);
+    rmSync(probePath);
+    syncDirectory(transactionDirectory);
+
+    recoveryPath = join(transactionDirectory, "displaced");
+    try {
+      renameSync(path, recoveryPath);
+      recoveryExists = true;
+    } catch (error) {
+      if (errorCode(error) === "ENOENT") return { status: "changed" };
+      throw error;
+    }
+    syncDirectory(transactionDirectory);
+    syncParentDirectory(path);
+    writeManifest(transactionDirectory, path, "displaced");
+
+    if (!isManagedRegularFile(recoveryPath, path)
+      || !fileMatches(recoveryPath, prior.bytes, prior.mode)) {
+      const restored = restoreDisplaced(
+        path,
+        transactionDirectory,
+        recoveryPath,
+        temporaryPath,
+      );
+      if (restored.status === "changed") {
+        temporaryExists = false;
+      } else if (!pathExists(temporaryPath)) temporaryExists = false;
+      return restored;
+    }
+
+    try {
+      linkSync(temporaryPath, path);
+    } catch (error) {
+      if (errorCode(error) === "EEXIST") {
+        if (discardPrepared(transactionDirectory, temporaryPath)) temporaryExists = false;
+        return { status: "recovery-required", recoveryPath };
+      }
+      const restored = restoreDisplaced(
+        path,
+        transactionDirectory,
+        recoveryPath,
+        temporaryPath,
+      );
+      if (restored.status !== "changed") return restored;
+      temporaryExists = false;
+      return { status: "recovery-required", recoveryPath: restored.recoveryPath };
+    }
+
+    destinationPublished = true;
+    syncParentDirectory(path);
+    if (!fileMatches(path, encoded, prior.mode)) {
+      return { status: "recovery-required", recoveryPath };
+    }
+
+    writeManifest(transactionDirectory, path, "published");
+    rmSync(temporaryPath);
+    temporaryExists = false;
+    syncDirectory(transactionDirectory);
+    writeManifest(transactionDirectory, path, "committed");
+    return { status: "written", recoveryPath };
+  } catch {
+    if (descriptor !== undefined) {
+      try {
+        closeSync(descriptor);
+      } catch {
+        // Cleanup below remains conservative.
+      }
+      descriptor = undefined;
+    }
+    if (recoveryPath !== undefined && recoveryExists) {
+      return { status: "recovery-required", recoveryPath };
+    }
+    if (destinationPublished || (transactionExists && !removeTransaction(transactionDirectory))) {
+      return {
+        status: "recovery-required",
+        recoveryPath: pathExists(transactionDirectory) ? transactionDirectory : path,
+      };
+    }
+    transactionExists = false;
+    temporaryExists = false;
+    throw new Error("Unable to write JSON config");
+  } finally {
+    if (descriptor !== undefined) {
+      try {
+        closeSync(descriptor);
+      } catch {
+        // Preserve the operation's secret-free result.
+      }
+    }
+    if (temporaryExists && !transactionExists) {
+      try {
+        rmSync(temporaryPath, { force: true });
+      } catch {
+        // Recovery path or destination remains authoritative.
+      }
+    }
+    // Live or ambiguous transaction artifacts are intentionally retained and
+    // are always surfaced by the result or the next pre-inspection recovery.
   }
 }

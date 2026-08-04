@@ -4,7 +4,7 @@ import type {
   SetupClientAdapter,
   SetupResult,
 } from "./clients.js";
-import { atomicWriteJson, backupFile, readJsonObject } from "./json-config.js";
+import { atomicWriteJson, BackupFileError, backupFile, readJsonObject } from "./json-config.js";
 import type { JsonReadResult } from "./json-config.js";
 import type { ProcessResult, ProcessRunner } from "./process.js";
 import { isIdenticalMcpRegistration, isOwnedRockyRegistration } from "./registration.js";
@@ -216,8 +216,11 @@ export function createClaudeCodeAdapter(
       let backupPath: string;
       try {
         backupPath = backupFile(userConfigPath);
-      } catch {
-        return failed("Unable to back up Claude Code user config", registration);
+      } catch (error) {
+        const detail = error instanceof BackupFileError && error.recoveryPath !== undefined
+          ? `Unable to back up Claude Code user config; manual recovery: ${error.recoveryPath}`
+          : "Unable to back up Claude Code user config";
+        return failed(detail, registration);
       }
       const removed = await runner.run(executable, REMOVE_ARGS, { timeoutMs: CLAUDE_COMMAND_TIMEOUT_MS });
       if (!succeeded(removed)) {

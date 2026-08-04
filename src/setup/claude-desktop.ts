@@ -6,7 +6,13 @@ import type {
   SetupClientAdapter,
   SetupResult,
 } from "./clients.js";
-import { atomicWriteJson, backupFile, readJsonObject } from "./json-config.js";
+import {
+  atomicWriteJsonIfUnchanged,
+  BackupFileError,
+  backupFile,
+  readJsonObject,
+  recoverJsonTransaction,
+} from "./json-config.js";
 import type { JsonReadResult } from "./json-config.js";
 import type { PlatformServices } from "./platform.js";
 import type { ProcessResult, ProcessRunner } from "./process.js";
@@ -162,6 +168,18 @@ function isOwnedDesktopRegistration(
 }
 
 function inspectConfig(path: string, registration: McpRegistration): ConfigInspection {
+  const recovery = recoverJsonTransaction(path);
+  if (recovery.status !== "clear") {
+    const detail = recovery.status === "recovered"
+      ? recovery.recoveryPath === undefined
+        ? "Claude Desktop config transaction recovered; retry setup"
+        : `Claude Desktop config transaction recovered; live recovery: ${recovery.recoveryPath}; retry setup`
+      : `Claude Desktop config update requires manual recovery: ${recovery.recoveryPath}`;
+    return {
+      read: { status: "invalid", error: detail },
+      public: { state: "unreadable", detail },
+    };
+  }
   const read = readJsonObject(path);
   if (read.status === "invalid") {
     return {
@@ -208,15 +226,6 @@ function mutationDetail(prefix: string, backupPath: string | undefined): string 
   return backupPath === undefined ? prefix : `${prefix}; backup: ${backupPath}`;
 }
 
-function configIsUnchanged(path: string, prior: JsonReadResult): boolean {
-  const current = readJsonObject(path);
-  if (prior.status === "missing") return current.status === "missing";
-  return prior.status === "valid"
-    && current.status === "valid"
-    && prior.mode === current.mode
-    && prior.bytes.equals(current.bytes);
-}
-
 function writeMutation(
   path: string,
   inspection: ConfigInspection,
@@ -225,28 +234,45 @@ function writeMutation(
   registration: McpRegistration,
 ): SetupResult {
   let backupPath: string | undefined;
+  let liveRecoveryPath: string | undefined;
   if (inspection.read.status === "valid") {
     try {
       backupPath = backupFile(path);
-    } catch {
-      return failed("Unable to back up Claude Desktop config", registration);
+    } catch (error) {
+      const detail = error instanceof BackupFileError && error.recoveryPath !== undefined
+        ? `Unable to back up Claude Desktop config; manual recovery: ${error.recoveryPath}`
+        : "Unable to back up Claude Desktop config";
+      return failed(detail, registration);
     }
   }
 
-  if (!configIsUnchanged(path, inspection.read)) {
-    return failed(
-      mutationDetail(
-        "Claude Desktop config changed during setup; retry or use manual configuration",
-        backupPath,
-      ),
-      registration,
-    );
-  }
-
   try {
-    atomicWriteJson(path, value, {
-      mode: inspection.read.status === "valid" ? inspection.read.mode : undefined,
-    });
+    const write = atomicWriteJsonIfUnchanged(path, value, inspection.read);
+    if (write.status === "changed") {
+      const changeDetail = write.recoveryPath === undefined
+        ? "Claude Desktop config changed during setup; retry or use manual configuration"
+        : `Claude Desktop config changed during setup; live recovery: ${write.recoveryPath}; retry or use manual configuration`;
+      return failed(
+        mutationDetail(
+          changeDetail,
+          backupPath,
+        ),
+        registration,
+      );
+    }
+    if (write.status === "recovery-required") {
+      const recoveryDetail = write.recoveryPath === undefined
+        ? "Claude Desktop config update requires manual verification"
+        : `Claude Desktop config update requires manual recovery: ${write.recoveryPath}`;
+      return failed(
+        mutationDetail(
+          recoveryDetail,
+          backupPath,
+        ),
+        registration,
+      );
+    }
+    liveRecoveryPath = write.recoveryPath;
   } catch {
     return failed(
       mutationDetail("Unable to write Claude Desktop config", backupPath),
@@ -255,7 +281,12 @@ function writeMutation(
   }
 
   const result: SetupResult = { client: "claude-desktop", status };
-  if (backupPath !== undefined) result.detail = `Claude Desktop config backup: ${backupPath}`;
+  const details: string[] = [];
+  if (backupPath !== undefined) details.push(`Claude Desktop config backup: ${backupPath}`);
+  if (liveRecoveryPath !== undefined) {
+    details.push(`Claude Desktop live recovery: ${liveRecoveryPath}`);
+  }
+  if (details.length > 0) result.detail = details.join("; ");
   return result;
 }
 
@@ -332,7 +363,10 @@ export function createClaudeDesktopAdapter(
         return { client: "claude-desktop", status: "already-configured" };
       }
       if (inspection.public.state === "unreadable") {
-        return failed("Unable to read Claude Desktop config", prepared.registration);
+        return failed(
+          inspection.public.detail ?? "Unable to read Claude Desktop config",
+          prepared.registration,
+        );
       }
       if (inspection.public.state === "conflict" && !replace) {
         return {
@@ -369,7 +403,7 @@ export function createClaudeDesktopAdapter(
         return { client: "claude-desktop", status: "not-configured" };
       }
       if (inspection.public.state === "unreadable") {
-        return failed("Unable to read Claude Desktop config");
+        return failed(inspection.public.detail ?? "Unable to read Claude Desktop config");
       }
       const parsed = parseRegistration(inspection.snapshot);
       if (parsed === undefined || !isOwnedDesktopRegistration(parsed, prepared.registration)) {
@@ -402,7 +436,7 @@ export function createClaudeDesktopAdapter(
       if (inspection.state === "conflict") {
         return failed("Claude Desktop has a different rocky registration", prepared.registration);
       }
-      return failed("Unable to read Claude Desktop config");
+      return failed(inspection.detail ?? "Unable to read Claude Desktop config");
     },
   };
 }
