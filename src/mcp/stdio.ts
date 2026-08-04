@@ -39,6 +39,10 @@ export class JsonLineDecoder {
       return [{ kind: "too_large" }];
     }
     if (this.buffer.length === 0) return [];
+    if (this.buffer.length > this.maxLineBytes) {
+      this.buffer = Buffer.alloc(0);
+      return [{ kind: "too_large" }];
+    }
 
     const line = this.buffer;
     this.buffer = Buffer.alloc(0);

@@ -136,6 +136,13 @@ test("decoder retains one pending CR beyond its byte limit for a following newli
   ]);
 });
 
+test("decoder reports a pending CR over its byte limit as too large on end", () => {
+  const decoder = new JsonLineDecoder(8);
+
+  assert.deepEqual(decoder.push('"123456"\r'), []);
+  assert.deepEqual(decoder.end(), [{ kind: "too_large" }]);
+});
+
 test("decoder discards after a pending CR is followed by more input", () => {
   const decoder = new JsonLineDecoder(8);
 
