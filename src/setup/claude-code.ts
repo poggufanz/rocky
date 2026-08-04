@@ -130,6 +130,8 @@ function restoreSnapshot(
   originalRead: JsonReadResult,
   snapshot: unknown,
   backupPath: string,
+  policyRefused: boolean,
+  registration: McpRegistration,
 ): SetupResult {
   const current = readJsonObject(path);
   if (current.status === "invalid") {
@@ -157,7 +159,13 @@ function restoreSnapshot(
   } catch {
     return failed(backupDetail("Claude Code update failed and rollback requires manual recovery", backupPath));
   }
-  return failed(backupDetail("Claude Code registration update failed; previous registration was restored", backupPath));
+  const detail = backupDetail(
+    policyRefused
+      ? "Claude Code policy refused registration update; previous registration was restored"
+      : "Claude Code registration update failed; previous registration was restored",
+    backupPath,
+  );
+  return policyRefused ? blocked(detail, registration) : failed(detail);
 }
 
 export function createClaudeCodeAdapter(
@@ -229,6 +237,8 @@ export function createClaudeCodeAdapter(
         inspection.read,
         inspection.snapshot,
         backupPath,
+        isPolicyRefusal(added),
+        registration,
       );
     },
 

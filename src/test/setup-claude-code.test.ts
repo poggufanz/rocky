@@ -1,8 +1,15 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import type { ProcessResult, ProcessRunOptions, ProcessRunner } from "../setup/process.js";
 import { createClaudeCodeAdapter } from "../setup/claude-code.js";
 
@@ -68,6 +75,10 @@ function rockyEntry(command = registration.command): Record<string, unknown> {
     args: [...registration.args],
     env: { ...registration.env },
   };
+}
+
+function backupNames(path: string): string[] {
+  return readdirSync(dirname(path)).filter((name) => name.startsWith(`${basename(path)}.backup-`));
 }
 
 test("missing Claude executable is skipped without reading real home or running a command", async (t) => {
@@ -137,6 +148,49 @@ test("explicit replacement backs up exact config then uses official remove and a
   assert.deepEqual(readFileSync(join(path, "..", backups[0]!)), originalBytes);
 });
 
+test("replacement stops before remove when the full config backup cannot be created", async (t) => {
+  const directory = mkdtempSync(join(tmpdir(), "rocky-claude-backup-failure-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const path = join(directory, `${"x".repeat(230)}.json`);
+  const original = { mcpServers: { rocky: rockyEntry("/old/node") } };
+  writeFileSync(path, `${JSON.stringify(original)}\n`, "utf8");
+  const runner = new FakeRunner([]);
+  const adapter = createClaudeCodeAdapter({ runner, executable: "/opt/claude", userConfigPath: path });
+
+  const configured = await adapter.configure(registration, true);
+
+  assert.equal(configured.status, "failed");
+  assert.match(configured.detail ?? "", /back up/i);
+  assert.deepEqual(JSON.parse(readFileSync(path, "utf8")), original);
+  assert.deepEqual(runner.calls, []);
+});
+
+test("replacement remove refusal stops before add and preserves config", async (t) => {
+  const cases = [
+    { name: "enterprise policy", response: result(1, "", "enterprise policy: remove-secret"), status: "blocked-by-policy" },
+    { name: "ordinary error", response: result(1, "", "ordinary remove-secret"), status: "failed" },
+  ] as const;
+
+  for (const entry of cases) {
+    await t.test(entry.name, async () => {
+      const original = { mcpServers: { rocky: rockyEntry("/old/node") } };
+      const path = userConfig(t, original);
+      const originalBytes = readFileSync(path);
+      const runner = new FakeRunner([entry.response]);
+      const adapter = createClaudeCodeAdapter({ runner, executable: "/opt/claude", userConfigPath: path });
+
+      const configured = await adapter.configure(registration, true);
+
+      assert.equal(configured.status, entry.status);
+      assert.match(configured.detail ?? "", /backup/i);
+      assert.doesNotMatch(configured.detail ?? "", /remove-secret/);
+      assert.deepEqual(readFileSync(path), originalBytes);
+      assert.equal(backupNames(path).length, 1);
+      assert.deepEqual(runner.calls, [claudeCall(removeArgs)]);
+    });
+  }
+});
+
 test("failed add restores exact rocky snapshot into current unrelated config", async (t) => {
   const snapshot = {
     ...rockyEntry("/old/node"),
@@ -172,6 +226,105 @@ test("failed add restores exact rocky snapshot into current unrelated config", a
     mcpServers: { ...afterRemove.mcpServers, rocky: snapshot },
   });
   assert.deepEqual(runner.calls, [claudeCall(removeArgs), claudeCall(addArgs)]);
+});
+
+test("enterprise refusal during replacement add restores snapshot and reports policy block", async (t) => {
+  const snapshot = { ...rockyEntry("/old/node"), metadata: { token: "snapshot-secret" } };
+  const path = userConfig(t, { theme: "keep", mcpServers: { rocky: snapshot } });
+  const afterRemove = { theme: "changed", mcpServers: { other: { keep: true } } };
+  const runner = new FakeRunner([
+    () => {
+      writeFileSync(path, `${JSON.stringify(afterRemove, null, 2)}\n`, { mode: 0o640 });
+      return result(0);
+    },
+    result(1, "", "enterprise MCP policy: add-secret"),
+  ]);
+  const adapter = createClaudeCodeAdapter({ runner, executable: "/opt/claude", userConfigPath: path });
+
+  const configured = await adapter.configure(registration, true);
+
+  assert.equal(configured.status, "blocked-by-policy");
+  assert.match(configured.detail ?? "", /restored|backup/i);
+  assert.doesNotMatch(configured.detail ?? "", /snapshot-secret|add-secret/);
+  assert.deepEqual(JSON.parse(readFileSync(path, "utf8")), {
+    ...afterRemove,
+    mcpServers: { ...afterRemove.mcpServers, rocky: snapshot },
+  });
+  assert.deepEqual(runner.calls, [claudeCall(removeArgs), claudeCall(addArgs)]);
+});
+
+test("rollback restores the exact snapshot when the current config disappeared", async (t) => {
+  const snapshot = { ...rockyEntry("/old/node"), metadata: { exact: [1, 2, 3] } };
+  const path = userConfig(t, { unrelated: "lost-with-file", mcpServers: { rocky: snapshot } });
+  const runner = new FakeRunner([
+    () => {
+      rmSync(path);
+      return result(0);
+    },
+    result(1, "", "ordinary add failure"),
+  ]);
+  const adapter = createClaudeCodeAdapter({ runner, executable: "/opt/claude", userConfigPath: path });
+
+  const configured = await adapter.configure(registration, true);
+
+  assert.equal(configured.status, "failed");
+  assert.match(configured.detail ?? "", /restored/i);
+  assert.deepEqual(JSON.parse(readFileSync(path, "utf8")), { mcpServers: { rocky: snapshot } });
+});
+
+test("rollback refuses unreadable or non-object current config without overwriting it", async (t) => {
+  const cases = [
+    { name: "malformed JSON", bytes: '{"token":"malformed-secret"' },
+    { name: "non-object root", bytes: '["array-secret"]\n' },
+    { name: "non-object mcpServers", bytes: '{"theme":"keep","mcpServers":["server-secret"]}\n' },
+  ];
+
+  for (const entry of cases) {
+    await t.test(entry.name, async () => {
+      const path = userConfig(t, { mcpServers: { rocky: rockyEntry("/old/node") } });
+      const runner = new FakeRunner([
+        () => {
+          writeFileSync(path, entry.bytes, "utf8");
+          return result(0);
+        },
+        result(1, "", "ordinary add failure"),
+      ]);
+      const adapter = createClaudeCodeAdapter({ runner, executable: "/opt/claude", userConfigPath: path });
+
+      const configured = await adapter.configure(registration, true);
+
+      assert.equal(configured.status, "failed");
+      assert.match(configured.detail ?? "", /backup|manual|cannot be read/i);
+      assert.doesNotMatch(configured.detail ?? "", /malformed-secret|array-secret|server-secret/);
+      assert.equal(readFileSync(path, "utf8"), entry.bytes);
+    });
+  }
+});
+
+test("rollback atomic write failure leaves current unrelated config and reports manual recovery", async (t) => {
+  const path = userConfig(t, { mcpServers: { rocky: rockyEntry("/old/node") } });
+  const current = { theme: "keep", mcpServers: { other: { keep: true } } };
+  const directory = dirname(path);
+  const runner = new FakeRunner([
+    () => {
+      writeFileSync(path, `${JSON.stringify(current, null, 2)}\n`, { mode: 0o640 });
+      return result(0);
+    },
+    () => {
+      chmodSync(directory, 0o500);
+      return result(1, "", "ordinary add failure");
+    },
+  ]);
+  const adapter = createClaudeCodeAdapter({ runner, executable: "/opt/claude", userConfigPath: path });
+
+  try {
+    const configured = await adapter.configure(registration, true);
+    assert.equal(configured.status, "failed");
+    assert.match(configured.detail ?? "", /manual recovery/i);
+    assert.deepEqual(JSON.parse(readFileSync(path, "utf8")), current);
+  } finally {
+    chmodSync(directory, 0o700);
+  }
 });
 
 test("failed add never overwrites a concurrent rocky entry and reports backup", async (t) => {
@@ -247,4 +400,25 @@ test("remove calls official user-scope command only for an owned identity", asyn
   });
   assert.equal((await foreign.remove(registration)).status, "failed");
   assert.deepEqual(foreignRunner.calls, []);
+});
+
+test("owned removal distinguishes policy refusal from ordinary failure without exposing output", async (t) => {
+  const cases = [
+    { name: "enterprise policy", response: result(1, "", "managed policy: removal-secret"), status: "blocked-by-policy" },
+    { name: "ordinary error", response: result(1, "", "ordinary removal-secret"), status: "failed" },
+  ] as const;
+
+  for (const entry of cases) {
+    await t.test(entry.name, async () => {
+      const path = userConfig(t, { mcpServers: { rocky: rockyEntry() } });
+      const runner = new FakeRunner([entry.response]);
+      const adapter = createClaudeCodeAdapter({ runner, executable: "/opt/claude", userConfigPath: path });
+
+      const removed = await adapter.remove(registration);
+
+      assert.equal(removed.status, entry.status);
+      assert.doesNotMatch(removed.detail ?? "", /removal-secret/);
+      assert.deepEqual(runner.calls, [claudeCall(removeArgs)]);
+    });
+  }
 });

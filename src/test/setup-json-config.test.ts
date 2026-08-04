@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   chmodSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
@@ -72,6 +73,25 @@ test("backup copies exact bytes to the specified timestamped sibling", (t) => {
   assert.equal(statSync(backup).mode & 0o777, 0o640);
 });
 
+test("backup refuses a same-timestamp collision without changing existing bytes", (t) => {
+  const directory = temporaryDirectory(t);
+  const path = join(directory, "settings.json");
+  const now = new Date("2026-08-04T08:15:30.123Z");
+  writeFileSync(path, '{"token":"first-secret"}\n', "utf8");
+  const backup = backupFile(path, now);
+  const firstBackupBytes = readFileSync(backup);
+  writeFileSync(path, '{"token":"second-secret"}\n', "utf8");
+
+  assert.throws(
+    () => backupFile(path, now),
+    (error: unknown) => error instanceof Error
+      && /back up JSON config/i.test(error.message)
+      && !/first-secret|second-secret/.test(error.message),
+  );
+  assert.deepEqual(readFileSync(backup), firstBackupBytes);
+  assert.notDeepEqual(readFileSync(path), firstBackupBytes);
+});
+
 test("atomic JSON replacement preserves unrelated keys and prior permissions", (t) => {
   const directory = temporaryDirectory(t);
   const path = join(directory, "settings.json");
@@ -102,20 +122,24 @@ test("atomic JSON replacement preserves unrelated keys and prior permissions", (
   assert.deepEqual(readdirSync(directory), [basename(path)]);
 });
 
-test("atomic JSON writer creates private files and cleans temporary files after failure", (t) => {
+test("atomic JSON writer creates private files", (t) => {
   const directory = temporaryDirectory(t);
   const path = join(directory, "settings.json");
   atomicWriteJson(path, { theme: "dark" });
   assert.equal(statSync(path).mode & 0o777, 0o600);
+});
 
-  const secretDocument: Record<string, unknown> = { token: "fake-secret-token" };
-  secretDocument.self = secretDocument;
+test("atomic JSON writer cleans its random temporary sibling after rename failure", (t) => {
+  const directory = temporaryDirectory(t);
+  const path = join(directory, "settings.json");
+  mkdirSync(path);
+
   assert.throws(
-    () => atomicWriteJson(path, secretDocument),
+    () => atomicWriteJson(path, { token: "fake-secret-token" }),
     (error: unknown) => error instanceof Error
       && /write JSON config/i.test(error.message)
       && !/fake-secret-token/.test(error.message),
   );
-  assert.deepEqual(JSON.parse(readFileSync(path, "utf8")), { theme: "dark" });
   assert.deepEqual(readdirSync(directory), [basename(path)]);
+  assert.equal(statSync(path).isDirectory(), true);
 });

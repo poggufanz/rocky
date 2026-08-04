@@ -1,5 +1,6 @@
 import {
   closeSync,
+  constants,
   copyFileSync,
   fchmodSync,
   fsyncSync,
@@ -65,7 +66,7 @@ function backupTimestamp(now: Date): string {
 export function backupFile(path: string, now = new Date()): string {
   try {
     const backupPath = `${path}.backup-${backupTimestamp(now)}`;
-    copyFileSync(path, backupPath);
+    copyFileSync(path, backupPath, constants.COPYFILE_EXCL);
     return backupPath;
   } catch {
     throw new Error("Unable to back up JSON config");
