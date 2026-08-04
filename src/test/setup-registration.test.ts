@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join, win32 } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -156,6 +156,48 @@ test("process runner preserves exact argv and stdin without invoking a shell", a
   });
 });
 
+test("batch process runner forwards the requested environment and cwd", async (t) => {
+  const cwd = mkdtempSync(join(tmpdir(), "rocky-process-cwd-"));
+  t.after(() => rmSync(cwd, { recursive: true, force: true }));
+  const runner = createProcessRunner();
+  const script = "console.log(JSON.stringify({cwd:process.cwd(),marker:process.env.ROCKY_RUN_MARKER,leaked:process.env.ROCKY_PARENT_ONLY}))";
+  const previous = process.env.ROCKY_PARENT_ONLY;
+  process.env.ROCKY_PARENT_ONLY = "must-not-merge";
+  try {
+    const result = await runner.run(process.execPath, ["-e", script], {
+      cwd,
+      env: { ROCKY_RUN_MARKER: "forwarded" },
+    });
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(JSON.parse(result.stdout.trim()), {
+      cwd,
+      marker: "forwarded",
+    });
+  } finally {
+    if (previous === undefined) delete process.env.ROCKY_PARENT_ONLY;
+    else process.env.ROCKY_PARENT_ONLY = previous;
+  }
+});
+
+test("real batch runner distinguishes spawn failure from a nonzero child exit", async () => {
+  const runner = createProcessRunner();
+  const spawnFailure = await runner.run(
+    join(tmpdir(), "rocky-definitely-missing-executable"),
+    [],
+  );
+  const nonzero = await runner.run(process.execPath, [
+    "-e",
+    "process.stderr.write('classified-nonzero');process.exit(7)",
+  ]);
+
+  assert.equal(spawnFailure.status, null);
+  assert.ok(spawnFailure.error instanceof Error);
+  assert.equal(nonzero.status, 7);
+  assert.equal(nonzero.error, undefined);
+  assert.equal(nonzero.stderr, "classified-nonzero");
+});
+
 test("process runner bounds both output streams", async () => {
   const runner = createProcessRunner();
   const result = await runner.run(process.execPath, [
@@ -294,4 +336,30 @@ test("Unix executable discovery uses injected PATH and file boundary", () => {
 
   assert.equal(platform.resolveExecutable("codex"), executable);
   assert.equal(platform.resolveExecutable("missing"), undefined);
+});
+
+test("WSL detection is automatic from injected runtime environment", () => {
+  const distro = createPlatformServices({
+    platform: "linux",
+    home: "/home/ada",
+    env: { PATH: "", WSL_DISTRO_NAME: "Ubuntu-24.04" },
+    fileExists: () => false,
+  });
+  const interop = createPlatformServices({
+    platform: "linux",
+    home: "/home/ada",
+    env: { PATH: "", WSL_INTEROP: "/run/WSL/interop" },
+    fileExists: () => false,
+  });
+  const nonLinux = createPlatformServices({
+    platform: "darwin",
+    home: "/Users/Ada",
+    env: { PATH: "", WSL_DISTRO_NAME: "not-wsl" },
+    fileExists: () => false,
+  });
+
+  assert.equal(distro.isWsl, true);
+  assert.equal(distro.wslDistro, "Ubuntu-24.04");
+  assert.equal(interop.isWsl, true);
+  assert.equal(nonLinux.isWsl, false);
 });

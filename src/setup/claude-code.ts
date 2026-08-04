@@ -4,7 +4,15 @@ import type {
   SetupClientAdapter,
   SetupResult,
 } from "./clients.js";
-import { atomicWriteJson, BackupFileError, backupFile, readJsonObject } from "./json-config.js";
+import { lstatSync } from "node:fs";
+import { isDeepStrictEqual } from "node:util";
+import {
+  atomicWriteJson,
+  AtomicJsonWriteError,
+  BackupFileError,
+  backupFile,
+  readJsonObject,
+} from "./json-config.js";
 import type { JsonReadResult } from "./json-config.js";
 import type { ProcessResult, ProcessRunner } from "./process.js";
 import { isIdenticalMcpRegistration, isOwnedRockyRegistration } from "./registration.js";
@@ -27,6 +35,13 @@ interface ConfigInspection {
   public: InspectionResult;
   read: JsonReadResult;
   snapshot?: unknown;
+  topology?: SafeTopology;
+}
+
+interface SafeTopology {
+  state: "missing" | "regular";
+  dev?: number;
+  ino?: number;
 }
 
 function isObject(value: unknown): value is JsonObject {
@@ -61,29 +76,62 @@ function parseRegistration(value: unknown): McpRegistration | undefined {
     env: { ...value.env },
   };
 }
+
+function inspectSafeTopology(path: string): SafeTopology | undefined {
+  try {
+    const metadata = lstatSync(path);
+    if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.nlink !== 1) return undefined;
+    return { state: "regular", dev: metadata.dev, ino: metadata.ino };
+  } catch (error) {
+    if (isObject(error) && error.code === "ENOENT") return { state: "missing" };
+    return undefined;
+  }
+}
+
+function topologyUnchanged(path: string, expected: SafeTopology | undefined): boolean {
+  const current = inspectSafeTopology(path);
+  return expected !== undefined
+    && current !== undefined
+    && current.state === expected.state
+    && current.dev === expected.dev
+    && current.ino === expected.ino;
+}
+
 function inspectUserConfig(path: string, registration: McpRegistration): ConfigInspection {
+  const topology = inspectSafeTopology(path);
+  if (topology === undefined) {
+    return {
+      read: { status: "invalid", error: "Unsafe Claude Code user config topology" },
+      public: {
+        state: "unreadable",
+        detail: "Claude Code user config must be a single-link regular file for mutation",
+      },
+    };
+  }
   const read = readJsonObject(path);
   if (read.status === "invalid") {
     return {
       read,
+      topology,
       public: { state: "unreadable", detail: "Unable to read Claude Code user config" },
     };
   }
   const servers = read.value.mcpServers;
-  if (servers === undefined) return { read, public: { state: "absent" } };
+  if (servers === undefined) return { read, topology, public: { state: "absent" } };
   if (!isObject(servers)) {
     return {
       read,
+      topology,
       public: { state: "unreadable", detail: "Unable to read Claude Code user config" },
     };
   }
-  if (!hasOwn(servers, "rocky")) return { read, public: { state: "absent" } };
+  if (!hasOwn(servers, "rocky")) return { read, topology, public: { state: "absent" } };
 
   const snapshot = servers.rocky;
   const stored = parseRegistration(snapshot);
   return stored !== undefined && isIdenticalMcpRegistration(stored, registration)
-    ? { read, snapshot, public: { state: "identical", snapshot } }
-    : { read, snapshot, public: { state: "conflict", snapshot } };
+    ? { read, topology, snapshot, public: { state: "identical", snapshot } }
+    : { read, topology, snapshot, public: { state: "conflict", snapshot } };
 }
 
 function succeeded(result: ProcessResult): boolean {
@@ -133,6 +181,13 @@ function restoreSnapshot(
   policyRefused: boolean,
   registration: McpRegistration,
 ): SetupResult {
+  const topology = inspectSafeTopology(path);
+  if (topology === undefined) {
+    return failed(backupDetail(
+      "Claude Code update failed and rollback stopped on unsafe config topology",
+      backupPath,
+    ));
+  }
   const current = readJsonObject(path);
   if (current.status === "invalid") {
     return failed(backupDetail("Claude Code update failed and current config cannot be read", backupPath));
@@ -154,9 +209,27 @@ function restoreSnapshot(
   const priorMode = current.status === "valid"
     ? current.mode
     : originalRead.status === "valid" ? originalRead.mode : undefined;
+  if (!topologyUnchanged(path, topology)) {
+    return failed(backupDetail(
+      "Claude Code update failed and config topology changed before rollback",
+      backupPath,
+    ));
+  }
   try {
     atomicWriteJson(path, restored, { mode: priorMode });
-  } catch {
+  } catch (error) {
+    if (error instanceof AtomicJsonWriteError && error.committed) {
+      const installed = readJsonObject(path);
+      if (installed.status === "valid" && isDeepStrictEqual(installed.value, restored)) {
+        const detail = backupDetail(
+          policyRefused
+            ? "Claude Code policy refused registration update; previous registration was restored but directory durability is unconfirmed"
+            : "Claude Code registration update failed; previous registration was restored but directory durability is unconfirmed",
+          backupPath,
+        );
+        return policyRefused ? blocked(detail, registration) : failed(detail);
+      }
+    }
     return failed(backupDetail("Claude Code update failed and rollback requires manual recovery", backupPath));
   }
   const detail = backupDetail(
@@ -202,7 +275,10 @@ export function createClaudeCodeAdapter(
         return { client: "claude-code", status: "already-configured" };
       }
       if (inspection.public.state === "unreadable") {
-        return failed("Unable to read Claude Code user config", registration);
+        return failed(
+          inspection.public.detail ?? "Unable to read Claude Code user config",
+          registration,
+        );
       }
       if (!replace) {
         return {
@@ -213,6 +289,13 @@ export function createClaudeCodeAdapter(
         };
       }
 
+      if (!topologyUnchanged(userConfigPath, inspection.topology)) {
+        return failed(
+          "Claude Code user config topology changed; use manual registration",
+          registration,
+        );
+      }
+
       let backupPath: string;
       try {
         backupPath = backupFile(userConfigPath);
@@ -221,6 +304,12 @@ export function createClaudeCodeAdapter(
           ? `Unable to back up Claude Code user config; manual recovery: ${error.recoveryPath}`
           : "Unable to back up Claude Code user config";
         return failed(detail, registration);
+      }
+      if (!topologyUnchanged(userConfigPath, inspection.topology)) {
+        return failed(
+          backupDetail("Claude Code user config topology changed; use manual registration", backupPath),
+          registration,
+        );
       }
       const removed = await runner.run(executable, REMOVE_ARGS, { timeoutMs: CLAUDE_COMMAND_TIMEOUT_MS });
       if (!succeeded(removed)) {
@@ -252,11 +341,20 @@ export function createClaudeCodeAdapter(
         return { client: "claude-code", status: "not-configured" };
       }
       if (inspection.public.state === "unreadable") {
-        return failed("Unable to read Claude Code user config");
+        return failed(
+          inspection.public.detail ?? "Unable to read Claude Code user config",
+          registration,
+        );
       }
       const stored = parseRegistration(inspection.snapshot);
       if (stored === undefined || !isOwnedRockyRegistration(stored, registration)) {
         return failed("Claude Code rocky registration is not owned by Rocky");
+      }
+      if (!topologyUnchanged(userConfigPath, inspection.topology)) {
+        return failed(
+          "Claude Code user config topology changed; use manual registration",
+          registration,
+        );
       }
       const removed = await runner.run(executable, REMOVE_ARGS, { timeoutMs: CLAUDE_COMMAND_TIMEOUT_MS });
       if (succeeded(removed)) return { client: "claude-code", status: "removed" };

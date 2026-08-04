@@ -14,6 +14,7 @@ export interface PlatformServices {
   wslpathExecutablePaths?: readonly string[];
   resolveExecutable(name: string): string | undefined;
   fileExists(path: string): boolean;
+  hasClaudeDesktop(): boolean;
   hasBashHook(): boolean;
 }
 
@@ -30,6 +31,7 @@ export interface PlatformServiceOverrides {
   wslDesktopConfigPaths?: readonly string[];
   wslExecutablePaths?: readonly string[];
   wslpathExecutablePaths?: readonly string[];
+  claudeDesktopInstalled?: boolean;
 }
 
 function detectWsl(platform: NodeJS.Platform, env: NodeJS.ProcessEnv): boolean {
@@ -134,6 +136,8 @@ export function createPlatformServices(overrides: PlatformServiceOverrides = {})
   const fileExists = overrides.fileExists ?? existsSync;
   const listDirectory = overrides.listDirectory ?? listProfileDirectories;
   const home = overrides.home ?? homedir();
+  const appData = overrides.appData ?? env.APPDATA;
+  const localAppData = env.LOCALAPPDATA;
   const service: PlatformServices = {
     platform,
     home,
@@ -144,6 +148,31 @@ export function createPlatformServices(overrides: PlatformServiceOverrides = {})
         : resolveUnixExecutable(name, env, fileExists);
     },
     fileExists,
+    hasClaudeDesktop() {
+      if (overrides.claudeDesktopInstalled !== undefined) {
+        return overrides.claudeDesktopInstalled;
+      }
+      if (platform === "darwin") {
+        return fileExists("/Applications/Claude.app")
+          || fileExists(posix.join(home, "Applications", "Claude.app"))
+          || fileExists(posix.join(
+            home,
+            "Library",
+            "Application Support",
+            "Claude",
+            "claude_desktop_config.json",
+          ));
+      }
+      if (platform === "win32") {
+        const candidates = [
+          localAppData === undefined ? undefined : win32.join(localAppData, "AnthropicClaude", "Claude.exe"),
+          localAppData === undefined ? undefined : win32.join(localAppData, "Programs", "Claude", "Claude.exe"),
+          appData === undefined ? undefined : win32.join(appData, "Claude", "claude_desktop_config.json"),
+        ];
+        return candidates.some((candidate) => candidate !== undefined && fileExists(candidate));
+      }
+      return false;
+    },
     hasBashHook() {
       if (overrides.bashHookInstalled !== undefined) return overrides.bashHookInstalled;
       try {
@@ -153,7 +182,6 @@ export function createPlatformServices(overrides: PlatformServiceOverrides = {})
       }
     },
   };
-  const appData = overrides.appData ?? env.APPDATA;
   if (appData !== undefined) service.appData = appData;
   const wslDistro = overrides.wslDistro ?? env.WSL_DISTRO_NAME;
   if (wslDistro !== undefined) service.wslDistro = wslDistro;

@@ -1,5 +1,16 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import {
+  chmodSync,
+  lstatSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  symlinkSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import { createCodexAdapter } from "../setup/codex.js";
 import type { McpRegistration } from "../setup/clients.js";
 import type { ProcessResult, ProcessRunOptions, ProcessRunner } from "../setup/process.js";
@@ -54,6 +65,30 @@ class FakeRunner implements ProcessRunner {
 
 function result(status: number, stdout = "", stderr = ""): ProcessResult {
   return { status, stdout, stderr };
+}
+
+function temporaryRegistration(t: test.TestContext): McpRegistration {
+  const root = mkdtempSync(join(tmpdir(), "rocky-codex-recovery-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  return {
+    ...registration,
+    env: { ...registration.env, ROCKY_HOME: join(root, ".rocky") },
+  };
+}
+
+function addArgumentsFor(value: McpRegistration): string[] {
+  return [
+    "mcp", "add",
+    "--env", `ROCKY_MCP_EXPOSURE=${value.env.ROCKY_MCP_EXPOSURE}`,
+    "--env", `ROCKY_HOME=${value.env.ROCKY_HOME}`,
+    "rocky", "--", value.command, ...value.args,
+  ];
+}
+
+function recoveryPath(detail: string | undefined): string {
+  const match = /manual recovery:\s+([^;\n]+)/i.exec(detail ?? "");
+  assert.ok(match?.[1], "result must report a recovery artifact path");
+  return match[1];
 }
 
 function completeSnapshot(
@@ -189,25 +224,37 @@ test("conflicting registration requires confirmation when replace is false", asy
   assert.deepEqual(runner.calls, [codexCall(getArgs)]);
 });
 
-test("replace removes and adds a fully restorable conflict with exact argv", async () => {
+test("replace persists then deletes prior snapshot only after desired registration verifies", async (t) => {
+  const desired = temporaryRegistration(t);
   const runner = new FakeRunner([
     result(0, JSON.stringify(completeSnapshot("/old/node"))),
     result(0),
     result(0),
+    result(0, JSON.stringify(completeSnapshot(
+      desired.command,
+      desired.args,
+      desired.env,
+    ))),
   ]);
   const adapter = createCodexAdapter({ runner, executable: "/opt/codex" });
 
-  const configured = await adapter.configure(registration, true);
+  const configured = await adapter.configure(desired, true);
 
   assert.deepEqual(configured, { client: "codex", status: "configured" });
   assert.deepEqual(runner.calls, [
     codexCall(getArgs),
     codexCall(removeArgs),
-    codexCall(addArgs),
+    codexCall(addArgumentsFor(desired)),
+    codexCall(getArgs),
   ]);
+  const recoveryDirectory = join(dirname(desired.env.ROCKY_HOME!), ".rocky-setup-recovery");
+  assert.deepEqual(readdirSync(recoveryDirectory), []);
+  assert.equal(lstatSync(recoveryDirectory).mode & 0o777, 0o700);
+  assert.throws(() => lstatSync(desired.env.ROCKY_HOME!), { code: "ENOENT" });
 });
 
-test("failed replacement add recreates and verifies the exact prior snapshot", async () => {
+test("failed replacement add recreates, verifies, and deletes the durable prior snapshot", async (t) => {
+  const desired = temporaryRegistration(t);
   const priorEnv = { KEEP_FIRST: "alpha", KEEP_SECOND: "bravo" };
   const snapshot = completeSnapshot("/old/node", ["/old/server.js", "--flag", "two words"], priorEnv);
   const runner = new FakeRunner([
@@ -219,7 +266,7 @@ test("failed replacement add recreates and verifies the exact prior snapshot", a
   ]);
   const adapter = createCodexAdapter({ runner, executable: "/opt/codex" });
 
-  const configured = await adapter.configure(registration, true);
+  const configured = await adapter.configure(desired, true);
 
   assert.deepEqual(configured, {
     client: "codex",
@@ -230,7 +277,7 @@ test("failed replacement add recreates and verifies the exact prior snapshot", a
   assert.deepEqual(runner.calls, [
     codexCall(getArgs),
     codexCall(removeArgs),
-    codexCall(addArgs),
+    codexCall(addArgumentsFor(desired)),
     {
       command: "/opt/codex",
       args: [
@@ -243,9 +290,12 @@ test("failed replacement add recreates and verifies the exact prior snapshot", a
     },
     codexCall(getArgs),
   ]);
+  assert.deepEqual(readdirSync(join(dirname(desired.env.ROCKY_HOME!), ".rocky-setup-recovery")), []);
+  assert.throws(() => lstatSync(desired.env.ROCKY_HOME!), { code: "ENOENT" });
 });
 
-test("rollback verification mismatch fails with secret-free manual recovery guidance", async () => {
+test("rollback verification mismatch retains a private exact recovery artifact", async (t) => {
+  const desired = temporaryRegistration(t);
   const snapshot = completeSnapshot("/old/node", ["/old/server.js"], { API_TOKEN: "secret-token" });
   const changed = completeSnapshot("/different/node", ["/old/server.js"], { API_TOKEN: "secret-token" });
   const runner = new FakeRunner([
@@ -257,12 +307,117 @@ test("rollback verification mismatch fails with secret-free manual recovery guid
   ]);
   const adapter = createCodexAdapter({ runner, executable: "/opt/codex" });
 
-  const configured = await adapter.configure(registration, true);
+  const configured = await adapter.configure(desired, true);
 
   assert.equal(configured.status, "failed");
   assert.match(configured.detail ?? "", /manual recovery/i);
   assert.doesNotMatch(configured.detail ?? "", /secret-token|API_TOKEN|old\/server/);
-  assert.deepEqual(configured.manualRegistration, registration);
+  assert.deepEqual(configured.manualRegistration, desired);
+  const artifact = recoveryPath(configured.detail);
+  assert.deepEqual(JSON.parse(readFileSync(artifact, "utf8")), snapshot);
+  assert.equal(lstatSync(artifact).isFile(), true);
+  assert.equal(lstatSync(artifact).nlink, 1);
+  assert.equal(lstatSync(artifact).mode & 0o777, 0o600);
+  assert.equal(dirname(artifact), join(dirname(desired.env.ROCKY_HOME!), ".rocky-setup-recovery"));
+  assert.equal(lstatSync(dirname(artifact)).isSymbolicLink(), false);
+  assert.equal(lstatSync(dirname(artifact)).mode & 0o777, 0o700);
+});
+
+test("rollback add failure retains collision-safe recovery artifacts and reports no secrets", async (t) => {
+  const desired = temporaryRegistration(t);
+  const snapshots = [
+    completeSnapshot("/old/one", ["/old/one.js"], { TOKEN: "first-secret" }),
+    completeSnapshot("/old/two", ["/old/two.js"], { TOKEN: "second-secret" }),
+  ];
+  const paths: string[] = [];
+
+  for (const snapshot of snapshots) {
+    const runner = new FakeRunner([
+      result(0, JSON.stringify(snapshot)),
+      result(0),
+      result(1, "", "desired-add-secret"),
+      result(1, "", "rollback-add-secret"),
+    ]);
+    const configured = await createCodexAdapter({ runner, executable: "/opt/codex" })
+      .configure(desired, true);
+
+    assert.equal(configured.status, "failed");
+    assert.deepEqual(configured.manualRegistration, desired);
+    assert.doesNotMatch(configured.detail ?? "", /first-secret|second-secret|add-secret|TOKEN/);
+    paths.push(recoveryPath(configured.detail));
+  }
+
+  assert.notEqual(paths[0], paths[1]);
+  assert.deepEqual(JSON.parse(readFileSync(paths[0]!, "utf8")), snapshots[0]);
+  assert.deepEqual(JSON.parse(readFileSync(paths[1]!, "utf8")), snapshots[1]);
+});
+
+test("malformed and nonzero rollback verification retain the durable recovery artifact", async (t) => {
+  const cases = [
+    { name: "malformed", verification: result(0, "{not-json") },
+    { name: "nonzero", verification: result(9, "", "verification-secret") },
+  ];
+
+  for (const entry of cases) {
+    await t.test(entry.name, async () => {
+      const desired = temporaryRegistration(t);
+      const snapshot = completeSnapshot("/old/node", ["/old/server.js"], { TOKEN: "prior-secret" });
+      const runner = new FakeRunner([
+        result(0, JSON.stringify(snapshot)),
+        result(0),
+        result(1),
+        result(0),
+        entry.verification,
+      ]);
+
+      const configured = await createCodexAdapter({ runner, executable: "/opt/codex" })
+        .configure(desired, true);
+
+      assert.equal(configured.status, "failed");
+      assert.match(configured.detail ?? "", /manual recovery/i);
+      assert.doesNotMatch(configured.detail ?? "", /prior-secret|verification-secret|TOKEN/);
+      assert.deepEqual(JSON.parse(readFileSync(recoveryPath(configured.detail), "utf8")), snapshot);
+    });
+  }
+});
+
+test("symlinked recovery directory is refused before destructive remove", async (t) => {
+  const desired = temporaryRegistration(t);
+  const outside = mkdtempSync(join(tmpdir(), "rocky-codex-outside-"));
+  t.after(() => rmSync(outside, { recursive: true, force: true }));
+  const recoveryDirectory = join(dirname(desired.env.ROCKY_HOME!), ".rocky-setup-recovery");
+  symlinkSync(outside, recoveryDirectory);
+  const runner = new FakeRunner([
+    result(0, JSON.stringify(completeSnapshot("/old/node", [], { TOKEN: "prior-secret" }))),
+  ]);
+
+  const configured = await createCodexAdapter({ runner, executable: "/opt/codex" })
+    .configure(desired, true);
+
+  assert.equal(configured.status, "failed");
+  assert.match(configured.detail ?? "", /recovery/i);
+  assert.doesNotMatch(configured.detail ?? "", /prior-secret|TOKEN/);
+  assert.deepEqual(runner.calls, [codexCall(getArgs)]);
+  assert.deepEqual(readdirSync(outside), []);
+});
+
+test("private recovery directory is allowed under an existing searchable user home", async (t) => {
+  const desired = temporaryRegistration(t);
+  const userHome = dirname(desired.env.ROCKY_HOME!);
+  chmodSync(userHome, 0o755);
+  const runner = new FakeRunner([
+    result(0, JSON.stringify(completeSnapshot("/old/node"))),
+    result(0),
+    result(0),
+    result(0, JSON.stringify(completeSnapshot(desired.command, desired.args, desired.env))),
+  ]);
+
+  const configured = await createCodexAdapter({ runner, executable: "/opt/codex" })
+    .configure(desired, true);
+
+  assert.equal(configured.status, "configured");
+  assert.equal(lstatSync(join(userHome, ".rocky-setup-recovery")).mode & 0o777, 0o700);
+  assert.throws(() => lstatSync(desired.env.ROCKY_HOME!), { code: "ENOENT" });
 });
 
 test("non-default and unknown snapshot metadata blocks replacement before remove", async (t) => {

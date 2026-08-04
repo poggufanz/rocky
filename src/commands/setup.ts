@@ -21,7 +21,11 @@ import { checkMcpRegistration } from "../setup/health.js";
 import { SetupUsageError, parseSetupArgs } from "../setup/parser.js";
 import { createPlatformServices, type PlatformServices } from "../setup/platform.js";
 import { processRunner, type ProcessRunner } from "../setup/process.js";
-import { isEphemeralInstall, resolveMcpRegistration } from "../setup/registration.js";
+import {
+  isEphemeralInstall,
+  isIdenticalMcpRegistration,
+  resolveMcpRegistration,
+} from "../setup/registration.js";
 import { detail, say } from "../ui/rocky.js";
 
 export interface ConfirmationPort {
@@ -81,7 +85,11 @@ export async function createProductionAdapters(
   registration: McpRegistration,
 ): Promise<readonly SetupClientAdapter[]> {
   const common: SetupClientAdapter[] = [
-    createCodexAdapter({ runner, executable: platform.resolveExecutable("codex") }),
+    createCodexAdapter({
+      runner,
+      executable: platform.resolveExecutable("codex"),
+      recoveryBaseDirectory: platform.home,
+    }),
     createClaudeCodeAdapter({
       runner,
       executable: platform.resolveExecutable("claude"),
@@ -92,6 +100,8 @@ export async function createProductionAdapters(
     const desktopPath = resolveDesktopConfigPath(platform);
     common.push(desktopPath === undefined
       ? unavailableAdapter("claude-desktop", "Claude Desktop config is not available on this host")
+      : !platform.hasClaudeDesktop()
+        ? unavailableAdapter("claude-desktop", "Claude Desktop is not installed on this host")
       : createClaudeDesktopAdapter({ configPath: desktopPath }));
     return common;
   }
@@ -169,9 +179,42 @@ export async function createProductionAdapters(
   return common;
 }
 
-function printResult(result: SetupResult): void {
+function manualAddArguments(client: "codex" | "claude-code", registration: McpRegistration): string[] {
+  const args = client === "codex"
+    ? ["mcp", "add"]
+    : ["mcp", "add", "--scope", "user", "--transport", "stdio"];
+  for (const [name, value] of Object.entries(registration.env)) {
+    args.push("--env", `${name}=${value}`);
+  }
+  args.push(registration.name, "--", registration.command, ...registration.args);
+  return args;
+}
+
+function printResult(result: SetupResult, desired: McpRegistration): void {
   detail(`${result.client}: ${result.status}`);
   if (result.detail !== undefined) detail(result.detail);
+  if (result.manualRegistration === undefined) return;
+  if (!isIdenticalMcpRegistration(result.manualRegistration, desired)) {
+    detail(`${result.client} manual registration unavailable; rerun setup for safe guidance`);
+    return;
+  }
+  if (result.client === "codex" || result.client === "claude-code") {
+    detail(`${result.client} manual argv: ${JSON.stringify(manualAddArguments(
+      result.client,
+      result.manualRegistration,
+    ))}`);
+    return;
+  }
+  detail(`${result.client} manual config: ${JSON.stringify({
+    mcpServers: {
+      rocky: {
+        type: "stdio",
+        command: result.manualRegistration.command,
+        args: [...result.manualRegistration.args],
+        env: { ...result.manualRegistration.env },
+      },
+    },
+  })}`);
 }
 
 function skippedFromInspection(client: SetupClientId, inspection: InspectionResult): SetupResult {
@@ -370,7 +413,7 @@ export async function setup(argv: readonly string[], deps?: SetupDependencies): 
   );
 
   say("host setup results follow.");
-  for (const result of results) printResult(result);
+  for (const result of results) printResult(result, registration);
 
   if (options.mode === "configure"
     && dependencies.platform.shell !== undefined

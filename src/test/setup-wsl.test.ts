@@ -24,6 +24,16 @@ const completeInput = {
   rockyHome: "/home/ada/.rocky",
 };
 
+const completeRegistration: McpRegistration = {
+  name: "rocky",
+  command: completeInput.nodePath,
+  args: [completeInput.entryPath, "mcp"],
+  env: {
+    ROCKY_MCP_EXPOSURE: completeInput.exposure,
+    ROCKY_HOME: completeInput.rockyHome,
+  },
+};
+
 class FakeRunner implements ProcessRunner {
   readonly calls: Array<{ command: string; args: readonly string[]; options?: ProcessRunOptions }> = [];
 
@@ -421,4 +431,91 @@ test("explicit WSL Desktop config is an additional deduplicated candidate", () =
   });
 
   assert.deepEqual(platform.wslDesktopConfigPaths, [discovered, explicit]);
+});
+
+test("native macOS and Windows skip Desktop when the client is absent", async (t) => {
+  const cases = [
+    {
+      name: "macOS",
+      platform: createPlatformServices({
+        platform: "darwin",
+        home: "/Users/Ada",
+        env: { PATH: "" },
+        isWsl: false,
+        fileExists: () => false,
+      }),
+    },
+    {
+      name: "Windows",
+      platform: createPlatformServices({
+        platform: "win32",
+        home: "C:\\Users\\Ada",
+        appData: "C:\\Users\\Ada\\AppData\\Roaming",
+        env: { PATH: "", LOCALAPPDATA: "C:\\Users\\Ada\\AppData\\Local" },
+        isWsl: false,
+        fileExists: () => false,
+      }),
+    },
+  ];
+
+  for (const entry of cases) {
+    await t.test(entry.name, async () => {
+      const adapters = await createProductionAdapters(entry.platform, new FakeRunner({
+        status: 0,
+        stdout: "",
+        stderr: "",
+      }), completeRegistration);
+      const desktop = adapters.find(({ id }) => id === "claude-desktop");
+      assert.ok(desktop !== undefined);
+
+      const inspected = await desktop.inspect(completeRegistration);
+
+      assert.equal(inspected.state, "blocked");
+      assert.match(inspected.detail ?? "", /not installed/i);
+    });
+  }
+});
+
+test("installed native Desktop is configurable before its first config file exists", async (t) => {
+  const macRoot = mkdtempSync(join(tmpdir(), "rocky-native-desktop-"));
+  t.after(() => rmSync(macRoot, { recursive: true, force: true }));
+  const macApp = "/Applications/Claude.app";
+  const windowsApp = "C:\\Users\\Ada\\AppData\\Local\\AnthropicClaude\\Claude.exe";
+  const cases = [
+    {
+      name: "macOS",
+      platform: createPlatformServices({
+        platform: "darwin",
+        home: macRoot,
+        env: { PATH: "" },
+        isWsl: false,
+        fileExists: (path) => path === macApp,
+      }),
+    },
+    {
+      name: "Windows",
+      platform: createPlatformServices({
+        platform: "win32",
+        home: "C:\\Users\\Ada",
+        appData: "C:\\Users\\Ada\\AppData\\Roaming",
+        env: { PATH: "", LOCALAPPDATA: "C:\\Users\\Ada\\AppData\\Local" },
+        isWsl: false,
+        fileExists: (path) => path === windowsApp,
+      }),
+    },
+  ];
+
+  for (const entry of cases) {
+    await t.test(entry.name, async () => {
+      const adapters = await createProductionAdapters(entry.platform, new FakeRunner({
+        status: 0,
+        stdout: "",
+        stderr: "",
+      }), completeRegistration);
+      const desktop = adapters.find(({ id }) => id === "claude-desktop");
+      assert.ok(desktop !== undefined);
+
+      assert.equal((await desktop.inspect(completeRegistration)).state, "absent");
+    });
+  }
 });

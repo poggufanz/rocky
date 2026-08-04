@@ -164,6 +164,41 @@ test("atomic JSON writer cleans its random temporary sibling after rename failur
   assert.equal(statSync(path).isDirectory(), true);
 });
 
+test("atomic JSON writer reports published bytes when parent fsync fails after rename", (t) => {
+  const directory = temporaryDirectory(t);
+  const path = join(directory, "settings.json");
+  writeFileSync(path, '{"before":true}\n', "utf8");
+  const originalRename = fs.renameSync;
+  const originalFsync = fs.fsyncSync;
+  let published = false;
+  fs.renameSync = ((from: fs.PathLike, to: fs.PathLike) => {
+    originalRename(from, to);
+    if (String(to) === path) published = true;
+  }) as typeof fs.renameSync;
+  fs.fsyncSync = ((descriptor: number) => {
+    if (published) throw new Error("fake parent fsync secret");
+    return originalFsync(descriptor);
+  }) as typeof fs.fsyncSync;
+  syncBuiltinESMExports();
+  t.after(() => {
+    fs.renameSync = originalRename;
+    fs.fsyncSync = originalFsync;
+    syncBuiltinESMExports();
+  });
+
+  assert.throws(
+    () => atomicWriteJson(path, { after: true }),
+    (error: unknown) => {
+      const candidate = error as Error & { committed?: boolean };
+      return error instanceof Error
+        && candidate.committed === true
+        && /durability/i.test(candidate.message)
+        && !/fake parent fsync secret/.test(candidate.message);
+    },
+  );
+  assert.deepEqual(JSON.parse(readFileSync(path, "utf8")), { after: true });
+});
+
 test("conditional JSON results only report recovery artifacts that still exist", (t) => {
   const directory = temporaryDirectory(t);
   const successfulPath = join(directory, "successful.json");

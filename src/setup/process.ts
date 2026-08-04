@@ -61,6 +61,7 @@ export function createProcessRunner(captureLimitBytes = PROCESS_CAPTURE_LIMIT_BY
         let stdoutBytes = 0;
         let stderrBytes = 0;
         let processError: Error | undefined;
+        let spawnFailed = false;
         const controller = options.timeoutMs === undefined ? undefined : new AbortController();
         let child: ChildProcessWithoutNullStreams;
 
@@ -96,12 +97,13 @@ export function createProcessRunner(captureLimitBytes = PROCESS_CAPTURE_LIMIT_BY
           stderrBytes = captureChunk(stderr, stderrBytes, chunk, captureLimitBytes);
         });
         child.on("error", (error) => {
+          spawnFailed = true;
           processError ??= error;
         });
         child.on("close", (status) => {
           if (timer !== undefined) clearTimeout(timer);
           const result: ProcessResult = {
-            status,
+            status: spawnFailed ? null : status,
             stdout: Buffer.concat(stdout).toString("utf8"),
             stderr: Buffer.concat(stderr).toString("utf8"),
           };

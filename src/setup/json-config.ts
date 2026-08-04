@@ -121,6 +121,15 @@ export class BackupFileError extends Error {
   }
 }
 
+export class AtomicJsonWriteError extends Error {
+  constructor(readonly committed: boolean) {
+    super(committed
+      ? "JSON config was replaced but directory durability is unconfirmed"
+      : "Unable to write JSON config");
+    this.name = "AtomicJsonWriteError";
+  }
+}
+
 function syncParentDirectory(path: string): void {
   if (process.platform === "win32") return;
   let descriptor: number | undefined;
@@ -143,7 +152,7 @@ export function atomicWriteJson(
     if (serialized === undefined) throw new Error("not serializable");
     encoded = `${serialized}\n`;
   } catch {
-    throw new Error("Unable to write JSON config");
+    throw new AtomicJsonWriteError(false);
   }
 
   const temporaryPath = join(
@@ -163,7 +172,7 @@ export function atomicWriteJson(
     renamed = true;
     syncParentDirectory(path);
   } catch {
-    throw new Error("Unable to write JSON config");
+    throw new AtomicJsonWriteError(renamed);
   } finally {
     if (descriptor !== undefined) {
       try {

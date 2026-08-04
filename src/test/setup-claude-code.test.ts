@@ -2,9 +2,12 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import fs, {
   mkdtempSync,
+  linkSync,
+  lstatSync,
   readFileSync,
   readdirSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
@@ -314,6 +317,55 @@ test("replacement remove refusal stops before add and preserves config", async (
   }
 });
 
+test("linked Claude Code configs block replacement and removal before any CLI mutation", async (t) => {
+  const cases = ["symlink", "hard-link"] as const;
+  const operations = ["replace", "remove"] as const;
+
+  for (const topology of cases) {
+    for (const operation of operations) {
+      await t.test(`${topology} ${operation}`, async () => {
+        const directory = mkdtempSync(join(tmpdir(), "rocky-claude-topology-"));
+        t.after(() => rmSync(directory, { recursive: true, force: true }));
+        const target = join(directory, "target.json");
+        const path = join(directory, ".claude.json");
+        const bytes = `${JSON.stringify({
+          secret: "topology-secret",
+          mcpServers: { rocky: rockyEntry("/old/node") },
+        })}\n`;
+        writeFileSync(target, bytes, { mode: 0o640 });
+        if (topology === "symlink") symlinkSync(target, path);
+        else linkSync(target, path);
+        const beforePath = lstatSync(path);
+        const beforeTarget = lstatSync(target);
+        const runner = new FakeRunner([]);
+        const adapter = createClaudeCodeAdapter({
+          runner,
+          executable: "/opt/claude",
+          userConfigPath: path,
+        });
+
+        const outcome = operation === "replace"
+          ? await adapter.configure(registration, true)
+          : await adapter.remove(registration);
+
+        assert.equal(outcome.status, "failed");
+        assert.match(outcome.detail ?? "", /topology|regular file|manual/i);
+        assert.doesNotMatch(outcome.detail ?? "", /topology-secret|old\/node/);
+        assert.deepEqual(outcome.manualRegistration, registration);
+        assert.deepEqual(runner.calls, []);
+        const afterPath = lstatSync(path);
+        const afterTarget = lstatSync(target);
+        assert.equal(afterPath.dev, beforePath.dev);
+        assert.equal(afterPath.ino, beforePath.ino);
+        assert.equal(afterPath.isSymbolicLink(), beforePath.isSymbolicLink());
+        assert.equal(afterTarget.dev, beforeTarget.dev);
+        assert.equal(afterTarget.ino, beforeTarget.ino);
+        assert.equal(readFileSync(target, "utf8"), bytes);
+      });
+    }
+  }
+});
+
 test("failed add restores exact rocky snapshot into current unrelated config", async (t) => {
   const snapshot = {
     ...rockyEntry("/old/node"),
@@ -424,6 +476,33 @@ test("rollback refuses unreadable or non-object current config without overwriti
   }
 });
 
+test("rollback refuses a config topology swap after CLI remove", async (t) => {
+  const path = userConfig(t, { mcpServers: { rocky: rockyEntry("/old/node") } });
+  const target = join(dirname(path), "concurrent-target.json");
+  const targetBytes = '{"theme":"concurrent","secret":"topology-swap-secret","mcpServers":{}}\n';
+  writeFileSync(target, targetBytes, "utf8");
+  const runner = new FakeRunner([
+    () => {
+      rmSync(path);
+      symlinkSync(target, path);
+      return result(0);
+    },
+    result(1, "", "add-secret"),
+  ]);
+
+  const configured = await createClaudeCodeAdapter({
+    runner,
+    executable: "/opt/claude",
+    userConfigPath: path,
+  }).configure(registration, true);
+
+  assert.equal(configured.status, "failed");
+  assert.match(configured.detail ?? "", /topology|manual recovery/i);
+  assert.doesNotMatch(configured.detail ?? "", /topology-swap-secret|add-secret|old\/node/);
+  assert.equal(lstatSync(path).isSymbolicLink(), true);
+  assert.equal(readFileSync(target, "utf8"), targetBytes);
+});
+
 test("rollback rename failure cleans its temp and reports manual recovery", async (t) => {
   const path = userConfig(t, { mcpServers: { rocky: rockyEntry("/old/node") } });
   const current = { theme: "keep", mcpServers: { other: { keep: true } } };
@@ -453,6 +532,53 @@ test("rollback rename failure cleans its temp and reports manual recovery", asyn
     syncBuiltinESMExports();
   }
   assert.equal(readdirSync(directory).some((name) => name.includes(".tmp-")), false);
+});
+
+test("rollback reports restored but durability-unconfirmed after post-rename parent fsync failure", async (t) => {
+  const snapshot = { ...rockyEntry("/old/node"), token: "rollback-secret" };
+  const path = userConfig(t, { mcpServers: { rocky: snapshot } });
+  const current = { theme: "keep", mcpServers: { other: { keep: true } } };
+  const runner = new FakeRunner([
+    () => {
+      writeFileSync(path, `${JSON.stringify(current)}\n`, { mode: 0o640 });
+      return result(0);
+    },
+    result(1, "", "add-secret"),
+  ]);
+  const originalRename = fs.renameSync;
+  const originalFsync = fs.fsyncSync;
+  let published = false;
+  fs.renameSync = ((from: fs.PathLike, to: fs.PathLike) => {
+    originalRename(from, to);
+    if (String(to) === path) published = true;
+  }) as typeof fs.renameSync;
+  fs.fsyncSync = ((descriptor: number) => {
+    if (published) throw new Error("fake rollback parent fsync secret");
+    return originalFsync(descriptor);
+  }) as typeof fs.fsyncSync;
+  syncBuiltinESMExports();
+
+  try {
+    const configured = await createClaudeCodeAdapter({
+      runner,
+      executable: "/opt/claude",
+      userConfigPath: path,
+    }).configure(registration, true);
+
+    assert.equal(configured.status, "failed");
+    assert.match(configured.detail ?? "", /restored/i);
+    assert.match(configured.detail ?? "", /durability/i);
+    assert.match(configured.detail ?? "", /backup/i);
+    assert.doesNotMatch(configured.detail ?? "", /manual recovery|rollback-secret|add-secret|fsync secret/i);
+    assert.deepEqual(JSON.parse(readFileSync(path, "utf8")), {
+      ...current,
+      mcpServers: { ...current.mcpServers, rocky: snapshot },
+    });
+  } finally {
+    fs.renameSync = originalRename;
+    fs.fsyncSync = originalFsync;
+    syncBuiltinESMExports();
+  }
 });
 
 test("failed add never overwrites a concurrent rocky entry and reports backup", async (t) => {

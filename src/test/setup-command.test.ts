@@ -445,6 +445,59 @@ test("sanitized and raw configure print required projected-memory disclosures", 
   assert.equal(raw.calls[0]?.registration.env.ROCKY_MCP_EXPOSURE, "raw");
 });
 
+test("manual registrations render as host-appropriate desired argv or config", async () => {
+  const desired: McpRegistration = {
+    name: "rocky",
+    command: nodePath,
+    args: [entryPath, "mcp"],
+    env: { ROCKY_MCP_EXPOSURE: "sanitized", ROCKY_HOME: rockyHome },
+  };
+  const adapters = (["codex", "claude-code", "claude-desktop"] as const).map((client) =>
+    new FakeAdapter(client, {
+      configure: {
+        client,
+        status: "failed",
+        detail: "manual setup required",
+        manualRegistration: desired,
+      },
+    }));
+
+  const output = await captureStderr(() => setup(["--yes"], dependencies(adapters)));
+
+  assert.equal(output.code, 1);
+  assert.match(output.stderr, /codex manual argv: \["mcp","add"/);
+  assert.match(output.stderr, /claude-code manual argv: \["mcp","add","--scope","user","--transport","stdio"/);
+  assert.match(output.stderr, /claude-desktop manual config: \{"mcpServers":\{"rocky":\{"type":"stdio"/);
+  assert.match(output.stderr, new RegExp(rockyHome.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+});
+
+test("manual renderer refuses noncanonical snapshots and never prints their secrets", async () => {
+  const unsafe: McpRegistration = {
+    name: "rocky",
+    command: "/secret/prior-node",
+    args: ["/secret/prior-server.js", "mcp"],
+    env: {
+      ROCKY_MCP_EXPOSURE: "sanitized",
+      ROCKY_HOME: rockyHome,
+      API_TOKEN: "prior-secret-token",
+    },
+  };
+  const adapter = new FakeAdapter("codex", {
+    configure: {
+      client: "codex",
+      status: "failed",
+      detail: "manual recovery required",
+      manualRegistration: unsafe,
+    },
+  });
+
+  const output = await captureStderr(() => setup(["--yes"], dependencies([adapter])));
+
+  assert.equal(output.code, 1);
+  assert.match(output.stderr, /manual registration unavailable/i);
+  assert.doesNotMatch(output.stderr, /prior-node|prior-server|API_TOKEN|prior-secret-token/);
+});
+
 test("Bash without installed ears prints next step but never installs hook", async () => {
   const adapter = new FakeAdapter("codex", {});
   const output = await captureStderr(() => setup(["--yes"], dependencies([adapter], {

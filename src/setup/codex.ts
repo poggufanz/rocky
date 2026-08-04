@@ -1,4 +1,17 @@
 import { isDeepStrictEqual } from "node:util";
+import { randomBytes } from "node:crypto";
+import {
+  closeSync,
+  constants,
+  fstatSync,
+  fsyncSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { dirname, isAbsolute, join } from "node:path";
 import type {
   InspectionResult,
   McpRegistration,
@@ -16,6 +29,14 @@ const CODEX_COMMAND_TIMEOUT_MS = 10_000;
 export interface CodexAdapterDependencies {
   runner: ProcessRunner;
   executable?: string;
+  recoveryBaseDirectory?: string;
+}
+
+interface RecoveryArtifact {
+  path: string;
+  directory: string;
+  dev: number;
+  ino: number;
 }
 
 interface JsonObject {
@@ -228,6 +249,129 @@ function failed(detail: string, manualRegistration?: McpRegistration): SetupResu
   return result;
 }
 
+function syncDirectory(path: string): void {
+  if (process.platform === "win32") return;
+  const descriptor = openSync(path, "r");
+  try {
+    fsyncSync(descriptor);
+  } finally {
+    closeSync(descriptor);
+  }
+}
+
+function safeBaseDirectory(path: string): boolean {
+  try {
+    const metadata = lstatSync(path);
+    return metadata.isDirectory() && !metadata.isSymbolicLink();
+  } catch {
+    return false;
+  }
+}
+
+function privateDirectory(path: string): boolean {
+  if (!safeBaseDirectory(path)) return false;
+  return process.platform === "win32" || (lstatSync(path).mode & 0o077) === 0;
+}
+
+function persistRecoveryArtifact(baseDirectory: string, snapshot: unknown): RecoveryArtifact {
+  if (!isAbsolute(baseDirectory) || !safeBaseDirectory(baseDirectory)) {
+    throw new Error("unsafe recovery base");
+  }
+  const directory = join(baseDirectory, ".rocky-setup-recovery");
+  try {
+    mkdirSync(directory, { mode: 0o700 });
+    syncDirectory(baseDirectory);
+  } catch (error) {
+    const code = error instanceof Error && "code" in error ? error.code : undefined;
+    if (code !== "EEXIST" || !privateDirectory(directory)) {
+      throw new Error("unsafe recovery directory");
+    }
+  }
+  if (!privateDirectory(directory)) throw new Error("unsafe recovery directory");
+
+  const path = join(directory, `codex-rocky-${randomBytes(16).toString("hex")}.json`);
+  let descriptor: number | undefined;
+  let identity: { dev: number; ino: number } | undefined;
+  try {
+    const noFollow = "O_NOFOLLOW" in constants ? constants.O_NOFOLLOW : 0;
+    descriptor = openSync(
+      path,
+      constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | noFollow,
+      0o600,
+    );
+    const opened = fstatSync(descriptor);
+    identity = { dev: opened.dev, ino: opened.ino };
+    writeFileSync(descriptor, `${JSON.stringify(snapshot)}\n`, "utf8");
+    fsyncSync(descriptor);
+    closeSync(descriptor);
+    descriptor = undefined;
+    syncDirectory(directory);
+    const stored = lstatSync(path);
+    if (!stored.isFile()
+      || stored.isSymbolicLink()
+      || stored.nlink !== 1
+      || stored.dev !== identity.dev
+      || stored.ino !== identity.ino
+      || (stored.mode & 0o077) !== 0) {
+      throw new Error("unsafe recovery artifact");
+    }
+    return { path, directory, dev: stored.dev, ino: stored.ino };
+  } catch {
+    if (descriptor !== undefined) {
+      try { closeSync(descriptor); } catch { /* preserve secret-free failure */ }
+    }
+    if (identity !== undefined) {
+      try {
+        const stored = lstatSync(path);
+        if (stored.isFile() && stored.dev === identity.dev && stored.ino === identity.ino) {
+          rmSync(path);
+          syncDirectory(directory);
+        }
+      } catch {
+        // Preparation failed before destructive mutation; never report an unverified path.
+      }
+    }
+    throw new Error("Unable to persist Codex recovery artifact");
+  }
+}
+
+function removeRecoveryArtifact(artifact: RecoveryArtifact): boolean {
+  try {
+    const stored = lstatSync(artifact.path);
+    if (!stored.isFile()
+      || stored.isSymbolicLink()
+      || stored.nlink !== 1
+      || stored.dev !== artifact.dev
+      || stored.ino !== artifact.ino) return false;
+    rmSync(artifact.path);
+    syncDirectory(artifact.directory);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function recoveryFailure(
+  prefix: string,
+  artifact: RecoveryArtifact,
+  desired: McpRegistration,
+): SetupResult {
+  try {
+    const stored = lstatSync(artifact.path);
+    if (stored.isFile()
+      && !stored.isSymbolicLink()
+      && stored.nlink === 1
+      && stored.dev === artifact.dev
+      && stored.ino === artifact.ino
+      && (process.platform === "win32" || (stored.mode & 0o077) === 0)) {
+      return failed(`${prefix}; manual recovery: ${artifact.path}`, desired);
+    }
+  } catch {
+    // Never report a recovery path that no longer exists.
+  }
+  return failed(`${prefix}; recovery artifact is unavailable`, desired);
+}
+
 export function createCodexAdapter(dependencies: CodexAdapterDependencies): SetupClientAdapter {
   const { runner, executable } = dependencies;
 
@@ -287,23 +431,69 @@ export function createCodexAdapter(dependencies: CodexAdapterDependencies): Setu
       const rollback = snapshotToRestorableStdio(inspection.snapshot);
       if (!rollback.ok) return manualReplacement(rollback.reason, registration);
 
+      const rockyHome = registration.env.ROCKY_HOME;
+      const recoveryBase = dependencies.recoveryBaseDirectory
+        ?? (rockyHome === undefined ? undefined : dirname(rockyHome));
+      let recovery: RecoveryArtifact;
+      try {
+        if (recoveryBase === undefined) throw new Error("missing recovery base");
+        recovery = persistRecoveryArtifact(recoveryBase, inspection.snapshot);
+      } catch {
+        return failed(
+          "Unable to create private Codex recovery artifact; replacement stopped",
+          registration,
+        );
+      }
+
       const removed = await runner.run(executable, REMOVE_ARGS, { timeoutMs: CODEX_COMMAND_TIMEOUT_MS });
       if (!succeeded(removed)) {
-        return failed("Unable to remove existing Codex registration", registration);
+        const current = await runner.run(executable, GET_ARGS, { timeoutMs: CODEX_COMMAND_TIMEOUT_MS });
+        const verified = succeeded(current) ? parseSnapshot(current.stdout) : { ok: false as const };
+        if (verified.ok && isDeepStrictEqual(verified.value.snapshot, inspection.snapshot)) {
+          return removeRecoveryArtifact(recovery)
+            ? failed("Unable to remove existing Codex registration", registration)
+            : recoveryFailure("Codex recovery artifact cleanup failed", recovery, registration);
+        }
+        return recoveryFailure(
+          "Unable to remove existing Codex registration and prior state could not be verified",
+          recovery,
+          registration,
+        );
       }
       const added = await add(registration);
-      if (succeeded(added)) return { client: "codex", status: "configured" };
+      if (succeeded(added)) {
+        const current = await runner.run(executable, GET_ARGS, { timeoutMs: CODEX_COMMAND_TIMEOUT_MS });
+        const verified = succeeded(current) ? parseSnapshot(current.stdout) : { ok: false as const };
+        if (!verified.ok
+          || !isIdenticalMcpRegistration(verified.value.registration, registration)
+          || !snapshotToRestorableStdio(verified.value.snapshot).ok) {
+          return recoveryFailure(
+            "Codex registration update could not be verified",
+            recovery,
+            registration,
+          );
+        }
+        return removeRecoveryArtifact(recovery)
+          ? { client: "codex", status: "configured" }
+          : recoveryFailure("Codex recovery artifact cleanup failed", recovery, registration);
+      }
 
       const restored = await add(rollback.registration);
       if (!succeeded(restored)) {
-        return failed("Codex registration update and rollback failed; manual recovery is required", registration);
+        return recoveryFailure(
+          "Codex registration update and rollback failed",
+          recovery,
+          registration,
+        );
       }
       const verificationResult = await runner.run(executable, GET_ARGS, { timeoutMs: CODEX_COMMAND_TIMEOUT_MS });
       const verification = succeeded(verificationResult) ? parseSnapshot(verificationResult.stdout) : { ok: false as const };
       if (!verification.ok || !isDeepStrictEqual(verification.value.snapshot, inspection.snapshot)) {
-        return failed("Codex rollback could not be verified; manual recovery is required", registration);
+        return recoveryFailure("Codex rollback could not be verified", recovery, registration);
       }
-      return failed("Codex registration update failed; previous registration was restored");
+      return removeRecoveryArtifact(recovery)
+        ? failed("Codex registration update failed; previous registration was restored")
+        : recoveryFailure("Codex recovery artifact cleanup failed", recovery, registration);
     },
 
     async remove(registration) {
