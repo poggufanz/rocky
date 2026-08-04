@@ -6,11 +6,12 @@ import type {
   SetupResult,
 } from "./clients.js";
 import type { ProcessResult, ProcessRunner } from "./process.js";
-import { isIdenticalMcpRegistration } from "./registration.js";
+import { isIdenticalMcpRegistration, isOwnedRockyRegistration } from "./registration.js";
 
 const GET_ARGS = ["mcp", "get", "rocky", "--json"] as const;
 const REMOVE_ARGS = ["mcp", "remove", "rocky"] as const;
 const MISSING_DETAIL = "Codex CLI is not installed";
+const CODEX_COMMAND_TIMEOUT_MS = 10_000;
 
 export interface CodexAdapterDependencies {
   runner: ProcessRunner;
@@ -64,13 +65,7 @@ function hasEveryKey(value: JsonObject, keys: readonly string[]): boolean {
   return keys.every((key) => Object.prototype.hasOwnProperty.call(value, key));
 }
 
-function parseSnapshot(stdout: string): ParseResult {
-  let value: unknown;
-  try {
-    value = JSON.parse(stdout);
-  } catch {
-    return { ok: false };
-  }
+function parseSnapshotValue(value: unknown): ParseResult {
   if (!isObject(value)
     || !hasEveryKey(value, [
       "name",
@@ -119,12 +114,22 @@ function parseSnapshot(stdout: string): ParseResult {
   };
 }
 
+function parseSnapshot(stdout: string): ParseResult {
+  try {
+    return parseSnapshotValue(JSON.parse(stdout));
+  } catch {
+    return { ok: false };
+  }
+}
+
 function succeeded(result: ProcessResult): boolean {
   return result.status === 0 && result.error === undefined;
 }
 
 function isNotFound(result: ProcessResult): boolean {
-  return result.status !== 0
+  return typeof result.status === "number"
+    && result.status !== 0
+    && result.error === undefined
     && /no mcp server named\s+['"]?rocky['"]?\s+found|mcp server\s+['"]?rocky['"]?\s+(?:was\s+)?not found/i
       .test(`${result.stdout}\n${result.stderr}`);
 }
@@ -228,14 +233,15 @@ export function createCodexAdapter(dependencies: CodexAdapterDependencies): Setu
 
   async function readSnapshot(registration: McpRegistration): Promise<InspectionResult> {
     if (executable === undefined) return { state: "blocked", detail: MISSING_DETAIL };
-    const result = await runner.run(executable, GET_ARGS);
+    const result = await runner.run(executable, GET_ARGS, { timeoutMs: CODEX_COMMAND_TIMEOUT_MS });
     if (!succeeded(result)) {
       if (isNotFound(result)) return { state: "absent" };
       return { state: "unreadable", detail: "Unable to read Codex registration" };
     }
     const parsed = parseSnapshot(result.stdout);
     if (!parsed.ok) return { state: "unreadable", detail: "Unable to read Codex registration" };
-    return isIdenticalMcpRegistration(parsed.value.registration, registration)
+    const restorable = snapshotToRestorableStdio(parsed.value.snapshot);
+    return isIdenticalMcpRegistration(parsed.value.registration, registration) && restorable.ok
       ? { state: "identical", snapshot: parsed.value.snapshot }
       : { state: "conflict", snapshot: parsed.value.snapshot };
   }
@@ -244,7 +250,7 @@ export function createCodexAdapter(dependencies: CodexAdapterDependencies): Setu
     if (executable === undefined) {
       return { status: null, stdout: "", stderr: "", error: new Error(MISSING_DETAIL) };
     }
-    return runner.run(executable, addArguments(registration));
+    return runner.run(executable, addArguments(registration), { timeoutMs: CODEX_COMMAND_TIMEOUT_MS });
   }
 
   return {
@@ -281,7 +287,7 @@ export function createCodexAdapter(dependencies: CodexAdapterDependencies): Setu
       const rollback = snapshotToRestorableStdio(inspection.snapshot);
       if (!rollback.ok) return manualReplacement(rollback.reason, registration);
 
-      const removed = await runner.run(executable, REMOVE_ARGS);
+      const removed = await runner.run(executable, REMOVE_ARGS, { timeoutMs: CODEX_COMMAND_TIMEOUT_MS });
       if (!succeeded(removed)) {
         return failed("Unable to remove existing Codex registration", registration);
       }
@@ -292,7 +298,7 @@ export function createCodexAdapter(dependencies: CodexAdapterDependencies): Setu
       if (!succeeded(restored)) {
         return failed("Codex registration update and rollback failed; manual recovery is required", registration);
       }
-      const verificationResult = await runner.run(executable, GET_ARGS);
+      const verificationResult = await runner.run(executable, GET_ARGS, { timeoutMs: CODEX_COMMAND_TIMEOUT_MS });
       const verification = succeeded(verificationResult) ? parseSnapshot(verificationResult.stdout) : { ok: false as const };
       if (!verification.ok || !isDeepStrictEqual(verification.value.snapshot, inspection.snapshot)) {
         return failed("Codex rollback could not be verified; manual recovery is required", registration);
@@ -306,7 +312,11 @@ export function createCodexAdapter(dependencies: CodexAdapterDependencies): Setu
       if (inspection.state === "absent") return { client: "codex", status: "not-configured" };
       if (inspection.state === "blocked") return skipped();
       if (inspection.state === "unreadable") return failed("Unable to read Codex registration");
-      return succeeded(await runner.run(executable, REMOVE_ARGS))
+      const parsed = parseSnapshotValue(inspection.snapshot);
+      if (!parsed.ok || !isOwnedRockyRegistration(parsed.value.registration, registration)) {
+        return failed("Codex rocky registration is not owned by Rocky");
+      }
+      return succeeded(await runner.run(executable, REMOVE_ARGS, { timeoutMs: CODEX_COMMAND_TIMEOUT_MS }))
         ? { client: "codex", status: "removed" }
         : failed("Unable to remove Codex registration");
     },
