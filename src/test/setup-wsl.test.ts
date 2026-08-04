@@ -882,6 +882,69 @@ test("native Desktop backup cleanup never removes a rebound attacker file", asyn
   }
 });
 
+test("native Desktop drops cached backup path when topology changes after backup returns", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "rocky-native-backup-report-swap-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const parent = join(root, "Library", "Application Support", "Claude");
+  const displacedParent = `${parent}-prepared`;
+  const configName = "claude_desktop_config.json";
+  const configPath = join(parent, configName);
+  const originalConfig = '{"theme":"dark","secret":"fake-original-secret"}\n';
+  mkdirSync(parent, { recursive: true });
+  writeFileSync(configPath, originalConfig, "utf8");
+  const originalLstat = fs.lstatSync;
+  let backupPath: string | undefined;
+  let rootChecksAfterBackupProbe = 0;
+  let swapped = false;
+  (fs as unknown as { lstatSync: typeof fs.lstatSync }).lstatSync = ((path: fs.PathLike, options?: unknown) => {
+    const pathText = String(path);
+    if (pathText.includes(`${configName}.backup-`)) backupPath = pathText;
+    if (backupPath !== undefined && pathText === root) {
+      rootChecksAfterBackupProbe += 1;
+      if (!swapped && rootChecksAfterBackupProbe === 2) {
+        fs.renameSync(parent, displacedParent);
+        mkdirSync(parent, { mode: 0o700 });
+        swapped = true;
+      }
+    }
+    return options === undefined
+      ? originalLstat(path)
+      : originalLstat(path, options as never);
+  }) as typeof fs.lstatSync;
+  syncBuiltinESMExports();
+
+  try {
+    const platform = createPlatformServices({
+      platform: "darwin",
+      home: root,
+      env: { PATH: "" },
+      isWsl: false,
+      claudeDesktopInstalled: true,
+    });
+    const adapters = await createProductionAdapters(
+      platform,
+      new FakeRunner({ status: 0, stdout: "", stderr: "" }),
+      completeRegistration,
+    );
+    const desktop = adapters.find(({ id }) => id === "claude-desktop");
+    assert.ok(desktop !== undefined);
+
+    const result = await desktop.configure(completeRegistration, false);
+
+    assert.equal(swapped, true);
+    assert.equal(result.status, "failed");
+    assert.doesNotMatch(result.detail ?? "", /claude_desktop_config\.json\.backup-|fake-original-secret|ROCKY_HOME/i);
+    assert.deepEqual(fs.readdirSync(parent), []);
+    assert.equal(readFileSync(join(displacedParent, configName), "utf8"), originalConfig);
+    const displacedNames = fs.readdirSync(displacedParent);
+    assert.equal(displacedNames.filter((name) => name.includes(`${configName}.backup-`)).length, 1);
+    assert.equal(displacedNames.some((name) => name.includes(".transaction-")), false);
+  } finally {
+    (fs as unknown as { lstatSync: typeof fs.lstatSync }).lstatSync = originalLstat;
+    syncBuiltinESMExports();
+  }
+});
+
 test("native Desktop manifest cleanup revalidates after probing a rebound temporary path", async (t) => {
   const root = mkdtempSync(join(tmpdir(), "rocky-native-manifest-cleanup-swap-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));

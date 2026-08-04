@@ -299,13 +299,13 @@ function writeMutation(
         : "Unable to back up Claude Desktop config";
       return failed(detail, registration);
     }
-    if (!mutationGuardUnchanged(guard)) return unsafeTopology(registration, backupPath);
+    if (!mutationGuardUnchanged(guard)) return unsafeTopology(registration);
   }
 
   try {
-    if (!mutationGuardUnchanged(guard)) return unsafeTopology(registration, backupPath);
+    if (!mutationGuardUnchanged(guard)) return unsafeTopology(registration);
     const write = atomicWriteJsonIfUnchanged(path, value, inspection.read, guard);
-    if (!mutationGuardUnchanged(guard)) return unsafeTopology(registration, backupPath);
+    if (!mutationGuardUnchanged(guard)) return unsafeTopology(registration);
     if (write.status === "changed") {
       const changeDetail = write.recoveryPath === undefined
         ? "Claude Desktop config changed during setup; retry or use manual configuration"
