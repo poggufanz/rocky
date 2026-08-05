@@ -123,6 +123,13 @@ function crashTransaction(
 
 type PairedSourceRace = "bytes" | "mode";
 
+function hasFilesystemFifoCapability(
+  spawnSucceeded: boolean,
+  nativeTopologyIsFifo: boolean,
+): boolean {
+  return spawnSucceeded && nativeTopologyIsFifo;
+}
+
 type PairedSourceRacePlatform = "win32" | "posix";
 
 interface PairedSourceRaceModes {
@@ -397,6 +404,23 @@ test("paired source race modes keep byte injection writable and mode changes obs
     );
     assert.equal((actual.initial & 0o222) !== 0, expected.initialWritable, context);
     assert.equal((actual.replacement & 0o222) !== 0, expected.replacementWritable, context);
+  }
+});
+
+test("FIFO capability requires successful creation and native FIFO topology", () => {
+  const cases = [
+    { spawnSucceeded: false, nativeTopologyIsFifo: false, expected: false },
+    { spawnSucceeded: false, nativeTopologyIsFifo: true, expected: false },
+    { spawnSucceeded: true, nativeTopologyIsFifo: false, expected: false },
+    { spawnSucceeded: true, nativeTopologyIsFifo: true, expected: true },
+  ];
+
+  for (const entry of cases) {
+    assert.equal(
+      hasFilesystemFifoCapability(entry.spawnSucceeded, entry.nativeTopologyIsFifo),
+      entry.expected,
+      JSON.stringify(entry),
+    );
   }
 });
 
@@ -2756,12 +2780,25 @@ test("POSIX recovery rejects a FIFO source swap promptly before reading", async 
   const path = configPath(t);
   const fifoProbe = join(dirname(path), "fifo-probe");
   const probe = spawnSync("mkfifo", [fifoProbe], { encoding: "utf8" });
-  if (probe.error !== undefined || probe.status !== 0) {
-    t.skip("host has no mkfifo capability");
+  let nativeTopologyIsFifo = false;
+  try {
+    if (probe.error === undefined && probe.status === 0) {
+      try {
+        nativeTopologyIsFifo = fs.lstatSync(fifoProbe).isFIFO();
+      } catch {
+        nativeTopologyIsFifo = false;
+      }
+    }
+  } finally {
+    rmSync(fifoProbe, { recursive: true, force: true });
+  }
+  if (!hasFilesystemFifoCapability(
+    probe.error === undefined && probe.status === 0,
+    nativeTopologyIsFifo,
+  )) {
+    t.skip("host has no filesystem FIFO capability");
     return;
   }
-  assert.equal(fs.lstatSync(fifoProbe).isFIFO(), true);
-  fs.unlinkSync(fifoProbe);
 
   const recoveryBytes = Buffer.from('{"theme":"fifo-recovery-authority"}\n', "utf8");
   const transaction = crashTransaction(path, "restart-fifo-source", "displaced", recoveryBytes);

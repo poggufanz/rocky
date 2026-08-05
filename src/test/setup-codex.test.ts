@@ -93,6 +93,10 @@ function recoveryPath(detail: string | undefined): string {
   return match[1];
 }
 
+function differentStatNumber(value: number): number {
+  return value === 0 ? 1 : 0;
+}
+
 function simulateWindowsArtifactMetadata(
   t: test.TestContext,
   mutate: (metadata: Stats) => void = () => {},
@@ -155,6 +159,20 @@ function completeSnapshot(
     tool_timeout_sec: null,
   };
 }
+
+test("Stats Number identity replacement is guaranteed distinct at every magnitude", () => {
+  const cases = [
+    { value: Number.MAX_SAFE_INTEGER + 1, expected: 0 },
+    { value: 0, expected: 1 },
+    { value: 1, expected: 0 },
+  ];
+
+  for (const entry of cases) {
+    const actual = differentStatNumber(entry.value);
+    assert.equal(actual, entry.expected, JSON.stringify(entry));
+    assert.notEqual(actual, entry.value, JSON.stringify(entry));
+  }
+});
 
 test("missing Codex executable skips setup without invoking runner", async () => {
   const runner = new FakeRunner([]);
@@ -317,6 +335,7 @@ test("Windows recovery mode semantics reach the intended remove and replacement 
 });
 
 test("Windows recovery artifact identity and link-count mismatches stop before remove", async (t) => {
+  const identityMutations: Array<{ before: number; after: number }> = [];
   const cases: Array<{
     name: string;
     mutate(metadata: Stats): void;
@@ -324,7 +343,12 @@ test("Windows recovery artifact identity and link-count mismatches stop before r
     {
       name: "identity",
       mutate(metadata) {
-        Object.defineProperty(metadata, "ino", { configurable: true, value: metadata.ino + 1 });
+        const before = metadata.ino;
+        Object.defineProperty(metadata, "ino", {
+          configurable: true,
+          value: differentStatNumber(before),
+        });
+        identityMutations.push({ before, after: metadata.ino });
       },
     },
     {
@@ -349,6 +373,12 @@ test("Windows recovery artifact identity and link-count mismatches stop before r
       assert.equal(configured.status, "failed");
       assert.match(configured.detail ?? "", /recovery artifact/i);
       assert.deepEqual(runner.calls.map((call) => call.args), [getArgs]);
+      if (entry.name === "identity") {
+        assert.ok(identityMutations.length > 0, "identity mutation must reach a recovery artifact");
+        for (const mutation of identityMutations) {
+          assert.notEqual(mutation.after, mutation.before);
+        }
+      }
     });
   }
 });

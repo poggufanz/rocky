@@ -19,6 +19,7 @@ import {
   convertMountedWindowsPath,
 } from "../setup/claude-desktop.js";
 import { createPlatformServices } from "../setup/platform.js";
+import { directorySyncCapability } from "../setup/directory-sync.js";
 import { createProductionAdapters } from "../commands/setup.js";
 import type { McpRegistration } from "../setup/clients.js";
 
@@ -762,22 +763,26 @@ test("native Desktop backup cleanup never removes a rebound attacker file", asyn
   const displacedParent = `${parent}-prepared`;
   const configPath = fixture.configPath;
   const sentinel = "attacker-backup-sentinel\n";
+  const originalConfig = '{"theme":"dark"}\n';
   mkdirSync(parent, { recursive: true });
-  writeFileSync(configPath, '{"theme":"dark"}\n', "utf8");
-  const originalFsync = fs.fsyncSync;
+  writeFileSync(configPath, originalConfig, "utf8");
+  const originalDirectorySync = directorySyncCapability.sync;
+  let injectedDirectory: string | undefined;
   let reboundBackupPath: string | undefined;
-  (fs as unknown as { fsyncSync: typeof fs.fsyncSync }).fsyncSync = ((fd) => {
-    const backupName = fs.readdirSync(parent).find((name) => name.includes(".backup-"));
+  directorySyncCapability.sync = (directory) => {
+    const backupName = directory === parent
+      ? fs.readdirSync(parent).find((name) => name.startsWith(`${basename(configPath)}.backup-`))
+      : undefined;
     if (reboundBackupPath === undefined && backupName !== undefined) {
+      injectedDirectory = directory;
       fs.renameSync(parent, displacedParent);
       mkdirSync(parent, { mode: 0o700 });
       reboundBackupPath = join(parent, backupName);
       writeFileSync(reboundBackupPath, sentinel, "utf8");
       throw new Error("injected backup durability failure");
     }
-    return originalFsync(fd);
-  }) as typeof fs.fsyncSync;
-  syncBuiltinESMExports();
+    return originalDirectorySync(directory);
+  };
 
   try {
     const adapters = await createProductionAdapters(
@@ -792,15 +797,17 @@ test("native Desktop backup cleanup never removes a rebound attacker file", asyn
 
     assert.equal(result.status, "failed");
     assert.doesNotMatch(result.detail ?? "", /backup-|attacker-backup|ROCKY_HOME/i);
+    assert.equal(injectedDirectory, parent);
     assert.ok(reboundBackupPath !== undefined);
     assert.equal(readFileSync(reboundBackupPath, "utf8"), sentinel);
-    assert.equal(
-      fs.readdirSync(displacedParent).some((name) => name.includes(".backup-")),
-      true,
-    );
+    assert.equal(fs.lstatSync(reboundBackupPath).isFile(), true);
+    assert.equal(fs.lstatSync(reboundBackupPath).isSymbolicLink(), false);
+    const originalBackupPath = join(displacedParent, basename(reboundBackupPath));
+    assert.equal(readFileSync(originalBackupPath, "utf8"), originalConfig);
+    assert.equal(fs.lstatSync(originalBackupPath).isFile(), true);
+    assert.equal(fs.lstatSync(originalBackupPath).isSymbolicLink(), false);
   } finally {
-    (fs as unknown as { fsyncSync: typeof fs.fsyncSync }).fsyncSync = originalFsync;
-    syncBuiltinESMExports();
+    directorySyncCapability.sync = originalDirectorySync;
   }
 });
 
