@@ -38,10 +38,26 @@ try {
   run(process.execPath, ["--test", ...selected]);
 
   const smoke = join(packageRoot, "test", "hook-smoke.bash");
-  const smokeRequested = process.platform === "linux" || process.env.ROCKY_RUN_HOOK_SMOKE === "1";
-  if (filters.length === 0 && smokeRequested && existsSync(smoke)) {
+  const explicitlyRequested = process.env.ROCKY_RUN_HOOK_SMOKE === "1";
+  const smokeRequested = process.platform === "linux" || explicitlyRequested;
+  if (filters.length > 0) {
+    console.log("[hook-smoke] skipped: focused Node test selection; hook compatibility was not evaluated.");
+  } else if (!smokeRequested) {
+    console.log(
+      `[hook-smoke] skipped on ${process.platform}: current smoke uses GNU script -qec; ` +
+      "Node tests passed, but this skip is not a Bash hook incompatibility result.",
+    );
+  } else if (!existsSync(smoke)) {
+    throw new Error(`hook smoke fixture is missing: ${smoke}`);
+  } else {
     const probe = spawnSync("bash", ["--version"], { stdio: "ignore" });
-    if (!probe.error && probe.status === 0) run("bash", [smoke]);
+    if (probe.error || probe.status !== 0) {
+      console.log("[hook-smoke] skipped: Bash executable unavailable; hook compatibility was not evaluated.");
+    } else {
+      console.log(`[hook-smoke] running (${explicitlyRequested ? "explicit request" : "Linux default"}).`);
+      run("bash", [smoke]);
+      console.log("[hook-smoke] passed.");
+    }
   }
 } catch (error) {
   if (!(error instanceof CommandFailed)) console.error(error);

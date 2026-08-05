@@ -23,6 +23,9 @@
     "build": "node scripts/build.mjs",
     "dev": "tsc -p tsconfig.build.json --watch",
     "test": "node scripts/test.mjs",
+    "package:smoke": "node scripts/package-smoke.mjs",
+    "benchmark:mcp": "npm run build --silent && node scripts/benchmark-mcp.mjs",
+    "release:check": "node scripts/release-check.mjs",
     "prepack": "npm run build",
     "prepublishOnly": "npm test"
   },
