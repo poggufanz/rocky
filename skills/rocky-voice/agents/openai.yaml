@@ -1,0 +1,4 @@
+interface:
+  display_name: "Rocky Voice"
+  short_description: "Narrate Rocky memory in Rocky's voice"
+  default_prompt: "Use $rocky-voice to narrate this Rocky recall result without changing its technical evidence."

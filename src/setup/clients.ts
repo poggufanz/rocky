@@ -14,6 +14,7 @@ export interface SetupOptions {
   exposure: Exposure;
   replace: boolean;
   yes: boolean;
+  voiceSkill: boolean;
 }
 
 export type SetupClientId = "codex" | "claude-code" | "claude-desktop";

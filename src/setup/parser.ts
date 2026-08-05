@@ -17,6 +17,7 @@ export function parseSetupArgs(argv: readonly string[]): SetupOptions {
   let exposureProvided = false;
   let replace = false;
   let yes = false;
+  let voiceSkill = false;
 
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
@@ -34,6 +35,10 @@ export function parseSetupArgs(argv: readonly string[]): SetupOptions {
     }
     if (argument === "--yes") {
       yes = true;
+      continue;
+    }
+    if (argument === "--voice-skill") {
+      voiceSkill = true;
       continue;
     }
     if (argument === "--mcp-exposure") {
@@ -59,5 +64,5 @@ export function parseSetupArgs(argv: readonly string[]): SetupOptions {
     throw new SetupUsageError("--replace and --mcp-exposure are valid only in configure mode");
   }
 
-  return { mode, exposure, replace, yes };
+  return { mode, exposure, replace, yes, voiceSkill };
 }

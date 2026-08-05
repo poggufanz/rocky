@@ -26,6 +26,14 @@ import {
   isIdenticalMcpRegistration,
   resolveMcpRegistration,
 } from "../setup/registration.js";
+import {
+  checkVoiceSkill,
+  installVoiceSkill,
+  removeVoiceSkill,
+  resolveVoiceSkillTargets,
+  type VoiceSkillOperationResult,
+  type VoiceSkillTarget,
+} from "../setup/voice-skill.js";
 import { detail, say } from "../ui/rocky.js";
 
 export interface ConfirmationPort {
@@ -40,6 +48,15 @@ export interface SetupDependencies {
   nodePath?: string;
   entryPath?: string;
   rockyHome?: string;
+  env?: NodeJS.ProcessEnv;
+  voiceSkills?: VoiceSkillServices;
+}
+
+export interface VoiceSkillServices {
+  resolveTargets(env: NodeJS.ProcessEnv, home: string): readonly VoiceSkillTarget[];
+  install(target: VoiceSkillTarget, replace: boolean): Promise<VoiceSkillOperationResult>;
+  check(target: VoiceSkillTarget): Promise<VoiceSkillOperationResult>;
+  remove(target: VoiceSkillTarget): Promise<VoiceSkillOperationResult>;
 }
 
 interface ConfirmationInput {
@@ -260,6 +277,7 @@ async function consentResults(
   adapters: readonly SetupClientAdapter[],
   registration: McpRegistration,
   confirmation: ConfirmationPort,
+  includeVoiceSkill: boolean,
 ): Promise<ConsentOutcome> {
   const inspections = new Map<SetupClientAdapter, InspectionResult>();
   const inspectionFailures = new Map<SetupClientAdapter, SetupResult>();
@@ -281,9 +299,14 @@ async function consentResults(
   const requiresConsent = [...inspections.values()].some((inspection) => inspection.state !== "blocked"
     && inspection.state !== "unreadable");
   if (!requiresConsent) return { results: orderedResults(), inspectionFailures };
-  const allowed = await confirmation.confirm(
-    mode === "configure" ? "configure MCP hosts now, question" : "remove Rocky from MCP hosts now, question",
-  );
+  const prompt = mode === "configure"
+    ? includeVoiceSkill
+      ? "configure MCP hosts and managed voice skill now, question"
+      : "configure MCP hosts now, question"
+    : includeVoiceSkill
+      ? "remove Rocky from MCP hosts and remove managed voice skill now, question"
+      : "remove Rocky from MCP hosts now, question";
+  const allowed = await confirmation.confirm(prompt);
   if (allowed) return { inspectionFailures };
   const instruction = mode === "configure" ? "rocky setup --yes" : "rocky setup --remove --yes";
   const results = orderedResults();
@@ -348,6 +371,82 @@ function defaultDependencies(): SetupDependencies {
   };
 }
 
+const defaultVoiceSkillServices: VoiceSkillServices = {
+  resolveTargets: resolveVoiceSkillTargets,
+  install(target, replace) {
+    return installVoiceSkill(target, { replace });
+  },
+  check(target) {
+    return checkVoiceSkill(target);
+  },
+  remove(target) {
+    return removeVoiceSkill(target);
+  },
+};
+
+function detectedVoiceSkillHosts(platform: PlatformServices): ReadonlySet<VoiceSkillTarget["host"]> {
+  const hosts = new Set<VoiceSkillTarget["host"]>();
+  try {
+    if (platform.resolveExecutable("codex") !== undefined) hosts.add("codex");
+  } catch {
+    // Missing or unreadable client discovery is treated as undetected.
+  }
+  try {
+    if (platform.resolveExecutable("claude") !== undefined) hosts.add("claude-code");
+  } catch {
+    // Missing or unreadable client discovery is treated as undetected.
+  }
+  return hosts;
+}
+
+async function invokeVoiceSkills(
+  mode: SetupMode,
+  targets: readonly VoiceSkillTarget[],
+  replace: boolean,
+  services: VoiceSkillServices,
+): Promise<VoiceSkillOperationResult[]> {
+  const results: VoiceSkillOperationResult[] = [];
+  for (const target of targets) {
+    try {
+      results.push(mode === "configure"
+        ? await services.install(target, replace)
+        : mode === "check"
+          ? await services.check(target)
+          : await services.remove(target));
+    } catch {
+      results.push({
+        host: target.host,
+        status: "failed",
+        detail: "Voice skill host operation failed",
+      });
+    }
+  }
+  return results;
+}
+
+function printVoiceSkillResult(result: VoiceSkillOperationResult): void {
+  detail(`voice-skill ${result.host}: ${result.status}`);
+  detail(result.detail);
+  if (result.backupPath !== undefined && !result.detail.includes(result.backupPath)) {
+    detail(`voice-skill backup: ${result.backupPath}`);
+  }
+}
+
+function voiceSkillSucceeded(
+  mode: SetupMode,
+  results: readonly VoiceSkillOperationResult[],
+): boolean {
+  if (mode === "configure") {
+    return results.every(({ status }) => status === "installed"
+      || status === "unchanged"
+      || status === "upgraded");
+  }
+  if (mode === "check") {
+    return results.every(({ status }) => status === "unchanged");
+  }
+  return results.every(({ status }) => status === "removed" || status === "skipped");
+}
+
 export async function setup(argv: readonly string[], deps?: SetupDependencies): Promise<number> {
   let options;
   try {
@@ -394,15 +493,18 @@ export async function setup(argv: readonly string[], deps?: SetupDependencies): 
     : dependencies.adapters;
   let results: SetupResult[] | undefined;
   let inspectionFailures: ReadonlyMap<SetupClientAdapter, SetupResult> = new Map();
+  let skillWorkAuthorized = true;
   if (options.mode !== "check" && !options.yes) {
     const consent = await consentResults(
       options.mode,
       adapters,
       registration,
       dependencies.confirmation,
+      options.voiceSkill,
     );
     results = consent.results;
     inspectionFailures = consent.inspectionFailures;
+    if (consent.results !== undefined) skillWorkAuthorized = false;
   }
   results ??= await invokeAdapters(
     options.mode,
@@ -416,6 +518,20 @@ export async function setup(argv: readonly string[], deps?: SetupDependencies): 
   say("host setup results follow.");
   for (const result of results) printResult(options.mode, result, registration);
 
+  let voiceResults: VoiceSkillOperationResult[] = [];
+  if (options.voiceSkill && skillWorkAuthorized) {
+    const services = dependencies.voiceSkills ?? defaultVoiceSkillServices;
+    const detected = detectedVoiceSkillHosts(dependencies.platform);
+    if (detected.size > 0) {
+      const targets = services.resolveTargets(
+        dependencies.env ?? process.env,
+        dependencies.platform.home,
+      ).filter((target) => detected.has(target.host));
+      voiceResults = await invokeVoiceSkills(options.mode, targets, options.replace, services);
+      for (const result of voiceResults) printVoiceSkillResult(result);
+    }
+  }
+
   if (options.mode === "configure"
     && dependencies.platform.shell !== undefined
     && basename(dependencies.platform.shell) === "bash"
@@ -423,5 +539,6 @@ export async function setup(argv: readonly string[], deps?: SetupDependencies): 
     detail("next step: rocky hook install");
   }
 
-  return exitCode(options.mode, results);
+  const setupExit = exitCode(options.mode, results);
+  return setupExit === 0 && voiceSkillSucceeded(options.mode, voiceResults) ? 0 : 1;
 }

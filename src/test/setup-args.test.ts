@@ -8,6 +8,7 @@ test("setup parser applies safe defaults", () => {
     exposure: "sanitized",
     replace: false,
     yes: false,
+    voiceSkill: false,
   });
 });
 
@@ -17,6 +18,7 @@ test("setup parser selects check mode without changing safe defaults", () => {
     exposure: "sanitized",
     replace: false,
     yes: false,
+    voiceSkill: false,
   });
 });
 
@@ -26,6 +28,7 @@ test("setup parser selects remove mode and accepts ordinary confirmation bypass"
     exposure: "sanitized",
     replace: false,
     yes: true,
+    voiceSkill: false,
   });
 });
 
@@ -35,7 +38,36 @@ test("setup parser accepts configure-only options in any order", () => {
     exposure: "raw",
     replace: true,
     yes: true,
+    voiceSkill: false,
   });
+});
+
+test("setup parser selects voice skill work explicitly in every mode", () => {
+  assert.deepEqual(parseSetupArgs(["--voice-skill", "--yes"]), {
+    mode: "configure",
+    exposure: "sanitized",
+    replace: false,
+    yes: true,
+    voiceSkill: true,
+  });
+  assert.deepEqual(parseSetupArgs(["--check", "--voice-skill"]), {
+    mode: "check",
+    exposure: "sanitized",
+    replace: false,
+    yes: false,
+    voiceSkill: true,
+  });
+  assert.deepEqual(parseSetupArgs(["--voice-skill", "--remove", "--yes"]), {
+    mode: "remove",
+    exposure: "sanitized",
+    replace: false,
+    yes: true,
+    voiceSkill: true,
+  });
+});
+
+test("yes alone never selects voice skill work", () => {
+  assert.equal(parseSetupArgs(["--yes"]).voiceSkill, false);
 });
 
 test("setup parser rejects mutually exclusive modes", () => {

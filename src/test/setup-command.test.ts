@@ -12,6 +12,10 @@ import type {
   SetupClientId,
   SetupResult,
 } from "../setup/clients.js";
+import type {
+  VoiceSkillOperationResult,
+  VoiceSkillTarget,
+} from "../setup/voice-skill.js";
 import type { ProcessRunner, ProcessSession } from "../setup/process.js";
 import { createPlatformServices } from "../setup/platform.js";
 import {
@@ -19,6 +23,7 @@ import {
   setup,
   type ConfirmationPort,
   type SetupDependencies,
+  type VoiceSkillServices,
 } from "../commands/setup.js";
 
 const nodePath = process.execPath;
@@ -137,6 +142,73 @@ class FakeConfirmation implements ConfirmationPort {
   }
 }
 
+class FakeVoiceSkillServices implements VoiceSkillServices {
+  readonly calls: Array<{
+    method: "resolve" | "install" | "check" | "remove";
+    host?: VoiceSkillTarget["host"];
+    replace?: boolean;
+    home?: string;
+    env?: NodeJS.ProcessEnv;
+  }> = [];
+
+  constructor(
+    private readonly statuses: Partial<Record<
+      "install" | "check" | "remove",
+      Partial<Record<VoiceSkillTarget["host"], VoiceSkillOperationResult["status"]>>
+    >> = {},
+    private readonly observe?: (
+      method: "install" | "check" | "remove",
+      target: VoiceSkillTarget,
+    ) => void,
+  ) {}
+
+  resolveTargets(env: NodeJS.ProcessEnv, home: string): readonly VoiceSkillTarget[] {
+    this.calls.push({ method: "resolve", env, home });
+    return [
+      {
+        host: "codex",
+        destination: join(home, ".agents", "skills", "rocky-voice"),
+        backupRoot: join(home, ".agents", ".rocky", "backups", "voice-skills"),
+      },
+      {
+        host: "claude-code",
+        destination: join(home, ".claude", "skills", "rocky-voice"),
+        backupRoot: join(home, ".claude", ".rocky", "backups", "voice-skills"),
+      },
+    ];
+  }
+
+  private result(
+    method: "install" | "check" | "remove",
+    target: VoiceSkillTarget,
+  ): VoiceSkillOperationResult {
+    const fallback = method === "install" ? "installed" : method === "check" ? "unchanged" : "removed";
+    return {
+      host: target.host,
+      status: this.statuses[method]?.[target.host] ?? fallback,
+      detail: `${target.host} ${method} detail`,
+    };
+  }
+
+  async install(target: VoiceSkillTarget, replace: boolean): Promise<VoiceSkillOperationResult> {
+    this.observe?.("install", target);
+    this.calls.push({ method: "install", host: target.host, replace });
+    return this.result("install", target);
+  }
+
+  async check(target: VoiceSkillTarget): Promise<VoiceSkillOperationResult> {
+    this.observe?.("check", target);
+    this.calls.push({ method: "check", host: target.host });
+    return this.result("check", target);
+  }
+
+  async remove(target: VoiceSkillTarget): Promise<VoiceSkillOperationResult> {
+    this.observe?.("remove", target);
+    this.calls.push({ method: "remove", host: target.host });
+    return this.result("remove", target);
+  }
+}
+
 function dependencies(
   adapters: readonly SetupClientAdapter[],
   options: {
@@ -144,23 +216,34 @@ function dependencies(
     runner?: ProcessRunner;
     shell?: string;
     bashHookInstalled?: boolean;
+    home?: string;
+    env?: NodeJS.ProcessEnv;
+    detected?: readonly ("codex" | "claude-code")[];
+    voiceSkills?: VoiceSkillServices;
   } = {},
 ): SetupDependencies {
+  const detected = new Set(options.detected ?? []);
+  const env = options.env ?? { PATH: "/tools", SHELL: options.shell ?? "/bin/zsh" };
   return {
     runner: options.runner ?? new HealthyRunner(),
     platform: createPlatformServices({
       platform: "linux",
-      home: "/home/ada",
-      env: { PATH: "", SHELL: options.shell ?? "/bin/zsh" },
+      home: options.home ?? "/home/ada",
+      env,
       isWsl: false,
       bashHookInstalled: options.bashHookInstalled,
-      fileExists: (path) => path === nodePath || path === entryPath,
+      fileExists: (path) => path === nodePath
+        || path === entryPath
+        || (path === "/tools/codex" && detected.has("codex"))
+        || (path === "/tools/claude" && detected.has("claude-code")),
     }),
     adapters,
     confirmation: options.confirmation ?? new FakeConfirmation(true),
     nodePath,
     entryPath,
     rockyHome,
+    env,
+    voiceSkills: options.voiceSkills,
   };
 }
 
@@ -425,6 +508,113 @@ test("yes bypasses ordinary prompt without inventing raw exposure", async () => 
 
   assert.equal(await setup(["--yes"], dependencies([adapter], { confirmation })), 0);
   assert.equal(adapter.calls[0]?.registration.env.ROCKY_MCP_EXPOSURE, "sanitized");
+});
+
+test("yes without voice flag never plans or mutates skill targets", async () => {
+  const voiceSkills = new FakeVoiceSkillServices();
+  const adapter = new FakeAdapter("codex", {});
+
+  assert.equal(await setup(["--yes"], dependencies([adapter], {
+    detected: ["codex"],
+    voiceSkills,
+  })), 0);
+
+  assert.deepEqual(voiceSkills.calls, []);
+});
+
+test("voice flag dispatches after MCP to detected Codex and Claude Code but never Desktop", async (t) => {
+  const desired: McpRegistration = {
+    name: "rocky",
+    command: nodePath,
+    args: [entryPath, "mcp"],
+    env: { ROCKY_MCP_EXPOSURE: "sanitized", ROCKY_HOME: rockyHome },
+  };
+  const cases = [
+    { mode: "configure" as const, argv: ["--yes", "--replace", "--voice-skill"], method: "install" as const },
+    { mode: "check" as const, argv: ["--check", "--voice-skill"], method: "check" as const },
+    { mode: "remove" as const, argv: ["--remove", "--yes", "--voice-skill"], method: "remove" as const },
+  ];
+
+  for (const entry of cases) {
+    await t.test(entry.mode, async () => {
+      const adapters = (["codex", "claude-code", "claude-desktop"] as const).map((client) =>
+        new FakeAdapter(client, entry.mode === "configure"
+          ? { configure: { client, status: "configured" } }
+          : entry.mode === "check"
+            ? { check: { client, status: "healthy", healthRegistration: desired } }
+            : { remove: { client, status: "removed" } }));
+      const voiceSkills = new FakeVoiceSkillServices({}, (method) => {
+        assert.equal(method, entry.method);
+        assert.deepEqual(adapters.map((adapter) => adapter.calls.map(({ method: call }) => call)),
+          adapters.map(() => [entry.mode === "configure" ? "configure" : entry.mode]));
+      });
+
+      const output = await captureStderr(() => setup(entry.argv, dependencies(adapters, {
+        detected: ["codex", "claude-code"],
+        voiceSkills,
+        env: { PATH: "/tools", CLAUDE_CONFIG_DIR: "/tmp/test-claude-config" },
+      })));
+
+      assert.equal(output.code, 0, output.stderr);
+      assert.deepEqual(voiceSkills.calls.map(({ method, host, replace }) => ({ method, host, replace })), [
+        { method: "resolve", host: undefined, replace: undefined },
+        { method: entry.method, host: "codex", replace: entry.method === "install" ? true : undefined },
+        { method: entry.method, host: "claude-code", replace: entry.method === "install" ? true : undefined },
+      ]);
+      assert.match(output.stderr, new RegExp(`voice-skill codex: ${entry.method === "install" ? "installed" : entry.method === "check" ? "unchanged" : "removed"}`));
+      assert.match(output.stderr, new RegExp(`voice-skill claude-code: ${entry.method === "install" ? "installed" : entry.method === "check" ? "unchanged" : "removed"}`));
+      assert.doesNotMatch(output.stderr, /voice-skill claude-desktop/);
+      assert.equal(output.stdout, "");
+    });
+  }
+});
+
+test("voice skill refusal is isolated per host and contributes partial-failure exit one", async () => {
+  const adapters = [
+    new FakeAdapter("codex", { configure: { client: "codex", status: "configured" } }),
+    new FakeAdapter("claude-code", { configure: { client: "claude-code", status: "configured" } }),
+  ];
+  const voiceSkills = new FakeVoiceSkillServices({
+    install: { codex: "refused", "claude-code": "installed" },
+  });
+
+  const output = await captureStderr(() => setup(
+    ["--yes", "--voice-skill"],
+    dependencies(adapters, {
+      detected: ["codex", "claude-code"],
+      voiceSkills,
+    }),
+  ));
+
+  assert.equal(output.code, 1);
+  assert.match(output.stderr, /codex: configured/);
+  assert.match(output.stderr, /claude-code: configured/);
+  assert.match(output.stderr, /voice-skill codex: refused/);
+  assert.match(output.stderr, /voice-skill claude-code: installed/);
+  assert.deepEqual(voiceSkills.calls.filter(({ method }) => method === "install").map(({ host }) => host), [
+    "codex", "claude-code",
+  ]);
+});
+
+test("declined combined consent performs no voice skill operation", async () => {
+  const confirmation = new FakeConfirmation(false);
+  const voiceSkills = new FakeVoiceSkillServices();
+  const adapter = new FakeAdapter("codex", { inspect: { state: "absent" } });
+
+  const output = await captureStderr(() => setup(
+    ["--voice-skill"],
+    dependencies([adapter], {
+      confirmation,
+      detected: ["codex"],
+      voiceSkills,
+    }),
+  ));
+
+  assert.equal(output.code, 1);
+  assert.equal(confirmation.messages.length, 1);
+  assert.match(confirmation.messages[0] ?? "", /voice skill/i);
+  assert.deepEqual(voiceSkills.calls, []);
+  assert.deepEqual(adapter.calls.map(({ method }) => method), ["inspect"]);
 });
 
 test("sanitized and raw configure print required projected-memory disclosures", async () => {
