@@ -656,7 +656,12 @@ test("manual registrations render as host-appropriate desired argv or config", a
 
   assert.equal(output.code, 1);
   assert.match(output.stderr, /codex manual argv: \["mcp","add"/);
-  assert.match(output.stderr, /claude-code manual argv: \["mcp","add","--scope","user","--transport","stdio"/);
+  assert.ok(output.stderr.includes(`claude-code manual argv: ${JSON.stringify([
+    "mcp", "add", "--scope", "user", "--transport", "stdio", "rocky",
+    "--env", "ROCKY_MCP_EXPOSURE=sanitized",
+    "--env", `ROCKY_HOME=${rockyHome}`,
+    "--", nodePath, entryPath, "mcp",
+  ])}`));
   assert.match(output.stderr, /claude-desktop manual config: \{"mcpServers":\{"rocky":\{"type":"stdio"/);
   assert.match(output.stderr, new RegExp(rockyHome.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
 });

@@ -27,9 +27,10 @@ const addArgs = [
   "mcp", "add",
   "--scope", "user",
   "--transport", "stdio",
+  "rocky",
   "--env", "ROCKY_MCP_EXPOSURE=sanitized",
   "--env", "ROCKY_HOME=/home/ada/.rocky",
-  "rocky", "--", "/opt/node", "/opt/rocky/dist/index.js", "mcp",
+  "--", "/opt/node", "/opt/rocky/dist/index.js", "mcp",
 ];
 const removeArgs = ["mcp", "remove", "--scope", "user", "rocky"];
 
@@ -103,6 +104,22 @@ test("new user registration uses exact official Claude add argv", async (t) => {
   assert.equal((await adapter.inspect(registration)).state, "absent");
   assert.equal((await adapter.configure(registration, false)).status, "configured");
   assert.deepEqual(runner.calls, [claudeCall(addArgs)]);
+});
+
+test("server name precedes Claude's variadic env arguments", async (t) => {
+  const path = userConfig(t, { mcpServers: {} });
+  const runner = new FakeRunner([
+    ({ args }) => {
+      const nameIndex = args.indexOf(registration.name);
+      const envIndex = args.indexOf("--env");
+      return nameIndex >= 0 && envIndex >= 0 && nameIndex < envIndex
+        ? result(0)
+        : result(1, "", "Invalid environment variable format: rocky");
+    },
+  ]);
+  const adapter = createClaudeCodeAdapter({ runner, executable: "/opt/claude", userConfigPath: path });
+
+  assert.equal((await adapter.configure(registration, false)).status, "configured");
 });
 
 test("absent registration rechecks config topology immediately before add", async (t) => {

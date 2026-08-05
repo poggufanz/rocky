@@ -145,11 +145,11 @@ function isPolicyRefusal(result: ProcessResult): boolean {
 }
 
 function addArguments(registration: McpRegistration): string[] {
-  const args = ["mcp", "add", "--scope", "user", "--transport", "stdio"];
+  const args = ["mcp", "add", "--scope", "user", "--transport", "stdio", registration.name];
   for (const [name, value] of Object.entries(registration.env)) {
     args.push("--env", `${name}=${value}`);
   }
-  args.push(registration.name, "--", registration.command, ...registration.args);
+  args.push("--", registration.command, ...registration.args);
   return args;
 }
 

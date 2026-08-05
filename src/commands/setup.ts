@@ -199,11 +199,12 @@ export async function createProductionAdapters(
 function manualAddArguments(client: "codex" | "claude-code", registration: McpRegistration): string[] {
   const args = client === "codex"
     ? ["mcp", "add"]
-    : ["mcp", "add", "--scope", "user", "--transport", "stdio"];
+    : ["mcp", "add", "--scope", "user", "--transport", "stdio", registration.name];
   for (const [name, value] of Object.entries(registration.env)) {
     args.push("--env", `${name}=${value}`);
   }
-  args.push(registration.name, "--", registration.command, ...registration.args);
+  if (client === "codex") args.push(registration.name);
+  args.push("--", registration.command, ...registration.args);
   return args;
 }
 

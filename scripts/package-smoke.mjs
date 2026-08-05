@@ -196,33 +196,38 @@ function createFakeClients(directory, quoteShellPath) {
 const { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } = require("node:fs");
 const { dirname, join } = require("node:path");
 
-function registration(values) {
+function registration(kind, values) {
   let index = 2;
   const env = {};
-  while (values[index]?.startsWith("--")) {
-    const option = values[index];
-    if (option === "--env") {
-      const pair = values[index + 1] ?? "";
-      const separator = pair.indexOf("=");
-      if (separator < 1) throw new Error("invalid fake-client environment");
-      env[pair.slice(0, separator)] = pair.slice(separator + 1);
-      index += 2;
-      continue;
+
+  if (kind === "claude") {
+    const prefix = ["--scope", "user", "--transport", "stdio", "rocky"];
+    if (!prefix.every((value, offset) => values[index + offset] === value)) {
+      throw new Error("invalid fake Claude registration prefix");
     }
-    if (option === "--scope" || option === "--transport") {
-      index += 2;
-      continue;
-    }
-    throw new Error("unexpected fake-client option: " + option);
+    index += prefix.length;
+  } else if (kind !== "codex") {
+    throw new Error("unexpected fake-client kind: " + kind);
   }
-  const name = values[index];
-  index += 1;
-  if (name !== "rocky" || values[index] !== "--") throw new Error("invalid fake-client registration");
+
+  while (values[index] === "--env") {
+    const pair = values[index + 1] ?? "";
+    const separator = pair.indexOf("=");
+    if (separator < 1) throw new Error("invalid fake-client environment");
+    env[pair.slice(0, separator)] = pair.slice(separator + 1);
+    index += 2;
+  }
+
+  if (kind === "codex") {
+    if (values[index] !== "rocky") throw new Error("invalid fake Codex registration name");
+    index += 1;
+  }
+  if (values[index] !== "--") throw new Error("invalid fake-client command delimiter");
   index += 1;
   const command = values[index];
   index += 1;
   if (command === undefined) throw new Error("missing fake-client command");
-  return { name, command, args: values.slice(index), env };
+  return { name: "rocky", command, args: values.slice(index), env };
 }
 
 function codexSnapshot(value) {
@@ -263,7 +268,7 @@ function runFakeClient(kind, args) {
       }
       process.stdout.write(readFileSync(path, "utf8"));
     } else if (args[0] === "mcp" && args[1] === "add") {
-      writeFileSync(path, JSON.stringify(codexSnapshot(registration(args))) + "\n", "utf8");
+      writeFileSync(path, JSON.stringify(codexSnapshot(registration("codex", args))) + "\n", "utf8");
     } else if (args[0] === "mcp" && args[1] === "remove") {
       rmSync(path, { force: true });
     } else {
@@ -274,7 +279,7 @@ function runFakeClient(kind, args) {
   if (kind === "claude") {
     const path = join(process.env.HOME, ".claude.json");
     if (args[0] === "mcp" && args[1] === "add") {
-      const value = registration(args);
+      const value = registration("claude", args);
       const config = readObject(path);
       mkdirSync(dirname(path), { recursive: true });
       writeFileSync(path, JSON.stringify({
