@@ -417,6 +417,41 @@ test("staged activation failure rolls original target back", async (t) => {
   assert.equal(readFileSync(join(target.destination, "user.txt"), "utf8"), "keep");
 });
 
+test("detected replacement race remains a refusal after rollback restores original target", async (t) => {
+  const target = codexTarget(temporaryRoot(t));
+  await fs.mkdir(target.destination, { recursive: true });
+  await fs.writeFile(join(target.destination, "user.txt"), "keep", "utf8");
+  let calls = 0;
+  let raceVisible = false;
+  const rename: VoiceSkillFileOps["rename"] = async (from, to) => {
+    calls += 1;
+    await fs.rename(from, to);
+    if (calls === 1) {
+      await fs.mkdir(target.destination);
+      raceVisible = true;
+    }
+  };
+  const lstat: VoiceSkillFileOps["lstat"] = async (path, options) => {
+    if (String(path) === target.destination && raceVisible) {
+      raceVisible = false;
+      const stats = await fs.lstat(path, options as never);
+      await fs.rmdir(target.destination);
+      return stats as never;
+    }
+    return fs.lstat(path, options as never) as never;
+  };
+
+  const result = await installVoiceSkill(target, {
+    replace: true,
+    ops: { ...operations(rename), lstat },
+  });
+
+  assert.equal(result.status, "refused");
+  assert.equal(calls, 2);
+  assert.match(result.detail, /restored/i);
+  assert.equal(readFileSync(join(target.destination, "user.txt"), "utf8"), "keep");
+});
+
 test("rollback failure reports both paths and preserves only recoverable backup", async (t) => {
   const target = codexTarget(temporaryRoot(t));
   await fs.mkdir(target.destination, { recursive: true });

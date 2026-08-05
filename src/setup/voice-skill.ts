@@ -56,11 +56,13 @@ class VoiceSkillRefusal extends Error {
 
 class VoiceSkillTransactionError extends Error {
   readonly crossDevice: boolean;
+  readonly refused: boolean;
 
-  constructor(message: string, crossDevice = false) {
+  constructor(message: string, crossDevice = false, refused = false) {
     super(message);
     this.name = "VoiceSkillTransactionError";
     this.crossDevice = crossDevice;
+    this.refused = refused;
   }
 }
 
@@ -410,7 +412,7 @@ function resultForError(
   const message = error instanceof Error ? error.message : "Voice skill operation failed";
   const detail = pathDetails.length === 0 ? message : `${message}; ${pathDetails.join("; ")}`;
   const refused = error instanceof VoiceSkillRefusal
-    || (error instanceof VoiceSkillTransactionError && error.crossDevice)
+    || (error instanceof VoiceSkillTransactionError && (error.crossDevice || error.refused))
     || isCrossDevice(error)
     || isDestinationCollision(error);
   return { host: target.host, status: refused ? "refused" : "failed", detail };
@@ -535,6 +537,7 @@ export async function replaceDirectoryTransactionally(
     throw new VoiceSkillTransactionError(
       `Voice skill activation failed and original target was restored; staged ${staged}; backup ${backup}`,
       isCrossDevice(activationError),
+      activationError instanceof VoiceSkillRefusal || isDestinationCollision(activationError),
     );
   }
 }
