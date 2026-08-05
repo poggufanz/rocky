@@ -1,5 +1,6 @@
 import {
   closeSync,
+  constants as fsConstants,
   fchmodSync,
   fstatSync,
   fsyncSync,
@@ -8,14 +9,16 @@ import {
   mkdirSync,
   openSync,
   readFileSync,
+  readSync,
   readdirSync,
   renameSync,
   rmSync,
   statSync,
   writeFileSync,
+  writeSync,
 } from "node:fs";
 import type { Stats } from "node:fs";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { basename, dirname, join } from "node:path";
 import { directorySyncCapability } from "./directory-sync.js";
 
@@ -362,9 +365,19 @@ function isManagedRecoveryPair(
   }
 }
 
+interface RecoveryFileIdentity {
+  dev: number;
+  ino: number;
+  nlink: number;
+}
+
 interface RecoveryPublication {
-  source: { dev: number; ino: number; nlink: number };
-  destination: { dev: number; ino: number; nlink: number };
+  source: RecoveryFileIdentity;
+  destination: RecoveryFileIdentity;
+  expectedBytes: Buffer;
+  expectedDigest: string;
+  expectedLength: number;
+  expectedMode: number;
 }
 
 function sameIdentity(
@@ -382,7 +395,104 @@ function stableSourceMetadata(
     && left.nlink === right.nlink
     && left.size === right.size
     && left.mtimeMs === right.mtimeMs
-    && left.ctimeMs === right.ctimeMs;
+    && left.ctimeMs === right.ctimeMs
+    && observableRecoveryMode(left) === observableRecoveryMode(right);
+}
+
+function observableRecoveryMode(metadata: Stats): number {
+  const mode = metadata.mode & 0o777;
+  return process.platform === "win32" ? ((mode & 0o222) === 0 ? 0 : 1) : mode;
+}
+
+function recoveryDigest(bytes: Buffer): string {
+  return createHash("sha256").update(bytes).digest("hex");
+}
+
+function recoveryReadOpenFlags(): number {
+  if (process.platform === "win32") return fsConstants.O_RDONLY;
+  return fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK;
+}
+
+function recoveryDestinationOpenFlags(): number {
+  return fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_RDWR;
+}
+
+function readDescriptorExactly(descriptor: number, length: number): Buffer {
+  if (!Number.isSafeInteger(length) || length < 0) {
+    throw new Error("Recovery file length is invalid");
+  }
+  const bytes = Buffer.alloc(length);
+  let offset = 0;
+  while (offset < length) {
+    const read = readSync(descriptor, bytes, offset, length - offset, offset);
+    if (read <= 0) throw new Error("Recovery file ended during positional read");
+    offset += read;
+  }
+  return bytes;
+}
+
+function writeDescriptorCompletely(descriptor: number, bytes: Buffer): void {
+  let offset = 0;
+  while (offset < bytes.length) {
+    const written = writeSync(descriptor, bytes, offset, bytes.length - offset, offset);
+    if (written <= 0) throw new Error("Recovery publication made no write progress");
+    offset += written;
+  }
+}
+
+function recoveryIdentityMatches(
+  metadata: Stats,
+  identity: RecoveryFileIdentity,
+): boolean {
+  return sameIdentity(metadata, identity) && metadata.nlink === identity.nlink;
+}
+
+function validatePublishedPath(
+  path: string,
+  identity: RecoveryFileIdentity,
+  publication: RecoveryPublication,
+): boolean {
+  let descriptor: number | undefined;
+  try {
+    const before = lstatSync(path);
+    if (!before.isFile()
+      || before.isSymbolicLink()
+      || !recoveryIdentityMatches(before, identity)
+      || before.size !== publication.expectedLength
+      || observableRecoveryMode(before) !== publication.expectedMode) {
+      return false;
+    }
+
+    descriptor = openSync(path, recoveryReadOpenFlags());
+    const opened = fstatSync(descriptor);
+    const observed = lstatSync(path);
+    if (!opened.isFile()
+      || !observed.isFile()
+      || observed.isSymbolicLink()
+      || !recoveryIdentityMatches(opened, identity)
+      || !recoveryIdentityMatches(observed, identity)
+      || !stableSourceMetadata(before, opened)
+      || !stableSourceMetadata(opened, observed)) {
+      return false;
+    }
+
+    const bytes = readDescriptorExactly(descriptor, publication.expectedLength);
+    const afterRead = fstatSync(descriptor);
+    const finalPath = lstatSync(path);
+    return stableSourceMetadata(opened, afterRead)
+      && stableSourceMetadata(afterRead, finalPath)
+      && recoveryIdentityMatches(afterRead, identity)
+      && recoveryIdentityMatches(finalPath, identity)
+      && observableRecoveryMode(afterRead) === publication.expectedMode
+      && bytes.equals(publication.expectedBytes)
+      && recoveryDigest(bytes) === publication.expectedDigest;
+  } catch {
+    return false;
+  } finally {
+    if (descriptor !== undefined) {
+      try { closeSync(descriptor); } catch { /* retain recovery authority */ }
+    }
+  }
 }
 
 function recoveryPublicationUnchanged(
@@ -390,25 +500,13 @@ function recoveryPublicationUnchanged(
   existingPath: string,
   newPath: string,
 ): boolean {
-  try {
-    const source = lstatSync(existingPath);
-    const destination = lstatSync(newPath);
-    return source.isFile()
-      && !source.isSymbolicLink()
-      && destination.isFile()
-      && !destination.isSymbolicLink()
-      && sameIdentity(source, publication.source)
-      && source.nlink === publication.source.nlink
-      && sameIdentity(destination, publication.destination)
-      && destination.nlink === publication.destination.nlink;
-  } catch {
-    return false;
-  }
+  return validatePublishedPath(existingPath, publication.source, publication)
+    && validatePublishedPath(newPath, publication.destination, publication);
 }
 
 // linkSync provides no handle proving which inode still occupies its destination
-// after return. Exclusive open does: descriptor identity is established by the
-// creation syscall, so a rebound namespace entry is never cleanup-authorized.
+// after return. Exclusive read/write open does: descriptor identity is established
+// by creation, supports positional readback, and never authorizes ambiguous cleanup.
 function copyRegularFileExclusiveNoFollow(
   existingPath: string,
   newPath: string,
@@ -423,46 +521,70 @@ function copyRegularFileExclusiveNoFollow(
   let sourceDescriptor: number | undefined;
   let destinationDescriptor: number | undefined;
   try {
-    sourceDescriptor = openSync(existingPath, "r");
+    sourceDescriptor = openSync(existingPath, recoveryReadOpenFlags());
     const openedSource = fstatSync(sourceDescriptor);
     const observedSource = lstatSync(existingPath);
     if (!openedSource.isFile()
       || !observedSource.isFile()
       || observedSource.isSymbolicLink()
-      || !sameIdentity(before, openedSource)
-      || !sameIdentity(openedSource, observedSource)) {
+      || !stableSourceMetadata(before, openedSource)
+      || !stableSourceMetadata(openedSource, observedSource)) {
       throw new Error("Recovery source changed before publication");
     }
 
-    const bytes = readFileSync(sourceDescriptor);
+    const bytes = readDescriptorExactly(sourceDescriptor, openedSource.size);
+    const digest = recoveryDigest(bytes);
+    const expectedMode = observableRecoveryMode(openedSource);
     const sourceAfterRead = fstatSync(sourceDescriptor);
-    if (!stableSourceMetadata(openedSource, sourceAfterRead)) {
+    const sourcePathAfterRead = lstatSync(existingPath);
+    if (!stableSourceMetadata(openedSource, sourceAfterRead)
+      || !stableSourceMetadata(sourceAfterRead, sourcePathAfterRead)) {
       throw new Error("Recovery source changed while reading");
     }
 
-    destinationDescriptor = openSync(newPath, "wx", before.mode & 0o777);
+    destinationDescriptor = openSync(
+      newPath,
+      recoveryDestinationOpenFlags(),
+      openedSource.mode & 0o777,
+    );
     const createdDestination = fstatSync(destinationDescriptor);
-    if (!createdDestination.isFile() || createdDestination.nlink !== 1) {
+    const createdPath = lstatSync(newPath);
+    if (!createdDestination.isFile()
+      || createdDestination.nlink !== 1
+      || !createdPath.isFile()
+      || createdPath.isSymbolicLink()
+      || !sameIdentity(createdDestination, createdPath)
+      || createdPath.nlink !== 1) {
       throw new Error("Recovery destination is not an exclusive regular file");
     }
-    writeFileSync(destinationDescriptor, bytes);
-    fchmodSync(destinationDescriptor, before.mode & 0o777);
+    writeDescriptorCompletely(destinationDescriptor, bytes);
+    fchmodSync(destinationDescriptor, openedSource.mode & 0o777);
     fsyncSync(destinationDescriptor);
+    const publishedBytes = readDescriptorExactly(destinationDescriptor, bytes.length);
     const writtenDestination = fstatSync(destinationDescriptor);
+    const finalSourceDescriptor = fstatSync(sourceDescriptor);
+    const finalSourceBytes = readDescriptorExactly(sourceDescriptor, bytes.length);
     const finalSource = lstatSync(existingPath);
     const finalDestination = lstatSync(newPath);
-    if (!stableSourceMetadata(sourceAfterRead, finalSource)
+    if (!stableSourceMetadata(sourceAfterRead, finalSourceDescriptor)
+      || !stableSourceMetadata(finalSourceDescriptor, finalSource)
       || !finalSource.isFile()
       || finalSource.isSymbolicLink()
-      || !sameIdentity(sourceAfterRead, finalSource)
+      || !sameIdentity(finalSourceDescriptor, finalSource)
+      || !finalSourceBytes.equals(bytes)
+      || recoveryDigest(finalSourceBytes) !== digest
       || !writtenDestination.isFile()
       || !sameIdentity(createdDestination, writtenDestination)
       || writtenDestination.nlink !== 1
       || writtenDestination.size !== bytes.length
+      || observableRecoveryMode(writtenDestination) !== expectedMode
+      || !publishedBytes.equals(bytes)
+      || recoveryDigest(publishedBytes) !== digest
       || !finalDestination.isFile()
       || finalDestination.isSymbolicLink()
-      || !sameIdentity(writtenDestination, finalDestination)
-      || finalDestination.nlink !== writtenDestination.nlink) {
+      || !stableSourceMetadata(writtenDestination, finalDestination)
+      || finalDestination.nlink !== writtenDestination.nlink
+      || observableRecoveryMode(finalDestination) !== expectedMode) {
       throw new Error("Recovery publication changed before validation");
     }
     return {
@@ -476,6 +598,10 @@ function copyRegularFileExclusiveNoFollow(
         ino: writtenDestination.ino,
         nlink: writtenDestination.nlink,
       },
+      expectedBytes: Buffer.from(bytes),
+      expectedDigest: digest,
+      expectedLength: bytes.length,
+      expectedMode,
     };
   } finally {
     if (destinationDescriptor !== undefined) {
@@ -670,6 +796,9 @@ export function recoverJsonTransaction(
       if (!recoveryPublicationUnchanged(publication, displacedPath, path)) {
         return { status: "manual", recoveryPath: firstExistingPath(transactionDirectory) };
       }
+      // Node has no portable compare-and-swap joining this final validation to
+      // manifest publication. A later external mutation remains outside this
+      // atomic boundary and never authorizes cleanup; earlier races fail closed.
       try {
         writeManifest(transactionDirectory, path, "committed", guard);
       } catch {
@@ -730,6 +859,9 @@ function restoreDisplaced(
         recoveryPath: firstExistingPath(transactionDirectory, path),
       };
     }
+    // Node has no portable compare-and-swap joining this final validation to
+    // manifest publication. A later external mutation remains outside this
+    // transaction's atomic boundary; all earlier observable races fail closed.
     writeManifest(transactionDirectory, path, "committed", guard);
   } catch {
     return {

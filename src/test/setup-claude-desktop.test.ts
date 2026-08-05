@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import fs, {
   chmodSync,
   closeSync,
+  constants as fsConstants,
   ftruncateSync,
   mkdtempSync,
   mkdirSync,
@@ -11,8 +12,10 @@ import fs, {
   readdirSync,
   rmSync,
   statSync,
+  writeSync,
   writeFileSync,
 } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
@@ -69,6 +72,28 @@ function assertRequestedFileMode(path: string, posixMode: number): void {
   } else {
     assert.equal(metadata.mode & 0o777, posixMode);
   }
+}
+
+const ACCESS_MODE_MASK = fsConstants.O_WRONLY | fsConstants.O_RDWR;
+
+function isReadOnlyOpen(flags: fs.OpenMode): boolean {
+  return flags === "r"
+    || (typeof flags === "number"
+      && (flags & ACCESS_MODE_MASK) === fsConstants.O_RDONLY
+      && (flags & fsConstants.O_CREAT) === 0);
+}
+
+function isExclusiveRecoveryDestinationOpen(flags: fs.OpenMode): boolean {
+  return flags === "wx"
+    || (typeof flags === "number"
+      && (flags & ACCESS_MODE_MASK) === fsConstants.O_RDWR
+      && (flags & fsConstants.O_CREAT) !== 0
+      && (flags & fsConstants.O_EXCL) !== 0);
+}
+
+function observableMode(path: string): number {
+  const mode = fs.lstatSync(path).mode & 0o777;
+  return process.platform === "win32" ? ((mode & 0o222) === 0 ? 0 : 1) : mode;
 }
 
 function crashTransaction(
@@ -969,7 +994,7 @@ test("failed in-process restore reports the surviving transaction instead of mis
     flags: fs.OpenMode,
     mode?: fs.Mode,
   ) => {
-    if (basename(String(candidate)) === "displaced" && flags === "r") {
+    if (basename(String(candidate)) === "displaced" && isReadOnlyOpen(flags)) {
       displacedPath = String(candidate);
       transaction = dirname(displacedPath);
       fs.unlinkSync(displacedPath);
@@ -1124,7 +1149,9 @@ test("in-process restore never deletes a destination rebound after link publicat
     const descriptor = mode === undefined
       ? originalOpen(candidate, flags)
       : originalOpen(candidate, flags, mode);
-    if (!reboundInjected && String(candidate) === path && flags === "wx") rebound();
+    if (!reboundInjected
+      && String(candidate) === path
+      && isExclusiveRecoveryDestinationOpen(flags)) rebound();
     return descriptor;
   }) as typeof fs.openSync;
   syncBuiltinESMExports();
@@ -1160,7 +1187,7 @@ test("in-process restore never deletes a destination rebound after link publicat
     assert.equal(fs.lstatSync(displaced).isSymbolicLink(), false);
     assert.deepEqual(readFileSync(displaced), recoveryBytes);
     assert.equal(JSON.parse(readFileSync(join(transaction, "manifest.json"), "utf8")).state, "displaced");
-    assert.match(configured.detail ?? "", new RegExp(displaced.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+    assert.match(configured.detail ?? "", new RegExp(transaction.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
     assert.deepEqual(readFileSync(backupPaths(path)[0]!), originalBytes);
   } finally {
     fs.renameSync = originalRename;
@@ -1328,7 +1355,9 @@ test("restore collision preserves current file and reports displaced concurrent 
     flags: fs.OpenMode,
     mode?: fs.Mode,
   ) => {
-    if (!currentInjected && String(candidate) === path && flags === "wx") injectCurrent();
+    if (!currentInjected
+      && String(candidate) === path
+      && isExclusiveRecoveryDestinationOpen(flags)) injectCurrent();
     return mode === undefined
       ? originalOpen(candidate, flags)
       : originalOpen(candidate, flags, mode);
@@ -1620,7 +1649,7 @@ test("restart recovery refuses a displaced symlink swapped in during publication
     flags: fs.OpenMode,
     mode?: fs.Mode,
   ) => {
-    if (!injected && String(candidate) === displaced && flags === "r") swapSource();
+    if (!injected && String(candidate) === displaced && isReadOnlyOpen(flags)) swapSource();
     return mode === undefined
       ? originalOpen(candidate, flags)
       : originalOpen(candidate, flags, mode);
@@ -1680,7 +1709,9 @@ test("restart recovery never deletes a destination rebound after link publicatio
     const descriptor = mode === undefined
       ? originalOpen(candidate, flags)
       : originalOpen(candidate, flags, mode);
-    if (!reboundInjected && String(candidate) === path && flags === "wx") rebound();
+    if (!reboundInjected
+      && String(candidate) === path
+      && isExclusiveRecoveryDestinationOpen(flags)) rebound();
     return descriptor;
   }) as typeof fs.openSync;
   syncBuiltinESMExports();
@@ -1720,6 +1751,416 @@ test("restart recovery never deletes a destination rebound after link publicatio
   }
 });
 
+test("restart recovery refuses an equal-length destination overwrite during publication", async (t) => {
+  const path = configPath(t);
+  const recoveryBytes = Buffer.from('{"theme":"recovery-aaaa"}\n', "utf8");
+  const attackerBytes = Buffer.from('{"theme":"attacker-bbbb"}\n', "utf8");
+  assert.equal(attackerBytes.length, recoveryBytes.length);
+  const transaction = crashTransaction(path, "restart-publication-overwrite", "displaced", recoveryBytes);
+  const displaced = join(transaction, "displaced");
+  const originalOpen = fs.openSync;
+  const originalFsync = fs.fsyncSync;
+  let destinationDescriptor: number | undefined;
+  let overwriteInjected = false;
+
+  (fs as unknown as { openSync: typeof fs.openSync }).openSync = ((
+    candidate: fs.PathLike,
+    flags: fs.OpenMode,
+    mode?: fs.Mode,
+  ) => {
+    const descriptor = mode === undefined
+      ? originalOpen(candidate, flags)
+      : originalOpen(candidate, flags, mode);
+    if (String(candidate) === path && isExclusiveRecoveryDestinationOpen(flags)) {
+      destinationDescriptor = descriptor;
+    }
+    return descriptor;
+  }) as typeof fs.openSync;
+  fs.fsyncSync = ((descriptor: number) => {
+    originalFsync(descriptor);
+    if (!overwriteInjected && descriptor === destinationDescriptor) {
+      const attackerDescriptor = originalOpen(path, "r+");
+      try {
+        writeSync(attackerDescriptor, attackerBytes, 0, attackerBytes.length, 0);
+        originalFsync(attackerDescriptor);
+      } finally {
+        closeSync(attackerDescriptor);
+      }
+      overwriteInjected = true;
+    }
+  }) as typeof fs.fsyncSync;
+  syncBuiltinESMExports();
+
+  try {
+    const configured = await createClaudeDesktopAdapter({ configPath: path })
+      .configure(registration, false);
+
+    assert.equal(overwriteInjected, true);
+    assert.equal(configured.status, "failed");
+    assert.match(configured.detail ?? "", /manual recovery/i);
+    assert.doesNotMatch(configured.detail ?? "", /recovery-aaaa|attacker-bbbb/i);
+    assert.deepEqual(readFileSync(path), attackerBytes);
+    assert.deepEqual(readFileSync(displaced), recoveryBytes);
+    assert.equal(fs.lstatSync(path).isFile(), true);
+    assert.equal(fs.lstatSync(path).isSymbolicLink(), false);
+    assert.equal(fs.lstatSync(displaced).isFile(), true);
+    assert.equal(fs.lstatSync(displaced).isSymbolicLink(), false);
+    assert.equal(JSON.parse(readFileSync(join(transaction, "manifest.json"), "utf8")).state, "displaced");
+    assert.match(configured.detail ?? "", new RegExp(displaced.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  } finally {
+    (fs as unknown as { openSync: typeof fs.openSync }).openSync = originalOpen;
+    fs.fsyncSync = originalFsync;
+    syncBuiltinESMExports();
+  }
+});
+
+test("restart recovery refuses an equal-length overwrite before final pre-commit validation", async (t) => {
+  const path = configPath(t);
+  const recoveryBytes = Buffer.from('{"theme":"recovery-cccc"}\n', "utf8");
+  const attackerBytes = Buffer.from('{"theme":"attacker-dddd"}\n', "utf8");
+  assert.equal(attackerBytes.length, recoveryBytes.length);
+  const transaction = crashTransaction(path, "restart-post-helper-overwrite", "displaced", recoveryBytes);
+  const displaced = join(transaction, "displaced");
+  const originalDirectorySync = directorySyncCapability.sync;
+  let overwriteInjected = false;
+
+  directorySyncCapability.sync = (candidate) => {
+    const result = originalDirectorySync(candidate);
+    if (!overwriteInjected
+      && candidate === transaction
+      && !fs.existsSync(join(transaction, "prepared"))
+      && fs.existsSync(path)) {
+      writeFileSync(path, attackerBytes);
+      overwriteInjected = true;
+    }
+    return result;
+  };
+
+  try {
+    const configured = await createClaudeDesktopAdapter({ configPath: path })
+      .configure(registration, false);
+
+    assert.equal(overwriteInjected, true);
+    assert.equal(configured.status, "failed");
+    assert.match(configured.detail ?? "", /manual recovery/i);
+    assert.doesNotMatch(configured.detail ?? "", /recovery-cccc|attacker-dddd/i);
+    assert.deepEqual(readFileSync(path), attackerBytes);
+    assert.deepEqual(readFileSync(displaced), recoveryBytes);
+    assert.equal(fs.lstatSync(path).isFile(), true);
+    assert.equal(fs.lstatSync(path).isSymbolicLink(), false);
+    assert.equal(fs.lstatSync(displaced).isFile(), true);
+    assert.equal(fs.lstatSync(displaced).isSymbolicLink(), false);
+    assert.equal(JSON.parse(readFileSync(join(transaction, "manifest.json"), "utf8")).state, "displaced");
+    assert.match(configured.detail ?? "", new RegExp(transaction.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  } finally {
+    directorySyncCapability.sync = originalDirectorySync;
+  }
+});
+
+test("restart recovery refuses a source mode change before descriptor open", async (t) => {
+  const path = configPath(t);
+  const recoveryBytes = Buffer.from('{"theme":"source-mode-authority"}\n', "utf8");
+  const transaction = crashTransaction(path, "restart-source-mode-race", "displaced", recoveryBytes);
+  const displaced = join(transaction, "displaced");
+  const initialMode = process.platform === "win32" ? 0o444 : 0o640;
+  const racedMode = process.platform === "win32" ? 0o666 : 0o600;
+  chmodSync(displaced, initialMode);
+  const observedInitialMode = observableMode(displaced);
+  const originalOpen = fs.openSync;
+  let observedRacedMode: number | undefined;
+  let modeRaceInjected = false;
+
+  (fs as unknown as { openSync: typeof fs.openSync }).openSync = ((
+    candidate: fs.PathLike,
+    flags: fs.OpenMode,
+    mode?: fs.Mode,
+  ) => {
+    if (!modeRaceInjected && String(candidate) === displaced && isReadOnlyOpen(flags)) {
+      chmodSync(displaced, racedMode);
+      observedRacedMode = observableMode(displaced);
+      modeRaceInjected = true;
+    }
+    return mode === undefined
+      ? originalOpen(candidate, flags)
+      : originalOpen(candidate, flags, mode);
+  }) as typeof fs.openSync;
+  syncBuiltinESMExports();
+
+  try {
+    const configured = await createClaudeDesktopAdapter({ configPath: path })
+      .configure(registration, false);
+
+    assert.equal(modeRaceInjected, true);
+    assert.ok(observedRacedMode !== undefined);
+    assert.notEqual(observedRacedMode, observedInitialMode);
+    assert.equal(configured.status, "failed");
+    assert.match(configured.detail ?? "", /manual recovery/i);
+    assert.doesNotMatch(configured.detail ?? "", /source-mode-authority/i);
+    assert.equal(fs.existsSync(path), false);
+    assert.deepEqual(readFileSync(displaced), recoveryBytes);
+    assert.equal(observableMode(displaced), observedRacedMode);
+    assert.equal(fs.lstatSync(displaced).isFile(), true);
+    assert.equal(fs.lstatSync(displaced).isSymbolicLink(), false);
+    assert.equal(JSON.parse(readFileSync(join(transaction, "manifest.json"), "utf8")).state, "displaced");
+  } finally {
+    (fs as unknown as { openSync: typeof fs.openSync }).openSync = originalOpen;
+    syncBuiltinESMExports();
+  }
+});
+
+test("restart recovery refuses a destination mode change during publication", async (t) => {
+  const path = configPath(t);
+  const recoveryBytes = Buffer.from('{"theme":"destination-mode-authority"}\n', "utf8");
+  const transaction = crashTransaction(path, "restart-destination-mode-race", "displaced", recoveryBytes);
+  const displaced = join(transaction, "displaced");
+  const racedMode = process.platform === "win32" ? 0o444 : 0o600;
+  const sourceMode = observableMode(displaced);
+  const originalOpen = fs.openSync;
+  const originalFsync = fs.fsyncSync;
+  let destinationDescriptor: number | undefined;
+  let observedRacedMode: number | undefined;
+  let modeRaceInjected = false;
+
+  (fs as unknown as { openSync: typeof fs.openSync }).openSync = ((
+    candidate: fs.PathLike,
+    flags: fs.OpenMode,
+    mode?: fs.Mode,
+  ) => {
+    const descriptor = mode === undefined
+      ? originalOpen(candidate, flags)
+      : originalOpen(candidate, flags, mode);
+    if (String(candidate) === path && isExclusiveRecoveryDestinationOpen(flags)) {
+      destinationDescriptor = descriptor;
+    }
+    return descriptor;
+  }) as typeof fs.openSync;
+  fs.fsyncSync = ((descriptor: number) => {
+    originalFsync(descriptor);
+    if (!modeRaceInjected && descriptor === destinationDescriptor) {
+      chmodSync(path, racedMode);
+      observedRacedMode = observableMode(path);
+      modeRaceInjected = true;
+    }
+  }) as typeof fs.fsyncSync;
+  syncBuiltinESMExports();
+
+  try {
+    const configured = await createClaudeDesktopAdapter({ configPath: path })
+      .configure(registration, false);
+
+    assert.equal(modeRaceInjected, true);
+    assert.ok(observedRacedMode !== undefined);
+    assert.notEqual(observedRacedMode, sourceMode);
+    assert.equal(configured.status, "failed");
+    assert.match(configured.detail ?? "", /manual recovery/i);
+    assert.doesNotMatch(configured.detail ?? "", /destination-mode-authority/i);
+    assert.deepEqual(readFileSync(path), recoveryBytes);
+    assert.equal(observableMode(path), observedRacedMode);
+    assert.deepEqual(readFileSync(displaced), recoveryBytes);
+    assert.equal(observableMode(displaced), sourceMode);
+    assert.equal(JSON.parse(readFileSync(join(transaction, "manifest.json"), "utf8")).state, "displaced");
+  } finally {
+    (fs as unknown as { openSync: typeof fs.openSync }).openSync = originalOpen;
+    fs.fsyncSync = originalFsync;
+    syncBuiltinESMExports();
+  }
+});
+
+test("restart recovery retains a partial destination and exact displaced authority after ENOSPC", async (t) => {
+  const path = configPath(t);
+  const recoveryBytes = Buffer.from('{"theme":"partial-write-authority"}\n', "utf8");
+  const partialBytes = recoveryBytes.subarray(0, 9);
+  const transaction = crashTransaction(path, "restart-partial-write", "displaced", recoveryBytes);
+  const displaced = join(transaction, "displaced");
+  const originalOpen = fs.openSync;
+  const originalWriteFile = fs.writeFileSync;
+  const originalWrite = fs.writeSync;
+  let destinationDescriptor: number | undefined;
+  let partialWriteInjected = false;
+
+  (fs as unknown as { openSync: typeof fs.openSync }).openSync = ((
+    candidate: fs.PathLike,
+    flags: fs.OpenMode,
+    mode?: fs.Mode,
+  ) => {
+    const descriptor = mode === undefined
+      ? originalOpen(candidate, flags)
+      : originalOpen(candidate, flags, mode);
+    if (String(candidate) === path && isExclusiveRecoveryDestinationOpen(flags)) {
+      destinationDescriptor = descriptor;
+    }
+    return descriptor;
+  }) as typeof fs.openSync;
+  (fs as unknown as { writeFileSync: typeof fs.writeFileSync }).writeFileSync = ((
+    file: fs.PathOrFileDescriptor,
+    data: string | NodeJS.ArrayBufferView,
+    options?: fs.WriteFileOptions,
+  ) => {
+    if (!partialWriteInjected && file === destinationDescriptor) {
+      originalWrite(destinationDescriptor, partialBytes, 0, partialBytes.length, 0);
+      partialWriteInjected = true;
+      throw Object.assign(new Error("fake partial-write secret"), { code: "ENOSPC" });
+    }
+    return originalWriteFile(file, data, options);
+  }) as typeof fs.writeFileSync;
+  (fs as unknown as { writeSync: typeof fs.writeSync }).writeSync = ((
+    descriptor: number,
+    data: NodeJS.ArrayBufferView | string,
+    ...args: unknown[]
+  ) => {
+    if (!partialWriteInjected && descriptor === destinationDescriptor) {
+      originalWrite(descriptor, partialBytes, 0, partialBytes.length, 0);
+      partialWriteInjected = true;
+      throw Object.assign(new Error("fake partial-write secret"), { code: "ENOSPC" });
+    }
+    return (originalWrite as (...values: unknown[]) => number)(descriptor, data, ...args);
+  }) as typeof fs.writeSync;
+  syncBuiltinESMExports();
+
+  try {
+    const configured = await createClaudeDesktopAdapter({ configPath: path })
+      .configure(registration, false);
+
+    assert.equal(partialWriteInjected, true);
+    assert.equal(configured.status, "failed");
+    assert.match(configured.detail ?? "", /manual recovery/i);
+    assert.doesNotMatch(configured.detail ?? "", /partial-write-authority|fake partial-write/i);
+    assert.deepEqual(readFileSync(path), partialBytes);
+    assert.equal(fs.lstatSync(path).isFile(), true);
+    assert.equal(fs.lstatSync(path).isSymbolicLink(), false);
+    assert.deepEqual(readFileSync(displaced), recoveryBytes);
+    assert.equal(fs.lstatSync(displaced).isFile(), true);
+    assert.equal(fs.lstatSync(displaced).isSymbolicLink(), false);
+    assert.equal(JSON.parse(readFileSync(join(transaction, "manifest.json"), "utf8")).state, "displaced");
+    assert.match(configured.detail ?? "", new RegExp(displaced.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  } finally {
+    (fs as unknown as { openSync: typeof fs.openSync }).openSync = originalOpen;
+    (fs as unknown as { writeFileSync: typeof fs.writeFileSync }).writeFileSync = originalWriteFile;
+    (fs as unknown as { writeSync: typeof fs.writeSync }).writeSync = originalWrite;
+    syncBuiltinESMExports();
+  }
+});
+
+test("restart recovery uses a numeric nonblocking no-follow source open where supported", async (t) => {
+  const path = configPath(t);
+  const recoveryBytes = Buffer.from('{"theme":"fake-source-open-secret"}\n', "utf8");
+  const transaction = crashTransaction(path, "restart-source-open-flags", "displaced", recoveryBytes);
+  const displaced = join(transaction, "displaced");
+  const originalOpen = fs.openSync;
+  let observedFlags: fs.OpenMode | undefined;
+
+  (fs as unknown as { openSync: typeof fs.openSync }).openSync = ((
+    candidate: fs.PathLike,
+    flags: fs.OpenMode,
+    mode?: fs.Mode,
+  ) => {
+    if (observedFlags === undefined && String(candidate) === displaced) observedFlags = flags;
+    return mode === undefined
+      ? originalOpen(candidate, flags)
+      : originalOpen(candidate, flags, mode);
+  }) as typeof fs.openSync;
+  syncBuiltinESMExports();
+
+  try {
+    const configured = await createClaudeDesktopAdapter({ configPath: path })
+      .configure(registration, false);
+
+    assert.equal(configured.status, "failed");
+    assert.match(configured.detail ?? "", /recovered|retry/i);
+    assert.doesNotMatch(configured.detail ?? "", /fake-source-open-secret/i);
+    assert.equal(typeof observedFlags, "number");
+    if (typeof observedFlags !== "number") return;
+    assert.equal(observedFlags & ACCESS_MODE_MASK, fsConstants.O_RDONLY);
+    if (process.platform === "win32") {
+      assert.equal(observedFlags, fsConstants.O_RDONLY);
+    } else {
+      assert.equal((observedFlags & fsConstants.O_NOFOLLOW) !== 0, true);
+      assert.equal((observedFlags & fsConstants.O_NONBLOCK) !== 0, true);
+    }
+    assert.deepEqual(readFileSync(path), recoveryBytes);
+    assert.deepEqual(readFileSync(displaced), recoveryBytes);
+    assert.equal(JSON.parse(readFileSync(join(transaction, "manifest.json"), "utf8")).state, "committed");
+  } finally {
+    (fs as unknown as { openSync: typeof fs.openSync }).openSync = originalOpen;
+    syncBuiltinESMExports();
+  }
+});
+
+test("POSIX recovery rejects a FIFO source swap promptly before reading", async (t) => {
+  const path = configPath(t);
+  const fifoProbe = join(dirname(path), "fifo-probe");
+  const probe = spawnSync("mkfifo", [fifoProbe], { encoding: "utf8" });
+  if (probe.error !== undefined || probe.status !== 0) {
+    t.skip("host has no mkfifo capability");
+    return;
+  }
+  assert.equal(fs.lstatSync(fifoProbe).isFIFO(), true);
+  fs.unlinkSync(fifoProbe);
+
+  const recoveryBytes = Buffer.from('{"theme":"fifo-recovery-authority"}\n', "utf8");
+  const transaction = crashTransaction(path, "restart-fifo-source", "displaced", recoveryBytes);
+  const displaced = join(transaction, "displaced");
+  const authority = join(transaction, "displaced.authority");
+  const moduleUrl = new URL("../setup/claude-desktop.js", import.meta.url).href;
+  const script = `
+    import fs from "node:fs";
+    import { spawnSync } from "node:child_process";
+    import { syncBuiltinESMExports } from "node:module";
+    import { createClaudeDesktopAdapter } from ${JSON.stringify(moduleUrl)};
+    const path = ${JSON.stringify(path)};
+    const displaced = ${JSON.stringify(displaced)};
+    const authority = ${JSON.stringify(authority)};
+    const registration = ${JSON.stringify(registration)};
+    const originalOpen = fs.openSync;
+    let injected = false;
+    fs.openSync = (candidate, flags, mode) => {
+      if (!injected && String(candidate) === displaced) {
+        fs.renameSync(displaced, authority);
+        const made = spawnSync("mkfifo", [displaced], { encoding: "utf8" });
+        if (made.error !== undefined || made.status !== 0) throw new Error("mkfifo failed");
+        injected = true;
+      }
+      return mode === undefined
+        ? originalOpen(candidate, flags)
+        : originalOpen(candidate, flags, mode);
+    };
+    syncBuiltinESMExports();
+    const started = Date.now();
+    const result = await createClaudeDesktopAdapter({ configPath: path }).configure(registration, false);
+    process.stdout.write(JSON.stringify({ result, elapsed: Date.now() - started, injected }));
+  `;
+
+  const child = spawnSync(process.execPath, ["--input-type=module", "-e", script], {
+    encoding: "utf8",
+    timeout: 2_000,
+    killSignal: "SIGTERM",
+  });
+
+  assert.equal(child.error, undefined, `child error: ${child.error?.message ?? "none"}`);
+  assert.equal(child.signal, null);
+  assert.equal(child.status, 0, `child stderr: ${child.stderr}`);
+  const observed = JSON.parse(child.stdout) as {
+    result: { status: string; detail?: string };
+    elapsed: number;
+    injected: boolean;
+  };
+  assert.equal(observed.injected, true);
+  assert.ok(observed.elapsed < 1_500, `recovery took ${observed.elapsed} ms`);
+  assert.equal(observed.result.status, "failed");
+  assert.match(observed.result.detail ?? "", /manual recovery/i);
+  assert.doesNotMatch(`${child.stdout}\n${child.stderr}`, /fifo-recovery-authority/i);
+  assert.equal(fs.existsSync(path), false);
+  assert.equal(fs.lstatSync(displaced).isFIFO(), true);
+  assert.equal(fs.lstatSync(authority).isFile(), true);
+  assert.equal(fs.lstatSync(authority).isSymbolicLink(), false);
+  assert.deepEqual(readFileSync(authority), recoveryBytes);
+  assert.equal(JSON.parse(readFileSync(join(transaction, "manifest.json"), "utf8")).state, "displaced");
+  assert.deepEqual(
+    readdirSync(transaction).sort(),
+    ["displaced", "displaced.authority", "manifest.json", "prepared"],
+  );
+});
+
 test("failed restart restore reports surviving transaction instead of missing displaced file", async (t) => {
   const path = configPath(t);
   const displacedBytes = Buffer.from('{"theme":"dark"}\n', "utf8");
@@ -1743,7 +2184,7 @@ test("failed restart restore reports surviving transaction instead of missing di
     flags: fs.OpenMode,
     mode?: fs.Mode,
   ) => {
-    if (!injected && String(candidate) === displacedPath && flags === "r") removeSource();
+    if (!injected && String(candidate) === displacedPath && isReadOnlyOpen(flags)) removeSource();
     return mode === undefined
       ? originalOpen(candidate, flags)
       : originalOpen(candidate, flags, mode);
