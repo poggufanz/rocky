@@ -9,6 +9,8 @@ import { PACKAGE_NAME, PACKAGE_VERSION } from "../core/package-info.js";
 const packageRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const readme = readFileSync(join(packageRoot, "README.md"), "utf8");
 const grounding = readFileSync(join(packageRoot, "docs", "scientific-grounding.md"), "utf8");
+const unscopedRockyInstall = /\bnpm\s+(?:install|i)(?=\s)[^\n;&|#]*?[\s`'"]rocky-cli(?:@[^\s`'",;:)]+)?(?=$|[\s`'",;:.)])/i;
+const inactiveInstallContext = /\b(?:historical|superseded|negative test|not an active command)\b|\b(?:do not|don't|never) use\b/i;
 
 function helpOutput(): string {
   const env: NodeJS.ProcessEnv = { ...process.env };
@@ -34,6 +36,33 @@ function assertNoActiveExplain(surface: string, label: string): void {
   }
 }
 
+function hasActiveUnscopedRockyInstall(surface: string): boolean {
+  return surface.split("\n").some((line) => (
+    unscopedRockyInstall.test(line) && !inactiveInstallContext.test(line)
+  ));
+}
+
+test("unscoped Rocky install matcher rejects active commands only", () => {
+  const cases = [
+    ["npm install -g rocky-cli", true],
+    ["npm i -g rocky-cli", true],
+    ["npm install rocky-cli", true],
+    ["npm i rocky-cli", true],
+    ["npm install --save-dev other-package rocky-cli@0.2.0", true],
+    ["Use `npm i other-package rocky-cli --save-exact`.", true],
+    ["npm install -g @poggufanz/rocky-cli", false],
+    ["npm install @poggufanz/rocky-cli", false],
+    ["npm install @poggufanz/rocky-cli@0.2.1-beta.0", false],
+    ["npm install rocky-cli-helper", false],
+    ["Historical example: npm install rocky-cli@0.1.0", false],
+    ["Negative test: do not use npm i --save-dev rocky-cli", false],
+  ] as const;
+
+  for (const [surface, expected] of cases) {
+    assert.equal(hasActiveUnscopedRockyInstall(surface), expected, surface);
+  }
+});
+
 test("README and CLI help publish the installable v0.2.1 command surface", () => {
   const help = helpOutput();
   const expected = [
@@ -49,7 +78,7 @@ test("README and CLI help publish the installable v0.2.1 command surface", () =>
   assertContainsEvery(help, "CLI help", expected);
 
   for (const [label, surface] of [["README", readme], ["CLI help", help]] as const) {
-    assert.doesNotMatch(surface, /\bnpm\s+(?:install|i)\s+-g\s+rocky-cli(?:\s|$)/i);
+    assert.equal(hasActiveUnscopedRockyInstall(surface), false, `${label} advertises unscoped Rocky install`);
     assert.doesNotMatch(surface, /never uploaded/i);
     assert.doesNotMatch(surface, /v0\.1[^\n]*(?:current|this release)/i);
     assertNoActiveExplain(surface, label);
