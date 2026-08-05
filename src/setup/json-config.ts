@@ -447,61 +447,162 @@ function recoveryIdentityMatches(
   return sameIdentity(metadata, identity) && metadata.nlink === identity.nlink;
 }
 
-function validatePublishedPath(
-  path: string,
+function publishedDescriptorMatches(
+  metadata: Stats,
   identity: RecoveryFileIdentity,
   publication: RecoveryPublication,
 ): boolean {
-  let descriptor: number | undefined;
-  try {
-    const before = lstatSync(path);
-    if (!before.isFile()
-      || before.isSymbolicLink()
-      || !recoveryIdentityMatches(before, identity)
-      || before.size !== publication.expectedLength
-      || observableRecoveryMode(before) !== publication.expectedMode) {
-      return false;
-    }
-
-    descriptor = openSync(path, recoveryReadOpenFlags());
-    const opened = fstatSync(descriptor);
-    const observed = lstatSync(path);
-    if (!opened.isFile()
-      || !observed.isFile()
-      || observed.isSymbolicLink()
-      || !recoveryIdentityMatches(opened, identity)
-      || !recoveryIdentityMatches(observed, identity)
-      || !stableSourceMetadata(before, opened)
-      || !stableSourceMetadata(opened, observed)) {
-      return false;
-    }
-
-    const bytes = readDescriptorExactly(descriptor, publication.expectedLength);
-    const afterRead = fstatSync(descriptor);
-    const finalPath = lstatSync(path);
-    return stableSourceMetadata(opened, afterRead)
-      && stableSourceMetadata(afterRead, finalPath)
-      && recoveryIdentityMatches(afterRead, identity)
-      && recoveryIdentityMatches(finalPath, identity)
-      && observableRecoveryMode(afterRead) === publication.expectedMode
-      && bytes.equals(publication.expectedBytes)
-      && recoveryDigest(bytes) === publication.expectedDigest;
-  } catch {
-    return false;
-  } finally {
-    if (descriptor !== undefined) {
-      try { closeSync(descriptor); } catch { /* retain recovery authority */ }
-    }
-  }
+  return metadata.isFile()
+    && recoveryIdentityMatches(metadata, identity)
+    && metadata.size === publication.expectedLength
+    && observableRecoveryMode(metadata) === publication.expectedMode;
 }
 
-function recoveryPublicationUnchanged(
+function publishedPathMatches(
+  metadata: Stats,
+  identity: RecoveryFileIdentity,
+  publication: RecoveryPublication,
+): boolean {
+  return !metadata.isSymbolicLink()
+    && publishedDescriptorMatches(metadata, identity, publication);
+}
+
+function stablePublishedObservation(
+  previous: Stats,
+  descriptor: Stats,
+  path: Stats,
+  identity: RecoveryFileIdentity,
+  publication: RecoveryPublication,
+): boolean {
+  return publishedDescriptorMatches(descriptor, identity, publication)
+    && publishedPathMatches(path, identity, publication)
+    && stableSourceMetadata(previous, descriptor)
+    && stableSourceMetadata(descriptor, path);
+}
+
+function exactPublishedSnapshot(
+  bytes: Buffer,
+  publication: RecoveryPublication,
+): boolean {
+  return bytes.equals(publication.expectedBytes)
+    && recoveryDigest(bytes) === publication.expectedDigest;
+}
+
+function validatePublishedPair(
   publication: RecoveryPublication,
   existingPath: string,
   newPath: string,
 ): boolean {
-  return validatePublishedPath(existingPath, publication.source, publication)
-    && validatePublishedPath(newPath, publication.destination, publication);
+  let sourceDescriptor: number | undefined;
+  let destinationDescriptor: number | undefined;
+  try {
+    const sourceBefore = lstatSync(existingPath);
+    if (!publishedPathMatches(sourceBefore, publication.source, publication)) return false;
+    sourceDescriptor = openSync(existingPath, recoveryReadOpenFlags());
+    const openedSource = fstatSync(sourceDescriptor);
+    if (!publishedDescriptorMatches(openedSource, publication.source, publication)
+      || !stableSourceMetadata(sourceBefore, openedSource)) {
+      return false;
+    }
+
+    const destinationBefore = lstatSync(newPath);
+    if (!publishedPathMatches(destinationBefore, publication.destination, publication)) return false;
+    destinationDescriptor = openSync(newPath, recoveryReadOpenFlags());
+    const openedDestination = fstatSync(destinationDescriptor);
+    if (!publishedDescriptorMatches(openedDestination, publication.destination, publication)
+      || !stableSourceMetadata(destinationBefore, openedDestination)) {
+      return false;
+    }
+
+    // Both descriptors remain live while each namespace is re-observed. A
+    // source mutation initiated by destination open is therefore in-bounds.
+    const pairedSourceDescriptor = fstatSync(sourceDescriptor);
+    const pairedDestinationDescriptor = fstatSync(destinationDescriptor);
+    const pairedSourcePath = lstatSync(existingPath);
+    const pairedDestinationPath = lstatSync(newPath);
+    if (!stablePublishedObservation(
+      openedSource,
+      pairedSourceDescriptor,
+      pairedSourcePath,
+      publication.source,
+      publication,
+    ) || !stablePublishedObservation(
+      openedDestination,
+      pairedDestinationDescriptor,
+      pairedDestinationPath,
+      publication.destination,
+      publication,
+    )) {
+      return false;
+    }
+
+    const sourceBytes = readDescriptorExactly(sourceDescriptor, publication.expectedLength);
+    const destinationBytes = readDescriptorExactly(
+      destinationDescriptor,
+      publication.expectedLength,
+    );
+    const sourceAfterRead = fstatSync(sourceDescriptor);
+    const destinationAfterRead = fstatSync(destinationDescriptor);
+    const sourcePathAfterRead = lstatSync(existingPath);
+    const destinationPathAfterRead = lstatSync(newPath);
+    if (!exactPublishedSnapshot(sourceBytes, publication)
+      || !exactPublishedSnapshot(destinationBytes, publication)
+      || !sourceBytes.equals(destinationBytes)
+      || !stablePublishedObservation(
+        pairedSourceDescriptor,
+        sourceAfterRead,
+        sourcePathAfterRead,
+        publication.source,
+        publication,
+      )
+      || !stablePublishedObservation(
+        pairedDestinationDescriptor,
+        destinationAfterRead,
+        destinationPathAfterRead,
+        publication.destination,
+        publication,
+      )) {
+      return false;
+    }
+
+    // One finite final pass rechecks source bytes after destination bytes, then
+    // re-observes both descriptors and namespaces before either descriptor closes.
+    const finalDestinationBytes = readDescriptorExactly(
+      destinationDescriptor,
+      publication.expectedLength,
+    );
+    const finalSourceBytes = readDescriptorExactly(sourceDescriptor, publication.expectedLength);
+    const finalSourceDescriptor = fstatSync(sourceDescriptor);
+    const finalDestinationDescriptor = fstatSync(destinationDescriptor);
+    const finalSourcePath = lstatSync(existingPath);
+    const finalDestinationPath = lstatSync(newPath);
+    return exactPublishedSnapshot(finalSourceBytes, publication)
+      && exactPublishedSnapshot(finalDestinationBytes, publication)
+      && finalSourceBytes.equals(finalDestinationBytes)
+      && stablePublishedObservation(
+        sourceAfterRead,
+        finalSourceDescriptor,
+        finalSourcePath,
+        publication.source,
+        publication,
+      )
+      && stablePublishedObservation(
+        destinationAfterRead,
+        finalDestinationDescriptor,
+        finalDestinationPath,
+        publication.destination,
+        publication,
+      );
+  } catch {
+    return false;
+  } finally {
+    if (destinationDescriptor !== undefined) {
+      try { closeSync(destinationDescriptor); } catch { /* retain every ambiguous file */ }
+    }
+    if (sourceDescriptor !== undefined) {
+      try { closeSync(sourceDescriptor); } catch { /* retain recovery authority */ }
+    }
+  }
 }
 
 // linkSync provides no handle proving which inode still occupies its destination
@@ -783,7 +884,7 @@ export function recoverJsonTransaction(
           recoveryPath: firstExistingPath(displacedPath, transactionDirectory, path),
         };
       }
-      if (!recoveryPublicationUnchanged(publication, displacedPath, path)) {
+      if (!validatePublishedPair(publication, displacedPath, path)) {
         return { status: "manual", recoveryPath: firstExistingPath(transactionDirectory) };
       }
       const preparedPath = join(transactionDirectory, "prepared");
@@ -793,12 +894,12 @@ export function recoverJsonTransaction(
         return { status: "manual", recoveryPath: firstExistingPath(transactionDirectory) };
       }
       if (!mutationGuardUnchanged(guard)) return { status: "manual" };
-      if (!recoveryPublicationUnchanged(publication, displacedPath, path)) {
+      if (!validatePublishedPair(publication, displacedPath, path)) {
         return { status: "manual", recoveryPath: firstExistingPath(transactionDirectory) };
       }
-      // Node has no portable compare-and-swap joining this final validation to
-      // manifest publication. A later external mutation remains outside this
-      // atomic boundary and never authorizes cleanup; earlier races fail closed.
+      // Each path's last successful paired observation still precedes manifest
+      // publication. Node cannot atomically compare both files and publish this
+      // manifest; mutation in that remaining interval never authorizes cleanup.
       try {
         writeManifest(transactionDirectory, path, "committed", guard);
       } catch {
@@ -845,7 +946,7 @@ function restoreDisplaced(
       recoveryPath: firstExistingPath(displacedPath, transactionDirectory, path),
     };
   }
-  if (!recoveryPublicationUnchanged(publication, displacedPath, path)) {
+  if (!validatePublishedPair(publication, displacedPath, path)) {
     return {
       status: "recovery-required",
       recoveryPath: firstExistingPath(transactionDirectory, path),
@@ -853,15 +954,16 @@ function restoreDisplaced(
   }
   try {
     requireMutationGuard(guard);
-    if (!recoveryPublicationUnchanged(publication, displacedPath, path)) {
+    if (!validatePublishedPair(publication, displacedPath, path)) {
       return {
         status: "recovery-required",
         recoveryPath: firstExistingPath(transactionDirectory, path),
       };
     }
-    // Node has no portable compare-and-swap joining this final validation to
-    // manifest publication. A later external mutation remains outside this
-    // transaction's atomic boundary; all earlier observable races fail closed.
+    // Each path's last successful paired observation still precedes manifest
+    // publication. Node cannot atomically compare both files and publish this
+    // manifest; mutation in that remaining interval can remain externally
+    // ambiguous, but never creates cleanup authority.
     writeManifest(transactionDirectory, path, "committed", guard);
   } catch {
     return {
