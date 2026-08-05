@@ -156,13 +156,17 @@ function runStep(state, env, label, file, args, display) {
     maxBuffer: MAX_COMMAND_OUTPUT_BYTES,
     windowsHide: true,
   });
-  const status = result.status ?? 1;
-  state.commands.push({ label, command: display, status, signal: result.signal ?? null });
-  if (result.error !== undefined) throw new StepError(`${label} could not run: ${result.error.message}`);
-  if (status !== 0 || result.signal !== null) {
+  const status = result.status;
+  const signal = result.signal;
+  const error = result.error === undefined
+    ? null
+    : `${result.error.code === "ETIMEDOUT" ? "timeout" : "spawn error"}: ${result.error.code ?? result.error.name}`;
+  state.commands.push({ label, command: display, status, signal, error });
+  if (result.error !== undefined) throw new StepError(`${label} ${error}`);
+  if (status !== 0 || signal !== null) {
     const diagnostic = (result.stderr || result.stdout).trim().slice(-4_000);
     if (diagnostic) process.stderr.write(`${diagnostic}\n`);
-    throw new StepError(`${label} failed with status ${status}`);
+    throw new StepError(`${label} failed with ${status === null ? "no exit status" : `status ${status}`}`);
   }
   return result.stdout;
 }
@@ -267,10 +271,11 @@ function markdown(state) {
     "",
     "## Commands",
     "",
-    "| Step | Command | Exit | Signal |",
-    "|---|---|---:|---|",
+    "| Step | Command | Exit | Signal | Error |",
+    "|---|---|---:|---|---|",
     ...state.commands.map((command) =>
-      `| ${safeCell(command.label)} | \`${safeCell(command.command)}\` | ${command.status} | ${command.signal ?? "none"} |`),
+      `| ${safeCell(command.label)} | \`${safeCell(command.command)}\` | ` +
+      `${command.status === null ? "not exited" : command.status} | ${command.signal ?? "none"} | ${command.error ?? "none"} |`),
     "",
     "## Package metadata",
     "",
@@ -334,7 +339,9 @@ async function main(reportPath) {
   try {
     temporaryRoot = mkdtempSync(join(tmpdir(), "rocky-release-check-"));
     const env = isolatedEnvironment(temporaryRoot);
-    const npm = resolveNpmExecutable();
+    const npm = process.env.ROCKY_RELEASE_CHECK_TEST_SPAWN_ERROR === "1"
+      ? join(temporaryRoot, "missing-npm-executable")
+      : resolveNpmExecutable();
     state.npm = runStep(state, env, "npm version", npm, ["--version"], "npm --version").trim();
     runStep(state, env, "clean build and full tests", npm, ["test"], "npm test");
     assertMetadata(state);

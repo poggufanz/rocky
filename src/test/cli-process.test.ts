@@ -15,6 +15,8 @@ const PROCESS_TIMEOUT_MS = 5_000;
 interface ProcessSandbox {
   root: string;
   rockyHome: string;
+  fetchMarker: string;
+  backgroundMarker: string;
   env: NodeJS.ProcessEnv;
 }
 
@@ -43,10 +45,18 @@ function processSandbox(t: TestContext): ProcessSandbox {
     CLAUDE_CONFIG_DIR: directories.claudeConfig,
     CODEX_HOME: directories.codexHome,
     ROCKY_HOME: directories.rockyHome,
+    ROCKY_TEST_FETCH_MARKER: join(root, "fetch-used.marker"),
+    ROCKY_TEST_BACKGROUND_MARKER: join(root, "background-attempt.marker"),
   };
   delete env.NODE_OPTIONS;
   delete env.NODE_TEST_CONTEXT;
-  return { root, rockyHome: directories.rockyHome, env };
+  return {
+    root,
+    rockyHome: directories.rockyHome,
+    fetchMarker: env.ROCKY_TEST_FETCH_MARKER!,
+    backgroundMarker: env.ROCKY_TEST_BACKGROUND_MARKER!,
+    env,
+  };
 }
 
 function runCli(
@@ -69,8 +79,20 @@ function runNodeScript(
   sandbox: ProcessSandbox,
   script: string,
   args: readonly string[],
+  envOverrides: NodeJS.ProcessEnv = {},
 ): SpawnSyncReturns<string> {
   return spawnSync(process.execPath, [script, ...args], {
+    cwd: packageRoot,
+    env: { ...sandbox.env, ...envOverrides },
+    encoding: "utf8",
+    timeout: PROCESS_TIMEOUT_MS,
+    maxBuffer: 2 * 1024 * 1024,
+    windowsHide: true,
+  });
+}
+
+function runPreloadProbe(sandbox: ProcessSandbox, source: string): SpawnSyncReturns<string> {
+  return spawnSync(process.execPath, ["--require", throwFetch, "--eval", source], {
     cwd: packageRoot,
     env: sandbox.env,
     encoding: "utf8",
@@ -80,12 +102,48 @@ function runNodeScript(
   });
 }
 
+function assertNoDetectorMarkers(sandbox: ProcessSandbox): void {
+  assert.equal(existsSync(sandbox.fetchMarker), false, "isolated CLI attempted fetch");
+  assert.equal(existsSync(sandbox.backgroundMarker), false, "isolated CLI attempted background child");
+}
+
 function assertCompleted(result: SpawnSyncReturns<string>, expectedStatus: number): void {
   assert.ok(result.pid > 0);
   assert.equal(result.error, undefined);
   assert.equal(result.signal, null);
   assert.equal(result.status, expectedStatus, result.stderr);
+  if (process.platform !== "win32") {
+    assert.throws(
+      () => process.kill(result.pid, 0),
+      (error: unknown) => typeof error === "object" && error !== null && "code" in error && error.code === "ESRCH",
+      `direct child pid ${result.pid} is still live`,
+    );
+  }
 }
+
+test("fetch detector records use even when the throwing fetch is caught", (t) => {
+  const sandbox = processSandbox(t);
+  const result = runPreloadProbe(sandbox, "try { fetch('http://127.0.0.1/'); } catch {}\n");
+
+  assertCompleted(result, 0);
+  assert.equal(readFileSync(sandbox.fetchMarker, "utf8"), "fetch\n");
+  assert.equal(existsSync(sandbox.backgroundMarker), false);
+});
+
+test("background detector blocks detached and unref attempts before they can linger", (t) => {
+  const sandbox = processSandbox(t);
+  const source = [
+    "const { spawn } = require('node:child_process');",
+    "try { spawn(process.execPath, ['--eval', ''], { detached: true, stdio: 'ignore' }); } catch {}",
+    "const child = spawn(process.execPath, ['--eval', ''], { stdio: 'ignore' });",
+    "try { child.unref(); } catch {}",
+  ].join("\n");
+  const result = runPreloadProbe(sandbox, source);
+
+  assertCompleted(result, 0);
+  assert.equal(existsSync(sandbox.fetchMarker), false);
+  assert.deepEqual(readFileSync(sandbox.backgroundMarker, "utf8").trim().split("\n"), ["detached", "unref"]);
+});
 
 test("help, recall, stats, and hook status finish successfully without external fetch", (t) => {
   const commands = [
@@ -96,9 +154,10 @@ test("help, recall, stats, and hook status finish successfully without external 
   ] as const;
 
   for (const args of commands) {
-    const result = runCli(processSandbox(t), args);
+    const sandbox = processSandbox(t);
+    const result = runCli(sandbox, args);
     assertCompleted(result, 0);
-    assert.doesNotMatch(result.stderr, /unexpected fetch from isolated Rocky CLI process/);
+    assertNoDetectorMarkers(sandbox);
   }
 });
 
@@ -111,8 +170,10 @@ test("unknown commands and invalid command grammar exit 2", (t) => {
     ["hook"],
     ["hook", "invalid-subcommand"],
   ] as const) {
-    const result = runCli(processSandbox(t), args);
+    const sandbox = processSandbox(t);
+    const result = runCli(sandbox, args);
     assertCompleted(result, 2);
+    assertNoDetectorMarkers(sandbox);
   }
 });
 
@@ -132,12 +193,14 @@ test("run preserves path-with-spaces child streams and exit status", (t) => {
   );
   const command = `${quoteShellPath(process.execPath, process.platform)} ${quoteShellPath(child, process.platform)}`;
 
-  const result = runCli(processSandbox(t), ["run", command]);
+  const sandbox = processSandbox(t);
+  const result = runCli(sandbox, ["run", command]);
 
   assertCompleted(result, 7);
   assert.equal(result.stdout, "CHILD_STDOUT_SENTINEL\n");
   assert.doesNotMatch(result.stdout, /new error|good trade|I remember|\/\\_/);
   assert.match(result.stderr, /CHILD_STDERR_SENTINEL/);
+  assertNoDetectorMarkers(sandbox);
 });
 
 test("modern MCP emits JSON lines only and exits after EOF", (t) => {
@@ -154,7 +217,8 @@ test("modern MCP emits JSON lines only and exits after EOF", (t) => {
     },
   };
 
-  const result = runCli(processSandbox(t), ["mcp"], `${JSON.stringify(request)}\n`);
+  const sandbox = processSandbox(t);
+  const result = runCli(sandbox, ["mcp"], `${JSON.stringify(request)}\n`);
 
   assertCompleted(result, 0);
   assert.equal(result.stderr, "");
@@ -164,6 +228,7 @@ test("modern MCP emits JSON lines only and exits after EOF", (t) => {
   assert.equal(response.jsonrpc, "2.0");
   assert.equal(response.id, "cli-process-discover");
   assert.equal(typeof response.result, "object");
+  assertNoDetectorMarkers(sandbox);
 });
 
 test("seeded recall --ai falls back before any no-Ollama fetch", (t) => {
@@ -186,7 +251,7 @@ test("seeded recall --ai falls back before any no-Ollama fetch", (t) => {
 
   assertCompleted(result, 0);
   assert.match(result.stderr, /small model sleeps\. memory still works\./);
-  assert.doesNotMatch(result.stderr, /unexpected fetch from isolated Rocky CLI process/);
+  assertNoDetectorMarkers(sandbox);
 });
 
 test("release checker refuses publishing arguments before doing release work", (t) => {
@@ -207,6 +272,46 @@ test("release checker source has no registry-mutation subprocess argument", () =
   const source = readFileSync(join(packageRoot, "scripts", "release-check.mjs"), "utf8");
   assert.doesNotMatch(source, /npm\s+(?:publish|deprecate|dist-tag)\b/i);
   assert.doesNotMatch(source, /\[\s*["'](?:publish|deprecate|dist-tag)["']/i);
+});
+
+test("release checker partial report preserves a spawn failure without inventing exit 1", (t) => {
+  const sandbox = processSandbox(t);
+  const report = join(sandbox.root, "partial-release-report.md");
+  const result = runNodeScript(
+    sandbox,
+    join(packageRoot, "scripts", "release-check.mjs"),
+    ["--report", report],
+    { ROCKY_RELEASE_CHECK_TEST_SPAWN_ERROR: "1" },
+  );
+
+  assertCompleted(result, 1);
+  const markdown = readFileSync(report, "utf8");
+  assert.match(markdown, /Result: \*\*FAIL\*\*/);
+  assert.match(markdown, /npm version.*not exited.*spawn error: ENOENT/);
+  assert.doesNotMatch(markdown, /npm version.*\| 1 \|/);
+});
+
+test("unsupported benchmark contract uses exact discriminator and separate pending prose", (t) => {
+  const sandbox = processSandbox(t);
+  const output = join(sandbox.root, "unsupported-performance.json");
+  const result = runNodeScript(
+    sandbox,
+    join(packageRoot, "scripts", "benchmark-mcp.mjs"),
+    ["--output", output],
+    { ROCKY_BENCHMARK_TEST_UNSUPPORTED_REPORT: "1" },
+  );
+
+  assertCompleted(result, 0);
+  const report = JSON.parse(readFileSync(output, "utf8")) as {
+    steadyStateRssBytes: { median: unknown; p95: unknown; values: unknown[]; method: unknown; pending?: unknown };
+  };
+  assert.deepEqual(report.steadyStateRssBytes, {
+    median: null,
+    p95: null,
+    values: [],
+    method: "unsupported",
+    pending: "requires Node 22 on Linux",
+  });
 });
 
 test("benchmark rejects relative and package-internal output paths before spawning MCP", (t) => {

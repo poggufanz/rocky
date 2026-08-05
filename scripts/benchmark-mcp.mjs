@@ -363,6 +363,23 @@ function nodeMajor() {
   return Number(process.versions.node.split(".")[0]);
 }
 
+function steadyStateRssReport(values, supported) {
+  return {
+    median: median(values),
+    p95: p95(values),
+    values,
+    method: supported ? "/proc/<pid>/status VmRSS (KiB converted to bytes)" : "unsupported",
+    ...(supported ? {} : { pending: "requires Node 22 on Linux" }),
+  };
+}
+
+function writeUnsupportedReportProbe(output) {
+  const report = { steadyStateRssBytes: steadyStateRssReport([], false) };
+  mkdirSync(dirname(output), { recursive: true });
+  writeFileSync(output, `${JSON.stringify(report, null, 2)}\n`, "utf8");
+  process.stdout.write(`${output}\n`);
+}
+
 async function benchmark(output) {
   const temporaryRoot = mkdtempSync(join(tmpdir(), "rocky-mcp-benchmark-"));
   try {
@@ -403,14 +420,7 @@ async function benchmark(output) {
       samples: SAMPLE_COUNT,
       emptyColdStartMs: { median: coldMedian, p95: p95(cold), values: cold },
       fixture: { records: FIXTURE_RECORDS, bytes: fixtureBytes },
-      steadyStateRssBytes: {
-        median: median(rss),
-        p95: p95(rss),
-        values: rss,
-        method: rssSupported
-          ? "/proc/<pid>/status VmRSS (KiB converted to bytes)"
-          : "unsupported: pending Node 22/Linux measurement",
-      },
+      steadyStateRssBytes: steadyStateRssReport(rss, rssSupported),
       gates: {
         coldStartMedianUnderMs: COLD_GATE_MS,
         idleRssUnderBytes: RSS_GATE_BYTES,
@@ -428,7 +438,8 @@ async function benchmark(output) {
 
 try {
   const output = outputArgument(process.argv.slice(2));
-  await benchmark(output);
+  if (process.env.ROCKY_BENCHMARK_TEST_UNSUPPORTED_REPORT === "1") writeUnsupportedReportProbe(output);
+  else await benchmark(output);
 } catch (error) {
   process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
   process.exitCode = error instanceof UsageError ? 2 : 1;
