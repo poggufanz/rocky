@@ -10,7 +10,9 @@
 
 **A blind engineer who lives in your terminal, never forgets an error, and makes sure you still understand your own code.**
 
-Rocky is a terminal companion inspired by the alien engineer from Andy Weir's *Project Hail Mary*. Every AI tool on the market writes code *for* you. Rocky does the opposite job: he keeps track of what you and your AI have already been through, so the second time an error appears, the answer comes from your own history — not from twenty minutes of googling.
+Rocky is a terminal companion inspired by the alien engineer from Andy Weir's *Project Hail Mary*. He keeps track of what you and your AI have already been through, so the second time an error appears, the answer comes from your own history — not from twenty minutes of googling.
+
+**Teaching modes exist inside individual agents. Rocky is the layer that remembers what you learned — passive, cross-tool, and permanent.** That learning layer is planned v0.5 work; current v0.2.1 remembers failure/fix evidence across supported hosts. The longer-term mission is simple: make user not forget about fundamentals.
 
 He is also, unapologetically, a pet.
 
@@ -22,19 +24,36 @@ Eridians have photographic memory. Rocky catches them.
 
 The longer arc of this project is what we call the comprehension guardian: in an era where AI generates code faster than anyone reads it, Rocky's job is to make sure the human still understands what got built. See [docs/scientific-grounding.md](docs/scientific-grounding.md) for the research this is built on.
 
+## The Good Trade
+
+**The Good Trade.** You get smarter, so your AI gets more effective. Better AI work gives you better material to learn from, so you get smarter again. Rocky exists to keep that loop spinning—because the opposite loop is a risk worth resisting.
+
+This is Rocky's v0.5 product hypothesis, not an established outcome. “More effective” means that a better-informed user can provide sharper direction, context, choices, and verification; it does not mean the model weights change. Rocky's impact on understanding still has to be tested through dogfooding and user research.
+
+> “You teach, I remember. I remind, you understand. This is good trade.”
+
+That companion line is an original Rocky project tagline inspired by the lore, not a quotation from *Project Hail Mary*.
+
 ## Install
 
 ```bash
-git clone https://github.com/<you>/rocky
-cd rocky
-npm install      # dev deps only — rocky has zero runtime dependencies
-npm run build
-npm link         # makes `rocky` available globally
+npm install -g @poggufanz/rocky-cli
 ```
+
+Current beta: `@poggufanz/rocky-cli@0.2.1-beta.0`. One install includes the `rocky` CLI and its read-only MCP server. The unrelated unscoped `rocky-cli` package is not this project and Rocky never installs, upgrades, or removes it. The binary name remains `rocky`, so npm reports any local binary-name conflict through its normal install behavior.
 
 Requires Node 18+.
 
-## Usage (v0.1 — the memory MVP)
+Register Rocky with detected MCP hosts after installation:
+
+```bash
+rocky setup
+rocky setup --voice-skill   # also install the managed Rocky voice skill
+```
+
+`rocky setup` configures detected hosts with sanitized MCP exposure after consent. By itself it never edits `.bashrc`, installs a voice skill, installs or pulls an Ollama model, or enables local AI. Voice-skill work requires the explicit `--voice-skill` flag. Shell integration is a separate `rocky hook install` step.
+
+## Usage (v0.2.1 — distribution bridge)
 
 Run anything failure-prone through Rocky:
 
@@ -55,18 +74,24 @@ Ask his memory directly:
 ```bash
 rocky recall "connection refused"
 rocky recall "sharp"
+rocky recall --ai "connection refused"   # optional configured loopback Ollama
 rocky stats
+rocky mcp                                # local read-only stdio server
 ```
 
-Memory lives in `~/.rocky/memory.jsonl`. Local only. Nothing is uploaded, no telemetry, no account. It's a text file you can read, grep, and delete.
+Memory lives in `~/.rocky/memory.jsonl`. It is a text file you can read, grep, back up, and delete. Rocky records explicit terminal commands and errors plus the operational metadata needed to link them: working directory, time, exit code, fingerprints, origin, record IDs, and fix links. Rocky does not keylog and does not capture the screen.
 
-## The ears (v0.2)
+The core CLI and local MCP server contain no telemetry, make no external network requests, and run no daemon. MCP uses local stdio, exposes read-only tools, and projects sanitized memory by default. A configured cloud host may forward selected projected content under that host's own policy, so review the host and choose raw exposure only when you intend to share those fields. Optional AI calls only a separately managed Ollama service over loopback (`127.0.0.1`).
 
-Skip the wrapper entirely — let Rocky listen to your whole bash session:
+## The ears (v0.2, implemented)
+
+On Bash, including Bash under WSL, skip the wrapper entirely and let Rocky listen to the shell session:
 
 ```bash
 rocky hook install    # adds one managed block to ~/.bashrc
 ```
+
+The hook installer is separate from `rocky setup`; MCP setup never edits `.bashrc`. Other shells and platforms can still write full failure memory through `rocky run`.
 
 From the next shell on: every failing command is remembered (no stderr — the
 hook hears command and exit code only; `rocky run` remains the deep-memory
@@ -91,22 +116,49 @@ edited file. `ROCKY_OFF=1` makes him deaf for a session;
 3. **Fix linking** — when a command succeeds where its base program recently failed (same directory, within 48h), Rocky links that success to the unresolved failures. No AI involved; it's an honest heuristic, and it's right often enough to be useful.
 4. **Recall** — token-overlap search across commands and error signatures, deduplicated per distinct error, fix shown when known.
 
-No LLM anywhere in v0.1. That's deliberate: the memory loop has to be useful with zero setup and zero API keys, or nothing built on top of it will matter.
+The deterministic memory loop remains useful with zero AI setup and zero API keys. v0.2.1 can optionally ask a locally running Ollama model to rank or interpret deterministic recall candidates; the model cannot create or change the underlying stored evidence, and invalid output falls back to deterministic recall.
+
+## Optional local AI
+
+Rocky never installs or pulls a model. Install and manage Ollama separately, pull a model yourself, then opt in:
+
+```bash
+rocky model status
+rocky model use qwen3:0.6b-q4_K_M
+rocky recall --ai "sharp build failure"
+rocky model off
+```
+
+When no model is installed, Rocky suggests a tiny `qwen3:0.6b-q4_K_M` model at about 523 MB or a balanced `qwen3.5:2b-q4_K_M` model at about 1.9 GB. Those are optional quantized download estimates, not Rocky tarball contents or peak-RAM guarantees; runtime, context, KV cache, and platform overhead can use more memory.
+
+Each Rocky generation request sends `keep_alive: 0`, asking Ollama to unload that model after the request. Rocky cannot stop a shared Ollama daemon or unload a model globally on behalf of other clients.
 
 ## Project structure
 
 ```
 rocky/
 ├── src/
-│   ├── index.ts            # CLI entry: run | recall | stats | help
+│   ├── index.ts            # CLI entry and command dispatcher
 │   ├── commands/
 │   │   ├── run.ts          # command wrapper: stream, fingerprint, remember, link fixes
-│   │   └── recall.ts       # search memory, show fixes
+│   │   ├── recall.ts       # deterministic search + optional local-AI interpretation
+│   │   ├── hook.ts         # Bash/WSL hook and guard lifecycle
+│   │   ├── mcp.ts          # local read-only MCP stdio server
+│   │   ├── model.ts        # opt-in Ollama configuration
+│   │   ├── setup.ts        # detected-host and optional voice-skill setup
+│   │   └── stats.ts        # memory summary
 │   ├── core/
 │   │   ├── fingerprint.ts  # stderr -> stable error signature + token bags
-│   │   └── memory.ts       # JSONL store, fingerprint lookup, fuzzy search
+│   │   ├── memory.ts       # append-only JSONL writers
+│   │   ├── memory-read.ts  # bounded parsing and backward-compatible loading
+│   │   └── memory-query.ts # fingerprint lookup and fuzzy search
+│   ├── mcp/                # bounded read-only tools and privacy projection
+│   ├── setup/              # host adapters, consent, health, voice skill
+│   ├── ai/                 # loopback-only Ollama adapter and grounded schema
+│   ├── shell/              # Bash hook assets
 │   └── ui/
 │       └── rocky.ts        # his face, his voice, relative time
+├── skills/rocky-voice/     # optional managed voice skill asset
 ├── docs/
 │   └── scientific-grounding.md
 ├── package.json            # zero runtime deps
@@ -124,21 +176,23 @@ Rocky speaks the way he does in the book, and the rules are enforced in code, no
 
 When things are serious, Rocky is serious. Diagnoses and fixes are printed plainly; the personality lives around the information, never inside it. A `--quiet` mode is planned for people debugging production at 2 a.m.
 
+Rocky asks because he is curious, not because he is testing you; you are always the one who knows. That proactive “Curious Blind Friend” behavior is planned for v0.5 and is not part of v0.2.1.
+
 ## Roadmap
 
 Each phase is one facet of who Rocky is:
 
-- **v0.1 — his memory** (this release): `rocky run`, `rocky recall`, `rocky stats`. The error → fix loop, fully offline.
-- **v0.2 — his ears**: bash shell hook — Rocky listens to every command, no `run` wrapper needed — plus the dangerous-command guard: `rm -rf` in strange places, force pushes, `curl | bash` are held until you answer `you sure, question`.
+- **v0.2.1 — distribution bridge** (current beta): the v0.1 memory and implemented v0.2 Bash/WSL ears, plus scoped npm distribution, read-only MCP, consent-based host setup, an optional managed voice skill, and optional loopback Ollama interpretation for recall.
 - **v0.3 — his patience**: `rocky watch` — hand him a long build, migration, or download; he waits (he once waited 46 years), notifies you, and holds the logs if it dies.
-- **v0.4 — his diligence**: pre-push hull check — verifies that AI-added packages actually exist on the registry (hallucinated-package defense), wraps secret scanning, and asks one comprehension question about the riskiest line in the diff. The only feature that ever touches the network — npm registry only, nothing else, ever.
-- **v0.5 — his curiosity**: `rocky explain` + provenance memory — Rocky remembers which lines were written by AI and asks *you* to explain them: the comprehension-debt tracker. Backed by the self-explanation and retrieval-practice literature (see docs).
+- **v0.4 — his diligence**: pre-push hull check — verifies that AI-added packages actually exist on the registry (hallucinated-package defense), wraps secret scanning, and asks one comprehension question about the riskiest line in the diff. Its planned registry lookup is external egress; network errors must fail open.
+- **v0.5 — his curiosity**: Nervous System agent hooks + the Intent↔Mechanism Dictionary + an opt-in Ollama/BYOK annotation layer. The earlier `rocky explain` concept is superseded, not an active command. These planned mechanisms preserve recorded evidence, surface ambiguity only on explicit lookup, and never rewrite, inject, optimize, or submit a user's prompt.
 - **later — his care**: ambient pet mode and the desktop pet window (deferred). He notices you've been at it for four hours, and he has opinions about your sleep.
-- **LLM layer (opt-in, BYOK)**: local via Ollama or your own OpenAI/Anthropic/Gemini key. Every feature keeps a useful degraded mode without it.
+
+v0.2.1 does not implement the v0.5 nervous-system hooks, bidirectional intent↔mechanism lookup, ambiguity handling, proactive questions, digest, quiz, or BYOK annotation.
 
 ## Contributing
 
-Fully open source under MIT. Especially welcome: zsh/fish ports of the shell hook (bash ships first in v0.2), better fingerprinting for specific toolchains (pytest, cargo, gradle), and more of Rocky's dialogue — in character, please. He never uses emoji. He can't see them.
+Fully open source under MIT. Especially welcome: zsh/fish ports of the shell hook (Bash shipped first in v0.2), better fingerprinting for specific toolchains (pytest, cargo, gradle), and more of Rocky's dialogue — in character, please. He never uses emoji. He can't see them.
 
 ---
 
