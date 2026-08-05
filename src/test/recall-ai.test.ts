@@ -16,7 +16,7 @@ import { RECALL_AI_SCHEMA } from "../ai/schema.js";
 import { loadConfig, type ConfigLoadResult } from "../core/config-read.js";
 import type { MemoryRecord } from "../core/memory-read.js";
 import { createMemoryQueries, type RecallHit } from "../core/memory-query.js";
-import { projectRecallHits } from "../mcp/privacy.js";
+import { MAX_FIELD_BYTES, projectRecallHits } from "../mcp/privacy.js";
 
 const records = Object.freeze([
   Object.freeze({
@@ -81,7 +81,7 @@ interface FakeOllama {
   calls: { model: string; prompt: string; schema: Record<string, unknown>; signal?: AbortSignal }[];
 }
 
-function fakeOllama(value: unknown | (() => unknown | Promise<unknown>)): FakeOllama {
+function fakeOllama(value: unknown | ((signal?: AbortSignal) => unknown | Promise<unknown>)): FakeOllama {
   const calls: FakeOllama["calls"] = [];
   return {
     calls,
@@ -90,18 +90,32 @@ function fakeOllama(value: unknown | (() => unknown | Promise<unknown>)): FakeOl
       async probeModel() { return { supported: true }; },
       async generateStructured(model, prompt, schema, signal) {
         calls.push({ model, prompt, schema, signal });
-        return typeof value === "function" ? await value() : value;
+        return typeof value === "function" ? await value(signal) : value;
       },
     },
   };
 }
 
 function configuredPortReturning(
-  value: unknown | (() => unknown | Promise<unknown>),
+  value: unknown | ((signal?: AbortSignal) => unknown | Promise<unknown>),
   config: ConfigLoadResult = enabledConfig(),
 ) {
   const ollama = fakeOllama(value);
   return { port: createRecallAiPort({ loadConfig: configLoader(config), ollama: ollama.client }), ollama };
+}
+
+function maximumRawHit(index: number): RecallHit {
+  const field = String(index).repeat(MAX_FIELD_BYTES);
+  return {
+    failure: {
+      kind: "failure", id: field, ts: index, cwd: field, cmd: field, exitCode: 1,
+      fingerprint: field, signature: [field], excerpt: field,
+    },
+    fix: {
+      kind: "fix", id: field, ts: index, cwd: field, cmd: field, failureIds: [field],
+    },
+    score: 1,
+  };
 }
 
 function ids(source: readonly RecallHit[] = hits): string[] {
@@ -227,6 +241,37 @@ test("raw prompt may use projected raw evidence without unprojected fields", asy
 
   assert.match(prompt, /private\/two|second-secret/);
   assert.doesNotMatch(prompt, /"score"|resolvedBy/);
+});
+
+test("raw prompt and outcome preserve sparse source-local candidate identity", async () => {
+  const third: RecallHit = {
+    failure: {
+      kind: "failure", id: "third", ts: 3, cwd: "/work", cmd: "original third command", exitCode: 1,
+      fingerprint: "third-fingerprint", signature: ["third failure"], excerpt: "third excerpt",
+    },
+    score: 1,
+  };
+  const sparseHits = [maximumRawHit(1), maximumRawHit(2), third];
+  const { port, ollama } = configuredPortReturning(validOutput({
+    ranked_candidates: ["c3", "c1"],
+    evidence_refs: ["c3.failure"],
+  }), enabledConfig("raw"));
+
+  const result = await port.run(input(sparseHits, "raw"), new AbortController().signal);
+  const prompt = promptFrom(ollama);
+  const candidates = prompt.candidates as Array<{ id: string; failure: { command: string } }>;
+
+  assert.deepEqual(candidates.map((candidate) => candidate.id), ["c1", "c3"]);
+  assert.equal(candidates.find((candidate) => candidate.id === "c3")?.failure.command, "original third command");
+  assert.equal(candidates.some((candidate) => candidate.id === "c2"), false);
+  assert.deepEqual(result, {
+    aiStatus: "used",
+    rankedCandidateIds: ["c3", "c1", "c2"],
+    act: "known_fix",
+    evidenceRefs: ["c3.failure"],
+    confidence: 0.82,
+    explanation: "Dependency version differs from remembered working command.",
+  });
 });
 
 test("oversized CLI query produces parseable bounded prompt with query truncation marker", async () => {
@@ -376,6 +421,34 @@ test("a late model response cannot override in-flight caller cancellation", asyn
   controller.abort(new Error("caller cancelled"));
   resolveResponse?.(validOutput());
   assert.deepEqual(await result, { aiStatus: "cancelled", rankedCandidateIds: ["c1", "c2"] });
+});
+
+test("end-to-end recall deadline starts before inference and remains distinct from caller cancellation", { timeout: 2_000 }, async () => {
+  let receivedSignal: AbortSignal | undefined;
+  const ollama = fakeOllama((signal?: AbortSignal) => new Promise((resolve, reject) => {
+    receivedSignal = signal;
+    const timer = setTimeout(() => resolve(validOutput()), 750);
+    signal?.addEventListener("abort", () => {
+      clearTimeout(timer);
+      reject(signal.reason);
+    }, { once: true });
+  }));
+  const dependencies = {
+    loadConfig: configLoader(enabledConfig()),
+    ollama: ollama.client,
+    deadlineMs: 250,
+  };
+  const port = createRecallAiPort(dependencies);
+  const caller = new AbortController();
+  const started = Date.now();
+
+  const result = await port.run(input(), caller.signal);
+  const elapsedMs = Date.now() - started;
+
+  assert.deepEqual(result, { aiStatus: "timeout", rankedCandidateIds: ["c1", "c2"] });
+  assert.equal(caller.signal.aborted, false);
+  assert.equal(receivedSignal?.aborted, true);
+  assert.ok(elapsedMs >= 100 && elapsedMs < 1_500, `deadline completed in ${elapsedMs}ms`);
 });
 
 test("model ranking appends omitted candidates in deterministic original order", async () => {

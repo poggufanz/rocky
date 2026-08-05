@@ -243,14 +243,29 @@ async function runAi<T>(operation: () => Promise<T>): Promise<T> {
   }
 }
 
-function mergeAi(payload: object, ai: RecallAiOutcome): Record<string, unknown> {
+function mergeAi(
+  payload: object,
+  ai: RecallAiOutcome,
+  aiCandidateIds: readonly string[],
+): Record<string, unknown> {
   const source = payload as Record<string, unknown>;
   const items = Array.isArray(source.items) ? source.items.filter(isItem) : [];
   const itemIds = items.map((item) => item.candidateId);
-  const rankedValid = validRankedCandidateIds(ai.rankedCandidateIds, itemIds);
+  const rankedValid = validRankedCandidateIds(ai.rankedCandidateIds, aiCandidateIds);
   const evidenceValid = ai.evidenceRefs === undefined || validEvidenceRefs(ai.evidenceRefs, items);
-  const useAiOrder = ai.aiStatus === "used" && rankedValid && evidenceValid;
-  const ranked = useAiOrder ? [...ai.rankedCandidateIds] : [];
+  if (ai.aiStatus === "used" && (!rankedValid || !evidenceValid)) {
+    return {
+      ...source,
+      aiStatus: "invalid_output",
+      items,
+      rankedCandidateIds: itemIds,
+    };
+  }
+
+  const useAiOrder = ai.aiStatus === "used";
+  const ranked = useAiOrder
+    ? ai.rankedCandidateIds.filter((id) => itemIds.includes(id))
+    : [];
   for (const id of itemIds) if (!ranked.includes(id)) ranked.push(id);
   const reorderedItems = useAiOrder
     ? ranked.map((id) => items.find((item) => item.candidateId === id)!).filter(isItem)
@@ -295,7 +310,8 @@ export function createToolRegistry(options: CreateToolRegistryOptions): McpToolR
             const ai = await runAi(() => options.recallWithAi.run(
               { query: input.query, hits: hits.slice(0, 5), exposure: options.exposure }, signal,
             ));
-            return cappedResult(mergeAi(projected, ai));
+            const aiCandidateIds = hits.slice(0, 5).map((_, index) => `c${index + 1}`);
+            return cappedResult(mergeAi(projected, ai, aiCandidateIds));
           }
           default:
             throw new McpInvalidParamsError("unknown tool");

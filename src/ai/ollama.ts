@@ -114,8 +114,16 @@ async function readJson(response: Response, boundary: BoundedSignal): Promise<un
   return JSON.parse(new TextDecoder().decode(bytes)) as unknown;
 }
 
-function validateHttpResponse(response: Response): void {
-  if (!response.ok) throw new Error(`Ollama request failed: ${response.status}`);
+function rejectHttpResponse(response: Response, boundary: BoundedSignal): void {
+  if (response.ok) return;
+  const error = new Error(`Ollama request failed: ${response.status}`);
+  boundary.abort(error);
+  if (response.body !== null) {
+    void response.body.cancel(error).catch(() => {
+      // The status-only failure remains authoritative if transport cleanup races.
+    });
+  }
+  throw error;
 }
 
 function errorReason(error: unknown): string {
@@ -132,9 +140,13 @@ export function createOllamaClient(options: OllamaClientOptions = {}): OllamaCli
     const boundary = boundedSignal(parent, timeoutMs);
     try {
       if (boundary.signal.aborted) throw abortReason(boundary.signal);
-      const response = await fetchImpl(`${OLLAMA_ORIGIN}${path}`, { ...init, signal: boundary.signal });
+      const response = await fetchImpl(`${OLLAMA_ORIGIN}${path}`, {
+        ...init,
+        signal: boundary.signal,
+        redirect: "error",
+      });
       if (boundary.signal.aborted) throw abortReason(boundary.signal);
-      validateHttpResponse(response);
+      rejectHttpResponse(response, boundary);
       return await readJson(response, boundary);
     } finally {
       boundary.close();

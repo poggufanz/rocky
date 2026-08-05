@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { Buffer } from "node:buffer";
+import { performance } from "node:perf_hooks";
 import type { RecallHit, RecentFailureHit } from "../core/memory-query.js";
 import {
   MAX_FIELD_BYTES,
@@ -11,6 +12,20 @@ import {
   strictestExposure,
   truncateUtf8,
 } from "../mcp/privacy.js";
+
+function maximumRawHit(index: number): RecallHit {
+  const field = String(index).repeat(MAX_FIELD_BYTES);
+  return {
+    failure: {
+      kind: "failure", id: field, ts: index, cwd: field, cmd: field, exitCode: 1,
+      fingerprint: field, signature: [field], excerpt: field,
+    },
+    fix: {
+      kind: "fix", id: field, ts: index, cwd: field, cmd: field, failureIds: [field],
+    },
+    score: 1,
+  };
+}
 
 test("sanitized projection is an allowlist and never exposes UUID cwd or excerpt", () => {
   const hit = Object.freeze({
@@ -120,6 +135,17 @@ test("UTF-8 truncation stops before a multi-byte code point", () => {
   assert.equal(Buffer.byteLength(output.value, "utf8"), MAX_FIELD_BYTES - 3);
 });
 
+test("UTF-8 truncation stays linear for a large prefix", { timeout: 20_000 }, () => {
+  const input = `${"x".repeat(200_000)}🙂`;
+  const started = performance.now();
+  const output = truncateUtf8(input, 199_999);
+  const elapsedMs = performance.now() - started;
+
+  assert.equal(output.value.length, 199_999);
+  assert.equal(output.truncated, true);
+  assert.ok(elapsedMs < 2_000, `200 KiB truncation took ${elapsedMs.toFixed(1)}ms`);
+});
+
 test("raw projection preserves secrets, deep-clones canonical records, and normalizes controls", () => {
   const failure = Object.freeze({
     kind: "failure" as const, id: "f-raw", ts: 20, cwd: "/work\u0000/private",
@@ -214,6 +240,22 @@ test("response cap omits a whole projected item and never exceeds its byte limit
   assert.ok(Buffer.byteLength(JSON.stringify(output), "utf8") <= MAX_RESPONSE_BYTES);
   const candidateIds = (output.items as readonly { candidateId: string }[]).map((item) => item.candidateId);
   assert.deepEqual(candidateIds, candidateIds.map((_, index) => `c${index + 1}`));
+});
+
+test("response cap preserves source-local candidate IDs after skipping an oversized middle hit", () => {
+  const third: RecallHit = {
+    failure: {
+      kind: "failure", id: "third", ts: 3, cwd: "/work", cmd: "original third command", exitCode: 1,
+      fingerprint: "third-fingerprint", signature: ["third failure"], excerpt: "third excerpt",
+    },
+    score: 1,
+  };
+
+  const output = projectRecallHits([maximumRawHit(1), maximumRawHit(2), third], "raw");
+
+  assert.equal(output.truncated, true);
+  assert.deepEqual(output.items.map((item) => item.candidateId), ["c1", "c3"]);
+  assert.equal(output.items[1].command, "original third command");
 });
 
 test("response cap omits the item that would make an untruncated response 524289 bytes", () => {

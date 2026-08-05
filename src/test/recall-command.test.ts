@@ -1,9 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { performance } from "node:perf_hooks";
+import type { OllamaClient } from "../ai/ollama.js";
 import type { RecallWithAiPort } from "../ai/port.js";
-import { formatModelExplanation } from "../ai/recall-ai.js";
+import { createRecallAiPort, formatModelExplanation } from "../ai/recall-ai.js";
 import { parseRecallArgs, recall } from "../commands/recall.js";
 import type { MemoryQueries, RecallHit } from "../core/memory-query.js";
+import { MAX_FIELD_BYTES } from "../mcp/privacy.js";
 import { phrase, phraseForAct } from "../ui/phrases.js";
 
 function hit(id: string, command = `command-${id}`): RecallHit {
@@ -21,6 +24,39 @@ function hit(id: string, command = `command-${id}`): RecallHit {
     },
     score: 1,
   };
+}
+
+function maximumRawHit(index: number, marker: string): RecallHit {
+  const field = String(index).repeat(MAX_FIELD_BYTES);
+  return {
+    failure: {
+      kind: "failure", id: field, ts: index, cwd: field, cmd: `${marker} ${field}`, exitCode: 1,
+      fingerprint: field, signature: [field], excerpt: field,
+    },
+    fix: {
+      kind: "fix", id: field, ts: index, cwd: field, cmd: field, failureIds: [field],
+    },
+    score: 1,
+  };
+}
+
+function enabledAiPort(output: Record<string, unknown>, prompts: string[]): RecallWithAiPort {
+  const ollama: OllamaClient = {
+    async listInstalledModels() { return []; },
+    async probeModel() { return { supported: true }; },
+    async generateStructured(_model, prompt) {
+      prompts.push(prompt);
+      return output;
+    },
+  };
+  return createRecallAiPort({
+    loadConfig: () => ({
+      status: "valid",
+      path: "/test/config.json",
+      config: { version: 1, ai: { enabled: true, provider: "ollama", model: "test-model", exposure: "raw" } },
+    }),
+    ollama,
+  });
 }
 
 function memoryReturning(
@@ -115,6 +151,63 @@ test("ai recall caps evidence at five, uses raw caller exposure, and renders onl
   assert.deepEqual(headings, ["c4", "c2", "c1", "c3", "c5"]);
   assert.doesNotMatch(output.stderr, /command-c6/);
   assert.equal(output.stdout, "");
+});
+
+test("CLI renders the original c3 when raw projection skips oversized c2", async () => {
+  const third = hit("c3", "original third command");
+  const source = memoryReturning([
+    maximumRawHit(1, "original first command"),
+    maximumRawHit(2, "oversized middle command"),
+    third,
+  ]);
+  const prompts: string[] = [];
+  const port = enabledAiPort({
+    act: "unresolved",
+    ranked_candidates: ["c3", "c1"],
+    evidence_refs: ["c3.failure"],
+    confidence: 0.9,
+    explanation: "Third failure is strongest match.",
+  }, prompts);
+
+  const output = await captureStderr(() => recall(["--ai", "error"], {
+    memory: source.memory,
+    recallWithAi: port,
+  }));
+  const prompt = JSON.parse(prompts[0]) as { candidates: Array<{ id: string; failure: { command: string } }> };
+
+  assert.equal(output.code, 0);
+  assert.deepEqual(prompt.candidates.map((candidate) => candidate.id), ["c1", "c3"]);
+  assert.equal(prompt.candidates.find((candidate) => candidate.id === "c3")?.failure.command, "original third command");
+  assert.match(output.stderr, /1\. original third command/);
+  assert.ok(output.stderr.indexOf("original third command") < output.stderr.indexOf("original first command"));
+  assert.ok(output.stderr.indexOf("original first command") < output.stderr.indexOf("oversized middle command"));
+});
+
+test("CLI bounds a 500k AI query within a conservative runtime", { timeout: 30_000 }, async () => {
+  const source = memoryReturning([hit("c1", "query target")]);
+  const prompts: string[] = [];
+  const port = enabledAiPort({
+    act: "unresolved",
+    ranked_candidates: ["c1"],
+    evidence_refs: ["c1.failure"],
+    confidence: 0.9,
+    explanation: "One deterministic match.",
+  }, prompts);
+  const query = "q".repeat(500_000);
+  const started = performance.now();
+
+  const output = await captureStderr(() => recall(["--ai", query], {
+    memory: source.memory,
+    recallWithAi: port,
+  }));
+  const elapsedMs = performance.now() - started;
+  const prompt = JSON.parse(prompts[0]) as { query: string; truncatedFields: string[] };
+
+  assert.equal(output.code, 0);
+  assert.ok(Buffer.byteLength(prompts[0], "utf8") <= 8 * 1024);
+  assert.ok(prompt.truncatedFields.includes("query"));
+  assert.ok(prompt.query.length < query.length);
+  assert.ok(elapsedMs < 5_000, `500k CLI recall took ${elapsedMs.toFixed(1)}ms`);
 });
 
 test("AI failures and malformed used outcomes retain deterministic hits and valid recall exit zero", async (t) => {

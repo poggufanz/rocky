@@ -66,15 +66,15 @@ export function parseModelRecallOutput(
   }
   if (typeof value.explanation !== "string" || [...value.explanation].length > 300) return undefined;
 
-  const candidateIds = hits.slice(0, 5).map((_, index) => `c${index + 1}`);
+  const candidateIds = hits.slice(0, 5).map((hit) => hit.candidateId);
   const candidateSet = new Set(candidateIds);
   if (value.ranked_candidates.some((id) => !candidateSet.has(id))) return undefined;
   for (const ref of value.evidence_refs) {
     const match = EVIDENCE_REF.exec(ref);
     if (!match) return undefined;
-    const candidate = Number(match[0].slice(1).split(".")[0]) - 1;
-    if (!candidateSet.has(`c${candidate + 1}`)) return undefined;
-    if (match[1] === "fix" && !hits[candidate]?.hasFix) return undefined;
+    const candidateId = match[0].split(".")[0];
+    if (!candidateSet.has(candidateId)) return undefined;
+    if (match[1] === "fix" && !hits.find((hit) => hit.candidateId === candidateId)?.hasFix) return undefined;
   }
 
   const explanation = normalizeExplanation(value.explanation);

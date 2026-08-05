@@ -51,12 +51,15 @@ export function normalizeOutputText(value: string): string {
 
 export function truncateUtf8(value: string, maxBytes: number): { value: string; truncated: boolean } {
   if (Buffer.byteLength(value, "utf8") <= maxBytes) return { value, truncated: false };
-  let output = "";
+  const output: string[] = [];
+  let bytes = 0;
   for (const character of value) {
-    if (Buffer.byteLength(output + character, "utf8") > maxBytes) break;
-    output += character;
+    const characterBytes = Buffer.byteLength(character, "utf8");
+    if (bytes + characterBytes > maxBytes) break;
+    output.push(character);
+    bytes += characterBytes;
   }
-  return { value: output, truncated: true };
+  return { value: output.join(""), truncated: true };
 }
 
 export function redactText(value: string, rockyHome = process.env.ROCKY_HOME ?? homedir()): string {
@@ -192,8 +195,8 @@ function projectHit(hit: SourceHit, exposure: Exposure, candidateId: string): Pr
 function projectHits(hits: readonly SourceHit[], exposure: Exposure): { items: ProjectedRecallHit[]; truncated: boolean } {
   const items: ProjectedRecallHit[] = [];
   let truncated = false;
-  for (const hit of hits) {
-    const item = projectHit(hit, exposure, `c${items.length + 1}`);
+  for (const [index, hit] of hits.entries()) {
+    const item = projectHit(hit, exposure, `c${index + 1}`);
     const prospective = { exposure, items: [...items, item], truncated };
     if (Buffer.byteLength(JSON.stringify(prospective), "utf8") > MAX_RESPONSE_BYTES) {
       truncated = true;

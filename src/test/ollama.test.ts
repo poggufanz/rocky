@@ -75,6 +75,7 @@ test("lists canonical installed models from loopback tags", async () => {
   assert.equal(calls.length, 1);
   assert.equal(urlOf(calls[0]), `${OLLAMA_ORIGIN}/api/tags`);
   assert.equal(calls[0].init?.method, "GET");
+  assert.equal(calls[0].init?.redirect, "error");
 });
 
 test("generates structured output with deterministic non-thinking options", async () => {
@@ -86,6 +87,7 @@ test("generates structured output with deterministic non-thinking options", asyn
   assert.equal(calls.length, 1);
   assert.equal(urlOf(calls[0]), `${OLLAMA_ORIGIN}/api/generate`);
   assert.equal(calls[0].init?.method, "POST");
+  assert.equal(calls[0].init?.redirect, "error");
   assert.deepEqual(requestBody(calls[0]), {
     model: "qwen3:0.6b-q4_K_M",
     prompt: "rank this",
@@ -97,12 +99,78 @@ test("generates structured output with deterministic non-thinking options", asyn
   });
 });
 
+test("rejects 307 and 308 inference redirects without forwarding the request body", async (t) => {
+  for (const status of [307, 308]) {
+    await t.test(String(status), async () => {
+      const calls: FetchCall[] = [];
+      const secretBody = "raw local recall evidence";
+      const redirectResponse = new Response(null, {
+        status,
+        headers: { location: "https://outside.example/collect" },
+      });
+      const fetchImpl: typeof fetch = async (input, init) => {
+        calls.push({ input, init });
+        if (calls.length === 1) {
+          if (init?.redirect === "error") throw new TypeError("redirect blocked");
+          calls.push({ input: redirectResponse.headers.get("location")!, init });
+          return jsonResponse({ done: true, response: "{}" });
+        }
+        throw new Error("unexpected fetch call");
+      };
+      const client = createOllamaClient({ fetchImpl });
+
+      await assert.rejects(
+        client.generateStructured("model", secretBody, {}),
+        /redirect blocked/,
+      );
+      assert.equal(calls[0].init?.redirect, "error");
+      assert.equal(calls.length, 1);
+      assert.equal(calls.some((call) => urlOf(call).startsWith("https://outside.example")), false);
+      assert.equal(calls.slice(1).some((call) => String(call.init?.body).includes(secretBody)), false);
+    });
+  }
+});
+
 test("rejects non-success inference responses without retrying", async () => {
   const { fetchImpl, calls } = fetchFrom([jsonResponse({ error: "model unavailable" }, 500)]);
   const client = createOllamaClient({ fetchImpl });
 
   await assert.rejects(client.generateStructured("model", "prompt", {}), /Ollama request failed: 500/);
   assert.equal(calls.filter((call) => urlOf(call).endsWith("/api/generate")).length, 1);
+});
+
+test("aborts and cancels an endless non-success body exactly once without reading it", async () => {
+  const events: string[] = [];
+  let pulls = 0;
+  let cancellations = 0;
+  const body = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      pulls += 1;
+      controller.enqueue(new Uint8Array(64 * 1024));
+    },
+    cancel() {
+      cancellations += 1;
+      events.push("body-cancelled");
+    },
+  });
+  let requestSignal: AbortSignal | undefined;
+  const calls: FetchCall[] = [];
+  const client = createOllamaClient({
+    fetchImpl: async (input, init) => {
+      calls.push({ input, init });
+      requestSignal = init?.signal ?? undefined;
+      requestSignal?.addEventListener("abort", () => events.push("request-aborted"), { once: true });
+      return new Response(body, { status: 503 });
+    },
+  });
+
+  await assert.rejects(client.generateStructured("model", "prompt", {}), /Ollama request failed: 503/);
+
+  assert.equal(calls.length, 1);
+  assert.equal(requestSignal?.aborted, true);
+  assert.equal(cancellations, 1);
+  assert.ok(pulls <= 1, `non-success body was read ${pulls} times`);
+  assert.deepEqual(events, ["request-aborted", "body-cancelled"]);
 });
 
 test("rejects malformed tags JSON", async () => {

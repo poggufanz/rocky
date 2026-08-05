@@ -19,7 +19,8 @@ import { fileURLToPath } from "node:url";
 import { singleFlightRecallAi } from "../ai/recall-ai.js";
 import type { RecallWithAiPort } from "../ai/port.js";
 import type { MemoryRecord } from "../core/memory-read.js";
-import { createMemoryQueries } from "../core/memory-query.js";
+import { createMemoryQueries, type MemoryQueries, type RecallHit } from "../core/memory-query.js";
+import { MAX_FIELD_BYTES } from "../mcp/privacy.js";
 import { createToolRegistry } from "../mcp/tools.js";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -31,6 +32,20 @@ const modernMeta = {
   "io.modelcontextprotocol/clientCapabilities": {},
   "io.modelcontextprotocol/clientInfo": { name: "rocky-process-test", version: "1.0.0" },
 };
+
+function maximumRawHit(index: number): RecallHit {
+  const field = String(index).repeat(MAX_FIELD_BYTES);
+  return {
+    failure: {
+      kind: "failure", id: field, ts: index, cwd: field, cmd: field, exitCode: 1,
+      fingerprint: field, signature: [field], excerpt: field,
+    },
+    fix: {
+      kind: "fix", id: field, ts: index, cwd: field, cmd: field, failureIds: [field],
+    },
+    score: 1,
+  };
+}
 
 interface JsonRpcResponse {
   jsonrpc: "2.0";
@@ -324,18 +339,84 @@ test("MCP tool registry returns busy without queuing and only accepts a fully va
   assert.deepEqual((reordered.structuredContent.items as { candidateId: string }[]).map((item) => item.candidateId), ["c2", "c1"]);
 
   for (const outcome of [
-    { aiStatus: "used" as const, rankedCandidateIds: ["c2", "not-a-candidate"] },
-    { aiStatus: "used" as const, rankedCandidateIds: ["c2", "c1"], evidenceRefs: ["c2.failure", "outside.failure"] },
+    {
+      aiStatus: "used" as const,
+      rankedCandidateIds: ["c2", "not-a-candidate"],
+      evidenceRefs: ["c2.failure"],
+      act: "known_fix" as const,
+      confidence: 0.9,
+      explanation: "must be discarded",
+    },
+    {
+      aiStatus: "used" as const,
+      rankedCandidateIds: ["c2", "c2"],
+      evidenceRefs: ["c2.failure"],
+      act: "known_fix" as const,
+      confidence: 0.9,
+      explanation: "must be discarded",
+    },
+    {
+      aiStatus: "used" as const,
+      rankedCandidateIds: ["c2", "c1"],
+      evidenceRefs: ["c2.failure", "outside.failure"],
+      act: "known_fix" as const,
+      confidence: 0.9,
+      explanation: "must be discarded",
+    },
   ]) {
     const rejected = await createToolRegistry({
       exposure: "sanitized",
       memory: createMemoryQueries(() => records),
       recallWithAi: { async run() { return outcome; } },
     }).call("recall_with_ai", { query: "needle" }, new AbortController().signal);
+    assert.equal(rejected.structuredContent.aiStatus, "invalid_output");
     assert.deepEqual(rejected.structuredContent.rankedCandidateIds, ["c1", "c2"]);
     assert.deepEqual((rejected.structuredContent.items as { candidateId: string }[]).map((item) => item.candidateId), ["c1", "c2"]);
-    assert.deepEqual(rejected.structuredContent.evidenceRefs ?? [], outcome.evidenceRefs === undefined ? [] : ["c2.failure"]);
+    for (const field of ["act", "confidence", "explanation", "evidenceRefs"]) {
+      assert.equal(field in rejected.structuredContent, false, `${field} survived invalid used outcome`);
+    }
   }
+});
+
+test("MCP keeps sparse projected IDs aligned with original AI candidates", async () => {
+  const third: RecallHit = {
+    failure: {
+      kind: "failure", id: "third", ts: 3, cwd: "/work", cmd: "original third command", exitCode: 1,
+      fingerprint: "third-fingerprint", signature: ["needle"], excerpt: "third excerpt",
+    },
+    score: 1,
+  };
+  const hits = [maximumRawHit(1), maximumRawHit(2), third];
+  const memory: MemoryQueries = {
+    recall() { return hits; },
+    recentFailures() { return []; },
+    stats() { return { failures: 3, fixEvents: 2, resolved: 2, unresolved: 1 }; },
+  };
+  const result = await createToolRegistry({
+    exposure: "raw",
+    memory,
+    recallWithAi: {
+      async run() {
+        return {
+          aiStatus: "used",
+          rankedCandidateIds: ["c3", "c1", "c2"],
+          evidenceRefs: ["c3.failure"],
+          act: "unresolved",
+          confidence: 0.9,
+          explanation: "Third failure is strongest match.",
+        };
+      },
+    },
+  }).call("recall_with_ai", { query: "needle", limit: 3 }, new AbortController().signal);
+
+  assert.equal(result.structuredContent.aiStatus, "used");
+  assert.deepEqual(
+    (result.structuredContent.items as { candidateId: string; command: string }[])
+      .map(({ candidateId, command }) => [candidateId, command]),
+    [["c3", "original third command"]],
+  );
+  assert.deepEqual(result.structuredContent.rankedCandidateIds, ["c3"]);
+  assert.deepEqual(result.structuredContent.evidenceRefs, ["c3.failure"]);
 });
 
 test("compiled CLI serves a separate legacy lifecycle and reloads externally appended memory", { timeout: 10_000 }, async (t) => {
