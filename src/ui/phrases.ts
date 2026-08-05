@@ -49,7 +49,7 @@ export function phraseForAct(act: AiAct): string {
   }
 }
 
-const VISUAL_LANGUAGE = /\bi\s+(?:(?:can|cannot|can't|could|couldn't|will|would|do|did|am|was|were|have|had|never)\s+)*(?:see|saw|seen|seeing|look|looks|looked|looking|watch|watches|watched|watching|view|views|viewed|viewing|observe|observes|observed|observing|notice|notices|noticed|noticing|read|reads|reading|scan|scans|scanned|scanning)\b/i;
+const VISUAL_LANGUAGE = /\bi\s+(?:(?:am|are|be|been|being|can|cannot|can't|could|couldn't|did|didn't|do|does|don't|doesn't|had|has|have|is|may|might|must|never|not|shall|should|shouldn't|was|were|will|won't|would|wouldn't)\s+)*(?:see|saw|seen|seeing|look|looks|looked|looking|watch|watches|watched|watching|view|views|viewed|viewing|observe|observes|observed|observing|notice|notices|noticed|noticing|read|reads|reading|scan|scans|scanned|scanning)\b/i;
 const ARTICLE = /(?:^|[^\p{L}\p{N}_])(?:a|an|the)(?=$|[^\p{L}\p{N}_])/iu;
 const EMOJI = /[\u{00A9}\u{00AE}\u{203C}\u{2049}\u{2122}\u{2139}\u{2300}-\u{23FF}\u{2600}-\u{27BF}\u{2B00}-\u{2BFF}\u{3030}\u{303D}\u{3297}\u{3299}\u{1F000}-\u{1FAFF}\u{200D}\u{FE0F}]/u;
 
