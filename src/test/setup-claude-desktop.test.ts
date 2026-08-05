@@ -947,6 +947,7 @@ test("failed in-process restore reports the surviving transaction instead of mis
   const path = configPath(t, { theme: "dark", mcpServers: { other: {} } });
   const originalRename = fs.renameSync;
   const originalLink = fs.linkSync;
+  const originalOpen = fs.openSync;
   let transaction: string | undefined;
   let displacedPath: string | undefined;
   fs.renameSync = ((source: fs.PathLike, destination: fs.PathLike) => {
@@ -963,6 +964,20 @@ test("failed in-process restore reports the surviving transaction instead of mis
     }
     return originalLink(existingPath, newPath);
   }) as typeof fs.linkSync;
+  (fs as unknown as { openSync: typeof fs.openSync }).openSync = ((
+    candidate: fs.PathLike,
+    flags: fs.OpenMode,
+    mode?: fs.Mode,
+  ) => {
+    if (basename(String(candidate)) === "displaced" && flags === "r") {
+      displacedPath = String(candidate);
+      transaction = dirname(displacedPath);
+      fs.unlinkSync(displacedPath);
+    }
+    return mode === undefined
+      ? originalOpen(candidate, flags)
+      : originalOpen(candidate, flags, mode);
+  }) as typeof fs.openSync;
   syncBuiltinESMExports();
 
   try {
@@ -980,6 +995,7 @@ test("failed in-process restore reports the surviving transaction instead of mis
   } finally {
     fs.renameSync = originalRename;
     fs.linkSync = originalLink;
+    (fs as unknown as { openSync: typeof fs.openSync }).openSync = originalOpen;
     syncBuiltinESMExports();
   }
 });
@@ -1062,6 +1078,94 @@ test("a symlink swapped in at displacement is preserved without a followed hard 
   } finally {
     fs.renameSync = originalRename;
     fs.linkSync = originalLink;
+    syncBuiltinESMExports();
+  }
+});
+
+test("in-process restore never deletes a destination rebound after link publication", async (t) => {
+  const original = { theme: "dark", mcpServers: { other: { version: 1 } } };
+  const recoveryBytes = Buffer.from('{"theme":"recovery-authority"}\n', "utf8");
+  const attackerBytes = Buffer.from('{"theme":"attacker-owned"}\n', "utf8");
+  const path = configPath(t, original);
+  const originalBytes = readFileSync(path);
+  const originalRename = fs.renameSync;
+  const originalLink = fs.linkSync;
+  const originalOpen = fs.openSync;
+  let attackerIdentity: ReturnType<typeof fs.lstatSync> | undefined;
+  let reboundInjected = false;
+  let displacementInjected = false;
+
+  const rebound = () => {
+    fs.unlinkSync(path);
+    writeFileSync(path, attackerBytes, { mode: 0o600 });
+    chmodSync(path, 0o600);
+    attackerIdentity = fs.lstatSync(path);
+    reboundInjected = true;
+  };
+  fs.renameSync = ((source: fs.PathLike, destination: fs.PathLike) => {
+    if (!displacementInjected && String(source) === path && basename(String(destination)) === "displaced") {
+      writeFileSync(path, recoveryBytes);
+      displacementInjected = true;
+    }
+    return originalRename(source, destination);
+  }) as typeof fs.renameSync;
+  fs.linkSync = ((existingPath: fs.PathLike, newPath: fs.PathLike) => {
+    const result = originalLink(existingPath, newPath);
+    if (!reboundInjected && basename(String(existingPath)) === "displaced" && String(newPath) === path) {
+      rebound();
+    }
+    return result;
+  }) as typeof fs.linkSync;
+  (fs as unknown as { openSync: typeof fs.openSync }).openSync = ((
+    candidate: fs.PathLike,
+    flags: fs.OpenMode,
+    mode?: fs.Mode,
+  ) => {
+    const descriptor = mode === undefined
+      ? originalOpen(candidate, flags)
+      : originalOpen(candidate, flags, mode);
+    if (!reboundInjected && String(candidate) === path && flags === "wx") rebound();
+    return descriptor;
+  }) as typeof fs.openSync;
+  syncBuiltinESMExports();
+
+  try {
+    const configured = await createClaudeDesktopAdapter({ configPath: path })
+      .configure(registration, false);
+
+    assert.equal(displacementInjected, true);
+    assert.equal(reboundInjected, true);
+    assert.equal(configured.status, "failed");
+    assert.match(configured.detail ?? "", /manual recovery/i);
+    assert.doesNotMatch(configured.detail ?? "", /recovery-authority|attacker-owned/i);
+    assert.ok(attackerIdentity !== undefined);
+    const current = fs.lstatSync(path);
+    assert.equal(current.isFile(), true);
+    assert.equal(current.isSymbolicLink(), false);
+    assert.deepEqual(
+      { dev: current.dev, ino: current.ino, mode: current.mode, nlink: current.nlink },
+      {
+        dev: attackerIdentity.dev,
+        ino: attackerIdentity.ino,
+        mode: attackerIdentity.mode,
+        nlink: attackerIdentity.nlink,
+      },
+    );
+    assert.deepEqual(readFileSync(path), attackerBytes);
+    const transactionName = readdirSync(dirname(path)).find((name) => name.includes(".transaction-"));
+    assert.ok(transactionName !== undefined);
+    const transaction = join(dirname(path), transactionName);
+    const displaced = join(transaction, "displaced");
+    assert.equal(fs.lstatSync(displaced).isFile(), true);
+    assert.equal(fs.lstatSync(displaced).isSymbolicLink(), false);
+    assert.deepEqual(readFileSync(displaced), recoveryBytes);
+    assert.equal(JSON.parse(readFileSync(join(transaction, "manifest.json"), "utf8")).state, "displaced");
+    assert.match(configured.detail ?? "", new RegExp(displaced.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+    assert.deepEqual(readFileSync(backupPaths(path)[0]!), originalBytes);
+  } finally {
+    fs.renameSync = originalRename;
+    fs.linkSync = originalLink;
+    (fs as unknown as { openSync: typeof fs.openSync }).openSync = originalOpen;
     syncBuiltinESMExports();
   }
 });
@@ -1196,9 +1300,16 @@ test("restore collision preserves current file and reports displaced concurrent 
   const currentBytes = Buffer.from(`${JSON.stringify(currentConcurrent, null, 2)}\n`, "utf8");
   const originalRename = fs.renameSync;
   const originalLink = fs.linkSync;
+  const originalOpen = fs.openSync;
   let currentMode: number | undefined;
   let displacedInjected = false;
   let currentInjected = false;
+  const injectCurrent = () => {
+    currentInjected = true;
+    writeFileSync(path, currentBytes, { mode: 0o600 });
+    chmodSync(path, 0o600);
+    currentMode = fileMode(path);
+  };
   fs.renameSync = ((source: fs.PathLike, destination: fs.PathLike) => {
     if (!displacedInjected && String(source) === path) {
       displacedInjected = true;
@@ -1208,13 +1319,20 @@ test("restore collision preserves current file and reports displaced concurrent 
   }) as typeof fs.renameSync;
   fs.linkSync = ((existingPath: fs.PathLike, newPath: fs.PathLike) => {
     if (!currentInjected && basename(String(existingPath)) === "displaced" && String(newPath) === path) {
-      currentInjected = true;
-      writeFileSync(path, currentBytes, { mode: 0o600 });
-      chmodSync(path, 0o600);
-      currentMode = fileMode(path);
+      injectCurrent();
     }
     return originalLink(existingPath, newPath);
   }) as typeof fs.linkSync;
+  (fs as unknown as { openSync: typeof fs.openSync }).openSync = ((
+    candidate: fs.PathLike,
+    flags: fs.OpenMode,
+    mode?: fs.Mode,
+  ) => {
+    if (!currentInjected && String(candidate) === path && flags === "wx") injectCurrent();
+    return mode === undefined
+      ? originalOpen(candidate, flags)
+      : originalOpen(candidate, flags, mode);
+  }) as typeof fs.openSync;
   syncBuiltinESMExports();
 
   try {
@@ -1238,6 +1356,7 @@ test("restore collision preserves current file and reports displaced concurrent 
   } finally {
     fs.renameSync = originalRename;
     fs.linkSync = originalLink;
+    (fs as unknown as { openSync: typeof fs.openSync }).openSync = originalOpen;
     syncBuiltinESMExports();
   }
 });
@@ -1482,14 +1601,30 @@ test("restart recovery refuses a displaced symlink swapped in during publication
     target: path,
   })}\n`, { mode: 0o600 });
   const originalLink = fs.linkSync;
+  const originalOpen = fs.openSync;
+  let injected = false;
+  const swapSource = () => {
+    fs.unlinkSync(displaced);
+    fs.symlinkSync(foreign, displaced);
+    injected = true;
+  };
   fs.linkSync = ((existingPath: fs.PathLike, newPath: fs.PathLike) => {
     if (String(existingPath) === displaced && String(newPath) === path) {
-      fs.unlinkSync(displaced);
-      fs.symlinkSync(foreign, displaced);
+      if (!injected) swapSource();
       return originalLink(fs.realpathSync(displaced), newPath);
     }
     return originalLink(existingPath, newPath);
   }) as typeof fs.linkSync;
+  (fs as unknown as { openSync: typeof fs.openSync }).openSync = ((
+    candidate: fs.PathLike,
+    flags: fs.OpenMode,
+    mode?: fs.Mode,
+  ) => {
+    if (!injected && String(candidate) === displaced && flags === "r") swapSource();
+    return mode === undefined
+      ? originalOpen(candidate, flags)
+      : originalOpen(candidate, flags, mode);
+  }) as typeof fs.openSync;
   syncBuiltinESMExports();
 
   try {
@@ -1509,6 +1644,78 @@ test("restart recovery refuses a displaced symlink swapped in during publication
     );
   } finally {
     fs.linkSync = originalLink;
+    (fs as unknown as { openSync: typeof fs.openSync }).openSync = originalOpen;
+    syncBuiltinESMExports();
+  }
+});
+
+test("restart recovery never deletes a destination rebound after link publication", async (t) => {
+  const path = configPath(t);
+  const recoveryBytes = Buffer.from('{"theme":"restart-recovery-authority"}\n', "utf8");
+  const attackerBytes = Buffer.from('{"theme":"restart-attacker-owned"}\n', "utf8");
+  const transaction = crashTransaction(path, "restart-link-rebound", "displaced", recoveryBytes);
+  const displaced = join(transaction, "displaced");
+  const originalLink = fs.linkSync;
+  const originalOpen = fs.openSync;
+  let attackerIdentity: ReturnType<typeof fs.lstatSync> | undefined;
+  let reboundInjected = false;
+
+  const rebound = () => {
+    fs.unlinkSync(path);
+    writeFileSync(path, attackerBytes, { mode: 0o600 });
+    chmodSync(path, 0o600);
+    attackerIdentity = fs.lstatSync(path);
+    reboundInjected = true;
+  };
+  fs.linkSync = ((existingPath: fs.PathLike, newPath: fs.PathLike) => {
+    const result = originalLink(existingPath, newPath);
+    if (!reboundInjected && String(existingPath) === displaced && String(newPath) === path) rebound();
+    return result;
+  }) as typeof fs.linkSync;
+  (fs as unknown as { openSync: typeof fs.openSync }).openSync = ((
+    candidate: fs.PathLike,
+    flags: fs.OpenMode,
+    mode?: fs.Mode,
+  ) => {
+    const descriptor = mode === undefined
+      ? originalOpen(candidate, flags)
+      : originalOpen(candidate, flags, mode);
+    if (!reboundInjected && String(candidate) === path && flags === "wx") rebound();
+    return descriptor;
+  }) as typeof fs.openSync;
+  syncBuiltinESMExports();
+
+  try {
+    const configured = await createClaudeDesktopAdapter({ configPath: path })
+      .configure(registration, false);
+
+    assert.equal(reboundInjected, true);
+    assert.equal(configured.status, "failed");
+    assert.match(configured.detail ?? "", /manual recovery/i);
+    assert.doesNotMatch(configured.detail ?? "", /restart-recovery-authority|restart-attacker-owned/i);
+    assert.ok(attackerIdentity !== undefined);
+    const current = fs.lstatSync(path);
+    assert.equal(current.isFile(), true);
+    assert.equal(current.isSymbolicLink(), false);
+    assert.deepEqual(
+      { dev: current.dev, ino: current.ino, mode: current.mode, nlink: current.nlink },
+      {
+        dev: attackerIdentity.dev,
+        ino: attackerIdentity.ino,
+        mode: attackerIdentity.mode,
+        nlink: attackerIdentity.nlink,
+      },
+    );
+    assert.deepEqual(readFileSync(path), attackerBytes);
+    assert.equal(fs.lstatSync(displaced).isFile(), true);
+    assert.equal(fs.lstatSync(displaced).isSymbolicLink(), false);
+    assert.deepEqual(readFileSync(displaced), recoveryBytes);
+    assert.equal(JSON.parse(readFileSync(join(transaction, "manifest.json"), "utf8")).state, "displaced");
+    assert.deepEqual(readdirSync(transaction).sort(), ["displaced", "manifest.json", "prepared"]);
+    assert.match(configured.detail ?? "", new RegExp(displaced.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  } finally {
+    fs.linkSync = originalLink;
+    (fs as unknown as { openSync: typeof fs.openSync }).openSync = originalOpen;
     syncBuiltinESMExports();
   }
 });
@@ -1519,12 +1726,28 @@ test("failed restart restore reports surviving transaction instead of missing di
   const transaction = crashTransaction(path, "restart-missing-displaced", "displaced", displacedBytes);
   const displacedPath = join(transaction, "displaced");
   const originalLink = fs.linkSync;
+  const originalOpen = fs.openSync;
+  let injected = false;
+  const removeSource = () => {
+    fs.unlinkSync(displacedPath);
+    injected = true;
+  };
   fs.linkSync = ((existingPath: fs.PathLike, newPath: fs.PathLike) => {
     if (String(existingPath) === displacedPath && String(newPath) === path) {
-      fs.unlinkSync(displacedPath);
+      if (!injected) removeSource();
     }
     return originalLink(existingPath, newPath);
   }) as typeof fs.linkSync;
+  (fs as unknown as { openSync: typeof fs.openSync }).openSync = ((
+    candidate: fs.PathLike,
+    flags: fs.OpenMode,
+    mode?: fs.Mode,
+  ) => {
+    if (!injected && String(candidate) === displacedPath && flags === "r") removeSource();
+    return mode === undefined
+      ? originalOpen(candidate, flags)
+      : originalOpen(candidate, flags, mode);
+  }) as typeof fs.openSync;
   syncBuiltinESMExports();
 
   try {
@@ -1539,6 +1762,7 @@ test("failed restart restore reports surviving transaction instead of missing di
     assert.doesNotMatch(configured.detail ?? "", new RegExp(displacedPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   } finally {
     fs.linkSync = originalLink;
+    (fs as unknown as { openSync: typeof fs.openSync }).openSync = originalOpen;
     syncBuiltinESMExports();
   }
 });

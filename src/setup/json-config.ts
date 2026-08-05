@@ -12,9 +12,9 @@ import {
   renameSync,
   rmSync,
   statSync,
-  unlinkSync,
   writeFileSync,
 } from "node:fs";
+import type { Stats } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { basename, dirname, join } from "node:path";
 import { directorySyncCapability } from "./directory-sync.js";
@@ -362,40 +362,128 @@ function isManagedRecoveryPair(
   }
 }
 
-function linkRegularFileNoFollow(existingPath: string, newPath: string): void {
+interface RecoveryPublication {
+  source: { dev: number; ino: number; nlink: number };
+  destination: { dev: number; ino: number; nlink: number };
+}
+
+function sameIdentity(
+  left: { dev: number; ino: number },
+  right: { dev: number; ino: number },
+): boolean {
+  return left.dev === right.dev && left.ino === right.ino;
+}
+
+function stableSourceMetadata(
+  left: Stats,
+  right: Stats,
+): boolean {
+  return sameIdentity(left, right)
+    && left.nlink === right.nlink
+    && left.size === right.size
+    && left.mtimeMs === right.mtimeMs
+    && left.ctimeMs === right.ctimeMs;
+}
+
+function recoveryPublicationUnchanged(
+  publication: RecoveryPublication,
+  existingPath: string,
+  newPath: string,
+): boolean {
+  try {
+    const source = lstatSync(existingPath);
+    const destination = lstatSync(newPath);
+    return source.isFile()
+      && !source.isSymbolicLink()
+      && destination.isFile()
+      && !destination.isSymbolicLink()
+      && sameIdentity(source, publication.source)
+      && source.nlink === publication.source.nlink
+      && sameIdentity(destination, publication.destination)
+      && destination.nlink === publication.destination.nlink;
+  } catch {
+    return false;
+  }
+}
+
+// linkSync provides no handle proving which inode still occupies its destination
+// after return. Exclusive open does: descriptor identity is established by the
+// creation syscall, so a rebound namespace entry is never cleanup-authorized.
+function copyRegularFileExclusiveNoFollow(
+  existingPath: string,
+  newPath: string,
+): RecoveryPublication {
   const before = lstatSync(existingPath);
-  if (!before.isFile() || before.isSymbolicLink()) {
+  if (!before.isFile()
+    || before.isSymbolicLink()
+    || !isManagedRegularFile(existingPath, newPath)) {
     throw new Error("Recovery source is not a regular file");
   }
 
-  let published: ReturnType<typeof lstatSync> | undefined;
+  let sourceDescriptor: number | undefined;
+  let destinationDescriptor: number | undefined;
   try {
-    linkSync(existingPath, newPath);
-    published = lstatSync(newPath);
-    const after = lstatSync(existingPath);
-    if (!published.isFile()
-      || published.isSymbolicLink()
-      || !after.isFile()
-      || after.isSymbolicLink()
-      || before.dev !== after.dev
-      || before.ino !== after.ino
-      || after.dev !== published.dev
-      || after.ino !== published.ino) {
-      throw new Error("Recovery source changed during publication");
+    sourceDescriptor = openSync(existingPath, "r");
+    const openedSource = fstatSync(sourceDescriptor);
+    const observedSource = lstatSync(existingPath);
+    if (!openedSource.isFile()
+      || !observedSource.isFile()
+      || observedSource.isSymbolicLink()
+      || !sameIdentity(before, openedSource)
+      || !sameIdentity(openedSource, observedSource)) {
+      throw new Error("Recovery source changed before publication");
     }
-  } catch (error) {
-    if (published !== undefined) {
-      try {
-        const current = lstatSync(newPath);
-        if (current.dev === published.dev && current.ino === published.ino) {
-          unlinkSync(newPath);
-          syncParentDirectory(newPath);
-        }
-      } catch {
-        // Caller retains the transaction as the manual recovery authority.
-      }
+
+    const bytes = readFileSync(sourceDescriptor);
+    const sourceAfterRead = fstatSync(sourceDescriptor);
+    if (!stableSourceMetadata(openedSource, sourceAfterRead)) {
+      throw new Error("Recovery source changed while reading");
     }
-    throw error;
+
+    destinationDescriptor = openSync(newPath, "wx", before.mode & 0o777);
+    const createdDestination = fstatSync(destinationDescriptor);
+    if (!createdDestination.isFile() || createdDestination.nlink !== 1) {
+      throw new Error("Recovery destination is not an exclusive regular file");
+    }
+    writeFileSync(destinationDescriptor, bytes);
+    fchmodSync(destinationDescriptor, before.mode & 0o777);
+    fsyncSync(destinationDescriptor);
+    const writtenDestination = fstatSync(destinationDescriptor);
+    const finalSource = lstatSync(existingPath);
+    const finalDestination = lstatSync(newPath);
+    if (!stableSourceMetadata(sourceAfterRead, finalSource)
+      || !finalSource.isFile()
+      || finalSource.isSymbolicLink()
+      || !sameIdentity(sourceAfterRead, finalSource)
+      || !writtenDestination.isFile()
+      || !sameIdentity(createdDestination, writtenDestination)
+      || writtenDestination.nlink !== 1
+      || writtenDestination.size !== bytes.length
+      || !finalDestination.isFile()
+      || finalDestination.isSymbolicLink()
+      || !sameIdentity(writtenDestination, finalDestination)
+      || finalDestination.nlink !== writtenDestination.nlink) {
+      throw new Error("Recovery publication changed before validation");
+    }
+    return {
+      source: {
+        dev: finalSource.dev,
+        ino: finalSource.ino,
+        nlink: finalSource.nlink,
+      },
+      destination: {
+        dev: writtenDestination.dev,
+        ino: writtenDestination.ino,
+        nlink: writtenDestination.nlink,
+      },
+    };
+  } finally {
+    if (destinationDescriptor !== undefined) {
+      try { closeSync(destinationDescriptor); } catch { /* retain recovery authority */ }
+    }
+    if (sourceDescriptor !== undefined) {
+      try { closeSync(sourceDescriptor); } catch { /* retain recovery authority */ }
+    }
   }
 }
 
@@ -559,8 +647,9 @@ export function recoverJsonTransaction(
         };
       }
       if (!mutationGuardUnchanged(guard)) return { status: "manual" };
+      let publication: RecoveryPublication;
       try {
-        linkRegularFileNoFollow(displacedPath, path);
+        publication = copyRegularFileExclusiveNoFollow(displacedPath, path);
         syncParentDirectory(path);
       } catch {
         return {
@@ -568,7 +657,7 @@ export function recoverJsonTransaction(
           recoveryPath: firstExistingPath(displacedPath, transactionDirectory, path),
         };
       }
-      if (!isManagedRecoveryPair(path, displacedPath, path)) {
+      if (!recoveryPublicationUnchanged(publication, displacedPath, path)) {
         return { status: "manual", recoveryPath: firstExistingPath(transactionDirectory) };
       }
       const preparedPath = join(transactionDirectory, "prepared");
@@ -578,6 +667,9 @@ export function recoverJsonTransaction(
         return { status: "manual", recoveryPath: firstExistingPath(transactionDirectory) };
       }
       if (!mutationGuardUnchanged(guard)) return { status: "manual" };
+      if (!recoveryPublicationUnchanged(publication, displacedPath, path)) {
+        return { status: "manual", recoveryPath: firstExistingPath(transactionDirectory) };
+      }
       try {
         writeManifest(transactionDirectory, path, "committed", guard);
       } catch {
@@ -613,9 +705,10 @@ function restoreDisplaced(
       recoveryPath: firstExistingPath(transactionDirectory, preparedPath),
     };
   }
+  let publication: RecoveryPublication;
   try {
     requireMutationGuard(guard);
-    linkRegularFileNoFollow(displacedPath, path);
+    publication = copyRegularFileExclusiveNoFollow(displacedPath, path);
     syncParentDirectory(path);
   } catch {
     return {
@@ -623,7 +716,7 @@ function restoreDisplaced(
       recoveryPath: firstExistingPath(displacedPath, transactionDirectory, path),
     };
   }
-  if (!isManagedRecoveryPair(path, displacedPath, path)) {
+  if (!recoveryPublicationUnchanged(publication, displacedPath, path)) {
     return {
       status: "recovery-required",
       recoveryPath: firstExistingPath(transactionDirectory, path),
@@ -631,6 +724,12 @@ function restoreDisplaced(
   }
   try {
     requireMutationGuard(guard);
+    if (!recoveryPublicationUnchanged(publication, displacedPath, path)) {
+      return {
+        status: "recovery-required",
+        recoveryPath: firstExistingPath(transactionDirectory, path),
+      };
+    }
     writeManifest(transactionDirectory, path, "committed", guard);
   } catch {
     return {
