@@ -13,7 +13,10 @@ globalThis.fetch = async (url, init = {}) => {
   process.stderr.write(`SLOW_FETCH_PROMPT_BASE64 ${Buffer.from(String(init.body ?? ""), "utf8").toString("base64")}\n`);
   return await new Promise((resolve, reject) => {
     const signal = init.signal;
-    const abort = () => reject(signal?.reason ?? new Error("local AI request cancelled"));
+    const abort = () => {
+      process.stderr.write("SLOW_FETCH_GENERATE_ABORTED\n");
+      reject(signal?.reason ?? new Error("local AI request cancelled"));
+    };
     if (signal?.aborted) abort();
     else signal?.addEventListener("abort", abort, { once: true });
   });

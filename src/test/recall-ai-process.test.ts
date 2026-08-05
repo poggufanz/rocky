@@ -10,6 +10,7 @@ import { fileURLToPath } from "node:url";
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const fixtureMemory = join(repoRoot, "test", "fixtures", "mcp", "memory.jsonl");
 const slowFetch = join(repoRoot, "test", "fixtures", "mcp", "slow-fetch.cjs");
+const slowFetchAborted = "SLOW_FETCH_GENERATE_ABORTED";
 const modernMeta = {
   "io.modelcontextprotocol/protocolVersion": "2026-07-28",
   "io.modelcontextprotocol/clientCapabilities": {},
@@ -74,6 +75,33 @@ async function waitFor(predicate: () => boolean, label: string): Promise<void> {
   }
 }
 
+async function withTimeout<T>(promise: Promise<T>, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error(`${label} exceeded 2000ms`)), 2_000);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
+async function stopChild(child: ChildProcessWithoutNullStreams, closed: Promise<{ code: number | null; signal: NodeJS.Signals | null }>): Promise<{
+  code: number | null;
+  signal: NodeJS.Signals | null;
+}> {
+  child.stdin.end();
+  try {
+    return await withTimeout(closed, "MCP EOF close");
+  } catch {
+    child.kill();
+    return await withTimeout(closed, "forced MCP close");
+  }
+}
+
 test("cancelled MCP local-AI request leaves all state untouched and never emits a response", { timeout: 10_000 }, async (t) => {
   const home = seedHome(t);
   const before = snapshotTree(home);
@@ -86,28 +114,35 @@ test("cancelled MCP local-AI request leaves all state untouched and never emits 
   const stderr: Buffer[] = [];
   child.stderr.on("data", (chunk: Buffer) => stderr.push(Buffer.from(chunk)));
   const closed = waitForChild(child);
+  let closedByTest = false;
 
-  child.stdin.write(`${JSON.stringify(modernRequest("cancel-me", "tools/call", {
-    name: "recall_with_ai", arguments: { query: "missing module" },
-  }))}\n`);
-  await waitFor(() => Buffer.concat(stderr).toString("utf8").includes("SLOW_FETCH_PROMPT_BASE64 "), "slow local AI request start");
-  child.stdin.write(`${JSON.stringify({
-    jsonrpc: "2.0", method: "notifications/cancelled", params: { requestId: "cancel-me", reason: "test cancellation" },
-  })}\n`);
-  child.stdin.write(`${JSON.stringify(modernRequest("stats-after-cancel", "tools/call", { name: "stats", arguments: {} }))}\n`);
+  try {
+    child.stdin.write(`${JSON.stringify(modernRequest("cancel-me", "tools/call", {
+      name: "recall_with_ai", arguments: { query: "missing module" },
+    }))}\n`);
+    await waitFor(() => Buffer.concat(stderr).toString("utf8").includes("SLOW_FETCH_PROMPT_BASE64 "), "slow local AI request start");
+    child.stdin.write(`${JSON.stringify({
+      jsonrpc: "2.0", method: "notifications/cancelled", params: { requestId: "cancel-me", reason: "test cancellation" },
+    })}\n`);
+    await waitFor(
+      () => Buffer.concat(stderr).toString("utf8").includes(slowFetchAborted),
+      "notification cancellation reaching local AI request",
+    );
+    child.stdin.write(`${JSON.stringify(modernRequest("stats-after-cancel", "tools/call", { name: "stats", arguments: {} }))}\n`);
 
-  const statsLine = await Promise.race([
-    lines.next(),
-    new Promise<IteratorResult<string>>((_, reject) => setTimeout(() => reject(new Error("stats response exceeded 2000ms")), 2_000)),
-  ]);
-  assert.equal(statsLine.done, false);
-  const stats = JSON.parse(statsLine.value ?? "") as { id: string; result?: { structuredContent?: { failures?: number } } };
-  assert.equal(stats.id, "stats-after-cancel");
-  assert.equal(stats.result?.structuredContent?.failures, 2);
+    const statsLine = await withTimeout(lines.next(), "stats response");
+    assert.equal(statsLine.done, false);
+    const stats = JSON.parse(statsLine.value ?? "") as { id: string; result?: { structuredContent?: { failures?: number } } };
+    assert.equal(stats.id, "stats-after-cancel");
+    assert.equal(stats.result?.structuredContent?.failures, 2);
 
-  child.stdin.end();
-  assert.deepEqual(await closed, { code: 0, signal: null });
-  const remaining = await lines.next();
-  assert.equal(remaining.done, true);
-  assert.deepEqual(snapshotTree(home), before);
+    const exit = await stopChild(child, closed);
+    closedByTest = true;
+    assert.deepEqual(exit, { code: 0, signal: null });
+    const remaining = await withTimeout(lines.next(), "MCP stdout EOF");
+    assert.equal(remaining.done, true);
+    assert.deepEqual(snapshotTree(home), before);
+  } finally {
+    if (!closedByTest) await stopChild(child, closed);
+  }
 });
