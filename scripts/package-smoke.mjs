@@ -3,6 +3,7 @@ import { spawnSync } from "node:child_process";
 import {
   accessSync,
   chmodSync,
+  copyFileSync,
   constants,
   existsSync,
   lstatSync,
@@ -17,6 +18,12 @@ import {
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import {
+  commandInvocation,
+  fakeClientLaunchers,
+  nodeOptionsRequire,
+  shouldRunInstalledSetup,
+} from "./package-smoke-support.mjs";
 
 const PACKAGE_NAME = "@poggufanz/rocky-cli";
 const PACKAGE_VERSION = "0.2.1-beta.0";
@@ -53,7 +60,13 @@ function resolveNpmExecutable() {
 }
 
 function childResult(file, args, options) {
-  const result = spawnSync(file, args, {
+  const invocation = commandInvocation(
+    file,
+    args,
+    process.platform,
+    options.env?.ComSpec ?? options.env?.COMSPEC ?? process.env.ComSpec ?? process.env.COMSPEC,
+  );
+  const result = spawnSync(invocation.file, invocation.args, {
     cwd: options.cwd ?? packageRoot,
     env: options.env,
     input: options.input,
@@ -176,15 +189,12 @@ function jsonLines(result, label) {
   return result.stdout.trim().split("\n").filter(Boolean).map((line) => JSON.parse(line));
 }
 
-function createFakeClients(directory, stateRoot, quoteShellPath) {
-  const script = join(directory, "fake-client.mjs");
-  writeFileSync(script, String.raw`import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+function createFakeClients(directory, quoteShellPath) {
+  const script = join(directory, "fake-client.cjs");
+  writeFileSync(script, String.raw`"use strict";
 
-const [kind, ...args] = process.argv.slice(2);
-const stateRoot = process.env.ROCKY_FAKE_CLIENT_STATE;
-if (stateRoot === undefined) throw new Error("missing fake-client state");
-mkdirSync(stateRoot, { recursive: true });
+const { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } = require("node:fs");
+const { dirname, join } = require("node:path");
 
 function registration(values) {
   let index = 2;
@@ -240,78 +250,73 @@ function readObject(path) {
   return JSON.parse(readFileSync(path, "utf8"));
 }
 
-if (kind === "codex") {
-  const path = join(stateRoot, "codex.json");
-  if (args[0] === "mcp" && args[1] === "get") {
-    if (!existsSync(path)) {
-      process.stderr.write("No MCP server named 'rocky' found\n");
-      process.exitCode = 1;
-    } else {
+function runFakeClient(kind, args) {
+  const stateRoot = process.env.ROCKY_FAKE_CLIENT_STATE;
+  if (stateRoot === undefined) throw new Error("missing fake-client state");
+  mkdirSync(stateRoot, { recursive: true });
+  if (kind === "codex") {
+    const path = join(stateRoot, "codex.json");
+    if (args[0] === "mcp" && args[1] === "get") {
+      if (!existsSync(path)) {
+        process.stderr.write("No MCP server named 'rocky' found\n");
+        return 1;
+      }
       process.stdout.write(readFileSync(path, "utf8"));
+    } else if (args[0] === "mcp" && args[1] === "add") {
+      writeFileSync(path, JSON.stringify(codexSnapshot(registration(args))) + "\n", "utf8");
+    } else if (args[0] === "mcp" && args[1] === "remove") {
+      rmSync(path, { force: true });
+    } else {
+      throw new Error("unexpected fake Codex command: " + JSON.stringify(args));
     }
-  } else if (args[0] === "mcp" && args[1] === "add") {
-    writeFileSync(path, JSON.stringify(codexSnapshot(registration(args))) + "\n", "utf8");
-  } else if (args[0] === "mcp" && args[1] === "remove") {
-    rmSync(path, { force: true });
-  } else {
-    throw new Error("unexpected fake Codex command: " + JSON.stringify(args));
+    return 0;
   }
-} else if (kind === "claude") {
-  const path = join(process.env.HOME, ".claude.json");
-  if (args[0] === "mcp" && args[1] === "add") {
-    const value = registration(args);
-    const config = readObject(path);
-    mkdirSync(dirname(path), { recursive: true });
-    writeFileSync(path, JSON.stringify({
-      ...config,
-      mcpServers: {
-        ...(config.mcpServers ?? {}),
-        rocky: { type: "stdio", command: value.command, args: value.args, env: value.env },
-      },
-    }) + "\n", "utf8");
-  } else if (args[0] === "mcp" && args[1] === "remove") {
-    const config = readObject(path);
-    const servers = { ...(config.mcpServers ?? {}) };
-    delete servers.rocky;
-    writeFileSync(path, JSON.stringify({ ...config, mcpServers: servers }) + "\n", "utf8");
-  } else {
-    throw new Error("unexpected fake Claude command: " + JSON.stringify(args));
+  if (kind === "claude") {
+    const path = join(process.env.HOME, ".claude.json");
+    if (args[0] === "mcp" && args[1] === "add") {
+      const value = registration(args);
+      const config = readObject(path);
+      mkdirSync(dirname(path), { recursive: true });
+      writeFileSync(path, JSON.stringify({
+        ...config,
+        mcpServers: {
+          ...(config.mcpServers ?? {}),
+          rocky: { type: "stdio", command: value.command, args: value.args, env: value.env },
+        },
+      }) + "\n", "utf8");
+    } else if (args[0] === "mcp" && args[1] === "remove") {
+      const config = readObject(path);
+      const servers = { ...(config.mcpServers ?? {}) };
+      delete servers.rocky;
+      writeFileSync(path, JSON.stringify({ ...config, mcpServers: servers }) + "\n", "utf8");
+    } else {
+      throw new Error("unexpected fake Claude command: " + JSON.stringify(args));
+    }
+    return 0;
   }
-} else {
   throw new Error("unexpected fake-client kind: " + kind);
+}
+
+module.exports = { runFakeClient };
+if (require.main === module) {
+  const [kind, ...args] = process.argv.slice(2);
+  process.exitCode = runFakeClient(kind, args);
 }
 `, "utf8");
 
-  if (process.platform === "win32") {
-    for (const kind of ["codex", "claude"]) {
-      const wrapper = join(directory, `${kind}.cmd`);
-      writeFileSync(
-        wrapper,
-        `@echo off\r\n${quoteShellPath(process.execPath, "win32")} ${quoteShellPath(script, "win32")} ${kind} %*\r\n`,
-        "utf8",
-      );
+  for (const launcher of fakeClientLaunchers(process.platform, directory)) {
+    if (launcher.type === "copy-node") {
+      copyFileSync(process.execPath, launcher.path);
+      continue;
     }
-    return;
-  }
-
-  for (const kind of ["codex", "claude"]) {
-    const wrapper = join(directory, kind);
     writeFileSync(
-      wrapper,
-      `#!/bin/sh\nexec ${quoteShellPath(process.execPath, process.platform)} ${quoteShellPath(script, process.platform)} ${kind} "$@"\n`,
+      launcher.path,
+      `#!/bin/sh\nexec ${quoteShellPath(process.execPath, process.platform)} ${quoteShellPath(script, process.platform)} ${launcher.kind} "$@"\n`,
       "utf8",
     );
-    chmodSync(wrapper, 0o755);
+    chmodSync(launcher.path, 0o755);
   }
-}
-
-function nativeLinux() {
-  if (process.platform !== "linux") return false;
-  try {
-    return !/microsoft|wsl/i.test(readFileSync("/proc/version", "utf8"));
-  } catch {
-    return true;
-  }
+  return script;
 }
 
 async function main() {
@@ -323,6 +328,8 @@ async function main() {
   const fakeClientDirectory = temporaryDirectory("rocky-package-clients-");
   const fakeClientState = temporaryDirectory("rocky-package-client-state-");
   const npm = resolveNpmExecutable();
+  const preload = join(packageRoot, "scripts", "package-smoke-preload.cjs");
+  const fakeClientScript = join(fakeClientDirectory, "fake-client.cjs");
 
   const npmrc = join(isolatedHome, "empty-npmrc");
   const globalNpmrc = join(isolatedHome, "empty-global-npmrc");
@@ -330,12 +337,15 @@ async function main() {
   const claudeConfig = join(isolatedHome, "claude-config");
   const codexHome = join(isolatedHome, "codex-home");
   const xdgConfig = join(isolatedHome, "xdg-config");
+  const wslClaudeConfig = join(isolatedHome, "wsl-claude-desktop-config.json");
   for (const directory of [appData, claudeConfig, codexHome, xdgConfig]) {
     mkdirSync(directory, { recursive: true });
   }
   writeFileSync(npmrc, "", "utf8");
   writeFileSync(globalNpmrc, "", "utf8");
   writeFileSync(join(isolatedHome, ".bashrc"), "# package-smoke isolated home\n", "utf8");
+  writeFileSync(wslClaudeConfig, "{}\n", "utf8");
+  assert.equal(existsSync(preload), true, `package-smoke preload is missing: ${preload}`);
 
   const env = { ...process.env };
   for (const key of Object.keys(env)) {
@@ -350,6 +360,10 @@ async function main() {
     CODEX_HOME: codexHome,
     ROCKY_HOME: rockyHome,
     ROCKY_FAKE_CLIENT_STATE: fakeClientState,
+    ROCKY_PACKAGE_SMOKE_FAKE_CLIENT: fakeClientScript,
+    ROCKY_PACKAGE_SMOKE_HERMETIC: "1",
+    ROCKY_PACKAGE_SMOKE_NODE: process.execPath,
+    ROCKY_WSL_CLAUDE_CONFIG: wslClaudeConfig,
     XDG_CONFIG_HOME: xdgConfig,
     NPM_CONFIG_USERCONFIG: npmrc,
     NPM_CONFIG_GLOBALCONFIG: globalNpmrc,
@@ -361,14 +375,11 @@ async function main() {
     NPM_CONFIG_SCRIPT_SHELL: process.platform === "win32"
       ? process.env.ComSpec ?? "C:\\Windows\\System32\\cmd.exe"
       : "/bin/sh",
-    NODE_OPTIONS: "",
+    NODE_OPTIONS: nodeOptionsRequire(preload, process.platform),
     PATH: [fakeClientDirectory, dirname(process.execPath)].join(delimiter),
   });
   env.Path = env.PATH;
   delete env.NODE_TEST_CONTEXT;
-  delete env.WSL_DISTRO_NAME;
-  delete env.WSL_INTEROP;
-  delete env.ROCKY_WSL_CLAUDE_CONFIG;
 
   const pack = childResult(npm, [
     "pack",
@@ -429,7 +440,7 @@ async function main() {
     assert.throws(() => quoteShellPath(`C:\\Rocky\\${unsafe}`, "win32"), /unsafe/i);
   }
 
-  createFakeClients(fakeClientDirectory, fakeClientState, quoteShellPath);
+  assert.equal(createFakeClients(fakeClientDirectory, quoteShellPath), fakeClientScript);
 
   const shimHelp = childResult(shim, ["--help"], { env });
   const entryHelp = childResult(process.execPath, [installedEntry, "--help"], { env });
@@ -545,52 +556,41 @@ async function main() {
   });
   assert.deepEqual(legacyResponses[1].result, {});
 
-  if (nativeLinux()) {
-    const configured = childResult(
-      process.execPath,
-      [installedEntry, "setup", "--yes", "--voice-skill"],
-      { env },
-    );
-    assertSuccess(configured, "fake-client setup configure");
-    assert.match(configured.stderr, /voice-skill codex: installed/);
-    assert.match(configured.stderr, /voice-skill claude-code: installed/);
-    for (const markerPath of [
-      join(isolatedHome, ".agents", "skills", "rocky-voice", ".rocky-managed.json"),
-      join(claudeConfig, "skills", "rocky-voice", ".rocky-managed.json"),
-    ]) {
-      assert.equal(JSON.parse(readFileSync(markerPath, "utf8")).packageName, PACKAGE_NAME);
-    }
-
-    const checked = assertStateUnchanged(rockyHome, "fake-client setup check MCP", () => childResult(
-      process.execPath,
-      [installedEntry, "setup", "--check", "--voice-skill"],
-      { env, timeout: 30_000 },
-    ));
-    assertSuccess(checked, "fake-client setup check");
-    assert.match(checked.stderr, /voice-skill codex: unchanged/);
-    assert.match(checked.stderr, /voice-skill claude-code: unchanged/);
-
-    const removed = childResult(
-      process.execPath,
-      [installedEntry, "setup", "--remove", "--yes", "--voice-skill"],
-      { env },
-    );
-    assertSuccess(removed, "fake-client setup remove");
-    assert.match(removed.stderr, /voice-skill codex: removed/);
-    assert.match(removed.stderr, /voice-skill claude-code: removed/);
-    assert.equal(existsSync(join(isolatedHome, ".agents", "skills", "rocky-voice")), false);
-    assert.equal(existsSync(join(claudeConfig, "skills", "rocky-voice")), false);
-  } else {
-    const voiceModule = await import(pathToFileURL(join(installedRoot, "dist", "setup", "voice-skill.js")).href);
-    const target = {
-      host: "codex",
-      destination: join(isolatedHome, ".agents", "skills", "rocky-voice"),
-      backupRoot: join(isolatedHome, ".agents", ".rocky", "backups", "voice-skills"),
-    };
-    assert.equal((await voiceModule.installVoiceSkill(target, { replace: false })).status, "installed");
-    assert.equal((await voiceModule.checkVoiceSkill(target)).status, "unchanged");
-    assert.equal((await voiceModule.removeVoiceSkill(target)).status, "removed");
+  assert.equal(shouldRunInstalledSetup(process.platform), true);
+  const configured = childResult(
+    process.execPath,
+    [installedEntry, "setup", "--yes", "--voice-skill"],
+    { env },
+  );
+  assertSuccess(configured, "fake-client setup configure");
+  assert.match(configured.stderr, /voice-skill codex: installed/);
+  assert.match(configured.stderr, /voice-skill claude-code: installed/);
+  for (const markerPath of [
+    join(isolatedHome, ".agents", "skills", "rocky-voice", ".rocky-managed.json"),
+    join(claudeConfig, "skills", "rocky-voice", ".rocky-managed.json"),
+  ]) {
+    assert.equal(JSON.parse(readFileSync(markerPath, "utf8")).packageName, PACKAGE_NAME);
   }
+
+  const checked = assertStateUnchanged(rockyHome, "fake-client setup check MCP", () => childResult(
+    process.execPath,
+    [installedEntry, "setup", "--check", "--voice-skill"],
+    { env, timeout: 30_000 },
+  ));
+  assertSuccess(checked, "fake-client setup check");
+  assert.match(checked.stderr, /voice-skill codex: unchanged/);
+  assert.match(checked.stderr, /voice-skill claude-code: unchanged/);
+
+  const removed = childResult(
+    process.execPath,
+    [installedEntry, "setup", "--remove", "--yes", "--voice-skill"],
+    { env },
+  );
+  assertSuccess(removed, "fake-client setup remove");
+  assert.match(removed.stderr, /voice-skill codex: removed/);
+  assert.match(removed.stderr, /voice-skill claude-code: removed/);
+  assert.equal(existsSync(join(isolatedHome, ".agents", "skills", "rocky-voice")), false);
+  assert.equal(existsSync(join(claudeConfig, "skills", "rocky-voice")), false);
 
   process.stdout.write([
     "package smoke passed",
