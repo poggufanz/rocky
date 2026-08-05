@@ -123,6 +123,27 @@ function crashTransaction(
 
 type PairedSourceRace = "bytes" | "mode";
 
+type PairedSourceRacePlatform = "win32" | "posix";
+
+interface PairedSourceRaceModes {
+  initial: number;
+  replacement: number;
+}
+
+function pairedSourceRaceModes(
+  platform: PairedSourceRacePlatform,
+  race: PairedSourceRace,
+): PairedSourceRaceModes {
+  if (platform === "win32") {
+    return race === "bytes"
+      ? { initial: 0o666, replacement: 0o666 }
+      : { initial: 0o444, replacement: 0o666 };
+  }
+  return race === "bytes"
+    ? { initial: 0o640, replacement: 0o640 }
+    : { initial: 0o640, replacement: 0o600 };
+}
+
 async function assertRestartSourceRaceFailsClosed(
   t: test.TestContext,
   race: PairedSourceRace,
@@ -133,13 +154,17 @@ async function assertRestartSourceRaceFailsClosed(
   assert.equal(attackerBytes.length, recoveryBytes.length);
   const transaction = crashTransaction(path, `restart-paired-source-${race}`, "displaced", recoveryBytes);
   const displaced = join(transaction, "displaced");
-  const initialMode = process.platform === "win32" ? 0o444 : 0o640;
-  const racedMode = process.platform === "win32" ? 0o666 : 0o600;
+  const racePlatform: PairedSourceRacePlatform = process.platform === "win32" ? "win32" : "posix";
+  const raceModes = pairedSourceRaceModes(racePlatform, race);
+  const initialMode = raceModes.initial;
+  const racedMode = raceModes.replacement;
   chmodSync(displaced, initialMode);
   const observedInitialMode = observableMode(displaced);
   const originalOpen = fs.openSync;
+  let observedPreRaceMode: number | undefined;
   let observedRacedMode: number | undefined;
   let destinationValidationOpens = 0;
+  let raceInjectedAtDestinationValidationOpen: number | undefined;
   let raceInjected = false;
 
   (fs as unknown as { openSync: typeof fs.openSync }).openSync = ((
@@ -150,6 +175,8 @@ async function assertRestartSourceRaceFailsClosed(
     if (String(candidate) === path && isReadOnlyOpen(flags)) {
       destinationValidationOpens += 1;
       if (!raceInjected && destinationValidationOpens === 2) {
+        observedPreRaceMode = observableMode(displaced);
+        raceInjectedAtDestinationValidationOpen = destinationValidationOpens;
         if (race === "bytes") writeFileSync(displaced, attackerBytes);
         else chmodSync(displaced, racedMode);
         observedRacedMode = observableMode(displaced);
@@ -168,6 +195,11 @@ async function assertRestartSourceRaceFailsClosed(
 
     assert.equal(raceInjected, true);
     assert.equal(destinationValidationOpens, 2);
+    assert.equal(raceInjectedAtDestinationValidationOpen, 2);
+    assert.equal(observedPreRaceMode, observedInitialMode);
+    if (process.platform === "win32" && race === "bytes") {
+      assert.equal(observedPreRaceMode, 1);
+    }
     assert.equal(configured.status, "failed");
     assert.doesNotMatch(configured.detail ?? "", /transaction recovered/i);
     assert.match(configured.detail ?? "", /manual recovery/i);
@@ -182,13 +214,18 @@ async function assertRestartSourceRaceFailsClosed(
     assert.equal(fs.lstatSync(path).isSymbolicLink(), false);
     assert.deepEqual(readFileSync(path), recoveryBytes);
     assert.equal(observableMode(path), observedInitialMode);
+    assertRequestedFileMode(path, initialMode);
     assert.equal(fs.lstatSync(displaced).isFile(), true);
     assert.equal(fs.lstatSync(displaced).isSymbolicLink(), false);
     assert.deepEqual(readFileSync(displaced), race === "bytes" ? attackerBytes : recoveryBytes);
     assert.ok(observedRacedMode !== undefined);
     assert.equal(observableMode(displaced), observedRacedMode);
+    assertRequestedFileMode(displaced, racedMode);
     if (race === "mode") assert.notEqual(observedRacedMode, observedInitialMode);
     else assert.equal(observedRacedMode, observedInitialMode);
+    if (process.platform === "win32" && race === "bytes") {
+      assert.equal(observedRacedMode, 1);
+    }
   } finally {
     (fs as unknown as { openSync: typeof fs.openSync }).openSync = originalOpen;
     syncBuiltinESMExports();
@@ -205,16 +242,20 @@ async function assertInProcessSourceRaceFailsClosed(
   assert.equal(attackerBytes.length, recoveryBytes.length);
   const path = configPath(t, original);
   const originalBytes = readFileSync(path);
-  const initialMode = process.platform === "win32" ? 0o444 : 0o640;
-  const racedMode = process.platform === "win32" ? 0o666 : 0o600;
+  const racePlatform: PairedSourceRacePlatform = process.platform === "win32" ? "win32" : "posix";
+  const raceModes = pairedSourceRaceModes(racePlatform, race);
+  const initialMode = raceModes.initial;
+  const racedMode = raceModes.replacement;
   const originalRename = fs.renameSync;
   const originalOpen = fs.openSync;
   let transaction: string | undefined;
   let displaced: string | undefined;
   let observedInitialMode: number | undefined;
+  let observedPreRaceMode: number | undefined;
   let observedRacedMode: number | undefined;
   let displacementInjected = false;
   let destinationValidationOpens = 0;
+  let raceInjectedAtDestinationValidationOpen: number | undefined;
   let raceInjected = false;
 
   fs.renameSync = ((source: fs.PathLike, destination: fs.PathLike) => {
@@ -238,6 +279,8 @@ async function assertInProcessSourceRaceFailsClosed(
     if (displaced !== undefined && String(candidate) === path && isReadOnlyOpen(flags)) {
       destinationValidationOpens += 1;
       if (!raceInjected && destinationValidationOpens === 2) {
+        observedPreRaceMode = observableMode(displaced);
+        raceInjectedAtDestinationValidationOpen = destinationValidationOpens;
         if (race === "bytes") writeFileSync(displaced, attackerBytes);
         else chmodSync(displaced, racedMode);
         observedRacedMode = observableMode(displaced);
@@ -256,10 +299,15 @@ async function assertInProcessSourceRaceFailsClosed(
 
     assert.equal(displacementInjected, true);
     assert.equal(destinationValidationOpens, 2);
+    assert.equal(raceInjectedAtDestinationValidationOpen, 2);
     assert.equal(raceInjected, true);
     assert.ok(transaction !== undefined);
     assert.ok(displaced !== undefined);
     assert.ok(observedInitialMode !== undefined);
+    assert.equal(observedPreRaceMode, observedInitialMode);
+    if (process.platform === "win32" && race === "bytes") {
+      assert.equal(observedPreRaceMode, 1);
+    }
     assert.ok(observedRacedMode !== undefined);
     assert.equal(configured.status, "failed");
     assert.doesNotMatch(configured.detail ?? "", /transaction recovered|changed during setup/i);
@@ -275,12 +323,17 @@ async function assertInProcessSourceRaceFailsClosed(
     assert.equal(fs.lstatSync(path).isSymbolicLink(), false);
     assert.deepEqual(readFileSync(path), recoveryBytes);
     assert.equal(observableMode(path), observedInitialMode);
+    assertRequestedFileMode(path, initialMode);
     assert.equal(fs.lstatSync(displaced).isFile(), true);
     assert.equal(fs.lstatSync(displaced).isSymbolicLink(), false);
     assert.deepEqual(readFileSync(displaced), race === "bytes" ? attackerBytes : recoveryBytes);
     assert.equal(observableMode(displaced), observedRacedMode);
+    assertRequestedFileMode(displaced, racedMode);
     if (race === "mode") assert.notEqual(observedRacedMode, observedInitialMode);
     else assert.equal(observedRacedMode, observedInitialMode);
+    if (process.platform === "win32" && race === "bytes") {
+      assert.equal(observedRacedMode, 1);
+    }
     const backups = backupPaths(path);
     assert.equal(backups.length, 1);
     assert.deepEqual(readFileSync(backups[0]!), originalBytes);
@@ -290,6 +343,62 @@ async function assertInProcessSourceRaceFailsClosed(
     syncBuiltinESMExports();
   }
 }
+
+test("paired source race modes keep byte injection writable and mode changes observable", () => {
+  const cases: Array<{
+    platform: PairedSourceRacePlatform;
+    race: PairedSourceRace;
+    initial: number;
+    replacement: number;
+    initialWritable: boolean;
+    replacementWritable: boolean;
+  }> = [
+    {
+      platform: "win32",
+      race: "bytes",
+      initial: 0o666,
+      replacement: 0o666,
+      initialWritable: true,
+      replacementWritable: true,
+    },
+    {
+      platform: "win32",
+      race: "mode",
+      initial: 0o444,
+      replacement: 0o666,
+      initialWritable: false,
+      replacementWritable: true,
+    },
+    {
+      platform: "posix",
+      race: "bytes",
+      initial: 0o640,
+      replacement: 0o640,
+      initialWritable: true,
+      replacementWritable: true,
+    },
+    {
+      platform: "posix",
+      race: "mode",
+      initial: 0o640,
+      replacement: 0o600,
+      initialWritable: true,
+      replacementWritable: true,
+    },
+  ];
+
+  for (const expected of cases) {
+    const actual = pairedSourceRaceModes(expected.platform, expected.race);
+    const context = `${expected.platform} ${expected.race}`;
+    assert.deepEqual(
+      actual,
+      { initial: expected.initial, replacement: expected.replacement },
+      context,
+    );
+    assert.equal((actual.initial & 0o222) !== 0, expected.initialWritable, context);
+    assert.equal((actual.replacement & 0o222) !== 0, expected.replacementWritable, context);
+  }
+});
 
 test("restart recovery refuses an equal-length source overwrite begun during destination validation", async (t) => {
   await assertRestartSourceRaceFailsClosed(t, "bytes");
