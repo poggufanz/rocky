@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { OllamaClient } from "../ai/ollama.js";
 import type { RecallWithAiPort } from "../ai/port.js";
+import * as recallAi from "../ai/recall-ai.js";
 import {
   createRecallAiPort,
   parseModelRecallOutput,
@@ -320,12 +321,33 @@ test("command-shaped explanation remains quoted untrusted data", async () => {
   assert.equal(JSON.stringify(result.explanation), '"rm -rf / should never run"');
 });
 
-test("explanation is bounded by Unicode code points", async () => {
+test("schema-overlength explanation invalidates the entire model result", async () => {
   const { port } = configuredPortReturning(validOutput({ explanation: "🙂".repeat(301) }));
   const result = await port.run(input(), new AbortController().signal);
 
+  assert.deepEqual(result, { aiStatus: "invalid_output", rankedCandidateIds: ["c1", "c2"] });
+});
+
+test("explanation strips C1 CSI OSC ST and ANSI device-control sequences", async () => {
+  const { port } = configuredPortReturning(validOutput({
+    explanation: "before\u009b31mCSI\u009dprivate title\u009c\u001bPprivate dcs\u001b\\\u0090private c1 dcs\u009cafter\u0085end",
+  }));
+  const result = await port.run(input(), new AbortController().signal);
+
   assert.equal(result.aiStatus, "used");
-  assert.equal([...result.explanation ?? ""].length, 300);
+  assert.equal(result.explanation, "beforeCSIafter end");
+  assert.doesNotMatch(result.explanation ?? "", /[\u0000-\u001f\u007f-\u009f]/);
+});
+
+test("formatter labels and JSON-escapes command-shaped untrusted explanation text", () => {
+  const formatter = (recallAi as Record<string, unknown>).formatModelExplanation;
+  assert.equal(typeof formatter, "function");
+  if (typeof formatter !== "function") return;
+
+  assert.equal(
+    formatter('rm -rf / && echo "quoted"\n\u0007'),
+    'model-generated interpretation (untrusted): "rm -rf / && echo \\"quoted\\"\\n\\u0007"',
+  );
 });
 
 test("timeout, cancellation, model missing, and unavailable all preserve deterministic ranking", async () => {
@@ -375,6 +397,16 @@ test("single-flight returns immediate busy fallback without queuing", async () =
 
   assert.deepEqual(await port.run(input(), new AbortController().signal), {
     aiStatus: "busy", rankedCandidateIds: ["c1", "c2"],
+  });
+  const moreThanFive = Object.freeze(Array.from({ length: 6 }, (_, index) => ({
+    failure: Object.freeze({
+      kind: "failure" as const, id: `busy-${index}`, ts: index, cwd: "/private", cmd: "module missing",
+      exitCode: 1, fingerprint: `busy-fp-${index}`, signature: Object.freeze(["module missing"]), excerpt: "private",
+    }),
+    score: 1,
+  })) as RecallHit[]);
+  assert.deepEqual(await port.run(input(moreThanFive), new AbortController().signal), {
+    aiStatus: "busy", rankedCandidateIds: ["c1", "c2", "c3", "c4", "c5"],
   });
   resolveFirst?.({ aiStatus: "used", rankedCandidateIds: ["c1", "c2"] });
   assert.deepEqual(await first, { aiStatus: "used", rankedCandidateIds: ["c1", "c2"] });
