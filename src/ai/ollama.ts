@@ -37,6 +37,13 @@ export class OllamaResponseTooLargeError extends Error {
   }
 }
 
+class OllamaRequestTimeoutError extends Error {
+  constructor() {
+    super("Ollama request timed out");
+    this.name = "OllamaRequestTimeoutError";
+  }
+}
+
 interface BoundedSignal {
   signal: AbortSignal;
   abort(reason: unknown): void;
@@ -48,7 +55,7 @@ function boundedSignal(parent: AbortSignal | undefined, timeoutMs: number): Boun
   const onAbort = () => controller.abort(parent?.reason);
   if (parent?.aborted) controller.abort(parent.reason);
   else parent?.addEventListener("abort", onAbort, { once: true });
-  const timer = setTimeout(() => controller.abort(new Error("Ollama request timed out")), timeoutMs);
+  const timer = setTimeout(() => controller.abort(new OllamaRequestTimeoutError()), timeoutMs);
   return {
     signal: controller.signal,
     abort(reason) {
@@ -206,6 +213,7 @@ export function createOllamaClient(options: OllamaClientOptions = {}): OllamaCli
           ? { supported: true }
           : { supported: false, reason: "probe response did not contain ok: true" };
       } catch (error) {
+        if (signal?.aborted || error instanceof OllamaRequestTimeoutError) throw error;
         return { supported: false, reason: errorReason(error) };
       }
     },

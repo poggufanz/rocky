@@ -190,6 +190,36 @@ test("uses the configured bounded timeout without retrying", async () => {
   assert.equal(calls.filter((call) => urlOf(call).endsWith("/api/generate")).length, 1);
 });
 
+test("propagates a pre-aborted caller signal from a model probe without fetching", async () => {
+  const controller = new AbortController();
+  const callerReason = new Error("probe already cancelled");
+  controller.abort(callerReason);
+  let calls = 0;
+  const client = createOllamaClient({
+    fetchImpl: async () => {
+      calls += 1;
+      return jsonResponse({ done: true, response: '{"ok":true}' });
+    },
+  });
+
+  await assert.rejects(client.probeModel("model", controller.signal), callerReason);
+  assert.equal(calls, 0);
+});
+
+test("propagates a model probe timeout without retrying", async () => {
+  const { calls } = fetchFrom([]);
+  const client = createOllamaClient({
+    timeoutMs: 5,
+    fetchImpl: async (input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push({ input, init });
+      return new Promise<Response>((_, reject) => init?.signal?.addEventListener("abort", () => reject(init.signal?.reason), { once: true }));
+    },
+  });
+
+  await assert.rejects(client.probeModel("model"), /Ollama request timed out/);
+  assert.equal(calls.filter((call) => urlOf(call).endsWith("/api/generate")).length, 1);
+});
+
 test("probes structured non-thinking support and reports unsupported capability", async () => {
   const { fetchImpl, calls } = fetchFrom([
     jsonResponse({ done: true, response: '{"ok":true}' }),
