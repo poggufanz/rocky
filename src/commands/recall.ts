@@ -7,7 +7,7 @@
  */
 
 import { createOllamaClient } from "../ai/ollama.js";
-import { type AiAct, type RecallAiOutcome, type RecallWithAiPort } from "../ai/port.js";
+import { type AiAct, type AiStatus, type RecallWithAiPort } from "../ai/port.js";
 import { createRecallAiPort, formatModelExplanation, singleFlightRecallAi } from "../ai/recall-ai.js";
 import { createMemoryQueries, type MemoryQueries, type RecallHit } from "../core/memory-query.js";
 import { loadMemory } from "../core/memory-read.js";
@@ -72,21 +72,75 @@ function isAiAct(value: unknown): value is AiAct {
   return value === "known_fix" || value === "unresolved" || value === "ambiguous";
 }
 
-function isRecallAiOutcome(value: unknown): value is RecallAiOutcome {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
-  const candidate = value as { aiStatus?: unknown; rankedCandidateIds?: unknown };
-  const statuses: readonly RecallAiOutcome["aiStatus"][] = [
-    "used", "disabled", "unavailable", "model_missing", "timeout", "cancelled",
-    "invalid_output", "low_confidence", "busy", "no_hits",
-  ];
-  return typeof candidate.aiStatus === "string" && statuses.includes(candidate.aiStatus as RecallAiOutcome["aiStatus"]) &&
-    Array.isArray(candidate.rankedCandidateIds) && candidate.rankedCandidateIds.every((id) => typeof id === "string");
+type ValidUsedOutcome = {
+  aiStatus: "used";
+  rankedCandidateIds: readonly string[];
+  act: AiAct;
+  evidenceRefs: readonly string[];
+  confidence: number;
+  explanation: string;
+};
+
+type ValidFallbackOutcome = {
+  aiStatus: Exclude<AiStatus, "used">;
+  rankedCandidateIds: readonly string[];
+  act?: AiAct;
+  evidenceRefs?: readonly string[];
+  confidence?: number;
+  explanation?: string;
+};
+
+type ValidRecallAiOutcome = ValidUsedOutcome | ValidFallbackOutcome;
+
+const AI_STATUSES: readonly AiStatus[] = [
+  "used", "disabled", "unavailable", "model_missing", "timeout", "cancelled",
+  "invalid_output", "low_confidence", "busy", "no_hits",
+];
+
+function boundedStringArray(value: unknown, maximum: number): value is readonly string[] {
+  return Array.isArray(value) && value.length <= maximum && value.every((item) => typeof item === "string");
 }
 
-function sayAiOutcome(outcome: RecallAiOutcome): void {
-  if (outcome.aiStatus === "used" && isAiAct(outcome.act)) {
+function boundedExplanation(value: unknown): value is string {
+  return typeof value === "string" && [...value].length <= 300;
+}
+
+function validOptionalFields(candidate: {
+  act?: unknown;
+  evidenceRefs?: unknown;
+  confidence?: unknown;
+  explanation?: unknown;
+}): boolean {
+  return (candidate.act === undefined || isAiAct(candidate.act)) &&
+    (candidate.evidenceRefs === undefined || boundedStringArray(candidate.evidenceRefs, 10)) &&
+    (candidate.confidence === undefined ||
+      (typeof candidate.confidence === "number" && Number.isFinite(candidate.confidence) &&
+        candidate.confidence >= 0 && candidate.confidence <= 1)) &&
+    (candidate.explanation === undefined || boundedExplanation(candidate.explanation));
+}
+
+function isRecallAiOutcome(value: unknown): value is ValidRecallAiOutcome {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const candidate = value as {
+    aiStatus?: unknown;
+    rankedCandidateIds?: unknown;
+    act?: unknown;
+    evidenceRefs?: unknown;
+    confidence?: unknown;
+    explanation?: unknown;
+  };
+  if (typeof candidate.aiStatus !== "string" || !AI_STATUSES.includes(candidate.aiStatus as AiStatus)) return false;
+  if (!boundedStringArray(candidate.rankedCandidateIds, 5) || !validOptionalFields(candidate)) return false;
+  if (candidate.aiStatus !== "used") return true;
+  return isAiAct(candidate.act) && boundedStringArray(candidate.evidenceRefs, 10) &&
+    typeof candidate.confidence === "number" && Number.isFinite(candidate.confidence) &&
+    candidate.confidence >= 0.6 && candidate.confidence <= 1 && boundedExplanation(candidate.explanation);
+}
+
+function sayAiOutcome(outcome: ValidRecallAiOutcome): void {
+  if (outcome.aiStatus === "used") {
     say(phraseForAct(outcome.act));
-    if (typeof outcome.explanation === "string") detail(formatModelExplanation(outcome.explanation));
+    detail(formatModelExplanation(outcome.explanation));
     return;
   }
   switch (outcome.aiStatus) {
@@ -138,13 +192,13 @@ export async function recall(argv: readonly string[], dependencies?: RecallDepen
   }
 
   let displayed = hits;
-  let outcome: RecallAiOutcome | undefined;
+  let outcome: ValidRecallAiOutcome | undefined;
   if (parsed.useAi) {
     try {
       const result: unknown = await deps.recallWithAi.run({ query, hits, exposure: "raw" }, new AbortController().signal);
       outcome = isRecallAiOutcome(result)
         ? result
-        : { aiStatus: "unavailable", rankedCandidateIds: [] };
+        : { aiStatus: "invalid_output", rankedCandidateIds: [] };
     } catch {
       outcome = { aiStatus: "unavailable", rankedCandidateIds: [] };
     }

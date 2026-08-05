@@ -94,6 +94,8 @@ test("ai recall caps evidence at five, uses raw caller exposure, and renders onl
         aiStatus: "used",
         act: "known_fix",
         rankedCandidateIds: ["c4", "untrusted-id", "c2", "c4"],
+        evidenceRefs: ["c4.failure"],
+        confidence: 0.82,
         explanation: 'rm -rf / && echo "quoted"\n',
       };
     },
@@ -115,8 +117,8 @@ test("ai recall caps evidence at five, uses raw caller exposure, and renders onl
   assert.equal(output.stdout, "");
 });
 
-test("AI failures and non-used outcomes retain deterministic hits and valid recall exit zero", async (t) => {
-  const cases: Array<{ name: string; ai: RecallWithAiPort; phrase: string }> = [
+test("AI failures and malformed used outcomes retain deterministic hits and valid recall exit zero", async (t) => {
+  const cases: Array<{ name: string; ai: RecallWithAiPort; phrase: string; unsafeExplanation?: string }> = [
     {
       name: "rejected port",
       ai: { async run() { throw new Error("unavailable"); } },
@@ -138,7 +140,36 @@ test("AI failures and non-used outcomes retain deterministic hits and valid reca
           return { aiStatus: "used", rankedCandidateIds: null } as unknown as Awaited<ReturnType<RecallWithAiPort["run"]>>;
         },
       },
-      phrase: phrase("ai-unavailable"),
+      phrase: phrase("ai-fallback"),
+    },
+    {
+      name: "used outcome with invalid act",
+      ai: {
+        async run() {
+          return {
+            aiStatus: "used",
+            act: "not-an-act",
+            rankedCandidateIds: ["c2", "c1"],
+            explanation: "invalid act explanation must not render",
+          } as unknown as Awaited<ReturnType<RecallWithAiPort["run"]>>;
+        },
+      },
+      phrase: phrase("ai-fallback"),
+      unsafeExplanation: "invalid act explanation must not render",
+    },
+    {
+      name: "used outcome without act",
+      ai: {
+        async run() {
+          return {
+            aiStatus: "used",
+            rankedCandidateIds: ["c2", "c1"],
+            explanation: "missing act explanation must not render",
+          };
+        },
+      },
+      phrase: phrase("ai-fallback"),
+      unsafeExplanation: "missing act explanation must not render",
     },
   ];
   for (const entry of cases) {
@@ -153,6 +184,7 @@ test("AI failures and non-used outcomes retain deterministic hits and valid reca
       assert.match(output.stderr, new RegExp(entry.phrase));
       const headings = [...output.stderr.matchAll(/\d+\. command-(c\d)/g)].map((match) => match[1]);
       assert.deepEqual(headings, ["c1", "c2"]);
+      if (entry.unsafeExplanation !== undefined) assert.doesNotMatch(output.stderr, new RegExp(entry.unsafeExplanation));
     });
   }
 });
