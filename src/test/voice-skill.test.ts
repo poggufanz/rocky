@@ -32,13 +32,21 @@ function parseFlatMappings(source: string): Readonly<Record<string, string>> {
 }
 
 function parseSkill(source: string): SkillDocument {
-  const match = source.match(/^---\n([\s\S]*?)\n---\n([\s\S]*)$/);
+  const normalized = source.replaceAll("\r\n", "\n").replaceAll("\r", "\n");
+  const match = normalized.match(/^---\n([\s\S]*?)\n---\n([\s\S]*)$/);
   assert.ok(match, "SKILL.md must contain narrow YAML frontmatter");
   return {
     frontmatter: parseFlatMappings(match[1] ?? ""),
     body: match[2] ?? "",
   };
 }
+
+test("skill parser preserves identical semantics for LF and CRLF bytes", () => {
+  const lf = readFileSync(join(skillRoot, "SKILL.md"), "utf8").replaceAll("\r\n", "\n");
+  const crlf = lf.replaceAll("\n", "\r\n");
+
+  assert.deepEqual(parseSkill(crlf), parseSkill(lf));
+});
 
 function filesBelow(root: string, prefix = ""): string[] {
   const found: string[] = [];

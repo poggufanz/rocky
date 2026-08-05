@@ -15,6 +15,7 @@ import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import type { ProcessResult, ProcessRunOptions, ProcessRunner } from "../setup/process.js";
 import { createClaudeCodeAdapter } from "../setup/claude-code.js";
+import { directorySyncCapability } from "../setup/directory-sync.js";
 
 const registration = {
   name: "rocky" as const,
@@ -652,16 +653,18 @@ test("rollback reports restored but durability-unconfirmed after post-rename par
     result(1, "", "add-secret"),
   ]);
   const originalRename = fs.renameSync;
-  const originalFsync = fs.fsyncSync;
+  const originalDirectorySync = directorySyncCapability.sync;
   let published = false;
   fs.renameSync = ((from: fs.PathLike, to: fs.PathLike) => {
     originalRename(from, to);
     if (String(to) === path) published = true;
   }) as typeof fs.renameSync;
-  fs.fsyncSync = ((descriptor: number) => {
-    if (published) throw new Error("fake rollback parent fsync secret");
-    return originalFsync(descriptor);
-  }) as typeof fs.fsyncSync;
+  directorySyncCapability.sync = (directory) => {
+    if (published && directory === dirname(path)) {
+      throw new Error("fake rollback parent fsync secret");
+    }
+    return true;
+  };
   syncBuiltinESMExports();
 
   try {
@@ -682,7 +685,7 @@ test("rollback reports restored but durability-unconfirmed after post-rename par
     });
   } finally {
     fs.renameSync = originalRename;
-    fs.fsyncSync = originalFsync;
+    directorySyncCapability.sync = originalDirectorySync;
     syncBuiltinESMExports();
   }
 });

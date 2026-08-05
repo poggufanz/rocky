@@ -483,6 +483,7 @@ test("destination race is refused without deleting raced content", async (t) => 
       raced = true;
       await fs.mkdir(target.destination, { recursive: true });
       await fs.writeFile(join(target.destination, "raced.txt"), "keep race", "utf8");
+      throw Object.assign(new Error("Windows destination permission collision"), { code: "EPERM" });
     }
     await fs.rename(from, to);
   };
@@ -493,6 +494,22 @@ test("destination race is refused without deleting raced content", async (t) => 
   assert.equal(result.status, "refused");
   assert.match(result.detail, /changed|race|destination|exist/i);
   assert.equal(readFileSync(join(target.destination, "raced.txt"), "utf8"), "keep race");
+});
+
+test("permission-style activation error without a destination remains a failure", async (t) => {
+  const target = codexTarget(temporaryRoot(t));
+  const rename: VoiceSkillFileOps["rename"] = async (from, to) => {
+    if (String(to) === target.destination) {
+      throw Object.assign(new Error("Windows permission denied"), { code: "EPERM" });
+    }
+    await fs.rename(from, to);
+  };
+
+  const result = await installVoiceSkill(target, { replace: false, ops: operations(rename) });
+
+  assert.equal(result.status, "failed");
+  assert.match(result.detail, /failed|permission/i);
+  await expectMissing(target.destination);
 });
 
 test("cross-device rename is a refusal with no copy-delete fallback", async (t) => {

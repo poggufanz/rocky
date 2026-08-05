@@ -1,8 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import childProcess from "node:child_process";
+import { EventEmitter } from "node:events";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
-import { delimiter, dirname, join, win32 } from "node:path";
+import { dirname, join, win32 } from "node:path";
+import { PassThrough, Writable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import {
   isEphemeralInstall,
@@ -170,10 +174,14 @@ test("batch process runner forwards the requested environment and cwd", async (t
     });
 
     assert.equal(result.status, 0, result.stderr);
-    assert.deepEqual(JSON.parse(result.stdout.trim()), {
-      cwd,
-      marker: "forwarded",
-    });
+    const reported = JSON.parse(result.stdout.trim()) as {
+      cwd: string;
+      marker: string;
+      leaked?: string;
+    };
+    assert.equal(realpathSync(reported.cwd), realpathSync(cwd));
+    assert.equal(reported.marker, "forwarded");
+    assert.equal(reported.leaked, undefined);
   } finally {
     if (previous === undefined) delete process.env.ROCKY_PARENT_ONLY;
     else process.env.ROCKY_PARENT_ONLY = previous;
@@ -280,7 +288,46 @@ test("interactive process session bounds a final unterminated queued line", asyn
   assert.equal(await session.readLine(), undefined);
 });
 
-test("interactive process session handles child stdin EPIPE without an uncaught stream error", async () => {
+test("interactive process session deterministically rejects handled child stdin EPIPE", async () => {
+  const originalSpawn = childProcess.spawn;
+  const stdinError = Object.assign(new Error("injected child stdin EPIPE"), { code: "EPIPE" });
+  const child = Object.assign(new EventEmitter(), {
+    stdin: new Writable({
+      write(_chunk, _encoding, callback) {
+        callback(stdinError);
+      },
+    }),
+    stdout: new PassThrough(),
+    stderr: new PassThrough(),
+    kill() {
+      return true;
+    },
+  });
+  (childProcess as unknown as { spawn: typeof childProcess.spawn }).spawn = (() => child) as never;
+  syncBuiltinESMExports();
+
+  try {
+    const runner = createProcessRunner();
+    assert.ok(runner.openSession !== undefined);
+    const session = await runner.openSession("injected-child", []);
+
+    await assert.rejects(
+      () => session.writeLine("probe"),
+      (error: unknown) => error instanceof Error
+        && (error as NodeJS.ErrnoException).code === "EPIPE",
+    );
+    child.stdout.end();
+    child.stderr.end();
+    child.emit("close", 1);
+    const result = await session.wait();
+    assert.equal((result.error as NodeJS.ErrnoException | undefined)?.code, "EPIPE");
+  } finally {
+    (childProcess as unknown as { spawn: typeof childProcess.spawn }).spawn = originalSpawn;
+    syncBuiltinESMExports();
+  }
+});
+
+test("real interactive session permits a buffered write or returns a handled pipe error", async () => {
   const runner = createProcessRunner();
   assert.ok(runner.openSession !== undefined);
   const script = [
@@ -302,7 +349,10 @@ test("interactive process session handles child stdin EPIPE without an uncaught 
     session.kill();
     await session.wait();
   }
-  assert.ok(writeError instanceof Error);
+  assert.equal(writeError === undefined || writeError instanceof Error, true);
+  if (writeError instanceof Error) {
+    assert.match(`${writeError.name} ${writeError.message}`, /pipe|closed|write|EPIPE/i);
+  }
 });
 
 test("native Windows executable discovery accepts exe and rejects cmd-only shims", () => {
@@ -329,7 +379,7 @@ test("Unix executable discovery uses injected PATH and file boundary", () => {
   const platform = createPlatformServices({
     platform: "linux",
     home: "/home/ada",
-    env: { PATH: ["/usr/bin", "/opt/rocky tools"].join(delimiter) },
+    env: { PATH: ["/usr/bin", "/opt/rocky tools"].join(":") },
     fileExists: (path) => path === executable,
     isWsl: false,
   });

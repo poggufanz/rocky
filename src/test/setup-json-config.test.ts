@@ -20,11 +20,30 @@ import {
   backupFile,
   readJsonObject,
 } from "../setup/json-config.js";
+import {
+  createDirectorySyncCapability,
+  directorySyncCapability,
+} from "../setup/directory-sync.js";
 
 function temporaryDirectory(t: test.TestContext): string {
   const directory = mkdtempSync(join(tmpdir(), "rocky-json-config-"));
   t.after(() => rmSync(directory, { recursive: true, force: true }));
   return directory;
+}
+
+function fileMode(path: string): number {
+  return statSync(path).mode & 0o777;
+}
+
+function assertRequestedFileMode(path: string, posixMode: number): void {
+  const metadata = lstatSync(path);
+  assert.equal(metadata.isFile(), true);
+  assert.equal(metadata.isSymbolicLink(), false);
+  if (process.platform === "win32") {
+    assert.equal((metadata.mode & 0o222) === 0, (posixMode & 0o222) === 0);
+  } else {
+    assert.equal(metadata.mode & 0o777, posixMode);
+  }
 }
 
 test("missing JSON config returns an empty object without creating the file", (t) => {
@@ -39,6 +58,7 @@ test("valid JSON object returns the parsed object, exact bytes, and permission m
   const bytes = Buffer.from('{\n  "theme": "dark"\n}\n', "utf8");
   writeFileSync(path, bytes, { mode: 0o640 });
   chmodSync(path, 0o640);
+  const observedMode = fileMode(path);
 
   const result = readJsonObject(path);
 
@@ -46,7 +66,8 @@ test("valid JSON object returns the parsed object, exact bytes, and permission m
   if (result.status !== "valid") return;
   assert.deepEqual(result.value, { theme: "dark" });
   assert.deepEqual(result.bytes, bytes);
-  assert.equal(result.mode, 0o640);
+  assert.equal(result.mode, observedMode);
+  if (process.platform !== "win32") assert.equal(observedMode, 0o640);
 });
 
 test("malformed JSON and non-object roots are invalid without exposing document contents", (t) => {
@@ -72,12 +93,14 @@ test("backup copies exact bytes to the specified timestamped sibling", (t) => {
   const bytes = Buffer.from([0x7b, 0x0d, 0x0a, 0x20, 0x20, 0x7d, 0x0a]);
   writeFileSync(path, bytes, { mode: 0o640 });
   chmodSync(path, 0o640);
+  const sourceMode = fileMode(path);
 
   const backup = backupFile(path, new Date("2026-08-04T08:15:30.123Z"));
 
   assert.equal(backup, `${path}.backup-20260804T081530123Z`);
   assert.deepEqual(readFileSync(backup), bytes);
-  assert.equal(statSync(backup).mode & 0o777, 0o640);
+  assert.equal(fileMode(backup), sourceMode);
+  if (process.platform !== "win32") assert.equal(sourceMode, 0o640);
 });
 
 test("backup refuses a same-timestamp collision without changing existing bytes", (t) => {
@@ -105,11 +128,13 @@ test("backup fsyncs a read-only source through its writable owned descriptor", (
   const bytes = Buffer.from('{"token":"fake-readonly-secret"}\n', "utf8");
   writeFileSync(path, bytes, { mode: 0o400 });
   chmodSync(path, 0o400);
+  const sourceMode = fileMode(path);
 
   const backup = backupFile(path, new Date("2026-08-04T08:15:31.123Z"));
 
   assert.deepEqual(readFileSync(backup), bytes);
-  assert.equal(statSync(backup).mode & 0o777, 0o400);
+  assert.equal(fileMode(backup), sourceMode);
+  assertRequestedFileMode(backup, 0o400);
 });
 
 test("atomic JSON replacement preserves unrelated keys and prior permissions", (t) => {
@@ -138,7 +163,8 @@ test("atomic JSON replacement preserves unrelated keys and prior permissions", (
       rocky: { command: "/opt/node" },
     },
   });
-  assert.equal(statSync(path).mode & 0o777, 0o640);
+  assert.equal(fileMode(path), prior.mode);
+  if (process.platform !== "win32") assert.equal(prior.mode, 0o640);
   assert.deepEqual(readdirSync(directory), [basename(path)]);
 });
 
@@ -146,7 +172,8 @@ test("atomic JSON writer creates private files", (t) => {
   const directory = temporaryDirectory(t);
   const path = join(directory, "settings.json");
   atomicWriteJson(path, { theme: "dark" });
-  assert.equal(statSync(path).mode & 0o777, 0o600);
+  assertRequestedFileMode(path, 0o600);
+  assert.deepEqual(readdirSync(directory), [basename(path)]);
 });
 
 test("atomic JSON writer cleans its random temporary sibling after rename failure", (t) => {
@@ -169,20 +196,20 @@ test("atomic JSON writer reports published bytes when parent fsync fails after r
   const path = join(directory, "settings.json");
   writeFileSync(path, '{"before":true}\n', "utf8");
   const originalRename = fs.renameSync;
-  const originalFsync = fs.fsyncSync;
+  const originalDirectorySync = directorySyncCapability.sync;
   let published = false;
   fs.renameSync = ((from: fs.PathLike, to: fs.PathLike) => {
     originalRename(from, to);
     if (String(to) === path) published = true;
   }) as typeof fs.renameSync;
-  fs.fsyncSync = ((descriptor: number) => {
-    if (published) throw new Error("fake parent fsync secret");
-    return originalFsync(descriptor);
-  }) as typeof fs.fsyncSync;
+  directorySyncCapability.sync = (directory) => {
+    if (published && directory === dirname(path)) throw new Error("fake parent fsync secret");
+    return true;
+  };
   syncBuiltinESMExports();
   t.after(() => {
     fs.renameSync = originalRename;
-    fs.fsyncSync = originalFsync;
+    directorySyncCapability.sync = originalDirectorySync;
     syncBuiltinESMExports();
   });
 
@@ -197,6 +224,26 @@ test("atomic JSON writer reports published bytes when parent fsync fails after r
     },
   );
   assert.deepEqual(JSON.parse(readFileSync(path, "utf8")), { after: true });
+});
+
+test("directory sync capability reports Windows unsupported without invoking filesystem ops", () => {
+  const calls: string[] = [];
+  const windows = createDirectorySyncCapability("win32", {
+    open(path) {
+      calls.push(`open:${path}`);
+      return 1;
+    },
+    fsync(descriptor) {
+      calls.push(`fsync:${descriptor}`);
+    },
+    close(descriptor) {
+      calls.push(`close:${descriptor}`);
+    },
+  });
+
+  assert.equal(windows.supported, false);
+  assert.equal(windows.sync("C:\\Users\\Ada"), false);
+  assert.deepEqual(calls, []);
 });
 
 test("conditional JSON results only report recovery artifacts that still exist", (t) => {

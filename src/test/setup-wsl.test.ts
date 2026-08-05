@@ -11,7 +11,7 @@ import fs, {
 } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, join, posix, win32 } from "node:path";
 import type { ProcessResult, ProcessRunOptions, ProcessRunner } from "../setup/process.js";
 import {
   WslManualConfigurationError,
@@ -52,6 +52,48 @@ class FakeRunner implements ProcessRunner {
     this.calls.push({ command, args: [...args], options });
     return this.response;
   }
+}
+
+function nativeDesktopFixture(root: string): {
+  parent: string;
+  configPath: string;
+  platform: ReturnType<typeof createPlatformServices>;
+} {
+  if (process.platform === "win32") {
+    const parent = join(root, "Claude");
+    return {
+      parent,
+      configPath: join(parent, "claude_desktop_config.json"),
+      platform: createPlatformServices({
+        platform: "win32",
+        home: "C:\\Users\\Ada",
+        appData: root,
+        env: { PATH: "" },
+        isWsl: false,
+        claudeDesktopInstalled: true,
+      }),
+    };
+  }
+  const parent = join(root, "Library", "Application Support", "Claude");
+  return {
+    parent,
+    configPath: join(parent, "claude_desktop_config.json"),
+    platform: createPlatformServices({
+      platform: "darwin",
+      home: root,
+      env: { PATH: "" },
+      isWsl: false,
+      claudeDesktopInstalled: true,
+    }),
+  };
+}
+
+function posixFilesystemRoot(t: test.TestContext): string {
+  const nativeRoot = mkdtempSync(join(process.cwd(), ".rocky-wsl-production-"));
+  t.after(() => rmSync(nativeRoot, { recursive: true, force: true }));
+  if (process.platform !== "win32") return nativeRoot;
+  const drive = win32.parse(nativeRoot).root;
+  return `/${nativeRoot.slice(drive.length).replaceAll("\\", "/")}`;
 }
 
 test("WSL Desktop registration stores exact Windows command and Linux argv", () => {
@@ -212,15 +254,14 @@ test("mounted path conversion turns runner rejection into secret-free manual gui
 });
 
 test("production WSL Desktop construction verifies every bridge input before conversion", async (t) => {
-  const root = mkdtempSync(join(tmpdir(), "rocky-wsl-production-"));
-  t.after(() => rmSync(root, { recursive: true, force: true }));
-  const configPath = join(root, "mnt/c/Users/Ada/AppData/Roaming/Claude/claude_desktop_config.json");
-  const mountedWsl = join(root, "mnt/c/Windows/System32/wsl.exe");
-  const wslpath = join(root, "usr/bin/wslpath");
+  const root = posixFilesystemRoot(t);
+  const configPath = posix.join(root, "mnt/c/Users/Ada/AppData/Roaming/Claude/claude_desktop_config.json");
+  const mountedWsl = posix.join(root, "mnt/c/Windows/System32/wsl.exe");
+  const wslpath = posix.join(root, "usr/bin/wslpath");
   const envPath = "/usr/bin/env";
-  const nodePath = join(root, "usr/bin/node");
-  const entryPath = join(root, "opt/rocky/dist/index.js");
-  const rockyHome = join(root, "home/ada/.rocky");
+  const nodePath = posix.join(root, "usr/bin/node");
+  const entryPath = posix.join(root, "opt/rocky/dist/index.js");
+  const rockyHome = posix.join(root, "home/ada/.rocky");
   for (const path of [configPath, mountedWsl, wslpath, nodePath, entryPath]) {
     mkdirSync(dirname(path), { recursive: true });
     writeFileSync(path, path === configPath ? "{}\n" : "fixture", "utf8");
@@ -228,7 +269,7 @@ test("production WSL Desktop construction verifies every bridge input before con
   const existing = new Set([configPath, mountedWsl, wslpath, envPath, nodePath, entryPath]);
   const platform = createPlatformServices({
     platform: "linux",
-    home: join(root, "home/ada"),
+    home: posix.join(root, "home/ada"),
     env: { PATH: "" },
     isWsl: true,
     wslDistro: "Ubuntu-24.04",
@@ -443,17 +484,12 @@ test("explicit WSL Desktop config is an additional deduplicated candidate", () =
 });
 
 test("native macOS and Windows skip Desktop when the client is absent", async (t) => {
-  const macRoot = mkdtempSync(join(tmpdir(), "rocky-native-absent-"));
-  const windowsRoot = mkdtempSync(join(tmpdir(), "rocky-native-absent-"));
-  t.after(() => rmSync(macRoot, { recursive: true, force: true }));
-  t.after(() => rmSync(windowsRoot, { recursive: true, force: true }));
   const cases = [
     {
       name: "macOS",
-      configParent: join(macRoot, "Library"),
       platform: createPlatformServices({
         platform: "darwin",
-        home: macRoot,
+        home: "/Users/Ada",
         env: { PATH: "" },
         isWsl: false,
         fileExists: () => false,
@@ -461,11 +497,10 @@ test("native macOS and Windows skip Desktop when the client is absent", async (t
     },
     {
       name: "Windows",
-      configParent: join(windowsRoot, "Claude"),
       platform: createPlatformServices({
         platform: "win32",
         home: "C:\\Users\\Ada",
-        appData: windowsRoot,
+        appData: "C:\\Users\\Ada\\AppData\\Roaming",
         env: { PATH: "", LOCALAPPDATA: "C:\\Users\\Ada\\AppData\\Local" },
         isWsl: false,
         fileExists: () => false,
@@ -475,11 +510,12 @@ test("native macOS and Windows skip Desktop when the client is absent", async (t
 
   for (const entry of cases) {
     await t.test(entry.name, async () => {
-      const adapters = await createProductionAdapters(entry.platform, new FakeRunner({
+      const runner = new FakeRunner({
         status: 0,
         stdout: "",
         stderr: "",
-      }), completeRegistration);
+      });
+      const adapters = await createProductionAdapters(entry.platform, runner, completeRegistration);
       const desktop = adapters.find(({ id }) => id === "claude-desktop");
       assert.ok(desktop !== undefined);
 
@@ -489,233 +525,138 @@ test("native macOS and Windows skip Desktop when the client is absent", async (t
       assert.equal(inspected.state, "blocked");
       assert.match(inspected.detail ?? "", /not installed/i);
       assert.equal(configured.status, "skipped");
-      assert.equal(existsSync(entry.configParent), false);
+      assert.deepEqual(runner.calls, []);
     });
   }
 });
 
 test("installed native Desktop is configurable before its first config file exists", async (t) => {
-  const macRoot = mkdtempSync(join(tmpdir(), "rocky-native-desktop-"));
-  const windowsRoot = mkdtempSync(join(tmpdir(), "rocky-native-desktop-"));
-  t.after(() => rmSync(macRoot, { recursive: true, force: true }));
-  t.after(() => rmSync(windowsRoot, { recursive: true, force: true }));
-  const macApp = "/Applications/Claude.app";
-  const windowsApp = "C:\\Users\\Ada\\AppData\\Local\\AnthropicClaude\\Claude.exe";
-  const cases = [
-    {
-      name: "macOS",
-      configPath: join(macRoot, "Library", "Application Support", "Claude", "claude_desktop_config.json"),
-      platform: createPlatformServices({
-        platform: "darwin",
-        home: macRoot,
-        env: { PATH: "" },
-        isWsl: false,
-        fileExists: (path) => path === macApp,
-      }),
-    },
-    {
-      name: "Windows",
-      configPath: join(windowsRoot, "Claude", "claude_desktop_config.json"),
-      platform: createPlatformServices({
-        platform: "win32",
-        home: "C:\\Users\\Ada",
-        appData: windowsRoot,
-        env: { PATH: "", LOCALAPPDATA: "C:\\Users\\Ada\\AppData\\Local" },
-        isWsl: false,
-        fileExists: (path) => path === windowsApp,
-      }),
-    },
-  ];
+  const root = mkdtempSync(join(tmpdir(), "rocky-native-desktop-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const fixture = nativeDesktopFixture(root);
+  const adapters = await createProductionAdapters(fixture.platform, new FakeRunner({
+    status: 0,
+    stdout: "",
+    stderr: "",
+  }), completeRegistration);
+  const desktop = adapters.find(({ id }) => id === "claude-desktop");
+  assert.ok(desktop !== undefined);
 
-  for (const entry of cases) {
-    await t.test(entry.name, async () => {
-      const adapters = await createProductionAdapters(entry.platform, new FakeRunner({
-        status: 0,
-        stdout: "",
-        stderr: "",
-      }), completeRegistration);
-      const desktop = adapters.find(({ id }) => id === "claude-desktop");
-      assert.ok(desktop !== undefined);
-
-      assert.equal((await desktop.inspect(completeRegistration)).state, "absent");
-      assert.equal((await desktop.configure(completeRegistration, false)).status, "configured");
-      assert.deepEqual(JSON.parse(readFileSync(entry.configPath, "utf8")), {
-        mcpServers: {
-          rocky: {
-            type: "stdio",
-            command: completeRegistration.command,
-            args: [...completeRegistration.args],
-            env: { ...completeRegistration.env },
-          },
-        },
-      });
-    });
-  }
+  assert.equal((await desktop.inspect(completeRegistration)).state, "absent");
+  assert.equal((await desktop.configure(completeRegistration, false)).status, "configured");
+  assert.deepEqual(JSON.parse(readFileSync(fixture.configPath, "utf8")), {
+    mcpServers: {
+      rocky: {
+        type: "stdio",
+        command: completeRegistration.command,
+        args: [...completeRegistration.args],
+        env: { ...completeRegistration.env },
+      },
+    },
+  });
 });
 
 test("native Desktop rejects parent replacement during fresh inspection", async (t) => {
-  const macRoot = mkdtempSync(join(tmpdir(), "rocky-native-fresh-swap-"));
-  const windowsRoot = mkdtempSync(join(tmpdir(), "rocky-native-fresh-swap-"));
+  const root = mkdtempSync(join(tmpdir(), "rocky-native-fresh-swap-"));
   const attackerRoot = mkdtempSync(join(tmpdir(), "rocky-native-fresh-target-"));
-  t.after(() => rmSync(macRoot, { recursive: true, force: true }));
-  t.after(() => rmSync(windowsRoot, { recursive: true, force: true }));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
   t.after(() => rmSync(attackerRoot, { recursive: true, force: true }));
-  const cases = [
-    {
-      name: "macOS",
-      parent: join(macRoot, "Library", "Application Support", "Claude"),
-      platform: createPlatformServices({
-        platform: "darwin",
-        home: macRoot,
-        env: { PATH: "" },
-        isWsl: false,
-        claudeDesktopInstalled: true,
-      }),
-    },
-    {
-      name: "Windows",
-      parent: join(windowsRoot, "Claude"),
-      platform: createPlatformServices({
-        platform: "win32",
-        home: "C:\\Users\\Ada",
-        appData: windowsRoot,
-        env: { PATH: "" },
-        isWsl: false,
-        claudeDesktopInstalled: true,
-      }),
-    },
-  ];
+  const fixture = nativeDesktopFixture(root);
+  const displacedParent = `${fixture.parent}-prepared`;
+  const attackerTarget = join(attackerRoot, "attacker");
+  mkdirSync(attackerTarget);
+  const originalReaddir = fs.readdirSync;
+  let swapped = false;
+  fs.readdirSync = ((path: fs.PathLike, options?: unknown) => {
+    if (!swapped && String(path) === fixture.parent && existsSync(fixture.parent)) {
+      fs.renameSync(fixture.parent, displacedParent);
+      symlinkSync(attackerTarget, fixture.parent, "dir");
+      swapped = true;
+    }
+    return options === undefined
+      ? originalReaddir(path)
+      : originalReaddir(path, options as never);
+  }) as typeof fs.readdirSync;
+  syncBuiltinESMExports();
 
-  for (const entry of cases) {
-    await t.test(entry.name, async () => {
-      const displacedParent = `${entry.parent}-prepared`;
-      const attackerTarget = join(attackerRoot, entry.name);
-      mkdirSync(attackerTarget);
-      const originalReaddir = fs.readdirSync;
-      let swapped = false;
-      fs.readdirSync = ((path: fs.PathLike, options?: unknown) => {
-        if (!swapped && String(path) === entry.parent && existsSync(entry.parent)) {
-          fs.renameSync(entry.parent, displacedParent);
-          symlinkSync(attackerTarget, entry.parent, "dir");
-          swapped = true;
-        }
-        return options === undefined
-          ? originalReaddir(path)
-          : originalReaddir(path, options as never);
-      }) as typeof fs.readdirSync;
-      syncBuiltinESMExports();
+  try {
+    const adapters = await createProductionAdapters(
+      fixture.platform,
+      new FakeRunner({ status: 0, stdout: "", stderr: "" }),
+      completeRegistration,
+    );
+    const desktop = adapters.find(({ id }) => id === "claude-desktop");
+    assert.ok(desktop !== undefined);
 
-      try {
-        const adapters = await createProductionAdapters(
-          entry.platform,
-          new FakeRunner({ status: 0, stdout: "", stderr: "" }),
-          completeRegistration,
-        );
-        const desktop = adapters.find(({ id }) => id === "claude-desktop");
-        assert.ok(desktop !== undefined);
+    const result = await desktop.configure(completeRegistration, false);
 
-        const result = await desktop.configure(completeRegistration, false);
-
-        assert.equal(swapped, true);
-        assert.equal(result.status, "failed");
-        assert.doesNotMatch(result.detail ?? "", /fake-secret|ROCKY_HOME|\/home\/ada/i);
-        assert.deepEqual(originalReaddir(attackerTarget), []);
-        assert.deepEqual(originalReaddir(displacedParent), []);
-      } finally {
-        fs.readdirSync = originalReaddir;
-        syncBuiltinESMExports();
-      }
-    });
+    assert.equal(swapped, true);
+    assert.equal(result.status, "failed");
+    assert.doesNotMatch(result.detail ?? "", /fake-secret|ROCKY_HOME|\/home\/ada/i);
+    assert.deepEqual(originalReaddir(attackerTarget), []);
+    assert.deepEqual(originalReaddir(displacedParent), []);
+  } finally {
+    fs.readdirSync = originalReaddir;
+    syncBuiltinESMExports();
   }
 });
 
 test("native Desktop revalidates parent inside writer before publication", async (t) => {
-  const macRoot = mkdtempSync(join(tmpdir(), "rocky-native-writer-swap-"));
-  const windowsRoot = mkdtempSync(join(tmpdir(), "rocky-native-writer-swap-"));
-  t.after(() => rmSync(macRoot, { recursive: true, force: true }));
-  t.after(() => rmSync(windowsRoot, { recursive: true, force: true }));
-  const cases = [
-    {
-      name: "macOS",
-      parent: join(macRoot, "Library", "Application Support", "Claude"),
-      configName: "claude_desktop_config.json",
-      platform: createPlatformServices({
-        platform: "darwin",
-        home: macRoot,
-        env: { PATH: "" },
-        isWsl: false,
-        claudeDesktopInstalled: true,
-      }),
-    },
-    {
-      name: "Windows",
-      parent: join(windowsRoot, "Claude"),
-      configName: "claude_desktop_config.json",
-      platform: createPlatformServices({
-        platform: "win32",
-        home: "C:\\Users\\Ada",
-        appData: windowsRoot,
-        env: { PATH: "" },
-        isWsl: false,
-        claudeDesktopInstalled: true,
-      }),
-    },
-  ];
+  const root = mkdtempSync(join(tmpdir(), "rocky-native-writer-swap-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const fixture = nativeDesktopFixture(root);
+  const configName = basename(fixture.configPath);
+  const displacedParent = `${fixture.parent}-prepared`;
+  const originalLstat = fs.lstatSync;
+  const originalReaddir = fs.readdirSync;
+  let swapped = false;
+  (fs as unknown as { lstatSync: typeof fs.lstatSync }).lstatSync = ((path: fs.PathLike, options?: unknown) => {
+    const transactionExists = existsSync(fixture.parent)
+      && originalReaddir(fixture.parent).some((name) => name.startsWith(`.${configName}.transaction-`));
+    if (!swapped && transactionExists) {
+      fs.renameSync(fixture.parent, displacedParent);
+      mkdirSync(fixture.parent, { mode: 0o700 });
+      swapped = true;
+    }
+    return options === undefined
+      ? originalLstat(path)
+      : originalLstat(path, options as never);
+  }) as typeof fs.lstatSync;
+  syncBuiltinESMExports();
 
-  for (const entry of cases) {
-    await t.test(entry.name, async () => {
-      const displacedParent = `${entry.parent}-prepared`;
-      const originalLstat = fs.lstatSync;
-      const originalReaddir = fs.readdirSync;
-      let swapped = false;
-      (fs as unknown as { lstatSync: typeof fs.lstatSync }).lstatSync = ((path: fs.PathLike, options?: unknown) => {
-        const transactionExists = existsSync(entry.parent)
-          && originalReaddir(entry.parent).some((name) => name.startsWith(`.${entry.configName}.transaction-`));
-        if (!swapped && transactionExists) {
-          fs.renameSync(entry.parent, displacedParent);
-          mkdirSync(entry.parent, { mode: 0o700 });
-          swapped = true;
-        }
-        return options === undefined
-          ? originalLstat(path)
-          : originalLstat(path, options as never);
-      }) as typeof fs.lstatSync;
-      syncBuiltinESMExports();
+  try {
+    const adapters = await createProductionAdapters(
+      fixture.platform,
+      new FakeRunner({ status: 0, stdout: "", stderr: "" }),
+      completeRegistration,
+    );
+    const desktop = adapters.find(({ id }) => id === "claude-desktop");
+    assert.ok(desktop !== undefined);
 
-      try {
-        const adapters = await createProductionAdapters(
-          entry.platform,
-          new FakeRunner({ status: 0, stdout: "", stderr: "" }),
-          completeRegistration,
-        );
-        const desktop = adapters.find(({ id }) => id === "claude-desktop");
-        assert.ok(desktop !== undefined);
+    const result = await desktop.configure(completeRegistration, false);
 
-        const result = await desktop.configure(completeRegistration, false);
-
-        assert.equal(swapped, true);
-        assert.equal(result.status, "failed");
-        assert.doesNotMatch(result.detail ?? "", /fake-secret|ROCKY_HOME|\/home\/ada/i);
-        assert.deepEqual(originalReaddir(entry.parent), []);
-        assert.equal(existsSync(join(displacedParent, entry.configName)), false);
-        assert.equal(
-          originalReaddir(displacedParent).some((name) => name.startsWith(`.${entry.configName}.transaction-`)),
-          true,
-        );
-      } finally {
-        (fs as unknown as { lstatSync: typeof fs.lstatSync }).lstatSync = originalLstat;
-        syncBuiltinESMExports();
-      }
-    });
+    assert.equal(swapped, true);
+    assert.equal(result.status, "failed");
+    assert.doesNotMatch(result.detail ?? "", /fake-secret|ROCKY_HOME|\/home\/ada/i);
+    assert.deepEqual(originalReaddir(fixture.parent), []);
+    assert.equal(existsSync(join(displacedParent, configName)), false);
+    assert.equal(
+      originalReaddir(displacedParent).some((name) => name.startsWith(`.${configName}.transaction-`)),
+      true,
+    );
+  } finally {
+    (fs as unknown as { lstatSync: typeof fs.lstatSync }).lstatSync = originalLstat;
+    syncBuiltinESMExports();
   }
 });
 
 test("native Desktop never cleans through topology rebound after publication collision", async (t) => {
   const root = mkdtempSync(join(tmpdir(), "rocky-native-cleanup-swap-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
-  const parent = join(root, "Library", "Application Support", "Claude");
+  const fixture = nativeDesktopFixture(root);
+  const parent = fixture.parent;
   const displacedParent = `${parent}-prepared`;
-  const configPath = join(parent, "claude_desktop_config.json");
+  const configPath = fixture.configPath;
   const sentinel = "attacker-sentinel\n";
   const originalLink = fs.linkSync;
   let sentinelPath: string | undefined;
@@ -733,15 +674,8 @@ test("native Desktop never cleans through topology rebound after publication col
   syncBuiltinESMExports();
 
   try {
-    const platform = createPlatformServices({
-      platform: "darwin",
-      home: root,
-      env: { PATH: "" },
-      isWsl: false,
-      claudeDesktopInstalled: true,
-    });
     const adapters = await createProductionAdapters(
-      platform,
+      fixture.platform,
       new FakeRunner({ status: 0, stdout: "", stderr: "" }),
       completeRegistration,
     );
@@ -765,9 +699,10 @@ test("native Desktop never cleans through topology rebound after publication col
 test("native Desktop does not create or advertise a backup after parent identity changes", async (t) => {
   const root = mkdtempSync(join(tmpdir(), "rocky-native-backup-create-swap-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
-  const parent = join(root, "Library", "Application Support", "Claude");
+  const fixture = nativeDesktopFixture(root);
+  const parent = fixture.parent;
   const displacedParent = `${parent}-prepared`;
-  const configPath = join(parent, "claude_desktop_config.json");
+  const configPath = fixture.configPath;
   mkdirSync(parent, { recursive: true });
   writeFileSync(configPath, '{"theme":"dark"}\n', "utf8");
   const originalFstat = fs.fstatSync;
@@ -793,15 +728,8 @@ test("native Desktop does not create or advertise a backup after parent identity
   syncBuiltinESMExports();
 
   try {
-    const platform = createPlatformServices({
-      platform: "darwin",
-      home: root,
-      env: { PATH: "" },
-      isWsl: false,
-      claudeDesktopInstalled: true,
-    });
     const adapters = await createProductionAdapters(
-      platform,
+      fixture.platform,
       new FakeRunner({ status: 0, stdout: "", stderr: "" }),
       completeRegistration,
     );
@@ -829,9 +757,10 @@ test("native Desktop does not create or advertise a backup after parent identity
 test("native Desktop backup cleanup never removes a rebound attacker file", async (t) => {
   const root = mkdtempSync(join(tmpdir(), "rocky-native-backup-cleanup-swap-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
-  const parent = join(root, "Library", "Application Support", "Claude");
+  const fixture = nativeDesktopFixture(root);
+  const parent = fixture.parent;
   const displacedParent = `${parent}-prepared`;
-  const configPath = join(parent, "claude_desktop_config.json");
+  const configPath = fixture.configPath;
   const sentinel = "attacker-backup-sentinel\n";
   mkdirSync(parent, { recursive: true });
   writeFileSync(configPath, '{"theme":"dark"}\n', "utf8");
@@ -851,15 +780,8 @@ test("native Desktop backup cleanup never removes a rebound attacker file", asyn
   syncBuiltinESMExports();
 
   try {
-    const platform = createPlatformServices({
-      platform: "darwin",
-      home: root,
-      env: { PATH: "" },
-      isWsl: false,
-      claudeDesktopInstalled: true,
-    });
     const adapters = await createProductionAdapters(
-      platform,
+      fixture.platform,
       new FakeRunner({ status: 0, stdout: "", stderr: "" }),
       completeRegistration,
     );
@@ -885,10 +807,11 @@ test("native Desktop backup cleanup never removes a rebound attacker file", asyn
 test("native Desktop drops cached backup path when topology changes after backup returns", async (t) => {
   const root = mkdtempSync(join(tmpdir(), "rocky-native-backup-report-swap-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
-  const parent = join(root, "Library", "Application Support", "Claude");
+  const fixture = nativeDesktopFixture(root);
+  const parent = fixture.parent;
   const displacedParent = `${parent}-prepared`;
-  const configName = "claude_desktop_config.json";
-  const configPath = join(parent, configName);
+  const configName = basename(fixture.configPath);
+  const configPath = fixture.configPath;
   const originalConfig = '{"theme":"dark","secret":"fake-original-secret"}\n';
   mkdirSync(parent, { recursive: true });
   writeFileSync(configPath, originalConfig, "utf8");
@@ -914,15 +837,8 @@ test("native Desktop drops cached backup path when topology changes after backup
   syncBuiltinESMExports();
 
   try {
-    const platform = createPlatformServices({
-      platform: "darwin",
-      home: root,
-      env: { PATH: "" },
-      isWsl: false,
-      claudeDesktopInstalled: true,
-    });
     const adapters = await createProductionAdapters(
-      platform,
+      fixture.platform,
       new FakeRunner({ status: 0, stdout: "", stderr: "" }),
       completeRegistration,
     );
@@ -948,7 +864,8 @@ test("native Desktop drops cached backup path when topology changes after backup
 test("native Desktop manifest cleanup revalidates after probing a rebound temporary path", async (t) => {
   const root = mkdtempSync(join(tmpdir(), "rocky-native-manifest-cleanup-swap-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
-  const parent = join(root, "Library", "Application Support", "Claude");
+  const fixture = nativeDesktopFixture(root);
+  const parent = fixture.parent;
   const displacedParent = `${parent}-prepared`;
   const originalLstat = fs.lstatSync;
   const originalRename = fs.renameSync;
@@ -975,15 +892,8 @@ test("native Desktop manifest cleanup revalidates after probing a rebound tempor
   syncBuiltinESMExports();
 
   try {
-    const platform = createPlatformServices({
-      platform: "darwin",
-      home: root,
-      env: { PATH: "" },
-      isWsl: false,
-      claudeDesktopInstalled: true,
-    });
     const adapters = await createProductionAdapters(
-      platform,
+      fixture.platform,
       new FakeRunner({ status: 0, stdout: "", stderr: "" }),
       completeRegistration,
     );
@@ -996,7 +906,7 @@ test("native Desktop manifest cleanup revalidates after probing a rebound tempor
     assert.doesNotMatch(result.detail ?? "", /attacker-manifest|ROCKY_HOME|\/home\/ada/i);
     assert.ok(reboundManifestPath !== undefined);
     assert.equal(readFileSync(reboundManifestPath, "utf8"), sentinel);
-    assert.equal(existsSync(join(displacedParent, "claude_desktop_config.json")), false);
+    assert.equal(existsSync(join(displacedParent, basename(fixture.configPath))), false);
   } finally {
     (fs as unknown as { lstatSync: typeof fs.lstatSync }).lstatSync = originalLstat;
     (fs as unknown as { renameSync: typeof fs.renameSync }).renameSync = originalRename;
@@ -1005,57 +915,49 @@ test("native Desktop manifest cleanup revalidates after probing a rebound tempor
 });
 
 test("native Desktop parent preparation rejects linked and non-directory topology", async (t) => {
-  const macRoot = mkdtempSync(join(tmpdir(), "rocky-native-topology-"));
-  const linkedTarget = mkdtempSync(join(tmpdir(), "rocky-native-target-"));
-  const windowsRoot = mkdtempSync(join(tmpdir(), "rocky-native-topology-"));
-  t.after(() => rmSync(macRoot, { recursive: true, force: true }));
-  t.after(() => rmSync(linkedTarget, { recursive: true, force: true }));
-  t.after(() => rmSync(windowsRoot, { recursive: true, force: true }));
+  await t.test("symlink", async (subtest) => {
+    const root = mkdtempSync(join(tmpdir(), "rocky-native-topology-linked-"));
+    const linkedTarget = mkdtempSync(join(tmpdir(), "rocky-native-target-"));
+    subtest.after(() => rmSync(root, { recursive: true, force: true }));
+    subtest.after(() => rmSync(linkedTarget, { recursive: true, force: true }));
+    const fixture = nativeDesktopFixture(root);
+    mkdirSync(dirname(fixture.parent), { recursive: true });
+    symlinkSync(linkedTarget, fixture.parent, "dir");
 
-  mkdirSync(join(linkedTarget, "Application Support", "Claude"), { recursive: true });
-  symlinkSync(linkedTarget, join(macRoot, "Library"));
-  writeFileSync(join(windowsRoot, "Claude"), "not-a-directory\n", "utf8");
-  const linkedConfig = join(linkedTarget, "Application Support", "Claude", "claude_desktop_config.json");
-  const cases = [
-    {
-      name: "macOS symlink",
-      platform: createPlatformServices({
-        platform: "darwin",
-        home: macRoot,
-        env: { PATH: "" },
-        isWsl: false,
-        claudeDesktopInstalled: true,
-      }),
-    },
-    {
-      name: "Windows non-directory",
-      platform: createPlatformServices({
-        platform: "win32",
-        home: "C:\\Users\\Ada",
-        appData: windowsRoot,
-        env: { PATH: "" },
-        isWsl: false,
-        claudeDesktopInstalled: true,
-      }),
-    },
-  ];
+    const adapters = await createProductionAdapters(
+      fixture.platform,
+      new FakeRunner({ status: 0, stdout: "", stderr: "" }),
+      completeRegistration,
+    );
+    const desktop = adapters.find(({ id }) => id === "claude-desktop");
+    assert.ok(desktop !== undefined);
 
-  for (const entry of cases) {
-    await t.test(entry.name, async () => {
-      const adapters = await createProductionAdapters(
-        entry.platform,
-        new FakeRunner({ status: 0, stdout: "", stderr: "" }),
-        completeRegistration,
-      );
-      const desktop = adapters.find(({ id }) => id === "claude-desktop");
-      assert.ok(desktop !== undefined);
+    const configured = await desktop.configure(completeRegistration, false);
 
-      const configured = await desktop.configure(completeRegistration, false);
+    assert.equal(configured.status, "failed");
+    assert.match(configured.detail ?? "", /parent|topology|manual|read/i);
+    assert.equal(existsSync(join(linkedTarget, basename(fixture.configPath))), false);
+  });
 
-      assert.equal(configured.status, "failed");
-      assert.match(configured.detail ?? "", /parent|topology|manual|read/i);
-      assert.equal(existsSync(linkedConfig), false);
-      assert.equal(readFileSync(join(windowsRoot, "Claude"), "utf8"), "not-a-directory\n");
-    });
-  }
+  await t.test("non-directory", async (subtest) => {
+    const root = mkdtempSync(join(tmpdir(), "rocky-native-topology-file-"));
+    subtest.after(() => rmSync(root, { recursive: true, force: true }));
+    const fixture = nativeDesktopFixture(root);
+    mkdirSync(dirname(fixture.parent), { recursive: true });
+    writeFileSync(fixture.parent, "not-a-directory\n", "utf8");
+
+    const adapters = await createProductionAdapters(
+      fixture.platform,
+      new FakeRunner({ status: 0, stdout: "", stderr: "" }),
+      completeRegistration,
+    );
+    const desktop = adapters.find(({ id }) => id === "claude-desktop");
+    assert.ok(desktop !== undefined);
+
+    const configured = await desktop.configure(completeRegistration, false);
+
+    assert.equal(configured.status, "failed");
+    assert.match(configured.detail ?? "", /parent|topology|manual|read/i);
+    assert.equal(readFileSync(fixture.parent, "utf8"), "not-a-directory\n");
+  });
 });

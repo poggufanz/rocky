@@ -12,10 +12,12 @@ import {
   renameSync,
   rmSync,
   statSync,
+  unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { basename, dirname, join } from "node:path";
+import { directorySyncCapability } from "./directory-sync.js";
 
 export type JsonReadResult =
   | { status: "missing"; value: Record<string, unknown> }
@@ -202,14 +204,7 @@ export class AtomicJsonWriteError extends Error {
 }
 
 function syncParentDirectory(path: string): void {
-  if (process.platform === "win32") return;
-  let descriptor: number | undefined;
-  try {
-    descriptor = openSync(dirname(path), "r");
-    fsyncSync(descriptor);
-  } finally {
-    if (descriptor !== undefined) closeSync(descriptor);
-  }
+  directorySyncCapability.sync(dirname(path));
 }
 
 export function atomicWriteJson(
@@ -367,15 +362,45 @@ function isManagedRecoveryPair(
   }
 }
 
-function syncDirectory(path: string): void {
-  if (process.platform === "win32") return;
-  let descriptor: number | undefined;
-  try {
-    descriptor = openSync(path, "r");
-    fsyncSync(descriptor);
-  } finally {
-    if (descriptor !== undefined) closeSync(descriptor);
+function linkRegularFileNoFollow(existingPath: string, newPath: string): void {
+  const before = lstatSync(existingPath);
+  if (!before.isFile() || before.isSymbolicLink()) {
+    throw new Error("Recovery source is not a regular file");
   }
+
+  let published: ReturnType<typeof lstatSync> | undefined;
+  try {
+    linkSync(existingPath, newPath);
+    published = lstatSync(newPath);
+    const after = lstatSync(existingPath);
+    if (!published.isFile()
+      || published.isSymbolicLink()
+      || !after.isFile()
+      || after.isSymbolicLink()
+      || before.dev !== after.dev
+      || before.ino !== after.ino
+      || after.dev !== published.dev
+      || after.ino !== published.ino) {
+      throw new Error("Recovery source changed during publication");
+    }
+  } catch (error) {
+    if (published !== undefined) {
+      try {
+        const current = lstatSync(newPath);
+        if (current.dev === published.dev && current.ino === published.ino) {
+          unlinkSync(newPath);
+          syncParentDirectory(newPath);
+        }
+      } catch {
+        // Caller retains the transaction as the manual recovery authority.
+      }
+    }
+    throw error;
+  }
+}
+
+function syncDirectory(path: string): void {
+  directorySyncCapability.sync(path);
 }
 
 function writeManifest(
@@ -535,7 +560,7 @@ export function recoverJsonTransaction(
       }
       if (!mutationGuardUnchanged(guard)) return { status: "manual" };
       try {
-        linkSync(displacedPath, path);
+        linkRegularFileNoFollow(displacedPath, path);
         syncParentDirectory(path);
       } catch {
         return {
@@ -590,7 +615,7 @@ function restoreDisplaced(
   }
   try {
     requireMutationGuard(guard);
-    linkSync(displacedPath, path);
+    linkRegularFileNoFollow(displacedPath, path);
     syncParentDirectory(path);
   } catch {
     return {

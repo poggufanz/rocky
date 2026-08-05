@@ -559,7 +559,7 @@ async function activateMissingTarget(
         true,
       );
     }
-    if (isDestinationCollision(error)) {
+    if (isDestinationCollision(error) || await optionalLstat(target, ops) !== undefined) {
       throw new VoiceSkillRefusal(`Voice skill destination race refused: ${target}`);
     }
     throw error;

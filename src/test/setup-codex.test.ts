@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import {
+import fs, {
   chmodSync,
   lstatSync,
   mkdtempSync,
@@ -8,9 +8,11 @@ import {
   readdirSync,
   rmSync,
   symlinkSync,
+  type Stats,
 } from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { createCodexAdapter } from "../setup/codex.js";
 import type { McpRegistration } from "../setup/clients.js";
 import type { ProcessResult, ProcessRunOptions, ProcessRunner } from "../setup/process.js";
@@ -89,6 +91,45 @@ function recoveryPath(detail: string | undefined): string {
   const match = /manual recovery:\s+([^;\n]+)/i.exec(detail ?? "");
   assert.ok(match?.[1], "result must report a recovery artifact path");
   return match[1];
+}
+
+function simulateWindowsArtifactMetadata(
+  t: test.TestContext,
+  mutate: (metadata: Stats) => void = () => {},
+): void {
+  const platform = Object.getOwnPropertyDescriptor(process, "platform");
+  const originalLstat = fs.lstatSync;
+  assert.ok(platform);
+  Object.defineProperty(process, "platform", { ...platform, value: "win32" });
+  const injectedLstat = ((path: fs.PathLike, options?: fs.StatSyncOptions) => {
+    const metadata = originalLstat(path, options as never) as Stats;
+    if (basename(String(path)).startsWith("codex-rocky-")) {
+      Object.defineProperty(metadata, "mode", {
+        configurable: true,
+        value: (metadata.mode & ~0o777) | 0o666,
+      });
+      mutate(metadata);
+    }
+    return metadata as never;
+  }) as typeof fs.lstatSync;
+  Object.defineProperty(fs, "lstatSync", { configurable: true, value: injectedLstat });
+  syncBuiltinESMExports();
+  t.after(() => {
+    Object.defineProperty(fs, "lstatSync", { configurable: true, value: originalLstat });
+    Object.defineProperty(process, "platform", platform);
+    syncBuiltinESMExports();
+  });
+}
+
+function assertRequestedMode(path: string, posixMode: number, kind: "file" | "directory"): void {
+  const metadata = lstatSync(path);
+  assert.equal(kind === "file" ? metadata.isFile() : metadata.isDirectory(), true);
+  assert.equal(metadata.isSymbolicLink(), false);
+  if (process.platform === "win32") {
+    assert.equal((metadata.mode & 0o222) === 0, (posixMode & 0o222) === 0);
+  } else {
+    assert.equal(metadata.mode & 0o777, posixMode);
+  }
 }
 
 function completeSnapshot(
@@ -249,8 +290,67 @@ test("replace persists then deletes prior snapshot only after desired registrati
   ]);
   const recoveryDirectory = join(dirname(desired.env.ROCKY_HOME!), ".rocky-setup-recovery");
   assert.deepEqual(readdirSync(recoveryDirectory), []);
-  assert.equal(lstatSync(recoveryDirectory).mode & 0o777, 0o700);
+  assertRequestedMode(recoveryDirectory, 0o700, "directory");
   assert.throws(() => lstatSync(desired.env.ROCKY_HOME!), { code: "ENOENT" });
+});
+
+test("Windows recovery mode semantics reach the intended remove and replacement flow", async (t) => {
+  simulateWindowsArtifactMetadata(t);
+  const desired = temporaryRegistration(t);
+  const runner = new FakeRunner([
+    result(0, JSON.stringify(completeSnapshot("C:\\old\\node.exe"))),
+    result(0),
+    result(0),
+    result(0, JSON.stringify(completeSnapshot(desired.command, desired.args, desired.env))),
+  ]);
+
+  const configured = await createCodexAdapter({ runner, executable: "C:\\tools\\codex.exe" })
+    .configure(desired, true);
+
+  assert.deepEqual(configured, { client: "codex", status: "configured" });
+  assert.deepEqual(runner.calls.map((call) => call.args), [
+    getArgs,
+    removeArgs,
+    addArgumentsFor(desired),
+    getArgs,
+  ]);
+});
+
+test("Windows recovery artifact identity and link-count mismatches stop before remove", async (t) => {
+  const cases: Array<{
+    name: string;
+    mutate(metadata: Stats): void;
+  }> = [
+    {
+      name: "identity",
+      mutate(metadata) {
+        Object.defineProperty(metadata, "ino", { configurable: true, value: metadata.ino + 1 });
+      },
+    },
+    {
+      name: "link count",
+      mutate(metadata) {
+        Object.defineProperty(metadata, "nlink", { configurable: true, value: 2 });
+      },
+    },
+  ];
+
+  for (const entry of cases) {
+    await t.test(entry.name, async (child) => {
+      simulateWindowsArtifactMetadata(child, entry.mutate);
+      const desired = temporaryRegistration(child);
+      const runner = new FakeRunner([
+        result(0, JSON.stringify(completeSnapshot("C:\\old\\node.exe"))),
+      ]);
+
+      const configured = await createCodexAdapter({ runner, executable: "C:\\tools\\codex.exe" })
+        .configure(desired, true);
+
+      assert.equal(configured.status, "failed");
+      assert.match(configured.detail ?? "", /recovery artifact/i);
+      assert.deepEqual(runner.calls.map((call) => call.args), [getArgs]);
+    });
+  }
 });
 
 test("failed replacement add recreates, verifies, and deletes the durable prior snapshot", async (t) => {
@@ -317,10 +417,10 @@ test("rollback verification mismatch retains a private exact recovery artifact",
   assert.deepEqual(JSON.parse(readFileSync(artifact, "utf8")), snapshot);
   assert.equal(lstatSync(artifact).isFile(), true);
   assert.equal(lstatSync(artifact).nlink, 1);
-  assert.equal(lstatSync(artifact).mode & 0o777, 0o600);
+  assertRequestedMode(artifact, 0o600, "file");
   assert.equal(dirname(artifact), join(dirname(desired.env.ROCKY_HOME!), ".rocky-setup-recovery"));
   assert.equal(lstatSync(dirname(artifact)).isSymbolicLink(), false);
-  assert.equal(lstatSync(dirname(artifact)).mode & 0o777, 0o700);
+  assertRequestedMode(dirname(artifact), 0o700, "directory");
 });
 
 test("rollback add failure retains collision-safe recovery artifacts and reports no secrets", async (t) => {
@@ -416,7 +516,7 @@ test("private recovery directory is allowed under an existing searchable user ho
     .configure(desired, true);
 
   assert.equal(configured.status, "configured");
-  assert.equal(lstatSync(join(userHome, ".rocky-setup-recovery")).mode & 0o777, 0o700);
+  assertRequestedMode(join(userHome, ".rocky-setup-recovery"), 0o700, "directory");
   assert.throws(() => lstatSync(desired.env.ROCKY_HOME!), { code: "ENOENT" });
 });
 

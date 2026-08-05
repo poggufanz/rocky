@@ -103,6 +103,19 @@ function assertNoForbiddenArtifact(path: string): void {
   }
 }
 
+function spawnDiagnostic(result: ReturnType<typeof spawnSync>): string {
+  return JSON.stringify({
+    error: result.error?.message ?? null,
+    signal: result.signal ?? null,
+    status: result.status ?? null,
+    stderr: typeof result.stderr === "string"
+      ? result.stderr
+      : result.stderr === undefined || result.stderr === null
+        ? ""
+        : String(result.stderr),
+  });
+}
+
 function dryRunPack(t: test.TestContext): PackResult {
   const root = mkdtempSync(join(tmpdir(), "rocky-package-metadata-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
@@ -110,7 +123,8 @@ function dryRunPack(t: test.TestContext): PackResult {
   const cache = join(root, "npm-cache");
   const userConfig = join(root, "empty-npmrc");
   writeFileSync(userConfig, "", "utf8");
-  const npm = process.platform === "win32" ? "npm.cmd" : "npm";
+  const npmCli = process.env.npm_execpath;
+  assert.ok(npmCli, "npm lifecycle must expose its JavaScript CLI entry");
   const env: NodeJS.ProcessEnv = { ...process.env };
   for (const key of Object.keys(env)) {
     if (/^npm_config_/i.test(key) || /^(?:npm_token|node_auth_token)$/i.test(key)) delete env[key];
@@ -123,7 +137,8 @@ function dryRunPack(t: test.TestContext): PackResult {
     NPM_CONFIG_OFFLINE: "true",
   });
   delete env.NODE_TEST_CONTEXT;
-  const result = spawnSync(npm, [
+  const result = spawnSync(process.execPath, [
+    npmCli,
     "pack",
     "--dry-run",
     "--json",
@@ -135,18 +150,29 @@ function dryRunPack(t: test.TestContext): PackResult {
     env,
     encoding: "utf8",
   });
-  assert.equal(result.status, 0, result.stderr);
-  assert.notEqual(result.stdout.trim(), "", JSON.stringify({
-    error: result.error?.message,
-    signal: result.signal,
-    status: result.status,
-    stderr: result.stderr,
-  }));
+  const diagnostic = spawnDiagnostic(result);
+  assert.equal(result.status, 0, diagnostic);
+  assert.notEqual(result.stdout.trim(), "", diagnostic);
   const parsed = JSON.parse(result.stdout) as unknown;
   assert.ok(Array.isArray(parsed));
   assert.equal(parsed.length, 1);
   return parsed[0] as PackResult;
 }
+
+test("package launcher diagnostics survive a missing executable and undefined stderr", () => {
+  const missing = spawnSync(join(tmpdir(), "rocky-missing-npm-launcher"), [], {
+    encoding: "utf8",
+  });
+
+  assert.doesNotThrow(() => spawnDiagnostic(missing));
+  assert.deepEqual(JSON.parse(spawnDiagnostic(missing)), {
+    error: missing.error?.message ?? null,
+    signal: null,
+    status: null,
+    stderr: "",
+  });
+  assert.match(missing.error?.message ?? "", /ENOENT|not found/i);
+});
 
 test("public package metadata pins the scoped beta identity and release coordinates", () => {
   const metadata = readJson(join(packageRoot, "package.json"));

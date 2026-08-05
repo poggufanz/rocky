@@ -20,6 +20,7 @@ import type {
 } from "./clients.js";
 import type { ProcessResult, ProcessRunner } from "./process.js";
 import { isIdenticalMcpRegistration, isOwnedRockyRegistration } from "./registration.js";
+import { directorySyncCapability } from "./directory-sync.js";
 
 const GET_ARGS = ["mcp", "get", "rocky", "--json"] as const;
 const REMOVE_ARGS = ["mcp", "remove", "rocky"] as const;
@@ -250,13 +251,7 @@ function failed(detail: string, manualRegistration?: McpRegistration): SetupResu
 }
 
 function syncDirectory(path: string): void {
-  if (process.platform === "win32") return;
-  const descriptor = openSync(path, "r");
-  try {
-    fsyncSync(descriptor);
-  } finally {
-    closeSync(descriptor);
-  }
+  directorySyncCapability.sync(path);
 }
 
 function safeBaseDirectory(path: string): boolean {
@@ -312,7 +307,7 @@ function persistRecoveryArtifact(baseDirectory: string, snapshot: unknown): Reco
       || stored.nlink !== 1
       || stored.dev !== identity.dev
       || stored.ino !== identity.ino
-      || (stored.mode & 0o077) !== 0) {
+      || (process.platform !== "win32" && (stored.mode & 0o077) !== 0)) {
       throw new Error("unsafe recovery artifact");
     }
     return { path, directory, dev: stored.dev, ino: stored.ino };

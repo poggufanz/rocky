@@ -21,6 +21,7 @@ import {
   resolveDesktopConfigPath,
 } from "../setup/claude-desktop.js";
 import { createPlatformServices } from "../setup/platform.js";
+import { directorySyncCapability } from "../setup/directory-sync.js";
 
 const registration = {
   name: "rocky" as const,
@@ -53,6 +54,21 @@ function backupPaths(path: string): string[] {
   return readdirSync(dirname(path))
     .filter((name) => name.startsWith(`${basename(path)}.backup-`))
     .map((name) => join(dirname(path), name));
+}
+
+function fileMode(path: string): number {
+  return statSync(path).mode & 0o777;
+}
+
+function assertRequestedFileMode(path: string, posixMode: number): void {
+  const metadata = fs.lstatSync(path);
+  assert.equal(metadata.isFile(), true);
+  assert.equal(metadata.isSymbolicLink(), false);
+  if (process.platform === "win32") {
+    assert.equal((metadata.mode & 0o222) === 0, (posixMode & 0o222) === 0);
+  } else {
+    assert.equal(metadata.mode & 0o777, posixMode);
+  }
 }
 
 function crashTransaction(
@@ -137,6 +153,7 @@ test("configure merges only mcpServers.rocky and backs up exact existing bytes",
   };
   const path = configPath(t, original);
   const originalBytes = readFileSync(path);
+  const originalMode = fileMode(path);
   const adapter = createClaudeDesktopAdapter({ configPath: path });
 
   const configured = await adapter.configure(registration, false);
@@ -150,7 +167,8 @@ test("configure merges only mcpServers.rocky and backs up exact existing bytes",
   const backups = backupPaths(path);
   assert.equal(backups.length, 1);
   assert.deepEqual(readFileSync(backups[0]!), originalBytes);
-  assert.equal(statSync(path).mode & 0o777, 0o640);
+  assert.equal(fileMode(path), originalMode);
+  if (process.platform !== "win32") assert.equal(originalMode, 0o640);
 });
 
 test("configure creates a private missing config without inventing unrelated keys or backup", async (t) => {
@@ -163,7 +181,7 @@ test("configure creates a private missing config without inventing unrelated key
   assert.deepEqual(JSON.parse(readFileSync(path, "utf8")), {
     mcpServers: { rocky: storedRegistration() },
   });
-  assert.equal(statSync(path).mode & 0o777, 0o600);
+  assertRequestedFileMode(path, 0o600);
   assert.deepEqual(backupPaths(path), []);
 });
 
@@ -684,12 +702,14 @@ test("configure preserves an unrelated update injected immediately before replac
   const originalBytes = readFileSync(path);
   const concurrentBytes = Buffer.from(`${JSON.stringify(concurrent, null, 2)}\n`, "utf8");
   const originalRename = fs.renameSync;
+  let concurrentMode: number | undefined;
   let injected = false;
   fs.renameSync = ((source: fs.PathLike, destination: fs.PathLike) => {
     if (!injected && (String(source) === path || String(destination) === path)) {
       injected = true;
       writeFileSync(path, concurrentBytes);
       chmodSync(path, 0o600);
+      concurrentMode = fileMode(path);
     }
     return originalRename(source, destination);
   }) as typeof fs.renameSync;
@@ -704,7 +724,8 @@ test("configure preserves an unrelated update injected immediately before replac
     assert.match(configured.detail ?? "", /changed|recovery|manual|retry/i);
     assert.doesNotMatch(configured.detail ?? "", /fake-late-configure-secret/);
     assert.deepEqual(readFileSync(path), concurrentBytes);
-    assert.equal(statSync(path).mode & 0o777, 0o600);
+    assert.equal(fileMode(path), concurrentMode);
+    assertRequestedFileMode(path, 0o600);
     const backups = backupPaths(path);
     assert.equal(backups.length, 1);
     assert.deepEqual(readFileSync(backups[0]!), originalBytes);
@@ -769,12 +790,14 @@ test("missing-config configure preserves a file created immediately before insta
   const concurrentBytes = Buffer.from(`${JSON.stringify(concurrent, null, 2)}\n`, "utf8");
   const originalRename = fs.renameSync;
   const originalLink = fs.linkSync;
+  let concurrentMode: number | undefined;
   let injected = false;
   const inject = () => {
     if (injected) return;
     injected = true;
     writeFileSync(path, concurrentBytes, { mode: 0o640 });
     chmodSync(path, 0o640);
+    concurrentMode = fileMode(path);
   };
   fs.renameSync = ((source: fs.PathLike, destination: fs.PathLike) => {
     if (String(destination) === path) inject();
@@ -795,7 +818,8 @@ test("missing-config configure preserves a file created immediately before insta
     assert.match(configured.detail ?? "", /changed|recovery|manual|retry/i);
     assert.doesNotMatch(configured.detail ?? "", /fake-late-create-secret/);
     assert.deepEqual(readFileSync(path), concurrentBytes);
-    assert.equal(statSync(path).mode & 0o777, 0o640);
+    assert.equal(fileMode(path), concurrentMode);
+    assertRequestedFileMode(path, 0o640);
     assert.deepEqual(backupPaths(path), []);
     assert.deepEqual(readdirSync(dirname(path)), [basename(path)]);
   } finally {
@@ -968,6 +992,7 @@ test("unsupported hard links abort before displacing an existing config", async 
   };
   const path = configPath(t, original);
   const originalBytes = readFileSync(path);
+  const originalMode = fileMode(path);
   const originalLink = fs.linkSync;
   fs.linkSync = (() => {
     throw Object.assign(new Error("hard links unsupported: fake-hard-link-secret"), { code: "EPERM" });
@@ -982,7 +1007,7 @@ test("unsupported hard links abort before displacing an existing config", async 
     assert.match(configured.detail ?? "", /write Claude Desktop config/i);
     assert.doesNotMatch(configured.detail ?? "", /fake-hard-link-secret|hard links unsupported/);
     assert.deepEqual(readFileSync(path), originalBytes);
-    assert.equal(statSync(path).mode & 0o777, 0o640);
+    assert.equal(fileMode(path), originalMode);
     assert.equal(backupPaths(path).length, 1);
     assert.equal(
       readdirSync(dirname(path)).some((name) => name.includes(".transaction-")),
@@ -994,22 +1019,32 @@ test("unsupported hard links abort before displacing an existing config", async 
   }
 });
 
-test("a symlink swapped in at displacement is restored instead of overwritten", async (t) => {
+test("a symlink swapped in at displacement is preserved without a followed hard link", async (t) => {
   const original = { theme: "dark", mcpServers: { other: { enabled: true } } };
   const path = configPath(t, original);
   const originalBytes = readFileSync(path);
   const concurrentTarget = join(dirname(path), "concurrent-config.json");
   writeFileSync(concurrentTarget, originalBytes, { mode: 0o640 });
   const originalRename = fs.renameSync;
+  const originalLink = fs.linkSync;
+  let displacedPath: string | undefined;
   let injected = false;
   fs.renameSync = ((source: fs.PathLike, destination: fs.PathLike) => {
     if (!injected && String(source) === path && basename(String(destination)) === "displaced") {
       injected = true;
       fs.unlinkSync(path);
       fs.symlinkSync(concurrentTarget, path);
+      displacedPath = String(destination);
     }
     return originalRename(source, destination);
   }) as typeof fs.renameSync;
+  fs.linkSync = ((existingPath: fs.PathLike, newPath: fs.PathLike) => {
+    const source = fs.lstatSync(existingPath);
+    return originalLink(
+      source.isSymbolicLink() ? fs.realpathSync(existingPath) : existingPath,
+      newPath,
+    );
+  }) as typeof fs.linkSync;
   syncBuiltinESMExports();
 
   try {
@@ -1019,11 +1054,14 @@ test("a symlink swapped in at displacement is restored instead of overwritten", 
     assert.equal(injected, true);
     assert.equal(configured.status, "failed");
     assert.match(configured.detail ?? "", /changed|retry|manual recovery/i);
-    assert.equal(fs.lstatSync(path).isSymbolicLink(), true);
-    assert.equal(fs.readlinkSync(path), concurrentTarget);
-    assert.deepEqual(readFileSync(path), originalBytes);
+    assert.throws(() => fs.lstatSync(path), { code: "ENOENT" });
+    assert.notEqual(displacedPath, undefined);
+    assert.equal(fs.lstatSync(displacedPath!).isSymbolicLink(), true);
+    assert.equal(fs.readlinkSync(displacedPath!), concurrentTarget);
+    assert.deepEqual(readFileSync(concurrentTarget), originalBytes);
   } finally {
     fs.renameSync = originalRename;
+    fs.linkSync = originalLink;
     syncBuiltinESMExports();
   }
 });
@@ -1063,14 +1101,17 @@ test("post-displacement creator wins while prior config remains at reported reco
   const concurrent = { theme: "light", secret: "fake-post-displacement-secret" };
   const path = configPath(t, original);
   const originalBytes = readFileSync(path);
+  const originalMode = fileMode(path);
   const concurrentBytes = Buffer.from(`${JSON.stringify(concurrent, null, 2)}\n`, "utf8");
   const originalLink = fs.linkSync;
+  let concurrentMode: number | undefined;
   let injected = false;
   fs.linkSync = ((existingPath: fs.PathLike, newPath: fs.PathLike) => {
     if (!injected && basename(String(existingPath)) === "prepared" && String(newPath) === path) {
       injected = true;
       writeFileSync(path, concurrentBytes, { mode: 0o600 });
       chmodSync(path, 0o600);
+      concurrentMode = fileMode(path);
     }
     return originalLink(existingPath, newPath);
   }) as typeof fs.linkSync;
@@ -1085,13 +1126,14 @@ test("post-displacement creator wins while prior config remains at reported reco
     assert.match(configured.detail ?? "", /manual recovery/i);
     assert.doesNotMatch(configured.detail ?? "", /fake-post-displacement-secret/);
     assert.deepEqual(readFileSync(path), concurrentBytes);
-    assert.equal(statSync(path).mode & 0o777, 0o600);
+    assert.equal(fileMode(path), concurrentMode);
+    assertRequestedFileMode(path, 0o600);
     const transaction = readdirSync(dirname(path)).find((name) => name.includes(".transaction-"));
     assert.ok(transaction);
     const recoveryPath = join(dirname(path), transaction, "displaced");
     assert.match(configured.detail ?? "", new RegExp(recoveryPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
     assert.deepEqual(readFileSync(recoveryPath), originalBytes);
-    assert.equal(statSync(recoveryPath).mode & 0o777, 0o640);
+    assert.equal(fileMode(recoveryPath), originalMode);
     assert.deepEqual(readdirSync(dirname(recoveryPath)).sort(), ["displaced", "manifest.json"]);
     assert.deepEqual(readFileSync(backupPaths(path)[0]!), originalBytes);
   } finally {
@@ -1154,6 +1196,7 @@ test("restore collision preserves current file and reports displaced concurrent 
   const currentBytes = Buffer.from(`${JSON.stringify(currentConcurrent, null, 2)}\n`, "utf8");
   const originalRename = fs.renameSync;
   const originalLink = fs.linkSync;
+  let currentMode: number | undefined;
   let displacedInjected = false;
   let currentInjected = false;
   fs.renameSync = ((source: fs.PathLike, destination: fs.PathLike) => {
@@ -1168,6 +1211,7 @@ test("restore collision preserves current file and reports displaced concurrent 
       currentInjected = true;
       writeFileSync(path, currentBytes, { mode: 0o600 });
       chmodSync(path, 0o600);
+      currentMode = fileMode(path);
     }
     return originalLink(existingPath, newPath);
   }) as typeof fs.linkSync;
@@ -1183,7 +1227,8 @@ test("restore collision preserves current file and reports displaced concurrent 
     assert.match(configured.detail ?? "", /manual recovery/i);
     assert.doesNotMatch(configured.detail ?? "", /fake-displaced-secret|fake-current-secret/);
     assert.deepEqual(readFileSync(path), currentBytes);
-    assert.equal(statSync(path).mode & 0o777, 0o600);
+    assert.equal(fileMode(path), currentMode);
+    assertRequestedFileMode(path, 0o600);
     const transaction = readdirSync(dirname(path)).find((name) => name.includes(".transaction-"));
     assert.ok(transaction);
     const recoveryPath = join(dirname(path), transaction, "displaced");
@@ -1285,35 +1330,22 @@ test("publication fails closed when live recovery disappears during commit", asy
 test("displacement fsyncs destination directory before source directory", async (t) => {
   const path = configPath(t, { theme: "dark" });
   const parent = dirname(path);
-  const originalOpen = fs.openSync;
-  const originalClose = fs.closeSync;
-  const originalFsync = fs.fsyncSync;
+  const originalDirectorySync = directorySyncCapability.sync;
   const originalRename = fs.renameSync;
-  const descriptors = new Map<number, string>();
   const order: string[] = [];
   let displaced = false;
-  fs.openSync = ((target: fs.PathLike, flags: fs.OpenMode, mode?: fs.Mode) => {
-    const descriptor = originalOpen(target, flags, mode);
-    descriptors.set(descriptor, String(target));
-    return descriptor;
-  }) as typeof fs.openSync;
-  fs.closeSync = ((descriptor: number) => {
-    descriptors.delete(descriptor);
-    return originalClose(descriptor);
-  }) as typeof fs.closeSync;
   fs.renameSync = ((source: fs.PathLike, destination: fs.PathLike) => {
     const result = originalRename(source, destination);
     if (String(source) === path && basename(String(destination)) === "displaced") displaced = true;
     return result;
   }) as typeof fs.renameSync;
-  fs.fsyncSync = ((descriptor: number) => {
-    const target = descriptors.get(descriptor);
-    if (displaced && target !== undefined && fs.statSync(target).isDirectory()) {
+  directorySyncCapability.sync = (target) => {
+    if (displaced) {
       if (target === parent) order.push("source");
       else if (target.includes(".transaction-")) order.push("destination");
     }
-    return originalFsync(descriptor);
-  }) as typeof fs.fsyncSync;
+    return true;
+  };
   syncBuiltinESMExports();
 
   try {
@@ -1323,9 +1355,7 @@ test("displacement fsyncs destination directory before source directory", async 
     assert.equal(configured.status, "configured");
     assert.deepEqual(order.slice(0, 2), ["destination", "source"]);
   } finally {
-    fs.openSync = originalOpen;
-    fs.closeSync = originalClose;
-    fs.fsyncSync = originalFsync;
+    directorySyncCapability.sync = originalDirectorySync;
     fs.renameSync = originalRename;
     syncBuiltinESMExports();
   }
@@ -1406,6 +1436,7 @@ test("next invocation restores an absent target from a displaced crash transacti
   const transaction = join(dirname(path), `.${basename(path)}.transaction-crash`);
   mkdirSync(transaction, { mode: 0o700 });
   writeFileSync(join(transaction, "displaced"), originalBytes, { mode: 0o640 });
+  const displacedMode = fileMode(join(transaction, "displaced"));
   writeFileSync(join(transaction, "manifest.json"), `${JSON.stringify({
     version: 1,
     state: "displaced",
@@ -1419,7 +1450,8 @@ test("next invocation restores an absent target from a displaced crash transacti
   assert.match(configured.detail ?? "", /recovered|retry/i);
   assert.doesNotMatch(configured.detail ?? "", /fake-crash-secret/);
   assert.deepEqual(readFileSync(path), originalBytes);
-  assert.equal(statSync(path).mode & 0o777, 0o640);
+  assert.equal(fileMode(path), displacedMode);
+  if (process.platform !== "win32") assert.equal(displacedMode, 0o640);
   assert.match(configured.detail ?? "", /live recovery/i);
   assert.deepEqual(readFileSync(join(transaction, "displaced")), originalBytes);
   assert.equal(
@@ -1454,6 +1486,7 @@ test("restart recovery refuses a displaced symlink swapped in during publication
     if (String(existingPath) === displaced && String(newPath) === path) {
       fs.unlinkSync(displaced);
       fs.symlinkSync(foreign, displaced);
+      return originalLink(fs.realpathSync(displaced), newPath);
     }
     return originalLink(existingPath, newPath);
   }) as typeof fs.linkSync;
@@ -1466,8 +1499,10 @@ test("restart recovery refuses a displaced symlink swapped in during publication
     assert.equal(configured.status, "failed");
     assert.match(configured.detail ?? "", /manual recovery/i);
     assert.doesNotMatch(configured.detail ?? "", /fake-recovery-swap-secret/);
-    assert.equal(fs.lstatSync(path).isSymbolicLink(), true);
+    assert.throws(() => fs.lstatSync(path), { code: "ENOENT" });
     assert.equal(fs.lstatSync(displaced).isSymbolicLink(), true);
+    assert.equal(fs.readlinkSync(displaced), foreign);
+    assert.equal(readFileSync(foreign, "utf8"), "{\"secret\":\"fake-recovery-swap-secret\"}\n");
     assert.equal(
       JSON.parse(readFileSync(join(transaction, "manifest.json"), "utf8")).state,
       "displaced",

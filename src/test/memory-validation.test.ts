@@ -1,8 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import { loadMemory } from "../core/memory.js";
 import { resolveRockyPaths } from "../core/state-paths.js";
 
@@ -24,11 +24,15 @@ test("loader skips JSON-valid garbage and keeps valid legacy records", () => {
   assert.equal(statSync(file).mtimeMs, before.mtime);
 });
 
-test("state paths resolve ROCKY_HOME on every call", () => {
-  const first = resolveRockyPaths({ ROCKY_HOME: "one" }, "/users/me", "/work");
-  const second = resolveRockyPaths({ ROCKY_HOME: "two" }, "/users/me", "/work");
-  assert.equal(first.home, join("/work", "one"));
-  assert.equal(second.home, join("/work", "two"));
+test("state paths resolve ROCKY_HOME on every call", (t) => {
+  const cwd = mkdtempSync(join(tmpdir(), "rocky-state-paths-"));
+  t.after(() => rmSync(cwd, { recursive: true, force: true }));
+  const first = resolveRockyPaths({ ROCKY_HOME: "one" }, cwd, cwd);
+  const second = resolveRockyPaths({ ROCKY_HOME: "two" }, cwd, cwd);
+  assert.equal(first.home, join(cwd, "one"));
+  assert.equal(second.home, join(cwd, "two"));
+  assert.equal(isAbsolute(first.home), true);
+  assert.equal(isAbsolute(second.home), true);
   assert.notEqual(first.memory, second.memory);
 });
 
