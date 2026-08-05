@@ -132,7 +132,7 @@ test("MCP source graph reaches only read-only query, config, privacy, AI-port, a
     "core/fingerprint.ts",
     "core/memory-query.ts",
     "core/memory-read.ts",
-    "core/package-identity.ts",
+    "core/package-info.ts",
     "core/state-paths.ts",
     "ai/ollama.ts",
     "ai/port.ts",

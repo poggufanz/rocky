@@ -3,12 +3,13 @@ import { createRecallAiPort, singleFlightRecallAi } from "../ai/recall-ai.js";
 import { parseExposure } from "../core/config-read.js";
 import { createMemoryQueries } from "../core/memory-query.js";
 import { loadMemory } from "../core/memory-read.js";
+import { PACKAGE_NAME, PACKAGE_VERSION } from "../core/package-info.js";
 import { runMcpStdio } from "../mcp/server.js";
 import { createToolRegistry } from "../mcp/tools.js";
 
 export const ROCKY_SERVER_INFO = {
-  name: "@poggufanz/rocky-cli",
-  version: "0.2.1-beta.0",
+  name: PACKAGE_NAME,
+  version: PACKAGE_VERSION,
 } as const;
 
 export async function mcp(): Promise<number> {

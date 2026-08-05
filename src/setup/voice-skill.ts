@@ -3,17 +3,17 @@ import { constants, type Dirent, type Stats } from "node:fs";
 import * as fs from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { PACKAGE_NAME } from "../core/package-info.js";
 
 export const VOICE_SKILL_NAME = "rocky-voice";
 
 const MARKER_NAME = ".rocky-managed.json";
-const PACKAGE_NAME = "@poggufanz/rocky-cli";
 const SOURCE_ROOT = fileURLToPath(new URL("../../skills/rocky-voice/", import.meta.url));
 let uniqueSequence = 0;
 
 export interface VoiceSkillMarker {
   schemaVersion: 1;
-  packageName: "@poggufanz/rocky-cli";
+  packageName: typeof PACKAGE_NAME;
   sourceHash: string;
   installedHash: string;
 }

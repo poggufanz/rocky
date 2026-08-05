@@ -1,13 +1,23 @@
 {
-  "name": "rocky-cli",
-  "version": "0.2.0",
+  "name": "@poggufanz/rocky-cli",
+  "version": "0.2.1-beta.0",
   "description": "A blind engineer who lives in your terminal, never forgets an error, and makes sure you still understand your own code.",
   "type": "module",
   "bin": {
     "rocky": "./dist/index.js"
   },
   "files": [
-    "dist"
+    "dist/index.js",
+    "dist/commands",
+    "dist/core",
+    "dist/ui",
+    "dist/mcp",
+    "dist/setup",
+    "dist/ai",
+    "dist/shell",
+    "skills/rocky-voice",
+    "README.md",
+    "LICENSE"
   ],
   "scripts": {
     "build": "node scripts/build.mjs",
@@ -26,7 +36,20 @@
     "error-memory",
     "project-hail-mary"
   ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/poggufanz/rocky.git"
+  },
+  "homepage": "https://github.com/poggufanz/rocky#readme",
+  "bugs": {
+    "url": "https://github.com/poggufanz/rocky/issues"
+  },
+  "author": "Muhammad Faiq",
   "license": "MIT",
+  "publishConfig": {
+    "access": "public",
+    "tag": "beta"
+  },
   "devDependencies": {
     "typescript": "^5.5.0",
     "@types/node": "^18.19.0"
