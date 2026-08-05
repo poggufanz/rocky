@@ -10,6 +10,8 @@
 
 import { writeFileSync } from "node:fs";
 
+export { phrase, phraseForAct, phraseKeys, validateRockyPhrase, type PhraseKey } from "./phrases.js";
+
 const useColor = process.stdout.isTTY && !process.env.NO_COLOR;
 
 const amber = (s: string) => (useColor ? `\u001b[33m${s}\u001b[0m` : s);
