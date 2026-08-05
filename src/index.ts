@@ -11,6 +11,7 @@
 
 import { run } from "./commands/run.js";
 import { recall } from "./commands/recall.js";
+import { model } from "./commands/model.js";
 import { stats } from "./commands/stats.js";
 import { hookFail, hookInstall, hookStatus, hookSuccess, hookUninstall } from "./commands/hook.js";
 import { mcp } from "./commands/mcp.js";
@@ -24,8 +25,13 @@ usage:
   rocky run "<command>"     run command through Rocky. failures are remembered;
                             when the same error returns, Rocky tells you what
                             fixed it last time.
-  rocky recall "<query>"    ask Rocky's memory. matches words from the error
-                            or the command.
+  rocky recall [--ai] [--] <query...>
+                            ask Rocky's memory. matches words from error or command.
+                            --ai asks configured local Ollama after deterministic recall.
+  rocky model status         report local-AI configuration without loading a model.
+  rocky model use [--exposure sanitized|raw] <installed-model>
+                            probe an installed Ollama model, then enable local AI.
+  rocky model off            disable Rocky local AI. Ollama stays untouched.
   rocky stats               what Rocky holds in memory.
   rocky mcp                 serve read-only memory tools over stdio.
   rocky setup               configure detected MCP hosts with sanitized exposure.
@@ -50,7 +56,9 @@ async function main(): Promise<number> {
     case "run":
       return run(arg);
     case "recall":
-      return recall(arg);
+      return recall(rest);
+    case "model":
+      return model(rest);
     case "stats":
       return stats();
     case "mcp":
