@@ -183,6 +183,21 @@ function candidateIdForRef(value: unknown): string | undefined {
   return typeof value === "string" ? value.split(".")[0] : undefined;
 }
 
+function validRankedCandidateIds(value: readonly string[], itemIds: readonly string[]): boolean {
+  return value.length <= itemIds.length && value.every((id, index) =>
+    itemIds.includes(id) && value.indexOf(id) === index,
+  );
+}
+
+function validEvidenceRefs(value: readonly string[], items: readonly { candidateId: string; hasFix?: unknown }[]): boolean {
+  return value.every((ref, index) => {
+    const match = /^([^.]*)\.(failure|fix)$/.exec(ref);
+    if (match === null || value.indexOf(ref) !== index) return false;
+    const item = items.find((candidate) => candidate.candidateId === match[1]);
+    return item !== undefined && (match[2] === "failure" || item.hasFix === true);
+  });
+}
+
 function cappedResult(payload: object, isError = false): ToolCallResult {
   const source = payload as Record<string, unknown>;
   const copy: Record<string, unknown> = { ...source };
@@ -230,11 +245,27 @@ async function runAi<T>(operation: () => Promise<T>): Promise<T> {
 
 function mergeAi(payload: object, ai: RecallAiOutcome): Record<string, unknown> {
   const source = payload as Record<string, unknown>;
-  const itemIds = Array.isArray(source.items) ? source.items.filter(isItem).map((item) => item.candidateId) : [];
-  const ranked = [...ai.rankedCandidateIds.filter((id) => itemIds.includes(id))];
+  const items = Array.isArray(source.items) ? source.items.filter(isItem) : [];
+  const itemIds = items.map((item) => item.candidateId);
+  const rankedValid = validRankedCandidateIds(ai.rankedCandidateIds, itemIds);
+  const evidenceValid = ai.evidenceRefs === undefined || validEvidenceRefs(ai.evidenceRefs, items);
+  const useAiOrder = ai.aiStatus === "used" && rankedValid && evidenceValid;
+  const ranked = useAiOrder ? [...ai.rankedCandidateIds] : [];
   for (const id of itemIds) if (!ranked.includes(id)) ranked.push(id);
-  const evidenceRefs = ai.evidenceRefs?.filter((ref) => itemIds.includes(candidateIdForRef(ref) ?? ""));
-  return { ...source, ...ai, rankedCandidateIds: ranked, ...(evidenceRefs === undefined ? {} : { evidenceRefs }) };
+  const reorderedItems = useAiOrder
+    ? ranked.map((id) => items.find((item) => item.candidateId === id)!).filter(isItem)
+    : items;
+  const { rankedCandidateIds: _rankedCandidateIds, evidenceRefs: _evidenceRefs, ...safeAi } = ai;
+  const evidenceRefs = ai.evidenceRefs?.filter((ref, index, refs) =>
+    refs.indexOf(ref) === index && validEvidenceRefs([ref], items),
+  );
+  return {
+    ...source,
+    ...safeAi,
+    items: reorderedItems,
+    rankedCandidateIds: ranked,
+    ...(evidenceRefs === undefined ? {} : { evidenceRefs }),
+  };
 }
 
 export function createToolRegistry(options: CreateToolRegistryOptions): McpToolRegistry {

@@ -16,10 +16,16 @@ import { dirname, join, relative } from "node:path";
 import { createInterface } from "node:readline";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { singleFlightRecallAi } from "../ai/recall-ai.js";
+import type { RecallWithAiPort } from "../ai/port.js";
+import type { MemoryRecord } from "../core/memory-read.js";
+import { createMemoryQueries } from "../core/memory-query.js";
+import { createToolRegistry } from "../mcp/tools.js";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const cli = join(repoRoot, "dist", "index.js");
 const fixtureMemory = join(repoRoot, "test", "fixtures", "mcp", "memory.jsonl");
+const slowFetch = join(repoRoot, "test", "fixtures", "mcp", "slow-fetch.cjs");
 const modernMeta = {
   "io.modelcontextprotocol/protocolVersion": "2026-07-28",
   "io.modelcontextprotocol/clientCapabilities": {},
@@ -47,7 +53,7 @@ function seedHome(t: test.TestContext): string {
   writeFileSync(join(home, "memory.jsonl"), readFileSync(fixtureMemory));
   writeFileSync(join(home, "config.json"), JSON.stringify({
     version: 1,
-    ai: { enabled: true, provider: "ollama", model: "never-contact", exposure: "raw" },
+    ai: { enabled: false },
   }) + "\n");
   writeFileSync(join(home, "pending"), "pending-sentinel\n");
   writeFileSync(join(home, "guard.rules"), "^rm -rf\\tguard sentinel\n");
@@ -102,8 +108,11 @@ class McpCliProcess {
   private readonly stderrChunks: Buffer[] = [];
   private readonly closed: Promise<{ code: number | null; signal: NodeJS.Signals | null }>;
 
-  constructor(home: string, exposure = "sanitized") {
-    this.child = spawn(process.execPath, [cli, "mcp"], {
+  constructor(home: string, exposure = "sanitized", preload?: string) {
+    this.child = spawn(process.execPath, [
+      ...(preload === undefined ? [] : ["--require", preload]),
+      cli, "mcp",
+    ], {
       cwd: repoRoot,
       env: { ...process.env, ROCKY_HOME: home, ROCKY_MCP_EXPOSURE: exposure },
       stdio: ["pipe", "pipe", "pipe"],
@@ -120,6 +129,10 @@ class McpCliProcess {
 
   async request(message: Record<string, unknown>): Promise<JsonRpcResponse> {
     this.notify(message);
+    return this.nextResponse();
+  }
+
+  async nextResponse(): Promise<JsonRpcResponse> {
     const next = await withTimeout(this.lineIterator.next(), 2_000, "MCP response");
     assert.equal(next.done, false, `server closed before response; stderr: ${this.stderr()}`);
     const line = next.value ?? "";
@@ -149,6 +162,21 @@ class McpCliProcess {
       assert.doesNotThrow(() => JSON.parse(line), `stdout is not JSON: ${line}`);
     }
   }
+}
+
+async function waitFor(predicate: () => boolean, label: string): Promise<void> {
+  const deadline = Date.now() + 2_000;
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error(`${label} exceeded 2000ms`);
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+  }
+}
+
+function slowFetchPrompt(stderr: string): Record<string, unknown> {
+  const prefix = "SLOW_FETCH_PROMPT_BASE64 ";
+  const line = stderr.split("\n").find((value) => value.startsWith(prefix));
+  assert.notEqual(line, undefined, "slow fetch did not capture an AI prompt");
+  return JSON.parse(Buffer.from(line!.slice(prefix.length), "base64").toString("utf8")) as Record<string, unknown>;
 }
 
 async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
@@ -214,6 +242,100 @@ test("compiled CLI serves modern discovery, listing, and every read-only tool wi
   assert.ok(server.stdoutLines.length > 0);
   server.assertJsonOnlyStdout();
   assert.deepEqual(snapshotTree(home), before);
+});
+
+test("MCP keeps stats responsive during one local-AI request and sends strictest sanitized evidence", { timeout: 10_000 }, async (t) => {
+  const home = seedHome(t);
+  writeFileSync(join(home, "config.json"), JSON.stringify({
+    version: 1,
+    ai: { enabled: true, provider: "ollama", model: "test-model", exposure: "sanitized" },
+  }) + "\n");
+  const before = snapshotTree(home);
+  const server = new McpCliProcess(home, "raw", slowFetch);
+
+  server.notify(modernRequest("ai-first", "tools/call", {
+    name: "recall_with_ai", arguments: { query: "missing module" },
+  }));
+  await waitFor(() => server.stderr().includes("SLOW_FETCH_PROMPT_BASE64 "), "slow local AI request start");
+
+  const prompt = JSON.stringify(slowFetchPrompt(server.stderr()));
+  assert.doesNotMatch(prompt, /"cwd"|"excerpt"|\/private\/rocky|fixture-secret-value|Bearer fixture-secret-value/);
+
+  server.notify(modernRequest("ai-busy", "tools/call", {
+    name: "recall_with_ai", arguments: { query: "missing module" },
+  }));
+  server.notify(modernRequest("responsive-stats", "tools/call", { name: "stats", arguments: {} }));
+
+  const responses = new Map<string | number | null, JsonRpcResponse>();
+  const first = await server.nextResponse();
+  const second = await server.nextResponse();
+  responses.set(first.id, first);
+  responses.set(second.id, second);
+
+  const busy = responses.get("ai-busy");
+  const stats = responses.get("responsive-stats");
+  assert.equal(structured(busy!).aiStatus, "busy");
+  assert.deepEqual(structured(busy!).rankedCandidateIds, ["c1"]);
+  assert.equal(structured(stats!).failures, 2);
+
+  server.notify({ jsonrpc: "2.0", method: "notifications/cancelled", params: { requestId: "ai-first" } });
+  const exit = await server.close();
+  assert.deepEqual(exit, { code: 0, signal: null });
+  server.assertJsonOnlyStdout();
+  assert.deepEqual(snapshotTree(home), before);
+});
+
+test("MCP tool registry returns busy without queuing and only accepts a fully valid AI reorder", async () => {
+  const records: MemoryRecord[] = [
+    {
+      kind: "failure", id: "candidate-one", ts: 1, cwd: "/private/one", cmd: "needle first", exitCode: 1,
+      fingerprint: "first", signature: ["needle"], excerpt: "first",
+    },
+    {
+      kind: "failure", id: "candidate-two", ts: 2, cwd: "/private/two", cmd: "needle second", exitCode: 1,
+      fingerprint: "second", signature: ["needle"], excerpt: "second",
+    },
+  ];
+  let finishFirst: ((value: Awaited<ReturnType<RecallWithAiPort["run"]>>) => void) | undefined;
+  const deferred: RecallWithAiPort = {
+    async run() {
+      return await new Promise((resolve) => { finishFirst = resolve; });
+    },
+  };
+  const registry = createToolRegistry({
+    exposure: "sanitized",
+    memory: createMemoryQueries(() => records),
+    recallWithAi: singleFlightRecallAi(deferred),
+  });
+  const first = registry.call("recall_with_ai", { query: "needle" }, new AbortController().signal);
+  const busy = await registry.call("recall_with_ai", { query: "needle" }, new AbortController().signal);
+  const stats = await registry.call("stats", {}, new AbortController().signal);
+  assert.equal(busy.structuredContent.aiStatus, "busy");
+  assert.deepEqual(busy.structuredContent.rankedCandidateIds, ["c1", "c2"]);
+  assert.equal(stats.structuredContent.failures, 2);
+  finishFirst?.({ aiStatus: "used", rankedCandidateIds: ["c2", "c1"] });
+  assert.deepEqual((await first).structuredContent.rankedCandidateIds, ["c2", "c1"]);
+
+  const reordered = await createToolRegistry({
+    exposure: "sanitized",
+    memory: createMemoryQueries(() => records),
+    recallWithAi: { async run() { return { aiStatus: "used", rankedCandidateIds: ["c2", "c1"] }; } },
+  }).call("recall_with_ai", { query: "needle" }, new AbortController().signal);
+  assert.deepEqual((reordered.structuredContent.items as { candidateId: string }[]).map((item) => item.candidateId), ["c2", "c1"]);
+
+  for (const outcome of [
+    { aiStatus: "used" as const, rankedCandidateIds: ["c2", "not-a-candidate"] },
+    { aiStatus: "used" as const, rankedCandidateIds: ["c2", "c1"], evidenceRefs: ["c2.failure", "outside.failure"] },
+  ]) {
+    const rejected = await createToolRegistry({
+      exposure: "sanitized",
+      memory: createMemoryQueries(() => records),
+      recallWithAi: { async run() { return outcome; } },
+    }).call("recall_with_ai", { query: "needle" }, new AbortController().signal);
+    assert.deepEqual(rejected.structuredContent.rankedCandidateIds, ["c1", "c2"]);
+    assert.deepEqual((rejected.structuredContent.items as { candidateId: string }[]).map((item) => item.candidateId), ["c1", "c2"]);
+    assert.deepEqual(rejected.structuredContent.evidenceRefs ?? [], outcome.evidenceRefs === undefined ? [] : ["c2.failure"]);
+  }
 });
 
 test("compiled CLI serves a separate legacy lifecycle and reloads externally appended memory", { timeout: 10_000 }, async (t) => {
