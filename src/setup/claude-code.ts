@@ -163,6 +163,10 @@ interface AuditedStage {
   guard: FileMutationGuard;
 }
 
+interface TargetTransactionGuard extends FileMutationGuard {
+  authoritativeRecoveryPath(path: string | undefined): string | undefined;
+}
+
 const fileTransactions: ClaudeFileTransactions = {
   inspect: inspectFileTransaction,
   recover: recoverFileTransaction,
@@ -435,7 +439,7 @@ function createTargetTransactionGuard(
   original: SafeFileSnapshot,
   publishedBytes: Buffer,
   pathApi: PlatformPath,
-): FileMutationGuard {
+): TargetTransactionGuard {
   const parent = pathApi.dirname(target);
   const prefix = `.${pathApi.basename(target)}.transaction-`;
   let transactionPath: string | undefined;
@@ -527,7 +531,46 @@ function createTargetTransactionGuard(
       && observation.publication.ino === publishedIdentity.ino;
   };
 
+  const authoritativeRecoveryPath = (candidate: string | undefined): string | undefined => {
+    if (candidate === undefined
+      || transactionPath === undefined
+      || transactionIdentity === undefined
+      || original.read.status !== "valid"
+      || original.identity === undefined
+      || candidate !== pathApi.join(transactionPath, "displaced")) return undefined;
+    try {
+      if (!sameDirectoryAuthority(identity(lstatSync(transactionPath)), transactionIdentity)
+        || !isDeepStrictEqual(
+          readdirSync(transactionPath).sort(),
+          ["displaced", "manifest.json"],
+        )) return undefined;
+      const manifestBytes = Buffer.from(`${JSON.stringify({
+        version: 1,
+        state: "committed",
+        target,
+      })}\n`, "utf8");
+      const manifest = exactObservedFile(
+        pathApi.join(transactionPath, "manifest.json"),
+        manifestBytes,
+        undefined,
+      );
+      const displaced = exactObservedFile(
+        candidate,
+        original.read.bytes,
+        original.read.mode,
+        original.identity,
+      );
+      return manifest?.nlink === 1
+        && displaced?.nlink === original.identity.nlink
+        ? candidate
+        : undefined;
+    } catch {
+      return undefined;
+    }
+  };
+
   return {
+    authoritativeRecoveryPath,
     unchanged: () => {
       if (transactionPath === undefined && fileSnapshotUnchanged(original, pathApi)) return true;
       if (transactionPath === undefined) {
@@ -1239,9 +1282,11 @@ export function createClaudeCodeAdapter(
       && isDeepStrictEqual(verifiedRoot, audited.parsed)
       && guard.unchanged();
     if (!exact) {
+      const recoveryPath = targetGuard.authoritativeRecoveryPath(written.recoveryPath)
+        ?? authoritativeStagePath(stage, pathApi);
       return failed(withRecovery(
         "Claude Code published state could not be verified",
-        written.recoveryPath,
+        recoveryPath,
       ), operation === "configure" ? registration : undefined);
     }
     const retainedStage = authoritativeStagePath(stage, pathApi);

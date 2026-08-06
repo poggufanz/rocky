@@ -1176,7 +1176,7 @@ test("real transaction rejects a same-byte inode installed after prepared public
   assert.equal(configured.status, "failed");
 });
 
-test("real committed publication rejects exact-state target and parent replacements", async (t) => {
+test("real committed publication reports only authoritative recovery after exact-state replacements", async (t) => {
   for (const operation of ["configure", "remove"] as const) {
     for (const race of ["target", "parent"] as const) {
       await t.test(`${operation} ${race}`, async (st) => {
@@ -1184,13 +1184,28 @@ test("real committed publication rejects exact-state target and parent replaceme
           keep: true,
           mcpServers: operation === "remove" ? { rocky: rockyEntry() } : {},
         });
+        const originalBytes = readFileSync(setup.configPath);
+        const originalMode = statSync(setup.configPath).mode & 0o777;
+        const originalIdentity = lstatSync(setup.configPath);
+        const stageRootIdentity = lstatSync(setup.stageRoot);
         let publishedInode: number | undefined;
         let winnerInode: number | undefined;
         let winnerBytes: Buffer | undefined;
         let committedParent: string | undefined;
+        let staleRecoveryPath: string | undefined;
+        let movedRecoveryPath: string | undefined;
+        let retainedTransactionInode: number | undefined;
+        let foreignTransactionInode: number | undefined;
+        let mutationStage: string | undefined;
+        let mutationStageIdentity: { dev: number; ino: number } | undefined;
         const adapter = createClaudeCodeAdapter(adapterDependencies(
           setup,
-          new FakeClaudeRunner((call) => transformStage(call)),
+          new FakeClaudeRunner((call) => {
+            mutationStage = stagePath(call);
+            const metadata = lstatSync(mutationStage);
+            mutationStageIdentity = { dev: metadata.dev, ino: metadata.ino };
+            return transformStage(call);
+          }),
           {
             lifecycle: {
               afterPublish(path) {
@@ -1210,9 +1225,27 @@ test("real committed publication rejects exact-state target and parent replaceme
                   writeFileSync(join(winnerParent, ".claude.json"), winnerBytes, { mode });
                   chmodSync(join(winnerParent, ".claude.json"), mode);
                   winnerInode = lstatSync(winnerParent).ino;
+                  const transactionName = readdirSync(setup.configDir)
+                    .find((name) => name.startsWith("..claude.json.transaction-"));
+                  if (transactionName === undefined) throw new Error("missing committed transaction");
+                  const retainedTransaction = join(setup.configDir, transactionName);
+                  retainedTransactionInode = lstatSync(retainedTransaction).ino;
+                  const foreignTransaction = join(winnerParent, transactionName);
+                  mkdirSync(foreignTransaction, { mode: 0o700 });
+                  writeFileSync(
+                    join(foreignTransaction, "manifest.json"),
+                    `${JSON.stringify({ version: 1, state: "committed", target: setup.configPath })}\n`,
+                  );
+                  writeFileSync(join(foreignTransaction, "displaced"), originalBytes, {
+                    mode: originalMode,
+                  });
+                  chmodSync(join(foreignTransaction, "displaced"), originalMode);
+                  foreignTransactionInode = lstatSync(foreignTransaction).ino;
                   committedParent = join(setup.root, `${operation}-committed-parent`);
                   renameSync(setup.configDir, committedParent);
                   renameSync(winnerParent, setup.configDir);
+                  staleRecoveryPath = join(setup.configDir, transactionName, "displaced");
+                  movedRecoveryPath = join(committedParent, transactionName, "displaced");
                 }
               },
             },
@@ -1232,6 +1265,48 @@ test("real committed publication rejects exact-state target and parent replaceme
         assert.deepEqual(readFileSync(setup.configPath), winnerBytes);
         if (committedParent !== undefined) assert.equal(existsSync(committedParent), true);
         assert.equal(outcome.status, "failed");
+        const reportedPath = /manual recovery: (.+)$/.exec(outcome.detail ?? "")?.[1];
+        assert.ok(reportedPath !== undefined, outcome.detail);
+        assert.equal(existsSync(reportedPath), true);
+        if (race === "target") {
+          assert.notEqual(reportedPath, mutationStage);
+          const recovery = lstatSync(reportedPath);
+          assert.equal(recovery.isFile(), true);
+          assert.equal(recovery.isSymbolicLink(), false);
+          assert.equal(recovery.dev, originalIdentity.dev);
+          assert.equal(recovery.ino, originalIdentity.ino);
+          assert.equal(recovery.nlink, originalIdentity.nlink);
+          assert.equal(recovery.mode & 0o777, originalMode);
+          assert.deepEqual(readFileSync(reportedPath), originalBytes);
+          const manifest = JSON.parse(
+            readFileSync(join(dirname(reportedPath), "manifest.json"), "utf8"),
+          ) as { state?: string; target?: string };
+          assert.deepEqual(manifest, {
+            version: 1,
+            state: "committed",
+            target: setup.configPath,
+          });
+        } else {
+          assert.ok(mutationStage !== undefined && mutationStageIdentity !== undefined);
+          assert.equal(reportedPath, mutationStage);
+          const reportedStage = lstatSync(reportedPath);
+          assert.equal(reportedStage.isDirectory(), true);
+          assert.equal(reportedStage.dev, mutationStageIdentity.dev);
+          assert.equal(reportedStage.ino, mutationStageIdentity.ino);
+          const currentStageRoot = lstatSync(setup.stageRoot);
+          assert.equal(currentStageRoot.dev, stageRootIdentity.dev);
+          assert.equal(currentStageRoot.ino, stageRootIdentity.ino);
+          assert.ok(staleRecoveryPath !== undefined && movedRecoveryPath !== undefined);
+          assert.equal(existsSync(staleRecoveryPath), true);
+          assert.equal((outcome.detail ?? "").includes(staleRecoveryPath), false);
+          assert.equal(existsSync(movedRecoveryPath), true);
+          const movedRecovery = lstatSync(movedRecoveryPath);
+          assert.equal(movedRecovery.dev, originalIdentity.dev);
+          assert.equal(movedRecovery.ino, originalIdentity.ino);
+          assert.deepEqual(readFileSync(movedRecoveryPath), originalBytes);
+          assert.ok(retainedTransactionInode !== undefined && foreignTransactionInode !== undefined);
+          assert.notEqual(foreignTransactionInode, retainedTransactionInode);
+        }
       });
     }
   }
@@ -1295,7 +1370,7 @@ test("post-audit stage topology change blocks publication and reports only retai
   assert.deepEqual(readFileSync(setup.configPath), before);
 });
 
-test("live publication recovery authority outranks a rebound stage pathname", async (t) => {
+test("post-publication failure reports neither an unproved recovery path nor a rebound stage", async (t) => {
   const setup = fixture(t, { keep: true, mcpServers: {} });
   const recoveryPath = join(setup.root, "live-task1-recovery");
   writeFileSync(recoveryPath, readFileSync(setup.configPath));
@@ -1325,8 +1400,9 @@ test("live publication recovery authority outranks a rebound stage pathname", as
 
   assert.equal(configured.status, "failed");
   assert.ok(stage !== undefined);
-  assert.ok((configured.detail ?? "").includes(recoveryPath));
+  assert.equal((configured.detail ?? "").includes(recoveryPath), false);
   assert.equal((configured.detail ?? "").includes(stage), false);
+  assert.doesNotMatch(configured.detail ?? "", /manual recovery:/i);
   assert.equal(readFileSync(join(stage, "attacker-sentinel"), "utf8"), "keep attacker\n");
 });
 
