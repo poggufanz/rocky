@@ -85,13 +85,22 @@ export interface RecoveryOutcome {
    */
   provenCopy?: string;
   /**
-   * Proven, at the moment this call finished acting, whether `path` itself
-   * holds live, reachable content — `isLiveRegularFile`, not a bare
-   * existence check (round 8, I2). A dangling symlink, a valid symlink, a
-   * directory, or any other name that merely *resolves* is never "exists"
-   * for this field: callers use it to decide whether an artifact derived
-   * from `path`'s prior bytes is safe to treat as redundant, and a name
-   * resolving proves nothing about whether real content sits behind it.
+   * A message-layer fact only: whether `path` still resolves to *something*
+   * (`pathExists`, i.e. `lstatSync` succeeding), read by `hook.ts` solely to
+   * choose which sentence to speak about `path`. This is deliberately NOT the
+   * same predicate `resolveUndisplacedTransaction` uses to decide whether
+   * discarding a staged artifact is safe (round 9, R1 — round 8's I2 fix
+   * applied `isLiveRegularFile` to both the decision site and this field, and
+   * their safe directions are opposite: a destroy/keep decision must be
+   * conservative about destroying — treat anything short of a proven live
+   * regular file as "not there", so a dangling or valid symlink still blocks
+   * discard — while a message must be conservative about claiming — treat
+   * anything that resolves, including a valid symlink to real content, as
+   * "still there", so Rocky never tells the user their file is "gone" when a
+   * name still stands at that path). One predicate cannot serve both
+   * purposes; this field exists so the same boolean is never reused for
+   * both. See `ambiguousOutcome` (message derivation) versus
+   * `resolveUndisplacedTransaction` (decision derivation) below.
    */
   targetExists: boolean;
   /** True only when this very call wrote bytes to `path` (created or restored it). */
@@ -717,8 +726,32 @@ function provenCopyOf(displacedPath: string, path: string): string | undefined {
  * The outcome record for a stop that resolved nothing new: proves, right
  * now, exactly what a caller may honestly claim — a transaction directory
  * only when it still exists, a copy only when `provenCopyOf` establishes
- * one, and whether `path` itself exists. `targetWritten` is supplied by the
- * caller, which alone knows whether its own attempt to write `path` ran.
+ * one, and whether `path` still resolves at all. `targetWritten` is supplied
+ * by the caller, which alone knows whether its own attempt to write `path`
+ * ran.
+ *
+ * `targetExists` here is deliberately `pathExists`, not `isLiveRegularFile`
+ * (round 9, R1). This value only ever reaches a message (`hook.ts`'s
+ * `reportBashrcRecoveryStop`, which picks between "I keep safe copy" and
+ * "bashrc gone" purely off this field) — it is never read back into a
+ * destroy/keep decision anywhere in this module. `isLiveRegularFile` is
+ * right for `resolveUndisplacedTransaction`'s own decision below because a
+ * decision must fail closed: treat a valid symlink as "not proven live" so a
+ * staged artifact is never discarded on its account. A message must fail the
+ * other way: treat that same valid symlink as "still there", because it is —
+ * following it reaches the user's real file, and telling them it is "gone"
+ * is false. Round 8 computed one boolean (`isLiveRegularFile`) and fed it to
+ * both the decision and this field; a `.bashrc` that is a live symlink to
+ * real content made the decision correctly retain it, and then this same
+ * field told the message layer to say "bashrc gone" and recommend copying a
+ * stale artifact over that live symlink — which follows the link and
+ * destroys the user's real file. `pathExists` never makes that claim: it is
+ * true for anything that resolves to a name at all (regular file, valid
+ * symlink, dangling symlink, directory, socket — every non-ENOENT shape),
+ * so "gone" is spoken only when `path` truly does not exist. See the
+ * `RecoveryOutcome.targetExists` doc comment for the general rule this
+ * follows: a decision predicate and a message predicate must never share one
+ * field, because their safe directions run opposite.
  */
 function ambiguousOutcome(
   transactionDirectory: string,
@@ -730,7 +763,7 @@ function ambiguousOutcome(
   return {
     transactionDirectory: directoryStillThere ? transactionDirectory : undefined,
     provenCopy: displacedPath !== undefined ? provenCopyOf(displacedPath, path) : undefined,
-    targetExists: isLiveRegularFile(path),
+    targetExists: pathExists(path),
     targetWritten,
     artifactRetainedUnproven: directoryStillThere,
   };
@@ -743,11 +776,18 @@ function ambiguousOutcome(
  * live content right now, proven by `isLiveRegularFile` (round 8, I2 —
  * *not* `pathExists`, which is also true for a dangling symlink; a hard
  * link only ever loses one name, but a dangling symlink is not a hard link
- * to anything and proves nothing was ever there), or the directory's own
- * staged artifact does not exist (nothing to protect regardless of `path`).
- * When neither holds, the directory — and the artifact inside it that
- * cannot be vouched for — is left in place and named, so the caller has
+ * to anything and proves nothing was ever there), or neither of the
+ * directory's own staged artifacts exist (nothing to protect regardless of
+ * `path`). When neither holds, the directory — and the artifact inside it
+ * that cannot be vouched for — is left in place and named, so the caller has
  * something concrete to inspect rather than a dead end with no remedy.
+ *
+ * This decision's own local (`targetIsLiveRegularFile`) is never written
+ * into the returned `RecoveryOutcome.targetExists` field below (round 9,
+ * R1): that field feeds a message, which must fail closed the opposite way
+ * from this decision — see the field's own doc comment. Every return here
+ * computes `pathExists(path)` fresh for the record instead, so a later edit
+ * cannot silently reintroduce the conflation by reusing one local for both.
  *
  * This single proof replaces two guards that used to apply this unevenly by
  * state label alone: unconditional for "prepared", conditional on
@@ -761,8 +801,14 @@ function ambiguousOutcome(
  * manifest state was written).
  *
  * Resolving never `rm -r`s the transaction directory itself (round 8, I1):
- * it discards only the (possibly absent) staged `prepared` artifact — the
- * exact, already-audited action the three sibling "recovered" branches in
+ * it discards only the (possibly absent) staged `prepared` and `link-probe`
+ * artifacts. `link-probe` (round 9, r4) is a second hard link to the exact
+ * same inode as `prepared`, created and removed by `atomicWriteBytesIfUnchanged`'s
+ * own link-capability probe; a crash inside that narrow window can leave
+ * `link-probe` standing after `prepared`'s own name is already gone. The
+ * same redundancy proof that authorizes discarding `prepared` covers it,
+ * since they are the same bytes under the same inode — this is the exact,
+ * already-audited action the three sibling "recovered" branches in
  * `recoverFileTransaction` already take — then advances the manifest to
  * "committed", the same state those branches leave behind too. A directory
  * that is never recursively deleted here cannot be deleted wrongly, cannot
@@ -778,14 +824,16 @@ function resolveUndisplacedTransaction(
   guard: FileMutationGuard | undefined,
 ): FileTransactionRecoveryResult {
   const preparedArtifactPath = join(transactionDirectory, "prepared");
-  const targetExists = isLiveRegularFile(path);
-  if (!targetExists && pathExists(preparedArtifactPath)) {
+  const linkProbePath = join(transactionDirectory, "link-probe");
+  const targetIsLiveRegularFile = isLiveRegularFile(path);
+  if (!targetIsLiveRegularFile
+    && (pathExists(preparedArtifactPath) || pathExists(linkProbePath))) {
     return {
       status: "manual",
       recoveryPath: transactionDirectory,
       outcome: {
         transactionDirectory,
-        targetExists: false,
+        targetExists: pathExists(path),
         targetWritten: false,
         artifactRetainedUnproven: true,
       },
@@ -795,20 +843,21 @@ function resolveUndisplacedTransaction(
     return {
       status: "manual",
       outcome: {
-        targetExists,
+        targetExists: pathExists(path),
         targetWritten: false,
         artifactRetainedUnproven: false,
       },
     };
   }
-  if (pathExists(preparedArtifactPath)
-    && (!mutationGuardUnchanged(guard) || !discardPrepared(transactionDirectory, preparedArtifactPath))) {
+  if ((pathExists(preparedArtifactPath) || pathExists(linkProbePath))
+    && (!mutationGuardUnchanged(guard)
+      || !discardPrepared(transactionDirectory, preparedArtifactPath, linkProbePath))) {
     return {
       status: "manual",
       recoveryPath: transactionDirectory,
       outcome: {
         transactionDirectory,
-        targetExists,
+        targetExists: pathExists(path),
         targetWritten: false,
         artifactRetainedUnproven: true,
       },
@@ -817,7 +866,7 @@ function resolveUndisplacedTransaction(
   if (!mutationGuardUnchanged(guard)) {
     return {
       status: "manual",
-      outcome: { targetExists, targetWritten: false, artifactRetainedUnproven: false },
+      outcome: { targetExists: pathExists(path), targetWritten: false, artifactRetainedUnproven: false },
     };
   }
   try {
@@ -828,7 +877,7 @@ function resolveUndisplacedTransaction(
       recoveryPath: transactionDirectory,
       outcome: {
         transactionDirectory,
-        targetExists,
+        targetExists: pathExists(path),
         targetWritten: false,
         artifactRetainedUnproven: true,
       },
@@ -837,7 +886,7 @@ function resolveUndisplacedTransaction(
   return {
     status: "recovered",
     outcome: {
-      targetExists,
+      targetExists: pathExists(path),
       targetWritten: false,
       artifactRetainedUnproven: false,
     },
@@ -1188,9 +1237,16 @@ function restoreDisplaced(
       outcome: ambiguousOutcome(transactionDirectory, path, displacedPath, true),
     };
   }
+  // recoveryPath reuses the same `provenCopy` the outcome record below
+  // carries, proven once at the top of this call, before the commit above
+  // could distort the check (round 9, m1: a bare `firstExistingPath` here
+  // would re-derive an unproven existence check for the exact value a proof
+  // already established a few lines up — the same "reuse the decision-unsafe
+  // predicate for a message" shape R1 closes elsewhere in this file, applied
+  // to disclosure instead of a claim).
   return {
     status: "changed",
-    recoveryPath: firstExistingPath(displacedPath),
+    recoveryPath: provenCopy,
     outcome: {
       transactionDirectory,
       provenCopy,
@@ -1201,9 +1257,18 @@ function restoreDisplaced(
   };
 }
 
-function discardPrepared(transactionDirectory: string, temporaryPath: string): boolean {
+/**
+ * Discards one or more individually-named, already-audited artifacts inside
+ * `transactionDirectory` (round 9, r4: `resolveUndisplacedTransaction` passes
+ * both `prepared` and `link-probe`, since a crash inside the link-probe
+ * window can leave both names pointing at the same staged inode). Each path
+ * is unlinked with `force: true`, so passing a name that never existed is a
+ * no-op, not a failure — callers that only ever have one artifact keep
+ * passing exactly one path.
+ */
+function discardPrepared(transactionDirectory: string, ...temporaryPaths: string[]): boolean {
   try {
-    rmSync(temporaryPath, { force: true });
+    for (const temporaryPath of temporaryPaths) rmSync(temporaryPath, { force: true });
     syncDirectory(transactionDirectory);
     return true;
   } catch {
@@ -1414,17 +1479,50 @@ export function atomicWriteBytesIfUnchanged(
         outcome: ambiguousOutcome(transactionDirectory, path, recoveryPath, destinationPublished),
       };
     }
-    requireMutationGuard(guard);
-    writeManifest(transactionDirectory, path, "committed", guard);
-    const liveRecoveryPath = firstExistingPath(recoveryPath);
-    if (liveRecoveryPath === undefined) {
+    // Proven now, BEFORE this call's own commit can distort the same check
+    // (see the identical note on `restoreDisplaced` above and
+    // `recoverFileTransaction`'s restore branches): once this transaction
+    // becomes its own "committed" entry, recomputing this *proof* afterward
+    // would count that self-reference against `displaced` and wrongly
+    // authorize it (the mirror image of the "wrongly report it as unproven"
+    // failure those sibling comments name — the self-reference cuts either
+    // way, so the full proof must never run again after the commit).
+    // Round 9, m1: the final success return used to skip this proof entirely
+    // and disclose a bare `firstExistingPath` — an existence check, not a
+    // copy proof — as the retained-copy path every caller (`hook.ts`'s
+    // `reportRetainedCopy`, reached from both `hookInstall` and
+    // `hookUninstall`) then spoke as fact. If the proof fails up front (only
+    // reachable by a same-user concurrent writer inside this 0700 directory,
+    // in the narrow window since `displaced` was last validated), this call
+    // does not commit at all — the transaction stays "published" and a later
+    // invocation resolves it fresh, exactly like every other unprovable
+    // shape in this module.
+    const provenCopy = provenCopyOf(recoveryPath, path);
+    if (provenCopy === undefined) {
       return {
         status: "recovery-required",
         recoveryPath: firstExistingPath(transactionDirectory, path),
         outcome: ambiguousOutcome(transactionDirectory, path, recoveryPath, destinationPublished),
       };
     }
-    return { status: "written", recoveryPath: liveRecoveryPath };
+    requireMutationGuard(guard);
+    writeManifest(transactionDirectory, path, "committed", guard);
+    // A second, narrower check after the commit: not `provenCopyOf` again —
+    // that would hit the exact self-reference trap the comment above
+    // describes — only `pathExists`, which cannot be fooled by this
+    // transaction's own now-committed manifest either way. This exists for
+    // the one thing a pre-commit proof cannot see: `displaced` vanishing
+    // entirely in the commit's own narrow window (a real, already-covered
+    // shape — the recovery reuses the transaction directory itself, never
+    // the vanished name, so nothing here is a new claim about content).
+    if (!pathExists(provenCopy)) {
+      return {
+        status: "recovery-required",
+        recoveryPath: firstExistingPath(transactionDirectory, path),
+        outcome: ambiguousOutcome(transactionDirectory, path, recoveryPath, destinationPublished),
+      };
+    }
+    return { status: "written", recoveryPath: provenCopy };
   } catch (error) {
     if (descriptor !== undefined) {
       try {

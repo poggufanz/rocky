@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import fs, {
   chmodSync,
+  existsSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
@@ -298,4 +299,67 @@ test("conditional JSON results only report recovery artifacts that still exist",
       `${scenario} reported a missing recovery artifact`,
     );
   }
+});
+
+// --- Round 9, r5: the adapter route must prune its own superseded
+// committed transaction directories, exactly like the bashrc route does ----
+
+test("a successful conditional write prunes this target's own superseded committed transactions (round 9, r5)", (t) => {
+  const directory = temporaryDirectory(t);
+  const path = join(directory, "pruned-adapter.json");
+  writeFileSync(path, '{"before":true}\n', "utf8");
+  const prior = readJsonObject(path);
+  assert.equal(prior.status, "valid");
+
+  // Five already-settled ("committed") leftovers, exactly the shape
+  // recoverJsonTransaction's own resolveUndisplacedTransaction path leaves
+  // behind after settling a crashed prepare — round 8's capability removal
+  // retains these directories rather than rm -r'ing them, on the promise
+  // that "the next real write commits a fresh copy" reclaims them. Before
+  // this round, nothing on the JSON/adapter route ever called
+  // pruneSupersededTransactions, so they never were.
+  const leftovers: string[] = [];
+  for (let i = 0; i < 5; i += 1) {
+    const transactionDirectory = join(directory, `.${basename(path)}.transaction-leftover-${i}`);
+    mkdirSync(transactionDirectory, { mode: 0o700 });
+    writeFileSync(
+      join(transactionDirectory, "manifest.json"),
+      `${JSON.stringify({ version: 1, state: "committed", target: path })}\n`,
+      "utf8",
+    );
+    leftovers.push(transactionDirectory);
+  }
+  assert.equal(leftovers.every((d) => existsSync(d)), true, "sanity: all five leftovers exist before the write");
+
+  const result = atomicWriteJsonIfUnchanged(path, { after: true }, prior);
+
+  assert.equal(result.status, "written");
+  assert.ok(result.recoveryPath !== undefined);
+  assert.equal(
+    leftovers.every((d) => !existsSync(d)),
+    true,
+    "the successful write's own prune sweep reclaims every superseded committed leftover (r5)",
+  );
+  assert.equal(existsSync(dirname(result.recoveryPath)), true, "this write's own fresh transaction directory survives");
+});
+
+test("pruning after a successful write never touches a pending, uncommitted sibling transaction (negative control for r5)", (t) => {
+  const directory = temporaryDirectory(t);
+  const path = join(directory, "pending-sibling.json");
+  writeFileSync(path, '{"before":true}\n', "utf8");
+  const prior = readJsonObject(path);
+  assert.equal(prior.status, "valid");
+
+  const pending = join(directory, `.${basename(path)}.transaction-pending`);
+  mkdirSync(pending, { mode: 0o700 });
+  writeFileSync(
+    join(pending, "manifest.json"),
+    `${JSON.stringify({ version: 1, state: "displaced", target: path })}\n`,
+    "utf8",
+  );
+
+  const result = atomicWriteJsonIfUnchanged(path, { after: true }, prior);
+
+  assert.equal(result.status, "written", "a sibling directory this API layer never inspects does not block the write");
+  assert.equal(existsSync(pending), true, "pruning after a successful write never removes a non-committed transaction (r5)");
 });

@@ -1071,13 +1071,18 @@ test("hook status degrades informatively instead of failing hard on a stray tran
 
 // --- Final audit, Important 2/3: prove the artifact, not the path ----------
 
-test("hook status names the surviving copy without inviting its removal when bashrc itself is gone (Important 3)", (t) => {
+test("hook status names the surviving copy without instructing its removal or restoration when bashrc itself is gone (Important 3)", (t) => {
   const sandbox = bashrcSandbox(t);
   const original = bytes("export SECRET_TOKEN=sk-live-DO-NOT-LEAK\n");
   // bashrc itself does NOT exist — the transaction directory's `displaced`
   // copy is the only surviving place holding it. This is exactly the
   // round-5-added guard's own shape (published, target absent, displaced
-  // present) and it must never invite destroying the last copy.
+  // present) and it must never invite destroying the last copy — and, round
+  // 9, R1's primary direction: never instruct restoring it either, since the
+  // same call site cannot prove that instruction is safe for every bashrc
+  // topology (a live symlink elsewhere reached the identical branch and the
+  // instruction destroyed the user's real file — see the dedicated R1 test
+  // below).
   const fixture = writePendingTransactionFixture(sandbox.bashrc, "published", {
     displaced: original,
   });
@@ -1093,13 +1098,17 @@ test("hook status names the surviving copy without inviting its removal when bas
   );
   assert.ok(!output.includes("SECRET_TOKEN"), "diagnostics stay secret-free");
   assert.equal(existsSync(join(fixture, "displaced")), true, "the copy itself is left untouched");
-  // Round 6 named the copy's path but never pinned that a *remedy* comes
-  // with it — the whole sentence was deletable with a green suite (final
-  // audit, F9 mutant A9). Strengthened here, not just re-asserted.
+  // Round 6 (A9) pinned a remedy verb here: "restore by copying that file to
+  // the bashrc path yourself". Round 9, R1 removes it: that instruction's
+  // correctness depends on facts this call never proves about the bashrc
+  // path (whether following it is a plain creation or a destructive
+  // overwrite), which is exactly the failure mode R1 reproduced. A9 is now
+  // eliminated by construction — the line it mutated no longer exists.
   assert.ok(
-    output.includes("restore by copying that file to the bashrc path yourself"),
-    "the last-surviving-copy case must give a remedy, not just name the path (A9)",
+    !output.includes("restore by copying"),
+    "states only what exists and where — no instruction for what to do with it (round 9, R1)",
   );
+  assert.ok(!/\byourself\b/.test(output), "no remedy phrased as an instruction to the user");
 });
 
 /**
@@ -1162,11 +1171,89 @@ test("hook install never offers bashrc itself as something to remove, even when 
   // either, under the new wording (final audit, F9 mutant A4's analogue:
   // the "does this still exist" proof, not a file/directory shape guess).
   assert.ok(
-    !output.includes("inspect before removing"),
+    !output.includes("unclear leftover:"),
     "must not claim a directory survives to inspect when it was actually removed",
   );
   assert.match(output, /no safe copy to name/);
   assert.deepEqual(readFileSync(sandbox.bashrc), concurrent, "the concurrent writer's bytes are untouched");
+});
+
+// --- Round 9, R1: a decision predicate and a message predicate must never
+// share one field — isLiveRegularFile stays at the destroy/keep decision,
+// pathExists drives the "is bashrc gone" claim, and no branch of
+// reportBashrcRecoveryStop speaks a remedy verb at all. ---------------------
+
+test("hook status never says bashrc is gone or names a remedy while a live symlink still resolves to real content (round 9, R1, PROBE N1)", (t) => {
+  const sandbox = bashrcSandbox(t);
+  const dotfilesDir = join(sandbox.home, "dotfiles");
+  mkdirSync(dotfilesDir, { recursive: true });
+  const realBashrc = join(dotfilesDir, "bashrc");
+  const liveContent = bytes("export REAL_CONTENT=live\nalias ll='ls -l'\n");
+  writeFileSync(realBashrc, liveContent);
+  let symlinkAvailable = true;
+  try {
+    symlinkSync(realBashrc, sandbox.bashrc);
+  } catch {
+    symlinkAvailable = false; // Some platforms require privilege for symlinks.
+  }
+  if (!symlinkAvailable) return;
+  // "published" with a proven `displaced` backup reaches ambiguousOutcome
+  // via the generic published catch-all, with a real, provable copy to
+  // name — exactly the shape whose message round 8's I2 fix got wrong for a
+  // valid (non-dangling) symlink: isLiveRegularFile(path) is false for any
+  // symlink, live or dangling alike, so it said "bashrc gone" and told the
+  // user to copy the stale artifact over the bashrc path themselves — `cp`
+  // follows the symlink and destroys the live file behind it.
+  const fixture = writePendingTransactionFixture(sandbox.bashrc, "published", {
+    displaced: bytes("export OLD_BYTES=stale\n"),
+  });
+
+  const result = hookStatus();
+
+  assert.equal(result, 1);
+  const output = sandbox.stderr();
+  assert.ok(!output.includes("bashrc gone"), "bashrc is not gone — the symlink still resolves to real content (R1)");
+  assert.ok(!output.includes("restore by copying"), "no remedy verb is ever spoken from this stop (round 9 primary direction)");
+  assert.ok(!/\byourself\b/.test(output), "no instruction telling the user what to type");
+  assert.ok(output.includes("I keep safe copy"), "states the proven fact: a copy exists");
+  assert.ok(output.includes(join(fixture, "displaced")), "the copy's path is named for inspection");
+  assert.equal(lstatSync(sandbox.bashrc).isSymbolicLink(), true, "the symlink itself survives untouched");
+  assert.deepEqual(readFileSync(realBashrc), liveContent, "the live content behind the symlink is never touched");
+  assert.ok(!output.includes("OLD_BYTES"), "diagnostics stay secret-free");
+});
+
+test("hook status retains a staged artifact instead of discarding it when bashrc is a valid symlink, not just a dangling one (round 9, coverage: C2)", (t) => {
+  const sandbox = bashrcSandbox(t);
+  const dotfilesDir = join(sandbox.home, "dotfiles");
+  mkdirSync(dotfilesDir, { recursive: true });
+  const realBashrc = join(dotfilesDir, "bashrc");
+  const liveContent = bytes("export REAL_CONTENT=live\n");
+  writeFileSync(realBashrc, liveContent);
+  let symlinkAvailable = true;
+  try {
+    symlinkSync(realBashrc, sandbox.bashrc);
+  } catch {
+    symlinkAvailable = false;
+  }
+  if (!symlinkAvailable) return;
+  // "prepared", no displaced: reaches resolveUndisplacedTransaction's own
+  // destroy/keep decision directly. isLiveRegularFile(path) — lstat-based —
+  // must say a valid symlink is not itself a proven regular file, exactly
+  // as it already does for a dangling one (round 8, I2 / PROBE L); a
+  // statSync-based predicate (following the symlink to the live file
+  // behind it) would wrongly treat the name resolving as proof nothing was
+  // ever at risk, and discard the only surviving copy of the staged bytes.
+  const staged = bytes("export USER_SECRET=only-copy\n");
+  const fixture = writePendingTransactionFixture(sandbox.bashrc, "prepared", { prepared: staged });
+
+  const result = hookStatus();
+
+  assert.equal(result, 1);
+  assert.equal(existsSync(join(fixture, "prepared")), true, "the staged artifact is retained, not discarded (C2)");
+  assert.deepEqual(readFileSync(join(fixture, "prepared")), staged, "the surviving bytes are untouched");
+  assert.equal(lstatSync(sandbox.bashrc).isSymbolicLink(), true, "the symlink itself is left untouched");
+  assert.deepEqual(readFileSync(realBashrc), liveContent, "the live content behind the symlink is never touched");
+  assert.ok(!sandbox.stderr().includes("USER_SECRET"), "diagnostics stay secret-free");
 });
 
 // --- Final audit, Important 1: settling can (re-)create bashrc, not just keep a copy ---
@@ -1310,14 +1397,21 @@ test("hook status reports an interrupted restore honestly instead of claiming to
   assert.ok(!output.includes("remove by hand"), "no removal instruction is ever spoken from an ambiguous stop");
   assert.ok(output.includes("inspect:"), "actionable guidance still names the surviving copy");
   assert.ok(output.includes(join(fixture, "displaced")), "the surviving copy is still named for inspection");
-  // Round 8, m4: branch 1 of reportBashrcRecoveryStop used to name the copy
-  // but never say to copy it back, unlike its sibling branch — exactly this
-  // state (bashrc exists, but holds broken bytes, so it must not be
-  // trusted) is the one PROBE A reproduces and the one that most needed it.
+  // Round 8, m4 added a remedy verb here ("restore by copying that file to
+  // the bashrc path yourself"), conditioned on this call's own write leaving
+  // bashrc broken. Round 9, R1 removes it along with every other remedy verb
+  // in this function: the instruction's safety depends on facts this call
+  // does not prove about the bashrc path, and the same reasoning that makes
+  // it look safe here (bashrc is provably a broken regular file this call
+  // itself just wrote) does not generalize to every state that reaches this
+  // branch — the branch selection itself is a message-layer fact, not a
+  // per-state safety proof. Rocky states what it proved (bashrc holds an
+  // unfinished write; a copy exists at this path) and stops there.
   assert.ok(
-    output.includes("restore by copying that file to the bashrc path yourself"),
-    "an untrustworthy bashrc must get the same restore remedy as a missing one (m4)",
+    !output.includes("restore by copying"),
+    "no remedy verb — states what exists and where, nothing about what to do with it (round 9, R1)",
   );
+  assert.ok(!/\byourself\b/.test(output), "no remedy phrased as an instruction to the user");
   assert.deepEqual(readFileSync(join(fixture, "displaced")), original, "the only intact copy is never destroyed");
   assert.ok(!output.includes("SECRET_TOKEN"), "diagnostics stay secret-free");
 });
@@ -1337,9 +1431,13 @@ test("hook commands give actionable guidance instead of a permanent dead end on 
     assert.ok(!output.includes("I keep safe copy"), "no copy is proven for a prepared-only artifact");
     assert.ok(!output.includes("remove by hand"), "never a destructive imperative");
     assert.ok(output.includes(fixture), "the directory is named so the user has something to inspect");
+    // Round 9, r9: the "removing" wording tension against README's
+    // categorical "never invites you to destroy" is closed by dropping the
+    // verb, not by qualifying the guarantee — the message states the fact
+    // (an unclear leftover exists at this path) with no verb attached at all.
     assert.ok(
-      output.includes("inspect before removing"),
-      "the message gives a remedy instead of a bare path with no verb (F2's escape hatch)",
+      output.includes("unclear leftover:") && output.includes(fixture),
+      "the message names the fact and the path, with no verb attached (F2's escape hatch, round 9 wording)",
     );
     assert.equal(existsSync(fixture), true, "nothing is silently discarded");
   }
@@ -1570,8 +1668,8 @@ test("hook status never destroys the only surviving copy of a prepared write whe
   assert.equal(existsSync(join(fixture, "prepared")), true, "the only surviving copy is not destroyed");
   assert.deepEqual(readFileSync(join(fixture, "prepared")), staged, "the surviving bytes are untouched");
   assert.ok(
-    output.includes("unclear leftover, inspect before removing"),
-    "actionable guidance names the retained directory instead of a bare dead end",
+    output.includes("unclear leftover:"),
+    "states the fact that a leftover exists instead of a bare dead end (round 9, r9 wording)",
   );
   assert.ok(output.includes(fixture), "the directory is named");
   assert.ok(!output.includes("USER_SECRET"), "diagnostics stay secret-free");
@@ -1604,6 +1702,124 @@ test("hook install reports a broken rocky-home write instead of dying with a raw
   );
   assert.ok(!output.includes("SECRET"), "diagnostics stay secret-free");
   assert.ok(!/^Error:/m.test(output), "no raw Node error string ever reaches the user (Rocky's voice, not Node's)");
+});
+
+test("hook install reports a broken guard.rules write instead of dying with a raw error, with the assets wrapper unaffected (round 9, coverage: C13)", (t) => {
+  const sandbox = bashrcSandbox(t);
+  const original = bytes("export SECRET=hunter2\n");
+  writeFileSync(sandbox.bashrc, original);
+  // ~/.rocky itself does not exist yet, so the mkdir/copy wrapper (I3's
+  // first try/catch) runs and succeeds normally — this test isolates I3's
+  // SECOND wrapper (the guard.rules read/write), which PROBE P above never
+  // exercises. guard.rules is pre-created as a directory so readFileSync
+  // inside that second try/catch throws instead.
+  mkdirSync(process.env.ROCKY_HOME as string, { recursive: true });
+  mkdirSync(join(process.env.ROCKY_HOME as string, "guard.rules"), { recursive: true });
+
+  const result = hookInstall();
+
+  assert.equal(result, 1);
+  const output = sandbox.stderr();
+  assert.ok(!/^Error:/m.test(output), "no raw Node error string ever reaches the user (Rocky's voice, not Node's) (C13)");
+  assert.ok(!output.includes("something break inside me"), "does not fall through to the generic top-level catch");
+  assert.deepEqual(
+    readFileSync(sandbox.bashrc),
+    bytes(`export SECRET=hunter2\n\n${BLOCK}`),
+    "bashrc was already rewritten before the guard.rules write failed",
+  );
+  assert.ok(
+    existsSync(join(process.env.ROCKY_HOME as string, "rocky-hook.bash")),
+    "the assets wrapper's own writes already succeeded",
+  );
+  const [transactionDirectory] = transactionDirectories(sandbox.home);
+  assert.ok(transactionDirectory !== undefined);
+  const recoveryPath = join(sandbox.home, transactionDirectory, "displaced");
+  assert.ok(existsSync(recoveryPath));
+  assert.ok(
+    output.includes(recoveryPath),
+    "the retained copy's path is disclosed even when the second wrapper is the one that fails",
+  );
+  assert.ok(!output.includes("SECRET"), "diagnostics stay secret-free");
+});
+
+// --- Round 9, R2: reportRockyHomeWriteFailure must not assert a bashrc
+// mutation that never happened on the path that never publishes ------------
+
+test("hook install reports rocky home breaking without claiming a bashrc mutation that never happened when the block is already managed (round 9, R2)", (t) => {
+  const sandbox = bashrcSandbox(t);
+  const original = bytes(`export A=1\n\n${BLOCK}`);
+  writeFileSync(sandbox.bashrc, original);
+  // classification !== "absent": hookInstall never calls publishBashrc on
+  // this path at all, so nothing about bashrc is touched before this
+  // failure. ~/.rocky already exists as a plain file, so the mkdirSync
+  // below throws exactly like PROBE P above.
+  writeFileSync(process.env.ROCKY_HOME as string, "not a directory\n");
+
+  const result = hookInstall();
+
+  assert.equal(result, 1);
+  const output = sandbox.stderr();
+  assert.deepEqual(readFileSync(sandbox.bashrc), original, "bashrc bytes are genuinely untouched on this path");
+  assert.deepEqual(transactionDirectories(sandbox.home), [], "no transaction was ever staged on this path");
+  assert.ok(
+    !output.includes("bashrc already changed"),
+    "must not assert a mutation that never happened (round 9, R2)",
+  );
+  assert.ok(output.includes("bashrc not touched"), "states plainly that bashrc was not touched");
+  assert.ok(!/^Error:/m.test(output), "no raw Node error string ever reaches the user");
+});
+
+test("hook install still says bashrc already changed when it genuinely published before the rocky-home write fails (negative control for R2)", (t) => {
+  const sandbox = bashrcSandbox(t);
+  const original = bytes("export A=1\n");
+  writeFileSync(sandbox.bashrc, original);
+  // classification === "absent": hookInstall DOES publish here.
+  writeFileSync(process.env.ROCKY_HOME as string, "not a directory\n");
+
+  const result = hookInstall();
+
+  assert.equal(result, 1);
+  const output = sandbox.stderr();
+  assert.deepEqual(readFileSync(sandbox.bashrc), bytes(`export A=1\n\n${BLOCK}`), "bashrc was genuinely rewritten");
+  assert.ok(output.includes("bashrc already changed"), "this path genuinely published, so the original sentence still applies");
+});
+
+// --- Round 9, r3: hookStatus's own reads must not reach index.ts's raw
+// error the same way hookInstall's writes used to (I3's class, unclosed) ---
+
+test("hook status reports a Rocky-voice message instead of a raw error when rocky-hook.bash is unreadable (round 9, r3)", (t) => {
+  const sandbox = bashrcSandbox(t);
+  writeFileSync(sandbox.bashrc, bytes(`export A=1\n\n${BLOCK}`));
+  // ~/.rocky/rocky-hook.bash exists as a directory instead of a file: the
+  // readFileSync inside hookStatus used to sit outside any try/catch, so
+  // this reached index.ts's top-level catch as a raw Node EISDIR error.
+  mkdirSync(join(process.env.ROCKY_HOME as string, "rocky-hook.bash"), { recursive: true });
+
+  const result = hookStatus();
+
+  assert.equal(result, 1);
+  const output = sandbox.stderr();
+  assert.ok(!/^Error:/m.test(output), "no raw Node error string ever reaches the user (Rocky's voice, not Node's)");
+  assert.ok(!output.includes("something break inside me"), "does not fall through to the generic top-level catch");
+  assert.match(output, /ears installed/);
+  assert.deepEqual(readFileSync(sandbox.bashrc), bytes(`export A=1\n\n${BLOCK}`), "bashrc itself is untouched");
+});
+
+test("hook status reports a Rocky-voice message instead of a raw error when guard.rules is unreadable (round 9, r3)", (t) => {
+  const sandbox = bashrcSandbox(t);
+  writeFileSync(sandbox.bashrc, bytes(`export A=1\n\n${BLOCK}`));
+  mkdirSync(process.env.ROCKY_HOME as string, { recursive: true });
+  writeFileSync(join(process.env.ROCKY_HOME as string, "rocky-hook.bash"), 'ROCKY_HOOK_VERSION="1"\n');
+  // guard.rules exists as a directory instead of a file.
+  mkdirSync(join(process.env.ROCKY_HOME as string, "guard.rules"), { recursive: true });
+
+  const result = hookStatus();
+
+  assert.equal(result, 1);
+  const output = sandbox.stderr();
+  assert.ok(!/^Error:/m.test(output), "no raw Node error string ever reaches the user");
+  assert.ok(!output.includes("something break inside me"), "does not fall through to the generic top-level catch");
+  assert.deepEqual(readFileSync(sandbox.bashrc), bytes(`export A=1\n\n${BLOCK}`), "bashrc itself is untouched");
 });
 
 // --- Round 8: mergeOutcome must accumulate facts across a multi-iteration
@@ -1657,4 +1873,59 @@ test("hook status accumulates settle facts across multiple recovered transaction
     "B9: an earlier iteration's provenCopy must survive a later iteration that proves no copy of its own",
   );
   assert.equal(existsSync(join(second, "prepared")), false, "the second, unrelated transaction's own scratch write is discarded");
+});
+
+// --- Round 9 coverage: C16 — mergeOutcome must use the freshest targetExists
+// fact across settle iterations, not an earlier iteration's stale one ------
+
+test("hook status uses the freshest targetExists fact when merging settle outcomes, not a stale earlier one (round 9, coverage: C16)", (t) => {
+  const sandbox = bashrcSandbox(t);
+  // bashrc absent at the start: the first transaction resolves with nothing
+  // staged while bashrc is still genuinely absent (targetExists false at
+  // that moment).
+  writeNamedPendingTransactionFixture(sandbox.bashrc, "1-recovered", "published", {});
+  // The second transaction reaches an ambiguous stop with a proven displaced
+  // backup. Its own targetExists must be computed against whatever bashrc
+  // looks like right now, at the second iteration.
+  const second = writeNamedPendingTransactionFixture(
+    sandbox.bashrc,
+    "2-ambiguous",
+    "published",
+    { displaced: bytes("export RESTORE_ME=please\n") },
+  );
+
+  // bashrc is created between the two settle iterations by a source outside
+  // Rocky's own recovery actions, so the first iteration's own targetExists
+  // (false, correct at the time) is stale by the time the second iteration
+  // runs. Fires on the third readdirSync of the transaction directory's
+  // parent — the second iteration's own inspectFileTransaction call, before
+  // its recoverFileTransaction computes the second transaction's outcome.
+  const originalReaddir = fs.readdirSync;
+  let calls = 0;
+  (fs as unknown as { readdirSync: typeof fs.readdirSync }).readdirSync = ((
+    ...args: Parameters<typeof fs.readdirSync>
+  ) => {
+    calls += 1;
+    if (calls === 3 && !existsSync(sandbox.bashrc)) {
+      writeFileSync(sandbox.bashrc, bytes("export CREATED_BETWEEN_ITERATIONS=true\n"));
+    }
+    return (originalReaddir as (...a: unknown[]) => unknown)(...args);
+  }) as typeof fs.readdirSync;
+  syncBuiltinESMExports();
+  t.after(() => {
+    fs.readdirSync = originalReaddir;
+    syncBuiltinESMExports();
+  });
+
+  const result = hookStatus();
+
+  assert.equal(result, 1);
+  const output = sandbox.stderr();
+  // Before round 9's coverage fix: mergeOutcome's targetExists kept the
+  // FIRST iteration's (stale, false) fact instead of the second (fresh,
+  // true) one, so this state would falsely say "bashrc gone" even though
+  // bashrc now genuinely exists.
+  assert.ok(!output.includes("bashrc gone"), "must use the freshest targetExists, not the first iteration's stale one (C16)");
+  assert.ok(output.includes("I keep safe copy"), "the second transaction's proven copy is still disclosed");
+  assert.ok(existsSync(join(second, "displaced")), "the second transaction's own artifact is retained, ambiguous stop");
 });

@@ -18,6 +18,7 @@ import {
   inspectFileTransaction,
   mutationGuardUnchanged,
   pathExists,
+  pruneSupersededTransactions,
   recoverFileTransaction,
   requireMutationGuard,
   syncParentDirectory,
@@ -279,6 +280,17 @@ export function recoverJsonTransaction(
  * Successful replacements retain the displaced inode as a reported live
  * recovery so a writer with an already-open descriptor cannot lose data.
  * Hard-link failure never falls back to an overwriting rename.
+ *
+ * A successful or refused-but-displaced write also prunes this target's own
+ * superseded committed transaction directories (round 9, r5). `hook.ts`'s
+ * bashrc route has always done this at both its settle and publish call
+ * sites; this JSON engine's only production consumers (Claude Desktop/Code
+ * adapters, via `claude-desktop.ts`/`claude-code.ts`) call straight into
+ * this function and never prune themselves, so every crashed-prepare
+ * leftover this route ever settles was retained forever — the bounded-growth
+ * property the engine's own doc comments promise held only on the bashrc
+ * route. Pruning here, once, closes it for every JSON consumer without
+ * touching any of them.
  */
 export function atomicWriteJsonIfUnchanged(
   path: string,
@@ -300,9 +312,14 @@ export function atomicWriteJsonIfUnchanged(
   const snapshot: BytesReadResult = prior.status === "valid"
     ? { status: "valid", bytes: prior.bytes, mode: prior.mode }
     : { status: "missing" };
+  let result: ConditionalJsonWriteResult;
   try {
-    return atomicWriteBytesIfUnchanged(path, encoded, snapshot, guard);
+    result = atomicWriteBytesIfUnchanged(path, encoded, snapshot, guard);
   } catch {
     throw new Error("Unable to write JSON config");
   }
+  if ((result.status === "written" || result.status === "changed") && result.recoveryPath !== undefined) {
+    pruneSupersededTransactions(path, dirname(result.recoveryPath));
+  }
+  return result;
 }

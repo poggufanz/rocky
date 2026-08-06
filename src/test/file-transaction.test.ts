@@ -1011,3 +1011,215 @@ test("recovery resolves a transaction with nothing staged when the target is als
   assert.equal(recovery.status, "recovered", "nothing staged and no live target: safe to resolve, not retain forever");
   assert.equal(inspectFileTransaction(path).status, "clear");
 });
+
+// --- Round 9, r4: a leftover link-probe hard link must not survive a
+// discard that only accounted for the "prepared" name ----------------------
+
+test("recovery discards a leftover link-probe hard link alongside prepared, not just the prepared name (round 9, r4)", (t) => {
+  const directory = temporaryDirectory(t);
+  const path = join(directory, "link-probe-leftover.bin");
+  const original = Buffer.from("original\n", "utf8");
+  writeFileSync(path, original);
+  const transactionDirectory = writeLegacyV1TransactionFixture(directory, path, "prepared", {
+    prepared: Buffer.from("staged, never published fake-secret-staged\n", "utf8"),
+  });
+  // Reproduces the exact crash window atomicWriteBytesIfUnchanged's own
+  // link-capability probe leaves: `link-probe` is a second hard link to the
+  // same inode as `prepared`, created and normally removed two lines later
+  // in that function. A crash between those two lines leaves both names
+  // live; round 8's discard only ever unlinked the name "prepared", so the
+  // same bytes silently survived under "link-probe".
+  linkSync(join(transactionDirectory, "prepared"), join(transactionDirectory, "link-probe"));
+  assert.equal(lstatSync(join(transactionDirectory, "prepared")).nlink, 2);
+
+  const recovery = recoverFileTransaction(path);
+
+  assert.equal(recovery.status, "recovered");
+  assert.deepEqual(readFileSync(path), original, "the live target is untouched");
+  assert.equal(existsSync(join(transactionDirectory, "prepared")), false, "the prepared name is discarded");
+  assert.equal(
+    existsSync(join(transactionDirectory, "link-probe")),
+    false,
+    "the link-probe name is discarded too — round 8 discarded only the 'prepared' name and left this inode's other name behind (r4)",
+  );
+  assert.equal(
+    JSON.parse(readFileSync(join(transactionDirectory, "manifest.json"), "utf8")).state,
+    "committed",
+  );
+});
+
+test("recovery still discards only prepared when no link-probe leftover exists (negative control for r4)", (t) => {
+  const directory = temporaryDirectory(t);
+  const path = join(directory, "no-link-probe.bin");
+  const original = Buffer.from("original\n", "utf8");
+  writeFileSync(path, original);
+  const transactionDirectory = writeLegacyV1TransactionFixture(directory, path, "prepared", {
+    prepared: Buffer.from("staged, never published\n", "utf8"),
+  });
+
+  const recovery = recoverFileTransaction(path);
+
+  assert.equal(recovery.status, "recovered");
+  assert.equal(existsSync(join(transactionDirectory, "prepared")), false);
+  assert.equal(existsSync(join(transactionDirectory, "link-probe")), false, "never created, never an error to discard it");
+});
+
+// --- Round 9, m1: a successful write's own retained-copy disclosure must be
+// a proven copy, not a bare existence check ----------------------------------
+
+test("a successful write discloses the retained-copy path only when proven, not from a bare existence check (round 9, m1)", (t) => {
+  const directory = temporaryDirectory(t);
+  const path = join(directory, "proven-recovery.bin");
+  const original = Buffer.from("original fake-secret-original\n", "utf8");
+  writeFileSync(path, original);
+  const prior = snapshotBytes(path);
+  const replacement = Buffer.from("replacement fake-secret-replacement\n", "utf8");
+
+  // Races the retained copy the instant its own "prepared" artifact is
+  // unlinked — the exact window between this call's last proof of
+  // `displaced` and its final disclosure of the recovery path (matched the
+  // same narrow call signature `injectFailureOnPreparedUnlink` above uses:
+  // no options object, basename "prepared", so it fires exactly once, at
+  // exactly this call, nowhere else). A second hard link to the exact same
+  // inode moves `displaced`'s own nlink from 1 to 2, which is enough to fail
+  // `isManagedRegularFile`'s "singly-owned copy" proof — only reachable by a
+  // same-user concurrent writer inside this 0700 directory.
+  const originalRm = fs.rmSync;
+  let raced = false;
+  fs.rmSync = ((...args: Parameters<typeof fs.rmSync>) => {
+    const [target, options] = args;
+    originalRm(...args);
+    if (!raced && typeof target === "string" && options === undefined && basename(target) === "prepared") {
+      raced = true;
+      const displaced = join(dirname(target), "displaced");
+      linkSync(displaced, `${displaced}-extra-name`);
+    }
+  }) as typeof fs.rmSync;
+  syncBuiltinESMExports();
+  t.after(() => {
+    fs.rmSync = originalRm;
+    syncBuiltinESMExports();
+  });
+
+  const result = atomicWriteBytesIfUnchanged(path, replacement, prior);
+
+  assert.ok(raced, "the injected race actually fired");
+  assert.deepEqual(readFileSync(path), replacement, "the write itself still succeeded and is not undone");
+  // Before round 9: the final success return used a bare `firstExistingPath`
+  // (an lstat existence check, true regardless of how many names now point
+  // at that inode) — it would have reported this doubly-linked file as
+  // though it were still the proven, singly-owned retained copy. After:
+  // recoveryPath is only ever the same `isManagedRegularFile`-proven value
+  // the outcome record's own `provenCopy` field uses elsewhere in this
+  // module — never a bare "something exists at this name" check.
+  assert.notEqual(result.status, "written", "an unproven retained copy must not be reported as a plain success");
+  assert.equal(result.status, "recovery-required");
+  assert.ok(result.outcome !== undefined);
+  assert.equal(result.outcome!.provenCopy, undefined, "the doubly-linked file is never accepted as a proven copy");
+});
+
+test("a successful write discloses the exact proven copy in the ordinary, uncontested case (negative control for m1)", (t) => {
+  const directory = temporaryDirectory(t);
+  const path = join(directory, "ordinary-recovery.bin");
+  const original = Buffer.from("original\n", "utf8");
+  writeFileSync(path, original);
+  const prior = snapshotBytes(path);
+
+  const result = atomicWriteBytesIfUnchanged(path, Buffer.from("replacement\n", "utf8"), prior);
+
+  assert.equal(result.status, "written");
+  assert.ok(result.recoveryPath !== undefined);
+  assert.deepEqual(readFileSync(result.recoveryPath), original, "the disclosed path is the genuine retained copy");
+});
+
+// --- Round 9 coverage: C6 (the discard gate must not attempt a needless
+// fsync when nothing was ever staged), C10 (the commit's own writeManifest
+// call must still carry the guard argument), C11 (the standalone recheck
+// between a successful discard and the commit must stay distinct from
+// writeManifest's own internal guard checks) -------------------------------
+
+test("resolving a transaction with nothing staged never attempts a needless discard fsync (round 9, coverage: C6)", (t) => {
+  const directory = temporaryDirectory(t);
+  const path = join(directory, "nothing-staged-gate.bin");
+  writeFileSync(path, "live\n", "utf8");
+  const transactionDirectory = writeLegacyV1TransactionFixture(directory, path, "published", {});
+
+  // Fails the SECOND directory fsync this transaction directory ever
+  // receives. This fixture's manifest was written directly (bypassing
+  // writeManifest), so the gated code makes exactly one fsync call for this
+  // directory: the final commit's own writeManifest. If the "nothing to
+  // discard" gate were dropped, discardPrepared would run unconditionally
+  // (a harmless rmSync no-op, since nothing exists) but still perform its
+  // own fsync first — making the commit's fsync the SECOND call instead of
+  // the first, which this injection would then catch.
+  const originalSync = directorySyncCapability.sync;
+  let calls = 0;
+  directorySyncCapability.sync = (directoryPath: string) => {
+    if (directoryPath === transactionDirectory) {
+      calls += 1;
+      if (calls === 2) throw new Error("injected second fsync failure carrying fake-secret");
+    }
+    return originalSync(directoryPath);
+  };
+  t.after(() => { directorySyncCapability.sync = originalSync; });
+
+  const recovery = recoverFileTransaction(path);
+
+  assert.equal(recovery.status, "recovered", "nothing staged: only one fsync should ever be attempted");
+  assert.equal(calls, 1, "the discard gate must not perform a needless fsync when nothing was staged (C6)");
+});
+
+test("resolving an undisplaced transaction still honors a guard change during its own final commit (round 9, coverage: C10)", (t) => {
+  const directory = temporaryDirectory(t);
+  const path = join(directory, "commit-guard.bin");
+  writeFileSync(path, "live\n", "utf8");
+  const transactionDirectory = writeLegacyV1TransactionFixture(directory, path, "published", {});
+
+  // The first two `unchanged()` calls are this function's own explicit
+  // checks (both pass, since nothing is staged to discard); a change
+  // reported starting on the third call — the very first check the commit's
+  // own writeManifest performs — must still abort the commit. Dropping the
+  // `guard` argument on that specific call (as opposed to dropping a check)
+  // is invisible to every explicit check resolveUndisplacedTransaction makes
+  // itself and observable only here.
+  let calls = 0;
+  const guard = { unchanged: () => { calls += 1; return calls <= 2; } };
+
+  const recovery = recoverFileTransaction(path, guard);
+
+  assert.equal(recovery.status, "manual", "a guard change reported during the commit's own write must still abort it (C10)");
+  assert.equal(
+    JSON.parse(readFileSync(join(transactionDirectory, "manifest.json"), "utf8")).state,
+    "published",
+    "the manifest must not advance to committed once the guard reports change",
+  );
+});
+
+test("resolving an undisplaced transaction stays silent about the directory once its own discard already succeeded before a later guard change (round 9, coverage: C11)", (t) => {
+  const directory = temporaryDirectory(t);
+  const path = join(directory, "post-discard-guard.bin");
+  writeFileSync(path, "live\n", "utf8");
+  const transactionDirectory = writeLegacyV1TransactionFixture(directory, path, "published", {
+    prepared: Buffer.from("staged, safe to discard\n", "utf8"),
+  });
+
+  // unchanged() reports true for the function's own first two checks (the
+  // one right after the retain branch, and the one guarding the discard
+  // itself — both of which must pass for the discard to actually run), then
+  // false starting on the third call: the standalone recheck this function
+  // performs between a successful discard and its own commit. Removing that
+  // standalone recheck (C11) does not change the final `status` here (the
+  // commit's own internal guard check still aborts it) — it changes what
+  // gets disclosed: the standalone check's own return names no directory
+  // (nothing is left at risk once the discard already succeeded), while the
+  // commit's internal-guard-check catch always names the directory as
+  // retained, which is what this test's `recoveryPath` assertion pins.
+  let calls = 0;
+  const guard = { unchanged: () => { calls += 1; return calls <= 2; } };
+
+  const recovery = recoverFileTransaction(path, guard);
+
+  assert.equal(recovery.status, "manual");
+  assert.equal(existsSync(join(transactionDirectory, "prepared")), false, "the discard itself already completed");
+  assert.equal(recovery.recoveryPath, undefined, "nothing is left at risk, so no directory is offered for inspection (C11)");
+});

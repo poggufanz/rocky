@@ -141,14 +141,25 @@ function requireOutcome(outcome: RecoveryOutcome | undefined): RecoveryOutcome {
  * This function makes no filesystem check of its own; every clause below
  * reads a field already on the record (final audit: "a name exists" is not
  * "the data is safe", and no message may re-derive that distinction later
- * from a bare path). No branch here ever instructs removing anything — a
- * proven copy is named for inspection, never targeted for deletion, because
- * an ambiguous stop can never prove the copy is redundant (final audit, F1
- * + F3: the same "prove the content, not the name" discipline the engine
- * guard now applies). `fromSettle` selects between two histories that must
- * not share a sentence: a transaction left behind by an earlier,
- * already-finished invocation ("from before") versus this very call's own
- * write turning ambiguous (final audit, F5).
+ * from a bare path).
+ *
+ * No branch here ever instructs the user to do anything (round 9, R1 — the
+ * primary finding of the sixth generation of this defect class). Earlier
+ * rounds named a proven copy and then added an imperative telling the user
+ * what to type: "restore by copying that file to the bashrc path yourself".
+ * That instruction's correctness depended on a fact this function cannot
+ * prove — what `cp` (or the user's own hand) does when it reaches the
+ * bashrc path — and it is false exactly when bashrc is a live symlink to
+ * real content: the copy follows the link and overwrites the user's actual
+ * file, the precise failure R1 reproduced. A message may state what Rocky
+ * proved (an artifact exists at this path and holds content, bashrc was or
+ * was not written by this call, a transaction is unfinished) and nothing
+ * more; every remedy verb is gone from every branch below, not only the one
+ * R1 named, because the same call site cannot tell which remaining
+ * imperative is safe for a path it does not control. `fromSettle` selects
+ * between two histories that must not share a sentence: a transaction left
+ * behind by an earlier, already-finished invocation ("from before") versus
+ * this very call's own write turning ambiguous (final audit, F5).
  */
 function reportBashrcRecoveryStop(rc: string, outcome: RecoveryOutcome, fromSettle: boolean): number {
   const origin = fromSettle
@@ -161,19 +172,13 @@ function reportBashrcRecoveryStop(rc: string, outcome: RecoveryOutcome, fromSett
   if (outcome.provenCopy !== undefined && outcome.targetExists) {
     say(`${origin} I keep safe copy. ${closing}`);
     detail(`inspect: ${outcome.provenCopy}`);
-    // m4: when this call's own write left bashrc holding broken bytes
-    // (`targetWritten`), the surviving copy is not merely worth a look — it
-    // is the only trustworthy content left. Branch 2 below always gives this
-    // remedy because bashrc is gone there; give it here too, conditioned on
-    // the one fact that makes bashrc's own current bytes untrustworthy,
-    // instead of stranding the user with a named file and no verb (PROBE A).
-    if (outcome.targetWritten) {
-      detail("restore by copying that file to the bashrc path yourself");
-    }
   } else if (outcome.provenCopy !== undefined) {
+    // outcome.targetExists here is `pathExists`, not `isLiveRegularFile`
+    // (round 9, R1 — see the RecoveryOutcome.targetExists doc comment): this
+    // branch fires only when bashrc truly does not exist at all, so "bashrc
+    // gone" is a fact Rocky proved, not a guess from a topology-blind check.
     say(`${origin} bashrc gone. I keep only copy of old bytes. ${closing}`);
     detail(`safe copy: ${outcome.provenCopy}`);
-    detail("restore by copying that file to the bashrc path yourself");
   } else {
     say(`${origin} no safe copy to name. ${closing}`);
     // m2: every outcome that can reach this branch (provenCopy undefined)
@@ -183,7 +188,10 @@ function reportBashrcRecoveryStop(rc: string, outcome: RecoveryOutcome, fromSett
     // directory:` arm this ternary used to have for artifactRetainedUnproven
     // === false was therefore unreachable dead code (round 8, m2/B18).
     if (outcome.transactionDirectory !== undefined) {
-      detail(`unclear leftover, inspect before removing: ${outcome.transactionDirectory}`);
+      // r9: states only that the directory exists and is unclear — no verb
+      // about removing it, matching README's categorical "never invites you
+      // to destroy" even in this leftover-artifact case.
+      detail(`unclear leftover: ${outcome.transactionDirectory}`);
     }
   }
   detail(`bashrc: ${rc}`);
@@ -382,18 +390,32 @@ function reportRetainedCopy(recoveryPath: string): void {
 }
 
 /**
- * I3: by the time `hookInstall` writes `~/.rocky` assets, `.bashrc` has
- * already been rewritten and published — a mkdir/copy/write failure here
- * (a stray `~/.rocky` file, ENOSPC, a permissions problem) must never be
- * allowed to escape as a raw, uncaught error. Before this fix it did: the
- * process died in `index.ts`'s top-level catch with an untranslated Node
- * error string, breaking Rocky's voice, and — if a write had just
+ * I3: by the time `hookInstall` writes `~/.rocky` assets, a mkdir/copy/write
+ * failure here (a stray `~/.rocky` file, ENOSPC, a permissions problem) must
+ * never be allowed to escape as a raw, uncaught error. Before that fix it
+ * did: the process died in `index.ts`'s top-level catch with an untranslated
+ * Node error string, breaking Rocky's voice, and — if a write had just
  * displaced the previous `.bashrc` — leaving that retained copy's path
  * unprinted, falsifying README's unconditional promise that install prints
  * it whenever one survives.
+ *
+ * `bashrcPublished` states which of `hookInstall`'s two paths reached this
+ * call (round 9, R2): a fresh install (`classification === "absent"`)
+ * publishes `.bashrc` before ever reaching this code, but a re-install onto
+ * an already-managed block never publishes anything and skips straight to
+ * these same `~/.rocky` writes. The two paths need two different sentences —
+ * one asserting a mutation that provably happened, one stating plainly that
+ * none did — never one sentence covering both, which is false on whichever
+ * path did not write.
  */
-function reportRockyHomeWriteFailure(rc: string, recoveryPath: string | undefined): number {
-  say("bashrc already changed, but rocky home breaks right after. ears maybe not working yet.");
+function reportRockyHomeWriteFailure(
+  rc: string,
+  recoveryPath: string | undefined,
+  bashrcPublished: boolean,
+): number {
+  say(bashrcPublished
+    ? "bashrc already changed, but rocky home breaks right after. ears maybe not working yet."
+    : "bashrc not touched. rocky home breaks. ears maybe not working yet.");
   detail(`bashrc: ${rc}`);
   if (recoveryPath !== undefined) reportRetainedCopy(recoveryPath);
   say("check disk space and permissions, then try again.");
@@ -420,7 +442,8 @@ export function hookInstall(): number {
   if (classification === "corrupt") return reportCorruptBlock(rc);
 
   let recoveryPath: string | undefined;
-  if (classification === "absent") {
+  const bashrcPublished = classification === "absent";
+  if (bashrcPublished) {
     const published = publishBashrc(
       rc,
       addHookBlockBytes(preparation.snapshot.bytes),
@@ -437,7 +460,7 @@ export function hookInstall(): number {
       copyFileSync(join(assetDir(), f), join(home, f));
     }
   } catch {
-    return reportRockyHomeWriteFailure(rc, recoveryPath);
+    return reportRockyHomeWriteFailure(rc, recoveryPath, bashrcPublished);
   }
 
   const rulesPath = join(home, "guard.rules");
@@ -448,7 +471,7 @@ export function hookInstall(): number {
       say("guard rules file has your edits. I keep them. good.");
     }
   } catch {
-    return reportRockyHomeWriteFailure(rc, recoveryPath);
+    return reportRockyHomeWriteFailure(rc, recoveryPath, bashrcPublished);
   }
 
   say("ears installed. open new shell, I hear everything there.");
@@ -519,14 +542,27 @@ export function hookStatus(): number {
     say("ears not installed. run: rocky hook install");
     return 0;
   }
+  // r3: these reads used to sit outside any try/catch, so a non-ENOENT
+  // failure (rocky-hook.bash replaced by a directory, EACCES, ...) reached
+  // index.ts's top-level catch as a raw Node error string — the same class
+  // I3 already closed for hookInstall's writes, left open here for status's
+  // reads.
   const hookFile = join(rockyHome(), "rocky-hook.bash");
-  const version = existsSync(hookFile)
-    ? /ROCKY_HOOK_VERSION="([^"]+)"/.exec(readFileSync(hookFile, "utf8"))?.[1] ?? "unknown"
-    : "missing";
   const rulesPath = join(rockyHome(), "guard.rules");
-  const ruleCount = existsSync(rulesPath)
-    ? readFileSync(rulesPath, "utf8").split("\n").filter((l) => l.trim() && !l.startsWith("#")).length
-    : 0;
+  let version: string;
+  let ruleCount: number;
+  try {
+    version = existsSync(hookFile)
+      ? /ROCKY_HOOK_VERSION="([^"]+)"/.exec(readFileSync(hookFile, "utf8"))?.[1] ?? "unknown"
+      : "missing";
+    ruleCount = existsSync(rulesPath)
+      ? readFileSync(rulesPath, "utf8").split("\n").filter((l) => l.trim() && !l.startsWith("#")).length
+      : 0;
+  } catch {
+    say("ears installed, but I cannot check rocky home.");
+    detail(`bashrc: ${rc}`);
+    return 1;
+  }
   say(`ears installed. hook version ${version}. ${ruleCount} guard rule${ruleCount === 1 ? "" : "s"} active.`);
   return 0;
 }
