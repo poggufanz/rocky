@@ -661,8 +661,72 @@ test("declined combined consent performs no voice skill operation", async () => 
   assert.equal(output.code, 1);
   assert.equal(confirmation.messages.length, 1);
   assert.match(confirmation.messages[0] ?? "", /voice skill/i);
+  assert.doesNotMatch(output.stderr, /voice-skill: unavailable/);
   assert.deepEqual(voiceSkills.calls, []);
   assert.deepEqual(adapter.calls.map(({ method }) => method), ["inspect"]);
+});
+
+test("unauthorized voice consent with no detected host never claims unavailable", async (t) => {
+  const cases: Array<{
+    name: string;
+    argv: readonly string[];
+    inspection: InspectionResult;
+    confirmation: ConfirmationPort;
+    expectPrompted: boolean;
+    exit: number;
+  }> = [
+    {
+      name: "declined consent, configure",
+      argv: ["--voice-skill"],
+      inspection: { state: "absent" },
+      confirmation: new FakeConfirmation(false),
+      expectPrompted: true,
+      exit: 1,
+    },
+    {
+      name: "declined consent, remove",
+      argv: ["--remove", "--voice-skill"],
+      inspection: { state: "absent" },
+      confirmation: new FakeConfirmation(false),
+      expectPrompted: true,
+      exit: 1,
+    },
+    {
+      name: "missing consent, configure, all hosts blocked (no prompt)",
+      argv: ["--voice-skill"],
+      inspection: { state: "blocked", detail: "codex is not installed" },
+      confirmation: { async confirm() { throw new Error("blocked hosts must not prompt"); } },
+      expectPrompted: false,
+      exit: 1,
+    },
+    {
+      name: "missing consent, remove, all hosts blocked (no prompt)",
+      argv: ["--remove", "--voice-skill"],
+      inspection: { state: "blocked", detail: "codex is not installed" },
+      confirmation: { async confirm() { throw new Error("blocked hosts must not prompt"); } },
+      expectPrompted: false,
+      exit: 0,
+    },
+  ];
+
+  for (const entry of cases) {
+    await t.test(entry.name, async () => {
+      const adapter = new FakeAdapter("codex", { inspect: entry.inspection });
+      const voiceSkills = new FakeVoiceSkillServices();
+
+      const output = await captureStderr(() => setup(entry.argv, dependencies([adapter], {
+        confirmation: entry.confirmation,
+        voiceSkills,
+      })));
+
+      assert.equal(output.code, entry.exit);
+      assert.doesNotMatch(output.stderr, /voice-skill: unavailable/);
+      assert.deepEqual(voiceSkills.calls, []);
+      if (entry.confirmation instanceof FakeConfirmation) {
+        assert.equal(entry.confirmation.messages.length, entry.expectPrompted ? 1 : 0);
+      }
+    });
+  }
 });
 
 test("explicit voice skill with no detected host reports unavailable while an independent Desktop MCP result still succeeds", async (t) => {
@@ -692,7 +756,7 @@ test("explicit voice skill with no detected host reports unavailable while an in
 
       assert.equal(output.code, 1);
       assert.equal(output.stdout, "");
-      assert.match(output.stderr, /voice-skill: unavailable/);
+      assert.ok(output.stderr.split("\n").includes("voice-skill: unavailable"));
       assert.match(output.stderr, new RegExp(`claude-desktop: ${entry.status}`));
       assert.deepEqual(desktop.calls.map(({ method }) => method), [entry.mode === "configure" ? "configure" : entry.mode]);
       assert.deepEqual(voiceSkills.calls, []);
@@ -718,7 +782,7 @@ test("detected host with no matching resolved target reports unavailable and per
 
   assert.equal(output.code, 1);
   assert.equal(output.stdout, "");
-  assert.match(output.stderr, /voice-skill: unavailable/);
+  assert.ok(output.stderr.split("\n").includes("voice-skill: unavailable"));
   assert.match(output.stderr, /codex: configured/);
   assert.deepEqual(voiceSkills.calls.map(({ method }) => method), ["resolve"]);
 });
