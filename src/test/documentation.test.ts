@@ -217,6 +217,11 @@ test("README documents the Claude Code manual-fallback reality with the exact so
     /claude-code: failed[^\n]*exits? 1|exits? 1[^\n]*claude-code: failed/i,
     "README must pair `claude-code: failed` with exit 1",
   );
+  assert.doesNotMatch(
+    readme,
+    /Claude Code[^\n]*(?:automation|registration)[^\n]*always (?:succeeds|works)/i,
+    "README must not contradict the manual-fallback disclosure with a claim that Claude Code automation always succeeds",
+  );
 });
 
 test("README keeps the sanitized-default, raw-opt-in, and loopback-only network contract", () => {
