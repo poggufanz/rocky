@@ -296,15 +296,46 @@ test("README discloses the retained .bashrc recovery copy left by write attempts
 });
 
 test("README discloses that hook status also settles and discloses a retained copy, not just install/uninstall", () => {
+  // Round 5 pinned the claim "status never writes bashrc itself" here — the
+  // whole-branch final audit found it false: with bashrc absent and a
+  // restorable retained copy, settling recreates bashrc from that copy
+  // (file-transaction.ts's restore-from-`displaced` path), and status
+  // printed nothing about having done so. Corrected per the audit's
+  // Important 1: status never edits the hook block itself, but settling can
+  // create or restore bashrc from a retained copy, and both the README and
+  // the command's own output must say so.
   assert.match(
     readme,
-    /status[^\n]*never writes bashrc itself[^\n]*settle/i,
-    "README must state status does not write bashrc on its own, but does settle an interrupted transaction",
+    /status[^\n]*never edits the hook block itself[^\n]*settle/i,
+    "README must state status does not edit the hook block on its own, but does settle an interrupted transaction",
+  );
+  assert.match(
+    readme,
+    /settl(?:e|ing)[^\n]*can (?:create|restore) [^\n]*bashrc/i,
+    "README must disclose that settling can create or restore bashrc from a retained copy",
   );
   assert.match(
     readme,
     /status[^\n]*prints that path too/i,
     "README must state status discloses a retained copy it settles, matching install/uninstall's disclosure",
+  );
+  assert.doesNotMatch(
+    readme,
+    /status[^\n]*never writes bashrc itself/i,
+    "README must not claim status never writes bashrc — settling can create or restore it",
+  );
+});
+
+test("README discloses that a retained copy is never named for removal when it is the last surviving copy", () => {
+  assert.match(
+    readme,
+    /only surviving copy[^\n]*bashrc itself missing[^\n]*names it/i,
+    "README must state Rocky names, rather than instructs removing, a retained copy that is the last surviving copy",
+  );
+  assert.doesNotMatch(
+    readme,
+    /only surviving copy[^\n]*remove/i,
+    "README must not pair the last-surviving-copy case with a removal instruction",
   );
 });
 

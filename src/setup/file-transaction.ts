@@ -646,9 +646,33 @@ export function recoverFileTransaction(
     // is attempted, the only thing left to name is the transaction directory
     // (if it still exists) — never the live target (whole-branch re-review,
     // Important 1).
+    //
+    // For "prepared" this reasoning holds regardless of whether `path`
+    // currently exists: `writeManifest(..., "prepared", ...)` always runs
+    // BEFORE `path` is ever touched (before the displacing rename and before
+    // any `linkSync`), so `path` at this state is either the caller's
+    // original, still-untouched file, or was never there to begin with
+    // (`prior.status === "missing"`) — `prepared` never carries data that
+    // isn't also, independently, either still live at `path` or was never
+    // the user's to begin with.
+    //
+    // For "published" that invariant is different: `writeManifest(...,
+    // "published", ...)` is only ever called AFTER `linkSync(temporaryPath,
+    // path)` has already succeeded, in both the general-write and
+    // missing-prior code paths — so every provable "published" shape
+    // guarantees `path` exists at that moment. A "published" manifest
+    // reaching here with `path` now absent means something removed `path`
+    // AFTER Rocky linked it — never a shape one of Rocky's own crash windows
+    // produces (final audit, Minor 4). `prepared` there shares `path`'s old
+    // inode and may be the last surviving name for bytes derived from the
+    // user's file, so it is not safe to discard sight unseen; requiring
+    // `pathExists(path)` here routes that shape to the explicit "published,
+    // unresolved" guard below instead, which stays `manual` and preserves
+    // the directory.
     const displacedPath = join(transactionDirectory, "displaced");
-    if ((manifest.state === "prepared" || manifest.state === "published")
-      && !pathExists(displacedPath)) {
+    const safeToDiscardWithoutDisplaced = manifest.state === "prepared"
+      || (manifest.state === "published" && pathExists(path));
+    if (safeToDiscardWithoutDisplaced && !pathExists(displacedPath)) {
       if (!mutationGuardUnchanged(guard)) return { status: "manual" };
       if (!removeTransaction(transactionDirectory)) {
         return {

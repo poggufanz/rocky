@@ -847,3 +847,50 @@ test("recovery never offers the target path itself as a manual recovery path, ev
   assert.equal(recovery.recoveryPath, undefined, "nothing Rocky-owned survives to name once the directory is gone");
   assert.deepEqual(readFileSync(path), original, "the untouched target keeps its own bytes");
 });
+
+// --- Minor 4 (final audit): the unconditional-discard branch never checked `path` ---
+
+test("recovery does not silently discard a published transaction's staged bytes when both the target and displaced are gone", (t) => {
+  // published + no displaced is normally safe to discard unconditionally
+  // (site 1): every provable crash window that reaches "published" leaves
+  // `path` linked, so `prepared`'s bytes are never the last copy of
+  // anything. That invariant breaks if `path` is ALSO gone — reachable only
+  // by something external removing it after publish, since Rocky's own code
+  // never unlinks `path` between the publishing linkSync and "committed".
+  // Before this fix, site 1 discarded unconditionally here too, silently
+  // destroying `prepared` — the only surviving evidence, derived from the
+  // user's own file.
+  const directory = temporaryDirectory(t);
+  const path = join(directory, "vanished-target.bin");
+  const transactionDirectory = writeLegacyV1TransactionFixture(directory, path, "published", {
+    prepared: Buffer.from("staged bytes derived from the user's file fake-secret\n", "utf8"),
+  });
+
+  const recovery = recoverFileTransaction(path);
+
+  assert.equal(recovery.status, "manual", "must not silently discard the only surviving evidence");
+  assert.equal(existsSync(transactionDirectory), true, "the transaction directory survives");
+  assert.equal(
+    existsSync(join(transactionDirectory, "prepared")),
+    true,
+    "prepared bytes, the last surviving copy, are not deleted",
+  );
+});
+
+test("recovery still discards a published transaction with no displaced when the target is present (unaffected by the path check)", (t) => {
+  // Negative control: the missing-prior crash window (W4) legitimately
+  // reaches this exact shape with `path` present (just linked). The added
+  // `path` proof must not regress that case.
+  const directory = temporaryDirectory(t);
+  const path = join(directory, "present-target.bin");
+  writeFileSync(path, "brand new file\n", "utf8");
+  const transactionDirectory = writeLegacyV1TransactionFixture(directory, path, "published", {
+    prepared: Buffer.from("unrelated staged bytes\n", "utf8"),
+  });
+
+  const recovery = recoverFileTransaction(path);
+
+  assert.equal(recovery.status, "recovered");
+  assert.equal(existsSync(transactionDirectory), false, "safe to discard once path is proven present");
+  assert.deepEqual(readFileSync(path), Buffer.from("brand new file\n", "utf8"));
+});

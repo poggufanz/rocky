@@ -1034,12 +1034,197 @@ test("hook status degrades informatively instead of failing hard on a stray tran
   const original = bytes("export A=1\n");
   writeFileSync(sandbox.bashrc, original);
   const junk = join(sandbox.home, "..bashrc.transaction-junk");
-  mkdirSync(junk, { mode: 0o700 }); // no manifest.json at all
+  mkdirSync(junk, { mode: 0o700 }); // no manifest.json at all — no `displaced` either
 
   const result = hookStatus();
 
   assert.equal(result, 1, "status must not crash or silently claim installed");
   assert.deepEqual(readFileSync(sandbox.bashrc), original, "bashrc itself is untouched");
-  assert.ok(sandbox.stderr().includes(junk), "the stray directory is named so the user can remove it by hand");
+  assert.ok(sandbox.stderr().includes(junk), "the stray directory is named so the user can inspect it");
   assert.match(sandbox.stderr(), /bashrc keeps unclear transaction/);
+  // Final audit, Important 2: this exact fixture — an empty directory,
+  // nothing proving a copy of anything — is the shape the previous version
+  // of this test built while the code spoke "I keep safe copy" over it. That
+  // was false: an empty directory is not a copy. This test previously never
+  // checked for the false claim's absence, so the suite stayed green on it.
+  // Corrected here to pin the honest message instead.
+  assert.ok(
+    !sandbox.stderr().includes("I keep safe copy"),
+    "must not claim a safe copy exists over a directory proven to hold no copy",
+  );
+  assert.ok(
+    !sandbox.stderr().includes("remove by hand"),
+    "must not instruct removal when nothing provable survives",
+  );
+});
+
+// --- Final audit, Important 2/3: prove the artifact, not the path ----------
+
+test("hook status names the surviving copy without inviting its removal when bashrc itself is gone (Important 3)", (t) => {
+  const sandbox = bashrcSandbox(t);
+  const original = bytes("export SECRET_TOKEN=sk-live-DO-NOT-LEAK\n");
+  // bashrc itself does NOT exist — the transaction directory's `displaced`
+  // copy is the only surviving place holding it. This is exactly the
+  // round-5-added guard's own shape (published, target absent, displaced
+  // present) and it must never invite destroying the last copy.
+  const fixture = writePendingTransactionFixture(sandbox.bashrc, "published", {
+    displaced: original,
+  });
+
+  const result = hookStatus();
+
+  assert.equal(result, 1);
+  const output = sandbox.stderr();
+  assert.ok(!output.includes("remove by hand"), "must never invite deleting the only surviving copy");
+  assert.ok(
+    output.includes(join(fixture, "displaced")),
+    "the surviving copy's exact path is still named, so the user can find it",
+  );
+  assert.ok(!output.includes("SECRET_TOKEN"), "diagnostics stay secret-free");
+  assert.equal(existsSync(join(fixture, "displaced")), true, "the copy itself is left untouched");
+});
+
+/**
+ * Races a "missing-prior" install (`.bashrc` did not exist) so `linkSync`
+ * throws EEXIST against a concurrently-created `path` (a real, independent
+ * write to `bashrc`, not Rocky's own), then fails only the very next parent
+ * fsync — matching `removeTransaction`'s own follow-up sync after its
+ * `rmSync` already succeeded. This is the one real site (`file-transaction.ts`'s
+ * missing-prior `EEXIST` catch) where the engine can still hand back `path`
+ * itself as a `recovery-required` `recoveryPath` (final audit, Minor 3/N1) —
+ * `destinationPublished` is false there, so it is not covered by the
+ * "already-published, already correct" reasoning that applies to the sites
+ * left alone. `hook.ts`'s message layer must independently refuse to ever
+ * name bashrc's own path as a transaction artifact.
+ */
+function injectMissingPriorLinkRaceWithPhantomRemoval(t: TestContext, bashrc: string, concurrent: Buffer): void {
+  const originalLink = fs.linkSync;
+  const originalSync = directorySyncCapability.sync;
+  let raced = false;
+  fs.linkSync = ((existingPath: fs.PathLike, newPath: fs.PathLike) => {
+    if (!raced && String(newPath) === bashrc) {
+      raced = true;
+      writeFileSync(bashrc, concurrent); // a concurrent writer wins the race
+      const error = new Error("EEXIST: file already exists") as NodeJS.ErrnoException;
+      error.code = "EEXIST";
+      throw error;
+    }
+    return originalLink(existingPath, newPath);
+  }) as typeof fs.linkSync;
+  directorySyncCapability.sync = (directoryPath: string) => {
+    if (raced && directoryPath === dirname(bashrc)) {
+      throw new Error("injected EIO on $HOME fsync, after removeTransaction's rmSync already succeeded");
+    }
+    return true;
+  };
+  syncBuiltinESMExports();
+  t.after(() => {
+    fs.linkSync = originalLink;
+    directorySyncCapability.sync = originalSync;
+    syncBuiltinESMExports();
+  });
+}
+
+test("hook install never offers bashrc itself as something to remove, even when a concurrent writer races the missing-prior publish (N1)", (t) => {
+  const sandbox = bashrcSandbox(t);
+  const concurrent = bytes("export CONCURRENT_WRITER=wins\n");
+  // bashrc absent: prior.status === "missing".
+  injectMissingPriorLinkRaceWithPhantomRemoval(t, sandbox.bashrc, concurrent);
+
+  const result = hookInstall();
+
+  assert.equal(result, 1);
+  const output = sandbox.stderr();
+  assert.ok(!output.includes("remove by hand"), "must never instruct removing bashrc itself");
+  assert.ok(!output.includes("I keep safe copy"), "must not claim a safe copy when only bashrc itself was named");
+  assert.ok(!output.includes("transaction directory:"), "must not name bashrc's own path as a transaction directory");
+  assert.match(output, /no safe copy to name/);
+  assert.deepEqual(readFileSync(sandbox.bashrc), concurrent, "the concurrent writer's bytes are untouched");
+});
+
+// --- Final audit, Important 1: settling can (re-)create bashrc, not just keep a copy ---
+
+test("hook status says plainly when settling has to put bashrc back, not just that a copy exists", (t) => {
+  const sandbox = bashrcSandbox(t);
+  // bashrc absent; a prior crashed install/uninstall left a restorable backup.
+  const original = bytes("export RESTORE_ME=please\n");
+  writePendingTransactionFixture(sandbox.bashrc, "displaced", { displaced: original });
+  assert.equal(existsSync(sandbox.bashrc), false, "bashrc absent before status runs");
+
+  const result = hookStatus();
+
+  assert.equal(result, 0, sandbox.stderr());
+  assert.deepEqual(readFileSync(sandbox.bashrc), original, "settling restored bashrc from the retained copy");
+  const output = sandbox.stderr();
+  assert.ok(
+    output.includes("I already put old bytes back"),
+    "status must say it recreated bashrc, not only that a copy exists",
+  );
+  assert.ok(!output.includes("RESTORE_ME"), "diagnostics stay secret-free");
+});
+
+test("hook install also discloses settling having to put bashrc back, separately from its own write", (t) => {
+  const sandbox = bashrcSandbox(t);
+  const original = bytes("export RESTORE_ME=please\n");
+  writePendingTransactionFixture(sandbox.bashrc, "displaced", { displaced: original });
+
+  const result = hookInstall();
+
+  assert.equal(result, 0, sandbox.stderr());
+  assert.deepEqual(readFileSync(sandbox.bashrc), bytes(`export RESTORE_ME=please\n\n${BLOCK}`));
+  assert.ok(
+    sandbox.stderr().includes("I already put old bytes back"),
+    "install must disclose the settle-time restore, not only its own new write",
+  );
+});
+
+test("hook status discloses a retained copy that settling only finalized, without falsely claiming bashrc was recreated", (t) => {
+  const sandbox = bashrcSandbox(t);
+  const original = bytes("export SECRET_TOKEN=sk-live-DO-NOT-LEAK\n");
+  writeFileSync(sandbox.bashrc, original);
+  injectPostPublishParentFsyncFailure(t, sandbox.bashrc);
+
+  // bashrc already held the new bytes before this call — settling only
+  // finalizes the manifest bookkeeping, it never (re)writes bashrc itself.
+  assert.equal(hookInstall(), 1);
+  assert.equal(inspectFileTransaction(sandbox.bashrc).status, "pending");
+
+  const result = hookStatus();
+
+  assert.equal(result, 0, sandbox.stderr());
+  const output = sandbox.stderr();
+  assert.ok(output.includes("I keep safe copy"), "still discloses the retained copy");
+  assert.ok(
+    !output.includes("I already put old bytes back"),
+    "must not claim bashrc was recreated when it was already live the whole time",
+  );
+});
+
+// --- Final audit, Minor 2 (N6): status's own prune call is unpinned --------
+
+test("hook status prunes a superseded retained copy when it settles a fresh one (N6)", (t) => {
+  const sandbox = bashrcSandbox(t);
+  const original = bytes("export GEN1_SUPERSEDED=drop-me\n");
+  writeFileSync(sandbox.bashrc, original);
+
+  // GEN1: a normal install leaves one committed retained copy holding `original`.
+  assert.equal(hookInstall(), 0, sandbox.stderr());
+  const [gen1] = transactionDirectories(sandbox.home);
+  assert.ok(gen1 !== undefined);
+  assert.equal(transactionDirectories(sandbox.home).length, 1);
+
+  // GEN2: uninstall crashes after publish but before the parent fsync,
+  // leaving a second, pending transaction behind.
+  injectPostPublishParentFsyncFailure(t, sandbox.bashrc);
+  assert.equal(hookUninstall(), 1);
+  assert.equal(inspectFileTransaction(sandbox.bashrc).status, "pending");
+  assert.equal(transactionDirectories(sandbox.home).length, 2, "GEN1 committed + GEN2 pending");
+
+  const result = hookStatus();
+
+  assert.equal(result, 0, sandbox.stderr());
+  assert.ok(sandbox.stderr().includes("I keep safe copy"), "the surviving GEN2 copy is disclosed before pruning");
+  const remaining = transactionDirectories(sandbox.home);
+  assert.equal(remaining.length, 1, "status prunes the superseded GEN1 copy when it settles GEN2");
+  assert.ok(!remaining.includes(gen1), "the older, now-superseded copy is gone");
 });
