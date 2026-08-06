@@ -8,8 +8,6 @@ import {
   openSync,
   readFileSync,
   readdirSync,
-  rmSync,
-  rmdirSync,
   writeFileSync,
 } from "node:fs";
 import type { Stats } from "node:fs";
@@ -39,7 +37,8 @@ import type { ProcessResult, ProcessRunner } from "./process.js";
 import { isIdenticalMcpRegistration, isOwnedRockyRegistration } from "./registration.js";
 
 const MISSING_DETAIL = "Claude Code CLI is not installed";
-const MANUAL_DETAIL = "Claude Code policy-equivalent automation is unavailable; use manual registration";
+const MANUAL_CONFIGURE_DETAIL = "Claude Code policy-equivalent automation is unavailable; use manual registration";
+const MANUAL_REMOVE_DETAIL = "Claude Code automated removal is unavailable; remove Rocky manually from Claude Code user MCP configuration";
 const CLAUDE_COMMAND_TIMEOUT_MS = 10_000;
 const EXACT_VERSION = "2.1.222";
 const ADD_HELP_ARGS = ["mcp", "add", "--help"] as const;
@@ -154,7 +153,7 @@ interface PolicyProof {
 
 interface PrivateStage {
   path: string;
-  rootIdentity: NodeIdentity;
+  rootNamespace: readonly NamespaceObservation[];
   identity: NodeIdentity;
 }
 
@@ -206,6 +205,7 @@ function isStringMap(value: unknown): value is Record<string, string> {
 
 function parseRegistration(value: unknown): McpRegistration | undefined {
   if (!isObject(value)
+    || !isDeepStrictEqual(Object.keys(value).sort(), ["args", "command", "env", "type"])
     || value.type !== "stdio"
     || typeof value.command !== "string"
     || value.command.length === 0
@@ -217,10 +217,6 @@ function parseRegistration(value: unknown): McpRegistration | undefined {
     args: [...value.args],
     env: { ...value.env },
   };
-}
-
-function cloneJson(value: JsonObject): JsonObject {
-  return JSON.parse(JSON.stringify(value)) as JsonObject;
 }
 
 function identity(metadata: Stats): NodeIdentity | undefined {
@@ -366,6 +362,148 @@ function fileSnapshotUnchanged(snapshot: SafeFileSnapshot, pathApi: PlatformPath
     && current.read.mode === snapshot.read.mode;
 }
 
+function pathMissing(path: string): boolean {
+  try {
+    lstatSync(path);
+    return false;
+  } catch (error) {
+    return errorCode(error) === "ENOENT";
+  }
+}
+
+function exactObservedFile(
+  path: string,
+  expectedBytes: Buffer,
+  expectedMode: number | undefined,
+  expectedIdentity?: Pick<NodeIdentity, "dev" | "ino">,
+): NodeIdentity | undefined {
+  let descriptor: number | undefined;
+  try {
+    const before = identity(lstatSync(path));
+    if (before?.kind !== "file"
+      || (expectedMode !== undefined && before.mode !== expectedMode)
+      || (expectedIdentity !== undefined
+        && (before.dev !== expectedIdentity.dev || before.ino !== expectedIdentity.ino))) {
+      return undefined;
+    }
+    descriptor = openSync(path, readFlags());
+    const opened = identity(fstatSync(descriptor));
+    if (!sameIdentity(before, opened)) return undefined;
+    const bytes = readFileSync(descriptor);
+    const after = identity(fstatSync(descriptor));
+    const finalPath = identity(lstatSync(path));
+    return bytes.equals(expectedBytes)
+      && sameIdentity(opened, after)
+      && sameIdentity(after, finalPath)
+      ? after
+      : undefined;
+  } catch {
+    return undefined;
+  } finally {
+    if (descriptor !== undefined) {
+      try { closeSync(descriptor); } catch { /* failed closed */ }
+    }
+  }
+}
+
+function transactionManifestState(
+  transactionDirectory: string,
+  target: string,
+  pathApi: PlatformPath,
+): "prepared" | "displaced" | "published" | "committed" | undefined {
+  try {
+    const parsed: unknown = JSON.parse(
+      readFileSync(pathApi.join(transactionDirectory, "manifest.json"), "utf8"),
+    );
+    if (!isObject(parsed)
+      || parsed.version !== 1
+      || parsed.target !== target
+      || (parsed.state !== "prepared"
+        && parsed.state !== "displaced"
+        && parsed.state !== "published"
+        && parsed.state !== "committed")) return undefined;
+    return parsed.state;
+  } catch {
+    return undefined;
+  }
+}
+
+function createTargetTransactionGuard(
+  target: string,
+  original: SafeFileSnapshot,
+  publishedBytes: Buffer,
+  pathApi: PlatformPath,
+): FileMutationGuard {
+  const parent = pathApi.dirname(target);
+  const prefix = `.${pathApi.basename(target)}.transaction-`;
+  let transactionPath: string | undefined;
+  let transactionIdentity: NodeIdentity | undefined;
+
+  const transactionCandidates = (): string[] => {
+    try {
+      return readdirSync(parent)
+        .filter((name) => name.startsWith(prefix))
+        .map((name) => pathApi.join(parent, name));
+    } catch {
+      return [];
+    }
+  };
+
+  const validTransactionState = (candidate: string): boolean => {
+    const directory = identity(lstatSync(candidate));
+    if (directory?.kind !== "directory") return false;
+    const displacedPath = pathApi.join(candidate, "displaced");
+    const preparedPath = pathApi.join(candidate, "prepared");
+    const state = transactionManifestState(candidate, target, pathApi);
+    if (state === undefined) return false;
+
+    if (original.read.status === "valid") {
+      if (original.identity === undefined
+        || exactObservedFile(
+          displacedPath,
+          original.read.bytes,
+          original.read.mode,
+          original.identity,
+        ) === undefined) return false;
+      const prepared = exactObservedFile(preparedPath, publishedBytes, original.read.mode);
+      if (pathMissing(target)) return prepared?.nlink === 1;
+      const targetFile = exactObservedFile(target, publishedBytes, original.read.mode);
+      if (targetFile === undefined) return false;
+      if (pathMissing(preparedPath)) return targetFile.nlink === 1 && state === "published";
+      return prepared !== undefined
+        && targetFile.dev === prepared.dev
+        && targetFile.ino === prepared.ino
+        && targetFile.nlink === 2
+        && prepared.nlink === 2;
+    }
+
+    const targetFile = exactObservedFile(target, publishedBytes, 0o600);
+    const prepared = exactObservedFile(preparedPath, publishedBytes, 0o600);
+    return targetFile !== undefined
+      && prepared !== undefined
+      && targetFile.dev === prepared.dev
+      && targetFile.ino === prepared.ino
+      && targetFile.nlink === 2
+      && prepared.nlink === 2;
+  };
+
+  return {
+    unchanged: () => {
+      if (transactionPath === undefined && fileSnapshotUnchanged(original, pathApi)) return true;
+      if (transactionPath === undefined) {
+        const candidates = transactionCandidates().filter((candidate) => {
+          try { return validTransactionState(candidate); } catch { return false; }
+        });
+        if (candidates.length !== 1) return false;
+        transactionPath = candidates[0]!;
+        transactionIdentity = identity(lstatSync(transactionPath));
+      }
+      return sameDirectoryAuthority(identity(lstatSync(transactionPath)), transactionIdentity)
+        && validTransactionState(transactionPath);
+    },
+  };
+}
+
 function parseConfig(file: SafeFileSnapshot, registration: McpRegistration): ConfigInspection {
   let root: JsonObject;
   if (file.read.status === "missing") root = {};
@@ -425,7 +563,7 @@ export function resolveClaudeCodeUserConfig(
       mutationSafe: false,
     };
   }
-  if (!options.path.isAbsolute(configured)) return { status: "manual" };
+  if (!isCanonicalAbsoluteDirectory(configured, options.path)) return { status: "manual" };
   const normalizedPolicyRoot = configured.normalize("NFC");
   return {
     status: "resolved",
@@ -434,6 +572,31 @@ export function resolveClaudeCodeUserConfig(
     override: "absolute",
     mutationSafe: normalizedPolicyRoot === configured,
   };
+}
+
+function isCanonicalAbsoluteDirectory(path: string, pathApi: PlatformPath): boolean {
+  if (!pathApi.isAbsolute(path) || pathApi.normalize(path) !== path) return false;
+  const root = pathApi.parse(path).root;
+  if (root.length === 0 || (path !== root && /[\\/]$/.test(path))) return false;
+  if (path === root) {
+    if (pathApi.sep !== "\\") return path === "/";
+    return /^[A-Za-z]:\\$/.test(root) || /^\\\\[^\\]+\\[^\\]+\\$/.test(root);
+  }
+  const suffix = path.slice(root.length);
+  const parts = suffix.split(/[\\/]/);
+  if (parts.some((part) => part.length === 0 || part === "." || part === "..")) return false;
+  if (pathApi.sep === "\\") {
+    if (path.includes("/") || root === "\\" || /^\\\\[?.]\\/.test(path)) return false;
+    return /^[A-Za-z]:\\$/.test(root) || /^\\\\[^\\]+\\[^\\]+\\$/.test(root);
+  }
+  return !path.includes("\\");
+}
+
+function isCanonicalAbsoluteFile(path: string, pathApi: PlatformPath): boolean {
+  if (!pathApi.isAbsolute(path) || pathApi.normalize(path) !== path || /[\\/]$/.test(path)) return false;
+  const parent = pathApi.dirname(path);
+  return isCanonicalAbsoluteDirectory(parent, pathApi)
+    && pathApi.join(parent, pathApi.basename(path)) === path;
 }
 
 function addArguments(registration: McpRegistration): string[] {
@@ -450,9 +613,11 @@ function succeeded(result: ProcessResult): boolean {
 }
 
 function isPolicyRefusal(result: ProcessResult): boolean {
-  return /enterprise|managed|policy|administrator|not allowed|disabled by/i.test(
-    `${result.stdout}\n${result.stderr}\n${result.error?.message ?? ""}`,
-  );
+  return result.error === undefined
+    && result.status === 1
+    && /enterprise policy (?:denied|refused)|disabled by (?:an )?administrator policy/i.test(
+      `${result.stdout}\n${result.stderr}`,
+    );
 }
 
 function skipped(): SetupResult {
@@ -471,8 +636,10 @@ function blocked(detail: string, manualRegistration?: McpRegistration): SetupRes
   return output;
 }
 
-function manual(registration?: McpRegistration): SetupResult {
-  return failed(MANUAL_DETAIL, registration);
+function manual(operation: "configure" | "remove", registration?: McpRegistration): SetupResult {
+  return operation === "configure"
+    ? failed(MANUAL_CONFIGURE_DETAIL, registration)
+    : failed(MANUAL_REMOVE_DETAIL);
 }
 
 function withRecovery(prefix: string, recoveryPath: string | undefined): string {
@@ -555,73 +722,36 @@ function capturePolicyProof(
 function createPrivateStage(stagingRoot: string, pathApi: PlatformPath): PrivateStage | undefined {
   if (!pathApi.isAbsolute(stagingRoot)) return undefined;
   try {
-    const rootIdentity = identity(lstatSync(stagingRoot));
-    if (rootIdentity?.kind !== "directory") return undefined;
+    const rootNamespace = observeNamespace(stagingRoot, pathApi);
+    if (rootNamespace?.at(-1)?.identity?.kind !== "directory") return undefined;
     const path = mkdtempSync(pathApi.join(stagingRoot, "rocky-claude-code-"));
     chmodSync(path, 0o700);
+    if (!namespaceUnchanged(rootNamespace, pathApi)) return undefined;
     const stageIdentity = identity(lstatSync(path));
     if (stageIdentity?.kind !== "directory"
       || (process.platform !== "win32" && stageIdentity.mode !== 0o700)) return undefined;
-    return { path, rootIdentity, identity: stageIdentity };
+    return { path, rootNamespace, identity: stageIdentity };
   } catch {
     return undefined;
   }
 }
 
-function stageIdentityUnchanged(stage: PrivateStage, stagingRoot: string): boolean {
+function stageIdentityUnchanged(stage: PrivateStage, pathApi: PlatformPath): boolean {
   try {
-    return sameDirectoryAuthority(identity(lstatSync(stagingRoot)), stage.rootIdentity)
+    return namespaceUnchanged(stage.rootNamespace, pathApi)
       && sameDirectoryAuthority(identity(lstatSync(stage.path)), stage.identity);
   } catch {
     return false;
   }
 }
 
-function removeExactFile(path: string, expected: NodeIdentity): boolean {
-  try {
-    if (!sameIdentity(identity(lstatSync(path)), expected)) return false;
-    rmSync(path);
-    return true;
-  } catch {
-    return false;
-  }
+function authoritativeStagePath(stage: PrivateStage, pathApi: PlatformPath): string | undefined {
+  return stageIdentityUnchanged(stage, pathApi) ? stage.path : undefined;
 }
 
-function cleanupEmptyStage(stage: PrivateStage, stagingRoot: string): boolean {
-  try {
-    if (!stageIdentityUnchanged(stage, stagingRoot) || readdirSync(stage.path).length !== 0) return false;
-    rmdirSync(stage.path);
-    return sameDirectoryAuthority(identity(lstatSync(stagingRoot)), stage.rootIdentity);
-  } catch {
-    return false;
-  }
-}
-
-function cleanupAuditedStage(
-  stage: PrivateStage,
-  stagingRoot: string,
-  pathApi: PlatformPath,
-  configIdentity: NodeIdentity,
-  backupDirectoryIdentity: NodeIdentity,
-  backupPath: string,
-  backupIdentity: NodeIdentity,
-): boolean {
-  try {
-    if (!stageIdentityUnchanged(stage, stagingRoot)) return false;
-    const configPath = pathApi.join(stage.path, ".claude.json");
-    const backupDirectory = pathApi.dirname(backupPath);
-    if (!removeExactFile(configPath, configIdentity)
-      || !removeExactFile(backupPath, backupIdentity)
-      || !sameDirectoryAuthority(identity(lstatSync(backupDirectory)), backupDirectoryIdentity)
-      || readdirSync(backupDirectory).length !== 0) return false;
-    rmdirSync(backupDirectory);
-    if (!stageIdentityUnchanged(stage, stagingRoot) || readdirSync(stage.path).length !== 0) return false;
-    rmdirSync(stage.path);
-    return sameDirectoryAuthority(identity(lstatSync(stagingRoot)), stage.rootIdentity);
-  } catch {
-    return false;
-  }
-}
+// Node 18 exposes no inode-conditional unlink/rmdir. Stages therefore remain
+// private and recoverable; pathname-only best-effort cleanup could delete a
+// same-user replacement installed after the last observable identity check.
 
 function forcedEnvironment(env: NodeJS.ProcessEnv, stage: string): NodeJS.ProcessEnv {
   return {
@@ -654,7 +784,7 @@ async function proveCapability(
   runner: ProcessRunner,
   executable: string,
   stage: PrivateStage,
-  stagingRoot: string,
+  pathApi: PlatformPath,
   env: NodeJS.ProcessEnv,
   cwd: string,
 ): Promise<boolean> {
@@ -663,20 +793,17 @@ async function proveCapability(
     env: forcedEnvironment(env, stage.path),
     cwd,
   };
-  let capable = false;
   try {
+    if (!stageIdentityUnchanged(stage, pathApi)) return false;
     const version = await runner.run(executable, ["--version"], options);
-    if (!exactVersion(version)) return false;
+    if (!exactVersion(version) || !stageIdentityUnchanged(stage, pathApi)) return false;
     const addHelp = await runner.run(executable, ADD_HELP_ARGS, options);
-    if (!addHelpIsExact(addHelp)) return false;
+    if (!addHelpIsExact(addHelp) || !stageIdentityUnchanged(stage, pathApi)) return false;
     const removeHelp = await runner.run(executable, REMOVE_HELP_ARGS, options);
-    capable = removeHelpIsExact(removeHelp);
+    return removeHelpIsExact(removeHelp) && stageIdentityUnchanged(stage, pathApi);
   } catch {
-    capable = false;
-  } finally {
-    if (!cleanupEmptyStage(stage, stagingRoot)) capable = false;
+    return false;
   }
-  return capable;
 }
 
 function copySnapshotToStage(
@@ -711,8 +838,12 @@ function copySnapshotToStage(
 }
 
 function nonRockyState(root: JsonObject): JsonObject {
-  const cloned = cloneJson(root);
-  if (isObject(cloned.mcpServers)) delete cloned.mcpServers.rocky;
+  const cloned = { ...root };
+  if (isObject(root.mcpServers)) {
+    const servers = { ...root.mcpServers };
+    delete servers.rocky;
+    cloned.mcpServers = servers;
+  }
   return cloned;
 }
 
@@ -724,8 +855,10 @@ function auditStage(
   registration: McpRegistration,
   manifest: ClaudePolicyManifest,
   pathApi: PlatformPath,
+  invocationStartedAt: number,
+  invocationCompletedAt: number,
 ): AuditedStage | undefined {
-  if (!stageIdentityUnchanged(stage, stagingRoot) || original.file === undefined || original.root === undefined) {
+  if (!stageIdentityUnchanged(stage, pathApi) || original.file === undefined || original.root === undefined) {
     return undefined;
   }
   const configPath = pathApi.join(stage.path, ".claude.json");
@@ -740,8 +873,14 @@ function auditStage(
     backupEntries = readdirSync(backupDirectory);
     if (backupEntries.length !== 1) return undefined;
     const backupName = backupEntries[0]!;
+    const timestampText = backupName.slice(manifest.backup.filePrefix.length);
+    const timestamp = Number(timestampText);
     if (!backupName.startsWith(manifest.backup.filePrefix)
-      || !/^\d+$/.test(backupName.slice(manifest.backup.filePrefix.length))) return undefined;
+      || !/^\d{13,}$/.test(timestampText)
+      || !Number.isSafeInteger(timestamp)
+      || String(timestamp) !== timestampText
+      || timestamp < invocationStartedAt
+      || timestamp > invocationCompletedAt) return undefined;
     const backupPath = pathApi.join(backupDirectory, backupName);
     const backup = readSafeFile(backupPath, pathApi);
     const staged = readSafeFile(configPath, pathApi);
@@ -771,7 +910,7 @@ function auditStage(
     const proof = {
       unchanged: () => {
         try {
-          return stageIdentityUnchanged(stage, stagingRoot)
+          return stageIdentityUnchanged(stage, pathApi)
             && isDeepStrictEqual(readdirSync(stage.path).sort(), rootEntries)
             && sameDirectoryAuthority(identity(lstatSync(backupDirectory)), backupDirectoryIdentity)
             && isDeepStrictEqual(readdirSync(backupDirectory).sort(), [...backupEntries].sort())
@@ -782,15 +921,6 @@ function auditStage(
         }
       },
     };
-    (proof as FileMutationGuard & { cleanup: () => boolean }).cleanup = () => cleanupAuditedStage(
-      stage,
-      stagingRoot,
-      pathApi,
-      staged.identity!,
-      backupDirectoryIdentity,
-      backupPath,
-      backup.identity!,
-    );
     return { bytes: staged.read.bytes, parsed, guard: proof };
   } catch {
     return undefined;
@@ -803,11 +933,6 @@ function combineGuards(...guards: readonly FileMutationGuard[]): FileMutationGua
   }) };
 }
 
-function auditCleanup(audit: AuditedStage): boolean {
-  const cleanup = (audit.guard as FileMutationGuard & { cleanup?: () => boolean }).cleanup;
-  return cleanup?.() ?? false;
-}
-
 function inspectUserConfig(
   resolved: ResolvedClaudeCodeUserConfig,
   registration: McpRegistration,
@@ -818,11 +943,15 @@ function inspectUserConfig(
   if (resolved.status === "manual") {
     return { public: { state: "unreadable", detail: "Claude Code config path requires manual setup" } };
   }
-  if (inspectTransaction && transactions.inspect(resolved.configPath).status === "pending") {
+  const transaction = inspectTransaction ? transactions.inspect(resolved.configPath) : undefined;
+  if (transaction?.status === "pending") {
     return {
       public: {
         state: "unreadable",
-        detail: "Claude Code config recovery is pending; retry after recovery",
+        detail: withRecovery(
+          "Claude Code config recovery is pending; retry after recovery",
+          transaction.recoveryPath,
+        ),
       },
     };
   }
@@ -880,6 +1009,7 @@ export function createClaudeCodeAdapter(
   const resolved = dependencies.userConfigPath === undefined
     ? resolveClaudeCodeUserConfig({ home, cwd, env: setupEnv, path: pathApi })
     : pathApi.isAbsolute(dependencies.userConfigPath)
+      && isCanonicalAbsoluteFile(dependencies.userConfigPath, pathApi)
       ? {
         status: "resolved" as const,
         configPath: dependencies.userConfigPath,
@@ -899,10 +1029,10 @@ export function createClaudeCodeAdapter(
       || !resolved.mutationSafe
       || inspection.file === undefined
       || inspection.root === undefined
-      || !validManifest(manifest, platform, architecture, pathApi)) return manual(operation === "configure" ? registration : undefined);
+      || !validManifest(manifest, platform, architecture, pathApi)) return manual(operation, registration);
 
     const parentNamespace = observeNamespace(pathApi.dirname(resolved.configPath), pathApi);
-    if (parentNamespace?.at(-1)?.identity?.kind !== "directory") return manual(operation === "configure" ? registration : undefined);
+    if (parentNamespace?.at(-1)?.identity?.kind !== "directory") return manual(operation, registration);
     const policy = capturePolicyProof(
       manifest,
       resolved,
@@ -911,24 +1041,24 @@ export function createClaudeCodeAdapter(
       pathApi,
       parentNamespace,
     );
-    if (policy === undefined) return manual(operation === "configure" ? registration : undefined);
+    if (policy === undefined) return manual(operation, registration);
 
     const capabilityStage = createPrivateStage(stagingRoot, pathApi);
-    if (capabilityStage === undefined) return manual(operation === "configure" ? registration : undefined);
+    if (capabilityStage === undefined) return manual(operation, registration);
     if (!await proveCapability(
       runner,
       executable!,
       capabilityStage,
-      stagingRoot,
+      pathApi,
       setupEnv,
       cwd,
-    )) return manual(operation === "configure" ? registration : undefined);
+    )) return manual(operation, registration);
 
     const stage = createPrivateStage(stagingRoot, pathApi);
     if (stage === undefined || !copySnapshotToStage(stage, inspection.file, pathApi)) {
       return failed(withRecovery(
         "Unable to create exact private Claude Code stage",
-        stage?.path,
+        stage === undefined ? undefined : authoritativeStagePath(stage, pathApi),
       ), operation === "configure" ? registration : undefined);
     }
     const beforeNames = readdirSync(stage.path).sort();
@@ -936,11 +1066,10 @@ export function createClaudeCodeAdapter(
     if (!isDeepStrictEqual(beforeNames, expectedBefore)
       || !policy.guard.unchanged()
       || !fileSnapshotUnchanged(inspection.file, pathApi)) {
-      if (!cleanupEmptyStage(stage, stagingRoot)) {
-        return failed(`Claude Code staging stopped; manual recovery: ${stage.path}`,
-          operation === "configure" ? registration : undefined);
-      }
-      return manual(operation === "configure" ? registration : undefined);
+      return failed(withRecovery(
+        "Claude Code staging stopped",
+        authoritativeStagePath(stage, pathApi),
+      ), operation === "configure" ? registration : undefined);
     }
 
     const run = async (args: readonly string[]): Promise<ProcessResult> => runner.run(
@@ -955,12 +1084,24 @@ export function createClaudeCodeAdapter(
     const commands = operation === "remove"
       ? [REMOVE_ARGS]
       : replace ? [REMOVE_ARGS, addArguments(registration)] : [addArguments(registration)];
+    const invocationStartedAt = Date.now();
     for (const args of commands) {
+      if (!stageIdentityUnchanged(stage, pathApi)
+        || !policy.guard.unchanged()
+        || !fileSnapshotUnchanged(inspection.file, pathApi)) {
+        return failed(withRecovery(
+          "Claude Code staged transformation authority changed",
+          authoritativeStagePath(stage, pathApi),
+        ), operation === "configure" ? registration : undefined);
+      }
       let outcome: ProcessResult;
       try {
         outcome = await run(args);
       } catch {
-        return failed(`Claude Code staged transformation failed; manual recovery: ${stage.path}`,
+        return failed(withRecovery(
+          "Claude Code staged transformation failed",
+          authoritativeStagePath(stage, pathApi),
+        ),
           operation === "configure" ? registration : undefined);
       }
       if (!succeeded(outcome)) {
@@ -969,12 +1110,16 @@ export function createClaudeCodeAdapter(
             operation === "configure" ? registration : undefined)
           : failed("Claude Code staged registration update failed",
             operation === "configure" ? registration : undefined);
-        const cleaned = cleanupEmptyStage(stage, stagingRoot);
-        return cleaned
-          ? result
-          : { ...result, detail: withRecovery(result.detail ?? "Claude Code staged update failed", stage.path) };
+        return {
+          ...result,
+          detail: withRecovery(
+            result.detail ?? "Claude Code staged update failed",
+            authoritativeStagePath(stage, pathApi),
+          ),
+        };
       }
     }
+    const invocationCompletedAt = Date.now();
 
     const audited = auditStage(
       stage,
@@ -984,12 +1129,23 @@ export function createClaudeCodeAdapter(
       registration,
       manifest,
       pathApi,
+      invocationStartedAt,
+      invocationCompletedAt,
     );
     if (audited === undefined || !policy.guard.unchanged() || !fileSnapshotUnchanged(inspection.file, pathApi)) {
-      return failed(`Claude Code staged audit failed; manual recovery: ${stage.path}`,
+      return failed(withRecovery(
+        "Claude Code staged audit failed",
+        authoritativeStagePath(stage, pathApi),
+      ),
         operation === "configure" ? registration : undefined);
     }
-    const guard = combineGuards(policy.guard, audited.guard);
+    const targetGuard = createTargetTransactionGuard(
+      resolved.configPath,
+      inspection.file,
+      audited.bytes,
+      pathApi,
+    );
+    const guard = combineGuards(policy.guard, audited.guard, targetGuard);
     let written: ConditionalBytesWriteResult;
     try {
       written = transactions.write(
@@ -999,23 +1155,23 @@ export function createClaudeCodeAdapter(
         guard,
       );
     } catch {
-      if (!auditCleanup(audited)) {
-        return failed(`Claude Code stage cleanup requires manual recovery: ${stage.path}`,
-          operation === "configure" ? registration : undefined);
-      }
-      return failed("Unable to publish staged Claude Code registration",
+      return failed(withRecovery(
+        "Unable to publish staged Claude Code registration",
+        authoritativeStagePath(stage, pathApi),
+      ),
         operation === "configure" ? registration : undefined);
     }
     if (written.status !== "written") {
-      if (!auditCleanup(audited)) {
-        return failed(`Claude Code stage cleanup requires manual recovery: ${stage.path}`,
-          operation === "configure" ? registration : undefined);
-      }
+      const auditedStillAuthoritative = audited.guard.unchanged();
+      const retainedStage = authoritativeStagePath(stage, pathApi);
+      const recoveryPath = written.status === "recovery-required"
+        ? written.recoveryPath ?? retainedStage
+        : auditedStillAuthoritative ? written.recoveryPath ?? retainedStage : retainedStage;
       return failed(withRecovery(
         written.status === "changed"
           ? "Claude Code config changed before publication"
           : "Claude Code publication requires manual recovery",
-        written.recoveryPath,
+        recoveryPath,
       ), operation === "configure" ? registration : undefined);
     }
     try { dependencies.lifecycle?.afterPublish?.(resolved.configPath); } catch { /* verification decides */ }
@@ -1034,19 +1190,22 @@ export function createClaudeCodeAdapter(
       && verified.read.mode === inspection.file.read.mode
       && isObject(verifiedRoot)
       && isDeepStrictEqual(verifiedRoot, audited.parsed);
-    if (!auditCleanup(audited)) {
-      return failed(`Claude Code stage cleanup requires manual recovery: ${stage.path}`,
-        operation === "configure" ? registration : undefined);
-    }
     if (!exact) {
       return failed(withRecovery(
         "Claude Code published state could not be verified",
         written.recoveryPath,
       ), operation === "configure" ? registration : undefined);
     }
+    const retainedStage = authoritativeStagePath(stage, pathApi);
+    if (retainedStage === undefined) {
+      return failed(withRecovery(
+        "Claude Code stage authority changed after publication",
+        written.recoveryPath,
+      ), operation === "configure" ? registration : undefined);
+    }
     const detail = written.recoveryPath === undefined
-      ? undefined
-      : `Claude Code recovery artifact: ${written.recoveryPath}`;
+      ? `Claude Code retained private stage: ${retainedStage}`
+      : `Claude Code retained private stage: ${retainedStage}; Claude Code recovery artifact: ${written.recoveryPath}`;
     return operation === "configure"
       ? { client: "claude-code", status: "configured", ...(detail === undefined ? {} : { detail }) }
       : { client: "claude-code", status: "removed", ...(detail === undefined ? {} : { detail }) };
@@ -1062,7 +1221,7 @@ export function createClaudeCodeAdapter(
 
     async configure(registration, replace) {
       if (executable === undefined) return skipped();
-      if (resolved.status === "manual") return manual(registration);
+      if (resolved.status === "manual") return manual("configure", registration);
       const recovered = recoveryResult(transactions.recover(resolved.configPath), registration);
       if (recovered !== undefined) return recovered;
       const inspection = inspectUserConfig(resolved, registration, pathApi, transactions, false);
@@ -1085,7 +1244,7 @@ export function createClaudeCodeAdapter(
 
     async remove(registration) {
       if (executable === undefined) return skipped();
-      if (resolved.status === "manual") return manual();
+      if (resolved.status === "manual") return manual("remove");
       const recovered = recoveryResult(transactions.recover(resolved.configPath), undefined);
       if (recovered !== undefined) return recovered;
       const inspection = inspectUserConfig(resolved, registration, pathApi, transactions, false);

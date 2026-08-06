@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import {
+import fs, {
   chmodSync,
   copyFileSync,
   existsSync,
@@ -16,6 +16,7 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join, posix, win32 } from "node:path";
 import type { McpRegistration } from "../setup/clients.js";
@@ -88,7 +89,7 @@ class FakeClaudeRunner implements ProcessRunner {
   }
 }
 
-function result(status: number, stdout = "", stderr = "", error?: Error): ProcessResult {
+function result(status: number | null, stdout = "", stderr = "", error?: Error): ProcessResult {
   const output: ProcessResult = { status, stdout, stderr };
   if (error !== undefined) output.error = error;
   return output;
@@ -184,11 +185,16 @@ function stagePath(call: RunnerCall): string {
   return path;
 }
 
-function writeBackup(stage: string, before: Buffer, mode: number): void {
+function writeBackup(
+  stage: string,
+  before: Buffer,
+  mode: number,
+  timestamp: string | number = Date.now(),
+): void {
   const backups = join(stage, "backups");
   if (existsSync(backups)) return;
   mkdirSync(backups, { mode: 0o755 });
-  const backup = join(backups, `.claude.json.backup.${Date.now()}`);
+  const backup = join(backups, `.claude.json.backup.${timestamp}`);
   writeFileSync(backup, before, { mode });
   chmodSync(backup, mode);
 }
@@ -197,6 +203,7 @@ function transformStage(
   call: RunnerCall,
   options: {
     backup?: "exact" | "missing" | "mismatch" | "extra";
+    backupTimestamp?: string | number;
     mutate?: (stage: string, configPath: string, parsed: Record<string, unknown>) => void;
     preserveConfigMutation?: boolean;
   } = {},
@@ -209,7 +216,7 @@ function transformStage(
     const backupBytes = options.backup === "mismatch"
       ? Buffer.from("{\"not\":\"the source\"}\n")
       : before ?? Buffer.from("{\"firstStartTime\":1}\n");
-    writeBackup(stage, backupBytes, mode);
+    writeBackup(stage, backupBytes, mode, options.backupTimestamp);
     if (options.backup === "extra") {
       writeFileSync(join(stage, "backups", `.claude.json.backup.${Date.now() + 1}`), backupBytes);
     }
@@ -244,6 +251,17 @@ function assertForcedEnvironment(call: RunnerCall): void {
 
 function mutationCalls(runner: FakeClaudeRunner): RunnerCall[] {
   return runner.calls.filter(({ args }) => args.at(-1) !== "--help" && args[0] !== "--version");
+}
+
+function assertRetainedPrivateStages(stageRoot: string, minimum: number): void {
+  const names = readdirSync(stageRoot);
+  assert.ok(names.length >= minimum, `expected at least ${minimum} retained stages`);
+  for (const name of names) {
+    const metadata = lstatSync(join(stageRoot, name));
+    assert.equal(metadata.isDirectory(), true);
+    assert.equal(metadata.isSymbolicLink(), false);
+    if (process.platform !== "win32") assert.equal(metadata.mode & 0o777, 0o700);
+  }
 }
 
 function writeLegacyTransaction(
@@ -328,6 +346,58 @@ test("effective Claude target uses platform path semantics without resolving uns
     override: "absolute",
     mutationSafe: false,
   });
+
+  for (const configured of [
+    "/tmp/a/../b",
+    "/tmp/a/./b",
+    "/tmp//b",
+    "/tmp/b/",
+  ]) {
+    assert.deepEqual(resolveClaudeCodeUserConfig({
+      home: "/home/ada",
+      cwd: "/work/project",
+      env: { CLAUDE_CONFIG_DIR: configured },
+      path: posix,
+    }), { status: "manual" }, configured);
+  }
+  for (const configured of [
+    "C:\\a\\..\\b",
+    "C:\\\\b",
+    "C:/b",
+    "\\b",
+    "\\\\?\\C:\\b",
+  ]) {
+    assert.deepEqual(resolveClaudeCodeUserConfig({
+      home: "C:\\Users\\Ada",
+      cwd: "C:\\work\\project",
+      env: { CLAUDE_CONFIG_DIR: configured },
+      path: win32,
+    }), { status: "manual" }, configured);
+  }
+});
+
+test("lexically noncanonical absolute overrides stop before transaction reads or runner activity", async (t) => {
+  for (const configured of ["/tmp/a/../b", "/tmp//b", "/tmp/a/./b", "/tmp/b/"]) {
+    await t.test(configured, async (st) => {
+      const setup = fixture(st, { mcpServers: {} });
+      let transactionCalls = 0;
+      const transactions: ClaudeFileTransactions = {
+        inspect: () => { transactionCalls += 1; throw new Error("must not inspect"); },
+        recover: () => { transactionCalls += 1; throw new Error("must not recover"); },
+        write: () => { transactionCalls += 1; throw new Error("must not write"); },
+      };
+      const runner = new FakeClaudeRunner(() => { throw new Error("must not run"); });
+      const outcome = await createClaudeCodeAdapter(adapterDependencies(setup, runner, {
+        env: { CLAUDE_CONFIG_DIR: configured },
+        fileTransactions: transactions,
+      })).configure(registration, false);
+
+      assert.equal(outcome.status, "failed");
+      assert.equal(transactionCalls, 0);
+      assert.deepEqual(runner.calls, []);
+      assert.deepEqual(readdirSync(setup.stageRoot), []);
+    });
+  }
 });
 
 test("missing executable preserves blocked inspection and skipped operations", async (t) => {
@@ -483,7 +553,7 @@ test("exact version and command grammar capability gates reject every unproved r
       assert.equal(mutationCalls(runner).length, 0);
       assert.doesNotMatch(configured.detail ?? "", /secret|spawn/i);
       for (const call of runner.calls) assertForcedEnvironment(call);
-      assert.deepEqual(readdirSync(setup.stageRoot), []);
+      assertRetainedPrivateStages(setup.stageRoot, 1);
     });
   }
 });
@@ -530,8 +600,9 @@ test("supported staged configure uses exact argv env clone audit and conditional
   });
   assert.equal(statSync(setup.configPath).mode & 0o777, originalMode);
   assert.match(configured.detail ?? "", /recovery/i);
+  assert.ok((configured.detail ?? "").includes(stagePath(actual[0]!)));
   assert.doesNotMatch(configured.detail ?? "", /dark|https:\/\/local/);
-  assert.deepEqual(readdirSync(setup.stageRoot), []);
+  assertRetainedPrivateStages(setup.stageRoot, 2);
 });
 
 test("replacement and removal run name-only commands only inside stage and retain displaced recovery", async (t) => {
@@ -566,7 +637,7 @@ test("replacement and removal run name-only commands only inside stage and retai
       assert.deepEqual(published.mcpServers.other, { keep: true });
       if (operation === "replace") assert.deepEqual(published.mcpServers.rocky, rockyEntry());
       else assert.equal(Object.prototype.hasOwnProperty.call(published.mcpServers, "rocky"), false);
-      assert.deepEqual(readdirSync(setup.stageRoot), []);
+      assertRetainedPrivateStages(setup.stageRoot, 2);
     });
   }
 });
@@ -707,12 +778,187 @@ test("stage topology backup and semantic audit failures never publish", async (t
   }
 });
 
+test("non-Rocky audit preserves negative zero and rejects nonfinite parse collapse", async (t) => {
+  for (const entry of [
+    { name: "negative zero", source: '{"n":-0,"mcpServers":{}}\n' },
+    { name: "large exponent", source: '{"n":1e400,"mcpServers":{}}\n' },
+  ]) {
+    await t.test(entry.name, async (st) => {
+      const setup = fixture(st);
+      writeFileSync(setup.configPath, entry.source, { mode: 0o640 });
+      chmodSync(setup.configPath, 0o640);
+      const before = readFileSync(setup.configPath);
+      const configured = await createClaudeCodeAdapter(adapterDependencies(
+        setup,
+        new FakeClaudeRunner((call) => transformStage(call)),
+      )).configure(registration, false);
+
+      assert.equal(configured.status, "failed");
+      assert.deepEqual(readFileSync(setup.configPath), before);
+    });
+  }
+});
+
+test("Rocky registration requires exact own keys in staged and stored state", async (t) => {
+  for (const operation of ["configure", "replace"] as const) {
+    await t.test(`staged ${operation}`, async (st) => {
+      const setup = fixture(st, {
+        mcpServers: operation === "replace" ? { rocky: rockyEntry("/old/node") } : {},
+      });
+      const before = readFileSync(setup.configPath);
+      const runner = new FakeClaudeRunner((call) => transformStage(call, {
+        mutate: (_stage, _path, parsed) => {
+          const servers = parsed.mcpServers as Record<string, Record<string, unknown>>;
+          if (call.args[1] === "add") servers.rocky!.unexpected = { changesSemantics: true };
+        },
+      }));
+      const outcome = await createClaudeCodeAdapter(adapterDependencies(setup, runner))
+        .configure(registration, operation === "replace");
+
+      assert.equal(outcome.status, "failed");
+      assert.deepEqual(readFileSync(setup.configPath), before);
+    });
+  }
+
+  await t.test("stored health and removal", async (st) => {
+    const setup = fixture(st, {
+      mcpServers: { rocky: { ...rockyEntry(), unexpected: "future-behavior" } },
+    });
+    const before = readFileSync(setup.configPath);
+    const runner = new FakeClaudeRunner(() => { throw new Error("must not run"); });
+    const adapter = createClaudeCodeAdapter(adapterDependencies(setup, runner));
+
+    assert.equal((await adapter.inspect(registration)).state, "conflict");
+    assert.equal((await adapter.check(registration)).status, "failed");
+    assert.equal((await adapter.remove(registration)).status, "failed");
+    assert.deepEqual(runner.calls, []);
+    assert.deepEqual(readFileSync(setup.configPath), before);
+  });
+});
+
+test("backup timestamp must be safe epoch milliseconds inside the transform window", async (t) => {
+  for (const entry of [
+    { name: "zero", timestamp: 0 },
+    { name: "short", timestamp: 1 },
+    { name: "future", timestamp: Number.MAX_SAFE_INTEGER },
+    { name: "overflow", timestamp: "9007199254740992" },
+  ]) {
+    await t.test(entry.name, async (st) => {
+      const setup = fixture(st, { mcpServers: {} });
+      const before = readFileSync(setup.configPath);
+      const configured = await createClaudeCodeAdapter(adapterDependencies(
+        setup,
+        new FakeClaudeRunner((call) => transformStage(call, { backupTimestamp: entry.timestamp })),
+      )).configure(registration, false);
+
+      assert.equal(configured.status, "failed");
+      assert.deepEqual(readFileSync(setup.configPath), before);
+    });
+  }
+});
+
+test("staging root rejects linked ancestors and ancestor rebind before any runner", async (t) => {
+  await t.test("stable symlink ancestor", async (st) => {
+    const setup = fixture(st, { mcpServers: {} });
+    const realNamespace = join(setup.root, "real-namespace");
+    const linkedNamespace = join(setup.root, "linked-namespace");
+    mkdirSync(join(realNamespace, "stages"), { recursive: true, mode: 0o700 });
+    symlinkSync(realNamespace, linkedNamespace, "dir");
+    const runner = new FakeClaudeRunner(() => { throw new Error("must not run"); });
+
+    const outcome = await createClaudeCodeAdapter(adapterDependencies(setup, runner, {
+      stagingRoot: join(linkedNamespace, "stages"),
+    })).configure(registration, false);
+
+    assert.equal(outcome.status, "failed");
+    assert.deepEqual(runner.calls, []);
+  });
+
+  await t.test("ancestor rebound during stage creation", async (st) => {
+    const setup = fixture(st, { mcpServers: {} });
+    const namespace = join(setup.root, "stage-namespace");
+    const stagingRoot = join(namespace, "stages");
+    const attackerNamespace = join(setup.root, "attacker-namespace");
+    mkdirSync(stagingRoot, { recursive: true, mode: 0o700 });
+    mkdirSync(join(attackerNamespace, "stages"), { recursive: true, mode: 0o700 });
+    const originalMkdtemp = fs.mkdtempSync;
+    let rebound = false;
+    fs.mkdtempSync = ((prefix: string, options?: unknown) => {
+      const created = options === undefined
+        ? originalMkdtemp(prefix)
+        : originalMkdtemp(prefix, options as never) as unknown as string;
+      if (!rebound && prefix.startsWith(stagingRoot)) {
+        renameSync(namespace, `${namespace}-owned`);
+        symlinkSync(attackerNamespace, namespace, "dir");
+        mkdirSync(join(attackerNamespace, "stages", posix.basename(created)), { mode: 0o700 });
+        rebound = true;
+      }
+      return created;
+    }) as typeof fs.mkdtempSync;
+    syncBuiltinESMExports();
+    const runner = new FakeClaudeRunner(() => { throw new Error("must not run"); });
+    try {
+      const outcome = await createClaudeCodeAdapter(adapterDependencies(setup, runner, {
+        stagingRoot,
+      })).configure(registration, false);
+      assert.equal(outcome.status, "failed");
+      assert.equal(rebound, true);
+      assert.deepEqual(runner.calls, []);
+    } finally {
+      fs.mkdtempSync = originalMkdtemp;
+      syncBuiltinESMExports();
+    }
+  });
+});
+
+test("stage lifecycle never uses pathname-only deletion for invocation-owned entries", async (t) => {
+  const setup = fixture(t, { mcpServers: {} });
+  const originalRm = fs.rmSync;
+  const originalRmdir = fs.rmdirSync;
+  let pathnameDeletes = 0;
+  fs.rmSync = ((path: fs.PathLike, options?: unknown) => {
+    if (String(path).startsWith(setup.stageRoot)) {
+      pathnameDeletes += 1;
+      throw new Error("pathname-only deletion forbidden");
+    }
+    return options === undefined
+      ? originalRm(path)
+      : originalRm(path, options as never);
+  }) as typeof fs.rmSync;
+  fs.rmdirSync = ((path: fs.PathLike, options?: unknown) => {
+    if (String(path).startsWith(setup.stageRoot)) {
+      pathnameDeletes += 1;
+      throw new Error("pathname-only deletion forbidden");
+    }
+    return options === undefined
+      ? originalRmdir(path)
+      : originalRmdir(path, options as never);
+  }) as typeof fs.rmdirSync;
+  syncBuiltinESMExports();
+  try {
+    const configured = await createClaudeCodeAdapter(adapterDependencies(
+      setup,
+      new FakeClaudeRunner((call) => transformStage(call)),
+    )).configure(registration, false);
+
+    assert.equal(configured.status, "configured");
+    assert.equal(pathnameDeletes, 0);
+    assertRetainedPrivateStages(setup.stageRoot, 2);
+  } finally {
+    fs.rmSync = originalRm;
+    fs.rmdirSync = originalRmdir;
+    syncBuiltinESMExports();
+  }
+});
+
 test("stage symlink hard-link and rebound attacks are refused without deleting attacker state", async (t) => {
   for (const attack of ["symlink", "hard-link", "rebound"] as const) {
     await t.test(attack, async (st) => {
       const setup = fixture(st, { keep: true, mcpServers: {} });
       const before = readFileSync(setup.configPath);
       let sentinel: string | undefined;
+      let oldStagePath: string | undefined;
+      let ownedStagePath: string | undefined;
       const runner = new FakeClaudeRunner((call) => {
         const stage = stagePath(call);
         const config = join(stage, ".claude.json");
@@ -727,8 +973,10 @@ test("stage symlink hard-link and rebound attacks are refused without deleting a
           sentinel = join(setup.root, "attacker-link.json");
           linkSync(config, sentinel);
         } else {
+          oldStagePath = stage;
           const displaced = `${stage}-owned`;
           renameSync(stage, displaced);
+          ownedStagePath = displaced;
           mkdirSync(stage, { mode: 0o700 });
           sentinel = join(stage, "attacker-sentinel");
           writeFileSync(sentinel, "keep attacker\n");
@@ -743,6 +991,11 @@ test("stage symlink hard-link and rebound attacks are refused without deleting a
       assert.ok(sentinel !== undefined);
       assert.equal(existsSync(sentinel), true);
       assert.doesNotMatch(configured.detail ?? "", /attacker-sentinel|keep attacker/);
+      if (attack === "rebound") {
+        assert.ok(oldStagePath !== undefined && ownedStagePath !== undefined);
+        assert.equal((configured.detail ?? "").includes(oldStagePath), false);
+        assert.equal(existsSync(ownedStagePath), true);
+      }
     });
   }
 });
@@ -805,6 +1058,58 @@ test("target and parent inode swaps with identical bytes still block publication
   }
 });
 
+test("final transaction guard binds target and parent identity at the write boundary", async (t) => {
+  for (const race of ["target", "parent"] as const) {
+    await t.test(race, async (st) => {
+      const setup = fixture(st, { keep: true, mcpServers: {} });
+      const winner = readFileSync(setup.configPath);
+      const preparedTarget = join(setup.root, "write-boundary-target.json");
+      const preparedParent = join(setup.root, "write-boundary-parent");
+      if (race === "target") {
+        copyFileSync(setup.configPath, preparedTarget);
+        chmodSync(preparedTarget, statSync(setup.configPath).mode & 0o777);
+      } else {
+        mkdirSync(preparedParent, { mode: 0o700 });
+        writeFileSync(join(preparedParent, ".claude.json"), winner, { mode: 0o640 });
+      }
+      let checked = false;
+      let guardBeforeRace: boolean | undefined;
+      let guardAfterRace: boolean | undefined;
+      const transactions: ClaudeFileTransactions = {
+        inspect: () => ({ status: "clear" }),
+        recover: () => ({ status: "clear" }),
+        write: (_path, _bytes, _prior, guard) => {
+          guardBeforeRace = guard?.unchanged();
+          const originalTargetInode = lstatSync(setup.configPath).ino;
+          const originalParentInode = lstatSync(setup.configDir).ino;
+          if (race === "target") {
+            renameSync(preparedTarget, setup.configPath);
+            assert.notEqual(lstatSync(setup.configPath).ino, originalTargetInode);
+          } else {
+            renameSync(setup.configDir, join(setup.root, "write-boundary-parent-owned"));
+            renameSync(preparedParent, setup.configDir);
+            assert.notEqual(lstatSync(setup.configDir).ino, originalParentInode);
+          }
+          checked = true;
+          guardAfterRace = guard?.unchanged();
+          return { status: "changed" };
+        },
+      };
+      const configured = await createClaudeCodeAdapter(adapterDependencies(
+        setup,
+        new FakeClaudeRunner((call) => transformStage(call)),
+        { fileTransactions: transactions, policyManifest: completeManifest([], []) },
+      )).configure(registration, false);
+
+      assert.equal(checked, true);
+      assert.equal(guardBeforeRace, true);
+      assert.equal(guardAfterRace, false);
+      assert.equal(configured.status, "failed");
+      assert.deepEqual(readFileSync(setup.configPath), winner);
+    });
+  }
+});
+
 test("two simultaneous staged configures preserve one exact winner", async (t) => {
   const setup = fixture(t, { keep: true, mcpServers: {} });
   let waiting = 0;
@@ -857,10 +1162,45 @@ test("post-audit stage topology change blocks publication and reports only retai
 
   assert.equal(configured.status, "failed");
   assert.ok(stage !== undefined);
-  assert.equal(configured.detail, `Claude Code stage cleanup requires manual recovery: ${stage}`);
+  assert.equal(configured.detail, `Claude Code config changed before publication; manual recovery: ${stage}`);
   assert.doesNotMatch(configured.detail, new RegExp(unrelatedRecovery));
   assert.deepEqual(readFileSync(join(stage, "late-attacker-entry"), "utf8"), "keep attacker\n");
   assert.deepEqual(readFileSync(setup.configPath), before);
+});
+
+test("live publication recovery authority outranks a rebound stage pathname", async (t) => {
+  const setup = fixture(t, { keep: true, mcpServers: {} });
+  const recoveryPath = join(setup.root, "live-task1-recovery");
+  writeFileSync(recoveryPath, readFileSync(setup.configPath));
+  let stage: string | undefined;
+  const runner = new FakeClaudeRunner((call) => {
+    stage = stagePath(call);
+    return transformStage(call);
+  });
+  const transactions: ClaudeFileTransactions = {
+    inspect: () => ({ status: "clear" }),
+    recover: () => ({ status: "clear" }),
+    write: (path, bytes, prior, guard) => {
+      assert.equal(guard?.unchanged(), true);
+      writeFileSync(path, bytes, { mode: prior.status === "valid" ? prior.mode : 0o600 });
+      if (prior.status === "valid" && prior.mode !== undefined) chmodSync(path, prior.mode);
+      assert.ok(stage !== undefined);
+      renameSync(stage, `${stage}-owned`);
+      mkdirSync(stage, { mode: 0o700 });
+      writeFileSync(join(stage, "attacker-sentinel"), "keep attacker\n");
+      return { status: "written", recoveryPath };
+    },
+  };
+
+  const configured = await createClaudeCodeAdapter(adapterDependencies(setup, runner, {
+    fileTransactions: transactions,
+  })).configure(registration, false);
+
+  assert.equal(configured.status, "failed");
+  assert.ok(stage !== undefined);
+  assert.ok((configured.detail ?? "").includes(recoveryPath));
+  assert.equal((configured.detail ?? "").includes(stage), false);
+  assert.equal(readFileSync(join(stage, "attacker-sentinel"), "utf8"), "keep attacker\n");
 });
 
 test("pending transactions are inspected or recovered before target interpretation", async (t) => {
@@ -875,6 +1215,32 @@ test("pending transactions are inspected or recovered before target interpretati
     assert.deepEqual(runner.calls, []);
     assert.equal(existsSync(transaction), true);
   });
+
+  for (const recoveryPath of [join(tmpdir(), "authoritative-pending-recovery"), undefined]) {
+    await t.test(`injected pending ${recoveryPath === undefined ? "without" : "with"} path`, async (st) => {
+      const setup = fixture(st, { mcpServers: { rocky: rockyEntry() } });
+      const transactions: ClaudeFileTransactions = {
+        inspect: () => ({ status: "pending", ...(recoveryPath === undefined ? {} : { recoveryPath }) }),
+        recover: () => ({ status: "clear" }),
+        write: () => { throw new Error("must not write"); },
+      };
+      const adapter = createClaudeCodeAdapter(adapterDependencies(setup, new FakeClaudeRunner(), {
+        fileTransactions: transactions,
+      }));
+
+      const inspected = await adapter.inspect(registration);
+      const checked = await adapter.check(registration);
+      assert.equal(inspected.state, "unreadable");
+      assert.equal(checked.status, "failed");
+      if (recoveryPath === undefined) {
+        assert.doesNotMatch(inspected.detail ?? "", /manual recovery:/i);
+        assert.doesNotMatch(checked.detail ?? "", /manual recovery:/i);
+      } else {
+        assert.ok((inspected.detail ?? "").includes(recoveryPath));
+        assert.ok((checked.detail ?? "").includes(recoveryPath));
+      }
+    });
+  }
 
   await t.test("recovered stops for retry", async (st) => {
     const setup = fixture(st, { mcpServers: {} });
@@ -999,13 +1365,21 @@ test("unsafe target topology and malformed shapes are untouched and secret-free"
 
 test("known staged policy refusal is blocked but ordinary output is a secret-free failure", async (t) => {
   for (const entry of [
-    { stderr: "enterprise policy denied fake-policy-secret", status: "blocked-by-policy" },
-    { stderr: "ordinary failure fake-process-secret", status: "failed" },
+    { stderr: "enterprise policy denied fake-policy-secret", status: "blocked-by-policy", error: undefined, childStatus: 1 },
+    { stderr: "ordinary failure fake-process-secret", status: "failed", error: undefined, childStatus: 1 },
+    { stderr: "enterprise policy denied", status: "failed", error: undefined, childStatus: 2 },
+    { stderr: "", status: "failed", error: new Error("Operation not allowed"), childStatus: null },
+    { stderr: "enterprise policy denied", status: "failed", error: new Error("process timeout"), childStatus: null },
   ]) {
     await t.test(entry.status, async (st) => {
       const setup = fixture(st, { mcpServers: {} });
       const before = readFileSync(setup.configPath);
-      const runner = new FakeClaudeRunner(() => result(1, "", entry.stderr));
+      const runner = new FakeClaudeRunner(() => result(
+        entry.childStatus,
+        "",
+        entry.stderr,
+        entry.error,
+      ));
       const configured = await createClaudeCodeAdapter(adapterDependencies(setup, runner))
         .configure(registration, false);
 
@@ -1019,4 +1393,18 @@ test("known staged policy refusal is blocked but ordinary output is a secret-fre
       assert.deepEqual(configured.manualRegistration, registration);
     });
   }
+});
+
+test("production-incomplete owned removal returns remove-specific guidance without add payload", async (t) => {
+  const setup = fixture(t, { mcpServers: { rocky: rockyEntry() } });
+  const runner = new FakeClaudeRunner(() => { throw new Error("must not run"); });
+  const removed = await createClaudeCodeAdapter(adapterDependencies(setup, runner, {
+    policyManifest: { ...completeManifest(), complete: false },
+  })).remove(registration);
+
+  assert.equal(removed.status, "failed");
+  assert.match(removed.detail ?? "", /remove/i);
+  assert.doesNotMatch(removed.detail ?? "", /registration|\badd\b/i);
+  assert.equal(removed.manualRegistration, undefined);
+  assert.deepEqual(runner.calls, []);
 });
