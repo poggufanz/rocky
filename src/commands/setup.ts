@@ -541,14 +541,20 @@ export async function setup(argv: readonly string[], deps?: SetupDependencies): 
   for (const result of results) printResult(options.mode, result, registration);
 
   let voiceResults: VoiceSkillOperationResult[] = [];
+  let voiceUnavailable = false;
   if (options.voiceSkill && skillWorkAuthorized) {
     const services = dependencies.voiceSkills ?? defaultVoiceSkillServices;
     const detected = detectedVoiceSkillHosts(dependencies.platform);
-    if (detected.size > 0) {
-      const targets = services.resolveTargets(
+    const targets = detected.size > 0
+      ? services.resolveTargets(
         dependencies.env ?? process.env,
         dependencies.platform.home,
-      ).filter((target) => detected.has(target.host));
+      ).filter((target) => detected.has(target.host))
+      : [];
+    if (targets.length === 0) {
+      voiceUnavailable = true;
+      detail("voice-skill: unavailable");
+    } else {
       voiceResults = await invokeVoiceSkills(options.mode, targets, options.replace, services);
       for (const result of voiceResults) printVoiceSkillResult(result);
     }
@@ -562,5 +568,5 @@ export async function setup(argv: readonly string[], deps?: SetupDependencies): 
   }
 
   const setupExit = exitCode(options.mode, results);
-  return setupExit === 0 && voiceSkillSucceeded(options.mode, voiceResults) ? 0 : 1;
+  return !voiceUnavailable && setupExit === 0 && voiceSkillSucceeded(options.mode, voiceResults) ? 0 : 1;
 }

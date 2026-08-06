@@ -162,11 +162,12 @@ class FakeVoiceSkillServices implements VoiceSkillServices {
       method: "install" | "check" | "remove",
       target: VoiceSkillTarget,
     ) => void,
+    private readonly targets?: readonly VoiceSkillTarget[],
   ) {}
 
   resolveTargets(env: NodeJS.ProcessEnv, home: string): readonly VoiceSkillTarget[] {
     this.calls.push({ method: "resolve", env, home });
-    return [
+    return this.targets ?? [
       {
         host: "codex",
         destination: join(home, ".agents", "skills", "rocky-voice"),
@@ -662,6 +663,64 @@ test("declined combined consent performs no voice skill operation", async () => 
   assert.match(confirmation.messages[0] ?? "", /voice skill/i);
   assert.deepEqual(voiceSkills.calls, []);
   assert.deepEqual(adapter.calls.map(({ method }) => method), ["inspect"]);
+});
+
+test("explicit voice skill with no detected host reports unavailable while an independent Desktop MCP result still succeeds", async (t) => {
+  const desired: McpRegistration = {
+    name: "rocky",
+    command: nodePath,
+    args: [entryPath, "mcp"],
+    env: { ROCKY_MCP_EXPOSURE: "sanitized", ROCKY_HOME: rockyHome },
+  };
+  const cases = [
+    { mode: "configure" as const, argv: ["--yes", "--voice-skill"], resultKey: "configure" as const, status: "configured" as const },
+    { mode: "check" as const, argv: ["--check", "--voice-skill"], resultKey: "check" as const, status: "healthy" as const },
+    { mode: "remove" as const, argv: ["--remove", "--yes", "--voice-skill"], resultKey: "remove" as const, status: "removed" as const },
+  ];
+
+  for (const entry of cases) {
+    await t.test(entry.mode, async () => {
+      const desktopResult: SetupResult = entry.mode === "check"
+        ? { client: "claude-desktop", status: "healthy", healthRegistration: desired }
+        : { client: "claude-desktop", status: entry.status };
+      const desktop = new FakeAdapter("claude-desktop", { [entry.resultKey]: desktopResult });
+      const voiceSkills = new FakeVoiceSkillServices();
+
+      const output = await captureStderr(() => setup(entry.argv, dependencies([desktop], {
+        voiceSkills,
+      })));
+
+      assert.equal(output.code, 1);
+      assert.equal(output.stdout, "");
+      assert.match(output.stderr, /voice-skill: unavailable/);
+      assert.match(output.stderr, new RegExp(`claude-desktop: ${entry.status}`));
+      assert.deepEqual(desktop.calls.map(({ method }) => method), [entry.mode === "configure" ? "configure" : entry.mode]);
+      assert.deepEqual(voiceSkills.calls, []);
+      assert.doesNotMatch(output.stderr, /voice-skill claude-desktop/);
+    });
+  }
+});
+
+test("detected host with no matching resolved target reports unavailable and performs zero host operations", async () => {
+  const codex = new FakeAdapter("codex", { configure: { client: "codex", status: "configured" } });
+  const voiceSkills = new FakeVoiceSkillServices({}, undefined, [
+    {
+      host: "claude-code",
+      destination: "/home/ada/.claude/skills/rocky-voice",
+      backupRoot: "/home/ada/.claude/.rocky/backups/voice-skills",
+    },
+  ]);
+
+  const output = await captureStderr(() => setup(
+    ["--yes", "--voice-skill"],
+    dependencies([codex], { detected: ["codex"], voiceSkills }),
+  ));
+
+  assert.equal(output.code, 1);
+  assert.equal(output.stdout, "");
+  assert.match(output.stderr, /voice-skill: unavailable/);
+  assert.match(output.stderr, /codex: configured/);
+  assert.deepEqual(voiceSkills.calls.map(({ method }) => method), ["resolve"]);
 });
 
 test("sanitized and raw configure print required projected-memory disclosures", async () => {
