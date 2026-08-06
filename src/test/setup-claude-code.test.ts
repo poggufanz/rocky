@@ -857,7 +857,23 @@ test("backup timestamp must be safe epoch milliseconds inside the transform wind
   }
 });
 
-test("staging root rejects linked ancestors and ancestor rebind before any runner", async (t) => {
+test("staging root rejects linked components and ancestor rebind before any runner", async (t) => {
+  await t.test("final component symlink", async (st) => {
+    const setup = fixture(st, { mcpServers: {} });
+    const realStageRoot = join(setup.root, "real-stage-root");
+    mkdirSync(realStageRoot, { mode: 0o700 });
+    rmSync(setup.stageRoot, { recursive: true });
+    symlinkSync(realStageRoot, setup.stageRoot, "dir");
+    const runner = new FakeClaudeRunner(() => { throw new Error("must not run"); });
+
+    const outcome = await createClaudeCodeAdapter(adapterDependencies(setup, runner))
+      .configure(registration, false);
+
+    assert.equal(outcome.status, "failed");
+    assert.deepEqual(runner.calls, []);
+    assert.deepEqual(readdirSync(realStageRoot), []);
+  });
+
   await t.test("stable symlink ancestor", async (st) => {
     const setup = fixture(st, { mcpServers: {} });
     const realNamespace = join(setup.root, "real-namespace");
@@ -1108,6 +1124,56 @@ test("final transaction guard binds target and parent identity at the write boun
       assert.deepEqual(readFileSync(setup.configPath), winner);
     });
   }
+});
+
+test("real transaction rejects a same-byte inode installed after prepared publication link removal", async (t) => {
+  const setup = fixture(t, { keep: true, mcpServers: {} });
+  const originalRm = fs.rmSync;
+  let swapped = false;
+  let publishedInode: number | undefined;
+  let winnerInode: number | undefined;
+  let winnerBytes: Buffer | undefined;
+  fs.rmSync = ((path: fs.PathLike, options?: fs.RmOptions) => {
+    const pathname = String(path);
+    const transactionDirectory = dirname(pathname);
+    const manifestPath = join(transactionDirectory, "manifest.json");
+    if (!swapped
+      && posix.basename(pathname) === "prepared"
+      && existsSync(manifestPath)) {
+      const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as { state?: string };
+      if (manifest.state === "published") {
+        options === undefined ? originalRm(path) : originalRm(path, options);
+        publishedInode = lstatSync(setup.configPath).ino;
+        winnerBytes = readFileSync(setup.configPath);
+        const winner = join(setup.root, "same-byte-published-winner.json");
+        writeFileSync(winner, winnerBytes, { mode: 0o640 });
+        chmodSync(winner, statSync(setup.configPath).mode & 0o777);
+        winnerInode = lstatSync(winner).ino;
+        renameSync(winner, setup.configPath);
+        swapped = true;
+        return;
+      }
+    }
+    options === undefined ? originalRm(path) : originalRm(path, options);
+  }) as typeof fs.rmSync;
+  syncBuiltinESMExports();
+  let configured;
+  try {
+    configured = await createClaudeCodeAdapter(adapterDependencies(
+      setup,
+      new FakeClaudeRunner((call) => transformStage(call)),
+    )).configure(registration, false);
+  } finally {
+    fs.rmSync = originalRm;
+    syncBuiltinESMExports();
+  }
+
+  assert.equal(swapped, true);
+  assert.ok(publishedInode !== undefined && winnerInode !== undefined && winnerBytes !== undefined);
+  assert.notEqual(winnerInode, publishedInode);
+  assert.equal(lstatSync(setup.configPath).ino, winnerInode);
+  assert.deepEqual(readFileSync(setup.configPath), winnerBytes);
+  assert.equal(configured.status, "failed");
 });
 
 test("two simultaneous staged configures preserve one exact winner", async (t) => {

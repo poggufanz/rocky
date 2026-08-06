@@ -266,32 +266,34 @@ function observeNamespace(path: string, pathApi: PlatformPath): NamespaceObserva
   const pieces = suffix.split(/[\\/]+/).filter(Boolean);
   const output: NamespaceObservation[] = [];
   let current = root;
-  const visit = (candidate: string): boolean => {
+  const visit = (
+    candidate: string,
+  ): "directory" | "terminal" | "missing" | "invalid" => {
     try {
       const metadata = lstatSync(candidate);
       const node = identity(metadata);
-      if (node === undefined) return false;
+      if (node === undefined) return "invalid";
       output.push({ path: candidate, state: "present", identity: node });
-      return node.kind === "directory";
+      return node.kind === "directory" ? "directory" : "terminal";
     } catch (error) {
-      if (errorCode(error) !== "ENOENT") return false;
+      if (errorCode(error) !== "ENOENT") return "invalid";
       output.push({ path: candidate, state: "missing" });
-      return false;
+      return "missing";
     }
   };
-  if (!visit(root) && pieces.length > 0) return undefined;
+  if (visit(root) !== "directory") return undefined;
   for (let index = 0; index < pieces.length; index += 1) {
     current = pathApi.join(current, pieces[index]!);
-    const canDescend = visit(current);
-    const observed = output.at(-1)!;
-    if (observed.state === "missing") {
+    const state = visit(current);
+    if (state === "invalid") return undefined;
+    if (state === "missing") {
       for (const remainder of pieces.slice(index + 1)) {
         current = pathApi.join(current, remainder);
         output.push({ path: current, state: "missing" });
       }
       break;
     }
-    if (!canDescend && index < pieces.length - 1) return undefined;
+    if (state === "terminal" && index < pieces.length - 1) return undefined;
   }
   return output;
 }
@@ -438,6 +440,7 @@ function createTargetTransactionGuard(
   const prefix = `.${pathApi.basename(target)}.transaction-`;
   let transactionPath: string | undefined;
   let transactionIdentity: NodeIdentity | undefined;
+  let publishedIdentity: Pick<NodeIdentity, "dev" | "ino"> | undefined;
 
   const transactionCandidates = (): string[] => {
     try {
@@ -449,13 +452,15 @@ function createTargetTransactionGuard(
     }
   };
 
-  const validTransactionState = (candidate: string): boolean => {
+  const transactionObservation = (
+    candidate: string,
+  ): { publication?: NodeIdentity } | undefined => {
     const directory = identity(lstatSync(candidate));
-    if (directory?.kind !== "directory") return false;
+    if (directory?.kind !== "directory") return undefined;
     const displacedPath = pathApi.join(candidate, "displaced");
     const preparedPath = pathApi.join(candidate, "prepared");
     const state = transactionManifestState(candidate, target, pathApi);
-    if (state === undefined) return false;
+    if (state === undefined) return undefined;
 
     if (original.read.status === "valid") {
       if (original.identity === undefined
@@ -464,42 +469,84 @@ function createTargetTransactionGuard(
           original.read.bytes,
           original.read.mode,
           original.identity,
-        ) === undefined) return false;
+        ) === undefined) return undefined;
       const prepared = exactObservedFile(preparedPath, publishedBytes, original.read.mode);
-      if (pathMissing(target)) return prepared?.nlink === 1;
+      if (pathMissing(target)) {
+        return prepared?.nlink === 1 && (state === "prepared" || state === "displaced")
+          ? {}
+          : undefined;
+      }
       const targetFile = exactObservedFile(target, publishedBytes, original.read.mode);
-      if (targetFile === undefined) return false;
-      if (pathMissing(preparedPath)) return targetFile.nlink === 1 && state === "published";
+      if (targetFile === undefined) return undefined;
+      if (pathMissing(preparedPath)) {
+        return targetFile.nlink === 1 && (state === "published" || state === "committed")
+          ? { publication: targetFile }
+          : undefined;
+      }
       return prepared !== undefined
         && targetFile.dev === prepared.dev
         && targetFile.ino === prepared.ino
         && targetFile.nlink === 2
-        && prepared.nlink === 2;
+        && prepared.nlink === 2
+        && (state === "displaced" || state === "published")
+        ? { publication: targetFile }
+        : undefined;
     }
 
     const targetFile = exactObservedFile(target, publishedBytes, 0o600);
     const prepared = exactObservedFile(preparedPath, publishedBytes, 0o600);
+    if (prepared === undefined && targetFile?.nlink === 1
+      && (state === "published" || state === "committed")) {
+      return { publication: targetFile };
+    }
     return targetFile !== undefined
       && prepared !== undefined
       && targetFile.dev === prepared.dev
       && targetFile.ino === prepared.ino
       && targetFile.nlink === 2
-      && prepared.nlink === 2;
+      && prepared.nlink === 2
+      && (state === "prepared" || state === "published")
+      ? { publication: targetFile }
+      : undefined;
+  };
+
+  const acceptObservation = (
+    observation: { publication?: NodeIdentity } | undefined,
+  ): boolean => {
+    if (observation === undefined) return false;
+    if (observation.publication === undefined) return publishedIdentity === undefined;
+    if (observation.publication.nlink === 1 && publishedIdentity === undefined) return false;
+    if (publishedIdentity === undefined) {
+      publishedIdentity = {
+        dev: observation.publication.dev,
+        ino: observation.publication.ino,
+      };
+      return true;
+    }
+    return observation.publication.dev === publishedIdentity.dev
+      && observation.publication.ino === publishedIdentity.ino;
   };
 
   return {
     unchanged: () => {
       if (transactionPath === undefined && fileSnapshotUnchanged(original, pathApi)) return true;
       if (transactionPath === undefined) {
-        const candidates = transactionCandidates().filter((candidate) => {
-          try { return validTransactionState(candidate); } catch { return false; }
+        const candidates = transactionCandidates().flatMap((candidate) => {
+          try {
+            const observation = transactionObservation(candidate);
+            return observation === undefined ? [] : [{ candidate, observation }];
+          } catch {
+            return [];
+          }
         });
         if (candidates.length !== 1) return false;
-        transactionPath = candidates[0]!;
+        transactionPath = candidates[0]!.candidate;
         transactionIdentity = identity(lstatSync(transactionPath));
+        return sameDirectoryAuthority(identity(lstatSync(transactionPath)), transactionIdentity)
+          && acceptObservation(candidates[0]!.observation);
       }
       return sameDirectoryAuthority(identity(lstatSync(transactionPath)), transactionIdentity)
-        && validTransactionState(transactionPath);
+        && acceptObservation(transactionObservation(transactionPath));
     },
   };
 }
