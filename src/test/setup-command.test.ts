@@ -740,6 +740,56 @@ test("missing consent because no host needed authorization still reports zero-el
   }
 });
 
+test("a detected voice-skill host forces real authorization before any mutation even when every MCP adapter is blocked", async (t) => {
+  // This is the exact state that hid the round-3 consent bypass: every MCP
+  // adapter is blocked/unreadable (so MCP work alone never needed a prompt),
+  // but a Codex/Claude Code executable IS detected on PATH, so there is real
+  // voice-skill work pending. Unlike the zero-detected-host test above,
+  // `detected` is non-empty here on purpose - omitting it is precisely how
+  // round 3's own regression sat in the one state where the bug was
+  // invisible. `confirm()` throwing on any call proves an invocation is a
+  // genuine prompt attempt, never a silent bypass: for a mutating mode
+  // (configure/remove) the outcome must be either a real prompt attempt or
+  // zero voice-skill calls - an unprompted mutation must never pass. `check`
+  // never mutates (see setup.ts's check-mode consent skip), so it is
+  // deliberately never gated behind a prompt; asserting it here documents
+  // that choice rather than treating it as a gap.
+  const cases: Array<{ name: string; argv: readonly string[]; mutates: boolean }> = [
+    { name: "configure", argv: ["--voice-skill"], mutates: true },
+    { name: "check", argv: ["--check", "--voice-skill"], mutates: false },
+    { name: "remove", argv: ["--remove", "--voice-skill"], mutates: true },
+  ];
+
+  for (const entry of cases) {
+    await t.test(entry.name, async () => {
+      const confirmation: ConfirmationPort = {
+        async confirm() { throw new Error("prompt attempted"); },
+      };
+      const adapter = new FakeAdapter("codex", { inspect: { state: "blocked", detail: "codex is not installed" } });
+      const voiceSkills = new FakeVoiceSkillServices();
+
+      let promptAttempted = false;
+      try {
+        await captureStderr(() => setup(entry.argv, dependencies([adapter], {
+          confirmation,
+          voiceSkills,
+          detected: ["codex"],
+        })));
+      } catch (error) {
+        assert.equal(error instanceof Error ? error.message : error, "prompt attempted");
+        promptAttempted = true;
+      }
+
+      if (entry.mutates) {
+        assert.ok(promptAttempted || voiceSkills.calls.length === 0,
+          `${entry.name}: voice skill mutated without ever being authorized`);
+      } else {
+        assert.equal(promptAttempted, false, "check must never require a consent prompt");
+      }
+    });
+  }
+});
+
 test("explicit voice skill with no detected host reports unavailable while an independent Desktop MCP result still succeeds", async (t) => {
   const desired: McpRegistration = {
     name: "rocky",

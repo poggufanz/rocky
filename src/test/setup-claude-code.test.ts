@@ -1037,6 +1037,52 @@ test("private stage creation refuses a stage whose realized mode is not exactly 
   assert.deepEqual(readFileSync(setup.configPath), before);
 });
 
+// M26b (whole-branch re-review B, Minor 3): copySnapshotToStage's own
+// post-chmod readback (`cloned.read.mode === snapshot.read.mode`,
+// claude-code.ts:1252) is masked in the sibling test below by the chmodSync
+// call that immediately precedes it - on every real filesystem, chmodSync
+// either applies the mode or throws, so the readback rarely gets a chance to
+// disagree. This test isolates the verification itself: chmodSync is faked
+// to return normally without actually changing the mode (a silent-refusal
+// filesystem), leaving only the readback check to catch the mismatch.
+test("stage clone verification catches a mode chmod that silently did not apply (M26b)", async (t) => {
+  const setup = fixture(t);
+  writeFileSync(setup.configPath, '{"mcpServers":{}}\n', { mode: 0o666 });
+  chmodSync(setup.configPath, 0o666);
+  const previousUmask = process.umask(0o022);
+  const originalChmod = fs.chmodSync;
+  let armed = false;
+  fs.chmodSync = ((path: fs.PathLike, mode: fs.Mode) => {
+    if (mode === 0o666 && String(path).startsWith(setup.stageRoot)) {
+      armed = true;
+      return;
+    }
+    originalChmod(path, mode);
+  }) as typeof fs.chmodSync;
+  syncBuiltinESMExports();
+
+  let outcome;
+  try {
+    outcome = await createClaudeCodeAdapter(adapterDependencies(
+      setup,
+      new FakeClaudeRunner((call) => transformStage(call)),
+    )).configure(registration, false);
+  } finally {
+    fs.chmodSync = originalChmod;
+    syncBuiltinESMExports();
+    process.umask(previousUmask);
+  }
+
+  assert.equal(armed, true, "test setup: the stage clone's own mode chmod must have been intercepted");
+  assert.equal(outcome.status, "failed");
+  // Must fail specifically because copySnapshotToStage itself rejected the
+  // mismatched mode - not because some later, unrelated audit step happens
+  // to also notice something is wrong. A later generic failure would let a
+  // mutant that guts this exact conjunct hide behind a different detail
+  // message while still reporting "failed" overall.
+  assert.match(outcome.detail ?? "", /Unable to create exact private Claude Code stage/);
+});
+
 test("stage clone forces the exact original mode even when the process umask would otherwise strip it", async (t) => {
   const setup = fixture(t);
   writeFileSync(setup.configPath, '{"mcpServers":{}}\n', { mode: 0o666 });
@@ -1302,6 +1348,211 @@ test("real transaction rejects a same-byte inode installed after prepared public
   assert.equal(lstatSync(setup.configPath).ino, winnerInode);
   assert.deepEqual(readFileSync(setup.configPath), winnerBytes);
   assert.equal(configured.status, "failed");
+});
+
+// M21 (whole-branch re-review B, "Important 1"): round 2 declared the closing
+// conjunct `sameIdentity(displacedDescriptor, displacedPath)` (both call
+// sites: `authoritativeRecoveryPath` and `finalAuthority`) an equivalent
+// mutant, reasoning that `rereadHeldExactFile`'s own nlink check already
+// rejects any path substitution. That reasoning only holds for a PLAIN
+// rename-over, which drops the held inode's link count to 0. The
+// re-reviewer proved it does not generalise: hard-link the displaced file
+// elsewhere first (nlink 1->2), then rename a same-bytes decoy over its own
+// path (nlink 2->1, back to the original expected count) - every sibling
+// check `rereadHeldExactFile` performs (bytes, mode, size, nlink, and even
+// its own dev/ino/ctime/mtime `sameIdentity` conjunct) can pass, and only
+// the dropped conjunct - which compares the held descriptor's identity
+// against a FRESH lstat of the path - catches that the path no longer holds
+// the user's original bytes.
+//
+// A real filesystem race reproducing this is flaky in practice: whether a
+// rename-driven unlink visibly bumps ctime within the same test run depends
+// on whether it lands in the same timestamp tick as the preceding link, which
+// is not deterministic (verified empirically: ~20% of otherwise-identical
+// runs land on a different tick and get masked by ctime instead of proving
+// anything about this conjunct). This test gets the exact same distinguishing
+// input deterministically by faking only the ONE lstatSync call on the
+// displaced path that the closing sweep itself makes, after every earlier
+// genuine observation (every guard poll, the held descriptor's own open, its
+// own fd-based reread) has already happened - every one of those stays real.
+// The faked observation matches nlink/mode/size/mtime/ctime exactly and
+// differs only in (dev, ino), so it is indistinguishable from a genuine
+// same-bytes decoy at the syscall level.
+//
+// The target lstatSync call is identified by a plain sequential count of
+// every lstatSync(displacedPath) call across the whole configure(), verified
+// stable and identical (7 calls, closing sweep last) on both Node 18 and
+// Node 22 - deliberately NOT anchored on fs.openSync, because Node 18's
+// readFileSync/writeFileSync route internally through the public,
+// patchable fs.openSync while Node 22's do not, which silently changes an
+// openSync-based anchor's timing across Node versions (verified empirically;
+// see round-4 report for the cross-version trace that caught this).
+function finalAuthorityTransaction(
+  setup: ReturnType<typeof fixture>,
+  originalMode: number,
+  transactionSuffix: string,
+  resultStatus: "written" | "changed",
+): { transactions: ClaudeFileTransactions; getDisplacedPath: () => string | undefined } {
+  let displacedPath: string | undefined;
+  const transactions: ClaudeFileTransactions = {
+    inspect: () => ({ status: "clear" }),
+    recover: () => ({ status: "clear" }),
+    write: (path, bytes, prior, guard) => {
+      const mode = prior.status === "valid" ? prior.mode ?? originalMode : originalMode;
+      const transactionDir = join(
+        dirname(path),
+        `.${posix.basename(path)}.transaction-${transactionSuffix}`,
+      );
+      mkdirSync(transactionDir, { mode: 0o700 });
+      displacedPath = join(transactionDir, "displaced");
+      const preparedPath = join(transactionDir, "prepared");
+      writeFileSync(preparedPath, bytes, { mode });
+      chmodSync(preparedPath, mode);
+      renameSync(path, displacedPath);
+      chmodSync(displacedPath, mode);
+      writeFileSync(
+        join(transactionDir, "manifest.json"),
+        `${JSON.stringify({ version: 1, state: "displaced", target: path })}\n`,
+      );
+      linkSync(preparedPath, path);
+      writeFileSync(
+        join(transactionDir, "manifest.json"),
+        `${JSON.stringify({ version: 1, state: "published", target: path })}\n`,
+      );
+      // Genuine nlink === 2 witness, same as the sibling test above.
+      assert.equal(guard?.unchanged(), true, "test setup: guard must witness the nlink=2 publish");
+      rmSync(preparedPath);
+      writeFileSync(
+        join(transactionDir, "manifest.json"),
+        `${JSON.stringify({ version: 1, state: "committed", target: path })}\n`,
+      );
+      return { status: resultStatus, recoveryPath: displacedPath };
+    },
+  };
+  return { transactions, getDisplacedPath: () => displacedPath };
+}
+
+async function runWithFakedDisplacedClosingRead(
+  setup: ReturnType<typeof fixture>,
+  transactions: ClaudeFileTransactions,
+  getDisplacedPath: () => string | undefined,
+  targetCallIndex: number,
+): Promise<{ outcome: Awaited<ReturnType<ReturnType<typeof createClaudeCodeAdapter>["configure"]>>; fakedCount: number }> {
+  let lstatCount = 0;
+  let fakedCount = 0;
+  const originalLstat = fs.lstatSync;
+  Object.defineProperty(fs, "lstatSync", {
+    configurable: true,
+    writable: true,
+    value: ((lstatPath: fs.PathLike, options?: unknown) => {
+      const pathname = String(lstatPath);
+      const real = options === undefined ? originalLstat(lstatPath) : originalLstat(lstatPath, options as never);
+      const displacedPath = getDisplacedPath();
+      if (displacedPath !== undefined && pathname === displacedPath) {
+        lstatCount += 1;
+        if (lstatCount === targetCallIndex) {
+          fakedCount += 1;
+          return {
+            dev: real.dev,
+            ino: real.ino + 1,
+            nlink: real.nlink,
+            mode: real.mode,
+            size: real.size,
+            mtimeMs: real.mtimeMs,
+            ctimeMs: real.ctimeMs,
+            isFile: () => true,
+            isDirectory: () => false,
+            isSymbolicLink: () => false,
+          } as unknown as fs.Stats;
+        }
+      }
+      return real;
+    }) as typeof fs.lstatSync,
+  });
+  syncBuiltinESMExports();
+  try {
+    const outcome = await createClaudeCodeAdapter(adapterDependencies(
+      setup,
+      new FakeClaudeRunner((call) => transformStage(call)),
+      { fileTransactions: transactions },
+    )).configure(registration, false);
+    return { outcome, fakedCount };
+  } finally {
+    Object.defineProperty(fs, "lstatSync", { configurable: true, writable: true, value: originalLstat });
+    syncBuiltinESMExports();
+  }
+}
+
+test("finalAuthority closing sweep never binds a same-bytes displaced file at a foreign inode (M21)", async (t) => {
+  const setup = fixture(t, { mcpServers: {} });
+  const originalMode = statSync(setup.configPath).mode & 0o777;
+  const { transactions, getDisplacedPath } = finalAuthorityTransaction(
+    setup,
+    originalMode,
+    "baadc0de-0123456789abcdef",
+    "written",
+  );
+
+  // The 7th lstatSync(displacedPath) call across the whole configure() is
+  // finalAuthority's own standalone closing-sweep read (verified via
+  // instrumented runs on both Node 18 and Node 22 - see round-4 report).
+  // Everything before it (2 earlier guard polls' worth of exactObservedFile
+  // pairs, then openHeldExactFile's own pre-open and post-read pair) must
+  // stay genuine or the earlier checks - and the open itself - would never
+  // succeed in the first place.
+  const { outcome, fakedCount } = await runWithFakedDisplacedClosingRead(
+    setup,
+    transactions,
+    getDisplacedPath,
+    7,
+  );
+
+  // The fake must actually have fired exactly once, or this test would pass
+  // vacuously without ever presenting the distinguishing input.
+  assert.equal(fakedCount, 1, "test setup: the closing-sweep displaced lstat must be faked exactly once");
+  assert.equal(outcome.status, "failed");
+  assert.equal((outcome.detail ?? "").includes("authority changed"), true, outcome.detail);
+});
+
+// Same distinguishing input and same rationale as the finalAuthority test
+// above, for authoritativeRecoveryPath's own copy of the M21 conjunct
+// (claude-code.ts:796). authoritativeRecoveryPath is reached from
+// selectAuthoritativeRecovery only when `transactions.write` reports a
+// non-"written" status, so this variant makes the same genuine committed
+// transaction but has the fake writer report `status: "changed"` instead of
+// `status: "written"` to route into the recovery-path selector rather than
+// the success path - one fewer earlier guard poll than the finalAuthority
+// variant runs (the "exact" publication verification step never runs on this
+// path), so the closing-sweep read is the 5th lstatSync(displacedPath) call
+// here, not the 7th (verified via the same instrumented runs).
+test("authoritativeRecoveryPath never binds a same-bytes displaced file at a foreign inode after a genuine commit (M21)", async (t) => {
+  const setup = fixture(t, { mcpServers: {} });
+  const originalMode = statSync(setup.configPath).mode & 0o777;
+  const { transactions, getDisplacedPath } = finalAuthorityTransaction(
+    setup,
+    originalMode,
+    "c0ffeec0-0123456789abcdef",
+    "changed",
+  );
+
+  const { outcome, fakedCount } = await runWithFakedDisplacedClosingRead(
+    setup,
+    transactions,
+    getDisplacedPath,
+    5,
+  );
+
+  assert.equal(fakedCount, 1, "test setup: the closing-sweep displaced lstat must be faked exactly once");
+  assert.equal(outcome.status, "failed");
+  // The foreign inode must never be named as the authoritative recovery
+  // path; any reported path must be the (private, safe) stage directory
+  // instead - the same contract the cold-start sibling test above pins.
+  const displacedPath = getDisplacedPath();
+  const reportedPath = /manual recovery: (.+)$/.exec(outcome.detail ?? "")?.[1];
+  assert.notEqual(reportedPath, displacedPath);
+  if (reportedPath !== undefined) {
+    assert.equal(lstatSync(reportedPath).isDirectory(), true, `expected the stage directory, got ${reportedPath}`);
+  }
 });
 
 test("finalAuthority closing sweep rejects a same-bytes displaced file substituted after the genuine binding", async (t) => {

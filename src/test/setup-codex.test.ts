@@ -1033,6 +1033,30 @@ test("session shutdown failure after a verified absent-add still reports configu
   assert.equal(session.closeCount, 1);
 });
 
+// Negative twin of the test above (Minor 2, whole-branch re-review B):
+// `verifiedAbsentAdd` must stay false when the CAS add itself never advanced
+// the version - a mutant that hoists the flag above that check would report
+// "configured" here too, exactly the "a failed or unverified write is
+// reported as success" bug this flag exists to prevent.
+test("unverified absent-add (no CAS version advance) followed by a dirty session close never reports configured", async () => {
+  const session = new FakeAppServerSession(
+    codexHome,
+    [
+      readResult(undefined),
+      writeResult("sha256:one"),
+    ],
+    new Error("SECRET_UNVERIFIED_ADD_SHUTDOWN"),
+  );
+  const configured = await adapterWith(
+    new VersionRunner([versionResult()]),
+    new FakeAppServerSessionFactory([session]),
+  ).configure(registration, false);
+
+  assert.notEqual(configured.status, "configured");
+  assert.equal(session.closeCount, 1);
+  assert.doesNotMatch(configured.detail ?? "", /SECRET_UNVERIFIED_ADD_SHUTDOWN/);
+});
+
 test("successful writes require exact absolute response paths and a nonempty advanced bound version", async (t) => {
   const malformedPath = writeResult();
   malformedPath.filePath = `${codexHome}/../.codex/config.toml`;

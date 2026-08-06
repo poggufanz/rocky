@@ -269,9 +269,14 @@ function failedHostOperation(client: SetupClientId, detailMessage = "Host operat
 interface ConsentOutcome {
   results?: SetupResult[];
   inspectionFailures: ReadonlyMap<SetupClientAdapter, SetupResult>;
-  // True only when a prompt was actually shown and answered no. "No adapter
-  // needed a prompt" (everything blocked/unreadable) is a different state and
-  // must not be conflated with a real decline - see setup()'s use of this flag.
+  // True only when a prompt was actually shown and answered no. "Nothing
+  // needed a prompt" (every MCP adapter blocked/unreadable AND no voice-skill
+  // host is even detected) is a different state and must not be conflated
+  // with a real decline - see setup()'s use of this flag. A detected
+  // voice-skill host is real pending work, so it forces requiresConsent below
+  // exactly like a non-blocked MCP adapter does; this is what closes the
+  // consent bypass where a detected host let voice-skill work mutate the
+  // filesystem despite every MCP adapter being blocked/unreadable.
   declined: boolean;
 }
 
@@ -299,6 +304,7 @@ async function consentResults(
   registration: McpRegistration,
   confirmation: ConfirmationPort,
   includeVoiceSkill: boolean,
+  voiceSkillHostDetected: boolean,
 ): Promise<ConsentOutcome> {
   const inspections = new Map<SetupClientAdapter, InspectionResult>();
   const inspectionFailures = new Map<SetupClientAdapter, SetupResult>();
@@ -317,8 +323,15 @@ async function consentResults(
       ? failedHostOperation(adapter.id, "Host inspection failed")
       : skippedFromInspection(adapter.id, inspection, mode, registration);
   });
+  // Consent must cover every mutation setup() is actually about to attempt,
+  // not just the MCP adapters. A detected Codex/Claude Code voice-skill host
+  // is real pending work exactly like a non-blocked MCP adapter, so it forces
+  // a prompt too - otherwise a machine with every MCP adapter blocked but a
+  // host binary on PATH would let --voice-skill mutate with no prompt ever
+  // shown (the exact consent bypass this function now closes).
   const requiresConsent = [...inspections.values()].some((inspection) => inspection.state !== "blocked"
-    && inspection.state !== "unreadable");
+    && inspection.state !== "unreadable")
+    || (includeVoiceSkill && voiceSkillHostDetected);
   if (!requiresConsent) return { results: orderedResults(), inspectionFailures, declined: false };
   const prompt = mode === "configure"
     ? includeVoiceSkill
@@ -520,6 +533,13 @@ export async function setup(argv: readonly string[], deps?: SetupDependencies): 
   let results: SetupResult[] | undefined;
   let inspectionFailures: ReadonlyMap<SetupClientAdapter, SetupResult> = new Map();
   let skillWorkAuthorized = true;
+  // Detected once, up front, so the consent gate below and the dispatch
+  // further down agree on exactly the same set of eligible hosts - computing
+  // it twice independently is how this drifted out of sync with consent in
+  // the first place.
+  const detectedVoiceHosts = options.voiceSkill
+    ? detectedVoiceSkillHosts(dependencies.platform)
+    : new Set<VoiceSkillTarget["host"]>();
   if (options.mode !== "check" && !options.yes) {
     const consent = await consentResults(
       options.mode,
@@ -527,13 +547,18 @@ export async function setup(argv: readonly string[], deps?: SetupDependencies): 
       registration,
       dependencies.confirmation,
       options.voiceSkill,
+      detectedVoiceHosts.size > 0,
     );
     results = consent.results;
     inspectionFailures = consent.inspectionFailures;
     // Only a real decline withdraws voice-skill authorization. When nothing
-    // needed a prompt (every adapter blocked/unreadable), skillWorkAuthorized
-    // stays true so the zero-eligible-target check below can still run and
-    // report `voice-skill: unavailable` for an explicit --voice-skill request.
+    // needed a prompt (every MCP adapter blocked/unreadable AND no voice-skill
+    // host detected), skillWorkAuthorized stays true so the zero-eligible-
+    // target check below can still run and report `voice-skill: unavailable`
+    // for an explicit --voice-skill request that genuinely has nothing to
+    // authorize. A detected host forces requiresConsent above, so this
+    // branch can never see skillWorkAuthorized stay true for real,
+    // unauthorized voice-skill work.
     if (consent.declined) skillWorkAuthorized = false;
   }
   results ??= await invokeAdapters(
@@ -550,14 +575,17 @@ export async function setup(argv: readonly string[], deps?: SetupDependencies): 
 
   let voiceResults: VoiceSkillOperationResult[] = [];
   let voiceUnavailable = false;
+  // --check never mutates (checkVoiceSkill only reads and hashes; it writes
+  // nothing), so it deliberately stays outside the consent gate above, the
+  // same way MCP `check` never calls consentResults either. There is no
+  // filesystem risk to authorize for a read.
   if (options.voiceSkill && skillWorkAuthorized) {
     const services = dependencies.voiceSkills ?? defaultVoiceSkillServices;
-    const detected = detectedVoiceSkillHosts(dependencies.platform);
-    const targets = detected.size > 0
+    const targets = detectedVoiceHosts.size > 0
       ? services.resolveTargets(
         dependencies.env ?? process.env,
         dependencies.platform.home,
-      ).filter((target) => detected.has(target.host))
+      ).filter((target) => detectedVoiceHosts.has(target.host))
       : [];
     if (targets.length === 0) {
       voiceUnavailable = true;
