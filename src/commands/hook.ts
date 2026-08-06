@@ -5,14 +5,25 @@
  *  - hidden handlers `_hookfail` / `_hooksuccess`, spawned in the background
  *    by rocky-hook.bash (stderr discarded — they speak via /dev/tty)
  *  - `rocky hook install|uninstall|status` (Task 6)
+ *
+ * `.bashrc` is user startup state: every mutation goes through the strict
+ * byte parser in `core/hook-block.ts` and the recoverable conditional
+ * transaction engine in `setup/file-transaction.ts`. In-place writes are
+ * forbidden here.
  */
 
-import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import type { Stats } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { commandFingerprint } from "../core/fingerprint.js";
 import { renderGuardRules, rulesFileIsPristine } from "../core/guard-rules.js";
+import {
+  addHookBlockBytes,
+  classifyHookBlock,
+  removeHookBlockBytes,
+} from "../core/hook-block.js";
 import { resolveRockyPaths } from "../core/state-paths.js";
 import {
   clearPendingIfResolved,
@@ -21,6 +32,15 @@ import {
   recordHookFailure,
 } from "../core/memory.js";
 import { findByFingerprint, getFix, recentUnresolvedFailures } from "../core/memory-query.js";
+import {
+  atomicWriteBytesIfUnchanged,
+  inspectFileTransaction,
+  recoverFileTransaction,
+} from "../setup/file-transaction.js";
+import type {
+  BytesReadResult,
+  ConditionalBytesWriteResult,
+} from "../setup/file-transaction.js";
 import { ago, detail, detailTty, say, sayTty } from "../ui/rocky.js";
 
 /** A command failed in the hooked shell. Record it; speak only if memory has something to say. */
@@ -57,33 +77,17 @@ export function hookSuccess(cmd: string, cwd: string): number {
   return 0;
 }
 
-const HOOK_BEGIN = "# >>> rocky hook >>>";
-const HOOK_END = "# <<< rocky hook <<<";
-const HOOK_LINE =
-  '[ -f "${ROCKY_HOME:-$HOME/.rocky}/rocky-hook.bash" ] && . "${ROCKY_HOME:-$HOME/.rocky}/rocky-hook.bash"';
-
+/** Legacy string helpers — thin wrappers over the strict byte parser. */
 export function hasHookBlock(content: string): boolean {
-  return content.includes(HOOK_BEGIN);
+  return classifyHookBlock(Buffer.from(content, "utf8")) === "managed";
 }
 
 export function addHookBlock(content: string): string {
-  if (hasHookBlock(content)) return content;
-  const sep = content.length === 0 || content.endsWith("\n") ? "" : "\n";
-  return `${content}${sep}\n${HOOK_BEGIN}\n${HOOK_LINE}\n${HOOK_END}\n`;
+  return addHookBlockBytes(Buffer.from(content, "utf8")).toString("utf8");
 }
 
 export function removeHookBlock(content: string): string {
-  if (!hasHookBlock(content)) return content;
-  if (!content.split("\n").some((l) => l.trim() === HOOK_END)) return content; // BEGIN without END: corrupt block, touch nothing
-  const lines = content.split("\n");
-  const out: string[] = [];
-  let inside = false;
-  for (const l of lines) {
-    if (l.trim() === HOOK_BEGIN) { inside = true; continue; }
-    if (l.trim() === HOOK_END) { inside = false; continue; }
-    if (!inside) out.push(l);
-  }
-  return out.join("\n").replace(/\n{3,}$/, "\n\n");
+  return removeHookBlockBytes(Buffer.from(content, "utf8")).toString("utf8");
 }
 
 function rockyHome(): string {
@@ -96,6 +100,116 @@ function bashrcPath(): string {
 
 function assetDir(): string {
   return join(dirname(fileURLToPath(import.meta.url)), "..", "shell");
+}
+
+/** An ambiguous stop keeps a secret-free recovery path: diagnostics name paths only. */
+function reportBashrcRecoveryStop(rc: string, recoveryPath: string | undefined): number {
+  say("bashrc write stops halfway. I keep safe copy. I touch nothing more.");
+  if (recoveryPath !== undefined) detail(`recovery: ${recoveryPath}`);
+  detail(`bashrc: ${rc}`);
+  return 1;
+}
+
+/**
+ * Recover interrupted bashrc transactions before any byte is trusted. Returns
+ * undefined once inspection is clear; a manual/ambiguous recovery stops the
+ * command instead of continuing from stale assumptions.
+ */
+function settleBashrcTransactions(rc: string): number | undefined {
+  for (;;) {
+    const inspection = inspectFileTransaction(rc);
+    if (inspection.status === "clear") return undefined;
+    const recovery = recoverFileTransaction(rc);
+    if (recovery.status === "manual") {
+      return reportBashrcRecoveryStop(rc, recovery.recoveryPath ?? inspection.recoveryPath);
+    }
+    // Recovered: re-inspect from fresh state before proceeding.
+  }
+}
+
+interface BashrcSnapshot {
+  prior: BytesReadResult;
+  bytes: Buffer;
+}
+
+type BashrcPreparation =
+  | { status: "ready"; snapshot: BashrcSnapshot }
+  | { status: "stop"; exit: number };
+
+/**
+ * Settle pending transactions, refuse unsafe topology (symlink, non-regular,
+ * multi-linked), and snapshot current bytes/mode. A missing bashrc snapshots
+ * as `missing` so install still creates it.
+ */
+function prepareBashrc(rc: string): BashrcPreparation {
+  const settled = settleBashrcTransactions(rc);
+  if (settled !== undefined) return { status: "stop", exit: settled };
+
+  let metadata: Stats | undefined;
+  try {
+    metadata = lstatSync(rc);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+      say("I cannot check bashrc. I touch nothing.");
+      detail(`bashrc: ${rc}`);
+      return { status: "stop", exit: 1 };
+    }
+  }
+  if (metadata !== undefined) {
+    const refusal = metadata.isSymbolicLink()
+      ? "bashrc is symlink. I touch nothing. I write only plain file."
+      : !metadata.isFile()
+        ? "bashrc is not regular file. I touch nothing."
+        : metadata.nlink > 1
+          ? "bashrc has many names. I touch nothing. I write only file with one name."
+          : undefined;
+    if (refusal !== undefined) {
+      say(refusal);
+      detail(`bashrc: ${rc}`);
+      return { status: "stop", exit: 1 };
+    }
+  }
+  if (metadata === undefined) {
+    return { status: "ready", snapshot: { prior: { status: "missing" }, bytes: Buffer.alloc(0) } };
+  }
+  let bytes: Buffer;
+  try {
+    bytes = readFileSync(rc);
+  } catch {
+    say("bashrc does not open for me. I touch nothing.");
+    detail(`bashrc: ${rc}`);
+    return { status: "stop", exit: 1 };
+  }
+  return {
+    status: "ready",
+    snapshot: { prior: { status: "valid", bytes, mode: metadata.mode & 0o777 }, bytes },
+  };
+}
+
+/** Publish staged bytes only while bashrc still matches the snapshot. */
+function publishBashrc(rc: string, staged: Buffer, prior: BytesReadResult): number {
+  let result: ConditionalBytesWriteResult;
+  try {
+    result = atomicWriteBytesIfUnchanged(rc, staged, prior);
+  } catch {
+    say("bashrc write fails. I touch nothing. check disk space and permissions, then try again.");
+    detail(`bashrc: ${rc}`);
+    return 1;
+  }
+  if (result.status === "written") return 0;
+  if (result.status === "changed") {
+    say("bashrc changed while I worked. I touch nothing. your bytes win. run command again.");
+    detail(`bashrc: ${rc}`);
+    return 1;
+  }
+  return reportBashrcRecoveryStop(rc, result.recoveryPath);
+}
+
+/** Corrupt marker bytes are preserved byte-for-byte; repair stays manual. */
+function reportCorruptBlock(rc: string): number {
+  say("hook block in bashrc is corrupt. I touch nothing. repair markers by hand, then call me again.");
+  detail(`bashrc: ${rc}`);
+  return 1;
 }
 
 export function hookInstall(): number {
@@ -119,8 +233,18 @@ export function hookInstall(): number {
   }
 
   const rc = bashrcPath();
-  const content = existsSync(rc) ? readFileSync(rc, "utf8") : "";
-  if (!hasHookBlock(content)) writeFileSync(rc, addHookBlock(content), "utf8");
+  const preparation = prepareBashrc(rc);
+  if (preparation.status === "stop") return preparation.exit;
+  const classification = classifyHookBlock(preparation.snapshot.bytes);
+  if (classification === "corrupt") return reportCorruptBlock(rc);
+  if (classification === "absent") {
+    const published = publishBashrc(
+      rc,
+      addHookBlockBytes(preparation.snapshot.bytes),
+      preparation.snapshot.prior,
+    );
+    if (published !== 0) return published;
+  }
 
   say("ears installed. open new shell, I hear everything there.");
   detail(`hook:  ${join(home, "rocky-hook.bash")}`);
@@ -131,19 +255,41 @@ export function hookInstall(): number {
 
 export function hookUninstall(): number {
   const rc = bashrcPath();
-  if (!existsSync(rc) || !hasHookBlock(readFileSync(rc, "utf8"))) {
+  const preparation = prepareBashrc(rc);
+  if (preparation.status === "stop") return preparation.exit;
+  const classification = classifyHookBlock(preparation.snapshot.bytes);
+  if (classification === "corrupt") return reportCorruptBlock(rc);
+  if (classification === "absent") {
     say("no ears installed. nothing to remove.");
     return 0;
   }
-  writeFileSync(rc, removeHookBlock(readFileSync(rc, "utf8")), "utf8");
+  const published = publishBashrc(
+    rc,
+    removeHookBlockBytes(preparation.snapshot.bytes),
+    preparation.snapshot.prior,
+  );
+  if (published !== 0) return published;
   say(`ears removed from shell. memory stays in ${rockyHome()}. I still remember.`);
   return 0;
 }
 
 export function hookStatus(): number {
   const rc = bashrcPath();
-  const installed = existsSync(rc) && hasHookBlock(readFileSync(rc, "utf8"));
-  if (!installed) {
+  if (!existsSync(rc)) {
+    say("ears not installed. run: rocky hook install");
+    return 0;
+  }
+  let bytes: Buffer;
+  try {
+    bytes = readFileSync(rc);
+  } catch {
+    say("bashrc does not open for me. I touch nothing.");
+    detail(`bashrc: ${rc}`);
+    return 1;
+  }
+  const classification = classifyHookBlock(bytes);
+  if (classification === "corrupt") return reportCorruptBlock(rc);
+  if (classification !== "managed") {
     say("ears not installed. run: rocky hook install");
     return 0;
   }
