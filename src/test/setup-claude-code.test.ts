@@ -480,6 +480,83 @@ test("production-incomplete manifest makes every needed mutation manual without 
   assert.deepEqual(runner.calls, []);
 });
 
+test("production-default adapter with no injected policy manifest fails closed with zero host or stage activity", async (t) => {
+  await t.test("configure", async (st) => {
+    const setup = fixture(st, { mcpServers: {} });
+    const before = readFileSync(setup.configPath);
+    const runner = new FakeClaudeRunner(() => { throw new Error("must not run"); });
+    const adapter = createClaudeCodeAdapter({
+      runner,
+      executable: "/opt/claude",
+      env: { CLAUDE_CONFIG_DIR: setup.configDir, PATH: "/tools" },
+      home: join(setup.root, "home"),
+      cwd: setup.cwd,
+      platform: "linux",
+      architecture: "x64",
+      stagingRoot: setup.stageRoot,
+      // deliberately no policyManifest: exercises the shipped production default
+      // (incompleteProductionManifest), matching createProductionAdapters wiring.
+    });
+
+    const configured = await adapter.configure(registration, false);
+
+    assert.equal(configured.status, "failed");
+    assert.equal(
+      configured.detail,
+      "Claude Code policy-equivalent automation is unavailable; use manual registration",
+    );
+    assert.deepEqual(configured.manualRegistration, registration);
+    assert.deepEqual(runner.calls, []);
+    assert.deepEqual(readdirSync(setup.stageRoot), []);
+    assert.deepEqual(readFileSync(setup.configPath), before);
+  });
+
+  await t.test("remove", async (st) => {
+    const setup = fixture(st, { mcpServers: { rocky: rockyEntry() } });
+    const before = readFileSync(setup.configPath);
+    const runner = new FakeClaudeRunner(() => { throw new Error("must not run"); });
+    const adapter = createClaudeCodeAdapter({
+      runner,
+      executable: "/opt/claude",
+      env: { CLAUDE_CONFIG_DIR: setup.configDir, PATH: "/tools" },
+      home: join(setup.root, "home"),
+      cwd: setup.cwd,
+      platform: "linux",
+      architecture: "x64",
+      stagingRoot: setup.stageRoot,
+    });
+
+    const removed = await adapter.remove(registration);
+
+    assert.equal(removed.status, "failed");
+    assert.equal(
+      removed.detail,
+      "Claude Code automated removal is unavailable; remove Rocky manually from Claude Code user MCP configuration",
+    );
+    assert.equal(removed.manualRegistration, undefined);
+    assert.deepEqual(runner.calls, []);
+    assert.deepEqual(readdirSync(setup.stageRoot), []);
+    assert.deepEqual(readFileSync(setup.configPath), before);
+  });
+});
+
+test("remove refuses a foreign but parseable rocky entry and leaves exact bytes untouched", async (t) => {
+  const setup = fixture(t, { mcpServers: { rocky: rockyEntry("/foreign/node") } });
+  const before = readFileSync(setup.configPath);
+  const runner = new FakeClaudeRunner(() => { throw new Error("must not run"); });
+  const adapter = createClaudeCodeAdapter(adapterDependencies(setup, runner));
+
+  const removed = await adapter.remove(registration);
+
+  assert.deepEqual(removed, {
+    client: "claude-code",
+    status: "failed",
+    detail: "Claude Code rocky registration is not owned by Rocky",
+  });
+  assert.deepEqual(runner.calls, []);
+  assert.deepEqual(readFileSync(setup.configPath), before);
+});
+
 test("relative empty and non-NFC overrides stop needed mutation before file stage or runner activity", async (t) => {
   const cases = [
     { name: "relative", override: "relative/config" },
@@ -929,6 +1006,55 @@ test("staging root rejects linked components and ancestor rebind before any runn
   });
 });
 
+test("private stage creation refuses a stage whose realized mode is not exactly 0700", async (t) => {
+  const setup = fixture(t, { mcpServers: {} });
+  const before = readFileSync(setup.configPath);
+  const originalChmod = fs.chmodSync;
+  let armed = false;
+  fs.chmodSync = ((path: fs.PathLike, mode: fs.Mode) => {
+    if (mode === 0o700) {
+      armed = true;
+      originalChmod(path, 0o755);
+      return;
+    }
+    originalChmod(path, mode);
+  }) as typeof fs.chmodSync;
+  syncBuiltinESMExports();
+  const runner = new FakeClaudeRunner(() => { throw new Error("must not run"); });
+
+  let outcome;
+  try {
+    outcome = await createClaudeCodeAdapter(adapterDependencies(setup, runner))
+      .configure(registration, false);
+  } finally {
+    fs.chmodSync = originalChmod;
+    syncBuiltinESMExports();
+  }
+
+  assert.equal(armed, true);
+  assert.equal(outcome.status, "failed");
+  assert.deepEqual(runner.calls, []);
+  assert.deepEqual(readFileSync(setup.configPath), before);
+});
+
+test("stage clone forces the exact original mode even when the process umask would otherwise strip it", async (t) => {
+  const setup = fixture(t);
+  writeFileSync(setup.configPath, '{"mcpServers":{}}\n', { mode: 0o666 });
+  chmodSync(setup.configPath, 0o666);
+  const previousUmask = process.umask(0o022);
+  let outcome;
+  try {
+    outcome = await createClaudeCodeAdapter(adapterDependencies(
+      setup,
+      new FakeClaudeRunner((call) => transformStage(call)),
+    )).configure(registration, false);
+  } finally {
+    process.umask(previousUmask);
+  }
+
+  assert.equal(outcome.status, "configured");
+});
+
 test("stage lifecycle never uses pathname-only deletion for invocation-owned entries", async (t) => {
   const setup = fixture(t, { mcpServers: {} });
   const originalRm = fs.rmSync;
@@ -1176,6 +1302,227 @@ test("real transaction rejects a same-byte inode installed after prepared public
   assert.equal(lstatSync(setup.configPath).ino, winnerInode);
   assert.deepEqual(readFileSync(setup.configPath), winnerBytes);
   assert.equal(configured.status, "failed");
+});
+
+test("finalAuthority closing sweep rejects a same-bytes displaced file substituted after the genuine binding", async (t) => {
+  const setup = fixture(t, { mcpServers: {} });
+  const originalMode = statSync(setup.configPath).mode & 0o777;
+  const originalBytes = readFileSync(setup.configPath);
+
+  let displacedPath: string | undefined;
+  const transactions: ClaudeFileTransactions = {
+    inspect: () => ({ status: "clear" }),
+    recover: () => ({ status: "clear" }),
+    write: (path, bytes, prior, guard) => {
+      const mode = prior.status === "valid" ? prior.mode ?? originalMode : originalMode;
+      const transactionDir = join(
+        dirname(path),
+        `.${posix.basename(path)}.transaction-cafef00d-0123456789abcdef`,
+      );
+      mkdirSync(transactionDir, { mode: 0o700 });
+      displacedPath = join(transactionDir, "displaced");
+      const preparedPath = join(transactionDir, "prepared");
+      writeFileSync(preparedPath, bytes, { mode });
+      chmodSync(preparedPath, mode);
+      renameSync(path, displacedPath);
+      chmodSync(displacedPath, mode);
+      writeFileSync(
+        join(transactionDir, "manifest.json"),
+        `${JSON.stringify({ version: 1, state: "displaced", target: path })}\n`,
+      );
+      linkSync(preparedPath, path);
+      writeFileSync(
+        join(transactionDir, "manifest.json"),
+        `${JSON.stringify({ version: 1, state: "published", target: path })}\n`,
+      );
+      // Genuine nlink === 2 witness: this is the only moment `publishedIdentity`
+      // is meant to bind from (target and prepared still share the same inode).
+      assert.equal(guard?.unchanged(), true, "test setup: guard must witness the nlink=2 publish");
+      rmSync(preparedPath);
+      writeFileSync(
+        join(transactionDir, "manifest.json"),
+        `${JSON.stringify({ version: 1, state: "committed", target: path })}\n`,
+      );
+      return { status: "written", recoveryPath: displacedPath };
+    },
+  };
+
+  const foreignDisplaced = join(setup.root, "foreign-displaced.json");
+  writeFileSync(foreignDisplaced, originalBytes, { mode: originalMode });
+  chmodSync(foreignDisplaced, originalMode);
+
+  let committedManifestObservations = 0;
+  let finalGuardArmed = false;
+  let displacedObservations = 0;
+  let raced = false;
+  const originalReadFile = fs.readFileSync;
+  const originalLstat = fs.lstatSync;
+  fs.readFileSync = ((
+    filePath: fs.PathOrFileDescriptor,
+    options?: BufferEncoding | { encoding?: BufferEncoding | null; flag?: string } | null,
+  ) => {
+    const value = options === undefined
+      ? originalReadFile(filePath)
+      : originalReadFile(filePath, options as never);
+    if (typeof filePath !== "number" && posix.basename(String(filePath)) === "manifest.json") {
+      try {
+        const parsed = JSON.parse(
+          typeof value === "string" ? value : value.toString("utf8"),
+        ) as { state?: string; target?: string };
+        if (parsed.state === "committed" && parsed.target === setup.configPath) {
+          committedManifestObservations += 1;
+          if (committedManifestObservations === 2) finalGuardArmed = true;
+        }
+      } catch {
+        // Only exact committed Task 1 manifest observations arm the race.
+      }
+    }
+    return value;
+  }) as typeof fs.readFileSync;
+  Object.defineProperty(fs, "lstatSync", {
+    configurable: true,
+    writable: true,
+    value: ((lstatPath: fs.PathLike, options?: unknown) => {
+      const pathname = String(lstatPath);
+      if (finalGuardArmed && displacedPath !== undefined && pathname === displacedPath) {
+        displacedObservations += 1;
+      }
+      if (!raced
+        && finalGuardArmed
+        && displacedObservations >= 2
+        && pathname === setup.configPath) {
+        raced = true;
+        renameSync(displacedPath!, join(setup.root, "genuine-displaced.json"));
+        renameSync(foreignDisplaced, displacedPath!);
+      }
+      return options === undefined
+        ? originalLstat(lstatPath)
+        : originalLstat(lstatPath, options as never);
+    }) as typeof fs.lstatSync,
+  });
+  syncBuiltinESMExports();
+
+  let outcome;
+  try {
+    outcome = await createClaudeCodeAdapter(adapterDependencies(
+      setup,
+      new FakeClaudeRunner((call) => transformStage(call)),
+      { fileTransactions: transactions },
+    )).configure(registration, false);
+  } finally {
+    fs.readFileSync = originalReadFile;
+    Object.defineProperty(fs, "lstatSync", {
+      configurable: true,
+      writable: true,
+      value: originalLstat,
+    });
+    syncBuiltinESMExports();
+  }
+
+  assert.equal(raced, true);
+  assert.equal(outcome.status, "failed");
+  assert.equal((outcome.detail ?? "").includes(displacedPath!), false);
+});
+
+test("authoritativeRecoveryPath never binds a same-bytes displaced file at a foreign inode", async (t) => {
+  const setup = fixture(t, { mcpServers: {} });
+  const originalMode = statSync(setup.configPath).mode & 0o777;
+  const originalBytes = readFileSync(setup.configPath);
+
+  const transactions: ClaudeFileTransactions = {
+    inspect: () => ({ status: "clear" }),
+    recover: () => ({ status: "clear" }),
+    write: (path, bytes, prior, guard) => {
+      const mode = prior.status === "valid" ? prior.mode ?? originalMode : originalMode;
+      const transactionDir = join(
+        dirname(path),
+        `.${posix.basename(path)}.transaction-baadf00d-0123456789abcdef`,
+      );
+      mkdirSync(transactionDir, { mode: 0o700 });
+      const displacedPath = join(transactionDir, "displaced");
+      const preparedPath = join(transactionDir, "prepared");
+      writeFileSync(preparedPath, bytes, { mode });
+      chmodSync(preparedPath, mode);
+      renameSync(path, displacedPath);
+      chmodSync(displacedPath, mode);
+      writeFileSync(
+        join(transactionDir, "manifest.json"),
+        `${JSON.stringify({ version: 1, state: "displaced", target: path })}\n`,
+      );
+      // Genuine discovery: target missing, prepared present, state "displaced" ->
+      // binds `transactionPath` (no publication witnessed yet, none needed here).
+      assert.equal(guard?.unchanged(), true, "test setup: guard must discover the transaction");
+      // Before any descriptor is ever opened on `displaced`, replace it with a
+      // foreign file holding the exact original bytes and mode at a different
+      // inode -- no live race required, this is the cold starting state
+      // `authoritativeRecoveryPath` must open for the very first time.
+      const foreign = join(setup.root, "foreign-displaced-source.json");
+      writeFileSync(foreign, originalBytes, { mode: originalMode });
+      chmodSync(foreign, originalMode);
+      renameSync(displacedPath, join(setup.root, "genuine-displaced-aside.json"));
+      renameSync(foreign, displacedPath);
+      return { status: "changed", recoveryPath: displacedPath };
+    },
+  };
+
+  const outcome = await createClaudeCodeAdapter(adapterDependencies(
+    setup,
+    new FakeClaudeRunner((call) => transformStage(call)),
+    { fileTransactions: transactions },
+  )).configure(registration, false);
+
+  assert.equal(outcome.status, "failed");
+  // The foreign inode must never be named as the authoritative recovery path;
+  // any reported path must be the (private, safe) stage directory instead.
+  const reportedPath = /manual recovery: (.+)$/.exec(outcome.detail ?? "")?.[1];
+  if (reportedPath !== undefined) {
+    assert.equal(lstatSync(reportedPath).isDirectory(), true, `expected the stage directory, got ${reportedPath}`);
+  }
+});
+
+test("target guard refuses to bind publication identity from a cold already-committed nlink-1 observation", async (t) => {
+  const setup = fixture(t, { mcpServers: {} });
+  const originalMode = statSync(setup.configPath).mode & 0o777;
+
+  // A fake Task 1 writer that completes the publish entirely on disk
+  // (including a genuine "committed" transaction directory) without ever
+  // calling the supplied guard. This makes the adapter's own post-write
+  // `guard.unchanged()` check the first-ever observer of the transaction,
+  // arriving only after the target has already settled to nlink 1 -- the
+  // exact window `acceptObservation`'s nlink-1 first-binding refusal
+  // guards, since a genuine watched publish is only ever first observed
+  // at nlink 2 (target still hard-linked to the transaction's `prepared`).
+  const transactions: ClaudeFileTransactions = {
+    inspect: () => ({ status: "clear" }),
+    recover: () => ({ status: "clear" }),
+    write: (path, bytes, prior) => {
+      const transactionDir = join(
+        dirname(path),
+        `.${posix.basename(path)}.transaction-deadbeef-0123456789abcdef`,
+      );
+      mkdirSync(transactionDir, { mode: 0o700 });
+      const displacedPath = join(transactionDir, "displaced");
+      const mode = prior.status === "valid" ? prior.mode ?? originalMode : originalMode;
+      renameSync(path, displacedPath);
+      chmodSync(displacedPath, mode);
+      writeFileSync(path, bytes, { mode });
+      chmodSync(path, mode);
+      writeFileSync(
+        join(transactionDir, "manifest.json"),
+        `${JSON.stringify({ version: 1, state: "committed", target: path })}\n`,
+      );
+      return { status: "written", recoveryPath: displacedPath };
+    },
+  };
+
+  const configured = await createClaudeCodeAdapter(adapterDependencies(
+    setup,
+    new FakeClaudeRunner((call) => transformStage(call)),
+    { fileTransactions: transactions },
+  )).configure(registration, false);
+
+  assert.equal(configured.status, "failed");
+  assert.match(configured.detail ?? "", /could not be verified/i);
 });
 
 test("real committed publication reports only authoritative recovery after exact-state replacements", async (t) => {

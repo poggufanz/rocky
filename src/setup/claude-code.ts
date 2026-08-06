@@ -567,50 +567,39 @@ function createTargetTransactionGuard(
     const state = transactionManifestState(candidate, target, pathApi);
     if (state === undefined) return undefined;
 
-    if (original.read.status === "valid") {
-      if (original.identity === undefined
-        || exactObservedFile(
-          displacedPath,
-          original.read.bytes,
-          original.read.mode,
-          original.identity,
-        ) === undefined) return undefined;
-      const prepared = exactObservedFile(preparedPath, publishedBytes, original.read.mode);
-      if (pathMissing(target)) {
-        return prepared?.nlink === 1 && (state === "prepared" || state === "displaced")
-          ? {}
-          : undefined;
-      }
-      const targetFile = exactObservedFile(target, publishedBytes, original.read.mode);
-      if (targetFile === undefined) return undefined;
-      if (pathMissing(preparedPath)) {
-        return targetFile.nlink === 1 && (state === "published" || state === "committed")
-          ? { publication: targetFile }
-          : undefined;
-      }
-      return prepared !== undefined
-        && targetFile.dev === prepared.dev
-        && targetFile.ino === prepared.ino
-        && targetFile.nlink === 2
-        && prepared.nlink === 2
-        && (state === "displaced" || state === "published")
+    // `original.read.status` is always "valid" here: this guard is only ever
+    // constructed after `auditStage` has already required
+    // `original.file.read.status === "valid"` (see its call site above) and
+    // returned early otherwise, so a missing-original observation can never
+    // reach this function. Fail closed rather than carry untestable logic
+    // for a shape the adapter cannot produce.
+    if (original.read.status !== "valid") return undefined;
+    if (original.identity === undefined
+      || exactObservedFile(
+        displacedPath,
+        original.read.bytes,
+        original.read.mode,
+        original.identity,
+      ) === undefined) return undefined;
+    const prepared = exactObservedFile(preparedPath, publishedBytes, original.read.mode);
+    if (pathMissing(target)) {
+      return prepared?.nlink === 1 && (state === "prepared" || state === "displaced")
+        ? {}
+        : undefined;
+    }
+    const targetFile = exactObservedFile(target, publishedBytes, original.read.mode);
+    if (targetFile === undefined) return undefined;
+    if (pathMissing(preparedPath)) {
+      return targetFile.nlink === 1 && (state === "published" || state === "committed")
         ? { publication: targetFile }
         : undefined;
     }
-
-    const targetFile = exactObservedFile(target, publishedBytes, 0o600);
-    const prepared = exactObservedFile(preparedPath, publishedBytes, 0o600);
-    if (prepared === undefined && targetFile?.nlink === 1
-      && (state === "published" || state === "committed")) {
-      return { publication: targetFile };
-    }
-    return targetFile !== undefined
-      && prepared !== undefined
+    return prepared !== undefined
       && targetFile.dev === prepared.dev
       && targetFile.ino === prepared.ino
       && targetFile.nlink === 2
       && prepared.nlink === 2
-      && (state === "prepared" || state === "published")
+      && (state === "displaced" || state === "published")
       ? { publication: targetFile }
       : undefined;
   };
@@ -1595,6 +1584,15 @@ export function createClaudeCodeAdapter(
       ),
         operation === "configure" ? registration : undefined);
     }
+    // Contract: this selector deliberately does not call `audited.guard.unchanged()`.
+    // For the pathname it can actually claim (the Task 1 recovery artifact, or
+    // else the stage), the bracketing `authoritativeStagePath`/
+    // `authoritativeRecoveryPath` pathname->inode proofs are the stronger check;
+    // `audited.guard` proves stage *contents*, which this string never asserts,
+    // and it is undefined on most of the branches that report a stage. Every
+    // branch reaching here is already fail-closed regardless (both proofs
+    // wrap every I/O error into a safe default). Do not "fix" this by adding
+    // an `audited.guard.unchanged()` call.
     const selectAuthoritativeRecovery = (candidate: string | undefined): string | undefined => {
       const stageBeforeCandidate = authoritativeStagePath(stage, pathApi);
       const taskOneRecovery = targetGuard.authoritativeRecoveryPath(candidate);

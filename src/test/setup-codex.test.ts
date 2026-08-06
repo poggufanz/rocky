@@ -760,6 +760,28 @@ test("non-base provenance classes and wrong user config path are rejected", asyn
   }
 });
 
+test("a base-layer leaf missing its own origin entry is never trusted, even when every present origin is exact", async () => {
+  const entry = entryFor(registration);
+  const origins: Record<string, unknown> = {};
+  addOrigins(entry, "mcp_servers.rocky", origins, baseSource(), "sha256:one");
+  delete origins["mcp_servers.rocky.command"];
+  const response = {
+    config: { mcp_servers: { rocky: entry } },
+    origins,
+    layers: [{ name: baseSource(), version: "sha256:one", config: { mcp_servers: { rocky: entry } } }],
+  };
+  const session = new FakeAppServerSession(codexHome, [response]);
+  const adapter = adapterWith(
+    new VersionRunner([versionResult()]),
+    new FakeAppServerSessionFactory([session]),
+  );
+
+  const inspection = await adapter.inspect(registration);
+
+  assert.equal(inspection.state, "conflict");
+  assert.match(inspection.detail ?? "", /provenance/i);
+});
+
 test("missing layers, origins, or matching base-user version is unreadable", async (t) => {
   const valid = readResult(entryFor(registration));
   const cases: Array<{ name: string; mutate(value: Record<string, unknown>): void }> = [
@@ -773,6 +795,13 @@ test("missing layers, origins, or matching base-user version is unreadable", asy
           version: "sha256:system",
           config: {},
         }];
+      },
+    },
+    {
+      name: "duplicate base layer",
+      mutate(value) {
+        const layers = value.layers as unknown[];
+        value.layers = [layers[0], structuredClone(layers[0])];
       },
     },
   ];
@@ -985,6 +1014,25 @@ test("absent registration is added with expectedVersion CAS and exact post-state
   assert.equal(session.closeCount, 1);
 });
 
+test("session shutdown failure after a verified absent-add still reports configured, not capability-unavailable", async () => {
+  const session = new FakeAppServerSession(
+    codexHome,
+    [
+      readResult(undefined),
+      writeResult(),
+      readResult(entryFor(registration), baseSource(), "sha256:two"),
+    ],
+    new Error("SECRET_ABSENT_ADD_SHUTDOWN"),
+  );
+  const configured = await adapterWith(
+    new VersionRunner([versionResult()]),
+    new FakeAppServerSessionFactory([session]),
+  ).configure(registration, false);
+
+  assert.deepEqual(configured, { client: "codex", status: "configured" });
+  assert.equal(session.closeCount, 1);
+});
+
 test("successful writes require exact absolute response paths and a nonempty advanced bound version", async (t) => {
   const malformedPath = writeResult();
   malformedPath.filePath = `${codexHome}/../.codex/config.toml`;
@@ -1011,6 +1059,22 @@ test("successful writes require exact absolute response paths and a nonempty adv
       assert.deepEqual(configured.manualRegistration, registration);
     });
   }
+});
+
+test("absent-add post-state verification requires the exact desired entry bytes, not just an advanced trusted version", async () => {
+  const session = new FakeAppServerSession(codexHome, [
+    readResult(undefined),
+    writeResult(),
+    readResult(entryFor({ ...registration, command: "/opt/different-node" }), baseSource(), "sha256:two"),
+  ]);
+  const configured = await adapterWith(
+    new VersionRunner([versionResult()]),
+    new FakeAppServerSessionFactory([session]),
+  ).configure(registration, false);
+
+  assert.equal(configured.status, "failed");
+  assert.match(configured.detail ?? "", /could not be verified/i);
+  assert.deepEqual(configured.manualRegistration, registration);
 });
 
 test("concurrent appearance causes CAS conflict and leaves foreign entry untouched", async () => {

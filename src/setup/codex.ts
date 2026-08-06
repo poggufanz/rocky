@@ -573,6 +573,7 @@ export function createCodexAdapter(dependencies: CodexAdapterDependencies): Setu
       if (executable === undefined) return skipped();
       const desiredEntry = entryForRegistration(registration);
       let destructiveRecovery: RecoveryArtifact | undefined;
+      let verifiedAbsentAdd = false;
       const operation = await withSession(async (session): Promise<SetupResult> => {
         const read = await readFromSession(session);
         if (!read.ok) return manualFallback(CAPABILITY_DETAIL, registration);
@@ -605,6 +606,7 @@ export function createCodexAdapter(dependencies: CodexAdapterDependencies): Setu
             || !isDeepStrictEqual(verified.snapshot.entry, desiredEntry)) {
             return manualFallback("Codex registration update could not be verified", registration);
           }
+          verifiedAbsentAdd = true;
           return { client: "codex", status: "configured" };
         }
 
@@ -688,6 +690,7 @@ export function createCodexAdapter(dependencies: CodexAdapterDependencies): Setu
         return { client: "codex", status: "configured" };
       });
       if (!operation.ok) {
+        if (verifiedAbsentAdd) return { client: "codex", status: "configured" };
         return destructiveRecovery === undefined
           ? manualFallback(CAPABILITY_DETAIL, registration)
           : recoveryFailure(
