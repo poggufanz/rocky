@@ -17,6 +17,7 @@ import type {
   VoiceSkillTarget,
 } from "../setup/voice-skill.js";
 import type { ProcessRunner, ProcessSession } from "../setup/process.js";
+import { createCodexAdapter } from "../setup/codex.js";
 import { createPlatformServices } from "../setup/platform.js";
 import {
   createConfirmationPort,
@@ -392,6 +393,51 @@ test("configure and remove require ordinary consent with exact non-interactive r
       assert.match(output.stderr, mode === "configure" ? /rocky setup --yes/ : /rocky setup --remove --yes/);
     });
   }
+});
+
+test("ordinary Codex capability failure prints exact manual argv without mutation or consent", async () => {
+  const confirmation: ConfirmationPort = {
+    async confirm() { throw new Error("unreadable-only hosts must not ask for consent"); },
+  };
+  let versionCalls = 0;
+  let mutationSessions = 0;
+  const oldCodexRunner: ProcessRunner = {
+    async run(_command, args) {
+      versionCalls += 1;
+      assert.deepEqual(args, ["--version"]);
+      return { status: 0, stdout: "codex-cli 0.145.9\n", stderr: "" };
+    },
+    async openSession() {
+      mutationSessions += 1;
+      throw new Error("old Codex must not open app-server");
+    },
+  };
+  const codex = createCodexAdapter({
+    runner: oldCodexRunner,
+    executable: "/tools/codex",
+    env: { CODEX_HOME: "/home/ada/.codex" },
+    home: "/home/ada",
+  });
+  const blocked = new FakeAdapter("claude-code", {
+    inspect: { state: "blocked", detail: "Claude Code CLI is not installed" },
+  });
+  const output = await captureStderr(() => setup([], dependencies(
+    [codex, blocked],
+    { confirmation },
+  )));
+  const expectedArgv = [
+    "mcp", "add",
+    "--env", "ROCKY_MCP_EXPOSURE=sanitized",
+    "--env", `ROCKY_HOME=${rockyHome}`,
+    "rocky", "--", nodePath, entryPath, "mcp",
+  ];
+
+  assert.equal(output.code, 1);
+  assert.match(output.stderr, /codex: failed/);
+  assert.ok(output.stderr.includes(`codex manual argv: ${JSON.stringify(expectedArgv)}`));
+  assert.equal(versionCalls, 1);
+  assert.equal(mutationSessions, 0);
+  assert.deepEqual(blocked.calls.map(({ method }) => method), ["inspect"]);
 });
 
 test("consent inspection rejection becomes a safe failure and later hosts still configure", async () => {

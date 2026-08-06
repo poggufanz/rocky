@@ -3,6 +3,7 @@ import { spawn } from "node:child_process";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 
 export const PROCESS_CAPTURE_LIMIT_BYTES = 64 * 1024;
+export const PROCESS_TERMINATION_TIMEOUT_MS = 250;
 
 export interface ProcessResult {
   status: number | null;
@@ -15,6 +16,7 @@ export interface ProcessRunOptions {
   env?: NodeJS.ProcessEnv;
   cwd?: string;
   timeoutMs?: number;
+  terminationTimeoutMs?: number;
   input?: string;
 }
 
@@ -62,7 +64,6 @@ export function createProcessRunner(captureLimitBytes = PROCESS_CAPTURE_LIMIT_BY
         let stderrBytes = 0;
         let processError: Error | undefined;
         let spawnFailed = false;
-        const controller = options.timeoutMs === undefined ? undefined : new AbortController();
         let child: ChildProcessWithoutNullStreams;
 
         try {
@@ -70,7 +71,6 @@ export function createProcessRunner(captureLimitBytes = PROCESS_CAPTURE_LIMIT_BY
             cwd: options.cwd,
             env: options.env,
             shell: false,
-            signal: controller?.signal,
             stdio: ["pipe", "pipe", "pipe"] as const,
           }) as ChildProcessWithoutNullStreams;
         } catch (error) {
@@ -83,11 +83,37 @@ export function createProcessRunner(captureLimitBytes = PROCESS_CAPTURE_LIMIT_BY
           return;
         }
 
+        let completed = false;
+        let terminationTimer: NodeJS.Timeout | undefined;
+        let hardStopTimer: NodeJS.Timeout | undefined;
+        const terminationTimeoutMs = options.terminationTimeoutMs
+          ?? PROCESS_TERMINATION_TIMEOUT_MS;
+        const finish = (status: number | null): void => {
+          if (completed) return;
+          completed = true;
+          if (timer !== undefined) clearTimeout(timer);
+          if (terminationTimer !== undefined) clearTimeout(terminationTimer);
+          if (hardStopTimer !== undefined) clearTimeout(hardStopTimer);
+          const result: ProcessResult = {
+            status: spawnFailed ? null : status,
+            stdout: Buffer.concat(stdout).toString("utf8"),
+            stderr: Buffer.concat(stderr).toString("utf8"),
+          };
+          if (processError !== undefined) result.error = processError;
+          resolveResult(result);
+        };
         const timer = options.timeoutMs === undefined
           ? undefined
           : setTimeout(() => {
             processError = new Error(`process timeout after ${options.timeoutMs}ms`);
-            controller?.abort();
+            child.kill("SIGTERM");
+            terminationTimer = setTimeout(() => {
+              child.kill("SIGKILL");
+              hardStopTimer = setTimeout(
+                () => finish(null),
+                Math.max(1, terminationTimeoutMs),
+              );
+            }, Math.max(1, terminationTimeoutMs));
           }, Math.max(0, options.timeoutMs));
 
         child.stdout.on("data", (chunk: Buffer) => {
@@ -101,14 +127,7 @@ export function createProcessRunner(captureLimitBytes = PROCESS_CAPTURE_LIMIT_BY
           processError ??= error;
         });
         child.on("close", (status) => {
-          if (timer !== undefined) clearTimeout(timer);
-          const result: ProcessResult = {
-            status: spawnFailed ? null : status,
-            stdout: Buffer.concat(stdout).toString("utf8"),
-            stderr: Buffer.concat(stderr).toString("utf8"),
-          };
-          if (processError !== undefined) result.error = processError;
-          resolveResult(result);
+          finish(status);
         });
 
         child.stdin.on("error", (error) => {

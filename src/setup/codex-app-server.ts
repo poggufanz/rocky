@@ -1,4 +1,6 @@
 import type { ProcessRunner, ProcessSession } from "./process.js";
+import { performance } from "node:perf_hooks";
+import { isAbsolute } from "node:path";
 
 interface JsonObject {
   [key: string]: unknown;
@@ -25,12 +27,16 @@ const DEFAULT_TIMEOUTS: AppServerTimeouts = {
   requestTimeoutMs: 5_000,
   shutdownTimeoutMs: 2_000,
 };
+const MAX_IGNORED_NOTIFICATIONS = 64;
+const MAX_IGNORED_NOTIFICATION_BYTES = 64 * 1024;
 
 class AppServerProtocolError extends Error {
   constructor() {
     super("Codex app-server protocol error");
   }
 }
+
+class AppServerTimeoutError extends Error {}
 
 export class AppServerRequestError extends Error {
   constructor(
@@ -52,9 +58,28 @@ function positiveTimeout(value: number, name: string): number {
   return value;
 }
 
-function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+interface Deadline {
+  expiresAt: number;
+  label: string;
+}
+
+function createDeadline(timeoutMs: number, label: string): Deadline {
+  return { expiresAt: performance.now() + timeoutMs, label };
+}
+
+function remainingTime(deadline: Deadline): number {
+  const remaining = deadline.expiresAt - performance.now();
+  if (remaining <= 0) throw new AppServerTimeoutError(`${deadline.label} timed out`);
+  return remaining;
+}
+
+function withDeadline<T>(promise: Promise<T>, deadline: Deadline): Promise<T> {
+  const remaining = remainingTime(deadline);
   return new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error(`${label} timed out`)), timeoutMs);
+    const timer = setTimeout(
+      () => reject(new AppServerTimeoutError(`${deadline.label} timed out`)),
+      remaining,
+    );
     promise.then(
       (value) => {
         clearTimeout(timer);
@@ -66,6 +91,10 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): 
       },
     );
   });
+}
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  return withDeadline(promise, createDeadline(timeoutMs, label));
 }
 
 function parseLine(line: string): JsonObject {
@@ -81,15 +110,31 @@ function parseLine(line: string): JsonObject {
 async function readResponse(
   processSession: ProcessSession,
   id: number,
-  timeoutMs: number,
+  deadline: Deadline,
 ): Promise<unknown> {
-  const deadline = Date.now() + timeoutMs;
+  let notificationCount = 0;
+  let notificationBytes = 0;
   while (true) {
-    const remaining = Math.max(1, deadline - Date.now());
-    const line = await withTimeout(processSession.readLine(), remaining, "Codex app-server request");
+    remainingTime(deadline);
+    const line = await withDeadline(processSession.readLine(), deadline);
     if (line === undefined) throw new AppServerProtocolError();
     const message = parseLine(line);
-    if (message.id === undefined && typeof message.method === "string") continue;
+    if (message.id === undefined && typeof message.method === "string") {
+      if (Object.prototype.hasOwnProperty.call(message, "result")
+        || Object.prototype.hasOwnProperty.call(message, "error")
+        || (message.params !== undefined
+          && !isObject(message.params)
+          && !Array.isArray(message.params))) {
+        throw new AppServerProtocolError();
+      }
+      notificationCount += 1;
+      notificationBytes += Buffer.byteLength(line, "utf8");
+      if (notificationCount > MAX_IGNORED_NOTIFICATIONS
+        || notificationBytes > MAX_IGNORED_NOTIFICATION_BYTES) {
+        throw new AppServerProtocolError();
+      }
+      continue;
+    }
     if (message.id !== id) throw new AppServerProtocolError();
     if (isObject(message.error)) {
       const code = typeof message.error.code === "number" ? message.error.code : undefined;
@@ -107,34 +152,71 @@ async function requestRaw(
   id: number,
   method: string,
   params: JsonObject,
-  timeoutMs: number,
+  timeoutMsOrDeadline: number | Deadline,
 ): Promise<unknown> {
-  await withTimeout(
+  const deadline = typeof timeoutMsOrDeadline === "number"
+    ? createDeadline(timeoutMsOrDeadline, "Codex app-server request")
+    : timeoutMsOrDeadline;
+  await withDeadline(
     processSession.writeLine(JSON.stringify({ id, method, params })),
-    timeoutMs,
-    "Codex app-server request",
+    deadline,
   );
-  return readResponse(processSession, id, timeoutMs);
+  return readResponse(processSession, id, deadline);
+}
+
+function isCleanExit(result: Awaited<ReturnType<ProcessSession["wait"]>>): boolean {
+  return result.status === 0 && result.error === undefined;
+}
+
+type ShutdownWait = "clean" | "dirty" | "timeout" | "error";
+
+async function waitForShutdown(
+  processSession: ProcessSession,
+  timeoutMs: number,
+): Promise<ShutdownWait> {
+  try {
+    const result = await withTimeout(
+      processSession.wait(),
+      timeoutMs,
+      "Codex app-server shutdown",
+    );
+    return isCleanExit(result) ? "clean" : "dirty";
+  } catch (error) {
+    return error instanceof AppServerTimeoutError ? "timeout" : "error";
+  }
 }
 
 async function shutdownProcess(
   processSession: ProcessSession,
   timeoutMs: number,
 ): Promise<void> {
-  processSession.end();
+  let eofFailed = false;
   try {
-    await withTimeout(processSession.wait(), timeoutMs, "Codex app-server shutdown");
-    return;
+    processSession.end();
   } catch {
-    processSession.kill("SIGTERM");
+    eofFailed = true;
   }
-  try {
-    await withTimeout(processSession.wait(), timeoutMs, "Codex app-server shutdown");
-    return;
-  } catch {
-    processSession.kill("SIGKILL");
+
+  if (!eofFailed) {
+    const eofWait = await waitForShutdown(processSession, timeoutMs);
+    if (eofWait === "clean") return;
+    if (eofWait === "dirty") throw new Error("Codex app-server shutdown failed");
+    if (eofWait === "error") eofFailed = true;
   }
-  await withTimeout(processSession.wait(), timeoutMs, "Codex app-server shutdown");
+
+  processSession.kill("SIGTERM");
+  const termWait = await waitForShutdown(processSession, timeoutMs);
+  if (termWait === "clean") {
+    if (!eofFailed) return;
+    throw new Error("Codex app-server shutdown failed");
+  }
+  if (termWait === "dirty") throw new Error("Codex app-server shutdown failed");
+
+  processSession.kill("SIGKILL");
+  const killWait = await waitForShutdown(processSession, timeoutMs);
+  if (killWait !== "clean" || eofFailed) {
+    throw new Error("Codex app-server shutdown failed");
+  }
 }
 
 export function isConfigVersionConflict(error: unknown): boolean {
@@ -171,15 +253,28 @@ export function createAppServerSessionFactory(
       if (runner.openSession === undefined) {
         throw new Error("Codex app-server sessions are unavailable");
       }
-      const processSession = await withTimeout(
-        runner.openSession(
-          executable,
-          ["app-server", "--listen", "stdio://"],
-          { env: { CODEX_HOME: codexHome } },
-        ),
+      const startupDeadline = createDeadline(
         timeouts.startupTimeoutMs,
         "Codex app-server startup",
       );
+      const acquisition = runner.openSession(
+        executable,
+        ["app-server", "--listen", "stdio://"],
+        { env: { CODEX_HOME: codexHome } },
+      );
+      let processSession: ProcessSession;
+      try {
+        processSession = await withDeadline(acquisition, startupDeadline);
+      } catch (error) {
+        void acquisition.then(async (lateSession) => {
+          try {
+            await shutdownProcess(lateSession, timeouts.shutdownTimeoutMs);
+          } catch {
+            // Late acquisition remains failed; cleanup already escalated.
+          }
+        }, () => {});
+        throw error;
+      }
 
       try {
         const initialized = await requestRaw(
@@ -190,17 +285,18 @@ export function createAppServerSessionFactory(
             clientInfo: { name: "rocky", version: "0.2.1" },
             capabilities: { experimentalApi: true },
           },
-          timeouts.startupTimeoutMs,
+          startupDeadline,
         );
         if (!isObject(initialized)
           || typeof initialized.codexHome !== "string"
+          || !isAbsolute(initialized.codexHome)
+          || initialized.codexHome !== codexHome
           || typeof initialized.userAgent !== "string") {
           throw new AppServerProtocolError();
         }
-        await withTimeout(
+        await withDeadline(
           processSession.writeLine(JSON.stringify({ method: "initialized" })),
-          timeouts.startupTimeoutMs,
-          "Codex app-server startup",
+          startupDeadline,
         );
 
         let nextId = 2;

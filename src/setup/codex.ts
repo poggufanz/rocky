@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import {
   closeSync,
   constants,
@@ -7,11 +7,12 @@ import {
   lstatSync,
   mkdirSync,
   openSync,
+  readFileSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, isAbsolute, join, normalize, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import type {
   InspectionResult,
@@ -35,6 +36,15 @@ const CAPABILITY_DETAIL = "Codex app-server provenance and CAS capability is una
 const CODEX_VERSION_TIMEOUT_MS = 5_000;
 const MINIMUM_CODEX_VERSION = [0, 146, 1] as const;
 const ROCKY_KEY_PATH = "mcp_servers.rocky";
+const EFFECTIVE_ONLY_DEFAULTS: Readonly<Record<string, unknown>> = {
+  cwd: null,
+  disabled_tools: null,
+  enabled: true,
+  enabled_tools: null,
+  required: false,
+  startup_timeout_sec: null,
+  tool_timeout_sec: null,
+};
 
 export interface CodexAdapterDependencies {
   runner: ProcessRunner;
@@ -51,6 +61,8 @@ interface RecoveryArtifact {
   directory: string;
   dev: number;
   ino: number;
+  length: number;
+  digest: string;
 }
 
 interface JsonObject {
@@ -122,10 +134,12 @@ function nested(value: unknown, keys: readonly string[]): unknown {
 
 function collectLeafPaths(value: unknown, path: string, output: Set<string>): void {
   if (Array.isArray(value)) {
+    if (value.length === 0) output.add(path);
     value.forEach((entry, index) => collectLeafPaths(entry, `${path}.${index}`, output));
     return;
   }
   if (isObject(value)) {
+    if (Object.keys(value).length === 0) output.add(path);
     for (const [key, entry] of Object.entries(value)) {
       collectLeafPaths(entry, `${path}.${key}`, output);
     }
@@ -134,15 +148,19 @@ function collectLeafPaths(value: unknown, path: string, output: Set<string>): vo
   output.add(path);
 }
 
-function sameResolvedPath(left: string, right: string): boolean {
-  return normalize(resolve(left)) === normalize(resolve(right));
+function isProtocolVersion(value: unknown): value is string {
+  return typeof value === "string"
+    && value.length > 0
+    && value.trim() === value
+    && !/[\u0000-\u001f\u007f]/.test(value);
 }
 
 function isBaseUserSource(value: unknown, configPath: string): boolean {
   return isObject(value)
     && value.type === "user"
     && typeof value.file === "string"
-    && sameResolvedPath(value.file, configPath)
+    && isAbsolute(value.file)
+    && value.file === configPath
     && value.profile === null;
 }
 
@@ -150,6 +168,31 @@ function originIsBaseUser(value: unknown, configPath: string, version: string): 
   return isObject(value)
     && value.version === version
     && isBaseUserSource(value.name, configPath);
+}
+
+function effectiveEntryAgreesWithBase(effectiveEntry: JsonObject, baseEntry: JsonObject): boolean {
+  for (const [key, baseValue] of Object.entries(baseEntry)) {
+    if (!Object.prototype.hasOwnProperty.call(effectiveEntry, key)
+      || !isDeepStrictEqual(effectiveEntry[key], baseValue)) return false;
+  }
+  for (const [key, effectiveValue] of Object.entries(effectiveEntry)) {
+    if (Object.prototype.hasOwnProperty.call(baseEntry, key)) continue;
+    if (!Object.prototype.hasOwnProperty.call(EFFECTIVE_ONLY_DEFAULTS, key)
+      || !isDeepStrictEqual(effectiveValue, EFFECTIVE_ONLY_DEFAULTS[key])) return false;
+  }
+  return true;
+}
+
+function effectiveDefaultPaths(effectiveEntry: JsonObject, baseEntry: JsonObject): Set<string> {
+  const defaults = new Set<string>();
+  for (const [key, effectiveValue] of Object.entries(effectiveEntry)) {
+    if (!Object.prototype.hasOwnProperty.call(baseEntry, key)
+      && Object.prototype.hasOwnProperty.call(EFFECTIVE_ONLY_DEFAULTS, key)
+      && isDeepStrictEqual(effectiveValue, EFFECTIVE_ONLY_DEFAULTS[key])) {
+      defaults.add(`${ROCKY_KEY_PATH}.${key}`);
+    }
+  }
+  return defaults;
 }
 
 function parseConfigRead(value: unknown, configPath: string): SnapshotRead {
@@ -163,41 +206,49 @@ function parseConfigRead(value: unknown, configPath: string): SnapshotRead {
     && isBaseUserSource(layer.name, configPath));
   if (matchingLayers.length !== 1) return { ok: false };
   const baseLayer = matchingLayers[0]!;
-  if (typeof baseLayer.version !== "string" || !isObject(baseLayer.config)) {
+  if (!isProtocolVersion(baseLayer.version) || !isObject(baseLayer.config)) {
     return { ok: false };
   }
+  const baseVersion = baseLayer.version;
 
   const effectiveEntry = nested(value.config, ["mcp_servers", "rocky"]);
   const baseEntry = nested(baseLayer.config, ["mcp_servers", "rocky"]);
-  if (effectiveEntry === undefined && baseEntry === undefined) {
+  const originPaths = new Set(Object.keys(origins).filter((path) => (
+    path === ROCKY_KEY_PATH || path.startsWith(`${ROCKY_KEY_PATH}.`)
+  )));
+  if (effectiveEntry === undefined && baseEntry === undefined && originPaths.size === 0) {
     return {
       ok: true,
       snapshot: {
         kind: "absent",
         configPath,
-        version: baseLayer.version,
+        version: baseVersion,
         trusted: true,
       },
     };
   }
 
-  const paths = new Set<string>();
-  if (baseEntry !== undefined) collectLeafPaths(baseEntry, ROCKY_KEY_PATH, paths);
-  for (const path of Object.keys(origins)) {
-    if (path === ROCKY_KEY_PATH || path.startsWith(`${ROCKY_KEY_PATH}.`)) paths.add(path);
-  }
+  const basePaths = new Set<string>();
+  const effectivePaths = new Set<string>();
+  if (baseEntry !== undefined) collectLeafPaths(baseEntry, ROCKY_KEY_PATH, basePaths);
+  if (effectiveEntry !== undefined) collectLeafPaths(effectiveEntry, ROCKY_KEY_PATH, effectivePaths);
+  const defaultPaths = isObject(baseEntry) && isObject(effectiveEntry)
+    ? effectiveDefaultPaths(effectiveEntry, baseEntry)
+    : new Set<string>();
+  const actualPaths = new Set([...basePaths, ...effectivePaths].filter((path) => !defaultPaths.has(path)));
+  const originsAreExact = [...originPaths].every((path) => actualPaths.has(path)
+    && originIsBaseUser(origins[path], configPath, baseVersion));
+  const everyMemberHasOrigin = [...actualPaths].every((path) => originPaths.has(path));
   const trusted = isObject(baseEntry)
     && isObject(effectiveEntry)
-    && paths.size > 0
-    && [...paths].every((path) => originIsBaseUser(
-      origins[path],
-      configPath,
-      baseLayer.version as string,
-    ));
+    && effectiveEntryAgreesWithBase(effectiveEntry, baseEntry)
+    && actualPaths.size > 0
+    && originsAreExact
+    && everyMemberHasOrigin;
   const snapshot: CodexSnapshot = {
     kind: "present",
     configPath,
-    version: baseLayer.version,
+    version: baseVersion,
     trusted,
   };
   if (isObject(baseEntry)) {
@@ -247,12 +298,15 @@ function manualFallback(reason: string, registration: McpRegistration): SetupRes
   return failed(`${reason}; use manual registration`, registration);
 }
 
-function writeSucceeded(value: unknown, expectedPath: string): boolean {
+function writeVersion(value: unknown, expectedPath: string): string | undefined {
   return isObject(value)
     && value.status === "ok"
-    && typeof value.version === "string"
+    && isProtocolVersion(value.version)
     && typeof value.filePath === "string"
-    && sameResolvedPath(value.filePath, expectedPath);
+    && isAbsolute(value.filePath)
+    && value.filePath === expectedPath
+    ? value.version
+    : undefined;
 }
 
 function syncDirectory(path: string): void {
@@ -273,6 +327,41 @@ function privateDirectory(path: string): boolean {
   return process.platform === "win32" || (lstatSync(path).mode & 0o077) === 0;
 }
 
+function recoveryDigest(bytes: NodeJS.ArrayBufferView): string {
+  return createHash("sha256").update(bytes).digest("hex");
+}
+
+function recoveryArtifactIsExact(artifact: RecoveryArtifact): boolean {
+  let descriptor: number | undefined;
+  try {
+    if (!privateDirectory(artifact.directory)) return false;
+    const noFollow = "O_NOFOLLOW" in constants ? constants.O_NOFOLLOW : 0;
+    descriptor = openSync(artifact.path, constants.O_RDONLY | noFollow);
+    const before = fstatSync(descriptor);
+    if (!before.isFile()
+      || before.nlink !== 1
+      || before.dev !== artifact.dev
+      || before.ino !== artifact.ino
+      || before.size !== artifact.length
+      || (process.platform !== "win32" && (before.mode & 0o077) !== 0)) return false;
+    const bytes = readFileSync(descriptor);
+    const after = fstatSync(descriptor);
+    return after.isFile()
+      && after.nlink === 1
+      && after.dev === artifact.dev
+      && after.ino === artifact.ino
+      && after.size === artifact.length
+      && bytes.length === artifact.length
+      && recoveryDigest(bytes) === artifact.digest;
+  } catch {
+    return false;
+  } finally {
+    if (descriptor !== undefined) {
+      try { closeSync(descriptor); } catch { /* validation remains failed closed */ }
+    }
+  }
+}
+
 function persistRecoveryArtifact(baseDirectory: string, snapshot: unknown): RecoveryArtifact {
   if (!isAbsolute(baseDirectory) || !safeBaseDirectory(baseDirectory)) {
     throw new Error("unsafe recovery base");
@@ -290,6 +379,7 @@ function persistRecoveryArtifact(baseDirectory: string, snapshot: unknown): Reco
   if (!privateDirectory(directory)) throw new Error("unsafe recovery directory");
 
   const path = join(directory, `codex-rocky-${randomBytes(16).toString("hex")}.json`);
+  const bytes = Buffer.from(`${JSON.stringify(snapshot)}\n`, "utf8");
   let descriptor: number | undefined;
   let identity: { dev: number; ino: number } | undefined;
   try {
@@ -301,21 +391,23 @@ function persistRecoveryArtifact(baseDirectory: string, snapshot: unknown): Reco
     );
     const opened = fstatSync(descriptor);
     identity = { dev: opened.dev, ino: opened.ino };
-    writeFileSync(descriptor, `${JSON.stringify(snapshot)}\n`, "utf8");
+    writeFileSync(descriptor, bytes);
     fsyncSync(descriptor);
     closeSync(descriptor);
     descriptor = undefined;
     syncDirectory(directory);
-    const stored = lstatSync(path);
-    if (!stored.isFile()
-      || stored.isSymbolicLink()
-      || stored.nlink !== 1
-      || stored.dev !== identity.dev
-      || stored.ino !== identity.ino
-      || (process.platform !== "win32" && (stored.mode & 0o077) !== 0)) {
+    const artifact: RecoveryArtifact = {
+      path,
+      directory,
+      dev: identity.dev,
+      ino: identity.ino,
+      length: bytes.length,
+      digest: recoveryDigest(bytes),
+    };
+    if (!recoveryArtifactIsExact(artifact)) {
       throw new Error("unsafe recovery artifact");
     }
-    return { path, directory, dev: stored.dev, ino: stored.ino };
+    return artifact;
   } catch {
     if (descriptor !== undefined) {
       try { closeSync(descriptor); } catch { /* preserve secret-free failure */ }
@@ -323,7 +415,18 @@ function persistRecoveryArtifact(baseDirectory: string, snapshot: unknown): Reco
     if (identity !== undefined) {
       try {
         const stored = lstatSync(path);
-        if (stored.isFile() && stored.dev === identity.dev && stored.ino === identity.ino) {
+        const artifact: RecoveryArtifact = {
+          path,
+          directory,
+          dev: identity.dev,
+          ino: identity.ino,
+          length: bytes.length,
+          digest: recoveryDigest(bytes),
+        };
+        if (stored.isFile()
+          && stored.dev === identity.dev
+          && stored.ino === identity.ino
+          && recoveryArtifactIsExact(artifact)) {
           rmSync(path);
           syncDirectory(directory);
         }
@@ -337,6 +440,7 @@ function persistRecoveryArtifact(baseDirectory: string, snapshot: unknown): Reco
 
 function removeRecoveryArtifact(artifact: RecoveryArtifact): boolean {
   try {
+    if (!recoveryArtifactIsExact(artifact)) return false;
     const stored = lstatSync(artifact.path);
     if (!stored.isFile()
       || stored.isSymbolicLink()
@@ -356,39 +460,19 @@ function recoveryFailure(
   artifact: RecoveryArtifact,
   desired: McpRegistration,
 ): SetupResult {
-  try {
-    const stored = lstatSync(artifact.path);
-    if (stored.isFile()
-      && !stored.isSymbolicLink()
-      && stored.nlink === 1
-      && stored.dev === artifact.dev
-      && stored.ino === artifact.ino
-      && (process.platform === "win32" || (stored.mode & 0o077) === 0)) {
-      return failed(`${prefix}; manual recovery: ${artifact.path}`, desired);
-    }
-  } catch {
-    // Never report a recovery path that no longer exists.
+  if (recoveryArtifactIsExact(artifact)) {
+    return failed(`${prefix}; manual recovery: ${artifact.path}`, desired);
   }
   return failed(`${prefix}; recovery artifact is unavailable`, desired);
 }
 
 function removedWithRecovery(artifact: RecoveryArtifact): SetupResult {
-  try {
-    const stored = lstatSync(artifact.path);
-    if (stored.isFile()
-      && !stored.isSymbolicLink()
-      && stored.nlink === 1
-      && stored.dev === artifact.dev
-      && stored.ino === artifact.ino
-      && (process.platform === "win32" || (stored.mode & 0o077) === 0)) {
-      return {
-        client: "codex",
-        status: "removed",
-        detail: `Codex recovery artifact retained; manual recovery: ${artifact.path}`,
-      };
-    }
-  } catch {
-    // A successful destructive removal requires a live recovery authority.
+  if (recoveryArtifactIsExact(artifact)) {
+    return {
+      client: "codex",
+      status: "removed",
+      detail: `Codex recovery artifact retained; manual recovery: ${artifact.path}`,
+    };
   }
   return failed("Codex registration was removed but recovery artifact is unavailable");
 }
@@ -421,7 +505,9 @@ export function createCodexAdapter(dependencies: CodexAdapterDependencies): Setu
     let outcome: SessionOperation<T> = { ok: false };
     try {
       session = await sessionFactory.open(executable, codexHome);
-      if (!sameResolvedPath(session.codexHome, codexHome)) throw new Error("unexpected Codex home");
+      if (!isAbsolute(session.codexHome) || session.codexHome !== codexHome) {
+        throw new Error("unexpected Codex home");
+      }
       outcome = { ok: true, value: await operation(session) };
     } catch {
       outcome = { ok: false };
@@ -507,12 +593,14 @@ export function createCodexAdapter(dependencies: CodexAdapterDependencies): Setu
               ? manualFallback("Codex registration changed before CAS add", registration)
               : manualFallback(CAPABILITY_DETAIL, registration);
           }
-          if (!writeSucceeded(written, configPath)) {
+          const writtenVersion = writeVersion(written, configPath);
+          if (writtenVersion === undefined || writtenVersion === snapshot.version) {
             return manualFallback("Codex CAS add failed", registration);
           }
           const verified = await readFromSession(session);
           if (!verified.ok
             || verified.snapshot.kind !== "present"
+            || verified.snapshot.version !== writtenVersion
             || !verified.snapshot.trusted
             || !isDeepStrictEqual(verified.snapshot.entry, desiredEntry)) {
             return manualFallback("Codex registration update could not be verified", registration);
@@ -555,6 +643,13 @@ export function createCodexAdapter(dependencies: CodexAdapterDependencies): Setu
             registration,
           );
         }
+        if (!recoveryArtifactIsExact(recovery)) {
+          return recoveryFailure(
+            "Codex recovery artifact changed before replacement; no changes made",
+            recovery,
+            registration,
+          );
+        }
 
         let written: unknown;
         try {
@@ -574,12 +669,14 @@ export function createCodexAdapter(dependencies: CodexAdapterDependencies): Setu
               : "Codex CAS replacement failed";
           return recoveryFailure(prefix, recovery, registration);
         }
-        if (!writeSucceeded(written, configPath)) {
+        const writtenVersion = writeVersion(written, configPath);
+        if (writtenVersion === undefined || writtenVersion === snapshot.version) {
           return recoveryFailure("Codex CAS replacement failed", recovery, registration);
         }
         const verified = await readFromSession(session);
         if (!verified.ok
           || verified.snapshot.kind !== "present"
+          || verified.snapshot.version !== writtenVersion
           || !verified.snapshot.trusted
           || !isDeepStrictEqual(verified.snapshot.entry, desiredEntry)) {
           return recoveryFailure(
@@ -598,6 +695,14 @@ export function createCodexAdapter(dependencies: CodexAdapterDependencies): Setu
             destructiveRecovery,
             registration,
           );
+      }
+      if (destructiveRecovery !== undefined
+        && operation.value.status !== "configured"
+        && !recoveryArtifactIsExact(destructiveRecovery)) {
+        return failed(
+          "Codex recovery artifact is unavailable after app-server shutdown",
+          registration,
+        );
       }
       if (operation.value.status === "configured" && destructiveRecovery !== undefined) {
         return removeRecoveryArtifact(destructiveRecovery)
@@ -641,6 +746,13 @@ export function createCodexAdapter(dependencies: CodexAdapterDependencies): Setu
             registration,
           );
         }
+        if (!recoveryArtifactIsExact(recovery)) {
+          return recoveryFailure(
+            "Codex recovery artifact changed before removal; no changes made",
+            recovery,
+            registration,
+          );
+        }
 
         let written: unknown;
         try {
@@ -659,11 +771,14 @@ export function createCodexAdapter(dependencies: CodexAdapterDependencies): Setu
               : "Codex CAS removal failed";
           return recoveryFailure(prefix, recovery, registration);
         }
-        if (!writeSucceeded(written, configPath)) {
+        const writtenVersion = writeVersion(written, configPath);
+        if (writtenVersion === undefined || writtenVersion === snapshot.version) {
           return recoveryFailure("Codex CAS removal failed", recovery, registration);
         }
         const verified = await readFromSession(session);
-        if (!verified.ok || verified.snapshot.kind !== "absent") {
+        if (!verified.ok
+          || verified.snapshot.kind !== "absent"
+          || verified.snapshot.version !== writtenVersion) {
           return recoveryFailure(
             "Codex registration removal could not be verified",
             recovery,
@@ -672,7 +787,15 @@ export function createCodexAdapter(dependencies: CodexAdapterDependencies): Setu
         }
         return removedWithRecovery(recovery);
       });
-      if (operation.ok) return operation.value;
+      if (operation.ok) {
+        if (destructiveRecovery !== undefined
+          && !recoveryArtifactIsExact(destructiveRecovery)) {
+          return failed(
+            "Codex registration recovery artifact is unavailable after app-server shutdown",
+          );
+        }
+        return operation.value;
+      }
       return destructiveRecovery === undefined
         ? manualFallback(CAPABILITY_DETAIL, registration)
         : recoveryFailure(
@@ -689,6 +812,8 @@ export function createCodexAdapter(dependencies: CodexAdapterDependencies): Setu
       const { snapshot } = read;
       if (snapshot.kind === "absent") return { client: "codex", status: "not-configured" };
       if (snapshot.trusted
+        && snapshot.entry !== undefined
+        && entryHasOnlyRegistrationFields(snapshot.entry)
         && snapshot.registration !== undefined
         && isOwnedRockyRegistration(snapshot.registration, registration)) {
         return {

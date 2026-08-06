@@ -6,9 +6,10 @@ import {
   readFileSync,
   readdirSync,
   rmSync,
+  writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, relative } from "node:path";
 import {
   AppServerRequestError,
   createAppServerSessionFactory,
@@ -39,6 +40,7 @@ class FakeProcessSession implements ProcessSession {
       stdout: "",
       stderr: "",
     }),
+    private readonly endError?: Error,
   ) {}
 
   async writeLine(line: string): Promise<void> {
@@ -52,6 +54,7 @@ class FakeProcessSession implements ProcessSession {
 
   end(): void {
     this.endCount += 1;
+    if (this.endError !== undefined) throw this.endError;
   }
 
   kill(signal?: NodeJS.Signals | number): void {
@@ -130,6 +133,7 @@ class FakeAppServerSession implements AppServerSession {
     readonly codexHome: string,
     private readonly steps: SessionStep[],
     private readonly closeError?: Error,
+    private readonly closeHook?: () => void,
   ) {}
 
   async request(method: string, params: Record<string, unknown>): Promise<unknown> {
@@ -142,6 +146,7 @@ class FakeAppServerSession implements AppServerSession {
 
   async close(): Promise<void> {
     this.closeCount += 1;
+    this.closeHook?.();
     if (this.closeError !== undefined) throw this.closeError;
   }
 }
@@ -239,6 +244,24 @@ function readResult(
   };
 }
 
+function readProjection(
+  effectiveEntry: unknown,
+  baseEntry: unknown,
+  origins: Record<string, unknown>,
+  version = "sha256:one",
+  source: Record<string, unknown> = baseSource(),
+): Record<string, unknown> {
+  return {
+    config: { mcp_servers: effectiveEntry === undefined ? {} : { rocky: effectiveEntry } },
+    origins,
+    layers: [{
+      name: source,
+      version,
+      config: { mcp_servers: baseEntry === undefined ? {} : { rocky: baseEntry } },
+    }],
+  };
+}
+
 function writeResult(version = "sha256:two"): Record<string, unknown> {
   return {
     status: "ok",
@@ -270,6 +293,25 @@ function recoveryPath(detail: string | undefined): string {
   return match[1];
 }
 
+function corruptRecoveryInPlace(
+  desired: McpRegistration,
+  mode: "equal-length" | "truncate",
+): string {
+  const directory = join(dirname(desired.env.ROCKY_HOME!), ".rocky-setup-recovery");
+  const [name] = readdirSync(directory);
+  assert.ok(name, "recovery artifact must exist before destructive request");
+  const path = join(directory, name);
+  const inode = lstatSync(path).ino;
+  const original = readFileSync(path);
+  const corrupted = mode === "truncate"
+    ? original.subarray(0, Math.max(0, original.length - 1))
+    : Buffer.from(original);
+  if (mode === "equal-length" && corrupted.length > 0) corrupted[0] = corrupted[0]! ^ 0xff;
+  writeFileSync(path, corrupted);
+  assert.equal(lstatSync(path).ino, inode);
+  return path;
+}
+
 function adapterWith(
   runner: ProcessRunner,
   sessionFactory: AppServerSessionFactory,
@@ -299,6 +341,10 @@ const timeouts = {
   requestTimeoutMs: 25,
   shutdownTimeoutMs: 25,
 };
+
+function delay(milliseconds: number): Promise<void> {
+  return new Promise((resolveDelay) => setTimeout(resolveDelay, milliseconds));
+}
 
 test("app-server performs handshake, config JSONL requests, and clean shutdown", async () => {
   const readResult = {
@@ -450,6 +496,195 @@ test("shutdown timeout escalates from EOF to TERM and KILL", async () => {
   assert.equal(processSession.waitCount, 3);
 });
 
+test("late app-server acquisition is cleaned up after startup timeout", async () => {
+  const processSession = new FakeProcessSession([initializeResult]);
+  class LateRunner implements ProcessRunner {
+    async run(): Promise<never> { throw new Error("unexpected run"); }
+    async openSession(): Promise<ProcessSession> {
+      await delay(20);
+      return processSession;
+    }
+  }
+  const factory = createAppServerSessionFactory(new LateRunner(), {
+    ...timeouts,
+    startupTimeoutMs: 5,
+  });
+
+  await assert.rejects(factory.open("/opt/codex", "/tmp/disposable-codex"), /timed out/i);
+  await delay(30);
+
+  assert.equal(processSession.endCount, 1);
+  assert.equal(processSession.waitCount, 1);
+});
+
+test("throwing EOF still escalates through TERM and KILL", async () => {
+  const neverExit = new Promise<ProcessResult>(() => {});
+  const processSession = new FakeProcessSession(
+    [initializeResult],
+    neverExit,
+    new Error("SECRET_EOF_FAILURE"),
+  );
+  const factory = createAppServerSessionFactory(new SessionRunner(processSession), {
+    ...timeouts,
+    shutdownTimeoutMs: 5,
+  });
+  const session = await factory.open("/opt/codex", "/tmp/disposable-codex");
+
+  await assert.rejects(session.close(), /shutdown/i);
+  assert.equal(processSession.endCount, 1);
+  assert.deepEqual(processSession.kills, ["SIGTERM", "SIGKILL"]);
+});
+
+test("rejected process wait still escalates through TERM and KILL", async () => {
+  const processSession = new FakeProcessSession(
+    [initializeResult],
+    Promise.reject(new Error("SECRET_WAIT_REJECTION")),
+  );
+  const session = await createAppServerSessionFactory(
+    new SessionRunner(processSession),
+    timeouts,
+  ).open("/opt/codex", "/tmp/disposable-codex");
+
+  await assert.rejects(session.close(), (error: unknown) => {
+    assert.doesNotMatch(
+      error instanceof Error ? error.message : String(error),
+      /SECRET_WAIT_REJECTION/,
+    );
+    return true;
+  });
+  assert.deepEqual(processSession.kills, ["SIGTERM", "SIGKILL"]);
+});
+
+test("nonzero or errored app-server exit is never classified as clean", async (t) => {
+  const cases: ProcessResult[] = [
+    { status: 1, stdout: "", stderr: "SECRET_DIRTY_EXIT" },
+    { status: 0, stdout: "", stderr: "", error: new Error("SECRET_WAIT_ERROR") },
+  ];
+  for (const result of cases) {
+    await t.test(result.error === undefined ? "nonzero" : "error", async () => {
+      const processSession = new FakeProcessSession([initializeResult], Promise.resolve(result));
+      const session = await createAppServerSessionFactory(
+        new SessionRunner(processSession),
+        timeouts,
+      ).open("/opt/codex", "/tmp/disposable-codex");
+      await assert.rejects(session.close(), (error: unknown) => {
+        assert.doesNotMatch(
+          error instanceof Error ? error.message : String(error),
+          /SECRET_DIRTY_EXIT|SECRET_WAIT_ERROR/,
+        );
+        return true;
+      });
+    });
+  }
+});
+
+test("one absolute request deadline covers write and response without reset", async () => {
+  class SlowSession extends FakeProcessSession {
+    private requestWritten = false;
+    override async writeLine(line: string): Promise<void> {
+      const message = JSON.parse(line) as { id?: number };
+      if (message.id === 2) {
+        await delay(20);
+        this.requestWritten = true;
+      }
+      return super.writeLine(line);
+    }
+    override async readLine(): Promise<string | undefined> {
+      if (this.requestWritten) await delay(20);
+      return super.readLine();
+    }
+  }
+  const processSession = new SlowSession([
+    initializeResult,
+    JSON.stringify({ id: 2, result: { ok: true } }),
+  ]);
+  const session = await createAppServerSessionFactory(new SessionRunner(processSession), {
+    ...timeouts,
+    requestTimeoutMs: 30,
+  }).open("/opt/codex", "/tmp/disposable-codex");
+
+  await assert.rejects(session.request("config/read", { includeLayers: true }), /timed out/i);
+  await session.close();
+});
+
+test("one absolute startup deadline covers acquisition and initialization without reset", async () => {
+  class SlowStartupSession extends FakeProcessSession {
+    override async readLine(): Promise<string | undefined> {
+      await delay(15);
+      return super.readLine();
+    }
+  }
+  const processSession = new SlowStartupSession([initializeResult]);
+  class SlowStartupRunner implements ProcessRunner {
+    async run(): Promise<never> { throw new Error("unexpected run"); }
+    async openSession(): Promise<ProcessSession> {
+      await delay(15);
+      return processSession;
+    }
+  }
+
+  await assert.rejects(
+    createAppServerSessionFactory(new SlowStartupRunner(), {
+      ...timeouts,
+      startupTimeoutMs: 25,
+    }).open("/opt/codex", "/tmp/disposable-codex"),
+    /timed out/i,
+  );
+  assert.equal(processSession.endCount, 1);
+});
+
+test("notifications are bounded and malformed notification envelopes fail closed", async (t) => {
+  const cases = [
+    {
+      name: "count bound",
+      messages: [
+        ...Array.from({ length: 65 }, (_, index) => JSON.stringify({
+          method: "config/changed",
+          params: { index },
+        })),
+        JSON.stringify({ id: 2, result: { tooLate: true } }),
+      ],
+    },
+    {
+      name: "malformed envelope",
+      messages: [JSON.stringify({ method: "config/changed", result: { secret: "SECRET" } })],
+    },
+    {
+      name: "wrong response id",
+      messages: [JSON.stringify({ id: 99, result: { secret: "SECRET_WRONG_ID" } })],
+    },
+  ];
+  for (const entry of cases) {
+    await t.test(entry.name, async () => {
+      const processSession = new FakeProcessSession([initializeResult, ...entry.messages]);
+      const session = await createAppServerSessionFactory(
+        new SessionRunner(processSession),
+        { ...timeouts, requestTimeoutMs: 1_000 },
+      ).open("/opt/codex", "/tmp/disposable-codex");
+      await assert.rejects(session.request("config/read", { includeLayers: true }), /protocol|timed out/i);
+      await session.close();
+    });
+  }
+});
+
+test("initialized Codex home must be absolute and exactly requested", async (t) => {
+  const cases = ["relative-codex", "/tmp/disposable-codex/../disposable-codex"];
+  for (const initializedHome of cases) {
+    await t.test(initializedHome, async () => {
+      const processSession = new FakeProcessSession([JSON.stringify({
+        id: 1,
+        result: { userAgent: "codex-cli/0.146.1", codexHome: initializedHome },
+      })]);
+      await assert.rejects(
+        createAppServerSessionFactory(new SessionRunner(processSession), timeouts)
+          .open("/opt/codex", "/tmp/disposable-codex"),
+        /protocol/i,
+      );
+      assert.equal(processSession.endCount, 1);
+    });
+  }
+});
+
 test("base user provenance at resolved CODEX_HOME is accepted and drives health", async () => {
   const storedRaw: McpRegistration = {
     ...registration,
@@ -578,6 +813,147 @@ test("effective Rocky state that disagrees with base layer is never authorized",
   assert.doesNotMatch(inspection.detail ?? "", /SECRET_MALFORMED_EFFECTIVE_STATE/);
 });
 
+test("effective registration fields must agree with the base layer before any operation is authorized", async () => {
+  const base = entryFor(registration);
+  const effective = { ...base, command: "/foreign/effective", enabled: false };
+  const response = readResult(base);
+  (response.config as Record<string, unknown>).mcp_servers = { rocky: effective };
+  const sessions = [
+    new FakeAppServerSession(codexHome, [structuredClone(response)]),
+    new FakeAppServerSession(codexHome, [structuredClone(response)]),
+    new FakeAppServerSession(codexHome, [structuredClone(response)]),
+  ];
+  const adapter = adapterWith(
+    new VersionRunner([versionResult(), versionResult(), versionResult()]),
+    new FakeAppServerSessionFactory([...sessions]),
+  );
+
+  assert.notEqual((await adapter.inspect(registration)).state, "identical");
+  assert.equal((await adapter.check(registration)).status, "failed");
+  assert.equal((await adapter.remove(registration)).status, "failed");
+  assert.deepEqual(sessions.map((session) => session.requests.map(({ method }) => method)), [
+    ["config/read"],
+    ["config/read"],
+    ["config/read"],
+  ]);
+});
+
+test("effective-only unknown, empty-container, null, and tombstone state fails closed", async (t) => {
+  const base = entryFor(registration);
+  const baseResponse = readResult(base);
+  const baseOrigins = structuredClone(baseResponse.origins as Record<string, unknown>);
+  const cases: Array<{ name: string; effective: unknown; base: unknown; origins?: Record<string, unknown> }> = [
+    { name: "unknown scalar", effective: { ...base, future_setting: "foreign" }, base },
+    { name: "empty object", effective: { ...base, future_setting: {} }, base: { ...base, future_setting: {} } },
+    { name: "empty array", effective: { ...base, future_setting: [] }, base: { ...base, future_setting: [] } },
+    { name: "null", effective: { ...base, future_setting: null }, base: { ...base, future_setting: null } },
+    { name: "root tombstone", effective: null, base: null },
+    {
+      name: "foreign origin without values",
+      effective: undefined,
+      base: undefined,
+      origins: {
+        "mcp_servers.rocky.command": origin({ type: "project", dotCodexFolder: "/work/.codex" }),
+      },
+    },
+  ];
+
+  for (const entry of cases) {
+    await t.test(entry.name, async () => {
+      const session = new FakeAppServerSession(codexHome, [
+        readProjection(entry.effective, entry.base, entry.origins ?? structuredClone(baseOrigins)),
+      ]);
+      const adapter = adapterWith(
+        new VersionRunner([versionResult()]),
+        new FakeAppServerSessionFactory([session]),
+      );
+
+      const configured = await adapter.configure(registration, false);
+
+      assert.notEqual(configured.status, "configured");
+      assert.deepEqual(session.requests.map(({ method }) => method), ["config/read"]);
+    });
+  }
+});
+
+test("only explicit benign effective defaults may be absent from the raw base layer", async (t) => {
+  const base = entryFor(registration);
+  const response = readResult(base);
+  const origins = response.origins as Record<string, unknown>;
+  const cases = [
+    { name: "known defaults", effective: { ...base, enabled: true, required: false }, expected: "identical" },
+    { name: "disabled", effective: { ...base, enabled: false }, expected: "conflict" },
+    { name: "required", effective: { ...base, required: true }, expected: "conflict" },
+  ] as const;
+
+  for (const entry of cases) {
+    await t.test(entry.name, async () => {
+      const session = new FakeAppServerSession(codexHome, [
+        readProjection(entry.effective, base, structuredClone(origins)),
+      ]);
+      const inspection = await adapterWith(
+        new VersionRunner([versionResult()]),
+        new FakeAppServerSessionFactory([session]),
+      ).inspect(registration);
+      assert.equal(inspection.state, entry.expected);
+    });
+  }
+});
+
+test("check rejects owned core registrations carrying disabled, execution, policy, OAuth, or unknown metadata", async (t) => {
+  const cases: Array<{ name: string; field: string; value: unknown }> = [
+    { name: "disabled", field: "enabled", value: false },
+    { name: "cwd", field: "cwd", value: "/secret/work" },
+    { name: "startup timeout", field: "startup_timeout_sec", value: 15 },
+    { name: "tool timeout", field: "tool_timeout_sec", value: 45 },
+    { name: "approval", field: "default_tools_approval_mode", value: "prompt" },
+    { name: "tool policy", field: "disabled_tools", value: ["secret_tool"] },
+    { name: "OAuth", field: "oauth", value: { access_token: "secret-token" } },
+    { name: "unknown", field: "future_metadata", value: { secret: "future-secret" } },
+  ];
+
+  for (const entry of cases) {
+    await t.test(entry.name, async () => {
+      const stored = { ...entryFor(registration), [entry.field]: entry.value };
+      const session = new FakeAppServerSession(codexHome, [readResult(stored)]);
+      const checked = await adapterWith(
+        new VersionRunner([versionResult()]),
+        new FakeAppServerSessionFactory([session]),
+      ).check(registration);
+
+      assert.equal(checked.status, "failed");
+      assert.equal(checked.healthRegistration, undefined);
+      assert.doesNotMatch(checked.detail ?? "", /secret|future_metadata|disabled_tools/);
+    });
+  }
+});
+
+test("official config paths and versions must be absolute, exact, and nonempty", async (t) => {
+  const aliasedPath = `${codexHome}/../.codex/config.toml`;
+  const relativePath = relative(process.cwd(), configPath);
+  const responseWithLayerPath = (path: string): Record<string, unknown> => {
+    const response = readResult(entryFor(registration));
+    (response.layers as Array<Record<string, unknown>>)[0]!.name = baseSource(path);
+    return response;
+  };
+  const cases: Array<{ name: string; response: Record<string, unknown> }> = [
+    { name: "normalized alias", response: responseWithLayerPath(aliasedPath) },
+    { name: "relative source", response: responseWithLayerPath(relativePath) },
+    { name: "empty layer version", response: readResult(entryFor(registration), baseSource(), "") },
+  ];
+
+  for (const entry of cases) {
+    await t.test(entry.name, async () => {
+      const session = new FakeAppServerSession(codexHome, [entry.response]);
+      const inspection = await adapterWith(
+        new VersionRunner([versionResult()]),
+        new FakeAppServerSessionFactory([session]),
+      ).inspect(registration);
+      assert.equal(inspection.state, "unreadable");
+    });
+  }
+});
+
 test("absent registration is added with expectedVersion CAS and exact post-state verification", async () => {
   const session = new FakeAppServerSession(codexHome, [
     readResult(undefined),
@@ -607,6 +983,34 @@ test("absent registration is added with expectedVersion CAS and exact post-state
     { method: "config/read", params: { includeLayers: true } },
   ]);
   assert.equal(session.closeCount, 1);
+});
+
+test("successful writes require exact absolute response paths and a nonempty advanced bound version", async (t) => {
+  const malformedPath = writeResult();
+  malformedPath.filePath = `${codexHome}/../.codex/config.toml`;
+  const cases: Array<{ name: string; written: unknown; postVersion: string }> = [
+    { name: "aliased write path", written: malformedPath, postVersion: "sha256:two" },
+    { name: "empty write version", written: writeResult(""), postVersion: "" },
+    { name: "post-read mismatch", written: writeResult("sha256:two"), postVersion: "sha256:three" },
+    { name: "no version advance", written: writeResult("sha256:one"), postVersion: "sha256:one" },
+  ];
+
+  for (const entry of cases) {
+    await t.test(entry.name, async () => {
+      const session = new FakeAppServerSession(codexHome, [
+        readResult(undefined),
+        entry.written,
+        readResult(entryFor(registration), baseSource(), entry.postVersion),
+      ]);
+      const configured = await adapterWith(
+        new VersionRunner([versionResult()]),
+        new FakeAppServerSessionFactory([session]),
+      ).configure(registration, false);
+
+      assert.equal(configured.status, "failed");
+      assert.deepEqual(configured.manualRegistration, registration);
+    });
+  }
 });
 
 test("concurrent appearance causes CAS conflict and leaves foreign entry untouched", async () => {
@@ -745,6 +1149,54 @@ test("replacement race preserves foreign state and retains private recovery auth
   ]);
 });
 
+test("replacement conflict never reports same-inode overwritten recovery bytes as authority", async (t) => {
+  const desired = temporaryRegistration(t);
+  const prior = entryFor({ ...desired, command: "/opt/prior-node" });
+  let artifact = "";
+  const session = new FakeAppServerSession(codexHome, [
+    readResult(prior),
+    () => {
+      artifact = corruptRecoveryInPlace(desired, "equal-length");
+      throw versionConflict();
+    },
+  ]);
+
+  const configured = await adapterWith(
+    new VersionRunner([versionResult()]),
+    new FakeAppServerSessionFactory([session]),
+  ).configure(desired, true);
+
+  assert.equal(configured.status, "failed");
+  assert.match(configured.detail ?? "", /recovery artifact is unavailable/i);
+  assert.doesNotMatch(configured.detail ?? "", /manual recovery:/i);
+  assert.equal(lstatSync(artifact).isFile(), true);
+});
+
+test("replacement conflict revalidates retained recovery authority after clean session close", async (t) => {
+  const desired = temporaryRegistration(t);
+  const prior = entryFor({ ...desired, command: "/opt/prior-node" });
+  let artifact = "";
+  const session = new FakeAppServerSession(
+    codexHome,
+    [readResult(prior), versionConflict()],
+    undefined,
+    () => {
+      artifact = corruptRecoveryInPlace(desired, "equal-length");
+    },
+  );
+
+  const configured = await adapterWith(
+    new VersionRunner([versionResult()]),
+    new FakeAppServerSessionFactory([session]),
+  ).configure(desired, true);
+
+  assert.equal(configured.status, "failed");
+  assert.match(configured.detail ?? "", /recovery artifact is unavailable/i);
+  assert.doesNotMatch(configured.detail ?? "", /manual recovery:/i);
+  assert.equal(lstatSync(artifact).isFile(), true);
+  assert.equal(session.closeCount, 1);
+});
+
 test("replacement post-state mismatch is failure with retained recovery authority", async (t) => {
   const desired = temporaryRegistration(t);
   const prior = entryFor({ ...desired, command: "/opt/prior-node" });
@@ -766,6 +1218,47 @@ test("replacement post-state mismatch is failure with retained recovery authorit
   assert.deepEqual(JSON.parse(readFileSync(recoveryPath(configured.detail), "utf8")), prior);
 });
 
+test("replacement verification is bound to the exact advanced write version", async (t) => {
+  const desired = temporaryRegistration(t);
+  const prior = entryFor({ ...desired, command: "/opt/prior-node" });
+  const session = new FakeAppServerSession(codexHome, [
+    readResult(prior),
+    writeResult("sha256:two"),
+    readResult(entryFor(desired), baseSource(), "sha256:three"),
+  ]);
+
+  const configured = await adapterWith(
+    new VersionRunner([versionResult()]),
+    new FakeAppServerSessionFactory([session]),
+  ).configure(desired, true);
+
+  assert.equal(configured.status, "failed");
+  assert.deepEqual(JSON.parse(readFileSync(recoveryPath(configured.detail), "utf8")), prior);
+});
+
+test("replacement cleanup refuses to delete a same-inode truncated recovery artifact", async (t) => {
+  const desired = temporaryRegistration(t);
+  const prior = entryFor({ ...desired, command: "/opt/prior-node" });
+  let artifact = "";
+  const session = new FakeAppServerSession(codexHome, [
+    readResult(prior),
+    writeResult(),
+    () => {
+      artifact = corruptRecoveryInPlace(desired, "truncate");
+      return readResult(entryFor(desired), baseSource(), "sha256:two");
+    },
+  ]);
+
+  const configured = await adapterWith(
+    new VersionRunner([versionResult()]),
+    new FakeAppServerSessionFactory([session]),
+  ).configure(desired, true);
+
+  assert.equal(configured.status, "failed");
+  assert.match(configured.detail ?? "", /recovery artifact is unavailable/i);
+  assert.equal(lstatSync(artifact).isFile(), true);
+});
+
 test("owned removal uses CAS delete, verifies absence, and retains recovery artifact", async (t) => {
   const desired = temporaryRegistration(t);
   const storedRaw: McpRegistration = {
@@ -776,7 +1269,7 @@ test("owned removal uses CAS delete, verifies absence, and retains recovery arti
   const session = new FakeAppServerSession(codexHome, [
     readResult(prior),
     writeResult(),
-    readResult(undefined, baseSource(), "sha256:empty"),
+    readResult(undefined, baseSource(), "sha256:two"),
   ]);
   const adapter = adapterWith(
     new VersionRunner([versionResult()]),
@@ -834,6 +1327,82 @@ test("remove race leaves foreign replacement untouched and retains recovery auth
   ]);
 });
 
+test("remove conflict never reports same-inode truncated recovery bytes as authority", async (t) => {
+  const desired = temporaryRegistration(t);
+  const prior = entryFor(desired);
+  let artifact = "";
+  const session = new FakeAppServerSession(codexHome, [
+    readResult(prior),
+    () => {
+      artifact = corruptRecoveryInPlace(desired, "truncate");
+      throw versionConflict();
+    },
+  ]);
+
+  const removed = await adapterWith(
+    new VersionRunner([versionResult()]),
+    new FakeAppServerSessionFactory([session]),
+  ).remove(desired);
+
+  assert.equal(removed.status, "failed");
+  assert.match(removed.detail ?? "", /recovery artifact is unavailable/i);
+  assert.doesNotMatch(removed.detail ?? "", /manual recovery:/i);
+  assert.equal(lstatSync(artifact).isFile(), true);
+});
+
+test("successful removal fails closed when retained recovery bytes were overwritten in place", async (t) => {
+  const desired = temporaryRegistration(t);
+  const prior = entryFor(desired);
+  let artifact = "";
+  const session = new FakeAppServerSession(codexHome, [
+    readResult(prior),
+    () => {
+      artifact = corruptRecoveryInPlace(desired, "equal-length");
+      return writeResult();
+    },
+    readResult(undefined, baseSource(), "sha256:two"),
+  ]);
+
+  const removed = await adapterWith(
+    new VersionRunner([versionResult()]),
+    new FakeAppServerSessionFactory([session]),
+  ).remove(desired);
+
+  assert.equal(removed.status, "failed");
+  assert.match(removed.detail ?? "", /recovery artifact is unavailable/i);
+  assert.doesNotMatch(removed.detail ?? "", /manual recovery:/i);
+  assert.equal(lstatSync(artifact).isFile(), true);
+});
+
+test("successful removal revalidates retained recovery authority after clean session close", async (t) => {
+  const desired = temporaryRegistration(t);
+  const prior = entryFor(desired);
+  let artifact = "";
+  const session = new FakeAppServerSession(
+    codexHome,
+    [
+      readResult(prior),
+      writeResult(),
+      readResult(undefined, baseSource(), "sha256:two"),
+    ],
+    undefined,
+    () => {
+      artifact = corruptRecoveryInPlace(desired, "truncate");
+    },
+  );
+
+  const removed = await adapterWith(
+    new VersionRunner([versionResult()]),
+    new FakeAppServerSessionFactory([session]),
+  ).remove(desired);
+
+  assert.equal(removed.status, "failed");
+  assert.match(removed.detail ?? "", /recovery artifact is unavailable/i);
+  assert.doesNotMatch(removed.detail ?? "", /manual recovery:/i);
+  assert.equal(lstatSync(artifact).isFile(), true);
+  assert.equal(session.closeCount, 1);
+});
+
 test("remove refuses ownership or provenance mismatch before mutation", async (t) => {
   const foreign = entryFor({ ...registration, command: "/opt/foreign-node" });
   const cases = [
@@ -881,6 +1450,24 @@ test("remove post-state mismatch is failure with retained recovery authority", a
 
   assert.equal(removed.status, "failed");
   assert.match(removed.detail ?? "", /verif/i);
+  assert.deepEqual(JSON.parse(readFileSync(recoveryPath(removed.detail), "utf8")), prior);
+});
+
+test("removal verification is bound to the exact advanced write version", async (t) => {
+  const desired = temporaryRegistration(t);
+  const prior = entryFor(desired);
+  const session = new FakeAppServerSession(codexHome, [
+    readResult(prior),
+    writeResult("sha256:two"),
+    readResult(undefined, baseSource(), "sha256:three"),
+  ]);
+
+  const removed = await adapterWith(
+    new VersionRunner([versionResult()]),
+    new FakeAppServerSessionFactory([session]),
+  ).remove(desired);
+
+  assert.equal(removed.status, "failed");
   assert.deepEqual(JSON.parse(readFileSync(recoveryPath(removed.detail), "utf8")), prior);
 });
 
@@ -1039,6 +1626,32 @@ test("shutdown failure after destructive replacement retains and reports recover
   assert.deepEqual(JSON.parse(readFileSync(recoveryPath(configured.detail), "utf8")), prior);
 });
 
+test("dirty production app-server exit after replacement retains recovery authority", async (t) => {
+  const desired = temporaryRegistration(t);
+  const prior = entryFor({ ...desired, command: "/opt/prior-node" });
+  const initialized = JSON.stringify({
+    id: 1,
+    result: { userAgent: "codex-cli/0.146.1", codexHome },
+  });
+  const processSession = new FakeProcessSession([
+    initialized,
+    JSON.stringify({ id: 2, result: readResult(prior) }),
+    JSON.stringify({ id: 3, result: writeResult() }),
+    JSON.stringify({ id: 4, result: readResult(entryFor(desired), baseSource(), "sha256:two") }),
+  ], Promise.resolve({ status: 1, stdout: "", stderr: "SECRET_DIRTY_EXIT" }));
+  const factory = createAppServerSessionFactory(new SessionRunner(processSession), timeouts);
+
+  const configured = await adapterWith(
+    new VersionRunner([versionResult()]),
+    factory,
+  ).configure(desired, true);
+
+  assert.equal(configured.status, "failed");
+  assert.match(configured.detail ?? "", /did not shut down cleanly/i);
+  assert.doesNotMatch(configured.detail ?? "", /SECRET_DIRTY_EXIT/);
+  assert.deepEqual(JSON.parse(readFileSync(recoveryPath(configured.detail), "utf8")), prior);
+});
+
 test("shutdown failure after destructive removal still reports retained recovery authority", async (t) => {
   const desired = temporaryRegistration(t);
   const prior = entryFor(desired);
@@ -1047,7 +1660,7 @@ test("shutdown failure after destructive removal still reports retained recovery
     [
       readResult(prior),
       writeResult(),
-      readResult(undefined, baseSource(), "sha256:empty"),
+      readResult(undefined, baseSource(), "sha256:two"),
     ],
     new Error("SECRET_DESTRUCTIVE_SHUTDOWN"),
   );

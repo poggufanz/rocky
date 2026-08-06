@@ -236,12 +236,25 @@ function printResult(mode: SetupMode, result: SetupResult, desired: McpRegistrat
   })}`);
 }
 
-function skippedFromInspection(client: SetupClientId, inspection: InspectionResult): SetupResult {
+function skippedFromInspection(
+  client: SetupClientId,
+  inspection: InspectionResult,
+  mode: Exclude<SetupMode, "check">,
+  registration: McpRegistration,
+): SetupResult {
   if (inspection.state === "blocked") {
     return { client, status: "skipped", detail: inspection.detail };
   }
   if (inspection.state === "unreadable") {
-    return { client, status: "failed", detail: inspection.detail ?? "Host registration cannot be read" };
+    const result: SetupResult = {
+      client,
+      status: "failed",
+      detail: inspection.detail ?? "Host registration cannot be read",
+    };
+    if (mode === "configure" && client === "codex") {
+      result.manualRegistration = registration;
+    }
+    return result;
   }
   return { client, status: "requires-confirmation" };
 }
@@ -295,7 +308,7 @@ async function consentResults(
     const inspection = inspections.get(adapter);
     return inspection === undefined
       ? failedHostOperation(adapter.id, "Host inspection failed")
-      : skippedFromInspection(adapter.id, inspection);
+      : skippedFromInspection(adapter.id, inspection, mode, registration);
   });
   const requiresConsent = [...inspections.values()].some((inspection) => inspection.state !== "blocked"
     && inspection.state !== "unreadable");
