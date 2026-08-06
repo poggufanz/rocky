@@ -1,7 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { PACKAGE_NAME, PACKAGE_VERSION } from "../core/package-info.js";
@@ -181,6 +182,53 @@ test("README status string for zero-eligible voice-skill matches the source lite
   );
 });
 
+function isolatedCliRun(args: readonly string[]): { status: number | null; stdout: string; stderr: string } {
+  // Isolated HOME plus a PATH that resolves only `node` reproduces the default
+  // first-run state for a Linux user with no Codex CLI, no Claude Code CLI, and
+  // no Claude Desktop config - the exact scenario README's zero-eligible-host
+  // voice-skill sentence describes.
+  const root = mkdtempSync(join(tmpdir(), "rocky-doc-cli-"));
+  try {
+    const home = join(root, "home");
+    mkdirSync(home, { recursive: true });
+    const result = spawnSync(process.execPath, [join(packageRoot, "dist", "index.js"), ...args], {
+      cwd: packageRoot,
+      encoding: "utf8",
+      env: {
+        HOME: home,
+        PATH: dirname(process.execPath),
+        SHELL: "/bin/bash",
+        ROCKY_HOME: join(home, ".rocky"),
+      },
+    });
+    return { status: result.status, stdout: result.stdout, stderr: result.stderr };
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+test("compiled CLI honors the single zero-eligible-host voice-skill contract without --yes, matching README", async (t) => {
+  // This is the end-to-end proof behind the prose assertions above: the
+  // README claim holds against the real compiled CLI, not only against a
+  // string grep, for the exact flagless invocations the whole-branch review
+  // found diverging from the documented contract.
+  const cases = [
+    { name: "configure", argv: ["setup", "--voice-skill"] },
+    { name: "remove", argv: ["setup", "--remove", "--voice-skill"] },
+  ] as const;
+
+  for (const entry of cases) {
+    await t.test(entry.name, () => {
+      const result = isolatedCliRun(entry.argv);
+      assert.equal(result.status, 1, `stderr: ${result.stderr}`);
+      assert.ok(
+        result.stderr.split("\n").includes("voice-skill: unavailable"),
+        `expected the exact "voice-skill: unavailable" line, got: ${result.stderr}`,
+      );
+    });
+  }
+});
+
 test("README documents recoverable/conditional bashrc writes and corrupt-marker refusal", () => {
   assert.match(
     readme,
@@ -284,20 +332,54 @@ test("README keeps the sanitized-default, raw-opt-in, and loopback-only network 
   assert.ok(readme.includes("127.0.0.1"), "README must name the loopback address for optional AI");
 });
 
+function topLevelCommandSurface(indexSource: string): Set<string> {
+  // Scrape only the outer `switch (command)` in main() - not the nested `hook`
+  // sub-switch (install/uninstall/status are never dispatched as `rocky <word>`,
+  // only as `rocky hook <word>`) and not the internal `_hookfail`/`_hooksuccess`
+  // markers, which are dispatch targets but never advertised commands. Without
+  // this scoping, a help line that wrongly names any of those (e.g. `rocky
+  // status`) would pass vacuously because the bare word is a known `case` label
+  // somewhere in the file, just not one reachable via `rocky <word>`.
+  const outerStart = indexSource.indexOf("switch (command) {");
+  assert.ok(outerStart >= 0, "expected src/index.ts to contain the top-level command switch");
+  const nestedStart = indexSource.indexOf("switch (rest[0])", outerStart);
+  assert.ok(nestedStart >= 0, "expected src/index.ts to contain the nested hook switch");
+  const nestedBraceOpen = indexSource.indexOf("{", nestedStart);
+  assert.ok(nestedBraceOpen >= 0, "expected the nested hook switch to open a block");
+  let depth = 0;
+  let nestedEnd = -1;
+  for (let i = nestedBraceOpen; i < indexSource.length; i += 1) {
+    if (indexSource[i] === "{") depth += 1;
+    else if (indexSource[i] === "}") {
+      depth -= 1;
+      if (depth === 0) { nestedEnd = i; break; }
+    }
+  }
+  assert.ok(nestedEnd >= 0, "expected the nested hook switch block to close");
+  const withoutNestedSwitch = indexSource.slice(0, nestedStart) + indexSource.slice(nestedEnd + 1);
+
+  const commands = new Set<string>();
+  for (const match of withoutNestedSwitch.matchAll(/case\s+"([a-zA-Z_-]+)":/g)) {
+    if (match[1].startsWith("_")) continue;
+    commands.add(match[1]);
+  }
+  return commands;
+}
+
 test("CLI help does not advertise a command that does not exist", () => {
   const help = helpOutput();
   const indexSource = readFileSync(join(packageRoot, "src", "index.ts"), "utf8");
-  const knownCommands = new Set<string>();
-  for (const match of indexSource.matchAll(/case\s+"([a-zA-Z_-]+)":/g)) {
-    knownCommands.add(match[1]);
-  }
+  const knownCommands = topLevelCommandSurface(indexSource);
+  assert.ok(knownCommands.has("hook"), "sanity: top-level command scrape must still find `hook`");
+  assert.ok(!knownCommands.has("status"), "sanity: nested hook sub-switch labels must not leak into the top-level surface");
+  assert.ok(!knownCommands.has("_hookfail"), "sanity: internal dispatch markers must not leak into the top-level surface");
 
   for (const line of help.split("\n")) {
     const commandMatch = /^\s*rocky\s+([a-zA-Z-]+)\b/.exec(line);
     if (commandMatch === null) continue;
     assert.ok(
       knownCommands.has(commandMatch[1]),
-      `help advertises "rocky ${commandMatch[1]}", which has no matching case in src/index.ts main(): ${line}`,
+      `help advertises "rocky ${commandMatch[1]}", which has no matching top-level case in src/index.ts main(): ${line}`,
     );
   }
 });

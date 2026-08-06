@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import {
+  existsSync,
   mkdtempSync,
   readdirSync,
   readFileSync,
@@ -116,15 +117,28 @@ function spawnDiagnostic(result: ReturnType<typeof spawnSync>): string {
   });
 }
 
-function dryRunPack(t: test.TestContext): PackResult {
+function resolveNpmCli(): string | undefined {
+  // Under `npm run test --`, npm's lifecycle exposes its own JS entry point
+  // directly. Under bare `node scripts/test.mjs` (CLAUDE.md's documented
+  // focused-iteration command), no npm lifecycle is running, so npm_execpath
+  // is unset - fall back to the standard Node-relative layout every mainstream
+  // Node install (official installer, nvm, n, asdf) uses: npm ships bundled
+  // at <node-install-prefix>/lib/node_modules/npm/bin/npm-cli.js, one level up
+  // from the directory holding the running `node` binary itself.
+  if (typeof process.env.npm_execpath === "string" && process.env.npm_execpath.length > 0) {
+    return process.env.npm_execpath;
+  }
+  const bundled = join(dirname(process.execPath), "..", "lib", "node_modules", "npm", "bin", "npm-cli.js");
+  return existsSync(bundled) ? bundled : undefined;
+}
+
+function dryRunPack(t: test.TestContext, npmCli: string): PackResult {
   const root = mkdtempSync(join(tmpdir(), "rocky-package-metadata-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const home = join(root, "home");
   const cache = join(root, "npm-cache");
   const userConfig = join(root, "empty-npmrc");
   writeFileSync(userConfig, "", "utf8");
-  const npmCli = process.env.npm_execpath;
-  assert.ok(npmCli, "npm lifecycle must expose its JavaScript CLI entry");
   const env: NodeJS.ProcessEnv = { ...process.env };
   for (const key of Object.keys(env)) {
     if (/^npm_config_/i.test(key) || /^(?:npm_token|node_auth_token)$/i.test(key)) delete env[key];
@@ -233,7 +247,13 @@ test("production identity constants match package metadata without duplicate lit
 });
 
 test("npm pack dry-run exposes only the bounded production payload", (t) => {
-  const packed = dryRunPack(t);
+  const npmCli = resolveNpmCli();
+  if (npmCli === undefined) {
+    t.skip("no npm CLI entry point found: npm_execpath is unset (not running under an npm "
+      + "lifecycle) and no bundled npm-cli.js exists next to the running node binary");
+    return;
+  }
+  const packed = dryRunPack(t, npmCli);
   assert.equal(packed.name, "@poggufanz/rocky-cli");
   assert.equal(packed.version, "0.2.1-beta.0");
   assert.ok(packed.size < 1_000_000, `tarball is ${packed.size} bytes`);

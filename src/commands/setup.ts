@@ -269,6 +269,10 @@ function failedHostOperation(client: SetupClientId, detailMessage = "Host operat
 interface ConsentOutcome {
   results?: SetupResult[];
   inspectionFailures: ReadonlyMap<SetupClientAdapter, SetupResult>;
+  // True only when a prompt was actually shown and answered no. "No adapter
+  // needed a prompt" (everything blocked/unreadable) is a different state and
+  // must not be conflated with a real decline - see setup()'s use of this flag.
+  declined: boolean;
 }
 
 function exitCode(mode: SetupMode, results: readonly SetupResult[]): number {
@@ -315,7 +319,7 @@ async function consentResults(
   });
   const requiresConsent = [...inspections.values()].some((inspection) => inspection.state !== "blocked"
     && inspection.state !== "unreadable");
-  if (!requiresConsent) return { results: orderedResults(), inspectionFailures };
+  if (!requiresConsent) return { results: orderedResults(), inspectionFailures, declined: false };
   const prompt = mode === "configure"
     ? includeVoiceSkill
       ? "configure MCP hosts and managed voice skill now, question"
@@ -324,7 +328,7 @@ async function consentResults(
       ? "remove Rocky from MCP hosts and remove managed voice skill now, question"
       : "remove Rocky from MCP hosts now, question";
   const allowed = await confirmation.confirm(prompt);
-  if (allowed) return { inspectionFailures };
+  if (allowed) return { inspectionFailures, declined: false };
   const instruction = mode === "configure" ? "rocky setup --yes" : "rocky setup --remove --yes";
   const results = orderedResults();
   for (const result of results) {
@@ -332,7 +336,7 @@ async function consentResults(
       result.detail = `Confirmation required; rerun with ${instruction}`;
     }
   }
-  return { results, inspectionFailures };
+  return { results, inspectionFailures, declined: true };
 }
 
 async function invokeAdapters(
@@ -526,7 +530,11 @@ export async function setup(argv: readonly string[], deps?: SetupDependencies): 
     );
     results = consent.results;
     inspectionFailures = consent.inspectionFailures;
-    if (consent.results !== undefined) skillWorkAuthorized = false;
+    // Only a real decline withdraws voice-skill authorization. When nothing
+    // needed a prompt (every adapter blocked/unreadable), skillWorkAuthorized
+    // stays true so the zero-eligible-target check below can still run and
+    // report `voice-skill: unavailable` for an explicit --voice-skill request.
+    if (consent.declined) skillWorkAuthorized = false;
   }
   results ??= await invokeAdapters(
     options.mode,

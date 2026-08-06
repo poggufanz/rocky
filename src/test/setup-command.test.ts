@@ -666,65 +666,76 @@ test("declined combined consent performs no voice skill operation", async () => 
   assert.deepEqual(adapter.calls.map(({ method }) => method), ["inspect"]);
 });
 
-test("unauthorized voice consent with no detected host never claims unavailable", async (t) => {
+test("declined voice consent performs no voice operation and never claims unavailable", async (t) => {
+  // A real decline answers a question that was actually asked. Rocky never learned
+  // whether any voice-skill target would have been eligible, so it must not report
+  // "unavailable" - that would claim knowledge the decline never let it gather.
   const cases: Array<{
     name: string;
     argv: readonly string[];
     inspection: InspectionResult;
-    confirmation: ConfirmationPort;
-    expectPrompted: boolean;
     exit: number;
   }> = [
     {
       name: "declined consent, configure",
       argv: ["--voice-skill"],
       inspection: { state: "absent" },
-      confirmation: new FakeConfirmation(false),
-      expectPrompted: true,
       exit: 1,
     },
     {
       name: "declined consent, remove",
       argv: ["--remove", "--voice-skill"],
       inspection: { state: "absent" },
-      confirmation: new FakeConfirmation(false),
-      expectPrompted: true,
       exit: 1,
-    },
-    {
-      name: "missing consent, configure, all hosts blocked (no prompt)",
-      argv: ["--voice-skill"],
-      inspection: { state: "blocked", detail: "codex is not installed" },
-      confirmation: { async confirm() { throw new Error("blocked hosts must not prompt"); } },
-      expectPrompted: false,
-      exit: 1,
-    },
-    {
-      name: "missing consent, remove, all hosts blocked (no prompt)",
-      argv: ["--remove", "--voice-skill"],
-      inspection: { state: "blocked", detail: "codex is not installed" },
-      confirmation: { async confirm() { throw new Error("blocked hosts must not prompt"); } },
-      expectPrompted: false,
-      exit: 0,
     },
   ];
 
   for (const entry of cases) {
     await t.test(entry.name, async () => {
+      const confirmation = new FakeConfirmation(false);
       const adapter = new FakeAdapter("codex", { inspect: entry.inspection });
       const voiceSkills = new FakeVoiceSkillServices();
 
       const output = await captureStderr(() => setup(entry.argv, dependencies([adapter], {
-        confirmation: entry.confirmation,
+        confirmation,
         voiceSkills,
       })));
 
       assert.equal(output.code, entry.exit);
       assert.doesNotMatch(output.stderr, /voice-skill: unavailable/);
       assert.deepEqual(voiceSkills.calls, []);
-      if (entry.confirmation instanceof FakeConfirmation) {
-        assert.equal(entry.confirmation.messages.length, entry.expectPrompted ? 1 : 0);
-      }
+      assert.equal(confirmation.messages.length, 1);
+    });
+  }
+});
+
+test("missing consent because no host needed authorization still reports zero-eligible voice unavailable", async (t) => {
+  // No adapter required a prompt at all (every one is blocked/unreadable), so
+  // consent was never withheld - there was nothing to withhold. This is a
+  // different state than a decline: an explicit --voice-skill request is still
+  // authorized, and with zero eligible hosts it must report the same
+  // `voice-skill: unavailable` result an authorized `--yes` run would, in both
+  // configure and remove mode.
+  const cases: Array<{ name: string; argv: readonly string[]; exit: number }> = [
+    { name: "configure, all hosts blocked (no prompt)", argv: ["--voice-skill"], exit: 1 },
+    { name: "remove, all hosts blocked (no prompt)", argv: ["--remove", "--voice-skill"], exit: 1 },
+  ];
+
+  for (const entry of cases) {
+    await t.test(entry.name, async () => {
+      const confirmation: ConfirmationPort = { async confirm() { throw new Error("blocked hosts must not prompt"); } };
+      const adapter = new FakeAdapter("codex", { inspect: { state: "blocked", detail: "codex is not installed" } });
+      const voiceSkills = new FakeVoiceSkillServices();
+
+      const output = await captureStderr(() => setup(entry.argv, dependencies([adapter], {
+        confirmation,
+        voiceSkills,
+      })));
+
+      assert.equal(output.code, entry.exit);
+      assert.ok(output.stderr.split("\n").includes("voice-skill: unavailable"));
+      assert.deepEqual(voiceSkills.calls, []);
+      assert.deepEqual(adapter.calls.map(({ method }) => method), ["inspect"]);
     });
   }
 });

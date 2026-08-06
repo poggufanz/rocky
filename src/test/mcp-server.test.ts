@@ -254,6 +254,12 @@ test("cancel aborts the exact numeric ID without touching the matching string ID
   textual.resolve(toolResult({ id: "textual" }));
   await server.whenIdle();
   assert.deepEqual(sent.map((message) => message.id), ["1"]);
+
+  // the cancelled request released its reservation, so ID 1 is reusable
+  server.accept(modernToolCall(1, "recall", { query: "again" }));
+  await server.whenIdle();
+  assert.equal(signals.length, 3);
+  assert.deepEqual(sent.map((message) => message.id), ["1", 1]);
 });
 
 test("duplicate live ID is rejected without replacing the original controller", async () => {
