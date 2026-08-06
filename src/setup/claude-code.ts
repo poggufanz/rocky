@@ -7,6 +7,7 @@ import {
   mkdtempSync,
   openSync,
   readFileSync,
+  readSync,
   readdirSync,
   writeFileSync,
 } from "node:fs";
@@ -165,6 +166,15 @@ interface AuditedStage {
 
 interface TargetTransactionGuard extends FileMutationGuard {
   authoritativeRecoveryPath(path: string | undefined): string | undefined;
+  finalAuthority(
+    path: string | undefined,
+    interveningGuard: FileMutationGuard,
+  ): { status: "authoritative"; recoveryPath: string } | { status: "changed" };
+}
+
+interface HeldFileObservation {
+  descriptor: number;
+  identity: NodeIdentity;
 }
 
 const fileTransactions: ClaudeFileTransactions = {
@@ -412,6 +422,90 @@ function exactObservedFile(
   }
 }
 
+function readDescriptorExactly(descriptor: number, length: number): Buffer | undefined {
+  if (!Number.isSafeInteger(length) || length < 0) return undefined;
+  const bytes = Buffer.alloc(length);
+  let offset = 0;
+  try {
+    while (offset < length) {
+      const count = readSync(descriptor, bytes, offset, length - offset, offset);
+      if (count <= 0) return undefined;
+      offset += count;
+    }
+    return bytes;
+  } catch {
+    return undefined;
+  }
+}
+
+function openHeldExactFile(
+  path: string,
+  expectedBytes: Buffer,
+  expectedMode: number | undefined,
+  expectedIdentity: Pick<NodeIdentity, "dev" | "ino"> | undefined,
+  expectedLinks: number,
+): HeldFileObservation | undefined {
+  let descriptor: number | undefined;
+  let retained = false;
+  try {
+    const before = identity(lstatSync(path));
+    if (before?.kind !== "file"
+      || before.nlink !== expectedLinks
+      || before.size !== expectedBytes.length
+      || (expectedMode !== undefined && before.mode !== expectedMode)
+      || (expectedIdentity !== undefined
+        && (before.dev !== expectedIdentity.dev || before.ino !== expectedIdentity.ino))) {
+      return undefined;
+    }
+    descriptor = openSync(path, readFlags());
+    const opened = identity(fstatSync(descriptor));
+    if (!sameIdentity(before, opened)) return undefined;
+    const bytes = readDescriptorExactly(descriptor, expectedBytes.length);
+    const after = identity(fstatSync(descriptor));
+    const observedPath = identity(lstatSync(path));
+    if (bytes === undefined
+      || after === undefined
+      || observedPath === undefined
+      || !bytes.equals(expectedBytes)
+      || !sameIdentity(opened, after)
+      || !sameIdentity(after, observedPath)) return undefined;
+    retained = true;
+    return { descriptor, identity: after };
+  } catch {
+    return undefined;
+  } finally {
+    if (!retained && descriptor !== undefined) {
+      try { closeSync(descriptor); } catch { /* failed closed */ }
+    }
+  }
+}
+
+function rereadHeldExactFile(
+  held: HeldFileObservation,
+  expectedBytes: Buffer,
+  expectedMode: number | undefined,
+  expectedIdentity: Pick<NodeIdentity, "dev" | "ino"> | undefined,
+  expectedLinks: number,
+): NodeIdentity | undefined {
+  const bytes = readDescriptorExactly(held.descriptor, expectedBytes.length);
+  const observed = identity(fstatSync(held.descriptor));
+  if (bytes === undefined || observed === undefined) return undefined;
+  return bytes.equals(expectedBytes)
+    && sameIdentity(held.identity, observed)
+    && observed.nlink === expectedLinks
+    && observed.size === expectedBytes.length
+    && (expectedMode === undefined || observed.mode === expectedMode)
+    && (expectedIdentity === undefined
+      || (observed.dev === expectedIdentity.dev && observed.ino === expectedIdentity.ino))
+    ? observed
+    : undefined;
+}
+
+function closeHeldFile(held: HeldFileObservation | undefined): void {
+  if (held === undefined) return;
+  try { closeSync(held.descriptor); } catch { /* authority already failed closed */ }
+}
+
 function transactionManifestState(
   transactionDirectory: string,
   target: string,
@@ -531,46 +625,198 @@ function createTargetTransactionGuard(
       && observation.publication.ino === publishedIdentity.ino;
   };
 
-  const authoritativeRecoveryPath = (candidate: string | undefined): string | undefined => {
+  const committedManifestBytes = Buffer.from(`${JSON.stringify({
+    version: 1,
+    state: "committed",
+    target,
+  })}\n`, "utf8");
+
+  const recoveryAuthorityInputs = (
+    candidate: string | undefined,
+  ): {
+    transaction: string;
+    transactionIdentity: NodeIdentity;
+    manifest: string;
+    displaced: string;
+    originalIdentity: NodeIdentity;
+    originalBytes: Buffer;
+    originalMode: number | undefined;
+  } | undefined => {
     if (candidate === undefined
       || transactionPath === undefined
       || transactionIdentity === undefined
       || original.read.status !== "valid"
       || original.identity === undefined
       || candidate !== pathApi.join(transactionPath, "displaced")) return undefined;
+    return {
+      transaction: transactionPath,
+      transactionIdentity,
+      manifest: pathApi.join(transactionPath, "manifest.json"),
+      displaced: candidate,
+      originalIdentity: original.identity,
+      originalBytes: original.read.bytes,
+      originalMode: original.read.mode,
+    };
+  };
+
+  const authoritativeRecoveryPath = (candidate: string | undefined): string | undefined => {
+    const inputs = recoveryAuthorityInputs(candidate);
+    if (inputs === undefined) return undefined;
+    let manifest: HeldFileObservation | undefined;
+    let displaced: HeldFileObservation | undefined;
     try {
-      if (!sameDirectoryAuthority(identity(lstatSync(transactionPath)), transactionIdentity)
-        || !isDeepStrictEqual(
-          readdirSync(transactionPath).sort(),
-          ["displaced", "manifest.json"],
-        )) return undefined;
-      const manifestBytes = Buffer.from(`${JSON.stringify({
-        version: 1,
-        state: "committed",
-        target,
-      })}\n`, "utf8");
-      const manifest = exactObservedFile(
-        pathApi.join(transactionPath, "manifest.json"),
-        manifestBytes,
+      const transactionBefore = identity(lstatSync(inputs.transaction));
+      const entriesBefore = readdirSync(inputs.transaction).sort();
+      if (!sameDirectoryAuthority(transactionBefore, inputs.transactionIdentity)
+        || !isDeepStrictEqual(entriesBefore, ["displaced", "manifest.json"])) return undefined;
+      manifest = openHeldExactFile(
+        inputs.manifest,
+        committedManifestBytes,
         undefined,
+        undefined,
+        1,
       );
-      const displaced = exactObservedFile(
-        candidate,
-        original.read.bytes,
-        original.read.mode,
-        original.identity,
+      if (manifest === undefined) return undefined;
+      displaced = openHeldExactFile(
+        inputs.displaced,
+        inputs.originalBytes,
+        inputs.originalMode,
+        inputs.originalIdentity,
+        inputs.originalIdentity.nlink,
       );
-      return manifest?.nlink === 1
-        && displaced?.nlink === original.identity.nlink
-        ? candidate
+      if (displaced === undefined) return undefined;
+
+      const manifestDescriptor = rereadHeldExactFile(
+        manifest,
+        committedManifestBytes,
+        undefined,
+        manifest.identity,
+        1,
+      );
+      const displacedDescriptor = rereadHeldExactFile(
+        displaced,
+        inputs.originalBytes,
+        inputs.originalMode,
+        inputs.originalIdentity,
+        inputs.originalIdentity.nlink,
+      );
+      const manifestPath = identity(lstatSync(inputs.manifest));
+      const closingEntries = readdirSync(inputs.transaction).sort();
+      const closingTransaction = identity(lstatSync(inputs.transaction));
+      const displacedPath = identity(lstatSync(inputs.displaced));
+      return manifestDescriptor !== undefined
+        && displacedDescriptor !== undefined
+        && sameIdentity(manifestDescriptor, manifestPath)
+        && isDeepStrictEqual(closingEntries, ["displaced", "manifest.json"])
+        && sameDirectoryAuthority(closingTransaction, inputs.transactionIdentity)
+        && sameIdentity(displacedDescriptor, displacedPath)
+        ? inputs.displaced
         : undefined;
     } catch {
       return undefined;
+    } finally {
+      closeHeldFile(displaced);
+      closeHeldFile(manifest);
+    }
+  };
+
+  const finalAuthority = (
+    candidate: string | undefined,
+    interveningGuard: FileMutationGuard,
+  ): { status: "authoritative"; recoveryPath: string } | { status: "changed" } => {
+    const inputs = recoveryAuthorityInputs(candidate);
+    if (inputs === undefined || publishedIdentity === undefined) return { status: "changed" };
+    let manifest: HeldFileObservation | undefined;
+    let displaced: HeldFileObservation | undefined;
+    let publication: HeldFileObservation | undefined;
+    try {
+      const transactionBefore = identity(lstatSync(inputs.transaction));
+      const entriesBefore = readdirSync(inputs.transaction).sort();
+      if (!sameDirectoryAuthority(transactionBefore, inputs.transactionIdentity)
+        || !isDeepStrictEqual(entriesBefore, ["displaced", "manifest.json"])
+        || transactionManifestState(inputs.transaction, target, pathApi) !== "committed") {
+        return { status: "changed" };
+      }
+      manifest = openHeldExactFile(
+        inputs.manifest,
+        committedManifestBytes,
+        undefined,
+        undefined,
+        1,
+      );
+      if (manifest === undefined) return { status: "changed" };
+      displaced = openHeldExactFile(
+        inputs.displaced,
+        inputs.originalBytes,
+        inputs.originalMode,
+        inputs.originalIdentity,
+        inputs.originalIdentity.nlink,
+      );
+      if (displaced === undefined) return { status: "changed" };
+      publication = openHeldExactFile(
+        target,
+        publishedBytes,
+        inputs.originalMode,
+        publishedIdentity,
+        1,
+      );
+      if (publication === undefined) return { status: "changed" };
+
+      let guardUnchanged = false;
+      try { guardUnchanged = interveningGuard.unchanged(); } catch { /* failed closed */ }
+      const publicationDescriptor = rereadHeldExactFile(
+        publication,
+        publishedBytes,
+        inputs.originalMode,
+        publishedIdentity,
+        1,
+      );
+      const manifestDescriptor = rereadHeldExactFile(
+        manifest,
+        committedManifestBytes,
+        undefined,
+        manifest.identity,
+        1,
+      );
+      const displacedDescriptor = rereadHeldExactFile(
+        displaced,
+        inputs.originalBytes,
+        inputs.originalMode,
+        inputs.originalIdentity,
+        inputs.originalIdentity.nlink,
+      );
+
+      // Keep all descriptors live through one closing namespace sweep. Recovery
+      // is observed last, after target, manifest, topology, and transaction dir.
+      const publicationPath = identity(lstatSync(target));
+      const manifestPath = identity(lstatSync(inputs.manifest));
+      const closingEntries = readdirSync(inputs.transaction).sort();
+      const closingTransaction = identity(lstatSync(inputs.transaction));
+      const displacedPath = identity(lstatSync(inputs.displaced));
+      const unchanged = guardUnchanged
+        && publicationDescriptor !== undefined
+        && manifestDescriptor !== undefined
+        && displacedDescriptor !== undefined
+        && sameIdentity(publicationDescriptor, publicationPath)
+        && sameIdentity(manifestDescriptor, manifestPath)
+        && isDeepStrictEqual(closingEntries, ["displaced", "manifest.json"])
+        && sameDirectoryAuthority(closingTransaction, inputs.transactionIdentity)
+        && sameIdentity(displacedDescriptor, displacedPath);
+      return unchanged
+        ? { status: "authoritative", recoveryPath: inputs.displaced }
+        : { status: "changed" };
+    } catch {
+      return { status: "changed" };
+    } finally {
+      closeHeldFile(publication);
+      closeHeldFile(displaced);
+      closeHeldFile(manifest);
     }
   };
 
   return {
     authoritativeRecoveryPath,
+    finalAuthority,
     unchanged: () => {
       if (transactionPath === undefined && fileSnapshotUnchanged(original, pathApi)) return true;
       if (transactionPath === undefined) {
@@ -1235,7 +1481,8 @@ export function createClaudeCodeAdapter(
       audited.bytes,
       pathApi,
     );
-    const guard = combineGuards(policy.guard, audited.guard, targetGuard);
+    const nonTargetGuard = combineGuards(policy.guard, audited.guard);
+    const guard = combineGuards(nonTargetGuard, targetGuard);
     let written: ConditionalBytesWriteResult;
     try {
       written = transactions.write(
@@ -1291,21 +1538,17 @@ export function createClaudeCodeAdapter(
         selectAuthoritativeRecovery(),
       ), operation === "configure" ? registration : undefined);
     }
-    const retainedStage = authoritativeStagePath(stage, pathApi);
-    const recoveryPath = targetGuard.authoritativeRecoveryPath(written.recoveryPath);
-    const finalAuthority = guard.unchanged();
-    if (retainedStage === undefined || !finalAuthority) {
+    const finalAuthority = targetGuard.finalAuthority(written.recoveryPath, nonTargetGuard);
+    if (finalAuthority.status === "changed") {
       return failed(withRecovery(
         "Claude Code stage authority changed after publication",
         selectAuthoritativeRecovery(),
       ), operation === "configure" ? registration : undefined);
     }
-    const detail = recoveryPath === undefined
-      ? `Claude Code retained private stage: ${retainedStage}`
-      : `Claude Code retained private stage: ${retainedStage}; Claude Code recovery artifact: ${recoveryPath}`;
+    const detail = `Claude Code retained private stage: ${stage.path}; Claude Code recovery artifact: ${finalAuthority.recoveryPath}`;
     return operation === "configure"
-      ? { client: "claude-code", status: "configured", ...(detail === undefined ? {} : { detail }) }
-      : { client: "claude-code", status: "removed", ...(detail === undefined ? {} : { detail }) };
+      ? { client: "claude-code", status: "configured", detail }
+      : { client: "claude-code", status: "removed", detail };
   }
 
   return {
