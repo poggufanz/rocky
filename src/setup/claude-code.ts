@@ -1281,24 +1281,28 @@ export function createClaudeCodeAdapter(
       && isObject(verifiedRoot)
       && isDeepStrictEqual(verifiedRoot, audited.parsed)
       && guard.unchanged();
+    const selectAuthoritativeRecovery = (): string | undefined => (
+      targetGuard.authoritativeRecoveryPath(written.recoveryPath)
+        ?? authoritativeStagePath(stage, pathApi)
+    );
     if (!exact) {
-      const recoveryPath = targetGuard.authoritativeRecoveryPath(written.recoveryPath)
-        ?? authoritativeStagePath(stage, pathApi);
       return failed(withRecovery(
         "Claude Code published state could not be verified",
-        recoveryPath,
+        selectAuthoritativeRecovery(),
       ), operation === "configure" ? registration : undefined);
     }
     const retainedStage = authoritativeStagePath(stage, pathApi);
-    if (retainedStage === undefined) {
+    const recoveryPath = targetGuard.authoritativeRecoveryPath(written.recoveryPath);
+    const finalAuthority = guard.unchanged();
+    if (retainedStage === undefined || !finalAuthority) {
       return failed(withRecovery(
         "Claude Code stage authority changed after publication",
-        written.recoveryPath,
+        selectAuthoritativeRecovery(),
       ), operation === "configure" ? registration : undefined);
     }
-    const detail = written.recoveryPath === undefined
+    const detail = recoveryPath === undefined
       ? `Claude Code retained private stage: ${retainedStage}`
-      : `Claude Code retained private stage: ${retainedStage}; Claude Code recovery artifact: ${written.recoveryPath}`;
+      : `Claude Code retained private stage: ${retainedStage}; Claude Code recovery artifact: ${recoveryPath}`;
     return operation === "configure"
       ? { client: "claude-code", status: "configured", ...(detail === undefined ? {} : { detail }) }
       : { client: "claude-code", status: "removed", ...(detail === undefined ? {} : { detail }) };
