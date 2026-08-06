@@ -663,6 +663,34 @@ export function recoverFileTransaction(
       return { status: "recovered", recoveryPath: firstExistingPath(displacedPath) };
     }
 
+    // Complete-but-unrecorded: a crash between the publishing linkSync and the
+    // "published" manifest write leaves the manifest at "prepared"/"displaced"
+    // even though the target already holds the new bytes. This is provable,
+    // not guessed: `path` shares its inode with the transaction's own
+    // `prepared` artifact (nlink 2, the exact pairing only that linkSync can
+    // create) and the pre-write bytes are intact in `displaced`. Finish
+    // committing the transaction that already happened instead of reporting
+    // an unrecoverable dead end for a write that in fact succeeded.
+    const preparedArtifactPath = join(transactionDirectory, "prepared");
+    if ((manifest.state === "prepared" || manifest.state === "displaced")
+      && pathExists(path)
+      && pathExists(displacedPath)
+      && isManagedRegularFile(displacedPath, path)
+      && isManagedRecoveryPair(path, preparedArtifactPath, path)) {
+      if (pathExists(preparedArtifactPath)
+        && (!mutationGuardUnchanged(guard)
+          || !discardPrepared(transactionDirectory, preparedArtifactPath))) {
+        return { status: "manual", recoveryPath: firstExistingPath(transactionDirectory) };
+      }
+      if (!mutationGuardUnchanged(guard)) return { status: "manual" };
+      try {
+        writeManifest(transactionDirectory, path, "committed", guard);
+      } catch {
+        return { status: "manual", recoveryPath: firstExistingPath(transactionDirectory) };
+      }
+      return { status: "recovered", recoveryPath: firstExistingPath(displacedPath) };
+    }
+
     if (pathExists(path)) {
       return { status: "manual", recoveryPath: firstExistingPath(transactionDirectory) };
     }
@@ -719,6 +747,25 @@ export function recoverFileTransaction(
     }
   }
   return { status: "clear" };
+}
+
+/**
+ * Remove committed transaction directories for `path` other than `keep`.
+ * Only `state: "committed"` manifests are eligible — a `committed` directory
+ * is provably finished (nothing in `recoverFileTransaction`/`inspectFileTransaction`
+ * ever reads it again) and, once a newer one exists, provably superseded: its
+ * `displaced` bytes describe a state of `path` that is now two writes stale.
+ * Pending/ambiguous transactions are never touched here; they stay exactly
+ * where `recoverFileTransaction` can find them. Best-effort: a failure to
+ * remove one is silently skipped rather than surfaced, so pruning stale
+ * recovery copies can never itself become a new source of ambiguity.
+ */
+export function pruneSupersededTransactions(path: string, keep?: string): void {
+  for (const transactionDirectory of transactionDirectories(path)) {
+    if (transactionDirectory === keep) continue;
+    if (readManifest(transactionDirectory, path)?.state !== "committed") continue;
+    removeTransaction(transactionDirectory);
+  }
 }
 
 function restoreDisplaced(
@@ -959,6 +1006,16 @@ export function atomicWriteBytesIfUnchanged(
       };
     }
 
+    // Contract for external guard-based callers (e.g. the Claude staged
+    // publication path's target/prepared identity check): `path` and
+    // `temporaryPath` are the same inode with nlink === 2 for the entire
+    // window between the linkSync above and the rmSync below — that exact
+    // pairing is what a caller-supplied guard observes as proof of a
+    // completed publish. Both requireMutationGuard calls in this window must
+    // keep running for that proof to stay valid. Drop or reorder either one
+    // and no test here will fail, but every such external observation
+    // silently degrades to "could not be verified" — a fail-closed but
+    // total functional break with no test naming the cause.
     requireMutationGuard(guard);
     writeManifest(transactionDirectory, path, "published", guard);
     requireMutationGuard(guard);

@@ -204,6 +204,49 @@ test("README documents recoverable/conditional bashrc writes and corrupt-marker 
   );
 });
 
+test("README discloses the retained .bashrc recovery copy left by write attempts", () => {
+  assert.match(
+    readme,
+    /recovery copy[^\n]*previous bytes/i,
+    "README must disclose that a .bashrc write keeps a recovery copy of the previous bytes",
+  );
+  assert.match(
+    readme,
+    /not under[^\n]*~\/\.rocky/i,
+    "README must state the recovery copy lives outside ~/.rocky, directly in $HOME",
+  );
+  assert.match(
+    readme,
+    /full contents,? secrets included/i,
+    "README must disclose the recovery copy holds the previous file's full contents, secrets included",
+  );
+  assert.match(
+    readme,
+    /your call/i,
+    "README must state removing the recovery copy sooner is the user's call",
+  );
+  assert.match(
+    readme,
+    /keeps only the most recent copy/i,
+    "README must state Rocky prunes superseded recovery copies, keeping only the most recent",
+  );
+  assert.match(
+    readme,
+    /same recoverable-transaction mechanism[^\n]*Claude Desktop config writes/i,
+    "README must disclose the same recoverable-transaction mechanism backs Claude Desktop config writes",
+  );
+  assert.match(
+    readme,
+    /Claude Code[^\n]*once its staged publication activates/i,
+    "README must disclose Claude Code gets the same retained-copy mechanism once its staged publication activates, without claiming it is active now",
+  );
+  assert.doesNotMatch(
+    readme,
+    /Claude Code[^\n]*config writes,? (?:today|now)|Claude Code config writes today/i,
+    "README must not claim Claude Code's config writes currently leave a retained copy",
+  );
+});
+
 test("README documents the Claude Code manual-fallback reality with the exact source literal", () => {
   const claudeCodeSource = readFileSync(join(packageRoot, "src", "setup", "claude-code.ts"), "utf8");
   const match = /MANUAL_CONFIGURE_DETAIL = "([^"]+)"/.exec(claudeCodeSource);

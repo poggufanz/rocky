@@ -103,6 +103,8 @@ The hook installer is separate from `rocky setup`; MCP setup never edits `.bashr
 
 Every `.bashrc` write goes through a recoverable, conditional transaction. Unrelated bytes and the file's permissions are preserved exactly. Rocky refuses to touch a symlinked, non-regular, multiply-linked, or unreadable file. A corrupt, orphaned, reversed, or duplicated Rocky marker block is left untouched. `rocky hook status` reports it and exits nonzero instead of claiming installed; repair stays manual.
 
+Every attempted `.bashrc` write — a successful one, or one refused after a concurrent edit was found — keeps one recovery copy of the previous bytes in a sibling directory next to `.bashrc`, directly in `$HOME` and not under `~/.rocky/`. `rocky hook install`/`uninstall` print that copy's exact path when they leave one; it holds the previous file's full contents, secrets included. Rocky keeps only the most recent copy — each new `.bashrc` write prunes the copy the one before it left — but removing today's copy sooner is your call. The same recoverable-transaction mechanism backs Rocky's Claude Desktop config writes today, and will back Claude Code's once its staged publication activates (see above); either one leaves the same kind of retained copy next to the config file it rewrites.
+
 From the next shell on: every failing command is remembered (no stderr — the
 hook hears command and exit code only; `rocky run` remains the deep-memory
 path). When a command succeeds where its program recently failed, the fix is

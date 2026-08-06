@@ -20,6 +20,7 @@ import { basename, dirname, join } from "node:path";
 import {
   atomicWriteBytesIfUnchanged,
   inspectFileTransaction,
+  pruneSupersededTransactions,
   recoverFileTransaction,
 } from "../setup/file-transaction.js";
 import type { BytesReadResult } from "../setup/file-transaction.js";
@@ -384,9 +385,17 @@ test("a parent fsync failure after publish reports recovery-required with intact
   assert.deepEqual(readFileSync(path), replacement);
   assert.deepEqual(readFileSync(result.recoveryPath), original);
   assert.equal(inspectFileTransaction(path).status, "pending");
+
+  // The publish itself already completed (nlink 2, proven pairing with the
+  // transaction's `prepared` artifact) — a later recovery must finish
+  // committing it, not report `manual` forever (whole-branch review, Important 1).
+  assert.equal(lstatSync(path).nlink, 2);
   const recovery = recoverFileTransaction(path);
-  assert.equal(recovery.status, "manual");
-  assert.deepEqual(readFileSync(path), replacement);
+  assert.equal(recovery.status, "recovered");
+  assert.deepEqual(readFileSync(path), replacement, "already-published bytes stay live");
+  assert.equal(lstatSync(path).nlink, 1, "the redundant prepared link is discarded");
+  assert.equal(inspectFileTransaction(path).status, "clear");
+  assert.deepEqual(recoverFileTransaction(path), { status: "clear" }, "idempotent on a second run");
 });
 
 test("non-regular, symlink, and multi-link targets are refused without mutation", (t) => {
@@ -443,4 +452,166 @@ test("non-regular, symlink, and multi-link targets are refused without mutation"
   );
   assert.deepEqual(readFileSync(multiTarget), multiBytes);
   assert.deepEqual(transactionDirectories(directory, multiTarget), []);
+});
+
+test("a concurrent mode change between snapshot and publish refuses to overwrite", (t) => {
+  if (process.platform === "win32") return; // POSIX mode bits only.
+  const directory = temporaryDirectory(t);
+  const path = join(directory, "modechange.bin");
+  const original = Buffer.from("original fake-secret-original\n", "utf8");
+  writeFileSync(path, original, { mode: 0o644 });
+  chmodSync(path, 0o644);
+  const prior = snapshotBytes(path); // bytes AND mode 0o644 captured here
+
+  chmodSync(path, 0o600); // bytes unchanged, mode changes concurrently
+
+  const result = atomicWriteBytesIfUnchanged(path, Buffer.from("new\n", "utf8"), prior);
+
+  // Bytes alone would match: the mode conjunct is what must trigger the
+  // refusal here. Without it, Rocky would silently overwrite past a user's
+  // concurrent chmod.
+  assert.equal(result.status, "changed");
+  assert.deepEqual(readFileSync(path), original);
+  assertRequestedFileMode(path, 0o600);
+  assert.equal(inspectFileTransaction(path).status, "clear");
+});
+
+/**
+ * Fails the Nth manifest write (by counting `openSync(..., "wx")` calls whose
+ * path ends in `manifest.tmp`) exactly once, then behaves normally. Manifests
+ * are written in order prepared -> displaced -> published, so N=3 fails the
+ * "published" manifest specifically, deterministically reproducing the
+ * reviewer's SIGKILL window: the destination is already hard-linked to the
+ * transaction's `prepared` artifact (nlink 2) and `displaced` already holds
+ * the pre-write bytes, but the manifest never advances past "displaced".
+ */
+function injectFailureBeforeNthManifestWrite(t: test.TestContext, n: number): void {
+  const originalOpen = fs.openSync;
+  let manifestWrites = 0;
+  let fired = false;
+  fs.openSync = ((...args: Parameters<typeof fs.openSync>) => {
+    const [target, flags] = args;
+    if (!fired && typeof target === "string" && target.endsWith("manifest.tmp") && flags === "wx") {
+      manifestWrites += 1;
+      if (manifestWrites === n) {
+        fired = true;
+        throw new Error("injected crash before a manifest write carrying fake-secret-original");
+      }
+    }
+    return originalOpen(...args);
+  }) as typeof fs.openSync;
+  syncBuiltinESMExports();
+  t.after(() => {
+    fs.openSync = originalOpen;
+    syncBuiltinESMExports();
+  });
+}
+
+test("recovery finishes a transaction whose publish completed before the manifest recorded it", (t) => {
+  const directory = temporaryDirectory(t);
+  const path = join(directory, "crash-window.bin");
+  const original = Buffer.from("original fake-secret-original\n", "utf8");
+  writeFileSync(path, original);
+  const prior = snapshotBytes(path);
+  const replacement = Buffer.from("replacement fake-secret-replacement\n", "utf8");
+
+  injectFailureBeforeNthManifestWrite(t, 3); // fail exactly the "published" manifest write
+
+  const result = atomicWriteBytesIfUnchanged(path, replacement, prior);
+  assert.equal(result.status, "recovery-required");
+
+  // Reproduces the review's SIGKILL window exactly: the target is already a
+  // hard link of the transaction's `prepared` artifact (nlink 2), the
+  // pre-write bytes are intact in `displaced`, and the manifest still says
+  // "displaced" because the crash landed before "published" was recorded.
+  const [transactionName] = transactionDirectories(directory, path);
+  assert.ok(transactionName !== undefined, "a transaction directory survives the crash");
+  const transactionDirectory = join(directory, transactionName);
+  const manifestPath = join(transactionDirectory, "manifest.json");
+  assert.equal(
+    readFileSync(manifestPath, "utf8"),
+    `${JSON.stringify({ version: 1, state: "displaced", target: path })}\n`,
+  );
+  assert.equal(lstatSync(path).nlink, 2);
+  assert.deepEqual(readFileSync(path), replacement, "the write already published");
+  assert.deepEqual(readFileSync(join(transactionDirectory, "displaced")), original);
+  assert.equal(inspectFileTransaction(path).status, "pending");
+
+  // A fresh process picking this up (a later `recoverFileTransaction` call,
+  // exactly like a new `rocky hook install` after the crash) must finish the
+  // transaction it already completed, not report "manual" forever.
+  const recovery = recoverFileTransaction(path);
+  assert.equal(recovery.status, "recovered");
+  assert.deepEqual(readFileSync(path), replacement, "already-published bytes stay live");
+  assert.equal(lstatSync(path).nlink, 1, "the redundant prepared link is discarded");
+  assert.equal(inspectFileTransaction(path).status, "clear");
+  assert.equal(
+    readFileSync(manifestPath, "utf8"),
+    `${JSON.stringify({ version: 1, state: "committed", target: path })}\n`,
+  );
+
+  // Idempotent and safe on a second run.
+  assert.deepEqual(recoverFileTransaction(path), { status: "clear" });
+});
+
+test("recovery cannot be tricked by an unrelated file merely sharing displaced's identity shape", (t) => {
+  // Negative control for the new evidence-based branch: a "prepared" manifest
+  // with an existing `displaced` artifact that is NOT actually paired with
+  // `path` (no shared inode with `prepared`) must stay manual, not be
+  // silently resolved.
+  const directory = temporaryDirectory(t);
+  const path = join(directory, "ambiguous.bin");
+  const original = Buffer.from("original\n", "utf8");
+  writeFileSync(path, original);
+  const transactionDirectory = writeLegacyV1TransactionFixture(directory, path, "prepared", {
+    displaced: Buffer.from("unrelated bytes\n", "utf8"),
+    prepared: Buffer.from("never linked to path\n", "utf8"),
+  });
+
+  const recovery = recoverFileTransaction(path);
+
+  assert.equal(recovery.status, "manual");
+  assert.equal(recovery.recoveryPath, transactionDirectory);
+  assert.deepEqual(readFileSync(path), original, "bytes untouched while ambiguous");
+});
+
+function writeNamedTransactionFixture(
+  directory: string,
+  path: string,
+  suffix: string,
+  state: "prepared" | "displaced" | "published" | "committed",
+  displaced?: Buffer,
+): string {
+  const transactionDirectory = join(directory, `.${basename(path)}.transaction-${suffix}`);
+  mkdirSync(transactionDirectory, { mode: 0o700 });
+  writeFileSync(
+    join(transactionDirectory, "manifest.json"),
+    `${JSON.stringify({ version: 1, state, target: path })}\n`,
+    "utf8",
+  );
+  if (displaced !== undefined) writeFileSync(join(transactionDirectory, "displaced"), displaced);
+  return transactionDirectory;
+}
+
+test("pruneSupersededTransactions removes only committed siblings other than the kept one", (t) => {
+  const directory = temporaryDirectory(t);
+  const path = join(directory, "pruned.bin");
+  writeFileSync(path, "current\n", "utf8");
+
+  const oldCommitted = writeNamedTransactionFixture(
+    directory, path, "1-old", "committed", Buffer.from("old\n", "utf8"),
+  );
+  const pending = writeNamedTransactionFixture(
+    directory, path, "2-pending", "displaced", Buffer.from("mid\n", "utf8"),
+  );
+  const keep = writeNamedTransactionFixture(
+    directory, path, "3-keep", "committed", Buffer.from("kept\n", "utf8"),
+  );
+
+  pruneSupersededTransactions(path, keep);
+
+  assert.equal(existsSync(oldCommitted), false, "superseded committed directory is pruned");
+  assert.equal(existsSync(pending), true, "a non-committed directory is never touched by pruning");
+  assert.equal(existsSync(keep), true, "the kept directory survives");
+  assert.deepEqual(readFileSync(path, "utf8"), "current\n", "pruning never touches the target");
 });

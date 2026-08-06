@@ -35,6 +35,7 @@ import { findByFingerprint, getFix, recentUnresolvedFailures } from "../core/mem
 import {
   atomicWriteBytesIfUnchanged,
   inspectFileTransaction,
+  pruneSupersededTransactions,
   recoverFileTransaction,
 } from "../setup/file-transaction.js";
 import type {
@@ -102,10 +103,19 @@ function assetDir(): string {
   return join(dirname(fileURLToPath(import.meta.url)), "..", "shell");
 }
 
-/** An ambiguous stop keeps a secret-free recovery path: diagnostics name paths only. */
+/**
+ * An ambiguous stop keeps a secret-free recovery path: diagnostics name paths
+ * only. Reached only when evidence cannot prove the transaction's true shape
+ * (see the "complete-but-unrecorded" branch in `recoverFileTransaction`,
+ * which now resolves the one shape that IS provable) — so this never claims
+ * the write stopped halfway, only that what happened is unclear, and always
+ * names the exact directory to inspect and remove by hand.
+ */
 function reportBashrcRecoveryStop(rc: string, recoveryPath: string | undefined): number {
-  say("bashrc write stops halfway. I keep safe copy. I touch nothing more.");
-  if (recoveryPath !== undefined) detail(`recovery: ${recoveryPath}`);
+  say("bashrc keeps unclear transaction from before. I keep safe copy. I touch nothing more.");
+  if (recoveryPath !== undefined) {
+    detail(`inspect, then remove by hand: ${recoveryPath}`);
+  }
   detail(`bashrc: ${rc}`);
   return 1;
 }
@@ -186,23 +196,47 @@ function prepareBashrc(rc: string): BashrcPreparation {
   };
 }
 
-/** Publish staged bytes only while bashrc still matches the snapshot. */
-function publishBashrc(rc: string, staged: Buffer, prior: BytesReadResult): number {
+interface PublishResult {
+  exit: number;
+  /** Set only when this write left a live retained copy of the prior bytes. */
+  recoveryPath?: string;
+}
+
+/**
+ * Publish staged bytes only while bashrc still matches the snapshot.
+ *
+ * A successful publish, and a refusal that had to displace bashrc before
+ * discovering a concurrent edit, both retain one recovery copy of the
+ * previous bytes (`result.recoveryPath`). Callers must report that path
+ * instead of claiming nothing was touched — see Important 2 of the
+ * whole-branch review. Once a fresh copy commits, any older superseded
+ * copies for this same target are pruned so at most one survives.
+ */
+function publishBashrc(rc: string, staged: Buffer, prior: BytesReadResult): PublishResult {
   let result: ConditionalBytesWriteResult;
   try {
     result = atomicWriteBytesIfUnchanged(rc, staged, prior);
   } catch {
     say("bashrc write fails. I touch nothing. check disk space and permissions, then try again.");
     detail(`bashrc: ${rc}`);
-    return 1;
+    return { exit: 1 };
   }
-  if (result.status === "written") return 0;
-  if (result.status === "changed") {
-    say("bashrc changed while I worked. I touch nothing. your bytes win. run command again.");
-    detail(`bashrc: ${rc}`);
-    return 1;
+  if (result.status === "written" || result.status === "changed") {
+    if (result.recoveryPath !== undefined) {
+      pruneSupersededTransactions(rc, dirname(result.recoveryPath));
+    }
+    if (result.status === "written") return { exit: 0, recoveryPath: result.recoveryPath };
+    if (result.recoveryPath !== undefined) {
+      say("bashrc changed while I worked. your bytes win. I keep safe copy too.");
+      detail(`bashrc: ${rc}`);
+      detail(`safe copy: ${result.recoveryPath}`);
+    } else {
+      say("bashrc changed while I worked. I touch nothing. your bytes win. run command again.");
+      detail(`bashrc: ${rc}`);
+    }
+    return { exit: 1 };
   }
-  return reportBashrcRecoveryStop(rc, result.recoveryPath);
+  return { exit: reportBashrcRecoveryStop(rc, result.recoveryPath) };
 }
 
 /** Corrupt marker bytes are preserved byte-for-byte; repair stays manual. */
@@ -212,17 +246,46 @@ function reportCorruptBlock(rc: string): number {
   return 1;
 }
 
-export function hookInstall(): number {
-  const home = rockyHome();
-  mkdirSync(home, { recursive: true });
+/** Rocky voice, kept identical wherever a recovery copy needs disclosing. */
+function reportRetainedCopy(recoveryPath: string): void {
+  say("I keep safe copy of old bashrc. yours to remove, any time.");
+  detail(`safe copy: ${recoveryPath}`);
+}
 
-  for (const f of ["rocky-hook.bash", "bash-preexec.sh"]) {
-    const src = join(assetDir(), f);
-    if (!existsSync(src)) {
+export function hookInstall(): number {
+  // Check installability before writing anything: a missing hook asset must
+  // fail before any write, exactly like the bashrc topology/corrupt refusals
+  // below it (Minor: hookInstall must not write ~/.rocky assets ahead of a
+  // refusal whose message claims nothing was touched).
+  const assets = ["rocky-hook.bash", "bash-preexec.sh"];
+  for (const f of assets) {
+    if (!existsSync(join(assetDir(), f))) {
       say(`hook file missing from install: ${f}. install incomplete. bad.`);
       return 1;
     }
-    copyFileSync(src, join(home, f));
+  }
+
+  const rc = bashrcPath();
+  const preparation = prepareBashrc(rc);
+  if (preparation.status === "stop") return preparation.exit;
+  const classification = classifyHookBlock(preparation.snapshot.bytes);
+  if (classification === "corrupt") return reportCorruptBlock(rc);
+
+  let recoveryPath: string | undefined;
+  if (classification === "absent") {
+    const published = publishBashrc(
+      rc,
+      addHookBlockBytes(preparation.snapshot.bytes),
+      preparation.snapshot.prior,
+    );
+    if (published.exit !== 0) return published.exit;
+    recoveryPath = published.recoveryPath;
+  }
+
+  const home = rockyHome();
+  mkdirSync(home, { recursive: true });
+  for (const f of assets) {
+    copyFileSync(join(assetDir(), f), join(home, f));
   }
 
   const rulesPath = join(home, "guard.rules");
@@ -232,23 +295,10 @@ export function hookInstall(): number {
     say("guard rules file has your edits. I keep them. good.");
   }
 
-  const rc = bashrcPath();
-  const preparation = prepareBashrc(rc);
-  if (preparation.status === "stop") return preparation.exit;
-  const classification = classifyHookBlock(preparation.snapshot.bytes);
-  if (classification === "corrupt") return reportCorruptBlock(rc);
-  if (classification === "absent") {
-    const published = publishBashrc(
-      rc,
-      addHookBlockBytes(preparation.snapshot.bytes),
-      preparation.snapshot.prior,
-    );
-    if (published !== 0) return published;
-  }
-
   say("ears installed. open new shell, I hear everything there.");
   detail(`hook:  ${join(home, "rocky-hook.bash")}`);
   detail(`rules: ${rulesPath}`);
+  if (recoveryPath !== undefined) reportRetainedCopy(recoveryPath);
   say("dangerous command comes, I ask first. ROCKY_OFF=1 makes me deaf.");
   return 0;
 }
@@ -268,26 +318,24 @@ export function hookUninstall(): number {
     removeHookBlockBytes(preparation.snapshot.bytes),
     preparation.snapshot.prior,
   );
-  if (published !== 0) return published;
+  if (published.exit !== 0) return published.exit;
   say(`ears removed from shell. memory stays in ${rockyHome()}. I still remember.`);
+  if (published.recoveryPath !== undefined) reportRetainedCopy(published.recoveryPath);
   return 0;
 }
 
+/**
+ * Status shares `prepareBashrc` with install/uninstall so it never diverges
+ * from them: it settles any pending transaction, refuses (via lstat) the same
+ * symlink/non-regular/multi-link topology, and reports corrupt truthfully —
+ * instead of following symlinks through `existsSync`/`readFileSync` and
+ * telling the user to run a command that install would then refuse.
+ */
 export function hookStatus(): number {
   const rc = bashrcPath();
-  if (!existsSync(rc)) {
-    say("ears not installed. run: rocky hook install");
-    return 0;
-  }
-  let bytes: Buffer;
-  try {
-    bytes = readFileSync(rc);
-  } catch {
-    say("bashrc does not open for me. I touch nothing.");
-    detail(`bashrc: ${rc}`);
-    return 1;
-  }
-  const classification = classifyHookBlock(bytes);
+  const preparation = prepareBashrc(rc);
+  if (preparation.status === "stop") return preparation.exit;
+  const classification = classifyHookBlock(preparation.snapshot.bytes);
   if (classification === "corrupt") return reportCorruptBlock(rc);
   if (classification !== "managed") {
     say("ears not installed. run: rocky hook install");

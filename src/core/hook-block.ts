@@ -58,15 +58,22 @@ export function classifyHookBlock(content: Buffer): HookBlockClassification {
  * Append the managed block. Every existing byte is preserved; the block is
  * preceded by one blank separator line (plus a line feed when the content
  * does not already end at a line boundary). Non-absent input is returned
- * unchanged — corrupt content is never rewritten.
+ * unchanged — corrupt content is never rewritten. When the content already
+ * ends in a blank line — typically the separator a previous `remove` left
+ * behind — that existing line is reused as the separator instead of adding
+ * another, so repeated add/remove cycles do not grow an extra blank line
+ * each time.
  */
 export function addHookBlockBytes(content: Buffer): Buffer {
   if (classifyHookBlock(content) !== "absent") return content;
+  const endsWithBlankLine = content.length >= 2
+    && content[content.length - 1] === LINE_FEED
+    && content[content.length - 2] === LINE_FEED;
   const needsLineFeed = content.length > 0 && content[content.length - 1] !== LINE_FEED;
   return Buffer.concat([
     content,
     ...(needsLineFeed ? [SEPARATOR_BYTES] : []),
-    SEPARATOR_BYTES,
+    ...(endsWithBlankLine ? [] : [SEPARATOR_BYTES]),
     BLOCK_BYTES,
   ]);
 }

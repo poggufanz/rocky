@@ -152,6 +152,18 @@ test("removeHookBlockBytes after addHookBlockBytes leaves only the separator lin
   assert.deepEqual(removeHookBlockBytes(added), bytes("export A=1\n\n"));
 });
 
+test("addHookBlockBytes reuses an existing trailing blank line instead of growing it", () => {
+  // Reproduces the reviewer's accumulation finding: repeated install/uninstall
+  // cycles must not add one more blank line to bashrc each time.
+  let content = bytes("export A=1\n");
+  for (let cycle = 0; cycle < 3; cycle += 1) {
+    content = addHookBlockBytes(content);
+    assert.equal(classifyHookBlock(content), "managed");
+    content = removeHookBlockBytes(content);
+  }
+  assert.deepEqual(content, bytes("export A=1\n\n"));
+});
+
 test("removeHookBlockBytes returns absent and corrupt input unchanged", () => {
   const absent = bytes("export A=1\n");
   assert.deepEqual(removeHookBlockBytes(absent), absent);
@@ -675,4 +687,218 @@ test("hook uninstall stops with guidance when a pending transaction is ambiguous
   assert.deepEqual(readFileSync(sandbox.bashrc), original);
   assert.ok(sandbox.stderr().includes(fixture));
   assert.equal(existsSync(fixture), true);
+});
+
+// --- status shares topology/pending-transaction handling with install/uninstall ---
+
+test("hook status refuses a symlink bashrc instead of following it and claiming installed", (t) => {
+  const sandbox = bashrcSandbox(t);
+  const real = join(sandbox.home, "real-bashrc");
+  writeFileSync(real, bytes(`export A=1\n\n${BLOCK}`));
+  let symlinkAvailable = true;
+  try {
+    symlinkSync(real, sandbox.bashrc);
+  } catch {
+    symlinkAvailable = false;
+  }
+  if (!symlinkAvailable) return;
+
+  assert.equal(hookStatus(), 1);
+  assert.match(sandbox.stderr(), /symlink/);
+  // Consistent with install/uninstall, which refuse the same topology.
+  assert.equal(hookInstall(), 1);
+  assert.match(sandbox.stderr(), /symlink/);
+});
+
+test("hook status refuses a dangling symlink instead of telling the user to run install", (t) => {
+  const sandbox = bashrcSandbox(t);
+  let symlinkAvailable = true;
+  try {
+    symlinkSync(join(sandbox.home, "missing-target"), sandbox.bashrc);
+  } catch {
+    symlinkAvailable = false;
+  }
+  if (!symlinkAvailable) return;
+
+  const result = hookStatus();
+
+  // Before the fix this claimed "ears not installed. run: rocky hook
+  // install" — a command that install then refuses. A dangling symlink is a
+  // topology refusal, exactly like install/uninstall already give it.
+  assert.equal(result, 1);
+  assert.match(sandbox.stderr(), /symlink/);
+  assert.ok(!sandbox.stderr().includes("run: rocky hook install"));
+});
+
+test("hook status refuses a multi-linked managed bashrc instead of claiming plain installed", (t) => {
+  const sandbox = bashrcSandbox(t);
+  const original = bytes(`export A=1\n\n${BLOCK}`);
+  writeFileSync(sandbox.bashrc, original);
+  linkSync(sandbox.bashrc, join(sandbox.home, "bashrc-alias"));
+
+  assert.equal(hookStatus(), 1);
+  assert.match(sandbox.stderr(), /many names|hard link/i);
+});
+
+test("hook status settles a pending transaction instead of reporting stale state", (t) => {
+  const sandbox = bashrcSandbox(t);
+  const original = bytes("export A=1\n");
+  writeFileSync(sandbox.bashrc, original);
+  const fixture = writePendingTransactionFixture(sandbox.bashrc, "prepared");
+
+  assert.equal(hookStatus(), 0, sandbox.stderr());
+
+  assert.equal(existsSync(fixture), false, "stale transaction recovered away by status too");
+  assert.match(sandbox.stderr(), /ears not installed/);
+});
+
+test("hook status reports the same ambiguous-transaction guidance install gives, not a false installed", (t) => {
+  const sandbox = bashrcSandbox(t);
+  const original = bytes("export IMPORTANT_USER_STATE=preserve-me\n");
+  writeFileSync(sandbox.bashrc, original);
+  const fixture = writePendingTransactionFixture(sandbox.bashrc, "published", {
+    displaced: original,
+  });
+
+  assert.equal(hookStatus(), 1);
+
+  assert.deepEqual(readFileSync(sandbox.bashrc), original, "status never mutates");
+  assert.ok(sandbox.stderr().includes(fixture));
+  assert.ok(!sandbox.stderr().includes("IMPORTANT_USER_STATE"));
+  assert.equal(existsSync(fixture), true);
+});
+
+// --- Important 2: undisclosed retained copies of the previous bashrc bytes ---
+
+test("hook install writes no rocky-home assets before a topology refusal", (t) => {
+  const sandbox = bashrcSandbox(t);
+  const real = join(sandbox.home, "real-bashrc");
+  writeFileSync(real, bytes("export A=1\n"));
+  let symlinkAvailable = true;
+  try {
+    symlinkSync(real, sandbox.bashrc);
+  } catch {
+    symlinkAvailable = false;
+  }
+  if (!symlinkAvailable) return;
+
+  assert.equal(hookInstall(), 1);
+
+  assert.match(sandbox.stderr(), /symlink/);
+  assert.equal(
+    existsSync(process.env.ROCKY_HOME as string),
+    false,
+    "no ~/.rocky assets written ahead of an \"I touch nothing\" refusal",
+  );
+});
+
+test("hook install reports the retained copy of the previous bashrc instead of staying silent", (t) => {
+  const sandbox = bashrcSandbox(t);
+  const original = bytes("export SECRET_TOKEN=sk-live-DO-NOT-LEAK\n");
+  writeFileSync(sandbox.bashrc, original);
+
+  assert.equal(hookInstall(), 0, sandbox.stderr());
+
+  const [transactionDirectory] = transactionDirectories(sandbox.home);
+  assert.ok(transactionDirectory !== undefined);
+  const recoveryPath = join(sandbox.home, transactionDirectory, "displaced");
+  assert.ok(existsSync(recoveryPath));
+  assert.ok(sandbox.stderr().includes(recoveryPath), "the retained copy path is disclosed");
+  assert.ok(!sandbox.stderr().includes("SECRET_TOKEN"), "diagnostics stay secret-free");
+});
+
+test("hook install discloses a retained copy on refusal instead of claiming it touches nothing", (t) => {
+  const sandbox = bashrcSandbox(t);
+  const original = bytes("export SECRET_TOKEN=sk-live-DO-NOT-LEAK\n");
+  writeFileSync(sandbox.bashrc, original);
+  const concurrent = bytes("export LATE_WRITER=wins\n");
+  injectConcurrentEdit(t, sandbox.bashrc, concurrent);
+
+  assert.equal(hookInstall(), 1);
+
+  assert.deepEqual(readFileSync(sandbox.bashrc), concurrent, "user bytes win");
+  assert.ok(
+    !sandbox.stderr().includes("I touch nothing"),
+    "must not claim it touched nothing while a copy was written",
+  );
+  const [transactionDirectory] = transactionDirectories(sandbox.home);
+  assert.ok(transactionDirectory !== undefined);
+  assert.ok(sandbox.stderr().includes(join(sandbox.home, transactionDirectory, "displaced")));
+});
+
+test("repeated install/uninstall cycles keep only the most recent retained copy", (t) => {
+  const sandbox = bashrcSandbox(t);
+  const original = bytes("export SECRET_TOKEN=sk-live-DO-NOT-LEAK\n");
+  writeFileSync(sandbox.bashrc, original);
+
+  for (let cycle = 0; cycle < 3; cycle += 1) {
+    assert.equal(hookInstall(), 0, sandbox.stderr());
+    assert.equal(hookUninstall(), 0, sandbox.stderr());
+  }
+
+  const remaining = transactionDirectories(sandbox.home);
+  assert.equal(remaining.length, 1, `expected exactly one retained copy, got ${remaining.length}`);
+  // The first add/remove cycle leaves one separator blank line behind (pinned
+  // by "removeHookBlockBytes after addHookBlockBytes leaves only the
+  // separator line"); later cycles reuse it and must not add another.
+  assert.deepEqual(readFileSync(sandbox.bashrc), Buffer.concat([original, bytes("\n")]));
+});
+
+// --- Important 1: a completed-but-unrecorded crash window must not brick install/uninstall ---
+
+/**
+ * Fails the Nth manifest write (counting `openSync(..., "wx")` calls whose
+ * path ends in `manifest.tmp`) exactly once. Manifests are written in order
+ * prepared -> displaced -> published, so N=3 fails the "published" manifest
+ * specifically: the bashrc write has already published (linked to the new
+ * bytes, nlink 2) but the manifest never advances past "displaced" —
+ * deterministically reproducing the reviewer's real-SIGKILL window without
+ * any sleep or an actual crash.
+ */
+function injectFailureBeforeNthManifestWrite(t: TestContext, n: number): void {
+  const originalOpen = fs.openSync;
+  let manifestWrites = 0;
+  let fired = false;
+  fs.openSync = ((...args: Parameters<typeof fs.openSync>) => {
+    const [target, flags] = args;
+    if (!fired && typeof target === "string" && target.endsWith("manifest.tmp") && flags === "wx") {
+      manifestWrites += 1;
+      if (manifestWrites === n) {
+        fired = true;
+        throw new Error("injected crash before a manifest write");
+      }
+    }
+    return originalOpen(...args);
+  }) as typeof fs.openSync;
+  syncBuiltinESMExports();
+  t.after(() => {
+    fs.openSync = originalOpen;
+    syncBuiltinESMExports();
+  });
+}
+
+test("hook install recovers instead of permanently bricking after a completed-but-unrecorded crash", (t) => {
+  const sandbox = bashrcSandbox(t);
+  const original = bytes("export A=1\n");
+  writeFileSync(sandbox.bashrc, original);
+  injectFailureBeforeNthManifestWrite(t, 3); // fails exactly the "published" manifest write
+
+  // The crash lands here: the write already published, but the manifest
+  // could not record it. Before the fix, every later `hook install` and
+  // `hook uninstall` call returned exit 1 forever with "write stops halfway"
+  // — even though the write had, in fact, fully succeeded.
+  assert.equal(hookInstall(), 1);
+  assert.equal(inspectFileTransaction(sandbox.bashrc).status, "pending");
+  assert.deepEqual(readFileSync(sandbox.bashrc), bytes(`export A=1\n\n${BLOCK}`), "already published");
+
+  // A later run (the injected fault only fires once) must recover and settle
+  // cleanly instead of reporting the same dead end forever.
+  assert.equal(hookInstall(), 0, sandbox.stderr());
+  assert.deepEqual(readFileSync(sandbox.bashrc), bytes(`export A=1\n\n${BLOCK}`));
+  assert.equal(inspectFileTransaction(sandbox.bashrc).status, "clear");
+
+  assert.equal(hookUninstall(), 0, sandbox.stderr());
+  assert.deepEqual(readFileSync(sandbox.bashrc), bytes("export A=1\n\n"));
+
+  // `hook status` must never have contradicted this: it settles the same way.
 });
