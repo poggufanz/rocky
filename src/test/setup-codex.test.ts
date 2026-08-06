@@ -1,21 +1,164 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import fs, {
-  chmodSync,
+import {
   lstatSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
   rmSync,
-  symlinkSync,
-  type Stats,
 } from "node:fs";
-import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { dirname, join } from "node:path";
+import {
+  AppServerRequestError,
+  createAppServerSessionFactory,
+  isConfigVersionConflict,
+  type AppServerSession,
+  type AppServerSessionFactory,
+} from "../setup/codex-app-server.js";
 import { createCodexAdapter } from "../setup/codex.js";
 import type { McpRegistration } from "../setup/clients.js";
-import type { ProcessResult, ProcessRunOptions, ProcessRunner } from "../setup/process.js";
+import type {
+  ProcessResult,
+  ProcessRunOptions,
+  ProcessRunner,
+  ProcessSession,
+  ProcessSessionOptions,
+} from "../setup/process.js";
+
+class FakeProcessSession implements ProcessSession {
+  readonly written: string[] = [];
+  readonly kills: Array<NodeJS.Signals | number | undefined> = [];
+  endCount = 0;
+  waitCount = 0;
+
+  constructor(
+    private readonly lines: Array<string | undefined | Promise<string | undefined>>,
+    private readonly waitResult: Promise<ProcessResult> = Promise.resolve({
+      status: 0,
+      stdout: "",
+      stderr: "",
+    }),
+  ) {}
+
+  async writeLine(line: string): Promise<void> {
+    this.written.push(line);
+  }
+
+  async readLine(): Promise<string | undefined> {
+    const line = this.lines.shift();
+    return line instanceof Promise ? line : line;
+  }
+
+  end(): void {
+    this.endCount += 1;
+  }
+
+  kill(signal?: NodeJS.Signals | number): void {
+    this.kills.push(signal);
+  }
+
+  wait(): Promise<ProcessResult> {
+    this.waitCount += 1;
+    return this.waitResult;
+  }
+}
+
+interface OpenCall {
+  command: string;
+  args: string[];
+  options?: ProcessSessionOptions;
+}
+
+class SessionRunner implements ProcessRunner {
+  readonly calls: OpenCall[] = [];
+
+  constructor(private readonly session: ProcessSession) {}
+
+  async run(
+    _command: string,
+    _args: readonly string[],
+    _options?: ProcessRunOptions,
+  ): Promise<ProcessResult> {
+    throw new Error("unexpected one-shot process call");
+  }
+
+  async openSession(
+    command: string,
+    args: readonly string[],
+    options?: ProcessSessionOptions,
+  ): Promise<ProcessSession> {
+    const call: OpenCall = { command, args: [...args] };
+    if (options !== undefined) call.options = options;
+    this.calls.push(call);
+    return this.session;
+  }
+}
+
+interface RunCall {
+  command: string;
+  args: string[];
+  options?: ProcessRunOptions;
+}
+
+class VersionRunner implements ProcessRunner {
+  readonly calls: RunCall[] = [];
+
+  constructor(private readonly results: ProcessResult[]) {}
+
+  async run(
+    command: string,
+    args: readonly string[],
+    options?: ProcessRunOptions,
+  ): Promise<ProcessResult> {
+    const call: RunCall = { command, args: [...args] };
+    if (options !== undefined) call.options = options;
+    this.calls.push(call);
+    const result = this.results.shift();
+    assert.ok(result, `unexpected process call: ${command} ${args.join(" ")}`);
+    return result;
+  }
+}
+
+type SessionStep = unknown | Error | ((method: string, params: Record<string, unknown>) => unknown);
+
+class FakeAppServerSession implements AppServerSession {
+  readonly requests: Array<{ method: string; params: Record<string, unknown> }> = [];
+  closeCount = 0;
+
+  constructor(
+    readonly codexHome: string,
+    private readonly steps: SessionStep[],
+    private readonly closeError?: Error,
+  ) {}
+
+  async request(method: string, params: Record<string, unknown>): Promise<unknown> {
+    this.requests.push({ method, params });
+    const step = this.steps.shift();
+    assert.notEqual(step, undefined, `unexpected app-server request: ${method}`);
+    if (step instanceof Error) throw step;
+    return typeof step === "function" ? step(method, params) : step;
+  }
+
+  async close(): Promise<void> {
+    this.closeCount += 1;
+    if (this.closeError !== undefined) throw this.closeError;
+  }
+}
+
+class FakeAppServerSessionFactory implements AppServerSessionFactory {
+  readonly calls: Array<{ executable: string; codexHome: string }> = [];
+
+  constructor(private readonly sessions: Array<AppServerSession | Error>) {}
+
+  async open(executable: string, codexHome: string): Promise<AppServerSession> {
+    this.calls.push({ executable, codexHome });
+    const session = this.sessions.shift();
+    if (session === undefined) throw new Error("unexpected app-server session");
+    if (session instanceof Error) throw session;
+    return session;
+  }
+}
 
 const registration: McpRegistration = {
   name: "rocky",
@@ -27,50 +170,93 @@ const registration: McpRegistration = {
   },
 };
 
-const getArgs = ["mcp", "get", "rocky", "--json"];
-const addArgs = [
-  "mcp", "add",
-  "--env", "ROCKY_MCP_EXPOSURE=sanitized",
-  "--env", "ROCKY_HOME=/home/ada/.rocky",
-  "rocky", "--", "/opt/node", "/opt/rocky/dist/index.js", "mcp",
-];
-const removeArgs = ["mcp", "remove", "rocky"];
+const codexHome = "/home/ada/.codex";
+const configPath = `${codexHome}/config.toml`;
 
-interface RunnerCall {
-  command: string;
-  args: string[];
-  options?: ProcessRunOptions;
+function versionResult(version = "0.146.1"): ProcessResult {
+  return { status: 0, stdout: `codex-cli ${version}\n`, stderr: "" };
 }
 
-function codexCall(args: readonly string[]): RunnerCall {
+function entryFor(value: McpRegistration = registration): Record<string, unknown> {
   return {
-    command: "/opt/codex",
-    args: [...args],
-    options: { timeoutMs: 10_000 },
+    command: value.command,
+    args: [...value.args],
+    env: { ...value.env },
   };
 }
 
-class FakeRunner implements ProcessRunner {
-  readonly calls: RunnerCall[] = [];
-
-  constructor(private readonly results: ProcessResult[]) {}
-
-  async run(command: string, args: readonly string[], options?: ProcessRunOptions): Promise<ProcessResult> {
-    const call: RunnerCall = { command, args: [...args] };
-    if (options !== undefined) call.options = options;
-    this.calls.push(call);
-    const result = this.results.shift();
-    assert.ok(result, `unexpected process call: ${command} ${args.join(" ")}`);
-    return result;
-  }
+function baseSource(path = configPath, profile: string | null = null): Record<string, unknown> {
+  return { type: "user", file: path, profile };
 }
 
-function result(status: number, stdout = "", stderr = ""): ProcessResult {
-  return { status, stdout, stderr };
+function origin(source: Record<string, unknown>, version = "sha256:one"): Record<string, unknown> {
+  return { name: source, version };
+}
+
+function addOrigins(
+  value: unknown,
+  path: string,
+  origins: Record<string, unknown>,
+  source: Record<string, unknown>,
+  version: string,
+): void {
+  if (Array.isArray(value)) {
+    value.forEach((entry, index) => addOrigins(
+      entry,
+      `${path}.${index}`,
+      origins,
+      source,
+      version,
+    ));
+    return;
+  }
+  if (typeof value === "object" && value !== null) {
+    for (const [key, entry] of Object.entries(value)) {
+      addOrigins(entry, `${path}.${key}`, origins, source, version);
+    }
+    return;
+  }
+  origins[path] = origin(path === "mcp_servers.rocky.command" ? source : baseSource(), version);
+}
+
+function readResult(
+  entry: Record<string, unknown> | undefined,
+  source: Record<string, unknown> = baseSource(),
+  version = "sha256:one",
+): Record<string, unknown> {
+  const origins: Record<string, unknown> = {};
+  if (entry !== undefined) {
+    addOrigins(entry, "mcp_servers.rocky", origins, source, version);
+  }
+  return {
+    config: { mcp_servers: entry === undefined ? {} : { rocky: entry } },
+    origins,
+    layers: [{
+      name: baseSource(),
+      version,
+      config: { mcp_servers: entry === undefined ? {} : { rocky: entry } },
+    }],
+  };
+}
+
+function writeResult(version = "sha256:two"): Record<string, unknown> {
+  return {
+    status: "ok",
+    version,
+    filePath: configPath,
+    overriddenMetadata: null,
+  };
+}
+
+function versionConflict(): AppServerRequestError {
+  return new AppServerRequestError(
+    -32600,
+    { config_write_error_code: "configVersionConflict" },
+  );
 }
 
 function temporaryRegistration(t: test.TestContext): McpRegistration {
-  const root = mkdtempSync(join(tmpdir(), "rocky-codex-recovery-"));
+  const root = mkdtempSync(join(tmpdir(), "rocky-codex-cas-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   return {
     ...registration,
@@ -78,105 +264,635 @@ function temporaryRegistration(t: test.TestContext): McpRegistration {
   };
 }
 
-function addArgumentsFor(value: McpRegistration): string[] {
-  return [
-    "mcp", "add",
-    "--env", `ROCKY_MCP_EXPOSURE=${value.env.ROCKY_MCP_EXPOSURE}`,
-    "--env", `ROCKY_HOME=${value.env.ROCKY_HOME}`,
-    "rocky", "--", value.command, ...value.args,
-  ];
-}
-
 function recoveryPath(detail: string | undefined): string {
   const match = /manual recovery:\s+([^;\n]+)/i.exec(detail ?? "");
-  assert.ok(match?.[1], "result must report a recovery artifact path");
+  assert.ok(match?.[1], "result must report private recovery authority");
   return match[1];
 }
 
-function differentStatNumber(value: number): number {
-  return value === 0 ? 1 : 0;
-}
-
-function simulateWindowsArtifactMetadata(
-  t: test.TestContext,
-  mutate: (metadata: Stats) => void = () => {},
-): void {
-  const platform = Object.getOwnPropertyDescriptor(process, "platform");
-  const originalLstat = fs.lstatSync;
-  assert.ok(platform);
-  Object.defineProperty(process, "platform", { ...platform, value: "win32" });
-  const injectedLstat = ((path: fs.PathLike, options?: fs.StatSyncOptions) => {
-    const metadata = originalLstat(path, options as never) as Stats;
-    if (basename(String(path)).startsWith("codex-rocky-")) {
-      Object.defineProperty(metadata, "mode", {
-        configurable: true,
-        value: (metadata.mode & ~0o777) | 0o666,
-      });
-      mutate(metadata);
-    }
-    return metadata as never;
-  }) as typeof fs.lstatSync;
-  Object.defineProperty(fs, "lstatSync", { configurable: true, value: injectedLstat });
-  syncBuiltinESMExports();
-  t.after(() => {
-    Object.defineProperty(fs, "lstatSync", { configurable: true, value: originalLstat });
-    Object.defineProperty(process, "platform", platform);
-    syncBuiltinESMExports();
+function adapterWith(
+  runner: ProcessRunner,
+  sessionFactory: AppServerSessionFactory,
+) {
+  return createCodexAdapter({
+    runner,
+    executable: "/opt/codex",
+    sessionFactory,
+    env: { CODEX_HOME: codexHome },
+    home: "/home/ada",
+    cwd: "/work/project",
   });
 }
 
-function assertRequestedMode(path: string, posixMode: number, kind: "file" | "directory"): void {
-  const metadata = lstatSync(path);
-  assert.equal(kind === "file" ? metadata.isFile() : metadata.isDirectory(), true);
-  assert.equal(metadata.isSymbolicLink(), false);
-  if (process.platform === "win32") {
-    assert.equal((metadata.mode & 0o222) === 0, (posixMode & 0o222) === 0);
-  } else {
-    assert.equal(metadata.mode & 0o777, posixMode);
-  }
-}
+const initializeResult = JSON.stringify({
+  id: 1,
+  result: {
+    userAgent: "rocky/0.146.1",
+    codexHome: "/tmp/disposable-codex",
+    platformFamily: "unix",
+    platformOs: "linux",
+  },
+});
 
-function completeSnapshot(
-  command = registration.command,
-  args: readonly string[] = registration.args,
-  env: Readonly<Record<string, string>> = registration.env,
-): Record<string, unknown> {
-  return {
-    name: "rocky",
-    enabled: true,
-    disabled_reason: null,
-    transport: {
-      type: "stdio",
-      command,
-      args: [...args],
-      env: { ...env },
-      env_vars: [],
-      cwd: null,
-    },
-    enabled_tools: null,
-    disabled_tools: null,
-    startup_timeout_sec: null,
-    tool_timeout_sec: null,
+const timeouts = {
+  startupTimeoutMs: 25,
+  requestTimeoutMs: 25,
+  shutdownTimeoutMs: 25,
+};
+
+test("app-server performs handshake, config JSONL requests, and clean shutdown", async () => {
+  const readResult = {
+    config: { mcp_servers: {} },
+    origins: {},
+    layers: [{
+      name: { type: "user", file: "/tmp/disposable-codex/config.toml", profile: null },
+      version: "sha256:before",
+      config: {},
+    }],
   };
-}
+  const writeResult = {
+    status: "ok",
+    version: "sha256:after",
+    filePath: "/tmp/disposable-codex/config.toml",
+    overriddenMetadata: null,
+  };
+  const processSession = new FakeProcessSession([
+    initializeResult,
+    JSON.stringify({ id: 2, result: readResult }),
+    JSON.stringify({ id: 3, result: writeResult }),
+  ]);
+  const runner = new SessionRunner(processSession);
+  const factory = createAppServerSessionFactory(runner, timeouts);
 
-test("Stats Number identity replacement is guaranteed distinct at every magnitude", () => {
-  const cases = [
-    { value: Number.MAX_SAFE_INTEGER + 1, expected: 0 },
-    { value: 0, expected: 1 },
-    { value: 1, expected: 0 },
+  const session = await factory.open("/opt/codex", "/tmp/disposable-codex");
+  assert.equal(session.codexHome, "/tmp/disposable-codex");
+  assert.deepEqual(await session.request("config/read", { includeLayers: true }), readResult);
+  assert.deepEqual(await session.request("config/value/write", {
+    filePath: "/tmp/disposable-codex/config.toml",
+    keyPath: "mcp_servers.rocky",
+    value: { command: "/opt/node", args: ["/opt/rocky.js", "mcp"] },
+    mergeStrategy: "upsert",
+    expectedVersion: "sha256:before",
+  }), writeResult);
+  await session.close();
+
+  assert.deepEqual(runner.calls, [{
+    command: "/opt/codex",
+    args: ["app-server", "--listen", "stdio://"],
+    options: { env: { CODEX_HOME: "/tmp/disposable-codex" } },
+  }]);
+  assert.deepEqual(processSession.written.map((line) => JSON.parse(line)), [
+    {
+      id: 1,
+      method: "initialize",
+      params: {
+        clientInfo: { name: "rocky", version: "0.2.1" },
+        capabilities: { experimentalApi: true },
+      },
+    },
+    { method: "initialized" },
+    { id: 2, method: "config/read", params: { includeLayers: true } },
+    {
+      id: 3,
+      method: "config/value/write",
+      params: {
+        filePath: "/tmp/disposable-codex/config.toml",
+        keyPath: "mcp_servers.rocky",
+        value: { command: "/opt/node", args: ["/opt/rocky.js", "mcp"] },
+        mergeStrategy: "upsert",
+        expectedVersion: "sha256:before",
+      },
+    },
+  ]);
+  assert.equal(processSession.endCount, 1);
+  assert.equal(processSession.waitCount, 1);
+  assert.deepEqual(processSession.kills, []);
+});
+
+test("app-server exposes configVersionConflict without echoing server text", async () => {
+  const processSession = new FakeProcessSession([
+    initializeResult,
+    JSON.stringify({
+      id: 2,
+      error: {
+        code: -32600,
+        message: "Configuration changed: SECRET_SERVER_TEXT",
+        data: { config_write_error_code: "configVersionConflict" },
+      },
+    }),
+  ]);
+  const factory = createAppServerSessionFactory(new SessionRunner(processSession), timeouts);
+  const session = await factory.open("/opt/codex", "/tmp/disposable-codex");
+
+  await assert.rejects(
+    session.request("config/value/write", {
+      keyPath: "mcp_servers.rocky",
+      value: null,
+      mergeStrategy: "replace",
+      expectedVersion: "sha256:stale",
+    }),
+    (error: unknown) => {
+      assert.equal(isConfigVersionConflict(error), true);
+      assert.doesNotMatch(error instanceof Error ? error.message : String(error), /SECRET_SERVER_TEXT/);
+      return true;
+    },
+  );
+  await session.close();
+});
+
+test("malformed JSONL fails generically and session can still be shut down", async () => {
+  const processSession = new FakeProcessSession([initializeResult, "{SECRET_BAD_JSON"]);
+  const factory = createAppServerSessionFactory(new SessionRunner(processSession), timeouts);
+  const session = await factory.open("/opt/codex", "/tmp/disposable-codex");
+
+  await assert.rejects(
+    session.request("config/read", { includeLayers: true }),
+    (error: unknown) => {
+      assert.match(error instanceof Error ? error.message : String(error), /protocol/i);
+      assert.doesNotMatch(error instanceof Error ? error.message : String(error), /SECRET_BAD_JSON/);
+      return true;
+    },
+  );
+  await session.close();
+  assert.equal(processSession.endCount, 1);
+});
+
+test("request timeout is bounded and does not prevent session shutdown", async () => {
+  const never = new Promise<string | undefined>(() => {});
+  const processSession = new FakeProcessSession([initializeResult, never]);
+  const factory = createAppServerSessionFactory(new SessionRunner(processSession), {
+    ...timeouts,
+    requestTimeoutMs: 5,
+  });
+  const session = await factory.open("/opt/codex", "/tmp/disposable-codex");
+
+  await assert.rejects(
+    session.request("config/read", { includeLayers: true }),
+    /timed out/i,
+  );
+  await session.close();
+  assert.equal(processSession.endCount, 1);
+  assert.equal(processSession.waitCount, 1);
+});
+
+test("shutdown timeout escalates from EOF to TERM and KILL", async () => {
+  const neverExit = new Promise<ProcessResult>(() => {});
+  const processSession = new FakeProcessSession([initializeResult], neverExit);
+  const factory = createAppServerSessionFactory(new SessionRunner(processSession), {
+    ...timeouts,
+    shutdownTimeoutMs: 5,
+  });
+  const session = await factory.open("/opt/codex", "/tmp/disposable-codex");
+
+  await assert.rejects(session.close(), /shutdown/i);
+  assert.equal(processSession.endCount, 1);
+  assert.deepEqual(processSession.kills, ["SIGTERM", "SIGKILL"]);
+  assert.equal(processSession.waitCount, 3);
+});
+
+test("base user provenance at resolved CODEX_HOME is accepted and drives health", async () => {
+  const storedRaw: McpRegistration = {
+    ...registration,
+    env: { ...registration.env, ROCKY_MCP_EXPOSURE: "raw" },
+  };
+  const inspectSession = new FakeAppServerSession(codexHome, [readResult(entryFor(registration))]);
+  const checkSession = new FakeAppServerSession(codexHome, [readResult(entryFor(storedRaw))]);
+  const runner = new VersionRunner([versionResult(), versionResult()]);
+  const factory = new FakeAppServerSessionFactory([inspectSession, checkSession]);
+  const adapter = adapterWith(runner, factory);
+
+  const inspection = await adapter.inspect(registration);
+  const checked = await adapter.check(registration);
+
+  assert.equal(inspection.state, "identical");
+  assert.notEqual(inspection.snapshot, undefined);
+  assert.deepEqual(checked, {
+    client: "codex",
+    status: "healthy",
+    healthRegistration: storedRaw,
+  });
+  assert.deepEqual(inspectSession.requests, [{
+    method: "config/read",
+    params: { includeLayers: true },
+  }]);
+  assert.deepEqual(checkSession.requests, inspectSession.requests);
+  assert.equal(inspectSession.closeCount, 1);
+  assert.equal(checkSession.closeCount, 1);
+  assert.deepEqual(factory.calls, [
+    { executable: "/opt/codex", codexHome },
+    { executable: "/opt/codex", codexHome },
+  ]);
+  assert.equal(runner.calls.every((call) => call.args.join(" ") === "--version"), true);
+  assert.equal(runner.calls.every((call) => (call.options?.timeoutMs ?? 0) > 0), true);
+});
+
+test("non-base provenance classes and wrong user config path are rejected", async (t) => {
+  const cases: Array<{ name: string; source: Record<string, unknown> }> = [
+    { name: "project", source: { type: "project", dotCodexFolder: "/work/.codex" } },
+    { name: "profile", source: baseSource(configPath, "work") },
+    { name: "session", source: { type: "sessionFlags" } },
+    { name: "system", source: { type: "system", file: "/etc/codex/config.toml" } },
+    { name: "MDM", source: { type: "mdm", domain: "example", key: "managed" } },
+    {
+      name: "enterprise",
+      source: { type: "enterpriseManaged", id: "policy", name: "Managed policy" },
+    },
+    {
+      name: "legacy",
+      source: { type: "legacyManagedConfigTomlFromFile", file: "/etc/codex/managed.toml" },
+    },
+    { name: "unknown", source: { type: "futurePolicy", secret: "SECRET_ORIGIN" } },
+    { name: "wrong config path", source: baseSource("/home/ada/other/config.toml") },
   ];
 
   for (const entry of cases) {
-    const actual = differentStatNumber(entry.value);
-    assert.equal(actual, entry.expected, JSON.stringify(entry));
-    assert.notEqual(actual, entry.value, JSON.stringify(entry));
+    await t.test(entry.name, async () => {
+      const session = new FakeAppServerSession(codexHome, [
+        readResult(entryFor(registration), entry.source),
+      ]);
+      const adapter = adapterWith(
+        new VersionRunner([versionResult()]),
+        new FakeAppServerSessionFactory([session]),
+      );
+
+      const inspection = await adapter.inspect(registration);
+
+      assert.equal(inspection.state, "conflict");
+      assert.match(inspection.detail ?? "", /provenance/i);
+      assert.doesNotMatch(inspection.detail ?? "", /SECRET_ORIGIN|Managed policy|other\/config/);
+      assert.equal(session.closeCount, 1);
+    });
   }
 });
 
-test("missing Codex executable skips setup without invoking runner", async () => {
-  const runner = new FakeRunner([]);
-  const adapter = createCodexAdapter({ runner });
+test("missing layers, origins, or matching base-user version is unreadable", async (t) => {
+  const valid = readResult(entryFor(registration));
+  const cases: Array<{ name: string; mutate(value: Record<string, unknown>): void }> = [
+    { name: "layers", mutate(value) { delete value.layers; } },
+    { name: "origins", mutate(value) { delete value.origins; } },
+    {
+      name: "base layer",
+      mutate(value) {
+        value.layers = [{
+          name: { type: "system", file: "/etc/codex/config.toml" },
+          version: "sha256:system",
+          config: {},
+        }];
+      },
+    },
+  ];
+
+  for (const entry of cases) {
+    await t.test(entry.name, async () => {
+      const malformed = structuredClone(valid);
+      entry.mutate(malformed);
+      const session = new FakeAppServerSession(codexHome, [malformed]);
+      const adapter = adapterWith(
+        new VersionRunner([versionResult()]),
+        new FakeAppServerSessionFactory([session]),
+      );
+
+      const inspection = await adapter.inspect(registration);
+
+      assert.equal(inspection.state, "unreadable");
+      assert.doesNotMatch(inspection.detail ?? "", /mcp_servers|sha256|etc\/codex/);
+      assert.equal(session.closeCount, 1);
+    });
+  }
+});
+
+test("effective Rocky state that disagrees with base layer is never authorized", async () => {
+  const inconsistent = readResult(entryFor(registration));
+  (inconsistent.config as Record<string, unknown>).mcp_servers = {
+    rocky: "SECRET_MALFORMED_EFFECTIVE_STATE",
+  };
+  const session = new FakeAppServerSession(codexHome, [inconsistent]);
+  const adapter = adapterWith(
+    new VersionRunner([versionResult()]),
+    new FakeAppServerSessionFactory([session]),
+  );
+
+  const inspection = await adapter.inspect(registration);
+
+  assert.notEqual(inspection.state, "identical");
+  assert.doesNotMatch(inspection.detail ?? "", /SECRET_MALFORMED_EFFECTIVE_STATE/);
+});
+
+test("absent registration is added with expectedVersion CAS and exact post-state verification", async () => {
+  const session = new FakeAppServerSession(codexHome, [
+    readResult(undefined),
+    writeResult(),
+    readResult(entryFor(registration), baseSource(), "sha256:two"),
+  ]);
+  const adapter = adapterWith(
+    new VersionRunner([versionResult()]),
+    new FakeAppServerSessionFactory([session]),
+  );
+
+  const configured = await adapter.configure(registration, false);
+
+  assert.deepEqual(configured, { client: "codex", status: "configured" });
+  assert.deepEqual(session.requests, [
+    { method: "config/read", params: { includeLayers: true } },
+    {
+      method: "config/value/write",
+      params: {
+        filePath: configPath,
+        keyPath: "mcp_servers.rocky",
+        value: entryFor(registration),
+        mergeStrategy: "upsert",
+        expectedVersion: "sha256:one",
+      },
+    },
+    { method: "config/read", params: { includeLayers: true } },
+  ]);
+  assert.equal(session.closeCount, 1);
+});
+
+test("concurrent appearance causes CAS conflict and leaves foreign entry untouched", async () => {
+  const foreign = entryFor({ ...registration, command: "/opt/foreign-node" });
+  let currentEntry: Record<string, unknown> | undefined;
+  const session = new FakeAppServerSession(codexHome, [
+    readResult(undefined),
+    () => {
+      currentEntry = foreign;
+      throw versionConflict();
+    },
+  ]);
+  const adapter = adapterWith(
+    new VersionRunner([versionResult()]),
+    new FakeAppServerSessionFactory([session]),
+  );
+
+  const configured = await adapter.configure(registration, false);
+
+  assert.equal(configured.status, "failed");
+  assert.deepEqual(configured.manualRegistration, registration);
+  assert.match(configured.detail ?? "", /changed|conflict/i);
+  assert.deepEqual(currentEntry, foreign);
+  assert.deepEqual(session.requests.map(({ method }) => method), [
+    "config/read",
+    "config/value/write",
+  ]);
+});
+
+test("identical registration is a no-op", async () => {
+  const session = new FakeAppServerSession(codexHome, [readResult(entryFor(registration))]);
+  const adapter = adapterWith(
+    new VersionRunner([versionResult()]),
+    new FakeAppServerSessionFactory([session]),
+  );
+
+  assert.deepEqual(await adapter.configure(registration, false), {
+    client: "codex",
+    status: "already-configured",
+  });
+  assert.deepEqual(session.requests.map(({ method }) => method), ["config/read"]);
+});
+
+test("different base-user entry needs confirmation, while foreign provenance refuses replacement", async () => {
+  const prior = entryFor({ ...registration, command: "/opt/prior-node" });
+  const confirmationSession = new FakeAppServerSession(codexHome, [readResult(prior)]);
+  const foreignSession = new FakeAppServerSession(codexHome, [
+    readResult(prior, { type: "project", dotCodexFolder: "/work/.codex" }),
+  ]);
+  const adapter = adapterWith(
+    new VersionRunner([versionResult(), versionResult()]),
+    new FakeAppServerSessionFactory([confirmationSession, foreignSession]),
+  );
+
+  assert.deepEqual(await adapter.configure(registration, false), {
+    client: "codex",
+    status: "requires-confirmation",
+    detail: "Codex already has a different rocky registration",
+    manualRegistration: registration,
+  });
+  const refused = await adapter.configure(registration, true);
+  assert.equal(refused.status, "failed");
+  assert.deepEqual(refused.manualRegistration, registration);
+  assert.match(refused.detail ?? "", /provenance|manual/i);
+  assert.deepEqual(foreignSession.requests.map(({ method }) => method), ["config/read"]);
+});
+
+test("replacement uses one CAS batch and removes recovery artifact only after exact verification", async (t) => {
+  const desired = temporaryRegistration(t);
+  const prior = entryFor({
+    ...desired,
+    command: "/opt/prior-node",
+    env: { ...desired.env, PRIOR_TOKEN: "secret-prior" },
+  });
+  const session = new FakeAppServerSession(codexHome, [
+    readResult(prior),
+    writeResult(),
+    readResult(entryFor(desired), baseSource(), "sha256:two"),
+  ]);
+  const adapter = adapterWith(
+    new VersionRunner([versionResult()]),
+    new FakeAppServerSessionFactory([session]),
+  );
+
+  const configured = await adapter.configure(desired, true);
+
+  assert.deepEqual(configured, { client: "codex", status: "configured" });
+  assert.deepEqual(session.requests[1], {
+    method: "config/batchWrite",
+    params: {
+      filePath: configPath,
+      expectedVersion: "sha256:one",
+      edits: [
+        { keyPath: "mcp_servers.rocky", value: null, mergeStrategy: "replace" },
+        {
+          keyPath: "mcp_servers.rocky",
+          value: entryFor(desired),
+          mergeStrategy: "upsert",
+        },
+      ],
+    },
+  });
+  const recoveryDirectory = join(dirname(desired.env.ROCKY_HOME!), ".rocky-setup-recovery");
+  assert.deepEqual(readdirSync(recoveryDirectory), []);
+  assert.equal(lstatSync(recoveryDirectory).mode & 0o077, 0);
+});
+
+test("replacement race preserves foreign state and retains private recovery authority", async (t) => {
+  const desired = temporaryRegistration(t);
+  const prior = entryFor({ ...desired, command: "/opt/prior-node" });
+  const foreign = entryFor({ ...desired, command: "/opt/foreign-node" });
+  let currentEntry = prior;
+  const session = new FakeAppServerSession(codexHome, [
+    readResult(prior),
+    () => {
+      currentEntry = foreign;
+      throw versionConflict();
+    },
+  ]);
+  const adapter = adapterWith(
+    new VersionRunner([versionResult()]),
+    new FakeAppServerSessionFactory([session]),
+  );
+
+  const configured = await adapter.configure(desired, true);
+
+  assert.equal(configured.status, "failed");
+  assert.deepEqual(configured.manualRegistration, desired);
+  assert.deepEqual(currentEntry, foreign);
+  const artifact = recoveryPath(configured.detail);
+  assert.deepEqual(JSON.parse(readFileSync(artifact, "utf8")), prior);
+  assert.equal(lstatSync(artifact).mode & 0o077, 0);
+  assert.deepEqual(session.requests.map(({ method }) => method), [
+    "config/read",
+    "config/batchWrite",
+  ]);
+});
+
+test("replacement post-state mismatch is failure with retained recovery authority", async (t) => {
+  const desired = temporaryRegistration(t);
+  const prior = entryFor({ ...desired, command: "/opt/prior-node" });
+  const mismatched = entryFor({ ...desired, command: "/opt/unexpected-node" });
+  const session = new FakeAppServerSession(codexHome, [
+    readResult(prior),
+    writeResult(),
+    readResult(mismatched, baseSource(), "sha256:two"),
+  ]);
+  const adapter = adapterWith(
+    new VersionRunner([versionResult()]),
+    new FakeAppServerSessionFactory([session]),
+  );
+
+  const configured = await adapter.configure(desired, true);
+
+  assert.equal(configured.status, "failed");
+  assert.match(configured.detail ?? "", /verif/i);
+  assert.deepEqual(JSON.parse(readFileSync(recoveryPath(configured.detail), "utf8")), prior);
+});
+
+test("owned removal uses CAS delete, verifies absence, and retains recovery artifact", async (t) => {
+  const desired = temporaryRegistration(t);
+  const storedRaw: McpRegistration = {
+    ...desired,
+    env: { ...desired.env, ROCKY_MCP_EXPOSURE: "raw" },
+  };
+  const prior = entryFor(storedRaw);
+  const session = new FakeAppServerSession(codexHome, [
+    readResult(prior),
+    writeResult(),
+    readResult(undefined, baseSource(), "sha256:empty"),
+  ]);
+  const adapter = adapterWith(
+    new VersionRunner([versionResult()]),
+    new FakeAppServerSessionFactory([session]),
+  );
+
+  const removed = await adapter.remove(desired);
+
+  assert.equal(removed.status, "removed");
+  assert.equal(removed.manualRegistration, undefined);
+  assert.deepEqual(session.requests, [
+    { method: "config/read", params: { includeLayers: true } },
+    {
+      method: "config/value/write",
+      params: {
+        filePath: configPath,
+        keyPath: "mcp_servers.rocky",
+        value: null,
+        mergeStrategy: "replace",
+        expectedVersion: "sha256:one",
+      },
+    },
+    { method: "config/read", params: { includeLayers: true } },
+  ]);
+  const artifact = recoveryPath(removed.detail);
+  assert.deepEqual(JSON.parse(readFileSync(artifact, "utf8")), prior);
+  assert.equal(lstatSync(artifact).mode & 0o077, 0);
+});
+
+test("remove race leaves foreign replacement untouched and retains recovery authority", async (t) => {
+  const desired = temporaryRegistration(t);
+  const prior = entryFor(desired);
+  const foreign = entryFor({ ...desired, command: "/opt/foreign-node" });
+  let currentEntry = prior;
+  const session = new FakeAppServerSession(codexHome, [
+    readResult(prior),
+    () => {
+      currentEntry = foreign;
+      throw versionConflict();
+    },
+  ]);
+  const adapter = adapterWith(
+    new VersionRunner([versionResult()]),
+    new FakeAppServerSessionFactory([session]),
+  );
+
+  const removed = await adapter.remove(desired);
+
+  assert.equal(removed.status, "failed");
+  assert.deepEqual(currentEntry, foreign);
+  assert.deepEqual(JSON.parse(readFileSync(recoveryPath(removed.detail), "utf8")), prior);
+  assert.deepEqual(session.requests.map(({ method }) => method), [
+    "config/read",
+    "config/value/write",
+  ]);
+});
+
+test("remove refuses ownership or provenance mismatch before mutation", async (t) => {
+  const foreign = entryFor({ ...registration, command: "/opt/foreign-node" });
+  const cases = [
+    { name: "ownership", response: readResult(foreign) },
+    {
+      name: "provenance",
+      response: readResult(entryFor(registration), {
+        type: "project",
+        dotCodexFolder: "/work/.codex",
+      }),
+    },
+  ];
+
+  for (const entry of cases) {
+    await t.test(entry.name, async () => {
+      const session = new FakeAppServerSession(codexHome, [entry.response]);
+      const adapter = adapterWith(
+        new VersionRunner([versionResult()]),
+        new FakeAppServerSessionFactory([session]),
+      );
+
+      const removed = await adapter.remove(registration);
+
+      assert.equal(removed.status, "failed");
+      assert.match(removed.detail ?? "", /owned|provenance/i);
+      assert.deepEqual(session.requests.map(({ method }) => method), ["config/read"]);
+    });
+  }
+});
+
+test("remove post-state mismatch is failure with retained recovery authority", async (t) => {
+  const desired = temporaryRegistration(t);
+  const prior = entryFor(desired);
+  const session = new FakeAppServerSession(codexHome, [
+    readResult(prior),
+    writeResult(),
+    readResult(prior, baseSource(), "sha256:two"),
+  ]);
+  const adapter = adapterWith(
+    new VersionRunner([versionResult()]),
+    new FakeAppServerSessionFactory([session]),
+  );
+
+  const removed = await adapter.remove(desired);
+
+  assert.equal(removed.status, "failed");
+  assert.match(removed.detail ?? "", /verif/i);
+  assert.deepEqual(JSON.parse(readFileSync(recoveryPath(removed.detail), "utf8")), prior);
+});
+
+test("missing Codex executable keeps existing skipped semantics without probing", async () => {
+  const runner = new VersionRunner([]);
+  const factory = new FakeAppServerSessionFactory([]);
+  const adapter = createCodexAdapter({
+    runner,
+    sessionFactory: factory,
+    env: { CODEX_HOME: codexHome },
+    home: "/home/ada",
+  });
 
   const results = await Promise.all([
     adapter.inspect(registration),
@@ -192,597 +908,180 @@ test("missing Codex executable skips setup without invoking runner", async () =>
     { client: "codex", status: "skipped", detail: "Codex CLI is not installed" },
   ]);
   assert.deepEqual(runner.calls, []);
+  assert.deepEqual(factory.calls, []);
 });
 
-test("not-found get configures with exact get and add argv", async () => {
-  const runner = new FakeRunner([
-    result(1, "", "Error: No MCP server named 'rocky' found."),
-    result(0),
-  ]);
-  const adapter = createCodexAdapter({ runner, executable: "/opt/codex" });
-
-  const configured = await adapter.configure(registration, false);
-
-  assert.deepEqual(configured, { client: "codex", status: "configured" });
-  assert.deepEqual(runner.calls, [
-    codexCall(getArgs),
-    codexCall(addArgs),
-  ]);
-});
-
-test("timeout and spawn failures never become absent from not-found text", async (t) => {
-  const notFound = "Error: No MCP server named 'rocky' found.";
-  const cases: Array<{ name: string; processResult: ProcessResult }> = [
-    {
-      name: "timeout",
-      processResult: {
-        status: null,
-        stdout: "",
-        stderr: notFound,
-        error: new Error("process timeout after 10000ms"),
-      },
-    },
-    {
-      name: "spawn error",
-      processResult: {
-        status: null,
-        stdout: "",
-        stderr: notFound,
-        error: new Error("spawn /opt/codex ENOENT"),
-      },
-    },
-    {
-      name: "numeric exit carrying runner error",
-      processResult: {
-        status: 1,
-        stdout: "",
-        stderr: notFound,
-        error: new Error("runner failed while collecting output"),
-      },
-    },
-  ];
-
-  for (const entry of cases) {
-    await t.test(entry.name, async () => {
-      const runner = new FakeRunner([entry.processResult]);
-      const adapter = createCodexAdapter({ runner, executable: "/opt/codex" });
-
-      const configured = await adapter.configure(registration, false);
-
-      assert.equal(configured.status, "failed");
-      assert.match(configured.detail ?? "", /read/i);
-      assert.doesNotMatch(configured.detail ?? "", /ENOENT|timeout|runner failed|No MCP server/);
-      assert.deepEqual(runner.calls, [codexCall(getArgs)]);
-    });
-  }
-});
-
-test("identical registration is a no-op after normalized command comparison", async () => {
-  const snapshot = completeSnapshot("/opt/bin/../node");
-  const runner = new FakeRunner([result(0, JSON.stringify(snapshot))]);
-  const adapter = createCodexAdapter({ runner, executable: "/opt/codex" });
-
-  const configured = await adapter.configure(registration, false);
-
-  assert.deepEqual(configured, { client: "codex", status: "already-configured" });
-  assert.deepEqual(runner.calls, [codexCall(getArgs)]);
-});
-
-test("conflicting registration requires confirmation when replace is false", async () => {
-  const runner = new FakeRunner([result(0, JSON.stringify(completeSnapshot("/old/node")))]);
-  const adapter = createCodexAdapter({ runner, executable: "/opt/codex" });
-
-  const configured = await adapter.configure(registration, false);
-
-  assert.deepEqual(configured, {
-    client: "codex",
-    status: "requires-confirmation",
-    detail: "Codex already has a different rocky registration",
-    manualRegistration: registration,
-  });
-  assert.deepEqual(runner.calls, [codexCall(getArgs)]);
-});
-
-test("replace persists then deletes prior snapshot only after desired registration verifies", async (t) => {
-  const desired = temporaryRegistration(t);
-  const runner = new FakeRunner([
-    result(0, JSON.stringify(completeSnapshot("/old/node"))),
-    result(0),
-    result(0),
-    result(0, JSON.stringify(completeSnapshot(
-      desired.command,
-      desired.args,
-      desired.env,
-    ))),
-  ]);
-  const adapter = createCodexAdapter({ runner, executable: "/opt/codex" });
-
-  const configured = await adapter.configure(desired, true);
-
-  assert.deepEqual(configured, { client: "codex", status: "configured" });
-  assert.deepEqual(runner.calls, [
-    codexCall(getArgs),
-    codexCall(removeArgs),
-    codexCall(addArgumentsFor(desired)),
-    codexCall(getArgs),
-  ]);
-  const recoveryDirectory = join(dirname(desired.env.ROCKY_HOME!), ".rocky-setup-recovery");
-  assert.deepEqual(readdirSync(recoveryDirectory), []);
-  assertRequestedMode(recoveryDirectory, 0o700, "directory");
-  assert.throws(() => lstatSync(desired.env.ROCKY_HOME!), { code: "ENOENT" });
-});
-
-test("Windows recovery mode semantics reach the intended remove and replacement flow", async (t) => {
-  simulateWindowsArtifactMetadata(t);
-  const desired = temporaryRegistration(t);
-  const runner = new FakeRunner([
-    result(0, JSON.stringify(completeSnapshot("C:\\old\\node.exe"))),
-    result(0),
-    result(0),
-    result(0, JSON.stringify(completeSnapshot(desired.command, desired.args, desired.env))),
-  ]);
-
-  const configured = await createCodexAdapter({ runner, executable: "C:\\tools\\codex.exe" })
-    .configure(desired, true);
-
-  assert.deepEqual(configured, { client: "codex", status: "configured" });
-  assert.deepEqual(runner.calls.map((call) => call.args), [
-    getArgs,
-    removeArgs,
-    addArgumentsFor(desired),
-    getArgs,
-  ]);
-});
-
-test("Windows recovery artifact identity and link-count mismatches stop before remove", async (t) => {
-  const identityMutations: Array<{ before: number; after: number }> = [];
+test("old, timed-out, or missing app-server capability returns manual registration without mutation", async (t) => {
   const cases: Array<{
     name: string;
-    mutate(metadata: Stats): void;
+    version: ProcessResult;
+    session?: AppServerSession | Error;
   }> = [
+    { name: "old version", version: versionResult("0.145.9") },
     {
-      name: "identity",
-      mutate(metadata) {
-        const before = metadata.ino;
-        Object.defineProperty(metadata, "ino", {
-          configurable: true,
-          value: differentStatNumber(before),
-        });
-        identityMutations.push({ before, after: metadata.ino });
+      name: "version timeout",
+      version: {
+        status: null,
+        stdout: "",
+        stderr: "SECRET_VERSION_TIMEOUT",
+        error: new Error("SECRET_VERSION_TIMEOUT"),
       },
     },
     {
-      name: "link count",
-      mutate(metadata) {
-        Object.defineProperty(metadata, "nlink", { configurable: true, value: 2 });
-      },
-    },
-  ];
-
-  for (const entry of cases) {
-    await t.test(entry.name, async (child) => {
-      simulateWindowsArtifactMetadata(child, entry.mutate);
-      const desired = temporaryRegistration(child);
-      const runner = new FakeRunner([
-        result(0, JSON.stringify(completeSnapshot("C:\\old\\node.exe"))),
-      ]);
-
-      const configured = await createCodexAdapter({ runner, executable: "C:\\tools\\codex.exe" })
-        .configure(desired, true);
-
-      assert.equal(configured.status, "failed");
-      assert.match(configured.detail ?? "", /recovery artifact/i);
-      assert.deepEqual(runner.calls.map((call) => call.args), [getArgs]);
-      if (entry.name === "identity") {
-        assert.ok(identityMutations.length > 0, "identity mutation must reach a recovery artifact");
-        for (const mutation of identityMutations) {
-          assert.notEqual(mutation.after, mutation.before);
-        }
-      }
-    });
-  }
-});
-
-test("failed replacement add recreates, verifies, and deletes the durable prior snapshot", async (t) => {
-  const desired = temporaryRegistration(t);
-  const priorEnv = { KEEP_FIRST: "alpha", KEEP_SECOND: "bravo" };
-  const snapshot = completeSnapshot("/old/node", ["/old/server.js", "--flag", "two words"], priorEnv);
-  const runner = new FakeRunner([
-    result(0, JSON.stringify(snapshot)),
-    result(0),
-    result(1, "", "add failed with SECRET_VALUE"),
-    result(0),
-    result(0, JSON.stringify(snapshot)),
-  ]);
-  const adapter = createCodexAdapter({ runner, executable: "/opt/codex" });
-
-  const configured = await adapter.configure(desired, true);
-
-  assert.deepEqual(configured, {
-    client: "codex",
-    status: "failed",
-    detail: "Codex registration update failed; previous registration was restored",
-  });
-  assert.doesNotMatch(configured.detail ?? "", /SECRET_VALUE|alpha|bravo/);
-  assert.deepEqual(runner.calls, [
-    codexCall(getArgs),
-    codexCall(removeArgs),
-    codexCall(addArgumentsFor(desired)),
-    {
-      command: "/opt/codex",
-      args: [
-        "mcp", "add",
-        "--env", "KEEP_FIRST=alpha",
-        "--env", "KEEP_SECOND=bravo",
-        "rocky", "--", "/old/node", "/old/server.js", "--flag", "two words",
-      ],
-      options: { timeoutMs: 10_000 },
-    },
-    codexCall(getArgs),
-  ]);
-  assert.deepEqual(readdirSync(join(dirname(desired.env.ROCKY_HOME!), ".rocky-setup-recovery")), []);
-  assert.throws(() => lstatSync(desired.env.ROCKY_HOME!), { code: "ENOENT" });
-});
-
-test("rollback verification mismatch retains a private exact recovery artifact", async (t) => {
-  const desired = temporaryRegistration(t);
-  const snapshot = completeSnapshot("/old/node", ["/old/server.js"], { API_TOKEN: "secret-token" });
-  const changed = completeSnapshot("/different/node", ["/old/server.js"], { API_TOKEN: "secret-token" });
-  const runner = new FakeRunner([
-    result(0, JSON.stringify(snapshot)),
-    result(0),
-    result(1),
-    result(0),
-    result(0, JSON.stringify(changed)),
-  ]);
-  const adapter = createCodexAdapter({ runner, executable: "/opt/codex" });
-
-  const configured = await adapter.configure(desired, true);
-
-  assert.equal(configured.status, "failed");
-  assert.match(configured.detail ?? "", /manual recovery/i);
-  assert.doesNotMatch(configured.detail ?? "", /secret-token|API_TOKEN|old\/server/);
-  assert.deepEqual(configured.manualRegistration, desired);
-  const artifact = recoveryPath(configured.detail);
-  assert.deepEqual(JSON.parse(readFileSync(artifact, "utf8")), snapshot);
-  assert.equal(lstatSync(artifact).isFile(), true);
-  assert.equal(lstatSync(artifact).nlink, 1);
-  assertRequestedMode(artifact, 0o600, "file");
-  assert.equal(dirname(artifact), join(dirname(desired.env.ROCKY_HOME!), ".rocky-setup-recovery"));
-  assert.equal(lstatSync(dirname(artifact)).isSymbolicLink(), false);
-  assertRequestedMode(dirname(artifact), 0o700, "directory");
-});
-
-test("rollback add failure retains collision-safe recovery artifacts and reports no secrets", async (t) => {
-  const desired = temporaryRegistration(t);
-  const snapshots = [
-    completeSnapshot("/old/one", ["/old/one.js"], { TOKEN: "first-secret" }),
-    completeSnapshot("/old/two", ["/old/two.js"], { TOKEN: "second-secret" }),
-  ];
-  const paths: string[] = [];
-
-  for (const snapshot of snapshots) {
-    const runner = new FakeRunner([
-      result(0, JSON.stringify(snapshot)),
-      result(0),
-      result(1, "", "desired-add-secret"),
-      result(1, "", "rollback-add-secret"),
-    ]);
-    const configured = await createCodexAdapter({ runner, executable: "/opt/codex" })
-      .configure(desired, true);
-
-    assert.equal(configured.status, "failed");
-    assert.deepEqual(configured.manualRegistration, desired);
-    assert.doesNotMatch(configured.detail ?? "", /first-secret|second-secret|add-secret|TOKEN/);
-    paths.push(recoveryPath(configured.detail));
-  }
-
-  assert.notEqual(paths[0], paths[1]);
-  assert.deepEqual(JSON.parse(readFileSync(paths[0]!, "utf8")), snapshots[0]);
-  assert.deepEqual(JSON.parse(readFileSync(paths[1]!, "utf8")), snapshots[1]);
-});
-
-test("malformed and nonzero rollback verification retain the durable recovery artifact", async (t) => {
-  const cases = [
-    { name: "malformed", verification: result(0, "{not-json") },
-    { name: "nonzero", verification: result(9, "", "verification-secret") },
-  ];
-
-  for (const entry of cases) {
-    await t.test(entry.name, async () => {
-      const desired = temporaryRegistration(t);
-      const snapshot = completeSnapshot("/old/node", ["/old/server.js"], { TOKEN: "prior-secret" });
-      const runner = new FakeRunner([
-        result(0, JSON.stringify(snapshot)),
-        result(0),
-        result(1),
-        result(0),
-        entry.verification,
-      ]);
-
-      const configured = await createCodexAdapter({ runner, executable: "/opt/codex" })
-        .configure(desired, true);
-
-      assert.equal(configured.status, "failed");
-      assert.match(configured.detail ?? "", /manual recovery/i);
-      assert.doesNotMatch(configured.detail ?? "", /prior-secret|verification-secret|TOKEN/);
-      assert.deepEqual(JSON.parse(readFileSync(recoveryPath(configured.detail), "utf8")), snapshot);
-    });
-  }
-});
-
-test("symlinked recovery directory is refused before destructive remove", async (t) => {
-  const desired = temporaryRegistration(t);
-  const outside = mkdtempSync(join(tmpdir(), "rocky-codex-outside-"));
-  t.after(() => rmSync(outside, { recursive: true, force: true }));
-  const recoveryDirectory = join(dirname(desired.env.ROCKY_HOME!), ".rocky-setup-recovery");
-  symlinkSync(outside, recoveryDirectory);
-  const runner = new FakeRunner([
-    result(0, JSON.stringify(completeSnapshot("/old/node", [], { TOKEN: "prior-secret" }))),
-  ]);
-
-  const configured = await createCodexAdapter({ runner, executable: "/opt/codex" })
-    .configure(desired, true);
-
-  assert.equal(configured.status, "failed");
-  assert.match(configured.detail ?? "", /recovery/i);
-  assert.doesNotMatch(configured.detail ?? "", /prior-secret|TOKEN/);
-  assert.deepEqual(runner.calls, [codexCall(getArgs)]);
-  assert.deepEqual(readdirSync(outside), []);
-});
-
-test("private recovery directory is allowed under an existing searchable user home", async (t) => {
-  const desired = temporaryRegistration(t);
-  const userHome = dirname(desired.env.ROCKY_HOME!);
-  chmodSync(userHome, 0o755);
-  const runner = new FakeRunner([
-    result(0, JSON.stringify(completeSnapshot("/old/node"))),
-    result(0),
-    result(0),
-    result(0, JSON.stringify(completeSnapshot(desired.command, desired.args, desired.env))),
-  ]);
-
-  const configured = await createCodexAdapter({ runner, executable: "/opt/codex" })
-    .configure(desired, true);
-
-  assert.equal(configured.status, "configured");
-  assertRequestedMode(join(userHome, ".rocky-setup-recovery"), 0o700, "directory");
-  assert.throws(() => lstatSync(desired.env.ROCKY_HOME!), { code: "ENOENT" });
-});
-
-test("non-default and unknown snapshot metadata blocks replacement before remove", async (t) => {
-  const cases: Array<{ name: string; mutate(snapshot: Record<string, unknown>): void }> = [
-    {
-      name: "cwd",
-      mutate(snapshot) {
-        (snapshot.transport as Record<string, unknown>).cwd = "/private/work";
-      },
+      name: "app-server missing",
+      version: versionResult(),
+      session: new Error("spawn ENOENT SECRET_APP_SERVER"),
     },
     {
-      name: "startup timeout",
-      mutate(snapshot) {
-        snapshot.startup_timeout_sec = 15;
-      },
-    },
-    {
-      name: "approval mode",
-      mutate(snapshot) {
-        snapshot.default_tools_approval_mode = "prompt";
-      },
-    },
-    {
-      name: "tool policy",
-      mutate(snapshot) {
-        snapshot.enabled_tools = ["memory_search"];
-      },
-    },
-    {
-      name: "OAuth",
-      mutate(snapshot) {
-        snapshot.oauth = { access_token: "never-log-this" };
-      },
-    },
-    {
-      name: "unknown metadata",
-      mutate(snapshot) {
-        snapshot.future_metadata = { secret: "never-log-this" };
-      },
-    },
-    {
-      name: "disabled registration",
-      mutate(snapshot) {
-        snapshot.enabled = false;
-        snapshot.disabled_reason = "managed policy details";
-      },
-    },
-    {
-      name: "empty environment that Codex add serializes as null",
-      mutate(snapshot) {
-        (snapshot.transport as Record<string, unknown>).env = {};
-      },
+      name: "app-server startup timeout",
+      version: versionResult(),
+      session: new Error("startup timed out SECRET_APP_SERVER"),
     },
   ];
 
   for (const entry of cases) {
     await t.test(entry.name, async () => {
-      const snapshot = completeSnapshot("/old/node");
-      entry.mutate(snapshot);
-      const runner = new FakeRunner([result(0, JSON.stringify(snapshot))]);
-      const adapter = createCodexAdapter({ runner, executable: "/opt/codex" });
-
-      const configured = await adapter.configure(registration, true);
+      const runner = new VersionRunner([entry.version]);
+      const factory = new FakeAppServerSessionFactory(
+        entry.session === undefined ? [] : [entry.session],
+      );
+      const configured = await adapterWith(runner, factory)
+        .configure(registration, false);
 
       assert.equal(configured.status, "failed");
-      assert.match(configured.detail ?? "", /manual/i);
-      assert.doesNotMatch(configured.detail ?? "", /never-log-this|private\/work|managed policy details/);
       assert.deepEqual(configured.manualRegistration, registration);
-      assert.deepEqual(runner.calls, [codexCall(getArgs)]);
+      assert.match(configured.detail ?? "", /manual registration/i);
+      assert.doesNotMatch(
+        configured.detail ?? "",
+        /SECRET_VERSION_TIMEOUT|SECRET_APP_SERVER|ENOENT/,
+      );
+      assert.deepEqual(runner.calls[0]?.args, ["--version"]);
+      assert.equal((runner.calls[0]?.options?.timeoutMs ?? 0) > 0, true);
+      assert.equal(factory.calls.length, entry.session === undefined ? 0 : 1);
     });
   }
 });
 
-test("matching core with unsafe metadata is conflicting, unhealthy, and not replaceable", async (t) => {
-  const cases: Array<{ name: string; mutate(snapshot: Record<string, unknown>): void }> = [
+test("unsupported config read or expectedVersion write never invokes CLI mutation fallback", async (t) => {
+  const cases: Array<{ name: string; steps: SessionStep[]; methods: string[] }> = [
     {
-      name: "disabled",
-      mutate(snapshot) {
-        snapshot.enabled = false;
-        snapshot.disabled_reason = "secret managed reason";
-      },
+      name: "config read",
+      steps: [new AppServerRequestError(-32601, { message: "SECRET_METHOD" })],
+      methods: ["config/read"],
     },
     {
-      name: "cwd",
-      mutate(snapshot) {
-        (snapshot.transport as Record<string, unknown>).cwd = "/secret/project";
-      },
-    },
-    {
-      name: "timeout",
-      mutate(snapshot) {
-        snapshot.tool_timeout_sec = 45;
-      },
-    },
-    {
-      name: "approval",
-      mutate(snapshot) {
-        snapshot.default_tools_approval_mode = "prompt";
-      },
-    },
-    {
-      name: "tool policy",
-      mutate(snapshot) {
-        snapshot.disabled_tools = ["secret_tool_name"];
-      },
-    },
-    {
-      name: "OAuth",
-      mutate(snapshot) {
-        snapshot.oauth = { access_token: "secret-access-token" };
-      },
-    },
-    {
-      name: "unknown metadata",
-      mutate(snapshot) {
-        snapshot.future_metadata = { value: "secret-future-value" };
-      },
+      name: "expectedVersion",
+      steps: [
+        readResult(undefined),
+        new AppServerRequestError(-32602, { message: "SECRET_EXPECTED_VERSION" }),
+      ],
+      methods: ["config/read", "config/value/write"],
     },
   ];
 
   for (const entry of cases) {
     await t.test(entry.name, async () => {
-      const snapshot = completeSnapshot();
-      entry.mutate(snapshot);
-      const encoded = JSON.stringify(snapshot);
-      const runner = new FakeRunner([
-        result(0, encoded),
-        result(0, encoded),
-        result(0, encoded),
-      ]);
-      const adapter = createCodexAdapter({ runner, executable: "/opt/codex" });
+      const session = new FakeAppServerSession(codexHome, entry.steps);
+      const runner = new VersionRunner([versionResult()]);
+      const configured = await adapterWith(
+        runner,
+        new FakeAppServerSessionFactory([session]),
+      ).configure(registration, false);
 
-      const inspection = await adapter.inspect(registration);
-      const checked = await adapter.check(registration);
-      const replaced = await adapter.configure(registration, true);
-
-      assert.equal(inspection.state, "conflict");
-      assert.equal(checked.status, "failed");
-      assert.equal(replaced.status, "failed");
-      assert.match(replaced.detail ?? "", /manual/i);
-      assert.doesNotMatch(
-        `${inspection.detail ?? ""}${checked.detail ?? ""}${replaced.detail ?? ""}`,
-        /secret managed|secret\/project|secret_tool_name|secret-access-token|secret-future-value/,
-      );
-      assert.deepEqual(runner.calls, [codexCall(getArgs), codexCall(getArgs), codexCall(getArgs)]);
+      assert.equal(configured.status, "failed");
+      assert.deepEqual(configured.manualRegistration, registration);
+      assert.match(configured.detail ?? "", /manual registration/i);
+      assert.doesNotMatch(configured.detail ?? "", /SECRET_METHOD|SECRET_EXPECTED_VERSION/);
+      assert.deepEqual(session.requests.map(({ method }) => method), entry.methods);
+      assert.deepEqual(runner.calls.map(({ args }) => args), [["--version"]]);
+      assert.equal(session.closeCount, 1);
     });
   }
 });
 
-test("malformed or partial get JSON is unreadable without exposing its contents", async () => {
-  const partial = {
-    name: "rocky",
-    enabled: true,
-    transport: { type: "stdio", command: "/old/node", args: [], env: { TOKEN: "sensitive" } },
-  };
-  const runner = new FakeRunner([result(0, JSON.stringify(partial))]);
-  const adapter = createCodexAdapter({ runner, executable: "/opt/codex" });
-
-  const configured = await adapter.configure(registration, true);
+test("session shutdown failure prevents configured success", async () => {
+  const session = new FakeAppServerSession(
+    codexHome,
+    [readResult(entryFor(registration))],
+    new Error("SECRET_SHUTDOWN_FAILURE"),
+  );
+  const configured = await adapterWith(
+    new VersionRunner([versionResult()]),
+    new FakeAppServerSessionFactory([session]),
+  ).configure(registration, false);
 
   assert.equal(configured.status, "failed");
-  assert.match(configured.detail ?? "", /read/i);
-  assert.doesNotMatch(configured.detail ?? "", /TOKEN|sensitive|old\/node/);
-  assert.deepEqual(runner.calls, [codexCall(getArgs)]);
+  assert.deepEqual(configured.manualRegistration, registration);
+  assert.match(configured.detail ?? "", /manual registration/i);
+  assert.doesNotMatch(configured.detail ?? "", /SECRET_SHUTDOWN_FAILURE/);
+  assert.equal(session.closeCount, 1);
 });
 
-test("remove refuses foreign command, args, and environment without mutation", async (t) => {
-  const cases: Array<{ name: string; snapshot: Record<string, unknown> }> = [
-    {
-      name: "foreign command",
-      snapshot: completeSnapshot("/secret/foreign-node"),
-    },
-    {
-      name: "foreign args",
-      snapshot: completeSnapshot(registration.command, ["/secret/foreign-server.js", "mcp"]),
-    },
-    {
-      name: "foreign environment",
-      snapshot: completeSnapshot(registration.command, registration.args, {
-        ROCKY_MCP_EXPOSURE: "sanitized",
-        ROCKY_HOME: "/secret/foreign-home",
-        API_TOKEN: "secret-token",
-      }),
-    },
-  ];
+test("shutdown failure after destructive replacement retains and reports recovery authority", async (t) => {
+  const desired = temporaryRegistration(t);
+  const prior = entryFor({ ...desired, command: "/opt/prior-node" });
+  const session = new FakeAppServerSession(
+    codexHome,
+    [
+      readResult(prior),
+      writeResult(),
+      readResult(entryFor(desired), baseSource(), "sha256:two"),
+    ],
+    new Error("SECRET_DESTRUCTIVE_SHUTDOWN"),
+  );
+  const configured = await adapterWith(
+    new VersionRunner([versionResult()]),
+    new FakeAppServerSessionFactory([session]),
+  ).configure(desired, true);
 
-  for (const entry of cases) {
-    await t.test(entry.name, async () => {
-      const runner = new FakeRunner([result(0, JSON.stringify(entry.snapshot))]);
-      const adapter = createCodexAdapter({ runner, executable: "/opt/codex" });
-
-      const removed = await adapter.remove(registration);
-
-      assert.equal(removed.status, "failed");
-      assert.doesNotMatch(
-        removed.detail ?? "",
-        /foreign-node|foreign-server|foreign-home|API_TOKEN|secret-token/,
-      );
-      assert.deepEqual(runner.calls, [codexCall(getArgs)]);
-    });
-  }
+  assert.equal(configured.status, "failed");
+  assert.doesNotMatch(configured.detail ?? "", /SECRET_DESTRUCTIVE_SHUTDOWN/);
+  assert.deepEqual(JSON.parse(readFileSync(recoveryPath(configured.detail), "utf8")), prior);
 });
 
-test("remove and check use inspection results and exact remove argv", async () => {
-  const ownedRaw = completeSnapshot(registration.command, registration.args, {
-    ROCKY_MCP_EXPOSURE: "raw",
-    ROCKY_HOME: registration.env.ROCKY_HOME,
-  });
-  const removeRunner = new FakeRunner([
-    result(0, JSON.stringify(ownedRaw)),
-    result(0),
-  ]);
-  const removeAdapter = createCodexAdapter({ runner: removeRunner, executable: "/opt/codex" });
-  const removed = await removeAdapter.remove(registration);
+test("shutdown failure after destructive removal still reports retained recovery authority", async (t) => {
+  const desired = temporaryRegistration(t);
+  const prior = entryFor(desired);
+  const session = new FakeAppServerSession(
+    codexHome,
+    [
+      readResult(prior),
+      writeResult(),
+      readResult(undefined, baseSource(), "sha256:empty"),
+    ],
+    new Error("SECRET_DESTRUCTIVE_SHUTDOWN"),
+  );
+  const removed = await adapterWith(
+    new VersionRunner([versionResult()]),
+    new FakeAppServerSessionFactory([session]),
+  ).remove(desired);
 
-  assert.deepEqual(removed, { client: "codex", status: "removed" });
-  assert.deepEqual(removeRunner.calls, [
-    codexCall(getArgs),
-    codexCall(removeArgs),
-  ]);
+  assert.equal(removed.status, "failed");
+  assert.doesNotMatch(removed.detail ?? "", /SECRET_DESTRUCTIVE_SHUTDOWN/);
+  assert.deepEqual(JSON.parse(readFileSync(recoveryPath(removed.detail), "utf8")), prior);
+});
 
-  const storedRawRegistration: McpRegistration = {
+test("secret-bearing foreign config never appears in result detail", async () => {
+  const secret = "SECRET_CONFIG_TOKEN_7f91";
+  const foreign = entryFor({
     ...registration,
-    env: { ...registration.env, ROCKY_MCP_EXPOSURE: "raw" },
-  };
-  const checkRunner = new FakeRunner([result(0, JSON.stringify(completeSnapshot(
-    storedRawRegistration.command,
-    storedRawRegistration.args,
-    storedRawRegistration.env,
-  )))]);
-  const checkAdapter = createCodexAdapter({ runner: checkRunner, executable: "/opt/codex" });
-  assert.deepEqual(await checkAdapter.check(registration), {
-    client: "codex",
-    status: "healthy",
-    healthRegistration: storedRawRegistration,
+    command: "/opt/foreign-node",
+    env: { ...registration.env, API_TOKEN: secret },
   });
-  assert.deepEqual(checkRunner.calls, [codexCall(getArgs)]);
+  const response = readResult(foreign, {
+    type: "enterpriseManaged",
+    id: "policy",
+    name: `managed-${secret}`,
+  });
+  (response.config as Record<string, unknown>).unrelated_secret = secret;
+  const session = new FakeAppServerSession(codexHome, [response]);
+  const configured = await adapterWith(
+    new VersionRunner([versionResult()]),
+    new FakeAppServerSessionFactory([session]),
+  ).configure(registration, true);
+
+  assert.equal(configured.status, "failed");
+  assert.deepEqual(configured.manualRegistration, registration);
+  assert.doesNotMatch(JSON.stringify(configured), new RegExp(secret));
+  assert.deepEqual(session.requests.map(({ method }) => method), ["config/read"]);
 });
