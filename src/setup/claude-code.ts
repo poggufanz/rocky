@@ -1236,7 +1236,8 @@ export function createClaudeCodeAdapter(
       && verified.read.bytes.equals(audited.bytes)
       && verified.read.mode === inspection.file.read.mode
       && isObject(verifiedRoot)
-      && isDeepStrictEqual(verifiedRoot, audited.parsed);
+      && isDeepStrictEqual(verifiedRoot, audited.parsed)
+      && guard.unchanged();
     if (!exact) {
       return failed(withRecovery(
         "Claude Code published state could not be verified",

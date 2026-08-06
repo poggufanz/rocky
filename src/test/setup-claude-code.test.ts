@@ -1176,6 +1176,67 @@ test("real transaction rejects a same-byte inode installed after prepared public
   assert.equal(configured.status, "failed");
 });
 
+test("real committed publication rejects exact-state target and parent replacements", async (t) => {
+  for (const operation of ["configure", "remove"] as const) {
+    for (const race of ["target", "parent"] as const) {
+      await t.test(`${operation} ${race}`, async (st) => {
+        const setup = fixture(st, {
+          keep: true,
+          mcpServers: operation === "remove" ? { rocky: rockyEntry() } : {},
+        });
+        let publishedInode: number | undefined;
+        let winnerInode: number | undefined;
+        let winnerBytes: Buffer | undefined;
+        let committedParent: string | undefined;
+        const adapter = createClaudeCodeAdapter(adapterDependencies(
+          setup,
+          new FakeClaudeRunner((call) => transformStage(call)),
+          {
+            lifecycle: {
+              afterPublish(path) {
+                winnerBytes = readFileSync(path);
+                const mode = statSync(path).mode & 0o777;
+                if (race === "target") {
+                  publishedInode = lstatSync(path).ino;
+                  const winner = join(setup.root, `${operation}-target-winner.json`);
+                  writeFileSync(winner, winnerBytes, { mode });
+                  chmodSync(winner, mode);
+                  winnerInode = lstatSync(winner).ino;
+                  renameSync(winner, path);
+                } else {
+                  publishedInode = lstatSync(setup.configDir).ino;
+                  const winnerParent = join(setup.root, `${operation}-parent-winner`);
+                  mkdirSync(winnerParent, { mode: 0o700 });
+                  writeFileSync(join(winnerParent, ".claude.json"), winnerBytes, { mode });
+                  chmodSync(join(winnerParent, ".claude.json"), mode);
+                  winnerInode = lstatSync(winnerParent).ino;
+                  committedParent = join(setup.root, `${operation}-committed-parent`);
+                  renameSync(setup.configDir, committedParent);
+                  renameSync(winnerParent, setup.configDir);
+                }
+              },
+            },
+          },
+        ));
+
+        const outcome = operation === "configure"
+          ? await adapter.configure(registration, false)
+          : await adapter.remove(registration);
+
+        assert.ok(publishedInode !== undefined && winnerInode !== undefined && winnerBytes !== undefined);
+        assert.notEqual(winnerInode, publishedInode);
+        assert.equal(
+          lstatSync(race === "target" ? setup.configPath : setup.configDir).ino,
+          winnerInode,
+        );
+        assert.deepEqual(readFileSync(setup.configPath), winnerBytes);
+        if (committedParent !== undefined) assert.equal(existsSync(committedParent), true);
+        assert.equal(outcome.status, "failed");
+      });
+    }
+  }
+});
+
 test("two simultaneous staged configures preserve one exact winner", async (t) => {
   const setup = fixture(t, { keep: true, mcpServers: {} });
   let waiting = 0;
