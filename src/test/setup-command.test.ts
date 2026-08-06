@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -20,6 +20,7 @@ import type { ProcessRunner, ProcessSession } from "../setup/process.js";
 import { createCodexAdapter } from "../setup/codex.js";
 import { createPlatformServices } from "../setup/platform.js";
 import {
+  createProductionAdapters,
   createConfirmationPort,
   setup,
   type ConfirmationPort,
@@ -710,6 +711,54 @@ test("manual registrations render as host-appropriate desired argv or config", a
   ])}`));
   assert.match(output.stderr, /claude-desktop manual config: \{"mcpServers":\{"rocky":\{"type":"stdio"/);
   assert.match(output.stderr, new RegExp(rockyHome.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+});
+
+test("production adapter wiring passes the captured setup environment to Claude path resolution", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "rocky-setup-claude-env-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const home = join(root, "home");
+  const override = join(root, "override");
+  mkdirSync(home, { recursive: true });
+  mkdirSync(override, { recursive: true });
+  writeFileSync(join(home, ".claude.json"), JSON.stringify({
+    mcpServers: { rocky: { type: "stdio", command: "/foreign", args: [], env: {} } },
+  }));
+  writeFileSync(join(override, ".claude.json"), JSON.stringify({
+    mcpServers: { rocky: {
+      type: "stdio",
+      command: nodePath,
+      args: [entryPath, "mcp"],
+      env: { ROCKY_MCP_EXPOSURE: "sanitized", ROCKY_HOME: rockyHome },
+    } },
+  }));
+  const env = { PATH: "/tools", CLAUDE_CONFIG_DIR: override };
+  const platform = createPlatformServices({
+    platform: "linux",
+    home,
+    env,
+    isWsl: false,
+    fileExists: (path) => path === "/tools/claude",
+  });
+  const adapters = await createProductionAdapters(
+    platform,
+    { async run() { throw new Error("read-only inspection must not run Claude"); } },
+    {
+      name: "rocky",
+      command: nodePath,
+      args: [entryPath, "mcp"],
+      env: { ROCKY_MCP_EXPOSURE: "sanitized", ROCKY_HOME: rockyHome },
+    },
+    env,
+  );
+  const claude = adapters.find(({ id }) => id === "claude-code");
+  assert.ok(claude !== undefined);
+
+  assert.equal((await claude.inspect({
+    name: "rocky",
+    command: nodePath,
+    args: [entryPath, "mcp"],
+    env: { ROCKY_MCP_EXPOSURE: "sanitized", ROCKY_HOME: rockyHome },
+  })).state, "identical");
 });
 
 test("remove and check never render manual instructions that add Rocky", async (t) => {

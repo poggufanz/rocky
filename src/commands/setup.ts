@@ -100,6 +100,7 @@ export async function createProductionAdapters(
   platform: PlatformServices,
   runner: ProcessRunner,
   registration: McpRegistration,
+  env: NodeJS.ProcessEnv = process.env,
 ): Promise<readonly SetupClientAdapter[]> {
   const common: SetupClientAdapter[] = [
     createCodexAdapter({
@@ -110,7 +111,9 @@ export async function createProductionAdapters(
     createClaudeCodeAdapter({
       runner,
       executable: platform.resolveExecutable("claude"),
-      userConfigPath: join(platform.home, ".claude.json"),
+      env,
+      home: platform.home,
+      platform: platform.platform,
     }),
   ];
   if (!platform.isWsl) {
@@ -503,7 +506,12 @@ export async function setup(argv: readonly string[], deps?: SetupDependencies): 
   }
 
   const adapters = deps === undefined
-    ? await createProductionAdapters(dependencies.platform, dependencies.runner, registration)
+    ? await createProductionAdapters(
+      dependencies.platform,
+      dependencies.runner,
+      registration,
+      dependencies.env ?? process.env,
+    )
     : dependencies.adapters;
   let results: SetupResult[] | undefined;
   let inspectionFailures: ReadonlyMap<SetupClientAdapter, SetupResult> = new Map();
