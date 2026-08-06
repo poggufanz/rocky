@@ -84,15 +84,30 @@ export interface RecoveryOutcome {
    * exists. Absent when no such artifact is proven.
    */
   provenCopy?: string;
-  /** Proven, at the moment this call finished acting, whether `path` exists. */
+  /**
+   * Proven, at the moment this call finished acting, whether `path` itself
+   * holds live, reachable content — `isLiveRegularFile`, not a bare
+   * existence check (round 8, I2). A dangling symlink, a valid symlink, a
+   * directory, or any other name that merely *resolves* is never "exists"
+   * for this field: callers use it to decide whether an artifact derived
+   * from `path`'s prior bytes is safe to treat as redundant, and a name
+   * resolving proves nothing about whether real content sits behind it.
+   */
   targetExists: boolean;
   /** True only when this very call wrote bytes to `path` (created or restored it). */
   targetWritten: boolean;
-  /** True only when this very call removed a transaction directory. */
-  directoryRemoved: boolean;
   /**
    * True when this call found a transaction directory it could not prove
    * safe to discard and left it in place rather than guessing.
+   *
+   * There is deliberately no field recording whether a transaction
+   * directory was *removed*: round 8 found `directoryRemoved` written by
+   * ten call sites and read by none (I1) — an unread fact is not a safety
+   * mechanism, it is the enumeration gap wearing the enumeration's uniform.
+   * The fix is not to wire it up; it is that recovery no longer removes a
+   * transaction directory at all (see `resolveUndisplacedTransaction`'s doc
+   * comment). A capability that does not exist cannot be exercised
+   * silently, and needs no field to disclose it.
    */
   artifactRetainedUnproven: boolean;
 }
@@ -146,6 +161,23 @@ export function pathExists(path: string): boolean {
   } catch (error) {
     if (errorCode(error) === "ENOENT") return false;
     return true;
+  }
+}
+
+/**
+ * Proves `path` itself holds live, reachable content — a genuine regular
+ * file, not merely a name that resolves. `pathExists`/`lstatSync` return
+ * true for a dangling symlink, a valid symlink, a directory, a socket, or
+ * any other non-regular name (round 8, I2: `resolveUndisplacedTransaction`
+ * used to treat any of those as proof that discarding a staged artifact
+ * loses nothing — false for a dangling symlink, where the staged artifact
+ * can be the only surviving copy of anything).
+ */
+function isLiveRegularFile(path: string): boolean {
+  try {
+    return lstatSync(path).isFile();
+  } catch {
+    return false;
   }
 }
 
@@ -698,24 +730,24 @@ function ambiguousOutcome(
   return {
     transactionDirectory: directoryStillThere ? transactionDirectory : undefined,
     provenCopy: displacedPath !== undefined ? provenCopyOf(displacedPath, path) : undefined,
-    targetExists: pathExists(path),
+    targetExists: isLiveRegularFile(path),
     targetWritten,
-    directoryRemoved: false,
     artifactRetainedUnproven: directoryStillThere,
   };
 }
 
 /**
- * Decide whether it is safe to discard a transaction directory that has no
+ * Decide whether it is safe to resolve a transaction directory that has no
  * proven `displaced` backup. Safe exactly when nothing inside it could be
- * the last surviving copy of anything: either `path` itself is still live
- * (so discarding this directory's own bookkeeping never touches the only
- * copy of anything — a hard link only loses one name, never the data other
- * names still hold), or the directory's own staged artifact does not exist
- * (nothing to protect regardless of `path`). When neither holds, the
- * directory — and the artifact inside it that cannot be vouched for — is
- * left in place and named, so the caller has something concrete to inspect
- * rather than a dead end with no remedy.
+ * the last surviving copy of anything: either `path` itself genuinely holds
+ * live content right now, proven by `isLiveRegularFile` (round 8, I2 —
+ * *not* `pathExists`, which is also true for a dangling symlink; a hard
+ * link only ever loses one name, but a dangling symlink is not a hard link
+ * to anything and proves nothing was ever there), or the directory's own
+ * staged artifact does not exist (nothing to protect regardless of `path`).
+ * When neither holds, the directory — and the artifact inside it that
+ * cannot be vouched for — is left in place and named, so the caller has
+ * something concrete to inspect rather than a dead end with no remedy.
  *
  * This single proof replaces two guards that used to apply this unevenly by
  * state label alone: unconditional for "prepared", conditional on
@@ -727,6 +759,18 @@ function ambiguousOutcome(
  * proportional to what is actually at stake, decided from evidence
  * available at recovery time, never from an assumption recorded when the
  * manifest state was written).
+ *
+ * Resolving never `rm -r`s the transaction directory itself (round 8, I1):
+ * it discards only the (possibly absent) staged `prepared` artifact — the
+ * exact, already-audited action the three sibling "recovered" branches in
+ * `recoverFileTransaction` already take — then advances the manifest to
+ * "committed", the same state those branches leave behind too. A directory
+ * that is never recursively deleted here cannot be deleted wrongly, cannot
+ * be deleted silently, and needs no field to disclose that it happened.
+ * `pruneSupersededTransactions` — already silent, already proof-backed, and
+ * unchanged by this round — reclaims it the next time a real `.bashrc`
+ * write commits a fresh copy; until then, an inert directory holding at
+ * most a "committed" manifest sits in `$HOME` doing nothing.
  */
 function resolveUndisplacedTransaction(
   transactionDirectory: string,
@@ -734,7 +778,7 @@ function resolveUndisplacedTransaction(
   guard: FileMutationGuard | undefined,
 ): FileTransactionRecoveryResult {
   const preparedArtifactPath = join(transactionDirectory, "prepared");
-  const targetExists = pathExists(path);
+  const targetExists = isLiveRegularFile(path);
   if (!targetExists && pathExists(preparedArtifactPath)) {
     return {
       status: "manual",
@@ -743,7 +787,6 @@ function resolveUndisplacedTransaction(
         transactionDirectory,
         targetExists: false,
         targetWritten: false,
-        directoryRemoved: false,
         artifactRetainedUnproven: true,
       },
     };
@@ -754,27 +797,40 @@ function resolveUndisplacedTransaction(
       outcome: {
         targetExists,
         targetWritten: false,
-        directoryRemoved: false,
         artifactRetainedUnproven: false,
       },
     };
   }
-  if (!removeTransaction(transactionDirectory)) {
-    // `rmSync` itself may have already succeeded, with only the follow-up
-    // durability fsync throwing — check reality now rather than trusting
-    // the boolean alone, so a directory that is actually gone is never
-    // reported as retained (mirrors `firstExistingPath`'s own freshness,
-    // made explicit in the record instead of implicit in a path lookup).
-    const directoryStillThere = pathExists(transactionDirectory);
+  if (pathExists(preparedArtifactPath)
+    && (!mutationGuardUnchanged(guard) || !discardPrepared(transactionDirectory, preparedArtifactPath))) {
     return {
       status: "manual",
-      recoveryPath: directoryStillThere ? transactionDirectory : undefined,
+      recoveryPath: transactionDirectory,
       outcome: {
-        transactionDirectory: directoryStillThere ? transactionDirectory : undefined,
+        transactionDirectory,
         targetExists,
         targetWritten: false,
-        directoryRemoved: !directoryStillThere,
-        artifactRetainedUnproven: directoryStillThere,
+        artifactRetainedUnproven: true,
+      },
+    };
+  }
+  if (!mutationGuardUnchanged(guard)) {
+    return {
+      status: "manual",
+      outcome: { targetExists, targetWritten: false, artifactRetainedUnproven: false },
+    };
+  }
+  try {
+    writeManifest(transactionDirectory, path, "committed", guard);
+  } catch {
+    return {
+      status: "manual",
+      recoveryPath: transactionDirectory,
+      outcome: {
+        transactionDirectory,
+        targetExists,
+        targetWritten: false,
+        artifactRetainedUnproven: true,
       },
     };
   }
@@ -783,7 +839,6 @@ function resolveUndisplacedTransaction(
     outcome: {
       targetExists,
       targetWritten: false,
-      directoryRemoved: true,
       artifactRetainedUnproven: false,
     },
   };
@@ -860,7 +915,6 @@ export function recoverFileTransaction(
           provenCopy,
           targetExists: true,
           targetWritten: false,
-          directoryRemoved: false,
           artifactRetainedUnproven: false,
         },
       };
@@ -914,7 +968,6 @@ export function recoverFileTransaction(
           provenCopy: displacedPath,
           targetExists: true,
           targetWritten: false,
-          directoryRemoved: false,
           artifactRetainedUnproven: false,
         },
       };
@@ -1019,7 +1072,6 @@ export function recoverFileTransaction(
           provenCopy,
           targetExists: true,
           targetWritten: true,
-          directoryRemoved: false,
           artifactRetainedUnproven: false,
         },
       };
@@ -1144,7 +1196,6 @@ function restoreDisplaced(
       provenCopy,
       targetExists: true,
       targetWritten: true,
-      directoryRemoved: false,
       artifactRetainedUnproven: false,
     },
   };

@@ -2931,7 +2931,16 @@ test("next invocation safely aborts a prepared transaction before inspecting con
   assert.match(configured.detail ?? "", /recovered|retry/i);
   assert.doesNotMatch(configured.detail ?? "", /fake-prepared-secret/);
   assert.deepEqual(readFileSync(path), originalBytes);
-  assert.equal(fs.existsSync(transaction), false);
+  // Round 8, I1: this shared engine path (`resolveUndisplacedTransaction`)
+  // no longer `rm -r`s the whole transaction directory — it discards only
+  // the staged `prepared` artifact and marks the directory committed, the
+  // same narrow action the sibling "recovered" branches already took, so a
+  // future prune sweep reclaims it instead of a bespoke recursive delete
+  // whose own outcome record nothing read. `configure()`'s own contract
+  // (failed status, "recovered" detail, config bytes untouched) is
+  // unaffected — only this implementation detail of the shared engine is.
+  assert.equal(fs.existsSync(transaction), true);
+  assert.equal(fs.existsSync(join(transaction, "prepared")), false);
   assert.deepEqual(backupPaths(path), []);
 });
 

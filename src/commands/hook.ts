@@ -118,7 +118,6 @@ function mergeOutcome(base: RecoveryOutcome | undefined, next: RecoveryOutcome):
     provenCopy: next.provenCopy ?? base.provenCopy,
     targetExists: next.targetExists,
     targetWritten: base.targetWritten || next.targetWritten,
-    directoryRemoved: base.directoryRemoved || next.directoryRemoved,
     artifactRetainedUnproven: base.artifactRetainedUnproven || next.artifactRetainedUnproven,
   };
 }
@@ -162,16 +161,29 @@ function reportBashrcRecoveryStop(rc: string, outcome: RecoveryOutcome, fromSett
   if (outcome.provenCopy !== undefined && outcome.targetExists) {
     say(`${origin} I keep safe copy. ${closing}`);
     detail(`inspect: ${outcome.provenCopy}`);
+    // m4: when this call's own write left bashrc holding broken bytes
+    // (`targetWritten`), the surviving copy is not merely worth a look — it
+    // is the only trustworthy content left. Branch 2 below always gives this
+    // remedy because bashrc is gone there; give it here too, conditioned on
+    // the one fact that makes bashrc's own current bytes untrustworthy,
+    // instead of stranding the user with a named file and no verb (PROBE A).
+    if (outcome.targetWritten) {
+      detail("restore by copying that file to the bashrc path yourself");
+    }
   } else if (outcome.provenCopy !== undefined) {
     say(`${origin} bashrc gone. I keep only copy of old bytes. ${closing}`);
     detail(`safe copy: ${outcome.provenCopy}`);
     detail("restore by copying that file to the bashrc path yourself");
   } else {
     say(`${origin} no safe copy to name. ${closing}`);
+    // m2: every outcome that can reach this branch (provenCopy undefined)
+    // sets `transactionDirectory` and `artifactRetainedUnproven` from the
+    // same boolean — the three outcomes that could disagree always set
+    // provenCopy instead, routing to a branch above. The `transaction
+    // directory:` arm this ternary used to have for artifactRetainedUnproven
+    // === false was therefore unreachable dead code (round 8, m2/B18).
     if (outcome.transactionDirectory !== undefined) {
-      detail(outcome.artifactRetainedUnproven
-        ? `unclear leftover, inspect before removing: ${outcome.transactionDirectory}`
-        : `transaction directory: ${outcome.transactionDirectory}`);
+      detail(`unclear leftover, inspect before removing: ${outcome.transactionDirectory}`);
     }
   }
   detail(`bashrc: ${rc}`);
@@ -369,6 +381,25 @@ function reportRetainedCopy(recoveryPath: string): void {
   detail(`safe copy: ${recoveryPath}`);
 }
 
+/**
+ * I3: by the time `hookInstall` writes `~/.rocky` assets, `.bashrc` has
+ * already been rewritten and published — a mkdir/copy/write failure here
+ * (a stray `~/.rocky` file, ENOSPC, a permissions problem) must never be
+ * allowed to escape as a raw, uncaught error. Before this fix it did: the
+ * process died in `index.ts`'s top-level catch with an untranslated Node
+ * error string, breaking Rocky's voice, and — if a write had just
+ * displaced the previous `.bashrc` — leaving that retained copy's path
+ * unprinted, falsifying README's unconditional promise that install prints
+ * it whenever one survives.
+ */
+function reportRockyHomeWriteFailure(rc: string, recoveryPath: string | undefined): number {
+  say("bashrc already changed, but rocky home breaks right after. ears maybe not working yet.");
+  detail(`bashrc: ${rc}`);
+  if (recoveryPath !== undefined) reportRetainedCopy(recoveryPath);
+  say("check disk space and permissions, then try again.");
+  return 1;
+}
+
 export function hookInstall(): number {
   // Check installability before writing anything: a missing hook asset must
   // fail before any write, exactly like the bashrc topology/corrupt refusals
@@ -400,16 +431,24 @@ export function hookInstall(): number {
   }
 
   const home = rockyHome();
-  mkdirSync(home, { recursive: true });
-  for (const f of assets) {
-    copyFileSync(join(assetDir(), f), join(home, f));
+  try {
+    mkdirSync(home, { recursive: true });
+    for (const f of assets) {
+      copyFileSync(join(assetDir(), f), join(home, f));
+    }
+  } catch {
+    return reportRockyHomeWriteFailure(rc, recoveryPath);
   }
 
   const rulesPath = join(home, "guard.rules");
-  if (!existsSync(rulesPath) || rulesFileIsPristine(readFileSync(rulesPath, "utf8"))) {
-    writeFileSync(rulesPath, renderGuardRules(), "utf8");
-  } else {
-    say("guard rules file has your edits. I keep them. good.");
+  try {
+    if (!existsSync(rulesPath) || rulesFileIsPristine(readFileSync(rulesPath, "utf8"))) {
+      writeFileSync(rulesPath, renderGuardRules(), "utf8");
+    } else {
+      say("guard rules file has your edits. I keep them. good.");
+    }
+  } catch {
+    return reportRockyHomeWriteFailure(rc, recoveryPath);
   }
 
   say("ears installed. open new shell, I hear everything there.");

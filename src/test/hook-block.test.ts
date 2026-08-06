@@ -751,7 +751,15 @@ test("hook status settles a pending transaction instead of reporting stale state
 
   assert.equal(hookStatus(), 0, sandbox.stderr());
 
-  assert.equal(existsSync(fixture), false, "stale transaction recovered away by status too");
+  // Round 8, I1: settling this shape no longer `rm -r`s the transaction
+  // directory (nothing was ever staged in it — the fixture carries no
+  // `prepared` artifact — so there is nothing to discard); it marks the
+  // directory committed and leaves it for the next real publish's own prune
+  // sweep to reclaim (`status` never publishes). What matters for "settles a
+  // pending transaction" is that it stops blocking future commands, not that
+  // the directory vanishes here.
+  assert.equal(inspectFileTransaction(sandbox.bashrc).status, "clear", "the transaction no longer blocks anything");
+  assert.deepEqual(readFileSync(sandbox.bashrc), original, "bashrc itself is untouched");
   assert.match(sandbox.stderr(), /ears not installed/);
 });
 
@@ -1302,6 +1310,14 @@ test("hook status reports an interrupted restore honestly instead of claiming to
   assert.ok(!output.includes("remove by hand"), "no removal instruction is ever spoken from an ambiguous stop");
   assert.ok(output.includes("inspect:"), "actionable guidance still names the surviving copy");
   assert.ok(output.includes(join(fixture, "displaced")), "the surviving copy is still named for inspection");
+  // Round 8, m4: branch 1 of reportBashrcRecoveryStop used to name the copy
+  // but never say to copy it back, unlike its sibling branch — exactly this
+  // state (bashrc exists, but holds broken bytes, so it must not be
+  // trusted) is the one PROBE A reproduces and the one that most needed it.
+  assert.ok(
+    output.includes("restore by copying that file to the bashrc path yourself"),
+    "an untrustworthy bashrc must get the same restore remedy as a missing one (m4)",
+  );
   assert.deepEqual(readFileSync(join(fixture, "displaced")), original, "the only intact copy is never destroyed");
   assert.ok(!output.includes("SECRET_TOKEN"), "diagnostics stay secret-free");
 });
@@ -1496,4 +1512,149 @@ test("hook status never claims a safe copy exists when the displaced artifact is
   );
   assert.ok(!output.includes("safe copy:"), "no copy path is asserted over an unproven artifact");
   assert.equal(lstatSync(join(fixture, "displaced")).isSymbolicLink(), true, "the symlink itself is left untouched");
+});
+
+// --- Round 8: I1 (unread directoryRemoved field / silent rm -r), I2
+// (dangling symlink authorising destruction), I3 (unguarded ~/.rocky write) --
+
+test("hook status reports honestly over a corrupt block after a stale prepared transaction resolves silently (round 8, I1, PROBE I)", (t) => {
+  const sandbox = bashrcSandbox(t);
+  // Corrupt marker bytes (one BEGIN, no END) plus a leftover "prepared"
+  // transaction that was never displaced -- exactly the fixture round 7's
+  // own PROBE G built, but with a corrupt block instead of an absent one.
+  // No fault injection needed.
+  const original = bytes("export A=1\n# >>> rocky hook >>>\nMANGLED\n");
+  writeFileSync(sandbox.bashrc, original);
+  const fixture = writePendingTransactionFixture(sandbox.bashrc, "prepared", {
+    prepared: bytes("export A=1\nexport B=2\n\n# >>> rocky hook >>>\nSTAGED-ONLY-COPY-OF-export-B\n"),
+  });
+
+  const result = hookStatus();
+
+  assert.equal(result, 1);
+  const output = sandbox.stderr();
+  assert.match(output, /corrupt/);
+  // The stale, never-applied staged write is discarded -- it was never
+  // linked to bashrc, since the transaction crashed before displacing
+  // anything -- but bashrc's own bytes, the only content this call is
+  // answerable for, are genuinely untouched. Before round 8, resolving this
+  // shape `rm -r`'d the whole transaction directory and reported that fact
+  // in a field nothing read (I1), so this same "I touch nothing" claim
+  // followed a real, undisclosed deletion; here the claim is simply true.
+  assert.deepEqual(readFileSync(sandbox.bashrc), original, "bashrc's own corrupt bytes are untouched");
+  assert.equal(existsSync(join(fixture, "prepared")), false, "the redundant staged scratch write is discarded");
+  assert.ok(!output.includes("SECRET"), "diagnostics stay secret-free");
+});
+
+test("hook status never destroys the only surviving copy of a prepared write when bashrc is a dangling symlink (round 8, I2, PROBE L)", (t) => {
+  const sandbox = bashrcSandbox(t);
+  let symlinkAvailable = true;
+  try {
+    symlinkSync(join(sandbox.home, "dotfiles-bashrc-missing"), sandbox.bashrc);
+  } catch {
+    symlinkAvailable = false; // Some platforms require privilege for symlinks.
+  }
+  if (!symlinkAvailable) return;
+  const staged = bytes("export USER_SECRET=only-copy\nexport PATH=$PATH:/opt/bin\n");
+  const fixture = writePendingTransactionFixture(sandbox.bashrc, "prepared", { prepared: staged });
+
+  const result = hookStatus();
+
+  // Before round 8: `pathExists(bashrc)` (a bare `lstatSync`) returned true
+  // for the dangling symlink, so the resolver believed "path itself is
+  // live, nothing lost" and discarded the only surviving copy of the
+  // staged bytes, then this call's own later topology refusal printed
+  // "bashrc is symlink. I touch nothing." over the wreckage.
+  assert.equal(result, 1);
+  const output = sandbox.stderr();
+  assert.equal(existsSync(join(fixture, "prepared")), true, "the only surviving copy is not destroyed");
+  assert.deepEqual(readFileSync(join(fixture, "prepared")), staged, "the surviving bytes are untouched");
+  assert.ok(
+    output.includes("unclear leftover, inspect before removing"),
+    "actionable guidance names the retained directory instead of a bare dead end",
+  );
+  assert.ok(output.includes(fixture), "the directory is named");
+  assert.ok(!output.includes("USER_SECRET"), "diagnostics stay secret-free");
+});
+
+test("hook install reports a broken rocky-home write instead of dying with a raw error, and still discloses the retained bashrc copy (round 8, I3, PROBE P)", (t) => {
+  const sandbox = bashrcSandbox(t);
+  const original = bytes("export SECRET=hunter2\nalias ll='ls -l'\n");
+  writeFileSync(sandbox.bashrc, original);
+  // ~/.rocky already exists as a plain file: one stray redirect, a `sudo
+  // rocky` run, or any tool that created it before this install ever runs.
+  writeFileSync(process.env.ROCKY_HOME as string, "not a directory\n");
+
+  const result = hookInstall();
+
+  assert.equal(result, 1);
+  const output = sandbox.stderr();
+  assert.deepEqual(
+    readFileSync(sandbox.bashrc),
+    bytes(`export SECRET=hunter2\nalias ll='ls -l'\n\n${BLOCK}`),
+    "bashrc was already rewritten before the rocky-home write failed",
+  );
+  const [transactionDirectory] = transactionDirectories(sandbox.home);
+  assert.ok(transactionDirectory !== undefined);
+  const recoveryPath = join(sandbox.home, transactionDirectory, "displaced");
+  assert.ok(existsSync(recoveryPath), "the retained copy of the previous bashrc survives");
+  assert.ok(
+    output.includes(recoveryPath),
+    "the retained copy's path is disclosed, not swallowed by a raw uncaught error",
+  );
+  assert.ok(!output.includes("SECRET"), "diagnostics stay secret-free");
+  assert.ok(!/^Error:/m.test(output), "no raw Node error string ever reaches the user (Rocky's voice, not Node's)");
+});
+
+// --- Round 8: mergeOutcome must accumulate facts across a multi-iteration
+// settle loop, not keep only the last iteration's (B8/B9) ------------------
+
+function writeNamedPendingTransactionFixture(
+  bashrc: string,
+  suffix: string,
+  state: "prepared" | "displaced" | "published",
+  artifacts: { displaced?: Buffer; prepared?: Buffer } = {},
+): string {
+  const directory = join(dirname(bashrc), `.${basename(bashrc)}.transaction-${suffix}`);
+  mkdirSync(directory, { mode: 0o700 });
+  writeFileSync(
+    join(directory, "manifest.json"),
+    `${JSON.stringify({ version: 1, state, target: bashrc })}\n`,
+    "utf8",
+  );
+  if (artifacts.displaced !== undefined) writeFileSync(join(directory, "displaced"), artifacts.displaced);
+  if (artifacts.prepared !== undefined) writeFileSync(join(directory, "prepared"), artifacts.prepared);
+  return directory;
+}
+
+test("hook status accumulates settle facts across multiple recovered transactions instead of keeping only the last (round 8, B8/B9)", (t) => {
+  const sandbox = bashrcSandbox(t);
+  const original = bytes("export RESTORE_ME=please\n");
+  // Sorted first: bashrc absent, a genuine restorable backup -- targetWritten
+  // true and a proven copy, both facts a multi-iteration settle loop must
+  // not drop once a later iteration resolves its own, unrelated transaction.
+  writeNamedPendingTransactionFixture(sandbox.bashrc, "1-restore", "displaced", { displaced: original });
+  // Sorted second: only resolved after the first iteration restores bashrc,
+  // so this one sets neither fact (round 8's capability-removal outcome).
+  const second = writeNamedPendingTransactionFixture(
+    sandbox.bashrc,
+    "2-clear",
+    "prepared",
+    { prepared: bytes("stale, never linked\n") },
+  );
+
+  const result = hookStatus();
+
+  assert.equal(result, 0, sandbox.stderr());
+  const output = sandbox.stderr();
+  assert.deepEqual(readFileSync(sandbox.bashrc), original, "the first transaction's restore survives the second's own resolution");
+  assert.ok(
+    output.includes("I already put old bytes back"),
+    "B8: an earlier iteration's targetWritten must survive a later iteration that writes nothing itself",
+  );
+  assert.ok(
+    output.includes(`safe copy: ${join(sandbox.home, "..bashrc.transaction-1-restore", "displaced")}`),
+    "B9: an earlier iteration's provenCopy must survive a later iteration that proves no copy of its own",
+  );
+  assert.equal(existsSync(join(second, "prepared")), false, "the second, unrelated transaction's own scratch write is discarded");
 });

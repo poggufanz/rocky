@@ -208,7 +208,17 @@ test("recovery restores displaced bytes from a byte-for-byte v1 transaction fixt
   );
 });
 
-test("recovery removes a prepared transaction that never displaced the target", (t) => {
+test("recovery resolves a prepared transaction that never displaced the target, without rm -r'ing the directory", (t) => {
+  // Round 8, I1: resolving this shape used to `rmSync(dir, { recursive: true
+  // })` the whole transaction directory in one step whose own outcome record
+  // nothing ever read. It now takes the same narrow, already-audited action
+  // the sibling "recovered" branches below take — discard just the staged
+  // `prepared` artifact and advance the manifest to "committed" — leaving an
+  // inert directory `pruneSupersededTransactions` reclaims on the next real
+  // write. The guarantee this test name promises (the stale transaction no
+  // longer blocks anything, and the live target is never touched) still
+  // holds; only the "whole directory vanishes here" implementation detail
+  // does not.
   const directory = temporaryDirectory(t);
   const path = join(directory, "prepared.bin");
   const original = Buffer.from("original\n", "utf8");
@@ -221,8 +231,14 @@ test("recovery removes a prepared transaction that never displaced the target", 
 
   assert.equal(recovery.status, "recovered");
   assert.deepEqual(readFileSync(path), original);
-  assert.equal(existsSync(transactionDirectory), false);
+  assert.equal(existsSync(join(transactionDirectory, "prepared")), false, "the staged artifact is discarded");
+  assert.equal(
+    JSON.parse(readFileSync(join(transactionDirectory, "manifest.json"), "utf8")).state,
+    "committed",
+    "the directory is marked resolved, not silently removed",
+  );
   assert.equal(inspectFileTransaction(path).status, "clear");
+  assert.deepEqual(recoverFileTransaction(path), { status: "clear" }, "idempotent on a second run");
 });
 
 test("recovery completes a displaced transaction whose publish never happened", (t) => {
@@ -770,7 +786,7 @@ test("recovery finishes a missing-prior transaction whose manifest already recor
   assert.deepEqual(recoverFileTransaction(path), { status: "clear" }, "idempotent on a second run");
 });
 
-test("recovery discards an orphaned published transaction directory without touching an unrelated target (W4 negative control)", (t) => {
+test("recovery resolves an orphaned published transaction directory without touching an unrelated target (W4 negative control)", (t) => {
   const directory = temporaryDirectory(t);
   const path = join(directory, "orphaned.bin");
   const original = Buffer.from("original\n", "utf8");
@@ -782,7 +798,11 @@ test("recovery discards an orphaned published transaction directory without touc
   const recovery = recoverFileTransaction(path);
 
   assert.equal(recovery.status, "recovered");
-  assert.equal(existsSync(transactionDirectory), false, "orphaned transaction directory discarded");
+  assert.equal(
+    existsSync(join(transactionDirectory, "prepared")),
+    false,
+    "the unrelated staged artifact is discarded (round 8: no rm -r of the directory itself)",
+  );
   assert.deepEqual(readFileSync(path), original, "unrelated target bytes are never touched");
 });
 
@@ -818,7 +838,7 @@ test("the complete-but-unrecorded branch refuses when displaced is not a plain r
   assert.equal(lstatSync(path).nlink, 2, "nothing was mutated");
 });
 
-test("recovery never offers the target path itself as a manual recovery path, even when directory removal partially fails (Important 1)", (t) => {
+test("recovery retains and names a transaction directory instead of guessing when discarding its resolved artifact fails partway (Important 1 / round 8, I1)", (t) => {
   const directory = temporaryDirectory(t);
   const path = join(directory, "degraded-recovery.bin");
   const original = Buffer.from("original fake-secret-original\n", "utf8");
@@ -827,13 +847,16 @@ test("recovery never offers the target path itself as a manual recovery path, ev
     prepared: Buffer.from("never published\n", "utf8"),
   });
 
-  // The reviewer's exact mechanism: rmSync of the transaction directory
-  // succeeds, but the follow-up parent-directory fsync throws (a real EIO on
-  // $HOME), so `removeTransaction` reports failure even though the directory
-  // is already gone.
+  // Real fault injection, no sleep: the staged artifact's own unlink
+  // succeeds, but the follow-up directory fsync (a real EIO on $HOME)
+  // throws. Round 8 no longer `rmSync`s the whole transaction directory
+  // here (I1) — resolving discards only the staged artifact and marks the
+  // directory committed — so a durability failure at that step must retain
+  // and name the directory rather than proceed on an unproven assumption
+  // that the discard actually completed.
   const originalSync = directorySyncCapability.sync;
   directorySyncCapability.sync = () => {
-    throw new Error("injected EIO on parent directory fsync carrying fake-secret-original");
+    throw new Error("injected EIO on directory fsync carrying fake-secret-original");
   };
   t.after(() => {
     directorySyncCapability.sync = originalSync;
@@ -842,9 +865,14 @@ test("recovery never offers the target path itself as a manual recovery path, ev
   const recovery = recoverFileTransaction(path);
 
   assert.equal(recovery.status, "manual");
-  assert.equal(existsSync(transactionDirectory), false, "rmSync itself succeeded; only the parent fsync failed");
+  assert.equal(
+    existsSync(transactionDirectory),
+    true,
+    "the directory is retained, not removed, when the discard cannot be proven durable",
+  );
+  assert.equal(existsSync(join(transactionDirectory, "prepared")), false, "the unlink itself already succeeded");
   assert.notEqual(recovery.recoveryPath, path, "the live target must never be offered as something to remove");
-  assert.equal(recovery.recoveryPath, undefined, "nothing Rocky-owned survives to name once the directory is gone");
+  assert.equal(recovery.recoveryPath, transactionDirectory, "the retained directory is named so the user has something to inspect");
   assert.deepEqual(readFileSync(path), original, "the untouched target keeps its own bytes");
 });
 
@@ -877,7 +905,7 @@ test("recovery does not silently discard a published transaction's staged bytes 
   );
 });
 
-test("recovery still discards a published transaction with no displaced when the target is present (unaffected by the path check)", (t) => {
+test("recovery still resolves a published transaction with no displaced when the target is present (unaffected by the path check)", (t) => {
   // Negative control: the missing-prior crash window (W4) legitimately
   // reaches this exact shape with `path` present (just linked). The added
   // `path` proof must not regress that case.
@@ -891,6 +919,95 @@ test("recovery still discards a published transaction with no displaced when the
   const recovery = recoverFileTransaction(path);
 
   assert.equal(recovery.status, "recovered");
-  assert.equal(existsSync(transactionDirectory), false, "safe to discard once path is proven present");
+  assert.equal(
+    existsSync(join(transactionDirectory, "prepared")),
+    false,
+    "safe to discard the staged artifact once path is proven present",
+  );
   assert.deepEqual(readFileSync(path), Buffer.from("brand new file\n", "utf8"));
+});
+
+// --- Round 8 coverage: B3 (restoreDisplaced's own in-process copy-failure
+// outcome, the publish route's twin of the already-pinned recovery-route
+// fix) and B11 (the "nothing staged" arm of resolveUndisplacedTransaction) --
+
+test("a fresh write's own in-process restore reports an interrupted restore honestly instead of defaulting targetWritten to false (round 8, B3)", (t) => {
+  const directory = temporaryDirectory(t);
+  const path = join(directory, "publish-restore-fault.bin");
+  const original = Buffer.from("original fake-secret-original\n", "utf8");
+  writeFileSync(path, original);
+  const prior = snapshotBytes(path);
+
+  // Corrupt the freshly-displaced backup the instant atomicWriteBytesIfUnchanged
+  // creates it (its own renameSync(path, displaced)), so its own in-process
+  // fileMatches check fails and it must restore from the very artifact it
+  // just displaced — all inside this one call, unlike PROBE A / mutant B4,
+  // which pin the same shape reached a call later, via recoverFileTransaction.
+  const originalRename = fs.renameSync;
+  fs.renameSync = ((from: fs.PathLike, to: fs.PathLike) => {
+    originalRename(from, to);
+    if (String(from) === path) writeFileSync(String(to), "corrupted\n", "utf8");
+  }) as typeof fs.renameSync;
+
+  // Fail only the write to the descriptor opened for `path` itself — the
+  // restore's own O_CREAT|O_EXCL destination create — not any other
+  // descriptor (the prepared write and the manifest writes also route
+  // through the exported writeSync in this Node build, so a call-order-only
+  // injection fires too early).
+  const originalOpen = fs.openSync;
+  let targetDescriptor: number | undefined;
+  (fs as unknown as { openSync: typeof fs.openSync }).openSync = ((
+    ...args: Parameters<typeof fs.openSync>
+  ) => {
+    const fd = originalOpen(...args);
+    if (String(args[0]) === path) targetDescriptor = fd;
+    return fd;
+  }) as typeof fs.openSync;
+  const originalWriteSync = fs.writeSync;
+  let injected = false;
+  (fs as unknown as { writeSync: typeof fs.writeSync }).writeSync = ((
+    ...args: Parameters<typeof fs.writeSync>
+  ) => {
+    if (!injected && args[0] === targetDescriptor) {
+      injected = true;
+      const error = new Error("ENOSPC: no space left on device") as NodeJS.ErrnoException;
+      error.code = "ENOSPC";
+      throw error;
+    }
+    return originalWriteSync(...args);
+  }) as typeof fs.writeSync;
+  syncBuiltinESMExports();
+  t.after(() => {
+    fs.renameSync = originalRename;
+    fs.openSync = originalOpen;
+    fs.writeSync = originalWriteSync;
+    syncBuiltinESMExports();
+  });
+
+  const result = atomicWriteBytesIfUnchanged(path, Buffer.from("replacement\n", "utf8"), prior);
+
+  assert.equal(result.status, "recovery-required");
+  assert.ok(result.outcome !== undefined);
+  // The failed O_CREAT|O_EXCL restore leaves a broken file at `path` behind
+  // (never cleaned up — see copyRegularFileExclusiveNoFollow's own doc
+  // comment on why not). `targetWritten` must reflect that fresh proof, not
+  // a stale default of false — the exact thing mutant B3 (hardcode `false`
+  // at restoreDisplaced's own ambiguousOutcome call) would get away with.
+  assert.equal(existsSync(path), true, "the failed restore left a broken file behind");
+  assert.equal(result.outcome!.targetWritten, true, "targetWritten must be proven fresh, not defaulted");
+});
+
+test("recovery resolves a transaction with nothing staged when the target is also absent (round 8, B11)", (t) => {
+  // No target, no prepared, no displaced: purely empty bookkeeping, exactly
+  // what a crash between mkdirSync and the very first openSync("prepared",
+  // "wx") leaves behind. Safe to resolve regardless of the target's own
+  // state, since nothing was ever staged to protect.
+  const directory = temporaryDirectory(t);
+  const path = join(directory, "nothing-staged.bin");
+  writeLegacyV1TransactionFixture(directory, path, "published", {});
+
+  const recovery = recoverFileTransaction(path);
+
+  assert.equal(recovery.status, "recovered", "nothing staged and no live target: safe to resolve, not retain forever");
+  assert.equal(inspectFileTransaction(path).status, "clear");
 });
