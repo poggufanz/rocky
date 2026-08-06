@@ -109,6 +109,118 @@ test("README identity, roadmap, and v0.5 hypothesis stay aligned with shipped me
   ));
 });
 
+test("README documents capability-gated Codex and staged Claude Code setup, not name-only live mutation", () => {
+  assert.match(readme, /capability-gated/i, "README must describe Codex registration as capability-gated");
+  assert.match(
+    readme,
+    /compare-and-swap|version-checked/i,
+    "README must describe Codex's versioned/CAS write behavior",
+  );
+  assert.doesNotMatch(
+    readme,
+    /\bcodex mcp (?:add|remove)\b/i,
+    "README must not describe Codex automation as a name-only `codex mcp add/remove`",
+  );
+
+  assert.match(
+    readme,
+    /private (?:copy|stage)/i,
+    "README must describe Claude Code registration as staged into a private copy",
+  );
+  assert.match(
+    readme,
+    /polic(?:y|ies)[^\n]*(?:unchanged|equivalent)/i,
+    "README must describe Claude Code policy-equivalence proof",
+  );
+  assert.match(
+    readme,
+    /recoverable transaction/i,
+    "README must describe Claude Code publication as a recoverable transaction",
+  );
+  assert.doesNotMatch(
+    readme,
+    /\bclaude mcp (?:add|remove)\b/i,
+    "README must not describe Claude Code automation as a live name-only `claude mcp add/remove`",
+  );
+  assert.doesNotMatch(
+    readme,
+    /remove-then-add|live config/i,
+    "README must not describe the superseded remove-then-add rollback mechanism",
+  );
+});
+
+test("README documents zero-eligible-host voice-skill behavior and Claude Desktop exclusion", () => {
+  assert.ok(
+    readme.includes("voice-skill: unavailable"),
+    "README must contain the exact aggregate detail line `voice-skill: unavailable`",
+  );
+  assert.match(
+    readme,
+    /voice-skill: unavailable[^\n]*exit(?:s|ing)? 1|exit(?:s|ing)? 1[^\n]*voice-skill: unavailable/i,
+    "README must pair `voice-skill: unavailable` with exit 1",
+  );
+  assert.match(
+    readme,
+    /Claude Desktop never receives the voice skill/i,
+    "README must state Claude Desktop is never a voice-skill target",
+  );
+});
+
+test("README status string for zero-eligible voice-skill matches the source literal exactly", () => {
+  const setupSource = readFileSync(join(packageRoot, "src", "commands", "setup.ts"), "utf8");
+  const match = /detail\("(voice-skill: [^"]+)"\)/.exec(setupSource);
+  assert.ok(match, "expected src/commands/setup.ts to contain the voice-skill unavailable detail literal");
+  assert.ok(
+    readme.includes(match![1]),
+    `README must contain the exact source literal ${JSON.stringify(match![1])}`,
+  );
+});
+
+test("README documents recoverable/conditional bashrc writes and corrupt-marker refusal", () => {
+  assert.match(
+    readme,
+    /recoverable,? conditional transaction/i,
+    "README must describe bashrc writes as a recoverable, conditional transaction",
+  );
+  assert.match(
+    readme,
+    /corrupt[^\n]*(?:marker|block)/i,
+    "README must describe corrupt Rocky marker blocks",
+  );
+  assert.doesNotMatch(
+    readme,
+    /corrupt[^\n]*(?:is|are|remains?)\s+(?:installed|removed)\b/i,
+    "README must not claim a corrupt hook block is installed or removed",
+  );
+  assert.match(
+    readme,
+    /exits? nonzero/i,
+    "README must state hook status exits nonzero on corrupt/ambiguous state instead of claiming installed",
+  );
+});
+
+test("README and CLI help avoid forbidden universal-support and evidence overclaims", () => {
+  const help = helpOutput();
+  for (const [label, surface] of [["README", readme], ["CLI help", help]] as const) {
+    assert.doesNotMatch(surface, /\buniversal\b[^\n]*(?:host|platform)/i, `${label} claims universal host/platform support`);
+    assert.doesNotMatch(surface, /\bevery (?:host|platform)\b/i, `${label} claims every host/platform is supported`);
+    assert.doesNotMatch(
+      surface,
+      /\b(?:CI|release candidate|hosted)[^\n]*(?:passed|verified|certified)\b/i,
+      `${label} claims post-fix CI/host/release evidence passed`,
+    );
+    assert.doesNotMatch(
+      surface,
+      /automatic(?:ally)?[^\n]*(?:install|installs|installed|installing)[^\n]*(?:model|skill|hook)/i,
+      `${label} claims automatic model/skill/hook installation`,
+    );
+  }
+});
+
+test("README states zero runtime/optional dependencies, reusing package metadata as source of truth", () => {
+  assert.match(readme, /zero runtime dep/i, "README must state zero runtime dependencies");
+});
+
 test("scientific grounding keeps v0.5 learning mechanisms planned and evidence claims bounded", () => {
   assert.match(grounding, /planned v0\.5 dictionary is designed to help close the comprehension loop/i);
   assert.match(grounding, /asking and follow-up behavior[^\n]*planned v0\.5/i);
