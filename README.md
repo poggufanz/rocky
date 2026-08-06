@@ -55,7 +55,7 @@ rocky setup --voice-skill   # also install the managed Rocky voice skill
 
 Codex registration is capability-gated, not a name-only mutation: Rocky proves the existing Rocky entry originates from the base user config layer through Codex's official app-server config protocol, writes with a version-checked compare-and-swap, and falls back to manual instructions whenever provenance, capability, or version cannot be proven.
 
-Claude Code registration is staged, never a live in-place mutation: Rocky clones the effective `.claude.json` into a private copy, proves the surrounding policy is unchanged, runs the official Claude CLI only against that private copy, audits that only the Rocky entry changed, then publishes the audited bytes through a recoverable transaction.
+Claude Code registration goes through a private stage: Rocky clones the effective `.claude.json` into a private copy, proves the surrounding policy is unchanged, runs the official Claude CLI only against that private copy, audits that only the Rocky entry changed, then publishes the audited bytes through a recoverable transaction. In this beta that staged path never activates: Rocky ships no complete Claude Code policy manifest, so when Claude Code is installed `rocky setup` reports `claude-code: failed` with `Claude Code policy-equivalent automation is unavailable; use manual registration`, exits 1, and you add the `rocky` entry to Claude Code yourself.
 
 `--voice-skill` only targets detected Codex and Claude Code hosts. Claude Desktop never receives the voice skill, and its own MCP result stays independent. When zero hosts are eligible, Rocky prints `voice-skill: unavailable` and exits 1 instead of inventing a result.
 
@@ -99,7 +99,7 @@ rocky hook install    # adds one managed block to ~/.bashrc
 
 The hook installer is separate from `rocky setup`; MCP setup never edits `.bashrc`. Other shells and platforms can still write full failure memory through `rocky run`.
 
-Every `.bashrc` write goes through a recoverable, conditional transaction: unrelated bytes and the file's permissions are preserved exactly, and Rocky refuses to touch a symlinked, non-regular, multiply-linked, or unreadable file. A corrupt, orphaned, reversed, duplicated, or otherwise malformed Rocky marker block is left untouched — `rocky hook status` reports it and exits nonzero instead of claiming installed, and repair stays manual.
+Every `.bashrc` write goes through a recoverable, conditional transaction. Unrelated bytes and the file's permissions are preserved exactly. Rocky refuses to touch a symlinked, non-regular, multiply-linked, or unreadable file. A corrupt, orphaned, reversed, or duplicated Rocky marker block is left untouched — `rocky hook status` reports it and exits nonzero instead of claiming installed, and repair stays manual.
 
 From the next shell on: every failing command is remembered (no stderr — the
 hook hears command and exit code only; `rocky run` remains the deep-memory

@@ -161,6 +161,11 @@ test("README documents zero-eligible-host voice-skill behavior and Claude Deskto
   );
   assert.match(
     readme,
+    /prints `?voice-skill: unavailable`? and exits 1/i,
+    "README must describe a single aggregate `voice-skill: unavailable` result, not an invented per-host result",
+  );
+  assert.match(
+    readme,
     /Claude Desktop never receives the voice skill/i,
     "README must state Claude Desktop is never a voice-skill target",
   );
@@ -197,6 +202,56 @@ test("README documents recoverable/conditional bashrc writes and corrupt-marker 
     /exits? nonzero/i,
     "README must state hook status exits nonzero on corrupt/ambiguous state instead of claiming installed",
   );
+});
+
+test("README documents the Claude Code manual-fallback reality with the exact source literal", () => {
+  const claudeCodeSource = readFileSync(join(packageRoot, "src", "setup", "claude-code.ts"), "utf8");
+  const match = /MANUAL_CONFIGURE_DETAIL = "([^"]+)"/.exec(claudeCodeSource);
+  assert.ok(match, "expected src/setup/claude-code.ts to contain MANUAL_CONFIGURE_DETAIL");
+  assert.ok(
+    readme.includes(match![1]),
+    `README must contain the exact source literal ${JSON.stringify(match![1])}`,
+  );
+  assert.match(
+    readme,
+    /claude-code: failed[^\n]*exits? 1|exits? 1[^\n]*claude-code: failed/i,
+    "README must pair `claude-code: failed` with exit 1",
+  );
+});
+
+test("README keeps the sanitized-default, raw-opt-in, and loopback-only network contract", () => {
+  assert.match(readme, /contain no telemetry/i, "README must state the core CLI/MCP contain no telemetry");
+  assert.match(readme, /make no external network requests/i, "README must state no external network requests");
+  assert.match(readme, /run no daemon/i, "README must state Rocky runs no daemon");
+  assert.match(
+    readme,
+    /sanitized memory by default|sanitized[^\n]*by default/i,
+    "README must state sanitized memory is the default MCP exposure",
+  );
+  assert.match(
+    readme,
+    /raw exposure only when you intend/i,
+    "README must describe raw exposure as an explicit opt-in",
+  );
+  assert.ok(readme.includes("127.0.0.1"), "README must name the loopback address for optional AI");
+});
+
+test("CLI help does not advertise a command that does not exist", () => {
+  const help = helpOutput();
+  const indexSource = readFileSync(join(packageRoot, "src", "index.ts"), "utf8");
+  const knownCommands = new Set<string>();
+  for (const match of indexSource.matchAll(/case\s+"([a-zA-Z_-]+)":/g)) {
+    knownCommands.add(match[1]);
+  }
+
+  for (const line of help.split("\n")) {
+    const commandMatch = /^\s*rocky\s+([a-zA-Z-]+)\b/.exec(line);
+    if (commandMatch === null) continue;
+    assert.ok(
+      knownCommands.has(commandMatch[1]),
+      `help advertises "rocky ${commandMatch[1]}", which has no matching case in src/index.ts main(): ${line}`,
+    );
+  }
 });
 
 test("README and CLI help avoid forbidden universal-support and evidence overclaims", () => {
