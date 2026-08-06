@@ -61,19 +61,55 @@ function syncDirectory(path: string): void {
   directorySyncCapability.sync(path);
 }
 
+/**
+ * What a recovery/settle/write call actually proved and did, established
+ * once — by the code that acted, at the moment it acted — rather than
+ * re-derived later by whatever prints a message about it. Every user-facing
+ * sentence about a recovery outcome must be a pure function of this record;
+ * nothing downstream may re-check the filesystem to decide what to claim.
+ *
+ * `outcome` is optional on the result types below purely for backward
+ * compatibility with existing callers (`json-config.ts` and its adapters)
+ * that predate this record and only ever read `recoveryPath`; every
+ * production code path in this module populates it.
+ */
+export interface RecoveryOutcome {
+  /** A transaction directory this call examined, when one resolved. */
+  transactionDirectory?: string;
+  /**
+   * A live regular file, proven — at the moment this call finished acting —
+   * to be a genuine, singly-owned copy of content derived from the target's
+   * prior bytes (`isManagedRegularFile`, not a bare existence check). Never
+   * a directory, a symlink, an unrelated file, or a path that merely
+   * exists. Absent when no such artifact is proven.
+   */
+  provenCopy?: string;
+  /** Proven, at the moment this call finished acting, whether `path` exists. */
+  targetExists: boolean;
+  /** True only when this very call wrote bytes to `path` (created or restored it). */
+  targetWritten: boolean;
+  /** True only when this very call removed a transaction directory. */
+  directoryRemoved: boolean;
+  /**
+   * True when this call found a transaction directory it could not prove
+   * safe to discard and left it in place rather than guessing.
+   */
+  artifactRetainedUnproven: boolean;
+}
+
 export type BytesReadResult =
   | { status: "missing" }
   | { status: "valid"; bytes: Buffer; mode?: number };
 
 export type ConditionalBytesWriteResult =
-  | { status: "written"; recoveryPath?: string }
-  | { status: "changed"; recoveryPath?: string }
-  | { status: "recovery-required"; recoveryPath?: string };
+  | { status: "written"; recoveryPath?: string; outcome?: RecoveryOutcome }
+  | { status: "changed"; recoveryPath?: string; outcome?: RecoveryOutcome }
+  | { status: "recovery-required"; recoveryPath?: string; outcome?: RecoveryOutcome };
 
 export type FileTransactionRecoveryResult =
   | { status: "clear" }
-  | { status: "recovered"; recoveryPath?: string }
-  | { status: "manual"; recoveryPath?: string };
+  | { status: "recovered"; recoveryPath?: string; outcome?: RecoveryOutcome }
+  | { status: "manual"; recoveryPath?: string; outcome?: RecoveryOutcome };
 
 export type FileTransactionInspectionResult =
   | { status: "clear" }
@@ -509,6 +545,21 @@ function copyRegularFileExclusiveNoFollow(
       expectedLength: bytes.length,
       expectedMode,
     };
+  } catch (error) {
+    // Deliberately never cleans up `newPath` here, even though O_CREAT|O_EXCL
+    // guarantees this call is always the one that created it fresh: the path
+    // can be rebound after creation by a concurrent writer, or its content
+    // can be overwritten in place by one, before this catch ever runs (both
+    // reproduced by `setup-claude-desktop.test.ts`'s rebind- and
+    // overwrite-during-publication tests) — an unlink here could destroy
+    // data that now belongs to someone else, at a path Rocky merely happened
+    // to create the container for. F1's actual defect is not the absence of
+    // cleanup; it is a caller trusting "a path exists" as proof of anything.
+    // The fix lives in the outcome record instead: every caller re-observes
+    // `path` itself, fresh, right now, and reports exactly what it finds —
+    // never "I touch nothing" when this call may have left bytes behind,
+    // and never an instruction to remove the one place old content survives.
+    throw error;
   } finally {
     if (destinationDescriptor !== undefined) {
       try { closeSync(destinationDescriptor); } catch { /* retain recovery authority */ }
@@ -617,6 +668,127 @@ export function inspectFileTransaction(path: string): FileTransactionInspectionR
   return { status: "clear" };
 }
 
+/**
+ * A live regular file, proven right now via `isManagedRegularFile` (never a
+ * bare existence check — a directory, a symlink, or a file with the wrong
+ * link-count shape are all refused), that can honestly be called a
+ * surviving copy of content derived from `path`'s prior bytes. Absent when
+ * no such proof holds (final audit, F9 mutant A1: the message layer used to
+ * accept any live file by name; the proof now lives here, once, and is
+ * strictly stronger than a bare `.isFile()` check).
+ */
+function provenCopyOf(displacedPath: string, path: string): string | undefined {
+  return isManagedRegularFile(displacedPath, path) ? displacedPath : undefined;
+}
+
+/**
+ * The outcome record for a stop that resolved nothing new: proves, right
+ * now, exactly what a caller may honestly claim — a transaction directory
+ * only when it still exists, a copy only when `provenCopyOf` establishes
+ * one, and whether `path` itself exists. `targetWritten` is supplied by the
+ * caller, which alone knows whether its own attempt to write `path` ran.
+ */
+function ambiguousOutcome(
+  transactionDirectory: string,
+  path: string,
+  displacedPath: string | undefined,
+  targetWritten: boolean,
+): RecoveryOutcome {
+  const directoryStillThere = pathExists(transactionDirectory);
+  return {
+    transactionDirectory: directoryStillThere ? transactionDirectory : undefined,
+    provenCopy: displacedPath !== undefined ? provenCopyOf(displacedPath, path) : undefined,
+    targetExists: pathExists(path),
+    targetWritten,
+    directoryRemoved: false,
+    artifactRetainedUnproven: directoryStillThere,
+  };
+}
+
+/**
+ * Decide whether it is safe to discard a transaction directory that has no
+ * proven `displaced` backup. Safe exactly when nothing inside it could be
+ * the last surviving copy of anything: either `path` itself is still live
+ * (so discarding this directory's own bookkeeping never touches the only
+ * copy of anything — a hard link only loses one name, never the data other
+ * names still hold), or the directory's own staged artifact does not exist
+ * (nothing to protect regardless of `path`). When neither holds, the
+ * directory — and the artifact inside it that cannot be vouched for — is
+ * left in place and named, so the caller has something concrete to inspect
+ * rather than a dead end with no remedy.
+ *
+ * This single proof replaces two guards that used to apply this unevenly by
+ * state label alone: unconditional for "prepared", conditional on
+ * `pathExists(path)` for "published", and unconditional again for the
+ * "displaced" fallback below. A crash can leave any of the three states
+ * holding a `prepared` artifact derived from the user's file with `path`
+ * externally removed afterward; the label never proved which, only the
+ * artifact's own presence does (final audit, F2 + F3: protection
+ * proportional to what is actually at stake, decided from evidence
+ * available at recovery time, never from an assumption recorded when the
+ * manifest state was written).
+ */
+function resolveUndisplacedTransaction(
+  transactionDirectory: string,
+  path: string,
+  guard: FileMutationGuard | undefined,
+): FileTransactionRecoveryResult {
+  const preparedArtifactPath = join(transactionDirectory, "prepared");
+  const targetExists = pathExists(path);
+  if (!targetExists && pathExists(preparedArtifactPath)) {
+    return {
+      status: "manual",
+      recoveryPath: transactionDirectory,
+      outcome: {
+        transactionDirectory,
+        targetExists: false,
+        targetWritten: false,
+        directoryRemoved: false,
+        artifactRetainedUnproven: true,
+      },
+    };
+  }
+  if (!mutationGuardUnchanged(guard)) {
+    return {
+      status: "manual",
+      outcome: {
+        targetExists,
+        targetWritten: false,
+        directoryRemoved: false,
+        artifactRetainedUnproven: false,
+      },
+    };
+  }
+  if (!removeTransaction(transactionDirectory)) {
+    // `rmSync` itself may have already succeeded, with only the follow-up
+    // durability fsync throwing — check reality now rather than trusting
+    // the boolean alone, so a directory that is actually gone is never
+    // reported as retained (mirrors `firstExistingPath`'s own freshness,
+    // made explicit in the record instead of implicit in a path lookup).
+    const directoryStillThere = pathExists(transactionDirectory);
+    return {
+      status: "manual",
+      recoveryPath: directoryStillThere ? transactionDirectory : undefined,
+      outcome: {
+        transactionDirectory: directoryStillThere ? transactionDirectory : undefined,
+        targetExists,
+        targetWritten: false,
+        directoryRemoved: !directoryStillThere,
+        artifactRetainedUnproven: directoryStillThere,
+      },
+    };
+  }
+  return {
+    status: "recovered",
+    outcome: {
+      targetExists,
+      targetWritten: false,
+      directoryRemoved: true,
+      artifactRetainedUnproven: false,
+    },
+  };
+}
+
 /** Recover an interrupted mutation before anybody interprets an absent target. */
 export function recoverFileTransaction(
   path: string,
@@ -626,8 +798,15 @@ export function recoverFileTransaction(
     const manifest = readManifest(transactionDirectory, path);
     if (manifest?.state === "committed") continue;
     if (manifest === undefined) {
-      return { status: "manual", recoveryPath: firstExistingPath(transactionDirectory) };
+      return {
+        status: "manual",
+        recoveryPath: firstExistingPath(transactionDirectory),
+        outcome: ambiguousOutcome(transactionDirectory, path, undefined, false),
+      };
     }
+
+    const displacedPath = join(transactionDirectory, "displaced");
+    const preparedArtifactPath = join(transactionDirectory, "prepared");
 
     // No displaced backup ever existed for this transaction: either the
     // process crashed before ever attempting to displace anything
@@ -635,70 +814,56 @@ export function recoverFileTransaction(
     // anything to protect and the manifest reached "published" the instant
     // `path` was linked (see the "missing" branch of `atomicWriteBytesIfUnchanged`
     // — it writes "published" right after `linkSync`, with no "displaced"
-    // state in between). Either way, discarding the transaction directory
-    // only ever removes its own internal artifacts (`prepared`,
-    // `manifest.json`) — never `path` itself. If `path` is already linked to
-    // the discarded `prepared` entry (the crash landed after "published" was
-    // recorded but before the transaction directory could be removed), its
-    // bytes survive: a hard link only loses one name, never the data other
-    // names still hold. `path` is deliberately never offered as the
-    // `recoveryPath` when this cleanup itself fails: once `removeTransaction`
-    // is attempted, the only thing left to name is the transaction directory
-    // (if it still exists) — never the live target (whole-branch re-review,
-    // Important 1).
-    //
-    // For "prepared" this reasoning holds regardless of whether `path`
-    // currently exists: `writeManifest(..., "prepared", ...)` always runs
-    // BEFORE `path` is ever touched (before the displacing rename and before
-    // any `linkSync`), so `path` at this state is either the caller's
-    // original, still-untouched file, or was never there to begin with
-    // (`prior.status === "missing"`) — `prepared` never carries data that
-    // isn't also, independently, either still live at `path` or was never
-    // the user's to begin with.
-    //
-    // For "published" that invariant is different: `writeManifest(...,
-    // "published", ...)` is only ever called AFTER `linkSync(temporaryPath,
-    // path)` has already succeeded, in both the general-write and
-    // missing-prior code paths — so every provable "published" shape
-    // guarantees `path` exists at that moment. A "published" manifest
-    // reaching here with `path` now absent means something removed `path`
-    // AFTER Rocky linked it — never a shape one of Rocky's own crash windows
-    // produces (final audit, Minor 4). `prepared` there shares `path`'s old
-    // inode and may be the last surviving name for bytes derived from the
-    // user's file, so it is not safe to discard sight unseen; requiring
-    // `pathExists(path)` here routes that shape to the explicit "published,
-    // unresolved" guard below instead, which stays `manual` and preserves
-    // the directory.
-    const displacedPath = join(transactionDirectory, "displaced");
-    const safeToDiscardWithoutDisplaced = manifest.state === "prepared"
-      || (manifest.state === "published" && pathExists(path));
-    if (safeToDiscardWithoutDisplaced && !pathExists(displacedPath)) {
-      if (!mutationGuardUnchanged(guard)) return { status: "manual" };
-      if (!removeTransaction(transactionDirectory)) {
-        return {
-          status: "manual",
-          recoveryPath: firstExistingPath(transactionDirectory),
-        };
-      }
-      return { status: "recovered" };
+    // state in between). `resolveUndisplacedTransaction` proves, from the
+    // artifact itself, whether discarding is safe (see its own doc comment).
+    if ((manifest.state === "prepared" || manifest.state === "published")
+      && !pathExists(displacedPath)) {
+      return resolveUndisplacedTransaction(transactionDirectory, path, guard);
     }
 
     if (manifest.state === "prepared"
       && pathExists(path)
       && isManagedRecoveryPair(path, displacedPath, path)) {
-      const preparedPath = join(transactionDirectory, "prepared");
-      if (pathExists(preparedPath)
+      // Proven now, before `discardPrepared`/`writeManifest` mutate anything
+      // below: committing this transaction makes it its own "committed"
+      // entry, and `isManagedRegularFile`'s link accounting reads exactly
+      // that state — recomputing the proof afterward would count this
+      // transaction's own just-written commit against itself and could
+      // report a copy as unproven that was proven moments earlier.
+      const provenCopy = provenCopyOf(displacedPath, path);
+      if (pathExists(preparedArtifactPath)
         && (!mutationGuardUnchanged(guard)
-          || !discardPrepared(transactionDirectory, preparedPath))) {
-        return { status: "manual", recoveryPath: firstExistingPath(transactionDirectory) };
+          || !discardPrepared(transactionDirectory, preparedArtifactPath))) {
+        return {
+          status: "manual",
+          recoveryPath: firstExistingPath(transactionDirectory),
+          outcome: ambiguousOutcome(transactionDirectory, path, displacedPath, false),
+        };
       }
-      if (!mutationGuardUnchanged(guard)) return { status: "manual" };
+      if (!mutationGuardUnchanged(guard)) {
+        return { status: "manual", outcome: ambiguousOutcome(transactionDirectory, path, displacedPath, false) };
+      }
       try {
         writeManifest(transactionDirectory, path, "committed", guard);
       } catch {
-        return { status: "manual", recoveryPath: firstExistingPath(transactionDirectory) };
+        return {
+          status: "manual",
+          recoveryPath: firstExistingPath(transactionDirectory),
+          outcome: ambiguousOutcome(transactionDirectory, path, displacedPath, false),
+        };
       }
-      return { status: "recovered", recoveryPath: firstExistingPath(displacedPath) };
+      return {
+        status: "recovered",
+        recoveryPath: firstExistingPath(displacedPath),
+        outcome: {
+          transactionDirectory,
+          provenCopy,
+          targetExists: true,
+          targetWritten: false,
+          directoryRemoved: false,
+          artifactRetainedUnproven: false,
+        },
+      };
     }
 
     // Complete-but-unrecorded: a crash between the publishing linkSync and
@@ -707,14 +872,9 @@ export function recoverFileTransaction(
     // holds the new bytes. This is provable, not guessed, in all three
     // states: `path` shares its inode with the transaction's own `prepared`
     // artifact (nlink 2, the exact pairing only that linkSync can create)
-    // and the pre-write bytes are intact in `displaced`. "published" carries
-    // *more* evidence than "prepared"/"displaced" here — the manifest itself
-    // already recorded the publish — so resolving only the other two while
-    // leaving "published" permanently manual was an arbitrary boundary, not
-    // a principled one (whole-branch re-review, Important 2). Finish
-    // committing the transaction that already happened instead of reporting
-    // an unrecoverable dead end for a write that in fact succeeded.
-    const preparedArtifactPath = join(transactionDirectory, "prepared");
+    // and the pre-write bytes are intact in `displaced`. Finish committing
+    // the transaction that already happened instead of reporting an
+    // unrecoverable dead end for a write that in fact succeeded.
     if ((manifest.state === "prepared"
         || manifest.state === "displaced"
         || manifest.state === "published")
@@ -725,15 +885,39 @@ export function recoverFileTransaction(
       if (pathExists(preparedArtifactPath)
         && (!mutationGuardUnchanged(guard)
           || !discardPrepared(transactionDirectory, preparedArtifactPath))) {
-        return { status: "manual", recoveryPath: firstExistingPath(transactionDirectory) };
+        return {
+          status: "manual",
+          recoveryPath: firstExistingPath(transactionDirectory),
+          outcome: ambiguousOutcome(transactionDirectory, path, displacedPath, false),
+        };
       }
-      if (!mutationGuardUnchanged(guard)) return { status: "manual" };
+      if (!mutationGuardUnchanged(guard)) {
+        return { status: "manual", outcome: ambiguousOutcome(transactionDirectory, path, displacedPath, false) };
+      }
       try {
         writeManifest(transactionDirectory, path, "committed", guard);
       } catch {
-        return { status: "manual", recoveryPath: firstExistingPath(transactionDirectory) };
+        return {
+          status: "manual",
+          recoveryPath: firstExistingPath(transactionDirectory),
+          outcome: ambiguousOutcome(transactionDirectory, path, displacedPath, false),
+        };
       }
-      return { status: "recovered", recoveryPath: firstExistingPath(displacedPath) };
+      // Proven by this branch's own entry condition, before `discardPrepared`/
+      // `writeManifest` mutate anything above — never recomputed afterward
+      // (see the same note on the legacy-pairing branch above).
+      return {
+        status: "recovered",
+        recoveryPath: firstExistingPath(displacedPath),
+        outcome: {
+          transactionDirectory,
+          provenCopy: displacedPath,
+          targetExists: true,
+          targetWritten: false,
+          directoryRemoved: false,
+          artifactRetainedUnproven: false,
+        },
+      };
     }
 
     // A "published" manifest that reaches here was not proven by either
@@ -745,11 +929,19 @@ export function recoverFileTransaction(
     // restore-from-`displaced` logic below, which assumes a state machine
     // "published" was never meant to re-enter.
     if (manifest.state === "published") {
-      return { status: "manual", recoveryPath: firstExistingPath(transactionDirectory) };
+      return {
+        status: "manual",
+        recoveryPath: firstExistingPath(transactionDirectory),
+        outcome: ambiguousOutcome(transactionDirectory, path, displacedPath, false),
+      };
     }
 
     if (pathExists(path)) {
-      return { status: "manual", recoveryPath: firstExistingPath(transactionDirectory) };
+      return {
+        status: "manual",
+        recoveryPath: firstExistingPath(transactionDirectory),
+        outcome: ambiguousOutcome(transactionDirectory, path, displacedPath, false),
+      };
     }
 
     if (pathExists(displacedPath)) {
@@ -757,9 +949,18 @@ export function recoverFileTransaction(
         return {
           status: "manual",
           recoveryPath: firstExistingPath(displacedPath, transactionDirectory),
+          outcome: ambiguousOutcome(transactionDirectory, path, displacedPath, false),
         };
       }
-      if (!mutationGuardUnchanged(guard)) return { status: "manual" };
+      // Proven now, before anything below mutates: committing makes this
+      // transaction its own "committed" entry, and recomputing the same
+      // proof afterward would count that self-reference against `displaced`
+      // and report it as unproven (the exact bug this note guards against
+      // on the two commit branches above).
+      const provenCopy = displacedPath;
+      if (!mutationGuardUnchanged(guard)) {
+        return { status: "manual", outcome: ambiguousOutcome(transactionDirectory, path, displacedPath, false) };
+      }
       let publication: RecoveryPublication;
       try {
         publication = copyRegularFileExclusiveNoFollow(displacedPath, path);
@@ -768,20 +969,35 @@ export function recoverFileTransaction(
         return {
           status: "manual",
           recoveryPath: firstExistingPath(displacedPath, transactionDirectory, path),
+          outcome: ambiguousOutcome(transactionDirectory, path, displacedPath, pathExists(path)),
         };
       }
       if (!validatePublishedPair(publication, displacedPath, path)) {
-        return { status: "manual", recoveryPath: firstExistingPath(transactionDirectory) };
+        return {
+          status: "manual",
+          recoveryPath: firstExistingPath(transactionDirectory),
+          outcome: ambiguousOutcome(transactionDirectory, path, displacedPath, true),
+        };
       }
       const preparedPath = join(transactionDirectory, "prepared");
       if (pathExists(preparedPath)
         && (!mutationGuardUnchanged(guard)
           || !discardPrepared(transactionDirectory, preparedPath))) {
-        return { status: "manual", recoveryPath: firstExistingPath(transactionDirectory) };
+        return {
+          status: "manual",
+          recoveryPath: firstExistingPath(transactionDirectory),
+          outcome: ambiguousOutcome(transactionDirectory, path, displacedPath, true),
+        };
       }
-      if (!mutationGuardUnchanged(guard)) return { status: "manual" };
+      if (!mutationGuardUnchanged(guard)) {
+        return { status: "manual", outcome: ambiguousOutcome(transactionDirectory, path, displacedPath, true) };
+      }
       if (!validatePublishedPair(publication, displacedPath, path)) {
-        return { status: "manual", recoveryPath: firstExistingPath(transactionDirectory) };
+        return {
+          status: "manual",
+          recoveryPath: firstExistingPath(transactionDirectory),
+          outcome: ambiguousOutcome(transactionDirectory, path, displacedPath, true),
+        };
       }
       // Each path's last successful paired observation still precedes manifest
       // publication. Node cannot atomically compare both files and publish this
@@ -789,23 +1005,32 @@ export function recoverFileTransaction(
       try {
         writeManifest(transactionDirectory, path, "committed", guard);
       } catch {
-        return { status: "manual", recoveryPath: firstExistingPath(transactionDirectory) };
-      }
-      return { status: "recovered", recoveryPath: firstExistingPath(displacedPath) };
-    } else {
-      // Both target and displaced backup are absent: nothing to restore, and
-      // removing the transaction directory never touches `path`. On removal
-      // failure the only artifact left to name is that directory — never
-      // `path`, which does not even exist here (whole-branch re-review,
-      // Important 1).
-      if (!mutationGuardUnchanged(guard)) return { status: "manual" };
-      if (!removeTransaction(transactionDirectory)) {
         return {
           status: "manual",
           recoveryPath: firstExistingPath(transactionDirectory),
+          outcome: ambiguousOutcome(transactionDirectory, path, displacedPath, true),
         };
       }
-      return { status: "recovered" };
+      return {
+        status: "recovered",
+        recoveryPath: firstExistingPath(displacedPath),
+        outcome: {
+          transactionDirectory,
+          provenCopy,
+          targetExists: true,
+          targetWritten: true,
+          directoryRemoved: false,
+          artifactRetainedUnproven: false,
+        },
+      };
+    } else {
+      // Both target and displaced backup are absent: `resolveUndisplacedTransaction`
+      // applies the same artifact-driven proof used above — safe to discard
+      // only when `path` is live (it is not, here) or the staged artifact
+      // does not exist; otherwise the directory is retained and named
+      // rather than guessed away (final audit, F3's reasoning extended to
+      // this fallback, not just the state-gated fast path above it).
+      return resolveUndisplacedTransaction(transactionDirectory, path, guard);
     }
   }
   return { status: "clear" };
@@ -854,12 +1079,19 @@ function restoreDisplaced(
   preparedPath: string,
   guard?: FileMutationGuard,
 ): ConditionalBytesWriteResult {
+  // Proven now, before this call's own commit can distort the same check
+  // (see the identical note in `recoverFileTransaction`'s restore branch):
+  // once this transaction becomes its own "committed" entry, recomputing
+  // this proof afterward would count that self-reference against
+  // `displaced` and wrongly report it as unproven.
+  const provenCopy = provenCopyOf(displacedPath, path);
   if (pathExists(preparedPath)
     && (!mutationGuardUnchanged(guard)
       || !discardPrepared(transactionDirectory, preparedPath))) {
     return {
       status: "recovery-required",
       recoveryPath: firstExistingPath(transactionDirectory, preparedPath),
+      outcome: ambiguousOutcome(transactionDirectory, path, displacedPath, false),
     };
   }
   let publication: RecoveryPublication;
@@ -868,15 +1100,19 @@ function restoreDisplaced(
     publication = copyRegularFileExclusiveNoFollow(displacedPath, path);
     syncParentDirectory(path);
   } catch {
+    // A partial write can leave `path` behind holding broken bytes (final
+    // audit, F1) — never assumed either way, established fresh, right now.
     return {
       status: "recovery-required",
       recoveryPath: firstExistingPath(displacedPath, transactionDirectory, path),
+      outcome: ambiguousOutcome(transactionDirectory, path, displacedPath, pathExists(path)),
     };
   }
   if (!validatePublishedPair(publication, displacedPath, path)) {
     return {
       status: "recovery-required",
       recoveryPath: firstExistingPath(transactionDirectory, path),
+      outcome: ambiguousOutcome(transactionDirectory, path, displacedPath, true),
     };
   }
   try {
@@ -885,6 +1121,7 @@ function restoreDisplaced(
       return {
         status: "recovery-required",
         recoveryPath: firstExistingPath(transactionDirectory, path),
+        outcome: ambiguousOutcome(transactionDirectory, path, displacedPath, true),
       };
     }
     // Each path's last successful paired observation still precedes manifest
@@ -896,9 +1133,21 @@ function restoreDisplaced(
     return {
       status: "recovery-required",
       recoveryPath: firstExistingPath(transactionDirectory, path),
+      outcome: ambiguousOutcome(transactionDirectory, path, displacedPath, true),
     };
   }
-  return { status: "changed", recoveryPath: firstExistingPath(displacedPath) };
+  return {
+    status: "changed",
+    recoveryPath: firstExistingPath(displacedPath),
+    outcome: {
+      transactionDirectory,
+      provenCopy,
+      targetExists: true,
+      targetWritten: true,
+      directoryRemoved: false,
+      artifactRetainedUnproven: false,
+    },
+  };
 }
 
 function discardPrepared(transactionDirectory: string, temporaryPath: string): boolean {
@@ -964,6 +1213,7 @@ export function atomicWriteBytesIfUnchanged(
             return {
               status: "recovery-required",
               recoveryPath: firstExistingPath(transactionDirectory, path),
+              outcome: ambiguousOutcome(transactionDirectory, path, undefined, destinationPublished),
             };
           }
           transactionExists = false;
@@ -981,6 +1231,7 @@ export function atomicWriteBytesIfUnchanged(
         return {
           status: "recovery-required",
           recoveryPath: firstExistingPath(transactionDirectory, path),
+          outcome: ambiguousOutcome(transactionDirectory, path, undefined, destinationPublished),
         };
       }
       transactionExists = false;
@@ -1015,6 +1266,7 @@ export function atomicWriteBytesIfUnchanged(
         return {
           status: "recovery-required",
           recoveryPath: firstExistingPath(transactionDirectory, temporaryPath),
+          outcome: ambiguousOutcome(transactionDirectory, path, undefined, destinationPublished),
         };
       }
       throw error;
@@ -1054,6 +1306,7 @@ export function atomicWriteBytesIfUnchanged(
             path,
             temporaryPath,
           ),
+          outcome: ambiguousOutcome(transactionDirectory, path, recoveryPath, destinationPublished),
         };
       }
       const restored = restoreDisplaced(
@@ -1073,6 +1326,7 @@ export function atomicWriteBytesIfUnchanged(
           transactionDirectory,
           path,
         ),
+        outcome: ambiguousOutcome(transactionDirectory, path, recoveryPath, true),
       };
     }
 
@@ -1082,6 +1336,7 @@ export function atomicWriteBytesIfUnchanged(
       return {
         status: "recovery-required",
         recoveryPath: firstExistingPath(recoveryPath, transactionDirectory, path),
+        outcome: ambiguousOutcome(transactionDirectory, path, recoveryPath, destinationPublished),
       };
     }
 
@@ -1105,6 +1360,7 @@ export function atomicWriteBytesIfUnchanged(
       return {
         status: "recovery-required",
         recoveryPath: firstExistingPath(transactionDirectory, path),
+        outcome: ambiguousOutcome(transactionDirectory, path, recoveryPath, destinationPublished),
       };
     }
     requireMutationGuard(guard);
@@ -1114,6 +1370,7 @@ export function atomicWriteBytesIfUnchanged(
       return {
         status: "recovery-required",
         recoveryPath: firstExistingPath(transactionDirectory, path),
+        outcome: ambiguousOutcome(transactionDirectory, path, recoveryPath, destinationPublished),
       };
     }
     return { status: "written", recoveryPath: liveRecoveryPath };
@@ -1127,10 +1384,16 @@ export function atomicWriteBytesIfUnchanged(
       descriptor = undefined;
     }
     if (error instanceof FileMutationGuardChangedError) {
-      return { status: "recovery-required" };
+      return {
+        status: "recovery-required",
+        outcome: ambiguousOutcome(transactionDirectory, path, recoveryPath, destinationPublished),
+      };
     }
     if (!mutationGuardUnchanged(guard)) {
-      return { status: "recovery-required" };
+      return {
+        status: "recovery-required",
+        outcome: ambiguousOutcome(transactionDirectory, path, recoveryPath, destinationPublished),
+      };
     }
     if (recoveryPath !== undefined && recoveryExists) {
       return {
@@ -1141,6 +1404,7 @@ export function atomicWriteBytesIfUnchanged(
           path,
           temporaryPath,
         ),
+        outcome: ambiguousOutcome(transactionDirectory, path, recoveryPath, destinationPublished),
       };
     }
     if (destinationPublished || (transactionExists && !removeTransaction(transactionDirectory))) {
@@ -1152,6 +1416,7 @@ export function atomicWriteBytesIfUnchanged(
           path,
           temporaryPath,
         ),
+        outcome: ambiguousOutcome(transactionDirectory, path, recoveryPath, destinationPublished),
       };
     }
     transactionExists = false;

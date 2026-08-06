@@ -42,6 +42,7 @@ import {
 import type {
   BytesReadResult,
   ConditionalBytesWriteResult,
+  RecoveryOutcome,
 } from "../setup/file-transaction.js";
 import { ago, detail, detailTty, say, sayTty } from "../ui/rocky.js";
 
@@ -105,71 +106,80 @@ function assetDir(): string {
 }
 
 /**
- * Resolves an engine-supplied `recoveryPath` candidate down to "the
- * transaction directory it names", proven independently at the point the
- * words are spoken — never trusting the candidate's shape. `path` exists is
- * not proof of anything worth naming: the missing-prior `EEXIST` race in
- * `atomicWriteBytesIfUnchanged` can still hand back bashrc's own live path
- * (final audit, Minor 3/N1), and `recoverFileTransaction` no longer offers it
- * either, but a future engine regression could. Excluding `rc` by identity —
- * not by guessing at path shape — is the one check that has to hold for
- * every candidate this function is ever handed.
+ * Merges outcome facts across a settle loop that may recover more than one
+ * stale transaction directory before reaching a clear state: any write or
+ * removal an earlier iteration performed stays true once a later
+ * iteration's own facts are folded in.
  */
-function resolveTransactionDirectory(candidate: string | undefined, rc: string): string | undefined {
-  if (candidate === undefined || candidate === rc || !pathExists(candidate)) return undefined;
-  try {
-    return lstatSync(candidate).isDirectory() ? candidate : dirname(candidate);
-  } catch {
-    return undefined;
-  }
-}
-
-/** True only when `path` is proven, right now, to be a live regular file — never absent, a directory, or a symlink. */
-function isLiveRegularFile(path: string): boolean {
-  try {
-    return lstatSync(path).isFile();
-  } catch {
-    return false;
-  }
+function mergeOutcome(base: RecoveryOutcome | undefined, next: RecoveryOutcome): RecoveryOutcome {
+  if (base === undefined) return next;
+  return {
+    transactionDirectory: next.transactionDirectory ?? base.transactionDirectory,
+    provenCopy: next.provenCopy ?? base.provenCopy,
+    targetExists: next.targetExists,
+    targetWritten: base.targetWritten || next.targetWritten,
+    directoryRemoved: base.directoryRemoved || next.directoryRemoved,
+    artifactRetainedUnproven: base.artifactRetainedUnproven || next.artifactRetainedUnproven,
+  };
 }
 
 /**
- * An ambiguous stop only ever claims a kept copy when a `displaced` artifact
- * is proven — right now, at the point of speaking — to be a live regular
- * file (final audit, Important 2: a transaction directory existing is not
- * evidence that a copy of anything survives inside it). And a removal
- * imperative is only ever spoken when bashrc itself still exists: if bashrc
- * is gone, the proven copy is the only surviving place holding its content,
- * and telling the user to remove it would destroy their last copy (final
- * audit, Important 3). In that state Rocky instead says where the content
- * is, that it is the only copy, and how to put it back — never "remove".
+ * Every engine call this module makes populates `outcome`. This only guards
+ * against a future engine regression silently dropping it — the point of
+ * the record is that no message function ever falls back to re-deriving
+ * facts from the filesystem itself, the exact pattern this round replaces.
  */
-function reportBashrcRecoveryStop(rc: string, recoveryPath: string | undefined): number {
-  const transactionDirectory = resolveTransactionDirectory(recoveryPath, rc);
-  const displacedPath = transactionDirectory !== undefined
-    ? join(transactionDirectory, "displaced")
-    : undefined;
-  const provenCopy = displacedPath !== undefined && isLiveRegularFile(displacedPath)
-    ? displacedPath
-    : undefined;
+function requireOutcome(outcome: RecoveryOutcome | undefined): RecoveryOutcome {
+  if (outcome === undefined) {
+    throw new Error("internal: recovery outcome missing from engine result");
+  }
+  return outcome;
+}
 
-  if (provenCopy !== undefined && pathExists(rc)) {
-    say("bashrc keeps unclear transaction from before. I keep safe copy. I touch nothing more.");
-    detail(`inspect, then remove by hand: ${provenCopy}`);
-  } else if (provenCopy !== undefined) {
-    say("bashrc gone. I keep only copy of old bytes. I touch nothing more.");
-    detail(`safe copy: ${provenCopy}`);
+/**
+ * Speaks only what `outcome` proves — established once, by the code that
+ * acted, at the moment it acted (`file-transaction.ts`'s `RecoveryOutcome`).
+ * This function makes no filesystem check of its own; every clause below
+ * reads a field already on the record (final audit: "a name exists" is not
+ * "the data is safe", and no message may re-derive that distinction later
+ * from a bare path). No branch here ever instructs removing anything — a
+ * proven copy is named for inspection, never targeted for deletion, because
+ * an ambiguous stop can never prove the copy is redundant (final audit, F1
+ * + F3: the same "prove the content, not the name" discipline the engine
+ * guard now applies). `fromSettle` selects between two histories that must
+ * not share a sentence: a transaction left behind by an earlier,
+ * already-finished invocation ("from before") versus this very call's own
+ * write turning ambiguous (final audit, F5).
+ */
+function reportBashrcRecoveryStop(rc: string, outcome: RecoveryOutcome, fromSettle: boolean): number {
+  const origin = fromSettle
+    ? "bashrc keeps unclear transaction from before."
+    : "bashrc write leaves unclear state.";
+  const closing = outcome.targetWritten
+    ? "bashrc holds unfinished write. do not trust it."
+    : "I touch nothing more.";
+
+  if (outcome.provenCopy !== undefined && outcome.targetExists) {
+    say(`${origin} I keep safe copy. ${closing}`);
+    detail(`inspect: ${outcome.provenCopy}`);
+  } else if (outcome.provenCopy !== undefined) {
+    say(`${origin} bashrc gone. I keep only copy of old bytes. ${closing}`);
+    detail(`safe copy: ${outcome.provenCopy}`);
     detail("restore by copying that file to the bashrc path yourself");
   } else {
-    say("bashrc keeps unclear transaction from before. no safe copy to name. I touch nothing more.");
-    if (transactionDirectory !== undefined) detail(`transaction directory: ${transactionDirectory}`);
+    say(`${origin} no safe copy to name. ${closing}`);
+    if (outcome.transactionDirectory !== undefined) {
+      detail(outcome.artifactRetainedUnproven
+        ? `unclear leftover, inspect before removing: ${outcome.transactionDirectory}`
+        : `transaction directory: ${outcome.transactionDirectory}`);
+    }
   }
   detail(`bashrc: ${rc}`);
   return 1;
 }
 
 type SettleResult =
-  | { status: "clear"; recoveryPath?: string }
+  | { status: "clear"; outcome?: RecoveryOutcome }
   | { status: "stop"; exit: number };
 
 /**
@@ -177,24 +187,25 @@ type SettleResult =
  * manual/ambiguous recovery stops the command instead of continuing from
  * stale assumptions. A transaction actually recovered here belonged to some
  * earlier, already-finished invocation — not this call's own write — so its
- * retained-copy path (when one exists) is carried back for the caller to
- * disclose rather than silently absorbed (whole-branch re-review, Minor 1).
+ * outcome (when one exists) is carried back for the caller to disclose
+ * rather than silently absorbed (whole-branch re-review, Minor 1).
  */
 function settleBashrcTransactions(rc: string): SettleResult {
-  let recoveryPath: string | undefined;
+  let outcome: RecoveryOutcome | undefined;
   for (;;) {
     const inspection = inspectFileTransaction(rc);
-    if (inspection.status === "clear") return { status: "clear", recoveryPath };
+    if (inspection.status === "clear") return { status: "clear", outcome };
     const recovery = recoverFileTransaction(rc);
     if (recovery.status === "manual") {
       return {
         status: "stop",
-        exit: reportBashrcRecoveryStop(rc, recovery.recoveryPath ?? inspection.recoveryPath),
+        exit: reportBashrcRecoveryStop(rc, mergeOutcome(outcome, requireOutcome(recovery.outcome)), true),
       };
     }
-    // Recovered: re-inspect from fresh state before proceeding.
-    if (recovery.status === "recovered" && recovery.recoveryPath !== undefined) {
-      recoveryPath = recovery.recoveryPath;
+    // Recovered: fold this iteration's facts in, then re-inspect from fresh
+    // state before proceeding — another stale directory may still remain.
+    if (recovery.status === "recovered") {
+      outcome = mergeOutcome(outcome, requireOutcome(recovery.outcome));
     }
   }
 }
@@ -216,18 +227,21 @@ type BashrcPreparation =
  * publish had already reached bashrc before this call ever started (bashrc
  * unchanged, a copy is simply retained), or it can restore bashrc itself
  * from that copy because bashrc did not exist a moment ago and does now.
- * "I keep safe copy" is true of both, but only the second one is also true
- * of "I already put old bytes back" — and a command claiming only the first
- * when the second happened is the exact gap the audit reproduced against
- * `rocky hook status`.
+ * Both facts are read directly off `outcome.targetWritten` — proven by the
+ * engine at the moment it acted, not inferred here from a before/after
+ * snapshot (closes final audit F7's unpinned conjunct structurally, not
+ * just narrowly). The finalize branch never promises the copy is "yours to
+ * remove, any time": a publish later in this same invocation can still
+ * supersede it (final audit, F4) — only a write's own, genuinely final
+ * disclosure (`reportRetainedCopy`) makes that promise.
  */
-function reportSettledRecovery(recoveryPath: string, recreatedBashrc: boolean): void {
-  if (recreatedBashrc) {
+function reportSettledRecovery(outcome: RecoveryOutcome): void {
+  if (outcome.targetWritten) {
     say("bashrc gone. I already put old bytes back from safe copy.");
-    detail(`safe copy: ${recoveryPath}`);
   } else {
-    reportRetainedCopy(recoveryPath);
+    say("I keep safe copy of old bashrc.");
   }
+  if (outcome.provenCopy !== undefined) detail(`safe copy: ${outcome.provenCopy}`);
 }
 
 /**
@@ -240,11 +254,19 @@ function reportSettledRecovery(recoveryPath: string, recreatedBashrc: boolean): 
  * same accurate report of what settling just did, not only whichever
  * command the reviewer's own reproduction happened to name (final audit:
  * apply the fix to the class of message, not the one instance reproduced).
+ * The disclosure happens before any later stop in this function returns
+ * (final audit, F6): a stop that follows a mutating settle must never claim
+ * nothing was touched.
  */
 function prepareBashrc(rc: string): BashrcPreparation {
-  const existedBeforeSettling = pathExists(rc);
   const settled = settleBashrcTransactions(rc);
   if (settled.status === "stop") return { status: "stop", exit: settled.exit };
+
+  if (settled.outcome !== undefined
+    && (settled.outcome.targetWritten || settled.outcome.provenCopy !== undefined)) {
+    reportSettledRecovery(settled.outcome);
+    pruneSupersededTransactions(rc, settled.outcome.transactionDirectory);
+  }
 
   let metadata: Stats | undefined;
   try {
@@ -255,11 +277,6 @@ function prepareBashrc(rc: string): BashrcPreparation {
       detail(`bashrc: ${rc}`);
       return { status: "stop", exit: 1 };
     }
-  }
-
-  if (settled.recoveryPath !== undefined) {
-    reportSettledRecovery(settled.recoveryPath, !existedBeforeSettling && metadata !== undefined);
-    pruneSupersededTransactions(rc, dirname(settled.recoveryPath));
   }
 
   if (metadata !== undefined) {
@@ -336,7 +353,7 @@ function publishBashrc(rc: string, staged: Buffer, prior: BytesReadResult): Publ
     }
     return { exit: 1 };
   }
-  return { exit: reportBashrcRecoveryStop(rc, result.recoveryPath) };
+  return { exit: reportBashrcRecoveryStop(rc, requireOutcome(result.outcome), false) };
 }
 
 /** Corrupt marker bytes are preserved byte-for-byte; repair stays manual. */

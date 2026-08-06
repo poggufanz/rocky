@@ -241,7 +241,7 @@ function transactionDirectories(home: string): string[] {
 function writePendingTransactionFixture(
   bashrc: string,
   state: "prepared" | "displaced" | "published",
-  artifacts: { displaced?: Buffer } = {},
+  artifacts: { displaced?: Buffer; prepared?: Buffer } = {},
 ): string {
   const directory = join(
     dirname(bashrc),
@@ -255,6 +255,9 @@ function writePendingTransactionFixture(
   );
   if (artifacts.displaced !== undefined) {
     writeFileSync(join(directory, "displaced"), artifacts.displaced);
+  }
+  if (artifacts.prepared !== undefined) {
+    writeFileSync(join(directory, "prepared"), artifacts.prepared);
   }
   return directory;
 }
@@ -1082,6 +1085,13 @@ test("hook status names the surviving copy without inviting its removal when bas
   );
   assert.ok(!output.includes("SECRET_TOKEN"), "diagnostics stay secret-free");
   assert.equal(existsSync(join(fixture, "displaced")), true, "the copy itself is left untouched");
+  // Round 6 named the copy's path but never pinned that a *remedy* comes
+  // with it — the whole sentence was deletable with a green suite (final
+  // audit, F9 mutant A9). Strengthened here, not just re-asserted.
+  assert.ok(
+    output.includes("restore by copying that file to the bashrc path yourself"),
+    "the last-surviving-copy case must give a remedy, not just name the path (A9)",
+  );
 });
 
 /**
@@ -1138,6 +1148,15 @@ test("hook install never offers bashrc itself as something to remove, even when 
   assert.ok(!output.includes("remove by hand"), "must never instruct removing bashrc itself");
   assert.ok(!output.includes("I keep safe copy"), "must not claim a safe copy when only bashrc itself was named");
   assert.ok(!output.includes("transaction directory:"), "must not name bashrc's own path as a transaction directory");
+  // The transaction directory itself was actually removed here (rmSync
+  // succeeded; only the follow-up fsync threw) — round 7's outcome record
+  // must reflect that a removed directory is never named for inspection
+  // either, under the new wording (final audit, F9 mutant A4's analogue:
+  // the "does this still exist" proof, not a file/directory shape guess).
+  assert.ok(
+    !output.includes("inspect before removing"),
+    "must not claim a directory survives to inspect when it was actually removed",
+  );
   assert.match(output, /no safe copy to name/);
   assert.deepEqual(readFileSync(sandbox.bashrc), concurrent, "the concurrent writer's bytes are untouched");
 });
@@ -1227,4 +1246,254 @@ test("hook status prunes a superseded retained copy when it settles a fresh one 
   const remaining = transactionDirectories(sandbox.home);
   assert.equal(remaining.length, 1, "status prunes the superseded GEN1 copy when it settles GEN2");
   assert.ok(!remaining.includes(gen1), "the older, now-superseded copy is gone");
+});
+
+// --- Round 7 final audit: an outcome record, not a live filesystem check,
+// drives every recovery message. F1/F2/F3 reproduced exactly as the auditor
+// did (PROBE A, PROBE B, PROBE G). -------------------------------------
+
+/**
+ * Fails the first `fs.writeSync` call, landing inside `writeDescriptorCompletely`
+ * — the byte-copy loop `copyRegularFileExclusiveNoFollow` uses to restore a
+ * displaced backup. Nothing else in a settle/status invocation calls raw
+ * `writeSync` before that point. Matches the final audit's PROBE A exactly.
+ */
+function injectRecoveryWriteEnospc(t: TestContext): void {
+  const originalWriteSync = fs.writeSync;
+  let injected = false;
+  (fs as unknown as { writeSync: typeof fs.writeSync }).writeSync = ((
+    ...args: Parameters<typeof fs.writeSync>
+  ) => {
+    if (!injected) {
+      injected = true;
+      const error = new Error("ENOSPC: no space left on device") as NodeJS.ErrnoException;
+      error.code = "ENOSPC";
+      throw error;
+    }
+    return originalWriteSync(...args);
+  }) as typeof fs.writeSync;
+  syncBuiltinESMExports();
+  t.after(() => {
+    fs.writeSync = originalWriteSync;
+    syncBuiltinESMExports();
+  });
+}
+
+test("hook status reports an interrupted restore honestly instead of claiming to touch nothing (round 7, F1, PROBE A)", (t) => {
+  const sandbox = bashrcSandbox(t);
+  const original = bytes("export SECRET_TOKEN=sk-live-DO-NOT-LEAK\nalias ll='ls -l'\n");
+  // bashrc absent; a prior crashed install/uninstall left a restorable
+  // backup — PROBE A's exact fixture.
+  const fixture = writePendingTransactionFixture(sandbox.bashrc, "displaced", { displaced: original });
+  injectRecoveryWriteEnospc(t);
+
+  const result = hookStatus();
+
+  assert.equal(result, 1);
+  const output = sandbox.stderr();
+  // Before this round: Rocky created a truncated bashrc during the failed
+  // restore (openSync(O_CREAT|O_EXCL) lands before the injected write
+  // fails), then said "I touch nothing more" and pointed removal at the
+  // displaced copy — the only intact copy left. Both are now false claims
+  // this round refuses to make.
+  assert.equal(existsSync(sandbox.bashrc), true, "the failed restore left a broken bashrc behind");
+  assert.equal(readFileSync(sandbox.bashrc).length, 0, "the broken bashrc holds zero bytes, not real content");
+  assert.ok(!output.includes("I touch nothing more"), "must not claim nothing was touched after creating bashrc");
+  assert.ok(!output.includes("remove by hand"), "no removal instruction is ever spoken from an ambiguous stop");
+  assert.ok(output.includes("inspect:"), "actionable guidance still names the surviving copy");
+  assert.ok(output.includes(join(fixture, "displaced")), "the surviving copy is still named for inspection");
+  assert.deepEqual(readFileSync(join(fixture, "displaced")), original, "the only intact copy is never destroyed");
+  assert.ok(!output.includes("SECRET_TOKEN"), "diagnostics stay secret-free");
+});
+
+test("hook commands give actionable guidance instead of a permanent dead end on a published transaction with no displaced backup (round 7, F2, PROBE B)", (t) => {
+  const sandbox = bashrcSandbox(t);
+  // bashrc absent; txdir manifest state="published", prepared = exactly
+  // what a crashed missing-prior install leaves (the hook block over zero
+  // prior content) — PROBE B's exact fixture.
+  const staged = addHookBlockBytes(Buffer.alloc(0));
+  const fixture = writePendingTransactionFixture(sandbox.bashrc, "published", { prepared: staged });
+
+  for (const attempt of [hookStatus, hookInstall, hookUninstall, hookStatus]) {
+    const result = attempt();
+    assert.equal(result, 1, "no path resolves this ambiguous shape into a silent success");
+    const output = sandbox.stderr();
+    assert.ok(!output.includes("I keep safe copy"), "no copy is proven for a prepared-only artifact");
+    assert.ok(!output.includes("remove by hand"), "never a destructive imperative");
+    assert.ok(output.includes(fixture), "the directory is named so the user has something to inspect");
+    assert.ok(
+      output.includes("inspect before removing"),
+      "the message gives a remedy instead of a bare path with no verb (F2's escape hatch)",
+    );
+    assert.equal(existsSync(fixture), true, "nothing is silently discarded");
+  }
+  assert.equal(existsSync(sandbox.bashrc), false, "bashrc is never created by any of the four attempts");
+});
+
+test("hook status never deletes the only surviving copy of a prepared write, and never reports false success over it (round 7, F3, PROBE G)", (t) => {
+  const sandbox = bashrcSandbox(t);
+  // bashrc absent; txdir manifest state="prepared", prepared = the ONLY
+  // surviving copy of the user's content plus the hook block — PROBE G's
+  // exact fixture. Before this round, "prepared" was discarded
+  // unconditionally regardless of `path`, deleting this silently.
+  const staged = bytes("export USER_SECRET=only-copy\n\n# >>> rocky hook >>>\n");
+  const fixture = writePendingTransactionFixture(sandbox.bashrc, "prepared", { prepared: staged });
+
+  const result = hookStatus();
+
+  assert.equal(result, 1, "status must not silently discard the only surviving copy and exit 0");
+  const output = sandbox.stderr();
+  assert.ok(!output.includes("ears not installed"), "must not report false success over a destroyed transaction");
+  assert.equal(existsSync(fixture), true, "the transaction directory survives");
+  assert.equal(
+    existsSync(join(fixture, "prepared")),
+    true,
+    "the only surviving copy of the user's bytes is not deleted",
+  );
+  assert.deepEqual(readFileSync(join(fixture, "prepared")), staged, "the surviving bytes are untouched");
+  assert.ok(output.includes(fixture), "the directory is named");
+  assert.ok(!output.includes("USER_SECRET"), "diagnostics stay secret-free");
+});
+
+// --- Round 7 final audit, Minors F4/F5/F6 ----------------------------------
+
+test("hook install never promises permanence for a settle-disclosed copy its own publish supersedes (round 7, F4)", (t) => {
+  const sandbox = bashrcSandbox(t);
+  const original = bytes(`export A=1\n\n${BLOCK}`);
+  writeFileSync(sandbox.bashrc, original);
+
+  // Inline, resettable version of `injectPostPublishParentFsyncFailure`:
+  // that helper's fault stays permanently live once triggered, which would
+  // also break this test's own SECOND write below. Only the first crash
+  // may be faulted — there must be exactly one interrupted transaction to
+  // settle, not two.
+  const originalLink = fs.linkSync;
+  const originalSync = directorySyncCapability.sync;
+  let published = false;
+  fs.linkSync = ((existingPath: fs.PathLike, newPath: fs.PathLike) => {
+    originalLink(existingPath, newPath);
+    if (String(newPath) === sandbox.bashrc) published = true;
+  }) as typeof fs.linkSync;
+  directorySyncCapability.sync = (directoryPath: string) => {
+    if (published && directoryPath === dirname(sandbox.bashrc)) {
+      throw new Error("injected fsync failure");
+    }
+    return true;
+  };
+  syncBuiltinESMExports();
+
+  // hookUninstall crashes after publish, leaving a pending transaction a
+  // later invocation must settle before proceeding.
+  assert.equal(hookUninstall(), 1);
+  assert.equal(inspectFileTransaction(sandbox.bashrc).status, "pending");
+
+  fs.linkSync = originalLink;
+  directorySyncCapability.sync = originalSync;
+  syncBuiltinESMExports();
+
+  // hookInstall settles that stale transaction (disclosing it), then
+  // performs its own fresh write — disclosing a second, different copy —
+  // and its own prune supersedes the first.
+  const result = hookInstall();
+
+  assert.equal(result, 0, sandbox.stderr());
+  const output = sandbox.stderr();
+  const promises = (output.match(/yours to remove, any time/g) ?? []).length;
+  assert.equal(
+    promises,
+    1,
+    "only the final, genuinely-last write may promise permanence — not a settled copy this same call supersedes",
+  );
+  assert.ok(output.includes("I keep safe copy"), "the settled copy is still disclosed, just without the broken promise");
+});
+
+test("hook install never says a transaction is 'from before' when it is this very call's own write (round 7, F5)", (t) => {
+  const sandbox = bashrcSandbox(t);
+  const original = bytes("export A=1\n");
+  writeFileSync(sandbox.bashrc, original);
+  injectPostPublishParentFsyncFailure(t, sandbox.bashrc);
+
+  const result = hookInstall();
+
+  assert.equal(result, 1);
+  const output = sandbox.stderr();
+  assert.ok(
+    !output.includes("from before"),
+    "this call's own write turning ambiguous is not a transaction from before",
+  );
+  assert.match(output, /bashrc write leaves unclear state/);
+});
+
+test("hook status discloses what settling did even when it cannot then check bashrc itself (round 7, F6)", (t) => {
+  const sandbox = bashrcSandbox(t);
+  const original = bytes("export SECRET_TOKEN=sk-live-DO-NOT-LEAK\n");
+  writeFileSync(sandbox.bashrc, original);
+  injectPostPublishParentFsyncFailure(t, sandbox.bashrc);
+  assert.equal(hookInstall(), 1);
+  assert.equal(inspectFileTransaction(sandbox.bashrc).status, "pending");
+
+  // Fires only on the 3rd `lstatSync(bashrc)` call during the next
+  // settle+check: calls 1-2 belong to `recoverFileTransaction`'s own
+  // internal proofs (which must succeed for settling to finish and
+  // disclose); call 3 is `prepareBashrc`'s own post-settle topology check,
+  // the one this finding is about. Calibrated empirically against this
+  // exact fixture, not guessed.
+  const originalLstat = fs.lstatSync;
+  let calls = 0;
+  (fs as unknown as { lstatSync: typeof fs.lstatSync }).lstatSync = ((
+    ...args: Parameters<typeof fs.lstatSync>
+  ) => {
+    if (args[0] === sandbox.bashrc) {
+      calls += 1;
+      if (calls === 3) {
+        const error = new Error("injected EACCES on bashrc lstat") as NodeJS.ErrnoException;
+        error.code = "EACCES";
+        throw error;
+      }
+    }
+    return originalLstat(...args);
+  }) as typeof fs.lstatSync;
+  syncBuiltinESMExports();
+  t.after(() => {
+    (fs as unknown as { lstatSync: typeof fs.lstatSync }).lstatSync = originalLstat;
+    syncBuiltinESMExports();
+  });
+
+  const result = hookStatus();
+
+  assert.equal(result, 1);
+  const output = sandbox.stderr();
+  assert.match(output, /I cannot check bashrc/);
+  assert.ok(
+    output.includes("I keep safe copy"),
+    "settling's own mutation must still be disclosed before this stop, not suppressed by it",
+  );
+  assert.ok(!output.includes("SECRET_TOKEN"), "diagnostics stay secret-free");
+});
+
+// --- Round 7 final audit, F9 coverage gaps (A1) ----------------------------
+
+test("hook status never claims a safe copy exists when the displaced artifact is not a proven regular file (round 7, F9 A1)", (t) => {
+  const sandbox = bashrcSandbox(t);
+  const elsewhere = join(sandbox.home, "elsewhere.txt");
+  writeFileSync(elsewhere, "not the real backup\n");
+  const fixture = writePendingTransactionFixture(sandbox.bashrc, "published");
+  let symlinkAvailable = true;
+  try {
+    symlinkSync(elsewhere, join(fixture, "displaced"));
+  } catch {
+    symlinkAvailable = false; // Some platforms require privilege for symlinks.
+  }
+  if (!symlinkAvailable) return;
+
+  const result = hookStatus();
+
+  assert.equal(result, 1);
+  const output = sandbox.stderr();
+  assert.ok(
+    !output.includes("I keep safe copy"),
+    "a symlinked displaced artifact must never be claimed as a proven copy (the .isFile() proof, not a bare existence check)",
+  );
+  assert.ok(!output.includes("safe copy:"), "no copy path is asserted over an unproven artifact");
+  assert.equal(lstatSync(join(fixture, "displaced")).isSymbolicLink(), true, "the symlink itself is left untouched");
 });

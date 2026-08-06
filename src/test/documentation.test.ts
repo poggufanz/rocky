@@ -326,16 +326,27 @@ test("README discloses that hook status also settles and discloses a retained co
   );
 });
 
-test("README discloses that a retained copy is never named for removal when it is the last surviving copy", () => {
+test("README discloses that a retained copy is never named for removal (round 7, F8)", () => {
+  // Round 6's claim gated the no-removal guarantee on "(bashrc itself
+  // missing)" — the exact defeated predicate the final audit's F1 broke: a
+  // 0-byte bashrc Rocky itself left behind satisfies "bashrc exists" while
+  // holding none of the user's content. The guarantee holds regardless of
+  // whether bashrc happens to exist, so the README must not gate it on that
+  // condition.
   assert.match(
     readme,
-    /only surviving copy[^\n]*bashrc itself missing[^\n]*names it/i,
-    "README must state Rocky names, rather than instructs removing, a retained copy that is the last surviving copy",
+    /never (?:tells|instructs) you to remove a retained copy/i,
+    "README must state Rocky never instructs removing a retained copy, unconditionally",
   );
   assert.doesNotMatch(
     readme,
-    /only surviving copy[^\n]*remove/i,
-    "README must not pair the last-surviving-copy case with a removal instruction",
+    /bashrc itself missing/i,
+    "README must not gate the no-removal guarantee on bashrc being absent — that predicate is defeated by a bashrc Rocky itself left broken",
+  );
+  assert.doesNotMatch(
+    readme,
+    /remove by hand/i,
+    "README must not describe a removal-by-hand instruction anywhere in the bashrc recovery disclosure",
   );
 });
 
