@@ -145,6 +145,37 @@ class PermanentBackpressureWritable extends Writable {
   }
 }
 
+class ControllableBackpressureWritable extends Writable {
+  readonly chunks: string[] = [];
+  private blocked = true;
+
+  override write(chunk: string | Uint8Array): boolean {
+    this.chunks.push(Buffer.from(chunk).toString("utf8"));
+    return !this.blocked;
+  }
+
+  releaseDrain(): void {
+    this.blocked = false;
+    this.emit("drain");
+  }
+}
+
+function parseLine(line: string | undefined): JsonRpcResponse {
+  return JSON.parse(line ?? "") as JsonRpcResponse;
+}
+
+function expectedRecallSuccess(id: JsonRpcId): JsonRpcResponse {
+  return {
+    jsonrpc: "2.0",
+    id,
+    result: {
+      ...toolResult({ completed: true }),
+      resultType: "complete",
+      _meta: { "io.modelcontextprotocol/serverInfo": serverInfo },
+    },
+  };
+}
+
 function serverWith(
   tools: McpToolRegistry,
   send: (response: JsonRpcResponse) => Promise<void> = async () => undefined,
@@ -282,6 +313,107 @@ test("duplicate live ID cannot commit a legacy state transition", async () => {
       _meta: { "io.modelcontextprotocol/serverInfo": serverInfo },
     },
   });
+});
+
+test("a blocked send keeps the ID reserved through duplicate rejection, cancellation, and close, then frees it after settlement", async () => {
+  const output = new ControllableBackpressureWritable();
+  const writer = new SerializedJsonWriter(output);
+  let calls = 0;
+  let originalSignal: AbortSignal | undefined;
+  const server = serverWith(fakeRegistry({
+    recall: (_args, signal) => {
+      calls += 1;
+      originalSignal = signal;
+      return toolResult({ completed: true });
+    },
+  }), (message) => writer.write(message));
+
+  // 1. Fast tools/call "same" is called once; its success response reaches
+  // the blocked send but has not settled.
+  server.accept(modernToolCall("same", "recall", { query: "one" }));
+  await waitFor(() => output.chunks.length === 1);
+  assert.equal(calls, 1);
+
+  // 2/3. A duplicate "same" accepted while blocked must not call the tool
+  // again; it queues the exact -32600 Invalid Request response behind the
+  // still-unsettled original send, while the original reservation remains
+  // live. The writer serializes strictly in submission order, so the queued
+  // write cannot reach output until backpressure releases (step 6) — settle
+  // one bounded tick and prove no second tool call happened instead of
+  // waiting on output bytes that cannot arrive yet.
+  server.accept(modernToolCall("same", "recall", { query: "two" }));
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(calls, 1);
+  assert.equal(output.chunks.length, 1);
+
+  // 4. notifications/cancelled for "same" during the responding phase must
+  // not abort the original signal or retract the original success.
+  server.accept(cancelNotification("same"));
+  assert.equal(originalSignal?.aborted, false);
+
+  // 5. In a separate focused fixture, close() against a responding slot must
+  // not abort its controller, must still honor the fixed drain deadline, and
+  // permanent backpressure must not make shutdown unbounded. The reuse
+  // fixture (`server`) above stays open for step 7.
+  const closeOutput = new PermanentBackpressureWritable();
+  const closeWriter = new SerializedJsonWriter(closeOutput);
+  let closeSignal: AbortSignal | undefined;
+  const closeServer = serverWith(fakeRegistry({
+    recall: (_args, signal) => {
+      closeSignal = signal;
+      return toolResult({ completed: true });
+    },
+  }), (message) => closeWriter.write(message), undefined, 25);
+  closeServer.accept(modernToolCall("closing", "recall", {}));
+  await waitFor(() => closeOutput.chunks.length === 1);
+  const closeStartedAt = Date.now();
+  assert.equal(await closeServer.close(), "timed_out");
+  assert.ok(Date.now() - closeStartedAt < 500, "close exceeded fixed bound");
+  assert.equal(closeSignal?.aborted, false);
+
+  // 6. Releasing backpressure yields exactly one original success response
+  // and exactly one duplicate -32600 response, with no second first-lifetime
+  // tool call.
+  output.releaseDrain();
+  await server.whenIdle();
+  assert.equal(calls, 1);
+  assert.equal(output.chunks.length, 2);
+  assert.deepEqual(parseLine(output.chunks[0]), expectedRecallSuccess("same"));
+  assert.deepEqual(parseLine(output.chunks[1]), {
+    jsonrpc: "2.0",
+    id: "same",
+    error: { code: JSON_RPC_ERROR.INVALID_REQUEST, message: "Invalid Request" },
+  });
+
+  // 7. After all sends settle, ID "same" is reusable: the tool is called
+  // again for the new request and it receives one normal response.
+  server.accept(modernToolCall("same", "recall", { query: "three" }));
+  await waitFor(() => output.chunks.length === 3);
+  await server.whenIdle();
+  assert.equal(calls, 2);
+  assert.deepEqual(parseLine(output.chunks[2]), expectedRecallSuccess("same"));
+});
+
+test("a rejected response send still releases the reservation in finally", async () => {
+  const diagnostics: string[] = [];
+  let calls = 0;
+  const server = serverWith(fakeRegistry({
+    recall: () => {
+      calls += 1;
+      return toolResult({ completed: true });
+    },
+  }), async () => { throw new Error("write failed: /private/secret-path"); }, (message) => { diagnostics.push(message); });
+
+  server.accept(modernToolCall("same", "recall", { query: "one" }));
+  await server.whenIdle();
+
+  assert.equal(calls, 1);
+  assert.equal(diagnostics.length, 1);
+  assert.match(diagnostics[0] ?? "", /write failed/);
+
+  server.accept(modernToolCall("same", "recall", { query: "two" }));
+  await server.whenIdle();
+  assert.equal(calls, 2);
 });
 
 test("cancellation after response enqueue does not retract the response", async () => {

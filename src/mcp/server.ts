@@ -35,6 +35,7 @@ interface InFlightSlot {
   controller: AbortController;
   cancelled: boolean;
   work: Promise<void>;
+  phase: "running" | "responding";
 }
 
 interface MessageServerDependencies {
@@ -134,9 +135,13 @@ export function createMcpMessageServer(deps: MessageServerDependencies): McpMess
       }
     }
 
-    if (inFlight.get(routed.id) === slot) inFlight.delete(routed.id);
-    if (slot.cancelled || response === undefined) return;
-    await send(response);
+    try {
+      if (slot.cancelled || response === undefined) return;
+      slot.phase = "responding";
+      await send(response);
+    } finally {
+      if (inFlight.get(routed.id) === slot) inFlight.delete(routed.id);
+    }
   };
 
   const accept = (value: unknown): void => {
@@ -151,7 +156,7 @@ export function createMcpMessageServer(deps: MessageServerDependencies): McpMess
       case "cancel": {
         protocolState = routed.nextState;
         const slot = inFlight.get(routed.requestId);
-        if (slot === undefined) return;
+        if (slot === undefined || slot.phase !== "running") return;
         slot.cancelled = true;
         slot.controller.abort(routed.reason);
         return;
@@ -171,6 +176,7 @@ export function createMcpMessageServer(deps: MessageServerDependencies): McpMess
           controller: new AbortController(),
           cancelled: false,
           work: Promise.resolve(),
+          phase: "running",
         };
         inFlight.set(routed.id, slot);
         slot.work = Promise.resolve().then(() => execute(routed, slot));
@@ -207,6 +213,7 @@ export function createMcpMessageServer(deps: MessageServerDependencies): McpMess
 
     accepting = false;
     for (const slot of inFlight.values()) {
+      if (slot.phase !== "running") continue;
       slot.cancelled = true;
       slot.controller.abort();
     }
