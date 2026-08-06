@@ -615,3 +615,235 @@ test("pruneSupersededTransactions removes only committed siblings other than the
   assert.equal(existsSync(keep), true, "the kept directory survives");
   assert.deepEqual(readFileSync(path, "utf8"), "current\n", "pruning never touches the target");
 });
+
+test("pruneSupersededTransactions protects the kept directory by filesystem identity, not string equality", (t) => {
+  // Reviewer's P3-7: a differently-spelled-but-identical `keep` path (a
+  // trailing slash) must still protect that directory. A raw string compare
+  // would fail to recognize it and delete the copy that was just created.
+  const directory = temporaryDirectory(t);
+  const path = join(directory, "structural-keep.bin");
+  writeFileSync(path, "current\n", "utf8");
+
+  const keep = writeNamedTransactionFixture(
+    directory, path, "1-keep", "committed", Buffer.from("kept\n", "utf8"),
+  );
+  const other = writeNamedTransactionFixture(
+    directory, path, "2-other", "committed", Buffer.from("old\n", "utf8"),
+  );
+
+  pruneSupersededTransactions(path, `${keep}/`);
+
+  assert.equal(existsSync(keep), true, "the kept directory survives a non-canonical spelling of its own path");
+  assert.equal(existsSync(other), false, "the other committed sibling is still pruned");
+});
+
+// --- Important 2: the recovery boundary must be complete, not arbitrary ----
+
+/**
+ * Fails the single-argument `rmSync(temporaryPath)` unlink of the
+ * transaction's own `prepared` artifact — the step immediately after the
+ * "published" manifest write lands, and the last step before the manifest
+ * advances to "committed". Matched narrowly (no options object, basename
+ * "prepared") so it cannot fire on `discardPrepared`'s `{ force: true }`
+ * calls, `removeTransaction`'s `{ recursive: true }` call, or the
+ * `link-probe` cleanup.
+ */
+function injectFailureOnPreparedUnlink(t: test.TestContext): void {
+  const originalRm = fs.rmSync;
+  let fired = false;
+  fs.rmSync = ((...args: Parameters<typeof fs.rmSync>) => {
+    const [target, options] = args;
+    if (!fired && typeof target === "string" && options === undefined && basename(target) === "prepared") {
+      fired = true;
+      throw new Error("injected unlink failure after publish carrying fake-secret-original");
+    }
+    return originalRm(...args);
+  }) as typeof fs.rmSync;
+  syncBuiltinESMExports();
+  t.after(() => {
+    fs.rmSync = originalRm;
+    syncBuiltinESMExports();
+  });
+}
+
+test("recovery finishes a transaction whose manifest already recorded the publish (Important 2, W2)", (t) => {
+  const directory = temporaryDirectory(t);
+  const path = join(directory, "published-window.bin");
+  const original = Buffer.from("original fake-secret-original\n", "utf8");
+  writeFileSync(path, original);
+  const prior = snapshotBytes(path);
+  const replacement = Buffer.from("replacement fake-secret-replacement\n", "utf8");
+
+  injectFailureOnPreparedUnlink(t);
+
+  const result = atomicWriteBytesIfUnchanged(path, replacement, prior);
+  assert.equal(result.status, "recovery-required");
+
+  const [transactionName] = transactionDirectories(directory, path);
+  assert.ok(transactionName !== undefined, "a transaction directory survives the crash");
+  const transactionDirectory = join(directory, transactionName);
+  const manifestPath = join(transactionDirectory, "manifest.json");
+  // The manifest DID advance to "published" here — strictly more evidence
+  // than the "displaced" window round 1 already resolved, per the reviewer.
+  assert.equal(
+    readFileSync(manifestPath, "utf8"),
+    `${JSON.stringify({ version: 1, state: "published", target: path })}\n`,
+  );
+  assert.equal(lstatSync(path).nlink, 2, "path is still hard-linked to the undiscarded prepared artifact");
+  assert.deepEqual(readFileSync(path), replacement, "the write already published");
+  assert.deepEqual(readFileSync(join(transactionDirectory, "displaced")), original);
+  assert.equal(inspectFileTransaction(path).status, "pending");
+
+  const recovery = recoverFileTransaction(path);
+  assert.equal(
+    recovery.status,
+    "recovered",
+    "W2: a 'published' manifest with intact displaced and a proven prepared pairing must finish, not stay manual forever",
+  );
+  assert.deepEqual(readFileSync(path), replacement, "already-published bytes stay live");
+  assert.equal(lstatSync(path).nlink, 1, "the redundant prepared link is discarded");
+  assert.equal(inspectFileTransaction(path).status, "clear");
+  assert.equal(
+    readFileSync(manifestPath, "utf8"),
+    `${JSON.stringify({ version: 1, state: "committed", target: path })}\n`,
+  );
+  assert.deepEqual(recoverFileTransaction(path), { status: "clear" }, "idempotent on a second run");
+});
+
+/**
+ * Fails `removeTransaction`'s `rmSync(transactionDirectory, { recursive:
+ * true })` exactly once, matched by the `recursive` option so it cannot fire
+ * on any other `rmSync` call in the module.
+ */
+function injectFailureOnTransactionRemoval(t: test.TestContext): void {
+  const originalRm = fs.rmSync;
+  let fired = false;
+  fs.rmSync = ((...args: Parameters<typeof fs.rmSync>) => {
+    const [target, options] = args;
+    const recursive = typeof options === "object" && options !== null
+      && (options as { recursive?: boolean }).recursive === true;
+    if (!fired && typeof target === "string" && recursive) {
+      fired = true;
+      throw new Error("injected transaction directory removal failure carrying fake-secret-original");
+    }
+    return originalRm(...args);
+  }) as typeof fs.rmSync;
+  syncBuiltinESMExports();
+  t.after(() => {
+    fs.rmSync = originalRm;
+    syncBuiltinESMExports();
+  });
+}
+
+test("recovery finishes a missing-prior transaction whose manifest already recorded the publish (Important 2, W4)", (t) => {
+  const directory = temporaryDirectory(t);
+  const path = join(directory, "missing-prior-published.bin");
+  const prior: BytesReadResult = { status: "missing" };
+  const bytes = Buffer.from("brand new file fake-secret-new\n", "utf8");
+
+  injectFailureOnTransactionRemoval(t);
+
+  const result = atomicWriteBytesIfUnchanged(path, bytes, prior);
+  assert.equal(result.status, "recovery-required");
+
+  const [transactionName] = transactionDirectories(directory, path);
+  assert.ok(transactionName !== undefined, "a transaction directory survives the crash");
+  const transactionDirectory = join(directory, transactionName);
+  assert.equal(
+    readFileSync(join(transactionDirectory, "manifest.json"), "utf8"),
+    `${JSON.stringify({ version: 1, state: "published", target: path })}\n`,
+  );
+  assert.equal(existsSync(join(transactionDirectory, "displaced")), false, "no prior file ever existed to displace");
+  assert.equal(lstatSync(path).nlink, 2);
+  assert.deepEqual(readFileSync(path), bytes);
+  assert.equal(inspectFileTransaction(path).status, "pending");
+
+  const recovery = recoverFileTransaction(path);
+  assert.equal(
+    recovery.status,
+    "recovered",
+    "W4: a 'published' manifest with nothing to protect (no prior file) must finish, not stay manual forever",
+  );
+  assert.deepEqual(readFileSync(path), bytes, "already-published bytes stay live");
+  assert.equal(lstatSync(path).nlink, 1, "the redundant prepared link is discarded");
+  assert.equal(inspectFileTransaction(path).status, "clear");
+  assert.deepEqual(recoverFileTransaction(path), { status: "clear" }, "idempotent on a second run");
+});
+
+test("recovery discards an orphaned published transaction directory without touching an unrelated target (W4 negative control)", (t) => {
+  const directory = temporaryDirectory(t);
+  const path = join(directory, "orphaned.bin");
+  const original = Buffer.from("original\n", "utf8");
+  writeFileSync(path, original); // path exists independently of any transaction artifact
+  const transactionDirectory = writeLegacyV1TransactionFixture(directory, path, "published", {
+    prepared: Buffer.from("unrelated staged bytes, never linked to path\n", "utf8"),
+  });
+
+  const recovery = recoverFileTransaction(path);
+
+  assert.equal(recovery.status, "recovered");
+  assert.equal(existsSync(transactionDirectory), false, "orphaned transaction directory discarded");
+  assert.deepEqual(readFileSync(path), original, "unrelated target bytes are never touched");
+});
+
+test("the complete-but-unrecorded branch refuses when displaced is not a plain regular file (M3)", (t) => {
+  const directory = temporaryDirectory(t);
+  const path = join(directory, "displaced-symlink.bin");
+  const elsewhere = join(directory, "elsewhere.bin");
+  writeFileSync(elsewhere, Buffer.from("not the real backup\n", "utf8"));
+
+  // Build the exact "path === transaction's own prepared artifact" pairing
+  // the branch requires (nlink 2, shared inode), but make `displaced` a
+  // symlink instead of the plain regular file `isManagedRegularFile` demands.
+  const transactionDirectory = join(directory, `.${basename(path)}.transaction-9-cafef00dfeed`);
+  mkdirSync(transactionDirectory, { mode: 0o700 });
+  writeFileSync(path, "publishable bytes\n", "utf8");
+  linkSync(path, join(transactionDirectory, "prepared"));
+  let symlinkAvailable = true;
+  try {
+    symlinkSync(elsewhere, join(transactionDirectory, "displaced"));
+  } catch {
+    symlinkAvailable = false; // Some platforms require privilege for symlinks.
+  }
+  if (!symlinkAvailable) return;
+  writeFileSync(
+    join(transactionDirectory, "manifest.json"),
+    `${JSON.stringify({ version: 1, state: "published", target: path })}\n`,
+    "utf8",
+  );
+
+  const recovery = recoverFileTransaction(path);
+
+  assert.equal(recovery.status, "manual", "a symlinked displaced is not a proven backup; must not commit (M3)");
+  assert.equal(lstatSync(path).nlink, 2, "nothing was mutated");
+});
+
+test("recovery never offers the target path itself as a manual recovery path, even when directory removal partially fails (Important 1)", (t) => {
+  const directory = temporaryDirectory(t);
+  const path = join(directory, "degraded-recovery.bin");
+  const original = Buffer.from("original fake-secret-original\n", "utf8");
+  writeFileSync(path, original);
+  const transactionDirectory = writeLegacyV1TransactionFixture(directory, path, "prepared", {
+    prepared: Buffer.from("never published\n", "utf8"),
+  });
+
+  // The reviewer's exact mechanism: rmSync of the transaction directory
+  // succeeds, but the follow-up parent-directory fsync throws (a real EIO on
+  // $HOME), so `removeTransaction` reports failure even though the directory
+  // is already gone.
+  const originalSync = directorySyncCapability.sync;
+  directorySyncCapability.sync = () => {
+    throw new Error("injected EIO on parent directory fsync carrying fake-secret-original");
+  };
+  t.after(() => {
+    directorySyncCapability.sync = originalSync;
+  });
+
+  const recovery = recoverFileTransaction(path);
+
+  assert.equal(recovery.status, "manual");
+  assert.equal(existsSync(transactionDirectory), false, "rmSync itself succeeded; only the parent fsync failed");
+  assert.notEqual(recovery.recoveryPath, path, "the live target must never be offered as something to remove");
+  assert.equal(recovery.recoveryPath, undefined, "nothing Rocky-owned survives to name once the directory is gone");
+  assert.deepEqual(readFileSync(path), original, "the untouched target keeps its own bytes");
+});

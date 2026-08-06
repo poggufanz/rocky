@@ -35,6 +35,7 @@ import { findByFingerprint, getFix, recentUnresolvedFailures } from "../core/mem
 import {
   atomicWriteBytesIfUnchanged,
   inspectFileTransaction,
+  pathExists,
   pruneSupersededTransactions,
   recoverFileTransaction,
 } from "../setup/file-transaction.js";
@@ -104,36 +105,59 @@ function assetDir(): string {
 }
 
 /**
- * An ambiguous stop keeps a secret-free recovery path: diagnostics name paths
- * only. Reached only when evidence cannot prove the transaction's true shape
- * (see the "complete-but-unrecorded" branch in `recoverFileTransaction`,
- * which now resolves the one shape that IS provable) — so this never claims
- * the write stopped halfway, only that what happened is unclear, and always
- * names the exact directory to inspect and remove by hand.
+ * An ambiguous stop only ever names an artifact Rocky itself created — never
+ * bashrc itself — and only ever claims a kept copy when one is proven to
+ * still exist at the moment of speaking. `recoverFileTransaction` no longer
+ * offers bashrc's own path as a `manual` recovery path (whole-branch
+ * re-review, Important 1), but a caller can still hand this function a stale
+ * or already-vanished path (e.g. a directory removed by this same process a
+ * moment earlier, once `syncParentDirectory` then failed) — so the check is
+ * repeated here, at the point where the words are actually spoken. When
+ * nothing provable survives, Rocky says so instead of claiming a copy that
+ * is not there.
  */
 function reportBashrcRecoveryStop(rc: string, recoveryPath: string | undefined): number {
-  say("bashrc keeps unclear transaction from before. I keep safe copy. I touch nothing more.");
-  if (recoveryPath !== undefined) {
-    detail(`inspect, then remove by hand: ${recoveryPath}`);
+  const provenRecoveryPath = recoveryPath !== undefined && recoveryPath !== rc && pathExists(recoveryPath)
+    ? recoveryPath
+    : undefined;
+  if (provenRecoveryPath !== undefined) {
+    say("bashrc keeps unclear transaction from before. I keep safe copy. I touch nothing more.");
+    detail(`inspect, then remove by hand: ${provenRecoveryPath}`);
+  } else {
+    say("bashrc keeps unclear transaction from before. no safe copy to name. I touch nothing more.");
   }
   detail(`bashrc: ${rc}`);
   return 1;
 }
 
+type SettleResult =
+  | { status: "clear"; recoveryPath?: string }
+  | { status: "stop"; exit: number };
+
 /**
- * Recover interrupted bashrc transactions before any byte is trusted. Returns
- * undefined once inspection is clear; a manual/ambiguous recovery stops the
- * command instead of continuing from stale assumptions.
+ * Recover interrupted bashrc transactions before any byte is trusted. A
+ * manual/ambiguous recovery stops the command instead of continuing from
+ * stale assumptions. A transaction actually recovered here belonged to some
+ * earlier, already-finished invocation — not this call's own write — so its
+ * retained-copy path (when one exists) is carried back for the caller to
+ * disclose rather than silently absorbed (whole-branch re-review, Minor 1).
  */
-function settleBashrcTransactions(rc: string): number | undefined {
+function settleBashrcTransactions(rc: string): SettleResult {
+  let recoveryPath: string | undefined;
   for (;;) {
     const inspection = inspectFileTransaction(rc);
-    if (inspection.status === "clear") return undefined;
+    if (inspection.status === "clear") return { status: "clear", recoveryPath };
     const recovery = recoverFileTransaction(rc);
     if (recovery.status === "manual") {
-      return reportBashrcRecoveryStop(rc, recovery.recoveryPath ?? inspection.recoveryPath);
+      return {
+        status: "stop",
+        exit: reportBashrcRecoveryStop(rc, recovery.recoveryPath ?? inspection.recoveryPath),
+      };
     }
     // Recovered: re-inspect from fresh state before proceeding.
+    if (recovery.status === "recovered" && recovery.recoveryPath !== undefined) {
+      recoveryPath = recovery.recoveryPath;
+    }
   }
 }
 
@@ -143,7 +167,16 @@ interface BashrcSnapshot {
 }
 
 type BashrcPreparation =
-  | { status: "ready"; snapshot: BashrcSnapshot }
+  | {
+    status: "ready";
+    snapshot: BashrcSnapshot;
+    /** Set only when settling found and recovered an already-finished, stale
+     * transaction from some earlier invocation — not this call's own write.
+     * A caller that would otherwise never publish anything of its own (e.g.
+     * `hookStatus`) must still disclose this path (whole-branch re-review,
+     * Minor 1). */
+    staleRecoveryPath?: string;
+  }
   | { status: "stop"; exit: number };
 
 /**
@@ -153,7 +186,7 @@ type BashrcPreparation =
  */
 function prepareBashrc(rc: string): BashrcPreparation {
   const settled = settleBashrcTransactions(rc);
-  if (settled !== undefined) return { status: "stop", exit: settled };
+  if (settled.status === "stop") return { status: "stop", exit: settled.exit };
 
   let metadata: Stats | undefined;
   try {
@@ -180,7 +213,11 @@ function prepareBashrc(rc: string): BashrcPreparation {
     }
   }
   if (metadata === undefined) {
-    return { status: "ready", snapshot: { prior: { status: "missing" }, bytes: Buffer.alloc(0) } };
+    return {
+      status: "ready",
+      snapshot: { prior: { status: "missing" }, bytes: Buffer.alloc(0) },
+      staleRecoveryPath: settled.recoveryPath,
+    };
   }
   let bytes: Buffer;
   try {
@@ -193,6 +230,7 @@ function prepareBashrc(rc: string): BashrcPreparation {
   return {
     status: "ready",
     snapshot: { prior: { status: "valid", bytes, mode: metadata.mode & 0o777 }, bytes },
+    staleRecoveryPath: settled.recoveryPath,
   };
 }
 
@@ -330,11 +368,29 @@ export function hookUninstall(): number {
  * symlink/non-regular/multi-link topology, and reports corrupt truthfully —
  * instead of following symlinks through `existsSync`/`readFileSync` and
  * telling the user to run a command that install would then refuse.
+ *
+ * Settling can convert a stale, already-finished transaction from an earlier
+ * crashed invocation into a permanently retained copy holding the previous
+ * bashrc's full contents — a mutation `status` performs as a side effect of
+ * being safe to call at any time, not one it advertises up front. A
+ * read-only status that never settled anything was considered and rejected
+ * here: `hook status settles a pending transaction instead of reporting
+ * stale state` already pins settling as status's behavior, and reverting
+ * that would leave the exact stale, secret-holding transaction directory
+ * this paragraph exists to disclose sitting unrecovered instead. Disclosing
+ * accurately — see below — is the only remaining option that satisfies both
+ * "status must recover what install/uninstall would" and "status must not
+ * silently retain secrets it did not mention" (whole-branch re-review,
+ * Minor 1).
  */
 export function hookStatus(): number {
   const rc = bashrcPath();
   const preparation = prepareBashrc(rc);
   if (preparation.status === "stop") return preparation.exit;
+  if (preparation.staleRecoveryPath !== undefined) {
+    reportRetainedCopy(preparation.staleRecoveryPath);
+    pruneSupersededTransactions(rc, dirname(preparation.staleRecoveryPath));
+  }
   const classification = classifyHookBlock(preparation.snapshot.bytes);
   if (classification === "corrupt") return reportCorruptBlock(rc);
   if (classification !== "managed") {

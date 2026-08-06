@@ -902,3 +902,144 @@ test("hook install recovers instead of permanently bricking after a completed-bu
 
   // `hook status` must never have contradicted this: it settles the same way.
 });
+
+// --- Important 2: the recovery boundary must be complete, not arbitrary ----
+
+/**
+ * Fails the single-argument `rmSync(temporaryPath)` unlink of the
+ * transaction's own `prepared` artifact — the step right after the
+ * "published" manifest write lands. Matched narrowly (no options object,
+ * basename "prepared") so it cannot fire on any other `rmSync` call.
+ */
+function injectFailureOnPreparedUnlink(t: TestContext): void {
+  const originalRm = fs.rmSync;
+  let fired = false;
+  fs.rmSync = ((...args: Parameters<typeof fs.rmSync>) => {
+    const [target, options] = args;
+    if (!fired && typeof target === "string" && options === undefined && basename(target) === "prepared") {
+      fired = true;
+      throw new Error("injected unlink failure after publish");
+    }
+    return originalRm(...args);
+  }) as typeof fs.rmSync;
+  syncBuiltinESMExports();
+  t.after(() => {
+    fs.rmSync = originalRm;
+    syncBuiltinESMExports();
+  });
+}
+
+test("hook install recovers instead of permanently bricking after a published-but-uncommitted crash (Important 2, W2)", (t) => {
+  const sandbox = bashrcSandbox(t);
+  const original = bytes("export A=1\n");
+  writeFileSync(sandbox.bashrc, original);
+  injectFailureOnPreparedUnlink(t);
+
+  // The crash lands here: the manifest already says "published" (stronger
+  // evidence than the "displaced" window round 1 resolved), but round 1
+  // still returned "manual" forever for this exact shape.
+  assert.equal(hookInstall(), 1);
+  assert.equal(inspectFileTransaction(sandbox.bashrc).status, "pending");
+  assert.deepEqual(readFileSync(sandbox.bashrc), bytes(`export A=1\n\n${BLOCK}`), "already published");
+
+  assert.equal(hookInstall(), 0, sandbox.stderr());
+  assert.deepEqual(readFileSync(sandbox.bashrc), bytes(`export A=1\n\n${BLOCK}`));
+  assert.equal(inspectFileTransaction(sandbox.bashrc).status, "clear");
+
+  assert.equal(hookUninstall(), 0, sandbox.stderr());
+  assert.deepEqual(readFileSync(sandbox.bashrc), bytes("export A=1\n\n"));
+});
+
+// --- Important 1: guidance must never name bashrc itself for removal -------
+
+test("hook status never tells the user to remove their own bashrc, even when the retained transaction directory vanishes mid-cleanup (Important 1)", (t) => {
+  const sandbox = bashrcSandbox(t);
+  const original = bytes("export SECRET_TOKEN=sk-live-DO-NOT-LEAK\n");
+  writeFileSync(sandbox.bashrc, original);
+  // "prepared", no displaced: reaches the unconditional-discard branch, which
+  // calls removeTransaction — exactly the reviewer's reproduction shape.
+  writePendingTransactionFixture(sandbox.bashrc, "prepared");
+
+  // Real fault injection, no sleep, no real crash: rmSync of the transaction
+  // directory succeeds, but the parent-directory fsync (an EIO on $HOME)
+  // throws, so removeTransaction reports failure even though the directory
+  // is already gone.
+  const originalSync = directorySyncCapability.sync;
+  directorySyncCapability.sync = () => {
+    throw new Error("injected EIO on $HOME fsync");
+  };
+  t.after(() => {
+    directorySyncCapability.sync = originalSync;
+  });
+
+  const result = hookStatus();
+
+  assert.equal(result, 1);
+  const output = sandbox.stderr();
+  assert.ok(!output.includes("remove by hand"), "no removal instruction when nothing provable survives");
+  assert.ok(!output.includes("I keep safe copy"), "must not claim a safe copy exists when none does");
+  assert.match(output, /no safe copy to name/);
+  assert.deepEqual(readFileSync(sandbox.bashrc), original, "bashrc itself is untouched");
+  assert.ok(!output.includes("SECRET_TOKEN"), "diagnostics stay secret-free");
+});
+
+// --- Minor 1: status must disclose, not silently absorb, a settled recovery ---
+
+test("hook status discloses a retained copy left behind by settling someone else's interrupted transaction", (t) => {
+  const sandbox = bashrcSandbox(t);
+  const original = bytes("export SECRET_TOKEN=sk-live-DO-NOT-LEAK\n");
+  writeFileSync(sandbox.bashrc, original);
+  injectPostPublishParentFsyncFailure(t, sandbox.bashrc);
+
+  // This run crashes mid-publish (the W1 window round 1 already resolves)
+  // and leaves a pending transaction behind — not status's own doing.
+  assert.equal(hookInstall(), 1);
+  assert.equal(inspectFileTransaction(sandbox.bashrc).status, "pending");
+  const before = sandbox.stderr().length;
+
+  const result = hookStatus();
+
+  assert.equal(result, 0, sandbox.stderr());
+  const statusOutput = sandbox.stderr().slice(before);
+  assert.ok(
+    statusOutput.includes("I keep safe copy"),
+    "status discloses the settled recovery instead of silently absorbing it",
+  );
+  assert.ok(!statusOutput.includes("SECRET_TOKEN"), "diagnostics stay secret-free");
+  assert.equal(inspectFileTransaction(sandbox.bashrc).status, "clear");
+  assert.match(sandbox.stderr(), /ears installed/);
+});
+
+// --- Minor 3: hookUninstall's disclosure must be pinned too (M15) ----------
+
+test("hook uninstall reports the retained copy of the previous bashrc instead of staying silent", (t) => {
+  const sandbox = bashrcSandbox(t);
+  const original = bytes(`export SECRET_TOKEN=sk-live-DO-NOT-LEAK\n\n${BLOCK}`);
+  writeFileSync(sandbox.bashrc, original);
+
+  assert.equal(hookUninstall(), 0, sandbox.stderr());
+
+  const [transactionDirectory] = transactionDirectories(sandbox.home);
+  assert.ok(transactionDirectory !== undefined);
+  const recoveryPath = join(sandbox.home, transactionDirectory, "displaced");
+  assert.ok(existsSync(recoveryPath));
+  assert.ok(sandbox.stderr().includes(recoveryPath), "the retained copy path is disclosed");
+  assert.ok(!sandbox.stderr().includes("SECRET_TOKEN"), "diagnostics stay secret-free");
+});
+
+// --- Minor 4: a stray transaction directory with no manifest must degrade informatively ---
+
+test("hook status degrades informatively instead of failing hard on a stray transaction directory with no manifest", (t) => {
+  const sandbox = bashrcSandbox(t);
+  const original = bytes("export A=1\n");
+  writeFileSync(sandbox.bashrc, original);
+  const junk = join(sandbox.home, "..bashrc.transaction-junk");
+  mkdirSync(junk, { mode: 0o700 }); // no manifest.json at all
+
+  const result = hookStatus();
+
+  assert.equal(result, 1, "status must not crash or silently claim installed");
+  assert.deepEqual(readFileSync(sandbox.bashrc), original, "bashrc itself is untouched");
+  assert.ok(sandbox.stderr().includes(junk), "the stray directory is named so the user can remove it by hand");
+  assert.match(sandbox.stderr(), /bashrc keeps unclear transaction/);
+});

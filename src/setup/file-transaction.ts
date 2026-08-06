@@ -629,17 +629,31 @@ export function recoverFileTransaction(
       return { status: "manual", recoveryPath: firstExistingPath(transactionDirectory) };
     }
 
-    if (manifest.state === "published") {
-      return { status: "manual", recoveryPath: firstExistingPath(transactionDirectory) };
-    }
-
+    // No displaced backup ever existed for this transaction: either the
+    // process crashed before ever attempting to displace anything
+    // ("prepared"), or the prior target was missing so there was never
+    // anything to protect and the manifest reached "published" the instant
+    // `path` was linked (see the "missing" branch of `atomicWriteBytesIfUnchanged`
+    // — it writes "published" right after `linkSync`, with no "displaced"
+    // state in between). Either way, discarding the transaction directory
+    // only ever removes its own internal artifacts (`prepared`,
+    // `manifest.json`) — never `path` itself. If `path` is already linked to
+    // the discarded `prepared` entry (the crash landed after "published" was
+    // recorded but before the transaction directory could be removed), its
+    // bytes survive: a hard link only loses one name, never the data other
+    // names still hold. `path` is deliberately never offered as the
+    // `recoveryPath` when this cleanup itself fails: once `removeTransaction`
+    // is attempted, the only thing left to name is the transaction directory
+    // (if it still exists) — never the live target (whole-branch re-review,
+    // Important 1).
     const displacedPath = join(transactionDirectory, "displaced");
-    if (manifest.state === "prepared" && !pathExists(displacedPath)) {
+    if ((manifest.state === "prepared" || manifest.state === "published")
+      && !pathExists(displacedPath)) {
       if (!mutationGuardUnchanged(guard)) return { status: "manual" };
       if (!removeTransaction(transactionDirectory)) {
         return {
           status: "manual",
-          recoveryPath: firstExistingPath(transactionDirectory, path),
+          recoveryPath: firstExistingPath(transactionDirectory),
         };
       }
       return { status: "recovered" };
@@ -663,16 +677,23 @@ export function recoverFileTransaction(
       return { status: "recovered", recoveryPath: firstExistingPath(displacedPath) };
     }
 
-    // Complete-but-unrecorded: a crash between the publishing linkSync and the
-    // "published" manifest write leaves the manifest at "prepared"/"displaced"
-    // even though the target already holds the new bytes. This is provable,
-    // not guessed: `path` shares its inode with the transaction's own
-    // `prepared` artifact (nlink 2, the exact pairing only that linkSync can
-    // create) and the pre-write bytes are intact in `displaced`. Finish
+    // Complete-but-unrecorded: a crash between the publishing linkSync and
+    // the manifest fully advancing to "committed" leaves the manifest at
+    // "prepared", "displaced", or "published" even though the target already
+    // holds the new bytes. This is provable, not guessed, in all three
+    // states: `path` shares its inode with the transaction's own `prepared`
+    // artifact (nlink 2, the exact pairing only that linkSync can create)
+    // and the pre-write bytes are intact in `displaced`. "published" carries
+    // *more* evidence than "prepared"/"displaced" here — the manifest itself
+    // already recorded the publish — so resolving only the other two while
+    // leaving "published" permanently manual was an arbitrary boundary, not
+    // a principled one (whole-branch re-review, Important 2). Finish
     // committing the transaction that already happened instead of reporting
     // an unrecoverable dead end for a write that in fact succeeded.
     const preparedArtifactPath = join(transactionDirectory, "prepared");
-    if ((manifest.state === "prepared" || manifest.state === "displaced")
+    if ((manifest.state === "prepared"
+        || manifest.state === "displaced"
+        || manifest.state === "published")
       && pathExists(path)
       && pathExists(displacedPath)
       && isManagedRegularFile(displacedPath, path)
@@ -689,6 +710,18 @@ export function recoverFileTransaction(
         return { status: "manual", recoveryPath: firstExistingPath(transactionDirectory) };
       }
       return { status: "recovered", recoveryPath: firstExistingPath(displacedPath) };
+    }
+
+    // A "published" manifest that reaches here was not proven by either
+    // branch above (e.g. `path` does not actually exist — every provable
+    // "published" shape guarantees it does, since `linkSync` always precedes
+    // the "published" manifest write). This is genuinely ambiguous, not the
+    // "write clearly already succeeded" case the two branches above resolve,
+    // so it stays manual rather than falling into the "prepared"/"displaced"
+    // restore-from-`displaced` logic below, which assumes a state machine
+    // "published" was never meant to re-enter.
+    if (manifest.state === "published") {
+      return { status: "manual", recoveryPath: firstExistingPath(transactionDirectory) };
     }
 
     if (pathExists(path)) {
@@ -736,17 +769,30 @@ export function recoverFileTransaction(
       }
       return { status: "recovered", recoveryPath: firstExistingPath(displacedPath) };
     } else {
+      // Both target and displaced backup are absent: nothing to restore, and
+      // removing the transaction directory never touches `path`. On removal
+      // failure the only artifact left to name is that directory — never
+      // `path`, which does not even exist here (whole-branch re-review,
+      // Important 1).
       if (!mutationGuardUnchanged(guard)) return { status: "manual" };
       if (!removeTransaction(transactionDirectory)) {
         return {
           status: "manual",
-          recoveryPath: firstExistingPath(transactionDirectory, path),
+          recoveryPath: firstExistingPath(transactionDirectory),
         };
       }
       return { status: "recovered" };
     }
   }
   return { status: "clear" };
+}
+
+function directoryIdentity(path: string): { dev: number; ino: number } | undefined {
+  try {
+    return lstatSync(path);
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -759,10 +805,19 @@ export function recoverFileTransaction(
  * where `recoverFileTransaction` can find them. Best-effort: a failure to
  * remove one is silently skipped rather than surfaced, so pruning stale
  * recovery copies can never itself become a new source of ambiguity.
+ *
+ * `keep` is compared by filesystem identity (dev+ino), not by string, so a
+ * differently-spelled-but-equivalent path (a trailing slash, for example)
+ * still protects the directory it names — the exemption does not rely on the
+ * sole caller today always passing a canonical string.
  */
 export function pruneSupersededTransactions(path: string, keep?: string): void {
+  const keptIdentity = keep !== undefined ? directoryIdentity(keep) : undefined;
   for (const transactionDirectory of transactionDirectories(path)) {
-    if (transactionDirectory === keep) continue;
+    if (keptIdentity !== undefined) {
+      const candidateIdentity = directoryIdentity(transactionDirectory);
+      if (candidateIdentity !== undefined && sameIdentity(candidateIdentity, keptIdentity)) continue;
+    }
     if (readManifest(transactionDirectory, path)?.state !== "committed") continue;
     removeTransaction(transactionDirectory);
   }

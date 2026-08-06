@@ -295,6 +295,19 @@ test("README discloses the retained .bashrc recovery copy left by write attempts
   );
 });
 
+test("README discloses that hook status also settles and discloses a retained copy, not just install/uninstall", () => {
+  assert.match(
+    readme,
+    /status[^\n]*never writes bashrc itself[^\n]*settle/i,
+    "README must state status does not write bashrc on its own, but does settle an interrupted transaction",
+  );
+  assert.match(
+    readme,
+    /status[^\n]*prints that path too/i,
+    "README must state status discloses a retained copy it settles, matching install/uninstall's disclosure",
+  );
+});
+
 test("README documents the Claude Code manual-fallback reality with the exact source literal", () => {
   const claudeCodeSource = readFileSync(join(packageRoot, "src", "setup", "claude-code.ts"), "utf8");
   const match = /MANUAL_CONFIGURE_DETAIL = "([^"]+)"/.exec(claudeCodeSource);
