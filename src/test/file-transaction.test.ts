@@ -1,0 +1,446 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import fs, {
+  chmodSync,
+  existsSync,
+  linkSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
+import { tmpdir } from "node:os";
+import { basename, dirname, join } from "node:path";
+import {
+  atomicWriteBytesIfUnchanged,
+  inspectFileTransaction,
+  recoverFileTransaction,
+} from "../setup/file-transaction.js";
+import type { BytesReadResult } from "../setup/file-transaction.js";
+import { directorySyncCapability } from "../setup/directory-sync.js";
+
+function temporaryDirectory(t: test.TestContext): string {
+  const directory = mkdtempSync(join(tmpdir(), "rocky-file-transaction-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  return directory;
+}
+
+function snapshotBytes(path: string): BytesReadResult {
+  try {
+    return { status: "valid", bytes: readFileSync(path), mode: statSync(path).mode & 0o777 };
+  } catch {
+    return { status: "missing" };
+  }
+}
+
+function assertRequestedFileMode(path: string, posixMode: number): void {
+  const metadata = lstatSync(path);
+  assert.equal(metadata.isFile(), true);
+  assert.equal(metadata.isSymbolicLink(), false);
+  if (process.platform === "win32") {
+    assert.equal((metadata.mode & 0o222) === 0, (posixMode & 0o222) === 0);
+  } else {
+    assert.equal(metadata.mode & 0o777, posixMode);
+  }
+}
+
+function transactionDirectories(directory: string, path: string): string[] {
+  return readdirSync(directory)
+    .filter((name) => name.startsWith(`.${basename(path)}.transaction-`));
+}
+
+/**
+ * Builds an interrupted transaction exactly as the pre-extraction v1 engine
+ * wrote it: a sibling `.<basename>.transaction-<pid>-<8-byte-hex>` directory
+ * holding `manifest.json` as `${JSON.stringify({ version: 1, state, target })}\n`.
+ */
+function writeLegacyV1TransactionFixture(
+  directory: string,
+  path: string,
+  state: "prepared" | "displaced" | "published" | "committed",
+  artifacts: { displaced?: Buffer; prepared?: Buffer },
+): string {
+  const transactionDirectory = join(
+    directory,
+    `.${basename(path)}.transaction-4242-0123456789abcdef`,
+  );
+  mkdirSync(transactionDirectory, { mode: 0o700 });
+  writeFileSync(
+    join(transactionDirectory, "manifest.json"),
+    `${JSON.stringify({ version: 1, state, target: path })}\n`,
+    "utf8",
+  );
+  if (artifacts.displaced !== undefined) {
+    writeFileSync(join(transactionDirectory, "displaced"), artifacts.displaced);
+  }
+  if (artifacts.prepared !== undefined) {
+    writeFileSync(join(transactionDirectory, "prepared"), artifacts.prepared);
+  }
+  return transactionDirectory;
+}
+
+test("conditional byte write installs exact bytes and preserves the existing mode", (t) => {
+  const directory = temporaryDirectory(t);
+  const path = join(directory, "settings.bin");
+  const original = Buffer.from("original fake-secret-original\r\n", "utf8");
+  writeFileSync(path, original, { mode: 0o640 });
+  chmodSync(path, 0o640);
+  const prior = snapshotBytes(path);
+  const replacement = Buffer.from([0x23, 0x20, 0xff, 0xfe, 0x0d, 0x0a, 0x00, 0x7a]);
+
+  const result = atomicWriteBytesIfUnchanged(path, replacement, prior);
+
+  assert.equal(result.status, "written");
+  assert.deepEqual(readFileSync(path), replacement);
+  assertRequestedFileMode(path, 0o640);
+  assert.ok(result.recoveryPath !== undefined);
+  assert.deepEqual(readFileSync(result.recoveryPath), original);
+  assert.equal(inspectFileTransaction(path).status, "clear");
+});
+
+test("conditional byte write creates a missing target privately", (t) => {
+  const directory = temporaryDirectory(t);
+  const path = join(directory, "created.bin");
+  const bytes = Buffer.from("managed bytes\n", "utf8");
+
+  const result = atomicWriteBytesIfUnchanged(path, bytes, { status: "missing" });
+
+  assert.equal(result.status, "written");
+  assert.deepEqual(readFileSync(path), bytes);
+  assertRequestedFileMode(path, 0o600);
+  assert.deepEqual(readdirSync(directory), [basename(path)]);
+});
+
+test("stale snapshot refuses to overwrite and retains the displaced bytes", (t) => {
+  const directory = temporaryDirectory(t);
+  const path = join(directory, "stale.bin");
+  writeFileSync(path, "original fake-secret-original\n", "utf8");
+  const prior = snapshotBytes(path);
+  const late = Buffer.from("late writer fake-secret-late\n", "utf8");
+  writeFileSync(path, late);
+
+  const result = atomicWriteBytesIfUnchanged(path, Buffer.from("stale merge\n", "utf8"), prior);
+
+  assert.equal(result.status, "changed");
+  assert.deepEqual(readFileSync(path), late);
+  assert.ok(result.recoveryPath !== undefined);
+  assert.deepEqual(readFileSync(result.recoveryPath), late);
+  assert.equal(inspectFileTransaction(path).status, "clear");
+});
+
+test("a target that appears after a missing snapshot is preserved", (t) => {
+  const directory = temporaryDirectory(t);
+  const path = join(directory, "raced.bin");
+  const prior: BytesReadResult = { status: "missing" };
+  const racer = Buffer.from("concurrent fake-secret-racer\n", "utf8");
+  writeFileSync(path, racer);
+
+  const result = atomicWriteBytesIfUnchanged(path, Buffer.from("ours\n", "utf8"), prior);
+
+  assert.equal(result.status, "changed");
+  assert.deepEqual(readFileSync(path), racer);
+  assert.equal(inspectFileTransaction(path).status, "clear");
+  assert.deepEqual(readdirSync(directory), [basename(path)]);
+});
+
+test("a changed mutation guard refuses before touching the target", (t) => {
+  const directory = temporaryDirectory(t);
+  const path = join(directory, "guarded.bin");
+  const original = Buffer.from("original\n", "utf8");
+  writeFileSync(path, original);
+  const prior = snapshotBytes(path);
+
+  const result = atomicWriteBytesIfUnchanged(path, Buffer.from("new\n", "utf8"), prior, {
+    unchanged: () => false,
+  });
+
+  assert.equal(result.status, "recovery-required");
+  assert.equal(result.recoveryPath, undefined);
+  assert.deepEqual(readFileSync(path), original);
+  assert.deepEqual(readdirSync(directory), [basename(path)]);
+});
+
+test("inspection reports a pending transaction without mutating anything", (t) => {
+  const directory = temporaryDirectory(t);
+  const path = join(directory, "watched.bin");
+  const original = Buffer.from("original\n", "utf8");
+  writeFileSync(path, original);
+  assert.deepEqual(inspectFileTransaction(path), { status: "clear" });
+
+  const transactionDirectory = writeLegacyV1TransactionFixture(directory, path, "prepared", {});
+
+  const inspection = inspectFileTransaction(path);
+  assert.equal(inspection.status, "pending");
+  assert.equal(inspection.recoveryPath, transactionDirectory);
+  assert.deepEqual(readFileSync(path), original);
+});
+
+test("recovery restores displaced bytes from a byte-for-byte v1 transaction fixture", (t) => {
+  const directory = temporaryDirectory(t);
+  // The old engine's Claude Desktop target name is used deliberately: this
+  // fixture proves interrupted pre-extraction transactions remain recoverable.
+  const path = join(directory, "claude_desktop_config.json");
+  const original = Buffer.from('{\n  "mcpServers": {}\n}\n', "utf8");
+  // Simulates a process that died after displacing the target but before the
+  // displaced manifest state landed: manifest still says "prepared", the
+  // displaced artifact holds the user's bytes, and the target is gone.
+  const transactionDirectory = writeLegacyV1TransactionFixture(directory, path, "prepared", {
+    displaced: original,
+  });
+
+  const recovery = recoverFileTransaction(path);
+
+  assert.equal(recovery.status, "recovered");
+  assert.deepEqual(readFileSync(path), original);
+  assert.equal(recovery.recoveryPath, join(transactionDirectory, "displaced"));
+  assert.deepEqual(readFileSync(join(transactionDirectory, "displaced")), original);
+  assert.equal(inspectFileTransaction(path).status, "clear");
+  assert.equal(
+    readFileSync(join(transactionDirectory, "manifest.json"), "utf8"),
+    `${JSON.stringify({ version: 1, state: "committed", target: path })}\n`,
+  );
+});
+
+test("recovery removes a prepared transaction that never displaced the target", (t) => {
+  const directory = temporaryDirectory(t);
+  const path = join(directory, "prepared.bin");
+  const original = Buffer.from("original\n", "utf8");
+  writeFileSync(path, original);
+  const transactionDirectory = writeLegacyV1TransactionFixture(directory, path, "prepared", {
+    prepared: Buffer.from("never published\n", "utf8"),
+  });
+
+  const recovery = recoverFileTransaction(path);
+
+  assert.equal(recovery.status, "recovered");
+  assert.deepEqual(readFileSync(path), original);
+  assert.equal(existsSync(transactionDirectory), false);
+  assert.equal(inspectFileTransaction(path).status, "clear");
+});
+
+test("recovery completes a displaced transaction whose publish never happened", (t) => {
+  const directory = temporaryDirectory(t);
+  const path = join(directory, "displaced.bin");
+  const original = Buffer.from("original fake-secret-original\n", "utf8");
+  const transactionDirectory = writeLegacyV1TransactionFixture(directory, path, "displaced", {
+    displaced: original,
+  });
+
+  const recovery = recoverFileTransaction(path);
+
+  assert.equal(recovery.status, "recovered");
+  assert.deepEqual(readFileSync(path), original);
+  assert.equal(recovery.recoveryPath, join(transactionDirectory, "displaced"));
+  assert.equal(inspectFileTransaction(path).status, "clear");
+});
+
+test("recovery reports a published transaction as manual and skips committed ones", (t) => {
+  const directory = temporaryDirectory(t);
+  const path = join(directory, "states.bin");
+  const original = Buffer.from("original\n", "utf8");
+  const publishedBytes = Buffer.from("published\n", "utf8");
+  const publishedDirectory = writeLegacyV1TransactionFixture(directory, path, "published", {
+    displaced: original,
+  });
+  writeFileSync(path, publishedBytes);
+
+  const manual = recoverFileTransaction(path);
+  assert.equal(manual.status, "manual");
+  assert.equal(manual.recoveryPath, publishedDirectory);
+  assert.deepEqual(readFileSync(path), publishedBytes);
+
+  rmSync(publishedDirectory, { recursive: true, force: true });
+  writeLegacyV1TransactionFixture(directory, path, "committed", { displaced: original });
+  assert.deepEqual(inspectFileTransaction(path), { status: "clear" });
+  assert.deepEqual(recoverFileTransaction(path), { status: "clear" });
+});
+
+test("an unreadable manifest is pending for inspection and manual for recovery", (t) => {
+  const directory = temporaryDirectory(t);
+  const path = join(directory, "corrupt.bin");
+  writeFileSync(path, "original\n", "utf8");
+  const transactionDirectory = join(
+    directory,
+    `.${basename(path)}.transaction-7-deadbeefcafebabe`,
+  );
+  mkdirSync(transactionDirectory, { mode: 0o700 });
+  writeFileSync(join(transactionDirectory, "manifest.json"), "not json\n", "utf8");
+
+  assert.equal(inspectFileTransaction(path).status, "pending");
+  const recovery = recoverFileTransaction(path);
+  assert.equal(recovery.status, "manual");
+  assert.equal(recovery.recoveryPath, transactionDirectory);
+});
+
+test("a failed prepared write throws and retains no transaction artifacts", (t) => {
+  const directory = temporaryDirectory(t);
+  const path = join(directory, "write-fault.bin");
+  const original = Buffer.from("original fake-secret-original\n", "utf8");
+  writeFileSync(path, original);
+  const prior = snapshotBytes(path);
+
+  const originalWriteFile = fs.writeFileSync;
+  const callOriginal = originalWriteFile as (
+    file: fs.PathOrFileDescriptor,
+    data: unknown,
+    options?: fs.WriteFileOptions,
+  ) => void;
+  let injected = false;
+  fs.writeFileSync = ((
+    file: fs.PathOrFileDescriptor,
+    data: unknown,
+    options?: fs.WriteFileOptions,
+  ) => {
+    if (!injected && typeof file === "number") {
+      injected = true;
+      throw new Error("injected prepared-write failure carrying fake-secret-original");
+    }
+    return callOriginal(file, data, options);
+  }) as typeof fs.writeFileSync;
+  syncBuiltinESMExports();
+  t.after(() => {
+    fs.writeFileSync = originalWriteFile;
+    syncBuiltinESMExports();
+  });
+
+  assert.throws(
+    () => atomicWriteBytesIfUnchanged(path, Buffer.from("replacement\n", "utf8"), prior),
+    (error: unknown) => error instanceof Error
+      && /unable to write file/i.test(error.message)
+      && !/fake-secret-original/.test(error.message),
+  );
+  assert.deepEqual(readFileSync(path), original);
+  assert.deepEqual(readdirSync(directory), [basename(path)]);
+});
+
+test("a failed displacement rename throws and leaves the target untouched", (t) => {
+  const directory = temporaryDirectory(t);
+  const path = join(directory, "rename-fault.bin");
+  const original = Buffer.from("original fake-secret-original\n", "utf8");
+  writeFileSync(path, original);
+  const prior = snapshotBytes(path);
+
+  const originalRename = fs.renameSync;
+  fs.renameSync = ((from: fs.PathLike, to: fs.PathLike) => {
+    if (String(from) === path) {
+      throw new Error("injected displacement failure carrying fake-secret-original");
+    }
+    return originalRename(from, to);
+  }) as typeof fs.renameSync;
+  syncBuiltinESMExports();
+  t.after(() => {
+    fs.renameSync = originalRename;
+    syncBuiltinESMExports();
+  });
+
+  assert.throws(
+    () => atomicWriteBytesIfUnchanged(path, Buffer.from("replacement\n", "utf8"), prior),
+    (error: unknown) => error instanceof Error
+      && /unable to write file/i.test(error.message)
+      && !/fake-secret-original/.test(error.message),
+  );
+  assert.deepEqual(readFileSync(path), original);
+  assert.deepEqual(readdirSync(directory), [basename(path)]);
+});
+
+test("a parent fsync failure after publish reports recovery-required with intact bytes", (t) => {
+  const directory = temporaryDirectory(t);
+  const path = join(directory, "durability-fault.bin");
+  const original = Buffer.from("original fake-secret-original\n", "utf8");
+  writeFileSync(path, original);
+  const prior = snapshotBytes(path);
+  const replacement = Buffer.from("replacement fake-secret-replacement\n", "utf8");
+
+  const originalLink = fs.linkSync;
+  const originalDirectorySync = directorySyncCapability.sync;
+  let published = false;
+  fs.linkSync = ((existingPath: fs.PathLike, newPath: fs.PathLike) => {
+    originalLink(existingPath, newPath);
+    if (String(newPath) === path) published = true;
+  }) as typeof fs.linkSync;
+  directorySyncCapability.sync = (directoryPath) => {
+    if (published && directoryPath === dirname(path)) {
+      throw new Error("injected fsync failure carrying fake-secret-original");
+    }
+    return true;
+  };
+  syncBuiltinESMExports();
+  t.after(() => {
+    fs.linkSync = originalLink;
+    directorySyncCapability.sync = originalDirectorySync;
+    syncBuiltinESMExports();
+  });
+
+  const result = atomicWriteBytesIfUnchanged(path, replacement, prior);
+
+  assert.equal(result.status, "recovery-required");
+  assert.ok(result.recoveryPath !== undefined);
+  assert.deepEqual(readFileSync(path), replacement);
+  assert.deepEqual(readFileSync(result.recoveryPath), original);
+  assert.equal(inspectFileTransaction(path).status, "pending");
+  const recovery = recoverFileTransaction(path);
+  assert.equal(recovery.status, "manual");
+  assert.deepEqual(readFileSync(path), replacement);
+});
+
+test("non-regular, symlink, and multi-link targets are refused without mutation", (t) => {
+  const directory = temporaryDirectory(t);
+
+  const directoryTarget = join(directory, "directory-target");
+  mkdirSync(directoryTarget);
+  assert.throws(
+    () => atomicWriteBytesIfUnchanged(
+      directoryTarget,
+      Buffer.from("replacement\n", "utf8"),
+      { status: "valid", bytes: Buffer.from("claimed\n", "utf8"), mode: 0o644 },
+    ),
+    /unable to write file/i,
+  );
+  assert.equal(statSync(directoryTarget).isDirectory(), true);
+  assert.deepEqual(transactionDirectories(directory, directoryTarget), []);
+
+  const realTarget = join(directory, "real-target");
+  const realBytes = Buffer.from("real fake-secret-real\n", "utf8");
+  writeFileSync(realTarget, realBytes);
+  const linkTarget = join(directory, "link-target");
+  let symlinkAvailable = true;
+  try {
+    symlinkSync(realTarget, linkTarget);
+  } catch {
+    symlinkAvailable = false; // Some platforms require privilege for symlinks.
+  }
+  if (symlinkAvailable) {
+    assert.throws(
+      () => atomicWriteBytesIfUnchanged(
+        linkTarget,
+        Buffer.from("replacement\n", "utf8"),
+        snapshotBytes(linkTarget),
+      ),
+      /unable to write file/i,
+    );
+    assert.equal(lstatSync(linkTarget).isSymbolicLink(), true);
+    assert.deepEqual(readFileSync(realTarget), realBytes);
+    assert.deepEqual(transactionDirectories(directory, linkTarget), []);
+  }
+
+  const multiTarget = join(directory, "multi-target");
+  const multiBytes = Buffer.from("multi fake-secret-multi\n", "utf8");
+  writeFileSync(multiTarget, multiBytes);
+  linkSync(multiTarget, join(directory, "multi-target-alias"));
+  assert.throws(
+    () => atomicWriteBytesIfUnchanged(
+      multiTarget,
+      Buffer.from("replacement\n", "utf8"),
+      snapshotBytes(multiTarget),
+    ),
+    /unable to write file/i,
+  );
+  assert.deepEqual(readFileSync(multiTarget), multiBytes);
+  assert.deepEqual(transactionDirectories(directory, multiTarget), []);
+});
