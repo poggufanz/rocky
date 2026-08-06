@@ -528,6 +528,13 @@ function transactionManifestState(
   }
 }
 
+function transactionManifestBytes(
+  target: string,
+  state: "prepared" | "displaced" | "published" | "committed",
+): Buffer {
+  return Buffer.from(`${JSON.stringify({ version: 1, state, target })}\n`, "utf8");
+}
+
 function createTargetTransactionGuard(
   target: string,
   original: SafeFileSnapshot,
@@ -625,11 +632,7 @@ function createTargetTransactionGuard(
       && observation.publication.ino === publishedIdentity.ino;
   };
 
-  const committedManifestBytes = Buffer.from(`${JSON.stringify({
-    version: 1,
-    state: "committed",
-    target,
-  })}\n`, "utf8");
+  const committedManifestBytes = transactionManifestBytes(target, "committed");
 
   const recoveryAuthorityInputs = (
     candidate: string | undefined,
@@ -664,19 +667,40 @@ function createTargetTransactionGuard(
     if (inputs === undefined) return undefined;
     let manifest: HeldFileObservation | undefined;
     let displaced: HeldFileObservation | undefined;
+    let prepared: HeldFileObservation | undefined;
+    let publication: HeldFileObservation | undefined;
     try {
       const transactionBefore = identity(lstatSync(inputs.transaction));
       const entriesBefore = readdirSync(inputs.transaction).sort();
-      if (!sameDirectoryAuthority(transactionBefore, inputs.transactionIdentity)
-        || !isDeepStrictEqual(entriesBefore, ["displaced", "manifest.json"])) return undefined;
-      manifest = openHeldExactFile(
-        inputs.manifest,
-        committedManifestBytes,
-        undefined,
-        undefined,
-        1,
+      const hasPrepared = isDeepStrictEqual(
+        entriesBefore,
+        ["displaced", "manifest.json", "prepared"],
       );
-      if (manifest === undefined) return undefined;
+      const publishedOnly = isDeepStrictEqual(entriesBefore, ["displaced", "manifest.json"]);
+      if (!sameDirectoryAuthority(transactionBefore, inputs.transactionIdentity)
+        || (!hasPrepared && !publishedOnly)) return undefined;
+      const allowedStates = hasPrepared
+        ? ["displaced", "published"] as const
+        : ["committed", "published"] as const;
+      let state: "displaced" | "published" | "committed" | undefined;
+      let manifestBytes: Buffer | undefined;
+      for (const candidateState of allowedStates) {
+        const candidateBytes = transactionManifestBytes(target, candidateState);
+        const candidateManifest = openHeldExactFile(
+          inputs.manifest,
+          candidateBytes,
+          undefined,
+          undefined,
+          1,
+        );
+        if (candidateManifest !== undefined) {
+          state = candidateState;
+          manifestBytes = candidateBytes;
+          manifest = candidateManifest;
+          break;
+        }
+      }
+      if (state === undefined || manifestBytes === undefined || manifest === undefined) return undefined;
       displaced = openHeldExactFile(
         inputs.displaced,
         inputs.originalBytes,
@@ -686,9 +710,53 @@ function createTargetTransactionGuard(
       );
       if (displaced === undefined) return undefined;
 
+      let targetMustBeMissing = false;
+      if (state !== "committed" && hasPrepared) {
+        const preparedPath = pathApi.join(inputs.transaction, "prepared");
+        if (state === "displaced" && pathMissing(target)) {
+          targetMustBeMissing = true;
+          prepared = openHeldExactFile(
+            preparedPath,
+            publishedBytes,
+            inputs.originalMode,
+            undefined,
+            1,
+          );
+        } else {
+          if (state === "published" && publishedIdentity === undefined) return undefined;
+          publication = openHeldExactFile(
+            target,
+            publishedBytes,
+            inputs.originalMode,
+            state === "displaced" ? undefined : publishedIdentity,
+            2,
+          );
+          if (publication !== undefined) {
+            prepared = openHeldExactFile(
+              preparedPath,
+              publishedBytes,
+              inputs.originalMode,
+              publication.identity,
+              2,
+            );
+          }
+        }
+        if (prepared === undefined) return undefined;
+      } else if (state === "published") {
+        if (publishedIdentity === undefined) return undefined;
+        publication = openHeldExactFile(
+          target,
+          publishedBytes,
+          inputs.originalMode,
+          publishedIdentity,
+          1,
+        );
+        if (publication === undefined) return undefined;
+      }
+
       const manifestDescriptor = rereadHeldExactFile(
         manifest,
-        committedManifestBytes,
+        manifestBytes,
         undefined,
         manifest.identity,
         1,
@@ -700,14 +768,41 @@ function createTargetTransactionGuard(
         inputs.originalIdentity,
         inputs.originalIdentity.nlink,
       );
+      const preparedDescriptor = prepared === undefined ? undefined : rereadHeldExactFile(
+        prepared,
+        publishedBytes,
+        inputs.originalMode,
+        prepared.identity,
+        prepared.identity.nlink,
+      );
+      const publicationDescriptor = publication === undefined ? undefined : rereadHeldExactFile(
+        publication,
+        publishedBytes,
+        inputs.originalMode,
+        publication.identity,
+        publication.identity.nlink,
+      );
+      const closingTarget = publication === undefined ? undefined : identity(lstatSync(target));
+      const closingTargetMissing = targetMustBeMissing && pathMissing(target);
+      const closingPrepared = prepared === undefined
+        ? undefined
+        : identity(lstatSync(pathApi.join(inputs.transaction, "prepared")));
       const manifestPath = identity(lstatSync(inputs.manifest));
       const closingEntries = readdirSync(inputs.transaction).sort();
       const closingTransaction = identity(lstatSync(inputs.transaction));
       const displacedPath = identity(lstatSync(inputs.displaced));
       return manifestDescriptor !== undefined
         && displacedDescriptor !== undefined
+        && (prepared === undefined
+          || (preparedDescriptor !== undefined
+            && sameIdentity(preparedDescriptor, closingPrepared)))
+        && (state === "committed"
+          || (publication === undefined
+            ? closingTargetMissing
+            : publicationDescriptor !== undefined
+              && sameIdentity(publicationDescriptor, closingTarget)))
         && sameIdentity(manifestDescriptor, manifestPath)
-        && isDeepStrictEqual(closingEntries, ["displaced", "manifest.json"])
+        && isDeepStrictEqual(closingEntries, entriesBefore)
         && sameDirectoryAuthority(closingTransaction, inputs.transactionIdentity)
         && sameIdentity(displacedDescriptor, displacedPath)
         ? inputs.displaced
@@ -715,6 +810,8 @@ function createTargetTransactionGuard(
     } catch {
       return undefined;
     } finally {
+      closeHeldFile(publication);
+      closeHeldFile(prepared);
       closeHeldFile(displaced);
       closeHeldFile(manifest);
     }
@@ -1498,17 +1595,20 @@ export function createClaudeCodeAdapter(
       ),
         operation === "configure" ? registration : undefined);
     }
+    const selectAuthoritativeRecovery = (candidate: string | undefined): string | undefined => {
+      const stageBeforeCandidate = authoritativeStagePath(stage, pathApi);
+      const taskOneRecovery = targetGuard.authoritativeRecoveryPath(candidate);
+      if (taskOneRecovery !== undefined) return taskOneRecovery;
+      return stageBeforeCandidate === undefined
+        ? undefined
+        : authoritativeStagePath(stage, pathApi);
+    };
     if (written.status !== "written") {
-      const auditedStillAuthoritative = audited.guard.unchanged();
-      const retainedStage = authoritativeStagePath(stage, pathApi);
-      const recoveryPath = written.status === "recovery-required"
-        ? written.recoveryPath ?? retainedStage
-        : auditedStillAuthoritative ? written.recoveryPath ?? retainedStage : retainedStage;
       return failed(withRecovery(
         written.status === "changed"
           ? "Claude Code config changed before publication"
           : "Claude Code publication requires manual recovery",
-        recoveryPath,
+        selectAuthoritativeRecovery(written.recoveryPath),
       ), operation === "configure" ? registration : undefined);
     }
     try { dependencies.lifecycle?.afterPublish?.(resolved.configPath); } catch { /* verification decides */ }
@@ -1528,24 +1628,20 @@ export function createClaudeCodeAdapter(
       && isObject(verifiedRoot)
       && isDeepStrictEqual(verifiedRoot, audited.parsed)
       && guard.unchanged();
-    const selectAuthoritativeRecovery = (): string | undefined => (
-      targetGuard.authoritativeRecoveryPath(written.recoveryPath)
-        ?? authoritativeStagePath(stage, pathApi)
-    );
     if (!exact) {
       return failed(withRecovery(
         "Claude Code published state could not be verified",
-        selectAuthoritativeRecovery(),
+        selectAuthoritativeRecovery(written.recoveryPath),
       ), operation === "configure" ? registration : undefined);
     }
     const finalAuthority = targetGuard.finalAuthority(written.recoveryPath, nonTargetGuard);
     if (finalAuthority.status === "changed") {
       return failed(withRecovery(
         "Claude Code stage authority changed after publication",
-        selectAuthoritativeRecovery(),
+        selectAuthoritativeRecovery(written.recoveryPath),
       ), operation === "configure" ? registration : undefined);
     }
-    const detail = `Claude Code retained private stage: ${stage.path}; Claude Code recovery artifact: ${finalAuthority.recoveryPath}`;
+    const detail = `Claude Code recovery artifact: ${finalAuthority.recoveryPath}`;
     return operation === "configure"
       ? { client: "claude-code", status: "configured", detail }
       : { client: "claude-code", status: "removed", detail };

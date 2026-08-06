@@ -26,6 +26,8 @@ import {
   type ClaudeFileTransactions,
   type ClaudePolicyManifest,
 } from "../setup/claude-code.js";
+import { directorySyncCapability } from "../setup/directory-sync.js";
+import { atomicWriteBytesIfUnchanged } from "../setup/file-transaction.js";
 import type { ProcessResult, ProcessRunOptions, ProcessRunner } from "../setup/process.js";
 
 const registration: McpRegistration = {
@@ -600,7 +602,7 @@ test("supported staged configure uses exact argv env clone audit and conditional
   });
   assert.equal(statSync(setup.configPath).mode & 0o777, originalMode);
   assert.match(configured.detail ?? "", /recovery/i);
-  assert.ok((configured.detail ?? "").includes(stagePath(actual[0]!)));
+  assert.equal((configured.detail ?? "").includes(stagePath(actual[0]!)), false);
   assert.doesNotMatch(configured.detail ?? "", /dark|https:\/\/local/);
   assertRetainedPrivateStages(setup.stageRoot, 2);
 });
@@ -1672,6 +1674,358 @@ test("final target observation stays paired with the exact displaced recovery in
   }
 });
 
+test("successful final authority reports only its paired recovery after a closing stage rebound", async (t) => {
+  for (const operation of ["configure", "remove"] as const) {
+    await t.test(operation, async (st) => {
+      const secret = `fake-${operation}-success-stage-secret`;
+      const setup = fixture(st, {
+        secret,
+        mcpServers: operation === "remove" ? { rocky: rockyEntry() } : {},
+      });
+      const originalBytes = readFileSync(setup.configPath);
+      const originalMode = statSync(setup.configPath).mode & 0o777;
+      const originalIdentity = lstatSync(setup.configPath);
+      let mutationStage: string | undefined;
+      let originalStageIdentity: ReturnType<typeof lstatSync> | undefined;
+      let movedStagePath: string | undefined;
+      let foreignStageIdentity: ReturnType<typeof lstatSync> | undefined;
+      let publishedReturned = false;
+      let committedManifestObservations = 0;
+      let finalCapabilityArmed = false;
+      let closingTargetObservations = 0;
+      let raced = false;
+      const originalReadFile = fs.readFileSync;
+      const originalLstat = fs.lstatSync;
+
+      fs.readFileSync = ((
+        path: fs.PathOrFileDescriptor,
+        options?: BufferEncoding | { encoding?: BufferEncoding | null; flag?: string } | null,
+      ) => {
+        const value = options === undefined
+          ? originalReadFile(path)
+          : originalReadFile(path, options as never);
+        if (publishedReturned
+          && typeof path !== "number"
+          && posix.basename(String(path)) === "manifest.json") {
+          try {
+            const parsed = JSON.parse(
+              typeof value === "string" ? value : value.toString("utf8"),
+            ) as { state?: string; target?: string };
+            if (parsed.state === "committed" && parsed.target === setup.configPath) {
+              committedManifestObservations += 1;
+              if (committedManifestObservations === 2) finalCapabilityArmed = true;
+            }
+          } catch {
+            // Only the exact committed Task 1 manifest arms the closing sweep.
+          }
+        }
+        return value;
+      }) as typeof fs.readFileSync;
+      Object.defineProperty(fs, "lstatSync", {
+        configurable: true,
+        writable: true,
+        value: ((path: fs.PathLike, options?: unknown) => {
+          if (finalCapabilityArmed && String(path) === setup.configPath) {
+            closingTargetObservations += 1;
+            if (!raced && closingTargetObservations === 3) {
+              assert.ok(mutationStage !== undefined);
+              raced = true;
+              originalStageIdentity = originalLstat(mutationStage);
+              movedStagePath = `${mutationStage}-authoritative`;
+              renameSync(mutationStage, movedStagePath);
+              mkdirSync(mutationStage, { mode: 0o700 });
+              chmodSync(mutationStage, 0o700);
+              foreignStageIdentity = originalLstat(mutationStage);
+            }
+          }
+          return options === undefined
+            ? originalLstat(path)
+            : originalLstat(path, options as never);
+        }) as typeof fs.lstatSync,
+      });
+      syncBuiltinESMExports();
+
+      let outcome;
+      try {
+        const adapter = createClaudeCodeAdapter(adapterDependencies(
+          setup,
+          new FakeClaudeRunner((call) => {
+            mutationStage = stagePath(call);
+            return transformStage(call);
+          }),
+          {
+            lifecycle: {
+              afterPublish() {
+                publishedReturned = true;
+              },
+            },
+          },
+        ));
+        outcome = operation === "configure"
+          ? await adapter.configure(registration, false)
+          : await adapter.remove(registration);
+      } finally {
+        fs.readFileSync = originalReadFile;
+        Object.defineProperty(fs, "lstatSync", {
+          configurable: true,
+          writable: true,
+          value: originalLstat,
+        });
+        syncBuiltinESMExports();
+      }
+
+      assert.equal(publishedReturned, true);
+      assert.equal(committedManifestObservations, 2);
+      assert.equal(finalCapabilityArmed, true);
+      assert.equal(closingTargetObservations, 3);
+      assert.equal(raced, true);
+      assert.ok(mutationStage !== undefined && movedStagePath !== undefined);
+      assert.ok(originalStageIdentity !== undefined && foreignStageIdentity !== undefined);
+      const movedStageIdentity = lstatSync(movedStagePath);
+      assert.equal(movedStageIdentity.isDirectory(), true);
+      assert.equal(movedStageIdentity.dev, originalStageIdentity.dev);
+      assert.equal(movedStageIdentity.ino, originalStageIdentity.ino);
+      assert.equal(movedStageIdentity.mode & 0o777, 0o700);
+      const currentForeignStage = lstatSync(mutationStage);
+      assert.equal(currentForeignStage.isDirectory(), true);
+      assert.equal(currentForeignStage.dev, foreignStageIdentity.dev);
+      assert.equal(currentForeignStage.ino, foreignStageIdentity.ino);
+      assert.equal(currentForeignStage.mode & 0o777, 0o700);
+      assert.notEqual(currentForeignStage.ino, movedStageIdentity.ino);
+
+      assert.equal(outcome.status, operation === "configure" ? "configured" : "removed");
+      assert.equal((outcome.detail ?? "").includes(mutationStage), false, outcome.detail);
+      assert.equal((outcome.detail ?? "").includes(movedStagePath), false, outcome.detail);
+      const recoveryPath = /Claude Code recovery artifact: (.+)$/.exec(outcome.detail ?? "")?.[1];
+      assert.ok(recoveryPath !== undefined, outcome.detail);
+      const recoveryIdentity = lstatSync(recoveryPath);
+      assert.equal(recoveryIdentity.isFile(), true);
+      assert.equal(recoveryIdentity.isSymbolicLink(), false);
+      assert.equal(recoveryIdentity.dev, originalIdentity.dev);
+      assert.equal(recoveryIdentity.ino, originalIdentity.ino);
+      assert.equal(recoveryIdentity.nlink, originalIdentity.nlink);
+      assert.equal(recoveryIdentity.mode & 0o777, originalMode);
+      assert.deepEqual(readFileSync(recoveryPath), originalBytes);
+      assert.deepEqual(readdirSync(dirname(recoveryPath)).sort(), ["displaced", "manifest.json"]);
+      assert.deepEqual(
+        JSON.parse(readFileSync(join(dirname(recoveryPath), "manifest.json"), "utf8")),
+        { version: 1, state: "committed", target: setup.configPath },
+      );
+      assert.doesNotMatch(outcome.detail ?? "", new RegExp(secret));
+    });
+  }
+});
+
+test("post-publication recovery-required reports no rebound raw Task 1 path", async (t) => {
+  for (const operation of ["configure", "remove"] as const) {
+    await t.test(operation, async (st) => {
+      const secret = `fake-${operation}-durability-secret`;
+      const setup = fixture(st, {
+        secret,
+        mcpServers: operation === "remove" ? { rocky: rockyEntry() } : {},
+      });
+      const originalBytes = readFileSync(setup.configPath);
+      const originalMode = statSync(setup.configPath).mode & 0o777;
+      const originalIdentity = lstatSync(setup.configPath);
+      let mutationStage: string | undefined;
+      let mutationStageIdentity: ReturnType<typeof lstatSync> | undefined;
+      let task1Returned = false;
+      let task1RecoveryPath: string | undefined;
+      let publicationLinked = false;
+      let durabilityFaulted = false;
+      let raced = false;
+      let movedParent: string | undefined;
+      let movedRecoveryPath: string | undefined;
+      let foreignRecoveryPath: string | undefined;
+      let originalRecoveryIdentity: ReturnType<typeof lstatSync> | undefined;
+      let originalTransactionIdentity: ReturnType<typeof lstatSync> | undefined;
+      let foreignRecoveryIdentity: ReturnType<typeof lstatSync> | undefined;
+      let foreignTransactionIdentity: ReturnType<typeof lstatSync> | undefined;
+      let movedPublishedIdentity: ReturnType<typeof lstatSync> | undefined;
+      let foreignPublishedIdentity: ReturnType<typeof lstatSync> | undefined;
+      let publishedBytes: Buffer | undefined;
+      let manifestBytes: Buffer | undefined;
+      let manifestMode: number | undefined;
+      const originalLink = fs.linkSync;
+      const originalLstat = fs.lstatSync;
+      const originalDirectorySync = directorySyncCapability.sync;
+
+      fs.linkSync = ((existingPath: fs.PathLike, newPath: fs.PathLike) => {
+        originalLink(existingPath, newPath);
+        if (String(newPath) === setup.configPath) publicationLinked = true;
+      }) as typeof fs.linkSync;
+      directorySyncCapability.sync = (directoryPath) => {
+        if (publicationLinked && !durabilityFaulted && directoryPath === setup.configDir) {
+          durabilityFaulted = true;
+          throw new Error(`injected parent sync fault carrying ${secret}`);
+        }
+        return originalDirectorySync(directoryPath);
+      };
+
+      const installForeignParent = () => {
+        assert.ok(task1RecoveryPath !== undefined);
+        const transaction = dirname(task1RecoveryPath);
+        const transactionName = posix.basename(transaction);
+        const preparedPath = join(transaction, "prepared");
+        const manifestPath = join(transaction, "manifest.json");
+        originalRecoveryIdentity = originalLstat(task1RecoveryPath);
+        originalTransactionIdentity = originalLstat(transaction);
+        movedPublishedIdentity = originalLstat(setup.configPath);
+        publishedBytes = readFileSync(setup.configPath);
+        manifestBytes = readFileSync(manifestPath);
+        manifestMode = originalLstat(manifestPath).mode & 0o777;
+
+        const foreignParent = join(setup.root, `${operation}-durability-foreign-parent`);
+        mkdirSync(foreignParent, { mode: 0o700 });
+        const foreignTransaction = join(foreignParent, transactionName);
+        mkdirSync(foreignTransaction, { mode: 0o700 });
+        const foreignManifest = join(foreignTransaction, "manifest.json");
+        writeFileSync(foreignManifest, manifestBytes, { mode: manifestMode });
+        chmodSync(foreignManifest, manifestMode);
+        foreignRecoveryPath = join(foreignTransaction, "displaced");
+        writeFileSync(foreignRecoveryPath, originalBytes, { mode: originalMode });
+        chmodSync(foreignRecoveryPath, originalMode);
+        const foreignPrepared = join(foreignTransaction, "prepared");
+        const preparedMode = originalLstat(preparedPath).mode & 0o777;
+        copyFileSync(preparedPath, foreignPrepared);
+        chmodSync(foreignPrepared, preparedMode);
+        const foreignTarget = join(foreignParent, ".claude.json");
+        originalLink(foreignPrepared, foreignTarget);
+
+        movedParent = join(setup.root, `${operation}-durability-authoritative-parent`);
+        renameSync(setup.configDir, movedParent);
+        renameSync(foreignParent, setup.configDir);
+        movedRecoveryPath = join(movedParent, transactionName, "displaced");
+        foreignRecoveryPath = join(setup.configDir, transactionName, "displaced");
+        foreignRecoveryIdentity = originalLstat(foreignRecoveryPath);
+        foreignTransactionIdentity = originalLstat(dirname(foreignRecoveryPath));
+        foreignPublishedIdentity = originalLstat(setup.configPath);
+      };
+
+      Object.defineProperty(fs, "lstatSync", {
+        configurable: true,
+        writable: true,
+        value: ((path: fs.PathLike, options?: unknown) => {
+          if (task1Returned && !raced && String(path) === mutationStage) {
+            raced = true;
+            installForeignParent();
+          }
+          return options === undefined
+            ? originalLstat(path)
+            : originalLstat(path, options as never);
+        }) as typeof fs.lstatSync,
+      });
+      syncBuiltinESMExports();
+
+      const transactions: ClaudeFileTransactions = {
+        inspect: () => ({ status: "clear" }),
+        recover: () => ({ status: "clear" }),
+        write: (path, bytes, prior, guard) => {
+          const result = atomicWriteBytesIfUnchanged(path, bytes, prior, guard);
+          assert.equal(result.status, "recovery-required");
+          task1RecoveryPath = result.recoveryPath;
+          task1Returned = true;
+          return result;
+        },
+      };
+
+      let outcome;
+      try {
+        const adapter = createClaudeCodeAdapter(adapterDependencies(
+          setup,
+          new FakeClaudeRunner((call) => {
+            mutationStage = stagePath(call);
+            mutationStageIdentity = originalLstat(mutationStage);
+            return transformStage(call);
+          }),
+          { fileTransactions: transactions },
+        ));
+        outcome = operation === "configure"
+          ? await adapter.configure(registration, false)
+          : await adapter.remove(registration);
+      } finally {
+        fs.linkSync = originalLink;
+        directorySyncCapability.sync = originalDirectorySync;
+        Object.defineProperty(fs, "lstatSync", {
+          configurable: true,
+          writable: true,
+          value: originalLstat,
+        });
+        syncBuiltinESMExports();
+      }
+
+      assert.equal(publicationLinked, true);
+      assert.equal(durabilityFaulted, true);
+      assert.equal(task1Returned, true);
+      assert.equal(raced, true);
+      assert.ok(task1RecoveryPath !== undefined);
+      assert.ok(movedParent !== undefined && movedRecoveryPath !== undefined);
+      assert.ok(foreignRecoveryPath !== undefined);
+      assert.ok(originalRecoveryIdentity !== undefined && originalTransactionIdentity !== undefined);
+      assert.ok(foreignRecoveryIdentity !== undefined && foreignTransactionIdentity !== undefined);
+      assert.ok(movedPublishedIdentity !== undefined && foreignPublishedIdentity !== undefined);
+      assert.ok(publishedBytes !== undefined && manifestBytes !== undefined && manifestMode !== undefined);
+
+      assert.equal(outcome.status, "failed");
+      assert.deepEqual(readFileSync(setup.configPath), publishedBytes);
+      assert.equal(lstatSync(setup.configPath).ino, foreignPublishedIdentity.ino);
+      assert.notEqual(foreignPublishedIdentity.ino, movedPublishedIdentity.ino);
+      assert.deepEqual(readFileSync(join(movedParent, ".claude.json")), publishedBytes);
+
+      const movedRecovery = lstatSync(movedRecoveryPath);
+      assert.equal(movedRecovery.dev, originalRecoveryIdentity.dev);
+      assert.equal(movedRecovery.ino, originalRecoveryIdentity.ino);
+      assert.equal(movedRecovery.nlink, 1);
+      assert.equal(movedRecovery.mode & 0o777, originalMode);
+      assert.deepEqual(readFileSync(movedRecoveryPath), originalBytes);
+      const foreignRecovery = lstatSync(foreignRecoveryPath);
+      assert.equal(foreignRecovery.dev, foreignRecoveryIdentity.dev);
+      assert.equal(foreignRecovery.ino, foreignRecoveryIdentity.ino);
+      assert.equal(foreignRecovery.nlink, 1);
+      assert.equal(foreignRecovery.mode & 0o777, originalMode);
+      assert.deepEqual(readFileSync(foreignRecoveryPath), originalBytes);
+      assert.notEqual(foreignRecovery.ino, movedRecovery.ino);
+      assert.notEqual(foreignTransactionIdentity.ino, originalTransactionIdentity.ino);
+      assert.deepEqual(readdirSync(dirname(movedRecoveryPath)).sort(), [
+        "displaced", "manifest.json", "prepared",
+      ]);
+      assert.deepEqual(readdirSync(dirname(foreignRecoveryPath)).sort(), [
+        "displaced", "manifest.json", "prepared",
+      ]);
+      assert.deepEqual(readFileSync(join(dirname(movedRecoveryPath), "manifest.json")), manifestBytes);
+      assert.deepEqual(readFileSync(join(dirname(foreignRecoveryPath), "manifest.json")), manifestBytes);
+      assert.equal(statSync(join(dirname(movedRecoveryPath), "manifest.json")).mode & 0o777, manifestMode);
+      assert.equal(statSync(join(dirname(foreignRecoveryPath), "manifest.json")).mode & 0o777, manifestMode);
+      assert.deepEqual(JSON.parse(manifestBytes.toString("utf8")), {
+        version: 1,
+        state: "displaced",
+        target: setup.configPath,
+      });
+      const movedPrepared = lstatSync(join(dirname(movedRecoveryPath), "prepared"));
+      const movedTarget = lstatSync(join(movedParent, ".claude.json"));
+      assert.equal(movedPrepared.dev, movedTarget.dev);
+      assert.equal(movedPrepared.ino, movedTarget.ino);
+      assert.equal(movedPrepared.nlink, 2);
+      const foreignPrepared = lstatSync(join(dirname(foreignRecoveryPath), "prepared"));
+      const foreignTarget = lstatSync(setup.configPath);
+      assert.equal(foreignPrepared.dev, foreignTarget.dev);
+      assert.equal(foreignPrepared.ino, foreignTarget.ino);
+      assert.equal(foreignPrepared.nlink, 2);
+
+      assert.equal((outcome.detail ?? "").includes(task1RecoveryPath), false, outcome.detail);
+      const reportedPath = /manual recovery: (.+)$/.exec(outcome.detail ?? "")?.[1];
+      assert.ok(mutationStage !== undefined && mutationStageIdentity !== undefined);
+      assert.equal(reportedPath, mutationStage);
+      const retainedStage = lstatSync(reportedPath);
+      assert.equal(retainedStage.dev, mutationStageIdentity.dev);
+      assert.equal(retainedStage.ino, mutationStageIdentity.ino);
+      assert.doesNotMatch(outcome.detail ?? "", new RegExp(secret));
+      assert.doesNotMatch(outcome.detail ?? "", /fake-original-secret/);
+      assert.equal(originalIdentity.ino, originalRecoveryIdentity.ino);
+    });
+  }
+});
+
 test("two simultaneous staged configures preserve one exact winner", async (t) => {
   const setup = fixture(t, { keep: true, mcpServers: {} });
   let waiting = 0;
@@ -1836,6 +2190,7 @@ test("transaction result discriminants and post-write mismatch never overclaim s
       const before = readFileSync(setup.configPath);
       const recoveryPath = join(setup.root, `${transactionStatus}-recovery`);
       writeFileSync(recoveryPath, before);
+      let stage: string | undefined;
       const transactions: ClaudeFileTransactions = {
         inspect: () => ({ status: "clear" }),
         recover: () => ({ status: "clear" }),
@@ -1844,13 +2199,18 @@ test("transaction result discriminants and post-write mismatch never overclaim s
           return { status: transactionStatus, recoveryPath };
         },
       };
-      const runner = new FakeClaudeRunner((call) => transformStage(call));
+      const runner = new FakeClaudeRunner((call) => {
+        stage = stagePath(call);
+        return transformStage(call);
+      });
       const configured = await createClaudeCodeAdapter(adapterDependencies(setup, runner, {
         fileTransactions: transactions,
       })).configure(registration, false);
 
       assert.equal(configured.status, "failed");
-      assert.ok((configured.detail ?? "").includes(recoveryPath));
+      assert.ok(stage !== undefined);
+      assert.equal((configured.detail ?? "").includes(recoveryPath), false);
+      assert.equal(/manual recovery: (.+)$/.exec(configured.detail ?? "")?.[1], stage);
       assert.deepEqual(readFileSync(setup.configPath), before);
     });
   }
