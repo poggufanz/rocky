@@ -2970,7 +2970,20 @@ test("next invocation recognizes a prepared crash with both names on the same in
   assert.equal(fs.existsSync(join(transaction, "prepared")), false);
 });
 
-test("next invocation preserves ambiguous crash target and transaction for manual recovery", async (t) => {
+// Round 10, S1: this fixture is exactly the shape `recoverFileTransaction`'s
+// `published` fallback now proves safe to commit — `displaced` is a proven,
+// singly-owned copy and `path` is itself a live regular file, the same
+// evidence `resolveUndisplacedTransaction` already accepted elsewhere in the
+// engine, plus a proven `displaced` on top. Before round 10 this state was a
+// permanent, unrecoverable "manual" stop, on both the hook route and (via
+// this same shared engine function) this adapter route — this test's old
+// name and its `/manual recovery/i` assertion pinned exactly that permanent
+// bricking. Committing here writes nothing to `path` and destroys nothing:
+// `displaced` is retained either way, only the transaction's own manifest
+// label advances, so the settle step now resolves it and reports `failed`
+// (this call still performed no configuration write) with a truthful detail
+// naming the live recovery, instead of stopping the surface dead forever.
+test("next invocation recovers a published crash target whose displaced backup and live target both prove safe (round 10, S1)", async (t) => {
   const current = { theme: "light", secret: "fake-ambiguous-current" };
   const displaced = { theme: "dark", secret: "fake-ambiguous-displaced" };
   const path = configPath(t, current);
@@ -2988,11 +3001,16 @@ test("next invocation preserves ambiguous crash target and transaction for manua
 
   const configured = await adapter.configure(registration, true);
 
-  assert.equal(configured.status, "failed");
-  assert.match(configured.detail ?? "", /manual recovery/i);
+  assert.equal(configured.status, "failed", "this call itself still performs no configuration write");
+  assert.match(configured.detail ?? "", /transaction recovered/i);
+  assert.match(
+    configured.detail ?? "",
+    /live recovery: .*displaced/,
+    "the detail names the exact proven artifact, not a bare claim (round 10, S1)",
+  );
   assert.doesNotMatch(configured.detail ?? "", /fake-ambiguous-current|fake-ambiguous-displaced/);
-  assert.deepEqual(readFileSync(path), currentBytes);
-  assert.deepEqual(readFileSync(join(transaction, "displaced")), displacedBytes);
+  assert.deepEqual(readFileSync(path), currentBytes, "the target's own bytes are never touched by settling");
+  assert.deepEqual(readFileSync(join(transaction, "displaced")), displacedBytes, "the retained copy survives untouched");
   assert.deepEqual(backupPaths(path), []);
 });
 

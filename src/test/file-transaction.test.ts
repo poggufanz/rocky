@@ -257,7 +257,7 @@ test("recovery completes a displaced transaction whose publish never happened", 
   assert.equal(inspectFileTransaction(path).status, "clear");
 });
 
-test("recovery reports a published transaction as manual and skips committed ones", (t) => {
+test("recovery commits a published transaction whose displaced backup and live target both prove safe, and skips committed ones (round 10, S1)", (t) => {
   const directory = temporaryDirectory(t);
   const path = join(directory, "states.bin");
   const original = Buffer.from("original\n", "utf8");
@@ -267,15 +267,47 @@ test("recovery reports a published transaction as manual and skips committed one
   });
   writeFileSync(path, publishedBytes);
 
-  const manual = recoverFileTransaction(path);
-  assert.equal(manual.status, "manual");
-  assert.equal(manual.recoveryPath, publishedDirectory);
-  assert.deepEqual(readFileSync(path), publishedBytes);
+  // `displaced` is a proven, singly-owned copy and `path` is itself a live
+  // regular file — the exact evidence `resolveUndisplacedTransaction`
+  // already accepts, plus a proven `displaced` on top. Committing here
+  // destroys nothing (`displaced` is retained either way); before round 10,
+  // S1, this exact shape returned "manual" unconditionally, forever, with
+  // no re-examination of the evidence — reported before this fix as "a
+  // published transaction as manual" (this test's own former name).
+  const recovered = recoverFileTransaction(path);
+  assert.equal(recovered.status, "recovered");
+  assert.deepEqual(readFileSync(path), publishedBytes, "the live target is never touched by this recovery");
+  assert.deepEqual(readFileSync(join(publishedDirectory, "displaced")), original, "the retained copy survives untouched");
+  assert.equal(
+    JSON.parse(readFileSync(join(publishedDirectory, "manifest.json"), "utf8")).state,
+    "committed",
+  );
+  assert.deepEqual(recoverFileTransaction(path), { status: "clear" }, "idempotent on a second run");
 
   rmSync(publishedDirectory, { recursive: true, force: true });
   writeLegacyV1TransactionFixture(directory, path, "committed", { displaced: original });
   assert.deepEqual(inspectFileTransaction(path), { status: "clear" });
   assert.deepEqual(recoverFileTransaction(path), { status: "clear" });
+});
+
+test("recovery still reports a published transaction as manual when the target is not itself a live regular file (negative control for S1)", (t) => {
+  const directory = temporaryDirectory(t);
+  const path = join(directory, "vanished-target-with-displaced.bin");
+  const original = Buffer.from("original\n", "utf8");
+  // `displaced` is present and provable, but `path` itself does not exist —
+  // S1's new commit path requires both, and a target-absent shape stays
+  // exactly as ambiguous as it was before this round (final audit's own
+  // reasoning: a proven copy is not proof that discarding is not throwing
+  // away the last surviving evidence of the target ever having existed at
+  // all, when nothing currently occupies that name to compare against).
+  const publishedDirectory = writeLegacyV1TransactionFixture(directory, path, "published", {
+    displaced: original,
+  });
+
+  const manual = recoverFileTransaction(path);
+  assert.equal(manual.status, "manual");
+  assert.equal(manual.recoveryPath, publishedDirectory);
+  assert.equal(existsSync(join(publishedDirectory, "displaced")), true, "the only surviving copy is retained");
 });
 
 test("an unreadable manifest is pending for inspection and manual for recovery", (t) => {
@@ -1064,6 +1096,42 @@ test("recovery still discards only prepared when no link-probe leftover exists (
   assert.equal(existsSync(join(transactionDirectory, "link-probe")), false, "never created, never an error to discard it");
 });
 
+test("recovery retains a link-probe-only leftover instead of discarding it when the target is not proven live (round 10, s5/D10)", (t) => {
+  // r4's own test above pins only the discard side (target live, both
+  // "prepared" and "link-probe" removed together). This is the missing
+  // retain side: `link-probe` is the *only* surviving artifact (no
+  // "prepared" name at all) over a target that proves nothing was ever
+  // there. Mutant D10 drops the `link-probe` disjunct from the retain gate
+  // only (leaving it in the discard gate two lines below) — under that
+  // mutant this exact shape is silently discarded and committed, destroying
+  // the only surviving copy of the staged bytes: the I2/PROBE-L data-loss
+  // shape, reintroduced under the "link-probe" name instead of "prepared".
+  const directory = temporaryDirectory(t);
+  const path = join(directory, "link-probe-only-dangling.bin");
+  let symlinkAvailable = true;
+  try {
+    symlinkSync(join(directory, "missing-target"), path);
+  } catch {
+    symlinkAvailable = false; // Some platforms require privilege for symlinks.
+  }
+  if (!symlinkAvailable) return;
+  const transactionDirectory = writeLegacyV1TransactionFixture(directory, path, "prepared", {});
+  writeFileSync(
+    join(transactionDirectory, "link-probe"),
+    Buffer.from("staged bytes fake-secret-linkprobe\n", "utf8"),
+  );
+
+  const recovery = recoverFileTransaction(path);
+
+  assert.equal(
+    recovery.status,
+    "manual",
+    "a dangling symlink target proves nothing was ever there — link-probe alone must still be retained (s5/D10)",
+  );
+  assert.equal(existsSync(join(transactionDirectory, "link-probe")), true, "the only surviving copy is not silently discarded");
+  assert.equal(lstatSync(path).isSymbolicLink(), true, "the dangling symlink itself is left untouched");
+});
+
 // --- Round 9, m1: a successful write's own retained-copy disclosure must be
 // a proven copy, not a bare existence check ----------------------------------
 
@@ -1116,6 +1184,17 @@ test("a successful write discloses the retained-copy path only when proven, not 
   assert.equal(result.status, "recovery-required");
   assert.ok(result.outcome !== undefined);
   assert.equal(result.outcome!.provenCopy, undefined, "the doubly-linked file is never accepted as a proven copy");
+  // Round 10, s3: `path` itself was already proven byte- and mode-correct by
+  // this same call's own `fileMatches` check, before the race above ever
+  // touched `displaced` — only the *retained copy's* provenance is what this
+  // branch cannot prove. `targetWritten` must say so: `false`, not `true`,
+  // so `hook.ts` never renders "bashrc holds unfinished write. do not trust
+  // it." over a write that is neither unfinished nor untrustworthy.
+  assert.equal(
+    result.outcome!.targetWritten,
+    false,
+    "the target's own write was already verified — this is not an unfinished-write claim (s3)",
+  );
 });
 
 test("a successful write discloses the exact proven copy in the ordinary, uncontested case (negative control for m1)", (t) => {
@@ -1130,6 +1209,71 @@ test("a successful write discloses the exact proven copy in the ordinary, uncont
   assert.equal(result.status, "written");
   assert.ok(result.recoveryPath !== undefined);
   assert.deepEqual(readFileSync(result.recoveryPath), original, "the disclosed path is the genuine retained copy");
+});
+
+test("restoreDisplaced's own success return discloses the copy proven before its commit, not a fresh check racing it (round 10, s4/D3)", (t) => {
+  const directory = temporaryDirectory(t);
+  const path = join(directory, "restore-disclosure-race.bin");
+  const original = Buffer.from("original fake-secret-original\n", "utf8");
+  writeFileSync(path, original);
+  const prior = snapshotBytes(path);
+
+  // Corrupt the freshly-displaced backup the instant it is created (same
+  // technique as the B3 test above), forcing restoreDisplaced's own
+  // in-process restore-from-displaced branch to run.
+  const originalRename = fs.renameSync;
+  fs.renameSync = ((from: fs.PathLike, to: fs.PathLike) => {
+    originalRename(from, to);
+    if (String(from) === path) writeFileSync(String(to), "corrupted\n", "utf8");
+  }) as typeof fs.renameSync;
+
+  // restoreDisplaced writes exactly one manifest of its own ("committed"),
+  // the third manifest.tmp write overall (prepared, displaced, committed).
+  // Delete `displaced` as that write lands — after every stability check
+  // this function performs on that name has already passed, so the deletion
+  // changes nothing about whether the restore itself succeeded; it only
+  // matters to a check re-run *after* this point. Round 9's m1 item 3
+  // (`recoveryPath: provenCopy`) captures that proof once, before this call's
+  // own commit could distort it (the exact self-reference reasoning the
+  // sibling comments in `file-transaction.ts` name repeatedly), and discloses
+  // that frozen value — never a bare existence check re-evaluated fresh at
+  // the return statement, which mutant D3 (revert to
+  // `firstExistingPath(displacedPath)`) reintroduces and this race exposes.
+  const originalOpen = fs.openSync;
+  let manifestWrites = 0;
+  let raced = false;
+  (fs as unknown as { openSync: typeof fs.openSync }).openSync = ((
+    ...args: Parameters<typeof fs.openSync>
+  ) => {
+    const [target, flags] = args;
+    if (!raced && typeof target === "string" && target.endsWith("manifest.tmp") && flags === "wx") {
+      manifestWrites += 1;
+      if (manifestWrites === 3) {
+        raced = true;
+        rmSync(join(dirname(target), "displaced"), { force: true });
+      }
+    }
+    return originalOpen(...args);
+  }) as typeof fs.openSync;
+  syncBuiltinESMExports();
+  t.after(() => {
+    fs.renameSync = originalRename;
+    fs.openSync = originalOpen;
+    syncBuiltinESMExports();
+  });
+
+  const result = atomicWriteBytesIfUnchanged(path, Buffer.from("replacement\n", "utf8"), prior);
+
+  assert.ok(raced, "the injected race actually fired");
+  assert.equal(result.status, "changed");
+  assert.ok(
+    result.recoveryPath !== undefined,
+    "the copy proven before this call's own commit is still disclosed, not re-derived from a now-stale existence check (s4/D3)",
+  );
+  assert.ok(
+    result.recoveryPath!.endsWith("displaced"),
+    "the disclosed path names the copy that was proven, by identity, not re-checked fresh",
+  );
 });
 
 // --- Round 9 coverage: C6 (the discard gate must not attempt a needless

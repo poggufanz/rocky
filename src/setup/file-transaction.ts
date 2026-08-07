@@ -782,12 +782,18 @@ function ambiguousOutcome(
  * that cannot be vouched for — is left in place and named, so the caller has
  * something concrete to inspect rather than a dead end with no remedy.
  *
- * This decision's own local (`targetIsLiveRegularFile`) is never written
- * into the returned `RecoveryOutcome.targetExists` field below (round 9,
- * R1): that field feeds a message, which must fail closed the opposite way
- * from this decision — see the field's own doc comment. Every return here
- * computes `pathExists(path)` fresh for the record instead, so a later edit
- * cannot silently reintroduce the conflation by reusing one local for both.
+ * This decision's own `isLiveRegularFile(path)` check is inlined into the
+ * condition below, not bound to a named local (round 10, S2): a local in
+ * function scope stayed readable at every return in this function, so
+ * nothing stopped a later edit from writing it into the returned
+ * `RecoveryOutcome.targetExists` field too — a field that feeds a message,
+ * which must fail closed the opposite way from this decision (see the
+ * field's own doc comment; round 9 introduced exactly such a local and
+ * claimed no boolean in scope meant both things, which mutants D12/D13
+ * disproved by re-merging it with no test failing). Every return here
+ * computes `pathExists(path)` fresh for the record instead, so the two
+ * predicates cannot be conflated even by reusing this file's own name for
+ * the check — there is nothing named to reuse.
  *
  * This single proof replaces two guards that used to apply this unevenly by
  * state label alone: unconditional for "prepared", conditional on
@@ -825,8 +831,7 @@ function resolveUndisplacedTransaction(
 ): FileTransactionRecoveryResult {
   const preparedArtifactPath = join(transactionDirectory, "prepared");
   const linkProbePath = join(transactionDirectory, "link-probe");
-  const targetIsLiveRegularFile = isLiveRegularFile(path);
-  if (!targetIsLiveRegularFile
+  if (!isLiveRegularFile(path)
     && (pathExists(preparedArtifactPath) || pathExists(linkProbePath))) {
     return {
       status: "manual",
@@ -1023,14 +1028,58 @@ export function recoverFileTransaction(
     }
 
     // A "published" manifest that reaches here was not proven by either
-    // branch above (e.g. `path` does not actually exist — every provable
-    // "published" shape guarantees it does, since `linkSync` always precedes
-    // the "published" manifest write). This is genuinely ambiguous, not the
-    // "write clearly already succeeded" case the two branches above resolve,
-    // so it stays manual rather than falling into the "prepared"/"displaced"
-    // restore-from-`displaced` logic below, which assumes a state machine
-    // "published" was never meant to re-enter.
+    // branch above (e.g. `prepared` is already gone, so `isManagedRecoveryPair`
+    // cannot pair it with `path` — the exact shape a crash or a single failed
+    // write leaves between `atomicWriteBytesIfUnchanged`'s own `prepared`
+    // unlink and its "committed" manifest write). round 10, S1: that shape is
+    // not ambiguous — `displaced` proven a singly-owned copy of the prior
+    // bytes, plus `path` itself proven a live regular file, is exactly
+    // `resolveUndisplacedTransaction`'s own accepted proof (see its doc
+    // comment) with a proven `displaced` on top, and committing changes
+    // nothing on disk: `displaced` is retained either way, only the manifest
+    // label advances. Before this fix, every such shape — including an
+    // ordinary `SIGKILL` or a single failed manifest write, with no adversary
+    // and no concurrency — was `manual` forever, on a target that was already
+    // byte-correct.
     if (manifest.state === "published") {
+      if (pathExists(displacedPath)
+        && isManagedRegularFile(displacedPath, path)
+        && isLiveRegularFile(path)) {
+        // Proven now, before this call's own commit can distort the same
+        // check (see the identical note on the two branches above and on
+        // `restoreDisplaced`): once this transaction becomes its own
+        // "committed" entry, recomputing this proof afterward would count
+        // that self-reference against `displaced` and wrongly report it as
+        // unproven.
+        const provenCopy = displacedPath;
+        try {
+          writeManifest(transactionDirectory, path, "committed", guard);
+        } catch {
+          return {
+            status: "manual",
+            recoveryPath: firstExistingPath(transactionDirectory),
+            outcome: ambiguousOutcome(transactionDirectory, path, displacedPath, false),
+          };
+        }
+        return {
+          status: "recovered",
+          recoveryPath: firstExistingPath(displacedPath),
+          outcome: {
+            transactionDirectory,
+            provenCopy,
+            targetExists: true,
+            targetWritten: false,
+            artifactRetainedUnproven: false,
+          },
+        };
+      }
+      // Genuinely ambiguous otherwise (e.g. `path` does not exist or is not a
+      // live regular file, or `displaced` cannot be proven a singly-owned
+      // copy — a same-user concurrent writer inside this 0700 directory is
+      // the only way to reach that second case), so this stays manual rather
+      // than falling into the "prepared"/"displaced" restore-from-`displaced`
+      // logic below, which assumes a state machine "published" was never
+      // meant to re-enter.
       return {
         status: "manual",
         recoveryPath: firstExistingPath(transactionDirectory),
@@ -1494,15 +1543,37 @@ export function atomicWriteBytesIfUnchanged(
     // `hookUninstall`) then spoke as fact. If the proof fails up front (only
     // reachable by a same-user concurrent writer inside this 0700 directory,
     // in the narrow window since `displaced` was last validated), this call
-    // does not commit at all — the transaction stays "published" and a later
-    // invocation resolves it fresh, exactly like every other unprovable
-    // shape in this module.
+    // does not commit at all — the transaction stays "published".
+    //
+    // Round 10, S1 correction: round 9's comment here (and its report's table
+    // row 33) claimed a later invocation "resolves it fresh, exactly like
+    // every other unprovable shape in this module". That was false for the
+    // ordinary case: before this round, `recoverFileTransaction`'s own
+    // "published" fallback returned `manual` unconditionally, with no
+    // re-examination of the evidence — a real `SIGKILL` right here, or a
+    // single failed manifest write one line below, left the transaction
+    // permanently stuck, forever, with no adversary involved. That fallback
+    // now re-proves `displaced` and `path` on every later invocation (see its
+    // own doc comment above) and *does* resolve fresh whenever `prepared`
+    // being gone is the only reason this proof failed. It genuinely cannot
+    // resolve the one case this proof itself also guards against: a
+    // concurrent writer that leaves an unaccounted extra link on `displaced`
+    // stays unprovable for as long as that link exists, on any later
+    // invocation, and correctly stays `manual` rather than guess.
     const provenCopy = provenCopyOf(recoveryPath, path);
     if (provenCopy === undefined) {
+      // round 10, s3: `targetWritten: false` here, not `destinationPublished`
+      // — this specific call's own write to `path` was already proven
+      // byte- and mode-correct by `fileMatches` a few lines above, before
+      // this proof of `displaced` even ran. `targetWritten: true` would tell
+      // `hook.ts` to render "bashrc holds unfinished write. do not trust
+      // it." over a write that is not unfinished and is trustworthy — only
+      // the retained copy's own provenance is what this branch could not
+      // prove, not `path` itself.
       return {
         status: "recovery-required",
         recoveryPath: firstExistingPath(transactionDirectory, path),
-        outcome: ambiguousOutcome(transactionDirectory, path, recoveryPath, destinationPublished),
+        outcome: ambiguousOutcome(transactionDirectory, path, recoveryPath, false),
       };
     }
     requireMutationGuard(guard);

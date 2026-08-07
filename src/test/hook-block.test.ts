@@ -665,7 +665,12 @@ test("hook install stops with guidance when a pending transaction is ambiguous",
   const sandbox = bashrcSandbox(t);
   const original = bytes("export IMPORTANT_USER_STATE=preserve-me\n");
   writeFileSync(sandbox.bashrc, original);
-  const fixture = writePendingTransactionFixture(sandbox.bashrc, "published", {
+  // State "prepared", not "published" (round 10, S1): a "published" manifest
+  // with a proven `displaced` and a live target is no longer ambiguous on
+  // its own — see the dedicated S1 test — so this fixture uses a shape S1's
+  // new commit path does not touch (no proven pairing between `path` and
+  // either artifact name) to keep exercising a genuinely ambiguous stop.
+  const fixture = writePendingTransactionFixture(sandbox.bashrc, "prepared", {
     displaced: original,
   });
 
@@ -681,7 +686,9 @@ test("hook uninstall stops with guidance when a pending transaction is ambiguous
   const sandbox = bashrcSandbox(t);
   const original = bytes(`export A=1\n\n${BLOCK}`);
   writeFileSync(sandbox.bashrc, original);
-  const fixture = writePendingTransactionFixture(sandbox.bashrc, "published", {
+  // State "prepared", not "published" — see the identical note on the
+  // install test above (round 10, S1).
+  const fixture = writePendingTransactionFixture(sandbox.bashrc, "prepared", {
     displaced: original,
   });
 
@@ -767,7 +774,9 @@ test("hook status reports the same ambiguous-transaction guidance install gives,
   const sandbox = bashrcSandbox(t);
   const original = bytes("export IMPORTANT_USER_STATE=preserve-me\n");
   writeFileSync(sandbox.bashrc, original);
-  const fixture = writePendingTransactionFixture(sandbox.bashrc, "published", {
+  // State "prepared", not "published" — see the identical note on the
+  // install test above (round 10, S1).
+  const fixture = writePendingTransactionFixture(sandbox.bashrc, "prepared", {
     displaced: original,
   });
 
@@ -915,44 +924,52 @@ test("hook install recovers instead of permanently bricking after a completed-bu
 });
 
 // --- Important 2: the recovery boundary must be complete, not arbitrary ----
+// --- Round 10, S1: a published transaction whose `prepared` unlink already
+// succeeded, but whose "committed" manifest write did not, is a permanent
+// brick unless a later invocation re-examines the evidence. -----------------
 
-/**
- * Fails the single-argument `rmSync(temporaryPath)` unlink of the
- * transaction's own `prepared` artifact — the step right after the
- * "published" manifest write lands. Matched narrowly (no options object,
- * basename "prepared") so it cannot fire on any other `rmSync` call.
- */
-function injectFailureOnPreparedUnlink(t: TestContext): void {
-  const originalRm = fs.rmSync;
-  let fired = false;
-  fs.rmSync = ((...args: Parameters<typeof fs.rmSync>) => {
-    const [target, options] = args;
-    if (!fired && typeof target === "string" && options === undefined && basename(target) === "prepared") {
-      fired = true;
-      throw new Error("injected unlink failure after publish");
-    }
-    return originalRm(...args);
-  }) as typeof fs.rmSync;
-  syncBuiltinESMExports();
-  t.after(() => {
-    fs.rmSync = originalRm;
-    syncBuiltinESMExports();
-  });
-}
-
-test("hook install recovers instead of permanently bricking after a published-but-uncommitted crash (Important 2, W2)", (t) => {
+test("hook install recovers instead of permanently bricking after a published-but-uncommitted crash (round 10, S1, PROBE W2)", (t) => {
   const sandbox = bashrcSandbox(t);
   const original = bytes("export A=1\n");
   writeFileSync(sandbox.bashrc, original);
-  injectFailureOnPreparedUnlink(t);
+  // Fails exactly the fourth manifest.tmp write (prepared, displaced,
+  // published, committed) — the "committed" one, which only runs AFTER the
+  // `prepared` unlink has already succeeded. This is the corrected fixture
+  // for this test's own name: the version this replaces
+  // (`injectFailureOnPreparedUnlink`) failed the *unlink itself*, so
+  // `prepared` survived and the pre-existing "complete-but-unrecorded"
+  // branch rescued it for a reason unrelated to the state this test names —
+  // the permanently-bricked shape the auditor calls S1 was never actually
+  // reached. `prepared` is genuinely gone below, proven by assertion, not
+  // merely assumed.
+  injectFailureBeforeNthManifestWrite(t, 4);
 
-  // The crash lands here: the manifest already says "published" (stronger
-  // evidence than the "displaced" window round 1 resolved), but round 1
-  // still returned "manual" forever for this exact shape.
+  // The crash lands here: `prepared` is genuinely unlinked, `displaced`
+  // holds the prior bytes, bashrc already holds the new, published bytes —
+  // but the manifest never advances past "published". Before round 10 (S1),
+  // `recoverFileTransaction`'s own "published" fallback returned "manual"
+  // unconditionally here, with no re-examination of the evidence: no
+  // adversary, no concurrency, just one failed write, and this shape stayed
+  // a permanent, unrecoverable stop forever — `hook install`, `uninstall`
+  // and `status` all exiting 1 on a `.bashrc` that was already byte-correct.
   assert.equal(hookInstall(), 1);
   assert.equal(inspectFileTransaction(sandbox.bashrc).status, "pending");
   assert.deepEqual(readFileSync(sandbox.bashrc), bytes(`export A=1\n\n${BLOCK}`), "already published");
+  const [transactionDirectory] = transactionDirectories(sandbox.home);
+  assert.ok(transactionDirectory !== undefined);
+  assert.equal(
+    existsSync(join(sandbox.home, transactionDirectory, "prepared")),
+    false,
+    "prepared is genuinely gone here — the shape this test's name describes, not a failed unlink",
+  );
+  assert.equal(
+    JSON.parse(readFileSync(join(sandbox.home, transactionDirectory, "manifest.json"), "utf8")).state,
+    "published",
+    "the manifest never advanced past published — the crash landed on the commit write itself",
+  );
 
+  // A later invocation (the injected fault only fires once) must recover
+  // and settle cleanly instead of reporting the same dead end forever.
   assert.equal(hookInstall(), 0, sandbox.stderr());
   assert.deepEqual(readFileSync(sandbox.bashrc), bytes(`export A=1\n\n${BLOCK}`));
   assert.equal(inspectFileTransaction(sandbox.bashrc).status, "clear");
@@ -1091,7 +1108,15 @@ test("hook status names the surviving copy without instructing its removal or re
 
   assert.equal(result, 1);
   const output = sandbox.stderr();
-  assert.ok(!output.includes("remove by hand"), "must never invite deleting the only surviving copy");
+  // Round 10, S2/D7: this is the one call site where the message-only
+  // `targetExists` predicate is actually observable — `path` genuinely does
+  // not exist here (unlike the R1/PROBE N1 symlink case above, where a name
+  // still resolves) and a copy is proven, so Rocky must say "bashrc gone".
+  // Before this assertion, that branch was spoken by this exact fixture but
+  // never pinned: mutant D7 (dropping `&& outcome.targetExists` from
+  // `hook.ts:172`, collapsing this branch into the "I keep safe copy"
+  // branch above it) survived because nothing here checked for the words.
+  assert.ok(output.includes("bashrc gone"), "bashrc truly does not exist — Rocky must say so (round 10, S2/D7)");
   assert.ok(
     output.includes(join(fixture, "displaced")),
     "the surviving copy's exact path is still named, so the user can find it",
@@ -1886,11 +1911,17 @@ test("hook status uses the freshest targetExists fact when merging settle outcom
   writeNamedPendingTransactionFixture(sandbox.bashrc, "1-recovered", "published", {});
   // The second transaction reaches an ambiguous stop with a proven displaced
   // backup. Its own targetExists must be computed against whatever bashrc
-  // looks like right now, at the second iteration.
+  // looks like right now, at the second iteration. State "prepared", not
+  // "published" (round 10, S1): a "published" manifest with a proven
+  // `displaced` and a live target is no longer ambiguous on its own — see
+  // the dedicated S1 test — so this fixture uses a state/shape S1's new
+  // commit path does not touch (no proven pairing between `path` and either
+  // artifact name) to keep exercising the genuinely-ambiguous stop this test
+  // is about.
   const second = writeNamedPendingTransactionFixture(
     sandbox.bashrc,
     "2-ambiguous",
-    "published",
+    "prepared",
     { displaced: bytes("export RESTORE_ME=please\n") },
   );
 
