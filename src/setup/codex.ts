@@ -41,6 +41,15 @@ const EFFECTIVE_ONLY_DEFAULTS: Readonly<Record<string, unknown>> = {
   disabled_tools: null,
   enabled: true,
   enabled_tools: null,
+  // Codex-cli 0.146.1's real app-server synthesizes this leaf on every
+  // mcp_servers.<name> effective view with no origin entry, same as the
+  // other keys here - "local" is what it defaults to for a command/args
+  // (stdio) server, which is the only shape Rocky ever writes. Confirmed
+  // against the live 0.146.1 app-server (gate 12 host acceptance finding);
+  // see docs/superpowers/sdd/2026-08-06-v021-final-hardening-handover/
+  // codex-provenance-investigation.md for the raw transcript. Any other
+  // value still fails closed - it is not this exact recognized default.
+  environment_id: "local",
   required: false,
   startup_timeout_sec: null,
   tool_timeout_sec: null,
@@ -604,7 +613,15 @@ export function createCodexAdapter(dependencies: CodexAdapterDependencies): Setu
             || verified.snapshot.version !== writtenVersion
             || !verified.snapshot.trusted
             || !isDeepStrictEqual(verified.snapshot.entry, desiredEntry)) {
-            return manualFallback("Codex registration update could not be verified", registration);
+            // Reached only once writeVersion() above has confirmed the CAS
+            // write advanced the on-disk version - a write is a fact here,
+            // not a possibility. Say so and name the exact file: telling
+            // the user to "use manual registration" without disclosing
+            // that is exactly the gate 12 finding this guards against.
+            return manualFallback(
+              `Codex wrote to ${configPath}, but the result could not be verified; check ${configPath} for mcp_servers.rocky`,
+              registration,
+            );
           }
           verifiedAbsentAdd = true;
           return { client: "codex", status: "configured" };
@@ -681,8 +698,13 @@ export function createCodexAdapter(dependencies: CodexAdapterDependencies): Setu
           || verified.snapshot.version !== writtenVersion
           || !verified.snapshot.trusted
           || !isDeepStrictEqual(verified.snapshot.entry, desiredEntry)) {
+          // Same disclosure requirement as the absent-add branch above: the
+          // CAS batch write already advanced the on-disk version by this
+          // point, so the message must say a write landed and name the
+          // file, not just point at the recovery backup as if the file
+          // were still in its prior state.
           return recoveryFailure(
-            "Codex registration update could not be verified",
+            `Codex wrote to ${configPath}, but the replacement could not be verified; check ${configPath} for mcp_servers.rocky`,
             recovery,
             registration,
           );
@@ -782,8 +804,15 @@ export function createCodexAdapter(dependencies: CodexAdapterDependencies): Setu
         if (!verified.ok
           || verified.snapshot.kind !== "absent"
           || verified.snapshot.version !== writtenVersion) {
+          // Real codex-cli 0.146.1 was observed hitting exactly this branch
+          // on a genuinely successful removal (see
+          // docs/superpowers/sdd/2026-08-06-v021-final-hardening-handover/
+          // codex-provenance-investigation.md): the null/replace write had
+          // already advanced the on-disk version by this point. Say the
+          // entry was removed and name the file, not just point at the
+          // backup as though the file were untouched.
           return recoveryFailure(
-            "Codex registration removal could not be verified",
+            `Codex removed the rocky entry from ${configPath}, but the removal could not be verified; check ${configPath} for mcp_servers.rocky`,
             recovery,
             registration,
           );

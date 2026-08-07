@@ -920,6 +920,15 @@ test("only explicit benign effective defaults may be absent from the raw base la
     { name: "known defaults", effective: { ...base, enabled: true, required: false }, expected: "identical" },
     { name: "disabled", effective: { ...base, enabled: false }, expected: "conflict" },
     { name: "required", effective: { ...base, required: true }, expected: "conflict" },
+    // Pinned from a real codex-cli 0.146.1 app-server post-write config/read
+    // (gate 12 host acceptance, disposable CODEX_HOME): the effective view for
+    // any mcp_servers.<name> entry always carries a synthesized, origin-less
+    // `environment_id` leaf defaulting to "local" for a command/args (stdio)
+    // server, exactly like the already-recognized `enabled`/`tool_timeout_sec`
+    // defaults. Only that exact default value is benign; any other value must
+    // still fail closed (no origin exists for it, so it cannot be verified).
+    { name: "environment_id local default", effective: { ...base, environment_id: "local" }, expected: "identical" },
+    { name: "environment_id non-default value", effective: { ...base, environment_id: "remote" }, expected: "conflict" },
   ] as const;
 
   for (const entry of cases) {
@@ -1033,6 +1042,62 @@ test("absent registration is added with expectedVersion CAS and exact post-state
   assert.equal(session.closeCount, 1);
 });
 
+// Regression pinned from an actual real codex-cli 0.146.1 app-server session
+// (gate 12 host acceptance finding, disposable CODEX_HOME under /tmp; see
+// docs/superpowers/sdd/2026-08-06-v021-final-hardening-handover/
+// codex-provenance-investigation.md for the full raw transcript). Against the
+// real binary, Rocky's post-write verification `config/read` came back with
+// this exact shape: the effective `mcp_servers.rocky` entry carried three
+// keys beyond command/args/env - `environment_id: "local"`, `enabled: true`,
+// `tool_timeout_sec: null` - and `origins` had no leaf for `environment_id`
+// (only for command/args.0/args.1/env.*), because it is a synthesized
+// effective-only default, not a user-authored value. Before this fix,
+// `effectiveEntryAgreesWithBase`/`everyMemberHasOrigin` treated the
+// unrecognized `environment_id` leaf as an unexplained member and refused
+// with "Codex registration update could not be verified" even though the
+// write had landed and every real leaf traced to the base user layer. This
+// test reproduces that exact real response shape as a fixture and asserts
+// `configure()` completes as "configured", not a manual-fallback failure.
+test("real 0.146.1 app-server effective view (environment_id/enabled/tool_timeout_sec synthesized defaults) verifies as configured", async () => {
+  const desiredEntry = entryFor(registration);
+  const postWriteRaw = {
+    config: {
+      mcp_servers: {
+        rocky: {
+          ...desiredEntry,
+          environment_id: "local",
+          enabled: true,
+          tool_timeout_sec: null,
+        },
+      },
+    },
+    origins: {
+      "mcp_servers.rocky.command": origin(baseSource(), "sha256:two"),
+      "mcp_servers.rocky.args.0": origin(baseSource(), "sha256:two"),
+      "mcp_servers.rocky.args.1": origin(baseSource(), "sha256:two"),
+      "mcp_servers.rocky.env.ROCKY_MCP_EXPOSURE": origin(baseSource(), "sha256:two"),
+      "mcp_servers.rocky.env.ROCKY_HOME": origin(baseSource(), "sha256:two"),
+    },
+    layers: [
+      { name: baseSource(), version: "sha256:two", config: { mcp_servers: { rocky: desiredEntry } } },
+      { name: { type: "system", file: "/etc/codex/config.toml" }, version: "sha256:two", config: {} },
+    ],
+  };
+  const session = new FakeAppServerSession(codexHome, [
+    readResult(undefined),
+    writeResult("sha256:two"),
+    postWriteRaw,
+  ]);
+  const adapter = adapterWith(
+    new VersionRunner([versionResult()]),
+    new FakeAppServerSessionFactory([session]),
+  );
+
+  const configured = await adapter.configure(registration, false);
+
+  assert.deepEqual(configured, { client: "codex", status: "configured" });
+});
+
 test("session shutdown failure after a verified absent-add still reports configured, not capability-unavailable", async () => {
   const session = new FakeAppServerSession(
     codexHome,
@@ -1118,6 +1183,18 @@ test("absent-add post-state verification requires the exact desired entry bytes,
   assert.equal(configured.status, "failed");
   assert.match(configured.detail ?? "", /could not be verified/i);
   assert.deepEqual(configured.manualRegistration, registration);
+  // Gate 12 host acceptance found Rocky's CAS write landing on disk while the
+  // reported failure told the user to register manually, without ever
+  // disclosing the file had already changed. This point is reached only
+  // after writeVersion() has confirmed the write advanced the on-disk
+  // version - a write is a fact here, not a possibility - so the message
+  // must say so and name the exact file, not just suggest a manual fallback
+  // as if nothing happened.
+  assert.match(configured.detail ?? "", /\bwrote\b/i);
+  assert.ok(
+    (configured.detail ?? "").includes(configPath),
+    "detail must name the exact config file Rocky already wrote to",
+  );
 });
 
 test("concurrent appearance causes CAS conflict and leaves foreign entry untouched", async () => {
@@ -1328,6 +1405,16 @@ test("replacement post-state mismatch is failure with retained recovery authorit
   assert.equal(configured.status, "failed");
   assert.match(configured.detail ?? "", /verif/i);
   assert.deepEqual(JSON.parse(readFileSync(recoveryPath(configured.detail), "utf8")), prior);
+  // Same disclosure requirement as the absent-add case above: the CAS
+  // batch write already advanced the on-disk version by the time this
+  // branch is reached, so the message must say a write landed and name
+  // the file, not just point at the recovery backup as if the file were
+  // still in its prior state.
+  assert.match(configured.detail ?? "", /\bwrote\b/i);
+  assert.ok(
+    (configured.detail ?? "").includes(configPath),
+    "detail must name the exact config file Rocky already wrote to",
+  );
 });
 
 test("replacement verification is bound to the exact advanced write version", async (t) => {
@@ -1565,6 +1652,19 @@ test("remove post-state mismatch is failure with retained recovery authority", a
   assert.equal(removed.status, "failed");
   assert.match(removed.detail ?? "", /verif/i);
   assert.deepEqual(JSON.parse(readFileSync(recoveryPath(removed.detail), "utf8")), prior);
+  // Same disclosure requirement: reached only after writeVersion() confirms
+  // the null/replace removal write advanced the on-disk version (a real
+  // codex-cli 0.146.1 host was observed hitting exactly this branch on a
+  // genuinely successful removal - see
+  // docs/superpowers/sdd/2026-08-06-v021-final-hardening-handover/
+  // codex-provenance-investigation.md). The message must say the entry was
+  // removed and name the file, not just point at the backup as though
+  // nothing had changed yet.
+  assert.match(removed.detail ?? "", /\bremoved\b/i);
+  assert.ok(
+    (removed.detail ?? "").includes(configPath),
+    "detail must name the exact config file Rocky already removed the entry from",
+  );
 });
 
 test("removal verification is bound to the exact advanced write version", async (t) => {
