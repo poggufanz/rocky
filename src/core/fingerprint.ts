@@ -82,3 +82,13 @@ export function similarity(a: Set<string>, b: Set<string>): number {
   for (const t of a) if (b.has(t)) inter++;
   return inter / (a.size + b.size - inter);
 }
+
+/**
+ * Shallow fingerprint for failures heard through the shell hook, where no
+ * stderr is available: normalized command line + exit code. The "cmd:" prefix
+ * keeps this hash space disjoint from stderr fingerprints.
+ */
+export function commandFingerprint(cmd: string, exitCode: number): string {
+  const sig = `cmd:${normalizeLine(cmd)}:${exitCode}`;
+  return createHash("sha1").update(sig).digest("hex").slice(0, 16);
+}

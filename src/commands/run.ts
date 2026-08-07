@@ -11,13 +11,11 @@
 import { spawn } from "node:child_process";
 import { fingerprint } from "../core/fingerprint.js";
 import {
-  findByFingerprint,
-  getFix,
   loadMemory,
-  recentUnresolvedFailures,
   recordFailure,
   recordFix,
 } from "../core/memory.js";
+import { findByFingerprint, getFix, recentUnresolvedFailures } from "../core/memory-query.js";
 import { ago, detail, say } from "../ui/rocky.js";
 
 interface RunResult {
@@ -87,7 +85,7 @@ function onFailure(cmd: string, result: RunResult): void {
 
 function onSuccess(cmd: string): void {
   const memory = loadMemory();
-  const unresolved = recentUnresolvedFailures(memory, cmd);
+  const unresolved = recentUnresolvedFailures(memory, cmd, { cwd: process.cwd() });
   if (unresolved.length > 0) {
     recordFix(cmd, unresolved);
     say("command works now. you fix it. I remember the fix. good good good.");
