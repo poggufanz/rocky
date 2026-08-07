@@ -98,6 +98,11 @@ function assertSuccess(result, label) {
   assert.equal(result.signal, null, `${label} received signal: ${diagnostics(result)}`);
 }
 
+function assertStatus(result, expectedStatus, label) {
+  assert.equal(result.status, expectedStatus, `${label}: ${diagnostics(result)}`);
+  assert.equal(result.signal, null, `${label} received signal: ${diagnostics(result)}`);
+}
+
 function parseSinglePackResult(stdout) {
   const parsed = JSON.parse(stdout);
   assert.ok(Array.isArray(parsed), "npm pack JSON must be an array");
@@ -562,12 +567,36 @@ async function main() {
   assert.deepEqual(legacyResponses[1].result, {});
 
   assert.equal(shouldRunInstalledSetup(process.platform), true);
+
+  // The fake clients only implement the pre-Task-3/4 name-only `mcp add` /
+  // `mcp remove` contract. The reviewed adapters (src/setup/codex.ts,
+  // src/setup/claude-code.ts) require Codex app-server CAS provenance and
+  // Claude Code's policy-equivalent staged automation respectively, neither
+  // of which these fakes can satisfy, so both correctly refuse to mutate
+  // and fall back to manual guidance instead of touching state — exactly
+  // README.md:56-64, and independently reproduced against fresh fake hosts
+  // by evidence-packet-b64587b.md Gate 10 (cases A6/A7/A8/A9/A10). Voice
+  // skill installation does not depend on MCP host capability, so it still
+  // succeeds against the same fake clients (they are "detected" via
+  // `--version`-shaped resolution, just not capability-complete).
   const configured = childResult(
     process.execPath,
     [installedEntry, "setup", "--yes", "--voice-skill"],
     { env },
   );
-  assertSuccess(configured, "fake-client setup configure");
+  assertStatus(configured, 1, "fake-client setup configure");
+  assert.match(configured.stderr, /codex: failed/);
+  assert.match(
+    configured.stderr,
+    /Codex app-server provenance and CAS capability is unavailable; use manual registration/,
+  );
+  assert.match(configured.stderr, /codex manual argv: \[/);
+  assert.match(configured.stderr, /claude-code: failed/);
+  assert.match(
+    configured.stderr,
+    /Claude Code policy-equivalent automation is unavailable; use manual registration/,
+  );
+  assert.match(configured.stderr, /claude-code manual argv: \[/);
   assert.match(configured.stderr, /voice-skill codex: installed/);
   assert.match(configured.stderr, /voice-skill claude-code: installed/);
   for (const markerPath of [
@@ -577,25 +606,67 @@ async function main() {
     assert.equal(JSON.parse(readFileSync(markerPath, "utf8")).packageName, PACKAGE_NAME);
   }
 
+  // `--check` never got a session either: Codex reads always need a
+  // capability-proven app-server session, so it reports the same capability
+  // failure. Claude Code's read is a direct JSON read of the (still empty,
+  // since configure never wrote anything) effective config, so it correctly
+  // reports `not-configured` rather than failing. Aggregate exit is 1
+  // because nothing reached `healthy` (src/commands/setup.ts exitCode
+  // "check" branch). Voice-skill state is unaffected by any of this.
   const checked = assertStateUnchanged(rockyHome, "fake-client setup check MCP", () => childResult(
     process.execPath,
     [installedEntry, "setup", "--check", "--voice-skill"],
     { env, timeout: 30_000 },
   ));
-  assertSuccess(checked, "fake-client setup check");
+  assertStatus(checked, 1, "fake-client setup check");
+  assert.match(checked.stderr, /codex: failed/);
+  assert.match(
+    checked.stderr,
+    /Codex app-server provenance and CAS capability is unavailable; use manual registration/,
+  );
+  assert.match(checked.stderr, /claude-code: not-configured/);
   assert.match(checked.stderr, /voice-skill codex: unchanged/);
   assert.match(checked.stderr, /voice-skill claude-code: unchanged/);
 
+  // Same shape for `--remove`: Codex still can't prove capability so it
+  // fails; Claude Code correctly reports `not-configured` since it was
+  // never actually written. Voice-skill removal is independent and moves
+  // the managed skill to a backup, exactly as it did during `configure`.
   const removed = childResult(
     process.execPath,
     [installedEntry, "setup", "--remove", "--yes", "--voice-skill"],
     { env },
   );
-  assertSuccess(removed, "fake-client setup remove");
+  assertStatus(removed, 1, "fake-client setup remove");
+  assert.match(removed.stderr, /codex: failed/);
+  assert.match(
+    removed.stderr,
+    /Codex app-server provenance and CAS capability is unavailable; use manual registration/,
+  );
+  assert.match(removed.stderr, /claude-code: not-configured/);
   assert.match(removed.stderr, /voice-skill codex: removed/);
   assert.match(removed.stderr, /voice-skill claude-code: removed/);
   assert.equal(existsSync(join(isolatedHome, ".agents", "skills", "rocky-voice")), false);
   assert.equal(existsSync(join(claudeConfig, "skills", "rocky-voice")), false);
+
+  // Zero-eligible-host shape (README.md:64): with neither fake client
+  // reachable on PATH, Rocky must not invent a per-host voice-skill result;
+  // it prints the exact `voice-skill: unavailable` literal and exits 1.
+  // This is the one manual-required literal Gate 10 pins (cases A3/A4/A5)
+  // that the fake-client flow above never exercises, since both fakes are
+  // always "detected" there.
+  const noHostsEnv = { ...env, PATH: dirname(process.execPath), Path: dirname(process.execPath) };
+  const noHosts = assertStateUnchanged(
+    rockyHome,
+    "fake-client setup with no detected hosts",
+    () => childResult(
+      process.execPath,
+      [installedEntry, "setup", "--yes", "--voice-skill"],
+      { env: noHostsEnv },
+    ),
+  );
+  assertStatus(noHosts, 1, "fake-client setup with no detected hosts");
+  assert.match(noHosts.stderr, /voice-skill: unavailable/);
 
   process.stdout.write([
     "package smoke passed",
