@@ -3012,6 +3012,26 @@ test("next invocation recovers a published crash target whose displaced backup a
   assert.deepEqual(readFileSync(path), currentBytes, "the target's own bytes are never touched by settling");
   assert.deepEqual(readFileSync(join(transaction, "displaced")), displacedBytes, "the retained copy survives untouched");
   assert.deepEqual(backupPaths(path), []);
+  // Round 11, t4: the sibling test three lines up ("...both names on the
+  // same inode") asserts the manifest actually advanced; this test never
+  // did, even though the manifest label is the entire mechanism S1 adds.
+  assert.equal(
+    JSON.parse(readFileSync(join(transaction, "manifest.json"), "utf8")).state,
+    "committed",
+    "the commit is what un-bricks this surface — the manifest must actually advance (round 11, t4)",
+  );
+
+  // Round 11, t4: S1's whole point on this route is that the surface is no
+  // longer permanently stuck. Nothing here previously called `configure()`
+  // a second time to prove it — the hook-route twin already does (asserting
+  // `hookInstall()` returns 0 on the second call); this is that same proof
+  // on the adapter route.
+  const retried = await adapter.configure(registration, false);
+  assert.equal(retried.status, "configured", "the surface is no longer permanently stuck (round 11, t4)");
+  assert.equal(
+    (JSON.parse(readFileSync(path, "utf8")).mcpServers as Record<string, unknown>).rocky !== undefined,
+    true,
+  );
 });
 
 test("registration transform is used for storage, inspection, and removal", async (t) => {

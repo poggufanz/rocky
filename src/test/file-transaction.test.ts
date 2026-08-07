@@ -310,6 +310,180 @@ test("recovery still reports a published transaction as manual when the target i
   assert.equal(existsSync(join(publishedDirectory, "displaced")), true, "the only surviving copy is retained");
 });
 
+// --- Round 11, T1: round 10 wrote the published-commit branch above but
+// wrote zero mutants against it. These five pin the nine survivors the
+// final audit found (branch-final-audit-commit-path.md); E1 is a genuine
+// equivalent (isManagedRegularFile implies pathExists on its whole domain)
+// and E11 is a genuine equivalent re-derived in the round 11 report
+// (targetExists from a "recovered" outcome is provably never read by any
+// consumer — hook.ts's mergeOutcome always overwrites it with the next
+// iteration's own value before a message can ever see it).
+
+test("the published-commit branch's own final write still honors a guard change (round 11, T1/E7)", (t) => {
+  const directory = temporaryDirectory(t);
+  const path = join(directory, "commit-guard-published.bin");
+  writeFileSync(path, "live\n", "utf8");
+  const transactionDirectory = writeLegacyV1TransactionFixture(directory, path, "published", {
+    displaced: Buffer.from("original\n", "utf8"),
+  });
+
+  // Nothing above this branch's own commit calls the guard at all (unlike
+  // `resolveUndisplacedTransaction`'s C10 test, where two of this
+  // function's own checks precede its commit) — this branch's proof is
+  // purely topological, so the very first `unchanged()` call happens inside
+  // this call's own `writeManifest`. A guard reporting change on that first
+  // call must still abort the commit — exactly the property C10 pins at the
+  // sibling site, which this branch duplicated without duplicating the test.
+  const guard = { unchanged: () => false };
+
+  const recovery = recoverFileTransaction(path, guard);
+
+  assert.equal(recovery.status, "manual", "a guard change reported during the commit's own write must abort it (E7)");
+  assert.equal(
+    JSON.parse(readFileSync(join(transactionDirectory, "manifest.json"), "utf8")).state,
+    "published",
+    "the manifest must not advance to committed once the guard reports change",
+  );
+});
+
+test("the published-commit branch stays manual, not silently recovered, when its own manifest write fails (round 11, T1/E9)", (t) => {
+  const directory = temporaryDirectory(t);
+  const path = join(directory, "commit-fault-published.bin");
+  writeFileSync(path, "live\n", "utf8");
+  const transactionDirectory = writeLegacyV1TransactionFixture(directory, path, "published", {
+    displaced: Buffer.from("original\n", "utf8"),
+  });
+
+  // This fixture bypasses `writeManifest` entirely, so the commit this
+  // branch attempts is the only "manifest.tmp" open the whole test
+  // performs — failing the first one deterministically fails exactly this
+  // call's own commit, with no guard, no crash, no concurrency involved.
+  injectFailureBeforeNthManifestWrite(t, 1);
+
+  const recovery = recoverFileTransaction(path);
+
+  assert.equal(
+    recovery.status,
+    "manual",
+    "a failed commit write must never be reported as recovered — nothing on disk actually advanced (E9)",
+  );
+  assert.equal(
+    JSON.parse(readFileSync(join(transactionDirectory, "manifest.json"), "utf8")).state,
+    "published",
+    "the manifest stays published; a fail-open here would leave settleBashrcTransactions spinning forever on this same directory (E9, consequence class: E6)",
+  );
+});
+
+test("the published-commit branch's own recovered outcome proves the retained copy before the commit and never claims an unfinished write (round 11, T1/E10,E8)", (t) => {
+  const directory = temporaryDirectory(t);
+  const path = join(directory, "commit-outcome-published.bin");
+  writeFileSync(path, "live\n", "utf8");
+  const original = Buffer.from("original\n", "utf8");
+  const transactionDirectory = writeLegacyV1TransactionFixture(directory, path, "published", {
+    displaced: original,
+  });
+  const displacedPath = join(transactionDirectory, "displaced");
+
+  const recovery = recoverFileTransaction(path);
+
+  assert.equal(recovery.status, "recovered");
+  assert.ok(recovery.outcome !== undefined);
+  // E10: flipping this to `true` makes `hook.ts:259` say "bashrc gone. I
+  // already put old bytes back from safe copy." over a `.bashrc` this call
+  // never touched and that never went missing.
+  assert.equal(
+    recovery.outcome!.targetWritten,
+    false,
+    "this branch never writes path — settling on a manifest label alone must never claim a restore (E10)",
+  );
+  // E8: capturing `provenCopy` AFTER the commit re-derives the proof
+  // against this transaction's own now-"committed" manifest, which counts
+  // the directory against itself and reports the one surviving copy as
+  // unproven — the exact self-reference trap the branch's own comment
+  // names.
+  assert.equal(
+    recovery.outcome!.provenCopy,
+    displacedPath,
+    "the retained copy must stay disclosed after the commit, not swallowed by the self-reference trap (E8)",
+  );
+});
+
+test("recovery still reports a published transaction as manual when the target is a dangling symlink (round 11, T1/E4)", (t) => {
+  const directory = temporaryDirectory(t);
+  const path = join(directory, "dangling-target-published.bin");
+  const original = Buffer.from("original\n", "utf8");
+  const transactionDirectory = writeLegacyV1TransactionFixture(directory, path, "published", {
+    displaced: original,
+  });
+  symlinkSync(join(directory, "never-existed"), path);
+
+  // `pathExists` and `isLiveRegularFile` disagree here: a dangling symlink
+  // resolves to *something* (`lstatSync` succeeds) but is not itself a
+  // regular file. S2 eliminated this exact conflation at the sibling
+  // `resolveUndisplacedTransaction` site by construction (round 10); this
+  // branch performs the identical check inline and can re-merge the same
+  // way with no compile error to catch it.
+  const recovery = recoverFileTransaction(path);
+
+  assert.equal(recovery.status, "manual", "a dangling symlink target must never be treated as live (E4)");
+  assert.equal(recovery.recoveryPath, transactionDirectory);
+  assert.equal(lstatSync(path).isSymbolicLink(), true, "the symlink itself is untouched");
+  assert.equal(existsSync(join(transactionDirectory, "displaced")), true, "the only surviving copy is retained");
+});
+
+test("the published-commit branch retains a leftover prepared artifact instead of discarding it (round 11, T1/E13)", (t) => {
+  const directory = temporaryDirectory(t);
+  const path = join(directory, "leftover-artifact-published.bin");
+  writeFileSync(path, "live\n", "utf8");
+  const transactionDirectory = writeLegacyV1TransactionFixture(directory, path, "published", {
+    displaced: Buffer.from("original\n", "utf8"),
+    // An unpaired `prepared` left behind by an earlier, unrelated crash —
+    // not linked to `path`, so `isManagedRecoveryPair` never routes this
+    // fixture through the complete-but-unrecorded branch above it; it
+    // still reaches this branch's own commit.
+    prepared: Buffer.from("stray, never linked to path\n", "utf8"),
+  });
+
+  const recovery = recoverFileTransaction(path);
+
+  assert.equal(recovery.status, "recovered");
+  assert.equal(
+    existsSync(join(transactionDirectory, "prepared")),
+    true,
+    "this branch commits on topology alone and must not silently discard an artifact it never proved safe to discard (E13)",
+  );
+});
+
+test("the published-commit branch's displaced proof accounts for a committed sibling sharing displaced's inode (round 11, T1/E5)", (t) => {
+  const directory = temporaryDirectory(t);
+  const path = join(directory, "sibling-link-published.bin");
+  writeFileSync(path, "live\n", "utf8");
+
+  const committedDirectory = writeNamedTransactionFixture(
+    directory, path, "1-committed", "committed", Buffer.from("original\n", "utf8"),
+  );
+  const publishedDirectory = writeNamedTransactionFixture(directory, path, "2-published", "published");
+  // A second hard link to the exact same inode as the committed sibling's
+  // own `displaced` — `isManagedRegularFile`'s link accounting must count
+  // that committed sibling's own copy against `path` (the transaction
+  // target), not against `displaced` itself, or this genuinely safe,
+  // already-accounted-for two-name shape looks like an unaccounted extra
+  // link and the branch wrongly refuses to commit.
+  linkSync(join(committedDirectory, "displaced"), join(publishedDirectory, "displaced"));
+
+  const recovery = recoverFileTransaction(path);
+
+  assert.equal(
+    recovery.status,
+    "recovered",
+    "a displaced backup shared with a committed sibling is still a proven, singly-owned copy of path (E5)",
+  );
+  assert.equal(
+    JSON.parse(readFileSync(join(publishedDirectory, "manifest.json"), "utf8")).state,
+    "committed",
+  );
+});
+
 test("an unreadable manifest is pending for inspection and manual for recovery", (t) => {
   const directory = temporaryDirectory(t);
   const path = join(directory, "corrupt.bin");
