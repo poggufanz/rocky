@@ -10,6 +10,7 @@ import fs, {
   mkdtempSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   renameSync,
   rmSync,
   statSync,
@@ -18,7 +19,7 @@ import fs, {
 } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
-import { dirname, join, posix, win32 } from "node:path";
+import nodePath, { posix, win32 } from "node:path";
 import type { McpRegistration } from "../setup/clients.js";
 import {
   createClaudeCodeAdapter,
@@ -29,6 +30,17 @@ import {
 import { directorySyncCapability } from "../setup/directory-sync.js";
 import { atomicWriteBytesIfUnchanged } from "../setup/file-transaction.js";
 import type { ProcessResult, ProcessRunOptions, ProcessRunner } from "../setup/process.js";
+
+// This whole file exercises the claude-code adapter with platform:"linux"
+// (forced posix pathApi, see adapterDependencies below) on every CI host, so
+// every fixture path built here - not just the ones the adapter reads - has to
+// be posix-shaped. Aliasing the bare dirname/join to posix's versions makes
+// that automatic for the ~150 call sites below instead of auditing each one;
+// on POSIX hosts path.join/path.dirname already *are* path.posix.join/dirname
+// (same function reference), so this is a verified no-op there. The one spot
+// that legitimately needs the real host-native join (building the fixture
+// root under process.cwd()) uses the `nodePath` default import instead.
+const { dirname, join } = posix;
 
 const registration: McpRegistration = {
   name: "rocky",
@@ -97,11 +109,31 @@ function result(status: number | null, stdout = "", stderr = "", error?: Error):
   return output;
 }
 
+// This adapter is always exercised here with platform:"linux" (forcing the
+// injected posix pathApi, see adapterDependencies below), so its fixture root
+// must actually be a posix-shaped path, not just a real directory. Two host
+// quirks break that if left unhandled:
+//  - macOS resolves os.tmpdir() under a symlinked ancestor (/var -> /private/var).
+//    The adapter's topology guard deliberately refuses a config path with a
+//    symlinked ancestor (that refusal is the product working correctly - see
+//    docs/superpowers/specs/2026-08-04-v021-distribution-bridge-design.md), so
+//    the fixture must resolve to the real, symlink-free path.
+//  - win32 mkdtemp/cwd paths are backslash-separated and drive-lettered, which
+//    the posix pathApi cannot parse as absolute at all. Building the fixture
+//    under process.cwd() (not os.tmpdir(), which may sit on a different drive)
+//    and stripping the drive lets a leading "/" be reinterpreted by Windows as
+//    drive-relative to the current drive, so it still resolves to the same
+//    real directory while satisfying posix.isAbsolute(). This mirrors the
+//    posixFilesystemRoot helper already used for the same reason in
+//    setup-wsl.test.ts.
 function temporaryDirectory(t: test.TestContext, prefix = "rocky-claude-staged-"): string {
-  const path = mkdtempSync(join(tmpdir(), prefix));
+  const path = mkdtempSync(nodePath.join(process.cwd(), prefix));
   chmodSync(path, 0o700);
   t.after(() => rmSync(path, { recursive: true, force: true }));
-  return path;
+  const real = realpathSync(path);
+  if (process.platform !== "win32") return real;
+  const drive = win32.parse(real).root;
+  return `/${real.slice(drive.length).replaceAll("\\", "/")}`;
 }
 
 function fixture(t: test.TestContext, value?: Record<string, unknown>): {

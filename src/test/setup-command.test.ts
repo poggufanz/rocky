@@ -1,8 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, posix, win32 } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import type {
@@ -897,17 +897,32 @@ test("manual registrations render as host-appropriate desired argv or config", a
   assert.match(output.stderr, new RegExp(rockyHome.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
 });
 
+// This test forces platform:"linux" below (posix path semantics), so its real
+// fixture directories must be handed to the adapter as posix-shaped strings -
+// see the fuller explanation on temporaryDirectory() in setup-claude-code.test.ts
+// for why raw os.tmpdir()/mkdtemp output (symlinked ancestors on macOS,
+// backslash+drive paths on win32) can't be used as-is.
+function posixFixtureRoot(t: test.TestContext, prefix: string): string {
+  const path = mkdtempSync(join(process.cwd(), prefix));
+  t.after(() => rmSync(path, { recursive: true, force: true }));
+  const real = realpathSync(path);
+  if (process.platform !== "win32") return real;
+  const drive = win32.parse(real).root;
+  return `/${real.slice(drive.length).replaceAll("\\", "/")}`;
+}
+
 test("production adapter wiring passes the captured setup environment to Claude path resolution", async (t) => {
-  const root = mkdtempSync(join(tmpdir(), "rocky-setup-claude-env-"));
-  t.after(() => rmSync(root, { recursive: true, force: true }));
-  const home = join(root, "home");
-  const override = join(root, "override");
+  const root = posixFixtureRoot(t, "rocky-setup-claude-env-");
+  // root is posix-shaped (see posixFixtureRoot above) - stay on posix.join here,
+  // not the ambient join, or win32 would reintroduce backslashes into it.
+  const home = posix.join(root, "home");
+  const override = posix.join(root, "override");
   mkdirSync(home, { recursive: true });
   mkdirSync(override, { recursive: true });
-  writeFileSync(join(home, ".claude.json"), JSON.stringify({
+  writeFileSync(posix.join(home, ".claude.json"), JSON.stringify({
     mcpServers: { rocky: { type: "stdio", command: "/foreign", args: [], env: {} } },
   }));
-  writeFileSync(join(override, ".claude.json"), JSON.stringify({
+  writeFileSync(posix.join(override, ".claude.json"), JSON.stringify({
     mcpServers: { rocky: {
       type: "stdio",
       command: nodePath,

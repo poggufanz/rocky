@@ -9,7 +9,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, relative } from "node:path";
+import { dirname, join, resolve, sep } from "node:path";
 import {
   AppServerRequestError,
   createAppServerSessionFactory,
@@ -175,8 +175,15 @@ const registration: McpRegistration = {
   },
 };
 
-const codexHome = "/home/ada/.codex";
-const configPath = `${codexHome}/config.toml`;
+// codex.ts always joins/resolves paths with the ambient node:path module (it has
+// no injectable pathApi like claude-code.ts does), so these fixture constants must
+// carry the host's own separator convention. On POSIX, resolve(sep, ...) is a
+// no-op and reproduces the previous literal exactly. On win32 it produces a
+// backslash path, matching what resolveCodexHome()/join() compute internally -
+// otherwise withSession()'s exact `session.codexHome !== codexHome` check and
+// isBaseUserSource()'s exact `value.file === configPath` check spuriously fail.
+const codexHome = resolve(sep, "home", "ada", ".codex");
+const configPath = join(codexHome, "config.toml");
 
 function versionResult(version = "0.146.1"): ProcessResult {
   return { status: 0, stdout: `codex-cli ${version}\n`, stderr: "" };
@@ -959,7 +966,13 @@ test("check rejects owned core registrations carrying disabled, execution, polic
 
 test("official config paths and versions must be absolute, exact, and nonempty", async (t) => {
   const aliasedPath = `${codexHome}/../.codex/config.toml`;
-  const relativePath = relative(process.cwd(), configPath);
+  // Deliberately relative (no leading separator, no drive letter) on every
+  // platform: relative(process.cwd(), configPath) is unreliable here because on
+  // win32 a driveless configPath and a drive-lettered process.cwd() are treated
+  // as different roots, so relative() hands back configPath unchanged - which
+  // would make this "must be relative" case accidentally absolute and exact,
+  // defeating the assertion below.
+  const relativePath = configPath.replace(/^[/\\]+/, "");
   const responseWithLayerPath = (path: string): Record<string, unknown> => {
     const response = readResult(entryFor(registration));
     (response.layers as Array<Record<string, unknown>>)[0]!.name = baseSource(path);
