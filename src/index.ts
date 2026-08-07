@@ -7,6 +7,7 @@
  *   rocky recall [--ai] <query> search Rocky's memory of past errors
  *   rocky hook|mcp|model|setup distribution bridge commands
  *   rocky --help
+ *   rocky --version
  */
 
 import { run } from "./commands/run.js";
@@ -16,7 +17,7 @@ import { stats } from "./commands/stats.js";
 import { hookFail, hookInstall, hookStatus, hookSuccess, hookUninstall } from "./commands/hook.js";
 import { mcp } from "./commands/mcp.js";
 import { setup } from "./commands/setup.js";
-import { PACKAGE_NAME } from "./core/package-info.js";
+import { PACKAGE_NAME, PACKAGE_VERSION } from "./core/package-info.js";
 import { face, say } from "./ui/rocky.js";
 
 const HELP = `
@@ -89,6 +90,9 @@ async function main(): Promise<number> {
       return hookFail(rest[0] ?? "", Number(rest[1] ?? 1), rest[2] ?? process.cwd());
     case "_hooksuccess":
       return hookSuccess(rest[0] ?? "", rest[1] ?? process.cwd());
+    case "--version":
+      console.log(PACKAGE_VERSION);
+      return 0;
     case "--help":
     case "-h":
     case "help":

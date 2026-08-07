@@ -6,6 +6,7 @@ import { dirname, join } from "node:path";
 import test, { type TestContext } from "node:test";
 import { fileURLToPath } from "node:url";
 import { quoteShellPath } from "../core/shell-quote.js";
+import { PACKAGE_VERSION } from "../core/package-info.js";
 
 const packageRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const entry = join(packageRoot, "dist", "index.js");
@@ -169,12 +170,24 @@ test("unknown commands and invalid command grammar exit 2", (t) => {
     ["recall", "--invalid-option"],
     ["hook"],
     ["hook", "invalid-subcommand"],
+    ["-v"],
+    ["--Version"],
+    ["--version-typo"],
   ] as const) {
     const sandbox = processSandbox(t);
     const result = runCli(sandbox, args);
     assertCompleted(result, 2);
     assertNoDetectorMarkers(sandbox);
   }
+});
+
+test("--version prints the package version to stdout, matching PACKAGE_VERSION, and exits 0", (t) => {
+  const sandbox = processSandbox(t);
+  const result = runCli(sandbox, ["--version"]);
+  assertCompleted(result, 0);
+  assert.equal(result.stdout, `${PACKAGE_VERSION}\n`);
+  assert.equal(result.stderr, "");
+  assertNoDetectorMarkers(sandbox);
 });
 
 test("run preserves path-with-spaces child streams and exit status", (t) => {
