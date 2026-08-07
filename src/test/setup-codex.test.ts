@@ -9,7 +9,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve, sep } from "node:path";
+import { dirname, join, parse, resolve, sep } from "node:path";
 import {
   AppServerRequestError,
   createAppServerSessionFactory,
@@ -966,13 +966,19 @@ test("check rejects owned core registrations carrying disabled, execution, polic
 
 test("official config paths and versions must be absolute, exact, and nonempty", async (t) => {
   const aliasedPath = `${codexHome}/../.codex/config.toml`;
-  // Deliberately relative (no leading separator, no drive letter) on every
-  // platform: relative(process.cwd(), configPath) is unreliable here because on
-  // win32 a driveless configPath and a drive-lettered process.cwd() are treated
-  // as different roots, so relative() hands back configPath unchanged - which
-  // would make this "must be relative" case accidentally absolute and exact,
-  // defeating the assertion below.
-  const relativePath = configPath.replace(/^[/\\]+/, "");
+  // Deliberately relative on every platform. Two independent traps here:
+  //   - relative(process.cwd(), configPath) is unreliable because on win32 a
+  //     driveless configPath and a drive-lettered process.cwd() are treated as
+  //     different roots, so relative() hands back configPath unchanged.
+  //   - stripping only a leading "/"/"\\" is unreliable too: resolve(sep, ...)
+  //     (see codexHome above) asks win32 to fill in the current drive for a
+  //     driveless root, so configPath is actually drive-lettered ("D:\\..."),
+  //     and a leading-separator strip leaves the drive letter in place -
+  //     verified empirically (round 2 of this file's Windows fixes: this same
+  //     mistake left relativePath === configPath on windows-latest CI).
+  // path.parse(...).root strips whatever the real root is - "/", "\\", or a
+  // drive - on every platform, which is what actually makes this relative.
+  const relativePath = configPath.slice(parse(configPath).root.length);
   const responseWithLayerPath = (path: string): Record<string, unknown> => {
     const response = readResult(entryFor(registration));
     (response.layers as Array<Record<string, unknown>>)[0]!.name = baseSource(path);
@@ -1216,7 +1222,10 @@ test("replacement uses one CAS batch and removes recovery artifact only after ex
   });
   const recoveryDirectory = join(dirname(desired.env.ROCKY_HOME!), ".rocky-setup-recovery");
   assert.deepEqual(readdirSync(recoveryDirectory), []);
-  assert.equal(lstatSync(recoveryDirectory).mode & 0o077, 0);
+  // codex.ts's own privateDirectory() treats win32 as exempt from this exact
+  // check (codex.ts:327) - there is no POSIX mode to be group/other-clear on
+  // Windows, so it trusts the host's ACL model instead. Mirror that here.
+  if (process.platform !== "win32") assert.equal(lstatSync(recoveryDirectory).mode & 0o077, 0);
 });
 
 test("replacement race preserves foreign state and retains private recovery authority", async (t) => {
@@ -1243,7 +1252,9 @@ test("replacement race preserves foreign state and retains private recovery auth
   assert.deepEqual(currentEntry, foreign);
   const artifact = recoveryPath(configured.detail);
   assert.deepEqual(JSON.parse(readFileSync(artifact, "utf8")), prior);
-  assert.equal(lstatSync(artifact).mode & 0o077, 0);
+  // See the matching guard above: codex.ts itself exempts win32 from this
+  // exact mode check (codex.ts:327).
+  if (process.platform !== "win32") assert.equal(lstatSync(artifact).mode & 0o077, 0);
   assert.deepEqual(session.requests.map(({ method }) => method), [
     "config/read",
     "config/batchWrite",
@@ -1397,7 +1408,9 @@ test("owned removal uses CAS delete, verifies absence, and retains recovery arti
   ]);
   const artifact = recoveryPath(removed.detail);
   assert.deepEqual(JSON.parse(readFileSync(artifact, "utf8")), prior);
-  assert.equal(lstatSync(artifact).mode & 0o077, 0);
+  // See the matching guard above: codex.ts itself exempts win32 from this
+  // exact mode check (codex.ts:327).
+  if (process.platform !== "win32") assert.equal(lstatSync(artifact).mode & 0o077, 0);
 });
 
 test("remove race leaves foreign replacement untouched and retains recovery authority", async (t) => {
