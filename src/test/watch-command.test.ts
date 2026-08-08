@@ -71,6 +71,22 @@ test("the composed idle line follows Rocky voice rules", () => {
   assert.deepEqual(validateRockyPhrase("still waiting. 10 minutes. waiting is easy for me"), []);
 });
 
+test("watch speaks the composed outcome line on success and on failure, and both pass the voice validator", async (t) => {
+  const home = sandboxHome(t);
+
+  const ok = await withRockyHome(home, () => captureStderr(() => watch(["sh -c 'exit 0'"])));
+  assert.equal(ok.result, 0);
+  const okLine = /\[Rocky\] (command finish\. good good\. \d+ seconds?\.)/.exec(ok.stderr);
+  assert.ok(okLine, `expected a composed watch-ok line in stderr, got: ${ok.stderr}`);
+  assert.deepEqual(validateRockyPhrase(okLine![1]!), []);
+
+  const fail = await withRockyHome(home, () => captureStderr(() => watch(["sh -c 'exit 1'"])));
+  assert.equal(fail.result, 1);
+  const failLine = /\[Rocky\] (command dies\. bad\. \d+ seconds?\.)/.exec(fail.stderr);
+  assert.ok(failLine, `expected a composed watch-fail line in stderr, got: ${fail.stderr}`);
+  assert.deepEqual(validateRockyPhrase(failLine![1]!), []);
+});
+
 test("watch() with an empty command speaks the same 'no command' line run uses and exits 2", async (t) => {
   const home = sandboxHome(t);
   const { result, stderr } = await withRockyHome(home, () => captureStderr(() => watch([""])));

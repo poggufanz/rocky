@@ -104,9 +104,19 @@ function runPreloadProbe(sandbox: ProcessSandbox, source: string): SpawnSyncRetu
   });
 }
 
-function assertNoDetectorMarkers(sandbox: ProcessSandbox): void {
+/** The network-egress half of the guarantee: no external fetch was attempted. */
+function assertNoFetchAttempt(sandbox: ProcessSandbox): void {
   assert.equal(existsSync(sandbox.fetchMarker), false, "isolated CLI attempted fetch");
+}
+
+/** The background-daemon half: no detached spawn / unref was attempted. */
+function assertNoBackgroundSpawnAttempt(sandbox: ProcessSandbox): void {
   assert.equal(existsSync(sandbox.backgroundMarker), false, "isolated CLI attempted background child");
+}
+
+function assertNoDetectorMarkers(sandbox: ProcessSandbox): void {
+  assertNoFetchAttempt(sandbox);
+  assertNoBackgroundSpawnAttempt(sandbox);
 }
 
 function assertCompleted(result: SpawnSyncReturns<string>, expectedStatus: number): void {
@@ -424,12 +434,15 @@ test("watch records a failure with origin watch and saves exactly one log file w
   const files = readdirSync(watchDir);
   assert.equal(files.length, 1);
   assert.match(readFileSync(join(watchDir, files[0]!), "utf8"), /boom/);
-  // No assertNoDetectorMarkers here: unlike run/recall/stats/hook, watch's
-  // whole point is a best-effort detached notify-send/osascript spawn on
-  // completion (core/notify.ts) — the isolated preload's detached-spawn
-  // guard throws inside it, notify()'s own try/catch swallows that and
-  // falls back to a bell, and the exit code and memory/log assertions above
-  // already prove the wrapped command's outcome was never touched by it.
+  // Only the fetch half of assertNoDetectorMarkers applies here: unlike
+  // run/recall/stats/hook, watch's whole point is a best-effort detached
+  // notify-send/osascript spawn on completion (core/notify.ts) — the
+  // isolated preload's detached-spawn guard throws inside it, notify()'s own
+  // try/catch swallows that and falls back to a bell, and the exit
+  // code/memory/log assertions above already prove the wrapped command's
+  // outcome was never touched by it. The network-egress guarantee this test
+  // has nothing to do with notify still applies in full.
+  assertNoFetchAttempt(sandbox);
 });
 
 test("watch passes a Ctrl-C-style exit code straight through, with no memory record and no log", (t) => {
