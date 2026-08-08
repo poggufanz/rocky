@@ -32,7 +32,7 @@ import {
   recordHookFailure,
   type MemoryRecord,
 } from "../core/memory.js";
-import { findByFingerprint, getFix, recentUnresolvedFailures } from "../core/memory-query.js";
+import { findByFingerprint, fixFromElsewhere, getFix, recentUnresolvedFailures } from "../core/memory-query.js";
 import {
   atomicWriteBytesIfUnchanged,
   inspectFileTransaction,
@@ -80,6 +80,11 @@ export function hookFail(cmd: string, exitCode: number, cwd: string): number {
     const fix = getFix(memory, withFix)!;
     sayTty(`I hear this error before. ${ago(withFix.ts)}. last time, you fix with:`);
     detailTty(fix.cmd);
+    const elsewhere = fixFromElsewhere(fix, cwd);
+    if (elsewhere !== undefined) {
+      sayTty("but fix comes from other place.");
+      detailTty(`place: ${elsewhere}`);
+    }
     sayTty("try, question");
   } else {
     const hint = deepMemoryHint(cmd);

@@ -24,6 +24,18 @@ export function getFix(records: readonly MemoryRecord[], failure: FailureRecord)
   return records.find((record): record is FixRecord => record.kind === "fix" && record.id === failure.resolvedBy);
 }
 
+/**
+ * Cross-directory fix matching is kept — the same error in another project
+ * often has the same cure — but a fix served from elsewhere must admit it.
+ * Returns the fix's cwd when it differs from `cwd` (the caller speaks that),
+ * or undefined when it matches (the caller adds no line at all). Compared as
+ * stored, no normalization: memory holds whatever `process.cwd()` gave at
+ * record time.
+ */
+export function fixFromElsewhere(fix: FixRecord, cwd: string): string | undefined {
+  return fix.cwd === cwd ? undefined : fix.cwd;
+}
+
 export function queryRecall(records: readonly MemoryRecord[], input: RecallQuery): RecallHit[] {
   const limit = input.limit ?? 3;
   const queryTokens = tokens(input.query);

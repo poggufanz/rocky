@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import { spawnSync, type SpawnSyncReturns } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test, { type TestContext } from "node:test";
 import { fileURLToPath } from "node:url";
+import { fingerprint } from "../core/fingerprint.js";
 import { quoteShellPath } from "../core/shell-quote.js";
 import { PACKAGE_VERSION } from "../core/package-info.js";
 
@@ -364,4 +365,78 @@ test("a memory write failure never changes the wrapped command's exit code", (t)
 
   const succeeded = runCli(sandbox, ["run", "exit 0"]);
   assert.equal(succeeded.status, 0);
+});
+
+/**
+ * Builds a `rocky run` command line whose stderr is exactly `marker`, so the
+ * fingerprint `run`'s onFailure computes from that real stderr can be
+ * predicted in the test (via `fingerprint(marker)`) and seeded ahead of
+ * time. Quoted through `quoteShellPath` — same helper `deepMemoryHint` uses —
+ * so the child's `-e` script survives the shell that `run.ts` spawns it
+ * through.
+ */
+function failingCommandPrinting(marker: string): string {
+  const script = `console.error('${marker}');process.exit(1)`;
+  return `${quoteShellPath(process.execPath, process.platform)} -e ${quoteShellPath(script, process.platform)}`;
+}
+
+test("run's onFailure admits when the remembered fix comes from a different directory", (t) => {
+  const sandbox = processSandbox(t);
+  const marker = "error rocky test boom elsewhere";
+  const fp = fingerprint(marker);
+  const elsewhere = join(sandbox.root, "elsewhere-project");
+  const failure = {
+    kind: "failure", id: "elsewhere-failure", ts: 1_700_000_000_000, cwd: packageRoot,
+    cmd: "whatever failed before", exitCode: 1, fingerprint: fp, signature: [marker], excerpt: marker,
+    origin: "run",
+  };
+  const fix = {
+    kind: "fix", id: "elsewhere-fix", ts: 1_700_000_001_000, cwd: elsewhere,
+    cmd: "the remembered fix command", failureIds: ["elsewhere-failure"],
+  };
+  writeFileSync(
+    join(sandbox.rockyHome, "memory.jsonl"),
+    `${JSON.stringify(failure)}\n${JSON.stringify(fix)}\n`,
+    "utf8",
+  );
+
+  const result = runCli(sandbox, ["run", failingCommandPrinting(marker)]);
+
+  assertCompleted(result, 1);
+  assert.match(result.stderr, /but fix comes from other place\./);
+  assert.match(result.stderr, new RegExp(`place:\\s*${elsewhere.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
+  assertNoDetectorMarkers(sandbox);
+});
+
+test("run's onFailure adds no line when the remembered fix's cwd matches the current directory", (t) => {
+  const sandbox = processSandbox(t);
+  const marker = "error rocky test boom samecwd";
+  const fp = fingerprint(marker);
+  // runCli spawns with cwd: packageRoot, so the fix must be seeded against
+  // process.cwd()'s resolved form to match what `run.ts` compares against.
+  const here = realpathSync(packageRoot);
+  const failure = {
+    kind: "failure", id: "samecwd-failure", ts: 1_700_000_000_000, cwd: here,
+    cmd: "whatever failed before", exitCode: 1, fingerprint: fp, signature: [marker], excerpt: marker,
+    origin: "run",
+  };
+  const fix = {
+    kind: "fix", id: "samecwd-fix", ts: 1_700_000_001_000, cwd: here,
+    cmd: "the remembered fix command", failureIds: ["samecwd-failure"],
+  };
+  writeFileSync(
+    join(sandbox.rockyHome, "memory.jsonl"),
+    `${JSON.stringify(failure)}\n${JSON.stringify(fix)}\n`,
+    "utf8",
+  );
+
+  const result = runCli(sandbox, ["run", failingCommandPrinting(marker)]);
+
+  assertCompleted(result, 1);
+  assert.doesNotMatch(result.stderr, /other place/);
+  assert.doesNotMatch(result.stderr, /place:/);
+  // sanity: the base fix line still speaks, proving the comparison — not the
+  // whole fix branch — is what's being suppressed here.
+  assert.match(result.stderr, /last time, you fix with:/);
+  assertNoDetectorMarkers(sandbox);
 });

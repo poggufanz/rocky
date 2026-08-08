@@ -18,7 +18,7 @@ import {
   recordFix,
   type MemoryRecord,
 } from "../core/memory.js";
-import { findByFingerprint, getFix, recentUnresolvedFailures } from "../core/memory-query.js";
+import { findByFingerprint, fixFromElsewhere, getFix, recentUnresolvedFailures } from "../core/memory-query.js";
 import { ago, detail, say } from "../ui/rocky.js";
 
 interface RunResult {
@@ -101,6 +101,11 @@ function onFailure(cmd: string, result: RunResult): void {
         const fix = getFix(memory, withFix)!;
         say(`last time, you fix with:`);
         detail(`    ${fix.cmd}`);
+        const elsewhere = fixFromElsewhere(fix, process.cwd());
+        if (elsewhere !== undefined) {
+          say("but fix comes from other place.");
+          detail(`    place: ${elsewhere}`);
+        }
         say("try, question");
       } else {
         say("no fix in memory yet. you fix, I remember. this is good trade.");
