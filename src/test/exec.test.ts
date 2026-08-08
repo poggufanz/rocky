@@ -214,12 +214,17 @@ test("runProcess: onIdle never fires while the child keeps writing to stderr", a
   );
 
   const idles: number[] = [];
+  // The threshold has to sit far above the write interval, not just above it.
+  // At idleMs 100 against a 20 ms interval this went red on a loaded Windows
+  // runner with a single 105 ms gap — scheduler jitter, not a failure to reset
+  // the timer. 500 ms leaves room for that while still failing loudly if
+  // stderr stops resetting `lastActivity` at all.
   const result = await runProcess(
     `${quoteShellPath(process.execPath, process.platform)} ${quoteShellPath(script, process.platform)}`,
-    { idleMs: 100, onIdle: (elapsedMs) => idles.push(elapsedMs) },
+    { idleMs: 500, onIdle: (elapsedMs) => idles.push(elapsedMs) },
   );
   assert.equal(result.code, 0);
-  assert.deepEqual(idles, []);
+  assert.deepEqual(idles, [], "output must keep resetting the idle timer");
 });
 
 test("runProcess: idleMs omitted never calls onIdle — run's behavior stays untouched", async () => {
