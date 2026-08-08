@@ -10,6 +10,7 @@ export type PhraseKey =
   | "ai-busy"
   | "ai-fallback"
   | "bashrc-write-protected"
+  | "hook-histcontrol"
   | "watch-idle-tail"
   | "watch-ok"
   | "watch-fail"
@@ -25,6 +26,7 @@ const PHRASES: Readonly<Record<PhraseKey, string>> = Object.freeze({
   "ai-busy": "small model busy. deterministic memory speaks now.",
   "ai-fallback": "model words not grounded enough. I keep memory order.",
   "bashrc-write-protected": "bashrc is write-protected. I replace it anyway. your lines stay.",
+  "hook-histcontrol": "my ears change your history setting. command typed with space in front is remembered now.",
   "watch-idle-tail": "waiting is easy for me",
   "watch-ok": "command finish. good good.",
   "watch-fail": "command dies. bad.",
@@ -41,6 +43,7 @@ export const phraseKeys: readonly PhraseKey[] = Object.freeze([
   "ai-busy",
   "ai-fallback",
   "bashrc-write-protected",
+  "hook-histcontrol",
   "watch-idle-tail",
   "watch-ok",
   "watch-fail",

@@ -15,7 +15,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { addHookBlock, hasHookBlock, hookInstall, hookUninstall, removeHookBlock } from "../commands/hook.js";
-import { validateRockyPhrase } from "../ui/phrases.js";
+import { phrase, validateRockyPhrase } from "../ui/phrases.js";
 
 const BLOCK_RE = /# >>> rocky hook >>>[\s\S]*# <<< rocky hook <<</;
 const DISCLOSURE = "bashrc is write-protected. I replace it anyway. your lines stay.";
@@ -160,4 +160,17 @@ test("hookInstall never prints the write-protected disclosure for an ordinary mo
   assert.equal(hookInstall(), 0, sandbox.stderr());
 
   assert.ok(!sandbox.stderr().includes(DISCLOSURE), sandbox.stderr());
+});
+
+test("hook install discloses that it changes the shell history setting", (t) => {
+  // bash-preexec strips ignorespace/ignoreboth from HISTCONTROL so it can read
+  // commands via `history 1`. A command typed with a leading space — the usual
+  // way to keep a token out of shell history — starts being recorded. Rocky
+  // changes it, so Rocky has to say it.
+  const sandbox = bashrcSandbox(t);
+  writeFileSync(sandbox.bashrc, "export MY_VAR=1\n");
+
+  assert.equal(hookInstall(), 0, sandbox.stderr());
+  assert.ok(sandbox.stderr().includes(phrase("hook-histcontrol")), sandbox.stderr());
+  assert.deepEqual(validateRockyPhrase(phrase("hook-histcontrol")), []);
 });

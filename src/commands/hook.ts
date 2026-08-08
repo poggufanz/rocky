@@ -527,6 +527,11 @@ export function hookInstall(): number {
   detail(`rules: ${rulesPath}`);
   if (recoveryPath !== undefined) reportRetainedCopy(recoveryPath);
   say("dangerous command comes, I ask first. ROCKY_OFF=1 makes me deaf.");
+  // bash-preexec must read every command through `history 1`, so it strips
+  // ignorespace/ignoreboth from HISTCONTROL. A command deliberately typed with
+  // a leading space — the usual way to keep a token out of history — starts
+  // being recorded. Rocky changes it, so Rocky says it.
+  say(phrase("hook-histcontrol"));
   return 0;
 }
 

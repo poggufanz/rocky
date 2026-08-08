@@ -63,3 +63,31 @@ test("memoryPath resolves ROCKY_HOME each time", () => {
     else process.env.ROCKY_HOME = original;
   }
 });
+
+test("recordFix keeps its line readable instead of writing a record that is silently lost", () => {
+  // 10 000 linked failures used to serialise to ~1.13 MB — past
+  // MAX_MEMORY_LINE_BYTES, so loadMemory skipped it forever while Rocky still
+  // said "I remember the fix" and stats reported "0 have fix".
+  const links = Array.from({ length: 10_000 }, (_, i) => ({
+    failure: {
+      kind: "failure" as const, id: `failure-${i}`, ts: 1_700_000_000_000 + i, cwd: "/x",
+      cmd: "true", exitCode: 1, fingerprint: "ff", signature: [] as string[], excerpt: "",
+    },
+    basis: "signature" as const,
+  }));
+
+  const fix = memory.recordFix("true ok", links, "/x");
+
+  assert.ok(fix.links !== undefined);
+  assert.equal(fix.links.length, memory.MAX_FIX_LINKS);
+  assert.equal(fix.failureIds.length, memory.MAX_FIX_LINKS);
+  assert.ok(
+    Buffer.byteLength(JSON.stringify(fix) + "\n", "utf8") <= memory.MAX_MEMORY_LINE_BYTES,
+    "a fix record must fit inside the line length every reader enforces",
+  );
+
+  // it must actually survive the round trip it previously failed
+  const stored = memory.loadMemory(join(home, "memory.jsonl"))
+    .filter((record) => record.kind === "fix" && record.id === fix.id);
+  assert.equal(stored.length, 1, "the fix record must still be readable after writing");
+});
