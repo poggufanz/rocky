@@ -342,3 +342,26 @@ test("benchmark rejects relative and package-internal output paths before spawni
     assert.match(result.stderr, /output.*absolute|outside.*package/i);
   }
 });
+
+test("run reports the shell convention exit code when the command dies from a signal", (t) => {
+  if (process.platform === "win32") return;
+  const sandbox = processSandbox(t);
+
+  const terminated = runCli(sandbox, ["run", "kill -TERM $$"]);
+  assert.equal(terminated.status, 143);
+
+  const killed = runCli(sandbox, ["run", "kill -KILL $$"]);
+  assert.equal(killed.status, 137);
+});
+
+test("a memory write failure never changes the wrapped command's exit code", (t) => {
+  const sandbox = processSandbox(t);
+  // A directory where the memory file belongs makes every write fail.
+  mkdirSync(join(sandbox.rockyHome, "memory.jsonl"), { recursive: true });
+
+  const failed = runCli(sandbox, ["run", "exit 42"]);
+  assert.equal(failed.status, 42);
+
+  const succeeded = runCli(sandbox, ["run", "exit 0"]);
+  assert.equal(succeeded.status, 0);
+});

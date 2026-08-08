@@ -9,7 +9,9 @@
  */
 
 import { spawn } from "node:child_process";
+import { constants } from "node:os";
 import { fingerprint } from "../core/fingerprint.js";
+import { resolveRockyPaths } from "../core/state-paths.js";
 import {
   loadMemory,
   recordFailure,
@@ -31,12 +33,26 @@ export async function run(cmd: string): Promise<number> {
 
   const result = await execute(cmd);
 
-  if (result.code === 0) {
-    onSuccess(cmd);
-  } else {
-    onFailure(cmd, result);
+  // Memory is bookkeeping. It must never change what the wrapped command did,
+  // so a storage failure is reported and swallowed rather than propagated.
+  try {
+    if (result.code === 0) {
+      onSuccess(cmd);
+    } else {
+      onFailure(cmd, result);
+    }
+  } catch {
+    say("I cannot write memory. this one I forget.");
+    detail(`    memory: ${resolveRockyPaths().memory}`);
   }
   return result.code;
+}
+
+/** Shell convention: a command killed by signal N exits with 128 + N. */
+function signalExit(signal: NodeJS.Signals | null): number {
+  if (!signal) return 1;
+  const number = constants.signals[signal];
+  return typeof number === "number" ? 128 + number : 1;
 }
 
 function execute(cmd: string): Promise<RunResult> {
@@ -50,7 +66,7 @@ function execute(cmd: string): Promise<RunResult> {
       stderr += chunk.toString("utf8");
       process.stderr.write(chunk); // stream through untouched
     });
-    child.on("close", (code) => resolve({ code: code ?? 1, stderr }));
+    child.on("close", (code, signal) => resolve({ code: code ?? signalExit(signal), stderr }));
     child.on("error", (err) => {
       stderr += String(err.message);
       process.stderr.write(err.message + "\n");
