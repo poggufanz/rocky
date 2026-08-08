@@ -1,7 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { StringDecoder } from "node:string_decoder";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { createTailBuffer, runProcess } from "../core/exec.js";
+import { quotePosixShell } from "../core/shell-quote.js";
 
 test("createTailBuffer keeps only the last N lines, in order", () => {
   const buf = createTailBuffer(200);
@@ -96,6 +100,46 @@ test("runProcess: nonzero exit with stderr", async () => {
   assert.ok(result.tail.includes("boom"));
   assert.equal(result.stderr, "boom");
   assert.ok(result.durationMs >= 0);
+});
+
+test("runProcess: a multi-byte character split across a real child's stderr chunks decodes intact", async (t) => {
+  // Drives runProcess itself (not createTailBuffer directly), so this test
+  // actually exercises exec.ts's `decoder.write(chunk)` line. A long run of
+  // a 3-byte character ("€", 0xe2 0x82 0xac) is written in two writes with a
+  // real event-loop gap between them, forcing two separate stderr `data`
+  // events on the parent — deterministically, not relying on guessing the
+  // platform's pipe/stream chunk size — with the split deliberately not
+  // landing on a 3-byte character boundary.
+  const dir = mkdtempSync(join(tmpdir(), "rocky-exec-multibyte-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+
+  const expected = "€".repeat(30_000);
+  const bytes = Buffer.from(expected, "utf8");
+  let splitAt = Math.floor(bytes.length / 2);
+  if (splitAt % 3 === 0) splitAt += 1; // force the split mid-character, not on a boundary
+
+  const script = join(dir, "split-stderr.cjs");
+  writeFileSync(
+    script,
+    `
+    const bytes = Buffer.from(${JSON.stringify(expected)}, "utf8");
+    process.stderr.write(bytes.subarray(0, ${splitAt}));
+    setTimeout(() => {
+      process.stderr.write(bytes.subarray(${splitAt}));
+      process.stderr.write("\\n");
+      process.exit(0);
+    }, 20);
+    `,
+  );
+
+  const result = await runProcess(`${quotePosixShell(process.execPath)} ${quotePosixShell(script)}`, {
+    maxLineBytes: bytes.length + 16,
+  });
+
+  assert.equal(result.code, 0);
+  assert.equal(result.tail.length, 1);
+  assert.ok(!result.stderr.includes("�"), "no replacement character from a corrupted chunk split");
+  assert.equal(result.stderr, expected);
 });
 
 test("runProcess: clean exit has empty tail", async () => {
