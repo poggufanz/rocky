@@ -11,7 +11,7 @@ import { type AiAct, type AiStatus, type RecallWithAiPort } from "../ai/port.js"
 import { createRecallAiPort, formatModelExplanation, singleFlightRecallAi } from "../ai/recall-ai.js";
 import { createMemoryQueries, type MemoryQueries, type RecallHit } from "../core/memory-query.js";
 import { loadMemory } from "../core/memory-read.js";
-import { ago, detail, heading, phrase, phraseForAct, say } from "../ui/rocky.js";
+import { ago, detail, elapsed, heading, phrase, phraseForAct, say } from "../ui/rocky.js";
 
 export type ParsedRecall = { useAi: boolean; query: string };
 
@@ -212,6 +212,13 @@ export async function recall(argv: readonly string[], dependencies?: RecallDepen
     detail(indent(hit.failure.excerpt));
     if (hit.fix) {
       say(`fixed with: ${hit.fix.cmd}`);
+      const link = hit.fix.links?.find((candidate) => candidate.id === hit.failure.id);
+      if (link) {
+        const span = elapsed(hit.fix.ts - hit.failure.ts);
+        say(link.basis === "signature"
+          ? `same command, ${span} later. strong.`
+          : `same program, ${span} later. maybe not fix. check, question`);
+      }
     } else {
       say("no fix recorded for this one. bad bad.");
     }

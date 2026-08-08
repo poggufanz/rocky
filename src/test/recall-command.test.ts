@@ -5,9 +5,11 @@ import type { OllamaClient } from "../ai/ollama.js";
 import type { RecallWithAiPort } from "../ai/port.js";
 import { createRecallAiPort, formatModelExplanation } from "../ai/recall-ai.js";
 import { parseRecallArgs, recall } from "../commands/recall.js";
+import type { FixLink } from "../core/memory-read.js";
 import type { MemoryQueries, RecallHit } from "../core/memory-query.js";
 import { MAX_FIELD_BYTES } from "../mcp/privacy.js";
-import { phrase, phraseForAct } from "../ui/phrases.js";
+import { phrase, phraseForAct, validateRockyPhrase } from "../ui/phrases.js";
+import { elapsed } from "../ui/rocky.js";
 
 function hit(id: string, command = `command-${id}`): RecallHit {
   return {
@@ -23,6 +25,22 @@ function hit(id: string, command = `command-${id}`): RecallHit {
       excerpt: `excerpt-${id}`,
     },
     score: 1,
+  };
+}
+
+function hitWithFix(id: string, fixElapsedMs: number, links?: FixLink[]): RecallHit {
+  const base = hit(id);
+  return {
+    ...base,
+    fix: {
+      kind: "fix",
+      id: `fix-${id}`,
+      ts: base.failure.ts + fixElapsedMs,
+      cwd: base.failure.cwd,
+      cmd: `fix-for-${id}`,
+      failureIds: [base.failure.id],
+      ...(links === undefined ? {} : { links }),
+    },
   };
 }
 
@@ -103,6 +121,49 @@ test("recall parser accepts only a leading ai option and preserves literal query
   assert.deepEqual(parseRecallArgs(["--", "--ai", "literal"]), { useAi: false, query: "--ai literal" });
   assert.deepEqual(parseRecallArgs(["error", "--ai"]), { useAi: false, query: "error --ai" });
   assert.throws(() => parseRecallArgs(["--unknown"]), /unknown option/);
+});
+
+test("elapsed returns the bare span with no suffix", () => {
+  assert.equal(elapsed(0), "just now");
+  assert.equal(elapsed(59_000), "just now");
+  assert.equal(elapsed(60_000), "1 minute");
+  assert.equal(elapsed(120_000), "2 minutes");
+  assert.equal(elapsed(6 * 3600_000), "6 hours");
+  assert.equal(elapsed(3 * 86_400_000), "3 days");
+});
+
+test("recall speaks a strong link for a same-command fix", async () => {
+  const source = memoryReturning([hitWithFix("c1", 2 * 60_000, [{ id: "c1", basis: "signature" }])]);
+  const noAi: RecallWithAiPort = { async run() { throw new Error("AI must not run without --ai"); } };
+  const output = await captureStderr(() => recall(["npm", "test"], { memory: source.memory, recallWithAi: noAi }));
+
+  assert.equal(output.code, 0);
+  assert.match(output.stderr, /fixed with: fix-for-c1/);
+  assert.match(output.stderr, /same command, 2 minutes later\. strong\./);
+  assert.deepEqual(validateRockyPhrase("same command, 2 minutes later. strong."), []);
+});
+
+test("recall speaks a weak link for a same-program fix", async () => {
+  const source = memoryReturning([hitWithFix("c1", 6 * 3600_000, [{ id: "c1", basis: "program" }])]);
+  const noAi: RecallWithAiPort = { async run() { throw new Error("AI must not run without --ai"); } };
+  const output = await captureStderr(() => recall(["npm", "test"], { memory: source.memory, recallWithAi: noAi }));
+
+  assert.equal(output.code, 0);
+  assert.match(output.stderr, /same program, 6 hours later\. maybe not fix\. check, question/);
+  assert.deepEqual(validateRockyPhrase("same program, 6 hours later. maybe not fix. check, question"), []);
+});
+
+test("recall stays silent about link basis when links are missing or don't cover this failure", async () => {
+  const source = memoryReturning([
+    hitWithFix("c1", 60_000), // v0.2.1-era fix record: no links field at all
+    hitWithFix("c2", 60_000, [{ id: "not-c2", basis: "signature" }]), // links present, none match this failure
+  ]);
+  const noAi: RecallWithAiPort = { async run() { throw new Error("AI must not run without --ai"); } };
+  const output = await captureStderr(() => recall(["npm", "test"], { memory: source.memory, recallWithAi: noAi }));
+
+  assert.equal(output.code, 0);
+  assert.doesNotMatch(output.stderr, /same command,/);
+  assert.doesNotMatch(output.stderr, /same program,/);
 });
 
 test("ordinary recall preserves deterministic output and does not invoke the AI port", async () => {
