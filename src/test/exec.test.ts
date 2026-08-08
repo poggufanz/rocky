@@ -164,3 +164,64 @@ test("runProcess: nonexistent binary through the shell preserves the shell's own
   // implicitly by run.ts's own error-path coverage), so just check failure.
   assert.notEqual(result.code, 0);
 });
+
+test("runProcess: onIdle fires repeatedly, at or above the threshold, while the child stays silent", async () => {
+  const idles: number[] = [];
+  const result = await runProcess("sh -c 'sleep 0.3'", {
+    idleMs: 50,
+    onIdle: (elapsedMs) => idles.push(elapsedMs),
+  });
+  assert.equal(result.code, 0);
+  assert.ok(idles.length >= 2, `expected at least 2 onIdle calls, got ${idles.length}`);
+  for (const elapsed of idles) assert.ok(elapsed >= 50, `elapsedMs ${elapsed} is below the 50ms threshold`);
+});
+
+test("runProcess: onIdle never fires while the child keeps writing to stderr", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "rocky-exec-idle-active-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+
+  const script = join(dir, "chatty-stderr.cjs");
+  writeFileSync(
+    script,
+    `
+    let count = 0;
+    const timer = setInterval(() => {
+      process.stderr.write("tick " + count + "\\n");
+      count++;
+      if (count >= 10) {
+        clearInterval(timer);
+        process.exit(0);
+      }
+    }, 20);
+    `,
+  );
+
+  const idles: number[] = [];
+  const result = await runProcess(
+    `${quotePosixShell(process.execPath)} ${quotePosixShell(script)}`,
+    { idleMs: 100, onIdle: (elapsedMs) => idles.push(elapsedMs) },
+  );
+  assert.equal(result.code, 0);
+  assert.deepEqual(idles, []);
+});
+
+test("runProcess: idleMs omitted never calls onIdle — run's behavior stays untouched", async () => {
+  const idles: number[] = [];
+  const result = await runProcess("sh -c 'sleep 0.05'", {
+    onIdle: (elapsedMs) => idles.push(elapsedMs),
+  });
+  assert.equal(result.code, 0);
+  assert.deepEqual(idles, []);
+});
+
+test("runProcess: the idle timer is cleared on close and never fires after the promise resolves", async () => {
+  const idles: number[] = [];
+  const idleMs = 30;
+  await runProcess("sh -c 'sleep 0.05'", {
+    idleMs,
+    onIdle: (elapsedMs) => idles.push(elapsedMs),
+  });
+  const countAtResolve = idles.length;
+  await new Promise((resolve) => setTimeout(resolve, idleMs * 3));
+  assert.equal(idles.length, countAtResolve, "onIdle fired again after the process had already closed");
+});

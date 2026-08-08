@@ -18,6 +18,10 @@ export const MAX_LINE_BYTES = 4096;
 export interface ExecOptions {
   tailLines?: number; // default TAIL_LINES
   maxLineBytes?: number; // default MAX_LINE_BYTES
+  /** Silence threshold. undefined = no timer at all (the `run` behavior). */
+  idleMs?: number;
+  /** Called every time the threshold is crossed again; ms since last stderr. */
+  onIdle?: (elapsedMs: number) => void;
 }
 
 export interface ExecResult {
@@ -91,6 +95,7 @@ export function runProcess(cmd: string, options: ExecOptions = {}): Promise<Exec
   const start = Date.now();
   const buffer = createTailBuffer(options.tailLines, options.maxLineBytes);
   const decoder = new StringDecoder("utf8");
+  let lastActivity = start;
 
   return new Promise((resolve) => {
     const child = spawn(cmd, {
@@ -98,18 +103,36 @@ export function runProcess(cmd: string, options: ExecOptions = {}): Promise<Exec
       stdio: ["inherit", "inherit", "pipe"],
     });
 
+    // Repeating, not one-shot: with the child silent, every idleMs tick's
+    // elapsed-since-activity keeps clearing the threshold again (idleMs,
+    // 2*idleMs, 3*idleMs, ...), so onIdle fires on each crossing. unref()
+    // so this never holds the process open; cleared on both close and error
+    // so it can never fire after runProcess has already resolved.
+    let idleTimer: NodeJS.Timeout | undefined;
+    if (options.idleMs !== undefined) {
+      const idleMs = options.idleMs;
+      idleTimer = setInterval(() => {
+        const elapsed = Date.now() - lastActivity;
+        if (elapsed >= idleMs) options.onIdle?.(elapsed);
+      }, idleMs);
+      idleTimer.unref();
+    }
+
     child.stderr?.on("data", (chunk: Buffer) => {
+      lastActivity = Date.now();
       buffer.push(decoder.write(chunk));
       process.stderr.write(chunk); // stream through untouched, unbounded, unmodified
     });
 
     child.on("close", (code, signal) => {
+      if (idleTimer) clearInterval(idleTimer);
       buffer.push(decoder.end());
       const tail = buffer.end();
       resolve({ code: code ?? signalExit(signal), stderr: tail.join("\n"), tail, durationMs: Date.now() - start });
     });
 
     child.on("error", (err) => {
+      if (idleTimer) clearInterval(idleTimer);
       const message = `${err.message}\n`;
       process.stderr.write(message);
       buffer.push(decoder.end());
