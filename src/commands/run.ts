@@ -54,46 +54,82 @@ function readMemory(): MemoryRecord[] | undefined {
   }
 }
 
+/**
+ * Speaks what memory knows about this fingerprint: a prior sighting and its
+ * fix (naming the fix's own directory when it differs from `cwd`), or that
+ * this is new. Shared by `run`'s onFailure and `watch`'s failure path — spec
+ * §7 names `run`, `watch`, and `_hookfail` as the three paths that must carry
+ * the cross-directory admission, and this is the one place `run` and `watch`
+ * can't drift on it. `quiet` (used by `watch --quiet`) suppresses all of it.
+ */
+export function speakFailureMemory(
+  memory: MemoryRecord[],
+  fp: string,
+  exitCode: number,
+  cwd: string,
+  quiet = false,
+): void {
+  if (quiet) return;
+  const previous = findByFingerprint(memory, fp);
+
+  if (previous.length > 0) {
+    const first = previous[0];
+    say(`I remember this error. You hear it before. ${ago(first.ts)}. Same same.`);
+    const withFix = [...previous].reverse().find((f) => getFix(memory, f));
+    if (withFix) {
+      const fix = getFix(memory, withFix)!;
+      say(`last time, you fix with:`);
+      detail(`    ${fix.cmd}`);
+      const elsewhere = fixFromElsewhere(fix, cwd);
+      if (elsewhere !== undefined) {
+        say("but fix comes from other place.");
+        detail(`    place: ${elsewhere}`);
+      }
+      say("try, question");
+    } else {
+      say("no fix in memory yet. you fix, I remember. this is good trade.");
+    }
+  } else {
+    say(`new error. bad. I remember it now. exit code ${exitCode}.`);
+  }
+}
+
 function onFailure(cmd: string, result: ExecResult): void {
   const memory = readMemory();
   if (memory !== undefined) {
     // result.stderr is the bounded tail (last TAIL_LINES lines, each capped
     // at MAX_LINE_BYTES), not the full stderr stream — fingerprinting now
     // sees the last 200 lines, not everything the command wrote (spec §3.6).
-    const fp = fingerprint(result.stderr);
-    const previous = findByFingerprint(memory, fp);
-
-    if (previous.length > 0) {
-      const first = previous[0];
-      say(`I remember this error. You hear it before. ${ago(first.ts)}. Same same.`);
-      const withFix = [...previous].reverse().find((f) => getFix(memory, f));
-      if (withFix) {
-        const fix = getFix(memory, withFix)!;
-        say(`last time, you fix with:`);
-        detail(`    ${fix.cmd}`);
-        const elsewhere = fixFromElsewhere(fix, process.cwd());
-        if (elsewhere !== undefined) {
-          say("but fix comes from other place.");
-          detail(`    place: ${elsewhere}`);
-        }
-        say("try, question");
-      } else {
-        say("no fix in memory yet. you fix, I remember. this is good trade.");
-      }
-    } else {
-      say(`new error. bad. I remember it now. exit code ${result.code}.`);
-    }
+    speakFailureMemory(memory, fingerprint(result.stderr), result.code, process.cwd());
   }
 
   recordFailure(cmd, result.code, result.stderr);
 }
 
+/**
+ * Links this success as the fix for any unresolved failure of the same
+ * program in `cwd` within the link window, and speaks about it unless
+ * `quiet`. Shared by `run`'s onSuccess and `watch`'s success path so both
+ * commands apply the exact same linking rule and say the exact same
+ * sentence about it. Returns whether a fix was linked.
+ */
+export function linkFixOnSuccess(
+  memory: MemoryRecord[],
+  cmd: string,
+  cwd: string,
+  quiet = false,
+): boolean {
+  const unresolved = recentUnresolvedFailures(memory, cmd, { cwd });
+  if (unresolved.length > 0) {
+    recordFix(cmd, unresolved, cwd);
+    if (!quiet) say("command works now. you fix it. I remember the fix. good good good.");
+    return true;
+  }
+  return false;
+}
+
 function onSuccess(cmd: string): void {
   const memory = readMemory();
   if (memory === undefined) return;
-  const unresolved = recentUnresolvedFailures(memory, cmd, { cwd: process.cwd() });
-  if (unresolved.length > 0) {
-    recordFix(cmd, unresolved);
-    say("command works now. you fix it. I remember the fix. good good good.");
-  }
+  linkFixOnSuccess(memory, cmd, process.cwd());
 }

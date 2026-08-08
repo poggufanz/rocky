@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync, type SpawnSyncReturns } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test, { type TestContext } from "node:test";
@@ -405,6 +405,48 @@ test("run's onFailure admits when the remembered fix comes from a different dire
   assertCompleted(result, 1);
   assert.match(result.stderr, /but fix comes from other place\./);
   assert.match(result.stderr, new RegExp(`place:\\s*${elsewhere.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
+  assertNoDetectorMarkers(sandbox);
+});
+
+test("watch records a failure with origin watch and saves exactly one log file with the stderr tail", (t) => {
+  const sandbox = processSandbox(t);
+  const result = runCli(sandbox, ["watch", "sh -c 'echo boom >&2; exit 3'"]);
+
+  assertCompleted(result, 3);
+
+  const lines = readFileSync(join(sandbox.rockyHome, "memory.jsonl"), "utf8").trim().split("\n");
+  assert.equal(lines.length, 1);
+  const record = JSON.parse(lines[0]!) as { kind: string; origin?: string };
+  assert.equal(record.kind, "failure");
+  assert.equal(record.origin, "watch");
+
+  const watchDir = join(sandbox.rockyHome, "watch");
+  const files = readdirSync(watchDir);
+  assert.equal(files.length, 1);
+  assert.match(readFileSync(join(watchDir, files[0]!), "utf8"), /boom/);
+  // No assertNoDetectorMarkers here: unlike run/recall/stats/hook, watch's
+  // whole point is a best-effort detached notify-send/osascript spawn on
+  // completion (core/notify.ts) — the isolated preload's detached-spawn
+  // guard throws inside it, notify()'s own try/catch swallows that and
+  // falls back to a bell, and the exit code and memory/log assertions above
+  // already prove the wrapped command's outcome was never touched by it.
+});
+
+test("watch passes a Ctrl-C-style exit code straight through, with no memory record and no log", (t) => {
+  if (process.platform === "win32") return;
+  const sandbox = processSandbox(t);
+  const result = runCli(sandbox, ["watch", "sh -c 'exit 130'"]);
+
+  assert.equal(result.status, 130);
+  assert.equal(existsSync(join(sandbox.rockyHome, "memory.jsonl")), false);
+  assert.equal(existsSync(join(sandbox.rockyHome, "watch")), false);
+  assertNoDetectorMarkers(sandbox);
+});
+
+test("watch with an empty command exits 2", (t) => {
+  const sandbox = processSandbox(t);
+  const result = runCli(sandbox, ["watch", ""]);
+  assertCompleted(result, 2);
   assertNoDetectorMarkers(sandbox);
 });
 

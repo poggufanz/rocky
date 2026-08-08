@@ -73,6 +73,7 @@ test("README and CLI help publish the installable v0.2.1 command surface", () =>
     "rocky recall --ai",
     "rocky model",
     "rocky setup --voice-skill",
+    "rocky watch",
   ] as const;
 
   assertContainsEvery(readme, "README", expected);
