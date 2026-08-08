@@ -238,7 +238,7 @@ test("compiled CLI serves modern discovery, listing, and every read-only tool wi
   const discovery = await server.request(modernRequest("modern-discover", "server/discover"));
   assert.deepEqual(discovery.result?.supportedVersions, ["2026-07-28"]);
   assert.deepEqual(discovery.result?._meta, {
-    "io.modelcontextprotocol/serverInfo": { name: "@poggufanz/rocky-cli", version: "0.2.1-beta.1" },
+    "io.modelcontextprotocol/serverInfo": { name: "@poggufanz/rocky-cli", version: "0.3.0" },
   });
   assertToolCatalog(await server.request(modernRequest("modern-list", "tools/list")));
 

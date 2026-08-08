@@ -40,7 +40,7 @@ That companion line is an original Rocky project tagline inspired by the lore, n
 npm install -g @poggufanz/rocky-cli
 ```
 
-Current beta: `@poggufanz/rocky-cli@0.2.1-beta.1`. One install includes the `rocky` CLI and its read-only MCP server. The unrelated unscoped `rocky-cli` package is not this project and Rocky never installs, upgrades, or removes it. The binary name remains `rocky`, so npm reports any local binary-name conflict through its normal install behavior.
+Current beta: `@poggufanz/rocky-cli@0.3.0`. One install includes the `rocky` CLI and its read-only MCP server. The unrelated unscoped `rocky-cli` package is not this project and Rocky never installs, upgrades, or removes it. The binary name remains `rocky`, so npm reports any local binary-name conflict through its normal install behavior.
 
 Requires Node 18+.
 
