@@ -46,3 +46,16 @@ test("hookSuccess does not change process cwd", () => {
   const fixes = memory.loadMemory().filter((record) => record.kind === "fix");
   assert.equal(fixes.at(-1)?.cwd, cwd);
 });
+
+const { deepMemoryHint } = await import("../commands/hook.js");
+
+test("deep memory hint quotes the command so it can be pasted safely", () => {
+  assert.equal(deepMemoryHint("npm run build"), "rocky run 'npm run build'");
+  assert.equal(deepMemoryHint('git commit -m "wip"'), `rocky run 'git commit -m "wip"'`);
+  assert.equal(deepMemoryHint("echo it's"), `rocky run 'echo it'\\''s'`);
+});
+
+test("no deep memory hint when the command is already a rocky run", () => {
+  assert.equal(deepMemoryHint('rocky run "kimi resume"'), undefined);
+  assert.equal(deepMemoryHint("  rocky   run npm test"), undefined);
+});

@@ -44,6 +44,7 @@ import type {
   ConditionalBytesWriteResult,
   RecoveryOutcome,
 } from "../setup/file-transaction.js";
+import { quotePosixShell } from "../core/shell-quote.js";
 import { ago, detail, detailTty, say, sayTty } from "../ui/rocky.js";
 
 /** A command failed in the hooked shell. Record it; speak only if memory has something to say. */
@@ -63,9 +64,22 @@ export function hookFail(cmd: string, exitCode: number, cwd: string): number {
     detailTty(fix.cmd);
     sayTty("try, question");
   } else {
-    sayTty(`this error again. deep memory need stderr. run with: rocky run "${cmd}", question`);
+    const hint = deepMemoryHint(cmd);
+    // No hint means the command already went through `rocky run`, so deep
+    // memory exists and that run has already spoken. Passive ears stay quiet.
+    if (hint) sayTty(`this error again. deep memory need stderr. run with: ${hint}, question`);
   }
   return 0;
+}
+
+/**
+ * The deep-memory suggestion, quoted so it survives a copy and paste, or
+ * undefined when the command is already a `rocky run` and wrapping it again
+ * would add nothing.
+ */
+export function deepMemoryHint(cmd: string): string | undefined {
+  if (/^\s*rocky\s+run\b/.test(cmd)) return undefined;
+  return `rocky run ${quotePosixShell(cmd)}`;
 }
 
 /** A command succeeded while the pending flag existed. Try to link a fix. */

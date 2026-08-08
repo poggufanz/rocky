@@ -7,5 +7,10 @@ export function quoteShellPath(value: string, platform: NodeJS.Platform): string
     }
     return `"${value}"`;
   }
+  return quotePosixShell(value);
+}
+
+/** Single-quote a value so a POSIX shell reads it back byte for byte. */
+export function quotePosixShell(value: string): string {
   return `'${value.replaceAll("'", "'\\''")}'`;
 }
