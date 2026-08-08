@@ -120,7 +120,12 @@ test("hookInstall discloses a write-protected bashrc, replaces it anyway, keeps 
   assert.equal(hookInstall(), 0, sandbox.stderr());
 
   assert.ok(sandbox.stderr().includes(DISCLOSURE), sandbox.stderr());
-  assert.equal(lstatSync(sandbox.bashrc).mode & 0o777, 0o400);
+  // Windows has no per-class permission bits: chmod(0o400) sets the
+  // read-only attribute, and stat reports back 0o444, not 0o400. The bit
+  // that actually matters on both platforms is the owner write bit staying
+  // absent (0o400 on POSIX, 0o444 on Windows both clear it) — that's what
+  // proves the file is still write-protected, not the exact POSIX octal.
+  assert.equal(lstatSync(sandbox.bashrc).mode & 0o200, 0, "owner write bit must stay absent: still write-protected");
   const content = readFileSync(sandbox.bashrc, "utf8");
   assert.ok(content.includes("export MY_VAR=1"), "user line survives");
   assert.match(content, BLOCK_RE);
@@ -138,7 +143,10 @@ test("hookUninstall discloses a write-protected bashrc, replaces it anyway, keep
   assert.equal(hookUninstall(), 0, sandbox.stderr());
 
   assert.ok(sandbox.stderr().includes(DISCLOSURE), sandbox.stderr());
-  assert.equal(lstatSync(sandbox.bashrc).mode & 0o777, 0o400);
+  // See the parallel hookInstall test above: Windows reports 0o444 (no
+  // per-class bits, chmod just sets read-only), not POSIX's 0o400, so assert
+  // the owner write bit is absent rather than the exact octal.
+  assert.equal(lstatSync(sandbox.bashrc).mode & 0o200, 0, "owner write bit must stay absent: still write-protected");
   const content = readFileSync(sandbox.bashrc, "utf8");
   assert.ok(content.includes("export MY_VAR=1"), "user line survives");
   assert.ok(!hasHookBlock(content), "hook block removed");

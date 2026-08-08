@@ -5,7 +5,23 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createTailBuffer, runProcess } from "../core/exec.js";
-import { quotePosixShell } from "../core/shell-quote.js";
+import { quoteShellPath } from "../core/shell-quote.js";
+
+// runProcess spawns with `shell: true`, which on Windows is cmd.exe — it does
+// not understand POSIX single quotes, so an executable-position argument
+// quoted with quotePosixShell fails as "filename ... syntax is incorrect".
+// quoteShellPath already dispatches per platform (double quotes on win32,
+// quotePosixShell everywhere else — see shell-quote.ts) and is exercised for
+// both branches in shell-quote.test.ts; reuse it here instead of duplicating
+// quoting logic. This local check proves the exact command string these two
+// tests build below is double-quoted on win32, not single-quoted.
+test("win32 command construction for a real-child spawn double-quotes, not POSIX single-quotes", () => {
+  const execPath = "C:\\Program Files\\nodejs\\node.exe";
+  const script = "C:\\Users\\rocky test\\split-stderr.cjs";
+  const command = `${quoteShellPath(execPath, "win32")} ${quoteShellPath(script, "win32")}`;
+  assert.equal(command, '"C:\\Program Files\\nodejs\\node.exe" "C:\\Users\\rocky test\\split-stderr.cjs"');
+  assert.ok(!command.includes("'"), "cmd.exe cannot parse POSIX single quotes");
+});
 
 test("createTailBuffer keeps only the last N lines, in order", () => {
   const buf = createTailBuffer(200);
@@ -132,9 +148,10 @@ test("runProcess: a multi-byte character split across a real child's stderr chun
     `,
   );
 
-  const result = await runProcess(`${quotePosixShell(process.execPath)} ${quotePosixShell(script)}`, {
-    maxLineBytes: bytes.length + 16,
-  });
+  const result = await runProcess(
+    `${quoteShellPath(process.execPath, process.platform)} ${quoteShellPath(script, process.platform)}`,
+    { maxLineBytes: bytes.length + 16 },
+  );
 
   assert.equal(result.code, 0);
   assert.equal(result.tail.length, 1);
@@ -198,7 +215,7 @@ test("runProcess: onIdle never fires while the child keeps writing to stderr", a
 
   const idles: number[] = [];
   const result = await runProcess(
-    `${quotePosixShell(process.execPath)} ${quotePosixShell(script)}`,
+    `${quoteShellPath(process.execPath, process.platform)} ${quoteShellPath(script, process.platform)}`,
     { idleMs: 100, onIdle: (elapsedMs) => idles.push(elapsedMs) },
   );
   assert.equal(result.code, 0);
