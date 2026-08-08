@@ -185,17 +185,17 @@ export async function recall(argv: readonly string[], dependencies?: RecallDepen
     hits = parsed.useAi
       ? deps.memory.recall({ query, limit: 5 }).slice(0, 5)
       : deps.memory.recall({ query });
+    if (hits.length === 0) {
+      if (deps.memory.recentFailures({ limit: 1 }).length === 0) {
+        say("memory is empty. no errors yet. this is good... or you not use me yet, question");
+        return 0;
+      }
+      say("I listen to memory. nothing match. maybe error is new, maybe words are different.");
+      return 1;
+    }
   } catch {
     say("memory file does not open for me. I answer from nothing.");
     detail(`    memory: ${resolveRockyPaths().memory}`);
-    return 1;
-  }
-  if (hits.length === 0) {
-    if (deps.memory.recentFailures({ limit: 1 }).length === 0) {
-      say("memory is empty. no errors yet. this is good... or you not use me yet, question");
-      return 0;
-    }
-    say("I listen to memory. nothing match. maybe error is new, maybe words are different.");
     return 1;
   }
 

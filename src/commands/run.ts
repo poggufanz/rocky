@@ -60,16 +60,14 @@ function readMemory(): MemoryRecord[] | undefined {
  * this is new. Shared by `run`'s onFailure and `watch`'s failure path — spec
  * §7 names `run`, `watch`, and `_hookfail` as the three paths that must carry
  * the cross-directory admission, and this is the one place `run` and `watch`
- * can't drift on it. `quiet` (used by `watch --quiet`) suppresses all of it.
+ * can't drift on it.
  */
 export function speakFailureMemory(
   memory: MemoryRecord[],
   fp: string,
   exitCode: number,
   cwd: string,
-  quiet = false,
 ): void {
-  if (quiet) return;
   const previous = findByFingerprint(memory, fp);
 
   if (previous.length > 0) {
@@ -111,21 +109,19 @@ function onFailure(cmd: string, result: ExecResult): void {
  * program in `cwd` within the link window, and speaks about it unless
  * `quiet`. Shared by `run`'s onSuccess and `watch`'s success path so both
  * commands apply the exact same linking rule and say the exact same
- * sentence about it. Returns whether a fix was linked.
+ * sentence about it.
  */
 export function linkFixOnSuccess(
   memory: MemoryRecord[],
   cmd: string,
   cwd: string,
   quiet = false,
-): boolean {
+): void {
   const unresolved = recentUnresolvedFailures(memory, cmd, { cwd });
   if (unresolved.length > 0) {
     recordFix(cmd, unresolved, cwd);
     if (!quiet) say("command works now. you fix it. I remember the fix. good good good.");
-    return true;
   }
-  return false;
 }
 
 function onSuccess(cmd: string): void {

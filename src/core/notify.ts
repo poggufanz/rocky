@@ -1,8 +1,8 @@
 /**
  * Best-effort desktop notification for `rocky watch`. Never a source of
- * truth — if the platform has no known notifier, or the spawn fails or
- * times out, this falls back to a terminal bell and stays silent. It never
- * throws and never changes an exit code.
+ * truth — if the platform has no known notifier, or the spawn fails, this
+ * falls back to a terminal bell and stays silent. It never throws and never
+ * changes an exit code.
  */
 
 import { spawn } from "node:child_process";
@@ -13,7 +13,6 @@ export interface NotifyInput {
   durationMs: number;
 }
 
-const NOTIFY_TIMEOUT_MS = 2000;
 const CMD_TRUNCATE_LENGTH = 60;
 
 /** "13m32s", "45s", "1h02m03s" — compact, for notifications and --quiet. */
@@ -71,10 +70,15 @@ export function notify(input: NotifyInput): void {
       process.stderr.write("\x07");
       return;
     }
+    // No `timeout` option here: Node's spawn timeout installs a ref'd
+    // setTimeout cleared only on 'exit', which an ENOENT spawn never emits
+    // (it emits 'error' instead) — that held the event loop open for the
+    // full timeout. detached + stdio: "ignore" + unref() already guarantee
+    // a hung notifier can't hold the process open, so the timer bought
+    // nothing but a 2s stall.
     const child = spawn(argv.file, argv.args, {
       detached: true,
       stdio: "ignore",
-      timeout: NOTIFY_TIMEOUT_MS,
     });
     child.on("error", () => {
       try {

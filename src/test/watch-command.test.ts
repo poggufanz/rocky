@@ -1,9 +1,9 @@
 import test, { type TestContext } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { parseWatchArgs, watch, WATCH_IDLE_MS } from "../commands/watch.js";
+import { idleLine, parseWatchArgs, watch, WATCH_IDLE_MS } from "../commands/watch.js";
 import { fingerprint } from "../core/fingerprint.js";
 import { quoteShellPath } from "../core/shell-quote.js";
 import { validateRockyPhrase } from "../ui/phrases.js";
@@ -67,20 +67,23 @@ test("WATCH_IDLE_MS is ten minutes", () => {
   assert.equal(WATCH_IDLE_MS, 1000 * 60 * 10);
 });
 
-test("the composed idle line follows Rocky voice rules", () => {
-  assert.deepEqual(validateRockyPhrase("still waiting. 10 minutes. waiting is easy for me"), []);
+test("idleLine composes the voice-valid idle sentence for a given elapsed duration", () => {
+  assert.equal(idleLine(600_000), "still waiting. 10 minutes. waiting is easy for me");
+  assert.equal(idleLine(60_000), "still waiting. 1 minute. waiting is easy for me");
+  assert.deepEqual(validateRockyPhrase(idleLine(600_000)), []);
 });
 
 test("watch speaks the composed outcome line on success and on failure, and both pass the voice validator", async (t) => {
   const home = sandboxHome(t);
+  const notifier = fakeNotifier();
 
-  const ok = await withRockyHome(home, () => captureStderr(() => watch(["sh -c 'exit 0'"])));
+  const ok = await withRockyHome(home, () => captureStderr(() => watch(["sh -c 'exit 0'"], { notify: notifier.notify })));
   assert.equal(ok.result, 0);
   const okLine = /\[Rocky\] (command finish\. good good\. \d+ seconds?\.)/.exec(ok.stderr);
   assert.ok(okLine, `expected a composed watch-ok line in stderr, got: ${ok.stderr}`);
   assert.deepEqual(validateRockyPhrase(okLine![1]!), []);
 
-  const fail = await withRockyHome(home, () => captureStderr(() => watch(["sh -c 'exit 1'"])));
+  const fail = await withRockyHome(home, () => captureStderr(() => watch(["sh -c 'exit 1'"], { notify: notifier.notify })));
   assert.equal(fail.result, 1);
   const failLine = /\[Rocky\] (command dies\. bad\. \d+ seconds?\.)/.exec(fail.stderr);
   assert.ok(failLine, `expected a composed watch-fail line in stderr, got: ${fail.stderr}`);
@@ -144,9 +147,10 @@ test("watch's failure path admits when the remembered fix comes from a different
     cmd: "the remembered fix command", failureIds: ["w-elsewhere-failure"],
   };
   writeFileSync(join(home, "memory.jsonl"), `${JSON.stringify(failure)}\n${JSON.stringify(fix)}\n`, "utf8");
+  const notifier = fakeNotifier();
 
   const { result, stderr } = await withRockyHome(home, () =>
-    captureStderr(() => watch([failingCommandPrinting(marker)])));
+    captureStderr(() => watch([failingCommandPrinting(marker)], { notify: notifier.notify })));
 
   assert.equal(result, 1);
   assert.match(stderr, /but fix comes from other place\./);
@@ -163,8 +167,10 @@ test("watch's success path links a fix exactly like run's onSuccess, using the s
     signature: ["echo build-that-failed-before"], excerpt: "irrelevant", origin: "watch",
   };
   writeFileSync(join(home, "memory.jsonl"), `${JSON.stringify(failure)}\n`, "utf8");
+  const notifier = fakeNotifier();
 
-  const { result, stderr } = await withRockyHome(home, () => captureStderr(() => watch(["echo all-good"])));
+  const { result, stderr } = await withRockyHome(home, () =>
+    captureStderr(() => watch(["echo all-good"], { notify: notifier.notify })));
 
   assert.equal(result, 0);
   assert.match(stderr, /command works now\. you fix it\. I remember the fix\. good good good\./);
@@ -175,9 +181,10 @@ test("an unwritable watch log speaks watch-log-unwritable but still records the 
   mkdirSync(home, { recursive: true });
   // A file sitting where the watch/ directory belongs makes mkdirSync fail.
   writeFileSync(join(home, "watch"), "blocker", "utf8");
+  const notifier = fakeNotifier();
 
   const { result, stderr } = await withRockyHome(home, () =>
-    captureStderr(() => watch(["sh -c \"echo boom >&2; exit 1\""])));
+    captureStderr(() => watch(["sh -c \"echo boom >&2; exit 1\""], { notify: notifier.notify })));
 
   assert.equal(result, 1);
   assert.match(stderr, /watch folder does not open for me\. no log this time\. memory still remembers\./);
@@ -185,6 +192,24 @@ test("an unwritable watch log speaks watch-log-unwritable but still records the 
   const lines = readFileSync(join(home, "memory.jsonl"), "utf8").trim().split("\n");
   assert.equal(lines.length, 1);
   assert.equal((JSON.parse(lines[0]!) as { origin?: string }).origin, "watch");
+});
+
+test("a memory-write failure on the watch failure path still writes the watch log (Minor 5)", async (t) => {
+  const home = sandboxHome(t);
+  mkdirSync(home, { recursive: true });
+  // memory.jsonl as a directory makes recordWatchFailure's appendFileSync throw,
+  // independent of watch/ which stays writable — the log must not be lost.
+  mkdirSync(join(home, "memory.jsonl"), { recursive: true });
+  const notifier = fakeNotifier();
+
+  const { result, stderr } = await withRockyHome(home, () =>
+    captureStderr(() => watch(["sh -c \"echo boom >&2; exit 1\""], { notify: notifier.notify })));
+
+  assert.equal(result, 1);
+  assert.match(stderr, /I cannot write memory\. this one I forget\./);
+  const logFiles = readdirSync(join(home, "watch")).filter((name) => name.endsWith(".log"));
+  assert.equal(logFiles.length, 1);
+  assert.match(stderr, new RegExp(`log: .*${logFiles[0]!.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
 });
 
 test("watch notifies via the injected dependency on both success and failure", async (t) => {

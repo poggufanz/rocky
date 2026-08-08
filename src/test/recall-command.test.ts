@@ -391,3 +391,19 @@ test("unknown leading recall options return usage before reading memory", async 
   assert.deepEqual(source.inputs, []);
   assert.match(output.stderr, /unknown option/);
 });
+
+test("a memory read failure on the second (recentFailures) call cannot leak a raw Node error (Minor 3)", async () => {
+  const memory: MemoryQueries = {
+    recall() { return []; },
+    recentFailures() { throw new Error("EISDIR: illegal operation on a directory"); },
+    stats() { return { failures: 0, fixEvents: 0, resolved: 0, unresolved: 0 }; },
+  };
+  const output = await captureStderr(() => recall(["nothing", "matches"], {
+    memory,
+    recallWithAi: { async run() { throw new Error("AI must not run"); } },
+  }));
+
+  assert.equal(output.code, 1);
+  assert.match(output.stderr, /memory file does not open for me\. I answer from nothing\./);
+  assert.doesNotMatch(output.stderr, /EISDIR/);
+});

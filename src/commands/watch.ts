@@ -33,7 +33,6 @@ export function parseWatchArgs(argv: readonly string[]): ParsedWatch {
       continue;
     }
     if (parsingOptions && token === "--quiet") {
-      if (quiet) throw new Error("unknown option: --quiet");
       quiet = true;
       continue;
     }
@@ -77,7 +76,7 @@ function readMemory(quiet: boolean): MemoryRecord[] | undefined {
 }
 
 /** "still waiting. 10 minutes. waiting is easy for me" — composed because the duration varies. */
-function idleLine(elapsedMs: number): string {
+export function idleLine(elapsedMs: number): string {
   const minutes = Math.round(elapsedMs / 60000);
   return `still waiting. ${minutes} minute${minutes === 1 ? "" : "s"}. ${phrase("watch-idle-tail")}`;
 }
@@ -106,7 +105,13 @@ function onWatchSuccess(cmd: string, cwd: string, quiet: boolean, result: ExecRe
   if (memory !== undefined) linkFixOnSuccess(memory, cmd, cwd, quiet);
 }
 
-/** Returns the log path writeWatchLog produced, or undefined when it couldn't write. */
+/**
+ * Returns the log path writeWatchLog produced, or undefined when it
+ * couldn't write. The log write always runs, even when recordWatchFailure
+ * throws (e.g. memory.jsonl unreadable) — the watch log is independent of
+ * memory and is the whole point of `watch` on failure, so a memory-write
+ * failure must not cost it.
+ */
 function onWatchFailure(cmd: string, cwd: string, quiet: boolean, result: ExecResult): string | undefined {
   if (!quiet) {
     say(outcomeLine(false, result.durationMs));
@@ -116,7 +121,14 @@ function onWatchFailure(cmd: string, cwd: string, quiet: boolean, result: ExecRe
     }
   }
 
-  recordWatchFailure(cmd, result.code, result.stderr, cwd);
+  try {
+    recordWatchFailure(cmd, result.code, result.stderr, cwd);
+  } catch {
+    if (!quiet) {
+      say("I cannot write memory. this one I forget.");
+      detail(`    memory: ${resolveRockyPaths().memory}`);
+    }
+  }
 
   const logPath = writeWatchLog(resolveRockyPaths().watchDir, watchLogName(Date.now(), cmd), result.tail);
   if (!quiet) {
@@ -150,7 +162,6 @@ export async function watch(
 
   const cwd = process.cwd();
   const result = await runProcess(cmd, {
-    tailLines: 200,
     idleMs: WATCH_IDLE_MS,
     onIdle: quiet ? undefined : (elapsedMs: number) => say(idleLine(elapsedMs)),
   });
