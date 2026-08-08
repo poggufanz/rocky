@@ -16,6 +16,9 @@ export interface FailureRecord {
   resolvedBy?: string;
 }
 
+export type LinkBasis = "signature" | "program";
+export interface FixLink { id: string; basis: LinkBasis }
+
 export interface FixRecord {
   kind: "fix";
   id: string;
@@ -23,6 +26,7 @@ export interface FixRecord {
   cwd: string;
   cmd: string;
   failureIds: string[];
+  links?: FixLink[];
 }
 
 export type MemoryRecord = FailureRecord | FixRecord;
@@ -60,9 +64,28 @@ export function parseMemoryRecord(value: unknown): MemoryRecord | undefined {
   if (record.kind === "fix") {
     const failureIds = strings(record.failureIds);
     if (!failureIds) return undefined;
-    return { kind: "fix", id: record.id, ts: Number(record.ts), cwd: record.cwd, cmd: record.cmd, failureIds };
+    let links: FixLink[] | undefined;
+    if (record.links !== undefined) {
+      links = parseFixLinks(record.links);
+      if (!links) return undefined;
+    }
+    return {
+      kind: "fix", id: record.id, ts: Number(record.ts), cwd: record.cwd, cmd: record.cmd, failureIds,
+      ...(links === undefined ? {} : { links }),
+    };
   }
   return undefined;
+}
+
+function parseFixLinks(value: unknown): FixLink[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const links: FixLink[] = [];
+  for (const entry of value) {
+    const obj = objectValue(entry);
+    if (!obj || typeof obj.id !== "string" || (obj.basis !== "signature" && obj.basis !== "program")) return undefined;
+    links.push({ id: obj.id, basis: obj.basis });
+  }
+  return links;
 }
 
 export function loadMemory(path = resolveRockyPaths().memory): MemoryRecord[] {

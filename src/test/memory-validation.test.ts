@@ -24,6 +24,23 @@ test("loader skips JSON-valid garbage and keeps valid legacy records", () => {
   assert.equal(statSync(file).mtimeMs, before.mtime);
 });
 
+test("loader accepts a fix's links array and drops a fix with a malformed link", () => {
+  const root = mkdtempSync(join(tmpdir(), "rocky-links-"));
+  const file = join(root, "memory.jsonl");
+  const goodFix = {
+    kind: "fix", id: "x1", ts: 2, cwd: "/work", cmd: "true", failureIds: ["f1"],
+    links: [{ id: "f1", basis: "signature" }],
+  };
+  const badFix = {
+    kind: "fix", id: "x2", ts: 3, cwd: "/work", cmd: "true", failureIds: ["f1"],
+    links: [{ id: "f1", basis: "maybe" }],
+  };
+  writeFileSync(file, [JSON.stringify(goodFix), JSON.stringify(badFix)].join("\n") + "\n");
+  const records = loadMemory(file);
+  assert.deepEqual(records.map((r) => r.id), ["x1"]);
+  assert.equal(records[0].kind === "fix" ? records[0].links?.[0]?.basis : undefined, "signature");
+});
+
 test("state paths resolve ROCKY_HOME on every call", (t) => {
   const cwd = mkdtempSync(join(tmpdir(), "rocky-state-paths-"));
   t.after(() => rmSync(cwd, { recursive: true, force: true }));

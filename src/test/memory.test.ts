@@ -41,7 +41,7 @@ test("clearPendingIfResolved removes flag only when nothing unresolved", () => {
   const failures = records.filter(
     (r): r is import("../core/memory.js").FailureRecord => r.kind === "failure"
   );
-  memory.recordFix("npm run build", failures);
+  memory.recordFix("npm run build", failures.map((failure) => ({ failure, basis: "program" as const })));
   records = memory.loadMemory();
   assert.equal(memory.hasUnresolvedRecent(records), false);
   memory.clearPendingIfResolved(records);

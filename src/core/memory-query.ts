@@ -1,6 +1,6 @@
-import { similarity, tokens } from "./fingerprint.js";
+import { commandBase, commandSignature, similarity, tokens } from "./fingerprint.js";
 import { loadMemory } from "./memory-read.js";
-import type { FailureRecord, FixRecord, MemoryRecord } from "./memory-read.js";
+import type { FailureRecord, FixRecord, LinkBasis, MemoryRecord } from "./memory-read.js";
 
 export interface RecallQuery { query: string; limit?: number; cwd?: string }
 export interface RecallHit { failure: FailureRecord; fix?: FixRecord; score: number }
@@ -62,17 +62,27 @@ export function queryStats(records: readonly MemoryRecord[], input: StatsQuery =
   return { failures: failures.length, fixEvents, resolved, unresolved: failures.length - resolved };
 }
 
+export const LINK_WINDOW_MS = 1000 * 60 * 60 * 8;
+
+export interface UnresolvedLink { failure: FailureRecord; basis: LinkBasis }
+
 export function recentUnresolvedFailures(
   records: readonly MemoryRecord[],
   command: string,
   input: LinkQuery,
-): FailureRecord[] {
-  const base = command.trim().split(/\s+/)[0];
-  const cutoff = (input.now ?? Date.now()) - (input.windowMs ?? 1000 * 60 * 60 * 48);
-  return records.filter((record): record is FailureRecord =>
-    record.kind === "failure" && !record.resolvedBy && record.ts >= cutoff &&
-    record.cwd === input.cwd && record.cmd.trim().split(/\s+/)[0] === base
-  );
+): UnresolvedLink[] {
+  const base = commandBase(command);
+  const signature = commandSignature(command);
+  const cutoff = (input.now ?? Date.now()) - (input.windowMs ?? LINK_WINDOW_MS);
+  return records
+    .filter((record): record is FailureRecord =>
+      record.kind === "failure" && !record.resolvedBy && record.ts >= cutoff &&
+      record.cwd === input.cwd && commandBase(record.cmd) === base
+    )
+    .map((failure) => ({
+      failure,
+      basis: commandSignature(failure.cmd) === signature ? "signature" as const : "program" as const,
+    }));
 }
 
 export function createMemoryQueries(load: () => MemoryRecord[] = loadMemory): MemoryQueries {

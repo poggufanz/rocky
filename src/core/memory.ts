@@ -5,6 +5,7 @@ import { randomUUID } from "node:crypto";
 import { commandFingerprint, fingerprint, normalizeLine, signatureLines } from "./fingerprint.js";
 import { resolveRockyPaths } from "./state-paths.js";
 import type { FailureRecord, FixRecord, MemoryRecord } from "./memory-read.js";
+import type { UnresolvedLink } from "./memory-query.js";
 
 export type { FailureRecord, FixRecord, MemoryRecord } from "./memory-read.js";
 export { loadMemory, parseMemoryRecord, MAX_MEMORY_LINE_BYTES } from "./memory-read.js";
@@ -33,9 +34,11 @@ export function recordFailure(cmd: string, exitCode: number, stderr: string): Fa
   return rec;
 }
 
-export function recordFix(cmd: string, failures: FailureRecord[], cwd = process.cwd()): FixRecord {
+export function recordFix(cmd: string, links: readonly UnresolvedLink[], cwd = process.cwd()): FixRecord {
   const rec: FixRecord = {
-    kind: "fix", id: randomUUID(), ts: Date.now(), cwd, cmd, failureIds: failures.map((failure) => failure.id),
+    kind: "fix", id: randomUUID(), ts: Date.now(), cwd, cmd,
+    failureIds: links.map((link) => link.failure.id),
+    links: links.map((link) => ({ id: link.failure.id, basis: link.basis })),
   };
   append(rec);
   return rec;

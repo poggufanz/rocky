@@ -92,3 +92,31 @@ export function commandFingerprint(cmd: string, exitCode: number): string {
   const sig = `cmd:${normalizeLine(cmd)}:${exitCode}`;
   return createHash("sha1").update(sig).digest("hex").slice(0, 16);
 }
+
+/**
+ * First whitespace-separated token, reduced to its basename when it looks
+ * like a path. A regex split on both `/` and `\` (not node:path) so a
+ * Windows-style path reduces correctly even when Rocky runs on Linux.
+ */
+export function commandBase(cmd: string): string {
+  const first = cmd.trim().split(/\s+/)[0] ?? "";
+  if (!first) return "";
+  const segments = first.split(/[\\/]/);
+  return segments[segments.length - 1] || first;
+}
+
+/**
+ * Deterministic command signature used to grade fix links ("signature" vs
+ * "program" basis). This is a command signature, not an error fingerprint:
+ * no lowercasing, no number masking, flag case preserved (`-v` !== `-V`).
+ */
+export function commandSignature(cmd: string): string {
+  const trimmed = cmd.trim();
+  if (!trimmed) return "";
+  const rest = trimmed.split(/\s+/).slice(1);
+  const base = commandBase(cmd);
+  const firstNonFlag = rest.find((token) => !token.startsWith("-"));
+  if (firstNonFlag !== undefined) return `${base} ${firstNonFlag}`;
+  const flags = [...new Set(rest)].sort();
+  return [base, ...flags].join(" ");
+}
