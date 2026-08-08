@@ -24,7 +24,7 @@ import {
   type ToolCallResult,
 } from "../mcp/tools.js";
 
-const serverInfo = { name: "@poggufanz/rocky-cli", version: "0.2.1-beta.0" };
+const serverInfo = { name: "@poggufanz/rocky-cli", version: "0.2.1-beta.1" };
 const statsPayload = { failures: 0, fixEvents: 0, resolved: 0, unresolved: 0 };
 
 interface Deferred<T> {
