@@ -33,6 +33,13 @@ check "install writes guard rules"          test -f "$ROCKY_HOME/guard.rules"
 # add a harmless test rule so guard can be exercised without danger
 printf '^touch marker\ttest rule speaks\n' >> "$ROCKY_HOME/guard.rules"
 
+# fixtures for the cwd-at-typed-time check
+mkdir -p "$TMP/typed" "$TMP/elsewhere"
+
+# rocky must be resolvable by name (not just $ROCKY_BIN) for the denylist's
+# "rocky run ..." scenario to exercise a real invocation from the prompt.
+export PATH="$TMP:$PATH"
+
 # --- interactive session: guard + failure + fix-link -----------------------
 # Input is paced (~0.3s/line) like a human typist. Dumping all lines at once
 # lets readline read ahead past the guard's /dev/tty answer read, which desyncs
@@ -67,6 +74,49 @@ check "hook failure recorded"      grep -q '"origin":"hook"' "$ROCKY_HOME/memory
 check "repeat failure remembered"  grep -q "deep memory need stderr" "$SESSION_OUT"
 check "success links fix"          grep -q '"kind":"fix"' "$ROCKY_HOME/memory.jsonl"
 check "pending flag cleared"       test ! -f "$ROCKY_HOME/pending"
+
+# --- second interactive session: denylist + cwd-at-typed-time --------------
+# Its own session (rather than appended to the one above) so its failures —
+# and the pending flag they set — don't reopen the "pending flag cleared"
+# assertion the first session already closed. Same $ROCKY_HOME, so records
+# still land in the same memory.jsonl.
+DENY_SESSION_OUT="$TMP/deny-session.log"
+feed_session <<EOS2 | script -qec "bash -i" "$DENY_SESSION_OUT" > /dev/null 2>&1
+cd "$TMP/typed"
+sleep 1
+cd /rocky-not-here-either
+sleep 1
+{ cd "$TMP/elsewhere"; } && ls /rocky-not-here
+sleep 1
+rocky run "sh -c 'exit 4'"
+sleep 1
+exit
+EOS2
+
+# --- denylist: builtins and rocky's own invocations carry no information ---
+not_present() { ! grep -q "$1" "$2"; }
+check "failing cd produces no memory record" \
+  not_present "rocky-not-here-either" "$ROCKY_HOME/memory.jsonl"
+
+# rocky's own exit code propagates from `rocky run`, so a naive hook would
+# record the outer "rocky run ..." failure on top of run.ts's own deep
+# record for the inner command — same failure, counted twice.
+hook_origin_lines_matching() { # <substring>
+  grep -F '"origin":"hook"' "$ROCKY_HOME/memory.jsonl" 2>/dev/null | grep -c -F -- "$1"
+}
+rocky_run_not_double_recorded() { [ "$(hook_origin_lines_matching "exit 4")" -eq 0 ]; }
+check "rocky run failure not double-recorded by the hook" rocky_run_not_double_recorded
+
+# --- cwd is where the command was typed, not where it ended ----------------
+cwd_field_of_hook_record_matching() { # <substring>
+  grep -F '"origin":"hook"' "$ROCKY_HOME/memory.jsonl" 2>/dev/null | grep -F -- "$1"
+}
+cwd_recorded_as_typed() {
+  local line
+  line=$(cwd_field_of_hook_record_matching "elsewhere")
+  [ -n "$line" ] && printf '%s\n' "$line" | grep -qF "\"cwd\":\"$TMP/typed\""
+}
+check "cwd recorded is where command was typed" cwd_recorded_as_typed
 
 # --- resilience: rules file gone, shell must stay alive --------------------
 rm -f "$ROCKY_HOME/guard.rules"

@@ -8,12 +8,13 @@
 # interactive shells only — scripts and CI never touched
 [[ $- == *i* ]] || return 0
 
-ROCKY_HOOK_VERSION="0.2.0"
+ROCKY_HOOK_VERSION="0.3.0"
 __rocky_home="${ROCKY_HOME:-$HOME/.rocky}"
 __rocky_bin="${ROCKY_BIN:-rocky}"
 __rocky_disabled=""
 __rocky_warned=""
 __rocky_last_cmd=""
+__rocky_last_cwd=""
 
 # bash-preexec gives us preexec/precmd (DEBUG trap + PROMPT_COMMAND, battle-tested)
 if [[ -r "$__rocky_home/bash-preexec.sh" ]]; then
@@ -50,8 +51,10 @@ __rocky_guard() {
 __rocky_preexec() {
   [[ -n "$__rocky_disabled" || -n "${ROCKY_OFF:-}" ]] && return 0
   __rocky_last_cmd="$1"
+  __rocky_last_cwd="$PWD"
   if ! __rocky_guard "$1"; then
     __rocky_last_cmd=""
+    __rocky_last_cwd=""
     return 1
   fi
   return 0
@@ -62,7 +65,23 @@ __rocky_precmd() {
   [[ -n "$__rocky_disabled" || -n "${ROCKY_OFF:-}" ]] && return 0
   [[ -n "$__rocky_last_cmd" ]] || return 0
   local cmd="$__rocky_last_cmd"
+  local cwd="${__rocky_last_cwd:-$PWD}"
   __rocky_last_cmd=""
+  __rocky_last_cwd=""
+
+  # denylist: shell builtins (cd/pushd/popd/export/alias/source/.) and
+  # rocky's own invocations carry no information worth remembering, and a
+  # naive hook would double-record `rocky run` failures on top of run.ts's
+  # own deep record. Pure first-word case match — no subshells, no external
+  # binaries, no node spawn — this runs before every prompt.
+  local first_word="${cmd#"${cmd%%[![:space:]]*}"}"
+  first_word="${first_word%%[[:space:]]*}"
+  case "$first_word" in
+    cd|pushd|popd|export|alias|source|.|rocky|*/rocky)
+      return 0
+      ;;
+  esac
+
   if ! command -v "$__rocky_bin" >/dev/null 2>&1; then
     if [[ -z "$__rocky_warned" ]]; then
       printf '[Rocky] rocky binary gone. my ears sleep now.\n' >&2
@@ -72,9 +91,9 @@ __rocky_precmd() {
     return 0
   fi
   if [[ "$exit_code" -ne 0 ]]; then
-    { "$__rocky_bin" _hookfail "$cmd" "$exit_code" "$PWD" >/dev/null 2>&1 & disown; } 2>/dev/null
+    { "$__rocky_bin" _hookfail "$cmd" "$exit_code" "$cwd" >/dev/null 2>&1 & disown; } 2>/dev/null
   elif [[ -f "$__rocky_home/pending" ]]; then
-    { "$__rocky_bin" _hooksuccess "$cmd" "$PWD" >/dev/null 2>&1 & disown; } 2>/dev/null
+    { "$__rocky_bin" _hooksuccess "$cmd" "$cwd" >/dev/null 2>&1 & disown; } 2>/dev/null
   fi
   return 0
 }
