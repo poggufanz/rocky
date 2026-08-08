@@ -8,9 +8,8 @@
  * this success is recorded as the fix.
  */
 
-import { spawn } from "node:child_process";
-import { constants } from "node:os";
 import { fingerprint } from "../core/fingerprint.js";
+import { runProcess, type ExecResult } from "../core/exec.js";
 import { resolveRockyPaths } from "../core/state-paths.js";
 import {
   loadMemory,
@@ -21,18 +20,13 @@ import {
 import { findByFingerprint, fixFromElsewhere, getFix, recentUnresolvedFailures } from "../core/memory-query.js";
 import { ago, detail, say } from "../ui/rocky.js";
 
-interface RunResult {
-  code: number;
-  stderr: string;
-}
-
 export async function run(cmd: string): Promise<number> {
   if (!cmd || cmd.trim().length === 0) {
     say("no command. give command, question");
     return 2;
   }
 
-  const result = await execute(cmd);
+  const result = await runProcess(cmd);
 
   // Memory is bookkeeping. It must never change what the wrapped command did,
   // so a storage failure is reported and swallowed rather than propagated.
@@ -49,33 +43,6 @@ export async function run(cmd: string): Promise<number> {
   return result.code;
 }
 
-/** Shell convention: a command killed by signal N exits with 128 + N. */
-function signalExit(signal: NodeJS.Signals | null): number {
-  if (!signal) return 1;
-  const number = constants.signals[signal];
-  return typeof number === "number" ? 128 + number : 1;
-}
-
-function execute(cmd: string): Promise<RunResult> {
-  let stderr = "";
-  return new Promise((resolve) => {
-    const child = spawn(cmd, {
-      shell: true,
-      stdio: ["inherit", "inherit", "pipe"],
-    });
-    child.stderr?.on("data", (chunk: Buffer) => {
-      stderr += chunk.toString("utf8");
-      process.stderr.write(chunk); // stream through untouched
-    });
-    child.on("close", (code, signal) => resolve({ code: code ?? signalExit(signal), stderr }));
-    child.on("error", (err) => {
-      stderr += String(err.message);
-      process.stderr.write(err.message + "\n");
-      resolve({ code: 127, stderr });
-    });
-  });
-}
-
 /** An unreadable memory file is spoken, not thrown — callers get `undefined` and carry on. */
 function readMemory(): MemoryRecord[] | undefined {
   try {
@@ -87,9 +54,12 @@ function readMemory(): MemoryRecord[] | undefined {
   }
 }
 
-function onFailure(cmd: string, result: RunResult): void {
+function onFailure(cmd: string, result: ExecResult): void {
   const memory = readMemory();
   if (memory !== undefined) {
+    // result.stderr is the bounded tail (last TAIL_LINES lines, each capped
+    // at MAX_LINE_BYTES), not the full stderr stream — fingerprinting now
+    // sees the last 200 lines, not everything the command wrote (spec §3.6).
     const fp = fingerprint(result.stderr);
     const previous = findByFingerprint(memory, fp);
 
