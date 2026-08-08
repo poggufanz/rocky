@@ -61,6 +61,10 @@ test("parseWatchArgs parses --quiet, a positional command, the -- escape, and re
   assert.deepEqual(parseWatchArgs(["npm run build"]), { quiet: false, cmd: "npm run build" });
   assert.deepEqual(parseWatchArgs(["--", "--quiet"]), { quiet: false, cmd: "--quiet" });
   assert.throws(() => parseWatchArgs(["--bogus"]));
+  assert.deepEqual(
+    parseWatchArgs(["--quiet", "--quiet", "npm", "test"]),
+    { quiet: true, cmd: "npm test" },
+  );
 });
 
 test("WATCH_IDLE_MS is ten minutes", () => {
