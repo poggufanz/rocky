@@ -1,5 +1,6 @@
 import { Buffer } from "node:buffer";
 import { loadConfig, type Exposure } from "../core/config-read.js";
+import type { FailureOrigin } from "../core/memory-read.js";
 import type { RecallHit } from "../core/memory-query.js";
 import {
   normalizeOutputText,
@@ -62,7 +63,7 @@ interface PromptCandidate {
     fingerprint: string;
     timestamp: number;
     exitCode: number;
-    origin: "run" | "hook";
+    origin: FailureOrigin;
     signature: string[];
     command: string;
     cwd?: string;

@@ -4,7 +4,7 @@ import fs, { mkdtempSync, readFileSync, readdirSync, statSync, writeFileSync } f
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadConfig, saveConfigAtomic } from "../core/config.js";
+import { loadConfig, parseConfig, saveConfigAtomic } from "../core/config.js";
 
 test("missing config returns disabled mode without creating a file", () => {
   const file = join(mkdtempSync(join(tmpdir(), "rocky-config-")), "config.json");
@@ -56,6 +56,37 @@ test("invalid config shapes are refused", () => {
     const result = loadConfig(file);
     assert.equal(result.status, "invalid");
   }
+});
+
+test("parseConfig accepts a watch key with notify: false", () => {
+  const config = parseConfig({ version: 1, ai: { enabled: false }, watch: { notify: false } });
+  assert.deepEqual(config, { version: 1, ai: { enabled: false }, watch: { notify: false } });
+});
+
+test("parseConfig accepts a config with no watch key; watch stays undefined", () => {
+  const config = parseConfig({ version: 1, ai: { enabled: false } });
+  assert.ok(config);
+  assert.equal(config.watch, undefined);
+});
+
+test("parseConfig rejects malformed watch shapes", () => {
+  const cases = [
+    { version: 1, ai: { enabled: false }, watch: {} },
+    { version: 1, ai: { enabled: false }, watch: { notify: "yes" } },
+    { version: 1, ai: { enabled: false }, watch: { notify: true, extra: 1 } },
+    { version: 1, ai: { enabled: false }, watch: null },
+    { version: 1, ai: { enabled: false }, watch: [] },
+  ];
+  for (const value of cases) {
+    assert.equal(parseConfig(value), undefined, JSON.stringify(value));
+  }
+});
+
+test("saveConfigAtomic round-trips a config carrying watch", () => {
+  const file = join(mkdtempSync(join(tmpdir(), "rocky-config-")), "config.json");
+  const config = { version: 1 as const, ai: { enabled: false as const }, watch: { notify: false } };
+  saveConfigAtomic(config, file);
+  assert.deepEqual(loadConfig(file), { status: "valid", path: file, config });
 });
 
 test("failed atomic write leaves no temp sibling", () => {

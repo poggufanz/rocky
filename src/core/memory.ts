@@ -34,6 +34,16 @@ export function recordFailure(cmd: string, exitCode: number, stderr: string): Fa
   return rec;
 }
 
+export function recordWatchFailure(cmd: string, exitCode: number, stderr: string, cwd = process.cwd()): FailureRecord {
+  const rec: FailureRecord = {
+    kind: "failure", id: randomUUID(), ts: Date.now(), cwd, cmd, exitCode,
+    fingerprint: fingerprint(stderr), signature: signatureLines(stderr), excerpt: lastLines(stderr, 4), origin: "watch",
+  };
+  append(rec);
+  touchPending();
+  return rec;
+}
+
 export function recordFix(cmd: string, links: readonly UnresolvedLink[], cwd = process.cwd()): FixRecord {
   const rec: FixRecord = {
     kind: "fix", id: randomUUID(), ts: Date.now(), cwd, cmd,

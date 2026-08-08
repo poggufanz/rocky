@@ -62,3 +62,62 @@ test("loader drops a line larger than one MiB", () => {
   }) + "\n");
   assert.deepEqual(loadMemory(file), []);
 });
+
+test("a watch-origin failure record round-trips", () => {
+  const root = mkdtempSync(join(tmpdir(), "rocky-origin-watch-"));
+  const file = join(root, "memory.jsonl");
+  const record = {
+    kind: "failure", id: "f-watch", ts: 1, cwd: "/w", cmd: "x", exitCode: 1,
+    fingerprint: "fp", signature: ["x"], excerpt: "x", origin: "watch",
+  };
+  writeFileSync(file, JSON.stringify(record) + "\n");
+  const records = loadMemory(file);
+  assert.equal(records.length, 1);
+  assert.equal(records[0].kind === "failure" ? records[0].origin : undefined, "watch");
+});
+
+test("an unrecognized string origin no longer discards the record; it reads as run", () => {
+  const root = mkdtempSync(join(tmpdir(), "rocky-origin-unknown-"));
+  const file = join(root, "memory.jsonl");
+  const record = {
+    kind: "failure", id: "f-unknown", ts: 1, cwd: "/w", cmd: "x", exitCode: 1,
+    fingerprint: "fp", signature: ["x"], excerpt: "x", origin: "quantum",
+  };
+  writeFileSync(file, JSON.stringify(record) + "\n");
+  const records = loadMemory(file);
+  assert.equal(records.length, 1);
+  assert.equal(records[0].kind === "failure" ? records[0].origin : undefined, "run");
+});
+
+test("a non-string origin no longer discards the record; it reads as run", () => {
+  const root = mkdtempSync(join(tmpdir(), "rocky-origin-nonstring-"));
+  const file = join(root, "memory.jsonl");
+  const record = {
+    kind: "failure", id: "f-nonstring", ts: 1, cwd: "/w", cmd: "x", exitCode: 1,
+    fingerprint: "fp", signature: ["x"], excerpt: "x", origin: 7,
+  };
+  writeFileSync(file, JSON.stringify(record) + "\n");
+  const records = loadMemory(file);
+  assert.equal(records.length, 1);
+  assert.equal(records[0].kind === "failure" ? records[0].origin : undefined, "run");
+});
+
+test("a failure record with no origin still parses with origin undefined", () => {
+  const root = mkdtempSync(join(tmpdir(), "rocky-origin-absent-"));
+  const file = join(root, "memory.jsonl");
+  const record = {
+    kind: "failure", id: "f-absent", ts: 1, cwd: "/w", cmd: "x", exitCode: 1,
+    fingerprint: "fp", signature: ["x"], excerpt: "x",
+  };
+  writeFileSync(file, JSON.stringify(record) + "\n");
+  const records = loadMemory(file);
+  assert.equal(records.length, 1);
+  assert.equal(records[0].kind === "failure" ? records[0].origin : undefined, undefined);
+});
+
+test("watchDir is <home>/watch and respects ROCKY_HOME", (t) => {
+  const cwd = mkdtempSync(join(tmpdir(), "rocky-watchdir-"));
+  t.after(() => rmSync(cwd, { recursive: true, force: true }));
+  const paths = resolveRockyPaths({ ROCKY_HOME: "somehome" }, cwd, cwd);
+  assert.equal(paths.watchDir, join(cwd, "somehome", "watch"));
+});
