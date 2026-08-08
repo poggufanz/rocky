@@ -40,7 +40,7 @@ That companion line is an original Rocky project tagline inspired by the lore, n
 npm install -g @poggufanz/rocky-cli
 ```
 
-Current beta: `@poggufanz/rocky-cli@0.2.1-beta.1`. One install includes the `rocky` CLI and its read-only MCP server. The unrelated unscoped `rocky-cli` package is not this project and Rocky never installs, upgrades, or removes it. The binary name remains `rocky`, so npm reports any local binary-name conflict through its normal install behavior.
+Current beta: `@poggufanz/rocky-cli@0.3.0`. One install includes the `rocky` CLI and its read-only MCP server. The unrelated unscoped `rocky-cli` package is not this project and Rocky never installs, upgrades, or removes it. The binary name remains `rocky`, so npm reports any local binary-name conflict through its normal install behavior.
 
 Requires Node 18+.
 
@@ -92,6 +92,24 @@ rocky mcp                                # local read-only stdio server
 Memory lives in `~/.rocky/memory.jsonl`. It is a text file you can read, grep, back up, and delete. Rocky records explicit terminal commands and errors plus the operational metadata needed to link them: working directory, time, exit code, fingerprints, origin, record IDs, and fix links. Rocky does not keylog and does not capture the screen.
 
 The core CLI and local MCP server contain no telemetry, make no external network requests, and run no daemon. MCP uses local stdio, exposes read-only tools, and projects sanitized memory by default. A configured cloud host may forward selected projected content under that host's own policy, so review the host and choose raw exposure only when you intend to share those fields. Optional AI calls only a separately managed Ollama service over loopback (`127.0.0.1`).
+
+## `rocky watch` (v0.3, implemented)
+
+For the commands you walk away from — a long build, a migration, a big download:
+
+```bash
+rocky watch "npm run build"
+rocky watch "docker compose up" --quiet
+```
+
+`rocky watch` runs `cmd` exactly like `rocky run` does — same streaming, same fingerprinting, same fix-linking, same cross-directory fix admission — plus:
+
+- **An idle line** every 10 minutes of stderr silence, so a quiet terminal still tells you Rocky's still there.
+- **A notification** when it finishes: a desktop notification (`notify-send` on Linux, `osascript` on macOS) or a terminal bell where neither exists. Best-effort only, never a source of truth, and never blocks the wrapped command's exit code.
+- **A saved stderr tail** on failure, under `~/.rocky/watch/`, alongside the same kind of memory record `rocky run` writes (`origin: "watch"`).
+- **`--quiet`**, which keeps the recording but drops every persona line, every idle line, and the notification — stderr gets plain facts only: duration, exit code, and the log path.
+
+Ctrl-C (or an external `SIGTERM`) passes its exit code straight through — no memory record, no log, no notification. Notifications can be turned off in `~/.rocky/config.json` with `"watch": { "notify": false }`; a missing, invalid, or unreadable config always defaults to notifications on and never blocks the run.
 
 ## The ears (v0.2, implemented)
 
@@ -197,7 +215,7 @@ Rocky asks because he is curious, not because he is testing you; you are always 
 Each phase is one facet of who Rocky is:
 
 - **v0.2.1 — distribution bridge** (current beta): the v0.1 memory and implemented v0.2 Bash/WSL ears, plus scoped npm distribution, read-only MCP, consent-based host setup, an optional managed voice skill, and optional loopback Ollama interpretation for recall.
-- **v0.3 — his patience**: `rocky watch` — hand him a long build, migration, or download; he waits (he once waited 46 years), notifies you, and holds the logs if it dies.
+- **v0.3 — his patience** (implemented): `rocky watch` — hand him a long build, migration, or download; he waits (he once waited 46 years), notifies you, and holds the logs if it dies.
 - **v0.4 — his diligence**: pre-push hull check — verifies that AI-added packages actually exist on the registry (hallucinated-package defense), wraps secret scanning, and asks one comprehension question about the riskiest line in the diff. Its planned registry lookup is external egress; network errors must fail open.
 - **v0.5 — his curiosity**: Nervous System agent hooks + the Intent↔Mechanism Dictionary + an opt-in Ollama/BYOK annotation layer. The earlier `rocky explain` concept is superseded, not an active command. These planned mechanisms preserve recorded evidence, surface ambiguity only on explicit lookup, and never rewrite, inject, optimize, or submit a user's prompt.
 - **later — his care**: ambient pet mode and the desktop pet window (deferred). He notices you've been at it for four hours, and he has opinions about your sleep.

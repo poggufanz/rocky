@@ -1,9 +1,17 @@
-import { loadMemory, memoryPath } from "../core/memory.js";
+import { loadMemory, memoryPath, type MemoryRecord } from "../core/memory.js";
 import { queryStats } from "../core/memory-query.js";
-import { face, say } from "../ui/rocky.js";
+import { detail, face, say } from "../ui/rocky.js";
 
 export function stats(): number {
-  const result = queryStats(loadMemory());
+  let records: MemoryRecord[];
+  try {
+    records = loadMemory();
+  } catch {
+    say("memory file does not open for me. I answer from nothing.");
+    detail(`    memory: ${memoryPath()}`);
+    return 1;
+  }
+  const result = queryStats(records);
   console.log(face());
   say(`I remember ${result.failures} error${result.failures === 1 ? "" : "s"}. ${result.resolved} have fix. ${result.fixEvents} fix event${result.fixEvents === 1 ? "" : "s"} total.`);
   say(`memory file: ${memoryPath()}`);

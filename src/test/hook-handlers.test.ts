@@ -1,14 +1,47 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, existsSync, readFileSync } from "node:fs";
+import fs, { mkdtempSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { commandFingerprint } from "../core/fingerprint.js";
+import { validateRockyPhrase } from "../ui/phrases.js";
 
 const home = mkdtempSync(join(tmpdir(), "rocky-hook-"));
 process.env.ROCKY_HOME = home;
 
 const memory = await import("../core/memory.js");
 const { hookFail, hookSuccess } = await import("../commands/hook.js");
+
+/**
+ * Hook handlers speak over /dev/tty (they run detached, stderr discarded).
+ * Intercept `fs.writeFileSync` for that one path and pass every other path
+ * through untouched — same technique file-transaction.test.ts and
+ * hook-block.test.ts already use to observe writes a module under test makes
+ * through a plain named `import { writeFileSync } from "node:fs"`.
+ */
+function captureTty<T>(fn: () => T): { result: T; tty: string } {
+  const original = fs.writeFileSync;
+  let tty = "";
+  fs.writeFileSync = ((
+    file: fs.PathOrFileDescriptor,
+    data: unknown,
+    options?: fs.WriteFileOptions,
+  ) => {
+    if (file === "/dev/tty") {
+      tty += String(data);
+      return;
+    }
+    return original(file, data as never, options);
+  }) as typeof fs.writeFileSync;
+  syncBuiltinESMExports();
+  try {
+    return { result: fn(), tty };
+  } finally {
+    fs.writeFileSync = original;
+    syncBuiltinESMExports();
+  }
+}
 
 const cwd = mkdtempSync(join(tmpdir(), "rocky-cwd-"));
 
@@ -58,4 +91,64 @@ test("deep memory hint quotes the command so it can be pasted safely", () => {
 test("no deep memory hint when the command is already a rocky run", () => {
   assert.equal(deepMemoryHint('rocky run "kimi resume"'), undefined);
   assert.equal(deepMemoryHint("  rocky   run npm test"), undefined);
+});
+
+/**
+ * Isolated ROCKY_HOME per test below: the shared `home`/`cwd` above already
+ * carries fix records other tests count exactly, so seeding a fix from a
+ * different directory there would corrupt those assertions. hookFail reads
+ * ROCKY_HOME fresh on every call (`resolveRockyPaths` defaults to
+ * `process.env`), so swapping it around one call is enough isolation.
+ */
+function seedElsewhereFix(failCwd: string, fixCwd: string, cmd: string, exitCode: number): void {
+  const isolatedHome = mkdtempSync(join(tmpdir(), "rocky-hook-elsewhere-"));
+  const fp = commandFingerprint(cmd, exitCode);
+  const failure = {
+    kind: "failure", id: "seed-failure", ts: Date.now() - 1000, cwd: failCwd, cmd,
+    exitCode, fingerprint: fp, signature: [cmd], excerpt: `exit ${exitCode}`, origin: "hook",
+  };
+  const fix = {
+    kind: "fix", id: "seed-fix", ts: Date.now(), cwd: fixCwd, cmd: "the remembered fix",
+    failureIds: ["seed-failure"],
+  };
+  writeFileSync(
+    join(isolatedHome, "memory.jsonl"),
+    `${JSON.stringify(failure)}\n${JSON.stringify(fix)}\n`,
+    "utf8",
+  );
+  process.env.ROCKY_HOME = isolatedHome;
+}
+
+test("hookFail admits when the remembered fix's cwd differs from the cwd argument", () => {
+  const failCwd = mkdtempSync(join(tmpdir(), "rocky-elsewhere-fail-"));
+  const fixCwd = mkdtempSync(join(tmpdir(), "rocky-elsewhere-fix-"));
+  seedElsewhereFix(failCwd, fixCwd, "elsewhere-test-cmd", 1);
+  try {
+    const { result, tty } = captureTty(() => hookFail("elsewhere-test-cmd", 1, failCwd));
+    assert.equal(result, 0);
+    assert.match(tty, /but fix comes from other place\./);
+    assert.match(tty, new RegExp(`place: ${fixCwd.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
+  } finally {
+    process.env.ROCKY_HOME = home;
+  }
+});
+
+test("hookFail says nothing extra when the remembered fix's cwd matches the cwd argument", () => {
+  const sameCwd = mkdtempSync(join(tmpdir(), "rocky-samecwd-"));
+  seedElsewhereFix(sameCwd, sameCwd, "samecwd-test-cmd", 1);
+  try {
+    const { result, tty } = captureTty(() => hookFail("samecwd-test-cmd", 1, sameCwd));
+    assert.equal(result, 0);
+    assert.doesNotMatch(tty, /other place/);
+    assert.doesNotMatch(tty, /place:/);
+    // sanity: the base fix line still speaks, proving the comparison — not
+    // the whole fix branch — is what's being suppressed here.
+    assert.match(tty, /last time, you fix with:/);
+  } finally {
+    process.env.ROCKY_HOME = home;
+  }
+});
+
+test("the elsewhere-admission line follows Rocky's voice rules", () => {
+  assert.deepEqual(validateRockyPhrase("but fix comes from other place."), []);
 });

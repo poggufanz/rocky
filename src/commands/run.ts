@@ -8,22 +8,17 @@
  * this success is recorded as the fix.
  */
 
-import { spawn } from "node:child_process";
-import { constants } from "node:os";
 import { fingerprint } from "../core/fingerprint.js";
+import { runProcess, type ExecResult } from "../core/exec.js";
 import { resolveRockyPaths } from "../core/state-paths.js";
 import {
   loadMemory,
   recordFailure,
   recordFix,
+  type MemoryRecord,
 } from "../core/memory.js";
-import { findByFingerprint, getFix, recentUnresolvedFailures } from "../core/memory-query.js";
-import { ago, detail, say } from "../ui/rocky.js";
-
-interface RunResult {
-  code: number;
-  stderr: string;
-}
+import { findByFingerprint, fixFromElsewhere, getFix, recentUnresolvedFailures } from "../core/memory-query.js";
+import { ago, detail, elapsed, say } from "../ui/rocky.js";
 
 export async function run(cmd: string): Promise<number> {
   if (!cmd || cmd.trim().length === 0) {
@@ -31,7 +26,7 @@ export async function run(cmd: string): Promise<number> {
     return 2;
   }
 
-  const result = await execute(cmd);
+  const result = await runProcess(cmd);
 
   // Memory is bookkeeping. It must never change what the wrapped command did,
   // so a storage failure is reported and swallowed rather than propagated.
@@ -48,36 +43,31 @@ export async function run(cmd: string): Promise<number> {
   return result.code;
 }
 
-/** Shell convention: a command killed by signal N exits with 128 + N. */
-function signalExit(signal: NodeJS.Signals | null): number {
-  if (!signal) return 1;
-  const number = constants.signals[signal];
-  return typeof number === "number" ? 128 + number : 1;
+/** An unreadable memory file is spoken, not thrown — callers get `undefined` and carry on. */
+function readMemory(): MemoryRecord[] | undefined {
+  try {
+    return loadMemory();
+  } catch {
+    say("memory file does not open for me. I answer from nothing.");
+    detail(`    memory: ${resolveRockyPaths().memory}`);
+    return undefined;
+  }
 }
 
-function execute(cmd: string): Promise<RunResult> {
-  let stderr = "";
-  return new Promise((resolve) => {
-    const child = spawn(cmd, {
-      shell: true,
-      stdio: ["inherit", "inherit", "pipe"],
-    });
-    child.stderr?.on("data", (chunk: Buffer) => {
-      stderr += chunk.toString("utf8");
-      process.stderr.write(chunk); // stream through untouched
-    });
-    child.on("close", (code, signal) => resolve({ code: code ?? signalExit(signal), stderr }));
-    child.on("error", (err) => {
-      stderr += String(err.message);
-      process.stderr.write(err.message + "\n");
-      resolve({ code: 127, stderr });
-    });
-  });
-}
-
-function onFailure(cmd: string, result: RunResult): void {
-  const memory = loadMemory();
-  const fp = fingerprint(result.stderr);
+/**
+ * Speaks what memory knows about this fingerprint: a prior sighting and its
+ * fix (naming the fix's own directory when it differs from `cwd`), or that
+ * this is new. Shared by `run`'s onFailure and `watch`'s failure path — spec
+ * §7 names `run`, `watch`, and `_hookfail` as the three paths that must carry
+ * the cross-directory admission, and this is the one place `run` and `watch`
+ * can't drift on it.
+ */
+export function speakFailureMemory(
+  memory: MemoryRecord[],
+  fp: string,
+  exitCode: number,
+  cwd: string,
+): void {
   const previous = findByFingerprint(memory, fp);
 
   if (previous.length > 0) {
@@ -88,22 +78,64 @@ function onFailure(cmd: string, result: RunResult): void {
       const fix = getFix(memory, withFix)!;
       say(`last time, you fix with:`);
       detail(`    ${fix.cmd}`);
+      // Say how much this link is worth. `recall` graded strong/weak from the
+      // day it shipped; run/watch/hook did not, so the surfaces people actually
+      // use presented a weak "same program" guess with the same confidence as a
+      // real match. A wrong fix stated plainly is worse than no fix at all.
+      const basis = fix.links?.find((link) => link.id === withFix.id)?.basis;
+      if (basis === "signature") {
+        say(`same command, ${elapsed(fix.ts - withFix.ts)} later. strong.`);
+      } else if (basis === "program") {
+        say(`same program, ${elapsed(fix.ts - withFix.ts)} later. maybe not fix. check, question`);
+      }
+      const elsewhere = fixFromElsewhere(fix, cwd);
+      if (elsewhere !== undefined) {
+        say("but fix comes from other place.");
+        detail(`    place: ${elsewhere}`);
+      }
       say("try, question");
     } else {
       say("no fix in memory yet. you fix, I remember. this is good trade.");
     }
   } else {
-    say(`new error. bad. I remember it now. exit code ${result.code}.`);
+    say(`new error. bad. I remember it now. exit code ${exitCode}.`);
+  }
+}
+
+function onFailure(cmd: string, result: ExecResult): void {
+  const memory = readMemory();
+  if (memory !== undefined) {
+    // result.stderr is the bounded tail (last TAIL_LINES lines, each capped
+    // at MAX_LINE_BYTES), not the full stderr stream — fingerprinting now
+    // sees the last 200 lines, not everything the command wrote (spec §3.6).
+    speakFailureMemory(memory, fingerprint(result.stderr), result.code, process.cwd());
   }
 
   recordFailure(cmd, result.code, result.stderr);
 }
 
-function onSuccess(cmd: string): void {
-  const memory = loadMemory();
-  const unresolved = recentUnresolvedFailures(memory, cmd, { cwd: process.cwd() });
+/**
+ * Links this success as the fix for any unresolved failure of the same
+ * program in `cwd` within the link window, and speaks about it unless
+ * `quiet`. Shared by `run`'s onSuccess and `watch`'s success path so both
+ * commands apply the exact same linking rule and say the exact same
+ * sentence about it.
+ */
+export function linkFixOnSuccess(
+  memory: MemoryRecord[],
+  cmd: string,
+  cwd: string,
+  quiet = false,
+): void {
+  const unresolved = recentUnresolvedFailures(memory, cmd, { cwd });
   if (unresolved.length > 0) {
-    recordFix(cmd, unresolved);
-    say("command works now. you fix it. I remember the fix. good good good.");
+    recordFix(cmd, unresolved, cwd);
+    if (!quiet) say("command works now. you fix it. I remember the fix. good good good.");
   }
+}
+
+function onSuccess(cmd: string): void {
+  const memory = readMemory();
+  if (memory === undefined) return;
+  linkFixOnSuccess(memory, cmd, process.cwd());
 }

@@ -53,16 +53,22 @@ export function detail(msg: string): void {
   process.stderr.write(`${dim(msg)}\n`);
 }
 
-/** "84 days ago", "3 hours ago", "just now" — Rocky counts precisely. */
-export function ago(ts: number): string {
-  const s = Math.floor((Date.now() - ts) / 1000);
+/** "just now", "2 minutes", "6 hours", "3 days" — the bare span, no suffix. */
+export function elapsed(ms: number): string {
+  const s = Math.floor(ms / 1000);
   if (s < 60) return "just now";
   const m = Math.floor(s / 60);
-  if (m < 60) return `${m} minute${m === 1 ? "" : "s"} ago`;
+  if (m < 60) return `${m} minute${m === 1 ? "" : "s"}`;
   const h = Math.floor(m / 60);
-  if (h < 24) return `${h} hour${h === 1 ? "" : "s"} ago`;
+  if (h < 24) return `${h} hour${h === 1 ? "" : "s"}`;
   const d = Math.floor(h / 24);
-  return `${d} day${d === 1 ? "" : "s"} ago`;
+  return `${d} day${d === 1 ? "" : "s"}`;
+}
+
+/** "84 days ago", "3 hours ago", "just now" — Rocky counts precisely. */
+export function ago(ts: number): string {
+  const span = elapsed(Date.now() - ts);
+  return span === "just now" ? span : `${span} ago`;
 }
 
 /**

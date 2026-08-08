@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import { spawnSync, type SpawnSyncReturns } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test, { type TestContext } from "node:test";
 import { fileURLToPath } from "node:url";
+import { fingerprint } from "../core/fingerprint.js";
 import { quoteShellPath } from "../core/shell-quote.js";
 import { PACKAGE_VERSION } from "../core/package-info.js";
 
@@ -103,9 +104,19 @@ function runPreloadProbe(sandbox: ProcessSandbox, source: string): SpawnSyncRetu
   });
 }
 
-function assertNoDetectorMarkers(sandbox: ProcessSandbox): void {
+/** The network-egress half of the guarantee: no external fetch was attempted. */
+function assertNoFetchAttempt(sandbox: ProcessSandbox): void {
   assert.equal(existsSync(sandbox.fetchMarker), false, "isolated CLI attempted fetch");
+}
+
+/** The background-daemon half: no detached spawn / unref was attempted. */
+function assertNoBackgroundSpawnAttempt(sandbox: ProcessSandbox): void {
   assert.equal(existsSync(sandbox.backgroundMarker), false, "isolated CLI attempted background child");
+}
+
+function assertNoDetectorMarkers(sandbox: ProcessSandbox): void {
+  assertNoFetchAttempt(sandbox);
+  assertNoBackgroundSpawnAttempt(sandbox);
 }
 
 function assertCompleted(result: SpawnSyncReturns<string>, expectedStatus: number): void {
@@ -364,4 +375,206 @@ test("a memory write failure never changes the wrapped command's exit code", (t)
 
   const succeeded = runCli(sandbox, ["run", "exit 0"]);
   assert.equal(succeeded.status, 0);
+});
+
+/**
+ * Builds a `rocky run` command line whose stderr is exactly `marker`, so the
+ * fingerprint `run`'s onFailure computes from that real stderr can be
+ * predicted in the test (via `fingerprint(marker)`) and seeded ahead of
+ * time. Quoted through `quoteShellPath` — same helper `deepMemoryHint` uses —
+ * so the child's `-e` script survives the shell that `run.ts` spawns it
+ * through.
+ */
+function failingCommandPrinting(marker: string): string {
+  const script = `console.error('${marker}');process.exit(1)`;
+  return `${quoteShellPath(process.execPath, process.platform)} -e ${quoteShellPath(script, process.platform)}`;
+}
+
+test("run's onFailure speaks the strong link basis, not just the fix command", (t) => {
+  const sandbox = processSandbox(t);
+  const marker = "error rocky basis strong boom";
+  const fp = fingerprint(marker);
+  const failure = {
+    kind: "failure", id: "basis-strong-failure", ts: 1_700_000_000_000, cwd: packageRoot,
+    cmd: "cargo build --release", exitCode: 1, fingerprint: fp, signature: [marker], excerpt: marker,
+    origin: "run",
+  };
+  const fix = {
+    kind: "fix", id: "basis-strong-fix", ts: 1_700_000_120_000, cwd: packageRoot,
+    cmd: "cargo build", failureIds: ["basis-strong-failure"],
+    links: [{ id: "basis-strong-failure", basis: "signature" }],
+  };
+  writeFileSync(
+    join(sandbox.rockyHome, "memory.jsonl"),
+    `${JSON.stringify(failure)}\n${JSON.stringify(fix)}\n`,
+    "utf8",
+  );
+
+  const result = runCli(sandbox, ["run", failingCommandPrinting(marker)]);
+
+  assertCompleted(result, 1);
+  assert.match(result.stderr, /same command, 2 minutes later\. strong\./);
+  assert.doesNotMatch(result.stderr, /maybe not fix/);
+  assertNoDetectorMarkers(sandbox);
+});
+
+test("run's onFailure hedges a weak link instead of presenting it like a real match", (t) => {
+  const sandbox = processSandbox(t);
+  const marker = "error rocky basis weak boom";
+  const fp = fingerprint(marker);
+  const failure = {
+    kind: "failure", id: "basis-weak-failure", ts: 1_700_000_000_000, cwd: packageRoot,
+    cmd: "npm run build", exitCode: 1, fingerprint: fp, signature: [marker], excerpt: marker,
+    origin: "run",
+  };
+  const fix = {
+    kind: "fix", id: "basis-weak-fix", ts: 1_700_000_120_000, cwd: packageRoot,
+    cmd: "npm rebuild sharp", failureIds: ["basis-weak-failure"],
+    links: [{ id: "basis-weak-failure", basis: "program" }],
+  };
+  writeFileSync(
+    join(sandbox.rockyHome, "memory.jsonl"),
+    `${JSON.stringify(failure)}\n${JSON.stringify(fix)}\n`,
+    "utf8",
+  );
+
+  const result = runCli(sandbox, ["run", failingCommandPrinting(marker)]);
+
+  assertCompleted(result, 1);
+  assert.match(result.stderr, /same program, 2 minutes later\. maybe not fix\. check, question/);
+  assert.doesNotMatch(result.stderr, /\bstrong\b/);
+  assertNoDetectorMarkers(sandbox);
+});
+
+test("a v0.2.1-era fix record without links stays silent about basis", (t) => {
+  const sandbox = processSandbox(t);
+  const marker = "error rocky basis absent boom";
+  const fp = fingerprint(marker);
+  const failure = {
+    kind: "failure", id: "basis-none-failure", ts: 1_700_000_000_000, cwd: packageRoot,
+    cmd: "npm run build", exitCode: 1, fingerprint: fp, signature: [marker], excerpt: marker,
+    origin: "run",
+  };
+  const fix = {
+    kind: "fix", id: "basis-none-fix", ts: 1_700_000_120_000, cwd: packageRoot,
+    cmd: "npm rebuild sharp", failureIds: ["basis-none-failure"],
+  };
+  writeFileSync(
+    join(sandbox.rockyHome, "memory.jsonl"),
+    `${JSON.stringify(failure)}\n${JSON.stringify(fix)}\n`,
+    "utf8",
+  );
+
+  const result = runCli(sandbox, ["run", failingCommandPrinting(marker)]);
+
+  assertCompleted(result, 1);
+  assert.match(result.stderr, /last time, you fix with:/);
+  assert.doesNotMatch(result.stderr, /\bstrong\b|maybe not fix/);
+  assertNoDetectorMarkers(sandbox);
+});
+
+test("run's onFailure admits when the remembered fix comes from a different directory", (t) => {
+  const sandbox = processSandbox(t);
+  const marker = "error rocky test boom elsewhere";
+  const fp = fingerprint(marker);
+  const elsewhere = join(sandbox.root, "elsewhere-project");
+  const failure = {
+    kind: "failure", id: "elsewhere-failure", ts: 1_700_000_000_000, cwd: packageRoot,
+    cmd: "whatever failed before", exitCode: 1, fingerprint: fp, signature: [marker], excerpt: marker,
+    origin: "run",
+  };
+  const fix = {
+    kind: "fix", id: "elsewhere-fix", ts: 1_700_000_001_000, cwd: elsewhere,
+    cmd: "the remembered fix command", failureIds: ["elsewhere-failure"],
+  };
+  writeFileSync(
+    join(sandbox.rockyHome, "memory.jsonl"),
+    `${JSON.stringify(failure)}\n${JSON.stringify(fix)}\n`,
+    "utf8",
+  );
+
+  const result = runCli(sandbox, ["run", failingCommandPrinting(marker)]);
+
+  assertCompleted(result, 1);
+  assert.match(result.stderr, /but fix comes from other place\./);
+  assert.match(result.stderr, new RegExp(`place:\\s*${elsewhere.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
+  assertNoDetectorMarkers(sandbox);
+});
+
+test("watch records a failure with origin watch and saves exactly one log file with the stderr tail", (t) => {
+  const sandbox = processSandbox(t);
+  const result = runCli(sandbox, ["watch", "sh -c 'echo boom >&2; exit 3'"]);
+
+  assertCompleted(result, 3);
+
+  const lines = readFileSync(join(sandbox.rockyHome, "memory.jsonl"), "utf8").trim().split("\n");
+  assert.equal(lines.length, 1);
+  const record = JSON.parse(lines[0]!) as { kind: string; origin?: string };
+  assert.equal(record.kind, "failure");
+  assert.equal(record.origin, "watch");
+
+  const watchDir = join(sandbox.rockyHome, "watch");
+  const files = readdirSync(watchDir);
+  assert.equal(files.length, 1);
+  assert.match(readFileSync(join(watchDir, files[0]!), "utf8"), /boom/);
+  // Only the fetch half of assertNoDetectorMarkers applies here: unlike
+  // run/recall/stats/hook, watch's whole point is a best-effort detached
+  // notify-send/osascript spawn on completion (core/notify.ts) — the
+  // isolated preload's detached-spawn guard throws inside it, notify()'s own
+  // try/catch swallows that and falls back to a bell, and the exit
+  // code/memory/log assertions above already prove the wrapped command's
+  // outcome was never touched by it. The network-egress guarantee this test
+  // has nothing to do with notify still applies in full.
+  assertNoFetchAttempt(sandbox);
+});
+
+test("watch passes a Ctrl-C-style exit code straight through, with no memory record and no log", (t) => {
+  if (process.platform === "win32") return;
+  const sandbox = processSandbox(t);
+  const result = runCli(sandbox, ["watch", "sh -c 'exit 130'"]);
+
+  assert.equal(result.status, 130);
+  assert.equal(existsSync(join(sandbox.rockyHome, "memory.jsonl")), false);
+  assert.equal(existsSync(join(sandbox.rockyHome, "watch")), false);
+  assertNoDetectorMarkers(sandbox);
+});
+
+test("watch with an empty command exits 2", (t) => {
+  const sandbox = processSandbox(t);
+  const result = runCli(sandbox, ["watch", ""]);
+  assertCompleted(result, 2);
+  assertNoDetectorMarkers(sandbox);
+});
+
+test("run's onFailure adds no line when the remembered fix's cwd matches the current directory", (t) => {
+  const sandbox = processSandbox(t);
+  const marker = "error rocky test boom samecwd";
+  const fp = fingerprint(marker);
+  // runCli spawns with cwd: packageRoot, so the fix must be seeded against
+  // process.cwd()'s resolved form to match what `run.ts` compares against.
+  const here = realpathSync(packageRoot);
+  const failure = {
+    kind: "failure", id: "samecwd-failure", ts: 1_700_000_000_000, cwd: here,
+    cmd: "whatever failed before", exitCode: 1, fingerprint: fp, signature: [marker], excerpt: marker,
+    origin: "run",
+  };
+  const fix = {
+    kind: "fix", id: "samecwd-fix", ts: 1_700_000_001_000, cwd: here,
+    cmd: "the remembered fix command", failureIds: ["samecwd-failure"],
+  };
+  writeFileSync(
+    join(sandbox.rockyHome, "memory.jsonl"),
+    `${JSON.stringify(failure)}\n${JSON.stringify(fix)}\n`,
+    "utf8",
+  );
+
+  const result = runCli(sandbox, ["run", failingCommandPrinting(marker)]);
+
+  assertCompleted(result, 1);
+  assert.doesNotMatch(result.stderr, /other place/);
+  assert.doesNotMatch(result.stderr, /place:/);
+  // sanity: the base fix line still speaks, proving the comparison — not the
+  // whole fix branch — is what's being suppressed here.
+  assert.match(result.stderr, /last time, you fix with:/);
+  assertNoDetectorMarkers(sandbox);
 });

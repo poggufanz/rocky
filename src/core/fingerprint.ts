@@ -92,3 +92,72 @@ export function commandFingerprint(cmd: string, exitCode: number): string {
   const sig = `cmd:${normalizeLine(cmd)}:${exitCode}`;
   return createHash("sha1").update(sig).digest("hex").slice(0, 16);
 }
+
+/**
+ * First whitespace-separated token, reduced to its basename when it looks
+ * like a path. A regex split on both `/` and `\` (not node:path) so a
+ * Windows-style path reduces correctly even when Rocky runs on Linux.
+ */
+/** `FOO=1 npm test` — an assignment prefix is not the program being run. */
+const ENV_ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
+
+/**
+ * Programs that exist only to run another program. Their own name says nothing
+ * about what failed, so `sudo systemctl restart nginx` must reduce to
+ * `systemctl restart`, not `sudo systemctl` — otherwise `restart` and `status`
+ * collapse into one signature and a read-only command gets graded a strong fix
+ * for a failed restart.
+ */
+const WRAPPERS = new Set(["sudo", "doas", "env", "command", "time", "nohup", "nice", "exec"]);
+
+function basename(token: string): string {
+  const segments = token.split(/[\\/]/);
+  return segments[segments.length - 1] || token;
+}
+
+/** Drop assignment prefixes and wrapper programs to reach the real command. */
+function meaningfulTokens(cmd: string): string[] {
+  const tokens = cmd.trim().split(/\s+/).filter((token) => token.length > 0);
+  let start = 0;
+  while (start < tokens.length) {
+    const token = tokens[start];
+    if (token === undefined) break;
+    if (ENV_ASSIGNMENT.test(token) || WRAPPERS.has(basename(token))) { start++; continue; }
+    break;
+  }
+  // A line that is nothing but prefixes still has to name something.
+  return start < tokens.length ? tokens.slice(start) : tokens;
+}
+
+export function commandBase(cmd: string): string {
+  const first = meaningfulTokens(cmd)[0];
+  return first ? basename(first) : "";
+}
+
+/**
+ * Deterministic command signature used to grade fix links ("signature" vs
+ * "program" basis). This is a command signature, not an error fingerprint:
+ * no lowercasing, no number masking, flag case preserved (`-v` !== `-V`).
+ */
+export function commandSignature(cmd: string): string {
+  const tokens = meaningfulTokens(cmd);
+  const first = tokens[0];
+  if (first === undefined || first === "") return "";
+  const base = basename(first);
+  const rest = tokens.slice(1);
+
+  // A flag's value is not the subcommand. `docker --context prod build .` is a
+  // build, not a "prod" — without this, `docker --context prod ps` shares its
+  // signature and gets graded a strong fix for a failed build.
+  for (let i = 0; i < rest.length; i++) {
+    const token = rest[i];
+    if (token === undefined) break;
+    if (!token.startsWith("-")) return `${base} ${token}`;
+    if (token.includes("=")) continue;                      // --context=prod carries its own value
+    const next = rest[i + 1];
+    if (next !== undefined && !next.startsWith("-")) i++;   // skip the flag's value
+  }
+
+  const flags = [...new Set(rest)].sort();
+  return [base, ...flags].join(" ");
+}

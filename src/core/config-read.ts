@@ -7,9 +7,16 @@ export type AiConfig =
   | { enabled: false }
   | { enabled: true; provider: "ollama"; model: string; exposure: Exposure };
 
+export interface WatchConfig {
+  notify: boolean;
+}
+
+export const DEFAULT_WATCH_NOTIFY = true;
+
 export interface RockyConfigV1 {
   version: 1;
   ai: AiConfig;
+  watch?: WatchConfig;
 }
 
 export type ConfigLoadResult =
@@ -25,20 +32,36 @@ export function parseExposure(value: string | undefined, fallback: Exposure = "s
   throw new Error(`invalid exposure: ${value}`);
 }
 
+function parseWatch(value: unknown): WatchConfig | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+  const watch = value as Record<string, unknown>;
+  if (Object.keys(watch).some((key) => key !== "notify")) return undefined;
+  if (typeof watch.notify !== "boolean") return undefined;
+  return { notify: watch.notify };
+}
+
 export function parseConfig(value: unknown): RockyConfigV1 | undefined {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
   const root = value as Record<string, unknown>;
-  if (Object.keys(root).some((key) => key !== "version" && key !== "ai")) return undefined;
+  if (Object.keys(root).some((key) => key !== "version" && key !== "ai" && key !== "watch")) return undefined;
   if (root.version !== 1 || typeof root.ai !== "object" || root.ai === null || Array.isArray(root.ai)) return undefined;
   const ai = root.ai as Record<string, unknown>;
+  let watch: WatchConfig | undefined;
+  if (root.watch !== undefined) {
+    watch = parseWatch(root.watch);
+    if (!watch) return undefined;
+  }
   if (ai.enabled === false) {
     if (Object.keys(ai).some((key) => key !== "enabled")) return undefined;
-    return { version: 1, ai: { enabled: false } };
+    return { version: 1, ai: { enabled: false }, ...(watch === undefined ? {} : { watch }) };
   }
   if (Object.keys(ai).some((key) => !["enabled", "provider", "model", "exposure"].includes(key))) return undefined;
   if (ai.enabled !== true || ai.provider !== "ollama" || typeof ai.model !== "string" || ai.model.trim() === "") return undefined;
   if (ai.exposure !== "sanitized" && ai.exposure !== "raw") return undefined;
-  return { version: 1, ai: { enabled: true, provider: "ollama", model: ai.model, exposure: ai.exposure } };
+  return {
+    version: 1, ai: { enabled: true, provider: "ollama", model: ai.model, exposure: ai.exposure },
+    ...(watch === undefined ? {} : { watch }),
+  };
 }
 
 export function loadConfig(path = resolveRockyPaths().config): ConfigLoadResult {

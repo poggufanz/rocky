@@ -26,7 +26,7 @@ import {
 } from "./package-smoke-support.mjs";
 
 const PACKAGE_NAME = "@poggufanz/rocky-cli";
-const PACKAGE_VERSION = "0.2.1-beta.1";
+const PACKAGE_VERSION = "0.3.0";
 const PACKAGE_BINARY = "rocky";
 const packageRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const keepTemp = process.argv.slice(2).includes("--keep-temp");

@@ -11,7 +11,8 @@ import { type AiAct, type AiStatus, type RecallWithAiPort } from "../ai/port.js"
 import { createRecallAiPort, formatModelExplanation, singleFlightRecallAi } from "../ai/recall-ai.js";
 import { createMemoryQueries, type MemoryQueries, type RecallHit } from "../core/memory-query.js";
 import { loadMemory } from "../core/memory-read.js";
-import { ago, detail, heading, phrase, phraseForAct, say } from "../ui/rocky.js";
+import { resolveRockyPaths } from "../core/state-paths.js";
+import { ago, detail, elapsed, heading, phrase, phraseForAct, say } from "../ui/rocky.js";
 
 export type ParsedRecall = { useAi: boolean; query: string };
 
@@ -179,15 +180,22 @@ export async function recall(argv: readonly string[], dependencies?: RecallDepen
   }
 
   const deps = dependencies ?? defaultDependencies();
-  const hits = parsed.useAi
-    ? deps.memory.recall({ query, limit: 5 }).slice(0, 5)
-    : deps.memory.recall({ query });
-  if (hits.length === 0) {
-    if (deps.memory.recentFailures({ limit: 1 }).length === 0) {
-      say("memory is empty. no errors yet. this is good... or you not use me yet, question");
-      return 0;
+  let hits: RecallHit[];
+  try {
+    hits = parsed.useAi
+      ? deps.memory.recall({ query, limit: 5 }).slice(0, 5)
+      : deps.memory.recall({ query });
+    if (hits.length === 0) {
+      if (deps.memory.recentFailures({ limit: 1 }).length === 0) {
+        say("memory is empty. no errors yet. this is good... or you not use me yet, question");
+        return 0;
+      }
+      say("I listen to memory. nothing match. maybe error is new, maybe words are different.");
+      return 1;
     }
-    say("I listen to memory. nothing match. maybe error is new, maybe words are different.");
+  } catch {
+    say("memory file does not open for me. I answer from nothing.");
+    detail(`    memory: ${resolveRockyPaths().memory}`);
     return 1;
   }
 
@@ -212,6 +220,13 @@ export async function recall(argv: readonly string[], dependencies?: RecallDepen
     detail(indent(hit.failure.excerpt));
     if (hit.fix) {
       say(`fixed with: ${hit.fix.cmd}`);
+      const link = hit.fix.links?.find((candidate) => candidate.id === hit.failure.id);
+      if (link) {
+        const span = elapsed(hit.fix.ts - hit.failure.ts);
+        say(link.basis === "signature"
+          ? `same command, ${span} later. strong.`
+          : `same program, ${span} later. maybe not fix. check, question`);
+      }
     } else {
       say("no fix recorded for this one. bad bad.");
     }

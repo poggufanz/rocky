@@ -7,6 +7,17 @@ import {
 } from "../core/config.js";
 import { detail, say } from "../ui/rocky.js";
 
+/**
+ * Keys this command does not own. `watch` belongs to the user, not to the AI
+ * settings — rebuilding the config from scratch silently deleted it, so
+ * `rocky model off` turned watch notifications back on for someone who had
+ * deliberately switched them off.
+ */
+function preservedKeys(current: ReturnType<typeof loadConfig>): Pick<RockyConfigV1, "watch"> {
+  if (current.status === "invalid" || current.config.watch === undefined) return {};
+  return { watch: current.config.watch };
+}
+
 export interface ModelDependencies {
   ollama: OllamaClient;
   loadConfig: typeof loadConfig;
@@ -114,6 +125,7 @@ async function useModel(request: UseRequest, deps: ModelDependencies): Promise<n
   const config: RockyConfigV1 = {
     version: 1,
     ai: { enabled: true, provider: "ollama", model: request.model, exposure: request.exposure },
+    ...preservedKeys(current),
   };
   try {
     deps.saveConfigAtomic(config);
@@ -153,7 +165,7 @@ export async function model(argv: readonly string[], dependencies?: ModelDepende
       if (current === undefined) return 1;
       if (current.status === "invalid") return configurationFailure(current.path, "invalid");
       try {
-        deps.saveConfigAtomic({ version: 1, ai: { enabled: false } });
+        deps.saveConfigAtomic({ version: 1, ai: { enabled: false }, ...preservedKeys(current) });
       } catch {
         say("configuration not saved. memory still works. bad bad.");
         detail(`AI config could not save: ${current.path}`);
