@@ -46,7 +46,7 @@ import type {
   RecoveryOutcome,
 } from "../setup/file-transaction.js";
 import { quotePosixShell } from "../core/shell-quote.js";
-import { ago, detail, detailTty, say, sayTty } from "../ui/rocky.js";
+import { ago, detail, detailTty, phrase, say, sayTty } from "../ui/rocky.js";
 
 /**
  * An unreadable memory file is spoken over /dev/tty, not thrown — a detached
@@ -390,6 +390,14 @@ interface PublishResult {
  * copies for this same target are pruned so at most one survives.
  */
 function publishBashrc(rc: string, staged: Buffer, prior: BytesReadResult): PublishResult {
+  // The rename-based transaction below needs write permission on bashrc's
+  // *directory*, not on bashrc itself, so a mode-400 bashrc still gets
+  // legitimately replaced. That is correct, but a user who locked the file
+  // stated an intent — say so before touching it, rather than walking past
+  // it in silence.
+  if (prior.status === "valid" && prior.mode !== undefined && (prior.mode & 0o200) === 0) {
+    say(phrase("bashrc-write-protected"));
+  }
   let result: ConditionalBytesWriteResult;
   try {
     result = atomicWriteBytesIfUnchanged(rc, staged, prior);

@@ -8,7 +8,8 @@ export type PhraseKey =
   | "ai-unavailable"
   | "ai-timeout"
   | "ai-busy"
-  | "ai-fallback";
+  | "ai-fallback"
+  | "bashrc-write-protected";
 
 const PHRASES: Readonly<Record<PhraseKey, string>> = Object.freeze({
   "ai-known-fix": "memory and small model agree. old fix is strong clue. good good.",
@@ -19,6 +20,7 @@ const PHRASES: Readonly<Record<PhraseKey, string>> = Object.freeze({
   "ai-timeout": "small model takes too long. I keep old memory answer.",
   "ai-busy": "small model busy. deterministic memory speaks now.",
   "ai-fallback": "model words not grounded enough. I keep memory order.",
+  "bashrc-write-protected": "bashrc is write-protected. I replace it anyway. your lines stay.",
 });
 
 export const phraseKeys: readonly PhraseKey[] = Object.freeze([
@@ -30,6 +32,7 @@ export const phraseKeys: readonly PhraseKey[] = Object.freeze([
   "ai-timeout",
   "ai-busy",
   "ai-fallback",
+  "bashrc-write-protected",
 ]);
 
 export function phrase(key: PhraseKey): string {
