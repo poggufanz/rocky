@@ -30,6 +30,7 @@ import {
   loadMemory,
   recordFix,
   recordHookFailure,
+  type MemoryRecord,
 } from "../core/memory.js";
 import { findByFingerprint, getFix, recentUnresolvedFailures } from "../core/memory-query.js";
 import {
@@ -47,13 +48,30 @@ import type {
 import { quotePosixShell } from "../core/shell-quote.js";
 import { ago, detail, detailTty, say, sayTty } from "../ui/rocky.js";
 
+/**
+ * An unreadable memory file is spoken over /dev/tty, not thrown — a detached
+ * hook handler must never take the shell down.
+ */
+function readMemory(): MemoryRecord[] | undefined {
+  try {
+    return loadMemory();
+  } catch {
+    sayTty("memory file does not open for me. I answer from nothing.");
+    detailTty(`memory: ${resolveRockyPaths().memory}`);
+    return undefined;
+  }
+}
+
 /** A command failed in the hooked shell. Record it; speak only if memory has something to say. */
 export function hookFail(cmd: string, exitCode: number, cwd: string): number {
-  const memory = loadMemory();
-  const fp = commandFingerprint(cmd, exitCode);
-  const previous = findByFingerprint(memory, fp);
+  const memory = readMemory();
 
   recordHookFailure(cmd, exitCode, cwd);
+
+  if (memory === undefined) return 0; // unreadable memory: recorded, but nothing to recall
+
+  const fp = commandFingerprint(cmd, exitCode);
+  const previous = findByFingerprint(memory, fp);
 
   if (previous.length === 0) return 0; // first time: passive ears stay quiet
 
@@ -84,13 +102,16 @@ export function deepMemoryHint(cmd: string): string | undefined {
 
 /** A command succeeded while the pending flag existed. Try to link a fix. */
 export function hookSuccess(cmd: string, cwd: string): number {
-  const memory = loadMemory();
+  const memory = readMemory();
+  if (memory === undefined) return 0;
   const unresolved = recentUnresolvedFailures(memory, cmd, { cwd });
   if (unresolved.length > 0) {
     recordFix(cmd, unresolved, cwd);
     sayTty("command works now. you fix it. I remember the fix. good good good.");
   }
-  clearPendingIfResolved(loadMemory());
+  // Re-read: the fix just recorded above changes resolution state.
+  const latest = readMemory();
+  if (latest !== undefined) clearPendingIfResolved(latest);
   return 0;
 }
 
