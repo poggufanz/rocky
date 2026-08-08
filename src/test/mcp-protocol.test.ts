@@ -33,7 +33,7 @@ function requestOf(routed: RoutedMessage) {
   return routed;
 }
 
-const serverInfo = { name: "@poggufanz/rocky-cli", version: "0.2.1-beta.0" };
+const serverInfo = { name: "@poggufanz/rocky-cli", version: "0.2.1-beta.1" };
 
 test("modern discovery is stateless and stamps complete server identity", () => {
   const routed = routeProtocolMessage(fixture("modern/discover-request.json"), INITIAL_PROTOCOL_STATE);

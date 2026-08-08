@@ -18,7 +18,7 @@ import { commandInvocation } from "./package-smoke-support.mjs";
 
 const packageRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const PACKAGE_NAME = "@poggufanz/rocky-cli";
-const PACKAGE_VERSION = "0.2.1-beta.0";
+const PACKAGE_VERSION = "0.2.1-beta.1";
 const COMMAND_TIMEOUT_MS = 10 * 60 * 1_000;
 const MAX_COMMAND_OUTPUT_BYTES = 32 * 1024 * 1024;
 

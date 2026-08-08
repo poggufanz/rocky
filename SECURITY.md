@@ -16,7 +16,8 @@ This is a one-person side project, not a funded product. Expect a first reply wi
 
 | Version | Supported |
 | --- | --- |
-| 0.2.1-beta.0 | Yes |
+| 0.2.1-beta.1 | Yes |
+| 0.2.1-beta.0 | No |
 | earlier | No |
 
 Only the current beta gets fixes. Anything published before it is superseded.
