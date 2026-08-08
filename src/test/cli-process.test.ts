@@ -390,6 +390,89 @@ function failingCommandPrinting(marker: string): string {
   return `${quoteShellPath(process.execPath, process.platform)} -e ${quoteShellPath(script, process.platform)}`;
 }
 
+test("run's onFailure speaks the strong link basis, not just the fix command", (t) => {
+  const sandbox = processSandbox(t);
+  const marker = "error rocky basis strong boom";
+  const fp = fingerprint(marker);
+  const failure = {
+    kind: "failure", id: "basis-strong-failure", ts: 1_700_000_000_000, cwd: packageRoot,
+    cmd: "cargo build --release", exitCode: 1, fingerprint: fp, signature: [marker], excerpt: marker,
+    origin: "run",
+  };
+  const fix = {
+    kind: "fix", id: "basis-strong-fix", ts: 1_700_000_120_000, cwd: packageRoot,
+    cmd: "cargo build", failureIds: ["basis-strong-failure"],
+    links: [{ id: "basis-strong-failure", basis: "signature" }],
+  };
+  writeFileSync(
+    join(sandbox.rockyHome, "memory.jsonl"),
+    `${JSON.stringify(failure)}\n${JSON.stringify(fix)}\n`,
+    "utf8",
+  );
+
+  const result = runCli(sandbox, ["run", failingCommandPrinting(marker)]);
+
+  assertCompleted(result, 1);
+  assert.match(result.stderr, /same command, 2 minutes later\. strong\./);
+  assert.doesNotMatch(result.stderr, /maybe not fix/);
+  assertNoDetectorMarkers(sandbox);
+});
+
+test("run's onFailure hedges a weak link instead of presenting it like a real match", (t) => {
+  const sandbox = processSandbox(t);
+  const marker = "error rocky basis weak boom";
+  const fp = fingerprint(marker);
+  const failure = {
+    kind: "failure", id: "basis-weak-failure", ts: 1_700_000_000_000, cwd: packageRoot,
+    cmd: "npm run build", exitCode: 1, fingerprint: fp, signature: [marker], excerpt: marker,
+    origin: "run",
+  };
+  const fix = {
+    kind: "fix", id: "basis-weak-fix", ts: 1_700_000_120_000, cwd: packageRoot,
+    cmd: "npm rebuild sharp", failureIds: ["basis-weak-failure"],
+    links: [{ id: "basis-weak-failure", basis: "program" }],
+  };
+  writeFileSync(
+    join(sandbox.rockyHome, "memory.jsonl"),
+    `${JSON.stringify(failure)}\n${JSON.stringify(fix)}\n`,
+    "utf8",
+  );
+
+  const result = runCli(sandbox, ["run", failingCommandPrinting(marker)]);
+
+  assertCompleted(result, 1);
+  assert.match(result.stderr, /same program, 2 minutes later\. maybe not fix\. check, question/);
+  assert.doesNotMatch(result.stderr, /\bstrong\b/);
+  assertNoDetectorMarkers(sandbox);
+});
+
+test("a v0.2.1-era fix record without links stays silent about basis", (t) => {
+  const sandbox = processSandbox(t);
+  const marker = "error rocky basis absent boom";
+  const fp = fingerprint(marker);
+  const failure = {
+    kind: "failure", id: "basis-none-failure", ts: 1_700_000_000_000, cwd: packageRoot,
+    cmd: "npm run build", exitCode: 1, fingerprint: fp, signature: [marker], excerpt: marker,
+    origin: "run",
+  };
+  const fix = {
+    kind: "fix", id: "basis-none-fix", ts: 1_700_000_120_000, cwd: packageRoot,
+    cmd: "npm rebuild sharp", failureIds: ["basis-none-failure"],
+  };
+  writeFileSync(
+    join(sandbox.rockyHome, "memory.jsonl"),
+    `${JSON.stringify(failure)}\n${JSON.stringify(fix)}\n`,
+    "utf8",
+  );
+
+  const result = runCli(sandbox, ["run", failingCommandPrinting(marker)]);
+
+  assertCompleted(result, 1);
+  assert.match(result.stderr, /last time, you fix with:/);
+  assert.doesNotMatch(result.stderr, /\bstrong\b|maybe not fix/);
+  assertNoDetectorMarkers(sandbox);
+});
+
 test("run's onFailure admits when the remembered fix comes from a different directory", (t) => {
   const sandbox = processSandbox(t);
   const marker = "error rocky test boom elsewhere";

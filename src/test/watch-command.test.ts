@@ -264,3 +264,20 @@ test("watch notifies by default when config is missing, invalid JSON, or unreada
     assert.equal(notifier.calls.length, 1);
   }
 });
+
+test("options are honoured after the command, the position --help documents", () => {
+  // `rocky watch "sleep 1" --quiet` used to append the flag to the command:
+  // `sleep 1 --quiet` really ran, a wrapped exit 0 became 1, and a failure that
+  // never happened entered memory. Rocky must never edit the command he is handed.
+  assert.deepEqual(parseWatchArgs(["sleep 1", "--quiet"]), { quiet: true, cmd: "sleep 1" });
+  assert.deepEqual(parseWatchArgs(["--quiet", "sleep 1"]), { quiet: true, cmd: "sleep 1" });
+  assert.deepEqual(parseWatchArgs(["npm", "run", "build", "--quiet"]), { quiet: true, cmd: "npm run build" });
+
+  // A trailing unknown flag is rejected exactly like a leading one — never
+  // silently appended to the command.
+  assert.throws(() => parseWatchArgs(["true", "--bogus"]), /unknown option: --bogus/);
+  assert.throws(() => parseWatchArgs(["--bogus", "true"]), /unknown option: --bogus/);
+
+  // `--` still ends option parsing, so a literal flag token stays expressible.
+  assert.deepEqual(parseWatchArgs(["--", "sleep 1", "--quiet"]), { quiet: false, cmd: "sleep 1 --quiet" });
+});

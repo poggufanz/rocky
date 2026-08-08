@@ -22,6 +22,18 @@ import { detail, phrase, say } from "../ui/rocky.js";
 
 export interface ParsedWatch { quiet: boolean; cmd: string }
 
+/**
+ * Options are honoured wherever they appear, not only before the command.
+ *
+ * `rocky --help` documents `rocky watch "<command>" [--quiet]` — the trailing
+ * form. Stopping option parsing at the first positional appended `--quiet` to
+ * the command string instead, so `rocky watch "sleep 1" --quiet` really ran
+ * `sleep 1 --quiet`: a wrapped exit 0 became 1 and a failure that never
+ * happened entered memory. Rocky must never change the command he was handed.
+ *
+ * `--` still ends option parsing, so a command that genuinely needs a literal
+ * `--flag` token stays expressible.
+ */
 export function parseWatchArgs(argv: readonly string[]): ParsedWatch {
   let quiet = false;
   let parsingOptions = true;
@@ -37,7 +49,6 @@ export function parseWatchArgs(argv: readonly string[]): ParsedWatch {
       continue;
     }
     if (parsingOptions && token.startsWith("--")) throw new Error(`unknown option: ${token}`);
-    parsingOptions = false;
     cmdParts.push(token);
   }
 
