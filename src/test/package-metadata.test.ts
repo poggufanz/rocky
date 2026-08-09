@@ -206,7 +206,10 @@ test("public package metadata pins the scoped beta identity and release coordina
   assert.deepEqual(metadata.bugs, { url: "https://github.com/poggufanz/rocky/issues" });
   assert.equal(metadata.author, "Muhammad Faiq");
   assert.equal(metadata.license, "MIT");
-  assert.deepEqual(metadata.publishConfig, { access: "public", tag: "beta" });
+  // No `tag` here on purpose: it was left over from the 0.2.1-beta era, and it
+  // sent 0.4.0 to the `beta` tag while a bare `npm install -g` kept serving
+  // 0.3.0 — the release with the sanitized-MCP credential leak.
+  assert.deepEqual(metadata.publishConfig, { access: "public" });
   assert.deepEqual(metadata.files, expectedFiles);
   assert.equal(object(metadata.scripts, "scripts").prepack, "npm run build");
   assert.equal(object(metadata.scripts, "scripts").prepublishOnly, "npm test");

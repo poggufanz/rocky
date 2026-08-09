@@ -52,8 +52,7 @@
   "author": "Muhammad Faiq",
   "license": "MIT",
   "publishConfig": {
-    "access": "public",
-    "tag": "beta"
+    "access": "public"
   },
   "devDependencies": {
     "typescript": "^5.5.0",
