@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { phrase, phraseForAct, phraseKeys, validateRockyPhrase } from "../ui/phrases.js";
+import { prompt } from "../ui/rocky.js";
 
 test("phrase validator rejects visual language, emoji, and question marks", () => {
   assert.deepEqual(validateRockyPhrase("I see the answer now? 👀"), [
@@ -37,6 +38,13 @@ test("phrase validator requires question-marked lines to end with question suffi
 
 test("every catalog phrase follows Rocky voice rules", () => {
   for (const key of phraseKeys) assert.deepEqual(validateRockyPhrase(phrase(key)), [], key);
+});
+
+test("check prompts use stable voice IDs and keep the question suffix last", () => {
+  assert.ok(phraseKeys.includes("check-answer"));
+  assert.equal(phrase("check-answer"), "answer, question");
+  assert.match(prompt(phrase("check-registry-consent")), /\[Rocky\].*\[y\/N\], question $/);
+  assert.equal(prompt(phrase("check-answer")), "[Rocky] answer, question ");
 });
 
 test("every AI act uses its dedicated catalog phrase", () => {

@@ -40,6 +40,11 @@ export function say(msg: string): void {
   process.stderr.write(`${amber("[Rocky]")} ${msg}\n`);
 }
 
+/** Rocky prompt text; readline writes it to the prompt port's stderr stream. */
+export function prompt(msg: string): string {
+  return `${amber("[Rocky]")} ${msg} `;
+}
+
 /** Rocky line without trailing newline context — for multi-line blocks. */
 export function block(lines: string[]): void {
   for (const l of lines) process.stderr.write(`${amber("♫")} ${l}\n`);

@@ -1,4 +1,3 @@
-import { createInterface } from "node:readline/promises";
 import { basename, join, posix } from "node:path";
 import type {
   InspectionResult,
@@ -21,6 +20,7 @@ import { checkMcpRegistration } from "../setup/health.js";
 import { SetupUsageError, parseSetupArgs } from "../setup/parser.js";
 import { createPlatformServices, type PlatformServices } from "../setup/platform.js";
 import { processRunner, type ProcessRunner } from "../setup/process.js";
+import { createPromptPort, type PromptInput } from "../setup/prompt.js";
 import {
   isEphemeralInstall,
   isIdenticalMcpRegistration,
@@ -59,28 +59,13 @@ export interface VoiceSkillServices {
   remove(target: VoiceSkillTarget): Promise<VoiceSkillOperationResult>;
 }
 
-interface ConfirmationInput {
-  isTTY?: boolean;
-  read?: (size?: number) => unknown;
-}
-
 export function createConfirmationPort(
-  input: ConfirmationInput = process.stdin,
+  input: PromptInput = process.stdin,
 ): ConfirmationPort {
+  const prompt = createPromptPort(input, process.stderr);
   return {
     async confirm(message) {
-      if (input.isTTY !== true) return false;
-      const terminal = createInterface({
-        input: input as NodeJS.ReadStream,
-        output: process.stderr,
-        terminal: true,
-      });
-      try {
-        const answer = await terminal.question(`[Rocky] ${message} [y/N] `);
-        return answer.trim().toLowerCase() === "y" || answer.trim().toLowerCase() === "yes";
-      } finally {
-        terminal.close();
-      }
+      return prompt.confirm(`[Rocky] ${message}`);
     },
   };
 }
