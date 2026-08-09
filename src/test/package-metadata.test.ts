@@ -31,6 +31,7 @@ const expectedFiles = [
   "skills/rocky-voice",
   "README.md",
   "LICENSE",
+  "CHANGELOG.md",
 ] as const;
 
 interface JsonObject {
@@ -83,6 +84,7 @@ function occurrenceCount(value: string, needle: string): number {
 function allowedPackPath(path: string): boolean {
   return path === "LICENSE"
     || path === "README.md"
+    || path === "CHANGELOG.md"
     || path === "package.json"
     || path === "dist/index.js"
     || path.startsWith("dist/commands/")
@@ -267,6 +269,7 @@ test("npm pack dry-run exposes only the bounded production payload", (t) => {
   for (const required of [
     "LICENSE",
     "README.md",
+    "CHANGELOG.md",
     "package.json",
     "dist/index.js",
     "skills/rocky-voice/SKILL.md",

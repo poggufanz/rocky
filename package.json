@@ -17,7 +17,8 @@
     "dist/shell",
     "skills/rocky-voice",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "CHANGELOG.md"
   ],
   "scripts": {
     "build": "node scripts/build.mjs",
