@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
 import { chmodSync, closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import test, { type TestContext } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -462,12 +463,18 @@ test("--offline skips registry even when consent is stored", async (t) => {
 });
 
 test("not a git repository reports one line and exits 0", async (t) => {
+  // The shared sandbox lives inside the package worktree, so a run there finds
+  // the enclosing repository and tests something else entirely. A genuine
+  // "no repository" case has to sit outside any repo.
+  const outside = mkdtempSync(join(tmpdir(), "rocky-no-repo-"));
+  t.after(() => rmSync(outside, { recursive: true, force: true }));
   const box = sandbox(t);
 
-  const result = await runCheck(box, ["--offline"]);
+  const result = await runCheck({ ...box, repo: outside }, ["--offline"]);
 
   assertCompleted(result, 0);
   assert.equal(result.stderr.trim().split(/\r?\n/).length, 1);
+  assert.match(result.stderr, /nothing to check/);
 });
 
 test("ROCKY_NO_QUIZ and missing TTY never block comprehension", async (t) => {
@@ -572,7 +579,9 @@ test("git output is capped by default on the check path", async (t) => {
 
   const result = await runCheck(box, ["--offline"]);
 
-  assertCompleted(result, 0);
+  // Exit 2, not 0: the cap tripped, so this range was never inspected, and a
+  // manual run must not report that as clean.
+  assertCompleted(result, 2);
   assert.equal(result.stderr.trim().split(/\r?\n/).length, 1);
   assert.match(result.stderr, /git rev-parse output exceeded 1 MB.*check data not inspected/i);
 });
@@ -710,4 +719,30 @@ test("pre-push mode never reads git's positional arguments as --help", async (t)
   assertCompleted(result, 3);
   assert.doesNotMatch(result.stderr, /usage: rocky check/);
   assert.match(result.stderr, /src\/key\.ts:1/);
+});
+
+test("a manual run whose git calls fail exits 2, not a clean 0", async (t) => {
+  // Fail-open protects pushes, not exit codes. A stress audit found a manual
+  // run reporting 0 — "checked, clean" to any script reading it — after git
+  // failed so early that nothing was inspected at all.
+  const box = sandbox(t);
+  initRepo(box, { "README.md": "clean\n" }, { "src/a.ts": "const a = 1;\n" });
+  rmSync(join(box.repo, ".git", "objects"), { recursive: true, force: true });
+
+  const result = await runCheck(box, []);
+
+  assertCompleted(result, 2);
+  assert.match(result.stderr, /could not run/);
+});
+
+test("the same broken repository still lets a push through in hook mode", async (t) => {
+  const box = sandbox(t);
+  const commits = initRepo(box, { "README.md": "clean\n" }, { "src/a.ts": "const a = 1;\n" });
+  const line = prePushLine(commits.second!, commits.first);
+  rmSync(join(box.repo, ".git", "objects"), { recursive: true, force: true });
+
+  const result = await runCheck(box, ["--pre-push"], line);
+
+  // Exit 0: a Rocky that cannot run must never be the reason a push is held.
+  assertCompleted(result, 0);
 });

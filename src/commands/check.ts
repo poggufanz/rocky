@@ -37,6 +37,8 @@ interface DiffRange {
 interface CheckState {
   finding: boolean;
   prePush: boolean;
+  /** A stage could not run, so part of the range went uninspected. */
+  incomplete: boolean;
 }
 
 interface PackageCandidate {
@@ -53,7 +55,10 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function reportFailure(stage: string, error: unknown): void {
+function reportFailure(state: CheckState, stage: string, error: unknown): void {
+  // Printing is not enough: a stage that could not run means this range was
+  // never fully inspected, and the exit code has to be able to say so.
+  state.incomplete = true;
   detail(`rocky check ${stage} could not run: ${errorMessage(error)}`);
 }
 
@@ -185,8 +190,12 @@ async function pushRanges(): Promise<DiffRange[]> {
   return ranges;
 }
 
+/** Thrown when there is simply nothing to inspect, as opposed to a failed attempt. */
+class NothingToCheck extends Error {}
+
 async function manualRange(): Promise<DiffRange> {
-  await git(["rev-parse", "--git-dir"]);
+  const repo = await gitMaybe(["rev-parse", "--git-dir"]);
+  if (repo.code !== 0) throw new NothingToCheck("no git repository here. nothing to check");
   const upstream = await gitMaybe(["rev-parse", "--verify", "@{upstream}"]);
   if (upstream.code === 0) return { base: "@{upstream}", head: "HEAD" };
   return { base: await emptyTree(), head: "HEAD" };
@@ -355,7 +364,9 @@ async function installHookFlow(quiet: boolean): Promise<number> {
   try {
     await registryConsent(quiet, true);
   } catch (error) {
-    reportFailure("registry consent", error);
+    // Installing a hook inspects nothing, so a failed consent prompt here is
+    // not an incomplete scan — it only means the answer is still unrecorded.
+    detail(`rocky check registry consent could not run: ${errorMessage(error)}`);
   }
   return result.status === "refused" ? 1 : 0;
 }
@@ -402,32 +413,47 @@ async function runCheck(rest: readonly string[], state: CheckState): Promise<num
     lines = await addedLines(ranges);
     announceSecretFindings(lines, quiet, state);
   } catch (error) {
-    reportFailure("secret scan", error);
+    reportFailure(state, "secret scan", error);
   }
 
   try {
     await packageStage(ranges, flags.has("--offline"), quiet, state);
   } catch (error) {
-    reportFailure("package scan", error);
+    reportFailure(state, "package scan", error);
   }
 
   if (!quiet && process.env.ROCKY_NO_QUIZ !== "1") {
     try {
       await maybeAskComprehension(lines, ranges);
     } catch (error) {
-      reportFailure("comprehension prompt", error);
+      reportFailure(state, "comprehension prompt", error);
     }
   }
 
+  if (!state.finding && state.incomplete && !state.prePush) return 2;
   return findingExit(state);
 }
 
 export async function check(rest: string[]): Promise<number> {
-  const state: CheckState = { finding: false, prePush: rest.includes("--pre-push") };
+  const state: CheckState = { finding: false, prePush: rest.includes("--pre-push"), incomplete: false };
   try {
     return await runCheck(rest, state);
   } catch (error) {
+    if (error instanceof NothingToCheck) {
+      // Documented in the spec as exit 0: no repository means no range, which
+      // is not the same as a check that was attempted and failed.
+      detail(errorMessage(error));
+      return findingExit(state);
+    }
     detail(`rocky check could not run: ${errorMessage(error)}`);
-    return findingExit(state);
+    state.incomplete = true;
+    // A finding already made is never erased by a later failure.
+    if (state.finding) return findingExit(state);
+    // Fail open only where a push is at stake. In hook mode exit 0 is the whole
+    // point: a broken Rocky must not hold anyone's push. Run by hand there is no
+    // push to protect, and exit 0 would tell a script "checked, clean" about a
+    // run that inspected nothing — so an infrastructure failure exits 2, which
+    // is neither clean nor a finding.
+    return state.prePush ? 0 : 2;
   }
 }

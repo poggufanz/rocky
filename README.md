@@ -151,7 +151,9 @@ Rocky looks only at the commits you are about to push, and runs three checks. Th
 
 The registry lookup is consent-gated: the first time it would run, Rocky states exactly what leaves the machine — package names, to registry.npmjs.org, no telemetry — and asks once. Answer no and he never asks again. With no answer stored and no terminal to ask on (CI, a non-interactive hook), the lookup is skipped silently rather than hanging.
 
-Only a secret or a missing package ever holds a push. Registry unreachable, a git command that fails, a Rocky bug — all of it fails open with one plain line, because a broken Rocky must never be the reason you cannot ship. `git push --no-verify` remains git's own escape hatch.
+Only a secret or a missing package ever holds a push. Registry unreachable, a git command that fails, a Rocky bug — during a push all of it fails open with one plain line, because a broken Rocky must never be the reason you cannot ship. `git push --no-verify` remains git's own escape hatch.
+
+Run by hand there is no push to protect, so the exit code says plainly what happened: **0** nothing found, **1** something found, **2** Rocky could not check — git failed, or the diff was too large to read, so the range went uninspected. A script that treats 0 as "clean" is then telling the truth. During a push the codes differ on purpose: a finding exits 3 and only that holds the push, while everything else exits 0.
 
 ## The ears (v0.2, implemented)
 
