@@ -26,9 +26,12 @@ import {
 } from "./package-smoke-support.mjs";
 
 const PACKAGE_NAME = "@poggufanz/rocky-cli";
-const PACKAGE_VERSION = "0.3.0";
 const PACKAGE_BINARY = "rocky";
 const packageRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
+// Read from the manifest rather than pinning a literal: this script only runs
+// in CI, so a stale copy here survives every local gate and fails the release
+// build instead — which is exactly what it did on the 0.4.0 bump.
+const PACKAGE_VERSION = JSON.parse(readFileSync(join(packageRoot, "package.json"), "utf8")).version;
 const keepTemp = process.argv.slice(2).includes("--keep-temp");
 const unknownArguments = process.argv.slice(2).filter((argument) => argument !== "--keep-temp");
 assert.deepEqual(unknownArguments, [], `unknown arguments: ${unknownArguments.join(", ")}`);
@@ -113,9 +116,11 @@ function parseSinglePackResult(stdout) {
 function allowedPackPath(path) {
   return path === "LICENSE"
     || path === "README.md"
+    || path === "CHANGELOG.md"
     || path === "package.json"
     || path === "dist/index.js"
     || path.startsWith("dist/commands/")
+    || path.startsWith("dist/check/")
     || path.startsWith("dist/core/")
     || path.startsWith("dist/ui/")
     || path.startsWith("dist/mcp/")
@@ -146,6 +151,7 @@ function assertPackResult(packed) {
   for (const required of [
     "LICENSE",
     "README.md",
+    "CHANGELOG.md",
     "package.json",
     "dist/index.js",
     "skills/rocky-voice/SKILL.md",

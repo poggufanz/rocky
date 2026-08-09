@@ -722,6 +722,8 @@ test("pre-push mode never reads git's positional arguments as --help", async (t)
 });
 
 test("a manual run whose secret stage cannot read the diff exits 2, not a clean 0", async (t) => {
+  // installGitShim resolves a bare `git` on PATH, which Windows spells git.exe.
+  if (process.platform === "win32") return;
   // Fail-open protects pushes, not exit codes. A stress audit found a manual
   // run reporting 0 — "checked, clean" to any script reading it — when the
   // range had in fact never been inspected.
@@ -736,6 +738,8 @@ test("a manual run whose secret stage cannot read the diff exits 2, not a clean 
 });
 
 test("the same unreadable diff still lets a push through in hook mode", async (t) => {
+  // installGitShim resolves a bare `git` on PATH, which Windows spells git.exe.
+  if (process.platform === "win32") return;
   const box = sandbox(t);
   const commits = initRepo(box, { "README.md": "clean\n" }, { "src/a.ts": "const a = 1;\n" });
   const line = prePushLine(commits.second!, commits.first);

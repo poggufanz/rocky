@@ -22,6 +22,7 @@ const packageRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const expectedFiles = [
   "dist/index.js",
   "dist/commands",
+  "dist/check",
   "dist/core",
   "dist/ui",
   "dist/mcp",
@@ -88,6 +89,7 @@ function allowedPackPath(path: string): boolean {
     || path === "package.json"
     || path === "dist/index.js"
     || path.startsWith("dist/commands/")
+    || path.startsWith("dist/check/")
     || path.startsWith("dist/core/")
     || path.startsWith("dist/ui/")
     || path.startsWith("dist/mcp/")

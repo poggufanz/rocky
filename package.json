@@ -9,6 +9,7 @@
   "files": [
     "dist/index.js",
     "dist/commands",
+    "dist/check",
     "dist/core",
     "dist/ui",
     "dist/mcp",
