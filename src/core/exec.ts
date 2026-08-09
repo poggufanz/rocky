@@ -63,7 +63,13 @@ export function runGit(
   options: GitOptions = {},
 ): Promise<GitResult> {
   return new Promise((resolve) => {
-    const child = spawn("git", [...args], { stdio: ["pipe", "pipe", "pipe"] });
+    // Git's fatal messages are the only way to tell "no repository here" from
+    // "this repository is broken" — both exit 128 — so the locale is pinned
+    // rather than left to whatever the user's shell exports.
+    const child = spawn("git", [...args], {
+      stdio: ["pipe", "pipe", "pipe"],
+      env: { ...process.env, LC_ALL: "C", LANG: "C" },
+    });
     const stdout: Buffer[] = [];
     const stderr: Buffer[] = [];
     let outputBytes = 0;

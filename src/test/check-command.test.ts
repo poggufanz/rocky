@@ -721,28 +721,28 @@ test("pre-push mode never reads git's positional arguments as --help", async (t)
   assert.match(result.stderr, /src\/key\.ts:1/);
 });
 
-test("a manual run whose git calls fail exits 2, not a clean 0", async (t) => {
+test("a manual run whose secret stage cannot read the diff exits 2, not a clean 0", async (t) => {
   // Fail-open protects pushes, not exit codes. A stress audit found a manual
-  // run reporting 0 — "checked, clean" to any script reading it — after git
-  // failed so early that nothing was inspected at all.
+  // run reporting 0 — "checked, clean" to any script reading it — when the
+  // range had in fact never been inspected.
   const box = sandbox(t);
   initRepo(box, { "README.md": "clean\n" }, { "src/a.ts": "const a = 1;\n" });
-  rmSync(join(box.repo, ".git", "objects"), { recursive: true, force: true });
+  installGitShim(box, "diff-flood");
 
-  const result = await runCheck(box, []);
+  const result = await runCheck(box, ["--offline"]);
 
   assertCompleted(result, 2);
-  assert.match(result.stderr, /could not run/);
+  assert.match(result.stderr, /secret lines not inspected/i);
 });
 
-test("the same broken repository still lets a push through in hook mode", async (t) => {
+test("the same unreadable diff still lets a push through in hook mode", async (t) => {
   const box = sandbox(t);
   const commits = initRepo(box, { "README.md": "clean\n" }, { "src/a.ts": "const a = 1;\n" });
   const line = prePushLine(commits.second!, commits.first);
-  rmSync(join(box.repo, ".git", "objects"), { recursive: true, force: true });
+  installGitShim(box, "diff-flood");
 
-  const result = await runCheck(box, ["--pre-push"], line);
+  const result = await runCheck(box, ["--pre-push", "--offline"], line);
 
-  // Exit 0: a Rocky that cannot run must never be the reason a push is held.
+  // Exit 0: a Rocky that cannot inspect must never be the reason a push is held.
   assertCompleted(result, 0);
 });

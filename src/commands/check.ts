@@ -195,7 +195,14 @@ class NothingToCheck extends Error {}
 
 async function manualRange(): Promise<DiffRange> {
   const repo = await gitMaybe(["rev-parse", "--git-dir"]);
-  if (repo.code !== 0) throw new NothingToCheck("no git repository here. nothing to check");
+  if (repo.code !== 0) {
+    // Missing repository and broken repository both exit 128; only git's own
+    // message separates them, and only the first one means "nothing to check".
+    if (/not a git repository/i.test(repo.stderr)) {
+      throw new NothingToCheck("no git repository here. nothing to check");
+    }
+    throw new Error("git rev-parse failed");
+  }
   const upstream = await gitMaybe(["rev-parse", "--verify", "@{upstream}"]);
   if (upstream.code === 0) return { base: "@{upstream}", head: "HEAD" };
   return { base: await emptyTree(), head: "HEAD" };
