@@ -12,7 +12,7 @@
 
 Rocky is a terminal companion inspired by the alien engineer from Andy Weir's *Project Hail Mary*. He keeps track of what you and your AI have already been through, so the second time an error appears, the answer comes from your own history — not from twenty minutes of googling.
 
-**Teaching modes exist inside individual agents. Rocky is the layer that remembers what you learned — passive, cross-tool, and permanent.** That learning layer is planned v0.5 work; current v0.2.1 remembers failure/fix evidence across supported hosts. The longer-term mission is simple: make user not forget about fundamentals.
+**Teaching modes exist inside individual agents. Rocky is the layer that remembers what you learned — passive, cross-tool, and permanent.** That learning layer is planned v0.5 work; v0.3.0 remembers failure/fix evidence across supported hosts. The longer-term mission is simple: make user not forget about fundamentals.
 
 He is also, unapologetically, a pet.
 
@@ -40,7 +40,7 @@ That companion line is an original Rocky project tagline inspired by the lore, n
 npm install -g @poggufanz/rocky-cli
 ```
 
-Current beta: `@poggufanz/rocky-cli@0.3.0`. One install includes the `rocky` CLI and its read-only MCP server. The unrelated unscoped `rocky-cli` package is not this project and Rocky never installs, upgrades, or removes it. The binary name remains `rocky`, so npm reports any local binary-name conflict through its normal install behavior.
+Current release: `@poggufanz/rocky-cli@0.3.0`. One install includes the `rocky` CLI and its read-only MCP server. The unrelated unscoped `rocky-cli` package is not this project and Rocky never installs, upgrades, or removes it. The binary name remains `rocky`, so npm reports any local binary-name conflict through its normal install behavior.
 
 Requires Node 18+.
 
@@ -59,11 +59,11 @@ Proving that runs a real `codex app-server` process against your live `$CODEX_HO
 
 Claude Code registration goes through a private stage. Rocky clones the effective `.claude.json` into a private copy, proves the surrounding policy is unchanged, runs the official Claude CLI only against that copy, audits that only the Rocky entry changed, then publishes the audited bytes through a recoverable transaction.
 
-That staged path does not activate in this beta. Rocky ships no complete Claude Code policy manifest, so any `rocky setup` run that still has to write reports `claude-code: failed` with `Claude Code policy-equivalent automation is unavailable; use manual registration` and exits 1. Rocky prints the exact CLI argv to paste; run it yourself. Once the entry exists, later runs report `claude-code: already-configured`.
+That staged path does not activate in this release. Rocky ships no complete Claude Code policy manifest, so any `rocky setup` run that still has to write reports `claude-code: failed` with `Claude Code policy-equivalent automation is unavailable; use manual registration` and exits 1. Rocky prints the exact CLI argv to paste; run it yourself. Once the entry exists, later runs report `claude-code: already-configured`.
 
 `--voice-skill` only targets detected Codex and Claude Code hosts. Claude Desktop never receives the voice skill, and its own MCP result stays independent. When zero hosts are eligible, Rocky prints `voice-skill: unavailable` and exits 1 instead of inventing a result.
 
-## Usage (v0.2.1 — distribution bridge)
+## Usage
 
 Run anything failure-prone through Rocky:
 
@@ -148,7 +148,7 @@ edited file. `ROCKY_OFF=1` makes him deaf for a session;
 3. **Fix linking** — when a command succeeds where its base program recently failed (same directory, within 48h), Rocky links that success to the unresolved failures. No AI involved; it's an honest heuristic, and it's right often enough to be useful.
 4. **Recall** — token-overlap search across commands and error signatures, deduplicated per distinct error, fix shown when known.
 
-The deterministic memory loop remains useful with zero AI setup and zero API keys. v0.2.1 can optionally ask a locally running Ollama model to rank or interpret deterministic recall candidates; the model cannot create or change the underlying stored evidence, and invalid output falls back to deterministic recall.
+The deterministic memory loop remains useful with zero AI setup and zero API keys. Rocky can optionally ask a locally running Ollama model to rank or interpret deterministic recall candidates; the model cannot create or change the underlying stored evidence, and invalid output falls back to deterministic recall.
 
 ## Optional local AI
 
@@ -208,19 +208,19 @@ Rocky speaks the way he does in the book, and the rules are enforced in code, no
 
 When things are serious, Rocky is serious. Diagnoses and fixes are printed plainly; the personality lives around the information, never inside it. A `--quiet` mode is planned for people debugging production at 2 a.m.
 
-Rocky asks because he is curious, not because he is testing you; you are always the one who knows. That proactive “Curious Blind Friend” behavior is planned for v0.5 and is not part of v0.2.1.
+Rocky asks because he is curious, not because he is testing you; you are always the one who knows. That proactive “Curious Blind Friend” behavior is planned for v0.5 and is not part of v0.3.0.
 
 ## Roadmap
 
 Each phase is one facet of who Rocky is:
 
-- **v0.2.1 — distribution bridge** (current beta): the v0.1 memory and implemented v0.2 Bash/WSL ears, plus scoped npm distribution, read-only MCP, consent-based host setup, an optional managed voice skill, and optional loopback Ollama interpretation for recall.
-- **v0.3 — his patience** (implemented): `rocky watch` — hand him a long build, migration, or download; he waits (he once waited 46 years), notifies you, and holds the logs if it dies.
+- **v0.2.1 — distribution bridge**: the v0.1 memory and implemented v0.2 Bash/WSL ears, plus scoped npm distribution, read-only MCP, consent-based host setup, an optional managed voice skill, and optional loopback Ollama interpretation for recall.
+- **v0.3 — his patience** (current release): `rocky watch` — hand him a long build, migration, or download; he waits (he once waited 46 years), notifies you, and holds the logs if it dies.
 - **v0.4 — his diligence**: pre-push hull check — verifies that AI-added packages actually exist on the registry (hallucinated-package defense), wraps secret scanning, and asks one comprehension question about the riskiest line in the diff. Its planned registry lookup is external egress; network errors must fail open.
 - **v0.5 — his curiosity**: Nervous System agent hooks + the Intent↔Mechanism Dictionary + an opt-in Ollama/BYOK annotation layer. The earlier `rocky explain` concept is superseded, not an active command. These planned mechanisms preserve recorded evidence, surface ambiguity only on explicit lookup, and never rewrite, inject, optimize, or submit a user's prompt.
 - **later — his care**: ambient pet mode and the desktop pet window (deferred). He notices you've been at it for four hours, and he has opinions about your sleep.
 
-v0.2.1 does not implement the v0.5 nervous-system hooks, bidirectional intent↔mechanism lookup, ambiguity handling, proactive questions, digest, quiz, or BYOK annotation.
+v0.3.0 does not implement the v0.5 nervous-system hooks, bidirectional intent↔mechanism lookup, ambiguity handling, proactive questions, digest, quiz, or BYOK annotation.
 
 ## Contributing
 

@@ -51,7 +51,7 @@ Anything that makes the sanitized MCP projection reveal fields that raw exposure
 
 ## What doesn't count
 
-Rocky refusing to act and telling you to do something manually is the designed behavior when it can't prove a state is safe. Codex registration removal and Claude Code automation both currently end that way, which is documented and intentional in this beta.
+Rocky refusing to act and telling you to do something manually is the designed behavior when it can't prove a state is safe. Codex registration removal and Claude Code automation both currently end that way, which is documented and intentional in this release.
 
 The recovery copies described above are working as designed. If you think the design is wrong, that's a worthwhile discussion for a public issue rather than a private advisory.
 
