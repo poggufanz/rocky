@@ -90,3 +90,15 @@ test("a command that is nothing but prefixes still names something", () => {
   assert.equal(commandSignature(""), "");
   assert.equal(commandSignature("   "), "");
 });
+
+test("rocky run is a wrapper: base and signature come from the wrapped command", () => {
+  assert.equal(commandBase("rocky run npm test"), "npm");
+  assert.equal(commandSignature("rocky run npm test"), "npm test");
+  assert.equal(commandBase("sudo rocky run npm test"), "npm");
+});
+
+test("other rocky subcommands are not stripped", () => {
+  assert.equal(commandBase("rocky setup"), "rocky");
+  assert.equal(commandBase("rocky --help"), "rocky");
+  assert.equal(commandBase("rocky run"), "rocky"); // nothing but prefixes: falls back to naming itself
+});

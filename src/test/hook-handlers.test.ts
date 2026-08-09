@@ -45,6 +45,21 @@ function captureTty<T>(fn: () => T): { result: T; tty: string } {
 
 const cwd = mkdtempSync(join(tmpdir(), "rocky-cwd-"));
 
+test("hookFail records nothing and says nothing for cancel exits", () => {
+  const cancelHome = mkdtempSync(join(tmpdir(), "rocky-hook-cancel-"));
+  process.env.ROCKY_HOME = cancelHome;
+  try {
+    for (const code of [130, 143]) {
+      const { result, tty } = captureTty(() => hookFail("kimi --resume", code, "/tmp/somewhere"));
+      assert.equal(result, 0);
+      assert.equal(tty, "");
+    }
+    assert.equal(existsSync(join(cancelHome, "memory.jsonl")), false);
+  } finally {
+    process.env.ROCKY_HOME = home;
+  }
+});
+
 test("hookFail records origin:hook failure and sets pending", () => {
   const code = hookFail("npm run build", 1, cwd);
   assert.equal(code, 0);

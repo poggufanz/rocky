@@ -365,6 +365,20 @@ test("run reports the shell convention exit code when the command dies from a si
   assert.equal(killed.status, 137);
 });
 
+test("rocky run passes cancel exit codes through without recording or speaking", (t) => {
+  for (const code of [130, 143]) {
+    const sandbox = processSandbox(t);
+    const command = `${quoteShellPath(process.execPath, process.platform)} -e ${quoteShellPath(`process.exit(${code})`, process.platform)}`;
+    const result = runCli(sandbox, ["run", command]);
+
+    assertCompleted(result, code);
+    assert.doesNotMatch(result.stderr, /\[Rocky\]/);
+    assert.equal(result.stderr, "");
+    assert.equal(existsSync(join(sandbox.rockyHome, "memory.jsonl")), false);
+    assertNoDetectorMarkers(sandbox);
+  }
+});
+
 test("a memory write failure never changes the wrapped command's exit code", (t) => {
   const sandbox = processSandbox(t);
   // A directory where the memory file belongs makes every write fail.
@@ -380,7 +394,7 @@ test("a memory write failure never changes the wrapped command's exit code", (t)
 /**
  * Builds a `rocky run` command line whose stderr is exactly `marker`, so the
  * fingerprint `run`'s onFailure computes from that real stderr can be
- * predicted in the test (via `fingerprint(marker)`) and seeded ahead of
+ * predicted in the test (via `fingerprint(marker, cmd, exitCode)`) and seeded ahead of
  * time. Quoted through `quoteShellPath` — same helper `deepMemoryHint` uses —
  * so the child's `-e` script survives the shell that `run.ts` spawns it
  * through.
@@ -393,7 +407,7 @@ function failingCommandPrinting(marker: string): string {
 test("run's onFailure speaks the strong link basis, not just the fix command", (t) => {
   const sandbox = processSandbox(t);
   const marker = "error rocky basis strong boom";
-  const fp = fingerprint(marker);
+  const fp = fingerprint(marker, "cargo build --release", 1);
   const failure = {
     kind: "failure", id: "basis-strong-failure", ts: 1_700_000_000_000, cwd: packageRoot,
     cmd: "cargo build --release", exitCode: 1, fingerprint: fp, signature: [marker], excerpt: marker,
@@ -421,7 +435,7 @@ test("run's onFailure speaks the strong link basis, not just the fix command", (
 test("run's onFailure hedges a weak link instead of presenting it like a real match", (t) => {
   const sandbox = processSandbox(t);
   const marker = "error rocky basis weak boom";
-  const fp = fingerprint(marker);
+  const fp = fingerprint(marker, "npm run build", 1);
   const failure = {
     kind: "failure", id: "basis-weak-failure", ts: 1_700_000_000_000, cwd: packageRoot,
     cmd: "npm run build", exitCode: 1, fingerprint: fp, signature: [marker], excerpt: marker,
@@ -449,7 +463,7 @@ test("run's onFailure hedges a weak link instead of presenting it like a real ma
 test("a v0.2.1-era fix record without links stays silent about basis", (t) => {
   const sandbox = processSandbox(t);
   const marker = "error rocky basis absent boom";
-  const fp = fingerprint(marker);
+  const fp = fingerprint(marker, "npm run build", 1);
   const failure = {
     kind: "failure", id: "basis-none-failure", ts: 1_700_000_000_000, cwd: packageRoot,
     cmd: "npm run build", exitCode: 1, fingerprint: fp, signature: [marker], excerpt: marker,
@@ -476,7 +490,7 @@ test("a v0.2.1-era fix record without links stays silent about basis", (t) => {
 test("run's onFailure admits when the remembered fix comes from a different directory", (t) => {
   const sandbox = processSandbox(t);
   const marker = "error rocky test boom elsewhere";
-  const fp = fingerprint(marker);
+  const fp = fingerprint(marker, "whatever failed before", 1);
   const elsewhere = join(sandbox.root, "elsewhere-project");
   const failure = {
     kind: "failure", id: "elsewhere-failure", ts: 1_700_000_000_000, cwd: packageRoot,
@@ -549,7 +563,7 @@ test("watch with an empty command exits 2", (t) => {
 test("run's onFailure adds no line when the remembered fix's cwd matches the current directory", (t) => {
   const sandbox = processSandbox(t);
   const marker = "error rocky test boom samecwd";
-  const fp = fingerprint(marker);
+  const fp = fingerprint(marker, "whatever failed before", 1);
   // runCli spawns with cwd: packageRoot, so the fix must be seeded against
   // process.cwd()'s resolved form to match what `run.ts` compares against.
   const here = realpathSync(packageRoot);

@@ -18,6 +18,7 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { commandFingerprint } from "../core/fingerprint.js";
+import { CANCEL_CODES } from "../core/exec.js";
 import { renderGuardRules, rulesFileIsPristine } from "../core/guard-rules.js";
 import {
   addHookBlockBytes,
@@ -64,6 +65,8 @@ function readMemory(): MemoryRecord[] | undefined {
 
 /** A command failed in the hooked shell. Record it; speak only if memory has something to say. */
 export function hookFail(cmd: string, exitCode: number, cwd: string): number {
+  if (CANCEL_CODES.has(exitCode)) return 0;
+
   const memory = readMemory();
 
   recordHookFailure(cmd, exitCode, cwd);

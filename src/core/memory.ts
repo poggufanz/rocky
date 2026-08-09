@@ -6,10 +6,10 @@ import { Buffer } from "node:buffer";
 import { commandFingerprint, fingerprint, normalizeLine, signatureLines } from "./fingerprint.js";
 import { resolveRockyPaths } from "./state-paths.js";
 import { MAX_MEMORY_LINE_BYTES } from "./memory-read.js";
-import type { FailureRecord, FixRecord, MemoryRecord } from "./memory-read.js";
+import type { FailureRecord, FixRecord, MemoryRecord, NoteRecord } from "./memory-read.js";
 import type { UnresolvedLink } from "./memory-query.js";
 
-export type { FailureRecord, FixRecord, MemoryRecord } from "./memory-read.js";
+export type { FailureRecord, FixRecord, MemoryRecord, NoteRecord } from "./memory-read.js";
 export { loadMemory, parseMemoryRecord, MAX_MEMORY_LINE_BYTES } from "./memory-read.js";
 
 export function memoryPath(): string {
@@ -29,7 +29,7 @@ function append(record: MemoryRecord): void {
 export function recordFailure(cmd: string, exitCode: number, stderr: string): FailureRecord {
   const rec: FailureRecord = {
     kind: "failure", id: randomUUID(), ts: Date.now(), cwd: process.cwd(), cmd, exitCode,
-    fingerprint: fingerprint(stderr), signature: signatureLines(stderr), excerpt: lastLines(stderr, 4),
+    fingerprint: fingerprint(stderr, cmd, exitCode), signature: signatureLines(stderr), excerpt: lastLines(stderr, 4),
   };
   append(rec);
   touchPending();
@@ -39,7 +39,7 @@ export function recordFailure(cmd: string, exitCode: number, stderr: string): Fa
 export function recordWatchFailure(cmd: string, exitCode: number, stderr: string, cwd = process.cwd()): FailureRecord {
   const rec: FailureRecord = {
     kind: "failure", id: randomUUID(), ts: Date.now(), cwd, cmd, exitCode,
-    fingerprint: fingerprint(stderr), signature: signatureLines(stderr), excerpt: lastLines(stderr, 4), origin: "watch",
+    fingerprint: fingerprint(stderr, cmd, exitCode), signature: signatureLines(stderr), excerpt: lastLines(stderr, 4), origin: "watch",
   };
   append(rec);
   touchPending();
@@ -105,4 +105,16 @@ export function recordHookFailure(cmd: string, exitCode: number, cwd: string): F
   append(rec);
   touchPending();
   return rec;
+}
+
+export function recordNote(input: {
+  cwd: string;
+  cmd: string;
+  file: string;
+  line: number;
+  subject: string;
+  answer: string;
+}): void {
+  const rec: NoteRecord = { kind: "note", id: randomUUID(), ts: Date.now(), ...input };
+  append(rec);
 }

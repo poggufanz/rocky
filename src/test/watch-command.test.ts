@@ -138,7 +138,7 @@ test("watch's failure path admits when the remembered fix comes from a different
   const home = sandboxHome(t);
   mkdirSync(home, { recursive: true });
   const marker = "watch test boom elsewhere";
-  const fp = fingerprint(marker);
+  const fp = fingerprint(marker, "whatever failed before", 1);
   const here = process.cwd();
   const elsewhere = join(home, "elsewhere-project");
   const failure = {

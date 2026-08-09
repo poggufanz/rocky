@@ -31,7 +31,19 @@ export interface FixRecord {
   links?: FixLink[];
 }
 
-export type MemoryRecord = FailureRecord | FixRecord;
+export interface NoteRecord {
+  kind: "note";
+  id: string;
+  ts: number;
+  cwd: string;
+  cmd: string;
+  file: string;
+  line: number;
+  subject: string;
+  answer: string;
+}
+
+export type MemoryRecord = FailureRecord | FixRecord | NoteRecord;
 
 export const MAX_MEMORY_LINE_BYTES = 1024 * 1024;
 
@@ -87,6 +99,14 @@ export function parseMemoryRecord(value: unknown): MemoryRecord | undefined {
     return {
       kind: "fix", id: record.id, ts: Number(record.ts), cwd: record.cwd, cmd: record.cmd, failureIds,
       ...(links === undefined ? {} : { links }),
+    };
+  }
+  if (record.kind === "note") {
+    if (typeof record.file !== "string" || typeof record.line !== "number" || !Number.isInteger(record.line) ||
+        typeof record.subject !== "string" || typeof record.answer !== "string") return undefined;
+    return {
+      kind: "note", id: record.id, ts: Number(record.ts), cwd: record.cwd, cmd: record.cmd,
+      file: record.file, line: Number(record.line), subject: record.subject, answer: record.answer,
     };
   }
   return undefined;
