@@ -12,7 +12,7 @@
 
 Rocky is a terminal companion inspired by the alien engineer from Andy Weir's *Project Hail Mary*. He keeps track of what you and your AI have already been through, so the second time an error appears, the answer comes from your own history — not from twenty minutes of googling.
 
-**Teaching modes exist inside individual agents. Rocky is the layer that remembers what you learned — passive, cross-tool, and permanent.** That learning layer is planned v0.5 work; v0.3.0 remembers failure/fix evidence across supported hosts. The longer-term mission is simple: make user not forget about fundamentals.
+**Teaching modes exist inside individual agents. Rocky is the layer that remembers what you learned — passive, cross-tool, and permanent.** That learning layer is planned v0.5 work; v0.4.0 remembers failure/fix evidence across supported hosts and checks what you are about to push. The longer-term mission is simple: make user not forget about fundamentals.
 
 He is also, unapologetically, a pet.
 
@@ -39,7 +39,7 @@ Two loops run in opposite directions:
 - **The loop worth resisting** — the AI gets more capable, more of the thinking gets handed over, understanding and vigilance erode, intent and verification get worse, and the results get harder to judge at all.
 - **The Good Trade** — you understand more, your intent and decisions get sharper, the AI's work in your hands gets more useful, and that work becomes the material you learn from next.
 
-The arrow that usually breaks is *AI output → you learn from it*. Each arrow maps to one mechanism rather than to a slogan, and every mechanism below is planned v0.5 work, not v0.3.0 behavior:
+The arrow that usually breaks is *AI output → you learn from it*. Each arrow maps to one mechanism rather than to a slogan, and every mechanism below is planned v0.5 work, not v0.4.0 behavior:
 
 | Arrow kept alive | Mechanism | Role |
 |---|---|---|
@@ -61,7 +61,7 @@ That companion line is an original Rocky project tagline inspired by the lore, n
 npm install -g @poggufanz/rocky-cli
 ```
 
-Current release: `@poggufanz/rocky-cli@0.3.0`. One install includes the `rocky` CLI and its read-only MCP server. The unrelated unscoped `rocky-cli` package is not this project and Rocky never installs, upgrades, or removes it. The binary name remains `rocky`, so npm reports any local binary-name conflict through its normal install behavior.
+Current release: `@poggufanz/rocky-cli@0.4.0`. One install includes the `rocky` CLI and its read-only MCP server. The unrelated unscoped `rocky-cli` package is not this project and Rocky never installs, upgrades, or removes it. The binary name remains `rocky`, so npm reports any local binary-name conflict through its normal install behavior.
 
 Requires Node 18+.
 
@@ -250,7 +250,7 @@ Rocky speaks the way he does in the book, and the rules are enforced in code, no
 
 When things are serious, Rocky is serious. Diagnoses and fixes are printed plainly; the personality lives around the information, never inside it. A `--quiet` mode is planned for people debugging production at 2 a.m.
 
-Rocky asks because he is curious, not because he is testing you; you are always the one who knows, never the one being graded. Ignore him and he goes quiet — an ignored question is never repeated — and answering `busy` makes him wait without complaint (he once waited 46 years). That proactive “Curious Blind Friend” behavior is planned for v0.5 and is not part of v0.3.0.
+Rocky asks because he is curious, not because he is testing you; you are always the one who knows, never the one being graded. Ignore him and he goes quiet — an ignored question is never repeated — and answering `busy` makes him wait without complaint (he once waited 46 years). That proactive “Curious Blind Friend” behavior is planned for v0.5 and is not part of v0.4.0.
 
 The fence never moves: Rocky hears your terminal, and — from v0.5 — your agent hooks. That's it. No keylogging, no screen reading, no capture of screen content of any kind. “Rocky can't see your screen” is a literal description of the architecture, not just lore.
 
@@ -259,8 +259,8 @@ The fence never moves: Rocky hears your terminal, and — from v0.5 — your age
 Each phase is one facet of who Rocky is:
 
 - **v0.2.1 — distribution bridge**: the v0.1 memory and implemented v0.2 Bash/WSL ears, plus scoped npm distribution, read-only MCP, consent-based host setup, an optional managed voice skill, and optional loopback Ollama interpretation for recall.
-- **v0.3 — his patience** (current release): `rocky watch` — hand him a long build, migration, or download; he waits (he once waited 46 years), notifies you, and holds the logs if it dies.
-- **v0.4 — his diligence** (implemented): pre-push hull check — `rocky check` verifies that AI-added packages actually exist on the registry (hallucinated-package defense), scans added lines for secrets, and asks one comprehension question about the riskiest line in the diff. Its registry lookup is this project's only external egress; network errors fail open and never hold a push.
+- **v0.3 — his patience**: `rocky watch` — hand him a long build, migration, or download; he waits (he once waited 46 years), notifies you, and holds the logs if it dies.
+- **v0.4 — his diligence** (current release): pre-push hull check — `rocky check` verifies that AI-added packages actually exist on the registry (hallucinated-package defense), scans added lines for secrets, and asks one comprehension question about the riskiest line in the diff. Its registry lookup is this project's only external egress; network errors fail open and never hold a push.
 - **v0.5 — his curiosity**: Nervous System agent hooks + the Intent↔Mechanism Dictionary + an opt-in Ollama/BYOK annotation layer. The earlier `rocky explain` concept is superseded, not an active command. These planned mechanisms preserve recorded evidence, surface ambiguity only on explicit lookup, and never rewrite, inject, optimize, or submit a user's prompt. In more detail:
   - *Nervous system* — when an agent finishes editing code, an agent hook fires on its own; it is never a tool call the agent has to choose to make. Rocky reads the diff in a separate process and a cheap model (a hosted small model, or a local Ollama one for free) writes a one-or-two sentence annotation: what changed, and why. Debounced per burst of edits (the agent quiet for ~30 seconds counts as one batch), not per file. With no key configured he keeps the deterministic facts only — file, ±lines, time. The principle underneath: hooks write knowledge, MCP reads it back. The working agent is never interrupted and never pays tokens for it.
   - *What gets stored is a triple* — **intent → stated rationale → mechanism**. The rationale is the reasoning the agent *stated* in its transcript; it is never "the AI's thinking", which no API exposes. A cheap model squeezes it to two sentences plus a concept tag at capture time, before it reaches disk, and `rocky why <file>` answers from it. Because a stated rationale can be post-hoc or simply wrong, Rocky serves it as a quote and not as fact: `agent say: <rationale>. I only hear. correct, question`. Your own one-line answer to `what doing, question` is the human version of the same field, which is what makes the dictionary serve manual coders as well as vibe coders.
@@ -272,7 +272,7 @@ Each phase is one facet of who Rocky is:
   - *How it stays cheap* — git is the database: Rocky stores a commit hash, a path, and a line range, and reconstructs content with `git show` when asked. Only what cannot be reconstructed is kept whole: your intent, the compacted rationale, an stderr excerpt. Cheap models compact at the door, retention is tiered (full detail for 90 days, then rollups), `rocky export` always exists so nothing is locked in, and no embedding vectors ship in v1. The learning principle is **curate, don't train**: the base model stays cheap forever and what grows is the memory plus few-shot examples drawn from your own history. Never continuous fine-tuning.
 - **later — his care**: ambient pet mode and the desktop pet window (deferred). He notices you've been at it for four hours, and he has opinions about your sleep.
 
-v0.3.0 does not implement the v0.5 nervous-system hooks, bidirectional intent↔mechanism lookup, ambiguity handling, proactive questions, digest, quiz, or BYOK annotation.
+v0.4.0 does not implement the v0.5 nervous-system hooks, bidirectional intent↔mechanism lookup, ambiguity handling, proactive questions, digest, quiz, or BYOK annotation.
 
 ## Contributing
 

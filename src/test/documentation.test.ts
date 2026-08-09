@@ -116,7 +116,7 @@ test("README identity, roadmap, and v0.5 hypothesis stay aligned with shipped me
   assert.match(readme, /more effective/i);
   assert.match(readme, /does not mean (?:the )?model weights change/i);
   assert.ok(readme.includes(
-    "v0.3.0 does not implement the v0.5 nervous-system hooks, bidirectional intent↔mechanism lookup, ambiguity handling, proactive questions, digest, quiz, or BYOK annotation.",
+    "v0.4.0 does not implement the v0.5 nervous-system hooks, bidirectional intent↔mechanism lookup, ambiguity handling, proactive questions, digest, quiz, or BYOK annotation.",
   ));
 });
 
