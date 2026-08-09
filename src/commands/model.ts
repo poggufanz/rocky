@@ -8,14 +8,16 @@ import {
 import { detail, say } from "../ui/rocky.js";
 
 /**
- * Keys this command does not own. `watch` belongs to the user, not to the AI
- * settings — rebuilding the config from scratch silently deleted it, so
- * `rocky model off` turned watch notifications back on for someone who had
- * deliberately switched them off.
+ * Keys this command does not own. `watch` settings and `check` registry
+ * consent belong to the user, not to AI settings, so model changes preserve
+ * both sections byte-for-byte.
  */
-function preservedKeys(current: ReturnType<typeof loadConfig>): Pick<RockyConfigV1, "watch"> {
-  if (current.status === "invalid" || current.config.watch === undefined) return {};
-  return { watch: current.config.watch };
+function preservedKeys(current: ReturnType<typeof loadConfig>): Pick<RockyConfigV1, "watch" | "check"> {
+  if (current.status === "invalid") return {};
+  return {
+    ...(current.config.watch === undefined ? {} : { watch: current.config.watch }),
+    ...(current.config.check === undefined ? {} : { check: current.config.check }),
+  };
 }
 
 export interface ModelDependencies {

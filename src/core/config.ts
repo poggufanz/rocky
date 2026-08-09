@@ -5,7 +5,13 @@ import { resolveRockyPaths } from "./state-paths.js";
 import { loadConfig, parseConfig, type RockyConfigV1 } from "./config-read.js";
 
 export { loadConfig, parseConfig, parseExposure } from "./config-read.js";
-export type { AiConfig, ConfigLoadResult, Exposure, RockyConfigV1 } from "./config-read.js";
+export type { AiConfig, CheckConfig, ConfigLoadResult, Exposure, RockyConfigV1 } from "./config-read.js";
+
+export function setCheckRegistry(enabled: boolean): void {
+  const current = loadConfig();
+  if (current.status === "invalid") throw new Error(`refusing to overwrite invalid config at ${current.path}`);
+  saveConfigAtomic({ ...current.config, check: { registry: enabled } }, current.path);
+}
 
 export function saveConfigAtomic(config: RockyConfigV1, path = resolveRockyPaths().config): { path: string } {
   if (parseConfig(config) === undefined) throw new Error("invalid config shape");
