@@ -413,6 +413,10 @@ test("repairing a malformed old package manifest skips that file and never calls
 });
 
 test("NUL-delimited name-only output finds a nested package manifest with a tab in its path", async (t) => {
+  // Windows path names cannot contain a tab, so the fixture itself is
+  // unbuildable there. The parsing this covers matters on POSIX, where such
+  // a path is legal and git quotes it.
+  if (process.platform === "win32") return;
   const box = sandbox(t);
   const path = "packages/tab\tname/package.json";
   const commits = initRepo(box, { "README.md": "clean\n" }, {
