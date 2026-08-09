@@ -27,10 +27,10 @@ test("bounded runner kills a TERM-ignoring child and still settles", async (t) =
       "process.on('SIGTERM', () => {});",
       "setInterval(() => {}, 1000);",
     ].join("\n"),
-  ], { timeoutMs: 100 });
+  ], { timeoutMs: 500 });
   const raced = await Promise.race([
     running.then((result) => ({ settled: true as const, result })),
-    delay(750).then(() => ({ settled: false as const })),
+    delay(10_000).then(() => ({ settled: false as const })),
   ]);
   if (!raced.settled) {
     const pid = Number(readFileSync(pidPath, "utf8"));
@@ -43,12 +43,23 @@ test("bounded runner kills a TERM-ignoring child and still settles", async (t) =
     assert.notEqual(raced.result.error, undefined);
     assert.match(raced.result.error?.message ?? "", /timeout/i);
     const pid = Number(readFileSync(pidPath, "utf8"));
-    assert.throws(
-      () => process.kill(pid, 0),
-      (error: unknown) => typeof error === "object"
-        && error !== null
-        && "code" in error
-        && error.code === "ESRCH",
-    );
+    // The runner resolving and the OS reaping the killed child are two
+    // different events. Asserting the second one instantly made this test fail
+    // whenever the machine was busy — which is exactly when a kill escalation
+    // matters — so wait for the process to actually disappear instead.
+    assert.equal(await waitForExit(pid, 5_000), true, `pid ${pid} still alive after kill escalation`);
   }
 });
+
+async function waitForExit(pid: number, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    try {
+      process.kill(pid, 0);
+    } catch (error) {
+      return typeof error === "object" && error !== null && "code" in error && error.code === "ESRCH";
+    }
+    if (Date.now() >= deadline) return false;
+    await delay(25);
+  }
+}

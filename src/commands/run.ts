@@ -9,7 +9,7 @@
  */
 
 import { fingerprint } from "../core/fingerprint.js";
-import { runProcess, type ExecResult } from "../core/exec.js";
+import { CANCEL_CODES, runProcess, type ExecResult } from "../core/exec.js";
 import { resolveRockyPaths } from "../core/state-paths.js";
 import {
   loadMemory,
@@ -33,7 +33,7 @@ export async function run(cmd: string): Promise<number> {
   try {
     if (result.code === 0) {
       onSuccess(cmd);
-    } else {
+    } else if (!CANCEL_CODES.has(result.code)) {
       onFailure(cmd, result);
     }
   } catch {
@@ -108,7 +108,7 @@ function onFailure(cmd: string, result: ExecResult): void {
     // result.stderr is the bounded tail (last TAIL_LINES lines, each capped
     // at MAX_LINE_BYTES), not the full stderr stream — fingerprinting now
     // sees the last 200 lines, not everything the command wrote (spec §3.6).
-    speakFailureMemory(memory, fingerprint(result.stderr), result.code, process.cwd());
+    speakFailureMemory(memory, fingerprint(result.stderr, cmd, result.code), result.code, process.cwd());
   }
 
   recordFailure(cmd, result.code, result.stderr);

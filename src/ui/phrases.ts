@@ -14,7 +14,13 @@ export type PhraseKey =
   | "watch-idle-tail"
   | "watch-ok"
   | "watch-fail"
-  | "watch-log-unwritable";
+  | "watch-log-unwritable"
+  | "check-secret"
+  | "check-package-missing"
+  | "check-registry-consent"
+  | "check-answer"
+  | "check-comprehension"
+  | "check-unknown-flag";
 
 const PHRASES: Readonly<Record<PhraseKey, string>> = Object.freeze({
   "ai-known-fix": "memory and small model agree. old fix is strong clue. good good.",
@@ -31,6 +37,12 @@ const PHRASES: Readonly<Record<PhraseKey, string>> = Object.freeze({
   "watch-ok": "command finish. good good.",
   "watch-fail": "command dies. bad.",
   "watch-log-unwritable": "watch folder does not open for me. no log this time. memory still remembers.",
+  "check-secret": "secret sits in outgoing code. bad bad.",
+  "check-package-missing": "package does not exist. AI dream it, question",
+  "check-registry-consent": "package names only go to registry.npmjs.org. no telemetry. offline failures stay open. allow registry lookup [y/N], question",
+  "check-answer": "answer, question",
+  "check-comprehension": "I hear risky new line. what it doing, question",
+  "check-unknown-flag": "that flag I do not know. bad.",
 });
 
 export const phraseKeys: readonly PhraseKey[] = Object.freeze([
@@ -48,6 +60,12 @@ export const phraseKeys: readonly PhraseKey[] = Object.freeze([
   "watch-ok",
   "watch-fail",
   "watch-log-unwritable",
+  "check-secret",
+  "check-package-missing",
+  "check-registry-consent",
+  "check-answer",
+  "check-comprehension",
+  "check-unknown-flag",
 ]);
 
 export function phrase(key: PhraseKey): string {

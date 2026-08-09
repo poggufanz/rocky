@@ -312,3 +312,36 @@ test("recent and recall responses restart candidate IDs at c1", () => {
   assert.equal(projectRecentFailures([hit], "sanitized").items[0].candidateId, "c1");
   assert.equal(projectRecallHits([{ ...hit, score: 1 }], "sanitized").items[0].candidateId, "c1");
 });
+
+test("redactor is not defeated by a prefix in front of the key name", () => {
+  // A stress audit of 0.4.0 found the key rule anchored to `^`, whitespace or
+  // `;`, so any other neighbouring character — `:` in an npm config line,
+  // `,` in a list, `(` in a log — let the whole credential through. The
+  // entropy fallback could not save it either: `=` sat inside its lookbehind,
+  // which is exactly where a credential appears.
+  const leaky = [
+    "user:_authToken=A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8S9t0",
+    "config:api_secret=SuperSecretValue12345678",
+    "env:password=hunter22222",
+    "(api_key=abc123)",
+    "x,PASSWORD=letmein",
+    "npm config set //registry.npmjs.org/:_authToken=npm_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8",
+    // No recognised key name at all: the entropy fallback is the only net left.
+    "unknownfield=A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8S9t0",
+  ];
+  for (const input of leaky) {
+    const output = redactText(input, "/home/ada");
+    assert.match(output, /\[redacted\]/, `expected redaction for ${input}`);
+    assert.doesNotMatch(
+      output,
+      /A1b2C3d4E5f6|SuperSecretValue|hunter22222|abc123|letmein|npm_A1b2/,
+      `secret survived redaction in ${input}`,
+    );
+  }
+});
+
+test("redactor still leaves ordinary words that merely contain a key name", () => {
+  for (const benign of ["monkeykeyboard", "keyboard shortcut", "the token bus arrives", "hello world"]) {
+    assert.equal(redactText(benign, "/home/ada"), benign);
+  }
+});

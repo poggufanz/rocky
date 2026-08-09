@@ -14,6 +14,7 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
 import { createInterface } from "node:readline";
+import { PACKAGE_NAME, PACKAGE_VERSION } from "../core/package-info.js";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { singleFlightRecallAi } from "../ai/recall-ai.js";
@@ -238,7 +239,7 @@ test("compiled CLI serves modern discovery, listing, and every read-only tool wi
   const discovery = await server.request(modernRequest("modern-discover", "server/discover"));
   assert.deepEqual(discovery.result?.supportedVersions, ["2026-07-28"]);
   assert.deepEqual(discovery.result?._meta, {
-    "io.modelcontextprotocol/serverInfo": { name: "@poggufanz/rocky-cli", version: "0.3.0" },
+    "io.modelcontextprotocol/serverInfo": { name: PACKAGE_NAME, version: PACKAGE_VERSION },
   });
   assertToolCatalog(await server.request(modernRequest("modern-list", "tools/list")));
 

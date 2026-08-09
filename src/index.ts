@@ -18,6 +18,7 @@ import { stats } from "./commands/stats.js";
 import { hookFail, hookInstall, hookStatus, hookSuccess, hookUninstall } from "./commands/hook.js";
 import { mcp } from "./commands/mcp.js";
 import { setup } from "./commands/setup.js";
+import { check } from "./commands/check.js";
 import { PACKAGE_NAME, PACKAGE_VERSION } from "./core/package-info.js";
 import { face, say } from "./ui/rocky.js";
 
@@ -54,14 +55,17 @@ usage:
   rocky setup --mcp-exposure sanitized|raw
                             choose projected-memory exposure during configure.
   rocky setup --voice-skill configure hosts and install managed voice skill explicitly.
+  rocky check [--pre-push|--install-hook|--offline|--quiet]
+                            hull check before push.
   rocky hook install        put Rocky's ears in your bash. every command heard,
                             failures remembered, dangerous commands questioned.
   rocky hook uninstall      remove the ears. memory stays.
   rocky hook status         are the ears in, question
 
-memory lives in ~/.rocky/memory.jsonl. core CLI/MCP has no telemetry or external
-network egress. configured hosts control what they forward; optional AI uses
-loopback Ollama only.
+memory lives in ~/.rocky/memory.jsonl. no telemetry. only outside call is rocky
+check asking registry.npmjs.org whether package exists — package name only, you say
+yes first, offline never blocks. configured hosts control what they forward;
+optional AI uses loopback Ollama only.
 `;
 
 async function main(): Promise<number> {
@@ -83,6 +87,8 @@ async function main(): Promise<number> {
       return mcp();
     case "setup":
       return setup(rest);
+    case "check":
+      return check(rest);
     case "hook":
       switch (rest[0]) {
         case "install":

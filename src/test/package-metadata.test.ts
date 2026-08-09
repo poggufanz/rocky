@@ -22,6 +22,7 @@ const packageRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const expectedFiles = [
   "dist/index.js",
   "dist/commands",
+  "dist/check",
   "dist/core",
   "dist/ui",
   "dist/mcp",
@@ -31,6 +32,7 @@ const expectedFiles = [
   "skills/rocky-voice",
   "README.md",
   "LICENSE",
+  "CHANGELOG.md",
 ] as const;
 
 interface JsonObject {
@@ -83,9 +85,11 @@ function occurrenceCount(value: string, needle: string): number {
 function allowedPackPath(path: string): boolean {
   return path === "LICENSE"
     || path === "README.md"
+    || path === "CHANGELOG.md"
     || path === "package.json"
     || path === "dist/index.js"
     || path.startsWith("dist/commands/")
+    || path.startsWith("dist/check/")
     || path.startsWith("dist/core/")
     || path.startsWith("dist/ui/")
     || path.startsWith("dist/mcp/")
@@ -191,7 +195,7 @@ test("package launcher diagnostics survive a missing executable and undefined st
 test("public package metadata pins the scoped beta identity and release coordinates", () => {
   const metadata = readJson(join(packageRoot, "package.json"));
   assert.equal(metadata.name, "@poggufanz/rocky-cli");
-  assert.equal(metadata.version, "0.3.0");
+  assert.equal(metadata.version, "0.4.0");
   assert.deepEqual(metadata.bin, { rocky: "./dist/index.js" });
   assert.deepEqual(metadata.engines, { node: ">=18" });
   assert.deepEqual(metadata.repository, {
@@ -202,7 +206,10 @@ test("public package metadata pins the scoped beta identity and release coordina
   assert.deepEqual(metadata.bugs, { url: "https://github.com/poggufanz/rocky/issues" });
   assert.equal(metadata.author, "Muhammad Faiq");
   assert.equal(metadata.license, "MIT");
-  assert.deepEqual(metadata.publishConfig, { access: "public", tag: "beta" });
+  // No `tag` here on purpose: it was left over from the 0.2.1-beta era, and it
+  // sent 0.4.0 to the `beta` tag while a bare `npm install -g` kept serving
+  // 0.3.0 — the release with the sanitized-MCP credential leak.
+  assert.deepEqual(metadata.publishConfig, { access: "public" });
   assert.deepEqual(metadata.files, expectedFiles);
   assert.equal(object(metadata.scripts, "scripts").prepack, "npm run build");
   assert.equal(object(metadata.scripts, "scripts").prepublishOnly, "npm test");
@@ -214,11 +221,11 @@ test("package and lock contain no runtime or optional dependencies", () => {
   assert.deepEqual(metadata.dependencies ?? {}, {});
   assert.deepEqual(metadata.optionalDependencies ?? {}, {});
   assert.equal(lock.name, "@poggufanz/rocky-cli");
-  assert.equal(lock.version, "0.3.0");
+  assert.equal(lock.version, "0.4.0");
   const packages = object(lock.packages, "lock packages");
   const root = object(packages[""], "lock root");
   assert.equal(root.name, "@poggufanz/rocky-cli");
-  assert.equal(root.version, "0.3.0");
+  assert.equal(root.version, "0.4.0");
   assert.deepEqual(root.dependencies ?? {}, {});
   assert.deepEqual(root.optionalDependencies ?? {}, {});
   for (const [path, value] of Object.entries(packages)) {
@@ -242,7 +249,7 @@ test("production identity constants match package metadata without duplicate lit
     });
   assert.deepEqual(occurrences, [
     { path: "src/core/package-info.ts", literal: "@poggufanz/rocky-cli" },
-    { path: "src/core/package-info.ts", literal: "0.3.0" },
+    { path: "src/core/package-info.ts", literal: "0.4.0" },
   ]);
 });
 
@@ -255,7 +262,7 @@ test("npm pack dry-run exposes only the bounded production payload", (t) => {
   }
   const packed = dryRunPack(t, npmCli);
   assert.equal(packed.name, "@poggufanz/rocky-cli");
-  assert.equal(packed.version, "0.3.0");
+  assert.equal(packed.version, "0.4.0");
   assert.ok(packed.size < 1_000_000, `tarball is ${packed.size} bytes`);
   assert.ok(Number.isFinite(packed.unpackedSize) && packed.unpackedSize > 0);
   const paths = packed.files.map(({ path }) => path).sort();
@@ -267,6 +274,7 @@ test("npm pack dry-run exposes only the bounded production payload", (t) => {
   for (const required of [
     "LICENSE",
     "README.md",
+    "CHANGELOG.md",
     "package.json",
     "dist/index.js",
     "skills/rocky-voice/SKILL.md",

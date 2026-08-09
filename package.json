@@ -1,6 +1,6 @@
 {
   "name": "@poggufanz/rocky-cli",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "A blind engineer who lives in your terminal, never forgets an error, and makes sure you still understand your own code.",
   "type": "module",
   "bin": {
@@ -9,6 +9,7 @@
   "files": [
     "dist/index.js",
     "dist/commands",
+    "dist/check",
     "dist/core",
     "dist/ui",
     "dist/mcp",
@@ -17,7 +18,8 @@
     "dist/shell",
     "skills/rocky-voice",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "CHANGELOG.md"
   ],
   "scripts": {
     "build": "node scripts/build.mjs",
@@ -50,8 +52,7 @@
   "author": "Muhammad Faiq",
   "license": "MIT",
   "publishConfig": {
-    "access": "public",
-    "tag": "beta"
+    "access": "public"
   },
   "devDependencies": {
     "typescript": "^5.5.0",

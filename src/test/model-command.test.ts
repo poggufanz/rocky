@@ -273,3 +273,32 @@ test("model off and model use keep config keys they do not own", async () => {
   assert.equal(await model(["off"], deps), 0);
   assert.deepEqual(saved, { version: 1, ai: { enabled: false }, watch: { notify: false } });
 });
+
+test("model off and model use preserve check registry consent byte-for-byte", async () => {
+  const check = { registry: true };
+  const seeded: RockyConfigV1 = {
+    version: 1,
+    ai: { enabled: true, provider: "ollama", model: "llama3", exposure: "sanitized" },
+    check,
+  };
+  const savedCheckBytes: string[] = [];
+
+  for (const argv of [["off"], ["use", "installed-model"]]) {
+    const saved: RockyConfigV1[] = [];
+    const ollama = fakeOllama([{ name: "installed-model", size: 1 }]);
+
+    assert.equal(await model(argv, {
+      ollama: ollama.client,
+      loadConfig: configLoader({ status: "valid", path: "/tmp/config.json", config: seeded }),
+      saveConfigAtomic: (config) => {
+        saved.push(config);
+        return { path: "/tmp/config.json" };
+      },
+    }), 0, argv.join(" "));
+    assert.equal(saved.length, 1, argv.join(" "));
+    savedCheckBytes.push(JSON.stringify(saved[0]!.check));
+  }
+
+  const seededCheckBytes = JSON.stringify(check);
+  assert.deepEqual(savedCheckBytes, [seededCheckBytes, seededCheckBytes]);
+});

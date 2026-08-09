@@ -11,12 +11,17 @@ export interface WatchConfig {
   notify: boolean;
 }
 
+export interface CheckConfig {
+  registry: boolean;
+}
+
 export const DEFAULT_WATCH_NOTIFY = true;
 
 export interface RockyConfigV1 {
   version: 1;
   ai: AiConfig;
   watch?: WatchConfig;
+  check?: CheckConfig;
 }
 
 export type ConfigLoadResult =
@@ -40,10 +45,18 @@ function parseWatch(value: unknown): WatchConfig | undefined {
   return { notify: watch.notify };
 }
 
+function parseCheck(value: unknown): CheckConfig | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+  const check = value as Record<string, unknown>;
+  if (Object.keys(check).some((key) => key !== "registry")) return undefined;
+  if (typeof check.registry !== "boolean") return undefined;
+  return { registry: check.registry };
+}
+
 export function parseConfig(value: unknown): RockyConfigV1 | undefined {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
   const root = value as Record<string, unknown>;
-  if (Object.keys(root).some((key) => key !== "version" && key !== "ai" && key !== "watch")) return undefined;
+  if (Object.keys(root).some((key) => key !== "version" && key !== "ai" && key !== "watch" && key !== "check")) return undefined;
   if (root.version !== 1 || typeof root.ai !== "object" || root.ai === null || Array.isArray(root.ai)) return undefined;
   const ai = root.ai as Record<string, unknown>;
   let watch: WatchConfig | undefined;
@@ -51,9 +64,19 @@ export function parseConfig(value: unknown): RockyConfigV1 | undefined {
     watch = parseWatch(root.watch);
     if (!watch) return undefined;
   }
+  let check: CheckConfig | undefined;
+  if (root.check !== undefined) {
+    check = parseCheck(root.check);
+    if (!check) return undefined;
+  }
   if (ai.enabled === false) {
     if (Object.keys(ai).some((key) => key !== "enabled")) return undefined;
-    return { version: 1, ai: { enabled: false }, ...(watch === undefined ? {} : { watch }) };
+    return {
+      version: 1,
+      ai: { enabled: false },
+      ...(watch === undefined ? {} : { watch }),
+      ...(check === undefined ? {} : { check }),
+    };
   }
   if (Object.keys(ai).some((key) => !["enabled", "provider", "model", "exposure"].includes(key))) return undefined;
   if (ai.enabled !== true || ai.provider !== "ollama" || typeof ai.model !== "string" || ai.model.trim() === "") return undefined;
@@ -61,6 +84,7 @@ export function parseConfig(value: unknown): RockyConfigV1 | undefined {
   return {
     version: 1, ai: { enabled: true, provider: "ollama", model: ai.model, exposure: ai.exposure },
     ...(watch === undefined ? {} : { watch }),
+    ...(check === undefined ? {} : { check }),
   };
 }
 

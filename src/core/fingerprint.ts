@@ -54,9 +54,17 @@ export function signatureLines(stderr: string): string[] {
   return chosen.map(normalizeLine).filter((l) => l.length > 0);
 }
 
-/** Stable hash for exact re-occurrence detection. */
-export function fingerprint(stderr: string): string {
+/**
+ * Stable hash for exact re-occurrence detection. When stderr carries no
+ * signal at all, hashing "" would collapse every silent failure — any
+ * command, any project — onto one constant fingerprint and fabricate
+ * cross-command matches (observed live in dogfood data). Fall back to the
+ * command fingerprint instead: same information content as a hook-heard
+ * failure, and the `cmd:` prefix keeps the hash space disjoint by design.
+ */
+export function fingerprint(stderr: string, cmd: string, exitCode: number): string {
   const sig = signatureLines(stderr).join("\n");
+  if (sig.length === 0) return commandFingerprint(cmd, exitCode);
   return createHash("sha1").update(sig).digest("hex").slice(0, 16);
 }
 
@@ -123,6 +131,9 @@ function meaningfulTokens(cmd: string): string[] {
     const token = tokens[start];
     if (token === undefined) break;
     if (ENV_ASSIGNMENT.test(token) || WRAPPERS.has(basename(token))) { start++; continue; }
+    // `rocky run <X>` is a two-token wrapper: its own name says nothing about
+    // what failed. `rocky setup` etc. fall through (next token is not "run").
+    if (basename(token) === "rocky" && tokens[start + 1] === "run") { start += 2; continue; }
     break;
   }
   // A line that is nothing but prefixes still has to name something.

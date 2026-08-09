@@ -15,6 +15,14 @@ import { StringDecoder } from "node:string_decoder";
 export const TAIL_LINES = 200;
 export const MAX_LINE_BYTES = 4096;
 
+/**
+ * Exit codes that mean "the user cancelled", not "the command failed":
+ * 130 = SIGINT (Ctrl-C), 143 = SIGTERM. A cancelled run is not a memory
+ * event — no record, no speaking. Deliberately NOT generalized further;
+ * any other code needs its own evidence.
+ */
+export const CANCEL_CODES: ReadonlySet<number> = new Set([130, 143]);
+
 export interface ExecOptions {
   tailLines?: number; // default TAIL_LINES
   maxLineBytes?: number; // default MAX_LINE_BYTES
@@ -31,6 +39,91 @@ export interface ExecResult {
   /** The bounded tail, newest last. */
   tail: string[];
   durationMs: number;
+}
+
+export interface GitResult {
+  code: number;
+  stdout: string;
+  stderr: string;
+  timedOut: boolean;
+  outputLimitExceeded: boolean;
+}
+
+export interface GitOptions {
+  /** Opt-in deadline. Omitted callers retain the prior unlimited behavior. */
+  timeoutMs?: number;
+  /** Opt-in combined stdout/stderr memory cap. The child is killed as soon as it is exceeded. */
+  maxOutputBytes?: number;
+}
+
+/** Execute git with argv boundaries intact and capture its output. */
+export function runGit(
+  args: readonly string[],
+  input?: string,
+  options: GitOptions = {},
+): Promise<GitResult> {
+  return new Promise((resolve) => {
+    // Git's fatal messages are the only way to tell "no repository here" from
+    // "this repository is broken" — both exit 128 — so the locale is pinned
+    // rather than left to whatever the user's shell exports.
+    const child = spawn("git", [...args], {
+      stdio: ["pipe", "pipe", "pipe"],
+      env: { ...process.env, LC_ALL: "C", LANG: "C" },
+    });
+    const stdout: Buffer[] = [];
+    const stderr: Buffer[] = [];
+    let outputBytes = 0;
+    let timedOut = false;
+    let outputLimitExceeded = false;
+    let settled = false;
+    let timer: NodeJS.Timeout | undefined;
+    const finish = (code: number): void => {
+      if (settled) return;
+      settled = true;
+      if (timer !== undefined) clearTimeout(timer);
+      resolve({
+        code,
+        stdout: Buffer.concat(stdout).toString("utf8"),
+        stderr: Buffer.concat(stderr).toString("utf8"),
+        timedOut,
+        outputLimitExceeded,
+      });
+    };
+
+    const keepOutput = (target: Buffer[], chunk: Buffer): void => {
+      const limit = options.maxOutputBytes;
+      if (limit === undefined) {
+        target.push(chunk);
+        return;
+      }
+      const remaining = Math.max(0, limit - outputBytes);
+      if (remaining > 0) {
+        const kept = chunk.length <= remaining ? chunk : chunk.subarray(0, remaining);
+        target.push(kept);
+        outputBytes += kept.length;
+      }
+      if (chunk.length > remaining) {
+        outputLimitExceeded = true;
+        child.kill("SIGKILL");
+      }
+    };
+
+    child.stdout.on("data", (chunk: Buffer) => keepOutput(stdout, chunk));
+    child.stderr.on("data", (chunk: Buffer) => keepOutput(stderr, chunk));
+    child.stdin.on("error", () => { /* spawn failure is reported by the child itself */ });
+    child.on("error", (error) => {
+      stderr.push(Buffer.from(error.message));
+      finish(127);
+    });
+    child.on("close", (code, signal) => finish(code ?? signalExit(signal)));
+    if (options.timeoutMs !== undefined) {
+      timer = setTimeout(() => {
+        timedOut = true;
+        child.kill("SIGKILL");
+      }, options.timeoutMs);
+    }
+    child.stdin.end(input);
+  });
 }
 
 /** Exported for tests: the ring buffer, independent of any child process. */

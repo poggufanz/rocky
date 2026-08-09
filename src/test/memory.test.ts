@@ -91,3 +91,30 @@ test("recordFix keeps its line readable instead of writing a record that is sile
     .filter((record) => record.kind === "fix" && record.id === fix.id);
   assert.equal(stored.length, 1, "the fix record must still be readable after writing");
 });
+
+test("recordNote round-trips through the parser", () => {
+  memory.recordNote({
+    cwd: "/tmp/x",
+    cmd: "abc..def",
+    file: "src/a.ts",
+    line: 3,
+    subject: "eval(x)",
+    answer: "it evaluates x",
+  });
+
+  const note = memory.loadMemory().find((record) => record.kind === "note");
+  assert.ok(note);
+  assert.equal(note.file, "src/a.ts");
+  assert.equal(note.answer, "it evaluates x");
+});
+
+test("parseMemoryRecord rejects malformed notes and still skips unknown kinds", () => {
+  assert.equal(
+    memory.parseMemoryRecord({ kind: "note", id: "x", ts: 1, cwd: "/", cmd: "" }),
+    undefined,
+  );
+  assert.equal(
+    memory.parseMemoryRecord({ kind: "hologram", id: "x", ts: 1, cwd: "/", cmd: "" }),
+    undefined,
+  );
+});

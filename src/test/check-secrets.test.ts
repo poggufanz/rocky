@@ -1,0 +1,73 @@
+import assert from "node:assert/strict";
+import { test } from "node:test";
+import type { AddedLine } from "../check/diff.js";
+import { scanSecrets } from "../check/secrets.js";
+
+function line(text: string): AddedLine {
+  return { file: "src/x.ts", line: 7, text };
+}
+
+test("detects each supported secret family", () => {
+  const cases: Array<[string, string]> = [
+    ["AKIA" + "A1B2C3D4E5F6G7H8", "aws access key"],
+    ["-----BEGIN RSA PRIVATE KEY-----", "private key"],
+    ["ghp_" + "aB3d".repeat(9), "github token"],
+    ["github_pat_" + "aB3dE5fG7hI9jK2mN4pQ6r" + "_" + "sT8uV0wX1yZ2cD4eF6gH8iJ9kL3mNP", "github token"],
+    ["xoxb-1234567890-AbCdEfGhIj", "slack token"],
+    ["sk-ant-aB3dE5fG7hI9jK2mN4pQ6rS8", "anthropic key"],
+    ["sk-aB3dE5fG7hI9jK2mN4pQ6rS8tU0vW1xY", "openai key"],
+    ["npm_" + "aB3d".repeat(9), "npm token"],
+    ['password = "pA7!cV2@kL9"', "password assignment"],
+  ];
+
+  for (const [text, kind] of cases) {
+    const hits = scanSecrets([line(`const k = "${text}"`)]);
+    assert.equal(hits.length, 1, text);
+    assert.equal(hits[0]!.kind, kind, text);
+    assert.equal(hits[0]!.file, "src/x.ts");
+    assert.equal(hits[0]!.line, 7);
+  }
+});
+
+test("anthropic keys are not double-reported as openai keys", () => {
+  const hits = scanSecrets([line("sk-ant-aB3dE5fG7hI9jK2mN4pQ6rS8")]);
+
+  assert.deepEqual(hits.map((hit) => hit.kind), ["anthropic key"]);
+});
+
+test("reports only the first matching secret per added line", () => {
+  const hits = scanSecrets([
+    line("const keys = [\"AKIAA1B2C3D4E5F6G7H8\", \"sk-aB3dE5fG7hI9jK2mN4pQ6rS8\"]"),
+  ]);
+
+  assert.deepEqual(hits.map((hit) => hit.kind), ["aws access key"]);
+});
+
+test("detects real-shaped secrets in comment-like added lines", () => {
+  const realKey = "sk-ant-aB3dE5fG7hI9jK2mN4pQ6rS8";
+  const cases = [
+    `  #apiKey = "${realKey}";`,
+    `* leaked key: ${realKey}`,
+    `// const apiKey = "${realKey}";`,
+  ];
+
+  for (const text of cases) {
+    assert.deepEqual(scanSecrets([line(text)]).map((hit) => hit.kind), ["anthropic key"], text);
+  }
+});
+
+test("does not flag benign, placeholder, or test-example lines", () => {
+  const benign = [
+    "const password = process.env.PASSWORD;",
+    'password = ""',
+    "// example: sk-ant-" + "x".repeat(24),
+    "const b64 = \"aGVsbG8gd29ybGQgdGhpcyBpcyBiYXNlNjQ=\";",
+    "skill = new Skill()",
+    "AKIAI is not a full key",
+    "const placeholder = \"sk-ant-" + "x".repeat(24) + "\";",
+    "const placeholder = \"sk-" + "z".repeat(24) + "\";",
+    'password = "test-password-123"',
+  ];
+
+  assert.equal(scanSecrets(benign.map(line)).length, 0);
+});

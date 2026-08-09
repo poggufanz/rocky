@@ -11,7 +11,7 @@
  */
 
 import { fingerprint } from "../core/fingerprint.js";
-import { runProcess, type ExecResult } from "../core/exec.js";
+import { CANCEL_CODES, runProcess, type ExecResult } from "../core/exec.js";
 import { resolveRockyPaths } from "../core/state-paths.js";
 import { loadMemory, recordWatchFailure, type MemoryRecord } from "../core/memory.js";
 import { DEFAULT_WATCH_NOTIFY, loadConfig } from "../core/config-read.js";
@@ -56,10 +56,6 @@ export function parseWatchArgs(argv: readonly string[]): ParsedWatch {
 }
 
 export const WATCH_IDLE_MS = 1000 * 60 * 10;
-
-// Shell convention (spec §7): the user cancelled. Pass the code through as-is
-// — no memory record, no log, no notification, no persona line.
-const CANCEL_CODES = new Set([130, 143]);
 
 export interface WatchDependencies {
   notify: (input: NotifyInput) => void;
@@ -128,7 +124,7 @@ function onWatchFailure(cmd: string, cwd: string, quiet: boolean, result: ExecRe
     say(outcomeLine(false, result.durationMs));
     const memory = readMemory(false);
     if (memory !== undefined) {
-      speakFailureMemory(memory, fingerprint(result.stderr), result.code, cwd);
+      speakFailureMemory(memory, fingerprint(result.stderr, cmd, result.code), result.code, cwd);
     }
   }
 
