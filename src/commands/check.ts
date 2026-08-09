@@ -360,11 +360,37 @@ async function installHookFlow(quiet: boolean): Promise<number> {
   return result.status === "refused" ? 1 : 0;
 }
 
+const KNOWN_FLAGS = new Set(["--pre-push", "--install-hook", "--offline", "--quiet", "--help"]);
+
+function usage(): number {
+  detail("usage: rocky check [--pre-push] [--install-hook] [--offline] [--quiet]");
+  detail("  (no flag)        check what you are about to push");
+  detail("  --install-hook   run the check from a git pre-push hook");
+  detail("  --offline        skip the registry lookup for this run");
+  detail("  --quiet          plain facts only, no persona, no question");
+  detail("  --pre-push       read ref updates from git on stdin (hook mode)");
+  detail("env: ROCKY_NO_QUIZ=1 skips the comprehension question");
+  return 0;
+}
+
 async function runCheck(rest: readonly string[], state: CheckState): Promise<number> {
+  // Only arguments Rocky owns are parsed as flags. In hook mode git appends the
+  // remote name and URL, and a remote may legitimately be called anything —
+  // reading those as flags would let a repo named `--offline` disable the scan.
   const ownedArgs = state.prePush
     ? rest.slice(0, rest.indexOf("--pre-push") + 1)
     : rest;
   const flags = new Set(ownedArgs.filter((arg) => arg.startsWith("--")));
+  if (flags.has("--help")) return usage();
+  // An unrecognised flag must not silently degrade into a full check: someone
+  // who typed it meant something Rocky did not do.
+  const unknown = [...flags].filter((flag) => !KNOWN_FLAGS.has(flag));
+  if (unknown.length > 0) {
+    say(phrase("check-unknown-flag"));
+    detail(`unknown: ${unknown.join(", ")}`);
+    usage();
+    return 2;
+  }
   const quiet = flags.has("--quiet");
   if (flags.has("--install-hook")) return installHookFlow(quiet);
 

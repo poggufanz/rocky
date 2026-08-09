@@ -19,7 +19,8 @@ export type PhraseKey =
   | "check-package-missing"
   | "check-registry-consent"
   | "check-answer"
-  | "check-comprehension";
+  | "check-comprehension"
+  | "check-unknown-flag";
 
 const PHRASES: Readonly<Record<PhraseKey, string>> = Object.freeze({
   "ai-known-fix": "memory and small model agree. old fix is strong clue. good good.",
@@ -41,6 +42,7 @@ const PHRASES: Readonly<Record<PhraseKey, string>> = Object.freeze({
   "check-registry-consent": "package names only go to registry.npmjs.org. no telemetry. offline failures stay open. allow registry lookup [y/N], question",
   "check-answer": "answer, question",
   "check-comprehension": "I hear risky new line. what it doing, question",
+  "check-unknown-flag": "that flag I do not know. bad.",
 });
 
 export const phraseKeys: readonly PhraseKey[] = Object.freeze([
@@ -63,6 +65,7 @@ export const phraseKeys: readonly PhraseKey[] = Object.freeze([
   "check-registry-consent",
   "check-answer",
   "check-comprehension",
+  "check-unknown-flag",
 ]);
 
 export function phrase(key: PhraseKey): string {

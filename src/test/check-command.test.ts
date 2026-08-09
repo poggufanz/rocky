@@ -665,3 +665,49 @@ test("offline package lookup never claims that capped package names were checked
   assertCompleted(result, 0);
   assert.doesNotMatch(result.stderr, /package limit:.*checked/i);
 });
+
+test("--help prints usage and checks nothing", async (t) => {
+  const box = sandbox(t);
+  const secret = "AKIAZXCVBNMASDFGHJKL";
+  initRepo(box, { "README.md": "clean\n" }, { "src/key.ts": `export const key = "${secret}";\n` });
+
+  const result = await runCheck(box, ["--help"]);
+
+  assertCompleted(result, 0);
+  assert.match(result.stderr, /usage: rocky check/);
+  // A usage print must not double as a scan: the planted secret stays unreported.
+  assert.doesNotMatch(result.stderr, /src\/key\.ts/);
+});
+
+test("an unrecognised flag refuses instead of silently running a full check", async (t) => {
+  const box = sandbox(t);
+  const secret = "AKIAZXCVBNMASDFGHJKL";
+  initRepo(box, { "README.md": "clean\n" }, { "src/key.ts": `export const key = "${secret}";\n` });
+
+  const result = await runCheck(box, ["--offlien"]);
+
+  // Exit 2 is usage-error, deliberately neither 0 (clean) nor a finding code:
+  // a typo'd --offline must never read as "checked, nothing found".
+  assertCompleted(result, 2);
+  assert.match(result.stderr, /unknown: --offlien/);
+  assert.match(result.stderr, /usage: rocky check/);
+  assert.doesNotMatch(result.stderr, /src\/key\.ts/);
+});
+
+test("pre-push mode never reads git's positional arguments as --help", async (t) => {
+  const box = sandbox(t);
+  const secret = "AKIAZXCVBNMASDFGHJKL";
+  const commits = initRepo(box, { "README.md": "clean\n" }, {
+    "src/key.ts": `export const key = "${secret}";\n`,
+  });
+
+  const result = await runCheck(
+    box,
+    ["--pre-push", "--help", "https://example.com/repo.git"],
+    prePushLine(commits.second!, commits.first),
+  );
+
+  assertCompleted(result, 3);
+  assert.doesNotMatch(result.stderr, /usage: rocky check/);
+  assert.match(result.stderr, /src\/key\.ts:1/);
+});
