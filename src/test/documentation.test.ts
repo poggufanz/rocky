@@ -10,6 +10,7 @@ import { PACKAGE_NAME, PACKAGE_VERSION } from "../core/package-info.js";
 const packageRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const readme = readFileSync(join(packageRoot, "README.md"), "utf8");
 const grounding = readFileSync(join(packageRoot, "docs", "scientific-grounding.md"), "utf8");
+const modelSource = readFileSync(join(packageRoot, "src", "commands", "model.ts"), "utf8");
 const unscopedRockyInstall = /\bnpm\s+(?:install|i)(?=\s)[^\n;&|#]*?[\s`'"]rocky-cli(?:@[^\s`'",;:)]+)?(?=$|[\s`'",;:.)])/i;
 const inactiveInstallContext = /\b(?:historical|superseded|negative test|not an active command)\b|\b(?:do not|don't|never) use\b/i;
 
@@ -36,6 +37,13 @@ function assertNoActiveExplain(surface: string, label: string): void {
     assert.match(line, /superseded|not an active command/i, `${label} advertises rocky explain: ${line}`);
   }
 }
+
+test("preservedKeys documentation names both check and watch ownership", () => {
+  const comment = /\/\*\*[\s\S]*?\*\/\s*function preservedKeys/.exec(modelSource)?.[0];
+  assert.ok(comment, "preservedKeys must keep its ownership comment");
+  assert.match(comment, /`watch`/);
+  assert.match(comment, /`check`/);
+});
 
 function hasActiveUnscopedRockyInstall(surface: string): boolean {
   return surface.split("\n").some((line) => (
@@ -69,6 +77,7 @@ test("README and CLI help publish the installable v0.2.1 command surface", () =>
   const expected = [
     "npm install -g @poggufanz/rocky-cli",
     "rocky setup",
+    "rocky check",
     "rocky mcp",
     "rocky recall --ai",
     "rocky model",
@@ -371,10 +380,69 @@ test("README documents the Claude Code manual-fallback reality with the exact so
   );
 });
 
+test("no shipped surface still claims the project makes no external network requests", () => {
+  // v0.4 made `rocky check` call the npm registry. A blanket no-egress claim is
+  // now false wherever it survives, and it survived in three places the first
+  // pass missed — so every shipped documentation surface is checked here, not
+  // just README, and the rejection is by claim SHAPE rather than by the one
+  // exact sentence that happened to exist (rewording would have evaded that).
+  const security = readFileSync(join(packageRoot, "SECURITY.md"), "utf8");
+  const surfaces = [
+    ["README", readme],
+    ["SECURITY.md", security],
+    ["scientific-grounding.md", grounding],
+    ["CLI help", helpOutput()],
+  ] as const;
+
+  const blanketClaims = [
+    /\bcore CLI[^.\n]*\bno (?:telemetry or )?external (?:network )?(?:egress|requests)/i,
+    /\bCLI and (?:the )?(?:local )?MCP server[^.\n]*\bmakes? no external network requests/i,
+    /\bthe project\b[^.\n]*\bmakes? no external (?:network )?requests/i,
+    /\bRocky\b[^.\n]*\bmakes? no external network requests\b(?![^.\n]*(?:except|other than|apart from))/i,
+  ] as const;
+
+  for (const [label, surface] of surfaces) {
+    for (const claim of blanketClaims) {
+      assert.doesNotMatch(surface, claim, `${label} still carries a blanket no-external-egress claim`);
+    }
+  }
+
+  // And the two surfaces that describe the network contract in prose must name
+  // the one thing that does leave the machine.
+  for (const [label, surface] of [["README", readme], ["SECURITY.md", security]] as const) {
+    assert.ok(surface.includes("registry.npmjs.org"), `${label} must name the one external host Rocky contacts`);
+  }
+});
+
 test("README keeps the sanitized-default, raw-opt-in, and loopback-only network contract", () => {
-  assert.match(readme, /contain no telemetry/i, "README must state the core CLI/MCP contain no telemetry");
-  assert.match(readme, /make no external network requests/i, "README must state no external network requests");
-  assert.match(readme, /run no daemon/i, "README must state Rocky runs no daemon");
+  assert.match(readme, /contains no telemetry/i, "README must state the CLI contains no telemetry");
+  assert.match(readme, /runs no daemon/i, "README must state Rocky runs no daemon");
+  // v0.4 turned the old blanket "no external network requests" claim false:
+  // `rocky check` really does call the registry. The claim is now scoped, and
+  // the scoping is pinned here so it cannot silently widen back out.
+  assert.match(
+    readme,
+    /only external network egress is `rocky check`/i,
+    "README must scope external egress to rocky check's registry lookup",
+  );
+  // The qualifiers must live in the SAME paragraph as the egress claim.
+  // Scattered across the document they would pass a bare `includes` while
+  // leaving the sentence a reader actually sees unqualified.
+  const egressParagraph = readme
+    .split("\n\n")
+    .find((paragraph) => /only external network egress is `rocky check`/i.test(paragraph));
+  assert.ok(egressParagraph, "README must contain the scoped egress paragraph");
+  for (const [term, label] of [
+    ["registry.npmjs.org", "name the registry host"],
+    ["package names only", "state only package names leave the machine"],
+    ["consent-gated", "describe the consent gate"],
+    ["fail-open when offline", "state the lookup fails open"],
+  ] as const) {
+    assert.ok(
+      egressParagraph!.toLowerCase().includes(term.toLowerCase()),
+      `README's egress paragraph must ${label}`,
+    );
+  }
   assert.match(
     readme,
     /sanitized memory by default|sanitized[^\n]*by default/i,

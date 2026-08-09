@@ -22,6 +22,10 @@ Developers run around five search sessions a day just looking things up (Sadowsk
 
 Eridians have photographic memory. Rocky catches them.
 
+Code nobody understands has a measured price as well. GitClear's 2025 analysis found the share of changed lines associated with refactoring falling from 25% in 2021 to under 10% in 2024 — the first year on record in which copy/pasted lines outnumbered moved ones — and its 2026 follow-up reports duplicated blocks up 81%, constructs that mask errors up 47%, and changes touching code older than a year down 74% since 2023. Those are measurements of code, not of comprehension, and neither those reports nor this project attributes the debt to any particular group of developers.
+
+Rocky is *built to* attack that cost: fewer agent runs wasted on ambiguous direction, fewer misunderstanding loops, less debugging déjà vu. That is stated design intent for planned work, not a measured result — this project publishes no saving percentage it has not measured.
+
 The longer arc of this project is what we call the comprehension guardian: in an era where AI generates code faster than anyone reads it, Rocky's job is to make sure the human still understands what got built. See [docs/scientific-grounding.md](docs/scientific-grounding.md) for the research this is built on.
 
 ## The Good Trade
@@ -29,6 +33,23 @@ The longer arc of this project is what we call the comprehension guardian: in an
 **The Good Trade.** You get smarter, so your AI gets more effective. Better AI work gives you better material to learn from, so you get smarter again. Rocky exists to keep that loop spinning—because the opposite loop is a risk worth resisting.
 
 This is Rocky's v0.5 product hypothesis, not an established outcome. “More effective” means that a better-informed user can provide sharper direction, context, choices, and verification; it does not mean the model weights change. Rocky's impact on understanding still has to be tested through dogfooding and user research.
+
+Two loops run in opposite directions:
+
+- **The loop worth resisting** — the AI gets more capable, more of the thinking gets handed over, understanding and vigilance erode, intent and verification get worse, and the results get harder to judge at all.
+- **The Good Trade** — you understand more, your intent and decisions get sharper, the AI's work in your hands gets more useful, and that work becomes the material you learn from next.
+
+The arrow that usually breaks is *AI output → you learn from it*. Each arrow maps to one mechanism rather than to a slogan, and every mechanism below is planned v0.5 work, not v0.3.0 behavior:
+
+| Arrow kept alive | Mechanism | Role |
+|---|---|---|
+| AI output → your understanding | Nervous system + intent→mechanism dictionary | Shows the concrete mechanism behind your intent and the agent's change |
+| Your understanding → next intent | Reverse lookup (mechanism→intent) | Returns the intent you actually stored, with its change ID and time |
+| Your intent → AI output | Ambiguity surfacing | Shows the several mechanisms one of your own words has already produced, and lets you pick |
+| Your articulation → memory | The curious blind friend | One curious question turns a one-line answer into a journal entry and a dictionary entry |
+| Memory → next decision | Recall, digest, historical evidence | Carries a cross-session lesson into a new decision |
+
+The claim stops there: better direction from you, never a smarter model.
 
 > “You teach, I remember. I remind, you understand. This is good trade.”
 
@@ -91,7 +112,7 @@ rocky mcp                                # local read-only stdio server
 
 Memory lives in `~/.rocky/memory.jsonl`. It is a text file you can read, grep, back up, and delete. Rocky records explicit terminal commands and errors plus the operational metadata needed to link them: working directory, time, exit code, fingerprints, origin, record IDs, and fix links. Rocky does not keylog and does not capture the screen.
 
-The core CLI and local MCP server contain no telemetry, make no external network requests, and run no daemon. MCP uses local stdio, exposes read-only tools, and projects sanitized memory by default. A configured cloud host may forward selected projected content under that host's own policy, so review the host and choose raw exposure only when you intend to share those fields. Optional AI calls only a separately managed Ollama service over loopback (`127.0.0.1`).
+The CLI contains no telemetry and runs no daemon. Its only external network egress is `rocky check`'s package-existence lookup against registry.npmjs.org — consent-gated, package names only, fail-open when offline. Everything else, including the local MCP server, reaches no external host at all. MCP uses local stdio, exposes read-only tools, and projects sanitized memory by default. A configured cloud host may forward selected projected content under that host's own policy, so review the host and choose raw exposure only when you intend to share those fields. Optional AI calls only a separately managed Ollama service over loopback (`127.0.0.1`).
 
 ## `rocky watch` (v0.3, implemented)
 
@@ -110,6 +131,27 @@ rocky watch "docker compose up" --quiet
 - **`--quiet`**, which keeps the recording but drops every persona line, every idle line, and the notification — stderr gets plain facts only: duration, exit code, and the log path.
 
 Ctrl-C (or an external `SIGTERM`) passes its exit code straight through — no memory record, no log, no notification. Notifications can be turned off in `~/.rocky/config.json` with `"watch": { "notify": false }`; a missing, invalid, or unreadable config always defaults to notifications on and never blocks the run.
+
+## `rocky check` (v0.4, implemented)
+
+The hull check, for the moment right before code leaves your machine:
+
+```bash
+rocky check                  # check what you are about to push
+rocky check --install-hook   # run it automatically as a git pre-push hook
+rocky check --offline        # skip the registry lookup for this run
+rocky check --quiet          # plain facts, no persona, no question
+```
+
+Rocky looks only at the commits you are about to push, and runs three checks. The secret scan and the risk question read the **added** lines of that range; the package check reads whole committed files — each changed `package.json` at both ends of the range, plus your `.npmrc` and the committed `package-lock.json` — because deciding whether a dependency is new, and whether it is even checkable, is not something a diff line can answer.
+
+- **Secrets, offline.** AWS keys, private-key headers, GitHub/Slack/OpenAI/Anthropic/npm tokens, and literal `password=`/`secret=` assignments. A hit names `file:line` and blocks the push.
+- **Hallucinated packages.** Dependencies newly added to a `package.json` are checked for existence against registry.npmjs.org. A package the registry has never heard of blocks the push — `this package not exist. AI dream it, question`. Dependencies using `workspace:`/`file:`/`link:`/`portal:`, scopes your `.npmrc` points elsewhere, and names already resolved in the committed lockfile are skipped, because those are where false accusations come from.
+- **One comprehension question.** Rocky scores the added lines for risk (eval/exec, destructive fs, network, auth handling), picks the riskiest one, and asks what it does. He asks because he is curious, not to test you. **It never blocks a push** — ignore it, answer `busy`, run without a terminal, or set `ROCKY_NO_QUIZ=1`, and the push proceeds. A real answer is kept in your memory file as your own note.
+
+The registry lookup is consent-gated: the first time it would run, Rocky states exactly what leaves the machine — package names, to registry.npmjs.org, no telemetry — and asks once. Answer no and he never asks again. With no answer stored and no terminal to ask on (CI, a non-interactive hook), the lookup is skipped silently rather than hanging.
+
+Only a secret or a missing package ever holds a push. Registry unreachable, a git command that fails, a Rocky bug — all of it fails open with one plain line, because a broken Rocky must never be the reason you cannot ship. `git push --no-verify` remains git's own escape hatch.
 
 ## The ears (v0.2, implemented)
 
@@ -208,7 +250,9 @@ Rocky speaks the way he does in the book, and the rules are enforced in code, no
 
 When things are serious, Rocky is serious. Diagnoses and fixes are printed plainly; the personality lives around the information, never inside it. A `--quiet` mode is planned for people debugging production at 2 a.m.
 
-Rocky asks because he is curious, not because he is testing you; you are always the one who knows. That proactive “Curious Blind Friend” behavior is planned for v0.5 and is not part of v0.3.0.
+Rocky asks because he is curious, not because he is testing you; you are always the one who knows, never the one being graded. Ignore him and he goes quiet — an ignored question is never repeated — and answering `busy` makes him wait without complaint (he once waited 46 years). That proactive “Curious Blind Friend” behavior is planned for v0.5 and is not part of v0.3.0.
+
+The fence never moves: Rocky hears your terminal, and — from v0.5 — your agent hooks. That's it. No keylogging, no screen reading, no capture of screen content of any kind. “Rocky can't see your screen” is a literal description of the architecture, not just lore.
 
 ## Roadmap
 
@@ -216,8 +260,16 @@ Each phase is one facet of who Rocky is:
 
 - **v0.2.1 — distribution bridge**: the v0.1 memory and implemented v0.2 Bash/WSL ears, plus scoped npm distribution, read-only MCP, consent-based host setup, an optional managed voice skill, and optional loopback Ollama interpretation for recall.
 - **v0.3 — his patience** (current release): `rocky watch` — hand him a long build, migration, or download; he waits (he once waited 46 years), notifies you, and holds the logs if it dies.
-- **v0.4 — his diligence**: pre-push hull check — verifies that AI-added packages actually exist on the registry (hallucinated-package defense), wraps secret scanning, and asks one comprehension question about the riskiest line in the diff. Its planned registry lookup is external egress; network errors must fail open.
-- **v0.5 — his curiosity**: Nervous System agent hooks + the Intent↔Mechanism Dictionary + an opt-in Ollama/BYOK annotation layer. The earlier `rocky explain` concept is superseded, not an active command. These planned mechanisms preserve recorded evidence, surface ambiguity only on explicit lookup, and never rewrite, inject, optimize, or submit a user's prompt.
+- **v0.4 — his diligence** (implemented): pre-push hull check — `rocky check` verifies that AI-added packages actually exist on the registry (hallucinated-package defense), scans added lines for secrets, and asks one comprehension question about the riskiest line in the diff. Its registry lookup is this project's only external egress; network errors fail open and never hold a push.
+- **v0.5 — his curiosity**: Nervous System agent hooks + the Intent↔Mechanism Dictionary + an opt-in Ollama/BYOK annotation layer. The earlier `rocky explain` concept is superseded, not an active command. These planned mechanisms preserve recorded evidence, surface ambiguity only on explicit lookup, and never rewrite, inject, optimize, or submit a user's prompt. In more detail:
+  - *Nervous system* — when an agent finishes editing code, an agent hook fires on its own; it is never a tool call the agent has to choose to make. Rocky reads the diff in a separate process and a cheap model (a hosted small model, or a local Ollama one for free) writes a one-or-two sentence annotation: what changed, and why. Debounced per burst of edits (the agent quiet for ~30 seconds counts as one batch), not per file. With no key configured he keeps the deterministic facts only — file, ±lines, time. The principle underneath: hooks write knowledge, MCP reads it back. The working agent is never interrupted and never pays tokens for it.
+  - *What gets stored is a triple* — **intent → stated rationale → mechanism**. The rationale is the reasoning the agent *stated* in its transcript; it is never "the AI's thinking", which no API exposes. A cheap model squeezes it to two sentences plus a concept tag at capture time, before it reaches disk, and `rocky why <file>` answers from it. Because a stated rationale can be post-hoc or simply wrong, Rocky serves it as a quote and not as fact: `agent say: <rationale>. I only hear. correct, question`. Your own one-line answer to `what doing, question` is the human version of the same field, which is what makes the dictionary serve manual coders as well as vibe coders.
+  - *Intent→mechanism dictionary* — your casual prompt ("nudge the button up a bit") beside the code that came out (`margin-top: 8px`), collected into a private dictionary. Delivered least-intrusive first: a passive one-line label after a change (`you say "nudge up". it is margin-top. I think. check, question`), then `rocky what "nudge up"`, then a weekly pattern digest, and only last an opt-in retrieval quiz. His wording stays tentative on purpose — a cheap model's mapping can be wrong, and for teaching that trade is acceptable. Vibe coding translates intent into mechanism and hides the translation; that is where fundamentals evaporate. Rocky sits at the translation and shows what is inside it, using material from your own work.
+  - *The dictionary runs backwards too*, as a pull and never a push: `rocky how do i say "nudge up"` answers from your own history — `last time you say "nudge up", it become margin-top. maybe you mean margin, question`. He reminds you of vocabulary you have already met; he does not translate for you. When one of your words has meant several different things, he shows the evidence — `you say "the button". I hear 3 button in this file. which one, question` — and lets you choose. Reading a prompt through a prompt hook to detect ambiguity earlier is an open candidate, not a decision; the locked rule holds either way: **Rocky never rewrites, "optimizes", injects, or submits a prompt on your behalf.**
+  - *`rocky brief`* — the morning readout. Overnight journal entries and triples rendered into one summary: "N commit, N decision, N thing to understand — start where, question". Built for people who run agents in a loop; the loop works at night, Rocky tells the story in the morning.
+  - *Memory circuit breaker* — a record category for **negative knowledge**: approaches that failed, their fingerprint, how many times, when. Loop-breakers that work per run forget when the run ends, and an agent inside one iteration starts from a fresh context, so by construction it cannot see its own repetition; only an observer living across iterations and sessions can. So the warning carries memory — `this approach... agent try 3 times last week. fail same way. I remember. different way, question`. Advisory by default, injected through a hook; hard blocking stays opt-in. He flags measurable behavioural symptoms — a repeated failure fingerprint, the same file rewritten N times, iterations that never converge — and never judges whether an outcome is any good, for which he has no ground truth.
+  - *`rocky attest` (gated experiment)* — one small command recording that a named human read and answered a comprehension question about a given diff, into a file you can attach to a PR. An experiment to see whether the demand is real, not an enterprise product, and it stays one command.
+  - *How it stays cheap* — git is the database: Rocky stores a commit hash, a path, and a line range, and reconstructs content with `git show` when asked. Only what cannot be reconstructed is kept whole: your intent, the compacted rationale, an stderr excerpt. Cheap models compact at the door, retention is tiered (full detail for 90 days, then rollups), `rocky export` always exists so nothing is locked in, and no embedding vectors ship in v1. The learning principle is **curate, don't train**: the base model stays cheap forever and what grows is the memory plus few-shot examples drawn from your own history. Never continuous fine-tuning.
 - **later — his care**: ambient pet mode and the desktop pet window (deferred). He notices you've been at it for four hours, and he has opinions about your sleep.
 
 v0.3.0 does not implement the v0.5 nervous-system hooks, bidirectional intent↔mechanism lookup, ambiguity handling, proactive questions, digest, quiz, or BYOK annotation.
