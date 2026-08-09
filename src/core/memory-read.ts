@@ -2,6 +2,8 @@ import { existsSync, readFileSync } from "node:fs";
 import { Buffer } from "node:buffer";
 import { resolveRockyPaths } from "./state-paths.js";
 
+export type FailureOrigin = "run" | "hook" | "watch";
+
 export interface FailureRecord {
   kind: "failure";
   id: string;
@@ -12,9 +14,12 @@ export interface FailureRecord {
   fingerprint: string;
   signature: string[];
   excerpt: string;
-  origin?: "run" | "hook";
+  origin?: FailureOrigin;
   resolvedBy?: string;
 }
+
+export type LinkBasis = "signature" | "program";
+export interface FixLink { id: string; basis: LinkBasis }
 
 export interface FixRecord {
   kind: "fix";
@@ -23,6 +28,7 @@ export interface FixRecord {
   cwd: string;
   cmd: string;
   failureIds: string[];
+  links?: FixLink[];
 }
 
 export type MemoryRecord = FailureRecord | FixRecord;
@@ -41,6 +47,19 @@ function strings(value: unknown): string[] | undefined {
     : undefined;
 }
 
+// A record's origin is defined but not one of the three known values — including when it
+// isn't a string at all (a number, an object, null) — is read as "run" rather than
+// discarding the whole record. Compatibility cost the spec accepts: an already-released
+// v0.2.1 binary's parser only knows "run"/"hook" and still discards a "watch" record
+// outright, so a v0.3 -> v0.2.1 downgrade loses those records. Accepted because the
+// package is still beta; after v1, this kind of loosening must ship before any new
+// origin value is introduced, not after.
+function normalizeOrigin(origin: unknown): FailureOrigin | undefined {
+  if (origin === undefined) return undefined;
+  if (origin === "run" || origin === "hook" || origin === "watch") return origin;
+  return "run";
+}
+
 export function parseMemoryRecord(value: unknown): MemoryRecord | undefined {
   const record = objectValue(value);
   if (!record || typeof record.id !== "string" || typeof record.ts !== "number" || !Number.isFinite(record.ts) ||
@@ -49,20 +68,39 @@ export function parseMemoryRecord(value: unknown): MemoryRecord | undefined {
     const signature = strings(record.signature);
     if (typeof record.exitCode !== "number" || !Number.isInteger(record.exitCode) || typeof record.fingerprint !== "string" ||
         !signature || typeof record.excerpt !== "string") return undefined;
-    if (record.origin !== undefined && record.origin !== "run" && record.origin !== "hook") return undefined;
+    const origin = normalizeOrigin(record.origin);
     return {
       kind: "failure", id: record.id, ts: Number(record.ts), cwd: record.cwd,
       cmd: record.cmd, exitCode: Number(record.exitCode), fingerprint: record.fingerprint,
       signature, excerpt: record.excerpt,
-      ...(record.origin === undefined ? {} : { origin: record.origin }),
+      ...(origin === undefined ? {} : { origin }),
     };
   }
   if (record.kind === "fix") {
     const failureIds = strings(record.failureIds);
     if (!failureIds) return undefined;
-    return { kind: "fix", id: record.id, ts: Number(record.ts), cwd: record.cwd, cmd: record.cmd, failureIds };
+    let links: FixLink[] | undefined;
+    if (record.links !== undefined) {
+      links = parseFixLinks(record.links);
+      if (!links) return undefined;
+    }
+    return {
+      kind: "fix", id: record.id, ts: Number(record.ts), cwd: record.cwd, cmd: record.cmd, failureIds,
+      ...(links === undefined ? {} : { links }),
+    };
   }
   return undefined;
+}
+
+function parseFixLinks(value: unknown): FixLink[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const links: FixLink[] = [];
+  for (const entry of value) {
+    const obj = objectValue(entry);
+    if (!obj || typeof obj.id !== "string" || (obj.basis !== "signature" && obj.basis !== "program")) return undefined;
+    links.push({ id: obj.id, basis: obj.basis });
+  }
+  return links;
 }
 
 export function loadMemory(path = resolveRockyPaths().memory): MemoryRecord[] {

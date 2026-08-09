@@ -252,3 +252,24 @@ test("model off writes only disabled config and refuses malformed config without
   assert.equal(ollama.tags, 0);
   assert.deepEqual(ollama.probes, []);
 });
+
+test("model off and model use keep config keys they do not own", async () => {
+  // Rebuilding the config from scratch silently deleted the user's `watch`
+  // key, so `rocky model off` turned watch notifications back on for someone
+  // who had deliberately switched them off.
+  const withWatch = {
+    version: 1 as const,
+    ai: { enabled: true as const, provider: "ollama" as const, model: "llama3", exposure: "sanitized" as const },
+    watch: { notify: false },
+  };
+
+  let saved: unknown;
+  const deps = {
+    ollama: { listInstalledModels: async () => [], probeModel: async () => ({ supported: true }), generateStructured: async () => ({}) },
+    loadConfig: () => ({ status: "valid" as const, path: "/tmp/config.json", config: withWatch }),
+    saveConfigAtomic: (config: unknown) => { saved = config; return { path: "/tmp/config.json" }; },
+  } as unknown as Parameters<typeof model>[1];
+
+  assert.equal(await model(["off"], deps), 0);
+  assert.deepEqual(saved, { version: 1, ai: { enabled: false }, watch: { notify: false } });
+});

@@ -30,8 +30,9 @@ import {
   loadMemory,
   recordFix,
   recordHookFailure,
+  type MemoryRecord,
 } from "../core/memory.js";
-import { findByFingerprint, getFix, recentUnresolvedFailures } from "../core/memory-query.js";
+import { findByFingerprint, fixFromElsewhere, getFix, recentUnresolvedFailures } from "../core/memory-query.js";
 import {
   atomicWriteBytesIfUnchanged,
   inspectFileTransaction,
@@ -45,15 +46,32 @@ import type {
   RecoveryOutcome,
 } from "../setup/file-transaction.js";
 import { quotePosixShell } from "../core/shell-quote.js";
-import { ago, detail, detailTty, say, sayTty } from "../ui/rocky.js";
+import { ago, detail, detailTty, phrase, say, sayTty } from "../ui/rocky.js";
+
+/**
+ * An unreadable memory file is spoken over /dev/tty, not thrown — a detached
+ * hook handler must never take the shell down.
+ */
+function readMemory(): MemoryRecord[] | undefined {
+  try {
+    return loadMemory();
+  } catch {
+    sayTty("memory file does not open for me. I answer from nothing.");
+    detailTty(`memory: ${resolveRockyPaths().memory}`);
+    return undefined;
+  }
+}
 
 /** A command failed in the hooked shell. Record it; speak only if memory has something to say. */
 export function hookFail(cmd: string, exitCode: number, cwd: string): number {
-  const memory = loadMemory();
-  const fp = commandFingerprint(cmd, exitCode);
-  const previous = findByFingerprint(memory, fp);
+  const memory = readMemory();
 
   recordHookFailure(cmd, exitCode, cwd);
+
+  if (memory === undefined) return 0; // unreadable memory: recorded, but nothing to recall
+
+  const fp = commandFingerprint(cmd, exitCode);
+  const previous = findByFingerprint(memory, fp);
 
   if (previous.length === 0) return 0; // first time: passive ears stay quiet
 
@@ -62,6 +80,11 @@ export function hookFail(cmd: string, exitCode: number, cwd: string): number {
     const fix = getFix(memory, withFix)!;
     sayTty(`I hear this error before. ${ago(withFix.ts)}. last time, you fix with:`);
     detailTty(fix.cmd);
+    const elsewhere = fixFromElsewhere(fix, cwd);
+    if (elsewhere !== undefined) {
+      sayTty("but fix comes from other place.");
+      detailTty(`place: ${elsewhere}`);
+    }
     sayTty("try, question");
   } else {
     const hint = deepMemoryHint(cmd);
@@ -84,13 +107,16 @@ export function deepMemoryHint(cmd: string): string | undefined {
 
 /** A command succeeded while the pending flag existed. Try to link a fix. */
 export function hookSuccess(cmd: string, cwd: string): number {
-  const memory = loadMemory();
+  const memory = readMemory();
+  if (memory === undefined) return 0;
   const unresolved = recentUnresolvedFailures(memory, cmd, { cwd });
   if (unresolved.length > 0) {
     recordFix(cmd, unresolved, cwd);
     sayTty("command works now. you fix it. I remember the fix. good good good.");
   }
-  clearPendingIfResolved(loadMemory());
+  // Re-read: the fix just recorded above changes resolution state.
+  const latest = readMemory();
+  if (latest !== undefined) clearPendingIfResolved(latest);
   return 0;
 }
 
@@ -364,6 +390,14 @@ interface PublishResult {
  * copies for this same target are pruned so at most one survives.
  */
 function publishBashrc(rc: string, staged: Buffer, prior: BytesReadResult): PublishResult {
+  // The rename-based transaction below needs write permission on bashrc's
+  // *directory*, not on bashrc itself, so a mode-400 bashrc still gets
+  // legitimately replaced. That is correct, but a user who locked the file
+  // stated an intent — say so before touching it, rather than walking past
+  // it in silence.
+  if (prior.status === "valid" && prior.mode !== undefined && (prior.mode & 0o200) === 0) {
+    say(phrase("bashrc-write-protected"));
+  }
   let result: ConditionalBytesWriteResult;
   try {
     result = atomicWriteBytesIfUnchanged(rc, staged, prior);
@@ -493,6 +527,11 @@ export function hookInstall(): number {
   detail(`rules: ${rulesPath}`);
   if (recoveryPath !== undefined) reportRetainedCopy(recoveryPath);
   say("dangerous command comes, I ask first. ROCKY_OFF=1 makes me deaf.");
+  // bash-preexec must read every command through `history 1`, so it strips
+  // ignorespace/ignoreboth from HISTCONTROL. A command deliberately typed with
+  // a leading space — the usual way to keep a token out of history — starts
+  // being recorded. Rocky changes it, so Rocky says it.
+  say(phrase("hook-histcontrol"));
   return 0;
 }
 

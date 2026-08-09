@@ -73,6 +73,7 @@ test("README and CLI help publish the installable v0.2.1 command surface", () =>
     "rocky recall --ai",
     "rocky model",
     "rocky setup --voice-skill",
+    "rocky watch",
   ] as const;
 
   assertContainsEvery(readme, "README", expected);
@@ -106,7 +107,7 @@ test("README identity, roadmap, and v0.5 hypothesis stay aligned with shipped me
   assert.match(readme, /more effective/i);
   assert.match(readme, /does not mean (?:the )?model weights change/i);
   assert.ok(readme.includes(
-    "v0.2.1 does not implement the v0.5 nervous-system hooks, bidirectional intent↔mechanism lookup, ambiguity handling, proactive questions, digest, quiz, or BYOK annotation.",
+    "v0.3.0 does not implement the v0.5 nervous-system hooks, bidirectional intent↔mechanism lookup, ambiguity handling, proactive questions, digest, quiz, or BYOK annotation.",
   ));
 });
 

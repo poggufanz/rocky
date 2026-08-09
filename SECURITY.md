@@ -16,11 +16,12 @@ This is a one-person side project, not a funded product. Expect a first reply wi
 
 | Version | Supported |
 | --- | --- |
-| 0.2.1-beta.1 | Yes |
+| 0.3.0 | Yes |
+| 0.2.1-beta.1 | No |
 | 0.2.1-beta.0 | No |
 | earlier | No |
 
-Only the current beta gets fixes. Anything published before it is superseded.
+Only the current release gets fixes. Anything published before it is superseded.
 
 Note that `@poggufanz/rocky-cli` is the only package this project publishes. The unscoped `rocky-cli` on npm belongs to someone else and has nothing to do with this project.
 
@@ -50,7 +51,7 @@ Anything that makes the sanitized MCP projection reveal fields that raw exposure
 
 ## What doesn't count
 
-Rocky refusing to act and telling you to do something manually is the designed behavior when it can't prove a state is safe. Codex registration removal and Claude Code automation both currently end that way, which is documented and intentional in this beta.
+Rocky refusing to act and telling you to do something manually is the designed behavior when it can't prove a state is safe. Codex registration removal and Claude Code automation both currently end that way, which is documented and intentional in this release.
 
 The recovery copies described above are working as designed. If you think the design is wrong, that's a worthwhile discussion for a public issue rather than a private advisory.
 

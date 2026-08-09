@@ -11,6 +11,7 @@
  */
 
 import { run } from "./commands/run.js";
+import { watch } from "./commands/watch.js";
 import { recall } from "./commands/recall.js";
 import { model } from "./commands/model.js";
 import { stats } from "./commands/stats.js";
@@ -30,6 +31,12 @@ usage:
   rocky run "<command>"     run command through Rocky. failures are remembered;
                             when the same error returns, Rocky tells you what
                             fixed it last time.
+  rocky watch "<command>" [--quiet]
+                            run a long command; Rocky waits, remembers failures
+                            the same way run does, saves the stderr tail on
+                            failure, and knocks (desktop notification, or a
+                            bell) when it finishes. --quiet: plain facts on
+                            stderr only, no persona lines, no notification.
   rocky recall [--] <query...>
                             ask Rocky's memory. matches words from error or command.
   rocky recall --ai [--] <query...>
@@ -64,6 +71,8 @@ async function main(): Promise<number> {
   switch (command) {
     case "run":
       return run(arg);
+    case "watch":
+      return watch(rest);
     case "recall":
       return recall(rest);
     case "model":

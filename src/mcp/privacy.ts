@@ -1,7 +1,7 @@
 import { Buffer } from "node:buffer";
 import { homedir } from "node:os";
 import type { Exposure } from "../core/config-read.js";
-import type { FailureRecord, FixRecord } from "../core/memory-read.js";
+import type { FailureOrigin, FailureRecord, FixRecord } from "../core/memory-read.js";
 import type { RecallHit, RecentFailureHit } from "../core/memory-query.js";
 
 export const MAX_FIELD_BYTES = 16 * 1024;
@@ -12,7 +12,7 @@ export interface ProjectedRecallHit {
   fingerprint: string;
   timestamp: number;
   exitCode: number;
-  origin: "run" | "hook";
+  origin: FailureOrigin;
   signature: readonly string[];
   hasFix: boolean;
   command: string;

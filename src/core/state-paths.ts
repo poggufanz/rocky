@@ -6,6 +6,7 @@ export interface RockyPaths {
   memory: string;
   pending: string;
   config: string;
+  watchDir: string;
 }
 
 export function resolveRockyPaths(
@@ -20,5 +21,6 @@ export function resolveRockyPaths(
     memory: join(home, "memory.jsonl"),
     pending: join(home, "pending"),
     config: join(home, "config.json"),
+    watchDir: join(home, "watch"),
   };
 }

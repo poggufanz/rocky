@@ -8,7 +8,13 @@ export type PhraseKey =
   | "ai-unavailable"
   | "ai-timeout"
   | "ai-busy"
-  | "ai-fallback";
+  | "ai-fallback"
+  | "bashrc-write-protected"
+  | "hook-histcontrol"
+  | "watch-idle-tail"
+  | "watch-ok"
+  | "watch-fail"
+  | "watch-log-unwritable";
 
 const PHRASES: Readonly<Record<PhraseKey, string>> = Object.freeze({
   "ai-known-fix": "memory and small model agree. old fix is strong clue. good good.",
@@ -19,6 +25,12 @@ const PHRASES: Readonly<Record<PhraseKey, string>> = Object.freeze({
   "ai-timeout": "small model takes too long. I keep old memory answer.",
   "ai-busy": "small model busy. deterministic memory speaks now.",
   "ai-fallback": "model words not grounded enough. I keep memory order.",
+  "bashrc-write-protected": "bashrc is write-protected. I replace it anyway. your lines stay.",
+  "hook-histcontrol": "my ears change your history setting. command typed with space in front is remembered now.",
+  "watch-idle-tail": "waiting is easy for me",
+  "watch-ok": "command finish. good good.",
+  "watch-fail": "command dies. bad.",
+  "watch-log-unwritable": "watch folder does not open for me. no log this time. memory still remembers.",
 });
 
 export const phraseKeys: readonly PhraseKey[] = Object.freeze([
@@ -30,6 +42,12 @@ export const phraseKeys: readonly PhraseKey[] = Object.freeze([
   "ai-timeout",
   "ai-busy",
   "ai-fallback",
+  "bashrc-write-protected",
+  "hook-histcontrol",
+  "watch-idle-tail",
+  "watch-ok",
+  "watch-fail",
+  "watch-log-unwritable",
 ]);
 
 export function phrase(key: PhraseKey): string {
