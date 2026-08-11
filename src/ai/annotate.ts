@@ -39,7 +39,16 @@ const ANSI_CSI_8BIT = /\u009b[0-?]*[ -/]*[@-~]/g;
 const ANSI_OTHER = /\u001b[()][0-2A-Z0-9]/g;
 const BIDI_RE = /[\u200e\u200f\u202a-\u202e\u2066-\u2069]/g;
 const CONTROL_RE = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/g;
-const POSSIBLE_SECRET_FRAGMENT_RE = /(^|[^\p{L}\p{N}_])(?:AKIA[0-9A-Z]*|(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_]*|github_pat_[A-Za-z0-9_]*|xox[baprs]-[A-Za-z0-9-]*|sk-ant-[A-Za-z0-9_-]*|sk-[A-Za-z0-9]*|npm_[A-Za-z0-9_]*|-----BEGIN[ A-Z0-9_-]*|(?:password|secret)\s*=\s*(?:["'][^"']*)?)/giu;
+// Keep token families aligned with shared ASCII `\\b` patterns. Do not use
+// Unicode-aware `/u` here: a non-ASCII prefix is a boundary to the shared
+// redactor, and Unicode case folding could broaden ASCII token classes.
+const ASCII_SECRET_FRAGMENT_RE = /(^|[^A-Za-z0-9_])(?:AKIA[0-9A-Z]*|(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_]*|github_pat_[A-Za-z0-9_]*|xox[baprs]-[A-Za-z0-9-]*|sk-ant-[A-Za-z0-9_-]*|sk-[A-Za-z0-9]*|npm_[A-Za-z0-9_]*)/g;
+// The shared private-key pattern has no word boundary, so its incomplete
+// header scrub is intentionally boundary-free as well.
+const PRIVATE_KEY_FRAGMENT_RE = /-----BEGIN[ A-Z0-9_-]*/g;
+// Shared password/secret assignment matching is case-insensitive but not
+// Unicode-aware; preserve the same ASCII boundary explicitly.
+const ASSIGNMENT_SECRET_FRAGMENT_RE = /(^|[^A-Za-z0-9_])(?:password|secret)\s*=\s*(?:["'][^"']*)?/gi;
 
 /**
  * Schema passed to Ollama. The parser remains defensive because providers can
@@ -120,9 +129,15 @@ function sanitizeText(value: string, maximum: number): string {
   // redaction. This is intentionally conservative and covers every secret
   // family used by redactSecrets, including private-key/password prefixes.
   const safe = wasTruncated
-    ? redacted.replace(POSSIBLE_SECRET_FRAGMENT_RE, (_match, prefix: string) => prefix)
+    ? scrubSecretFragments(redacted)
     : redacted;
   return truncateChars(safe.replace(/\s+/gu, " ").trim(), maximum);
+}
+
+function scrubSecretFragments(value: string): string {
+  const withoutTokens = value.replace(ASCII_SECRET_FRAGMENT_RE, (_match, prefix: string) => prefix);
+  const withoutPrivateKey = withoutTokens.replace(PRIVATE_KEY_FRAGMENT_RE, "");
+  return withoutPrivateKey.replace(ASSIGNMENT_SECRET_FRAGMENT_RE, (_match, prefix: string) => prefix);
 }
 
 function hasOwn(record: Record<string, unknown>, key: string): boolean {

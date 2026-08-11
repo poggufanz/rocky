@@ -97,9 +97,11 @@ test("parseAnnotateOutput does not leak secret fragments after control padding r
     "xoxb-1234567890abcdefghijklmnop",
     "sk-ant-abcdefghijklmnopqrst123",
     "sk-abcdefghijklmnopqrst123",
+    "github_pat_abcdefghijklmnopqrstuvwxyz123456",
     "npm_abcdefghijklmnopqrstuvwxyz1234567890",
     "-----BEGIN RSA PRIVATE KEY-----",
     "password='secret-value'",
+    "secret=secret-value",
   ];
   for (const control of controls) {
     for (const fragment of secretFragments) {
@@ -110,7 +112,7 @@ test("parseAnnotateOutput does not leak secret fragments after control padding r
         const out = parseAnnotateOutput(value);
         if (out) {
           const encoded = JSON.stringify(out);
-          assert.doesNotMatch(encoded, /AKIA|gh[oprsu]_|github_pat_|xox[baprs]-|sk-(?:ant-)?|npm_|-----BEGIN|password\s*=/u, `${control} ${fragment}`);
+          assert.doesNotMatch(encoded, /AKIA|gh[oprsu]_|github_pat_|xox[baprs]-|sk-(?:ant-)?|npm_|-----BEGIN|(?:password|secret)\s*=/u, `${control} ${fragment}`);
         }
       }
     }
@@ -123,6 +125,13 @@ test("parseAnnotateOutput removes the short Anthropic fragment from the original
   if (parsed) {
     assert.doesNotMatch(JSON.stringify(parsed), /sk-ant-|abcdefghijkl/u);
   }
+});
+
+test("parseAnnotateOutput removes a secret fragment after a Unicode word prefix", () => {
+  const candidate = "é" + boundaryPadding("\u0000", 4_585) + "sk-ant-abcdefghijklmnopqrst123" + "SAFE".repeat(20);
+  const parsed = parseAnnotateOutput({ summary: candidate, tags: [candidate], label: candidate });
+  assert.ok(parsed);
+  assert.doesNotMatch(JSON.stringify(parsed), /sk-ant-|abcdefghijklmnopqrst123/u);
 });
 
 test("boundary scrub preserves benign text and removes an incomplete prefix before trailing text", async () => {
@@ -223,6 +232,19 @@ test("createOllamaAnnotate redacts control-padded secret fragments in prompt evi
     assert.doesNotMatch(capture.prompt, /sk-(?:ant-)?|abcdefghijklmnopqrst123/u);
     assert.ok(Buffer.byteLength(capture.prompt, "utf8") <= 8 * 1024);
   }
+});
+
+test("createOllamaAnnotate removes a secret fragment after a Unicode word prefix in prompt evidence", async () => {
+  const candidate = "é" + boundaryPadding("\u0000", 4_585) + "sk-ant-abcdefghijklmnopqrst123" + "SAFE".repeat(20);
+  const capture: GenerateCapture = {};
+  const port = createOllamaAnnotate(fakeClient({ summary: "compact", tags: [] }, capture), "model-a");
+  const out = await port.run(
+    { intent: candidate, rationaleRaw: candidate, files: [{ path: "safe", excerpt: candidate }] },
+    AbortSignal.timeout(1_000),
+  );
+  assert.deepEqual(out, { summary: "compact", tags: [] });
+  assert.ok(capture.prompt);
+  assert.doesNotMatch(capture.prompt, /sk-ant-|abcdefghijklmnopqrst123/u);
 });
 
 test("createOllamaAnnotate returns undefined for invalid, throwing, and already-aborted calls", async () => {
