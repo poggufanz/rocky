@@ -30,6 +30,205 @@ check "install copies hook file"            test -f "$ROCKY_HOME/rocky-hook.bash
 check "install copies bash-preexec"         test -f "$ROCKY_HOME/bash-preexec.sh"
 check "install writes guard rules"          test -f "$ROCKY_HOME/guard.rules"
 
+# --- passive labels: one per prompt, even with no captured command ---------
+LABEL_STDOUT="$TMP/label.stdout"
+LABEL_STDERR="$TMP/label.stderr"
+printf 'first label\nsecond label\n' > "$ROCKY_HOME/labels"
+bash --noprofile --norc -i -c '
+  source "$ROCKY_HOME/rocky-hook.bash"
+  __rocky_last_cmd=""
+  __rocky_precmd
+  __rocky_last_cmd=""
+  __rocky_precmd
+  __rocky_last_cmd=""
+  __rocky_precmd
+' >"$LABEL_STDOUT" 2>"$LABEL_STDERR"
+check "first passive label prints once to stderr" \
+  grep -qF '[Rocky] first label' "$LABEL_STDERR"
+check "second passive label prints once to stderr" \
+  grep -qF '[Rocky] second label' "$LABEL_STDERR"
+check "passive labels preserve FIFO order" \
+  test "$(grep -nF '[Rocky] first label' "$LABEL_STDERR" | head -n 1 | cut -d: -f1)" -lt \
+       "$(grep -nF '[Rocky] second label' "$LABEL_STDERR" | head -n 1 | cut -d: -f1)"
+check "third empty prompt is silent" \
+  test "$(grep -cF '[Rocky]' "$LABEL_STDERR" || true)" -eq 2
+check "passive labels keep stdout empty" test ! -s "$LABEL_STDOUT"
+check "last passive label leaves an empty queue" test -f "$ROCKY_HOME/labels"
+check "last passive label empties queue" test ! -s "$ROCKY_HOME/labels"
+
+# Label fixtures use a separate real home, so malformed queue paths cannot
+# affect the failure/fix checks below. Prompt calls are bounded to keep a
+# regression that opens a FIFO from hanging the smoke gate.
+LABEL_HOME="$TMP/label-home"
+mkdir -p "$LABEL_HOME"
+cp "$ROCKY_HOME/rocky-hook.bash" "$LABEL_HOME/rocky-hook.bash"
+cp "$ROCKY_HOME/bash-preexec.sh" "$LABEL_HOME/bash-preexec.sh"
+LABEL_SPAWN="$TMP/label-spawned"
+LABEL_PROBE="$TMP/rocky-label-probe"
+cat > "$LABEL_PROBE" <<'WRAP'
+#!/bin/sh
+printf x >> "$ROCKY_LABEL_SPAWN"
+WRAP
+chmod +x "$LABEL_PROBE"
+export ROCKY_LABEL_SPAWN="$LABEL_SPAWN"
+
+run_label_prompt() { # <home> <locale> <stdout> <stderr> [off]
+  local home="$1" locale_name="$2" out="$3" err="$4" off="${5:-}"
+  : > "$out"
+  : > "$err"
+  if [[ "$off" == "1" ]]; then
+    ROCKY_OFF=1 LC_ALL="$locale_name" ROCKY_HOME="$home" ROCKY_BIN="$LABEL_PROBE" \
+      bash --noprofile --norc -i -c '
+        source "$ROCKY_HOME/rocky-hook.bash"
+        __rocky_last_cmd=""
+        __rocky_precmd
+      ' >"$out" 2>"$err" &
+  else
+    LC_ALL="$locale_name" ROCKY_HOME="$home" ROCKY_BIN="$LABEL_PROBE" \
+      bash --noprofile --norc -i -c '
+        source "$ROCKY_HOME/rocky-hook.bash"
+        __rocky_last_cmd=""
+        __rocky_precmd
+      ' >"$out" 2>"$err" &
+  fi
+  local pid=$! ticks=0
+  while kill -0 "$pid" >/dev/null 2>&1; do
+    if [[ "$ticks" -ge 50 ]]; then
+      kill "$pid" >/dev/null 2>&1 || true
+      wait "$pid" >/dev/null 2>&1 || true
+      echo "FAIL  - passive-label prompt timed out"
+      FAIL=1
+      return 124
+    fi
+    sleep 0.1
+    ticks=$((ticks + 1))
+  done
+  wait "$pid"
+  local status=$?
+  if [[ "$status" -ne 0 ]]; then
+    echo "FAIL  - passive-label prompt exited $status"
+    FAIL=1
+  fi
+  return "$status"
+}
+
+LABEL_STDOUT="$TMP/malformed-label.stdout"
+LABEL_STDERR="$TMP/malformed-label.stderr"
+LABEL_MARKER="$TMP/label-marker"
+LABEL_VALUE="literal %s \$(touch \"$LABEL_MARKER\") "
+LABEL_VALUE="${LABEL_VALUE}"$'\033[31mred\033[0m\001bell\007 '
+LABEL_VALUE="${LABEL_VALUE}"$'\342\200\256bidi\342\200\256 end'
+printf '%s\nsecond safe label\n' "$LABEL_VALUE" > "$LABEL_HOME/labels"
+run_label_prompt "$LABEL_HOME" C "$LABEL_STDOUT" "$LABEL_STDERR"
+check "label command substitution stays inert" test ! -e "$LABEL_MARKER"
+check "label percent text stays data" grep -qF '[Rocky] literal %s $(touch "' "$LABEL_STDERR"
+check "label ANSI and controls are stripped" \
+  bash -c '! LC_ALL=C grep -a -q "$(printf "\\033")" "$1"' bash "$LABEL_STDERR"
+check "label BEL is stripped" \
+  bash -c '! LC_ALL=C grep -a -q "$(printf "\\007")" "$1"' bash "$LABEL_STDERR"
+check "label C0 control is stripped" \
+  bash -c '! LC_ALL=C grep -a -q "$(printf "\\001")" "$1"' bash "$LABEL_STDERR"
+check "label bidi controls are stripped" \
+  bash -c '! LC_ALL=C grep -a -q "$(printf "\\342\\200\\256")" "$1"' bash "$LABEL_STDERR"
+check "label sanitization keeps stdout empty" test ! -s "$LABEL_STDOUT"
+check "label probe is not spawned for display" test ! -e "$LABEL_SPAWN"
+check "sanitized label still dequeues first line" grep -qF 'second safe label' "$LABEL_HOME/labels"
+
+# An empty first line is claimed without display, so it cannot block FIFO order.
+printf '\nlast after empty\n' > "$LABEL_HOME/labels"
+run_label_prompt "$LABEL_HOME" C "$LABEL_STDOUT" "$LABEL_STDERR"
+check "empty label line is silent" test "$(grep -a -cF '[Rocky]' "$LABEL_STDERR" || true)" -eq 0
+check "empty label line is dequeued" grep -qF 'last after empty' "$LABEL_HOME/labels"
+run_label_prompt "$LABEL_HOME" C "$LABEL_STDOUT" "$LABEL_STDERR"
+check "label after empty line prints" grep -qF '[Rocky] last after empty' "$LABEL_STDERR"
+
+# A failed atomic rename must not print or lose the claimed line. The fixed
+# legacy temp name remains an attacker-controlled symlink and is never used.
+LABEL_FIXED_TARGET="$TMP/fixed-temp-target"
+printf protected > "$LABEL_FIXED_TARGET"
+ln -s "$LABEL_FIXED_TARGET" "$LABEL_HOME/labels.tmp"
+printf 'rename must fail\n' > "$LABEL_HOME/labels"
+LABEL_FAKEBIN="$TMP/fakebin"
+mkdir -p "$LABEL_FAKEBIN"
+cat > "$LABEL_FAKEBIN/mv" <<'MV'
+#!/bin/sh
+exit 1
+MV
+chmod +x "$LABEL_FAKEBIN/mv"
+OLD_PATH="$PATH"
+PATH="$LABEL_FAKEBIN:$PATH"
+run_label_prompt "$LABEL_HOME" C "$LABEL_STDOUT" "$LABEL_STDERR"
+PATH="$OLD_PATH"
+check "failed rename prints no label" test "$(grep -a -cF '[Rocky]' "$LABEL_STDERR" || true)" -eq 0
+check "failed rename keeps queue line" grep -qF 'rename must fail' "$LABEL_HOME/labels"
+check "fixed labels.tmp symlink remains untouched" test -L "$LABEL_HOME/labels.tmp"
+check "fixed temp symlink target remains untouched" test "$(cat "$LABEL_FIXED_TARGET")" = protected
+run_label_prompt "$LABEL_HOME" C "$LABEL_STDOUT" "$LABEL_STDERR"
+check "successful unique rename prints queued label" grep -qF '[Rocky] rename must fail' "$LABEL_STDERR"
+
+# Disabled mode leaves queued labels for the next enabled prompt.
+printf 'off label\n' > "$LABEL_HOME/labels"
+run_label_prompt "$LABEL_HOME" C "$LABEL_STDOUT" "$LABEL_STDERR" 1
+check "ROCKY_OFF suppresses label display" test "$(grep -a -cF '[Rocky]' "$LABEL_STDERR" || true)" -eq 0
+check "ROCKY_OFF leaves labels queued" grep -qF 'off label' "$LABEL_HOME/labels"
+run_label_prompt "$LABEL_HOME" C "$LABEL_STDOUT" "$LABEL_STDERR"
+check "queued label displays after ROCKY_OFF" grep -qF '[Rocky] off label' "$LABEL_STDERR"
+
+# Missing, empty, directory, FIFO, symlink, unreadable, and oversized queues
+# all fail open without opening special files or mutating unsafe paths.
+rm -f "$LABEL_HOME/labels"
+run_label_prompt "$LABEL_HOME" C "$LABEL_STDOUT" "$LABEL_STDERR"
+check "missing labels queue is silent" test "$(grep -a -cF '[Rocky]' "$LABEL_STDERR" || true)" -eq 0
+: > "$LABEL_HOME/labels"
+run_label_prompt "$LABEL_HOME" C "$LABEL_STDOUT" "$LABEL_STDERR"
+check "empty labels queue is silent" test "$(grep -a -cF '[Rocky]' "$LABEL_STDERR" || true)" -eq 0
+rm -f "$LABEL_HOME/labels"
+mkdir "$LABEL_HOME/labels"
+run_label_prompt "$LABEL_HOME" C "$LABEL_STDOUT" "$LABEL_STDERR"
+check "directory labels queue is silent" test -d "$LABEL_HOME/labels"
+rmdir "$LABEL_HOME/labels"
+mkfifo "$LABEL_HOME/labels"
+run_label_prompt "$LABEL_HOME" C "$LABEL_STDOUT" "$LABEL_STDERR"
+check "FIFO labels queue is silent without blocking" test -p "$LABEL_HOME/labels"
+rm -f "$LABEL_HOME/labels"
+printf symlink-target > "$LABEL_HOME/label-target"
+ln -s "$LABEL_HOME/label-target" "$LABEL_HOME/labels"
+run_label_prompt "$LABEL_HOME" C "$LABEL_STDOUT" "$LABEL_STDERR"
+check "symlink labels queue is silent" test -L "$LABEL_HOME/labels"
+check "symlink labels target is untouched" test "$(cat "$LABEL_HOME/label-target")" = symlink-target
+rm -f "$LABEL_HOME/labels"
+printf unreadable > "$LABEL_HOME/labels"
+chmod 000 "$LABEL_HOME/labels"
+run_label_prompt "$LABEL_HOME" C "$LABEL_STDOUT" "$LABEL_STDERR"
+if [[ -r "$LABEL_HOME/labels" ]]; then
+  echo "ok    - unreadable labels queue check skipped for privileged user"
+else
+  check "unreadable labels queue is silent" test "$(grep -a -cF '[Rocky]' "$LABEL_STDERR" || true)" -eq 0
+  check "unreadable labels queue remains" test "$(stat -c %s "$LABEL_HOME/labels" 2>/dev/null || stat -f %z "$LABEL_HOME/labels")" -eq 10
+fi
+chmod 600 "$LABEL_HOME/labels"
+head -c 65537 /dev/zero > "$LABEL_HOME/labels"
+run_label_prompt "$LABEL_HOME" C "$LABEL_STDOUT" "$LABEL_STDERR"
+check "oversized labels queue is silent" test "$(grep -a -cF '[Rocky]' "$LABEL_STDERR" || true)" -eq 0
+check "oversized labels queue stays untouched" test "$(stat -c %s "$LABEL_HOME/labels" 2>/dev/null || stat -f %z "$LABEL_HOME/labels")" -eq 65537
+
+# Repeat the hostile control case under a UTF-8 locale when available; the
+# hook also has to remain safe when locale byte indexing is C.
+UTF8_LOCALE=""
+if LC_ALL=C.UTF-8 bash -c ':' >/dev/null 2>&1; then UTF8_LOCALE="C.UTF-8"; fi
+if [[ -n "$UTF8_LOCALE" ]]; then
+  LABEL_VALUE=$'utf8 \033[32mgreen\033[0m '
+  LABEL_VALUE="${LABEL_VALUE}"$'\342\200\256bidi\342\200\256'
+  printf '%s\n' "$LABEL_VALUE" > "$LABEL_HOME/labels"
+  run_label_prompt "$LABEL_HOME" "$UTF8_LOCALE" "$LABEL_STDOUT" "$LABEL_STDERR"
+  check "UTF-8 label prints without ANSI" \
+    bash -c '! LC_ALL=C grep -a -q "$(printf "\\033")" "$1"' bash "$LABEL_STDERR"
+  check "UTF-8 label strips bidi controls" \
+    bash -c '! LC_ALL=C grep -a -q "$(printf "\\342\\200\\256")" "$1"' bash "$LABEL_STDERR"
+else
+  echo "ok    - UTF-8 locale label check skipped"
+fi
+
 # add a harmless test rule so guard can be exercised without danger
 printf '^touch marker\ttest rule speaks\n' >> "$ROCKY_HOME/guard.rules"
 
