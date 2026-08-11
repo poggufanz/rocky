@@ -346,8 +346,8 @@ function targetSnapshotMatches(topology: Topology, read: ReadableJsonResult): bo
     && topology.targetIdentity.ino === read.identity.ino;
 }
 
-function sameTopologyDirectories(expected: Topology, actual: Topology): boolean {
-  return expected.directories.every((entry) => actual.directories.some((observed) =>
+function sameTopologyDirectories(expected: readonly PathIdentity[], actual: Topology): boolean {
+  return expected.every((entry) => actual.directories.some((observed) =>
     observed.path === entry.path
       && observed.dev === entry.dev
       && observed.ino === entry.ino));
@@ -360,6 +360,7 @@ function createPrivateParent(
 ): Topology {
   beforeCreateParent?.();
   try {
+    const expectedDirectories: PathIdentity[] = [...initial.directories];
     for (const parent of initial.missing) {
       try {
         const metadata = lstatSync(parent);
@@ -374,9 +375,13 @@ function createPrivateParent(
       }
       const metadata = lstatSync(parent);
       if (!metadata.isDirectory() || metadata.isSymbolicLink()) throw new Error(GENERIC_ERROR);
+      // Retain identity for every component that was absent in the initial
+      // snapshot. A later ancestor rebind must not become the new guard
+      // baseline merely because final inspection observes it first.
+      expectedDirectories.push({ path: parent, dev: metadata.dev, ino: metadata.ino });
     }
     const after = inspectTopology(targetPath);
-    if (after.targetExists || after.missing.length !== 0 || !sameTopologyDirectories(initial, after)) {
+    if (after.targetExists || after.missing.length !== 0 || !sameTopologyDirectories(expectedDirectories, after)) {
       throw new Error(GENERIC_ERROR);
     }
     return after;

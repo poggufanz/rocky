@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import {
+import fs, {
   chmodSync,
   existsSync,
   lstatSync,
@@ -13,6 +13,7 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import {
@@ -269,6 +270,39 @@ test("ancestor rebind immediately before recursive parent creation fails closed"
   assert.equal(callbackCalled, true);
   assert.equal(result.status, "error");
   assert.equal(existsSync(join(attacker, "deep", "custom.json")), false);
+  assert.equal(existsSync(settings), false);
+});
+
+test("newly created parent identity is retained across final topology validation", async (t) => {
+  const value = fixture(t);
+  const settings = join(value.root, "nested", "deep", "claude-settings.json");
+  const firstParent = join(value.root, "nested");
+  const parent = dirname(settings);
+  const backup = join(value.root, "created-parent-backup");
+  const originalMkdir = fs.mkdirSync;
+  let rebound = false;
+  fs.mkdirSync = ((path: fs.PathLike, options?: fs.MakeDirectoryOptions | fs.Mode | null) => {
+    const created = originalMkdir(path, options);
+    if (String(path) === parent && !rebound) {
+      rebound = true;
+      renameSync(firstParent, backup);
+      originalMkdir(firstParent, options);
+      originalMkdir(parent, options);
+    }
+    return created;
+  }) as typeof fs.mkdirSync;
+  syncBuiltinESMExports();
+  t.after(() => {
+    fs.mkdirSync = originalMkdir;
+    syncBuiltinESMExports();
+  });
+
+  const result = await installClaudeAgentHooks({ settingsPath: settings }, {
+    command: value.command,
+    confirmation: { async confirm(): Promise<boolean> { return true; } },
+  });
+  assert.equal(rebound, true);
+  assert.equal(result.status, "error");
   assert.equal(existsSync(settings), false);
 });
 
