@@ -9,12 +9,15 @@ export interface McpRegistration {
 
 export type SetupMode = "configure" | "check" | "remove";
 
+export type AgentHooksAction = "install" | "uninstall" | "status";
+
 export interface SetupOptions {
   mode: SetupMode;
   exposure: Exposure;
   replace: boolean;
   yes: boolean;
   voiceSkill: boolean;
+  agentHooksAction?: AgentHooksAction;
 }
 
 export type SetupClientId = "codex" | "claude-code" | "claude-desktop";
