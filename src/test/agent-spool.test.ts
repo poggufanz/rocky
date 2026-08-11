@@ -48,6 +48,31 @@ function oldTime(now = Date.now()): Date {
   return new Date(now - 11 * 60 * 1000);
 }
 
+function privateLockMetadata(pid: number, token = "a".repeat(32)): string {
+  return JSON.stringify({ pid, token });
+}
+
+async function waitForPath(path: string, timeoutMs = 5_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!existsSync(path) && Date.now() < deadline) {
+    await new Promise<void>((resolve) => setTimeout(resolve, 5));
+  }
+  if (!existsSync(path)) throw new Error(`expected marker: ${path}`);
+}
+
+async function exitedPid(): Promise<number> {
+  const child = spawn(process.execPath, ["--input-type=module", "--eval", "process.exit(0)"], {
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  const pid = child.pid;
+  await new Promise<void>((resolve, reject) => {
+    child.once("error", reject);
+    child.once("close", () => resolve());
+  });
+  if (!pid) throw new Error("test child did not expose a pid");
+  return pid;
+}
+
 async function waitForReady(directory: string, count: number): Promise<void> {
   const deadline = Date.now() + 5_000;
   while (readdirSync(directory).length < count) {
@@ -192,6 +217,111 @@ test("concurrent processes cannot overshoot the per-batch byte cap", { timeout: 
   assert.ok(finalSize <= MAX_BATCH_BYTES);
 });
 
+test("failed private lock creation removes its owned artifact before the next append", { timeout: 10_000 }, async (t) => {
+  const paths = freshPaths(t);
+  const key = "recover";
+  const spoolModule = join(dirname(fileURLToPath(import.meta.url)), "..", "agent", "spool.js");
+  const workerScript = [
+    "import fs from 'node:fs';",
+    "import { syncBuiltinESMExports } from 'node:module';",
+    "import { join } from 'node:path';",
+    "import { pathToFileURL } from 'node:url';",
+    "const [modulePath, home] = process.argv.slice(1);",
+    "const originalWrite = fs.writeSync.bind(fs);",
+    "let failed = false;",
+    "fs.writeSync = (fd, ...args) => { if (!failed) { failed = true; return 0; } return originalWrite(fd, ...args); };",
+    "syncBuiltinESMExports();",
+    "const { appendEvent } = await import(pathToFileURL(modulePath).href);",
+    "appendEvent('recover', { v: 1, agent: 'claude-code', kind: 'intent', ts: 1, text: 'short write' }, { spoolDir: join(home, 'spool') });",
+  ].join("\n");
+  const child = spawn(process.execPath, [
+    "--input-type=module",
+    "--eval",
+    workerScript,
+    spoolModule,
+    paths.home,
+  ], { stdio: ["pipe", "pipe", "pipe"] });
+  const result = await waitForWorker(child);
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(existsSync(join(paths.spoolDir, `${key}.append.lock`)), false);
+
+  appendEvent(key, intent("next append is not suppressed"), paths);
+  assert.equal(readBatch(key, paths).length, 1);
+});
+
+test("stale private locks with live owners are preserved", (t) => {
+  const paths = freshPaths(t);
+  mkdirSync(paths.spoolDir, { recursive: true });
+  const stale = oldTime();
+  const privatePath = join(paths.spoolDir, "live.append.lock");
+  writeFileSync(privatePath, privateLockMetadata(process.pid, "b".repeat(32)));
+  utimesSync(privatePath, stale, stale);
+  appendEvent("live", intent("live private owner"), paths);
+  assert.equal(existsSync(privatePath), true);
+  assert.equal(readBatch("live", paths).length, 0);
+});
+
+test("active writer release cannot race a stale-owner replacement", { timeout: 15_000 }, async (t) => {
+  const paths = freshPaths(t);
+  const key = "replace";
+  const readyA = join(paths.home, "ready-a");
+  const readyB = join(paths.home, "ready-b");
+  const attemptB = join(paths.home, "attempt-b");
+  const allowUnlink = join(paths.home, "allow-unlink");
+  const writeDirectory = join(paths.home, "write-gates");
+  const unlinkDirectory = join(paths.home, "unlink-gates");
+  mkdirSync(writeDirectory);
+  mkdirSync(unlinkDirectory);
+  const spoolModule = join(dirname(fileURLToPath(import.meta.url)), "..", "agent", "spool.js");
+  const workerScript = [
+    "import fs from 'node:fs';",
+    "import { existsSync, writeFileSync } from 'node:fs';",
+    "import { syncBuiltinESMExports } from 'node:module';",
+    "import { join } from 'node:path';",
+    "import { pathToFileURL } from 'node:url';",
+    "const [modulePath, home, key, readyPath, attemptPath, writeDirectory, unlinkDirectory, allowPath, gateUnlink] = process.argv.slice(1);",
+    "const originalWrite = fs.writeSync.bind(fs);",
+    "const originalWriteFile = fs.writeFileSync.bind(fs);",
+    "const originalUnlink = fs.unlinkSync.bind(fs);",
+    "fs.writeSync = (fd, ...args) => { const marker = join(writeDirectory, `${process.pid}.write`); if (!existsSync(marker)) originalWriteFile(marker, 'write'); return originalWrite(fd, ...args); };",
+    "if (gateUnlink === 'yes') fs.unlinkSync = (path, ...args) => { if (String(path).endsWith(`${key}.append.lock`)) { const marker = join(unlinkDirectory, `${process.pid}.unlink`); originalWriteFile(marker, 'unlink'); const signal = new Int32Array(new SharedArrayBuffer(4)); while (!existsSync(allowPath)) Atomics.wait(signal, 0, 0, 1); } return originalUnlink(path, ...args); };",
+    "syncBuiltinESMExports();",
+    "const { appendEvent } = await import(pathToFileURL(modulePath).href);",
+    "writeFileSync(readyPath, 'ready');",
+    "if (attemptPath !== '-') writeFileSync(attemptPath, 'attempt');",
+    "appendEvent(key, { v: 1, agent: 'claude-code', kind: 'intent', ts: 1, text: 'replacement race' }, { spoolDir: join(home, 'spool') });",
+  ].join("\n");
+  const childA = spawn(process.execPath, [
+    "--input-type=module", "--eval", workerScript, spoolModule, paths.home, key,
+    readyA, "-", writeDirectory, unlinkDirectory, allowUnlink, "yes",
+  ], { stdio: ["pipe", "pipe", "pipe"] });
+  const childACompletion = waitForWorker(childA);
+  let childB: ChildProcessWithoutNullStreams | undefined;
+  try {
+    await waitForPath(join(unlinkDirectory, `${childA.pid}.unlink`));
+    const privatePath = join(paths.spoolDir, `${key}.append.lock`);
+    const stale = oldTime();
+    utimesSync(privatePath, stale, stale);
+    childB = spawn(process.execPath, [
+      "--input-type=module", "--eval", workerScript, spoolModule, paths.home, key,
+      readyB, attemptB, writeDirectory, unlinkDirectory, allowUnlink, "no",
+    ], { stdio: ["pipe", "pipe", "pipe"] });
+    const childBCompletion = waitForWorker(childB);
+    await waitForPath(readyB);
+    await waitForPath(attemptB);
+    const writeGateCount = await waitForGate(writeDirectory, 2, 2_000);
+    assert.equal(writeGateCount, 1);
+    writeFileSync(allowUnlink, "release");
+    const [resultA, resultB] = await Promise.all([childACompletion, childBCompletion]);
+    assert.equal(resultA.code, 0, resultA.stderr);
+    assert.equal(resultB.code, 0, resultB.stderr);
+  } finally {
+    if (childA.exitCode === null && childA.signalCode === null) childA.kill();
+    if (childB && childB.exitCode === null && childB.signalCode === null) childB.kill();
+  }
+  assert.equal(existsSync(join(paths.spoolDir, `${key}.append.lock`)), false);
+});
+
 test("filesystem boundaries reject empty, traversal, control, and oversized keys", (t) => {
   const paths = freshPaths(t);
   const escaped = join(paths.home, "escape.jsonl");
@@ -240,25 +370,22 @@ test("acquireLock reclaims one stale regular lock but excludes fresh locks", (t)
   assert.equal(acquireLock("fresh", paths), false);
 });
 
-test("append writer lock reclaims stale state but removeBatch preserves fresh ownership", (t) => {
+test("private stale state remains fail-safe and removeBatch preserves ownership", async (t) => {
   const paths = freshPaths(t);
   const lock = join(paths.spoolDir, "writer.append.lock");
   mkdirSync(paths.spoolDir, { recursive: true });
-  writeFileSync(lock, "a".repeat(32));
+  writeFileSync(lock, privateLockMetadata(await exitedPid(), "a".repeat(32)));
   const stale = oldTime();
   utimesSync(lock, stale, stale);
-  appendEvent("writer", intent("stale lock can recover"), paths);
-  assert.equal(readBatch("writer", paths).length, 1);
+  appendEvent("writer", intent("stale lock drops safely"), paths);
+  assert.equal(readBatch("writer", paths).length, 0);
+  assert.equal(existsSync(lock), true);
 
-  writeFileSync(lock, "b".repeat(32));
+  writeFileSync(lock, privateLockMetadata(process.pid, "b".repeat(32)));
   appendEvent("writer", intent("fresh lock blocks"), paths);
   assert.equal(existsSync(lock), true);
   removeBatch("writer", paths);
   assert.equal(existsSync(lock), true);
-
-  utimesSync(lock, stale, stale);
-  removeBatch("writer", paths);
-  assert.equal(existsSync(lock), false);
 });
 
 test("removeBatch deletes regular batch and lock files", (t) => {

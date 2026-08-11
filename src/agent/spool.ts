@@ -26,6 +26,7 @@ const SAFE_KEY = /^[A-Za-z0-9_-]{1,120}$/;
 const NO_FOLLOW = process.platform === "win32" ? 0 : constants.O_NOFOLLOW;
 const APPEND_LOCK_SUFFIX = ".append.lock";
 const APPEND_LOCK_TOKEN_BYTES = 16;
+const LOCK_METADATA_MAX_BYTES = 128;
 
 type FileKind = "missing" | "regular" | "other";
 
@@ -98,106 +99,144 @@ function closeQuietly(fd: number): void {
   }
 }
 
-interface OwnedAppendLock {
+interface LockMetadata {
+  pid: number;
+  token: string;
+}
+
+interface OwnedPrivateLock {
   fd: number;
   path: string;
   stats: Stats;
   token: string;
+  pid: number;
 }
 
-function createAppendLock(path: string): OwnedAppendLock | undefined {
+function usableIdentity(stats: Stats): boolean {
+  return Number.isFinite(stats.dev) && Number.isFinite(stats.ino)
+    && (stats.dev !== 0 || stats.ino !== 0);
+}
+
+function sameIdentity(left: Stats, right: Stats): boolean {
+  return usableIdentity(left) && usableIdentity(right) && left.dev === right.dev && left.ino === right.ino;
+}
+
+function encodeLockMetadata(token: string): Buffer | undefined {
+  try {
+    const encoded = Buffer.from(JSON.stringify({ pid: process.pid, token }), "utf8");
+    return encoded.byteLength <= LOCK_METADATA_MAX_BYTES ? encoded : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function parseLockMetadata(bytes: Buffer): LockMetadata | undefined {
+  if (bytes.byteLength === 0 || bytes.byteLength > LOCK_METADATA_MAX_BYTES) return undefined;
+  try {
+    const value: unknown = JSON.parse(bytes.toString("utf8"));
+    if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+    const record = value as Record<string, unknown>;
+    if (Object.keys(record).length !== 2) return undefined;
+    if (!Number.isSafeInteger(record.pid) || typeof record.pid !== "number" || record.pid <= 0) return undefined;
+    if (typeof record.token !== "string" || !/^[a-f0-9]{32}$/.test(record.token)) return undefined;
+    return { pid: record.pid, token: record.token };
+  } catch {
+    return undefined;
+  }
+}
+
+function readPrivateMetadata(path: string): LockMetadata | undefined {
+  const initial = inspectFile(path);
+  if (initial.kind !== "regular" || !initial.stats || initial.stats.size === 0 || initial.stats.size > LOCK_METADATA_MAX_BYTES) {
+    return undefined;
+  }
   let fd = -1;
   try {
+    fd = openSync(path, constants.O_RDONLY | NO_FOLLOW);
+    const opened = fstatSync(fd);
+    if (!opened.isFile() || opened.isSymbolicLink() || opened.size === 0 || opened.size > LOCK_METADATA_MAX_BYTES) {
+      return undefined;
+    }
+    const bounded = Buffer.alloc(LOCK_METADATA_MAX_BYTES + 1);
+    const count = readSync(fd, bounded, 0, bounded.length, 0);
+    const after = fstatSync(fd);
+    if (count !== after.size || after.size > LOCK_METADATA_MAX_BYTES) return undefined;
+    return parseLockMetadata(bounded.subarray(0, count));
+  } catch {
+    return undefined;
+  } finally {
+    if (fd >= 0) closeQuietly(fd);
+  }
+}
+
+function removeCreatedPrivate(path: string, token: string, createdStats: Stats | undefined): void {
+  const current = inspectFile(path);
+  if (current.kind !== "regular" || !current.stats) return;
+  const metadata = readPrivateMetadata(path);
+  if (metadata && metadata.token !== token) return;
+  if (createdStats && usableIdentity(createdStats) && usableIdentity(current.stats)
+    && !sameIdentity(createdStats, current.stats)) return;
+  try {
+    unlinkSync(path);
+  } catch {
+    // The successful O_EXCL creator remains the only cooperative owner.
+  }
+}
+
+function createPrivateLock(path: string): OwnedPrivateLock | undefined {
+  let fd = -1;
+  let created = false;
+  let createdStats: Stats | undefined;
+  let token: string | undefined;
+  let succeeded = false;
+  try {
+    token = randomBytes(APPEND_LOCK_TOKEN_BYTES).toString("hex");
+    const encoded = encodeLockMetadata(token);
+    if (!encoded) return undefined;
     fd = openSync(path, "wx", 0o600);
-    const token = randomBytes(APPEND_LOCK_TOKEN_BYTES).toString("hex");
-    const encoded = Buffer.from(token, "utf8");
+    created = true;
+    createdStats = fstatSync(fd);
+    if (!createdStats.isFile() || createdStats.isSymbolicLink()) return undefined;
     if (writeSync(fd, encoded, 0, encoded.byteLength) !== encoded.byteLength) return undefined;
     const stats = fstatSync(fd);
-    if (!stats.isFile() || stats.isSymbolicLink()) return undefined;
+    if (!stats.isFile() || stats.isSymbolicLink() || stats.size !== encoded.byteLength) return undefined;
     try {
       fchmodSync(fd, 0o600);
     } catch {
       // File mode is best effort on platforms that do not support it.
     }
-    const owned = { fd, path, stats, token };
+    const owned = { fd, path, stats, token, pid: process.pid };
+    succeeded = true;
     fd = -1;
     return owned;
   } catch {
     return undefined;
   } finally {
     if (fd >= 0) closeQuietly(fd);
+    if (created && !succeeded && token) removeCreatedPrivate(path, token, createdStats);
   }
 }
 
-function acquireAppendLock(paths: RockyPaths, key: string): OwnedAppendLock | undefined {
+function acquireAppendLock(paths: RockyPaths, key: string): OwnedPrivateLock | undefined {
   let path: string;
   try {
     path = appendLockPath(paths, key);
   } catch {
     return undefined;
   }
-
-  const existing = inspectFile(path);
-  if (existing.kind === "other") return undefined;
-  if (existing.kind === "regular") {
-    if (!existing.stats || !isStale(existing.stats, Date.now())) return undefined;
-    try {
-      const verify = inspectFile(path);
-      if (verify.kind !== "regular" || !verify.stats || !isStale(verify.stats, Date.now())) return undefined;
-      unlinkSync(path);
-    } catch {
-      return undefined;
-    }
-  }
-
-  const owned = createAppendLock(path);
-  return owned;
+  if (inspectFile(path).kind !== "missing") return undefined;
+  return createPrivateLock(path);
 }
 
-function readAppendLockToken(path: string): string | undefined {
-  const initial = inspectFile(path);
-  if (initial.kind !== "regular" || !initial.stats || initial.stats.size !== APPEND_LOCK_TOKEN_BYTES * 2) return undefined;
-  let fd = -1;
-  try {
-    fd = openSync(path, constants.O_RDONLY | NO_FOLLOW);
-    const opened = fstatSync(fd);
-    if (!opened.isFile() || opened.isSymbolicLink() || opened.size > APPEND_LOCK_TOKEN_BYTES * 2) return undefined;
-    const bounded = Buffer.alloc(APPEND_LOCK_TOKEN_BYTES * 2);
-    const count = readSync(fd, bounded, 0, bounded.length, 0);
-    if (count !== bounded.length) return undefined;
-    const token = bounded.toString("utf8");
-    return /^[a-f0-9]+$/.test(token) ? token : undefined;
-  } catch {
-    return undefined;
-  } finally {
-    if (fd >= 0) closeQuietly(fd);
-  }
-}
-
-function releaseAppendLock(lock: OwnedAppendLock): void {
+function releaseAppendLock(lock: OwnedPrivateLock): void {
   closeQuietly(lock.fd);
   const current = inspectFile(lock.path);
   if (current.kind !== "regular" || !current.stats) return;
-  const token = readAppendLockToken(lock.path);
-  if (token !== lock.token) return;
-  const hasIdentity = Number.isFinite(lock.stats.dev) && Number.isFinite(lock.stats.ino)
-    && Number.isFinite(current.stats.dev) && Number.isFinite(current.stats.ino)
-    && (lock.stats.dev !== 0 || lock.stats.ino !== 0)
-    && (current.stats.dev !== 0 || current.stats.ino !== 0);
-  if (hasIdentity && (lock.stats.dev !== current.stats.dev || lock.stats.ino !== current.stats.ino)) return;
+  const metadata = readPrivateMetadata(lock.path);
+  if (!metadata || metadata.token !== lock.token || metadata.pid !== lock.pid) return;
+  if (usableIdentity(lock.stats) && usableIdentity(current.stats) && !sameIdentity(lock.stats, current.stats)) return;
   try {
     unlinkSync(lock.path);
-  } catch {
-    // Races and permission errors are safe no-ops.
-  }
-}
-
-function removeStaleRegular(path: string): void {
-  const current = inspectFile(path);
-  if (current.kind !== "regular" || !current.stats || !isStale(current.stats, Date.now())) return;
-  try {
-    const verify = inspectFile(path);
-    if (verify.kind === "regular" && verify.stats && isStale(verify.stats, Date.now())) unlinkSync(path);
   } catch {
     // Races and permission errors are safe no-ops.
   }
@@ -322,7 +361,6 @@ export function removeBatch(key: string, paths = resolveRockyPaths()): void {
   try {
     removeRegular(batchPath(paths, key));
     removeRegular(lockPath(paths, key));
-    removeStaleRegular(appendLockPath(paths, key));
   } catch {
     // Transient state is always best effort.
   }
