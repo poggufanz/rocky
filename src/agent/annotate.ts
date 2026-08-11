@@ -76,7 +76,7 @@ function cleanText(value: string, maximum: number): string {
   const stripped = bounded
     .replace(ANSI_RE, "")
     .replace(BIDI_RE, "")
-    .replace(CONTROL_RE, " ");
+    .replace(CONTROL_RE, "");
   return redactSecrets(stripped).replace(/\s+/g, " ").trim().slice(0, maximum);
 }
 
@@ -229,9 +229,11 @@ export async function annotateBatch(key: string, deps: AnnotateDeps = {}): Promi
   const paths = deps.paths ?? resolveRockyPaths();
   const git = deps.git ?? defaultGit;
   const events = readBatch(key, paths);
-  const intentEvent = events.find((event) => event.kind === "intent");
+  const agent: AgentName = events[0]?.agent ?? "claude-code";
+  const batchEvents = events.filter((event) => event.agent === agent);
+  const intentEvent = batchEvents.find((event) => event.kind === "intent");
   const byPath = new Map<string, { path: string; excerpt?: string }>();
-  for (const event of events) {
+  for (const event of batchEvents) {
     if (event.kind !== "mechanism") continue;
     const gitPath = operationalText(event.path, MAX_PATH_CHARS);
     const path = cleanText(event.path, MAX_PATH_CHARS);
@@ -246,7 +248,7 @@ export async function annotateBatch(key: string, deps: AnnotateDeps = {}): Promi
 
   let rationaleEvent: Extract<(typeof events)[number], { kind: "rationale" }> | undefined;
   let rationaleText: string | undefined;
-  for (const event of events) {
+  for (const event of batchEvents) {
     if (event.kind !== "rationale") continue;
     const text = cleanText(event.text, MAX_RATIONALE_CHARS);
     if (text) {
@@ -256,9 +258,9 @@ export async function annotateBatch(key: string, deps: AnnotateDeps = {}): Promi
   }
 
   const rawCwd = intentEvent?.kind === "intent" && intentEvent.cwd ? intentEvent.cwd : process.cwd();
-  const gitCwd = operationalText(rawCwd, MAX_CWD_CHARS) || process.cwd();
+  const operationalCwd = operationalText(rawCwd, MAX_CWD_CHARS);
+  const gitCwd = operationalCwd.trim() ? operationalCwd : process.cwd();
   const cwd = cleanText(rawCwd, MAX_CWD_CHARS) || process.cwd();
-  const agent: AgentName = events[0]?.agent ?? "claude-code";
   const headRaw = runGit(git, ["rev-parse", "HEAD"], gitCwd);
   const head = headRaw === undefined ? undefined : cleanText(headRaw, MAX_HEAD_CHARS) || undefined;
   const allMechanisms = [...byPath.entries()];

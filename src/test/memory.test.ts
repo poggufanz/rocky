@@ -1,9 +1,21 @@
 import { after, test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as memory from "../core/memory.js";
+import { resolveRockyPaths, type RockyPaths } from "../core/state-paths.js";
 
 const home = mkdtempSync(join(tmpdir(), "rocky-mem-"));
 const originalRockyHome = process.env.ROCKY_HOME;
@@ -149,3 +161,84 @@ test("loadMemory skips unknown record kinds between known records", (t) => {
   const records = memory.loadMemory(path);
   assert.deepEqual(records.map((record) => record.id), ["known-1", "known-2"]);
 });
+
+function tripleInput() {
+  return {
+    ts: 7,
+    cwd: "/w",
+    agent: "codex" as const,
+    intent: { text: "make test pass" },
+    mechanism: { files: [], truncatedFiles: 0 },
+  };
+}
+
+test("recordTriple creates a private 0600 memory file under umask 022", (t) => {
+  const directory = mkdtempSync(join(tmpdir(), "rocky-mem-private-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const resolved = freshMemoryPaths(directory);
+  const previous = process.umask(0o022);
+  try {
+    memory.recordTriple(tripleInput(), resolved);
+    if (process.platform !== "win32") assert.equal(statSync(resolved.memory).mode & 0o777, 0o600);
+  } finally {
+    process.umask(previous);
+  }
+});
+
+test("recordTriple corrects an existing permissive regular memory file", (t) => {
+  const directory = mkdtempSync(join(tmpdir(), "rocky-mem-correct-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const resolved = freshMemoryPaths(directory);
+  writeFileSync(resolved.memory, "", "utf8");
+  if (process.platform !== "win32") chmodSync(resolved.memory, 0o644);
+  const previous = process.umask(0o022);
+  try {
+    memory.recordTriple(tripleInput(), resolved);
+    if (process.platform !== "win32") assert.equal(statSync(resolved.memory).mode & 0o777, 0o600);
+    assert.equal(memory.loadMemory(resolved.memory).length, 1);
+  } finally {
+    process.umask(previous);
+  }
+});
+
+test("recordTriple rejects a memory symlink without modifying its target", (t) => {
+  const directory = mkdtempSync(join(tmpdir(), "rocky-mem-symlink-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const resolved = freshMemoryPaths(directory);
+  const target = join(directory, "target.jsonl");
+  writeFileSync(target, "keep\n", "utf8");
+  try {
+    symlinkSync(target, resolved.memory);
+  } catch {
+    return;
+  }
+  assert.equal(lstatSync(resolved.memory).isSymbolicLink(), true);
+  assert.throws(() => memory.recordTriple(tripleInput(), resolved));
+  assert.equal(readFileSync(target, "utf8"), "keep\n");
+  assert.equal(lstatSync(resolved.memory).isSymbolicLink(), true);
+});
+
+test("recordTriple rejects a non-regular memory destination", (t) => {
+  const directory = mkdtempSync(join(tmpdir(), "rocky-mem-nonregular-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const resolved = freshMemoryPaths(directory);
+  mkdirSync(resolved.memory, { recursive: true });
+  assert.throws(() => memory.recordTriple(tripleInput(), resolved));
+  assert.equal(lstatSync(resolved.memory).isDirectory(), true);
+});
+
+test("recordTriple rejects a candidate line over the memory byte cap", (t) => {
+  const directory = mkdtempSync(join(tmpdir(), "rocky-mem-cap-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const resolved = freshMemoryPaths(directory);
+  assert.throws(() => memory.recordTriple({
+    ...tripleInput(),
+    intent: { text: "x".repeat(memory.MAX_MEMORY_LINE_BYTES) },
+  }, resolved));
+  assert.equal(existsSync(resolved.memory), false);
+});
+
+function freshMemoryPaths(directory: string): RockyPaths {
+  // Keep these tests independent of process.env.ROCKY_HOME.
+  return resolveRockyPaths({ ROCKY_HOME: directory });
+}

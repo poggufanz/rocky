@@ -1,6 +1,18 @@
 /** Rocky's append-only memory writers and pending-state helpers. */
 
-import { appendFileSync, existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  closeSync,
+  constants,
+  fchmodSync,
+  fstatSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  rmSync,
+  writeFileSync,
+  writeSync,
+} from "node:fs";
 import { randomUUID } from "node:crypto";
 import { Buffer } from "node:buffer";
 import { commandFingerprint, fingerprint, normalizeLine, signatureLines } from "./fingerprint.js";
@@ -18,12 +30,74 @@ export function memoryPath(): string {
 }
 
 function ensureDir(home: string): void {
-  if (!existsSync(home)) mkdirSync(home, { recursive: true });
+  let stats;
+  try {
+    stats = lstatSync(home);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    mkdirSync(home, { recursive: true, mode: 0o700 });
+    stats = lstatSync(home);
+  }
+  if (!stats.isDirectory() || stats.isSymbolicLink()) {
+    throw new Error("Rocky home must be a real directory");
+  }
+  try {
+    chmodSync(home, 0o700);
+  } catch (error) {
+    if (process.platform !== "win32") throw error;
+  }
 }
 
 function append(record: MemoryRecord, paths = resolveRockyPaths()): void {
+  const line = `${JSON.stringify(record)}\n`;
+  const encoded = Buffer.from(line, "utf8");
+  if (encoded.byteLength > MAX_MEMORY_LINE_BYTES) {
+    throw new Error("Rocky memory record exceeds line limit");
+  }
+
   ensureDir(paths.home);
-  appendFileSync(paths.memory, JSON.stringify(record) + "\n", "utf8");
+  try {
+    const existing = lstatSync(paths.memory);
+    if (!existing.isFile() || existing.isSymbolicLink()) {
+      throw new Error("Rocky memory must be a regular file");
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+
+  const noFollow = process.platform === "win32" ? 0 : constants.O_NOFOLLOW;
+  const flags = constants.O_WRONLY | constants.O_APPEND | constants.O_CREAT | noFollow;
+  let fd = -1;
+  try {
+    fd = openSync(paths.memory, flags, 0o600);
+    const opened = fstatSync(fd);
+    if (!opened.isFile() || opened.isSymbolicLink()) {
+      throw new Error("Rocky memory must be a regular file");
+    }
+    try {
+      fchmodSync(fd, 0o600);
+    } catch (error) {
+      if (process.platform !== "win32") throw error;
+    }
+    if (process.platform !== "win32" && (fstatSync(fd).mode & 0o777) !== 0o600) {
+      throw new Error("Rocky memory must be private");
+    }
+
+    let offset = 0;
+    while (offset < encoded.byteLength) {
+      const written = writeSync(fd, encoded, offset, encoded.byteLength - offset);
+      if (written <= 0) throw new Error("Rocky memory write made no progress");
+      offset += written;
+    }
+  } finally {
+    if (fd >= 0) {
+      try {
+        closeSync(fd);
+      } catch {
+        // The append result is already durable or already failed; never leak fd.
+      }
+    }
+  }
 }
 
 export function recordFailure(cmd: string, exitCode: number, stderr: string): FailureRecord {

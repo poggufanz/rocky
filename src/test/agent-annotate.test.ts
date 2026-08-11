@@ -208,6 +208,66 @@ test("mechanism paths are redacted and control-stripped before durable write", a
   ]);
 });
 
+test("C0-obfuscated secrets are removed before durable redaction in every text field", async (t) => {
+  const paths = freshPaths(t);
+  const token = "sk-\u0000ant-abcdefghijklmnopqrst123";
+  append("control-secret", [
+    { v: 1, agent: "codex", kind: "intent", ts: 1, text: `plan\ntext ${token}` },
+    { v: 1, agent: "codex", kind: "mechanism", ts: 2, tool: "Edit", path: `src/${token}.ts`, excerpt: `color: ${token}` },
+    { v: 1, agent: "codex", kind: "rationale", ts: 3, source: "notify", text: `why ${token}` },
+  ], paths);
+
+  const triple = await annotateBatch("control-secret", { paths, git: () => undefined, queueLabel: () => {} });
+  assert.ok(triple);
+  assert.equal(triple.intent?.text, "plan text [redacted anthropic key]");
+  assert.equal(triple.rationale?.text, "why [redacted anthropic key]");
+  assert.equal(triple.mechanism.files[0]?.path, "src/[redacted anthropic key].ts");
+  assert.equal(triple.mechanism.files[0]?.excerpt, "color: [redacted anthropic key]");
+  const durable = JSON.stringify(triple);
+  assert.doesNotMatch(durable, /sk-\s*ant-/u);
+  assert.doesNotMatch(durable, /abcdefghijklmnopqrst123/u);
+  assert.doesNotMatch(durable, /[\u0000-\u001f\u007f\u001b\u202e]/u);
+});
+
+test("mixed-agent batches use the first valid agent and ignore mismatched evidence", async (t) => {
+  const paths = freshPaths(t);
+  append("mixed-agent", [
+    { v: 1, agent: "claude-code", kind: "intent", ts: 1, text: "claude intent" },
+    { v: 1, agent: "codex", kind: "mechanism", ts: 2, tool: "Edit", path: "codex.ts", excerpt: "codex: x" },
+    { v: 1, agent: "claude-code", kind: "mechanism", ts: 3, tool: "Edit", path: "claude.ts", excerpt: "claude: x" },
+    { v: 1, agent: "codex", kind: "rationale", ts: 4, source: "notify", text: "codex rationale" },
+    { v: 1, agent: "claude-code", kind: "rationale", ts: 5, source: "transcript", text: "claude rationale" },
+  ], paths);
+
+  const triple = await annotateBatch("mixed-agent", { paths, git: () => undefined, queueLabel: () => {} });
+  assert.ok(triple);
+  assert.equal(triple.agent, "claude-code");
+  assert.deepEqual(triple.mechanism.files.map((file) => file.path), ["claude.ts"]);
+  assert.equal(triple.rationale?.text, "claude rationale");
+});
+
+test("whitespace/control-only operational cwd falls back to process.cwd", async (t) => {
+  const paths = freshPaths(t);
+  const seenCwds: string[] = [];
+  append("cwd-fallback", [
+    { v: 1, agent: "codex", kind: "intent", ts: 1, cwd: "\u0000\n\t\u202e", text: "keep intent" },
+    { v: 1, agent: "codex", kind: "mechanism", ts: 2, tool: "Edit", path: "a.ts", excerpt: "test: pass" },
+  ], paths);
+
+  const triple = await annotateBatch("cwd-fallback", {
+    paths,
+    git: (_args, cwd) => {
+      seenCwds.push(cwd);
+      return undefined;
+    },
+    queueLabel: () => {},
+  });
+  assert.ok(triple);
+  assert.equal(triple.cwd, process.cwd());
+  assert.ok(seenCwds.length > 0);
+  assert.equal(seenCwds.every((cwd) => cwd === process.cwd()), true);
+});
+
 test("a throwing label queue cannot prevent cleanup after durable append", async (t) => {
   const paths = freshPaths(t);
   seedBatch(paths, "queue-throw");
