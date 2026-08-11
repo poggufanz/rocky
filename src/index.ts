@@ -99,7 +99,7 @@ async function main(): Promise<number> {
         case "status":
           return hookStatus();
         case "agent-event":
-          return agentEvent(rest[1] ?? "");
+          return agentEvent(rest[1] ?? "", rest[1] === "codex" ? { argvPayload: rest[2] } : undefined);
         default:
           say("hook needs install, uninstall, or status. which one, question");
           return 2;

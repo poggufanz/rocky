@@ -15,6 +15,7 @@ import {
 import { dirname } from "node:path";
 import { appendEvent } from "../agent/spool.js";
 import { parseClaudeHookPayload, type ParsedHookPayload } from "../agent/adapters/claude-code.js";
+import { parseCodexHookPayload } from "../agent/adapters/codex.js";
 import { redactSecrets } from "../core/redact.js";
 import { resolveRockyPaths, type RockyPaths } from "../core/state-paths.js";
 
@@ -31,6 +32,7 @@ const CONTROL = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F]/g;
 
 export interface AgentHookDeps {
   stdin?: () => Promise<string>;
+  argvPayload?: string;
   spawnAnnotate?: (key: string) => void;
   paths?: RockyPaths;
   now?: () => number;
@@ -302,17 +304,21 @@ export async function agentEvent(adapter: string, deps: AgentHookDeps = {}): Pro
   const effectiveDeps = (deps && typeof deps === "object" ? deps : {}) as AgentHookDeps;
   try {
     paths = effectiveDeps.paths ?? resolveRockyPaths();
-    if (adapter === "codex") {
-      logHookError("codex adapter not wired yet", paths);
-    } else if (adapter !== "claude-code") {
+    if (adapter !== "claude-code" && adapter !== "codex") {
       logHookError(`unknown adapter ${safeAdapterLabel(adapter)}`, paths);
     } else {
-      const raw = await (effectiveDeps.stdin ?? readStdin)();
+      const argvPayload = effectiveDeps.argvPayload;
+      const hasArgvPayload = adapter === "codex"
+        && typeof argvPayload === "string"
+        && argvPayload.length > 0;
+      const raw = hasArgvPayload ? argvPayload : await (effectiveDeps.stdin ?? readStdin)();
       if (typeof raw !== "string" || Buffer.byteLength(raw, "utf8") > STDIN_CAP_BYTES) {
         throw new OversizedInputError();
       }
       const payload: unknown = JSON.parse(raw);
-      const parsed = parseClaudeHookPayload(payload, effectiveDeps.now?.());
+      const parsed = adapter === "codex"
+        ? parseCodexHookPayload(payload, effectiveDeps.now?.())
+        : parseClaudeHookPayload(payload, effectiveDeps.now?.());
       applyParsedEvent(parsed, paths, effectiveDeps);
     }
   } catch {
