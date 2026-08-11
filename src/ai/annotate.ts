@@ -25,6 +25,7 @@ const MAX_TAG_CHARS = 24;
 const MAX_TAGS = 5;
 const MAX_LABEL_CHARS = 120;
 const MAX_SCAN_BYTES = 4 * 1024;
+const SECRET_SCAN_OVERLAP_BYTES = 512;
 const MAX_PROMPT_BYTES = 8 * 1024;
 const MAX_PROMPT_FILES = 8;
 const MAX_PROMPT_PATH_CHARS = 512;
@@ -38,6 +39,7 @@ const ANSI_CSI_8BIT = /\u009b[0-?]*[ -/]*[@-~]/g;
 const ANSI_OTHER = /\u001b[()][0-2A-Z0-9]/g;
 const BIDI_RE = /[\u200e\u200f\u202a-\u202e\u2066-\u2069]/g;
 const CONTROL_RE = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/g;
+const POSSIBLE_SECRET_FRAGMENT_RE = /(^|[^\p{L}\p{N}_])(?:AKIA[0-9A-Z]*|(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_]*|github_pat_[A-Za-z0-9_]*|xox[baprs]-[A-Za-z0-9-]*|sk-ant-[A-Za-z0-9_-]*|sk-[A-Za-z0-9]*|npm_[A-Za-z0-9_]*|-----BEGIN[ A-Z0-9_-]*|(?:password|secret)\s*=\s*(?:["'][^"']*)?)/giu;
 
 /**
  * Schema passed to Ollama. The parser remains defensive because providers can
@@ -95,7 +97,12 @@ function truncateChars(value: string, maximum: number): string {
  * recognized by the existing secret redactor.
  */
 function sanitizeText(value: string, maximum: number): string {
-  const bounded = prefixUtf8(value, MAX_SCAN_BYTES);
+  const bounded = prefixUtf8(value, MAX_SCAN_BYTES + SECRET_SCAN_OVERLAP_BYTES);
+  // The overlap is inspection-only: content crossing the original 4 KiB
+  // boundary still needs conservative fragment scrubbing even when the
+  // complete bounded prefix fits inside the 4.5 KiB inspection window.
+  const wasTruncated =
+    bounded.length < value.length || Buffer.byteLength(bounded, "utf8") > MAX_SCAN_BYTES;
   const oneLine = bounded
     .replace(ANSI_STRING_7BIT, "")
     .replace(ANSI_STRING_8BIT, "")
@@ -107,7 +114,15 @@ function sanitizeText(value: string, maximum: number): string {
     .replace(CONTROL_RE, "")
     .replace(/\s+/gu, " ")
     .trim();
-  return truncateChars(redactSecrets(oneLine), maximum);
+  const redacted = redactSecrets(oneLine);
+  // If the bounded raw prefix ended in a possible secret, the provider may
+  // have supplied only a recognizable prefix. Remove such fragments after
+  // redaction. This is intentionally conservative and covers every secret
+  // family used by redactSecrets, including private-key/password prefixes.
+  const safe = wasTruncated
+    ? redacted.replace(POSSIBLE_SECRET_FRAGMENT_RE, (_match, prefix: string) => prefix)
+    : redacted;
+  return truncateChars(safe.replace(/\s+/gu, " ").trim(), maximum);
 }
 
 function hasOwn(record: Record<string, unknown>, key: string): boolean {

@@ -1,4 +1,5 @@
 import { strict as assert } from "node:assert";
+import { Buffer } from "node:buffer";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -11,6 +12,12 @@ import {
 } from "../ai/annotate.js";
 import type { OllamaClient } from "../ai/ollama.js";
 import { loadConfig, type ConfigLoadResult } from "../core/config-read.js";
+
+function boundaryPadding(control: string, bytes = 4_080): string {
+  const controlBytes = Buffer.byteLength(control, "utf8");
+  const count = Math.floor(bytes / controlBytes);
+  return control.repeat(count);
+}
 
 function enabledConfig(path = "/tmp/annotate-config.json"): ConfigLoadResult {
   return {
@@ -82,6 +89,68 @@ test("parseAnnotateOutput bounds hostile input before transformations and persis
   assert.doesNotMatch(JSON.stringify(out), /sk-ant-|abcdefghijklmnopqrst123/u);
 });
 
+test("parseAnnotateOutput does not leak secret fragments after control padding reaches scan boundary", () => {
+  const controls = ["\u0000", "\u001b[31m", "\u202e"];
+  const secretFragments = [
+    "AKIAABCDEFGHIJKLMNOP",
+    "ghp_abcdefghijklmnopqrstuvwxyz1234567890",
+    "xoxb-1234567890abcdefghijklmnop",
+    "sk-ant-abcdefghijklmnopqrst123",
+    "sk-abcdefghijklmnopqrst123",
+    "npm_abcdefghijklmnopqrstuvwxyz1234567890",
+    "-----BEGIN RSA PRIVATE KEY-----",
+    "password='secret-value'",
+  ];
+  for (const control of controls) {
+    for (const fragment of secretFragments) {
+      const padded = boundaryPadding(control) + fragment;
+      const truncated = boundaryPadding(control, 4_600) + fragment;
+      for (const candidate of [padded, truncated]) {
+        const value = { summary: candidate, tags: [candidate], label: candidate };
+        const out = parseAnnotateOutput(value);
+        if (out) {
+          const encoded = JSON.stringify(out);
+          assert.doesNotMatch(encoded, /AKIA|gh[oprsu]_|github_pat_|xox[baprs]-|sk-(?:ant-)?|npm_|-----BEGIN|password\s*=/u, `${control} ${fragment}`);
+        }
+      }
+    }
+  }
+});
+
+test("parseAnnotateOutput removes the short Anthropic fragment from the original boundary repro", () => {
+  const candidate = "\u0000".repeat(4_080) + "sk-ant-abcdefghijkl";
+  const parsed = parseAnnotateOutput({ summary: candidate, tags: [candidate], label: candidate });
+  if (parsed) {
+    assert.doesNotMatch(JSON.stringify(parsed), /sk-ant-|abcdefghijkl/u);
+  }
+});
+
+test("boundary scrub preserves benign text and removes an incomplete prefix before trailing text", async () => {
+  const controls = ["\u0000", "\u001b[31m", "\u202e"];
+  for (const control of controls) {
+    const candidate = `keep this ${boundaryPadding(control, 4_580)}sk-ant-abc tail${"x".repeat(100)}`;
+    const parsed = parseAnnotateOutput({ summary: candidate, tags: [candidate], label: candidate });
+    assert.ok(parsed);
+    assert.match(parsed.summary, /keep this tail/u);
+    assert.doesNotMatch(JSON.stringify(parsed), /sk-ant-|sk-|keep this.*abc/u);
+
+    const capture: GenerateCapture = {};
+    const port = createOllamaAnnotate(fakeClient({ summary: "compact", tags: [] }, capture), "m");
+    await port.run({ intent: candidate, rationaleRaw: candidate, files: [{ path: candidate, excerpt: candidate }] }, AbortSignal.timeout(1_000));
+    assert.ok(capture.prompt);
+    assert.match(capture.prompt, /keep this tail/u);
+    assert.doesNotMatch(capture.prompt, /sk-ant-|sk-|abc/u);
+  }
+});
+
+test("boundary scrub removes an incomplete private-key header", () => {
+  const candidate = `keep this ${boundaryPadding("\u0000", 4_550)}-----BEGIN RSA PR${"x".repeat(100)}`;
+  const parsed = parseAnnotateOutput({ summary: candidate, tags: [candidate], label: candidate });
+  assert.ok(parsed);
+  assert.match(parsed.summary, /keep this/u);
+  assert.doesNotMatch(JSON.stringify(parsed), /-----BEGIN|PRIVATE/u);
+});
+
 test("ANNOTATE_SCHEMA independently requires bounded summary and tags and rejects extras", () => {
   assert.deepEqual(ANNOTATE_SCHEMA, {
     type: "object",
@@ -142,6 +211,20 @@ test("createOllamaAnnotate sends bounded quoted evidence and the supplied signal
   assert.doesNotMatch(capture.prompt, /interpret|run|execute.*command/i);
 });
 
+test("createOllamaAnnotate redacts control-padded secret fragments in prompt evidence", async () => {
+  const capture: GenerateCapture = {};
+  const client = fakeClient({ summary: "compact", tags: [] }, capture);
+  const port = createOllamaAnnotate(client, "model-a");
+  for (const control of ["\u0000", "\u001b[31m", "\u202e"]) {
+    const padded = boundaryPadding(control) + "sk-ant-abcdefghijklmnopqrst123";
+    const out = await port.run({ intent: padded, rationaleRaw: padded, files: [{ path: padded, excerpt: padded }] }, AbortSignal.timeout(1_000));
+    assert.deepEqual(out, { summary: "compact", tags: [] });
+    assert.ok(capture.prompt);
+    assert.doesNotMatch(capture.prompt, /sk-(?:ant-)?|abcdefghijklmnopqrst123/u);
+    assert.ok(Buffer.byteLength(capture.prompt, "utf8") <= 8 * 1024);
+  }
+});
+
 test("createOllamaAnnotate returns undefined for invalid, throwing, and already-aborted calls", async () => {
   const invalid = createOllamaAnnotate(fakeClient({ summary: 7, tags: [] }, {}), "m");
   assert.equal(await invalid.run({ files: [] }, AbortSignal.timeout(1_000)), undefined);
@@ -154,6 +237,21 @@ test("createOllamaAnnotate returns undefined for invalid, throwing, and already-
   const signal = AbortSignal.abort(new Error("cancelled"));
   assert.equal(await aborted.run({ files: [] }, signal), undefined);
   assert.equal(capture.model, undefined);
+});
+
+test("createOllamaAnnotate rejects a response after its signal expires", async () => {
+  const controller = new AbortController();
+  const client: OllamaClient = {
+    async listInstalledModels() { return []; },
+    async probeModel() { return { supported: true }; },
+    async generateStructured(_model, _prompt, _schema, signal) {
+      controller.abort(new Error("expired"));
+      assert.equal(signal, controller.signal);
+      return { summary: "late", tags: [] };
+    },
+  };
+  const port = createOllamaAnnotate(client, "m");
+  assert.equal(await port.run({ files: [] }, controller.signal), undefined);
 });
 
 test("annotatePortFromConfig is enabled only for valid Ollama config", () => {
