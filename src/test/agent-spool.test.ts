@@ -1,6 +1,8 @@
 import { strict as assert } from "node:assert";
+import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import test from "node:test";
 import {
+  existsSync,
   mkdtempSync,
   lstatSync,
   mkdirSync,
@@ -14,6 +16,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { resolveRockyPaths } from "../core/state-paths.js";
 import {
   acquireLock,
@@ -43,6 +46,31 @@ const intent = (text: string): IntentEvent => ({
 
 function oldTime(now = Date.now()): Date {
   return new Date(now - 11 * 60 * 1000);
+}
+
+async function waitForReady(directory: string, count: number): Promise<void> {
+  const deadline = Date.now() + 5_000;
+  while (readdirSync(directory).length < count) {
+    if (Date.now() >= deadline) throw new Error("concurrent spool workers did not become ready");
+    await new Promise<void>((resolve) => setTimeout(resolve, 5));
+  }
+}
+
+async function waitForGate(directory: string, count: number, timeoutMs: number): Promise<number> {
+  const deadline = Date.now() + timeoutMs;
+  while (readdirSync(directory).length < count && Date.now() < deadline) {
+    await new Promise<void>((resolve) => setTimeout(resolve, 5));
+  }
+  return readdirSync(directory).length;
+}
+
+function waitForWorker(child: ChildProcessWithoutNullStreams): Promise<{ code: number | null; stderr: string }> {
+  const stderr: Buffer[] = [];
+  child.stderr.on("data", (chunk: Buffer) => stderr.push(Buffer.from(chunk)));
+  return new Promise((resolve, reject) => {
+    child.once("error", reject);
+    child.once("close", (code) => resolve({ code, stderr: Buffer.concat(stderr).toString("utf8") }));
+  });
 }
 
 test("state paths include exact transient spool, labels, and agent log paths", (t) => {
@@ -86,6 +114,82 @@ test("appendEvent never grows a batch beyond the byte cap", (t) => {
   const big = intent("z".repeat(1_900));
   for (let i = 0; i < 400; i += 1) appendEvent("k2", big, paths);
   assert.ok(statSync(join(paths.spoolDir, "k2.jsonl")).size <= MAX_BATCH_BYTES);
+});
+
+test("concurrent processes cannot overshoot the per-batch byte cap", { timeout: 15_000 }, async (t) => {
+  const paths = freshPaths(t);
+  const key = "race";
+  const event = intent("q".repeat(1_900));
+  const line = `${JSON.stringify(event)}\n`;
+  const lineBytes = Buffer.byteLength(line, "utf8");
+  mkdirSync(paths.spoolDir, { recursive: true });
+  writeFileSync(join(paths.spoolDir, `${key}.jsonl`), Buffer.alloc(MAX_BATCH_BYTES - lineBytes, 0x20));
+
+  const workerCount = 24;
+  const readyDirectory = join(paths.home, "ready");
+  const gateDirectory = join(paths.home, "gate");
+  const startPath = join(paths.home, "start");
+  const releasePath = join(paths.home, "release");
+  mkdirSync(readyDirectory);
+  mkdirSync(gateDirectory);
+  const spoolModule = join(dirname(fileURLToPath(import.meta.url)), "..", "agent", "spool.js");
+  const workerScript = [
+    "import fs from 'node:fs';",
+    "import { existsSync, writeFileSync } from 'node:fs';",
+    "import { syncBuiltinESMExports } from 'node:module';",
+    "import { join } from 'node:path';",
+    "import { pathToFileURL } from 'node:url';",
+    "const [modulePath, home, readyPath, startPath, key, text, gateDirectory, releasePath] = process.argv.slice(1);",
+    "const originalWrite = fs.writeSync.bind(fs);",
+    "const originalWriteFile = fs.writeFileSync.bind(fs);",
+    "fs.writeSync = (fd, ...args) => { const markerPath = join(gateDirectory, `${process.pid}.gate`); if (!existsSync(markerPath)) { originalWriteFile(markerPath, 'gate'); const signal = new Int32Array(new SharedArrayBuffer(4)); while (!existsSync(releasePath)) Atomics.wait(signal, 0, 0, 1); } return originalWrite(fd, ...args); };",
+    "syncBuiltinESMExports();",
+    "const { appendEvent } = await import(pathToFileURL(modulePath).href);",
+    "writeFileSync(readyPath, 'ready');",
+    "const signal = new Int32Array(new SharedArrayBuffer(4));",
+    "while (!existsSync(startPath)) Atomics.wait(signal, 0, 0, 1);",
+    "const paths = { spoolDir: join(home, 'spool') };",
+    "const event = { v: 1, agent: 'claude-code', kind: 'intent', ts: 1, text };",
+    "for (let i = 0; i < 4; i += 1) appendEvent(key, event, paths);",
+  ].join("\n");
+  const children: ChildProcessWithoutNullStreams[] = [];
+  const completions: Promise<{ code: number | null; stderr: string }>[] = [];
+  try {
+    for (let i = 0; i < workerCount; i += 1) {
+      const child = spawn(process.execPath, [
+        "--input-type=module",
+        "--eval",
+        workerScript,
+        spoolModule,
+        paths.home,
+        join(readyDirectory, `${i}.ready`),
+        startPath,
+        key,
+        event.text,
+        gateDirectory,
+        releasePath,
+      ], { stdio: ["pipe", "pipe", "pipe"] });
+      children.push(child);
+      completions.push(waitForWorker(child));
+    }
+    await waitForReady(readyDirectory, workerCount);
+    writeFileSync(startPath, "go\n");
+    const gateCount = await waitForGate(gateDirectory, 2, 2_000);
+    assert.equal(gateCount, 1);
+    writeFileSync(releasePath, "release\n");
+    const results = await Promise.all(completions);
+    for (const result of results) {
+      assert.equal(result.code, 0, result.stderr);
+    }
+  } finally {
+    for (const child of children) {
+      if (child.exitCode === null && child.signalCode === null) child.kill();
+    }
+  }
+
+  assert.equal(existsSync(startPath), true);
+  const finalSize = statSync(join(paths.spoolDir, `${key}.jsonl`)).size;
+  assert.ok(finalSize <= MAX_BATCH_BYTES);
 });
 
 test("filesystem boundaries reject empty, traversal, control, and oversized keys", (t) => {
@@ -134,6 +238,27 @@ test("acquireLock reclaims one stale regular lock but excludes fresh locks", (t)
   appendEvent("fresh", intent("b"), paths);
   assert.equal(acquireLock("fresh", paths), true);
   assert.equal(acquireLock("fresh", paths), false);
+});
+
+test("append writer lock reclaims stale state but removeBatch preserves fresh ownership", (t) => {
+  const paths = freshPaths(t);
+  const lock = join(paths.spoolDir, "writer.append.lock");
+  mkdirSync(paths.spoolDir, { recursive: true });
+  writeFileSync(lock, "a".repeat(32));
+  const stale = oldTime();
+  utimesSync(lock, stale, stale);
+  appendEvent("writer", intent("stale lock can recover"), paths);
+  assert.equal(readBatch("writer", paths).length, 1);
+
+  writeFileSync(lock, "b".repeat(32));
+  appendEvent("writer", intent("fresh lock blocks"), paths);
+  assert.equal(existsSync(lock), true);
+  removeBatch("writer", paths);
+  assert.equal(existsSync(lock), true);
+
+  utimesSync(lock, stale, stale);
+  removeBatch("writer", paths);
+  assert.equal(existsSync(lock), false);
 });
 
 test("removeBatch deletes regular batch and lock files", (t) => {
