@@ -19,6 +19,7 @@ import { hookFail, hookInstall, hookStatus, hookSuccess, hookUninstall } from ".
 import { mcp } from "./commands/mcp.js";
 import { setup } from "./commands/setup.js";
 import { check } from "./commands/check.js";
+import { agentEvent } from "./commands/agent-hook.js";
 import { PACKAGE_NAME, PACKAGE_VERSION } from "./core/package-info.js";
 import { face, say } from "./ui/rocky.js";
 
@@ -97,6 +98,8 @@ async function main(): Promise<number> {
           return hookUninstall();
         case "status":
           return hookStatus();
+        case "agent-event":
+          return agentEvent(rest[1] ?? "");
         default:
           say("hook needs install, uninstall, or status. which one, question");
           return 2;
