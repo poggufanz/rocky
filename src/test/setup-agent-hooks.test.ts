@@ -1,11 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  chmodSync,
   existsSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  renameSync,
   rmSync,
   statSync,
   symlinkSync,
@@ -250,6 +252,59 @@ test("authorized install creates a missing custom parent and CAS refuses a late 
   assert.deepEqual(JSON.parse(readFileSync(value.settings, "utf8")), { concurrent: true });
 });
 
+test("ancestor rebind immediately before recursive parent creation fails closed", async (t) => {
+  const value = fixture(t);
+  const settings = join(value.root, "nested", "deep", "custom.json");
+  const attacker = join(value.root, "attacker");
+  mkdirSync(attacker);
+  let callbackCalled = false;
+  const result = await installClaudeAgentHooks({ settingsPath: settings }, {
+    command: value.command,
+    confirmation: { async confirm(): Promise<boolean> { return true; } },
+    beforeCreateParent: () => {
+      callbackCalled = true;
+      symlinkSync(attacker, join(value.root, "nested"));
+    },
+  });
+  assert.equal(callbackCalled, true);
+  assert.equal(result.status, "error");
+  assert.equal(existsSync(join(attacker, "deep", "custom.json")), false);
+  assert.equal(existsSync(settings), false);
+});
+
+test("same-byte same-mode inode replacement is a CAS change, not a successful write", async (t) => {
+  const value = fixture(t);
+  mkdirSync(dirname(value.settings), { recursive: true });
+  const originalBytes = Buffer.from('{"foreign":true}\n', "utf8");
+  writeFileSync(value.settings, originalBytes, { mode: 0o640 });
+  chmodSync(value.settings, 0o640);
+  const replacement = join(value.root, "replacement.json");
+  const result = await installClaudeAgentHooks({ settingsPath: value.settings }, {
+    command: `${value.command} replacement`,
+    confirmation: { async confirm(): Promise<boolean> { return true; } },
+    beforeWrite: () => {
+      writeFileSync(replacement, originalBytes, { mode: 0o640 });
+      chmodSync(replacement, 0o640);
+      renameSync(replacement, value.settings);
+    },
+  });
+  assert.equal(result.status, "error");
+  assert.deepEqual(readFileSync(value.settings), originalBytes);
+  assert.equal(lstatSync(value.settings).mode & 0o777, 0o640);
+});
+
+test("Windows hook paths double a trailing backslash before closing quote", () => {
+  const command = rockyHookCommand(
+    "claude-code",
+    "C:\\Program Files\\node.exe",
+    "C:\\Rocky CLI\\",
+  );
+  assert.equal(
+    command,
+    '"C:\\Program Files\\node.exe" "C:\\Rocky CLI\\\\" hook agent-event claude-code',
+  );
+});
+
 test("pending transactions, symlink targets, and symlink parents fail closed", async (t) => {
   const value = fixture(t);
   mkdirSync(dirname(value.settings), { recursive: true });
@@ -272,6 +327,32 @@ test("pending transactions, symlink targets, and symlink parents fail closed", a
   symlinkSync(realParent, parentLink);
   assert.equal((await uninstallClaudeAgentHooks({ settingsPath: join(parentLink, "settings.json") }, { command: value.command })).status, "error");
   assert.equal(lstatSync(link).isSymbolicLink(), true);
+});
+
+test("non-regular targets and parent components fail closed", async (t) => {
+  const value = fixture(t);
+  mkdirSync(dirname(value.settings), { recursive: true });
+  mkdirSync(value.settings);
+  assert.equal(
+    (await installClaudeAgentHooks({ settingsPath: value.settings }, {
+      command: value.command,
+      confirmation: { async confirm(): Promise<boolean> { return true; } },
+    })).status,
+    "error",
+  );
+  rmSync(value.settings, { recursive: true, force: true });
+
+  const parentFile = join(value.root, "parent-file");
+  writeFileSync(parentFile, "not a directory");
+  const child = join(parentFile, "settings.json");
+  assert.equal(
+    (await installClaudeAgentHooks({ settingsPath: child }, {
+      command: value.command,
+      confirmation: { async confirm(): Promise<boolean> { return true; } },
+    })).status,
+    "error",
+  );
+  assert.equal(existsSync(child), false);
 });
 
 test("status is absent for partial, stale, duplicate, or unknown owned markers", (t) => {
@@ -326,4 +407,31 @@ test("dedicated setup branch installs only Claude hooks and never invokes MCP ad
   assert.equal(await setup(["--status"], dependencies), 0);
   assert.equal(await setup(["--uninstall-agent-hooks"], dependencies), 0);
   assert.deepEqual(calls, []);
+});
+
+test("dedicated --yes agent-hook install still requires explicit consent", async (t) => {
+  const value = fixture(t);
+  let prompts = 0;
+  const dependencies: SetupDependencies = {
+    runner: { async run() { throw new Error("MCP runner must not run"); }, async openSession() { throw new Error("MCP session must not open"); } },
+    platform: createPlatformServices({
+      platform: "linux",
+      home: value.root,
+      env: { PATH: "/tools" },
+      isWsl: false,
+      fileExists: (path) => path === process.execPath,
+    }),
+    adapters: [],
+    confirmation: {
+      async confirm() {
+        prompts += 1;
+        return false;
+      },
+    },
+    nodePath: process.execPath,
+    entryPath: process.execPath,
+  };
+  assert.equal(await setup(["--agent-hooks", "--yes"], dependencies), 1);
+  assert.equal(prompts, 1);
+  assert.equal(existsSync(join(value.root, ".claude")), false);
 });

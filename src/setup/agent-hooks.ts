@@ -1,4 +1,4 @@
-import { lstatSync, mkdirSync } from "node:fs";
+import { chmodSync, lstatSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, posix, win32 } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -35,6 +35,8 @@ export interface AgentHooksRuntimeOptions {
   detail?: (message: string) => void;
   /** Test seam for proving the transactional writer refuses a late race. */
   beforeWrite?: () => void;
+  /** Test seam for rebinding a missing parent immediately before creation. */
+  beforeCreateParent?: () => void;
 }
 
 export interface AgentHooksOperationResult {
@@ -58,7 +60,10 @@ interface PathIdentity {
 
 interface Topology {
   targetExists: boolean;
+  targetIdentity?: { dev: number; ino: number };
   directories: readonly PathIdentity[];
+  /** Missing parent components in creation order, nearest root first. */
+  missing: readonly string[];
 }
 
 interface CurrentConfig {
@@ -117,7 +122,9 @@ function quoteWindowsPath(value: string): string {
   // Claude Code stores a command line. Reject cmd.exe expansion characters
   // instead of trying to make a shell escape that changes across hosts.
   if (/["%!]/.test(value)) throw new Error("path is unsafe for Windows command line");
-  return `"${value}"`;
+  const trailing = value.match(/\\+$/)?.[0] ?? "";
+  const body = trailing.length === 0 ? value : value.slice(0, -trailing.length);
+  return `"${body}${trailing.replaceAll("\\", "\\\\")}"`;
 }
 
 function quotePath(value: string): string {
@@ -278,11 +285,14 @@ function errorCode(error: unknown): string | undefined {
 
 function inspectTopology(path: string): Topology {
   const directories: PathIdentity[] = [];
+  const missing: string[] = [];
   let targetExists = false;
+  let targetIdentity: { dev: number; ino: number } | undefined;
   try {
     const target = lstatSync(path);
     if (!target.isFile() || target.isSymbolicLink()) throw new Error(GENERIC_ERROR);
     targetExists = true;
+    targetIdentity = { dev: target.dev, ino: target.ino };
   } catch (error) {
     if (error instanceof Error && error.message === GENERIC_ERROR) throw error;
     if (errorCode(error) !== "ENOENT") throw new Error(GENERIC_ERROR);
@@ -294,16 +304,19 @@ function inspectTopology(path: string): Topology {
       const metadata = lstatSync(current);
       if (!metadata.isDirectory() || metadata.isSymbolicLink()) throw new Error(GENERIC_ERROR);
       directories.push({ path: current, dev: metadata.dev, ino: metadata.ino });
-      break;
+      const parent = dirname(current);
+      if (parent === current) break;
+      current = parent;
     } catch (error) {
       if (error instanceof Error && error.message === GENERIC_ERROR) throw error;
       if (errorCode(error) !== "ENOENT") throw new Error(GENERIC_ERROR);
+      missing.push(current);
       const parent = dirname(current);
       if (parent === current) throw new Error(GENERIC_ERROR);
       current = parent;
     }
   }
-  return { targetExists, directories };
+  return { targetExists, targetIdentity, directories, missing: missing.reverse() };
 }
 
 function topologyGuard(topology: Topology): JsonMutationGuard {
@@ -324,13 +337,52 @@ function topologyGuard(topology: Topology): JsonMutationGuard {
   });
 }
 
-function createPrivateParent(targetPath: string): Topology {
+function targetSnapshotMatches(topology: Topology, read: ReadableJsonResult): boolean {
+  if (topology.targetExists !== (read.status === "valid")) return false;
+  if (!topology.targetExists || read.status !== "valid") return true;
+  return topology.targetIdentity !== undefined
+    && read.identity !== undefined
+    && topology.targetIdentity.dev === read.identity.dev
+    && topology.targetIdentity.ino === read.identity.ino;
+}
+
+function sameTopologyDirectories(expected: Topology, actual: Topology): boolean {
+  return expected.directories.every((entry) => actual.directories.some((observed) =>
+    observed.path === entry.path
+      && observed.dev === entry.dev
+      && observed.ino === entry.ino));
+}
+
+function createPrivateParent(
+  targetPath: string,
+  initial: Topology,
+  beforeCreateParent?: () => void,
+): Topology {
+  beforeCreateParent?.();
   try {
-    mkdirSync(dirname(targetPath), { recursive: true, mode: 0o700 });
+    for (const parent of initial.missing) {
+      try {
+        const metadata = lstatSync(parent);
+        if (!metadata.isDirectory() || metadata.isSymbolicLink()) throw new Error(GENERIC_ERROR);
+      } catch (error) {
+        if (error instanceof Error && error.message === GENERIC_ERROR) throw error;
+        if (errorCode(error) !== "ENOENT") throw new Error(GENERIC_ERROR);
+        mkdirSync(parent, { mode: 0o700 });
+        // mkdir mode is subject to umask. Ensure every component Rocky owns
+        // is private even when the invoking shell has a permissive umask.
+        chmodSync(parent, 0o700);
+      }
+      const metadata = lstatSync(parent);
+      if (!metadata.isDirectory() || metadata.isSymbolicLink()) throw new Error(GENERIC_ERROR);
+    }
+    const after = inspectTopology(targetPath);
+    if (after.targetExists || after.missing.length !== 0 || !sameTopologyDirectories(initial, after)) {
+      throw new Error(GENERIC_ERROR);
+    }
+    return after;
   } catch {
     throw new Error(GENERIC_ERROR);
   }
-  return inspectTopology(targetPath);
 }
 
 function inspectCurrent(path: string): CurrentConfig {
@@ -343,6 +395,7 @@ function inspectCurrent(path: string): CurrentConfig {
   if (inspectJsonTransaction(path).status === "pending") throw new Error(GENERIC_ERROR);
   const read = readJsonObject(path);
   if (read.status === "invalid") throw new Error(GENERIC_ERROR);
+  if (!targetSnapshotMatches(topology, read)) throw new Error(GENERIC_ERROR);
   // Validate Claude's hook containers before any caller displays proposed
   // entries or asks for consent. A malformed existing settings file must
   // never be silently replaced by a merge.
@@ -350,14 +403,15 @@ function inspectCurrent(path: string): CurrentConfig {
   return { read, topology };
 }
 
-function prepareMutation(path: string): CurrentConfig {
+function prepareMutation(path: string, options: AgentHooksRuntimeOptions): CurrentConfig {
   let topology = inspectTopology(path);
   if (!topology.targetExists) {
-    topology = createPrivateParent(path);
+    topology = createPrivateParent(path, topology, options.beforeCreateParent);
   }
   if (inspectJsonTransaction(path).status === "pending") throw new Error(GENERIC_ERROR);
   const read = readJsonObject(path);
   if (read.status === "invalid") throw new Error(GENERIC_ERROR);
+  if (!targetSnapshotMatches(topology, read)) throw new Error(GENERIC_ERROR);
   return { read, topology };
 }
 
@@ -390,8 +444,20 @@ function writeMutation(
   try {
     options.beforeWrite?.();
     const result = atomicWriteJsonIfUnchanged(path, value, current.read, topologyGuard(current.topology));
-    if (result.status === "written") return { status: "written" };
-    return { status: "error", detail: GENERIC_ERROR };
+    if (result.status === "written") {
+      return result.recoveryPath === undefined
+        ? { status: "written" }
+        : {
+          status: "written",
+          detail: `Claude Code agent hooks previous config retained; manual recovery: ${result.recoveryPath}`,
+        };
+    }
+    return {
+      status: "error",
+      detail: result.recoveryPath === undefined
+        ? GENERIC_ERROR
+        : `${GENERIC_ERROR}; manual recovery: ${result.recoveryPath}`,
+    };
   } catch {
     return { status: "error", detail: GENERIC_ERROR };
   }
@@ -435,7 +501,7 @@ export async function installClaudeAgentHooks(
   try {
     // Re-read after the prompt. This is deliberate: user or another setup
     // process may have changed settings while consent was pending.
-    const current = prepareMutation(resolved.settingsPath);
+    const current = prepareMutation(resolved.settingsPath, options);
     const merged = mergeClaudeHooks(current.read.value, command);
     return writeMutation(resolved.settingsPath, current, merged, options);
   } catch {

@@ -8,7 +8,6 @@ import {
   readFileSync,
   renameSync,
   rmSync,
-  statSync,
   writeFileSync,
 } from "node:fs";
 import { randomBytes } from "node:crypto";
@@ -26,13 +25,14 @@ import {
 import type {
   BytesReadResult,
   ConditionalBytesWriteResult,
+  FileIdentity,
   FileTransactionInspectionResult,
   FileTransactionRecoveryResult,
 } from "./file-transaction.js";
 
 export type JsonReadResult =
   | { status: "missing"; value: Record<string, unknown> }
-  | { status: "valid"; value: Record<string, unknown>; bytes: Buffer; mode?: number }
+  | { status: "valid"; value: Record<string, unknown>; bytes: Buffer; mode?: number; identity?: FileIdentity }
   | { status: "invalid"; error: string };
 
 /**
@@ -56,8 +56,20 @@ function errorCode(error: unknown): string | undefined {
 
 export function readJsonObject(path: string): JsonReadResult {
   let bytes: Buffer;
+  let metadata: ReturnType<typeof lstatSync>;
   try {
+    const before = lstatSync(path);
+    if (!before.isFile() || before.isSymbolicLink()) {
+      return { status: "invalid", error: "Unable to read JSON config metadata" };
+    }
     bytes = readFileSync(path);
+    const after = lstatSync(path);
+    if (!after.isFile() || after.isSymbolicLink()
+      || after.dev !== before.dev
+      || after.ino !== before.ino) {
+      return { status: "invalid", error: "Unable to read JSON config metadata" };
+    }
+    metadata = after;
   } catch (error) {
     return errorCode(error) === "ENOENT"
       ? { status: "missing", value: {} }
@@ -74,16 +86,21 @@ export function readJsonObject(path: string): JsonReadResult {
     return { status: "invalid", error: "JSON config root must be an object" };
   }
 
-  try {
-    return {
-      status: "valid",
-      value,
-      bytes,
-      mode: statSync(path).mode & 0o777,
-    };
-  } catch {
-    return { status: "invalid", error: "Unable to read JSON config metadata" };
-  }
+  const result: Extract<JsonReadResult, { status: "valid" }> = {
+    status: "valid",
+    value,
+    bytes,
+    mode: metadata.mode & 0o777,
+  };
+  // Keep the public read shape stable for existing callers/tests while
+  // carrying inode authority into the conditional writer.
+  Object.defineProperty(result, "identity", {
+    configurable: false,
+    enumerable: false,
+    value: { dev: metadata.dev, ino: metadata.ino },
+    writable: false,
+  });
+  return result;
 }
 
 function backupTimestamp(now: Date): string {
@@ -310,7 +327,7 @@ export function atomicWriteJsonIfUnchanged(
   }
 
   const snapshot: BytesReadResult = prior.status === "valid"
-    ? { status: "valid", bytes: prior.bytes, mode: prior.mode }
+    ? { status: "valid", bytes: prior.bytes, mode: prior.mode, identity: prior.identity }
     : { status: "missing" };
   let result: ConditionalJsonWriteResult;
   try {
