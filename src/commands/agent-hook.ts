@@ -21,6 +21,8 @@ import { resolveRockyPaths, type RockyPaths } from "../core/state-paths.js";
 const STDIN_CAP_BYTES = 2 * 1024 * 1024;
 const LOG_CAP_BYTES = 64 * 1024;
 const LOG_MESSAGE_CAP_BYTES = 2 * 1024;
+const LOG_SCAN_BYTES = 8 * 1024;
+const ADAPTER_LABEL_CAP_BYTES = 256;
 const NO_FOLLOW = process.platform === "win32" ? 0 : constants.O_NOFOLLOW;
 
 const ANSI_ESCAPE = /\u001B(?:\[[0-?]*[ -/]*[@-~]|\][^\u0007]*(?:\u0007|\u001B\\)|[@-_])/g;
@@ -34,15 +36,36 @@ export interface AgentHookDeps {
   now?: () => number;
 }
 
+function utf8Width(codePoint: number): number {
+  if (codePoint <= 0x7f) return 1;
+  if (codePoint <= 0x7ff) return 2;
+  if (codePoint <= 0xffff) return 3;
+  return 4;
+}
+
+/** Return a bounded UTF-8 prefix without measuring or copying the full input. */
+function utf8Prefix(value: string, maxBytes: number): string {
+  let bytes = 0;
+  let offset = 0;
+  while (offset < value.length) {
+    const codePoint = value.codePointAt(offset) ?? 0;
+    const width = utf8Width(codePoint);
+    if (bytes + width > maxBytes) break;
+    bytes += width;
+    offset += codePoint > 0xffff ? 2 : 1;
+  }
+  return offset === value.length ? value : value.slice(0, offset);
+}
+
 function capUtf8(value: string, maxBytes: number): string {
-  const bytes = Buffer.from(value, "utf8");
-  return bytes.byteLength <= maxBytes ? value : bytes.subarray(0, maxBytes).toString("utf8");
+  return utf8Prefix(value, maxBytes);
 }
 
 function sanitizeLogMessage(message: string): string {
   // Strip presentation/control bytes before redaction so a secret adjacent to
   // an ANSI sequence still has the word boundary the redactor expects.
-  const withoutEscapes = message.replace(ANSI_ESCAPE, "");
+  const bounded = utf8Prefix(message, LOG_SCAN_BYTES);
+  const withoutEscapes = bounded.replace(ANSI_ESCAPE, "");
   const withoutControls = withoutEscapes.replace(BIDI_CONTROL, "").replace(CONTROL, "");
   const oneLine = withoutControls.replace(/\s+/gu, " ").trim();
   return capUtf8(redactSecrets(oneLine), LOG_MESSAGE_CAP_BYTES);
@@ -73,7 +96,7 @@ export function logHookError(message: string, paths?: RockyPaths): void {
     const target = targetPaths.agentLog;
     if (typeof target !== "string" || target.length === 0) return;
 
-    const safeMessage = sanitizeLogMessage(typeof message === "string" ? message : String(message));
+    const safeMessage = sanitizeLogMessage(typeof message === "string" ? message : "");
     const line = Buffer.from(`${new Date().toISOString()} ${safeMessage}\n`, "utf8");
     if (line.byteLength > LOG_CAP_BYTES) return;
 
@@ -166,6 +189,9 @@ function defaultSpawnAnnotate(key: string): void {
     shell: false,
     windowsHide: true,
   });
+  child.once("error", () => {
+    // Detached annotation is best effort; never surface its asynchronous error.
+  });
   child.unref();
 }
 
@@ -179,10 +205,59 @@ function safeLogFailure(paths: RockyPaths | undefined): void {
 
 function safeAdapterLabel(adapter: unknown): string {
   try {
-    return typeof adapter === "string" ? adapter : String(adapter);
+    return typeof adapter === "string" ? utf8Prefix(adapter, ADAPTER_LABEL_CAP_BYTES) : "unknown";
   } catch {
     return "unknown";
   }
+}
+
+interface StdoutLike {
+  write: (chunk: string, callback?: (error?: Error) => void) => unknown;
+  once?: (event: string, listener: (error: unknown) => void) => unknown;
+  removeListener?: (event: string, listener: (error: unknown) => void) => unknown;
+}
+
+/** Write the one hook response while containing synchronous and async stream errors. */
+function writeEmptyResponse(): Promise<void> {
+  return new Promise((resolve) => {
+    let settled = false;
+    let listenerAttached = false;
+    const output = process.stdout as unknown as Partial<StdoutLike>;
+    const onError = () => settle();
+    const cleanup = () => {
+      if (listenerAttached && typeof output.removeListener === "function") {
+        try {
+          output.removeListener("error", onError);
+        } catch {
+          // Closed streams may reject listener cleanup; resolution remains safe.
+        }
+      }
+      listenerAttached = false;
+    };
+    const settle = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve();
+    };
+
+    try {
+      if (typeof output.write !== "function") {
+        settle();
+        return;
+      }
+      if (typeof output.once === "function" && typeof output.removeListener === "function") {
+        output.once("error", onError);
+        listenerAttached = true;
+        output.write("{}", () => settle());
+      } else {
+        output.write("{}");
+        settle();
+      }
+    } catch {
+      settle();
+    }
+  });
 }
 
 function applyParsedEvent(parsed: ParsedHookPayload, paths: RockyPaths, deps: AgentHookDeps): void {
@@ -245,8 +320,7 @@ export async function agentEvent(adapter: string, deps: AgentHookDeps = {}): Pro
   } finally {
     // This is the sole stdout write. A closed pipe/EPIPE is harmless here.
     try {
-      const output = process.stdout as unknown as { write?: (chunk: string) => unknown };
-      if (typeof output.write === "function") output.write("{}");
+      await writeEmptyResponse();
     } catch {
       // Vendor hooks must never observe a rejected promise from stdout failure.
     }

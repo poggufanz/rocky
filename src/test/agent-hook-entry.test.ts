@@ -1,5 +1,6 @@
 import { strict as assert } from "node:assert";
 import { spawnSync } from "node:child_process";
+import { EventEmitter } from "node:events";
 import {
   existsSync,
   lstatSync,
@@ -33,8 +34,11 @@ function freshPaths(t: TestContext): RockyPaths {
 async function captureStdout(fn: () => Promise<number>): Promise<{ code: number; out: string }> {
   let out = "";
   const original = process.stdout.write;
-  (process.stdout as unknown as { write: (chunk: string) => boolean }).write = (chunk: string) => {
+  (process.stdout as unknown as {
+    write: (chunk: string, callback?: (error?: Error) => void) => boolean;
+  }).write = (chunk: string, callback?: (error?: Error) => void) => {
     out += chunk;
+    callback?.();
     return true;
   };
   try {
@@ -133,21 +137,88 @@ test("garbage, unknown, codex, and oversized inputs return 0 with exact {}", asy
   assert.equal(existsSync(paths.memory), false);
 });
 
-test("stdout writer errors are swallowed after one attempted response", async (t) => {
+test("stdout async EPIPE is swallowed after one attempted response and listener cleanup", async (t) => {
   const paths = freshPaths(t);
-  const original = process.stdout.write;
-  let writes = 0;
-  (process.stdout as unknown as { write: (chunk: string) => boolean }).write = () => {
-    writes += 1;
-    throw new Error("closed stream");
+  const originalDescriptor = Object.getOwnPropertyDescriptor(process, "stdout");
+  const originalOutput = process.stdout;
+  const output = new EventEmitter() as EventEmitter & {
+    write: (chunk: string, callback?: (error?: Error) => void) => boolean;
   };
+  const originalWrite = originalOutput.write.bind(originalOutput);
+  let armed = false;
+  output.write = (chunk: string, callback?: (error?: Error) => void) => {
+    if (!armed || chunk !== "{}") return originalWrite(chunk, callback);
+    armed = false;
+    writes += 1;
+    listenersAtWrite = output.listenerCount("error");
+    setImmediate(() => {
+      const error = Object.assign(new Error("closed stream"), { code: "EPIPE" });
+      output.emit("error", error);
+      callback?.(error);
+    });
+    return true;
+  };
+  Object.defineProperty(process, "stdout", { value: output, configurable: true, enumerable: true });
+  const listenersBefore = output.listenerCount("error");
+  const testListener = () => {};
+  output.on("error", testListener);
+  let writes = 0;
+  let listenersAtWrite = 0;
   try {
+    armed = true;
     const code = await agentEvent("claude-code", { stdin: async () => "not json", paths });
     assert.equal(code, 0);
     assert.equal(writes, 1);
+    assert.equal(listenersAtWrite, listenersBefore + 2);
+    assert.equal(output.listenerCount("error"), listenersBefore + 1);
   } finally {
-    process.stdout.write = original;
+    output.removeListener("error", testListener);
+    if (originalDescriptor) Object.defineProperty(process, "stdout", originalDescriptor);
   }
+});
+
+test("default annotate child error is swallowed without changing hook success", (t) => {
+  const home = mkdtempSync(join(tmpdir(), "rocky-hookentry-spawn-"));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const preload = join(home, "spawn-error.cjs");
+  const marker = join(home, "spawn-called");
+  writeFileSync(preload, [
+    "const childProcess = require('node:child_process');",
+    "const { syncBuiltinESMExports } = require('node:module');",
+    "const { EventEmitter } = require('node:events');",
+    "const fs = require('node:fs');",
+    `const marker = ${JSON.stringify(marker)};`,
+    "childProcess.spawn = (...args) => {",
+    "  fs.writeFileSync(marker, JSON.stringify(args[2]));",
+    "  const child = new EventEmitter();",
+    "  child.unref = () => {};",
+    "  process.nextTick(() => child.emit('error', Object.assign(new Error('EPIPE'), { code: 'EPIPE' })));",
+    "  return child;",
+    "};",
+    "syncBuiltinESMExports();",
+    "",
+  ].join("\n"), "utf8");
+  const stop = JSON.stringify({
+    session_id: "s1",
+    prompt_id: "p1",
+    hook_event_name: "Stop",
+    cwd: "/w",
+    last_assistant_message: "fixed spacing in button",
+  });
+  const result = spawnSync(process.execPath, ["--require", preload, entry, "hook", "agent-event", "claude-code"], {
+    cwd: packageRoot,
+    env: { ...process.env, ROCKY_HOME: home },
+    encoding: "utf8",
+    input: stop,
+    timeout: 5_000,
+    windowsHide: true,
+  });
+
+  assert.equal(result.error, undefined);
+  assert.equal(existsSync(marker), true);
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout, "{}");
+  assert.doesNotMatch(result.stderr, /Unhandled ['"]error['"]|EPIPE/);
 });
 
 test("logHookError redacts secrets and collapses ANSI, control, bidi, and newlines", (t) => {
@@ -170,6 +241,15 @@ test("logHookError keeps the complete file within the strict 64 KiB cap", (t) =>
   writeFileSync(paths.agentLog, "x".repeat(LOG_CAP_BYTES - 2), "utf8");
   logHookError("y".repeat(LOG_CAP_BYTES), paths);
   assert.ok(statSync(paths.agentLog).size <= LOG_CAP_BYTES);
+});
+
+test("logHookError bounds hostile diagnostic scanning before persistence", (t) => {
+  const paths = freshPaths(t);
+  const secret = "AKIAABCDEFGHIJKLMNOP";
+  logHookError(`${"prefix ".repeat(4096)}${secret}`, paths);
+  const log = readFileSync(paths.agentLog, "utf8");
+  assert.ok(statSync(paths.agentLog).size <= LOG_CAP_BYTES);
+  assert.equal(log.includes(secret), false);
 });
 
 test("logHookError rejects symlink and non-regular destinations", (t) => {
