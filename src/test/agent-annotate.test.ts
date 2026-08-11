@@ -16,6 +16,8 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test, type TestContext } from "node:test";
 import { annotateBatch, annotateCommand, defaultQueueLabel, degradedLabel } from "../agent/annotate.js";
+import type { AnnotatePort } from "../ai/annotate.js";
+import type { ConfigLoadResult } from "../core/config-read.js";
 import { appendEvent, readBatch } from "../agent/spool.js";
 import type { AgentEvent } from "../agent/schema.js";
 import { loadMemory, parseMemoryRecord, recordTriple } from "../core/memory.js";
@@ -409,4 +411,147 @@ test("hidden _annotate dispatch is silent and uses scratch home", (t) => {
   assert.equal(result.stdout, "");
   assert.equal(result.stderr, "");
   assert.equal(loadMemory(paths.memory).filter((record) => record.kind === "triple").length, 1);
+});
+
+function deterministicFields(record: NonNullable<Awaited<ReturnType<typeof annotateBatch>>>): unknown {
+  const { id: _id, ts: _ts, rationale: _rationale, ...rest } = record;
+  return rest;
+}
+
+function aiSeed(paths: RockyPaths, key: string): void {
+  append(key, [
+    { v: 1, agent: "claude-code", kind: "intent", ts: 1, cwd: "/workspace", text: "change spacing" },
+    { v: 1, agent: "claude-code", kind: "mechanism", ts: 2, tool: "Edit", path: "src/app.css", excerpt: "margin-top: 8px" },
+    { v: 1, agent: "claude-code", kind: "rationale", ts: 3, source: "transcript", text: "agent rationale" },
+  ], paths);
+}
+
+test("AI success changes only compacted rationale, tags, and valid queued label", async (t) => {
+  const degradedPaths = freshPaths(t);
+  const aiPaths = freshPaths(t);
+  aiSeed(degradedPaths, "degraded");
+  aiSeed(aiPaths, "ai");
+  const degradedLabels: string[] = [];
+  const aiLabels: string[] = [];
+  const fake: AnnotatePort = {
+    async run(input, signal) {
+      assert.equal(input.intent, "change spacing");
+      assert.equal(input.rationaleRaw, "agent rationale");
+      assert.deepEqual(input.files, [{ path: "src/app.css", excerpt: "margin-top: 8px" }]);
+      assert.equal(signal.aborted, false);
+      return { summary: "compact rationale", tags: ["spacing"], label: "spacing, question" };
+    },
+  };
+  const degraded = await annotateBatch("degraded", {
+    paths: degradedPaths,
+    now: () => 7,
+    git: () => undefined,
+    queueLabel: (line) => degradedLabels.push(line),
+  });
+  const ai = await annotateBatch("ai", {
+    paths: aiPaths,
+    now: () => 7,
+    git: () => undefined,
+    ai: fake,
+    queueLabel: (line) => aiLabels.push(line),
+  });
+  assert.ok(degraded);
+  assert.ok(ai);
+  assert.deepEqual(deterministicFields(ai), deterministicFields(degraded));
+  assert.deepEqual(ai.rationale, { text: "compact rationale", tags: ["spacing"], source: "transcript" });
+  assert.deepEqual(aiLabels, ["spacing, question"]);
+  assert.equal(degradedLabels.length, 1);
+});
+
+test("throwing and undefined AI ports produce exact degraded rationale, tags, and label", async (t) => {
+  const throwingPaths = freshPaths(t);
+  const undefinedPaths = freshPaths(t);
+  aiSeed(throwingPaths, "throwing");
+  aiSeed(undefinedPaths, "undefined");
+  const expectedLabels: string[] = [];
+  const throwing: AnnotatePort = { async run() { throw new Error("offline"); } };
+  const absent: AnnotatePort = { async run() { return undefined; } };
+  const throwingResult = await annotateBatch("throwing", {
+    paths: throwingPaths,
+    now: () => 7,
+    git: () => undefined,
+    ai: throwing,
+    queueLabel: (line) => expectedLabels.push(line),
+  });
+  const undefinedResult = await annotateBatch("undefined", {
+    paths: undefinedPaths,
+    now: () => 7,
+    git: () => undefined,
+    ai: absent,
+    queueLabel: (line) => expectedLabels.push(line),
+  });
+  assert.ok(throwingResult);
+  assert.ok(undefinedResult);
+  assert.equal(throwingResult.rationale?.text, "agent rationale");
+  assert.deepEqual(throwingResult.rationale?.tags, []);
+  assert.equal(undefinedResult.rationale?.text, "agent rationale");
+  assert.deepEqual(undefinedResult.rationale?.tags, []);
+  assert.equal(expectedLabels.length, 2);
+  assert.match(expectedLabels[0] ?? "", /you say/);
+  assert.equal(expectedLabels[0], expectedLabels[1]);
+});
+
+test("invalid or voice-breaking AI label falls back while valid summary and tags remain usable", async (t) => {
+  const paths = freshPaths(t);
+  aiSeed(paths, "invalid-label");
+  const labels: string[] = [];
+  const fake: AnnotatePort = {
+    async run() { return { summary: "compact", tags: ["spacing"], label: "the thing?" }; },
+  };
+  const result = await annotateBatch("invalid-label", {
+    paths,
+    ai: fake,
+    git: () => undefined,
+    queueLabel: (line) => labels.push(line),
+  });
+  assert.ok(result);
+  assert.equal(result.rationale?.text, "compact");
+  assert.deepEqual(result.rationale?.tags, ["spacing"]);
+  assert.equal(labels.length, 1);
+  assert.match(labels[0] ?? "", /^you say /);
+  assert.doesNotMatch(labels[0] ?? "", /the thing\?/u);
+});
+
+test("AI may queue a valid label but never invent a rationale event", async (t) => {
+  const paths = freshPaths(t);
+  append("no-rationale-ai", [
+    { v: 1, agent: "codex", kind: "intent", ts: 1, cwd: "/workspace", text: "change spacing" },
+    { v: 1, agent: "codex", kind: "mechanism", ts: 2, tool: "Edit", path: "src/app.css", excerpt: "margin-top: 8px" },
+  ], paths);
+  const labels: string[] = [];
+  const fake: AnnotatePort = {
+    async run(input) {
+      assert.equal(input.rationaleRaw, undefined);
+      return { summary: "invented summary must not store", tags: ["spacing"], label: "spacing, question" };
+    },
+  };
+  const result = await annotateBatch("no-rationale-ai", { paths, ai: fake, git: () => undefined, queueLabel: (line) => labels.push(line) });
+  assert.ok(result);
+  assert.equal(result.rationale, undefined);
+  assert.deepEqual(labels, ["spacing, question"]);
+});
+
+test("default AI config lookup uses injected paths.config and never an unrelated home", async (t) => {
+  const paths = freshPaths(t);
+  aiSeed(paths, "config-path");
+  const seen: string[] = [];
+  const configLoader = (path: string): ConfigLoadResult => {
+    seen.push(path);
+    return { status: "missing", path, config: { version: 1, ai: { enabled: false } } };
+  };
+  const labels: string[] = [];
+  const result = await annotateBatch("config-path", {
+    paths,
+    loadConfig: configLoader,
+    git: () => undefined,
+    queueLabel: (line) => labels.push(line),
+  });
+  assert.ok(result);
+  assert.deepEqual(seen, [paths.config]);
+  assert.equal(labels.length, 1);
 });

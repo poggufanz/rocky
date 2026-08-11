@@ -14,7 +14,9 @@ import {
 import { resolveRockyPaths, type RockyPaths } from "../core/state-paths.js";
 import { recordTriple } from "../core/memory.js";
 import type { TripleFile, TripleRecord } from "../core/memory.js";
+import { loadConfig, type ConfigLoadResult } from "../core/config-read.js";
 import { redactSecrets } from "../core/redact.js";
+import { annotatePortFromConfig, parseAnnotateOutput, type AnnotatePort, type AnnotateOutput } from "../ai/annotate.js";
 import {
   MAX_EXCERPT_CHARS,
   MAX_INTENT_CHARS,
@@ -22,11 +24,6 @@ import {
   type AgentName,
 } from "./schema.js";
 import { acquireLock, listOrphanBatches, readBatch, removeBatch } from "./spool.js";
-
-/** Local placeholder. Task 8 supplies the Ollama-backed implementation. */
-interface AnnotatePort {
-  run(input: unknown, signal: AbortSignal): Promise<undefined>;
-}
 
 export const MAX_TRIPLE_FILES = 8;
 
@@ -47,6 +44,7 @@ export interface AnnotateDeps {
   now?: () => number;
   git?: (args: string[], cwd: string) => string | undefined;
   ai?: AnnotatePort;
+  loadConfig?: (path: string) => ConfigLoadResult;
   queueLabel?: (line: string, paths: RockyPaths) => void;
 }
 
@@ -276,8 +274,39 @@ export async function annotateBatch(key: string, deps: AnnotateDeps = {}): Promi
   });
 
   const intentText = intentEvent?.kind === "intent" ? cleanText(intentEvent.text, MAX_INTENT_CHARS) || undefined : undefined;
+  let port = deps.ai;
+  if (port === undefined) {
+    try {
+      const readConfig = deps.loadConfig ?? loadConfig;
+      port = annotatePortFromConfig(readConfig(paths.config));
+    } catch {
+      port = undefined;
+    }
+  }
+
+  let aiOutput: AnnotateOutput | undefined;
+  if (port !== undefined) {
+    try {
+      const input = {
+        ...(intentText === undefined ? {} : { intent: intentText }),
+        ...(rationaleText === undefined ? {} : { rationaleRaw: rationaleText }),
+        files: files.map((file) => file.excerpt === undefined
+          ? { path: file.path }
+          : { path: file.path, excerpt: file.excerpt }),
+      };
+      const output = await port.run(input, AbortSignal.timeout(15_000));
+      aiOutput = parseAnnotateOutput(output);
+    } catch {
+      aiOutput = undefined;
+    }
+  }
+
   const rationale = rationaleEvent && rationaleText
-    ? { text: rationaleText, tags: [] as string[], source: rationaleEvent.source }
+    ? {
+      text: aiOutput?.summary ?? rationaleText,
+      tags: aiOutput === undefined ? [] : [...aiOutput.tags],
+      source: rationaleEvent.source,
+    }
     : undefined;
   const now = deps.now?.();
   const ts = now !== undefined && Number.isFinite(now) ? now : undefined;
@@ -294,7 +323,7 @@ export async function annotateBatch(key: string, deps: AnnotateDeps = {}): Promi
     },
   }, paths);
 
-  const label = degradedLabel(intentText, files);
+  const label = aiOutput?.label ?? degradedLabel(intentText, files);
   if (label) {
     try {
       const enqueue = deps.queueLabel ?? defaultQueueLabel;
