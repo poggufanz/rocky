@@ -142,6 +142,22 @@ check "empty label line is dequeued" grep -qF 'last after empty' "$LABEL_HOME/la
 run_label_prompt "$LABEL_HOME" C "$LABEL_STDOUT" "$LABEL_STDERR"
 check "label after empty line prints" grep -qF '[Rocky] last after empty' "$LABEL_STDERR"
 
+# Keep the shell boundary aligned with agent-hook.ts: invisible/bidi controls
+# outside the original subset must be inert in both byte and UTF-8 locales.
+LABEL_VALUE="before safe"
+LABEL_VALUE="${LABEL_VALUE}"$'\330\234\342\200\213\342\200\220\342\201\240\342\201\252\342\201\257\357\273\277'
+LABEL_VALUE="${LABEL_VALUE} after safe"
+printf '%s\n' "$LABEL_VALUE" > "$LABEL_HOME/labels"
+run_label_prompt "$LABEL_HOME" C "$LABEL_STDOUT" "$LABEL_STDERR"
+check "C locale missing bidi controls leave benign text" grep -qF '[Rocky] before safe' "$LABEL_STDERR"
+check "C locale strips U+061C" bash -c '! LC_ALL=C grep -a -q "$(printf "\\330\\234")" "$1"' bash "$LABEL_STDERR"
+check "C locale strips U+200B" bash -c '! LC_ALL=C grep -a -q "$(printf "\\342\\200\\213")" "$1"' bash "$LABEL_STDERR"
+check "C locale strips U+2060" bash -c '! LC_ALL=C grep -a -q "$(printf "\\342\\201\\240")" "$1"' bash "$LABEL_STDERR"
+check "C locale strips U+206A" bash -c '! LC_ALL=C grep -a -q "$(printf "\\342\\201\\252")" "$1"' bash "$LABEL_STDERR"
+check "C locale strips U+206F" bash -c '! LC_ALL=C grep -a -q "$(printf "\\342\\201\\257")" "$1"' bash "$LABEL_STDERR"
+check "C locale strips U+FEFF" bash -c '! LC_ALL=C grep -a -q "$(printf "\\357\\273\\277")" "$1"' bash "$LABEL_STDERR"
+check "C locale missing bidi controls leave trailing text" grep -qF 'after safe' "$LABEL_STDERR"
+
 # A failed atomic rename must not print or lose the claimed line. The fixed
 # legacy temp name remains an attacker-controlled symlink and is never used.
 LABEL_FIXED_TARGET="$TMP/fixed-temp-target"
@@ -225,6 +241,19 @@ if [[ -n "$UTF8_LOCALE" ]]; then
     bash -c '! LC_ALL=C grep -a -q "$(printf "\\033")" "$1"' bash "$LABEL_STDERR"
   check "UTF-8 label strips bidi controls" \
     bash -c '! LC_ALL=C grep -a -q "$(printf "\\342\\200\\256")" "$1"' bash "$LABEL_STDERR"
+  LABEL_VALUE="before safe"
+  LABEL_VALUE="${LABEL_VALUE}"$'\330\234\342\200\213\342\200\220\342\201\240\342\201\252\342\201\257\357\273\277'
+  LABEL_VALUE="${LABEL_VALUE} after safe"
+  printf '%s\n' "$LABEL_VALUE" > "$LABEL_HOME/labels"
+  run_label_prompt "$LABEL_HOME" "$UTF8_LOCALE" "$LABEL_STDOUT" "$LABEL_STDERR"
+  check "UTF-8 locale missing bidi controls leave benign text" grep -qF '[Rocky] before safe' "$LABEL_STDERR"
+  check "UTF-8 locale strips U+061C" bash -c '! LC_ALL=C grep -a -q "$(printf "\\330\\234")" "$1"' bash "$LABEL_STDERR"
+  check "UTF-8 locale strips U+200B" bash -c '! LC_ALL=C grep -a -q "$(printf "\\342\\200\\213")" "$1"' bash "$LABEL_STDERR"
+  check "UTF-8 locale strips U+2060" bash -c '! LC_ALL=C grep -a -q "$(printf "\\342\\201\\240")" "$1"' bash "$LABEL_STDERR"
+  check "UTF-8 locale strips U+206A" bash -c '! LC_ALL=C grep -a -q "$(printf "\\342\\201\\252")" "$1"' bash "$LABEL_STDERR"
+  check "UTF-8 locale strips U+206F" bash -c '! LC_ALL=C grep -a -q "$(printf "\\342\\201\\257")" "$1"' bash "$LABEL_STDERR"
+  check "UTF-8 locale strips U+FEFF" bash -c '! LC_ALL=C grep -a -q "$(printf "\\357\\273\\277")" "$1"' bash "$LABEL_STDERR"
+  check "UTF-8 locale missing bidi controls leave trailing text" grep -qF 'after safe' "$LABEL_STDERR"
 else
   echo "ok    - UTF-8 locale label check skipped"
 fi
