@@ -306,6 +306,37 @@ test("newly created parent identity is retained across final topology validation
   assert.equal(existsSync(settings), false);
 });
 
+test("parent rebind immediately after mkdir fails closed before chmod", async (t) => {
+  const value = fixture(t);
+  const settings = join(value.root, "nested", "claude-settings.json");
+  const parent = dirname(settings);
+  const backup = join(value.root, "created-parent-backup");
+  const originalMkdir = fs.mkdirSync;
+  let rebound = false;
+  fs.mkdirSync = ((path: fs.PathLike, options?: fs.MakeDirectoryOptions | fs.Mode | null) => {
+    const created = originalMkdir(path, options);
+    if (String(path) === parent && !rebound) {
+      rebound = true;
+      renameSync(parent, backup);
+      originalMkdir(parent, options);
+    }
+    return created;
+  }) as typeof fs.mkdirSync;
+  syncBuiltinESMExports();
+  t.after(() => {
+    fs.mkdirSync = originalMkdir;
+    syncBuiltinESMExports();
+  });
+
+  const result = await installClaudeAgentHooks({ settingsPath: settings }, {
+    command: value.command,
+    confirmation: { async confirm(): Promise<boolean> { return true; } },
+  });
+  assert.equal(rebound, true);
+  assert.equal(result.status, "error");
+  assert.equal(existsSync(settings), false);
+});
+
 test("same-byte same-mode inode replacement is a CAS change, not a successful write", async (t) => {
   const value = fixture(t);
   mkdirSync(dirname(value.settings), { recursive: true });

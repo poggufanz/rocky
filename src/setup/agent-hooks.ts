@@ -1,6 +1,6 @@
-import { chmodSync, lstatSync, mkdirSync } from "node:fs";
+import { chmodSync, lstatSync, mkdirSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join, posix, win32 } from "node:path";
+import { basename, dirname, join, posix, win32 } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   atomicWriteJsonIfUnchanged,
@@ -363,22 +363,56 @@ function createPrivateParent(
     const expectedDirectories: PathIdentity[] = [...initial.directories];
     for (const parent of initial.missing) {
       try {
-        const metadata = lstatSync(parent);
-        if (!metadata.isDirectory() || metadata.isSymbolicLink()) throw new Error(GENERIC_ERROR);
+        lstatSync(parent);
+        // Every path in initial.missing was absent during the authorized
+        // snapshot. If another actor wins the name before our mkdir, do not
+        // adopt its directory as Rocky's creation baseline.
+        throw new Error(GENERIC_ERROR);
       } catch (error) {
         if (error instanceof Error && error.message === GENERIC_ERROR) throw error;
         if (errorCode(error) !== "ENOENT") throw new Error(GENERIC_ERROR);
-        mkdirSync(parent, { mode: 0o700 });
-        // mkdir mode is subject to umask. Ensure every component Rocky owns
-        // is private even when the invoking shell has a permissive umask.
-        chmodSync(parent, 0o700);
       }
+
+      const container = dirname(parent);
+      let containerBefore: ReturnType<typeof lstatSync>;
+      let entriesBefore: string[];
+      try {
+        containerBefore = lstatSync(container);
+        if (!containerBefore.isDirectory() || containerBefore.isSymbolicLink()) {
+          throw new Error(GENERIC_ERROR);
+        }
+        entriesBefore = readdirSync(container);
+      } catch (error) {
+        if (error instanceof Error && error.message === GENERIC_ERROR) throw error;
+        if (errorCode(error) !== "ENOENT") throw new Error(GENERIC_ERROR);
+        throw new Error(GENERIC_ERROR);
+      }
+
+      if (entriesBefore.includes(basename(parent))) throw new Error(GENERIC_ERROR);
+      mkdirSync(parent, { mode: 0o700 });
       const metadata = lstatSync(parent);
       if (!metadata.isDirectory() || metadata.isSymbolicLink()) throw new Error(GENERIC_ERROR);
+      const containerAfter = lstatSync(container);
+      if (!containerAfter.isDirectory()
+        || containerAfter.isSymbolicLink()
+        || containerAfter.dev !== containerBefore.dev
+        || containerAfter.ino !== containerBefore.ino) {
+        throw new Error(GENERIC_ERROR);
+      }
+      const entriesAfter = readdirSync(container);
+      const expectedEntries = [...entriesBefore, basename(parent)].sort();
+      entriesAfter.sort();
+      if (entriesAfter.length !== expectedEntries.length
+        || entriesAfter.some((entry, index) => entry !== expectedEntries[index])) {
+        throw new Error(GENERIC_ERROR);
+      }
       // Retain identity for every component that was absent in the initial
       // snapshot. A later ancestor rebind must not become the new guard
       // baseline merely because final inspection observes it first.
       expectedDirectories.push({ path: parent, dev: metadata.dev, ino: metadata.ino });
+      // mkdir mode is subject to umask. Ensure every component Rocky owns
+      // is private even when the invoking shell has a permissive umask.
+      chmodSync(parent, 0o700);
     }
     const after = inspectTopology(targetPath);
     if (after.targetExists || after.missing.length !== 0 || !sameTopologyDirectories(expectedDirectories, after)) {
