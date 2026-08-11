@@ -43,7 +43,27 @@ export interface NoteRecord {
   answer: string;
 }
 
-export type MemoryRecord = FailureRecord | FixRecord | NoteRecord;
+export interface TripleFile {
+  path: string;
+  plusMinus: [number, number];
+  props: string[];
+  excerpt?: string;
+}
+
+export interface TripleRecord {
+  kind: "triple";
+  id: string;
+  ts: number;
+  cwd: string;
+  schemaV: 1;
+  agent: "claude-code" | "codex";
+  origin: "agent-hook";
+  intent?: { text: string };
+  rationale?: { text: string; tags: string[]; source: "transcript" | "notify" };
+  mechanism: { head?: string; files: TripleFile[]; truncatedFiles: number };
+}
+
+export type MemoryRecord = FailureRecord | FixRecord | NoteRecord | TripleRecord;
 
 export const MAX_MEMORY_LINE_BYTES = 1024 * 1024;
 
@@ -75,11 +95,11 @@ function normalizeOrigin(origin: unknown): FailureOrigin | undefined {
 export function parseMemoryRecord(value: unknown): MemoryRecord | undefined {
   const record = objectValue(value);
   if (!record || typeof record.id !== "string" || typeof record.ts !== "number" || !Number.isFinite(record.ts) ||
-      typeof record.cwd !== "string" || typeof record.cmd !== "string") return undefined;
+      typeof record.cwd !== "string") return undefined;
   if (record.kind === "failure") {
     const signature = strings(record.signature);
     if (typeof record.exitCode !== "number" || !Number.isInteger(record.exitCode) || typeof record.fingerprint !== "string" ||
-        !signature || typeof record.excerpt !== "string") return undefined;
+        !signature || typeof record.excerpt !== "string" || typeof record.cmd !== "string") return undefined;
     const origin = normalizeOrigin(record.origin);
     return {
       kind: "failure", id: record.id, ts: Number(record.ts), cwd: record.cwd,
@@ -90,7 +110,7 @@ export function parseMemoryRecord(value: unknown): MemoryRecord | undefined {
   }
   if (record.kind === "fix") {
     const failureIds = strings(record.failureIds);
-    if (!failureIds) return undefined;
+    if (!failureIds || typeof record.cmd !== "string") return undefined;
     let links: FixLink[] | undefined;
     if (record.links !== undefined) {
       links = parseFixLinks(record.links);
@@ -103,13 +123,74 @@ export function parseMemoryRecord(value: unknown): MemoryRecord | undefined {
   }
   if (record.kind === "note") {
     if (typeof record.file !== "string" || typeof record.line !== "number" || !Number.isInteger(record.line) ||
-        typeof record.subject !== "string" || typeof record.answer !== "string") return undefined;
+        typeof record.subject !== "string" || typeof record.answer !== "string" || typeof record.cmd !== "string") return undefined;
     return {
       kind: "note", id: record.id, ts: Number(record.ts), cwd: record.cwd, cmd: record.cmd,
       file: record.file, line: Number(record.line), subject: record.subject, answer: record.answer,
     };
   }
+  if (record.kind === "triple") return parseTripleRecord(record);
   return undefined;
+}
+
+function parseTripleRecord(record: Record<string, unknown>): TripleRecord | undefined {
+  if (record.schemaV !== 1 || record.origin !== "agent-hook" ||
+      (record.agent !== "claude-code" && record.agent !== "codex")) return undefined;
+
+  const mechanism = objectValue(record.mechanism);
+  if (!mechanism || !Array.isArray(mechanism.files) ||
+      typeof mechanism.truncatedFiles !== "number" || !Number.isInteger(mechanism.truncatedFiles) ||
+      mechanism.truncatedFiles < 0 ||
+      (mechanism.head !== undefined && typeof mechanism.head !== "string")) return undefined;
+
+  const files: TripleFile[] = [];
+  for (const value of mechanism.files) {
+    const file = objectValue(value);
+    if (!file || typeof file.path !== "string" || !Array.isArray(file.plusMinus) || file.plusMinus.length !== 2 ||
+        typeof file.plusMinus[0] !== "number" || !Number.isFinite(file.plusMinus[0]) ||
+        typeof file.plusMinus[1] !== "number" || !Number.isFinite(file.plusMinus[1]) ||
+        !Array.isArray(file.props) || !file.props.every((prop) => typeof prop === "string") ||
+        (file.excerpt !== undefined && typeof file.excerpt !== "string")) return undefined;
+    files.push({
+      path: file.path,
+      plusMinus: [file.plusMinus[0], file.plusMinus[1]],
+      props: [...file.props],
+      ...(file.excerpt === undefined ? {} : { excerpt: file.excerpt }),
+    });
+  }
+
+  let intent: TripleRecord["intent"];
+  if (record.intent !== undefined) {
+    const value = objectValue(record.intent);
+    if (!value || typeof value.text !== "string") return undefined;
+    intent = { text: value.text };
+  }
+
+  let rationale: TripleRecord["rationale"];
+  if (record.rationale !== undefined) {
+    const value = objectValue(record.rationale);
+    const tags = value ? strings(value.tags) : undefined;
+    if (!value || typeof value.text !== "string" || !tags ||
+        (value.source !== "transcript" && value.source !== "notify")) return undefined;
+    rationale = { text: value.text, tags, source: value.source };
+  }
+
+  return {
+    kind: "triple",
+    id: record.id as string,
+    ts: record.ts as number,
+    cwd: record.cwd as string,
+    schemaV: 1,
+    agent: record.agent,
+    origin: "agent-hook",
+    ...(intent === undefined ? {} : { intent }),
+    ...(rationale === undefined ? {} : { rationale }),
+    mechanism: {
+      ...(mechanism.head === undefined ? {} : { head: mechanism.head }),
+      files,
+      truncatedFiles: mechanism.truncatedFiles,
+    },
+  };
 }
 
 function parseFixLinks(value: unknown): FixLink[] | undefined {

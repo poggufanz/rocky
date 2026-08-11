@@ -1,6 +1,6 @@
 import { after, test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, existsSync, readFileSync } from "node:fs";
+import { mkdtempSync, existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as memory from "../core/memory.js";
@@ -117,4 +117,35 @@ test("parseMemoryRecord rejects malformed notes and still skips unknown kinds", 
     memory.parseMemoryRecord({ kind: "hologram", id: "x", ts: 1, cwd: "/", cmd: "" }),
     undefined,
   );
+});
+
+test("loadMemory skips unknown record kinds between known records", (t) => {
+  const directory = mkdtempSync(join(tmpdir(), "rocky-mem-forward-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const path = join(directory, "memory.jsonl");
+  const failure = {
+    kind: "failure",
+    id: "known-1",
+    ts: 1,
+    cwd: "/w",
+    cmd: "false",
+    exitCode: 1,
+    fingerprint: "f",
+    signature: ["false"],
+    excerpt: "failed",
+  };
+  const note = {
+    kind: "note",
+    id: "known-2",
+    ts: 2,
+    cwd: "/w",
+    cmd: "note",
+    file: "src/a.ts",
+    line: 1,
+    subject: "x",
+    answer: "y",
+  };
+  writeFileSync(path, `${JSON.stringify(failure)}\n{"kind":"hologram","id":"unknown"}\n${JSON.stringify(note)}\n`, "utf8");
+  const records = memory.loadMemory(path);
+  assert.deepEqual(records.map((record) => record.id), ["known-1", "known-2"]);
 });

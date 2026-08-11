@@ -5,11 +5,12 @@ import { randomUUID } from "node:crypto";
 import { Buffer } from "node:buffer";
 import { commandFingerprint, fingerprint, normalizeLine, signatureLines } from "./fingerprint.js";
 import { resolveRockyPaths } from "./state-paths.js";
+import type { RockyPaths } from "./state-paths.js";
 import { MAX_MEMORY_LINE_BYTES } from "./memory-read.js";
-import type { FailureRecord, FixRecord, MemoryRecord, NoteRecord } from "./memory-read.js";
+import type { FailureRecord, FixRecord, MemoryRecord, NoteRecord, TripleRecord } from "./memory-read.js";
 import type { UnresolvedLink } from "./memory-query.js";
 
-export type { FailureRecord, FixRecord, MemoryRecord, NoteRecord } from "./memory-read.js";
+export type { FailureRecord, FixRecord, MemoryRecord, NoteRecord, TripleFile, TripleRecord } from "./memory-read.js";
 export { loadMemory, parseMemoryRecord, MAX_MEMORY_LINE_BYTES } from "./memory-read.js";
 
 export function memoryPath(): string {
@@ -20,8 +21,7 @@ function ensureDir(home: string): void {
   if (!existsSync(home)) mkdirSync(home, { recursive: true });
 }
 
-function append(record: MemoryRecord): void {
-  const paths = resolveRockyPaths();
+function append(record: MemoryRecord, paths = resolveRockyPaths()): void {
   ensureDir(paths.home);
   appendFileSync(paths.memory, JSON.stringify(record) + "\n", "utf8");
 }
@@ -117,4 +117,24 @@ export function recordNote(input: {
 }): void {
   const rec: NoteRecord = { kind: "note", id: randomUUID(), ts: Date.now(), ...input };
   append(rec);
+}
+
+export function recordTriple(
+  input: Omit<TripleRecord, "kind" | "id" | "ts" | "schemaV" | "origin"> & { ts?: number },
+  paths?: RockyPaths,
+): TripleRecord {
+  const rec: TripleRecord = {
+    kind: "triple",
+    id: randomUUID(),
+    ts: input.ts ?? Date.now(),
+    schemaV: 1,
+    origin: "agent-hook",
+    agent: input.agent,
+    cwd: input.cwd,
+    ...(input.intent === undefined ? {} : { intent: input.intent }),
+    ...(input.rationale === undefined ? {} : { rationale: input.rationale }),
+    mechanism: input.mechanism,
+  };
+  append(rec, paths);
+  return rec;
 }

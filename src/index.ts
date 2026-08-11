@@ -20,6 +20,7 @@ import { mcp } from "./commands/mcp.js";
 import { setup } from "./commands/setup.js";
 import { check } from "./commands/check.js";
 import { agentEvent } from "./commands/agent-hook.js";
+import { annotateCommand } from "./agent/annotate.js";
 import { PACKAGE_NAME, PACKAGE_VERSION } from "./core/package-info.js";
 import { face, say } from "./ui/rocky.js";
 
@@ -108,6 +109,8 @@ async function main(): Promise<number> {
       return hookFail(rest[0] ?? "", Number(rest[1] ?? 1), rest[2] ?? process.cwd());
     case "_hooksuccess":
       return hookSuccess(rest[0] ?? "", rest[1] ?? process.cwd());
+    case "_annotate":
+      return annotateCommand(rest[0] ?? "");
     case "--version":
       console.log(PACKAGE_VERSION);
       return 0;
