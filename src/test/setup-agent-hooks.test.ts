@@ -497,6 +497,28 @@ test("codexConfigSnippet preserves Windows drive and UNC paths exactly", () => {
   assert.ok(snippet.includes(command));
 });
 
+test("codexConfigSnippet accepts canonical special paths and preserves notify argv", () => {
+  const nodePath = "/opt/Rocky $cache/node`bin\\!\"tool";
+  const scriptPath = "/opt/Rocky's CLI/dist/rocky\\!\"index.js";
+  const command = rockyHookCommand("codex", nodePath, scriptPath);
+  const snippet = codexConfigSnippet(command);
+  const expectedNotify = `notify = [${JSON.stringify(nodePath)}, ${JSON.stringify(scriptPath)}, "hook", "agent-event", "codex"]`;
+  assert.ok(snippet.includes(expectedNotify));
+  assert.equal(snippet.split(`command = ${JSON.stringify(command)}`).length - 1, 3);
+});
+
+test("codexConfigSnippet rejects direct noncanonical and unsafe path spellings", () => {
+  const directCommands = [
+    '"/usr/bin/node" "/opt/$cache/index.js" hook agent-event codex',
+    '"/usr/bin/node" "/opt/`cache/index.js" hook agent-event codex',
+    '"/usr/bin/node" "/opt/rocky\\!bin/index.js" hook agent-event codex',
+    '"C:\\Program Files\\%PATH%\\node.exe" "C:\\Rocky\\dist\\index.js" hook agent-event codex',
+    '"C:\\Program Files\\!\\node.exe" "C:\\Rocky\\dist\\index.js" hook agent-event codex',
+    '"C:\\Program Files\\\\\"evil\\node.exe" "C:\\Rocky\\dist\\index.js" hook agent-event codex',
+  ];
+  for (const command of directCommands) assert.throws(() => codexConfigSnippet(command));
+});
+
 function captureStderr(run: () => Promise<number>): Promise<{ code: number; stderr: string }> {
   let stderr = "";
   const original = process.stderr.write;

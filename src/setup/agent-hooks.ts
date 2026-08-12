@@ -173,7 +173,7 @@ function decodePosixCommandPath(raw: string): string {
       continue;
     }
     const escaped = raw[index + 1];
-    if (escaped === undefined || !["\\", "$", "`", '"', "!"].includes(escaped)) {
+    if (escaped === undefined || !["\\", "$", "`", '"'].includes(escaped)) {
       throw new Error("POSIX hook path has ambiguous escape");
     }
     value += escaped;
@@ -213,9 +213,12 @@ function parseCodexHookCommand(command: string): HookCommandPaths {
   if (command.slice(second.next) !== " hook agent-event codex") {
     throw new Error("hook command is not a Codex agent hook");
   }
-  requireSafeAbsolutePath(first.value, "Node");
-  requireSafeAbsolutePath(second.value, "entry");
-  return { executable: first.value, script: second.value };
+  const executable = requireSafeAbsolutePath(first.value, "Node");
+  const script = requireSafeAbsolutePath(second.value, "entry");
+  if (rockyHookCommand("codex", executable, script) !== command) {
+    throw new Error("hook command is not canonical");
+  }
+  return { executable, script };
 }
 
 function tomlBasicString(value: string): string {
