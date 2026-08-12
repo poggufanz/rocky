@@ -12,7 +12,7 @@ import {
   writeSync,
 } from "node:fs";
 import { resolveRockyPaths, type RockyPaths } from "../core/state-paths.js";
-import { recordTriple } from "../core/memory.js";
+import { recordTripleOnce } from "../core/memory.js";
 import type { TripleFile, TripleRecord } from "../core/memory.js";
 import { loadConfig, type ConfigLoadResult } from "../core/config-read.js";
 import { redactSecrets } from "../core/redact.js";
@@ -23,7 +23,18 @@ import {
   MAX_RATIONALE_CHARS,
   type AgentName,
 } from "./schema.js";
-import { acquireLock, listOrphanBatches, readBatch, removeBatch } from "./spool.js";
+import {
+  acquireAnnotationLease,
+  claimBatch,
+  listOrphanBatches,
+  listOrphanClaims,
+  prepareClaim,
+  readClaim,
+  releaseAnnotationLease,
+  removeClaim,
+  type AnnotationLease,
+  type BatchClaim,
+} from "./spool.js";
 
 export const MAX_TRIPLE_FILES = 8;
 
@@ -46,6 +57,10 @@ export interface AnnotateDeps {
   ai?: AnnotatePort;
   loadConfig?: (path: string) => ConfigLoadResult;
   queueLabel?: (line: string, paths: RockyPaths) => void;
+  /** Internal recovery hooks keep claim and lease ownership in one transaction. */
+  claim?: BatchClaim;
+  lease?: AnnotationLease;
+  afterPersist?: (record: TripleRecord, appended: boolean) => void;
 }
 
 function closeQuietly(fd: number): void {
@@ -226,131 +241,142 @@ export function degradedLabel(intent: string | undefined, files: readonly Triple
 export async function annotateBatch(key: string, deps: AnnotateDeps = {}): Promise<TripleRecord | undefined> {
   const paths = deps.paths ?? resolveRockyPaths();
   const git = deps.git ?? defaultGit;
-  const events = readBatch(key, paths);
-  const agent: AgentName = events[0]?.agent ?? "claude-code";
-  const batchEvents = events.filter((event) => event.agent === agent);
-  const intentEvent = batchEvents.find((event) => event.kind === "intent");
-  const byPath = new Map<string, { path: string; excerpt?: string }>();
-  for (const event of batchEvents) {
-    if (event.kind !== "mechanism") continue;
-    const gitPath = operationalText(event.path, MAX_PATH_CHARS);
-    const path = cleanText(event.path, MAX_PATH_CHARS);
-    if (!path || !gitPath) continue;
-    const excerpt = event.excerpt === undefined ? undefined : cleanText(event.excerpt, MAX_EXCERPT_CHARS) || undefined;
-    byPath.set(gitPath, { path, excerpt });
-  }
-  if (byPath.size === 0) {
-    removeBatch(key, paths);
-    return undefined;
-  }
-
-  let rationaleEvent: Extract<(typeof events)[number], { kind: "rationale" }> | undefined;
-  let rationaleText: string | undefined;
-  for (const event of batchEvents) {
-    if (event.kind !== "rationale") continue;
-    const text = cleanText(event.text, MAX_RATIONALE_CHARS);
-    if (text) {
-      rationaleEvent = event;
-      rationaleText = text;
+  const lease = deps.lease ?? acquireAnnotationLease(key, paths);
+  if (!lease) return undefined;
+  let claim: BatchClaim | undefined;
+  try {
+    claim = deps.claim === undefined ? claimBatch(key, paths) : prepareClaim(deps.claim, paths);
+    if (!claim) return undefined;
+    const events = readClaim(claim, paths);
+    const agent: AgentName = events[0]?.agent ?? "claude-code";
+    const batchEvents = events.filter((event) => event.agent === agent);
+    const intentEvent = batchEvents.find((event) => event.kind === "intent");
+    const byPath = new Map<string, { path: string; excerpt?: string }>();
+    for (const event of batchEvents) {
+      if (event.kind !== "mechanism") continue;
+      const gitPath = operationalText(event.path, MAX_PATH_CHARS);
+      const path = cleanText(event.path, MAX_PATH_CHARS);
+      if (!path || !gitPath) continue;
+      const excerpt = event.excerpt === undefined ? undefined : cleanText(event.excerpt, MAX_EXCERPT_CHARS) || undefined;
+      byPath.set(gitPath, { path, excerpt });
     }
-  }
-
-  const rawCwd = intentEvent?.kind === "intent" && intentEvent.cwd ? intentEvent.cwd : process.cwd();
-  const operationalCwd = operationalText(rawCwd, MAX_CWD_CHARS);
-  const gitCwd = operationalCwd.trim() ? operationalCwd : process.cwd();
-  const cwd = cleanText(rawCwd, MAX_CWD_CHARS) || process.cwd();
-  const headRaw = runGit(git, ["rev-parse", "HEAD"], gitCwd);
-  const head = headRaw === undefined ? undefined : cleanText(headRaw, MAX_HEAD_CHARS) || undefined;
-  const allMechanisms = [...byPath.entries()];
-  const files: TripleFile[] = allMechanisms.slice(0, MAX_TRIPLE_FILES).map(([gitPath, value]) => {
-    const excerpt = value?.excerpt;
-    const numstat = runGit(git, ["diff", "--numstat", "--", gitPath], gitCwd);
-    return {
-      path: value.path,
-      plusMinus: parseNumstat(numstat),
-      props: propsFromExcerpt(excerpt),
-      ...(excerpt === undefined ? {} : { excerpt }),
-    };
-  });
-
-  const intentText = intentEvent?.kind === "intent" ? cleanText(intentEvent.text, MAX_INTENT_CHARS) || undefined : undefined;
-  let port = deps.ai;
-  if (port === undefined) {
-    try {
-      const readConfig = deps.loadConfig ?? loadConfig;
-      port = annotatePortFromConfig(readConfig(paths.config));
-    } catch {
-      port = undefined;
+    if (byPath.size === 0) {
+      removeClaim(claim, paths);
+      return undefined;
     }
-  }
 
-  let aiOutput: AnnotateOutput | undefined;
-  if (port !== undefined) {
-    try {
-      const input = {
-        ...(intentText === undefined ? {} : { intent: intentText }),
-        ...(rationaleText === undefined ? {} : { rationaleRaw: rationaleText }),
-        files: files.map((file) => file.excerpt === undefined
-          ? { path: file.path }
-          : { path: file.path, excerpt: file.excerpt }),
+    let rationaleEvent: Extract<(typeof events)[number], { kind: "rationale" }> | undefined;
+    let rationaleText: string | undefined;
+    for (const event of batchEvents) {
+      if (event.kind !== "rationale") continue;
+      const text = cleanText(event.text, MAX_RATIONALE_CHARS);
+      if (text) {
+        rationaleEvent = event;
+        rationaleText = text;
+      }
+    }
+
+    const rawCwd = intentEvent?.kind === "intent" && intentEvent.cwd ? intentEvent.cwd : process.cwd();
+    const operationalCwd = operationalText(rawCwd, MAX_CWD_CHARS);
+    const gitCwd = operationalCwd.trim() ? operationalCwd : process.cwd();
+    const cwd = cleanText(rawCwd, MAX_CWD_CHARS) || process.cwd();
+    const headRaw = runGit(git, ["rev-parse", "HEAD"], gitCwd);
+    const head = headRaw === undefined ? undefined : cleanText(headRaw, MAX_HEAD_CHARS) || undefined;
+    const allMechanisms = [...byPath.entries()];
+    const files: TripleFile[] = allMechanisms.slice(0, MAX_TRIPLE_FILES).map(([gitPath, value]) => {
+      const excerpt = value?.excerpt;
+      const numstat = runGit(git, ["diff", "--numstat", "--", gitPath], gitCwd);
+      return {
+        path: value.path,
+        plusMinus: parseNumstat(numstat),
+        props: propsFromExcerpt(excerpt),
+        ...(excerpt === undefined ? {} : { excerpt }),
       };
-      const output = await port.run(input, AbortSignal.timeout(15_000));
-      aiOutput = parseAnnotateOutput(output);
-    } catch {
-      aiOutput = undefined;
-    }
-  }
+    });
 
-  const rationale = rationaleEvent && rationaleText
-    ? {
-      text: aiOutput?.summary ?? rationaleText,
-      tags: aiOutput === undefined ? [] : [...aiOutput.tags],
-      source: rationaleEvent.source,
+    const intentText = intentEvent?.kind === "intent" ? cleanText(intentEvent.text, MAX_INTENT_CHARS) || undefined : undefined;
+    let port = deps.ai;
+    if (port === undefined) {
+      try {
+        const readConfig = deps.loadConfig ?? loadConfig;
+        port = annotatePortFromConfig(readConfig(paths.config));
+      } catch {
+        port = undefined;
+      }
     }
-    : undefined;
-  const now = deps.now?.();
-  const ts = now !== undefined && Number.isFinite(now) ? now : undefined;
-  const triple = recordTriple({
-    ...(ts === undefined ? {} : { ts }),
-    agent,
-    cwd,
-    ...(intentText === undefined ? {} : { intent: { text: intentText } }),
-    ...(rationale === undefined ? {} : { rationale }),
-    mechanism: {
-      ...(head === undefined ? {} : { head }),
-      files,
-      truncatedFiles: Math.max(0, allMechanisms.length - MAX_TRIPLE_FILES),
-    },
-  }, paths);
 
-  const label = aiOutput?.label ?? degradedLabel(intentText, files);
-  if (label) {
-    try {
-      const enqueue = deps.queueLabel ?? defaultQueueLabel;
-      const safe = safeLabel(label);
-      if (safe) enqueue(safe, paths);
-    } catch {
-      // A broken label queue cannot turn a successful append into a retry.
+    let aiOutput: AnnotateOutput | undefined;
+    if (port !== undefined) {
+      try {
+        const input = {
+          ...(intentText === undefined ? {} : { intent: intentText }),
+          ...(rationaleText === undefined ? {} : { rationaleRaw: rationaleText }),
+          files: files.map((file) => file.excerpt === undefined
+            ? { path: file.path }
+            : { path: file.path, excerpt: file.excerpt }),
+        };
+        const output = await port.run(input, AbortSignal.timeout(15_000));
+        aiOutput = parseAnnotateOutput(output);
+      } catch {
+        aiOutput = undefined;
+      }
     }
+
+    const rationale = rationaleEvent && rationaleText
+      ? {
+        text: aiOutput?.summary ?? rationaleText,
+        tags: aiOutput === undefined ? [] : [...aiOutput.tags],
+        source: rationaleEvent.source,
+      }
+      : undefined;
+    const now = deps.now?.();
+    const ts = now !== undefined && Number.isFinite(now) ? now : undefined;
+    const persisted = recordTripleOnce({
+      ...(ts === undefined ? {} : { ts }),
+      agent,
+      cwd,
+      ...(intentText === undefined ? {} : { intent: { text: intentText } }),
+      ...(rationale === undefined ? {} : { rationale }),
+      mechanism: {
+        ...(head === undefined ? {} : { head }),
+        files,
+        truncatedFiles: Math.max(0, allMechanisms.length - MAX_TRIPLE_FILES),
+      },
+    }, `${claim.key}:${claim.id}`, paths);
+    deps.afterPersist?.(persisted.record, persisted.appended);
+
+    if (persisted.appended) {
+      const label = aiOutput?.label ?? degradedLabel(intentText, files);
+      if (label) {
+        try {
+          const enqueue = deps.queueLabel ?? defaultQueueLabel;
+          const safe = safeLabel(label);
+          if (safe) enqueue(safe, paths);
+        } catch {
+          // A broken label queue cannot turn a successful append into a retry.
+        }
+      }
+    }
+    removeClaim(claim, paths);
+    return persisted.record;
+  } finally {
+    releaseAnnotationLease(lease, paths);
   }
-  removeBatch(key, paths);
-  return triple;
 }
 
 export async function annotateCommand(key: string): Promise<number> {
   try {
     const paths = resolveRockyPaths();
-    if (key && acquireLock(key, paths)) {
+    if (key) await annotateBatch(key, { paths });
+    for (const claim of listOrphanClaims(Date.now(), paths)) {
       try {
-        await annotateBatch(key, { paths });
+        await annotateBatch(claim.key, { paths, claim });
       } catch {
-        // Detached annotation is fail-open; leave spool/lock for orphan recovery.
+        // One broken claim must not prevent the next eligible claim.
       }
     }
     for (const orphan of listOrphanBatches(Date.now(), paths)) {
-      try {
-        if (acquireLock(orphan, paths)) await annotateBatch(orphan, { paths });
-      } catch {
+      try { await annotateBatch(orphan, { paths }); } catch {
         // One broken orphan must not prevent the next eligible batch.
       }
     }

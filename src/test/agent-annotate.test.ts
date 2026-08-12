@@ -1,11 +1,13 @@
 import { strict as assert } from "node:assert";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import {
   existsSync,
+  linkSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   rmSync,
   symlinkSync,
   utimesSync,
@@ -18,9 +20,9 @@ import { test, type TestContext } from "node:test";
 import { annotateBatch, annotateCommand, defaultQueueLabel, degradedLabel } from "../agent/annotate.js";
 import type { AnnotatePort } from "../ai/annotate.js";
 import type { ConfigLoadResult } from "../core/config-read.js";
-import { appendEvent, readBatch } from "../agent/spool.js";
+import { appendEvent, listOrphanClaims, readBatch } from "../agent/spool.js";
 import type { AgentEvent } from "../agent/schema.js";
-import { loadMemory, parseMemoryRecord, recordTriple } from "../core/memory.js";
+import { loadMemory, parseMemoryRecord, recordTriple, recordTripleOnce } from "../core/memory.js";
 import { resolveRockyPaths, type RockyPaths } from "../core/state-paths.js";
 
 function freshPaths(t: TestContext): RockyPaths {
@@ -31,6 +33,14 @@ function freshPaths(t: TestContext): RockyPaths {
 
 function append(key: string, events: readonly AgentEvent[], paths: RockyPaths): void {
   for (const event of events) appendEvent(key, event, paths);
+}
+
+async function waitForMarker(path: string, timeoutMs = 5_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!existsSync(path) && Date.now() < deadline) {
+    await new Promise<void>((resolve) => setTimeout(resolve, 5));
+  }
+  if (!existsSync(path)) throw new Error(`missing marker ${path}`);
 }
 
 function seedBatch(paths: RockyPaths, key: string, rationale = "margin adds spacing"): void {
@@ -108,6 +118,110 @@ test("degraded annotate writes one redacted triple to injected memory path and r
   assert.ok(gitCalls.some(({ args }) => args[0] === "rev-parse" && args[1] === "HEAD"));
 });
 
+test("late appends stay in a fresh live spool while annotation awaits AI", async (t) => {
+  const paths = freshPaths(t);
+  append("late-append", [
+    { v: 1, agent: "claude-code", kind: "intent", ts: 1, cwd: paths.home, text: "change spacing" },
+    { v: 1, agent: "claude-code", kind: "mechanism", ts: 2, tool: "Edit", path: "before.css", excerpt: "margin-top: 8px" },
+  ], paths);
+
+  let begin: (() => void) | undefined;
+  let release: (() => void) | undefined;
+  const started = new Promise<void>((resolve) => { begin = resolve; });
+  const blocked = new Promise<void>((resolve) => { release = resolve; });
+  const ai: AnnotatePort = {
+    async run() {
+      begin?.();
+      await blocked;
+      return { summary: "compact", tags: ["spacing"], label: "spacing, question" };
+    },
+  };
+
+  const annotation = annotateBatch("late-append", { paths, ai, git: () => undefined, queueLabel: () => {} });
+  await started;
+  append("late-append", [
+    { v: 1, agent: "claude-code", kind: "mechanism", ts: 3, tool: "Edit", path: "after.ts", excerpt: "test: pass" },
+  ], paths);
+  release?.();
+  const triple = await annotation;
+
+  assert.ok(triple);
+  assert.deepEqual(triple.mechanism.files.map((file) => file.path), ["before.css"]);
+  assert.deepEqual(readBatch("late-append", paths).map((event) => event.kind === "mechanism" ? event.path : event.kind), ["after.ts"]);
+});
+
+test("orphan claim replay reuses one deterministic triple identity", async (t) => {
+  const home = mkdtempSync(join(tmpdir(), "rocky-annotate-replay-"));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const paths = resolveRockyPaths({ ROCKY_HOME: home });
+  const original = process.env.ROCKY_HOME;
+  process.env.ROCKY_HOME = home;
+  try {
+    const claimName = "replay.claim." + "a".repeat(32) + ".jsonl";
+    const claimPath = join(paths.spoolDir, claimName);
+    mkdirSync(paths.spoolDir, { recursive: true });
+    const content = [
+      { v: 1, agent: "codex", kind: "intent", ts: 1, cwd: paths.home, text: "replay this" },
+      { v: 1, agent: "codex", kind: "mechanism", ts: 2, tool: "Edit", path: "replay.ts", excerpt: "test: pass" },
+    ].map((event) => JSON.stringify(event)).join("\n") + "\n";
+    const old = new Date(Date.now() - 11 * 60 * 1000);
+    writeFileSync(claimPath, content, { mode: 0o600 });
+    utimesSync(claimPath, old, old);
+
+    await annotateCommand("replay");
+    const first = loadMemory(paths.memory).filter((record) => record.kind === "triple");
+    assert.equal(first.length, 1);
+    const firstId = first[0]?.id;
+    assert.equal(readFileSync(paths.labels, "utf8").split("\n").filter(Boolean).length, 1);
+
+    writeFileSync(claimPath, content, { mode: 0o600 });
+    utimesSync(claimPath, old, old);
+    await annotateCommand("replay");
+    const records = loadMemory(paths.memory).filter((record) => record.kind === "triple");
+    assert.equal(records.length, 1);
+    assert.equal(records[0]?.id, firstId);
+    assert.equal(readFileSync(paths.labels, "utf8").split("\n").filter(Boolean).length, 1);
+    assert.equal(existsSync(claimPath), false);
+  } finally {
+    if (original === undefined) delete process.env.ROCKY_HOME;
+    else process.env.ROCKY_HOME = original;
+  }
+});
+
+test("orphan claim recovery detaches a same-inode live path before annotation", async (t) => {
+  const paths = freshPaths(t);
+  const key = "orphan-hardlink";
+  append(key, [
+    { v: 1, agent: "codex", kind: "intent", ts: 1, cwd: paths.home, text: "recover orphan" },
+    { v: 1, agent: "codex", kind: "mechanism", ts: 2, tool: "Edit", path: "orphan.ts", excerpt: "test: pass" },
+  ], paths);
+  const live = join(paths.spoolDir, `${key}.jsonl`);
+  const claimPath = join(paths.spoolDir, `${key}.claim.${"c".repeat(32)}.jsonl`);
+  try {
+    linkSync(live, claimPath);
+  } catch {
+    t.skip("hard links are unavailable");
+    return;
+  }
+  const old = new Date(Date.now() - 11 * 60 * 1000);
+  utimesSync(live, old, old);
+  utimesSync(claimPath, old, old);
+  const original = process.env.ROCKY_HOME;
+  process.env.ROCKY_HOME = paths.home;
+  try {
+    const claim = listOrphanClaims(Date.now(), paths)[0];
+    assert.ok(claim);
+    const triple = await annotateBatch(key, { paths, claim, git: () => undefined, queueLabel: () => {} });
+    assert.ok(triple);
+  } finally {
+    if (original === undefined) delete process.env.ROCKY_HOME;
+    else process.env.ROCKY_HOME = original;
+  }
+  assert.equal(loadMemory(paths.memory).filter((record) => record.kind === "triple").length, 1);
+  assert.equal(existsSync(live), false);
+  assert.equal(existsSync(claimPath), false);
+});
+
 test("recordTriple round-trips without cmd through an explicitly injected memory path", (t) => {
   const paths = freshPaths(t);
   const record = recordTriple({
@@ -122,6 +236,161 @@ test("recordTriple round-trips without cmd through an explicitly injected memory
   assert.equal(loaded.length, 1);
   assert.deepEqual(loaded[0], record);
   assert.equal("cmd" in record, false);
+});
+
+test("recordTripleOnce recovers a stale zero-byte lock left before metadata", (t) => {
+  const paths = freshPaths(t);
+  const lock = `${paths.memory}.triple.lock`;
+  writeFileSync(lock, "", { mode: 0o600 });
+  const stale = new Date(Date.now() - 11 * 60 * 1000);
+  utimesSync(lock, stale, stale);
+
+  const result = recordTripleOnce({
+    agent: "codex",
+    cwd: paths.home,
+    mechanism: { files: [{ path: "stale.ts", plusMinus: [1, 1], props: [] }], truncatedFiles: 0 },
+  }, "stale-empty-lock", paths);
+
+  assert.equal(result.appended, true);
+  assert.equal(loadMemory(paths.memory).filter((record) => record.kind === "triple").length, 1);
+  assert.equal(existsSync(lock), false);
+});
+
+test("recordTripleOnce keeps a fresh zero-byte lock busy", (t) => {
+  const paths = freshPaths(t);
+  const lock = `${paths.memory}.triple.lock`;
+  writeFileSync(lock, "", { mode: 0o600 });
+  const originalNow = Date.now;
+  const base = originalNow();
+  let first = true;
+  Date.now = () => first ? (first = false, base) : base + 6_000;
+  try {
+    assert.throws(() => recordTripleOnce({
+      agent: "codex",
+      cwd: paths.home,
+      mechanism: { files: [{ path: "fresh.ts", plusMinus: [1, 1], props: [] }], truncatedFiles: 0 },
+    }, "fresh-empty-lock", paths), /triple lock is busy/u);
+  } finally {
+    Date.now = originalNow;
+  }
+  assert.equal(existsSync(lock), true);
+  assert.equal(existsSync(paths.memory), false);
+});
+
+test("recordTripleOnce keeps stale malformed triple lock fail-closed", (t) => {
+  const paths = freshPaths(t);
+  const lock = `${paths.memory}.triple.lock`;
+  writeFileSync(lock, "not-owner-metadata", { mode: 0o600 });
+  const stale = new Date(Date.now() - 11 * 60 * 1000);
+  utimesSync(lock, stale, stale);
+  const originalNow = Date.now;
+  const base = originalNow();
+  let first = true;
+  Date.now = () => first ? (first = false, base) : base + 6_000;
+  try {
+    assert.throws(() => recordTripleOnce({
+      agent: "codex",
+      cwd: paths.home,
+      mechanism: { files: [{ path: "malformed.ts", plusMinus: [1, 1], props: [] }], truncatedFiles: 0 },
+    }, "malformed-triple-lock", paths), /triple lock is busy/u);
+  } finally {
+    Date.now = originalNow;
+  }
+  assert.equal(readFileSync(lock, "utf8"), "not-owner-metadata");
+  assert.equal(existsSync(paths.memory), false);
+});
+
+test("recordTripleOnce serializes check and append across processes", { timeout: 15_000 }, async (t) => {
+  const home = mkdtempSync(join(tmpdir(), "rocky-triple-once-"));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const modulePath = join(dirname(fileURLToPath(import.meta.url)), "..", "core", "memory.js");
+  const gateDir = join(home, "gates");
+  const release = join(home, "release");
+  mkdirSync(gateDir);
+  writeFileSync(join(home, "memory.jsonl"), "", { mode: 0o600 });
+  const workerScript = [
+    "import fs from 'node:fs';",
+    "import { syncBuiltinESMExports } from 'node:module';",
+    "import { pathToFileURL } from 'node:url';",
+    "const [modulePath, home, gateDir, releasePath] = process.argv.slice(1);",
+    "const originalRead = fs.readFileSync.bind(fs);",
+    "let gated = false;",
+    "fs.readFileSync = (path, ...args) => { if (!gated && String(path).endsWith('memory.jsonl')) { gated = true; fs.writeFileSync(`${gateDir}/${process.pid}.gate`, 'gate'); const signal = new Int32Array(new SharedArrayBuffer(4)); while (!fs.existsSync(releasePath)) Atomics.wait(signal, 0, 0, 10); } return originalRead(path, ...args); };",
+    "syncBuiltinESMExports();",
+    "const { recordTripleOnce } = await import(pathToFileURL(modulePath).href);",
+    "recordTripleOnce({ agent: 'codex', cwd: home, mechanism: { files: [{ path: 'a.ts', plusMinus: [1, 1], props: [] }], truncatedFiles: 0 } }, 'shared-claim', { home, memory: `${home}/memory.jsonl` });",
+  ].join("\n");
+  const children = [0, 1].map(() => spawn(process.execPath, [
+    "--input-type=module", "--eval", workerScript, modulePath, home, gateDir, release,
+  ], { stdio: ["pipe", "pipe", "pipe"] }));
+  t.after(() => {
+    for (const child of children) if (child.exitCode === null && child.signalCode === null) child.kill();
+  });
+  await Promise.race(children.map((child) => waitForMarker(join(gateDir, `${child.pid}.gate`))));
+  writeFileSync(release, "go");
+  const results = await Promise.all(children.map((child) => new Promise<number>((resolve, reject) => {
+    child.once("error", reject);
+    child.once("close", (code) => resolve(code ?? 1));
+  })));
+  assert.deepEqual(results, [0, 0]);
+  assert.equal(loadMemory(join(home, "memory.jsonl")).filter((record) => record.kind === "triple").length, 1);
+});
+
+test("crash after durable triple and label replays claim without duplicate record or label", { timeout: 15_000 }, async (t) => {
+  const home = mkdtempSync(join(tmpdir(), "rocky-crash-replay-"));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const paths = resolveRockyPaths({ ROCKY_HOME: home });
+  append("crashed", [
+    { v: 1, agent: "codex", kind: "intent", ts: 1, cwd: home, text: "recover crash" },
+    { v: 1, agent: "codex", kind: "mechanism", ts: 2, tool: "Edit", path: "replay.ts", excerpt: "test: pass" },
+  ], paths);
+  const modulePath = join(dirname(fileURLToPath(import.meta.url)), "..", "agent", "annotate.js");
+  const statePath = join(dirname(modulePath), "..", "core", "state-paths.js");
+  const workerScript = [
+    "import { writeFileSync } from 'node:fs';",
+    "import { pathToFileURL } from 'node:url';",
+    "const [annotatePath, statePath, key, home] = process.argv.slice(1);",
+    "process.env.ROCKY_HOME = home;",
+    "const { annotateBatch } = await import(pathToFileURL(annotatePath).href);",
+    "const { resolveRockyPaths } = await import(pathToFileURL(statePath).href);",
+    "await annotateBatch(key, { paths: resolveRockyPaths(), git: () => undefined, queueLabel: (line) => { writeFileSync(`${home}/labels`, `${line}\\n`, { mode: 0o600 }); process.exit(0); } });",
+  ].join("\n");
+  const child = spawn(process.execPath, [
+    "--input-type=module", "--eval", workerScript, modulePath, statePath, "crashed", home,
+  ], { stdio: ["pipe", "pipe", "pipe"] });
+  t.after(() => {
+    if (child.exitCode === null && child.signalCode === null) child.kill();
+  });
+  const result = await new Promise<{ code: number | null; stderr: string }>((resolve, reject) => {
+    const stderr: Buffer[] = [];
+    child.stderr.on("data", (chunk: Buffer) => stderr.push(Buffer.from(chunk)));
+    child.once("error", reject);
+    child.once("close", (code) => resolve({ code, stderr: Buffer.concat(stderr).toString("utf8") }));
+  });
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(loadMemory(paths.memory).filter((record) => record.kind === "triple").length, 1);
+  assert.equal(readdirSync(paths.spoolDir).filter((name) => name.startsWith("crashed.claim.")).length, 1);
+
+  const firstId = loadMemory(paths.memory).find((record) => record.kind === "triple")?.id;
+  const recoveryTime = new Date(Date.now() - 11 * 60 * 1000);
+  for (const name of readdirSync(paths.spoolDir)) {
+    if (name.startsWith("crashed.claim.") || name === "crashed.lock") {
+      utimesSync(join(paths.spoolDir, name), recoveryTime, recoveryTime);
+    }
+  }
+  const original = process.env.ROCKY_HOME;
+  process.env.ROCKY_HOME = home;
+  try {
+    await annotateCommand("crashed");
+  } finally {
+    if (original === undefined) delete process.env.ROCKY_HOME;
+    else process.env.ROCKY_HOME = original;
+  }
+  const records = loadMemory(paths.memory).filter((record) => record.kind === "triple");
+  assert.equal(records.length, 1);
+  assert.equal(records[0]?.id, firstId);
+  assert.equal(readdirSync(paths.spoolDir).some((name) => name.startsWith("crashed.claim.")), false);
+  assert.equal(readFileSync(paths.labels, "utf8").split("\n").filter(Boolean).length, 1);
 });
 
 test("intent-only and rationale-only batches clear without memory or labels", async (t) => {

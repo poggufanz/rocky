@@ -3,14 +3,18 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import test from "node:test";
 import {
   existsSync,
+  linkSync,
   mkdtempSync,
   lstatSync,
   mkdirSync,
   readFileSync,
+  readlinkSync,
   readdirSync,
+  renameSync,
   rmSync,
   statSync,
   symlinkSync,
+  unlinkSync,
   utimesSync,
   writeFileSync,
 } from "node:fs";
@@ -19,13 +23,20 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { resolveRockyPaths } from "../core/state-paths.js";
 import {
+  acquireAnnotationLease,
   acquireLock,
   appendEvent,
+  claimBatch,
   listOrphanBatches,
   MAX_BATCH_BYTES,
   readBatch,
+  readClaim,
+  releaseAnnotationLease,
+  removeClaim,
   removeBatch,
 } from "../agent/spool.js";
+import { annotateCommand } from "../agent/annotate.js";
+import { loadMemory } from "../core/memory.js";
 import type { IntentEvent } from "../agent/schema.js";
 
 type CleanupContext = { after(callback: () => void): void };
@@ -359,7 +370,7 @@ test("acquireLock reclaims one stale regular lock but excludes fresh locks", (t)
   const paths = freshPaths(t);
   appendEvent("stale", intent("a"), paths);
   const stalePath = join(paths.spoolDir, "stale.lock");
-  writeFileSync(stalePath, "old");
+  writeFileSync(stalePath, "");
   const stale = oldTime();
   utimesSync(stalePath, stale, stale);
   assert.equal(acquireLock("stale", paths), true);
@@ -378,14 +389,329 @@ test("private stale state remains fail-safe and removeBatch preserves ownership"
   const stale = oldTime();
   utimesSync(lock, stale, stale);
   appendEvent("writer", intent("stale lock drops safely"), paths);
-  assert.equal(readBatch("writer", paths).length, 0);
-  assert.equal(existsSync(lock), true);
+  assert.equal(readBatch("writer", paths).length, 1);
+  assert.equal(existsSync(lock), false);
 
   writeFileSync(lock, privateLockMetadata(process.pid, "b".repeat(32)));
   appendEvent("writer", intent("fresh lock blocks"), paths);
   assert.equal(existsSync(lock), true);
   removeBatch("writer", paths);
   assert.equal(existsSync(lock), true);
+});
+
+test("stale owner-bearing append lock with a dead owner is recovered", { timeout: 10_000 }, async (t) => {
+  const paths = freshPaths(t);
+  const key = "dead-writer";
+  mkdirSync(paths.spoolDir, { recursive: true });
+  const lock = join(paths.spoolDir, `${key}.append.lock`);
+  writeFileSync(lock, privateLockMetadata(await exitedPid(), "d".repeat(32)), { mode: 0o600 });
+  const stale = oldTime();
+  utimesSync(lock, stale, stale);
+
+  appendEvent(key, intent("recover dead writer"), paths);
+
+  assert.equal(readBatch(key, paths).length, 1);
+  assert.equal(existsSync(lock), false);
+});
+
+test("stale zero-byte append lock left before metadata is recovered", (t) => {
+  const paths = freshPaths(t);
+  const key = "empty-writer";
+  mkdirSync(paths.spoolDir, { recursive: true });
+  const lock = join(paths.spoolDir, `${key}.append.lock`);
+  writeFileSync(lock, "", { mode: 0o600 });
+  const stale = oldTime();
+  utimesSync(lock, stale, stale);
+
+  appendEvent(key, intent("recover empty writer"), paths);
+
+  assert.equal(readBatch(key, paths).length, 1);
+  assert.equal(existsSync(lock), false);
+});
+
+test("fresh or malformed append locks remain fail-closed", (t) => {
+  const paths = freshPaths(t);
+  const freshKey = "fresh-empty-writer";
+  const freshLock = join(paths.spoolDir, `${freshKey}.append.lock`);
+  mkdirSync(paths.spoolDir, { recursive: true });
+  writeFileSync(freshLock, "", { mode: 0o600 });
+  appendEvent(freshKey, intent("do not race fresh empty writer"), paths);
+  assert.equal(readBatch(freshKey, paths).length, 0);
+  assert.equal(existsSync(freshLock), true);
+
+  const malformedKey = "malformed-writer";
+  const malformedLock = join(paths.spoolDir, `${malformedKey}.append.lock`);
+  writeFileSync(malformedLock, "unknown-owner", { mode: 0o600 });
+  const stale = oldTime();
+  utimesSync(malformedLock, stale, stale);
+  appendEvent(malformedKey, intent("do not race malformed writer"), paths);
+  assert.equal(readBatch(malformedKey, paths).length, 0);
+  assert.equal(readFileSync(malformedLock, "utf8"), "unknown-owner");
+});
+
+test("non-empty stale annotation lease is malformed and fails closed", (t) => {
+  const paths = freshPaths(t);
+  const key = "malformed-lease";
+  appendEvent(key, intent("retain malformed lease"), paths);
+  const lock = join(paths.spoolDir, `${key}.lock`);
+  writeFileSync(lock, "not-owner-metadata", { mode: 0o600 });
+  const stale = oldTime();
+  utimesSync(lock, stale, stale);
+
+  assert.equal(acquireLock(key, paths), false);
+  assert.equal(readFileSync(lock, "utf8"), "not-owner-metadata");
+});
+
+test("successful annotation lease acquisition closes its lock descriptor", (t) => {
+  if (process.platform !== "linux" || !existsSync("/proc/self/fd")) {
+    t.skip("Linux proc descriptors are unavailable");
+    return;
+  }
+  const paths = freshPaths(t);
+  const key = "lease-fd";
+  const lock = join(paths.spoolDir, `${key}.lock`);
+  const openTargets = (): string[] => readdirSync("/proc/self/fd").flatMap((fd) => {
+    try {
+      return [readlinkSync(join("/proc/self/fd", fd))];
+    } catch {
+      return [];
+    }
+  }).filter((target) => target === lock || target === `${lock} (deleted)`);
+
+  const lease = acquireAnnotationLease(key, paths);
+  assert.ok(lease);
+  try {
+    assert.deepEqual(openTargets(), []);
+  } finally {
+    releaseAnnotationLease(lease, paths);
+  }
+});
+
+test("cleanup cannot unlink a replacement annotation lease", (t) => {
+  const paths = freshPaths(t);
+  const key = "replacement-lease";
+  appendEvent(key, intent("lease replacement"), paths);
+  assert.equal(acquireLock(key, paths), true);
+  const lock = join(paths.spoolDir, `${key}.lock`);
+  unlinkSync(lock);
+  writeFileSync(lock, "replacement-owner", { mode: 0o600 });
+
+  removeBatch(key, paths);
+
+  assert.equal(existsSync(lock), true);
+  assert.equal(readFileSync(lock, "utf8"), "replacement-owner");
+});
+
+test("a stale annotation lease with a live owner is preserved", { timeout: 15_000 }, async (t) => {
+  const home = mkdtempSync(join(tmpdir(), "rocky-live-lease-"));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const paths = resolveRockyPaths({ ROCKY_HOME: home });
+  const key = "live-lease";
+  appendEvent(key, intent("live lease"), paths);
+  appendEvent(key, { v: 1, agent: "claude-code", kind: "mechanism", ts: 2, tool: "Edit", path: "a.ts", excerpt: "test: pass" }, paths);
+
+  const lock = join(paths.spoolDir, `${key}.lock`);
+  const marker = join(home, "lease-ready");
+  const release = join(home, "lease-release");
+  const worker = spawn(process.execPath, [
+    "--input-type=module",
+    "--eval",
+    [
+      "import { existsSync, writeFileSync } from 'node:fs';",
+      "const [lockPath, markerPath, releasePath] = process.argv.slice(1);",
+      "writeFileSync(lockPath, JSON.stringify({ pid: process.pid, token: 'c'.repeat(32) }), { mode: 0o600 });",
+      "writeFileSync(markerPath, 'ready');",
+      "const signal = new Int32Array(new SharedArrayBuffer(4));",
+      "while (!existsSync(releasePath)) Atomics.wait(signal, 0, 0, 10);",
+    ].join("\n"),
+    lock,
+    marker,
+    release,
+  ], { stdio: ["pipe", "pipe", "pipe"] });
+  t.after(() => {
+    if (worker.exitCode === null && worker.signalCode === null) worker.kill();
+  });
+  await waitForPath(marker);
+  const stale = oldTime();
+  utimesSync(lock, stale, stale);
+
+  const original = process.env.ROCKY_HOME;
+  process.env.ROCKY_HOME = home;
+  try {
+    await annotateCommand(key);
+    assert.equal(loadMemory(paths.memory).filter((record) => record.kind === "triple").length, 0);
+    assert.equal(readBatch(key, paths).length, 2);
+    assert.match(readFileSync(lock, "utf8"), /"pid"/u);
+
+    writeFileSync(release, "release");
+    await new Promise<void>((resolve, reject) => {
+      worker.once("error", reject);
+      worker.once("close", () => resolve());
+    });
+    await annotateCommand(key);
+    assert.equal(loadMemory(paths.memory).filter((record) => record.kind === "triple").length, 1);
+    assert.equal(readBatch(key, paths).length, 0);
+  } finally {
+    if (original === undefined) delete process.env.ROCKY_HOME;
+    else process.env.ROCKY_HOME = original;
+  }
+});
+
+test("claim cleanup cannot unlink a replacement claim", (t) => {
+  const paths = freshPaths(t);
+  const key = "replacement-claim";
+  appendEvent(key, intent("claim replacement"), paths);
+  const claim = claimBatch(key, paths);
+  assert.ok(claim);
+  renameSync(claim.path, `${claim.path}.old`);
+  writeFileSync(claim.path, "replacement claim", { mode: 0o600 });
+
+  assert.equal(removeClaim(claim, paths), false);
+  assert.equal(existsSync(claim.path), true);
+  assert.equal(readFileSync(claim.path, "utf8"), "replacement claim");
+});
+
+test("claim recovery removes only the same live inode left by a link-before-unlink crash", (t) => {
+  const paths = freshPaths(t);
+  const key = "claim-recovery";
+  appendEvent(key, intent("recover claim"), paths);
+  const live = join(paths.spoolDir, `${key}.jsonl`);
+  const claimPath = join(paths.spoolDir, `${key}.claim.${"e".repeat(32)}.jsonl`);
+  try {
+    linkSync(live, claimPath);
+  } catch {
+    t.skip("hard links are unavailable");
+    return;
+  }
+
+  const claim = claimBatch(key, paths);
+  assert.ok(claim);
+  assert.equal(claim.path, claimPath);
+  assert.equal(existsSync(live), false);
+  assert.equal(readBatch(key, paths).length, 1);
+});
+
+test("claimBatch after-lock recovery fails closed when live unlink leaves the same inode", { timeout: 15_000 }, async (t) => {
+  const paths = freshPaths(t);
+  const key = "after-lock-claim";
+  appendEvent(key, intent("after lock claim"), paths);
+  const live = join(paths.spoolDir, `${key}.jsonl`);
+  const claimPath = join(paths.spoolDir, `${key}.claim.${"a".repeat(32)}.jsonl`);
+  const resultPath = join(paths.home, "after-lock-result.json");
+  const modulePath = join(dirname(fileURLToPath(import.meta.url)), "..", "agent", "spool.js");
+  const workerScript = [
+    "import fs from 'node:fs';",
+    "import { syncBuiltinESMExports } from 'node:module';",
+    "import { join } from 'node:path';",
+    "import { pathToFileURL } from 'node:url';",
+    "const [modulePath, home, key, live, claimPath, resultPath] = process.argv.slice(1);",
+    "const originalReadDir = fs.readdirSync.bind(fs);",
+    "const originalLink = fs.linkSync.bind(fs);",
+    "const originalUnlink = fs.unlinkSync.bind(fs);",
+    "let reads = 0;",
+    "fs.readdirSync = (path, ...args) => { reads += 1; if (reads === 2) originalLink(live, claimPath); return originalReadDir(path, ...args); };",
+    "fs.unlinkSync = (path, ...args) => { if (String(path) === live) throw new Error('blocked same-inode unlink'); return originalUnlink(path, ...args); };",
+    "syncBuiltinESMExports();",
+    "const { claimBatch } = await import(pathToFileURL(modulePath).href);",
+    "const claim = claimBatch(key, { spoolDir: join(home, 'spool') });",
+    "fs.writeFileSync(resultPath, JSON.stringify({ path: claim?.path ?? null }), { mode: 0o600 });",
+  ].join("\n");
+  const child = spawn(process.execPath, [
+    "--input-type=module", "--eval", workerScript, modulePath, paths.home, key, live, claimPath, resultPath,
+  ], { stdio: ["pipe", "pipe", "pipe"] });
+  const result = await waitForWorker(child);
+  assert.equal(result.code, 0, result.stderr);
+  assert.deepEqual(JSON.parse(readFileSync(resultPath, "utf8")), { path: null });
+  assert.equal(existsSync(live), true);
+  assert.equal(existsSync(claimPath), true);
+});
+
+test("claim finalization fails closed when live unlink remains blocked", { timeout: 15_000 }, async (t) => {
+  const paths = freshPaths(t);
+  const freshKey = "blocked-fresh";
+  const existingKey = "blocked-existing";
+  appendEvent(freshKey, intent("blocked fresh claim"), paths);
+  appendEvent(existingKey, intent("blocked existing claim"), paths);
+  const existingLive = join(paths.spoolDir, `${existingKey}.jsonl`);
+  const existingClaim = join(paths.spoolDir, `${existingKey}.claim.${"f".repeat(32)}.jsonl`);
+  try {
+    linkSync(existingLive, existingClaim);
+  } catch {
+    t.skip("hard links are unavailable");
+    return;
+  }
+  const modulePath = join(dirname(fileURLToPath(import.meta.url)), "..", "agent", "spool.js");
+  const resultPath = join(paths.home, "blocked-result.json");
+  const workerScript = [
+    "import fs from 'node:fs';",
+    "import { syncBuiltinESMExports } from 'node:module';",
+    "import { join } from 'node:path';",
+    "import { pathToFileURL } from 'node:url';",
+    "const [modulePath, home, freshKey, existingKey, resultPath] = process.argv.slice(1);",
+    "const originalUnlink = fs.unlinkSync.bind(fs);",
+    "fs.unlinkSync = (path, ...args) => { if (String(path).endsWith(`${freshKey}.jsonl`) || String(path).endsWith(`${existingKey}.jsonl`)) throw new Error('blocked live unlink'); return originalUnlink(path, ...args); };",
+    "syncBuiltinESMExports();",
+    "const { claimBatch } = await import(pathToFileURL(modulePath).href);",
+    "const paths = { spoolDir: join(home, 'spool') };",
+    "const fresh = claimBatch(freshKey, paths);",
+    "const existing = claimBatch(existingKey, paths);",
+    "fs.writeFileSync(resultPath, JSON.stringify({ fresh: fresh?.path ?? null, existing: existing?.path ?? null }), { mode: 0o600 });",
+  ].join("\n");
+  const child = spawn(process.execPath, [
+    "--input-type=module", "--eval", workerScript, modulePath, paths.home, freshKey, existingKey, resultPath,
+  ], { stdio: ["pipe", "pipe", "pipe"] });
+  const result = await waitForWorker(child);
+  assert.equal(result.code, 0, result.stderr);
+  assert.deepEqual(JSON.parse(readFileSync(resultPath, "utf8")), { fresh: null, existing: null });
+  assert.equal(existsSync(join(paths.spoolDir, `${freshKey}.jsonl`)), true);
+  assert.equal(existsSync(existingLive), true);
+  assert.equal(readdirSync(paths.spoolDir).filter((name) => name.startsWith(`${freshKey}.claim.`)).length, 1);
+  assert.equal(existsSync(existingClaim), true);
+});
+
+test("appendEvent detaches a post-claim same-inode live path before appending", (t) => {
+  const paths = freshPaths(t);
+  const key = "append-after-claim";
+  appendEvent(key, intent("before crash"), paths);
+  const live = join(paths.spoolDir, `${key}.jsonl`);
+  const claimPath = join(paths.spoolDir, `${key}.claim.${"b".repeat(32)}.jsonl`);
+  try {
+    linkSync(live, claimPath);
+  } catch {
+    t.skip("hard links are unavailable");
+    return;
+  }
+  const claim = { key, id: "b".repeat(32), path: claimPath, stats: lstatSync(claimPath) };
+  appendEvent(key, { v: 1, agent: "claude-code", kind: "mechanism", ts: 2, tool: "Edit", path: "after.ts", excerpt: "test: pass" }, paths);
+
+  assert.equal(readClaim(claim, paths).some((event) => event.kind === "mechanism"), false);
+  assert.deepEqual(readBatch(key, paths).map((event) => event.kind === "mechanism" ? event.path : event.kind), ["after.ts"]);
+});
+
+test("forged claim paths outside spool are rejected without deleting their inode", (t) => {
+  const paths = freshPaths(t);
+  const key = "forged-claim";
+  appendEvent(key, intent("reject forged claim"), paths);
+  const claim = claimBatch(key, paths);
+  assert.ok(claim);
+  const outside = join(paths.home, "forged.claim.jsonl");
+  try {
+    linkSync(claim.path, outside);
+  } catch {
+    t.skip("hard links are unavailable");
+    return;
+  }
+  const original = process.env.ROCKY_HOME;
+  process.env.ROCKY_HOME = paths.home;
+  try {
+    const forged = { ...claim, path: outside };
+    assert.deepEqual(readClaim(forged), []);
+    assert.equal(removeClaim(forged, paths), false);
+    assert.equal(existsSync(outside), true);
+  } finally {
+    if (original === undefined) delete process.env.ROCKY_HOME;
+    else process.env.ROCKY_HOME = original;
+  }
 });
 
 test("removeBatch deletes regular batch and lock files", (t) => {
@@ -409,7 +735,7 @@ test("listOrphanBatches returns sorted stale batches with absent or stale regula
     utimesSync(join(paths.spoolDir, `${key}.jsonl`), stale, stale);
   }
   const staleLock = join(paths.spoolDir, "stale-lock.lock");
-  writeFileSync(staleLock, "old");
+  writeFileSync(staleLock, "");
   utimesSync(staleLock, stale, stale);
   assert.equal(acquireLock("fresh-lock", paths), true);
 
