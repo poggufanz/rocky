@@ -141,13 +141,18 @@ test("README identity, roadmap, and Plan 01/Plan 02 v0.5 boundary stay aligned",
     "reverse lookup",
     "ambiguity surfacing",
     "curious blind friend",
-    "recall, digest",
+    "digest",
+    "memory circuit breaker",
   ]) {
-    const row = readme.split("\n").find((line) => line.toLowerCase().includes(mechanism));
+    const row = readme.split("\n").find((line) => line.trimStart().startsWith("|") && line.toLowerCase().includes(mechanism));
     assert.ok(row, `README must keep a conceptual row for ${mechanism}`);
     assert.match(row ?? "", /Plan 02 deferred/i, `${mechanism} must be marked Plan 02 deferred`);
   }
-  for (const deferred of ["dictionary", "digest", "quiz", "export", "ambiguity", "search tools", "BYOK", "brief", "attest"]) {
+  const recallRow = readme.split("\n").find((line) => line.toLowerCase().includes("| recall |"));
+  assert.ok(recallRow, "README must keep a conceptual row for current Recall");
+  assert.match(recallRow ?? "", /Plan 01 implemented\/current/i);
+  assert.doesNotMatch(recallRow ?? "", /Plan 02 deferred/i);
+  for (const deferred of ["dictionary", "digest", "quiz", "export", "ambiguity", "search tools", "BYOK", "brief", "attest", "circuit breaker"]) {
     assert.match(readme, new RegExp(`${deferred}[^\\n]*defer|defer[^\\n]*${deferred}`, "i"));
   }
   const changelog = readFileSync(join(packageRoot, "CHANGELOG.md"), "utf8");

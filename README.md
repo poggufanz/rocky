@@ -48,7 +48,9 @@ The arrow that usually breaks is *AI output → you learn from it*. Each arrow m
 | Your understanding → next intent | Reverse lookup (mechanism→intent) | Returns the intent you actually stored, with its change ID and time | Plan 02 deferred |
 | Your intent → AI output | Ambiguity surfacing | Shows the several mechanisms one of your own words has already produced, and lets you pick | Plan 02 deferred |
 | Your articulation → memory | The curious blind friend | One curious question turns a one-line answer into a journal entry and a dictionary entry | Plan 02 deferred |
-| Memory → next decision | Recall, digest, historical evidence | Carries a cross-session lesson into a new decision | Plan 02 deferred |
+| Memory → next decision | Recall | Carries a cross-session lesson into a new decision | Plan 01 implemented/current |
+| Memory → next decision | Digest | Carries a cross-session lesson into a planned summary | Plan 02 deferred |
+| Memory → next decision | Memory circuit breaker | Flags repeated approaches as planned negative knowledge | Plan 02 deferred |
 
 The claim stops there: better direction from you, never a smarter model.
 

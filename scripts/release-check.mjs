@@ -172,29 +172,41 @@ function runStep(state, env, label, file, args, display) {
   return result.stdout;
 }
 
-export function validateReleaseMetadata(value) {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
-  const dependencies = value.dependencies ?? {};
-  const optionalDependencies = value.optionalDependencies ?? {};
-  return value.name === PACKAGE_NAME
-    && value.version === PACKAGE_VERSION
-    && JSON.stringify(value.bin) === JSON.stringify({ rocky: "./dist/index.js" })
-    && value.engines?.node === ">=18"
-    && value.license === "MIT"
-    && value.author === "Muhammad Faiq"
-    && value.repository?.type === "git"
-    && value.repository?.url === "git+https://github.com/poggufanz/rocky.git"
-    && value.homepage === "https://github.com/poggufanz/rocky#readme"
-    && value.bugs?.url === "https://github.com/poggufanz/rocky/issues"
-    && value.publishConfig?.access === "public"
-    && Object.keys(dependencies).length === 0
-    && Object.keys(optionalDependencies).length === 0;
+function isEmptyDependencyRecord(value) {
+  if (value === undefined || value === null) return true;
+  if (typeof value !== "object" || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) return false;
+  return Object.keys(value).length === 0;
 }
 
-function assertMetadata(state) {
+export function validateReleaseMetadata(value) {
+  try {
+    if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+    return isEmptyDependencyRecord(value.dependencies)
+      && isEmptyDependencyRecord(value.optionalDependencies)
+      && value.name === PACKAGE_NAME
+      && value.version === PACKAGE_VERSION
+      && JSON.stringify(value.bin) === JSON.stringify({ rocky: "./dist/index.js" })
+      && value.engines?.node === ">=18"
+      && value.license === "MIT"
+      && value.author === "Muhammad Faiq"
+      && value.repository?.type === "git"
+      && value.repository?.url === "git+https://github.com/poggufanz/rocky.git"
+      && value.homepage === "https://github.com/poggufanz/rocky#readme"
+      && value.bugs?.url === "https://github.com/poggufanz/rocky/issues"
+      && value.publishConfig?.access === "public";
+  } catch {
+    return false;
+  }
+}
+
+export function assertMetadata(state) {
   const value = JSON.parse(readFileSync(join(packageRoot, "package.json"), "utf8"));
   const valid = validateReleaseMetadata(value);
   if (!valid) throw new StepError("package metadata assertion failed");
+  const dependencies = value.dependencies ?? {};
+  const optionalDependencies = value.optionalDependencies ?? {};
   state.metadata = {
     name: value.name,
     version: value.version,

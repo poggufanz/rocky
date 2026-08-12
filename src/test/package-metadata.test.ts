@@ -220,6 +220,7 @@ test("public package metadata pins the scoped beta identity and release coordina
 test("release metadata validation rejects a wrong package name independently", async () => {
   const releaseCheck = await import(pathToFileURL(join(packageRoot, "scripts", "release-check.mjs")).href) as {
     validateReleaseMetadata(value: unknown): boolean;
+    assertMetadata(state: { metadata?: Record<string, unknown> }): void;
   };
   const metadata = readJson(join(packageRoot, "package.json"));
   assert.equal(releaseCheck.validateReleaseMetadata(metadata), true);
@@ -227,6 +228,41 @@ test("release metadata validation rejects a wrong package name independently", a
     releaseCheck.validateReleaseMetadata({ ...metadata, name: "@attacker/not-rocky" }),
     false,
   );
+});
+
+test("release metadata assertion consumes valid metadata without a scope error", async () => {
+  const releaseCheck = await import(pathToFileURL(join(packageRoot, "scripts", "release-check.mjs")).href) as {
+    assertMetadata(state: { metadata?: Record<string, unknown> }): void;
+  };
+  const state: { metadata?: Record<string, unknown> } = {};
+  assert.doesNotThrow(() => releaseCheck.assertMetadata(state));
+  assert.deepEqual(state.metadata, {
+    name: "@poggufanz/rocky-cli",
+    version: "0.4.0",
+    binary: "rocky",
+    license: "MIT",
+    author: "Muhammad Faiq",
+    runtimeDependencies: 0,
+    optionalDependencies: 0,
+  });
+});
+
+test("release metadata validation rejects malformed dependency fields without throwing", async () => {
+  const releaseCheck = await import(pathToFileURL(join(packageRoot, "scripts", "release-check.mjs")).href) as {
+    validateReleaseMetadata(value: unknown): boolean;
+  };
+  const metadata = readJson(join(packageRoot, "package.json"));
+  for (const field of ["dependencies", "optionalDependencies"]) {
+    for (const value of [false, 0, 1, "", [], ["package"], { package: "^1.0.0" }, new Date()]) {
+      assert.equal(
+        releaseCheck.validateReleaseMetadata({ ...metadata, [field]: value }),
+        false,
+        `${field}=${String(value)} must fail validation`,
+      );
+    }
+    assert.equal(releaseCheck.validateReleaseMetadata({ ...metadata, [field]: null }), true);
+    assert.equal(releaseCheck.validateReleaseMetadata({ ...metadata, [field]: {} }), true);
+  }
 });
 
 test("package and lock contain no runtime or optional dependencies", () => {
