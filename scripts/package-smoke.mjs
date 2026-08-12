@@ -566,6 +566,46 @@ async function main() {
   // Installed tarball dogfood: replay one Claude turn through the real CLI.
   // Each hook has a strict stdout contract; Stop launches detached annotation,
   // so poll only the isolated scratch home until the durable triple appears.
+  const memoryPath = join(rockyHome, "memory.jsonl");
+  const spoolPath = join(rockyHome, "spool");
+  const labelsPath = join(rockyHome, "labels");
+  const spoolEntries = () => {
+    try {
+      return readdirSync(spoolPath);
+    } catch {
+      return [];
+    }
+  };
+
+  // Current documented Claude hook payloads do not provide prompt_id. Rocky
+  // must fail closed for capture rather than joining unrelated turns.
+  const noIdentityMemory = readFileSync(memoryPath);
+  const noIdentitySpool = spoolEntries();
+  const noIdentityLabels = existsSync(labelsPath) ? readFileSync(labelsPath) : undefined;
+  const documentedClaudePayload = {
+    session_id: "documented-claude-session",
+    hook_event_name: "UserPromptSubmit",
+    cwd: isolatedHome,
+    transcript_path: join(isolatedHome, "transcript.jsonl"),
+    permission_mode: "default",
+    prompt: "documented payload without turn identity",
+  };
+  const noIdentityHook = childResult(
+    process.execPath,
+    [installedEntry, "hook", "agent-event", "claude-code"],
+    { env, cwd: isolatedHome, input: `${JSON.stringify(documentedClaudePayload)}\n` },
+  );
+  assertStatus(noIdentityHook, 0, "installed Claude hook without prompt_id");
+  assert.equal(noIdentityHook.stdout, "{}", "Claude missing prompt_id stdout contract");
+  assert.equal(noIdentityHook.stderr, "", "Claude missing prompt_id stderr");
+  assert.deepEqual(readFileSync(memoryPath), noIdentityMemory, "missing prompt_id must not write a triple");
+  assert.deepEqual(spoolEntries(), noIdentitySpool, "missing prompt_id must not create a spool batch");
+  assert.deepEqual(
+    existsSync(labelsPath) ? readFileSync(labelsPath) : undefined,
+    noIdentityLabels,
+    "missing prompt_id must not queue a label",
+  );
+
   const hookSecret = "ghp_" + "a".repeat(36);
   const hookPayloads = [
     {
@@ -604,22 +644,12 @@ async function main() {
     assert.equal(hook.stdout, "{}", `installed Claude hook ${index + 1} stdout contract`);
     assert.equal(hook.stderr, "", `installed Claude hook ${index + 1} stderr`);
   }
-  const memoryPath = join(rockyHome, "memory.jsonl");
-  const spoolPath = join(rockyHome, "spool");
-  const labelsPath = join(rockyHome, "labels");
   const readMemoryRecords = () => {
     try {
       return readFileSync(memoryPath, "utf8")
         .split("\n")
         .filter(Boolean)
         .map((line) => JSON.parse(line));
-    } catch {
-      return [];
-    }
-  };
-  const spoolEntries = () => {
-    try {
-      return readdirSync(spoolPath);
     } catch {
       return [];
     }
@@ -654,6 +684,78 @@ async function main() {
     /[\u0000-\u001f\u007f-\u009f\u200e\u200f\u202a-\u202e\u2066-\u2069]/u,
     "queued label must contain no control or bidi characters",
   );
+
+  // Exercise the installed Codex adapter through both current stdin hooks and
+  // legacy notify argv. The same turn identity must produce one deterministic,
+  // redacted triple and one additional passive label.
+  const codexSecret = "ghp_" + "b".repeat(36);
+  const codexModernPayloads = [
+    {
+      session_id: "package-smoke-codex-session",
+      turn_id: "package-smoke-codex-turn",
+      hook_event_name: "UserPromptSubmit",
+      cwd: isolatedHome,
+      prompt: "move card right",
+    },
+    {
+      session_id: "package-smoke-codex-session",
+      turn_id: "package-smoke-codex-turn",
+      hook_event_name: "PostToolUse",
+      cwd: isolatedHome,
+      tool_name: "apply_patch",
+      tool_input: {
+        file_path: "src/card.css",
+        content: `margin-left: 4px; token=${codexSecret}`,
+      },
+    },
+  ];
+  for (const [index, payload] of codexModernPayloads.entries()) {
+    const hook = childResult(
+      process.execPath,
+      [installedEntry, "hook", "agent-event", "codex"],
+      { env, cwd: isolatedHome, input: `${JSON.stringify(payload)}\n` },
+    );
+    assertStatus(hook, 0, `installed Codex modern hook ${index + 1}`);
+    assert.equal(hook.stdout, "{}", `installed Codex modern hook ${index + 1} stdout contract`);
+    assert.equal(hook.stderr, "", `installed Codex modern hook ${index + 1} stderr`);
+  }
+  const codexNotify = {
+    type: "agent-turn-complete",
+    "thread-id": "package-smoke-codex-session",
+    "turn-id": "package-smoke-codex-turn",
+    "last-assistant-message": `changed card position; rationale=${codexSecret}`,
+  };
+  const legacyNotify = childResult(
+    process.execPath,
+    [installedEntry, "hook", "agent-event", "codex", JSON.stringify(codexNotify)],
+    { env, cwd: isolatedHome },
+  );
+  assertStatus(legacyNotify, 0, "installed Codex legacy notify hook");
+  assert.equal(legacyNotify.stdout, "{}", "installed Codex legacy notify stdout contract");
+  assert.equal(legacyNotify.stderr, "", "installed Codex legacy notify stderr");
+  waitFor(() => {
+    const records = readMemoryRecords();
+    return records.filter((record) => record.kind === "triple").length === 2
+      && spoolEntries().every((name) => !name.endsWith(".jsonl") && !name.endsWith(".lock"));
+  });
+  const codexTriples = readMemoryRecords().filter((record) => record.kind === "triple");
+  assert.equal(codexTriples.length, 2, "installed Codex turn must produce one additional triple");
+  const codexTriple = codexTriples.find((record) => record.agent === "codex");
+  assert.ok(codexTriple, "installed Codex turn must identify its agent");
+  assert.equal(codexTriple.intent?.text, "move card right");
+  assert.equal(codexTriple.mechanism.files[0].path, "src/card.css");
+  assert.match(codexTriple.mechanism.files[0].excerpt, /margin-left: 4px/);
+  assert.match(codexTriple.mechanism.files[0].excerpt, /\[redacted github token\]/);
+  assert.match(codexTriple.rationale.text, /\[redacted github token\]/);
+  assert.doesNotMatch(JSON.stringify(codexTriple), /ghp_/);
+  const labelsAfterCodex = readFileSync(labelsPath, "utf8").split("\n").filter(Boolean);
+  assert.equal(labelsAfterCodex.length, 2, "installed Codex turn must queue one additional label");
+  assert.match(
+    labelsAfterCodex[1] ?? "",
+    /^you say "move card right"\. it is margin-left\. I think\. check, question$/u,
+    "installed Codex turn must queue deterministic mapping label",
+  );
+  assert.doesNotMatch(labelsAfterCodex[1] ?? "", /ghp_/u, "Codex label must not contain raw token");
 
   // Setup dogfood uses explicit consent in an isolated HOME. The Claude
   // settings parent exists and remains private; Codex TOML is only printed.

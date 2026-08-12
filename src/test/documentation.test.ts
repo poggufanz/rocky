@@ -134,6 +134,8 @@ test("README identity, roadmap, and Plan 01/Plan 02 v0.5 boundary stay aligned",
   assert.match(readme, /quoted[^\n]*untrusted hearsay/i);
   assert.match(readme, /Claude[^\n]*explicit consent/i);
   assert.match(readme, /pre-created[^\n]*\.claude/i);
+  assert.match(readme, /Claude Code capture requires hook payload field `prompt_id`/i);
+  assert.match(readme, /without `prompt_id`, Rocky records nothing and never merges turns/i);
   assert.match(readme, /manual[^\n]*Codex[^\n]*TOML/i);
   assert.match(readme, /\/hooks/);
   for (const mechanism of [

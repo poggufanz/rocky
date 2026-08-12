@@ -411,6 +411,54 @@ test("dedicated setup branch installs only Claude hooks and never invokes MCP ad
   assert.deepEqual(calls, []);
 });
 
+test("agent-hook capability notice precedes consent and remains visible in status", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "rocky-agent-hook-capability-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  mkdirSync(join(root, ".claude"), { recursive: true, mode: 0o700 });
+  const timeline: string[] = [];
+  let output = "";
+  const originalStderr = process.stderr.write;
+  process.stderr.write = ((chunk: string | Uint8Array) => {
+    const text = typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8");
+    output += text;
+    if (text.includes("Claude Code capture requires hook payload field `prompt_id`")) timeline.push("capability");
+    return true;
+  }) as typeof process.stderr.write;
+  const dependencies: SetupDependencies = {
+    runner: { async run() { throw new Error("MCP runner must not run"); }, async openSession() { throw new Error("MCP session must not open"); } },
+    platform: createPlatformServices({
+      platform: "linux",
+      home: root,
+      env: { PATH: "/tools" },
+      isWsl: false,
+      fileExists: (path) => path === process.execPath,
+    }),
+    adapters: [],
+    confirmation: {
+      async confirm() {
+        timeline.push("consent");
+        return true;
+      },
+    },
+    nodePath: process.execPath,
+    entryPath: process.execPath,
+  };
+  try {
+    assert.equal(await setup(["--agent-hooks"], dependencies), 0);
+    assert.ok(timeline.includes("capability"));
+    assert.ok(timeline.includes("consent"));
+    assert.ok(timeline.indexOf("capability") < timeline.indexOf("consent"));
+
+    output = "";
+    assert.equal(await setup(["--status"], dependencies), 0);
+    assert.match(output, /Claude Code capture requires hook payload field `prompt_id`/);
+    assert.match(output, /claude-code agent hooks: installed/);
+    assert.match(output, /codex agent hooks: manual/);
+  } finally {
+    process.stderr.write = originalStderr;
+  }
+});
+
 test("dedicated --yes agent-hook install still requires explicit consent", async (t) => {
   const value = fixture(t);
   let prompts = 0;

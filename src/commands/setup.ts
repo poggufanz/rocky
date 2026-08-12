@@ -24,6 +24,7 @@ import { processRunner, type ProcessRunner } from "../setup/process.js";
 import { createPromptPort, type PromptInput } from "../setup/prompt.js";
 import {
   agentHooksStatus,
+  CLAUDE_CAPTURE_CAPABILITY_NOTICE,
   defaultAgentHooksEntryPath,
   defaultAgentHooksTarget,
   installClaudeAgentHooks,
@@ -436,6 +437,9 @@ async function runAgentHooksAction(
       confirmation: dependencies.confirmation,
       detail,
     };
+    if (action === "install" || action === "status") {
+      detail(CLAUDE_CAPTURE_CAPABILITY_NOTICE);
+    }
     if (action === "install") {
       const result = await installClaudeAgentHooks(target, options);
       detail(`claude-code agent hooks: ${result.status}`);

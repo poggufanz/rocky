@@ -18,6 +18,9 @@ const GENERIC_ERROR = "Claude Code agent hooks update cannot complete";
 const MISSING_PARENT_PROTECTION = process.platform === "win32" ? "private ACL" : "mode 0700";
 const MISSING_PARENT_ERROR = `Claude Code settings parent missing; create private directory for Claude settings with ${MISSING_PARENT_PROTECTION}, then rerun setup`;
 
+export const CLAUDE_CAPTURE_CAPABILITY_NOTICE =
+  "Claude Code capture requires hook payload field `prompt_id`; without `prompt_id`, Rocky records nothing and never merges turns.";
+
 export interface AgentHooksTarget {
   settingsPath: string;
 }
