@@ -18,6 +18,7 @@ import { tmpdir } from "node:os";
 import {
   buildClaudeHookEntries,
   agentHooksStatus,
+  codexConfigSnippet,
   installClaudeAgentHooks,
   mergeClaudeHooks,
   removeClaudeHooks,
@@ -434,4 +435,120 @@ test("dedicated --yes agent-hook install still requires explicit consent", async
   assert.match(stderr, /private directory/i);
   assert.match(stderr, /rerun setup/i);
   assert.equal(existsSync(join(value.root, ".claude")), false);
+});
+
+test("codexConfigSnippet emits verified notify and lifecycle TOML", () => {
+  const command = rockyHookCommand("codex", "/usr/bin/node", "/opt/Rocky CLI/dist/index.js");
+  const snippet = codexConfigSnippet(command);
+  assert.ok(snippet.includes(
+    'notify = ["/usr/bin/node", "/opt/Rocky CLI/dist/index.js", "hook", "agent-event", "codex"]',
+  ));
+  for (const event of ["UserPromptSubmit", "PostToolUse", "Stop"]) {
+    assert.ok(snippet.includes(`[[hooks.${event}]]`));
+    assert.ok(snippet.includes(`[[hooks.${event}.hooks]]`));
+  }
+  assert.ok(snippet.includes('matcher = "^apply_patch$"'));
+  assert.ok(snippet.includes(
+    `command = '\"/usr/bin/node\" \"/opt/Rocky CLI/dist/index.js\" hook agent-event codex'`,
+  ));
+  assert.doesNotMatch(snippet, /TODO|TBD|placeholder/i);
+  assert.doesNotMatch(snippet, /(?:^|\s)rocky(?:\s|$)/i);
+});
+
+test("codexConfigSnippet keeps Windows paths and spaces TOML-safe", () => {
+  const command = rockyHookCommand(
+    "codex",
+    "C:\\Program Files\\node.exe",
+    "C:\\Rocky CLI\\dist\\index.js",
+  );
+  const snippet = codexConfigSnippet(command);
+  assert.ok(snippet.includes(
+    'notify = ["C:\\\\Program Files\\\\node.exe", "C:\\\\Rocky CLI\\\\dist\\\\index.js", "hook", "agent-event", "codex"]',
+  ));
+  assert.ok(snippet.includes('command = \'"C:\\Program Files\\node.exe" "C:\\Rocky CLI\\dist\\index.js" hook agent-event codex\''));
+});
+
+function captureStderr(run: () => Promise<number>): Promise<{ code: number; stderr: string }> {
+  let stderr = "";
+  const original = process.stderr.write;
+  process.stderr.write = ((chunk: string | Uint8Array) => {
+    stderr += String(chunk);
+    return true;
+  }) as typeof process.stderr.write;
+  return run().then((code) => ({ code, stderr })).finally(() => {
+    process.stderr.write = original;
+  });
+}
+
+function setupDependenciesFor(root: string, confirmation = true): SetupDependencies {
+  return {
+    runner: {
+      async run() { throw new Error("MCP runner must not run"); },
+      async openSession() { throw new Error("MCP session must not open"); },
+    },
+    platform: createPlatformServices({
+      platform: "linux",
+      home: root,
+      env: { PATH: "/tools" },
+      isWsl: false,
+      fileExists: (path) => path === process.execPath,
+    }),
+    adapters: [],
+    confirmation: { async confirm() { return confirmation; } },
+    nodePath: process.execPath,
+    entryPath: process.execPath,
+  };
+}
+
+test("setup agent-hooks prints Codex manual TOML and never touches Codex config", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "rocky-agent-hooks-codex-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  mkdirSync(join(root, ".claude"), { mode: 0o700 });
+  const codexHome = join(root, ".codex");
+  mkdirSync(codexHome, { mode: 0o700 });
+  const configPath = join(codexHome, "config.toml");
+  const before = "# user config\nnotify = [\"other\"]\n";
+  writeFileSync(configPath, before);
+
+  const output = await captureStderr(() => setup(["--agent-hooks"], setupDependenciesFor(root)));
+  assert.equal(output.code, 0);
+  assert.match(output.stderr, /notify = \[\"/);
+  assert.match(output.stderr, /\[\[hooks\.UserPromptSubmit\]\]/);
+  assert.match(output.stderr, /matcher = \"\^apply_patch\$\"/);
+  assert.match(output.stderr, /codex config is toml/i);
+  assert.match(output.stderr, /\/hooks/);
+  assert.equal(readFileSync(configPath, "utf8"), before);
+  assert.equal(existsSync(join(root, ".claude", "settings.json")), true);
+});
+
+test("setup agent-hooks prints Codex guidance but preserves Claude error exit", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "rocky-agent-hooks-codex-error-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const output = await captureStderr(() => setup(["--agent-hooks"], setupDependenciesFor(root, false)));
+  assert.equal(output.code, 1);
+  assert.match(output.stderr, /notify = \[\"/);
+  assert.match(output.stderr, /codex config is toml/i);
+  assert.equal(existsSync(join(root, ".codex", "config.toml")), false);
+});
+
+test("setup status reports Codex manual and uninstall leaves TOML untouched", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "rocky-agent-hooks-codex-status-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  mkdirSync(join(root, ".claude"), { mode: 0o700 });
+  const codexHome = join(root, ".codex");
+  mkdirSync(codexHome, { mode: 0o700 });
+  const configPath = join(codexHome, "config.toml");
+  const before = "notify = [\"keep\"]\n";
+  writeFileSync(configPath, before);
+  const dependencies = setupDependenciesFor(root);
+  assert.equal((await setup(["--agent-hooks"], dependencies)), 0);
+
+  const status = await captureStderr(() => setup(["--status"], dependencies));
+  assert.equal(status.code, 0);
+  assert.match(status.stderr, /codex agent hooks: manual/);
+
+  const uninstall = await captureStderr(() => setup(["--uninstall-agent-hooks"], dependencies));
+  assert.equal(uninstall.code, 0);
+  assert.match(uninstall.stderr, /codex agent hooks: manual/);
+  assert.equal(readFileSync(configPath, "utf8"), before);
 });

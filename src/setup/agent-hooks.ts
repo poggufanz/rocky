@@ -9,6 +9,7 @@ import {
 } from "./json-config.js";
 import type { JsonMutationGuard, JsonReadResult } from "./json-config.js";
 import { createPromptPort } from "./prompt.js";
+import { detail, heading, say } from "../ui/rocky.js";
 
 const CLAUDE_MARKER = "hook agent-event claude-code";
 const POST_TOOL_MATCHER = "Edit|Write|MultiEdit|NotebookEdit";
@@ -146,6 +147,96 @@ export function rockyHookCommand(
   const executable = requireSafeAbsolutePath(execPath, "Node");
   const script = requireSafeAbsolutePath(scriptPath, "entry");
   return `${quotePath(executable)} ${quotePath(script)} hook agent-event ${adapter}`;
+}
+
+interface HookCommandPaths {
+  executable: string;
+  script: string;
+}
+
+function parseQuotedCommandPath(command: string, start: number): { value: string; next: number } {
+  if (command[start] !== '"') throw new Error("hook command must quote executable paths");
+  let value = "";
+  for (let index = start + 1; index < command.length; index += 1) {
+    const character = command[index];
+    if (character === '"') return { value, next: index + 1 };
+    if (character !== "\\") {
+      value += character;
+      continue;
+    }
+    const escaped = command[index + 1];
+    if (escaped === undefined) throw new Error("hook command has unfinished escape");
+    if (["\\", "$", "`", '"', "!"].includes(escaped)) {
+      value += escaped;
+      index += 1;
+    } else {
+      // Windows paths keep interior separators literal. POSIX commands only
+      // escape the metacharacters handled above, so an unknown escape retains
+      // its separator instead of silently changing the configured path.
+      value += "\\";
+    }
+  }
+  throw new Error("hook command has unterminated path");
+}
+
+function parseCodexHookCommand(command: string): HookCommandPaths {
+  if (typeof command !== "string" || command.length === 0 || hasControl(command)) {
+    throw new Error("hook command is invalid");
+  }
+  const first = parseQuotedCommandPath(command, 0);
+  let index = first.next;
+  if (command[index] !== " ") throw new Error("hook command must separate executable paths");
+  while (command[index] === " ") index += 1;
+  const second = parseQuotedCommandPath(command, index);
+  if (command.slice(second.next) !== " hook agent-event codex") {
+    throw new Error("hook command is not a Codex agent hook");
+  }
+  requireSafeAbsolutePath(first.value, "Node");
+  requireSafeAbsolutePath(second.value, "entry");
+  return { executable: first.value, script: second.value };
+}
+
+function tomlBasicString(value: string): string {
+  return JSON.stringify(value);
+}
+
+function tomlCommandString(command: string): string {
+  // Literal TOML strings preserve the command's shell quoting, including
+  // Windows separators. Paths containing an apostrophe use a basic string so
+  // the resulting snippet remains valid TOML rather than truncating the hook.
+  return command.includes("'") ? tomlBasicString(command) : `'${command}'`;
+}
+
+/** Build paste-ready Codex config.toml entries without touching user config. */
+export function codexConfigSnippet(command: string): string {
+  const paths = parseCodexHookCommand(command);
+  const argv = [paths.executable, paths.script, "hook", "agent-event", "codex"];
+  const lifecycle = (event: "UserPromptSubmit" | "PostToolUse" | "Stop", matcher?: string): string[] => [
+    `[[hooks.${event}]]`,
+    ...(matcher === undefined ? [] : [`matcher = ${tomlBasicString(matcher)}`]),
+    "",
+    `[[hooks.${event}.hooks]]`,
+    'type = "command"',
+    `command = ${tomlCommandString(command)}`,
+  ];
+  return [
+    `notify = [${argv.map(tomlBasicString).join(", ")}]`,
+    "",
+    ...lifecycle("UserPromptSubmit"),
+    "",
+    ...lifecycle("PostToolUse", "^apply_patch$"),
+    "",
+    ...lifecycle("Stop"),
+    "",
+  ].join("\n");
+}
+
+/** Print Codex's manual setup guidance; no Codex config file is read or written. */
+export function printCodexAgentHooks(command = rockyHookCommand("codex")): void {
+  heading("Codex agent hooks");
+  detail(codexConfigSnippet(command));
+  say("codex config is toml. I not touch it. you paste, I listen.");
+  detail("Trust warning: review and trust changed command hooks through Codex /hooks before they run.");
 }
 
 /** Build the exact Claude Code event groups owned by Rocky. */

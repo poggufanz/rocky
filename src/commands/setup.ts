@@ -27,6 +27,7 @@ import {
   defaultAgentHooksEntryPath,
   defaultAgentHooksTarget,
   installClaudeAgentHooks,
+  printCodexAgentHooks,
   rockyHookCommand,
   uninstallClaudeAgentHooks,
 } from "../setup/agent-hooks.js";
@@ -428,6 +429,7 @@ async function runAgentHooksAction(
     const nodePath = resolveInstalledPath(nodeCandidate);
     const entryPath = resolveInstalledPath(entryCandidate);
     const command = rockyHookCommand("claude-code", nodePath, entryPath);
+    const codexCommand = rockyHookCommand("codex", nodePath, entryPath);
     const target = defaultAgentHooksTarget(dependencies.platform.home);
     const options = {
       command,
@@ -438,16 +440,19 @@ async function runAgentHooksAction(
       const result = await installClaudeAgentHooks(target, options);
       detail(`claude-code agent hooks: ${result.status}`);
       if (result.detail !== undefined) detail(result.detail);
+      printCodexAgentHooks(codexCommand);
       return result.status === "written" || result.status === "unchanged" ? 0 : 1;
     }
     if (action === "uninstall") {
       const result = await uninstallClaudeAgentHooks(target, options);
       detail(`claude-code agent hooks: ${result.status}`);
       if (result.detail !== undefined) detail(result.detail);
+      detail("codex agent hooks: manual (config.toml unchanged)");
       return result.status === "written" || result.status === "unchanged" ? 0 : 1;
     }
     const result = agentHooksStatus(target, options);
     detail(`claude-code agent hooks: ${result.claudeCode}`);
+    detail("codex agent hooks: manual");
     return result.claudeCode === "unreadable" ? 1 : 0;
   } catch {
     say("Claude Code agent hook paths are not usable. setup stops. bad.");
