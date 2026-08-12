@@ -62,18 +62,18 @@ test("redactSecretsAtBoundary preserves trailing boundaries removed after fixed-
   assert.equal(redactSecretsAtBoundary(`${npm}\u061Csuffix`), "[redacted npm token]suffix");
 });
 
-test("redactSecretsAtBoundary stops variable-length tokens at a removed trailing boundary", () => {
+test("redactSecretsAtBoundary redacts the whole variable-length match after a removed boundary", () => {
   const cases: ReadonlyArray<readonly [string, string]> = [
-    ["sk-ant-abcdefghijklmnopqrst123", "anthropic key"],
+    ["sk-ant-abcdefghijklmnopqrst", "anthropic key"],
     ["ghp_abcdefghijklmnopqrstuvwxyz1234567890", "github token"],
     ["xoxb-1234567890abcdefghijklmnop", "slack token"],
-    ["sk-abcdefghijklmnopqrst123", "openai key"],
+    ["sk-abcdefghijklmnopqrst", "openai key"],
   ];
 
   for (const [token, kind] of cases) {
     assert.equal(
-      redactSecretsAtBoundary(`😀${token}\u061CZ`),
-      `😀[redacted ${kind}]Z`,
+      redactSecretsAtBoundary(`😀${token}\u061Cuvw`),
+      `😀[redacted ${kind}]`,
       kind,
     );
   }
@@ -105,6 +105,18 @@ test("redactSecretsAtBoundary removes recognizable fragments for every secret fa
     assert.doesNotMatch(output, new RegExp(fragment.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "u"), `${kind}: ${fragment}`);
     assert.equal(output, "prefix", kind);
   }
+});
+
+test("redactSecretsAtBoundary scrubs truncated fragments only at bounded input EOF", () => {
+  const fragment = "sk-ant-abc";
+  assert.equal(
+    redactSecretsAtBoundary(`prefix\u061C${fragment}`, { mayBeTruncated: true }),
+    "prefix",
+  );
+  assert.equal(
+    redactSecretsAtBoundary(`prefix\u061C${fragment} tail`, { mayBeTruncated: true }),
+    `prefix${fragment} tail`,
+  );
 });
 
 test("redactSecretsAtBoundary does not treat internal controls as token boundaries", () => {

@@ -271,27 +271,6 @@ function hasTrailingBoundary(text: string, end: number): boolean {
   return !isAsciiWord(text[end]);
 }
 
-function matchEndAtRemovedBoundary(
-  text: string,
-  start: number,
-  end: number,
-  definition: SecretDefinition,
-  removedOffsets: ReadonlySet<number>,
-): number {
-  if (!definition.trailingBoundary) return end;
-  const greedyHasExplicitBoundary = removedOffsets.has(end)
-    || (end < text.length && hasTrailingBoundary(text, end));
-  if (greedyHasExplicitBoundary || (end === text.length && ![...removedOffsets].some((offset) => offset > start && offset < end))) {
-    return end;
-  }
-  const source = new RegExp(`^(?:${definition.source})$`, definition.flags ?? "");
-  for (const boundary of [...removedOffsets].sort((left, right) => right - left)) {
-    if (boundary <= start || boundary > end) continue;
-    if (source.test(text.slice(start, boundary))) return boundary;
-  }
-  return end;
-}
-
 interface Replacement {
   readonly start: number;
   readonly end: number;
@@ -310,7 +289,9 @@ function collectReplacements(text: string, context: SecretBoundaryContext): Repl
       const rawEnd = start + matched.length;
       const definition = SECRET_DEFINITIONS[order];
       if (!definition) continue;
-      const end = matchEndAtRemovedBoundary(text, start, rawEnd, definition, removedOffsets);
+      // Keep all contiguous normalized token-body characters: an invisible
+      // split followed by more body text is ambiguous, so never expose tail.
+      const end = rawEnd;
       const normalLeading = !definition.leadingBoundary || hasLeadingBoundary(text, start);
       const normalTrailing = !definition.trailingBoundary || hasTrailingBoundary(text, end);
       const hasRecordedLeading = !definition.leadingBoundary || removedOffsets.has(start);
@@ -331,6 +312,8 @@ function collectReplacements(text: string, context: SecretBoundaryContext): Repl
       const rawEnd = start + matched.length;
       const definition = SECRET_DEFINITIONS[order];
       if (!definition) continue;
+      // `mayBeTruncated` only authorizes scrubbing a fragment at normalized
+      // input EOF; visible tail proves this prefix was not cut at the cap.
       if (rawEnd !== text.length) continue;
       const end = rawEnd;
       const normalLeading = !definition.leadingBoundary || hasLeadingBoundary(text, start);
