@@ -4,22 +4,118 @@
  * Order matters: "anthropic key" must precede "openai key". First match per
  * line wins.
  */
-export const SECRET_PATTERNS: ReadonlyArray<readonly [kind: string, re: RegExp]> = [
-  ["aws access key", /\bAKIA[0-9A-Z]{16}\b/],
-  ["private key", /-----BEGIN [A-Z ]*PRIVATE KEY-----/],
-  ["github token", /\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{36,}\b|\bgithub_pat_[A-Za-z0-9_]{22,}\b/],
-  ["slack token", /\bxox[baprs]-[A-Za-z0-9-]{10,}\b/],
-  ["anthropic key", /\bsk-ant-[A-Za-z0-9_-]{20,}\b/],
-  ["openai key", /\bsk-[A-Za-z0-9]{20,}\b/],
-  ["npm token", /\bnpm_[A-Za-z0-9]{36}\b/],
-  ["password assignment", /\b(?:password|secret)\s*=\s*(['"])([^'"]{4,})\1/i],
+interface SecretDefinition {
+  readonly kind: string;
+  readonly source: string;
+  readonly flags?: string;
+  readonly leadingBoundary?: boolean;
+  readonly trailingBoundary?: boolean;
+  readonly fragmentSource: string;
+}
+
+const SECRET_DEFINITIONS: ReadonlyArray<SecretDefinition> = [
+  {
+    kind: "aws access key",
+    source: "AKIA[0-9A-Z]{16}",
+    leadingBoundary: true,
+    trailingBoundary: true,
+    fragmentSource: "AKIA[0-9A-Z]{8,}",
+  },
+  {
+    kind: "private key",
+    source: "-----BEGIN [A-Z ]*PRIVATE KEY-----",
+    fragmentSource: "-----BEGIN[ A-Za-z0-9_-]*",
+  },
+  {
+    kind: "github token",
+    source: "(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{22,}",
+    leadingBoundary: true,
+    trailingBoundary: true,
+    fragmentSource: "(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_]{4,}|github_pat_[A-Za-z0-9_]{4,}",
+  },
+  {
+    kind: "slack token",
+    source: "xox[baprs]-[A-Za-z0-9-]{10,}",
+    leadingBoundary: true,
+    trailingBoundary: true,
+    fragmentSource: "xox[baprs]-[A-Za-z0-9-]{4,}",
+  },
+  {
+    kind: "anthropic key",
+    source: "sk-ant-[A-Za-z0-9_-]{20,}",
+    leadingBoundary: true,
+    trailingBoundary: true,
+    fragmentSource: "sk-ant-[A-Za-z0-9_-]{3,}",
+  },
+  {
+    kind: "openai key",
+    source: "sk-[A-Za-z0-9]{20,}",
+    leadingBoundary: true,
+    trailingBoundary: true,
+    fragmentSource: "sk-[A-Za-z0-9]{3,}",
+  },
+  {
+    kind: "npm token",
+    source: "npm_[A-Za-z0-9]{36}",
+    leadingBoundary: true,
+    trailingBoundary: true,
+    fragmentSource: "npm_[A-Za-z0-9_]{8,}",
+  },
+  {
+    kind: "password assignment",
+    source: String.raw`(?:password|secret)\s*=\s*(['"])([^'"]{4,})\1`,
+    flags: "i",
+    leadingBoundary: true,
+    fragmentSource: String.raw`(?:password|secret)\s*=\s*(?:["'][^"']*|[^\s]*)`,
+  },
 ];
 
-const INVISIBLE_CONTROL_RE = /[\u061C\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]/g;
+function patternFor(definition: SecretDefinition, boundaryFree: boolean): RegExp {
+  const leading = !boundaryFree && definition.leadingBoundary ? "\\b" : "";
+  const trailing = !boundaryFree && definition.trailingBoundary ? "\\b" : "";
+  return new RegExp(`${leading}(?:${definition.source})${trailing}`, definition.flags ?? "");
+}
+
+export const SECRET_PATTERNS: ReadonlyArray<readonly [kind: string, re: RegExp]> = SECRET_DEFINITIONS.map(
+  (definition) => [definition.kind, patternFor(definition, false)] as const,
+);
+
+const INVISIBLE_CONTROL_SINGLE_RE = /[\u061C\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]/u;
+
+const SECRET_BOUNDARY_FREE_PATTERNS: ReadonlyArray<readonly [kind: string, re: RegExp]> = SECRET_DEFINITIONS.map(
+  (definition) => [definition.kind, new RegExp(patternFor(definition, true).source, `${definition.flags ?? ""}g`)] as const,
+);
+
+const SECRET_FRAGMENT_PATTERNS: ReadonlyArray<readonly [kind: string, re: RegExp]> = SECRET_DEFINITIONS.map(
+  (definition) => [definition.kind, new RegExp(definition.fragmentSource, `${definition.flags ?? ""}g`)] as const,
+);
+
+interface InvisibleControlStripResult {
+  readonly text: string;
+  /** UTF-16 offsets in `text` where one or more invisible controls were removed. */
+  readonly removedOffsets: ReadonlySet<number>;
+}
 
 /** Remove format controls without inserting separators before secret matching. */
 export function stripInvisibleControls(text: string): string {
-  return text.replace(INVISIBLE_CONTROL_RE, "");
+  return stripInvisibleControlsWithOffsets(text).text;
+}
+
+/** Strip hidden format controls while retaining the resulting boundary map. */
+function stripInvisibleControlsWithOffsets(text: string): InvisibleControlStripResult {
+  if (!text) return { text, removedOffsets: new Set<number>() };
+  const pieces: string[] = [];
+  const removedOffsets = new Set<number>();
+  let outputOffset = 0;
+  for (const character of text) {
+    if (INVISIBLE_CONTROL_SINGLE_RE.test(character)) {
+      removedOffsets.add(outputOffset);
+      continue;
+    }
+    pieces.push(character);
+    outputOffset += character.length;
+  }
+  return { text: pieces.join(""), removedOffsets };
 }
 
 export function redactSecrets(text: string): string {
@@ -31,4 +127,101 @@ export function redactSecrets(text: string): string {
     );
   }
   return out;
+}
+
+/** Boundary context for a raw value entering a durable or AI/log sink. */
+export interface SecretBoundaryOptions {
+  /** The caller's bounded prefix may end in a partial secret family marker. */
+  readonly mayBeTruncated?: boolean;
+}
+
+interface SecretBoundaryContext extends SecretBoundaryOptions {
+  readonly removedOffsets: ReadonlySet<number>;
+}
+
+function isAsciiWord(character: string | undefined): boolean {
+  return character !== undefined && /[A-Za-z0-9_]/u.test(character);
+}
+
+function hasLeadingBoundary(text: string, start: number): boolean {
+  return !isAsciiWord(text[start - 1]);
+}
+
+function hasTrailingBoundary(text: string, end: number): boolean {
+  return !isAsciiWord(text[end]);
+}
+
+interface Replacement {
+  readonly start: number;
+  readonly end: number;
+  readonly value: string;
+  readonly order: number;
+}
+
+function collectReplacements(text: string, context: SecretBoundaryContext): Replacement[] {
+  const removedOffsets = context.removedOffsets;
+  const full: Replacement[] = [];
+  for (let order = 0; order < SECRET_BOUNDARY_FREE_PATTERNS.length; order += 1) {
+    const [kind, re] = SECRET_BOUNDARY_FREE_PATTERNS[order] as [string, RegExp];
+    for (const match of text.matchAll(re)) {
+      const start = match.index ?? 0;
+      const matched = match[0] ?? "";
+      const end = start + matched.length;
+      const definition = SECRET_DEFINITIONS[order];
+      if (!definition) continue;
+      const normalLeading = !definition.leadingBoundary || hasLeadingBoundary(text, start);
+      const normalTrailing = !definition.trailingBoundary || hasTrailingBoundary(text, end);
+      const hasRecordedLeading = !definition.leadingBoundary || removedOffsets.has(start);
+      const hasRecordedTrailing = !definition.trailingBoundary || removedOffsets.has(end);
+      if ((!normalTrailing && !hasRecordedTrailing) || (!normalLeading && !hasRecordedLeading)) continue;
+      full.push({ start, end, value: `[redacted ${kind}]`, order });
+    }
+  }
+
+  const replacements = [...full];
+  if (!context.mayBeTruncated) return replacements;
+
+  for (let order = 0; order < SECRET_FRAGMENT_PATTERNS.length; order += 1) {
+    const [, re] = SECRET_FRAGMENT_PATTERNS[order] as [string, RegExp];
+    for (const match of text.matchAll(re)) {
+      const start = match.index ?? 0;
+      const matched = match[0] ?? "";
+      const end = start + matched.length;
+      if (end !== text.length) continue;
+      const definition = SECRET_DEFINITIONS[order];
+      if (!definition) continue;
+      const normalLeading = !definition.leadingBoundary || hasLeadingBoundary(text, start);
+      const hasRecordedBoundary = !definition.leadingBoundary || removedOffsets.has(start);
+      if (!normalLeading && !hasRecordedBoundary) continue;
+      replacements.push({ start, end, value: "", order: SECRET_BOUNDARY_FREE_PATTERNS.length + order });
+    }
+  }
+  return replacements;
+}
+
+/**
+ * Strip the exact invisible controls and redact a raw boundary value.
+ * Complete matches retain the normal placeholder. A complete family match may
+ * ignore its leading word boundary only when a removed control created that
+ * normalized offset; partial matching is additionally opt-in for callers that
+ * know their input may be capped.
+ */
+export function redactSecretsAtBoundary(text: string, options: SecretBoundaryOptions = {}): string {
+  const stripped = stripInvisibleControlsWithOffsets(text);
+  const replacements = collectReplacements(stripped.text, {
+    removedOffsets: stripped.removedOffsets,
+    mayBeTruncated: options.mayBeTruncated,
+  })
+    .sort((left, right) => right.start - left.start || left.order - right.order);
+  const selected: Replacement[] = [];
+  for (const replacement of replacements) {
+    if (selected.some((chosen) => replacement.end > chosen.start && replacement.start < chosen.end)) continue;
+    selected.push(replacement);
+  }
+
+  let out = stripped.text;
+  for (const replacement of selected) {
+    out = out.slice(0, replacement.start) + replacement.value + out.slice(replacement.end);
+  }
+  return redactSecrets(out);
 }

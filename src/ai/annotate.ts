@@ -1,6 +1,6 @@
 import { Buffer } from "node:buffer";
 import { loadConfig, type ConfigLoadResult } from "../core/config-read.js";
-import { redactSecrets, stripInvisibleControls } from "../core/redact.js";
+import { redactSecretsAtBoundary } from "../core/redact.js";
 import { validateRockyPhrase } from "../ui/phrases.js";
 import { createOllamaClient, type OllamaClient } from "./ollama.js";
 
@@ -38,16 +38,9 @@ const ANSI_CSI_7BIT = /\u001b\[[0-?]*[ -/]*[@-~]/g;
 const ANSI_CSI_8BIT = /\u009b[0-?]*[ -/]*[@-~]/g;
 const ANSI_OTHER = /\u001b[()][0-2A-Z0-9]/g;
 const CONTROL_RE = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/g;
-// Keep token families aligned with shared ASCII `\\b` patterns. Do not use
-// Unicode-aware `/u` here: a non-ASCII prefix is a boundary to the shared
-// redactor, and Unicode case folding could broaden ASCII token classes.
-const ASCII_SECRET_FRAGMENT_RE = /(^|[^A-Za-z0-9_])(?:AKIA[0-9A-Z]*|(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_]*|github_pat_[A-Za-z0-9_]*|xox[baprs]-[A-Za-z0-9-]*|sk-ant-[A-Za-z0-9_-]*|sk-[A-Za-z0-9]*|npm_[A-Za-z0-9_]*)/g;
-// The shared private-key pattern has no word boundary, so its incomplete
-// header scrub is intentionally boundary-free as well.
-const PRIVATE_KEY_FRAGMENT_RE = /-----BEGIN[ A-Z0-9_-]*/g;
-// Shared password/secret assignment matching is case-insensitive but not
-// Unicode-aware; preserve the same ASCII boundary explicitly.
-const ASSIGNMENT_SECRET_FRAGMENT_RE = /(^|[^A-Za-z0-9_])(?:password|secret)\s*=\s*(?:["'][^"']*)?/gi;
+// Internal sentinel: redactSecretsAtBoundary removes it while recording the
+// boundary restored by stripping ANSI/C0/C1 controls.
+const BOUNDARY_MARKER = "\u2065";
 
 /**
  * Schema passed to Ollama. The parser remains defensive because providers can
@@ -100,43 +93,28 @@ function truncateChars(value: string, maximum: number): string {
 }
 
 /**
- * Strip terminal and hidden controls before redaction. In particular, C0
- * controls are removed (rather than replaced) so `sk-\0ant-...` is still
- * recognized by the existing secret redactor.
+ * Strip terminal and hidden controls before redaction. C0/C1 and ANSI
+ * removals use an internal invisible sentinel so normalized boundary offsets
+ * remain available to the shared redactor; the sentinel is removed there.
  */
 function sanitizeText(value: string, maximum: number): string {
   const bounded = prefixUtf8(value, MAX_SCAN_BYTES + SECRET_SCAN_OVERLAP_BYTES);
-  // The overlap is inspection-only: content crossing the original 4 KiB
-  // boundary still needs conservative fragment scrubbing even when the
-  // complete bounded prefix fits inside the 4.5 KiB inspection window.
-  const wasTruncated =
-    bounded.length < value.length || Buffer.byteLength(bounded, "utf8") > MAX_SCAN_BYTES;
   const withoutTerminalControls = bounded
-    .replace(ANSI_STRING_7BIT, "")
-    .replace(ANSI_STRING_8BIT, "")
-    .replace(ANSI_CSI_7BIT, "")
-    .replace(ANSI_CSI_8BIT, "")
-    .replace(ANSI_OTHER, "")
-    .replace(/\u001b/g, "")
-    .replace(CONTROL_RE, "");
-  const oneLine = stripInvisibleControls(withoutTerminalControls)
-    .replace(/\s+/gu, " ")
-    .trim();
-  const redacted = redactSecrets(oneLine);
-  // If the bounded raw prefix ended in a possible secret, the provider may
-  // have supplied only a recognizable prefix. Remove such fragments after
-  // redaction. This is intentionally conservative and covers every secret
-  // family used by redactSecrets, including private-key/password prefixes.
-  const safe = wasTruncated
-    ? scrubSecretFragments(redacted)
-    : redacted;
+    .replace(ANSI_STRING_7BIT, BOUNDARY_MARKER)
+    .replace(ANSI_STRING_8BIT, BOUNDARY_MARKER)
+    .replace(ANSI_CSI_7BIT, BOUNDARY_MARKER)
+    .replace(ANSI_CSI_8BIT, BOUNDARY_MARKER)
+    .replace(ANSI_OTHER, BOUNDARY_MARKER)
+    .replace(/\u001b/g, BOUNDARY_MARKER)
+    .replace(CONTROL_RE, BOUNDARY_MARKER);
+  // Scrub complete matches and recognizable fragments. The latter is needed
+  // both when a control removal loses a word boundary and when the raw cap
+  // cuts through a secret before sanitization.
+  const safe = redactSecretsAtBoundary(withoutTerminalControls, {
+    mayBeTruncated:
+      bounded.length < value.length || Buffer.byteLength(bounded, "utf8") > MAX_SCAN_BYTES,
+  });
   return truncateChars(safe.replace(/\s+/gu, " ").trim(), maximum);
-}
-
-function scrubSecretFragments(value: string): string {
-  const withoutTokens = value.replace(ASCII_SECRET_FRAGMENT_RE, (_match, prefix: string) => prefix);
-  const withoutPrivateKey = withoutTokens.replace(PRIVATE_KEY_FRAGMENT_RE, "");
-  return withoutPrivateKey.replace(ASSIGNMENT_SECRET_FRAGMENT_RE, (_match, prefix: string) => prefix);
 }
 
 function hasOwn(record: Record<string, unknown>, key: string): boolean {

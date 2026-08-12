@@ -552,6 +552,54 @@ test("every invisible format control is removed before durable redaction", async
   }
 });
 
+test("durable annotation redacts a token after visible text and an invisible control", async (t) => {
+  const paths = freshPaths(t);
+  const token = "sk-ant-abcdefghijklmnopqrst123";
+  append("durable-prefix", [
+    { v: 1, agent: "codex", kind: "intent", ts: 1, text: `prefix\u061C${token}` },
+    { v: 1, agent: "codex", kind: "mechanism", ts: 2, tool: "Edit", path: "src/app.ts", excerpt: "value: 1" },
+    { v: 1, agent: "codex", kind: "rationale", ts: 3, source: "notify", text: "why" },
+  ], paths);
+
+  const triple = await annotateBatch("durable-prefix", { paths, git: () => undefined, queueLabel: () => {} });
+  assert.ok(triple);
+  assert.equal(triple?.intent?.text, "prefix[redacted anthropic key]");
+  assert.doesNotMatch(JSON.stringify(triple), /sk-ant-|abcdefghijklmnopqrst123/u);
+});
+
+test("durable annotation scrubs a recognizable fragment exposed by the ingress cap", async (t) => {
+  const paths = freshPaths(t);
+  const token = "sk-ant-abcdefghijklmnopqrst123";
+  append("durable-cap", [
+    { v: 1, agent: "codex", kind: "intent", ts: 1, text: `${"\u061C".repeat(1980)}${token}` },
+    { v: 1, agent: "codex", kind: "mechanism", ts: 2, tool: "Edit", path: "src/app.ts", excerpt: "value: 1" },
+    { v: 1, agent: "codex", kind: "rationale", ts: 3, source: "notify", text: "why" },
+  ], paths);
+
+  const triple = await annotateBatch("durable-cap", { paths, git: () => undefined, queueLabel: () => {} });
+  assert.ok(triple);
+  assert.doesNotMatch(JSON.stringify(triple), /sk-ant-|abcdefghijklmnopqrst123/u);
+});
+
+test("durable annotation keeps C0 and ANSI boundary removals redacted", async (t) => {
+  const paths = freshPaths(t);
+  const token = "sk-ant-abcdefghijklmnopqrst123";
+  for (const [name, control] of [["c0", "\u0000"], ["ansi", "\u001b[31m"]] as const) {
+    const key = `durable-boundary-${name}`;
+    const candidate = `prefix${control}${token}`;
+    append(key, [
+      { v: 1, agent: "codex", kind: "intent", ts: 1, text: candidate },
+      { v: 1, agent: "codex", kind: "mechanism", ts: 2, tool: "Edit", path: "src/app.ts", excerpt: "value: 1" },
+      { v: 1, agent: "codex", kind: "rationale", ts: 3, source: "notify", text: "why" },
+    ], paths);
+
+    const triple = await annotateBatch(key, { paths, git: () => undefined, queueLabel: () => {} });
+    assert.ok(triple, name);
+    assert.equal(triple?.intent?.text, "prefix[redacted anthropic key]", name);
+    assert.doesNotMatch(JSON.stringify(triple), /sk-ant-|abcdefghijklmnopqrst123|\u001b|\u0000/u, name);
+  }
+});
+
 test("mixed-agent batches use the first valid agent and ignore mismatched evidence", async (t) => {
   const paths = freshPaths(t);
   append("mixed-agent", [

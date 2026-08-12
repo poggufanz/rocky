@@ -16,7 +16,7 @@ import { dirname } from "node:path";
 import { appendEvent } from "../agent/spool.js";
 import { parseClaudeHookPayload, type ParsedHookPayload } from "../agent/adapters/claude-code.js";
 import { parseCodexHookPayload } from "../agent/adapters/codex.js";
-import { redactSecrets, stripInvisibleControls } from "../core/redact.js";
+import { redactSecretsAtBoundary } from "../core/redact.js";
 import { resolveRockyPaths, type RockyPaths } from "../core/state-paths.js";
 
 const STDIN_CAP_BYTES = 2 * 1024 * 1024;
@@ -28,6 +28,9 @@ const NO_FOLLOW = process.platform === "win32" ? 0 : constants.O_NOFOLLOW;
 
 const ANSI_ESCAPE = /\u001B(?:\[[0-?]*[ -/]*[@-~]|\][^\u0007]*(?:\u0007|\u001B\\)|[@-_])/g;
 const CONTROL = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F]/g;
+// Internal sentinel: redactSecretsAtBoundary removes it while recording the
+// boundary restored by stripping ANSI/C0/C1 controls.
+const BOUNDARY_MARKER = "\u2065";
 
 export interface AgentHookDeps {
   stdin?: () => Promise<string>;
@@ -66,10 +69,11 @@ function sanitizeLogMessage(message: string): string {
   // Strip presentation/control bytes before redaction so a secret adjacent to
   // an ANSI sequence still has the word boundary the redactor expects.
   const bounded = utf8Prefix(message, LOG_SCAN_BYTES);
-  const withoutEscapes = bounded.replace(ANSI_ESCAPE, "");
-  const withoutControls = stripInvisibleControls(withoutEscapes).replace(CONTROL, "");
-  const oneLine = withoutControls.replace(/\s+/gu, " ").trim();
-  return capUtf8(redactSecrets(oneLine), LOG_MESSAGE_CAP_BYTES);
+  const withoutEscapes = bounded.replace(ANSI_ESCAPE, BOUNDARY_MARKER);
+  const withoutC0C1 = withoutEscapes.replace(CONTROL, BOUNDARY_MARKER);
+  return capUtf8(redactSecretsAtBoundary(withoutC0C1, {
+    mayBeTruncated: bounded.length < message.length,
+  }).replace(/\s+/gu, " ").trim(), LOG_MESSAGE_CAP_BYTES);
 }
 
 function closeQuietly(fd: number): void {

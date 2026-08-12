@@ -276,6 +276,34 @@ test("logHookError strips every shared invisible format control before redaction
   }
 });
 
+test("logHookError redacts a token after visible text and an invisible control", (t) => {
+  const paths = freshPaths(t);
+  const token = "sk-ant-abcdefghijklmnopqrst123";
+  logHookError(`prefix\u2065${token}`, paths);
+  const log = readFileSync(paths.agentLog, "utf8");
+  assert.doesNotMatch(log, /sk-ant-|abcdefghijklmnopqrst123/u);
+  assert.match(log, /prefix\[redacted anthropic key\]/u);
+});
+
+test("logHookError scrubs a recognizable fragment exposed by its scan cap", (t) => {
+  const paths = freshPaths(t);
+  const token = "sk-ant-abcdefghijklmnopqrst123";
+  logHookError(`${"\u2065".repeat(2724)}${token}`, paths);
+  const log = readFileSync(paths.agentLog, "utf8");
+  assert.doesNotMatch(log, /sk-ant-|abcdefghijklmnopqrst123/u);
+});
+
+test("logHookError retains C0 and ANSI removal offsets", (t) => {
+  const token = "sk-ant-abcdefghijklmnopqrst123";
+  for (const [name, control] of [["c0", "\u0000"], ["ansi", "\u001b[31m"]] as const) {
+    const paths = freshPaths(t);
+    logHookError(`prefix${control}${token}`, paths);
+    const log = readFileSync(paths.agentLog, "utf8");
+    assert.doesNotMatch(log, /sk-ant-|abcdefghijklmnopqrst123|\u001b|\u0000/u, name);
+    assert.match(log, /prefix\[redacted anthropic key\]/u, name);
+  }
+});
+
 test("logHookError keeps the complete file within the strict 64 KiB cap", (t) => {
   const paths = freshPaths(t);
   mkdirSync(paths.home, { recursive: true });

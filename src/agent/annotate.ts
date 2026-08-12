@@ -15,7 +15,7 @@ import { resolveRockyPaths, type RockyPaths } from "../core/state-paths.js";
 import { recordTripleOnce } from "../core/memory.js";
 import type { TripleFile, TripleRecord } from "../core/memory.js";
 import { loadConfig, type ConfigLoadResult } from "../core/config-read.js";
-import { redactSecrets, stripInvisibleControls } from "../core/redact.js";
+import { redactSecretsAtBoundary, stripInvisibleControls } from "../core/redact.js";
 import { annotatePortFromConfig, parseAnnotateOutput, type AnnotatePort, type AnnotateOutput } from "../ai/annotate.js";
 import {
   MAX_EXCERPT_CHARS,
@@ -47,6 +47,9 @@ const MAX_CWD_CHARS = 4096;
 const PROP_RE = /([a-zA-Z-]{2,})\s*:/g;
 const ANSI_RE = /\u001b(?:\][^\u0007]*(?:\u0007|\u001b\\)|\[[0-?]*[ -/]*[@-~])/g;
 const CONTROL_RE = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/g;
+// Internal sentinel: redactSecretsAtBoundary removes it while recording the
+// boundary restored by stripping ANSI/C0/C1 controls.
+const BOUNDARY_MARKER = "\u2065";
 const NO_FOLLOW = process.platform === "win32" ? 0 : constants.O_NOFOLLOW;
 
 export interface AnnotateDeps {
@@ -85,12 +88,12 @@ function prefixUtf8(value: string, maximumBytes: number): string {
 
 function cleanText(value: string, maximum: number): string {
   const bounded = prefixUtf8(value, Math.max(1, maximum) * 4);
-  const stripped = stripInvisibleControls(
-    bounded
-      .replace(ANSI_RE, "")
-      .replace(CONTROL_RE, ""),
-  );
-  return redactSecrets(stripped).replace(/\s+/g, " ").trim().slice(0, maximum);
+  const stripped = bounded
+    .replace(ANSI_RE, BOUNDARY_MARKER)
+    .replace(CONTROL_RE, BOUNDARY_MARKER);
+  return redactSecretsAtBoundary(stripped, {
+    mayBeTruncated: value.length >= maximum || bounded.length < value.length,
+  }).replace(/\s+/g, " ").trim().slice(0, maximum);
 }
 
 function operationalText(value: string, maximum: number): string {

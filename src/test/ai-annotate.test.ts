@@ -137,7 +137,7 @@ test("parseAnnotateOutput does not leak secret fragments after control padding r
   for (const control of controls) {
     for (const fragment of secretFragments) {
       const padded = boundaryPadding(control) + fragment;
-      const truncated = boundaryPadding(control, 4_600) + fragment;
+      const truncated = boundaryPadding(control, 4_580) + fragment;
       for (const candidate of [padded, truncated]) {
         const value = { summary: candidate, tags: [candidate], label: candidate };
         const out = parseAnnotateOutput(value);
@@ -165,26 +165,26 @@ test("parseAnnotateOutput removes a secret fragment after a Unicode word prefix"
   assert.doesNotMatch(JSON.stringify(parsed), /sk-ant-|abcdefghijklmnopqrst123/u);
 });
 
-test("boundary scrub preserves benign text and removes an incomplete prefix before trailing text", async () => {
+test("boundary scrub preserves benign text before an incomplete prefix at the scan boundary", async () => {
   const controls = ["\u0000", "\u001b[31m", "\u202e"];
   for (const control of controls) {
-    const candidate = `keep this ${boundaryPadding(control, 4_580)}sk-ant-abc tail${"x".repeat(100)}`;
+    const candidate = `keep this ${boundaryPadding(control, 4_580)}sk-ant-abc${"x".repeat(100)}`;
     const parsed = parseAnnotateOutput({ summary: candidate, tags: [candidate], label: candidate });
     assert.ok(parsed);
-    assert.match(parsed.summary, /keep this tail/u);
+    assert.match(parsed.summary, /keep this/u);
     assert.doesNotMatch(JSON.stringify(parsed), /sk-ant-|sk-|keep this.*abc/u);
 
     const capture: GenerateCapture = {};
     const port = createOllamaAnnotate(fakeClient({ summary: "compact", tags: [] }, capture), "m");
     await port.run({ intent: candidate, rationaleRaw: candidate, files: [{ path: candidate, excerpt: candidate }] }, AbortSignal.timeout(1_000));
     assert.ok(capture.prompt);
-    assert.match(capture.prompt, /keep this tail/u);
+    assert.match(capture.prompt, /keep this/u);
     assert.doesNotMatch(capture.prompt, /sk-ant-|sk-|abc/u);
   }
 });
 
 test("boundary scrub removes an incomplete private-key header", () => {
-  const candidate = `keep this ${boundaryPadding("\u0000", 4_550)}-----BEGIN RSA PR${"x".repeat(100)}`;
+  const candidate = `keep this ${boundaryPadding("\u0000", 4_580)}-----BEGIN RSA PR${"x".repeat(100)}`;
   const parsed = parseAnnotateOutput({ summary: candidate, tags: [candidate], label: candidate });
   assert.ok(parsed);
   assert.match(parsed.summary, /keep this/u);
@@ -310,6 +310,48 @@ test("parseAnnotateOutput removes every invisible format control before output r
     assert.deepEqual(parsed?.tags, ["[redacted anthropic key]"], name);
     assert.equal(parsed?.label, "[redacted anthropic key]", name);
     assert.doesNotMatch(JSON.stringify(parsed), /sk-ant-|abcdefghijklmnopqrst123/u, name);
+  }
+});
+
+test("annotation boundaries redact a token after visible text and an invisible control", async () => {
+  const token = "sk-ant-abcdefghijklmnopqrst123";
+  const candidate = `prefix\u061C${token}`;
+  const parsed = parseAnnotateOutput({ summary: candidate, tags: [candidate], label: candidate });
+  assert.ok(parsed);
+  assert.equal(parsed?.summary, "prefix[redacted anthropic key]");
+  assert.equal(parsed?.tags.length, 1);
+  assert.match(parsed?.tags[0] ?? "", /^prefix\[redacted anthropi/u);
+  assert.equal(parsed?.label, "prefix[redacted anthropic key]");
+
+  const capture: GenerateCapture = {};
+  const port = createOllamaAnnotate(fakeClient({ summary: "compact", tags: [] }, capture), "model-a");
+  const out = await port.run(
+    { intent: candidate, rationaleRaw: candidate, files: [{ path: candidate, excerpt: candidate }] },
+    AbortSignal.timeout(1_000),
+  );
+  assert.deepEqual(out, { summary: "compact", tags: [] });
+  assert.ok(capture.prompt);
+  assert.doesNotMatch(capture.prompt, /sk-ant-|abcdefghijklmnopqrst123/u);
+});
+
+test("annotation boundaries retain C0 and ANSI removal offsets", async () => {
+  const token = "sk-ant-abcdefghijklmnopqrst123";
+  for (const [name, control] of [["c0", "\u0000"], ["ansi", "\u001b[31m"]] as const) {
+    const candidate = `prefix${control}${token}`;
+    const parsed = parseAnnotateOutput({ summary: candidate, tags: [candidate], label: candidate });
+    assert.ok(parsed, name);
+    assert.equal(parsed?.summary, "prefix[redacted anthropic key]", name);
+    assert.equal(parsed?.label, "prefix[redacted anthropic key]", name);
+    assert.doesNotMatch(JSON.stringify(parsed), /sk-ant-|abcdefghijklmnopqrst123|\u001b|\u0000/u, name);
+
+    const capture: GenerateCapture = {};
+    const port = createOllamaAnnotate(fakeClient({ summary: "compact", tags: [] }, capture), "model-a");
+    await port.run(
+      { intent: candidate, rationaleRaw: candidate, files: [{ path: candidate, excerpt: candidate }] },
+      AbortSignal.timeout(1_000),
+    );
+    assert.ok(capture.prompt, name);
+    assert.doesNotMatch(capture.prompt, /sk-ant-|abcdefghijklmnopqrst123|\u001b|\u0000/u, name);
   }
 });
 
