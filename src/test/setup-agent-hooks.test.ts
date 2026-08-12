@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import {
   chmodSync,
   existsSync,
@@ -41,8 +42,22 @@ test("rockyHookCommand escapes POSIX metacharacters without changing the suffix"
   );
   assert.equal(
     command,
-    '"/opt/Rocky CLI/bin/node\\!" "/opt/Rocky CLI/\\$dist/rocky\\"cli/index.js" hook agent-event claude-code',
+    '"/opt/Rocky CLI/bin/node!" "/opt/Rocky CLI/\\$dist/rocky\\"cli/index.js" hook agent-event claude-code',
   );
+});
+
+test("POSIX hook command round-trips metacharacters through sh", () => {
+  if (process.platform === "win32") return;
+  const nodePath = "/tmp/Rocky CLI/node!bin";
+  const scriptPath = "/tmp/Rocky CLI/$dist/rocky`cli/quo\"te\\bin/index.js";
+  const command = rockyHookCommand("codex", nodePath, scriptPath);
+  const result = spawnSync(
+    "sh",
+    ["-c", `set -- ${command}; printf '%s\\n' "$1" "$2"`],
+    { encoding: "utf8" },
+  );
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(result.stdout.split("\n").slice(0, 2), [nodePath, scriptPath]);
 });
 
 test("rockyHookCommand rejects relative, control, and ephemeral paths", () => {
@@ -466,6 +481,20 @@ test("codexConfigSnippet keeps Windows paths and spaces TOML-safe", () => {
     'notify = ["C:\\\\Program Files\\\\node.exe", "C:\\\\Rocky CLI\\\\dist\\\\index.js", "hook", "agent-event", "codex"]',
   ));
   assert.ok(snippet.includes('command = \'"C:\\Program Files\\node.exe" "C:\\Rocky CLI\\dist\\index.js" hook agent-event codex\''));
+});
+
+test("codexConfigSnippet preserves Windows drive and UNC paths exactly", () => {
+  const nodePath = "C:\\Program Files\\$cache\\node`bin.exe";
+  const scriptPath = "\\\\server\\share\\Rocky CLI\\dist\\index.js\\";
+  const command = rockyHookCommand("codex", nodePath, scriptPath);
+  const snippet = codexConfigSnippet(command);
+  const expectedNotify = `notify = [${JSON.stringify(nodePath)}, ${JSON.stringify(scriptPath)}, "hook", "agent-event", "codex"]`;
+  assert.ok(snippet.includes(expectedNotify));
+  assert.equal((snippet.match(/command = /g) ?? []).length, 3);
+  for (const event of ["UserPromptSubmit", "PostToolUse", "Stop"]) {
+    assert.ok(snippet.includes(`[[hooks.${event}]]`));
+  }
+  assert.ok(snippet.includes(command));
 });
 
 function captureStderr(run: () => Promise<number>): Promise<{ code: number; stderr: string }> {

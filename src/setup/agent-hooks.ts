@@ -115,8 +115,7 @@ function quotePosixPath(value: string): string {
     .replaceAll("\\", "\\\\")
     .replaceAll("$", "\\$")
     .replaceAll("`", "\\`")
-    .replaceAll("\"", "\\\"")
-    .replaceAll("!", "\\!")}"`;
+    .replaceAll("\"", "\\\"")}"`;
 }
 
 function quoteWindowsPath(value: string): string {
@@ -154,27 +153,50 @@ interface HookCommandPaths {
   script: string;
 }
 
-function parseQuotedCommandPath(command: string, start: number): { value: string; next: number } {
-  if (command[start] !== '"') throw new Error("hook command must quote executable paths");
+function isWindowsCommandPath(raw: string): boolean {
+  return /^[A-Za-z]:[\\/]/.test(raw) || raw.startsWith("\\\\");
+}
+
+function decodeWindowsCommandPath(raw: string): string {
+  const trailing = raw.match(/\\+$/)?.[0];
+  if (trailing === undefined) return raw;
+  if (trailing.length % 2 !== 0) throw new Error("Windows hook path has malformed trailing escape");
+  return `${raw.slice(0, -trailing.length)}${"\\".repeat(trailing.length / 2)}`;
+}
+
+function decodePosixCommandPath(raw: string): string {
   let value = "";
-  for (let index = start + 1; index < command.length; index += 1) {
-    const character = command[index];
-    if (character === '"') return { value, next: index + 1 };
+  for (let index = 0; index < raw.length; index += 1) {
+    const character = raw[index];
     if (character !== "\\") {
       value += character;
       continue;
     }
-    const escaped = command[index + 1];
-    if (escaped === undefined) throw new Error("hook command has unfinished escape");
-    if (["\\", "$", "`", '"', "!"].includes(escaped)) {
-      value += escaped;
-      index += 1;
-    } else {
-      // Windows paths keep interior separators literal. POSIX commands only
-      // escape the metacharacters handled above, so an unknown escape retains
-      // its separator instead of silently changing the configured path.
-      value += "\\";
+    const escaped = raw[index + 1];
+    if (escaped === undefined || !["\\", "$", "`", '"', "!"].includes(escaped)) {
+      throw new Error("POSIX hook path has ambiguous escape");
     }
+    value += escaped;
+    index += 1;
+  }
+  return value;
+}
+
+function decodeCommandPath(raw: string): string {
+  return isWindowsCommandPath(raw) ? decodeWindowsCommandPath(raw) : decodePosixCommandPath(raw);
+}
+
+function parseQuotedCommandPath(command: string, start: number): { value: string; next: number } {
+  if (command[start] !== '"') throw new Error("hook command must quote executable paths");
+  let raw = "";
+  for (let index = start + 1; index < command.length; index += 1) {
+    const character = command[index];
+    if (character === '"') {
+      let slashes = 0;
+      for (let cursor = raw.length - 1; cursor >= 0 && raw[cursor] === "\\"; cursor -= 1) slashes += 1;
+      if (slashes % 2 === 0) return { value: decodeCommandPath(raw), next: index + 1 };
+    }
+    raw += character;
   }
   throw new Error("hook command has unterminated path");
 }
