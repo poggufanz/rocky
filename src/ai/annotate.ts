@@ -1,6 +1,6 @@
 import { Buffer } from "node:buffer";
 import { loadConfig, type ConfigLoadResult } from "../core/config-read.js";
-import { redactSecrets } from "../core/redact.js";
+import { redactSecrets, stripInvisibleControls } from "../core/redact.js";
 import { validateRockyPhrase } from "../ui/phrases.js";
 import { createOllamaClient, type OllamaClient } from "./ollama.js";
 
@@ -37,7 +37,6 @@ const ANSI_STRING_8BIT = /[\u0090\u0098\u009d\u009e\u009f][\s\S]*?(?:\u0007|\u00
 const ANSI_CSI_7BIT = /\u001b\[[0-?]*[ -/]*[@-~]/g;
 const ANSI_CSI_8BIT = /\u009b[0-?]*[ -/]*[@-~]/g;
 const ANSI_OTHER = /\u001b[()][0-2A-Z0-9]/g;
-const BIDI_RE = /[\u200e\u200f\u202a-\u202e\u2066-\u2069]/g;
 const CONTROL_RE = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/g;
 // Keep token families aligned with shared ASCII `\\b` patterns. Do not use
 // Unicode-aware `/u` here: a non-ASCII prefix is a boundary to the shared
@@ -112,15 +111,15 @@ function sanitizeText(value: string, maximum: number): string {
   // complete bounded prefix fits inside the 4.5 KiB inspection window.
   const wasTruncated =
     bounded.length < value.length || Buffer.byteLength(bounded, "utf8") > MAX_SCAN_BYTES;
-  const oneLine = bounded
+  const withoutTerminalControls = bounded
     .replace(ANSI_STRING_7BIT, "")
     .replace(ANSI_STRING_8BIT, "")
     .replace(ANSI_CSI_7BIT, "")
     .replace(ANSI_CSI_8BIT, "")
     .replace(ANSI_OTHER, "")
     .replace(/\u001b/g, "")
-    .replace(BIDI_RE, "")
-    .replace(CONTROL_RE, "")
+    .replace(CONTROL_RE, "");
+  const oneLine = stripInvisibleControls(withoutTerminalControls)
     .replace(/\s+/gu, " ")
     .trim();
   const redacted = redactSecrets(oneLine);

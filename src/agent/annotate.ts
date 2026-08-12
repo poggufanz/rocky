@@ -15,7 +15,7 @@ import { resolveRockyPaths, type RockyPaths } from "../core/state-paths.js";
 import { recordTripleOnce } from "../core/memory.js";
 import type { TripleFile, TripleRecord } from "../core/memory.js";
 import { loadConfig, type ConfigLoadResult } from "../core/config-read.js";
-import { redactSecrets } from "../core/redact.js";
+import { redactSecrets, stripInvisibleControls } from "../core/redact.js";
 import { annotatePortFromConfig, parseAnnotateOutput, type AnnotatePort, type AnnotateOutput } from "../ai/annotate.js";
 import {
   MAX_EXCERPT_CHARS,
@@ -46,7 +46,6 @@ const MAX_HEAD_CHARS = 256;
 const MAX_CWD_CHARS = 4096;
 const PROP_RE = /([a-zA-Z-]{2,})\s*:/g;
 const ANSI_RE = /\u001b(?:\][^\u0007]*(?:\u0007|\u001b\\)|\[[0-?]*[ -/]*[@-~])/g;
-const BIDI_RE = /[\u200e\u200f\u202a-\u202e\u2066-\u2069]/g;
 const CONTROL_RE = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/g;
 const NO_FOLLOW = process.platform === "win32" ? 0 : constants.O_NOFOLLOW;
 
@@ -86,17 +85,17 @@ function prefixUtf8(value: string, maximumBytes: number): string {
 
 function cleanText(value: string, maximum: number): string {
   const bounded = prefixUtf8(value, Math.max(1, maximum) * 4);
-  const stripped = bounded
-    .replace(ANSI_RE, "")
-    .replace(BIDI_RE, "")
-    .replace(CONTROL_RE, "");
+  const stripped = stripInvisibleControls(
+    bounded
+      .replace(ANSI_RE, "")
+      .replace(CONTROL_RE, ""),
+  );
   return redactSecrets(stripped).replace(/\s+/g, " ").trim().slice(0, maximum);
 }
 
 function operationalText(value: string, maximum: number): string {
-  return prefixUtf8(value, Math.max(1, maximum) * 4)
-    .replace(ANSI_RE, "")
-    .replace(BIDI_RE, "")
+  return stripInvisibleControls(prefixUtf8(value, Math.max(1, maximum) * 4)
+    .replace(ANSI_RE, ""))
     .replace(/[\r\n\t]/g, " ")
     .replace(CONTROL_RE, " ");
 }

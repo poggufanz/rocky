@@ -15,6 +15,13 @@ export const SECRET_PATTERNS: ReadonlyArray<readonly [kind: string, re: RegExp]>
   ["password assignment", /\b(?:password|secret)\s*=\s*(['"])([^'"]{4,})\1/i],
 ];
 
+const INVISIBLE_CONTROL_RE = /[\u061C\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]/g;
+
+/** Remove format controls without inserting separators before secret matching. */
+export function stripInvisibleControls(text: string): string {
+  return text.replace(INVISIBLE_CONTROL_RE, "");
+}
+
 export function redactSecrets(text: string): string {
   let out = text;
   for (const [kind, re] of SECRET_PATTERNS) {

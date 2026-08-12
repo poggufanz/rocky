@@ -25,6 +25,37 @@ import type { AgentEvent } from "../agent/schema.js";
 import { loadMemory, parseMemoryRecord, recordTriple, recordTripleOnce } from "../core/memory.js";
 import { resolveRockyPaths, type RockyPaths } from "../core/state-paths.js";
 
+const INVISIBLE_FORMAT_CONTROLS: ReadonlyArray<readonly [string, string]> = [
+  ["U+061C", "\u061C"],
+  ["U+200B", "\u200B"],
+  ["U+200C", "\u200C"],
+  ["U+200D", "\u200D"],
+  ["U+200E", "\u200E"],
+  ["U+200F", "\u200F"],
+  ["U+202A", "\u202A"],
+  ["U+202B", "\u202B"],
+  ["U+202C", "\u202C"],
+  ["U+202D", "\u202D"],
+  ["U+202E", "\u202E"],
+  ["U+2060", "\u2060"],
+  ["U+2061", "\u2061"],
+  ["U+2062", "\u2062"],
+  ["U+2063", "\u2063"],
+  ["U+2064", "\u2064"],
+  ["U+2065", "\u2065"],
+  ["U+2066", "\u2066"],
+  ["U+2067", "\u2067"],
+  ["U+2068", "\u2068"],
+  ["U+2069", "\u2069"],
+  ["U+206A", "\u206A"],
+  ["U+206B", "\u206B"],
+  ["U+206C", "\u206C"],
+  ["U+206D", "\u206D"],
+  ["U+206E", "\u206E"],
+  ["U+206F", "\u206F"],
+  ["U+FEFF", "\uFEFF"],
+];
+
 function freshPaths(t: TestContext): RockyPaths {
   const home = mkdtempSync(join(tmpdir(), "rocky-annotate-"));
   t.after(() => rmSync(home, { recursive: true, force: true }));
@@ -498,6 +529,27 @@ test("C0-obfuscated secrets are removed before durable redaction in every text f
   assert.doesNotMatch(durable, /sk-\s*ant-/u);
   assert.doesNotMatch(durable, /abcdefghijklmnopqrst123/u);
   assert.doesNotMatch(durable, /[\u0000-\u001f\u007f\u001b\u202e]/u);
+});
+
+test("every invisible format control is removed before durable redaction", async (t) => {
+  const paths = freshPaths(t);
+  for (const [name, control] of INVISIBLE_FORMAT_CONTROLS) {
+    const key = `format-${name.slice(2)}`;
+    const token = `sk-${control}ant-abcdefghijklmnopqrst123`;
+    append(key, [
+      { v: 1, agent: "codex", kind: "intent", ts: 1, text: `plan ${token}` },
+      { v: 1, agent: "codex", kind: "mechanism", ts: 2, tool: "Edit", path: `src/${token}.ts`, excerpt: `color: ${token}` },
+      { v: 1, agent: "codex", kind: "rationale", ts: 3, source: "notify", text: `why ${token}` },
+    ], paths);
+
+    const triple = await annotateBatch(key, { paths, git: () => undefined, queueLabel: () => {} });
+    assert.ok(triple, name);
+    assert.equal(triple?.intent?.text, "plan [redacted anthropic key]", name);
+    assert.equal(triple?.rationale?.text, "why [redacted anthropic key]", name);
+    assert.equal(triple?.mechanism.files[0]?.path, "src/[redacted anthropic key].ts", name);
+    assert.equal(triple?.mechanism.files[0]?.excerpt, "color: [redacted anthropic key]", name);
+    assert.doesNotMatch(JSON.stringify(triple), /sk-ant-|abcdefghijklmnopqrst123/u, name);
+  }
 });
 
 test("mixed-agent batches use the first valid agent and ignore mismatched evidence", async (t) => {

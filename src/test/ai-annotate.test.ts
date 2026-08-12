@@ -13,6 +13,37 @@ import {
 import type { OllamaClient } from "../ai/ollama.js";
 import { loadConfig, type ConfigLoadResult } from "../core/config-read.js";
 
+const INVISIBLE_FORMAT_CONTROLS: ReadonlyArray<readonly [string, string]> = [
+  ["U+061C", "\u061C"],
+  ["U+200B", "\u200B"],
+  ["U+200C", "\u200C"],
+  ["U+200D", "\u200D"],
+  ["U+200E", "\u200E"],
+  ["U+200F", "\u200F"],
+  ["U+202A", "\u202A"],
+  ["U+202B", "\u202B"],
+  ["U+202C", "\u202C"],
+  ["U+202D", "\u202D"],
+  ["U+202E", "\u202E"],
+  ["U+2060", "\u2060"],
+  ["U+2061", "\u2061"],
+  ["U+2062", "\u2062"],
+  ["U+2063", "\u2063"],
+  ["U+2064", "\u2064"],
+  ["U+2065", "\u2065"],
+  ["U+2066", "\u2066"],
+  ["U+2067", "\u2067"],
+  ["U+2068", "\u2068"],
+  ["U+2069", "\u2069"],
+  ["U+206A", "\u206A"],
+  ["U+206B", "\u206B"],
+  ["U+206C", "\u206C"],
+  ["U+206D", "\u206D"],
+  ["U+206E", "\u206E"],
+  ["U+206F", "\u206F"],
+  ["U+FEFF", "\uFEFF"],
+];
+
 function boundaryPadding(control: string, bytes = 4_080): string {
   const controlBytes = Buffer.byteLength(control, "utf8");
   const count = Math.floor(bytes / controlBytes);
@@ -245,6 +276,41 @@ test("createOllamaAnnotate removes a secret fragment after a Unicode word prefix
   assert.deepEqual(out, { summary: "compact", tags: [] });
   assert.ok(capture.prompt);
   assert.doesNotMatch(capture.prompt, /sk-ant-|abcdefghijklmnopqrst123/u);
+});
+
+test("createOllamaAnnotate removes every invisible format control before input redaction", async () => {
+  for (const [name, control] of INVISIBLE_FORMAT_CONTROLS) {
+    const token = `sk-${control}ant-abcdefghijklmnopqrst123`;
+    const capture: GenerateCapture = {};
+    const port = createOllamaAnnotate(fakeClient({ summary: "compact", tags: [] }, capture), "model-a");
+    const out = await port.run({
+      intent: token,
+      rationaleRaw: token,
+      files: [{ path: token, excerpt: token }],
+    }, AbortSignal.timeout(1_000));
+
+    assert.deepEqual(out, { summary: "compact", tags: [] }, name);
+    assert.ok(capture.prompt, name);
+    assert.doesNotMatch(capture.prompt, /sk-ant-|abcdefghijklmnopqrst123/u, name);
+    assert.match(capture.prompt, /\[redacted anthropic key\]/u, name);
+  }
+});
+
+test("parseAnnotateOutput removes every invisible format control before output redaction", () => {
+  for (const [name, control] of INVISIBLE_FORMAT_CONTROLS) {
+    const token = `sk-${control}ant-abcdefghijklmnopqrst123`;
+    const parsed = parseAnnotateOutput({
+      summary: token,
+      tags: [token],
+      label: token,
+    });
+
+    assert.ok(parsed, name);
+    assert.equal(parsed?.summary, "[redacted anthropic key]", name);
+    assert.deepEqual(parsed?.tags, ["[redacted anthropic key]"], name);
+    assert.equal(parsed?.label, "[redacted anthropic key]", name);
+    assert.doesNotMatch(JSON.stringify(parsed), /sk-ant-|abcdefghijklmnopqrst123/u, name);
+  }
 });
 
 test("createOllamaAnnotate returns undefined for invalid, throwing, and already-aborted calls", async () => {
