@@ -18,7 +18,7 @@ import { commandInvocation } from "./package-smoke-support.mjs";
 
 const packageRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const packageMetadata = JSON.parse(readFileSync(join(packageRoot, "package.json"), "utf8"));
-const PACKAGE_NAME = packageMetadata.name;
+const PACKAGE_NAME = "@poggufanz/rocky-cli";
 const PACKAGE_VERSION = packageMetadata.version;
 const COMMAND_TIMEOUT_MS = 10 * 60 * 1_000;
 const MAX_COMMAND_OUTPUT_BYTES = 32 * 1024 * 1024;
@@ -172,11 +172,11 @@ function runStep(state, env, label, file, args, display) {
   return result.stdout;
 }
 
-function assertMetadata(state) {
-  const value = JSON.parse(readFileSync(join(packageRoot, "package.json"), "utf8"));
+export function validateReleaseMetadata(value) {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
   const dependencies = value.dependencies ?? {};
   const optionalDependencies = value.optionalDependencies ?? {};
-  const valid = value.name === PACKAGE_NAME
+  return value.name === PACKAGE_NAME
     && value.version === PACKAGE_VERSION
     && JSON.stringify(value.bin) === JSON.stringify({ rocky: "./dist/index.js" })
     && value.engines?.node === ">=18"
@@ -189,6 +189,11 @@ function assertMetadata(state) {
     && value.publishConfig?.access === "public"
     && Object.keys(dependencies).length === 0
     && Object.keys(optionalDependencies).length === 0;
+}
+
+function assertMetadata(state) {
+  const value = JSON.parse(readFileSync(join(packageRoot, "package.json"), "utf8"));
+  const valid = validateReleaseMetadata(value);
   if (!valid) throw new StepError("package metadata assertion failed");
   state.metadata = {
     name: value.name,
@@ -400,11 +405,15 @@ async function main(reportPath) {
   if (failed) throw new StepError(state.failure);
 }
 
-try {
-  const report = reportArgument(process.argv.slice(2));
-  await main(report);
-  process.stdout.write(`${report}\n`);
-} catch (error) {
-  process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
-  process.exitCode = error instanceof UsageError ? 2 : 1;
+const launchedAsScript = process.argv[1] !== undefined
+  && resolve(process.argv[1]) === resolve(fileURLToPath(import.meta.url));
+if (launchedAsScript) {
+  try {
+    const report = reportArgument(process.argv.slice(2));
+    await main(report);
+    process.stdout.write(`${report}\n`);
+  } catch (error) {
+    process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+    process.exitCode = error instanceof UsageError ? 2 : 1;
+  }
 }

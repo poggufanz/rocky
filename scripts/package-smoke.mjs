@@ -641,10 +641,18 @@ async function main() {
   assert.match(triple.rationale.text, /\[redacted github token\]/);
   assert.doesNotMatch(JSON.stringify(triple), /ghp_/);
   assert.equal(spoolEntries().some((name) => name.endsWith(".jsonl") || name.endsWith(".lock")), false);
-  assert.equal(
-    readFileSync(labelsPath, "utf8").split("\n").filter(Boolean).length,
-    1,
-    "installed Claude turn must queue one passive label",
+  const queuedLabels = readFileSync(labelsPath, "utf8").split("\n").filter(Boolean);
+  assert.equal(queuedLabels.length, 1, "installed Claude turn must queue one passive label");
+  assert.match(
+    queuedLabels[0] ?? "",
+    /^you say "move button down"\. it is margin-top\. I think\. check, question$/u,
+    "installed Claude turn must queue deterministic mapping label",
+  );
+  assert.doesNotMatch(queuedLabels[0] ?? "", /ghp_/u, "queued label must not contain raw token");
+  assert.doesNotMatch(
+    queuedLabels[0] ?? "",
+    /[\u0000-\u001f\u007f-\u009f\u200e\u200f\u202a-\u202e\u2066-\u2069]/u,
+    "queued label must contain no control or bidi characters",
   );
 
   // Setup dogfood uses explicit consent in an isolated HOME. The Claude

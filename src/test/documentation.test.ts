@@ -136,6 +136,17 @@ test("README identity, roadmap, and Plan 01/Plan 02 v0.5 boundary stay aligned",
   assert.match(readme, /pre-created[^\n]*\.claude/i);
   assert.match(readme, /manual[^\n]*Codex[^\n]*TOML/i);
   assert.match(readme, /\/hooks/);
+  for (const mechanism of [
+    "intent→mechanism dictionary",
+    "reverse lookup",
+    "ambiguity surfacing",
+    "curious blind friend",
+    "recall, digest",
+  ]) {
+    const row = readme.split("\n").find((line) => line.toLowerCase().includes(mechanism));
+    assert.ok(row, `README must keep a conceptual row for ${mechanism}`);
+    assert.match(row ?? "", /Plan 02 deferred/i, `${mechanism} must be marked Plan 02 deferred`);
+  }
   for (const deferred of ["dictionary", "digest", "quiz", "export", "ambiguity", "search tools", "BYOK", "brief", "attest"]) {
     assert.match(readme, new RegExp(`${deferred}[^\\n]*defer|defer[^\\n]*${deferred}`, "i"));
   }

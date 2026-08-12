@@ -41,13 +41,14 @@ Two loops run in opposite directions:
 
 The arrow that usually breaks is *AI output → you learn from it*. Each arrow maps to one mechanism rather than to a slogan. In this unreleased branch, Plan 01 is implemented and Plan 02 remains deferred:
 
-| Arrow kept alive | Mechanism | Role |
-|---|---|---|
-| AI output → your understanding | Nervous system + intent→mechanism dictionary | Shows the concrete mechanism behind your intent and the agent's change |
-| Your understanding → next intent | Reverse lookup (mechanism→intent) | Returns the intent you actually stored, with its change ID and time |
-| Your intent → AI output | Ambiguity surfacing | Shows the several mechanisms one of your own words has already produced, and lets you pick |
-| Your articulation → memory | The curious blind friend | One curious question turns a one-line answer into a journal entry and a dictionary entry |
-| Memory → next decision | Recall, digest, historical evidence | Carries a cross-session lesson into a new decision |
+| Arrow kept alive | Mechanism | Role | Boundary |
+|---|---|---|---|
+| AI output → your understanding | Nervous system | Shows the concrete mechanism behind your intent and the agent's change | Plan 01 implemented |
+| AI output → your understanding | Intent→mechanism dictionary | Shows the concrete mechanism behind your intent and the agent's change | Plan 02 deferred |
+| Your understanding → next intent | Reverse lookup (mechanism→intent) | Returns the intent you actually stored, with its change ID and time | Plan 02 deferred |
+| Your intent → AI output | Ambiguity surfacing | Shows the several mechanisms one of your own words has already produced, and lets you pick | Plan 02 deferred |
+| Your articulation → memory | The curious blind friend | One curious question turns a one-line answer into a journal entry and a dictionary entry | Plan 02 deferred |
+| Memory → next decision | Recall, digest, historical evidence | Carries a cross-session lesson into a new decision | Plan 02 deferred |
 
 The claim stops there: better direction from you, never a smarter model.
 

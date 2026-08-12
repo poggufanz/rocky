@@ -11,7 +11,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   PACKAGE_BINARY,
   PACKAGE_NAME,
@@ -215,6 +215,18 @@ test("public package metadata pins the scoped beta identity and release coordina
   assert.deepEqual(metadata.files, expectedFiles);
   assert.equal(object(metadata.scripts, "scripts").prepack, "npm run build");
   assert.equal(object(metadata.scripts, "scripts").prepublishOnly, "npm test");
+});
+
+test("release metadata validation rejects a wrong package name independently", async () => {
+  const releaseCheck = await import(pathToFileURL(join(packageRoot, "scripts", "release-check.mjs")).href) as {
+    validateReleaseMetadata(value: unknown): boolean;
+  };
+  const metadata = readJson(join(packageRoot, "package.json"));
+  assert.equal(releaseCheck.validateReleaseMetadata(metadata), true);
+  assert.equal(
+    releaseCheck.validateReleaseMetadata({ ...metadata, name: "@attacker/not-rocky" }),
+    false,
+  );
 });
 
 test("package and lock contain no runtime or optional dependencies", () => {
