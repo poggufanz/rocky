@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import fs, {
+import {
   chmodSync,
   existsSync,
   lstatSync,
@@ -13,7 +13,6 @@ import fs, {
   symlinkSync,
   writeFileSync,
 } from "node:fs";
-import { syncBuiltinESMExports } from "node:module";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import {
@@ -135,28 +134,31 @@ function fixture(t: test.TestContext): { root: string; settings: string; command
   };
 }
 
-test("install decline never creates parent or writes settings", async (t) => {
+test("missing parent fails before consent or proposed JSON and never mutates filesystem", async (t) => {
   const value = fixture(t);
   const details: string[] = [];
-  const prompts: string[] = [];
+  let prompted = false;
   const result = await installClaudeAgentHooks({ settingsPath: value.settings }, {
     command: value.command,
     detail: (message) => details.push(message),
     confirmation: {
-      async confirm(message) {
-        prompts.push(message);
-        return false;
+      async confirm() {
+        prompted = true;
+        return true;
       },
     },
   });
-  assert.equal(result.status, "declined");
-  assert.deepEqual(prompts, ["install ears for claude code, question"]);
-  assert.equal(details.length, 1);
+  assert.equal(result.status, "error");
+  assert.equal(prompted, false);
+  assert.equal(details.length, 0);
+  assert.match(result.detail ?? "", /rerun setup/i);
+  assert.match(result.detail ?? "", /private directory/i);
+  assert.doesNotMatch(result.detail ?? "", /UserPromptSubmit|PostToolUse|Stop/);
   assert.equal(existsSync(dirname(value.settings)), false);
   assert.equal(existsSync(value.settings), false);
 });
 
-test("install creates private custom parent, preserves foreign settings, and is unchanged on repeat", async (t) => {
+test("install preserves foreign settings and is unchanged on repeat", async (t) => {
   const value = fixture(t);
   const existing = {
     custom: { keep: true },
@@ -215,6 +217,7 @@ test("malformed settings are unreadable before consent and never overwritten", a
 
 test("consent re-read preserves a config change made while prompt is open", async (t) => {
   const value = fixture(t);
+  mkdirSync(dirname(value.settings), { recursive: true, mode: 0o700 });
   const lateForeign = { whilePrompt: true };
   const result = await installClaudeAgentHooks({ settingsPath: value.settings }, {
     command: value.command,
@@ -230,8 +233,9 @@ test("consent re-read preserves a config change made while prompt is open", asyn
   assert.deepEqual((JSON.parse(readFileSync(value.settings, "utf8")) as Record<string, unknown>).whilePrompt, true);
 });
 
-test("authorized install creates a missing custom parent and CAS refuses a late write race", async (t) => {
+test("authorized install creates missing settings in an existing parent and CAS refuses a late write race", async (t) => {
   const value = fixture(t);
+  mkdirSync(dirname(value.settings), { recursive: true, mode: 0o700 });
   const result = await installClaudeAgentHooks({ settingsPath: value.settings }, {
     command: value.command,
     confirmation: { async confirm(): Promise<boolean> { return true; } },
@@ -251,90 +255,6 @@ test("authorized install creates a missing custom parent and CAS refuses a late 
   assert.equal(race.status, "error");
   assert.notDeepEqual(readFileSync(value.settings), before);
   assert.deepEqual(JSON.parse(readFileSync(value.settings, "utf8")), { concurrent: true });
-});
-
-test("ancestor rebind immediately before recursive parent creation fails closed", async (t) => {
-  const value = fixture(t);
-  const settings = join(value.root, "nested", "deep", "custom.json");
-  const attacker = join(value.root, "attacker");
-  mkdirSync(attacker);
-  let callbackCalled = false;
-  const result = await installClaudeAgentHooks({ settingsPath: settings }, {
-    command: value.command,
-    confirmation: { async confirm(): Promise<boolean> { return true; } },
-    beforeCreateParent: () => {
-      callbackCalled = true;
-      symlinkSync(attacker, join(value.root, "nested"));
-    },
-  });
-  assert.equal(callbackCalled, true);
-  assert.equal(result.status, "error");
-  assert.equal(existsSync(join(attacker, "deep", "custom.json")), false);
-  assert.equal(existsSync(settings), false);
-});
-
-test("newly created parent identity is retained across final topology validation", async (t) => {
-  const value = fixture(t);
-  const settings = join(value.root, "nested", "deep", "claude-settings.json");
-  const firstParent = join(value.root, "nested");
-  const parent = dirname(settings);
-  const backup = join(value.root, "created-parent-backup");
-  const originalMkdir = fs.mkdirSync;
-  let rebound = false;
-  fs.mkdirSync = ((path: fs.PathLike, options?: fs.MakeDirectoryOptions | fs.Mode | null) => {
-    const created = originalMkdir(path, options);
-    if (String(path) === parent && !rebound) {
-      rebound = true;
-      renameSync(firstParent, backup);
-      originalMkdir(firstParent, options);
-      originalMkdir(parent, options);
-    }
-    return created;
-  }) as typeof fs.mkdirSync;
-  syncBuiltinESMExports();
-  t.after(() => {
-    fs.mkdirSync = originalMkdir;
-    syncBuiltinESMExports();
-  });
-
-  const result = await installClaudeAgentHooks({ settingsPath: settings }, {
-    command: value.command,
-    confirmation: { async confirm(): Promise<boolean> { return true; } },
-  });
-  assert.equal(rebound, true);
-  assert.equal(result.status, "error");
-  assert.equal(existsSync(settings), false);
-});
-
-test("parent rebind immediately after mkdir fails closed before chmod", async (t) => {
-  const value = fixture(t);
-  const settings = join(value.root, "nested", "claude-settings.json");
-  const parent = dirname(settings);
-  const backup = join(value.root, "created-parent-backup");
-  const originalMkdir = fs.mkdirSync;
-  let rebound = false;
-  fs.mkdirSync = ((path: fs.PathLike, options?: fs.MakeDirectoryOptions | fs.Mode | null) => {
-    const created = originalMkdir(path, options);
-    if (String(path) === parent && !rebound) {
-      rebound = true;
-      renameSync(parent, backup);
-      originalMkdir(parent, options);
-    }
-    return created;
-  }) as typeof fs.mkdirSync;
-  syncBuiltinESMExports();
-  t.after(() => {
-    fs.mkdirSync = originalMkdir;
-    syncBuiltinESMExports();
-  });
-
-  const result = await installClaudeAgentHooks({ settingsPath: settings }, {
-    command: value.command,
-    confirmation: { async confirm(): Promise<boolean> { return true; } },
-  });
-  assert.equal(rebound, true);
-  assert.equal(result.status, "error");
-  assert.equal(existsSync(settings), false);
 });
 
 test("same-byte same-mode inode replacement is a CAS change, not a successful write", async (t) => {
@@ -445,6 +365,7 @@ test("status is absent for partial, stale, duplicate, or unknown owned markers",
 
 test("dedicated setup branch installs only Claude hooks and never invokes MCP adapters", async (t) => {
   const value = fixture(t);
+  mkdirSync(join(value.root, ".claude"), { mode: 0o700 });
   const calls: string[] = [];
   const dependencies: SetupDependencies = {
     runner: { async run() { throw new Error("MCP runner must not run"); }, async openSession() { throw new Error("MCP session must not open"); } },
@@ -477,6 +398,12 @@ test("dedicated setup branch installs only Claude hooks and never invokes MCP ad
 test("dedicated --yes agent-hook install still requires explicit consent", async (t) => {
   const value = fixture(t);
   let prompts = 0;
+  const originalStderr = process.stderr.write;
+  let stderr = "";
+  process.stderr.write = ((chunk: string | Uint8Array) => {
+    stderr += String(chunk);
+    return true;
+  }) as typeof process.stderr.write;
   const dependencies: SetupDependencies = {
     runner: { async run() { throw new Error("MCP runner must not run"); }, async openSession() { throw new Error("MCP session must not open"); } },
     platform: createPlatformServices({
@@ -496,7 +423,15 @@ test("dedicated --yes agent-hook install still requires explicit consent", async
     nodePath: process.execPath,
     entryPath: process.execPath,
   };
-  assert.equal(await setup(["--agent-hooks", "--yes"], dependencies), 1);
-  assert.equal(prompts, 1);
+  let code: number;
+  try {
+    code = await setup(["--agent-hooks", "--yes"], dependencies);
+  } finally {
+    process.stderr.write = originalStderr;
+  }
+  assert.equal(code, 1);
+  assert.equal(prompts, 0);
+  assert.match(stderr, /private directory/i);
+  assert.match(stderr, /rerun setup/i);
   assert.equal(existsSync(join(value.root, ".claude")), false);
 });

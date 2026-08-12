@@ -1,6 +1,6 @@
-import { chmodSync, lstatSync, mkdirSync, readdirSync } from "node:fs";
+import { lstatSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, dirname, join, posix, win32 } from "node:path";
+import { dirname, join, posix, win32 } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   atomicWriteJsonIfUnchanged,
@@ -14,6 +14,8 @@ const CLAUDE_MARKER = "hook agent-event claude-code";
 const POST_TOOL_MATCHER = "Edit|Write|MultiEdit|NotebookEdit";
 const AGENT_HOOK_CONFIRMATION = "install ears for claude code, question";
 const GENERIC_ERROR = "Claude Code agent hooks update cannot complete";
+const MISSING_PARENT_PROTECTION = process.platform === "win32" ? "private ACL" : "mode 0700";
+const MISSING_PARENT_ERROR = `Claude Code settings parent missing; create private directory for Claude settings with ${MISSING_PARENT_PROTECTION}, then rerun setup`;
 
 export interface AgentHooksTarget {
   settingsPath: string;
@@ -35,8 +37,6 @@ export interface AgentHooksRuntimeOptions {
   detail?: (message: string) => void;
   /** Test seam for proving the transactional writer refuses a late race. */
   beforeWrite?: () => void;
-  /** Test seam for rebinding a missing parent immediately before creation. */
-  beforeCreateParent?: () => void;
 }
 
 export interface AgentHooksOperationResult {
@@ -62,7 +62,7 @@ interface Topology {
   targetExists: boolean;
   targetIdentity?: { dev: number; ino: number };
   directories: readonly PathIdentity[];
-  /** Missing parent components in creation order, nearest root first. */
+  /** Missing parent components, nearest root first. */
   missing: readonly string[];
 }
 
@@ -283,6 +283,12 @@ function errorCode(error: unknown): string | undefined {
   return isObject(error) && typeof error.code === "string" ? error.code : undefined;
 }
 
+function operationDetail(error: unknown): string {
+  return error instanceof Error && error.message === MISSING_PARENT_ERROR
+    ? MISSING_PARENT_ERROR
+    : GENERIC_ERROR;
+}
+
 function inspectTopology(path: string): Topology {
   const directories: PathIdentity[] = [];
   const missing: string[] = [];
@@ -346,91 +352,14 @@ function targetSnapshotMatches(topology: Topology, read: ReadableJsonResult): bo
     && topology.targetIdentity.ino === read.identity.ino;
 }
 
-function sameTopologyDirectories(expected: readonly PathIdentity[], actual: Topology): boolean {
-  return expected.every((entry) => actual.directories.some((observed) =>
-    observed.path === entry.path
-      && observed.dev === entry.dev
-      && observed.ino === entry.ino));
-}
-
-function createPrivateParent(
-  targetPath: string,
-  initial: Topology,
-  beforeCreateParent?: () => void,
-): Topology {
-  beforeCreateParent?.();
-  try {
-    const expectedDirectories: PathIdentity[] = [...initial.directories];
-    for (const parent of initial.missing) {
-      try {
-        lstatSync(parent);
-        // Every path in initial.missing was absent during the authorized
-        // snapshot. If another actor wins the name before our mkdir, do not
-        // adopt its directory as Rocky's creation baseline.
-        throw new Error(GENERIC_ERROR);
-      } catch (error) {
-        if (error instanceof Error && error.message === GENERIC_ERROR) throw error;
-        if (errorCode(error) !== "ENOENT") throw new Error(GENERIC_ERROR);
-      }
-
-      const container = dirname(parent);
-      let containerBefore: ReturnType<typeof lstatSync>;
-      let entriesBefore: string[];
-      try {
-        containerBefore = lstatSync(container);
-        if (!containerBefore.isDirectory() || containerBefore.isSymbolicLink()) {
-          throw new Error(GENERIC_ERROR);
-        }
-        entriesBefore = readdirSync(container);
-      } catch (error) {
-        if (error instanceof Error && error.message === GENERIC_ERROR) throw error;
-        if (errorCode(error) !== "ENOENT") throw new Error(GENERIC_ERROR);
-        throw new Error(GENERIC_ERROR);
-      }
-
-      if (entriesBefore.includes(basename(parent))) throw new Error(GENERIC_ERROR);
-      mkdirSync(parent, { mode: 0o700 });
-      const metadata = lstatSync(parent);
-      if (!metadata.isDirectory() || metadata.isSymbolicLink()) throw new Error(GENERIC_ERROR);
-      const containerAfter = lstatSync(container);
-      if (!containerAfter.isDirectory()
-        || containerAfter.isSymbolicLink()
-        || containerAfter.dev !== containerBefore.dev
-        || containerAfter.ino !== containerBefore.ino) {
-        throw new Error(GENERIC_ERROR);
-      }
-      const entriesAfter = readdirSync(container);
-      const expectedEntries = [...entriesBefore, basename(parent)].sort();
-      entriesAfter.sort();
-      if (entriesAfter.length !== expectedEntries.length
-        || entriesAfter.some((entry, index) => entry !== expectedEntries[index])) {
-        throw new Error(GENERIC_ERROR);
-      }
-      // Retain identity for every component that was absent in the initial
-      // snapshot. A later ancestor rebind must not become the new guard
-      // baseline merely because final inspection observes it first.
-      expectedDirectories.push({ path: parent, dev: metadata.dev, ino: metadata.ino });
-      // mkdir mode is subject to umask. Ensure every component Rocky owns
-      // is private even when the invoking shell has a permissive umask.
-      chmodSync(parent, 0o700);
-    }
-    const after = inspectTopology(targetPath);
-    if (after.targetExists || after.missing.length !== 0 || !sameTopologyDirectories(expectedDirectories, after)) {
-      throw new Error(GENERIC_ERROR);
-    }
-    return after;
-  } catch {
-    throw new Error(GENERIC_ERROR);
-  }
-}
-
-function inspectCurrent(path: string): CurrentConfig {
+function inspectCurrent(path: string, requireParent = false): CurrentConfig {
   let topology: Topology;
   try {
     topology = inspectTopology(path);
   } catch {
     throw new Error(GENERIC_ERROR);
   }
+  if (requireParent && topology.missing.length > 0) throw new Error(MISSING_PARENT_ERROR);
   if (inspectJsonTransaction(path).status === "pending") throw new Error(GENERIC_ERROR);
   const read = readJsonObject(path);
   if (read.status === "invalid") throw new Error(GENERIC_ERROR);
@@ -442,11 +371,9 @@ function inspectCurrent(path: string): CurrentConfig {
   return { read, topology };
 }
 
-function prepareMutation(path: string, options: AgentHooksRuntimeOptions): CurrentConfig {
-  let topology = inspectTopology(path);
-  if (!topology.targetExists) {
-    topology = createPrivateParent(path, topology, options.beforeCreateParent);
-  }
+function prepareMutation(path: string): CurrentConfig {
+  const topology = inspectTopology(path);
+  if (topology.missing.length > 0) throw new Error(MISSING_PARENT_ERROR);
   if (inspectJsonTransaction(path).status === "pending") throw new Error(GENERIC_ERROR);
   const read = readJsonObject(path);
   if (read.status === "invalid") throw new Error(GENERIC_ERROR);
@@ -520,12 +447,13 @@ export async function installClaudeAgentHooks(
     resolved = resolveTarget(target, options);
     command = commandFor(options);
     // Validate pending transactions, target topology, and JSON before any
-    // display or consent. Missing parent/config is readable and remains
-    // untouched until explicit consent authorizes parent creation.
-    inspectCurrent(resolved.settingsPath);
+    // display or consent. A missing parent is rejected before any proposed
+    // JSON or prompt; an existing parent with missing settings stays writable
+    // only after explicit consent.
+    inspectCurrent(resolved.settingsPath, true);
     printEntries(command, options);
-  } catch {
-    return { status: "error", detail: GENERIC_ERROR };
+  } catch (error) {
+    return { status: "error", detail: operationDetail(error) };
   }
 
   const confirmation = options.confirmation ?? defaultConfirmation();
@@ -540,11 +468,11 @@ export async function installClaudeAgentHooks(
   try {
     // Re-read after the prompt. This is deliberate: user or another setup
     // process may have changed settings while consent was pending.
-    const current = prepareMutation(resolved.settingsPath, options);
+    const current = prepareMutation(resolved.settingsPath);
     const merged = mergeClaudeHooks(current.read.value, command);
     return writeMutation(resolved.settingsPath, current, merged, options);
-  } catch {
-    return { status: "error", detail: GENERIC_ERROR };
+  } catch (error) {
+    return { status: "error", detail: operationDetail(error) };
   }
 }
 
