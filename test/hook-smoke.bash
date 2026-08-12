@@ -82,7 +82,9 @@ run_label_prompt() { # <home> <locale> <stdout> <stderr> [off] [shim-dir] [race-
   if [[ "$off" == "1" ]]; then
     ROCKY_OFF=1 PATH="$shim_prefix$PATH" ROCKY_LABEL_RACE_MODE="$race_mode" \
       ROCKY_LABEL_RACE_PATH="$race_path" ROCKY_LABEL_RACE_MARKER="$LABEL_RACE_MARKER" \
-      ROCKY_LABEL_REAL_STAT="$LABEL_REAL_STAT" ROCKY_LABEL_REAL_MV="$LABEL_REAL_MV" ROCKY_LABEL_REAL_CAT="$LABEL_REAL_CAT" \
+      ROCKY_LABEL_RACE_DIR="$LABEL_RACE_DIR" ROCKY_LABEL_REAL_STAT="$LABEL_REAL_STAT" \
+      ROCKY_LABEL_REAL_MV="$LABEL_REAL_MV" ROCKY_LABEL_REAL_CAT="$LABEL_REAL_CAT" \
+      ROCKY_LABEL_REAL_MKDIR="$LABEL_REAL_MKDIR" \
       ROCKY_LABEL_ESCAPE="$LABEL_ESCAPE" LC_ALL="$locale_name" ROCKY_HOME="$home" ROCKY_BIN="$LABEL_PROBE" \
       bash --noprofile --norc -i -c '
         source "$ROCKY_HOME/rocky-hook.bash"
@@ -92,7 +94,9 @@ run_label_prompt() { # <home> <locale> <stdout> <stderr> [off] [shim-dir] [race-
   else
     PATH="$shim_prefix$PATH" ROCKY_LABEL_RACE_MODE="$race_mode" \
       ROCKY_LABEL_RACE_PATH="$race_path" ROCKY_LABEL_RACE_MARKER="$LABEL_RACE_MARKER" \
-      ROCKY_LABEL_REAL_STAT="$LABEL_REAL_STAT" ROCKY_LABEL_REAL_MV="$LABEL_REAL_MV" ROCKY_LABEL_REAL_CAT="$LABEL_REAL_CAT" \
+      ROCKY_LABEL_RACE_DIR="$LABEL_RACE_DIR" ROCKY_LABEL_REAL_STAT="$LABEL_REAL_STAT" \
+      ROCKY_LABEL_REAL_MV="$LABEL_REAL_MV" ROCKY_LABEL_REAL_CAT="$LABEL_REAL_CAT" \
+      ROCKY_LABEL_REAL_MKDIR="$LABEL_REAL_MKDIR" \
       ROCKY_LABEL_ESCAPE="$LABEL_ESCAPE" LC_ALL="$locale_name" ROCKY_HOME="$home" ROCKY_BIN="$LABEL_PROBE" \
       bash --noprofile --norc -i -c '
         source "$ROCKY_HOME/rocky-hook.bash"
@@ -123,6 +127,60 @@ run_label_prompt() { # <home> <locale> <stdout> <stderr> [off] [shim-dir] [race-
   return "$status"
 }
 
+run_two_label_prompts() { # <home> <locale> <out1> <err1> <out2> <err2> [shim-dir] [race-mode]
+  local home="$1" locale_name="$2" out1="$3" err1="$4" out2="$5" err2="$6"
+  local shim_dir="${7:-}" race_mode="${8:-}" shim_prefix="" pid1 pid2 ticks=0 status1=0 status2=0
+  [[ -n "$shim_dir" ]] && shim_prefix="$shim_dir:"
+  : > "$out1"
+  : > "$err1"
+  : > "$out2"
+  : > "$err2"
+  PATH="$shim_prefix$PATH" ROCKY_LABEL_RACE_MODE="$race_mode" \
+    ROCKY_LABEL_RACE_PATH="$home/labels" ROCKY_LABEL_RACE_MARKER="$LABEL_RACE_MARKER" \
+    ROCKY_LABEL_RACE_DIR="$LABEL_RACE_DIR" ROCKY_LABEL_REAL_STAT="$LABEL_REAL_STAT" \
+    ROCKY_LABEL_REAL_MV="$LABEL_REAL_MV" ROCKY_LABEL_REAL_CAT="$LABEL_REAL_CAT" \
+    ROCKY_LABEL_REAL_MKDIR="$LABEL_REAL_MKDIR" \
+    LC_ALL="$locale_name" ROCKY_HOME="$home" ROCKY_BIN="$LABEL_PROBE" \
+    bash --noprofile --norc -i -c '
+      source "$ROCKY_HOME/rocky-hook.bash"
+      __rocky_last_cmd=""
+      __rocky_precmd
+    ' >"$out1" 2>"$err1" &
+  pid1=$!
+  PATH="$shim_prefix$PATH" ROCKY_LABEL_RACE_MODE="$race_mode" \
+    ROCKY_LABEL_RACE_PATH="$home/labels" ROCKY_LABEL_RACE_MARKER="$LABEL_RACE_MARKER" \
+    ROCKY_LABEL_RACE_DIR="$LABEL_RACE_DIR" ROCKY_LABEL_REAL_STAT="$LABEL_REAL_STAT" \
+    ROCKY_LABEL_REAL_MV="$LABEL_REAL_MV" ROCKY_LABEL_REAL_CAT="$LABEL_REAL_CAT" \
+    ROCKY_LABEL_REAL_MKDIR="$LABEL_REAL_MKDIR" \
+    LC_ALL="$locale_name" ROCKY_HOME="$home" ROCKY_BIN="$LABEL_PROBE" \
+    bash --noprofile --norc -i -c '
+      source "$ROCKY_HOME/rocky-hook.bash"
+      __rocky_last_cmd=""
+      __rocky_precmd
+    ' >"$out2" 2>"$err2" &
+  pid2=$!
+  while kill -0 "$pid1" >/dev/null 2>&1 || kill -0 "$pid2" >/dev/null 2>&1; do
+    if [[ "$ticks" -ge 60 ]]; then
+      kill -KILL "$pid1" "$pid2" >/dev/null 2>&1 || true
+      wait "$pid1" >/dev/null 2>&1 || true
+      wait "$pid2" >/dev/null 2>&1 || true
+      echo "FAIL  - simultaneous label prompts timed out"
+      FAIL=1
+      return 124
+    fi
+    sleep 0.1
+    ticks=$((ticks + 1))
+  done
+  wait "$pid1" || status1=$?
+  wait "$pid2" || status2=$?
+  if [[ "$status1" -ne 0 || "$status2" -ne 0 ]]; then
+    echo "FAIL  - simultaneous label prompts exited $status1/$status2"
+    FAIL=1
+    return 1
+  fi
+  return 0
+}
+
 # Deterministic race shims: stat observes the opened claim descriptor, then
 # swaps the public pathname or kills the drain at selected commit points. The
 # prompt helper kills a stuck child after five seconds, so regressions remain
@@ -130,15 +188,46 @@ run_label_prompt() { # <home> <locale> <stdout> <stderr> [off] [shim-dir] [race-
 LABEL_RACE_BIN="$TMP/label-race-bin"
 mkdir -p "$LABEL_RACE_BIN"
 LABEL_RACE_MARKER="$TMP/label-race-marker"
+LABEL_RACE_DIR="$TMP/label-race-dir"
+mkdir -p "$LABEL_RACE_DIR"
 LABEL_REAL_STAT="$(command -v stat || true)"
 LABEL_REAL_MV="$(command -v mv || true)"
 LABEL_REAL_CAT="$(command -v cat || true)"
+LABEL_REAL_MKDIR="$(command -v mkdir || true)"
 LABEL_ESCAPE="$TMP/label-escape"
 mkdir -p "$LABEL_ESCAPE"
+cat > "$LABEL_RACE_BIN/mkdir" <<'MKDIR'
+#!/usr/bin/env bash
+if [[ "$ROCKY_LABEL_RACE_MODE" == "simultaneous-retained" &&
+      "${1:-}" == "$ROCKY_HOME"/.labels.claim.*/*.active ]]; then
+  : > "$ROCKY_LABEL_RACE_DIR/entrant.$BASHPID"
+  __rocky_race_ticks=0
+  while [[ ! -e "$ROCKY_LABEL_RACE_DIR/release" && "$__rocky_race_ticks" -lt 100 ]]; do
+    if [[ "$(find "$ROCKY_LABEL_RACE_DIR" -maxdepth 1 -name 'entrant.*' -type f -print | wc -l)" -ge 2 ]]; then
+      : > "$ROCKY_LABEL_RACE_DIR/lock-boundary"
+      : > "$ROCKY_LABEL_RACE_DIR/release"
+    fi
+    sleep 0.01
+    __rocky_race_ticks=$((__rocky_race_ticks + 1))
+  done
+fi
+if [[ "$ROCKY_LABEL_RACE_MODE" == "lock-init-window" &&
+      "${1:-}" == "$ROCKY_HOME"/.labels.claim.*/*.active ]]; then
+  "$ROCKY_LABEL_REAL_MKDIR" "$@"
+  __rocky_mkdir_status=$?
+  if [[ "$__rocky_mkdir_status" -eq 0 ]]; then
+    sleep 0.2
+  fi
+  exit "$__rocky_mkdir_status"
+fi
+exec "$ROCKY_LABEL_REAL_MKDIR" "$@"
+MKDIR
+chmod +x "$LABEL_RACE_BIN/mkdir"
 cat > "$LABEL_RACE_BIN/stat" <<'STAT'
 #!/usr/bin/env bash
 "$ROCKY_LABEL_REAL_STAT" "$@" || exit $?
 if [[ ! -e "$ROCKY_LABEL_RACE_MARKER" && \
+      ! -e "$ROCKY_LABEL_RACE_DIR/lock-boundary" && \
       ( ( "$1" == "-c" && "$2" == "%s" && "$3" == "$ROCKY_LABEL_RACE_PATH" ) ||
         ( "$1" == "-Lc" && "$2" == "%s" && "$3" == "/dev/fd/9" ) ||
         ( "$1" == "-f" && "$2" == "%z" && "$3" == "/dev/fd/9" ) ) ]]; then
@@ -226,6 +315,52 @@ check "claim crash leaves marker" test -e "$LABEL_RACE_MARKER"
 run_label_prompt "$LABEL_HOME" C "$LABEL_STDOUT" "$LABEL_STDERR"
 check "crashed claim retries once" grep -qF '[Rocky] crash retry label' "$LABEL_STDERR"
 check "crashed claim is cleaned" test -z "$(find "$LABEL_HOME" -maxdepth 1 -name '.labels.claim.*' -print -quit)"
+
+# Two prompt workers must atomically own one retained source. The mkdir shim
+# releases only after both workers contend at the lock boundary, making the
+# pre-fix duplicate read/print deterministic while keeping the parent bounded.
+rm -rf "$LABEL_HOME"/.labels.claim.* "$LABEL_RACE_DIR"
+mkdir -p "$LABEL_RACE_DIR" "$LABEL_HOME/.labels.claim.010-concurrent"
+printf 'same retained head\n' > "$LABEL_HOME/.labels.claim.010-concurrent/remainder.next.1"
+CONCURRENT_OUT1="$TMP/concurrent-1.stdout"
+CONCURRENT_ERR1="$TMP/concurrent-1.stderr"
+CONCURRENT_OUT2="$TMP/concurrent-2.stdout"
+CONCURRENT_ERR2="$TMP/concurrent-2.stderr"
+run_two_label_prompts "$LABEL_HOME" C "$CONCURRENT_OUT1" "$CONCURRENT_ERR1" \
+  "$CONCURRENT_OUT2" "$CONCURRENT_ERR2" "$LABEL_RACE_BIN" simultaneous-retained
+CONCURRENT_HEAD_COUNT="$(cat "$CONCURRENT_ERR1" "$CONCURRENT_ERR2" | grep -a -cF '[Rocky] same retained head' || true)"
+check "simultaneous retained claim prints once" test "$CONCURRENT_HEAD_COUNT" -eq 1
+check "simultaneous retained claim leaves no duplicate source" \
+  test -z "$(find "$LABEL_HOME" -maxdepth 2 -type f -name 'remainder.next.*' -print -quit)"
+
+# The first owner may be paused after atomic mkdir and before publishing its
+# PID/token. A contender must treat that lock as live, not steal it.
+rm -rf "$LABEL_HOME"/.labels.claim.* "$LABEL_RACE_DIR"
+mkdir -p "$LABEL_RACE_DIR" "$LABEL_HOME/.labels.claim.010-init-window"
+printf 'init window head\n' > "$LABEL_HOME/.labels.claim.010-init-window/remainder.next.1"
+run_two_label_prompts "$LABEL_HOME" C "$CONCURRENT_OUT1" "$CONCURRENT_ERR1" \
+  "$CONCURRENT_OUT2" "$CONCURRENT_ERR2" "$LABEL_RACE_BIN" lock-init-window
+INIT_WINDOW_HEAD_COUNT="$(cat "$CONCURRENT_ERR1" "$CONCURRENT_ERR2" | grep -a -cF '[Rocky] init window head' || true)"
+check "lock initialization window prints once" test "$INIT_WINDOW_HEAD_COUNT" -eq 1
+check "lock initialization window leaves no source" \
+  test -z "$(find "$LABEL_HOME" -maxdepth 2 -type f -name 'remainder.next.*' -print -quit)"
+
+# A permanently invalid retained claim must not stop later valid retained or
+# public labels. Invalid data stays inside the private claim namespace.
+rm -rf "$LABEL_HOME"/.labels.claim.* "$LABEL_RACE_DIR"
+mkdir -p "$LABEL_HOME/.labels.claim.010-invalid" "$LABEL_HOME/.labels.claim.020-valid"
+head -c 65537 /dev/zero > "$LABEL_HOME/.labels.claim.010-invalid/remainder.next.bad"
+printf 'valid after invalid\n' > "$LABEL_HOME/.labels.claim.020-valid/remainder.next.good"
+printf 'public after retained\n' > "$LABEL_HOME/labels"
+run_label_prompt "$LABEL_HOME" C "$LABEL_STDOUT" "$LABEL_STDERR"
+check "invalid retained claim does not starve valid retained" \
+  grep -qF '[Rocky] valid after invalid' "$LABEL_STDERR"
+run_label_prompt "$LABEL_HOME" C "$LABEL_STDOUT" "$LABEL_STDERR"
+check "invalid retained claim does not starve public queue" \
+  grep -qF '[Rocky] public after retained' "$LABEL_STDERR"
+check "invalid retained claim remains private" \
+  test -n "$(find "$LABEL_HOME" -type f -name 'remainder.next.bad' -print -quit)"
+rm -rf "$LABEL_HOME"/.labels.claim.* "$LABEL_RACE_DIR"
 
 # A crash after private remainder persistence but before display must retry the
 # original queue head first; otherwise persisted remainder could overtake it.
