@@ -62,6 +62,31 @@ test("redactSecretsAtBoundary preserves trailing boundaries removed after fixed-
   assert.equal(redactSecretsAtBoundary(`${npm}\u061Csuffix`), "[redacted npm token]suffix");
 });
 
+test("redactSecretsAtBoundary stops variable-length tokens at a removed trailing boundary", () => {
+  const cases: ReadonlyArray<readonly [string, string]> = [
+    ["sk-ant-abcdefghijklmnopqrst123", "anthropic key"],
+    ["ghp_abcdefghijklmnopqrstuvwxyz1234567890", "github token"],
+    ["xoxb-1234567890abcdefghijklmnop", "slack token"],
+    ["sk-abcdefghijklmnopqrst123", "openai key"],
+  ];
+
+  for (const [token, kind] of cases) {
+    assert.equal(
+      redactSecretsAtBoundary(`😀${token}\u061CZ`),
+      `😀[redacted ${kind}]Z`,
+      kind,
+    );
+  }
+});
+
+test("redactSecretsAtBoundary keeps an internal split inside a longer token", () => {
+  const token = `sk-ant-${"abcdefghijklmnopqrst"}\u061Cuvw`;
+  assert.equal(
+    redactSecretsAtBoundary(`😀${token}!`),
+    "😀[redacted anthropic key]!",
+  );
+});
+
 test("redactSecretsAtBoundary removes recognizable fragments for every secret family", () => {
   const cases: ReadonlyArray<readonly [string, string]> = [
     ["AKIAABCDEFGH", "aws access key"],

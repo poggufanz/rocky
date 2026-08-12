@@ -15,7 +15,7 @@ import { resolveRockyPaths, type RockyPaths } from "../core/state-paths.js";
 import { recordTripleOnce } from "../core/memory.js";
 import type { TripleFile, TripleRecord } from "../core/memory.js";
 import { loadConfig, type ConfigLoadResult } from "../core/config-read.js";
-import { redactSecretsAtBoundary, stripInvisibleControls } from "../core/redact.js";
+import { redactSecretsAtBoundary, replaceAnsiAndControls, stripInvisibleControls } from "../core/redact.js";
 import { annotatePortFromConfig, parseAnnotateOutput, type AnnotatePort, type AnnotateOutput } from "../ai/annotate.js";
 import {
   MAX_EXCERPT_CHARS,
@@ -45,8 +45,6 @@ const MAX_PATH_CHARS = 1024;
 const MAX_HEAD_CHARS = 256;
 const MAX_CWD_CHARS = 4096;
 const PROP_RE = /([a-zA-Z-]{2,})\s*:/g;
-const ANSI_RE = /\u001b(?:\][^\u0007]*(?:\u0007|\u001b\\)|\[[0-?]*[ -/]*[@-~])/g;
-const CONTROL_RE = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/g;
 // Internal sentinel: redactSecretsAtBoundary removes it while recording the
 // boundary restored by stripping ANSI/C0/C1 controls.
 const BOUNDARY_MARKER = "\u2065";
@@ -88,19 +86,15 @@ function prefixUtf8(value: string, maximumBytes: number): string {
 
 function cleanText(value: string, maximum: number): string {
   const bounded = prefixUtf8(value, Math.max(1, maximum) * 4);
-  const stripped = bounded
-    .replace(ANSI_RE, BOUNDARY_MARKER)
-    .replace(CONTROL_RE, BOUNDARY_MARKER);
+  const stripped = replaceAnsiAndControls(bounded, BOUNDARY_MARKER);
   return redactSecretsAtBoundary(stripped, {
     mayBeTruncated: value.length >= maximum || bounded.length < value.length,
   }).replace(/\s+/g, " ").trim().slice(0, maximum);
 }
 
 function operationalText(value: string, maximum: number): string {
-  return stripInvisibleControls(prefixUtf8(value, Math.max(1, maximum) * 4)
-    .replace(ANSI_RE, ""))
-    .replace(/[\r\n\t]/g, " ")
-    .replace(CONTROL_RE, " ");
+  return stripInvisibleControls(replaceAnsiAndControls(prefixUtf8(value, Math.max(1, maximum) * 4), "", " "))
+    .replace(/[\r\n\t]/g, " ");
 }
 
 function safeLabel(value: string): string | undefined {

@@ -304,6 +304,44 @@ test("logHookError retains C0 and ANSI removal offsets", (t) => {
   }
 });
 
+test("logHookError consumes ANSI payloads before redacting adjacent secrets", (t) => {
+  const token = "sk-ant-abcdefghijklmnopqrst123";
+  const cases: ReadonlyArray<readonly [string, string]> = [
+    ["c1-csi", `prefix\u009b31m${token}`],
+    ["c1-ss2", `prefix\u008em${token}`],
+    ["c1-ss3", `prefix\u008fm${token}`],
+    ["esc-ss2", `prefix\u001bNm${token}`],
+    ["esc-ss3", `prefix\u001bOm${token}`],
+    ["esc-dcs", `prefix\u001bP31m\u001b\\${token}`],
+    ["esc-sos", `prefix\u001bX31m\u001b\\${token}`],
+    ["esc-pm", `prefix\u001b^31m\u001b\\${token}`],
+    ["esc-apc", `prefix\u001b_31m\u001b\\${token}`],
+    ["c1-osc", `prefix\u009d31m\u009c${token}`],
+    ["c1-dcs", `prefix\u009031m\u009c${token}`],
+    ["c1-sos", `prefix\u009831m\u009c${token}`],
+    ["c1-pm", `prefix\u009e31m\u009c${token}`],
+    ["c1-apc", `prefix\u009f31m\u009c${token}`],
+  ];
+
+  for (const [name, candidate] of cases) {
+    const paths = freshPaths(t);
+    logHookError(candidate, paths);
+    const log = readFileSync(paths.agentLog, "utf8");
+    assert.equal(log.includes(token), false, name);
+    assert.match(log, /prefix\[redacted anthropic key\]/u, name);
+    assert.doesNotMatch(log, /31m|\u001b|[\u008e\u008f\u009b]/u, name);
+  }
+});
+
+test("logHookError consumes DCS payload through BEL until ST", (t) => {
+  const paths = freshPaths(t);
+  const token = "sk-ant-abcdefghijklmnopqrst123";
+  logHookError(`prefix\u009031m\u0007${token}\u009c`, paths);
+  const log = readFileSync(paths.agentLog, "utf8");
+  assert.match(log, /prefix\s*$/u);
+  assert.doesNotMatch(log, /31m|sk-ant-|abcdefghijklmnopqrst123|\u0090|\u009c/u);
+});
+
 test("logHookError keeps the complete file within the strict 64 KiB cap", (t) => {
   const paths = freshPaths(t);
   mkdirSync(paths.home, { recursive: true });

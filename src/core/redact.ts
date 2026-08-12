@@ -82,6 +82,126 @@ export const SECRET_PATTERNS: ReadonlyArray<readonly [kind: string, re: RegExp]>
 
 const INVISIBLE_CONTROL_SINGLE_RE = /[\u061C\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]/u;
 
+const ESC = 0x1b;
+const BEL = 0x07;
+const ST = 0x9c;
+const CSI_8BIT = 0x9b;
+const SS2_8BIT = 0x8e;
+const SS3_8BIT = 0x8f;
+const OSC_8BIT = 0x9d;
+const DCS_8BIT = 0x90;
+const SOS_8BIT = 0x98;
+const PM_8BIT = 0x9e;
+const APC_8BIT = 0x9f;
+
+function isControlStringStart(code: number): boolean {
+  return code === OSC_8BIT || code === DCS_8BIT || code === SOS_8BIT || code === PM_8BIT || code === APC_8BIT;
+}
+
+function consumeCsi(text: string, start: number): number {
+  let offset = start;
+  while (offset < text.length) {
+    const code = text.charCodeAt(offset);
+    if (code >= 0x30 && code <= 0x3f) {
+      offset += 1;
+      continue;
+    }
+    break;
+  }
+  while (offset < text.length) {
+    const code = text.charCodeAt(offset);
+    if (code >= 0x20 && code <= 0x2f) {
+      offset += 1;
+      continue;
+    }
+    break;
+  }
+  if (offset < text.length && text.charCodeAt(offset) >= 0x40 && text.charCodeAt(offset) <= 0x7e) {
+    return offset + 1;
+  }
+  // An unterminated sequence is still untrusted payload. Consume its bounded tail.
+  return text.length;
+}
+
+function consumeControlString(text: string, start: number, terminatesAtBel: boolean): number {
+  let offset = start;
+  while (offset < text.length) {
+    const code = text.charCodeAt(offset);
+    if ((terminatesAtBel && code === BEL) || code === ST) return offset + 1;
+    if (code === ESC && text.charCodeAt(offset + 1) === 0x5c) return offset + 2;
+    offset += 1;
+  }
+  // A missing terminator must not expose payload bytes to later redaction logic.
+  return text.length;
+}
+
+function consumeEscape(text: string, start: number): number {
+  const next = text.charCodeAt(start + 1);
+  if (next === 0x5b) return consumeCsi(text, start + 2);
+  if (next === 0x4e || next === 0x4f) return consumeShiftedGraphic(text, start + 1);
+  if (next === 0x5d || next === 0x50 || next === 0x58 || next === 0x5e || next === 0x5f) {
+    return consumeControlString(text, start + 2, next === 0x5d);
+  }
+  if (next >= 0x20 && next <= 0x2f) {
+    let offset = start + 2;
+    while (offset < text.length && text.charCodeAt(offset) >= 0x20 && text.charCodeAt(offset) <= 0x2f) offset += 1;
+    return offset < text.length && text.charCodeAt(offset) >= 0x30 && text.charCodeAt(offset) <= 0x7e
+      ? offset + 1
+      : offset;
+  }
+  // Standard two-byte ESC Fe sequences (and unknown ESC payload) are removed as a unit.
+  return next >= 0x40 && next <= 0x7e ? start + 2 : start + 1;
+}
+
+function consumeShiftedGraphic(text: string, introducer: number): number {
+  const codePoint = text.codePointAt(introducer + 1);
+  if (codePoint === undefined) return Math.min(introducer + 1, text.length);
+  return Math.min(introducer + 1 + (codePoint > 0xffff ? 2 : 1), text.length);
+}
+
+function isC0OrC1(code: number): boolean {
+  return code <= 0x1f || code === 0x7f || (code >= 0x80 && code <= 0x9f);
+}
+
+/** Replace ANSI, C0, and C1 controls while preserving one logical boundary per removal. */
+export function replaceAnsiAndControls(text: string, replacement = "", c0Replacement = replacement): string {
+  if (!text) return text;
+  const pieces: string[] = [];
+  let offset = 0;
+  while (offset < text.length) {
+    const code = text.charCodeAt(offset);
+    let end = offset;
+    let isSequence = false;
+    if (code === ESC) {
+      end = consumeEscape(text, offset);
+      isSequence = true;
+    } else if (code === CSI_8BIT) {
+      end = consumeCsi(text, offset + 1);
+      isSequence = true;
+    } else if (code === SS2_8BIT || code === SS3_8BIT) {
+      end = consumeShiftedGraphic(text, offset);
+      isSequence = true;
+    } else if (isControlStringStart(code)) {
+      end = consumeControlString(text, offset + 1, code === OSC_8BIT);
+      isSequence = true;
+    } else if (isC0OrC1(code)) {
+      end = offset + 1;
+    }
+
+    if (end !== offset) {
+      const isWhitespaceControl = code === 0x09 || code === 0x0a || code === 0x0d;
+      pieces.push(isWhitespaceControl ? String.fromCharCode(code) : (isSequence ? replacement : c0Replacement));
+      offset = end;
+      continue;
+    }
+
+    const codePoint = text.codePointAt(offset) ?? 0;
+    pieces.push(String.fromCodePoint(codePoint));
+    offset += codePoint > 0xffff ? 2 : 1;
+  }
+  return pieces.join("");
+}
+
 const SECRET_BOUNDARY_FREE_PATTERNS: ReadonlyArray<readonly [kind: string, re: RegExp]> = SECRET_DEFINITIONS.map(
   (definition) => [definition.kind, new RegExp(patternFor(definition, true).source, `${definition.flags ?? ""}g`)] as const,
 );
@@ -151,6 +271,27 @@ function hasTrailingBoundary(text: string, end: number): boolean {
   return !isAsciiWord(text[end]);
 }
 
+function matchEndAtRemovedBoundary(
+  text: string,
+  start: number,
+  end: number,
+  definition: SecretDefinition,
+  removedOffsets: ReadonlySet<number>,
+): number {
+  if (!definition.trailingBoundary) return end;
+  const greedyHasExplicitBoundary = removedOffsets.has(end)
+    || (end < text.length && hasTrailingBoundary(text, end));
+  if (greedyHasExplicitBoundary || (end === text.length && ![...removedOffsets].some((offset) => offset > start && offset < end))) {
+    return end;
+  }
+  const source = new RegExp(`^(?:${definition.source})$`, definition.flags ?? "");
+  for (const boundary of [...removedOffsets].sort((left, right) => right - left)) {
+    if (boundary <= start || boundary > end) continue;
+    if (source.test(text.slice(start, boundary))) return boundary;
+  }
+  return end;
+}
+
 interface Replacement {
   readonly start: number;
   readonly end: number;
@@ -166,9 +307,10 @@ function collectReplacements(text: string, context: SecretBoundaryContext): Repl
     for (const match of text.matchAll(re)) {
       const start = match.index ?? 0;
       const matched = match[0] ?? "";
-      const end = start + matched.length;
+      const rawEnd = start + matched.length;
       const definition = SECRET_DEFINITIONS[order];
       if (!definition) continue;
+      const end = matchEndAtRemovedBoundary(text, start, rawEnd, definition, removedOffsets);
       const normalLeading = !definition.leadingBoundary || hasLeadingBoundary(text, start);
       const normalTrailing = !definition.trailingBoundary || hasTrailingBoundary(text, end);
       const hasRecordedLeading = !definition.leadingBoundary || removedOffsets.has(start);
@@ -186,10 +328,11 @@ function collectReplacements(text: string, context: SecretBoundaryContext): Repl
     for (const match of text.matchAll(re)) {
       const start = match.index ?? 0;
       const matched = match[0] ?? "";
-      const end = start + matched.length;
-      if (end !== text.length) continue;
+      const rawEnd = start + matched.length;
       const definition = SECRET_DEFINITIONS[order];
       if (!definition) continue;
+      if (rawEnd !== text.length) continue;
+      const end = rawEnd;
       const normalLeading = !definition.leadingBoundary || hasLeadingBoundary(text, start);
       const hasRecordedBoundary = !definition.leadingBoundary || removedOffsets.has(start);
       if (!normalLeading && !hasRecordedBoundary) continue;

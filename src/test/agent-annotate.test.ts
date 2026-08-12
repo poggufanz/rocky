@@ -600,6 +600,56 @@ test("durable annotation keeps C0 and ANSI boundary removals redacted", async (t
   }
 });
 
+test("durable annotation consumes ANSI payloads before redacting adjacent secrets", async (t) => {
+  const paths = freshPaths(t);
+  const token = "sk-ant-abcdefghijklmnopqrst123";
+  const cases: ReadonlyArray<readonly [string, string]> = [
+    ["c1-csi", `prefix\u009b31m${token}`],
+    ["c1-ss2", `prefix\u008em${token}`],
+    ["c1-ss3", `prefix\u008fm${token}`],
+    ["esc-ss2", `prefix\u001bNm${token}`],
+    ["esc-ss3", `prefix\u001bOm${token}`],
+    ["esc-dcs", `prefix\u001bP31m\u001b\\${token}`],
+    ["esc-sos", `prefix\u001bX31m\u001b\\${token}`],
+    ["esc-pm", `prefix\u001b^31m\u001b\\${token}`],
+    ["esc-apc", `prefix\u001b_31m\u001b\\${token}`],
+    ["c1-osc", `prefix\u009d31m\u009c${token}`],
+    ["c1-dcs", `prefix\u009031m\u009c${token}`],
+    ["c1-sos", `prefix\u009831m\u009c${token}`],
+    ["c1-pm", `prefix\u009e31m\u009c${token}`],
+    ["c1-apc", `prefix\u009f31m\u009c${token}`],
+  ];
+
+  for (const [name, candidate] of cases) {
+    const key = `durable-ansi-payload-${name}`;
+    append(key, [
+      { v: 1, agent: "codex", kind: "intent", ts: 1, text: candidate },
+      { v: 1, agent: "codex", kind: "mechanism", ts: 2, tool: "Edit", path: "src/app.ts", excerpt: "value: 1" },
+      { v: 1, agent: "codex", kind: "rationale", ts: 3, source: "notify", text: "why" },
+    ], paths);
+
+    const triple = await annotateBatch(key, { paths, git: () => undefined, queueLabel: () => {} });
+    assert.ok(triple, name);
+    assert.equal(triple?.intent?.text, "prefix[redacted anthropic key]", name);
+    assert.doesNotMatch(JSON.stringify(triple), /sk-ant-|abcdefghijklmnopqrst123|31m|\u001b|[\u008e\u008f\u009b]/u, name);
+  }
+});
+
+test("durable annotation consumes DCS payload through BEL until ST", async (t) => {
+  const paths = freshPaths(t);
+  const token = "sk-ant-abcdefghijklmnopqrst123";
+  const key = "durable-dcs-bel";
+  append(key, [
+    { v: 1, agent: "codex", kind: "intent", ts: 1, text: `prefix\u009031m\u0007${token}\u009c` },
+    { v: 1, agent: "codex", kind: "mechanism", ts: 2, tool: "Edit", path: "src/app.ts", excerpt: "value: 1" },
+  ], paths);
+
+  const triple = await annotateBatch(key, { paths, git: () => undefined, queueLabel: () => {} });
+  assert.ok(triple);
+  assert.equal(triple?.intent?.text, "prefix");
+  assert.doesNotMatch(JSON.stringify(triple), /31m|sk-ant-|abcdefghijklmnopqrst123|\u0090|\u009c/u);
+});
+
 test("mixed-agent batches use the first valid agent and ignore mismatched evidence", async (t) => {
   const paths = freshPaths(t);
   append("mixed-agent", [
