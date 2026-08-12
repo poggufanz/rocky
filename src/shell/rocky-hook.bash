@@ -80,7 +80,7 @@ __rocky_sanitize_label() {
     $'\330\234' \
     $'\342\200\213' $'\342\200\214' $'\342\200\215' $'\342\200\216' $'\342\200\217' \
     $'\342\200\252' $'\342\200\253' $'\342\200\254' $'\342\200\255' $'\342\200\256' \
-    $'\342\201\240' $'\342\201\241' $'\342\201\242' $'\342\201\243' $'\342\201\244' \
+    $'\342\201\240' $'\342\201\241' $'\342\201\242' $'\342\201\243' $'\342\201\244' $'\342\201\245' \
     $'\342\201\246' $'\342\201\247' $'\342\201\250' $'\342\201\251' $'\342\201\252' $'\342\201\253' $'\342\201\254' $'\342\201\255' $'\342\201\256' $'\342\201\257' \
     $'\357\273\277'; do
     __rocky_input="${__rocky_input//"$__rocky_control"/}"
@@ -142,69 +142,160 @@ __rocky_drain_label() (
   local __rocky_labels="$__rocky_home/labels"
   local __rocky_label=""
   local __rocky_safe_label=""
-  local __rocky_tmp=""
+  local __rocky_claim_dir=""
+  local __rocky_source=""
+  local __rocky_candidate=""
+  local __rocky_pending=""
+  local __rocky_next=""
+  local __rocky_probe=""
   local __rocky_size=""
+  local __rocky_has_remainder=0
+  local __rocky_attempt=0
 
-  # Queue files are private state.  Refuse links and special files before any
-  # read, so a FIFO (or a retargeted path) cannot block the prompt.
   [[ -d "$__rocky_home" && ! -L "$__rocky_home" ]] || return 0
-  [[ -s "$__rocky_labels" && -f "$__rocky_labels" && ! -L "$__rocky_labels" ]] || return 0
-  if ! __rocky_size=$(command stat -c %s "$__rocky_labels" 2>/dev/null); then
-    __rocky_size=$(command stat -f %z "$__rocky_labels" 2>/dev/null) || return 0
+
+  # A retained claim is older than a new public queue, so scan it first and
+  # preserve old-before-late ordering. An unfinished original queue wins over
+  # its persisted remainder after a crash, keeping the head ahead of tail.
+  for __rocky_candidate in "$__rocky_home"/.labels.claim.*; do
+    [[ -d "$__rocky_candidate" && ! -L "$__rocky_candidate" ]] || continue
+    if [[ -f "$__rocky_candidate/queue" && ! -L "$__rocky_candidate/queue" ]]; then
+      __rocky_claim_dir="$__rocky_candidate"
+      __rocky_source="$__rocky_candidate/queue"
+      break
+    fi
+    for __rocky_pending in "$__rocky_candidate"/remainder.next.* "$__rocky_candidate"/remainder; do
+      if [[ -f "$__rocky_pending" && ! -L "$__rocky_pending" ]]; then
+        __rocky_claim_dir="$__rocky_candidate"
+        __rocky_source="$__rocky_pending"
+        break 2
+      fi
+    done
+  done
+
+  # No retained claim: atomically move the public queue into a unique private
+  # directory before opening it.  A pathname swap can only move a special file
+  # into the claim, which is rejected below without a potentially blocking read.
+  if [[ -z "$__rocky_source" ]]; then
+    [[ -s "$__rocky_labels" && -f "$__rocky_labels" && ! -L "$__rocky_labels" ]] || return 0
+    umask 077
+    __rocky_claim_dir=$(command mktemp -d "$__rocky_home/.labels.claim.XXXXXX" 2>/dev/null) || return 0
+    case "$__rocky_claim_dir" in
+      "$__rocky_home"/.labels.claim.*) ;;
+      *) command rmdir "$__rocky_claim_dir" >/dev/null 2>&1; return 0 ;;
+    esac
+    [[ -d "$__rocky_claim_dir" && ! -L "$__rocky_claim_dir" ]] || {
+      command rmdir "$__rocky_claim_dir" >/dev/null 2>&1
+      return 0
+    }
+    __rocky_source="$__rocky_claim_dir/queue"
+    if ! command mv "$__rocky_labels" "$__rocky_source" 2>/dev/null; then
+      command rmdir "$__rocky_claim_dir" >/dev/null 2>&1
+      return 0
+    fi
+  fi
+
+  # Reject a claimed special file before opening.  The read/write open keeps a
+  # same-UID swap to a FIFO nonblocking on Bash/Linux/WSL; the descriptor type
+  # check below is authoritative before any read.
+  [[ -f "$__rocky_source" && ! -L "$__rocky_source" ]] || return 0
+  if ! { exec 9<> "$__rocky_source"; } 2>/dev/null; then
+    return 0
+  fi
+  [[ -f /dev/fd/9 ]] || { exec 9>&-; return 0; }
+
+  # Validate the opened descriptor, not the old public pathname.  GNU stat's
+  # -L form is used on Linux/WSL; BSD stat's -f form is the portable fallback.
+  if ! __rocky_size=$(command stat -Lc %s /dev/fd/9 2>/dev/null); then
+    __rocky_size=$(command stat -f %z /dev/fd/9 2>/dev/null) || {
+      exec 9>&-
+      return 0
+    }
   fi
   __rocky_size="${__rocky_size//[[:space:]]/}"
-  [[ "$__rocky_size" =~ ^[0-9]+$ && "$__rocky_size" -le 65536 ]] || return 0
+  [[ "$__rocky_size" =~ ^[0-9]+$ && "$__rocky_size" -gt 0 && "$__rocky_size" -le 65536 ]] || {
+    exec 9>&-
+    return 0
+  }
 
-  # A final line need not end in a newline; retain it when read reports EOF.
-  if IFS= read -r __rocky_label < "$__rocky_labels" 2>/dev/null; then
+  # A final line need not end in newline.  Read one additional byte exactly so
+  # an empty next line remains queued; this byte is copied before the rest.
+  if IFS= read -r __rocky_label <&9 2>/dev/null; then
     :
   else
-    # EOF without a newline is valid when read retained a nonempty final line;
-    # a failed open/read with no data stays untouched and fails open.
-    [[ -n "$__rocky_label" ]] || return 0
-  fi
-  if [[ -z "$__rocky_label" && ! -s "$__rocky_labels" ]]; then
-    return 0
+    [[ -n "$__rocky_label" ]] || { exec 9>&-; return 0; }
   fi
   __rocky_sanitize_label "$__rocky_label"
+  # Bash 3 has read -n but not read -N.  In the C locale -n 1 gives an empty
+  # value for a delimiter byte; restore that byte so remainder copy is exact.
+  if LC_ALL=C IFS= read -r -n 1 __rocky_probe <&9 2>/dev/null; then
+    [[ -n "$__rocky_probe" ]] || __rocky_probe=$'\n'
+    __rocky_has_remainder=1
+  else
+    __rocky_has_remainder=0
+  fi
 
-  # mktemp is exclusive and same-directory; umask is isolated in this
-  # subshell, and every failure leaves the original queue untouched.
+  # Empty remainder: remove private claim and do not publish an empty queue.
+  if [[ "$__rocky_has_remainder" -eq 0 ]]; then
+    exec 9>&-
+    # Keep source until display succeeds; an interrupted print may retry the
+    # same head, but it cannot lose it.
+    if [[ -n "$__rocky_safe_label" ]] && ! printf '[Rocky] %s\n' "$__rocky_safe_label" >&2; then
+      return 0
+    fi
+    command rm -f "$__rocky_source" >/dev/null 2>&1
+    for __rocky_pending in "$__rocky_claim_dir"/queue "$__rocky_claim_dir"/remainder "$__rocky_claim_dir"/remainder.next.*; do
+      [[ -f "$__rocky_pending" && ! -L "$__rocky_pending" ]] && command rm -f "$__rocky_pending" >/dev/null 2>&1
+    done
+    command rmdir "$__rocky_claim_dir" >/dev/null 2>&1
+    return 0
+  fi
+
+  # Persist unread remainder only inside the already-private claim directory.
+  # Never republish it to the public queue: producers can create a fresh labels
+  # path independently, while claim scanning preserves old-before-late order.
+  # Pick an unpredictable private name, then create it through a noclobber
+  # descriptor. `mktemp` would close a path before reopening it, reintroducing
+  # a symlink/FIFO TOCTOU.
   umask 077
-  __rocky_tmp=$(command mktemp "$__rocky_home/.labels.XXXXXX" 2>/dev/null) || return 0
-  case "$__rocky_tmp" in
-    "$__rocky_home"/.labels.*) ;;
-    *) return 0 ;;
-  esac
-  [[ -n "$__rocky_tmp" && -f "$__rocky_tmp" && ! -L "$__rocky_tmp" ]] || {
-    command rm -f "$__rocky_tmp" >/dev/null 2>&1
+  set -C
+  while (( __rocky_attempt < 16 )); do
+    (( __rocky_attempt += 1 ))
+    __rocky_next="$__rocky_claim_dir/remainder.next.${RANDOM}.${__rocky_attempt}"
+    [[ ! -e "$__rocky_next" && ! -L "$__rocky_next" ]] || continue
+    if { exec 7> "$__rocky_next"; } 2>/dev/null; then
+      break
+    fi
+    __rocky_next=""
+  done
+  [[ -n "$__rocky_next" && -f /dev/fd/7 ]] || {
+    exec 9>&-
+    exec 7>&-
     return 0
   }
-
-  [[ -s "$__rocky_labels" && -f "$__rocky_labels" && ! -L "$__rocky_labels" ]] || {
-    command rm -f "$__rocky_tmp" >/dev/null 2>&1
-    return 0
-  }
-  if ! command tail -n +2 "$__rocky_labels" > "$__rocky_tmp" 2>/dev/null; then
-    command rm -f "$__rocky_tmp" >/dev/null 2>&1
+  if ! printf '%s' "$__rocky_probe" >&7 || ! command cat <&9 >&7 2>/dev/null; then
+    exec 9>&-
+    exec 7>&-
+    command rm -f "$__rocky_next" >/dev/null 2>&1
     return 0
   fi
-  [[ -f "$__rocky_tmp" && ! -L "$__rocky_tmp" ]] || {
-    command rm -f "$__rocky_tmp" >/dev/null 2>&1
-    return 0
-  }
-  [[ -f "$__rocky_labels" && ! -L "$__rocky_labels" ]] || {
-    command rm -f "$__rocky_tmp" >/dev/null 2>&1
-    return 0
-  }
-
-  # Claim the first line before displaying it.  A failed rename leaves it for
-  # a later prompt, while a successful rename cannot print the same line twice.
-  if ! command mv "$__rocky_tmp" "$__rocky_labels" 2>/dev/null; then
-    command rm -f "$__rocky_tmp" >/dev/null 2>&1
+  exec 9>&-
+  exec 7>&-
+  # Print before removing the owned source. If output or the shell fails here,
+  # the original queue remains and is retried before the persisted remainder;
+  # duplicates are preferable to losing a label.
+  if [[ -n "$__rocky_safe_label" ]] && ! printf '[Rocky] %s\n' "$__rocky_safe_label" >&2; then
     return 0
   fi
-  [[ -n "$__rocky_safe_label" ]] && printf '[Rocky] %s\n' "$__rocky_safe_label" >&2
+  command rm -f "$__rocky_source" >/dev/null 2>&1
+  # Keep exact persisted remainder for the next prompt; stale siblings from a
+  # crash can be removed only after this head was printed successfully.
+  for __rocky_pending in "$__rocky_claim_dir"/queue "$__rocky_claim_dir"/remainder "$__rocky_claim_dir"/remainder.next.*; do
+    if [[ "$__rocky_pending" != "$__rocky_next" && -f "$__rocky_pending" && ! -L "$__rocky_pending" ]]; then
+      command rm -f "$__rocky_pending" >/dev/null 2>&1
+    fi
+  done
+  command rmdir "$__rocky_claim_dir" >/dev/null 2>&1
   return 0
 )
 
