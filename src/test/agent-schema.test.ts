@@ -103,7 +103,20 @@ test("batchKey sanitizes to filename-safe and bounded", () => {
 });
 
 test("batchKey preserves an ordinary short filename-safe key exactly", () => {
-  assert.equal(batchKey("codex", "session_01", "turn-2"), "codex-session_01-turn-2");
+  assert.equal(batchKey("codex", "session_01", "turn_2"), "codex-session_01-turn_2");
+});
+
+test("batchKey uses collision-resistant encoding when a component contains a delimiter", () => {
+  const sessionDelimiter = batchKey("codex", "a-b", "c");
+  const turnDelimiter = batchKey("codex", "a", "b-c");
+
+  assert.notEqual(sessionDelimiter, "codex-a-b-c");
+  assert.notEqual(turnDelimiter, "codex-a-b-c");
+  assert.notEqual(sessionDelimiter, turnDelimiter);
+  assert.match(sessionDelimiter, /^[A-Za-z0-9_-]+$/);
+  assert.match(turnDelimiter, /^[A-Za-z0-9_-]+$/);
+  assert.ok(sessionDelimiter.length <= 120);
+  assert.ok(turnDelimiter.length <= 120);
 });
 
 test("batchKey keeps distinct unsafe inputs distinct after sanitization", () => {

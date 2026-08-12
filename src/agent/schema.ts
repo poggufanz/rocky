@@ -87,16 +87,23 @@ function sanitizeKeyPart(value: string): string {
   return value.replace(/[^A-Za-z0-9_-]/g, "_");
 }
 
-function keyDigest(raw: string): string {
-  return createHash("sha256").update(raw).digest("hex").slice(0, 16);
+function keyDigest(agent: AgentName, session: string, turn: string): string {
+  // Hash a structured value, not the display form.  Joining with hyphens would
+  // make (session: "a-b", turn: "c") collide with (session: "a", turn: "b-c").
+  return createHash("sha256")
+    .update(JSON.stringify([agent, session, turn]), "utf8")
+    .digest("hex")
+    .slice(0, 16);
 }
 
 export function batchKey(agent: AgentName, session: string, turn: string): string {
   const raw = `${agent}-${session}-${turn}`;
-  if (raw.length <= MAX_BATCH_KEY_CHARS && FILENAME_SAFE.test(raw)) return raw;
+  const componentsAreUnambiguous = session.length > 0 && turn.length > 0
+    && !session.includes("-") && !turn.includes("-");
+  if (componentsAreUnambiguous && raw.length <= MAX_BATCH_KEY_CHARS && FILENAME_SAFE.test(raw)) return raw;
 
   const prefix = `${sanitizeKeyPart(agent)}-`;
-  const suffix = `-${keyDigest(raw)}`;
+  const suffix = `-${keyDigest(agent, session, turn)}`;
   const body = sanitizeKeyPart(`${session}-${turn}`);
   const available = Math.max(0, MAX_BATCH_KEY_CHARS - prefix.length - suffix.length);
   return `${prefix}${body.slice(0, available)}${suffix}`;

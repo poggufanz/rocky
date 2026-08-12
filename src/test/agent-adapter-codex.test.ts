@@ -89,7 +89,7 @@ test("modern identity aliases work but missing identity never uses fallback cons
   };
   const parsed = parseCodexHookPayload(base, 42);
   assert.ok(parsed && parsed.action === "append");
-  assert.equal(parsed.key, "codex-alias-session-alias-turn");
+  assert.match(parsed.key, /^codex-alias-session-alias-turn-[a-f0-9]{16}$/);
 
   assert.equal(parseCodexHookPayload({ ...base, sessionId: undefined }), undefined);
   assert.equal(parseCodexHookPayload({ ...base, turnId: undefined }), undefined);

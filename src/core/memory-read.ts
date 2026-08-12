@@ -1,4 +1,12 @@
-import { existsSync, readFileSync } from "node:fs";
+import {
+  closeSync,
+  constants,
+  fstatSync,
+  lstatSync,
+  openSync,
+  readFileSync,
+  type Stats,
+} from "node:fs";
 import { Buffer } from "node:buffer";
 import { resolveRockyPaths } from "./state-paths.js";
 
@@ -204,10 +212,52 @@ function parseFixLinks(value: unknown): FixLink[] | undefined {
   return links;
 }
 
+function readFlags(): number {
+  // POSIX provides both flags. Windows has no portable equivalent, so its
+  // lstat/fstat type and identity checks below are the strongest available
+  // protection there; a namespace race not observable through those checks is
+  // a platform limitation of Node's descriptor API.
+  const noFollow = process.platform === "win32" || !("O_NOFOLLOW" in constants)
+    ? 0
+    : constants.O_NOFOLLOW;
+  const nonblock = process.platform === "win32" || !("O_NONBLOCK" in constants)
+    ? 0
+    : constants.O_NONBLOCK;
+  return constants.O_RDONLY | noFollow | nonblock;
+}
+
+function sameFileIdentity(expected: Stats, opened: Stats): boolean {
+  return expected.dev === opened.dev && expected.ino === opened.ino;
+}
+
 export function loadMemory(path = resolveRockyPaths().memory): MemoryRecord[] {
-  if (!existsSync(path)) return [];
+  let descriptor: number | undefined;
+  let contents: string;
+  try {
+    const listed = lstatSync(path);
+    if (!listed.isFile() || listed.isSymbolicLink()) return [];
+
+    descriptor = openSync(path, readFlags());
+    const opened = fstatSync(descriptor);
+    if (!opened.isFile() || opened.isSymbolicLink() || !sameFileIdentity(listed, opened)) return [];
+
+    contents = readFileSync(descriptor, "utf8");
+    const after = fstatSync(descriptor);
+    if (!after.isFile() || after.isSymbolicLink() || !sameFileIdentity(opened, after)) return [];
+  } catch {
+    return [];
+  } finally {
+    if (descriptor !== undefined) {
+      try {
+        closeSync(descriptor);
+      } catch {
+        // A failed close must not expose memory-read details to callers.
+      }
+    }
+  }
+
   const records: MemoryRecord[] = [];
-  for (const line of readFileSync(path, "utf8").split("\n")) {
+  for (const line of contents.split("\n")) {
     if (Buffer.byteLength(line, "utf8") > MAX_MEMORY_LINE_BYTES) continue;
     const trimmed = line.trim();
     if (!trimmed) continue;
