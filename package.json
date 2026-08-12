@@ -15,6 +15,7 @@
     "dist/mcp",
     "dist/setup",
     "dist/ai",
+    "dist/agent",
     "dist/shell",
     "skills/rocky-voice",
     "README.md",

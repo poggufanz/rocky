@@ -12,7 +12,7 @@
 
 Rocky is a terminal companion inspired by the alien engineer from Andy Weir's *Project Hail Mary*. He keeps track of what you and your AI have already been through, so the second time an error appears, the answer comes from your own history — not from twenty minutes of googling.
 
-**Teaching modes exist inside individual agents. Rocky is the layer that remembers what you learned — passive, cross-tool, and permanent.** That learning layer is planned v0.5 work; v0.4.0 remembers failure/fix evidence across supported hosts and checks what you are about to push. The longer-term mission is simple: make user not forget about fundamentals.
+**Teaching modes exist inside individual agents. Rocky is the layer that remembers what you learned — passive, cross-tool, and permanent.** Plan 01 of the v0.5 Nervous System is implemented in this unreleased branch; the package version remains v0.4.0 while Plan 02 dictionary and teaching surfaces stay deferred. The longer-term mission is simple: make user not forget about fundamentals.
 
 He is also, unapologetically, a pet.
 
@@ -39,7 +39,7 @@ Two loops run in opposite directions:
 - **The loop worth resisting** — the AI gets more capable, more of the thinking gets handed over, understanding and vigilance erode, intent and verification get worse, and the results get harder to judge at all.
 - **The Good Trade** — you understand more, your intent and decisions get sharper, the AI's work in your hands gets more useful, and that work becomes the material you learn from next.
 
-The arrow that usually breaks is *AI output → you learn from it*. Each arrow maps to one mechanism rather than to a slogan, and every mechanism below is planned v0.5 work, not v0.4.0 behavior:
+The arrow that usually breaks is *AI output → you learn from it*. Each arrow maps to one mechanism rather than to a slogan. In this unreleased branch, Plan 01 is implemented and Plan 02 remains deferred:
 
 | Arrow kept alive | Mechanism | Role |
 |---|---|---|
@@ -70,6 +70,9 @@ Register Rocky with detected MCP hosts after installation:
 ```bash
 rocky setup
 rocky setup --voice-skill   # also install the managed Rocky voice skill
+rocky setup --agent-hooks
+rocky setup --uninstall-agent-hooks
+rocky setup --status
 ```
 
 `rocky setup` configures detected hosts with sanitized MCP exposure after consent. By itself it never edits `.bashrc`, installs a voice skill, installs or pulls an Ollama model, or enables local AI. Voice-skill work requires the explicit `--voice-skill` flag. Shell integration is a separate `rocky hook install` step.
@@ -83,6 +86,16 @@ Claude Code registration goes through a private stage. Rocky clones the effectiv
 That staged path does not activate in this release. Rocky ships no complete Claude Code policy manifest, so any `rocky setup` run that still has to write reports `claude-code: failed` with `Claude Code policy-equivalent automation is unavailable; use manual registration` and exits 1. Rocky prints the exact CLI argv to paste; run it yourself. Once the entry exists, later runs report `claude-code: already-configured`.
 
 `--voice-skill` only targets detected Codex and Claude Code hosts. Claude Desktop never receives the voice skill, and its own MCP result stays independent. When zero hosts are eligible, Rocky prints `voice-skill: unavailable` and exits 1 instead of inventing a result.
+
+## Nervous System (v0.5.0 — unreleased)
+
+Plan 01 is implemented in this unreleased branch. Rocky captures the user prompt, edited paths, small capped excerpts, and the agent's stated rationale. Events pass through a transient private spool before Rocky redacts secrets and writes one durable `triple` record to local `~/.rocky/memory.jsonl`; Rocky state stays private, with `0600` files where the platform supports those modes.
+
+This feature adds no new egress and no daemon. Rocky does not capture screens or keystrokes, and never rewrites, injects, or submits a prompt. With Ollama disabled or unavailable, deterministic degraded annotation still records the evidence. An optional configured loopback Ollama may compact only rationale, tags, and the passive label; it never changes the captured intent, path, or excerpt evidence. Rationale is quoted, untrusted hearsay — never fact and never hidden chain-of-thought.
+
+Claude Code setup via `rocky setup --agent-hooks` asks for explicit consent before changing settings. Use a pre-created private `~/.claude` parent (mode `0700` where supported); Rocky fails closed when that parent is missing. Codex setup prints a manual Codex TOML block and writes no Codex config; review and trust the command through Codex `/hooks` before pasting it. `rocky setup --uninstall-agent-hooks` removes Rocky's Claude hooks only and never edits Codex `config.toml`.
+
+Plan 02 remains deferred: bidirectional intent↔mechanism dictionary lookup (`what`, `how`, `why`), digest, quiz, export, ambiguity checker, new MCP search tools, BYOK annotation, `brief`, `attest`, and the memory circuit breaker. Rocky does not expose those commands in this release.
 
 ## Usage
 
@@ -254,7 +267,7 @@ When things are serious, Rocky is serious. Diagnoses and fixes are printed plain
 
 Rocky asks because he is curious, not because he is testing you; you are always the one who knows, never the one being graded. Ignore him and he goes quiet — an ignored question is never repeated — and answering `busy` makes him wait without complaint (he once waited 46 years). That proactive “Curious Blind Friend” behavior is planned for v0.5 and is not part of v0.4.0.
 
-The fence never moves: Rocky hears your terminal, and — from v0.5 — your agent hooks. That's it. No keylogging, no screen reading, no capture of screen content of any kind. “Rocky can't see your screen” is a literal description of the architecture, not just lore.
+The fence never moves: Rocky hears your terminal and the explicit Plan 01 agent hooks. That's it. No keylogging, no screen reading, no capture of screen content of any kind. “Rocky can't see your screen” is a literal description of the architecture, not just lore.
 
 ## Roadmap
 
@@ -263,18 +276,10 @@ Each phase is one facet of who Rocky is:
 - **v0.2.1 — distribution bridge**: the v0.1 memory and implemented v0.2 Bash/WSL ears, plus scoped npm distribution, read-only MCP, consent-based host setup, an optional managed voice skill, and optional loopback Ollama interpretation for recall.
 - **v0.3 — his patience**: `rocky watch` — hand him a long build, migration, or download; he waits (he once waited 46 years), notifies you, and holds the logs if it dies.
 - **v0.4 — his diligence** (current release): pre-push hull check — `rocky check` verifies that AI-added packages actually exist on the registry (hallucinated-package defense), scans added lines for secrets, and asks one comprehension question about the riskiest line in the diff. Its registry lookup is this project's only external egress; network errors fail open and never hold a push.
-- **v0.5 — his curiosity**: Nervous System agent hooks + the Intent↔Mechanism Dictionary + an opt-in Ollama/BYOK annotation layer. The earlier `rocky explain` concept is superseded, not an active command. These planned mechanisms preserve recorded evidence, surface ambiguity only on explicit lookup, and never rewrite, inject, optimize, or submit a user's prompt. In more detail:
-  - *Nervous system* — when an agent finishes editing code, an agent hook fires on its own; it is never a tool call the agent has to choose to make. Rocky reads the diff in a separate process and a cheap model (a hosted small model, or a local Ollama one for free) writes a one-or-two sentence annotation: what changed, and why. Debounced per burst of edits (the agent quiet for ~30 seconds counts as one batch), not per file. With no key configured he keeps the deterministic facts only — file, ±lines, time. The principle underneath: hooks write knowledge, MCP reads it back. The working agent is never interrupted and never pays tokens for it.
-  - *What gets stored is a triple* — **intent → stated rationale → mechanism**. The rationale is the reasoning the agent *stated* in its transcript; it is never "the AI's thinking", which no API exposes. A cheap model squeezes it to two sentences plus a concept tag at capture time, before it reaches disk, and `rocky why <file>` answers from it. Because a stated rationale can be post-hoc or simply wrong, Rocky serves it as a quote and not as fact: `agent say: <rationale>. I only hear. correct, question`. Your own one-line answer to `what doing, question` is the human version of the same field, which is what makes the dictionary serve manual coders as well as vibe coders.
-  - *Intent→mechanism dictionary* — your casual prompt ("nudge the button up a bit") beside the code that came out (`margin-top: 8px`), collected into a private dictionary. Delivered least-intrusive first: a passive one-line label after a change (`you say "nudge up". it is margin-top. I think. check, question`), then `rocky what "nudge up"`, then a weekly pattern digest, and only last an opt-in retrieval quiz. His wording stays tentative on purpose — a cheap model's mapping can be wrong, and for teaching that trade is acceptable. Vibe coding translates intent into mechanism and hides the translation; that is where fundamentals evaporate. Rocky sits at the translation and shows what is inside it, using material from your own work.
-  - *The dictionary runs backwards too*, as a pull and never a push: `rocky how do i say "nudge up"` answers from your own history — `last time you say "nudge up", it become margin-top. maybe you mean margin, question`. He reminds you of vocabulary you have already met; he does not translate for you. When one of your words has meant several different things, he shows the evidence — `you say "the button". I hear 3 button in this file. which one, question` — and lets you choose. Reading a prompt through a prompt hook to detect ambiguity earlier is an open candidate, not a decision; the locked rule holds either way: **Rocky never rewrites, "optimizes", injects, or submits a prompt on your behalf.**
-  - *`rocky brief`* — the morning readout. Overnight journal entries and triples rendered into one summary: "N commit, N decision, N thing to understand — start where, question". Built for people who run agents in a loop; the loop works at night, Rocky tells the story in the morning.
-  - *Memory circuit breaker* — a record category for **negative knowledge**: approaches that failed, their fingerprint, how many times, when. Loop-breakers that work per run forget when the run ends, and an agent inside one iteration starts from a fresh context, so by construction it cannot see its own repetition; only an observer living across iterations and sessions can. So the warning carries memory — `this approach... agent try 3 times last week. fail same way. I remember. different way, question`. Advisory by default, injected through a hook; hard blocking stays opt-in. He flags measurable behavioural symptoms — a repeated failure fingerprint, the same file rewritten N times, iterations that never converge — and never judges whether an outcome is any good, for which he has no ground truth.
-  - *`rocky attest` (gated experiment)* — one small command recording that a named human read and answered a comprehension question about a given diff, into a file you can attach to a PR. An experiment to see whether the demand is real, not an enterprise product, and it stays one command.
-  - *How it stays cheap* — git is the database: Rocky stores a commit hash, a path, and a line range, and reconstructs content with `git show` when asked. Only what cannot be reconstructed is kept whole: your intent, the compacted rationale, an stderr excerpt. Cheap models compact at the door, retention is tiered (full detail for 90 days, then rollups), `rocky export` always exists so nothing is locked in, and no embedding vectors ship in v1. The learning principle is **curate, don't train**: the base model stays cheap forever and what grows is the memory plus few-shot examples drawn from your own history. Never continuous fine-tuning.
+- **v0.5 — his curiosity**: Plan 01 Nervous System agent hooks are implemented but unreleased. They preserve prompt/path/excerpt/stated-rationale evidence in local memory, use deterministic fallback when Ollama is unavailable, and keep rationale explicitly quoted and untrusted. Plan 02 — dictionary lookup, ambiguity handling, proactive questions, digest, quiz, export, new MCP search tools, BYOK annotation, `brief`, `attest`, and the circuit breaker — remains deferred. The earlier `rocky explain` concept is superseded, not an active command.
 - **later — his care**: ambient pet mode and the desktop pet window (deferred). He notices you've been at it for four hours, and he has opinions about your sleep.
 
-v0.4.0 does not implement the v0.5 nervous-system hooks, bidirectional intent↔mechanism lookup, ambiguity handling, proactive questions, digest, quiz, or BYOK annotation.
+The package version remains v0.4.0 until this release is published; the Nervous System section above describes the implemented Plan 01 surface in this unreleased branch.
 
 ## Contributing
 

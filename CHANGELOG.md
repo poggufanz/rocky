@@ -2,6 +2,17 @@
 
 Notable changes per release. Dates are the release date.
 
+## 0.5.0 — Unreleased
+
+### Added
+
+- Plan 01 Nervous System schema and private bounded event spool for Claude Code and Codex hooks.
+- Claude Code prompt, edit-path, capped-excerpt, and stated-rationale capture; Codex modern and notify hook adapters.
+- Redacted intent → rationale → mechanism triple annotation with deterministic degraded fallback, optional loopback Ollama compaction, and one passive label.
+- Consent-gated Claude Code agent-hook setup, printed manual Codex TOML with `/hooks` trust guidance, and Claude-only uninstall/status commands.
+
+Plan 02 dictionary lookup, ambiguity checker, digest, quiz, export, new MCP search tools, BYOK annotation, `brief`, `attest`, and the memory circuit breaker remain deferred.
+
 ## 0.4.0 — 9 August 2026
 
 ### Added

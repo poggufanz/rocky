@@ -57,12 +57,19 @@ usage:
   rocky setup --mcp-exposure sanitized|raw
                             choose projected-memory exposure during configure.
   rocky setup --voice-skill configure hosts and install managed voice skill explicitly.
+  rocky setup --agent-hooks
+                            install Claude Code hooks after explicit consent; print Codex TOML.
+  rocky setup --uninstall-agent-hooks
+                            remove Rocky Claude Code hooks; Codex config stays untouched.
+  rocky setup --status       report Claude Code agent-hook state; Codex remains manual.
   rocky check [--pre-push|--install-hook|--offline|--quiet]
                             hull check before push.
   rocky hook install        put Rocky's ears in your bash. every command heard,
                             failures remembered, dangerous commands questioned.
   rocky hook uninstall      remove the ears. memory stays.
   rocky hook status         are the ears in, question
+  rocky hook agent-event claude-code|codex
+                            private fail-open agent hook endpoint; stdout is always {}.
 
 memory lives in ~/.rocky/memory.jsonl. no telemetry. only outside call is rocky
 check asking registry.npmjs.org whether package exists — package name only, you say

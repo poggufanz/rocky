@@ -28,6 +28,7 @@ const expectedFiles = [
   "dist/mcp",
   "dist/setup",
   "dist/ai",
+  "dist/agent",
   "dist/shell",
   "skills/rocky-voice",
   "README.md",
@@ -95,6 +96,7 @@ function allowedPackPath(path: string): boolean {
     || path.startsWith("dist/mcp/")
     || path.startsWith("dist/setup/")
     || path.startsWith("dist/ai/")
+    || path.startsWith("dist/agent/")
     || path.startsWith("dist/shell/")
     || path === "skills/rocky-voice/SKILL.md"
     || path === "skills/rocky-voice/agents/openai.yaml";
@@ -277,10 +279,12 @@ test("npm pack dry-run exposes only the bounded production payload", (t) => {
     "CHANGELOG.md",
     "package.json",
     "dist/index.js",
+    "dist/agent/schema.js",
     "skills/rocky-voice/SKILL.md",
     "skills/rocky-voice/agents/openai.yaml",
   ]) {
     assert.ok(paths.includes(required), `missing packed path: ${required}`);
   }
   assert.ok(paths.some((path) => path.startsWith("dist/mcp/")), "MCP production modules are missing");
+  assert.ok(paths.some((path) => path.startsWith("dist/agent/")), "agent production modules are missing");
 });
