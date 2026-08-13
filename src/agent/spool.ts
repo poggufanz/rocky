@@ -188,9 +188,14 @@ function parseLockMetadata(bytes: Buffer): LockMetadata | undefined {
 
 function encodeAnnotationMetadata(token: string, stats: Stats): Buffer | undefined {
   try {
-    const dev = Number.isSafeInteger(stats.dev) ? stats.dev : 0;
-    const ino = Number.isSafeInteger(stats.ino) ? stats.ino : 0;
-    const encoded = Buffer.from(JSON.stringify({ pid: process.pid, token, dev, ino }), "utf8");
+    const metadata: AnnotationMetadata = { pid: process.pid, token };
+    if (Number.isSafeInteger(stats.dev) && stats.dev >= 0
+      && Number.isSafeInteger(stats.ino) && stats.ino >= 0
+      && (stats.dev !== 0 || stats.ino !== 0)) {
+      metadata.dev = stats.dev;
+      metadata.ino = stats.ino;
+    }
+    const encoded = Buffer.from(JSON.stringify(metadata), "utf8");
     return encoded.byteLength <= ANNOTATION_METADATA_MAX_BYTES ? encoded : undefined;
   } catch {
     return undefined;

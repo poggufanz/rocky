@@ -434,6 +434,48 @@ test("stale zero-byte append lock left before metadata is recovered", (t) => {
   assert.equal(existsSync(lock), false);
 });
 
+test("stale zero-byte append lock recovers with unsafe filesystem identity", { timeout: 10_000 }, async (t) => {
+  const paths = freshPaths(t);
+  const key = "unsafe-empty-writer";
+  const resultPath = join(paths.home, "result.json");
+  const spoolModule = join(dirname(fileURLToPath(import.meta.url)), "..", "agent", "spool.js");
+  const workerScript = [
+    "import fs from 'node:fs';",
+    "import { syncBuiltinESMExports } from 'node:module';",
+    "import { join } from 'node:path';",
+    "import { pathToFileURL } from 'node:url';",
+    "const [modulePath, home, resultPath, key] = process.argv.slice(1);",
+    "const unsafeIno = Number.MAX_SAFE_INTEGER + 2;",
+    "const patchIdentity = (stats) => { stats.ino = unsafeIno; return stats; };",
+    "const originalFstat = fs.fstatSync.bind(fs);",
+    "const originalLstat = fs.lstatSync.bind(fs);",
+    "fs.fstatSync = (...args) => patchIdentity(originalFstat(...args));",
+    "fs.lstatSync = (...args) => patchIdentity(originalLstat(...args));",
+    "syncBuiltinESMExports();",
+    "const { appendEvent, readBatch } = await import(pathToFileURL(modulePath).href);",
+    "const paths = { spoolDir: join(home, 'spool') };",
+    "const lock = join(paths.spoolDir, `${key}.append.lock`);",
+    "fs.mkdirSync(paths.spoolDir, { recursive: true });",
+    "fs.writeFileSync(lock, '');",
+    "const stale = new Date(Date.now() - 11 * 60 * 1000);",
+    "fs.utimesSync(lock, stale, stale);",
+    "appendEvent(key, { v: 1, agent: 'claude-code', kind: 'intent', ts: 1, text: 'unsafe stale recovery' }, paths);",
+    "fs.writeFileSync(resultPath, JSON.stringify({ events: readBatch(key, paths).length, lockExists: fs.existsSync(lock) }));",
+  ].join("\n");
+  const child = spawn(process.execPath, [
+    "--input-type=module",
+    "--eval",
+    workerScript,
+    spoolModule,
+    paths.home,
+    resultPath,
+    key,
+  ], { stdio: ["pipe", "pipe", "pipe"] });
+  const result = await waitForWorker(child);
+  assert.equal(result.code, 0, result.stderr);
+  assert.deepEqual(JSON.parse(readFileSync(resultPath, "utf8")), { events: 1, lockExists: false });
+});
+
 test("fresh or malformed append locks remain fail-closed", (t) => {
   const paths = freshPaths(t);
   const freshKey = "fresh-empty-writer";
@@ -744,6 +786,46 @@ test("removeBatch deletes regular batch and lock files", (t) => {
   removeBatch("k3", paths);
   assert.equal(readBatch("k3", paths).length, 0);
   assert.equal(acquireLock("k3", paths), true);
+});
+
+test("removeBatch releases locks when filesystem identity exceeds safe integer range", { timeout: 10_000 }, async (t) => {
+  const paths = freshPaths(t);
+  const key = "unsafe-identity";
+  const resultPath = join(paths.home, "result.json");
+  const spoolModule = join(dirname(fileURLToPath(import.meta.url)), "..", "agent", "spool.js");
+  const workerScript = [
+    "import fs from 'node:fs';",
+    "import { syncBuiltinESMExports } from 'node:module';",
+    "import { join } from 'node:path';",
+    "import { pathToFileURL } from 'node:url';",
+    "const [modulePath, home, resultPath, key] = process.argv.slice(1);",
+    "const unsafeIno = Number.MAX_SAFE_INTEGER + 2;",
+    "const patchIdentity = (stats) => { stats.ino = unsafeIno; return stats; };",
+    "const originalFstat = fs.fstatSync.bind(fs);",
+    "const originalLstat = fs.lstatSync.bind(fs);",
+    "fs.fstatSync = (...args) => patchIdentity(originalFstat(...args));",
+    "fs.lstatSync = (...args) => patchIdentity(originalLstat(...args));",
+    "syncBuiltinESMExports();",
+    "const { acquireLock, appendEvent, removeBatch } = await import(pathToFileURL(modulePath).href);",
+    "const paths = { spoolDir: join(home, 'spool') };",
+    "appendEvent(key, { v: 1, agent: 'claude-code', kind: 'intent', ts: 1, text: 'unsafe identity' }, paths);",
+    "const first = acquireLock(key, paths);",
+    "removeBatch(key, paths);",
+    "const second = acquireLock(key, paths);",
+    "fs.writeFileSync(resultPath, JSON.stringify({ first, second }));",
+  ].join("\n");
+  const child = spawn(process.execPath, [
+    "--input-type=module",
+    "--eval",
+    workerScript,
+    spoolModule,
+    paths.home,
+    resultPath,
+    key,
+  ], { stdio: ["pipe", "pipe", "pipe"] });
+  const result = await waitForWorker(child);
+  assert.equal(result.code, 0, result.stderr);
+  assert.deepEqual(JSON.parse(readFileSync(resultPath, "utf8")), { first: true, second: true });
 });
 
 test("listOrphanBatches returns sorted stale batches with absent or stale regular locks", (t) => {
