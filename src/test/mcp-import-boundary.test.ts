@@ -127,7 +127,7 @@ function assertReadOnlyGraph(roots: readonly string[], graphSourceRoot: string, 
   }
 }
 
-test("MCP source graph reaches only read-only query, config, privacy, AI-port, and transport modules", () => {
+test("MCP source graph reaches only explicitly allowlisted read-only modules; writable core modules stay forbidden", () => {
   assert.ok(existsSync(entry), "src/commands/mcp.ts must be the MCP process boundary");
   const roots = [entry, ...descendants(join(sourceRoot, "mcp"))];
   const allowed = new Set([
@@ -138,6 +138,8 @@ test("MCP source graph reaches only read-only query, config, privacy, AI-port, a
     "core/memory-query.ts",
     "core/memory-read.ts",
     "core/package-info.ts",
+    // Audited pure sanitizer: no imports or filesystem side effects.
+    "core/redact.ts",
     "core/state-paths.ts",
     "ai/ollama.ts",
     "ai/port.ts",
@@ -149,6 +151,9 @@ test("MCP source graph reaches only read-only query, config, privacy, AI-port, a
     "mcp/stdio.ts",
     "mcp/tools.ts",
   ]);
+  for (const writable of ["core/config.ts", "core/memory.ts", "core/watch-log.ts"] as const) {
+    assert.equal(allowed.has(writable), false, `writable core module must remain outside MCP allowlist: ${writable}`);
+  }
   assertReadOnlyGraph(roots, sourceRoot, allowed);
 });
 
