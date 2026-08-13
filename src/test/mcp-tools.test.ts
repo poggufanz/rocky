@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import type { MemoryRecord } from "../core/memory-read.js";
+import type { MemoryRecord, TripleRecord } from "../core/memory-read.js";
 import { createMemoryQueries } from "../core/memory-query.js";
 import { disabledRecallWithAi, type RecallWithAiPort } from "../ai/port.js";
 import { createToolRegistry, McpInvalidParamsError, ToolExecutionError, TOOL_ENVELOPE_RESERVE_BYTES } from "../mcp/tools.js";
@@ -17,10 +17,29 @@ const records: MemoryRecord[] = [
   },
 ];
 
+const triple: TripleRecord = {
+  kind: "triple", id: "triple-1", ts: 300, cwd: "/private/project", schemaV: 1,
+  agent: "codex", origin: "agent-hook", intent: { text: "naikin button" },
+  rationale: { text: "spacing", tags: ["margin"], source: "transcript" },
+  mechanism: {
+    files: [{ path: "src/app.css", plusMinus: [2, 1], props: ["margin-top"] }],
+    truncatedFiles: 0,
+  },
+};
+const knowledgeRecords: MemoryRecord[] = [...records, triple];
+
 function registry(exposure: "sanitized" | "raw" = "sanitized") {
   return createToolRegistry({
     exposure,
     memory: createMemoryQueries(() => records),
+    recallWithAi: disabledRecallWithAi,
+  });
+}
+
+function knowledgeRegistry(exposure: "sanitized" | "raw" = "sanitized") {
+  return createToolRegistry({
+    exposure,
+    memory: createMemoryQueries(() => knowledgeRecords),
     recallWithAi: disabledRecallWithAi,
   });
 }
@@ -37,7 +56,9 @@ async function mapUnexpectedToolFailureToWire(call: () => Promise<unknown>, id: 
 
 test("sanitized catalog excludes cwd and stays in frozen order", () => {
   const definitions = registry().list();
-  assert.deepEqual(definitions.map((tool) => tool.name), ["recall", "recent_failures", "stats", "recall_with_ai"]);
+  assert.deepEqual(definitions.map((tool) => tool.name), [
+    "recall", "recent_failures", "stats", "recall_with_ai", "search_knowledge", "fetch_record", "why_file",
+  ]);
   assert.equal(JSON.stringify(definitions).includes('"cwd"'), false);
   assert.ok(definitions.every((tool) =>
     tool.annotations.readOnlyHint && !tool.annotations.destructiveHint &&
@@ -51,7 +72,167 @@ test("sanitized catalog excludes cwd and stays in frozen order", () => {
 test("raw catalog adds cwd only to queries that support it", () => {
   const definitions = registry("raw").list();
   assert.equal(JSON.stringify(definitions).includes('"cwd"'), true);
-  assert.deepEqual(definitions.map((tool) => tool.name), ["recall", "recent_failures", "stats", "recall_with_ai"]);
+  assert.deepEqual(definitions.map((tool) => tool.name), [
+    "recall", "recent_failures", "stats", "recall_with_ai", "search_knowledge", "fetch_record", "why_file",
+  ]);
+});
+
+test("new tool descriptions are concrete and schemas expose their bounds", () => {
+  const definitions = registry().list();
+  const search = definitions.find((tool) => tool.name === "search_knowledge");
+  const fetch = definitions.find((tool) => tool.name === "fetch_record");
+  const why = definitions.find((tool) => tool.name === "why_file");
+  assert.ok(search && fetch && why);
+  assert.match(search.description, /Example/);
+  assert.match(fetch.description, /Example/);
+  assert.match(why.description, /Example/);
+  assert.deepEqual(search.inputSchema, {
+    type: "object", additionalProperties: false, required: ["query"], properties: {
+      query: { type: "string", minLength: 1, maxLength: 500 },
+      kind: { type: "string", enum: ["failure", "fix", "triple"] },
+      limit: { type: "integer", minimum: 1, maximum: 20 },
+    },
+  });
+  assert.deepEqual(fetch.inputSchema, {
+    type: "object", additionalProperties: false, required: ["id"], properties: { id: { type: "string" } },
+  });
+  assert.deepEqual(why.inputSchema, {
+    type: "object", additionalProperties: false, required: ["path"], properties: {
+      path: { type: "string" }, limit: { type: "integer", minimum: 1, maximum: 10 },
+    },
+  });
+});
+
+test("knowledge tools search, fetch, and explain one file", async () => {
+  const signal = new AbortController().signal;
+  const search = await knowledgeRegistry().call("search_knowledge", { query: "naikin" }, signal);
+  assert.equal(search.isError, undefined);
+  assert.deepEqual(search.structuredContent.items, [{
+    id: "triple-1", ts: 300, kind: "triple", snippet: "naikin button", score: 1 / 3,
+  }]);
+
+  const fetched = await knowledgeRegistry().call("fetch_record", { id: "triple-1" }, signal);
+  assert.equal(fetched.isError, undefined);
+  assert.equal((fetched.structuredContent.record as { id: string }).id, "triple-1");
+  assert.equal((fetched.structuredContent.record as { files: unknown[] }).files.length, 1);
+  assert.equal("cwd" in (fetched.structuredContent.record as object), false);
+  assert.equal("excerpt" in ((fetched.structuredContent.record as { files: object[] }).files[0] ?? {}), false);
+
+  const why = await knowledgeRegistry().call("why_file", { path: "src/app.css", limit: 1 }, signal);
+  assert.equal(why.isError, undefined);
+  assert.equal((why.structuredContent.items as unknown[]).length, 1);
+});
+
+test("search snippets and fetched failures use sanitized explicit projections", async () => {
+  const sensitive: MemoryRecord = {
+    kind: "failure", id: "opaque-failure", ts: 301, cwd: "/private/project", cmd: "npm test --token=fixture-secret-value-12345678901234567890",
+    exitCode: 1, fingerprint: "fp", signature: ["secret fixture"], excerpt: "Bearer fixture-secret-value-12345678901234567890",
+  };
+  const tools = createToolRegistry({
+    exposure: "sanitized",
+    memory: createMemoryQueries(() => [sensitive]),
+    recallWithAi: disabledRecallWithAi,
+  });
+  const search = await tools.call("search_knowledge", { query: "token" }, new AbortController().signal);
+  assert.equal((search.structuredContent.items as { id: string }[])[0]?.id, sensitive.id);
+  assert.doesNotMatch(JSON.stringify(search), /fixture-secret-value|\/private\/project/);
+  const fetched = await tools.call("fetch_record", { id: sensitive.id }, new AbortController().signal);
+  assert.equal((fetched.structuredContent.record as { id: string }).id, sensitive.id);
+  assert.equal("cwd" in (fetched.structuredContent.record as object), false);
+  assert.equal("excerpt" in (fetched.structuredContent.record as object), false);
+  assert.doesNotMatch(JSON.stringify(fetched), /fixture-secret-value|\/private\/project/);
+});
+
+test("sanitized knowledge projections remove C1 terminal strings and invisible format controls", async () => {
+  const hostile = [
+    "hostile ",
+    "\u009b31m",
+    "\u009d8;;https://evil.example/title-payload\u009c",
+    "\u009d52;c;clipboard-payload\u009c",
+    "\u061c\u200b\u200d\u2060\ufeff",
+    " text",
+  ].join("");
+  const hostileTriple: TripleRecord = {
+    kind: "triple", id: "hostile-triple", ts: 303, cwd: "/private/project", schemaV: 1,
+    agent: "codex", origin: "agent-hook", intent: { text: `${hostile}button` },
+    rationale: { text: hostile, tags: [hostile], source: "transcript" },
+    mechanism: {
+      files: [{ path: "src/hostile.ts", plusMinus: [1, 1], props: [hostile] }],
+      truncatedFiles: 0,
+    },
+  };
+  const tools = createToolRegistry({
+    exposure: "sanitized",
+    memory: createMemoryQueries(() => [hostileTriple]),
+    recallWithAi: disabledRecallWithAi,
+  });
+  const signal = new AbortController().signal;
+  const search = await tools.call("search_knowledge", { query: "hostile" }, signal);
+  const fetched = await tools.call("fetch_record", { id: hostileTriple.id }, signal);
+  const why = await tools.call("why_file", { path: "src/hostile.ts" }, signal);
+  const serialized = JSON.stringify({ search, fetched, why });
+
+  assert.doesNotMatch(serialized, /[\u0080-\u009f\u061c\u200b-\u200f\u2060-\u206f\ufeff]/u);
+  assert.doesNotMatch(serialized, /31m|title-payload|clipboard-payload/);
+});
+
+test("unsupported notes are indistinguishable from unknown fetch IDs", async () => {
+  const note: MemoryRecord = {
+    kind: "note", id: "note-id", ts: 302, cwd: "/private", cmd: "rocky note",
+    file: "src/app.ts", line: 1, subject: "subject", answer: "answer",
+  };
+  const tools = createToolRegistry({
+    exposure: "sanitized", memory: createMemoryQueries(() => [note]), recallWithAi: disabledRecallWithAi,
+  });
+  const unknown = await tools.call("fetch_record", { id: "missing" }, new AbortController().signal);
+  const unsupported = await tools.call("fetch_record", { id: "note-id" }, new AbortController().signal);
+  assert.equal(unknown.isError, true);
+  assert.equal(unsupported.isError, true);
+  assert.deepEqual(unsupported.structuredContent, unknown.structuredContent);
+  assert.doesNotMatch(JSON.stringify(unsupported), /note-id|subject|answer/);
+});
+
+test("oversized single fetch returns a bounded deterministic fallback", async () => {
+  const giant = {
+    ...triple,
+    id: "giant-triple",
+    mechanism: {
+      files: Array.from({ length: 40 }, () => ({
+        path: "p".repeat(16 * 1024), plusMinus: [1, 1] as [number, number],
+        props: ["q".repeat(16 * 1024)], excerpt: "e".repeat(16 * 1024),
+      })),
+      truncatedFiles: 0,
+    },
+  } satisfies TripleRecord;
+  const tools = createToolRegistry({
+    exposure: "raw", memory: createMemoryQueries(() => [giant]), recallWithAi: disabledRecallWithAi,
+  });
+  const result = await tools.call("fetch_record", { id: giant.id }, new AbortController().signal);
+  assert.deepEqual(result.structuredContent, { exposure: "raw", record: null, truncated: true });
+  assert.equal(result.isError, undefined);
+  assert.ok(Buffer.byteLength(JSON.stringify(result), "utf8") <= MAX_RESPONSE_BYTES - TOOL_ENVELOPE_RESERVE_BYTES);
+});
+
+test("fetch unknown and unsupported IDs return the same safe not-found error", async () => {
+  const signal = new AbortController().signal;
+  const unknown = await knowledgeRegistry().call("fetch_record", { id: "hostile-id-\u001b[31msecret" }, signal);
+  assert.equal(unknown.isError, true);
+  assert.deepEqual(unknown.structuredContent, { error: { code: "not_found", message: "record not found" } });
+  assert.doesNotMatch(JSON.stringify(unknown), /hostile-id|secret/);
+});
+
+test("knowledge tool validators reject malformed, out-of-range, and unknown arguments", async () => {
+  const signal = new AbortController().signal;
+  const invalid = [
+    ["search_knowledge", { query: "" }],
+    ["search_knowledge", { query: "x", kind: "note" }],
+    ["search_knowledge", { query: "x", limit: 21 }],
+    ["fetch_record", {}],
+    ["fetch_record", { id: 1 }],
+    ["why_file", {}],
+    ["why_file", { path: "x", limit: 11 }],
+  ] as const;
+  for (const [name, args] of invalid) await assert.rejects(knowledgeRegistry().call(name, args, signal), McpInvalidParamsError);
 });
 
 test("raw runtime accepts cwd while sanitized runtime does not", async () => {
@@ -201,7 +382,11 @@ test("complete tool result cap removes whole trailing items and fits modern and 
 test("explicit operational failures become safe error results", async () => {
   const broken = createToolRegistry({
     exposure: "sanitized",
-    memory: { recall() { throw new ToolExecutionError("memory_unavailable", "memory unavailable"); }, recentFailures() { return []; }, stats() { return { failures: 0, fixEvents: 0, resolved: 0, unresolved: 0 }; } },
+    memory: {
+      recall() { throw new ToolExecutionError("memory_unavailable", "memory unavailable"); },
+      recentFailures() { return []; }, stats() { return { failures: 0, fixEvents: 0, resolved: 0, unresolved: 0 }; },
+      searchKnowledge() { return []; }, fetchRecord() { return undefined; }, whyFile() { return []; },
+    },
     recallWithAi: disabledRecallWithAi,
   });
   const result = await broken.call("recall", { query: "missing" }, new AbortController().signal);
@@ -219,6 +404,7 @@ test("recognized storage failures are wrapped at the storage boundary", async ()
       },
       recentFailures() { return []; },
       stats() { return { failures: 0, fixEvents: 0, resolved: 0, unresolved: 0 }; },
+      searchKnowledge() { return []; }, fetchRecord() { return undefined; }, whyFile() { return []; },
     },
     recallWithAi: disabledRecallWithAi,
   });
@@ -231,7 +417,11 @@ test("recognized storage failures are wrapped at the storage boundary", async ()
 test("unexpected programmer errors reach the server boundary", async () => {
   const broken = createToolRegistry({
     exposure: "sanitized",
-    memory: { recall() { throw new Error("invariant violated"); }, recentFailures() { return []; }, stats() { return { failures: 0, fixEvents: 0, resolved: 0, unresolved: 0 }; } },
+    memory: {
+      recall() { throw new Error("invariant violated"); }, recentFailures() { return []; },
+      stats() { return { failures: 0, fixEvents: 0, resolved: 0, unresolved: 0 }; },
+      searchKnowledge() { return []; }, fetchRecord() { return undefined; }, whyFile() { return []; },
+    },
     recallWithAi: disabledRecallWithAi,
   });
   await assert.rejects(broken.call("recall", { query: "missing" }, new AbortController().signal), /invariant violated/);
@@ -244,7 +434,11 @@ test("unrecognized coded invariants reach the server boundary", async () => {
   ]) {
     const broken = createToolRegistry({
       exposure: "sanitized",
-      memory: { recall() { throw error; }, recentFailures() { return []; }, stats() { return { failures: 0, fixEvents: 0, resolved: 0, unresolved: 0 }; } },
+      memory: {
+        recall() { throw error; }, recentFailures() { return []; },
+        stats() { return { failures: 0, fixEvents: 0, resolved: 0, unresolved: 0 }; },
+        searchKnowledge() { return []; }, fetchRecord() { return undefined; }, whyFile() { return []; },
+      },
       recallWithAi: disabledRecallWithAi,
     });
     await assert.rejects(

@@ -523,6 +523,9 @@ function realRegistryWithStats(stats: () => typeof statsPayload) {
       recall: () => [],
       recentFailures: () => [],
       stats,
+      searchKnowledge: () => [],
+      fetchRecord: () => undefined,
+      whyFile: () => [],
     },
     recallWithAi: disabledRecallWithAi,
   });

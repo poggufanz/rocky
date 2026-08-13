@@ -672,7 +672,7 @@ async function main() {
   assert.doesNotMatch(JSON.stringify(triple), /ghp_/);
   assert.equal(spoolEntries().some((name) => name.endsWith(".jsonl") || name.endsWith(".lock")), false);
   const queuedLabels = readFileSync(labelsPath, "utf8").split("\n").filter(Boolean);
-  assert.equal(queuedLabels.length, 1, "installed Claude turn must queue one passive label");
+  assert.equal(queuedLabels.length, 2, "installed Claude turn must queue mapping plus first weekly digest hint");
   assert.match(
     queuedLabels[0] ?? "",
     /^you say "move button down"\. it is margin-top\. I think\. check, question$/u,
@@ -683,6 +683,11 @@ async function main() {
     queuedLabels[0] ?? "",
     /[\u0000-\u001f\u007f-\u009f\u200e\u200f\u202a-\u202e\u2066-\u2069]/u,
     "queued label must contain no control or bidi characters",
+  );
+  assert.equal(
+    queuedLabels[1],
+    "week of work in memory. rocky digest, question",
+    "installed first weekly turn must queue the bounded digest hint after its mapping label",
   );
 
   // Exercise the installed Codex adapter through both current stdin hooks and
@@ -749,13 +754,13 @@ async function main() {
   assert.match(codexTriple.rationale.text, /\[redacted github token\]/);
   assert.doesNotMatch(JSON.stringify(codexTriple), /ghp_/);
   const labelsAfterCodex = readFileSync(labelsPath, "utf8").split("\n").filter(Boolean);
-  assert.equal(labelsAfterCodex.length, 2, "installed Codex turn must queue one additional label");
+  assert.equal(labelsAfterCodex.length, 3, "installed Codex turn must queue one additional label without repeating weekly hint");
   assert.match(
-    labelsAfterCodex[1] ?? "",
+    labelsAfterCodex[2] ?? "",
     /^you say "move card right"\. it is margin-left\. I think\. check, question$/u,
     "installed Codex turn must queue deterministic mapping label",
   );
-  assert.doesNotMatch(labelsAfterCodex[1] ?? "", /ghp_/u, "Codex label must not contain raw token");
+  assert.doesNotMatch(labelsAfterCodex[2] ?? "", /ghp_/u, "Codex label must not contain raw token");
 
   // Setup dogfood uses explicit consent in an isolated HOME. The Claude
   // settings parent exists and remains private; Codex TOML is only printed.

@@ -72,7 +72,7 @@ test("unscoped Rocky install matcher rejects active commands only", () => {
   }
 });
 
-test("README and CLI help publish the installable v0.2.1 command surface", () => {
+test("README and CLI help publish the installable command surface", () => {
   const help = helpOutput();
   const expected = [
     "npm install -g @poggufanz/rocky-cli",
@@ -80,6 +80,12 @@ test("README and CLI help publish the installable v0.2.1 command surface", () =>
     "rocky check",
     "rocky mcp",
     "rocky recall --ai",
+    "rocky what",
+    "rocky how",
+    "rocky why",
+    "rocky digest",
+    "rocky quiz",
+    "rocky export",
     "rocky model",
     "rocky setup --voice-skill",
     "rocky setup --agent-hooks",
@@ -120,7 +126,7 @@ test("README identity, roadmap, and Plan 01/Plan 02 v0.5 boundary stay aligned",
   assert.match(readme, /does not mean (?:the )?model weights change/i);
   assert.match(readme, /Nervous System \(v0\.5\.0 — unreleased\)/);
   assert.match(readme, /Plan 01[^\n]*implemented/i);
-  assert.match(readme, /Plan 02[^\n]*deferred/i);
+  assert.match(readme, /Plan 02[^\n]*(?:implemented|available|unreleased)/i);
   assert.match(readme, /user prompt|captured prompt/i);
   assert.match(readme, /edited paths?[^\n]*(?:excerpt|capped)/i);
   assert.match(readme, /stated rationale/i);
@@ -132,6 +138,31 @@ test("README identity, roadmap, and Plan 01/Plan 02 v0.5 boundary stay aligned",
   assert.match(readme, /deterministic[^\n]*(?:fallback|degraded)/i);
   assert.match(readme, /loopback Ollama/i);
   assert.match(readme, /quoted[^\n]*untrusted hearsay/i);
+  assertContainsEvery(readme, "README v0.5 dictionary surfaces", [
+    'rocky what "move button down"',
+    'rocky what --ai "move button down"',
+    'rocky how "move button down"',
+    "rocky why src/button.css",
+    "rocky digest",
+    "rocky quiz",
+    "rocky export --kind triple > triples.jsonl",
+    "rocky export --since 7d",
+    "search_knowledge",
+    "fetch_record",
+    "why_file",
+    "Reasons are hearsay Rocky heard, not verified facts.",
+  ]);
+  assert.match(readme, /filtered raw JSONL on stdout/i);
+  assert.match(readme, /count\/persona line goes to stderr/i);
+  assert.match(readme, /user-owned, append-only data/i);
+  assert.match(readme, /at most one question for that turn/i);
+  assert.match(readme, /detached, non-blocking ambiguity check/i);
+  assert.match(readme, /never reads project files/i);
+  assert.match(readme, /ignored questions are dropped and never repeated/i);
+  assert.match(readme, /next shell prompt shows at most one label/i);
+  assert.match(readme, /non-quiet `rocky watch` also shows it/i);
+  assert.match(readme, /Labels never enter agent context/i);
+  assert.match(readme, /`watch --quiet` stays plain-facts mode and does not poll persona labels/i);
   assert.match(readme, /Claude[^\n]*explicit consent/i);
   assert.match(readme, /pre-created[^\n]*\.claude/i);
   assert.match(readme, /Claude Code capture requires hook payload field `prompt_id`/i);
@@ -144,17 +175,16 @@ test("README identity, roadmap, and Plan 01/Plan 02 v0.5 boundary stay aligned",
     "ambiguity surfacing",
     "curious blind friend",
     "digest",
-    "memory circuit breaker",
   ]) {
     const row = readme.split("\n").find((line) => line.trimStart().startsWith("|") && line.toLowerCase().includes(mechanism));
     assert.ok(row, `README must keep a conceptual row for ${mechanism}`);
-    assert.match(row ?? "", /Plan 02 deferred/i, `${mechanism} must be marked Plan 02 deferred`);
+    assert.match(row ?? "", /Plan 02 implemented \(unreleased\)/i, `${mechanism} must be marked implemented in unreleased Plan 02`);
   }
   const recallRow = readme.split("\n").find((line) => line.toLowerCase().includes("| recall |"));
   assert.ok(recallRow, "README must keep a conceptual row for current Recall");
   assert.match(recallRow ?? "", /Plan 01 implemented\/current/i);
   assert.doesNotMatch(recallRow ?? "", /Plan 02 deferred/i);
-  for (const deferred of ["dictionary", "digest", "quiz", "export", "ambiguity", "search tools", "BYOK", "brief", "attest", "circuit breaker"]) {
+  for (const deferred of ["BYOK", "brief", "attest", "circuit breaker"]) {
     assert.match(readme, new RegExp(`${deferred}[^\\n]*defer|defer[^\\n]*${deferred}`, "i"));
   }
   const changelog = readFileSync(join(packageRoot, "CHANGELOG.md"), "utf8");

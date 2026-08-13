@@ -211,7 +211,7 @@ async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: str
 
 function assertToolCatalog(response: JsonRpcResponse): void {
   assert.deepEqual((response.result?.tools as { name: string }[]).map((tool) => tool.name), [
-    "recall", "recent_failures", "stats", "recall_with_ai",
+    "recall", "recent_failures", "stats", "recall_with_ai", "search_knowledge", "fetch_record", "why_file",
   ]);
   assert.equal(JSON.stringify(response).includes('"cwd"'), false);
 }
@@ -229,6 +229,9 @@ const calls = [
   ["recent_failures", {}],
   ["stats", {}],
   ["recall_with_ai", { query: "missing module" }],
+  ["search_knowledge", { query: "missing module" }],
+  ["fetch_record", { id: "fixture-failure-resolved" }],
+  ["why_file", { path: "src/app.css", limit: 1 }],
 ] as const;
 
 test("compiled CLI serves modern discovery, listing, and every read-only tool without mutating state", { timeout: 10_000 }, async (t) => {
@@ -392,6 +395,9 @@ test("MCP keeps sparse projected IDs aligned with original AI candidates", async
     recall() { return hits; },
     recentFailures() { return []; },
     stats() { return { failures: 3, fixEvents: 2, resolved: 2, unresolved: 1 }; },
+    searchKnowledge() { return []; },
+    fetchRecord() { return undefined; },
+    whyFile() { return []; },
   };
   const result = await createToolRegistry({
     exposure: "raw",

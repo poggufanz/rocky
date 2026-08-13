@@ -6,6 +6,7 @@
  *   rocky run "<command>"     run a command; Rocky remembers failures & fixes
  *   rocky recall [--ai] <query> search Rocky's memory of past errors
  *   rocky hook|mcp|model|setup distribution bridge commands
+ *   rocky watch|check|what|how|why|digest|quiz|export v0.3–v0.5 surfaces
  *   rocky --help
  *   rocky --version
  */
@@ -19,8 +20,10 @@ import { hookFail, hookInstall, hookStatus, hookSuccess, hookUninstall } from ".
 import { mcp } from "./commands/mcp.js";
 import { setup } from "./commands/setup.js";
 import { check } from "./commands/check.js";
+import { digest, exportCommand, how, quiz, what, why } from "./commands/dictionary.js";
 import { agentEvent } from "./commands/agent-hook.js";
 import { annotateCommand } from "./agent/annotate.js";
+import { ambiguityCommand } from "./agent/ambiguity.js";
 import { PACKAGE_NAME, PACKAGE_VERSION } from "./core/package-info.js";
 import { face, say } from "./ui/rocky.js";
 
@@ -44,6 +47,13 @@ usage:
                             ask Rocky's memory. matches words from error or command.
   rocky recall --ai [--] <query...>
                             --ai asks configured local Ollama after deterministic recall.
+  rocky what <query...>     look up what remembered intent became.
+  rocky how <query...>      remember how intent became code.
+  rocky why <file>          hear why remembered change touched file.
+  rocky digest              hear this week's remembered intent pattern.
+  rocky quiz                practice remembered intent. Rocky asks, then reveals.
+  rocky export [--kind failure|fix|note|triple] [--since ISO|Nd]
+                            dump raw memory as JSONL on stdout.
   rocky model status         report local-AI configuration without loading a model.
   rocky model use [--exposure sanitized|raw] <installed-model>
                             probe an installed Ollama model, then enable local AI.
@@ -98,6 +108,18 @@ async function main(): Promise<number> {
       return setup(rest);
     case "check":
       return check(rest);
+    case "what":
+      return what(rest);
+    case "how":
+      return how(rest);
+    case "why":
+      return why(rest);
+    case "digest":
+      return digest(rest);
+    case "quiz":
+      return quiz(rest);
+    case "export":
+      return exportCommand(rest);
     case "hook":
       switch (rest[0]) {
         case "install":
@@ -118,6 +140,8 @@ async function main(): Promise<number> {
       return hookSuccess(rest[0] ?? "", rest[1] ?? process.cwd());
     case "_annotate":
       return annotateCommand(rest[0] ?? "");
+    case "_ambiguity":
+      return ambiguityCommand(rest[0] ?? "");
     case "--version":
       console.log(PACKAGE_VERSION);
       return 0;

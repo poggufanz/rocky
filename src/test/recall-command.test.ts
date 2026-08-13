@@ -91,6 +91,7 @@ function memoryReturning(
       },
       recentFailures() { return recent.map(({ failure, fix }) => ({ failure, ...(fix === undefined ? {} : { fix }) })); },
       stats() { return { failures: 0, fixEvents: 0, resolved: 0, unresolved: 0 }; },
+      searchKnowledge() { return []; }, fetchRecord() { return undefined; }, whyFile() { return []; },
     },
   };
 }
@@ -397,6 +398,7 @@ test("a memory read failure on the second (recentFailures) call cannot leak a ra
     recall() { return []; },
     recentFailures() { throw new Error("EISDIR: illegal operation on a directory"); },
     stats() { return { failures: 0, fixEvents: 0, resolved: 0, unresolved: 0 }; },
+    searchKnowledge() { return []; }, fetchRecord() { return undefined; }, whyFile() { return []; },
   };
   const output = await captureStderr(() => recall(["nothing", "matches"], {
     memory,

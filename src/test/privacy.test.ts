@@ -3,11 +3,14 @@ import assert from "node:assert/strict";
 import { Buffer } from "node:buffer";
 import { performance } from "node:perf_hooks";
 import type { RecallHit, RecentFailureHit } from "../core/memory-query.js";
+import type { FixRecord, TripleRecord } from "../core/memory-read.js";
 import {
   MAX_FIELD_BYTES,
   MAX_RESPONSE_BYTES,
+  projectMemoryRecord,
   projectRecentFailures,
   projectRecallHits,
+  projectTriple,
   redactText,
   strictestExposure,
   truncateUtf8,
@@ -344,4 +347,86 @@ test("redactor still leaves ordinary words that merely contain a key name", () =
   for (const benign of ["monkeykeyboard", "keyboard shortcut", "the token bus arrives", "hello world"]) {
     assert.equal(redactText(benign, "/home/ada"), benign);
   }
+});
+
+test("projectTriple sanitized is explicit, redacted, bounded, and detached", () => {
+  const triple: TripleRecord = {
+    kind: "triple", id: "opaque-triple-id", ts: 31, cwd: "/home/ada/private", schemaV: 1,
+    agent: "codex", origin: "agent-hook",
+    intent: { text: "use sk-ant-abcdefghijklmnopqrstuvwxyz1234567890 for button" },
+    rationale: { text: "secret=sk-ant-abcdefghijklmnopqrstuvwxyz1234567890", tags: ["sk-ant-abcdefghijklmnopqrstuvwxyz1234567890"] , source: "notify" },
+    mechanism: {
+      head: "head --token sk-ant-abcdefghijklmnopqrstuvwxyz1234567890",
+      files: [{
+        path: "/home/ada/private/button.tsx",
+        plusMinus: [3, 1],
+        props: ["--token=sk-ant-abcdefghijklmnopqrstuvwxyz1234567890"],
+        excerpt: "excerpt sk-ant-abcdefghijklmnopqrstuvwxyz1234567890",
+      }],
+      truncatedFiles: 0,
+    },
+  };
+
+  const output = projectTriple(triple, "sanitized");
+  assert.equal(output.id, triple.id);
+  assert.equal("cwd" in output, false);
+  assert.equal(output.files[0]?.excerpt, undefined);
+  assert.doesNotMatch(JSON.stringify(output), /sk-ant-|\/home\/ada\/private/);
+  assert.notEqual(output.files, triple.mechanism.files);
+  assert.notEqual(output.files[0]?.props, triple.mechanism.files[0]?.props);
+  assert.notEqual(output.files[0]?.plusMinus, triple.mechanism.files[0]?.plusMinus);
+});
+
+test("projectTriple raw keeps bounded excerpt and normalized cwd without sharing arrays", () => {
+  const triple: TripleRecord = {
+    kind: "triple", id: "opaque-raw-id", ts: 32, cwd: "/work\u0000/private", schemaV: 1,
+    agent: "claude-code", origin: "agent-hook",
+    intent: { text: "change button" },
+    mechanism: {
+      files: [{ path: "src/button.tsx", plusMinus: [1, 2], props: ["color"], excerpt: "raw excerpt\u0000" }],
+      truncatedFiles: 0,
+    },
+  };
+
+  const output = projectTriple(triple, "raw");
+  assert.equal(output.id, triple.id);
+  assert.equal(output.cwd, "/work /private");
+  assert.equal(output.files[0]?.excerpt, "raw excerpt");
+  assert.notEqual(output.files, triple.mechanism.files);
+  assert.notEqual(output.files[0]?.plusMinus, triple.mechanism.files[0]?.plusMinus);
+});
+
+test("triple props and tags preserve array boundaries, cardinality, and empty entries", () => {
+  const triple: TripleRecord = {
+    kind: "triple", id: "boundary-triple", ts: 33, cwd: "/work", schemaV: 1,
+    agent: "codex", origin: "agent-hook",
+    rationale: { text: "why", tags: ["one\ntwo", "", "three"], source: "notify" },
+    mechanism: {
+      files: [{ path: "src/file.ts", plusMinus: [1, 1], props: ["one\ntwo", "", "three"] }],
+      truncatedFiles: 0,
+    },
+  };
+  const output = projectTriple(triple, "sanitized");
+  assert.deepEqual(output.rationale?.tags, ["one two", "", "three"]);
+  assert.deepEqual(output.files[0]?.props, ["one two", "", "three"]);
+  assert.equal(output.rationale?.tags.length, triple.rationale?.tags.length);
+  assert.equal(output.files[0]?.props.length, triple.mechanism.files[0]?.props.length);
+});
+
+test("persisted IDs and link IDs stay opaque while fix arrays remain detached", () => {
+  const opaque = "sk-ant-abcdefghijklmnopqrstuvwxyz1234567890";
+  const fix: FixRecord = {
+    kind: "fix", id: opaque, ts: 34, cwd: "/work", cmd: "npm test",
+    failureIds: [opaque, "", "second-id"],
+    links: [{ id: opaque, basis: "signature" }],
+  };
+  const output = projectMemoryRecord(fix, "sanitized") as {
+    id: string; failureIds: string[]; links: { id: string; basis: string }[];
+  };
+  assert.equal(output.id, opaque);
+  assert.deepEqual(output.failureIds, [opaque, "", "second-id"]);
+  assert.deepEqual(output.links, [{ id: opaque, basis: "signature" }]);
+  assert.notEqual(output.failureIds, fix.failureIds);
+  assert.notEqual(output.links, fix.links);
+  assert.notEqual(output.links[0], fix.links?.[0]);
 });

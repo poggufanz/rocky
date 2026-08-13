@@ -1,6 +1,7 @@
 import { commandBase, commandSignature, similarity, tokens } from "./fingerprint.js";
 import { loadMemory } from "./memory-read.js";
-import type { FailureRecord, FixRecord, LinkBasis, MemoryRecord } from "./memory-read.js";
+import type { FailureRecord, FixRecord, LinkBasis, MemoryRecord, TripleRecord } from "./memory-read.js";
+import { triplesForFile } from "./dictionary.js";
 
 export interface RecallQuery { query: string; limit?: number; cwd?: string }
 export interface RecallHit { failure: FailureRecord; fix?: FixRecord; score: number }
@@ -9,10 +10,21 @@ export interface RecentFailureHit { failure: FailureRecord; fix?: FixRecord }
 export interface StatsQuery { cwd?: string }
 export interface MemoryStats { failures: number; fixEvents: number; resolved: number; unresolved: number }
 export interface LinkQuery { cwd: string; now?: number; windowMs?: number }
+export interface KnowledgeSearchQuery { query: string; kind?: "failure" | "fix" | "triple"; limit?: number }
+export interface KnowledgeSearchHit {
+  id: string;
+  ts: number;
+  kind: "failure" | "fix" | "triple";
+  snippet: string;
+  score: number;
+}
 export interface MemoryQueries {
   recall(input: RecallQuery): RecallHit[];
   recentFailures(input?: RecentFailuresQuery): RecentFailureHit[];
   stats(input?: StatsQuery): MemoryStats;
+  searchKnowledge(input: KnowledgeSearchQuery): KnowledgeSearchHit[];
+  fetchRecord(id: string): MemoryRecord | undefined;
+  whyFile(path: string, limit?: number): TripleRecord[];
 }
 
 export function findByFingerprint(records: readonly MemoryRecord[], fp: string): FailureRecord[] {
@@ -91,6 +103,57 @@ export function queryStats(records: readonly MemoryRecord[], input: StatsQuery =
   return { failures: failures.length, fixEvents, resolved, unresolved: failures.length - resolved };
 }
 
+export function searchKnowledge(
+  records: readonly MemoryRecord[],
+  input: KnowledgeSearchQuery,
+): KnowledgeSearchHit[] {
+  const limit = Math.min(Math.max(input.limit ?? 10, 1), 20);
+  const queryTokens = tokens(input.query);
+  const hits: KnowledgeSearchHit[] = [];
+  const wants = (kind: KnowledgeSearchHit["kind"]): boolean => input.kind === undefined || input.kind === kind;
+
+  for (const record of records) {
+    if (record.kind === "failure" && wants("failure")) {
+      const score = similarity(queryTokens, tokens(`${record.cmd} ${record.signature.join(" ")}`));
+      if (score > 0) hits.push({
+        id: record.id,
+        ts: record.ts,
+        kind: "failure",
+        snippet: record.cmd.slice(0, 120),
+        score,
+      });
+    } else if (record.kind === "fix" && wants("fix")) {
+      const score = similarity(queryTokens, tokens(record.cmd));
+      if (score > 0) hits.push({
+        id: record.id,
+        ts: record.ts,
+        kind: "fix",
+        snippet: record.cmd.slice(0, 120),
+        score,
+      });
+    } else if (record.kind === "triple" && wants("triple") && record.intent) {
+      const score = similarity(queryTokens, tokens(`${record.intent.text} ${record.rationale?.tags.join(" ") ?? ""}`));
+      if (score > 0) hits.push({
+        id: record.id,
+        ts: record.ts,
+        kind: "triple",
+        snippet: record.intent.text.slice(0, 120),
+        score,
+      });
+    }
+  }
+
+  return hits.sort((a, b) => b.score - a.score || b.ts - a.ts).slice(0, limit);
+}
+
+export function fetchRecord(records: readonly MemoryRecord[], id: string): MemoryRecord | undefined {
+  return records.find((record) => record.id === id);
+}
+
+export function whyFile(records: readonly MemoryRecord[], path: string, limit = 5): TripleRecord[] {
+  return triplesForFile(records, path, limit);
+}
+
 export const LINK_WINDOW_MS = 1000 * 60 * 60 * 8;
 
 export interface UnresolvedLink { failure: FailureRecord; basis: LinkBasis }
@@ -119,5 +182,8 @@ export function createMemoryQueries(load: () => MemoryRecord[] = loadMemory): Me
     recall: (input) => queryRecall(load(), input),
     recentFailures: (input = {}) => queryRecentFailures(load(), input),
     stats: (input = {}) => queryStats(load(), input),
+    searchKnowledge: (input) => searchKnowledge(load(), input),
+    fetchRecord: (id) => fetchRecord(load(), id),
+    whyFile: (path, limit = 5) => whyFile(load(), path, limit),
   };
 }

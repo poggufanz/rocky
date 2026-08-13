@@ -5,15 +5,19 @@ import {
   constants,
   fchmodSync,
   fstatSync,
+  ftruncateSync,
   lstatSync,
   mkdirSync,
   openSync,
   readSync,
   writeSync,
+  type BigIntStats,
 } from "node:fs";
 import { resolveRockyPaths, type RockyPaths } from "../core/state-paths.js";
 import { recordTripleOnce } from "../core/memory.js";
 import type { TripleFile, TripleRecord } from "../core/memory.js";
+import { loadMemory } from "../core/memory-read.js";
+import { digestBuckets } from "../core/dictionary.js";
 import { loadConfig, type ConfigLoadResult } from "../core/config-read.js";
 import { redactSecretsAtBoundary, replaceAnsiAndControls, stripInvisibleControls } from "../core/redact.js";
 import { annotatePortFromConfig, parseAnnotateOutput, type AnnotatePort, type AnnotateOutput } from "../ai/annotate.js";
@@ -49,6 +53,9 @@ const PROP_RE = /([a-zA-Z-]{2,})\s*:/g;
 // boundary restored by stripping ANSI/C0/C1 controls.
 const BOUNDARY_MARKER = "\u2065";
 const NO_FOLLOW = process.platform === "win32" ? 0 : constants.O_NOFOLLOW;
+const NO_BLOCK = process.platform === "win32" ? 0 : constants.O_NONBLOCK;
+const WEEK_MS = 7n * 24n * 60n * 60n * 1_000n;
+const DIGEST_HINT_LEASE_KEY = "__rocky_digest_hint__";
 
 export interface AnnotateDeps {
   paths?: RockyPaths;
@@ -176,6 +183,149 @@ export function defaultQueueLabel(line: string, paths: RockyPaths): void {
     writeLabelLines(paths.labels, [...existing, safe].slice(-MAX_LABEL_LINES));
   } catch {
     // Labels are best effort and never affect durable memory.
+  }
+}
+
+function digestLstat(path: string): BigIntStats {
+  return lstatSync(path, { bigint: true });
+}
+
+function digestFstat(fd: number): BigIntStats {
+  return fstatSync(fd, { bigint: true });
+}
+
+function exactTimeMs(timeMs: number): bigint | undefined {
+  return Number.isSafeInteger(timeMs) ? BigInt(timeMs) : undefined;
+}
+
+function usableFileIdentity(stats: { dev: bigint; ino: bigint }): boolean {
+  return typeof stats.dev === "bigint" && typeof stats.ino === "bigint"
+    && stats.dev >= 0n && stats.ino >= 0n && (stats.dev !== 0n || stats.ino !== 0n);
+}
+
+function sameFileIdentity(left: { dev: bigint; ino: bigint }, right: { dev: bigint; ino: bigint }): boolean {
+  return usableFileIdentity(left) && usableFileIdentity(right)
+    && left.dev === right.dev && left.ino === right.ino;
+}
+
+function validDigestDescriptor(stats: {
+  dev: bigint;
+  ino: bigint;
+  nlink: bigint;
+  isFile: () => boolean;
+  isSymbolicLink: () => boolean;
+}): boolean {
+  return stats.isFile() && !stats.isSymbolicLink() && stats.nlink === 1n && usableFileIdentity(stats);
+}
+
+type DigestHintState = "missing" | "recent" | "stale" | "unsafe";
+
+function digestHintState(path: string, now: number): DigestHintState {
+  const nowMs = exactTimeMs(now);
+  if (nowMs === undefined) return "unsafe";
+  let initial: BigIntStats;
+  try {
+    initial = digestLstat(path);
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "ENOENT" ? "missing" : "unsafe";
+  }
+  if (!validDigestDescriptor(initial)) return "unsafe";
+
+  let fd = -1;
+  try {
+    fd = openSync(path, constants.O_RDONLY | NO_FOLLOW | NO_BLOCK);
+    const opened = digestFstat(fd);
+    if (!validDigestDescriptor(opened) || !sameFileIdentity(initial, opened)) return "unsafe";
+    const after = digestFstat(fd);
+    if (!validDigestDescriptor(after) || !sameFileIdentity(opened, after)) return "unsafe";
+    return nowMs - after.mtimeMs < WEEK_MS ? "recent" : "stale";
+  } catch {
+    return "unsafe";
+  } finally {
+    if (fd >= 0) closeQuietly(fd);
+  }
+}
+
+function writeDigestHint(path: string, value: string, now: number): boolean {
+  const nowMs = exactTimeMs(now);
+  if (nowMs === undefined) return false;
+  let fd = -1;
+  try {
+    const state = digestHintState(path, now);
+    if (state === "recent" || state === "unsafe") return false;
+
+    let expected: BigIntStats;
+    if (state === "missing") {
+      fd = openSync(path, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | NO_FOLLOW | NO_BLOCK, 0o600);
+      expected = digestFstat(fd);
+      if (!validDigestDescriptor(expected)) return false;
+    } else {
+      const initial = digestLstat(path);
+      if (!validDigestDescriptor(initial)) return false;
+      fd = openSync(path, constants.O_RDWR | NO_FOLLOW | NO_BLOCK);
+      const opened = digestFstat(fd);
+      if (!validDigestDescriptor(opened) || !sameFileIdentity(initial, opened)
+        || nowMs - opened.mtimeMs < WEEK_MS) return false;
+      expected = opened;
+    }
+
+    try {
+      fchmodSync(fd, 0o600);
+    } catch {
+      if (process.platform !== "win32") return false;
+    }
+    if (process.platform !== "win32" && (digestFstat(fd).mode & 0o777n) !== 0o600n) return false;
+    const encoded = Buffer.from(value, "utf8");
+    const beforeWritePath = digestLstat(path);
+    const beforeWriteDescriptor = digestFstat(fd);
+    if (!validDigestDescriptor(beforeWritePath)
+      || !validDigestDescriptor(beforeWriteDescriptor)
+      || !sameFileIdentity(expected, beforeWritePath)
+      || !sameFileIdentity(expected, beforeWriteDescriptor)) return false;
+    ftruncateSync(fd, 0);
+    let offset = 0;
+    while (offset < encoded.byteLength) {
+      const written = writeSync(fd, encoded, offset, encoded.byteLength - offset);
+      if (written <= 0) return false;
+      offset += written;
+    }
+    const after = digestFstat(fd);
+    if (!validDigestDescriptor(after)
+      || !sameFileIdentity(expected, after)
+      || after.size !== BigInt(encoded.byteLength)) return false;
+    const publicPath = digestLstat(path);
+    if (!validDigestDescriptor(publicPath) || !sameFileIdentity(after, publicPath)) return false;
+    return true;
+  } catch {
+    // Digest hints are advisory and never affect annotation success.
+    return false;
+  } finally {
+    if (fd >= 0) closeQuietly(fd);
+  }
+}
+
+export function maybeQueueDigestHint(paths: RockyPaths, now = Date.now()): void {
+  let lease: AnnotationLease | undefined;
+  try {
+    if (!Number.isFinite(now)) return;
+    if (!ensureHomeDirectory(paths.home)) return;
+    lease = acquireAnnotationLease(DIGEST_HINT_LEASE_KEY, paths);
+    if (!lease) return;
+    const state = digestHintState(paths.digestHint, now);
+    if (state === "recent" || state === "unsafe") return;
+    if (digestBuckets(loadMemory(paths.memory), now).length === 0) return;
+    if (!writeDigestHint(paths.digestHint, String(now), now)) return;
+    defaultQueueLabel("week of work in memory. rocky digest, question", paths);
+  } catch {
+    // Hinting is best effort and never affects annotation success or cleanup.
+  } finally {
+    if (lease) {
+      try {
+        releaseAnnotationLease(lease, paths);
+      } catch {
+        // Lease release is best effort at this fail-open boundary.
+      }
+    }
   }
 }
 
@@ -378,6 +528,7 @@ export async function annotateCommand(key: string): Promise<number> {
         // One broken orphan must not prevent the next eligible batch.
       }
     }
+    maybeQueueDigestHint(paths);
   } catch {
     // Hidden detached command is never allowed to affect the shell.
   }

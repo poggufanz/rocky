@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { Buffer } from "node:buffer";
 import {
   chmodSync,
   closeSync,
@@ -16,6 +17,7 @@ import { dirname } from "node:path";
 import { appendEvent } from "../agent/spool.js";
 import { parseClaudeHookPayload, type ParsedHookPayload } from "../agent/adapters/claude-code.js";
 import { parseCodexHookPayload } from "../agent/adapters/codex.js";
+import { loadConfig } from "../core/config-read.js";
 import { redactSecretsAtBoundary, replaceAnsiAndControls } from "../core/redact.js";
 import { resolveRockyPaths, type RockyPaths } from "../core/state-paths.js";
 
@@ -34,6 +36,7 @@ export interface AgentHookDeps {
   stdin?: () => Promise<string>;
   argvPayload?: string;
   spawnAnnotate?: (key: string) => void;
+  spawnAmbiguity?: (text: string) => void;
   paths?: RockyPaths;
   now?: () => number;
 }
@@ -197,6 +200,47 @@ function defaultSpawnAnnotate(key: string): void {
   child.unref();
 }
 
+function defaultSpawnAmbiguity(text: string): void {
+  const currentScript = process.argv[1];
+  if (!currentScript) throw new Error("current script path unavailable");
+  const script = realpathSync(currentScript);
+  const payload = Buffer.from(text, "utf8").toString("base64url");
+  const child = spawn(process.execPath, [script, "_ambiguity", payload], {
+    detached: true,
+    stdio: "ignore",
+    shell: false,
+    windowsHide: true,
+  });
+  child.once("error", () => {
+    // Detached ambiguity checks are best effort; never surface async errors.
+  });
+  child.unref();
+}
+
+function enabledOllama(paths: RockyPaths): boolean {
+  try {
+    const result = loadConfig(paths.config);
+    return result.status === "valid"
+      && result.config.ai.enabled === true
+      && result.config.ai.provider === "ollama"
+      && typeof result.config.ai.model === "string"
+      && result.config.ai.model.trim().length > 0;
+  } catch {
+    return false;
+  }
+}
+
+/** Spawn one detached ambiguity check only for an enabled local Ollama setup. */
+export function maybeSpawnAmbiguity(text: string, paths: RockyPaths, deps: AgentHookDeps = {}): void {
+  try {
+    if (typeof text !== "string" || !enabledOllama(paths)) return;
+    const spawnAmbiguity = deps.spawnAmbiguity ?? defaultSpawnAmbiguity;
+    spawnAmbiguity(text);
+  } catch {
+    // Ambiguity is advisory and must never affect the agent hook.
+  }
+}
+
 function safeLogFailure(paths: RockyPaths | undefined): void {
   try {
     logHookError("agent-event hook failed", paths);
@@ -265,10 +309,15 @@ function writeEmptyResponse(): Promise<void> {
 function applyParsedEvent(parsed: ParsedHookPayload, paths: RockyPaths, deps: AgentHookDeps): void {
   if (!parsed) return;
   if (parsed.action === "append") {
+    let appended = false;
     try {
       appendEvent(parsed.key, parsed.event, paths);
+      appended = true;
     } catch {
       safeLogFailure(paths);
+    }
+    if (appended && parsed.event.kind === "intent") {
+      maybeSpawnAmbiguity(parsed.event.text, paths, deps);
     }
     return;
   }
