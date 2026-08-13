@@ -144,10 +144,15 @@ __rocky_drain_label() (
   local __rocky_safe_label=""
   local __rocky_claim_dir=""
   local __rocky_source=""
-  local __rocky_lock=""
-  local __rocky_lock_status=1
   local __rocky_owner_pid=""
+  local __rocky_owner_start=""
   local __rocky_owner_token=""
+  local __rocky_owner_identity=""
+  local __rocky_claim_status=1
+  local __rocky_proc_pid=""
+  local __rocky_proc_start=""
+  local -a __rocky_skipped_sources
+  __rocky_skipped_sources=()
   local __rocky_claim_blocked=0
   local __rocky_candidate=""
   local __rocky_pending=""
@@ -159,99 +164,108 @@ __rocky_drain_label() (
 
   [[ -d "$__rocky_home" && ! -L "$__rocky_home" ]] || return 0
 
-  # A retained source gets an atomic lock directory before it is opened. A
-  # second prompt either sees a live owner and leaves the old source alone, or
-  # reclaims a stale lock after a crashed owner. Resolve owner identity lazily,
-  # only after a queue is found, so an empty prompt remains pure shell. Bash 3
-  # lacks BASHPID; /proc/self/stat is a Bash-builtin read on Linux/WSL and gives
-  # the actual subshell PID without spawning a helper process.
-  __rocky_get_owner_identity() {
+  __rocky_read_proc_identity() {
+    local __rocky_proc_target="$1"
+    local __rocky_proc_line=""
     local __rocky_proc_rest=""
-    [[ "$__rocky_owner_pid" =~ ^[1-9][0-9]*$ && -n "$__rocky_owner_token" ]] && return 0
-    if [[ -r /proc/self/stat ]]; then
-      IFS=' ' read -r __rocky_owner_pid __rocky_proc_rest < /proc/self/stat 2>/dev/null || __rocky_owner_pid=""
-    fi
-    [[ "$__rocky_owner_pid" =~ ^[1-9][0-9]*$ ]] || __rocky_owner_pid="${BASHPID:-}"
-    [[ "$__rocky_owner_pid" =~ ^[1-9][0-9]*$ ]] || __rocky_owner_pid="$$"
-    __rocky_owner_token="${RANDOM:-0}.$$.$__rocky_owner_pid"
-    return 0
+    __rocky_proc_pid=""
+    __rocky_proc_start=""
+    [[ "$__rocky_proc_target" == "self" || "$__rocky_proc_target" =~ ^[1-9][0-9]*$ ]] || return 1
+    IFS= read -r __rocky_proc_line < "/proc/$__rocky_proc_target/stat" 2>/dev/null || return 1
+    __rocky_proc_pid="${__rocky_proc_line%% *}"
+    # comm can contain spaces and ')'; strip through the final ") " so the
+    # remaining fields start at state and field 22 is the twentieth token.
+    __rocky_proc_rest="${__rocky_proc_line##*) }"
+    [[ "$__rocky_proc_rest" != "$__rocky_proc_line" ]] || return 1
+    set -- $__rocky_proc_rest
+    [[ "$#" -ge 20 ]] || return 1
+    __rocky_proc_start="${20}"
+    [[ "$__rocky_proc_pid" =~ ^[1-9][0-9]*$ && "$__rocky_proc_start" =~ ^[1-9][0-9]*$ ]]
   }
 
-  __rocky_acquire_source_lock() {
-    local __rocky_lock_path="${1}.active"
-    local __rocky_lock_owner=""
-    local __rocky_lock_pid=""
-    local __rocky_lock_attempt=0
-    local __rocky_lock_wait=0
-    __rocky_lock_status=1
-    __rocky_get_owner_identity
-    while (( __rocky_lock_attempt < 2 )); do
-      (( __rocky_lock_attempt += 1 ))
-      if command mkdir "$__rocky_lock_path" >/dev/null 2>&1; then
-        set -C
-        if [[ ! -e "$__rocky_lock_path/pid" && ! -L "$__rocky_lock_path/pid" ]] &&
-           { exec 8> "$__rocky_lock_path/pid"; } 2>/dev/null &&
-           printf '%s:%s\n' "$__rocky_owner_pid" "$__rocky_owner_token" >&8 2>/dev/null; then
-          exec 8>&-
-          set +C
-          __rocky_lock_status=0
-          return 0
-        fi
-        exec 8>&-
-        set +C
-        command rm -f "$__rocky_lock_path/pid" >/dev/null 2>&1
-        command rmdir "$__rocky_lock_path" >/dev/null 2>&1
+  __rocky_get_owner_identity() {
+    [[ -n "$__rocky_owner_identity" ]] && return 0
+    __rocky_read_proc_identity self || return 1
+    __rocky_owner_pid="$__rocky_proc_pid"
+    __rocky_owner_start="$__rocky_proc_start"
+    __rocky_owner_token="${RANDOM:-0}${RANDOM:-0}"
+    __rocky_owner_identity="$__rocky_owner_pid.$__rocky_owner_start.$__rocky_owner_token"
+    [[ "$__rocky_owner_identity" =~ ^[1-9][0-9]*\.[1-9][0-9]*\.[0-9]+$ ]]
+  }
+
+  __rocky_acquire_claim_dir() {
+    local __rocky_original="$1"
+    local __rocky_base="$1"
+    local __rocky_existing_pid=""
+    local __rocky_existing_start=""
+    local __rocky_existing_token=""
+    local __rocky_destination=""
+    __rocky_claim_status=1
+    __rocky_get_owner_identity || return 1
+
+    if [[ "$__rocky_original" =~ ^(.+)\.work\.([1-9][0-9]*)\.([1-9][0-9]*)\.([0-9]+)$ ]]; then
+      __rocky_base="${BASH_REMATCH[1]}"
+      __rocky_existing_pid="${BASH_REMATCH[2]}"
+      __rocky_existing_start="${BASH_REMATCH[3]}"
+      __rocky_existing_token="${BASH_REMATCH[4]}"
+      if [[ "$__rocky_existing_pid.$__rocky_existing_start.$__rocky_existing_token" == "$__rocky_owner_identity" ]]; then
+        __rocky_claim_dir="$__rocky_original"
+        __rocky_claim_status=0
+        return 0
+      fi
+      if __rocky_read_proc_identity "$__rocky_existing_pid" &&
+         [[ "$__rocky_proc_pid" == "$__rocky_existing_pid" && "$__rocky_proc_start" == "$__rocky_existing_start" ]]; then
+        __rocky_claim_status=2
         return 1
       fi
-      # A symlink is never followed or cleaned through; remove only the link
-      # itself and retry the private lock path.
-      if [[ -L "$__rocky_lock_path" ]]; then
-        command rm -f "$__rocky_lock_path" >/dev/null 2>&1
-        continue
-      fi
-      [[ -d "$__rocky_lock_path" ]] || return 1
-      # The owner creates the PID marker immediately after mkdir. Give that
-      # tiny publication window a bounded handoff before treating an empty
-      # lock as stale; this prevents a live owner from being double-claimed.
-      __rocky_lock_wait=0
-      while [[ ! -e "$__rocky_lock_path/pid" && ! -L "$__rocky_lock_path/pid" &&
-                "$__rocky_lock_wait" -lt 10 ]]; do
-        sleep 0.01
-        (( __rocky_lock_wait += 1 ))
-      done
-      # Missing/empty marker means another owner is still initializing. Do not
-      # steal its directory: an owner killed in this tiny window is safer as a
-      # retained, manually recoverable claim than a duplicate read.
-      if [[ ! -f "$__rocky_lock_path/pid" || -L "$__rocky_lock_path/pid" ]]; then
-        return 1
-      fi
-      if [[ ! -s "$__rocky_lock_path/pid" ]]; then
-        return 1
-      fi
-      __rocky_lock_pid=""
-      IFS= read -r __rocky_lock_owner < "$__rocky_lock_path/pid" 2>/dev/null || __rocky_lock_owner=""
-      __rocky_lock_pid="${__rocky_lock_owner%%:*}"
-      if [[ "$__rocky_lock_pid" =~ ^[1-9][0-9]*$ ]] && kill -0 "$__rocky_lock_pid" >/dev/null 2>&1; then
-        return 1
-      fi
-      if [[ -n "$__rocky_lock_owner" ]]; then
-        command rm -f "$__rocky_lock_path/pid" >/dev/null 2>&1
-      fi
-      command rmdir "$__rocky_lock_path" >/dev/null 2>&1 || return 1
+    fi
+
+    __rocky_destination="$__rocky_base.work.$__rocky_owner_identity"
+    case "$__rocky_destination" in
+      "$__rocky_home"/.labels.claim.*.work.*) ;;
+      *) return 1 ;;
+    esac
+    [[ ! -e "$__rocky_destination" && ! -L "$__rocky_destination" ]] || return 1
+    # Rename the whole private claim to publish one owner-qualified directory;
+    # no queue or remainder is opened before this atomic ownership boundary.
+    if command mv "$__rocky_original" "$__rocky_destination" 2>/dev/null &&
+       [[ -d "$__rocky_destination" && ! -L "$__rocky_destination" ]]; then
+      __rocky_claim_dir="$__rocky_destination"
+      __rocky_claim_status=0
+      return 0
+    fi
+    __rocky_claim_status=2
+    return 1
+  }
+
+  __rocky_source_is_skipped() {
+    local __rocky_skipped=""
+    for __rocky_skipped in "${__rocky_skipped_sources[@]}"; do
+      [[ "$__rocky_skipped" == "$1" ]] && return 0
     done
     return 1
   }
 
-  __rocky_release_source_lock() {
-    local __rocky_lock_path="$1"
-    local __rocky_lock_owner=""
-    [[ -d "$__rocky_lock_path" && ! -L "$__rocky_lock_path" ]] || return 0
-    [[ -f "$__rocky_lock_path/pid" && ! -L "$__rocky_lock_path/pid" ]] || return 0
-    IFS= read -r __rocky_lock_owner < "$__rocky_lock_path/pid" 2>/dev/null || return 0
-    [[ "$__rocky_lock_owner" == "$__rocky_owner_pid:$__rocky_owner_token" ]] || return 0
-    command rm -f "$__rocky_lock_path/pid" >/dev/null 2>&1
-    command rmdir "$__rocky_lock_path" >/dev/null 2>&1
-    return 0
+  __rocky_find_claim_source() {
+    local __rocky_search_dir="$1"
+    local __rocky_search_path=""
+    __rocky_source=""
+    __rocky_search_path="$__rocky_search_dir/queue"
+    if [[ -f "$__rocky_search_path" && ! -L "$__rocky_search_path" &&
+          ! -e "$__rocky_search_path.invalid" && ! -L "$__rocky_search_path.invalid" ]] &&
+       ! __rocky_source_is_skipped "$__rocky_search_path"; then
+      __rocky_source="$__rocky_search_path"
+      return 0
+    fi
+    for __rocky_search_path in "$__rocky_search_dir"/remainder.next.* "$__rocky_search_dir"/remainder; do
+      if [[ -f "$__rocky_search_path" && ! -L "$__rocky_search_path" &&
+            ! -e "$__rocky_search_path.invalid" && ! -L "$__rocky_search_path.invalid" ]] &&
+         ! __rocky_source_is_skipped "$__rocky_search_path"; then
+        __rocky_source="$__rocky_search_path"
+        return 0
+      fi
+    done
+    return 1
   }
 
   __rocky_mark_invalid_source() {
@@ -267,40 +281,24 @@ __rocky_drain_label() (
   while :; do
     __rocky_claim_dir=""
     __rocky_source=""
-    __rocky_lock=""
     __rocky_claim_blocked=0
 
     # Retained claims are older than a new public queue. An unfinished
     # original queue wins over its persisted remainder after a crash, keeping
-    # the head ahead of tail. A live lock blocks this whole claim, preserving
+    # the head ahead of tail. A live owner blocks this whole claim, preserving
     # old-before-late ordering while another prompt finishes it.
     for __rocky_candidate in "$__rocky_home"/.labels.claim.*; do
       [[ -d "$__rocky_candidate" && ! -L "$__rocky_candidate" ]] || continue
-      if [[ -f "$__rocky_candidate/queue" && ! -L "$__rocky_candidate/queue" &&
-            ! -e "$__rocky_candidate/queue.invalid" && ! -L "$__rocky_candidate/queue.invalid" ]]; then
-        if __rocky_acquire_source_lock "$__rocky_candidate/queue"; then
-          __rocky_claim_dir="$__rocky_candidate"
-          __rocky_source="$__rocky_candidate/queue"
-          __rocky_lock="$__rocky_source.active"
-          break
+      __rocky_find_claim_source "$__rocky_candidate" || continue
+      __rocky_source=""
+      if __rocky_acquire_claim_dir "$__rocky_candidate"; then
+        if ! __rocky_find_claim_source "$__rocky_claim_dir"; then
+          __rocky_claim_blocked=1
         fi
-        __rocky_claim_blocked=1
         break
       fi
-      for __rocky_pending in "$__rocky_candidate"/remainder.next.* "$__rocky_candidate"/remainder; do
-        if [[ -f "$__rocky_pending" && ! -L "$__rocky_pending" &&
-              ! -e "$__rocky_pending.invalid" && ! -L "$__rocky_pending.invalid" ]]; then
-          if __rocky_acquire_source_lock "$__rocky_pending"; then
-            __rocky_claim_dir="$__rocky_candidate"
-            __rocky_source="$__rocky_pending"
-            __rocky_lock="$__rocky_source.active"
-            break
-          fi
-          __rocky_claim_blocked=1
-          break
-        fi
-      done
-      [[ -n "$__rocky_source" || "$__rocky_claim_blocked" -eq 1 ]] && break
+      [[ "$__rocky_claim_status" -eq 2 ]] && __rocky_claim_blocked=1
+      break
     done
 
     [[ -n "$__rocky_source" ]] || {
@@ -326,26 +324,24 @@ __rocky_drain_label() (
         command rmdir "$__rocky_claim_dir" >/dev/null 2>&1
         return 0
       fi
-      if ! __rocky_acquire_source_lock "$__rocky_source"; then
+      __rocky_candidate="$__rocky_claim_dir"
+      if ! __rocky_acquire_claim_dir "$__rocky_candidate"; then
         return 0
       fi
-      __rocky_lock="$__rocky_source.active"
+      __rocky_source="$__rocky_claim_dir/queue"
     }
 
     # Reject a claimed special file before opening. The read/write open keeps
     # a same-UID swap to a FIFO nonblocking on Bash/Linux/WSL; the descriptor
     # type check below is authoritative before any read.
     if [[ ! -f "$__rocky_source" || -L "$__rocky_source" ]]; then
-      __rocky_release_source_lock "$__rocky_lock"
       return 0
     fi
     if ! { exec 9<> "$__rocky_source"; } 2>/dev/null; then
-      __rocky_release_source_lock "$__rocky_lock"
       return 0
     fi
     if [[ ! -f /dev/fd/9 ]]; then
       exec 9>&-
-      __rocky_release_source_lock "$__rocky_lock"
       return 0
     fi
 
@@ -354,20 +350,18 @@ __rocky_drain_label() (
     if ! __rocky_size=$(command stat -Lc %s /dev/fd/9 2>/dev/null); then
       __rocky_size=$(command stat -f %z /dev/fd/9 2>/dev/null) || {
         exec 9>&-
-        __rocky_release_source_lock "$__rocky_lock"
         return 0
       }
     fi
     __rocky_size="${__rocky_size//[[:space:]]/}"
     if ! [[ "$__rocky_size" =~ ^[0-9]+$ ]]; then
       exec 9>&-
-      __rocky_release_source_lock "$__rocky_lock"
       return 0
     fi
     if [[ "$__rocky_size" -eq 0 || "$__rocky_size" -gt 65536 ]]; then
       exec 9>&-
+      __rocky_skipped_sources+=("$__rocky_source")
       __rocky_mark_invalid_source "$__rocky_source"
-      __rocky_release_source_lock "$__rocky_lock"
       # Continue scanning: one bad retained claim must not starve later data.
       continue
     fi
@@ -379,7 +373,6 @@ __rocky_drain_label() (
     else
       [[ -n "$__rocky_label" ]] || {
         exec 9>&-
-        __rocky_release_source_lock "$__rocky_lock"
         return 0
       }
     fi
@@ -399,14 +392,12 @@ __rocky_drain_label() (
       # Keep source until display succeeds; an interrupted print may retry the
       # same head, but it cannot lose it.
       if [[ -n "$__rocky_safe_label" ]] && ! printf '[Rocky] %s\n' "$__rocky_safe_label" >&2; then
-        __rocky_release_source_lock "$__rocky_lock"
         return 0
       fi
       command rm -f "$__rocky_source" >/dev/null 2>&1
       for __rocky_pending in "$__rocky_claim_dir"/queue "$__rocky_claim_dir"/remainder "$__rocky_claim_dir"/remainder.next.*; do
         [[ -f "$__rocky_pending" && ! -L "$__rocky_pending" ]] && command rm -f "$__rocky_pending" >/dev/null 2>&1
       done
-      __rocky_release_source_lock "$__rocky_lock"
       command rmdir "$__rocky_claim_dir" >/dev/null 2>&1
       return 0
     fi
@@ -432,7 +423,6 @@ __rocky_drain_label() (
       exec 9>&-
       exec 7>&-
       set +C
-      __rocky_release_source_lock "$__rocky_lock"
       return 0
     }
     if ! printf '%s' "$__rocky_probe" >&7 || ! command cat <&9 >&7 2>/dev/null; then
@@ -440,7 +430,6 @@ __rocky_drain_label() (
       exec 7>&-
       set +C
       command rm -f "$__rocky_next" >/dev/null 2>&1
-      __rocky_release_source_lock "$__rocky_lock"
       return 0
     fi
     exec 9>&-
@@ -450,7 +439,6 @@ __rocky_drain_label() (
     # here, the original queue remains and is retried before persisted
     # remainder; duplicates are preferable to losing a label.
     if [[ -n "$__rocky_safe_label" ]] && ! printf '[Rocky] %s\n' "$__rocky_safe_label" >&2; then
-      __rocky_release_source_lock "$__rocky_lock"
       return 0
     fi
     command rm -f "$__rocky_source" >/dev/null 2>&1
@@ -461,7 +449,6 @@ __rocky_drain_label() (
         command rm -f "$__rocky_pending" >/dev/null 2>&1
       fi
     done
-    __rocky_release_source_lock "$__rocky_lock"
     command rmdir "$__rocky_claim_dir" >/dev/null 2>&1
     return 0
   done

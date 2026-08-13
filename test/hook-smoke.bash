@@ -15,6 +15,16 @@ check() { # check <description> <condition...>
   if "$@"; then echo "ok    - $desc"; else echo "FAIL  - $desc"; FAIL=1; fi
 }
 
+check_file_contains() { # check_file_contains <description> <needle> <path>
+  local desc="$1" needle="$2" path="$3"
+  if [[ -f "$path" ]] && grep -qF "$needle" "$path"; then
+    echo "ok    - $desc"
+  else
+    echo "FAIL  - $desc"
+    FAIL=1
+  fi
+}
+
 # rocky wrapper so the hook can spawn a single executable path
 cat > "$TMP/rocky" <<WRAP
 #!/bin/sh
@@ -198,27 +208,10 @@ LABEL_ESCAPE="$TMP/label-escape"
 mkdir -p "$LABEL_ESCAPE"
 cat > "$LABEL_RACE_BIN/mkdir" <<'MKDIR'
 #!/usr/bin/env bash
-if [[ "$ROCKY_LABEL_RACE_MODE" == "simultaneous-retained" &&
-      "${1:-}" == "$ROCKY_HOME"/.labels.claim.*/*.active ]]; then
-  : > "$ROCKY_LABEL_RACE_DIR/entrant.$BASHPID"
-  __rocky_race_ticks=0
-  while [[ ! -e "$ROCKY_LABEL_RACE_DIR/release" && "$__rocky_race_ticks" -lt 100 ]]; do
-    if [[ "$(find "$ROCKY_LABEL_RACE_DIR" -maxdepth 1 -name 'entrant.*' -type f -print | wc -l)" -ge 2 ]]; then
-      : > "$ROCKY_LABEL_RACE_DIR/lock-boundary"
-      : > "$ROCKY_LABEL_RACE_DIR/release"
-    fi
-    sleep 0.01
-    __rocky_race_ticks=$((__rocky_race_ticks + 1))
-  done
-fi
-if [[ "$ROCKY_LABEL_RACE_MODE" == "lock-init-window" &&
-      "${1:-}" == "$ROCKY_HOME"/.labels.claim.*/*.active ]]; then
-  "$ROCKY_LABEL_REAL_MKDIR" "$@"
-  __rocky_mkdir_status=$?
-  if [[ "$__rocky_mkdir_status" -eq 0 ]]; then
-    sleep 0.2
-  fi
-  exit "$__rocky_mkdir_status"
+if [[ "$ROCKY_LABEL_RACE_MODE" == "invalid-marker-fail" &&
+      "${1:-}" == "$ROCKY_HOME"/.labels.claim.*/*.invalid ]]; then
+  : > "$ROCKY_LABEL_RACE_DIR/invalid-marker-attempt"
+  exit 1
 fi
 exec "$ROCKY_LABEL_REAL_MKDIR" "$@"
 MKDIR
@@ -227,7 +220,6 @@ cat > "$LABEL_RACE_BIN/stat" <<'STAT'
 #!/usr/bin/env bash
 "$ROCKY_LABEL_REAL_STAT" "$@" || exit $?
 if [[ ! -e "$ROCKY_LABEL_RACE_MARKER" && \
-      ! -e "$ROCKY_LABEL_RACE_DIR/lock-boundary" && \
       ( ( "$1" == "-c" && "$2" == "%s" && "$3" == "$ROCKY_LABEL_RACE_PATH" ) ||
         ( "$1" == "-Lc" && "$2" == "%s" && "$3" == "/dev/fd/9" ) ||
         ( "$1" == "-f" && "$2" == "%z" && "$3" == "/dev/fd/9" ) ) ]]; then
@@ -256,7 +248,31 @@ STAT
 chmod +x "$LABEL_RACE_BIN/stat"
 cat > "$LABEL_RACE_BIN/mv" <<'MV'
 #!/usr/bin/env bash
-if [[ "$ROCKY_LABEL_RACE_MODE" == "crash-after-claim" && "${1:-}" == "$ROCKY_LABEL_RACE_PATH" ]]; then
+if [[ "$ROCKY_LABEL_RACE_MODE" == "atomic-rename-boundary" &&
+      "${1:-}" == "$ROCKY_HOME"/.labels.claim.* &&
+      "${2:-}" == "$ROCKY_HOME"/.labels.claim.*.work.* ]]; then
+  : > "$ROCKY_LABEL_RACE_DIR/rename-entrant.$BASHPID"
+  __rocky_race_ticks=0
+  while [[ ! -e "$ROCKY_LABEL_RACE_DIR/release" && "$__rocky_race_ticks" -lt 100 ]]; do
+    if [[ "$(find "$ROCKY_LABEL_RACE_DIR" -maxdepth 1 -name 'rename-entrant.*' -type f -print | wc -l)" -ge 2 ]]; then
+      : > "$ROCKY_LABEL_RACE_DIR/rename-boundary"
+      : > "$ROCKY_LABEL_RACE_DIR/release"
+    fi
+    sleep 0.01
+    __rocky_race_ticks=$((__rocky_race_ticks + 1))
+  done
+elif [[ "$ROCKY_LABEL_RACE_MODE" == "crash-after-owner-rename" &&
+        "${1:-}" == "$ROCKY_HOME"/.labels.claim.* &&
+        "${2:-}" == "$ROCKY_HOME"/.labels.claim.*.work.* ]]; then
+  "$ROCKY_LABEL_REAL_MV" "$@"
+  status=$?
+  if [[ "$status" -eq 0 ]]; then
+    : > "$ROCKY_LABEL_RACE_DIR/owner-rename-boundary"
+    : > "$ROCKY_LABEL_RACE_MARKER"
+    kill -KILL "$PPID" >/dev/null 2>&1 || true
+  fi
+  exit "$status"
+elif [[ "$ROCKY_LABEL_RACE_MODE" == "crash-after-claim" && "${1:-}" == "$ROCKY_LABEL_RACE_PATH" ]]; then
   "$ROCKY_LABEL_REAL_MV" "$@"
   status=$?
   if [[ "$status" -eq 0 ]]; then
@@ -316,34 +332,86 @@ run_label_prompt "$LABEL_HOME" C "$LABEL_STDOUT" "$LABEL_STDERR"
 check "crashed claim retries once" grep -qF '[Rocky] crash retry label' "$LABEL_STDERR"
 check "crashed claim is cleaned" test -z "$(find "$LABEL_HOME" -maxdepth 1 -name '.labels.claim.*' -print -quit)"
 
-# Two prompt workers must atomically own one retained source. The mkdir shim
-# releases only after both workers contend at the lock boundary, making the
-# pre-fix duplicate read/print deterministic while keeping the parent bounded.
-rm -rf "$LABEL_HOME"/.labels.claim.* "$LABEL_RACE_DIR"
-mkdir -p "$LABEL_RACE_DIR" "$LABEL_HOME/.labels.claim.010-concurrent"
-printf 'same retained head\n' > "$LABEL_HOME/.labels.claim.010-concurrent/remainder.next.1"
+# Atomic ownership is a directory rename boundary, not a marker publication.
+# Both contenders must reach that real rename before the shim releases them;
+# the committed lock protocol never reaches this barrier, so the assertion is
+# intentionally observable rather than a shim-only success check.
 CONCURRENT_OUT1="$TMP/concurrent-1.stdout"
 CONCURRENT_ERR1="$TMP/concurrent-1.stderr"
 CONCURRENT_OUT2="$TMP/concurrent-2.stdout"
 CONCURRENT_ERR2="$TMP/concurrent-2.stderr"
+rm -rf "$LABEL_HOME"/.labels.claim.* "$LABEL_RACE_DIR"
+mkdir -p "$LABEL_RACE_DIR" "$LABEL_HOME/.labels.claim.010-rename-boundary"
+printf 'atomic retained head\n' > "$LABEL_HOME/.labels.claim.010-rename-boundary/remainder.next.1"
 run_two_label_prompts "$LABEL_HOME" C "$CONCURRENT_OUT1" "$CONCURRENT_ERR1" \
-  "$CONCURRENT_OUT2" "$CONCURRENT_ERR2" "$LABEL_RACE_BIN" simultaneous-retained
-CONCURRENT_HEAD_COUNT="$(cat "$CONCURRENT_ERR1" "$CONCURRENT_ERR2" | grep -a -cF '[Rocky] same retained head' || true)"
-check "simultaneous retained claim prints once" test "$CONCURRENT_HEAD_COUNT" -eq 1
-check "simultaneous retained claim leaves no duplicate source" \
+  "$CONCURRENT_OUT2" "$CONCURRENT_ERR2" "$LABEL_RACE_BIN" atomic-rename-boundary
+ATOMIC_HEAD_COUNT="$(cat "$CONCURRENT_ERR1" "$CONCURRENT_ERR2" | grep -a -cF '[Rocky] atomic retained head' || true)"
+check "ownership rename race barrier fires" test -e "$LABEL_RACE_DIR/rename-boundary"
+check "ownership rename race prints once" test "$ATOMIC_HEAD_COUNT" -eq 1
+check "ownership rename race leaves no source" \
   test -z "$(find "$LABEL_HOME" -maxdepth 2 -type f -name 'remainder.next.*' -print -quit)"
 
-# The first owner may be paused after atomic mkdir and before publishing its
-# PID/token. A contender must treat that lock as live, not steal it.
+# A crash immediately after the ownership rename leaves an owner-qualified
+# private directory. The next prompt must reclaim it and deliver the head.
+rm -f "$LABEL_RACE_MARKER"
 rm -rf "$LABEL_HOME"/.labels.claim.* "$LABEL_RACE_DIR"
-mkdir -p "$LABEL_RACE_DIR" "$LABEL_HOME/.labels.claim.010-init-window"
-printf 'init window head\n' > "$LABEL_HOME/.labels.claim.010-init-window/remainder.next.1"
-run_two_label_prompts "$LABEL_HOME" C "$CONCURRENT_OUT1" "$CONCURRENT_ERR1" \
-  "$CONCURRENT_OUT2" "$CONCURRENT_ERR2" "$LABEL_RACE_BIN" lock-init-window
-INIT_WINDOW_HEAD_COUNT="$(cat "$CONCURRENT_ERR1" "$CONCURRENT_ERR2" | grep -a -cF '[Rocky] init window head' || true)"
-check "lock initialization window prints once" test "$INIT_WINDOW_HEAD_COUNT" -eq 1
-check "lock initialization window leaves no source" \
-  test -z "$(find "$LABEL_HOME" -maxdepth 2 -type f -name 'remainder.next.*' -print -quit)"
+mkdir -p "$LABEL_RACE_DIR" "$LABEL_HOME/.labels.claim.020-owner-crash"
+printf 'owner rename crash retry\n' > "$LABEL_HOME/.labels.claim.020-owner-crash/remainder.next.1"
+RACE_STATUS=0
+run_label_prompt "$LABEL_HOME" C "$LABEL_STDOUT" "$LABEL_STDERR" "" "$LABEL_RACE_BIN" \
+  crash-after-owner-rename "$LABEL_HOME/.labels.claim.020-owner-crash" || RACE_STATUS=$?
+check "owner rename crash is bounded" test "$RACE_STATUS" -eq 0
+check "owner rename crash reaches rename boundary" test -e "$LABEL_RACE_DIR/owner-rename-boundary"
+check "owner rename crash prints nothing before retry" \
+  test "$(grep -a -cF '[Rocky]' "$LABEL_STDERR" || true)" -eq 0
+check "owner rename crash retains renamed claim" \
+  test -n "$(find "$LABEL_HOME" -maxdepth 1 -type d -name '.labels.claim.*.work.*' -print -quit)"
+run_label_prompt "$LABEL_HOME" C "$LABEL_STDOUT" "$LABEL_STDERR"
+check "owner rename crash retries head once" grep -qF '[Rocky] owner rename crash retry' "$LABEL_STDERR"
+check "owner rename crash claim is cleaned" \
+  test -z "$(find "$LABEL_HOME" -maxdepth 1 -name '.labels.claim.*' -print -quit)"
+
+proc_start_time() { # <pid>; Linux/WSL /proc stat field 22 via final ") "
+  local __proc_pid="$1" __proc_line="" __proc_rest=""
+  IFS= read -r __proc_line < "/proc/$__proc_pid/stat" 2>/dev/null || return 1
+  __proc_rest="${__proc_line##*) }"
+  [[ "$__proc_rest" != "$__proc_line" ]] || return 1
+  set -- $__proc_rest
+  [[ "$#" -ge 20 ]] || return 1
+  printf '%s\n' "${20}"
+}
+sleep 10 &
+LIVE_OWNER_PID=$!
+LIVE_OWNER_START="$(proc_start_time "$LIVE_OWNER_PID" || true)"
+if [[ "$LIVE_OWNER_START" =~ ^[1-9][0-9]*$ ]]; then
+  # Exact live PID + start time remains an owner and blocks younger public data.
+  rm -rf "$LABEL_HOME"/.labels.claim.* "$LABEL_RACE_DIR"
+  mkdir -p "$LABEL_RACE_DIR" "$LABEL_HOME/.labels.claim.030-live-owner.work.$LIVE_OWNER_PID.$LIVE_OWNER_START.301"
+  printf 'live owner head\n' > "$LABEL_HOME/.labels.claim.030-live-owner.work.$LIVE_OWNER_PID.$LIVE_OWNER_START.301/remainder.next.1"
+  printf 'younger public label\n' > "$LABEL_HOME/labels"
+  run_label_prompt "$LABEL_HOME" C "$LABEL_STDOUT" "$LABEL_STDERR"
+  check "exact live owner blocks younger claim" \
+    test "$(grep -a -cF '[Rocky]' "$LABEL_STDERR" || true)" -eq 0
+  check_file_contains "exact live owner retains head" 'live owner head' \
+    "$LABEL_HOME/.labels.claim.030-live-owner.work.$LIVE_OWNER_PID.$LIVE_OWNER_START.301/remainder.next.1"
+  check "exact live owner retains public queue" grep -qF 'younger public label' "$LABEL_HOME/labels"
+  rm -rf "$LABEL_HOME"/.labels.claim.* "$LABEL_HOME/labels"
+
+  # A reused PID with a deliberately mismatched start time is reclaimable.
+  MISMATCHED_START=$((LIVE_OWNER_START + 1))
+  rm -rf "$LABEL_HOME"/.labels.claim.* "$LABEL_RACE_DIR"
+  mkdir -p "$LABEL_RACE_DIR" "$LABEL_HOME/.labels.claim.040-reused-owner.work.$$.$MISMATCHED_START.401"
+  printf 'reused PID reclaimed\n' > "$LABEL_HOME/.labels.claim.040-reused-owner.work.$$.$MISMATCHED_START.401/remainder.next.1"
+  run_label_prompt "$LABEL_HOME" C "$LABEL_STDOUT" "$LABEL_STDERR"
+  check "mismatched live PID start is reclaimed" grep -qF '[Rocky] reused PID reclaimed' "$LABEL_STDERR"
+  check "mismatched owner claim is cleaned" \
+    test -z "$(find "$LABEL_HOME" -maxdepth 1 -name '.labels.claim.*' -print -quit)"
+  rm -rf "$LABEL_HOME"/.labels.claim.*
+else
+  echo "ok    - /proc owner identity checks skipped"
+fi
+kill "$LIVE_OWNER_PID" >/dev/null 2>&1 || true
+wait "$LIVE_OWNER_PID" >/dev/null 2>&1 || true
 
 # A permanently invalid retained claim must not stop later valid retained or
 # public labels. Invalid data stays inside the private claim namespace.
@@ -361,6 +429,30 @@ check "invalid retained claim does not starve public queue" \
 check "invalid retained claim remains private" \
   test -n "$(find "$LABEL_HOME" -type f -name 'remainder.next.bad' -print -quit)"
 rm -rf "$LABEL_HOME"/.labels.claim.* "$LABEL_RACE_DIR"
+
+# If invalid-marker publication fails, the bad bytes stay private and are
+# skipped locally for this drain. Later retained/public labels still advance;
+# the shim marker proves the failure path actually ran.
+rm -rf "$LABEL_HOME"/.labels.claim.* "$LABEL_RACE_DIR"
+mkdir -p "$LABEL_RACE_DIR" "$LABEL_HOME/.labels.claim.010-invalid-marker-fail" \
+  "$LABEL_HOME/.labels.claim.020-valid-after-marker-fail"
+head -c 65537 /dev/zero > "$LABEL_HOME/.labels.claim.010-invalid-marker-fail/remainder.next.bad"
+printf 'valid after marker failure\n' > "$LABEL_HOME/.labels.claim.020-valid-after-marker-fail/remainder.next.good"
+printf 'public after marker failure\n' > "$LABEL_HOME/labels"
+RACE_STATUS=0
+run_label_prompt "$LABEL_HOME" C "$LABEL_STDOUT" "$LABEL_STDERR" "" "$LABEL_RACE_BIN" \
+  invalid-marker-fail "$LABEL_HOME/.labels.claim.010-invalid-marker-fail/remainder.next.bad" || RACE_STATUS=$?
+check "invalid-marker failure prompt stays bounded" test "$RACE_STATUS" -eq 0
+check "invalid-marker failure is exercised" test -e "$LABEL_RACE_DIR/invalid-marker-attempt"
+check "invalid-marker failure does not starve valid retained" \
+  grep -qF '[Rocky] valid after marker failure' "$LABEL_STDERR"
+check "invalid-marker failure keeps bytes private" \
+  test -n "$(find "$LABEL_HOME" -type f -name 'remainder.next.bad' -print -quit)"
+run_label_prompt "$LABEL_HOME" C "$LABEL_STDOUT" "$LABEL_STDERR" "" "$LABEL_RACE_BIN" \
+  invalid-marker-fail "$LABEL_HOME/.labels.claim.010-invalid-marker-fail/remainder.next.bad"
+check "invalid-marker failure does not starve public queue" \
+  grep -qF '[Rocky] public after marker failure' "$LABEL_STDERR"
+rm -rf "$LABEL_HOME"/.labels.claim.* "$LABEL_HOME/labels" "$LABEL_RACE_DIR"
 
 # A crash after private remainder persistence but before display must retry the
 # original queue head first; otherwise persisted remainder could overtake it.
