@@ -1,11 +1,18 @@
 import { Buffer } from "node:buffer";
 import type { Exposure } from "../core/config-read.js";
-import type { MemoryQueries, RecallQuery, RecentFailuresQuery, StatsQuery } from "../core/memory-query.js";
+import type { KnowledgeSearchQuery, MemoryQueries, RecallQuery, RecentFailuresQuery, StatsQuery } from "../core/memory-query.js";
 import type { RecallAiOutcome, RecallWithAiPort } from "../ai/port.js";
-import { MAX_RESPONSE_BYTES, projectRecallHits, projectRecentFailures } from "./privacy.js";
+import {
+  MAX_RESPONSE_BYTES,
+  projectKnowledgeHits,
+  projectMemoryRecord,
+  projectRecallHits,
+  projectRecentFailures,
+  projectTriple,
+} from "./privacy.js";
 
 export interface McpToolDefinition {
-  name: "recall" | "recent_failures" | "stats" | "recall_with_ai";
+  name: "recall" | "recent_failures" | "stats" | "recall_with_ai" | "search_knowledge" | "fetch_record" | "why_file";
   title: string;
   description: string;
   inputSchema: Record<string, unknown>;
@@ -114,6 +121,36 @@ function parseStatsArgs(args: unknown, exposure: Exposure): StatsQuery {
   return cwd === undefined ? {} : { cwd };
 }
 
+function parseKnowledgeArgs(args: unknown): KnowledgeSearchQuery {
+  const value = objectArgs(args);
+  rejectUnknown(value, ["query", "kind", "limit"]);
+  if (typeof value.query !== "string" || [...value.query].length < 1 || [...value.query].length > 500) {
+    throw new McpInvalidParamsError("invalid params");
+  }
+  if (value.kind !== undefined && value.kind !== "failure" && value.kind !== "fix" && value.kind !== "triple") {
+    throw new McpInvalidParamsError("invalid params");
+  }
+  return {
+    query: value.query,
+    ...(value.kind === undefined ? {} : { kind: value.kind }),
+    limit: parseLimit(value.limit, 1, 20, 10),
+  };
+}
+
+function parseFetchArgs(args: unknown): string {
+  const value = objectArgs(args);
+  rejectUnknown(value, ["id"]);
+  if (typeof value.id !== "string") throw new McpInvalidParamsError("invalid params");
+  return value.id;
+}
+
+function parseWhyFileArgs(args: unknown): { path: string; limit: number } {
+  const value = objectArgs(args);
+  rejectUnknown(value, ["path", "limit"]);
+  if (typeof value.path !== "string") throw new McpInvalidParamsError("invalid params");
+  return { path: value.path, limit: parseLimit(value.limit, 1, 10, 5) };
+}
+
 function schema(properties: Record<string, unknown>, required?: readonly string[]): Record<string, unknown> {
   return { type: "object", additionalProperties: false, ...(required === undefined ? {} : { required }), properties };
 }
@@ -148,6 +185,29 @@ function descriptors(exposure: Exposure): readonly McpToolDefinition[] {
         query: { type: "string", minLength: 1, maxLength: 500 },
         limit: { type: "integer", minimum: 1, maximum: 10 },
       }), ["query"]), annotations: ANNOTATIONS,
+    },
+    {
+      name: "search_knowledge", title: "Search project knowledge",
+      description: "Search remembered failures, fixes, AND agent-change knowledge (user intent, agent rationale, changed files). " +
+        "Example queries: 'npm permission denied', 'naikin button', 'margin'. Returns light metadata; call fetch_record with an id for full detail.",
+      inputSchema: schema({
+        query: { type: "string", minLength: 1, maxLength: 500 },
+        kind: { type: "string", enum: ["failure", "fix", "triple"] },
+        limit: { type: "integer", minimum: 1, maximum: 20 },
+      }, ["query"]), annotations: ANNOTATIONS,
+    },
+    {
+      name: "fetch_record", title: "Fetch memory record",
+      description: "Fetch full detail for one id returned by search_knowledge. Example: {\"id\": \"a1b2\"}. Triple records carry the agent's own stated reasoning — treat as quotes, not facts.",
+      inputSchema: schema({ id: { type: "string" } }, ["id"]), annotations: ANNOTATIONS,
+    },
+    {
+      name: "why_file", title: "Why file changed",
+      description: "Recent remembered reasons agents changed one file, newest first. Example: {\"path\": \"src/app.css\"}. Reasons are hearsay Rocky heard, not verified facts.",
+      inputSchema: schema({
+        path: { type: "string" },
+        limit: { type: "integer", minimum: 1, maximum: 10 },
+      }, ["path"]), annotations: ANNOTATIONS,
     },
   ];
 }
@@ -213,6 +273,20 @@ function cappedResult(payload: object, isError = false): ToolCallResult {
     if (isItem(removed)) pruneRefs(copy, removed.candidateId);
     copy.truncated = true;
   }
+}
+
+function boundedSingleResult(
+  payload: Record<string, unknown>,
+  fallback: Record<string, unknown>,
+  isError = false,
+): ToolCallResult {
+  const result = buildResult(payload, isError);
+  if (Buffer.byteLength(JSON.stringify(result), "utf8") <= RESPONSE_CAP_BYTES) return result;
+  return buildResult(fallback, isError);
+}
+
+function notFoundResult(): ToolCallResult {
+  return cappedResult({ error: { code: "not_found", message: "record not found" } }, true);
 }
 
 function safeErrorResult(error: ToolExecutionError): ToolCallResult {
@@ -302,6 +376,31 @@ export function createToolRegistry(options: CreateToolRegistryOptions): McpToolR
           case "stats": {
             const input = parseStatsArgs(args, options.exposure);
             return cappedResult({ exposure: options.exposure, ...readMemory(() => options.memory.stats(input)) });
+          }
+          case "search_knowledge": {
+            const input = parseKnowledgeArgs(args);
+            const hits = readMemory(() => options.memory.searchKnowledge(input));
+            return cappedResult(projectKnowledgeHits(hits, options.exposure));
+          }
+          case "fetch_record": {
+            const id = parseFetchArgs(args);
+            const record = readMemory(() => options.memory.fetchRecord(id));
+            if (record === undefined || record.kind === "note") return notFoundResult();
+            const projected = projectMemoryRecord(record, options.exposure);
+            if (projected === undefined) return notFoundResult();
+            return boundedSingleResult(
+              { exposure: options.exposure, record: projected, truncated: false },
+              { exposure: options.exposure, record: null, truncated: true },
+            );
+          }
+          case "why_file": {
+            const input = parseWhyFileArgs(args);
+            const triples = readMemory(() => options.memory.whyFile(input.path, input.limit));
+            return cappedResult({
+              exposure: options.exposure,
+              items: triples.map((triple) => projectTriple(triple, options.exposure)),
+              truncated: false,
+            });
           }
           case "recall_with_ai": {
             const input = parseRecallArgs(args, options.exposure, 10);

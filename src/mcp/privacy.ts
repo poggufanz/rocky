@@ -1,8 +1,8 @@
 import { Buffer } from "node:buffer";
 import { homedir } from "node:os";
 import type { Exposure } from "../core/config-read.js";
-import type { FailureOrigin, FailureRecord, FixRecord } from "../core/memory-read.js";
-import type { RecallHit, RecentFailureHit } from "../core/memory-query.js";
+import type { FailureOrigin, FailureRecord, FixRecord, MemoryRecord, TripleRecord } from "../core/memory-read.js";
+import type { KnowledgeSearchHit, RecallHit, RecentFailureHit } from "../core/memory-query.js";
 
 export const MAX_FIELD_BYTES = 16 * 1024;
 export const MAX_RESPONSE_BYTES = 512 * 1024;
@@ -32,6 +32,36 @@ export interface ProjectedRecallResponse {
 export interface ProjectedRecentResponse {
   exposure: Exposure;
   items: readonly ProjectedRecallHit[];
+  truncated: boolean;
+}
+
+export interface ProjectedTriple {
+  id: string;
+  timestamp: number;
+  agent: "claude-code" | "codex";
+  intent?: string;
+  rationale?: { text: string; tags: readonly string[] };
+  files: readonly {
+    path: string;
+    plusMinus: [number, number];
+    props: readonly string[];
+    excerpt?: string;
+  }[];
+  cwd?: string;
+  truncatedFields: readonly string[];
+}
+
+export interface ProjectedKnowledgeHit {
+  id: string;
+  ts: number;
+  kind: "failure" | "fix" | "triple";
+  snippet: string;
+  score: number;
+}
+
+export interface ProjectedKnowledgeResponse {
+  exposure: Exposure;
+  items: readonly ProjectedKnowledgeHit[];
   truncated: boolean;
 }
 
@@ -110,6 +140,148 @@ function projectSignature(
   return clipped.value.split("\n");
 }
 
+function projectStringArray(
+  values: readonly string[],
+  exposure: Exposure,
+  path: string,
+  truncation: Truncation,
+): string[] {
+  let wasTruncated = false;
+  const output = values.map((value) => {
+    const normalized = exposure === "sanitized" ? redactText(value) : normalizeOutputText(value);
+    const clipped = truncateUtf8(normalized, MAX_FIELD_BYTES);
+    if (clipped.truncated) wasTruncated = true;
+    return clipped.value;
+  });
+  if (wasTruncated) truncation.fields.push(path);
+  return output;
+}
+
+function projectOpaqueId(value: string, path: string, truncation: Truncation): string {
+  const clipped = truncateUtf8(value, MAX_FIELD_BYTES);
+  if (clipped.truncated) truncation.fields.push(path);
+  return clipped.value;
+}
+
+function projectOpaqueIds(values: readonly string[], path: string, truncation: Truncation): string[] {
+  let wasTruncated = false;
+  const output = values.map((value) => {
+    const clipped = truncateUtf8(value, MAX_FIELD_BYTES);
+    if (clipped.truncated) wasTruncated = true;
+    return clipped.value;
+  });
+  if (wasTruncated) truncation.fields.push(path);
+  return output;
+}
+
+function safePlusMinus(value: number): number {
+  return Number.isFinite(value) ? value : 0;
+}
+
+function projectTripleFile(
+  file: TripleRecord["mechanism"]["files"][number],
+  index: number,
+  exposure: Exposure,
+  truncation: Truncation,
+): ProjectedTriple["files"][number] {
+  const projected: ProjectedTriple["files"][number] = {
+    path: projectText(file.path, exposure, `files[${index}].path`, truncation),
+    plusMinus: [safePlusMinus(file.plusMinus[0]), safePlusMinus(file.plusMinus[1])],
+    props: projectStringArray(file.props, exposure, `files[${index}].props`, truncation),
+  };
+  if (exposure === "raw" && file.excerpt !== undefined) {
+    projected.excerpt = projectText(file.excerpt, exposure, `files[${index}].excerpt`, truncation);
+  }
+  return projected;
+}
+
+export function projectTriple(triple: TripleRecord, exposure: Exposure): ProjectedTriple {
+  const truncation: Truncation = { fields: [] };
+  const projected: ProjectedTriple = {
+    id: projectOpaqueId(triple.id, "id", truncation),
+    timestamp: triple.ts,
+    agent: triple.agent,
+    files: triple.mechanism.files.map((file, index) => projectTripleFile(file, index, exposure, truncation)),
+    truncatedFields: truncation.fields,
+  };
+  if (triple.intent !== undefined) {
+    projected.intent = projectText(triple.intent.text, exposure, "intent", truncation);
+  }
+  if (triple.rationale !== undefined) {
+    projected.rationale = {
+      text: projectText(triple.rationale.text, exposure, "rationale.text", truncation),
+      tags: projectStringArray(triple.rationale.tags, exposure, "rationale.tags", truncation),
+    };
+  }
+  if (exposure === "raw") projected.cwd = projectText(triple.cwd, exposure, "cwd", truncation);
+  return projected;
+}
+
+export function projectKnowledgeHits(
+  hits: readonly KnowledgeSearchHit[],
+  exposure: Exposure,
+): ProjectedKnowledgeResponse {
+  const items = hits.map((hit) => {
+    const truncation: Truncation = { fields: [] };
+    return {
+      id: projectOpaqueId(hit.id, "id", truncation),
+      ts: hit.ts,
+      kind: hit.kind,
+      snippet: projectText(hit.snippet, exposure, "snippet", truncation),
+      score: Number.isFinite(hit.score) ? hit.score : 0,
+    };
+  });
+  return { exposure, items, truncated: false };
+}
+
+function projectFailureRecord(failure: FailureRecord, exposure: Exposure): Record<string, unknown> {
+  const truncation: Truncation = { fields: [] };
+  const projected: Record<string, unknown> = {
+    kind: "failure",
+    id: projectOpaqueId(failure.id, "record.id", truncation),
+    ts: failure.ts,
+    cmd: projectText(failure.cmd, exposure, "record.cmd", truncation),
+    exitCode: failure.exitCode,
+    fingerprint: projectText(failure.fingerprint, exposure, "record.fingerprint", truncation),
+    signature: projectSignature(failure.signature, exposure, "record.signature", truncation),
+    truncatedFields: truncation.fields,
+  };
+  if (failure.origin !== undefined) projected.origin = failure.origin;
+  if (failure.resolvedBy !== undefined) projected.resolvedBy = projectOpaqueId(failure.resolvedBy, "record.resolvedBy", truncation);
+  if (exposure === "raw") {
+    projected.cwd = projectText(failure.cwd, exposure, "record.cwd", truncation);
+    projected.excerpt = projectText(failure.excerpt, exposure, "record.excerpt", truncation);
+  }
+  return projected;
+}
+
+function projectFixRecord(fix: FixRecord, exposure: Exposure): Record<string, unknown> {
+  const truncation: Truncation = { fields: [] };
+  const projected: Record<string, unknown> = {
+    kind: "fix",
+    id: projectOpaqueId(fix.id, "record.id", truncation),
+    ts: fix.ts,
+    cmd: projectText(fix.cmd, exposure, "record.cmd", truncation),
+    failureIds: projectOpaqueIds(fix.failureIds, "record.failureIds", truncation),
+    truncatedFields: truncation.fields,
+  };
+  if (fix.links !== undefined) {
+    projected.links = fix.links.map((link, index) => ({
+      id: projectOpaqueId(link.id, `record.links[${index}].id`, truncation),
+      basis: link.basis,
+    }));
+  }
+  if (exposure === "raw") projected.cwd = projectText(fix.cwd, exposure, "record.cwd", truncation);
+  return projected;
+}
+
+export function projectMemoryRecord(record: MemoryRecord, exposure: Exposure): Record<string, unknown> | undefined {
+  if (record.kind === "failure") return projectFailureRecord(record, exposure);
+  if (record.kind === "fix") return projectFixRecord(record, exposure);
+  if (record.kind === "triple") return projectTriple(record, exposure) as unknown as Record<string, unknown>;
+  return undefined;
+}
+
 function cloneFailure(failure: FailureRecord, exposure: Exposure, truncation: Truncation): FailureRecord {
   const allowed = {
     kind: "failure" as const,
@@ -125,7 +297,7 @@ function cloneFailure(failure: FailureRecord, exposure: Exposure, truncation: Tr
   };
   const clone: FailureRecord = {
     kind: "failure",
-    id: projectText(allowed.id, exposure, "rawRecord.failure.id", truncation),
+    id: projectOpaqueId(allowed.id, "rawRecord.failure.id", truncation),
     ts: allowed.ts,
     cwd: projectText(allowed.cwd, exposure, "rawRecord.failure.cwd", truncation),
     cmd: projectText(allowed.cmd, exposure, "rawRecord.failure.cmd", truncation),
@@ -146,15 +318,23 @@ function cloneFix(fix: FixRecord, exposure: Exposure, truncation: Truncation): F
     cwd: fix.cwd,
     cmd: fix.cmd,
     failureIds: fix.failureIds,
+    links: fix.links,
   };
-  return {
+  const projected: FixRecord = {
     kind: "fix",
-    id: projectText(allowed.id, exposure, "rawRecord.fix.id", truncation),
+    id: projectOpaqueId(allowed.id, "rawRecord.fix.id", truncation),
     ts: allowed.ts,
     cwd: projectText(allowed.cwd, exposure, "rawRecord.fix.cwd", truncation),
     cmd: projectText(allowed.cmd, exposure, "rawRecord.fix.cmd", truncation),
-    failureIds: projectSignature(allowed.failureIds, exposure, "rawRecord.fix.failureIds", truncation),
+    failureIds: projectOpaqueIds(allowed.failureIds, "rawRecord.fix.failureIds", truncation),
   };
+  if (allowed.links !== undefined) {
+    projected.links = allowed.links.map((link, index) => ({
+      id: projectOpaqueId(link.id, `rawRecord.fix.links[${index}].id`, truncation),
+      basis: link.basis,
+    }));
+  }
+  return projected;
 }
 
 function projectHit(hit: SourceHit, exposure: Exposure, candidateId: string): ProjectedRecallHit {

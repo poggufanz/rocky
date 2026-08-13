@@ -1,12 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import type { FailureRecord, FixRecord, MemoryRecord } from "../core/memory.js";
+import type { FailureRecord, FixRecord, MemoryRecord, TripleRecord } from "../core/memory.js";
 import {
   createMemoryQueries,
   queryRecall,
   queryRecentFailures,
   queryStats,
   recentUnresolvedFailures,
+  searchKnowledge,
 } from "../core/memory-query.js";
 
 const failureA: FailureRecord = {
@@ -22,6 +23,16 @@ const fixA: FixRecord = {
   kind: "fix", id: "x1", ts: 300, cwd: "/work/a", cmd: "npm install", failureIds: ["f1"],
 };
 const records: MemoryRecord[] = [{ ...failureA, resolvedBy: "x1" }, failureB, fixA];
+
+const tripleA: TripleRecord = {
+  kind: "triple", id: "t1", ts: 400, cwd: "/work/a", schemaV: 1,
+  agent: "codex", origin: "agent-hook", intent: { text: "naikin button" },
+  rationale: { text: "spacing", tags: ["margin"], source: "transcript" },
+  mechanism: {
+    files: [{ path: "src/app.css", plusMinus: [2, 1], props: ["margin-top"] }],
+    truncatedFiles: 0,
+  },
+};
 
 test("queryStats applies cwd consistently", () => {
   assert.deepEqual(queryStats(records), { failures: 2, fixEvents: 1, resolved: 1, unresolved: 1 });
@@ -124,4 +135,38 @@ test("createMemoryQueries reloads memory for every query", () => {
   queries.stats();
 
   assert.equal(loads, 3);
+});
+
+test("searchKnowledge merges failure, fix, and triple sources with kind filter", () => {
+  const mixed: MemoryRecord[] = [
+    { ...failureA, cmd: "npm install", signature: ["permission denied"] },
+    { ...fixA, cmd: "npm cache clean" },
+    tripleA,
+    { ...failureB, cmd: "cargo test", signature: ["borrow error"] },
+  ];
+
+  const all = searchKnowledge(mixed, { query: "npm" });
+  assert.deepEqual(new Set(all.map((hit) => hit.kind)), new Set(["failure", "fix"]));
+
+  const onlyFix = searchKnowledge(mixed, { query: "npm", kind: "fix" });
+  assert.ok(onlyFix.every((hit) => hit.kind === "fix") && onlyFix.length === 1);
+
+  const triples = searchKnowledge(mixed, { query: "naikin" });
+  assert.equal(triples[0]?.kind, "triple");
+  assert.equal(searchKnowledge(mixed, { query: "npm", limit: 1 }).length, 1);
+});
+
+test("searchKnowledge orders equal scores newest first and clamps limits", () => {
+  const older = { ...failureA, id: "older", ts: 100, cmd: "npm test" };
+  const newer = { ...failureA, id: "newer", ts: 200, cmd: "npm test" };
+  assert.deepEqual(searchKnowledge([older, newer], { query: "npm", limit: 0 }).map((hit) => hit.id), ["newer"]);
+  assert.equal(searchKnowledge([older, newer], { query: "npm", limit: 99 }).length, 2);
+});
+
+test("createMemoryQueries wires knowledge search, fetch, and why-file queries", () => {
+  const queries = createMemoryQueries(() => [tripleA, failureA, fixA]);
+  assert.equal(queries.searchKnowledge({ query: "naikin" })[0]?.id, "t1");
+  assert.equal(queries.fetchRecord("t1")?.kind, "triple");
+  assert.equal(queries.fetchRecord("missing"), undefined);
+  assert.deepEqual(queries.whyFile("src/app.css").map((record) => record.id), ["t1"]);
 });

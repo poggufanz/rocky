@@ -133,6 +133,7 @@ test("MCP source graph reaches only read-only query, config, privacy, AI-port, a
   const allowed = new Set([
     "commands/mcp.ts",
     "core/config-read.ts",
+    "core/dictionary.ts",
     "core/fingerprint.ts",
     "core/memory-query.ts",
     "core/memory-read.ts",
