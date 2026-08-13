@@ -912,6 +912,59 @@ test("maybeQueueDigestHint queues once per week when recent intent exists", (t) 
   assert.equal(readFileSync(paths.labels, "utf8").trim().split("\n").filter(Boolean).length, 2);
 });
 
+test("digest hint uses exact file identity when numeric inode is unsafe", { timeout: 15_000 }, (t) => {
+  const home = mkdtempSync(join(tmpdir(), "rocky-digest-bigint-identity-"));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const paths = resolveRockyPaths({ ROCKY_HOME: home });
+  const now = Date.now();
+  seedDigestTriple(paths, now);
+
+  const annotatePath = join(dirname(fileURLToPath(import.meta.url)), "..", "agent", "annotate.js");
+  const statePath = join(dirname(annotatePath), "..", "core", "state-paths.js");
+  const worker = [
+    "import fs from 'node:fs';",
+    "import { syncBuiltinESMExports } from 'node:module';",
+    "import { pathToFileURL } from 'node:url';",
+    "const [annotatePath, statePath, home, markerPath, now] = process.argv.slice(1);",
+    "const originalOpen = fs.openSync.bind(fs);",
+    "const originalClose = fs.closeSync.bind(fs);",
+    "const originalLstat = fs.lstatSync.bind(fs);",
+    "const originalFstat = fs.fstatSync.bind(fs);",
+    "const markerDescriptors = new Set();",
+    "const unsafeNumericIdentity = (stats) => new Proxy(stats, { get(target, property) {",
+    "  if (property === 'ino') return Number.MAX_SAFE_INTEGER + 1;",
+    "  const value = Reflect.get(target, property, target);",
+    "  return typeof value === 'function' ? value.bind(target) : value;",
+    "} });",
+    "fs.openSync = (path, ...args) => {",
+    "  const fd = originalOpen(path, ...args);",
+    "  if (String(path) === markerPath) markerDescriptors.add(fd);",
+    "  return fd;",
+    "};",
+    "fs.closeSync = (fd) => { markerDescriptors.delete(fd); return originalClose(fd); };",
+    "fs.lstatSync = (path, ...args) => {",
+    "  const stats = originalLstat(path, ...args);",
+    "  return String(path) === markerPath && args[0]?.bigint !== true ? unsafeNumericIdentity(stats) : stats;",
+    "};",
+    "fs.fstatSync = (fd, ...args) => {",
+    "  const stats = originalFstat(fd, ...args);",
+    "  return markerDescriptors.has(fd) && args[0]?.bigint !== true ? unsafeNumericIdentity(stats) : stats;",
+    "};",
+    "syncBuiltinESMExports();",
+    "const { maybeQueueDigestHint } = await import(pathToFileURL(annotatePath).href);",
+    "const { resolveRockyPaths } = await import(pathToFileURL(statePath).href);",
+    "maybeQueueDigestHint(resolveRockyPaths({ ROCKY_HOME: home }), Number(now));",
+  ].join("\n");
+  const result = spawnSync(process.execPath, [
+    "--input-type=module", "--eval", worker, annotatePath, statePath, home, paths.digestHint, String(now),
+  ], { encoding: "utf8", timeout: 10_000, windowsHide: true });
+
+  assert.equal(result.error, undefined, result.error?.message);
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(labelLines(paths), ["week of work in memory. rocky digest, question"]);
+  assert.equal(readFileSync(paths.digestHint, "utf8"), String(now));
+});
+
 test("digest hint hardlink remains byte-identical and queues nothing", (t) => {
   const paths = freshPaths(t);
   const target = join(paths.home, "digest-target");
@@ -964,7 +1017,7 @@ test("digest hint rejects a marker hardlink replacement before open", { timeout:
     "const originalLstat = fs.lstatSync.bind(fs);",
     "const originalLink = fs.linkSync.bind(fs);",
     "const originalRename = fs.renameSync.bind(fs);",
-    "const safeMarkerStats = originalLstat(markerPath);",
+    "const safeMarkerStats = originalLstat(markerPath, { bigint: true });",
     "let replaced = false;",
     "fs.lstatSync = (path, ...args) => {",
     "  const result = originalLstat(path, ...args);",

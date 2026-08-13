@@ -124,7 +124,12 @@ test("package-smoke preload blocks only mounted-profile discovery through ESM", 
 test("copied Node fake client is intercepted by exact executable basename", async (t) => {
   const { nodeOptionsRequire } = await loadSupport();
   const root = mkdtempSync(join(tmpdir(), "rocky copied node "));
-  t.after(() => rmSync(root, { recursive: true, force: true }));
+  t.after(() => rmSync(root, {
+    recursive: true,
+    force: true,
+    maxRetries: 5,
+    retryDelay: 100,
+  }));
   const preload = join(root, "package-smoke-preload.cjs");
   const handler = join(root, "fake-client-handler.cjs");
   const executable = join(root, "codex.exe");

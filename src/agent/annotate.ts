@@ -11,6 +11,7 @@ import {
   openSync,
   readSync,
   writeSync,
+  type BigIntStats,
 } from "node:fs";
 import { resolveRockyPaths, type RockyPaths } from "../core/state-paths.js";
 import { recordTripleOnce } from "../core/memory.js";
@@ -53,7 +54,8 @@ const PROP_RE = /([a-zA-Z-]{2,})\s*:/g;
 const BOUNDARY_MARKER = "\u2065";
 const NO_FOLLOW = process.platform === "win32" ? 0 : constants.O_NOFOLLOW;
 const NO_BLOCK = process.platform === "win32" ? 0 : constants.O_NONBLOCK;
-const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
+const NS_PER_MS = 1_000_000n;
+const WEEK_NS = 7n * 24n * 60n * 60n * 1_000n * NS_PER_MS;
 const DIGEST_HINT_LEASE_KEY = "__rocky_digest_hint__";
 
 export interface AnnotateDeps {
@@ -185,33 +187,46 @@ export function defaultQueueLabel(line: string, paths: RockyPaths): void {
   }
 }
 
-function usableFileIdentity(stats: { dev: number; ino: number }): boolean {
-  return Number.isSafeInteger(stats.dev) && Number.isSafeInteger(stats.ino)
-    && stats.dev >= 0 && stats.ino >= 0 && (stats.dev !== 0 || stats.ino !== 0);
+function digestLstat(path: string): BigIntStats {
+  return lstatSync(path, { bigint: true });
 }
 
-function sameFileIdentity(left: { dev: number; ino: number }, right: { dev: number; ino: number }): boolean {
+function digestFstat(fd: number): BigIntStats {
+  return fstatSync(fd, { bigint: true });
+}
+
+function exactTimeNs(timeMs: number): bigint | undefined {
+  return Number.isSafeInteger(timeMs) ? BigInt(timeMs) * NS_PER_MS : undefined;
+}
+
+function usableFileIdentity(stats: { dev: bigint; ino: bigint }): boolean {
+  return typeof stats.dev === "bigint" && typeof stats.ino === "bigint"
+    && stats.dev >= 0n && stats.ino >= 0n && (stats.dev !== 0n || stats.ino !== 0n);
+}
+
+function sameFileIdentity(left: { dev: bigint; ino: bigint }, right: { dev: bigint; ino: bigint }): boolean {
   return usableFileIdentity(left) && usableFileIdentity(right)
     && left.dev === right.dev && left.ino === right.ino;
 }
 
 function validDigestDescriptor(stats: {
-  dev: number;
-  ino: number;
-  nlink: number;
+  dev: bigint;
+  ino: bigint;
+  nlink: bigint;
   isFile: () => boolean;
   isSymbolicLink: () => boolean;
 }): boolean {
-  return stats.isFile() && !stats.isSymbolicLink() && stats.nlink === 1 && usableFileIdentity(stats);
+  return stats.isFile() && !stats.isSymbolicLink() && stats.nlink === 1n && usableFileIdentity(stats);
 }
 
 type DigestHintState = "missing" | "recent" | "stale" | "unsafe";
 
 function digestHintState(path: string, now: number): DigestHintState {
-  if (!Number.isFinite(now)) return "unsafe";
-  let initial;
+  const nowNs = exactTimeNs(now);
+  if (nowNs === undefined) return "unsafe";
+  let initial: BigIntStats;
   try {
-    initial = lstatSync(path);
+    initial = digestLstat(path);
   } catch (error) {
     return (error as NodeJS.ErrnoException).code === "ENOENT" ? "missing" : "unsafe";
   }
@@ -220,11 +235,11 @@ function digestHintState(path: string, now: number): DigestHintState {
   let fd = -1;
   try {
     fd = openSync(path, constants.O_RDONLY | NO_FOLLOW | NO_BLOCK);
-    const opened = fstatSync(fd);
+    const opened = digestFstat(fd);
     if (!validDigestDescriptor(opened) || !sameFileIdentity(initial, opened)) return "unsafe";
-    const after = fstatSync(fd);
-    if (!validDigestDescriptor(after) || !sameFileIdentity(opened, after) || !Number.isFinite(after.mtimeMs)) return "unsafe";
-    return now - after.mtimeMs < WEEK_MS ? "recent" : "stale";
+    const after = digestFstat(fd);
+    if (!validDigestDescriptor(after) || !sameFileIdentity(opened, after)) return "unsafe";
+    return nowNs - after.mtimeNs < WEEK_NS ? "recent" : "stale";
   } catch {
     return "unsafe";
   } finally {
@@ -233,24 +248,25 @@ function digestHintState(path: string, now: number): DigestHintState {
 }
 
 function writeDigestHint(path: string, value: string, now: number): boolean {
-  if (!Number.isFinite(now)) return false;
+  const nowNs = exactTimeNs(now);
+  if (nowNs === undefined) return false;
   let fd = -1;
   try {
     const state = digestHintState(path, now);
     if (state === "recent" || state === "unsafe") return false;
 
-    let expected: ReturnType<typeof fstatSync>;
+    let expected: BigIntStats;
     if (state === "missing") {
       fd = openSync(path, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | NO_FOLLOW | NO_BLOCK, 0o600);
-      expected = fstatSync(fd);
+      expected = digestFstat(fd);
       if (!validDigestDescriptor(expected)) return false;
     } else {
-      const initial = lstatSync(path);
+      const initial = digestLstat(path);
       if (!validDigestDescriptor(initial)) return false;
       fd = openSync(path, constants.O_RDWR | NO_FOLLOW | NO_BLOCK);
-      const opened = fstatSync(fd);
+      const opened = digestFstat(fd);
       if (!validDigestDescriptor(opened) || !sameFileIdentity(initial, opened)
-        || !Number.isFinite(opened.mtimeMs) || now - opened.mtimeMs < WEEK_MS) return false;
+        || nowNs - opened.mtimeNs < WEEK_NS) return false;
       expected = opened;
     }
 
@@ -259,10 +275,10 @@ function writeDigestHint(path: string, value: string, now: number): boolean {
     } catch {
       if (process.platform !== "win32") return false;
     }
-    if (process.platform !== "win32" && (fstatSync(fd).mode & 0o777) !== 0o600) return false;
+    if (process.platform !== "win32" && (digestFstat(fd).mode & 0o777n) !== 0o600n) return false;
     const encoded = Buffer.from(value, "utf8");
-    const beforeWritePath = lstatSync(path);
-    const beforeWriteDescriptor = fstatSync(fd);
+    const beforeWritePath = digestLstat(path);
+    const beforeWriteDescriptor = digestFstat(fd);
     if (!validDigestDescriptor(beforeWritePath)
       || !validDigestDescriptor(beforeWriteDescriptor)
       || !sameFileIdentity(expected, beforeWritePath)
@@ -274,9 +290,11 @@ function writeDigestHint(path: string, value: string, now: number): boolean {
       if (written <= 0) return false;
       offset += written;
     }
-    const after = fstatSync(fd);
-    if (!validDigestDescriptor(after) || !sameFileIdentity(expected, after) || after.size !== encoded.byteLength) return false;
-    const publicPath = lstatSync(path);
+    const after = digestFstat(fd);
+    if (!validDigestDescriptor(after)
+      || !sameFileIdentity(expected, after)
+      || after.size !== BigInt(encoded.byteLength)) return false;
+    const publicPath = digestLstat(path);
     if (!validDigestDescriptor(publicPath) || !sameFileIdentity(after, publicPath)) return false;
     return true;
   } catch {
