@@ -1,4 +1,5 @@
 import { strict as assert } from "node:assert";
+import { Buffer } from "node:buffer";
 import { test } from "node:test";
 import { how, what } from "../commands/dictionary.js";
 import type { MemoryRecord, TripleRecord } from "../core/memory-read.js";
@@ -14,34 +15,69 @@ export function seeded(): MemoryRecord[] {
 }
 
 export function sinks() {
-  const lines: string[] = [];
-  return { lines, deps: { say: (l: string) => lines.push(l), out: (l: string) => lines.push(l) } };
+  const sayLines: string[] = [];
+  const outLines: string[] = [];
+  return { sayLines, outLines, deps: { say: (l: string) => sayLines.push(l), out: (l: string) => outLines.push(l) } };
 }
 
 test("what speaks tentative mapping and evidence for a hit", () => {
-  const { lines, deps } = sinks();
+  const { sayLines, outLines, deps } = sinks();
   assert.equal(what(["naikin"], { load: seeded, ...deps }), 0);
-  const joined = lines.join("\n");
-  assert.ok(joined.includes('you say "naikin". it is margin-top. I think. check, question'));
-  assert.ok(joined.includes("src/app.css"));
-  assert.ok(!joined.includes("?"));
+  assert.deepEqual(sayLines, ['you say "naikin". it is margin-top. I think. check, question']);
+  assert.equal(outLines.length, 1);
+  assert.ok(outLines[0]?.includes("src/app.css"));
+  assert.ok(!sayLines.some((line) => line.includes("src/app.css")));
+  assert.ok(!outLines.some((line) => line.includes("you say")));
 });
 
 test("what with no memory stays in voice and returns 0", () => {
-  const { lines, deps } = sinks();
+  const { sayLines, outLines, deps } = sinks();
   assert.equal(what(["gibberish-zz"], { load: () => [], ...deps }), 0);
-  assert.ok(lines.join("\n").includes("I not hear this before"));
+  assert.equal(sayLines.length, 1);
+  assert.ok(sayLines[0]?.includes("I not hear this before"));
+  assert.deepEqual(outLines, []);
 });
 
 test("how reminds vocabulary without writing a prompt", () => {
-  const { lines, deps } = sinks();
+  const { sayLines, outLines, deps } = sinks();
   assert.equal(how(["naikin"], { load: seeded, ...deps }), 0);
-  const joined = lines.join("\n");
-  assert.ok(joined.includes('last time you say "naikin", it become margin-top'));
-  assert.ok(joined.includes("maybe you mean margin-top, question"));
+  assert.equal(sayLines.length, 1);
+  assert.ok(sayLines[0]?.includes('last time you say "naikin", it become margin-top'));
+  assert.ok(sayLines[0]?.includes("maybe you mean margin-top, question"));
+  assert.equal(outLines.length, 1);
+  assert.ok(outLines[0]?.includes("src/app.css"));
+  assert.ok(!outLines.some((line) => line.includes("last time you say")));
 });
 
 test("missing query argument returns 2", () => {
-  assert.equal(what([], { load: () => [], ...sinks().deps }), 2);
-  assert.equal(how([], { load: () => [], ...sinks().deps }), 2);
+  const whatSinks = sinks();
+  assert.equal(what([], { load: () => [], ...whatSinks.deps }), 2);
+  assert.equal(whatSinks.sayLines.length, 1);
+  assert.deepEqual(whatSinks.outLines, []);
+  const howSinks = sinks();
+  assert.equal(how([], { load: () => [], ...howSinks.deps }), 2);
+  assert.equal(howSinks.sayLines.length, 1);
+  assert.deepEqual(howSinks.outLines, []);
+});
+
+test("hostile dictionary values stay bounded, terminal-safe, and question-free", () => {
+  const hostile = seeded()[0] as TripleRecord;
+  hostile.intent = { text: `naikin\u001b[31m?\n${"i".repeat(8_000)}\u200b` };
+  hostile.mechanism.files[0] = {
+    path: `src/\u001b]8;;https://evil.test\u0007${"p".repeat(8_000)}\n.css`,
+    plusMinus: [3, 1],
+    props: [`margin?\u0000${"x".repeat(8_000)}`],
+  };
+  const hostileQuery = `naikin?\u001b[2J\n${"q".repeat(8_000)}\u200b`;
+  const { sayLines, outLines, deps } = sinks();
+  assert.equal(what([hostileQuery], { load: () => [hostile], ...deps }), 0);
+
+  for (const line of [...sayLines, ...outLines]) {
+    assert.ok(!line.includes("\n"), JSON.stringify(line));
+    assert.ok(!line.includes("\r"), JSON.stringify(line));
+    assert.ok(!line.includes("?"), JSON.stringify(line));
+    assert.ok(!line.includes("\u001b"), JSON.stringify(line));
+    assert.ok(!/[\p{Cc}\p{Cf}\u2028\u2029]/u.test(line), JSON.stringify(line));
+    assert.ok(Buffer.byteLength(line, "utf8") <= 512, String(Buffer.byteLength(line, "utf8")));
+  }
 });
