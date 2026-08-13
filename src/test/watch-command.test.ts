@@ -133,6 +133,51 @@ test("watch polls labels during an active command, speaks appends once, and neve
   assert.equal(readFileSync(labelsPath, "utf8"), expectedBytes);
 });
 
+test("watch sanitizes terminal and invisible controls from labels read from the real file", async (t) => {
+  const home = sandboxHome(t);
+  mkdirSync(home, { recursive: true });
+  const labelsPath = join(home, "labels");
+  const original = Buffer.from([
+    "keep CSI \u001b[31mred\u001b[0m",
+    "keep OSC \u001b]0;terminal-title\u0007safe after OSC",
+    "keep C0\u0000NUL\u0007BEL\u000bVT\u007fDEL\u0085C1",
+    "keep bidi\u202Ehidden\u2060zero\u200Bwidth\uFEFFend",
+    "keep incomplete \u001b[31",
+    "\r\n",
+  ].join("\r\n"), "utf8");
+  writeFileSync(labelsPath, original);
+
+  const spoken: string[] = [];
+  let poll: (() => void) | undefined;
+  const timer = { unref: () => {} };
+  const dependencies = {
+    notify: () => {},
+    setInterval: (callback: () => void) => {
+      poll = callback;
+      return timer as unknown as NodeJS.Timeout;
+    },
+    clearInterval: () => {},
+    say: (line: string) => { spoken.push(line); },
+  };
+
+  const running = withRockyHome(home, () => watch(["sh -c 'sleep 0.15'"], dependencies));
+  assert.ok(poll, "watch must poll the real labels file");
+  assert.equal(await running, 0);
+
+  const terminalOrControl = /[\u0000-\u001F\u007F-\u009F\u061C\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF\u001B]/u;
+  assert.ok(spoken.some((line) => line.includes("keep CSI") && line.includes("red")));
+  assert.ok(spoken.some((line) => line.includes("safe after OSC")));
+  assert.ok(spoken.some((line) => line.includes("keep incomplete")));
+  assert.ok(spoken.some((line) => line.includes("keep C0") && line.includes("C1")));
+  assert.ok(spoken.some((line) => line.includes("keep bidi") && line.includes("end")));
+  for (const line of spoken) {
+    assert.doesNotMatch(line, terminalOrControl);
+    assert.doesNotMatch(line, /[\r\n]/u);
+    assert.ok(line.length <= 400, `label exceeded 400 characters: ${line.length}`);
+  }
+  assert.deepEqual(readFileSync(labelsPath), original, "watch must not rewrite labels bytes");
+});
+
 test("watch ignores missing, empty, unchanged, and unreadable label polls", async (t) => {
   const home = sandboxHome(t);
   const spoken: string[] = [];
