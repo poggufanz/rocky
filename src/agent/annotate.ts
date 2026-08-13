@@ -5,12 +5,12 @@ import {
   constants,
   fchmodSync,
   fstatSync,
+  ftruncateSync,
   lstatSync,
   mkdirSync,
   openSync,
   readSync,
   writeSync,
-  statSync,
 } from "node:fs";
 import { resolveRockyPaths, type RockyPaths } from "../core/state-paths.js";
 import { recordTripleOnce } from "../core/memory.js";
@@ -52,7 +52,9 @@ const PROP_RE = /([a-zA-Z-]{2,})\s*:/g;
 // boundary restored by stripping ANSI/C0/C1 controls.
 const BOUNDARY_MARKER = "\u2065";
 const NO_FOLLOW = process.platform === "win32" ? 0 : constants.O_NOFOLLOW;
+const NO_BLOCK = process.platform === "win32" ? 0 : constants.O_NONBLOCK;
 const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
+const DIGEST_HINT_LEASE_KEY = "__rocky_digest_hint__";
 
 export interface AnnotateDeps {
   paths?: RockyPaths;
@@ -183,69 +185,130 @@ export function defaultQueueLabel(line: string, paths: RockyPaths): void {
   }
 }
 
-function digestHintIsRecent(path: string, now: number): boolean {
+function usableFileIdentity(stats: { dev: number; ino: number }): boolean {
+  return Number.isSafeInteger(stats.dev) && Number.isSafeInteger(stats.ino)
+    && stats.dev >= 0 && stats.ino >= 0 && (stats.dev !== 0 || stats.ino !== 0);
+}
+
+function sameFileIdentity(left: { dev: number; ino: number }, right: { dev: number; ino: number }): boolean {
+  return usableFileIdentity(left) && usableFileIdentity(right)
+    && left.dev === right.dev && left.ino === right.ino;
+}
+
+function validDigestDescriptor(stats: {
+  dev: number;
+  ino: number;
+  nlink: number;
+  isFile: () => boolean;
+  isSymbolicLink: () => boolean;
+}): boolean {
+  return stats.isFile() && !stats.isSymbolicLink() && stats.nlink === 1 && usableFileIdentity(stats);
+}
+
+type DigestHintState = "missing" | "recent" | "stale" | "unsafe";
+
+function digestHintState(path: string, now: number): DigestHintState {
+  if (!Number.isFinite(now)) return "unsafe";
+  let initial;
   try {
-    const initial = lstatSync(path);
-    if (!initial.isFile() || initial.isSymbolicLink() || initial.nlink > 1) return true;
-    const modified = statSync(path).mtimeMs;
-    return Number.isFinite(modified) && now - modified < WEEK_MS;
+    initial = lstatSync(path);
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "ENOENT" ? "missing" : "unsafe";
+  }
+  if (!validDigestDescriptor(initial)) return "unsafe";
+
+  let fd = -1;
+  try {
+    fd = openSync(path, constants.O_RDONLY | NO_FOLLOW | NO_BLOCK);
+    const opened = fstatSync(fd);
+    if (!validDigestDescriptor(opened) || !sameFileIdentity(initial, opened)) return "unsafe";
+    const after = fstatSync(fd);
+    if (!validDigestDescriptor(after) || !sameFileIdentity(opened, after) || !Number.isFinite(after.mtimeMs)) return "unsafe";
+    return now - after.mtimeMs < WEEK_MS ? "recent" : "stale";
   } catch {
-    // Missing or unreadable marker behaves like absent. The write path still
-    // checks the destination descriptor before touching it.
-    return false;
+    return "unsafe";
+  } finally {
+    if (fd >= 0) closeQuietly(fd);
   }
 }
 
-function writeDigestHint(path: string, value: string): void {
+function writeDigestHint(path: string, value: string, now: number): boolean {
+  if (!Number.isFinite(now)) return false;
   let fd = -1;
   try {
-    const initial = (() => {
-      try {
-        return lstatSync(path);
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
-        throw error;
-      }
-    })();
-    if (initial && (!initial.isFile() || initial.isSymbolicLink() || initial.nlink > 1)) return;
+    const state = digestHintState(path, now);
+    if (state === "recent" || state === "unsafe") return false;
 
-    const flags = constants.O_WRONLY
-      | (initial === undefined ? constants.O_CREAT | constants.O_EXCL : constants.O_TRUNC)
-      | NO_FOLLOW;
-    fd = openSync(path, flags, 0o600);
-    const opened = fstatSync(fd);
-    if (!opened.isFile() || opened.isSymbolicLink() || opened.nlink > 1) return;
+    let expected: ReturnType<typeof fstatSync>;
+    if (state === "missing") {
+      fd = openSync(path, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | NO_FOLLOW | NO_BLOCK, 0o600);
+      expected = fstatSync(fd);
+      if (!validDigestDescriptor(expected)) return false;
+    } else {
+      const initial = lstatSync(path);
+      if (!validDigestDescriptor(initial)) return false;
+      fd = openSync(path, constants.O_RDWR | NO_FOLLOW | NO_BLOCK);
+      const opened = fstatSync(fd);
+      if (!validDigestDescriptor(opened) || !sameFileIdentity(initial, opened)
+        || !Number.isFinite(opened.mtimeMs) || now - opened.mtimeMs < WEEK_MS) return false;
+      expected = opened;
+    }
+
     try {
       fchmodSync(fd, 0o600);
     } catch {
-      if (process.platform !== "win32") return;
+      if (process.platform !== "win32") return false;
     }
-    if (process.platform !== "win32" && (fstatSync(fd).mode & 0o777) !== 0o600) return;
+    if (process.platform !== "win32" && (fstatSync(fd).mode & 0o777) !== 0o600) return false;
     const encoded = Buffer.from(value, "utf8");
+    const beforeWritePath = lstatSync(path);
+    const beforeWriteDescriptor = fstatSync(fd);
+    if (!validDigestDescriptor(beforeWritePath)
+      || !validDigestDescriptor(beforeWriteDescriptor)
+      || !sameFileIdentity(expected, beforeWritePath)
+      || !sameFileIdentity(expected, beforeWriteDescriptor)) return false;
+    ftruncateSync(fd, 0);
     let offset = 0;
     while (offset < encoded.byteLength) {
       const written = writeSync(fd, encoded, offset, encoded.byteLength - offset);
-      if (written <= 0) return;
+      if (written <= 0) return false;
       offset += written;
     }
     const after = fstatSync(fd);
-    if (!after.isFile() || after.isSymbolicLink() || after.nlink > 1 || after.size !== encoded.byteLength) return;
+    if (!validDigestDescriptor(after) || !sameFileIdentity(expected, after) || after.size !== encoded.byteLength) return false;
+    const publicPath = lstatSync(path);
+    if (!validDigestDescriptor(publicPath) || !sameFileIdentity(after, publicPath)) return false;
+    return true;
   } catch {
     // Digest hints are advisory and never affect annotation success.
+    return false;
   } finally {
     if (fd >= 0) closeQuietly(fd);
   }
 }
 
 export function maybeQueueDigestHint(paths: RockyPaths, now = Date.now()): void {
+  let lease: AnnotationLease | undefined;
   try {
+    if (!Number.isFinite(now)) return;
     if (!ensureHomeDirectory(paths.home)) return;
-    if (digestHintIsRecent(paths.digestHint, now)) return;
+    lease = acquireAnnotationLease(DIGEST_HINT_LEASE_KEY, paths);
+    if (!lease) return;
+    const state = digestHintState(paths.digestHint, now);
+    if (state === "recent" || state === "unsafe") return;
     if (digestBuckets(loadMemory(paths.memory), now).length === 0) return;
+    if (!writeDigestHint(paths.digestHint, String(now), now)) return;
     defaultQueueLabel("week of work in memory. rocky digest, question", paths);
-    writeDigestHint(paths.digestHint, String(now));
   } catch {
     // Hinting is best effort and never affects annotation success or cleanup.
+  } finally {
+    if (lease) {
+      try {
+        releaseAnnotationLease(lease, paths);
+      } catch {
+        // Lease release is best effort at this fail-open boundary.
+      }
+    }
   }
 }
 

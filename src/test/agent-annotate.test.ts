@@ -56,6 +56,8 @@ const INVISIBLE_FORMAT_CONTROLS: ReadonlyArray<readonly [string, string]> = [
   ["U+FEFF", "\uFEFF"],
 ];
 
+const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
+
 function freshPaths(t: TestContext): RockyPaths {
   const home = mkdtempSync(join(tmpdir(), "rocky-annotate-"));
   t.after(() => rmSync(home, { recursive: true, force: true }));
@@ -80,6 +82,22 @@ function seedBatch(paths: RockyPaths, key: string, rationale = "margin adds spac
     { v: 1, agent: "claude-code", kind: "mechanism", ts: 2, tool: "Edit", path: "src/app.css", excerpt: "margin-top: 8px" },
     { v: 1, agent: "claude-code", kind: "rationale", ts: 3, source: "transcript", text: rationale },
   ], paths);
+}
+
+function seedDigestTriple(paths: RockyPaths, ts: number): void {
+  recordTriple({
+    ts,
+    agent: "codex",
+    cwd: "/w",
+    intent: { text: "naikin" },
+    mechanism: { files: [{ path: "a.css", plusMinus: [1, 0], props: ["margin"] }], truncatedFiles: 0 },
+  }, paths);
+}
+
+function labelLines(paths: RockyPaths): string[] {
+  return existsSync(paths.labels)
+    ? readFileSync(paths.labels, "utf8").split("\n").filter(Boolean)
+    : [];
 }
 
 test("degraded annotate writes one redacted triple to injected memory path and removes batch", async (t) => {
@@ -879,13 +897,7 @@ test("annotateCommand locks duplicate requests, sweeps stale orphans, and return
 test("maybeQueueDigestHint queues once per week when recent intent exists", (t) => {
   const paths = freshPaths(t);
   const now = Date.now();
-  recordTriple({
-    ts: now,
-    agent: "codex",
-    cwd: "/w",
-    intent: { text: "naikin" },
-    mechanism: { files: [{ path: "a.css", plusMinus: [1, 0], props: ["margin"] }], truncatedFiles: 0 },
-  }, paths);
+  seedDigestTriple(paths, now);
 
   maybeQueueDigestHint(paths, now);
   maybeQueueDigestHint(paths, now + 1_000);
@@ -895,15 +907,133 @@ test("maybeQueueDigestHint queues once per week when recent intent exists", (t) 
   assert.equal(readFileSync(paths.digestHint, "utf8"), String(now));
 
   const next = now + 8 * 24 * 60 * 60 * 1_000;
-  recordTriple({
-    ts: next,
-    agent: "codex",
-    cwd: "/w",
-    intent: { text: "naikin again" },
-    mechanism: { files: [{ path: "a.css", plusMinus: [1, 0], props: ["margin"] }], truncatedFiles: 0 },
-  }, paths);
+  seedDigestTriple(paths, next);
   maybeQueueDigestHint(paths, next);
   assert.equal(readFileSync(paths.labels, "utf8").trim().split("\n").filter(Boolean).length, 2);
+});
+
+test("digest hint hardlink remains byte-identical and queues nothing", (t) => {
+  const paths = freshPaths(t);
+  const target = join(paths.home, "digest-target");
+  writeFileSync(target, "keep-target", { mode: 0o600 });
+  try {
+    linkSync(target, paths.digestHint);
+  } catch {
+    t.skip("hard links are unavailable");
+    return;
+  }
+  seedDigestTriple(paths, Date.now());
+  maybeQueueDigestHint(paths, Date.now());
+  assert.equal(readFileSync(target, "utf8"), "keep-target");
+  assert.deepEqual(labelLines(paths), []);
+});
+
+test("digest hint symlink target remains byte-identical and queues nothing", (t) => {
+  const paths = freshPaths(t);
+  const target = join(paths.home, "digest-target");
+  writeFileSync(target, "keep-target", { mode: 0o600 });
+  try {
+    symlinkSync(target, paths.digestHint);
+  } catch {
+    t.skip("symlinks are unavailable");
+    return;
+  }
+  seedDigestTriple(paths, Date.now());
+  maybeQueueDigestHint(paths, Date.now());
+  assert.equal(readFileSync(target, "utf8"), "keep-target");
+  assert.deepEqual(labelLines(paths), []);
+});
+
+test("digest hint FIFO returns bounded and queues nothing on POSIX", { timeout: 5_000 }, (t) => {
+  if (process.platform === "win32") {
+    t.skip("FIFO is POSIX-only");
+    return;
+  }
+  const paths = freshPaths(t);
+  const made = spawnSync("mkfifo", [paths.digestHint], { encoding: "utf8", windowsHide: true });
+  if (made.error || made.status !== 0) {
+    t.skip("mkfifo is unavailable");
+    return;
+  }
+  seedDigestTriple(paths, Date.now());
+  const modulePath = join(dirname(fileURLToPath(import.meta.url)), "..", "agent", "annotate.js");
+  const statePath = join(dirname(modulePath), "..", "core", "state-paths.js");
+  const worker = [
+    "import { pathToFileURL } from 'node:url';",
+    "const [annotatePath, statePath, home, now] = process.argv.slice(1);",
+    "const { maybeQueueDigestHint } = await import(pathToFileURL(annotatePath).href);",
+    "const { resolveRockyPaths } = await import(pathToFileURL(statePath).href);",
+    "maybeQueueDigestHint(resolveRockyPaths({ ROCKY_HOME: home }), Number(now));",
+  ].join("\n");
+  const result = spawnSync(process.execPath, [
+    "--input-type=module", "--eval", worker, modulePath, statePath, paths.home, String(Date.now()),
+  ], { encoding: "utf8", timeout: 1_000, windowsHide: true });
+  assert.equal(result.error, undefined, result.error?.message);
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(labelLines(paths), []);
+});
+
+test("digest hint marker commit failure queues nothing", (t) => {
+  const paths = freshPaths(t);
+  seedDigestTriple(paths, Date.now());
+  const broken = { ...paths, digestHint: join(paths.home, "missing-parent", "digest-hint") };
+  maybeQueueDigestHint(broken, Date.now());
+  assert.deepEqual(labelLines(paths), []);
+});
+
+test("digest hint exact seven-day boundary is eligible once", (t) => {
+  const paths = freshPaths(t);
+  const now = Date.now();
+  seedDigestTriple(paths, now);
+  writeFileSync(paths.digestHint, "old", { mode: 0o600 });
+  const old = new Date(now - WEEK_MS);
+  utimesSync(paths.digestHint, old, old);
+  maybeQueueDigestHint(paths, now);
+  maybeQueueDigestHint(paths, now);
+  assert.deepEqual(labelLines(paths), ["week of work in memory. rocky digest, question"]);
+  assert.equal(readFileSync(paths.digestHint, "utf8"), String(now));
+});
+
+test("digest hint lease allows exactly one label across racing processes", { timeout: 15_000 }, async (t) => {
+  const home = mkdtempSync(join(tmpdir(), "rocky-digest-race-"));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const paths = resolveRockyPaths({ ROCKY_HOME: home });
+  const now = Date.now();
+  seedDigestTriple(paths, now);
+  const start = join(home, "start");
+  const readyDir = join(home, "ready");
+  mkdirSync(readyDir);
+  const modulePath = join(dirname(fileURLToPath(import.meta.url)), "..", "agent", "annotate.js");
+  const statePath = join(dirname(modulePath), "..", "core", "state-paths.js");
+  const worker = [
+    "import { existsSync, writeFileSync } from 'node:fs';",
+    "import { pathToFileURL } from 'node:url';",
+    "const [annotatePath, statePath, home, start, ready, now] = process.argv.slice(1);",
+    "const { maybeQueueDigestHint } = await import(pathToFileURL(annotatePath).href);",
+    "const { resolveRockyPaths } = await import(pathToFileURL(statePath).href);",
+    "writeFileSync(ready, 'ready');",
+    "const signal = new Int32Array(new SharedArrayBuffer(4));",
+    "while (!existsSync(start)) Atomics.wait(signal, 0, 0, 10);",
+    "maybeQueueDigestHint(resolveRockyPaths({ ROCKY_HOME: home }), Number(now));",
+  ].join("\n");
+  const children = [0, 1].map((index) => spawn(process.execPath, [
+    "--input-type=module", "--eval", worker, modulePath, statePath, home, start,
+    join(readyDir, `${index}`), String(now),
+  ], { stdio: ["ignore", "pipe", "pipe"] }));
+  t.after(() => {
+    for (const child of children) if (child.exitCode === null && child.signalCode === null) child.kill();
+  });
+  for (const index of [0, 1]) await waitForMarker(join(readyDir, `${index}`));
+  writeFileSync(start, "go");
+  const results = await Promise.all(children.map((child) => new Promise<{ code: number | null; stderr: string }>((resolve, reject) => {
+    const stderr: Buffer[] = [];
+    child.stderr.on("data", (chunk: Buffer) => stderr.push(Buffer.from(chunk)));
+    child.once("error", reject);
+    child.once("close", (code) => resolve({ code, stderr: Buffer.concat(stderr).toString("utf8") }));
+  })));
+  assert.deepEqual(results.map((result) => result.code), [0, 0], results.map((result) => result.stderr).join("\n"));
+  assert.deepEqual(labelLines(paths), ["week of work in memory. rocky digest, question"]);
+  assert.equal(readFileSync(paths.digestHint, "utf8"), String(now));
 });
 
 test("hidden _annotate dispatch is silent and uses scratch home", (t) => {
