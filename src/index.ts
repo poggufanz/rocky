@@ -19,6 +19,7 @@ import { hookFail, hookInstall, hookStatus, hookSuccess, hookUninstall } from ".
 import { mcp } from "./commands/mcp.js";
 import { setup } from "./commands/setup.js";
 import { check } from "./commands/check.js";
+import { how, what } from "./commands/dictionary.js";
 import { agentEvent } from "./commands/agent-hook.js";
 import { annotateCommand } from "./agent/annotate.js";
 import { PACKAGE_NAME, PACKAGE_VERSION } from "./core/package-info.js";
@@ -44,6 +45,8 @@ usage:
                             ask Rocky's memory. matches words from error or command.
   rocky recall --ai [--] <query...>
                             --ai asks configured local Ollama after deterministic recall.
+  rocky what <query...>     look up what remembered intent became.
+  rocky how <query...>      remember how intent became code.
   rocky model status         report local-AI configuration without loading a model.
   rocky model use [--exposure sanitized|raw] <installed-model>
                             probe an installed Ollama model, then enable local AI.
@@ -98,6 +101,10 @@ async function main(): Promise<number> {
       return setup(rest);
     case "check":
       return check(rest);
+    case "what":
+      return what(rest);
+    case "how":
+      return how(rest);
     case "hook":
       switch (rest[0]) {
         case "install":
