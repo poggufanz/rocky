@@ -722,9 +722,17 @@ test("native Desktop does not create or advertise a backup after parent identity
       mkdirSync(parent, { mode: 0o700 });
       swapped = true;
     }
-    return options === undefined
+    const metadata = options === undefined
       ? originalLstat(path)
       : originalLstat(path, options as never);
+    const isBigInt = typeof options === "object"
+      && options !== null
+      && (options as { bigint?: unknown }).bigint === true;
+    if (!isBigInt && String(path) === parent) {
+      metadata.dev = Number.MAX_SAFE_INTEGER + 2;
+      metadata.ino = Number.MAX_SAFE_INTEGER + 2;
+    }
+    return metadata;
   }) as typeof fs.lstatSync;
   syncBuiltinESMExports();
 

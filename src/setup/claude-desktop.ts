@@ -416,10 +416,10 @@ function errorCode(error: unknown): string | undefined {
 }
 
 function prepareNativeConfigParent(plan: NativeDesktopConfigPlan): JsonMutationGuard | undefined {
-  const retained: Array<{ path: string; dev: number; ino: number }> = [];
+  const retained: Array<{ path: string; dev: bigint; ino: bigint }> = [];
   const retainDirectory = (path: string): boolean => {
     try {
-      const metadata = lstatSync(path);
+      const metadata = lstatSync(path, { bigint: true });
       if (!metadata.isDirectory() || metadata.isSymbolicLink()) return false;
       retained.push({ path, dev: metadata.dev, ino: metadata.ino });
       return true;
@@ -429,7 +429,7 @@ function prepareNativeConfigParent(plan: NativeDesktopConfigPlan): JsonMutationG
   };
   const retainedUnchanged = (): boolean => retained.every((expected) => {
     try {
-      const metadata = lstatSync(expected.path);
+      const metadata = lstatSync(expected.path, { bigint: true });
       return metadata.isDirectory()
         && !metadata.isSymbolicLink()
         && metadata.dev === expected.dev
@@ -444,7 +444,7 @@ function prepareNativeConfigParent(plan: NativeDesktopConfigPlan): JsonMutationG
   for (const component of plan.directoryComponents) {
     current = plan.pathApi.join(current, component);
     try {
-      const metadata = lstatSync(current);
+      const metadata = lstatSync(current, { bigint: true });
       if (!metadata.isDirectory() || metadata.isSymbolicLink()) return undefined;
       retained.push({ path: current, dev: metadata.dev, ino: metadata.ino });
     } catch (error) {
