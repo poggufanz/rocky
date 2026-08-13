@@ -54,8 +54,7 @@ const PROP_RE = /([a-zA-Z-]{2,})\s*:/g;
 const BOUNDARY_MARKER = "\u2065";
 const NO_FOLLOW = process.platform === "win32" ? 0 : constants.O_NOFOLLOW;
 const NO_BLOCK = process.platform === "win32" ? 0 : constants.O_NONBLOCK;
-const NS_PER_MS = 1_000_000n;
-const WEEK_NS = 7n * 24n * 60n * 60n * 1_000n * NS_PER_MS;
+const WEEK_MS = 7n * 24n * 60n * 60n * 1_000n;
 const DIGEST_HINT_LEASE_KEY = "__rocky_digest_hint__";
 
 export interface AnnotateDeps {
@@ -195,8 +194,8 @@ function digestFstat(fd: number): BigIntStats {
   return fstatSync(fd, { bigint: true });
 }
 
-function exactTimeNs(timeMs: number): bigint | undefined {
-  return Number.isSafeInteger(timeMs) ? BigInt(timeMs) * NS_PER_MS : undefined;
+function exactTimeMs(timeMs: number): bigint | undefined {
+  return Number.isSafeInteger(timeMs) ? BigInt(timeMs) : undefined;
 }
 
 function usableFileIdentity(stats: { dev: bigint; ino: bigint }): boolean {
@@ -222,8 +221,8 @@ function validDigestDescriptor(stats: {
 type DigestHintState = "missing" | "recent" | "stale" | "unsafe";
 
 function digestHintState(path: string, now: number): DigestHintState {
-  const nowNs = exactTimeNs(now);
-  if (nowNs === undefined) return "unsafe";
+  const nowMs = exactTimeMs(now);
+  if (nowMs === undefined) return "unsafe";
   let initial: BigIntStats;
   try {
     initial = digestLstat(path);
@@ -239,7 +238,7 @@ function digestHintState(path: string, now: number): DigestHintState {
     if (!validDigestDescriptor(opened) || !sameFileIdentity(initial, opened)) return "unsafe";
     const after = digestFstat(fd);
     if (!validDigestDescriptor(after) || !sameFileIdentity(opened, after)) return "unsafe";
-    return nowNs - after.mtimeNs < WEEK_NS ? "recent" : "stale";
+    return nowMs - after.mtimeMs < WEEK_MS ? "recent" : "stale";
   } catch {
     return "unsafe";
   } finally {
@@ -248,8 +247,8 @@ function digestHintState(path: string, now: number): DigestHintState {
 }
 
 function writeDigestHint(path: string, value: string, now: number): boolean {
-  const nowNs = exactTimeNs(now);
-  if (nowNs === undefined) return false;
+  const nowMs = exactTimeMs(now);
+  if (nowMs === undefined) return false;
   let fd = -1;
   try {
     const state = digestHintState(path, now);
@@ -266,7 +265,7 @@ function writeDigestHint(path: string, value: string, now: number): boolean {
       fd = openSync(path, constants.O_RDWR | NO_FOLLOW | NO_BLOCK);
       const opened = digestFstat(fd);
       if (!validDigestDescriptor(opened) || !sameFileIdentity(initial, opened)
-        || nowNs - opened.mtimeNs < WEEK_NS) return false;
+        || nowMs - opened.mtimeMs < WEEK_MS) return false;
       expected = opened;
     }
 

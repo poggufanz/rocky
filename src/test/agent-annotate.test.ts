@@ -1123,6 +1123,63 @@ test("digest hint exact seven-day boundary is eligible once", (t) => {
   assert.equal(readFileSync(paths.digestHint, "utf8"), String(now));
 });
 
+test("digest hint ignores sub-millisecond rounding at seven-day boundary", { timeout: 15_000 }, (t) => {
+  const home = mkdtempSync(join(tmpdir(), "rocky-digest-ms-boundary-"));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const paths = resolveRockyPaths({ ROCKY_HOME: home });
+  const now = Date.now();
+  seedDigestTriple(paths, now);
+  writeFileSync(paths.digestHint, "old", { mode: 0o600 });
+
+  const annotatePath = join(dirname(fileURLToPath(import.meta.url)), "..", "agent", "annotate.js");
+  const statePath = join(dirname(annotatePath), "..", "core", "state-paths.js");
+  const worker = [
+    "import fs from 'node:fs';",
+    "import { syncBuiltinESMExports } from 'node:module';",
+    "import { pathToFileURL } from 'node:url';",
+    "const [annotatePath, statePath, home, markerPath, now, oldMs] = process.argv.slice(1);",
+    "const originalOpen = fs.openSync.bind(fs);",
+    "const originalClose = fs.closeSync.bind(fs);",
+    "const originalLstat = fs.lstatSync.bind(fs);",
+    "const originalFstat = fs.fstatSync.bind(fs);",
+    "const markerDescriptors = new Set();",
+    "const exactOldMs = BigInt(oldMs);",
+    "const roundedBoundaryStats = (stats) => new Proxy(stats, { get(target, property) {",
+    "  if (property === 'mtimeMs') return exactOldMs;",
+    "  if (property === 'mtimeNs') return exactOldMs * 1_000_000n + 999n;",
+    "  const value = Reflect.get(target, property, target);",
+    "  return typeof value === 'function' ? value.bind(target) : value;",
+    "} });",
+    "fs.openSync = (path, ...args) => {",
+    "  const fd = originalOpen(path, ...args);",
+    "  if (String(path) === markerPath) markerDescriptors.add(fd);",
+    "  return fd;",
+    "};",
+    "fs.closeSync = (fd) => { markerDescriptors.delete(fd); return originalClose(fd); };",
+    "fs.lstatSync = (path, ...args) => {",
+    "  const stats = originalLstat(path, ...args);",
+    "  return String(path) === markerPath && args[0]?.bigint === true ? roundedBoundaryStats(stats) : stats;",
+    "};",
+    "fs.fstatSync = (fd, ...args) => {",
+    "  const stats = originalFstat(fd, ...args);",
+    "  return markerDescriptors.has(fd) && args[0]?.bigint === true ? roundedBoundaryStats(stats) : stats;",
+    "};",
+    "syncBuiltinESMExports();",
+    "const { maybeQueueDigestHint } = await import(pathToFileURL(annotatePath).href);",
+    "const { resolveRockyPaths } = await import(pathToFileURL(statePath).href);",
+    "maybeQueueDigestHint(resolveRockyPaths({ ROCKY_HOME: home }), Number(now));",
+  ].join("\n");
+  const result = spawnSync(process.execPath, [
+    "--input-type=module", "--eval", worker, annotatePath, statePath, home,
+    paths.digestHint, String(now), String(now - WEEK_MS),
+  ], { encoding: "utf8", timeout: 10_000, windowsHide: true });
+
+  assert.equal(result.error, undefined, result.error?.message);
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(labelLines(paths), ["week of work in memory. rocky digest, question"]);
+  assert.equal(readFileSync(paths.digestHint, "utf8"), String(now));
+});
+
 test("digest hint lease allows exactly one label across racing processes", { timeout: 15_000 }, async (t) => {
   const home = mkdtempSync(join(tmpdir(), "rocky-digest-race-"));
   t.after(() => rmSync(home, { recursive: true, force: true }));
