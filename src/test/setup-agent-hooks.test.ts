@@ -8,13 +8,14 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   renameSync,
   rmSync,
   statSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import {
   buildClaudeHookEntries,
@@ -170,7 +171,7 @@ test("removeClaudeHooks still strips the exact pre-canonical POSIX bang spelling
 });
 
 function fixture(t: test.TestContext): { root: string; settings: string; command: string } {
-  const root = mkdtempSync(join(tmpdir(), "rocky-agent-hooks-"));
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "rocky-agent-hooks-")));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   return {
     root,
@@ -222,7 +223,9 @@ test("install preserves foreign settings and is unchanged on repeat", async (t) 
   assert.deepEqual(parsed.custom, existing.custom);
   assert.deepEqual((parsed.hooks as Record<string, unknown>).OtherEvent, existing.hooks.OtherEvent);
   assert.deepEqual(agentHooksStatus({ settingsPath: value.settings }, options), { claudeCode: "installed" });
-  assert.equal(statSync(dirname(value.settings)).mode & 0o777, 0o700);
+  if (process.platform !== "win32") {
+    assert.equal(statSync(dirname(value.settings)).mode & 0o777, 0o700);
+  }
 
   const second = await installClaudeAgentHooks({ settingsPath: value.settings }, options);
   assert.equal(second.status, "unchanged");
@@ -320,7 +323,9 @@ test("same-byte same-mode inode replacement is a CAS change, not a successful wr
   });
   assert.equal(result.status, "error");
   assert.deepEqual(readFileSync(value.settings), originalBytes);
-  assert.equal(lstatSync(value.settings).mode & 0o777, 0o640);
+  if (process.platform !== "win32") {
+    assert.equal(lstatSync(value.settings).mode & 0o777, 0o640);
+  }
 });
 
 test("Windows hook paths double a trailing backslash before closing quote", () => {
@@ -338,7 +343,7 @@ test("Windows hook paths double a trailing backslash before closing quote", () =
 test("pending transactions, symlink targets, and symlink parents fail closed", async (t) => {
   const value = fixture(t);
   mkdirSync(dirname(value.settings), { recursive: true });
-  const transaction = join(dirname(value.settings), `.${value.settings.split("/").pop()}.transaction-test`);
+  const transaction = join(dirname(value.settings), `.${basename(value.settings)}.transaction-test`);
   mkdirSync(transaction);
   writeFileSync(join(transaction, "manifest.json"), JSON.stringify({ version: 1, state: "prepared", target: value.settings }));
   const pending = await uninstallClaudeAgentHooks({ settingsPath: value.settings }, { command: value.command });
@@ -441,7 +446,7 @@ test("dedicated setup branch installs only Claude hooks and never invokes MCP ad
 });
 
 test("agent-hook capability notice precedes consent and remains visible in status", async (t) => {
-  const root = mkdtempSync(join(tmpdir(), "rocky-agent-hook-capability-"));
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "rocky-agent-hook-capability-")));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   mkdirSync(join(root, ".claude"), { recursive: true, mode: 0o700 });
   const timeline: string[] = [];
@@ -629,7 +634,7 @@ function setupDependenciesFor(root: string, confirmation = true): SetupDependenc
 }
 
 test("setup agent-hooks prints Codex manual TOML and never touches Codex config", async (t) => {
-  const root = mkdtempSync(join(tmpdir(), "rocky-agent-hooks-codex-"));
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "rocky-agent-hooks-codex-")));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   mkdirSync(join(root, ".claude"), { mode: 0o700 });
   const codexHome = join(root, ".codex");
@@ -650,7 +655,7 @@ test("setup agent-hooks prints Codex manual TOML and never touches Codex config"
 });
 
 test("setup agent-hooks prints Codex guidance but preserves Claude error exit", async (t) => {
-  const root = mkdtempSync(join(tmpdir(), "rocky-agent-hooks-codex-error-"));
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "rocky-agent-hooks-codex-error-")));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const output = await captureStderr(() => setup(["--agent-hooks"], setupDependenciesFor(root, false)));
   assert.equal(output.code, 1);
@@ -660,7 +665,7 @@ test("setup agent-hooks prints Codex guidance but preserves Claude error exit", 
 });
 
 test("setup status reports Codex manual and uninstall leaves TOML untouched", async (t) => {
-  const root = mkdtempSync(join(tmpdir(), "rocky-agent-hooks-codex-status-"));
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "rocky-agent-hooks-codex-status-")));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   mkdirSync(join(root, ".claude"), { mode: 0o700 });
   const codexHome = join(root, ".codex");
