@@ -78,11 +78,15 @@ const FILESYSTEM_MUTATIONS = new Set([
   "rmdirSync", "symlink", "symlinkSync", "truncate", "truncateSync", "unlink", "unlinkSync",
   "utimes", "utimesSync", "write", "writeFile", "writeFileSync", "writeSync", "writev", "writevSync",
 ]);
+const READ_ONLY_OPEN_SYNC_PATH = "core/memory-read.ts";
 
 function assertReadOnlyImport(imported: SourceImport, localPath: string): void {
   if (["fs", "node:fs", "fs/promises", "node:fs/promises"].includes(imported.specifier)) {
+    // memory-read opens with read-only flags and validates descriptor identity; keep exception exact.
+    const auditedReadOnlyOpenSync = localPath === READ_ONLY_OPEN_SYNC_PATH && imported.specifier === "node:fs";
     const mutation = imported.importedNames.find((name) =>
-      name === "*" || name === "default" || FILESYSTEM_MUTATIONS.has(name));
+      name === "*" || name === "default" ||
+      (FILESYSTEM_MUTATIONS.has(name) && !(name === "openSync" && auditedReadOnlyOpenSync)));
     assert.equal(mutation, undefined,
       `filesystem mutation import reachable from ${localPath}: ${mutation ?? "unknown"}`);
     return;
@@ -184,6 +188,7 @@ for (const fixture of [
   { file: "fs-promises-entry.ts", capability: "promises" },
   { file: "fs-writev-entry.ts", capability: "writev" },
   { file: "fs-writev-sync-entry.ts", capability: "writevSync" },
+  { file: "fs-open-sync-entry.ts", capability: "openSync" },
   { file: "fs-default-entry.ts", capability: "default" },
   { file: "fs-namespace-entry.ts", capability: "*" },
   { file: "fs-dynamic-entry.ts", capability: "*" },
