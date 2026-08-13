@@ -1,6 +1,9 @@
+import { dictionaryRankPortFromConfig, type DictionaryRankPort } from "../ai/dictionary-ai.js";
+import { loadConfig } from "../core/config.js";
 import { queryDictionary, type DictionaryHit } from "../core/dictionary.js";
 import { loadMemory, type MemoryRecord } from "../core/memory-read.js";
 import { replaceAnsiAndControls, stripInvisibleControls } from "../core/redact.js";
+import { resolveRockyPaths } from "../core/state-paths.js";
 import { truncateUtf8 } from "../mcp/privacy.js";
 import { ago, detail, say } from "../ui/rocky.js";
 
@@ -14,6 +17,7 @@ export interface DictionaryCommandDeps {
   load?: () => MemoryRecord[];
   say?: (line: string) => void;
   out?: (line: string) => void;
+  rank?: DictionaryRankPort;
 }
 
 interface Sinks {
@@ -54,9 +58,28 @@ function evidence(hits: DictionaryHit[], support: (line: string) => void): void 
   }
 }
 
-export function what(argv: string[], deps: DictionaryCommandDeps = {}): number {
+function reorder(hits: readonly DictionaryHit[], rankedIds: readonly string[]): DictionaryHit[] | undefined {
+  const result: DictionaryHit[] = [];
+  const used = new Set<number>();
+  for (const id of rankedIds) {
+    for (let index = 0; index < hits.length; index += 1) {
+      if (!used.has(index) && hits[index]?.triple.id === id) {
+        used.add(index);
+        result.push(hits[index] as DictionaryHit);
+      }
+    }
+  }
+  if (result.length === 0) return undefined;
+  for (let index = 0; index < hits.length; index += 1) {
+    if (!used.has(index)) result.push(hits[index] as DictionaryHit);
+  }
+  return result;
+}
+
+export async function what(argv: string[], deps: DictionaryCommandDeps = {}): Promise<number> {
   const { speak, support, records } = resolve(deps);
-  const query = argv.join(" ").trim();
+  const useAi = argv.includes("--ai");
+  const query = argv.filter((argument) => argument !== "--ai").join(" ").trim();
   if (!query) {
     speak('what needs word to look up. rocky what "naikin", question');
     return 2;
@@ -66,8 +89,34 @@ export function what(argv: string[], deps: DictionaryCommandDeps = {}): number {
     speak(terminalSafe(`"${terminalSafe(query, MAX_QUERY_DISPLAY_BYTES)}"... I not hear this before. I listen now.`, MAX_OUTPUT_LINE_BYTES));
     return 0;
   }
-  speak(terminalSafe(`you say "${terminalSafe(query, MAX_QUERY_DISPLAY_BYTES)}". it is ${subject(hits[0])}. I think. check, question`, MAX_OUTPUT_LINE_BYTES));
-  evidence(hits, support);
+  let displayed = hits;
+  if (useAi) {
+    let rank = deps.rank;
+    if (rank === undefined) {
+      try {
+        rank = dictionaryRankPortFromConfig(loadConfig(resolveRockyPaths().config));
+      } catch {
+        rank = undefined;
+      }
+    }
+    if (rank === undefined) {
+      speak("model sleeps. I use my own ears.");
+    } else {
+      let rankedIds: readonly string[] | undefined;
+      try {
+        rankedIds = await rank.run(query, hits, AbortSignal.timeout(10_000));
+      } catch {
+        rankedIds = undefined;
+      }
+      const ranked = Array.isArray(rankedIds) && rankedIds.every((id) => typeof id === "string")
+        ? reorder(hits, rankedIds)
+        : undefined;
+      if (ranked === undefined) speak("model sleeps. I use my own ears.");
+      else displayed = ranked;
+    }
+  }
+  speak(terminalSafe(`you say "${terminalSafe(query, MAX_QUERY_DISPLAY_BYTES)}". it is ${subject(displayed[0] as DictionaryHit)}. I think. check, question`, MAX_OUTPUT_LINE_BYTES));
+  evidence(displayed, support);
   return 0;
 }
 

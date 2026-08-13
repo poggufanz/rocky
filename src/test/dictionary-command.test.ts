@@ -20,9 +20,9 @@ export function sinks() {
   return { sayLines, outLines, deps: { say: (l: string) => sayLines.push(l), out: (l: string) => outLines.push(l) } };
 }
 
-test("what speaks tentative mapping and evidence for a hit", () => {
+test("what speaks tentative mapping and evidence for a hit", async () => {
   const { sayLines, outLines, deps } = sinks();
-  assert.equal(what(["naikin"], { load: seeded, ...deps }), 0);
+  assert.equal(await what(["naikin"], { load: seeded, ...deps }), 0);
   assert.deepEqual(sayLines, ['you say "naikin". it is margin-top. I think. check, question']);
   assert.equal(outLines.length, 1);
   assert.ok(outLines[0]?.includes("src/app.css"));
@@ -30,9 +30,9 @@ test("what speaks tentative mapping and evidence for a hit", () => {
   assert.ok(!outLines.some((line) => line.includes("you say")));
 });
 
-test("what with no memory stays in voice and returns 0", () => {
+test("what with no memory stays in voice and returns 0", async () => {
   const { sayLines, outLines, deps } = sinks();
-  assert.equal(what(["gibberish-zz"], { load: () => [], ...deps }), 0);
+  assert.equal(await what(["gibberish-zz"], { load: () => [], ...deps }), 0);
   assert.equal(sayLines.length, 1);
   assert.ok(sayLines[0]?.includes("I not hear this before"));
   assert.deepEqual(outLines, []);
@@ -49,9 +49,9 @@ test("how reminds vocabulary without writing a prompt", () => {
   assert.ok(!outLines.some((line) => line.includes("last time you say")));
 });
 
-test("missing query argument returns 2", () => {
+test("missing query argument returns 2", async () => {
   const whatSinks = sinks();
-  assert.equal(what([], { load: () => [], ...whatSinks.deps }), 2);
+  assert.equal(await what([], { load: () => [], ...whatSinks.deps }), 2);
   assert.equal(whatSinks.sayLines.length, 1);
   assert.deepEqual(whatSinks.outLines, []);
   const howSinks = sinks();
@@ -60,7 +60,7 @@ test("missing query argument returns 2", () => {
   assert.deepEqual(howSinks.outLines, []);
 });
 
-test("hostile dictionary values stay bounded, terminal-safe, and question-free", () => {
+test("hostile dictionary values stay bounded, terminal-safe, and question-free", async () => {
   const hostile = seeded()[0] as TripleRecord;
   hostile.intent = { text: `naikin\u001b[31m?\n${"i".repeat(8_000)}\u200b` };
   hostile.mechanism.files[0] = {
@@ -70,7 +70,7 @@ test("hostile dictionary values stay bounded, terminal-safe, and question-free",
   };
   const hostileQuery = `naikin?\u001b[2J\n${"q".repeat(8_000)}\u200b`;
   const { sayLines, outLines, deps } = sinks();
-  assert.equal(what([hostileQuery], { load: () => [hostile], ...deps }), 0);
+  assert.equal(await what([hostileQuery], { load: () => [hostile], ...deps }), 0);
 
   for (const line of [...sayLines, ...outLines]) {
     assert.ok(!line.includes("\n"), JSON.stringify(line));
@@ -80,4 +80,42 @@ test("hostile dictionary values stay bounded, terminal-safe, and question-free",
     assert.ok(!/[\p{Cc}\p{Cf}\u2028\u2029]/u.test(line), JSON.stringify(line));
     assert.ok(Buffer.byteLength(line, "utf8") <= 512, String(Buffer.byteLength(line, "utf8")));
   }
+});
+
+test("what --ai strips flag, ranks deterministic hits, and keeps headline", async () => {
+  const { sayLines, outLines, deps } = sinks();
+  let calls = 0;
+  let observedQuery = "";
+  const rank = {
+    async run(query: string, hits: readonly { triple: { id: string } }[]) {
+      calls += 1;
+      observedQuery = query;
+      assert.equal(hits.length, 1);
+      return ["t1"];
+    },
+  };
+  assert.equal(await what(["--ai", "naikin"], { load: seeded, rank, ...deps }), 0);
+  assert.equal(calls, 1);
+  assert.equal(observedQuery, "naikin");
+  assert.deepEqual(sayLines, ['you say "naikin". it is margin-top. I think. check, question']);
+  assert.equal(outLines.length, 1);
+});
+
+test("what --ai speaks model sleeps and keeps evidence on rank failure", async () => {
+  const { sayLines, outLines, deps } = sinks();
+  const rank = { async run() { return undefined; } };
+  assert.equal(await what(["--ai", "naikin"], { load: seeded, rank, ...deps }), 0);
+  assert.deepEqual(sayLines, ["model sleeps. I use my own ears.", 'you say "naikin". it is margin-top. I think. check, question']);
+  assert.equal(outLines.length, 1);
+  assert.ok(outLines[0]?.includes("src/app.css"));
+});
+
+test("what without --ai never touches rank port", async () => {
+  const { sayLines, outLines, deps } = sinks();
+  let calls = 0;
+  const rank = { async run() { calls += 1; return ["t1"]; } };
+  assert.equal(await what(["naikin"], { load: seeded, rank, ...deps }), 0);
+  assert.equal(calls, 0);
+  assert.equal(sayLines.length, 1);
+  assert.equal(outLines.length, 1);
 });
