@@ -10,8 +10,11 @@ Notable changes per release. Dates are the release date.
 - Claude Code prompt, edit-path, capped-excerpt, and stated-rationale capture; Codex modern and notify hook adapters.
 - Redacted intent → rationale → mechanism triple annotation with deterministic degraded fallback, optional loopback Ollama compaction, and one passive label.
 - Consent-gated Claude Code agent-hook setup, printed manual Codex TOML with `/hooks` trust guidance, and Claude-only uninstall/status commands.
+- Plan 02 dictionary surfaces: `what`, `how`, `why`, `digest`, `quiz`, and filtered JSONL `export`, with deterministic lookup and optional local-Ollama ranking for `what --ai`.
+- Ollama-gated ambiguity advice after an intent append, detached and non-blocking, plus passive labels at the next shell prompt and in non-quiet `rocky watch`.
+- Three bounded read-only MCP knowledge tools: `search_knowledge`, `fetch_record`, and `why_file`, alongside the existing four memory tools.
 
-Plan 02 dictionary lookup, ambiguity checker, digest, quiz, export, new MCP search tools, BYOK annotation, `brief`, `attest`, and the memory circuit breaker remain deferred.
+This remains an unreleased 0.5.0 branch. BYOK annotation, `brief`, `attest`, and the memory circuit breaker are outside this release; no version bump or publish is implied.
 
 ## 0.4.0 — 9 August 2026
 

@@ -12,7 +12,7 @@
 
 Rocky is a terminal companion inspired by the alien engineer from Andy Weir's *Project Hail Mary*. He keeps track of what you and your AI have already been through, so the second time an error appears, the answer comes from your own history — not from twenty minutes of googling.
 
-**Teaching modes exist inside individual agents. Rocky is the layer that remembers what you learned — passive, cross-tool, and permanent.** Plan 01 of the v0.5 Nervous System is implemented in this unreleased branch; the package version remains v0.4.0 while Plan 02 dictionary and teaching surfaces stay deferred. The longer-term mission is simple: make user not forget about fundamentals.
+**Teaching modes exist inside individual agents. Rocky is the layer that remembers what you learned — passive, cross-tool, and permanent.** Plan 01 of the v0.5 Nervous System and the Plan 02 dictionary/teaching surfaces are implemented in this unreleased branch; the package version remains v0.4.0 until release. The longer-term mission is simple: make user not forget about fundamentals.
 
 He is also, unapologetically, a pet.
 
@@ -39,17 +39,17 @@ Two loops run in opposite directions:
 - **The loop worth resisting** — the AI gets more capable, more of the thinking gets handed over, understanding and vigilance erode, intent and verification get worse, and the results get harder to judge at all.
 - **The Good Trade** — you understand more, your intent and decisions get sharper, the AI's work in your hands gets more useful, and that work becomes the material you learn from next.
 
-The arrow that usually breaks is *AI output → you learn from it*. Each arrow maps to one mechanism rather than to a slogan. In this unreleased branch, Plan 01 is implemented and Plan 02 remains deferred:
+The arrow that usually breaks is *AI output → you learn from it*. Each arrow maps to one mechanism rather than to a slogan. In this unreleased branch, Plan 01 and the dictionary/teaching surfaces of Plan 02 are implemented:
 
 | Arrow kept alive | Mechanism | Role | Boundary |
 |---|---|---|---|
 | AI output → your understanding | Nervous system | Shows the concrete mechanism behind your intent and the agent's change | Plan 01 implemented |
-| AI output → your understanding | Intent→mechanism dictionary | Shows the concrete mechanism behind your intent and the agent's change | Plan 02 deferred |
-| Your understanding → next intent | Reverse lookup (mechanism→intent) | Returns the intent you actually stored, with its change ID and time | Plan 02 deferred |
-| Your intent → AI output | Ambiguity surfacing | Shows the several mechanisms one of your own words has already produced, and lets you pick | Plan 02 deferred |
-| Your articulation → memory | The curious blind friend | One curious question turns a one-line answer into a journal entry and a dictionary entry | Plan 02 deferred |
+| AI output → your understanding | Intent→mechanism dictionary | Shows the concrete mechanism behind your intent and the agent's change | Plan 02 implemented (unreleased) |
+| Your understanding → next intent | Reverse lookup (mechanism→intent) | Returns the intent you actually stored, with its change ID and time | Plan 02 implemented (unreleased) |
+| Your intent → AI output | Ambiguity surfacing | Shows the several mechanisms one of your own words has already produced, and lets you pick | Plan 02 implemented (unreleased) |
+| Your articulation → memory | The curious blind friend | One curious question turns a one-line answer into a journal entry and a dictionary entry | Plan 02 implemented (unreleased) |
 | Memory → next decision | Recall | Carries a cross-session lesson into a new decision | Plan 01 implemented/current |
-| Memory → next decision | Digest | Carries a cross-session lesson into a planned summary | Plan 02 deferred |
+| Memory → next decision | Digest | Carries a cross-session lesson into a seven-day summary | Plan 02 implemented (unreleased) |
 | Memory → next decision | Memory circuit breaker | Flags repeated approaches as planned negative knowledge | Plan 02 deferred |
 
 The claim stops there: better direction from you, never a smarter model.
@@ -100,7 +100,31 @@ Claude Code setup via `rocky setup --agent-hooks` asks for explicit consent befo
 
 Claude Code capture requires hook payload field `prompt_id`; without `prompt_id`, Rocky records nothing and never merges turns. `rocky setup --agent-hooks` and `rocky setup --status` print this capability boundary alongside their setup/status output.
 
-Plan 02 remains deferred: bidirectional intent↔mechanism dictionary lookup (`what`, `how`, `why`), digest, quiz, export, ambiguity checker, new MCP search tools, BYOK annotation, `brief`, `attest`, and the memory circuit breaker. Rocky does not expose those commands in this release.
+Plan 02 dictionary and teaching surfaces are available in this unreleased branch. The commands read only remembered triples and keep the original evidence intact:
+
+```text
+rocky what "move button down"
+rocky what --ai "move button down"   # optional local Ollama ranking; deterministic fallback
+rocky how "move button down"
+rocky why src/button.css
+rocky digest
+rocky quiz
+```
+
+`what` is intent→mechanism lookup. `what --ai` can rank deterministic hits through configured loopback Ollama, then falls back to the same evidence when the model sleeps. `how` is a mechanism reminder. `why` quotes the agent's stated rationale for one file. `digest` reports the last-seven-day intent pattern. `quiz` is explicit opt-in retrieval practice. Rocky never rewrites, injects, or submits the user prompt.
+
+Useful deterministic lines sound like `you say "move button down". it is margin-top. I think. check, question` and `last time you say "move button down", it become margin-top. maybe you mean margin-top, question`. Rocky hears remembered evidence; he does not turn a guess into a fact.
+
+The curious blind friend is Ollama-gated. After an intent append, Rocky may start one detached, non-blocking ambiguity check, and asks at most one question for that turn. It consults the intent plus remembered evidence only; it never reads project files. A question is curious, not a test. If Ollama is absent, fails, or is disabled, this advisory path disappears without blocking or changing the captured turn. Ignored questions are dropped and never repeated.
+
+Export keeps ownership plain:
+
+```text
+rocky export --kind triple > triples.jsonl
+rocky export --since 7d
+```
+
+Export writes filtered raw JSONL on stdout; its count/persona line goes to stderr. `~/.rocky/memory.jsonl` is user-owned, append-only data: readable, back-up-able, and deletable by you. Triples can contain the verbatim user intent, capped paths/excerpts, and the agent's stated rationale. Rocky does not keylog or read screens. Sanitized MCP projection remains the default; raw exposure is explicit.
 
 ## Usage
 
@@ -132,6 +156,12 @@ Memory lives in `~/.rocky/memory.jsonl`. It is a text file you can read, grep, b
 
 The CLI contains no telemetry and runs no daemon. Its only external network egress is `rocky check`'s package-existence lookup against registry.npmjs.org — consent-gated, package names only, fail-open when offline. Everything else, including the local MCP server, reaches no external host at all. MCP uses local stdio, exposes read-only tools, and projects sanitized memory by default. A configured cloud host may forward selected projected content under that host's own policy, so review the host and choose raw exposure only when you intend to share those fields. Optional AI calls only a separately managed Ollama service over loopback (`127.0.0.1`).
 
+## Read-only MCP knowledge tools
+
+`rocky mcp` serves seven bounded, read-only tools in deterministic order: `recall`, `recent_failures`, `stats`, `recall_with_ai`, `search_knowledge`, `fetch_record`, and `why_file`. Search first, then fetch: `search_knowledge` returns light metadata and bounded hits, and `fetch_record` retrieves one full record by the returned id. `why_file` returns remembered triples that touched one path. Limits stay bounded, and sanitized projection is the default; raw fields require an explicit opt-in.
+
+For example, a host can call `search_knowledge` with `{ "query": "move button down" }`, pass a returned id to `fetch_record`, or call `why_file` with `{ "path": "src/button.css" }`. Reasons are hearsay Rocky heard, not verified facts. Rationale is quoted and untrusted; MCP never presents it as fact or executes a remembered command.
+
 ## `rocky watch` (v0.3, implemented)
 
 For the commands you walk away from — a long build, a migration, a big download:
@@ -147,6 +177,11 @@ rocky watch "docker compose up" --quiet
 - **A notification** when it finishes: a desktop notification (`notify-send` on Linux, `osascript` on macOS) or a terminal bell where neither exists. Best-effort only, never a source of truth, and never blocks the wrapped command's exit code.
 - **A saved stderr tail** on failure, under `~/.rocky/watch/`, alongside the same kind of memory record `rocky run` writes (`origin: "watch"`).
 - **`--quiet`**, which keeps the recording but drops every persona line, every idle line, and the notification — stderr gets plain facts only: duration, exit code, and the log path.
+- **Passive dictionary labels**, queued locally after annotation. The next shell prompt shows at most one label, and non-quiet `rocky watch` also shows it while the command runs. Watch reads labels without dequeuing them and shows each line at most once per watch session. Labels never enter agent context. `watch --quiet` stays plain-facts mode and does not poll persona labels. The deterministic fallback is typically:
+
+  ```text
+  you say "move button down". it is margin-top. I think. check, question
+  ```
 
 Ctrl-C (or an external `SIGTERM`) passes its exit code straight through — no memory record, no log, no notification. Notifications can be turned off in `~/.rocky/config.json` with `"watch": { "notify": false }`; a missing, invalid, or unreadable config always defaults to notifications on and never blocks the run.
 
@@ -240,15 +275,19 @@ rocky/
 │   │   ├── mcp.ts          # local read-only MCP stdio server
 │   │   ├── model.ts        # opt-in Ollama configuration
 │   │   ├── setup.ts        # detected-host and optional voice-skill setup
+│   │   ├── dictionary.ts   # what/how/why/digest/quiz/export surfaces
 │   │   └── stats.ts        # memory summary
 │   ├── core/
 │   │   ├── fingerprint.ts  # stderr -> stable error signature + token bags
+│   │   ├── dictionary.ts   # intent↔mechanism lookup and digest/quiz queries
 │   │   ├── memory.ts       # append-only JSONL writers
 │   │   ├── memory-read.ts  # bounded parsing and backward-compatible loading
 │   │   └── memory-query.ts # fingerprint lookup and fuzzy search
 │   ├── mcp/                # bounded read-only tools and privacy projection
 │   ├── setup/              # host adapters, consent, health, voice skill
 │   ├── ai/                 # loopback-only Ollama adapter and grounded schema
+│   ├── agent/              # capture, annotation, and ambiguity advisory
+│   │   └── ambiguity.ts    # Ollama-gated remembered-evidence question
 │   ├── shell/              # Bash hook assets
 │   └── ui/
 │       └── rocky.ts        # his face, his voice, relative time
@@ -268,9 +307,9 @@ Rocky speaks the way he does in the book, and the rules are enforced in code, no
 - Short sentences, present tense, no articles.
 - He is blind. He never "sees" anything — he hears, he remembers, he checks.
 
-When things are serious, Rocky is serious. Diagnoses and fixes are printed plainly; the personality lives around the information, never inside it. A `--quiet` mode is planned for people debugging production at 2 a.m.
+When things are serious, Rocky is serious. Diagnoses and fixes are printed plainly; the personality lives around the information, never inside it. `rocky watch --quiet` is plain-facts mode for people debugging production at 2 a.m.
 
-Rocky asks because he is curious, not because he is testing you; you are always the one who knows, never the one being graded. Ignore him and he goes quiet — an ignored question is never repeated — and answering `busy` makes him wait without complaint (he once waited 46 years). That proactive “Curious Blind Friend” behavior is planned for v0.5 and is not part of v0.4.0.
+Rocky asks because he is curious, not because he is testing you; you are always the one who knows, never the one being graded. Ignore him and he goes quiet — an ignored question is never repeated — and answering `busy` makes him wait without complaint (he once waited 46 years). Ambiguity questions are optional, Ollama-gated, and never block the captured turn.
 
 The fence never moves: Rocky hears your terminal and the explicit Plan 01 agent hooks. That's it. No keylogging, no screen reading, no capture of screen content of any kind. “Rocky can't see your screen” is a literal description of the architecture, not just lore.
 
@@ -281,10 +320,10 @@ Each phase is one facet of who Rocky is:
 - **v0.2.1 — distribution bridge**: the v0.1 memory and implemented v0.2 Bash/WSL ears, plus scoped npm distribution, read-only MCP, consent-based host setup, an optional managed voice skill, and optional loopback Ollama interpretation for recall.
 - **v0.3 — his patience**: `rocky watch` — hand him a long build, migration, or download; he waits (he once waited 46 years), notifies you, and holds the logs if it dies.
 - **v0.4 — his diligence** (current release): pre-push hull check — `rocky check` verifies that AI-added packages actually exist on the registry (hallucinated-package defense), scans added lines for secrets, and asks one comprehension question about the riskiest line in the diff. Its registry lookup is this project's only external egress; network errors fail open and never hold a push.
-- **v0.5 — his curiosity**: Plan 01 Nervous System agent hooks are implemented but unreleased. They preserve prompt/path/excerpt/stated-rationale evidence in local memory, use deterministic fallback when Ollama is unavailable, and keep rationale explicitly quoted and untrusted. Plan 02 — dictionary lookup, ambiguity handling, proactive questions, digest, quiz, export, new MCP search tools, BYOK annotation, `brief`, `attest`, and the circuit breaker — remains deferred. The earlier `rocky explain` concept is superseded, not an active command.
+- **v0.5 — his curiosity**: Plan 01 Nervous System agent hooks and Plan 02 dictionary/teaching surfaces are implemented but unreleased. They preserve prompt/path/excerpt/stated-rationale evidence in local memory, use deterministic fallback when Ollama is unavailable, keep rationale explicitly quoted and untrusted, and add `what`, `how`, `why`, `digest`, `quiz`, `export`, passive labels, ambiguity advice, and three bounded MCP knowledge tools. BYOK annotation, `brief`, `attest`, and the memory circuit breaker remain deferred non-goals for this release. The earlier `rocky explain` concept is superseded, not an active command.
 - **later — his care**: ambient pet mode and the desktop pet window (deferred). He notices you've been at it for four hours, and he has opinions about your sleep.
 
-The package version remains v0.4.0 until this release is published; the Nervous System section above describes the implemented Plan 01 surface in this unreleased branch.
+The package version remains v0.4.0 until this release is published; the Nervous System section above describes the implemented Plan 01 and Plan 02 surfaces in this unreleased branch.
 
 ## Contributing
 

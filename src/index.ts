@@ -6,6 +6,7 @@
  *   rocky run "<command>"     run a command; Rocky remembers failures & fixes
  *   rocky recall [--ai] <query> search Rocky's memory of past errors
  *   rocky hook|mcp|model|setup distribution bridge commands
+ *   rocky watch|check|what|how|why|digest|quiz|export v0.3–v0.5 surfaces
  *   rocky --help
  *   rocky --version
  */
