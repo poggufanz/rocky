@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import type { Exposure } from "../core/config-read.js";
 import type { FailureOrigin, FailureRecord, FixRecord, MemoryRecord, TripleRecord } from "../core/memory-read.js";
 import type { KnowledgeSearchHit, RecallHit, RecentFailureHit } from "../core/memory-query.js";
+import { replaceAnsiAndControls, stripInvisibleControls } from "../core/redact.js";
 
 export const MAX_FIELD_BYTES = 16 * 1024;
 export const MAX_RESPONSE_BYTES = 512 * 1024;
@@ -73,8 +74,7 @@ export function strictestExposure(a: Exposure, b: Exposure): Exposure {
 }
 
 export function normalizeOutputText(value: string): string {
-  return value
-    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f\u202a-\u202e\u2066-\u2069]/gi, " ")
+  return stripInvisibleControls(replaceAnsiAndControls(value, "", " "))
     .replace(/\s+/g, " ")
     .trim();
 }

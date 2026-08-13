@@ -143,6 +143,39 @@ test("search snippets and fetched failures use sanitized explicit projections", 
   assert.doesNotMatch(JSON.stringify(fetched), /fixture-secret-value|\/private\/project/);
 });
 
+test("sanitized knowledge projections remove C1 terminal strings and invisible format controls", async () => {
+  const hostile = [
+    "hostile ",
+    "\u009b31m",
+    "\u009d8;;https://evil.example/title-payload\u009c",
+    "\u009d52;c;clipboard-payload\u009c",
+    "\u061c\u200b\u200d\u2060\ufeff",
+    " text",
+  ].join("");
+  const hostileTriple: TripleRecord = {
+    kind: "triple", id: "hostile-triple", ts: 303, cwd: "/private/project", schemaV: 1,
+    agent: "codex", origin: "agent-hook", intent: { text: `${hostile}button` },
+    rationale: { text: hostile, tags: [hostile], source: "transcript" },
+    mechanism: {
+      files: [{ path: "src/hostile.ts", plusMinus: [1, 1], props: [hostile] }],
+      truncatedFiles: 0,
+    },
+  };
+  const tools = createToolRegistry({
+    exposure: "sanitized",
+    memory: createMemoryQueries(() => [hostileTriple]),
+    recallWithAi: disabledRecallWithAi,
+  });
+  const signal = new AbortController().signal;
+  const search = await tools.call("search_knowledge", { query: "hostile" }, signal);
+  const fetched = await tools.call("fetch_record", { id: hostileTriple.id }, signal);
+  const why = await tools.call("why_file", { path: "src/hostile.ts" }, signal);
+  const serialized = JSON.stringify({ search, fetched, why });
+
+  assert.doesNotMatch(serialized, /[\u0080-\u009f\u061c\u200b-\u200f\u2060-\u206f\ufeff]/u);
+  assert.doesNotMatch(serialized, /31m|title-payload|clipboard-payload/);
+});
+
 test("unsupported notes are indistinguishable from unknown fetch IDs", async () => {
   const note: MemoryRecord = {
     kind: "note", id: "note-id", ts: 302, cwd: "/private", cmd: "rocky note",
