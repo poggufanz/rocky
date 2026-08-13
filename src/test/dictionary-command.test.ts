@@ -313,8 +313,13 @@ test("quiz refuses default reader when stdin is not a TTY", async () => {
   try {
     Object.defineProperty(process.stdin, "isTTY", { configurable: true, value: false });
     const { sayLines, outLines } = sinks();
-    const old = seeded().map((record) => ({ ...record, ts: Date.now() - 3 * 24 * 60 * 60 * 1000 }));
-    assert.equal(await quiz([], { load: () => old as MemoryRecord[], say: (line) => sayLines.push(line), out: (line) => outLines.push(line) }), 0);
+    let loads = 0;
+    assert.equal(await quiz([], {
+      load: () => { loads += 1; throw new Error("memory must not load"); },
+      say: (line) => sayLines.push(line),
+      out: (line) => outLines.push(line),
+    }), 0);
+    assert.equal(loads, 0);
     assert.deepEqual(sayLines, ["quiz needs terminal with you in it. later, question"]);
     assert.deepEqual(outLines, []);
   } finally {

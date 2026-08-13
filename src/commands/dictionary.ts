@@ -214,13 +214,6 @@ export async function quiz(
   } = {},
 ): Promise<number> {
   const { speak, records } = resolve(deps);
-  const now = deps.now ?? Date.now();
-  const candidates = quizCandidates(records(), now, 3);
-  if (candidates.length === 0) {
-    speak("nothing old enough to ask. work more, come back, question");
-    return 0;
-  }
-
   let ask = deps.ask;
   if (ask === undefined) {
     if (process.stdin.isTTY !== true) {
@@ -233,6 +226,13 @@ export async function quiz(
       return 0;
     }
     ask = (message) => port.ask(message);
+  }
+
+  const now = deps.now ?? Date.now();
+  const candidates = quizCandidates(records(), now, 3);
+  if (candidates.length === 0) {
+    speak("nothing old enough to ask. work more, come back, question");
+    return 0;
   }
 
   for (const candidate of candidates) {
