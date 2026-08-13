@@ -928,6 +928,82 @@ test("digest hint hardlink remains byte-identical and queues nothing", (t) => {
   assert.deepEqual(labelLines(paths), []);
 });
 
+test("digest hint rejects a marker hardlink replacement before open", { timeout: 15_000 }, async (t) => {
+  if (process.platform === "win32") {
+    t.skip("atomic hardlink replacement is POSIX-only");
+    return;
+  }
+  const home = mkdtempSync(join(tmpdir(), "rocky-digest-marker-race-"));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const paths = resolveRockyPaths({ ROCKY_HOME: home });
+  const now = Date.now();
+  const stale = new Date(now - WEEK_MS);
+  const sentinelPath = join(home, "sentinel");
+  const replacementPath = join(home, "digest-hint.replacement");
+  const resultPath = join(home, "child-result.json");
+  writeFileSync(paths.digestHint, "stale marker", { mode: 0o600 });
+  writeFileSync(sentinelPath, "sentinel bytes", { mode: 0o600 });
+  utimesSync(paths.digestHint, stale, stale);
+  utimesSync(sentinelPath, stale, stale);
+  try {
+    linkSync(sentinelPath, replacementPath);
+    rmSync(replacementPath, { force: true });
+  } catch {
+    t.skip("hard links are unavailable");
+    return;
+  }
+  seedDigestTriple(paths, now);
+
+  const annotatePath = join(dirname(fileURLToPath(import.meta.url)), "..", "agent", "annotate.js");
+  const statePath = join(dirname(annotatePath), "..", "core", "state-paths.js");
+  const workerScript = [
+    "import fs from 'node:fs';",
+    "import { syncBuiltinESMExports } from 'node:module';",
+    "import { pathToFileURL } from 'node:url';",
+    "const [annotatePath, statePath, home, markerPath, sentinelPath, replacementPath, resultPath, now] = process.argv.slice(1);",
+    "const originalLstat = fs.lstatSync.bind(fs);",
+    "const originalLink = fs.linkSync.bind(fs);",
+    "const originalRename = fs.renameSync.bind(fs);",
+    "const safeMarkerStats = originalLstat(markerPath);",
+    "let replaced = false;",
+    "fs.lstatSync = (path, ...args) => {",
+    "  const result = originalLstat(path, ...args);",
+    "  if (String(path) !== markerPath) return result;",
+    "  if (!replaced) {",
+    "    replaced = true;",
+    "    originalLink(sentinelPath, replacementPath);",
+    "    originalRename(replacementPath, markerPath);",
+    "  }",
+    "  return safeMarkerStats;",
+    "};",
+    "syncBuiltinESMExports();",
+    "const { maybeQueueDigestHint } = await import(pathToFileURL(annotatePath).href);",
+    "const { resolveRockyPaths } = await import(pathToFileURL(statePath).href);",
+    "maybeQueueDigestHint(resolveRockyPaths({ ROCKY_HOME: home }), Number(now));",
+    "const labels = fs.existsSync(`${home}/labels`) ? fs.readFileSync(`${home}/labels`, 'utf8') : '';",
+    "const target = fs.readFileSync(sentinelPath, 'utf8');",
+    "fs.writeFileSync(resultPath, JSON.stringify({ replaced, labels, target }), { mode: 0o600 });",
+  ].join("\n");
+  const child = spawn(process.execPath, [
+    "--input-type=module", "--eval", workerScript, annotatePath, statePath, home,
+    paths.digestHint, sentinelPath, replacementPath, resultPath, String(now),
+  ], { stdio: ["ignore", "pipe", "pipe"] });
+  t.after(() => {
+    if (child.exitCode === null && child.signalCode === null) child.kill();
+  });
+  const completion = await new Promise<{ code: number | null; stderr: string }>((resolve, reject) => {
+    const stderr: Buffer[] = [];
+    child.stderr.on("data", (chunk: Buffer) => stderr.push(Buffer.from(chunk)));
+    child.once("error", reject);
+    child.once("close", (code) => resolve({ code, stderr: Buffer.concat(stderr).toString("utf8") }));
+  });
+  assert.equal(completion.code, 0, completion.stderr);
+  const result = JSON.parse(readFileSync(resultPath, "utf8")) as { replaced: boolean; labels: string; target: string };
+  assert.equal(result.replaced, true);
+  assert.equal(result.target, "sentinel bytes", JSON.stringify(result));
+  assert.equal(result.labels, "", JSON.stringify(result));
+});
+
 test("digest hint symlink target remains byte-identical and queues nothing", (t) => {
   const paths = freshPaths(t);
   const target = join(paths.home, "digest-target");
