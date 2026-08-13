@@ -86,6 +86,24 @@ const submitPayload = JSON.stringify({
   prompt: "naikin",
 });
 
+function enableLocalAi(paths: RockyPaths): void {
+  writeFileSync(paths.config, JSON.stringify({
+    version: 1,
+    ai: { enabled: true, provider: "ollama", model: "ambiguity-test", exposure: "sanitized" },
+  }), { encoding: "utf8", mode: 0o600 });
+}
+
+function mechanismPayload(): string {
+  return JSON.stringify({
+    session_id: "s1",
+    prompt_id: "p2",
+    hook_event_name: "PostToolUse",
+    cwd: "/w",
+    tool_name: "Edit",
+    tool_input: { file_path: "src/button.tsx", new_string: "button" },
+  });
+}
+
 test("valid UserPromptSubmit payload appends intent, prints {} and returns 0", async (t) => {
   const paths = freshPaths(t);
   const spawned: string[] = [];
@@ -100,6 +118,53 @@ test("valid UserPromptSubmit payload appends intent, prints {} and returns 0", a
   assert.equal(readBatch("claude-code-s1-p1", paths).length, 1);
   assert.deepEqual(spawned, []);
   assert.equal(existsSync(paths.memory), false);
+});
+
+test("enabled intent append spawns ambiguity once while preserving exact stdout", async (t) => {
+  const paths = freshPaths(t);
+  enableLocalAi(paths);
+  const spawned: string[] = [];
+  const result = await captureStdout(() => agentEvent("claude-code", {
+    stdin: async () => submitPayload,
+    spawnAmbiguity: (text: string) => spawned.push(text),
+    paths,
+  }));
+
+  assert.equal(result.code, 0);
+  assert.equal(result.out, "{}");
+  assert.deepEqual(spawned, ["naikin"]);
+  assert.equal(readBatch("claude-code-s1-p1", paths).length, 1);
+});
+
+test("enabled mechanism append never spawns ambiguity and preserves exact stdout", async (t) => {
+  const paths = freshPaths(t);
+  enableLocalAi(paths);
+  const spawned: string[] = [];
+  const result = await captureStdout(() => agentEvent("claude-code", {
+    stdin: async () => mechanismPayload(),
+    spawnAmbiguity: (text: string) => spawned.push(text),
+    paths,
+  }));
+
+  assert.equal(result.code, 0);
+  assert.equal(result.out, "{}");
+  assert.deepEqual(spawned, []);
+  assert.equal(readBatch("claude-code-s1-p2", paths).length, 1);
+});
+
+test("disabled config does not invoke ambiguity injection seam", async (t) => {
+  const paths = freshPaths(t);
+  const spawned: string[] = [];
+  const result = await captureStdout(() => agentEvent("claude-code", {
+    stdin: async () => submitPayload,
+    spawnAmbiguity: (text: string) => spawned.push(text),
+    paths,
+  }));
+
+  assert.equal(result.code, 0);
+  assert.equal(result.out, "{}");
+  assert.deepEqual(spawned, []);
+  assert.equal(readBatch("claude-code-s1-p1", paths).length, 1);
 });
 
 test("Stop payload appends direct rationale before spawning annotate once", async (t) => {
@@ -249,6 +314,58 @@ test("default annotate child error is swallowed without changing hook success", 
   assert.equal(result.status, 0, result.stderr);
   assert.equal(result.stdout, "{}");
   assert.doesNotMatch(result.stderr, /Unhandled ['"]error['"]|EPIPE/);
+});
+
+test("default ambiguity child is detached, base64url-encoded, and error-swallowed", (t) => {
+  const home = mkdtempSync(join(tmpdir(), "rocky-hookentry-ambiguity-spawn-"));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const preload = join(home, "spawn-recorder.cjs");
+  const marker = join(home, "spawn-called");
+  writeFileSync(join(home, "config.json"), JSON.stringify({
+    version: 1,
+    ai: { enabled: true, provider: "ollama", model: "ambiguity-test", exposure: "sanitized" },
+  }), "utf8");
+  writeFileSync(preload, [
+    "const childProcess = require('node:child_process');",
+    "const { syncBuiltinESMExports } = require('node:module');",
+    "const { EventEmitter } = require('node:events');",
+    "const fs = require('node:fs');",
+    `const marker = ${JSON.stringify(marker)};`,
+    "childProcess.spawn = (...args) => {",
+    "  const child = new EventEmitter();",
+    "  child.unref = () => fs.appendFileSync(marker, JSON.stringify({ unref: true }) + '\\n');",
+    "  fs.writeFileSync(marker, JSON.stringify({ args }) + '\\n');",
+    "  process.nextTick(() => child.emit('error', Object.assign(new Error('EPIPE'), { code: 'EPIPE' })));",
+    "  return child;",
+    "};",
+    "syncBuiltinESMExports();",
+    "",
+  ].join("\n"), "utf8");
+  const result = spawnSync(process.execPath, ["--require", preload, entry, "hook", "agent-event", "claude-code"], {
+    cwd: packageRoot,
+    env: { ...process.env, ROCKY_HOME: home },
+    encoding: "utf8",
+    input: submitPayload,
+    timeout: 5_000,
+    windowsHide: true,
+  });
+
+  assert.equal(result.error, undefined);
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout, "{}");
+  assert.doesNotMatch(result.stderr, /Unhandled ['"]error['"]|EPIPE/);
+  const markerText = readFileSync(marker, "utf8");
+  const lines = markerText.trim().split("\n");
+  const first = JSON.parse(lines[0] ?? "{}") as { args?: unknown[] };
+  // The preload appends unref evidence after recording the spawn arguments.
+  assert.match(markerText, /"unref":true/u);
+  assert.deepEqual(first.args?.[1], [entry, "_ambiguity", Buffer.from("naikin", "utf8").toString("base64url")]);
+  assert.deepEqual(first.args?.[2], {
+    detached: true,
+    stdio: "ignore",
+    shell: false,
+    windowsHide: true,
+  });
 });
 
 test("logHookError redacts secrets and collapses ANSI, control, bidi, and newlines", (t) => {
