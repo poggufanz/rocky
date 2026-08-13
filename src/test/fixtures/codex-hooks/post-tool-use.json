@@ -1,0 +1,1 @@
+{"hook_event_name":"PostToolUse","session_id":"th4","turn_id":"t9","tool_name":"apply_patch","tool_input":{"command":"*** Begin Patch\n*** Update File: src/app.css\n@@\n-margin-top: 4px\n+margin-top: 8px\n*** End Patch"}}

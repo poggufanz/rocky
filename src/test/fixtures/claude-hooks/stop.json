@@ -1,0 +1,1 @@
+{ "session_id": "s1", "prompt_id": "p1", "hook_event_name": "Stop", "cwd": "/w", "transcript_path": "REPLACED_IN_TEST", "stop_hook_active": false }

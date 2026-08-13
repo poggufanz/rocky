@@ -82,6 +82,9 @@ test("README and CLI help publish the installable v0.2.1 command surface", () =>
     "rocky recall --ai",
     "rocky model",
     "rocky setup --voice-skill",
+    "rocky setup --agent-hooks",
+    "rocky setup --uninstall-agent-hooks",
+    "rocky setup --status",
     "rocky watch",
   ] as const;
 
@@ -96,7 +99,7 @@ test("README and CLI help publish the installable v0.2.1 command surface", () =>
   }
 });
 
-test("README identity, roadmap, and v0.5 hypothesis stay aligned with shipped metadata", () => {
+test("README identity, roadmap, and Plan 01/Plan 02 v0.5 boundary stay aligned", () => {
   assert.ok(
     readme.includes(`${PACKAGE_NAME}@${PACKAGE_VERSION}`),
     "README package identity must come from the same name and version as package-info.ts",
@@ -115,9 +118,47 @@ test("README identity, roadmap, and v0.5 hypothesis stay aligned with shipped me
   assert.ok(readme.includes("This is Rocky's v0.5 product hypothesis, not an established outcome."));
   assert.match(readme, /more effective/i);
   assert.match(readme, /does not mean (?:the )?model weights change/i);
-  assert.ok(readme.includes(
-    "v0.4.0 does not implement the v0.5 nervous-system hooks, bidirectional intent↔mechanism lookup, ambiguity handling, proactive questions, digest, quiz, or BYOK annotation.",
-  ));
+  assert.match(readme, /Nervous System \(v0\.5\.0 — unreleased\)/);
+  assert.match(readme, /Plan 01[^\n]*implemented/i);
+  assert.match(readme, /Plan 02[^\n]*deferred/i);
+  assert.match(readme, /user prompt|captured prompt/i);
+  assert.match(readme, /edited paths?[^\n]*(?:excerpt|capped)/i);
+  assert.match(readme, /stated rationale/i);
+  assert.match(readme, /transient[^\n]*spool/i);
+  assert.match(readme, /memory\.jsonl/);
+  assert.match(readme, /0600|private/i);
+  assert.match(readme, /no (?:new )?egress/i);
+  assert.match(readme, /never (?:rewrite|inject|submit)[^\n]*prompt/i);
+  assert.match(readme, /deterministic[^\n]*(?:fallback|degraded)/i);
+  assert.match(readme, /loopback Ollama/i);
+  assert.match(readme, /quoted[^\n]*untrusted hearsay/i);
+  assert.match(readme, /Claude[^\n]*explicit consent/i);
+  assert.match(readme, /pre-created[^\n]*\.claude/i);
+  assert.match(readme, /Claude Code capture requires hook payload field `prompt_id`/i);
+  assert.match(readme, /without `prompt_id`, Rocky records nothing and never merges turns/i);
+  assert.match(readme, /manual[^\n]*Codex[^\n]*TOML/i);
+  assert.match(readme, /\/hooks/);
+  for (const mechanism of [
+    "intent→mechanism dictionary",
+    "reverse lookup",
+    "ambiguity surfacing",
+    "curious blind friend",
+    "digest",
+    "memory circuit breaker",
+  ]) {
+    const row = readme.split("\n").find((line) => line.trimStart().startsWith("|") && line.toLowerCase().includes(mechanism));
+    assert.ok(row, `README must keep a conceptual row for ${mechanism}`);
+    assert.match(row ?? "", /Plan 02 deferred/i, `${mechanism} must be marked Plan 02 deferred`);
+  }
+  const recallRow = readme.split("\n").find((line) => line.toLowerCase().includes("| recall |"));
+  assert.ok(recallRow, "README must keep a conceptual row for current Recall");
+  assert.match(recallRow ?? "", /Plan 01 implemented\/current/i);
+  assert.doesNotMatch(recallRow ?? "", /Plan 02 deferred/i);
+  for (const deferred of ["dictionary", "digest", "quiz", "export", "ambiguity", "search tools", "BYOK", "brief", "attest", "circuit breaker"]) {
+    assert.match(readme, new RegExp(`${deferred}[^\\n]*defer|defer[^\\n]*${deferred}`, "i"));
+  }
+  const changelog = readFileSync(join(packageRoot, "CHANGELOG.md"), "utf8");
+  assert.match(changelog, /## 0\.5\.0 — Unreleased/);
 });
 
 test("README documents capability-gated Codex and staged Claude Code setup, not name-only live mutation", () => {

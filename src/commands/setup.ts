@@ -1,4 +1,5 @@
-import { basename, join, posix } from "node:path";
+import { lstatSync, realpathSync } from "node:fs";
+import { basename, join, posix, win32 } from "node:path";
 import type {
   InspectionResult,
   McpRegistration,
@@ -21,6 +22,17 @@ import { SetupUsageError, parseSetupArgs } from "../setup/parser.js";
 import { createPlatformServices, type PlatformServices } from "../setup/platform.js";
 import { processRunner, type ProcessRunner } from "../setup/process.js";
 import { createPromptPort, type PromptInput } from "../setup/prompt.js";
+import {
+  agentHooksStatus,
+  CLAUDE_CAPTURE_CAPABILITY_NOTICE,
+  defaultAgentHooksEntryPath,
+  defaultAgentHooksTarget,
+  installClaudeAgentHooks,
+  printCodexAgentHooks,
+  rockyHookCommand,
+  uninstallClaudeAgentHooks,
+} from "../setup/agent-hooks.js";
+import type { AgentHooksAction } from "../setup/clients.js";
 import {
   isEphemeralInstall,
   isIdenticalMcpRegistration,
@@ -390,6 +402,68 @@ function defaultDependencies(): SetupDependencies {
   };
 }
 
+async function runAgentHooksAction(
+  action: AgentHooksAction,
+  dependencies: SetupDependencies,
+): Promise<number> {
+  const nodeCandidate = dependencies.nodePath ?? process.execPath;
+  const entryCandidate = dependencies.entryPath ?? defaultAgentHooksEntryPath();
+  try {
+    // Dedicated agent-hook setup is deliberately independent from MCP
+    // registration. Validate injected paths here so tests and production both
+    // refuse a relative, missing, or ephemeral script before consent/output.
+    // Validate the spelling before realpath resolution. Otherwise an
+    // existing relative candidate could become absolute and evade the pure
+    // command builder's path boundary.
+    rockyHookCommand("claude-code", nodeCandidate, entryCandidate);
+    const resolveInstalledPath = (candidate: string): string => {
+      if (!posix.isAbsolute(candidate) && !win32.isAbsolute(candidate)) {
+        throw new Error("path must be absolute");
+      }
+      if (!dependencies.platform.fileExists(candidate)) throw new Error("missing path");
+      const resolved = realpathSync(candidate);
+      const metadata = lstatSync(resolved);
+      if (!metadata.isFile() || metadata.isSymbolicLink()) throw new Error("path is not a file");
+      if (isEphemeralInstall(resolved)) throw new Error("path is ephemeral");
+      return resolved;
+    };
+    const nodePath = resolveInstalledPath(nodeCandidate);
+    const entryPath = resolveInstalledPath(entryCandidate);
+    const command = rockyHookCommand("claude-code", nodePath, entryPath);
+    const codexCommand = rockyHookCommand("codex", nodePath, entryPath);
+    const target = defaultAgentHooksTarget(dependencies.platform.home);
+    const options = {
+      command,
+      confirmation: dependencies.confirmation,
+      detail,
+    };
+    if (action === "install" || action === "status") {
+      detail(CLAUDE_CAPTURE_CAPABILITY_NOTICE);
+    }
+    if (action === "install") {
+      const result = await installClaudeAgentHooks(target, options);
+      detail(`claude-code agent hooks: ${result.status}`);
+      if (result.detail !== undefined) detail(result.detail);
+      printCodexAgentHooks(codexCommand);
+      return result.status === "written" || result.status === "unchanged" ? 0 : 1;
+    }
+    if (action === "uninstall") {
+      const result = await uninstallClaudeAgentHooks(target, options);
+      detail(`claude-code agent hooks: ${result.status}`);
+      if (result.detail !== undefined) detail(result.detail);
+      detail("codex agent hooks: manual (config.toml unchanged)");
+      return result.status === "written" || result.status === "unchanged" ? 0 : 1;
+    }
+    const result = agentHooksStatus(target, options);
+    detail(`claude-code agent hooks: ${result.claudeCode}`);
+    detail("codex agent hooks: manual");
+    return result.claudeCode === "unreadable" ? 1 : 0;
+  } catch {
+    say("Claude Code agent hook paths are not usable. setup stops. bad.");
+    return 1;
+  }
+}
+
 const defaultVoiceSkillServices: VoiceSkillServices = {
   resolveTargets: resolveVoiceSkillTargets,
   install(target, replace) {
@@ -479,6 +553,10 @@ export async function setup(argv: readonly string[], deps?: SetupDependencies): 
   }
 
   const dependencies = deps ?? defaultDependencies();
+  if (options.agentHooksAction !== undefined) {
+    return runAgentHooksAction(options.agentHooksAction, dependencies);
+  }
+
   let registration: McpRegistration;
   try {
     registration = resolveMcpRegistration({

@@ -126,6 +126,7 @@ function allowedPackPath(path) {
     || path.startsWith("dist/mcp/")
     || path.startsWith("dist/setup/")
     || path.startsWith("dist/ai/")
+    || path.startsWith("dist/agent/")
     || path.startsWith("dist/shell/")
     || path === "skills/rocky-voice/SKILL.md"
     || path === "skills/rocky-voice/agents/openai.yaml";
@@ -154,12 +155,14 @@ function assertPackResult(packed) {
     "CHANGELOG.md",
     "package.json",
     "dist/index.js",
+    "dist/agent/schema.js",
     "skills/rocky-voice/SKILL.md",
     "skills/rocky-voice/agents/openai.yaml",
   ]) {
     assert.ok(paths.includes(required), `missing packed path: ${required}`);
   }
   assert.ok(paths.some((path) => path.startsWith("dist/mcp/")), "MCP modules are missing");
+  assert.ok(paths.some((path) => path.startsWith("dist/agent/")), "agent modules are missing");
   return paths;
 }
 
@@ -198,6 +201,34 @@ function jsonLines(result, label) {
   assertSuccess(result, label);
   assert.equal(result.stderr, "", `${label} wrote diagnostics: ${result.stderr}`);
   return result.stdout.trim().split("\n").filter(Boolean).map((line) => JSON.parse(line));
+}
+
+function installedSetupWithConsent(installedEntry, options) {
+  // The production prompt intentionally refuses piped stdin unless it is a
+  // TTY. For deterministic tarball dogfood, this tiny Node-only runner marks
+  // its pipe as the consenting terminal, then imports the installed entry.
+  // There is no shell or command-string interpolation here.
+  const entryUrl = pathToFileURL(installedEntry).href;
+  const runner = [
+    "Object.defineProperty(process.stdin, \"isTTY\", { value: true });",
+    `process.argv = [process.execPath, ${JSON.stringify(installedEntry)}, "setup", "--agent-hooks"];`,
+    `await import(${JSON.stringify(entryUrl)});`,
+  ].join("\n");
+  return childResult(process.execPath, ["--input-type=module", "-e", runner], options);
+}
+
+function waitBriefly() {
+  // Keep the installed-artifact poll synchronous and shell-free on Node 18.
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+}
+
+function waitFor(predicate, timeoutMs = 8_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return;
+    waitBriefly();
+  }
+  assert.equal(predicate(), true, "timed out waiting for installed detached annotation");
 }
 
 function createFakeClients(directory, quoteShellPath) {
@@ -431,10 +462,11 @@ async function main() {
     : join(prefixDirectory, "lib", "node_modules", "@poggufanz", "rocky-cli");
   const installedEntry = join(installedRoot, "dist", "index.js");
   const installedQuoteModule = join(installedRoot, "dist", "core", "shell-quote.js");
+  const installedAgentSchema = join(installedRoot, "dist", "agent", "schema.js");
   const shim = process.platform === "win32"
     ? join(prefixDirectory, "rocky.cmd")
     : join(prefixDirectory, "bin", "rocky");
-  for (const path of [installedEntry, installedQuoteModule, shim]) {
+  for (const path of [installedEntry, installedQuoteModule, installedAgentSchema, shim]) {
     assert.equal(existsSync(path), true, `installed path is missing: ${path}`);
   }
   const installedMetadata = JSON.parse(readFileSync(join(installedRoot, "package.json"), "utf8"));
@@ -455,6 +487,16 @@ async function main() {
   for (const unsafe of ['"', "\r", "\n", "\0", "%", "!"]) {
     assert.throws(() => quoteShellPath(`C:\\Rocky\\${unsafe}`, "win32"), /unsafe/i);
   }
+
+  const agentSchema = await import(pathToFileURL(installedAgentSchema).href);
+  const importedIntent = agentSchema.parseAgentEvent({
+    v: 1,
+    agent: "claude-code",
+    kind: "intent",
+    ts: 1,
+    text: "installed agent import",
+  });
+  assert.equal(importedIntent?.kind, "intent");
 
   assert.equal(createFakeClients(fakeClientDirectory, quoteShellPath), fakeClientScript);
 
@@ -520,6 +562,226 @@ async function main() {
   );
   assertSuccess(aiRecall, "installed no-Ollama recall --ai");
   assert.match(`${aiRecall.stdout}\n${aiRecall.stderr}`, /small model sleeps\. memory still works\./);
+
+  // Installed tarball dogfood: replay one Claude turn through the real CLI.
+  // Each hook has a strict stdout contract; Stop launches detached annotation,
+  // so poll only the isolated scratch home until the durable triple appears.
+  const memoryPath = join(rockyHome, "memory.jsonl");
+  const spoolPath = join(rockyHome, "spool");
+  const labelsPath = join(rockyHome, "labels");
+  const spoolEntries = () => {
+    try {
+      return readdirSync(spoolPath);
+    } catch {
+      return [];
+    }
+  };
+
+  // Current documented Claude hook payloads do not provide prompt_id. Rocky
+  // must fail closed for capture rather than joining unrelated turns.
+  const noIdentityMemory = readFileSync(memoryPath);
+  const noIdentitySpool = spoolEntries();
+  const noIdentityLabels = existsSync(labelsPath) ? readFileSync(labelsPath) : undefined;
+  const documentedClaudePayload = {
+    session_id: "documented-claude-session",
+    hook_event_name: "UserPromptSubmit",
+    cwd: isolatedHome,
+    transcript_path: join(isolatedHome, "transcript.jsonl"),
+    permission_mode: "default",
+    prompt: "documented payload without turn identity",
+  };
+  const noIdentityHook = childResult(
+    process.execPath,
+    [installedEntry, "hook", "agent-event", "claude-code"],
+    { env, cwd: isolatedHome, input: `${JSON.stringify(documentedClaudePayload)}\n` },
+  );
+  assertStatus(noIdentityHook, 0, "installed Claude hook without prompt_id");
+  assert.equal(noIdentityHook.stdout, "{}", "Claude missing prompt_id stdout contract");
+  assert.equal(noIdentityHook.stderr, "", "Claude missing prompt_id stderr");
+  assert.deepEqual(readFileSync(memoryPath), noIdentityMemory, "missing prompt_id must not write a triple");
+  assert.deepEqual(spoolEntries(), noIdentitySpool, "missing prompt_id must not create a spool batch");
+  assert.deepEqual(
+    existsSync(labelsPath) ? readFileSync(labelsPath) : undefined,
+    noIdentityLabels,
+    "missing prompt_id must not queue a label",
+  );
+
+  const hookSecret = "ghp_" + "a".repeat(36);
+  const hookPayloads = [
+    {
+      session_id: "package-smoke-session",
+      prompt_id: "package-smoke-turn",
+      hook_event_name: "UserPromptSubmit",
+      cwd: isolatedHome,
+      prompt: "move button down",
+    },
+    {
+      session_id: "package-smoke-session",
+      prompt_id: "package-smoke-turn",
+      hook_event_name: "PostToolUse",
+      cwd: isolatedHome,
+      tool_name: "Edit",
+      tool_input: {
+        file_path: "src/button.css",
+        new_string: `margin-top: 8px; token=${hookSecret}`,
+      },
+    },
+    {
+      session_id: "package-smoke-session",
+      prompt_id: "package-smoke-turn",
+      hook_event_name: "Stop",
+      cwd: isolatedHome,
+      last_assistant_message: `changed spacing for button; rationale=${hookSecret}`,
+    },
+  ];
+  for (const [index, payload] of hookPayloads.entries()) {
+    const hook = childResult(
+      process.execPath,
+      [installedEntry, "hook", "agent-event", "claude-code"],
+      { env, cwd: isolatedHome, input: `${JSON.stringify(payload)}\n` },
+    );
+    assertStatus(hook, 0, `installed Claude hook ${index + 1}`);
+    assert.equal(hook.stdout, "{}", `installed Claude hook ${index + 1} stdout contract`);
+    assert.equal(hook.stderr, "", `installed Claude hook ${index + 1} stderr`);
+  }
+  const readMemoryRecords = () => {
+    try {
+      return readFileSync(memoryPath, "utf8")
+        .split("\n")
+        .filter(Boolean)
+        .map((line) => JSON.parse(line));
+    } catch {
+      return [];
+    }
+  };
+  waitFor(() => {
+    const records = readMemoryRecords();
+    return records.filter((record) => record.kind === "triple").length === 1
+      && spoolEntries().every((name) => !name.endsWith(".jsonl") && !name.endsWith(".lock"));
+  });
+  const triples = readMemoryRecords().filter((record) => record.kind === "triple");
+  assert.equal(triples.length, 1, "installed Claude turn must produce one triple");
+  const [triple] = triples;
+  assert.equal(triple.agent, "claude-code");
+  assert.equal(triple.intent?.text, "move button down");
+  assert.equal(triple.mechanism.files.length, 1);
+  assert.equal(triple.mechanism.files[0].path, "src/button.css");
+  assert.match(triple.mechanism.files[0].excerpt, /margin-top: 8px/);
+  assert.match(triple.mechanism.files[0].excerpt, /\[redacted github token\]/);
+  assert.match(triple.rationale.text, /\[redacted github token\]/);
+  assert.doesNotMatch(JSON.stringify(triple), /ghp_/);
+  assert.equal(spoolEntries().some((name) => name.endsWith(".jsonl") || name.endsWith(".lock")), false);
+  const queuedLabels = readFileSync(labelsPath, "utf8").split("\n").filter(Boolean);
+  assert.equal(queuedLabels.length, 1, "installed Claude turn must queue one passive label");
+  assert.match(
+    queuedLabels[0] ?? "",
+    /^you say "move button down"\. it is margin-top\. I think\. check, question$/u,
+    "installed Claude turn must queue deterministic mapping label",
+  );
+  assert.doesNotMatch(queuedLabels[0] ?? "", /ghp_/u, "queued label must not contain raw token");
+  assert.doesNotMatch(
+    queuedLabels[0] ?? "",
+    /[\u0000-\u001f\u007f-\u009f\u200e\u200f\u202a-\u202e\u2066-\u2069]/u,
+    "queued label must contain no control or bidi characters",
+  );
+
+  // Exercise the installed Codex adapter through both current stdin hooks and
+  // legacy notify argv. The same turn identity must produce one deterministic,
+  // redacted triple and one additional passive label.
+  const codexSecret = "ghp_" + "b".repeat(36);
+  const codexModernPayloads = [
+    {
+      session_id: "package-smoke-codex-session",
+      turn_id: "package-smoke-codex-turn",
+      hook_event_name: "UserPromptSubmit",
+      cwd: isolatedHome,
+      prompt: "move card right",
+    },
+    {
+      session_id: "package-smoke-codex-session",
+      turn_id: "package-smoke-codex-turn",
+      hook_event_name: "PostToolUse",
+      cwd: isolatedHome,
+      tool_name: "apply_patch",
+      tool_input: {
+        file_path: "src/card.css",
+        content: `margin-left: 4px; token=${codexSecret}`,
+      },
+    },
+  ];
+  for (const [index, payload] of codexModernPayloads.entries()) {
+    const hook = childResult(
+      process.execPath,
+      [installedEntry, "hook", "agent-event", "codex"],
+      { env, cwd: isolatedHome, input: `${JSON.stringify(payload)}\n` },
+    );
+    assertStatus(hook, 0, `installed Codex modern hook ${index + 1}`);
+    assert.equal(hook.stdout, "{}", `installed Codex modern hook ${index + 1} stdout contract`);
+    assert.equal(hook.stderr, "", `installed Codex modern hook ${index + 1} stderr`);
+  }
+  const codexNotify = {
+    type: "agent-turn-complete",
+    "thread-id": "package-smoke-codex-session",
+    "turn-id": "package-smoke-codex-turn",
+    "last-assistant-message": `changed card position; rationale=${codexSecret}`,
+  };
+  const legacyNotify = childResult(
+    process.execPath,
+    [installedEntry, "hook", "agent-event", "codex", JSON.stringify(codexNotify)],
+    { env, cwd: isolatedHome },
+  );
+  assertStatus(legacyNotify, 0, "installed Codex legacy notify hook");
+  assert.equal(legacyNotify.stdout, "{}", "installed Codex legacy notify stdout contract");
+  assert.equal(legacyNotify.stderr, "", "installed Codex legacy notify stderr");
+  waitFor(() => {
+    const records = readMemoryRecords();
+    return records.filter((record) => record.kind === "triple").length === 2
+      && spoolEntries().every((name) => !name.endsWith(".jsonl") && !name.endsWith(".lock"));
+  });
+  const codexTriples = readMemoryRecords().filter((record) => record.kind === "triple");
+  assert.equal(codexTriples.length, 2, "installed Codex turn must produce one additional triple");
+  const codexTriple = codexTriples.find((record) => record.agent === "codex");
+  assert.ok(codexTriple, "installed Codex turn must identify its agent");
+  assert.equal(codexTriple.intent?.text, "move card right");
+  assert.equal(codexTriple.mechanism.files[0].path, "src/card.css");
+  assert.match(codexTriple.mechanism.files[0].excerpt, /margin-left: 4px/);
+  assert.match(codexTriple.mechanism.files[0].excerpt, /\[redacted github token\]/);
+  assert.match(codexTriple.rationale.text, /\[redacted github token\]/);
+  assert.doesNotMatch(JSON.stringify(codexTriple), /ghp_/);
+  const labelsAfterCodex = readFileSync(labelsPath, "utf8").split("\n").filter(Boolean);
+  assert.equal(labelsAfterCodex.length, 2, "installed Codex turn must queue one additional label");
+  assert.match(
+    labelsAfterCodex[1] ?? "",
+    /^you say "move card right"\. it is margin-left\. I think\. check, question$/u,
+    "installed Codex turn must queue deterministic mapping label",
+  );
+  assert.doesNotMatch(labelsAfterCodex[1] ?? "", /ghp_/u, "Codex label must not contain raw token");
+
+  // Setup dogfood uses explicit consent in an isolated HOME. The Claude
+  // settings parent exists and remains private; Codex TOML is only printed.
+  const claudeSettingsDirectory = join(isolatedHome, ".claude");
+  mkdirSync(claudeSettingsDirectory, { recursive: true, mode: 0o700 });
+  const codexConfigPaths = [
+    join(isolatedHome, ".codex", "config.toml"),
+    join(codexHome, "config.toml"),
+  ];
+  const codexBefore = codexConfigPaths.map((path) => existsSync(path) ? readFileSync(path) : undefined);
+  const agentSetup = installedSetupWithConsent(
+    installedEntry,
+    { env, cwd: isolatedHome, input: "y\n" },
+  );
+  assertStatus(agentSetup, 0, "installed agent-hook setup with explicit consent");
+  assert.equal(agentSetup.stdout, "", "agent-hook setup keeps stdout clean");
+  assert.match(agentSetup.stderr, /install ears for claude code, question/);
+  assert.match(agentSetup.stderr, /claude-code agent hooks: written/);
+  assert.match(agentSetup.stderr, /notify = \[/);
+  assert.match(agentSetup.stderr, /\/\/hooks|\/hooks/);
+  const claudeSettings = JSON.parse(readFileSync(join(claudeSettingsDirectory, "settings.json"), "utf8"));
+  assert.ok(claudeSettings.hooks?.UserPromptSubmit);
+  for (const [index, path] of codexConfigPaths.entries()) {
+    assert.equal(existsSync(path), codexBefore[index] !== undefined, `Codex config path ${path} changed existence`);
+    if (codexBefore[index] !== undefined) assert.deepEqual(readFileSync(path), codexBefore[index]);
+  }
 
   const modernRequest = {
     jsonrpc: "2.0",

@@ -1,5 +1,5 @@
 import type { Exposure } from "../core/config-read.js";
-import type { SetupMode, SetupOptions } from "./clients.js";
+import type { AgentHooksAction, SetupMode, SetupOptions } from "./clients.js";
 
 export class SetupUsageError extends Error {
   readonly exitCode = 2;
@@ -18,6 +18,7 @@ export function parseSetupArgs(argv: readonly string[]): SetupOptions {
   let replace = false;
   let yes = false;
   let voiceSkill = false;
+  let agentHooksAction: AgentHooksAction | undefined;
 
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
@@ -41,6 +42,18 @@ export function parseSetupArgs(argv: readonly string[]): SetupOptions {
       voiceSkill = true;
       continue;
     }
+    if (argument === "--agent-hooks" || argument === "--uninstall-agent-hooks" || argument === "--status") {
+      const selected: AgentHooksAction = argument === "--agent-hooks"
+        ? "install"
+        : argument === "--uninstall-agent-hooks"
+          ? "uninstall"
+          : "status";
+      if (agentHooksAction !== undefined) {
+        throw new SetupUsageError("agent hook actions are mutually exclusive");
+      }
+      agentHooksAction = selected;
+      continue;
+    }
     if (argument === "--mcp-exposure") {
       const value = argv[index + 1];
       if (value === undefined || value.startsWith("--")) {
@@ -62,6 +75,13 @@ export function parseSetupArgs(argv: readonly string[]): SetupOptions {
 
   if (mode !== "configure" && (replace || exposureProvided)) {
     throw new SetupUsageError("--replace and --mcp-exposure are valid only in configure mode");
+  }
+
+  if (agentHooksAction !== undefined) {
+    if (modeOption !== undefined || replace || exposureProvided || voiceSkill) {
+      throw new SetupUsageError("agent hook actions cannot combine with MCP or voice-skill options");
+    }
+    return { mode, exposure, replace, yes, voiceSkill, agentHooksAction };
   }
 
   return { mode, exposure, replace, yes, voiceSkill };

@@ -17,8 +17,9 @@ import { fileURLToPath } from "node:url";
 import { commandInvocation } from "./package-smoke-support.mjs";
 
 const packageRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
+const packageMetadata = JSON.parse(readFileSync(join(packageRoot, "package.json"), "utf8"));
 const PACKAGE_NAME = "@poggufanz/rocky-cli";
-const PACKAGE_VERSION = "0.3.0";
+const PACKAGE_VERSION = packageMetadata.version;
 const COMMAND_TIMEOUT_MS = 10 * 60 * 1_000;
 const MAX_COMMAND_OUTPUT_BYTES = 32 * 1024 * 1024;
 
@@ -171,25 +172,41 @@ function runStep(state, env, label, file, args, display) {
   return result.stdout;
 }
 
-function assertMetadata(state) {
+function isEmptyDependencyRecord(value) {
+  if (value === undefined || value === null) return true;
+  if (typeof value !== "object" || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) return false;
+  return Object.keys(value).length === 0;
+}
+
+export function validateReleaseMetadata(value) {
+  try {
+    if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+    return isEmptyDependencyRecord(value.dependencies)
+      && isEmptyDependencyRecord(value.optionalDependencies)
+      && value.name === PACKAGE_NAME
+      && value.version === PACKAGE_VERSION
+      && JSON.stringify(value.bin) === JSON.stringify({ rocky: "./dist/index.js" })
+      && value.engines?.node === ">=18"
+      && value.license === "MIT"
+      && value.author === "Muhammad Faiq"
+      && value.repository?.type === "git"
+      && value.repository?.url === "git+https://github.com/poggufanz/rocky.git"
+      && value.homepage === "https://github.com/poggufanz/rocky#readme"
+      && value.bugs?.url === "https://github.com/poggufanz/rocky/issues"
+      && value.publishConfig?.access === "public";
+  } catch {
+    return false;
+  }
+}
+
+export function assertMetadata(state) {
   const value = JSON.parse(readFileSync(join(packageRoot, "package.json"), "utf8"));
+  const valid = validateReleaseMetadata(value);
+  if (!valid) throw new StepError("package metadata assertion failed");
   const dependencies = value.dependencies ?? {};
   const optionalDependencies = value.optionalDependencies ?? {};
-  const valid = value.name === PACKAGE_NAME
-    && value.version === PACKAGE_VERSION
-    && JSON.stringify(value.bin) === JSON.stringify({ rocky: "./dist/index.js" })
-    && value.engines?.node === ">=18"
-    && value.license === "MIT"
-    && value.author === "Muhammad Faiq"
-    && value.repository?.type === "git"
-    && value.repository?.url === "git+https://github.com/poggufanz/rocky.git"
-    && value.homepage === "https://github.com/poggufanz/rocky#readme"
-    && value.bugs?.url === "https://github.com/poggufanz/rocky/issues"
-    && value.publishConfig?.access === "public"
-    && value.publishConfig?.tag === "beta"
-    && Object.keys(dependencies).length === 0
-    && Object.keys(optionalDependencies).length === 0;
-  if (!valid) throw new StepError("package metadata assertion failed");
   state.metadata = {
     name: value.name,
     version: value.version,
@@ -204,14 +221,17 @@ function assertMetadata(state) {
 function allowedPackPath(path) {
   return path === "LICENSE"
     || path === "README.md"
+    || path === "CHANGELOG.md"
     || path === "package.json"
     || path === "dist/index.js"
     || path.startsWith("dist/commands/")
+    || path.startsWith("dist/check/")
     || path.startsWith("dist/core/")
     || path.startsWith("dist/ui/")
     || path.startsWith("dist/mcp/")
     || path.startsWith("dist/setup/")
     || path.startsWith("dist/ai/")
+    || path.startsWith("dist/agent/")
     || path.startsWith("dist/shell/")
     || path === "skills/rocky-voice/SKILL.md"
     || path === "skills/rocky-voice/agents/openai.yaml";
@@ -240,12 +260,13 @@ function parseManifest(stdout) {
     }
   }
   for (const required of [
-    "LICENSE", "README.md", "package.json", "dist/index.js",
+    "LICENSE", "README.md", "CHANGELOG.md", "package.json", "dist/index.js", "dist/agent/schema.js",
     "skills/rocky-voice/SKILL.md", "skills/rocky-voice/agents/openai.yaml",
   ]) {
     if (!paths.includes(required)) throw new StepError(`required packed path is missing: ${required}`);
   }
   if (!paths.some((path) => path.startsWith("dist/mcp/"))) throw new StepError("MCP package payload is missing");
+  if (!paths.some((path) => path.startsWith("dist/agent/"))) throw new StepError("agent package payload is missing");
   return {
     filename: packed.filename,
     packageSize: packed.size,
@@ -261,7 +282,7 @@ function safeCell(value) {
 function markdown(state) {
   const status = state.failure === undefined ? "PASS" : "FAIL";
   const lines = [
-    "# Rocky v0.2.1 release check",
+    `# Rocky ${PACKAGE_VERSION} release check`,
     "",
     `- Result: **${status}**`,
     `- Measured at: ${state.measuredAt}`,
@@ -396,11 +417,15 @@ async function main(reportPath) {
   if (failed) throw new StepError(state.failure);
 }
 
-try {
-  const report = reportArgument(process.argv.slice(2));
-  await main(report);
-  process.stdout.write(`${report}\n`);
-} catch (error) {
-  process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
-  process.exitCode = error instanceof UsageError ? 2 : 1;
+const launchedAsScript = process.argv[1] !== undefined
+  && resolve(process.argv[1]) === resolve(fileURLToPath(import.meta.url));
+if (launchedAsScript) {
+  try {
+    const report = reportArgument(process.argv.slice(2));
+    await main(report);
+    process.stdout.write(`${report}\n`);
+  } catch (error) {
+    process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+    process.exitCode = error instanceof UsageError ? 2 : 1;
+  }
 }

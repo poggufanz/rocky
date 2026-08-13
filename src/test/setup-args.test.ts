@@ -70,6 +70,35 @@ test("yes alone never selects voice skill work", () => {
   assert.equal(parseSetupArgs(["--yes"]).voiceSkill, false);
 });
 
+test("setup parser selects dedicated Claude agent-hook actions", () => {
+  assert.deepEqual(parseSetupArgs(["--agent-hooks"]), {
+    mode: "configure",
+    exposure: "sanitized",
+    replace: false,
+    yes: false,
+    voiceSkill: false,
+    agentHooksAction: "install",
+  });
+  assert.equal(parseSetupArgs(["--uninstall-agent-hooks"]).agentHooksAction, "uninstall");
+  assert.equal(parseSetupArgs(["--status"]).agentHooksAction, "status");
+  assert.equal(parseSetupArgs(["--agent-hooks", "--yes"]).agentHooksAction, "install");
+});
+
+test("dedicated agent-hook actions reject ordinary setup flags and each other", () => {
+  for (const argv of [
+    ["--agent-hooks", "--uninstall-agent-hooks"],
+    ["--agent-hooks", "--check"],
+    ["--agent-hooks", "--remove"],
+    ["--agent-hooks", "--replace"],
+    ["--agent-hooks", "--mcp-exposure", "raw"],
+    ["--agent-hooks", "--voice-skill"],
+    ["--status", "--check"],
+  ]) {
+    assert.throws(() => parseSetupArgs(argv), (error: unknown) =>
+      error instanceof SetupUsageError && error.exitCode === 2);
+  }
+});
+
 test("setup parser rejects mutually exclusive modes", () => {
   assert.throws(
     () => parseSetupArgs(["--check", "--remove"]),

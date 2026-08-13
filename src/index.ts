@@ -19,6 +19,8 @@ import { hookFail, hookInstall, hookStatus, hookSuccess, hookUninstall } from ".
 import { mcp } from "./commands/mcp.js";
 import { setup } from "./commands/setup.js";
 import { check } from "./commands/check.js";
+import { agentEvent } from "./commands/agent-hook.js";
+import { annotateCommand } from "./agent/annotate.js";
 import { PACKAGE_NAME, PACKAGE_VERSION } from "./core/package-info.js";
 import { face, say } from "./ui/rocky.js";
 
@@ -55,12 +57,19 @@ usage:
   rocky setup --mcp-exposure sanitized|raw
                             choose projected-memory exposure during configure.
   rocky setup --voice-skill configure hosts and install managed voice skill explicitly.
+  rocky setup --agent-hooks
+                            install Claude Code hooks after explicit consent; print Codex TOML.
+  rocky setup --uninstall-agent-hooks
+                            remove Rocky Claude Code hooks; Codex config stays untouched.
+  rocky setup --status       report Claude Code agent-hook state; Codex remains manual.
   rocky check [--pre-push|--install-hook|--offline|--quiet]
                             hull check before push.
   rocky hook install        put Rocky's ears in your bash. every command heard,
                             failures remembered, dangerous commands questioned.
   rocky hook uninstall      remove the ears. memory stays.
   rocky hook status         are the ears in, question
+  rocky hook agent-event claude-code|codex
+                            private fail-open agent hook endpoint; stdout is always {}.
 
 memory lives in ~/.rocky/memory.jsonl. no telemetry. only outside call is rocky
 check asking registry.npmjs.org whether package exists — package name only, you say
@@ -97,6 +106,8 @@ async function main(): Promise<number> {
           return hookUninstall();
         case "status":
           return hookStatus();
+        case "agent-event":
+          return agentEvent(rest[1] ?? "", rest[1] === "codex" ? { argvPayload: rest[2] } : undefined);
         default:
           say("hook needs install, uninstall, or status. which one, question");
           return 2;
@@ -105,6 +116,8 @@ async function main(): Promise<number> {
       return hookFail(rest[0] ?? "", Number(rest[1] ?? 1), rest[2] ?? process.cwd());
     case "_hooksuccess":
       return hookSuccess(rest[0] ?? "", rest[1] ?? process.cwd());
+    case "_annotate":
+      return annotateCommand(rest[0] ?? "");
     case "--version":
       console.log(PACKAGE_VERSION);
       return 0;

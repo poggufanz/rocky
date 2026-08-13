@@ -41,6 +41,11 @@ export function mutationGuardUnchanged(guard: FileMutationGuard | undefined): bo
   }
 }
 
+export interface FileIdentity {
+  dev: number;
+  ino: number;
+}
+
 export function requireMutationGuard(guard: FileMutationGuard | undefined): void {
   if (!mutationGuardUnchanged(guard)) throw new FileMutationGuardChangedError();
 }
@@ -123,7 +128,7 @@ export interface RecoveryOutcome {
 
 export type BytesReadResult =
   | { status: "missing" }
-  | { status: "valid"; bytes: Buffer; mode?: number };
+  | { status: "valid"; bytes: Buffer; mode?: number; identity?: FileIdentity };
 
 export type ConditionalBytesWriteResult =
   | { status: "written"; recoveryPath?: string; outcome?: RecoveryOutcome }
@@ -158,6 +163,17 @@ function fileMatches(path: string, bytes: Buffer, mode?: number): boolean {
   try {
     return readFileSync(path).equals(bytes)
       && (mode === undefined || (statSync(path).mode & 0o777) === mode);
+  } catch {
+    return false;
+  }
+}
+
+function fileIdentityMatches(path: string, identity: FileIdentity): boolean {
+  try {
+    const metadata = lstatSync(path);
+    return metadata.isFile()
+      && !metadata.isSymbolicLink()
+      && sameIdentity(metadata, identity);
   } catch {
     return false;
   }
@@ -1341,6 +1357,10 @@ export function atomicWriteBytesIfUnchanged(
   prior: BytesReadResult,
   guard?: FileMutationGuard,
 ): ConditionalBytesWriteResult {
+  const priorIdentity = prior.status === "valid" ? prior.identity : undefined;
+  if (priorIdentity !== undefined && !fileIdentityMatches(path, priorIdentity)) {
+    return { status: "changed" };
+  }
   const transactionDirectory = transactionPath(path);
   const temporaryPath = join(transactionDirectory, "prepared");
   let descriptor: number | undefined;
@@ -1418,6 +1438,18 @@ export function atomicWriteBytesIfUnchanged(
     recoveryPath = join(transactionDirectory, "displaced");
     try {
       requireMutationGuard(guard);
+      if (priorIdentity !== undefined && !fileIdentityMatches(path, priorIdentity)) {
+        if (removeTransaction(transactionDirectory)) {
+          transactionExists = false;
+          temporaryExists = false;
+          return { status: "changed" };
+        }
+        return {
+          status: "recovery-required",
+          recoveryPath: firstExistingPath(transactionDirectory, temporaryPath, path),
+          outcome: ambiguousOutcome(transactionDirectory, path, undefined, destinationPublished),
+        };
+      }
       renameSync(path, recoveryPath);
       recoveryExists = true;
     } catch (error) {
@@ -1440,6 +1472,20 @@ export function atomicWriteBytesIfUnchanged(
     syncParentDirectory(path);
     requireMutationGuard(guard);
     writeManifest(transactionDirectory, path, "displaced", guard);
+
+    if (priorIdentity !== undefined && !fileIdentityMatches(recoveryPath, priorIdentity)) {
+      const restored = restoreDisplaced(
+        path,
+        transactionDirectory,
+        recoveryPath,
+        temporaryPath,
+        guard,
+      );
+      if (restored.status === "changed") {
+        temporaryExists = false;
+      } else if (!pathExists(temporaryPath)) temporaryExists = false;
+      return restored;
+    }
 
     if (!isManagedRegularFile(recoveryPath, path)
       || !fileMatches(recoveryPath, prior.bytes, prior.mode)) {

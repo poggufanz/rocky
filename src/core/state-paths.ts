@@ -7,6 +7,9 @@ export interface RockyPaths {
   pending: string;
   config: string;
   watchDir: string;
+  spoolDir: string;
+  labels: string;
+  agentLog: string;
 }
 
 export function resolveRockyPaths(
@@ -22,5 +25,8 @@ export function resolveRockyPaths(
     pending: join(home, "pending"),
     config: join(home, "config.json"),
     watchDir: join(home, "watch"),
+    spoolDir: join(home, "spool"),
+    labels: join(home, "labels"),
+    agentLog: join(home, "agent-hook.log"),
   };
 }
