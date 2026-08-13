@@ -1,7 +1,7 @@
 import { strict as assert } from "node:assert";
 import { Buffer } from "node:buffer";
 import { test } from "node:test";
-import { how, what } from "../commands/dictionary.js";
+import { how, what, why } from "../commands/dictionary.js";
 import type { MemoryRecord, TripleRecord } from "../core/memory-read.js";
 
 export function seeded(): MemoryRecord[] {
@@ -61,6 +61,59 @@ test("how reminds vocabulary without writing a prompt", () => {
   assert.equal(outLines.length, 1);
   assert.ok(outLines[0]?.includes("src/app.css"));
   assert.ok(!outLines.some((line) => line.includes("last time you say")));
+});
+
+test("why quotes rationale as hearsay, newest first", () => {
+  const { sayLines, outLines, deps } = sinks();
+  assert.equal(why(["src/app.css"], { load: seeded, ...deps }), 0);
+  const joined = [...sayLines, ...outLines].join("\n");
+  assert.ok(joined.includes("agent say: margin adds space. I only hear. correct, question"));
+  assert.ok(!joined.includes("?"));
+});
+
+test("why without rationale reports change without reason", () => {
+  const records = seeded().map((record) => record.kind === "triple" ? { ...record, rationale: undefined } : record);
+  const { sayLines, outLines, deps } = sinks();
+  assert.equal(why(["src/app.css"], { load: () => records, ...deps }), 0);
+  assert.ok([...sayLines, ...outLines].join("\n").includes("change happen. no reason I hear."));
+});
+
+test("why on unknown file and missing arg", () => {
+  const unknown = sinks();
+  assert.equal(why(["ghost.css"], { load: () => [], ...unknown.deps }), 0);
+  assert.ok(unknown.sayLines.join("\n").includes("nobody touch this while I listen"));
+
+  const missing = sinks();
+  assert.equal(why([], { load: () => [], ...missing.deps }), 2);
+  assert.equal(missing.outLines.length, 0);
+});
+
+test("why keeps hostile rationale, tags, and paths bounded and terminal-safe", () => {
+  const hostile = seeded()[0] as TripleRecord;
+  const hostilePath = `src/\u001b]8;;https://evil.test\u0007${"p".repeat(8_000)}\n.css`;
+  hostile.rationale = {
+    text: `agent?\u001b[31m\n${"r".repeat(8_000)}`,
+    tags: [`tag?\u0000${"t".repeat(8_000)}`],
+    source: "transcript",
+  };
+  hostile.mechanism.files[0] = {
+    path: hostilePath,
+    plusMinus: [3, 1],
+    props: ["margin-top"],
+  };
+  const { sayLines, outLines, deps } = sinks();
+  assert.equal(why([hostilePath], { load: () => [hostile], ...deps }), 0);
+  assert.ok(sayLines.some((line) => line.startsWith("agent say:")));
+  assert.ok(outLines.some((line) => line.includes("tags:")));
+
+  for (const line of [...sayLines, ...outLines]) {
+    assert.ok(!line.includes("\n"), JSON.stringify(line));
+    assert.ok(!line.includes("\r"), JSON.stringify(line));
+    assert.ok(!line.includes("?"), JSON.stringify(line));
+    assert.ok(!line.includes("\u001b"), JSON.stringify(line));
+    assert.ok(!/[\p{Cc}\p{Cf}\u2028\u2029]/u.test(line), JSON.stringify(line));
+    assert.ok(Buffer.byteLength(line, "utf8") <= 512, String(Buffer.byteLength(line, "utf8")));
+  }
 });
 
 test("missing query argument returns 2", async () => {

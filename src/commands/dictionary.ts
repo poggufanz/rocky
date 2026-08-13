@@ -1,6 +1,6 @@
 import { dictionaryRankPortFromConfig, type DictionaryRankPort } from "../ai/dictionary-ai.js";
 import { loadConfig } from "../core/config.js";
-import { queryDictionary, type DictionaryHit } from "../core/dictionary.js";
+import { queryDictionary, triplesForFile, type DictionaryHit } from "../core/dictionary.js";
 import { loadMemory, type MemoryRecord } from "../core/memory-read.js";
 import { replaceAnsiAndControls, stripInvisibleControls } from "../core/redact.js";
 import { resolveRockyPaths } from "../core/state-paths.js";
@@ -136,5 +136,38 @@ export function how(argv: string[], deps: DictionaryCommandDeps = {}): number {
   const safeSubject = subject(hits[0]);
   speak(terminalSafe(`last time you say "${safeQuery}", it become ${safeSubject}. maybe you mean ${safeSubject}, question`, MAX_OUTPUT_LINE_BYTES));
   evidence(hits, support);
+  return 0;
+}
+
+export function why(argv: string[], deps: DictionaryCommandDeps = {}): number {
+  const { speak, support, records } = resolve(deps);
+  const path = argv.join(" ").trim();
+  if (!path) {
+    speak("why needs file to remember. rocky why src/app.css, question");
+    return 2;
+  }
+  const safePath = terminalSafe(path, MAX_PATH_DISPLAY_BYTES);
+  const hits = triplesForFile(records(), path);
+  if (hits.length === 0) {
+    speak(terminalSafe(`"${safePath}"... nobody touch this while I listen.`, MAX_OUTPUT_LINE_BYTES));
+    return 0;
+  }
+  for (const triple of hits) {
+    const first = triple.mechanism.files[0];
+    const where = first
+      ? `${terminalSafe(first.path, MAX_PATH_DISPLAY_BYTES)} +${first.plusMinus[0]} -${first.plusMinus[1]}`
+      : safePath;
+    const rationale = triple.rationale ? terminalSafe(triple.rationale.text, MAX_INTENT_DISPLAY_BYTES).trim() : "";
+    if (rationale) {
+      speak(terminalSafe(`agent say: ${rationale}. I only hear. correct, question`, MAX_OUTPUT_LINE_BYTES));
+      const tags = triple.rationale?.tags
+        .map((tag) => terminalSafe(tag, MAX_INTENT_DISPLAY_BYTES))
+        .filter(Boolean)
+        .join(" ");
+      support(terminalSafe(`  (${where}, ${ago(triple.ts)}${tags ? `, tags: ${tags}` : ""})`, MAX_OUTPUT_LINE_BYTES));
+    } else {
+      speak(terminalSafe(`change happen. no reason I hear. (${where}, ${ago(triple.ts)})`, MAX_OUTPUT_LINE_BYTES));
+    }
+  }
   return 0;
 }
