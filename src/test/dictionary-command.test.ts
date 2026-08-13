@@ -14,6 +14,20 @@ export function seeded(): MemoryRecord[] {
   return [triple];
 }
 
+function multiSeeded(): MemoryRecord[] {
+  const makeTriple = (id: string, ts: number, path: string, property: string): TripleRecord => ({
+    kind: "triple", id, ts, cwd: "/w", schemaV: 1, agent: "claude-code", origin: "agent-hook",
+    intent: { text: "naikin button" },
+    rationale: { text: "small change", tags: ["button"], source: "transcript" },
+    mechanism: { files: [{ path, plusMinus: [1, 0], props: [property] }], truncatedFiles: 0 },
+  });
+  return [
+    makeTriple("t1", 1, "src/first.css", "margin-top"),
+    makeTriple("t2", 2, "src/second.css", "color"),
+    makeTriple("t3", 3, "src/third.css", "padding"),
+  ];
+}
+
 export function sinks() {
   const sayLines: string[] = [];
   const outLines: string[] = [];
@@ -101,6 +115,25 @@ test("what --ai strips flag, ranks deterministic hits, and keeps headline", asyn
   assert.equal(outLines.length, 1);
 });
 
+test("what --ai reorders known hits and appends every omitted hit exactly once", async () => {
+  const { sayLines, outLines, deps } = sinks();
+  const rank = {
+    async run(_query: string, hits: readonly { triple: { id: string } }[]) {
+      assert.equal(hits.length, 3);
+      return ["t1", "unknown", "t1", "t2"];
+    },
+  };
+  assert.equal(await what(["--ai", "naikin", "button"], { load: multiSeeded, rank, ...deps }), 0);
+  assert.equal(sayLines[0], 'you say "naikin button". it is margin-top. I think. check, question');
+  assert.equal(outLines.length, 3);
+  const expectedOrder = ["src/first.css", "src/second.css", "src/third.css"];
+  assert.deepEqual(outLines.map((line) => expectedOrder.find((path) => line.includes(path))), expectedOrder);
+  for (const path of expectedOrder) {
+    assert.equal(outLines.filter((line) => line.includes(path)).length, 1, path);
+  }
+  assert.ok(!outLines.some((line) => line.includes("unknown")));
+});
+
 test("what --ai speaks model sleeps and keeps evidence on rank failure", async () => {
   const { sayLines, outLines, deps } = sinks();
   const rank = { async run() { return undefined; } };
@@ -118,4 +151,37 @@ test("what without --ai never touches rank port", async () => {
   assert.equal(calls, 0);
   assert.equal(sayLines.length, 1);
   assert.equal(outLines.length, 1);
+});
+
+test("what --ai requests an exact ten-second caller signal", async () => {
+  const { sayLines, outLines, deps } = sinks();
+  const expectedSignal = new AbortController().signal;
+  let observedSignal: AbortSignal | undefined;
+  let observedTimeout: number | undefined;
+  const originalDescriptor = Object.getOwnPropertyDescriptor(AbortSignal, "timeout");
+  try {
+    Object.defineProperty(AbortSignal, "timeout", {
+      configurable: true,
+      enumerable: originalDescriptor?.enumerable ?? false,
+      writable: true,
+      value: (milliseconds: number) => {
+        observedTimeout = milliseconds;
+        return expectedSignal;
+      },
+    });
+    const rank = {
+      async run(_query: string, _hits: readonly unknown[], signal: AbortSignal) {
+        observedSignal = signal;
+        return ["t1"];
+      },
+    };
+    assert.equal(await what(["--ai", "naikin"], { load: seeded, rank, ...deps }), 0);
+    assert.equal(observedTimeout, 10_000);
+    assert.equal(observedSignal, expectedSignal);
+    assert.equal(sayLines.length, 1);
+    assert.equal(outLines.length, 1);
+  } finally {
+    if (originalDescriptor) Object.defineProperty(AbortSignal, "timeout", originalDescriptor);
+    else Reflect.deleteProperty(AbortSignal, "timeout");
+  }
 });
