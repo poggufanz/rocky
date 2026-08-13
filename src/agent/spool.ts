@@ -836,11 +836,13 @@ function readClaimBytes(claim: BatchClaim, paths: RockyPaths): Buffer | undefine
   try {
     fd = openSync(claim.path, constants.O_RDONLY | NO_FOLLOW);
     const opened = fstatSync(fd);
-    if (!opened.isFile() || opened.isSymbolicLink() || !compatibleIdentity(claim.stats, opened) || opened.size > MAX_BATCH_BYTES) return undefined;
+    if (!opened.isFile() || opened.isSymbolicLink() || !compatibleIdentity(claim.stats, opened)
+      || opened.size > MAX_BATCH_BYTES || opened.size !== initial.stats.size) return undefined;
     const bounded = Buffer.alloc(MAX_BATCH_BYTES + 1);
     const count = readSync(fd, bounded, 0, bounded.length, 0);
     const after = fstatSync(fd);
-    if (count > MAX_BATCH_BYTES || after.size > MAX_BATCH_BYTES || !compatibleIdentity(opened, after)) return undefined;
+    if (count !== after.size || count > MAX_BATCH_BYTES || after.size > MAX_BATCH_BYTES
+      || after.size !== opened.size || !compatibleIdentity(opened, after)) return undefined;
     return bounded.subarray(0, count);
   } catch {
     return undefined;
@@ -849,9 +851,11 @@ function readClaimBytes(claim: BatchClaim, paths: RockyPaths): Buffer | undefine
   }
 }
 
-export function readClaim(claim: BatchClaim, paths = resolveRockyPaths()): AgentEvent[] {
-  const bytes = readClaimBytes(claim, paths);
-  if (!bytes) return [];
+export type ClaimReadResult =
+  | { readonly ok: true; readonly events: AgentEvent[] }
+  | { readonly ok: false };
+
+function parseClaimEvents(bytes: Buffer): AgentEvent[] {
   const events: AgentEvent[] = [];
   for (const line of bytes.toString("utf8").split(/\r?\n/u)) {
     if (!line.trim()) continue;
@@ -863,6 +867,16 @@ export function readClaim(claim: BatchClaim, paths = resolveRockyPaths()): Agent
     }
   }
   return events;
+}
+
+export function readClaimResult(claim: BatchClaim, paths = resolveRockyPaths()): ClaimReadResult {
+  const bytes = readClaimBytes(claim, paths);
+  return bytes === undefined ? { ok: false } : { ok: true, events: parseClaimEvents(bytes) };
+}
+
+export function readClaim(claim: BatchClaim, paths = resolveRockyPaths()): AgentEvent[] {
+  const result = readClaimResult(claim, paths);
+  return result.ok ? result.events : [];
 }
 
 export function removeClaim(claim: BatchClaim, paths = resolveRockyPaths()): boolean {

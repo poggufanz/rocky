@@ -136,6 +136,15 @@ function quotePath(value: string): string {
     : quotePosixPath(value);
 }
 
+function quoteLegacyPosixPath(value: string): string {
+  return `"${value
+    .replaceAll("\\", "\\\\")
+    .replaceAll("$", "\\$")
+    .replaceAll("`", "\\`")
+    .replaceAll("\"", "\\\"")
+    .replaceAll("!", "\\!")}"`;
+}
+
 function defaultEntryPath(): string {
   return join(dirname(fileURLToPath(import.meta.url)), "..", "index.js");
 }
@@ -167,7 +176,7 @@ function decodeWindowsCommandPath(raw: string): string {
   return `${raw.slice(0, -trailing.length)}${"\\".repeat(trailing.length / 2)}`;
 }
 
-function decodePosixCommandPath(raw: string): string {
+function decodePosixCommandPath(raw: string, allowLegacyBang = false): string {
   let value = "";
   for (let index = 0; index < raw.length; index += 1) {
     const character = raw[index];
@@ -176,7 +185,8 @@ function decodePosixCommandPath(raw: string): string {
       continue;
     }
     const escaped = raw[index + 1];
-    if (escaped === undefined || !["\\", "$", "`", '"'].includes(escaped)) {
+    const allowedEscapes = ["\\", "$", "`", '"', ...(allowLegacyBang ? ["!"] : [])];
+    if (escaped === undefined || !allowedEscapes.includes(escaped)) {
       throw new Error("POSIX hook path has ambiguous escape");
     }
     value += escaped;
@@ -185,11 +195,17 @@ function decodePosixCommandPath(raw: string): string {
   return value;
 }
 
-function decodeCommandPath(raw: string): string {
-  return isWindowsCommandPath(raw) ? decodeWindowsCommandPath(raw) : decodePosixCommandPath(raw);
+function decodeCommandPath(raw: string, allowLegacyBang = false): string {
+  return isWindowsCommandPath(raw)
+    ? decodeWindowsCommandPath(raw)
+    : decodePosixCommandPath(raw, allowLegacyBang);
 }
 
-function parseQuotedCommandPath(command: string, start: number): { value: string; next: number } {
+function parseQuotedCommandPath(
+  command: string,
+  start: number,
+  allowLegacyBang = false,
+): { value: string; next: number } {
   if (command[start] !== '"') throw new Error("hook command must quote executable paths");
   let raw = "";
   for (let index = start + 1; index < command.length; index += 1) {
@@ -197,7 +213,7 @@ function parseQuotedCommandPath(command: string, start: number): { value: string
     if (character === '"') {
       let slashes = 0;
       for (let cursor = raw.length - 1; cursor >= 0 && raw[cursor] === "\\"; cursor -= 1) slashes += 1;
-      if (slashes % 2 === 0) return { value: decodeCommandPath(raw), next: index + 1 };
+      if (slashes % 2 === 0) return { value: decodeCommandPath(raw, allowLegacyBang), next: index + 1 };
     }
     raw += character;
   }
@@ -222,6 +238,37 @@ function parseCodexHookCommand(command: string): HookCommandPaths {
     throw new Error("hook command is not canonical");
   }
   return { executable, script };
+}
+
+/**
+ * Recognize the exact Claude command shape Rocky writes, including the old
+ * quoted-path spelling and the historical bare `rocky` command. A marker in
+ * an argument or an otherwise unrelated shell command is foreign.
+ */
+function isRockyClaudeHookCommand(command: string): boolean {
+  if (typeof command !== "string" || command.length === 0 || hasControl(command)) return false;
+  if (command === `rocky ${CLAUDE_MARKER}`) return true;
+  const suffix = ` ${CLAUDE_MARKER}`;
+  if (!command.endsWith(suffix)) return false;
+  const paths = command.slice(0, -suffix.length);
+  try {
+    const first = parseQuotedCommandPath(paths, 0, true);
+    if (paths[first.next] !== " ") return false;
+    const second = parseQuotedCommandPath(paths, first.next + 1, true);
+    if (second.next !== paths.length) return false;
+    requireSafeAbsolutePath(first.value, "Node");
+    requireSafeAbsolutePath(second.value, "entry");
+    try {
+      if (rockyHookCommand("claude-code", first.value, second.value) === command) return true;
+    } catch {
+      // A command is only legacy-compatible when its exact old POSIX spelling
+      // can be reproduced below. Unsafe/noncanonical Windows paths stay foreign.
+    }
+    if (isWindowsCommandPath(first.value) || isWindowsCommandPath(second.value)) return false;
+    return `${quoteLegacyPosixPath(first.value)} ${quoteLegacyPosixPath(second.value)} ${CLAUDE_MARKER}` === command;
+  } catch {
+    return false;
+  }
 }
 
 function tomlBasicString(value: string): string {
@@ -310,7 +357,8 @@ function hookCommand(value: JsonObject): string | undefined {
 }
 
 function isRockyHook(value: JsonObject): boolean {
-  return hookCommand(value)?.includes(CLAUDE_MARKER) === true;
+  const command = hookCommand(value);
+  return command !== undefined && isRockyClaudeHookCommand(command);
 }
 
 function stripRockyGroups(groups: readonly unknown[]): unknown[] {

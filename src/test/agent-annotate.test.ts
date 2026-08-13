@@ -336,6 +336,7 @@ test("recordTripleOnce serializes check and append across processes", { timeout:
   t.after(() => rmSync(home, { recursive: true, force: true }));
   const modulePath = join(dirname(fileURLToPath(import.meta.url)), "..", "core", "memory.js");
   const gateDir = join(home, "gates");
+  const start = join(home, "start");
   const release = join(home, "release");
   mkdirSync(gateDir);
   writeFileSync(join(home, "memory.jsonl"), "", { mode: 0o600 });
@@ -343,24 +344,39 @@ test("recordTripleOnce serializes check and append across processes", { timeout:
     "import fs from 'node:fs';",
     "import { syncBuiltinESMExports } from 'node:module';",
     "import { pathToFileURL } from 'node:url';",
-    "const [modulePath, home, gateDir, releasePath] = process.argv.slice(1);",
+    "const [modulePath, home, gateDir, startPath, releasePath] = process.argv.slice(1);",
     "const originalOpen = fs.openSync.bind(fs);",
     "const originalRead = fs.readFileSync.bind(fs);",
     "let memoryFd;",
     "let gated = false;",
+    "const signal = new Int32Array(new SharedArrayBuffer(4));",
     "fs.openSync = (path, ...args) => { const fd = originalOpen(path, ...args); if (String(path).endsWith('memory.jsonl')) memoryFd = fd; return fd; };",
     "fs.readFileSync = (path, ...args) => { const isMemory = typeof path === 'number' ? path === memoryFd : String(path).endsWith('memory.jsonl'); if (!gated && isMemory) { gated = true; fs.writeFileSync(`${gateDir}/${process.pid}.gate`, 'gate'); const signal = new Int32Array(new SharedArrayBuffer(4)); while (!fs.existsSync(releasePath)) Atomics.wait(signal, 0, 0, 10); } return originalRead(path, ...args); };",
     "syncBuiltinESMExports();",
     "const { recordTripleOnce } = await import(pathToFileURL(modulePath).href);",
+    "fs.writeFileSync(`${gateDir}/${process.pid}.ready`, 'ready');",
+    "while (!fs.existsSync(startPath)) Atomics.wait(signal, 0, 0, 10);",
     "recordTripleOnce({ agent: 'codex', cwd: home, mechanism: { files: [{ path: 'a.ts', plusMinus: [1, 1], props: [] }], truncatedFiles: 0 } }, 'shared-claim', { home, memory: `${home}/memory.jsonl` });",
   ].join("\n");
   const children = [0, 1].map(() => spawn(process.execPath, [
-    "--input-type=module", "--eval", workerScript, modulePath, home, gateDir, release,
+    "--input-type=module", "--eval", workerScript, modulePath, home, gateDir, start, release,
   ], { stdio: ["pipe", "pipe", "pipe"] }));
   t.after(() => {
     for (const child of children) if (child.exitCode === null && child.signalCode === null) child.kill();
   });
+  for (const child of children) await waitForMarker(join(gateDir, `${child.pid}.ready`));
+  writeFileSync(start, "go");
   await Promise.race(children.map((child) => waitForMarker(join(gateDir, `${child.pid}.gate`))));
+  const observationDeadline = Date.now() + 500;
+  let gateCount = 0;
+  while (Date.now() < observationDeadline) {
+    gateCount = readdirSync(gateDir).filter((name) => name.endsWith(".gate")).length;
+    if (gateCount > 1) break;
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+  }
+  gateCount = readdirSync(gateDir).filter((name) => name.endsWith(".gate")).length;
+  assert.equal(existsSync(release), false);
+  assert.equal(gateCount, 1, "second worker reached memory read before release");
   writeFileSync(release, "go");
   const results = await Promise.all(children.map((child) => new Promise<number>((resolve, reject) => {
     child.once("error", reject);
@@ -713,6 +729,54 @@ test("memory failure leaves evidence recoverable and does not remove batch", asy
     annotateBatch("memory-fail", { paths, git: () => undefined }),
   );
   assert.equal(readBatch("memory-fail", paths).length, 3);
+});
+
+test("short claim read leaves durable evidence and writes no triple", { timeout: 15_000 }, async (t) => {
+  const home = mkdtempSync(join(tmpdir(), "rocky-annotate-short-read-"));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const paths = resolveRockyPaths({ ROCKY_HOME: home });
+  const key = "short-read";
+  seedBatch(paths, key);
+  const originalBytes = readFileSync(join(paths.spoolDir, `${key}.jsonl`));
+  const modulePath = join(dirname(fileURLToPath(import.meta.url)), "..", "agent", "annotate.js");
+  const statePath = join(dirname(modulePath), "..", "core", "state-paths.js");
+  const resultPath = join(home, "result.json");
+  const workerScript = [
+    "import fs from 'node:fs';",
+    "import { syncBuiltinESMExports } from 'node:module';",
+    "import { pathToFileURL } from 'node:url';",
+    "const [annotatePath, statePath, key, home, resultPath] = process.argv.slice(1);",
+    "process.env.ROCKY_HOME = home;",
+    "const { annotateBatch } = await import(pathToFileURL(annotatePath).href);",
+    "const { resolveRockyPaths } = await import(pathToFileURL(statePath).href);",
+    "const originalRead = fs.readSync.bind(fs);",
+    "const originalFstat = fs.fstatSync.bind(fs);",
+    "let shortRead = false;",
+    "fs.readSync = (fd, ...args) => { if (!shortRead && originalFstat(fd).size > 192) { shortRead = true; return 0; } return originalRead(fd, ...args); };",
+    "syncBuiltinESMExports();",
+    "const paths = resolveRockyPaths();",
+    "const result = await annotateBatch(key, { paths, git: () => undefined, queueLabel: () => {} });",
+    "fs.writeFileSync(resultPath, JSON.stringify({ result: result === undefined ? 'undefined' : 'record', shortRead, files: fs.readdirSync(paths.spoolDir) }), { mode: 0o600 });",
+  ].join("\n");
+  const child = spawn(process.execPath, [
+    "--input-type=module", "--eval", workerScript, modulePath, statePath, key, home, resultPath,
+  ], { stdio: ["pipe", "pipe", "pipe"] });
+  const completion = await new Promise<{ code: number | null; stderr: string }>((resolve, reject) => {
+    const stderr: Buffer[] = [];
+    child.stderr.on("data", (chunk: Buffer) => stderr.push(Buffer.from(chunk)));
+    child.once("error", reject);
+    child.once("close", (code) => resolve({ code, stderr: Buffer.concat(stderr).toString("utf8") }));
+  });
+  assert.equal(completion.code, 0, completion.stderr);
+  const workerResult = JSON.parse(readFileSync(resultPath, "utf8")) as { result: string; shortRead: boolean; files: string[] };
+  assert.equal(workerResult.result, "undefined");
+  assert.equal(workerResult.shortRead, true);
+  assert.equal(workerResult.files.filter((name) => name.startsWith(`${key}.claim.`)).length, 1);
+  assert.equal(workerResult.files.includes(`${key}.jsonl`), false);
+  assert.equal(loadMemory(paths.memory).filter((record) => record.kind === "triple").length, 0);
+  const claimName = readdirSync(paths.spoolDir).find((name) => name.startsWith(`${key}.claim.`));
+  assert.ok(claimName);
+  assert.deepEqual(readFileSync(join(paths.spoolDir, claimName)), originalBytes);
 });
 
 test("degradedLabel uses exact rocky voice and strips terminal injection", () => {

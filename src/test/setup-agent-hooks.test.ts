@@ -29,6 +29,8 @@ import {
 import { createPlatformServices } from "../setup/platform.js";
 import { setup, type SetupDependencies } from "../commands/setup.js";
 
+const LEGACY_CLAUDE_HOOK_COMMAND = "rocky hook agent-event claude-code";
+
 test("rockyHookCommand is absolute, quoted, and never bare rocky", () => {
   const command = rockyHookCommand("claude-code", "/usr/bin/node", "/opt/rocky/dist/index.js");
   assert.equal(command, '"/usr/bin/node" "/opt/rocky/dist/index.js" hook agent-event claude-code');
@@ -84,8 +86,8 @@ test("mergeClaudeHooks is idempotent and preserves foreign hooks", () => {
       PostToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: "other-tool" }] }],
     },
   };
-  const once = mergeClaudeHooks(structuredClone(foreign), "X hook agent-event claude-code");
-  const twice = mergeClaudeHooks(structuredClone(once), "X hook agent-event claude-code");
+  const once = mergeClaudeHooks(structuredClone(foreign), LEGACY_CLAUDE_HOOK_COMMAND);
+  const twice = mergeClaudeHooks(structuredClone(once), LEGACY_CLAUDE_HOOK_COMMAND);
   assert.deepEqual(twice, once);
   assert.deepEqual((once.hooks as Record<string, unknown[]>).PostToolUse?.[0], foreign.hooks.PostToolUse[0]);
   assert.deepEqual(mergeClaudeHooks({}, "X"), {
@@ -103,20 +105,20 @@ test("mergeClaudeHooks keeps foreign nested hooks in mixed groups", () => {
       Stop: [{
         name: "foreign-group",
         hooks: [
-          { type: "command", command: "X hook agent-event claude-code" },
+          { type: "command", command: LEGACY_CLAUDE_HOOK_COMMAND },
           { type: "command", command: "other-tool" },
         ],
       }],
     },
   };
-  const merged = mergeClaudeHooks(existing, "X hook agent-event claude-code");
+  const merged = mergeClaudeHooks(existing, LEGACY_CLAUDE_HOOK_COMMAND);
   assert.deepEqual((merged.hooks as Record<string, unknown[]>).Stop?.[0], {
     name: "foreign-group",
     hooks: [{ type: "command", command: "other-tool" }],
   });
   assert.notStrictEqual(merged, existing);
   assert.deepEqual(existing.hooks.Stop[0].hooks, [
-    { type: "command", command: "X hook agent-event claude-code" },
+    { type: "command", command: LEGACY_CLAUDE_HOOK_COMMAND },
     { type: "command", command: "other-tool" },
   ]);
 });
@@ -135,9 +137,36 @@ test("removeClaudeHooks strips only Rocky entries and drops empty containers", (
       PostToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: "other-tool" }] }],
     },
   };
-  const merged = mergeClaudeHooks(structuredClone(foreign), "X hook agent-event claude-code");
+  const merged = mergeClaudeHooks(structuredClone(foreign), LEGACY_CLAUDE_HOOK_COMMAND);
   assert.deepEqual(removeClaudeHooks(merged), foreign);
-  assert.deepEqual(removeClaudeHooks(mergeClaudeHooks({}, "X hook agent-event claude-code")), {});
+  assert.deepEqual(removeClaudeHooks(mergeClaudeHooks({}, LEGACY_CLAUDE_HOOK_COMMAND)), {});
+});
+
+test("removeClaudeHooks preserves a foreign command that embeds Rocky marker as an argument", () => {
+  const foreign = {
+    hooks: {
+      Stop: [{ hooks: [{ type: "command", command: "foreign-tool --label 'hook agent-event claude-code'" }] }],
+    },
+  };
+  assert.deepEqual(removeClaudeHooks(foreign), foreign);
+});
+
+test("removeClaudeHooks preserves parsed but noncanonical or unsafe Windows commands", () => {
+  const commands = [
+    '"C:\\Program Files\\%PATH%\\node.exe" "C:\\Rocky\\dist\\index.js" hook agent-event claude-code',
+    '"C:\\Program Files\\!\\node.exe" "C:\\Rocky\\dist\\index.js" hook agent-event claude-code',
+    String.raw`"C:\Program Files\\\"evil\node.exe" "C:\Rocky\dist\index.js" hook agent-event claude-code`,
+  ];
+  for (const command of commands) {
+    const foreign = { hooks: { Stop: [{ hooks: [{ type: "command", command }] }] } };
+    assert.deepEqual(removeClaudeHooks(foreign), foreign, command);
+  }
+});
+
+test("removeClaudeHooks still strips the exact pre-canonical POSIX bang spelling", () => {
+  const command = '"/opt/Rocky\\! CLI/node" "/opt/Rocky\\! CLI/index.js" hook agent-event claude-code';
+  const existing = { hooks: { Stop: [{ hooks: [{ type: "command", command }] }] } };
+  assert.deepEqual(removeClaudeHooks(existing), {});
 });
 
 function fixture(t: test.TestContext): { root: string; settings: string; command: string } {

@@ -31,6 +31,7 @@ import {
   MAX_BATCH_BYTES,
   readBatch,
   readClaim,
+  readClaimResult,
   releaseAnnotationLease,
   removeClaim,
   removeBatch,
@@ -686,6 +687,24 @@ test("appendEvent detaches a post-claim same-inode live path before appending", 
 
   assert.equal(readClaim(claim, paths).some((event) => event.kind === "mechanism"), false);
   assert.deepEqual(readBatch(key, paths).map((event) => event.kind === "mechanism" ? event.path : event.kind), ["after.ts"]);
+});
+
+test("readClaimResult distinguishes a successful empty claim", (t) => {
+  const paths = freshPaths(t);
+  const key = "empty-claim";
+  mkdirSync(paths.spoolDir, { recursive: true });
+  writeFileSync(join(paths.spoolDir, `${key}.jsonl`), "", { mode: 0o600 });
+  const claim = claimBatch(key, paths);
+  assert.ok(claim);
+
+  assert.deepEqual(readClaimResult(claim, paths), { ok: true, events: [] });
+  assert.deepEqual(readClaim(claim, paths), []);
+
+  const malformedKey = "malformed-claim";
+  writeFileSync(join(paths.spoolDir, `${malformedKey}.jsonl`), "not-json\n", { mode: 0o600 });
+  const malformedClaim = claimBatch(malformedKey, paths);
+  assert.ok(malformedClaim);
+  assert.deepEqual(readClaimResult(malformedClaim, paths), { ok: true, events: [] });
 });
 
 test("forged claim paths outside spool are rejected without deleting their inode", (t) => {

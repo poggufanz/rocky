@@ -29,7 +29,7 @@ import {
   listOrphanBatches,
   listOrphanClaims,
   prepareClaim,
-  readClaim,
+  readClaimResult,
   releaseAnnotationLease,
   removeClaim,
   type AnnotationLease,
@@ -243,7 +243,9 @@ export async function annotateBatch(key: string, deps: AnnotateDeps = {}): Promi
   try {
     claim = deps.claim === undefined ? claimBatch(key, paths) : prepareClaim(deps.claim, paths);
     if (!claim) return undefined;
-    const events = readClaim(claim, paths);
+    const claimRead = readClaimResult(claim, paths);
+    if (!claimRead.ok) return undefined;
+    const events = claimRead.events;
     const agent: AgentName = events[0]?.agent ?? "claude-code";
     const batchEvents = events.filter((event) => event.agent === agent);
     const intentEvent = batchEvents.find((event) => event.kind === "intent");
