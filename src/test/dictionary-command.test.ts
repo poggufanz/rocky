@@ -1,7 +1,7 @@
 import { strict as assert } from "node:assert";
 import { Buffer } from "node:buffer";
 import { test } from "node:test";
-import { digest, how, what, why } from "../commands/dictionary.js";
+import { digest, how, quiz, what, why } from "../commands/dictionary.js";
 import type { MemoryRecord, TripleRecord } from "../core/memory-read.js";
 
 export function seeded(): MemoryRecord[] {
@@ -279,5 +279,71 @@ test("what --ai requests an exact ten-second caller signal", async () => {
   } finally {
     if (originalDescriptor) Object.defineProperty(AbortSignal, "timeout", originalDescriptor);
     else Reflect.deleteProperty(AbortSignal, "timeout");
+  }
+});
+
+test("quiz asks from own history, reveals, never grades", async () => {
+  const old = seeded().map((record) => ({ ...record, ts: Date.now() - 3 * 24 * 60 * 60 * 1000 }));
+  const { sayLines, outLines, deps } = sinks();
+  const asked: string[] = [];
+  const code = await quiz([], {
+    load: () => old as MemoryRecord[],
+    now: Date.now(),
+    ask: async (message) => { asked.push(message); return "margin"; },
+    ...deps,
+  });
+  assert.equal(code, 0);
+  const joined = [...sayLines, ...outLines].join("\n");
+  assert.ok(joined.includes('you say "naikin dikit buttonnya". what it become, question'));
+  assert.ok(joined.includes("I remember: margin-top."));
+  assert.ok(joined.includes("you know better than me. good good."));
+  assert.deepEqual(asked, ["your answer: "]);
+  for (const banned of ["wrong", "correct!", "score", "?"]) assert.ok(!joined.includes(banned));
+});
+
+test("quiz with nothing old enough", async () => {
+  const { sayLines, outLines, deps } = sinks();
+  assert.equal(await quiz([], { load: seeded, now: Date.now(), ask: async () => "x", ...deps }), 0);
+  assert.ok(sayLines.join("\n").includes("nothing old enough to ask. work more, come back, question"));
+  assert.deepEqual(outLines, []);
+});
+
+test("quiz refuses default reader when stdin is not a TTY", async () => {
+  const descriptor = Object.getOwnPropertyDescriptor(process.stdin, "isTTY");
+  try {
+    Object.defineProperty(process.stdin, "isTTY", { configurable: true, value: false });
+    const { sayLines, outLines } = sinks();
+    const old = seeded().map((record) => ({ ...record, ts: Date.now() - 3 * 24 * 60 * 60 * 1000 }));
+    assert.equal(await quiz([], { load: () => old as MemoryRecord[], say: (line) => sayLines.push(line), out: (line) => outLines.push(line) }), 0);
+    assert.deepEqual(sayLines, ["quiz needs terminal with you in it. later, question"]);
+    assert.deepEqual(outLines, []);
+  } finally {
+    if (descriptor === undefined) Reflect.deleteProperty(process.stdin, "isTTY");
+    else Object.defineProperty(process.stdin, "isTTY", descriptor);
+  }
+});
+
+test("quiz keeps hostile memory text bounded, terminal-safe, and question-free", async () => {
+  const hostile = seeded()[0] as TripleRecord;
+  hostile.intent = { text: `naikin?\u001b[31m\n${"i".repeat(8_000)}\u200b` };
+  hostile.mechanism.files[0] = {
+    path: `src/\u001b]8;;https://evil.test\u0007${"p".repeat(8_000)}\n.css`,
+    plusMinus: [3, 1],
+    props: [`margin?\u0000${"x".repeat(8_000)}`],
+  };
+  const { sayLines, outLines, deps } = sinks();
+  assert.equal(await quiz([], {
+    load: () => [{ ...hostile, ts: Date.now() - 3 * 24 * 60 * 60 * 1000 }],
+    now: Date.now(),
+    ask: async () => "x",
+    ...deps,
+  }), 0);
+  for (const line of [...sayLines, ...outLines]) {
+    assert.ok(!line.includes("\n"), JSON.stringify(line));
+    assert.ok(!line.includes("\r"), JSON.stringify(line));
+    assert.ok(!line.includes("?"), JSON.stringify(line));
+    assert.ok(!line.includes("\u001b"), JSON.stringify(line));
+    assert.ok(!/[\p{Cc}\p{Cf}\u2028\u2029]/u.test(line), JSON.stringify(line));
+    assert.ok(Buffer.byteLength(line, "utf8") <= 512, String(Buffer.byteLength(line, "utf8")));
   }
 });

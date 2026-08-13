@@ -1,9 +1,10 @@
 import { dictionaryRankPortFromConfig, type DictionaryRankPort } from "../ai/dictionary-ai.js";
 import { loadConfig } from "../core/config.js";
-import { digestBuckets, queryDictionary, triplesForFile, type DictionaryHit } from "../core/dictionary.js";
+import { digestBuckets, queryDictionary, quizCandidates, triplesForFile, type DictionaryHit } from "../core/dictionary.js";
 import { loadMemory, type MemoryRecord } from "../core/memory-read.js";
 import { replaceAnsiAndControls, stripInvisibleControls } from "../core/redact.js";
 import { resolveRockyPaths } from "../core/state-paths.js";
+import { createTtyPromptPort } from "../setup/prompt.js";
 import { truncateUtf8 } from "../mcp/privacy.js";
 import { ago, detail, say } from "../ui/rocky.js";
 
@@ -40,9 +41,13 @@ function terminalSafe(value: string, maximumBytes: number): string {
   return truncateUtf8(withoutControls, maximumBytes).value;
 }
 
-function subject(hit: DictionaryHit): string {
-  const first = hit.triple.mechanism.files[0];
+function subjectForTriple(triple: DictionaryHit["triple"]): string {
+  const first = triple.mechanism.files[0];
   return terminalSafe(first ? first.props[0] ?? first.path : "something", MAX_SUBJECT_DISPLAY_BYTES);
+}
+
+function subject(hit: DictionaryHit): string {
+  return subjectForTriple(hit.triple);
 }
 
 function shorten(text: string): string {
@@ -198,5 +203,46 @@ export function digest(_argv: string[], deps: DictionaryCommandDeps & { now?: nu
       .join("; ");
     support(terminalSafe(`${tag}: ${bucket.count}  (${examples})`, MAX_OUTPUT_LINE_BYTES));
   }
+  return 0;
+}
+
+export async function quiz(
+  _argv: string[],
+  deps: DictionaryCommandDeps & {
+    ask?: (msg: string) => Promise<string | undefined>;
+    now?: number;
+  } = {},
+): Promise<number> {
+  const { speak, records } = resolve(deps);
+  const now = deps.now ?? Date.now();
+  const candidates = quizCandidates(records(), now, 3);
+  if (candidates.length === 0) {
+    speak("nothing old enough to ask. work more, come back, question");
+    return 0;
+  }
+
+  let ask = deps.ask;
+  if (ask === undefined) {
+    if (process.stdin.isTTY !== true) {
+      speak("quiz needs terminal with you in it. later, question");
+      return 0;
+    }
+    const port = createTtyPromptPort();
+    if (port === undefined) {
+      speak("quiz needs terminal with you in it. later, question");
+      return 0;
+    }
+    ask = (message) => port.ask(message);
+  }
+
+  for (const candidate of candidates) {
+    const intent = terminalSafe(candidate.intent?.text ?? "this change", MAX_INTENT_DISPLAY_BYTES);
+    speak(terminalSafe(`you say "${intent}". what it become, question`, MAX_OUTPUT_LINE_BYTES));
+    await ask("your answer: ");
+    const first = candidate.mechanism.files[0];
+    const path = terminalSafe(first?.path ?? "somewhere", MAX_PATH_DISPLAY_BYTES);
+    speak(terminalSafe(`I remember: ${subjectForTriple(candidate)}. (${path}, ${ago(candidate.ts)})`, MAX_OUTPUT_LINE_BYTES));
+  }
+  speak("you know better than me. good good.");
   return 0;
 }
