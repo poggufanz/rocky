@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { idleLine, parseWatchArgs, watch, WATCH_IDLE_MS } from "../commands/watch.js";
+import { idleLine, parseWatchArgs, unseenLabels, watch, WATCH_IDLE_MS } from "../commands/watch.js";
 import { fingerprint } from "../core/fingerprint.js";
 import { quoteShellPath } from "../core/shell-quote.js";
 import { validateRockyPhrase } from "../ui/phrases.js";
@@ -75,6 +75,140 @@ test("idleLine composes the voice-valid idle sentence for a given elapsed durati
   assert.equal(idleLine(600_000), "still waiting. 10 minutes. waiting is easy for me");
   assert.equal(idleLine(60_000), "still waiting. 1 minute. waiting is easy for me");
   assert.deepEqual(validateRockyPhrase(idleLine(600_000)), []);
+});
+
+test("unseenLabels returns each non-empty label once and mutates the session set", () => {
+  const seen = new Set<string>();
+
+  assert.deepEqual(unseenLabels(seen, "a\nb\n"), ["a", "b"]);
+  assert.deepEqual([...seen], ["a", "b"]);
+  assert.deepEqual(unseenLabels(seen, "a\nb\n"), []);
+  assert.deepEqual(unseenLabels(seen, "\na\n\nb\n"), []);
+});
+
+test("unseenLabels strips CRLF separators without leaving carriage returns in labels", () => {
+  const seen = new Set<string>();
+
+  assert.deepEqual(unseenLabels(seen, "first\r\nsecond\r\n"), ["first", "second"]);
+  assert.equal([...seen].some((line) => line.includes("\r")), false);
+});
+
+test("watch polls labels during an active command, speaks appends once, and never mutates the file", async (t) => {
+  const home = sandboxHome(t);
+  mkdirSync(home, { recursive: true });
+  const labelsPath = join(home, "labels");
+  writeFileSync(labelsPath, "first\n", "utf8");
+  const spoken: string[] = [];
+  let poll: (() => void) | undefined;
+  let clearCalls = 0;
+  let unrefCalls = 0;
+  const timer = { unref: () => { unrefCalls += 1; } };
+  const dependencies = {
+    notify: () => {},
+    setInterval: (callback: () => void) => {
+      poll = callback;
+      return timer as unknown as NodeJS.Timeout;
+    },
+    clearInterval: () => { clearCalls += 1; },
+    say: (line: string) => { spoken.push(line); },
+  };
+
+  const running = withRockyHome(home, () => watch(["sh -c 'sleep 0.15'"], dependencies));
+  assert.ok(poll, "watch must install a recurring label poll");
+  assert.deepEqual(spoken, ["first"], "watch must perform an immediate poll");
+  assert.equal(clearCalls, 0, "poll timer must remain active while command runs");
+
+  writeFileSync(labelsPath, "first\nsecond\n", "utf8");
+  poll!();
+  writeFileSync(labelsPath, "first\nsecond\nthird\n", "utf8");
+  poll!();
+  poll!();
+
+  const expectedBytes = "first\nsecond\nthird\n";
+  assert.equal(readFileSync(labelsPath, "utf8"), expectedBytes);
+  assert.deepEqual(spoken, ["first", "second", "third"]);
+  assert.equal(await running, 0);
+  assert.equal(clearCalls, 1, "poll timer must be cleared after success");
+  assert.equal(unrefCalls, 1, "poll timer must not keep the process alive");
+  assert.equal(readFileSync(labelsPath, "utf8"), expectedBytes);
+});
+
+test("watch ignores missing, empty, unchanged, and unreadable label polls", async (t) => {
+  const home = sandboxHome(t);
+  const spoken: string[] = [];
+  let poll: (() => void) | undefined;
+  let reads = 0;
+  const timer = { unref: () => {} };
+  const dependencies = {
+    notify: () => {},
+    readLabels: (_path: string) => {
+      reads += 1;
+      if (reads === 1) throw new Error("read failed");
+      if (reads === 2) return "";
+      return "label\n";
+    },
+    setInterval: (callback: () => void) => {
+      poll = callback;
+      return timer as unknown as NodeJS.Timeout;
+    },
+    clearInterval: () => {},
+    say: (line: string) => { spoken.push(line); },
+  };
+
+  const running = withRockyHome(home, () => watch(["sh -c 'sleep 0.15'"], dependencies));
+  assert.ok(poll);
+  poll!();
+  poll!();
+  poll!();
+  poll!();
+  assert.equal(await running, 0);
+  assert.deepEqual(spoken, ["label"]);
+});
+
+test("quiet watch neither reads nor speaks labels", async (t) => {
+  const home = sandboxHome(t);
+  let reads = 0;
+  let timers = 0;
+  const spoken: string[] = [];
+  const dependencies = {
+    notify: () => {},
+    readLabels: () => { reads += 1; return "quiet label\n"; },
+    setInterval: () => {
+      timers += 1;
+      return { unref: () => {} } as unknown as NodeJS.Timeout;
+    },
+    clearInterval: () => {},
+    say: (line: string) => { spoken.push(line); },
+  };
+
+  const { result, stderr } = await withRockyHome(home, () =>
+    captureStderr(() => watch(["--quiet", "sh -c 'exit 0'"], dependencies)));
+  assert.equal(result, 0);
+  assert.equal(reads, 0);
+  assert.equal(timers, 0);
+  assert.deepEqual(spoken, []);
+  assert.doesNotMatch(stderr, /quiet label/);
+});
+
+test("watch clears its label poll timer for success, failure, and cancellation", async (t) => {
+  for (const [name, command, expected] of [
+    ["success", "sh -c 'exit 0'", 0],
+    ["failure", "sh -c 'exit 1'", 1],
+    ["cancel", "sh -c 'exit 130'", 130],
+  ] as const) {
+    const home = sandboxHome(t);
+    let clearCalls = 0;
+    const timer = { unref: () => {} };
+    const dependencies = {
+      notify: () => {},
+      setInterval: () => timer as unknown as NodeJS.Timeout,
+      clearInterval: () => { clearCalls += 1; },
+      say: () => {},
+    };
+    const result = await withRockyHome(home, () => watch([command], dependencies));
+    assert.equal(result, expected, name);
+    assert.equal(clearCalls, 1, `${name} must clear label timer`);
+  }
 });
 
 test("watch speaks the composed outcome line on success and on failure, and both pass the voice validator", async (t) => {

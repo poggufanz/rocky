@@ -10,6 +10,7 @@
  * idle line, and the notification — stderr gets plain facts only.
  */
 
+import { closeSync, constants, fstatSync, lstatSync, openSync, readSync } from "node:fs";
 import { fingerprint } from "../core/fingerprint.js";
 import { CANCEL_CODES, runProcess, type ExecResult } from "../core/exec.js";
 import { resolveRockyPaths } from "../core/state-paths.js";
@@ -56,13 +57,83 @@ export function parseWatchArgs(argv: readonly string[]): ParsedWatch {
 }
 
 export const WATCH_IDLE_MS = 1000 * 60 * 10;
+export const WATCH_LABEL_POLL_MS = 1000;
+
+const MAX_LABEL_FILE_BYTES = 64 * 1024;
+const MAX_LABEL_LINES = 10;
+const MAX_LABEL_CHARS = 400;
+const NO_FOLLOW = process.platform === "win32" ? 0 : constants.O_NOFOLLOW;
+type WatchTimer = ReturnType<typeof setInterval>;
+
+/** Return new non-empty labels in file order and remember them for this watch session. */
+export function unseenLabels(seen: Set<string>, fileContent: string): string[] {
+  const unseen: string[] = [];
+  for (const line of fileContent.split(/\r\n|\n|\r/)) {
+    if (line.length === 0 || seen.has(line)) continue;
+    seen.add(line);
+    unseen.push(line);
+  }
+  return unseen;
+}
 
 export interface WatchDependencies {
   notify: (input: NotifyInput) => void;
+  /** Test seams; omitted callers retain the real read, timer, and persona behavior. */
+  readLabels?: (path: string) => string;
+  setInterval?: (callback: () => void, delayMs: number) => WatchTimer;
+  clearInterval?: (timer: WatchTimer) => void;
+  say?: (line: string) => void;
+  labelPollMs?: number;
 }
 
 function defaultWatchDependencies(): WatchDependencies {
   return { notify: realNotify };
+}
+
+function closeQuietly(fd: number): void {
+  try {
+    closeSync(fd);
+  } catch {
+    // Best effort at this private read boundary.
+  }
+}
+
+/** Read labels without following links, writing, or retaining an unbounded queue. */
+function readLabelsFile(path: string): string {
+  let initial;
+  try {
+    initial = lstatSync(path);
+  } catch {
+    return "";
+  }
+  if (!initial.isFile() || initial.isSymbolicLink() || initial.size > MAX_LABEL_FILE_BYTES) return "";
+
+  let fd = -1;
+  try {
+    fd = openSync(path, constants.O_RDONLY | NO_FOLLOW);
+    const opened = fstatSync(fd);
+    if (!opened.isFile() || opened.isSymbolicLink() || opened.size > MAX_LABEL_FILE_BYTES) return "";
+    const bytes = Buffer.alloc(MAX_LABEL_FILE_BYTES + 1);
+    const count = readSync(fd, bytes, 0, bytes.length, 0);
+    const after = fstatSync(fd);
+    if (!after.isFile() || after.isSymbolicLink() || count !== after.size || count > MAX_LABEL_FILE_BYTES) return "";
+
+    const content = bytes.subarray(0, count).toString("utf8");
+    const lines = content.split(/\r\n|\n|\r/).filter(Boolean).slice(-MAX_LABEL_LINES);
+    return lines.map((line) => line.slice(0, MAX_LABEL_CHARS)).join("\n");
+  } catch {
+    return "";
+  } finally {
+    if (fd >= 0) closeQuietly(fd);
+  }
+}
+
+function unrefTimer(timer: WatchTimer): void {
+  try {
+    (timer as unknown as { unref?: () => void }).unref?.();
+  } catch {
+    // A polling timer is best effort and must never alter wrapped-command behavior.
+  }
 }
 
 /**
@@ -168,10 +239,54 @@ export async function watch(
   }
 
   const cwd = process.cwd();
-  const result = await runProcess(cmd, {
-    idleMs: WATCH_IDLE_MS,
-    onIdle: quiet ? undefined : (elapsedMs: number) => say(idleLine(elapsedMs)),
-  });
+  const seen = new Set<string>();
+  const labelsPath = resolveRockyPaths().labels;
+  const readLabels = dependencies.readLabels ?? readLabelsFile;
+  const schedulePoll = dependencies.setInterval ?? setInterval;
+  const cancelPoll = dependencies.clearInterval ?? clearInterval;
+  const speakLabel = dependencies.say ?? say;
+  let labelTimer: WatchTimer | undefined;
+  let result: ExecResult;
+
+  const pollLabels = (): void => {
+    let content = "";
+    try {
+      content = readLabels(labelsPath);
+    } catch {
+      // Missing, unsafe, or unreadable labels are an empty queue for this tick.
+      return;
+    }
+    try {
+      for (const line of unseenLabels(seen, content)) speakLabel(line);
+    } catch {
+      // Persona output is best effort and must not alter wrapped-command behavior.
+    }
+  };
+
+  try {
+    if (!quiet) {
+      pollLabels();
+      try {
+        labelTimer = schedulePoll(pollLabels, dependencies.labelPollMs ?? WATCH_LABEL_POLL_MS);
+        unrefTimer(labelTimer);
+      } catch {
+        // A polling setup failure must not prevent the command from running.
+        labelTimer = undefined;
+      }
+    }
+    result = await runProcess(cmd, {
+      idleMs: WATCH_IDLE_MS,
+      onIdle: quiet ? undefined : (elapsedMs: number) => say(idleLine(elapsedMs)),
+    });
+  } finally {
+    if (labelTimer !== undefined) {
+      try {
+        cancelPoll(labelTimer);
+      } catch {
+        // Timer cleanup is best effort after the child has settled.
+      }
+    }
+  }
 
   if (CANCEL_CODES.has(result.code)) return result.code;
 
