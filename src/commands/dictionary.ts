@@ -1,6 +1,6 @@
 import { dictionaryRankPortFromConfig, type DictionaryRankPort } from "../ai/dictionary-ai.js";
 import { loadConfig } from "../core/config.js";
-import { queryDictionary, triplesForFile, type DictionaryHit } from "../core/dictionary.js";
+import { digestBuckets, queryDictionary, triplesForFile, type DictionaryHit } from "../core/dictionary.js";
 import { loadMemory, type MemoryRecord } from "../core/memory-read.js";
 import { replaceAnsiAndControls, stripInvisibleControls } from "../core/redact.js";
 import { resolveRockyPaths } from "../core/state-paths.js";
@@ -12,6 +12,7 @@ const MAX_SUBJECT_DISPLAY_BYTES = 120;
 const MAX_PATH_DISPLAY_BYTES = 180;
 const MAX_INTENT_DISPLAY_BYTES = 128;
 const MAX_OUTPUT_LINE_BYTES = 512;
+const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
 
 export interface DictionaryCommandDeps {
   load?: () => MemoryRecord[];
@@ -168,6 +169,34 @@ export function why(argv: string[], deps: DictionaryCommandDeps = {}): number {
     } else {
       speak(terminalSafe(`change happen. no reason I hear. (${where}, ${ago(triple.ts)})`, MAX_OUTPUT_LINE_BYTES));
     }
+  }
+  return 0;
+}
+
+export function digest(_argv: string[], deps: DictionaryCommandDeps & { now?: number } = {}): number {
+  const { speak, support, records } = resolve(deps);
+  const now = deps.now ?? Date.now();
+  const memory = records();
+  const buckets = digestBuckets(memory, now);
+  if (buckets.length === 0) {
+    speak("quiet week. no intent I hear. quiet good good.");
+    return 0;
+  }
+
+  const count = memory.filter((record) => record.kind === "triple"
+    && record.ts <= now
+    && now - record.ts <= WEEK_MS).length;
+  const top = buckets[0];
+  const headline = top && top.count >= 3
+    ? `${count} intent this week. ${terminalSafe(top.tag, MAX_INTENT_DISPLAY_BYTES)} again and again. pattern, question`
+    : `${count} intent this week. I remember all.`;
+  speak(terminalSafe(headline, MAX_OUTPUT_LINE_BYTES));
+  for (const bucket of buckets) {
+    const tag = terminalSafe(bucket.tag, MAX_INTENT_DISPLAY_BYTES);
+    const examples = bucket.examples.slice(0, 3)
+      .map((example) => terminalSafe(example, MAX_INTENT_DISPLAY_BYTES))
+      .join("; ");
+    support(terminalSafe(`${tag}: ${bucket.count}  (${examples})`, MAX_OUTPUT_LINE_BYTES));
   }
   return 0;
 }

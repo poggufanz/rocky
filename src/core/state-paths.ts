@@ -9,6 +9,7 @@ export interface RockyPaths {
   watchDir: string;
   spoolDir: string;
   labels: string;
+  digestHint: string;
   agentLog: string;
 }
 
@@ -27,6 +28,7 @@ export function resolveRockyPaths(
     watchDir: join(home, "watch"),
     spoolDir: join(home, "spool"),
     labels: join(home, "labels"),
+    digestHint: join(home, "digest-hint"),
     agentLog: join(home, "agent-hook.log"),
   };
 }

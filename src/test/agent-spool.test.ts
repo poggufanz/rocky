@@ -110,9 +110,10 @@ function waitForWorker(child: ChildProcessWithoutNullStreams): Promise<{ code: n
   });
 }
 
-test("state paths include exact transient spool, labels, and agent log paths", (t) => {
+test("state paths include exact transient spool, digest hint, labels, and agent log paths", (t) => {
   const paths = freshPaths(t);
   assert.equal(paths.spoolDir, join(paths.home, "spool"));
+  assert.equal(paths.digestHint, join(paths.home, "digest-hint"));
   assert.equal(paths.labels, join(paths.home, "labels"));
   assert.equal(paths.agentLog, join(paths.home, "agent-hook.log"));
 });

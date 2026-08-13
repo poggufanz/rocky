@@ -1,7 +1,7 @@
 import { strict as assert } from "node:assert";
 import { Buffer } from "node:buffer";
 import { test } from "node:test";
-import { how, what, why } from "../commands/dictionary.js";
+import { digest, how, what, why } from "../commands/dictionary.js";
 import type { MemoryRecord, TripleRecord } from "../core/memory-read.js";
 
 export function seeded(): MemoryRecord[] {
@@ -114,6 +114,49 @@ test("why keeps hostile rationale, tags, and paths bounded and terminal-safe", (
     assert.ok(!/[\p{Cc}\p{Cf}\u2028\u2029]/u.test(line), JSON.stringify(line));
     assert.ok(Buffer.byteLength(line, "utf8") <= 512, String(Buffer.byteLength(line, "utf8")));
   }
+});
+
+test("digest speaks pattern headline and bucket lines", () => {
+  const t = (ts: number, intent: string, tags: string[]) => ({
+    ...seeded()[0],
+    id: intent,
+    ts,
+    intent: { text: intent },
+    rationale: { text: "r", tags, source: "transcript" as const },
+  });
+  const now = Date.now();
+  const records = [
+    t(now - 1_000, "a", ["flexbox"]),
+    t(now - 2_000, "b", ["flexbox"]),
+    t(now - 3_000, "c", ["flexbox"]),
+  ] as MemoryRecord[];
+  const { sayLines, outLines, deps } = sinks();
+  assert.equal(digest([], { load: () => records, now, ...deps }), 0);
+  assert.ok(sayLines.join("\n").includes("3 intent this week. flexbox again and again. pattern, question"));
+  assert.ok(outLines.join("\n").includes("flexbox: 3"));
+  assert.ok(![...sayLines, ...outLines].join("\n").includes("?"));
+});
+
+test("digest counts triples directly when one triple has multiple tags", () => {
+  const now = Date.now();
+  const records = [seeded()[0], {
+    ...seeded()[0],
+    id: "multi-tag",
+    ts: now - 1_000,
+    rationale: { text: "r", tags: ["flexbox", "spacing"], source: "transcript" as const },
+  }] as MemoryRecord[];
+  const { sayLines, outLines, deps } = sinks();
+  assert.equal(digest([], { load: () => records, now, ...deps }), 0);
+  assert.ok(sayLines[0]?.startsWith("2 intent this week."));
+  assert.equal(outLines.filter((line) => line.startsWith("flexbox:")).length, 1);
+  assert.equal(outLines.filter((line) => line.startsWith("spacing:")).length, 1);
+});
+
+test("digest empty week stays quiet good", () => {
+  const { sayLines, outLines, deps } = sinks();
+  assert.equal(digest([], { load: () => [], now: Date.now(), ...deps }), 0);
+  assert.ok(sayLines.join("\n").includes("quiet week. no intent I hear. quiet good good."));
+  assert.deepEqual(outLines, []);
 });
 
 test("missing query argument returns 2", async () => {

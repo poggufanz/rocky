@@ -17,7 +17,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test, type TestContext } from "node:test";
-import { annotateBatch, annotateCommand, defaultQueueLabel, degradedLabel } from "../agent/annotate.js";
+import { annotateBatch, annotateCommand, defaultQueueLabel, degradedLabel, maybeQueueDigestHint } from "../agent/annotate.js";
 import type { AnnotatePort } from "../ai/annotate.js";
 import type { ConfigLoadResult } from "../core/config-read.js";
 import { appendEvent, listOrphanClaims, readBatch } from "../agent/spool.js";
@@ -203,7 +203,7 @@ test("orphan claim replay reuses one deterministic triple identity", async (t) =
     const first = loadMemory(paths.memory).filter((record) => record.kind === "triple");
     assert.equal(first.length, 1);
     const firstId = first[0]?.id;
-    assert.equal(readFileSync(paths.labels, "utf8").split("\n").filter(Boolean).length, 1);
+    assert.equal(readFileSync(paths.labels, "utf8").split("\n").filter(Boolean).length, 2);
 
     writeFileSync(claimPath, content, { mode: 0o600 });
     utimesSync(claimPath, old, old);
@@ -211,7 +211,7 @@ test("orphan claim replay reuses one deterministic triple identity", async (t) =
     const records = loadMemory(paths.memory).filter((record) => record.kind === "triple");
     assert.equal(records.length, 1);
     assert.equal(records[0]?.id, firstId);
-    assert.equal(readFileSync(paths.labels, "utf8").split("\n").filter(Boolean).length, 1);
+    assert.equal(readFileSync(paths.labels, "utf8").split("\n").filter(Boolean).length, 2);
     assert.equal(existsSync(claimPath), false);
   } finally {
     if (original === undefined) delete process.env.ROCKY_HOME;
@@ -440,7 +440,7 @@ test("crash after durable triple and label replays claim without duplicate recor
   assert.equal(records.length, 1);
   assert.equal(records[0]?.id, firstId);
   assert.equal(readdirSync(paths.spoolDir).some((name) => name.startsWith("crashed.claim.")), false);
-  assert.equal(readFileSync(paths.labels, "utf8").split("\n").filter(Boolean).length, 1);
+  assert.equal(readFileSync(paths.labels, "utf8").split("\n").filter(Boolean).length, 2);
 });
 
 test("intent-only and rationale-only batches clear without memory or labels", async (t) => {
@@ -874,6 +874,36 @@ test("annotateCommand locks duplicate requests, sweeps stale orphans, and return
   assert.equal(records.filter((record) => record.kind === "triple").length, 2);
   assert.equal(readBatch("requested", paths).length, 0);
   assert.equal(readBatch("orphan", paths).length, 0);
+});
+
+test("maybeQueueDigestHint queues once per week when recent intent exists", (t) => {
+  const paths = freshPaths(t);
+  const now = Date.now();
+  recordTriple({
+    ts: now,
+    agent: "codex",
+    cwd: "/w",
+    intent: { text: "naikin" },
+    mechanism: { files: [{ path: "a.css", plusMinus: [1, 0], props: ["margin"] }], truncatedFiles: 0 },
+  }, paths);
+
+  maybeQueueDigestHint(paths, now);
+  maybeQueueDigestHint(paths, now + 1_000);
+  const first = readFileSync(paths.labels, "utf8").trim().split("\n").filter(Boolean);
+  assert.equal(first.length, 1);
+  assert.ok(first[0]?.includes("rocky digest, question"));
+  assert.equal(readFileSync(paths.digestHint, "utf8"), String(now));
+
+  const next = now + 8 * 24 * 60 * 60 * 1_000;
+  recordTriple({
+    ts: next,
+    agent: "codex",
+    cwd: "/w",
+    intent: { text: "naikin again" },
+    mechanism: { files: [{ path: "a.css", plusMinus: [1, 0], props: ["margin"] }], truncatedFiles: 0 },
+  }, paths);
+  maybeQueueDigestHint(paths, next);
+  assert.equal(readFileSync(paths.labels, "utf8").trim().split("\n").filter(Boolean).length, 2);
 });
 
 test("hidden _annotate dispatch is silent and uses scratch home", (t) => {

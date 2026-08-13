@@ -10,10 +10,13 @@ import {
   openSync,
   readSync,
   writeSync,
+  statSync,
 } from "node:fs";
 import { resolveRockyPaths, type RockyPaths } from "../core/state-paths.js";
 import { recordTripleOnce } from "../core/memory.js";
 import type { TripleFile, TripleRecord } from "../core/memory.js";
+import { loadMemory } from "../core/memory-read.js";
+import { digestBuckets } from "../core/dictionary.js";
 import { loadConfig, type ConfigLoadResult } from "../core/config-read.js";
 import { redactSecretsAtBoundary, replaceAnsiAndControls, stripInvisibleControls } from "../core/redact.js";
 import { annotatePortFromConfig, parseAnnotateOutput, type AnnotatePort, type AnnotateOutput } from "../ai/annotate.js";
@@ -49,6 +52,7 @@ const PROP_RE = /([a-zA-Z-]{2,})\s*:/g;
 // boundary restored by stripping ANSI/C0/C1 controls.
 const BOUNDARY_MARKER = "\u2065";
 const NO_FOLLOW = process.platform === "win32" ? 0 : constants.O_NOFOLLOW;
+const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
 
 export interface AnnotateDeps {
   paths?: RockyPaths;
@@ -176,6 +180,72 @@ export function defaultQueueLabel(line: string, paths: RockyPaths): void {
     writeLabelLines(paths.labels, [...existing, safe].slice(-MAX_LABEL_LINES));
   } catch {
     // Labels are best effort and never affect durable memory.
+  }
+}
+
+function digestHintIsRecent(path: string, now: number): boolean {
+  try {
+    const initial = lstatSync(path);
+    if (!initial.isFile() || initial.isSymbolicLink() || initial.nlink > 1) return true;
+    const modified = statSync(path).mtimeMs;
+    return Number.isFinite(modified) && now - modified < WEEK_MS;
+  } catch {
+    // Missing or unreadable marker behaves like absent. The write path still
+    // checks the destination descriptor before touching it.
+    return false;
+  }
+}
+
+function writeDigestHint(path: string, value: string): void {
+  let fd = -1;
+  try {
+    const initial = (() => {
+      try {
+        return lstatSync(path);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+        throw error;
+      }
+    })();
+    if (initial && (!initial.isFile() || initial.isSymbolicLink() || initial.nlink > 1)) return;
+
+    const flags = constants.O_WRONLY
+      | (initial === undefined ? constants.O_CREAT | constants.O_EXCL : constants.O_TRUNC)
+      | NO_FOLLOW;
+    fd = openSync(path, flags, 0o600);
+    const opened = fstatSync(fd);
+    if (!opened.isFile() || opened.isSymbolicLink() || opened.nlink > 1) return;
+    try {
+      fchmodSync(fd, 0o600);
+    } catch {
+      if (process.platform !== "win32") return;
+    }
+    if (process.platform !== "win32" && (fstatSync(fd).mode & 0o777) !== 0o600) return;
+    const encoded = Buffer.from(value, "utf8");
+    let offset = 0;
+    while (offset < encoded.byteLength) {
+      const written = writeSync(fd, encoded, offset, encoded.byteLength - offset);
+      if (written <= 0) return;
+      offset += written;
+    }
+    const after = fstatSync(fd);
+    if (!after.isFile() || after.isSymbolicLink() || after.nlink > 1 || after.size !== encoded.byteLength) return;
+  } catch {
+    // Digest hints are advisory and never affect annotation success.
+  } finally {
+    if (fd >= 0) closeQuietly(fd);
+  }
+}
+
+export function maybeQueueDigestHint(paths: RockyPaths, now = Date.now()): void {
+  try {
+    if (!ensureHomeDirectory(paths.home)) return;
+    if (digestHintIsRecent(paths.digestHint, now)) return;
+    if (digestBuckets(loadMemory(paths.memory), now).length === 0) return;
+    defaultQueueLabel("week of work in memory. rocky digest, question", paths);
+    writeDigestHint(paths.digestHint, String(now));
+  } catch {
+    // Hinting is best effort and never affects annotation success or cleanup.
   }
 }
 
@@ -378,6 +448,7 @@ export async function annotateCommand(key: string): Promise<number> {
         // One broken orphan must not prevent the next eligible batch.
       }
     }
+    maybeQueueDigestHint(paths);
   } catch {
     // Hidden detached command is never allowed to affect the shell.
   }
