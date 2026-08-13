@@ -14,6 +14,9 @@ const MAX_PATH_DISPLAY_BYTES = 180;
 const MAX_INTENT_DISPLAY_BYTES = 128;
 const MAX_OUTPUT_LINE_BYTES = 512;
 const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
+const DAY_MS = 24 * 60 * 60 * 1000;
+const EXPORT_USAGE = "export takes --kind failure|fix|note|triple and --since 30d. try again, question";
+const EXPORT_KINDS: ReadonlySet<MemoryRecord["kind"]> = new Set(["failure", "fix", "note", "triple"]);
 
 export interface DictionaryCommandDeps {
   load?: () => MemoryRecord[];
@@ -30,6 +33,69 @@ interface Sinks {
 
 function resolve(deps: DictionaryCommandDeps): Sinks {
   return { speak: deps.say ?? say, support: deps.out ?? detail, records: deps.load ?? loadMemory };
+}
+
+type ExportCommandDeps = DictionaryCommandDeps & {
+  stdout?: (line: string) => void;
+  now?: number;
+};
+
+function exportUsage(speak: (line: string) => void): number {
+  speak(EXPORT_USAGE);
+  return 2;
+}
+
+function exportSince(value: string, now: number): number | undefined {
+  const daysMatch = /^(\d+)d$/.exec(value);
+  if (daysMatch !== null) {
+    const days = Number(daysMatch[1]);
+    const span = days * DAY_MS;
+    if (!Number.isSafeInteger(days) || !Number.isFinite(span)) return undefined;
+    return now - span;
+  }
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+// `export` is reserved as a command name, so this function keeps the explicit suffix.
+// stdout carries raw JSONL data; say/out remain persona and supporting stderr sinks.
+export function exportCommand(argv: string[], deps: ExportCommandDeps = {}): number {
+  const { speak, records } = resolve(deps);
+  const now = deps.now ?? Date.now();
+  const kinds = new Set<MemoryRecord["kind"]>();
+  let cutoff: number | undefined;
+  let hasSince = false;
+
+  for (let index = 0; index < argv.length; index += 1) {
+    const argument = argv[index];
+    if (argument === "--kind") {
+      const value = argv[index + 1];
+      if (value === undefined || !EXPORT_KINDS.has(value as MemoryRecord["kind"])) return exportUsage(speak);
+      kinds.add(value as MemoryRecord["kind"]);
+      index += 1;
+      continue;
+    }
+    if (argument === "--since") {
+      if (hasSince) return exportUsage(speak);
+      const value = argv[index + 1];
+      if (value === undefined) return exportUsage(speak);
+      cutoff = exportSince(value, now);
+      if (cutoff === undefined) return exportUsage(speak);
+      hasSince = true;
+      index += 1;
+      continue;
+    }
+    return exportUsage(speak);
+  }
+
+  const selected = records().filter((record) => (
+    (kinds.size === 0 || kinds.has(record.kind))
+    && (cutoff === undefined || record.ts >= cutoff)
+  ));
+  const stdout = deps.stdout ?? console.log;
+  for (const record of selected) stdout(JSON.stringify(record));
+  speak(`${selected.length} record go out. memory is yours. always.`);
+  return 0;
 }
 
 function terminalSafe(value: string, maximumBytes: number): string {

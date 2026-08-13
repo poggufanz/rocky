@@ -1,7 +1,7 @@
 import { strict as assert } from "node:assert";
 import { Buffer } from "node:buffer";
 import { test } from "node:test";
-import { digest, how, quiz, what, why } from "../commands/dictionary.js";
+import { digest, exportCommand, how, quiz, what, why } from "../commands/dictionary.js";
 import type { MemoryRecord, TripleRecord } from "../core/memory-read.js";
 
 export function seeded(): MemoryRecord[] {
@@ -28,6 +28,24 @@ function multiSeeded(): MemoryRecord[] {
   ];
 }
 
+function exportSeeded(now = Date.UTC(2026, 0, 31, 12, 0, 0)): MemoryRecord[] {
+  const triple = seeded()[0] as TripleRecord;
+  return [
+    {
+      kind: "failure", id: "f1", ts: now - 2 * 24 * 60 * 60 * 1000, cwd: "/w", cmd: "npm test",
+      exitCode: 1, fingerprint: "fp", signature: ["Error"], excerpt: "Error",
+    },
+    {
+      kind: "fix", id: "x1", ts: now - 24 * 60 * 60 * 1000, cwd: "/w", cmd: "npm install", failureIds: ["f1"],
+    },
+    {
+      kind: "note", id: "n1", ts: now - 12 * 60 * 60 * 1000, cwd: "/w", cmd: "rocky note",
+      file: "src/app.ts", line: 7, subject: "button", answer: "margin-top",
+    },
+    { ...triple, id: "t1", ts: now },
+  ];
+}
+
 export function sinks() {
   const sayLines: string[] = [];
   const outLines: string[] = [];
@@ -42,6 +60,120 @@ test("what speaks tentative mapping and evidence for a hit", async () => {
   assert.ok(outLines[0]?.includes("src/app.css"));
   assert.ok(!sayLines.some((line) => line.includes("src/app.css")));
   assert.ok(!outLines.some((line) => line.includes("you say")));
+});
+
+test("export emits every raw record once in loaded order and keeps sinks separate", () => {
+  const now = Date.UTC(2026, 0, 31, 12, 0, 0);
+  const records = exportSeeded(now);
+  const stdout: string[] = [];
+  const { sayLines, outLines, deps } = sinks();
+  let loads = 0;
+  assert.equal(exportCommand([], {
+    load: () => { loads += 1; return records; },
+    stdout: (line: string) => stdout.push(line),
+    now,
+    ...deps,
+  }), 0);
+  assert.equal(loads, 1);
+  assert.deepEqual(stdout, records.map((record) => JSON.stringify(record)));
+  assert.deepEqual(stdout.map((line) => JSON.parse(line)), records);
+  assert.deepEqual(sayLines, ["4 record go out. memory is yours. always."]);
+  assert.deepEqual(outLines, []);
+});
+
+test("export repeated kinds form an ordered union without duplicate records", () => {
+  const now = Date.UTC(2026, 0, 31, 12, 0, 0);
+  const records = exportSeeded(now);
+  const stdout: string[] = [];
+  const { sayLines, deps } = sinks();
+  assert.equal(exportCommand(["--kind", "failure", "--kind", "triple", "--kind", "failure"], {
+    load: () => records,
+    stdout: (line: string) => stdout.push(line),
+    now,
+    ...deps,
+  }), 0);
+  assert.deepEqual(stdout.map((line) => (JSON.parse(line) as { id: string }).id), ["f1", "t1"]);
+  assert.deepEqual(sayLines, ["2 record go out. memory is yours. always."]);
+});
+
+test("export since Nd uses invocation time and includes the exact boundary", () => {
+  const now = Date.UTC(2026, 0, 31, 12, 0, 0);
+  const records: MemoryRecord[] = [
+    { kind: "failure", id: "old", ts: now - 30 * 24 * 60 * 60 * 1000 - 1, cwd: "/w", cmd: "old", exitCode: 1, fingerprint: "old", signature: [], excerpt: "" },
+    { kind: "failure", id: "boundary", ts: now - 30 * 24 * 60 * 60 * 1000, cwd: "/w", cmd: "boundary", exitCode: 1, fingerprint: "boundary", signature: [], excerpt: "" },
+    { kind: "failure", id: "future", ts: now + 1, cwd: "/w", cmd: "future", exitCode: 1, fingerprint: "future", signature: [], excerpt: "" },
+  ];
+  const stdout: string[] = [];
+  const { sayLines, deps } = sinks();
+  assert.equal(exportCommand(["--since", "30d"], { load: () => records, stdout: (line: string) => stdout.push(line), now, ...deps }), 0);
+  assert.deepEqual(stdout.map((line) => (JSON.parse(line) as { id: string }).id), ["boundary", "future"]);
+  assert.deepEqual(sayLines, ["2 record go out. memory is yours. always."]);
+});
+
+test("export since ISO uses an inclusive timestamp cutoff", () => {
+  const now = Date.UTC(2026, 0, 31, 12, 0, 0);
+  const cutoff = Date.UTC(2026, 0, 15, 0, 0, 0);
+  const records: MemoryRecord[] = [
+    { kind: "failure", id: "before", ts: cutoff - 1, cwd: "/w", cmd: "before", exitCode: 1, fingerprint: "before", signature: [], excerpt: "" },
+    { kind: "failure", id: "at", ts: cutoff, cwd: "/w", cmd: "at", exitCode: 1, fingerprint: "at", signature: [], excerpt: "" },
+    { kind: "failure", id: "after", ts: cutoff + 1, cwd: "/w", cmd: "after", exitCode: 1, fingerprint: "after", signature: [], excerpt: "" },
+  ];
+  const stdout: string[] = [];
+  const { sayLines, deps } = sinks();
+  assert.equal(exportCommand(["--since", new Date(cutoff).toISOString()], { load: () => records, stdout: (line: string) => stdout.push(line), now, ...deps }), 0);
+  assert.deepEqual(stdout.map((line) => (JSON.parse(line) as { id: string }).id), ["at", "after"]);
+  assert.deepEqual(sayLines, ["2 record go out. memory is yours. always."]);
+});
+
+test("export with zero matches emits no data and still speaks summary", () => {
+  const stdout: string[] = [];
+  const { sayLines, outLines, deps } = sinks();
+  assert.equal(exportCommand(["--kind", "note"], {
+    load: seeded,
+    stdout: (line: string) => stdout.push(line),
+    ...deps,
+  }), 0);
+  assert.deepEqual(stdout, []);
+  assert.deepEqual(sayLines, ["0 record go out. memory is yours. always."]);
+  assert.deepEqual(outLines, []);
+});
+
+test("export invalid kind is rejected before memory load or stdout", () => {
+  const stdout: string[] = [];
+  const { sayLines, deps } = sinks();
+  let loads = 0;
+  assert.equal(exportCommand(["--kind", "hologram"], {
+    load: () => { loads += 1; return exportSeeded(); },
+    stdout: (line: string) => stdout.push(line),
+    ...deps,
+  }), 2);
+  assert.equal(loads, 0);
+  assert.deepEqual(stdout, []);
+  assert.deepEqual(sayLines, ["export takes --kind failure|fix|note|triple and --since 30d. try again, question"]);
+});
+
+test("export missing or invalid values, unknown flags, and positional junk are rejected atomically", () => {
+  const cases: string[][] = [
+    ["--kind"],
+    ["--since"],
+    ["--since", "not-a-date"],
+    ["--unknown"],
+    ["memory.jsonl"],
+    ["--kind", "failure", "junk"],
+  ];
+  for (const argv of cases) {
+    const stdout: string[] = [];
+    const { sayLines, deps } = sinks();
+    let loads = 0;
+    assert.equal(exportCommand(argv, {
+      load: () => { loads += 1; return exportSeeded(); },
+      stdout: (line: string) => stdout.push(line),
+      ...deps,
+    }), 2, argv.join(" "));
+    assert.equal(loads, 0, argv.join(" "));
+    assert.deepEqual(stdout, [], argv.join(" "));
+    assert.deepEqual(sayLines, ["export takes --kind failure|fix|note|triple and --since 30d. try again, question"], argv.join(" "));
+  }
 });
 
 test("what with no memory stays in voice and returns 0", async () => {

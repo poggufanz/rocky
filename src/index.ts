@@ -19,7 +19,7 @@ import { hookFail, hookInstall, hookStatus, hookSuccess, hookUninstall } from ".
 import { mcp } from "./commands/mcp.js";
 import { setup } from "./commands/setup.js";
 import { check } from "./commands/check.js";
-import { digest, how, quiz, what, why } from "./commands/dictionary.js";
+import { digest, exportCommand, how, quiz, what, why } from "./commands/dictionary.js";
 import { agentEvent } from "./commands/agent-hook.js";
 import { annotateCommand } from "./agent/annotate.js";
 import { PACKAGE_NAME, PACKAGE_VERSION } from "./core/package-info.js";
@@ -50,6 +50,8 @@ usage:
   rocky why <file>          hear why remembered change touched file.
   rocky digest              hear this week's remembered intent pattern.
   rocky quiz                practice remembered intent. Rocky asks, then reveals.
+  rocky export [--kind failure|fix|note|triple] [--since ISO|Nd]
+                            dump raw memory as JSONL on stdout.
   rocky model status         report local-AI configuration without loading a model.
   rocky model use [--exposure sanitized|raw] <installed-model>
                             probe an installed Ollama model, then enable local AI.
@@ -114,6 +116,8 @@ async function main(): Promise<number> {
       return digest(rest);
     case "quiz":
       return quiz(rest);
+    case "export":
+      return exportCommand(rest);
     case "hook":
       switch (rest[0]) {
         case "install":
