@@ -124,7 +124,7 @@ test("README identity, roadmap, and Plan 01/Plan 02 v0.5 boundary stay aligned",
   assert.ok(readme.includes("This is Rocky's v0.5 product hypothesis, not an established outcome."));
   assert.match(readme, /more effective/i);
   assert.match(readme, /does not mean (?:the )?model weights change/i);
-  assert.match(readme, /Nervous System \(v0\.5\.0 — unreleased\)/);
+  assert.match(readme, /Nervous System \(v0\.5\.0\)/);
   assert.match(readme, /Plan 01[^\n]*implemented/i);
   assert.match(readme, /Plan 02[^\n]*(?:implemented|available|unreleased)/i);
   assert.match(readme, /user prompt|captured prompt/i);
@@ -178,7 +178,7 @@ test("README identity, roadmap, and Plan 01/Plan 02 v0.5 boundary stay aligned",
   ]) {
     const row = readme.split("\n").find((line) => line.trimStart().startsWith("|") && line.toLowerCase().includes(mechanism));
     assert.ok(row, `README must keep a conceptual row for ${mechanism}`);
-    assert.match(row ?? "", /Plan 02 implemented \(unreleased\)/i, `${mechanism} must be marked implemented in unreleased Plan 02`);
+    assert.match(row ?? "", /Plan 02 implemented/i, `${mechanism} must be marked implemented in Plan 02`);
   }
   const recallRow = readme.split("\n").find((line) => line.toLowerCase().includes("| recall |"));
   assert.ok(recallRow, "README must keep a conceptual row for current Recall");
@@ -188,7 +188,7 @@ test("README identity, roadmap, and Plan 01/Plan 02 v0.5 boundary stay aligned",
     assert.match(readme, new RegExp(`${deferred}[^\\n]*defer|defer[^\\n]*${deferred}`, "i"));
   }
   const changelog = readFileSync(join(packageRoot, "CHANGELOG.md"), "utf8");
-  assert.match(changelog, /## 0\.5\.0 — Unreleased/);
+  assert.match(changelog, /## 0\.5\.0 — \d{1,2} \w+ \d{4}/);
 });
 
 test("README documents capability-gated Codex and staged Claude Code setup, not name-only live mutation", () => {
