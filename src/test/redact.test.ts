@@ -3,6 +3,8 @@ import { test } from "node:test";
 import { redactSecrets, redactSecretsAtBoundary, stripInvisibleControls } from "../core/redact.js";
 import {
   SYNTHETIC_DELIMITER_PRESERVATION_VECTORS,
+  SYNTHETIC_EOF_AMBIGUITY_VECTORS,
+  SYNTHETIC_EVERY_CONTROL_SPLIT_VECTORS,
   SYNTHETIC_SECRET_CLOSURE_VECTORS,
 } from "./secret-vectors.js";
 
@@ -62,6 +64,21 @@ test("shared secret vectors redact quoted keys, exact-looking values, controls, 
 
 test("logical controls after complete unquoted values preserve unrelated following text", () => {
   for (const vector of SYNTHETIC_DELIMITER_PRESERVATION_VECTORS) {
+    assert.equal(redactSecretsAtBoundary(vector.text), vector.durable, vector.name);
+  }
+});
+
+test("every control split is redacted without losing its delimiter or exposing a continuation", () => {
+  for (const vector of SYNTHETIC_EVERY_CONTROL_SPLIT_VECTORS) {
+    const output = redactSecretsAtBoundary(vector.text);
+    assert.equal(output, vector.durable, vector.name);
+    assert.ok(output.includes(vector.control), vector.name);
+    assert.ok(!output.includes(vector.cleartext.slice(vector.split)), vector.name);
+  }
+});
+
+test("ambiguous EOF continuations use a stable conservative-redaction marker", () => {
+  for (const vector of SYNTHETIC_EOF_AMBIGUITY_VECTORS) {
     assert.equal(redactSecretsAtBoundary(vector.text), vector.durable, vector.name);
   }
 });

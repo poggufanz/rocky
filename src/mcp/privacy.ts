@@ -94,7 +94,7 @@ export function truncateUtf8(value: string, maxBytes: number): { value: string; 
 
 export function redactText(value: string, rockyHome = process.env.ROCKY_HOME ?? homedir()): string {
   let output = normalizeOutputText(redactSecretsAtBoundary(value))
-    .replace(/\[redacted [^\]]+\]/g, "[redacted]");
+    .replace(/\[redacted (?!ambiguous continuation\])[^\]]+\]/g, "[redacted]");
   const home = normalizeOutputText(rockyHome);
   if (home) output = output.replaceAll(home, "[redacted]");
 

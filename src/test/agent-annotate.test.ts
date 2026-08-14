@@ -25,7 +25,9 @@ import type { AgentEvent } from "../agent/schema.js";
 import { loadMemory, parseMemoryRecord, recordTriple, recordTripleOnce } from "../core/memory.js";
 import { resolveRockyPaths, type RockyPaths } from "../core/state-paths.js";
 import {
+  AMBIGUOUS_CONTINUATION_MARKER,
   SYNTHETIC_DELIMITER_PRESERVATION_VECTORS,
+  SYNTHETIC_EOF_AMBIGUITY_VECTORS,
   SYNTHETIC_SECRET_CLOSURE_VECTORS,
 } from "./secret-vectors.js";
 
@@ -682,6 +684,33 @@ test("durable annotation preserves ordinary text after control-delimited unquote
   assert.equal(triple.intent?.text, "before [redacted password assignment] after words");
   assert.equal(triple.mechanism.files[0]?.excerpt, "before [redacted credential assignment] after words");
   assert.equal(triple.rationale?.text, "before [redacted password assignment] after words");
+});
+
+test("durable annotation discloses ambiguous EOF continuation redaction", async (t) => {
+  const paths = freshPaths(t);
+  const ambiguous = SYNTHETIC_EOF_AMBIGUITY_VECTORS[0];
+  assert.ok(ambiguous);
+  append("ambiguous-control-eof", [
+    { v: 1, agent: "codex", kind: "intent", ts: 1, text: ambiguous.text },
+    {
+      v: 1, agent: "codex", kind: "mechanism", ts: 2, tool: "Edit", path: "src/x.ts",
+      excerpt: "secret=pA7!\rcV2@kL9",
+    },
+  ], paths);
+
+  const triple = await annotateBatch("ambiguous-control-eof", {
+    paths, git: () => undefined, queueLabel: () => {},
+  });
+  assert.ok(triple);
+  assert.equal(
+    triple.intent?.text,
+    `before [redacted password assignment] ${AMBIGUOUS_CONTINUATION_MARKER}`,
+  );
+  assert.equal(
+    triple.mechanism.files[0]?.excerpt,
+    `[redacted password assignment] ${AMBIGUOUS_CONTINUATION_MARKER}`,
+  );
+  assert.doesNotMatch(JSON.stringify(triple), /@after|cV2@kL9/u);
 });
 
 test("every invisible format control is removed before durable redaction", async (t) => {

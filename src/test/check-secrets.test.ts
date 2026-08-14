@@ -5,6 +5,8 @@ import { scanSecrets } from "../check/secrets.js";
 import {
   EXACT_PLACEHOLDER_ASSIGNMENTS,
   SYNTHETIC_DELIMITER_PRESERVATION_VECTORS,
+  SYNTHETIC_EOF_AMBIGUITY_VECTORS,
+  SYNTHETIC_EVERY_CONTROL_SPLIT_VECTORS,
   SYNTHETIC_SECRET_CLOSURE_VECTORS,
 } from "./secret-vectors.js";
 
@@ -70,6 +72,18 @@ test("shared secret vectors detect quoted keys, realistic placeholder words, con
 
 test("logical delimiters after complete values do not hide hits or consume following records", () => {
   for (const vector of SYNTHETIC_DELIMITER_PRESERVATION_VECTORS) {
+    assert.deepEqual(scanSecrets([line(vector.text)]).map((hit) => hit.kind), [vector.kind], vector.name);
+  }
+});
+
+test("detects every TAB LF and CR split position in shared synthetic credentials", () => {
+  for (const vector of SYNTHETIC_EVERY_CONTROL_SPLIT_VECTORS) {
+    assert.deepEqual(scanSecrets([line(vector.text)]).map((hit) => hit.kind), [vector.kind], vector.name);
+  }
+});
+
+test("detects assignments with ambiguous EOF continuations", () => {
+  for (const vector of SYNTHETIC_EOF_AMBIGUITY_VECTORS) {
     assert.deepEqual(scanSecrets([line(vector.text)]).map((hit) => hit.kind), [vector.kind], vector.name);
   }
 });

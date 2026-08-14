@@ -18,6 +18,8 @@ import {
 } from "../mcp/privacy.js";
 import {
   SYNTHETIC_DELIMITER_PRESERVATION_VECTORS,
+  SYNTHETIC_EOF_AMBIGUITY_VECTORS,
+  SYNTHETIC_EVERY_CONTROL_SPLIT_VECTORS,
   SYNTHETIC_SECRET_CLOSURE_VECTORS,
 } from "./secret-vectors.js";
 
@@ -442,6 +444,38 @@ test("shared secret vectors stay closed in sanitized MCP while quoted-key raw ex
 test("sanitized MCP preserves ordinary records after redacted unquoted assignments", () => {
   for (const vector of SYNTHETIC_DELIMITER_PRESERVATION_VECTORS) {
     assert.equal(redactText(vector.text, "/home/ada"), vector.sanitizedMcp, vector.name);
+  }
+});
+
+test("sanitized MCP contains every control split while raw projection remains explicit", () => {
+  for (const [index, vector] of SYNTHETIC_EVERY_CONTROL_SPLIT_VECTORS.entries()) {
+    const triple: TripleRecord = {
+      kind: "triple", id: `control-split-${index}`, ts: 35, cwd: "/work", schemaV: 1,
+      agent: "codex", origin: "agent-hook", intent: { text: vector.text },
+      mechanism: {
+        files: [{ path: "src/x.ts", plusMinus: [0, 0], props: [], excerpt: vector.text }],
+        truncatedFiles: 0,
+      },
+    };
+    const sanitized = projectTriple(triple, "sanitized");
+    const raw = projectTriple(triple, "raw");
+    assert.equal(redactText(vector.text, "/home/ada"), vector.sanitizedMcp, vector.name);
+    assert.equal(sanitized.intent, vector.sanitizedMcp, vector.name);
+    assert.equal(raw.intent, normalizeOutputText(vector.text), vector.name);
+    assert.equal(raw.files[0]?.excerpt, normalizeOutputText(vector.text), vector.name);
+  }
+});
+
+test("sanitized MCP discloses conservative EOF redaction without exposing the removed token", () => {
+  for (const [index, vector] of SYNTHETIC_EOF_AMBIGUITY_VECTORS.entries()) {
+    const triple: TripleRecord = {
+      kind: "triple", id: `ambiguous-eof-${index}`, ts: 36, cwd: "/work", schemaV: 1,
+      agent: "codex", origin: "agent-hook", intent: { text: vector.text },
+      mechanism: { files: [], truncatedFiles: 0 },
+    };
+    assert.equal(redactText(vector.text, "/home/ada"), vector.sanitizedMcp, vector.name);
+    assert.equal(projectTriple(triple, "sanitized").intent, vector.sanitizedMcp, vector.name);
+    assert.equal(projectTriple(triple, "raw").intent, normalizeOutputText(vector.text), vector.name);
   }
 });
 

@@ -8,7 +8,6 @@ interface SecretDefinition {
   readonly trailingBoundary?: boolean;
   readonly fragmentSource: string;
   readonly assignmentValueGroups?: readonly number[];
-  readonly assignmentNames?: readonly string[];
 }
 
 const SECRET_DEFINITIONS: ReadonlyArray<SecretDefinition> = [
@@ -74,7 +73,6 @@ const SECRET_DEFINITIONS: ReadonlyArray<SecretDefinition> = [
     leadingBoundary: true,
     fragmentSource: String.raw`(?:(?:"(?:password|secret)"|'(?:password|secret)'|(?:password|secret)))\s*[:=]\s*(?:["'][^"']*|[^\s]*)`,
     assignmentValueGroups: [2, 3],
-    assignmentNames: ["password", "secret"],
   },
   {
     replacementLabel: "credential assignment",
@@ -84,7 +82,6 @@ const SECRET_DEFINITIONS: ReadonlyArray<SecretDefinition> = [
     leadingBoundary: true,
     fragmentSource: String.raw`(?:(?:"(?:token|api[_-]?key|authorization)"|'(?:token|api[_-]?key|authorization)'|(?:token|api[_-]?key|authorization)))\s*[:=]\s*(?:["'][^"']*|(?:(?:Bearer|Basic|Token)\s+)?[^\s]*)`,
     assignmentValueGroups: [2, 3],
-    assignmentNames: ["token", "apikey", "api_key", "api-key", "authorization"],
   },
 ];
 
@@ -234,6 +231,7 @@ interface SecretBoundaryInput extends InvisibleControlStripResult {
   readonly displayText: string;
   readonly displayStarts: ReadonlyMap<number, number>;
   readonly displayEnds: ReadonlyMap<number, number>;
+  readonly logicalControls: readonly { readonly offset: number; readonly character: string }[];
 }
 
 /** Remove format controls without inserting separators before secret matching. */
@@ -258,56 +256,11 @@ function stripInvisibleControlsWithOffsets(text: string): InvisibleControlStripR
   return { text: pieces.join(""), removedOffsets };
 }
 
-const ASSIGNMENT_KEY_NAMES = new Set(SECRET_DEFINITIONS.flatMap((definition) => definition.assignmentNames ?? []));
-const ASSIGNMENT_KEY_NAME_SOURCE = [...ASSIGNMENT_KEY_NAMES]
-  .map((name) => name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
-  .join("|");
-const ASSIGNMENT_VALUE_BEFORE_CONTROL_RE = new RegExp(
-  String.raw`(?:["']?(?:${ASSIGNMENT_KEY_NAME_SOURCE})["']?)\s*[:=]\s*([^\s'"\x60]+)$`,
-  "iu",
-);
-
-function assignmentNameAroundControl(text: string, offset: number): string {
-  let start = offset;
-  while (start > 0 && /[A-Za-z_-]|[\t\r\n]/u.test(text[start - 1] ?? "")) start -= 1;
-  let end = offset + 1;
-  while (end < text.length && /[A-Za-z_-]|[\t\r\n]/u.test(text[end] ?? "")) end += 1;
-  return `${text.slice(start, offset)}${text.slice(offset + 1, end)}`
-    .replace(/[\t\r\n]/gu, "")
-    .toLowerCase();
-}
-
-function assignmentValueBeforeControl(text: string, offset: number): string | undefined {
-  const prefix = text
-    .slice(Math.max(0, offset - 256), offset)
-    .replace(/[\u0000-\u001f\u007f-\u009f\u061C\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]/gu, "");
-  const match = ASSIGNMENT_VALUE_BEFORE_CONTROL_RE.exec(prefix);
-  return match?.[1];
-}
-
-function hasMixedCredentialShape(value: string): boolean {
-  const classes = [/[a-z]/u, /[A-Z]/u, /[0-9]/u, /[^A-Za-z0-9]/u]
-    .filter((pattern) => pattern.test(value));
-  return classes.length >= 2;
-}
-
-function shouldJoinLogicalControl(text: string, offset: number): boolean {
-  if (ASSIGNMENT_KEY_NAMES.has(assignmentNameAroundControl(text, offset))) return true;
-  let nextOffset = offset + 1;
-  while (/[\t\r\n]/u.test(text[nextOffset] ?? "")) nextOffset += 1;
-  const next = text[nextOffset];
-  const prefixValue = assignmentValueBeforeControl(text, offset);
-  return next !== undefined
-    && /[!@#$%^&*+/_=-]/u.test(next)
-    && prefixValue !== undefined
-    && hasMixedCredentialShape(prefixValue);
-}
-
 /**
  * Build a control-free matching view and offsets into a safe display view.
- * CR/LF/TAB remain logical delimiters by default. Only evidence-backed splits
- * are omitted while matching; display text retains every delimiter unless the
- * selected replacement spans it.
+ * CR/LF/TAB are omitted only from matching and recorded explicitly. Replacement
+ * logic preserves them rather than treating the normalized match as one
+ * contiguous source span.
  */
 function normalizeSecretBoundaryInput(text: string): SecretBoundaryInput {
   if (!text) {
@@ -317,6 +270,7 @@ function normalizeSecretBoundaryInput(text: string): SecretBoundaryInput {
       removedOffsets: new Set<number>(),
       displayStarts: new Map<number, number>(),
       displayEnds: new Map<number, number>(),
+      logicalControls: [],
     };
   }
 
@@ -325,6 +279,7 @@ function normalizeSecretBoundaryInput(text: string): SecretBoundaryInput {
   const removedOffsets = new Set<number>();
   const displayStarts = new Map<number, number>();
   const displayEnds = new Map<number, number>();
+  const logicalControls: Array<{ offset: number; character: string }> = [];
   let sourceOffset = 0;
   let matchingOffset = 0;
   let displayOffset = 0;
@@ -351,26 +306,15 @@ function normalizeSecretBoundaryInput(text: string): SecretBoundaryInput {
 
     if (end !== sourceOffset) {
       const isLogicalControl = code === 0x09 || code === 0x0a || code === 0x0d;
-      const joinsLogicalControl = isLogicalControl && shouldJoinLogicalControl(text, sourceOffset);
-      if (isLogicalControl && !joinsLogicalControl) {
+      removedOffsets.add(matchingOffset);
+      if (isLogicalControl) {
         const character = String.fromCharCode(code);
-        displayStarts.set(matchingOffset, displayOffset);
-        matching.push(character);
+        logicalControls.push({ offset: matchingOffset, character });
         display.push(character);
-        matchingOffset += 1;
-        displayOffset += 1;
-        displayEnds.set(matchingOffset, displayOffset);
-      } else {
-        removedOffsets.add(matchingOffset);
-      }
-      if (joinsLogicalControl) {
-        display.push(String.fromCharCode(code));
         displayOffset += 1;
       } else if (!isSequence) {
-        if (!isLogicalControl) {
-          display.push(" ");
-          displayOffset += 1;
-        }
+        display.push(" ");
+        displayOffset += 1;
       }
       sourceOffset = end;
       continue;
@@ -398,6 +342,7 @@ function normalizeSecretBoundaryInput(text: string): SecretBoundaryInput {
     removedOffsets,
     displayStarts,
     displayEnds,
+    logicalControls,
   };
 }
 
@@ -526,6 +471,45 @@ function collectReplacements(text: string, context: SecretBoundaryContext): Repl
   return replacements;
 }
 
+/** Stable disclosure that a logical-record continuation was removed conservatively. */
+export const AMBIGUOUS_SECRET_CONTINUATION = "[redacted ambiguous continuation]";
+
+function preserveLogicalControls(replacement: Replacement, input: SecretBoundaryInput): Replacement {
+  const controls = input.logicalControls.filter(
+    (control) => control.offset > replacement.start && control.offset < replacement.end,
+  );
+  if (controls.length === 0) return replacement;
+
+  const matched = input.text.slice(replacement.start, replacement.end);
+  const separator = matched.search(/[:=]/u);
+  const valueStart = separator < 0 ? replacement.start : replacement.start + separator + 1;
+  const valueControl = controls.find((control) => control.offset >= valueStart);
+  const hasVisibleTail = input.text.slice(replacement.end).trim().length > 0;
+
+  if (valueControl !== undefined && hasVisibleTail) {
+    const internalNameControls = controls
+      .filter((control) => control.offset < valueControl.offset)
+      .map((control) => control.character)
+      .join("");
+    return {
+      ...replacement,
+      end: valueControl.offset,
+      value: replacement.value + internalNameControls,
+    };
+  }
+
+  const normalizedValue = separator < 0 ? "" : matched.slice(separator + 1).trimStart();
+  const isQuotedAssignment = normalizedValue.startsWith("\"") || normalizedValue.startsWith("'");
+
+  return {
+    ...replacement,
+    value: replacement.value + controls.map((control) => {
+      const ambiguousValueContinuation = control.offset >= valueStart && !isQuotedAssignment;
+      return control.character + (ambiguousValueContinuation ? AMBIGUOUS_SECRET_CONTINUATION : "");
+    }).join(""),
+  };
+}
+
 /**
  * Strip the exact invisible controls and redact a raw boundary value.
  * Complete matches retain the normal placeholder. A complete family match may
@@ -547,7 +531,8 @@ export function redactSecretsAtBoundary(text: string, options: SecretBoundaryOpt
   }
 
   let out = normalized.displayText;
-  for (const replacement of selected.sort((left, right) => right.start - left.start)) {
+  const structured = selected.map((replacement) => preserveLogicalControls(replacement, normalized));
+  for (const replacement of structured.sort((left, right) => right.start - left.start)) {
     const start = normalized.displayStarts.get(replacement.start) ?? replacement.start;
     const end = normalized.displayEnds.get(replacement.end) ?? replacement.end;
     out = out.slice(0, start) + replacement.value + out.slice(end);
