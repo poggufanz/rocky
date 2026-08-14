@@ -8,6 +8,7 @@ import {
   readFileSync,
   readdirSync,
   rmSync,
+  unlinkSync,
   utimesSync,
   writeFileSync,
 } from "node:fs";
@@ -90,6 +91,23 @@ function delayedMemoryReadPreload(path: string): void {
     "const memoryFds = new Set();",
     "fs.openSync = (path, ...args) => { const fd = originalOpen(path, ...args); if (String(path) === process.env.ROCKY_TEST_MEMORY) memoryFds.add(fd); return fd; };",
     "fs.readFileSync = (path, ...args) => { const value = originalRead(path, ...args); if (typeof path === 'number' && memoryFds.has(path)) { const signal = new Int32Array(new SharedArrayBuffer(4)); Atomics.wait(signal, 0, 0, Number(process.env.ROCKY_TEST_READ_DELAY_MS || 15)); } return value; };",
+    "syncBuiltinESMExports();",
+  ].join("\n"), "utf8");
+}
+
+function mutationReloadFailurePreload(path: string): void {
+  writeFileSync(path, [
+    "const fs = require('node:fs');",
+    "const { syncBuiltinESMExports } = require('node:module');",
+    "const originalOpen = fs.openSync.bind(fs);",
+    "const originalRead = fs.readFileSync.bind(fs);",
+    "const originalLstat = fs.lstatSync.bind(fs);",
+    "const memoryFds = new Set();",
+    "let reads = 0;",
+    "let lists = 0;",
+    "fs.openSync = (path, ...args) => { const fd = originalOpen(path, ...args); if (String(path) === process.env.ROCKY_TEST_MEMORY) memoryFds.add(fd); return fd; };",
+    "fs.readFileSync = (path, ...args) => { if (process.env.ROCKY_TEST_RELOAD_MODE === 'read' && typeof path === 'number' && memoryFds.has(path) && ++reads === 2) throw new Error('injected mutation reload failure'); return originalRead(path, ...args); };",
+    "fs.lstatSync = (path, ...args) => { const stats = originalLstat(path, ...args); if (process.env.ROCKY_TEST_RELOAD_MODE === 'identity' && String(path) === process.env.ROCKY_TEST_MEMORY && ++lists === 3) { const replacement = Object.create(Object.getPrototypeOf(stats)); Object.assign(replacement, stats, { ino: Number(stats.ino) + 1 }); return replacement; } return stats; };",
     "syncBuiltinESMExports();",
   ].join("\n"), "utf8");
 }
@@ -267,11 +285,113 @@ test("weak-only candidate records association but never clears pending", (t) => 
   assert.equal(existsSync(join(home, "pending")), true);
 });
 
+test("a no-link success never clears pending without a confirmed resolution", (t) => {
+  const home = sandbox(t, "rocky-no-confirmed-pending-");
+  const cwd = home;
+  const now = 1_800_000_000_000;
+  seed(home, [failure("expired-failure", "npm run build", cwd, now - LINK_WINDOW_MS - 1)]);
+  const original = process.env.ROCKY_HOME;
+  process.env.ROCKY_HOME = home;
+  try {
+    memory.clearPendingIfResolved([], LINK_WINDOW_MS, now);
+    assert.equal(hookSuccess("npm run unrelated", cwd, { now }), 0);
+  } finally {
+    if (original === undefined) delete process.env.ROCKY_HOME;
+    else process.env.ROCKY_HOME = original;
+  }
+  assert.equal(existsSync(join(home, "pending")), true);
+  assert.equal(memory.loadMemory(join(home, "memory.jsonl")).filter((record) => record.kind === "fix").length, 0);
+});
+
+test("a reload failure after fix append fails closed and preserves pending", { timeout: 20_000 }, (t) => {
+  const home = sandbox(t, "rocky-reload-incomplete-");
+  const cwd = home;
+  const cmd = "node stable-command.js";
+  seed(home, [failure("reload-resolved", cmd, cwd), failure("reload-remaining", "cargo build", cwd)]);
+  const preload = join(home, "reload-failure.cjs");
+  mutationReloadFailurePreload(preload);
+  const result = spawnSync(process.execPath, [cli, "_hooksuccess", cmd, cwd], {
+    env: {
+      ...process.env,
+      ROCKY_HOME: home,
+      ROCKY_TEST_MEMORY: join(home, "memory.jsonl"),
+      ROCKY_TEST_RELOAD_MODE: "read",
+      NODE_OPTIONS: `--require=${preload}`,
+    },
+    encoding: "utf8",
+    timeout: 10_000,
+    windowsHide: true,
+  });
+  assert.equal(result.status, 0, result.stderr);
+  const records = memory.loadMemory(join(home, "memory.jsonl"));
+  assert.equal(records.filter((record) => record.kind === "fix").length, 1);
+  assert.equal(records.find((record): record is FailureRecord =>
+    record.kind === "failure" && record.id === "reload-remaining")?.resolvedBy, undefined);
+  assert.equal(existsSync(join(home, "pending")), true);
+
+  const identityHome = sandbox(t, "rocky-reload-identity-");
+  seed(identityHome, [failure("identity-resolved", cmd, identityHome), failure("identity-remaining", "cargo build", identityHome)]);
+  const identityResult = spawnSync(process.execPath, [cli, "_hooksuccess", cmd, identityHome], {
+    env: {
+      ...process.env,
+      ROCKY_HOME: identityHome,
+      ROCKY_TEST_MEMORY: join(identityHome, "memory.jsonl"),
+      ROCKY_TEST_RELOAD_MODE: "identity",
+      NODE_OPTIONS: `--require=${preload}`,
+    },
+    encoding: "utf8",
+    timeout: 10_000,
+    windowsHide: true,
+  });
+  assert.equal(identityResult.status, 0, identityResult.stderr);
+  const identityRecords = memory.loadMemory(join(identityHome, "memory.jsonl"));
+  assert.equal(identityRecords.filter((record) => record.kind === "fix").length, 1);
+  assert.equal(existsSync(join(identityHome, "pending")), true);
+});
+
+test("a crash after durable FixRecord append is reconciled by the next success", { timeout: 20_000 }, (t) => {
+  const home = sandbox(t, "rocky-fix-crash-recovery-");
+  const cwd = home;
+  const cmd = "node stable-command.js";
+  seed(home, [failure("crashed-fix", cmd, cwd)]);
+  const preload = join(home, "crash-after-fix.cjs");
+  writeFileSync(preload, [
+    "const fs = require('node:fs');",
+    "const { syncBuiltinESMExports } = require('node:module');",
+    "const originalWrite = fs.writeSync.bind(fs);",
+    "fs.writeSync = (fd, buffer, ...args) => { const written = originalWrite(fd, buffer, ...args); if (String(buffer).includes('\\\"kind\\\":\\\"fix\\\"')) process.exit(73); return written; };",
+    "syncBuiltinESMExports();",
+  ].join("\n"), "utf8");
+  const first = spawnSync(process.execPath, [cli, "_hooksuccess", cmd, cwd], {
+    env: {
+      ...process.env,
+      ROCKY_HOME: home,
+      NODE_OPTIONS: `--require=${preload}`,
+    },
+    encoding: "utf8",
+    timeout: 10_000,
+    windowsHide: true,
+  });
+  assert.equal(first.status, 73, first.stderr);
+  assert.equal(memory.loadMemory(join(home, "memory.jsonl")).filter((record) => record.kind === "fix").length, 1);
+  assert.equal(existsSync(join(home, "pending")), true);
+
+  const second = spawnSync(process.execPath, [cli, "_hooksuccess", cmd, cwd], {
+    env: { ...process.env, ROCKY_HOME: home },
+    encoding: "utf8",
+    timeout: 10_000,
+    windowsHide: true,
+  });
+  assert.equal(second.status, 0, second.stderr);
+  assert.equal(memory.loadMemory(join(home, "memory.jsonl")).filter((record) => record.kind === "fix").length, 1);
+  assert.equal(existsSync(join(home, "pending")), false);
+});
+
 function fixedClockPreload(path: string): void {
   writeFileSync(path, "Date.now = () => Number(process.env.ROCKY_FIXED_NOW);\n", "utf8");
 }
 
-test("run, watch, and hook use the same 8-hour boundary at minus/plus 1 ms", { timeout: 30_000 }, (t) => {
+test("run, watch, and hook use the same 8-hour boundary at minus/exact/plus 1 ms", { timeout: 30_000 }, (t) => {
   const root = sandbox(t, "rocky-window-boundary-");
   const preload = join(root, "fixed-clock.cjs");
   const fixture = join(root, "success.cjs");
@@ -282,6 +402,7 @@ test("run, watch, and hook use the same 8-hour boundary at minus/plus 1 ms", { t
   const surfaces = ["run", "watch", "hook"] as const;
   const boundaries = [
     { label: "inside", delta: 1, linked: true },
+    { label: "exact", delta: 0, linked: true },
     { label: "outside", delta: -1, linked: false },
   ] as const;
 
@@ -428,6 +549,26 @@ test("dead owner and stale empty, torn, or orphan-claim locks recover promptly",
     else process.env.ROCKY_HOME = original;
   }
   assert.equal(memory.loadMemory(join(home, "memory.jsonl")).filter((record) => record.kind === "note").length, 4);
+});
+
+test("a dead orphan claim is pruned when the primary pathname is already absent", (t) => {
+  const home = sandbox(t, "rocky-orphan-without-primary-");
+  const lock = `${join(home, "memory.jsonl")}.triple.lock`;
+  const deadPid = 2_147_483_647;
+  mkdirSync(home, { recursive: true });
+  writeFileSync(lock, JSON.stringify({ pid: deadPid, token: "o".repeat(32) }), { mode: 0o600 });
+  const orphanClaim = `${lock}.reclaim.${deadPid}.${"a".repeat(32)}`;
+  linkSync(lock, orphanClaim);
+  unlinkSync(lock);
+  const original = process.env.ROCKY_HOME;
+  process.env.ROCKY_HOME = home;
+  try {
+    memory.recordNote({ cwd: home, cmd: "after-absent-primary", file: "e.ts", line: 1, subject: "e", answer: "e" });
+  } finally {
+    if (original === undefined) delete process.env.ROCKY_HOME;
+    else process.env.ROCKY_HOME = original;
+  }
+  assert.equal(existsSync(orphanClaim), false);
 });
 
 test("competing dead-owner reclaimers never overlap transactions", { timeout: 30_000 }, async (t) => {

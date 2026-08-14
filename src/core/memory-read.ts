@@ -100,6 +100,17 @@ export type MemoryRecord = FailureRecord | FixRecord | AssociationRecord | NoteR
 
 export const MAX_MEMORY_LINE_BYTES = 1024 * 1024;
 
+/**
+ * `complete` distinguishes an empty/valid memory file from a read that failed
+ * before its contents could be trusted. Public readers keep their historical
+ * fail-closed `[]` behavior; mutation transactions use this bit to avoid
+ * deleting pending state from an incomplete snapshot.
+ */
+export interface MemoryLoadResult {
+  records: MemoryRecord[];
+  complete: boolean;
+}
+
 function objectValue(value: unknown): Record<string, unknown> | undefined {
   return typeof value === "object" && value !== null && !Array.isArray(value)
     ? value as Record<string, unknown>
@@ -291,22 +302,37 @@ function sameFileIdentity(expected: Stats, opened: Stats): boolean {
   return expected.dev === opened.dev && expected.ino === opened.ino;
 }
 
-export function loadMemory(path = resolveRockyPaths().memory): MemoryRecord[] {
+export function loadMemoryChecked(path = resolveRockyPaths().memory): MemoryLoadResult {
   let descriptor: number | undefined;
+  let listed: Stats | undefined;
   let contents: string;
   try {
-    const listed = lstatSync(path);
-    if (!listed.isFile() || listed.isSymbolicLink()) return [];
+    listed = lstatSync(path);
+    if (!listed.isFile() || listed.isSymbolicLink()) return { records: [], complete: false };
 
     descriptor = openSync(path, readFlags());
     const opened = fstatSync(descriptor);
-    if (!opened.isFile() || opened.isSymbolicLink() || !sameFileIdentity(listed, opened)) return [];
+    if (!opened.isFile() || opened.isSymbolicLink() || !sameFileIdentity(listed, opened)) {
+      return { records: [], complete: false };
+    }
 
     contents = readFileSync(descriptor, "utf8");
     const after = fstatSync(descriptor);
-    if (!after.isFile() || after.isSymbolicLink() || !sameFileIdentity(opened, after)) return [];
+    if (!after.isFile() || after.isSymbolicLink() || !sameFileIdentity(opened, after)) {
+      return { records: [], complete: false };
+    }
   } catch {
-    return [];
+    // Missing memory is a complete empty state; every other read failure is
+    // incomplete and must be treated conservatively by mutation callers.
+    // If the first lstat succeeded, a later open/read failure is a replacement
+    // or I/O race even when a second lstat now reports ENOENT.
+    if (listed !== undefined) return { records: [], complete: false };
+    try {
+      if (lstatSync(path).isFile()) return { records: [], complete: false };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return { records: [], complete: true };
+    }
+    return { records: [], complete: false };
   } finally {
     if (descriptor !== undefined) {
       try {
@@ -351,7 +377,12 @@ export function loadMemory(path = resolveRockyPaths().memory): MemoryRecord[] {
       }
     }
   }
-  return records;
+  return { records, complete: true };
+}
+
+/** Backward-compatible reader: malformed lines and unreadable files read as empty. */
+export function loadMemory(path = resolveRockyPaths().memory): MemoryRecord[] {
+  return loadMemoryChecked(path).records;
 }
 
 function validateStoredIdentity(

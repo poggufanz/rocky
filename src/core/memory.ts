@@ -25,7 +25,7 @@ import { basename, dirname, join } from "node:path";
 import { commandFingerprint, commandIdentity, fingerprint, normalizeLine, signatureLines } from "./fingerprint.js";
 import { resolveRockyPaths } from "./state-paths.js";
 import type { RockyPaths } from "./state-paths.js";
-import { loadMemory, MAX_MEMORY_LINE_BYTES } from "./memory-read.js";
+import { loadMemory, loadMemoryChecked, MAX_MEMORY_LINE_BYTES } from "./memory-read.js";
 import type { AssociationRecord, FailureRecord, FixRecord, MemoryRecord, NoteRecord, TripleRecord } from "./memory-read.js";
 import { LINK_WINDOW_MS, recentUnresolvedFailures, type UnresolvedLink } from "./memory-query.js";
 
@@ -273,7 +273,14 @@ function acquireTripleLock(paths: RockyPaths): TripleLock {
   const monotonicStarted = performance.now();
   for (;;) {
     const lock = tryTripleLock(path);
-    if (lock) return lock;
+    if (lock) {
+      // A previous reclaimer can die after unlinking the primary lock but
+      // before cleaning its hard-link claim.  Sweep such claims only after
+      // this process owns the pathname, and re-check every inode before the
+      // best-effort cleanup.
+      pruneDeadReclaimClaims(path);
+      return lock;
+    }
     const current = readTripleLock(path);
     if (current) {
       const alive = tripleOwnerAlive(current.metadata.pid);
@@ -385,7 +392,7 @@ function reclaimTripleLock(
 }
 
 /** Remove only hard-link claims whose owning reclaimer is definitely dead. */
-function pruneDeadReclaimClaims(path: string, expected: Stats): void {
+function pruneDeadReclaimClaims(path: string, expected?: Stats): void {
   const directory = dirname(path);
   const prefix = `${basename(path)}.reclaim.`;
   let names: string[];
@@ -403,7 +410,42 @@ function pruneDeadReclaimClaims(path: string, expected: Stats): void {
     const claimPath = join(directory, name);
     try {
       const claim = lstatSync(claimPath);
-      if (!claim.isFile() || claim.isSymbolicLink() || !sameTripleIdentity(expected, claim)) continue;
+      if (!claim.isFile() || claim.isSymbolicLink() || !tripleIdentityKnown(claim)) continue;
+      if (expected !== undefined && !sameTripleIdentity(expected, claim)) continue;
+
+      let primary: Stats | undefined;
+      try {
+        primary = lstatSync(path);
+        if (!primary.isFile() || primary.isSymbolicLink() || !tripleIdentityKnown(primary)) continue;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") continue;
+      }
+      // A claim that still names the current primary lock is not orphaned.
+      // When reclaiming a known stale primary (`expected`), that same inode
+      // is precisely the claim we may prune; otherwise only an absent or
+      // replaced primary permits cleanup.
+      if (primary !== undefined && sameTripleIdentity(primary, claim) && expected === undefined) continue;
+
+      // Revalidate both sides immediately before unlinking.  A concurrent
+      // namespace replacement therefore becomes a conservative no-op instead
+      // of deleting a pathname that no longer names the inspected inode.
+      const verifiedClaim = lstatSync(claimPath);
+      if (!verifiedClaim.isFile() || verifiedClaim.isSymbolicLink() ||
+          !sameTripleIdentity(claim, verifiedClaim)) continue;
+      if (primary !== undefined) {
+        const verifiedPrimary = lstatSync(path);
+        if (!verifiedPrimary.isFile() || verifiedPrimary.isSymbolicLink() ||
+            !tripleIdentityKnown(verifiedPrimary)) continue;
+        if (expected !== undefined && !sameTripleIdentity(expected, verifiedPrimary)) continue;
+        if (expected === undefined && sameTripleIdentity(verifiedPrimary, verifiedClaim)) continue;
+      } else {
+        try {
+          lstatSync(path);
+          continue;
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT") continue;
+        }
+      }
       unlinkSync(claimPath);
     } catch {
       // A concurrent sweep or namespace change is a conservative no-op.
@@ -440,7 +482,9 @@ export function withMemoryTransaction<T>(
       records = [...records, record];
     },
     reload() {
-      records = loadMemory(paths.memory);
+      const loaded = loadMemoryChecked(paths.memory);
+      if (!loaded.complete) throw new Error("Rocky memory reload is incomplete");
+      records = loaded.records;
       return records;
     },
   };
@@ -566,6 +610,47 @@ export interface ResolveFixResult extends WrittenFixRecords {
   possibleAssociated: number;
 }
 
+function hasRecentConfirmedResolutionForCommand(
+  records: readonly MemoryRecord[],
+  cmd: string,
+  cwd: string,
+  windowMs: number,
+  now: number,
+): boolean {
+  const currentIdentity = commandIdentity(cmd);
+  if (!currentIdentity.reliable) return false;
+  const cutoff = now - windowMs;
+  const resolvedById = new Map(
+    records
+      .filter((record): record is FailureRecord => record.kind === "failure" && record.resolvedBy !== undefined)
+      .map((record) => [record.id, record.resolvedBy]),
+  );
+  return records.some((record) => {
+    if (record.kind !== "fix" || record.cwd !== cwd || record.ts < cutoff || record.ts > now) return false;
+    const fixIdentity = commandIdentity(record.cmd, { platform: record.platform ?? process.platform });
+    if (!fixIdentity.reliable || fixIdentity.value !== currentIdentity.value) return false;
+    return record.failureIds.some((failureId) => resolvedById.get(failureId) === record.id);
+  });
+}
+
+function hasRecentConfirmedResolution(
+  records: readonly MemoryRecord[],
+  windowMs: number,
+  now: number,
+): boolean {
+  const cutoff = now - windowMs;
+  const fixes = new Map(
+    records
+      .filter((record): record is FixRecord => record.kind === "fix" && record.ts >= cutoff && record.ts <= now)
+      .map((record) => [record.id, record]),
+  );
+  return records.some((record) => {
+    if (record.kind !== "failure" || record.resolvedBy === undefined) return false;
+    const fix = fixes.get(record.resolvedBy);
+    return fix !== undefined && fix.failureIds.includes(record.id);
+  });
+}
+
 /** Reload, attribute, append, and reconcile pending under one per-memory lock. */
 export function resolveFixOnSuccess(
   cmd: string,
@@ -577,7 +662,16 @@ export function resolveFixOnSuccess(
     const now = options.now ?? Date.now();
     const windowMs = options.windowMs ?? LINK_WINDOW_MS;
     const links = recentUnresolvedFailures(transaction.records, cmd, { cwd, now, windowMs });
-    if (links.length === 0) return { confirmedResolved: 0, possibleAssociated: 0 };
+    if (links.length === 0) {
+      // A prior process may have durably appended its FixRecord and died
+      // before pending reconciliation.  Only a loader-confirmed resolution
+      // for this command can recover that state; weak associations and an
+      // empty/incomplete snapshot never clear pending.
+      if (hasRecentConfirmedResolutionForCommand(transaction.records, cmd, cwd, windowMs, now)) {
+        reconcilePendingUnlocked(transaction.records, transaction.paths, windowMs, now);
+      }
+      return { confirmedResolved: 0, possibleAssociated: 0 };
+    }
 
     const written = appendFixRecordsUnlocked(transaction, cmd, links, cwd, now);
     if (written.fix) {
@@ -636,7 +730,8 @@ export function clearPendingIfResolved(
 ): void {
   withMemoryTransaction((transaction) => {
     const selectedNow = now ?? Date.now();
-    if (!hasUnresolvedRecent(transaction.records, windowMs, selectedNow)) {
+    if (hasRecentConfirmedResolution(transaction.records, windowMs, selectedNow) &&
+        !hasUnresolvedRecent(transaction.records, windowMs, selectedNow)) {
       rmSync(transaction.paths.pending, { force: true });
     }
   });
