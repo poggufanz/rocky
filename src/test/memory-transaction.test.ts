@@ -8,6 +8,7 @@ import {
   readFileSync,
   readdirSync,
   rmSync,
+  symlinkSync,
   unlinkSync,
   utimesSync,
   writeFileSync,
@@ -18,7 +19,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { commandIdentity } from "../core/fingerprint.js";
 import * as memory from "../core/memory.js";
-import type { FailureRecord, MemoryRecord, NoteRecord } from "../core/memory.js";
+import type { AssociationRecord, FailureRecord, FixRecord, MemoryRecord, NoteRecord } from "../core/memory.js";
 import { LINK_WINDOW_MS, queryStats } from "../core/memory-query.js";
 import { hookSuccess } from "../commands/hook.js";
 
@@ -108,6 +109,20 @@ function mutationReloadFailurePreload(path: string): void {
     "fs.openSync = (path, ...args) => { const fd = originalOpen(path, ...args); if (String(path) === process.env.ROCKY_TEST_MEMORY) memoryFds.add(fd); return fd; };",
     "fs.readFileSync = (path, ...args) => { if (process.env.ROCKY_TEST_RELOAD_MODE === 'read' && typeof path === 'number' && memoryFds.has(path) && ++reads === 2) throw new Error('injected mutation reload failure'); return originalRead(path, ...args); };",
     "fs.lstatSync = (path, ...args) => { const stats = originalLstat(path, ...args); if (process.env.ROCKY_TEST_RELOAD_MODE === 'identity' && String(path) === process.env.ROCKY_TEST_MEMORY && ++lists === 3) { const replacement = Object.create(Object.getPrototypeOf(stats)); Object.assign(replacement, stats, { ino: Number(stats.ino) + 1 }); return replacement; } return stats; };",
+    "syncBuiltinESMExports();",
+  ].join("\n"), "utf8");
+}
+
+function initialMemoryReadFailurePreload(path: string): void {
+  writeFileSync(path, [
+    "const fs = require('node:fs');",
+    "const { syncBuiltinESMExports } = require('node:module');",
+    "const originalOpen = fs.openSync.bind(fs);",
+    "const originalRead = fs.readFileSync.bind(fs);",
+    "const memoryFds = new Set();",
+    "let reads = 0;",
+    "fs.openSync = (path, ...args) => { const fd = originalOpen(path, ...args); if (String(path) === process.env.ROCKY_TEST_MEMORY) memoryFds.add(fd); return fd; };",
+    "fs.readFileSync = (path, ...args) => { if (typeof path === 'number' && memoryFds.has(path) && ++reads === 1) throw new Error('injected initial memory read failure'); return originalRead(path, ...args); };",
     "syncBuiltinESMExports();",
   ].join("\n"), "utf8");
 }
@@ -387,6 +402,106 @@ test("a crash after durable FixRecord append is reconciled by the next success",
   assert.equal(existsSync(join(home, "pending")), false);
 });
 
+test("a delayed exact success recovers crash resolution beyond the link window while weak evidence stays pending", { timeout: 30_000 }, (t) => {
+  const oldNow = 1_800_000_000_000;
+  const delays = [9 * 60 * 60 * 1_000, 90 * 24 * 60 * 60 * 1_000];
+  for (const delay of delays) {
+    const home = sandbox(t, `rocky-fix-crash-delayed-${delay}-`);
+    const cwd = home;
+    const cmd = "node stable-command.js";
+    const preload = join(home, "crash-after-fix-old-clock.cjs");
+    seed(home, [failure(`crashed-${delay}`, cmd, cwd, oldNow)]);
+    writeFileSync(preload, [
+      `Date.now = () => ${oldNow};`,
+      "const fs = require('node:fs');",
+      "const { syncBuiltinESMExports } = require('node:module');",
+      "const originalWrite = fs.writeSync.bind(fs);",
+      "fs.writeSync = (fd, buffer, ...args) => { const written = originalWrite(fd, buffer, ...args); if (String(buffer).includes('\\\"kind\\\":\\\"fix\\\"')) process.exit(73); return written; };",
+      "syncBuiltinESMExports();",
+    ].join("\n"), "utf8");
+    const first = spawnSync(process.execPath, [cli, "_hooksuccess", cmd, cwd], {
+      env: { ...process.env, ROCKY_HOME: home, NODE_OPTIONS: `--require=${preload}` },
+      encoding: "utf8", timeout: 10_000, windowsHide: true,
+    });
+    assert.equal(first.status, 73, first.stderr);
+    assert.equal(existsSync(join(home, "pending")), true);
+    assert.equal(memory.loadMemory(join(home, "memory.jsonl")).filter((record) => record.kind === "fix").length, 1);
+
+    const originalHome = process.env.ROCKY_HOME;
+    process.env.ROCKY_HOME = home;
+    try {
+      const result = memory.resolveFixOnSuccess(cmd, cwd, { now: oldNow + delay });
+      assert.deepEqual(result, { confirmedResolved: 0, possibleAssociated: 0 });
+    } finally {
+      if (originalHome === undefined) delete process.env.ROCKY_HOME;
+      else process.env.ROCKY_HOME = originalHome;
+    }
+    assert.equal(existsSync(join(home, "pending")), false, `${delay} ms delayed recovery must reconcile pending`);
+  }
+
+  const weakHome = sandbox(t, "rocky-fix-crash-delayed-weak-");
+  const weakCwd = weakHome;
+  const weakCmd = "node weak-command.js";
+  const weakFailure = failure("weak-delayed", weakCmd, weakCwd, oldNow);
+  const weakAssociation: AssociationRecord = {
+    kind: "association", id: "weak-association", ts: oldNow, cwd: weakCwd, cmd: weakCmd,
+    candidateFailureIds: [weakFailure.id],
+    links: [{ id: weakFailure.id, basis: "program", confidence: "possible" }],
+  };
+  seed(weakHome, [weakFailure, weakAssociation]);
+  const weakOriginalHome = process.env.ROCKY_HOME;
+  process.env.ROCKY_HOME = weakHome;
+  try {
+    memory.resolveFixOnSuccess(weakCmd, weakCwd, { now: oldNow + delays[0]! });
+  } finally {
+    if (weakOriginalHome === undefined) delete process.env.ROCKY_HOME;
+    else process.env.ROCKY_HOME = weakOriginalHome;
+  }
+  assert.equal(existsSync(join(weakHome, "pending")), true, "old weak association must not clear pending");
+
+  const mismatchHome = sandbox(t, "rocky-fix-crash-delayed-mismatch-");
+  const mismatchCwd = mismatchHome;
+  const mismatchCmd = "node mismatch-command.js";
+  const mismatchFailure = failure("mismatch-delayed", mismatchCmd, mismatchCwd, oldNow);
+  const mismatchedFix: FixRecord = {
+    kind: "fix", id: "mismatched-fix", ts: oldNow, cwd: mismatchCwd,
+    cmd: "node other-command.js", failureIds: [mismatchFailure.id],
+  };
+  seed(mismatchHome, [mismatchFailure, mismatchedFix]);
+  const mismatchOriginalHome = process.env.ROCKY_HOME;
+  process.env.ROCKY_HOME = mismatchHome;
+  try {
+    memory.resolveFixOnSuccess(mismatchCmd, mismatchCwd, { now: oldNow + delays[1]! });
+  } finally {
+    if (mismatchOriginalHome === undefined) delete process.env.ROCKY_HOME;
+    else process.env.ROCKY_HOME = mismatchOriginalHome;
+  }
+  assert.equal(existsSync(join(mismatchHome, "pending")), true, "old unconfirmed FixRecord must not clear pending");
+
+  const incompleteHome = sandbox(t, "rocky-fix-crash-delayed-incomplete-");
+  const incompleteCwd = incompleteHome;
+  const incompleteCmd = "node incomplete-command.js";
+  const incompleteFailure = failure("incomplete-delayed", incompleteCmd, incompleteCwd, oldNow);
+  const incompleteFix: FixRecord = {
+    kind: "fix", id: "incomplete-fix", ts: oldNow, cwd: incompleteCwd,
+    cmd: incompleteCmd, failureIds: [incompleteFailure.id],
+  };
+  seed(incompleteHome, [incompleteFailure, incompleteFix]);
+  const incompletePreload = join(incompleteHome, "incomplete-read.cjs");
+  initialMemoryReadFailurePreload(incompletePreload);
+  const incomplete = spawnSync(process.execPath, [cli, "_hooksuccess", incompleteCmd, incompleteCwd], {
+    env: {
+      ...process.env,
+      ROCKY_HOME: incompleteHome,
+      ROCKY_TEST_MEMORY: join(incompleteHome, "memory.jsonl"),
+      NODE_OPTIONS: `--require=${incompletePreload}`,
+    },
+    encoding: "utf8", timeout: 10_000, windowsHide: true,
+  });
+  assert.equal(incomplete.status, 0, incomplete.stderr);
+  assert.equal(existsSync(join(incompleteHome, "pending")), true, "incomplete loader snapshot must retain pending");
+});
+
 function fixedClockPreload(path: string): void {
   writeFileSync(path, "Date.now = () => Number(process.env.ROCKY_FIXED_NOW);\n", "utf8");
 }
@@ -633,6 +748,59 @@ test("competing dead-owner reclaimers never overlap transactions", { timeout: 30
   assert.deepEqual(await Promise.all(completions), Array<number>(children.length).fill(0));
   assert.equal(existsSync(violation), false, "memory transactions must never overlap during recovery");
   assert.equal(existsSync(lock), false);
+});
+
+test("reclaim-claim sweeping examines a bounded batch and preserves unsafe entries", (t) => {
+  const home = sandbox(t, "rocky-lock-reclaim-bounded-");
+  const lock = `${join(home, "memory.jsonl")}.triple.lock`;
+  const deadPid = 2_147_483_647;
+  const claimPrefix = `${lock}.reclaim.`;
+  const claimNamePrefix = "memory.jsonl.triple.lock.reclaim.";
+  const claimCount = 320;
+  mkdirSync(home, { recursive: true });
+  const liveClaim = `${claimPrefix}${process.pid}.${"c".repeat(32)}`;
+  writeFileSync(liveClaim, "", { mode: 0o600 });
+  const unknownName = `${claimPrefix}not-a-claim`;
+  writeFileSync(unknownName, "unknown", { mode: 0o600 });
+  const replacementTarget = join(home, "replacement-target");
+  const replacementClaim = `${claimPrefix}${deadPid}.${"b".repeat(32)}`;
+  writeFileSync(replacementTarget, "replacement", { mode: 0o600 });
+  let replacementCreated = false;
+  try {
+    symlinkSync(replacementTarget, replacementClaim);
+    replacementCreated = true;
+  } catch {
+    // Symlink support is platform-dependent; the regular replacement and
+    // unknown-name controls below still exercise bounded cleanup.
+  }
+  for (let index = 0; index < claimCount; index++) {
+    const token = index.toString(16).padStart(32, "0");
+    writeFileSync(`${claimPrefix}${deadPid}.${token}`, "", { mode: 0o600 });
+  }
+
+  const originalHome = process.env.ROCKY_HOME;
+  process.env.ROCKY_HOME = home;
+  const started = Date.now();
+  try {
+    memory.recordNote({ cwd: home, cmd: "bounded-sweep", file: "bounded.ts", line: 1, subject: "bounded", answer: "bounded" });
+  } finally {
+    if (originalHome === undefined) delete process.env.ROCKY_HOME;
+    else process.env.ROCKY_HOME = originalHome;
+  }
+  const elapsed = Date.now() - started;
+  const remainingDeadRegularClaims = readdirSync(home).filter((name) =>
+    name.startsWith(claimNamePrefix) && /^\d+\.[a-f0-9]{32}$/u.test(name.slice(claimNamePrefix.length)) &&
+    !name.endsWith("b".repeat(32))
+  );
+  assert.ok(claimCount > memory.RECLAIM_CLAIM_SCAN_MAX_ENTRIES * 2,
+    "fixture must exceed two bounded sweep batches");
+  assert.ok(remainingDeadRegularClaims.length >= claimCount - memory.RECLAIM_CLAIM_SCAN_MAX_ENTRIES,
+    "sweep must leave residual claims after one fixed-size batch");
+  assert.ok(elapsed < 2_000, `bounded sweep must complete promptly, got ${elapsed} ms`);
+  assert.equal(existsSync(liveClaim), true, "live-owner claim is never removed");
+  assert.equal(existsSync(unknownName), true, "unknown claim-shaped file is never removed");
+  if (replacementCreated) assert.equal(existsSync(replacementClaim), true, "symlink/replacement claim is never removed");
+  assert.equal(existsSync(lock), false, "released primary lock is not left behind");
 });
 
 test("live owner lock is bounded bookkeeping and preserves child success", { timeout: 12_000 }, (t) => {

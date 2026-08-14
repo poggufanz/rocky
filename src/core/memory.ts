@@ -10,8 +10,8 @@ import {
   lstatSync,
   mkdirSync,
   openSync,
+  opendirSync,
   readSync,
-  readdirSync,
   rmSync,
   unlinkSync,
   writeFileSync,
@@ -25,7 +25,7 @@ import { basename, dirname, join } from "node:path";
 import { commandFingerprint, commandIdentity, fingerprint, normalizeLine, signatureLines } from "./fingerprint.js";
 import { resolveRockyPaths } from "./state-paths.js";
 import type { RockyPaths } from "./state-paths.js";
-import { loadMemory, loadMemoryChecked, MAX_MEMORY_LINE_BYTES } from "./memory-read.js";
+import { loadMemoryChecked, MAX_MEMORY_LINE_BYTES } from "./memory-read.js";
 import type { AssociationRecord, FailureRecord, FixRecord, MemoryRecord, NoteRecord, TripleRecord } from "./memory-read.js";
 import { LINK_WINDOW_MS, recentUnresolvedFailures, type UnresolvedLink } from "./memory-query.js";
 
@@ -112,6 +112,13 @@ const TRIPLE_LOCK_TOKEN_BYTES = 16;
 const TRIPLE_LOCK_MAX_BYTES = 160;
 const TRIPLE_LOCK_WAIT_MS = 5_000;
 const TRIPLE_LOCK_STALE_MS = 10 * 60 * 1000;
+/**
+ * Reclaim cleanup is best-effort housekeeping. Keep it outside the lock
+ * acquisition budget by bounding both directory entries and synchronous
+ * filesystem work; later mutations can sweep residual claims.
+ */
+export const RECLAIM_CLAIM_SCAN_MAX_ENTRIES = 64;
+export const RECLAIM_CLAIM_SCAN_MAX_MS = 100;
 
 interface TripleLockMetadata {
   pid: number;
@@ -395,72 +402,90 @@ function reclaimTripleLock(
 function pruneDeadReclaimClaims(path: string, expected?: Stats): void {
   const directory = dirname(path);
   const prefix = `${basename(path)}.reclaim.`;
-  let names: string[];
+  const started = performance.now();
+  let directoryHandle: ReturnType<typeof opendirSync> | undefined;
   try {
-    names = readdirSync(directory);
+    // `opendirSync` plus one-entry reads avoids materializing an arbitrary
+    // directory listing. The batch cap is deliberate: claim cleanup may be
+    // incomplete, but memory mutation must stay bounded and safe.
+    directoryHandle = opendirSync(directory, { bufferSize: 1 });
   } catch {
     return;
   }
-  for (const name of names) {
-    if (!name.startsWith(prefix)) continue;
-    const match = /^(\d+)\.([a-f0-9]{32})$/u.exec(name.slice(prefix.length));
-    if (!match) continue;
-    const pid = Number(match[1]);
-    if (!Number.isSafeInteger(pid) || pid <= 0 || tripleOwnerAlive(pid) !== false) continue;
-    const claimPath = join(directory, name);
-    try {
-      const claim = lstatSync(claimPath);
-      if (!claim.isFile() || claim.isSymbolicLink() || !tripleIdentityKnown(claim)) continue;
-      if (expected !== undefined && !sameTripleIdentity(expected, claim)) continue;
-      // A primary-less non-empty claim has no inode to compare against.
-      // Require its immutable lock metadata to parse and its original owner
-      // to be definitely dead, so a regular file merely wearing a claim-
-      // shaped name remains untouched.  Zero-byte claims are the deliberate
-      // stale-empty-lock recovery case, which has no metadata to parse.
-      const metadata = readTripleLock(claimPath);
-      if (metadata !== undefined) {
-        if (tripleOwnerAlive(metadata.metadata.pid) !== false) continue;
-      } else if (expected === undefined && claim.size !== 0) {
-        continue;
-      }
-
-      let primary: Stats | undefined;
+  try {
+    for (let examined = 0; examined < RECLAIM_CLAIM_SCAN_MAX_ENTRIES; examined++) {
+      if (performance.now() - started >= RECLAIM_CLAIM_SCAN_MAX_MS) break;
+      let entry;
       try {
-        primary = lstatSync(path);
-        if (!primary.isFile() || primary.isSymbolicLink() || !tripleIdentityKnown(primary)) continue;
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "ENOENT") continue;
+        entry = directoryHandle.readSync();
+      } catch {
+        break;
       }
-      // A claim that still names the current primary lock is not orphaned.
-      // When reclaiming a known stale primary (`expected`), that same inode
-      // is precisely the claim we may prune; otherwise only an absent or
-      // replaced primary permits cleanup.
-      if (primary !== undefined && sameTripleIdentity(primary, claim) && expected === undefined) continue;
-
-      // Revalidate both sides immediately before unlinking.  A concurrent
-      // namespace replacement therefore becomes a conservative no-op instead
-      // of deleting a pathname that no longer names the inspected inode.
-      const verifiedClaim = lstatSync(claimPath);
-      if (!verifiedClaim.isFile() || verifiedClaim.isSymbolicLink() ||
-          !sameTripleIdentity(claim, verifiedClaim)) continue;
-      if (primary !== undefined) {
-        const verifiedPrimary = lstatSync(path);
-        if (!verifiedPrimary.isFile() || verifiedPrimary.isSymbolicLink() ||
-            !tripleIdentityKnown(verifiedPrimary)) continue;
-        if (expected !== undefined && !sameTripleIdentity(expected, verifiedPrimary)) continue;
-        if (expected === undefined && sameTripleIdentity(verifiedPrimary, verifiedClaim)) continue;
-      } else {
-        try {
-          lstatSync(path);
+      if (entry === null) break;
+      const name = entry.name;
+      if (!name.startsWith(prefix)) continue;
+      const match = /^(\d+)\.([a-f0-9]{32})$/u.exec(name.slice(prefix.length));
+      if (!match) continue;
+      const pid = Number(match[1]);
+      if (!Number.isSafeInteger(pid) || pid <= 0 || tripleOwnerAlive(pid) !== false) continue;
+      const claimPath = join(directory, name);
+      try {
+        const claim = lstatSync(claimPath);
+        if (!claim.isFile() || claim.isSymbolicLink() || !tripleIdentityKnown(claim)) continue;
+        if (expected !== undefined && !sameTripleIdentity(expected, claim)) continue;
+        // A primary-less non-empty claim has no inode to compare against.
+        // Require its immutable lock metadata to parse and its original owner
+        // to be definitely dead, so a regular file merely wearing a claim-
+        // shaped name remains untouched.  Zero-byte claims are the deliberate
+        // stale-empty-lock recovery case, which has no metadata to parse.
+        const metadata = readTripleLock(claimPath);
+        if (metadata !== undefined) {
+          if (tripleOwnerAlive(metadata.metadata.pid) !== false) continue;
+        } else if (expected === undefined && claim.size !== 0) {
           continue;
+        }
+
+        let primary: Stats | undefined;
+        try {
+          primary = lstatSync(path);
+          if (!primary.isFile() || primary.isSymbolicLink() || !tripleIdentityKnown(primary)) continue;
         } catch (error) {
           if ((error as NodeJS.ErrnoException).code !== "ENOENT") continue;
         }
+        // A claim that still names the current primary lock is not orphaned.
+        // When reclaiming a known stale primary (`expected`), that same inode
+        // is precisely the claim we may prune; otherwise only an absent or
+        // replaced primary permits cleanup.
+        if (primary !== undefined && sameTripleIdentity(primary, claim) && expected === undefined) continue;
+
+        // Revalidate both sides immediately before unlinking.  A concurrent
+        // namespace replacement therefore becomes a conservative no-op instead
+        // of deleting a pathname that no longer names the inspected inode.
+        const verifiedClaim = lstatSync(claimPath);
+        if (!verifiedClaim.isFile() || verifiedClaim.isSymbolicLink() ||
+            !sameTripleIdentity(claim, verifiedClaim)) continue;
+        if (primary !== undefined) {
+          const verifiedPrimary = lstatSync(path);
+          if (!verifiedPrimary.isFile() || verifiedPrimary.isSymbolicLink() ||
+              !tripleIdentityKnown(verifiedPrimary)) continue;
+          if (expected !== undefined && !sameTripleIdentity(expected, verifiedPrimary)) continue;
+          if (expected === undefined && sameTripleIdentity(verifiedPrimary, verifiedClaim)) continue;
+        } else {
+          try {
+            lstatSync(path);
+            continue;
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== "ENOENT") continue;
+          }
+        }
+        unlinkSync(claimPath);
+      } catch {
+        // A concurrent sweep or namespace change is a conservative no-op.
       }
-      unlinkSync(claimPath);
-    } catch {
-      // A concurrent sweep or namespace change is a conservative no-op.
+      if (performance.now() - started >= RECLAIM_CLAIM_SCAN_MAX_MS) break;
     }
+  } finally {
+    try { directoryHandle.closeSync(); } catch { /* best effort */ }
   }
 }
 
@@ -474,6 +499,8 @@ function pruneDeadReclaimClaims(path: string, expected?: Stats): void {
 export interface MemoryTransaction {
   readonly paths: RockyPaths;
   readonly records: readonly MemoryRecord[];
+  /** False when the loader could not prove the snapshot complete. */
+  readonly complete: boolean;
   append(record: MemoryRecord): void;
   reload(): readonly MemoryRecord[];
 }
@@ -484,10 +511,13 @@ export function withMemoryTransaction<T>(
 ): T {
   ensureDir(paths.home);
   const lock = acquireTripleLock(paths);
-  let records = loadMemory(paths.memory);
+  const initial = loadMemoryChecked(paths.memory);
+  let records = initial.records;
+  let complete = initial.complete;
   const transaction: MemoryTransaction = {
     paths,
     get records() { return records; },
+    get complete() { return complete; },
     append(record) {
       appendUnlocked(record, paths);
       records = [...records, record];
@@ -496,6 +526,7 @@ export function withMemoryTransaction<T>(
       const loaded = loadMemoryChecked(paths.memory);
       if (!loaded.complete) throw new Error("Rocky memory reload is incomplete");
       records = loaded.records;
+      complete = true;
       return records;
     },
   };
@@ -621,26 +652,27 @@ export interface ResolveFixResult extends WrittenFixRecords {
   possibleAssociated: number;
 }
 
-function hasRecentConfirmedResolutionForCommand(
+function hasConfirmedResolutionForCommand(
   records: readonly MemoryRecord[],
   cmd: string,
   cwd: string,
-  windowMs: number,
   now: number,
 ): boolean {
   const currentIdentity = commandIdentity(cmd);
   if (!currentIdentity.reliable) return false;
-  const cutoff = now - windowMs;
-  const resolvedById = new Map(
+  const fixesById = new Map(
     records
-      .filter((record): record is FailureRecord => record.kind === "failure" && record.resolvedBy !== undefined)
-      .map((record) => [record.id, record.resolvedBy]),
+      .filter((record): record is FixRecord => record.kind === "fix")
+      .map((fix) => [fix.id, fix]),
   );
   return records.some((record) => {
-    if (record.kind !== "fix" || record.cwd !== cwd || record.ts < cutoff || record.ts > now) return false;
-    const fixIdentity = commandIdentity(record.cmd, { platform: record.platform ?? process.platform });
+    if (record.kind !== "failure" || record.cwd !== cwd || record.resolvedBy === undefined) return false;
+    const fix = fixesById.get(record.resolvedBy);
+    if (fix === undefined || fix.cwd !== cwd || fix.ts > now || !fix.failureIds.includes(record.id)) return false;
+    const fixIdentity = commandIdentity(fix.cmd, { platform: fix.platform ?? process.platform });
     if (!fixIdentity.reliable || fixIdentity.value !== currentIdentity.value) return false;
-    return record.failureIds.some((failureId) => resolvedById.get(failureId) === record.id);
+    const failureIdentity = commandIdentity(record.cmd, { platform: record.platform ?? process.platform });
+    return failureIdentity.reliable && failureIdentity.value === currentIdentity.value;
   });
 }
 
@@ -678,7 +710,7 @@ export function resolveFixOnSuccess(
       // before pending reconciliation.  Only a loader-confirmed resolution
       // for this command can recover that state; weak associations and an
       // empty/incomplete snapshot never clear pending.
-      if (hasRecentConfirmedResolutionForCommand(transaction.records, cmd, cwd, windowMs, now)) {
+      if (transaction.complete && hasConfirmedResolutionForCommand(transaction.records, cmd, cwd, now)) {
         reconcilePendingUnlocked(transaction.records, transaction.paths, windowMs, now);
       }
       return { confirmedResolved: 0, possibleAssociated: 0 };
