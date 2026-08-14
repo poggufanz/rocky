@@ -1,6 +1,6 @@
-import { commandBase, commandSignature, similarity, tokens } from "./fingerprint.js";
+import { commandBase, commandIdentity, similarity, tokens } from "./fingerprint.js";
 import { loadMemory } from "./memory-read.js";
-import type { FailureRecord, FixRecord, LinkBasis, MemoryRecord, TripleRecord } from "./memory-read.js";
+import type { FailureRecord, FixRecord, LinkBasis, LinkConfidence, MemoryRecord, TripleRecord } from "./memory-read.js";
 import { triplesForFile } from "./dictionary.js";
 
 export interface RecallQuery { query: string; limit?: number; cwd?: string }
@@ -156,25 +156,46 @@ export function whyFile(records: readonly MemoryRecord[], path: string, limit = 
 
 export const LINK_WINDOW_MS = 1000 * 60 * 60 * 8;
 
-export interface UnresolvedLink { failure: FailureRecord; basis: LinkBasis }
+export interface UnresolvedLink { failure: FailureRecord; basis: LinkBasis; confidence: LinkConfidence }
 
 export function recentUnresolvedFailures(
   records: readonly MemoryRecord[],
   command: string,
   input: LinkQuery,
 ): UnresolvedLink[] {
-  const base = commandBase(command);
-  const signature = commandSignature(command);
+  const currentIdentity = commandIdentity(command);
+  const base = currentIdentity.base;
   const cutoff = (input.now ?? Date.now()) - (input.windowMs ?? LINK_WINDOW_MS);
   return records
     .filter((record): record is FailureRecord =>
       record.kind === "failure" && !record.resolvedBy && record.ts >= cutoff &&
-      record.cwd === input.cwd && commandBase(record.cmd) === base
+      record.cwd === input.cwd && recordBase(record) === base
     )
-    .map((failure) => ({
-      failure,
-      basis: commandSignature(failure.cmd) === signature ? "signature" as const : "program" as const,
-    }));
+    .map((failure) => {
+      const priorIdentity = identityForFailure(failure);
+      const confirmed = currentIdentity.reliable && priorIdentity.reliable && priorIdentity.value === currentIdentity.value;
+      return {
+        failure,
+        basis: confirmed ? "identity" as const : "program" as const,
+        confidence: confirmed ? "confirmed" as const : "possible" as const,
+      };
+    });
+}
+
+function identityForFailure(failure: FailureRecord): { value: string; reliable: boolean; base: string } {
+  if (failure.identityV === 1 && failure.commandIdentity !== undefined) {
+    const derived = commandIdentity(failure.cmd, { platform: failure.platform ?? "unknown" });
+    return {
+      value: failure.commandIdentity,
+      reliable: failure.identityReliable === true && derived.reliable && failure.commandIdentity === derived.value,
+      base: derived.base,
+    };
+  }
+  return commandIdentity(failure.cmd, { platform: failure.platform ?? "unknown" });
+}
+
+function recordBase(failure: FailureRecord): string {
+  return identityForFailure(failure).base || commandBase(failure.cmd);
 }
 
 export function createMemoryQueries(load: () => MemoryRecord[] = loadMemory): MemoryQueries {

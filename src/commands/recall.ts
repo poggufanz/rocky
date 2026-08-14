@@ -223,7 +223,7 @@ export async function recall(argv: readonly string[], dependencies?: RecallDepen
       const link = hit.fix.links?.find((candidate) => candidate.id === hit.failure.id);
       if (link) {
         const span = elapsed(hit.fix.ts - hit.failure.ts);
-        say(link.basis === "signature"
+        say(link.basis === "identity" || link.basis === "signature"
           ? `same command, ${span} later. strong.`
           : `same program, ${span} later. maybe not fix. check, question`);
       }

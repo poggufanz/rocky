@@ -83,7 +83,7 @@ export function speakFailureMemory(
       // use presented a weak "same program" guess with the same confidence as a
       // real match. A wrong fix stated plainly is worse than no fix at all.
       const basis = fix.links?.find((link) => link.id === withFix.id)?.basis;
-      if (basis === "signature") {
+      if (basis === "identity" || basis === "signature") {
         say(`same command, ${elapsed(fix.ts - withFix.ts)} later. strong.`);
       } else if (basis === "program") {
         say(`same program, ${elapsed(fix.ts - withFix.ts)} later. maybe not fix. check, question`);
@@ -130,7 +130,9 @@ export function linkFixOnSuccess(
   const unresolved = recentUnresolvedFailures(memory, cmd, { cwd });
   if (unresolved.length > 0) {
     recordFix(cmd, unresolved, cwd);
-    if (!quiet) say("command works now. you fix it. I remember the fix. good good good.");
+    if (!quiet && unresolved.some((link) => link.confidence === "confirmed")) {
+      say("command works now. you fix it. I remember the fix. good good good.");
+    }
   }
 }
 

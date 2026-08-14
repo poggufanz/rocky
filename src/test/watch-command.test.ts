@@ -327,7 +327,7 @@ test("watch's failure path admits when the remembered fix comes from a different
   };
   const fix = {
     kind: "fix", id: "w-elsewhere-fix", ts: 1_700_000_001_000, cwd: elsewhere,
-    cmd: "the remembered fix command", failureIds: ["w-elsewhere-failure"],
+    cmd: "whatever failed before", failureIds: ["w-elsewhere-failure"],
   };
   writeFileSync(join(home, "memory.jsonl"), `${JSON.stringify(failure)}\n${JSON.stringify(fix)}\n`, "utf8");
   const notifier = fakeNotifier();
@@ -346,8 +346,8 @@ test("watch's success path links a fix exactly like run's onSuccess, using the s
   const cwd = process.cwd();
   const failure = {
     kind: "failure", id: "w-fix-failure", ts: Date.now() - 1000, cwd,
-    cmd: "echo build-that-failed-before", exitCode: 1, fingerprint: "deadbeef",
-    signature: ["echo build-that-failed-before"], excerpt: "irrelevant", origin: "watch",
+    cmd: "echo all-good", exitCode: 1, fingerprint: "deadbeef",
+    signature: ["echo all-good"], excerpt: "irrelevant", origin: "watch",
   };
   writeFileSync(join(home, "memory.jsonl"), `${JSON.stringify(failure)}\n`, "utf8");
   const notifier = fakeNotifier();

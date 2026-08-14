@@ -118,26 +118,110 @@ const ENV_ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
  */
 const WRAPPERS = new Set(["sudo", "doas", "env", "command", "time", "nohup", "nice", "exec"]);
 
+export const COMMAND_IDENTITY_VERSION = 1 as const;
+
+export interface CommandIdentity {
+  value: string;
+  reliable: boolean;
+  version: typeof COMMAND_IDENTITY_VERSION;
+  base: string;
+  display: string;
+}
+
+interface TokenizedCommand { tokens: string[]; reliable: boolean; assignments?: string[] }
+
 function basename(token: string): string {
   const segments = token.split(/[\\/]/);
   return segments[segments.length - 1] || token;
 }
 
-/** Drop assignment prefixes and wrapper programs to reach the real command. */
-function meaningfulTokens(cmd: string): string[] {
-  const tokens = cmd.trim().split(/\s+/).filter((token) => token.length > 0);
+/** Recover argv-shaped tokens and refuse strong identity for shell expansion/composition. */
+function tokenizeCommand(cmd: string): TokenizedCommand {
+  const tokens: string[] = [];
+  let token = "";
+  let quote: "'" | '"' | undefined;
+  let reliable = true;
+  let active = false;
+  const push = (): void => {
+    if (active) tokens.push(token);
+    token = "";
+    active = false;
+  };
+  for (let i = 0; i < cmd.length; i++) {
+    const char = cmd[i]!;
+    if (quote !== undefined) {
+      if (char === quote) { quote = undefined; active = true; continue; }
+      if (char === "\\" && quote === '"' && (cmd[i + 1] === '"' || cmd[i + 1] === "\\")) {
+        token += cmd[++i]!;
+        active = true;
+        continue;
+      }
+      if (char === "`" || char === "$") reliable = false;
+      token += char;
+      active = true;
+      continue;
+    }
+    if (char === "'" || char === '"') { quote = char; active = true; continue; }
+    if (/\s/u.test(char)) { push(); continue; }
+    if ("|&;<>()\r\n`".includes(char) || char === "$" || char === "%") reliable = false;
+    if (char === "\\" && (cmd[i + 1] === " " || cmd[i + 1] === "'" || cmd[i + 1] === '"')) {
+      token += cmd[++i]!;
+      active = true;
+      continue;
+    }
+    token += char;
+    active = true;
+  }
+  if (quote !== undefined) reliable = false;
+  push();
+  return { tokens, reliable };
+}
+
+function wrapperValueCount(wrapper: string, option: string): number | undefined {
+  if (option.includes("=")) return 0;
+  if ((wrapper === "sudo" || wrapper === "doas") &&
+      new Set(["-u", "--user", "-g", "--group", "-h", "--host", "-p", "--prompt", "-C", "--close-from",
+        "-R", "--chroot", "-D", "--chdir", "-r", "--role", "-t", "--type", "-U", "--other-user"]).has(option)) return 1;
+  if (wrapper === "env" && new Set(["-u", "--unset", "-C", "--chdir", "-S", "--split-string"]).has(option)) return 1;
+  if (wrapper === "time" && new Set(["-f", "--format", "-o", "--output"]).has(option)) return 1;
+  if (wrapper === "nice" && (option === "-n" || option === "--adjustment")) return 1;
+  const noValue = new Set(["-i", "--ignore-environment", "-0", "--null", "-n", "--non-interactive",
+    "-s", "--shell", "-V", "--version", "--help", "-v", "--verbose", "--quiet", "-q"]);
+  return noValue.has(option) ? 0 : undefined;
+}
+
+function meaningfulParsedTokens(parsed: TokenizedCommand): TokenizedCommand {
+  const tokens = parsed.tokens;
+  const assignments: string[] = [];
   let start = 0;
   while (start < tokens.length) {
     const token = tokens[start];
     if (token === undefined) break;
-    if (ENV_ASSIGNMENT.test(token) || WRAPPERS.has(basename(token))) { start++; continue; }
-    // `rocky run <X>` is a two-token wrapper: its own name says nothing about
-    // what failed. `rocky setup` etc. fall through (next token is not "run").
+    if (ENV_ASSIGNMENT.test(token)) { assignments.push(token); start++; continue; }
+    const wrapper = basename(token);
+    if (WRAPPERS.has(wrapper)) {
+      start++;
+      while (start < tokens.length) {
+        const option = tokens[start]!;
+        if (option === "--") { start++; break; }
+        if (wrapper === "env" && ENV_ASSIGNMENT.test(option)) { assignments.push(option); start++; continue; }
+        if (!option.startsWith("-") || option === "-") break;
+        const values = wrapperValueCount(wrapper, option);
+        if (values === undefined) parsed.reliable = false;
+        start += 1 + (values ?? 0);
+        if (start > tokens.length) parsed.reliable = false;
+      }
+      continue;
+    }
     if (basename(token) === "rocky" && tokens[start + 1] === "run") { start += 2; continue; }
     break;
   }
-  // A line that is nothing but prefixes still has to name something.
-  return start < tokens.length ? tokens.slice(start) : tokens;
+  return { tokens: start < tokens.length ? tokens.slice(start) : tokens, reliable: parsed.reliable, assignments };
+}
+
+/** Drop assignment prefixes and wrapper programs to reach the real command. */
+function meaningfulTokens(cmd: string): string[] {
+  return meaningfulParsedTokens(tokenizeCommand(cmd.trim())).tokens;
 }
 
 export function commandBase(cmd: string): string {
@@ -145,30 +229,34 @@ export function commandBase(cmd: string): string {
   return first ? basename(first) : "";
 }
 
-/**
- * Deterministic command signature used to grade fix links ("signature" vs
- * "program" basis). This is a command signature, not an error fingerprint:
- * no lowercasing, no number masking, flag case preserved (`-v` !== `-V`).
- */
+/** Versioned, conservative identity used only for memory attribution. */
+export function commandIdentity(
+  cmd: string,
+  options: { platform?: NodeJS.Platform | "unknown" } = {},
+): CommandIdentity {
+  const parsed = meaningfulParsedTokens(tokenizeCommand(cmd.trim()));
+  const first = parsed.tokens[0];
+  if (first === undefined) {
+    return { value: "[]", reliable: parsed.reliable, version: COMMAND_IDENTITY_VERSION, base: "", display: "" };
+  }
+  const base = basename(first);
+  const identityBase = (options.platform ?? process.platform) === "win32" ? base.toLowerCase() : base;
+  const normalized = [...(parsed.assignments ?? []).map((assignment) => `env:${assignment}`), identityBase, ...parsed.tokens.slice(1)];
+  return {
+    value: JSON.stringify(normalized),
+    reliable: parsed.reliable,
+    version: COMMAND_IDENTITY_VERSION,
+    base: identityBase,
+    display: normalized.join(" "),
+  };
+}
+
+/** Human-readable normalized command shape, separate from causal identity. */
 export function commandSignature(cmd: string): string {
   const tokens = meaningfulTokens(cmd);
   const first = tokens[0];
   if (first === undefined || first === "") return "";
-  const base = basename(first);
-  const rest = tokens.slice(1);
-
-  // A flag's value is not the subcommand. `docker --context prod build .` is a
-  // build, not a "prod" — without this, `docker --context prod ps` shares its
-  // signature and gets graded a strong fix for a failed build.
-  for (let i = 0; i < rest.length; i++) {
-    const token = rest[i];
-    if (token === undefined) break;
-    if (!token.startsWith("-")) return `${base} ${token}`;
-    if (token.includes("=")) continue;                      // --context=prod carries its own value
-    const next = rest[i + 1];
-    if (next !== undefined && !next.startsWith("-")) i++;   // skip the flag's value
-  }
-
-  const flags = [...new Set(rest)].sort();
-  return [base, ...flags].join(" ");
+  // Display preserves the complete normalized task/argument shape. Strong
+  // causal matching uses the separate versioned identity above.
+  return [basename(first), ...tokens.slice(1)].join(" ");
 }

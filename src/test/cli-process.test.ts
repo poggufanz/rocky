@@ -415,8 +415,8 @@ test("run's onFailure speaks the strong link basis, not just the fix command", (
   };
   const fix = {
     kind: "fix", id: "basis-strong-fix", ts: 1_700_000_120_000, cwd: packageRoot,
-    cmd: "cargo build", failureIds: ["basis-strong-failure"],
-    links: [{ id: "basis-strong-failure", basis: "signature" }],
+    cmd: "cargo build --release", failureIds: ["basis-strong-failure"],
+    links: [{ id: "basis-strong-failure", basis: "identity", confidence: "confirmed" }],
   };
   writeFileSync(
     join(sandbox.rockyHome, "memory.jsonl"),
@@ -432,7 +432,7 @@ test("run's onFailure speaks the strong link basis, not just the fix command", (
   assertNoDetectorMarkers(sandbox);
 });
 
-test("run's onFailure hedges a weak link instead of presenting it like a real match", (t) => {
+test("run's onFailure never presents a weak candidate as a remembered fix", (t) => {
   const sandbox = processSandbox(t);
   const marker = "error rocky basis weak boom";
   const fp = fingerprint(marker, "npm run build", 1);
@@ -455,12 +455,11 @@ test("run's onFailure hedges a weak link instead of presenting it like a real ma
   const result = runCli(sandbox, ["run", failingCommandPrinting(marker)]);
 
   assertCompleted(result, 1);
-  assert.match(result.stderr, /same program, 2 minutes later\. maybe not fix\. check, question/);
-  assert.doesNotMatch(result.stderr, /\bstrong\b/);
+  assert.doesNotMatch(result.stderr, /last time, you fix with:|same program|\bstrong\b/);
   assertNoDetectorMarkers(sandbox);
 });
 
-test("a v0.2.1-era fix record without links stays silent about basis", (t) => {
+test("a v0.2.1-era unproven fix record is downgraded", (t) => {
   const sandbox = processSandbox(t);
   const marker = "error rocky basis absent boom";
   const fp = fingerprint(marker, "npm run build", 1);
@@ -482,8 +481,7 @@ test("a v0.2.1-era fix record without links stays silent about basis", (t) => {
   const result = runCli(sandbox, ["run", failingCommandPrinting(marker)]);
 
   assertCompleted(result, 1);
-  assert.match(result.stderr, /last time, you fix with:/);
-  assert.doesNotMatch(result.stderr, /\bstrong\b|maybe not fix/);
+  assert.doesNotMatch(result.stderr, /last time, you fix with:|\bstrong\b|maybe not fix/);
   assertNoDetectorMarkers(sandbox);
 });
 
@@ -499,7 +497,7 @@ test("run's onFailure admits when the remembered fix comes from a different dire
   };
   const fix = {
     kind: "fix", id: "elsewhere-fix", ts: 1_700_000_001_000, cwd: elsewhere,
-    cmd: "the remembered fix command", failureIds: ["elsewhere-failure"],
+    cmd: "whatever failed before", failureIds: ["elsewhere-failure"],
   };
   writeFileSync(
     join(sandbox.rockyHome, "memory.jsonl"),
@@ -574,7 +572,7 @@ test("run's onFailure adds no line when the remembered fix's cwd matches the cur
   };
   const fix = {
     kind: "fix", id: "samecwd-fix", ts: 1_700_000_001_000, cwd: here,
-    cmd: "the remembered fix command", failureIds: ["samecwd-failure"],
+    cmd: "whatever failed before", failureIds: ["samecwd-failure"],
   };
   writeFileSync(
     join(sandbox.rockyHome, "memory.jsonl"),

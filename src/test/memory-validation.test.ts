@@ -6,7 +6,7 @@ import { isAbsolute, join } from "node:path";
 import { loadMemory } from "../core/memory.js";
 import { resolveRockyPaths } from "../core/state-paths.js";
 
-test("loader skips JSON-valid garbage and keeps valid legacy records", () => {
+test("loader keeps legacy records but downgrades an unproven historical fix", () => {
   const root = mkdtempSync(join(tmpdir(), "rocky-valid-"));
   const file = join(root, "memory.jsonl");
   const legacy = {
@@ -19,9 +19,22 @@ test("loader skips JSON-valid garbage and keeps valid legacy records", () => {
   const records = loadMemory(file);
   assert.equal(records.length, 2);
   assert.equal(records[0].kind, "failure");
-  assert.equal(records[0].kind === "failure" ? records[0].resolvedBy : undefined, "x1");
+  assert.equal(records[0].kind === "failure" ? records[0].resolvedBy : undefined, undefined);
   assert.deepEqual(readFileSync(file), before.bytes);
   assert.equal(statSync(file).mtimeMs, before.mtime);
+});
+
+test("loader dual-reads an exact reliable historical command as confirmed", () => {
+  const root = mkdtempSync(join(tmpdir(), "rocky-legacy-exact-"));
+  const file = join(root, "memory.jsonl");
+  const failure = {
+    kind: "failure", id: "f1", ts: 1, cwd: "/work", cmd: "npm run build", exitCode: 1,
+    fingerprint: "abc", signature: ["failed"], excerpt: "failed",
+  };
+  const fix = { kind: "fix", id: "x1", ts: 2, cwd: "/work", cmd: "npm run build", failureIds: ["f1"] };
+  writeFileSync(file, `${JSON.stringify(failure)}\n${JSON.stringify(fix)}\n`);
+  const records = loadMemory(file);
+  assert.equal(records[0]?.kind === "failure" ? records[0].resolvedBy : undefined, "x1");
 });
 
 test("loader accepts a fix's links array and drops a fix with a malformed link", () => {

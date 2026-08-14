@@ -269,7 +269,11 @@ function projectFixRecord(fix: FixRecord, exposure: Exposure): Record<string, un
     projected.links = fix.links.map((link, index) => ({
       id: projectOpaqueId(link.id, `record.links[${index}].id`, truncation),
       basis: link.basis,
+      ...(link.confidence === undefined ? {} : { confidence: link.confidence }),
     }));
+  }
+  if (fix.candidateFailureIds !== undefined) {
+    projected.candidateFailureIds = projectOpaqueIds(fix.candidateFailureIds, "record.candidateFailureIds", truncation);
   }
   if (exposure === "raw") projected.cwd = projectText(fix.cwd, exposure, "record.cwd", truncation);
   return projected;
@@ -318,6 +322,7 @@ function cloneFix(fix: FixRecord, exposure: Exposure, truncation: Truncation): F
     cwd: fix.cwd,
     cmd: fix.cmd,
     failureIds: fix.failureIds,
+    candidateFailureIds: fix.candidateFailureIds,
     links: fix.links,
   };
   const projected: FixRecord = {
@@ -332,7 +337,15 @@ function cloneFix(fix: FixRecord, exposure: Exposure, truncation: Truncation): F
     projected.links = allowed.links.map((link, index) => ({
       id: projectOpaqueId(link.id, `rawRecord.fix.links[${index}].id`, truncation),
       basis: link.basis,
+      ...(link.confidence === undefined ? {} : { confidence: link.confidence }),
     }));
+  }
+  if (allowed.candidateFailureIds !== undefined) {
+    projected.candidateFailureIds = projectOpaqueIds(
+      allowed.candidateFailureIds,
+      "rawRecord.fix.candidateFailureIds",
+      truncation,
+    );
   }
   return projected;
 }

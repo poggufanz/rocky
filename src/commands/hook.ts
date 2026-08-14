@@ -115,7 +115,9 @@ export function hookSuccess(cmd: string, cwd: string): number {
   const unresolved = recentUnresolvedFailures(memory, cmd, { cwd });
   if (unresolved.length > 0) {
     recordFix(cmd, unresolved, cwd);
-    sayTty("command works now. you fix it. I remember the fix. good good good.");
+    if (unresolved.some((link) => link.confidence === "confirmed")) {
+      sayTty("command works now. you fix it. I remember the fix. good good good.");
+    }
   }
   // Re-read: the fix just recorded above changes resolution state.
   const latest = readMemory();

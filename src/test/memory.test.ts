@@ -53,7 +53,7 @@ test("clearPendingIfResolved removes flag only when nothing unresolved", () => {
   const failures = records.filter(
     (r): r is import("../core/memory.js").FailureRecord => r.kind === "failure"
   );
-  memory.recordFix("npm run build", failures.map((failure) => ({ failure, basis: "program" as const })));
+  memory.recordFix("npm run build", failures.map((failure) => ({ failure, basis: "identity" as const, confidence: "confirmed" as const })));
   records = memory.loadMemory();
   assert.equal(memory.hasUnresolvedRecent(records), false);
   memory.clearPendingIfResolved(records);
@@ -85,7 +85,8 @@ test("recordFix keeps its line readable instead of writing a record that is sile
       kind: "failure" as const, id: `failure-${i}`, ts: 1_700_000_000_000 + i, cwd: "/x",
       cmd: "true", exitCode: 1, fingerprint: "ff", signature: [] as string[], excerpt: "",
     },
-    basis: "signature" as const,
+    basis: "identity" as const,
+    confidence: "confirmed" as const,
   }));
 
   const fix = memory.recordFix("true ok", links, "/x");

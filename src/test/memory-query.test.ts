@@ -57,11 +57,12 @@ test("link query uses injected cwd and clock without changing process cwd", () =
     cwd: "/work/b", now: 500, windowMs: 1000,
   });
   assert.deepEqual(hits.map((hit) => hit.failure.id), ["f2"]);
-  assert.deepEqual(hits.map((hit) => hit.basis), ["signature"]);
+  assert.deepEqual(hits.map((hit) => hit.basis), ["identity"]);
+  assert.deepEqual(hits.map((hit) => hit.confidence), ["confirmed"]);
   assert.equal(process.cwd(), before);
 });
 
-test("recentUnresolvedFailures grades signature vs program basis", () => {
+test("recentUnresolvedFailures grades exact identity vs program basis", () => {
   const setupFail: FailureRecord = {
     kind: "failure", id: "s1", ts: 0, cwd: "/work/c", cmd: "rocky setup",
     exitCode: 1, fingerprint: "fp-s1", signature: ["boom"], excerpt: "boom",
@@ -76,17 +77,57 @@ test("recentUnresolvedFailures grades signature vs program basis", () => {
   };
   const now = setupFail.ts + 2 * 60 * 1000; // 2 minutes later
 
-  // same signature ("rocky setup") -> strong link
-  const signatureHit = recentUnresolvedFailures([setupFail], "rocky setup --yes", { cwd: "/work/c", now });
-  assert.deepEqual(signatureHit.map((h) => ({ id: h.failure.id, basis: h.basis })), [{ id: "s1", basis: "signature" }]);
+  // same complete identity -> confirmed link
+  const signatureHit = recentUnresolvedFailures([setupFail], "rocky setup", { cwd: "/work/c", now });
+  assert.deepEqual(signatureHit.map((h) => ({ id: h.failure.id, basis: h.basis, confidence: h.confidence })), [
+    { id: "s1", basis: "identity", confidence: "confirmed" },
+  ]);
 
   // same base program, different signature -> weak link
   const programHit = recentUnresolvedFailures([yesFail], "rocky --help", { cwd: "/work/c", now });
-  assert.deepEqual(programHit.map((h) => ({ id: h.failure.id, basis: h.basis })), [{ id: "s2", basis: "program" }]);
+  assert.deepEqual(programHit.map((h) => ({ id: h.failure.id, basis: h.basis, confidence: h.confidence })), [
+    { id: "s2", basis: "program", confidence: "possible" },
+  ]);
 
   // flagship case: npm run build -> npm rebuild sharp must still link (program basis)
   const npmHit = recentUnresolvedFailures([buildFail], "npm rebuild sharp", { cwd: "/work/c", now });
-  assert.deepEqual(npmHit.map((h) => ({ id: h.failure.id, basis: h.basis })), [{ id: "s3", basis: "program" }]);
+  assert.deepEqual(npmHit.map((h) => ({ id: h.failure.id, basis: h.basis, confidence: h.confidence })), [
+    { id: "s3", basis: "program", confidence: "possible" },
+  ]);
+});
+
+test("same-program candidates stay possible and never become confirmed resolutions", () => {
+  const failure: FailureRecord = {
+    kind: "failure", id: "weak-1", ts: 100, cwd: "/work/weak", cmd: "npm run broken-alpha",
+    exitCode: 67, fingerprint: "fp-weak", signature: ["synthetic failure"], excerpt: "synthetic failure",
+    commandIdentity: "[\"npm\",\"run\",\"broken-alpha\"]", identityV: 1, identityReliable: true, platform: "linux",
+  };
+  const links = recentUnresolvedFailures([failure], "npm run unrelated-beta", {
+    cwd: "/work/weak", now: 200,
+  });
+
+  assert.deepEqual(links.map((link) => link.basis), ["program"]);
+  assert.deepEqual(links.map((link) => link.confidence), ["possible"]);
+});
+
+test("exact identity is confirmed while cwd and selected-window isolation remain intact", () => {
+  const failure: FailureRecord = {
+    kind: "failure", id: "exact-1", ts: 100, cwd: "/work/exact", cmd: "node script.mjs mode-a",
+    exitCode: 1, fingerprint: "fp-exact", signature: ["synthetic failure"], excerpt: "synthetic failure",
+    commandIdentity: "[\"node\",\"script.mjs\",\"mode-a\"]", identityV: 1, identityReliable: true, platform: "linux",
+  };
+  const exact = recentUnresolvedFailures([failure], "node script.mjs mode-a", {
+    cwd: "/work/exact", now: 200, windowMs: 200,
+  });
+  assert.deepEqual(exact.map((link) => ({ basis: link.basis, confidence: link.confidence })), [
+    { basis: "identity", confidence: "confirmed" },
+  ]);
+  assert.deepEqual(recentUnresolvedFailures([failure], "node script.mjs mode-a", {
+    cwd: "/work/other", now: 200, windowMs: 200,
+  }), []);
+  assert.deepEqual(recentUnresolvedFailures([failure], "node script.mjs mode-a", {
+    cwd: "/work/exact", now: 301, windowMs: 200,
+  }), []);
 });
 
 test("recentUnresolvedFailures narrows to an 8h window by default, widens with windowMs", () => {

@@ -18,7 +18,7 @@ import {
 } from "node:fs";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { Buffer } from "node:buffer";
-import { commandFingerprint, fingerprint, normalizeLine, signatureLines } from "./fingerprint.js";
+import { commandFingerprint, commandIdentity, fingerprint, normalizeLine, signatureLines } from "./fingerprint.js";
 import { resolveRockyPaths } from "./state-paths.js";
 import type { RockyPaths } from "./state-paths.js";
 import { loadMemory, MAX_MEMORY_LINE_BYTES } from "./memory-read.js";
@@ -289,9 +289,11 @@ function acquireTripleLock(paths: RockyPaths): TripleLock {
 }
 
 export function recordFailure(cmd: string, exitCode: number, stderr: string): FailureRecord {
+  const identity = commandIdentity(cmd);
   const rec: FailureRecord = {
     kind: "failure", id: randomUUID(), ts: Date.now(), cwd: process.cwd(), cmd, exitCode,
     fingerprint: fingerprint(stderr, cmd, exitCode), signature: signatureLines(stderr), excerpt: lastLines(stderr, 4),
+    commandIdentity: identity.value, identityV: identity.version, identityReliable: identity.reliable, platform: process.platform,
   };
   append(rec);
   touchPending();
@@ -299,9 +301,11 @@ export function recordFailure(cmd: string, exitCode: number, stderr: string): Fa
 }
 
 export function recordWatchFailure(cmd: string, exitCode: number, stderr: string, cwd = process.cwd()): FailureRecord {
+  const identity = commandIdentity(cmd);
   const rec: FailureRecord = {
     kind: "failure", id: randomUUID(), ts: Date.now(), cwd, cmd, exitCode,
     fingerprint: fingerprint(stderr, cmd, exitCode), signature: signatureLines(stderr), excerpt: lastLines(stderr, 4), origin: "watch",
+    commandIdentity: identity.value, identityV: identity.version, identityReliable: identity.reliable, platform: process.platform,
   };
   append(rec);
   touchPending();
@@ -319,10 +323,13 @@ export function recordWatchFailure(cmd: string, exitCode: number, stderr: string
 export const MAX_FIX_LINKS = 200;
 
 export function recordFix(cmd: string, links: readonly UnresolvedLink[], cwd = process.cwd()): FixRecord {
+  const identity = commandIdentity(cmd);
   const build = (chosen: readonly UnresolvedLink[]): FixRecord => ({
     kind: "fix", id: randomUUID(), ts: Date.now(), cwd, cmd,
-    failureIds: chosen.map((link) => link.failure.id),
-    links: chosen.map((link) => ({ id: link.failure.id, basis: link.basis })),
+    failureIds: chosen.filter((link) => link.confidence === "confirmed").map((link) => link.failure.id),
+    candidateFailureIds: chosen.filter((link) => link.confidence === "possible").map((link) => link.failure.id),
+    links: chosen.map((link) => ({ id: link.failure.id, basis: link.basis, confidence: link.confidence })),
+    commandIdentity: identity.value, identityV: identity.version, identityReliable: identity.reliable, platform: process.platform,
   });
 
   let chosen = links.slice(-MAX_FIX_LINKS);
@@ -360,9 +367,11 @@ export function clearPendingIfResolved(records: MemoryRecord[]): void {
 }
 
 export function recordHookFailure(cmd: string, exitCode: number, cwd: string): FailureRecord {
+  const identity = commandIdentity(cmd);
   const rec: FailureRecord = {
     kind: "failure", id: randomUUID(), ts: Date.now(), cwd, cmd, exitCode,
     fingerprint: commandFingerprint(cmd, exitCode), signature: [normalizeLine(cmd)], excerpt: `exit ${exitCode}`, origin: "hook",
+    commandIdentity: identity.value, identityV: identity.version, identityReliable: identity.reliable, platform: process.platform,
   };
   append(rec);
   touchPending();

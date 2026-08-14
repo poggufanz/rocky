@@ -9,6 +9,7 @@ import {
 } from "node:fs";
 import { Buffer } from "node:buffer";
 import { resolveRockyPaths } from "./state-paths.js";
+import { commandIdentity } from "./fingerprint.js";
 
 export type FailureOrigin = "run" | "hook" | "watch";
 
@@ -24,10 +25,15 @@ export interface FailureRecord {
   excerpt: string;
   origin?: FailureOrigin;
   resolvedBy?: string;
+  commandIdentity?: string;
+  identityV?: 1;
+  identityReliable?: boolean;
+  platform?: NodeJS.Platform;
 }
 
-export type LinkBasis = "signature" | "program";
-export interface FixLink { id: string; basis: LinkBasis }
+export type LinkBasis = "identity" | "signature" | "program";
+export type LinkConfidence = "confirmed" | "possible";
+export interface FixLink { id: string; basis: LinkBasis; confidence?: LinkConfidence }
 
 export interface FixRecord {
   kind: "fix";
@@ -36,7 +42,12 @@ export interface FixRecord {
   cwd: string;
   cmd: string;
   failureIds: string[];
+  candidateFailureIds?: string[];
   links?: FixLink[];
+  commandIdentity?: string;
+  identityV?: 1;
+  identityReliable?: boolean;
+  platform?: NodeJS.Platform;
 }
 
 export interface NoteRecord {
@@ -87,6 +98,19 @@ function strings(value: unknown): string[] | undefined {
     : undefined;
 }
 
+function identityFields(record: Record<string, unknown>): Pick<FailureRecord, "commandIdentity" | "identityV" | "identityReliable" | "platform"> | undefined {
+  if (record.commandIdentity === undefined && record.identityV === undefined &&
+      record.identityReliable === undefined && record.platform === undefined) return {};
+  if (typeof record.commandIdentity !== "string" || record.identityV !== 1 ||
+      typeof record.identityReliable !== "boolean" || typeof record.platform !== "string") return undefined;
+  return {
+    commandIdentity: record.commandIdentity,
+    identityV: 1,
+    identityReliable: record.identityReliable,
+    platform: record.platform as NodeJS.Platform,
+  };
+}
+
 // A record's origin is defined but not one of the three known values — including when it
 // isn't a string at all (a number, an object, null) — is read as "run" rather than
 // discarding the whole record. Compatibility cost the spec accepts: an already-released
@@ -106,19 +130,23 @@ export function parseMemoryRecord(value: unknown): MemoryRecord | undefined {
       typeof record.cwd !== "string") return undefined;
   if (record.kind === "failure") {
     const signature = strings(record.signature);
+    const identity = identityFields(record);
     if (typeof record.exitCode !== "number" || !Number.isInteger(record.exitCode) || typeof record.fingerprint !== "string" ||
-        !signature || typeof record.excerpt !== "string" || typeof record.cmd !== "string") return undefined;
+        !signature || !identity || typeof record.excerpt !== "string" || typeof record.cmd !== "string") return undefined;
     const origin = normalizeOrigin(record.origin);
     return {
       kind: "failure", id: record.id, ts: Number(record.ts), cwd: record.cwd,
       cmd: record.cmd, exitCode: Number(record.exitCode), fingerprint: record.fingerprint,
       signature, excerpt: record.excerpt,
       ...(origin === undefined ? {} : { origin }),
+      ...identity,
     };
   }
   if (record.kind === "fix") {
     const failureIds = strings(record.failureIds);
-    if (!failureIds || typeof record.cmd !== "string") return undefined;
+    const candidateFailureIds = record.candidateFailureIds === undefined ? undefined : strings(record.candidateFailureIds);
+    const identity = identityFields(record);
+    if (!failureIds || !identity || (record.candidateFailureIds !== undefined && !candidateFailureIds) || typeof record.cmd !== "string") return undefined;
     let links: FixLink[] | undefined;
     if (record.links !== undefined) {
       links = parseFixLinks(record.links);
@@ -126,7 +154,9 @@ export function parseMemoryRecord(value: unknown): MemoryRecord | undefined {
     }
     return {
       kind: "fix", id: record.id, ts: Number(record.ts), cwd: record.cwd, cmd: record.cmd, failureIds,
+      ...(candidateFailureIds === undefined ? {} : { candidateFailureIds }),
       ...(links === undefined ? {} : { links }),
+      ...identity,
     };
   }
   if (record.kind === "note") {
@@ -206,8 +236,14 @@ function parseFixLinks(value: unknown): FixLink[] | undefined {
   const links: FixLink[] = [];
   for (const entry of value) {
     const obj = objectValue(entry);
-    if (!obj || typeof obj.id !== "string" || (obj.basis !== "signature" && obj.basis !== "program")) return undefined;
-    links.push({ id: obj.id, basis: obj.basis });
+    if (!obj || typeof obj.id !== "string" ||
+        (obj.basis !== "identity" && obj.basis !== "signature" && obj.basis !== "program") ||
+        (obj.confidence !== undefined && obj.confidence !== "confirmed" && obj.confidence !== "possible")) return undefined;
+    links.push({
+      id: obj.id,
+      basis: obj.basis,
+      ...(obj.confidence === undefined ? {} : { confidence: obj.confidence }),
+    });
   }
   return links;
 }
@@ -273,8 +309,29 @@ export function loadMemory(path = resolveRockyPaths().memory): MemoryRecord[] {
     if (record.kind !== "fix") continue;
     for (const failureId of record.failureIds) {
       const failure = byId.get(failureId);
-      if (failure?.kind === "failure") failure.resolvedBy = record.id;
+      if (failure?.kind !== "failure") continue;
+      const failureIdentity = failure.identityV === 1 && failure.commandIdentity !== undefined
+        ? validateStoredIdentity(failure.cmd, failure.commandIdentity, failure.identityReliable, failure.platform)
+        : commandIdentity(failure.cmd, { platform: failure.platform ?? "unknown" });
+      const fixIdentity = record.identityV === 1 && record.commandIdentity !== undefined
+        ? validateStoredIdentity(record.cmd, record.commandIdentity, record.identityReliable, record.platform)
+        : commandIdentity(record.cmd, { platform: record.platform ?? "unknown" });
+      // Old records remain readable, but legacy signature/program grades are
+      // re-proved with v1 identity before they can count as resolved.
+      if (failureIdentity.reliable && fixIdentity.reliable && failureIdentity.value === fixIdentity.value) {
+        failure.resolvedBy = record.id;
+      }
     }
   }
   return records;
+}
+
+function validateStoredIdentity(
+  cmd: string,
+  value: string,
+  reliable: boolean | undefined,
+  platform: NodeJS.Platform | undefined,
+): { value: string; reliable: boolean } {
+  const derived = commandIdentity(cmd, { platform: platform ?? "unknown" });
+  return { value, reliable: reliable === true && derived.reliable && value === derived.value };
 }
