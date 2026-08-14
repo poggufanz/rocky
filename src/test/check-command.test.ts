@@ -156,6 +156,16 @@ function registry404Preload(box: Sandbox): { path: string; marker: string } {
   return { path, marker };
 }
 
+function registryMissingOnlyPreload(box: Sandbox, missingName: string): string {
+  const path = join(box.root, "registry-one-404.cjs");
+  writeFileSync(path, [
+    `const missing = ${JSON.stringify(encodeURIComponent(missingName))};`,
+    "global.fetch = async (url) => ({ status: String(url).endsWith('/' + missing) ? 404 : 200 });",
+    "",
+  ].join("\n"), "utf8");
+  return path;
+}
+
 function throwingStderrPreload(box: Sandbox, target: string, registry404 = false): string {
   const path = join(box.root, `stderr-throw-${registry404 ? "registry" : "plain"}.cjs`);
   writeFileSync(path, [
@@ -638,7 +648,38 @@ test("git show failure skips the package stage instead of treating manifests as 
   assert.equal(existsSync(preload.marker), false);
 });
 
-test("added-line limit announces exactly how much was not checked", async (t) => {
+test("a secret beyond the added-line cap makes a manual check incomplete", async (t) => {
+  const box = sandbox(t);
+  const secret = "AKIACAPPEDLINESECRET12";
+  const source = Array.from({ length: 20_000 }, (_, index) => `export const value${index} = ${index};`)
+    .concat(`export const key = "${secret}";`)
+    .join("\n") + "\n";
+  initRepo(box, { "src/large.ts": source });
+
+  const result = await runCheck(box, ["--offline"]);
+
+  assertCompleted(result, 2);
+  assert.match(result.stderr, /added-line limit: 20001 found; first 20000 checked, 1 skipped/);
+  assert.match(result.stderr, /incomplete/i);
+  assert.doesNotMatch(result.stderr, /src\/large\.ts:20001/);
+});
+
+test("a missing package beyond the package cap makes a manual check incomplete", async (t) => {
+  const box = sandbox(t);
+  const dependencies: Record<string, string> = {};
+  for (let index = 0; index < 51; index++) dependencies[`rocky-limit-package-${index}`] = "1.0.0";
+  initRepo(box, { "package.json": JSON.stringify({ dependencies }) });
+  enableRegistry(box);
+
+  const result = await runCheck(box, [], undefined, registryMissingOnlyPreload(box, "rocky-limit-package-50"));
+
+  assertCompleted(result, 2);
+  assert.match(result.stderr, /package limit: 51 found; first 50 checked, 1 skipped/);
+  assert.match(result.stderr, /incomplete/i);
+  assert.doesNotMatch(result.stderr, /rocky-limit-package-50/);
+});
+
+test("added-line limit announces incomplete coverage but remains fail-open for pre-push", async (t) => {
   const box = sandbox(t);
   const source = Array.from({ length: 20_001 }, (_, index) => `export const value${index} = ${index};`).join("\n") + "\n";
   const commits = initRepo(box, { "README.md": "clean\n" }, { "src/large.ts": source });
@@ -646,10 +687,12 @@ test("added-line limit announces exactly how much was not checked", async (t) =>
   const result = await runCheck(box, ["--pre-push", "--offline"], prePushLine(commits.second!, commits.first));
 
   assertCompleted(result, 0);
-  assert.match(result.stderr, /added-line limit: 20001 found; first 20000 checked, 1 not checked/);
+  assert.match(result.stderr, /added-line limit: 20001 found; first 20000 checked, 1 skipped/);
+  assert.match(result.stderr, /incomplete/i);
+  assert.doesNotMatch(result.stderr, /checked.clean/i);
 });
 
-test("package limit announces exactly how many names were not checked", async (t) => {
+test("package limit preserves a finding while reporting incomplete coverage", async (t) => {
   const box = sandbox(t);
   const dependencies: Record<string, string> = {};
   for (let index = 0; index < 51; index++) dependencies[`rocky-limit-package-${index}`] = "1.0.0";
@@ -662,7 +705,30 @@ test("package limit announces exactly how many names were not checked", async (t
   const result = await runCheck(box, ["--pre-push"], prePushLine(commits.second!, commits.first), preload.path);
 
   assertCompleted(result, 3);
-  assert.match(result.stderr, /package limit: 51 found; first 50 checked, 1 not checked/);
+  assert.match(result.stderr, /package limit: 51 found; first 50 checked, 1 skipped/);
+  assert.match(result.stderr, /incomplete/i);
+});
+
+test("exact line and package caps remain complete", async (t) => {
+  const box = sandbox(t);
+  const source = Array.from({ length: 19_999 }, (_, index) => `export const value${index} = ${index};`).join("\n") + "\n";
+  const dependencies: Record<string, string> = {};
+  for (let index = 0; index < 50; index++) dependencies[`rocky-exact-package-${index}`] = "1.0.0";
+  const commits = initRepo(box, { "README.md": "clean\n", "package.json": "{}\n" }, {
+    "src/large.ts": source,
+    "package.json": JSON.stringify({ dependencies }),
+  });
+  enableRegistry(box);
+  const result = await runCheck(
+    box,
+    ["--pre-push"],
+    prePushLine(commits.second!, commits.first),
+    registryMissingOnlyPreload(box, "never-missing"),
+  );
+
+  assertCompleted(result, 0);
+  assert.doesNotMatch(result.stderr, /incomplete/i);
+  assert.doesNotMatch(result.stderr, /limit:/i);
 });
 
 test("offline package lookup never claims that capped package names were checked", async (t) => {

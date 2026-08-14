@@ -41,6 +41,9 @@ interface CheckState {
   incomplete: boolean;
 }
 
+/** The only four externally meaningful results of a hull scan. */
+type ScanResult = "clean" | "finding" | "incomplete" | "finding-plus-incomplete";
+
 interface PackageCandidate {
   dep: NewDep;
   head: string;
@@ -51,6 +54,19 @@ function findingExit(state: CheckState): number {
   return state.prePush ? 3 : 1;
 }
 
+function scanResult(state: CheckState): ScanResult {
+  if (state.finding && state.incomplete) return "finding-plus-incomplete";
+  if (state.finding) return "finding";
+  if (state.incomplete) return "incomplete";
+  return "clean";
+}
+
+function incompleteDetail(message: string): void {
+  // Keep this on the stage's one diagnostic line. Pre-push must fail open, but
+  // its success status can never be mistaken for a complete clean scan.
+  detail(`${message}; INCOMPLETE: no clean result`);
+}
+
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -59,7 +75,7 @@ function reportFailure(state: CheckState, stage: string, error: unknown): void {
   // Printing is not enough: a stage that could not run means this range was
   // never fully inspected, and the exit code has to be able to say so.
   state.incomplete = true;
-  detail(`rocky check ${stage} could not run: ${errorMessage(error)}`);
+  incompleteDetail(`rocky check ${stage} could not run: ${errorMessage(error)}`);
 }
 
 interface GitReadOptions {
@@ -172,7 +188,7 @@ async function resolveNewRef(head: string): Promise<DiffRange> {
   return { base: await emptyTree(), head };
 }
 
-async function pushRanges(): Promise<DiffRange[]> {
+async function pushRanges(state: CheckState): Promise<DiffRange[]> {
   const ranges: DiffRange[] = [];
   for (const ref of parsePrePushStdin(await readCheckInput())) {
     const range = rangeForPush(ref);
@@ -181,7 +197,8 @@ async function pushRanges(): Promise<DiffRange[]> {
       try {
         ranges.push(await resolveNewRef(range.head));
       } catch (error) {
-        detail(`ref ${ref.localRef} not inspected by secret or package stages: ${errorMessage(error)}`);
+        state.incomplete = true;
+        incompleteDetail(`ref ${ref.localRef} not inspected by secret or package stages: ${errorMessage(error)}`);
       }
     } else {
       ranges.push({ base: range.base, head: range.head });
@@ -208,7 +225,7 @@ async function manualRange(): Promise<DiffRange> {
   return { base: await emptyTree(), head: "HEAD" };
 }
 
-async function addedLines(ranges: readonly DiffRange[]): Promise<AddedLine[]> {
+async function addedLines(ranges: readonly DiffRange[], state: CheckState): Promise<AddedLine[]> {
   const added: AddedLine[] = [];
   for (const range of ranges) {
     const diff = await git([
@@ -218,7 +235,10 @@ async function addedLines(ranges: readonly DiffRange[]): Promise<AddedLine[]> {
     added.push(...parseUnifiedZeroDiff(diff));
   }
   if (added.length > MAX_LINES) {
-    detail(`added-line limit: ${added.length} found; first ${MAX_LINES} checked, ${added.length - MAX_LINES} not checked`);
+    state.incomplete = true;
+    incompleteDetail(
+      `added-line limit: ${added.length} found; first ${MAX_LINES} checked, ${added.length - MAX_LINES} skipped`,
+    );
     return added.slice(0, MAX_LINES);
   }
   return added;
@@ -247,7 +267,7 @@ async function showFile(rev: string, path: string): Promise<string | null> {
   return result.stdout;
 }
 
-async function packageCandidates(ranges: readonly DiffRange[]): Promise<PackageCandidate[]> {
+async function packageCandidates(ranges: readonly DiffRange[], state: CheckState): Promise<PackageCandidate[]> {
   const candidates: PackageCandidate[] = [];
   for (const range of ranges) {
     const paths = (await git(
@@ -262,7 +282,8 @@ async function packageCandidates(ranges: readonly DiffRange[]): Promise<PackageC
       const after = await showFile(range.head, path);
       const dependencies = newDependencyNames(before, after);
       if (dependencies === null) {
-        detail(`package check skipped for ${path}: old manifest is malformed`);
+        state.incomplete = true;
+        incompleteDetail(`package check skipped for ${path}: old manifest is malformed`);
         continue;
       }
       for (const dep of dependencies) candidates.push({ dep, head: range.head });
@@ -271,8 +292,8 @@ async function packageCandidates(ranges: readonly DiffRange[]): Promise<PackageC
   return candidates;
 }
 
-async function checkablePackageNames(ranges: readonly DiffRange[]): Promise<string[]> {
-  const candidates = await packageCandidates(ranges);
+async function checkablePackageNames(ranges: readonly DiffRange[], state: CheckState): Promise<string[]> {
+  const candidates = await packageCandidates(ranges, state);
   const byHead = new Map<string, NewDep[]>();
   for (const candidate of candidates) {
     const deps = byHead.get(candidate.head) ?? [];
@@ -326,10 +347,23 @@ async function packageStage(
   quiet: boolean,
   state: CheckState,
 ): Promise<void> {
-  const names = await checkablePackageNames(ranges);
-  if (offline || names.length === 0 || !(await registryConsent(quiet))) return;
-  if (names.length > MAX_PACKAGES) {
-    detail(`package limit: ${names.length} found; first ${MAX_PACKAGES} checked, ${names.length - MAX_PACKAGES} not checked`);
+  const names = await checkablePackageNames(ranges, state);
+  const capped = names.length > MAX_PACKAGES;
+  if (capped) {
+    state.incomplete = true;
+  }
+  if (offline || names.length === 0 || !(await registryConsent(quiet))) {
+    if (capped) {
+      incompleteDetail(
+        `package limit: ${names.length} found; first ${MAX_PACKAGES} eligible, ${names.length - MAX_PACKAGES} skipped`,
+      );
+    }
+    return;
+  }
+  if (capped) {
+    incompleteDetail(
+      `package limit: ${names.length} found; first ${MAX_PACKAGES} checked, ${names.length - MAX_PACKAGES} skipped`,
+    );
   }
   const result = await checkPackages(names.slice(0, MAX_PACKAGES));
   if (result.unreachable.length > 0) {
@@ -412,12 +446,12 @@ async function runCheck(rest: readonly string[], state: CheckState): Promise<num
   const quiet = flags.has("--quiet");
   if (flags.has("--install-hook")) return installHookFlow(quiet);
 
-  const ranges = state.prePush ? await pushRanges() : [await manualRange()];
-  if (ranges.length === 0) return 0;
+  const ranges = state.prePush ? await pushRanges(state) : [await manualRange()];
+  if (ranges.length === 0) return scanResult(state) === "incomplete" && !state.prePush ? 2 : findingExit(state);
   let lines: AddedLine[] = [];
 
   try {
-    lines = await addedLines(ranges);
+    lines = await addedLines(ranges, state);
     announceSecretFindings(lines, quiet, state);
   } catch (error) {
     reportFailure(state, "secret scan", error);
@@ -437,7 +471,8 @@ async function runCheck(rest: readonly string[], state: CheckState): Promise<num
     }
   }
 
-  if (!state.finding && state.incomplete && !state.prePush) return 2;
+  const result = scanResult(state);
+  if (result === "incomplete" && !state.prePush) return 2;
   return findingExit(state);
 }
 
