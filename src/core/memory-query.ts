@@ -9,7 +9,7 @@ import {
   retrievalTokens,
   similarity,
 } from "./fingerprint.js";
-import { boundTripleRecord, loadMemory } from "./memory-read.js";
+import { boundTripleRecord, canonicalPath, loadMemory } from "./memory-read.js";
 import type { FailureRecord, FixRecord, LinkBasis, LinkConfidence, MemoryRecord, TripleRecord } from "./memory-read.js";
 import { triplesForFile } from "./dictionary.js";
 
@@ -45,6 +45,24 @@ export interface KnowledgeSearchHit {
   complete?: boolean;
   coverageStatus?: "complete" | "truncated" | "unknown";
 }
+export interface KnowledgeCoverageSummary {
+  status: "complete" | "truncated" | "unknown";
+  complete: boolean;
+  filesCovered: number;
+  truncatedFiles: number;
+}
+export interface WhyFilePossible {
+  id: string;
+  ts: number;
+  source: "agent-hook";
+  reason: "path_may_be_omitted";
+}
+export interface WhyFileEvidence {
+  matches: TripleRecord[];
+  possible: WhyFilePossible[];
+  coverage: KnowledgeCoverageSummary;
+  coverageIncomplete: boolean;
+}
 export interface MemoryQueries {
   recall(input: RecallQuery): RecallHit[];
   recentFailures(input?: RecentFailuresQuery): RecentFailureHit[];
@@ -52,6 +70,7 @@ export interface MemoryQueries {
   searchKnowledge(input: KnowledgeSearchQuery): KnowledgeSearchHit[];
   fetchRecord(id: string): MemoryRecord | undefined;
   whyFile(path: string, limit?: number): TripleRecord[];
+  whyFileEvidence?: (path: string, limit?: number) => WhyFileEvidence;
 }
 
 export type FingerprintLookup = string | readonly string[];
@@ -389,7 +408,6 @@ export function searchKnowledge(
   const now = input.now ?? Date.now();
   const queryTokenSet = queryTokens(input.query);
   const hits: KnowledgeSearchHit[] = [];
-  const sourceCoverage = new Map<string, TripleRecord["mechanism"]["coverageStatus"]>();
   const wants = (kind: KnowledgeSearchHit["kind"]): boolean => input.kind === undefined || input.kind === kind;
 
   const entries: Array<{ record: MemoryRecord; tokenSet: Set<string>; snippet: string }> = [];
@@ -405,7 +423,6 @@ export function searchKnowledge(
     } else if (record.kind === "fix" && wants("fix")) {
       entries.push({ record, tokenSet: retrievalTokens(record.cmd), snippet: record.cmd.slice(0, 120) });
     } else if (record.kind === "triple" && wants("triple") && record.intent) {
-      sourceCoverage.set(record.id, sourceRecord.kind === "triple" ? sourceRecord.mechanism.coverageStatus : undefined);
       entries.push({
         record,
         tokenSet: retrievalTokens(`${record.intent.text} ${record.rationale?.tags.join(" ") ?? ""}`),
@@ -465,7 +482,7 @@ export function searchKnowledge(
         filesCovered: record.mechanism.files.map((file) => file.path),
         truncatedFiles: record.mechanism.truncatedFiles,
         complete: completeTriple(record),
-        ...(sourceCoverage.get(record.id) === undefined ? {} : { coverageStatus: sourceCoverage.get(record.id) }),
+        coverageStatus: record.mechanism.coverageStatus,
       });
     } else if (record.kind === "note") {
       if (score > 0) hits.push({ id: record.id, ts: record.ts, kind: "note", snippet, score, source: "note" });
@@ -479,6 +496,74 @@ export function searchKnowledge(
 export function fetchRecord(records: readonly MemoryRecord[], id: string): MemoryRecord | undefined {
   const record = records.find((candidate) => candidate.id === id);
   return record?.kind === "triple" ? boundTripleRecord(record) : record;
+}
+
+function safeCoverageAdd(left: number, right: number): number {
+  if (!Number.isSafeInteger(left) || left < 0 || !Number.isSafeInteger(right) || right < 0) return Number.MAX_SAFE_INTEGER;
+  const sum = left + right;
+  return Number.isSafeInteger(sum) ? sum : Number.MAX_SAFE_INTEGER;
+}
+
+function rawTripleFiles(record: TripleRecord): string[] {
+  const mechanism = record.mechanism as unknown as { files?: unknown };
+  if (!Array.isArray(mechanism.files)) return [];
+  const seen = new Set<string>();
+  const paths: string[] = [];
+  for (const value of mechanism.files) {
+    if (typeof value !== "object" || value === null || Array.isArray(value)) continue;
+    const path = canonicalPath(typeof (value as { path?: unknown }).path === "string" ? (value as { path: string }).path : "");
+    if (path && !seen.has(path)) {
+      seen.add(path);
+      paths.push(path);
+    }
+  }
+  return paths;
+}
+
+function worstCoverageStatus(current: KnowledgeCoverageSummary["status"], next: KnowledgeCoverageSummary["status"]): KnowledgeCoverageSummary["status"] {
+  if (current === "unknown" || next === "unknown") return "unknown";
+  if (current === "truncated" || next === "truncated") return "truncated";
+  return "complete";
+}
+
+export function whyFileEvidence(records: readonly MemoryRecord[], path: string, limit = 5): WhyFileEvidence {
+  const target = canonicalPath(path);
+  const matches = triplesForFile(records, path, limit);
+  const boundedMatches = new Set(matches.map((record) => record.id));
+  const possible: WhyFilePossible[] = [];
+  let status: KnowledgeCoverageSummary["status"] = "complete";
+  let filesCovered = 0;
+  let truncatedFiles = 0;
+  let hasIncomplete = false;
+  for (const source of records) {
+    if (source.kind !== "triple") continue;
+    const bounded = boundTripleRecord(source);
+    const rawPaths = rawTripleFiles(source);
+    const boundedPaths = new Set(bounded.mechanism.files.map((file) => canonicalPath(file.path)).filter(Boolean));
+    const rawContainsTarget = target.length > 0 && rawPaths.some((candidate) => candidate === target || candidate.endsWith(`/${target}`));
+    const boundedContainsTarget = target.length > 0 && [...boundedPaths].some((candidate) => candidate === target || candidate.endsWith(`/${target}`));
+    const sourceStatus = bounded.mechanism.coverageStatus ?? "unknown";
+    const sourceIncomplete = sourceStatus !== "complete" || bounded.mechanism.truncatedFiles !== 0 || rawPaths.length > bounded.mechanism.files.length;
+    if (sourceIncomplete) {
+      hasIncomplete = true;
+      status = worstCoverageStatus(status, sourceStatus);
+      if (sourceStatus === "complete" || sourceStatus === "truncated") status = worstCoverageStatus(status, "truncated");
+      truncatedFiles = safeCoverageAdd(truncatedFiles, bounded.mechanism.truncatedFiles);
+      if (!boundedContainsTarget || (rawContainsTarget && !boundedContainsTarget)) {
+        if (!boundedMatches.has(source.id) && possible.length < limit) {
+          possible.push({ id: source.id, ts: source.ts, source: source.origin, reason: "path_may_be_omitted" });
+        }
+      }
+    }
+    filesCovered = Math.max(filesCovered, bounded.mechanism.files.length);
+  }
+  const coverage: KnowledgeCoverageSummary = {
+    status,
+    complete: !hasIncomplete && status === "complete" && truncatedFiles === 0,
+    filesCovered,
+    truncatedFiles,
+  };
+  return { matches, possible, coverage, coverageIncomplete: !coverage.complete };
 }
 
 export function whyFile(records: readonly MemoryRecord[], path: string, limit = 5): TripleRecord[] {
@@ -579,5 +664,6 @@ export function createMemoryQueries(load: () => MemoryRecord[] = loadMemory): Me
     searchKnowledge: (input) => searchKnowledge(load(), input),
     fetchRecord: (id) => fetchRecord(load(), id),
     whyFile: (path, limit = 5) => whyFile(load(), path, limit),
+    whyFileEvidence: (path, limit = 5) => whyFileEvidence(load(), path, limit),
   };
 }

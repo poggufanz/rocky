@@ -1,6 +1,8 @@
 import { dictionaryRankPortFromConfig, type DictionaryRankPort } from "../ai/dictionary-ai.js";
 import { loadConfig } from "../core/config.js";
-import { digestBuckets, queryDictionary, quizCandidates, triplesForFile, type DictionaryHit } from "../core/dictionary.js";
+import { digestBuckets, queryDictionary, quizCandidates, type DictionaryHit } from "../core/dictionary.js";
+import { canonicalPath } from "../core/memory-read.js";
+import { whyFileEvidence } from "../core/memory-query.js";
 import { loadMemory, type MemoryRecord } from "../core/memory-read.js";
 import { resolveRockyPaths } from "../core/state-paths.js";
 import { createTtyPromptPort } from "../setup/prompt.js";
@@ -129,11 +131,11 @@ function evidence(hits: DictionaryHit[], support: (line: string) => void): void 
 }
 
 function fileForQuery(triple: DictionaryHit["triple"], query: string): DictionaryHit["triple"]["mechanism"]["files"][number] | undefined {
-  const normalized = query.replaceAll("\\", "/").replace(/^\.\//u, "");
+  const normalized = canonicalPath(query);
   return triple.mechanism.files.find((file) => {
-    const candidate = file.path.replaceAll("\\", "/").replace(/^\.\//u, "");
+    const candidate = canonicalPath(file.path);
     return candidate === normalized || candidate.endsWith(`/${normalized}`);
-  }) ?? triple.mechanism.files[0];
+  });
 }
 
 function reorder(hits: readonly DictionaryHit[], rankedIds: readonly string[]): DictionaryHit[] | undefined {
@@ -225,10 +227,20 @@ export function why(argv: string[], deps: DictionaryCommandDeps = {}): number {
     return 2;
   }
   const safePath = terminalSafe(path, MAX_PATH_DISPLAY_BYTES);
-  const hits = triplesForFile(records(), path);
+  const memory = records();
+  const evidenceResult = whyFileEvidence(memory, path);
+  const hits = evidenceResult.matches;
   if (hits.length === 0) {
+    if (evidenceResult.coverageIncomplete || evidenceResult.possible.length > 0) {
+      speak(terminalSafe(`"${safePath}"... I not know if agent touch. coverage incomplete.`, MAX_OUTPUT_LINE_BYTES));
+      support(terminalSafe(`coverage status: ${evidenceResult.coverage.status}; possible path omitted.`, MAX_OUTPUT_LINE_BYTES));
+      return 0;
+    }
     speak(terminalSafe(`"${safePath}"... nobody touch this while I listen.`, MAX_OUTPUT_LINE_BYTES));
     return 0;
+  }
+  if (evidenceResult.coverageIncomplete) {
+    support(terminalSafe(`coverage status: ${evidenceResult.coverage.status}; some path may be omitted.`, MAX_OUTPUT_LINE_BYTES));
   }
   for (const triple of hits) {
     const selected = fileForQuery(triple, path);

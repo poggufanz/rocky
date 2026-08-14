@@ -14,9 +14,11 @@ import {
   type BigIntStats,
 } from "node:fs";
 import { resolveRockyPaths, type RockyPaths } from "../core/state-paths.js";
+import { canonicalPath } from "../core/memory-read.js";
+import { isSafeNonNegativeInteger } from "../core/memory-read.js";
 import { recordTripleOnce } from "../core/memory.js";
 import type { TripleFile, TripleRecord } from "../core/memory.js";
-import { loadMemory, MAX_TRIPLE_FILES } from "../core/memory-read.js";
+import { loadMemory, MAX_TRIPLE_FILES, pathIdentityHash, rememberTripleFileIdentity } from "../core/memory-read.js";
 import { digestBuckets } from "../core/dictionary.js";
 import { loadConfig, type ConfigLoadResult } from "../core/config-read.js";
 import { redactSecretsAtBoundary, replaceAnsiAndControls, stripInvisibleControls } from "../core/redact.js";
@@ -368,7 +370,17 @@ function parseNumstat(value: string | undefined): [number, number] | undefined {
   if (match[1] === "-" || match[2] === "-") return undefined;
   const added = Number(match[1]);
   const removed = Number(match[2]);
-  return Number.isSafeInteger(added) && Number.isSafeInteger(removed) ? [added, removed] : undefined;
+  return isSafeNonNegativeInteger(added) && isSafeNonNegativeInteger(removed) ? [added, removed] : undefined;
+}
+
+function safeCountSum(left: number, right: number): [number, boolean] {
+  if (!isSafeNonNegativeInteger(left) || !isSafeNonNegativeInteger(right)) return [0, false];
+  const value = left + right;
+  return [isSafeNonNegativeInteger(value) ? value : 0, isSafeNonNegativeInteger(value)];
+}
+
+function pathIdentity(value: string): string {
+  return canonicalPath(operationalText(value, MAX_PATH_CHARS));
 }
 
 interface DiffEntry {
@@ -385,13 +397,13 @@ function parseNumstatEntries(value: string | undefined): DiffEntry[] | undefined
     if (line.trim().length === 0) continue;
     const match = /^\s*(\d+|-)\t(\d+|-)\t(.+?)\s*$/u.exec(line);
     if (!match) return undefined;
-    const path = match[3]?.trim();
+    const path = match[3] === undefined ? "" : pathIdentity(match[3]);
     if (!path || seen.has(path)) continue;
     const plusMinus: [number, number] = [
       match[1] === "-" ? 0 : Number(match[1]),
       match[2] === "-" ? 0 : Number(match[2]),
     ];
-    if (!Number.isSafeInteger(plusMinus[0]) || !Number.isSafeInteger(plusMinus[1])) continue;
+    if (!isSafeNonNegativeInteger(plusMinus[0]) || !isSafeNonNegativeInteger(plusMinus[1])) continue;
     seen.add(path);
     entries.push({ path, plusMinus, statsKnown: match[1] !== "-" && match[2] !== "-" });
   }
@@ -401,7 +413,8 @@ function parseNumstatEntries(value: string | undefined): DiffEntry[] | undefined
 function parseUntrackedEntries(value: string | undefined): DiffEntry[] | undefined {
   if (value === undefined) return undefined;
   return value.split(/\r?\n/u).map((line) => line.trim()).filter(Boolean)
-    .map((path) => ({ path, plusMinus: [0, 0] as [number, number], statsKnown: false }));
+    .map((path) => ({ path: pathIdentity(path), plusMinus: [0, 0] as [number, number], statsKnown: false }))
+    .filter((entry) => entry.path.length > 0);
 }
 
 function mergeDiffEntries(...sources: Array<DiffEntry[] | undefined>): DiffEntry[] | undefined {
@@ -409,12 +422,20 @@ function mergeDiffEntries(...sources: Array<DiffEntry[] | undefined>): DiffEntry
   const merged = new Map<string, { plusMinus: [number, number]; statsKnown: boolean }>();
   for (const source of sources) {
     for (const entry of source ?? []) {
-      const prior = merged.get(entry.path);
-      merged.set(entry.path, prior === undefined
+      const path = pathIdentity(entry.path);
+      if (!path) continue;
+      const prior = merged.get(path);
+      const [added, addedOk] = prior === undefined
+        ? [entry.plusMinus[0], true] as [number, boolean]
+        : safeCountSum(prior.plusMinus[0], entry.plusMinus[0]);
+      const [removed, removedOk] = prior === undefined
+        ? [entry.plusMinus[1], true] as [number, boolean]
+        : safeCountSum(prior.plusMinus[1], entry.plusMinus[1]);
+      merged.set(path, prior === undefined
         ? { plusMinus: [...entry.plusMinus] as [number, number], statsKnown: entry.statsKnown }
         : {
-          plusMinus: [prior.plusMinus[0] + entry.plusMinus[0], prior.plusMinus[1] + entry.plusMinus[1]],
-          statsKnown: prior.statsKnown && entry.statsKnown,
+          plusMinus: [added, removed],
+          statsKnown: prior.statsKnown && entry.statsKnown && addedOk && removedOk,
         });
     }
   }
@@ -426,11 +447,18 @@ function baselineMap(intent: IntentEvent | undefined): Map<string, [number, numb
   if (baseline?.status !== "captured") return undefined;
   const mapped = new Map<string, [number, number]>();
   for (const file of baseline.files ?? []) {
-    const path = operationalText(file.path, MAX_PATH_CHARS);
+    const path = pathIdentity(file.path);
+    if (!path) continue;
     const previous = mapped.get(path);
-    mapped.set(path, previous === undefined
-      ? [...file.plusMinus] as [number, number]
-      : [previous[0] + file.plusMinus[0], previous[1] + file.plusMinus[1]]);
+    if (!isSafeNonNegativeInteger(file.plusMinus[0]) || !isSafeNonNegativeInteger(file.plusMinus[1])) return undefined;
+    if (previous === undefined) {
+      mapped.set(path, [...file.plusMinus] as [number, number]);
+      continue;
+    }
+    const [added, addedOk] = safeCountSum(previous[0], file.plusMinus[0]);
+    const [removed, removedOk] = safeCountSum(previous[1], file.plusMinus[1]);
+    if (!addedOk || !removedOk) return undefined;
+    mapped.set(path, [added, removed]);
   }
   return mapped;
 }
@@ -477,32 +505,46 @@ export async function annotateBatch(key: string, deps: AnnotateDeps = {}): Promi
     const coverageCandidates = new Map<string, string>();
     let coverageMetadataSeen = false;
     let coverageMetadataComplete = true;
-    let adapterTruncatedFiles = 0;
+    let coverageMetadataContradiction = false;
+    let adapterMaxTruncatedFiles = 0;
     let adapterTruncationMarkers = 0;
     for (const event of batchEvents) {
       if (event.kind !== "mechanism") continue;
       if (event.coveragePaths !== undefined || event.coveragePathsComplete !== undefined) {
         coverageMetadataSeen = true;
-        if (event.coveragePathsComplete === false
-          || (event.coveragePathsComplete === true && event.coveragePaths === undefined)) {
+        if (event.coveragePathsComplete !== true || event.coveragePaths === undefined) {
           coverageMetadataComplete = false;
         }
+        const eventPath = pathIdentity(event.path);
+        const eventCandidates = new Set<string>();
         for (const candidate of event.coveragePaths ?? []) {
-          const candidateGitPath = operationalText(candidate, MAX_PATH_CHARS);
-          const candidatePath = cleanText(candidate, MAX_PATH_CHARS);
-          if (!candidateGitPath || !candidatePath) {
+          const candidateGitPath = pathIdentity(candidate);
+          const candidatePath = canonicalPath(cleanText(candidate, MAX_PATH_CHARS));
+          if (!candidateGitPath || !candidatePath || eventCandidates.has(candidateGitPath)) {
             coverageMetadataComplete = false;
+            coverageMetadataContradiction = true;
             continue;
           }
+          eventCandidates.add(candidateGitPath);
           coverageCandidates.set(candidateGitPath, candidatePath);
         }
+        if (event.coveragePathsComplete === true && (!eventPath || !eventCandidates.has(eventPath))) {
+          coverageMetadataComplete = false;
+          coverageMetadataContradiction = true;
+        }
+        if (event.truncatedFiles !== undefined && event.coveragePaths !== undefined &&
+            (!isSafeNonNegativeInteger(event.truncatedFiles) || eventCandidates.size < event.truncatedFiles + 1)) {
+          coverageMetadataComplete = false;
+          coverageMetadataContradiction = true;
+        }
       }
-      const gitPath = operationalText(event.path, MAX_PATH_CHARS);
-      const path = cleanText(event.path, MAX_PATH_CHARS);
+      const gitPath = pathIdentity(event.path);
+      const path = canonicalPath(cleanText(event.path, MAX_PATH_CHARS)) || cleanText(event.path, MAX_PATH_CHARS);
       if (!path || !gitPath) continue;
       const excerpt = event.excerpt === undefined ? undefined : cleanText(event.excerpt, MAX_EXCERPT_CHARS) || undefined;
       if (event.truncatedFiles !== undefined) {
-        adapterTruncatedFiles += event.truncatedFiles;
+        if (!isSafeNonNegativeInteger(event.truncatedFiles)) coverageMetadataContradiction = true;
+        adapterMaxTruncatedFiles = Math.max(adapterMaxTruncatedFiles, event.truncatedFiles);
         adapterTruncationMarkers += 1;
       }
       byPath.set(gitPath, { path, excerpt, ...(event.provenance === undefined ? {} : { provenance: event.provenance }) });
@@ -544,13 +586,20 @@ export async function annotateBatch(key: string, deps: AnnotateDeps = {}): Promi
     const inferred = new Map<string, { path: string; plusMinus: [number, number]; provenance: FileProvenance }>();
     if (baselineByPath !== undefined && currentEntries !== undefined) {
       for (const entry of currentEntries) {
-        const gitPath = operationalText(entry.path, MAX_PATH_CHARS);
+        const gitPath = pathIdentity(entry.path);
         const prior = baselineByPath.get(gitPath);
-        const delta: [number, number] = prior === undefined
+        const delta: [number, number] | undefined = prior === undefined
           ? entry.plusMinus
-          : [Math.max(0, entry.plusMinus[0] - prior[0]), Math.max(0, entry.plusMinus[1] - prior[1])];
-        const cleanPath = cleanText(entry.path, MAX_PATH_CHARS);
+          : (isSafeNonNegativeInteger(entry.plusMinus[0]) && isSafeNonNegativeInteger(entry.plusMinus[1]) &&
+            isSafeNonNegativeInteger(prior[0]) && isSafeNonNegativeInteger(prior[1])
+            ? [Math.max(0, entry.plusMinus[0] - prior[0]), Math.max(0, entry.plusMinus[1] - prior[1])]
+            : undefined);
+        const cleanPath = canonicalPath(cleanText(entry.path, MAX_PATH_CHARS)) || cleanText(entry.path, MAX_PATH_CHARS);
         if (!cleanPath || !gitPath) continue;
+        if (delta === undefined) {
+          baselineStatus = "unknown";
+          continue;
+        }
         const observed = byPath.get(gitPath);
         if (observed) {
           // Tool evidence keeps its stronger provenance while the baseline
@@ -583,26 +632,39 @@ export async function annotateBatch(key: string, deps: AnnotateDeps = {}): Promi
       const committed = parseNumstatEntries(runGit(git, ["diff", "--numstat", `${baseline.head}..${head}`], gitCwd));
       if (committed === undefined) baselineStatus = "unknown";
       for (const entry of committed ?? []) {
-        const gitPath = operationalText(entry.path, MAX_PATH_CHARS);
-        const cleanPath = cleanText(entry.path, MAX_PATH_CHARS);
+        const gitPath = pathIdentity(entry.path);
+        const cleanPath = canonicalPath(cleanText(entry.path, MAX_PATH_CHARS)) || cleanText(entry.path, MAX_PATH_CHARS);
         if (!gitPath || !cleanPath) continue;
         const prior = baselineByPath.get(gitPath);
-        const delta: [number, number] = prior === undefined
+        const delta: [number, number] | undefined = prior === undefined
           ? entry.plusMinus
-          : [Math.max(0, entry.plusMinus[0] - prior[0]), Math.max(0, entry.plusMinus[1] - prior[1])];
+          : (isSafeNonNegativeInteger(entry.plusMinus[0]) && isSafeNonNegativeInteger(entry.plusMinus[1]) &&
+            isSafeNonNegativeInteger(prior[0]) && isSafeNonNegativeInteger(prior[1])
+            ? [Math.max(0, entry.plusMinus[0] - prior[0]), Math.max(0, entry.plusMinus[1] - prior[1])]
+            : undefined);
+        if (delta === undefined) {
+          baselineStatus = "unknown";
+          continue;
+        }
         const observed = byPath.get(gitPath);
         if (observed) {
           if (!entry.statsKnown) baselineStatus = "unknown";
           if (prior !== undefined) baselineStatus = "unknown";
           const current = observed.plusMinus ?? [0, 0];
-          observed.plusMinus = [current[0] + delta[0], current[1] + delta[1]];
+          const [added, addedOk] = safeCountSum(current[0], delta[0]);
+          const [removed, removedOk] = safeCountSum(current[1], delta[1]);
+          if (!addedOk || !removedOk) baselineStatus = "unknown";
+          observed.plusMinus = [added, removed];
           byPath.set(gitPath, observed);
           continue;
         }
         const inferredValue = inferred.get(gitPath);
         if (inferredValue) {
           if (!entry.statsKnown) baselineStatus = "unknown";
-          inferredValue.plusMinus = [inferredValue.plusMinus[0] + delta[0], inferredValue.plusMinus[1] + delta[1]];
+          const [added, addedOk] = safeCountSum(inferredValue.plusMinus[0], delta[0]);
+          const [removed, removedOk] = safeCountSum(inferredValue.plusMinus[1], delta[1]);
+          if (!addedOk || !removedOk) baselineStatus = "unknown";
+          inferredValue.plusMinus = [added, removed];
           inferred.set(gitPath, inferredValue);
           continue;
         }
@@ -615,11 +677,27 @@ export async function annotateBatch(key: string, deps: AnnotateDeps = {}): Promi
     for (const [gitPath, value] of inferred) {
       byPath.set(gitPath, value);
     }
+    // A complete adapter witness is stronger than the surviving individual
+    // event appends. Materialize bounded, conservative tool-observed entries
+    // for identities whose event append was lost so persisted files and the
+    // counted coverage union cannot disagree.
+    if (coverageMetadataSeen && coverageMetadataComplete && !coverageMetadataContradiction) {
+      for (const [gitPath, path] of coverageCandidates) {
+        if (!byPath.has(gitPath)) {
+          byPath.set(gitPath, { path, plusMinus: [0, 0], provenance: "tool-observed" });
+        }
+      }
+    }
     if (byPath.size === 0 && !(intentText !== undefined && rationaleText !== undefined)) {
       removeClaim(claim, paths);
       return undefined;
     }
-    const allMechanisms = [...byPath.entries()];
+    const allMechanisms = coverageMetadataSeen && coverageMetadataComplete && !coverageMetadataContradiction
+      ? [
+        ...[...coverageCandidates.keys()].filter((gitPath) => byPath.has(gitPath)).map((gitPath) => [gitPath, byPath.get(gitPath)!] as const),
+        ...[...byPath.entries()].filter(([gitPath]) => !coverageCandidates.has(gitPath)),
+      ]
+      : [...byPath.entries()];
     // Coverage identities are unioned before applying the durable eight-file
     // cap.  A count-only legacy marker can prove one adapter overflow, but
     // multiple markers may overlap, so those remain explicitly unknown.
@@ -627,31 +705,36 @@ export async function annotateBatch(key: string, deps: AnnotateDeps = {}): Promi
       coverageCandidates.set(gitPath, value.path);
     }
     const candidateCount = !coverageMetadataSeen && adapterTruncationMarkers === 1
-      ? Math.max(coverageCandidates.size, byPath.size + adapterTruncatedFiles)
+      ? Math.max(coverageCandidates.size, 64 + adapterMaxTruncatedFiles)
       : coverageCandidates.size;
     const coverageUnknown = spoolMayBeTruncated
       || (allMechanisms.length === 0 && intentText !== undefined && rationaleText !== undefined)
-      || (coverageMetadataSeen && !coverageMetadataComplete)
-      || (!coverageMetadataSeen && adapterTruncationMarkers > 1);
+      || (coverageMetadataSeen && (!coverageMetadataComplete || coverageMetadataContradiction))
+      || (!coverageMetadataSeen && adapterTruncationMarkers > 0);
     const truncatedFiles = Math.max(0, candidateCount - MAX_TRIPLE_FILES);
     const coverageStatus = coverageUnknown
       ? "unknown" as const
       : truncatedFiles > 0
         ? "truncated" as const
         : "complete" as const;
+    const displayPathCounts = new Map<string, number>();
+    for (const [, value] of allMechanisms) displayPathCounts.set(value.path, (displayPathCounts.get(value.path) ?? 0) + 1);
     const files: TripleFile[] = allMechanisms.slice(0, MAX_TRIPLE_FILES).map(([gitPath, value]) => {
       const excerpt = value?.excerpt;
       const knownDelta = value.plusMinus;
       const numstatRaw = knownDelta === undefined ? runGit(git, ["diff", "--numstat", "--", gitPath], gitCwd) : undefined;
       const numstat = knownDelta ?? parseNumstat(numstatRaw);
       if (knownDelta === undefined && numstat === undefined) baselineStatus = "unknown";
-      return {
+      const result: TripleFile = {
         path: value.path,
         plusMinus: numstat ?? [0, 0],
         props: propsFromExcerpt(excerpt),
         ...(excerpt === undefined ? {} : { excerpt }),
         ...(value.provenance === undefined ? {} : { provenance: value.provenance }),
+        ...(displayPathCounts.get(value.path) !== 1 ? { identityHash: pathIdentityHash(gitPath) } : {}),
       };
+      rememberTripleFileIdentity(result, gitPath);
+      return result;
     });
 
     let port = deps.ai;

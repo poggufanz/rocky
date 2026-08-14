@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { canonicalPath } from "../core/memory-read.js";
 
 export type AgentName = "claude-code" | "codex";
 
@@ -144,12 +145,16 @@ export function parseAgentEvent(value: unknown): AgentEvent | undefined {
         const seen = new Set<string>();
         for (const value of rawCoveragePaths.slice(0, MAX_COVERAGE_PATHS)) {
           if (typeof value !== "string" || value.length === 0 || value.length > 1024) return undefined;
-          if (!seen.has(value)) {
-            seen.add(value);
-            coveragePaths.push(value);
+          const identity = canonicalPath(value);
+          if (!identity) return undefined;
+          if (seen.has(identity)) {
+            coveragePathsComplete = false;
+            continue;
           }
+          seen.add(identity);
+          coveragePaths.push(identity);
         }
-        coveragePathsComplete = rawCoveragePaths.length <= MAX_COVERAGE_PATHS;
+        if (rawCoveragePaths.length > MAX_COVERAGE_PATHS) coveragePathsComplete = false;
       }
       if (record.coveragePathsComplete !== undefined) {
         if (typeof record.coveragePathsComplete !== "boolean") return undefined;

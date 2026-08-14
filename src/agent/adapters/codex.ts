@@ -5,6 +5,7 @@ import {
   type AgentEvent,
   type RationaleEvent,
 } from "../schema.js";
+import { canonicalPath } from "../../core/memory-read.js";
 import { MAX_ADAPTER_EVENTS, type ParsedHookPayload } from "./claude-code.js";
 
 type PlainRecord = Record<string, unknown>;
@@ -99,7 +100,7 @@ function changedPaths(command: string): string[] {
   const paths: string[] = [];
   const marker = /^\s*\*\*\*\s+(?:Update|Add|Delete)\s+File:\s*(.+?)\s*$/gmu;
   for (const match of command.matchAll(marker)) {
-    const path = match[1]?.trim();
+    const path = match[1] === undefined ? "" : canonicalPath(match[1]);
     if (path && !paths.includes(path)) paths.push(path);
   }
   if (paths.length > 0) return paths;
@@ -107,7 +108,7 @@ function changedPaths(command: string): string[] {
   // A conservative fallback for clients that send a unified git diff.
   const diff = /^\s*diff --git a\/([^\s]+) b\/([^\s]+)\s*$/gmu;
   for (const match of command.matchAll(diff)) {
-    const path = match[2]?.trim();
+    const path = match[2] === undefined ? "" : canonicalPath(match[2]);
     if (path && !paths.includes(path)) paths.push(path);
   }
   return paths;
@@ -176,8 +177,9 @@ function parseModern(payload: PlainRecord, now: number): ParsedHookPayload {
             payload.path,
             payload.filename,
           );
-          if (!directPath) continue;
-          candidates.push({ path: directPath, edit });
+          const identity = canonicalPath(directPath ?? "");
+          if (!identity) continue;
+          candidates.push({ path: identity, edit });
         }
       }
       const byPath = new Map<string, AgentEvent>();
@@ -202,11 +204,13 @@ function parseModern(payload: PlainRecord, now: number): ParsedHookPayload {
           input.patch,
           command,
         );
+        const identity = canonicalPath(candidate.path);
+        if (!identity) continue;
         const event = parseAgentEvent({
           v: 1, agent: "codex", kind: "mechanism", ts: now, tool,
-          path: candidate.path, excerpt, provenance: "tool-observed",
+          path: identity, excerpt, provenance: "tool-observed",
         });
-        if (event) byPath.set(candidate.path, event);
+        if (event) byPath.set(identity, event);
       }
       const bounded = [...byPath.values()].slice(0, MAX_ADAPTER_EVENTS);
       if (bounded.length === 0) return undefined;

@@ -14,6 +14,7 @@ import {
   type AgentEvent,
   type RationaleEvent,
 } from "../schema.js";
+import { canonicalPath } from "../../core/memory-read.js";
 
 export type ParsedHookPayload =
   | {
@@ -201,11 +202,13 @@ export function parseClaudeHookPayload(raw: unknown, now = Date.now()): ParsedHo
             ?? nonEmptyString(input.new_source)
             ?? nonEmptyString(input.file_text)
             ?? nonEmptyString(input.content);
+          const identity = canonicalPath(path);
+          if (!identity) continue;
           const event = parseAgentEvent({
-            v: 1, agent: "claude-code", kind: "mechanism", ts: now, tool, path, excerpt,
+            v: 1, agent: "claude-code", kind: "mechanism", ts: now, tool, path: identity, excerpt,
             provenance: "tool-observed",
           });
-          if (event) byPath.set(path, event);
+          if (event) byPath.set(identity, event);
         }
         return byPath.size === 0 ? undefined : appendPayload(key, [...byPath.values()], [...byPath.keys()]);
       }

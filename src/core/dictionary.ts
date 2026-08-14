@@ -1,5 +1,5 @@
 import { similarity, tokens } from "./fingerprint.js";
-import { boundTripleRecord } from "./memory-read.js";
+import { boundTripleRecord, canonicalPath } from "./memory-read.js";
 import type { MemoryRecord, TripleRecord } from "./memory-read.js";
 
 const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
@@ -41,23 +41,19 @@ export function queryDictionary(records: readonly MemoryRecord[], query: string,
   return hits;
 }
 
-function normalizePath(value: string): string {
-  return value.replaceAll("\\", "/");
-}
-
 export function triplesForFile(records: readonly MemoryRecord[], path: string, limit = 5): TripleRecord[] {
-  const target = normalizePath(path);
+  const target = canonicalPath(path);
   return triples(records)
     .filter((triple) => triple.mechanism.files.some((file) => {
-      const candidate = normalizePath(file.path);
-      return candidate === target || candidate.endsWith(`/${target}`);
+      const candidate = canonicalPath(file.path);
+      return candidate === target || (target.length > 0 && candidate.endsWith(`/${target}`));
     }))
     .sort((a, b) => b.ts - a.ts)
     .slice(0, limit);
 }
 
 function basename(path: string): string {
-  const parts = normalizePath(path).split("/");
+  const parts = canonicalPath(path).split("/");
   return parts[parts.length - 1] || path;
 }
 

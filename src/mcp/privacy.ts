@@ -1,7 +1,8 @@
 import { Buffer } from "node:buffer";
 import { homedir } from "node:os";
 import type { Exposure } from "../core/config-read.js";
-import { boundTripleRecord } from "../core/memory-read.js";
+import { boundTripleRecord, isSafeNonNegativeInteger, MAX_TRIPLE_FILES } from "../core/memory-read.js";
+import { canonicalPath } from "../core/memory-read.js";
 import type { FailureOrigin, FailureRecord, FixRecord, MemoryRecord, TripleRecord } from "../core/memory-read.js";
 import type { KnowledgeSearchHit, RecallHit, RecentFailureHit } from "../core/memory-query.js";
 import { redactSecretsAtBoundary, replaceAnsiAndControls, stripInvisibleControls } from "../core/redact.js";
@@ -191,7 +192,7 @@ function projectOpaqueIds(values: readonly string[], path: string, truncation: T
 }
 
 function safePlusMinus(value: number): number {
-  return Number.isFinite(value) ? value : 0;
+  return isSafeNonNegativeInteger(value) ? value : 0;
 }
 
 function projectTripleFile(
@@ -251,7 +252,44 @@ export function projectKnowledgeHits(
 ): ProjectedKnowledgeResponse {
   const project = (hit: KnowledgeSearchHit): ProjectedKnowledgeHit => {
     const truncation: Truncation = { fields: [] };
-    return {
+    let filesCovered: string[] | undefined;
+    let truncatedFiles: number | undefined;
+    let coverageStatus: ProjectedKnowledgeHit["coverageStatus"] = hit.coverageStatus;
+    let complete = hit.complete;
+    if (hit.filesCovered !== undefined || hit.kind === "triple") {
+      const sourceFiles = Array.isArray(hit.filesCovered) ? hit.filesCovered : [];
+      const unique = new Map<string, string>();
+      let invalid = !Array.isArray(hit.filesCovered) && hit.filesCovered !== undefined;
+      if (hit.kind === "triple" && sourceFiles.length === 0) invalid = true;
+      for (const value of sourceFiles) {
+        if (typeof value !== "string") {
+          invalid = true;
+          continue;
+        }
+        const path = canonicalPath(value);
+        if (!path) {
+          invalid = true;
+          continue;
+        }
+        if (!unique.has(path)) unique.set(path, path);
+      }
+      const allCount = unique.size;
+      const bounded = [...unique.values()].slice(0, MAX_TRIPLE_FILES);
+      const omitted = Math.max(0, allCount - bounded.length);
+      const declaredValid = hit.truncatedFiles === undefined || isSafeNonNegativeInteger(hit.truncatedFiles);
+      if (!declaredValid) invalid = true;
+      const declared = declaredValid && hit.truncatedFiles !== undefined ? hit.truncatedFiles : 0;
+      const total = declared + omitted;
+      if (!Number.isSafeInteger(total)) invalid = true;
+      truncatedFiles = Number.isSafeInteger(total) ? total : 0;
+      if (omitted > 0 && coverageStatus === "complete") coverageStatus = "truncated";
+      if (coverageStatus !== "complete" && coverageStatus !== "truncated") coverageStatus = "unknown";
+      if (invalid) coverageStatus = "unknown";
+      complete = coverageStatus === "complete" && truncatedFiles === 0 && complete === true;
+      filesCovered = projectStringArray(bounded, exposure, "filesCovered", truncation);
+      if (omitted > 0 || (hit.filesCovered?.length ?? 0) > bounded.length) truncation.fields.push("filesCovered");
+    }
+    const projected: ProjectedKnowledgeHit = {
       id: projectOpaqueId(hit.id, "id", truncation),
       ts: hit.ts,
       kind: hit.kind,
@@ -259,14 +297,13 @@ export function projectKnowledgeHits(
       score: Number.isFinite(hit.score) ? hit.score : 0,
       ...(hit.agent === undefined ? {} : { agent: hit.agent }),
       ...(hit.source === undefined ? {} : { source: projectText(hit.source, exposure, "source", truncation) }),
-      ...(hit.filesCovered === undefined ? {} : {
-        filesCovered: projectStringArray(hit.filesCovered, exposure, "filesCovered", truncation),
-      }),
-      ...(hit.truncatedFiles === undefined ? {} : { truncatedFiles: hit.truncatedFiles }),
-      ...(hit.complete === undefined ? {} : { complete: hit.complete }),
-      ...(hit.coverageStatus === undefined ? {} : { coverageStatus: hit.coverageStatus }),
+      ...(filesCovered === undefined ? {} : { filesCovered }),
+      ...(truncatedFiles === undefined ? {} : { truncatedFiles }),
+      ...(complete === undefined ? {} : { complete }),
+      ...(coverageStatus === undefined ? {} : { coverageStatus }),
       truncatedFields: truncation.fields,
     };
+    return projected;
   };
   const items: ProjectedKnowledgeHit[] = [];
   let truncated = false;

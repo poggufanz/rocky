@@ -1,6 +1,6 @@
 import { Buffer } from "node:buffer";
 import type { Exposure } from "../core/config-read.js";
-import type { KnowledgeSearchQuery, MemoryQueries, RecallQuery, RecentFailuresQuery, StatsQuery } from "../core/memory-query.js";
+import type { KnowledgeCoverageSummary, KnowledgeSearchQuery, MemoryQueries, RecallQuery, RecentFailuresQuery, StatsQuery, WhyFileEvidence } from "../core/memory-query.js";
 import type { RecallAiOutcome, RecallWithAiPort } from "../ai/port.js";
 import {
   MAX_RESPONSE_BYTES,
@@ -203,7 +203,7 @@ function descriptors(exposure: Exposure): readonly McpToolDefinition[] {
     },
     {
       name: "why_file", title: "Why file changed",
-      description: "Recent remembered reasons agents changed one file, newest first. Example: {\"path\": \"src/app.css\"}. Reasons are hearsay Rocky heard, not verified facts.",
+      description: "Recent remembered reasons agents changed one file, newest first, with separate incomplete-coverage disclosure. Example: {\"path\": \"src/app.css\"}. Reasons are hearsay Rocky heard, not verified facts.",
       inputSchema: schema({
         path: { type: "string" },
         limit: { type: "integer", minimum: 1, maximum: 10 },
@@ -287,6 +287,29 @@ function boundedSingleResult(
 
 function notFoundResult(): ToolCallResult {
   return cappedResult({ error: { code: "not_found", message: "record not found" } }, true);
+}
+
+function unknownCoverage(): KnowledgeCoverageSummary {
+  return { status: "unknown", complete: false, filesCovered: 0, truncatedFiles: 0 };
+}
+
+function fallbackWhyEvidence(options: CreateToolRegistryOptions, path: string, limit: number): WhyFileEvidence {
+  const matches = options.memory.whyFile(path, limit);
+  const statuses = matches.map((triple) => triple.mechanism.coverageStatus);
+  const status = statuses.includes("unknown") || statuses.length === 0
+    ? "unknown" as const
+    : statuses.includes("truncated") ? "truncated" as const : "complete" as const;
+  const truncatedFiles = matches.reduce((sum, triple) => {
+    const value = triple.mechanism.truncatedFiles;
+    return Number.isSafeInteger(value) && value >= 0 && Number.isSafeInteger(sum + value) ? sum + value : Number.MAX_SAFE_INTEGER;
+  }, 0);
+  const coverage = matches.length === 0 ? unknownCoverage() : {
+    status,
+    complete: status === "complete" && truncatedFiles === 0,
+    filesCovered: Math.min(8, matches.reduce((maximum, triple) => Math.max(maximum, triple.mechanism.files.length), 0)),
+    truncatedFiles,
+  };
+  return { matches, possible: [], coverage, coverageIncomplete: !coverage.complete };
 }
 
 function safeErrorResult(error: ToolExecutionError): ToolCallResult {
@@ -405,10 +428,16 @@ export function createToolRegistry(options: CreateToolRegistryOptions): McpToolR
           }
           case "why_file": {
             const input = parseWhyFileArgs(args);
-            const triples = readMemory(() => options.memory.whyFile(input.path, input.limit));
+            const evidence = readMemory(() => options.memory.whyFileEvidence
+              ? options.memory.whyFileEvidence(input.path, input.limit)
+              : fallbackWhyEvidence(options, input.path, input.limit));
             return cappedResult({
               exposure: options.exposure,
-              items: triples.map((triple) => projectTriple(triple, options.exposure)),
+              items: evidence.matches.map((triple) => projectTriple(triple, options.exposure)),
+              possible: evidence.possible,
+              coverage: evidence.coverage,
+              coverageStatus: evidence.coverage.status,
+              coverageIncomplete: evidence.coverageIncomplete,
               truncated: false,
             });
           }

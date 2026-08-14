@@ -109,7 +109,7 @@ test("knowledge tools search, fetch, and explain one file", async () => {
   assert.equal(search.isError, undefined);
   assert.deepEqual(search.structuredContent.items, [{
     id: "triple-1", ts: 300, kind: "triple", snippet: "naikin button", score: 1 / 3,
-    agent: "codex", source: "agent-hook", filesCovered: ["src/app.css"], truncatedFiles: 0, complete: false, truncatedFields: [],
+    agent: "codex", source: "agent-hook", filesCovered: ["src/app.css"], truncatedFiles: 0, complete: false, coverageStatus: "unknown", truncatedFields: [],
   }]);
 
   const fetched = await knowledgeRegistry().call("fetch_record", { id: "triple-1" }, signal);
@@ -242,7 +242,13 @@ test("oversized single fetch returns a bounded deterministic fallback", async ()
     exposure: "raw", memory: createMemoryQueries(() => [giant]), recallWithAi: disabledRecallWithAi,
   });
   const result = await tools.call("fetch_record", { id: giant.id }, new AbortController().signal);
-  assert.deepEqual(result.structuredContent, { exposure: "raw", record: null, truncated: true });
+  const projected = result.structuredContent.record as { files: unknown[]; truncatedFiles: number; coverageStatus?: string; complete: boolean };
+  assert.ok(projected);
+  assert.equal(projected.files.length, 1);
+  assert.equal(projected.truncatedFiles, 0);
+  assert.equal(projected.coverageStatus, "unknown");
+  assert.equal(projected.complete, false);
+  assert.equal(result.structuredContent.truncated, false);
   assert.equal(result.isError, undefined);
   assert.ok(Buffer.byteLength(JSON.stringify(result), "utf8") <= MAX_RESPONSE_BYTES - TOOL_ENVELOPE_RESERVE_BYTES);
 });

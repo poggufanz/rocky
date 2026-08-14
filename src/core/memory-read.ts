@@ -8,6 +8,7 @@ import {
   type Stats,
 } from "node:fs";
 import { Buffer } from "node:buffer";
+import { createHash } from "node:crypto";
 import { resolveRockyPaths } from "./state-paths.js";
 import { commandIdentity, type FingerprintAlgorithmVersion } from "./fingerprint.js";
 
@@ -84,6 +85,18 @@ export interface TripleFile {
   props: string[];
   excerpt?: string;
   provenance?: "tool-observed" | "git-diff-inferred" | "unknown";
+  /** Internal collision discriminator; never projected as user evidence. */
+  identityHash?: string;
+}
+
+const ephemeralTripleIdentities = new WeakMap<object, string>();
+
+export function rememberTripleFileIdentity(file: TripleFile, identity: string): void {
+  if (identity) ephemeralTripleIdentities.set(file, identity);
+}
+
+export function pathIdentityHash(value: string): string {
+  return createHash("sha256").update(canonicalPath(value), "utf8").digest("hex").slice(0, 32);
 }
 
 export interface TripleRecord {
@@ -108,25 +121,53 @@ export interface TripleRecord {
 /** Shared durable knowledge contract: only this many file witnesses survive. */
 export const MAX_TRIPLE_FILES = 8;
 
-function safeTruncatedFiles(value: number): number {
-  return Number.isSafeInteger(value) && value >= 0 ? value : 0;
+const ANSI_OR_OSC = /(?:\u001b\][^\u0007]*(?:\u0007|\u001b\\)|\u001b\[[0-?]*[ -/]*[@-~]|\u009d[^\u009c]*(?:\u009c|$)|\u009b[0-?]*[ -/]*[@-~])/gu;
+
+/** Shared canonical file identity. See README for platform case policy. */
+export function canonicalPath(value: string): string {
+  if (typeof value !== "string") return "";
+  const cleaned = value
+    .replace(ANSI_OR_OSC, " ")
+    .replace(/[\u0000-\u001f\u007f-\u009f\u061c\u200b-\u200f\u2060-\u206f\ufeff]/gu, "");
+  const trimmed = cleaned.trim();
+  if (!trimmed) return "";
+  let normalized = trimmed.replaceAll("\\", "/").replace(/\/{2,}/gu, "/");
+  const absolute = normalized.startsWith("/");
+  const segments = normalized.split("/").filter((segment) => segment !== ".");
+  normalized = segments.join("/");
+  if (absolute) normalized = `/${normalized}`;
+  if (normalized.length > 1) normalized = normalized.replace(/\/+$/u, "");
+  return process.platform === "win32" ? normalized.toLowerCase() : normalized;
 }
 
-function addTruncatedFiles(declared: number, omitted: number): number {
-  const total = safeTruncatedFiles(declared) + Math.max(0, omitted);
-  return Number.isSafeInteger(total) ? total : Number.MAX_SAFE_INTEGER;
+export function isSafeNonNegativeInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
+function addTruncatedFiles(declared: number, omitted: number): { value: number; valid: boolean } {
+  if (!isSafeNonNegativeInteger(declared) || !isSafeNonNegativeInteger(omitted)) {
+    return { value: 0, valid: false };
+  }
+  const total = declared + omitted;
+  return Number.isSafeInteger(total)
+    ? { value: total, valid: true }
+    : { value: Number.MAX_SAFE_INTEGER, valid: false };
 }
 
 function normalizedCoverageStatus(
   declared: TripleRecord["mechanism"]["coverageStatus"],
   truncatedFiles: number,
+  valid: boolean,
+  files: readonly TripleFile[],
 ): TripleRecord["mechanism"]["coverageStatus"] {
+  if (!valid) return "unknown";
   if (declared === "unknown") return "unknown";
   if (truncatedFiles > 0) return "truncated";
   // Historical triples had no coverage proof.  Keep that omission
   // conservative at every read/write boundary rather than upgrading it to a
   // complete turn merely because no truncation count was declared.
-  return declared ?? "unknown";
+  if (declared !== "complete") return "unknown";
+  return files.length === 0 ? "unknown" : "complete";
 }
 
 /**
@@ -135,27 +176,65 @@ function normalizedCoverageStatus(
  * into different file caps.
  */
 export function boundTripleMechanism(mechanism: TripleRecord["mechanism"]): TripleRecord["mechanism"] {
-  const allFiles = mechanism.files.map((file) => ({
-    path: file.path,
-    plusMinus: [file.plusMinus[0], file.plusMinus[1]] as [number, number],
-    props: [...file.props],
-    ...(file.excerpt === undefined ? {} : { excerpt: file.excerpt }),
-    ...(file.provenance === undefined ? {} : { provenance: file.provenance }),
-  }));
-  const files = allFiles.slice(0, MAX_TRIPLE_FILES).map((file) => ({
-    path: file.path,
-    plusMinus: [file.plusMinus[0], file.plusMinus[1]] as [number, number],
-    props: [...file.props],
-    ...(file.excerpt === undefined ? {} : { excerpt: file.excerpt }),
-    ...(file.provenance === undefined ? {} : { provenance: file.provenance }),
-  }));
-  const truncatedFiles = addTruncatedFiles(mechanism.truncatedFiles, allFiles.length - files.length);
-  const coverageStatus = normalizedCoverageStatus(mechanism.coverageStatus, truncatedFiles);
+  const source = (mechanism ?? {}) as unknown as Record<string, unknown>;
+  const rawFiles = Array.isArray(source.files) ? source.files : [];
+  let valid = Array.isArray(source.files);
+  const byIdentity = new Map<string, TripleFile>();
+  for (const value of rawFiles) {
+    if (typeof value !== "object" || value === null || Array.isArray(value)) {
+      valid = false;
+      continue;
+    }
+    const raw = value as Record<string, unknown>;
+    const path = typeof raw.path === "string" ? canonicalPath(raw.path) : "";
+    const ephemeralIdentity = ephemeralTripleIdentities.get(value as object);
+    const rawIdentityHash = raw.identityHash;
+    const identityHash = typeof rawIdentityHash === "string" && /^[0-9a-f]{32}$/u.test(rawIdentityHash)
+      ? rawIdentityHash
+      : undefined;
+    if (rawIdentityHash !== undefined && identityHash === undefined) valid = false;
+    const plusMinus = Array.isArray(raw.plusMinus) && raw.plusMinus.length === 2
+      ? raw.plusMinus
+      : undefined;
+    const plusMinusValid = plusMinus !== undefined
+      && isSafeNonNegativeInteger(plusMinus[0]) && isSafeNonNegativeInteger(plusMinus[1]);
+    if (!path || !plusMinusValid || !Array.isArray(raw.props) || !raw.props.every((prop) => typeof prop === "string")) {
+      valid = false;
+      continue;
+    }
+    const file: TripleFile = {
+      path,
+      plusMinus: plusMinusValid ? [plusMinus[0] as number, plusMinus[1] as number] : [0, 0],
+      props: [...raw.props] as string[],
+      ...(typeof raw.excerpt === "string" ? { excerpt: raw.excerpt } : {}),
+      ...(raw.provenance === "tool-observed" || raw.provenance === "git-diff-inferred" || raw.provenance === "unknown"
+        ? { provenance: raw.provenance }
+        : {}),
+      ...(identityHash === undefined ? {} : { identityHash }),
+    };
+    // Map.set replaces evidence without changing first-seen insertion order.
+    byIdentity.set(identityHash ?? ephemeralIdentity ?? path, file);
+  }
+  const allFiles = [...byIdentity.values()];
+  const files = allFiles.slice(0, MAX_TRIPLE_FILES);
+  const declared = source.truncatedFiles;
+  const added = addTruncatedFiles(isSafeNonNegativeInteger(declared) ? declared : 0, Math.max(0, allFiles.length - files.length));
+  if (!isSafeNonNegativeInteger(declared)) valid = false;
+  if (source.coverageStatus !== undefined && source.coverageStatus !== "complete" &&
+      source.coverageStatus !== "truncated" && source.coverageStatus !== "unknown") valid = false;
+  const truncatedFiles = added.value;
+  const coverageStatus = normalizedCoverageStatus(
+    source.coverageStatus as TripleRecord["mechanism"]["coverageStatus"], truncatedFiles, valid && added.valid, files,
+  );
   return {
-    ...(mechanism.head === undefined ? {} : { head: mechanism.head }),
-    files,
+    ...(typeof source.head === "string" ? { head: source.head } : {}),
+    files: files.map((file) => ({
+      ...file,
+      plusMinus: [...file.plusMinus] as [number, number],
+      props: [...file.props],
+    })),
     truncatedFiles,
-    ...(mechanism.baseline === undefined ? {} : { baseline: mechanism.baseline }),
+    ...(source.baseline === "captured" || source.baseline === "unknown" ? { baseline: source.baseline } : {}),
     coverageStatus,
   };
 }
@@ -296,10 +375,11 @@ function parseTripleRecord(record: Record<string, unknown>): TripleRecord | unde
   for (const value of mechanism.files) {
     const file = objectValue(value);
     if (!file || typeof file.path !== "string" || !Array.isArray(file.plusMinus) || file.plusMinus.length !== 2 ||
-        typeof file.plusMinus[0] !== "number" || !Number.isFinite(file.plusMinus[0]) ||
-        typeof file.plusMinus[1] !== "number" || !Number.isFinite(file.plusMinus[1]) ||
+        !isSafeNonNegativeInteger(file.plusMinus[0]) ||
+        !isSafeNonNegativeInteger(file.plusMinus[1]) ||
         !Array.isArray(file.props) || !file.props.every((prop) => typeof prop === "string") ||
         (file.excerpt !== undefined && typeof file.excerpt !== "string") ||
+        (file.identityHash !== undefined && (typeof file.identityHash !== "string" || !/^[0-9a-f]{32}$/u.test(file.identityHash))) ||
         (file.provenance !== undefined && file.provenance !== "tool-observed" &&
           file.provenance !== "git-diff-inferred" && file.provenance !== "unknown")) return undefined;
     allFiles.push({
@@ -307,15 +387,21 @@ function parseTripleRecord(record: Record<string, unknown>): TripleRecord | unde
       plusMinus: [file.plusMinus[0], file.plusMinus[1]],
       props: [...file.props],
       ...(file.excerpt === undefined ? {} : { excerpt: file.excerpt }),
+      ...(file.identityHash === undefined ? {} : { identityHash: file.identityHash }),
       ...(file.provenance === undefined ? {} : { provenance: file.provenance as TripleFile["provenance"] }),
     });
   }
-  const files = allFiles.slice(0, MAX_TRIPLE_FILES);
-
   const baseline = mechanism.baseline === undefined ? undefined : mechanism.baseline;
   if (baseline !== undefined && baseline !== "captured" && baseline !== "unknown") return undefined;
   const coverageStatus = mechanism.coverageStatus === undefined ? undefined : mechanism.coverageStatus;
   if (coverageStatus !== undefined && coverageStatus !== "complete" && coverageStatus !== "truncated" && coverageStatus !== "unknown") return undefined;
+  const bounded = boundTripleMechanism({
+    ...(mechanism.head === undefined ? {} : { head: mechanism.head as string }),
+    files: allFiles,
+    truncatedFiles: mechanism.truncatedFiles,
+    ...(baseline === undefined ? {} : { baseline }),
+    ...(coverageStatus === undefined ? {} : { coverageStatus }),
+  });
 
   let intent: TripleRecord["intent"];
   if (record.intent !== undefined) {
@@ -345,13 +431,10 @@ function parseTripleRecord(record: Record<string, unknown>): TripleRecord | unde
     ...(rationale === undefined ? {} : { rationale }),
     mechanism: {
       ...(mechanism.head === undefined ? {} : { head: mechanism.head }),
-      files,
-      truncatedFiles: addTruncatedFiles(mechanism.truncatedFiles, allFiles.length - files.length),
+      files: bounded.files,
+      truncatedFiles: bounded.truncatedFiles,
       ...(baseline === undefined ? {} : { baseline }),
-      coverageStatus: normalizedCoverageStatus(
-        coverageStatus,
-        addTruncatedFiles(mechanism.truncatedFiles, allFiles.length - files.length),
-      ),
+      coverageStatus: bounded.coverageStatus,
     },
   };
 }
