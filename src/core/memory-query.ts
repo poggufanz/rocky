@@ -31,9 +31,48 @@ export function findByFingerprint(records: readonly MemoryRecord[], fp: string):
   return records.filter((record): record is FailureRecord => record.kind === "failure" && record.fingerprint === fp);
 }
 
+interface FixIndex {
+  byId: Map<string, FixRecord>;
+  byFailureId: Map<string, FixRecord[]>;
+}
+
+const fixIndexCache = new WeakMap<readonly MemoryRecord[], FixIndex>();
+
+function fixesIndex(records: readonly MemoryRecord[]): FixIndex {
+  const cached = fixIndexCache.get(records);
+  if (cached !== undefined) return cached;
+  const index: FixIndex = { byId: new Map(), byFailureId: new Map() };
+  for (const record of records) {
+    if (record.kind !== "fix") continue;
+    index.byId.set(record.id, record);
+    for (const failureId of record.failureIds) {
+      const linked = index.byFailureId.get(failureId);
+      if (linked === undefined) index.byFailureId.set(failureId, [record]);
+      else linked.push(record);
+    }
+  }
+  fixIndexCache.set(records, index);
+  return index;
+}
+
+function fixForFailure(index: FixIndex, failure: FailureRecord): FixRecord | undefined {
+  if (failure.resolvedBy) {
+    return index.byId.get(failure.resolvedBy);
+  }
+  // A fix remembered in another directory remains useful for recall and
+  // passive hook speech, but it is not a local resolution: the loader leaves
+  // `resolvedBy` empty when fix.cwd differs from failure.cwd.
+  const failureIdentity = commandIdentity(failure.cmd, { platform: failure.platform ?? "unknown" });
+  if (!failureIdentity.reliable) return undefined;
+  return index.byFailureId.get(failure.id)?.find((record) => {
+    if (record.cwd === failure.cwd) return false;
+    const fixIdentity = commandIdentity(record.cmd, { platform: record.platform ?? "unknown" });
+    return fixIdentity.reliable && fixIdentity.value === failureIdentity.value;
+  });
+}
+
 export function getFix(records: readonly MemoryRecord[], failure: FailureRecord): FixRecord | undefined {
-  if (!failure.resolvedBy) return undefined;
-  return records.find((record): record is FixRecord => record.kind === "fix" && record.id === failure.resolvedBy);
+  return fixForFailure(fixesIndex(records), failure);
 }
 
 /**
@@ -48,23 +87,12 @@ export function fixFromElsewhere(fix: FixRecord, cwd: string): string | undefine
   return fix.cwd === cwd ? undefined : fix.cwd;
 }
 
-/**
- * One pass to index fixes by id. `getFix` scans the whole array, so calling it
- * per hit made recall quadratic in the number of already-resolved failures:
- * 40 000 records took 423 ms unresolved but 5 441 ms once resolved.
- */
-function fixesById(records: readonly MemoryRecord[]): Map<string, FixRecord> {
-  const index = new Map<string, FixRecord>();
-  for (const record of records) if (record.kind === "fix") index.set(record.id, record);
-  return index;
-}
-
-function lookupFix(index: Map<string, FixRecord>, failure: FailureRecord): FixRecord | undefined {
-  return failure.resolvedBy === undefined ? undefined : index.get(failure.resolvedBy);
+function lookupFix(index: FixIndex, failure: FailureRecord): FixRecord | undefined {
+  return fixForFailure(index, failure);
 }
 
 export function queryRecall(records: readonly MemoryRecord[], input: RecallQuery): RecallHit[] {
-  const fixes = fixesById(records);
+  const fixes = fixesIndex(records);
   const limit = input.limit ?? 3;
   const queryTokens = tokens(input.query);
   const best = new Map<string, RecallHit>();
@@ -85,7 +113,7 @@ export function queryRecentFailures(
   records: readonly MemoryRecord[],
   input: RecentFailuresQuery = {},
 ): RecentFailureHit[] {
-  const fixes = fixesById(records);
+  const fixes = fixesIndex(records);
   return records
     .filter((record): record is FailureRecord => record.kind === "failure")
     .filter((failure) => input.cwd === undefined || failure.cwd === input.cwd)
@@ -170,10 +198,12 @@ export function recentUnresolvedFailures(
 ): UnresolvedLink[] {
   const currentIdentity = commandIdentity(command);
   const base = currentIdentity.base;
-  const cutoff = (input.now ?? Date.now()) - (input.windowMs ?? LINK_WINDOW_MS);
+  const now = input.now ?? Date.now();
+  const cutoff = now - (input.windowMs ?? LINK_WINDOW_MS);
   return records
     .filter((record): record is FailureRecord =>
       record.kind === "failure" && !record.resolvedBy && record.ts >= cutoff &&
+      record.ts <= now &&
       record.cwd === input.cwd && recordBase(record) === base
     )
     .map((failure) => {

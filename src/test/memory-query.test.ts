@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import type { AssociationRecord, FailureRecord, FixRecord, MemoryRecord, TripleRecord } from "../core/memory.js";
 import {
+  LINK_WINDOW_MS,
   createMemoryQueries,
   queryRecall,
   queryRecentFailures,
@@ -49,6 +50,20 @@ test("queryRecentFailures is newest-first and filters unresolved", () => {
 test("queryRecall preserves fuzzy matching and exact cwd filter", () => {
   assert.deepEqual(queryRecall(records, { query: "module missing", cwd: "/work/a" }).map((hit) => hit.failure.id), ["f1"]);
   assert.deepEqual(queryRecall(records, { query: "module missing", cwd: "/work/b" }), []);
+});
+
+test("queryRecall keeps an explicit cross-directory fix visible without resolving the failure", () => {
+  const failure: FailureRecord = {
+    kind: "failure", id: "cross-recall-failure", ts: 100, cwd: "/work/source", cmd: "npm test",
+    exitCode: 1, fingerprint: "fp-cross-recall", signature: ["module missing"], excerpt: "module missing",
+  };
+  const fix: FixRecord = {
+    kind: "fix", id: "cross-recall-fix", ts: 200, cwd: "/work/fix", cmd: "npm test",
+    failureIds: [failure.id],
+  };
+  const hit = queryRecall([failure, fix], { query: "module missing", cwd: failure.cwd })[0];
+  assert.equal(hit?.fix?.id, fix.id);
+  assert.equal(failure.resolvedBy, undefined, "passive recall must not mutate attribution");
 });
 
 test("link query uses injected cwd and clock without changing process cwd", () => {
@@ -180,6 +195,25 @@ test("recentUnresolvedFailures narrows to an 8h window by default, widens with w
       .map((h) => h.failure.id),
     ["o1"],
   );
+});
+
+test("recentUnresolvedFailures excludes future failures but includes failure exactly at now", () => {
+  const now = 1_800_000_000_000;
+  const atNow: FailureRecord = {
+    ...failureB,
+    id: "at-now",
+    ts: now,
+    cwd: "/work/b",
+    commandIdentity: JSON.stringify(["npm", "test"]),
+    identityV: 1,
+    identityReliable: true,
+    platform: "linux",
+  };
+  const future: FailureRecord = { ...atNow, id: "future", ts: now + 1 };
+  const hits = recentUnresolvedFailures([atNow, future], "npm test", {
+    cwd: "/work/b", now, windowMs: LINK_WINDOW_MS,
+  });
+  assert.deepEqual(hits.map((hit) => hit.failure.id), ["at-now"]);
 });
 
 test("recentUnresolvedFailures excludes other cwds, resolved failures, and other base programs", () => {

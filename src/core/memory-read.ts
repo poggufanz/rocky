@@ -364,6 +364,10 @@ export function loadMemoryChecked(path = resolveRockyPaths().memory): MemoryLoad
       // readable, but a later duplicate must not rewrite provenance or make
       // resolvedBy depend on append order beyond the first confirmed event.
       if (failure?.kind !== "failure" || failure.resolvedBy !== undefined) continue;
+      // Fix attribution is cwd-bound. Cross-directory recall still admits a
+      // fix from elsewhere, but it must never mutate the failure's local
+      // resolution state or clear a local pending marker.
+      if (failure.cwd !== record.cwd) continue;
       const failureIdentity = failure.identityV === 1 && failure.commandIdentity !== undefined
         ? validateStoredIdentity(failure.cmd, failure.commandIdentity, failure.identityReliable, failure.platform)
         : commandIdentity(failure.cmd, { platform: failure.platform ?? "unknown" });

@@ -318,6 +318,73 @@ test("a no-link success never clears pending without a confirmed resolution", (t
   assert.equal(memory.loadMemory(join(home, "memory.jsonl")).filter((record) => record.kind === "fix").length, 0);
 });
 
+test("future failures are not linked and cannot satisfy delayed resolution proof", (t) => {
+  const now = 1_800_000_000_000;
+  const home = sandbox(t, "rocky-future-failure-");
+  const cwd = home;
+  const cmd = "node future-command.js";
+  const futureFailure = failure("future-failure", cmd, cwd, now + 1);
+  seed(home, [futureFailure]);
+  const originalHome = process.env.ROCKY_HOME;
+  process.env.ROCKY_HOME = home;
+  try {
+    const result = memory.resolveFixOnSuccess(cmd, cwd, { now });
+    assert.deepEqual(result, { confirmedResolved: 0, possibleAssociated: 0 });
+  } finally {
+    if (originalHome === undefined) delete process.env.ROCKY_HOME;
+    else process.env.ROCKY_HOME = originalHome;
+  }
+  assert.equal(existsSync(join(home, "pending")), true, "future unresolved failure retains pending");
+  assert.equal(memory.loadMemory(join(home, "memory.jsonl")).filter((record) => record.kind === "fix").length, 0);
+
+  const proofHome = sandbox(t, "rocky-future-proof-");
+  const proofFailure = failure("future-proof-failure", cmd, proofHome, now + 1);
+  const proofFix: FixRecord = {
+    kind: "fix", id: "future-proof-fix", ts: now - 1_000, cwd: proofHome,
+    cmd, failureIds: [proofFailure.id],
+  };
+  seed(proofHome, [proofFailure, proofFix]);
+  const proofOriginalHome = process.env.ROCKY_HOME;
+  process.env.ROCKY_HOME = proofHome;
+  try {
+    memory.resolveFixOnSuccess(cmd, proofHome, { now });
+  } finally {
+    if (proofOriginalHome === undefined) delete process.env.ROCKY_HOME;
+    else process.env.ROCKY_HOME = proofOriginalHome;
+  }
+  assert.equal(existsSync(join(proofHome, "pending")), true, "future failure cannot satisfy delayed recovery proof");
+});
+
+test("a same-identity FixRecord from another cwd cannot clear pending through delayed reconciliation", (t) => {
+  const now = 1_800_000_000_000;
+  const home = sandbox(t, "rocky-cross-cwd-resolution-");
+  const cwdA = join(home, "project-a");
+  const cwdB = join(home, "project-b");
+  const cmd = "node stable-command.js";
+  const oldFailure = failure("old-same-cwd-failure", cmd, cwdA, now - 2 * 60 * 60 * 1_000);
+  const oldFix: FixRecord = {
+    kind: "fix", id: "old-same-cwd-fix", ts: now - 2 * 60 * 60 * 1_000, cwd: cwdA,
+    cmd, failureIds: [oldFailure.id],
+  };
+  const recentFailure = failure("recent-cross-cwd-failure", cmd, cwdA, now - 1_000);
+  const crossCwdFix: FixRecord = {
+    kind: "fix", id: "cross-cwd-fix", ts: now - 500, cwd: cwdB,
+    cmd, failureIds: [recentFailure.id],
+  };
+  seed(home, [oldFailure, oldFix, recentFailure, crossCwdFix]);
+  const originalHome = process.env.ROCKY_HOME;
+  process.env.ROCKY_HOME = home;
+  try {
+    memory.clearPendingIfResolved([], LINK_WINDOW_MS, now);
+  } finally {
+    if (originalHome === undefined) delete process.env.ROCKY_HOME;
+    else process.env.ROCKY_HOME = originalHome;
+  }
+  const records = memory.loadMemory(join(home, "memory.jsonl"));
+  assert.equal(records.find((record): record is FailureRecord => record.kind === "failure" && record.id === recentFailure.id)?.resolvedBy, undefined);
+  assert.equal(existsSync(join(home, "pending")), true, "cross-cwd confirmation must retain pending");
+});
+
 test("a reload failure after fix append fails closed and preserves pending", { timeout: 20_000 }, (t) => {
   const home = sandbox(t, "rocky-reload-incomplete-");
   const cwd = home;
@@ -693,6 +760,36 @@ test("a dead orphan claim is pruned when the primary pathname is already absent"
   assert.equal(existsSync(orphanClaim), false);
 });
 
+test("an old orphan claim behind a stable nonclaim prefix cannot starve lock recovery", { timeout: 15_000 }, (t) => {
+  const home = sandbox(t, "rocky-orphan-prefix-starvation-");
+  const lock = `${join(home, "memory.jsonl")}.triple.lock`;
+  const deadPid = 2_147_483_647;
+  mkdirSync(home, { recursive: true });
+  // These names intentionally precede the reclaim-shaped entry in normal
+  // directory enumeration. They are stable, nonclaim files and must not be
+  // deleted; correctness cannot depend on sweeping past all of them.
+  for (let index = 0; index < 96; index++) {
+    writeFileSync(join(home, `aaa-stable-prefix-${index.toString().padStart(3, "0")}`), "keep", { mode: 0o600 });
+  }
+  writeFileSync(lock, JSON.stringify({ pid: deadPid, token: "d".repeat(32) }), { mode: 0o600 });
+  const orphanClaim = `${lock}.reclaim.${deadPid}.${"e".repeat(32)}`;
+  linkSync(lock, orphanClaim);
+
+  const originalHome = process.env.ROCKY_HOME;
+  process.env.ROCKY_HOME = home;
+  const started = Date.now();
+  try {
+    memory.recordNote({ cwd: home, cmd: "prefix-starvation", file: "prefix.ts", line: 1, subject: "prefix", answer: "recovered" });
+  } finally {
+    if (originalHome === undefined) delete process.env.ROCKY_HOME;
+    else process.env.ROCKY_HOME = originalHome;
+  }
+  assert.ok(Date.now() - started < 2_000, "orphan recovery must not wait for the full lock deadline");
+  assert.equal(existsSync(lock), false, "dead primary lock is reclaimed");
+  assert.equal(existsSync(orphanClaim), true, "old orphan claim may remain for bounded cleanup");
+  assert.equal(readdirSync(home).filter((name) => name.startsWith("aaa-stable-prefix-")).length, 96);
+});
+
 test("competing dead-owner reclaimers never overlap transactions", { timeout: 30_000 }, async (t) => {
   const home = sandbox(t, "rocky-lock-reclaim-race-");
   const lock = `${join(home, "memory.jsonl")}.triple.lock`;
@@ -703,7 +800,12 @@ test("competing dead-owner reclaimers never overlap transactions", { timeout: 30
   const violation = join(home, "overlap");
   mkdirSync(ready, { recursive: true });
   mkdirSync(active, { recursive: true });
+  for (let index = 0; index < 96; index++) {
+    writeFileSync(join(home, `aaa-reclaim-prefix-${index.toString().padStart(3, "0")}`), "keep", { mode: 0o600 });
+  }
   writeFileSync(lock, JSON.stringify({ pid: 2_147_483_647, token: "d".repeat(32) }), { mode: 0o600 });
+  linkSync(lock, `${lock}.reclaim.2147483647.${"e".repeat(32)}`);
+  writeFileSync(`${lock}.reclaim.guard`, JSON.stringify({ pid: 2_147_483_647, token: "c".repeat(32) }), { mode: 0o600 });
   writeFileSync(preload, [
     "const fs = require('node:fs');",
     "const { syncBuiltinESMExports } = require('node:module');",
@@ -748,6 +850,24 @@ test("competing dead-owner reclaimers never overlap transactions", { timeout: 30
   assert.deepEqual(await Promise.all(completions), Array<number>(children.length).fill(0));
   assert.equal(existsSync(violation), false, "memory transactions must never overlap during recovery");
   assert.equal(existsSync(lock), false);
+
+  // Exercise the same hard-link reclaim protocol for a crashed reclaimer
+  // that left an empty, old election guard rather than valid PID metadata.
+  writeFileSync(lock, JSON.stringify({ pid: 2_147_483_647, token: "d".repeat(32) }), { mode: 0o600 });
+  const staleGuard = `${lock}.reclaim.guard`;
+  writeFileSync(staleGuard, "", { mode: 0o600 });
+  const staleAt = new Date(Date.now() - 20 * 60 * 1_000);
+  utimesSync(staleGuard, staleAt, staleAt);
+  const originalHome = process.env.ROCKY_HOME;
+  process.env.ROCKY_HOME = home;
+  try {
+    memory.recordNote({ cwd: home, cmd: "stale-guard", file: "stale.ts", line: 1, subject: "stale", answer: "recovered" });
+  } finally {
+    if (originalHome === undefined) delete process.env.ROCKY_HOME;
+    else process.env.ROCKY_HOME = originalHome;
+  }
+  assert.equal(existsSync(lock), false, "stale election guard recovery removes dead primary");
+  assert.equal(existsSync(staleGuard), false, "stale election guard is removed through a claim");
 });
 
 test("reclaim-claim sweeping examines a bounded batch and preserves unsafe entries", (t) => {

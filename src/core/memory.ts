@@ -113,9 +113,9 @@ const TRIPLE_LOCK_MAX_BYTES = 160;
 const TRIPLE_LOCK_WAIT_MS = 5_000;
 const TRIPLE_LOCK_STALE_MS = 10 * 60 * 1000;
 /**
- * Reclaim cleanup is best-effort housekeeping. Keep it outside the lock
- * acquisition budget by bounding both directory entries and synchronous
- * filesystem work; later mutations can sweep residual claims.
+ * Reclaim cleanup is best-effort housekeeping. Keep it bounded by directory
+ * entries and a cooperative monotonic deadline; synchronous Node filesystem
+ * calls cannot be preempted, so later mutations can sweep residual claims.
  */
 export const RECLAIM_CLAIM_SCAN_MAX_ENTRIES = 64;
 export const RECLAIM_CLAIM_SCAN_MAX_MS = 100;
@@ -126,6 +126,12 @@ interface TripleLockMetadata {
 }
 
 interface TripleLock {
+  path: string;
+  token: string;
+  stats: Stats;
+}
+
+interface TripleReclaimElection {
   path: string;
   token: string;
   stats: Stats;
@@ -274,6 +280,141 @@ function releaseTripleLock(lock: TripleLock): void {
   try { unlinkSync(lock.path); } catch { /* leave state for conservative recovery */ }
 }
 
+/**
+ * Reclaim one regular path through an exclusive hard-link claim. The helper
+ * deliberately has no sidecar of its own: it is used only for reclaiming the
+ * reclaim-election sidecar, and nlink===2 serializes competing stale-guard
+ * reclaimers without introducing another independently reclaimable lock.
+ */
+function reclaimTriplePath(
+  path: string,
+  expected: Stats,
+  validateClaim: (claimPath: string) => boolean,
+): boolean {
+  if (!tripleIdentityKnown(expected)) return false;
+  const claimPath = `${path}.claim.${process.pid}.${randomBytes(TRIPLE_LOCK_TOKEN_BYTES).toString("hex")}`;
+  let claimed = false;
+  let claimIdentity: Stats | undefined;
+  try {
+    linkSync(path, claimPath);
+    claimed = true;
+    const claim = lstatSync(claimPath);
+    if (!claim.isFile() || claim.isSymbolicLink() || !tripleIdentityKnown(claim)) return false;
+    claimIdentity = claim;
+    const current = lstatSync(path);
+    if (!current.isFile() || current.isSymbolicLink() ||
+        !sameTripleIdentity(expected, claim) || !sameTripleIdentity(claim, current) ||
+        claim.nlink !== 2 || current.nlink !== 2 || !validateClaim(claimPath)) return false;
+
+    const verifiedClaim = lstatSync(claimPath);
+    const verifiedCurrent = lstatSync(path);
+    if (!verifiedClaim.isFile() || verifiedClaim.isSymbolicLink() || !verifiedCurrent.isFile() ||
+        verifiedCurrent.isSymbolicLink() || !sameTripleIdentity(expected, verifiedClaim) ||
+        !sameTripleIdentity(verifiedClaim, verifiedCurrent) || verifiedClaim.nlink !== 2 ||
+        verifiedCurrent.nlink !== 2 || !validateClaim(claimPath)) return false;
+    unlinkSync(path);
+    return true;
+  } catch {
+    return false;
+  } finally {
+    if (claimed) {
+      try {
+        const current = lstatSync(claimPath);
+        if (claimIdentity !== undefined && current.isFile() && !current.isSymbolicLink() &&
+            sameTripleIdentity(claimIdentity, current)) unlinkSync(claimPath);
+      } catch {
+        // A concurrent namespace change is a conservative no-op.
+      }
+    }
+  }
+}
+
+/**
+ * A deterministic sidecar elects one reclaimer before any hard-link claim.
+ * The bounded orphan sweep is intentionally not on this correctness path, so
+ * an old orphan may leave the primary inode's nlink greater than two. The
+ * sidecar is regular, metadata-validated, and fail-closed for live/unknown
+ * owners.
+ */
+function tryTripleReclaimElection(path: string): TripleReclaimElection | undefined {
+  const electionPath = `${path}.reclaim.guard`;
+  let fd = -1;
+  let token: string | undefined;
+  let created = false;
+  let succeeded = false;
+  try {
+    token = randomBytes(TRIPLE_LOCK_TOKEN_BYTES).toString("hex");
+    fd = openSync(electionPath, "wx", 0o600);
+    created = true;
+    const createdStats = fstatSync(fd);
+    if (!createdStats.isFile() || createdStats.isSymbolicLink()) return undefined;
+    const encoded = Buffer.from(JSON.stringify({ pid: process.pid, token }), "utf8");
+    if (encoded.byteLength > TRIPLE_LOCK_MAX_BYTES) return undefined;
+    let offset = 0;
+    while (offset < encoded.byteLength) {
+      const written = writeSync(fd, encoded, offset, encoded.byteLength - offset);
+      if (written <= 0) return undefined;
+      offset += written;
+    }
+    try { fchmodSync(fd, 0o600); } catch { /* mode is best effort on Windows */ }
+    const after = fstatSync(fd);
+    if (!after.isFile() || after.isSymbolicLink() || after.size !== encoded.byteLength) return undefined;
+    succeeded = true;
+    return { path: electionPath, token, stats: after };
+  } catch {
+    // Existing guard: only a definitely dead, metadata-valid owner may be
+    // reclaimed. Symlinks, unknown files, live owners, and unknown owners stay.
+    const current = readTripleLock(electionPath);
+    if (current && tripleOwnerAlive(current.metadata.pid) === false) {
+      reclaimTriplePath(electionPath, current.stats, (claimPath) => {
+        const verify = readTripleLock(claimPath);
+        return verify !== undefined && verify.metadata.pid === current.metadata.pid &&
+          verify.metadata.token === current.metadata.token && sameTripleIdentity(current.stats, verify.stats) &&
+          tripleOwnerAlive(verify.metadata.pid) === false;
+      });
+    } else {
+      // A reclaimer can crash after creating the guard but before writing
+      // metadata. Recover only an old regular empty/torn guard; unknown files
+      // and symlinks remain fail-closed.
+      try {
+        const now = Date.now();
+        const stale = staleEmptyTripleLock(electionPath, now) ?? staleMalformedTripleLock(electionPath, now);
+        if (stale !== undefined) {
+          reclaimTriplePath(electionPath, stale, (claimPath) => {
+            const confirmedStale = staleEmptyTripleLock(claimPath, Date.now()) ?? staleMalformedTripleLock(claimPath, Date.now());
+            return confirmedStale !== undefined && sameTripleIdentity(stale, confirmedStale);
+          });
+        }
+      } catch {
+        // A concurrent replacement or removal is a conservative no-op.
+      }
+    }
+    return undefined;
+  } finally {
+    if (fd >= 0) {
+      try { closeSync(fd); } catch { /* best effort */ }
+    }
+    if (created && !succeeded && token) {
+      const current = readTripleLock(electionPath);
+      if (current && current.metadata.pid === process.pid && current.metadata.token === token) {
+        reclaimTriplePath(electionPath, current.stats, (claimPath) => {
+          const verify = readTripleLock(claimPath);
+          return verify !== undefined && verify.metadata.pid === process.pid && verify.metadata.token === token &&
+            sameTripleIdentity(current.stats, verify.stats);
+        });
+      }
+    }
+  }
+}
+
+function releaseTripleReclaimElection(election: TripleReclaimElection): void {
+  reclaimTriplePath(election.path, election.stats, (claimPath) => {
+    const current = readTripleLock(claimPath);
+    return current !== undefined && current.metadata.pid === process.pid && current.metadata.token === election.token &&
+      sameTripleIdentity(election.stats, current.stats);
+  });
+}
+
 function acquireTripleLock(paths: RockyPaths): TripleLock {
   const path = `${paths.memory}${TRIPLE_LOCK_SUFFIX}`;
   const wallStarted = Date.now();
@@ -372,6 +513,11 @@ function reclaimTripleLock(
   pruneDeadReclaimClaims(path, expected);
   const claimPath = `${path}.reclaim.${process.pid}.${randomBytes(TRIPLE_LOCK_TOKEN_BYTES).toString("hex")}`;
   let claimed = false;
+  // Serialize every reclaim attempt, including the ordinary nlink===2 case.
+  // Otherwise a late contender could revalidate the old inode after an early
+  // contender has already unlinked it, then delete a replacement pathname.
+  const election = tryTripleReclaimElection(path);
+  if (election === undefined) return false;
   try {
     linkSync(path, claimPath);
     claimed = true;
@@ -379,19 +525,27 @@ function reclaimTripleLock(
     const current = lstatSync(path);
     if (!claim.isFile() || claim.isSymbolicLink() || !current.isFile() || current.isSymbolicLink() ||
         !sameTripleIdentity(expected, claim) || !sameTripleIdentity(claim, current) ||
-        claim.nlink !== 2 || current.nlink !== 2 || !validateClaim(claimPath)) return false;
+        claim.nlink < 2 || current.nlink < 2 || !validateClaim(claimPath)) return false;
 
     // Re-check after reading metadata. Another reclaimer may have linked the
-    // inode meanwhile; in that case this process leaves the pathname alone.
+    // inode meanwhile; the sidecar serializes all reclaimers, so an old
+    // orphan hard link may safely leave nlink greater than two.
     const verifiedClaim = lstatSync(claimPath);
     const verifiedCurrent = lstatSync(path);
     if (!sameTripleIdentity(expected, verifiedClaim) || !sameTripleIdentity(verifiedClaim, verifiedCurrent) ||
-        verifiedClaim.nlink !== 2 || verifiedCurrent.nlink !== 2) return false;
+        verifiedClaim.nlink < 2 || verifiedCurrent.nlink < 2) return false;
+    const verifiedElection = readTripleLock(election.path);
+    if (!verifiedElection || verifiedElection.metadata.pid !== process.pid ||
+        verifiedElection.metadata.token !== election.token ||
+        differentTripleIdentity(election.stats, verifiedElection.stats)) return false;
+    // The inode and election checks above are the final current-path guards
+    // before unlink. No other reclaimer can run until this guard is released.
     unlinkSync(path);
     return true;
   } catch {
     return false;
   } finally {
+    releaseTripleReclaimElection(election);
     if (claimed) {
       try { unlinkSync(claimPath); } catch { /* a later dead-claim sweep can recover it */ }
     }
@@ -478,6 +632,10 @@ function pruneDeadReclaimClaims(path: string, expected?: Stats): void {
             if ((error as NodeJS.ErrnoException).code !== "ENOENT") continue;
           }
         }
+        // Do not begin another destructive operation once the cooperative
+        // budget has elapsed. A syscall already in progress cannot be stopped
+        // by Node; this check bounds all work that follows the syscall.
+        if (performance.now() - started >= RECLAIM_CLAIM_SCAN_MAX_MS) continue;
         unlinkSync(claimPath);
       } catch {
         // A concurrent sweep or namespace change is a conservative no-op.
@@ -666,7 +824,7 @@ function hasConfirmedResolutionForCommand(
       .map((fix) => [fix.id, fix]),
   );
   return records.some((record) => {
-    if (record.kind !== "failure" || record.cwd !== cwd || record.resolvedBy === undefined) return false;
+    if (record.kind !== "failure" || record.cwd !== cwd || record.ts > now || record.resolvedBy === undefined) return false;
     const fix = fixesById.get(record.resolvedBy);
     if (fix === undefined || fix.cwd !== cwd || fix.ts > now || !fix.failureIds.includes(record.id)) return false;
     const fixIdentity = commandIdentity(fix.cmd, { platform: fix.platform ?? process.platform });
@@ -688,7 +846,7 @@ function hasRecentConfirmedResolution(
       .map((record) => [record.id, record]),
   );
   return records.some((record) => {
-    if (record.kind !== "failure" || record.resolvedBy === undefined) return false;
+    if (record.kind !== "failure" || record.ts > now || record.resolvedBy === undefined) return false;
     const fix = fixes.get(record.resolvedBy);
     return fix !== undefined && fix.failureIds.includes(record.id);
   });

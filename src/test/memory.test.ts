@@ -53,7 +53,18 @@ test("clearPendingIfResolved removes flag only when nothing unresolved", () => {
   const failures = records.filter(
     (r): r is import("../core/memory.js").FailureRecord => r.kind === "failure"
   );
-  memory.recordFix("npm run build", failures.map((failure) => ({ failure, basis: "identity" as const, confidence: "confirmed" as const })));
+  // Confirmed attribution is cwd-bound. Resolve each directory's failures
+  // with a transaction scoped to that directory; cross-directory fixes remain
+  // recall material but do not clear local pending state.
+  for (const cwd of new Set(failures.map((failure) => failure.cwd))) {
+    memory.recordFix(
+      "npm run build",
+      failures
+        .filter((failure) => failure.cwd === cwd)
+        .map((failure) => ({ failure, basis: "identity" as const, confidence: "confirmed" as const })),
+      cwd,
+    );
+  }
   records = memory.loadMemory();
   assert.equal(memory.hasUnresolvedRecent(records), false);
   memory.clearPendingIfResolved(records);
