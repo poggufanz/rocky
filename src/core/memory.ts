@@ -412,6 +412,12 @@ function pruneDeadReclaimClaims(path: string, expected?: Stats): void {
       const claim = lstatSync(claimPath);
       if (!claim.isFile() || claim.isSymbolicLink() || !tripleIdentityKnown(claim)) continue;
       if (expected !== undefined && !sameTripleIdentity(expected, claim)) continue;
+      // A primary-less claim has no inode to compare against.  Require the
+      // immutable lock metadata to parse and its original owner to be
+      // definitely dead, so a regular file merely wearing a claim-shaped
+      // name remains untouched.
+      const metadata = readTripleLock(claimPath);
+      if (metadata === undefined || tripleOwnerAlive(metadata.metadata.pid) !== false) continue;
 
       let primary: Stats | undefined;
       try {

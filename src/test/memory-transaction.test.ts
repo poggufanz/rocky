@@ -556,7 +556,7 @@ test("a dead orphan claim is pruned when the primary pathname is already absent"
   const lock = `${join(home, "memory.jsonl")}.triple.lock`;
   const deadPid = 2_147_483_647;
   mkdirSync(home, { recursive: true });
-  writeFileSync(lock, JSON.stringify({ pid: deadPid, token: "o".repeat(32) }), { mode: 0o600 });
+  writeFileSync(lock, JSON.stringify({ pid: deadPid, token: "b".repeat(32) }), { mode: 0o600 });
   const orphanClaim = `${lock}.reclaim.${deadPid}.${"a".repeat(32)}`;
   linkSync(lock, orphanClaim);
   unlinkSync(lock);
