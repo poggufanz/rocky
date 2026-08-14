@@ -147,8 +147,12 @@ export function canonicalPath(value: string, options: CanonicalPathOptions = {})
     .replace(/[\u0000-\u001f\u007f-\u009f\u061c\u200b-\u200f\u2060-\u206f\ufeff]/gu, "");
   const trimmed = cleaned.trim();
   if (!trimmed) return "";
+  const platform = options.platform ?? process.platform;
   const source = trimmed.replaceAll("\\", "/");
-  const hadUncPrefix = source.startsWith("//") && !/^\/{3,}/u.test(source);
+  // UNC syntax is a Windows identity, not a generic slash spelling.  An
+  // explicit POSIX/Linux origin must collapse duplicate separators so a
+  // reload on another platform cannot silently invent a UNC root.
+  const hadUncPrefix = platform === "win32" && source.startsWith("//") && !/^\/{3,}/u.test(source);
   const normalized = source.replace(/\/{2,}/gu, "/");
   const driveAbsolute = /^[A-Za-z]:\//u.test(normalized);
   const driveRelative = /^[A-Za-z]:/u.test(normalized) && !driveAbsolute;
@@ -178,7 +182,6 @@ export function canonicalPath(value: string, options: CanonicalPathOptions = {})
   if (prefix.endsWith("/") && segments.length === 0) result = prefix;
   if (prefix === "" && result.length === 0) return "";
 
-  const platform = options.platform ?? process.platform;
   if (platform === "win32") result = result.toLowerCase();
 
   // Relative paths are compared against the turn cwd only when a caller asks
@@ -244,6 +247,7 @@ export function boundTripleMechanism(
   let valid = Array.isArray(source.files) && contextPlatformValid;
   const byIdentity = new Map<string, TripleFile>();
   const hashPaths = new Map<string, string>();
+  const ordinaryPathHashes = new Map<string, string | undefined>();
   const platform = contextPlatform ?? process.platform;
   const hasBoundablePath = rawFiles.some((value) => {
     if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
@@ -282,8 +286,18 @@ export function boundTripleMechanism(
       // A durable discriminator is only trustworthy once it identifies one
       // file. Keep distinct display paths instead of collapsing them, but
       // downgrade coverage whenever a forged/repeated hash is encountered.
-      if (priorPath !== undefined) valid = false;
+      if (priorPath !== undefined && priorPath !== path) valid = false;
       else hashPaths.set(identityHash, path);
+    }
+    // A normal (non-redacted) display path is the authoritative durable
+    // identity.  Conflicting valid hashes for that path are contradictory
+    // evidence, not two files.  Hash-backed identity remains reserved for
+    // redacted displays where two raw paths can intentionally project alike.
+    const redactedDisplay = /\[redacted(?:[^\]]*)\]/iu.test(path);
+    if (!redactedDisplay) {
+      const priorHash = ordinaryPathHashes.get(identityPath);
+      if (ordinaryPathHashes.has(identityPath) && priorHash !== identityHash) valid = false;
+      else ordinaryPathHashes.set(identityPath, identityHash);
     }
     const plusMinus = Array.isArray(raw.plusMinus) && raw.plusMinus.length === 2
       ? raw.plusMinus
@@ -307,7 +321,9 @@ export function boundTripleMechanism(
     // Namespace every discriminator and bind it to canonical display path.
     // This prevents a hash-shaped plain path from colliding with a hash key,
     // while preserving distinct redacted paths that share one hash.
-    const key = identityHash !== undefined
+    const key = !redactedDisplay
+      ? `path:${identityPath}`
+      : identityHash !== undefined
       ? `hash:${identityPath}\u0000${identityHash}`
       : ephemeralIdentity !== undefined
         ? `ephemeral:${identityPath}\u0000${canonicalPath(ephemeralIdentity, { platform, cwd: context.cwd })}`
@@ -380,7 +396,7 @@ function identityFields(record: Record<string, unknown>): Pick<FailureRecord, "c
   if (record.commandIdentity === undefined && record.identityV === undefined &&
       record.identityReliable === undefined && record.platform === undefined) return {};
   if (typeof record.commandIdentity !== "string" || record.identityV !== 1 ||
-      typeof record.identityReliable !== "boolean" || typeof record.platform !== "string") return undefined;
+      typeof record.identityReliable !== "boolean" || !isKnownPathPlatform(record.platform)) return undefined;
   return {
     commandIdentity: record.commandIdentity,
     identityV: 1,
@@ -410,13 +426,14 @@ function normalizeOrigin(origin: unknown): FailureOrigin | undefined {
 
 export function parseMemoryRecord(value: unknown): MemoryRecord | undefined {
   const record = objectValue(value);
-  if (!record || typeof record.id !== "string" || typeof record.ts !== "number" || !Number.isFinite(record.ts) ||
+  if (!record || typeof record.id !== "string" || record.id.length === 0 || record.id.length > 512 ||
+      /[\u0000-\u001f\u007f-\u009f]/u.test(record.id) || !isSafeNonNegativeInteger(record.ts) ||
       typeof record.cwd !== "string") return undefined;
   if (record.kind === "failure") {
     const signature = strings(record.signature);
     const identity = identityFields(record);
     const fingerprintVersion = fingerprintFields(record);
-    if (typeof record.exitCode !== "number" || !Number.isInteger(record.exitCode) || typeof record.fingerprint !== "string" ||
+    if (typeof record.exitCode !== "number" || !Number.isSafeInteger(record.exitCode) || typeof record.fingerprint !== "string" ||
         !signature || !identity || !fingerprintVersion || typeof record.excerpt !== "string" || typeof record.cmd !== "string") return undefined;
     const origin = normalizeOrigin(record.origin);
     return {

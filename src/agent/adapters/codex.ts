@@ -240,6 +240,10 @@ function parseModern(payload: PlainRecord, now: number): ParsedHookPayload {
         ...(truncatedFiles > 0 ? { truncatedFiles } : {}),
         coveragePaths,
         coveragePathsComplete,
+        ...(invalidCoverage ? {} : {
+          coverageCandidateCount: byPath.size,
+          coverageCandidateCountExact: true,
+        }),
       };
     }
     case "Stop": {

@@ -23,10 +23,12 @@ import { digestBuckets } from "../core/dictionary.js";
 import { loadConfig, type ConfigLoadResult } from "../core/config-read.js";
 import { redactSecretsAtBoundary, replaceAnsiAndControls, stripInvisibleControls } from "../core/redact.js";
 import { annotatePortFromConfig, parseAnnotateOutput, type AnnotatePort, type AnnotateOutput } from "../ai/annotate.js";
+import { MAX_ADAPTER_EVENTS } from "./adapters/claude-code.js";
 import {
   MAX_EXCERPT_CHARS,
   MAX_INTENT_CHARS,
   MAX_RATIONALE_CHARS,
+  MAX_COVERAGE_PATHS,
   type FileProvenance,
   type AgentName,
   type IntentEvent,
@@ -40,6 +42,8 @@ import {
   readClaimResult,
   releaseAnnotationLease,
   removeClaim,
+  readCoverage,
+  removeCoverage,
   type AnnotationLease,
   type BatchClaim,
   MAX_BATCH_BYTES,
@@ -516,6 +520,10 @@ export async function annotateBatch(key: string, deps: AnnotateDeps = {}): Promi
     const rawCwd = intentEvent?.kind === "intent" && intentEvent.cwd ? intentEvent.cwd : process.cwd();
     const operationalCwd = operationalText(rawCwd, MAX_CWD_CHARS);
     const gitCwd = operationalCwd.trim() ? operationalCwd : process.cwd();
+    // Keep redaction on persisted/display values only.  Path identity must use
+    // the operational cwd, otherwise a secret-shaped directory can split an
+    // absolute tool path from its relative spelling after reload.
+    const identityCwd = operationalCwd.trim() ? operationalCwd : process.cwd();
     const cwd = cleanText(rawCwd, MAX_CWD_CHARS) || process.cwd();
     const byPath = new Map<string, {
       path: string;
@@ -525,11 +533,48 @@ export async function annotateBatch(key: string, deps: AnnotateDeps = {}): Promi
       plusMinus?: [number, number];
     }>();
     const coverageCandidates = new Map<string, string>();
+    const coverageSnapshot = readCoverage(claim.key, paths);
     let coverageMetadataSeen = false;
     let coverageMetadataComplete = true;
     let coverageMetadataContradiction = false;
     let adapterMaxTruncatedFiles = 0;
     let adapterTruncationMarkers = 0;
+    const markerSignatures = new Set<string>();
+    const coverageExpectedCounts: number[] = [];
+    let coverageExpectedCountUnknown = false;
+    let coverageCapProof = false;
+    let snapshotExpectedCount: number | undefined;
+    if (coverageSnapshot) {
+      coverageMetadataSeen = true;
+      if (!coverageSnapshot.pathsComplete) coverageMetadataComplete = false;
+      if (!coverageSnapshot.candidateCountExact || coverageSnapshot.candidateCount === undefined) {
+        coverageExpectedCountUnknown = true;
+      } else {
+        // A complete witness is re-counted after cwd-aware canonicalization;
+        // absolute/relative aliases must not consume two durable slots.
+        snapshotExpectedCount = coverageSnapshot.candidateCount;
+        // A single adapter payload can retain an exact count while its
+        // bounded identity witness is capped at 256 paths.
+        coverageCapProof = !coverageSnapshot.pathsComplete
+          && coverageSnapshot.payloads === 1
+          && coverageSnapshot.paths.length === MAX_COVERAGE_PATHS
+          && coverageSnapshot.candidateCount > coverageSnapshot.paths.length;
+      }
+      for (const candidate of coverageSnapshot.paths) {
+        const candidateGitPath = pathIdentity(candidate, identityCwd);
+        const candidatePath = canonicalPath(cleanText(candidate, MAX_PATH_CHARS));
+        if (!candidateGitPath || !candidatePath) {
+          coverageMetadataComplete = false;
+          coverageMetadataContradiction = true;
+          continue;
+        }
+        if (coverageCandidates.has(candidateGitPath)) continue;
+        coverageCandidates.set(candidateGitPath, candidatePath);
+      }
+      if (snapshotExpectedCount !== undefined) {
+        coverageExpectedCounts.push(coverageSnapshot.pathsComplete ? coverageCandidates.size : snapshotExpectedCount);
+      }
+    }
     for (const event of batchEvents) {
       if (event.kind !== "mechanism") continue;
       if (event.coveragePaths !== undefined || event.coveragePathsComplete !== undefined) {
@@ -537,10 +582,10 @@ export async function annotateBatch(key: string, deps: AnnotateDeps = {}): Promi
         if (event.coveragePathsComplete !== true || event.coveragePaths === undefined) {
           coverageMetadataComplete = false;
         }
-        const eventPath = pathIdentity(event.path, cwd);
+        const eventPath = pathIdentity(event.path, identityCwd);
         const eventCandidates = new Set<string>();
         for (const candidate of event.coveragePaths ?? []) {
-          const candidateGitPath = pathIdentity(candidate, cwd);
+          const candidateGitPath = pathIdentity(candidate, identityCwd);
           const candidatePath = canonicalPath(cleanText(candidate, MAX_PATH_CHARS));
           if (!candidateGitPath || !candidatePath || eventCandidates.has(candidateGitPath)) {
             coverageMetadataComplete = false;
@@ -560,15 +605,29 @@ export async function annotateBatch(key: string, deps: AnnotateDeps = {}): Promi
           coverageMetadataContradiction = true;
         }
       }
-      const gitPath = pathIdentity(event.path, cwd);
+      const gitPath = pathIdentity(event.path, identityCwd);
       const gitDisplayPath = canonicalPath(operationalText(event.path, MAX_PATH_CHARS));
       const path = canonicalPath(cleanText(event.path, MAX_PATH_CHARS)) || cleanText(event.path, MAX_PATH_CHARS);
       if (!path || !gitPath || !gitDisplayPath) continue;
       const excerpt = event.excerpt === undefined ? undefined : cleanText(event.excerpt, MAX_EXCERPT_CHARS) || undefined;
       if (event.truncatedFiles !== undefined) {
         if (!isSafeNonNegativeInteger(event.truncatedFiles)) coverageMetadataContradiction = true;
-        adapterMaxTruncatedFiles = Math.max(adapterMaxTruncatedFiles, event.truncatedFiles);
-        adapterTruncationMarkers += 1;
+        const markerSignature = `${event.truncatedFiles}\u0000${(event.coveragePaths ?? []).join("\u0000")}`;
+        if (!markerSignatures.has(markerSignature)) {
+          markerSignatures.add(markerSignature);
+          if (!coverageSnapshot) {
+            adapterMaxTruncatedFiles = Math.max(adapterMaxTruncatedFiles, event.truncatedFiles);
+            adapterTruncationMarkers += 1;
+          }
+          // A marker is an adapter event-cap omission count.  It is exact
+          // only when the bounded witness itself is complete or explicitly
+          // capped at MAX_COVERAGE_PATHS.
+          if (!coverageSnapshot && isSafeNonNegativeInteger(event.truncatedFiles) && event.coveragePaths !== undefined) {
+            coverageExpectedCounts.push(MAX_ADAPTER_EVENTS + event.truncatedFiles);
+            if (event.coveragePathsComplete === false && event.coveragePaths.length === MAX_COVERAGE_PATHS) coverageCapProof = true;
+            else if (event.coveragePathsComplete !== true) coverageExpectedCountUnknown = true;
+          }
+        }
       }
       byPath.set(gitPath, {
         path,
@@ -593,7 +652,7 @@ export async function annotateBatch(key: string, deps: AnnotateDeps = {}): Promi
     const headRaw = runGit(git, ["rev-parse", "HEAD"], gitCwd);
     const head = headRaw === undefined ? undefined : cleanText(headRaw, MAX_HEAD_CHARS) || undefined;
     const baseline = intentEvent?.baseline;
-    const baselineByPath = baselineMap(intentEvent, cwd);
+    const baselineByPath = baselineMap(intentEvent, identityCwd);
     const currentEntries = baselineByPath === undefined
       ? undefined
       : mergeDiffEntries([
@@ -615,7 +674,7 @@ export async function annotateBatch(key: string, deps: AnnotateDeps = {}): Promi
     }>();
     if (baselineByPath !== undefined && currentEntries !== undefined) {
       for (const entry of currentEntries) {
-        const gitPath = pathIdentity(entry.path, cwd);
+        const gitPath = pathIdentity(entry.path, identityCwd);
         const prior = baselineByPath.get(gitPath);
         const delta: [number, number] | undefined = prior === undefined
           ? entry.plusMinus
@@ -661,7 +720,7 @@ export async function annotateBatch(key: string, deps: AnnotateDeps = {}): Promi
       const committed = parseNumstatEntries(runGit(git, ["diff", "--numstat", `${baseline.head}..${head}`], gitCwd), gitCwd);
       if (committed === undefined) baselineStatus = "unknown";
       for (const entry of committed ?? []) {
-        const gitPath = pathIdentity(entry.path, cwd);
+        const gitPath = pathIdentity(entry.path, identityCwd);
         const cleanPath = canonicalPath(cleanText(entry.path, MAX_PATH_CHARS)) || cleanText(entry.path, MAX_PATH_CHARS);
         if (!gitPath || !cleanPath) continue;
         const prior = baselineByPath.get(gitPath);
@@ -717,8 +776,8 @@ export async function annotateBatch(key: string, deps: AnnotateDeps = {}): Promi
         }
       }
     }
-    if (byPath.size === 0 && !(intentText !== undefined && rationaleText !== undefined)) {
-      removeClaim(claim, paths);
+    if (byPath.size === 0 && !(intentText !== undefined && rationaleText !== undefined) && !coverageSnapshot) {
+      if (removeClaim(claim, paths)) removeCoverage(claim.key, paths);
       return undefined;
     }
     const allMechanisms = coverageMetadataSeen && coverageMetadataComplete && !coverageMetadataContradiction
@@ -733,13 +792,21 @@ export async function annotateBatch(key: string, deps: AnnotateDeps = {}): Promi
     for (const [gitPath, value] of allMechanisms) {
       coverageCandidates.set(gitPath, value.path);
     }
-    const candidateCount = !coverageMetadataSeen && adapterTruncationMarkers === 1
-      ? Math.max(coverageCandidates.size, 64 + adapterMaxTruncatedFiles)
-      : coverageCandidates.size;
+    const distinctExpectedCounts = [...new Set(coverageExpectedCounts)];
+    const expectedCountAmbiguous = distinctExpectedCounts.length > 1;
+    const expectedCount = distinctExpectedCounts.length === 1 ? distinctExpectedCounts[0]! : undefined;
+    const candidateCount = Math.max(coverageCandidates.size, expectedCount ?? 0,
+      !coverageMetadataSeen && adapterTruncationMarkers === 1 ? MAX_ADAPTER_EVENTS + adapterMaxTruncatedFiles : 0);
+    const boundedCountProof = !coverageExpectedCountUnknown
+      && !expectedCountAmbiguous
+      && (coverageCapProof || (coverageExpectedCounts.length > 0 && coverageMetadataComplete));
     const coverageUnknown = spoolMayBeTruncated
       || (allMechanisms.length === 0 && intentText !== undefined && rationaleText !== undefined)
-      || (coverageMetadataSeen && (!coverageMetadataComplete || coverageMetadataContradiction))
-      || (!coverageMetadataSeen && adapterTruncationMarkers > 0);
+      || coverageMetadataContradiction
+      || (coverageMetadataSeen && !coverageMetadataComplete && !boundedCountProof)
+      || coverageExpectedCountUnknown
+      || expectedCountAmbiguous
+      || (!coverageMetadataSeen && adapterTruncationMarkers > 0 && !boundedCountProof);
     const truncatedFiles = Math.max(0, candidateCount - MAX_TRIPLE_FILES);
     const coverageStatus = coverageUnknown
       ? "unknown" as const
@@ -832,7 +899,7 @@ export async function annotateBatch(key: string, deps: AnnotateDeps = {}): Promi
         }
       }
     }
-    removeClaim(claim, paths);
+    if (removeClaim(claim, paths)) removeCoverage(claim.key, paths);
     return persisted.record;
   } finally {
     releaseAnnotationLease(lease, paths);

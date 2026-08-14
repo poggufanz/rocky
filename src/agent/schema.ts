@@ -111,7 +111,7 @@ export function parseAgentEvent(value: unknown): AgentEvent | undefined {
   const record = value as Record<string, unknown>;
   if (record.v !== 1) return undefined;
   if (typeof record.agent !== "string" || !AGENTS.has(record.agent)) return undefined;
-  if (typeof record.ts !== "number" || !Number.isFinite(record.ts)) return undefined;
+  if (typeof record.ts !== "number" || !Number.isSafeInteger(record.ts) || record.ts < 0) return undefined;
   const agent = record.agent as AgentName;
   const ts = record.ts;
 

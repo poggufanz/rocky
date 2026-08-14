@@ -331,6 +331,7 @@ function normalizeKnowledgeHit(value: unknown): KnowledgeSearchHit | undefined {
       return undefined;
     }
     const rawComplete = typeof raw.complete === "boolean" ? raw.complete : undefined;
+    const coverageProof = raw.coverageProof === true;
     const coverageStatus = raw.coverageStatus === "complete" || raw.coverageStatus === "truncated" || raw.coverageStatus === "unknown"
       ? raw.coverageStatus
       : raw.coverageStatus === undefined ? undefined : "unknown";
@@ -365,6 +366,21 @@ function normalizeKnowledgeHit(value: unknown): KnowledgeSearchHit | undefined {
     if (normalizedComplete === true && (kind !== "triple" || normalizedStatus !== "complete" || filesCovered === undefined)) {
       normalizedComplete = false;
     }
+    // KnowledgeSearchHit intentionally carries only bounded file names, not
+    // baseline/provenance proof.  The canonical in-process query marks its
+    // complete result explicitly; custom providers cannot upgrade a hit by
+    // merely setting `complete` or `coverageStatus` to a strong value.
+    const provenComplete = kind === "triple"
+      && coverageProof
+      && normalizedComplete === true
+      && normalizedStatus === "complete"
+      && filesCovered !== undefined;
+    if (kind === "triple" && normalizedStatus === "complete" && !provenComplete) {
+      normalizedComplete = false;
+      normalizedStatus = Array.isArray(rawFilesCovered) && rawFilesCovered.length > MAX_TRIPLE_FILES
+        ? "truncated"
+        : "unknown";
+    }
     return {
       id,
       ts,
@@ -377,6 +393,7 @@ function normalizeKnowledgeHit(value: unknown): KnowledgeSearchHit | undefined {
       ...(rawTruncatedFiles === undefined ? {} : { truncatedFiles }),
       ...(normalizedComplete === undefined ? {} : { complete: normalizedComplete }),
       ...(normalizedStatus === undefined ? {} : { coverageStatus: normalizedStatus }),
+      ...(coverageProof ? { coverageProof: true } : {}),
     };
   } catch {
     return undefined;
@@ -645,17 +662,66 @@ function projectHit(hit: SourceHit, exposure: Exposure, candidateId: string): Pr
   return projected;
 }
 
+function normalizeSourceHit(value: unknown): SourceHit | undefined {
+  try {
+    if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+    const raw = value as Record<string, unknown>;
+    const failureValue = raw.failure;
+    if (typeof failureValue !== "object" || failureValue === null || Array.isArray(failureValue)) return undefined;
+    const failureRaw = failureValue as Record<string, unknown>;
+    if (failureRaw.kind !== "failure" || typeof failureRaw.id !== "string" || failureRaw.id.length === 0 ||
+        /[\u0000-\u001f\u007f-\u009f]/u.test(failureRaw.id) || !isSafeNonNegativeInteger(failureRaw.ts) ||
+        typeof failureRaw.cwd !== "string" || typeof failureRaw.cmd !== "string" ||
+        !Number.isSafeInteger(failureRaw.exitCode) || typeof failureRaw.fingerprint !== "string" ||
+        !Array.isArray(failureRaw.signature) || !failureRaw.signature.every((line) => typeof line === "string") ||
+        typeof failureRaw.excerpt !== "string" ||
+        (failureRaw.origin !== undefined && failureRaw.origin !== "run" && failureRaw.origin !== "hook" && failureRaw.origin !== "watch")) return undefined;
+    const failureTs = failureRaw.ts as number;
+    const failureExitCode = failureRaw.exitCode as number;
+    const failure: FailureRecord = {
+      kind: "failure", id: failureRaw.id, ts: failureTs, cwd: failureRaw.cwd, cmd: failureRaw.cmd,
+      exitCode: failureExitCode, fingerprint: failureRaw.fingerprint,
+      signature: [...failureRaw.signature] as string[], excerpt: failureRaw.excerpt,
+      ...(failureRaw.origin === undefined ? {} : { origin: failureRaw.origin as FailureOrigin }),
+    };
+    let fix: FixRecord | undefined;
+    if (raw.fix !== undefined) {
+      if (typeof raw.fix !== "object" || raw.fix === null || Array.isArray(raw.fix)) return undefined;
+      const fixRaw = raw.fix as Record<string, unknown>;
+      if (fixRaw.kind !== "fix" || typeof fixRaw.id !== "string" || fixRaw.id.length === 0 ||
+          /[\u0000-\u001f\u007f-\u009f]/u.test(fixRaw.id) || !isSafeNonNegativeInteger(fixRaw.ts) ||
+          typeof fixRaw.cwd !== "string" || typeof fixRaw.cmd !== "string" ||
+          !Array.isArray(fixRaw.failureIds) || !fixRaw.failureIds.every((id) => typeof id === "string")) return undefined;
+      fix = {
+        kind: "fix", id: fixRaw.id, ts: fixRaw.ts, cwd: fixRaw.cwd, cmd: fixRaw.cmd,
+        failureIds: [...fixRaw.failureIds] as string[],
+      };
+    }
+    return fix === undefined ? { failure } : { failure, fix };
+  } catch {
+    return undefined;
+  }
+}
+
 function projectHits(hits: readonly SourceHit[], exposure: Exposure): { items: ProjectedRecallHit[]; truncated: boolean } {
   const items: ProjectedRecallHit[] = [];
   let truncated = false;
-  for (const [index, hit] of hits.entries()) {
-    const item = projectHit(hit, exposure, `c${index + 1}`);
-    const prospective = { exposure, items: [...items, item], truncated };
-    if (Buffer.byteLength(JSON.stringify(prospective), "utf8") > MAX_RESPONSE_BYTES) {
-      truncated = true;
-      continue;
+  const source = Array.isArray(hits) ? hits.slice(0, MAX_KNOWLEDGE_HIT_INPUTS) : [];
+  if (Array.isArray(hits) && hits.length > MAX_KNOWLEDGE_HIT_INPUTS) truncated = true;
+  for (let index = 0; index < source.length; index += 1) {
+    try {
+      const hit = normalizeSourceHit(source[index]);
+      if (hit === undefined) continue;
+      const item = projectHit(hit, exposure, `c${index + 1}`);
+      const prospective = { exposure, items: [...items, item], truncated };
+      if (Buffer.byteLength(JSON.stringify(prospective), "utf8") > MAX_RESPONSE_BYTES) {
+        truncated = true;
+        continue;
+      }
+      items.push(item);
+    } catch {
+      // Custom MemoryQueries are untrusted at the MCP boundary.
     }
-    items.push(item);
   }
   return { items, truncated };
 }

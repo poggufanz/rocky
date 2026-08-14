@@ -25,6 +25,9 @@ export type ParsedHookPayload =
     truncatedFiles?: number;
     coveragePaths?: string[];
     coveragePathsComplete?: boolean;
+    /** Exact unique candidate count before bounded witness storage. */
+    coverageCandidateCount?: number;
+    coverageCandidateCountExact?: boolean;
   }
   | { action: "close"; key: string; rationale?: RationaleEvent }
   | undefined;
@@ -163,6 +166,10 @@ function appendPayload(
     ...(boundedCoverage === undefined ? {} : {
       coveragePaths: boundedCoverage,
       coveragePathsComplete: coverageComplete,
+    }),
+    ...(coveragePaths === undefined ? {} : {
+      coverageCandidateCount: coveragePaths.length,
+      coverageCandidateCountExact: coverageCompleteOverride !== false,
     }),
   };
 }

@@ -14,7 +14,7 @@ import {
   writeSync,
 } from "node:fs";
 import { dirname } from "node:path";
-import { appendEvent } from "../agent/spool.js";
+import { appendEvent, recordCoverage } from "../agent/spool.js";
 import { parseClaudeHookPayload, type ParsedHookPayload } from "../agent/adapters/claude-code.js";
 import { parseCodexHookPayload } from "../agent/adapters/codex.js";
 import { loadConfig } from "../core/config-read.js";
@@ -402,6 +402,26 @@ function writeEmptyResponse(): Promise<void> {
 function applyParsedEvent(parsed: ParsedHookPayload, paths: RockyPaths, deps: AgentHookDeps): void {
   if (!parsed) return;
   if (parsed.action === "append") {
+    // Coverage is a turn-level sidecar.  It is written before individual
+    // events so a lost first/middle/last append cannot make surviving files
+    // look like complete knowledge.
+    const firstMechanism = parsed.events.find((event): event is Extract<AgentEvent, { kind: "mechanism" }> => event.kind === "mechanism");
+    if (firstMechanism) {
+      const coveragePaths = parsed.coveragePaths ?? firstMechanism.coveragePaths ?? [firstMechanism.path];
+      const candidateCount = parsed.coverageCandidateCount ?? coveragePaths.length;
+      try {
+        recordCoverage(parsed.key, {
+          agent: firstMechanism.agent,
+          paths: coveragePaths,
+          candidateCount,
+          candidateCountExact: parsed.coverageCandidateCountExact ?? parsed.coveragePaths !== undefined,
+          pathsComplete: parsed.coveragePathsComplete ?? firstMechanism.coveragePathsComplete
+            ?? candidateCount === coveragePaths.length,
+        }, paths);
+      } catch {
+        // Sidecar persistence is best effort; append remains fail-open.
+      }
+    }
     // Keep overflow metadata attached until one mechanism append succeeds.
     // A transient first-write failure must not let later surviving events
     // silently lose the batch's exact coverage witness.

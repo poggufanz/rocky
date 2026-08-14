@@ -10,13 +10,14 @@ import {
   openSync,
   readSync,
   readdirSync,
+  renameSync,
   unlinkSync,
   writeSync,
   type Stats,
 } from "node:fs";
 import { join } from "node:path";
 import { resolveRockyPaths, type RockyPaths } from "../core/state-paths.js";
-import { parseAgentEvent, type AgentEvent } from "./schema.js";
+import { MAX_COVERAGE_PATHS, parseAgentEvent, type AgentEvent, type AgentName } from "./schema.js";
 
 export const MAX_BATCH_BYTES = 256 * 1024;
 export const MAX_SPOOL_BATCHES = 50;
@@ -32,6 +33,9 @@ const ANNOTATION_LOCK_TOKEN_BYTES = 16;
 const ANNOTATION_METADATA_MAX_BYTES = 192;
 const CLAIM_TOKEN_BYTES = 16;
 const CLAIM_PATTERN = /^([A-Za-z0-9_-]{1,120})\.claim\.([a-f0-9]{32})\.jsonl$/u;
+const COVERAGE_SUFFIX = ".coverage.json";
+const COVERAGE_TEMP_SUFFIX = ".coverage.tmp";
+const COVERAGE_MAX_BYTES = 64 * 1024;
 
 type FileKind = "missing" | "regular" | "other";
 
@@ -82,6 +86,148 @@ function ensureSpoolDirectory(path: string): boolean {
 
 function batchPath(paths: RockyPaths, key: string): string {
   return join(paths.spoolDir, `${key}.jsonl`);
+}
+
+function coveragePath(paths: RockyPaths, key: string): string {
+  return join(paths.spoolDir, `${key}${COVERAGE_SUFFIX}`);
+}
+
+function coverageTempPath(paths: RockyPaths, key: string): string {
+  return join(paths.spoolDir, `${key}${COVERAGE_TEMP_SUFFIX}.${process.pid}.${randomBytes(8).toString("hex")}`);
+}
+
+function safeCoveragePaths(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const paths: string[] = [];
+  const seen = new Set<string>();
+  for (const item of value) {
+    if (typeof item !== "string" || item.length === 0 || item.length > 1024 || seen.has(item)) continue;
+    seen.add(item);
+    paths.push(item);
+    if (paths.length >= MAX_COVERAGE_PATHS) break;
+  }
+  return paths;
+}
+
+function safeAgent(value: unknown): AgentName | undefined {
+  return value === "claude-code" || value === "codex" ? value : undefined;
+}
+
+function readCoverageUnlocked(paths: RockyPaths, key: string): CoverageSnapshot | undefined {
+  let file: string;
+  try {
+    file = coveragePath(paths, key);
+  } catch {
+    return undefined;
+  }
+  const info = inspectFile(file);
+  if (info.kind !== "regular" || !info.stats || info.stats.size > COVERAGE_MAX_BYTES) return undefined;
+  let fd = -1;
+  try {
+    fd = openSync(file, constants.O_RDONLY | NO_FOLLOW);
+    const opened = fstatSync(fd);
+    if (!opened.isFile() || opened.isSymbolicLink() || opened.size > COVERAGE_MAX_BYTES) return undefined;
+    const bytes = Buffer.alloc(COVERAGE_MAX_BYTES + 1);
+    const count = readSync(fd, bytes, 0, bytes.length, 0);
+    const after = fstatSync(fd);
+    if (!after.isFile() || after.isSymbolicLink() || count !== after.size || count > COVERAGE_MAX_BYTES) return undefined;
+    const parsed: unknown = JSON.parse(bytes.subarray(0, count).toString("utf8"));
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return undefined;
+    const record = parsed as Record<string, unknown>;
+    const agent = safeAgent(record.agent);
+    const candidateCount = record.candidateCount;
+    const payloads = record.payloads;
+    if (record.v !== 1 || !agent || typeof record.candidateCountExact !== "boolean" ||
+        typeof record.pathsComplete !== "boolean" || typeof payloads !== "number" || !Number.isSafeInteger(payloads) || payloads < 1 ||
+        payloads > Number.MAX_SAFE_INTEGER ||
+        (candidateCount !== undefined && (typeof candidateCount !== "number" || !Number.isSafeInteger(candidateCount) || candidateCount < 0))) return undefined;
+    return {
+      v: 1,
+      agent,
+      paths: safeCoveragePaths(record.paths),
+      ...(candidateCount === undefined ? {} : { candidateCount }),
+      candidateCountExact: record.candidateCountExact,
+      pathsComplete: record.pathsComplete,
+      payloads,
+    };
+  } catch {
+    return undefined;
+  } finally {
+    if (fd >= 0) closeQuietly(fd);
+  }
+}
+
+function writeCoverageUnlocked(paths: RockyPaths, key: string, snapshot: CoverageSnapshot): boolean {
+  let target: string;
+  let temporary: string | undefined;
+  let fd = -1;
+  try {
+    target = coveragePath(paths, key);
+    temporary = coverageTempPath(paths, key);
+    const encoded = Buffer.from(JSON.stringify(snapshot), "utf8");
+    if (encoded.byteLength > COVERAGE_MAX_BYTES) return false;
+    fd = openSync(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | NO_FOLLOW, 0o600);
+    const opened = fstatSync(fd);
+    if (!opened.isFile() || opened.isSymbolicLink()) return false;
+    try { fchmodSync(fd, 0o600); } catch { /* best effort */ }
+    if (writeSync(fd, encoded, 0, encoded.byteLength) !== encoded.byteLength) return false;
+    const after = fstatSync(fd);
+    if (!after.isFile() || after.isSymbolicLink() || after.size !== encoded.byteLength) return false;
+    closeQuietly(fd);
+    fd = -1;
+    renameSync(temporary, target);
+    temporary = undefined;
+    return true;
+  } catch {
+    return false;
+  } finally {
+    if (fd >= 0) closeQuietly(fd);
+    if (temporary !== undefined) {
+      try { unlinkSync(temporary); } catch { /* best effort */ }
+    }
+  }
+}
+
+function mergeCoverage(previous: CoverageSnapshot | undefined, input: CoverageInput): CoverageSnapshot | undefined {
+  const agent = safeAgent(input.agent);
+  if (!agent) return undefined;
+  const incomingPaths = safeCoveragePaths(input.paths);
+  const incomingCount = input.candidateCount;
+  const incomingCountValid = incomingCount === undefined || (Number.isSafeInteger(incomingCount) && incomingCount >= 0);
+  if (!incomingCountValid) return undefined;
+  const incomingCountExact = incomingCount !== undefined && input.candidateCountExact !== false;
+  const incomingComplete = input.pathsComplete === true && incomingCountExact && incomingCount === incomingPaths.length;
+  if (!previous || previous.agent !== agent) {
+    return {
+      v: 1, agent, paths: incomingPaths,
+      ...(incomingCount === undefined ? { candidateCount: incomingPaths.length } : { candidateCount: incomingCount }),
+      candidateCountExact: incomingCountExact || incomingPaths.length === 0,
+      pathsComplete: incomingComplete || (incomingCount === undefined && incomingPaths.length === 0),
+      payloads: 1,
+    };
+  }
+  const union = [...previous.paths];
+  const seen = new Set(union);
+  for (const path of incomingPaths) {
+    if (seen.has(path)) continue;
+    seen.add(path);
+    if (union.length < MAX_COVERAGE_PATHS) union.push(path);
+  }
+  const payloads = previous.payloads < Number.MAX_SAFE_INTEGER ? previous.payloads + 1 : Number.MAX_SAFE_INTEGER;
+  const allComplete = previous.pathsComplete && incomingComplete && previous.candidateCountExact && incomingCountExact;
+  const exactUnion = allComplete && union.length <= MAX_COVERAGE_PATHS;
+  const candidateCount = exactUnion
+    ? union.length
+    : Math.max(union.length, previous.candidateCount ?? 0, incomingCount ?? 0);
+  return {
+    v: 1,
+    agent,
+    paths: union,
+    candidateCount,
+    candidateCountExact: exactUnion || (previous.payloads === 1 && previous.candidateCountExact && incomingPaths.length === 0),
+    pathsComplete: exactUnion,
+    payloads,
+  };
 }
 
 function lockPath(paths: RockyPaths, key: string): string {
@@ -438,6 +584,62 @@ function releaseAppendLock(lock: OwnedPrivateLock): void {
   }
 }
 
+/** Record bounded coverage before attempting an individual event append. */
+export function recordCoverage(
+  key: string,
+  input: CoverageInput,
+  paths = resolveRockyPaths(),
+): boolean {
+  if (!isSafeKey(key)) return false;
+  const directory = spoolPath(paths);
+  if (!directory || !ensureSpoolDirectory(directory)) return false;
+  const appendLock = acquireAppendLock(paths, key);
+  if (!appendLock) return false;
+  try {
+    const merged = mergeCoverage(readCoverageUnlocked(paths, key), input);
+    return merged === undefined ? false : writeCoverageUnlocked(paths, key, merged);
+  } catch {
+    return false;
+  } finally {
+    releaseAppendLock(appendLock);
+  }
+}
+
+export function readCoverage(key: string, paths = resolveRockyPaths()): CoverageSnapshot | undefined {
+  if (!isSafeKey(key)) return undefined;
+  const directory = spoolPath(paths);
+  if (!directory || !isSpoolDirectory(directory)) return undefined;
+  const appendLock = acquireAppendLock(paths, key);
+  if (!appendLock) return undefined;
+  try {
+    return readCoverageUnlocked(paths, key);
+  } finally {
+    releaseAppendLock(appendLock);
+  }
+}
+
+function removeCoverageUnlocked(paths: RockyPaths, key: string): boolean {
+  let file: string;
+  try { file = coveragePath(paths, key); } catch { return false; }
+  const info = inspectFile(file);
+  if (info.kind === "missing") return true;
+  if (info.kind !== "regular") return false;
+  try { unlinkSync(file); return true; } catch { return false; }
+}
+
+export function removeCoverage(key: string, paths = resolveRockyPaths()): boolean {
+  if (!isSafeKey(key)) return false;
+  const directory = spoolPath(paths);
+  if (!directory || !isSpoolDirectory(directory)) return false;
+  const appendLock = acquireAppendLock(paths, key);
+  if (!appendLock) return false;
+  try {
+    return removeCoverageUnlocked(paths, key);
+  } finally {
+    releaseAppendLock(appendLock);
+  }
+}
+
 function removeOwnedAnnotationLock(path: string, token: string, pid: number, stats: Stats | undefined): boolean {
   const current = readAnnotationMetadata(path);
   if (!current || current.metadata.token !== token || current.metadata.pid !== pid) return false;
@@ -607,6 +809,25 @@ export function appendEvent(key: string, event: AgentEvent, paths = resolveRocky
   } finally {
     releaseAppendLock(appendLock);
   }
+}
+
+/** Bounded turn-level witness independent from per-event append success. */
+export interface CoverageInput {
+  agent: AgentName;
+  paths: readonly string[];
+  candidateCount?: number;
+  candidateCountExact?: boolean;
+  pathsComplete?: boolean;
+}
+
+export interface CoverageSnapshot {
+  v: 1;
+  agent: AgentName;
+  paths: string[];
+  candidateCount?: number;
+  candidateCountExact: boolean;
+  pathsComplete: boolean;
+  payloads: number;
 }
 
 export function readBatch(key: string, paths = resolveRockyPaths()): AgentEvent[] {

@@ -11,7 +11,7 @@ import {
   projectWhyPossible,
   projectTriple,
 } from "./privacy.js";
-import { boundTripleRecord, canonicalPath, isKnownPathPlatform, isSafeNonNegativeInteger } from "../core/memory-read.js";
+import { boundTripleRecord, canonicalPath, isKnownPathPlatform, isSafeNonNegativeInteger, parseMemoryRecord } from "../core/memory-read.js";
 import type { TripleRecord } from "../core/memory-read.js";
 
 export interface McpToolDefinition {
@@ -321,10 +321,13 @@ function safeTripleRecord(value: unknown): TripleRecord | undefined {
     if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
     const raw = value as Record<string, unknown>;
     const ts = raw.ts;
-    if (raw.kind !== "triple" || typeof raw.id !== "string" || typeof ts !== "number" || !Number.isSafeInteger(ts) ||
+    if (raw.kind !== "triple" || raw.schemaV !== 1 || raw.origin !== "agent-hook" ||
+        typeof raw.id !== "string" || raw.id.length === 0 || raw.id.length > 512 ||
+        /[\u0000-\u001f\u007f-\u009f]/u.test(raw.id) || typeof ts !== "number" || !Number.isSafeInteger(ts) || ts < 0 ||
         typeof raw.cwd !== "string" || raw.agent !== "claude-code" && raw.agent !== "codex") return undefined;
     const bounded = boundTripleRecord(raw as unknown as TripleRecord);
     const platform = isKnownPathPlatform(raw.platform) ? raw.platform : undefined;
+    if (raw.platform !== undefined && platform === undefined) return undefined;
     const safe: TripleRecord = {
       kind: "triple", id: raw.id, ts, cwd: raw.cwd, schemaV: 1,
       agent: raw.agent, origin: "agent-hook", mechanism: bounded.mechanism,
@@ -534,6 +537,33 @@ function readMemory<T>(operation: () => T): T {
   }
 }
 
+function safeMemoryStats(value: unknown): Record<string, number> {
+  try {
+    const source = typeof value === "object" && value !== null && !Array.isArray(value)
+      ? value as Record<string, unknown>
+      : {};
+    const count = (key: string): number => isSafeNonNegativeInteger(source[key]) ? source[key] as number : 0;
+    const failures = count("failures");
+    const fixEvents = count("fixEvents");
+    const resolved = count("resolved");
+    const unresolved = count("unresolved");
+    const confirmedFixes = source.confirmedFixes !== undefined ? count("confirmedFixes") : fixEvents;
+    const possibleFixes = count("possibleFixes");
+    const triples = count("triples");
+    const notes = count("notes");
+    const suppliedTotal = source.total;
+    const total = isSafeNonNegativeInteger(suppliedTotal)
+      ? suppliedTotal
+      : [failures, fixEvents, possibleFixes, triples, notes].reduce((sum, entry) => {
+        const next = sum + entry;
+        return isSafeNonNegativeInteger(next) ? next : Number.MAX_SAFE_INTEGER;
+      }, 0);
+    return { failures, fixEvents, resolved, unresolved, confirmedFixes, possibleFixes, triples, notes, total };
+  } catch {
+    return { failures: 0, fixEvents: 0, resolved: 0, unresolved: 0, confirmedFixes: 0, possibleFixes: 0, triples: 0, notes: 0, total: 0 };
+  }
+}
+
 async function runAi<T>(operation: () => Promise<T>): Promise<T> {
   try {
     return await operation();
@@ -604,13 +634,7 @@ export function createToolRegistry(options: CreateToolRegistryOptions): McpToolR
             const stats = readMemory(() => options.memory.stats(input));
             return cappedResult({
               exposure: options.exposure,
-              ...stats,
-              confirmedFixes: stats.confirmedFixes ?? stats.fixEvents,
-              possibleFixes: stats.possibleFixes ?? 0,
-              triples: stats.triples ?? 0,
-              notes: stats.notes ?? 0,
-              total: stats.total ?? stats.failures + stats.fixEvents + (stats.possibleFixes ?? 0) +
-                (stats.triples ?? 0) + (stats.notes ?? 0),
+              ...safeMemoryStats(stats),
             });
           }
           case "search_knowledge": {
@@ -622,7 +646,11 @@ export function createToolRegistry(options: CreateToolRegistryOptions): McpToolR
             const id = parseFetchArgs(args);
             const record = readMemory(() => options.memory.fetchRecord(id));
             if (record === undefined || record.kind === "note") return notFoundResult();
-            const projected = projectMemoryRecord(record, options.exposure);
+            if (record.kind === "failure" && record.origin !== undefined &&
+                record.origin !== "run" && record.origin !== "hook" && record.origin !== "watch") return notFoundResult();
+            const normalized = parseMemoryRecord(record);
+            if (normalized === undefined || normalized.kind === "note") return notFoundResult();
+            const projected = projectMemoryRecord(normalized, options.exposure);
             if (projected === undefined) return notFoundResult();
             return boundedSingleResult(
               { exposure: options.exposure, record: projected, truncated: false },

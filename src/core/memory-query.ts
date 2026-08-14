@@ -43,6 +43,8 @@ export interface KnowledgeSearchHit {
   truncatedFiles?: number;
   complete?: boolean;
   coverageStatus?: "complete" | "truncated" | "unknown";
+  /** Internal proof marker supplied only by the canonical in-process query. */
+  coverageProof?: boolean;
 }
 export interface KnowledgeCoverageSummary {
   status: "complete" | "truncated" | "unknown";
@@ -470,19 +472,23 @@ export function searchKnowledge(
         source: "fix",
       });
     } else if (record.kind === "triple") {
-      if (score > 0) hits.push({
-        id: record.id,
-        ts: record.ts,
-        kind: "triple",
-        snippet,
-        score,
-        agent: record.agent,
-        source: record.origin,
-        filesCovered: record.mechanism.files.map((file) => file.path),
-        truncatedFiles: record.mechanism.truncatedFiles,
-        complete: completeTriple(record),
-        coverageStatus: record.mechanism.coverageStatus,
-      });
+      if (score > 0) {
+        const complete = completeTriple(record);
+        hits.push({
+          id: record.id,
+          ts: record.ts,
+          kind: "triple",
+          snippet,
+          score,
+          agent: record.agent,
+          source: record.origin,
+          filesCovered: record.mechanism.files.map((file) => file.path),
+          truncatedFiles: record.mechanism.truncatedFiles,
+          complete,
+          coverageStatus: record.mechanism.coverageStatus,
+          ...(complete ? { coverageProof: true } : {}),
+        });
+      }
     } else if (record.kind === "note") {
       if (score > 0) hits.push({ id: record.id, ts: record.ts, kind: "note", snippet, score, source: "note" });
     }
@@ -504,21 +510,26 @@ function safeCoverageAdd(left: number, right: number): number {
 }
 
 function rawTripleFiles(record: TripleRecord): string[] {
-  const mechanism = record.mechanism as unknown as { files?: unknown };
-  if (!Array.isArray(mechanism.files)) return [];
+  const mechanism = record?.mechanism;
+  if (typeof mechanism !== "object" || mechanism === null || Array.isArray(mechanism) ||
+      !Array.isArray((mechanism as unknown as { files?: unknown }).files)) return [];
   const seen = new Set<string>();
   const paths: string[] = [];
-  const platform = record.platform ?? "unknown";
-  for (const value of mechanism.files) {
-    if (typeof value !== "object" || value === null || Array.isArray(value)) continue;
-    const path = canonicalPath(
-      typeof (value as { path?: unknown }).path === "string" ? (value as { path: string }).path : "",
-      { platform, cwd: record.cwd },
-    );
-    if (path && !seen.has(path)) {
-      seen.add(path);
-      paths.push(path);
+  try {
+    const platform = record.platform ?? "unknown";
+    for (const value of (mechanism as unknown as { files: unknown[] }).files) {
+      if (typeof value !== "object" || value === null || Array.isArray(value)) continue;
+      const path = canonicalPath(
+        typeof (value as { path?: unknown }).path === "string" ? (value as { path: string }).path : "",
+        { platform, cwd: record.cwd },
+      );
+      if (path && !seen.has(path)) {
+        seen.add(path);
+        paths.push(path);
+      }
     }
+  } catch {
+    return [];
   }
   return paths;
 }
@@ -589,29 +600,34 @@ export function whyFileEvidence(records: readonly MemoryRecord[], path: string, 
   for (const source of records) {
     if (source.kind !== "triple") continue;
     sawTriple = true;
-    const bounded = boundTripleRecord(source);
-    const rawPaths = rawTripleFiles(source);
-    const platform = bounded.platform ?? "unknown";
-    const targetIdentity = canonicalPath(path, { platform, cwd: bounded.cwd });
-    const boundedPaths = new Set(bounded.mechanism.files.map((file) => canonicalPath(file.path, {
-      platform, cwd: bounded.cwd,
-    })).filter(Boolean));
-    const rawContainsTarget = targetIdentity.length > 0 && rawPaths.includes(targetIdentity);
-    const boundedContainsTarget = targetIdentity.length > 0 && boundedPaths.has(targetIdentity);
-    const sourceStatus = bounded.mechanism.coverageStatus ?? "unknown";
-    const sourceIncomplete = sourceStatus !== "complete" || bounded.mechanism.truncatedFiles !== 0 || rawPaths.length > bounded.mechanism.files.length;
-    if (sourceIncomplete) {
-      hasIncomplete = true;
-      status = worstCoverageStatus(status, sourceStatus);
-      if (sourceStatus === "complete" || sourceStatus === "truncated") status = worstCoverageStatus(status, "truncated");
-      truncatedFiles = safeCoverageAdd(truncatedFiles, bounded.mechanism.truncatedFiles);
-      if (!boundedContainsTarget || (rawContainsTarget && !boundedContainsTarget)) {
-        if (!boundedMatches.has(source.id) && possible.length < limit) {
-          possible.push({ id: source.id, ts: source.ts, source: source.origin, reason: "path_may_be_omitted" });
+    try {
+      const bounded = boundTripleRecord(source);
+      const rawPaths = rawTripleFiles(source);
+      const platform = bounded.platform ?? "unknown";
+      const targetIdentity = canonicalPath(path, { platform, cwd: bounded.cwd });
+      const boundedPaths = new Set(bounded.mechanism.files.map((file) => canonicalPath(file.path, {
+        platform, cwd: bounded.cwd,
+      })).filter(Boolean));
+      const rawContainsTarget = targetIdentity.length > 0 && rawPaths.includes(targetIdentity);
+      const boundedContainsTarget = targetIdentity.length > 0 && boundedPaths.has(targetIdentity);
+      const sourceStatus = bounded.mechanism.coverageStatus ?? "unknown";
+      const sourceIncomplete = sourceStatus !== "complete" || bounded.mechanism.truncatedFiles !== 0 || rawPaths.length > bounded.mechanism.files.length;
+      if (sourceIncomplete) {
+        hasIncomplete = true;
+        status = worstCoverageStatus(status, sourceStatus);
+        if (sourceStatus === "complete" || sourceStatus === "truncated") status = worstCoverageStatus(status, "truncated");
+        truncatedFiles = safeCoverageAdd(truncatedFiles, bounded.mechanism.truncatedFiles);
+        if (!boundedContainsTarget || (rawContainsTarget && !boundedContainsTarget)) {
+          if (!boundedMatches.has(source.id) && possible.length < limit) {
+            possible.push({ id: source.id, ts: source.ts, source: source.origin, reason: "path_may_be_omitted" });
+          }
         }
       }
+      filesCovered = Math.max(filesCovered, bounded.mechanism.files.length);
+    } catch {
+      hasIncomplete = true;
+      status = "unknown";
     }
-    filesCovered = Math.max(filesCovered, bounded.mechanism.files.length);
   }
   if (!sawTriple || strictMatches.suffixAmbiguous) {
     hasIncomplete = true;
