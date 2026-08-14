@@ -412,12 +412,17 @@ function pruneDeadReclaimClaims(path: string, expected?: Stats): void {
       const claim = lstatSync(claimPath);
       if (!claim.isFile() || claim.isSymbolicLink() || !tripleIdentityKnown(claim)) continue;
       if (expected !== undefined && !sameTripleIdentity(expected, claim)) continue;
-      // A primary-less claim has no inode to compare against.  Require the
-      // immutable lock metadata to parse and its original owner to be
-      // definitely dead, so a regular file merely wearing a claim-shaped
-      // name remains untouched.
+      // A primary-less non-empty claim has no inode to compare against.
+      // Require its immutable lock metadata to parse and its original owner
+      // to be definitely dead, so a regular file merely wearing a claim-
+      // shaped name remains untouched.  Zero-byte claims are the deliberate
+      // stale-empty-lock recovery case, which has no metadata to parse.
       const metadata = readTripleLock(claimPath);
-      if (metadata === undefined || tripleOwnerAlive(metadata.metadata.pid) !== false) continue;
+      if (metadata !== undefined) {
+        if (tripleOwnerAlive(metadata.metadata.pid) !== false) continue;
+      } else if (expected === undefined && claim.size !== 0) {
+        continue;
+      }
 
       let primary: Stats | undefined;
       try {

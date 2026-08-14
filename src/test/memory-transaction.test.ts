@@ -564,6 +564,13 @@ test("a dead orphan claim is pruned when the primary pathname is already absent"
   process.env.ROCKY_HOME = home;
   try {
     memory.recordNote({ cwd: home, cmd: "after-absent-primary", file: "e.ts", line: 1, subject: "e", answer: "e" });
+    const emptyLock = `${lock}.empty-source`;
+    const emptyClaim = `${lock}.reclaim.${deadPid}.${"c".repeat(32)}`;
+    writeFileSync(emptyLock, "", { mode: 0o600 });
+    linkSync(emptyLock, emptyClaim);
+    unlinkSync(emptyLock);
+    memory.recordNote({ cwd: home, cmd: "after-empty-absent-primary", file: "f.ts", line: 1, subject: "f", answer: "f" });
+    assert.equal(existsSync(emptyClaim), false);
   } finally {
     if (original === undefined) delete process.env.ROCKY_HOME;
     else process.env.ROCKY_HOME = original;
