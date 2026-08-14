@@ -50,8 +50,16 @@ interface EvidenceDerivation {
   legacy: string;
 }
 
-/** Visit evidence lazily, stopping once a caller has a trusted answer. */
-function visitEvidence(
+/**
+ * Visit only evidence that can assert recurrence or a cross-version family.
+ *
+ * Excerpts are intentionally absent here. They are raw user text and can be
+ * newer, lossy, or forged relative to a persisted v1 signature; allowing an
+ * excerpt to derive an exact current hash turns a stale 404 into a 500 match.
+ * Command-only evidence and the stored signature are independently
+ * provenance-safe after their persisted v1 hash validates.
+ */
+function visitExactEvidence(
   record: FailureRecord,
   visitor: (evidence: EvidenceDerivation) => boolean,
 ): boolean {
@@ -63,37 +71,21 @@ function visitEvidence(
   }
 
   const signature = record.signature.join("\n");
-  let signatureProven = false;
   if (signature.length > 0) {
     // Stored signatures are already normalized. Avoid running the full line
-    // normalizer again in the common migration path; raw excerpts still use
-    // the complete derivation below when the fast witness does not fit.
+    // normalizer again in the common migration path; the full v1 derivation is
+    // only a compatibility fallback for older punctuation/spacing variants.
     const fast: EvidenceDerivation = {
       current: fingerprintSignature(record.signature, record.cmd, record.exitCode),
       legacy: legacyFingerprintSignature(record.signature, record.cmd, record.exitCode),
     };
     if (visitor(fast)) return true;
-    if (fast.legacy === record.fingerprint) {
-      signatureProven = true;
-    }
     if (fast.legacy !== record.fingerprint) {
       const fullLegacy = legacyFingerprint(signature, record.cmd, record.exitCode);
       if (fullLegacy === record.fingerprint) {
-        signatureProven = true;
         if (visitor({ ...fast, legacy: fullLegacy })) return true;
       } else if (fullLegacy !== fast.legacy && visitor({ ...fast, legacy: fullLegacy })) return true;
     }
-  }
-  if (record.excerpt.length > 0 && record.excerpt !== signature) {
-    const current = fingerprint(record.excerpt, record.cmd, record.exitCode);
-    // Once the stored signature itself proves the v1 hash, the excerpt only
-    // supplies a less-lossy current derivation; hashing it through v1 again
-    // adds cost without increasing provenance. A record with no proven
-    // signature still takes the conservative full legacy check.
-    return visitor({
-      current,
-      legacy: signatureProven ? record.fingerprint : legacyFingerprint(record.excerpt, record.cmd, record.exitCode),
-    });
   }
   return false;
 }
@@ -108,23 +100,19 @@ function fingerprintMatches(record: FailureRecord, candidates: Set<string>): boo
   if (!FINGERPRINT_TEXT.test(record.fingerprint)) return false;
   if (record.fingerprintV === 2) return candidates.has(record.fingerprint);
   // A v1/absent-marker record is trusted only when its persisted hash proves
-  // one of its own evidence sources, and the same source derives a current
-  // candidate. This blocks a stale HTTP/port hash from matching a new record
-  // just because callers pass both current and legacy candidates.
-  return visitEvidence(record, ({ current, legacy }) => {
-    if (record.fingerprint === current && candidates.has(current)) return true;
-    // A caller that intentionally supplies only a legacy hash still gets an
-    // exact historical lookup, but only after the stored source proves that
-    // hash; the dual-candidate path above cannot take this shortcut.
-    if (record.fingerprint === legacy && candidates.size === 1 && candidates.has(legacy)) return true;
-    return record.fingerprint === legacy && candidates.has(current);
-  });
+  // the legacy derivation from its own command/signature. This prevents a
+  // persisted v2 hash without a v2 marker from being treated as current, and
+  // it deliberately excludes raw excerpts from exact identity.
+  return visitExactEvidence(record, ({ current, legacy }) =>
+    record.fingerprint === legacy && (candidates.size === 1
+      ? (candidates.has(legacy) || candidates.has(current))
+      : candidates.has(current)));
 }
 
 type FingerprintMigrationIndex = ReadonlyMap<string, ReadonlySet<string>>;
 
 function trustedCurrentEvidence(record: FailureRecord, current: string): boolean {
-  return visitEvidence(record, (evidence) => evidence.current === current);
+  return visitExactEvidence(record, (evidence) => record.fingerprint === current && evidence.current === current);
 }
 
 /**
@@ -148,7 +136,7 @@ function fingerprintMigrationIndex(records: readonly FailureRecord[]): Fingerpri
   const untrustedCurrent = new Set<string>();
   for (const record of records) {
     if (record.fingerprintV === 2 || !FINGERPRINT_TEXT.test(record.fingerprint)) continue;
-    visitEvidence(record, (evidence) => {
+    visitExactEvidence(record, (evidence) => {
       if (record.fingerprint !== evidence.legacy) return false;
       const current = evidence.current;
       const witnesses = currentByHash.get(current);
@@ -174,11 +162,12 @@ function fingerprintMigrationIndex(records: readonly FailureRecord[]): Fingerpri
 
 function canonicalFingerprint(record: FailureRecord, migration: FingerprintMigrationIndex): string {
   if (record.fingerprintV === 2) return record.fingerprint;
-  if (!FINGERPRINT_TEXT.test(record.fingerprint)) return record.fingerprint;
+  const unprovenKey = `legacy:${record.id}`;
+  if (!FINGERPRINT_TEXT.test(record.fingerprint)) return unprovenKey;
   const family = migration.get(record.fingerprint);
-  if (family === undefined) return record.fingerprint;
-  let canonical = record.fingerprint;
-  visitEvidence(record, ({ current }) => {
+  if (family === undefined) return unprovenKey;
+  let canonical = unprovenKey;
+  visitExactEvidence(record, ({ current }) => {
     if (!family.has(current)) return false;
     canonical = current;
     return true;
@@ -188,11 +177,27 @@ function canonicalFingerprint(record: FailureRecord, migration: FingerprintMigra
 
 function knowledgeFailureKey(record: FailureRecord, migration: FingerprintMigrationIndex): string {
   const canonical = canonicalFingerprint(record, migration);
-  // Independent legacy records with the same (possibly hand-authored) hash
-  // remain separate. Only a trusted v1 -> v2 derivation is a cross-version
-  // family, which prevents malformed data from collapsing MCP results.
-  if (record.fingerprintV !== 2 && canonical === record.fingerprint) return `legacy:${record.id}`;
   return canonical;
+}
+
+/**
+ * Return semantic retrieval evidence for one failure. A legacy excerpt is
+ * admitted only after the persisted v1 signature independently hashes to the
+ * stored fingerprint; this makes raw numeric values searchable without
+ * granting the excerpt any exact recurrence or migration authority.
+ */
+export function retrievalEvidenceTokens(record: FailureRecord): Set<string> {
+  const evidence = retrievalTokens(`${record.cmd} ${record.signature.join(" ")}`);
+  if (record.fingerprintV === 2 || record.origin === "hook" || record.signature.length === 0 || record.excerpt.length === 0) {
+    return evidence;
+  }
+  const signature = record.signature.join("\n");
+  const proven = legacyFingerprintSignature(record.signature, record.cmd, record.exitCode) === record.fingerprint ||
+    legacyFingerprint(signature, record.cmd, record.exitCode) === record.fingerprint ||
+    legacyFingerprint(record.excerpt, record.cmd, record.exitCode) === record.fingerprint;
+  if (!proven) return evidence;
+  for (const token of retrievalTokens(record.excerpt)) evidence.add(token);
+  return evidence;
 }
 
 export function findByFingerprint(records: readonly MemoryRecord[], fp: FingerprintLookup, now = Date.now()): FailureRecord[] {
@@ -282,7 +287,7 @@ export function queryRecall(records: readonly MemoryRecord[], input: RecallQuery
   const candidates = unique
     .filter((record): record is FailureRecord => record.kind === "failure" && record.ts <= now &&
       (input.cwd === undefined || record.cwd === input.cwd))
-    .map((record) => ({ record, tokenSet: retrievalTokens([record.cmd, ...record.signature].join(" ")) }));
+    .map((record) => ({ record, tokenSet: retrievalEvidenceTokens(record) }));
   const documentFrequency = tokenDocumentFrequency(candidates.map((candidate) => candidate.tokenSet));
   const migration = fingerprintMigrationIndex(candidates.map(({ record }) => record));
   const best = new Map<string, RecallHit>();
@@ -349,7 +354,7 @@ export function searchKnowledge(
     if (record.kind === "failure" && wants("failure")) {
       entries.push({
         record,
-        tokenSet: retrievalTokens(`${record.cmd} ${record.signature.join(" ")}`),
+        tokenSet: retrievalEvidenceTokens(record),
         snippet: record.cmd.slice(0, 120),
       });
     } else if (record.kind === "fix" && wants("fix")) {

@@ -39,14 +39,14 @@ const HEX_ADDRESS = new RegExp(`(?<![${IDENTIFIER_BOUNDARY}])0x[0-9a-f]+(?![${ID
 const BARE_HEX = new RegExp(`(?<![${IDENTIFIER_BOUNDARY}])[0-9a-f]{7,40}(?![${IDENTIFIER_BOUNDARY}])`, "giu");
 const UUID_SHAPE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/giu;
 const DIGEST_SHAPE = /(?:[0-9a-f]{128}|[0-9a-f]{64}|[0-9a-f]{40})/giu;
-const ISO_TIMESTAMP = /\b\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?)?\b/gu;
-const CLOCK_TIME = /\b\d{1,2}:\d{2}(?::\d{2}(?:\.\d+)?)?\b/gu;
+const ISO_TIMESTAMP = /(?<![\p{L}\p{N}_])\p{Nd}{4}-\p{Nd}{2}-\p{Nd}{2}(?:[T ]\p{Nd}{2}:\p{Nd}{2}(?::\p{Nd}{2}(?:\.\p{Nd}+)?)?(?:Z|[+-]\p{Nd}{2}:?\p{Nd}{2})?)?(?![\p{L}\p{N}_])/gu;
+const CLOCK_TIME = /(?<![\p{L}\p{N}_])\p{Nd}{1,2}:\p{Nd}{2}(?::\p{Nd}{2}(?:\.\p{Nd}+)?)?(?![\p{L}\p{N}_])/gu;
 const NUMBER = /\p{Nd}+/gu;
 const SOURCE_EXTENSION = /\.(?:c|cc|cfg|conf|cpp|cs|css|env|go|graphql|h|hpp|html|ini|java|js|jsx|json|kt|lock|log|lua|map|md|php|proto|py|rb|rs|scss|sh|sql|swift|toml|ts|tsx|txt|vue|wasm|xml|yaml|yml)$/iu;
 const SOURCE_LOCATION = new RegExp(`${SOURCE_EXTENSION.source.slice(0, -1)}:\\d+$`, "iu");
 const SOURCE_LOCATION_PREFIX = new RegExp(`(?:^|[^\\s])${SOURCE_EXTENSION.source.slice(0, -1)}:\\s*$`, "iu");
 const SOURCE_LOCATION_CHAIN = new RegExp(`${SOURCE_EXTENSION.source.slice(0, -1)}:\\p{Nd}+(?:\\s*:\\s*\\p{Nd}+)*\\s*:?$`, "iu");
-const VOLATILE_NUMBER_CHAIN = /(?:^|[^\p{L}\p{N}_])(?:pid|process(?:[-_ ]?id)?|worker|thread|line|index|attempt|timestamp|time|date|column|col)\s*[:=]?\s*\p{Nd}+(?:\s*[:.,]\s*\p{Nd}+)*\s*[:.,]?\s*$/iu;
+const VOLATILE_NUMBER_CHAIN = /(?:^|[^\p{L}\p{N}_])(?:pid|process(?:[-_ ]?id)?|worker|thread|line|index|attempt|timestamp|time|date|column|col|request(?:[-_ ]?id)?|job(?:[-_ ]?id)?|trace(?:[-_ ]?id)?|span(?:[-_ ]?id)?|session(?:[-_ ]?id)?)\s*[:=]?\s*\p{Nd}+(?:\s*[-:.,]\s*\p{Nd}+)*\s*[-:.,]?\s*$/iu;
 
 const STOP_WORDS = new Set(["the", "a", "an", "at", "in", "on", "of", "to", "is", "was", "for", "and", "or"]);
 const TOKEN = /<[^>\s]+>|#[\p{L}\p{N}_-]*|[\p{L}\p{N}\p{M}]+(?:[-_.][\p{L}\p{N}\p{M}]+)+|[\p{L}\p{N}\p{M}]+/gu;
@@ -61,11 +61,20 @@ function rangeInPattern(text: string, pattern: RegExp, start: number, end: numbe
 }
 
 function maskUrls(text: string): string {
-  return text.replace(URL, (url) => {
-    // Keep sentence punctuation outside the URL while consuming auth, IPv6,
-    // port, query, and fragment as one opaque value.
-    const trailing = /[),.;!?'…]+$/u.exec(url)?.[0] ?? "";
-    return `<url>${trailing}`;
+  return text.replace(URL, (url, offset: number, whole: string) => {
+    // RFC3986 permits punctuation such as `?`, `!`, `;`, and apostrophe in a
+    // URL. Keep the complete match opaque. The one exception is a clearly
+    // surrounding apostrophe/parenthesis: when the character immediately
+    // before the URL opens that wrapper, peel the matching close (and ordinary
+    // sentence punctuation after it) back out deterministically.
+    const before = whole.slice(0, offset);
+    const peel = (open: string, close: string): string => {
+      if (!before.endsWith(open)) return "";
+      const escaped = close.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      return new RegExp(`${escaped}[.!?,;:…]*$`, "u").exec(url)?.[0] ?? "";
+    };
+    const trailing = peel("'", "'") || peel("(", ")") || peel("[", "]") || peel("{", "}");
+    return trailing.length === 0 ? "<url>" : `<url>${trailing}`;
   });
 }
 
@@ -90,6 +99,9 @@ function maskCommonVolatile(text: string): string {
 }
 
 function isLikelyPort(before: string, numberOffset: number): boolean {
+  // Generic request/job/trace labels are deliberately treated as volatile
+  // identifiers; they are indistinguishable from ports without a network
+  // label. Explicit host/domain/service/port contexts retain the number.
   const prefix = before.slice(0, numberOffset).trimEnd();
   if (!prefix.endsWith(":")) return false;
   const host = prefix.slice(0, -1).trimEnd();
@@ -109,7 +121,7 @@ function isLikelyPort(before: string, numberOffset: number): boolean {
   if (SOURCE_EXTENSION.test(label)) return false;
   if (!/^[\p{L}\p{N}][\p{L}\p{N}._-]*$/u.test(label)) return false;
   if (label.includes(".")) return true;
-  if (/\s/u.test(host) && !/(?:\bhost|server|address|connect|port|endpoint)\s*$/iu.test(context + " " + label)) return false;
+  if (/\s/u.test(host) && !/(?:\bhost|server|address|connect|port|endpoint|service)\s*$/iu.test(context + " " + label)) return false;
   // A bare `service:9200` is still a port even without a nearby network
   // verb. The source-location exclusions above keep the common false
   // positive (`file.ts:41`) volatile.
@@ -118,7 +130,7 @@ function isLikelyPort(before: string, numberOffset: number): boolean {
 
 function isVolatileNumberContext(line: string, offset: number): boolean {
   const before = line.slice(0, offset);
-  if (/(?:^|[^\p{L}\p{N}_])(?:pid|process(?:[-_ ]?id)?|worker|thread|line|index|attempt|timestamp|time|date|column|col)\s*[:=]?\s*$/iu.test(before)) return true;
+  if (/(?:^|[^\p{L}\p{N}_])(?:pid|process(?:[-_ ]?id)?|worker|thread|line|index|attempt|timestamp|time|date|column|col|request(?:[-_ ]?id)?|job(?:[-_ ]?id)?|trace(?:[-_ ]?id)?|span(?:[-_ ]?id)?|session(?:[-_ ]?id)?)\s*[:=]?\s*$/iu.test(before)) return true;
   // A source location's column (`file.ts:41:7`) is volatile too. The first
   // number is identified by its extension prefix; later numbers are covered
   // by the chained-location form below.
@@ -135,7 +147,7 @@ function isSemanticNumber(line: string, offset: number, end: number): boolean {
   // adjacent to a colon (which otherwise resembles `host:port`).
   if (isVolatileNumberContext(line, offset)) return false;
   if (/(?:^|[^\p{L}\p{N}_])sha-?$/iu.test(before)) return true;
-  if (/^\d{3}$/u.test(number) && Number(number) >= 100 && Number(number) <= 599 &&
+  if (/^\p{Nd}{3}$/u.test(number) &&
       /\b(?:http|status|response)\b/iu.test(context) &&
       !/\b(?:pid|line|process|worker|attempt)\b[^\d]*$/iu.test(context)) return true;
   if (/(?:\b(?:http(?:\/[0-9.]+)?|status[\s_-]*code|response(?:\s+status)?|error[\s_-]*code|exit[\s_-]*code|errno|sqlstate|code|port(?:\s+(?:number|id))?)\s*[:=]?\s*)$/iu.test(context)) {

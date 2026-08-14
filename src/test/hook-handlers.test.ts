@@ -120,7 +120,7 @@ function seedElsewhereFix(failCwd: string, fixCwd: string, cmd: string, exitCode
   const fp = commandFingerprint(cmd, exitCode);
   const failure = {
     kind: "failure", id: "seed-failure", ts: Date.now() - 1000, cwd: failCwd, cmd,
-    exitCode, fingerprint: fp, signature: [cmd], excerpt: `exit ${exitCode}`, origin: "hook",
+    exitCode, fingerprint: fp, fingerprintV: 2, signature: [cmd], excerpt: `exit ${exitCode}`, origin: "hook",
   };
   const fix = {
     kind: "fix", id: "seed-fix", ts: Date.now(), cwd: fixCwd, cmd,

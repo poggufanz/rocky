@@ -61,6 +61,16 @@ test("URL masking keeps RFC3986 apostrophes inside URLs and surrounding quotes o
   assert.equal(line, "error fetch '<url>'.");
 });
 
+test("URL masking keeps legal terminal punctuation inside the opaque URL", () => {
+  for (const punctuation of ["?", "!", ";", "'"]) {
+    assert.equal(
+      normalizeLine(`Error fetch https://host/path${punctuation}`),
+      "error fetch <url>",
+      punctuation,
+    );
+  }
+});
+
 test("semantic HTTP status, explicit code, and port numbers survive fingerprint normalization", () => {
   assert.notEqual(fingerprint("Error: HTTP 404 from port 9200", "curl", 1), fingerprint("Error: HTTP 500 from port 9200", "curl", 1));
   assert.notEqual(fingerprint("Error: HTTP 404 code 1001 on port 9200", "curl", 1), fingerprint("Error: HTTP 404 code 1002 on port 9200", "curl", 1));
@@ -79,6 +89,22 @@ test("volatile labelled numbers and Unicode decimal digits stay masked", () => {
   assert.equal(normalizeLine("Error worker:١٢٣٤"), "error worker:#");
   assert.equal(fingerprint("Error pid:1234", "node app", 1), fingerprint("Error pid:9876", "node app", 1));
   assert.equal(fingerprint("Error worker:١٢٣٤", "node app", 1), fingerprint("Error worker:٥٦٧٨", "node app", 1));
+  assert.equal(fingerprint("Error timestamp:٢٠٢٦-٠٨-١٤T١٠:١١:١٢Z", "node app", 1), fingerprint("Error timestamp:٢٠٢٧-٠٩-١٥T٢١:٣١:٤٢Z", "node app", 1));
+});
+
+test("fallback request and job identifiers stay volatile instead of becoming ports", () => {
+  const labels = ["request", "job", "request-id", "job-id", "trace-id", "span-id", "session-id"];
+  for (const label of labels) {
+    assert.equal(
+      fingerprint(`Error ${label}:1234`, "node app", 1),
+      fingerprint(`Error ${label}:9876`, "node app", 1),
+      label,
+    );
+  }
+  assert.notEqual(
+    fingerprint("Error connect to service:9200", "node app", 1),
+    fingerprint("Error connect to service:5432", "node app", 1),
+  );
 });
 
 test("identifier-shaped error codes keep semantic differences", () => {

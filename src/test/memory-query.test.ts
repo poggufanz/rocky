@@ -380,6 +380,32 @@ test("dual lookup rejects a legacy HTTP/port hash from different current semanti
   assert.deepEqual(findByFingerprint([legacy], candidates, 100), []);
 });
 
+test("absent and v1 records carrying a v2 hash are not trusted as current evidence", () => {
+  const stderr = "Error: HTTP 404 from port 9200";
+  for (const [id, fingerprintV] of [["unmarked-current-hash", undefined], ["v1-current-hash", 1]] as const) {
+    const record: FailureRecord = {
+      kind: "failure", id, ts: 100, cwd: "/work/a", cmd: "curl", exitCode: 1,
+      fingerprint: fingerprint(stderr, "curl", 1), signature: signatureLines(stderr), excerpt: stderr, fingerprintV,
+    };
+    assert.deepEqual(findByFingerprint([record], record.fingerprint, 100), [], id);
+  }
+});
+
+test("a proven v1 signature cannot use a forged excerpt for exact recurrence", () => {
+  const oldStderr = "Error: HTTP 404 from port 9200";
+  const forgedStderr = "Error: HTTP 500 from port 5432";
+  const record: FailureRecord = {
+    kind: "failure", id: "forged-excerpt", ts: 100, cwd: "/work/a", cmd: "curl", exitCode: 1,
+    fingerprint: legacyFingerprint(oldStderr, "curl", 1), signature: ["error http # from port #"], excerpt: forgedStderr,
+  };
+  assert.deepEqual(findByFingerprint([record], fingerprint(forgedStderr, "curl", 1), 100), []);
+  const current: FailureRecord = {
+    ...record, id: "current-500", ts: 200, fingerprint: fingerprint(forgedStderr, "curl", 1), fingerprintV: 2,
+    signature: signatureLines(forgedStderr), excerpt: forgedStderr,
+  };
+  assert.deepEqual(queryRecall([record, current], { query: "curl", limit: 5 }).map((hit) => hit.failure.id), [current.id, record.id]);
+});
+
 test("recall migration does not canonicalize legacy evidence onto a different v2 semantic", () => {
   const oldStderr = "Error: HTTP 404 from port 9200";
   const newStderr = "Error: HTTP 500 from port 5432";
@@ -396,7 +422,7 @@ test("recall migration does not canonicalize legacy evidence onto a different v2
   assert.deepEqual(searchKnowledge([legacy, current], { query: "curl", kind: "failure", limit: 5 }).map((hit) => hit.id), [current.id, legacy.id]);
 });
 
-test("current-only fingerprint lookup bridges lossy legacy URL signatures via excerpt", () => {
+test("current-only fingerprint lookup rejects lossy legacy URL excerpts", () => {
   const stderr = "Error fetch https://host/path?token=123#frag";
   const legacy: FailureRecord = {
     kind: "failure", id: "legacy-url-fingerprint", ts: 100, cwd: "/work/a", cmd: "curl", exitCode: 1,
@@ -404,7 +430,7 @@ test("current-only fingerprint lookup bridges lossy legacy URL signatures via ex
     signature: ["error fetch https:/<path>?token=#"],
     excerpt: stderr,
   };
-  assert.deepEqual(findByFingerprint([legacy], fingerprint(stderr, "curl", 1), 100).map((record) => record.id), [legacy.id]);
+  assert.deepEqual(findByFingerprint([legacy], fingerprint(stderr, "curl", 1), 100), []);
 });
 
 test("current-only lookup bridges legacy command fingerprints without stderr", () => {
@@ -490,6 +516,37 @@ test("malformed fingerprint provenance cannot create a migration family", () => 
   assert.deepEqual(findByFingerprint([forged], current.fingerprint, 300), []);
   assert.deepEqual(queryRecall([forged, current], { query: "different evidence" }).map((hit) => hit.failure.id), [forged.id]);
   assert.deepEqual(searchKnowledge([forged, current], { query: "different evidence", kind: "failure" }).map((hit) => hit.id), [forged.id]);
+});
+
+test("unproven legacy records with the same hash stay separate in recall", () => {
+  const alpha: FailureRecord = {
+    ...failureA, id: "legacy-alpha", ts: 100, cwd: "/work/a", cmd: "tool", fingerprint: "0123456789abcdef",
+    signature: ["alpha evidence"], excerpt: "alpha evidence",
+  };
+  const beta: FailureRecord = {
+    ...failureA, id: "legacy-beta", ts: 200, cwd: "/work/a", cmd: "tool", fingerprint: "0123456789abcdef",
+    signature: ["beta evidence"], excerpt: "beta evidence",
+  };
+  assert.deepEqual(queryRecall([alpha, beta], { query: "alpha beta", limit: 5 }).map((hit) => hit.failure.id), [beta.id, alpha.id]);
+  assert.deepEqual(searchKnowledge([alpha, beta], { query: "alpha beta", kind: "failure", limit: 5 }).map((hit) => hit.id), [beta.id, alpha.id]);
+});
+
+test("trusted v1 excerpts add numeric retrieval evidence without exact migration authority", () => {
+  const make = (id: string, stderr: string): FailureRecord => ({
+    ...failureA,
+    id,
+    ts: id.includes("404") ? 100 : 200,
+    cwd: "/work/a",
+    cmd: "curl",
+    fingerprint: legacyFingerprint(stderr, "curl", 1),
+    signature: ["error http # from port #"],
+    excerpt: stderr,
+  });
+  const records = [make("v1-404-9200", "Error: HTTP 404 from port 9200"), make("v1-500-5432", "Error: HTTP 500 from port 5432")];
+  assert.equal(queryRecall(records, { query: "404", limit: 2 })[0]?.failure.id, "v1-404-9200");
+  assert.equal(queryRecall(records, { query: "9200", limit: 2 })[0]?.failure.id, "v1-404-9200");
+  assert.equal(searchKnowledge(records, { query: "404", kind: "failure" })[0]?.id, "v1-404-9200");
+  assert.equal(searchKnowledge(records, { query: "9200", kind: "failure" })[0]?.id, "v1-404-9200");
 });
 
 test("port query ranks exact semantic port above nearby ports", () => {
