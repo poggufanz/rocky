@@ -13,6 +13,7 @@ import { createMemoryQueries, type MemoryQueries, type RecallHit } from "../core
 import { loadMemory } from "../core/memory-read.js";
 import { resolveRockyPaths } from "../core/state-paths.js";
 import { ago, detail, elapsed, heading, phrase, phraseForAct, say } from "../ui/rocky.js";
+import { safeTerminalBlock, safeTerminalLine } from "../ui/sanitize.js";
 
 export type ParsedRecall = { useAi: boolean; query: string };
 
@@ -141,7 +142,7 @@ function isRecallAiOutcome(value: unknown): value is ValidRecallAiOutcome {
 function sayAiOutcome(outcome: ValidRecallAiOutcome): void {
   if (outcome.aiStatus === "used") {
     say(phraseForAct(outcome.act));
-    detail(formatModelExplanation(outcome.explanation));
+    detail(safeTerminalBlock(formatModelExplanation(outcome.explanation)));
     return;
   }
   switch (outcome.aiStatus) {
@@ -216,10 +217,10 @@ export async function recall(argv: readonly string[], dependencies?: RecallDepen
   say(`I remember ${hits.length} thing${hits.length === 1 ? "" : "s"}.`);
   if (outcome !== undefined) sayAiOutcome(outcome);
   for (const [i, hit] of displayed.entries()) {
-    heading(`${i + 1}. ${hit.failure.cmd}   (${ago(hit.failure.ts)}, exit ${hit.failure.exitCode})`);
-    detail(indent(hit.failure.excerpt));
+    heading(`${i + 1}. ${safeTerminalLine(hit.failure.cmd)}   (${ago(hit.failure.ts)}, exit ${hit.failure.exitCode})`);
+    detail(indent(safeTerminalBlock(hit.failure.excerpt)));
     if (hit.fix) {
-      say(`fixed with: ${hit.fix.cmd}`);
+      say(`fixed with: ${safeTerminalLine(hit.fix.cmd)}`);
       const link = hit.fix.links?.find((candidate) => candidate.id === hit.failure.id);
       if (link) {
         const span = elapsed(hit.fix.ts - hit.failure.ts);

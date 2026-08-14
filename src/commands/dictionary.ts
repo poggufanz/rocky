@@ -2,11 +2,11 @@ import { dictionaryRankPortFromConfig, type DictionaryRankPort } from "../ai/dic
 import { loadConfig } from "../core/config.js";
 import { digestBuckets, queryDictionary, quizCandidates, triplesForFile, type DictionaryHit } from "../core/dictionary.js";
 import { loadMemory, type MemoryRecord } from "../core/memory-read.js";
-import { replaceAnsiAndControls, stripInvisibleControls } from "../core/redact.js";
 import { resolveRockyPaths } from "../core/state-paths.js";
 import { createTtyPromptPort } from "../setup/prompt.js";
 import { truncateUtf8 } from "../mcp/privacy.js";
 import { ago, detail, say } from "../ui/rocky.js";
+import { safeTerminalLine } from "../ui/sanitize.js";
 
 const MAX_QUERY_DISPLAY_BYTES = 160;
 const MAX_SUBJECT_DISPLAY_BYTES = 120;
@@ -99,10 +99,8 @@ export function exportCommand(argv: string[], deps: ExportCommandDeps = {}): num
 }
 
 function terminalSafe(value: string, maximumBytes: number): string {
-  const withoutSequences = replaceAnsiAndControls(value, " ", " ");
-  const withoutControls = stripInvisibleControls(withoutSequences)
-    .replace(/[\p{Cc}\p{Cf}]/gu, " ")
-    .replace(/[\u2028\u2029]/gu, " ")
+  const withoutControls = safeTerminalLine(value)
+    .replace(/[\u200b\u2060\ufeff]/gu, " ")
     .replace(/[?？]/gu, " ");
   return truncateUtf8(withoutControls, maximumBytes).value;
 }

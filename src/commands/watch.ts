@@ -17,10 +17,10 @@ import { resolveRockyPaths } from "../core/state-paths.js";
 import { loadMemory, recordWatchFailure, type MemoryRecord } from "../core/memory.js";
 import { DEFAULT_WATCH_NOTIFY, loadConfig } from "../core/config-read.js";
 import { formatDuration, notify as realNotify, spokenDuration, type NotifyInput } from "../core/notify.js";
-import { replaceAnsiAndControls, stripInvisibleControls } from "../core/redact.js";
 import { watchLogName, writeWatchLog } from "../core/watch-log.js";
 import { linkFixOnSuccess, speakFailureMemory } from "./run.js";
 import { detail, phrase, say } from "../ui/rocky.js";
+import { safeTerminalBlock, safeTerminalLine } from "../ui/sanitize.js";
 
 export interface ParsedWatch { quiet: boolean; cmd: string }
 
@@ -122,9 +122,9 @@ function readLabelsFile(path: string): string {
     const content = bytes.subarray(0, count).toString("utf8");
     // Labels are user-visible terminal text. Strip escape/control payloads
     // before splitting lines so a multi-line OSC cannot leak its payload.
-    const sanitized = stripInvisibleControls(replaceAnsiAndControls(content, "", " "))
-      .replace(/[\t\u2028\u2029]/gu, " ");
-    const lines = sanitized.split(/\r\n|\n|\r/)
+    const sanitized = safeTerminalBlock(content.replace(/\r\n?/gu, "\n"))
+      .replace(/[\u200b\u2060\ufeff]/gu, "");
+    const lines = sanitized.split("\n")
       .filter((line) => line.trim().length > 0)
       .slice(-MAX_LABEL_LINES);
     return lines.map((line) => line.slice(0, MAX_LABEL_CHARS)).join("\n");
@@ -264,7 +264,7 @@ export async function watch(
       return;
     }
     try {
-      for (const line of unseenLabels(seen, content)) speakLabel(line);
+      for (const line of unseenLabels(seen, content)) speakLabel(safeTerminalLine(line));
     } catch {
       // Persona output is best effort and must not alter wrapped-command behavior.
     }

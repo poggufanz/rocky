@@ -48,6 +48,7 @@ import type {
 } from "../setup/file-transaction.js";
 import { quotePosixShell } from "../core/shell-quote.js";
 import { ago, detail, detailTty, phrase, say, sayTty } from "../ui/rocky.js";
+import { safeTerminalLine } from "../ui/sanitize.js";
 
 /**
  * An unreadable memory file is spoken over /dev/tty, not thrown — a detached
@@ -82,18 +83,18 @@ export function hookFail(cmd: string, exitCode: number, cwd: string): number {
   if (withFix) {
     const fix = getFix(memory, withFix)!;
     sayTty(`I hear this error before. ${ago(withFix.ts)}. last time, you fix with:`);
-    detailTty(fix.cmd);
+    detailTty(safeTerminalLine(fix.cmd));
     const elsewhere = fixFromElsewhere(fix, cwd);
     if (elsewhere !== undefined) {
       sayTty("but fix comes from other place.");
-      detailTty(`place: ${elsewhere}`);
+      detailTty(`place: ${safeTerminalLine(elsewhere)}`);
     }
     sayTty("try, question");
   } else {
     const hint = deepMemoryHint(cmd);
     // No hint means the command already went through `rocky run`, so deep
     // memory exists and that run has already spoken. Passive ears stay quiet.
-    if (hint) sayTty(`this error again. deep memory need stderr. run with: ${hint}, question`);
+    if (hint) sayTty(`this error again. deep memory need stderr. run with: ${safeTerminalLine(hint)}, question`);
   }
   return 0;
 }

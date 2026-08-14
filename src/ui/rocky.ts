@@ -9,6 +9,7 @@
  */
 
 import { writeFileSync } from "node:fs";
+import { safeTerminalBlock, safeTerminalLine } from "./sanitize.js";
 
 export { phrase, phraseForAct, phraseKeys, validateRockyPhrase, type PhraseKey } from "./phrases.js";
 
@@ -37,25 +38,25 @@ export function face(): string {
 
 /** One Rocky line, prefixed. */
 export function say(msg: string): void {
-  process.stderr.write(`${amber("[Rocky]")} ${msg}\n`);
+  process.stderr.write(`${amber("[Rocky]")} ${safeTerminalLine(msg)}\n`);
 }
 
 /** Rocky prompt text; readline writes it to the prompt port's stderr stream. */
 export function prompt(msg: string): string {
-  return `${amber("[Rocky]")} ${msg} `;
+  return `${amber("[Rocky]")} ${safeTerminalLine(msg)} `;
 }
 
 /** Rocky line without trailing newline context — for multi-line blocks. */
 export function block(lines: string[]): void {
-  for (const l of lines) process.stderr.write(`${amber("♫")} ${l}\n`);
+  for (const l of lines) process.stderr.write(`${amber("♫")} ${safeTerminalLine(l)}\n`);
 }
 
 export function heading(msg: string): void {
-  process.stderr.write(`\n${bold(msg)}\n`);
+  process.stderr.write(`\n${bold(safeTerminalLine(msg))}\n`);
 }
 
 export function detail(msg: string): void {
-  process.stderr.write(`${dim(msg)}\n`);
+  process.stderr.write(`${dim(safeTerminalBlock(msg))}\n`);
 }
 
 /** "just now", "2 minutes", "6 hours", "3 days" — the bare span, no suffix. */
@@ -82,7 +83,7 @@ export function ago(ts: number): string {
  */
 export function sayTty(msg: string): void {
   try {
-    writeFileSync("/dev/tty", `[Rocky] ${msg}\n`);
+    writeFileSync("/dev/tty", `[Rocky] ${safeTerminalLine(msg)}\n`);
   } catch {
     /* no tty (tests, CI, detached session) — Rocky stays silent */
   }
@@ -90,7 +91,7 @@ export function sayTty(msg: string): void {
 
 export function detailTty(msg: string): void {
   try {
-    writeFileSync("/dev/tty", `    ${msg}\n`);
+    writeFileSync("/dev/tty", `    ${safeTerminalLine(msg)}\n`);
   } catch {
     /* silent */
   }

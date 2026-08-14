@@ -19,6 +19,7 @@ import {
 } from "../core/memory.js";
 import { findByFingerprint, fixFromElsewhere, getFix, recentUnresolvedFailures } from "../core/memory-query.js";
 import { ago, detail, elapsed, say } from "../ui/rocky.js";
+import { safeTerminalLine } from "../ui/sanitize.js";
 
 export async function run(cmd: string): Promise<number> {
   if (!cmd || cmd.trim().length === 0) {
@@ -77,7 +78,7 @@ export function speakFailureMemory(
     if (withFix) {
       const fix = getFix(memory, withFix)!;
       say(`last time, you fix with:`);
-      detail(`    ${fix.cmd}`);
+      detail(`    ${safeTerminalLine(fix.cmd)}`);
       // Say how much this link is worth. `recall` graded strong/weak from the
       // day it shipped; run/watch/hook did not, so the surfaces people actually
       // use presented a weak "same program" guess with the same confidence as a
@@ -91,7 +92,7 @@ export function speakFailureMemory(
       const elsewhere = fixFromElsewhere(fix, cwd);
       if (elsewhere !== undefined) {
         say("but fix comes from other place.");
-        detail(`    place: ${elsewhere}`);
+        detail(`    place: ${safeTerminalLine(elsewhere)}`);
       }
       say("try, question");
     } else {
