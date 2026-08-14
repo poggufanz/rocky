@@ -83,6 +83,7 @@ export interface TripleFile {
   plusMinus: [number, number];
   props: string[];
   excerpt?: string;
+  provenance?: "tool-observed" | "git-diff-inferred" | "unknown";
 }
 
 export interface TripleRecord {
@@ -95,7 +96,12 @@ export interface TripleRecord {
   origin: "agent-hook";
   intent?: { text: string };
   rationale?: { text: string; tags: string[]; source: "transcript" | "notify" };
-  mechanism: { head?: string; files: TripleFile[]; truncatedFiles: number };
+  mechanism: {
+    head?: string;
+    files: TripleFile[];
+    truncatedFiles: number;
+    baseline?: "captured" | "unknown";
+  };
 }
 
 export type MemoryRecord = FailureRecord | FixRecord | AssociationRecord | NoteRecord | TripleRecord;
@@ -222,7 +228,7 @@ function parseTripleRecord(record: Record<string, unknown>): TripleRecord | unde
 
   const mechanism = objectValue(record.mechanism);
   if (!mechanism || !Array.isArray(mechanism.files) ||
-      typeof mechanism.truncatedFiles !== "number" || !Number.isInteger(mechanism.truncatedFiles) ||
+      typeof mechanism.truncatedFiles !== "number" || !Number.isSafeInteger(mechanism.truncatedFiles) ||
       mechanism.truncatedFiles < 0 ||
       (mechanism.head !== undefined && typeof mechanism.head !== "string")) return undefined;
 
@@ -233,14 +239,20 @@ function parseTripleRecord(record: Record<string, unknown>): TripleRecord | unde
         typeof file.plusMinus[0] !== "number" || !Number.isFinite(file.plusMinus[0]) ||
         typeof file.plusMinus[1] !== "number" || !Number.isFinite(file.plusMinus[1]) ||
         !Array.isArray(file.props) || !file.props.every((prop) => typeof prop === "string") ||
-        (file.excerpt !== undefined && typeof file.excerpt !== "string")) return undefined;
+        (file.excerpt !== undefined && typeof file.excerpt !== "string") ||
+        (file.provenance !== undefined && file.provenance !== "tool-observed" &&
+          file.provenance !== "git-diff-inferred" && file.provenance !== "unknown")) return undefined;
     files.push({
       path: file.path,
       plusMinus: [file.plusMinus[0], file.plusMinus[1]],
       props: [...file.props],
       ...(file.excerpt === undefined ? {} : { excerpt: file.excerpt }),
+      ...(file.provenance === undefined ? {} : { provenance: file.provenance as TripleFile["provenance"] }),
     });
   }
+
+  const baseline = mechanism.baseline === undefined ? undefined : mechanism.baseline;
+  if (baseline !== undefined && baseline !== "captured" && baseline !== "unknown") return undefined;
 
   let intent: TripleRecord["intent"];
   if (record.intent !== undefined) {
@@ -272,6 +284,7 @@ function parseTripleRecord(record: Record<string, unknown>): TripleRecord | unde
       ...(mechanism.head === undefined ? {} : { head: mechanism.head }),
       files,
       truncatedFiles: mechanism.truncatedFiles,
+      ...(baseline === undefined ? {} : { baseline }),
     },
   };
 }

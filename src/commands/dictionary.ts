@@ -128,6 +128,14 @@ function evidence(hits: DictionaryHit[], support: (line: string) => void): void 
   }
 }
 
+function fileForQuery(triple: DictionaryHit["triple"], query: string): DictionaryHit["triple"]["mechanism"]["files"][number] | undefined {
+  const normalized = query.replaceAll("\\", "/").replace(/^\.\//u, "");
+  return triple.mechanism.files.find((file) => {
+    const candidate = file.path.replaceAll("\\", "/").replace(/^\.\//u, "");
+    return candidate === normalized || candidate.endsWith(`/${normalized}`);
+  }) ?? triple.mechanism.files[0];
+}
+
 function reorder(hits: readonly DictionaryHit[], rankedIds: readonly string[]): DictionaryHit[] | undefined {
   const result: DictionaryHit[] = [];
   const used = new Set<number>();
@@ -223,9 +231,9 @@ export function why(argv: string[], deps: DictionaryCommandDeps = {}): number {
     return 0;
   }
   for (const triple of hits) {
-    const first = triple.mechanism.files[0];
-    const where = first
-      ? `${terminalSafe(first.path, MAX_PATH_DISPLAY_BYTES)} +${first.plusMinus[0]} -${first.plusMinus[1]}`
+    const selected = fileForQuery(triple, path);
+    const where = selected
+      ? `${terminalSafe(selected.path, MAX_PATH_DISPLAY_BYTES)} +${selected.plusMinus[0]} -${selected.plusMinus[1]}`
       : safePath;
     const rationale = triple.rationale ? terminalSafe(triple.rationale.text, MAX_INTENT_DISPLAY_BYTES).trim() : "";
     if (rationale) {

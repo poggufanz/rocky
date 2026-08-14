@@ -2,6 +2,25 @@ import { createHash } from "node:crypto";
 
 export type AgentName = "claude-code" | "codex";
 
+/** Evidence source for a remembered file change. */
+export type FileProvenance = "tool-observed" | "git-diff-inferred" | "unknown";
+
+export interface TurnBaselineFile {
+  path: string;
+  plusMinus: [number, number];
+}
+
+/**
+ * A baseline is captured at UserPromptSubmit and consumed at Stop.  A missing
+ * baseline is explicit: annotation must not present current repository state
+ * as a proven turn delta.
+ */
+export interface TurnBaseline {
+  status: "captured" | "unknown";
+  head?: string;
+  files?: TurnBaselineFile[];
+}
+
 export interface IntentEvent {
   v: 1;
   agent: AgentName;
@@ -9,6 +28,7 @@ export interface IntentEvent {
   ts: number;
   cwd?: string;
   text: string;
+  baseline?: TurnBaseline;
 }
 
 export interface MechanismEvent {
@@ -19,7 +39,12 @@ export interface MechanismEvent {
   tool: string;
   path: string;
   excerpt?: string;
+  provenance?: FileProvenance;
+  /** Number of unique paths omitted by an adapter event cap. */
+  truncatedFiles?: number;
 }
+
+export const MAX_BASELINE_FILES = 256;
 
 export interface RationaleEvent {
   v: 1;
@@ -44,6 +69,33 @@ function str(value: unknown, cap: number): string | undefined {
   return typeof value === "string" && value.length > 0 ? value.slice(0, cap) : undefined;
 }
 
+function parseBaseline(value: unknown): TurnBaseline | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+  const record = value as Record<string, unknown>;
+  if (record.status !== "captured" && record.status !== "unknown") return undefined;
+  const filesValue = record.files;
+  if (filesValue !== undefined && !Array.isArray(filesValue)) return undefined;
+  if (filesValue !== undefined && filesValue.length > MAX_BASELINE_FILES) return { status: "unknown" };
+  const files: TurnBaselineFile[] = [];
+  for (const item of filesValue ?? []) {
+    if (typeof item !== "object" || item === null || Array.isArray(item)) return undefined;
+    const file = item as Record<string, unknown>;
+    if (typeof file.path !== "string" || file.path.length === 0 || file.path.length > 1024 ||
+        !Array.isArray(file.plusMinus) || file.plusMinus.length !== 2 ||
+        typeof file.plusMinus[0] !== "number" || !Number.isSafeInteger(file.plusMinus[0]) || file.plusMinus[0] < 0 ||
+        typeof file.plusMinus[1] !== "number" || !Number.isSafeInteger(file.plusMinus[1]) || file.plusMinus[1] < 0) return undefined;
+    files.push({ path: file.path, plusMinus: [file.plusMinus[0], file.plusMinus[1]] });
+    if (files.length >= MAX_BASELINE_FILES) break;
+  }
+  const head = record.head === undefined ? undefined : str(record.head, 256);
+  if (record.head !== undefined && head === undefined) return undefined;
+  return {
+    status: record.status,
+    ...(head === undefined ? {} : { head }),
+    ...(files.length === 0 ? {} : { files }),
+  };
+}
+
 export function parseAgentEvent(value: unknown): AgentEvent | undefined {
   if (typeof value !== "object" || value === null) return undefined;
   const record = value as Record<string, unknown>;
@@ -58,14 +110,28 @@ export function parseAgentEvent(value: unknown): AgentEvent | undefined {
       const text = str(record.text, MAX_INTENT_CHARS);
       if (!text) return undefined;
       const cwd = typeof record.cwd === "string" ? record.cwd : undefined;
-      return { v: 1, agent, kind: "intent", ts, ...(cwd ? { cwd } : {}), text };
+      const baseline = record.baseline === undefined ? undefined : parseBaseline(record.baseline);
+      if (record.baseline !== undefined && baseline === undefined) return undefined;
+      return { v: 1, agent, kind: "intent", ts, ...(cwd ? { cwd } : {}), text, ...(baseline ? { baseline } : {}) };
     }
     case "mechanism": {
       const path = str(record.path, 1024);
       const tool = str(record.tool, 64);
       if (!path || !tool) return undefined;
       const excerpt = str(record.excerpt, MAX_EXCERPT_CHARS);
-      return { v: 1, agent, kind: "mechanism", ts, tool, path, ...(excerpt ? { excerpt } : {}) };
+      const provenance = record.provenance === undefined ? undefined : record.provenance;
+      if (provenance !== undefined && provenance !== "tool-observed" && provenance !== "git-diff-inferred" && provenance !== "unknown") {
+        return undefined;
+      }
+      const rawTruncatedFiles = record.truncatedFiles;
+      if (rawTruncatedFiles !== undefined && (typeof rawTruncatedFiles !== "number" || !Number.isSafeInteger(rawTruncatedFiles) || rawTruncatedFiles < 0)) return undefined;
+      const truncatedFiles = typeof rawTruncatedFiles === "number" ? rawTruncatedFiles : undefined;
+      return {
+        v: 1, agent, kind: "mechanism", ts, tool, path,
+        ...(excerpt ? { excerpt } : {}),
+        ...(provenance === undefined ? {} : { provenance }),
+        ...(truncatedFiles === undefined ? {} : { truncatedFiles }),
+      };
     }
     case "rationale": {
       const text = str(record.text, MAX_RATIONALE_CHARS);

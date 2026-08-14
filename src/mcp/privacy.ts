@@ -40,6 +40,7 @@ export interface ProjectedTriple {
   id: string;
   timestamp: number;
   agent: "claude-code" | "codex";
+  source: "agent-hook";
   intent?: string;
   rationale?: { text: string; tags: readonly string[] };
   files: readonly {
@@ -47,7 +48,12 @@ export interface ProjectedTriple {
     plusMinus: [number, number];
     props: readonly string[];
     excerpt?: string;
+    provenance?: "tool-observed" | "git-diff-inferred" | "unknown";
   }[];
+  filesCovered: readonly string[];
+  truncatedFiles: number;
+  complete: boolean;
+  baseline?: "captured" | "unknown";
   cwd?: string;
   truncatedFields: readonly string[];
 }
@@ -55,9 +61,15 @@ export interface ProjectedTriple {
 export interface ProjectedKnowledgeHit {
   id: string;
   ts: number;
-  kind: "failure" | "fix" | "triple";
+  kind: "failure" | "fix" | "triple" | "note";
   snippet: string;
   score: number;
+  agent?: "claude-code" | "codex";
+  source?: string;
+  filesCovered?: readonly string[];
+  truncatedFiles?: number;
+  complete?: boolean;
+  truncatedFields: readonly string[];
 }
 
 export interface ProjectedKnowledgeResponse {
@@ -190,6 +202,7 @@ function projectTripleFile(
     plusMinus: [safePlusMinus(file.plusMinus[0]), safePlusMinus(file.plusMinus[1])],
     props: projectStringArray(file.props, exposure, `files[${index}].props`, truncation),
   };
+  if (file.provenance !== undefined) projected.provenance = file.provenance;
   if (exposure === "raw" && file.excerpt !== undefined) {
     projected.excerpt = projectText(file.excerpt, exposure, `files[${index}].excerpt`, truncation);
   }
@@ -202,9 +215,17 @@ export function projectTriple(triple: TripleRecord, exposure: Exposure): Project
     id: projectOpaqueId(triple.id, "id", truncation),
     timestamp: triple.ts,
     agent: triple.agent,
+    source: triple.origin,
     files: triple.mechanism.files.map((file, index) => projectTripleFile(file, index, exposure, truncation)),
+    filesCovered: triple.mechanism.files.map((file, index) => projectText(file.path, exposure, `filesCovered[${index}]`, truncation)),
+    truncatedFiles: triple.mechanism.truncatedFiles,
+    complete: triple.mechanism.truncatedFiles === 0
+      && triple.mechanism.baseline === "captured"
+      && triple.mechanism.files.length > 0
+      && triple.mechanism.files.every((file) => file.provenance === "tool-observed" || file.provenance === "git-diff-inferred"),
     truncatedFields: truncation.fields,
   };
+  if (triple.mechanism.baseline !== undefined) projected.baseline = triple.mechanism.baseline;
   if (triple.intent !== undefined) {
     projected.intent = projectText(triple.intent.text, exposure, "intent", truncation);
   }
@@ -222,7 +243,7 @@ export function projectKnowledgeHits(
   hits: readonly KnowledgeSearchHit[],
   exposure: Exposure,
 ): ProjectedKnowledgeResponse {
-  const items = hits.map((hit) => {
+  const project = (hit: KnowledgeSearchHit): ProjectedKnowledgeHit => {
     const truncation: Truncation = { fields: [] };
     return {
       id: projectOpaqueId(hit.id, "id", truncation),
@@ -230,9 +251,28 @@ export function projectKnowledgeHits(
       kind: hit.kind,
       snippet: projectText(hit.snippet, exposure, "snippet", truncation),
       score: Number.isFinite(hit.score) ? hit.score : 0,
+      ...(hit.agent === undefined ? {} : { agent: hit.agent }),
+      ...(hit.source === undefined ? {} : { source: projectText(hit.source, exposure, "source", truncation) }),
+      ...(hit.filesCovered === undefined ? {} : {
+        filesCovered: projectStringArray(hit.filesCovered, exposure, "filesCovered", truncation),
+      }),
+      ...(hit.truncatedFiles === undefined ? {} : { truncatedFiles: hit.truncatedFiles }),
+      ...(hit.complete === undefined ? {} : { complete: hit.complete }),
+      truncatedFields: truncation.fields,
     };
-  });
-  return { exposure, items, truncated: false };
+  };
+  const items: ProjectedKnowledgeHit[] = [];
+  let truncated = false;
+  for (const hit of hits) {
+    const item = project(hit);
+    const prospective = { exposure, items: [...items, item], truncated };
+    if (Buffer.byteLength(JSON.stringify(prospective), "utf8") > MAX_RESPONSE_BYTES) {
+      truncated = true;
+      continue;
+    }
+    items.push(item);
+  }
+  return { exposure, items, truncated };
 }
 
 function projectFailureRecord(failure: FailureRecord, exposure: Exposure): Record<string, unknown> {

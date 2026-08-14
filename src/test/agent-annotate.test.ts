@@ -568,6 +568,148 @@ test("C0-obfuscated secrets are removed before durable redaction in every text f
   assert.doesNotMatch(durable, /[\u0000-\u001f\u007f\u001b\u202e]/u);
 });
 
+test("captured turn baseline excludes identical pre-existing dirty files", async (t) => {
+  const paths = freshPaths(t);
+  append("baseline-delta", [
+    {
+      v: 1, agent: "codex", kind: "intent", ts: 1, cwd: paths.home, text: "change agent file",
+      baseline: { status: "captured", head: "head", files: [{ path: "pre.ts", plusMinus: [3, 2] }] },
+    },
+    { v: 1, agent: "codex", kind: "mechanism", ts: 2, tool: "Edit", path: "agent.ts", excerpt: "value: 1", provenance: "tool-observed" },
+  ], paths);
+  const triple = await annotateBatch("baseline-delta", {
+    paths,
+    git: (args) => {
+      if (args[0] === "rev-parse") return "head";
+      if (args[0] === "diff" && args[1] === "--numstat" && args[2] === undefined) return "3\t2\tpre.ts\n2\t1\tagent.ts";
+      if (args[0] === "diff" && args[1] === "--cached") return "";
+      if (args[0] === "ls-files") return "";
+      return args[3] === "agent.ts" ? "2\t1\tagent.ts" : undefined;
+    },
+  });
+  assert.ok(triple);
+  assert.deepEqual(triple.mechanism.files.map((file) => file.path), ["agent.ts"]);
+  assert.equal(triple.mechanism.baseline, "captured");
+  assert.equal(triple.mechanism.files[0]?.provenance, "tool-observed");
+});
+
+test("shell-only turn changes are git-diff-inferred with explicit provenance", async (t) => {
+  const paths = freshPaths(t);
+  append("shell-delta", [{
+    v: 1, agent: "claude-code", kind: "intent", ts: 1, cwd: paths.home, text: "run formatter",
+    baseline: { status: "captured", head: "head" },
+  }], paths);
+  const triple = await annotateBatch("shell-delta", {
+    paths,
+    git: (args) => {
+      if (args[0] === "rev-parse") return "head";
+      if (args[0] === "diff" && args[1] === "--numstat" && args[2] === undefined) return "4\t1\tshell.ts";
+      if (args[0] === "diff" && args[1] === "--cached") return "";
+      if (args[0] === "ls-files") return "";
+      return undefined;
+    },
+  });
+  assert.ok(triple);
+  assert.deepEqual(triple.mechanism.files.map((file) => file.path), ["shell.ts"]);
+  assert.equal(triple.mechanism.files[0]?.provenance, "git-diff-inferred");
+  assert.deepEqual(triple.mechanism.files[0]?.plusMinus, [4, 1]);
+});
+
+test("new untracked shell paths are inferred even without line stats", async (t) => {
+  const paths = freshPaths(t);
+  append("shell-untracked", [{
+    v: 1, agent: "codex", kind: "intent", ts: 1, cwd: paths.home, text: "create scratch file",
+    baseline: { status: "captured", head: "head", files: [] },
+  }], paths);
+  const triple = await annotateBatch("shell-untracked", {
+    paths,
+    git: (args) => {
+      if (args[0] === "rev-parse") return "head";
+      if (args[0] === "diff" && args[1] === "--numstat" && args[2] === undefined) return "";
+      if (args[0] === "diff" && args[1] === "--cached") return "";
+      if (args[0] === "ls-files") return "scratch.txt\n";
+      return undefined;
+    },
+  });
+  assert.ok(triple);
+  assert.equal(triple.mechanism.files[0]?.path, "scratch.txt");
+  assert.equal(triple.mechanism.files[0]?.provenance, "git-diff-inferred");
+  assert.deepEqual(triple.mechanism.files[0]?.plusMinus, [0, 0]);
+});
+
+test("commit-before-Stop is retained as inferred change when head range is available", async (t) => {
+  const paths = freshPaths(t);
+  append("commit-delta", [{
+    v: 1, agent: "codex", kind: "intent", ts: 1, cwd: paths.home, text: "commit file",
+    baseline: { status: "captured", head: "old-head" },
+  }], paths);
+  const triple = await annotateBatch("commit-delta", {
+    paths,
+    git: (args) => {
+      if (args[0] === "rev-parse") return "new-head";
+      if (args[0] === "diff" && args[1] === "--numstat" && args[2] === undefined) return "";
+      if (args[0] === "diff" && args[1] === "--cached") return "";
+      if (args[0] === "ls-files") return "";
+      if (args[0] === "diff" && args[2] === "old-head..new-head") return "2\t0\tcommitted.ts";
+      return undefined;
+    },
+  });
+  assert.ok(triple);
+  assert.equal(triple.mechanism.files[0]?.provenance, "git-diff-inferred");
+  assert.equal(triple.mechanism.files[0]?.path, "committed.ts");
+  assert.deepEqual(triple.mechanism.files[0]?.plusMinus, [2, 0]);
+});
+
+test("commit-before-Stop supplies delta for tool-observed paths", async (t) => {
+  const paths = freshPaths(t);
+  append("commit-observed", [
+    {
+      v: 1, agent: "codex", kind: "intent", ts: 1, cwd: paths.home, text: "commit observed file",
+      baseline: { status: "captured", head: "old-head" },
+    },
+    { v: 1, agent: "codex", kind: "mechanism", ts: 2, tool: "Edit", path: "observed.ts", provenance: "tool-observed" },
+  ], paths);
+  const triple = await annotateBatch("commit-observed", {
+    paths,
+    git: (args) => {
+      if (args[0] === "rev-parse") return "new-head";
+      if (args[0] === "diff" && args[1] === "--numstat" && args[2] === undefined) return "";
+      if (args[0] === "diff" && args[1] === "--cached") return "";
+      if (args[0] === "ls-files") return "";
+      if (args[0] === "diff" && args[2] === "old-head..new-head") return "2\t1\tobserved.ts";
+      return undefined;
+    },
+  });
+  assert.ok(triple);
+  assert.equal(triple.mechanism.files[0]?.provenance, "tool-observed");
+  assert.deepEqual(triple.mechanism.files[0]?.plusMinus, [2, 1]);
+  assert.equal(triple.mechanism.baseline, "captured");
+});
+
+test("missing commit range marks baseline unknown instead of claiming zero change", async (t) => {
+  const paths = freshPaths(t);
+  append("commit-unknown", [
+    {
+      v: 1, agent: "codex", kind: "intent", ts: 1, cwd: paths.home, text: "commit file",
+      baseline: { status: "captured", head: "old-head" },
+    },
+    { v: 1, agent: "codex", kind: "mechanism", ts: 2, tool: "Edit", path: "committed.ts", provenance: "tool-observed" },
+  ], paths);
+  const triple = await annotateBatch("commit-unknown", {
+    paths,
+    git: (args) => {
+      if (args[0] === "rev-parse") return "new-head";
+      if (args[0] === "diff" && args[1] === "--numstat" && args[2] === undefined) return "";
+      if (args[0] === "diff" && args[1] === "--cached") return "";
+      if (args[0] === "ls-files") return "";
+      return undefined;
+    },
+  });
+  assert.ok(triple);
+  assert.equal(triple.mechanism.baseline, "unknown");
+  assert.deepEqual(triple.mechanism.files[0]?.plusMinus, [0, 0]);
+});
+
 test("durable annotation redacts modern keys and credential assignments from every sink", async (t) => {
   const paths = freshPaths(t);
   const modernKey = "sk-proj-aB3dE5fG7hI9-jK2mN4pQ6rS8tU0vW1xY2zA4";

@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import type { AssociationRecord, FailureRecord, FixRecord, MemoryRecord, TripleRecord } from "../core/memory.js";
+import type { AssociationRecord, FailureRecord, FixRecord, MemoryRecord, NoteRecord, TripleRecord } from "../core/memory.js";
 import { fingerprint, fingerprintSignature, legacyFingerprint, signatureLines } from "../core/fingerprint.js";
 import {
   LINK_WINDOW_MS,
@@ -40,9 +40,13 @@ const tripleA: TripleRecord = {
 };
 
 test("queryStats applies cwd consistently", () => {
-  assert.deepEqual(queryStats(records), { failures: 2, fixEvents: 1, resolved: 1, unresolved: 1 });
+  assert.deepEqual(queryStats(records), {
+    failures: 2, fixEvents: 1, resolved: 1, unresolved: 1,
+    confirmedFixes: 1, possibleFixes: 0, triples: 0, notes: 0, total: 3,
+  });
   assert.deepEqual(queryStats(records, { cwd: "/work/a" }), {
     failures: 1, fixEvents: 1, resolved: 1, unresolved: 0,
+    confirmedFixes: 1, possibleFixes: 0, triples: 0, notes: 0, total: 2,
   });
 });
 
@@ -54,6 +58,30 @@ test("queryRecentFailures is newest-first and filters unresolved", () => {
 test("queryRecall preserves fuzzy matching and exact cwd filter", () => {
   assert.deepEqual(queryRecall(records, { query: "module missing", cwd: "/work/a" }).map((hit) => hit.failure.id), ["f1"]);
   assert.deepEqual(queryRecall(records, { query: "module missing", cwd: "/work/b" }), []);
+});
+
+test("queryStats reports all remembered knowledge kinds and fix confidence", () => {
+  const possible: AssociationRecord = {
+    kind: "association", id: "possible-a", ts: 250, cwd: "/work/a", cmd: "npm run build",
+    candidateFailureIds: ["f2"], links: [{ id: "f2", basis: "program", confidence: "possible" }],
+  };
+  const triple: TripleRecord = {
+    ...tripleA, id: "triple-stats", ts: 350,
+  };
+  const note: NoteRecord = {
+    kind: "note", id: "note-stats", ts: 360, cwd: "/work/a", cmd: "rocky note",
+    file: "src/app.ts", line: 3, subject: "cache", answer: "banana",
+  };
+  const result = queryStats([...records, possible, triple, note]);
+  assert.equal(result.failures, 2);
+  assert.equal(result.fixEvents, 1);
+  assert.equal(result.resolved, 1);
+  assert.equal(result.unresolved, 1);
+  assert.equal(result.confirmedFixes, 1);
+  assert.equal(result.possibleFixes, 1);
+  assert.equal(result.triples, 1);
+  assert.equal(result.notes, 1);
+  assert.equal(result.total, 6);
 });
 
 test("future records stay inert across operational query surfaces but remain fetchable", () => {
@@ -87,7 +115,10 @@ test("future records stay inert across operational query surfaces but remain fet
   assert.equal(getFix(input, futureFailure, now), undefined);
   assert.deepEqual(queryRecall(input, { query: "future-only-token", now }), []);
   assert.deepEqual(queryRecentFailures(input, { now }).map((hit) => hit.failure.id), [exactFailure.id]);
-  assert.deepEqual(queryStats(input, { now }), { failures: 1, fixEvents: 0, resolved: 0, unresolved: 1 });
+  assert.deepEqual(queryStats(input, { now }), {
+    failures: 1, fixEvents: 0, resolved: 0, unresolved: 1,
+    confirmedFixes: 0, possibleFixes: 0, triples: 0, notes: 0, total: 1,
+  });
   assert.deepEqual(searchKnowledge(input, { query: "future-only-token", now }), []);
   assert.equal(fetchRecord(input, futureFailure.id)?.id, futureFailure.id, "raw/fetch state remains retained");
 });
@@ -116,7 +147,10 @@ test("cross-directory confirmation never counts as local stats", () => {
     kind: "fix", id: "cross-stats-fix", ts: 200, cwd: "/work/other", cmd: "npm test",
     failureIds: [failure.id],
   };
-  assert.deepEqual(queryStats([failure, fix]), { failures: 1, fixEvents: 0, resolved: 0, unresolved: 1 });
+  assert.deepEqual(queryStats([failure, fix]), {
+    failures: 1, fixEvents: 0, resolved: 0, unresolved: 1,
+    confirmedFixes: 0, possibleFixes: 0, triples: 0, notes: 0, total: 2,
+  });
 });
 
 test("query indices are first-wins for duplicate IDs", () => {
@@ -126,7 +160,10 @@ test("query indices are first-wins for duplicate IDs", () => {
   const duplicateFailure: FailureRecord = { ...failure, cmd: "rm -rf /", fingerprint: "duplicate-later" };
   const input = [failure, duplicateFailure, first, later];
   assert.equal(getFix(input, failure)?.cmd, "npm run build");
-  assert.deepEqual(queryStats(input), { failures: 1, fixEvents: 1, resolved: 1, unresolved: 0 });
+  assert.deepEqual(queryStats(input), {
+    failures: 1, fixEvents: 1, resolved: 1, unresolved: 0,
+    confirmedFixes: 1, possibleFixes: 0, triples: 0, notes: 0, total: 2,
+  });
   assert.equal(queryRecall(input, { query: "module missing" })[0]?.fix?.cmd, "npm run build");
 });
 
@@ -192,6 +229,7 @@ test("possible associations never count as confirmed fix events", () => {
   };
   assert.deepEqual(queryStats([failureB, association]), {
     failures: 1, fixEvents: 0, resolved: 0, unresolved: 1,
+    confirmedFixes: 0, possibleFixes: 1, triples: 0, notes: 0, total: 2,
   });
   const downgradedLegacy: FixRecord = {
     kind: "fix", id: "legacy-weak", ts: 301, cwd: "/work/b", cmd: "npm run unrelated",
@@ -355,6 +393,30 @@ test("createMemoryQueries wires knowledge search, fetch, and why-file queries", 
   assert.equal(queries.fetchRecord("t1")?.kind, "triple");
   assert.equal(queries.fetchRecord("missing"), undefined);
   assert.deepEqual(queries.whyFile("src/app.css").map((record) => record.id), ["t1"]);
+});
+
+test("knowledge hits expose record provenance and bounded file coverage", () => {
+  const triple: TripleRecord = {
+    ...tripleA,
+    id: "knowledge-provenance",
+    ts: 500,
+    intent: { text: "banana cache" },
+    mechanism: {
+      files: [
+        { path: "first.ts", plusMinus: [1, 0], props: [], provenance: "tool-observed" },
+        { path: "second.ts", plusMinus: [2, 0], props: [], provenance: "git-diff-inferred" },
+      ],
+      truncatedFiles: 3,
+      baseline: "unknown",
+    },
+  };
+  const hit = searchKnowledge([triple], { query: "banana" })[0];
+  assert.equal(hit?.id, "knowledge-provenance");
+  assert.equal(hit?.agent, "codex");
+  assert.equal(hit?.source, "agent-hook");
+  assert.deepEqual(hit?.filesCovered, ["first.ts", "second.ts"]);
+  assert.equal(hit?.truncatedFiles, 3);
+  assert.equal(hit?.complete, false);
 });
 
 test("findByFingerprint dual lookup finds a v0.5 record after algorithm upgrade", () => {

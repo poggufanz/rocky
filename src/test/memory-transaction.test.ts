@@ -241,7 +241,10 @@ async function concurrentSuccesses(t: TestContext, count: number): Promise<void>
   assert.equal(fixes.length, 1, `${count} successes must create one physical confirmed fix`);
   assert.equal(associations.length, 0);
   assert.equal(rememberedFailure?.resolvedBy, fixes[0]?.id);
-  assert.deepEqual(queryStats(records), { failures: 1, fixEvents: 1, resolved: 1, unresolved: 0 });
+  assert.deepEqual(queryStats(records), {
+    failures: 1, fixEvents: 1, resolved: 1, unresolved: 0,
+    confirmedFixes: 1, possibleFixes: 0, triples: 0, notes: 0, total: 2,
+  });
   assert.equal(existsSync(join(home, "pending")), false);
   assert.equal(existsSync(`${join(home, "memory.jsonl")}.triple.lock`), false);
 }

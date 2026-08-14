@@ -92,7 +92,7 @@ That staged path does not activate in this release. Rocky ships no complete Clau
 
 ## Nervous System (v0.5.0)
 
-Plan 01 ships in v0.5.0. Rocky captures the user prompt, edited paths, small capped excerpts, and the agent's stated rationale. Events pass through a transient private spool before Rocky redacts secrets and writes one durable `triple` record to local `~/.rocky/memory.jsonl`; Rocky state stays private, with `0600` files where the platform supports those modes.
+Plan 01 ships in v0.5.0. Rocky captures the user prompt, every unique edited path within a documented 64-event adapter cap and 8-file durable triple cap, small capped excerpts, and the agent's stated rationale. Durable triples carry exact `truncatedFiles` counts plus per-file provenance (`tool-observed`, `git-diff-inferred`, or `unknown`); turn baselines make pre-existing dirty state and commit-before-Stop explicit. Events pass through a transient private spool before Rocky redacts secrets and writes one durable `triple` record to local `~/.rocky/memory.jsonl`; Rocky state stays private, with `0600` files where the platform supports those modes.
 
 This feature adds no new egress and no daemon. Rocky does not capture screens or keystrokes, and never rewrites, injects, or submits a prompt. With Ollama disabled or unavailable, deterministic degraded annotation still records the evidence. An optional configured loopback Ollama may compact only rationale, tags, and the passive label; it never changes the captured intent, path, or excerpt evidence. Rationale is quoted, untrusted hearsay — never fact and never hidden chain-of-thought.
 
@@ -158,7 +158,7 @@ The CLI contains no telemetry and runs no daemon. Its only external network egre
 
 ## Read-only MCP knowledge tools
 
-`rocky mcp` serves seven bounded, read-only tools in deterministic order: `recall`, `recent_failures`, `stats`, `recall_with_ai`, `search_knowledge`, `fetch_record`, and `why_file`. Search first, then fetch: `search_knowledge` returns light metadata and bounded hits, and `fetch_record` retrieves one full record by the returned id. `why_file` returns remembered triples that touched one path. Limits stay bounded, and sanitized projection is the default; raw fields require an explicit opt-in.
+`rocky mcp` serves seven bounded, read-only tools in deterministic order: `recall`, `recent_failures`, `stats`, `recall_with_ai`, `search_knowledge`, `fetch_record`, and `why_file`. Search first, then fetch: `search_knowledge` returns light metadata and bounded hits, including record id/timestamp, agent/source, covered files, and truncation status for triples; `fetch_record` retrieves one full record by the returned id. `why_file` returns remembered triples that touched one path. `stats` retains legacy counters and adds confirmed fixes, possible fixes, triples, notes, and total remembered items. Limits stay bounded, and sanitized projection is the default; raw fields require an explicit opt-in.
 
 For example, a host can call `search_knowledge` with `{ "query": "move button down" }`, pass a returned id to `fetch_record`, or call `why_file` with `{ "path": "src/button.css" }`. Reasons are hearsay Rocky heard, not verified facts. Rationale is quoted and untrusted; MCP never presents it as fact or executes a remembered command.
 

@@ -152,6 +152,27 @@ test("enabled mechanism append never spawns ambiguity and preserves exact stdout
   assert.equal(readBatch("claude-code-s1-p2", paths).length, 1);
 });
 
+test("bounded hook fan-out persists exact adapter overflow", async (t) => {
+  const paths = freshPaths(t);
+  const edits = Array.from({ length: 70 }, (_, index) => ({
+    file_path: `file-${index}.ts`, new_string: `value-${index}`,
+  }));
+  const payload = JSON.stringify({
+    session_id: "s1", prompt_id: "overflow", hook_event_name: "PostToolUse",
+    tool_name: "MultiEdit", tool_input: { edits },
+  });
+  const result = await captureStdout(() => agentEvent("claude-code", {
+    stdin: async () => payload, paths,
+  }));
+  assert.equal(result.code, 0);
+  assert.equal(result.out, "{}");
+  const events = readBatch("claude-code-s1-overflow", paths);
+  assert.equal(events.length, 64);
+  const last = events.at(-1);
+  assert.equal(last?.kind, "mechanism");
+  assert.equal(last?.kind === "mechanism" ? last.truncatedFiles : undefined, 6);
+});
+
 test("disabled config does not invoke ambiguity injection seam", async (t) => {
   const paths = freshPaths(t);
   const spawned: string[] = [];

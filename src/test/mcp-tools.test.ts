@@ -89,7 +89,7 @@ test("new tool descriptions are concrete and schemas expose their bounds", () =>
   assert.deepEqual(search.inputSchema, {
     type: "object", additionalProperties: false, required: ["query"], properties: {
       query: { type: "string", minLength: 1, maxLength: 500 },
-      kind: { type: "string", enum: ["failure", "fix", "triple"] },
+      kind: { type: "string", enum: ["failure", "fix", "triple", "note"] },
       limit: { type: "integer", minimum: 1, maximum: 20 },
     },
   });
@@ -109,6 +109,7 @@ test("knowledge tools search, fetch, and explain one file", async () => {
   assert.equal(search.isError, undefined);
   assert.deepEqual(search.structuredContent.items, [{
     id: "triple-1", ts: 300, kind: "triple", snippet: "naikin button", score: 1 / 3,
+    agent: "codex", source: "agent-hook", filesCovered: ["src/app.css"], truncatedFiles: 0, complete: false, truncatedFields: [],
   }]);
 
   const fetched = await knowledgeRegistry().call("fetch_record", { id: "triple-1" }, signal);
@@ -121,6 +122,39 @@ test("knowledge tools search, fetch, and explain one file", async () => {
   const why = await knowledgeRegistry().call("why_file", { path: "src/app.css", limit: 1 }, signal);
   assert.equal(why.isError, undefined);
   assert.equal((why.structuredContent.items as unknown[]).length, 1);
+});
+
+test("stats keeps legacy fields and adds bounded knowledge counters for old query implementations", async () => {
+  const memory = {
+    recall() { return []; },
+    recentFailures() { return []; },
+    stats() { return { failures: 2, fixEvents: 1, resolved: 1, unresolved: 1 }; },
+    searchKnowledge() { return []; },
+    fetchRecord() { return undefined; },
+    whyFile() { return []; },
+  };
+  const result = await createToolRegistry({
+    exposure: "sanitized", memory, recallWithAi: disabledRecallWithAi,
+  }).call("stats", {}, new AbortController().signal);
+  assert.deepEqual(result.structuredContent, {
+    exposure: "sanitized", failures: 2, fixEvents: 1, resolved: 1, unresolved: 1,
+    confirmedFixes: 1, possibleFixes: 0, triples: 0, notes: 0, total: 3,
+  });
+});
+
+test("note-only knowledge search stays bounded and sanitized", async () => {
+  const note: MemoryRecord = {
+    kind: "note", id: "note-search", ts: 304, cwd: "/private", cmd: "rocky note",
+    file: "src/app.ts", line: 4, subject: "cache", answer: "banana",
+  };
+  const result = await createToolRegistry({
+    exposure: "sanitized", memory: createMemoryQueries(() => [note]), recallWithAi: disabledRecallWithAi,
+  }).call("search_knowledge", { query: "banana", kind: "note" }, new AbortController().signal);
+  assert.deepEqual(result.structuredContent.items, [{
+    id: "note-search", ts: 304, kind: "note", snippet: "cache: banana", score: 1 / 6,
+    source: "note", truncatedFields: [],
+  }]);
+  assert.equal(result.structuredContent.truncated, false);
 });
 
 test("search snippets and fetched failures use sanitized explicit projections", async () => {
@@ -225,7 +259,6 @@ test("knowledge tool validators reject malformed, out-of-range, and unknown argu
   const signal = new AbortController().signal;
   const invalid = [
     ["search_knowledge", { query: "" }],
-    ["search_knowledge", { query: "x", kind: "note" }],
     ["search_knowledge", { query: "x", limit: 21 }],
     ["fetch_record", {}],
     ["fetch_record", { id: 1 }],

@@ -9,11 +9,12 @@ import {
 import { batchKey, MAX_RATIONALE_CHARS, parseAgentEvent, type AgentEvent, type RationaleEvent } from "../schema.js";
 
 export type ParsedHookPayload =
-  | { action: "append"; key: string; event: AgentEvent }
+  | { action: "append"; key: string; events: AgentEvent[]; event: AgentEvent; truncatedFiles?: number }
   | { action: "close"; key: string; rationale?: RationaleEvent }
   | undefined;
 
 const EDIT_TOOLS: ReadonlySet<string> = new Set(["Edit", "Write", "MultiEdit", "NotebookEdit"]);
+export const MAX_ADAPTER_EVENTS = 64;
 const TRANSCRIPT_TAIL_BYTES = 64 * 1024;
 
 type PlainRecord = Record<string, unknown>;
@@ -110,6 +111,19 @@ function rationaleEvent(text: string | undefined, now: number): RationaleEvent |
   return parsed?.kind === "rationale" ? parsed : undefined;
 }
 
+function appendPayload(key: string, events: AgentEvent[]): ParsedHookPayload {
+  const bounded = events.slice(0, MAX_ADAPTER_EVENTS);
+  return {
+    action: "append",
+    key,
+    events: bounded,
+    // `event` is retained as a compatibility alias for older internal users;
+    // new callers must consume the bounded list.
+    event: bounded[0]!,
+    ...(events.length > bounded.length ? { truncatedFiles: events.length - bounded.length } : {}),
+  };
+}
+
 export function parseClaudeHookPayload(raw: unknown, now = Date.now()): ParsedHookPayload {
   try {
     if (!isPlainRecord(raw)) return undefined;
@@ -126,7 +140,7 @@ export function parseClaudeHookPayload(raw: unknown, now = Date.now()): ParsedHo
         const text = nonEmptyString(raw.prompt);
         if (!text) return undefined;
         const event = parseAgentEvent({ v: 1, agent: "claude-code", kind: "intent", ts: now, cwd, text });
-        return event ? { action: "append", key, event } : undefined;
+        return event ? appendPayload(key, [event]) : undefined;
       }
       case "PostToolUse": {
         const tool = nonEmptyString(raw.tool_name);
@@ -134,29 +148,32 @@ export function parseClaudeHookPayload(raw: unknown, now = Date.now()): ParsedHo
         const input = raw.tool_input;
         if (!isPlainRecord(input)) return undefined;
 
-        let edit: PlainRecord | undefined;
-        if (tool === "MultiEdit") {
-          if (!Array.isArray(input.edits) || !isPlainRecord(input.edits[0])) return undefined;
-          edit = input.edits[0];
-        } else {
-          edit = input;
+        const edits: PlainRecord[] = tool === "MultiEdit"
+          ? (Array.isArray(input.edits) ? input.edits.filter(isPlainRecord) : [])
+          : [input];
+        if (edits.length === 0) return undefined;
+        const byPath = new Map<string, AgentEvent>();
+        for (const edit of edits) {
+          const path = nonEmptyString(edit.file_path)
+            ?? nonEmptyString(edit.notebook_path)
+            ?? nonEmptyString(input.file_path)
+            ?? nonEmptyString(input.notebook_path);
+          if (!path) continue;
+          const excerpt = nonEmptyString(edit.new_string)
+            ?? nonEmptyString(edit.new_source)
+            ?? nonEmptyString(edit.file_text)
+            ?? nonEmptyString(edit.content)
+            ?? nonEmptyString(input.new_string)
+            ?? nonEmptyString(input.new_source)
+            ?? nonEmptyString(input.file_text)
+            ?? nonEmptyString(input.content);
+          const event = parseAgentEvent({
+            v: 1, agent: "claude-code", kind: "mechanism", ts: now, tool, path, excerpt,
+            provenance: "tool-observed",
+          });
+          if (event) byPath.set(path, event);
         }
-
-        const path = nonEmptyString(edit.file_path)
-          ?? nonEmptyString(edit.notebook_path)
-          ?? nonEmptyString(input.file_path)
-          ?? nonEmptyString(input.notebook_path);
-        if (!path) return undefined;
-        const excerpt = nonEmptyString(edit.new_string)
-          ?? nonEmptyString(edit.new_source)
-          ?? nonEmptyString(edit.file_text)
-          ?? nonEmptyString(edit.content)
-          ?? nonEmptyString(input.new_string)
-          ?? nonEmptyString(input.new_source)
-          ?? nonEmptyString(input.file_text)
-          ?? nonEmptyString(input.content);
-        const event = parseAgentEvent({ v: 1, agent: "claude-code", kind: "mechanism", ts: now, tool, path, excerpt });
-        return event ? { action: "append", key, event } : undefined;
+        return byPath.size === 0 ? undefined : appendPayload(key, [...byPath.values()]);
       }
       case "Stop": {
         const direct = nonEmptyString(raw.last_assistant_message);

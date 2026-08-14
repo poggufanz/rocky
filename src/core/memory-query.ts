@@ -18,15 +18,31 @@ export interface RecallHit { failure: FailureRecord; fix?: FixRecord; score: num
 export interface RecentFailuresQuery { limit?: number; cwd?: string; unresolvedOnly?: boolean; now?: number }
 export interface RecentFailureHit { failure: FailureRecord; fix?: FixRecord }
 export interface StatsQuery { cwd?: string; now?: number }
-export interface MemoryStats { failures: number; fixEvents: number; resolved: number; unresolved: number }
+export interface MemoryStats {
+  failures: number;
+  fixEvents: number;
+  resolved: number;
+  unresolved: number;
+  /** New v0.5 counters are optional for third-party MemoryQueries implementations. */
+  confirmedFixes?: number;
+  possibleFixes?: number;
+  triples?: number;
+  notes?: number;
+  total?: number;
+}
 export interface LinkQuery { cwd: string; now?: number; windowMs?: number }
-export interface KnowledgeSearchQuery { query: string; kind?: "failure" | "fix" | "triple"; limit?: number; now?: number }
+export interface KnowledgeSearchQuery { query: string; kind?: "failure" | "fix" | "triple" | "note"; limit?: number; now?: number }
 export interface KnowledgeSearchHit {
   id: string;
   ts: number;
-  kind: "failure" | "fix" | "triple";
+  kind: "failure" | "fix" | "triple" | "note";
   snippet: string;
   score: number;
+  agent?: "claude-code" | "codex";
+  source?: string;
+  filesCovered?: string[];
+  truncatedFiles?: number;
+  complete?: boolean;
 }
 export interface MemoryQueries {
   recall(input: RecallQuery): RecallHit[];
@@ -340,7 +356,26 @@ export function queryStats(records: readonly MemoryRecord[], input: StatsQuery =
   );
   const fixEvents = scoped.filter((record) => record.kind === "fix" && confirmedFixIds.has(record.id)).length;
   const resolved = failures.filter((failure) => confirmedLocalFix(fixes, failure, now) !== undefined).length;
-  return { failures: failures.length, fixEvents, resolved, unresolved: failures.length - resolved };
+  const possibleFixes = scoped.filter((record) => record.kind === "association" ||
+    (record.kind === "fix" && record.links?.some((link) => link.confidence === "possible"))).length;
+  const result: MemoryStats = {
+    failures: failures.length, fixEvents, resolved, unresolved: failures.length - resolved,
+  };
+  return {
+    ...result,
+    confirmedFixes: fixEvents,
+    possibleFixes,
+    triples: scoped.filter((record) => record.kind === "triple").length,
+    notes: scoped.filter((record) => record.kind === "note").length,
+    total: scoped.length,
+  };
+}
+
+function completeTriple(record: TripleRecord): boolean {
+  return record.mechanism.truncatedFiles === 0
+    && record.mechanism.baseline === "captured"
+    && record.mechanism.files.length > 0
+    && record.mechanism.files.every((file) => file.provenance === "tool-observed" || file.provenance === "git-diff-inferred");
 }
 
 export function searchKnowledge(
@@ -370,6 +405,12 @@ export function searchKnowledge(
         tokenSet: retrievalTokens(`${record.intent.text} ${record.rationale?.tags.join(" ") ?? ""}`),
         snippet: record.intent.text.slice(0, 120),
       });
+    } else if (record.kind === "note" && wants("note")) {
+      entries.push({
+        record,
+        tokenSet: retrievalTokens(`${record.cmd} ${record.file} ${record.subject} ${record.answer}`),
+        snippet: `${record.subject}: ${record.answer}`.slice(0, 120),
+      });
     }
   }
   const documentFrequency = tokenDocumentFrequency(entries.map((entry) => entry.tokenSet));
@@ -383,7 +424,10 @@ export function searchKnowledge(
     const score = semanticScore(queryTokenSet, tokenSet, documentFrequency, entries.length);
     if (record.kind === "failure") {
       if (score > 0) {
-        const hit: KnowledgeSearchHit = { id: record.id, ts: record.ts, kind: "failure", snippet, score };
+        const hit: KnowledgeSearchHit = {
+          id: record.id, ts: record.ts, kind: "failure", snippet, score,
+          source: record.origin ?? "run",
+        };
         const key = knowledgeFailureKey(record, migration);
         const previous = failureHits.get(key);
         const current = record.fingerprintV === 2;
@@ -401,6 +445,7 @@ export function searchKnowledge(
         kind: "fix",
         snippet,
         score,
+        source: "fix",
       });
     } else if (record.kind === "triple") {
       if (score > 0) hits.push({
@@ -409,7 +454,14 @@ export function searchKnowledge(
         kind: "triple",
         snippet,
         score,
+        agent: record.agent,
+        source: record.origin,
+        filesCovered: record.mechanism.files.map((file) => file.path),
+        truncatedFiles: record.mechanism.truncatedFiles,
+        complete: completeTriple(record),
       });
+    } else if (record.kind === "note") {
+      if (score > 0) hits.push({ id: record.id, ts: record.ts, kind: "note", snippet, score, source: "note" });
     }
   }
 

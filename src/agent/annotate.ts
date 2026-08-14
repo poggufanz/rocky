@@ -25,7 +25,9 @@ import {
   MAX_EXCERPT_CHARS,
   MAX_INTENT_CHARS,
   MAX_RATIONALE_CHARS,
+  type FileProvenance,
   type AgentName,
+  type IntentEvent,
 } from "./schema.js";
 import {
   acquireAnnotationLease,
@@ -38,9 +40,15 @@ import {
   removeClaim,
   type AnnotationLease,
   type BatchClaim,
+  MAX_BATCH_BYTES,
 } from "./spool.js";
 
 export const MAX_TRIPLE_FILES = 8;
+
+// A full transient batch may have silently rejected its last append at the
+// spool cap.  Keep a conservative margin so annotation never calls such a
+// batch complete merely because its surviving unique paths fit the triple cap.
+const SPOOL_COMPLETENESS_MARGIN_BYTES = 8 * 1024;
 
 const MAX_LABEL_LINES = 10;
 const MAX_LABEL_CHARS = 400;
@@ -354,12 +362,69 @@ function runGit(git: (args: string[], cwd: string) => string | undefined, args: 
   }
 }
 
-function parseNumstat(value: string | undefined): [number, number] {
-  const match = value?.match(/^\s*(\d+)\t(\d+)(?:\t|$)/m);
-  if (!match) return [0, 0];
+function parseNumstat(value: string | undefined): [number, number] | undefined {
+  const match = value?.match(/^\s*(\d+|-)\t(\d+|[-])(?:\t|$)/m);
+  if (!match) return undefined;
+  if (match[1] === "-" || match[2] === "-") return undefined;
   const added = Number(match[1]);
   const removed = Number(match[2]);
-  return Number.isSafeInteger(added) && Number.isSafeInteger(removed) ? [added, removed] : [0, 0];
+  return Number.isSafeInteger(added) && Number.isSafeInteger(removed) ? [added, removed] : undefined;
+}
+
+interface DiffEntry {
+  path: string;
+  plusMinus: [number, number];
+  statsKnown: boolean;
+}
+
+function parseNumstatEntries(value: string | undefined): DiffEntry[] | undefined {
+  if (value === undefined) return undefined;
+  const entries: DiffEntry[] = [];
+  const seen = new Set<string>();
+  for (const line of value.split(/\r?\n/u)) {
+    if (line.trim().length === 0) continue;
+    const match = /^\s*(\d+|-)\t(\d+|-)\t(.+?)\s*$/u.exec(line);
+    if (!match) return undefined;
+    const path = match[3]?.trim();
+    if (!path || seen.has(path)) continue;
+    const plusMinus: [number, number] = [
+      match[1] === "-" ? 0 : Number(match[1]),
+      match[2] === "-" ? 0 : Number(match[2]),
+    ];
+    if (!Number.isSafeInteger(plusMinus[0]) || !Number.isSafeInteger(plusMinus[1])) continue;
+    seen.add(path);
+    entries.push({ path, plusMinus, statsKnown: match[1] !== "-" && match[2] !== "-" });
+  }
+  return entries;
+}
+
+function parseUntrackedEntries(value: string | undefined): DiffEntry[] | undefined {
+  if (value === undefined) return undefined;
+  return value.split(/\r?\n/u).map((line) => line.trim()).filter(Boolean)
+    .map((path) => ({ path, plusMinus: [0, 0] as [number, number], statsKnown: false }));
+}
+
+function mergeDiffEntries(...sources: Array<DiffEntry[] | undefined>): DiffEntry[] | undefined {
+  if (sources.some((source) => source === undefined)) return undefined;
+  const merged = new Map<string, { plusMinus: [number, number]; statsKnown: boolean }>();
+  for (const source of sources) {
+    for (const entry of source ?? []) {
+      const prior = merged.get(entry.path);
+      merged.set(entry.path, prior === undefined
+        ? { plusMinus: [...entry.plusMinus] as [number, number], statsKnown: entry.statsKnown }
+        : {
+          plusMinus: [prior.plusMinus[0] + entry.plusMinus[0], prior.plusMinus[1] + entry.plusMinus[1]],
+          statsKnown: prior.statsKnown && entry.statsKnown,
+        });
+    }
+  }
+  return [...merged.entries()].map(([path, value]) => ({ path, ...value }));
+}
+
+function baselineMap(intent: IntentEvent | undefined): Map<string, [number, number]> | undefined {
+  const baseline = intent?.baseline;
+  if (baseline?.status !== "captured") return undefined;
+  return new Map((baseline.files ?? []).map((file) => [operationalText(file.path, MAX_PATH_CHARS), file.plusMinus]));
 }
 
 function propsFromExcerpt(excerpt: string | undefined): string[] {
@@ -395,24 +460,22 @@ export async function annotateBatch(key: string, deps: AnnotateDeps = {}): Promi
     if (!claim) return undefined;
     const claimRead = readClaimResult(claim, paths);
     if (!claimRead.ok) return undefined;
+    const spoolMayBeTruncated = claim.stats.size >= MAX_BATCH_BYTES - SPOOL_COMPLETENESS_MARGIN_BYTES;
     const events = claimRead.events;
     const agent: AgentName = events[0]?.agent ?? "claude-code";
     const batchEvents = events.filter((event) => event.agent === agent);
-    const intentEvent = batchEvents.find((event) => event.kind === "intent");
-    const byPath = new Map<string, { path: string; excerpt?: string }>();
+    const intentEvent = batchEvents.find((event): event is Extract<typeof event, { kind: "intent" }> => event.kind === "intent");
+    const byPath = new Map<string, { path: string; excerpt?: string; provenance?: FileProvenance; plusMinus?: [number, number] }>();
+    let adapterTruncatedFiles = 0;
     for (const event of batchEvents) {
       if (event.kind !== "mechanism") continue;
       const gitPath = operationalText(event.path, MAX_PATH_CHARS);
       const path = cleanText(event.path, MAX_PATH_CHARS);
       if (!path || !gitPath) continue;
       const excerpt = event.excerpt === undefined ? undefined : cleanText(event.excerpt, MAX_EXCERPT_CHARS) || undefined;
-      byPath.set(gitPath, { path, excerpt });
+      adapterTruncatedFiles = Math.max(adapterTruncatedFiles, event.truncatedFiles ?? 0);
+      byPath.set(gitPath, { path, excerpt, ...(event.provenance === undefined ? {} : { provenance: event.provenance }) });
     }
-    if (byPath.size === 0) {
-      removeClaim(claim, paths);
-      return undefined;
-    }
-
     let rationaleEvent: Extract<(typeof events)[number], { kind: "rationale" }> | undefined;
     let rationaleText: string | undefined;
     for (const event of batchEvents) {
@@ -430,15 +493,101 @@ export async function annotateBatch(key: string, deps: AnnotateDeps = {}): Promi
     const cwd = cleanText(rawCwd, MAX_CWD_CHARS) || process.cwd();
     const headRaw = runGit(git, ["rev-parse", "HEAD"], gitCwd);
     const head = headRaw === undefined ? undefined : cleanText(headRaw, MAX_HEAD_CHARS) || undefined;
+    const baseline = intentEvent?.baseline;
+    const baselineByPath = baselineMap(intentEvent);
+    const currentEntries = baselineByPath === undefined
+      ? undefined
+      : mergeDiffEntries(
+        parseNumstatEntries(runGit(git, ["diff", "--numstat"], gitCwd)),
+        parseNumstatEntries(runGit(git, ["diff", "--cached", "--numstat"], gitCwd)),
+        parseUntrackedEntries(runGit(git, ["ls-files", "--others", "--exclude-standard"], gitCwd)),
+      );
+    // Legacy/manual batches may have no intent baseline at all.  Persist an
+    // explicit unknown marker rather than making a current diff look proven.
+    let baselineStatus: "captured" | "unknown" = baseline?.status ?? "unknown";
+    if (baselineByPath !== undefined && (!baseline?.head || head === undefined)) baselineStatus = "unknown";
+    if (baselineByPath !== undefined && currentEntries === undefined) baselineStatus = "unknown";
+    if (spoolMayBeTruncated) baselineStatus = "unknown";
+    const inferred = new Map<string, { path: string; plusMinus: [number, number]; provenance: FileProvenance }>();
+    if (baselineByPath !== undefined && currentEntries !== undefined) {
+      for (const entry of currentEntries) {
+        const gitPath = operationalText(entry.path, MAX_PATH_CHARS);
+        const prior = baselineByPath.get(gitPath);
+        const delta: [number, number] = prior === undefined
+          ? entry.plusMinus
+          : [Math.max(0, entry.plusMinus[0] - prior[0]), Math.max(0, entry.plusMinus[1] - prior[1])];
+        const cleanPath = cleanText(entry.path, MAX_PATH_CHARS);
+        if (!cleanPath || !gitPath) continue;
+        const observed = byPath.get(gitPath);
+        if (observed) {
+          // Tool evidence keeps its stronger provenance while the baseline
+          // supplies the turn delta for plus/minus accounting.
+          if (!entry.statsKnown) baselineStatus = "unknown";
+          observed.plusMinus = delta;
+          byPath.set(gitPath, observed);
+          continue;
+        }
+        // A zero-stat path absent from baseline is still meaningful: it is
+        // commonly a newly-created untracked file reported by ls-files.
+        if (delta[0] === 0 && delta[1] === 0 && prior !== undefined) continue;
+        if (!entry.statsKnown) baselineStatus = "unknown";
+        inferred.set(gitPath, { path: cleanPath, plusMinus: delta, provenance: "git-diff-inferred" });
+      }
+    }
+    // A commit can land between Stop and detached annotation. Compare the
+    // baseline head to current head when both are known; do not claim a delta
+    // when provenance is unavailable.
+    if (baselineByPath !== undefined && baseline?.head && head && baseline.head !== head) {
+      const committed = parseNumstatEntries(runGit(git, ["diff", "--numstat", `${baseline.head}..${head}`], gitCwd));
+      if (committed === undefined) baselineStatus = "unknown";
+      for (const entry of committed ?? []) {
+        const gitPath = operationalText(entry.path, MAX_PATH_CHARS);
+        const cleanPath = cleanText(entry.path, MAX_PATH_CHARS);
+        if (!gitPath || !cleanPath) continue;
+        const prior = baselineByPath.get(gitPath);
+        const delta: [number, number] = prior === undefined
+          ? entry.plusMinus
+          : [Math.max(0, entry.plusMinus[0] - prior[0]), Math.max(0, entry.plusMinus[1] - prior[1])];
+        const observed = byPath.get(gitPath);
+        if (observed) {
+          if (!entry.statsKnown) baselineStatus = "unknown";
+          const current = observed.plusMinus ?? [0, 0];
+          observed.plusMinus = [current[0] + delta[0], current[1] + delta[1]];
+          byPath.set(gitPath, observed);
+          continue;
+        }
+        const inferredValue = inferred.get(gitPath);
+        if (inferredValue) {
+          if (!entry.statsKnown) baselineStatus = "unknown";
+          inferredValue.plusMinus = [inferredValue.plusMinus[0] + delta[0], inferredValue.plusMinus[1] + delta[1]];
+          inferred.set(gitPath, inferredValue);
+          continue;
+        }
+        if (delta[0] === 0 && delta[1] === 0) continue;
+        if (!entry.statsKnown) baselineStatus = "unknown";
+        inferred.set(gitPath, { path: cleanPath, plusMinus: delta, provenance: "git-diff-inferred" });
+      }
+    }
+    for (const [gitPath, value] of inferred) {
+      byPath.set(gitPath, value);
+    }
+    if (byPath.size === 0) {
+      removeClaim(claim, paths);
+      return undefined;
+    }
     const allMechanisms = [...byPath.entries()];
     const files: TripleFile[] = allMechanisms.slice(0, MAX_TRIPLE_FILES).map(([gitPath, value]) => {
       const excerpt = value?.excerpt;
-      const numstat = runGit(git, ["diff", "--numstat", "--", gitPath], gitCwd);
+      const knownDelta = value.plusMinus;
+      const numstatRaw = knownDelta === undefined ? runGit(git, ["diff", "--numstat", "--", gitPath], gitCwd) : undefined;
+      const numstat = knownDelta ?? parseNumstat(numstatRaw);
+      if (knownDelta === undefined && numstat === undefined) baselineStatus = "unknown";
       return {
         path: value.path,
-        plusMinus: parseNumstat(numstat),
+        plusMinus: numstat ?? [0, 0],
         props: propsFromExcerpt(excerpt),
         ...(excerpt === undefined ? {} : { excerpt }),
+        ...(value.provenance === undefined ? {} : { provenance: value.provenance }),
       };
     });
 
@@ -472,8 +621,9 @@ export async function annotateBatch(key: string, deps: AnnotateDeps = {}): Promi
 
     const rationale = rationaleEvent && rationaleText
       ? {
-        text: aiOutput?.summary ?? rationaleText,
-        tags: aiOutput === undefined ? [] : [...aiOutput.tags],
+        text: cleanText(aiOutput?.summary ?? rationaleText, MAX_RATIONALE_CHARS),
+        tags: (aiOutput === undefined ? [] : aiOutput.tags)
+          .map((tag) => cleanText(tag, 80)).filter(Boolean).slice(0, 5),
         source: rationaleEvent.source,
       }
       : undefined;
@@ -488,7 +638,8 @@ export async function annotateBatch(key: string, deps: AnnotateDeps = {}): Promi
       mechanism: {
         ...(head === undefined ? {} : { head }),
         files,
-        truncatedFiles: Math.max(0, allMechanisms.length - MAX_TRIPLE_FILES),
+        truncatedFiles: adapterTruncatedFiles + Math.max(0, allMechanisms.length - MAX_TRIPLE_FILES),
+        ...(baselineStatus === undefined ? {} : { baseline: baselineStatus }),
       },
     }, `${claim.key}:${claim.id}`, paths);
     deps.afterPersist?.(persisted.record, persisted.appended);

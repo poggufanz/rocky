@@ -127,7 +127,7 @@ function parseKnowledgeArgs(args: unknown): KnowledgeSearchQuery {
   if (typeof value.query !== "string" || [...value.query].length < 1 || [...value.query].length > 500) {
     throw new McpInvalidParamsError("invalid params");
   }
-  if (value.kind !== undefined && value.kind !== "failure" && value.kind !== "fix" && value.kind !== "triple") {
+  if (value.kind !== undefined && value.kind !== "failure" && value.kind !== "fix" && value.kind !== "triple" && value.kind !== "note") {
     throw new McpInvalidParamsError("invalid params");
   }
   return {
@@ -176,7 +176,7 @@ function descriptors(exposure: Exposure): readonly McpToolDefinition[] {
       })), annotations: ANNOTATIONS,
     },
     {
-      name: "stats", title: "Memory statistics", description: "Read remembered failure statistics.",
+      name: "stats", title: "Memory statistics", description: "Read bounded memory statistics: failures, confirmed and possible fixes, triples, notes, and total remembered items.",
       inputSchema: schema(withCwd(exposure, {})), annotations: ANNOTATIONS,
     },
     {
@@ -189,10 +189,10 @@ function descriptors(exposure: Exposure): readonly McpToolDefinition[] {
     {
       name: "search_knowledge", title: "Search project knowledge",
       description: "Search remembered failures, fixes, AND agent-change knowledge (user intent, agent rationale, changed files). " +
-        "Example queries: 'npm permission denied', 'naikin button', 'margin'. Returns light metadata; call fetch_record with an id for full detail.",
+        "Example queries: 'npm permission denied', 'naikin button', 'margin'. Returns bounded metadata with record id, timestamp, source, covered files, and truncation status; call fetch_record with an id for full detail.",
       inputSchema: schema({
         query: { type: "string", minLength: 1, maxLength: 500 },
-        kind: { type: "string", enum: ["failure", "fix", "triple"] },
+        kind: { type: "string", enum: ["failure", "fix", "triple", "note"] },
         limit: { type: "integer", minimum: 1, maximum: 20 },
       }, ["query"]), annotations: ANNOTATIONS,
     },
@@ -375,7 +375,17 @@ export function createToolRegistry(options: CreateToolRegistryOptions): McpToolR
           }
           case "stats": {
             const input = parseStatsArgs(args, options.exposure);
-            return cappedResult({ exposure: options.exposure, ...readMemory(() => options.memory.stats(input)) });
+            const stats = readMemory(() => options.memory.stats(input));
+            return cappedResult({
+              exposure: options.exposure,
+              ...stats,
+              confirmedFixes: stats.confirmedFixes ?? stats.fixEvents,
+              possibleFixes: stats.possibleFixes ?? 0,
+              triples: stats.triples ?? 0,
+              notes: stats.notes ?? 0,
+              total: stats.total ?? stats.failures + stats.fixEvents + (stats.possibleFixes ?? 0) +
+                (stats.triples ?? 0) + (stats.notes ?? 0),
+            });
           }
           case "search_knowledge": {
             const input = parseKnowledgeArgs(args);

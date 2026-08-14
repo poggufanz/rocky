@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { Buffer } from "node:buffer";
 import {
   chmodSync,
@@ -20,6 +20,7 @@ import { parseCodexHookPayload } from "../agent/adapters/codex.js";
 import { loadConfig } from "../core/config-read.js";
 import { redactSecretsAtBoundary, replaceAnsiAndControls } from "../core/redact.js";
 import { resolveRockyPaths, type RockyPaths } from "../core/state-paths.js";
+import { MAX_BASELINE_FILES, type AgentEvent, type IntentEvent, type TurnBaseline } from "../agent/schema.js";
 
 const STDIN_CAP_BYTES = 2 * 1024 * 1024;
 const LOG_CAP_BYTES = 64 * 1024;
@@ -39,6 +40,8 @@ export interface AgentHookDeps {
   spawnAmbiguity?: (text: string) => void;
   paths?: RockyPaths;
   now?: () => number;
+  /** Test seam for bounded baseline capture; production uses local git only. */
+  git?: (args: string[], cwd: string) => string | undefined;
 }
 
 function utf8Width(codePoint: number): number {
@@ -257,6 +260,73 @@ function safeAdapterLabel(adapter: unknown): string {
   }
 }
 
+function defaultBaselineGit(args: string[], cwd: string): string | undefined {
+  try {
+    const result = spawnSync("git", args, {
+      cwd,
+      encoding: "utf8",
+      timeout: 5_000,
+      maxBuffer: 128 * 1024,
+      shell: false,
+      windowsHide: true,
+    });
+    if (result.error || result.status !== 0 || result.signal) return undefined;
+    return typeof result.stdout === "string" ? result.stdout.trim() : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function parseBaselineNumstat(value: string | undefined): Array<{ path: string; plusMinus: [number, number] }> | undefined {
+  if (value === undefined) return undefined;
+  const files: Array<{ path: string; plusMinus: [number, number] }> = [];
+  const seen = new Set<string>();
+  const lines = value.split(/\r?\n/u).filter((line) => line.length > 0);
+  for (const line of lines) {
+    const match = /^\s*(\d+|-)\t(\d+|-)\t(.+?)\s*$/u.exec(line);
+    if (!match) return undefined;
+    const path = match[3]?.trim();
+    if (!path || seen.has(path)) continue;
+    if (match[1] === "-" || match[2] === "-") return undefined;
+    const added = match[1] === "-" ? 0 : Number(match[1]);
+    const removed = match[2] === "-" ? 0 : Number(match[2]);
+    if (!Number.isSafeInteger(added) || !Number.isSafeInteger(removed)) continue;
+    seen.add(path);
+    files.push({ path, plusMinus: [added, removed] });
+    if (files.length > MAX_BASELINE_FILES) return undefined;
+  }
+  return files;
+}
+
+function captureTurnBaseline(cwd: string | undefined, deps: AgentHookDeps): TurnBaseline {
+  const target = typeof cwd === "string" && cwd.length > 0 ? cwd : process.cwd();
+  const git = deps.git ?? defaultBaselineGit;
+  try {
+    const head = git(["rev-parse", "HEAD"], target);
+    const unstaged = git(["diff", "--numstat"], target);
+    const staged = git(["diff", "--cached", "--numstat"], target);
+    const untracked = git(["ls-files", "--others", "--exclude-standard"], target);
+    const unstagedFiles = parseBaselineNumstat(unstaged);
+    const stagedFiles = parseBaselineNumstat(staged);
+    if (!head || unstagedFiles === undefined || stagedFiles === undefined || untracked === undefined) return { status: "unknown" };
+    const files = [...unstagedFiles, ...stagedFiles];
+    const seen = new Set(files.map((file) => file.path));
+    for (const path of untracked.split(/\r?\n/u).map((line) => line.trim()).filter(Boolean)) {
+      if (seen.has(path)) continue;
+      seen.add(path);
+      files.push({ path, plusMinus: [0, 0] });
+      if (files.length > MAX_BASELINE_FILES) return { status: "unknown" };
+    }
+    return {
+      status: "captured",
+      head: head.slice(0, 256),
+      ...(files.length === 0 ? {} : { files }),
+    };
+  } catch {
+    return { status: "unknown" };
+  }
+}
+
 interface StdoutLike {
   write: (chunk: string, callback?: (error?: Error) => void) => unknown;
   once?: (event: string, listener: (error: unknown) => void) => unknown;
@@ -309,15 +379,24 @@ function writeEmptyResponse(): Promise<void> {
 function applyParsedEvent(parsed: ParsedHookPayload, paths: RockyPaths, deps: AgentHookDeps): void {
   if (!parsed) return;
   if (parsed.action === "append") {
-    let appended = false;
-    try {
-      appendEvent(parsed.key, parsed.event, paths);
-      appended = true;
-    } catch {
-      safeLogFailure(paths);
-    }
-    if (appended && parsed.event.kind === "intent") {
-      maybeSpawnAmbiguity(parsed.event.text, paths, deps);
+    const lastMechanismIndex = parsed.truncatedFiles === undefined
+      ? -1
+      : parsed.events.reduce((last, event, index) => event.kind === "mechanism" ? index : last, -1);
+    for (const [index, original] of parsed.events.entries()) {
+      const event: AgentEvent = original.kind === "intent" && original.baseline === undefined
+        ? ({ ...original, baseline: captureTurnBaseline(original.cwd, deps) } satisfies IntentEvent)
+        : original.kind === "mechanism" && index === lastMechanismIndex && parsed.truncatedFiles !== undefined
+          ? { ...original, truncatedFiles: parsed.truncatedFiles }
+          : original;
+      let appended = false;
+      try {
+        appended = appendEvent(parsed.key, event, paths);
+      } catch {
+        safeLogFailure(paths);
+      }
+      if (appended && event.kind === "intent") {
+        maybeSpawnAmbiguity(event.text, paths, deps);
+      }
     }
     return;
   }

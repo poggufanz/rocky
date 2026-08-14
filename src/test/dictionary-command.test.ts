@@ -296,6 +296,26 @@ test("why quotes rationale as hearsay, newest first", () => {
   assert.ok(!joined.includes("?"));
 });
 
+test("why renders evidence for queried second file in one multi-file triple", () => {
+  const triple: TripleRecord = {
+    kind: "triple", id: "multi-file-why", ts: Date.now(), cwd: "/w", schemaV: 1,
+    agent: "codex", origin: "agent-hook", intent: { text: "change two files" },
+    rationale: { text: "keep styles aligned", tags: [], source: "notify" },
+    mechanism: {
+      files: [
+        { path: "src/first.ts", plusMinus: [2, 0], props: ["first"] },
+        { path: "src/second.ts", plusMinus: [7, 3], props: ["second"] },
+      ],
+      truncatedFiles: 0,
+    },
+  };
+  const { sayLines, outLines, deps } = sinks();
+  assert.equal(why(["src/second.ts"], { load: () => [triple], ...deps }), 0);
+  assert.ok(outLines.some((line) => line.includes("src/second.ts +7 -3")));
+  assert.equal(outLines.some((line) => line.includes("src/first.ts +2 -0")), false);
+  assert.ok(sayLines.some((line) => line.includes("agent say: keep styles aligned")));
+});
+
 test("why without rationale reports change without reason", () => {
   const records = seeded().map((record) => record.kind === "triple" ? { ...record, rationale: undefined } : record);
   const { sayLines, outLines, deps } = sinks();

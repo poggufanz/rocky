@@ -549,39 +549,40 @@ export function releaseAnnotationLease(lease: AnnotationLease, paths = resolveRo
   }
 }
 
-export function appendEvent(key: string, event: AgentEvent, paths = resolveRockyPaths()): void {
-  if (!isSafeKey(key)) return;
+export function appendEvent(key: string, event: AgentEvent, paths = resolveRockyPaths()): boolean {
+  if (!isSafeKey(key)) return false;
 
   let line: string;
   try {
     const encoded = JSON.stringify(event);
-    if (typeof encoded !== "string") return;
+    if (typeof encoded !== "string") return false;
     line = `${encoded}\n`;
-    if (Buffer.byteLength(line, "utf8") > MAX_BATCH_BYTES) return;
+    if (Buffer.byteLength(line, "utf8") > MAX_BATCH_BYTES) return false;
   } catch {
-    return;
+    return false;
   }
 
   const directory = spoolPath(paths);
-  if (!directory || !ensureSpoolDirectory(directory)) return;
+  if (!directory || !ensureSpoolDirectory(directory)) return false;
 
   let file: string;
   try {
     file = batchPath(paths, key);
   } catch {
-    return;
+    return false;
   }
 
   const candidate = Buffer.from(line, "utf8");
   const appendLock = acquireAppendLock(paths, key);
-  if (!appendLock) return;
+  if (!appendLock) return false;
   try {
-    if (!detachClaimedLiveLocked(key, paths, file)) return;
+    if (!detachClaimedLiveLocked(key, paths, file)) return false;
     const before = inspectFile(file);
-    if (before.kind === "other") return;
-    if (before.stats && before.stats.size + candidate.byteLength > MAX_BATCH_BYTES) return;
+    if (before.kind === "other") return false;
+    if (before.stats && before.stats.size + candidate.byteLength > MAX_BATCH_BYTES) return false;
 
     let fd = -1;
+    let appended = false;
     try {
       fd = openSync(
         file,
@@ -589,19 +590,20 @@ export function appendEvent(key: string, event: AgentEvent, paths = resolveRocky
         0o600,
       );
       const opened = fstatSync(fd);
-      if (!opened.isFile() || opened.isSymbolicLink()) return;
-      if (opened.size + candidate.byteLength > MAX_BATCH_BYTES) return;
+      if (!opened.isFile() || opened.isSymbolicLink()) return false;
+      if (opened.size + candidate.byteLength > MAX_BATCH_BYTES) return false;
       try {
         fchmodSync(fd, 0o600);
       } catch {
         // File mode is best effort on platforms that do not support it.
       }
-      writeSync(fd, candidate, 0, candidate.byteLength);
+      appended = writeSync(fd, candidate, 0, candidate.byteLength) === candidate.byteLength;
     } catch {
       // Spool is transient; callers must never fail because it is unavailable.
     } finally {
       if (fd >= 0) closeQuietly(fd);
     }
+    return appended;
   } finally {
     releaseAppendLock(appendLock);
   }
