@@ -6,7 +6,7 @@ import { isAbsolute, join } from "node:path";
 import { loadMemory } from "../core/memory.js";
 import { resolveRockyPaths } from "../core/state-paths.js";
 
-test("loader keeps legacy records but downgrades an unproven historical fix", () => {
+test("loader keeps legacy records but mismatched identity does not restore resolvedBy", () => {
   const root = mkdtempSync(join(tmpdir(), "rocky-valid-"));
   const file = join(root, "memory.jsonl");
   const legacy = {

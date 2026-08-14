@@ -123,7 +123,7 @@ function seedElsewhereFix(failCwd: string, fixCwd: string, cmd: string, exitCode
     exitCode, fingerprint: fp, signature: [cmd], excerpt: `exit ${exitCode}`, origin: "hook",
   };
   const fix = {
-    kind: "fix", id: "seed-fix", ts: Date.now(), cwd: fixCwd, cmd: "the remembered fix",
+    kind: "fix", id: "seed-fix", ts: Date.now(), cwd: fixCwd, cmd,
     failureIds: ["seed-failure"],
   };
   writeFileSync(
@@ -141,6 +141,7 @@ test("hookFail admits when the remembered fix's cwd differs from the cwd argumen
   try {
     const { result, tty } = captureTty(() => hookFail("elsewhere-test-cmd", 1, failCwd));
     assert.equal(result, 0);
+    assert.match(tty, /last time, you fix with:/);
     assert.match(tty, /but fix comes from other place\./);
     assert.match(tty, new RegExp(`place: ${fixCwd.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
   } finally {
