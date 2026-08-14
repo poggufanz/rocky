@@ -4,11 +4,14 @@ import type { Exposure } from "../core/config-read.js";
 import { boundTripleRecord, isSafeNonNegativeInteger, MAX_TRIPLE_FILES } from "../core/memory-read.js";
 import { canonicalPath } from "../core/memory-read.js";
 import type { FailureOrigin, FailureRecord, FixRecord, MemoryRecord, TripleRecord } from "../core/memory-read.js";
-import type { KnowledgeSearchHit, RecallHit, RecentFailureHit } from "../core/memory-query.js";
+import type { KnowledgeSearchHit, RecallHit, RecentFailureHit, WhyFilePossible } from "../core/memory-query.js";
 import { redactSecretsAtBoundary, replaceAnsiAndControls, stripInvisibleControls } from "../core/redact.js";
 
 export const MAX_FIELD_BYTES = 16 * 1024;
 export const MAX_RESPONSE_BYTES = 512 * 1024;
+/** Keep forged direct projections bounded while preserving the documented 20k probe. */
+const MAX_KNOWLEDGE_FILE_INPUTS = 20_000;
+const MAX_KNOWLEDGE_HIT_INPUTS = 20_000;
 
 export interface ProjectedRecallHit {
   candidateId: string;
@@ -80,6 +83,13 @@ export interface ProjectedKnowledgeResponse {
   exposure: Exposure;
   items: readonly ProjectedKnowledgeHit[];
   truncated: boolean;
+}
+
+export interface ProjectedWhyPossible {
+  id: string;
+  ts: number;
+  source: "agent-hook";
+  reason: "path_may_be_omitted";
 }
 
 type SourceHit = Pick<RecallHit, "failure" | "fix"> | Pick<RecentFailureHit, "failure" | "fix">;
@@ -246,6 +256,133 @@ export function projectTriple(triple: TripleRecord, exposure: Exposure): Project
   return projected;
 }
 
+/** Normalize custom why-file evidence before it reaches the MCP response cap. */
+export function projectWhyPossible(
+  values: readonly WhyFilePossible[],
+  limit: number,
+  exposure: Exposure = "sanitized",
+): ProjectedWhyPossible[] {
+  const output: ProjectedWhyPossible[] = [];
+  const maximum = Math.min(10, Math.max(0, Number.isSafeInteger(limit) ? limit : 0));
+  let inputLength = 0;
+  try {
+    if (!Array.isArray(values)) return output;
+    inputLength = Math.min(values.length, MAX_KNOWLEDGE_FILE_INPUTS);
+  } catch {
+    return output;
+  }
+  for (let index = 0; index < inputLength && output.length < maximum; index += 1) {
+    try {
+      const value = values[index] as unknown as Record<string, unknown>;
+      const ts = value.ts;
+      if (typeof value !== "object" || value === null || Array.isArray(value) ||
+          typeof value.id !== "string" || typeof ts !== "number" || !Number.isSafeInteger(ts) || ts < 0 ||
+          value.source !== "agent-hook" || value.reason !== "path_may_be_omitted") continue;
+      if (/[\u0000-\u001f\u007f-\u009f]/u.test(value.id)) continue;
+      const truncation: Truncation = { fields: [] };
+      output.push({
+        id: projectText(value.id, exposure, "possible.id", truncation),
+        ts,
+        source: "agent-hook",
+        reason: "path_may_be_omitted",
+      });
+    } catch {
+      // A hostile custom MemoryQueries implementation cannot break MCP.
+    }
+  }
+  return output;
+}
+
+function safeKnowledgeString(value: unknown, maximum = MAX_FIELD_BYTES): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const boundedInput = value.length > maximum * 2 ? value.slice(0, maximum * 2) : value;
+  return truncateUtf8(boundedInput, maximum).value;
+}
+
+function safeKnowledgeId(value: unknown): string | undefined {
+  const id = safeKnowledgeString(value);
+  return id !== undefined && id.trim().length > 0 && !/[\u0000-\u001f\u007f-\u009f]/u.test(id) ? id : undefined;
+}
+
+function normalizeKnowledgeHit(value: unknown): KnowledgeSearchHit | undefined {
+  try {
+    if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+    const raw = value as Record<string, unknown>;
+    const id = safeKnowledgeId(raw.id);
+    const ts = typeof raw.ts === "number" && Number.isSafeInteger(raw.ts) && raw.ts >= 0 ? raw.ts : undefined;
+    const kind = raw.kind === "failure" || raw.kind === "fix" || raw.kind === "triple" || raw.kind === "note"
+      ? raw.kind
+      : undefined;
+    const snippet = safeKnowledgeString(raw.snippet);
+    if (id === undefined || ts === undefined || kind === undefined || snippet === undefined) return undefined;
+
+    const score = typeof raw.score === "number" && Number.isFinite(raw.score)
+      ? Math.min(1, Math.max(0, raw.score))
+      : 0;
+    const agent = raw.agent === "claude-code" || raw.agent === "codex" ? raw.agent : undefined;
+    const sourceValue = safeKnowledgeString(raw.source);
+    const source = sourceValue !== undefined && (
+      (kind === "failure" && (sourceValue === "run" || sourceValue === "hook" || sourceValue === "watch"))
+      || (kind === "fix" && sourceValue === "fix")
+      || (kind === "triple" && sourceValue === "agent-hook")
+      || (kind === "note" && sourceValue === "note")
+    ) ? sourceValue : undefined;
+    if ((raw.agent !== undefined && agent === undefined) || (raw.source !== undefined && source === undefined)) {
+      return undefined;
+    }
+    const rawComplete = typeof raw.complete === "boolean" ? raw.complete : undefined;
+    const coverageStatus = raw.coverageStatus === "complete" || raw.coverageStatus === "truncated" || raw.coverageStatus === "unknown"
+      ? raw.coverageStatus
+      : raw.coverageStatus === undefined ? undefined : "unknown";
+    const rawTruncatedFiles = raw.truncatedFiles;
+    const truncatedValid = rawTruncatedFiles === undefined || isSafeNonNegativeInteger(rawTruncatedFiles);
+    const truncatedFiles: number = truncatedValid && typeof rawTruncatedFiles === "number" ? rawTruncatedFiles : 0;
+    const rawFilesCovered = raw.filesCovered;
+    const boundedRawFiles = Array.isArray(rawFilesCovered) && rawFilesCovered.length > MAX_KNOWLEDGE_FILE_INPUTS
+      ? rawFilesCovered.slice(0, MAX_KNOWLEDGE_FILE_INPUTS)
+      : rawFilesCovered;
+    const filesCovered = rawFilesCovered === undefined
+      ? undefined
+      : Array.isArray(boundedRawFiles)
+        ? boundedRawFiles.filter((file): file is string => typeof file === "string")
+        : [];
+    const malformedCoverage = (rawFilesCovered !== undefined && !Array.isArray(rawFilesCovered))
+      || (Array.isArray(rawFilesCovered) && rawFilesCovered.length > MAX_KNOWLEDGE_FILE_INPUTS)
+      || (Array.isArray(boundedRawFiles) && boundedRawFiles.some((file) => typeof file !== "string"))
+      || !truncatedValid
+      || (raw.coverageStatus !== undefined && coverageStatus === "unknown" && raw.coverageStatus !== "unknown");
+    let normalizedStatus: KnowledgeSearchHit["coverageStatus"] = coverageStatus;
+    let normalizedComplete = rawComplete;
+    if (kind !== "triple" && (rawFilesCovered !== undefined || rawTruncatedFiles !== undefined
+      || raw.coverageStatus !== undefined || rawComplete !== undefined)) {
+      normalizedStatus = "unknown";
+      normalizedComplete = false;
+    }
+    if (malformedCoverage || (truncatedFiles > 0 && normalizedStatus === "complete")) {
+      normalizedStatus = malformedCoverage ? "unknown" : "truncated";
+      normalizedComplete = false;
+    }
+    if (normalizedComplete === true && (kind !== "triple" || normalizedStatus !== "complete" || filesCovered === undefined)) {
+      normalizedComplete = false;
+    }
+    return {
+      id,
+      ts,
+      kind,
+      snippet,
+      score,
+      ...(agent === undefined ? {} : { agent }),
+      ...(source === undefined ? {} : { source }),
+      ...(filesCovered === undefined ? {} : { filesCovered }),
+      ...(rawTruncatedFiles === undefined ? {} : { truncatedFiles }),
+      ...(normalizedComplete === undefined ? {} : { complete: normalizedComplete }),
+      ...(normalizedStatus === undefined ? {} : { coverageStatus: normalizedStatus }),
+    };
+  } catch {
+    return undefined;
+  }
+}
+
 export function projectKnowledgeHits(
   hits: readonly KnowledgeSearchHit[],
   exposure: Exposure,
@@ -258,21 +395,36 @@ export function projectKnowledgeHits(
     let complete = hit.complete;
     if (hit.filesCovered !== undefined || hit.kind === "triple") {
       const sourceFiles = Array.isArray(hit.filesCovered) ? hit.filesCovered : [];
+      const inputBounded = sourceFiles.length > MAX_KNOWLEDGE_FILE_INPUTS
+        ? sourceFiles.slice(0, MAX_KNOWLEDGE_FILE_INPUTS)
+        : sourceFiles;
       const unique = new Map<string, string>();
       let invalid = !Array.isArray(hit.filesCovered) && hit.filesCovered !== undefined;
+      let hasAbsolute = false;
+      let hasRelative = false;
       if (hit.kind === "triple" && sourceFiles.length === 0) invalid = true;
-      for (const value of sourceFiles) {
+      if (sourceFiles.length > MAX_KNOWLEDGE_FILE_INPUTS) invalid = true;
+      for (const value of inputBounded) {
         if (typeof value !== "string") {
           invalid = true;
           continue;
         }
-        const path = canonicalPath(value);
+        // A projected hit has no durable origin/cwd metadata. Preserve case
+        // instead of consulting reader process.platform, which could collapse
+        // distinct POSIX paths after cross-platform reload.
+        const path = canonicalPath(value, { platform: "unknown" });
         if (!path) {
           invalid = true;
           continue;
         }
+        if (/^(?:\/|[A-Za-z]:\/)/u.test(path)) hasAbsolute = true;
+        else hasRelative = true;
         if (!unique.has(path)) unique.set(path, path);
       }
+      // Hits do not carry cwd/origin metadata. Mixed absolute and relative
+      // spellings cannot be proven to identify one file, so never claim
+      // complete coverage for that ambiguous projection.
+      if (hasAbsolute && hasRelative) invalid = true;
       const allCount = unique.size;
       const bounded = [...unique.values()].slice(0, MAX_TRIPLE_FILES);
       const omitted = Math.max(0, allCount - bounded.length);
@@ -287,7 +439,13 @@ export function projectKnowledgeHits(
       if (invalid) coverageStatus = "unknown";
       complete = coverageStatus === "complete" && truncatedFiles === 0 && complete === true;
       filesCovered = projectStringArray(bounded, exposure, "filesCovered", truncation);
-      if (omitted > 0 || (hit.filesCovered?.length ?? 0) > bounded.length) truncation.fields.push("filesCovered");
+      if (omitted > 0 || sourceFiles.length > inputBounded.length || (hit.filesCovered?.length ?? 0) > bounded.length) {
+        truncation.fields.push("filesCovered");
+      }
+    }
+    if (truncatedFiles !== undefined && truncatedFiles > 0 && coverageStatus === "complete") {
+      coverageStatus = "truncated";
+      complete = false;
     }
     const projected: ProjectedKnowledgeHit = {
       id: projectOpaqueId(hit.id, "id", truncation),
@@ -306,8 +464,21 @@ export function projectKnowledgeHits(
     return projected;
   };
   const items: ProjectedKnowledgeHit[] = [];
-  let truncated = false;
-  for (const hit of hits) {
+  let sourceHits: readonly KnowledgeSearchHit[] = [];
+  let inputTruncated = false;
+  try {
+    if (Array.isArray(hits)) {
+      inputTruncated = hits.length > MAX_KNOWLEDGE_HIT_INPUTS;
+      sourceHits = inputTruncated ? hits.slice(0, MAX_KNOWLEDGE_HIT_INPUTS) : hits;
+    }
+  } catch {
+    sourceHits = [];
+    inputTruncated = true;
+  }
+  let truncated = inputTruncated;
+  for (const candidate of sourceHits) {
+    const hit = normalizeKnowledgeHit(candidate);
+    if (hit === undefined) continue;
     const item = project(hit);
     const prospective = { exposure, items: [...items, item], truncated };
     if (Buffer.byteLength(JSON.stringify(prospective), "utf8") > MAX_RESPONSE_BYTES) {

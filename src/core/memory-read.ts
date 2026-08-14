@@ -107,6 +107,8 @@ export interface TripleRecord {
   schemaV: 1;
   agent: "claude-code" | "codex";
   origin: "agent-hook";
+  /** Origin platform keeps case-sensitive POSIX paths safe after reload. */
+  platform?: NodeJS.Platform;
   intent?: { text: string };
   rationale?: { text: string; tags: string[]; source: "transcript" | "notify" };
   mechanism: {
@@ -120,24 +122,75 @@ export interface TripleRecord {
 
 /** Shared durable knowledge contract: only this many file witnesses survive. */
 export const MAX_TRIPLE_FILES = 8;
+const KNOWN_PATH_PLATFORMS: ReadonlySet<string> = new Set([
+  "aix", "android", "darwin", "freebsd", "haiku", "linux", "openbsd", "sunos", "win32",
+]);
+
+export function isKnownPathPlatform(value: unknown): value is NodeJS.Platform {
+  return typeof value === "string" && KNOWN_PATH_PLATFORMS.has(value);
+}
 
 const ANSI_OR_OSC = /(?:\u001b\][^\u0007]*(?:\u0007|\u001b\\)|\u001b\[[0-?]*[ -/]*[@-~]|\u009d[^\u009c]*(?:\u009c|$)|\u009b[0-?]*[ -/]*[@-~])/gu;
 
+export interface CanonicalPathOptions {
+  /** Unknown means preserve case; live records default to current platform. */
+  platform?: NodeJS.Platform | "unknown";
+  /** Resolve a relative spelling against known turn cwd for identity only. */
+  cwd?: string;
+}
+
 /** Shared canonical file identity. See README for platform case policy. */
-export function canonicalPath(value: string): string {
+export function canonicalPath(value: string, options: CanonicalPathOptions = {}): string {
   if (typeof value !== "string") return "";
   const cleaned = value
     .replace(ANSI_OR_OSC, " ")
     .replace(/[\u0000-\u001f\u007f-\u009f\u061c\u200b-\u200f\u2060-\u206f\ufeff]/gu, "");
   const trimmed = cleaned.trim();
   if (!trimmed) return "";
-  let normalized = trimmed.replaceAll("\\", "/").replace(/\/{2,}/gu, "/");
-  const absolute = normalized.startsWith("/");
-  const segments = normalized.split("/").filter((segment) => segment !== ".");
-  normalized = segments.join("/");
-  if (absolute) normalized = `/${normalized}`;
-  if (normalized.length > 1) normalized = normalized.replace(/\/+$/u, "");
-  return process.platform === "win32" ? normalized.toLowerCase() : normalized;
+  const source = trimmed.replaceAll("\\", "/");
+  const hadUncPrefix = source.startsWith("//") && !/^\/{3,}/u.test(source);
+  const normalized = source.replace(/\/{2,}/gu, "/");
+  const driveAbsolute = /^[A-Za-z]:\//u.test(normalized);
+  const driveRelative = /^[A-Za-z]:/u.test(normalized) && !driveAbsolute;
+  const posixAbsolute = normalized.startsWith("/") && !hadUncPrefix;
+  let prefix = "";
+  let rest = normalized;
+  if (hadUncPrefix && normalized.length > 1) {
+    prefix = "//";
+    rest = normalized.slice(1);
+  } else if (hadUncPrefix) {
+    prefix = "/";
+    rest = "";
+  } else if (driveAbsolute) {
+    prefix = `${normalized.slice(0, 2)}/`;
+    rest = normalized.slice(3);
+  } else if (driveRelative) {
+    prefix = normalized.slice(0, 2);
+    rest = normalized.slice(2);
+  } else if (posixAbsolute) {
+    prefix = "/";
+    rest = normalized.slice(1);
+  }
+  const segments = rest.split("/").filter((segment) => segment.length > 0 && segment !== ".");
+  let result = `${prefix}${segments.join("/")}`;
+  if (prefix === "//" && segments.length === 0) result = "/";
+  if (prefix === "/" && segments.length === 0) result = "/";
+  if (prefix.endsWith("/") && segments.length === 0) result = prefix;
+  if (prefix === "" && result.length === 0) return "";
+
+  const platform = options.platform ?? process.platform;
+  if (platform === "win32") result = result.toLowerCase();
+
+  // Relative paths are compared against the turn cwd only when a caller asks
+  // for an identity key. Keep display paths relative at the storage boundary.
+  if (options.cwd !== undefined && prefix === "" && result.length > 0) {
+    const cwd = canonicalPath(options.cwd, { platform });
+    if (cwd.length > 0) {
+      const joined = cwd.endsWith("/") ? `${cwd}${result}` : `${cwd}/${result}`;
+      return canonicalPath(joined, { platform });
+    }
+  }
+  return result;
 }
 
 export function isSafeNonNegativeInteger(value: unknown): value is number {
@@ -175,24 +228,63 @@ function normalizedCoverageStatus(
  * the record contract prevents writers, readers, and projections from drifting
  * into different file caps.
  */
-export function boundTripleMechanism(mechanism: TripleRecord["mechanism"]): TripleRecord["mechanism"] {
+export interface TriplePathIdentityContext {
+  platform?: NodeJS.Platform | "unknown";
+  cwd?: string;
+}
+
+export function boundTripleMechanism(
+  mechanism: TripleRecord["mechanism"],
+  context: TriplePathIdentityContext = {},
+): TripleRecord["mechanism"] {
   const source = (mechanism ?? {}) as unknown as Record<string, unknown>;
   const rawFiles = Array.isArray(source.files) ? source.files : [];
-  let valid = Array.isArray(source.files);
+  const contextPlatform = context.platform;
+  const contextPlatformValid = contextPlatform === undefined || contextPlatform === "unknown" || isKnownPathPlatform(contextPlatform);
+  let valid = Array.isArray(source.files) && contextPlatformValid;
   const byIdentity = new Map<string, TripleFile>();
+  const hashPaths = new Map<string, string>();
+  const platform = contextPlatform ?? process.platform;
+  const hasBoundablePath = rawFiles.some((value) => {
+    if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+    const candidate = (value as Record<string, unknown>).path;
+    return typeof candidate === "string" && candidate.length > 0 && candidate.length <= 1024;
+  });
   for (const value of rawFiles) {
     if (typeof value !== "object" || value === null || Array.isArray(value)) {
       valid = false;
       continue;
     }
     const raw = value as Record<string, unknown>;
-    const path = typeof raw.path === "string" ? canonicalPath(raw.path) : "";
+    if (typeof raw.path !== "string" || raw.path.length === 0) {
+      valid = false;
+      continue;
+    }
+    // Keep one witness for a record made solely from hostile overlong paths,
+    // but discard such entries when any ordinary bounded path is available.
+    // Ingress adapters reject these paths; durable/reader boundaries retain
+    // them only as explicit unknown evidence so they cannot claim completeness
+    // or consume a slot ahead of valid paths.
+    if (raw.path.length > 1024) {
+      valid = false;
+      if (hasBoundablePath) continue;
+    }
+    const path = canonicalPath(raw.path, { platform });
+    const identityPath = canonicalPath(raw.path, { platform, cwd: context.cwd }) || path;
     const ephemeralIdentity = ephemeralTripleIdentities.get(value as object);
     const rawIdentityHash = raw.identityHash;
     const identityHash = typeof rawIdentityHash === "string" && /^[0-9a-f]{32}$/u.test(rawIdentityHash)
       ? rawIdentityHash
       : undefined;
     if (rawIdentityHash !== undefined && identityHash === undefined) valid = false;
+    if (identityHash !== undefined) {
+      const priorPath = hashPaths.get(identityHash);
+      // A durable discriminator is only trustworthy once it identifies one
+      // file. Keep distinct display paths instead of collapsing them, but
+      // downgrade coverage whenever a forged/repeated hash is encountered.
+      if (priorPath !== undefined) valid = false;
+      else hashPaths.set(identityHash, path);
+    }
     const plusMinus = Array.isArray(raw.plusMinus) && raw.plusMinus.length === 2
       ? raw.plusMinus
       : undefined;
@@ -212,8 +304,16 @@ export function boundTripleMechanism(mechanism: TripleRecord["mechanism"]): Trip
         : {}),
       ...(identityHash === undefined ? {} : { identityHash }),
     };
+    // Namespace every discriminator and bind it to canonical display path.
+    // This prevents a hash-shaped plain path from colliding with a hash key,
+    // while preserving distinct redacted paths that share one hash.
+    const key = identityHash !== undefined
+      ? `hash:${identityPath}\u0000${identityHash}`
+      : ephemeralIdentity !== undefined
+        ? `ephemeral:${identityPath}\u0000${canonicalPath(ephemeralIdentity, { platform, cwd: context.cwd })}`
+      : `path:${identityPath}`;
     // Map.set replaces evidence without changing first-seen insertion order.
-    byIdentity.set(identityHash ?? ephemeralIdentity ?? path, file);
+    byIdentity.set(key, file);
   }
   const allFiles = [...byIdentity.values()];
   const files = allFiles.slice(0, MAX_TRIPLE_FILES);
@@ -240,7 +340,13 @@ export function boundTripleMechanism(mechanism: TripleRecord["mechanism"]): Trip
 }
 
 export function boundTripleRecord(record: TripleRecord): TripleRecord {
-  return { ...record, mechanism: boundTripleMechanism(record.mechanism) };
+  return {
+    ...record,
+    mechanism: boundTripleMechanism(record.mechanism, {
+      platform: record.platform ?? "unknown",
+      cwd: record.cwd,
+    }),
+  };
 }
 
 export type MemoryRecord = FailureRecord | FixRecord | AssociationRecord | NoteRecord | TripleRecord;
@@ -365,6 +471,9 @@ function parseTripleRecord(record: Record<string, unknown>): TripleRecord | unde
   if (record.schemaV !== 1 || record.origin !== "agent-hook" ||
       (record.agent !== "claude-code" && record.agent !== "codex")) return undefined;
 
+  const platform = record.platform === undefined ? undefined : record.platform;
+  if (platform !== undefined && !isKnownPathPlatform(platform)) return undefined;
+
   const mechanism = objectValue(record.mechanism);
   if (!mechanism || !Array.isArray(mechanism.files) ||
       typeof mechanism.truncatedFiles !== "number" || !Number.isSafeInteger(mechanism.truncatedFiles) ||
@@ -401,7 +510,7 @@ function parseTripleRecord(record: Record<string, unknown>): TripleRecord | unde
     truncatedFiles: mechanism.truncatedFiles,
     ...(baseline === undefined ? {} : { baseline }),
     ...(coverageStatus === undefined ? {} : { coverageStatus }),
-  });
+  }, { platform: platform as NodeJS.Platform | undefined ?? "unknown", cwd: record.cwd as string });
 
   let intent: TripleRecord["intent"];
   if (record.intent !== undefined) {
@@ -427,6 +536,7 @@ function parseTripleRecord(record: Record<string, unknown>): TripleRecord | unde
     schemaV: 1,
     agent: record.agent,
     origin: "agent-hook",
+    ...(platform === undefined ? {} : { platform: platform as NodeJS.Platform }),
     ...(intent === undefined ? {} : { intent }),
     ...(rationale === undefined ? {} : { rationale }),
     mechanism: {

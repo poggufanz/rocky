@@ -961,10 +961,11 @@ export function recordTriple(
     schemaV: 1,
     origin: "agent-hook",
     agent: input.agent,
+    platform: input.platform ?? process.platform,
     cwd: input.cwd,
     ...(input.intent === undefined ? {} : { intent: input.intent }),
     ...(input.rationale === undefined ? {} : { rationale: input.rationale }),
-    mechanism: boundTripleMechanism(input.mechanism),
+    mechanism: boundTripleMechanism(input.mechanism, { platform: input.platform ?? process.platform, cwd: input.cwd }),
   };
   withMemoryTransaction((transaction) => transaction.append(rec), paths ?? resolveRockyPaths());
   return rec;
@@ -997,10 +998,11 @@ export function recordTripleOnce(
       schemaV: 1,
       origin: "agent-hook",
       agent: input.agent,
+      platform: input.platform ?? process.platform,
       cwd: input.cwd,
       ...(input.intent === undefined ? {} : { intent: input.intent }),
       ...(input.rationale === undefined ? {} : { rationale: input.rationale }),
-      mechanism: boundTripleMechanism(input.mechanism),
+      mechanism: boundTripleMechanism(input.mechanism, { platform: input.platform ?? process.platform, cwd: input.cwd }),
     };
     transaction.append(rec);
     return { record: rec, appended: true };

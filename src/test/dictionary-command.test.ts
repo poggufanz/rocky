@@ -326,7 +326,8 @@ test("why without rationale reports change without reason", () => {
 test("why on unknown file and missing arg", () => {
   const unknown = sinks();
   assert.equal(why(["ghost.css"], { load: () => [], ...unknown.deps }), 0);
-  assert.ok(unknown.sayLines.join("\n").includes("nobody touch this while I listen"));
+  assert.ok(unknown.sayLines.join("\n").includes("I not know if agent touch"));
+  assert.equal(unknown.sayLines.join("\n").includes("nobody touch this while I listen"), false);
 
   const missing = sinks();
   assert.equal(why([], { load: () => [], ...missing.deps }), 2);

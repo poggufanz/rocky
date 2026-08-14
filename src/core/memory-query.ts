@@ -11,7 +11,6 @@ import {
 } from "./fingerprint.js";
 import { boundTripleRecord, canonicalPath, loadMemory } from "./memory-read.js";
 import type { FailureRecord, FixRecord, LinkBasis, LinkConfidence, MemoryRecord, TripleRecord } from "./memory-read.js";
-import { triplesForFile } from "./dictionary.js";
 
 export interface RecallQuery { query: string; limit?: number; cwd?: string; now?: number }
 export interface RecallHit { failure: FailureRecord; fix?: FixRecord; score: number }
@@ -509,15 +508,66 @@ function rawTripleFiles(record: TripleRecord): string[] {
   if (!Array.isArray(mechanism.files)) return [];
   const seen = new Set<string>();
   const paths: string[] = [];
+  const platform = record.platform ?? "unknown";
   for (const value of mechanism.files) {
     if (typeof value !== "object" || value === null || Array.isArray(value)) continue;
-    const path = canonicalPath(typeof (value as { path?: unknown }).path === "string" ? (value as { path: string }).path : "");
+    const path = canonicalPath(
+      typeof (value as { path?: unknown }).path === "string" ? (value as { path: string }).path : "",
+      { platform, cwd: record.cwd },
+    );
     if (path && !seen.has(path)) {
       seen.add(path);
       paths.push(path);
     }
   }
   return paths;
+}
+
+interface WhyFilePathMatch {
+  triple: TripleRecord;
+  exact: boolean;
+  suffix: boolean;
+  identity: string;
+}
+
+function whyFilePathMatches(records: readonly MemoryRecord[], path: string, limit = 5): {
+  matches: TripleRecord[];
+  suffixAmbiguous: boolean;
+} {
+  const candidates: WhyFilePathMatch[] = [];
+  for (const source of records) {
+    if (source.kind !== "triple") continue;
+    const triple = boundTripleRecord(source);
+    const platform = triple.platform ?? "unknown";
+    const targetDisplay = canonicalPath(path, { platform });
+    const targetIdentity = canonicalPath(path, { platform, cwd: triple.cwd });
+    for (const file of triple.mechanism.files) {
+      const candidateDisplay = canonicalPath(file.path, { platform });
+      const identity = canonicalPath(file.path, { platform, cwd: triple.cwd });
+      if (!candidateDisplay || !identity) continue;
+      const exact = identity === targetIdentity || candidateDisplay === targetDisplay;
+      const suffix = !exact && targetDisplay.length > 0 && candidateDisplay.endsWith(`/${targetDisplay}`);
+      if (exact || suffix) candidates.push({ triple, exact, suffix, identity });
+    }
+  }
+  const exact = candidates.filter((candidate) => candidate.exact);
+  const suffixCandidates = candidates.filter((candidate) => candidate.suffix);
+  const selected = exact.length > 0
+    ? exact
+    : suffixCandidates.filter((candidate) => candidate.triple.mechanism.coverageStatus === "complete"
+      && candidate.triple.mechanism.truncatedFiles === 0);
+  if (exact.length === 0) {
+    const distinctSuffixes = new Set(suffixCandidates.map((candidate) => candidate.identity));
+    if (distinctSuffixes.size > 1) return { matches: [], suffixAmbiguous: true };
+  }
+  const seen = new Set<string>();
+  const matches: TripleRecord[] = [];
+  for (const candidate of selected.sort((a, b) => b.triple.ts - a.triple.ts)) {
+    if (seen.has(candidate.triple.id)) continue;
+    seen.add(candidate.triple.id);
+    matches.push(candidate.triple);
+  }
+  return { matches: matches.slice(0, limit), suffixAmbiguous: false };
 }
 
 function worstCoverageStatus(current: KnowledgeCoverageSummary["status"], next: KnowledgeCoverageSummary["status"]): KnowledgeCoverageSummary["status"] {
@@ -527,21 +577,27 @@ function worstCoverageStatus(current: KnowledgeCoverageSummary["status"], next: 
 }
 
 export function whyFileEvidence(records: readonly MemoryRecord[], path: string, limit = 5): WhyFileEvidence {
-  const target = canonicalPath(path);
-  const matches = triplesForFile(records, path, limit);
+  const strictMatches = whyFilePathMatches(records, path, limit);
+  const matches = strictMatches.matches.slice(0, limit);
   const boundedMatches = new Set(matches.map((record) => record.id));
   const possible: WhyFilePossible[] = [];
   let status: KnowledgeCoverageSummary["status"] = "complete";
   let filesCovered = 0;
   let truncatedFiles = 0;
   let hasIncomplete = false;
+  let sawTriple = false;
   for (const source of records) {
     if (source.kind !== "triple") continue;
+    sawTriple = true;
     const bounded = boundTripleRecord(source);
     const rawPaths = rawTripleFiles(source);
-    const boundedPaths = new Set(bounded.mechanism.files.map((file) => canonicalPath(file.path)).filter(Boolean));
-    const rawContainsTarget = target.length > 0 && rawPaths.some((candidate) => candidate === target || candidate.endsWith(`/${target}`));
-    const boundedContainsTarget = target.length > 0 && [...boundedPaths].some((candidate) => candidate === target || candidate.endsWith(`/${target}`));
+    const platform = bounded.platform ?? "unknown";
+    const targetIdentity = canonicalPath(path, { platform, cwd: bounded.cwd });
+    const boundedPaths = new Set(bounded.mechanism.files.map((file) => canonicalPath(file.path, {
+      platform, cwd: bounded.cwd,
+    })).filter(Boolean));
+    const rawContainsTarget = targetIdentity.length > 0 && rawPaths.includes(targetIdentity);
+    const boundedContainsTarget = targetIdentity.length > 0 && boundedPaths.has(targetIdentity);
     const sourceStatus = bounded.mechanism.coverageStatus ?? "unknown";
     const sourceIncomplete = sourceStatus !== "complete" || bounded.mechanism.truncatedFiles !== 0 || rawPaths.length > bounded.mechanism.files.length;
     if (sourceIncomplete) {
@@ -557,6 +613,10 @@ export function whyFileEvidence(records: readonly MemoryRecord[], path: string, 
     }
     filesCovered = Math.max(filesCovered, bounded.mechanism.files.length);
   }
+  if (!sawTriple || strictMatches.suffixAmbiguous) {
+    hasIncomplete = true;
+    status = "unknown";
+  }
   const coverage: KnowledgeCoverageSummary = {
     status,
     complete: !hasIncomplete && status === "complete" && truncatedFiles === 0,
@@ -567,7 +627,7 @@ export function whyFileEvidence(records: readonly MemoryRecord[], path: string, 
 }
 
 export function whyFile(records: readonly MemoryRecord[], path: string, limit = 5): TripleRecord[] {
-  return triplesForFile(records, path, limit);
+  return whyFilePathMatches(records, path, limit).matches;
 }
 
 export const LINK_WINDOW_MS = 1000 * 60 * 60 * 8;

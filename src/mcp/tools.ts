@@ -8,8 +8,11 @@ import {
   projectMemoryRecord,
   projectRecallHits,
   projectRecentFailures,
+  projectWhyPossible,
   projectTriple,
 } from "./privacy.js";
+import { boundTripleRecord, canonicalPath, isKnownPathPlatform, isSafeNonNegativeInteger } from "../core/memory-read.js";
+import type { TripleRecord } from "../core/memory-read.js";
 
 export interface McpToolDefinition {
   name: "recall" | "recent_failures" | "stats" | "recall_with_ai" | "search_knowledge" | "fetch_record" | "why_file";
@@ -64,6 +67,7 @@ const ANNOTATIONS = {
   openWorldHint: false,
 } as const;
 const RESPONSE_CAP_BYTES = MAX_RESPONSE_BYTES - TOOL_ENVELOPE_RESERVE_BYTES;
+const MAX_WHY_EVIDENCE_INPUTS = 20_000;
 const MEMORY_OPERATIONAL_CODES = Object.freeze([
   "EACCES", "EPERM", "ENOENT", "EIO", "EMFILE", "ENFILE", "ENOSPC", "EROFS", "EISDIR", "ENOTDIR",
 ] as const);
@@ -219,7 +223,13 @@ function freezeDeep<T>(value: T): T {
 }
 
 function buildResult(payload: Record<string, unknown>, isError = false): ToolCallResult {
-  const text = JSON.stringify(payload);
+  let text: string;
+  try {
+    text = JSON.stringify(payload);
+  } catch {
+    text = JSON.stringify({ truncated: true });
+    payload = { truncated: true };
+  }
   return {
     content: [{ type: "text", text }],
     structuredContent: payload,
@@ -261,16 +271,29 @@ function validEvidenceRefs(value: readonly string[], items: readonly { candidate
 function cappedResult(payload: object, isError = false): ToolCallResult {
   const source = payload as Record<string, unknown>;
   const copy: Record<string, unknown> = { ...source };
-  if (Array.isArray(source.items)) copy.items = [...source.items];
+  for (const [key, value] of Object.entries(source)) {
+    if (Array.isArray(value)) copy[key] = [...value];
+  }
+  const arrayPriority = Array.isArray(copy.possible) && copy.possible.length > 0
+    ? ["possible", "items", "rankedCandidateIds", "evidenceRefs"]
+    : ["items", "possible", "rankedCandidateIds", "evidenceRefs"];
+  const arrayKeys = [
+    ...arrayPriority.filter((key) => Array.isArray(copy[key])),
+    ...Object.keys(copy).filter((key) => Array.isArray(copy[key]) && !arrayPriority.includes(key)).sort(),
+  ];
   while (true) {
     const output = buildResult(copy, isError);
     if (Buffer.byteLength(JSON.stringify(output), "utf8") <= RESPONSE_CAP_BYTES) return output;
-    const items = copy.items;
-    if (!Array.isArray(items) || items.length === 0) {
+    const key = arrayKeys.find((candidate) => {
+      const values = copy[candidate];
+      return Array.isArray(values) && values.length > 0;
+    });
+    if (key === undefined) {
       throw new Error("response too large");
     }
-    const removed = items.pop();
-    if (isItem(removed)) pruneRefs(copy, removed.candidateId);
+    const values = copy[key] as unknown[];
+    const removed = values.pop();
+    if (key === "items" && isItem(removed)) pruneRefs(copy, removed.candidateId);
     copy.truncated = true;
   }
 }
@@ -293,23 +316,203 @@ function unknownCoverage(): KnowledgeCoverageSummary {
   return { status: "unknown", complete: false, filesCovered: 0, truncatedFiles: 0 };
 }
 
+function safeTripleRecord(value: unknown): TripleRecord | undefined {
+  try {
+    if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+    const raw = value as Record<string, unknown>;
+    const ts = raw.ts;
+    if (raw.kind !== "triple" || typeof raw.id !== "string" || typeof ts !== "number" || !Number.isSafeInteger(ts) ||
+        typeof raw.cwd !== "string" || raw.agent !== "claude-code" && raw.agent !== "codex") return undefined;
+    const bounded = boundTripleRecord(raw as unknown as TripleRecord);
+    const platform = isKnownPathPlatform(raw.platform) ? raw.platform : undefined;
+    const safe: TripleRecord = {
+      kind: "triple", id: raw.id, ts, cwd: raw.cwd, schemaV: 1,
+      agent: raw.agent, origin: "agent-hook", mechanism: bounded.mechanism,
+      ...(platform === undefined ? {} : { platform }),
+    };
+    const intent = raw.intent;
+    if (typeof intent === "object" && intent !== null && !Array.isArray(intent) &&
+        typeof (intent as Record<string, unknown>).text === "string") {
+      safe.intent = { text: (intent as Record<string, unknown>).text as string };
+    }
+    const rationale = raw.rationale;
+    if (typeof rationale === "object" && rationale !== null && !Array.isArray(rationale)) {
+      const candidate = rationale as Record<string, unknown>;
+      if (typeof candidate.text === "string" && Array.isArray(candidate.tags) &&
+          candidate.tags.every((tag) => typeof tag === "string") &&
+          (candidate.source === "transcript" || candidate.source === "notify")) {
+        safe.rationale = {
+          text: candidate.text,
+          tags: [...candidate.tags] as string[],
+          source: candidate.source,
+        };
+      }
+    }
+    return safe;
+  } catch {
+    return undefined;
+  }
+}
+
+function coverageForTriples(matches: readonly TripleRecord[]): KnowledgeCoverageSummary {
+  if (matches.length === 0) return unknownCoverage();
+  let status: KnowledgeCoverageSummary["status"] = "complete";
+  let filesCovered = 0;
+  let truncatedFiles = 0;
+  let allComplete = true;
+  for (const match of matches) {
+    try {
+      const projected = projectTriple(match, "sanitized");
+      const current = projected.coverageStatus === "complete" && projected.complete
+        ? "complete" as const
+        : projected.coverageStatus === "truncated" ? "truncated" as const : "unknown" as const;
+      if (current === "unknown") status = "unknown";
+      else if (current === "truncated" && status === "complete") status = "truncated";
+      filesCovered = Math.max(filesCovered, Math.min(8, projected.filesCovered.length));
+      if (isSafeNonNegativeInteger(projected.truncatedFiles) && Number.isSafeInteger(truncatedFiles + projected.truncatedFiles)) {
+        truncatedFiles += projected.truncatedFiles;
+      } else {
+        status = "unknown";
+        allComplete = false;
+      }
+      if (!projected.complete) allComplete = false;
+    } catch {
+      status = "unknown";
+      allComplete = false;
+    }
+  }
+  const complete = status === "complete" && truncatedFiles === 0 && allComplete;
+  return { status: complete ? "complete" : status, complete, filesCovered, truncatedFiles };
+}
+
+interface WhyPathRelation {
+  exact: boolean;
+  suffix: boolean;
+  suffixIdentities: readonly string[];
+}
+
+function whyPathRelation(candidate: TripleRecord, path: string): WhyPathRelation {
+  const platform = candidate.platform ?? "unknown";
+  const targetDisplay = canonicalPath(path, { platform });
+  const targetIdentity = canonicalPath(path, { platform, cwd: candidate.cwd });
+  if (!targetDisplay || !targetIdentity) return { exact: false, suffix: false, suffixIdentities: [] };
+  const suffixIdentities = new Set<string>();
+  for (const file of candidate.mechanism.files) {
+    const candidateDisplay = canonicalPath(file.path, { platform });
+    const candidateIdentity = canonicalPath(file.path, { platform, cwd: candidate.cwd });
+    if (!candidateDisplay || !candidateIdentity) continue;
+    if (candidateDisplay === targetDisplay || candidateIdentity === targetIdentity) {
+      return { exact: true, suffix: false, suffixIdentities: [] };
+    }
+    if (candidateDisplay.endsWith(`/${targetDisplay}`)) suffixIdentities.add(candidateIdentity);
+  }
+  return { exact: false, suffix: suffixIdentities.size > 0, suffixIdentities: [...suffixIdentities] };
+}
+
+interface WhyCandidate {
+  candidate: TripleRecord;
+  relation: WhyPathRelation;
+}
+
+function selectWhyCandidates(
+  candidates: readonly TripleRecord[],
+  path: string,
+  limit: number,
+): { matches: TripleRecord[]; possible: WhyFileEvidence["possible"]; ambiguousSuffix: boolean } {
+  const related: WhyCandidate[] = candidates.map((candidate) => ({
+    candidate,
+    relation: whyPathRelation(candidate, path),
+  }));
+  const hasExact = related.some(({ relation }) => relation.exact);
+  const suffixIdentities = new Set(
+    related
+      .filter(({ relation }) => !relation.exact && relation.suffix)
+      .flatMap(({ relation }) => relation.suffixIdentities),
+  );
+  const ambiguousSuffix = !hasExact && suffixIdentities.size > 1;
+  const matches: TripleRecord[] = [];
+  const possible: WhyFileEvidence["possible"] = [];
+  for (const { candidate, relation } of related) {
+    const incomplete = candidate.mechanism.coverageStatus !== "complete" || candidate.mechanism.truncatedFiles > 0;
+    const exactOrUnambiguousSuffix = relation.exact || (
+      !hasExact && !ambiguousSuffix && relation.suffix && !incomplete
+    );
+    if (exactOrUnambiguousSuffix) {
+      if (matches.length < limit) matches.push(candidate);
+    } else if (incomplete && possible.length < limit) {
+      possible.push({ id: candidate.id, ts: candidate.ts, source: candidate.origin, reason: "path_may_be_omitted" });
+    }
+  }
+  return { matches, possible, ambiguousSuffix };
+}
+
 function fallbackWhyEvidence(options: CreateToolRegistryOptions, path: string, limit: number): WhyFileEvidence {
-  const matches = options.memory.whyFile(path, limit);
-  const statuses = matches.map((triple) => triple.mechanism.coverageStatus);
-  const status = statuses.includes("unknown") || statuses.length === 0
-    ? "unknown" as const
-    : statuses.includes("truncated") ? "truncated" as const : "complete" as const;
-  const truncatedFiles = matches.reduce((sum, triple) => {
-    const value = triple.mechanism.truncatedFiles;
-    return Number.isSafeInteger(value) && value >= 0 && Number.isSafeInteger(sum + value) ? sum + value : Number.MAX_SAFE_INTEGER;
-  }, 0);
-  const coverage = matches.length === 0 ? unknownCoverage() : {
-    status,
-    complete: status === "complete" && truncatedFiles === 0,
-    filesCovered: Math.min(8, matches.reduce((maximum, triple) => Math.max(maximum, triple.mechanism.files.length), 0)),
-    truncatedFiles,
+  let rawMatches: unknown;
+  try {
+    rawMatches = options.memory.whyFile(path, limit);
+  } catch {
+    rawMatches = [];
+  }
+  let boundedRawMatches: readonly unknown[] = [];
+  try {
+    boundedRawMatches = Array.isArray(rawMatches) ? rawMatches.slice(0, MAX_WHY_EVIDENCE_INPUTS) : [];
+  } catch {
+    boundedRawMatches = [];
+  }
+  const candidates = boundedRawMatches
+    .map((value) => safeTripleRecord(value))
+    .filter((value): value is TripleRecord => value !== undefined);
+  const selected = selectWhyCandidates(candidates, path, limit);
+  const coverage = coverageForTriples(candidates);
+  const incomplete = !coverage.complete || selected.possible.length > 0 || selected.ambiguousSuffix;
+  return {
+    matches: selected.matches,
+    possible: selected.possible,
+    coverage: incomplete ? { ...coverage, status: "unknown", complete: false } : coverage,
+    coverageIncomplete: incomplete,
   };
-  return { matches, possible: [], coverage, coverageIncomplete: !coverage.complete };
+}
+
+function normalizeWhyEvidence(value: unknown, fallback: WhyFileEvidence, path: string, limit: number): WhyFileEvidence {
+  try {
+    if (typeof value !== "object" || value === null || Array.isArray(value)) return fallback;
+    const raw = value as Record<string, unknown>;
+    const candidates = (Array.isArray(raw.matches) ? raw.matches.slice(0, MAX_WHY_EVIDENCE_INPUTS) : [])
+      .map((entry) => safeTripleRecord(entry))
+      .filter((entry): entry is TripleRecord => entry !== undefined);
+    const selected = selectWhyCandidates(candidates, path, limit);
+    const derived = coverageForTriples(selected.matches);
+    const possible = [
+      ...selected.possible,
+      ...(Array.isArray(raw.possible) ? raw.possible as WhyFileEvidence["possible"] : []),
+    ].slice(0, limit);
+    const supplied = raw.coverage;
+    const suppliedObject = typeof supplied === "object" && supplied !== null && !Array.isArray(supplied)
+      ? supplied as Record<string, unknown>
+      : undefined;
+    const suppliedStatus = suppliedObject?.status === "complete" || suppliedObject?.status === "truncated" || suppliedObject?.status === "unknown"
+      ? suppliedObject.status
+      : undefined;
+    const suppliedComplete = suppliedObject?.complete === true && suppliedStatus === "complete" && suppliedObject.truncatedFiles === 0;
+    let coverage = derived;
+    if (suppliedStatus !== undefined) {
+      if (suppliedStatus === "unknown" || suppliedComplete === false && suppliedStatus === "complete") {
+        coverage = { ...derived, status: "unknown", complete: false };
+      } else if (derived.status === "truncated" || suppliedStatus === "truncated") {
+        coverage = { ...derived, status: "truncated", complete: false };
+      }
+    }
+    if (raw.coverageIncomplete === true) coverage = { ...coverage, status: "unknown", complete: false };
+    if (possible.length > 0 || selected.ambiguousSuffix) coverage = { ...coverage, status: "unknown", complete: false };
+    return {
+      matches: selected.matches,
+      possible,
+      coverage,
+      coverageIncomplete: !coverage.complete || possible.length > 0 || raw.coverageIncomplete === true,
+    };
+  } catch {
+    return fallback;
+  }
 }
 
 function safeErrorResult(error: ToolExecutionError): ToolCallResult {
@@ -428,13 +631,20 @@ export function createToolRegistry(options: CreateToolRegistryOptions): McpToolR
           }
           case "why_file": {
             const input = parseWhyFileArgs(args);
-            const evidence = readMemory(() => options.memory.whyFileEvidence
-              ? options.memory.whyFileEvidence(input.path, input.limit)
-              : fallbackWhyEvidence(options, input.path, input.limit));
+            let fallback: WhyFileEvidence | undefined;
+            const getFallback = (): WhyFileEvidence => fallback ??= fallbackWhyEvidence(options, input.path, input.limit);
+            const customEvidence = options.memory.whyFileEvidence;
+            const rawEvidence = readMemory(() => customEvidence
+              ? customEvidence(input.path, input.limit)
+              : getFallback());
+            const evidence = customEvidence === undefined
+              ? rawEvidence
+              : normalizeWhyEvidence(rawEvidence, getFallback(), input.path, input.limit);
+            const possible = projectWhyPossible(evidence.possible, input.limit, options.exposure);
             return cappedResult({
               exposure: options.exposure,
               items: evidence.matches.map((triple) => projectTriple(triple, options.exposure)),
-              possible: evidence.possible,
+              possible,
               coverage: evidence.coverage,
               coverageStatus: evidence.coverage.status,
               coverageIncomplete: evidence.coverageIncomplete,

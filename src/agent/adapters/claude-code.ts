@@ -127,19 +127,27 @@ function rationaleEvent(text: string | undefined, now: number): RationaleEvent |
   return parsed?.kind === "rationale" ? parsed : undefined;
 }
 
-function appendPayload(key: string, events: AgentEvent[], coveragePaths?: readonly string[]): ParsedHookPayload {
+function appendPayload(
+  key: string,
+  events: AgentEvent[],
+  coveragePaths?: readonly string[],
+  coverageCompleteOverride?: boolean,
+): ParsedHookPayload {
   const bounded = events.slice(0, MAX_ADAPTER_EVENTS);
-  const truncatedFiles = coveragePaths === undefined ? events.length - bounded.length : coveragePaths.length - bounded.length;
-  const hasOverflow = truncatedFiles > 0;
-  const boundedCoverage = hasOverflow && coveragePaths !== undefined
+  const omitted = coveragePaths === undefined ? events.length - bounded.length : Math.max(0, coveragePaths.length - bounded.length);
+  const truncatedFiles = omitted > 0 ? omitted : undefined;
+  const hasOverflow = omitted > 0;
+  const boundedCoverage = coveragePaths !== undefined
     ? coveragePaths.slice(0, MAX_COVERAGE_PATHS)
     : undefined;
-  const coverageComplete = boundedCoverage === undefined ? undefined : coveragePaths!.length <= MAX_COVERAGE_PATHS;
-  const firstMechanismIndex = hasOverflow ? bounded.findIndex((event) => event.kind === "mechanism") : -1;
+  const coverageComplete = boundedCoverage === undefined ? undefined
+    : (coverageCompleteOverride ?? true) && coveragePaths!.length <= MAX_COVERAGE_PATHS;
+  const attachCoverage = boundedCoverage !== undefined || hasOverflow;
+  const firstMechanismIndex = attachCoverage ? bounded.findIndex((event) => event.kind === "mechanism") : -1;
   const markedEvents = bounded.map((event, index) => index === firstMechanismIndex && event.kind === "mechanism"
     ? {
       ...event,
-      ...(hasOverflow ? { truncatedFiles } : {}),
+      ...(truncatedFiles === undefined ? {} : { truncatedFiles }),
       ...(boundedCoverage === undefined ? {} : { coveragePaths: boundedCoverage }),
       ...(coverageComplete === undefined ? {} : { coveragePathsComplete: coverageComplete }),
     }
@@ -151,7 +159,7 @@ function appendPayload(key: string, events: AgentEvent[], coveragePaths?: readon
     // `event` is retained as a compatibility alias for older internal users;
     // new callers must consume the bounded list.
     event: markedEvents[0]!,
-    ...(hasOverflow ? { truncatedFiles } : {}),
+    ...(truncatedFiles === undefined ? {} : { truncatedFiles }),
     ...(boundedCoverage === undefined ? {} : {
       coveragePaths: boundedCoverage,
       coveragePathsComplete: coverageComplete,
@@ -188,6 +196,7 @@ export function parseClaudeHookPayload(raw: unknown, now = Date.now()): ParsedHo
           : [input];
         if (edits.length === 0) return undefined;
         const byPath = new Map<string, AgentEvent>();
+        let invalidCoverage = false;
         for (const edit of edits) {
           const path = nonEmptyString(edit.file_path)
             ?? nonEmptyString(edit.notebook_path)
@@ -202,15 +211,28 @@ export function parseClaudeHookPayload(raw: unknown, now = Date.now()): ParsedHo
             ?? nonEmptyString(input.new_source)
             ?? nonEmptyString(input.file_text)
             ?? nonEmptyString(input.content);
+          if (path.length > 1024) {
+            invalidCoverage = true;
+            continue;
+          }
           const identity = canonicalPath(path);
           if (!identity) continue;
+          if (identity.length > 1024) {
+            invalidCoverage = true;
+            continue;
+          }
           const event = parseAgentEvent({
             v: 1, agent: "claude-code", kind: "mechanism", ts: now, tool, path: identity, excerpt,
             provenance: "tool-observed",
           });
           if (event) byPath.set(identity, event);
         }
-        return byPath.size === 0 ? undefined : appendPayload(key, [...byPath.values()], [...byPath.keys()]);
+        return byPath.size === 0 ? undefined : appendPayload(
+          key,
+          [...byPath.values()],
+          [...byPath.keys()],
+          invalidCoverage ? false : true,
+        );
       }
       case "Stop": {
         const direct = nonEmptyString(raw.last_assistant_message);

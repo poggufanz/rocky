@@ -42,12 +42,18 @@ export function queryDictionary(records: readonly MemoryRecord[], query: string,
 }
 
 export function triplesForFile(records: readonly MemoryRecord[], path: string, limit = 5): TripleRecord[] {
-  const target = canonicalPath(path);
   return triples(records)
-    .filter((triple) => triple.mechanism.files.some((file) => {
-      const candidate = canonicalPath(file.path);
-      return candidate === target || (target.length > 0 && candidate.endsWith(`/${target}`));
-    }))
+    .filter((triple) => {
+      const platform = triple.platform ?? "unknown";
+      const target = canonicalPath(path, { platform, cwd: triple.cwd });
+      const targetDisplay = canonicalPath(path, { platform });
+      return triple.mechanism.files.some((file) => {
+        const candidate = canonicalPath(file.path, { platform, cwd: triple.cwd });
+        const candidateDisplay = canonicalPath(file.path, { platform });
+        return candidate === target || candidateDisplay === targetDisplay
+          || (targetDisplay.length > 0 && candidateDisplay.endsWith(`/${targetDisplay}`));
+      });
+    })
     .sort((a, b) => b.ts - a.ts)
     .slice(0, limit);
 }

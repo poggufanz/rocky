@@ -131,10 +131,14 @@ function evidence(hits: DictionaryHit[], support: (line: string) => void): void 
 }
 
 function fileForQuery(triple: DictionaryHit["triple"], query: string): DictionaryHit["triple"]["mechanism"]["files"][number] | undefined {
-  const normalized = canonicalPath(query);
+  const platform = triple.platform ?? "unknown";
+  const normalized = canonicalPath(query, { platform, cwd: triple.cwd });
+  const normalizedDisplay = canonicalPath(query, { platform });
   return triple.mechanism.files.find((file) => {
-    const candidate = canonicalPath(file.path);
-    return candidate === normalized || candidate.endsWith(`/${normalized}`);
+    const candidate = canonicalPath(file.path, { platform, cwd: triple.cwd });
+    const candidateDisplay = canonicalPath(file.path, { platform });
+    return candidate === normalized || candidateDisplay === normalizedDisplay
+      || candidateDisplay.endsWith(`/${normalizedDisplay}`);
   });
 }
 

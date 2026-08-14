@@ -127,7 +127,7 @@ export function parseAgentEvent(value: unknown): AgentEvent | undefined {
     case "mechanism": {
       const path = str(record.path, 1024);
       const tool = str(record.tool, 64);
-      if (!path || !tool) return undefined;
+      if (!path || !tool || typeof record.path !== "string" || record.path.length > 1024) return undefined;
       const excerpt = str(record.excerpt, MAX_EXCERPT_CHARS);
       const provenance = record.provenance === undefined ? undefined : record.provenance;
       if (provenance !== undefined && provenance !== "tool-observed" && provenance !== "git-diff-inferred" && provenance !== "unknown") {

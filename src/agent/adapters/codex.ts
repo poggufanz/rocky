@@ -98,7 +98,7 @@ function changedPaths(command: string): string[] {
   // Codex's apply_patch input is patch text, not a shell command. Match only
   // patch marker lines so arbitrary command text is never interpreted.
   const paths: string[] = [];
-  const marker = /^\s*\*\*\*\s+(?:Update|Add|Delete)\s+File:\s*(.+?)\s*$/gmu;
+  const marker = /^\s*\*\*\*\s+(?:(?:Update|Add|Delete)\s+File|Move\s+to):\s*(.+?)\s*$/gmu;
   for (const match of command.matchAll(marker)) {
     const path = match[1] === undefined ? "" : canonicalPath(match[1]);
     if (path && !paths.includes(path)) paths.push(path);
@@ -183,6 +183,7 @@ function parseModern(payload: PlainRecord, now: number): ParsedHookPayload {
         }
       }
       const byPath = new Map<string, AgentEvent>();
+      let invalidCoverage = false;
       for (const candidate of candidates) {
         const edit = candidate.edit;
         const excerpt = firstString(
@@ -204,8 +205,16 @@ function parseModern(payload: PlainRecord, now: number): ParsedHookPayload {
           input.patch,
           command,
         );
+        if (candidate.path.length > 1024) {
+          invalidCoverage = true;
+          continue;
+        }
         const identity = canonicalPath(candidate.path);
         if (!identity) continue;
+        if (identity.length > 1024) {
+          invalidCoverage = true;
+          continue;
+        }
         const event = parseAgentEvent({
           v: 1, agent: "codex", kind: "mechanism", ts: now, tool,
           path: identity, excerpt, provenance: "tool-observed",
@@ -215,24 +224,22 @@ function parseModern(payload: PlainRecord, now: number): ParsedHookPayload {
       const bounded = [...byPath.values()].slice(0, MAX_ADAPTER_EVENTS);
       if (bounded.length === 0) return undefined;
       const truncatedFiles = byPath.size - bounded.length;
-      const coveragePaths = truncatedFiles > 0 ? [...byPath.keys()].slice(0, MAX_COVERAGE_PATHS) : undefined;
-      const coveragePathsComplete = coveragePaths === undefined ? undefined : byPath.size <= MAX_COVERAGE_PATHS;
+      const coveragePaths = [...byPath.keys()].slice(0, MAX_COVERAGE_PATHS);
+      const coveragePathsComplete = !invalidCoverage && byPath.size <= MAX_COVERAGE_PATHS;
       const markedEvents = bounded.map((event, index) => index === 0
         ? {
           ...event,
           ...(truncatedFiles > 0 ? { truncatedFiles } : {}),
-          ...(coveragePaths === undefined ? {} : { coveragePaths }),
-          ...(coveragePathsComplete === undefined ? {} : { coveragePathsComplete }),
+          coveragePaths,
+          coveragePathsComplete,
         }
         : event);
       return {
         action: "append", key, events: markedEvents,
         event: markedEvents[0]!,
         ...(truncatedFiles > 0 ? { truncatedFiles } : {}),
-        ...(coveragePaths === undefined ? {} : {
-          coveragePaths,
-          coveragePathsComplete: byPath.size <= MAX_COVERAGE_PATHS,
-        }),
+        coveragePaths,
+        coveragePathsComplete,
       };
     }
     case "Stop": {

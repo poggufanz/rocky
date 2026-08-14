@@ -280,7 +280,7 @@ function defaultBaselineGit(args: string[], cwd: string): string | undefined {
   }
 }
 
-function parseBaselineNumstat(value: string | undefined): Array<{ path: string; plusMinus: [number, number] }> | undefined {
+function parseBaselineNumstat(value: string | undefined, cwd?: string): Array<{ path: string; plusMinus: [number, number] }> | undefined {
   if (value === undefined) return undefined;
   const files: Array<{ path: string; plusMinus: [number, number] }> = [];
   const seen = new Set<string>();
@@ -288,14 +288,18 @@ function parseBaselineNumstat(value: string | undefined): Array<{ path: string; 
   for (const line of lines) {
     const match = /^\s*(\d+|-)\t(\d+|-)\t(.+?)\s*$/u.exec(line);
     if (!match) return undefined;
-    const path = match[3] === undefined ? "" : canonicalPath(match[3]);
-    if (!path || seen.has(path)) continue;
+    const rawPath = match[3] === undefined ? "" : match[3];
+    if (rawPath.length > 1024) return undefined;
+    const identity = canonicalPath(rawPath, { cwd });
+    const displayPath = canonicalPath(rawPath);
+    if (!identity || !displayPath || displayPath.length > 1024) return undefined;
+    if (seen.has(identity)) continue;
     if (match[1] === "-" || match[2] === "-") return undefined;
     const added = match[1] === "-" ? 0 : Number(match[1]);
     const removed = match[2] === "-" ? 0 : Number(match[2]);
     if (!Number.isSafeInteger(added) || added < 0 || !Number.isSafeInteger(removed) || removed < 0) continue;
-    seen.add(path);
-    files.push({ path, plusMinus: [added, removed] });
+    seen.add(identity);
+    files.push({ path: displayPath, plusMinus: [added, removed] });
     if (files.length > MAX_BASELINE_FILES) return undefined;
   }
   return files;
@@ -309,29 +313,31 @@ function captureTurnBaseline(cwd: string | undefined, deps: AgentHookDeps): Turn
     const unstaged = git(["diff", "--numstat"], target);
     const staged = git(["diff", "--cached", "--numstat"], target);
     const untracked = git(["ls-files", "--others", "--exclude-standard"], target);
-    const unstagedFiles = parseBaselineNumstat(unstaged);
-    const stagedFiles = parseBaselineNumstat(staged);
+    const unstagedFiles = parseBaselineNumstat(unstaged, target);
+    const stagedFiles = parseBaselineNumstat(staged, target);
     if (!head || unstagedFiles === undefined || stagedFiles === undefined || untracked === undefined) return { status: "unknown" };
-    const merged = new Map<string, [number, number]>();
+    const merged = new Map<string, { path: string; plusMinus: [number, number] }>();
     for (const file of [...unstagedFiles, ...stagedFiles]) {
-      const path = canonicalPath(file.path);
-      if (!path) continue;
-      const previous = merged.get(path);
-      const additions = previous === undefined ? file.plusMinus[0] : previous[0] + file.plusMinus[0];
-      const removals = previous === undefined ? file.plusMinus[1] : previous[1] + file.plusMinus[1];
+      const identity = canonicalPath(file.path, { cwd: target });
+      if (!identity) continue;
+      const previous = merged.get(identity);
+      const additions = previous === undefined ? file.plusMinus[0] : previous.plusMinus[0] + file.plusMinus[0];
+      const removals = previous === undefined ? file.plusMinus[1] : previous.plusMinus[1] + file.plusMinus[1];
       if (!Number.isSafeInteger(additions) || additions < 0 || !Number.isSafeInteger(removals) || removals < 0) return { status: "unknown" };
-      merged.set(path, previous === undefined
-        ? [...file.plusMinus] as [number, number]
-        : [additions, removals]);
+      merged.set(identity, previous === undefined
+        ? { path: file.path, plusMinus: [...file.plusMinus] as [number, number] }
+        : { path: previous.path, plusMinus: [additions, removals] });
     }
     if (merged.size > MAX_BASELINE_FILES) return { status: "unknown" };
-    const files = [...merged.entries()].map(([path, plusMinus]) => ({ path, plusMinus }));
-    const seen = new Set(files.map((file) => file.path));
+    const files = [...merged.values()];
+    const seen = new Set(merged.keys());
     for (const path of untracked.split(/\r?\n/u).map((line) => line.trim()).filter(Boolean)) {
-      const identity = canonicalPath(path);
-      if (!identity || seen.has(identity)) continue;
+      if (path.length > 1024) return { status: "unknown" };
+      const identity = canonicalPath(path, { cwd: target });
+      const displayPath = canonicalPath(path);
+      if (!identity || !displayPath || seen.has(identity)) continue;
       seen.add(identity);
-      files.push({ path: identity, plusMinus: [0, 0] });
+      files.push({ path: displayPath, plusMinus: [0, 0] });
       if (files.length > MAX_BASELINE_FILES) return { status: "unknown" };
     }
     return {
