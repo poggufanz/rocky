@@ -333,27 +333,20 @@ test("recordTripleOnce keeps a fresh zero-byte lock busy", (t) => {
   assert.equal(existsSync(paths.memory), false);
 });
 
-test("recordTripleOnce keeps stale malformed triple lock fail-closed", (t) => {
+test("recordTripleOnce safely recovers a stale malformed triple lock", (t) => {
   const paths = freshPaths(t);
   const lock = `${paths.memory}.triple.lock`;
   writeFileSync(lock, "not-owner-metadata", { mode: 0o600 });
   const stale = new Date(Date.now() - 11 * 60 * 1000);
   utimesSync(lock, stale, stale);
-  const originalNow = Date.now;
-  const base = originalNow();
-  let first = true;
-  Date.now = () => first ? (first = false, base) : base + 6_000;
-  try {
-    assert.throws(() => recordTripleOnce({
-      agent: "codex",
-      cwd: paths.home,
-      mechanism: { files: [{ path: "malformed.ts", plusMinus: [1, 1], props: [] }], truncatedFiles: 0 },
-    }, "malformed-triple-lock", paths), /triple lock is busy/u);
-  } finally {
-    Date.now = originalNow;
-  }
-  assert.equal(readFileSync(lock, "utf8"), "not-owner-metadata");
-  assert.equal(existsSync(paths.memory), false);
+  const result = recordTripleOnce({
+    agent: "codex",
+    cwd: paths.home,
+    mechanism: { files: [{ path: "malformed.ts", plusMinus: [1, 1], props: [] }], truncatedFiles: 0 },
+  }, "malformed-triple-lock", paths);
+  assert.equal(result.appended, true);
+  assert.equal(existsSync(lock), false);
+  assert.equal(loadMemory(paths.memory).filter((record) => record.kind === "triple").length, 1);
 });
 
 test("recordTripleOnce serializes check and append across processes", { timeout: 15_000 }, async (t) => {

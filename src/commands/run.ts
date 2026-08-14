@@ -4,8 +4,9 @@
  * Runs the command through a shell, streaming stdout/stderr untouched.
  * On failure: fingerprints stderr, checks memory for this exact error,
  * and if Rocky has heard it before (and knows what fixed it) he says so.
- * On success: if the same program failed recently in this directory,
- * this success is recorded as the fix.
+ * On success: if the same reliable command identity failed recently in this
+ * directory, this success is recorded as the confirmed fix. Same-program-only
+ * evidence remains a possible association.
  */
 
 import { fingerprint } from "../core/fingerprint.js";
@@ -14,10 +15,12 @@ import { resolveRockyPaths } from "../core/state-paths.js";
 import {
   loadMemory,
   recordFailure,
-  recordFix,
+  resolveFixOnSuccess,
+  type ResolveFixOptions,
+  type ResolveFixResult,
   type MemoryRecord,
 } from "../core/memory.js";
-import { findByFingerprint, fixFromElsewhere, getFix, recentUnresolvedFailures } from "../core/memory-query.js";
+import { findByFingerprint, fixFromElsewhere, getFix } from "../core/memory-query.js";
 import { ago, detail, elapsed, say } from "../ui/rocky.js";
 import { safeTerminalLine } from "../ui/sanitize.js";
 
@@ -116,29 +119,24 @@ function onFailure(cmd: string, result: ExecResult): void {
 }
 
 /**
- * Links this success as the fix for any unresolved failure of the same
- * program in `cwd` within the link window, and speaks about it unless
- * `quiet`. Shared by `run`'s onSuccess and `watch`'s success path so both
- * commands apply the exact same linking rule and say the exact same
- * sentence about it.
+ * Atomically links this success to unresolved failures in `cwd`: exact
+ * reliable identity is a confirmed fix, while same-program-only evidence is
+ * retained as a possible association. Shared by run and watch so attribution,
+ * pending reconciliation, and the selected window cannot drift.
  */
 export function linkFixOnSuccess(
-  memory: MemoryRecord[],
   cmd: string,
   cwd: string,
   quiet = false,
-): void {
-  const unresolved = recentUnresolvedFailures(memory, cmd, { cwd });
-  if (unresolved.length > 0) {
-    recordFix(cmd, unresolved, cwd);
-    if (!quiet && unresolved.some((link) => link.confidence === "confirmed")) {
-      say("command works now. you fix it. I remember the fix. good good good.");
-    }
+  options: ResolveFixOptions = {},
+): ResolveFixResult {
+  const result = resolveFixOnSuccess(cmd, cwd, options);
+  if (!quiet && result.confirmedResolved > 0) {
+    say("command works now. you fix it. I remember the fix. good good good.");
   }
+  return result;
 }
 
 function onSuccess(cmd: string): void {
-  const memory = readMemory();
-  if (memory === undefined) return;
-  linkFixOnSuccess(memory, cmd, process.cwd());
+  linkFixOnSuccess(cmd, process.cwd());
 }

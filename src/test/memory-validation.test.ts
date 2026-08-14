@@ -37,6 +37,20 @@ test("loader dual-reads an exact reliable historical command as confirmed", () =
   assert.equal(records[0]?.kind === "failure" ? records[0].resolvedBy : undefined, "x1");
 });
 
+test("legacy duplicate fixes preserve the first confirmed resolution provenance", () => {
+  const root = mkdtempSync(join(tmpdir(), "rocky-legacy-duplicate-fix-"));
+  const file = join(root, "memory.jsonl");
+  const failure = {
+    kind: "failure", id: "f1", ts: 1, cwd: "/work", cmd: "npm run build", exitCode: 1,
+    fingerprint: "abc", signature: ["failed"], excerpt: "failed",
+  };
+  const first = { kind: "fix", id: "x1", ts: 2, cwd: "/work", cmd: "npm run build", failureIds: ["f1"] };
+  const duplicate = { kind: "fix", id: "x2", ts: 3, cwd: "/work", cmd: "npm run build", failureIds: ["f1"] };
+  writeFileSync(file, `${JSON.stringify(failure)}\n${JSON.stringify(first)}\n${JSON.stringify(duplicate)}\n`);
+  const records = loadMemory(file);
+  assert.equal(records[0]?.kind === "failure" ? records[0].resolvedBy : undefined, "x1");
+});
+
 test("loader accepts a fix's links array and drops a fix with a malformed link", () => {
   const root = mkdtempSync(join(tmpdir(), "rocky-links-"));
   const file = join(root, "memory.jsonl");

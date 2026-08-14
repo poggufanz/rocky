@@ -27,13 +27,13 @@ import {
 } from "../core/hook-block.js";
 import { resolveRockyPaths } from "../core/state-paths.js";
 import {
-  clearPendingIfResolved,
   loadMemory,
-  recordFix,
   recordHookFailure,
+  resolveFixOnSuccess,
+  type ResolveFixOptions,
   type MemoryRecord,
 } from "../core/memory.js";
-import { findByFingerprint, fixFromElsewhere, getFix, recentUnresolvedFailures } from "../core/memory-query.js";
+import { findByFingerprint, fixFromElsewhere, getFix } from "../core/memory-query.js";
 import {
   atomicWriteBytesIfUnchanged,
   inspectFileTransaction,
@@ -70,7 +70,12 @@ export function hookFail(cmd: string, exitCode: number, cwd: string): number {
 
   const memory = readMemory();
 
-  recordHookFailure(cmd, exitCode, cwd);
+  try {
+    recordHookFailure(cmd, exitCode, cwd);
+  } catch {
+    sayTty("I cannot write memory. this one I forget.");
+    detailTty(`memory: ${resolveRockyPaths().memory}`);
+  }
 
   if (memory === undefined) return 0; // unreadable memory: recorded, but nothing to recall
 
@@ -110,19 +115,17 @@ export function deepMemoryHint(cmd: string): string | undefined {
 }
 
 /** A command succeeded while the pending flag existed. Try to link a fix. */
-export function hookSuccess(cmd: string, cwd: string): number {
-  const memory = readMemory();
-  if (memory === undefined) return 0;
-  const unresolved = recentUnresolvedFailures(memory, cmd, { cwd });
-  if (unresolved.length > 0) {
-    recordFix(cmd, unresolved, cwd);
-    if (unresolved.some((link) => link.confidence === "confirmed")) {
+export function hookSuccess(cmd: string, cwd: string, options: ResolveFixOptions = {}): number {
+  try {
+    const result = resolveFixOnSuccess(cmd, cwd, options);
+    if (result.confirmedResolved > 0) {
       sayTty("command works now. you fix it. I remember the fix. good good good.");
     }
+  } catch {
+    // Detached bookkeeping must never become the hooked command's outcome.
+    sayTty("I cannot write memory. this one I forget.");
+    detailTty(`memory: ${resolveRockyPaths().memory}`);
   }
-  // Re-read: the fix just recorded above changes resolution state.
-  const latest = readMemory();
-  if (latest !== undefined) clearPendingIfResolved(latest);
   return 0;
 }
 

@@ -684,11 +684,13 @@ touch marker1
 n
 touch marker2
 y
-ls /rocky-not-here
+test -f "$TMP/fix-ready"
 sleep 1
-ls /rocky-not-here
+test -f "$TMP/fix-ready"
 sleep 1
-ls .
+touch "$TMP/fix-ready"
+sleep 1
+test -f "$TMP/fix-ready"
 sleep 1
 exit
 EOS

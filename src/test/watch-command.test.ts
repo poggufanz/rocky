@@ -350,6 +350,7 @@ test("watch's success path links a fix exactly like run's onSuccess, using the s
     signature: ["echo all-good"], excerpt: "irrelevant", origin: "watch",
   };
   writeFileSync(join(home, "memory.jsonl"), `${JSON.stringify(failure)}\n`, "utf8");
+  writeFileSync(join(home, "pending"), "", "utf8");
   const notifier = fakeNotifier();
 
   const { result, stderr } = await withRockyHome(home, () =>
@@ -357,6 +358,7 @@ test("watch's success path links a fix exactly like run's onSuccess, using the s
 
   assert.equal(result, 0);
   assert.match(stderr, /command works now\. you fix it\. I remember the fix\. good good good\./);
+  assert.equal(existsSync(join(home, "pending")), false, "run/watch shared resolver clears pending atomically");
 });
 
 test("an unwritable watch log speaks watch-log-unwritable but still records the failure", async (t) => {

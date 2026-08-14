@@ -334,7 +334,10 @@ export function loadMemory(path = resolveRockyPaths().memory): MemoryRecord[] {
     if (record.kind !== "fix") continue;
     for (const failureId of record.failureIds) {
       const failure = byId.get(failureId);
-      if (failure?.kind !== "failure") continue;
+      // Resolution is a one-way transition. Legacy duplicate fix lines stay
+      // readable, but a later duplicate must not rewrite provenance or make
+      // resolvedBy depend on append order beyond the first confirmed event.
+      if (failure?.kind !== "failure" || failure.resolvedBy !== undefined) continue;
       const failureIdentity = failure.identityV === 1 && failure.commandIdentity !== undefined
         ? validateStoredIdentity(failure.cmd, failure.commandIdentity, failure.identityReliable, failure.platform)
         : commandIdentity(failure.cmd, { platform: failure.platform ?? "unknown" });

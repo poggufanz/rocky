@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -35,6 +35,7 @@ test("unrelated successful npm task is not suggested as confirmed fix", (t) => {
   assert.equal(lines.some((record) => record.kind === "fix"), false);
   const association = lines.find((record) => record.kind === "association");
   assert.deepEqual(association.candidateFailureIds.length, 1);
+  assert.equal(existsSync(join(home, "pending")), true, "possible association must not clear pending");
 
   const stats = spawnSync(process.execPath, [cli, "stats"], { cwd: project, env, encoding: "utf8" });
   assert.equal(stats.status, 0);

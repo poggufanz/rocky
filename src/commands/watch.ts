@@ -186,8 +186,7 @@ function plainFacts(result: ExecResult, logPath: string | undefined): void {
 
 function onWatchSuccess(cmd: string, cwd: string, quiet: boolean, result: ExecResult): void {
   if (!quiet) say(outcomeLine(true, result.durationMs));
-  const memory = readMemory(quiet);
-  if (memory !== undefined) linkFixOnSuccess(memory, cmd, cwd, quiet);
+  linkFixOnSuccess(cmd, cwd, quiet);
 }
 
 /**

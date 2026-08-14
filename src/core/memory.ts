@@ -6,10 +6,12 @@ import {
   constants,
   fchmodSync,
   fstatSync,
+  linkSync,
   lstatSync,
   mkdirSync,
   openSync,
   readSync,
+  readdirSync,
   rmSync,
   unlinkSync,
   writeFileSync,
@@ -18,12 +20,14 @@ import {
 } from "node:fs";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { Buffer } from "node:buffer";
+import { performance } from "node:perf_hooks";
+import { basename, dirname, join } from "node:path";
 import { commandFingerprint, commandIdentity, fingerprint, normalizeLine, signatureLines } from "./fingerprint.js";
 import { resolveRockyPaths } from "./state-paths.js";
 import type { RockyPaths } from "./state-paths.js";
 import { loadMemory, MAX_MEMORY_LINE_BYTES } from "./memory-read.js";
 import type { AssociationRecord, FailureRecord, FixRecord, MemoryRecord, NoteRecord, TripleRecord } from "./memory-read.js";
-import type { UnresolvedLink } from "./memory-query.js";
+import { LINK_WINDOW_MS, recentUnresolvedFailures, type UnresolvedLink } from "./memory-query.js";
 
 export type { AssociationRecord, FailureRecord, FixRecord, MemoryRecord, NoteRecord, TripleFile, TripleRecord } from "./memory-read.js";
 export { loadMemory, parseMemoryRecord, MAX_MEMORY_LINE_BYTES } from "./memory-read.js";
@@ -51,7 +55,7 @@ function ensureDir(home: string): void {
   }
 }
 
-function append(record: MemoryRecord, paths = resolveRockyPaths()): void {
+function appendUnlocked(record: MemoryRecord, paths: RockyPaths): void {
   const line = `${JSON.stringify(record)}\n`;
   const encoded = Buffer.from(line, "utf8");
   if (encoded.byteLength > MAX_MEMORY_LINE_BYTES) {
@@ -130,19 +134,28 @@ function sameTripleIdentity(left: Stats, right: Stats): boolean {
     && left.dev === right.dev && left.ino === right.ino;
 }
 
+function differentTripleIdentity(left: Stats, right: Stats): boolean {
+  return tripleIdentityKnown(left) && tripleIdentityKnown(right) && !sameTripleIdentity(left, right);
+}
+
+function lockReadFlags(): number {
+  const noFollow = process.platform === "win32" || !("O_NOFOLLOW" in constants) ? 0 : constants.O_NOFOLLOW;
+  const nonblock = process.platform === "win32" || !("O_NONBLOCK" in constants) ? 0 : constants.O_NONBLOCK;
+  return constants.O_RDONLY | noFollow | nonblock;
+}
+
 function readEmptyTripleLock(path: string): Stats | undefined {
   let fd = -1;
   try {
     const initial = lstatSync(path);
     if (!initial.isFile() || initial.isSymbolicLink() || initial.size !== 0) return undefined;
-    const noFollow = process.platform === "win32" ? 0 : constants.O_NOFOLLOW;
-    fd = openSync(path, constants.O_RDONLY | noFollow);
+    fd = openSync(path, lockReadFlags());
     const opened = fstatSync(fd);
     if (!opened.isFile() || opened.isSymbolicLink() || opened.size !== 0
-      || !sameTripleIdentity(initial, opened)) return undefined;
+      || differentTripleIdentity(initial, opened)) return undefined;
     const after = fstatSync(fd);
     if (!after.isFile() || after.isSymbolicLink() || after.size !== 0
-      || !sameTripleIdentity(opened, after)) return undefined;
+      || differentTripleIdentity(opened, after)) return undefined;
     return after;
   } catch {
     return undefined;
@@ -153,17 +166,22 @@ function readEmptyTripleLock(path: string): Stats | undefined {
   }
 }
 
-function reclaimStaleEmptyTripleLock(path: string, now = Date.now()): boolean {
-  const initial = readEmptyTripleLock(path);
-  if (!initial || !Number.isFinite(initial.mtimeMs) || now - initial.mtimeMs < TRIPLE_LOCK_STALE_MS) return false;
-  const current = readEmptyTripleLock(path);
-  if (!current || !Number.isFinite(current.mtimeMs) || now - current.mtimeMs < TRIPLE_LOCK_STALE_MS
-    || !sameTripleIdentity(initial, current)) return false;
+function staleEmptyTripleLock(path: string, now = Date.now()): Stats | undefined {
+  const stats = readEmptyTripleLock(path);
+  if (!stats || !Number.isFinite(stats.mtimeMs) || now - stats.mtimeMs < TRIPLE_LOCK_STALE_MS) return undefined;
+  return stats;
+}
+
+function parseTripleLockMetadata(bytes: Buffer): TripleLockMetadata | undefined {
   try {
-    unlinkSync(path);
-    return true;
+    const value: unknown = JSON.parse(bytes.toString("utf8"));
+    if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+    const record = value as Record<string, unknown>;
+    if (typeof record.pid !== "number" || !Number.isSafeInteger(record.pid) || record.pid <= 0 ||
+        typeof record.token !== "string" || !/^[a-f0-9]{32}$/u.test(record.token)) return undefined;
+    return { pid: record.pid, token: record.token };
   } catch {
-    return false;
+    return undefined;
   }
 }
 
@@ -172,20 +190,16 @@ function readTripleLock(path: string): { metadata: TripleLockMetadata; stats: St
   try {
     const initial = lstatSync(path);
     if (!initial.isFile() || initial.isSymbolicLink() || initial.size === 0 || initial.size > TRIPLE_LOCK_MAX_BYTES) return undefined;
-    const noFollow = process.platform === "win32" ? 0 : constants.O_NOFOLLOW;
-    fd = openSync(path, constants.O_RDONLY | noFollow);
+    fd = openSync(path, lockReadFlags());
     const opened = fstatSync(fd);
-    if (!opened.isFile() || opened.isSymbolicLink() || opened.size === 0 || opened.size > TRIPLE_LOCK_MAX_BYTES) return undefined;
+    if (!opened.isFile() || opened.isSymbolicLink() || opened.size === 0 || opened.size > TRIPLE_LOCK_MAX_BYTES
+      || differentTripleIdentity(initial, opened)) return undefined;
     const bytes = Buffer.alloc(TRIPLE_LOCK_MAX_BYTES + 1);
     const count = readSync(fd, bytes, 0, bytes.length, 0);
     const after = fstatSync(fd);
-    if (count !== after.size || after.size > TRIPLE_LOCK_MAX_BYTES) return undefined;
-    const value: unknown = JSON.parse(bytes.subarray(0, count).toString("utf8"));
-    if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
-    const record = value as Record<string, unknown>;
-    if (typeof record.pid !== "number" || !Number.isSafeInteger(record.pid) || record.pid <= 0 ||
-        typeof record.token !== "string" || !/^[a-f0-9]{32}$/u.test(record.token)) return undefined;
-    return { metadata: { pid: record.pid, token: record.token }, stats: after };
+    if (count !== after.size || after.size > TRIPLE_LOCK_MAX_BYTES || differentTripleIdentity(opened, after)) return undefined;
+    const metadata = parseTripleLockMetadata(bytes.subarray(0, count));
+    return metadata ? { metadata, stats: after } : undefined;
   } catch {
     return undefined;
   } finally {
@@ -249,15 +263,14 @@ function tryTripleLock(path: string): TripleLock | undefined {
 function releaseTripleLock(lock: TripleLock): void {
   const current = readTripleLock(lock.path);
   if (!current || current.metadata.pid !== process.pid || current.metadata.token !== lock.token) return;
-  if (Number.isFinite(lock.stats.dev) && Number.isFinite(lock.stats.ino) &&
-      Number.isFinite(current.stats.dev) && Number.isFinite(current.stats.ino) &&
-      (lock.stats.dev !== current.stats.dev || lock.stats.ino !== current.stats.ino)) return;
+  if (differentTripleIdentity(lock.stats, current.stats)) return;
   try { unlinkSync(lock.path); } catch { /* leave state for conservative recovery */ }
 }
 
 function acquireTripleLock(paths: RockyPaths): TripleLock {
   const path = `${paths.memory}${TRIPLE_LOCK_SUFFIX}`;
-  const deadline = Date.now() + TRIPLE_LOCK_WAIT_MS;
+  const wallStarted = Date.now();
+  const monotonicStarted = performance.now();
   for (;;) {
     const lock = tryTripleLock(path);
     if (lock) return lock;
@@ -266,25 +279,175 @@ function acquireTripleLock(paths: RockyPaths): TripleLock {
       const alive = tripleOwnerAlive(current.metadata.pid);
       if (alive === undefined) throw new Error("Rocky triple lock owner cannot be verified");
       if (!alive) {
-        try {
-          const verify = readTripleLock(path);
-          if (verify && verify.metadata.pid === current.metadata.pid && verify.metadata.token === current.metadata.token &&
-              (!Number.isFinite(current.stats.dev) || !Number.isFinite(verify.stats.dev) ||
-                (current.stats.dev === verify.stats.dev && current.stats.ino === verify.stats.ino))) unlinkSync(path);
-        } catch { /* fail closed */ }
+        const reclaimed = reclaimTripleLock(path, current.stats, (claimPath) => {
+          const verify = readTripleLock(claimPath);
+          return verify !== undefined && verify.metadata.pid === current.metadata.pid &&
+            verify.metadata.token === current.metadata.token && sameTripleIdentity(current.stats, verify.stats) &&
+            tripleOwnerAlive(verify.metadata.pid) === false;
+        });
+        if (reclaimed) continue;
       }
-    } else if (reclaimStaleEmptyTripleLock(path)) {
-      continue;
     } else {
+      const now = Date.now();
+      const staleEmpty = staleEmptyTripleLock(path, now);
+      if (staleEmpty && reclaimTripleLock(path, staleEmpty, (claimPath) => {
+        const verify = staleEmptyTripleLock(claimPath, now);
+        return verify !== undefined && sameTripleIdentity(staleEmpty, verify);
+      })) continue;
+
+      const staleMalformed = staleMalformedTripleLock(path, now);
+      if (staleMalformed && reclaimTripleLock(path, staleMalformed, (claimPath) => {
+        const verify = staleMalformedTripleLock(claimPath, now);
+        return verify !== undefined && sameTripleIdentity(staleMalformed, verify);
+      })) continue;
+
       try {
         if (lstatSync(path).isSymbolicLink()) throw new Error("Rocky triple lock target is unsafe");
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
       }
     }
-    if (Date.now() >= deadline) throw new Error("Rocky triple lock is busy");
+    if (Date.now() - wallStarted >= TRIPLE_LOCK_WAIT_MS ||
+        performance.now() - monotonicStarted >= TRIPLE_LOCK_WAIT_MS) {
+      throw new Error("Rocky triple lock is busy");
+    }
     const signal = new Int32Array(new SharedArrayBuffer(4));
     Atomics.wait(signal, 0, 0, 5);
+  }
+}
+
+/** A bounded, stable read of an old non-empty lock whose metadata is torn. */
+function staleMalformedTripleLock(path: string, now = Date.now()): Stats | undefined {
+  let fd = -1;
+  try {
+    const initial = lstatSync(path);
+    if (!initial.isFile() || initial.isSymbolicLink() || initial.size === 0 || initial.size > TRIPLE_LOCK_MAX_BYTES ||
+        !Number.isFinite(initial.mtimeMs) || now - initial.mtimeMs < TRIPLE_LOCK_STALE_MS) return undefined;
+    fd = openSync(path, lockReadFlags());
+    const opened = fstatSync(fd);
+    if (!opened.isFile() || opened.isSymbolicLink() || opened.size === 0 || opened.size > TRIPLE_LOCK_MAX_BYTES ||
+        differentTripleIdentity(initial, opened)) return undefined;
+    const bytes = Buffer.alloc(TRIPLE_LOCK_MAX_BYTES + 1);
+    const count = readSync(fd, bytes, 0, bytes.length, 0);
+    const after = fstatSync(fd);
+    if (count !== after.size || after.size === 0 || after.size > TRIPLE_LOCK_MAX_BYTES ||
+        differentTripleIdentity(opened, after) || !Number.isFinite(after.mtimeMs) ||
+        now - after.mtimeMs < TRIPLE_LOCK_STALE_MS) return undefined;
+    return parseTripleLockMetadata(bytes.subarray(0, count)) === undefined ? after : undefined;
+  } catch {
+    return undefined;
+  } finally {
+    if (fd >= 0) {
+      try { closeSync(fd); } catch { /* best effort */ }
+    }
+  }
+}
+
+/**
+ * Delete only the inode we inspected. A unique hard-link claim makes
+ * concurrent reclaimers observable through `nlink`: at most one can see the
+ * original pathname plus its sole claim. Losing reclaimers never unlink the
+ * pathname, so they cannot delete a replacement owner's lock.
+ */
+function reclaimTripleLock(
+  path: string,
+  expected: Stats,
+  validateClaim: (claimPath: string) => boolean,
+): boolean {
+  if (!tripleIdentityKnown(expected)) return false;
+  pruneDeadReclaimClaims(path, expected);
+  const claimPath = `${path}.reclaim.${process.pid}.${randomBytes(TRIPLE_LOCK_TOKEN_BYTES).toString("hex")}`;
+  let claimed = false;
+  try {
+    linkSync(path, claimPath);
+    claimed = true;
+    const claim = lstatSync(claimPath);
+    const current = lstatSync(path);
+    if (!claim.isFile() || claim.isSymbolicLink() || !current.isFile() || current.isSymbolicLink() ||
+        !sameTripleIdentity(expected, claim) || !sameTripleIdentity(claim, current) ||
+        claim.nlink !== 2 || current.nlink !== 2 || !validateClaim(claimPath)) return false;
+
+    // Re-check after reading metadata. Another reclaimer may have linked the
+    // inode meanwhile; in that case this process leaves the pathname alone.
+    const verifiedClaim = lstatSync(claimPath);
+    const verifiedCurrent = lstatSync(path);
+    if (!sameTripleIdentity(expected, verifiedClaim) || !sameTripleIdentity(verifiedClaim, verifiedCurrent) ||
+        verifiedClaim.nlink !== 2 || verifiedCurrent.nlink !== 2) return false;
+    unlinkSync(path);
+    return true;
+  } catch {
+    return false;
+  } finally {
+    if (claimed) {
+      try { unlinkSync(claimPath); } catch { /* a later dead-claim sweep can recover it */ }
+    }
+  }
+}
+
+/** Remove only hard-link claims whose owning reclaimer is definitely dead. */
+function pruneDeadReclaimClaims(path: string, expected: Stats): void {
+  const directory = dirname(path);
+  const prefix = `${basename(path)}.reclaim.`;
+  let names: string[];
+  try {
+    names = readdirSync(directory);
+  } catch {
+    return;
+  }
+  for (const name of names) {
+    if (!name.startsWith(prefix)) continue;
+    const match = /^(\d+)\.([a-f0-9]{32})$/u.exec(name.slice(prefix.length));
+    if (!match) continue;
+    const pid = Number(match[1]);
+    if (!Number.isSafeInteger(pid) || pid <= 0 || tripleOwnerAlive(pid) !== false) continue;
+    const claimPath = join(directory, name);
+    try {
+      const claim = lstatSync(claimPath);
+      if (!claim.isFile() || claim.isSymbolicLink() || !sameTripleIdentity(expected, claim)) continue;
+      unlinkSync(claimPath);
+    } catch {
+      // A concurrent sweep or namespace change is a conservative no-op.
+    }
+  }
+}
+
+/**
+ * One cooperative critical section for every mutation of a memory file.
+ * `records` is loaded only after ownership is established; `reload()` keeps
+ * multi-step decisions (fix append then pending reconciliation) on that same
+ * owned state. The historical `.triple.lock` name is retained so interrupted
+ * v0.5 writers remain recoverable after upgrade.
+ */
+export interface MemoryTransaction {
+  readonly paths: RockyPaths;
+  readonly records: readonly MemoryRecord[];
+  append(record: MemoryRecord): void;
+  reload(): readonly MemoryRecord[];
+}
+
+export function withMemoryTransaction<T>(
+  operation: (transaction: MemoryTransaction) => T,
+  paths: RockyPaths = resolveRockyPaths(),
+): T {
+  ensureDir(paths.home);
+  const lock = acquireTripleLock(paths);
+  let records = loadMemory(paths.memory);
+  const transaction: MemoryTransaction = {
+    paths,
+    get records() { return records; },
+    append(record) {
+      appendUnlocked(record, paths);
+      records = [...records, record];
+    },
+    reload() {
+      records = loadMemory(paths.memory);
+      return records;
+    },
+  };
+  try {
+    return operation(transaction);
+  } finally {
+    releaseTripleLock(lock);
   }
 }
 
@@ -295,8 +458,10 @@ export function recordFailure(cmd: string, exitCode: number, stderr: string): Fa
     fingerprint: fingerprint(stderr, cmd, exitCode), signature: signatureLines(stderr), excerpt: lastLines(stderr, 4),
     commandIdentity: identity.value, identityV: identity.version, identityReliable: identity.reliable, platform: process.platform,
   };
-  append(rec);
-  touchPending();
+  withMemoryTransaction((transaction) => {
+    transaction.append(rec);
+    touchPendingUnlocked(transaction.paths);
+  });
   return rec;
 }
 
@@ -307,8 +472,10 @@ export function recordWatchFailure(cmd: string, exitCode: number, stderr: string
     fingerprint: fingerprint(stderr, cmd, exitCode), signature: signatureLines(stderr), excerpt: lastLines(stderr, 4), origin: "watch",
     commandIdentity: identity.value, identityV: identity.version, identityReliable: identity.reliable, platform: process.platform,
   };
-  append(rec);
-  touchPending();
+  withMemoryTransaction((transaction) => {
+    transaction.append(rec);
+    touchPendingUnlocked(transaction.paths);
+  });
   return rec;
 }
 
@@ -322,13 +489,24 @@ export function recordWatchFailure(cmd: string, exitCode: number, stderr: string
  */
 export const MAX_FIX_LINKS = 200;
 
-export function recordFix(cmd: string, links: readonly UnresolvedLink[], cwd = process.cwd()): FixRecord | AssociationRecord {
+interface WrittenFixRecords {
+  fix?: FixRecord;
+  association?: AssociationRecord;
+}
+
+function appendFixRecordsUnlocked(
+  transaction: MemoryTransaction,
+  cmd: string,
+  links: readonly UnresolvedLink[],
+  cwd: string,
+  now: number,
+): WrittenFixRecords {
   const identity = commandIdentity(cmd);
   const chosen = links.slice(-MAX_FIX_LINKS);
   const confirmed = chosen.filter((link) => link.confidence === "confirmed");
   const possible = chosen.filter((link) => link.confidence === "possible");
   const metadata = {
-    ts: Date.now(), cwd, cmd,
+    ts: now, cwd, cmd,
     commandIdentity: identity.value, identityV: identity.version, identityReliable: identity.reliable, platform: process.platform,
   } as const;
 
@@ -345,7 +523,7 @@ export function recordFix(cmd: string, links: readonly UnresolvedLink[], cwd = p
       selected = selected.slice(Math.ceil(selected.length / 2));
       fix = buildFix();
     }
-    append(fix);
+    transaction.append(fix);
   }
   let association: AssociationRecord | undefined;
   if (possible.length > 0) {
@@ -360,11 +538,58 @@ export function recordFix(cmd: string, links: readonly UnresolvedLink[], cwd = p
       selected = selected.slice(Math.ceil(selected.length / 2));
       association = buildAssociation();
     }
-    append(association);
+    transaction.append(association);
   }
-  if (fix) return fix;
-  if (association) return association;
-  throw new Error("Rocky fix attribution requires at least one link");
+  return {
+    ...(fix === undefined ? {} : { fix }),
+    ...(association === undefined ? {} : { association }),
+  };
+}
+
+export function recordFix(cmd: string, links: readonly UnresolvedLink[], cwd = process.cwd()): FixRecord | AssociationRecord {
+  return withMemoryTransaction((transaction) => {
+    const written = appendFixRecordsUnlocked(transaction, cmd, links, cwd, Date.now());
+    if (written.fix) return written.fix;
+    if (written.association) return written.association;
+    throw new Error("Rocky fix attribution requires at least one link");
+  });
+}
+
+export interface ResolveFixOptions {
+  /** Stable test/selected-window clock. Normal callers capture `Date.now()` after locking. */
+  now?: number;
+  windowMs?: number;
+}
+
+export interface ResolveFixResult extends WrittenFixRecords {
+  confirmedResolved: number;
+  possibleAssociated: number;
+}
+
+/** Reload, attribute, append, and reconcile pending under one per-memory lock. */
+export function resolveFixOnSuccess(
+  cmd: string,
+  cwd = process.cwd(),
+  options: ResolveFixOptions = {},
+): ResolveFixResult {
+  const paths = resolveRockyPaths();
+  return withMemoryTransaction((transaction) => {
+    const now = options.now ?? Date.now();
+    const windowMs = options.windowMs ?? LINK_WINDOW_MS;
+    const links = recentUnresolvedFailures(transaction.records, cmd, { cwd, now, windowMs });
+    if (links.length === 0) return { confirmedResolved: 0, possibleAssociated: 0 };
+
+    const written = appendFixRecordsUnlocked(transaction, cmd, links, cwd, now);
+    if (written.fix) {
+      const latest = transaction.reload();
+      reconcilePendingUnlocked(latest, transaction.paths, windowMs, now);
+    }
+    return {
+      ...written,
+      confirmedResolved: written.fix?.failureIds.length ?? 0,
+      possibleAssociated: written.association?.candidateFailureIds.length ?? 0,
+    };
+  }, paths);
 }
 
 function lastLines(text: string, n: number): string {
@@ -376,19 +601,45 @@ export function pendingPath(): string {
   return resolveRockyPaths().pending;
 }
 
-export function touchPending(): void {
-  const paths = resolveRockyPaths();
+function touchPendingUnlocked(paths: RockyPaths): void {
   ensureDir(paths.home);
   writeFileSync(paths.pending, "", "utf8");
 }
 
-export function hasUnresolvedRecent(records: MemoryRecord[], windowMs = 1000 * 60 * 60 * 48): boolean {
-  const cutoff = Date.now() - windowMs;
+export function touchPending(): void {
+  withMemoryTransaction((transaction) => touchPendingUnlocked(transaction.paths));
+}
+
+export function hasUnresolvedRecent(
+  records: readonly MemoryRecord[],
+  windowMs = LINK_WINDOW_MS,
+  now = Date.now(),
+): boolean {
+  const cutoff = now - windowMs;
   return records.some((record) => record.kind === "failure" && !record.resolvedBy && record.ts >= cutoff);
 }
 
-export function clearPendingIfResolved(records: MemoryRecord[]): void {
-  if (!hasUnresolvedRecent(records)) rmSync(resolveRockyPaths().pending, { force: true });
+function reconcilePendingUnlocked(
+  records: readonly MemoryRecord[],
+  paths: RockyPaths,
+  windowMs: number,
+  now: number,
+): void {
+  if (hasUnresolvedRecent(records, windowMs, now)) touchPendingUnlocked(paths);
+  else rmSync(paths.pending, { force: true });
+}
+
+export function clearPendingIfResolved(
+  _records: readonly MemoryRecord[],
+  windowMs = LINK_WINDOW_MS,
+  now?: number,
+): void {
+  withMemoryTransaction((transaction) => {
+    const selectedNow = now ?? Date.now();
+    if (!hasUnresolvedRecent(transaction.records, windowMs, selectedNow)) {
+      rmSync(transaction.paths.pending, { force: true });
+    }
+  });
 }
 
 export function recordHookFailure(cmd: string, exitCode: number, cwd: string): FailureRecord {
@@ -398,8 +649,10 @@ export function recordHookFailure(cmd: string, exitCode: number, cwd: string): F
     fingerprint: commandFingerprint(cmd, exitCode), signature: [normalizeLine(cmd)], excerpt: `exit ${exitCode}`, origin: "hook",
     commandIdentity: identity.value, identityV: identity.version, identityReliable: identity.reliable, platform: process.platform,
   };
-  append(rec);
-  touchPending();
+  withMemoryTransaction((transaction) => {
+    transaction.append(rec);
+    touchPendingUnlocked(transaction.paths);
+  });
   return rec;
 }
 
@@ -412,7 +665,7 @@ export function recordNote(input: {
   answer: string;
 }): void {
   const rec: NoteRecord = { kind: "note", id: randomUUID(), ts: Date.now(), ...input };
-  append(rec);
+  withMemoryTransaction((transaction) => transaction.append(rec));
 }
 
 export function recordTriple(
@@ -431,7 +684,7 @@ export function recordTriple(
     ...(input.rationale === undefined ? {} : { rationale: input.rationale }),
     mechanism: input.mechanism,
   };
-  append(rec, paths);
+  withMemoryTransaction((transaction) => transaction.append(rec), paths ?? resolveRockyPaths());
   return rec;
 }
 
@@ -451,10 +704,8 @@ export function recordTripleOnce(
 ): RecordTripleOnceResult {
   const target = paths ?? resolveRockyPaths();
   const id = tripleIdForClaim(claimId);
-  ensureDir(target.home);
-  const lock = acquireTripleLock(target);
-  try {
-    const existing = loadMemory(target.memory).find((record): record is TripleRecord => record.kind === "triple" && record.id === id);
+  return withMemoryTransaction((transaction) => {
+    const existing = transaction.records.find((record): record is TripleRecord => record.kind === "triple" && record.id === id);
     if (existing) return { record: existing, appended: false };
 
     const rec: TripleRecord = {
@@ -469,9 +720,7 @@ export function recordTripleOnce(
       ...(input.rationale === undefined ? {} : { rationale: input.rationale }),
       mechanism: input.mechanism,
     };
-    append(rec, target);
+    transaction.append(rec);
     return { record: rec, appended: true };
-  } finally {
-    releaseTripleLock(lock);
-  }
+  }, target);
 }

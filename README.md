@@ -140,7 +140,7 @@ What happens:
 
 - **The command runs exactly as normal.** Output streams through untouched; the exit code is preserved. Rocky only speaks after your tool is done.
 - **On failure**, Rocky fingerprints the error and files it. If he has heard this exact error before, he says so — and if a later run fixed it, he tells you what the fix was.
-- **On success**, if the same program failed recently in this directory, Rocky records this run as the fix. That link is the whole product.
+- **On success**, Rocky confirms a fix only for the same reliable command identity that failed in this directory within eight hours. A same-program-only match is kept separately as a possible association; it never resolves the failure.
 
 Ask his memory directly:
 
@@ -224,8 +224,9 @@ Every attempted `.bashrc` write — a successful one, or one refused after a con
 
 From the next shell on: every failing command is remembered (no stderr — the
 hook hears command and exit code only; `rocky run` remains the deep-memory
-path). When a command succeeds where its program recently failed, the fix is
-linked automatically. And when a command looks catastrophic — `rm -rf` at a
+path). When a command succeeds where the same command recently failed, the fix
+is linked automatically; weaker same-program evidence stays only a possible
+association. And when a command looks catastrophic — `rm -rf` at a
 strange target, a force push, `curl | bash` — Rocky holds it:
 
 ```
@@ -242,7 +243,7 @@ edited file. `ROCKY_OFF=1` makes him deaf for a session;
 
 1. **Fingerprinting** (`src/core/fingerprint.ts`) — stderr is noisy: paths, line numbers, timestamps, and addresses change between runs of the same bug. Rocky extracts the lines that carry meaning, masks the volatile parts (`/home/you/app/src/x.ts:41:7` becomes `<path>:#:#`), and hashes the result. Same bug, same fingerprint, every time.
 2. **The failure log** (`src/core/memory.ts`) — append-only JSONL. Failures store the fingerprint, the command, the directory, and a short excerpt for display. Fixes store which failures they resolved.
-3. **Fix linking** — when a command succeeds where its base program recently failed (same directory, within 48h), Rocky links that success to the unresolved failures. No AI involved; it's an honest heuristic, and it's right often enough to be useful.
+3. **Fix linking** — within one per-memory transaction, Rocky reloads current state and confirms a success only for unresolved failures with the same reliable command identity (same directory, within 8h). Same-program-only candidates are stored as possible associations and never resolve failures or clear pending state. Concurrent writers share the transaction lock, so one unresolved-to-resolved transition creates one fix event.
 4. **Recall** — token-overlap search across commands and error signatures, deduplicated per distinct error, fix shown when known.
 
 The deterministic memory loop remains useful with zero AI setup and zero API keys. Rocky can optionally ask a locally running Ollama model to rank or interpret deterministic recall candidates; the model cannot create or change the underlying stored evidence, and invalid output falls back to deterministic recall.
