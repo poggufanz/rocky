@@ -42,9 +42,18 @@ export interface MechanismEvent {
   provenance?: FileProvenance;
   /** Number of unique paths omitted by an adapter event cap. */
   truncatedFiles?: number;
+  /**
+   * Bounded batch coverage witness.  Adapters attach this to the first
+   * mechanism event when their path list overflows, so annotation can union
+   * tool and Git identities instead of adding independent overflow counters.
+   */
+  coveragePaths?: string[];
+  coveragePathsComplete?: boolean;
 }
 
 export const MAX_BASELINE_FILES = 256;
+/** Keep durable coverage identity metadata bounded while retaining common multi-file turns. */
+export const MAX_COVERAGE_PATHS = 256;
 
 export interface RationaleEvent {
   v: 1;
@@ -126,11 +135,33 @@ export function parseAgentEvent(value: unknown): AgentEvent | undefined {
       const rawTruncatedFiles = record.truncatedFiles;
       if (rawTruncatedFiles !== undefined && (typeof rawTruncatedFiles !== "number" || !Number.isSafeInteger(rawTruncatedFiles) || rawTruncatedFiles < 0)) return undefined;
       const truncatedFiles = typeof rawTruncatedFiles === "number" ? rawTruncatedFiles : undefined;
+      const rawCoveragePaths = record.coveragePaths;
+      let coveragePaths: string[] | undefined;
+      let coveragePathsComplete: boolean | undefined;
+      if (rawCoveragePaths !== undefined) {
+        if (!Array.isArray(rawCoveragePaths)) return undefined;
+        coveragePaths = [];
+        const seen = new Set<string>();
+        for (const value of rawCoveragePaths.slice(0, MAX_COVERAGE_PATHS)) {
+          if (typeof value !== "string" || value.length === 0 || value.length > 1024) return undefined;
+          if (!seen.has(value)) {
+            seen.add(value);
+            coveragePaths.push(value);
+          }
+        }
+        coveragePathsComplete = rawCoveragePaths.length <= MAX_COVERAGE_PATHS;
+      }
+      if (record.coveragePathsComplete !== undefined) {
+        if (typeof record.coveragePathsComplete !== "boolean") return undefined;
+        coveragePathsComplete = record.coveragePathsComplete && coveragePathsComplete !== false;
+      }
       return {
         v: 1, agent, kind: "mechanism", ts, tool, path,
         ...(excerpt ? { excerpt } : {}),
         ...(provenance === undefined ? {} : { provenance }),
         ...(truncatedFiles === undefined ? {} : { truncatedFiles }),
+        ...(coveragePaths === undefined ? {} : { coveragePaths }),
+        ...(coveragePathsComplete === undefined ? {} : { coveragePathsComplete }),
       };
     }
     case "rationale": {

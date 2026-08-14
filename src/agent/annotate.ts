@@ -16,7 +16,7 @@ import {
 import { resolveRockyPaths, type RockyPaths } from "../core/state-paths.js";
 import { recordTripleOnce } from "../core/memory.js";
 import type { TripleFile, TripleRecord } from "../core/memory.js";
-import { loadMemory } from "../core/memory-read.js";
+import { loadMemory, MAX_TRIPLE_FILES } from "../core/memory-read.js";
 import { digestBuckets } from "../core/dictionary.js";
 import { loadConfig, type ConfigLoadResult } from "../core/config-read.js";
 import { redactSecretsAtBoundary, replaceAnsiAndControls, stripInvisibleControls } from "../core/redact.js";
@@ -43,7 +43,7 @@ import {
   MAX_BATCH_BYTES,
 } from "./spool.js";
 
-export const MAX_TRIPLE_FILES = 8;
+export { MAX_TRIPLE_FILES } from "../core/memory-read.js";
 
 // A full transient batch may have silently rejected its last append at the
 // spool cap.  Keep a conservative margin so annotation never calls such a
@@ -424,7 +424,15 @@ function mergeDiffEntries(...sources: Array<DiffEntry[] | undefined>): DiffEntry
 function baselineMap(intent: IntentEvent | undefined): Map<string, [number, number]> | undefined {
   const baseline = intent?.baseline;
   if (baseline?.status !== "captured") return undefined;
-  return new Map((baseline.files ?? []).map((file) => [operationalText(file.path, MAX_PATH_CHARS), file.plusMinus]));
+  const mapped = new Map<string, [number, number]>();
+  for (const file of baseline.files ?? []) {
+    const path = operationalText(file.path, MAX_PATH_CHARS);
+    const previous = mapped.get(path);
+    mapped.set(path, previous === undefined
+      ? [...file.plusMinus] as [number, number]
+      : [previous[0] + file.plusMinus[0], previous[1] + file.plusMinus[1]]);
+  }
+  return mapped;
 }
 
 function propsFromExcerpt(excerpt: string | undefined): string[] {
@@ -466,14 +474,37 @@ export async function annotateBatch(key: string, deps: AnnotateDeps = {}): Promi
     const batchEvents = events.filter((event) => event.agent === agent);
     const intentEvent = batchEvents.find((event): event is Extract<typeof event, { kind: "intent" }> => event.kind === "intent");
     const byPath = new Map<string, { path: string; excerpt?: string; provenance?: FileProvenance; plusMinus?: [number, number] }>();
+    const coverageCandidates = new Map<string, string>();
+    let coverageMetadataSeen = false;
+    let coverageMetadataComplete = true;
     let adapterTruncatedFiles = 0;
+    let adapterTruncationMarkers = 0;
     for (const event of batchEvents) {
       if (event.kind !== "mechanism") continue;
+      if (event.coveragePaths !== undefined || event.coveragePathsComplete !== undefined) {
+        coverageMetadataSeen = true;
+        if (event.coveragePathsComplete === false
+          || (event.coveragePathsComplete === true && event.coveragePaths === undefined)) {
+          coverageMetadataComplete = false;
+        }
+        for (const candidate of event.coveragePaths ?? []) {
+          const candidateGitPath = operationalText(candidate, MAX_PATH_CHARS);
+          const candidatePath = cleanText(candidate, MAX_PATH_CHARS);
+          if (!candidateGitPath || !candidatePath) {
+            coverageMetadataComplete = false;
+            continue;
+          }
+          coverageCandidates.set(candidateGitPath, candidatePath);
+        }
+      }
       const gitPath = operationalText(event.path, MAX_PATH_CHARS);
       const path = cleanText(event.path, MAX_PATH_CHARS);
       if (!path || !gitPath) continue;
       const excerpt = event.excerpt === undefined ? undefined : cleanText(event.excerpt, MAX_EXCERPT_CHARS) || undefined;
-      adapterTruncatedFiles = Math.max(adapterTruncatedFiles, event.truncatedFiles ?? 0);
+      if (event.truncatedFiles !== undefined) {
+        adapterTruncatedFiles += event.truncatedFiles;
+        adapterTruncationMarkers += 1;
+      }
       byPath.set(gitPath, { path, excerpt, ...(event.provenance === undefined ? {} : { provenance: event.provenance }) });
     }
     let rationaleEvent: Extract<(typeof events)[number], { kind: "rationale" }> | undefined;
@@ -486,6 +517,8 @@ export async function annotateBatch(key: string, deps: AnnotateDeps = {}): Promi
         rationaleText = text;
       }
     }
+
+    const intentText = intentEvent?.kind === "intent" ? cleanText(intentEvent.text, MAX_INTENT_CHARS) || undefined : undefined;
 
     const rawCwd = intentEvent?.kind === "intent" && intentEvent.cwd ? intentEvent.cwd : process.cwd();
     const operationalCwd = operationalText(rawCwd, MAX_CWD_CHARS);
@@ -523,6 +556,12 @@ export async function annotateBatch(key: string, deps: AnnotateDeps = {}): Promi
           // Tool evidence keeps its stronger provenance while the baseline
           // supplies the turn delta for plus/minus accounting.
           if (!entry.statsKnown) baselineStatus = "unknown";
+          // Aggregate numstat is a repository total, not a turn ledger.  A
+          // tool-observed path already dirty at baseline remains ambiguous,
+          // including same-count and decreasing edits.
+          if (prior !== undefined) baselineStatus = "unknown";
+          // Aggregate numstat cannot prove a turn delta when an observed path
+          // was already dirty by the same amount, or when its aggregate shrank.
           observed.plusMinus = delta;
           byPath.set(gitPath, observed);
           continue;
@@ -530,6 +569,9 @@ export async function annotateBatch(key: string, deps: AnnotateDeps = {}): Promi
         // A zero-stat path absent from baseline is still meaningful: it is
         // commonly a newly-created untracked file reported by ls-files.
         if (delta[0] === 0 && delta[1] === 0 && prior !== undefined) continue;
+        // For a shell-only path that overlaps a dirty baseline, even a
+        // positive aggregate delta may belong to unrelated work.
+        if (prior !== undefined) baselineStatus = "unknown";
         if (!entry.statsKnown) baselineStatus = "unknown";
         inferred.set(gitPath, { path: cleanPath, plusMinus: delta, provenance: "git-diff-inferred" });
       }
@@ -551,6 +593,7 @@ export async function annotateBatch(key: string, deps: AnnotateDeps = {}): Promi
         const observed = byPath.get(gitPath);
         if (observed) {
           if (!entry.statsKnown) baselineStatus = "unknown";
+          if (prior !== undefined) baselineStatus = "unknown";
           const current = observed.plusMinus ?? [0, 0];
           observed.plusMinus = [current[0] + delta[0], current[1] + delta[1]];
           byPath.set(gitPath, observed);
@@ -564,6 +607,7 @@ export async function annotateBatch(key: string, deps: AnnotateDeps = {}): Promi
           continue;
         }
         if (delta[0] === 0 && delta[1] === 0) continue;
+        if (prior !== undefined) baselineStatus = "unknown";
         if (!entry.statsKnown) baselineStatus = "unknown";
         inferred.set(gitPath, { path: cleanPath, plusMinus: delta, provenance: "git-diff-inferred" });
       }
@@ -571,11 +615,30 @@ export async function annotateBatch(key: string, deps: AnnotateDeps = {}): Promi
     for (const [gitPath, value] of inferred) {
       byPath.set(gitPath, value);
     }
-    if (byPath.size === 0) {
+    if (byPath.size === 0 && !(intentText !== undefined && rationaleText !== undefined)) {
       removeClaim(claim, paths);
       return undefined;
     }
     const allMechanisms = [...byPath.entries()];
+    // Coverage identities are unioned before applying the durable eight-file
+    // cap.  A count-only legacy marker can prove one adapter overflow, but
+    // multiple markers may overlap, so those remain explicitly unknown.
+    for (const [gitPath, value] of allMechanisms) {
+      coverageCandidates.set(gitPath, value.path);
+    }
+    const candidateCount = !coverageMetadataSeen && adapterTruncationMarkers === 1
+      ? Math.max(coverageCandidates.size, byPath.size + adapterTruncatedFiles)
+      : coverageCandidates.size;
+    const coverageUnknown = spoolMayBeTruncated
+      || (allMechanisms.length === 0 && intentText !== undefined && rationaleText !== undefined)
+      || (coverageMetadataSeen && !coverageMetadataComplete)
+      || (!coverageMetadataSeen && adapterTruncationMarkers > 1);
+    const truncatedFiles = Math.max(0, candidateCount - MAX_TRIPLE_FILES);
+    const coverageStatus = coverageUnknown
+      ? "unknown" as const
+      : truncatedFiles > 0
+        ? "truncated" as const
+        : "complete" as const;
     const files: TripleFile[] = allMechanisms.slice(0, MAX_TRIPLE_FILES).map(([gitPath, value]) => {
       const excerpt = value?.excerpt;
       const knownDelta = value.plusMinus;
@@ -591,7 +654,6 @@ export async function annotateBatch(key: string, deps: AnnotateDeps = {}): Promi
       };
     });
 
-    const intentText = intentEvent?.kind === "intent" ? cleanText(intentEvent.text, MAX_INTENT_CHARS) || undefined : undefined;
     let port = deps.ai;
     if (port === undefined) {
       try {
@@ -638,7 +700,8 @@ export async function annotateBatch(key: string, deps: AnnotateDeps = {}): Promi
       mechanism: {
         ...(head === undefined ? {} : { head }),
         files,
-        truncatedFiles: adapterTruncatedFiles + Math.max(0, allMechanisms.length - MAX_TRIPLE_FILES),
+        truncatedFiles,
+        coverageStatus,
         ...(baselineStatus === undefined ? {} : { baseline: baselineStatus }),
       },
     }, `${claim.key}:${claim.id}`, paths);

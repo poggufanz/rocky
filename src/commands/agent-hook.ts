@@ -42,6 +42,8 @@ export interface AgentHookDeps {
   now?: () => number;
   /** Test seam for bounded baseline capture; production uses local git only. */
   git?: (args: string[], cwd: string) => string | undefined;
+  /** Test seam for append-recovery coverage; production uses the guarded spool writer. */
+  appendEvent?: typeof appendEvent;
 }
 
 function utf8Width(codePoint: number): number {
@@ -309,7 +311,15 @@ function captureTurnBaseline(cwd: string | undefined, deps: AgentHookDeps): Turn
     const unstagedFiles = parseBaselineNumstat(unstaged);
     const stagedFiles = parseBaselineNumstat(staged);
     if (!head || unstagedFiles === undefined || stagedFiles === undefined || untracked === undefined) return { status: "unknown" };
-    const files = [...unstagedFiles, ...stagedFiles];
+    const merged = new Map<string, [number, number]>();
+    for (const file of [...unstagedFiles, ...stagedFiles]) {
+      const previous = merged.get(file.path);
+      merged.set(file.path, previous === undefined
+        ? [...file.plusMinus] as [number, number]
+        : [previous[0] + file.plusMinus[0], previous[1] + file.plusMinus[1]]);
+    }
+    if (merged.size > MAX_BASELINE_FILES) return { status: "unknown" };
+    const files = [...merged.entries()].map(([path, plusMinus]) => ({ path, plusMinus }));
     const seen = new Set(files.map((file) => file.path));
     for (const path of untracked.split(/\r?\n/u).map((line) => line.trim()).filter(Boolean)) {
       if (seen.has(path)) continue;
@@ -379,21 +389,31 @@ function writeEmptyResponse(): Promise<void> {
 function applyParsedEvent(parsed: ParsedHookPayload, paths: RockyPaths, deps: AgentHookDeps): void {
   if (!parsed) return;
   if (parsed.action === "append") {
-    const lastMechanismIndex = parsed.truncatedFiles === undefined
-      ? -1
-      : parsed.events.reduce((last, event, index) => event.kind === "mechanism" ? index : last, -1);
-    for (const [index, original] of parsed.events.entries()) {
+    // Keep overflow metadata attached until one mechanism append succeeds.
+    // A transient first-write failure must not let later surviving events
+    // silently lose the batch's exact coverage witness.
+    let coveragePending = parsed.truncatedFiles !== undefined
+      || parsed.coveragePaths !== undefined
+      || parsed.coveragePathsComplete !== undefined;
+    for (const original of parsed.events) {
+      const attachCoverage = original.kind === "mechanism" && coveragePending;
       const event: AgentEvent = original.kind === "intent" && original.baseline === undefined
         ? ({ ...original, baseline: captureTurnBaseline(original.cwd, deps) } satisfies IntentEvent)
-        : original.kind === "mechanism" && index === lastMechanismIndex && parsed.truncatedFiles !== undefined
-          ? { ...original, truncatedFiles: parsed.truncatedFiles }
+        : attachCoverage
+          ? {
+            ...original,
+            ...(parsed.truncatedFiles === undefined ? {} : { truncatedFiles: parsed.truncatedFiles }),
+            ...(parsed.coveragePaths === undefined ? {} : { coveragePaths: parsed.coveragePaths }),
+            ...(parsed.coveragePathsComplete === undefined ? {} : { coveragePathsComplete: parsed.coveragePathsComplete }),
+          }
           : original;
       let appended = false;
       try {
-        appended = appendEvent(parsed.key, event, paths);
+        appended = (deps.appendEvent ?? appendEvent)(parsed.key, event, paths);
       } catch {
         safeLogFailure(paths);
       }
+      if (appended && attachCoverage) coveragePending = false;
       if (appended && event.kind === "intent") {
         maybeSpawnAmbiguity(event.text, paths, deps);
       }

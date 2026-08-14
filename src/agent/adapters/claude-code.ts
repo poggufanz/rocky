@@ -6,10 +6,25 @@ import {
   openSync,
   readSync,
 } from "node:fs";
-import { batchKey, MAX_RATIONALE_CHARS, parseAgentEvent, type AgentEvent, type RationaleEvent } from "../schema.js";
+import {
+  batchKey,
+  MAX_COVERAGE_PATHS,
+  MAX_RATIONALE_CHARS,
+  parseAgentEvent,
+  type AgentEvent,
+  type RationaleEvent,
+} from "../schema.js";
 
 export type ParsedHookPayload =
-  | { action: "append"; key: string; events: AgentEvent[]; event: AgentEvent; truncatedFiles?: number }
+  | {
+    action: "append";
+    key: string;
+    events: AgentEvent[];
+    event: AgentEvent;
+    truncatedFiles?: number;
+    coveragePaths?: string[];
+    coveragePathsComplete?: boolean;
+  }
   | { action: "close"; key: string; rationale?: RationaleEvent }
   | undefined;
 
@@ -111,16 +126,35 @@ function rationaleEvent(text: string | undefined, now: number): RationaleEvent |
   return parsed?.kind === "rationale" ? parsed : undefined;
 }
 
-function appendPayload(key: string, events: AgentEvent[]): ParsedHookPayload {
+function appendPayload(key: string, events: AgentEvent[], coveragePaths?: readonly string[]): ParsedHookPayload {
   const bounded = events.slice(0, MAX_ADAPTER_EVENTS);
+  const truncatedFiles = coveragePaths === undefined ? events.length - bounded.length : coveragePaths.length - bounded.length;
+  const hasOverflow = truncatedFiles > 0;
+  const boundedCoverage = hasOverflow && coveragePaths !== undefined
+    ? coveragePaths.slice(0, MAX_COVERAGE_PATHS)
+    : undefined;
+  const coverageComplete = boundedCoverage === undefined ? undefined : coveragePaths!.length <= MAX_COVERAGE_PATHS;
+  const firstMechanismIndex = hasOverflow ? bounded.findIndex((event) => event.kind === "mechanism") : -1;
+  const markedEvents = bounded.map((event, index) => index === firstMechanismIndex && event.kind === "mechanism"
+    ? {
+      ...event,
+      ...(hasOverflow ? { truncatedFiles } : {}),
+      ...(boundedCoverage === undefined ? {} : { coveragePaths: boundedCoverage }),
+      ...(coverageComplete === undefined ? {} : { coveragePathsComplete: coverageComplete }),
+    }
+    : event);
   return {
     action: "append",
     key,
-    events: bounded,
+    events: markedEvents,
     // `event` is retained as a compatibility alias for older internal users;
     // new callers must consume the bounded list.
-    event: bounded[0]!,
-    ...(events.length > bounded.length ? { truncatedFiles: events.length - bounded.length } : {}),
+    event: markedEvents[0]!,
+    ...(hasOverflow ? { truncatedFiles } : {}),
+    ...(boundedCoverage === undefined ? {} : {
+      coveragePaths: boundedCoverage,
+      coveragePathsComplete: coverageComplete,
+    }),
   };
 }
 
@@ -173,7 +207,7 @@ export function parseClaudeHookPayload(raw: unknown, now = Date.now()): ParsedHo
           });
           if (event) byPath.set(path, event);
         }
-        return byPath.size === 0 ? undefined : appendPayload(key, [...byPath.values()]);
+        return byPath.size === 0 ? undefined : appendPayload(key, [...byPath.values()], [...byPath.keys()]);
       }
       case "Stop": {
         const direct = nonEmptyString(raw.last_assistant_message);

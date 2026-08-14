@@ -31,12 +31,19 @@ import {
 } from "./fingerprint.js";
 import { resolveRockyPaths } from "./state-paths.js";
 import type { RockyPaths } from "./state-paths.js";
-import { loadMemoryChecked, MAX_MEMORY_LINE_BYTES } from "./memory-read.js";
+import { boundTripleMechanism, loadMemoryChecked, MAX_MEMORY_LINE_BYTES } from "./memory-read.js";
 import type { AssociationRecord, FailureRecord, FixRecord, MemoryRecord, NoteRecord, TripleRecord } from "./memory-read.js";
 import { LINK_WINDOW_MS, recentUnresolvedFailures, type UnresolvedLink } from "./memory-query.js";
 
 export type { AssociationRecord, FailureRecord, FixRecord, MemoryRecord, NoteRecord, TripleFile, TripleRecord } from "./memory-read.js";
-export { loadMemory, parseMemoryRecord, MAX_MEMORY_LINE_BYTES } from "./memory-read.js";
+export {
+  boundTripleMechanism,
+  boundTripleRecord,
+  loadMemory,
+  parseMemoryRecord,
+  MAX_MEMORY_LINE_BYTES,
+  MAX_TRIPLE_FILES,
+} from "./memory-read.js";
 
 export function memoryPath(): string {
   return resolveRockyPaths().memory;
@@ -957,7 +964,7 @@ export function recordTriple(
     cwd: input.cwd,
     ...(input.intent === undefined ? {} : { intent: input.intent }),
     ...(input.rationale === undefined ? {} : { rationale: input.rationale }),
-    mechanism: input.mechanism,
+    mechanism: boundTripleMechanism(input.mechanism),
   };
   withMemoryTransaction((transaction) => transaction.append(rec), paths ?? resolveRockyPaths());
   return rec;
@@ -993,7 +1000,7 @@ export function recordTripleOnce(
       cwd: input.cwd,
       ...(input.intent === undefined ? {} : { intent: input.intent }),
       ...(input.rationale === undefined ? {} : { rationale: input.rationale }),
-      mechanism: input.mechanism,
+      mechanism: boundTripleMechanism(input.mechanism),
     };
     transaction.append(rec);
     return { record: rec, appended: true };

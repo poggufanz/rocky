@@ -1,6 +1,7 @@
 import { Buffer } from "node:buffer";
 import { homedir } from "node:os";
 import type { Exposure } from "../core/config-read.js";
+import { boundTripleRecord } from "../core/memory-read.js";
 import type { FailureOrigin, FailureRecord, FixRecord, MemoryRecord, TripleRecord } from "../core/memory-read.js";
 import type { KnowledgeSearchHit, RecallHit, RecentFailureHit } from "../core/memory-query.js";
 import { redactSecretsAtBoundary, replaceAnsiAndControls, stripInvisibleControls } from "../core/redact.js";
@@ -54,6 +55,7 @@ export interface ProjectedTriple {
   truncatedFiles: number;
   complete: boolean;
   baseline?: "captured" | "unknown";
+  coverageStatus?: "complete" | "truncated" | "unknown";
   cwd?: string;
   truncatedFields: readonly string[];
 }
@@ -69,6 +71,7 @@ export interface ProjectedKnowledgeHit {
   filesCovered?: readonly string[];
   truncatedFiles?: number;
   complete?: boolean;
+  coverageStatus?: "complete" | "truncated" | "unknown";
   truncatedFields: readonly string[];
 }
 
@@ -210,32 +213,35 @@ function projectTripleFile(
 }
 
 export function projectTriple(triple: TripleRecord, exposure: Exposure): ProjectedTriple {
+  const bounded = boundTripleRecord(triple);
   const truncation: Truncation = { fields: [] };
   const projected: ProjectedTriple = {
-    id: projectOpaqueId(triple.id, "id", truncation),
-    timestamp: triple.ts,
-    agent: triple.agent,
-    source: triple.origin,
-    files: triple.mechanism.files.map((file, index) => projectTripleFile(file, index, exposure, truncation)),
-    filesCovered: triple.mechanism.files.map((file, index) => projectText(file.path, exposure, `filesCovered[${index}]`, truncation)),
-    truncatedFiles: triple.mechanism.truncatedFiles,
-    complete: triple.mechanism.truncatedFiles === 0
-      && triple.mechanism.baseline === "captured"
-      && triple.mechanism.files.length > 0
-      && triple.mechanism.files.every((file) => file.provenance === "tool-observed" || file.provenance === "git-diff-inferred"),
+    id: projectOpaqueId(bounded.id, "id", truncation),
+    timestamp: bounded.ts,
+    agent: bounded.agent,
+    source: bounded.origin,
+    files: bounded.mechanism.files.map((file, index) => projectTripleFile(file, index, exposure, truncation)),
+    filesCovered: bounded.mechanism.files.map((file, index) => projectText(file.path, exposure, `filesCovered[${index}]`, truncation)),
+    truncatedFiles: bounded.mechanism.truncatedFiles,
+    complete: bounded.mechanism.coverageStatus === "complete"
+      && bounded.mechanism.truncatedFiles === 0
+      && bounded.mechanism.baseline === "captured"
+      && bounded.mechanism.files.length > 0
+      && bounded.mechanism.files.every((file) => file.provenance === "tool-observed" || file.provenance === "git-diff-inferred"),
     truncatedFields: truncation.fields,
   };
-  if (triple.mechanism.baseline !== undefined) projected.baseline = triple.mechanism.baseline;
-  if (triple.intent !== undefined) {
-    projected.intent = projectText(triple.intent.text, exposure, "intent", truncation);
+  if (bounded.mechanism.baseline !== undefined) projected.baseline = bounded.mechanism.baseline;
+  if (bounded.mechanism.coverageStatus !== undefined) projected.coverageStatus = bounded.mechanism.coverageStatus;
+  if (bounded.intent !== undefined) {
+    projected.intent = projectText(bounded.intent.text, exposure, "intent", truncation);
   }
-  if (triple.rationale !== undefined) {
+  if (bounded.rationale !== undefined) {
     projected.rationale = {
-      text: projectText(triple.rationale.text, exposure, "rationale.text", truncation),
-      tags: projectStringArray(triple.rationale.tags, exposure, "rationale.tags", truncation),
+      text: projectText(bounded.rationale.text, exposure, "rationale.text", truncation),
+      tags: projectStringArray(bounded.rationale.tags, exposure, "rationale.tags", truncation),
     };
   }
-  if (exposure === "raw") projected.cwd = projectText(triple.cwd, exposure, "cwd", truncation);
+  if (exposure === "raw") projected.cwd = projectText(bounded.cwd, exposure, "cwd", truncation);
   return projected;
 }
 
@@ -258,6 +264,7 @@ export function projectKnowledgeHits(
       }),
       ...(hit.truncatedFiles === undefined ? {} : { truncatedFiles: hit.truncatedFiles }),
       ...(hit.complete === undefined ? {} : { complete: hit.complete }),
+      ...(hit.coverageStatus === undefined ? {} : { coverageStatus: hit.coverageStatus }),
       truncatedFields: truncation.fields,
     };
   };

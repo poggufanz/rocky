@@ -9,7 +9,7 @@ import {
   retrievalTokens,
   similarity,
 } from "./fingerprint.js";
-import { loadMemory } from "./memory-read.js";
+import { boundTripleRecord, loadMemory } from "./memory-read.js";
 import type { FailureRecord, FixRecord, LinkBasis, LinkConfidence, MemoryRecord, TripleRecord } from "./memory-read.js";
 import { triplesForFile } from "./dictionary.js";
 
@@ -43,6 +43,7 @@ export interface KnowledgeSearchHit {
   filesCovered?: string[];
   truncatedFiles?: number;
   complete?: boolean;
+  coverageStatus?: "complete" | "truncated" | "unknown";
 }
 export interface MemoryQueries {
   recall(input: RecallQuery): RecallHit[];
@@ -372,10 +373,12 @@ export function queryStats(records: readonly MemoryRecord[], input: StatsQuery =
 }
 
 function completeTriple(record: TripleRecord): boolean {
-  return record.mechanism.truncatedFiles === 0
-    && record.mechanism.baseline === "captured"
-    && record.mechanism.files.length > 0
-    && record.mechanism.files.every((file) => file.provenance === "tool-observed" || file.provenance === "git-diff-inferred");
+  const bounded = boundTripleRecord(record);
+  return bounded.mechanism.coverageStatus === "complete"
+    && bounded.mechanism.truncatedFiles === 0
+    && bounded.mechanism.baseline === "captured"
+    && bounded.mechanism.files.length > 0
+    && bounded.mechanism.files.every((file) => file.provenance === "tool-observed" || file.provenance === "git-diff-inferred");
 }
 
 export function searchKnowledge(
@@ -386,10 +389,12 @@ export function searchKnowledge(
   const now = input.now ?? Date.now();
   const queryTokenSet = queryTokens(input.query);
   const hits: KnowledgeSearchHit[] = [];
+  const sourceCoverage = new Map<string, TripleRecord["mechanism"]["coverageStatus"]>();
   const wants = (kind: KnowledgeSearchHit["kind"]): boolean => input.kind === undefined || input.kind === kind;
 
   const entries: Array<{ record: MemoryRecord; tokenSet: Set<string>; snippet: string }> = [];
-  for (const record of uniqueRecords(records)) {
+  for (const sourceRecord of uniqueRecords(records)) {
+    const record = sourceRecord.kind === "triple" ? boundTripleRecord(sourceRecord) : sourceRecord;
     if (record.ts > now) continue;
     if (record.kind === "failure" && wants("failure")) {
       entries.push({
@@ -400,6 +405,7 @@ export function searchKnowledge(
     } else if (record.kind === "fix" && wants("fix")) {
       entries.push({ record, tokenSet: retrievalTokens(record.cmd), snippet: record.cmd.slice(0, 120) });
     } else if (record.kind === "triple" && wants("triple") && record.intent) {
+      sourceCoverage.set(record.id, sourceRecord.kind === "triple" ? sourceRecord.mechanism.coverageStatus : undefined);
       entries.push({
         record,
         tokenSet: retrievalTokens(`${record.intent.text} ${record.rationale?.tags.join(" ") ?? ""}`),
@@ -459,6 +465,7 @@ export function searchKnowledge(
         filesCovered: record.mechanism.files.map((file) => file.path),
         truncatedFiles: record.mechanism.truncatedFiles,
         complete: completeTriple(record),
+        ...(sourceCoverage.get(record.id) === undefined ? {} : { coverageStatus: sourceCoverage.get(record.id) }),
       });
     } else if (record.kind === "note") {
       if (score > 0) hits.push({ id: record.id, ts: record.ts, kind: "note", snippet, score, source: "note" });
@@ -470,7 +477,8 @@ export function searchKnowledge(
 }
 
 export function fetchRecord(records: readonly MemoryRecord[], id: string): MemoryRecord | undefined {
-  return records.find((record) => record.id === id);
+  const record = records.find((candidate) => candidate.id === id);
+  return record?.kind === "triple" ? boundTripleRecord(record) : record;
 }
 
 export function whyFile(records: readonly MemoryRecord[], path: string, limit = 5): TripleRecord[] {

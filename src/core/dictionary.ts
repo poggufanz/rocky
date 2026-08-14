@@ -1,4 +1,5 @@
 import { similarity, tokens } from "./fingerprint.js";
+import { boundTripleRecord } from "./memory-read.js";
 import type { MemoryRecord, TripleRecord } from "./memory-read.js";
 
 const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
@@ -8,7 +9,9 @@ export interface DictionaryHit { triple: TripleRecord; score: number }
 export interface DigestBucket { tag: string; count: number; examples: string[] }
 
 function triples(records: readonly MemoryRecord[]): TripleRecord[] {
-  return records.filter((record): record is TripleRecord => record.kind === "triple");
+  return records
+    .filter((record): record is TripleRecord => record.kind === "triple")
+    .map((record) => boundTripleRecord(record));
 }
 
 function mechanismIdentity(triple: TripleRecord): string {

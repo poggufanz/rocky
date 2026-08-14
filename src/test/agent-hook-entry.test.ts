@@ -17,7 +17,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test, type TestContext } from "node:test";
 import { agentEvent, logHookError } from "../commands/agent-hook.js";
-import { readBatch } from "../agent/spool.js";
+import { appendEvent, readBatch } from "../agent/spool.js";
 import { resolveRockyPaths, type RockyPaths } from "../core/state-paths.js";
 
 const packageRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -168,9 +168,38 @@ test("bounded hook fan-out persists exact adapter overflow", async (t) => {
   assert.equal(result.out, "{}");
   const events = readBatch("claude-code-s1-overflow", paths);
   assert.equal(events.length, 64);
-  const last = events.at(-1);
-  assert.equal(last?.kind, "mechanism");
-  assert.equal(last?.kind === "mechanism" ? last.truncatedFiles : undefined, 6);
+  const marked = events.find((event) => event.kind === "mechanism" && event.truncatedFiles !== undefined);
+  assert.equal(marked?.kind, "mechanism");
+  assert.equal(marked?.kind === "mechanism" ? marked.truncatedFiles : undefined, 6);
+});
+
+test("coverage metadata retries after a first mechanism append failure", async (t) => {
+  const paths = freshPaths(t);
+  const edits = Array.from({ length: 70 }, (_, index) => ({
+    file_path: `retry-${index}.ts`, new_string: `value-${index}`,
+  }));
+  let failFirst = true;
+  const result = await captureStdout(() => agentEvent("claude-code", {
+    stdin: async () => JSON.stringify({
+      session_id: "s1", prompt_id: "retry", hook_event_name: "PostToolUse",
+      tool_name: "MultiEdit", tool_input: { edits },
+    }),
+    paths,
+    appendEvent: (key, event, target) => {
+      if (failFirst) {
+        failFirst = false;
+        return false;
+      }
+      return appendEvent(key, event, target);
+    },
+  }));
+  assert.equal(result.code, 0);
+  assert.equal(result.out, "{}");
+  const marked = readBatch("claude-code-s1-retry", paths).find(
+    (event) => event.kind === "mechanism" && event.coveragePaths !== undefined,
+  );
+  assert.equal(marked?.kind, "mechanism");
+  assert.equal(marked?.kind === "mechanism" ? marked.coveragePaths?.length : undefined, 70);
 });
 
 test("disabled config does not invoke ambiguity injection seam", async (t) => {

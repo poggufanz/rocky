@@ -1,5 +1,6 @@
 import {
   batchKey,
+  MAX_COVERAGE_PATHS,
   parseAgentEvent,
   type AgentEvent,
   type RationaleEvent,
@@ -209,10 +210,25 @@ function parseModern(payload: PlainRecord, now: number): ParsedHookPayload {
       }
       const bounded = [...byPath.values()].slice(0, MAX_ADAPTER_EVENTS);
       if (bounded.length === 0) return undefined;
+      const truncatedFiles = byPath.size - bounded.length;
+      const coveragePaths = truncatedFiles > 0 ? [...byPath.keys()].slice(0, MAX_COVERAGE_PATHS) : undefined;
+      const coveragePathsComplete = coveragePaths === undefined ? undefined : byPath.size <= MAX_COVERAGE_PATHS;
+      const markedEvents = bounded.map((event, index) => index === 0
+        ? {
+          ...event,
+          ...(truncatedFiles > 0 ? { truncatedFiles } : {}),
+          ...(coveragePaths === undefined ? {} : { coveragePaths }),
+          ...(coveragePathsComplete === undefined ? {} : { coveragePathsComplete }),
+        }
+        : event);
       return {
-        action: "append", key, events: bounded,
-        event: bounded[0]!,
-        ...(byPath.size > bounded.length ? { truncatedFiles: byPath.size - bounded.length } : {}),
+        action: "append", key, events: markedEvents,
+        event: markedEvents[0]!,
+        ...(truncatedFiles > 0 ? { truncatedFiles } : {}),
+        ...(coveragePaths === undefined ? {} : {
+          coveragePaths,
+          coveragePathsComplete: byPath.size <= MAX_COVERAGE_PATHS,
+        }),
       };
     }
     case "Stop": {
