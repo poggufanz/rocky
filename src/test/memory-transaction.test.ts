@@ -159,6 +159,35 @@ function replacementBeforePrimaryRenamePreload(path: string): void {
   ].join("\n"), "utf8");
 }
 
+function tombstoneReplacementBeforeDeletePreload(path: string): void {
+  writeFileSync(path, [
+    "const fs = require('node:fs');",
+    "const { syncBuiltinESMExports } = require('node:module');",
+    "const originalOpen = fs.openSync.bind(fs);",
+    "const originalRead = fs.readSync.bind(fs);",
+    "const originalRename = fs.renameSync.bind(fs);",
+    "const tombstoneFds = new Map();",
+    "let reads = 0;",
+    "fs.openSync = (path, ...args) => { const fd = originalOpen(path, ...args); if (String(path).includes('.reclaim.tombstone.')) tombstoneFds.set(fd, String(path)); return fd; };",
+    "fs.readSync = (fd, ...args) => { const result = originalRead(fd, ...args); const tombstone = tombstoneFds.get(fd); if (tombstone && ++reads === 2) { originalRename(tombstone, process.env.ROCKY_TEST_TOMBSTONE_SAVE); fs.writeFileSync(tombstone, JSON.stringify({ pid: 2147483647, token: 'x'.repeat(32) })); } return result; };",
+    "syncBuiltinESMExports();",
+  ].join("\n"), "utf8");
+}
+
+function partialMetadataWritePreload(path: string): void {
+  writeFileSync(path, [
+    "const fs = require('node:fs');",
+    "const { syncBuiltinESMExports } = require('node:module');",
+    "const originalOpen = fs.openSync.bind(fs);",
+    "const originalWrite = fs.writeSync.bind(fs);",
+    "const paths = new Map();",
+    "let failed = false;",
+    "fs.openSync = (path, ...args) => { const fd = originalOpen(path, ...args); paths.set(fd, String(path)); return fd; };",
+    "fs.writeSync = (fd, ...args) => { if (!failed && paths.get(fd) === process.env.ROCKY_TEST_PARTIAL_PATH) { failed = true; if (process.env.ROCKY_TEST_PARTIAL_MODE === 'throw') throw new Error('injected partial metadata write'); return 0; } return originalWrite(fd, ...args); };",
+    "syncBuiltinESMExports();",
+  ].join("\n"), "utf8");
+}
+
 async function concurrentSuccesses(t: TestContext, count: number): Promise<void> {
   const home = sandbox(t, `rocky-atomic-${count}-`);
   const ready = join(home, "ready");
@@ -411,7 +440,7 @@ test("future failures are not linked and cannot satisfy delayed resolution proof
   const combinedRecords = memory.loadMemory(join(combinedHome, "memory.jsonl"), now);
   assert.equal(combinedRecords.find((record): record is FailureRecord => record.kind === "failure" && record.id === combinedFailure.id)?.resolvedBy, undefined);
   assert.equal(combinedRecords.find((record): record is FailureRecord => record.kind === "failure" && record.id === unrelatedFailure.id)?.resolvedBy, unrelatedFix.id);
-  assert.equal(existsSync(join(combinedHome, "pending")), true, "valid unrelated reconciliation cannot clear future pending");
+  assert.equal(existsSync(join(combinedHome, "pending")), false, "future records do not keep pending during reconciliation");
 });
 
 test("a same-identity FixRecord from another cwd cannot clear pending through delayed reconciliation", (t) => {
@@ -877,6 +906,81 @@ test("replacement moved by a reclaim rename is preserved in its tombstone", { ti
     .find((contents) => contents.includes(`\"token\":\"${"r".repeat(32)}\"`));
   assert.ok(preserved, "replacement inode remains in preserved tombstone");
   assert.equal(existsSync(lock), false, "next acquisition still releases canonical lock");
+});
+
+test("replacement after final tombstone validation survives because no path unlink occurs", { timeout: 20_000 }, (t) => {
+  const home = sandbox(t, "rocky-tombstone-predelete-");
+  const lock = join(home, "memory.jsonl.triple.lock");
+  const saved = join(home, "validated-tombstone.lock");
+  const preload = join(home, "replace-before-delete.cjs");
+  const deadPid = 2_147_483_647;
+  mkdirSync(home, { recursive: true });
+  writeFileSync(lock, JSON.stringify({ pid: deadPid, token: "d".repeat(32) }), { mode: 0o600 });
+  tombstoneReplacementBeforeDeletePreload(preload);
+  const worker = [
+    "const [modulePath, home] = process.argv.slice(1);",
+    "process.env.ROCKY_HOME = home;",
+    "const memory = await import(modulePath);",
+    "memory.withMemoryTransaction(() => {});",
+  ].join("\n");
+  const result = spawnSync(process.execPath, ["--input-type=module", "--eval", worker, memoryModuleUrl, home], {
+    env: {
+      ...process.env,
+      ROCKY_HOME: home,
+      ROCKY_TEST_TOMBSTONE_SAVE: saved,
+      NODE_OPTIONS: `--require=${preload}`,
+    },
+    encoding: "utf8",
+    timeout: 10_000,
+    windowsHide: true,
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(existsSync(saved), true, "validated inode remains preserved separately");
+  const replacement = readdirSync(home)
+    .filter((name) => name.includes(".reclaim.tombstone."))
+    .map((name) => readFileSync(join(home, name), "utf8"))
+    .find((contents) => contents.includes(`\"token\":\"${"x".repeat(32)}\"`));
+  assert.ok(replacement, "replacement at tombstone path survives");
+  assert.equal(existsSync(lock), false, "canonical lock remains absent after recovery");
+});
+
+test("partial primary and guard metadata writes recover without lock timeout", { timeout: 30_000 }, (t) => {
+  for (const target of ["primary", "guard"] as const) {
+    for (const mode of ["zero", "throw"] as const) {
+      const home = sandbox(t, `rocky-partial-${target}-${mode}-`);
+      const lock = join(home, "memory.jsonl.triple.lock");
+      const partialPath = target === "primary" ? lock : `${lock}.reclaim.guard`;
+      const preload = join(home, "partial-write.cjs");
+      mkdirSync(home, { recursive: true });
+      if (target === "guard") {
+        writeFileSync(lock, JSON.stringify({ pid: 2_147_483_647, token: "d".repeat(32) }), { mode: 0o600 });
+      }
+      partialMetadataWritePreload(preload);
+      const worker = [
+        "const [modulePath, home] = process.argv.slice(1);",
+        "process.env.ROCKY_HOME = home;",
+        "const memory = await import(modulePath);",
+        "memory.withMemoryTransaction(() => {});",
+      ].join("\n");
+      const started = Date.now();
+      const result = spawnSync(process.execPath, ["--input-type=module", "--eval", worker, memoryModuleUrl, home], {
+        env: {
+          ...process.env,
+          ROCKY_HOME: home,
+          ROCKY_TEST_PARTIAL_PATH: partialPath,
+          ROCKY_TEST_PARTIAL_MODE: mode,
+          NODE_OPTIONS: `--require=${preload}`,
+        },
+        encoding: "utf8",
+        timeout: 4_000,
+        windowsHide: true,
+      });
+      assert.equal(result.status, 0, `${target}/${mode}: ${result.stderr}`);
+      assert.ok(Date.now() - started < 2_000, `${target}/${mode} partial write must not wait for lock deadline`);
+      assert.equal(existsSync(lock), false, `${target}/${mode} canonical lock is released`);
+      assert.ok(readdirSync(home).some((name) => name.includes(".reclaim.tombstone.")), `${target}/${mode} leaves safe tombstone evidence`);
+    }
+  }
 });
 
 test("a dead orphan claim is pruned when the primary pathname is already absent", (t) => {

@@ -3,14 +3,14 @@ import { loadMemory } from "./memory-read.js";
 import type { FailureRecord, FixRecord, LinkBasis, LinkConfidence, MemoryRecord, TripleRecord } from "./memory-read.js";
 import { triplesForFile } from "./dictionary.js";
 
-export interface RecallQuery { query: string; limit?: number; cwd?: string }
+export interface RecallQuery { query: string; limit?: number; cwd?: string; now?: number }
 export interface RecallHit { failure: FailureRecord; fix?: FixRecord; score: number }
-export interface RecentFailuresQuery { limit?: number; cwd?: string; unresolvedOnly?: boolean }
+export interface RecentFailuresQuery { limit?: number; cwd?: string; unresolvedOnly?: boolean; now?: number }
 export interface RecentFailureHit { failure: FailureRecord; fix?: FixRecord }
-export interface StatsQuery { cwd?: string }
+export interface StatsQuery { cwd?: string; now?: number }
 export interface MemoryStats { failures: number; fixEvents: number; resolved: number; unresolved: number }
 export interface LinkQuery { cwd: string; now?: number; windowMs?: number }
-export interface KnowledgeSearchQuery { query: string; kind?: "failure" | "fix" | "triple"; limit?: number }
+export interface KnowledgeSearchQuery { query: string; kind?: "failure" | "fix" | "triple"; limit?: number; now?: number }
 export interface KnowledgeSearchHit {
   id: string;
   ts: number;
@@ -27,8 +27,10 @@ export interface MemoryQueries {
   whyFile(path: string, limit?: number): TripleRecord[];
 }
 
-export function findByFingerprint(records: readonly MemoryRecord[], fp: string): FailureRecord[] {
-  return uniqueRecords(records).filter((record): record is FailureRecord => record.kind === "failure" && record.fingerprint === fp);
+export function findByFingerprint(records: readonly MemoryRecord[], fp: string, now = Date.now()): FailureRecord[] {
+  return uniqueRecords(records).filter((record): record is FailureRecord =>
+    record.kind === "failure" && record.ts <= now && record.fingerprint === fp,
+  );
 }
 
 interface FixIndex {
@@ -85,9 +87,9 @@ function fixForFailure(index: FixIndex, failure: FailureRecord, now = Date.now()
   });
 }
 
-export function getFix(records: readonly MemoryRecord[], failure: FailureRecord): FixRecord | undefined {
+export function getFix(records: readonly MemoryRecord[], failure: FailureRecord, now = Date.now()): FixRecord | undefined {
   const unique = uniqueRecords(records);
-  return fixForFailure(fixesIndex(unique), failure);
+  return fixForFailure(fixesIndex(unique, now), failure, now);
 }
 
 /**
@@ -104,13 +106,13 @@ export function fixFromElsewhere(fix: FixRecord, cwd: string): string | undefine
 
 export function queryRecall(records: readonly MemoryRecord[], input: RecallQuery): RecallHit[] {
   const unique = uniqueRecords(records);
-  const now = Date.now();
+  const now = input.now ?? Date.now();
   const fixes = fixesIndex(unique, now);
   const limit = input.limit ?? 3;
   const queryTokens = tokens(input.query);
   const best = new Map<string, RecallHit>();
   for (const record of unique) {
-    if (record.kind !== "failure" || (input.cwd !== undefined && record.cwd !== input.cwd)) continue;
+    if (record.kind !== "failure" || record.ts > now || (input.cwd !== undefined && record.cwd !== input.cwd)) continue;
     const score = similarity(queryTokens, tokens([record.cmd, ...record.signature].join(" ")));
     if (score <= 0.05) continue;
     const hit = { failure: record, fix: fixForFailure(fixes, record, now), score };
@@ -127,10 +129,11 @@ export function queryRecentFailures(
   input: RecentFailuresQuery = {},
 ): RecentFailureHit[] {
   const unique = uniqueRecords(records);
-  const now = Date.now();
+  const now = input.now ?? Date.now();
   const fixes = fixesIndex(unique, now);
   return unique
     .filter((record): record is FailureRecord => record.kind === "failure")
+    .filter((failure) => failure.ts <= now)
     .filter((failure) => input.cwd === undefined || failure.cwd === input.cwd)
     .filter((failure) => !input.unresolvedOnly || !failure.resolvedBy)
     .sort((a, b) => b.ts - a.ts)
@@ -140,12 +143,12 @@ export function queryRecentFailures(
 
 export function queryStats(records: readonly MemoryRecord[], input: StatsQuery = {}): MemoryStats {
   const unique = uniqueRecords(records);
-  const scoped = unique.filter((record) => input.cwd === undefined || record.cwd === input.cwd);
+  const now = input.now ?? Date.now();
+  const scoped = unique.filter((record) => record.ts <= now && (input.cwd === undefined || record.cwd === input.cwd));
   const failures = scoped.filter((record): record is FailureRecord => record.kind === "failure");
-  const now = Date.now();
   const fixes = fixesIndex(unique, now);
   const confirmedFailures = unique.filter((record): record is FailureRecord =>
-    record.kind === "failure" && confirmedLocalFix(fixes, record, now) !== undefined,
+    record.kind === "failure" && record.ts <= now && confirmedLocalFix(fixes, record, now) !== undefined,
   );
   const confirmedFixIds = new Set(
     confirmedFailures.map((failure) => failure.resolvedBy!),
@@ -160,11 +163,13 @@ export function searchKnowledge(
   input: KnowledgeSearchQuery,
 ): KnowledgeSearchHit[] {
   const limit = Math.min(Math.max(input.limit ?? 10, 1), 20);
+  const now = input.now ?? Date.now();
   const queryTokens = tokens(input.query);
   const hits: KnowledgeSearchHit[] = [];
   const wants = (kind: KnowledgeSearchHit["kind"]): boolean => input.kind === undefined || input.kind === kind;
 
   for (const record of uniqueRecords(records)) {
+    if (record.ts > now) continue;
     if (record.kind === "failure" && wants("failure")) {
       const score = similarity(queryTokens, tokens(`${record.cmd} ${record.signature.join(" ")}`));
       if (score > 0) hits.push({

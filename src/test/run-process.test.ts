@@ -28,7 +28,9 @@ test("run speech discloses cross-directory fix as possible, never strong", () =>
   let output = "";
   process.stderr.write = ((chunk: string | Uint8Array) => { output += String(chunk); return true; }) as typeof process.stderr.write;
   try {
-    speakFailureMemory([failure, fix], failure.fingerprint, 1, failureCwd);
+    // Invocation happens where the fix was learned, but the linked failure
+    // came from another cwd; source disclosure must follow the failure.
+    speakFailureMemory([failure, fix], failure.fingerprint, 1, fixCwd);
   } finally {
     process.stderr.write = original;
   }
@@ -37,6 +39,23 @@ test("run speech discloses cross-directory fix as possible, never strong", () =>
   assert.doesNotMatch(output, /strong\./);
   assert.match(output, new RegExp(fixCwd.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   assert.equal(commandFingerprint(cmd, 1).length > 0, true);
+});
+
+test("run speech ignores a future failure at the captured clock", () => {
+  const now = Date.now();
+  const future = {
+    kind: "failure" as const, id: "run-future-failure", ts: now + 60_000, cwd: "/work/future", cmd: "node future.js",
+    exitCode: 1, fingerprint: "run-future-fingerprint", signature: ["future-only"], excerpt: "future-only",
+  };
+  const original = process.stderr.write;
+  let output = "";
+  process.stderr.write = ((chunk: string | Uint8Array) => { output += String(chunk); return true; }) as typeof process.stderr.write;
+  try {
+    speakFailureMemory([future], future.fingerprint, 1, future.cwd, now);
+  } finally {
+    process.stderr.write = original;
+  }
+  assert.doesNotMatch(output, /last time, you fix with:|future\.js|future-only/);
 });
 
 test("unrelated successful npm task is not suggested as confirmed fix", (t) => {

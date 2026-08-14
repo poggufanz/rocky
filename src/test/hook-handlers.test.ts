@@ -150,6 +150,22 @@ test("hookFail admits when the remembered fix's cwd differs from the cwd argumen
   }
 });
 
+test("hookFail compares elsewhere against linked failure cwd, not invocation cwd", () => {
+  const failCwd = mkdtempSync(join(tmpdir(), "rocky-linked-failure-source-"));
+  const fixCwd = mkdtempSync(join(tmpdir(), "rocky-linked-fix-current-"));
+  seedElsewhereFix(failCwd, fixCwd, "linked-cwd-test-cmd", 1);
+  try {
+    const { result, tty } = captureTty(() => hookFail("linked-cwd-test-cmd", 1, fixCwd));
+    assert.equal(result, 0);
+    assert.match(tty, /but fix comes from other place\./);
+    assert.match(tty, new RegExp(`place: ${fixCwd.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
+    assert.match(tty, /possible only/);
+    assert.doesNotMatch(tty, /strong\.|confirmed/);
+  } finally {
+    process.env.ROCKY_HOME = home;
+  }
+});
+
 test("hookFail says nothing extra when the remembered fix's cwd matches the cwd argument", () => {
   const sameCwd = mkdtempSync(join(tmpdir(), "rocky-samecwd-"));
   seedElsewhereFix(sameCwd, sameCwd, "samecwd-test-cmd", 1);

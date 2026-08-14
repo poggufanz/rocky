@@ -4,6 +4,8 @@ import type { AssociationRecord, FailureRecord, FixRecord, MemoryRecord, TripleR
 import {
   LINK_WINDOW_MS,
   createMemoryQueries,
+  fetchRecord,
+  findByFingerprint,
   queryRecall,
   queryRecentFailures,
   queryStats,
@@ -51,6 +53,42 @@ test("queryRecentFailures is newest-first and filters unresolved", () => {
 test("queryRecall preserves fuzzy matching and exact cwd filter", () => {
   assert.deepEqual(queryRecall(records, { query: "module missing", cwd: "/work/a" }).map((hit) => hit.failure.id), ["f1"]);
   assert.deepEqual(queryRecall(records, { query: "module missing", cwd: "/work/b" }), []);
+});
+
+test("future records stay inert across operational query surfaces but remain fetchable", () => {
+  const now = 1_800_000_000_000;
+  const futureFailure: FailureRecord = {
+    ...failureA,
+    id: "future-query-failure",
+    ts: now + 1,
+    fingerprint: "future-query-fingerprint",
+    cmd: "npm run future-only-token",
+    signature: ["future-only-token"],
+  };
+  const futureFix: FixRecord = {
+    ...fixA,
+    id: "future-query-fix",
+    ts: now + 2,
+    cmd: "npm run future-only-token",
+    failureIds: [futureFailure.id],
+  };
+  const exactFailure: FailureRecord = {
+    ...failureB,
+    id: "exact-query-failure",
+    ts: now,
+    fingerprint: "exact-query-fingerprint",
+    cmd: "npm run exact-query",
+    signature: ["exact-query"],
+  };
+  const input = [futureFailure, futureFix, exactFailure];
+
+  assert.deepEqual(findByFingerprint(input, futureFailure.fingerprint, now), []);
+  assert.equal(getFix(input, futureFailure, now), undefined);
+  assert.deepEqual(queryRecall(input, { query: "future-only-token", now }), []);
+  assert.deepEqual(queryRecentFailures(input, { now }).map((hit) => hit.failure.id), [exactFailure.id]);
+  assert.deepEqual(queryStats(input, { now }), { failures: 1, fixEvents: 0, resolved: 0, unresolved: 1 });
+  assert.deepEqual(searchKnowledge(input, { query: "future-only-token", now }), []);
+  assert.equal(fetchRecord(input, futureFailure.id)?.id, futureFailure.id, "raw/fetch state remains retained");
 });
 
 test("queryRecall keeps an explicit cross-directory fix visible without resolving the failure", () => {

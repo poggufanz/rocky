@@ -13,7 +13,6 @@ import {
   renameSync,
   readSync,
   rmSync,
-  unlinkSync,
   writeFileSync,
   writeSync,
   type Stats,
@@ -267,15 +266,11 @@ function tryTripleLock(path: string): TripleLock | undefined {
     if (fd >= 0) {
       try { closeSync(fd); } catch { /* best effort */ }
     }
-    if (created && !succeeded && token && createdStats) {
-      const current = readTripleLock(path);
-      if (current && current.metadata.pid === process.pid && current.metadata.token === token) {
-        reclaimTriplePath(path, createdStats, (tombstonePath) => {
-          const verify = readTripleLock(tombstonePath);
-          return verify !== undefined && verify.metadata.pid === process.pid &&
-            verify.metadata.token === token && sameTripleIdentity(createdStats!, verify.stats);
-        });
-      }
+    if (created && !succeeded && createdStats) {
+      reclaimTriplePath(path, createdStats, (tombstonePath) => {
+        const verify = lstatSync(tombstonePath);
+        return verify.isFile() && !verify.isSymbolicLink() && sameTripleIdentity(createdStats!, verify);
+      });
     }
   }
 }
@@ -293,9 +288,10 @@ function releaseTripleLock(lock: TripleLock): void {
 
 /**
  * Move one canonical regular path to a unique same-directory tombstone, then
- * validate the moved inode before removing only that tombstone. The canonical
- * name is never unlinked: if a replacement was moved by a TOCTOU race, its
- * identity/metadata check fails and the tombstone is deliberately preserved.
+ * validate the moved inode. The canonical name and tombstone are never
+ * unlinked here: a hostile same-user replacement after validation is
+ * indistinguishable through Node's portable path API, so preservation is the
+ * only safe outcome. Tombstones are non-blocking housekeeping evidence.
  */
 function reclaimTriplePath(
   path: string,
@@ -314,7 +310,6 @@ function reclaimTriplePath(
     const verified = lstatSync(tombstonePath);
     if (!verified.isFile() || verified.isSymbolicLink() || !sameTripleIdentity(expected, verified) ||
         !validateClaim(tombstonePath)) return false;
-    unlinkSync(tombstonePath);
     return true;
   } catch {
     return false;
@@ -388,15 +383,11 @@ function tryTripleReclaimElection(path: string): TripleReclaimElection | undefin
     if (fd >= 0) {
       try { closeSync(fd); } catch { /* best effort */ }
     }
-    if (created && !succeeded && token && createdStats) {
-      const current = readTripleLock(electionPath);
-      if (current && current.metadata.pid === process.pid && current.metadata.token === token) {
-        reclaimTriplePath(electionPath, createdStats, (claimPath) => {
-          const verify = readTripleLock(claimPath);
-          return verify !== undefined && verify.metadata.pid === process.pid && verify.metadata.token === token &&
-            sameTripleIdentity(createdStats!, verify.stats);
-        });
-      }
+    if (created && !succeeded && createdStats) {
+      reclaimTriplePath(electionPath, createdStats, (claimPath) => {
+        const verify = lstatSync(claimPath);
+        return verify.isFile() && !verify.isSymbolicLink() && sameTripleIdentity(createdStats!, verify);
+      });
     }
   }
 }
@@ -512,7 +503,7 @@ function reclaimTripleLock(
   }
 }
 
-/** Remove only hard-link claims whose owning reclaimer is definitely dead. */
+/** Move only hard-link claims whose owning reclaimer is definitely dead. */
 function pruneDeadReclaimClaims(path: string, expected?: Stats): void {
   const directory = dirname(path);
   const prefix = `${basename(path)}.reclaim.`;
@@ -573,8 +564,8 @@ function pruneDeadReclaimClaims(path: string, expected?: Stats): void {
         if (primary !== undefined && sameTripleIdentity(primary, claim) && expected === undefined) continue;
 
         // Revalidate the claim immediately before moving it. The canonical
-        // path is never unlinked by housekeeping; only a validated unique
-        // tombstone may be removed.
+        // path and tombstone are never unlinked by housekeeping; residual
+        // tombstones are safe evidence for a later bounded/manual sweep.
         const verifiedClaim = lstatSync(claimPath);
         if (!verifiedClaim.isFile() || verifiedClaim.isSymbolicLink() ||
             !sameTripleIdentity(claim, verifiedClaim)) continue;
@@ -768,7 +759,8 @@ function appendFixRecordsUnlocked(
 
 export function recordFix(cmd: string, links: readonly UnresolvedLink[], cwd = process.cwd()): FixRecord | AssociationRecord {
   return withMemoryTransaction((transaction) => {
-    const written = appendFixRecordsUnlocked(transaction, cmd, links, cwd, transaction.now);
+    const eligible = links.filter((link) => link.failure.ts <= transaction.now);
+    const written = appendFixRecordsUnlocked(transaction, cmd, eligible, cwd, transaction.now);
     if (written.fix) return written.fix;
     if (written.association) return written.association;
     throw new Error("Rocky fix attribution requires at least one link");
@@ -887,7 +879,7 @@ export function hasUnresolvedRecent(
   now = Date.now(),
 ): boolean {
   const cutoff = now - windowMs;
-  return records.some((record) => record.kind === "failure" && !record.resolvedBy && record.ts >= cutoff);
+  return records.some((record) => record.kind === "failure" && !record.resolvedBy && record.ts >= cutoff && record.ts <= now);
 }
 
 function reconcilePendingUnlocked(

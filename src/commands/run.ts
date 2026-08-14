@@ -60,7 +60,7 @@ function readMemory(): MemoryRecord[] | undefined {
 
 /**
  * Speaks what memory knows about this fingerprint: a prior sighting and its
- * fix (naming the fix's own directory when it differs from `cwd`), or that
+ * fix (naming the fix's own directory when it differs from linked failure cwd), or that
  * this is new. Shared by `run`'s onFailure and `watch`'s failure path — spec
  * §7 names `run`, `watch`, and `_hookfail` as the three paths that must carry
  * the cross-directory admission, and this is the one place `run` and `watch`
@@ -70,19 +70,20 @@ export function speakFailureMemory(
   memory: MemoryRecord[],
   fp: string,
   exitCode: number,
-  cwd: string,
+  _cwd: string,
+  now = Date.now(),
 ): void {
-  const previous = findByFingerprint(memory, fp);
+  const previous = findByFingerprint(memory, fp, now);
 
   if (previous.length > 0) {
     const first = previous[0];
     say(`I remember this error. You hear it before. ${ago(first.ts)}. Same same.`);
-    const withFix = [...previous].reverse().find((f) => getFix(memory, f));
+    const withFix = [...previous].reverse().find((f) => getFix(memory, f, now));
     if (withFix) {
-      const fix = getFix(memory, withFix)!;
+      const fix = getFix(memory, withFix, now)!;
       say(`last time, you fix with:`);
       detail(`    ${safeTerminalLine(fix.cmd)}`);
-      const elsewhere = fixFromElsewhere(fix, cwd);
+      const elsewhere = fixFromElsewhere(fix, withFix.cwd);
       // Say how much this link is worth. `recall` graded strong/weak from the
       // day it shipped; run/watch/hook did not, so the surfaces people actually
       // use presented a weak "same program" guess with the same confidence as a

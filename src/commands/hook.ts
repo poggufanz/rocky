@@ -79,17 +79,18 @@ export function hookFail(cmd: string, exitCode: number, cwd: string): number {
 
   if (memory === undefined) return 0; // unreadable memory: recorded, but nothing to recall
 
+  const now = Date.now();
   const fp = commandFingerprint(cmd, exitCode);
-  const previous = findByFingerprint(memory, fp);
+  const previous = findByFingerprint(memory, fp, now);
 
   if (previous.length === 0) return 0; // first time: passive ears stay quiet
 
-  const withFix = [...previous].reverse().find((f) => getFix(memory, f));
+  const withFix = [...previous].reverse().find((f) => getFix(memory, f, now));
   if (withFix) {
-    const fix = getFix(memory, withFix)!;
+    const fix = getFix(memory, withFix, now)!;
     sayTty(`I hear this error before. ${ago(withFix.ts)}. last time, you fix with:`);
     detailTty(safeTerminalLine(fix.cmd));
-    const elsewhere = fixFromElsewhere(fix, cwd);
+    const elsewhere = fixFromElsewhere(fix, withFix.cwd);
     if (elsewhere !== undefined) {
       sayTty("but fix comes from other place.");
       detailTty(`place: ${safeTerminalLine(elsewhere)}`);

@@ -71,6 +71,18 @@ test("clearPendingIfResolved removes flag only when nothing unresolved", () => {
   assert.ok(!existsSync(memory.pendingPath()), "flag cleared when resolved");
 });
 
+test("future failures stay out of pending unresolved state while exact now remains active", () => {
+  const now = 1_800_000_000_000;
+  const future = {
+    kind: "failure" as const, id: "future-pending", ts: now + 1, cwd: "/future", cmd: "npm test",
+    exitCode: 1, fingerprint: "future-pending", signature: ["future"], excerpt: "future",
+  };
+  const exact = { ...future, id: "exact-pending", ts: now };
+  const windowMs = 8 * 60 * 60 * 1_000;
+  assert.equal(memory.hasUnresolvedRecent([future], windowMs, now), false);
+  assert.equal(memory.hasUnresolvedRecent([exact], windowMs, now), true);
+});
+
 test("memoryPath resolves ROCKY_HOME each time", () => {
   const original = process.env.ROCKY_HOME;
   try {
