@@ -24,6 +24,7 @@ import { appendEvent, listOrphanClaims, readBatch } from "../agent/spool.js";
 import type { AgentEvent } from "../agent/schema.js";
 import { loadMemory, parseMemoryRecord, recordTriple, recordTripleOnce } from "../core/memory.js";
 import { resolveRockyPaths, type RockyPaths } from "../core/state-paths.js";
+import { SYNTHETIC_SECRET_CLOSURE_VECTORS } from "./secret-vectors.js";
 
 const INVISIBLE_FORMAT_CONTROLS: ReadonlyArray<readonly [string, string]> = [
   ["U+061C", "\u061C"],
@@ -633,6 +634,32 @@ test("durable annotation strips controls and scrubs a boundary-truncated modern 
   const durable = readFileSync(paths.memory, "utf8");
   assert.doesNotMatch(durable, /sk-proj-|aB3dE5fG7hI9|\u001b|\u202e/u);
   assert.match(triple.mechanism.files[0]?.path ?? "", /\[redacted openai key\]/u);
+});
+
+test("durable annotation closes shared quoted-key, control, realistic-word, and overlap vectors", async (t) => {
+  const paths = freshPaths(t);
+  const labels: string[] = [];
+  const [quotedPassword, quotedApi, realisticPassword, realisticAuth, tabSplit, lfSplit, crSplit, overlap] =
+    SYNTHETIC_SECRET_CLOSURE_VECTORS;
+  assert.ok(quotedPassword && quotedApi && realisticPassword && realisticAuth && tabSplit && lfSplit && crSplit && overlap);
+  append("review-secret-vectors", [
+    { v: 1, agent: "codex", kind: "intent", ts: 1, text: `${quotedPassword.text} ${lfSplit.text}` },
+    {
+      v: 1, agent: "codex", kind: "mechanism", ts: 2, tool: "Edit",
+      path: `src/${tabSplit.text}.ts`, excerpt: `${quotedApi.text} ${overlap.text} ${crSplit.text}`,
+    },
+    { v: 1, agent: "codex", kind: "rationale", ts: 3, source: "notify", text: `${realisticPassword.text} ${realisticAuth.text}` },
+  ], paths);
+
+  const triple = await annotateBatch("review-secret-vectors", {
+    paths, git: () => undefined, queueLabel: (label) => labels.push(label),
+  });
+  assert.ok(triple);
+  const durable = `${readFileSync(paths.memory, "utf8")}\n${JSON.stringify(labels)}`;
+  for (const fragment of ["pA7!cV2@kL9", "api-aB3dE5fG7hI9", "pA7!test!", "live-example-", "sk-proj-"]) {
+    assert.doesNotMatch(durable, new RegExp(fragment.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "u"), fragment);
+  }
+  assert.doesNotMatch(durable, /pass\s*word=|api_\s*key|secret=pA7/u);
 });
 
 test("every invisible format control is removed before durable redaction", async (t) => {

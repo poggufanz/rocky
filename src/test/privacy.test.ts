@@ -7,6 +7,7 @@ import type { FixRecord, TripleRecord } from "../core/memory-read.js";
 import {
   MAX_FIELD_BYTES,
   MAX_RESPONSE_BYTES,
+  normalizeOutputText,
   projectMemoryRecord,
   projectRecentFailures,
   projectRecallHits,
@@ -15,6 +16,7 @@ import {
   strictestExposure,
   truncateUtf8,
 } from "../mcp/privacy.js";
+import { SYNTHETIC_SECRET_CLOSURE_VECTORS } from "./secret-vectors.js";
 
 function maximumRawHit(index: number): RecallHit {
   const field = String(index).repeat(MAX_FIELD_BYTES);
@@ -413,6 +415,25 @@ test("modern prefixed keys stay sanitized by default while explicit raw triple e
   assert.doesNotMatch(JSON.stringify(sanitized), /sk-proj-|aB3dE5fG7hI9/u);
   assert.equal(raw.intent, `deploy ${modernKey}`);
   assert.equal(raw.files[0]?.excerpt, `token=${modernKey}`);
+});
+
+test("shared secret vectors stay closed in sanitized MCP while quoted-key raw exposure remains explicit", () => {
+  for (const [index, vector] of SYNTHETIC_SECRET_CLOSURE_VECTORS.entries()) {
+    const triple: TripleRecord = {
+      kind: "triple", id: `shared-projection-${index}`, ts: 34, cwd: "/work", schemaV: 1,
+      agent: "codex", origin: "agent-hook", intent: { text: vector.text },
+      mechanism: {
+        files: [{ path: "src/x.ts", plusMinus: [0, 0], props: [], excerpt: vector.text }],
+        truncatedFiles: 0,
+      },
+    };
+    const sanitized = projectTriple(triple, "sanitized");
+    const raw = projectTriple(triple, "raw");
+    assert.match(redactText(vector.text, "/home/ada"), /\[redacted\]/u, vector.name);
+    assert.match(sanitized.intent ?? "", /\[redacted\]/u, vector.name);
+    assert.equal(raw.intent, normalizeOutputText(vector.text), vector.name);
+    assert.equal(raw.files[0]?.excerpt, normalizeOutputText(vector.text), vector.name);
+  }
 });
 
 test("triple props and tags preserve array boundaries, cardinality, and empty entries", () => {

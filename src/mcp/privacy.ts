@@ -3,7 +3,7 @@ import { homedir } from "node:os";
 import type { Exposure } from "../core/config-read.js";
 import type { FailureOrigin, FailureRecord, FixRecord, MemoryRecord, TripleRecord } from "../core/memory-read.js";
 import type { KnowledgeSearchHit, RecallHit, RecentFailureHit } from "../core/memory-query.js";
-import { replaceAnsiAndControls, stripInvisibleControls } from "../core/redact.js";
+import { redactSecretsAtBoundary, replaceAnsiAndControls, stripInvisibleControls } from "../core/redact.js";
 
 export const MAX_FIELD_BYTES = 16 * 1024;
 export const MAX_RESPONSE_BYTES = 512 * 1024;
@@ -93,7 +93,8 @@ export function truncateUtf8(value: string, maxBytes: number): { value: string; 
 }
 
 export function redactText(value: string, rockyHome = process.env.ROCKY_HOME ?? homedir()): string {
-  let output = normalizeOutputText(value);
+  let output = normalizeOutputText(redactSecretsAtBoundary(value))
+    .replace(/\[redacted [^\]]+\]/g, "[redacted]");
   const home = normalizeOutputText(rockyHome);
   if (home) output = output.replaceAll(home, "[redacted]");
 

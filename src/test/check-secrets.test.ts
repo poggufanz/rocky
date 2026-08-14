@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { AddedLine } from "../check/diff.js";
 import { scanSecrets } from "../check/secrets.js";
+import { EXACT_PLACEHOLDER_ASSIGNMENTS, SYNTHETIC_SECRET_CLOSURE_VECTORS } from "./secret-vectors.js";
 
 function line(text: string): AddedLine {
   return { file: "src/x.ts", line: 7, text };
@@ -57,6 +58,12 @@ test("strips terminal controls and bidi obfuscation before secret detection", ()
   }
 });
 
+test("shared secret vectors detect quoted keys, realistic placeholder words, controls, and overlap", () => {
+  for (const vector of SYNTHETIC_SECRET_CLOSURE_VECTORS) {
+    assert.deepEqual(scanSecrets([line(vector.text)]).map((hit) => hit.kind), [vector.kind], vector.name);
+  }
+});
+
 test("anthropic keys are not double-reported as openai keys", () => {
   const hits = scanSecrets([line("sk-ant-aB3dE5fG7hI9jK2mN4pQ6rS8")]);
 
@@ -101,6 +108,7 @@ test("does not flag benign, placeholder, or test-example lines", () => {
     'authorization="Bearer example-token"',
     "authorization: Bearer placeholder-token",
     "sk-proj-" + "x".repeat(28),
+    ...EXACT_PLACEHOLDER_ASSIGNMENTS,
   ];
 
   assert.equal(scanSecrets(benign.map(line)).length, 0);
