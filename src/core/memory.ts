@@ -21,7 +21,14 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { Buffer } from "node:buffer";
 import { performance } from "node:perf_hooks";
 import { basename, dirname, join } from "node:path";
-import { commandFingerprint, commandIdentity, fingerprint, normalizeLine, signatureLines } from "./fingerprint.js";
+import {
+  FINGERPRINT_ALGORITHM_VERSION,
+  commandFingerprint,
+  commandIdentity,
+  fingerprint,
+  normalizeLine,
+  signatureLines,
+} from "./fingerprint.js";
 import { resolveRockyPaths } from "./state-paths.js";
 import type { RockyPaths } from "./state-paths.js";
 import { loadMemoryChecked, MAX_MEMORY_LINE_BYTES } from "./memory-read.js";
@@ -665,7 +672,8 @@ export function recordFailure(cmd: string, exitCode: number, stderr: string): Fa
   const ts = Date.now();
   const rec: FailureRecord = {
     kind: "failure", id: randomUUID(), ts, cwd: process.cwd(), cmd, exitCode,
-    fingerprint: fingerprint(stderr, cmd, exitCode), signature: signatureLines(stderr), excerpt: lastLines(stderr, 4),
+    fingerprint: fingerprint(stderr, cmd, exitCode), fingerprintV: FINGERPRINT_ALGORITHM_VERSION,
+    signature: signatureLines(stderr), excerpt: lastLines(stderr, 4),
     commandIdentity: identity.value, identityV: identity.version, identityReliable: identity.reliable, platform: process.platform,
   };
   withMemoryTransaction((transaction) => {
@@ -680,7 +688,8 @@ export function recordWatchFailure(cmd: string, exitCode: number, stderr: string
   const ts = Date.now();
   const rec: FailureRecord = {
     kind: "failure", id: randomUUID(), ts, cwd, cmd, exitCode,
-    fingerprint: fingerprint(stderr, cmd, exitCode), signature: signatureLines(stderr), excerpt: lastLines(stderr, 4), origin: "watch",
+    fingerprint: fingerprint(stderr, cmd, exitCode), fingerprintV: FINGERPRINT_ALGORITHM_VERSION,
+    signature: signatureLines(stderr), excerpt: lastLines(stderr, 4), origin: "watch",
     commandIdentity: identity.value, identityV: identity.version, identityReliable: identity.reliable, platform: process.platform,
   };
   withMemoryTransaction((transaction) => {
@@ -911,7 +920,8 @@ export function recordHookFailure(cmd: string, exitCode: number, cwd: string): F
   const ts = Date.now();
   const rec: FailureRecord = {
     kind: "failure", id: randomUUID(), ts, cwd, cmd, exitCode,
-    fingerprint: commandFingerprint(cmd, exitCode), signature: [normalizeLine(cmd)], excerpt: `exit ${exitCode}`, origin: "hook",
+    fingerprint: commandFingerprint(cmd, exitCode), fingerprintV: FINGERPRINT_ALGORITHM_VERSION,
+    signature: [normalizeLine(cmd)], excerpt: `exit ${exitCode}`, origin: "hook",
     commandIdentity: identity.value, identityV: identity.version, identityReliable: identity.reliable, platform: process.platform,
   };
   withMemoryTransaction((transaction) => {

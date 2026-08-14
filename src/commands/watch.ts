@@ -11,7 +11,7 @@
  */
 
 import { closeSync, constants, fstatSync, lstatSync, openSync, readSync } from "node:fs";
-import { fingerprint } from "../core/fingerprint.js";
+import { fingerprintCandidates } from "../core/fingerprint.js";
 import { CANCEL_CODES, runProcess, type ExecResult } from "../core/exec.js";
 import { resolveRockyPaths } from "../core/state-paths.js";
 import { loadMemory, recordWatchFailure, type MemoryRecord } from "../core/memory.js";
@@ -201,7 +201,7 @@ function onWatchFailure(cmd: string, cwd: string, quiet: boolean, result: ExecRe
     say(outcomeLine(false, result.durationMs));
     const memory = readMemory(false);
     if (memory !== undefined) {
-      speakFailureMemory(memory, fingerprint(result.stderr, cmd, result.code), result.code, cwd);
+      speakFailureMemory(memory, fingerprintCandidates(result.stderr, cmd, result.code), result.code, cwd);
     }
   }
 

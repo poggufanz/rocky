@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import type { AssociationRecord, FailureRecord, FixRecord, MemoryRecord, TripleRecord } from "../core/memory.js";
+import { fingerprint, legacyFingerprint, signatureLines } from "../core/fingerprint.js";
 import {
   LINK_WINDOW_MS,
   createMemoryQueries,
@@ -354,4 +355,133 @@ test("createMemoryQueries wires knowledge search, fetch, and why-file queries", 
   assert.equal(queries.fetchRecord("t1")?.kind, "triple");
   assert.equal(queries.fetchRecord("missing"), undefined);
   assert.deepEqual(queries.whyFile("src/app.css").map((record) => record.id), ["t1"]);
+});
+
+test("findByFingerprint dual lookup finds a v0.5 record after algorithm upgrade", () => {
+  const stderr = "Error: module missing at /tmp/cache-123";
+  const legacy: FailureRecord = {
+    kind: "failure", id: "legacy-fingerprint", ts: 100, cwd: "/work/a", cmd: "npm test",
+    exitCode: 1, fingerprint: legacyFingerprint(stderr, "npm test", 1), signature: ["error: module missing at <path>"], excerpt: stderr,
+  };
+  const current = fingerprint(stderr, "npm test", 1);
+  assert.deepEqual(findByFingerprint([legacy], [current, legacy.fingerprint], 100).map((record) => record.id), [legacy.id]);
+  assert.deepEqual(findByFingerprint([legacy], current, 100).map((record) => record.id), [legacy.id]);
+});
+
+test("current-only fingerprint lookup bridges lossy legacy URL signatures via excerpt", () => {
+  const stderr = "Error fetch https://host/path?token=123#frag";
+  const legacy: FailureRecord = {
+    kind: "failure", id: "legacy-url-fingerprint", ts: 100, cwd: "/work/a", cmd: "curl", exitCode: 1,
+    fingerprint: legacyFingerprint(stderr, "curl", 1),
+    signature: ["error fetch https:/<path>?token=#"],
+    excerpt: stderr,
+  };
+  assert.deepEqual(findByFingerprint([legacy], fingerprint(stderr, "curl", 1), 100).map((record) => record.id), [legacy.id]);
+});
+
+test("current-only lookup bridges legacy command fingerprints without stderr", () => {
+  const legacy: FailureRecord = {
+    kind: "failure", id: "legacy-command-fingerprint", ts: 100, cwd: "/work/a", cmd: "false", exitCode: 1,
+    fingerprint: legacyFingerprint("", "false", 1), signature: [], excerpt: "",
+  };
+  assert.deepEqual(findByFingerprint([legacy], fingerprint("", "false", 1), 100).map((record) => record.id), [legacy.id]);
+});
+
+test("current-only legacy derivation validates persisted fingerprint provenance", () => {
+  const stderr = "Error: module missing at /tmp/cache-123";
+  const forged: FailureRecord = {
+    kind: "failure", id: "forged-legacy-fingerprint", ts: 100, cwd: "/work/a", cmd: "npm test", exitCode: 1,
+    fingerprint: "not-the-v1-hash", signature: ["error: module missing at <path>"], excerpt: stderr,
+  };
+  assert.deepEqual(findByFingerprint([forged], fingerprint(stderr, "npm test", 1), 100), []);
+});
+
+test("recall deduplicates a legacy and current record for one fingerprint family", () => {
+  const stderr = "Error: module missing at /tmp/cache-123";
+  const legacy: FailureRecord = {
+    kind: "failure", id: "legacy-family", ts: 100, cwd: "/work/a", cmd: "npm test", exitCode: 1,
+    fingerprint: legacyFingerprint(stderr, "npm test", 1), signature: ["error: module missing at <path>"], excerpt: stderr,
+  };
+  const current: FailureRecord = {
+    ...legacy,
+    id: "current-family",
+    ts: 200,
+    fingerprint: fingerprint(stderr, "npm test", 1),
+    fingerprintV: 2,
+  };
+  assert.deepEqual(queryRecall([legacy, current], { query: "module missing" }).map((hit) => hit.failure.id), [current.id]);
+});
+
+test("port query ranks exact semantic port above nearby ports", () => {
+  const records: FailureRecord[] = [
+    {
+      ...failureA, id: "port-5432", ts: 100, cmd: "connect service", fingerprint: "port-5432",
+      signature: ["error connect refused on port 5432"], excerpt: "connect refused on port 5432",
+    },
+    {
+      ...failureB, id: "port-9200", ts: 200, cmd: "connect service", fingerprint: "port-9200",
+      signature: ["error connect refused on port 9200"], excerpt: "connect refused on port 9200",
+    },
+    {
+      ...failureA, id: "port-6379", ts: 300, cmd: "connect service", fingerprint: "port-6379",
+      signature: ["error connect refused on port 6379"], excerpt: "connect refused on port 6379",
+    },
+  ];
+  assert.equal(queryRecall(records, { query: "connect refused port 9200", limit: 3 })[0]?.failure.id, "port-9200");
+  assert.equal(searchKnowledge(records, { query: "connect refused port 9200", kind: "failure" })[0]?.id, "port-9200");
+});
+
+test("persisted signatures retain semantic status and port evidence", () => {
+  const records: FailureRecord[] = [
+    {
+      ...failureA,
+      id: "persisted-9200",
+      cmd: "curl",
+      fingerprint: "persisted-9200",
+      signature: signatureLines("Error HTTP 404 from port 9200"),
+      excerpt: "Error HTTP 404 from port 9200",
+    },
+    {
+      ...failureB,
+      id: "persisted-5432",
+      cmd: "curl",
+      fingerprint: "persisted-5432",
+      signature: signatureLines("Error HTTP 404 from port 5432"),
+      excerpt: "Error HTTP 404 from port 5432",
+    },
+  ];
+  assert.equal(queryRecall(records, { query: "HTTP 404 port 9200" })[0]?.failure.id, "persisted-9200");
+});
+
+test("one exact distinctive token survives long signatures", () => {
+  const make = (count: number, id: string): FailureRecord => ({
+    ...failureA,
+    id,
+    fingerprint: id,
+    cmd: "tool diagnose",
+    signature: [Array.from({ length: count }, (_, index) => `context-${index}`).concat("needle-unique").join(" ")],
+    excerpt: "needle-unique",
+  });
+  for (const count of [25, 100]) {
+    const hit = queryRecall([make(count, `long-${count}`)], { query: "needle-unique" });
+    assert.equal(hit[0]?.failure.id, `long-${count}`);
+  }
+});
+
+test("rare exact token boost remains active when token appears twice among many records", () => {
+  const make = (index: number, includeRare: boolean): FailureRecord => ({
+    ...failureA,
+    id: `rare-${index}`,
+    ts: 1_000 + index,
+    fingerprint: `rare-${index}`,
+    cmd: "tool diagnose",
+    signature: [Array.from({ length: 100 }, (_, item) => `context-${index}-${item}`)
+      .concat(includeRare ? ["rare-needle"] : [])
+      .join(" ")],
+    excerpt: includeRare ? "rare-needle" : "context",
+  });
+  const records = Array.from({ length: 50 }, (_, index) => make(index, index < 2));
+  const hits = queryRecall(records, { query: "rare-needle", limit: 3 });
+  assert.deepEqual(hits.map((hit) => hit.failure.id), ["rare-1", "rare-0"]);
+  assert.ok(hits.every((hit) => hit.score >= 0.06));
 });

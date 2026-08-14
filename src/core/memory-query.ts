@@ -1,4 +1,12 @@
-import { commandBase, commandIdentity, similarity, tokens } from "./fingerprint.js";
+import {
+  commandBase,
+  commandIdentity,
+  fingerprint,
+  legacyFingerprint,
+  retrievalTokens,
+  similarity,
+  tokens,
+} from "./fingerprint.js";
 import { loadMemory } from "./memory-read.js";
 import type { FailureRecord, FixRecord, LinkBasis, LinkConfidence, MemoryRecord, TripleRecord } from "./memory-read.js";
 import { triplesForFile } from "./dictionary.js";
@@ -27,9 +35,69 @@ export interface MemoryQueries {
   whyFile(path: string, limit?: number): TripleRecord[];
 }
 
-export function findByFingerprint(records: readonly MemoryRecord[], fp: string, now = Date.now()): FailureRecord[] {
+export type FingerprintLookup = string | readonly string[];
+
+const FINGERPRINT_TEXT = /^[0-9a-f]{16}$/u;
+
+function lookupFingerprints(fp: FingerprintLookup): Set<string> {
+  return new Set(typeof fp === "string" ? [fp] : fp);
+}
+
+function fingerprintMatches(record: FailureRecord, candidates: Set<string>): boolean {
+  if (candidates.has(record.fingerprint)) return true;
+  // Records marked v1 (or lacking a marker) predate v2. Re-normalizing their
+  // stored signature lets a current-only caller find old records for the
+  // common case; callers that still have stderr pass both candidates for lossy
+  // old numbers. A v2 record has already been compared exactly above.
+  if (record.fingerprintV === 2) return false;
+  if (!FINGERPRINT_TEXT.test(record.fingerprint)) return false;
+  // Empty-stderr and shell-hook records use the command-only fingerprint, so
+  // there is no stderr source to re-normalize. The current command hash still
+  // identifies this migration path without weakening the stored-hash check.
+  const commandOnly = (record.signature.length === 0 && record.excerpt.length === 0) || record.origin === "hook";
+  if (commandOnly) {
+    const currentCommand = fingerprint("", record.cmd, record.exitCode);
+    if (candidates.has(currentCommand) && record.fingerprint === legacyFingerprint("", record.cmd, record.exitCode)) return true;
+  }
+  // Old records carry only the normalized signature, while the excerpt often
+  // still has the raw error lines. Try both representations so a current-only
+  // caller can bridge the migration even when URL/number normalization was
+  // lossy in the stored v1 signature.
+  const sources = [record.signature.join("\n"), record.excerpt].filter((source, index, all) =>
+    source.length > 0 && all.indexOf(source) === index,
+  );
+  return sources.some((source) => {
+    const legacy = legacyFingerprint(source, record.cmd, record.exitCode);
+    // Re-derived values are accepted only when the persisted v1 fingerprint
+    // proves that this source belonged to the record. Otherwise a forged or
+    // hand-authored legacy record could match an unrelated current candidate
+    // merely because its signature happens to hash the same way.
+    return record.fingerprint === legacy && candidates.has(fingerprint(source, record.cmd, record.exitCode));
+  });
+}
+
+function canonicalFingerprint(record: FailureRecord, currentFingerprints: ReadonlySet<string>): string {
+  if (record.fingerprintV === 2) return record.fingerprint;
+  if (!FINGERPRINT_TEXT.test(record.fingerprint)) return record.fingerprint;
+  // Legacy-only stores already deduplicate on their persisted v1 hash. Only
+  // derive v2 candidates when a current record exists to bridge to; this keeps
+  // large pre-migration memories on the same linear path as modern memories.
+  if (currentFingerprints.size === 0) return record.fingerprint;
+  const sources = [record.signature.join("\n"), record.excerpt].filter((source, index, all) =>
+    source.length > 0 && all.indexOf(source) === index,
+  );
+  for (const source of sources) {
+    if (record.fingerprint !== legacyFingerprint(source, record.cmd, record.exitCode)) continue;
+    const current = fingerprint(source, record.cmd, record.exitCode);
+    if (currentFingerprints.has(current)) return current;
+  }
+  return record.fingerprint;
+}
+
+export function findByFingerprint(records: readonly MemoryRecord[], fp: FingerprintLookup, now = Date.now()): FailureRecord[] {
+  const candidates = lookupFingerprints(fp);
   return uniqueRecords(records).filter((record): record is FailureRecord =>
-    record.kind === "failure" && record.ts <= now && record.fingerprint === fp,
+    record.kind === "failure" && record.ts <= now && fingerprintMatches(record, candidates),
   );
 }
 
@@ -110,18 +178,26 @@ export function queryRecall(records: readonly MemoryRecord[], input: RecallQuery
   const fixes = fixesIndex(unique, now);
   const limit = input.limit ?? 3;
   const queryTokens = tokens(input.query);
+  const candidates = unique
+    .filter((record): record is FailureRecord => record.kind === "failure" && record.ts <= now &&
+      (input.cwd === undefined || record.cwd === input.cwd))
+    .map((record) => ({ record, tokenSet: retrievalTokens([record.cmd, ...record.signature].join(" ")) }));
+  const documentFrequency = tokenDocumentFrequency(candidates.map((candidate) => candidate.tokenSet));
+  const currentFingerprints = new Set(
+    candidates.filter(({ record }) => record.fingerprintV === 2).map(({ record }) => record.fingerprint),
+  );
   const best = new Map<string, RecallHit>();
-  for (const record of unique) {
-    if (record.kind !== "failure" || record.ts > now || (input.cwd !== undefined && record.cwd !== input.cwd)) continue;
-    const score = similarity(queryTokens, tokens([record.cmd, ...record.signature].join(" ")));
+  for (const { record, tokenSet } of candidates) {
+    const score = semanticScore(queryTokens, tokenSet, documentFrequency, candidates.length);
     if (score <= 0.05) continue;
     const hit = { failure: record, fix: fixForFailure(fixes, record, now), score };
-    const previous = best.get(record.fingerprint);
+    const key = canonicalFingerprint(record, currentFingerprints);
+    const previous = best.get(key);
     if (!previous || (!previous.fix && hit.fix) || (!!previous.fix === !!hit.fix && record.ts > previous.failure.ts)) {
-      best.set(record.fingerprint, hit);
+      best.set(key, hit);
     }
   }
-  return [...best.values()].sort((a, b) => b.score - a.score).slice(0, limit);
+  return [...best.values()].sort((a, b) => b.score - a.score || b.failure.ts - a.failure.ts).slice(0, limit);
 }
 
 export function queryRecentFailures(
@@ -168,33 +244,50 @@ export function searchKnowledge(
   const hits: KnowledgeSearchHit[] = [];
   const wants = (kind: KnowledgeSearchHit["kind"]): boolean => input.kind === undefined || input.kind === kind;
 
+  const entries: Array<{ record: MemoryRecord; tokenSet: Set<string>; snippet: string }> = [];
   for (const record of uniqueRecords(records)) {
     if (record.ts > now) continue;
     if (record.kind === "failure" && wants("failure")) {
-      const score = similarity(queryTokens, tokens(`${record.cmd} ${record.signature.join(" ")}`));
+      entries.push({
+        record,
+        tokenSet: retrievalTokens(`${record.cmd} ${record.signature.join(" ")}`),
+        snippet: record.cmd.slice(0, 120),
+      });
+    } else if (record.kind === "fix" && wants("fix")) {
+      entries.push({ record, tokenSet: retrievalTokens(record.cmd), snippet: record.cmd.slice(0, 120) });
+    } else if (record.kind === "triple" && wants("triple") && record.intent) {
+      entries.push({
+        record,
+        tokenSet: retrievalTokens(`${record.intent.text} ${record.rationale?.tags.join(" ") ?? ""}`),
+        snippet: record.intent.text.slice(0, 120),
+      });
+    }
+  }
+  const documentFrequency = tokenDocumentFrequency(entries.map((entry) => entry.tokenSet));
+  for (const { record, tokenSet, snippet } of entries) {
+    const score = semanticScore(queryTokens, tokenSet, documentFrequency, entries.length);
+    if (record.kind === "failure") {
       if (score > 0) hits.push({
         id: record.id,
         ts: record.ts,
         kind: "failure",
-        snippet: record.cmd.slice(0, 120),
+        snippet,
         score,
       });
-    } else if (record.kind === "fix" && wants("fix")) {
-      const score = similarity(queryTokens, tokens(record.cmd));
+    } else if (record.kind === "fix") {
       if (score > 0) hits.push({
         id: record.id,
         ts: record.ts,
         kind: "fix",
-        snippet: record.cmd.slice(0, 120),
+        snippet,
         score,
       });
-    } else if (record.kind === "triple" && wants("triple") && record.intent) {
-      const score = similarity(queryTokens, tokens(`${record.intent.text} ${record.rationale?.tags.join(" ") ?? ""}`));
+    } else if (record.kind === "triple") {
       if (score > 0) hits.push({
         id: record.id,
         ts: record.ts,
         kind: "triple",
-        snippet: record.intent.text.slice(0, 120),
+        snippet,
         score,
       });
     }
@@ -239,6 +332,46 @@ export function recentUnresolvedFailures(
         confidence: confirmed ? "confirmed" as const : "possible" as const,
       };
     });
+}
+
+function tokenDocumentFrequency(tokenSets: readonly Set<string>[]): Map<string, number> {
+  const frequency = new Map<string, number>();
+  for (const tokenSet of tokenSets) {
+    for (const token of tokenSet) frequency.set(token, (frequency.get(token) ?? 0) + 1);
+  }
+  return frequency;
+}
+
+const NON_DISTINCTIVE_TOKENS = new Set([
+  "line", "pid", "time", "timestamp", "date", "error", "exception", "fail", "failed", "failure",
+  "http", "status", "code", "port", "connect", "refused", "request", "response",
+]);
+
+function distinctiveToken(token: string): boolean {
+  if (token.startsWith("<") || token.startsWith("#")) return false;
+  if (NON_DISTINCTIVE_TOKENS.has(token)) return false;
+  // Short non-ASCII words can carry meaning (e.g. CJK); ASCII stop words are
+  // already filtered by the tokenizer and this guard keeps generic 3-letter
+  // command fragments from receiving a boost.
+  return token.length >= 3 || /[^\x00-\x7F]/u.test(token);
+}
+
+/** Jaccard plus an exact rare-token floor, applied before recall thresholds. */
+function semanticScore(
+  queryTokens: Set<string>,
+  candidateTokens: Set<string>,
+  documentFrequency: Map<string, number>,
+  candidateCount: number,
+): number {
+  const base = similarity(queryTokens, candidateTokens);
+  const rareFrequency = candidateCount >= 10
+    ? Math.min(8, Math.max(2, Math.ceil(candidateCount * 0.05)))
+    : 1;
+  const rareExact = [...queryTokens].some((token) =>
+    distinctiveToken(token) && candidateTokens.has(token) && (documentFrequency.get(token) ?? 0) <= rareFrequency,
+  );
+  if (!rareExact) return base;
+  return Math.min(1, Math.max(base, 0.06));
 }
 
 function identityForFailure(failure: FailureRecord): { value: string; reliable: boolean; base: string } {

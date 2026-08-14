@@ -17,8 +17,8 @@ import type { Stats } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { commandFingerprint } from "../core/fingerprint.js";
 import { CANCEL_CODES } from "../core/exec.js";
+import { commandFingerprintCandidates } from "../core/fingerprint.js";
 import { renderGuardRules, rulesFileIsPristine } from "../core/guard-rules.js";
 import {
   addHookBlockBytes,
@@ -80,7 +80,7 @@ export function hookFail(cmd: string, exitCode: number, cwd: string): number {
   if (memory === undefined) return 0; // unreadable memory: recorded, but nothing to recall
 
   const now = Date.now();
-  const fp = commandFingerprint(cmd, exitCode);
+  const fp = commandFingerprintCandidates(cmd, exitCode);
   const previous = findByFingerprint(memory, fp, now);
 
   if (previous.length === 0) return 0; // first time: passive ears stay quiet

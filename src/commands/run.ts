@@ -9,7 +9,7 @@
  * evidence remains a possible association.
  */
 
-import { fingerprint } from "../core/fingerprint.js";
+import { fingerprintCandidates } from "../core/fingerprint.js";
 import { CANCEL_CODES, runProcess, type ExecResult } from "../core/exec.js";
 import { resolveRockyPaths } from "../core/state-paths.js";
 import {
@@ -68,7 +68,7 @@ function readMemory(): MemoryRecord[] | undefined {
  */
 export function speakFailureMemory(
   memory: MemoryRecord[],
-  fp: string,
+  fp: string | readonly string[],
   exitCode: number,
   _cwd: string,
   now = Date.now(),
@@ -113,7 +113,7 @@ function onFailure(cmd: string, result: ExecResult): void {
     // result.stderr is the bounded tail (last TAIL_LINES lines, each capped
     // at MAX_LINE_BYTES), not the full stderr stream — fingerprinting now
     // sees the last 200 lines, not everything the command wrote (spec §3.6).
-    speakFailureMemory(memory, fingerprint(result.stderr, cmd, result.code), result.code, process.cwd());
+    speakFailureMemory(memory, fingerprintCandidates(result.stderr, cmd, result.code), result.code, process.cwd());
   }
 
   recordFailure(cmd, result.code, result.stderr);

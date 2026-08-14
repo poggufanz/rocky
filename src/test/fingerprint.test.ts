@@ -1,6 +1,16 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { normalizeLine, commandFingerprint, fingerprint } from "../core/fingerprint.js";
+import {
+  FINGERPRINT_ALGORITHM_VERSION,
+  commandFingerprint,
+  fingerprint,
+  fingerprintCandidates,
+  fingerprintTokens,
+  legacyFingerprint,
+  normalizeLine,
+  retrievalTokens,
+  tokens,
+} from "../core/fingerprint.js";
 
 test("normalizeLine masks paths and numbers", () => {
   const line = "Error: cannot open /home/you/app/src/x.ts:41:7";
@@ -35,4 +45,83 @@ test("empty-stderr failures of different commands no longer collide", () => {
 
 test("non-empty stderr fingerprint ignores cmd and exit code (unchanged behavior)", () => {
   assert.equal(fingerprint("Error: boom", "a", 1), fingerprint("Error: boom", "b", 2));
+});
+
+test("URL masking consumes the complete URL before path masking", () => {
+  const line = normalizeLine("Error GET https://user:pass@[2001:db8::1]:8443/api/item?token=123&mode=full#frag");
+  assert.equal(line, "error get <url>");
+  assert.equal(line.includes("host"), false);
+  assert.equal(line.includes("token"), false);
+  assert.equal(line.includes("8443"), false);
+});
+
+test("semantic HTTP status, explicit code, and port numbers survive fingerprint normalization", () => {
+  assert.notEqual(fingerprint("Error: HTTP 404 from port 9200", "curl", 1), fingerprint("Error: HTTP 500 from port 9200", "curl", 1));
+  assert.notEqual(fingerprint("Error: HTTP 404 code 1001 on port 9200", "curl", 1), fingerprint("Error: HTTP 404 code 1002 on port 9200", "curl", 1));
+  assert.notEqual(fingerprint("Error: connect to host:9200", "curl", 1), fingerprint("Error: connect to host:5432", "curl", 1));
+});
+
+test("volatile line, pid, and timestamp numbers remain stable", () => {
+  const a = "Error at /srv/app/index.ts:41:7 pid 1234 at 2026-08-14T10:11:12Z";
+  const b = "Error at /srv/app/index.ts:99:2 pid 9876 at 2027-09-15T21:31:42Z";
+  assert.equal(fingerprint(a, "node app", 1), fingerprint(b, "node app", 1));
+  assert.equal(fingerprint("Error at file.ts:41:7", "node app", 1), fingerprint("Error at file.ts:99:2", "node app", 1));
+});
+
+test("UUID and SHA digests are masked only at safe boundaries", () => {
+  const uuidA = "Error request 550e8400-e29b-41d4-a716-446655440000";
+  const uuidB = "Error request 6ba7b810-9dad-11d1-80b4-00c04fd430c8";
+  assert.equal(fingerprint(uuidA, "api", 1), fingerprint(uuidB, "api", 1));
+
+  const sha256A = "Error sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+  const sha256B = "Error sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+  assert.equal(fingerprint(sha256A, "hash", 1), fingerprint(sha256B, "hash", 1));
+  for (const [algorithm, length] of [["sha1", 40], ["sha256", 64], ["sha512", 128]] as const) {
+    const first = `Error ${algorithm}:${"a".repeat(length)}`;
+    const second = `Error ${algorithm}:${"b".repeat(length)}`;
+    assert.equal(fingerprint(first, "hash", 1), fingerprint(second, "hash", 1), algorithm);
+  }
+  assert.notEqual(
+    fingerprint(sha256A, "hash", 1),
+    fingerprint("Error sha512:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "hash", 1),
+  );
+  assert.notEqual(fingerprint("Error id tokenabc", "hash", 1), fingerprint("Error id tokendef", "hash", 1));
+  assert.notEqual(
+    fingerprint("Error id x550e8400-e29b-41d4-a716-446655440000", "hash", 1),
+    fingerprint("Error id x6ba7b810-9dad-11d1-80b4-00c04fd430c8", "hash", 1),
+  );
+  assert.equal(
+    normalizeLine("Error id x550e8400-e29b-41d4-a716-446655440000"),
+    "error id x550e8400-e29b-41d4-a716-446655440000",
+  );
+});
+
+test("retrieval tokenization is Unicode NFC and keeps separate fingerprint role", () => {
+  const cyrillic = tokens("Ошибка файл не найден");
+  const arabic = tokens("خطأ ملف مفقود");
+  const accentedComposed = tokens("café");
+  const accentedCombining = tokens("cafe\u0301");
+  const greek = tokens("Σφάλμα αρχείο");
+  const cjk = tokens("错误 文件");
+  assert.ok(cyrillic.has("ошибка") && cyrillic.has("найден"));
+  assert.ok(arabic.has("خطأ") && arabic.has("مفقود"));
+  assert.deepEqual(accentedCombining, accentedComposed);
+  assert.ok(greek.has("σφάλμα"));
+  assert.ok(cjk.has("错误") && cjk.has("文件"));
+  assert.ok(retrievalTokens("HTTP 404").has("404"));
+  assert.ok(retrievalTokens("line 41 pid 1234").has("#"));
+  assert.equal(retrievalTokens("line 41 pid 1234").has("41"), false);
+  const volatile = retrievalTokens("line 41 pid 1234 at 2026-08-14T10:11:12Z");
+  assert.equal([...volatile].some((token) => /^(?:41|1234|2026|10|11|12)$/u.test(token)), false);
+  assert.ok(fingerprintTokens("line 41").has("#"));
+  assert.ok(tokens("some-missing-package").has("some-missing-package"));
+  assert.ok(tokens("some-missing-package").has("missing"));
+});
+
+test("fingerprint algorithm is versioned and exposes a backward lookup candidate", () => {
+  assert.equal(FINGERPRINT_ALGORITHM_VERSION, 2);
+  const candidates = fingerprintCandidates("Error: old path /tmp/x-123", "node app", 1);
+  assert.equal(candidates[0], fingerprint("Error: old path /tmp/x-123", "node app", 1));
+  assert.equal(candidates.includes(legacyFingerprint("Error: old path /tmp/x-123", "node app", 1)), true);
+  assert.equal(candidates.length, 2);
 });

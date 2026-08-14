@@ -9,7 +9,7 @@ import {
 } from "node:fs";
 import { Buffer } from "node:buffer";
 import { resolveRockyPaths } from "./state-paths.js";
-import { commandIdentity } from "./fingerprint.js";
+import { commandIdentity, type FingerprintAlgorithmVersion } from "./fingerprint.js";
 
 export type FailureOrigin = "run" | "hook" | "watch";
 
@@ -21,6 +21,8 @@ export interface FailureRecord {
   cmd: string;
   exitCode: number;
   fingerprint: string;
+  /** Absent means a pre-v2 record; v1 is retained for explicit migrations. */
+  fingerprintV?: FingerprintAlgorithmVersion;
   signature: string[];
   excerpt: string;
   origin?: FailureOrigin;
@@ -136,6 +138,12 @@ function identityFields(record: Record<string, unknown>): Pick<FailureRecord, "c
   };
 }
 
+function fingerprintFields(record: Record<string, unknown>): Pick<FailureRecord, "fingerprintV"> | undefined {
+  if (record.fingerprintV === undefined) return {};
+  if (record.fingerprintV !== 1 && record.fingerprintV !== 2) return undefined;
+  return { fingerprintV: record.fingerprintV as FingerprintAlgorithmVersion };
+}
+
 // A record's origin is defined but not one of the three known values — including when it
 // isn't a string at all (a number, an object, null) — is read as "run" rather than
 // discarding the whole record. Compatibility cost the spec accepts: an already-released
@@ -156,13 +164,14 @@ export function parseMemoryRecord(value: unknown): MemoryRecord | undefined {
   if (record.kind === "failure") {
     const signature = strings(record.signature);
     const identity = identityFields(record);
+    const fingerprintVersion = fingerprintFields(record);
     if (typeof record.exitCode !== "number" || !Number.isInteger(record.exitCode) || typeof record.fingerprint !== "string" ||
-        !signature || !identity || typeof record.excerpt !== "string" || typeof record.cmd !== "string") return undefined;
+        !signature || !identity || !fingerprintVersion || typeof record.excerpt !== "string" || typeof record.cmd !== "string") return undefined;
     const origin = normalizeOrigin(record.origin);
     return {
       kind: "failure", id: record.id, ts: Number(record.ts), cwd: record.cwd,
       cmd: record.cmd, exitCode: Number(record.exitCode), fingerprint: record.fingerprint,
-      signature, excerpt: record.excerpt,
+      ...fingerprintVersion, signature, excerpt: record.excerpt,
       ...(origin === undefined ? {} : { origin }),
       ...identity,
     };
