@@ -29,6 +29,34 @@ test("detects each supported secret family", () => {
   }
 });
 
+test("detects modern prefixed keys and quoted or unquoted credential assignments", () => {
+  const cases: Array<[string, string]> = [
+    ["sk-proj-aB3dE5fG7hI9-jK2mN4pQ6rS8tU0vW1xY2zA4", "openai key"],
+    ["password=pA7!cV2@kL9", "password assignment"],
+    ["secret = 'rT8$wX3!nM6'", "password assignment"],
+    ["token=tok_aB3d-E5fG7hI9jK2mN4pQ6", "credential assignment"],
+    ['api_key = "api-aB3dE5fG7hI9jK2mN4pQ6"', "credential assignment"],
+    ['authorization="Bearer syn_aB3dE5fG7hI9jK2mN4pQ6"', "credential assignment"],
+    ["authorization: Bearer syn_aB3dE5fG7hI9jK2mN4pQ6", "credential assignment"],
+  ];
+
+  for (const [text, kind] of cases) {
+    assert.deepEqual(scanSecrets([line(text)]).map((hit) => hit.kind), [kind], text);
+  }
+});
+
+test("strips terminal controls and bidi obfuscation before secret detection", () => {
+  const cases = [
+    "sk-\u202eproj-aB3dE5fG7hI9jK2mN4pQ6rS8tU0vW1xY2zA4",
+    "sk-\u001b[31mproj-aB3dE5fG7hI9jK2mN4pQ6rS8tU0vW1xY2zA4",
+    "pass\u0000word=pA7!cV2@kL9",
+  ];
+
+  for (const text of cases) {
+    assert.equal(scanSecrets([line(text)]).length, 1, JSON.stringify(text));
+  }
+});
+
 test("anthropic keys are not double-reported as openai keys", () => {
   const hits = scanSecrets([line("sk-ant-aB3dE5fG7hI9jK2mN4pQ6rS8")]);
 
@@ -67,6 +95,12 @@ test("does not flag benign, placeholder, or test-example lines", () => {
     "const placeholder = \"sk-ant-" + "x".repeat(24) + "\";",
     "const placeholder = \"sk-" + "z".repeat(24) + "\";",
     'password = "test-password-123"',
+    "secret=example-secret",
+    "token=changeme",
+    'api_key="placeholder-value"',
+    'authorization="Bearer example-token"',
+    "authorization: Bearer placeholder-token",
+    "sk-proj-" + "x".repeat(28),
   ];
 
   assert.equal(scanSecrets(benign.map(line)).length, 0);

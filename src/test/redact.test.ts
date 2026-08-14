@@ -36,6 +36,20 @@ test("redactSecrets masks password assignments", () => {
   );
 });
 
+test("redactSecrets masks quoted and unquoted credential assignments without leaving value tails", () => {
+  const cases = [
+    "password=pA7!cV2@kL9",
+    "secret='rT8$wX3!nM6'",
+    "token=tok_aB3d-E5fG7hI9jK2mN4pQ6",
+    'api_key="api-aB3dE5fG7hI9jK2mN4pQ6"',
+    "authorization: Bearer syn_aB3dE5fG7hI9jK2mN4pQ6",
+  ];
+
+  for (const input of cases) {
+    assert.match(redactSecrets(input), /^\[redacted (?:password|credential) assignment\]$/u, input);
+  }
+});
+
 test("redactSecrets masks repeated matches of one secret kind", () => {
   const secret = "AKIAABCDEFGHIJKLMNOP";
   assert.equal(

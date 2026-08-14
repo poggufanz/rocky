@@ -1,83 +1,98 @@
-/**
- * Deliberately small and strict: an added-lines checker, not a gitleaks
- * replacement. False positives escape via `git push --no-verify`.
- * Order matters: "anthropic key" must precede "openai key". First match per
- * line wins.
- */
+/** Canonical secret families shared by durable replacement and hull detection. */
 interface SecretDefinition {
-  readonly kind: string;
+  readonly replacementLabel: string;
+  readonly detectionKind: string;
   readonly source: string;
   readonly flags?: string;
   readonly leadingBoundary?: boolean;
   readonly trailingBoundary?: boolean;
   readonly fragmentSource: string;
+  readonly assignmentValueGroups?: readonly number[];
 }
 
 const SECRET_DEFINITIONS: ReadonlyArray<SecretDefinition> = [
   {
-    kind: "aws access key",
+    replacementLabel: "aws access key",
+    detectionKind: "aws access key",
     source: "AKIA[0-9A-Z]{16}",
     leadingBoundary: true,
     trailingBoundary: true,
     fragmentSource: "AKIA[0-9A-Z]{8,}",
   },
   {
-    kind: "private key",
+    replacementLabel: "private key",
+    detectionKind: "private key",
     source: "-----BEGIN [A-Z ]*PRIVATE KEY-----",
     fragmentSource: "-----BEGIN[ A-Za-z0-9_-]*",
   },
   {
-    kind: "github token",
+    replacementLabel: "github token",
+    detectionKind: "github token",
     source: "(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{22,}",
     leadingBoundary: true,
     trailingBoundary: true,
     fragmentSource: "(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_]{4,}|github_pat_[A-Za-z0-9_]{4,}",
   },
   {
-    kind: "slack token",
+    replacementLabel: "slack token",
+    detectionKind: "slack token",
     source: "xox[baprs]-[A-Za-z0-9-]{10,}",
     leadingBoundary: true,
     trailingBoundary: true,
     fragmentSource: "xox[baprs]-[A-Za-z0-9-]{4,}",
   },
   {
-    kind: "anthropic key",
+    replacementLabel: "anthropic key",
+    detectionKind: "anthropic key",
     source: "sk-ant-[A-Za-z0-9_-]{20,}",
     leadingBoundary: true,
     trailingBoundary: true,
     fragmentSource: "sk-ant-[A-Za-z0-9_-]{3,}",
   },
   {
-    kind: "openai key",
-    source: "sk-[A-Za-z0-9]{20,}",
+    replacementLabel: "openai key",
+    detectionKind: "openai key",
+    source: "sk-[A-Za-z0-9_-]{20,}",
     leadingBoundary: true,
     trailingBoundary: true,
-    fragmentSource: "sk-[A-Za-z0-9]{3,}",
+    fragmentSource: "sk-[A-Za-z0-9_-]{3,}",
   },
   {
-    kind: "npm token",
+    replacementLabel: "npm token",
+    detectionKind: "npm token",
     source: "npm_[A-Za-z0-9]{36}",
     leadingBoundary: true,
     trailingBoundary: true,
     fragmentSource: "npm_[A-Za-z0-9_]{8,}",
   },
   {
-    kind: "password assignment",
-    source: String.raw`(?:password|secret)\s*=\s*(['"])([^'"]{4,})\1`,
+    replacementLabel: "password assignment",
+    detectionKind: "password assignment",
+    source: String.raw`(?:password|secret)\s*[:=]\s*(?:(['"])([^'"\r\n]{4,})\1|([^\s'"\x60,;]{4,}))`,
     flags: "i",
     leadingBoundary: true,
-    fragmentSource: String.raw`(?:password|secret)\s*=\s*(?:["'][^"']*|[^\s]*)`,
+    fragmentSource: String.raw`(?:password|secret)\s*[:=]\s*(?:["'][^"']*|[^\s]*)`,
+    assignmentValueGroups: [2, 3],
+  },
+  {
+    replacementLabel: "credential assignment",
+    detectionKind: "credential assignment",
+    source: String.raw`(?:token|api[_-]?key|authorization)\s*[:=]\s*(?:(['"])([^'"\r\n]{4,})\1|((?:(?:Bearer|Basic|Token)\s+)?[^\s'"\x60,;]{4,}))`,
+    flags: "i",
+    leadingBoundary: true,
+    fragmentSource: String.raw`(?:token|api[_-]?key|authorization)\s*[:=]\s*(?:["'][^"']*|(?:(?:Bearer|Basic|Token)\s+)?[^\s]*)`,
+    assignmentValueGroups: [2, 3],
   },
 ];
 
 function patternFor(definition: SecretDefinition, boundaryFree: boolean): RegExp {
-  const leading = !boundaryFree && definition.leadingBoundary ? "\\b" : "";
-  const trailing = !boundaryFree && definition.trailingBoundary ? "\\b" : "";
+  const leading = !boundaryFree && definition.leadingBoundary ? "(?<![A-Za-z0-9_])" : "";
+  const trailing = !boundaryFree && definition.trailingBoundary ? "(?![A-Za-z0-9_])" : "";
   return new RegExp(`${leading}(?:${definition.source})${trailing}`, definition.flags ?? "");
 }
 
-export const SECRET_PATTERNS: ReadonlyArray<readonly [kind: string, re: RegExp]> = SECRET_DEFINITIONS.map(
-  (definition) => [definition.kind, patternFor(definition, false)] as const,
+const SECRET_PATTERNS: ReadonlyArray<readonly [kind: string, re: RegExp]> = SECRET_DEFINITIONS.map(
+  (definition) => [definition.replacementLabel, patternFor(definition, false)] as const,
 );
 
 const INVISIBLE_CONTROL_SINGLE_RE = /[\u061C\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]/u;
@@ -203,11 +218,11 @@ export function replaceAnsiAndControls(text: string, replacement = "", c0Replace
 }
 
 const SECRET_BOUNDARY_FREE_PATTERNS: ReadonlyArray<readonly [kind: string, re: RegExp]> = SECRET_DEFINITIONS.map(
-  (definition) => [definition.kind, new RegExp(patternFor(definition, true).source, `${definition.flags ?? ""}g`)] as const,
+  (definition) => [definition.replacementLabel, new RegExp(patternFor(definition, true).source, `${definition.flags ?? ""}g`)] as const,
 );
 
 const SECRET_FRAGMENT_PATTERNS: ReadonlyArray<readonly [kind: string, re: RegExp]> = SECRET_DEFINITIONS.map(
-  (definition) => [definition.kind, new RegExp(definition.fragmentSource, `${definition.flags ?? ""}g`)] as const,
+  (definition) => [definition.replacementLabel, new RegExp(definition.fragmentSource, `${definition.flags ?? ""}g`)] as const,
 );
 
 interface InvisibleControlStripResult {
@@ -236,6 +251,49 @@ function stripInvisibleControlsWithOffsets(text: string): InvisibleControlStripR
     outputOffset += character.length;
   }
   return { text: pieces.join(""), removedOffsets };
+}
+
+const EXAMPLE_SECRET_WORD = /(?:^|[^A-Za-z0-9])(?:test|example|dummy|placeholder|changeme)(?:$|[^A-Za-z0-9])/i;
+const INDIRECT_SECRET_VALUE = /^(?:process\.env\.[A-Za-z_][A-Za-z0-9_]*|env\.[A-Za-z_][A-Za-z0-9_]*|\$\{?[A-Za-z_][A-Za-z0-9_]*\}?|<[^>]+>)$/i;
+const SECRET_TOKEN_PREFIX = /^(?:AKIA|github_pat_|gh[opurs]_|xox[baprs]-|sk-(?:[A-Za-z0-9]+-)*|npm_)/;
+
+function assignmentValue(definition: SecretDefinition, match: RegExpExecArray): string | undefined {
+  for (const group of definition.assignmentValueGroups ?? []) {
+    const value = match[group];
+    if (value !== undefined) return value.trim();
+  }
+  return undefined;
+}
+
+function isPlaceholderMatch(definition: SecretDefinition, match: RegExpExecArray): boolean {
+  const assigned = assignmentValue(definition, match);
+  if (assigned !== undefined) {
+    const candidate = assigned.replace(/^(?:Bearer|Basic|Token)\s+/i, "").trim();
+    return EXAMPLE_SECRET_WORD.test(candidate) || INDIRECT_SECRET_VALUE.test(candidate);
+  }
+
+  const body = match[0].replace(SECRET_TOKEN_PREFIX, "");
+  return body.length > 0 && /^([A-Za-z0-9])\1+$/.test(body);
+}
+
+/**
+ * Return the first non-placeholder secret family found after removing terminal
+ * and bidi obfuscation. Detection and durable replacement compile from the
+ * same canonical family definitions above, while retaining distinct labels.
+ */
+export function detectSecretKind(text: string): string | undefined {
+  const normalized = stripInvisibleControls(replaceAnsiAndControls(text));
+  for (const definition of SECRET_DEFINITIONS) {
+    const base = patternFor(definition, false);
+    const flags = `${base.flags.replace("g", "")}g`;
+    const pattern = new RegExp(base.source, flags);
+    let match: RegExpExecArray | null;
+    while ((match = pattern.exec(normalized)) !== null) {
+      if (!isPlaceholderMatch(definition, match)) return definition.detectionKind;
+      if (match[0].length === 0) pattern.lastIndex += 1;
+    }
+  }
+  return undefined;
 }
 
 export function redactSecrets(text: string): string {

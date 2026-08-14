@@ -568,6 +568,73 @@ test("C0-obfuscated secrets are removed before durable redaction in every text f
   assert.doesNotMatch(durable, /[\u0000-\u001f\u007f\u001b\u202e]/u);
 });
 
+test("durable annotation redacts modern keys and credential assignments from every sink", async (t) => {
+  const paths = freshPaths(t);
+  const modernKey = "sk-proj-aB3dE5fG7hI9-jK2mN4pQ6rS8tU0vW1xY2zA4";
+  const values = [
+    modernKey,
+    "pA7!cV2@kL9",
+    "rT8$wX3!nM6",
+    "tok_aB3d-E5fG7hI9jK2mN4pQ6",
+    "api-aB3dE5fG7hI9jK2mN4pQ6",
+    "syn_aB3dE5fG7hI9jK2mN4pQ6",
+  ];
+  const labels: string[] = [];
+  append("modern-secrets", [
+    { v: 1, agent: "codex", kind: "intent", ts: 1, text: `deploy ${modernKey}` },
+    {
+      v: 1, agent: "codex", kind: "mechanism", ts: 2, tool: "Edit",
+      path: `src/${modernKey}.ts`, excerpt: `${modernKey} password=pA7!cV2@kL9 secret='rT8$wX3!nM6'`,
+    },
+    {
+      v: 1, agent: "codex", kind: "rationale", ts: 3, source: "notify",
+      text: 'token=tok_aB3d-E5fG7hI9jK2mN4pQ6 authorization="Bearer syn_aB3dE5fG7hI9jK2mN4pQ6"',
+    },
+  ], paths);
+
+  const triple = await annotateBatch("modern-secrets", {
+    paths,
+    git: () => undefined,
+    ai: {
+      async run() {
+        return {
+          summary: `${modernKey} secret=rT8$wX3!nM6`,
+          tags: [modernKey, 'api_key="api-aB3dE5fG7hI9jK2mN4pQ6"'],
+          label: `${modernKey}, question`,
+        };
+      },
+    },
+    queueLabel: (label) => labels.push(label),
+  });
+
+  assert.ok(triple);
+  assert.match(triple.intent?.text ?? "", /\[redacted openai key\]/u);
+  assert.match(triple.mechanism.files[0]?.path ?? "", /\[redacted openai key\]/u);
+  assert.match(triple.mechanism.files[0]?.excerpt ?? "", /\[redacted openai key\].*\[redacted password assignment\]/u);
+  assert.match(triple.rationale?.text ?? "", /\[redacted openai key\].*\[redacted password assignment\]/u);
+  assert.equal(triple.rationale?.tags[0], "[redacted openai key]");
+  assert.match(triple.rationale?.tags[1] ?? "", /^\[redacted credential ass/u);
+  assert.match(labels[0] ?? "", /\[redacted openai key\]/u);
+  const durable = `${readFileSync(paths.memory, "utf8")}\n${JSON.stringify(labels)}`;
+  for (const value of values) assert.doesNotMatch(durable, new RegExp(value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "u"));
+});
+
+test("durable annotation strips controls and scrubs a boundary-truncated modern key", async (t) => {
+  const paths = freshPaths(t);
+  const obfuscated = "sk-\u202eproj-\u001b[31maB3dE5fG7hI9-jK2mN4pQ6rS8tU0vW1xY2zA4";
+  const capped = `${"\u061C".repeat(1980)}sk-proj-aB3dE5fG7hI9-jK2mN4pQ6rS8tU0vW1xY2zA4`;
+  append("modern-obfuscated", [
+    { v: 1, agent: "codex", kind: "intent", ts: 1, text: capped },
+    { v: 1, agent: "codex", kind: "mechanism", ts: 2, tool: "Edit", path: `src/${obfuscated}.ts`, excerpt: `token=${obfuscated}` },
+  ], paths);
+
+  const triple = await annotateBatch("modern-obfuscated", { paths, git: () => undefined, queueLabel: () => {} });
+  assert.ok(triple);
+  const durable = readFileSync(paths.memory, "utf8");
+  assert.doesNotMatch(durable, /sk-proj-|aB3dE5fG7hI9|\u001b|\u202e/u);
+  assert.match(triple.mechanism.files[0]?.path ?? "", /\[redacted openai key\]/u);
+});
+
 test("every invisible format control is removed before durable redaction", async (t) => {
   const paths = freshPaths(t);
   for (const [name, control] of INVISIBLE_FORMAT_CONTROLS) {

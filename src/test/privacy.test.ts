@@ -396,6 +396,25 @@ test("projectTriple raw keeps bounded excerpt and normalized cwd without sharing
   assert.notEqual(output.files[0]?.plusMinus, triple.mechanism.files[0]?.plusMinus);
 });
 
+test("modern prefixed keys stay sanitized by default while explicit raw triple exposure remains raw", () => {
+  const modernKey = "sk-proj-aB3dE5fG7hI9-jK2mN4pQ6rS8tU0vW1xY2zA4";
+  const triple: TripleRecord = {
+    kind: "triple", id: "modern-key-projection", ts: 33, cwd: "/work", schemaV: 1,
+    agent: "codex", origin: "agent-hook",
+    intent: { text: `deploy ${modernKey}` },
+    mechanism: {
+      files: [{ path: "src/deploy.ts", plusMinus: [1, 0], props: [], excerpt: `token=${modernKey}` }],
+      truncatedFiles: 0,
+    },
+  };
+
+  const sanitized = projectTriple(triple, "sanitized");
+  const raw = projectTriple(triple, "raw");
+  assert.doesNotMatch(JSON.stringify(sanitized), /sk-proj-|aB3dE5fG7hI9/u);
+  assert.equal(raw.intent, `deploy ${modernKey}`);
+  assert.equal(raw.files[0]?.excerpt, `token=${modernKey}`);
+});
+
 test("triple props and tags preserve array boundaries, cardinality, and empty entries", () => {
   const triple: TripleRecord = {
     kind: "triple", id: "boundary-triple", ts: 33, cwd: "/work", schemaV: 1,
