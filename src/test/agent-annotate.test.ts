@@ -28,6 +28,7 @@ import {
   AMBIGUOUS_CONTINUATION_MARKER,
   SYNTHETIC_DELIMITER_PRESERVATION_VECTORS,
   SYNTHETIC_EOF_AMBIGUITY_VECTORS,
+  SYNTHETIC_NON_EOF_CONTROL_PROBES,
   SYNTHETIC_SECRET_CLOSURE_VECTORS,
 } from "./secret-vectors.js";
 
@@ -667,7 +668,7 @@ test("durable annotation closes shared quoted-key, control, realistic-word, and 
   assert.doesNotMatch(durable, /pass\s*word=|api_\s*key|secret=pA7/u);
 });
 
-test("durable annotation preserves ordinary text after control-delimited unquoted values", async (t) => {
+test("durable annotation binds ambiguous control continuations", async (t) => {
   const paths = freshPaths(t);
   const [lf, tab, cr] = SYNTHETIC_DELIMITER_PRESERVATION_VECTORS;
   assert.ok(lf && tab && cr);
@@ -681,9 +682,35 @@ test("durable annotation preserves ordinary text after control-delimited unquote
     paths, git: () => undefined, queueLabel: () => {},
   });
   assert.ok(triple);
-  assert.equal(triple.intent?.text, "before [redacted password assignment] after words");
-  assert.equal(triple.mechanism.files[0]?.excerpt, "before [redacted credential assignment] after words");
-  assert.equal(triple.rationale?.text, "before [redacted password assignment] after words");
+  assert.equal(triple.intent?.text, `before [redacted password assignment] ${AMBIGUOUS_CONTINUATION_MARKER} words`);
+  assert.equal(triple.mechanism.files[0]?.excerpt, `before [redacted credential assignment] ${AMBIGUOUS_CONTINUATION_MARKER} words`);
+  assert.equal(triple.rationale?.text, `before [redacted password assignment] ${AMBIGUOUS_CONTINUATION_MARKER} words`);
+});
+
+test("durable annotation contains the three non-EOF control-split review probes", async (t) => {
+  const paths = freshPaths(t);
+  const [first, second, quoted] = SYNTHETIC_NON_EOF_CONTROL_PROBES;
+  assert.ok(first && second && quoted);
+  append("non-eof-control-review", [
+    { v: 1, agent: "codex", kind: "intent", ts: 1, text: first.text },
+    {
+      v: 1, agent: "codex", kind: "mechanism", ts: 2, tool: "Edit", path: "src/x.ts",
+      excerpt: second.text,
+    },
+    { v: 1, agent: "codex", kind: "rationale", ts: 3, source: "notify", text: quoted.text },
+  ], paths);
+
+  const triple = await annotateBatch("non-eof-control-review", {
+    paths, git: () => undefined, queueLabel: () => {},
+  });
+  assert.ok(triple);
+  assert.equal(triple.intent?.text, first.durable.replace(/\s+/gu, " ").trim());
+  assert.equal(triple.mechanism.files[0]?.excerpt, second.durable.replace(/\s+/gu, " ").trim());
+  assert.equal(triple.rationale?.text, quoted.durable.replace(/\s+/gu, " ").trim());
+  const durable = readFileSync(paths.memory, "utf8");
+  for (const vector of SYNTHETIC_NON_EOF_CONTROL_PROBES) {
+    assert.ok(!durable.includes(vector.leakedSuffix), vector.name);
+  }
 });
 
 test("durable annotation discloses ambiguous EOF continuation redaction", async (t) => {

@@ -2,9 +2,12 @@ import { strict as assert } from "node:assert";
 import { test } from "node:test";
 import { redactSecrets, redactSecretsAtBoundary, stripInvisibleControls } from "../core/redact.js";
 import {
+  AMBIGUOUS_CONTINUATION_MARKER,
   SYNTHETIC_DELIMITER_PRESERVATION_VECTORS,
   SYNTHETIC_EOF_AMBIGUITY_VECTORS,
   SYNTHETIC_EVERY_CONTROL_SPLIT_VECTORS,
+  SYNTHETIC_MULTI_CONTROL_PROBES,
+  SYNTHETIC_NON_EOF_CONTROL_PROBES,
   SYNTHETIC_SECRET_CLOSURE_VECTORS,
 } from "./secret-vectors.js";
 
@@ -62,18 +65,39 @@ test("shared secret vectors redact quoted keys, exact-looking values, controls, 
   }
 });
 
-test("logical controls after complete unquoted values preserve unrelated following text", () => {
+test("logical controls bind ambiguous canonical continuations and preserve only outside text", () => {
   for (const vector of SYNTHETIC_DELIMITER_PRESERVATION_VECTORS) {
     assert.equal(redactSecretsAtBoundary(vector.text), vector.durable, vector.name);
   }
 });
 
-test("every control split is redacted without losing its delimiter or exposing a continuation", () => {
+test("ambiguity disclosure marker has stable spelling", () => {
+  assert.equal(AMBIGUOUS_CONTINUATION_MARKER, "[redacted ambiguous continuation]");
+});
+
+test("every control split and suffix context maps the complete canonical span", () => {
   for (const vector of SYNTHETIC_EVERY_CONTROL_SPLIT_VECTORS) {
     const output = redactSecretsAtBoundary(vector.text);
     assert.equal(output, vector.durable, vector.name);
     assert.ok(output.includes(vector.control), vector.name);
-    assert.ok(!output.includes(vector.cleartext.slice(vector.split)), vector.name);
+    if (vector.reconstructableSuffix !== undefined) {
+      assert.ok(!output.includes(vector.reconstructableSuffix), vector.name);
+    }
+    if (vector.outsideText) assert.ok(output.endsWith(vector.outsideText), vector.name);
+  }
+});
+
+test("non-EOF review probes redact full unquoted and quoted values", () => {
+  for (const vector of SYNTHETIC_NON_EOF_CONTROL_PROBES) {
+    const output = redactSecretsAtBoundary(vector.text);
+    assert.equal(output, vector.durable, vector.name);
+    assert.ok(!output.includes(vector.leakedSuffix), vector.name);
+  }
+});
+
+test("multiple logical controls preserve every delimiter under structural marker policy", () => {
+  for (const vector of SYNTHETIC_MULTI_CONTROL_PROBES) {
+    assert.equal(redactSecretsAtBoundary(vector.text), vector.durable, vector.name);
   }
 });
 

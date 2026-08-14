@@ -20,6 +20,8 @@ import {
   SYNTHETIC_DELIMITER_PRESERVATION_VECTORS,
   SYNTHETIC_EOF_AMBIGUITY_VECTORS,
   SYNTHETIC_EVERY_CONTROL_SPLIT_VECTORS,
+  SYNTHETIC_MULTI_CONTROL_PROBES,
+  SYNTHETIC_NON_EOF_CONTROL_PROBES,
   SYNTHETIC_SECRET_CLOSURE_VECTORS,
 } from "./secret-vectors.js";
 
@@ -441,13 +443,13 @@ test("shared secret vectors stay closed in sanitized MCP while quoted-key raw ex
   }
 });
 
-test("sanitized MCP preserves ordinary records after redacted unquoted assignments", () => {
+test("sanitized MCP binds ambiguous continuations and preserves only canonical outside text", () => {
   for (const vector of SYNTHETIC_DELIMITER_PRESERVATION_VECTORS) {
     assert.equal(redactText(vector.text, "/home/ada"), vector.sanitizedMcp, vector.name);
   }
 });
 
-test("sanitized MCP contains every control split while raw projection remains explicit", () => {
+test("sanitized MCP contains every control split and suffix context while raw remains explicit", () => {
   for (const [index, vector] of SYNTHETIC_EVERY_CONTROL_SPLIT_VECTORS.entries()) {
     const triple: TripleRecord = {
       kind: "triple", id: `control-split-${index}`, ts: 35, cwd: "/work", schemaV: 1,
@@ -463,6 +465,32 @@ test("sanitized MCP contains every control split while raw projection remains ex
     assert.equal(sanitized.intent, vector.sanitizedMcp, vector.name);
     assert.equal(raw.intent, normalizeOutputText(vector.text), vector.name);
     assert.equal(raw.files[0]?.excerpt, normalizeOutputText(vector.text), vector.name);
+  }
+});
+
+test("sanitized MCP contains the three non-EOF review probes", () => {
+  for (const [index, vector] of SYNTHETIC_NON_EOF_CONTROL_PROBES.entries()) {
+    const triple: TripleRecord = {
+      kind: "triple", id: `non-eof-review-${index}`, ts: 37, cwd: "/work", schemaV: 1,
+      agent: "codex", origin: "agent-hook", intent: { text: vector.text },
+      mechanism: {
+        files: [{ path: "src/x.ts", plusMinus: [0, 0], props: [], excerpt: vector.text }],
+        truncatedFiles: 0,
+      },
+    };
+    const sanitized = projectTriple(triple, "sanitized");
+    const raw = projectTriple(triple, "raw");
+    assert.equal(redactText(vector.text, "/home/ada"), vector.sanitizedMcp, vector.name);
+    assert.equal(sanitized.intent, vector.sanitizedMcp, vector.name);
+    assert.ok(!JSON.stringify(sanitized).includes(vector.leakedSuffix), vector.name);
+    assert.equal(raw.intent, normalizeOutputText(vector.text), vector.name);
+    assert.equal(raw.files[0]?.excerpt, normalizeOutputText(vector.text), vector.name);
+  }
+});
+
+test("sanitized MCP applies structural marker policy to multiple controls", () => {
+  for (const vector of SYNTHETIC_MULTI_CONTROL_PROBES) {
+    assert.equal(redactText(vector.text, "/home/ada"), vector.sanitizedMcp, vector.name);
   }
 });
 

@@ -7,6 +7,8 @@ import {
   SYNTHETIC_DELIMITER_PRESERVATION_VECTORS,
   SYNTHETIC_EOF_AMBIGUITY_VECTORS,
   SYNTHETIC_EVERY_CONTROL_SPLIT_VECTORS,
+  SYNTHETIC_MULTI_CONTROL_PROBES,
+  SYNTHETIC_NON_EOF_CONTROL_PROBES,
   SYNTHETIC_SECRET_CLOSURE_VECTORS,
 } from "./secret-vectors.js";
 
@@ -70,14 +72,26 @@ test("shared secret vectors detect quoted keys, realistic placeholder words, con
   }
 });
 
-test("logical delimiters after complete values do not hide hits or consume following records", () => {
+test("logical delimiters in ambiguous continuations do not hide hits", () => {
   for (const vector of SYNTHETIC_DELIMITER_PRESERVATION_VECTORS) {
     assert.deepEqual(scanSecrets([line(vector.text)]).map((hit) => hit.kind), [vector.kind], vector.name);
   }
 });
 
-test("detects every TAB LF and CR split position in shared synthetic credentials", () => {
+test("detects every TAB LF and CR split position across suffix contexts", () => {
   for (const vector of SYNTHETIC_EVERY_CONTROL_SPLIT_VECTORS) {
+    assert.deepEqual(scanSecrets([line(vector.text)]).map((hit) => hit.kind), [vector.kind], vector.name);
+  }
+});
+
+test("detects the three non-EOF control-split review probes", () => {
+  for (const vector of SYNTHETIC_NON_EOF_CONTROL_PROBES) {
+    assert.deepEqual(scanSecrets([line(vector.text)]).map((hit) => hit.kind), [vector.kind], vector.name);
+  }
+});
+
+test("detects quoted and unquoted values split by multiple controls", () => {
+  for (const vector of SYNTHETIC_MULTI_CONTROL_PROBES) {
     assert.deepEqual(scanSecrets([line(vector.text)]).map((hit) => hit.kind), [vector.kind], vector.name);
   }
 });

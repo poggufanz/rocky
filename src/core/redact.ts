@@ -7,7 +7,10 @@ interface SecretDefinition {
   readonly leadingBoundary?: boolean;
   readonly trailingBoundary?: boolean;
   readonly fragmentSource: string;
-  readonly assignmentValueGroups?: readonly number[];
+  readonly assignmentValueGroups?: {
+    readonly quoted: number;
+    readonly unquoted: number;
+  };
 }
 
 const SECRET_DEFINITIONS: ReadonlyArray<SecretDefinition> = [
@@ -72,7 +75,7 @@ const SECRET_DEFINITIONS: ReadonlyArray<SecretDefinition> = [
     flags: "i",
     leadingBoundary: true,
     fragmentSource: String.raw`(?:(?:"(?:password|secret)"|'(?:password|secret)'|(?:password|secret)))\s*[:=]\s*(?:["'][^"']*|[^\s]*)`,
-    assignmentValueGroups: [2, 3],
+    assignmentValueGroups: { quoted: 2, unquoted: 3 },
   },
   {
     replacementLabel: "credential assignment",
@@ -81,7 +84,7 @@ const SECRET_DEFINITIONS: ReadonlyArray<SecretDefinition> = [
     flags: "i",
     leadingBoundary: true,
     fragmentSource: String.raw`(?:(?:"(?:token|api[_-]?key|authorization)"|'(?:token|api[_-]?key|authorization)'|(?:token|api[_-]?key|authorization)))\s*[:=]\s*(?:["'][^"']*|(?:(?:Bearer|Basic|Token)\s+)?[^\s]*)`,
-    assignmentValueGroups: [2, 3],
+    assignmentValueGroups: { quoted: 2, unquoted: 3 },
   },
 ];
 
@@ -214,7 +217,7 @@ export function replaceAnsiAndControls(text: string, replacement = "", c0Replace
 }
 
 const SECRET_BOUNDARY_FREE_PATTERNS: ReadonlyArray<readonly [kind: string, re: RegExp]> = SECRET_DEFINITIONS.map(
-  (definition) => [definition.replacementLabel, new RegExp(patternFor(definition, true).source, `${definition.flags ?? ""}g`)] as const,
+  (definition) => [definition.replacementLabel, new RegExp(patternFor(definition, true).source, `${definition.flags ?? ""}dg`)] as const,
 );
 
 const SECRET_FRAGMENT_PATTERNS: ReadonlyArray<readonly [kind: string, re: RegExp]> = SECRET_DEFINITIONS.map(
@@ -351,11 +354,9 @@ const INDIRECT_SECRET_VALUE = /^(?:process\.env\.[A-Za-z_][A-Za-z0-9_]*|env\.[A-
 const SECRET_TOKEN_PREFIX = /^(?:AKIA|github_pat_|gh[opurs]_|xox[baprs]-|sk-(?:[A-Za-z0-9]+-)*|npm_)/;
 
 function assignmentValue(definition: SecretDefinition, match: RegExpExecArray): string | undefined {
-  for (const group of definition.assignmentValueGroups ?? []) {
-    const value = match[group];
-    if (value !== undefined) return value.trim();
-  }
-  return undefined;
+  const groups = definition.assignmentValueGroups;
+  if (groups === undefined) return undefined;
+  return (match[groups.quoted] ?? match[groups.unquoted])?.trim();
 }
 
 function isPlaceholderMatch(definition: SecretDefinition, match: RegExpExecArray): boolean {
@@ -417,11 +418,34 @@ function hasTrailingBoundary(text: string, end: number): boolean {
   return !isAsciiWord(text[end]);
 }
 
+type MatchShape =
+  | { readonly kind: "standalone" }
+  | {
+      readonly kind: "assignment";
+      readonly quoted: boolean;
+      readonly valueStart: number;
+    };
+
 interface Replacement {
   readonly start: number;
   readonly end: number;
   readonly value: string;
   readonly order: number;
+  readonly shape: MatchShape;
+}
+
+function matchShape(definition: SecretDefinition, match: RegExpMatchArray): MatchShape {
+  const groups = definition.assignmentValueGroups;
+  if (groups === undefined) return { kind: "standalone" };
+
+  const quoted = match[groups.quoted] !== undefined;
+  const selectedGroup = quoted ? groups.quoted : groups.unquoted;
+  const valueStart = match.indices?.[selectedGroup]?.[0];
+  // Full assignment patterns always select exactly one registered value group.
+  // Falling back to standalone is conservative if that invariant is violated.
+  return valueStart === undefined
+    ? { kind: "standalone" }
+    : { kind: "assignment", quoted, valueStart };
 }
 
 function collectReplacements(text: string, context: SecretBoundaryContext): Replacement[] {
@@ -443,7 +467,7 @@ function collectReplacements(text: string, context: SecretBoundaryContext): Repl
       const hasRecordedLeading = !definition.leadingBoundary || removedOffsets.has(start);
       const hasRecordedTrailing = !definition.trailingBoundary || removedOffsets.has(end);
       if ((!normalTrailing && !hasRecordedTrailing) || (!normalLeading && !hasRecordedLeading)) continue;
-      full.push({ start, end, value: `[redacted ${kind}]`, order });
+      full.push({ start, end, value: `[redacted ${kind}]`, order, shape: matchShape(definition, match) });
     }
   }
 
@@ -465,7 +489,15 @@ function collectReplacements(text: string, context: SecretBoundaryContext): Repl
       const normalLeading = !definition.leadingBoundary || hasLeadingBoundary(text, start);
       const hasRecordedBoundary = !definition.leadingBoundary || removedOffsets.has(start);
       if (!normalLeading && !hasRecordedBoundary) continue;
-      replacements.push({ start, end, value: "", order: SECRET_BOUNDARY_FREE_PATTERNS.length + order });
+      replacements.push({
+        start,
+        end,
+        value: "",
+        order: SECRET_BOUNDARY_FREE_PATTERNS.length + order,
+        // A bounded fragment has no proven closing quote, so controls remain
+        // ambiguous under the same fail-closed policy as standalone tokens.
+        shape: { kind: "standalone" },
+      });
     }
   }
   return replacements;
@@ -480,31 +512,11 @@ function preserveLogicalControls(replacement: Replacement, input: SecretBoundary
   );
   if (controls.length === 0) return replacement;
 
-  const matched = input.text.slice(replacement.start, replacement.end);
-  const separator = matched.search(/[:=]/u);
-  const valueStart = separator < 0 ? replacement.start : replacement.start + separator + 1;
-  const valueControl = controls.find((control) => control.offset >= valueStart);
-  const hasVisibleTail = input.text.slice(replacement.end).trim().length > 0;
-
-  if (valueControl !== undefined && hasVisibleTail) {
-    const internalNameControls = controls
-      .filter((control) => control.offset < valueControl.offset)
-      .map((control) => control.character)
-      .join("");
-    return {
-      ...replacement,
-      end: valueControl.offset,
-      value: replacement.value + internalNameControls,
-    };
-  }
-
-  const normalizedValue = separator < 0 ? "" : matched.slice(separator + 1).trimStart();
-  const isQuotedAssignment = normalizedValue.startsWith("\"") || normalizedValue.startsWith("'");
-
   return {
     ...replacement,
     value: replacement.value + controls.map((control) => {
-      const ambiguousValueContinuation = control.offset >= valueStart && !isQuotedAssignment;
+      const ambiguousValueContinuation = replacement.shape.kind === "standalone"
+        || (!replacement.shape.quoted && control.offset >= replacement.shape.valueStart);
       return control.character + (ambiguousValueContinuation ? AMBIGUOUS_SECRET_CONTINUATION : "");
     }).join(""),
   };
