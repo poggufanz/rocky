@@ -82,20 +82,20 @@ export function speakFailureMemory(
       const fix = getFix(memory, withFix)!;
       say(`last time, you fix with:`);
       detail(`    ${safeTerminalLine(fix.cmd)}`);
+      const elsewhere = fixFromElsewhere(fix, cwd);
       // Say how much this link is worth. `recall` graded strong/weak from the
       // day it shipped; run/watch/hook did not, so the surfaces people actually
       // use presented a weak "same program" guess with the same confidence as a
       // real match. A wrong fix stated plainly is worse than no fix at all.
       const basis = fix.links?.find((link) => link.id === withFix.id)?.basis;
-      if (basis === "identity" || basis === "signature") {
-        say(`same command, ${elapsed(fix.ts - withFix.ts)} later. strong.`);
-      } else if (basis === "program") {
-        say(`same program, ${elapsed(fix.ts - withFix.ts)} later. maybe not fix. check, question`);
-      }
-      const elsewhere = fixFromElsewhere(fix, cwd);
       if (elsewhere !== undefined) {
         say("but fix comes from other place.");
         detail(`    place: ${safeTerminalLine(elsewhere)}`);
+        say("possible only. check, question");
+      } else if (basis === "identity" || basis === "signature") {
+        say(`same command, ${elapsed(fix.ts - withFix.ts)} later. strong.`);
+      } else if (basis === "program") {
+        say(`same program, ${elapsed(fix.ts - withFix.ts)} later. maybe not fix. check, question`);
       }
       say("try, question");
     } else {

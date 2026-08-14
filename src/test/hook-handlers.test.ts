@@ -144,6 +144,7 @@ test("hookFail admits when the remembered fix's cwd differs from the cwd argumen
     assert.match(tty, /last time, you fix with:/);
     assert.match(tty, /but fix comes from other place\./);
     assert.match(tty, new RegExp(`place: ${fixCwd.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
+    assert.doesNotMatch(tty, /strong\.|confirmed/);
   } finally {
     process.env.ROCKY_HOME = home;
   }

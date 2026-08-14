@@ -6,11 +6,11 @@ import {
   constants,
   fchmodSync,
   fstatSync,
-  linkSync,
   lstatSync,
   mkdirSync,
   openSync,
   opendirSync,
+  renameSync,
   readSync,
   rmSync,
   unlinkSync,
@@ -238,12 +238,13 @@ function tryTripleLock(path: string): TripleLock | undefined {
   let fd = -1;
   let created = false;
   let token: string | undefined;
+  let createdStats: Stats | undefined;
   let succeeded = false;
   try {
     token = randomBytes(TRIPLE_LOCK_TOKEN_BYTES).toString("hex");
     fd = openSync(path, "wx", 0o600);
     created = true;
-    const createdStats = fstatSync(fd);
+    createdStats = fstatSync(fd);
     if (!createdStats.isFile() || createdStats.isSymbolicLink()) return undefined;
     const encoded = Buffer.from(JSON.stringify({ pid: process.pid, token }), "utf8");
     if (encoded.byteLength > TRIPLE_LOCK_MAX_BYTES) return undefined;
@@ -255,7 +256,9 @@ function tryTripleLock(path: string): TripleLock | undefined {
     }
     try { fchmodSync(fd, 0o600); } catch { /* mode is best effort on Windows */ }
     const after = fstatSync(fd);
-    if (!after.isFile() || after.isSymbolicLink() || after.size !== encoded.byteLength) return undefined;
+    const named = lstatSync(path);
+    if (!after.isFile() || after.isSymbolicLink() || after.size !== encoded.byteLength ||
+        !named.isFile() || named.isSymbolicLink() || !sameTripleIdentity(after, named)) return undefined;
     succeeded = true;
     return { path, token, stats: after };
   } catch {
@@ -264,10 +267,14 @@ function tryTripleLock(path: string): TripleLock | undefined {
     if (fd >= 0) {
       try { closeSync(fd); } catch { /* best effort */ }
     }
-    if (created && !succeeded && token) {
+    if (created && !succeeded && token && createdStats) {
       const current = readTripleLock(path);
       if (current && current.metadata.pid === process.pid && current.metadata.token === token) {
-        try { unlinkSync(path); } catch { /* leave recovery state */ }
+        reclaimTriplePath(path, createdStats, (tombstonePath) => {
+          const verify = readTripleLock(tombstonePath);
+          return verify !== undefined && verify.metadata.pid === process.pid &&
+            verify.metadata.token === token && sameTripleIdentity(createdStats!, verify.stats);
+        });
       }
     }
   }
@@ -277,76 +284,61 @@ function releaseTripleLock(lock: TripleLock): void {
   const current = readTripleLock(lock.path);
   if (!current || current.metadata.pid !== process.pid || current.metadata.token !== lock.token) return;
   if (differentTripleIdentity(lock.stats, current.stats)) return;
-  try { unlinkSync(lock.path); } catch { /* leave state for conservative recovery */ }
+  reclaimTriplePath(lock.path, current.stats, (tombstonePath) => {
+    const verify = readTripleLock(tombstonePath);
+    return verify !== undefined && verify.metadata.pid === process.pid && verify.metadata.token === lock.token &&
+      sameTripleIdentity(lock.stats, verify.stats);
+  });
 }
 
 /**
- * Reclaim one regular path through an exclusive hard-link claim. The helper
- * deliberately has no sidecar of its own: it is used only for reclaiming the
- * reclaim-election sidecar, and nlink===2 serializes competing stale-guard
- * reclaimers without introducing another independently reclaimable lock.
+ * Move one canonical regular path to a unique same-directory tombstone, then
+ * validate the moved inode before removing only that tombstone. The canonical
+ * name is never unlinked: if a replacement was moved by a TOCTOU race, its
+ * identity/metadata check fails and the tombstone is deliberately preserved.
  */
 function reclaimTriplePath(
   path: string,
   expected: Stats,
-  validateClaim: (claimPath: string) => boolean,
+  validateClaim: (tombstonePath: string) => boolean,
 ): boolean {
   if (!tripleIdentityKnown(expected)) return false;
-  const claimPath = `${path}.claim.${process.pid}.${randomBytes(TRIPLE_LOCK_TOKEN_BYTES).toString("hex")}`;
-  let claimed = false;
-  let claimIdentity: Stats | undefined;
+  const tombstonePath = `${path}.reclaim.tombstone.${process.pid}.${randomBytes(TRIPLE_LOCK_TOKEN_BYTES).toString("hex")}`;
   try {
-    linkSync(path, claimPath);
-    claimed = true;
-    const claim = lstatSync(claimPath);
-    if (!claim.isFile() || claim.isSymbolicLink() || !tripleIdentityKnown(claim)) return false;
-    claimIdentity = claim;
     const current = lstatSync(path);
-    if (!current.isFile() || current.isSymbolicLink() ||
-        !sameTripleIdentity(expected, claim) || !sameTripleIdentity(claim, current) ||
-        claim.nlink !== 2 || current.nlink !== 2 || !validateClaim(claimPath)) return false;
-
-    const verifiedClaim = lstatSync(claimPath);
-    const verifiedCurrent = lstatSync(path);
-    if (!verifiedClaim.isFile() || verifiedClaim.isSymbolicLink() || !verifiedCurrent.isFile() ||
-        verifiedCurrent.isSymbolicLink() || !sameTripleIdentity(expected, verifiedClaim) ||
-        !sameTripleIdentity(verifiedClaim, verifiedCurrent) || verifiedClaim.nlink !== 2 ||
-        verifiedCurrent.nlink !== 2 || !validateClaim(claimPath)) return false;
-    unlinkSync(path);
+    if (!current.isFile() || current.isSymbolicLink() || !sameTripleIdentity(expected, current)) return false;
+    renameSync(path, tombstonePath);
+    const movedStats = lstatSync(tombstonePath);
+    if (!movedStats.isFile() || movedStats.isSymbolicLink() || !sameTripleIdentity(expected, movedStats) ||
+        !validateClaim(tombstonePath)) return false;
+    const verified = lstatSync(tombstonePath);
+    if (!verified.isFile() || verified.isSymbolicLink() || !sameTripleIdentity(expected, verified) ||
+        !validateClaim(tombstonePath)) return false;
+    unlinkSync(tombstonePath);
     return true;
   } catch {
     return false;
-  } finally {
-    if (claimed) {
-      try {
-        const current = lstatSync(claimPath);
-        if (claimIdentity !== undefined && current.isFile() && !current.isSymbolicLink() &&
-            sameTripleIdentity(claimIdentity, current)) unlinkSync(claimPath);
-      } catch {
-        // A concurrent namespace change is a conservative no-op.
-      }
-    }
   }
 }
 
 /**
- * A deterministic sidecar elects one reclaimer before any hard-link claim.
- * The bounded orphan sweep is intentionally not on this correctness path, so
- * an old orphan may leave the primary inode's nlink greater than two. The
- * sidecar is regular, metadata-validated, and fail-closed for live/unknown
- * owners.
+ * A deterministic regular sidecar elects one reclaimer before primary
+ * recovery. Legacy hard-link claims are housekeeping only, never a
+ * correctness dependency. The sidecar is metadata-validated and fail-closed
+ * for live/unknown owners.
  */
 function tryTripleReclaimElection(path: string): TripleReclaimElection | undefined {
   const electionPath = `${path}.reclaim.guard`;
   let fd = -1;
   let token: string | undefined;
+  let createdStats: Stats | undefined;
   let created = false;
   let succeeded = false;
   try {
     token = randomBytes(TRIPLE_LOCK_TOKEN_BYTES).toString("hex");
     fd = openSync(electionPath, "wx", 0o600);
     created = true;
-    const createdStats = fstatSync(fd);
+    createdStats = fstatSync(fd);
     if (!createdStats.isFile() || createdStats.isSymbolicLink()) return undefined;
     const encoded = Buffer.from(JSON.stringify({ pid: process.pid, token }), "utf8");
     if (encoded.byteLength > TRIPLE_LOCK_MAX_BYTES) return undefined;
@@ -358,7 +350,9 @@ function tryTripleReclaimElection(path: string): TripleReclaimElection | undefin
     }
     try { fchmodSync(fd, 0o600); } catch { /* mode is best effort on Windows */ }
     const after = fstatSync(fd);
-    if (!after.isFile() || after.isSymbolicLink() || after.size !== encoded.byteLength) return undefined;
+    const named = lstatSync(electionPath);
+    if (!after.isFile() || after.isSymbolicLink() || after.size !== encoded.byteLength ||
+        !named.isFile() || named.isSymbolicLink() || !sameTripleIdentity(after, named)) return undefined;
     succeeded = true;
     return { path: electionPath, token, stats: after };
   } catch {
@@ -394,13 +388,13 @@ function tryTripleReclaimElection(path: string): TripleReclaimElection | undefin
     if (fd >= 0) {
       try { closeSync(fd); } catch { /* best effort */ }
     }
-    if (created && !succeeded && token) {
+    if (created && !succeeded && token && createdStats) {
       const current = readTripleLock(electionPath);
       if (current && current.metadata.pid === process.pid && current.metadata.token === token) {
-        reclaimTriplePath(electionPath, current.stats, (claimPath) => {
+        reclaimTriplePath(electionPath, createdStats, (claimPath) => {
           const verify = readTripleLock(claimPath);
           return verify !== undefined && verify.metadata.pid === process.pid && verify.metadata.token === token &&
-            sameTripleIdentity(current.stats, verify.stats);
+            sameTripleIdentity(createdStats!, verify.stats);
         });
       }
     }
@@ -422,10 +416,8 @@ function acquireTripleLock(paths: RockyPaths): TripleLock {
   for (;;) {
     const lock = tryTripleLock(path);
     if (lock) {
-      // A previous reclaimer can die after unlinking the primary lock but
-      // before cleaning its hard-link claim.  Sweep such claims only after
-      // this process owns the pathname, and re-check every inode before the
-      // best-effort cleanup.
+      // Sweep legacy claims only after this process owns a fresh canonical
+      // pathname. Recovery never depends on finding or deleting one.
       pruneDeadReclaimClaims(path);
       return lock;
     }
@@ -498,57 +490,25 @@ function staleMalformedTripleLock(path: string, now = Date.now()): Stats | undef
   }
 }
 
-/**
- * Delete only the inode we inspected. A unique hard-link claim makes
- * concurrent reclaimers observable through `nlink`: at most one can see the
- * original pathname plus its sole claim. Losing reclaimers never unlink the
- * pathname, so they cannot delete a replacement owner's lock.
- */
+/** Reclaim a dead/stale primary while one guard owns the election. */
 function reclaimTripleLock(
   path: string,
   expected: Stats,
-  validateClaim: (claimPath: string) => boolean,
+  validateClaim: (tombstonePath: string) => boolean,
 ): boolean {
   if (!tripleIdentityKnown(expected)) return false;
-  pruneDeadReclaimClaims(path, expected);
-  const claimPath = `${path}.reclaim.${process.pid}.${randomBytes(TRIPLE_LOCK_TOKEN_BYTES).toString("hex")}`;
-  let claimed = false;
-  // Serialize every reclaim attempt, including the ordinary nlink===2 case.
-  // Otherwise a late contender could revalidate the old inode after an early
-  // contender has already unlinked it, then delete a replacement pathname.
   const election = tryTripleReclaimElection(path);
   if (election === undefined) return false;
   try {
-    linkSync(path, claimPath);
-    claimed = true;
-    const claim = lstatSync(claimPath);
-    const current = lstatSync(path);
-    if (!claim.isFile() || claim.isSymbolicLink() || !current.isFile() || current.isSymbolicLink() ||
-        !sameTripleIdentity(expected, claim) || !sameTripleIdentity(claim, current) ||
-        claim.nlink < 2 || current.nlink < 2 || !validateClaim(claimPath)) return false;
-
-    // Re-check after reading metadata. Another reclaimer may have linked the
-    // inode meanwhile; the sidecar serializes all reclaimers, so an old
-    // orphan hard link may safely leave nlink greater than two.
-    const verifiedClaim = lstatSync(claimPath);
-    const verifiedCurrent = lstatSync(path);
-    if (!sameTripleIdentity(expected, verifiedClaim) || !sameTripleIdentity(verifiedClaim, verifiedCurrent) ||
-        verifiedClaim.nlink < 2 || verifiedCurrent.nlink < 2) return false;
+    // Revalidate guard ownership immediately before moving primary. A delayed
+    // observer that finds a replacement guard aborts and preserves evidence.
     const verifiedElection = readTripleLock(election.path);
     if (!verifiedElection || verifiedElection.metadata.pid !== process.pid ||
         verifiedElection.metadata.token !== election.token ||
         differentTripleIdentity(election.stats, verifiedElection.stats)) return false;
-    // The inode and election checks above are the final current-path guards
-    // before unlink. No other reclaimer can run until this guard is released.
-    unlinkSync(path);
-    return true;
-  } catch {
-    return false;
+    return reclaimTriplePath(path, expected, validateClaim);
   } finally {
     releaseTripleReclaimElection(election);
-    if (claimed) {
-      try { unlinkSync(claimPath); } catch { /* a later dead-claim sweep can recover it */ }
-    }
   }
 }
 
@@ -612,9 +572,9 @@ function pruneDeadReclaimClaims(path: string, expected?: Stats): void {
         // replaced primary permits cleanup.
         if (primary !== undefined && sameTripleIdentity(primary, claim) && expected === undefined) continue;
 
-        // Revalidate both sides immediately before unlinking.  A concurrent
-        // namespace replacement therefore becomes a conservative no-op instead
-        // of deleting a pathname that no longer names the inspected inode.
+        // Revalidate the claim immediately before moving it. The canonical
+        // path is never unlinked by housekeeping; only a validated unique
+        // tombstone may be removed.
         const verifiedClaim = lstatSync(claimPath);
         if (!verifiedClaim.isFile() || verifiedClaim.isSymbolicLink() ||
             !sameTripleIdentity(claim, verifiedClaim)) continue;
@@ -636,7 +596,12 @@ function pruneDeadReclaimClaims(path: string, expected?: Stats): void {
         // budget has elapsed. A syscall already in progress cannot be stopped
         // by Node; this check bounds all work that follows the syscall.
         if (performance.now() - started >= RECLAIM_CLAIM_SCAN_MAX_MS) continue;
-        unlinkSync(claimPath);
+        reclaimTriplePath(claimPath, verifiedClaim, (tombstonePath) => {
+          const verify = readTripleLock(tombstonePath);
+          if (verify !== undefined) return tripleOwnerAlive(verify.metadata.pid) === false;
+          const stale = lstatSync(tombstonePath);
+          return stale.isFile() && !stale.isSymbolicLink() && stale.size === 0;
+        });
       } catch {
         // A concurrent sweep or namespace change is a conservative no-op.
       }
@@ -656,6 +621,8 @@ function pruneDeadReclaimClaims(path: string, expected?: Stats): void {
  */
 export interface MemoryTransaction {
   readonly paths: RockyPaths;
+  /** One in-lock wall-clock reference for loader, links, and reconciliation. */
+  readonly now: number;
   readonly records: readonly MemoryRecord[];
   /** False when the loader could not prove the snapshot complete. */
   readonly complete: boolean;
@@ -663,17 +630,24 @@ export interface MemoryTransaction {
   reload(): readonly MemoryRecord[];
 }
 
+export interface MemoryTransactionOptions {
+  now?: number;
+}
+
 export function withMemoryTransaction<T>(
   operation: (transaction: MemoryTransaction) => T,
   paths: RockyPaths = resolveRockyPaths(),
+  options: MemoryTransactionOptions = {},
 ): T {
   ensureDir(paths.home);
   const lock = acquireTripleLock(paths);
-  const initial = loadMemoryChecked(paths.memory);
+  const now = options.now ?? Date.now();
+  const initial = loadMemoryChecked(paths.memory, now);
   let records = initial.records;
   let complete = initial.complete;
   const transaction: MemoryTransaction = {
     paths,
+    now,
     get records() { return records; },
     get complete() { return complete; },
     append(record) {
@@ -681,7 +655,7 @@ export function withMemoryTransaction<T>(
       records = [...records, record];
     },
     reload() {
-      const loaded = loadMemoryChecked(paths.memory);
+      const loaded = loadMemoryChecked(paths.memory, now);
       if (!loaded.complete) throw new Error("Rocky memory reload is incomplete");
       records = loaded.records;
       complete = true;
@@ -697,29 +671,31 @@ export function withMemoryTransaction<T>(
 
 export function recordFailure(cmd: string, exitCode: number, stderr: string): FailureRecord {
   const identity = commandIdentity(cmd);
+  const ts = Date.now();
   const rec: FailureRecord = {
-    kind: "failure", id: randomUUID(), ts: Date.now(), cwd: process.cwd(), cmd, exitCode,
+    kind: "failure", id: randomUUID(), ts, cwd: process.cwd(), cmd, exitCode,
     fingerprint: fingerprint(stderr, cmd, exitCode), signature: signatureLines(stderr), excerpt: lastLines(stderr, 4),
     commandIdentity: identity.value, identityV: identity.version, identityReliable: identity.reliable, platform: process.platform,
   };
   withMemoryTransaction((transaction) => {
     transaction.append(rec);
     touchPendingUnlocked(transaction.paths);
-  });
+  }, resolveRockyPaths(), { now: ts });
   return rec;
 }
 
 export function recordWatchFailure(cmd: string, exitCode: number, stderr: string, cwd = process.cwd()): FailureRecord {
   const identity = commandIdentity(cmd);
+  const ts = Date.now();
   const rec: FailureRecord = {
-    kind: "failure", id: randomUUID(), ts: Date.now(), cwd, cmd, exitCode,
+    kind: "failure", id: randomUUID(), ts, cwd, cmd, exitCode,
     fingerprint: fingerprint(stderr, cmd, exitCode), signature: signatureLines(stderr), excerpt: lastLines(stderr, 4), origin: "watch",
     commandIdentity: identity.value, identityV: identity.version, identityReliable: identity.reliable, platform: process.platform,
   };
   withMemoryTransaction((transaction) => {
     transaction.append(rec);
     touchPendingUnlocked(transaction.paths);
-  });
+  }, resolveRockyPaths(), { now: ts });
   return rec;
 }
 
@@ -792,7 +768,7 @@ function appendFixRecordsUnlocked(
 
 export function recordFix(cmd: string, links: readonly UnresolvedLink[], cwd = process.cwd()): FixRecord | AssociationRecord {
   return withMemoryTransaction((transaction) => {
-    const written = appendFixRecordsUnlocked(transaction, cmd, links, cwd, Date.now());
+    const written = appendFixRecordsUnlocked(transaction, cmd, links, cwd, transaction.now);
     if (written.fix) return written.fix;
     if (written.association) return written.association;
     throw new Error("Rocky fix attribution requires at least one link");
@@ -818,15 +794,14 @@ function hasConfirmedResolutionForCommand(
 ): boolean {
   const currentIdentity = commandIdentity(cmd);
   if (!currentIdentity.reliable) return false;
-  const fixesById = new Map(
-    records
-      .filter((record): record is FixRecord => record.kind === "fix")
-      .map((fix) => [fix.id, fix]),
-  );
+  const fixesById = new Map<string, FixRecord>();
+  for (const record of records) {
+    if (record.kind === "fix" && !fixesById.has(record.id)) fixesById.set(record.id, record);
+  }
   return records.some((record) => {
     if (record.kind !== "failure" || record.cwd !== cwd || record.ts > now || record.resolvedBy === undefined) return false;
     const fix = fixesById.get(record.resolvedBy);
-    if (fix === undefined || fix.cwd !== cwd || fix.ts > now || !fix.failureIds.includes(record.id)) return false;
+    if (fix === undefined || fix.cwd !== cwd || fix.ts > now || fix.ts < record.ts || !fix.failureIds.includes(record.id)) return false;
     const fixIdentity = commandIdentity(fix.cmd, { platform: fix.platform ?? process.platform });
     if (!fixIdentity.reliable || fixIdentity.value !== currentIdentity.value) return false;
     const failureIdentity = commandIdentity(record.cmd, { platform: record.platform ?? process.platform });
@@ -840,15 +815,16 @@ function hasRecentConfirmedResolution(
   now: number,
 ): boolean {
   const cutoff = now - windowMs;
-  const fixes = new Map(
-    records
-      .filter((record): record is FixRecord => record.kind === "fix" && record.ts >= cutoff && record.ts <= now)
-      .map((record) => [record.id, record]),
-  );
+  const fixes = new Map<string, FixRecord>();
+  for (const record of records) {
+    if (record.kind === "fix" && record.ts >= cutoff && record.ts <= now && !fixes.has(record.id)) {
+      fixes.set(record.id, record);
+    }
+  }
   return records.some((record) => {
     if (record.kind !== "failure" || record.ts > now || record.resolvedBy === undefined) return false;
     const fix = fixes.get(record.resolvedBy);
-    return fix !== undefined && fix.failureIds.includes(record.id);
+    return fix !== undefined && fix.ts >= record.ts && fix.failureIds.includes(record.id);
   });
 }
 
@@ -860,7 +836,7 @@ export function resolveFixOnSuccess(
 ): ResolveFixResult {
   const paths = resolveRockyPaths();
   return withMemoryTransaction((transaction) => {
-    const now = options.now ?? Date.now();
+    const now = transaction.now;
     const windowMs = options.windowMs ?? LINK_WINDOW_MS;
     const links = recentUnresolvedFailures(transaction.records, cmd, { cwd, now, windowMs });
     if (links.length === 0) {
@@ -884,7 +860,7 @@ export function resolveFixOnSuccess(
       confirmedResolved: written.fix?.failureIds.length ?? 0,
       possibleAssociated: written.association?.candidateFailureIds.length ?? 0,
     };
-  }, paths);
+  }, paths, { now: options.now });
 }
 
 function lastLines(text: string, n: number): string {
@@ -929,26 +905,27 @@ export function clearPendingIfResolved(
   windowMs = LINK_WINDOW_MS,
   now?: number,
 ): void {
+  const selectedNow = now ?? Date.now();
   withMemoryTransaction((transaction) => {
-    const selectedNow = now ?? Date.now();
     if (hasRecentConfirmedResolution(transaction.records, windowMs, selectedNow) &&
         !hasUnresolvedRecent(transaction.records, windowMs, selectedNow)) {
       rmSync(transaction.paths.pending, { force: true });
     }
-  });
+  }, resolveRockyPaths(), { now: selectedNow });
 }
 
 export function recordHookFailure(cmd: string, exitCode: number, cwd: string): FailureRecord {
   const identity = commandIdentity(cmd);
+  const ts = Date.now();
   const rec: FailureRecord = {
-    kind: "failure", id: randomUUID(), ts: Date.now(), cwd, cmd, exitCode,
+    kind: "failure", id: randomUUID(), ts, cwd, cmd, exitCode,
     fingerprint: commandFingerprint(cmd, exitCode), signature: [normalizeLine(cmd)], excerpt: `exit ${exitCode}`, origin: "hook",
     commandIdentity: identity.value, identityV: identity.version, identityReliable: identity.reliable, platform: process.platform,
   };
   withMemoryTransaction((transaction) => {
     transaction.append(rec);
     touchPendingUnlocked(transaction.paths);
-  });
+  }, resolveRockyPaths(), { now: ts });
   return rec;
 }
 

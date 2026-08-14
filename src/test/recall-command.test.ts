@@ -144,6 +144,24 @@ test("recall speaks a strong link for a same-command fix", async () => {
   assert.deepEqual(validateRockyPhrase("same command, 2 minutes later. strong."), []);
 });
 
+test("recall discloses cross-directory fix as possible and never strong", async () => {
+  const source = memoryReturning([{
+    ...hitWithFix("cross", 2 * 60_000, [{ id: "cross", basis: "identity" }]),
+    fix: {
+      ...hitWithFix("cross", 2 * 60_000, [{ id: "cross", basis: "identity" }]).fix!,
+      cwd: "/tmp/other-project\u001b[31m",
+    },
+  }]);
+  const noAi: RecallWithAiPort = { async run() { throw new Error("AI must not run without --ai"); } };
+  const output = await captureStderr(() => recall(["npm", "test"], { memory: source.memory, recallWithAi: noAi }));
+
+  assert.equal(output.code, 0);
+  assert.match(output.stderr, /place: \/tmp\/other-project/);
+  assert.match(output.stderr, /possible|maybe not fix/);
+  assert.doesNotMatch(output.stderr, /strong\./);
+  assert.doesNotMatch(output.stderr, /\u001b\[31m/);
+});
+
 test("recall speaks a weak link for a same-program fix", async () => {
   const source = memoryReturning([hitWithFix("c1", 6 * 3600_000, [{ id: "c1", basis: "program" }])]);
   const noAi: RecallWithAiPort = { async run() { throw new Error("AI must not run without --ai"); } };

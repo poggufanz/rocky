@@ -4,9 +4,40 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
+import { commandFingerprint } from "../core/fingerprint.js";
+import { speakFailureMemory } from "../commands/run.js";
 
 const packageRoot = process.cwd();
 const cli = join(packageRoot, "dist", "index.js");
+
+test("run speech discloses cross-directory fix as possible, never strong", () => {
+  const failureCwd = join(tmpdir(), "rocky-run-failure");
+  const fixCwd = join(tmpdir(), "rocky-run-fix");
+  const cmd = "node stable-command.js";
+  const failure = {
+    kind: "failure" as const, id: "run-cross-failure", ts: Date.now() - 1_000, cwd: failureCwd, cmd,
+    exitCode: 1, fingerprint: "run-cross-fingerprint", signature: ["failure"], excerpt: "failure",
+    commandIdentity: JSON.stringify(["node", "stable-command.js"]), identityV: 1 as const,
+    identityReliable: true, platform: process.platform,
+  };
+  const fix = {
+    kind: "fix" as const, id: "run-cross-fix", ts: Date.now(), cwd: fixCwd, cmd,
+    failureIds: [failure.id], links: [{ id: failure.id, basis: "identity" as const, confidence: "confirmed" as const }],
+  };
+  const original = process.stderr.write;
+  let output = "";
+  process.stderr.write = ((chunk: string | Uint8Array) => { output += String(chunk); return true; }) as typeof process.stderr.write;
+  try {
+    speakFailureMemory([failure, fix], failure.fingerprint, 1, failureCwd);
+  } finally {
+    process.stderr.write = original;
+  }
+  assert.match(output, /place:/);
+  assert.match(output, /possible only|maybe not fix/);
+  assert.doesNotMatch(output, /strong\./);
+  assert.match(output, new RegExp(fixCwd.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  assert.equal(commandFingerprint(cmd, 1).length > 0, true);
+});
 
 test("unrelated successful npm task is not suggested as confirmed fix", (t) => {
   const home = mkdtempSync(join(tmpdir(), "rocky-causal-fix-"));

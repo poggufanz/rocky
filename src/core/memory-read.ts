@@ -302,7 +302,7 @@ function sameFileIdentity(expected: Stats, opened: Stats): boolean {
   return expected.dev === opened.dev && expected.ino === opened.ino;
 }
 
-export function loadMemoryChecked(path = resolveRockyPaths().memory): MemoryLoadResult {
+export function loadMemoryChecked(path = resolveRockyPaths().memory, now = Date.now()): MemoryLoadResult {
   let descriptor: number | undefined;
   let listed: Stats | undefined;
   let contents: string;
@@ -344,13 +344,20 @@ export function loadMemoryChecked(path = resolveRockyPaths().memory): MemoryLoad
   }
 
   const records: MemoryRecord[] = [];
+  const seenIds = new Set<string>();
   for (const line of contents.split("\n")) {
     if (Buffer.byteLength(line, "utf8") > MAX_MEMORY_LINE_BYTES) continue;
     const trimmed = line.trim();
     if (!trimmed) continue;
     try {
       const record = parseMemoryRecord(JSON.parse(trimmed));
-      if (record) records.push(record);
+      // Append-only history can contain a repeated id after a crash or a
+      // manual merge. First valid provenance wins; later duplicates are
+      // retained only as inert bytes in the file, never in operational state.
+      if (record && !seenIds.has(record.id)) {
+        seenIds.add(record.id);
+        records.push(record);
+      }
     } catch {
       // a corrupt line never kills the memory; skip it
     }
@@ -358,12 +365,13 @@ export function loadMemoryChecked(path = resolveRockyPaths().memory): MemoryLoad
   const byId = new Map(records.map((record) => [record.id, record]));
   for (const record of records) {
     if (record.kind !== "fix") continue;
+    if (record.ts > now) continue;
     for (const failureId of record.failureIds) {
       const failure = byId.get(failureId);
       // Resolution is a one-way transition. Legacy duplicate fix lines stay
       // readable, but a later duplicate must not rewrite provenance or make
       // resolvedBy depend on append order beyond the first confirmed event.
-      if (failure?.kind !== "failure" || failure.resolvedBy !== undefined) continue;
+      if (failure?.kind !== "failure" || failure.resolvedBy !== undefined || failure.ts > now || record.ts < failure.ts) continue;
       // Fix attribution is cwd-bound. Cross-directory recall still admits a
       // fix from elsewhere, but it must never mutate the failure's local
       // resolution state or clear a local pending marker.
@@ -385,8 +393,8 @@ export function loadMemoryChecked(path = resolveRockyPaths().memory): MemoryLoad
 }
 
 /** Backward-compatible reader: malformed lines and unreadable files read as empty. */
-export function loadMemory(path = resolveRockyPaths().memory): MemoryRecord[] {
-  return loadMemoryChecked(path).records;
+export function loadMemory(path = resolveRockyPaths().memory, now = Date.now()): MemoryRecord[] {
+  return loadMemoryChecked(path, now).records;
 }
 
 function validateStoredIdentity(

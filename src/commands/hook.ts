@@ -93,6 +93,7 @@ export function hookFail(cmd: string, exitCode: number, cwd: string): number {
     if (elsewhere !== undefined) {
       sayTty("but fix comes from other place.");
       detailTty(`place: ${safeTerminalLine(elsewhere)}`);
+      sayTty("possible only. check, question");
     }
     sayTty("try, question");
   } else {

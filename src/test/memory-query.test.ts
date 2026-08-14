@@ -9,6 +9,7 @@ import {
   queryStats,
   recentUnresolvedFailures,
   searchKnowledge,
+  getFix,
 } from "../core/memory-query.js";
 
 const failureA: FailureRecord = {
@@ -64,6 +65,40 @@ test("queryRecall keeps an explicit cross-directory fix visible without resolvin
   const hit = queryRecall([failure, fix], { query: "module missing", cwd: failure.cwd })[0];
   assert.equal(hit?.fix?.id, fix.id);
   assert.equal(failure.resolvedBy, undefined, "passive recall must not mutate attribution");
+});
+
+test("cross-directory confirmation never counts as local stats", () => {
+  const failure: FailureRecord = {
+    kind: "failure", id: "cross-stats-failure", ts: 100, cwd: "/work/source", cmd: "npm test",
+    exitCode: 1, fingerprint: "fp-cross-stats", signature: ["module missing"], excerpt: "module missing",
+    resolvedBy: "cross-stats-fix",
+  };
+  const fix: FixRecord = {
+    kind: "fix", id: "cross-stats-fix", ts: 200, cwd: "/work/other", cmd: "npm test",
+    failureIds: [failure.id],
+  };
+  assert.deepEqual(queryStats([failure, fix]), { failures: 1, fixEvents: 0, resolved: 0, unresolved: 1 });
+});
+
+test("query indices are first-wins for duplicate IDs", () => {
+  const failure: FailureRecord = { ...failureA, id: "duplicate-query-failure", resolvedBy: "duplicate-query-fix" };
+  const first: FixRecord = { ...fixA, id: "duplicate-query-fix", failureIds: [failure.id], cmd: "npm run build" };
+  const later: FixRecord = { ...first, cmd: "rm -rf /" };
+  const duplicateFailure: FailureRecord = { ...failure, cmd: "rm -rf /", fingerprint: "duplicate-later" };
+  const input = [failure, duplicateFailure, first, later];
+  assert.equal(getFix(input, failure)?.cmd, "npm run build");
+  assert.deepEqual(queryStats(input), { failures: 1, fixEvents: 1, resolved: 1, unresolved: 0 });
+  assert.equal(queryRecall(input, { query: "module missing" })[0]?.fix?.cmd, "npm run build");
+});
+
+test("query fix index observes same-array mutation on each call", () => {
+  const failure: FailureRecord = { ...failureA, id: "mutable-failure", resolvedBy: undefined };
+  const fix: FixRecord = { ...fixA, id: "mutable-fix", failureIds: [failure.id] };
+  const mutable: MemoryRecord[] = [failure];
+  assert.equal(getFix(mutable, failure), undefined);
+  mutable.push(fix);
+  failure.resolvedBy = fix.id;
+  assert.equal(getFix(mutable, failure)?.id, fix.id);
 });
 
 test("link query uses injected cwd and clock without changing process cwd", () => {

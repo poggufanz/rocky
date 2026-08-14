@@ -9,7 +9,7 @@
 import { createOllamaClient } from "../ai/ollama.js";
 import { type AiAct, type AiStatus, type RecallWithAiPort } from "../ai/port.js";
 import { createRecallAiPort, formatModelExplanation, singleFlightRecallAi } from "../ai/recall-ai.js";
-import { createMemoryQueries, type MemoryQueries, type RecallHit } from "../core/memory-query.js";
+import { createMemoryQueries, fixFromElsewhere, type MemoryQueries, type RecallHit } from "../core/memory-query.js";
 import { loadMemory } from "../core/memory-read.js";
 import { resolveRockyPaths } from "../core/state-paths.js";
 import { ago, detail, elapsed, heading, phrase, phraseForAct, say } from "../ui/rocky.js";
@@ -221,12 +221,19 @@ export async function recall(argv: readonly string[], dependencies?: RecallDepen
     detail(indent(safeTerminalBlock(hit.failure.excerpt)));
     if (hit.fix) {
       say(`fixed with: ${safeTerminalLine(hit.fix.cmd)}`);
-      const link = hit.fix.links?.find((candidate) => candidate.id === hit.failure.id);
-      if (link) {
-        const span = elapsed(hit.fix.ts - hit.failure.ts);
-        say(link.basis === "identity" || link.basis === "signature"
-          ? `same command, ${span} later. strong.`
-          : `same program, ${span} later. maybe not fix. check, question`);
+      const elsewhere = fixFromElsewhere(hit.fix, hit.failure.cwd);
+      if (elsewhere !== undefined) {
+        say("but fix comes from other place.");
+        detail(`place: ${safeTerminalLine(elsewhere)}`);
+        say("possible only. check, question");
+      } else {
+        const link = hit.fix.links?.find((candidate) => candidate.id === hit.failure.id);
+        if (link) {
+          const span = elapsed(hit.fix.ts - hit.failure.ts);
+          say(link.basis === "identity" || link.basis === "signature"
+            ? `same command, ${span} later. strong.`
+            : `same program, ${span} later. maybe not fix. check, question`);
+        }
       }
     } else {
       say("no fix recorded for this one. bad bad.");

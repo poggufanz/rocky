@@ -127,6 +127,38 @@ function initialMemoryReadFailurePreload(path: string): void {
   ].join("\n"), "utf8");
 }
 
+function crashAfterLockRenamePreload(path: string): void {
+  writeFileSync(path, [
+    "const fs = require('node:fs');",
+    "const { syncBuiltinESMExports } = require('node:module');",
+    "const originalRename = fs.renameSync.bind(fs);",
+    "fs.renameSync = (from, to, ...args) => {",
+    "  const result = originalRename(from, to, ...args);",
+    "  if (String(from) === process.env.ROCKY_TEST_CRASH_RENAME_FROM) process.exit(Number(process.env.ROCKY_TEST_CRASH_CODE || 73));",
+    "  return result;",
+    "};",
+    "syncBuiltinESMExports();",
+  ].join("\n"), "utf8");
+}
+
+function replacementBeforePrimaryRenamePreload(path: string): void {
+  writeFileSync(path, [
+    "const fs = require('node:fs');",
+    "const { syncBuiltinESMExports } = require('node:module');",
+    "const originalRename = fs.renameSync.bind(fs);",
+    "let replaced = false;",
+    "fs.renameSync = (from, to, ...args) => {",
+    "  if (!replaced && String(from) === process.env.ROCKY_TEST_REPLACE_FROM) {",
+    "    replaced = true;",
+    "    originalRename(from, process.env.ROCKY_TEST_REPLACE_SAVE);",
+    "    fs.writeFileSync(from, JSON.stringify({ pid: 2147483647, token: 'r'.repeat(32) }));",
+    "  }",
+    "  return originalRename(from, to, ...args);",
+    "};",
+    "syncBuiltinESMExports();",
+  ].join("\n"), "utf8");
+}
+
 async function concurrentSuccesses(t: TestContext, count: number): Promise<void> {
   const home = sandbox(t, `rocky-atomic-${count}-`);
   const ready = join(home, "ready");
@@ -353,6 +385,33 @@ test("future failures are not linked and cannot satisfy delayed resolution proof
     else process.env.ROCKY_HOME = proofOriginalHome;
   }
   assert.equal(existsSync(join(proofHome, "pending")), true, "future failure cannot satisfy delayed recovery proof");
+
+  const combinedHome = sandbox(t, "rocky-future-unrelated-reconcile-");
+  const combinedCwd = combinedHome;
+  const combinedFailure = failure("combined-future-failure", cmd, combinedCwd, now + 1);
+  const combinedFutureFix: FixRecord = {
+    kind: "fix", id: "combined-future-fix", ts: now + 2, cwd: combinedCwd,
+    cmd, failureIds: [combinedFailure.id],
+  };
+  const unrelatedCmd = "node unrelated-valid-command.js";
+  const unrelatedFailure = failure("combined-unrelated-failure", unrelatedCmd, combinedCwd, now - 1_000);
+  const unrelatedFix: FixRecord = {
+    kind: "fix", id: "combined-unrelated-fix", ts: now - 500, cwd: combinedCwd,
+    cmd: unrelatedCmd, failureIds: [unrelatedFailure.id],
+  };
+  seed(combinedHome, [combinedFailure, combinedFutureFix, unrelatedFailure, unrelatedFix]);
+  const combinedOriginalHome = process.env.ROCKY_HOME;
+  process.env.ROCKY_HOME = combinedHome;
+  try {
+    memory.resolveFixOnSuccess(unrelatedCmd, combinedCwd, { now });
+  } finally {
+    if (combinedOriginalHome === undefined) delete process.env.ROCKY_HOME;
+    else process.env.ROCKY_HOME = combinedOriginalHome;
+  }
+  const combinedRecords = memory.loadMemory(join(combinedHome, "memory.jsonl"), now);
+  assert.equal(combinedRecords.find((record): record is FailureRecord => record.kind === "failure" && record.id === combinedFailure.id)?.resolvedBy, undefined);
+  assert.equal(combinedRecords.find((record): record is FailureRecord => record.kind === "failure" && record.id === unrelatedFailure.id)?.resolvedBy, unrelatedFix.id);
+  assert.equal(existsSync(join(combinedHome, "pending")), true, "valid unrelated reconciliation cannot clear future pending");
 });
 
 test("a same-identity FixRecord from another cwd cannot clear pending through delayed reconciliation", (t) => {
@@ -733,6 +792,93 @@ test("dead owner and stale empty, torn, or orphan-claim locks recover promptly",
   assert.equal(memory.loadMemory(join(home, "memory.jsonl")).filter((record) => record.kind === "note").length, 4);
 });
 
+test("guard and primary crash tombstones do not block the next acquisition", { timeout: 20_000 }, async (t) => {
+  for (const mode of ["guard", "primary"] as const) {
+    await t.test(`${mode} move`, async (st) => {
+      const home = sandbox(st, `rocky-tombstone-crash-${mode}-`);
+      const lock = join(home, "memory.jsonl.triple.lock");
+      const guard = `${lock}.reclaim.guard`;
+      const deadPid = 2_147_483_647;
+      mkdirSync(home, { recursive: true });
+      writeFileSync(lock, JSON.stringify({ pid: deadPid, token: "d".repeat(32) }), { mode: 0o600 });
+      if (mode === "guard") writeFileSync(guard, JSON.stringify({ pid: deadPid, token: "c".repeat(32) }), { mode: 0o600 });
+      const preload = join(home, "crash-after-rename.cjs");
+      crashAfterLockRenamePreload(preload);
+      const worker = [
+        "const [modulePath, home] = process.argv.slice(1);",
+        "process.env.ROCKY_HOME = home;",
+        "const memory = await import(modulePath);",
+        "memory.withMemoryTransaction(() => {});",
+      ].join("\n");
+      const crashed = spawn(process.execPath, ["--input-type=module", "--eval", worker, memoryModuleUrl, home], {
+        env: {
+          ...process.env,
+          ROCKY_HOME: home,
+          ROCKY_TEST_CRASH_RENAME_FROM: mode === "guard" ? guard : lock,
+          NODE_OPTIONS: `--require=${preload}`,
+        },
+        stdio: ["ignore", "pipe", "pipe"],
+        windowsHide: true,
+      });
+      let stderr = "";
+      crashed.stderr?.on("data", (chunk) => { stderr += String(chunk); });
+      const crashCode = await completion(crashed);
+      assert.equal(crashCode, 73, stderr);
+      const tombstones = readdirSync(home).filter((name) => name.includes(".reclaim.tombstone."));
+      assert.ok(tombstones.length >= 1, "crash leaves unique tombstone");
+      assert.equal(existsSync(`${lock}.reclaim.guard.claim`), false);
+
+      const original = process.env.ROCKY_HOME;
+      process.env.ROCKY_HOME = home;
+      try {
+        memory.recordNote({ cwd: home, cmd: `after-${mode}-crash`, file: "crash.ts", line: 1, subject: "crash", answer: "recovered" });
+      } finally {
+        if (original === undefined) delete process.env.ROCKY_HOME;
+        else process.env.ROCKY_HOME = original;
+      }
+      assert.equal(existsSync(lock), false, "canonical lock is released after recovery");
+      assert.ok(readdirSync(home).some((name) => name.includes(".reclaim.tombstone.")), "tombstone remains housekeeping-only");
+    });
+  }
+});
+
+test("replacement moved by a reclaim rename is preserved in its tombstone", { timeout: 20_000 }, (t) => {
+  const home = sandbox(t, "rocky-tombstone-replacement-");
+  const lock = join(home, "memory.jsonl.triple.lock");
+  const saved = join(home, "original-primary.lock");
+  const preload = join(home, "replace-before-rename.cjs");
+  const deadPid = 2_147_483_647;
+  mkdirSync(home, { recursive: true });
+  writeFileSync(lock, JSON.stringify({ pid: deadPid, token: "d".repeat(32) }), { mode: 0o600 });
+  replacementBeforePrimaryRenamePreload(preload);
+  const worker = [
+    "const [modulePath, home] = process.argv.slice(1);",
+    "process.env.ROCKY_HOME = home;",
+    "const memory = await import(modulePath);",
+    "memory.withMemoryTransaction((transaction) => transaction.append({ kind: 'note', id: 'replacement-note', ts: Date.now(), cwd: home, cmd: 'replacement', file: 'replacement.ts', line: 1, subject: 'replacement', answer: 'preserved' }));",
+  ].join("\n");
+  const result = spawnSync(process.execPath, ["--input-type=module", "--eval", worker, memoryModuleUrl, home], {
+    env: {
+      ...process.env,
+      ROCKY_HOME: home,
+      ROCKY_TEST_REPLACE_FROM: lock,
+      ROCKY_TEST_REPLACE_SAVE: saved,
+      NODE_OPTIONS: `--require=${preload}`,
+    },
+    encoding: "utf8",
+    timeout: 10_000,
+    windowsHide: true,
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(existsSync(saved), true, "original inode remains recoverable");
+  const preserved = readdirSync(home)
+    .filter((name) => name.includes(".reclaim.tombstone."))
+    .map((name) => readFileSync(join(home, name), "utf8"))
+    .find((contents) => contents.includes(`\"token\":\"${"r".repeat(32)}\"`));
+  assert.ok(preserved, "replacement inode remains in preserved tombstone");
+  assert.equal(existsSync(lock), false, "next acquisition still releases canonical lock");
+});
+
 test("a dead orphan claim is pruned when the primary pathname is already absent", (t) => {
   const home = sandbox(t, "rocky-orphan-without-primary-");
   const lock = `${join(home, "memory.jsonl")}.triple.lock`;
@@ -851,7 +997,7 @@ test("competing dead-owner reclaimers never overlap transactions", { timeout: 30
   assert.equal(existsSync(violation), false, "memory transactions must never overlap during recovery");
   assert.equal(existsSync(lock), false);
 
-  // Exercise the same hard-link reclaim protocol for a crashed reclaimer
+  // Exercise the same tombstone reclaim protocol for a crashed reclaimer
   // that left an empty, old election guard rather than valid PID metadata.
   writeFileSync(lock, JSON.stringify({ pid: 2_147_483_647, token: "d".repeat(32) }), { mode: 0o600 });
   const staleGuard = `${lock}.reclaim.guard`;
@@ -867,7 +1013,7 @@ test("competing dead-owner reclaimers never overlap transactions", { timeout: 30
     else process.env.ROCKY_HOME = originalHome;
   }
   assert.equal(existsSync(lock), false, "stale election guard recovery removes dead primary");
-  assert.equal(existsSync(staleGuard), false, "stale election guard is removed through a claim");
+  assert.equal(existsSync(staleGuard), false, "stale election guard is removed through a tombstone");
 });
 
 test("reclaim-claim sweeping examines a bounded batch and preserves unsafe entries", (t) => {
