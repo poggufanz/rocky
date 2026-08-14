@@ -166,6 +166,20 @@ function registryMissingOnlyPreload(box: Sandbox, missingName: string): string {
   return path;
 }
 
+function registryStatusPreload(box: Sandbox, statuses: Record<string, number>, fallbackStatus = 200): string {
+  const path = join(box.root, "registry-statuses.cjs");
+  writeFileSync(path, [
+    `const statuses = ${JSON.stringify(statuses)};`,
+    `const fallbackStatus = ${fallbackStatus};`,
+    "global.fetch = async (url) => {",
+    "  const name = decodeURIComponent(String(url).slice(String(url).lastIndexOf('/') + 1));",
+    "  return { status: statuses[name] ?? fallbackStatus };",
+    "};",
+    "",
+  ].join("\n"), "utf8");
+  return path;
+}
+
 function throwingStderrPreload(box: Sandbox, target: string, registry404 = false): string {
   const path = join(box.root, `stderr-throw-${registry404 ? "registry" : "plain"}.cjs`);
   writeFileSync(path, [
@@ -476,6 +490,61 @@ test("--offline skips registry even when consent is stored", async (t) => {
   assert.throws(() => readFileSync(preload.marker, "utf8"), { code: "ENOENT" });
 });
 
+test("manual registry outages are incomplete rather than clean", async (t) => {
+  const box = sandbox(t);
+  initRepo(box, { "package.json": JSON.stringify({ dependencies: { "rocky-registry-unreachable": "1.0.0" } }) });
+  enableRegistry(box);
+
+  const result = await runCheck(box, [], undefined, registryStatusPreload(box, {}, 503));
+
+  assertCompleted(result, 2);
+  assert.match(result.stderr, /registry unreachable.*rocky-registry-unreachable/i);
+  assert.match(result.stderr, /incomplete/i);
+});
+
+test("mixed missing and unreachable packages retain both finding and incomplete evidence", async (t) => {
+  const box = sandbox(t);
+  const missing = "rocky-registry-missing";
+  const unreachable = "rocky-registry-unreachable";
+  initRepo(box, { "package.json": JSON.stringify({ dependencies: {
+    [missing]: "1.0.0",
+    [unreachable]: "1.0.0",
+  } }) });
+  enableRegistry(box);
+
+  const result = await runCheck(
+    box,
+    [],
+    undefined,
+    registryStatusPreload(box, { [missing]: 404, [unreachable]: 503 }),
+  );
+
+  assertCompleted(result, 1);
+  assert.match(result.stderr, new RegExp(missing));
+  assert.match(result.stderr, new RegExp(`registry unreachable.*${unreachable}`));
+  assert.match(result.stderr, /incomplete/i);
+});
+
+test("pre-push registry outages stay fail-open but announce incompleteness", async (t) => {
+  const box = sandbox(t);
+  const commits = initRepo(box, { "package.json": "{}\n" }, {
+    "package.json": JSON.stringify({ dependencies: { "rocky-registry-unreachable": "1.0.0" } }),
+  });
+  enableRegistry(box);
+
+  const result = await runCheck(
+    box,
+    ["--pre-push"],
+    prePushLine(commits.second!, commits.first),
+    registryStatusPreload(box, {}, 503),
+  );
+
+  assertCompleted(result, 0);
+  assert.match(result.stderr, /registry unreachable/i);
+  assert.match(result.stderr, /incomplete/i);
+  assert.doesNotMatch(result.stderr, /checked.clean/i);
+});
+
 test("not a git repository reports one line and exits 0", async (t) => {
   // The shared sandbox lives inside the package worktree, so a run there finds
   // the enclosing repository and tests something else entirely. A genuine
@@ -707,6 +776,30 @@ test("package limit preserves a finding while reporting incomplete coverage", as
   assertCompleted(result, 3);
   assert.match(result.stderr, /package limit: 51 found; first 50 checked, 1 skipped/);
   assert.match(result.stderr, /incomplete/i);
+});
+
+test("a missing package beyond the cap stays fail-open but reports incomplete pre-push coverage", async (t) => {
+  const box = sandbox(t);
+  const dependencies: Record<string, string> = {};
+  for (let index = 0; index < 51; index++) dependencies[`rocky-tail-package-${index}`] = "1.0.0";
+  const missing = "rocky-tail-package-50";
+  const commits = initRepo(box, { "package.json": "{}\n" }, {
+    "package.json": JSON.stringify({ dependencies }),
+  });
+  enableRegistry(box);
+
+  const result = await runCheck(
+    box,
+    ["--pre-push"],
+    prePushLine(commits.second!, commits.first),
+    registryMissingOnlyPreload(box, missing),
+  );
+
+  assertCompleted(result, 0);
+  assert.match(result.stderr, /package limit: 51 found; first 50 checked, 1 skipped/);
+  assert.match(result.stderr, /incomplete/i);
+  assert.doesNotMatch(result.stderr, new RegExp(missing));
+  assert.doesNotMatch(result.stderr, /checked.clean/i);
 });
 
 test("exact line and package caps remain complete", async (t) => {

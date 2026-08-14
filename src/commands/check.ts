@@ -367,7 +367,8 @@ async function packageStage(
   }
   const result = await checkPackages(names.slice(0, MAX_PACKAGES));
   if (result.unreachable.length > 0) {
-    detail(`registry unreachable for: ${result.unreachable.join(", ")}; check stays fail-open`);
+    state.incomplete = true;
+    incompleteDetail(`registry unreachable for: ${result.unreachable.join(", ")}; check stays fail-open`);
   }
   if (result.missing.length === 0) return;
   state.finding = true;
