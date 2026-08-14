@@ -366,6 +366,34 @@ test("findByFingerprint dual lookup finds a v0.5 record after algorithm upgrade"
   const current = fingerprint(stderr, "npm test", 1);
   assert.deepEqual(findByFingerprint([legacy], [current, legacy.fingerprint], 100).map((record) => record.id), [legacy.id]);
   assert.deepEqual(findByFingerprint([legacy], current, 100).map((record) => record.id), [legacy.id]);
+  assert.deepEqual(findByFingerprint([legacy], legacy.fingerprint, 100).map((record) => record.id), [legacy.id]);
+});
+
+test("dual lookup rejects a legacy HTTP/port hash from different current semantics", () => {
+  const oldStderr = "Error: HTTP 404 from port 9200";
+  const newStderr = "Error: HTTP 500 from port 5432";
+  const legacy: FailureRecord = {
+    kind: "failure", id: "legacy-wrong-semantics", ts: 100, cwd: "/work/a", cmd: "curl", exitCode: 1,
+    fingerprint: legacyFingerprint(oldStderr, "curl", 1), signature: signatureLines(oldStderr), excerpt: oldStderr,
+  };
+  const candidates = [fingerprint(newStderr, "curl", 1), legacyFingerprint(newStderr, "curl", 1)];
+  assert.deepEqual(findByFingerprint([legacy], candidates, 100), []);
+});
+
+test("recall migration does not canonicalize legacy evidence onto a different v2 semantic", () => {
+  const oldStderr = "Error: HTTP 404 from port 9200";
+  const newStderr = "Error: HTTP 500 from port 5432";
+  const legacy: FailureRecord = {
+    kind: "failure", id: "legacy-recall-404", ts: 100, cwd: "/work/a", cmd: "curl", exitCode: 1,
+    fingerprint: legacyFingerprint(oldStderr, "curl", 1), signature: signatureLines(oldStderr), excerpt: oldStderr,
+  };
+  const current: FailureRecord = {
+    kind: "failure", id: "current-recall-500", ts: 200, cwd: "/work/a", cmd: "curl", exitCode: 1,
+    fingerprint: fingerprint(newStderr, "curl", 1), fingerprintV: 2,
+    signature: signatureLines(newStderr), excerpt: newStderr,
+  };
+  assert.deepEqual(queryRecall([legacy, current], { query: "curl", limit: 5 }).map((hit) => hit.failure.id), [current.id, legacy.id]);
+  assert.deepEqual(searchKnowledge([legacy, current], { query: "curl", kind: "failure", limit: 5 }).map((hit) => hit.id), [current.id, legacy.id]);
 });
 
 test("current-only fingerprint lookup bridges lossy legacy URL signatures via excerpt", () => {
@@ -412,6 +440,58 @@ test("recall deduplicates a legacy and current record for one fingerprint family
   assert.deepEqual(queryRecall([legacy, current], { query: "module missing" }).map((hit) => hit.failure.id), [current.id]);
 });
 
+test("recall and MCP knowledge deduplicate silent legacy/current records", () => {
+  const cmd = "false";
+  const legacy: FailureRecord = {
+    kind: "failure", id: "legacy-silent-family", ts: 100, cwd: "/work/a", cmd, exitCode: 1,
+    fingerprint: legacyFingerprint("", cmd, 1), signature: [], excerpt: "",
+  };
+  const current: FailureRecord = {
+    ...legacy, id: "current-silent-family", ts: 200, fingerprint: fingerprint("", cmd, 1), fingerprintV: 2,
+  };
+  assert.deepEqual(queryRecall([legacy, current], { query: "false" }).map((hit) => hit.failure.id), [current.id]);
+  assert.deepEqual(searchKnowledge([legacy, current], { query: "false", kind: "failure" }).map((hit) => hit.id), [current.id]);
+});
+
+test("recall and MCP knowledge deduplicate hook-origin legacy/current records", () => {
+  const cmd = "npm run build";
+  const legacy: FailureRecord = {
+    kind: "failure", id: "legacy-hook-family", ts: 100, cwd: "/work/a", cmd, exitCode: 1,
+    fingerprint: legacyFingerprint("", cmd, 1), signature: ["npm run build"], excerpt: "exit 1", origin: "hook",
+  };
+  const current: FailureRecord = {
+    ...legacy, id: "current-hook-family", ts: 200, fingerprint: fingerprint("", cmd, 1), fingerprintV: 2,
+  };
+  assert.deepEqual(queryRecall([legacy, current], { query: "npm run build" }).map((hit) => hit.failure.id), [current.id]);
+  assert.deepEqual(searchKnowledge([legacy, current], { query: "npm run build", kind: "failure" }).map((hit) => hit.id), [current.id]);
+});
+
+test("watch and silent legacy command hashes require a current semantic witness", () => {
+  const cmd = "node worker.js";
+  const legacy: FailureRecord = {
+    kind: "failure", id: "legacy-watch-family", ts: 100, cwd: "/work/a", cmd, exitCode: 17,
+    fingerprint: legacyFingerprint("", cmd, 17), signature: [], excerpt: "", origin: "watch",
+  };
+  const current: FailureRecord = {
+    ...legacy, id: "current-watch-family", ts: 200, fingerprint: fingerprint("", cmd, 17), fingerprintV: 2,
+  };
+  assert.deepEqual(findByFingerprint([legacy], current.fingerprint, 300).map((record) => record.id), [legacy.id]);
+  assert.deepEqual(queryRecall([legacy, current], { query: "node worker.js" }).map((hit) => hit.failure.id), [current.id]);
+  assert.deepEqual(searchKnowledge([legacy, current], { query: "node worker.js", kind: "failure" }).map((hit) => hit.id), [current.id]);
+});
+
+test("malformed fingerprint provenance cannot create a migration family", () => {
+  const current: FailureRecord = {
+    ...failureA, id: "malformed-current", ts: 200, fingerprint: "0123456789abcdef", fingerprintV: 2,
+  };
+  const forged: FailureRecord = {
+    ...failureA, id: "forged-legacy", ts: 100, fingerprint: "0123456789abcdef", signature: ["different evidence"], excerpt: "different evidence",
+  };
+  assert.deepEqual(findByFingerprint([forged], current.fingerprint, 300), []);
+  assert.deepEqual(queryRecall([forged, current], { query: "different evidence" }).map((hit) => hit.failure.id), [forged.id]);
+  assert.deepEqual(searchKnowledge([forged, current], { query: "different evidence", kind: "failure" }).map((hit) => hit.id), [forged.id]);
+});
+
 test("port query ranks exact semantic port above nearby ports", () => {
   const records: FailureRecord[] = [
     {
@@ -451,6 +531,49 @@ test("persisted signatures retain semantic status and port evidence", () => {
     },
   ];
   assert.equal(queryRecall(records, { query: "HTTP 404 port 9200" })[0]?.failure.id, "persisted-9200");
+});
+
+test("numeric-only queries discriminate HTTP statuses and ports in recall and knowledge search", () => {
+  const records: FailureRecord[] = [
+    {
+      ...failureA, id: "status-404", ts: 100, cmd: "curl", fingerprint: "status-404",
+      signature: ["error HTTP 404"], excerpt: "error HTTP 404",
+    },
+    {
+      ...failureB, id: "status-500", ts: 200, cmd: "curl", fingerprint: "status-500",
+      signature: ["error HTTP 500"], excerpt: "error HTTP 500",
+    },
+    {
+      ...failureA, id: "port-9200-numeric", ts: 300, cmd: "connect service", fingerprint: "port-9200-numeric",
+      signature: ["error connection refused on port 9200"], excerpt: "error connection refused on port 9200",
+    },
+    {
+      ...failureB, id: "port-5432-numeric", ts: 400, cmd: "connect service", fingerprint: "port-5432-numeric",
+      signature: ["error connection refused on port 5432"], excerpt: "error connection refused on port 5432",
+    },
+  ];
+  assert.equal(queryRecall(records.slice(0, 2), { query: "404" })[0]?.failure.id, "status-404");
+  assert.equal(queryRecall(records.slice(2), { query: "9200" })[0]?.failure.id, "port-9200-numeric");
+  assert.equal(searchKnowledge(records.slice(0, 2), { query: "404", kind: "failure" })[0]?.id, "status-404");
+  assert.equal(searchKnowledge(records.slice(2), { query: "9200", kind: "failure" })[0]?.id, "port-9200-numeric");
+});
+
+test("Unicode recall normalizes composed and combining forms across all supported scripts", () => {
+  const records: FailureRecord[] = [
+    { ...failureA, id: "cyrillic", ts: 100, cmd: "tool", fingerprint: "lang-cyrillic", signature: ["ошибка проводка"], excerpt: "ошибка проводка" },
+    { ...failureA, id: "arabic", ts: 101, cmd: "tool", fingerprint: "lang-arabic", signature: ["خطأ ملف"], excerpt: "خطأ ملف" },
+    { ...failureA, id: "accented", ts: 102, cmd: "tool", fingerprint: "lang-accented", signature: ["café"], excerpt: "café" },
+    { ...failureA, id: "greek", ts: 103, cmd: "tool", fingerprint: "lang-greek", signature: ["σφάλμα αρχείο"], excerpt: "σφάλμα αρχείο" },
+    { ...failureA, id: "cjk", ts: 104, cmd: "tool", fingerprint: "lang-cjk", signature: ["错误 文件"], excerpt: "错误 文件" },
+  ];
+  const queries = ["ошибка", "خطأ", "cafe\u0301", "σφάλμα", "错误"];
+  const ids = ["cyrillic", "arabic", "accented", "greek", "cjk"];
+  for (let index = 0; index < queries.length; index++) {
+    const query = queries[index]!;
+    const id = ids[index]!;
+    assert.equal(queryRecall(records, { query })[0]?.failure.id, id, `recall ${id}`);
+    assert.equal(searchKnowledge(records, { query, kind: "failure" })[0]?.id, id, `knowledge ${id}`);
+  }
 });
 
 test("one exact distinctive token survives long signatures", () => {

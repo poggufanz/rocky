@@ -2,10 +2,12 @@ import {
   commandBase,
   commandIdentity,
   fingerprint,
+  fingerprintSignature,
   legacyFingerprint,
+  legacyFingerprintSignature,
+  queryTokens,
   retrievalTokens,
   similarity,
-  tokens,
 } from "./fingerprint.js";
 import { loadMemory } from "./memory-read.js";
 import type { FailureRecord, FixRecord, LinkBasis, LinkConfidence, MemoryRecord, TripleRecord } from "./memory-read.js";
@@ -43,55 +45,154 @@ function lookupFingerprints(fp: FingerprintLookup): Set<string> {
   return new Set(typeof fp === "string" ? [fp] : fp);
 }
 
-function fingerprintMatches(record: FailureRecord, candidates: Set<string>): boolean {
-  if (candidates.has(record.fingerprint)) return true;
-  // Records marked v1 (or lacking a marker) predate v2. Re-normalizing their
-  // stored signature lets a current-only caller find old records for the
-  // common case; callers that still have stderr pass both candidates for lossy
-  // old numbers. A v2 record has already been compared exactly above.
-  if (record.fingerprintV === 2) return false;
-  if (!FINGERPRINT_TEXT.test(record.fingerprint)) return false;
-  // Empty-stderr and shell-hook records use the command-only fingerprint, so
-  // there is no stderr source to re-normalize. The current command hash still
-  // identifies this migration path without weakening the stored-hash check.
-  const commandOnly = (record.signature.length === 0 && record.excerpt.length === 0) || record.origin === "hook";
-  if (commandOnly) {
-    const currentCommand = fingerprint("", record.cmd, record.exitCode);
-    if (candidates.has(currentCommand) && record.fingerprint === legacyFingerprint("", record.cmd, record.exitCode)) return true;
+interface EvidenceDerivation {
+  current: string;
+  legacy: string;
+}
+
+/** Visit evidence lazily, stopping once a caller has a trusted answer. */
+function visitEvidence(
+  record: FailureRecord,
+  visitor: (evidence: EvidenceDerivation) => boolean,
+): boolean {
+  if (record.origin === "hook" || (record.signature.length === 0 && record.excerpt.length === 0)) {
+    return visitor({
+      current: fingerprint("", record.cmd, record.exitCode),
+      legacy: legacyFingerprint("", record.cmd, record.exitCode),
+    });
   }
-  // Old records carry only the normalized signature, while the excerpt often
-  // still has the raw error lines. Try both representations so a current-only
-  // caller can bridge the migration even when URL/number normalization was
-  // lossy in the stored v1 signature.
-  const sources = [record.signature.join("\n"), record.excerpt].filter((source, index, all) =>
-    source.length > 0 && all.indexOf(source) === index,
-  );
-  return sources.some((source) => {
-    const legacy = legacyFingerprint(source, record.cmd, record.exitCode);
-    // Re-derived values are accepted only when the persisted v1 fingerprint
-    // proves that this source belonged to the record. Otherwise a forged or
-    // hand-authored legacy record could match an unrelated current candidate
-    // merely because its signature happens to hash the same way.
-    return record.fingerprint === legacy && candidates.has(fingerprint(source, record.cmd, record.exitCode));
+
+  const signature = record.signature.join("\n");
+  let signatureProven = false;
+  if (signature.length > 0) {
+    // Stored signatures are already normalized. Avoid running the full line
+    // normalizer again in the common migration path; raw excerpts still use
+    // the complete derivation below when the fast witness does not fit.
+    const fast: EvidenceDerivation = {
+      current: fingerprintSignature(record.signature, record.cmd, record.exitCode),
+      legacy: legacyFingerprintSignature(record.signature, record.cmd, record.exitCode),
+    };
+    if (visitor(fast)) return true;
+    if (fast.legacy === record.fingerprint) {
+      signatureProven = true;
+    }
+    if (fast.legacy !== record.fingerprint) {
+      const fullLegacy = legacyFingerprint(signature, record.cmd, record.exitCode);
+      if (fullLegacy === record.fingerprint) {
+        signatureProven = true;
+        if (visitor({ ...fast, legacy: fullLegacy })) return true;
+      } else if (fullLegacy !== fast.legacy && visitor({ ...fast, legacy: fullLegacy })) return true;
+    }
+  }
+  if (record.excerpt.length > 0 && record.excerpt !== signature) {
+    const current = fingerprint(record.excerpt, record.cmd, record.exitCode);
+    // Once the stored signature itself proves the v1 hash, the excerpt only
+    // supplies a less-lossy current derivation; hashing it through v1 again
+    // adds cost without increasing provenance. A record with no proven
+    // signature still takes the conservative full legacy check.
+    return visitor({
+      current,
+      legacy: signatureProven ? record.fingerprint : legacyFingerprint(record.excerpt, record.cmd, record.exitCode),
+    });
+  }
+  return false;
+}
+
+function fingerprintMatches(record: FailureRecord, candidates: Set<string>): boolean {
+  // A single exact lookup is an explicit request for the persisted hash and
+  // remains backward-compatible with synthetic/opaque records. Migration
+  // callers pass both current and legacy candidates; that path must prove
+  // semantic provenance below instead of accepting the legacy member early.
+  if (record.fingerprintV !== 2 && candidates.size === 1 && candidates.has(record.fingerprint) &&
+      !FINGERPRINT_TEXT.test(record.fingerprint)) return true;
+  if (!FINGERPRINT_TEXT.test(record.fingerprint)) return false;
+  if (record.fingerprintV === 2) return candidates.has(record.fingerprint);
+  // A v1/absent-marker record is trusted only when its persisted hash proves
+  // one of its own evidence sources, and the same source derives a current
+  // candidate. This blocks a stale HTTP/port hash from matching a new record
+  // just because callers pass both current and legacy candidates.
+  return visitEvidence(record, ({ current, legacy }) => {
+    if (record.fingerprint === current && candidates.has(current)) return true;
+    // A caller that intentionally supplies only a legacy hash still gets an
+    // exact historical lookup, but only after the stored source proves that
+    // hash; the dual-candidate path above cannot take this shortcut.
+    if (record.fingerprint === legacy && candidates.size === 1 && candidates.has(legacy)) return true;
+    return record.fingerprint === legacy && candidates.has(current);
   });
 }
 
-function canonicalFingerprint(record: FailureRecord, currentFingerprints: ReadonlySet<string>): string {
+type FingerprintMigrationIndex = ReadonlyMap<string, ReadonlySet<string>>;
+
+function trustedCurrentEvidence(record: FailureRecord, current: string): boolean {
+  return visitEvidence(record, (evidence) => evidence.current === current);
+}
+
+/**
+ * Build only the legacy families that have a trustworthy v2 witness. The
+ * index is keyed by the persisted v1 hash and stores current hashes derived
+ * from the same evidence; it avoids re-hashing every current record for every
+ * legacy record during recall and remains conservative for malformed data.
+ */
+function fingerprintMigrationIndex(records: readonly FailureRecord[]): FingerprintMigrationIndex {
+  const currentByHash = new Map<string, FailureRecord[]>();
+  for (const record of records) {
+    if (record.fingerprintV !== 2 || !FINGERPRINT_TEXT.test(record.fingerprint)) continue;
+    const bucket = currentByHash.get(record.fingerprint);
+    if (bucket === undefined) currentByHash.set(record.fingerprint, [record]);
+    else bucket.push(record);
+  }
+  if (currentByHash.size === 0) return new Map();
+
+  const migrated = new Map<string, Set<string>>();
+  const trustedCurrent = new Set<string>();
+  const untrustedCurrent = new Set<string>();
+  for (const record of records) {
+    if (record.fingerprintV === 2 || !FINGERPRINT_TEXT.test(record.fingerprint)) continue;
+    visitEvidence(record, (evidence) => {
+      if (record.fingerprint !== evidence.legacy) return false;
+      const current = evidence.current;
+      const witnesses = currentByHash.get(current);
+      if (witnesses === undefined || untrustedCurrent.has(current)) return false;
+      if (!trustedCurrent.has(current)) {
+        if (!witnesses.some((witness) => trustedCurrentEvidence(witness, current))) {
+          untrustedCurrent.add(current);
+          return false;
+        }
+        trustedCurrent.add(current);
+      }
+      const family = migrated.get(record.fingerprint);
+      if (family === undefined) migrated.set(record.fingerprint, new Set([current]));
+      else family.add(current);
+      // The first source that proves both legacy provenance and a current
+      // witness is sufficient. Excerpts remain a fallback for lossy legacy
+      // signatures, not an additional per-record hashing obligation.
+      return true;
+    });
+  }
+  return migrated;
+}
+
+function canonicalFingerprint(record: FailureRecord, migration: FingerprintMigrationIndex): string {
   if (record.fingerprintV === 2) return record.fingerprint;
   if (!FINGERPRINT_TEXT.test(record.fingerprint)) return record.fingerprint;
-  // Legacy-only stores already deduplicate on their persisted v1 hash. Only
-  // derive v2 candidates when a current record exists to bridge to; this keeps
-  // large pre-migration memories on the same linear path as modern memories.
-  if (currentFingerprints.size === 0) return record.fingerprint;
-  const sources = [record.signature.join("\n"), record.excerpt].filter((source, index, all) =>
-    source.length > 0 && all.indexOf(source) === index,
-  );
-  for (const source of sources) {
-    if (record.fingerprint !== legacyFingerprint(source, record.cmd, record.exitCode)) continue;
-    const current = fingerprint(source, record.cmd, record.exitCode);
-    if (currentFingerprints.has(current)) return current;
-  }
-  return record.fingerprint;
+  const family = migration.get(record.fingerprint);
+  if (family === undefined) return record.fingerprint;
+  let canonical = record.fingerprint;
+  visitEvidence(record, ({ current }) => {
+    if (!family.has(current)) return false;
+    canonical = current;
+    return true;
+  });
+  return canonical;
+}
+
+function knowledgeFailureKey(record: FailureRecord, migration: FingerprintMigrationIndex): string {
+  const canonical = canonicalFingerprint(record, migration);
+  // Independent legacy records with the same (possibly hand-authored) hash
+  // remain separate. Only a trusted v1 -> v2 derivation is a cross-version
+  // family, which prevents malformed data from collapsing MCP results.
+  if (record.fingerprintV !== 2 && canonical === record.fingerprint) return `legacy:${record.id}`;
+  return canonical;
 }
 
 export function findByFingerprint(records: readonly MemoryRecord[], fp: FingerprintLookup, now = Date.now()): FailureRecord[] {
@@ -177,21 +278,19 @@ export function queryRecall(records: readonly MemoryRecord[], input: RecallQuery
   const now = input.now ?? Date.now();
   const fixes = fixesIndex(unique, now);
   const limit = input.limit ?? 3;
-  const queryTokens = tokens(input.query);
+  const queryTokenSet = queryTokens(input.query);
   const candidates = unique
     .filter((record): record is FailureRecord => record.kind === "failure" && record.ts <= now &&
       (input.cwd === undefined || record.cwd === input.cwd))
     .map((record) => ({ record, tokenSet: retrievalTokens([record.cmd, ...record.signature].join(" ")) }));
   const documentFrequency = tokenDocumentFrequency(candidates.map((candidate) => candidate.tokenSet));
-  const currentFingerprints = new Set(
-    candidates.filter(({ record }) => record.fingerprintV === 2).map(({ record }) => record.fingerprint),
-  );
+  const migration = fingerprintMigrationIndex(candidates.map(({ record }) => record));
   const best = new Map<string, RecallHit>();
   for (const { record, tokenSet } of candidates) {
-    const score = semanticScore(queryTokens, tokenSet, documentFrequency, candidates.length);
+    const score = semanticScore(queryTokenSet, tokenSet, documentFrequency, candidates.length);
     if (score <= 0.05) continue;
     const hit = { failure: record, fix: fixForFailure(fixes, record, now), score };
-    const key = canonicalFingerprint(record, currentFingerprints);
+    const key = canonicalFingerprint(record, migration);
     const previous = best.get(key);
     if (!previous || (!previous.fix && hit.fix) || (!!previous.fix === !!hit.fix && record.ts > previous.failure.ts)) {
       best.set(key, hit);
@@ -240,7 +339,7 @@ export function searchKnowledge(
 ): KnowledgeSearchHit[] {
   const limit = Math.min(Math.max(input.limit ?? 10, 1), 20);
   const now = input.now ?? Date.now();
-  const queryTokens = tokens(input.query);
+  const queryTokenSet = queryTokens(input.query);
   const hits: KnowledgeSearchHit[] = [];
   const wants = (kind: KnowledgeSearchHit["kind"]): boolean => input.kind === undefined || input.kind === kind;
 
@@ -264,16 +363,27 @@ export function searchKnowledge(
     }
   }
   const documentFrequency = tokenDocumentFrequency(entries.map((entry) => entry.tokenSet));
+  const migration = fingerprintMigrationIndex(
+    entries
+      .filter((entry): entry is { record: FailureRecord; tokenSet: Set<string>; snippet: string } => entry.record.kind === "failure")
+      .map((entry) => entry.record),
+  );
+  const failureHits = new Map<string, { hit: KnowledgeSearchHit; current: boolean }>();
   for (const { record, tokenSet, snippet } of entries) {
-    const score = semanticScore(queryTokens, tokenSet, documentFrequency, entries.length);
+    const score = semanticScore(queryTokenSet, tokenSet, documentFrequency, entries.length);
     if (record.kind === "failure") {
-      if (score > 0) hits.push({
-        id: record.id,
-        ts: record.ts,
-        kind: "failure",
-        snippet,
-        score,
-      });
+      if (score > 0) {
+        const hit: KnowledgeSearchHit = { id: record.id, ts: record.ts, kind: "failure", snippet, score };
+        const key = knowledgeFailureKey(record, migration);
+        const previous = failureHits.get(key);
+        const current = record.fingerprintV === 2;
+        if (previous === undefined ||
+            (current && !previous.current) ||
+            (current === previous.current && (hit.score > previous.hit.score ||
+              (hit.score === previous.hit.score && hit.ts > previous.hit.ts)))) {
+          failureHits.set(key, { hit, current });
+        }
+      }
     } else if (record.kind === "fix") {
       if (score > 0) hits.push({
         id: record.id,
@@ -293,6 +403,7 @@ export function searchKnowledge(
     }
   }
 
+  hits.push(...[...failureHits.values()].map(({ hit }) => hit));
   return hits.sort((a, b) => b.score - a.score || b.ts - a.ts).slice(0, limit);
 }
 

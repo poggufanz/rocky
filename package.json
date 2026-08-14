@@ -28,6 +28,7 @@
     "test": "node scripts/test.mjs",
     "package:smoke": "node scripts/package-smoke.mjs",
     "benchmark:mcp": "npm run build --silent && node scripts/benchmark-mcp.mjs",
+    "benchmark:memory-query": "npm run build --silent && node scripts/benchmark-memory-query.mjs",
     "release:check": "node scripts/release-check.mjs",
     "prepack": "npm run build",
     "prepublishOnly": "npm test"

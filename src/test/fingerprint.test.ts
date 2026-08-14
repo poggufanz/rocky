@@ -8,6 +8,7 @@ import {
   fingerprintTokens,
   legacyFingerprint,
   normalizeLine,
+  queryTokens,
   retrievalTokens,
   tokens,
 } from "../core/fingerprint.js";
@@ -55,6 +56,11 @@ test("URL masking consumes the complete URL before path masking", () => {
   assert.equal(line.includes("8443"), false);
 });
 
+test("URL masking keeps RFC3986 apostrophes inside URLs and surrounding quotes outside", () => {
+  const line = normalizeLine("Error fetch 'https://user:o'connor@[2001:db8::1]:8443/O'Reilly?token=it's#frag'.");
+  assert.equal(line, "error fetch '<url>'.");
+});
+
 test("semantic HTTP status, explicit code, and port numbers survive fingerprint normalization", () => {
   assert.notEqual(fingerprint("Error: HTTP 404 from port 9200", "curl", 1), fingerprint("Error: HTTP 500 from port 9200", "curl", 1));
   assert.notEqual(fingerprint("Error: HTTP 404 code 1001 on port 9200", "curl", 1), fingerprint("Error: HTTP 404 code 1002 on port 9200", "curl", 1));
@@ -66,6 +72,17 @@ test("volatile line, pid, and timestamp numbers remain stable", () => {
   const b = "Error at /srv/app/index.ts:99:2 pid 9876 at 2027-09-15T21:31:42Z";
   assert.equal(fingerprint(a, "node app", 1), fingerprint(b, "node app", 1));
   assert.equal(fingerprint("Error at file.ts:41:7", "node app", 1), fingerprint("Error at file.ts:99:2", "node app", 1));
+});
+
+test("volatile labelled numbers and Unicode decimal digits stay masked", () => {
+  assert.equal(normalizeLine("Error pid:1234 worker:9876 index:41"), "error pid:# worker:# index:#");
+  assert.equal(normalizeLine("Error worker:١٢٣٤"), "error worker:#");
+  assert.equal(fingerprint("Error pid:1234", "node app", 1), fingerprint("Error pid:9876", "node app", 1));
+  assert.equal(fingerprint("Error worker:١٢٣٤", "node app", 1), fingerprint("Error worker:٥٦٧٨", "node app", 1));
+});
+
+test("identifier-shaped error codes keep semantic differences", () => {
+  assert.notEqual(fingerprint("Error code: E123", "node app", 1), fingerprint("Error code: E456", "node app", 1));
 });
 
 test("UUID and SHA digests are masked only at safe boundaries", () => {
@@ -109,13 +126,44 @@ test("retrieval tokenization is Unicode NFC and keeps separate fingerprint role"
   assert.ok(greek.has("σφάλμα"));
   assert.ok(cjk.has("错误") && cjk.has("文件"));
   assert.ok(retrievalTokens("HTTP 404").has("404"));
+  assert.ok(retrievalTokens("404").has("404"));
+  assert.ok(queryTokens("9200").has("9200"));
+  assert.ok(fingerprintTokens("Error 404").has("#"));
+  assert.ok(retrievalTokens("Error 404").has("404"));
   assert.ok(retrievalTokens("line 41 pid 1234").has("#"));
   assert.equal(retrievalTokens("line 41 pid 1234").has("41"), false);
   const volatile = retrievalTokens("line 41 pid 1234 at 2026-08-14T10:11:12Z");
   assert.equal([...volatile].some((token) => /^(?:41|1234|2026|10|11|12)$/u.test(token)), false);
+  const sourceLocation = retrievalTokens("file.ts:41:7");
+  assert.equal([...sourceLocation].some((token) => /^(?:41|7)$/u.test(token)), false);
+  const unicodeClock = retrievalTokens("time ١٢:٣٤");
+  assert.equal([...unicodeClock].some((token) => /^(?:١٢|٣٤)$/u.test(token)), false);
   assert.ok(fingerprintTokens("line 41").has("#"));
   assert.ok(tokens("some-missing-package").has("some-missing-package"));
   assert.ok(tokens("some-missing-package").has("missing"));
+});
+
+test("volatile numeric labels stay masked across ASCII and Unicode decimal fuzz", () => {
+  const contexts = ["pid", "worker", "index", "line", "timestamp"];
+  const values = ["1234", "9876", "١٢٣٤", "٩٨٧٦", "१२३४", "९८७६"];
+  for (const context of contexts) {
+    const first = normalizeLine(`Error ${context}:${values[0]}`);
+    for (const value of values.slice(1)) {
+      assert.equal(normalizeLine(`Error ${context}:${value}`), first, `${context} ${value}`);
+    }
+    assert.equal(first.includes(values[0]!), false, context);
+  }
+});
+
+test("deterministic mixed fingerprint fuzz stays bounded and version-shaped", () => {
+  const unicodeDigits = ["١٢٣٤", "१२३४", "１２３４", "៤៥៦៧"];
+  for (let index = 0; index < 5_000; index++) {
+    const url = `https://user:o'connor@[2001:db8::${index % 64}]:${8000 + (index % 17)}/O'Reilly?q=${index}#it's`;
+    const uuid = index.toString(16).padStart(8, "0").slice(-8);
+    const digest = `${index}`.repeat(128).slice(0, 128).padEnd(128, "a");
+    const stderr = `Error ${url} pid:${unicodeDigits[index % unicodeDigits.length]} ${uuid}-e29b-41d4-a716-446655440000 sha512:${digest} line:${index % 101}:7`;
+    assert.match(fingerprint(stderr, `node task-${index % 19}.js`, 1), /^[0-9a-f]{16}$/u);
+  }
 });
 
 test("fingerprint algorithm is versioned and exposes a backward lookup candidate", () => {

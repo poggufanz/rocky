@@ -4,6 +4,7 @@ import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node
 import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { loadMemory } from "../core/memory.js";
+import { parseMemoryRecord } from "../core/memory-read.js";
 import { resolveRockyPaths } from "../core/state-paths.js";
 
 test("loader keeps legacy records but mismatched identity does not restore resolvedBy", () => {
@@ -22,6 +23,17 @@ test("loader keeps legacy records but mismatched identity does not restore resol
   assert.equal(records[0].kind === "failure" ? records[0].resolvedBy : undefined, undefined);
   assert.deepEqual(readFileSync(file), before.bytes);
   assert.equal(statSync(file).mtimeMs, before.mtime);
+});
+
+test("failure parser preserves absent, v1, and v2 fingerprint provenance markers", () => {
+  const base = {
+    kind: "failure", id: "fingerprint-version", ts: 1, cwd: "/work", cmd: "false", exitCode: 1,
+    fingerprint: "0123456789abcdef", signature: ["failed"], excerpt: "failed",
+  };
+  assert.equal((parseMemoryRecord(base) as { fingerprintV?: number } | undefined)?.fingerprintV, undefined);
+  assert.equal((parseMemoryRecord({ ...base, fingerprintV: 1 }) as { fingerprintV?: number } | undefined)?.fingerprintV, 1);
+  assert.equal((parseMemoryRecord({ ...base, fingerprintV: 2 }) as { fingerprintV?: number } | undefined)?.fingerprintV, 2);
+  assert.equal(parseMemoryRecord({ ...base, fingerprintV: 3 }), undefined);
 });
 
 test("loader dual-reads an exact reliable historical command as confirmed", () => {

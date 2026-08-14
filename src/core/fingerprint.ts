@@ -23,7 +23,10 @@ export type FingerprintAlgorithmVersion =
   | typeof LEGACY_FINGERPRINT_ALGORITHM_VERSION
   | typeof FINGERPRINT_ALGORITHM_VERSION;
 
-const URL = /\bhttps?:\/\/[^\s<>"'`]+/giu;
+// Apostrophe is an RFC3986 pchar, so it can occur in userinfo, path, query,
+// and fragment. Keep it in the opaque URL match; `maskUrls` removes only a
+// terminal quote that is clearly surrounding punctuation.
+const URL = /\bhttps?:\/\/[^\s<>"`]+/giu;
 const ABSOLUTE_PATH = /(?:[A-Za-z]:[\\/]|\/)(?:[^\\/\s"'<>]+[\\/])*[^\\/\s"'<>]*/gu;
 // `_` is an identifier character too. Treating it as a boundary would turn
 // `cache_deadbeef` or `job_550e8400-e29b-41d4-a716-446655440000` into a
@@ -38,9 +41,12 @@ const UUID_SHAPE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}
 const DIGEST_SHAPE = /(?:[0-9a-f]{128}|[0-9a-f]{64}|[0-9a-f]{40})/giu;
 const ISO_TIMESTAMP = /\b\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?)?\b/gu;
 const CLOCK_TIME = /\b\d{1,2}:\d{2}(?::\d{2}(?:\.\d+)?)?\b/gu;
-const NUMBER = /\d+/gu;
+const NUMBER = /\p{Nd}+/gu;
 const SOURCE_EXTENSION = /\.(?:c|cc|cfg|conf|cpp|cs|css|env|go|graphql|h|hpp|html|ini|java|js|jsx|json|kt|lock|log|lua|map|md|php|proto|py|rb|rs|scss|sh|sql|swift|toml|ts|tsx|txt|vue|wasm|xml|yaml|yml)$/iu;
 const SOURCE_LOCATION = new RegExp(`${SOURCE_EXTENSION.source.slice(0, -1)}:\\d+$`, "iu");
+const SOURCE_LOCATION_PREFIX = new RegExp(`(?:^|[^\\s])${SOURCE_EXTENSION.source.slice(0, -1)}:\\s*$`, "iu");
+const SOURCE_LOCATION_CHAIN = new RegExp(`${SOURCE_EXTENSION.source.slice(0, -1)}:\\p{Nd}+(?:\\s*:\\s*\\p{Nd}+)*\\s*:?$`, "iu");
+const VOLATILE_NUMBER_CHAIN = /(?:^|[^\p{L}\p{N}_])(?:pid|process(?:[-_ ]?id)?|worker|thread|line|index|attempt|timestamp|time|date|column|col)\s*[:=]?\s*\p{Nd}+(?:\s*[:.,]\s*\p{Nd}+)*\s*[:.,]?\s*$/iu;
 
 const STOP_WORDS = new Set(["the", "a", "an", "at", "in", "on", "of", "to", "is", "was", "for", "and", "or"]);
 const TOKEN = /<[^>\s]+>|#[\p{L}\p{N}_-]*|[\p{L}\p{N}\p{M}]+(?:[-_.][\p{L}\p{N}\p{M}]+)+|[\p{L}\p{N}\p{M}]+/gu;
@@ -58,7 +64,7 @@ function maskUrls(text: string): string {
   return text.replace(URL, (url) => {
     // Keep sentence punctuation outside the URL while consuming auth, IPv6,
     // port, query, and fragment as one opaque value.
-    const trailing = /[),.;!?]+$/u.exec(url)?.[0] ?? "";
+    const trailing = /[),.;!?'…]+$/u.exec(url)?.[0] ?? "";
     return `<url>${trailing}`;
   });
 }
@@ -91,6 +97,10 @@ function isLikelyPort(before: string, numberOffset: number): boolean {
   const context = host.slice(0, Math.max(0, host.length - label.length)).trimEnd();
   if (label.endsWith("]")) return true;
   if (/\blocalhost$/iu.test(label) || /^127(?:\.\d{1,3}){3}$/u.test(label)) return true;
+  // A numeric label before a colon is a clock (`12:34`) or a generic
+  // numeric value, not a host/service. This also covers non-ASCII decimal
+  // digits, which JavaScript's `\d` does not match.
+  if (/^\p{Nd}+$/u.test(label)) return false;
   // A path/line prefix is not a port. Absolute paths have already become
   // `<path>`, while relative source locations commonly look like
   // `file.ts:41`; reject both those shapes before considering a host label.
@@ -106,10 +116,24 @@ function isLikelyPort(before: string, numberOffset: number): boolean {
   return true;
 }
 
+function isVolatileNumberContext(line: string, offset: number): boolean {
+  const before = line.slice(0, offset);
+  if (/(?:^|[^\p{L}\p{N}_])(?:pid|process(?:[-_ ]?id)?|worker|thread|line|index|attempt|timestamp|time|date|column|col)\s*[:=]?\s*$/iu.test(before)) return true;
+  // A source location's column (`file.ts:41:7`) is volatile too. The first
+  // number is identified by its extension prefix; later numbers are covered
+  // by the chained-location form below.
+  if (SOURCE_LOCATION_PREFIX.test(before)) return true;
+  if (SOURCE_LOCATION_CHAIN.test(before)) return true;
+  return VOLATILE_NUMBER_CHAIN.test(before);
+}
+
 function isSemanticNumber(line: string, offset: number, end: number): boolean {
   const before = line.slice(0, offset);
   const context = before.slice(-72);
   const number = line.slice(offset, end);
+  // These labels describe run-to-run volatility even when their value is
+  // adjacent to a colon (which otherwise resembles `host:port`).
+  if (isVolatileNumberContext(line, offset)) return false;
   if (/(?:^|[^\p{L}\p{N}_])sha-?$/iu.test(before)) return true;
   if (/^\d{3}$/u.test(number) && Number(number) >= 100 && Number(number) <= 599 &&
       /\b(?:http|status|response)\b/iu.test(context) &&
@@ -120,31 +144,34 @@ function isSemanticNumber(line: string, offset: number, end: number): boolean {
   if (/\bsqlstate\b(?:\s*[:=]?\s*[A-Za-z0-9_-]+)+$/iu.test(context)) return true;
 
   // Preserve explicit identifier-shaped codes such as E123 and ERR_42 while
-  // leaving ordinary version/PID suffixes volatile.
-  const tokenPrefix = before.slice(Math.max(0, before.search(/[\s:=([{,]+[^\s:=([{,]*$/u))).trim();
-  if (/^(?:e|err|error|errno|code|status)[_-]?[A-Za-z]*$/iu.test(tokenPrefix)) return true;
+  // leaving ordinary version/PID suffixes volatile. Capture the identifier
+  // immediately before the digits instead of including its `code:` label.
+  const tokenPrefix = before.match(/(?:^|[^\p{L}\p{N}_])([\p{L}][\p{L}\p{N}_-]*)$/u)?.[1] ?? "";
+  if (/^(?:e|err|error|errno|code|status)[_-]?[\p{L}\p{N}]*$/iu.test(tokenPrefix)) return true;
 
   return isLikelyPort(before, offset) || /\bport\s*[:=]?\s*$/iu.test(context);
 }
 
-function maskNumbers(text: string): string {
+type NumberRole = "fingerprint" | "retrieval" | "query";
+
+function maskNumbers(text: string, role: NumberRole): string {
   const mayContainUuid = text.includes("-");
   const mayContainDigest = text.length >= 40;
   return text.replace(NUMBER, (match, offset: number, whole: string) =>
     isSemanticNumber(whole, offset, offset + match.length) ||
+      // Retrieval and query evidence retain an otherwise unlabeled number so
+      // a bare `404` or `9200` query can find its semantic record. Explicit
+      // volatile labels remain masked in every representation.
+      (role !== "fingerprint" && !isVolatileNumberContext(whole, offset)) ||
       (mayContainUuid && rangeInPattern(whole, UUID_SHAPE, offset, offset + match.length)) ||
       (mayContainDigest && rangeInPattern(whole, DIGEST_SHAPE, offset, offset + match.length))
       ? match : "#",
   );
 }
 
-function normalizeWithNumbers(line: string, _role: "fingerprint" | "retrieval"): string {
+function normalizeWithNumbers(line: string, role: NumberRole): string {
   const prepared = maskCommonVolatile(stripAnsi(line).normalize("NFC").trim());
-  // Both roles mask volatile numbers. The distinction is in how callers use
-  // the resulting evidence: fingerprint tokens feed recurrence hashing,
-  // retrieval tokens retain semantic classes such as status/code/port while
-  // volatile line/PID/timestamp numbers remain masked in both roles.
-  const normalized = maskNumbers(prepared);
+  const normalized = maskNumbers(prepared, role);
   return normalized.replace(/\s+/gu, " ").toLowerCase();
 }
 
@@ -162,6 +189,11 @@ export function normalizeLine(line: string): string {
 /** Retrieval text retains semantic numeric evidence while masking volatile numbers. */
 export function normalizeRetrievalLine(line: string): string {
   return normalizeWithNumbers(line, "retrieval");
+}
+
+/** Query evidence keeps semantic numeric literals, including unlabeled ones. */
+export function queryTokens(text: string): Set<string> {
+  return tokenBag(normalizeWithNumbers(text, "query"));
 }
 
 /**
@@ -198,6 +230,12 @@ function hashFingerprint(signature: string): string {
     .update(`fingerprint-v${FINGERPRINT_ALGORITHM_VERSION}\n${signature}`)
     .digest("hex")
     .slice(0, 16);
+}
+
+/** Hash a signature that is already normalized and persisted on a record. */
+export function fingerprintSignature(signature: readonly string[], cmd: string, exitCode: number): string {
+  const normalized = signature.join("\n");
+  return normalized.length === 0 ? commandFingerprint(cmd, exitCode) : hashFingerprint(normalized);
 }
 
 /** Token bag for recurrence stability. Volatile numbers are already masked. */
@@ -283,6 +321,14 @@ function legacySignatureLines(stderr: string): string[] {
 function legacyCommandFingerprint(cmd: string, exitCode: number): string {
   const sig = `cmd:${legacyNormalizeLine(cmd)}:${exitCode}`;
   return createHash("sha1").update(sig).digest("hex").slice(0, 16);
+}
+
+/** Hash a legacy signature that is already normalized and persisted. */
+export function legacyFingerprintSignature(signature: readonly string[], cmd: string, exitCode: number): string {
+  const normalized = signature.join("\n");
+  return normalized.length === 0
+    ? legacyCommandFingerprint(cmd, exitCode)
+    : createHash("sha1").update(normalized).digest("hex").slice(0, 16);
 }
 
 /** v1 fingerprint used to find records written before the v2 migration. */
