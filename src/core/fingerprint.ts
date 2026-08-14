@@ -64,17 +64,26 @@ function maskUrls(text: string): string {
   return text.replace(URL, (url, offset: number, whole: string) => {
     // RFC3986 permits punctuation such as `?`, `!`, `;`, and apostrophe in a
     // URL. Keep the complete match opaque. The one exception is a clearly
-    // surrounding apostrophe/parenthesis: when the character immediately
-    // before the URL opens that wrapper, peel the matching close (and ordinary
-    // sentence punctuation after it) back out deterministically.
+    // surrounding wrapper run immediately before the URL: peel matching
+    // closers from the outside in, then retain ordinary sentence punctuation
+    // outside. This handles nested `('[url]')` shapes without reopening tails.
     const before = whole.slice(0, offset);
-    const peel = (open: string, close: string): string => {
-      if (!before.endsWith(open)) return "";
-      const escaped = close.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-      return new RegExp(`${escaped}[.!?,;:…]*$`, "u").exec(url)?.[0] ?? "";
-    };
-    const trailing = peel("'", "'") || peel("(", ")") || peel("[", "]") || peel("{", "}");
-    return trailing.length === 0 ? "<url>" : `<url>${trailing}`;
+    const wrappers: Record<string, string> = { "'": "'", "(": ")", "[": "]", "{": "}" };
+    let openingStart = before.length;
+    while (openingStart > 0 && wrappers[before[openingStart - 1]!] !== undefined) openingStart--;
+    const openings = before.slice(openingStart);
+    if (openings.length === 0) return "<url>";
+
+    const sentencePunctuation = /[.!?,;:…]+$/u.exec(url)?.[0] ?? "";
+    let core = sentencePunctuation.length > 0 ? url.slice(0, -sentencePunctuation.length) : url;
+    let wrapperSuffix = "";
+    for (const opening of openings) {
+      const closing = wrappers[opening];
+      if (closing === undefined || !core.endsWith(closing)) return "<url>";
+      core = core.slice(0, -closing.length);
+      wrapperSuffix = closing + wrapperSuffix;
+    }
+    return `<url>${wrapperSuffix}${sentencePunctuation}`;
   });
 }
 
@@ -121,7 +130,8 @@ function isLikelyPort(before: string, numberOffset: number): boolean {
   if (SOURCE_EXTENSION.test(label)) return false;
   if (!/^[\p{L}\p{N}][\p{L}\p{N}._-]*$/u.test(label)) return false;
   if (label.includes(".")) return true;
-  if (/\s/u.test(host) && !/(?:\bhost|server|address|connect|port|endpoint|service)\s*$/iu.test(context + " " + label)) return false;
+  if (/(?:^|\s)(?:host|server|address|port|endpoint|service)$/iu.test(label)) return true;
+  if (/\s/u.test(host) && !/(?:\bhost|server|address|connect|endpoint|port|service|refused|connection\s+refused)\b/iu.test(context)) return false;
   // A bare `service:9200` is still a port even without a nearby network
   // verb. The source-location exclusions above keep the common false
   // positive (`file.ts:41`) volatile.

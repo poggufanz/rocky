@@ -1,6 +1,6 @@
 import os from "node:os";
 import { performance } from "node:perf_hooks";
-import { fingerprint, legacyFingerprint, queryTokens, similarity, signatureLines } from "../dist/core/fingerprint.js";
+import { fingerprint, legacyFingerprint, legacyFingerprintSignature, queryTokens, similarity, signatureLines } from "../dist/core/fingerprint.js";
 import { queryRecall, retrievalEvidenceTokens } from "../dist/core/memory-query.js";
 
 // Deterministic Task-6 workload: 25k v1 records and 25k v2 records with the
@@ -73,10 +73,21 @@ function uniqueRecords(records) {
   });
 }
 
+function provenLegacy(record) {
+  if (record.fingerprintV === 2 || !/^[0-9a-f]{16}$/u.test(record.fingerprint)) return false;
+  if (record.origin === "hook" || (record.signature.length === 0 && record.excerpt.length === 0)) {
+    return legacyFingerprint("", record.cmd, record.exitCode) === record.fingerprint;
+  }
+  if (record.signature.length === 0) return false;
+  const signature = record.signature.join("\n");
+  return legacyFingerprintSignature(record.signature, record.cmd, record.exitCode) === record.fingerprint ||
+    legacyFingerprint(signature, record.cmd, record.exitCode) === record.fingerprint;
+}
+
 // Equivalent semantic scan without migration bookkeeping. It mirrors the
 // normal queryRecall filter, token role, document-frequency pass, score,
-// threshold, first-wins IDs, per-record dedupe, and final ordering. The
-// optimized path adds trusted v1->v2 provenance and family-key selection.
+// threshold, first-wins IDs, three-state legacy/current dedupe, and final
+// ordering. The optimized path adds the indexed provenance state selection.
 function baselineRecall(records) {
   const querySet = queryTokens(QUERY);
   const candidates = uniqueRecords(records)
@@ -89,7 +100,9 @@ function baselineRecall(records) {
     const value = score(querySet, tokenSet, frequencies, candidates.length);
     if (value <= 0.05) continue;
     const hit = { record, score: value };
-    const key = record.fingerprintV === 2 ? record.fingerprint : `legacy:${record.id}`;
+    const key = record.fingerprintV === 2
+      ? record.fingerprint
+      : provenLegacy(record) ? `legacy:${record.fingerprint}` : `legacy:${record.id}`;
     const previous = best.get(key);
     if (previous === undefined || record.ts > previous.record.ts) best.set(key, hit);
   }

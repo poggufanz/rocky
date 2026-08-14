@@ -109,17 +109,20 @@ function fingerprintMatches(record: FailureRecord, candidates: Set<string>): boo
       : candidates.has(current)));
 }
 
-type FingerprintMigrationIndex = ReadonlyMap<string, ReadonlySet<string>>;
+interface FingerprintMigrationIndex {
+  migrated: ReadonlyMap<string, ReadonlySet<string>>;
+  provenLegacyRecords: ReadonlySet<string>;
+}
 
 function trustedCurrentEvidence(record: FailureRecord, current: string): boolean {
   return visitExactEvidence(record, (evidence) => record.fingerprint === current && evidence.current === current);
 }
 
 /**
- * Build only the legacy families that have a trustworthy v2 witness. The
- * index is keyed by the persisted v1 hash and stores current hashes derived
- * from the same evidence; it avoids re-hashing every current record for every
- * legacy record during recall and remains conservative for malformed data.
+ * Prove legacy records from command/signature evidence and, when a trustworthy
+ * v2 witness exists, index the current family derived from that same source.
+ * Raw excerpts never participate in either state; malformed records remain
+ * outside the proven legacy set.
  */
 function fingerprintMigrationIndex(records: readonly FailureRecord[]): FingerprintMigrationIndex {
   const currentByHash = new Map<string, FailureRecord[]>();
@@ -129,15 +132,16 @@ function fingerprintMigrationIndex(records: readonly FailureRecord[]): Fingerpri
     if (bucket === undefined) currentByHash.set(record.fingerprint, [record]);
     else bucket.push(record);
   }
-  if (currentByHash.size === 0) return new Map();
-
   const migrated = new Map<string, Set<string>>();
+  const provenLegacyRecords = new Set<string>();
   const trustedCurrent = new Set<string>();
   const untrustedCurrent = new Set<string>();
   for (const record of records) {
     if (record.fingerprintV === 2 || !FINGERPRINT_TEXT.test(record.fingerprint)) continue;
     visitExactEvidence(record, (evidence) => {
       if (record.fingerprint !== evidence.legacy) return false;
+      provenLegacyRecords.add(record.id);
+      if (currentByHash.size === 0) return true;
       const current = evidence.current;
       const witnesses = currentByHash.get(current);
       if (witnesses === undefined || untrustedCurrent.has(current)) return false;
@@ -152,23 +156,24 @@ function fingerprintMigrationIndex(records: readonly FailureRecord[]): Fingerpri
       if (family === undefined) migrated.set(record.fingerprint, new Set([current]));
       else family.add(current);
       // The first source that proves both legacy provenance and a current
-      // witness is sufficient. Excerpts remain a fallback for lossy legacy
-      // signatures, not an additional per-record hashing obligation.
+      // witness is sufficient. Raw excerpts never provide that proof.
       return true;
     });
   }
-  return migrated;
+  return { migrated, provenLegacyRecords };
 }
 
 function canonicalFingerprint(record: FailureRecord, migration: FingerprintMigrationIndex): string {
   if (record.fingerprintV === 2) return record.fingerprint;
   const unprovenKey = `legacy:${record.id}`;
   if (!FINGERPRINT_TEXT.test(record.fingerprint)) return unprovenKey;
-  const family = migration.get(record.fingerprint);
-  if (family === undefined) return unprovenKey;
-  let canonical = unprovenKey;
-  visitExactEvidence(record, ({ current }) => {
-    if (!family.has(current)) return false;
+  const family = migration.migrated.get(record.fingerprint);
+  if (family === undefined) {
+    return migration.provenLegacyRecords.has(record.id) ? `legacy:${record.fingerprint}` : unprovenKey;
+  }
+  let canonical = migration.provenLegacyRecords.has(record.id) ? `legacy:${record.fingerprint}` : unprovenKey;
+  visitExactEvidence(record, ({ current, legacy }) => {
+    if (record.fingerprint !== legacy || !family.has(current)) return false;
     canonical = current;
     return true;
   });

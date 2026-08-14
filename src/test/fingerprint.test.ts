@@ -71,6 +71,13 @@ test("URL masking keeps legal terminal punctuation inside the opaque URL", () =>
   }
 });
 
+test("URL masking preserves nested surrounding wrappers outside one opaque URL", () => {
+  assert.equal(normalizeLine("Error ('https://host/path')."), "error ('<url>').");
+  assert.equal(normalizeLine("Error ([https://host/path])."), "error ([<url>]).");
+  assert.equal(normalizeLine("Error ([\"https://host/path?x=1!\"])."), "error ([\"<url>\"]).");
+  assert.equal(normalizeLine("Error ({'https://host/O'Reilly;'})."), "error ({'<url>'}).");
+});
+
 test("semantic HTTP status, explicit code, and port numbers survive fingerprint normalization", () => {
   assert.notEqual(fingerprint("Error: HTTP 404 from port 9200", "curl", 1), fingerprint("Error: HTTP 500 from port 9200", "curl", 1));
   assert.notEqual(fingerprint("Error: HTTP 404 code 1001 on port 9200", "curl", 1), fingerprint("Error: HTTP 404 code 1002 on port 9200", "curl", 1));
@@ -105,6 +112,13 @@ test("fallback request and job identifiers stay volatile instead of becoming por
     fingerprint("Error connect to service:9200", "node app", 1),
     fingerprint("Error connect to service:5432", "node app", 1),
   );
+});
+
+test("network context preserves single-label hostname ports", () => {
+  for (const context of ["connect redis", "connect to redis", "connection refused redis"]) {
+    assert.notEqual(normalizeLine(`Error ${context}:6379`), normalizeLine(`Error ${context}:5432`), context);
+  }
+  assert.notEqual(normalizeLine("Error service:9200"), normalizeLine("Error service:5432"));
 });
 
 test("identifier-shaped error codes keep semantic differences", () => {

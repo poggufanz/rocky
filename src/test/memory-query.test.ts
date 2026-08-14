@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import type { AssociationRecord, FailureRecord, FixRecord, MemoryRecord, TripleRecord } from "../core/memory.js";
-import { fingerprint, legacyFingerprint, signatureLines } from "../core/fingerprint.js";
+import { fingerprint, fingerprintSignature, legacyFingerprint, signatureLines } from "../core/fingerprint.js";
 import {
   LINK_WINDOW_MS,
   createMemoryQueries,
@@ -549,6 +549,96 @@ test("trusted v1 excerpts add numeric retrieval evidence without exact migration
   assert.equal(searchKnowledge(records, { query: "9200", kind: "failure" })[0]?.id, "v1-404-9200");
 });
 
+test("proven v1 duplicates deduplicate by legacy fingerprint without a v2 witness", () => {
+  const make = (id: string, ts: number, status: number): FailureRecord => ({
+    ...failureA,
+    id,
+    ts,
+    cwd: "/work/a",
+    cmd: "curl",
+    fingerprint: legacyFingerprint(`Error: HTTP ${status} from port 9200`, "curl", 1),
+    signature: ["error: http # from port #"],
+    excerpt: `Error: HTTP ${status} from port 9200`,
+  });
+  const records = [make("legacy-valid-404", 100, 404), make("legacy-valid-500", 200, 500)];
+  assert.deepEqual(queryRecall(records, { query: "curl", limit: 5 }).map((hit) => hit.failure.id), ["legacy-valid-500"]);
+  assert.deepEqual(searchKnowledge(records, { query: "curl", kind: "failure", limit: 5 }).map((hit) => hit.id), ["legacy-valid-500"]);
+});
+
+test("valid and malformed legacy records sharing a hash use legacy-family and per-record keys", () => {
+  const valid = {
+    ...failureA,
+    id: "legacy-valid",
+    ts: 100,
+    cwd: "/work/a",
+    cmd: "tool",
+    fingerprint: legacyFingerprint("Error: HTTP 404 from port 9200", "tool", 1),
+    signature: ["error: http # from port #"],
+    excerpt: "Error: HTTP 404 from port 9200",
+  } satisfies FailureRecord;
+  const malformed = [
+    { ...valid, id: "legacy-malformed-alpha", ts: 200, signature: ["error alpha"], excerpt: "error alpha" },
+    { ...valid, id: "legacy-malformed-beta", ts: 300, signature: ["error beta"], excerpt: "error beta" },
+  ];
+  const all = [valid, ...malformed];
+  assert.deepEqual(queryRecall(all, { query: "tool error", limit: 5 }).map((hit) => hit.failure.id), [
+    "legacy-malformed-beta", "legacy-malformed-alpha", "legacy-valid",
+  ]);
+  assert.deepEqual(searchKnowledge(all, { query: "tool error", kind: "failure", limit: 5 }).map((hit) => hit.id), [
+    "legacy-malformed-beta", "legacy-malformed-alpha", "legacy-valid",
+  ]);
+});
+
+test("malformed same-hash legacy records stay separate beside a migrated current family", () => {
+  const signature = ["error module missing at <path>"];
+  const legacy: FailureRecord = {
+    ...failureA,
+    id: "legacy-migrated",
+    ts: 100,
+    cwd: "/work/a",
+    cmd: "tool",
+    fingerprint: legacyFingerprint("Error module missing at /tmp/cache-123", "tool", 1),
+    signature,
+    excerpt: "Error module missing at /tmp/cache-123",
+  };
+  const current: FailureRecord = {
+    ...legacy,
+    id: "current-migrated",
+    ts: 200,
+    fingerprint: fingerprintSignature(signature, legacy.cmd, legacy.exitCode),
+    fingerprintV: 2,
+  };
+  const malformed: FailureRecord = {
+    ...legacy,
+    id: "legacy-malformed-mixed",
+    ts: 300,
+    signature: ["module forged"],
+    excerpt: "module forged",
+  };
+  const all = [legacy, current, malformed];
+  assert.deepEqual(queryRecall(all, { query: "tool module", limit: 5 }).map((hit) => hit.failure.id), [malformed.id, current.id]);
+  assert.deepEqual(searchKnowledge(all, { query: "tool module", kind: "failure", limit: 5 }).map((hit) => hit.id), [malformed.id, current.id]);
+});
+
+test("silent and hook v1 duplicates use proven command-only legacy families", () => {
+  const silentCmd = "false";
+  const silentFingerprint = legacyFingerprint("", silentCmd, 1);
+  const silent = [100, 200].map((ts, index): FailureRecord => ({
+    kind: "failure", id: `legacy-silent-${index}`, ts, cwd: "/work/a", cmd: silentCmd, exitCode: 1,
+    fingerprint: silentFingerprint, signature: [], excerpt: "",
+  }));
+  const hookCmd = "npm run build";
+  const hookFingerprint = legacyFingerprint("", hookCmd, 1);
+  const hooks = [300, 400].map((ts, index): FailureRecord => ({
+    kind: "failure", id: `legacy-hook-${index}`, ts, cwd: "/work/a", cmd: hookCmd, exitCode: 1,
+    fingerprint: hookFingerprint, signature: [hookCmd], excerpt: "exit 1", origin: "hook",
+  }));
+  for (const group of [silent, hooks]) {
+    assert.equal(queryRecall(group, { query: group[0]!.cmd, limit: 5 }).length, 1);
+    assert.equal(searchKnowledge(group, { query: group[0]!.cmd, kind: "failure", limit: 5 }).length, 1);
+  }
+});
+
 test("port query ranks exact semantic port above nearby ports", () => {
   const records: FailureRecord[] = [
     {
@@ -613,6 +703,15 @@ test("numeric-only queries discriminate HTTP statuses and ports in recall and kn
   assert.equal(queryRecall(records.slice(2), { query: "9200" })[0]?.failure.id, "port-9200-numeric");
   assert.equal(searchKnowledge(records.slice(0, 2), { query: "404", kind: "failure" })[0]?.id, "status-404");
   assert.equal(searchKnowledge(records.slice(2), { query: "9200", kind: "failure" })[0]?.id, "port-9200-numeric");
+});
+
+test("network context preserves ports for single-label hostnames", () => {
+  const records: FailureRecord[] = [
+    { ...failureA, id: "redis-6379", ts: 100, cmd: "connect redis", fingerprint: "redis-6379", signature: ["error connect redis:6379"], excerpt: "error connect redis:6379" },
+    { ...failureB, id: "redis-5432", ts: 200, cmd: "connect redis", fingerprint: "redis-5432", signature: ["error connect redis:5432"], excerpt: "error connect redis:5432" },
+  ];
+  assert.equal(queryRecall(records, { query: "6379", limit: 2 })[0]?.failure.id, "redis-6379");
+  assert.equal(searchKnowledge(records, { query: "6379", kind: "failure" })[0]?.id, "redis-6379");
 });
 
 test("Unicode recall normalizes composed and combining forms across all supported scripts", () => {
