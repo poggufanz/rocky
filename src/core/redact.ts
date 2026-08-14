@@ -8,6 +8,7 @@ interface SecretDefinition {
   readonly trailingBoundary?: boolean;
   readonly fragmentSource: string;
   readonly assignmentValueGroups?: readonly number[];
+  readonly assignmentNames?: readonly string[];
 }
 
 const SECRET_DEFINITIONS: ReadonlyArray<SecretDefinition> = [
@@ -73,6 +74,7 @@ const SECRET_DEFINITIONS: ReadonlyArray<SecretDefinition> = [
     leadingBoundary: true,
     fragmentSource: String.raw`(?:(?:"(?:password|secret)"|'(?:password|secret)'|(?:password|secret)))\s*[:=]\s*(?:["'][^"']*|[^\s]*)`,
     assignmentValueGroups: [2, 3],
+    assignmentNames: ["password", "secret"],
   },
   {
     replacementLabel: "credential assignment",
@@ -82,6 +84,7 @@ const SECRET_DEFINITIONS: ReadonlyArray<SecretDefinition> = [
     leadingBoundary: true,
     fragmentSource: String.raw`(?:(?:"(?:token|api[_-]?key|authorization)"|'(?:token|api[_-]?key|authorization)'|(?:token|api[_-]?key|authorization)))\s*[:=]\s*(?:["'][^"']*|(?:(?:Bearer|Basic|Token)\s+)?[^\s]*)`,
     assignmentValueGroups: [2, 3],
+    assignmentNames: ["token", "apikey", "api_key", "api-key", "authorization"],
   },
 ];
 
@@ -255,10 +258,56 @@ function stripInvisibleControlsWithOffsets(text: string): InvisibleControlStripR
   return { text: pieces.join(""), removedOffsets };
 }
 
+const ASSIGNMENT_KEY_NAMES = new Set(SECRET_DEFINITIONS.flatMap((definition) => definition.assignmentNames ?? []));
+const ASSIGNMENT_KEY_NAME_SOURCE = [...ASSIGNMENT_KEY_NAMES]
+  .map((name) => name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+  .join("|");
+const ASSIGNMENT_VALUE_BEFORE_CONTROL_RE = new RegExp(
+  String.raw`(?:["']?(?:${ASSIGNMENT_KEY_NAME_SOURCE})["']?)\s*[:=]\s*([^\s'"\x60]+)$`,
+  "iu",
+);
+
+function assignmentNameAroundControl(text: string, offset: number): string {
+  let start = offset;
+  while (start > 0 && /[A-Za-z_-]|[\t\r\n]/u.test(text[start - 1] ?? "")) start -= 1;
+  let end = offset + 1;
+  while (end < text.length && /[A-Za-z_-]|[\t\r\n]/u.test(text[end] ?? "")) end += 1;
+  return `${text.slice(start, offset)}${text.slice(offset + 1, end)}`
+    .replace(/[\t\r\n]/gu, "")
+    .toLowerCase();
+}
+
+function assignmentValueBeforeControl(text: string, offset: number): string | undefined {
+  const prefix = text
+    .slice(Math.max(0, offset - 256), offset)
+    .replace(/[\u0000-\u001f\u007f-\u009f\u061C\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]/gu, "");
+  const match = ASSIGNMENT_VALUE_BEFORE_CONTROL_RE.exec(prefix);
+  return match?.[1];
+}
+
+function hasMixedCredentialShape(value: string): boolean {
+  const classes = [/[a-z]/u, /[A-Z]/u, /[0-9]/u, /[^A-Za-z0-9]/u]
+    .filter((pattern) => pattern.test(value));
+  return classes.length >= 2;
+}
+
+function shouldJoinLogicalControl(text: string, offset: number): boolean {
+  if (ASSIGNMENT_KEY_NAMES.has(assignmentNameAroundControl(text, offset))) return true;
+  let nextOffset = offset + 1;
+  while (/[\t\r\n]/u.test(text[nextOffset] ?? "")) nextOffset += 1;
+  const next = text[nextOffset];
+  const prefixValue = assignmentValueBeforeControl(text, offset);
+  return next !== undefined
+    && /[!@#$%^&*+/_=-]/u.test(next)
+    && prefixValue !== undefined
+    && hasMixedCredentialShape(prefixValue);
+}
+
 /**
  * Build a control-free matching view and offsets into a safe display view.
- * CR/LF/TAB are omitted while matching so they cannot split a credential, but
- * remain in display text unless the selected replacement spans them.
+ * CR/LF/TAB remain logical delimiters by default. Only evidence-backed splits
+ * are omitted while matching; display text retains every delimiter unless the
+ * selected replacement spans it.
  */
 function normalizeSecretBoundaryInput(text: string): SecretBoundaryInput {
   if (!text) {
@@ -301,13 +350,27 @@ function normalizeSecretBoundaryInput(text: string): SecretBoundaryInput {
     }
 
     if (end !== sourceOffset) {
-      removedOffsets.add(matchingOffset);
-      if (code === 0x09 || code === 0x0a || code === 0x0d) {
+      const isLogicalControl = code === 0x09 || code === 0x0a || code === 0x0d;
+      const joinsLogicalControl = isLogicalControl && shouldJoinLogicalControl(text, sourceOffset);
+      if (isLogicalControl && !joinsLogicalControl) {
+        const character = String.fromCharCode(code);
+        displayStarts.set(matchingOffset, displayOffset);
+        matching.push(character);
+        display.push(character);
+        matchingOffset += 1;
+        displayOffset += 1;
+        displayEnds.set(matchingOffset, displayOffset);
+      } else {
+        removedOffsets.add(matchingOffset);
+      }
+      if (joinsLogicalControl) {
         display.push(String.fromCharCode(code));
         displayOffset += 1;
       } else if (!isSequence) {
-        display.push(" ");
-        displayOffset += 1;
+        if (!isLogicalControl) {
+          display.push(" ");
+          displayOffset += 1;
+        }
       }
       sourceOffset = end;
       continue;

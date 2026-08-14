@@ -2,7 +2,11 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { AddedLine } from "../check/diff.js";
 import { scanSecrets } from "../check/secrets.js";
-import { EXACT_PLACEHOLDER_ASSIGNMENTS, SYNTHETIC_SECRET_CLOSURE_VECTORS } from "./secret-vectors.js";
+import {
+  EXACT_PLACEHOLDER_ASSIGNMENTS,
+  SYNTHETIC_DELIMITER_PRESERVATION_VECTORS,
+  SYNTHETIC_SECRET_CLOSURE_VECTORS,
+} from "./secret-vectors.js";
 
 function line(text: string): AddedLine {
   return { file: "src/x.ts", line: 7, text };
@@ -60,6 +64,12 @@ test("strips terminal controls and bidi obfuscation before secret detection", ()
 
 test("shared secret vectors detect quoted keys, realistic placeholder words, controls, and overlap", () => {
   for (const vector of SYNTHETIC_SECRET_CLOSURE_VECTORS) {
+    assert.deepEqual(scanSecrets([line(vector.text)]).map((hit) => hit.kind), [vector.kind], vector.name);
+  }
+});
+
+test("logical delimiters after complete values do not hide hits or consume following records", () => {
+  for (const vector of SYNTHETIC_DELIMITER_PRESERVATION_VECTORS) {
     assert.deepEqual(scanSecrets([line(vector.text)]).map((hit) => hit.kind), [vector.kind], vector.name);
   }
 });

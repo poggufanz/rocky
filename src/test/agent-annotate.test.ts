@@ -24,7 +24,10 @@ import { appendEvent, listOrphanClaims, readBatch } from "../agent/spool.js";
 import type { AgentEvent } from "../agent/schema.js";
 import { loadMemory, parseMemoryRecord, recordTriple, recordTripleOnce } from "../core/memory.js";
 import { resolveRockyPaths, type RockyPaths } from "../core/state-paths.js";
-import { SYNTHETIC_SECRET_CLOSURE_VECTORS } from "./secret-vectors.js";
+import {
+  SYNTHETIC_DELIMITER_PRESERVATION_VECTORS,
+  SYNTHETIC_SECRET_CLOSURE_VECTORS,
+} from "./secret-vectors.js";
 
 const INVISIBLE_FORMAT_CONTROLS: ReadonlyArray<readonly [string, string]> = [
   ["U+061C", "\u061C"],
@@ -660,6 +663,25 @@ test("durable annotation closes shared quoted-key, control, realistic-word, and 
     assert.doesNotMatch(durable, new RegExp(fragment.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "u"), fragment);
   }
   assert.doesNotMatch(durable, /pass\s*word=|api_\s*key|secret=pA7/u);
+});
+
+test("durable annotation preserves ordinary text after control-delimited unquoted values", async (t) => {
+  const paths = freshPaths(t);
+  const [lf, tab, cr] = SYNTHETIC_DELIMITER_PRESERVATION_VECTORS;
+  assert.ok(lf && tab && cr);
+  append("review-delimiter-vectors", [
+    { v: 1, agent: "codex", kind: "intent", ts: 1, text: lf.text },
+    { v: 1, agent: "codex", kind: "mechanism", ts: 2, tool: "Edit", path: "src/x.ts", excerpt: tab.text },
+    { v: 1, agent: "codex", kind: "rationale", ts: 3, source: "notify", text: cr.text },
+  ], paths);
+
+  const triple = await annotateBatch("review-delimiter-vectors", {
+    paths, git: () => undefined, queueLabel: () => {},
+  });
+  assert.ok(triple);
+  assert.equal(triple.intent?.text, "before [redacted password assignment] after words");
+  assert.equal(triple.mechanism.files[0]?.excerpt, "before [redacted credential assignment] after words");
+  assert.equal(triple.rationale?.text, "before [redacted password assignment] after words");
 });
 
 test("every invisible format control is removed before durable redaction", async (t) => {

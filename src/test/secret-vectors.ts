@@ -63,3 +63,34 @@ export const EXACT_PLACEHOLDER_ASSIGNMENTS = [
   'api_key="placeholder-value"',
   'authorization="Bearer example-token"',
 ] as const;
+
+export const SYNTHETIC_DELIMITER_PRESERVATION_VECTORS = [
+  {
+    name: "LF after complete password value",
+    text: "before password=abcd\nafter words",
+    kind: "password assignment",
+    durable: "before [redacted password assignment]\nafter words",
+    sanitizedMcp: "before [redacted] after words",
+  },
+  {
+    name: "TAB after complete token value",
+    text: "before token=abcd1234\tafter words",
+    kind: "credential assignment",
+    durable: "before [redacted credential assignment]\tafter words",
+    sanitizedMcp: "before [redacted] after words",
+  },
+  {
+    name: "CR after complete secret value",
+    text: "before secret=abcd1234\rafter words",
+    kind: "password assignment",
+    durable: "before [redacted password assignment]\rafter words",
+    sanitizedMcp: "before [redacted] after words",
+  },
+  {
+    name: "punctuation-led ordinary LF record after simple value",
+    text: "before password=abcd\n@after mention",
+    kind: "password assignment",
+    durable: "before [redacted password assignment]\n@after mention",
+    sanitizedMcp: "before [redacted] @after mention",
+  },
+] as const;

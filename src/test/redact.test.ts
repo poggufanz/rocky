@@ -1,7 +1,10 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
 import { redactSecrets, redactSecretsAtBoundary, stripInvisibleControls } from "../core/redact.js";
-import { SYNTHETIC_SECRET_CLOSURE_VECTORS } from "./secret-vectors.js";
+import {
+  SYNTHETIC_DELIMITER_PRESERVATION_VECTORS,
+  SYNTHETIC_SECRET_CLOSURE_VECTORS,
+} from "./secret-vectors.js";
 
 test("redactSecrets masks known secret shapes and keeps surrounding text", () => {
   const input = "deploy with sk-ant-abcdefghijklmnopqrst123 done";
@@ -54,6 +57,12 @@ test("redactSecrets masks quoted and unquoted credential assignments without lea
 test("shared secret vectors redact quoted keys, exact-looking values, controls, and overlap cleanly", () => {
   for (const vector of SYNTHETIC_SECRET_CLOSURE_VECTORS) {
     assert.equal(redactSecretsAtBoundary(vector.text), vector.replacement, vector.name);
+  }
+});
+
+test("logical controls after complete unquoted values preserve unrelated following text", () => {
+  for (const vector of SYNTHETIC_DELIMITER_PRESERVATION_VECTORS) {
+    assert.equal(redactSecretsAtBoundary(vector.text), vector.durable, vector.name);
   }
 });
 

@@ -16,7 +16,10 @@ import {
   strictestExposure,
   truncateUtf8,
 } from "../mcp/privacy.js";
-import { SYNTHETIC_SECRET_CLOSURE_VECTORS } from "./secret-vectors.js";
+import {
+  SYNTHETIC_DELIMITER_PRESERVATION_VECTORS,
+  SYNTHETIC_SECRET_CLOSURE_VECTORS,
+} from "./secret-vectors.js";
 
 function maximumRawHit(index: number): RecallHit {
   const field = String(index).repeat(MAX_FIELD_BYTES);
@@ -433,6 +436,12 @@ test("shared secret vectors stay closed in sanitized MCP while quoted-key raw ex
     assert.match(sanitized.intent ?? "", /\[redacted\]/u, vector.name);
     assert.equal(raw.intent, normalizeOutputText(vector.text), vector.name);
     assert.equal(raw.files[0]?.excerpt, normalizeOutputText(vector.text), vector.name);
+  }
+});
+
+test("sanitized MCP preserves ordinary records after redacted unquoted assignments", () => {
+  for (const vector of SYNTHETIC_DELIMITER_PRESERVATION_VECTORS) {
+    assert.equal(redactText(vector.text, "/home/ada"), vector.sanitizedMcp, vector.name);
   }
 });
 
