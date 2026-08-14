@@ -69,10 +69,16 @@ test("repeated run sanitizes remembered fix and alternate cwd without changing l
 });
 
 test("Rocky color remains owned by TTY policy and NO_COLOR", () => {
-  const script = "Object.defineProperty(process.stdout,'isTTY',{value:true}); import('./dist/ui/rocky.js').then(m=>m.say('fixture'))";
-  const tty = spawnSync(process.execPath, ["--input-type=module", "-e", script], { cwd: packageRoot, encoding: "utf8" });
+  const redirectedScript = "Object.defineProperty(process.stdout,'isTTY',{value:true}); import('./dist/ui/rocky.js').then(m=>m.say('fixture'))";
+  const redirected = spawnSync(process.execPath, ["--input-type=module", "-e", redirectedScript], {
+    cwd: packageRoot, encoding: "utf8",
+  });
+  assert.doesNotMatch(redirected.stderr, /\u001b/u, "redirected stderr must stay clean even when stdout is a TTY");
+
+  const ttyScript = "Object.defineProperty(process.stderr,'isTTY',{value:true}); import('./dist/ui/rocky.js').then(m=>m.say('fixture'))";
+  const tty = spawnSync(process.execPath, ["--input-type=module", "-e", ttyScript], { cwd: packageRoot, encoding: "utf8" });
   assert.match(tty.stderr, /\u001b\[33m\[Rocky\]\u001b\[0m/);
-  const noColor = spawnSync(process.execPath, ["--input-type=module", "-e", script], {
+  const noColor = spawnSync(process.execPath, ["--input-type=module", "-e", ttyScript], {
     cwd: packageRoot, env: { ...process.env, NO_COLOR: "1" }, encoding: "utf8",
   });
   assert.doesNotMatch(noColor.stderr, /\u001b/u);
@@ -80,6 +86,15 @@ test("Rocky color remains owned by TTY policy and NO_COLOR", () => {
     cwd: packageRoot, encoding: "utf8",
   });
   assert.doesNotMatch(nonTty.stderr, /\u001b/u);
+
+  const stdoutTtyFace = spawnSync(process.execPath, ["--input-type=module", "-e",
+    "Object.defineProperty(process.stdout,'isTTY',{value:true}); import('./dist/ui/rocky.js').then(m=>process.stdout.write(m.face()))"],
+  { cwd: packageRoot, encoding: "utf8" });
+  assert.match(stdoutTtyFace.stdout, /\u001b\[33m/u, "stdout-owned face keeps color on TTY stdout");
+  const redirectedFace = spawnSync(process.execPath, ["--input-type=module", "-e",
+    "Object.defineProperty(process.stderr,'isTTY',{value:true}); import('./dist/ui/rocky.js').then(m=>process.stdout.write(m.face()))"],
+  { cwd: packageRoot, encoding: "utf8" });
+  assert.doesNotMatch(redirectedFace.stdout, /\u001b/u, "redirected stdout stays clean even when stderr is a TTY");
 });
 
 test("live child stderr bytes are preserved byte-for-byte as a contiguous prefix", () => {

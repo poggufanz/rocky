@@ -4,6 +4,43 @@ import { test } from "node:test";
 import { digest, exportCommand, how, quiz, what, why } from "../commands/dictionary.js";
 import type { MemoryRecord, TripleRecord } from "../core/memory-read.js";
 
+const fullHostileMatrix = [
+  "unicode-🪨-工程-e\u0301",
+  "\u001b[2J\u001b[H",
+  "\u001b]0;fixture-title\u0007",
+  "\u001b]8;;https://fixture.invalid\u001b\\link\u001b]8;;\u001b\\",
+  "\u001b]52;c;Zml4dHVyZQ==\u0007",
+  "\u001bP1;2|dcs\u001b\\",
+  "\u001b_apc\u001b\\",
+  "bell\u0007back\bcr\r",
+  "bidi\u202eoverride\u202c\u2066isolate\u2069",
+].join("|");
+
+const terminalInstruction = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/u;
+
+function fullHostileRecords(now = Date.now()): { triple: TripleRecord; note: MemoryRecord } {
+  const triple: TripleRecord = {
+    kind: "triple", id: "hostile-triple", ts: now - 3 * 24 * 60 * 60 * 1000,
+    cwd: `cwd-${fullHostileMatrix}`, schemaV: 1, agent: "codex", origin: "agent-hook",
+    intent: { text: `matrixneedle ${fullHostileMatrix}` },
+    rationale: { text: `reason ${fullHostileMatrix}`, tags: [`tag-${fullHostileMatrix}`], source: "notify" },
+    mechanism: {
+      head: `head-${fullHostileMatrix}`,
+      files: [{
+        path: `src/matrixneedle-${fullHostileMatrix}.ts`, plusMinus: [4, 2],
+        props: [`prop-${fullHostileMatrix}`], excerpt: `excerpt-${fullHostileMatrix}`,
+      }],
+      truncatedFiles: 0,
+    },
+  };
+  const note: MemoryRecord = {
+    kind: "note", id: "hostile-note", ts: now, cwd: `cwd-${fullHostileMatrix}`,
+    cmd: `note-cmd-${fullHostileMatrix}`, file: `file-${fullHostileMatrix}`,
+    line: 7, subject: `subject-${fullHostileMatrix}`, answer: `answer-${fullHostileMatrix}`,
+  };
+  return { triple, note };
+}
+
 export function seeded(): MemoryRecord[] {
   const triple: TripleRecord = {
     kind: "triple", id: "t1", ts: Date.now() - 60_000, cwd: "/w", schemaV: 1, agent: "claude-code", origin: "agent-hook",
@@ -79,6 +116,62 @@ test("export emits every raw record once in loaded order and keeps sinks separat
   assert.deepEqual(stdout.map((line) => JSON.parse(line)), records);
   assert.deepEqual(sayLines, ["4 record go out. memory is yours. always."]);
   assert.deepEqual(outLines, []);
+});
+
+test("explicit raw export preserves the full hostile note and triple records exactly", () => {
+  const records = fullHostileRecords();
+  const selected: MemoryRecord[] = [records.note, records.triple];
+  const stdout: string[] = [];
+  const { sayLines, deps } = sinks();
+  assert.equal(exportCommand([], {
+    load: () => selected,
+    stdout: (line: string) => stdout.push(line),
+    ...deps,
+  }), 0);
+  assert.deepEqual(stdout, selected.map((record) => JSON.stringify(record)));
+  assert.deepEqual(stdout.map((line) => JSON.parse(line)), selected);
+  assert.ok(stdout.some((line) => line.includes("\\u001b[2J")));
+  assert.ok(stdout.some((line) => line.includes("\\u001bP1;2|dcs")));
+  assert.ok(stdout.some((line) => line.includes("\\u001b_apc")));
+  assert.ok(stdout.some((line) => line.includes("\u202eoverride")));
+  assert.deepEqual(sayLines, ["2 record go out. memory is yours. always."]);
+});
+
+test("dictionary terminal surfaces inertly render the full hostile triple and never render note fields", async () => {
+  const now = Date.now();
+  const { triple, note } = fullHostileRecords(now);
+  const records: MemoryRecord[] = [note, triple];
+  const rendered: string[] = [];
+  const capture = () => {
+    const output = sinks();
+    return {
+      ...output,
+      deps: {
+        load: () => records,
+        say: (line: string) => { output.sayLines.push(line); rendered.push(line); },
+        out: (line: string) => { output.outLines.push(line); rendered.push(line); },
+      },
+    };
+  };
+
+  const whatOutput = capture();
+  assert.equal(await what(["matrixneedle"], whatOutput.deps), 0);
+  const howOutput = capture();
+  assert.equal(how(["matrixneedle"], howOutput.deps), 0);
+  const whyOutput = capture();
+  assert.equal(why([triple.mechanism.files[0]!.path], whyOutput.deps), 0);
+  const digestOutput = capture();
+  assert.equal(digest([], { ...digestOutput.deps, now }), 0);
+  const quizOutput = capture();
+  assert.equal(await quiz([], { ...quizOutput.deps, now, ask: async () => "fixture" }), 0);
+
+  assert.ok(rendered.some((line) => line.includes("unicode-🪨-工程-e\u0301")));
+  assert.ok(rendered.every((line) => !line.includes("answer-")), "note answer must not become terminal output");
+  for (const line of rendered) {
+    assert.doesNotMatch(line, terminalInstruction, JSON.stringify(line));
+    assert.doesNotMatch(line, /\u001b/u, JSON.stringify(line));
+    assert.doesNotMatch(line, /[\r\n]/u, JSON.stringify(line));
+  }
 });
 
 test("export repeated kinds form an ordered union without duplicate records", () => {

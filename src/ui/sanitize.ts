@@ -3,7 +3,7 @@ import { replaceAnsiAndControls } from "../core/redact.js";
 
 const BIDI_CONTROL_RE = /[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/gu;
 const LINE_SEPARATOR_RE = /[\u2028\u2029]/gu;
-const ROCKY_PREFIX_RE = /^(\s*)\[rocky\](?=\s|$)/iu;
+const ROCKY_PREFIX_RE = /^(\s*)\[rocky\]\p{Cf}*(?=\s|$)/iu;
 
 /**
  * Remove terminal instructions from untrusted stored text without changing

@@ -35,6 +35,14 @@ test("safeTerminalBlock preserves only LF structure and treats every line as unt
   assert.match(output, /\\rforged\n\[remembered Rocky\] fixture\\tline\nthird$/);
 });
 
+test("safeTerminalBlock relabels Rocky prefixes hidden behind format characters", () => {
+  for (const hidden of ["\u200b", "\u2060", "\ufeff", "\u200d", "\u200b\u2060\ufeff"]) {
+    const output = safeTerminalBlock(`[Rocky]${hidden} forged`);
+    assert.equal(output, "[remembered Rocky] forged");
+    assert.doesNotMatch(output, /[\u200b\u200d\u2060\ufeff]/u);
+  }
+});
+
 test("terminal sanitizing preserves ordinary Unicode, emoji, CJK, and combining marks", () => {
   const ordinary = "cafe\u0301 — 工程 — rocky 🪨 — family 👨‍👩‍👧‍👦";
   assert.equal(safeTerminalLine(ordinary), ordinary);
