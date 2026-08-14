@@ -14,6 +14,11 @@ const NOW = 1_800_000_000_000;
 const QUERY = "404 9200";
 const MIGRATION_QUERY = "migration-diverse";
 const MIGRATION_WITNESS_FAMILIES = new Set([0, 1, 2]);
+const REQUIRED_STATE_IDS = [
+  "state-migrated-legacy", "state-migrated-current", "state-migrated-malformed-old", "state-migrated-malformed-new",
+  "state-legacy-only-old", "state-legacy-only-new", "state-silent-legacy", "state-silent-current",
+  "state-hook-legacy", "state-hook-current",
+];
 const NON_DISTINCTIVE_TOKENS = new Set([
   "line", "pid", "time", "timestamp", "date", "error", "exception", "fail", "failed", "failure",
   "http", "status", "code", "port", "connect", "refused", "request", "response",
@@ -69,8 +74,127 @@ function makeMigrationCorpus() {
   return [legacy, current, neighbor];
 }
 
+function makeStateRecords() {
+  const migratedCmd = "tool state-migrated";
+  const migratedSignature = ["error: state-migrated"];
+  const migratedLegacy = legacyFingerprintSignature(migratedSignature, migratedCmd, 1);
+  const migratedCurrent = fingerprintSignature(migratedSignature, migratedCmd, 1);
+  const migratedExcerpt = "Error: state-migrated";
+
+  const legacyOnlyCmd = "tool state-legacy-only";
+  const legacyOnlySignature = ["error: state-legacy-only"];
+  const legacyOnlyFingerprint = legacyFingerprintSignature(legacyOnlySignature, legacyOnlyCmd, 1);
+
+  const silentCmd = "tool state-silent";
+  const hookCmd = "tool state-hook";
+  return [
+    {
+      kind: "failure", id: "state-migrated-legacy", benchmarkFamily: 600, ts: NOW - 200,
+      cwd: "/benchmark", cmd: migratedCmd, exitCode: 1, fingerprint: migratedLegacy,
+      signature: migratedSignature, excerpt: migratedExcerpt,
+    },
+    {
+      kind: "failure", id: "state-migrated-current", benchmarkFamily: 600, ts: NOW - 50,
+      cwd: "/benchmark", cmd: migratedCmd, exitCode: 1, fingerprint: migratedCurrent, fingerprintV: 2,
+      signature: migratedSignature, excerpt: migratedExcerpt,
+    },
+    {
+      kind: "failure", id: "state-migrated-malformed-old", benchmarkFamily: 600, ts: NOW - 150,
+      cwd: "/benchmark", cmd: migratedCmd, exitCode: 1, fingerprint: migratedLegacy,
+      signature: ["error: state-migrated forged-old"], excerpt: "Error: state-migrated forged-old",
+    },
+    {
+      kind: "failure", id: "state-migrated-malformed-new", benchmarkFamily: 600, ts: NOW - 100,
+      cwd: "/benchmark", cmd: migratedCmd, exitCode: 1, fingerprint: migratedLegacy,
+      signature: ["error: state-migrated forged-new"], excerpt: "Error: state-migrated forged-new",
+    },
+    {
+      kind: "failure", id: "state-legacy-only-old", benchmarkFamily: 601, ts: NOW - 300,
+      cwd: "/benchmark", cmd: legacyOnlyCmd, exitCode: 1, fingerprint: legacyOnlyFingerprint,
+      signature: legacyOnlySignature, excerpt: "Error: state-legacy-only",
+    },
+    {
+      kind: "failure", id: "state-legacy-only-new", benchmarkFamily: 601, ts: NOW - 250,
+      cwd: "/benchmark", cmd: legacyOnlyCmd, exitCode: 1, fingerprint: legacyOnlyFingerprint,
+      signature: legacyOnlySignature, excerpt: "Error: state-legacy-only",
+    },
+    {
+      kind: "failure", id: "state-silent-legacy", benchmarkFamily: 602, ts: NOW - 400,
+      cwd: "/benchmark", cmd: silentCmd, exitCode: 1, fingerprint: legacyFingerprint("", silentCmd, 1),
+      signature: [], excerpt: "",
+    },
+    {
+      kind: "failure", id: "state-silent-current", benchmarkFamily: 602, ts: NOW - 350,
+      cwd: "/benchmark", cmd: silentCmd, exitCode: 1, fingerprint: fingerprint("", silentCmd, 1), fingerprintV: 2,
+      signature: [], excerpt: "",
+    },
+    {
+      kind: "failure", id: "state-hook-legacy", benchmarkFamily: 603, ts: NOW - 500,
+      cwd: "/benchmark", cmd: hookCmd, exitCode: 1, fingerprint: legacyFingerprint("", hookCmd, 1),
+      signature: [], excerpt: "", origin: "hook",
+    },
+    {
+      kind: "failure", id: "state-hook-current", benchmarkFamily: 603, ts: NOW - 450,
+      cwd: "/benchmark", cmd: hookCmd, exitCode: 1, fingerprint: fingerprint("", hookCmd, 1), fingerprintV: 2,
+      signature: [], excerpt: "", origin: "hook",
+    },
+  ];
+}
+
 function makeDataset() {
-  return Array.from({ length: LEGACY_COUNT * 2 }, (_, index) => recordAt(Math.floor(index / 2), index % 2 === 1));
+  const records = Array.from({ length: LEGACY_COUNT * 2 }, (_, index) => recordAt(Math.floor(index / 2), index % 2 === 1));
+  const stateRecords = makeStateRecords();
+  records.splice(records.length - stateRecords.length, stateRecords.length, ...stateRecords);
+  return records;
+}
+
+function assertDatasetComposition(records) {
+  if (records.length !== RECORD_COUNT) throw new Error(`50k migration-state composition changed record count: ${records.length}`);
+  const byId = new Map(records.map((record) => [record.id, record]));
+  const present = new Set(records.map((record) => record.id));
+  const missing = REQUIRED_STATE_IDS.filter((id) => !present.has(id));
+  if (missing.length > 0) throw new Error(`50k migration-state composition missing: ${missing.join(",")}`);
+
+  const requireRecord = (id) => {
+    const record = byId.get(id);
+    if (record === undefined) throw new Error(`50k migration-state composition lost ${id}`);
+    return record;
+  };
+  const migratedLegacy = requireRecord("state-migrated-legacy");
+  const migratedCurrent = requireRecord("state-migrated-current");
+  const malformedOld = requireRecord("state-migrated-malformed-old");
+  const malformedNew = requireRecord("state-migrated-malformed-new");
+  if (migratedLegacy.fingerprintV === 2 || migratedCurrent.fingerprintV !== 2 ||
+      migratedLegacy.fingerprint !== legacyFingerprintSignature(migratedLegacy.signature, migratedLegacy.cmd, migratedLegacy.exitCode) ||
+      migratedCurrent.fingerprint !== fingerprintSignature(migratedCurrent.signature, migratedCurrent.cmd, migratedCurrent.exitCode) ||
+      malformedOld.fingerprint !== migratedLegacy.fingerprint || malformedNew.fingerprint !== migratedLegacy.fingerprint ||
+      legacyFingerprintSignature(malformedOld.signature, malformedOld.cmd, malformedOld.exitCode) === malformedOld.fingerprint ||
+      legacyFingerprintSignature(malformedNew.signature, malformedNew.cmd, malformedNew.exitCode) === malformedNew.fingerprint) {
+    throw new Error("50k migration-state composition has invalid migrated/malformed provenance");
+  }
+
+  const legacyOnlyOld = requireRecord("state-legacy-only-old");
+  const legacyOnlyNew = requireRecord("state-legacy-only-new");
+  const legacyOnlyWitness = fingerprintSignature(legacyOnlyOld.signature, legacyOnlyOld.cmd, legacyOnlyOld.exitCode);
+  if (legacyOnlyOld.fingerprintV === 2 || legacyOnlyNew.fingerprintV === 2 ||
+      legacyOnlyOld.fingerprint !== legacyOnlyNew.fingerprint ||
+      legacyFingerprintSignature(legacyOnlyOld.signature, legacyOnlyOld.cmd, legacyOnlyOld.exitCode) !== legacyOnlyOld.fingerprint ||
+      records.some((record) => record.fingerprintV === 2 && record.fingerprint === legacyOnlyWitness)) {
+    throw new Error("50k migration-state composition has an unexpected legacy-only witness");
+  }
+
+  const silentLegacy = requireRecord("state-silent-legacy");
+  const silentCurrent = requireRecord("state-silent-current");
+  const hookLegacy = requireRecord("state-hook-legacy");
+  const hookCurrent = requireRecord("state-hook-current");
+  if (silentLegacy.signature.length !== 0 || silentLegacy.excerpt.length !== 0 || silentCurrent.fingerprintV !== 2 ||
+      silentLegacy.fingerprint !== legacyFingerprint("", silentLegacy.cmd, silentLegacy.exitCode) ||
+      silentCurrent.fingerprint !== fingerprint("", silentCurrent.cmd, silentCurrent.exitCode) ||
+      hookLegacy.origin !== "hook" || hookCurrent.origin !== "hook" || hookCurrent.fingerprintV !== 2 ||
+      hookLegacy.fingerprint !== legacyFingerprint("", hookLegacy.cmd, hookLegacy.exitCode) ||
+      hookCurrent.fingerprint !== fingerprint("", hookCurrent.cmd, hookCurrent.exitCode)) {
+    throw new Error("50k migration-state composition has invalid silent or hook provenance");
+  }
 }
 
 function documentFrequency(tokenSets) {
@@ -242,6 +366,69 @@ function assertEquivalent(label, baselineResults, optimizedResults) {
   return comparison;
 }
 
+function stateShape(results, optimized) {
+  return {
+    ids: results.map((hit) => optimized ? hit.failure.id : hit.record.id),
+    families: results.map((hit) => optimized ? hit.failure.benchmarkFamily : hit.record.benchmarkFamily),
+    scores: results.map((hit) => hit.score),
+  };
+}
+
+function assertStateVector(records, vector) {
+  const requested = new Set(vector.ids);
+  const subset = records.filter((record) => requested.has(record.id));
+  if (subset.length !== vector.ids.length) {
+    throw new Error(`${vector.label} subset composition mismatch: ${JSON.stringify({ requested: vector.ids, actual: subset.map((record) => record.id) })}`);
+  }
+  const baseline = baselineRecall(subset, vector.query);
+  const optimized = optimizedRecall(subset, vector.query);
+  assertEquivalent(`${vector.label} state vector`, baseline, optimized);
+  const baselineShape = stateShape(baseline, false);
+  const optimizedShape = stateShape(optimized, true);
+  const expectedShape = { ids: vector.expectedIds, families: vector.expectedFamilies, scores: vector.expectedScores };
+  const scoresMatch = (actual) => actual.length === expectedShape.scores.length &&
+    actual.every((score, index) => Math.abs(score - expectedShape.scores[index]) < 1e-12);
+  const matches = (actual) => JSON.stringify(actual.ids) === JSON.stringify(expectedShape.ids) &&
+    JSON.stringify(actual.families) === JSON.stringify(expectedShape.families) && scoresMatch(actual.scores);
+  if (!matches(baselineShape) || !matches(optimizedShape)) {
+    throw new Error(`${vector.label} state vector expected mismatch: ${JSON.stringify({ expected: expectedShape, baseline: baselineShape, optimized: optimizedShape })}`);
+  }
+  return { label: vector.label, query: vector.query, expected: expectedShape, baseline: baselineShape, optimized: optimizedShape, passed: true };
+}
+
+const STATE_VECTORS = [
+  {
+    label: "trusted signature migration", query: "state-migrated",
+    ids: ["state-migrated-legacy", "state-migrated-current"],
+    expectedIds: ["state-migrated-current"], expectedFamilies: [600], expectedScores: [0.6],
+  },
+  {
+    label: "valid legacy duplicates without witness", query: "state-legacy-only",
+    ids: ["state-legacy-only-old", "state-legacy-only-new"],
+    expectedIds: ["state-legacy-only-new"], expectedFamilies: [601], expectedScores: [0.6666666666666666],
+  },
+  {
+    label: "unproven same-hash records", query: "state-migrated",
+    ids: ["state-migrated-malformed-old", "state-migrated-malformed-new"],
+    expectedIds: ["state-migrated-malformed-new", "state-migrated-malformed-old"], expectedFamilies: [600, 600], expectedScores: [0.375, 0.375],
+  },
+  {
+    label: "migrated family beside malformed records", query: "state-migrated",
+    ids: ["state-migrated-legacy", "state-migrated-current", "state-migrated-malformed-old", "state-migrated-malformed-new"],
+    expectedIds: ["state-migrated-current", "state-migrated-malformed-new", "state-migrated-malformed-old"], expectedFamilies: [600, 600, 600], expectedScores: [0.6, 0.375, 0.375],
+  },
+  {
+    label: "silent command-only migration", query: "state-silent",
+    ids: ["state-silent-legacy", "state-silent-current"],
+    expectedIds: ["state-silent-current"], expectedFamilies: [602], expectedScores: [0.75],
+  },
+  {
+    label: "hook-origin migration", query: "state-hook",
+    ids: ["state-hook-legacy", "state-hook-current"],
+    expectedIds: ["state-hook-current"], expectedFamilies: [603], expectedScores: [0.75],
+  },
+];
+
 const migrationCorpus = makeMigrationCorpus();
 const migrationBaseline = baselineRecall(migrationCorpus, MIGRATION_QUERY);
 const migrationOptimized = optimizedRecall(migrationCorpus, MIGRATION_QUERY);
@@ -251,11 +438,15 @@ if (JSON.stringify(migrationComparison.optimizedIds) !== JSON.stringify(["migrat
 }
 
 const records = makeDataset();
+assertDatasetComposition(records);
+const stateVectorResults = STATE_VECTORS.map((vector) => assertStateVector(records, vector));
 const baselineResults = baselineRecall(records);
 const optimizedResults = queryRecall(records, { query: QUERY, cwd: "/benchmark", now: NOW, limit: 3 });
 const equivalence = assertEquivalent("50k dataset", baselineResults, optimizedResults);
 const { baselineIds, optimizedIds, baselineFamilies, optimizedFamilies, baselineScores, optimizedScores } = equivalence;
 const equivalent = equivalence.passed;
+const currentRecordCount = records.filter((record) => record.fingerprintV === 2).length;
+const legacyRecordCount = records.length - currentRecordCount;
 for (let index = 0; index < WARMUPS; index++) {
   baselineRecall(records);
   optimizedRecall(records);
@@ -281,9 +472,10 @@ const report = {
   environment: { node: process.version, platform: process.platform, arch: process.arch, cpus: os.cpus().length },
   dataset: {
     records: RECORD_COUNT,
-    legacyRecords: LEGACY_COUNT,
-    currentRecords: RECORD_COUNT - LEGACY_COUNT,
-    seed: "family=0..24999; alternating legacy/current; trusted-v2 witness families=(0,1,2); status=(404,500,503); port=(9200,5432,6379)",
+    legacyRecords: legacyRecordCount,
+    currentRecords: currentRecordCount,
+    seed: "base families=0..24994 alternating legacy/current plus named state branches=(600..603); trusted-v2 witness families=(0,1,2); status=(404,500,503); port=(9200,5432,6379)",
+    stateIds: REQUIRED_STATE_IDS,
     query: QUERY,
   },
   warmups: WARMUPS,
@@ -293,6 +485,7 @@ const report = {
   equivalence: {
     passed: equivalent,
     migrationCorpus: migrationComparison,
+    stateVectors: stateVectorResults,
     baselineIds,
     optimizedIds,
     baselineFamilies,
