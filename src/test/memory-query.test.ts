@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import type { FailureRecord, FixRecord, MemoryRecord, TripleRecord } from "../core/memory.js";
+import type { AssociationRecord, FailureRecord, FixRecord, MemoryRecord, TripleRecord } from "../core/memory.js";
 import {
   createMemoryQueries,
   queryRecall,
@@ -96,6 +96,21 @@ test("recentUnresolvedFailures grades exact identity vs program basis", () => {
   ]);
 });
 
+test("possible associations never count as confirmed fix events", () => {
+  const association: AssociationRecord = {
+    kind: "association", id: "a1", ts: 300, cwd: "/work/b", cmd: "npm run unrelated",
+    candidateFailureIds: ["f2"], links: [{ id: "f2", basis: "program", confidence: "possible" }],
+  };
+  assert.deepEqual(queryStats([failureB, association]), {
+    failures: 1, fixEvents: 0, resolved: 0, unresolved: 1,
+  });
+  const downgradedLegacy: FixRecord = {
+    kind: "fix", id: "legacy-weak", ts: 301, cwd: "/work/b", cmd: "npm run unrelated",
+    failureIds: ["f2"], links: [{ id: "f2", basis: "program" }],
+  };
+  assert.equal(queryStats([failureB, downgradedLegacy]).fixEvents, 0);
+});
+
 test("same-program candidates stay possible and never become confirmed resolutions", () => {
   const failure: FailureRecord = {
     kind: "failure", id: "weak-1", ts: 100, cwd: "/work/weak", cmd: "npm run broken-alpha",
@@ -108,6 +123,28 @@ test("same-program candidates stay possible and never become confirmed resolutio
 
   assert.deepEqual(links.map((link) => link.basis), ["program"]);
   assert.deepEqual(links.map((link) => link.confidence), ["possible"]);
+});
+
+test("different wrapper effects cannot become confirmed links", () => {
+  const failure: FailureRecord = {
+    kind: "failure", id: "wrapper-1", ts: 100, cwd: "/work/wrapper", cmd: "sudo -u root npm test",
+    exitCode: 1, fingerprint: "fp-wrapper", signature: ["synthetic failure"], excerpt: "synthetic failure",
+  };
+  for (const command of ["sudo -u alice npm test", "npm test", "env -C /work/b npm test"]) {
+    const links = recentUnresolvedFailures([failure], command, { cwd: "/work/wrapper", now: 200 });
+    assert.ok(links.every((link) => link.confidence === "possible"));
+  }
+});
+
+test("identical unparsed expansions remain possible rather than confirmed", () => {
+  for (const cmd of ["node tests/*.mjs", 'node "%SCRIPT%" mode-a']) {
+    const failure: FailureRecord = {
+      kind: "failure", id: `ambiguous-${cmd}`, ts: 100, cwd: "/work/ambiguous", cmd,
+      exitCode: 1, fingerprint: "fp-ambiguous", signature: ["synthetic failure"], excerpt: "synthetic failure",
+    };
+    const links = recentUnresolvedFailures([failure], cmd, { cwd: "/work/ambiguous", now: 200 });
+    assert.deepEqual(links.map((link) => link.confidence), ["possible"]);
+  }
 });
 
 test("exact identity is confirmed while cwd and selected-window isolation remain intact", () => {

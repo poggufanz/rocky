@@ -54,6 +54,23 @@ test("loader accepts a fix's links array and drops a fix with a malformed link",
   assert.equal(records[0].kind === "fix" ? records[0].links?.[0]?.basis : undefined, "signature");
 });
 
+test("loader accepts possible associations without resolving failures", () => {
+  const root = mkdtempSync(join(tmpdir(), "rocky-association-"));
+  const file = join(root, "memory.jsonl");
+  const failure = {
+    kind: "failure", id: "f1", ts: 1, cwd: "/work", cmd: "npm run broken", exitCode: 1,
+    fingerprint: "abc", signature: ["failed"], excerpt: "failed",
+  };
+  const association = {
+    kind: "association", id: "a1", ts: 2, cwd: "/work", cmd: "npm run unrelated",
+    candidateFailureIds: ["f1"], links: [{ id: "f1", basis: "program", confidence: "possible" }],
+  };
+  writeFileSync(file, `${JSON.stringify(failure)}\n${JSON.stringify(association)}\n`);
+  const records = loadMemory(file);
+  assert.deepEqual(records.map((record) => record.kind), ["failure", "association"]);
+  assert.equal(records[0]?.kind === "failure" ? records[0].resolvedBy : undefined, undefined);
+});
+
 test("state paths resolve ROCKY_HOME on every call", (t) => {
   const cwd = mkdtempSync(join(tmpdir(), "rocky-state-paths-"));
   t.after(() => rmSync(cwd, { recursive: true, force: true }));

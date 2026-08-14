@@ -22,10 +22,10 @@ import { commandFingerprint, commandIdentity, fingerprint, normalizeLine, signat
 import { resolveRockyPaths } from "./state-paths.js";
 import type { RockyPaths } from "./state-paths.js";
 import { loadMemory, MAX_MEMORY_LINE_BYTES } from "./memory-read.js";
-import type { FailureRecord, FixRecord, MemoryRecord, NoteRecord, TripleRecord } from "./memory-read.js";
+import type { AssociationRecord, FailureRecord, FixRecord, MemoryRecord, NoteRecord, TripleRecord } from "./memory-read.js";
 import type { UnresolvedLink } from "./memory-query.js";
 
-export type { FailureRecord, FixRecord, MemoryRecord, NoteRecord, TripleFile, TripleRecord } from "./memory-read.js";
+export type { AssociationRecord, FailureRecord, FixRecord, MemoryRecord, NoteRecord, TripleFile, TripleRecord } from "./memory-read.js";
 export { loadMemory, parseMemoryRecord, MAX_MEMORY_LINE_BYTES } from "./memory-read.js";
 
 export function memoryPath(): string {
@@ -322,24 +322,49 @@ export function recordWatchFailure(cmd: string, exitCode: number, stderr: string
  */
 export const MAX_FIX_LINKS = 200;
 
-export function recordFix(cmd: string, links: readonly UnresolvedLink[], cwd = process.cwd()): FixRecord {
+export function recordFix(cmd: string, links: readonly UnresolvedLink[], cwd = process.cwd()): FixRecord | AssociationRecord {
   const identity = commandIdentity(cmd);
-  const build = (chosen: readonly UnresolvedLink[]): FixRecord => ({
-    kind: "fix", id: randomUUID(), ts: Date.now(), cwd, cmd,
-    failureIds: chosen.filter((link) => link.confidence === "confirmed").map((link) => link.failure.id),
-    candidateFailureIds: chosen.filter((link) => link.confidence === "possible").map((link) => link.failure.id),
-    links: chosen.map((link) => ({ id: link.failure.id, basis: link.basis, confidence: link.confidence })),
+  const chosen = links.slice(-MAX_FIX_LINKS);
+  const confirmed = chosen.filter((link) => link.confidence === "confirmed");
+  const possible = chosen.filter((link) => link.confidence === "possible");
+  const metadata = {
+    ts: Date.now(), cwd, cmd,
     commandIdentity: identity.value, identityV: identity.version, identityReliable: identity.reliable, platform: process.platform,
-  });
+  } as const;
 
-  let chosen = links.slice(-MAX_FIX_LINKS);
-  let rec = build(chosen);
-  while (chosen.length > 1 && Buffer.byteLength(JSON.stringify(rec) + "\n", "utf8") > MAX_MEMORY_LINE_BYTES) {
-    chosen = chosen.slice(Math.ceil(chosen.length / 2));
-    rec = build(chosen);
+  let fix: FixRecord | undefined;
+  if (confirmed.length > 0) {
+    let selected = confirmed;
+    const buildFix = (): FixRecord => ({
+      kind: "fix", id: randomUUID(), ...metadata,
+      failureIds: selected.map((link) => link.failure.id),
+      links: selected.map((link) => ({ id: link.failure.id, basis: "identity", confidence: "confirmed" })),
+    });
+    fix = buildFix();
+    while (selected.length > 1 && Buffer.byteLength(JSON.stringify(fix) + "\n", "utf8") > MAX_MEMORY_LINE_BYTES) {
+      selected = selected.slice(Math.ceil(selected.length / 2));
+      fix = buildFix();
+    }
+    append(fix);
   }
-  append(rec);
-  return rec;
+  let association: AssociationRecord | undefined;
+  if (possible.length > 0) {
+    let selected = possible;
+    const buildAssociation = (): AssociationRecord => ({
+      kind: "association", id: randomUUID(), ...metadata,
+      candidateFailureIds: selected.map((link) => link.failure.id),
+      links: selected.map((link) => ({ id: link.failure.id, basis: "program", confidence: "possible" })),
+    });
+    association = buildAssociation();
+    while (selected.length > 1 && Buffer.byteLength(JSON.stringify(association) + "\n", "utf8") > MAX_MEMORY_LINE_BYTES) {
+      selected = selected.slice(Math.ceil(selected.length / 2));
+      association = buildAssociation();
+    }
+    append(association);
+  }
+  if (fix) return fix;
+  if (association) return association;
+  throw new Error("Rocky fix attribution requires at least one link");
 }
 
 function lastLines(text: string, n: number): string {

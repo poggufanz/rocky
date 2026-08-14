@@ -98,7 +98,12 @@ export function queryRecentFailures(
 export function queryStats(records: readonly MemoryRecord[], input: StatsQuery = {}): MemoryStats {
   const scoped = records.filter((record) => input.cwd === undefined || record.cwd === input.cwd);
   const failures = scoped.filter((record): record is FailureRecord => record.kind === "failure");
-  const fixEvents = scoped.filter((record) => record.kind === "fix").length;
+  const confirmedFixIds = new Set(
+    records
+      .filter((record): record is FailureRecord => record.kind === "failure" && record.resolvedBy !== undefined)
+      .map((failure) => failure.resolvedBy!),
+  );
+  const fixEvents = scoped.filter((record) => record.kind === "fix" && confirmedFixIds.has(record.id)).length;
   const resolved = failures.filter((failure) => failure.resolvedBy !== undefined).length;
   return { failures: failures.length, fixEvents, resolved, unresolved: failures.length - resolved };
 }

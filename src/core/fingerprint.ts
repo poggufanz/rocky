@@ -128,7 +128,12 @@ export interface CommandIdentity {
   display: string;
 }
 
-interface TokenizedCommand { tokens: string[]; reliable: boolean; assignments?: string[] }
+interface TokenizedCommand {
+  tokens: string[];
+  reliable: boolean;
+  assignments?: string[];
+  wrapperEffects?: string[];
+}
 
 function basename(token: string): string {
   const segments = token.split(/[\\/]/);
@@ -156,14 +161,14 @@ function tokenizeCommand(cmd: string): TokenizedCommand {
         active = true;
         continue;
       }
-      if (char === "`" || char === "$") reliable = false;
+      if (char === "`" || char === "$" || char === "%" || char === "!") reliable = false;
       token += char;
       active = true;
       continue;
     }
     if (char === "'" || char === '"') { quote = char; active = true; continue; }
     if (/\s/u.test(char)) { push(); continue; }
-    if ("|&;<>()\r\n`".includes(char) || char === "$" || char === "%") reliable = false;
+    if ("|&;<>()\r\n`*?[]{}~".includes(char) || char === "$" || char === "%" || char === "!") reliable = false;
     if (char === "\\" && (cmd[i + 1] === " " || cmd[i + 1] === "'" || cmd[i + 1] === '"')) {
       token += cmd[++i]!;
       active = true;
@@ -193,6 +198,7 @@ function wrapperValueCount(wrapper: string, option: string): number | undefined 
 function meaningfulParsedTokens(parsed: TokenizedCommand): TokenizedCommand {
   const tokens = parsed.tokens;
   const assignments: string[] = [];
+  const wrapperEffects: string[] = [];
   let start = 0;
   while (start < tokens.length) {
     const token = tokens[start];
@@ -200,6 +206,7 @@ function meaningfulParsedTokens(parsed: TokenizedCommand): TokenizedCommand {
     if (ENV_ASSIGNMENT.test(token)) { assignments.push(token); start++; continue; }
     const wrapper = basename(token);
     if (WRAPPERS.has(wrapper)) {
+      wrapperEffects.push(`wrapper:${wrapper}`);
       start++;
       while (start < tokens.length) {
         const option = tokens[start]!;
@@ -208,6 +215,12 @@ function meaningfulParsedTokens(parsed: TokenizedCommand): TokenizedCommand {
         if (!option.startsWith("-") || option === "-") break;
         const values = wrapperValueCount(wrapper, option);
         if (values === undefined) parsed.reliable = false;
+        wrapperEffects.push(`wrapper-arg:${option}`);
+        for (let offset = 1; offset <= (values ?? 0); offset++) {
+          const value = tokens[start + offset];
+          if (value === undefined) parsed.reliable = false;
+          else wrapperEffects.push(`wrapper-arg:${value}`);
+        }
         start += 1 + (values ?? 0);
         if (start > tokens.length) parsed.reliable = false;
       }
@@ -216,7 +229,12 @@ function meaningfulParsedTokens(parsed: TokenizedCommand): TokenizedCommand {
     if (basename(token) === "rocky" && tokens[start + 1] === "run") { start += 2; continue; }
     break;
   }
-  return { tokens: start < tokens.length ? tokens.slice(start) : tokens, reliable: parsed.reliable, assignments };
+  return {
+    tokens: start < tokens.length ? tokens.slice(start) : tokens,
+    reliable: parsed.reliable,
+    assignments,
+    wrapperEffects,
+  };
 }
 
 /** Drop assignment prefixes and wrapper programs to reach the real command. */
@@ -241,7 +259,12 @@ export function commandIdentity(
   }
   const base = basename(first);
   const identityBase = (options.platform ?? process.platform) === "win32" ? base.toLowerCase() : base;
-  const normalized = [...(parsed.assignments ?? []).map((assignment) => `env:${assignment}`), identityBase, ...parsed.tokens.slice(1)];
+  const normalized = [
+    ...(parsed.assignments ?? []).map((assignment) => `env:${assignment}`),
+    ...(parsed.wrapperEffects ?? []),
+    identityBase,
+    ...parsed.tokens.slice(1),
+  ];
   return {
     value: JSON.stringify(normalized),
     reliable: parsed.reliable,

@@ -32,7 +32,11 @@ test("unrelated successful npm task is not suggested as confirmed fix", (t) => {
   assert.doesNotMatch(second.stderr, /unrelated-beta/);
 
   const lines = readFileSync(join(home, "memory.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
-  const fix = lines.find((record) => record.kind === "fix");
-  assert.deepEqual(fix.failureIds, []);
-  assert.deepEqual(fix.candidateFailureIds.length, 1);
+  assert.equal(lines.some((record) => record.kind === "fix"), false);
+  const association = lines.find((record) => record.kind === "association");
+  assert.deepEqual(association.candidateFailureIds.length, 1);
+
+  const stats = spawnSync(process.execPath, [cli, "stats"], { cwd: project, env, encoding: "utf8" });
+  assert.equal(stats.status, 0);
+  assert.match(stats.stderr, /0 fix events/);
 });

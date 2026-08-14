@@ -33,6 +33,17 @@ test("Windows folds executable case only and ambiguous shell input is never stro
   );
   assert.equal(commandIdentity("npm test && npm run build").reliable, false);
   assert.equal(commandIdentity('npm run "unterminated').reliable, false);
+  assert.equal(commandIdentity("node tests/*.mjs").reliable, false);
+  assert.equal(commandIdentity('node "%SCRIPT%" mode-a', { platform: "win32" }).reliable, false);
+});
+
+test("wrapper effects remain visible to causal identity while display and base unwrap", () => {
+  assert.equal(commandSignature("sudo -u root npm test"), "npm test");
+  assert.equal(commandBase("env -C /work/a npm test"), "npm");
+  assert.notEqual(commandIdentity("sudo -u root npm test").value, commandIdentity("sudo -u alice npm test").value);
+  assert.notEqual(commandIdentity("sudo -u root npm test").value, commandIdentity("npm test").value);
+  assert.notEqual(commandIdentity("env -C /work/a npm test").value, commandIdentity("env -C /work/b npm test").value);
+  assert.notEqual(commandIdentity("env -u DEBUG npm test").value, commandIdentity("npm test").value);
 });
 
 const cases: Array<[string, string]> = [

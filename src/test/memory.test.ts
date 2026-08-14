@@ -91,6 +91,8 @@ test("recordFix keeps its line readable instead of writing a record that is sile
 
   const fix = memory.recordFix("true ok", links, "/x");
 
+  assert.equal(fix.kind, "fix");
+  if (fix.kind !== "fix") throw new Error("confirmed links must produce fix record");
   assert.ok(fix.links !== undefined);
   assert.equal(fix.links.length, memory.MAX_FIX_LINKS);
   assert.equal(fix.failureIds.length, memory.MAX_FIX_LINKS);

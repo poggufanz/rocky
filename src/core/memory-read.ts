@@ -50,6 +50,20 @@ export interface FixRecord {
   platform?: NodeJS.Platform;
 }
 
+export interface AssociationRecord {
+  kind: "association";
+  id: string;
+  ts: number;
+  cwd: string;
+  cmd: string;
+  candidateFailureIds: string[];
+  links: FixLink[];
+  commandIdentity?: string;
+  identityV?: 1;
+  identityReliable?: boolean;
+  platform?: NodeJS.Platform;
+}
+
 export interface NoteRecord {
   kind: "note";
   id: string;
@@ -82,7 +96,7 @@ export interface TripleRecord {
   mechanism: { head?: string; files: TripleFile[]; truncatedFiles: number };
 }
 
-export type MemoryRecord = FailureRecord | FixRecord | NoteRecord | TripleRecord;
+export type MemoryRecord = FailureRecord | FixRecord | AssociationRecord | NoteRecord | TripleRecord;
 
 export const MAX_MEMORY_LINE_BYTES = 1024 * 1024;
 
@@ -157,6 +171,17 @@ export function parseMemoryRecord(value: unknown): MemoryRecord | undefined {
       ...(candidateFailureIds === undefined ? {} : { candidateFailureIds }),
       ...(links === undefined ? {} : { links }),
       ...identity,
+    };
+  }
+  if (record.kind === "association") {
+    const candidateFailureIds = strings(record.candidateFailureIds);
+    const identity = identityFields(record);
+    const links = parseFixLinks(record.links);
+    if (!candidateFailureIds || !identity || !links || typeof record.cmd !== "string" ||
+        links.some((link) => link.confidence !== "possible" || link.basis !== "program")) return undefined;
+    return {
+      kind: "association", id: record.id, ts: Number(record.ts), cwd: record.cwd, cmd: record.cmd,
+      candidateFailureIds, links, ...identity,
     };
   }
   if (record.kind === "note") {
