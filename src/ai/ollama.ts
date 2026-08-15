@@ -184,15 +184,22 @@ async function readJson(response: Response, boundary: BoundedSignal): Promise<un
   return JSON.parse(new TextDecoder().decode(bytes)) as unknown;
 }
 
+function cancelResponseBody(body: ReadableStream<Uint8Array> | null, reason: unknown): void {
+  if (body === null) return;
+  try {
+    void Promise.resolve(body.cancel(reason)).catch(() => {
+      // The bounded error remains the useful failure when cancellation races the stream.
+    });
+  } catch {
+    // The bounded error remains the useful failure when cancellation races the stream.
+  }
+}
+
 function rejectHttpResponse(response: Response, boundary: BoundedSignal): void {
   if (response.ok) return;
   const error = new Error(`Ollama request failed: ${response.status}`);
   boundary.abort(error);
-  if (response.body !== null) {
-    void response.body.cancel(error).catch(() => {
-      // The status-only failure remains authoritative if transport cleanup races.
-    });
-  }
+  cancelResponseBody(response.body, error);
   throw error;
 }
 
@@ -242,7 +249,11 @@ export function createOllamaClient(options: OllamaClientOptions = {}): OllamaCli
         if (boundary.signal.aborted) throw abortReason(boundary.signal);
         throw error;
       }
-      if (boundary.signal.aborted) throw abortReason(boundary.signal);
+      if (boundary.signal.aborted) {
+        const reason = abortReason(boundary.signal);
+        cancelResponseBody(response.body, reason);
+        throw reason;
+      }
       rejectHttpResponse(response, boundary);
       return await readJson(response, boundary);
     } finally {

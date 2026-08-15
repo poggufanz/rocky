@@ -295,6 +295,40 @@ test("uses the configured bounded timeout without retrying", async () => {
   assert.equal(calls.filter((call) => urlOf(call).endsWith("/api/generate")).length, 1);
 });
 
+test("cancels a response returned after caller abort without reading its body", async () => {
+  let reads = 0;
+  let cancellations = 0;
+  let cancellationReason: unknown;
+  const response = {
+    ok: true,
+    body: {
+      getReader() {
+        reads += 1;
+        throw new Error("aborted response must not be read");
+      },
+      cancel(reason: unknown) {
+        cancellations += 1;
+        cancellationReason = reason;
+        return Promise.resolve();
+      },
+    },
+  } as unknown as Response;
+  const controller = new AbortController();
+  const callerReason = new Error("caller aborted before response");
+  const client = createOllamaClient({
+    fetchImpl: async (_input, init) => {
+      assert.strictEqual(init?.signal?.aborted, false);
+      controller.abort(callerReason);
+      return response;
+    },
+  });
+
+  await assert.rejects(client.generateStructured("model", "prompt", {}, controller.signal), callerReason);
+  assert.equal(reads, 0);
+  assert.equal(cancellations, 1);
+  assert.strictEqual(cancellationReason, callerReason);
+});
+
 test("bounds a non-cooperative response reader and requests body cancellation", async () => {
   let cancellations = 0;
   let cancellationReason: unknown;
