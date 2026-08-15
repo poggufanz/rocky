@@ -15,7 +15,6 @@ import {
   projectRecentFailures,
   projectWhyPossible,
   projectTriple,
-  recallCandidateIdsForLength,
   safeOpaqueIdentifier,
   validateRecallCandidateIds,
 } from "./privacy.js";
@@ -309,24 +308,6 @@ function validEvidenceRefs(
     const item = items.find((candidate) => candidate.candidateId === match[1]);
     return item !== undefined && allowed.has(match[1]) && (match[2] === "failure" || item.hasFix === true);
   });
-}
-
-function alignAiOutcome(
-  ai: RecallAiOutcome | undefined,
-  aiCandidateIds: readonly string[],
-  knownCandidateIds: readonly string[],
-): RecallAiOutcome | undefined {
-  if (ai === undefined || ai.aiStatus !== "used") return ai;
-  const known = new Set(knownCandidateIds);
-  const ranked = ai.rankedCandidateIds;
-  const structurallyValid = ranked.every((id, index) =>
-    isRecallCandidateId(id) && known.has(id) && ranked.indexOf(id) === index,
-  );
-  if (!structurallyValid) return ai;
-  const aligned = ranked.filter((id) => aiCandidateIds.includes(id));
-  if (ranked.length > 0 && aligned.length === 0) return ai;
-  if (aligned.length === ranked.length) return ai;
-  return { ...ai, rankedCandidateIds: aligned };
 }
 
 function cappedResult(payload: object, isError = false): ToolCallResult {
@@ -1652,11 +1633,9 @@ export function createToolRegistry(options: CreateToolRegistryOptions): McpToolR
             }
             const safeAi = snapshotRecallAiOutcome(ai);
             const aiCandidateIds = aiCandidates.map((candidate) => candidate.candidateId);
-            const knownCandidateIds = safeProjection(() => recallCandidateIdsForLength(hits.length) ?? [], []);
-            const alignedAi = alignAiOutcome(safeAi, aiCandidateIds, knownCandidateIds);
             return safeProjection(
-              () => cappedResult(mergeAi(enriched, alignedAi, aiCandidateIds)),
-              cappedResult(deterministicAiFallback(enriched, alignedAi !== undefined ? "unavailable" : "invalid_output")),
+              () => cappedResult(mergeAi(enriched, safeAi, aiCandidateIds)),
+              cappedResult(deterministicAiFallback(enriched, safeAi !== undefined ? "unavailable" : "invalid_output")),
             );
           }
           default:
