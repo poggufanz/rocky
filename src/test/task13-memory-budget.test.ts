@@ -350,7 +350,7 @@ test("MCP provider read errors cannot become clean fallback answers", async () =
     stats: () => { throw new Error("provider read"); },
     searchKnowledge: () => [],
     fetchRecord: () => undefined,
-    whyFile: () => [],
+    whyFile: () => { throw new Error("provider read"); },
     coverage: () => clean,
   };
   const registry = createToolRegistry({
@@ -369,6 +369,11 @@ test("MCP provider read errors cannot become clean fallback answers", async () =
   assert.equal(aiContent.memoryCoverageIncomplete, true);
   assert.equal(aiContent.memoryCoverage?.complete, false);
   assert.equal(aiContent.memoryCoverage?.reason, "read-race");
+  const why = await registry.call("why_file", { path: "src/app.ts" }, new AbortController().signal);
+  const whyContent = why.structuredContent as { memoryCoverageIncomplete?: boolean; memoryCoverage?: { complete?: boolean; reason?: string } };
+  assert.equal(whyContent.memoryCoverageIncomplete, true);
+  assert.equal(whyContent.memoryCoverage?.complete, false);
+  assert.equal(whyContent.memoryCoverage?.reason, "read-race");
 });
 
 test("legitimate skipped-only coverage is preserved", async () => {

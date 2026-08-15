@@ -591,11 +591,12 @@ function selectWhyCandidates(
   return { matches, possible, ambiguousSuffix };
 }
 
-function fallbackWhyEvidence(options: CreateToolRegistryOptions, path: string, limit: number): WhyFileEvidence {
+function fallbackWhyEvidence(options: CreateToolRegistryOptions, path: string, limit: number, state?: SafeMemoryReadState): WhyFileEvidence {
   let rawMatches: unknown;
   try {
     rawMatches = options.memory.whyFile(path, limit);
   } catch {
+    if (state !== undefined) state.failed = true;
     rawMatches = [];
   }
   const boundedRawMatches = boundedProviderArray(rawMatches, MAX_WHY_EVIDENCE_INPUTS);
@@ -1031,8 +1032,9 @@ export function createToolRegistry(options: CreateToolRegistryOptions): McpToolR
           }
           case "why_file": {
             const input = parseWhyFileArgs(args);
+            const readState: SafeMemoryReadState = { failed: false };
             let fallback: WhyFileEvidence | undefined;
-            const getFallback = (): WhyFileEvidence => fallback ??= fallbackWhyEvidence(options, input.path, input.limit);
+            const getFallback = (): WhyFileEvidence => fallback ??= fallbackWhyEvidence(options, input.path, input.limit, readState);
             let customEvidence: MemoryQueries["whyFileEvidence"] | undefined;
             try { customEvidence = options.memory.whyFileEvidence; } catch { customEvidence = undefined; }
             const unknownEvidence: WhyFileEvidence = {
@@ -1040,18 +1042,17 @@ export function createToolRegistry(options: CreateToolRegistryOptions): McpToolR
               coverage: { status: "unknown", complete: false, filesCovered: 0, truncatedFiles: 0 },
               coverageIncomplete: true,
             };
-            const readState: SafeMemoryReadState = { failed: false };
             const rawEvidence = safeReadMemory(() => customEvidence
               ? customEvidence(input.path, input.limit)
               : getFallback(), unknownEvidence, canonicalMemory, readState);
-            const memoryScan = memoryCoverage(options.memory, readState.failed);
-            pairedCoverage = memoryScan;
             const evidence = safeProjection(
               () => customEvidence === undefined
                 ? rawEvidence
                 : normalizeWhyEvidence(rawEvidence, getFallback(), input.path, input.limit),
               unknownEvidence,
             );
+            const memoryScan = memoryCoverage(options.memory, readState.failed);
+            pairedCoverage = memoryScan;
             const projected = safeProjection(() => ({
               exposure: options.exposure,
               ...memoryCoveragePayload(memoryScan),
