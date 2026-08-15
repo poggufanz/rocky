@@ -9,8 +9,8 @@ import {
   retrievalTokens,
   similarity,
 } from "./fingerprint.js";
-import { boundTripleRecord, canonicalPath, loadMemory, pathIdentityHash } from "./memory-read.js";
-import type { FailureRecord, FixRecord, LinkBasis, LinkConfidence, MemoryRecord, TripleRecord } from "./memory-read.js";
+import { boundTripleRecord, canonicalPath, loadMemory, loadMemoryChecked, memorySnapshotIdentity, pathIdentityHash } from "./memory-read.js";
+import type { FailureRecord, FixRecord, LinkBasis, LinkConfidence, MemoryCoverage, MemoryRecord, TripleRecord } from "./memory-read.js";
 
 export interface RecallQuery { query: string; limit?: number; cwd?: string; now?: number }
 export interface RecallHit { failure: FailureRecord; fix?: FixRecord; score: number }
@@ -87,6 +87,8 @@ export interface MemoryQueries {
   fetchRecord(id: string): MemoryRecord | undefined;
   whyFile(path: string, limit?: number): TripleRecord[];
   whyFileEvidence?: (path: string, limit?: number) => WhyFileEvidence;
+  /** Present for the built-in durable reader; custom providers stay legacy-shaped. */
+  coverage?: () => MemoryCoverage;
 }
 
 export type FingerprintLookup = string | readonly string[];
@@ -846,15 +848,44 @@ function recordBase(failure: FailureRecord): string {
 }
 
 export function createMemoryQueries(load: () => MemoryRecord[] = loadMemory): MemoryQueries {
+  const durableLoader = load === loadMemory;
+  let cached: {
+    key: string;
+    records: MemoryRecord[];
+    coverage: MemoryCoverage;
+    resolvedAt: number;
+    nextFutureTs?: number;
+  } | undefined;
+  const loadRecords = (requestedNow = Date.now()): MemoryRecord[] => {
+    if (!durableLoader) return load();
+    const key = memorySnapshotIdentity();
+    const canReuse = cached !== undefined && key !== undefined && cached.key === key &&
+      requestedNow >= cached.resolvedAt &&
+      (cached.nextFutureTs === undefined || requestedNow < cached.nextFutureTs);
+    if (canReuse && cached !== undefined) return cached.records;
+    const loaded = loadMemoryChecked(undefined, requestedNow);
+    const nextFutureTs = loaded.records.reduce<number | undefined>((earliest, record) => {
+      if (record.ts <= requestedNow) return earliest;
+      return earliest === undefined ? record.ts : Math.min(earliest, record.ts);
+    }, undefined);
+    cached = {
+      key: key ?? `unavailable\u0000${Date.now()}`,
+      records: loaded.records,
+      coverage: loaded.coverage,
+      resolvedAt: requestedNow,
+      ...(nextFutureTs === undefined ? {} : { nextFutureTs }),
+    };
+    return loaded.records;
+  };
   const queries: MemoryQueries = {
-    recall: (input) => queryRecall(load(), input),
-    recentFailures: (input = {}) => queryRecentFailures(load(), input),
-    stats: (input = {}) => queryStats(load(), input),
-    searchKnowledge: (input) => searchKnowledge(load(), input),
-    fetchRecord: (id) => fetchRecord(load(), id),
-    whyFile: (path, limit = 5) => whyFile(load(), path, limit),
+    recall: (input) => queryRecall(loadRecords(input.now), input),
+    recentFailures: (input = {}) => queryRecentFailures(loadRecords(input.now), input),
+    stats: (input = {}) => queryStats(loadRecords(input.now), input),
+    searchKnowledge: (input) => searchKnowledge(loadRecords(input.now), input),
+    fetchRecord: (id) => fetchRecord(loadRecords(), id),
+    whyFile: (path, limit = 5) => whyFile(loadRecords(), path, limit),
     whyFileEvidence: (path, limit = 5) => {
-      const records = load();
+      const records = loadRecords();
       const evidence = whyFileEvidence(records, path, limit);
       // A strict pass may report an incomplete possible association while a
       // legacy provider still has an exact bounded witness. Prefer exact
@@ -874,6 +905,12 @@ export function createMemoryQueries(load: () => MemoryRecord[] = loadMemory): Me
         coverageIncomplete: true,
       };
     },
+    ...(durableLoader ? {
+      coverage: () => {
+        loadRecords();
+        return cached!.coverage;
+      },
+    } : {}),
   };
   Object.freeze(queries);
   canonicalMemoryQueries.add(queries);

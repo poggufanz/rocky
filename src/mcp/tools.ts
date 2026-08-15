@@ -15,7 +15,7 @@ import {
   safeOpaqueIdentifier,
 } from "./privacy.js";
 import { boundTripleRecord, canonicalPath, isKnownPathPlatform, isSafeNonNegativeInteger, parseMemoryRecord, pathIdentityHash } from "../core/memory-read.js";
-import type { TripleRecord } from "../core/memory-read.js";
+import type { MemoryCoverage, TripleRecord } from "../core/memory-read.js";
 
 /** Versioned read-only catalog used by MCP discovery and setup health. */
 const MCP_TOOL_NAMES = [
@@ -205,7 +205,7 @@ function descriptors(exposure: Exposure): readonly McpToolDefinition[] {
       })), annotations: ANNOTATIONS,
     },
     {
-      name: "stats", title: "Memory statistics", description: "Read bounded memory statistics: failures, confirmed and possible fixes, triples, notes, and total remembered items.",
+      name: "stats", title: "Memory statistics", description: "Read bounded memory statistics and coverage metadata: scanned, skipped, truncated, and memory version.",
       inputSchema: schema(withCwd(exposure, {})), annotations: ANNOTATIONS,
     },
     {
@@ -384,8 +384,11 @@ function boundedSingleResult(
   return buildResult(fallback, isError);
 }
 
-function notFoundResult(): ToolCallResult {
-  return cappedResult({ error: { code: "not_found", message: "record not found" } }, true);
+function notFoundResult(coverage?: MemoryCoverage): ToolCallResult {
+  return cappedResult({
+    error: { code: "not_found", message: "record not found" },
+    ...memoryCoveragePayload(coverage),
+  }, true);
 }
 
 function unknownCoverage(): KnowledgeCoverageSummary {
@@ -740,6 +743,40 @@ function safeMemoryStats(value: unknown, canonical = false): Record<string, unkn
   }
 }
 
+function memoryCoverage(memory: MemoryQueries): MemoryCoverage | undefined {
+  try {
+    const value = memory.coverage?.();
+    if (value === undefined || typeof value !== "object" || value === null) return undefined;
+    if (value.version !== 1 || !isSafeNonNegativeInteger(value.scanned) ||
+        !isSafeNonNegativeInteger(value.skipped) || !isSafeNonNegativeInteger(value.truncated) ||
+        !isSafeNonNegativeInteger(value.bytesScanned) || !isSafeNonNegativeInteger(value.bytesTotal) ||
+        typeof value.complete !== "boolean" ||
+        (value.reason !== undefined && value.reason !== "file-size-cap" && value.reason !== "record-cap" && value.reason !== "read-race")) return undefined;
+    return Object.freeze({
+      version: 1 as const,
+      scanned: value.scanned,
+      skipped: value.skipped,
+      truncated: value.truncated,
+      bytesScanned: value.bytesScanned,
+      bytesTotal: value.bytesTotal,
+      complete: value.complete,
+      ...(value.reason === undefined ? {} : { reason: value.reason }),
+    });
+  } catch {
+    return undefined;
+  }
+}
+
+function memoryCoveragePayload(coverage: MemoryCoverage | undefined): Record<string, unknown> {
+  if (coverage === undefined) return {};
+  return {
+    coverage,
+    memoryCoverage: coverage,
+    memoryVersion: coverage.version,
+    memoryCoverageIncomplete: !coverage.complete || coverage.skipped > 0 || coverage.truncated > 0,
+  };
+}
+
 async function runAi<T>(operation: () => Promise<T>): Promise<T> {
   try {
     return await operation();
@@ -866,47 +903,62 @@ export function createToolRegistry(options: CreateToolRegistryOptions): McpToolR
           case "recall": {
             const input = parseRecallArgs(args, options.exposure);
             const hits = safeReadMemory(() => options.memory.recall(input), [], canonicalMemory);
+            const coverage = memoryCoverage(options.memory);
             const projected = safeProjection(
               () => projectRecallHits(hits, options.exposure),
-              { exposure: options.exposure, items: [], truncated: true },
+              { exposure: options.exposure, items: [], truncated: true, ...memoryCoveragePayload(coverage) },
             );
+            const enriched = { ...projected, ...memoryCoveragePayload(coverage) };
             return safeProjection(
-              () => cappedResult(projected),
-              cappedResult({ exposure: options.exposure, items: [], truncated: true }),
+              () => cappedResult(enriched),
+              cappedResult({ exposure: options.exposure, items: [], truncated: true, ...memoryCoveragePayload(coverage) }),
             );
           }
           case "recent_failures": {
             const input = parseRecentArgs(args, options.exposure);
             const hits = safeReadMemory(() => options.memory.recentFailures(input), [], canonicalMemory);
+            const coverage = memoryCoverage(options.memory);
             const projected = safeProjection(
               () => projectRecentFailures(hits, options.exposure),
-              { exposure: options.exposure, items: [], truncated: true },
+              { exposure: options.exposure, items: [], truncated: true, ...memoryCoveragePayload(coverage) },
             );
+            const enriched = { ...projected, ...memoryCoveragePayload(coverage) };
             return safeProjection(
-              () => cappedResult(projected),
-              cappedResult({ exposure: options.exposure, items: [], truncated: true }),
+              () => cappedResult(enriched),
+              cappedResult({ exposure: options.exposure, items: [], truncated: true, ...memoryCoveragePayload(coverage) }),
             );
           }
           case "stats": {
             const input = parseStatsArgs(args, options.exposure);
             const stats = safeReadMemory<unknown>(() => options.memory.stats(input), {}, canonicalMemory);
+            const coverage = memoryCoverage(options.memory);
             const result = {
               exposure: options.exposure,
               ...safeMemoryStats(stats, canonicalMemory),
+              ...(coverage === undefined ? {} : { ...memoryCoveragePayload(coverage), coverageIncomplete: !coverage.complete || coverage.skipped > 0 || coverage.truncated > 0 }),
             };
-            return safeProjection(() => cappedResult(result), cappedResult({ exposure: options.exposure, ...safeMemoryStats({}) }));
+            return safeProjection(() => cappedResult(result), cappedResult({
+              exposure: options.exposure,
+              ...safeMemoryStats({}),
+              ...(coverage === undefined ? {} : {
+                ...memoryCoveragePayload(coverage),
+                coverageIncomplete: !coverage.complete || coverage.skipped > 0 || coverage.truncated > 0,
+              }),
+            }));
           }
           case "search_knowledge": {
             const input = parseKnowledgeArgs(args);
             const hits = safeReadMemory(() => options.memory.searchKnowledge(input), [], canonicalMemory);
+            const coverage = memoryCoverage(options.memory);
             const { projector, pending } = createPendingKnowledgeIdProjector();
             const projected = safeProjection(
               () => projectKnowledgeHits(hits, options.exposure, projector),
-              { exposure: options.exposure, items: [], truncated: true },
+              { exposure: options.exposure, items: [], truncated: true, ...memoryCoveragePayload(coverage) },
             );
+            const enriched = { ...projected, ...memoryCoveragePayload(coverage) };
             const result = safeProjection(
-              () => cappedResult(projected),
-              cappedResult({ exposure: options.exposure, items: [], truncated: true }),
+              () => cappedResult(enriched),
+              cappedResult({ exposure: options.exposure, items: [], truncated: true, ...memoryCoveragePayload(coverage) }),
             );
             safeProjection(() => {
               const items = (result.structuredContent as { items?: unknown[] } | undefined)?.items;
@@ -923,19 +975,20 @@ export function createToolRegistry(options: CreateToolRegistryOptions): McpToolR
             const id = parseFetchArgs(args);
             const record = safeReadMemory(() => options.memory.fetchRecord(resolveKnowledgeId(id)), undefined, canonicalMemory);
             try {
-              if (record === undefined || typeof record !== "object" || record === null || Array.isArray(record) || record.kind === "note") return notFoundResult();
+              const coverage = memoryCoverage(options.memory);
+              if (record === undefined || typeof record !== "object" || record === null || Array.isArray(record) || record.kind === "note") return notFoundResult(coverage);
               if (record.kind === "failure" && record.origin !== undefined &&
-                  record.origin !== "run" && record.origin !== "hook" && record.origin !== "watch") return notFoundResult();
+                  record.origin !== "run" && record.origin !== "hook" && record.origin !== "watch") return notFoundResult(coverage);
               const normalized = parseMemoryRecord(record);
-              if (normalized === undefined || normalized.kind === "note") return notFoundResult();
+              if (normalized === undefined || normalized.kind === "note") return notFoundResult(coverage);
               const projected = projectMemoryRecord(normalized, options.exposure, options.exposure === "sanitized");
-              if (projected === undefined) return notFoundResult();
+              if (projected === undefined) return notFoundResult(coverage);
               return boundedSingleResult(
-                { exposure: options.exposure, record: projected, truncated: false },
-                { exposure: options.exposure, record: null, truncated: true },
+                { exposure: options.exposure, record: projected, truncated: false, ...memoryCoveragePayload(coverage) },
+                { exposure: options.exposure, record: null, truncated: true, ...memoryCoveragePayload(coverage) },
               );
             } catch {
-              return notFoundResult();
+              return notFoundResult(memoryCoverage(options.memory));
             }
           }
           case "why_file": {
@@ -952,6 +1005,7 @@ export function createToolRegistry(options: CreateToolRegistryOptions): McpToolR
             const rawEvidence = safeReadMemory(() => customEvidence
               ? customEvidence(input.path, input.limit)
               : getFallback(), unknownEvidence, canonicalMemory);
+            const memoryScan = memoryCoverage(options.memory);
             const evidence = safeProjection(
               () => customEvidence === undefined
                 ? rawEvidence
@@ -960,22 +1014,25 @@ export function createToolRegistry(options: CreateToolRegistryOptions): McpToolR
             );
             const projected = safeProjection(() => ({
               exposure: options.exposure,
+              ...memoryCoveragePayload(memoryScan),
               items: evidence.matches.map((triple) => projectTriple(triple, options.exposure, options.exposure === "sanitized")),
               possible: projectWhyPossible(evidence.possible, input.limit, options.exposure),
               coverage: evidence.coverage,
               coverageStatus: evidence.coverage.status,
               coverageIncomplete: evidence.coverageIncomplete,
               truncated: false,
-            }), { exposure: options.exposure, items: [], possible: [], coverage: { status: "unknown", complete: false, filesCovered: 0, truncatedFiles: 0 }, coverageStatus: "unknown", coverageIncomplete: true, truncated: true });
-            return safeProjection(() => cappedResult(projected), cappedResult({ exposure: options.exposure, items: [], possible: [], coverage: { status: "unknown", complete: false, filesCovered: 0, truncatedFiles: 0 }, coverageStatus: "unknown", coverageIncomplete: true, truncated: true }));
+            }), { exposure: options.exposure, ...memoryCoveragePayload(memoryScan), items: [], possible: [], coverage: { status: "unknown", complete: false, filesCovered: 0, truncatedFiles: 0 }, coverageStatus: "unknown", coverageIncomplete: true, truncated: true });
+            return safeProjection(() => cappedResult(projected), cappedResult({ exposure: options.exposure, ...memoryCoveragePayload(memoryScan), items: [], possible: [], coverage: { status: "unknown", complete: false, filesCovered: 0, truncatedFiles: 0 }, coverageStatus: "unknown", coverageIncomplete: true, truncated: true }));
           }
           case "recall_with_ai": {
             const input = parseRecallArgs(args, options.exposure, 10);
             const hits = safeReadMemory(() => options.memory.recall(input), [], canonicalMemory);
+            const coverage = memoryCoverage(options.memory);
             const projected = safeProjection(
               () => projectRecallHits(hits, options.exposure),
-              { exposure: options.exposure, items: [], truncated: true },
+              { exposure: options.exposure, items: [], truncated: true, ...memoryCoveragePayload(coverage) },
             );
+            const enriched = { ...projected, ...memoryCoveragePayload(coverage) };
             // Materialize only a bounded indexed prefix before any later map,
             // serialization, or model inspection. A custom provider may hand
             // us a Proxy array whose iterator/slice throws or never ends.
@@ -988,8 +1045,8 @@ export function createToolRegistry(options: CreateToolRegistryOptions): McpToolR
             ));
             const aiCandidateIds = aiHits.map((_, index) => `c${index + 1}`);
             return safeProjection(
-              () => cappedResult(mergeAi(projected, ai, aiCandidateIds)),
-              cappedResult({ exposure: options.exposure, items: [], truncated: true }),
+              () => cappedResult(mergeAi(enriched, ai, aiCandidateIds)),
+              cappedResult({ exposure: options.exposure, items: [], truncated: true, ...memoryCoveragePayload(coverage) }),
             );
           }
           default:

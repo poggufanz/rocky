@@ -261,6 +261,35 @@ test("fetch unknown and unsupported IDs return the same safe not-found error", a
   assert.doesNotMatch(JSON.stringify(unknown), /hostile-id|secret/);
 });
 
+test("fetch not-found answers disclose incomplete canonical memory coverage", async () => {
+  const coverage = {
+    version: 1 as const,
+    scanned: 50_000,
+    skipped: 2,
+    truncated: 1,
+    bytesScanned: 64 * 1024 * 1024,
+    bytesTotal: 70 * 1024 * 1024,
+    complete: false,
+    reason: "file-size-cap" as const,
+  };
+  const memory = {
+    recall() { return []; },
+    recentFailures() { return []; },
+    stats() { return { failures: 0, fixEvents: 0, resolved: 0, unresolved: 0 }; },
+    searchKnowledge() { return []; },
+    fetchRecord() { return undefined; },
+    whyFile() { return []; },
+    coverage() { return coverage; },
+  };
+  const result = await createToolRegistry({
+    exposure: "sanitized", memory, recallWithAi: disabledRecallWithAi,
+  }).call("fetch_record", { id: "missing" }, new AbortController().signal);
+  assert.equal(result.isError, true);
+  assert.equal(result.structuredContent.memoryCoverageIncomplete, true);
+  assert.deepEqual(result.structuredContent.memoryCoverage, coverage);
+  assert.equal(result.structuredContent.memoryVersion, 1);
+});
+
 test("knowledge tool validators reject malformed, out-of-range, and unknown arguments", async () => {
   const signal = new AbortController().signal;
   const invalid = [

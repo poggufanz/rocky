@@ -10,7 +10,6 @@ import { createOllamaClient } from "../ai/ollama.js";
 import { type AiAct, type AiStatus, type RecallWithAiPort } from "../ai/port.js";
 import { createRecallAiPort, formatModelExplanation, singleFlightRecallAi } from "../ai/recall-ai.js";
 import { createMemoryQueries, fixFromElsewhere, type MemoryQueries, type RecallHit } from "../core/memory-query.js";
-import { loadMemory } from "../core/memory-read.js";
 import { resolveRockyPaths } from "../core/state-paths.js";
 import { ago, detail, elapsed, heading, phrase, phraseForAct, say } from "../ui/rocky.js";
 import { safeTerminalBlock, safeTerminalLine } from "../ui/sanitize.js";
@@ -47,7 +46,7 @@ export function parseRecallArgs(argv: readonly string[]): ParsedRecall {
 
 function defaultDependencies(): RecallDependencies {
   return {
-    memory: createMemoryQueries(loadMemory),
+    memory: createMemoryQueries(),
     recallWithAi: singleFlightRecallAi(createRecallAiPort({ ollama: createOllamaClient() })),
   };
 }
@@ -182,10 +181,15 @@ export async function recall(argv: readonly string[], dependencies?: RecallDepen
 
   const deps = dependencies ?? defaultDependencies();
   let hits: RecallHit[];
+  let coverage;
   try {
     hits = parsed.useAi
       ? deps.memory.recall({ query, limit: 5 }).slice(0, 5)
       : deps.memory.recall({ query });
+    try { coverage = deps.memory.coverage?.(); } catch { coverage = undefined; }
+    if (coverage !== undefined && (!coverage.complete || coverage.skipped > 0 || coverage.truncated > 0)) {
+      detail(`memory coverage: version ${coverage.version}, scanned ${coverage.scanned}, skipped ${coverage.skipped}, truncated ${coverage.truncated}, complete ${coverage.complete}`);
+    }
     if (hits.length === 0) {
       if (deps.memory.recentFailures({ limit: 1 }).length === 0) {
         say("memory is empty. no errors yet. this is good... or you not use me yet, question");

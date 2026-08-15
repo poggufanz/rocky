@@ -2,7 +2,6 @@ import { createOllamaClient } from "../ai/ollama.js";
 import { createRecallAiPort, singleFlightRecallAi } from "../ai/recall-ai.js";
 import { parseExposure } from "../core/config-read.js";
 import { createMemoryQueries } from "../core/memory-query.js";
-import { loadMemory } from "../core/memory-read.js";
 import { PACKAGE_NAME, PACKAGE_VERSION } from "../core/package-info.js";
 import { runMcpStdio } from "../mcp/server.js";
 import { createToolRegistry } from "../mcp/tools.js";
@@ -35,7 +34,7 @@ export async function mcp(argv: readonly string[] = []): Promise<number> {
   const recallWithAi = singleFlightRecallAi(createRecallAiPort({ ollama: createOllamaClient() }));
   const tools = createToolRegistry({
     exposure,
-    memory: createMemoryQueries(loadMemory),
+    memory: createMemoryQueries(),
     recallWithAi,
   });
   await runMcpStdio(

@@ -35,13 +35,16 @@ import { boundTripleMechanism, isKnownPathPlatform, isSafeNonNegativeInteger, lo
 import type { AssociationRecord, FailureRecord, FixRecord, MemoryRecord, NoteRecord, TripleRecord } from "./memory-read.js";
 import { LINK_WINDOW_MS, recentUnresolvedFailures, type UnresolvedLink } from "./memory-query.js";
 
-export type { AssociationRecord, FailureRecord, FixRecord, MemoryRecord, NoteRecord, TripleFile, TripleRecord } from "./memory-read.js";
+export type { AssociationRecord, FailureRecord, FixRecord, MemoryCoverage, MemoryRecord, NoteRecord, TripleFile, TripleRecord } from "./memory-read.js";
 export {
   boundTripleMechanism,
   boundTripleRecord,
   loadMemory,
+  MEMORY_FORMAT_VERSION,
+  MAX_MEMORY_FILE_BYTES,
   parseMemoryRecord,
   MAX_MEMORY_LINE_BYTES,
+  MAX_MEMORY_RECORDS,
   MAX_TRIPLE_FILES,
 } from "./memory-read.js";
 

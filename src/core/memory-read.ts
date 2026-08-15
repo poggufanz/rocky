@@ -4,7 +4,7 @@ import {
   fstatSync,
   lstatSync,
   openSync,
-  readFileSync,
+  readSync,
   type BigIntStats,
 } from "node:fs";
 import { Buffer } from "node:buffer";
@@ -444,7 +444,14 @@ export function boundTripleRecord(record: TripleRecord): TripleRecord {
 
 export type MemoryRecord = FailureRecord | FixRecord | AssociationRecord | NoteRecord | TripleRecord;
 
+/** Durable memory format version used by coverage metadata and cache entries. */
+export const MEMORY_FORMAT_VERSION = 1 as const;
+/** Supported envelope: files above this byte count are read only to this boundary. */
+export const MAX_MEMORY_FILE_BYTES = 64 * 1024 * 1024;
+/** Supported envelope: valid records above this count are reported as truncated. */
+export const MAX_MEMORY_RECORDS = 50_000;
 export const MAX_MEMORY_LINE_BYTES = 1024 * 1024;
+const MEMORY_READ_CHUNK_BYTES = 64 * 1024;
 const MAX_RECORD_ARRAY_ITEMS = 256;
 const MAX_RECORD_ITEM_CHARS = 16 * 1024;
 const MAX_RECORD_ARRAY_BYTES = 64 * 1024;
@@ -455,9 +462,21 @@ const MAX_RECORD_ARRAY_BYTES = 64 * 1024;
  * fail-closed `[]` behavior; mutation transactions use this bit to avoid
  * deleting pending state from an incomplete snapshot.
  */
+export interface MemoryCoverage {
+  version: typeof MEMORY_FORMAT_VERSION;
+  scanned: number;
+  skipped: number;
+  truncated: number;
+  bytesScanned: number;
+  bytesTotal: number;
+  complete: boolean;
+  reason?: "file-size-cap" | "record-cap" | "read-race";
+}
+
 export interface MemoryLoadResult {
   records: MemoryRecord[];
   complete: boolean;
+  coverage: MemoryCoverage;
 }
 
 function objectValue(value: unknown): Record<string, unknown> | undefined {
@@ -717,67 +736,138 @@ function readFlags(): number {
   return constants.O_RDONLY | NO_FOLLOW_FLAG | NO_BLOCK_FLAG;
 }
 
-export function loadMemoryChecked(path = resolveRockyPaths().memory, now = Date.now()): MemoryLoadResult {
-  let descriptor: number | undefined;
-  let listed: BigIntStats | undefined;
-  let contents: string;
-  try {
-    listed = lstatSync(path, { bigint: true });
-    if (!regularDescriptorSafe(listed) || !sameFilesystemIdentity(listed, listed)) return { records: [], complete: false };
+interface MemoryCacheEntry {
+  path: string;
+  key: string;
+  records: readonly MemoryRecord[];
+  complete: boolean;
+  coverage: MemoryCoverage;
+}
 
-    descriptor = openSync(path, readFlags());
-    const opened = fstatSync(descriptor, { bigint: true });
-    if (!regularDescriptorSafe(opened) || !sameFilesystemIdentity(listed, opened)) {
-      return { records: [], complete: false };
-    }
+// One immutable entry is enough for the normal long-running CLI/MCP process
+// and prevents a sequence of arbitrary ROCKY_HOME paths from retaining large
+// snapshots. A changed identity, size, or timestamp replaces it.
+let memoryCache: MemoryCacheEntry | undefined;
+let memoryParseCount = 0;
+let memoryCacheHitCount = 0;
 
-    contents = readFileSync(descriptor, "utf8");
-    const after = fstatSync(descriptor, { bigint: true });
-    if (!regularDescriptorSafe(after) || !sameFilesystemIdentity(opened, after)
-      || !sameFilesystemIdentity(listed, after)) {
-      return { records: [], complete: false };
-    }
-  } catch {
-    // Missing memory is a complete empty state; every other read failure is
-    // incomplete and must be treated conservatively by mutation callers.
-    // If the first lstat succeeded, a later open/read failure is a replacement
-    // or I/O race even when a second lstat now reports ENOENT.
-    if (listed !== undefined) return { records: [], complete: false };
-    try {
-      if (lstatSync(path, { bigint: true }).isFile()) return { records: [], complete: false };
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return { records: [], complete: true };
-    }
-    return { records: [], complete: false };
-  } finally {
-    if (descriptor !== undefined) {
-      try {
-        closeSync(descriptor);
-      } catch {
-        // A failed close must not expose memory-read details to callers.
-      }
-    }
+/** Small observable counter used by the bounded-reader scorecard. */
+export function memoryReadMetrics(): { parses: number; cacheHits: number } {
+  return { parses: memoryParseCount, cacheHits: memoryCacheHitCount };
+}
+
+function emptyCoverage(
+  bytesTotal = 0,
+  complete = false,
+  reason?: MemoryCoverage["reason"],
+): MemoryCoverage {
+  return Object.freeze({
+    version: MEMORY_FORMAT_VERSION,
+    scanned: 0,
+    skipped: 0,
+    truncated: 0,
+    bytesScanned: 0,
+    bytesTotal,
+    complete,
+    ...(reason === undefined ? {} : { reason }),
+  });
+}
+
+function emptyLoad(
+  complete: boolean,
+  bytesTotal = 0,
+  reason?: MemoryCoverage["reason"],
+): MemoryLoadResult {
+  return { records: [], complete, coverage: emptyCoverage(bytesTotal, complete, reason) };
+}
+
+function statBytes(value: bigint): number {
+  return value > BigInt(Number.MAX_SAFE_INTEGER) ? Number.MAX_SAFE_INTEGER : Number(value);
+}
+
+function memorySnapshotKey(path: string, stats: BigIntStats): string {
+  return [
+    path,
+    stats.dev.toString(),
+    stats.ino.toString(),
+    stats.size.toString(),
+    stats.mtimeNs.toString(),
+    stats.ctimeNs.toString(),
+  ].join("\u0000");
+}
+
+function freezeMemoryRecord(record: MemoryRecord): MemoryRecord {
+  if (record.kind === "failure") {
+    return Object.freeze({ ...record, signature: Object.freeze([...record.signature]) }) as unknown as MemoryRecord;
   }
-
-  const records: MemoryRecord[] = [];
-  const seenIds = new Set<string>();
-  for (const line of contents.split("\n")) {
-    if (Buffer.byteLength(line, "utf8") > MAX_MEMORY_LINE_BYTES) continue;
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-    try {
-      const record = parseMemoryRecord(JSON.parse(trimmed));
-      // Append-only history can contain a repeated id after a crash or a
-      // manual merge. First valid provenance wins; later duplicates are
-      // retained only as inert bytes in the file, never in operational state.
-      if (record && !seenIds.has(record.id)) {
-        seenIds.add(record.id);
-        records.push(record);
-      }
-    } catch {
-      // a corrupt line never kills the memory; skip it
-    }
+  if (record.kind === "fix") {
+    return Object.freeze({
+      ...record,
+      failureIds: Object.freeze([...record.failureIds]),
+      ...(record.candidateFailureIds === undefined ? {} : { candidateFailureIds: Object.freeze([...record.candidateFailureIds]) }),
+      ...(record.links === undefined ? {} : { links: Object.freeze(record.links.map((link) => Object.freeze({ ...link }))) }),
+    }) as unknown as MemoryRecord;
   }
+  if (record.kind === "association") {
+    return Object.freeze({
+      ...record,
+      candidateFailureIds: Object.freeze([...record.candidateFailureIds]),
+      links: Object.freeze(record.links.map((link) => Object.freeze({ ...link }))),
+    }) as unknown as MemoryRecord;
+  }
+  if (record.kind === "triple") {
+    const files = record.mechanism.files.map((file) => {
+      const frozenFile = {
+        ...file,
+        plusMinus: Object.freeze([...file.plusMinus]) as unknown as [number, number],
+        props: Object.freeze([...file.props]),
+      } as TripleFile;
+      // `identityHash` is intentionally non-enumerable on durable witnesses.
+      // Rebuilding a frozen snapshot must preserve that collision discriminator
+      // even though a plain spread would silently drop it.
+      if (file.identityHash !== undefined) {
+        Object.defineProperty(frozenFile, "identityHash", {
+          value: file.identityHash,
+          enumerable: false,
+          configurable: false,
+          writable: false,
+        });
+      }
+      return Object.freeze(frozenFile);
+    });
+    const intent = record.intent === undefined
+      ? undefined
+      : Object.freeze({ text: record.intent.text });
+    const rationale = record.rationale === undefined
+      ? undefined
+      : Object.freeze({ text: record.rationale.text, tags: Object.freeze([...record.rationale.tags]), source: record.rationale.source });
+    return Object.freeze({
+      ...record,
+      ...(intent === undefined ? {} : { intent }),
+      ...(rationale === undefined ? {} : { rationale }),
+      mechanism: Object.freeze({ ...record.mechanism, files: Object.freeze(files) }),
+    }) as unknown as MemoryRecord;
+  }
+  return Object.freeze({ ...record });
+}
+
+function materializeMemoryRecords(records: readonly MemoryRecord[]): MemoryRecord[] {
+  return records.map((record) => {
+    if (record.kind !== "failure") return record;
+    const { resolvedBy: _resolvedBy, ...withoutResolution } = record;
+    return { ...withoutResolution };
+  });
+}
+
+function needsResolution(records: readonly MemoryRecord[]): boolean {
+  return records.some((record) => record.kind === "fix");
+}
+
+function freezeMaterializedRecords(records: MemoryRecord[]): MemoryRecord[] {
+  return Object.freeze(records.map(freezeMemoryRecord)) as unknown as MemoryRecord[];
+}
+
+function resolveMemoryRecords(records: MemoryRecord[], now: number): void {
   const byId = new Map(records.map((record) => [record.id, record]));
   for (const record of records) {
     if (record.kind !== "fix") continue;
@@ -805,7 +895,193 @@ export function loadMemoryChecked(path = resolveRockyPaths().memory, now = Date.
       }
     }
   }
-  return { records, complete: true };
+}
+
+export function loadMemoryChecked(path = resolveRockyPaths().memory, now = Date.now()): MemoryLoadResult {
+  let descriptor: number | undefined;
+  let listed: BigIntStats | undefined;
+  let opened: BigIntStats | undefined;
+  try {
+    listed = lstatSync(path, { bigint: true });
+    if (!regularDescriptorSafe(listed) || !sameFilesystemIdentity(listed, listed)) return emptyLoad(false);
+
+    const listedKey = memorySnapshotKey(path, listed);
+    if (memoryCache?.path === path && memoryCache.key === listedKey) {
+      memoryCacheHitCount += 1;
+      if (!needsResolution(memoryCache.records)) {
+        return { records: memoryCache.records as MemoryRecord[], complete: memoryCache.complete, coverage: memoryCache.coverage };
+      }
+      const records = materializeMemoryRecords(memoryCache.records);
+      resolveMemoryRecords(records, now);
+      return { records: freezeMaterializedRecords(records), complete: memoryCache.complete, coverage: memoryCache.coverage };
+    }
+
+    descriptor = openSync(path, readFlags());
+    opened = fstatSync(descriptor, { bigint: true });
+    if (!regularDescriptorSafe(opened) || !sameFilesystemIdentity(listed, opened)) {
+      return emptyLoad(false, statBytes(listed.size), "read-race");
+    }
+
+    const totalBytes = statBytes(opened.size);
+    const readLimit = Math.min(totalBytes, MAX_MEMORY_FILE_BYTES);
+    const lineChunks: Buffer[] = [];
+    let lineBytes = 0;
+    let lineOversized = false;
+    let stoppedAtRecordCap = false;
+    let scanned = 0;
+    let skipped = 0;
+    let bytesScanned = 0;
+    let truncated = opened.size > BigInt(MAX_MEMORY_FILE_BYTES) ? 1 : 0;
+    const records: MemoryRecord[] = [];
+    const seenIds = new Set<string>();
+
+    const resetLine = (): void => {
+      lineChunks.length = 0;
+      lineBytes = 0;
+      lineOversized = false;
+    };
+    const consumeLine = (): void => {
+      if (lineBytes === 0 && !lineOversized) {
+        resetLine();
+        return;
+      }
+      if (records.length >= MAX_MEMORY_RECORDS) {
+        stoppedAtRecordCap = true;
+        truncated = Math.max(1, truncated);
+        resetLine();
+        return;
+      }
+      scanned += 1;
+      if (lineOversized || lineBytes > MAX_MEMORY_LINE_BYTES) {
+        skipped += 1;
+        resetLine();
+        return;
+      }
+      const line = Buffer.concat(lineChunks, lineBytes).toString("utf8").trim();
+      resetLine();
+      if (!line) return;
+      try {
+        const record = parseMemoryRecord(JSON.parse(line));
+        // Append-only history can contain a repeated id after a crash or a
+        // manual merge. First valid provenance wins; later duplicates are
+        // retained only as inert bytes in the file, never in operational state.
+        if (record && !seenIds.has(record.id)) {
+          seenIds.add(record.id);
+          records.push(record);
+        } else {
+          skipped += 1;
+        }
+      } catch {
+        // A corrupt line never kills the memory; the skipped count discloses it.
+        skipped += 1;
+      }
+    };
+    const consumeBytes = (chunk: Buffer): void => {
+      let remaining = chunk;
+      while (remaining.length > 0 && !stoppedAtRecordCap) {
+        const newline = remaining.indexOf(0x0a);
+        const part = newline < 0 ? remaining : remaining.subarray(0, newline);
+        if (!lineOversized) {
+          lineBytes += part.byteLength;
+          if (lineBytes > MAX_MEMORY_LINE_BYTES) {
+            lineOversized = true;
+            lineChunks.length = 0;
+          } else if (part.byteLength > 0) {
+            // The read buffer is reused on the next syscall; retain carried
+            // bytes as an immutable copy before that overwrite.
+            lineChunks.push(Buffer.from(part));
+          }
+        }
+        if (newline < 0) break;
+        consumeLine();
+        remaining = remaining.subarray(newline + 1);
+      }
+    };
+
+    const buffer = Buffer.alloc(MEMORY_READ_CHUNK_BYTES);
+    while (bytesScanned < readLimit && !stoppedAtRecordCap) {
+      const requested = Math.min(buffer.byteLength, readLimit - bytesScanned);
+      const count = readSync(descriptor, buffer, 0, requested, bytesScanned);
+      if (count <= 0) break;
+      bytesScanned += count;
+      consumeBytes(buffer.subarray(0, count));
+    }
+    // A partial final line is valid input when the file ends normally. A
+    // file-size-capped partial line is deliberately left undisclosed as a
+    // record; `truncated: 1` says that evidence exists beyond the boundary.
+    if (!stoppedAtRecordCap && opened.size <= BigInt(MAX_MEMORY_FILE_BYTES)) consumeLine();
+
+    const after = fstatSync(descriptor, { bigint: true });
+    const afterKey = memorySnapshotKey(path, after);
+    if (!regularDescriptorSafe(after) || !sameFilesystemIdentity(opened, after)
+      || !sameFilesystemIdentity(listed, after)
+      || memorySnapshotKey(path, opened) !== afterKey
+      || listedKey !== afterKey) {
+      memoryCache = undefined;
+      return emptyLoad(false, totalBytes, "read-race");
+    }
+    const complete = truncated === 0 && !stoppedAtRecordCap;
+    const truncationReason: MemoryCoverage["reason"] = stoppedAtRecordCap
+      ? "record-cap"
+      : opened.size > BigInt(MAX_MEMORY_FILE_BYTES) ? "file-size-cap" : "record-cap";
+    const coverage: MemoryCoverage = Object.freeze({
+      version: MEMORY_FORMAT_VERSION,
+      scanned,
+      skipped,
+      truncated,
+      bytesScanned,
+      bytesTotal: totalBytes,
+      complete,
+      ...(truncated > 0
+        ? { reason: truncationReason }
+        : {}),
+    });
+    const frozenRecords = Object.freeze(records.map(freezeMemoryRecord));
+    memoryParseCount += 1;
+    memoryCache = { path, key: afterKey, records: frozenRecords, complete, coverage };
+    if (!needsResolution(frozenRecords)) {
+      return { records: frozenRecords as MemoryRecord[], complete, coverage };
+    }
+    const materialized = materializeMemoryRecords(frozenRecords);
+    resolveMemoryRecords(materialized, now);
+    return { records: freezeMaterializedRecords(materialized), complete, coverage };
+  } catch {
+    // Missing memory is a complete empty state; every other read failure is
+    // incomplete and must be treated conservatively by mutation callers.
+    // If the first lstat succeeded, a later open/read failure is a replacement
+    // or I/O race even when a second lstat now reports ENOENT.
+    if (listed !== undefined) return emptyLoad(false, statBytes(listed.size), "read-race");
+    try {
+      if (lstatSync(path, { bigint: true }).isFile()) return emptyLoad(false, 0, "read-race");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+        if (memoryCache?.path === path) memoryCache = undefined;
+        return emptyLoad(true, 0);
+      }
+    }
+    return emptyLoad(false, 0, "read-race");
+  } finally {
+    if (descriptor !== undefined) {
+      try {
+        closeSync(descriptor);
+      } catch {
+        // A failed close must not expose memory-read details to callers.
+      }
+    }
+  }
+
+}
+
+/** Cheap identity probe used by long-lived query caches before reusing a snapshot. */
+export function memorySnapshotIdentity(path = resolveRockyPaths().memory): string | undefined {
+  try {
+    const stats = lstatSync(path, { bigint: true });
+    if (!regularDescriptorSafe(stats)) return undefined;
+    return memorySnapshotKey(path, stats);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return `missing\u0000${path}`;
+    return undefined;
+  }
 }
 
 /** Backward-compatible reader: malformed lines and unreadable files read as empty. */
