@@ -20,9 +20,9 @@ import { resolveRockyPaths } from "../core/state-paths.js";
 import { disabledRecallWithAi } from "../ai/port.js";
 import { createToolRegistry } from "../mcp/tools.js";
 
-function failure(id: string): string {
+function failure(id: string, cwd = "/budget"): string {
   return JSON.stringify({
-    kind: "failure", id, ts: 1, cwd: "/budget", cmd: "false", exitCode: 1,
+    kind: "failure", id, ts: 1, cwd, cmd: "false", exitCode: 1,
     fingerprint: id.padStart(16, "0"), signature: ["false"], excerpt: "false",
   });
 }
@@ -235,6 +235,9 @@ test("memory scorecard keeps heavy workers explicit and reports bounded RSS", ()
   assert.match(source, /rssAfterGcBytes/u);
   assert.match(source, /resourceMaxRssBytes/u);
   assert.match(source, /recallMs >= 2_000/u);
+  assert.match(source, /prepareFixture\(root, envelope/u);
+  assert.match(source, /parent-prepared fixture root/u);
+  assert.match(source, /DEGRADED_250K_RSS_LIMIT_BYTES/u);
   assert.equal(MAX_MEMORY_RECORDS, 50_000);
   const referenceRuntime = process.platform === "linux" && process.versions.node.startsWith("22.");
   assert.equal(MAX_SUPPORTED_MEMORY_RECORDS, referenceRuntime ? MAX_MEMORY_RECORDS : 10_000);
@@ -620,4 +623,47 @@ test("production stats single-flight shares one witness batch and revalidates ne
   const overAfter = memoryReadMetrics();
   assert.equal(overNext.structuredContent.memoryCoverageIncomplete, true);
   assert.equal(overAfter.parses - overBatch.parses, 1);
+});
+
+test("canonical stats single-flight shares witness scans across distinct cwd answers", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "rocky-task13-distinct-cwd-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const path = join(root, "memory.jsonl");
+  const distinct = Array.from({ length: 200 }, (_, index) => `${failure(`cwd-${index}`, `/cwd-${index}`)}\n`).join("");
+  const filler = `${failure("cwd-filler")}\n`;
+  const remaining = MAX_MEMORY_FILE_BYTES - Buffer.byteLength(distinct, "utf8");
+  writeFileSync(path, distinct + filler.repeat(Math.floor((remaining - 1) / Buffer.byteLength(filler, "utf8"))));
+  const previous = process.env.ROCKY_HOME;
+  process.env.ROCKY_HOME = root;
+  t.after(() => {
+    if (previous === undefined) delete process.env.ROCKY_HOME;
+    else process.env.ROCKY_HOME = previous;
+  });
+  const queries = createMemoryQueries();
+  const tools = createToolRegistry({ exposure: "raw", memory: queries, recallWithAi: disabledRecallWithAi });
+  const signal = new AbortController().signal;
+  await tools.call("stats", { cwd: "/cwd-0" }, signal);
+  const before = memoryReadMetrics();
+  const values = await Promise.all(Array.from({ length: 200 }, (_, index) =>
+    tools.call("stats", { cwd: `/cwd-${index}` }, signal)));
+  const after = memoryReadMetrics();
+  assert.deepEqual(values.map((value) => value.structuredContent.total), values.map(() => 1));
+  assert.ok(values.every((value) => value.structuredContent.memoryCoverageIncomplete === true));
+  assert.equal(after.parses - before.parses, 0);
+  assert.equal(after.cacheHits - before.cacheHits, 1);
+  assert.equal(after.witnessProbes - before.witnessProbes, 1);
+});
+
+test("custom-loader query providers are not coalesced as durable snapshot readers", async () => {
+  let loads = 0;
+  const memory = createMemoryQueries(() => {
+    loads += 1;
+    return [{
+      kind: "failure" as const, id: `custom-${loads}`, ts: 1, cwd: "/custom", cmd: "false", exitCode: 1,
+      fingerprint: "custom-fingerprint", signature: ["false"], excerpt: "false",
+    }];
+  });
+  const tools = createToolRegistry({ exposure: "raw", memory, recallWithAi: disabledRecallWithAi });
+  await Promise.all(Array.from({ length: 20 }, (_, index) => tools.call("stats", { cwd: `/custom-${index}` }, new AbortController().signal)));
+  assert.equal(loads, 20);
 });

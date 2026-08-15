@@ -1,8 +1,8 @@
 import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
 import type { Exposure } from "../core/config-read.js";
-import { hasCanonicalMemoryQueries } from "../core/memory-query.js";
-import type { KnowledgeCoverageSummary, KnowledgeSearchQuery, MemoryQueries, RecallHit, RecallQuery, RecentFailuresQuery, StatsQuery, WhyFileEvidence } from "../core/memory-query.js";
+import { hasCanonicalMemoryQueries, hasDurableMemoryQueries, loadDurableMemorySnapshot, queryStats } from "../core/memory-query.js";
+import type { DurableMemorySnapshot, KnowledgeCoverageSummary, KnowledgeSearchQuery, MemoryQueries, RecallHit, RecallQuery, RecentFailuresQuery, StatsQuery, WhyFileEvidence } from "../core/memory-query.js";
 import type { RecallAiOutcome, RecallWithAiPort } from "../ai/port.js";
 import {
   MAX_RESPONSE_BYTES,
@@ -919,7 +919,10 @@ export function createToolRegistry(options: CreateToolRegistryOptions): McpToolR
   const maxKnowledgeHandleRawBytes = 1024;
   const maxPendingHandleEntries = 20_000;
   const maxPendingHandleBytes = 8 * 1024 * 1024;
-  const statsFlights = new Map<string | undefined, Promise<StatsFlightResult>>();
+  // MCP stats inputs have no clock override, so one active flight can serve
+  // every cwd-specific pure projection. Settlement discards it; later calls
+  // revalidate the durable content witness.
+  let durableSnapshotFlight: Promise<DurableMemorySnapshot | undefined> | undefined;
   const readStatsSnapshot = (input: StatsQuery, canonicalMemory: boolean): StatsFlightResult => {
     const readState: SafeMemoryReadState = { failed: false };
     try {
@@ -929,17 +932,21 @@ export function createToolRegistry(options: CreateToolRegistryOptions): McpToolR
       return { stats: {}, coverage: memoryCoverage(options.memory, true), error };
     }
   };
+  const statsFromDurableSnapshot = (snapshot: DurableMemorySnapshot | undefined, input: StatsQuery): StatsFlightResult => snapshot === undefined
+    ? { stats: {}, coverage: unknownMemoryCoverage(), error: new ToolExecutionError("memory_unavailable", "memory unavailable") }
+    : { stats: queryStats(snapshot.records, input), coverage: snapshot.coverage };
   const readStatsFlight = (input: StatsQuery, canonicalMemory: boolean): Promise<StatsFlightResult> => {
-    if (!canonicalMemory) return Promise.resolve(readStatsSnapshot(input, false));
-    const key = input.cwd;
-    const current = statsFlights.get(key);
-    if (current !== undefined) return current;
-    let flight: Promise<StatsFlightResult>;
-    flight = Promise.resolve().then(() => readStatsSnapshot(input, true)).finally(() => {
-      if (statsFlights.get(key) === flight) statsFlights.delete(key);
+    if (!hasDurableMemoryQueries(options.memory)) return Promise.resolve(readStatsSnapshot(input, canonicalMemory));
+    const current = durableSnapshotFlight;
+    if (current !== undefined) {
+      return current.then((snapshot) => statsFromDurableSnapshot(snapshot, input));
+    }
+    let flight: Promise<DurableMemorySnapshot | undefined>;
+    flight = Promise.resolve().then(() => loadDurableMemorySnapshot(options.memory)).finally(() => {
+      if (durableSnapshotFlight === flight) durableSnapshotFlight = undefined;
     });
-    statsFlights.set(key, flight);
-    return flight;
+    durableSnapshotFlight = flight;
+    return flight.then((snapshot) => statsFromDurableSnapshot(snapshot, input));
   };
   // One shared allowlist with the privacy layer prevents silent drift.
   const safeDirectKnowledgeId = safeOpaqueIdentifier;

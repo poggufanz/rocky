@@ -51,6 +51,7 @@ export interface KnowledgeSearchHit {
 // results; custom providers remain conservative even in raw mode.
 const canonicalKnowledgeProof = new WeakSet<object>();
 const canonicalMemoryQueries = new WeakSet<object>();
+const durableMemorySnapshotLoaders = new WeakMap<object, (requestedNow?: number) => DurableMemorySnapshot>();
 
 export function hasCanonicalKnowledgeProof(value: unknown): boolean {
   try { return typeof value === "object" && value !== null && canonicalKnowledgeProof.has(value); }
@@ -90,6 +91,28 @@ export interface MemoryQueries {
   whyFileEvidence?: (path: string, limit?: number) => WhyFileEvidence;
   /** Present for the built-in durable reader; custom providers stay legacy-shaped. */
   coverage?: () => MemoryCoverage;
+}
+
+/** Internal immutable reader boundary used to batch per-cwd durable stats. */
+export interface DurableMemorySnapshot {
+  readonly records: readonly MemoryRecord[];
+  readonly coverage: MemoryCoverage;
+}
+
+/** True only for the default on-disk reader, not arbitrary custom loaders. */
+export function hasDurableMemoryQueries(value: unknown): boolean {
+  try { return typeof value === "object" && value !== null && durableMemorySnapshotLoaders.has(value); }
+  catch { return false; }
+}
+
+/** Load one paired durable snapshot for multiple pure per-cwd queries. */
+export function loadDurableMemorySnapshot(
+  value: MemoryQueries,
+  requestedNow = Date.now(),
+): DurableMemorySnapshot | undefined {
+  if (!hasDurableMemoryQueries(value)) return undefined;
+  try { return durableMemorySnapshotLoaders.get(value)?.(requestedNow); }
+  catch { return undefined; }
 }
 
 export type FingerprintLookup = string | readonly string[];
@@ -1004,5 +1027,13 @@ export function createMemoryQueries(load: () => MemoryRecord[] = loadMemory): Me
   };
   Object.freeze(queries);
   canonicalMemoryQueries.add(queries);
+  if (durableLoader) {
+    durableMemorySnapshotLoaders.set(queries, (requestedNow = Date.now()) => {
+      const records = loadRecords(requestedNow);
+      const coverage = lastCoverage;
+      if (coverage === undefined) throw new Error("Rocky durable snapshot coverage unavailable");
+      return { records, coverage };
+    });
+  }
   return queries;
 }
