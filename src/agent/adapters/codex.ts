@@ -115,15 +115,27 @@ function changedPaths(command: string): string[] {
   return paths;
 }
 
-function allEdits(input: PlainRecord, tool: string): PlainRecord[] {
-  if (tool !== "MultiEdit") return [input];
+function allEdits(input: PlainRecord, tool: string): { edits: PlainRecord[]; invalid: boolean } {
+  if (tool !== "MultiEdit") return { edits: [input], invalid: false };
   for (const key of ["edits", "changes", "operations"]) {
     const edits = input[key];
     if (Array.isArray(edits)) {
-      return edits.filter(isPlainRecord);
+      const output: PlainRecord[] = [];
+      let invalid = false;
+      const boundedLength = Math.min(edits.length, MAX_COVERAGE_PATHS * 2);
+      if (edits.length > boundedLength) invalid = true;
+      for (let index = 0; index < boundedLength; index += 1) {
+        const edit = edits[index];
+        if (!isPlainRecord(edit)) {
+          invalid = true;
+          continue;
+        }
+        output.push(edit);
+      }
+      return { edits: output, invalid };
     }
   }
-  return [];
+  return { edits: [], invalid: true };
 }
 
 function editInput(payload: PlainRecord): PlainRecord | undefined {
@@ -153,11 +165,13 @@ function parseModern(payload: PlainRecord, now: number): ParsedHookPayload {
       if (!tool || !EDIT_TOOLS.has(tool)) return undefined;
       const input = editInput(payload);
       if (!input) return undefined;
-      const edits = allEdits(input, tool);
+      const editBatch = allEdits(input, tool);
+      const edits = editBatch.edits;
       if (edits.length === 0) return undefined;
       const command = firstString(input.command, input.patch, edits[0]?.command, edits[0]?.patch);
       const patchPaths = tool === "apply_patch" && command ? changedPaths(command) : [];
       const candidates: Array<{ path: string; edit: PlainRecord; excerpt?: string }> = [];
+      let invalidCoverage = editBatch.invalid;
       if (patchPaths.length > 0) {
         for (const path of patchPaths) candidates.push({ path, edit: edits[0] ?? input });
       } else {
@@ -168,23 +182,29 @@ function parseModern(payload: PlainRecord, now: number): ParsedHookPayload {
             edit.path,
             edit.filename,
             edit.notebook_path,
-            input.file_path,
-            input.filePath,
-            input.path,
-            input.filename,
-            input.notebook_path,
-            payload.file_path,
-            payload.filePath,
-            payload.path,
-            payload.filename,
+            ...(tool === "MultiEdit" ? [] : [
+              input.file_path,
+              input.filePath,
+              input.path,
+              input.filename,
+              input.notebook_path,
+            ]),
+            ...(tool === "MultiEdit" ? [] : [
+              payload.file_path,
+              payload.filePath,
+              payload.path,
+              payload.filename,
+            ]),
           );
           const identity = canonicalPath(directPath ?? "");
-          if (!identity) continue;
+          if (!identity) {
+            invalidCoverage = true;
+            continue;
+          }
           candidates.push({ path: identity, edit });
         }
       }
       const byPath = new Map<string, AgentEvent>();
-      let invalidCoverage = false;
       for (const candidate of candidates) {
         const edit = candidate.edit;
         const excerpt = firstString(
@@ -242,14 +262,12 @@ function parseModern(payload: PlainRecord, now: number): ParsedHookPayload {
         coveragePaths,
         coveragePathsComplete,
         coverageCwd: cwd,
-        coverageDigest: createHash("sha256").update(JSON.stringify([...byPath.keys()]
+        coverageDigest: createHash("sha256").update(JSON.stringify([...new Set([...byPath.keys()]
           .map((path) => canonicalPath(path, { platform: process.platform, cwd }))
-          .filter((path): path is string => path.length > 0)
+          .filter((path): path is string => path.length > 0))]
           .sort()), "utf8").digest("hex"),
-        ...(invalidCoverage ? {} : {
-          coverageCandidateCount: byPath.size,
-          coverageCandidateCountExact: !invalidCoverage,
-        }),
+        coverageCandidateCount: byPath.size,
+        coverageCandidateCountExact: !invalidCoverage,
       };
     }
     case "Stop": {

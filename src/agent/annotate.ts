@@ -17,8 +17,9 @@ import {
   type BigIntStats,
 } from "node:fs";
 import { resolveRockyPaths, type RockyPaths } from "../core/state-paths.js";
+import { dirname } from "node:path";
 import { canonicalPath } from "../core/memory-read.js";
-import { NO_BLOCK_FLAG, NO_FOLLOW_FLAG, regularDescriptorSafe, sameFilesystemIdentity } from "../core/fs-safety.js";
+import { filesystemIdentity, NO_BLOCK_FLAG, NO_FOLLOW_FLAG, regularDescriptorSafe, sameFilesystemIdentity } from "../core/fs-safety.js";
 import { isSafeNonNegativeInteger } from "../core/memory-read.js";
 import { recordTripleOnce } from "../core/memory.js";
 import type { TripleFile, TripleRecord } from "../core/memory.js";
@@ -130,8 +131,8 @@ function safeLabel(value: string): string | undefined {
 function ensureHomeDirectory(home: string): boolean {
   try {
     mkdirSync(home, { recursive: true, mode: 0o700 });
-    const stats = lstatSync(home);
-    return stats.isDirectory() && !stats.isSymbolicLink();
+    const stats = lstatSync(home, { bigint: true });
+    return stats.isDirectory() && !stats.isSymbolicLink() && filesystemIdentity(stats) !== undefined;
   } catch {
     return false;
   }
@@ -173,6 +174,9 @@ function writeLabelLines(path: string, lines: readonly string[]): void {
   let fd = -1;
   let temporary: string | undefined;
   try {
+    const parent = dirname(path);
+    const parentIdentity = lstatSync(parent, { bigint: true });
+    if (!parentIdentity.isDirectory() || parentIdentity.isSymbolicLink() || filesystemIdentity(parentIdentity) === undefined) return;
     let before: BigIntStats | undefined;
     try {
       before = lstatSync(path, { bigint: true });
@@ -207,8 +211,14 @@ function writeLabelLines(path: string, lines: readonly string[]): void {
     }
     if (current === null || (before === undefined ? current !== undefined : current === undefined
       || !sameFilesystemIdentity(before, current))) return;
+    const beforeRenameParent = lstatSync(parent, { bigint: true });
+    if (!beforeRenameParent.isDirectory() || beforeRenameParent.isSymbolicLink()
+        || !sameFilesystemIdentity(parentIdentity, beforeRenameParent)) return;
     renameSync(temporary, path);
     temporary = undefined;
+    const afterRenameParent = lstatSync(parent, { bigint: true });
+    if (!afterRenameParent.isDirectory() || afterRenameParent.isSymbolicLink()
+        || !sameFilesystemIdentity(parentIdentity, afterRenameParent)) return;
   } finally {
     if (fd >= 0) closeQuietly(fd);
     if (temporary !== undefined) {
@@ -567,6 +577,18 @@ export async function annotateBatch(key: string, deps: AnnotateDeps = {}): Promi
     // late appends may have already created the next generation under the
     // same key.
     const coverageSnapshot = readClaimCoverage(claim, paths);
+    // A sidecar without a persisted cwd was produced without a trusted root.
+    // Keep event/sidecar identity hashing in that same root-less namespace;
+    // falling back to the annotator's process cwd would make every relative
+    // witness appear contradictory after a lost append.  When the sidecar
+    // carries cwd, it remains the authoritative operational root.
+    const coverageIdentityCwd = coverageSnapshot === undefined ? identityCwd : coverageSnapshot.cwd;
+    // Mechanism events must use the same root namespace as a trusted sidecar
+    // while they are reconciled.  A root-less sidecar cannot safely be joined
+    // to the annotator's process cwd, but relative witnesses can still be
+    // reconciled with one another without manufacturing a contradiction.
+    const mechanismIdentityCwd = coverageSnapshot === undefined ? identityCwd : coverageIdentityCwd;
+    const materializedEventIdentities = new Set<string>();
     let coverageMetadataSeen = false;
     let coverageMetadataComplete = true;
     let coverageMetadataContradiction = false;
@@ -579,6 +601,10 @@ export async function annotateBatch(key: string, deps: AnnotateDeps = {}): Promi
     let snapshotExpectedCount: number | undefined;
     if (coverageSnapshot) {
       coverageMetadataSeen = true;
+      if (coverageSnapshot.cwdConflict === true) {
+        coverageMetadataComplete = false;
+        coverageMetadataContradiction = true;
+      }
       const snapshotIdentityCount = coverageSnapshot.identityHashes?.length ?? coverageSnapshot.paths.length;
       if (coverageSnapshot.identityHashes === undefined) coverageMetadataComplete = false;
       if (!coverageSnapshot.candidateCountExact || coverageSnapshot.candidateCount === undefined) {
@@ -592,12 +618,12 @@ export async function annotateBatch(key: string, deps: AnnotateDeps = {}): Promi
         // stores only eight display witnesses but retains all identities.
         coverageCapProof = !coverageSnapshot.pathsComplete
           && coverageSnapshot.payloads === 1
+          && coverageSnapshot.cappedDigestProof === true
           && coverageSnapshot.candidateCount > snapshotIdentityCount
           && snapshotIdentityCount >= MAX_COVERAGE_PATHS;
         if (!coverageSnapshot.pathsComplete && !coverageCapProof) coverageMetadataComplete = false;
       }
       if (!coverageSnapshot.pathsComplete && coverageSnapshot.candidateCountExact !== true) coverageMetadataComplete = false;
-      const coverageIdentityCwd = coverageSnapshot.cwd ?? identityCwd;
       for (const candidate of coverageSnapshot.paths) {
         const candidateGitPath = pathIdentity(candidate, coverageIdentityCwd);
         const candidatePath = canonicalPath(cleanText(candidate, MAX_PATH_CHARS));
@@ -623,10 +649,10 @@ export async function annotateBatch(key: string, deps: AnnotateDeps = {}): Promi
         if (event.coveragePathsComplete !== true || event.coveragePaths === undefined) {
           coverageMetadataComplete = false;
         }
-        const eventPath = pathIdentity(event.path, identityCwd);
+        const eventPath = pathIdentity(event.path, mechanismIdentityCwd);
         const eventCandidates = new Set<string>();
         for (const candidate of event.coveragePaths ?? []) {
-          const candidateGitPath = pathIdentity(candidate, identityCwd);
+          const candidateGitPath = pathIdentity(candidate, mechanismIdentityCwd);
           const candidatePath = canonicalPath(cleanText(candidate, MAX_PATH_CHARS));
           if (!candidateGitPath || !candidatePath || eventCandidates.has(candidateGitPath)) {
             coverageMetadataComplete = false;
@@ -646,10 +672,13 @@ export async function annotateBatch(key: string, deps: AnnotateDeps = {}): Promi
           coverageMetadataContradiction = true;
         }
       }
-      const gitPath = pathIdentity(event.path, identityCwd);
+      const gitPath = pathIdentity(event.path, mechanismIdentityCwd);
       const gitDisplayPath = canonicalPath(operationalText(event.path, MAX_PATH_CHARS));
       const path = canonicalPath(cleanText(event.path, MAX_PATH_CHARS)) || cleanText(event.path, MAX_PATH_CHARS);
       if (!path || !gitPath || !gitDisplayPath) continue;
+      materializedEventIdentities.add(pathIdentityHash(event.path, {
+        platform: "unknown", cwd: coverageIdentityCwd,
+      }));
       const excerpt = event.excerpt === undefined ? undefined : cleanText(event.excerpt, MAX_EXCERPT_CHARS) || undefined;
       if (event.truncatedFiles !== undefined) {
         if (!isSafeNonNegativeInteger(event.truncatedFiles)) coverageMetadataContradiction = true;
@@ -676,6 +705,14 @@ export async function annotateBatch(key: string, deps: AnnotateDeps = {}): Promi
         excerpt,
         ...(event.provenance === undefined ? {} : { provenance: event.provenance }),
       });
+    }
+    if (coverageSnapshot?.candidateCountExact === true && coverageSnapshot.identityHashes !== undefined) {
+      const snapshotIdentities = new Set(coverageSnapshot.identityHashes);
+      if (materializedEventIdentities.size > (coverageSnapshot.candidateCount ?? snapshotIdentities.size)
+          || [...materializedEventIdentities].some((hash) => !snapshotIdentities.has(hash))) {
+        coverageMetadataComplete = false;
+        coverageMetadataContradiction = true;
+      }
     }
     let rationaleEvent: Extract<(typeof events)[number], { kind: "rationale" }> | undefined;
     let rationaleText: string | undefined;

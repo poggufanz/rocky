@@ -17,20 +17,25 @@ export function regularDescriptorSafe(stats: FilesystemStats | undefined): boole
   return stats !== undefined && stats.isFile() && !stats.isSymbolicLink();
 }
 
+function filesystemNodeSafe(stats: FilesystemStats | undefined): boolean {
+  return stats !== undefined && (stats.isFile() || stats.isDirectory()) && !stats.isSymbolicLink();
+}
+
+export function filesystemIdentity(stats: FilesystemStats | undefined): readonly [bigint, bigint] | undefined {
+  if (stats === undefined || !filesystemNodeSafe(stats)) return undefined;
+  const dev = typeof stats.dev === "bigint"
+    ? stats.dev
+    : Number.isSafeInteger(stats.dev) ? BigInt(stats.dev) : undefined;
+  const ino = typeof stats.ino === "bigint"
+    ? stats.ino
+    : Number.isSafeInteger(stats.ino) ? BigInt(stats.ino) : undefined;
+  if (dev === undefined || ino === undefined || dev < 0n || ino < 0n || (dev === 0n && ino === 0n)) return undefined;
+  return [dev, ino];
+}
+
 export function sameFilesystemIdentity(left: FilesystemStats | undefined, right: FilesystemStats | undefined): boolean {
-  if (left === undefined || right === undefined || !regularDescriptorSafe(left) || !regularDescriptorSafe(right)) return false;
-  const identity = (stats: FilesystemStats): readonly [bigint, bigint] | undefined => {
-    const dev = typeof stats.dev === "bigint"
-      ? stats.dev
-      : Number.isSafeInteger(stats.dev) ? BigInt(stats.dev) : undefined;
-    const ino = typeof stats.ino === "bigint"
-      ? stats.ino
-      : Number.isSafeInteger(stats.ino) ? BigInt(stats.ino) : undefined;
-    if (dev === undefined || ino === undefined || dev < 0n || ino < 0n || (dev === 0n && ino === 0n)) return undefined;
-    return [dev, ino];
-  };
-  const leftIdentity = identity(left);
-  const rightIdentity = identity(right);
+  const leftIdentity = filesystemIdentity(left);
+  const rightIdentity = filesystemIdentity(right);
   if (leftIdentity !== undefined && rightIdentity !== undefined) {
     return leftIdentity[0] === rightIdentity[0] && leftIdentity[1] === rightIdentity[1];
   }

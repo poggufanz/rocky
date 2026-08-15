@@ -12,7 +12,7 @@ import {
   projectWhyPossible,
   projectTriple,
 } from "./privacy.js";
-import { boundTripleRecord, canonicalPath, isKnownPathPlatform, isSafeNonNegativeInteger, parseMemoryRecord } from "../core/memory-read.js";
+import { boundTripleRecord, canonicalPath, isKnownPathPlatform, isSafeNonNegativeInteger, parseMemoryRecord, pathIdentityHash } from "../core/memory-read.js";
 import type { TripleRecord } from "../core/memory-read.js";
 
 export interface McpToolDefinition {
@@ -433,13 +433,18 @@ function whyPathRelation(candidate: TripleRecord, path: string): WhyPathRelation
   const platform = candidate.platform ?? "unknown";
   const targetDisplay = canonicalPath(path, { platform });
   const targetIdentity = canonicalPath(path, { platform, cwd: candidate.cwd });
+  const targetHash = targetIdentity.length > 0
+    ? pathIdentityHash(targetIdentity, { platform, canonical: true })
+    : undefined;
   if (!targetDisplay || !targetIdentity) return { exact: false, suffix: false, suffixIdentities: [] };
   const suffixIdentities = new Set<string>();
   for (const file of candidate.mechanism.files) {
     const candidateDisplay = canonicalPath(file.path, { platform });
     const candidateIdentity = canonicalPath(file.path, { platform, cwd: candidate.cwd });
     if (!candidateDisplay || !candidateIdentity) continue;
-    if (candidateDisplay === targetDisplay || candidateIdentity === targetIdentity) {
+    const hashExact = targetHash !== undefined && file.identityHash !== undefined
+      && /^[0-9a-f]{32}$/u.test(file.identityHash) && file.identityHash === targetHash;
+    if (hashExact || candidateDisplay === targetDisplay || candidateIdentity === targetIdentity) {
       return { exact: true, suffix: false, suffixIdentities: [] };
     }
     const knownRoot = canonicalPath(candidate.cwd, { platform });
@@ -520,8 +525,11 @@ function fallbackWhyEvidence(options: CreateToolRegistryOptions, path: string, l
     .map((value) => safeTripleRecord(value))
     .filter((value): value is TripleRecord => value !== undefined);
   const selected = selectWhyCandidates(candidates, path, limit);
-  const coverage = coverageForTriples(candidates);
-  const incomplete = !coverage.complete || selected.possible.length > 0 || selected.ambiguousSuffix || boundedRawMatches.truncated;
+  // Coverage belongs to selected exact/unambiguous evidence only. An
+  // unrelated complete triple cannot make an empty why-file result complete.
+  const coverage = coverageForTriples(selected.matches);
+  const incomplete = selected.matches.length === 0 || !coverage.complete || selected.possible.length > 0
+    || selected.ambiguousSuffix || boundedRawMatches.truncated;
   return {
     matches: selected.matches,
     possible: selected.possible,
@@ -627,14 +635,20 @@ function safeMemoryStats(value: unknown, canonical = false): Record<string, numb
       const next = sum + entry;
       return isSafeNonNegativeInteger(next) ? next : Number.MAX_SAFE_INTEGER;
     }, 0);
-    // Canonical queryStats.total is the record-level count and already
-    // accounts for a mixed FixRecord carrying both confirmed and possible
-    // links.  Untrusted providers cannot forge this exact proof: their
-    // supplied total remains ignored and the conservative component fallback
-    // preserves the legacy response contract.
+    // A custom provider may report one record in both confirmed and possible
+    // fix buckets. Accept a supplied total only when it is bounded and
+    // feasible against the non-overlapping record-kind lower/upper bounds;
+    // never manufacture an exact sum by adding overlapping fix categories.
     const suppliedTotal = source.total;
-    const total = canonical && isSafeNonNegativeInteger(suppliedTotal)
-      ? suppliedTotal
+    const nonOverlappingUpper = [failures, fixEvents, triples, notes].reduce((sum, entry) => {
+      const next = sum + entry;
+      return isSafeNonNegativeInteger(next) ? next : Number.MAX_SAFE_INTEGER;
+    }, 0);
+    const lowerBound = Math.max(failures, fixEvents, possibleFixes, triples, notes);
+    const suppliedFeasible = isSafeNonNegativeInteger(suppliedTotal)
+      && suppliedTotal >= lowerBound && suppliedTotal <= nonOverlappingUpper;
+    const total = (canonical && isSafeNonNegativeInteger(suppliedTotal)) || suppliedFeasible
+      ? suppliedTotal as number
       : recomputedTotal;
     return { failures, fixEvents, resolved, unresolved, confirmedFixes, possibleFixes, triples, notes, total };
   } catch {

@@ -11,6 +11,7 @@ import {
   readSync,
   readdirSync,
   renameSync,
+  statSync,
   unlinkSync,
   writeSync,
   type BigIntStats,
@@ -18,7 +19,7 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { canonicalPath, pathIdentityHash } from "../core/memory-read.js";
-import { NO_FOLLOW_FLAG, regularDescriptorSafe, sameFilesystemIdentity } from "../core/fs-safety.js";
+import { filesystemIdentity, NO_FOLLOW_FLAG, regularDescriptorSafe, sameFilesystemIdentity } from "../core/fs-safety.js";
 import { resolveRockyPaths, type RockyPaths } from "../core/state-paths.js";
 import { MAX_COVERAGE_PATHS, parseAgentEvent, type AgentEvent, type AgentName } from "./schema.js";
 
@@ -89,6 +90,66 @@ interface FileInfo {
   stats?: Stats;
 }
 
+// Native Windows can expose a valid file id above Number.MAX_SAFE_INTEGER in
+// the ordinary Stats shape. Keep normal size/time fields for callers, while
+// pairing each descriptor/path Stats object with a BigInt identity for strict
+// replacement checks.
+const strictIdentities = new WeakMap<object, readonly [bigint, bigint]>();
+
+function rememberStrictIdentity(stats: Stats, identity: BigIntStats): void {
+  const token = filesystemIdentity(identity);
+  if (token !== undefined) strictIdentities.set(stats, token);
+}
+
+function pathStrictIdentity(path: string): BigIntStats | undefined {
+  try {
+    // This is only a capability fallback when a host has replaced the
+    // descriptor/lstat BigInt API with an invalid numeric shape.  A regular,
+    // non-symlink path stat still provides a bounded identity; if it cannot,
+    // callers remain fail-closed.
+    const listed = lstatSync(path);
+    if ((!listed.isFile() && !listed.isDirectory()) || listed.isSymbolicLink()) return undefined;
+    const identity = statSync(path, { bigint: true });
+    return filesystemIdentity(identity) !== undefined ? identity : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function statWithStrictIdentity(fd: number, path?: string): Stats {
+  const stats = fstatSync(fd);
+  try {
+    const identity = fstatSync(fd, { bigint: true });
+    if (filesystemIdentity(identity) !== undefined) rememberStrictIdentity(stats, identity);
+    else if (path !== undefined) {
+      const fallback = pathStrictIdentity(path);
+      if (fallback !== undefined) rememberStrictIdentity(stats, fallback);
+    }
+  } catch {
+    if (path !== undefined) {
+      const fallback = pathStrictIdentity(path);
+      if (fallback !== undefined) rememberStrictIdentity(stats, fallback);
+    }
+  }
+  return stats;
+}
+
+function lstatWithStrictIdentity(path: string): Stats {
+  const stats = lstatSync(path);
+  try {
+    const identity = lstatSync(path, { bigint: true });
+    if (filesystemIdentity(identity) !== undefined) rememberStrictIdentity(stats, identity);
+    else {
+      const fallback = pathStrictIdentity(path);
+      if (fallback !== undefined) rememberStrictIdentity(stats, fallback);
+    }
+  } catch {
+    const fallback = pathStrictIdentity(path);
+    if (fallback !== undefined) rememberStrictIdentity(stats, fallback);
+  }
+  return stats;
+}
+
 function isSafeKey(key: unknown): key is string {
   return typeof key === "string" && key.length <= MAX_KEY_CHARS && SAFE_KEY.test(key);
 }
@@ -100,7 +161,7 @@ function spoolPath(paths: RockyPaths): string | undefined {
 
 function inspectFile(path: string): FileInfo {
   try {
-    const stats = lstatSync(path);
+    const stats = lstatWithStrictIdentity(path);
     return stats.isFile() && !stats.isSymbolicLink()
       ? { kind: "regular", stats }
       : { kind: "other" };
@@ -113,8 +174,8 @@ function inspectFile(path: string): FileInfo {
 
 function isSpoolDirectory(path: string): boolean {
   try {
-    const stats = lstatSync(path);
-    return stats.isDirectory() && !stats.isSymbolicLink();
+    const stats = lstatWithStrictIdentity(path);
+    return stats.isDirectory() && !stats.isSymbolicLink() && usableIdentity(stats);
   } catch {
     return false;
   }
@@ -237,20 +298,25 @@ function validCoverageHashes(value: unknown): string[] | undefined {
 }
 
 function payloadDigest(input: CoverageInput, identityHashes: readonly string[]): string {
+  const candidateCount = input.candidateCount ?? identityHashes.length;
+  const fullEnvelopeDigest = input.pathsComplete !== true
+    && candidateCount > identityHashes.length
+    && typeof input.payloadDigest === "string"
+    && PAYLOAD_DIGEST.test(input.payloadDigest)
+    ? input.payloadDigest
+    : undefined;
   return createHash("sha256")
     .update(JSON.stringify({
       agent: input.agent,
       cwd: typeof input.cwd === "string" ? canonicalPath(input.cwd, { platform: "unknown" }) : undefined,
-      candidateCount: input.candidateCount ?? identityHashes.length,
+      candidateCount,
       candidateCountExact: input.candidateCountExact !== false,
       pathsComplete: input.pathsComplete === true,
       // Payload order is not semantic. Keep first-seen order for witnesses,
       // but hash a sorted canonical identity set so reordered retries remain
       // idempotent.
       identityHashes: [...identityHashes].sort(),
-      adapterDigest: typeof input.payloadDigest === "string" && PAYLOAD_DIGEST.test(input.payloadDigest)
-        ? input.payloadDigest
-        : undefined,
+      ...(fullEnvelopeDigest === undefined ? {} : { fullEnvelopeDigest }),
     }), "utf8")
     .digest("hex");
 }
@@ -273,9 +339,13 @@ function parseCoverageBytes(bytes: Buffer): CoverageSnapshot | undefined {
     const claimDevToken = claimDev === undefined ? undefined : identityToken(claimDev);
     const claimInoToken = claimIno === undefined ? undefined : identityToken(claimIno);
     const cwdValue = record.cwd;
+    const cwdConflict = record.cwdConflict;
+    const cappedDigestProof = record.cappedDigestProof;
     if (record.v !== 1 || !agent || typeof record.candidateCountExact !== "boolean" ||
         typeof record.pathsComplete !== "boolean" || typeof payloads !== "number" || !Number.isSafeInteger(payloads) || payloads < 1 ||
         payloads > Number.MAX_SAFE_INTEGER ||
+        (cwdConflict !== undefined && typeof cwdConflict !== "boolean") ||
+        (cappedDigestProof !== undefined && typeof cappedDigestProof !== "boolean") ||
         (claimId !== undefined && (typeof claimId !== "string" || !CLAIM_ID.test(claimId))) ||
         (claimDev !== undefined && claimDevToken === undefined) ||
         (claimIno !== undefined && claimInoToken === undefined) ||
@@ -333,6 +403,10 @@ function parseCoverageBytes(bytes: Buffer): CoverageSnapshot | undefined {
       // once the ceiling is reached the snapshot remains explicitly unknown.
       if (payloads <= MAX_COVERAGE_PAYLOAD_DIGESTS && payloadDigests.length !== payloads) return undefined;
     }
+    // A bounded digest ledger cannot prove that every later payload was a
+    // replay or a distinct union member. Preserve the bounded snapshot as an
+    // explicit lower-bound/unknown witness, never as exact complete proof.
+    const digestLedgerOverflow = payloads > MAX_COVERAGE_PAYLOAD_DIGESTS;
     if (candidateCount !== undefined && identityHashes !== undefined && candidateCount < identityHashes.length) return undefined;
     return {
       v: 1,
@@ -344,9 +418,11 @@ function parseCoverageBytes(bytes: Buffer): CoverageSnapshot | undefined {
       ...(claimDevToken === undefined ? {} : { claimDev: claimDevToken }),
       ...(claimInoToken === undefined ? {} : { claimIno: claimInoToken }),
       ...(typeof cwdValue === "string" ? { cwd: canonicalPath(cwdValue, { platform: "unknown" }) } : {}),
+      ...(cwdConflict === true ? { cwdConflict: true } : {}),
+      ...(cappedDigestProof === true ? { cappedDigestProof: true } : {}),
       ...(payloadDigests === undefined ? {} : { payloadDigests }),
-      candidateCountExact: record.candidateCountExact,
-      pathsComplete: record.pathsComplete,
+      candidateCountExact: record.candidateCountExact && !digestLedgerOverflow,
+      pathsComplete: record.pathsComplete && !digestLedgerOverflow,
       payloads,
     };
   } catch {
@@ -476,6 +552,9 @@ function mergeCoverage(previous: CoverageSnapshot | undefined, input: CoverageIn
     && incomingCountExact && normalizedIncomingCount === incomingHashes.length;
   const incomingCandidateCount = normalizedIncomingCount === undefined ? incomingHashes.length : normalizedIncomingCount;
   const incomingDigest = payloadDigest(input, incomingHashes);
+  const cappedEnvelope = input.pathsComplete !== true && incomingCandidateCount > incomingHashes.length;
+  const hasFullEnvelopeDigest = cappedEnvelope && typeof input.payloadDigest === "string"
+    && PAYLOAD_DIGEST.test(input.payloadDigest);
   if (!previous || previous.agent !== agent) {
     return {
       v: 1, agent, paths: incomingPaths,
@@ -486,6 +565,7 @@ function mergeCoverage(previous: CoverageSnapshot | undefined, input: CoverageIn
       payloads: 1,
       payloadDigests: [incomingDigest],
       ...(incoming.cwd === undefined ? {} : { cwd: incoming.cwd }),
+      ...(hasFullEnvelopeDigest ? { cappedDigestProof: true } : {}),
     };
   }
   const priorDigests = previous.payloadDigests;
@@ -494,13 +574,17 @@ function mergeCoverage(previous: CoverageSnapshot | undefined, input: CoverageIn
   // two different tails can share the same retained prefix; treating that
   // digest as a replay would silently under-count a distinct payload.
   if (!incoming.overflow && priorDigests !== undefined && priorDigests.includes(incomingDigest)) return previous;
-  const payloadDigests = priorDigests === undefined ? undefined : [...priorDigests];
+  let payloadDigests = priorDigests === undefined ? undefined : [...priorDigests];
   let payloadDigestOverflow = false;
   if (payloadDigests !== undefined) {
     if (payloadDigests.length < MAX_COVERAGE_PAYLOAD_DIGESTS) payloadDigests.push(incomingDigest);
     else payloadDigestOverflow = true;
   }
   const priorHashes = previous.identityHashes ?? previous.paths.map((path) => pathIdentityHash(path, { platform: "unknown" }));
+  const previousCwd = previous.cwd === undefined ? undefined : canonicalPath(previous.cwd, { platform: "unknown" });
+  const incomingCwd = incoming.cwd === undefined ? undefined : canonicalPath(incoming.cwd, { platform: "unknown" });
+  const cwdConflict = previous.cwdConflict === true
+    || (previousCwd !== undefined && incomingCwd !== undefined && previousCwd !== incomingCwd);
   const unionHashes = [...priorHashes];
   const seenHashes = new Set(unionHashes);
   let unionOverflow = unionHashes.length > MAX_COVERAGE_IDENTITIES || payloadDigestOverflow;
@@ -521,7 +605,7 @@ function mergeCoverage(previous: CoverageSnapshot | undefined, input: CoverageIn
   const priorExact = previous.candidateCountExact && previous.identityHashes !== undefined
     && previous.payloadDigests !== undefined;
   const allComplete = previous.pathsComplete && incomingComplete && priorExact && incomingCountExact
-    && !unionOverflow;
+    && !unionOverflow && !cwdConflict;
   const singleKnownCount = payloads === 1 && incomingCountExact && !incoming.overflow;
   const exactUnion = allComplete;
   const candidateCount = exactUnion
@@ -535,11 +619,14 @@ function mergeCoverage(previous: CoverageSnapshot | undefined, input: CoverageIn
     paths: unionPaths,
     identityHashes: unionHashes,
     candidateCount,
-    candidateCountExact: exactUnion || singleKnownCount,
-    pathsComplete: exactUnion,
+    candidateCountExact: (exactUnion || singleKnownCount) && !cwdConflict,
+    pathsComplete: exactUnion && !cwdConflict,
     payloads,
     ...(payloadDigests === undefined ? {} : { payloadDigests }),
     ...(previous.cwd !== undefined ? { cwd: previous.cwd } : incoming.cwd === undefined ? {} : { cwd: incoming.cwd }),
+    ...(cwdConflict ? { cwdConflict: true } : {}),
+    ...((previous.cappedDigestProof === true || (payloads === 1 && hasFullEnvelopeDigest))
+      ? { cappedDigestProof: true } : {}),
   };
 }
 
@@ -605,20 +692,21 @@ interface OwnedPrivateLock {
 }
 
 function usableIdentity(stats: Stats): boolean {
-  return Number.isFinite(stats.dev) && Number.isFinite(stats.ino)
-    && (stats.dev !== 0 || stats.ino !== 0);
+  return strictIdentities.get(stats) !== undefined || sameFilesystemIdentity(stats, stats);
 }
 
 function sameIdentity(left: Stats, right: Stats): boolean {
-  return usableIdentity(left) && usableIdentity(right) && left.dev === right.dev && left.ino === right.ino;
+  const leftToken = strictIdentities.get(left);
+  const rightToken = strictIdentities.get(right);
+  if (leftToken !== undefined || rightToken !== undefined) {
+    return leftToken !== undefined && rightToken !== undefined
+      && leftToken[0] === rightToken[0] && leftToken[1] === rightToken[1];
+  }
+  return usableIdentity(left) && usableIdentity(right) && sameFilesystemIdentity(left, right);
 }
 
 function identitiesDiffer(left: Stats, right: Stats): boolean {
   return usableIdentity(left) && usableIdentity(right) && !sameIdentity(left, right);
-}
-
-function compatibleIdentity(left: Stats, right: Stats): boolean {
-  return !usableIdentity(left) || !usableIdentity(right) || sameIdentity(left, right);
 }
 
 function encodeLockMetadata(token: string): Buffer | undefined {
@@ -703,21 +791,21 @@ function readAnnotationLock(path: string): ReadAnnotationLock | undefined {
   let fd = -1;
   try {
     fd = openSync(path, constants.O_RDONLY | NO_FOLLOW);
-    const opened = fstatSync(fd);
+    const opened = statWithStrictIdentity(fd, path);
     if (!opened.isFile() || opened.isSymbolicLink() || opened.size > ANNOTATION_METADATA_MAX_BYTES) {
       return undefined;
     }
-    if (usableIdentity(initial.stats) && usableIdentity(opened) && !sameIdentity(initial.stats, opened)) return undefined;
+    if (!sameIdentity(initial.stats, opened)) return undefined;
     const bounded = Buffer.alloc(ANNOTATION_METADATA_MAX_BYTES + 1);
     const count = readSync(fd, bounded, 0, bounded.length, 0);
-    const after = fstatSync(fd);
+    const after = statWithStrictIdentity(fd, path);
     if (count !== after.size || after.size > ANNOTATION_METADATA_MAX_BYTES) return undefined;
-    if (usableIdentity(opened) && usableIdentity(after) && !sameIdentity(opened, after)) return undefined;
+    if (!sameIdentity(opened, after)) return undefined;
     if (count === 0) return { kind: "empty", stats: after };
     const metadata = parseAnnotationMetadata(bounded.subarray(0, count));
     if (!metadata) return { kind: "malformed", stats: after };
-    if (metadata.dev !== undefined && metadata.ino !== undefined && usableIdentity(after)
-      && (metadata.dev !== after.dev || metadata.ino !== after.ino)) return undefined;
+    if (metadata.dev !== undefined && metadata.ino !== undefined
+      && (!usableIdentity(after) || metadata.dev !== after.dev || metadata.ino !== after.ino)) return undefined;
     return { kind: "owned", metadata, stats: after };
   } catch {
     return undefined;
@@ -753,14 +841,15 @@ function readPrivateMetadata(path: string): LockMetadata | undefined {
   let fd = -1;
   try {
     fd = openSync(path, constants.O_RDONLY | NO_FOLLOW);
-    const opened = fstatSync(fd);
+    const opened = statWithStrictIdentity(fd, path);
     if (!opened.isFile() || opened.isSymbolicLink() || opened.size === 0 || opened.size > LOCK_METADATA_MAX_BYTES) {
       return undefined;
     }
     const bounded = Buffer.alloc(LOCK_METADATA_MAX_BYTES + 1);
     const count = readSync(fd, bounded, 0, bounded.length, 0);
-    const after = fstatSync(fd);
-    if (count !== after.size || after.size > LOCK_METADATA_MAX_BYTES) return undefined;
+    const after = statWithStrictIdentity(fd, path);
+    if (count !== after.size || after.size > LOCK_METADATA_MAX_BYTES || !sameIdentity(initial.stats, opened)
+        || !sameIdentity(opened, after)) return undefined;
     return parseLockMetadata(bounded.subarray(0, count));
   } catch {
     return undefined;
@@ -774,8 +863,7 @@ function removeCreatedPrivate(path: string, token: string, createdStats: Stats |
   if (current.kind !== "regular" || !current.stats) return;
   const metadata = readPrivateMetadata(path);
   if (metadata && metadata.token !== token) return;
-  if (createdStats && usableIdentity(createdStats) && usableIdentity(current.stats)
-    && !sameIdentity(createdStats, current.stats)) return;
+  if (createdStats && !sameIdentity(createdStats, current.stats)) return;
   try {
     unlinkSync(path);
   } catch {
@@ -795,11 +883,11 @@ function createPrivateLock(path: string): OwnedPrivateLock | undefined {
     if (!encoded) return undefined;
     fd = openSync(path, "wx", 0o600);
     created = true;
-    createdStats = fstatSync(fd);
-    if (!createdStats.isFile() || createdStats.isSymbolicLink()) return undefined;
+    createdStats = statWithStrictIdentity(fd, path);
+    if (!regularDescriptorSafe(createdStats) || !usableIdentity(createdStats)) return undefined;
     if (writeSync(fd, encoded, 0, encoded.byteLength) !== encoded.byteLength) return undefined;
-    const stats = fstatSync(fd);
-    if (!stats.isFile() || stats.isSymbolicLink() || stats.size !== encoded.byteLength) return undefined;
+    const stats = statWithStrictIdentity(fd, path);
+    if (!regularDescriptorSafe(stats) || !sameIdentity(createdStats, stats) || stats.size !== encoded.byteLength) return undefined;
     try {
       fchmodSync(fd, 0o600);
     } catch {
@@ -826,7 +914,7 @@ function reclaimDeadAppendLock(path: string, now: number): boolean {
   if (current.kind !== "regular" || !current.stats || !isStale(current.stats, now)) return false;
   const currentMetadata = readPrivateMetadata(path);
   if (!currentMetadata || currentMetadata.pid !== metadata.pid || currentMetadata.token !== metadata.token) return false;
-  if (usableIdentity(initial.stats) && usableIdentity(current.stats) && !sameIdentity(initial.stats, current.stats)) return false;
+  if (!sameIdentity(initial.stats, current.stats)) return false;
   try {
     unlinkSync(path);
     return true;
@@ -841,10 +929,10 @@ function readEmptyAppendLock(path: string): Stats | undefined {
   let fd = -1;
   try {
     fd = openSync(path, constants.O_RDONLY | NO_FOLLOW);
-    const opened = fstatSync(fd);
+    const opened = statWithStrictIdentity(fd, path);
     if (!opened.isFile() || opened.isSymbolicLink() || opened.size !== 0
       || !sameIdentity(initial.stats, opened)) return undefined;
-    const after = fstatSync(fd);
+    const after = statWithStrictIdentity(fd, path);
     if (!after.isFile() || after.isSymbolicLink() || after.size !== 0
       || !sameIdentity(opened, after)) return undefined;
     return after;
@@ -889,7 +977,7 @@ function releaseAppendLock(lock: OwnedPrivateLock): void {
   if (current.kind !== "regular" || !current.stats) return;
   const metadata = readPrivateMetadata(lock.path);
   if (!metadata || metadata.token !== lock.token || metadata.pid !== lock.pid) return;
-  if (usableIdentity(lock.stats) && usableIdentity(current.stats) && !sameIdentity(lock.stats, current.stats)) return;
+    if (!sameIdentity(lock.stats, current.stats)) return;
   try {
     unlinkSync(lock.path);
   } catch {
@@ -1040,7 +1128,7 @@ export function removeClaimCoverage(claim: BatchClaim, paths = resolveRockyPaths
 function removeOwnedAnnotationLock(path: string, token: string, pid: number, stats: Stats | undefined): boolean {
   const current = readAnnotationMetadata(path);
   if (!current || current.metadata.token !== token || current.metadata.pid !== pid) return false;
-  if (stats && usableIdentity(stats) && usableIdentity(current.stats) && !sameIdentity(stats, current.stats)) return false;
+  if (stats && !sameIdentity(stats, current.stats)) return false;
   try {
     unlinkSync(path);
     return true;
@@ -1060,12 +1148,12 @@ function createAnnotationLease(path: string, key: string): AnnotationLease | und
     token = randomBytes(ANNOTATION_LOCK_TOKEN_BYTES).toString("hex");
     fd = openSync(path, "wx", 0o600);
     created = true;
-    createdStats = fstatSync(fd);
-    if (!createdStats.isFile() || createdStats.isSymbolicLink()) return undefined;
+    createdStats = statWithStrictIdentity(fd, path);
+    if (!regularDescriptorSafe(createdStats) || !usableIdentity(createdStats)) return undefined;
     const encoded = encodeAnnotationMetadata(token, createdStats);
     if (!encoded || writeSync(fd, encoded, 0, encoded.byteLength) !== encoded.byteLength) return undefined;
-    const stats = fstatSync(fd);
-    if (!stats.isFile() || stats.isSymbolicLink() || stats.size !== encoded.byteLength) return undefined;
+    const stats = statWithStrictIdentity(fd, path);
+    if (!regularDescriptorSafe(stats) || !sameIdentity(createdStats, stats) || stats.size !== encoded.byteLength) return undefined;
     try {
       fchmodSync(fd, 0o600);
     } catch {
@@ -1087,7 +1175,7 @@ function createAnnotationLease(path: string, key: string): AnnotationLease | und
 function removeLegacyAnnotationLock(path: string, stats: Stats): boolean {
   const current = inspectFile(path);
   if (current.kind !== "regular" || !current.stats) return false;
-  if (usableIdentity(stats) && usableIdentity(current.stats) && !sameIdentity(stats, current.stats)) return false;
+  if (!sameIdentity(stats, current.stats)) return false;
   try {
     unlinkSync(path);
     return true;
@@ -1106,8 +1194,7 @@ function acquireAnnotationLeaseLocked(key: string, paths: RockyPaths, now: numbe
     if (!owner) return undefined;
     if (owner.kind === "owned" && owner.metadata) {
       if (ownerState(owner.metadata.pid) !== "dead") return undefined;
-      if (existing.stats && usableIdentity(existing.stats) && usableIdentity(owner.stats)
-        && !sameIdentity(existing.stats, owner.stats)) return undefined;
+      if (!existing.stats || !sameIdentity(existing.stats, owner.stats)) return undefined;
       if (!removeOwnedAnnotationLock(path, owner.metadata.token, owner.metadata.pid, owner.stats)) return undefined;
     } else if (owner.kind === "empty") {
       if (!removeLegacyAnnotationLock(path, existing.stats)) return undefined;
@@ -1161,8 +1248,8 @@ function appendBufferLocked(file: string, candidate: Buffer): boolean {
       constants.O_WRONLY | constants.O_APPEND | (create ? constants.O_CREAT | constants.O_EXCL : constants.O_CREAT) | NO_FOLLOW,
       0o600,
     );
-    const opened = fstatSync(fd);
-    if (!opened.isFile() || opened.isSymbolicLink()) return false;
+    const opened = statWithStrictIdentity(fd, file);
+    if (!regularDescriptorSafe(opened) || !usableIdentity(opened)) return false;
     if (before.stats && !sameIdentity(before.stats, opened)) return false;
     if (opened.size + candidate.byteLength > MAX_BATCH_BYTES) return false;
     try {
@@ -1171,7 +1258,7 @@ function appendBufferLocked(file: string, candidate: Buffer): boolean {
       // File mode is best effort on platforms that do not support it.
     }
     if (writeSync(fd, candidate, 0, candidate.byteLength) !== candidate.byteLength) return false;
-    const after = fstatSync(fd);
+    const after = statWithStrictIdentity(fd, file);
     return after.isFile() && !after.isSymbolicLink() && sameIdentity(opened, after);
   } catch {
     // Spool is transient; callers must never fail because it is unavailable.
@@ -1327,6 +1414,10 @@ export interface CoverageSnapshot {
   payloadDigests?: string[];
   /** Operational cwd used to resolve relative sidecar witnesses. */
   cwd?: string;
+  /** Different complete payloads named incompatible canonical cwd roots. */
+  cwdConflict?: boolean;
+  /** Adapter supplied a validated full-set digest for a single capped payload. */
+  cappedDigestProof?: boolean;
   /** Present only after the snapshot is copied into an immutable claim. */
   claimId?: string;
   /** Claim JSONL inode identity binds a copied sidecar to its generation. */
@@ -1359,12 +1450,13 @@ export function readBatch(key: string, paths = resolveRockyPaths()): AgentEvent[
   let bytes: Buffer;
   try {
     fd = openSync(file, constants.O_RDONLY | NO_FOLLOW);
-    const opened = fstatSync(fd);
-    if (!opened.isFile() || opened.isSymbolicLink() || opened.size > MAX_BATCH_BYTES) return [];
+    const opened = statWithStrictIdentity(fd, file);
+    if (!regularDescriptorSafe(opened) || !sameIdentity(initial.stats, opened) || opened.size > MAX_BATCH_BYTES) return [];
     const bounded = Buffer.alloc(MAX_BATCH_BYTES + 1);
     const count = readSync(fd, bounded, 0, bounded.length, 0);
-    const after = fstatSync(fd);
-    if (count > MAX_BATCH_BYTES || after.size > MAX_BATCH_BYTES) return [];
+    const after = statWithStrictIdentity(fd, file);
+    if (count > MAX_BATCH_BYTES || after.size > MAX_BATCH_BYTES || !sameIdentity(opened, after)
+      || !sameIdentity(initial.stats, after) || count !== after.size) return [];
     bytes = bounded.subarray(0, count);
   } catch {
     return [];
@@ -1677,19 +1769,19 @@ export function claimBatch(key: string, paths = resolveRockyPaths()): BatchClaim
 function readClaimBytes(claim: BatchClaim, paths: RockyPaths): Buffer | undefined {
   if (!expectedClaimPath(claim, paths)) return undefined;
   const initial = inspectFile(claim.path);
-  if (initial.kind !== "regular" || !initial.stats || !compatibleIdentity(claim.stats, initial.stats)
+  if (initial.kind !== "regular" || !initial.stats || !sameIdentity(claim.stats, initial.stats)
     || initial.stats.size > MAX_BATCH_BYTES) return undefined;
   let fd = -1;
   try {
     fd = openSync(claim.path, constants.O_RDONLY | NO_FOLLOW);
-    const opened = fstatSync(fd);
-    if (!opened.isFile() || opened.isSymbolicLink() || !compatibleIdentity(claim.stats, opened)
+    const opened = statWithStrictIdentity(fd, claim.path);
+    if (!opened.isFile() || opened.isSymbolicLink() || !sameIdentity(claim.stats, opened)
       || opened.size > MAX_BATCH_BYTES || opened.size !== initial.stats.size) return undefined;
     const bounded = Buffer.alloc(MAX_BATCH_BYTES + 1);
     const count = readSync(fd, bounded, 0, bounded.length, 0);
-    const after = fstatSync(fd);
+    const after = statWithStrictIdentity(fd, claim.path);
     if (count !== after.size || count > MAX_BATCH_BYTES || after.size > MAX_BATCH_BYTES
-      || after.size !== opened.size || !compatibleIdentity(opened, after)) return undefined;
+      || after.size !== opened.size || !sameIdentity(opened, after)) return undefined;
     return bounded.subarray(0, count);
   } catch {
     return undefined;
@@ -1736,8 +1828,8 @@ export function removeClaim(claim: BatchClaim, paths = resolveRockyPaths()): boo
     let fd = -1;
     try {
       fd = openSync(claim.path, constants.O_RDONLY | NO_FOLLOW);
-      const opened = fstatSync(fd);
-      if (!opened.isFile() || opened.isSymbolicLink() || !sameIdentity(claim.stats, opened)) return false;
+      const opened = statWithStrictIdentity(fd, claim.path);
+      if (!regularDescriptorSafe(opened) || !sameIdentity(claim.stats, opened)) return false;
     } catch {
       return false;
     } finally {
@@ -1774,14 +1866,14 @@ export function listOrphanClaims(now = Date.now(), paths = resolveRockyPaths()):
 function removeRegular(path: string, expected?: Stats): void {
   const initial = inspectFile(path);
   if (initial.kind !== "regular" || !initial.stats) return;
-  if (expected && !compatibleIdentity(expected, initial.stats)) return;
+  if (expected && !sameIdentity(expected, initial.stats)) return;
   // Re-lstat before unlink so a pathname replacement between discovery and
   // cleanup is not accepted as the original artifact.  The caller remains
   // fail-closed if the platform cannot provide stable inode identity.
   const checked = inspectFile(path);
   if (checked.kind !== "regular" || !checked.stats
-    || !compatibleIdentity(initial.stats, checked.stats)
-    || (expected && !compatibleIdentity(expected, checked.stats))) return;
+    || !sameIdentity(initial.stats, checked.stats)
+    || (expected && !sameIdentity(expected, checked.stats))) return;
   try {
     unlinkSync(path);
   } catch {
@@ -1816,7 +1908,10 @@ function sweepOrphanCoverageArtifacts(
       if (temp) {
         const key = temp[1];
         const lock = inspectFile(lockPath(paths, key));
-        if (lock.kind === "missing" || (lock.kind === "regular" && lock.stats && isStale(lock.stats, now))) {
+        const appendLock = inspectFile(appendLockPath(paths, key));
+        const lockSafe = lock.kind === "missing" || (lock.kind === "regular" && lock.stats && isStale(lock.stats, now));
+        const appendLockSafe = appendLock.kind === "missing" || (appendLock.kind === "regular" && appendLock.stats && isStale(appendLock.stats, now));
+        if (lockSafe && appendLockSafe) {
           removeRegular(fullPath, info.stats);
         }
         continue;
@@ -1827,8 +1922,10 @@ function sweepOrphanCoverageArtifacts(
       if (!isSafeKey(key)) continue;
       const batch = inspectFile(batchPath(paths, key));
       const lock = inspectFile(lockPath(paths, key));
+      const appendLock = inspectFile(appendLockPath(paths, key));
       const lockSafe = lock.kind === "missing" || (lock.kind === "regular" && lock.stats && isStale(lock.stats, now));
-      if (lockSafe && (batch.kind === "missing" || (batch.kind === "regular" && batch.stats && isStale(batch.stats, now)))) {
+      const appendLockSafe = appendLock.kind === "missing" || (appendLock.kind === "regular" && appendLock.stats && isStale(appendLock.stats, now));
+      if (lockSafe && appendLockSafe && (batch.kind === "missing" || (batch.kind === "regular" && batch.stats && isStale(batch.stats, now)))) {
         removeRegular(fullPath, info.stats);
       }
     } catch {
@@ -1883,14 +1980,18 @@ export function listOrphanBatches(now = Date.now(), paths = resolveRockyPaths())
 
     let batch: FileInfo;
     let lock: FileInfo;
+    let appendLock: FileInfo;
     try {
       batch = inspectFile(join(directory, name));
       if (batch.kind !== "regular" || !batch.stats || !isStale(batch.stats, reference)) continue;
       lock = inspectFile(lockPath(paths, key));
+      appendLock = inspectFile(appendLockPath(paths, key));
     } catch {
       continue;
     }
-    if (lock.kind === "missing" || (lock.kind === "regular" && lock.stats && isStale(lock.stats, reference))) {
+    const lockSafe = lock.kind === "missing" || (lock.kind === "regular" && lock.stats && isStale(lock.stats, reference));
+    const appendLockSafe = appendLock.kind === "missing" || (appendLock.kind === "regular" && appendLock.stats && isStale(appendLock.stats, reference));
+    if (lockSafe && appendLockSafe) {
       orphans.push(key);
     }
   }

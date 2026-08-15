@@ -10,7 +10,7 @@
  * idle line, and the notification — stderr gets plain facts only.
  */
 
-import { closeSync, constants, fstatSync, lstatSync, openSync, readSync } from "node:fs";
+import { closeSync, constants, fstatSync, lstatSync, openSync, readSync, type BigIntStats } from "node:fs";
 import { fingerprintCandidates } from "../core/fingerprint.js";
 import { CANCEL_CODES, runProcess, type ExecResult } from "../core/exec.js";
 import { resolveRockyPaths } from "../core/state-paths.js";
@@ -21,6 +21,7 @@ import { watchLogName, writeWatchLog } from "../core/watch-log.js";
 import { linkFixOnSuccess, speakFailureMemory } from "./run.js";
 import { detail, phrase, say } from "../ui/rocky.js";
 import { safeTerminalBlock, safeTerminalLine } from "../ui/sanitize.js";
+import { NO_FOLLOW_FLAG, regularDescriptorSafe, sameFilesystemIdentity } from "../core/fs-safety.js";
 
 export interface ParsedWatch { quiet: boolean; cmd: string }
 
@@ -63,7 +64,7 @@ export const WATCH_LABEL_POLL_MS = 1000;
 const MAX_LABEL_FILE_BYTES = 64 * 1024;
 const MAX_LABEL_LINES = 10;
 const MAX_LABEL_CHARS = 400;
-const NO_FOLLOW = process.platform === "win32" ? 0 : constants.O_NOFOLLOW;
+const NO_FOLLOW = NO_FOLLOW_FLAG;
 type WatchTimer = ReturnType<typeof setInterval>;
 
 /** Return new non-empty labels in file order and remember them for this watch session. */
@@ -101,23 +102,26 @@ function closeQuietly(fd: number): void {
 
 /** Read labels without following links, writing, or retaining an unbounded queue. */
 function readLabelsFile(path: string): string {
-  let initial;
+  let initial: BigIntStats;
   try {
-    initial = lstatSync(path);
+    initial = lstatSync(path, { bigint: true });
   } catch {
     return "";
   }
-  if (!initial.isFile() || initial.isSymbolicLink() || initial.size > MAX_LABEL_FILE_BYTES) return "";
+  if (!regularDescriptorSafe(initial) || !sameFilesystemIdentity(initial, initial)
+      || initial.size > BigInt(MAX_LABEL_FILE_BYTES)) return "";
 
   let fd = -1;
   try {
     fd = openSync(path, constants.O_RDONLY | NO_FOLLOW);
-    const opened = fstatSync(fd);
-    if (!opened.isFile() || opened.isSymbolicLink() || opened.size > MAX_LABEL_FILE_BYTES) return "";
+    const opened = fstatSync(fd, { bigint: true });
+    if (!regularDescriptorSafe(opened) || !sameFilesystemIdentity(initial, opened)
+        || opened.size > BigInt(MAX_LABEL_FILE_BYTES)) return "";
     const bytes = Buffer.alloc(MAX_LABEL_FILE_BYTES + 1);
     const count = readSync(fd, bytes, 0, bytes.length, 0);
-    const after = fstatSync(fd);
-    if (!after.isFile() || after.isSymbolicLink() || count !== after.size || count > MAX_LABEL_FILE_BYTES) return "";
+    const after = fstatSync(fd, { bigint: true });
+    if (!regularDescriptorSafe(after) || !sameFilesystemIdentity(opened, after)
+        || !sameFilesystemIdentity(initial, after) || BigInt(count) !== after.size || count > MAX_LABEL_FILE_BYTES) return "";
 
     const content = bytes.subarray(0, count).toString("utf8");
     // Labels are user-visible terminal text. Strip escape/control payloads

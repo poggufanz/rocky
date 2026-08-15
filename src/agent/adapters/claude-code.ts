@@ -163,10 +163,14 @@ function appendPayload(
       ...(coverageComplete === undefined ? {} : { coveragePathsComplete: coverageComplete }),
     }
     : event);
-  const digestPaths = coveragePaths === undefined ? [] : coveragePaths
-    .map((path) => canonicalPath(path, { platform: process.platform, cwd: coverageCwd }))
-    .filter((path): path is string => path.length > 0)
-    .sort();
+  const digestPathSet = new Set<string>();
+  if (coveragePaths !== undefined) {
+    for (const path of coveragePaths) {
+      const canonical = canonicalPath(path, { platform: process.platform, cwd: coverageCwd });
+      if (canonical.length > 0) digestPathSet.add(canonical);
+    }
+  }
+  const digestPaths = [...digestPathSet].sort();
   return {
     action: "append",
     key,
@@ -180,7 +184,7 @@ function appendPayload(
       coveragePathsComplete: coverageComplete,
     }),
     ...(coveragePaths === undefined ? {} : {
-      coverageCandidateCount: coveragePaths.length,
+      coverageCandidateCount: digestPaths.length,
       // Candidate count is the parser's unique-path total even when the
       // bounded event witness is capped. The witness completeness bit carries
       // the separate omission fact.
@@ -215,18 +219,37 @@ export function parseClaudeHookPayload(raw: unknown, now = Date.now()): ParsedHo
         const input = raw.tool_input;
         if (!isPlainRecord(input)) return undefined;
 
-        const edits: PlainRecord[] = tool === "MultiEdit"
-          ? (Array.isArray(input.edits) ? input.edits.filter(isPlainRecord) : [])
-          : [input];
+        let invalidCoverage = false;
+        let edits: PlainRecord[];
+        if (tool === "MultiEdit") {
+          const rawEdits = input.edits;
+          if (!Array.isArray(rawEdits)) return undefined;
+          edits = [];
+          const rawLength = rawEdits.length;
+          const boundedLength = Math.min(rawLength, MAX_COVERAGE_PATHS * 2);
+          if (rawLength > boundedLength) invalidCoverage = true;
+          for (let index = 0; index < boundedLength; index += 1) {
+            const edit = rawEdits[index];
+            if (!isPlainRecord(edit)) {
+              invalidCoverage = true;
+              continue;
+            }
+            edits.push(edit);
+          }
+        } else {
+          edits = [input];
+        }
         if (edits.length === 0) return undefined;
         const byPath = new Map<string, AgentEvent>();
-        let invalidCoverage = false;
         for (const edit of edits) {
           const path = nonEmptyString(edit.file_path)
             ?? nonEmptyString(edit.notebook_path)
-            ?? nonEmptyString(input.file_path)
-            ?? nonEmptyString(input.notebook_path);
-          if (!path) continue;
+            ?? (tool === "MultiEdit" ? undefined : nonEmptyString(input.file_path))
+            ?? (tool === "MultiEdit" ? undefined : nonEmptyString(input.notebook_path));
+          if (!path) {
+            invalidCoverage = true;
+            continue;
+          }
           const excerpt = nonEmptyString(edit.new_string)
             ?? nonEmptyString(edit.new_source)
             ?? nonEmptyString(edit.file_text)

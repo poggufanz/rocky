@@ -163,6 +163,14 @@ function projectText(value: string, exposure: Exposure, path: string, truncation
   return clipped.value;
 }
 
+const ROCKY_ID = /^(?:[0-9a-f]{16,64}|[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}|(?:triple|failure|fix|association|note)-[A-Za-z0-9._-]{1,96})$/iu;
+const SENSITIVE_ID_WORD = /(?:password|passwd|secret|token|credential|authorization|api[-_]?key)/iu;
+
+function safeOpaqueIdentifier(value: string): boolean {
+  return value.length > 0 && value.length <= 128 && !/[\u0000-\u001f\u007f-\u009f]/u.test(value)
+    && (ROCKY_ID.test(value) || (value.length <= 64 && /^[A-Za-z][A-Za-z0-9._:-]*$/u.test(value) && !SENSITIVE_ID_WORD.test(value)));
+}
+
 function projectSignature(
   signature: readonly string[],
   exposure: Exposure,
@@ -248,7 +256,9 @@ function projectStringArray(
 function projectOpaqueId(value: string, path: string, truncation: Truncation, sanitize = false): string {
   const boundedInput = boundProjectionInput(value);
   if (boundedInput.length !== value.length) truncation.fields.push(path);
-  const safe = sanitize ? redactText(boundedInput) : normalizeOutputText(boundedInput);
+  const safe = sanitize && safeOpaqueIdentifier(boundedInput)
+    ? boundedInput
+    : sanitize ? redactText(boundedInput) : normalizeOutputText(boundedInput);
   const clipped = truncateUtf8(safe, MAX_FIELD_BYTES);
   if (clipped.truncated) truncation.fields.push(path);
   return clipped.value;
@@ -659,8 +669,24 @@ function projectFixRecord(fix: FixRecord, exposure: Exposure, sanitizeIds = fals
     truncatedFields: truncation.fields,
   };
   if (fix.links !== undefined) {
-    const links = fix.links.slice(0, MAX_NESTED_ITEMS);
-    if (fix.links.length > links.length) truncation.fields.push("record.links");
+    const links: FixRecord["links"] = [];
+    try {
+      const length = Number.isSafeInteger(fix.links.length) && fix.links.length >= 0 ? fix.links.length : 0;
+      const bound = Math.min(length, MAX_NESTED_ITEMS);
+      if (length > bound) truncation.fields.push("record.links");
+      for (let index = 0; index < bound; index += 1) {
+        const link = fix.links[index];
+        if (!link || typeof link.id !== "string"
+            || (link.basis !== "identity" && link.basis !== "signature" && link.basis !== "program")
+            || (link.confidence !== undefined && link.confidence !== "confirmed" && link.confidence !== "possible")) {
+          truncation.fields.push("record.links");
+          continue;
+        }
+        links.push({ id: link.id, basis: link.basis, ...(link.confidence === undefined ? {} : { confidence: link.confidence }) });
+      }
+    } catch {
+      truncation.fields.push("record.links");
+    }
     projected.links = links.map((link, index) => ({
       id: projectOpaqueId(link.id, `record.links[${index}].id`, truncation, sanitizeIds),
       basis: link.basis,

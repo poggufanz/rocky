@@ -5,12 +5,13 @@ import {
   lstatSync,
   openSync,
   readFileSync,
-  type Stats,
+  type BigIntStats,
 } from "node:fs";
 import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
 import { resolveRockyPaths } from "./state-paths.js";
 import { commandIdentity, type FingerprintAlgorithmVersion } from "./fingerprint.js";
+import { NO_BLOCK_FLAG, NO_FOLLOW_FLAG, regularDescriptorSafe, sameFilesystemIdentity } from "./fs-safety.js";
 
 export type FailureOrigin = "run" | "hook" | "watch";
 
@@ -713,36 +714,27 @@ function readFlags(): number {
   // lstat/fstat type and identity checks below are the strongest available
   // protection there; a namespace race not observable through those checks is
   // a platform limitation of Node's descriptor API.
-  const noFollow = process.platform === "win32" || !("O_NOFOLLOW" in constants)
-    ? 0
-    : constants.O_NOFOLLOW;
-  const nonblock = process.platform === "win32" || !("O_NONBLOCK" in constants)
-    ? 0
-    : constants.O_NONBLOCK;
-  return constants.O_RDONLY | noFollow | nonblock;
-}
-
-function sameFileIdentity(expected: Stats, opened: Stats): boolean {
-  return expected.dev === opened.dev && expected.ino === opened.ino;
+  return constants.O_RDONLY | NO_FOLLOW_FLAG | NO_BLOCK_FLAG;
 }
 
 export function loadMemoryChecked(path = resolveRockyPaths().memory, now = Date.now()): MemoryLoadResult {
   let descriptor: number | undefined;
-  let listed: Stats | undefined;
+  let listed: BigIntStats | undefined;
   let contents: string;
   try {
-    listed = lstatSync(path);
-    if (!listed.isFile() || listed.isSymbolicLink()) return { records: [], complete: false };
+    listed = lstatSync(path, { bigint: true });
+    if (!regularDescriptorSafe(listed) || !sameFilesystemIdentity(listed, listed)) return { records: [], complete: false };
 
     descriptor = openSync(path, readFlags());
-    const opened = fstatSync(descriptor);
-    if (!opened.isFile() || opened.isSymbolicLink() || !sameFileIdentity(listed, opened)) {
+    const opened = fstatSync(descriptor, { bigint: true });
+    if (!regularDescriptorSafe(opened) || !sameFilesystemIdentity(listed, opened)) {
       return { records: [], complete: false };
     }
 
     contents = readFileSync(descriptor, "utf8");
-    const after = fstatSync(descriptor);
-    if (!after.isFile() || after.isSymbolicLink() || !sameFileIdentity(opened, after)) {
+    const after = fstatSync(descriptor, { bigint: true });
+    if (!regularDescriptorSafe(after) || !sameFilesystemIdentity(opened, after)
+      || !sameFilesystemIdentity(listed, after)) {
       return { records: [], complete: false };
     }
   } catch {
@@ -752,7 +744,7 @@ export function loadMemoryChecked(path = resolveRockyPaths().memory, now = Date.
     // or I/O race even when a second lstat now reports ENOENT.
     if (listed !== undefined) return { records: [], complete: false };
     try {
-      if (lstatSync(path).isFile()) return { records: [], complete: false };
+      if (lstatSync(path, { bigint: true }).isFile()) return { records: [], complete: false };
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return { records: [], complete: true };
     }

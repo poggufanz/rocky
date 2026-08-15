@@ -22,7 +22,7 @@ import { loadConfig } from "../core/config-read.js";
 import { redactSecretsAtBoundary, replaceAnsiAndControls } from "../core/redact.js";
 import { resolveRockyPaths, type RockyPaths } from "../core/state-paths.js";
 import { canonicalPath } from "../core/memory-read.js";
-import { NO_FOLLOW_FLAG, regularDescriptorSafe, sameFilesystemIdentity } from "../core/fs-safety.js";
+import { filesystemIdentity, NO_FOLLOW_FLAG, regularDescriptorSafe, sameFilesystemIdentity } from "../core/fs-safety.js";
 import { MAX_BASELINE_FILES, type AgentEvent, type IntentEvent, type TurnBaseline } from "../agent/schema.js";
 
 const STDIN_CAP_BYTES = 2 * 1024 * 1024;
@@ -115,8 +115,8 @@ export function logHookError(message: string, paths?: RockyPaths): void {
 
     const parent = dirname(target);
     mkdirSync(parent, { recursive: true, mode: 0o700 });
-    const parentStats = lstatSync(parent);
-    if (!parentStats.isDirectory() || parentStats.isSymbolicLink()) return;
+    const parentStats = lstatSync(parent, { bigint: true });
+    if (!parentStats.isDirectory() || parentStats.isSymbolicLink() || filesystemIdentity(parentStats) === undefined) return;
     // mkdir's mode is the creation default; chmod is best effort for existing private dirs.
     try {
       chmodSync(parent, 0o700);
@@ -133,6 +133,9 @@ export function logHookError(message: string, paths?: RockyPaths): void {
     if (listed && (!regularDescriptorSafe(listed) || !sameFilesystemIdentity(listed, listed))) return;
 
     const create = listed === undefined;
+    const parentBeforeOpen = lstatSync(parent, { bigint: true });
+    if (!parentBeforeOpen.isDirectory() || parentBeforeOpen.isSymbolicLink()
+        || !sameFilesystemIdentity(parentStats, parentBeforeOpen)) return;
     fd = openSync(
       target,
       constants.O_WRONLY | constants.O_APPEND | (create ? constants.O_CREAT | constants.O_EXCL : constants.O_CREAT) | NO_FOLLOW,
@@ -160,6 +163,9 @@ export function logHookError(message: string, paths?: RockyPaths): void {
     const after = fstatSync(fd, { bigint: true });
     if (!regularDescriptorSafe(after) || !sameFilesystemIdentity(opened, after)) return;
     if (after.size > BigInt(LOG_CAP_BYTES)) ftruncateSync(fd, LOG_CAP_BYTES);
+    const parentAfter = lstatSync(parent, { bigint: true });
+    if (!parentAfter.isDirectory() || parentAfter.isSymbolicLink()
+        || !sameFilesystemIdentity(parentStats, parentAfter)) return;
   } catch {
     // A broken log path must never break a vendor hook.
   } finally {
