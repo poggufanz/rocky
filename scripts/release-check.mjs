@@ -340,29 +340,81 @@ function fullGitObjectId(value) {
   return typeof value === "string" && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(value);
 }
 
+function markdownSourceLines(text) {
+  let fence;
+  return text.split(/\r?\n/u).map((line) => {
+    const opening = /^\s{0,3}(`{3,}|~{3,})/.exec(line)?.[1];
+    if (fence !== undefined) {
+      const closing = /^\s{0,3}(`{3,}|~{3,})\s*$/u.exec(line)?.[1];
+      if (closing !== undefined && closing[0] === fence.character && closing.length >= fence.length) fence = undefined;
+      return "";
+    }
+    if (opening !== undefined) {
+      fence = { character: opening[0], length: opening.length };
+      return "";
+    }
+    return line;
+  });
+}
+
+function markdownH2Sections(text) {
+  const sections = [];
+  let current;
+  for (const line of markdownSourceLines(text)) {
+    const heading = /^\s{0,3}##(?!#)\s+(.+?)\s*$/u.exec(line);
+    if (heading !== null) {
+      current = { title: heading[1].trim(), lines: [line] };
+      sections.push(current);
+    } else if (current !== undefined) {
+      current.lines.push(line);
+    }
+  }
+  return sections.map((section) => ({
+    title: section.title,
+    lines: section.lines,
+    text: section.lines.join("\n"),
+  }));
+}
+
+function releaseClauses(line) {
+  return line
+    .split(/(?:[.!?;](?=\s|$))\s*/u)
+    .flatMap((sentence) => sentence.split(/\s+\b(?:but|however|although|though)\b\s*/iu));
+}
+
+function directlyNegated(clause, start, end) {
+  const before = clause.slice(0, start);
+  const after = clause.slice(end);
+  if (/(?:^|\s)\b(?:not|never)(?:\s+yet)?(?:\s+been)?\s*$/i.test(before)) return true;
+  if (/(?:^|\s)\b(?:no|without)(?:\s+package)?(?:\s+(?:is|are|was|were|has|have|had|been)){0,2}\s*$/i.test(before)) {
+    return true;
+  }
+  if (/\bno\s+version\s+bump\s+or\s*$/i.test(before)) return true;
+  return /^\s*(?:(?:is|are|was|were|has|have|had|does|did|can|could|will|would)\s+)?(?:no|not|never)\b/i.test(after);
+}
+
 function hasPositivePublicationClaim(text) {
   const context = /(?:\bnpm\b|\bpackage\b|\brelease\b|\bversion\b|\btarball\b|\bartifact\b|\bregistry\b|@poggufanz\/rocky-cli)/i;
-  const publication = /\bpublish\w*\b|\bpublication\w*\b|\b(?:available|live)\b[\s\S]{0,60}\b(?:on|from|via)\s+(?:npm|the registry|registry\.npmjs\.org)\b|\b(?:npm|the registry|registry\.npmjs\.org)\b[\s\S]{0,60}\b(?:available|live)\b/i;
-  const negative = /\b(?:no|not|never|without)\b[\s\S]{0,80}\b(?:publish\w*\b|publication\w*\b|available\b|live\b)|\b(?:publish\w*\b|publication\w*\b|available\b|live\b)[\s\S]{0,80}\b(?:no|not|never)\b/i;
-  return text.split(/\r?\n/u).some((line) => {
-    return line.split(/[.;!?]+/u).some((clause) => context.test(clause)
-      && publication.test(clause)
-      && !negative.test(clause));
-  });
+  const signals = [
+    /\b(?:publish\w*|publication\w*)\b/gi,
+    /\b(?:available|live)\b[\s\S]{0,80}\b(?:on|from|via|in)\s+(?:npm|the npm registry|npm registry|the registry|registry\.npmjs\.org)\b/gi,
+    /\b(?:package|version|release|tarball|artifact)\b[\s\S]{0,80}\b(?:is|are|was|were|now)\s+(?:on|from|via|in)\s+(?:npm|the npm registry|npm registry|the registry|registry\.npmjs\.org)\b/gi,
+  ];
+  return markdownSourceLines(text).some((line) => releaseClauses(line).some((clause) => {
+    if (!context.test(clause)) return false;
+    const matches = new Map();
+    for (const signal of signals) {
+      for (const match of clause.matchAll(signal)) {
+        const start = match.index ?? 0;
+        matches.set(`${start}:${start + match[0].length}`, { start, end: start + match[0].length });
+      }
+    }
+    return [...matches.values()].some(({ start, end }) => !directlyNegated(clause, start, end));
+  }));
 }
 
 function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-function currentChangelogSection(text, expectedVersion) {
-  const escapedExpectedVersion = escapeRegExp(expectedVersion);
-  const heading = new RegExp(`^##\\s+${escapedExpectedVersion}\\s+[^\\r\\n]*`, "im").exec(text);
-  if (heading === null) return "";
-  const bodyStart = heading.index + heading[0].length;
-  const nextHeading = /^##\s+\d+\.\d+\.\d+\s+/m.exec(text.slice(bodyStart));
-  const sectionEnd = nextHeading === null ? text.length : bodyStart + nextHeading.index;
-  return text.slice(heading.index, sectionEnd);
 }
 
 export function validateReleaseTruth(snapshot) {
@@ -393,17 +445,20 @@ export function validateReleaseTruth(snapshot) {
   }
 
   const readme = typeof value.readme === "string" ? value.readme : "";
-  const roadmap = readme.slice(readme.indexOf("## Roadmap"));
-  const currentRoadmapLines = roadmap.split(/\r?\n/u).filter((line) => /\(current release\)/i.test(line));
+  const visibleReadmeLines = markdownSourceLines(readme);
+  const roadmapSections = markdownH2Sections(readme).filter((section) => /^Roadmap$/i.test(section.title));
+  const roadmap = roadmapSections.length === 1 ? roadmapSections[0] : undefined;
+  const currentRoadmapLines = roadmap?.lines.filter((line) => /\(current release\)/i.test(line)) ?? [];
   const roadmapToken = /^[-*]\s+\*\*(v\d+\.\d+(?:\.\d+)?)\s+/i.exec(currentRoadmapLines[0] ?? "")?.[1];
   const allowedRoadmapTokens = new Set([`v${expectedVersion}`, `v${expectedVersion.replace(/\.0$/, "")}`]);
   const allowedRoadmapToken = roadmapToken !== undefined && allowedRoadmapTokens.has(roadmapToken);
-  const currentReleaseLines = readme.split(/\r?\n/u).filter((line) => /^\s*Current release\s*:/i.test(line));
-  const currentReleaseMarkerCount = (readme.match(/\bCurrent release\s*:/gi) ?? []).length;
+  const currentReleaseLines = visibleReadmeLines.filter((line) => /^\s*Current release\s*:/i.test(line));
+  const currentReleaseMarkerCount = (visibleReadmeLines.join("\n").match(/\bCurrent release\s*:/gi) ?? []).length;
   const canonicalCurrentMarker = `Current release: \`${PACKAGE_NAME}@${expectedVersion}\``;
   if (currentReleaseMarkerCount !== 1
       || currentReleaseLines.length !== 1
       || !currentReleaseLines[0].trim().startsWith(canonicalCurrentMarker)
+      || roadmap === undefined
       || currentRoadmapLines.length !== 1
       || !allowedRoadmapToken
       || hasPositivePublicationClaim(readme)) {
@@ -411,12 +466,13 @@ export function validateReleaseTruth(snapshot) {
   }
 
   const changelog = typeof value.changelog === "string" ? value.changelog : "";
-  const heading = /^##\s+(\d+\.\d+\.\d+)\s+[—-]/m.exec(changelog);
-  const currentSection = currentChangelogSection(changelog, expectedVersion);
-  const expectedHeadingPattern = new RegExp(`^##\\s+${escapeRegExp(expectedVersion)}(?=\\s|$)`, "gim");
-  const expectedHeadingCount = [...changelog.matchAll(expectedHeadingPattern)].length;
-  if (heading?.[1] !== expectedVersion
-      || expectedHeadingCount !== 1
+  const changelogSections = markdownH2Sections(changelog);
+  const releaseSections = changelogSections.filter((section) => /^\d+\.\d+\.\d+(?:\s|$)/u.test(section.title));
+  const headingVersion = /^(\d+\.\d+\.\d+)(?:\s|$)/u.exec(releaseSections[0]?.title ?? "")?.[1];
+  const expectedSections = releaseSections.filter((section) => new RegExp(`^${escapeRegExp(expectedVersion)}(?:\\s|$)`).test(section.title));
+  const currentSection = expectedSections.length === 1 ? expectedSections[0].text : "";
+  if (headingVersion !== expectedVersion
+      || expectedSections.length !== 1
       || (currentSection !== "" && /\b(?:unreleased|unpublished)\b/i.test(currentSection))
       || hasPositivePublicationClaim(changelog)) {
     errors.push("CHANGELOG release status is stale");
