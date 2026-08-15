@@ -8,7 +8,7 @@
  * stderr grow past `tailLines` lines of at most `maxLineBytes` bytes each.
  */
 
-import { spawn, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { statSync } from "node:fs";
 import { constants } from "node:os";
 import { isAbsolute } from "node:path";
@@ -117,6 +117,7 @@ export function runGit(
       return;
     }
     const child = spawn(command.command, [...command.prefix, ...args], {
+      shell: false,
       stdio: ["pipe", "pipe", "pipe"],
       env: { ...process.env, LC_ALL: "C", LANG: "C" },
     });
@@ -174,49 +175,6 @@ export function runGit(
     }
     child.stdin.end(input);
   });
-}
-
-/**
- * Synchronous Git invocation for syntax-only patch validation. Callers must
- * use a bounded input and output budget; this shares the exact executable and
- * argv seam with runGit so tests cannot silently fall through to PATH Git.
- */
-export function runGitSync(
-  args: readonly string[],
-  input?: string,
-  options: GitOptions = {},
-): GitResult {
-  const command = gitSpawnCommand();
-  if (command === null) {
-    return {
-      code: 127,
-      stdout: "",
-      stderr: "invalid ROCKY_GIT_TEST_SHIM; git process not started",
-      timedOut: false,
-      outputLimitExceeded: false,
-    };
-  }
-  const result = spawnSync(command.command, [...command.prefix, ...args], {
-    input,
-    stdio: ["pipe", "pipe", "pipe"],
-    env: { ...process.env, LC_ALL: "C", LANG: "C" },
-    ...(options.timeoutMs === undefined ? {} : { timeout: options.timeoutMs }),
-    ...(options.maxOutputBytes === undefined ? {} : { maxBuffer: options.maxOutputBytes }),
-  });
-  const stdout = Buffer.isBuffer(result.stdout) ? result.stdout.toString("utf8") : String(result.stdout ?? "");
-  let stderr = Buffer.isBuffer(result.stderr) ? result.stderr.toString("utf8") : String(result.stderr ?? "");
-  if (result.error !== undefined && stderr.length === 0) stderr = result.error.message;
-  const errorCode = (result.error as NodeJS.ErrnoException | undefined)?.code;
-  const timedOut = errorCode === "ETIMEDOUT";
-  const outputLimitExceeded = errorCode === "ENOBUFS"
-    || /maxBuffer|ENOBUFS/i.test(result.error?.message ?? "");
-  return {
-    code: typeof result.status === "number" ? result.status : signalExit(result.signal),
-    stdout,
-    stderr,
-    timedOut,
-    outputLimitExceeded,
-  };
 }
 
 /** Exported for tests: the ring buffer, independent of any child process. */

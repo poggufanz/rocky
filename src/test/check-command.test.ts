@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
-import { chmodSync, closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import test, { type TestContext } from "node:test";
@@ -199,7 +199,7 @@ function throwingStderrPreload(box: Sandbox, target: string, registry404 = false
 
 function installGitShim(
   box: Sandbox,
-  mode: "merge-base-128" | "diff-hang-once" | "diff-flood" | "diff-stderr-flood" | "diff-malformed" | "diff-ambiguous" | "diff-index-only" | "diff-old-mode" | "diff-rename-from" | "diff-marker-only" | "diff-hunk-empty" | "diff-binary-patch" | "diff-invalid-later" | "diff-name-only-missing" | "diff-name-only-leading" | "diff-name-only-double" | "diff-name-only-bare" | "apply-numstat-orphan" | "rev-parse-flood" | "show-flood" | "show-128",
+  mode: "merge-base-128" | "diff-hang-once" | "diff-flood" | "diff-stderr-flood" | "diff-malformed" | "diff-ambiguous" | "diff-index-only" | "diff-old-mode" | "diff-rename-from" | "diff-marker-only" | "diff-hunk-empty" | "diff-binary-patch" | "diff-invalid-later" | "diff-name-only-missing" | "diff-name-only-leading" | "diff-name-only-double" | "diff-name-only-bare" | "ls-tree-name-only-bare" | "apply-numstat-orphan" | "apply-numstat-bad-number" | "apply-numstat-mixed-binary" | "apply-numstat-count-mismatch" | "rev-parse-flood" | "show-flood" | "show-128",
 ): void {
   let realGit = (box.env.PATH ?? "")
     .split(delimiter)
@@ -216,8 +216,8 @@ function installGitShim(
     }
   }
   assert.ok(realGit, "git executable must be present on PATH");
-  const bin = join(box.root, "git-shim-bin");
-  const script = join(bin, "git-shim.cjs");
+  const bin = join(box.root, "git shim bin");
+  const script = join(bin, "git shim.cjs");
   mkdirSync(bin, { recursive: true });
   writeFileSync(script, [
     "#!/usr/bin/env node",
@@ -242,7 +242,11 @@ function installGitShim(
     "if (mode === 'diff-name-only-leading' && args.includes('--name-only')) { require('node:fs').writeSync(1, '\\0package.json\\0'); process.exit(0); }",
     "if (mode === 'diff-name-only-double' && args.includes('--name-only')) { require('node:fs').writeSync(1, 'package.json\\0\\0'); process.exit(0); }",
     "if (mode === 'diff-name-only-bare' && args.includes('--name-only')) { require('node:fs').writeSync(1, '\\0'); process.exit(0); }",
+    "if (mode === 'ls-tree-name-only-bare' && args.includes('ls-tree')) { require('node:fs').writeSync(1, '\\0'); process.exit(0); }",
     "if (mode === 'apply-numstat-orphan' && args.includes('apply')) { require('node:fs').writeSync(1, '0\\t0\\tfile.ts\\0orphan\\0'); process.exit(0); }",
+    "if (mode === 'apply-numstat-bad-number' && args.includes('apply')) { require('node:fs').writeSync(1, '1x\\t0\\tfile.ts\\0'); process.exit(0); }",
+    "if (mode === 'apply-numstat-mixed-binary' && args.includes('apply')) { require('node:fs').writeSync(1, '-\\t0\\tfile.ts\\0'); process.exit(0); }",
+    "if (mode === 'apply-numstat-count-mismatch' && args.includes('apply')) { require('node:fs').writeSync(1, '0\\t0\\tfile.ts\\0'); process.exit(0); }",
     "if (mode === 'rev-parse-flood' && args.includes('--git-dir')) { require('node:fs').writeSync(1, Buffer.alloc(1024 * 1024 + 1, 120)); process.exit(0); }",
     "if (mode === 'show-flood' && args.includes('show')) { require('node:fs').writeSync(1, Buffer.alloc(1024 * 1024 + 1, 120)); process.exit(0); }",
     "if (mode === 'show-128' && args.includes('show')) process.exit(128);",
@@ -255,13 +259,6 @@ function installGitShim(
     "process.exit(result.status === null ? 1 : result.status);",
     "",
   ].join("\n"), "utf8");
-  if (process.platform === "win32") {
-    writeFileSync(join(bin, "git.cmd"), `@"${process.execPath}" "${script}" %*\r\n`, "utf8");
-  } else {
-    chmodSync(script, 0o755);
-    symlinkSync("git-shim.cjs", join(bin, "git"));
-  }
-  box.env.PATH = `${bin}${delimiter}${box.env.PATH ?? ""}`;
   box.env.ROCKY_REAL_GIT = realGit;
   box.env.ROCKY_GIT_SHIM_MODE = mode;
   box.env.ROCKY_GIT_SHIM_MARKER = join(box.root, "git-shim.marker");
@@ -699,9 +696,31 @@ test("the bounded Git process seam intercepts argv and preserves a finding befor
   assert.match(result.stderr, /src\/key\.ts:1/);
   assert.match(result.stderr, /INCOMPLETE/i);
   const calls = shimCalls(box);
-  assert.ok(calls.some(({ marker }) => marker === "rocky-git-shim"));
-  assert.ok(calls.some(({ args }) => args.includes("diff")), "secret diff was not intercepted");
-  assert.ok(calls.every(({ marker }) => marker === "rocky-git-shim"), "a real Git process bypassed the seam");
+  assert.ok(calls.every(({ marker }) => marker === "rocky-git-shim"));
+  assert.deepEqual(calls.map(({ args }) => args), [
+    ["-c", "core.quotePath=false", "rev-parse", "--git-dir"],
+    ["-c", "core.quotePath=false", "diff", "--unified=0", "--no-color", "--no-ext-diff", commits.first, commits.second!, "--"],
+    ["apply", "--numstat", "-z"],
+    ["-c", "core.quotePath=false", "diff", "--unified=0", "--no-color", "--no-ext-diff", commits.first, invalid, "--"],
+    ["-c", "core.quotePath=false", "diff", "--name-only", "-z", commits.first, commits.second!, "--"],
+    ["-c", "core.quotePath=false", "diff", "--name-only", "-z", commits.first, invalid, "--"],
+  ]);
+});
+
+test("the process-test seam needs explicit mode and never falls through when invalid", async (t) => {
+  const box = sandbox(t);
+  initRepo(box, { "src/key.ts": "export const key = \"AKIAABCDEFGHIJKLMNOP\";\n" });
+  box.env.ROCKY_GIT_TEST_SHIM = "{}";
+
+  const ambient = await runCheck(box, ["--offline", "--quiet"]);
+  assertCompleted(ambient, 1);
+  assert.match(ambient.stderr, /src\/key\.ts:1/);
+
+  box.env.ROCKY_GIT_TEST_MODE = "1";
+  const explicit = await runCheck(box, ["--offline", "--quiet"]);
+  assertCompleted(explicit, 2);
+  assert.match(explicit.stderr, /invalid ROCKY_GIT_TEST_SHIM|INCOMPLETE/i);
+  assert.doesNotMatch(explicit.stderr, /src\/key\.ts:1/);
 });
 
 test("a package finding from an earlier range survives a later invalid range", async (t) => {
@@ -744,16 +763,40 @@ test("malformed name-only NUL framing is incomplete and never clean", async (t) 
   }
 });
 
-test("orphan Git apply numstat frame is incomplete and intercepted", async (t) => {
+test("malformed ls-tree NUL framing is incomplete and never clean", async (t) => {
   const box = sandbox(t);
-  initRepo(box, { "README.md": "clean\n" });
-  installGitShim(box, "apply-numstat-orphan");
+  const commits = initRepo(box, {
+    "package.json": "{}\n",
+    ".npmrc": "registry=https://registry.npmjs.org/\n",
+    "package-lock.json": JSON.stringify({ lockfileVersion: 3, packages: {} }),
+  }, {
+    "package.json": JSON.stringify({ dependencies: { [NEVER_PACKAGE]: "1.0.0" } }),
+  });
+  installGitShim(box, "ls-tree-name-only-bare");
 
-  const result = await runCheck(box, ["--offline", "--quiet"]);
+  const result = await runCheck(box, ["--offline", "--quiet", "--pre-push"], prePushLine(commits.second!, commits.first));
 
-  assertCompleted(result, 2);
+  assertCompleted(result, 0);
   assert.match(result.stderr, /INCOMPLETE|malformed|ambiguous/i);
-  assert.ok(shimCalls(box).some(({ args }) => args.includes("apply")), "apply validator was not intercepted");
+});
+
+test("malformed or inconsistent Git apply numstat framing is incomplete and intercepted", async (t) => {
+  for (const mode of [
+    "apply-numstat-orphan",
+    "apply-numstat-bad-number",
+    "apply-numstat-mixed-binary",
+    "apply-numstat-count-mismatch",
+  ] as const) {
+    const box = sandbox(t);
+    initRepo(box, { "README.md": "clean\n" });
+    installGitShim(box, mode);
+
+    const result = await runCheck(box, ["--offline", "--quiet"]);
+
+    assertCompleted(result, 2, mode);
+    assert.match(result.stderr, /INCOMPLETE|malformed|ambiguous/i, mode);
+    assert.ok(shimCalls(box).some(({ args }) => args.includes("apply")), `${mode}: apply validator was not intercepted`);
+  }
 });
 
 test("README and pre-push hook document the same clean/incomplete mapping", () => {

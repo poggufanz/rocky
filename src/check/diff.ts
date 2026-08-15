@@ -1,4 +1,4 @@
-import { runGit, runGitSync, type GitResult } from "../core/exec.js";
+import { runGit } from "../core/exec.js";
 
 /** One ref line from git's pre-push stdin, per githooks(5). */
 export interface PushRef {
@@ -195,18 +195,6 @@ function parseNumstatAdded(output: string): number | null {
 const PATCH_PARSE_TIMEOUT_MS = 5_000;
 const MAX_PATCH_PARSE_BYTES = 1024 * 1024;
 
-function validatePatchWithGit(diffText: string): number | null {
-  // Git's stats-only parser reads the patch but does not update the index or worktree.
-  const patchInput = diffText.endsWith("\n") ? diffText : `${diffText}\n`;
-  const result: GitResult = runGitSync(
-    ["apply", "--numstat", "-z"],
-    patchInput,
-    { timeoutMs: PATCH_PARSE_TIMEOUT_MS, maxOutputBytes: MAX_PATCH_PARSE_BYTES },
-  );
-  if (result.code !== 0 || result.timedOut || result.outputLimitExceeded) return null;
-  return parseNumstatAdded(result.stdout);
-}
-
 function hasSafePatchOrder(diffText: string): boolean {
   let inHunk = false;
   let hasSection = false;
@@ -361,23 +349,8 @@ function hasSafePatchOrder(diffText: string): boolean {
   return hasSection && finishSection();
 }
 
-/** Parse Git's bounded unified-0 response, using Git itself as syntax proof. */
-export function parseUnifiedZeroDiffChecked(diffText: string): UnifiedDiffParseResult {
-  if (diffText.length === 0) return { added: [], complete: true };
-  if (Buffer.byteLength(diffText, "utf8") > MAX_PATCH_PARSE_BYTES) return { added: [], complete: false };
-  const lines = diffText.split(/\r?\n/);
-  if (lines.at(-1) === "") lines.pop();
-  if (lines.some((line) => line.length === 0)) return { added: [], complete: false };
-  if (!hasSafePatchOrder(diffText)) return { added: [], complete: false };
-  const expectedAdded = validatePatchWithGit(diffText);
-  if (expectedAdded === null) return { added: [], complete: false };
-  const added = extractAddedLines(diffText);
-  if (added.length !== expectedAdded) return { added: [], complete: false };
-  return { added, complete: true };
-}
-
-/** Async production variant: reuse the check path's bounded child-process runner. */
-export async function parseUnifiedZeroDiffCheckedAsync(diffText: string): Promise<UnifiedDiffParseResult> {
+/** Parse Git's bounded unified-0 response with the check path's async runner. */
+export async function parseUnifiedZeroDiffChecked(diffText: string): Promise<UnifiedDiffParseResult> {
   if (diffText.length === 0) return { added: [], complete: true };
   if (Buffer.byteLength(diffText, "utf8") > MAX_PATCH_PARSE_BYTES) return { added: [], complete: false };
   const lines = diffText.split(/\r?\n/);

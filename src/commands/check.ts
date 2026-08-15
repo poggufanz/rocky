@@ -2,7 +2,7 @@ import { resolve } from "node:path";
 import {
   parseNameOnlyZero,
   parsePrePushStdin,
-  parseUnifiedZeroDiffCheckedAsync,
+  parseUnifiedZeroDiffChecked,
   rangeForPush,
   type AddedLine,
   type PushRange,
@@ -248,7 +248,7 @@ async function addedLines(ranges: readonly DiffRange[], quiet: boolean, state: C
         "diff", "--unified=0", "--no-color", "--no-ext-diff",
         range.base, range.head, "--",
       ], undefined, { maxOutputBytes: MAX_READ_BYTES, notInspected: "secret lines" });
-      const parsed = await parseUnifiedZeroDiffCheckedAsync(diff);
+      const parsed = await parseUnifiedZeroDiffChecked(diff);
       if (!parsed.complete) {
         throw new Error("git diff output was malformed or ambiguous; secret lines not inspected");
       }
@@ -289,7 +289,16 @@ async function showFile(rev: string, path: string): Promise<string | null> {
   if (listed.code !== 0) {
     throw new Error(`git ls-tree failed with exit ${listed.code}; package files not inspected`);
   }
-  if (listed.stdout.length === 0) return null;
+  let listedPaths: string[];
+  try {
+    listedPaths = parseNameOnlyZero(listed.stdout);
+  } catch {
+    throw new Error("git ls-tree output was malformed or ambiguous; package files not inspected");
+  }
+  if (listedPaths.length === 0) return null;
+  if (listedPaths.length !== 1 || listedPaths[0] !== path) {
+    throw new Error("git ls-tree output did not match requested package path; package files not inspected");
+  }
   const result = await gitMaybe(
     ["show", `${rev}:${path}`],
     undefined,

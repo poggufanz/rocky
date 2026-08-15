@@ -139,7 +139,7 @@ test("parseUnifiedZeroDiff ignores plus-prefixed lines outside a hunk", () => {
   ]);
 });
 
-test("checked unified diff requires exact declared hunk counts", () => {
+test("checked unified diff requires exact declared hunk counts", async () => {
   const cases = [
     [
       "declared old/new counts overflow",
@@ -198,11 +198,11 @@ test("checked unified diff requires exact declared hunk counts", () => {
   ] as const;
 
   for (const [name, diff] of cases) {
-    assert.equal(parseUnifiedZeroDiffChecked(diff).complete, false, name);
+    assert.equal((await parseUnifiedZeroDiffChecked(diff)).complete, false, name);
   }
 });
 
-test("checked unified diff rejects incomplete metadata and raw blank grammar", () => {
+test("checked unified diff rejects incomplete metadata and raw blank grammar", async () => {
   const cases = [
     ["one-operand diff header", "diff --git a/file.ts\n"],
     [
@@ -295,11 +295,11 @@ test("checked unified diff rejects incomplete metadata and raw blank grammar", (
   ] as const;
 
   for (const [name, diff] of cases) {
-    assert.equal(parseUnifiedZeroDiffChecked(diff).complete, false, name);
+    assert.equal((await parseUnifiedZeroDiffChecked(diff)).complete, false, name);
   }
 });
 
-test("checked unified diff decodes C-quoted paths and accepts exact zero-count hunks", () => {
+test("checked unified diff decodes C-quoted paths and accepts exact zero-count hunks", async () => {
   const diff = [
     'diff --git "a/space\\tname.ts" "b/space\\tname.ts"',
     '--- "a/space\\tname.ts"',
@@ -308,13 +308,13 @@ test("checked unified diff decodes C-quoted paths and accepts exact zero-count h
     "+added",
   ].join("\n");
 
-  assert.deepEqual(parseUnifiedZeroDiffChecked(diff), {
+  assert.deepEqual(await parseUnifiedZeroDiffChecked(diff), {
     complete: true,
     added: [{ file: "space\tname.ts", line: 1, text: "added" }],
   });
 });
 
-test("checked unified diff retains additions from every exact hunk and section", () => {
+test("checked unified diff retains additions from every exact hunk and section", async () => {
   const diff = [
     "diff --git a/one.ts b/one.ts",
     "index 1111111..2222222",
@@ -334,7 +334,7 @@ test("checked unified diff retains additions from every exact hunk and section",
     "+fourth",
   ].join("\n");
 
-  assert.deepEqual(parseUnifiedZeroDiffChecked(diff), {
+  assert.deepEqual(await parseUnifiedZeroDiffChecked(diff), {
     complete: true,
     added: [
       { file: "one.ts", line: 1, text: "first" },
@@ -359,7 +359,7 @@ test("name-only NUL framing accepts only exact nonempty frames plus one terminat
   }
 });
 
-test("checked parser accepts Git's ordinary metadata and file-shape matrix", () => {
+test("checked parser accepts Git's ordinary metadata and file-shape matrix", async () => {
   const cases = [
     [
       "modify with mode",
@@ -516,11 +516,11 @@ test("checked parser accepts Git's ordinary metadata and file-shape matrix", () 
   ] as const;
 
   for (const [name, diff] of cases) {
-    assert.equal(parseUnifiedZeroDiffChecked(diff).complete, true, name);
+    assert.equal((await parseUnifiedZeroDiffChecked(diff)).complete, true, name);
   }
 });
 
-test("checked parser accepts normal Unicode and space path operands", () => {
+test("checked parser accepts normal Unicode and space path operands", async () => {
   const diff = [
     "diff --git a/space name/ユニコード.ts b/space name/ユニコード.ts",
     "index 1111111..2222222",
@@ -530,7 +530,7 @@ test("checked parser accepts normal Unicode and space path operands", () => {
     "+portable",
   ].join("\n");
 
-  assert.deepEqual(parseUnifiedZeroDiffChecked(diff), {
+  assert.deepEqual(await parseUnifiedZeroDiffChecked(diff), {
     complete: true,
     added: [{ file: "space name/ユニコード.ts", line: 1, text: "portable" }],
   });
