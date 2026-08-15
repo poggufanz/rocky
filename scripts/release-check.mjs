@@ -12,9 +12,8 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { delimiter, dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { dirname, isAbsolute, join, parse, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { commandInvocation } from "./package-smoke-support.mjs";
 
 const packageRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const packageMetadata = JSON.parse(readFileSync(join(packageRoot, "package.json"), "utf8"));
@@ -106,54 +105,85 @@ export function sanitizeReleaseEnvironment(source = process.env) {
   return removed ? env : source;
 }
 
-function environmentPath(environment) {
-  return environment.PATH
-    ?? environment.Path
-    ?? Object.entries(environment).find(([key]) => key.toLowerCase() === "path")?.[1]
-    ?? "";
-}
-
-function resolveNpmExecutable(environment = process.env) {
-  const names = process.platform === "win32" ? ["npm.cmd", "npm.exe"] : ["npm"];
-  const candidates = [
-    ...names.map((name) => join(dirname(process.execPath), name)),
-    ...environmentPath(environment).split(delimiter).flatMap((directory) =>
-      directory === "" ? [] : names.map((name) => join(directory, name))),
-  ];
-  for (const candidate of candidates) {
-    try {
-      accessSync(candidate, process.platform === "win32" ? constants.F_OK : constants.X_OK);
-      return resolve(candidate);
-    } catch {
-      // Continue through bounded PATH candidates.
-    }
+function regularFile(candidate, executable = false) {
+  try {
+    if (!lstatSync(candidate).isFile()) return undefined;
+    if (executable && process.platform !== "win32") accessSync(candidate, constants.X_OK);
+    return resolve(candidate);
+  } catch {
+    return undefined;
   }
-  throw new StepError("npm executable is unavailable");
 }
 
-export function resolveGitExecutable(environment = process.env) {
-  const names = process.platform === "win32" ? ["git.exe"] : ["git"];
-  const candidates = [
-    ...names.map((name) => join(dirname(process.execPath), name)),
-    ...environmentPath(environment).split(delimiter).flatMap((directory) =>
-      directory === "" ? [] : names.map((name) => join(directory, name))),
+function nodeDirectoryCandidates() {
+  const nodeDirectory = dirname(process.execPath);
+  if (process.platform !== "win32") {
+    return [nodeDirectory, "/usr/bin", "/bin", "/usr/local/bin", "/opt/homebrew/bin"];
+  }
+  const programFiles = dirname(nodeDirectory);
+  const volumeRoot = parse(process.execPath).root;
+  return [
+    nodeDirectory,
+    join(programFiles, "Git", "cmd"),
+    join(programFiles, "Git", "bin"),
+    join(volumeRoot, "Program Files", "Git", "cmd"),
+    join(volumeRoot, "Program Files", "Git", "bin"),
+    join(volumeRoot, "Program Files (x86)", "Git", "cmd"),
+    join(volumeRoot, "Program Files (x86)", "Git", "bin"),
+    join(volumeRoot, "Windows", "System32"),
   ];
-  for (const candidate of candidates) {
-    try {
-      accessSync(candidate, process.platform === "win32" ? constants.F_OK : constants.X_OK);
-      return resolve(candidate);
-    } catch {
-      // Continue through bounded PATH candidates.
-    }
+}
+
+function trustedGitCandidates() {
+  return nodeDirectoryCandidates().map((directory) => join(directory, process.platform === "win32" ? "git.exe" : "git"));
+}
+
+function trustedNpmCandidates() {
+  const nodeDirectory = dirname(process.execPath);
+  return [
+    join(nodeDirectory, "node_modules", "npm", "bin", "npm-cli.js"),
+    join(nodeDirectory, "..", "lib", "node_modules", "npm", "bin", "npm-cli.js"),
+    join(nodeDirectory, "..", "node_modules", "npm", "bin", "npm-cli.js"),
+    join(nodeDirectory, "..", "share", "nodejs", "npm", "bin", "npm-cli.js"),
+  ];
+}
+
+function trustedCommandProcessor() {
+  if (process.platform !== "win32") return undefined;
+  const volumeRoot = parse(process.execPath).root;
+  return regularFile(join(volumeRoot, "Windows", "System32", "cmd.exe"));
+}
+
+export function resolveNpmExecutable(_environment = process.env) {
+  for (const candidate of trustedNpmCandidates()) {
+    const npmCli = regularFile(candidate);
+    if (npmCli !== undefined) return npmCli;
+  }
+  throw new StepError("npm CLI executable is unavailable");
+}
+
+export function resolveNpmInvocation(environment = process.env) {
+  return { file: process.execPath, argsPrefix: [resolveNpmExecutable(environment)] };
+}
+
+export function resolveGitExecutable(_environment = process.env) {
+  for (const candidate of trustedGitCandidates()) {
+    const git = regularFile(candidate, true);
+    if (git !== undefined) return git;
   }
   throw new StepError("git executable is unavailable");
 }
 
 export function releaseCheckCommandPlan(npm, root = packageRoot) {
+  const invocation = typeof npm === "string" ? { file: npm, argsPrefix: [] } : npm;
+  if (invocation === null || typeof invocation !== "object" || typeof invocation.file !== "string" || !Array.isArray(invocation.argsPrefix)) {
+    throw new StepError("npm invocation is invalid");
+  }
+  const npmArgs = (args) => [ ...invocation.argsPrefix, ...args ];
   return {
-    npmVersion: { file: npm, args: ["--version"], display: "npm --version" },
-    fullTest: { file: npm, args: ["test"], display: "npm test" },
-    pack: { file: npm, args: ["pack", "--dry-run", "--json"], display: "npm pack --dry-run --json" },
+    npmVersion: { file: invocation.file, args: npmArgs(["--version"]), display: "npm --version" },
+    fullTest: { file: invocation.file, args: npmArgs(["test"]), display: "npm test" },
+    pack: { file: invocation.file, args: npmArgs(["pack", "--dry-run", "--json"]), display: "npm pack --dry-run --json" },
     smoke: {
       file: process.execPath,
       args: [join(root, "scripts", "package-smoke.mjs")],
@@ -201,20 +231,19 @@ function isolatedEnvironment(root) {
     NPM_CONFIG_FUND: "false",
     NPM_CONFIG_UPDATE_NOTIFIER: "false",
   });
+  for (const key of Object.keys(env)) {
+    if (key.toLowerCase() === "path" || key.toLowerCase() === "comspec") delete env[key];
+  }
+  env.PATH = [...new Set(nodeDirectoryCandidates())].join(process.platform === "win32" ? ";" : ":");
+  const commandProcessor = trustedCommandProcessor();
+  if (commandProcessor !== undefined) env.ComSpec = commandProcessor;
   delete env.NODE_OPTIONS;
   delete env.NODE_TEST_CONTEXT;
   return sanitizeReleaseEnvironment(env);
 }
 
-function runStep(state, env, label, file, args, display) {
-  const commandProcessor = env.ComSpec ?? env.COMSPEC ?? process.env.ComSpec ?? process.env.COMSPEC;
-  const invocation = commandInvocation(
-    file,
-    args,
-    process.platform,
-    commandProcessor,
-  );
-  const result = spawnSync(invocation.file, invocation.args, {
+export function runReleaseStep(state, env, label, file, args, display, runner = spawnSync) {
+  const result = runner(file, args, {
     cwd: packageRoot,
     env,
     shell: false,
@@ -222,7 +251,6 @@ function runStep(state, env, label, file, args, display) {
     timeout: COMMAND_TIMEOUT_MS,
     maxBuffer: MAX_COMMAND_OUTPUT_BYTES,
     windowsHide: true,
-    windowsVerbatimArguments: process.platform === "win32" && invocation.file === commandProcessor,
   });
   const status = result.status;
   const signal = result.signal;
@@ -261,7 +289,7 @@ export function readGitReleaseState(root, mode, runner = gitOutput, options = {}
   const run = (args) => runner(root, args, { env, gitExecutable });
   return {
     branch: run(["symbolic-ref", "--quiet", "--short", "HEAD"]) ?? "(detached)",
-    head: run(["rev-parse", "HEAD"]),
+    head: run(["rev-parse", "--verify", "HEAD^{commit}"]),
     status: run(["status", "--short", "--untracked-files=all", "--"]) ?? "(git status unavailable)",
     tagCommit: run(["rev-parse", "--verify", `refs/tags/${RELEASE_TAG}^{commit}`]),
     mode,
@@ -315,9 +343,19 @@ function fullGitObjectId(value) {
 function hasPositivePublicationClaim(text) {
   return text.split(/\r?\n/u).some((line) => {
     const releaseContext = /(?:\bnpm\b|\bpackage\b|\brelease\b|\bversion\b|\btarball\b|\bartifact\b|\bregistry\b|@poggufanz\/rocky-cli)/i.test(line);
-    const positiveClaim = /\b(?:is|was|were|has been|have been|now|already)\s+published\b|\bpublished\s+(?:package|version|release|artifact|tarball)\b|\bpublish(?:ed|es|ing)?\s+(?:to|on|as)\s+(?:npm|the registry|registry\.npmjs\.org)\b/i.test(line);
+    const positiveClaim = /\b(?:is|was|were|has been|have been|now|already)\s+published\b|\bpublished\s+(?:package|version|release|artifact|tarball)\b|\bpublish(?:ed|es|ing)?\s+(?:to|on|as)\s+(?:npm|the registry|registry\.npmjs\.org)\b|\bnpm\s+publishes?\s+(?:this\s+)?package\b|\bpackage\s+(?:is|was|has been)\s+live\s+(?:on|at)\s+npm\b|\bnpm\s+publication\s+(?:is|was|has been)\s+(?:complete|finished|live)\b/i.test(line);
     return releaseContext && positiveClaim;
   });
+}
+
+function currentChangelogSection(text, expectedVersion) {
+  const escapedExpectedVersion = expectedVersion.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const heading = new RegExp(`^##\\s+${escapedExpectedVersion}\\s+[^\\r\\n]*`, "im").exec(text);
+  if (heading === null) return "";
+  const bodyStart = heading.index + heading[0].length;
+  const nextHeading = /^##\s+\d+\.\d+\.\d+\s+/m.exec(text.slice(bodyStart));
+  const sectionEnd = nextHeading === null ? text.length : bodyStart + nextHeading.index;
+  return text.slice(heading.index, sectionEnd);
 }
 
 export function validateReleaseTruth(snapshot) {
@@ -362,9 +400,9 @@ export function validateReleaseTruth(snapshot) {
 
   const changelog = typeof value.changelog === "string" ? value.changelog : "";
   const heading = /^##\s+(\d+\.\d+\.\d+)\s+[—-]/m.exec(changelog);
-  const escapedExpectedVersion = expectedVersion.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const currentSection = currentChangelogSection(changelog, expectedVersion);
   if (heading?.[1] !== expectedVersion
-      || new RegExp(`##\\s+${escapedExpectedVersion}[\\s\\S]{0,800}\\b(?:unreleased|unpublished)\\b`, "i").test(changelog)
+      || (currentSection !== "" && /\b(?:unreleased|unpublished)\b/i.test(currentSection))
       || hasPositivePublicationClaim(changelog)) {
     errors.push("CHANGELOG release status is stale");
   }
@@ -660,13 +698,13 @@ async function main(reportPath, mode, truthOnly = false) {
       state.benchmark = { status: "not-run", reason: "truth-only validation" };
     } else {
       const npm = process.env.ROCKY_RELEASE_CHECK_TEST_SPAWN_ERROR === "1"
-        ? join(temporaryRoot, "missing-npm-executable")
-        : resolveNpmExecutable(env);
+        ? { file: join(temporaryRoot, "missing-npm-executable"), argsPrefix: [] }
+        : resolveNpmInvocation(env);
       const commands = releaseCheckCommandPlan(npm, packageRoot);
-      state.npm = runStep(state, env, "npm version", commands.npmVersion.file, commands.npmVersion.args, commands.npmVersion.display).trim();
-      runStep(state, env, "clean build and full tests", commands.fullTest.file, commands.fullTest.args, commands.fullTest.display);
+      state.npm = runReleaseStep(state, env, "npm version", commands.npmVersion.file, commands.npmVersion.args, commands.npmVersion.display).trim();
+      runReleaseStep(state, env, "clean build and full tests", commands.fullTest.file, commands.fullTest.args, commands.fullTest.display);
       assertMetadata(state);
-      state.manifest = parseManifest(runStep(
+      state.manifest = parseManifest(runReleaseStep(
         state,
         env,
         "dry-run package manifest",
@@ -674,7 +712,7 @@ async function main(reportPath, mode, truthOnly = false) {
         commands.pack.args,
         commands.pack.display,
       ));
-      runStep(
+      runReleaseStep(
         state,
         env,
         "installed tarball smoke",
@@ -685,7 +723,7 @@ async function main(reportPath, mode, truthOnly = false) {
 
       if (process.platform === "linux" && Number(process.versions.node.split(".")[0]) === 22) {
         const benchmarkPath = join(temporaryRoot, "benchmark.json");
-        runStep(
+        runReleaseStep(
           state,
           env,
           "MCP benchmark",
@@ -701,9 +739,9 @@ async function main(reportPath, mode, truthOnly = false) {
       }
     }
 
-    runStep(state, env, "git diff check", gitExecutable, ["diff", "--check"], "git diff --check");
+    runReleaseStep(state, env, "git diff check", gitExecutable, ["diff", "--check"], "git diff --check");
     state.diffCheckPassed = true;
-    state.gitStatus = runStep(state, env, "git status evidence", gitExecutable, ["status", "--short", "--untracked-files=all"], "git status --short --untracked-files=all");
+    state.gitStatus = runReleaseStep(state, env, "git status evidence", gitExecutable, ["status", "--short", "--untracked-files=all"], "git status --short --untracked-files=all");
     assertReleaseTruth(state, { mode, env, gitExecutable });
   } catch (error) {
     failed = true;

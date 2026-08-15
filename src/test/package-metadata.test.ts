@@ -374,6 +374,19 @@ test("canonical release truth rejects drift in every release marker", async () =
     [],
     "release history wording must not be treated as package publication",
   );
+  const currentSectionStart = snapshot.changelog.indexOf("## 0.5.0");
+  const nextSectionStart = snapshot.changelog.indexOf("\n## 0.4.0", currentSectionStart);
+  assert.ok(currentSectionStart >= 0 && nextSectionStart > currentSectionStart, "canonical changelog sections must exist");
+  const currentSection = snapshot.changelog.slice(currentSectionStart, nextSectionStart);
+  const lateUnreleasedStatus = snapshot.changelog.replace(
+    currentSection,
+    `${currentSection.slice(0, 900)}\nThis v0.5.0 release is unreleased.\n${currentSection.slice(900)}`,
+  );
+  assert.notDeepEqual(
+    releaseCheck.validateReleaseTruth({ ...snapshot, changelog: lateUnreleasedStatus }),
+    [],
+    "stale status beyond the old short scan must fail",
+  );
 
   const lock = object(snapshot.lock.packages, "lock packages");
   const lockRoot = object(lock[""], "lock root");
@@ -392,6 +405,9 @@ test("canonical release truth rejects drift in every release marker", async () =
     ["README publication claim", { ...snapshot, readme: `${snapshot.readme}\nThe npm package was published to npm.\n` }],
     ["README bare publication claim", { ...snapshot, readme: `${snapshot.readme}\nThe package published to npm.\n` }],
     ["README publish-to-npm claim", { ...snapshot, readme: `${snapshot.readme}\nThe package publishes to npm.\n` }],
+    ["README package live on npm claim", { ...snapshot, readme: `${snapshot.readme}\nThe package is live on npm.\n` }],
+    ["CHANGELOG publication complete claim", { ...snapshot, changelog: `${snapshot.changelog}\nnpm publication is complete.\n` }],
+    ["README npm publishes package claim", { ...snapshot, readme: `${snapshot.readme}\nnpm publishes this package.\n` }],
     ["CHANGELOG publication claim", { ...snapshot, changelog: `${snapshot.changelog}\nThe v0.5.0 package was published to npm.\n` }],
     ["help", { ...snapshot, helpStdout: snapshot.helpStdout.replace("@poggufanz/rocky-cli@0.5.0", "@poggufanz/rocky-cli@9.9.9") }],
     ["help wrong stream", { ...snapshot, helpStdout: "", helpStderr: snapshot.helpStdout }],

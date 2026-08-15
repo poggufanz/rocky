@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync, type SpawnSyncReturns } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test, { type TestContext } from "node:test";
@@ -309,7 +309,9 @@ test("release truth keeps branch and immutable-tag modes distinct", async () => 
       mode: string;
     };
     sanitizeReleaseEnvironment(environment: NodeJS.ProcessEnv): NodeJS.ProcessEnv;
-    releaseCheckCommandPlan(npm: string, root: string): Record<string, { file: string; args: string[] }>;
+    resolveGitExecutable(environment: NodeJS.ProcessEnv): string;
+    resolveNpmExecutable(environment: NodeJS.ProcessEnv): string;
+    releaseCheckCommandPlan(npm: string | { file: string; argsPrefix: string[] }, root: string): Record<string, { file: string; args: string[] }>;
   };
   const releaseHead = "20bc32090843334afa0ee92c0f0705fde625d1c3";
   const postReleaseHead = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -356,6 +358,7 @@ test("release truth keeps branch and immutable-tag modes distinct", async () => 
       if (options !== undefined) runnerOptions.push(options);
       const command = args.join(" ");
       if (command.startsWith("symbolic-ref")) return "iq";
+      if (command === "rev-parse --verify HEAD^{commit}") return postReleaseHead;
       if (command === "rev-parse HEAD") return postReleaseHead;
       if (command.startsWith("status")) return "";
       if (command === "rev-parse --verify refs/tags/v0.5.0^{commit}") return releaseHead;
@@ -386,7 +389,25 @@ test("release truth keeps branch and immutable-tag modes distinct", async () => 
     assert.ok(runnerOptions.length > 0);
     assert.ok(runnerOptions.every((options) => options.gitExecutable === "C:\\absolute\\git.exe" && options.env === sanitized));
     assert.ok(calls.some((args) => args.join(" ") === "status --short --untracked-files=all --"));
+    assert.ok(calls.some((args) => args.join(" ") === "rev-parse --verify HEAD^{commit}"));
     assert.ok(calls.some((args) => args.join(" ") === "rev-parse --verify refs/tags/v0.5.0^{commit}"));
+    const objectTypeCalls: string[][] = [];
+    const objectTypeRunner = (_root: string, args: string[]): string | undefined => {
+      objectTypeCalls.push(args);
+      const command = args.join(" ");
+      if (command.startsWith("symbolic-ref")) return "iq";
+      if (command === "rev-parse HEAD") return postReleaseHead;
+      if (command === "rev-parse --verify HEAD^{commit}") return undefined;
+      if (command.startsWith("status")) return "";
+      if (command === "rev-parse --verify refs/tags/v0.5.0^{commit}") return releaseHead;
+      return "cccccccccccccccccccccccccccccccccccccccc";
+    };
+    assert.notDeepEqual(
+      releaseCheck.validateGitReleaseState(releaseCheck.readGitReleaseState(fixture, "branch", objectTypeRunner)),
+      [],
+      "a hash-shaped non-commit must not satisfy HEAD evidence",
+    );
+    assert.ok(objectTypeCalls.some((args) => args.join(" ") === "rev-parse --verify HEAD^{commit}"));
     const dirtyRunner = (_root: string, args: string[]): string | undefined => (
       args[0] === "status" ? "?? dirty.txt" : runner(_root, args)
     );
@@ -403,6 +424,76 @@ test("release truth keeps branch and immutable-tag modes distinct", async () => 
   assert.deepEqual(plan.pack.args, ["pack", "--dry-run", "--json"]);
   assert.equal(plan.smoke.file, process.execPath);
   assert.deepEqual(plan.smoke.args, [join(packageRoot, "scripts", "package-smoke.mjs")]);
+});
+
+test("release evidence ignores hostile PATH and command processor", async () => {
+  const releaseCheck = await import(pathToFileURL(join(packageRoot, "scripts", "release-check.mjs")).href) as {
+    resolveGitExecutable(environment: NodeJS.ProcessEnv): string;
+    resolveNpmExecutable(environment: NodeJS.ProcessEnv): string;
+    resolveNpmInvocation(environment: NodeJS.ProcessEnv): { file: string; argsPrefix: string[] };
+    releaseCheckCommandPlan(npm: string | { file: string; argsPrefix: string[] }, root: string): Record<string, { file: string; args: string[] }>;
+  };
+  const fixture = mkdtempSync(join(tmpdir(), "rocky-release-tools "));
+  try {
+    const fakeGit = join(fixture, process.platform === "win32" ? "git.exe" : "git");
+    const fakeNpm = join(fixture, process.platform === "win32" ? "npm.cmd" : "npm");
+    writeFileSync(fakeGit, "fake git\n", "utf8");
+    writeFileSync(fakeNpm, "fake npm\n", "utf8");
+    if (process.platform !== "win32") {
+      chmodSync(fakeGit, 0o755);
+      chmodSync(fakeNpm, 0o755);
+    }
+    const hostile = {
+      ...process.env,
+      PATH: fixture,
+      Path: fixture,
+      ComSpec: join(fixture, process.platform === "win32" ? "hostile-cmd.exe" : "hostile-cmd"),
+    };
+    const git = releaseCheck.resolveGitExecutable(hostile);
+    const npm = releaseCheck.resolveNpmExecutable(hostile);
+    assert.notEqual(realpathSync(git), realpathSync(fakeGit));
+    assert.notEqual(realpathSync(npm), realpathSync(fakeNpm));
+    const npmInvocation = releaseCheck.resolveNpmInvocation(hostile);
+    assert.deepEqual(npmInvocation, { file: process.execPath, argsPrefix: [npm] });
+    const npmPlan = releaseCheck.releaseCheckCommandPlan(npmInvocation, packageRoot);
+    assert.equal(npmPlan.fullTest.file, process.execPath);
+    assert.deepEqual(npmPlan.fullTest.args, [npm, "test"]);
+    assert.equal(npmPlan.pack.file, process.execPath);
+    assert.deepEqual(npmPlan.pack.args, [npm, "pack", "--dry-run", "--json"]);
+    const source = readFileSync(join(packageRoot, "scripts", "release-check.mjs"), "utf8");
+    assert.doesNotMatch(source, /environmentPath|process\.env\.PATH/);
+    assert.doesNotMatch(source, /commandInvocation/);
+  } finally {
+    rmSync(fixture, { recursive: true, force: true });
+  }
+});
+
+test("release steps keep hostile ComSpec out of native argv", async () => {
+  const releaseCheck = await import(pathToFileURL(join(packageRoot, "scripts", "release-check.mjs")).href) as {
+    runReleaseStep(state: { commands: unknown[] }, env: NodeJS.ProcessEnv, label: string, file: string, args: string[], display: string, runner?: (...args: any[]) => SpawnSyncReturns<string>): string;
+  };
+  const calls: Array<{ file: string; args: string[]; options: Record<string, unknown> }> = [];
+  const state = { commands: [] as unknown[] };
+  const hostile = {
+    ...process.env,
+    PATH: "C:\\hostile-path",
+    ComSpec: "C:\\hostile-cmd.exe",
+  };
+  const npmCli = "C:\\trusted\\npm-cli.js";
+  const runner = (file: string, args: string[], options: Record<string, unknown>): SpawnSyncReturns<string> => {
+    calls.push({ file, args, options });
+    return { pid: 1, output: [], stdout: "ok\n", stderr: "", status: 0, signal: null, error: undefined };
+  };
+  assert.equal(
+    releaseCheck.runReleaseStep(state, hostile, "npm test", process.execPath, [npmCli, "test"], "npm test", runner),
+    "ok\n",
+  );
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].file, process.execPath);
+  assert.deepEqual(calls[0].args, [npmCli, "test"]);
+  assert.equal(calls[0].options.shell, false);
+  assert.equal(calls[0].options.env, hostile);
+  assert.equal(calls[0].options.cwd, packageRoot);
 });
 
 test("release checker rejects release truth-only mode before doing work", (t) => {
