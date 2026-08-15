@@ -170,7 +170,7 @@ test("MCP legacy why fallback preserves origin-platform path identity", async ()
   assert.equal((payload.items as unknown[]).length, 1);
 });
 
-test("MCP legacy why fallback does not invent possible hits from complete unrelated records", async () => {
+test("MCP legacy why fallback discloses missing-platform coverage conservatively", async () => {
   const record: TripleRecord = {
     ...legacyTriple(),
     id: "complete-unrelated",
@@ -189,8 +189,8 @@ test("MCP legacy why fallback does not invent possible hits from complete unrela
   const result = await registry.call("why_file", { path: "src/missing.ts" }, new AbortController().signal);
   const payload = result.structuredContent as Record<string, unknown>;
   assert.deepEqual(payload.possible, []);
-  assert.equal(payload.coverageIncomplete, false);
-  assert.equal(payload.coverageStatus, "complete");
+  assert.equal(payload.coverageIncomplete, true);
+  assert.equal(payload.coverageStatus, "unknown");
 });
 
 test("MCP custom why evidence cannot associate an unrelated match", async () => {

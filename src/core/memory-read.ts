@@ -95,8 +95,9 @@ export function rememberTripleFileIdentity(file: TripleFile, identity: string): 
   if (identity) ephemeralTripleIdentities.set(file, identity);
 }
 
-export function pathIdentityHash(value: string): string {
-  return createHash("sha256").update(canonicalPath(value), "utf8").digest("hex").slice(0, 32);
+export function pathIdentityHash(value: string, options: CanonicalPathOptions = {}): string {
+  const identity = options.canonical === true ? value : canonicalPath(value, options);
+  return createHash("sha256").update(identity, "utf8").digest("hex").slice(0, 32);
 }
 
 export interface TripleRecord {
@@ -131,12 +132,15 @@ export function isKnownPathPlatform(value: unknown): value is NodeJS.Platform {
 }
 
 const ANSI_OR_OSC = /(?:\u001b\][^\u0007]*(?:\u0007|\u001b\\)|\u001b\[[0-?]*[ -/]*[@-~]|\u009d[^\u009c]*(?:\u009c|$)|\u009b[0-?]*[ -/]*[@-~])/gu;
+const PATH_CONTROL = /[\u0000-\u001f\u007f-\u009f\u061c\u200b-\u200f\u2060-\u206f\ufeff]/u;
 
 export interface CanonicalPathOptions {
   /** Unknown means preserve case; live records default to current platform. */
   platform?: NodeJS.Platform | "unknown";
   /** Resolve a relative spelling against known turn cwd for identity only. */
   cwd?: string;
+  /** Hash an already canonical identity without reapplying reader platform policy. */
+  canonical?: boolean;
 }
 
 /** Shared canonical file identity. See README for platform case policy. */
@@ -242,19 +246,39 @@ export function boundTripleMechanism(
 ): TripleRecord["mechanism"] {
   const source = (mechanism ?? {}) as unknown as Record<string, unknown>;
   const rawFiles = Array.isArray(source.files) ? source.files : [];
+  let rawFilesLength = 0;
+  let rawFilesShapeValid = true;
+  try {
+    rawFilesLength = rawFiles.length;
+    if (!Number.isSafeInteger(rawFilesLength) || rawFilesLength < 0) rawFilesLength = 0;
+  } catch {
+    rawFilesLength = 0;
+    rawFilesShapeValid = false;
+  }
   const contextPlatform = context.platform;
   const contextPlatformValid = contextPlatform === undefined || contextPlatform === "unknown" || isKnownPathPlatform(contextPlatform);
-  let valid = Array.isArray(source.files) && contextPlatformValid;
+  let valid = Array.isArray(source.files) && contextPlatformValid && rawFilesShapeValid;
   const byIdentity = new Map<string, TripleFile>();
   const hashPaths = new Map<string, string>();
   const ordinaryPathHashes = new Map<string, string | undefined>();
+  const redactedDisplayHashes = new Map<string, string | undefined>();
   const platform = contextPlatform ?? process.platform;
-  const hasBoundablePath = rawFiles.some((value) => {
-    if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
-    const candidate = (value as Record<string, unknown>).path;
-    return typeof candidate === "string" && candidate.length > 0 && candidate.length <= 1024;
-  });
-  for (const value of rawFiles) {
+  let hasBoundablePath = false;
+  try {
+    for (let index = 0; index < rawFilesLength; index += 1) {
+      const value = rawFiles[index];
+      if (typeof value !== "object" || value === null || Array.isArray(value)) continue;
+      const candidate = (value as Record<string, unknown>).path;
+      if (typeof candidate === "string" && candidate.length > 0 && candidate.length <= 1024) {
+        hasBoundablePath = true;
+        break;
+      }
+    }
+  } catch {
+    valid = false;
+  }
+  for (let fileIndex = 0; fileIndex < rawFilesLength; fileIndex += 1) {
+    const value = rawFiles[fileIndex];
     if (typeof value !== "object" || value === null || Array.isArray(value)) {
       valid = false;
       continue;
@@ -264,6 +288,7 @@ export function boundTripleMechanism(
       valid = false;
       continue;
     }
+    if (PATH_CONTROL.test(raw.path)) valid = false;
     // Keep one witness for a record made solely from hostile overlong paths,
     // but discard such entries when any ordinary bounded path is available.
     // Ingress adapters reject these paths; durable/reader boundaries retain
@@ -298,26 +323,50 @@ export function boundTripleMechanism(
       const priorHash = ordinaryPathHashes.get(identityPath);
       if (ordinaryPathHashes.has(identityPath) && priorHash !== identityHash) valid = false;
       else ordinaryPathHashes.set(identityPath, identityHash);
+    } else {
+      const priorHash = redactedDisplayHashes.get(path);
+      // One redacted display may represent one raw file without a hash, or
+      // several files only when each has a distinct valid discriminator.
+      // Repeated absent/repeated hashes are ambiguous and cannot prove a
+      // complete turn after durable reload.
+      if (redactedDisplayHashes.has(path) && (priorHash === undefined || identityHash === undefined || priorHash === identityHash)) {
+        valid = false;
+      } else if (!redactedDisplayHashes.has(path)) {
+        redactedDisplayHashes.set(path, identityHash);
+      }
     }
     const plusMinus = Array.isArray(raw.plusMinus) && raw.plusMinus.length === 2
       ? raw.plusMinus
       : undefined;
     const plusMinusValid = plusMinus !== undefined
       && isSafeNonNegativeInteger(plusMinus[0]) && isSafeNonNegativeInteger(plusMinus[1]);
-    if (!path || !plusMinusValid || !Array.isArray(raw.props) || !raw.props.every((prop) => typeof prop === "string")) {
+    const props = strings(raw.props);
+    if (!path || !plusMinusValid || props === undefined) {
       valid = false;
       continue;
     }
     const file: TripleFile = {
       path,
       plusMinus: plusMinusValid ? [plusMinus[0] as number, plusMinus[1] as number] : [0, 0],
-      props: [...raw.props] as string[],
+      props: props.slice(),
       ...(typeof raw.excerpt === "string" ? { excerpt: raw.excerpt } : {}),
       ...(raw.provenance === "tool-observed" || raw.provenance === "git-diff-inferred" || raw.provenance === "unknown"
         ? { provenance: raw.provenance }
         : {}),
-      ...(identityHash === undefined ? {} : { identityHash }),
     };
+    // Keep the persisted discriminator available to identity-aware queries,
+    // while keeping the historical in-memory record shape stable for callers
+    // that inspect or export a bounded TripleFile.  The writer receives the
+    // enumerable ingress object; normalized/reloaded records carry the same
+    // value as a non-enumerable operational witness.
+    if (identityHash !== undefined) {
+      Object.defineProperty(file, "identityHash", {
+        value: identityHash,
+        enumerable: false,
+        configurable: true,
+        writable: false,
+      });
+    }
     // Namespace every discriminator and bind it to canonical display path.
     // This prevents a hash-shaped plain path from colliding with a hash key,
     // while preserving distinct redacted paths that share one hash.
@@ -344,11 +393,22 @@ export function boundTripleMechanism(
   );
   return {
     ...(typeof source.head === "string" ? { head: source.head } : {}),
-    files: files.map((file) => ({
-      ...file,
-      plusMinus: [...file.plusMinus] as [number, number],
-      props: [...file.props],
-    })),
+    files: files.map((file) => {
+      const copy: TripleFile = {
+        ...file,
+        plusMinus: [...file.plusMinus] as [number, number],
+        props: [...file.props],
+      };
+      if (file.identityHash !== undefined) {
+        Object.defineProperty(copy, "identityHash", {
+          value: file.identityHash,
+          enumerable: false,
+          configurable: true,
+          writable: false,
+        });
+      }
+      return copy;
+    }),
     truncatedFiles,
     ...(source.baseline === "captured" || source.baseline === "unknown" ? { baseline: source.baseline } : {}),
     coverageStatus,
@@ -356,18 +416,29 @@ export function boundTripleMechanism(
 }
 
 export function boundTripleRecord(record: TripleRecord): TripleRecord {
+  const mechanism = boundTripleMechanism(record.mechanism, {
+    platform: record.platform ?? "unknown",
+    cwd: record.cwd,
+  });
+  // A legacy triple without origin platform cannot prove case-sensitive path
+  // identity, even when its display spelling is relative to an absolute cwd.
+  // Keep it readable, but downgrade completeness until a writer supplies the
+  // origin marker.
+  if (record.platform === undefined && mechanism.files.length > 0) {
+    mechanism.coverageStatus = "unknown";
+  }
   return {
     ...record,
-    mechanism: boundTripleMechanism(record.mechanism, {
-      platform: record.platform ?? "unknown",
-      cwd: record.cwd,
-    }),
+    mechanism,
   };
 }
 
 export type MemoryRecord = FailureRecord | FixRecord | AssociationRecord | NoteRecord | TripleRecord;
 
 export const MAX_MEMORY_LINE_BYTES = 1024 * 1024;
+const MAX_RECORD_ARRAY_ITEMS = 256;
+const MAX_RECORD_ITEM_CHARS = 16 * 1024;
+const MAX_RECORD_ARRAY_BYTES = 64 * 1024;
 
 /**
  * `complete` distinguishes an empty/valid memory file from a read that failed
@@ -387,9 +458,24 @@ function objectValue(value: unknown): Record<string, unknown> | undefined {
 }
 
 function strings(value: unknown): string[] | undefined {
-  return Array.isArray(value) && value.every((entry) => typeof entry === "string")
-    ? [...value]
-    : undefined;
+  try {
+    if (!Array.isArray(value) || value.length > MAX_RECORD_ARRAY_ITEMS) return undefined;
+    const length = value.length;
+    if (!Number.isSafeInteger(length) || length < 0) return undefined;
+    const output: string[] = [];
+    let bytes = 0;
+    for (let index = 0; index < length; index += 1) {
+      const entry = value[index];
+      if (typeof entry !== "string" || entry.length > MAX_RECORD_ITEM_CHARS) return undefined;
+      const entryBytes = Buffer.byteLength(entry, "utf8");
+      if (bytes + entryBytes > MAX_RECORD_ARRAY_BYTES) return undefined;
+      bytes += entryBytes;
+      output.push(entry);
+    }
+    return output;
+  } catch {
+    return undefined;
+  }
 }
 
 function identityFields(record: Record<string, unknown>): Pick<FailureRecord, "commandIdentity" | "identityV" | "identityReliable" | "platform"> | undefined {
@@ -425,6 +511,14 @@ function normalizeOrigin(origin: unknown): FailureOrigin | undefined {
 }
 
 export function parseMemoryRecord(value: unknown): MemoryRecord | undefined {
+  try {
+    return parseMemoryRecordUnsafe(value);
+  } catch {
+    return undefined;
+  }
+}
+
+function parseMemoryRecordUnsafe(value: unknown): MemoryRecord | undefined {
   const record = objectValue(value);
   if (!record || typeof record.id !== "string" || record.id.length === 0 || record.id.length > 512 ||
       /[\u0000-\u001f\u007f-\u009f]/u.test(record.id) || !isSafeNonNegativeInteger(record.ts) ||
@@ -485,6 +579,14 @@ export function parseMemoryRecord(value: unknown): MemoryRecord | undefined {
 }
 
 function parseTripleRecord(record: Record<string, unknown>): TripleRecord | undefined {
+  try {
+    return parseTripleRecordUnsafe(record);
+  } catch {
+    return undefined;
+  }
+}
+
+function parseTripleRecordUnsafe(record: Record<string, unknown>): TripleRecord | undefined {
   if (record.schemaV !== 1 || record.origin !== "agent-hook" ||
       (record.agent !== "claude-code" && record.agent !== "codex")) return undefined;
 
@@ -492,18 +594,21 @@ function parseTripleRecord(record: Record<string, unknown>): TripleRecord | unde
   if (platform !== undefined && !isKnownPathPlatform(platform)) return undefined;
 
   const mechanism = objectValue(record.mechanism);
-  if (!mechanism || !Array.isArray(mechanism.files) ||
+  if (!mechanism || !Array.isArray(mechanism.files) || mechanism.files.length > MAX_RECORD_ARRAY_ITEMS ||
       typeof mechanism.truncatedFiles !== "number" || !Number.isSafeInteger(mechanism.truncatedFiles) ||
       mechanism.truncatedFiles < 0 ||
       (mechanism.head !== undefined && typeof mechanism.head !== "string")) return undefined;
 
   const allFiles: TripleFile[] = [];
-  for (const value of mechanism.files) {
+  const mechanismFilesLength = mechanism.files.length;
+  for (let fileIndex = 0; fileIndex < mechanismFilesLength; fileIndex += 1) {
+    const value = mechanism.files[fileIndex];
     const file = objectValue(value);
+    const props = file ? strings(file.props) : undefined;
     if (!file || typeof file.path !== "string" || !Array.isArray(file.plusMinus) || file.plusMinus.length !== 2 ||
         !isSafeNonNegativeInteger(file.plusMinus[0]) ||
         !isSafeNonNegativeInteger(file.plusMinus[1]) ||
-        !Array.isArray(file.props) || !file.props.every((prop) => typeof prop === "string") ||
+        props === undefined ||
         (file.excerpt !== undefined && typeof file.excerpt !== "string") ||
         (file.identityHash !== undefined && (typeof file.identityHash !== "string" || !/^[0-9a-f]{32}$/u.test(file.identityHash))) ||
         (file.provenance !== undefined && file.provenance !== "tool-observed" &&
@@ -511,7 +616,7 @@ function parseTripleRecord(record: Record<string, unknown>): TripleRecord | unde
     allFiles.push({
       path: file.path,
       plusMinus: [file.plusMinus[0], file.plusMinus[1]],
-      props: [...file.props],
+      props,
       ...(file.excerpt === undefined ? {} : { excerpt: file.excerpt }),
       ...(file.identityHash === undefined ? {} : { identityHash: file.identityHash }),
       ...(file.provenance === undefined ? {} : { provenance: file.provenance as TripleFile["provenance"] }),
@@ -528,6 +633,7 @@ function parseTripleRecord(record: Record<string, unknown>): TripleRecord | unde
     ...(baseline === undefined ? {} : { baseline }),
     ...(coverageStatus === undefined ? {} : { coverageStatus }),
   }, { platform: platform as NodeJS.Platform | undefined ?? "unknown", cwd: record.cwd as string });
+  if (platform === undefined && bounded.files.length > 0) bounded.coverageStatus = "unknown";
 
   let intent: TripleRecord["intent"];
   if (record.intent !== undefined) {
@@ -567,20 +673,31 @@ function parseTripleRecord(record: Record<string, unknown>): TripleRecord | unde
 }
 
 function parseFixLinks(value: unknown): FixLink[] | undefined {
-  if (!Array.isArray(value)) return undefined;
-  const links: FixLink[] = [];
-  for (const entry of value) {
-    const obj = objectValue(entry);
-    if (!obj || typeof obj.id !== "string" ||
-        (obj.basis !== "identity" && obj.basis !== "signature" && obj.basis !== "program") ||
-        (obj.confidence !== undefined && obj.confidence !== "confirmed" && obj.confidence !== "possible")) return undefined;
-    links.push({
-      id: obj.id,
-      basis: obj.basis,
-      ...(obj.confidence === undefined ? {} : { confidence: obj.confidence }),
-    });
+  try {
+    if (!Array.isArray(value) || value.length > MAX_RECORD_ARRAY_ITEMS) return undefined;
+    const length = value.length;
+    if (!Number.isSafeInteger(length) || length < 0) return undefined;
+    const links: FixLink[] = [];
+    let bytes = 0;
+    for (let index = 0; index < length; index += 1) {
+      const obj = objectValue(value[index]);
+      if (!obj || typeof obj.id !== "string" || obj.id.length === 0 || obj.id.length > MAX_RECORD_ITEM_CHARS
+          || /[\u0000-\u001f\u007f-\u009f]/u.test(obj.id) ||
+          (obj.basis !== "identity" && obj.basis !== "signature" && obj.basis !== "program") ||
+          (obj.confidence !== undefined && obj.confidence !== "confirmed" && obj.confidence !== "possible")) return undefined;
+      const idBytes = Buffer.byteLength(obj.id, "utf8");
+      if (bytes + idBytes > MAX_RECORD_ARRAY_BYTES) return undefined;
+      bytes += idBytes;
+      links.push({
+        id: obj.id,
+        basis: obj.basis,
+        ...(obj.confidence === undefined ? {} : { confidence: obj.confidence }),
+      });
+    }
+    return links;
+  } catch {
+    return undefined;
   }
-  return links;
 }
 
 function readFlags(): number {

@@ -1,5 +1,5 @@
 import { strict as assert } from "node:assert";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
@@ -82,7 +82,7 @@ test("searchKnowledge normalizes direct 20k-file records to bounded status", () 
   assert.equal(hits.length, 1);
   assert.equal(hits[0]?.filesCovered?.length, 8);
   assert.equal(hits[0]?.truncatedFiles, 19_992);
-  assert.equal(hits[0]?.coverageStatus, "truncated");
+  assert.equal(hits[0]?.coverageStatus, "unknown");
   assert.equal(hits[0]?.complete, false);
 });
 
@@ -211,9 +211,10 @@ test("redacted display collisions retain distinct bounded identities after reloa
   const result = await annotateBatch("redacted-collision", { paths, git: () => undefined, queueLabel: () => {} });
   assert.ok(result);
   assert.equal(result.mechanism.files.length, 2);
-  const reloaded = loadMemory(paths.memory)
-    .find((record): record is TripleRecord => record.kind === "triple");
-  assert.ok(reloaded);
+    const reloaded = loadMemory(paths.memory)
+      .find((record): record is TripleRecord => record.kind === "triple");
+    assert.ok(reloaded);
+    assert.match(readFileSync(paths.memory, "utf8"), /identityHash/);
   assert.equal(reloaded.mechanism.files.length, 2);
   assert.equal(new Set(reloaded.mechanism.files.map((item) => item.identityHash)).size, 2);
   assert.equal(reloaded.mechanism.coverageStatus, "complete");

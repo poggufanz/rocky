@@ -31,7 +31,7 @@ import {
 } from "./fingerprint.js";
 import { resolveRockyPaths } from "./state-paths.js";
 import type { RockyPaths } from "./state-paths.js";
-import { boundTripleMechanism, loadMemoryChecked, MAX_MEMORY_LINE_BYTES } from "./memory-read.js";
+import { boundTripleMechanism, isKnownPathPlatform, isSafeNonNegativeInteger, loadMemoryChecked, MAX_MEMORY_LINE_BYTES } from "./memory-read.js";
 import type { AssociationRecord, FailureRecord, FixRecord, MemoryRecord, NoteRecord, TripleRecord } from "./memory-read.js";
 import { LINK_WINDOW_MS, recentUnresolvedFailures, type UnresolvedLink } from "./memory-query.js";
 
@@ -950,25 +950,44 @@ export function recordNote(input: {
   withMemoryTransaction((transaction) => transaction.append(rec));
 }
 
+function safeTripleTimestamp(value: unknown): number {
+  return isSafeNonNegativeInteger(value) ? value : Date.now();
+}
+
+function safeTriplePlatform(value: unknown): NodeJS.Platform {
+  return isKnownPathPlatform(value) ? value : process.platform;
+}
+
 export function recordTriple(
   input: Omit<TripleRecord, "kind" | "id" | "ts" | "schemaV" | "origin"> & { ts?: number },
   paths?: RockyPaths,
 ): TripleRecord {
+  const platform = safeTriplePlatform(input.platform);
+  const boundedMechanism = boundTripleMechanism(input.mechanism, { platform, cwd: input.cwd });
+  const durableMechanism: TripleRecord["mechanism"] = {
+    ...boundedMechanism,
+    // `boundTripleMechanism` keeps identity witnesses non-enumerable for the
+    // normalized reader shape. Re-materialize them only for the JSONL write;
+    // otherwise redacted cwd/collision identities would vanish on reload.
+    files: boundedMechanism.files.map((file) => file.identityHash === undefined
+      ? file
+      : { ...file, identityHash: file.identityHash }),
+  };
   const rec: TripleRecord = {
     kind: "triple",
     id: randomUUID(),
-    ts: input.ts ?? Date.now(),
+    ts: safeTripleTimestamp(input.ts),
     schemaV: 1,
     origin: "agent-hook",
     agent: input.agent,
-    platform: input.platform ?? process.platform,
+    platform,
     cwd: input.cwd,
     ...(input.intent === undefined ? {} : { intent: input.intent }),
     ...(input.rationale === undefined ? {} : { rationale: input.rationale }),
-    mechanism: boundTripleMechanism(input.mechanism, { platform: input.platform ?? process.platform, cwd: input.cwd }),
+    mechanism: durableMechanism,
   };
   withMemoryTransaction((transaction) => transaction.append(rec), paths ?? resolveRockyPaths());
-  return rec;
+  return { ...rec, mechanism: boundTripleMechanism(rec.mechanism, { platform: rec.platform ?? "unknown", cwd: rec.cwd }) };
 }
 
 export interface RecordTripleOnceResult {
@@ -991,20 +1010,31 @@ export function recordTripleOnce(
     const existing = transaction.records.find((record): record is TripleRecord => record.kind === "triple" && record.id === id);
     if (existing) return { record: existing, appended: false };
 
+    const platform = safeTriplePlatform(input.platform);
+    const boundedMechanism = boundTripleMechanism(input.mechanism, { platform, cwd: input.cwd });
+    const durableMechanism: TripleRecord["mechanism"] = {
+      ...boundedMechanism,
+      files: boundedMechanism.files.map((file) => file.identityHash === undefined
+        ? file
+        : { ...file, identityHash: file.identityHash }),
+    };
     const rec: TripleRecord = {
       kind: "triple",
       id,
-      ts: input.ts ?? Date.now(),
+      ts: safeTripleTimestamp(input.ts),
       schemaV: 1,
       origin: "agent-hook",
       agent: input.agent,
-      platform: input.platform ?? process.platform,
+      platform,
       cwd: input.cwd,
       ...(input.intent === undefined ? {} : { intent: input.intent }),
       ...(input.rationale === undefined ? {} : { rationale: input.rationale }),
-      mechanism: boundTripleMechanism(input.mechanism, { platform: input.platform ?? process.platform, cwd: input.cwd }),
+      mechanism: durableMechanism,
     };
     transaction.append(rec);
-    return { record: rec, appended: true };
+    return {
+      record: { ...rec, mechanism: boundTripleMechanism(rec.mechanism, { platform: rec.platform ?? "unknown", cwd: rec.cwd }) },
+      appended: true,
+    };
   }, target);
 }

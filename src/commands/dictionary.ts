@@ -2,7 +2,7 @@ import { dictionaryRankPortFromConfig, type DictionaryRankPort } from "../ai/dic
 import { loadConfig } from "../core/config.js";
 import { digestBuckets, queryDictionary, quizCandidates, type DictionaryHit } from "../core/dictionary.js";
 import { canonicalPath } from "../core/memory-read.js";
-import { whyFileEvidence } from "../core/memory-query.js";
+import { whyFile, whyFileEvidence } from "../core/memory-query.js";
 import { loadMemory, type MemoryRecord } from "../core/memory-read.js";
 import { resolveRockyPaths } from "../core/state-paths.js";
 import { createTtyPromptPort } from "../setup/prompt.js";
@@ -233,7 +233,14 @@ export function why(argv: string[], deps: DictionaryCommandDeps = {}): number {
   const safePath = terminalSafe(path, MAX_PATH_DISPLAY_BYTES);
   const memory = records();
   const evidenceResult = whyFileEvidence(memory, path);
-  const hits = evidenceResult.matches;
+  // Legacy triples may contain an exact file witness without the newer
+  // baseline/provenance proof. Keep that historical explanation visible, but
+  // preserve conservative coverage disclosure and never claim completeness.
+  const hits = evidenceResult.matches.length > 0
+    ? evidenceResult.matches
+    : evidenceResult.coverageIncomplete
+      ? whyFile(memory, path)
+      : evidenceResult.matches;
   if (hits.length === 0) {
     if (evidenceResult.coverageIncomplete || evidenceResult.possible.length > 0) {
       speak(terminalSafe(`"${safePath}"... I not know if agent touch. coverage incomplete.`, MAX_OUTPUT_LINE_BYTES));

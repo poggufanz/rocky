@@ -169,6 +169,9 @@ function appendPayload(
     }),
     ...(coveragePaths === undefined ? {} : {
       coverageCandidateCount: coveragePaths.length,
+      // Candidate count is the parser's unique-path total even when the
+      // bounded event witness is capped. The witness completeness bit carries
+      // the separate omission fact.
       coverageCandidateCountExact: coverageCompleteOverride !== false,
     }),
   };

@@ -70,7 +70,7 @@ test("reader and every knowledge boundary keep forged oversized triples bounded"
     ...raw,
     mechanism: { ...raw.mechanism, coverageStatus: "complete" },
   });
-  assert.equal(forgedParsed?.kind === "triple" ? forgedParsed.mechanism.coverageStatus : undefined, "truncated");
+  assert.equal(forgedParsed?.kind === "triple" ? forgedParsed.mechanism.coverageStatus : undefined, "unknown");
 
   // The projection/query APIs also receive hand-built records from callers in
   // tests and integrations, so they must enforce the same contract themselves.
@@ -78,7 +78,7 @@ test("reader and every knowledge boundary keep forged oversized triples bounded"
   const projected = projectTriple(forged, "raw");
   assert.equal(projected.files.length, 8);
   assert.equal(projected.filesCovered.length, 8);
-  assert.equal(projected.coverageStatus, "truncated");
+  assert.equal(projected.coverageStatus, "unknown");
   assert.equal(projected.complete, false);
   const hit = searchKnowledge([forged], { query: "remember this", now: 2 })[0];
   assert.equal(hit?.filesCovered?.length, 8);

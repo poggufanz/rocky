@@ -9,7 +9,7 @@ import {
   retrievalTokens,
   similarity,
 } from "./fingerprint.js";
-import { boundTripleRecord, canonicalPath, loadMemory } from "./memory-read.js";
+import { boundTripleRecord, canonicalPath, loadMemory, pathIdentityHash } from "./memory-read.js";
 import type { FailureRecord, FixRecord, LinkBasis, LinkConfidence, MemoryRecord, TripleRecord } from "./memory-read.js";
 
 export interface RecallQuery { query: string; limit?: number; cwd?: string; now?: number }
@@ -43,8 +43,23 @@ export interface KnowledgeSearchHit {
   truncatedFiles?: number;
   complete?: boolean;
   coverageStatus?: "complete" | "truncated" | "unknown";
-  /** Internal proof marker supplied only by the canonical in-process query. */
-  coverageProof?: boolean;
+}
+
+// A caller can copy fields from a canonical hit, but cannot manufacture this
+// module-private capability. MCP projections use it only for in-process query
+// results; custom providers remain conservative even in raw mode.
+const canonicalKnowledgeProof = new WeakSet<object>();
+const canonicalMemoryQueries = new WeakSet<object>();
+
+export function hasCanonicalKnowledgeProof(value: unknown): boolean {
+  try { return typeof value === "object" && value !== null && canonicalKnowledgeProof.has(value); }
+  catch { return false; }
+}
+
+/** Only the in-process durable query object may surface operational I/O errors. */
+export function hasCanonicalMemoryQueries(value: unknown): boolean {
+  try { return typeof value === "object" && value !== null && canonicalMemoryQueries.has(value); }
+  catch { return false; }
 }
 export interface KnowledgeCoverageSummary {
   status: "complete" | "truncated" | "unknown";
@@ -393,12 +408,16 @@ export function queryStats(records: readonly MemoryRecord[], input: StatsQuery =
 }
 
 function completeTriple(record: TripleRecord): boolean {
-  const bounded = boundTripleRecord(record);
-  return bounded.mechanism.coverageStatus === "complete"
-    && bounded.mechanism.truncatedFiles === 0
-    && bounded.mechanism.baseline === "captured"
-    && bounded.mechanism.files.length > 0
-    && bounded.mechanism.files.every((file) => file.provenance === "tool-observed" || file.provenance === "git-diff-inferred");
+  try {
+    const bounded = boundTripleRecord(record);
+    return bounded.mechanism.coverageStatus === "complete"
+      && bounded.mechanism.truncatedFiles === 0
+      && bounded.mechanism.baseline === "captured"
+      && bounded.mechanism.files.length > 0
+      && bounded.mechanism.files.every((file) => file.provenance === "tool-observed" || file.provenance === "git-diff-inferred");
+  } catch {
+    return false;
+  }
 }
 
 export function searchKnowledge(
@@ -448,7 +467,7 @@ export function searchKnowledge(
     const score = semanticScore(queryTokenSet, tokenSet, documentFrequency, entries.length);
     if (record.kind === "failure") {
       if (score > 0) {
-        const hit: KnowledgeSearchHit = {
+         const hit: KnowledgeSearchHit = {
           id: record.id, ts: record.ts, kind: "failure", snippet, score,
           source: record.origin ?? "run",
         };
@@ -474,7 +493,7 @@ export function searchKnowledge(
     } else if (record.kind === "triple") {
       if (score > 0) {
         const complete = completeTriple(record);
-        hits.push({
+        const hit: KnowledgeSearchHit = {
           id: record.id,
           ts: record.ts,
           kind: "triple",
@@ -482,12 +501,20 @@ export function searchKnowledge(
           score,
           agent: record.agent,
           source: record.origin,
-          filesCovered: record.mechanism.files.map((file) => file.path),
+           filesCovered: record.mechanism.files.map((file) => file.path),
           truncatedFiles: record.mechanism.truncatedFiles,
           complete,
           coverageStatus: record.mechanism.coverageStatus,
-          ...(complete ? { coverageProof: true } : {}),
-        });
+        };
+         if (complete) {
+           // Brand only an immutable canonical projection. A caller can copy
+           // the fields, but cannot mutate a branded object into proof for a
+           // different record or coverage state.
+           Object.freeze(hit.filesCovered);
+           Object.freeze(hit);
+           canonicalKnowledgeProof.add(hit);
+         }
+         hits.push(hit);
       }
     } else if (record.kind === "note") {
       if (score > 0) hits.push({ id: record.id, ts: record.ts, kind: "note", snippet, score, source: "note" });
@@ -541,35 +568,96 @@ interface WhyFilePathMatch {
   identity: string;
 }
 
-function whyFilePathMatches(records: readonly MemoryRecord[], path: string, limit = 5): {
+const MAX_WHY_RECORDS = 20_000;
+
+interface SafeTripleCollection {
+  triples: TripleRecord[];
+  complete: boolean;
+}
+
+/** Normalize hostile direct/custom records before any matching traversal. */
+function safeTripleCollection(records: unknown): SafeTripleCollection {
+  const triples: TripleRecord[] = [];
+  let complete = true;
+  try {
+    if (!Array.isArray(records)) return { triples, complete: false };
+    const length = records.length;
+    if (!Number.isSafeInteger(length) || length < 0) return { triples, complete: false };
+    if (length > MAX_WHY_RECORDS) complete = false;
+    const bounded = Math.min(length, MAX_WHY_RECORDS);
+    for (let index = 0; index < bounded; index += 1) {
+      try {
+        const value = records[index] as unknown;
+        if (typeof value !== "object" || value === null || Array.isArray(value)) {
+          complete = false;
+          continue;
+        }
+        const candidate = value as MemoryRecord;
+        if (candidate.kind !== "triple") {
+          continue;
+        }
+        if (typeof candidate.id !== "string" || candidate.id.length === 0 || candidate.id.length > 512
+            || /[\u0000-\u001f\u007f-\u009f]/u.test(candidate.id)
+            || typeof candidate.ts !== "number" || !Number.isSafeInteger(candidate.ts) || candidate.ts < 0
+            || typeof candidate.cwd !== "string"
+            || (candidate.agent !== "claude-code" && candidate.agent !== "codex")
+            || candidate.origin !== "agent-hook") {
+          complete = false;
+          continue;
+        }
+        const boundedRecord = boundTripleRecord(candidate);
+        if (boundedRecord.mechanism.files.length === 0 && candidate.mechanism !== undefined) complete = false;
+        triples.push(boundedRecord);
+      } catch {
+        complete = false;
+      }
+    }
+  } catch {
+    complete = false;
+  }
+  return { triples, complete };
+}
+
+function whyFilePathMatches(records: readonly MemoryRecord[], path: string, limit = 5, requireComplete = true): {
   matches: TripleRecord[];
   suffixAmbiguous: boolean;
+  traversalIncomplete: boolean;
 } {
   const candidates: WhyFilePathMatch[] = [];
-  for (const source of records) {
-    if (source.kind !== "triple") continue;
-    const triple = boundTripleRecord(source);
+  const collection = safeTripleCollection(records);
+  for (const triple of collection.triples) {
     const platform = triple.platform ?? "unknown";
     const targetDisplay = canonicalPath(path, { platform });
     const targetIdentity = canonicalPath(path, { platform, cwd: triple.cwd });
+    const targetHash = targetIdentity ? pathIdentityHash(targetIdentity, { platform, canonical: true }) : undefined;
+    const trustedRoot = triple.platform !== undefined && (
+      canonicalPath(triple.cwd, { platform }).startsWith("/")
+      || /^[A-Za-z]:\//u.test(canonicalPath(triple.cwd, { platform }))
+    );
     for (const file of triple.mechanism.files) {
       const candidateDisplay = canonicalPath(file.path, { platform });
       const identity = canonicalPath(file.path, { platform, cwd: triple.cwd });
       if (!candidateDisplay || !identity) continue;
-      const exact = identity === targetIdentity || candidateDisplay === targetDisplay;
-      const suffix = !exact && targetDisplay.length > 0 && candidateDisplay.endsWith(`/${targetDisplay}`);
+      const hashExact = targetHash !== undefined && file.identityHash !== undefined && file.identityHash === targetHash;
+      const exact = hashExact || identity === targetIdentity || candidateDisplay === targetDisplay;
+      // Suffix matching is a legacy compatibility escape hatch. A trusted
+      // cwd/root makes ../other and /repo paths distinct, so never attach
+      // rationale through suffix alone in that case.
+      const suffix = !exact && !trustedRoot && targetDisplay.length > 0 && candidateDisplay.endsWith(`/${targetDisplay}`);
       if (exact || suffix) candidates.push({ triple, exact, suffix, identity });
     }
   }
   const exact = candidates.filter((candidate) => candidate.exact);
   const suffixCandidates = candidates.filter((candidate) => candidate.suffix);
   const selected = exact.length > 0
-    ? exact
-    : suffixCandidates.filter((candidate) => candidate.triple.mechanism.coverageStatus === "complete"
-      && candidate.triple.mechanism.truncatedFiles === 0);
+    ? (requireComplete ? exact.filter((candidate) => completeTriple(candidate.triple)) : exact)
+    : (requireComplete
+      ? suffixCandidates.filter((candidate) => completeTriple(candidate.triple))
+      : suffixCandidates.filter((candidate) => candidate.triple.mechanism.coverageStatus === "complete"
+        && candidate.triple.mechanism.truncatedFiles === 0));
   if (exact.length === 0) {
     const distinctSuffixes = new Set(suffixCandidates.map((candidate) => candidate.identity));
-    if (distinctSuffixes.size > 1) return { matches: [], suffixAmbiguous: true };
+    if (distinctSuffixes.size > 1) return { matches: [], suffixAmbiguous: true, traversalIncomplete: !collection.complete };
   }
   const seen = new Set<string>();
   const matches: TripleRecord[] = [];
@@ -578,7 +666,7 @@ function whyFilePathMatches(records: readonly MemoryRecord[], path: string, limi
     seen.add(candidate.triple.id);
     matches.push(candidate.triple);
   }
-  return { matches: matches.slice(0, limit), suffixAmbiguous: false };
+  return { matches: matches.slice(0, limit), suffixAmbiguous: false, traversalIncomplete: !collection.complete };
 }
 
 function worstCoverageStatus(current: KnowledgeCoverageSummary["status"], next: KnowledgeCoverageSummary["status"]): KnowledgeCoverageSummary["status"] {
@@ -595,10 +683,10 @@ export function whyFileEvidence(records: readonly MemoryRecord[], path: string, 
   let status: KnowledgeCoverageSummary["status"] = "complete";
   let filesCovered = 0;
   let truncatedFiles = 0;
-  let hasIncomplete = false;
+  let hasIncomplete = strictMatches.traversalIncomplete;
   let sawTriple = false;
-  for (const source of records) {
-    if (source.kind !== "triple") continue;
+  const collection = safeTripleCollection(records);
+  for (const source of collection.triples) {
     sawTriple = true;
     try {
       const bounded = boundTripleRecord(source);
@@ -611,16 +699,22 @@ export function whyFileEvidence(records: readonly MemoryRecord[], path: string, 
       const rawContainsTarget = targetIdentity.length > 0 && rawPaths.includes(targetIdentity);
       const boundedContainsTarget = targetIdentity.length > 0 && boundedPaths.has(targetIdentity);
       const sourceStatus = bounded.mechanism.coverageStatus ?? "unknown";
-      const sourceIncomplete = sourceStatus !== "complete" || bounded.mechanism.truncatedFiles !== 0 || rawPaths.length > bounded.mechanism.files.length;
+      const sourceIncomplete = !completeTriple(bounded)
+        || sourceStatus !== "complete"
+        || bounded.mechanism.truncatedFiles !== 0
+        || rawPaths.length > bounded.mechanism.files.length;
       if (sourceIncomplete) {
         hasIncomplete = true;
         status = worstCoverageStatus(status, sourceStatus);
-        if (sourceStatus === "complete" || sourceStatus === "truncated") status = worstCoverageStatus(status, "truncated");
+        // A complete marker without baseline/provenance is an evidence-proof
+        // gap, not a known file omission. Keep it explicitly unknown instead
+        // of fabricating a truncation count.
+        if (sourceStatus === "complete" && !completeTriple(bounded)) status = "unknown";
+        else if (sourceStatus === "truncated") status = worstCoverageStatus(status, "truncated");
         truncatedFiles = safeCoverageAdd(truncatedFiles, bounded.mechanism.truncatedFiles);
-        if (!boundedContainsTarget || (rawContainsTarget && !boundedContainsTarget)) {
-          if (!boundedMatches.has(source.id) && possible.length < limit) {
-            possible.push({ id: source.id, ts: source.ts, source: source.origin, reason: "path_may_be_omitted" });
-          }
+        if ((!boundedContainsTarget || (rawContainsTarget && !boundedContainsTarget) || !boundedMatches.has(source.id))
+            && possible.length < limit) {
+          possible.push({ id: source.id, ts: source.ts, source: source.origin, reason: "path_may_be_omitted" });
         }
       }
       filesCovered = Math.max(filesCovered, bounded.mechanism.files.length);
@@ -629,7 +723,13 @@ export function whyFileEvidence(records: readonly MemoryRecord[], path: string, 
       status = "unknown";
     }
   }
-  if (!sawTriple || strictMatches.suffixAmbiguous) {
+  const trustedRootPresent = collection.triples.some((triple) => {
+    const platform = triple.platform ?? "unknown";
+    const root = canonicalPath(triple.cwd, { platform });
+    return (root.startsWith("/") || /^[A-Za-z]:\//u.test(root)) && triple.platform !== undefined;
+  });
+  if (!sawTriple || strictMatches.suffixAmbiguous || !collection.complete
+      || (strictMatches.matches.length === 0 && trustedRootPresent)) {
     hasIncomplete = true;
     status = "unknown";
   }
@@ -643,7 +743,7 @@ export function whyFileEvidence(records: readonly MemoryRecord[], path: string, 
 }
 
 export function whyFile(records: readonly MemoryRecord[], path: string, limit = 5): TripleRecord[] {
-  return whyFilePathMatches(records, path, limit).matches;
+  return whyFilePathMatches(records, path, limit, false).matches;
 }
 
 export const LINK_WINDOW_MS = 1000 * 60 * 60 * 8;
@@ -733,13 +833,35 @@ function recordBase(failure: FailureRecord): string {
 }
 
 export function createMemoryQueries(load: () => MemoryRecord[] = loadMemory): MemoryQueries {
-  return {
+  const queries: MemoryQueries = {
     recall: (input) => queryRecall(load(), input),
     recentFailures: (input = {}) => queryRecentFailures(load(), input),
     stats: (input = {}) => queryStats(load(), input),
     searchKnowledge: (input) => searchKnowledge(load(), input),
     fetchRecord: (id) => fetchRecord(load(), id),
     whyFile: (path, limit = 5) => whyFile(load(), path, limit),
-    whyFileEvidence: (path, limit = 5) => whyFileEvidence(load(), path, limit),
+    whyFileEvidence: (path, limit = 5) => {
+      const records = load();
+      const evidence = whyFileEvidence(records, path, limit);
+      // A strict pass may report an incomplete possible association while a
+      // legacy provider still has an exact bounded witness. Prefer exact
+      // legacy evidence when strict matches are empty; never let a possible
+      // item suppress that compatibility fallback.
+      if (evidence.matches.length > 0) return evidence;
+      // Keep the pre-evidence query contract usable for legacy triples that
+      // have an exact file witness but lack the new baseline/provenance proof.
+      // The fallback is deliberately conservative: it retains the item only
+      // as an incomplete match, never upgrades coverage to complete.
+      const legacyMatches = whyFile(records, path, limit);
+      if (legacyMatches.length === 0) return evidence;
+      return {
+        ...evidence,
+        matches: legacyMatches,
+        coverage: { ...evidence.coverage, status: "unknown" as const, complete: false },
+        coverageIncomplete: true,
+      };
+    },
   };
+  canonicalMemoryQueries.add(queries);
+  return queries;
 }

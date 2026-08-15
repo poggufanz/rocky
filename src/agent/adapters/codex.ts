@@ -242,7 +242,7 @@ function parseModern(payload: PlainRecord, now: number): ParsedHookPayload {
         coveragePathsComplete,
         ...(invalidCoverage ? {} : {
           coverageCandidateCount: byPath.size,
-          coverageCandidateCountExact: true,
+          coverageCandidateCountExact: !invalidCoverage,
         }),
       };
     }

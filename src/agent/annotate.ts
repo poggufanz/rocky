@@ -42,8 +42,8 @@ import {
   readClaimResult,
   releaseAnnotationLease,
   removeClaim,
-  readCoverage,
-  removeCoverage,
+  readClaimCoverage,
+  removeClaimCoverage,
   type AnnotationLease,
   type BatchClaim,
   MAX_BATCH_BYTES,
@@ -533,7 +533,10 @@ export async function annotateBatch(key: string, deps: AnnotateDeps = {}): Promi
       plusMinus?: [number, number];
     }>();
     const coverageCandidates = new Map<string, string>();
-    const coverageSnapshot = readCoverage(claim.key, paths);
+    // A claim is an immutable generation. Never read the live sidecar here:
+    // late appends may have already created the next generation under the
+    // same key.
+    const coverageSnapshot = readClaimCoverage(claim, paths);
     let coverageMetadataSeen = false;
     let coverageMetadataComplete = true;
     let coverageMetadataContradiction = false;
@@ -546,7 +549,8 @@ export async function annotateBatch(key: string, deps: AnnotateDeps = {}): Promi
     let snapshotExpectedCount: number | undefined;
     if (coverageSnapshot) {
       coverageMetadataSeen = true;
-      if (!coverageSnapshot.pathsComplete) coverageMetadataComplete = false;
+      const snapshotIdentityCount = coverageSnapshot.identityHashes?.length ?? coverageSnapshot.paths.length;
+      if (coverageSnapshot.identityHashes === undefined) coverageMetadataComplete = false;
       if (!coverageSnapshot.candidateCountExact || coverageSnapshot.candidateCount === undefined) {
         coverageExpectedCountUnknown = true;
       } else {
@@ -554,11 +558,12 @@ export async function annotateBatch(key: string, deps: AnnotateDeps = {}): Promi
         // absolute/relative aliases must not consume two durable slots.
         snapshotExpectedCount = coverageSnapshot.candidateCount;
         // A single adapter payload can retain an exact count while its
-        // bounded identity witness is capped at 256 paths.
+        // bounded identity witness is capped at 256 paths. The compact sidecar
+        // stores only eight display witnesses but retains all identities.
         coverageCapProof = !coverageSnapshot.pathsComplete
           && coverageSnapshot.payloads === 1
-          && coverageSnapshot.paths.length === MAX_COVERAGE_PATHS
-          && coverageSnapshot.candidateCount > coverageSnapshot.paths.length;
+          && coverageSnapshot.candidateCount > snapshotIdentityCount
+          && snapshotIdentityCount >= MAX_COVERAGE_PATHS;
       }
       for (const candidate of coverageSnapshot.paths) {
         const candidateGitPath = pathIdentity(candidate, identityCwd);
@@ -572,7 +577,10 @@ export async function annotateBatch(key: string, deps: AnnotateDeps = {}): Promi
         coverageCandidates.set(candidateGitPath, candidatePath);
       }
       if (snapshotExpectedCount !== undefined) {
-        coverageExpectedCounts.push(coverageSnapshot.pathsComplete ? coverageCandidates.size : snapshotExpectedCount);
+        // Compact sidecars retain exact identity count separately from their
+        // eight display witnesses. Never substitute witness length for the
+        // durable candidate total.
+        coverageExpectedCounts.push(snapshotExpectedCount);
       }
     }
     for (const event of batchEvents) {
@@ -777,7 +785,7 @@ export async function annotateBatch(key: string, deps: AnnotateDeps = {}): Promi
       }
     }
     if (byPath.size === 0 && !(intentText !== undefined && rationaleText !== undefined) && !coverageSnapshot) {
-      if (removeClaim(claim, paths)) removeCoverage(claim.key, paths);
+      if (removeClaim(claim, paths)) removeClaimCoverage(claim, paths);
       return undefined;
     }
     const allMechanisms = coverageMetadataSeen && coverageMetadataComplete && !coverageMetadataContradiction
@@ -813,8 +821,6 @@ export async function annotateBatch(key: string, deps: AnnotateDeps = {}): Promi
       : truncatedFiles > 0
         ? "truncated" as const
         : "complete" as const;
-    const displayPathCounts = new Map<string, number>();
-    for (const [, value] of allMechanisms) displayPathCounts.set(value.path, (displayPathCounts.get(value.path) ?? 0) + 1);
     const files: TripleFile[] = allMechanisms.slice(0, MAX_TRIPLE_FILES).map(([gitPath, value]) => {
       const excerpt = value?.excerpt;
       const knownDelta = value.plusMinus;
@@ -828,7 +834,11 @@ export async function annotateBatch(key: string, deps: AnnotateDeps = {}): Promi
         props: propsFromExcerpt(excerpt),
         ...(excerpt === undefined ? {} : { excerpt }),
         ...(value.provenance === undefined ? {} : { provenance: value.provenance }),
-        ...(displayPathCounts.get(value.path) !== 1 ? { identityHash: pathIdentityHash(gitPath) } : {}),
+        // Keep an opaque operational identity for every witness. Display paths
+        // may be redacted (including cwd secrets); the discriminator lets a
+        // durable reload/query recover the original absolute-vs-relative
+        // identity without persisting raw operational text.
+        identityHash: pathIdentityHash(gitPath, { platform: process.platform, canonical: true }),
       };
       rememberTripleFileIdentity(result, gitPath);
       return result;
@@ -899,7 +909,7 @@ export async function annotateBatch(key: string, deps: AnnotateDeps = {}): Promi
         }
       }
     }
-    if (removeClaim(claim, paths)) removeCoverage(claim.key, paths);
+    if (removeClaim(claim, paths)) removeClaimCoverage(claim, paths);
     return persisted.record;
   } finally {
     releaseAnnotationLease(lease, paths);

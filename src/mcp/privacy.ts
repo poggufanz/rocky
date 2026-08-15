@@ -4,6 +4,7 @@ import type { Exposure } from "../core/config-read.js";
 import { boundTripleRecord, isSafeNonNegativeInteger, MAX_TRIPLE_FILES } from "../core/memory-read.js";
 import { canonicalPath } from "../core/memory-read.js";
 import type { FailureOrigin, FailureRecord, FixRecord, MemoryRecord, TripleRecord } from "../core/memory-read.js";
+import { hasCanonicalKnowledgeProof } from "../core/memory-query.js";
 import type { KnowledgeSearchHit, RecallHit, RecentFailureHit, WhyFilePossible } from "../core/memory-query.js";
 import { redactSecretsAtBoundary, replaceAnsiAndControls, stripInvisibleControls } from "../core/redact.js";
 
@@ -12,6 +13,8 @@ export const MAX_RESPONSE_BYTES = 512 * 1024;
 /** Keep forged direct projections bounded while preserving the documented 20k probe. */
 const MAX_KNOWLEDGE_FILE_INPUTS = 20_000;
 const MAX_KNOWLEDGE_HIT_INPUTS = 20_000;
+const MAX_NESTED_ITEMS = 256;
+const MAX_NESTED_BYTES = 64 * 1024;
 
 export interface ProjectedRecallHit {
   candidateId: string;
@@ -147,8 +150,14 @@ function redactHighEntropy(value: string): string {
   return value.replace(/(?<![A-Za-z0-9+/_-])[A-Za-z0-9+/_-]{32,}={0,2}(?![A-Za-z0-9+/_=-])/g, "[redacted]");
 }
 
+function boundProjectionInput(value: string): string {
+  return value.length > MAX_FIELD_BYTES * 2 ? value.slice(0, MAX_FIELD_BYTES * 2) : value;
+}
+
 function projectText(value: string, exposure: Exposure, path: string, truncation: Truncation): string {
-  const normalized = exposure === "sanitized" ? redactText(value) : normalizeOutputText(value);
+  const boundedInput = boundProjectionInput(value);
+  if (boundedInput.length !== value.length) truncation.fields.push(path);
+  const normalized = exposure === "sanitized" ? redactText(boundedInput) : normalizeOutputText(boundedInput);
   const clipped = truncateUtf8(normalized, MAX_FIELD_BYTES);
   if (clipped.truncated) truncation.fields.push(path);
   return clipped.value;
@@ -160,7 +169,37 @@ function projectSignature(
   path: string,
   truncation: Truncation,
 ): string[] {
-  const normalized = signature.map((line) => exposure === "sanitized" ? redactText(line) : normalizeOutputText(line));
+  const normalized: string[] = [];
+  let bytes = 0;
+  let boundedLength = 0;
+  let sourceLength = 0;
+  try {
+    const length = Number.isSafeInteger(signature.length) && signature.length >= 0 ? signature.length : 0;
+    sourceLength = length;
+    const bound = Math.min(length, MAX_NESTED_ITEMS);
+    if (length > bound) truncation.fields.push(path);
+    for (let index = 0; index < bound; index += 1) {
+      const line = signature[index];
+      if (typeof line !== "string") {
+        truncation.fields.push(path);
+        continue;
+      }
+      const boundedLine = boundProjectionInput(line);
+      if (boundedLine.length !== line.length) truncation.fields.push(path);
+      const normalizedLine = exposure === "sanitized" ? redactText(boundedLine) : normalizeOutputText(boundedLine);
+      const lineBytes = Buffer.byteLength(normalizedLine, "utf8");
+      if (bytes + lineBytes > MAX_NESTED_BYTES) {
+        truncation.fields.push(path);
+        break;
+      }
+      bytes += lineBytes;
+      normalized.push(normalizedLine);
+      boundedLength += 1;
+    }
+  } catch {
+    truncation.fields.push(path);
+  }
+  if (sourceLength > boundedLength) truncation.fields.push(path);
   if (normalized.length === 0) return [];
   const clipped = truncateUtf8(normalized.join("\n"), MAX_FIELD_BYTES);
   if (clipped.truncated) truncation.fields.push(path);
@@ -174,29 +213,77 @@ function projectStringArray(
   truncation: Truncation,
 ): string[] {
   let wasTruncated = false;
-  const output = values.map((value) => {
-    const normalized = exposure === "sanitized" ? redactText(value) : normalizeOutputText(value);
-    const clipped = truncateUtf8(normalized, MAX_FIELD_BYTES);
-    if (clipped.truncated) wasTruncated = true;
-    return clipped.value;
-  });
+  const output: string[] = [];
+  let bytes = 0;
+  try {
+    const length = Number.isSafeInteger(values.length) && values.length >= 0 ? values.length : 0;
+    const bound = Math.min(length, MAX_NESTED_ITEMS);
+    if (length > bound) wasTruncated = true;
+    for (let index = 0; index < bound; index += 1) {
+      const value = values[index];
+      if (typeof value !== "string") {
+        wasTruncated = true;
+        continue;
+      }
+      const boundedValue = boundProjectionInput(value);
+      if (boundedValue.length !== value.length) wasTruncated = true;
+      const normalized = exposure === "sanitized" ? redactText(boundedValue) : normalizeOutputText(boundedValue);
+      const clipped = truncateUtf8(normalized, MAX_FIELD_BYTES);
+      if (clipped.truncated) wasTruncated = true;
+      const itemBytes = Buffer.byteLength(clipped.value, "utf8");
+      if (bytes + itemBytes > MAX_NESTED_BYTES) {
+        wasTruncated = true;
+        break;
+      }
+      bytes += itemBytes;
+      output.push(clipped.value);
+    }
+  } catch {
+    wasTruncated = true;
+  }
   if (wasTruncated) truncation.fields.push(path);
   return output;
 }
 
-function projectOpaqueId(value: string, path: string, truncation: Truncation): string {
-  const clipped = truncateUtf8(value, MAX_FIELD_BYTES);
+function projectOpaqueId(value: string, path: string, truncation: Truncation, sanitize = false): string {
+  const boundedInput = boundProjectionInput(value);
+  if (boundedInput.length !== value.length) truncation.fields.push(path);
+  const safe = sanitize ? redactText(boundedInput) : normalizeOutputText(boundedInput);
+  const clipped = truncateUtf8(safe, MAX_FIELD_BYTES);
   if (clipped.truncated) truncation.fields.push(path);
   return clipped.value;
 }
 
-function projectOpaqueIds(values: readonly string[], path: string, truncation: Truncation): string[] {
+function projectOpaqueIds(values: readonly string[], path: string, truncation: Truncation, sanitize = false): string[] {
   let wasTruncated = false;
-  const output = values.map((value) => {
-    const clipped = truncateUtf8(value, MAX_FIELD_BYTES);
-    if (clipped.truncated) wasTruncated = true;
-    return clipped.value;
-  });
+  const output: string[] = [];
+  let bytes = 0;
+  try {
+    const length = Number.isSafeInteger(values.length) && values.length >= 0 ? values.length : 0;
+    const bounded = Math.min(length, MAX_NESTED_ITEMS);
+    if (length > bounded) wasTruncated = true;
+    for (let index = 0; index < bounded; index += 1) {
+      const value = values[index];
+      if (typeof value !== "string") {
+        wasTruncated = true;
+        continue;
+      }
+      const boundedInput = boundProjectionInput(value);
+      if (boundedInput.length !== value.length) wasTruncated = true;
+      const safe = sanitize ? redactText(boundedInput) : normalizeOutputText(boundedInput);
+      const clipped = truncateUtf8(safe, MAX_FIELD_BYTES);
+      if (clipped.truncated) wasTruncated = true;
+      const itemBytes = Buffer.byteLength(clipped.value, "utf8");
+      if (bytes + itemBytes > MAX_NESTED_BYTES) {
+        wasTruncated = true;
+        break;
+      }
+      bytes += itemBytes;
+      output.push(clipped.value);
+    }
+  } catch {
+    wasTruncated = true;
+  }
   if (wasTruncated) truncation.fields.push(path);
   return output;
 }
@@ -223,11 +310,11 @@ function projectTripleFile(
   return projected;
 }
 
-export function projectTriple(triple: TripleRecord, exposure: Exposure): ProjectedTriple {
+export function projectTriple(triple: TripleRecord, exposure: Exposure, sanitizeIds = false): ProjectedTriple {
   const bounded = boundTripleRecord(triple);
   const truncation: Truncation = { fields: [] };
   const projected: ProjectedTriple = {
-    id: projectOpaqueId(bounded.id, "id", truncation),
+    id: projectOpaqueId(bounded.id, "id", truncation, sanitizeIds),
     timestamp: bounded.ts,
     agent: bounded.agent,
     source: bounded.origin,
@@ -331,7 +418,7 @@ function normalizeKnowledgeHit(value: unknown): KnowledgeSearchHit | undefined {
       return undefined;
     }
     const rawComplete = typeof raw.complete === "boolean" ? raw.complete : undefined;
-    const coverageProof = raw.coverageProof === true;
+    const coverageProof = hasCanonicalKnowledgeProof(value);
     const coverageStatus = raw.coverageStatus === "complete" || raw.coverageStatus === "truncated" || raw.coverageStatus === "unknown"
       ? raw.coverageStatus
       : raw.coverageStatus === undefined ? undefined : "unknown";
@@ -345,11 +432,12 @@ function normalizeKnowledgeHit(value: unknown): KnowledgeSearchHit | undefined {
     const filesCovered = rawFilesCovered === undefined
       ? undefined
       : Array.isArray(boundedRawFiles)
-        ? boundedRawFiles.filter((file): file is string => typeof file === "string")
+        ? boundedRawFiles.filter((file): file is string => typeof file === "string" && file.length <= MAX_FIELD_BYTES * 2)
         : [];
     const malformedCoverage = (rawFilesCovered !== undefined && !Array.isArray(rawFilesCovered))
       || (Array.isArray(rawFilesCovered) && rawFilesCovered.length > MAX_KNOWLEDGE_FILE_INPUTS)
       || (Array.isArray(boundedRawFiles) && boundedRawFiles.some((file) => typeof file !== "string"))
+      || (Array.isArray(boundedRawFiles) && boundedRawFiles.some((file) => typeof file === "string" && file.length > MAX_FIELD_BYTES * 2))
       || !truncatedValid
       || (raw.coverageStatus !== undefined && coverageStatus === "unknown" && raw.coverageStatus !== "unknown");
     let normalizedStatus: KnowledgeSearchHit["coverageStatus"] = coverageStatus;
@@ -390,10 +478,9 @@ function normalizeKnowledgeHit(value: unknown): KnowledgeSearchHit | undefined {
       ...(agent === undefined ? {} : { agent }),
       ...(source === undefined ? {} : { source }),
       ...(filesCovered === undefined ? {} : { filesCovered }),
-      ...(rawTruncatedFiles === undefined ? {} : { truncatedFiles }),
+      ...(rawTruncatedFiles === undefined || !truncatedValid ? {} : { truncatedFiles }),
       ...(normalizedComplete === undefined ? {} : { complete: normalizedComplete }),
       ...(normalizedStatus === undefined ? {} : { coverageStatus: normalizedStatus }),
-      ...(coverageProof ? { coverageProof: true } : {}),
     };
   } catch {
     return undefined;
@@ -404,7 +491,7 @@ export function projectKnowledgeHits(
   hits: readonly KnowledgeSearchHit[],
   exposure: Exposure,
 ): ProjectedKnowledgeResponse {
-  const project = (hit: KnowledgeSearchHit): ProjectedKnowledgeHit => {
+  const project = (hit: KnowledgeSearchHit, preserveCanonicalMultiplicity = false): ProjectedKnowledgeHit => {
     const truncation: Truncation = { fields: [] };
     let filesCovered: string[] | undefined;
     let truncatedFiles: number | undefined;
@@ -436,7 +523,8 @@ export function projectKnowledgeHits(
         }
         if (/^(?:\/|[A-Za-z]:\/)/u.test(path)) hasAbsolute = true;
         else hasRelative = true;
-        if (!unique.has(path)) unique.set(path, path);
+        if (preserveCanonicalMultiplicity) unique.set(`${path}\u0000${unique.size}`, path);
+        else if (!unique.has(path)) unique.set(path, path);
       }
       // Hits do not carry cwd/origin metadata. Mixed absolute and relative
       // spellings cannot be proven to identify one file, so never claim
@@ -481,22 +569,27 @@ export function projectKnowledgeHits(
     return projected;
   };
   const items: ProjectedKnowledgeHit[] = [];
-  let sourceHits: readonly KnowledgeSearchHit[] = [];
+  const sourceHits: unknown[] = [];
   let inputTruncated = false;
   try {
     if (Array.isArray(hits)) {
-      inputTruncated = hits.length > MAX_KNOWLEDGE_HIT_INPUTS;
-      sourceHits = inputTruncated ? hits.slice(0, MAX_KNOWLEDGE_HIT_INPUTS) : hits;
+      const length = hits.length;
+      if (!Number.isSafeInteger(length) || length < 0) return { exposure, items, truncated: true };
+      inputTruncated = length > MAX_KNOWLEDGE_HIT_INPUTS;
+      const bound = Math.min(length, MAX_KNOWLEDGE_HIT_INPUTS);
+      for (let index = 0; index < bound; index += 1) {
+        try { sourceHits.push(hits[index]); } catch { inputTruncated = true; break; }
+      }
     }
   } catch {
-    sourceHits = [];
     inputTruncated = true;
   }
   let truncated = inputTruncated;
-  for (const candidate of sourceHits) {
+  for (let index = 0; index < sourceHits.length; index += 1) {
+    const candidate = sourceHits[index];
     const hit = normalizeKnowledgeHit(candidate);
     if (hit === undefined) continue;
-    const item = project(hit);
+    const item = project(hit, hasCanonicalKnowledgeProof(candidate));
     const prospective = { exposure, items: [...items, item], truncated };
     if (Buffer.byteLength(JSON.stringify(prospective), "utf8") > MAX_RESPONSE_BYTES) {
       truncated = true;
@@ -507,11 +600,11 @@ export function projectKnowledgeHits(
   return { exposure, items, truncated };
 }
 
-function projectFailureRecord(failure: FailureRecord, exposure: Exposure): Record<string, unknown> {
+function projectFailureRecord(failure: FailureRecord, exposure: Exposure, sanitizeIds = false): Record<string, unknown> {
   const truncation: Truncation = { fields: [] };
   const projected: Record<string, unknown> = {
     kind: "failure",
-    id: projectOpaqueId(failure.id, "record.id", truncation),
+    id: projectOpaqueId(failure.id, "record.id", truncation, sanitizeIds),
     ts: failure.ts,
     cmd: projectText(failure.cmd, exposure, "record.cmd", truncation),
     exitCode: failure.exitCode,
@@ -520,7 +613,7 @@ function projectFailureRecord(failure: FailureRecord, exposure: Exposure): Recor
     truncatedFields: truncation.fields,
   };
   if (failure.origin !== undefined) projected.origin = failure.origin;
-  if (failure.resolvedBy !== undefined) projected.resolvedBy = projectOpaqueId(failure.resolvedBy, "record.resolvedBy", truncation);
+  if (failure.resolvedBy !== undefined) projected.resolvedBy = projectOpaqueId(failure.resolvedBy, "record.resolvedBy", truncation, sanitizeIds);
   if (exposure === "raw") {
     projected.cwd = projectText(failure.cwd, exposure, "record.cwd", truncation);
     projected.excerpt = projectText(failure.excerpt, exposure, "record.excerpt", truncation);
@@ -528,34 +621,36 @@ function projectFailureRecord(failure: FailureRecord, exposure: Exposure): Recor
   return projected;
 }
 
-function projectFixRecord(fix: FixRecord, exposure: Exposure): Record<string, unknown> {
+function projectFixRecord(fix: FixRecord, exposure: Exposure, sanitizeIds = false): Record<string, unknown> {
   const truncation: Truncation = { fields: [] };
   const projected: Record<string, unknown> = {
     kind: "fix",
-    id: projectOpaqueId(fix.id, "record.id", truncation),
+    id: projectOpaqueId(fix.id, "record.id", truncation, sanitizeIds),
     ts: fix.ts,
     cmd: projectText(fix.cmd, exposure, "record.cmd", truncation),
-    failureIds: projectOpaqueIds(fix.failureIds, "record.failureIds", truncation),
+    failureIds: projectOpaqueIds(fix.failureIds, "record.failureIds", truncation, sanitizeIds),
     truncatedFields: truncation.fields,
   };
   if (fix.links !== undefined) {
-    projected.links = fix.links.map((link, index) => ({
-      id: projectOpaqueId(link.id, `record.links[${index}].id`, truncation),
+    const links = fix.links.slice(0, MAX_NESTED_ITEMS);
+    if (fix.links.length > links.length) truncation.fields.push("record.links");
+    projected.links = links.map((link, index) => ({
+      id: projectOpaqueId(link.id, `record.links[${index}].id`, truncation, sanitizeIds),
       basis: link.basis,
       ...(link.confidence === undefined ? {} : { confidence: link.confidence }),
     }));
   }
   if (fix.candidateFailureIds !== undefined) {
-    projected.candidateFailureIds = projectOpaqueIds(fix.candidateFailureIds, "record.candidateFailureIds", truncation);
+    projected.candidateFailureIds = projectOpaqueIds(fix.candidateFailureIds, "record.candidateFailureIds", truncation, sanitizeIds);
   }
   if (exposure === "raw") projected.cwd = projectText(fix.cwd, exposure, "record.cwd", truncation);
   return projected;
 }
 
-export function projectMemoryRecord(record: MemoryRecord, exposure: Exposure): Record<string, unknown> | undefined {
-  if (record.kind === "failure") return projectFailureRecord(record, exposure);
-  if (record.kind === "fix") return projectFixRecord(record, exposure);
-  if (record.kind === "triple") return projectTriple(record, exposure) as unknown as Record<string, unknown>;
+export function projectMemoryRecord(record: MemoryRecord, exposure: Exposure, sanitizeIds = false): Record<string, unknown> | undefined {
+  if (record.kind === "failure") return projectFailureRecord(record, exposure, sanitizeIds);
+  if (record.kind === "fix") return projectFixRecord(record, exposure, sanitizeIds);
+  if (record.kind === "triple") return projectTriple(record, exposure, sanitizeIds) as unknown as Record<string, unknown>;
   return undefined;
 }
 
@@ -662,6 +757,32 @@ function projectHit(hit: SourceHit, exposure: Exposure, candidateId: string): Pr
   return projected;
 }
 
+function boundedStringArray(value: unknown, maximum = MAX_NESTED_ITEMS): string[] | undefined {
+  try {
+    if (!Array.isArray(value)) return undefined;
+    const length = value.length;
+    if (!Number.isSafeInteger(length) || length < 0) return undefined;
+    const output: string[] = [];
+    const bound = Math.min(length, maximum);
+    let bytes = 0;
+    for (let index = 0; index < bound; index += 1) {
+      const item = value[index];
+      if (typeof item !== "string") return undefined;
+      if (item.length > MAX_FIELD_BYTES * 2) return undefined;
+      const boundedItem = item.length > MAX_FIELD_BYTES
+        ? truncateUtf8(item, MAX_FIELD_BYTES * 2).value
+        : item;
+      const itemBytes = Buffer.byteLength(boundedItem, "utf8");
+      if (bytes + itemBytes > MAX_NESTED_BYTES) break;
+      bytes += itemBytes;
+      output.push(boundedItem);
+    }
+    return output;
+  } catch {
+    return undefined;
+  }
+}
+
 function normalizeSourceHit(value: unknown): SourceHit | undefined {
   try {
     if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
@@ -669,11 +790,12 @@ function normalizeSourceHit(value: unknown): SourceHit | undefined {
     const failureValue = raw.failure;
     if (typeof failureValue !== "object" || failureValue === null || Array.isArray(failureValue)) return undefined;
     const failureRaw = failureValue as Record<string, unknown>;
+    const signature = boundedStringArray(failureRaw.signature);
     if (failureRaw.kind !== "failure" || typeof failureRaw.id !== "string" || failureRaw.id.length === 0 ||
         /[\u0000-\u001f\u007f-\u009f]/u.test(failureRaw.id) || !isSafeNonNegativeInteger(failureRaw.ts) ||
         typeof failureRaw.cwd !== "string" || typeof failureRaw.cmd !== "string" ||
         !Number.isSafeInteger(failureRaw.exitCode) || typeof failureRaw.fingerprint !== "string" ||
-        !Array.isArray(failureRaw.signature) || !failureRaw.signature.every((line) => typeof line === "string") ||
+        signature === undefined ||
         typeof failureRaw.excerpt !== "string" ||
         (failureRaw.origin !== undefined && failureRaw.origin !== "run" && failureRaw.origin !== "hook" && failureRaw.origin !== "watch")) return undefined;
     const failureTs = failureRaw.ts as number;
@@ -681,20 +803,21 @@ function normalizeSourceHit(value: unknown): SourceHit | undefined {
     const failure: FailureRecord = {
       kind: "failure", id: failureRaw.id, ts: failureTs, cwd: failureRaw.cwd, cmd: failureRaw.cmd,
       exitCode: failureExitCode, fingerprint: failureRaw.fingerprint,
-      signature: [...failureRaw.signature] as string[], excerpt: failureRaw.excerpt,
+      signature, excerpt: failureRaw.excerpt,
       ...(failureRaw.origin === undefined ? {} : { origin: failureRaw.origin as FailureOrigin }),
     };
     let fix: FixRecord | undefined;
     if (raw.fix !== undefined) {
       if (typeof raw.fix !== "object" || raw.fix === null || Array.isArray(raw.fix)) return undefined;
       const fixRaw = raw.fix as Record<string, unknown>;
+      const failureIds = boundedStringArray(fixRaw.failureIds);
       if (fixRaw.kind !== "fix" || typeof fixRaw.id !== "string" || fixRaw.id.length === 0 ||
           /[\u0000-\u001f\u007f-\u009f]/u.test(fixRaw.id) || !isSafeNonNegativeInteger(fixRaw.ts) ||
           typeof fixRaw.cwd !== "string" || typeof fixRaw.cmd !== "string" ||
-          !Array.isArray(fixRaw.failureIds) || !fixRaw.failureIds.every((id) => typeof id === "string")) return undefined;
+          failureIds === undefined) return undefined;
       fix = {
         kind: "fix", id: fixRaw.id, ts: fixRaw.ts, cwd: fixRaw.cwd, cmd: fixRaw.cmd,
-        failureIds: [...fixRaw.failureIds] as string[],
+        failureIds,
       };
     }
     return fix === undefined ? { failure } : { failure, fix };
@@ -706,8 +829,17 @@ function normalizeSourceHit(value: unknown): SourceHit | undefined {
 function projectHits(hits: readonly SourceHit[], exposure: Exposure): { items: ProjectedRecallHit[]; truncated: boolean } {
   const items: ProjectedRecallHit[] = [];
   let truncated = false;
-  const source = Array.isArray(hits) ? hits.slice(0, MAX_KNOWLEDGE_HIT_INPUTS) : [];
-  if (Array.isArray(hits) && hits.length > MAX_KNOWLEDGE_HIT_INPUTS) truncated = true;
+  const source: unknown[] = [];
+  try {
+    if (!Array.isArray(hits) || !Number.isSafeInteger(hits.length) || hits.length < 0) return { items, truncated: true };
+    if (hits.length > MAX_KNOWLEDGE_HIT_INPUTS) truncated = true;
+    const bound = Math.min(hits.length, MAX_KNOWLEDGE_HIT_INPUTS);
+    for (let index = 0; index < bound; index += 1) {
+      try { source.push(hits[index]); } catch { truncated = true; break; }
+    }
+  } catch {
+    return { items, truncated: true };
+  }
   for (let index = 0; index < source.length; index += 1) {
     try {
       const hit = normalizeSourceHit(source[index]);

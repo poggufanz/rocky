@@ -3,6 +3,7 @@ import { Buffer } from "node:buffer";
 import { PassThrough, Readable, Writable } from "node:stream";
 import test from "node:test";
 import { disabledRecallWithAi } from "../ai/port.js";
+import { createMemoryQueries } from "../core/memory-query.js";
 import {
   JSON_RPC_ERROR,
   MODERN_PROTOCOL_VERSION,
@@ -552,8 +553,10 @@ for (const era of ["modern", "legacy"] as const) {
 
   test(`${era} operational ToolExecutionError stays a successful isError tool result`, async () => {
     const sent: JsonRpcResponse[] = [];
-    const server = serverWith(realRegistryWithStats(() => {
-      throw new ToolExecutionError("memory_unavailable", "memory unavailable");
+    const server = serverWith(createToolRegistry({
+      exposure: "sanitized",
+      memory: createMemoryQueries(() => { throw new ToolExecutionError("memory_unavailable", "memory unavailable"); }),
+      recallWithAi: disabledRecallWithAi,
     }), async (message) => { sent.push(message); });
     if (era === "legacy") legacyReady(server);
     server.accept(eraToolCall(era, "operational", "stats", {}));
@@ -574,7 +577,7 @@ for (const era of ["modern", "legacy"] as const) {
     }
   });
 
-  test(`${era} unexpected exception maps to -32603 and leaks detail only to diagnostics`, async () => {
+  test(`${era} unexpected provider exception fails open without diagnostics`, async () => {
     const sent: JsonRpcResponse[] = [];
     const diagnostics: string[] = [];
     const server = serverWith(realRegistryWithStats(() => {
@@ -584,14 +587,12 @@ for (const era of ["modern", "legacy"] as const) {
     server.accept(eraToolCall(era, "unexpected", "stats", {}));
     await server.whenIdle();
 
-    assert.deepEqual(sent.find((message) => message.id === "unexpected"), {
-      jsonrpc: "2.0",
-      id: "unexpected",
-      error: { code: JSON_RPC_ERROR.INTERNAL_ERROR, message: "Internal error" },
-    });
+    const response = sent.find((message) => message.id === "unexpected");
+    assert.ok(response !== undefined && "result" in response);
+    assert.equal(response.result.isError, undefined);
+    assert.equal((response.result.structuredContent as Record<string, unknown>).total, 0);
     assert.doesNotMatch(JSON.stringify(sent), /private|rocky-secret|invariant/);
-    assert.equal(diagnostics.length, 1);
-    assert.match(diagnostics[0] ?? "", /invariant failed at \/private\/rocky-secret\.json/);
+    assert.equal(diagnostics.length, 0);
   });
 }
 

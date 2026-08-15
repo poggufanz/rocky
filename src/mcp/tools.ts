@@ -1,5 +1,6 @@
 import { Buffer } from "node:buffer";
 import type { Exposure } from "../core/config-read.js";
+import { hasCanonicalMemoryQueries } from "../core/memory-query.js";
 import type { KnowledgeCoverageSummary, KnowledgeSearchQuery, MemoryQueries, RecallQuery, RecentFailuresQuery, StatsQuery, WhyFileEvidence } from "../core/memory-query.js";
 import type { RecallAiOutcome, RecallWithAiPort } from "../ai/port.js";
 import {
@@ -442,7 +443,7 @@ function selectWhyCandidates(
     );
     if (exactOrUnambiguousSuffix) {
       if (matches.length < limit) matches.push(candidate);
-    } else if (incomplete && possible.length < limit) {
+    } else if (incomplete && (relation.suffix || candidate.mechanism.truncatedFiles > 0) && possible.length < limit) {
       possible.push({ id: candidate.id, ts: candidate.ts, source: candidate.origin, reason: "path_may_be_omitted" });
     }
   }
@@ -523,18 +524,28 @@ function safeErrorResult(error: ToolExecutionError): ToolCallResult {
 }
 
 function hasOperationalCode(error: unknown): boolean {
-  if (typeof error !== "object" || error === null || !("code" in error)) return false;
-  const code = (error as { code?: unknown }).code;
-  return typeof code === "string" && (MEMORY_OPERATIONAL_CODES as readonly string[]).includes(code);
+  try {
+    if (typeof error !== "object" || error === null || !("code" in error)) return false;
+    const code = (error as { code?: unknown }).code;
+    return typeof code === "string" && (MEMORY_OPERATIONAL_CODES as readonly string[]).includes(code);
+  } catch {
+    return false;
+  }
 }
 
-function readMemory<T>(operation: () => T): T {
+/** Third-party MemoryQueries are an untrusted read boundary. */
+function safeReadMemory<T>(operation: () => T, fallback: T, canonical = false): T {
   try {
     return operation();
   } catch (error) {
-    if (hasOperationalCode(error)) throw new ToolExecutionError("memory_unavailable", "memory unavailable");
-    throw error;
+    if (canonical && error instanceof ToolExecutionError) throw error;
+    if (canonical && hasOperationalCode(error)) throw new ToolExecutionError("memory_unavailable", "memory unavailable");
+    return fallback;
   }
+}
+
+function safeProjection<T>(operation: () => T, fallback: T): T {
+  try { return operation(); } catch { return fallback; }
 }
 
 function safeMemoryStats(value: unknown): Record<string, number> {
@@ -551,13 +562,10 @@ function safeMemoryStats(value: unknown): Record<string, number> {
     const possibleFixes = count("possibleFixes");
     const triples = count("triples");
     const notes = count("notes");
-    const suppliedTotal = source.total;
-    const total = isSafeNonNegativeInteger(suppliedTotal)
-      ? suppliedTotal
-      : [failures, fixEvents, possibleFixes, triples, notes].reduce((sum, entry) => {
-        const next = sum + entry;
-        return isSafeNonNegativeInteger(next) ? next : Number.MAX_SAFE_INTEGER;
-      }, 0);
+    const total = [failures, fixEvents, possibleFixes, triples, notes].reduce((sum, entry) => {
+      const next = sum + entry;
+      return isSafeNonNegativeInteger(next) ? next : Number.MAX_SAFE_INTEGER;
+    }, 0);
     return { failures, fixEvents, resolved, unresolved, confirmedFixes, possibleFixes, triples, notes, total };
   } catch {
     return { failures: 0, fixEvents: 0, resolved: 0, unresolved: 0, confirmedFixes: 0, possibleFixes: 0, triples: 0, notes: 0, total: 0 };
@@ -620,74 +628,122 @@ export function createToolRegistry(options: CreateToolRegistryOptions): McpToolR
     async call(name, args, signal) {
       if (!definitions.some((definition) => definition.name === name)) throw new McpInvalidParamsError("unknown tool");
       try {
+        const canonicalMemory = hasCanonicalMemoryQueries(options.memory);
         switch (name) {
           case "recall": {
             const input = parseRecallArgs(args, options.exposure);
-            return cappedResult(projectRecallHits(readMemory(() => options.memory.recall(input)), options.exposure));
+            const hits = safeReadMemory(() => options.memory.recall(input), [], canonicalMemory);
+            const projected = safeProjection(
+              () => projectRecallHits(hits, options.exposure),
+              { exposure: options.exposure, items: [], truncated: true },
+            );
+            return safeProjection(
+              () => cappedResult(projected),
+              cappedResult({ exposure: options.exposure, items: [], truncated: true }),
+            );
           }
           case "recent_failures": {
             const input = parseRecentArgs(args, options.exposure);
-            return cappedResult(projectRecentFailures(readMemory(() => options.memory.recentFailures(input)), options.exposure));
+            const hits = safeReadMemory(() => options.memory.recentFailures(input), [], canonicalMemory);
+            const projected = safeProjection(
+              () => projectRecentFailures(hits, options.exposure),
+              { exposure: options.exposure, items: [], truncated: true },
+            );
+            return safeProjection(
+              () => cappedResult(projected),
+              cappedResult({ exposure: options.exposure, items: [], truncated: true }),
+            );
           }
           case "stats": {
             const input = parseStatsArgs(args, options.exposure);
-            const stats = readMemory(() => options.memory.stats(input));
-            return cappedResult({
+            const stats = safeReadMemory<unknown>(() => options.memory.stats(input), {}, canonicalMemory);
+            const result = {
               exposure: options.exposure,
               ...safeMemoryStats(stats),
-            });
+            };
+            return safeProjection(() => cappedResult(result), cappedResult({ exposure: options.exposure, ...safeMemoryStats({}) }));
           }
           case "search_knowledge": {
             const input = parseKnowledgeArgs(args);
-            const hits = readMemory(() => options.memory.searchKnowledge(input));
-            return cappedResult(projectKnowledgeHits(hits, options.exposure));
+            const hits = safeReadMemory(() => options.memory.searchKnowledge(input), [], canonicalMemory);
+            const projected = safeProjection(
+              () => projectKnowledgeHits(hits, options.exposure),
+              { exposure: options.exposure, items: [], truncated: true },
+            );
+            return safeProjection(
+              () => cappedResult(projected),
+              cappedResult({ exposure: options.exposure, items: [], truncated: true }),
+            );
           }
           case "fetch_record": {
             const id = parseFetchArgs(args);
-            const record = readMemory(() => options.memory.fetchRecord(id));
-            if (record === undefined || record.kind === "note") return notFoundResult();
-            if (record.kind === "failure" && record.origin !== undefined &&
-                record.origin !== "run" && record.origin !== "hook" && record.origin !== "watch") return notFoundResult();
-            const normalized = parseMemoryRecord(record);
-            if (normalized === undefined || normalized.kind === "note") return notFoundResult();
-            const projected = projectMemoryRecord(normalized, options.exposure);
-            if (projected === undefined) return notFoundResult();
-            return boundedSingleResult(
-              { exposure: options.exposure, record: projected, truncated: false },
-              { exposure: options.exposure, record: null, truncated: true },
-            );
+            const record = safeReadMemory(() => options.memory.fetchRecord(id), undefined, canonicalMemory);
+            try {
+              if (record === undefined || typeof record !== "object" || record === null || Array.isArray(record) || record.kind === "note") return notFoundResult();
+              if (record.kind === "failure" && record.origin !== undefined &&
+                  record.origin !== "run" && record.origin !== "hook" && record.origin !== "watch") return notFoundResult();
+              const normalized = parseMemoryRecord(record);
+              if (normalized === undefined || normalized.kind === "note") return notFoundResult();
+              const projected = projectMemoryRecord(normalized, options.exposure, options.exposure === "sanitized");
+              if (projected === undefined) return notFoundResult();
+              return boundedSingleResult(
+                { exposure: options.exposure, record: projected, truncated: false },
+                { exposure: options.exposure, record: null, truncated: true },
+              );
+            } catch {
+              return notFoundResult();
+            }
           }
           case "why_file": {
             const input = parseWhyFileArgs(args);
             let fallback: WhyFileEvidence | undefined;
             const getFallback = (): WhyFileEvidence => fallback ??= fallbackWhyEvidence(options, input.path, input.limit);
-            const customEvidence = options.memory.whyFileEvidence;
-            const rawEvidence = readMemory(() => customEvidence
+            let customEvidence: MemoryQueries["whyFileEvidence"] | undefined;
+            try { customEvidence = options.memory.whyFileEvidence; } catch { customEvidence = undefined; }
+            const unknownEvidence: WhyFileEvidence = {
+              matches: [], possible: [],
+              coverage: { status: "unknown", complete: false, filesCovered: 0, truncatedFiles: 0 },
+              coverageIncomplete: true,
+            };
+            const rawEvidence = safeReadMemory(() => customEvidence
               ? customEvidence(input.path, input.limit)
-              : getFallback());
-            const evidence = customEvidence === undefined
-              ? rawEvidence
-              : normalizeWhyEvidence(rawEvidence, getFallback(), input.path, input.limit);
-            const possible = projectWhyPossible(evidence.possible, input.limit, options.exposure);
-            return cappedResult({
+              : getFallback(), unknownEvidence, canonicalMemory);
+            const evidence = safeProjection(
+              () => customEvidence === undefined
+                ? rawEvidence
+                : normalizeWhyEvidence(rawEvidence, getFallback(), input.path, input.limit),
+              unknownEvidence,
+            );
+            const projected = safeProjection(() => ({
               exposure: options.exposure,
-              items: evidence.matches.map((triple) => projectTriple(triple, options.exposure)),
-              possible,
+              items: evidence.matches.map((triple) => projectTriple(triple, options.exposure, options.exposure === "sanitized")),
+              possible: projectWhyPossible(evidence.possible, input.limit, options.exposure),
               coverage: evidence.coverage,
               coverageStatus: evidence.coverage.status,
               coverageIncomplete: evidence.coverageIncomplete,
               truncated: false,
-            });
+            }), { exposure: options.exposure, items: [], possible: [], coverage: { status: "unknown", complete: false, filesCovered: 0, truncatedFiles: 0 }, coverageStatus: "unknown", coverageIncomplete: true, truncated: true });
+            return safeProjection(() => cappedResult(projected), cappedResult({ exposure: options.exposure, items: [], possible: [], coverage: { status: "unknown", complete: false, filesCovered: 0, truncatedFiles: 0 }, coverageStatus: "unknown", coverageIncomplete: true, truncated: true }));
           }
           case "recall_with_ai": {
             const input = parseRecallArgs(args, options.exposure, 10);
-            const hits = readMemory(() => options.memory.recall(input));
-            const projected = projectRecallHits(hits, options.exposure);
+            const hits = safeReadMemory(() => options.memory.recall(input), [], canonicalMemory);
+            const projected = safeProjection(
+              () => projectRecallHits(hits, options.exposure),
+              { exposure: options.exposure, items: [], truncated: true },
+            );
+            const aiHits = safeProjection(
+              () => Array.isArray(hits) ? hits.slice(0, 5) : [],
+              [],
+            );
             const ai = await runAi(() => options.recallWithAi.run(
-              { query: input.query, hits: hits.slice(0, 5), exposure: options.exposure }, signal,
+              { query: input.query, hits: aiHits, exposure: options.exposure }, signal,
             ));
-            const aiCandidateIds = hits.slice(0, 5).map((_, index) => `c${index + 1}`);
-            return cappedResult(mergeAi(projected, ai, aiCandidateIds));
+            const aiCandidateIds = aiHits.map((_, index) => `c${index + 1}`);
+            return safeProjection(
+              () => cappedResult(mergeAi(projected, ai, aiCandidateIds)),
+              cappedResult({ exposure: options.exposure, items: [], truncated: true }),
+            );
           }
           default:
             throw new McpInvalidParamsError("unknown tool");

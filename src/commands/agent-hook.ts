@@ -14,7 +14,7 @@ import {
   writeSync,
 } from "node:fs";
 import { dirname } from "node:path";
-import { appendEvent, recordCoverage } from "../agent/spool.js";
+import { appendPayload } from "../agent/spool.js";
 import { parseClaudeHookPayload, type ParsedHookPayload } from "../agent/adapters/claude-code.js";
 import { parseCodexHookPayload } from "../agent/adapters/codex.js";
 import { loadConfig } from "../core/config-read.js";
@@ -44,7 +44,7 @@ export interface AgentHookDeps {
   /** Test seam for bounded baseline capture; production uses local git only. */
   git?: (args: string[], cwd: string) => string | undefined;
   /** Test seam for append-recovery coverage; production uses the guarded spool writer. */
-  appendEvent?: typeof appendEvent;
+  appendEvent?: (key: string, event: AgentEvent, paths?: RockyPaths) => boolean;
 }
 
 function utf8Width(codePoint: number): number {
@@ -406,28 +406,23 @@ function applyParsedEvent(parsed: ParsedHookPayload, paths: RockyPaths, deps: Ag
     // events so a lost first/middle/last append cannot make surviving files
     // look like complete knowledge.
     const firstMechanism = parsed.events.find((event): event is Extract<AgentEvent, { kind: "mechanism" }> => event.kind === "mechanism");
-    if (firstMechanism) {
-      const coveragePaths = parsed.coveragePaths ?? firstMechanism.coveragePaths ?? [firstMechanism.path];
-      const candidateCount = parsed.coverageCandidateCount ?? coveragePaths.length;
-      try {
-        recordCoverage(parsed.key, {
-          agent: firstMechanism.agent,
-          paths: coveragePaths,
-          candidateCount,
-          candidateCountExact: parsed.coverageCandidateCountExact ?? parsed.coveragePaths !== undefined,
-          pathsComplete: parsed.coveragePathsComplete ?? firstMechanism.coveragePathsComplete
-            ?? candidateCount === coveragePaths.length,
-        }, paths);
-      } catch {
-        // Sidecar persistence is best effort; append remains fail-open.
-      }
-    }
+    const coveragePaths = firstMechanism === undefined ? undefined : parsed.coveragePaths
+      ?? parsed.events.filter((event): event is Extract<AgentEvent, { kind: "mechanism" }> => event.kind === "mechanism").map((event) => event.path);
+    const coverageInput = firstMechanism === undefined || coveragePaths === undefined ? undefined : {
+      agent: firstMechanism.agent,
+      paths: coveragePaths,
+      candidateCount: parsed.coverageCandidateCount ?? coveragePaths.length,
+      candidateCountExact: parsed.coverageCandidateCountExact ?? parsed.coveragePaths !== undefined,
+      pathsComplete: parsed.coveragePathsComplete ?? firstMechanism.coveragePathsComplete
+        ?? (parsed.coveragePaths === undefined && coveragePaths.length <= 256),
+    };
     // Keep overflow metadata attached until one mechanism append succeeds.
     // A transient first-write failure must not let later surviving events
     // silently lose the batch's exact coverage witness.
     let coveragePending = parsed.truncatedFiles !== undefined
       || parsed.coveragePaths !== undefined
       || parsed.coveragePathsComplete !== undefined;
+    const preparedEvents: AgentEvent[] = [];
     for (const original of parsed.events) {
       const attachCoverage = original.kind === "mechanism" && coveragePending;
       const event: AgentEvent = original.kind === "intent" && original.baseline === undefined
@@ -440,24 +435,29 @@ function applyParsedEvent(parsed: ParsedHookPayload, paths: RockyPaths, deps: Ag
             ...(parsed.coveragePathsComplete === undefined ? {} : { coveragePathsComplete: parsed.coveragePathsComplete }),
           }
           : original;
-      let appended = false;
-      try {
-        appended = (deps.appendEvent ?? appendEvent)(parsed.key, event, paths);
-      } catch {
-        safeLogFailure(paths);
-      }
-      if (appended && attachCoverage) coveragePending = false;
-      if (appended && event.kind === "intent") {
-        maybeSpawnAmbiguity(event.text, paths, deps);
-      }
+      preparedEvents.push(event);
+      // The transactional production path has a durable sidecar, so only one
+      // event carries the fallback marker. A replaced append seam keeps the
+      // marker pending until a surviving event is known to persist it.
+      if (deps.appendEvent === undefined && attachCoverage) coveragePending = false;
     }
+    let results: boolean[];
+    try {
+      results = appendPayload(parsed.key, preparedEvents, coverageInput, paths, deps.appendEvent);
+    } catch {
+      results = preparedEvents.map(() => false);
+      safeLogFailure(paths);
+    }
+    preparedEvents.forEach((event, index) => {
+      if (results[index] === true && event.kind === "intent") maybeSpawnAmbiguity(event.text, paths, deps);
+    });
     return;
   }
 
   // Rationale persistence is intentionally attempted before the one annotate spawn.
   if (parsed.rationale) {
     try {
-      appendEvent(parsed.key, parsed.rationale, paths);
+      appendPayload(parsed.key, [parsed.rationale], undefined, paths);
     } catch {
       safeLogFailure(paths);
     }

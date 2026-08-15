@@ -421,11 +421,7 @@ test("complete tool result cap removes whole trailing items and fits modern and 
 test("explicit operational failures become safe error results", async () => {
   const broken = createToolRegistry({
     exposure: "sanitized",
-    memory: {
-      recall() { throw new ToolExecutionError("memory_unavailable", "memory unavailable"); },
-      recentFailures() { return []; }, stats() { return { failures: 0, fixEvents: 0, resolved: 0, unresolved: 0 }; },
-      searchKnowledge() { return []; }, fetchRecord() { return undefined; }, whyFile() { return []; },
-    },
+    memory: createMemoryQueries(() => { throw new ToolExecutionError("memory_unavailable", "memory unavailable"); }),
     recallWithAi: disabledRecallWithAi,
   });
   const result = await broken.call("recall", { query: "missing" }, new AbortController().signal);
@@ -434,17 +430,10 @@ test("explicit operational failures become safe error results", async () => {
 });
 
 test("recognized storage failures are wrapped at the storage boundary", async () => {
+  const storageError = Object.assign(new Error("/private/config.json"), { code: "EACCES" });
   const broken = createToolRegistry({
     exposure: "sanitized",
-    memory: {
-      recall() {
-        const error = Object.assign(new Error("/private/config.json"), { code: "EACCES" });
-        throw error;
-      },
-      recentFailures() { return []; },
-      stats() { return { failures: 0, fixEvents: 0, resolved: 0, unresolved: 0 }; },
-      searchKnowledge() { return []; }, fetchRecord() { return undefined; }, whyFile() { return []; },
-    },
+    memory: createMemoryQueries(() => { throw storageError; }),
     recallWithAi: disabledRecallWithAi,
   });
   const result = await broken.call("recall", { query: "missing" }, new AbortController().signal);
@@ -453,7 +442,24 @@ test("recognized storage failures are wrapped at the storage boundary", async ()
   assert.doesNotMatch(JSON.stringify(result), /private|config/);
 });
 
-test("unexpected programmer errors reach the server boundary", async () => {
+test("custom provider cannot forge canonical operational error codes", async () => {
+  const broken = createToolRegistry({
+    exposure: "sanitized",
+    memory: {
+      recall() { throw Object.assign(new Error("forged EACCES"), { code: "EACCES" }); },
+      recentFailures() { return []; },
+      stats() { return { failures: 0, fixEvents: 0, resolved: 0, unresolved: 0 }; },
+      searchKnowledge() { return []; }, fetchRecord() { return undefined; }, whyFile() { return []; },
+    },
+    recallWithAi: disabledRecallWithAi,
+  });
+  const result = await broken.call("recall", { query: "missing" }, new AbortController().signal);
+  assert.equal(result.isError, undefined);
+  assert.deepEqual(result.structuredContent.items, []);
+  assert.doesNotMatch(JSON.stringify(result), /forged|EACCES/);
+});
+
+test("unexpected provider errors fail open to a bounded recall result", async () => {
   const broken = createToolRegistry({
     exposure: "sanitized",
     memory: {
@@ -463,10 +469,13 @@ test("unexpected programmer errors reach the server boundary", async () => {
     },
     recallWithAi: disabledRecallWithAi,
   });
-  await assert.rejects(broken.call("recall", { query: "missing" }, new AbortController().signal), /invariant violated/);
+  const result = await broken.call("recall", { query: "missing" }, new AbortController().signal);
+  assert.equal(result.isError, undefined);
+  assert.deepEqual(result.structuredContent.items, []);
+  assert.doesNotMatch(JSON.stringify(result), /invariant violated/);
 });
 
-test("unrecognized coded invariants reach the server boundary", async () => {
+test("unrecognized provider codes fail open without leaking details", async () => {
   for (const error of [
     Object.assign(new Error("coded invariant"), { code: "BUG" }),
     { code: "BUG", message: "plain coded invariant" },
@@ -480,25 +489,20 @@ test("unrecognized coded invariants reach the server boundary", async () => {
       },
       recallWithAi: disabledRecallWithAi,
     });
-    await assert.rejects(
-      broken.call("recall", { query: "missing" }, new AbortController().signal),
-      (caught) => caught === error,
-    );
+    const result = await broken.call("recall", { query: "missing" }, new AbortController().signal);
+    assert.equal(result.isError, undefined);
+    assert.deepEqual(result.structuredContent.items, []);
+    assert.doesNotMatch(JSON.stringify(result), /coded invariant|BUG/);
   }
 });
 
-test("non-item response overflow reaches the server internal-error boundary", async () => {
+test("non-item response overflow fails open to a bounded fallback", async () => {
   const ai: RecallWithAiPort = {
     async run() { return { aiStatus: "disabled", rankedCandidateIds: [], explanation: "x".repeat(MAX_RESPONSE_BYTES) }; },
   };
-  const wire = await mapUnexpectedToolFailureToWire(
-    () => createToolRegistry({ exposure: "sanitized", memory: createMemoryQueries(() => records), recallWithAi: ai })
-      .call("recall_with_ai", { query: "not-present" }, new AbortController().signal),
-    "overflow",
-  );
-  assert.deepEqual(JSON.parse(wire), {
-    jsonrpc: "2.0", id: "overflow", error: { code: -32603, message: "Internal error" },
-  });
-  assert.ok(wire.endsWith("\n"));
-  assert.ok(Buffer.byteLength(wire, "utf8") <= MAX_RESPONSE_BYTES);
+  const result = await createToolRegistry({ exposure: "sanitized", memory: createMemoryQueries(() => records), recallWithAi: ai })
+    .call("recall_with_ai", { query: "not-present" }, new AbortController().signal);
+  assert.equal(result.isError, undefined);
+  assert.equal(result.structuredContent.truncated, true);
+  assert.ok(Buffer.byteLength(JSON.stringify(result), "utf8") <= MAX_RESPONSE_BYTES);
 });
