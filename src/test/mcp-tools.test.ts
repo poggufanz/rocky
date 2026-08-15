@@ -376,6 +376,53 @@ test("recall_with_ai returns no_hits when deterministic recall is empty", async 
   assert.equal(result.structuredContent.aiStatus, "no_hits");
 });
 
+test("recall_with_ai keeps deterministic evidence and paired coverage when AI fails", async () => {
+  const base = createMemoryQueries(() => records);
+  const paired = Object.freeze({
+    version: 1 as const, scanned: records.length, skipped: 0, truncated: 0,
+    bytesScanned: 10, bytesTotal: 10, complete: true as const,
+  });
+  const brokenAi: RecallWithAiPort = {
+    async run() { throw new Error("plain provider failure"); },
+  };
+  const result = await createToolRegistry({
+    exposure: "sanitized",
+    memory: { ...base, coverage: () => paired },
+    recallWithAi: brokenAi,
+  }).call("recall_with_ai", { query: "missing module" }, new AbortController().signal);
+  assert.equal(result.isError, undefined);
+  assert.equal(result.structuredContent.aiStatus, "unavailable");
+  assert.deepEqual(result.structuredContent.rankedCandidateIds, ["c1"]);
+  assert.equal((result.structuredContent.items as unknown[]).length, 1);
+  assert.deepEqual(result.structuredContent.coverage, paired);
+  assert.deepEqual(JSON.parse(result.content[0].text), result.structuredContent);
+});
+
+test("recall_with_ai treats malformed custom outcomes as bounded deterministic evidence", async () => {
+  const malformed = {
+    async run() { return undefined as never; },
+  } as unknown as RecallWithAiPort;
+  const result = await createToolRegistry({
+    exposure: "sanitized", memory: createMemoryQueries(() => records), recallWithAi: malformed,
+  }).call("recall_with_ai", { query: "missing module" }, new AbortController().signal);
+  assert.equal(result.isError, undefined);
+  assert.equal(result.structuredContent.aiStatus, "invalid_output");
+  assert.deepEqual(result.structuredContent.rankedCandidateIds, ["c1"]);
+  assert.equal((result.structuredContent.items as unknown[]).length, 1);
+});
+
+test("recall_with_ai allowlists custom outcome fields", async () => {
+  const outcome = {
+    aiStatus: "disabled", rankedCandidateIds: ["c1"], secret: "provider-only",
+  } as unknown as Awaited<ReturnType<RecallWithAiPort["run"]>>;
+  const result = await createToolRegistry({
+    exposure: "sanitized", memory: createMemoryQueries(() => records),
+    recallWithAi: { async run() { return outcome; } },
+  }).call("recall_with_ai", { query: "missing module" }, new AbortController().signal);
+  assert.equal(result.structuredContent.aiStatus, "disabled");
+  assert.doesNotMatch(JSON.stringify(result), /provider-only/);
+});
+
 test("recall_with_ai keeps requested hits while limiting AI candidates to five", async () => {
   const manyRecords: MemoryRecord[] = Array.from({ length: 10 }, (_, index) => ({
     kind: "failure" as const, id: `many-${index}`, ts: index, cwd: "/private", cmd: `needle ${index}`,

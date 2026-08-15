@@ -16,6 +16,7 @@ import {
 } from "../core/memory-read.js";
 import { createMemoryQueries } from "../core/memory-query.js";
 import { clearPendingIfResolved, recordFix, recordNote, recordTripleOnce, resolveFixOnSuccess } from "../core/memory.js";
+import { resolveRockyPaths } from "../core/state-paths.js";
 import { disabledRecallWithAi } from "../ai/port.js";
 import { createToolRegistry } from "../mcp/tools.js";
 
@@ -107,6 +108,23 @@ test("record-cap diagnostics are explicit", (t) => {
   assert.equal(result.complete, false);
   assert.ok(measured.truncated > 0);
   assert.equal(result.records.length, MAX_SUPPORTED_MEMORY_RECORDS);
+});
+
+test("once-only triple refuses an exactly full complete record snapshot", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "rocky-task13-triple-full-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const path = join(root, "memory.jsonl");
+  writeFileSync(path, Array.from({ length: MAX_SUPPORTED_MEMORY_RECORDS }, (_, index) => `${failure(`full-${index}`)}\n`).join(""));
+  const loaded = loadMemoryChecked(path);
+  assert.equal(loaded.complete, true);
+  assert.equal(loaded.records.length, MAX_SUPPORTED_MEMORY_RECORDS);
+  const claim = { agent: "codex" as const, cwd: root, mechanism: { files: [{ path: "src/x.ts", plusMinus: [1, 1] as [number, number], props: [] }], truncatedFiles: 0 } };
+  const paths = { ...resolveRockyPaths({ ROCKY_HOME: root }), memory: path };
+  const before = readFileSync(path, "utf8");
+  assert.throws(() => recordTripleOnce(claim, "full-cap-claim", paths));
+  assert.equal(readFileSync(path, "utf8"), before);
+  assert.throws(() => recordTripleOnce(claim, "full-cap-claim", paths));
+  assert.equal(readFileSync(path, "utf8"), before);
 });
 
 test("incomplete snapshots fail closed for fix, reconciliation, and once-only claims", (t) => {
@@ -547,27 +565,59 @@ test("durable query cache re-resolves fixes across time travel", (t) => {
   assert.equal(queries.stats({ now: 400 }).resolved, 1);
 });
 
-test("production query cache reuses one parsed snapshot for 200 concurrent MCP stats calls", async (t) => {
+test("production stats single-flight shares one witness batch and revalidates near and over cap", async (t) => {
   const root = mkdtempSync(join(tmpdir(), "rocky-task13-concurrent-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
-  writeFileSync(join(root, "memory.jsonl"), Array.from({ length: 10_000 }, (_, index) => `${failure(`concurrent-${index}`)}\n`).join(""));
+  const path = join(root, "memory.jsonl");
+  const line = `${failure("concurrent")}`;
+  const repeated = `${line}\n`;
+  const nearCapBytes = MAX_MEMORY_FILE_BYTES - Buffer.byteLength(repeated, "utf8");
+  writeFileSync(path, repeated.repeat(Math.floor(nearCapBytes / Buffer.byteLength(repeated, "utf8"))));
   const previous = process.env.ROCKY_HOME;
   process.env.ROCKY_HOME = root;
   t.after(() => {
     if (previous === undefined) delete process.env.ROCKY_HOME;
     else process.env.ROCKY_HOME = previous;
   });
-  const before = memoryReadMetrics();
   const queries = createMemoryQueries();
   const tools = createToolRegistry({ exposure: "sanitized", memory: queries, recallWithAi: disabledRecallWithAi });
   const signal = new AbortController().signal;
+  // Prime the immutable in-envelope snapshot, then issue the expensive
+  // content-witness probe concurrently. Without single-flight this performs
+  // 200 full bounded hash scans even though all answers are identical.
   const first = await tools.call("stats", {}, signal);
+  assert.equal(first.structuredContent.memoryCoverageIncomplete, true);
+  const before = memoryReadMetrics();
   const started = performance.now();
   const values = await Promise.all(Array.from({ length: 200 }, () => tools.call("stats", {}, signal)));
   const elapsedMs = performance.now() - started;
   const after = memoryReadMetrics();
   assert.deepEqual(values.map((value) => value.structuredContent.total), values.map(() => first.structuredContent.total));
-  assert.equal(after.parses - before.parses, 1);
-  assert.ok(after.cacheHits - before.cacheHits >= 200);
+  assert.equal(after.parses - before.parses, 0);
+  assert.equal(after.cacheHits - before.cacheHits, 1);
+  const witnessProbes = (after as typeof after & { witnessProbes?: number }).witnessProbes ?? 0;
+  const priorWitnessProbes = (before as typeof before & { witnessProbes?: number }).witnessProbes ?? 0;
+  assert.equal(witnessProbes - priorWitnessProbes, 1);
   assert.ok(elapsedMs < 10_000, `bounded cache calls took ${elapsedMs.toFixed(1)}ms`);
+
+  // A changed near-cap file must not reuse the old snapshot.
+  appendFileSync(path, repeated);
+  const afterMutationBefore = memoryReadMetrics();
+  const changed = await tools.call("stats", {}, signal);
+  const afterMutation = memoryReadMetrics();
+  assert.equal(changed.structuredContent.memoryCoverageIncomplete, true);
+  assert.equal(afterMutation.parses - afterMutationBefore.parses, 1);
+
+  // Over-cap snapshots are deliberately not cached, but concurrent callers
+  // still share the one bounded parse. The following call is a fresh parse.
+  writeFileSync(path, repeated.repeat(Math.ceil(MAX_MEMORY_FILE_BYTES / Buffer.byteLength(repeated, "utf8")) + 1));
+  const overBefore = memoryReadMetrics();
+  const over = await Promise.all(Array.from({ length: 10 }, () => tools.call("stats", {}, signal)));
+  const overBatch = memoryReadMetrics();
+  assert.ok(over.every((value) => value.structuredContent.memoryCoverageIncomplete === true));
+  assert.equal(overBatch.parses - overBefore.parses, 1);
+  const overNext = await tools.call("stats", {}, signal);
+  const overAfter = memoryReadMetrics();
+  assert.equal(overNext.structuredContent.memoryCoverageIncomplete, true);
+  assert.equal(overAfter.parses - overBatch.parses, 1);
 });

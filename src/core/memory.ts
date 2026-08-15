@@ -1078,6 +1078,9 @@ export function recordTripleOnce(
       ...(input.rationale === undefined ? {} : { rationale: input.rationale }),
       mechanism: durableMechanism,
     };
+    if (!transaction.canAppendComplete([rec])) {
+      throw new Error("Rocky triple claim exceeds bounded memory envelope");
+    }
     transaction.append(rec);
     return {
       record: { ...rec, mechanism: boundTripleMechanism(rec.mechanism, { platform: rec.platform ?? "unknown", cwd: rec.cwd }) },

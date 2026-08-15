@@ -768,10 +768,11 @@ interface MemoryCacheEntry {
 let memoryCache: MemoryCacheEntry | undefined;
 let memoryParseCount = 0;
 let memoryCacheHitCount = 0;
+let memoryWitnessProbeCount = 0;
 
 /** Small observable counter used by the bounded-reader scorecard. */
-export function memoryReadMetrics(): { parses: number; cacheHits: number } {
-  return { parses: memoryParseCount, cacheHits: memoryCacheHitCount };
+export function memoryReadMetrics(): { parses: number; cacheHits: number; witnessProbes: number } {
+  return { parses: memoryParseCount, cacheHits: memoryCacheHitCount, witnessProbes: memoryWitnessProbeCount };
 }
 
 function emptyCoverage(
@@ -825,6 +826,7 @@ function memorySnapshotKey(path: string, stats: BigIntStats): string {
  * prefix plus total-size metadata; no probabilistic sample is used here.
  */
 function memoryContentWitness(path: string, expected: BigIntStats): string | undefined {
+  memoryWitnessProbeCount += 1;
   let descriptor: number | undefined;
   try {
     descriptor = openSync(path, readFlags());

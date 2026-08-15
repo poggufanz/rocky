@@ -808,23 +808,56 @@ function memoryCoveragePayload(coverage: MemoryCoverage | undefined): Record<str
   };
 }
 
+const MCP_AI_STATUSES = Object.freeze([
+  "used", "disabled", "unavailable", "model_missing", "timeout", "cancelled",
+  "invalid_output", "low_confidence", "busy", "no_hits",
+] as const);
+const MCP_AI_ACTS = Object.freeze(["known_fix", "unresolved", "ambiguous"] as const);
+
+function isSafeRecallAiOutcome(value: unknown): value is RecallAiOutcome {
+  try {
+    if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+    const candidate = value as Record<string, unknown>;
+    if (typeof candidate.aiStatus !== "string" || !MCP_AI_STATUSES.includes(candidate.aiStatus as typeof MCP_AI_STATUSES[number])) return false;
+    if (!Array.isArray(candidate.rankedCandidateIds) || candidate.rankedCandidateIds.length > 5 ||
+        !candidate.rankedCandidateIds.every((id) => typeof id === "string")) return false;
+    if (candidate.act !== undefined && (typeof candidate.act !== "string" || !MCP_AI_ACTS.includes(candidate.act as typeof MCP_AI_ACTS[number]))) return false;
+    if (candidate.evidenceRefs !== undefined && (!Array.isArray(candidate.evidenceRefs) || candidate.evidenceRefs.length > 10 ||
+        !candidate.evidenceRefs.every((ref) => typeof ref === "string"))) return false;
+    if (candidate.confidence !== undefined && (typeof candidate.confidence !== "number" || !Number.isFinite(candidate.confidence) ||
+        candidate.confidence < 0 || candidate.confidence > 1)) return false;
+    if (candidate.explanation !== undefined && (typeof candidate.explanation !== "string" || [...candidate.explanation].length > 300)) return false;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function runAi<T>(operation: () => Promise<T>): Promise<T> {
   try {
     return await operation();
   } catch (error) {
-    if (hasOperationalCode(error)) throw new ToolExecutionError("ai_unavailable", "AI unavailable");
-    throw error;
+    // Storage/transport failures retain the existing safe-error wire shape;
+    // an ordinary provider exception is a bounded AI fallback instead of an
+    // uncaught JSON-RPC Internal Error.
+    if (hasOperationalCode(error) || error instanceof ToolExecutionError) {
+      throw new ToolExecutionError("ai_unavailable", "AI unavailable");
+    }
+    throw new ToolExecutionError("ai_fallback", "AI unavailable");
   }
 }
 
 function mergeAi(
   payload: object,
-  ai: RecallAiOutcome,
+  ai: unknown,
   aiCandidateIds: readonly string[],
 ): Record<string, unknown> {
   const source = payload as Record<string, unknown>;
   const items = Array.isArray(source.items) ? source.items.filter(isItem) : [];
   const itemIds = items.map((item) => item.candidateId);
+  if (!isSafeRecallAiOutcome(ai)) {
+    return { ...source, aiStatus: "invalid_output", items, rankedCandidateIds: itemIds, truncated: true };
+  }
   const rankedValid = validRankedCandidateIds(ai.rankedCandidateIds, aiCandidateIds);
   const evidenceValid = ai.evidenceRefs === undefined || validEvidenceRefs(ai.evidenceRefs, items);
   if (ai.aiStatus === "used" && (!rankedValid || !evidenceValid)) {
@@ -844,7 +877,10 @@ function mergeAi(
   const reorderedItems = useAiOrder
     ? ranked.map((id) => items.find((item) => item.candidateId === id)!).filter(isItem)
     : items;
-  const { rankedCandidateIds: _rankedCandidateIds, evidenceRefs: _evidenceRefs, ...safeAi } = ai;
+  const safeAi: Record<string, unknown> = { aiStatus: ai.aiStatus };
+  if (ai.act !== undefined) safeAi.act = ai.act;
+  if (ai.confidence !== undefined) safeAi.confidence = ai.confidence;
+  if (ai.explanation !== undefined) safeAi.explanation = ai.explanation;
   const evidenceRefs = ai.evidenceRefs?.filter((ref, index, refs) =>
     refs.indexOf(ref) === index && validEvidenceRefs([ref], items),
   );
@@ -855,6 +891,18 @@ function mergeAi(
     rankedCandidateIds: ranked,
     ...(evidenceRefs === undefined ? {} : { evidenceRefs }),
   };
+}
+
+function deterministicAiFallback(payload: object, aiStatus: "unavailable" | "invalid_output"): Record<string, unknown> {
+  const source = payload as Record<string, unknown>;
+  const items = Array.isArray(source.items) ? source.items.filter(isItem) : [];
+  return { ...source, aiStatus, items, rankedCandidateIds: items.map((item) => item.candidateId), truncated: true };
+}
+
+interface StatsFlightResult {
+  stats: unknown;
+  coverage: MemoryCoverage | undefined;
+  error?: unknown;
 }
 
 export function createToolRegistry(options: CreateToolRegistryOptions): McpToolRegistry {
@@ -871,6 +919,28 @@ export function createToolRegistry(options: CreateToolRegistryOptions): McpToolR
   const maxKnowledgeHandleRawBytes = 1024;
   const maxPendingHandleEntries = 20_000;
   const maxPendingHandleBytes = 8 * 1024 * 1024;
+  const statsFlights = new Map<string | undefined, Promise<StatsFlightResult>>();
+  const readStatsSnapshot = (input: StatsQuery, canonicalMemory: boolean): StatsFlightResult => {
+    const readState: SafeMemoryReadState = { failed: false };
+    try {
+      const stats = safeReadMemory<unknown>(() => options.memory.stats(input), {}, canonicalMemory, readState);
+      return { stats, coverage: memoryCoverage(options.memory, readState.failed) };
+    } catch (error) {
+      return { stats: {}, coverage: memoryCoverage(options.memory, true), error };
+    }
+  };
+  const readStatsFlight = (input: StatsQuery, canonicalMemory: boolean): Promise<StatsFlightResult> => {
+    if (!canonicalMemory) return Promise.resolve(readStatsSnapshot(input, false));
+    const key = input.cwd;
+    const current = statsFlights.get(key);
+    if (current !== undefined) return current;
+    let flight: Promise<StatsFlightResult>;
+    flight = Promise.resolve().then(() => readStatsSnapshot(input, true)).finally(() => {
+      if (statsFlights.get(key) === flight) statsFlights.delete(key);
+    });
+    statsFlights.set(key, flight);
+    return flight;
+  };
   // One shared allowlist with the privacy layer prevents silent drift.
   const safeDirectKnowledgeId = safeOpaqueIdentifier;
   const createPendingKnowledgeIdProjector = (): {
@@ -966,13 +1036,13 @@ export function createToolRegistry(options: CreateToolRegistryOptions): McpToolR
           }
           case "stats": {
             const input = parseStatsArgs(args, options.exposure);
-            const readState: SafeMemoryReadState = { failed: false };
-            const stats = safeReadMemory<unknown>(() => options.memory.stats(input), {}, canonicalMemory, readState);
-            const coverage = memoryCoverage(options.memory, readState.failed);
+            const flight = await readStatsFlight(input, canonicalMemory);
+            const coverage = flight.coverage;
             pairedCoverage = coverage;
+            if (flight.error !== undefined) throw flight.error;
             const result = {
               exposure: options.exposure,
-              ...safeMemoryStats(stats, canonicalMemory),
+              ...safeMemoryStats(flight.stats, canonicalMemory),
               ...memoryCoveragePayload(coverage),
             };
             return safeProjection(() => cappedResult(result), cappedResult({
@@ -1083,13 +1153,22 @@ export function createToolRegistry(options: CreateToolRegistryOptions): McpToolR
               () => boundedProviderArray(hits, 5).values as RecallHit[],
               [],
             );
-            const ai = await runAi(() => options.recallWithAi.run(
-              { query: input.query, hits: aiHits, exposure: options.exposure }, signal,
-            ));
+            let ai: unknown;
+            try {
+              ai = await runAi(() => options.recallWithAi.run(
+                { query: input.query, hits: aiHits, exposure: options.exposure }, signal,
+              ));
+            } catch (error) {
+              if (error instanceof ToolExecutionError && error.safeCode === "ai_fallback") {
+                ai = { aiStatus: "unavailable", rankedCandidateIds: [] } satisfies RecallAiOutcome;
+              } else {
+                throw error;
+              }
+            }
             const aiCandidateIds = aiHits.map((_, index) => `c${index + 1}`);
             return safeProjection(
               () => cappedResult(mergeAi(enriched, ai, aiCandidateIds)),
-              cappedResult({ exposure: options.exposure, items: [], truncated: true, ...memoryCoveragePayload(coverage) }),
+              cappedResult(deterministicAiFallback(enriched, isSafeRecallAiOutcome(ai) ? "unavailable" : "invalid_output")),
             );
           }
           default:
