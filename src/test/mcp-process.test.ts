@@ -450,15 +450,17 @@ test("MCP rejects a used ranking that includes a known but unhanded sparse candi
     fetchRecord() { return undefined; },
     whyFile() { return []; },
   };
+  let handedCandidateIds: string[] | undefined;
   const result = await createToolRegistry({
     exposure: "raw",
     memory,
     recallWithAi: {
-      async run() {
+      async run(input) {
+        handedCandidateIds = input.candidateIds === undefined ? undefined : [...input.candidateIds];
         return {
           aiStatus: "used" as const,
-          rankedCandidateIds: ["c3", "c2"],
-          evidenceRefs: ["c3.failure"],
+          rankedCandidateIds: ["c1", "c2"],
+          evidenceRefs: ["c1.failure"],
           act: "unresolved" as const,
           confidence: 0.9,
           explanation: "must be discarded",
@@ -467,6 +469,7 @@ test("MCP rejects a used ranking that includes a known but unhanded sparse candi
     },
   }).call("recall_with_ai", { query: "needle", limit: 3 }, new AbortController().signal);
 
+  assert.deepEqual(handedCandidateIds, ["c1", "c3"]);
   assert.equal(result.structuredContent.aiStatus, "invalid_output");
   assert.deepEqual(
     (result.structuredContent.items as { candidateId: string }[]).map((item) => item.candidateId),
