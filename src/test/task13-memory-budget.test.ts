@@ -237,7 +237,7 @@ test("memory scorecard keeps heavy workers explicit and reports bounded RSS", ()
   assert.match(source, /recallMs >= 2_000/u);
   assert.match(source, /prepareFixture\(root, envelope/u);
   assert.match(source, /parent-prepared fixture root/u);
-  assert.match(source, /DEGRADED_250K_RSS_LIMIT_BYTES/u);
+  assert.match(source, /DEGRADED_250K_POST_GC_RSS_LIMIT_BYTES/u);
   assert.equal(MAX_MEMORY_RECORDS, 50_000);
   const referenceRuntime = process.platform === "linux" && process.versions.node.startsWith("22.");
   assert.equal(MAX_SUPPORTED_MEMORY_RECORDS, referenceRuntime ? MAX_MEMORY_RECORDS : 10_000);
@@ -629,7 +629,9 @@ test("canonical stats single-flight shares witness scans across distinct cwd ans
   const root = mkdtempSync(join(tmpdir(), "rocky-task13-distinct-cwd-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const path = join(root, "memory.jsonl");
-  const distinct = Array.from({ length: 200 }, (_, index) => `${failure(`cwd-${index}`, `/cwd-${index}`)}\n`).join("");
+  const expectedTotals = Array.from({ length: 200 }, (_, index) => (index % 5) + 1);
+  const distinct = expectedTotals.map((count, index) => Array.from({ length: count }, (_, recordIndex) =>
+    `${failure(`cwd-${index}-${recordIndex}`, `/cwd-${index}`)}\n`).join("")).join("");
   const filler = `${failure("cwd-filler")}\n`;
   const remaining = MAX_MEMORY_FILE_BYTES - Buffer.byteLength(distinct, "utf8");
   writeFileSync(path, distinct + filler.repeat(Math.floor((remaining - 1) / Buffer.byteLength(filler, "utf8"))));
@@ -647,7 +649,7 @@ test("canonical stats single-flight shares witness scans across distinct cwd ans
   const values = await Promise.all(Array.from({ length: 200 }, (_, index) =>
     tools.call("stats", { cwd: `/cwd-${index}` }, signal)));
   const after = memoryReadMetrics();
-  assert.deepEqual(values.map((value) => value.structuredContent.total), values.map(() => 1));
+  assert.deepEqual(values.map((value) => value.structuredContent.total), expectedTotals);
   assert.ok(values.every((value) => value.structuredContent.memoryCoverageIncomplete === true));
   assert.equal(after.parses - before.parses, 0);
   assert.equal(after.cacheHits - before.cacheHits, 1);

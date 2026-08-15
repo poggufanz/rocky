@@ -18,8 +18,8 @@ const SCALAR_HEAVY_RECORDS = 70;
 const SCALAR_HEAVY_LINE_BYTES = 850 * 1024;
 const WRITE_CHUNK_BYTES = 64 * 1024;
 const WORKER_TIMEOUT_MS = 180_000;
-const SUPPORTED_RSS_LIMIT_BYTES = 150 * 1024 * 1024;
-const DEGRADED_250K_RSS_LIMIT_BYTES = 200 * 1024 * 1024;
+const SUPPORTED_POST_GC_RSS_LIMIT_BYTES = 150 * 1024 * 1024;
+const DEGRADED_250K_POST_GC_RSS_LIMIT_BYTES = 200 * 1024 * 1024;
 
 function line(index) {
   return JSON.stringify({
@@ -213,8 +213,8 @@ function assertScorecard(scorecard) {
       || twoFiftyK.coverage.truncated < 1 || twoFiftyK.statsMs >= 2_000 || twoFiftyK.recallMs >= 2_000) {
     throw new Error(`250k fixture did not meet bounded record-cap target: stats=${twoFiftyK.statsMs}ms recall=${twoFiftyK.recallMs}ms`);
   }
-  if (twoFiftyK.rssAfterGcBytes >= DEGRADED_250K_RSS_LIMIT_BYTES) {
-    throw new Error(`250k degraded RSS guard missed: rssAfterGc=${twoFiftyK.rssAfterGcBytes}`);
+  if (twoFiftyK.rssAfterGcBytes >= DEGRADED_250K_POST_GC_RSS_LIMIT_BYTES) {
+    throw new Error(`250k degraded post-GC RSS guard missed: rssAfterGc=${twoFiftyK.rssAfterGcBytes}`);
   }
   const overCap = byEnvelope.get("over-cap");
   if (overCap.coverage.complete !== false || overCap.coverage.truncated < 1
@@ -229,7 +229,7 @@ function assertScorecard(scorecard) {
   }
   for (const envelope of ["10000", "over-cap", "scalar-heavy"]) {
     const entry = byEnvelope.get(envelope);
-    if (entry.rssAfterGcBytes >= SUPPORTED_RSS_LIMIT_BYTES) {
+    if (entry.rssAfterGcBytes >= SUPPORTED_POST_GC_RSS_LIMIT_BYTES) {
       throw new Error(`${envelope} bounded RSS guard missed: rssAfterGc=${entry.rssAfterGcBytes}`);
     }
   }
@@ -242,7 +242,7 @@ function assertScorecard(scorecard) {
     if (fiftyK.statsMs >= 500 || fiftyK.recallMs >= 750) {
       throw new Error(`reference 50k latency budget missed: stats=${fiftyK.statsMs}ms recall=${fiftyK.recallMs}ms`);
     }
-    if (fiftyK.rssAfterGcBytes >= SUPPORTED_RSS_LIMIT_BYTES) {
+    if (fiftyK.rssAfterGcBytes >= SUPPORTED_POST_GC_RSS_LIMIT_BYTES) {
       throw new Error(`reference supported-envelope RSS budget missed: rssAfterGc=${fiftyK.rssAfterGcBytes}`);
     }
   }
@@ -294,8 +294,8 @@ if (process.argv[2] === "--worker") {
         : `${process.platform} Node ${process.versions.node} exact reference ${MAX_MEMORY_RECORDS}-record cap`,
     },
     targets: {
-      referenceLinuxNode22: { stats50kMs: 500, recall50kMs: 750, rssBytes: SUPPORTED_RSS_LIMIT_BYTES },
-      degraded250k: { statsMs: 2_000, recallMs: 2_000, rssBytes: DEGRADED_250K_RSS_LIMIT_BYTES },
+      referenceLinuxNode22: { stats50kMs: 500, recall50kMs: 750, postGcRssBytes: SUPPORTED_POST_GC_RSS_LIMIT_BYTES },
+      degraded250k: { statsMs: 2_000, recallMs: 2_000, postGcRssBytes: DEGRADED_250K_POST_GC_RSS_LIMIT_BYTES },
       bounded250kMs: 2_000,
     },
     ...gate,
