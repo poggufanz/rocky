@@ -341,15 +341,22 @@ function fullGitObjectId(value) {
 }
 
 function hasPositivePublicationClaim(text) {
+  const context = /(?:\bnpm\b|\bpackage\b|\brelease\b|\bversion\b|\btarball\b|\bartifact\b|\bregistry\b|@poggufanz\/rocky-cli)/i;
+  const publication = /\bpublish\w*\b|\bpublication\w*\b|\b(?:available|live)\b[\s\S]{0,60}\b(?:on|from|via)\s+(?:npm|the registry|registry\.npmjs\.org)\b|\b(?:npm|the registry|registry\.npmjs\.org)\b[\s\S]{0,60}\b(?:available|live)\b/i;
+  const negative = /\b(?:no|not|never|without)\b[\s\S]{0,80}\b(?:publish\w*\b|publication\w*\b|available\b|live\b)|\b(?:publish\w*\b|publication\w*\b|available\b|live\b)[\s\S]{0,80}\b(?:no|not|never)\b/i;
   return text.split(/\r?\n/u).some((line) => {
-    const releaseContext = /(?:\bnpm\b|\bpackage\b|\brelease\b|\bversion\b|\btarball\b|\bartifact\b|\bregistry\b|@poggufanz\/rocky-cli)/i.test(line);
-    const positiveClaim = /\b(?:is|was|were|has been|have been|now|already)\s+published\b|\bpublished\s+(?:package|version|release|artifact|tarball)\b|\bpublish(?:ed|es|ing)?\s+(?:to|on|as)\s+(?:npm|the registry|registry\.npmjs\.org)\b|\bnpm\s+publishes?\s+(?:this\s+)?package\b|\bpackage\s+(?:is|was|has been)\s+live\s+(?:on|at)\s+npm\b|\bnpm\s+publication\s+(?:is|was|has been)\s+(?:complete|finished|live)\b/i.test(line);
-    return releaseContext && positiveClaim;
+    return line.split(/[.;!?]+/u).some((clause) => context.test(clause)
+      && publication.test(clause)
+      && !negative.test(clause));
   });
 }
 
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 function currentChangelogSection(text, expectedVersion) {
-  const escapedExpectedVersion = expectedVersion.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const escapedExpectedVersion = escapeRegExp(expectedVersion);
   const heading = new RegExp(`^##\\s+${escapedExpectedVersion}\\s+[^\\r\\n]*`, "im").exec(text);
   if (heading === null) return "";
   const bodyStart = heading.index + heading[0].length;
@@ -391,7 +398,12 @@ export function validateReleaseTruth(snapshot) {
   const roadmapToken = /^[-*]\s+\*\*(v\d+\.\d+(?:\.\d+)?)\s+/i.exec(currentRoadmapLines[0] ?? "")?.[1];
   const allowedRoadmapTokens = new Set([`v${expectedVersion}`, `v${expectedVersion.replace(/\.0$/, "")}`]);
   const allowedRoadmapToken = roadmapToken !== undefined && allowedRoadmapTokens.has(roadmapToken);
-  if (!readme.includes(`Current release: \`${PACKAGE_NAME}@${expectedVersion}\``)
+  const currentReleaseLines = readme.split(/\r?\n/u).filter((line) => /^\s*Current release\s*:/i.test(line));
+  const currentReleaseMarkerCount = (readme.match(/\bCurrent release\s*:/gi) ?? []).length;
+  const canonicalCurrentMarker = `Current release: \`${PACKAGE_NAME}@${expectedVersion}\``;
+  if (currentReleaseMarkerCount !== 1
+      || currentReleaseLines.length !== 1
+      || !currentReleaseLines[0].trim().startsWith(canonicalCurrentMarker)
       || currentRoadmapLines.length !== 1
       || !allowedRoadmapToken
       || hasPositivePublicationClaim(readme)) {
@@ -401,7 +413,10 @@ export function validateReleaseTruth(snapshot) {
   const changelog = typeof value.changelog === "string" ? value.changelog : "";
   const heading = /^##\s+(\d+\.\d+\.\d+)\s+[—-]/m.exec(changelog);
   const currentSection = currentChangelogSection(changelog, expectedVersion);
+  const expectedHeadingPattern = new RegExp(`^##\\s+${escapeRegExp(expectedVersion)}(?=\\s|$)`, "gim");
+  const expectedHeadingCount = [...changelog.matchAll(expectedHeadingPattern)].length;
   if (heading?.[1] !== expectedVersion
+      || expectedHeadingCount !== 1
       || (currentSection !== "" && /\b(?:unreleased|unpublished)\b/i.test(currentSection))
       || hasPositivePublicationClaim(changelog)) {
     errors.push("CHANGELOG release status is stale");

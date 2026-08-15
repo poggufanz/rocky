@@ -369,10 +369,62 @@ test("canonical release truth rejects drift in every release marker", async () =
   assert.deepEqual(
     releaseCheck.validateReleaseTruth({
       ...snapshot,
+      readme: `${snapshot.readme}\nPackage docs updated. The staged transaction publishes audited bytes.\n`,
+    }),
+    [],
+    "publication wording in an unrelated compound clause must not inherit package context",
+  );
+  assert.deepEqual(
+    releaseCheck.validateReleaseTruth({
+      ...snapshot,
       changelog: `${snapshot.changelog}\nThe v0.4 release was released on 9 August.\n`,
     }),
     [],
     "release history wording must not be treated as package publication",
+  );
+  for (const [label, mutated] of [
+    ["README no package publication", { ...snapshot, readme: `${snapshot.readme}\nNo package publication is implied.\n` }],
+    ["README package not available", { ...snapshot, readme: `${snapshot.readme}\nThe package is not available on npm.\n` }],
+    ["README package never published", { ...snapshot, readme: `${snapshot.readme}\nThe package was never published on npm.\n` }],
+    ["CHANGELOG publication not complete", { ...snapshot, changelog: `${snapshot.changelog}\nnpm publication is not complete.\n` }],
+    ["README no saving percentage", { ...snapshot, readme: `${snapshot.readme}\nThis project publishes no saving percentage.\n` }],
+  ] as const) {
+    assert.deepEqual(releaseCheck.validateReleaseTruth(mutated), [], `${label} must remain allowed`);
+  }
+  assert.notDeepEqual(
+    releaseCheck.validateReleaseTruth({ ...snapshot, readme: `${snapshot.readme}\nnpm publish succeeded.\n` }),
+    [],
+    "an npm publish success claim must fail",
+  );
+  assert.notDeepEqual(
+    releaseCheck.validateReleaseTruth({ ...snapshot, readme: `${snapshot.readme}\nThe package is available on npm.\n` }),
+    [],
+    "package availability on npm must fail",
+  );
+  const canonicalCurrentMarker = `Current release: \`${PACKAGE_NAME}@${PACKAGE_VERSION}\``;
+  assert.notDeepEqual(
+    releaseCheck.validateReleaseTruth({ ...snapshot, readme: `${snapshot.readme}\n${canonicalCurrentMarker}. Duplicate marker.\n` }),
+    [],
+    "a duplicate canonical Current release marker must fail",
+  );
+  assert.notDeepEqual(
+    releaseCheck.validateReleaseTruth({ ...snapshot, readme: `${snapshot.readme}\nCurrent release: \`@wrong/rocky@9.9.9\`.\n` }),
+    [],
+    "an appended wrong Current release marker must fail",
+  );
+  const duplicateChangelogHeading = `${snapshot.changelog}\n## ${PACKAGE_VERSION} — duplicate section\nHistorical duplicate section.\n`;
+  assert.notDeepEqual(
+    releaseCheck.validateReleaseTruth({ ...snapshot, changelog: duplicateChangelogHeading }),
+    [],
+    "duplicate expected-version CHANGELOG sections must fail",
+  );
+  assert.deepEqual(
+    releaseCheck.validateReleaseTruth({
+      ...snapshot,
+      changelog: `${snapshot.changelog}\n## 0.4.0 — historical note\nThis historical section is unreleased and unpublished.\n`,
+    }),
+    [],
+    "historical unreleased wording outside current section must remain allowed",
   );
   const currentSectionStart = snapshot.changelog.indexOf("## 0.5.0");
   const nextSectionStart = snapshot.changelog.indexOf("\n## 0.4.0", currentSectionStart);
@@ -396,18 +448,23 @@ test("canonical release truth rejects drift in every release marker", async () =
     ["lock root", { ...snapshot, lock: { ...snapshot.lock, packages: { ...lock, "": { ...lockRoot, version: "9.9.9" } } } }],
     ["package-info", { ...snapshot, packageInfoSource: snapshot.packageInfoSource.replace('PACKAGE_VERSION = "0.5.0"', 'PACKAGE_VERSION = "9.9.9"') }],
     ["README", { ...snapshot, readme: snapshot.readme.replace("@poggufanz/rocky-cli@0.5.0", "@poggufanz/rocky-cli@9.9.9") }],
+    ["README appended wrong current marker", { ...snapshot, readme: `${snapshot.readme}\nCurrent release: \`@wrong/rocky@9.9.9\`.\n` }],
+    ["README duplicate current marker", { ...snapshot, readme: `${snapshot.readme}\n${canonicalCurrentMarker}. Duplicate marker.\n` }],
     ["README current roadmap", { ...snapshot, readme: snapshot.readme.replace("v0.4 — his diligence (implemented)", "v0.4 — his diligence (current release)") }],
     ["README roadmap v0.5.1", { ...snapshot, readme: snapshot.readme.replace("v0.5 — his curiosity", "v0.5.1 — his curiosity") }],
     ["README roadmap v0.5.0.1", { ...snapshot, readme: snapshot.readme.replace("v0.5 — his curiosity", "v0.5.0.1 — his curiosity") }],
     ["README roadmap v0.5-beta", { ...snapshot, readme: snapshot.readme.replace("v0.5 — his curiosity", "v0.5-beta — his curiosity") }],
     ["README second current marker", { ...snapshot, readme: snapshot.readme.replace("v0.4 — his diligence (implemented)", "v0.4 — his diligence (current release)") }],
     ["CHANGELOG", { ...snapshot, changelog: snapshot.changelog.replace("## 0.5.0", "## 9.9.9") }],
+    ["CHANGELOG duplicate expected section", { ...snapshot, changelog: duplicateChangelogHeading }],
     ["README publication claim", { ...snapshot, readme: `${snapshot.readme}\nThe npm package was published to npm.\n` }],
     ["README bare publication claim", { ...snapshot, readme: `${snapshot.readme}\nThe package published to npm.\n` }],
     ["README publish-to-npm claim", { ...snapshot, readme: `${snapshot.readme}\nThe package publishes to npm.\n` }],
     ["README package live on npm claim", { ...snapshot, readme: `${snapshot.readme}\nThe package is live on npm.\n` }],
     ["CHANGELOG publication complete claim", { ...snapshot, changelog: `${snapshot.changelog}\nnpm publication is complete.\n` }],
     ["README npm publishes package claim", { ...snapshot, readme: `${snapshot.readme}\nnpm publishes this package.\n` }],
+    ["README npm publish succeeded claim", { ...snapshot, readme: `${snapshot.readme}\nnpm publish succeeded.\n` }],
+    ["README package available on npm claim", { ...snapshot, readme: `${snapshot.readme}\nThe package is available on npm.\n` }],
     ["CHANGELOG publication claim", { ...snapshot, changelog: `${snapshot.changelog}\nThe v0.5.0 package was published to npm.\n` }],
     ["help", { ...snapshot, helpStdout: snapshot.helpStdout.replace("@poggufanz/rocky-cli@0.5.0", "@poggufanz/rocky-cli@9.9.9") }],
     ["help wrong stream", { ...snapshot, helpStdout: "", helpStderr: snapshot.helpStdout }],
