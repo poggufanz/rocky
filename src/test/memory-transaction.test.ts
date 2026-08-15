@@ -221,6 +221,25 @@ function partialMetadataWritePreload(path: string): void {
   ].join("\n"), "utf8");
 }
 
+function pruneLockObservationPreload(path: string): void {
+  writeFileSync(path, [
+    "const fs = require('node:fs');",
+    "const { syncBuiltinESMExports } = require('node:module');",
+    "const originalOpenDir = fs.opendirSync.bind(fs);",
+    "const originalExists = fs.existsSync.bind(fs);",
+    "const originalWrite = fs.writeFileSync.bind(fs);",
+    "let observed = false;",
+    "fs.opendirSync = (path, ...args) => {",
+    "  if (!observed && String(path) === process.env.ROCKY_TEST_PRUNE_DIRECTORY) {",
+    "    observed = true;",
+    "    originalWrite(process.env.ROCKY_TEST_PRUNE_MARKER, originalExists(process.env.ROCKY_TEST_PRUNE_LOCK) ? 'present' : 'absent');",
+    "  }",
+    "  return originalOpenDir(path, ...args);",
+    "};",
+    "syncBuiltinESMExports();",
+  ].join("\n"), "utf8");
+}
+
 async function concurrentSuccesses(t: TestContext, count: number): Promise<void> {
   const home = sandbox(t, `rocky-atomic-${count}-`);
   const ready = join(home, "ready");
@@ -296,6 +315,37 @@ test("16, 50, and 100 concurrent confirmed successes make one logical resolution
   for (const count of [16, 50, 100]) {
     await t.test(`${count} successes`, { timeout: 60_000 }, async (st) => concurrentSuccesses(st, count));
   }
+});
+
+test("lock housekeeping starts only after canonical lock release", { timeout: 15_000 }, (t) => {
+  const home = sandbox(t, "rocky-lock-housekeeping-order-");
+  const lock = `${join(home, "memory.jsonl")}.triple.lock`;
+  const marker = join(home, "prune-lock-state");
+  const preload = join(home, "observe-prune-lock.cjs");
+  mkdirSync(home, { recursive: true });
+  pruneLockObservationPreload(preload);
+  const worker = [
+    "const [modulePath, home] = process.argv.slice(1);",
+    "process.env.ROCKY_HOME = home;",
+    "const { withMemoryTransaction } = await import(modulePath);",
+    "withMemoryTransaction(() => {});",
+  ].join("\n");
+  const result = spawnSync(process.execPath, ["--input-type=module", "--eval", worker, memoryModuleUrl, home], {
+    env: {
+      ...process.env,
+      ROCKY_HOME: home,
+      ROCKY_TEST_PRUNE_DIRECTORY: home,
+      ROCKY_TEST_PRUNE_LOCK: lock,
+      ROCKY_TEST_PRUNE_MARKER: marker,
+      NODE_OPTIONS: `--require=${preload}`,
+    },
+    encoding: "utf8",
+    timeout: 10_000,
+    windowsHide: true,
+  });
+  assert.equal(result.status, 0, `${result.error ?? ""}${result.stderr}`);
+  assert.equal(readFileSync(marker, "utf8"), "absent");
+  assert.equal(existsSync(lock), false);
 });
 
 test("a concurrent new failure cannot be lost by pending clear", { timeout: 30_000 }, async (t) => {

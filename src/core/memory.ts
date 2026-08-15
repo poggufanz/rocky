@@ -293,11 +293,11 @@ function tryTripleLock(path: string): TripleLock | undefined {
   }
 }
 
-function releaseTripleLock(lock: TripleLock): void {
+function releaseTripleLock(lock: TripleLock): boolean {
   const current = readTripleLock(lock.path);
-  if (!current || current.metadata.pid !== process.pid || current.metadata.token !== lock.token) return;
-  if (differentTripleIdentity(lock.stats, current.stats)) return;
-  reclaimTriplePath(lock.path, current.stats, (tombstonePath) => {
+  if (!current || current.metadata.pid !== process.pid || current.metadata.token !== lock.token) return false;
+  if (differentTripleIdentity(lock.stats, current.stats)) return false;
+  return reclaimTriplePath(lock.path, current.stats, (tombstonePath) => {
     const verify = readTripleLock(tombstonePath);
     return verify !== undefined && verify.metadata.pid === process.pid && verify.metadata.token === lock.token &&
       sameTripleIdentity(lock.stats, verify.stats);
@@ -425,9 +425,6 @@ function acquireTripleLock(paths: RockyPaths): TripleLock {
   for (;;) {
     const lock = tryTripleLock(path);
     if (lock) {
-      // Sweep legacy claims only after this process owns a fresh canonical
-      // pathname. Recovery never depends on finding or deleting one.
-      pruneDeadReclaimClaims(path);
       return lock;
     }
     const current = readTripleLock(path);
@@ -690,7 +687,11 @@ export function withMemoryTransaction<T>(
   try {
     return operation(transaction);
   } finally {
-    releaseTripleLock(lock);
+    if (releaseTripleLock(lock)) {
+      // Sweep legacy claims only after the canonical lock is verified absent.
+      // Recovery never depends on finding or deleting one.
+      pruneDeadReclaimClaims(lock.path);
+    }
   }
 }
 
