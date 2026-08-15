@@ -161,6 +161,43 @@ function fullIdLines(value: string): string[] {
   return lines;
 }
 
+interface ProvenanceFields {
+  id: string;
+  ts: number;
+  source: string;
+  agent?: string;
+  fileLabel: "file" | "files";
+  files: string;
+  coverage: string;
+  confidence: string;
+  reason: string;
+  prefix?: string;
+  bareId?: boolean;
+}
+
+function provenanceLine(fields: ProvenanceFields, split = false): string {
+  const id = split
+    ? "id=split; full-id-next-line"
+    : fields.bareId === true
+      ? terminalSafe(fields.id, MAX_OUTPUT_LINE_BYTES)
+      : `id=${terminalSafe(fields.id, MAX_OUTPUT_LINE_BYTES)}`;
+  const agent = fields.agent === undefined ? "" : ` agent=${terminalSafe(fields.agent, 64)}`;
+  return `${fields.prefix ?? ""}${id} ts=${fields.ts} source=${terminalSafe(fields.source, 64)}${agent} ${fields.fileLabel}=${terminalSafe(fields.files, MAX_PROVENANCE_PATH_BYTES)} coverage=${terminalSafe(fields.coverage, 32)} confidence=${terminalSafe(fields.confidence, 32)} reason=${terminalSafe(fields.reason, 180)}`;
+}
+
+/** Keep metadata labels together, then carry an exact bounded ID separately. */
+function boundedProvenanceLines(fields: ProvenanceFields): string[] {
+  const inline = provenanceLine(fields);
+  if (Buffer.byteLength(inline, "utf8") <= MAX_OUTPUT_LINE_BYTES) return [terminalSafe(inline, MAX_OUTPUT_LINE_BYTES)];
+  return [terminalSafe(provenanceLine(fields, true), MAX_OUTPUT_LINE_BYTES), ...fullIdLines(fields.id)];
+}
+
+function boundedDetailLines(content: string, fields: ProvenanceFields, suffix = ""): string[] {
+  const inline = `${content} ${provenanceLine(fields)}${suffix}`;
+  if (Buffer.byteLength(inline, "utf8") <= MAX_OUTPUT_LINE_BYTES) return [terminalSafe(inline, MAX_OUTPUT_LINE_BYTES)];
+  return [terminalSafe(content, MAX_OUTPUT_LINE_BYTES), ...boundedProvenanceLines(fields)];
+}
+
 function subjectForTriple(triple: DictionaryHit["triple"]): string {
   const first = triple.mechanism.files[0];
   return terminalSafe(first ? first.props[0] ?? first.path : "something", MAX_SUBJECT_DISPLAY_BYTES);
@@ -210,17 +247,19 @@ function evidenceLines(hit: LookupHit): string[] {
   if ("note" in hit) {
     const note = hit.note;
     const metadata = noteConfidence(note);
-    const safeId = terminalSafe(note.id, MAX_OUTPUT_LINE_BYTES);
     const subject = subjectForNote(note);
     const answer = terminalSafe(note.answer, MAX_INTENT_DISPLAY_BYTES);
-    const line = `note ${safeId} ts=${note.ts} source=note file=${metadata.files} coverage=${metadata.coverage} confidence=${metadata.confidence} reason=${metadata.reason}; subject=${subject} answer=${answer}`;
+    const provenance: ProvenanceFields = {
+      id: note.id, ts: note.ts, source: "note", fileLabel: "file",
+      files: metadata.files, coverage: metadata.coverage, confidence: metadata.confidence,
+      reason: metadata.reason, prefix: "note ", bareId: true,
+    };
+    const line = `${provenanceLine(provenance)}; subject=${subject} answer=${answer}`;
     if (Buffer.byteLength(line, "utf8") <= MAX_OUTPUT_LINE_BYTES) return [terminalSafe(line, MAX_OUTPUT_LINE_BYTES)];
     const contentLine = `note subject=${subject} answer=${answer} file=${terminalSafe(note.file, MAX_PATH_DISPLAY_BYTES)}`;
-    const provenanceLine = `note id=split; full-id-next-line ts=${note.ts} source=note file=${terminalSafe(note.file, MAX_PROVENANCE_PATH_BYTES)} coverage=${metadata.coverage} confidence=${metadata.confidence} reason=${metadata.reason}`;
     return [
       terminalSafe(contentLine, MAX_OUTPUT_LINE_BYTES),
-      terminalSafe(provenanceLine, MAX_OUTPUT_LINE_BYTES),
-      ...fullIdLines(note.id),
+      ...boundedProvenanceLines(provenance),
     ];
   }
   const triple = hit.triple;
@@ -228,15 +267,11 @@ function evidenceLines(hit: LookupHit): string[] {
   if (!first || !triple.intent) return [];
   const metadata = tripleConfidence(triple);
   const body = `${shorten(triple.intent.text)} -> ${subjectForTriple(triple)}  (${terminalSafe(first.path, MAX_PATH_DISPLAY_BYTES)} +${first.plusMinus[0]} -${first.plusMinus[1]}, ${ago(triple.ts)};`;
-  const safeId = terminalSafe(triple.id, MAX_OUTPUT_LINE_BYTES);
-  const metadataLine = `id=${safeId} ts=${triple.ts} source=${triple.origin} agent=${triple.agent} files=${metadata.files} coverage=${metadata.coverage} confidence=${metadata.confidence} reason=${metadata.reason})`;
-  const line = `${body} ${metadataLine}`;
-  if (Buffer.byteLength(line, "utf8") <= MAX_OUTPUT_LINE_BYTES) return [terminalSafe(line, MAX_OUTPUT_LINE_BYTES)];
-  return [
-    terminalSafe(body, MAX_OUTPUT_LINE_BYTES),
-    terminalSafe(`id=split; full-id-next-line ts=${triple.ts} source=${triple.origin} agent=${triple.agent} files=${metadata.files} coverage=${metadata.coverage} confidence=${metadata.confidence} reason=${metadata.reason})`, MAX_OUTPUT_LINE_BYTES),
-    ...fullIdLines(triple.id),
-  ];
+  const provenance: ProvenanceFields = {
+    id: triple.id, ts: triple.ts, source: triple.origin, agent: triple.agent, fileLabel: "files",
+    files: metadata.files, coverage: metadata.coverage, confidence: metadata.confidence, reason: metadata.reason,
+  };
+  return boundedDetailLines(body, provenance, ")");
 }
 
 function evidence(hits: LookupHit[], support: (line: string) => void): void {
@@ -488,16 +523,20 @@ export function why(argv: string[], deps: DictionaryCommandDeps = {}): number {
       : safePath;
     const rationale = triple.rationale ? terminalSafe(triple.rationale.text, MAX_INTENT_DISPLAY_BYTES).trim() : "";
     const metadata = tripleConfidence(triple);
-    const provenance = terminalSafe(`id=${triple.id} ts=${triple.ts} source=${triple.origin} agent=${triple.agent} files=${metadata.files} coverage=${metadata.coverage} confidence=${metadata.confidence} reason=${metadata.reason}`, MAX_OUTPUT_LINE_BYTES);
+    const provenance: ProvenanceFields = {
+      id: triple.id, ts: triple.ts, source: triple.origin, agent: triple.agent, fileLabel: "files",
+      files: metadata.files, coverage: metadata.coverage, confidence: metadata.confidence, reason: metadata.reason,
+    };
     if (rationale) {
       speak(terminalSafe(`agent say: ${rationale}. I only hear. correct, question`, MAX_OUTPUT_LINE_BYTES));
       const tags = triple.rationale?.tags
         .map((tag) => terminalSafe(tag, MAX_INTENT_DISPLAY_BYTES))
         .filter(Boolean)
         .join(" ");
-      support(terminalSafe(`  (${where}, ${ago(triple.ts)}${tags ? `, tags: ${tags}` : ""}; ${provenance})`, MAX_OUTPUT_LINE_BYTES));
+      for (const line of boundedDetailLines(`  (${where}, ${ago(triple.ts)}${tags ? `, tags: ${tags}` : ""};`, provenance, ")")) support(line);
     } else {
-      speak(terminalSafe(`change happen. no reason I hear. (${where}, ${ago(triple.ts)}; ${provenance})`, MAX_OUTPUT_LINE_BYTES));
+      speak(terminalSafe("change happen. no reason I hear.", MAX_OUTPUT_LINE_BYTES));
+      for (const line of boundedDetailLines(`  (${where}, ${ago(triple.ts)};`, provenance, ")")) support(line);
     }
   }
   return 0;
@@ -600,7 +639,12 @@ export async function quiz(
       const subject = subjectForNote(candidate);
       speak(terminalSafe(`your note "${subject}". what you understand, question`, MAX_OUTPUT_LINE_BYTES));
       await ask("your answer: ");
-      speak(terminalSafe(`I remember your answer: ${terminalSafe(candidate.answer, MAX_INTENT_DISPLAY_BYTES)}. (id=${candidate.id} ts=${candidate.ts} source=note file=${metadata.files} coverage=${metadata.coverage} confidence=${metadata.confidence} reason=${metadata.reason})`, MAX_OUTPUT_LINE_BYTES));
+      speak(terminalSafe(`I remember your answer: ${terminalSafe(candidate.answer, MAX_INTENT_DISPLAY_BYTES)}. confidence=${metadata.confidence}`, MAX_OUTPUT_LINE_BYTES));
+      const provenance: ProvenanceFields = {
+        id: candidate.id, ts: candidate.ts, source: "note", fileLabel: "file", files: metadata.files,
+        coverage: metadata.coverage, confidence: metadata.confidence, reason: metadata.reason,
+      };
+      for (const line of boundedProvenanceLines(provenance)) support(line);
       continue;
     }
     const intent = terminalSafe(candidate.intent?.text ?? "this change", MAX_INTENT_DISPLAY_BYTES);
@@ -609,7 +653,12 @@ export async function quiz(
     const first = candidate.mechanism.files[0];
     const path = terminalSafe(first?.path ?? "somewhere", MAX_PATH_DISPLAY_BYTES);
     const metadata = tripleConfidence(candidate);
-    speak(terminalSafe(`I remember: ${subjectForTriple(candidate)}. (${path}, ${ago(candidate.ts)}; id=${candidate.id} ts=${candidate.ts} source=${candidate.origin} agent=${candidate.agent} files=${metadata.files} coverage=${metadata.coverage} confidence=${metadata.confidence} reason=${metadata.reason})`, MAX_OUTPUT_LINE_BYTES));
+    speak(terminalSafe(`I remember: ${subjectForTriple(candidate)}.`, MAX_OUTPUT_LINE_BYTES));
+    const provenance: ProvenanceFields = {
+      id: candidate.id, ts: candidate.ts, source: candidate.origin, agent: candidate.agent, fileLabel: "files",
+      files: metadata.files, coverage: metadata.coverage, confidence: metadata.confidence, reason: metadata.reason,
+    };
+    for (const line of boundedDetailLines(`  (${path} +${first?.plusMinus[0] ?? 0} -${first?.plusMinus[1] ?? 0}, ${ago(candidate.ts)};`, provenance, ")")) support(line);
   }
   speak("you know better than me. good good.");
   return 0;

@@ -736,6 +736,94 @@ test("long triple and note evidence retain bounded provenance fields", async () 
   for (const line of [...output.sayLines, ...output.outLines]) assert.ok(Buffer.byteLength(line, "utf8") <= 512);
 });
 
+test("long why provenance stays recoverable for rationale and no-rationale triples", () => {
+  const now = Date.now();
+  const path = `src/${"p".repeat(166)}.ts`;
+  const make = (id: string, rationale: TripleRecord["rationale"]): TripleRecord => ({
+    kind: "triple", id, ts: now - 1, cwd: "/repo", platform: "linux", schemaV: 1,
+    agent: "codex", origin: "agent-hook", intent: { text: `change ${"x".repeat(120)}` }, rationale,
+    mechanism: {
+      files: [{ path, plusMinus: [3, 1], props: [`prop-${"q".repeat(120)}\u001b[31m`], provenance: "tool-observed" }],
+      truncatedFiles: 0, baseline: "captured", coverageStatus: "complete",
+    },
+  });
+  const assertOutput = (output: ReturnType<typeof sinks>, id: string) => {
+    const lines = [...output.sayLines, ...output.outLines];
+    assert.ok(lines.some((line) => line.includes(id)), "full id must remain recoverable");
+    const provenance = lines.find((line) => line.includes("full-id-next-line") && line.includes("agent="));
+    assert.ok(provenance, "bounded provenance continuation must be present");
+    for (const label of ["id=", "ts=", "source=", "agent=", "files=", "coverage=", "confidence=", "reason="]) {
+      assert.ok(provenance!.includes(label), label);
+    }
+    for (const line of lines) {
+      assert.ok(Buffer.byteLength(line, "utf8") <= 512, String(Buffer.byteLength(line, "utf8")));
+      assert.doesNotMatch(line, /[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/u);
+    }
+  };
+
+  const withReason = sinks();
+  const reasonId = "w".repeat(512);
+  assert.equal(why([path], { load: () => [make(reasonId, {
+    text: `reason ${"r".repeat(120)}\u001b[31m`, tags: [`tag-${"t".repeat(120)}\u0000`], source: "notify",
+  })], now, ...withReason.deps }), 0);
+  assertOutput(withReason, reasonId);
+
+  const withoutReason = sinks();
+  const noReasonId = "n".repeat(512);
+  assert.equal(why([path], { load: () => [make(noReasonId, undefined)], now, ...withoutReason.deps }), 0);
+  assertOutput(withoutReason, noReasonId);
+  assert.ok(withoutReason.sayLines.some((line) => line.includes("change happen. no reason I hear.")));
+  assert.equal(withoutReason.sayLines.some((line) => line.includes("id=")), false);
+});
+
+test("quiz long note and triple reveals keep bounded provenance and full ids", async () => {
+  const now = Date.now();
+  const noteId = "n".repeat(512);
+  const tripleId = "t".repeat(512);
+  const note: MemoryRecord = {
+    kind: "note", id: noteId, ts: now - 2 * 24 * 60 * 60 * 1000, cwd: "/repo", cmd: "rocky note",
+    file: `src/${"n".repeat(166)}.ts`, line: 7, subject: `subject-${"s".repeat(113)}\u001b[31m`,
+    answer: `remember ${"a".repeat(119)}\u0000`,
+  };
+  const triple: TripleRecord = {
+    kind: "triple", id: tripleId, ts: now - 3 * 24 * 60 * 60 * 1000, cwd: "/repo", platform: "linux", schemaV: 1,
+    agent: "codex", origin: "agent-hook", intent: { text: `change ${"x".repeat(120)}` },
+    rationale: { text: "remembered reason", tags: ["tag"], source: "notify" },
+    mechanism: {
+      files: [{ path: `src/${"p".repeat(166)}.ts`, plusMinus: [3, 1], props: [`prop-${"q".repeat(120)}`], provenance: "tool-observed" }],
+      truncatedFiles: 0, baseline: "captured", coverageStatus: "complete",
+    },
+  };
+  const output = sinks();
+  const asked: string[] = [];
+  assert.equal(await quiz([], {
+    load: () => [triple, note], now,
+    ask: async (message) => { asked.push(message); return "my answer"; },
+    ...output.deps,
+  }), 0);
+  const lines = [...output.sayLines, ...output.outLines];
+  assert.deepEqual(asked, ["your answer: ", "your answer: "]);
+  assert.ok(output.sayLines.some((line) => line.includes("I remember your answer:")));
+  assert.ok(output.sayLines.some((line) => line.includes("I remember:")));
+  assert.equal(lines.some((line) => line.includes("wrong") || line.includes("correct!") || line.includes("score") || line.includes("?")), false);
+  assert.ok(lines.some((line) => line.includes(noteId)), "full note id must remain recoverable");
+  assert.ok(lines.some((line) => line.includes(tripleId)), "full triple id must remain recoverable");
+  const noteProvenance = output.outLines.find((line) => line.includes("full-id-next-line") && line.includes("source=note"));
+  assert.ok(noteProvenance);
+  for (const label of ["id=", "ts=", "source=", "file=", "coverage=", "confidence=", "reason="]) {
+    assert.ok(noteProvenance!.includes(label), label);
+  }
+  const tripleProvenance = output.outLines.find((line) => line.includes("full-id-next-line") && line.includes("agent="));
+  assert.ok(tripleProvenance);
+  for (const label of ["id=", "ts=", "source=", "agent=", "files=", "coverage=", "confidence=", "reason="]) {
+    assert.ok(tripleProvenance!.includes(label), label);
+  }
+  for (const line of lines) {
+    assert.ok(Buffer.byteLength(line, "utf8") <= 512, String(Buffer.byteLength(line, "utf8")));
+    assert.doesNotMatch(line, /[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/u);
+  }
+});
+
 test("what --ai does not call model for note-only evidence", async () => {
   const note: MemoryRecord = {
     kind: "note", id: "note-only", ts: Date.now(), cwd: "/w", cmd: "rocky note",
