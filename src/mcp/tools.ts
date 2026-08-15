@@ -468,6 +468,20 @@ function safeTripleRecord(value: unknown): TripleRecord | undefined {
   }
 }
 
+function boundedProviderTriples(value: ReturnType<typeof boundedProviderArray>): { candidates: TripleRecord[]; malformed: boolean; truncated: boolean } {
+  const candidates: TripleRecord[] = [];
+  let malformed = !value.valid;
+  for (const entry of value.values) {
+    const candidate = safeTripleRecord(entry);
+    if (candidate === undefined) {
+      malformed = true;
+      continue;
+    }
+    candidates.push(candidate);
+  }
+  return { candidates, malformed, truncated: value.truncated };
+}
+
 function coverageForTriples(matches: readonly TripleRecord[]): KnowledgeCoverageSummary {
   if (matches.length === 0) return unknownCoverage();
   let status: KnowledgeCoverageSummary["status"] = "complete";
@@ -568,17 +582,16 @@ function fallbackWhyEvidence(options: CreateToolRegistryOptions, path: string, l
     rawMatches = [];
   }
   const boundedRawMatches = boundedProviderArray(rawMatches, MAX_WHY_EVIDENCE_INPUTS);
-  const candidates = boundedRawMatches.values
-    .map((value) => safeTripleRecord(value))
-    .filter((value): value is TripleRecord => value !== undefined);
-  const selected = selectWhyCandidates(candidates, path, limit, now);
+  const normalizedMatches = boundedProviderTriples(boundedRawMatches);
+  const selected = selectWhyCandidates(normalizedMatches.candidates, path, limit, now);
   // Coverage belongs to selected exact/unambiguous evidence only. An
   // unrelated complete triple cannot make an empty why-file result complete.
-  const coverage = coverageForTriples(selected.matches);
-  const incomplete = selected.matches.length === 0 || !coverage.complete || selected.possible.length > 0
-    || selected.ambiguousSuffix || boundedRawMatches.truncated;
+  const matches = normalizedMatches.malformed ? [] : selected.matches;
+  const coverage = coverageForTriples(matches);
+  const incomplete = normalizedMatches.malformed || normalizedMatches.truncated || matches.length === 0 || !coverage.complete || selected.possible.length > 0
+    || selected.ambiguousSuffix;
   return {
-    matches: selected.matches,
+    matches,
     possible: selected.possible,
     coverage: incomplete ? { ...coverage, status: "unknown", complete: false } : coverage,
     coverageIncomplete: incomplete,
@@ -591,23 +604,30 @@ function normalizeWhyEvidence(value: unknown, fallback: WhyFileEvidence, path: s
     if (typeof value !== "object" || value === null || Array.isArray(value)) return fallback;
     const raw = value as Record<string, unknown>;
     const boundedMatches = boundedProviderArray(raw.matches, MAX_WHY_EVIDENCE_INPUTS);
-    const candidates = boundedMatches.values
-      .map((entry) => safeTripleRecord(entry))
-      .filter((entry): entry is TripleRecord => entry !== undefined);
-    const selected = selectWhyCandidates(candidates, path, limit, now);
+    const normalizedMatches = boundedProviderTriples(boundedMatches);
+    const selected = selectWhyCandidates(normalizedMatches.candidates, path, limit, now);
     const ambiguous = selected.ambiguousSuffix || raw.ambiguousPath === true;
-    const matches = ambiguous ? [] : selected.matches;
-    const derived = coverageForTriples(matches);
     const boundedPossible = boundedProviderArray(raw.possible, MAX_WHY_EVIDENCE_INPUTS);
+    let malformedPossible = !boundedPossible.valid;
     const providerPossible: WhyFileEvidence["possible"] = [];
     for (let index = 0; index < boundedPossible.values.length && providerPossible.length < limit; index += 1) {
       const candidate = boundedPossible.values[index];
-      if (typeof candidate !== "object" || candidate === null || Array.isArray(candidate)) continue;
+      if (typeof candidate !== "object" || candidate === null || Array.isArray(candidate)) {
+        malformedPossible = true;
+        continue;
+      }
       const value = candidate as Record<string, unknown>;
       if (typeof value.id !== "string" || typeof value.ts !== "number" || !Number.isSafeInteger(value.ts) || value.ts < 0 || value.ts > now
-          || value.source !== "agent-hook" || value.reason !== "path_may_be_omitted") continue;
+          || value.source !== "agent-hook" || value.reason !== "path_may_be_omitted") {
+        malformedPossible = true;
+        continue;
+      }
       providerPossible.push({ id: value.id, ts: value.ts, source: "agent-hook", reason: "path_may_be_omitted" });
     }
+    const malformedEvidence = normalizedMatches.malformed || malformedPossible;
+    const truncatedEvidence = normalizedMatches.truncated || boundedPossible.truncated;
+    const matches = ambiguous || malformedEvidence ? [] : selected.matches;
+    const derived = coverageForTriples(matches);
     const possible = [...selected.possible, ...providerPossible].slice(0, limit);
     const supplied = raw.coverage;
     const suppliedObject = typeof supplied === "object" && supplied !== null && !Array.isArray(supplied)
@@ -625,13 +645,13 @@ function normalizeWhyEvidence(value: unknown, fallback: WhyFileEvidence, path: s
         coverage = { ...derived, status: "truncated", complete: false };
       }
     }
-    if (raw.coverageIncomplete === true || boundedMatches.truncated || boundedPossible.truncated) coverage = { ...coverage, status: "unknown", complete: false };
+    if (raw.coverageIncomplete === true || malformedEvidence || truncatedEvidence) coverage = { ...coverage, status: "unknown", complete: false };
     if (possible.length > 0 || ambiguous) coverage = { ...coverage, status: "unknown", complete: false };
     return {
       matches,
       possible,
       coverage,
-      coverageIncomplete: !coverage.complete || possible.length > 0 || raw.coverageIncomplete === true,
+      coverageIncomplete: !coverage.complete || possible.length > 0 || raw.coverageIncomplete === true || malformedEvidence || truncatedEvidence,
       ...(ambiguous ? { ambiguousPath: true } : {}),
     };
   } catch {

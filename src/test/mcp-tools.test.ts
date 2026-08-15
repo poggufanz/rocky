@@ -45,6 +45,21 @@ function knowledgeRegistry(exposure: "sanitized" | "raw" = "sanitized") {
   });
 }
 
+function completeWhyTriple(id: string): TripleRecord {
+  return {
+    ...triple,
+    id,
+    cwd: "/repo",
+    platform: "linux",
+    mechanism: {
+      files: [{ path: "src/known.ts", plusMinus: [1, 0], props: ["known"], provenance: "tool-observed" }],
+      truncatedFiles: 0,
+      baseline: "captured",
+      coverageStatus: "complete",
+    },
+  };
+}
+
 async function mapUnexpectedToolFailureToWire(call: () => Promise<unknown>, id: string): Promise<string> {
   try {
     await call();
@@ -230,6 +245,43 @@ test("why_file suppresses custom matches marked ambiguous", async () => {
   assert.equal(result.structuredContent.ambiguousPath, true);
   assert.equal(result.structuredContent.coverageIncomplete, true);
   assert.equal(result.structuredContent.coverageStatus, "unknown");
+});
+
+test("why_file custom evidence fails closed on a malformed match", async () => {
+  const known = completeWhyTriple("custom-malformed-match");
+  const memory = {
+    ...createMemoryQueries(() => [known]),
+    whyFile: () => [known, null] as unknown as TripleRecord[],
+    whyFileEvidence: () => ({
+      matches: [known, null] as unknown as TripleRecord[],
+      possible: [],
+      coverage: { status: "complete" as const, complete: true, filesCovered: 1, truncatedFiles: 0 },
+      coverageIncomplete: false,
+    }),
+  };
+  const result = await createToolRegistry({
+    exposure: "sanitized", memory, recallWithAi: disabledRecallWithAi,
+  }).call("why_file", { path: "src/known.ts" }, new AbortController().signal);
+  assert.deepEqual(result.structuredContent.items, []);
+  assert.equal(result.structuredContent.coverageStatus, "unknown");
+  assert.equal(result.structuredContent.coverageIncomplete, true);
+  assert.equal((result.structuredContent.coverage as { complete: boolean }).complete, false);
+});
+
+test("why_file fallback fails closed on a malformed match", async () => {
+  const known = completeWhyTriple("fallback-malformed-match");
+  const memory = {
+    ...createMemoryQueries(() => [known]),
+    whyFile: () => [known, null] as unknown as TripleRecord[],
+    whyFileEvidence: undefined,
+  };
+  const result = await createToolRegistry({
+    exposure: "sanitized", memory, recallWithAi: disabledRecallWithAi,
+  }).call("why_file", { path: "src/known.ts" }, new AbortController().signal);
+  assert.deepEqual(result.structuredContent.items, []);
+  assert.equal(result.structuredContent.coverageStatus, "unknown");
+  assert.equal(result.structuredContent.coverageIncomplete, true);
+  assert.equal((result.structuredContent.coverage as { complete: boolean }).complete, false);
 });
 
 test("why_file keeps unmatched relative-root paths unknown", async () => {

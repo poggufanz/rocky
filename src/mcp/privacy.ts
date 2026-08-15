@@ -635,7 +635,10 @@ export function projectKnowledgeHits(
   for (let index = 0; index < sourceHits.length; index += 1) {
     const candidate = sourceHits[index];
     const hit = normalizeKnowledgeHit(candidate);
-    if (hit === undefined) continue;
+    if (hit === undefined) {
+      truncated = true;
+      continue;
+    }
     const item = project(hit, hasCanonicalKnowledgeProof(candidate));
     let serialized: string;
     try {

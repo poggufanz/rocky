@@ -2,13 +2,14 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { Buffer } from "node:buffer";
 import { performance } from "node:perf_hooks";
-import type { RecallHit, RecentFailureHit } from "../core/memory-query.js";
+import type { KnowledgeSearchHit, RecallHit, RecentFailureHit } from "../core/memory-query.js";
 import type { FixRecord, TripleRecord } from "../core/memory-read.js";
 import {
   MAX_FIELD_BYTES,
   MAX_RESPONSE_BYTES,
   normalizeOutputText,
   projectMemoryRecord,
+  projectKnowledgeHits,
   projectRecentFailures,
   projectRecallHits,
   projectTriple,
@@ -71,6 +72,17 @@ test("strictest exposure never escalates either boundary", () => {
 test("privacy limits use the specified byte values", () => {
   assert.equal(MAX_FIELD_BYTES, 16 * 1024);
   assert.equal(MAX_RESPONSE_BYTES, 512 * 1024);
+});
+
+test("malformed custom knowledge hits disclose truncation instead of disappearing cleanly", () => {
+  const valid: KnowledgeSearchHit = {
+    id: "valid-search-hit", ts: 10, kind: "triple", snippet: "known", score: 1,
+    agent: "codex", source: "agent-hook", filesCovered: ["src/known.ts"],
+    truncatedFiles: 0, complete: false, coverageStatus: "unknown",
+  };
+  const output = projectKnowledgeHits([valid, null] as unknown as KnowledgeSearchHit[], "sanitized");
+  assert.equal(output.items.length, 1);
+  assert.equal(output.truncated, true);
 });
 
 test("sanitized projection has exactly the allowlisted keys despite injected unknown data", () => {
