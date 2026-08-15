@@ -497,7 +497,6 @@ async function runCheck(rest: readonly string[], state: CheckState): Promise<num
     return 2;
   }
   const flags = new Set(ownedArgs.filter((arg) => arg.startsWith("--")));
-  if (flags.has("--help")) return usage();
   // An unrecognised flag must not silently degrade into a full check: someone
   // who typed it meant something Rocky did not do.
   const unknown = [...flags].filter((flag) => !KNOWN_FLAGS.has(flag));
@@ -507,6 +506,7 @@ async function runCheck(rest: readonly string[], state: CheckState): Promise<num
     usage();
     return 2;
   }
+  if (flags.has("--help")) return usage();
   const quiet = flags.has("--quiet");
   if (flags.has("--install-hook")) return installHookFlow(quiet);
 

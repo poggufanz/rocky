@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -37,15 +37,64 @@ function assertUsage(args: readonly string[], label: string, options: { cwd?: st
   assert.match(result.stderr, /usage|option|argument|query|command/i, label);
 }
 
+interface OpenStdinResult {
+  status: number | null;
+  signal: NodeJS.Signals | null;
+  stdout: string;
+  stderr: string;
+}
+
+async function runCliWithOpenStdin(args: readonly string[], deadlineMs = 1_500): Promise<OpenStdinResult> {
+  const home = mkdtempSync(join(tmpdir(), "rocky-cli-open-stdin-home-"));
+  const child = spawn(process.execPath, [cli, ...args], {
+    cwd: packageRoot,
+    env: { ...process.env, ROCKY_HOME: home },
+    stdio: ["pipe", "pipe", "pipe"],
+    windowsHide: true,
+  });
+  const stdout: Buffer[] = [];
+  const stderr: Buffer[] = [];
+  child.stdout.on("data", (chunk: Buffer) => stdout.push(chunk));
+  child.stderr.on("data", (chunk: Buffer) => stderr.push(chunk));
+  const close = new Promise<OpenStdinResult>((resolve) => {
+    child.once("error", () => resolve({ status: null, signal: null, stdout: "", stderr: "" }));
+    child.once("close", (status, signal) => resolve({
+      status,
+      signal,
+      stdout: Buffer.concat(stdout).toString("utf8"),
+      stderr: Buffer.concat(stderr).toString("utf8"),
+    }));
+  });
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const deadline = new Promise<undefined>((resolve) => {
+      timer = setTimeout(() => resolve(undefined), deadlineMs);
+    });
+    const result = await Promise.race([close, deadline]);
+    if (result === undefined) throw new Error(`CLI did not exit within ${deadlineMs} ms`);
+    return result;
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+    if (child.exitCode === null) {
+      child.stdin.destroy();
+      child.kill("SIGKILL");
+      await Promise.race([
+        close,
+        new Promise<void>((resolve) => setTimeout(resolve, 500)),
+      ]);
+    }
+    rmSync(home, { recursive: true, force: true });
+  }
+}
+
 test("strict no-argument commands reject positional junk before opening state", () => {
   for (const command of ["stats", "mcp", "hook status", "digest", "quiz"]) {
     assertUsage(command.split(" ").concat("junk"), `${command} junk`, { input: "" });
   }
 });
 
-test("MCP junk exits with usage and emits no protocol frame without waiting for stdin", () => {
-  const result = runCli(["mcp", "junk"], { input: "" });
-  assert.equal(result.error, undefined, String(result.error));
+test("MCP junk exits with usage while stdin remains open and emits no protocol frame", async () => {
+  const result = await runCliWithOpenStdin(["mcp", "junk"]);
   assert.equal(result.signal, null);
   assert.equal(result.status, 2, result.stderr);
   assert.equal(result.stdout, "");
@@ -78,6 +127,15 @@ test("manual check rejects positional junk before Git inspection", () => {
     assertUsage(["check", "junk"], "check positional junk", { cwd });
   } finally {
     rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("manual check rejects unknown flags regardless of help ordering", () => {
+  for (const args of [
+    ["check", "--help", "--bogus"],
+    ["check", "--bogus", "--help"],
+  ]) {
+    assertUsage(args, args.join(" "));
   }
 });
 
@@ -114,6 +172,13 @@ test("exact run parser preserves quote, trailing slash, Unicode, and spaced path
 test("help and version reject trailing arguments while clean version stays stdout-pure", () => {
   assertUsage(["--help", "junk"], "help trailing argument");
   assertUsage(["--version", "junk"], "version trailing argument");
+
+  const help = runCli(["--help"]);
+  assert.equal(help.error, undefined, String(help.error));
+  assert.equal(help.signal, null);
+  assert.equal(help.status, 0, help.stderr);
+  assert.match(help.stdout, /usage:/i);
+  assert.equal(help.stderr, "");
 
   const result = runCli(["--version"]);
   assert.equal(result.status, 0, result.stderr);
