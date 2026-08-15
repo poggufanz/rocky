@@ -14,6 +14,8 @@ import { createMemoryQueries } from "../dist/core/memory-query.js";
 
 const NOW = 1_800_000_000_000;
 const COUNTS = [10_000, 50_000, 250_000];
+const SCALAR_HEAVY_RECORDS = 70;
+const SCALAR_HEAVY_LINE_BYTES = 850 * 1024;
 const WRITE_CHUNK_BYTES = 64 * 1024;
 const WORKER_TIMEOUT_MS = 180_000;
 
@@ -30,6 +32,23 @@ function line(index) {
     signature: [`benchmark needle ${Number(index) % 100}`],
     excerpt: "benchmark needle",
   });
+}
+
+function scalarHeavyLine(index) {
+  const base = {
+    kind: "failure",
+    id: `scalar-${index}`,
+    ts: NOW - Number(index),
+    cwd: "/scorecard",
+    cmd: "scalar-heavy",
+    exitCode: 1,
+    fingerprint: Number(index).toString(16).padStart(16, "0"),
+    fingerprintV: 2,
+    signature: ["scalar-heavy"],
+    excerpt: "",
+  };
+  const overhead = Buffer.byteLength(JSON.stringify(base), "utf8");
+  return JSON.stringify({ ...base, excerpt: "s".repeat(Math.max(0, SCALAR_HEAVY_LINE_BYTES - overhead)) });
 }
 
 function writeAll(descriptor, value) {
@@ -60,6 +79,12 @@ function writeFixture(memoryPath, envelope) {
       const target = MAX_MEMORY_FILE_BYTES + Buffer.byteLength(repeated, "utf8");
       while (bytes + Buffer.byteLength(chunk, "utf8") < target) {
         chunk += repeated;
+        if (Buffer.byteLength(chunk, "utf8") >= WRITE_CHUNK_BYTES) flush();
+      }
+      flush();
+    } else if (envelope === "scalar-heavy") {
+      for (let index = 0; index < SCALAR_HEAVY_RECORDS; index += 1) {
+        chunk += `${scalarHeavyLine(index)}\n`;
         if (Buffer.byteLength(chunk, "utf8") >= WRITE_CHUNK_BYTES) flush();
       }
       flush();
@@ -147,7 +172,7 @@ function runWorker(envelope, operation) {
 
 function assertScorecard(scorecard) {
   const byEnvelope = new Map(scorecard.map((entry) => [String(entry.envelope), entry]));
-  for (const envelope of [...COUNTS, "over-cap"]) {
+  for (const envelope of [...COUNTS, "over-cap", "scalar-heavy"]) {
     const entry = byEnvelope.get(String(envelope));
     if (!entry || !Number.isFinite(entry.statsMs) || !Number.isFinite(entry.recallMs)
         || !Number.isSafeInteger(entry.rssAfterGcBytes) || entry.rssAfterGcBytes < 0
@@ -174,7 +199,13 @@ function assertScorecard(scorecard) {
       || overCap.coverage.bytesScanned > MAX_MEMORY_FILE_BYTES) {
     throw new Error("over-cap fixture did not disclose bounded incomplete coverage");
   }
-  for (const envelope of ["10000", "over-cap"]) {
+  const scalarHeavy = byEnvelope.get("scalar-heavy");
+  if (scalarHeavy.records >= SCALAR_HEAVY_RECORDS || scalarHeavy.coverage.complete !== false ||
+      scalarHeavy.coverage.reason !== "file-size-cap" || scalarHeavy.coverage.truncated < 1 ||
+      scalarHeavy.coverage.bytesScanned > MAX_MEMORY_FILE_BYTES) {
+    throw new Error("scalar-heavy fixture did not disclose file-cap degraded coverage");
+  }
+  for (const envelope of ["10000", "over-cap", "scalar-heavy"]) {
     const entry = byEnvelope.get(envelope);
     if (entry.rssAfterGcBytes >= 150 * 1024 * 1024) {
       throw new Error(`${envelope} bounded RSS guard missed: rssAfterGc=${entry.rssAfterGcBytes}`);
@@ -197,10 +228,13 @@ function assertScorecard(scorecard) {
 }
 
 if (process.argv[2] === "--worker") {
-  worker(process.argv[3] === "over-cap" ? "over-cap" : Number(process.argv[3]), process.argv[4] === "recall" ? "recall" : "stats");
+  const workerEnvelope = process.argv[3] === "over-cap" || process.argv[3] === "scalar-heavy"
+    ? process.argv[3]
+    : Number(process.argv[3]);
+  worker(workerEnvelope, process.argv[4] === "recall" ? "recall" : "stats");
 } else {
   const scorecard = [];
-  for (const envelope of [...COUNTS, "over-cap"]) {
+  for (const envelope of [...COUNTS, "over-cap", "scalar-heavy"]) {
     const stats = runWorker(envelope, "stats");
     const recall = runWorker(envelope, "recall");
     scorecard.push({

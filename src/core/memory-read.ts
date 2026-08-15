@@ -447,7 +447,7 @@ export type MemoryRecord = FailureRecord | FixRecord | AssociationRecord | NoteR
 /** Durable memory format version used by coverage metadata and cache entries. */
 export const MEMORY_FORMAT_VERSION = 1 as const;
 /** Supported envelope: files above this byte count are read only to this boundary. */
-export const MAX_MEMORY_FILE_BYTES = 64 * 1024 * 1024;
+export const MAX_MEMORY_FILE_BYTES = 32 * 1024 * 1024;
 /** Logical reference envelope used by the Linux Node 22 scorecard. */
 export const MAX_MEMORY_RECORDS = 50_000;
 /** Enforced platform envelope. Only the exact Linux Node 22 reference
@@ -755,6 +755,8 @@ function readFlags(): number {
 interface MemoryCacheEntry {
   path: string;
   key: string;
+  /** Full bounded-content witness for metadata-collision invalidation. */
+  witness?: string;
   records: readonly MemoryRecord[];
   complete: boolean;
   coverage: MemoryCoverage;
@@ -813,6 +815,45 @@ function memorySnapshotKey(path: string, stats: BigIntStats): string {
     stats.mtimeNs.toString(),
     stats.ctimeNs.toString(),
   ].join("\u0000");
+}
+
+/**
+ * Verify all bytes in the accepted envelope when metadata says a snapshot is
+ * unchanged.  Windows can expose identical dev/ino/size/timestamp tuples for
+ * rapid same-size rewrites, so metadata alone cannot authorize reuse.  A file
+ * above the bounded envelope is witnessed through its complete bounded
+ * prefix plus total-size metadata; no probabilistic sample is used here.
+ */
+function memoryContentWitness(path: string, expected: BigIntStats): string | undefined {
+  let descriptor: number | undefined;
+  try {
+    descriptor = openSync(path, readFlags());
+    const opened = fstatSync(descriptor, { bigint: true });
+    if (!regularDescriptorSafe(opened) || !sameFilesystemIdentity(expected, opened) ||
+        memorySnapshotKey(path, expected) !== memorySnapshotKey(path, opened)) return undefined;
+    const hash = createHash("sha256");
+    const buffer = Buffer.alloc(MEMORY_READ_CHUNK_BYTES);
+    const total = Math.min(statBytes(opened.size), MAX_MEMORY_FILE_BYTES);
+    let offset = 0;
+    while (offset < total) {
+      const requested = Math.min(buffer.byteLength, total - offset);
+      const count = readSync(descriptor, buffer, 0, requested, offset);
+      if (count <= 0) return undefined;
+      hash.update(buffer.subarray(0, count));
+      offset += count;
+    }
+    const after = fstatSync(descriptor, { bigint: true });
+    if (!regularDescriptorSafe(after) || !sameFilesystemIdentity(opened, after) ||
+        memorySnapshotKey(path, opened) !== memorySnapshotKey(path, after) ||
+        offset !== Math.min(statBytes(after.size), MAX_MEMORY_FILE_BYTES)) return undefined;
+    return hash.digest("hex");
+  } catch {
+    return undefined;
+  } finally {
+    if (descriptor !== undefined) {
+      try { closeSync(descriptor); } catch { /* best effort */ }
+    }
+  }
 }
 
 function freezeMemoryRecord(record: MemoryRecord): MemoryRecord {
@@ -927,14 +968,20 @@ export function loadMemoryChecked(path = resolveRockyPaths().memory, now = Date.
     }
 
     const listedKey = memorySnapshotKey(path, listed);
-    if (memoryCache?.path === path && memoryCache.key === listedKey) {
-      memoryCacheHitCount += 1;
-      if (!needsResolution(memoryCache.records)) {
-        return { records: memoryCache.records as MemoryRecord[], complete: memoryCache.complete, coverage: memoryCache.coverage };
+    if (memoryCache?.path === path && memoryCache.key === listedKey && memoryCache.witness !== undefined) {
+      // Metadata is only a fast candidate. Verify every accepted byte before
+      // reusing records so rapid same-size rewrites cannot poison answers or
+      // mutation decisions with a stale snapshot.
+      const witness = memoryContentWitness(path, listed);
+      if (witness === memoryCache.witness) {
+        memoryCacheHitCount += 1;
+        if (!needsResolution(memoryCache.records)) {
+          return { records: memoryCache.records as MemoryRecord[], complete: memoryCache.complete, coverage: memoryCache.coverage };
+        }
+        const records = materializeMemoryRecords(memoryCache.records);
+        resolveMemoryRecords(records, now);
+        return { records: freezeMaterializedRecords(records), complete: memoryCache.complete, coverage: memoryCache.coverage };
       }
-      const records = materializeMemoryRecords(memoryCache.records);
-      resolveMemoryRecords(records, now);
-      return { records: freezeMaterializedRecords(records), complete: memoryCache.complete, coverage: memoryCache.coverage };
     }
 
     descriptor = openSync(path, readFlags());
@@ -953,6 +1000,7 @@ export function loadMemoryChecked(path = resolveRockyPaths().memory, now = Date.
     let skipped = 0;
     let bytesScanned = 0;
     let truncated = opened.size > BigInt(MAX_MEMORY_FILE_BYTES) ? 1 : 0;
+    const contentHash = createHash("sha256");
     const records: MemoryRecord[] = [];
     const seenIds = new Set<string>();
 
@@ -1020,7 +1068,7 @@ export function loadMemoryChecked(path = resolveRockyPaths().memory, now = Date.
     };
 
     const buffer = Buffer.alloc(MEMORY_READ_CHUNK_BYTES);
-    while (bytesScanned < readLimit && !stoppedAtRecordCap) {
+    while (bytesScanned < readLimit) {
       const requested = Math.min(buffer.byteLength, readLimit - bytesScanned);
       const count = readSync(descriptor, buffer, 0, requested, bytesScanned);
       if (count <= 0) {
@@ -1030,7 +1078,9 @@ export function loadMemoryChecked(path = resolveRockyPaths().memory, now = Date.
         return emptyLoad(false, totalBytes, "read-race");
       }
       bytesScanned += count;
-      consumeBytes(buffer.subarray(0, count));
+      const bytes = buffer.subarray(0, count);
+      contentHash.update(bytes);
+      if (!stoppedAtRecordCap) consumeBytes(bytes);
     }
     // A partial final line is valid input when the file ends normally. A
     // file-size-capped partial line is deliberately left undisclosed as a
@@ -1064,10 +1114,12 @@ export function loadMemoryChecked(path = resolveRockyPaths().memory, now = Date.
     });
     const frozenRecords = Object.freeze(records.map(freezeMemoryRecord));
     memoryParseCount += 1;
-    // Cap/skipped snapshots are stable evidence and may be reused with their
-    // explicit incomplete metadata. Transient races/I/O never reach this
-    // cache assignment.
-    memoryCache = { path, key: afterKey, records: frozenRecords, complete, coverage };
+    // Cap/skipped snapshots are stable bounded evidence and may be reused
+    // with explicit incomplete metadata. The witness covers every byte that
+    // can affect this bounded answer plus total-size/identity metadata; it is
+    // not a probabilistic sample of the file.
+    const witness = contentHash.digest("hex");
+    memoryCache = { path, key: afterKey, witness, records: frozenRecords, complete, coverage };
     if (!needsResolution(frozenRecords)) {
       return { records: frozenRecords as MemoryRecord[], complete, coverage };
     }
@@ -1103,18 +1155,6 @@ export function loadMemoryChecked(path = resolveRockyPaths().memory, now = Date.
     }
   }
 
-}
-
-/** Cheap identity probe used by long-lived query caches before reusing a snapshot. */
-export function memorySnapshotIdentity(path = resolveRockyPaths().memory): string | undefined {
-  try {
-    const stats = lstatSync(path, { bigint: true });
-    if (!regularDescriptorSafe(stats)) return undefined;
-    return memorySnapshotKey(path, stats);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return `missing\u0000${path}`;
-    return undefined;
-  }
 }
 
 /** Backward-compatible reader: malformed lines and unreadable files read as empty. */

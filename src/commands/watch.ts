@@ -157,7 +157,7 @@ function readMemory(quiet: boolean): MemoryRecord[] | undefined {
   try {
     const loaded = loadMemoryChecked();
     if (!isCompleteMemoryCoverage(loaded.coverage)) {
-      const diagnostic = `memory coverage incomplete: scanned ${loaded.coverage.scanned}; skipped ${loaded.coverage.skipped}; truncated ${loaded.coverage.truncated}${loaded.coverage.reason === undefined ? "" : `; reason ${loaded.coverage.reason}`}`;
+      const diagnostic = `memory coverage incomplete: version ${loaded.coverage.version}; scanned ${loaded.coverage.scanned}; skipped ${loaded.coverage.skipped}; truncated ${loaded.coverage.truncated}${loaded.coverage.reason === undefined ? "" : `; reason ${loaded.coverage.reason}`}`;
       if (quiet) writeRockyStderr(`${diagnostic}\n`);
       else {
         say("memory coverage incomplete. I do not claim prior fix. check, question");

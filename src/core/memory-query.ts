@@ -10,7 +10,7 @@ import {
   retrievalTokens,
   similarity,
 } from "./fingerprint.js";
-import { boundTripleRecord, canonicalPath, loadMemory, loadMemoryChecked, memorySnapshotIdentity, pathIdentityHash } from "./memory-read.js";
+import { boundTripleRecord, canonicalPath, loadMemory, loadMemoryChecked, pathIdentityHash } from "./memory-read.js";
 import type { FailureRecord, FixRecord, LinkBasis, LinkConfidence, MemoryCoverage, MemoryRecord, TripleRecord } from "./memory-read.js";
 
 export interface RecallQuery { query: string; limit?: number; cwd?: string; now?: number }
@@ -376,10 +376,14 @@ export function queryRecall(records: readonly MemoryRecord[], input: RecallQuery
   // while scoring after the compact frequency pass.
   const documentFrequency = new Map<string, number>();
   const scratchTokens = new Set<string>();
-  const candidateSizes: number[] = [];
-  const candidateIntersections: number[] = [];
-  const candidateMasks: number[] = [];
-  const candidateMatches: Array<readonly number[] | undefined> = [];
+  const candidateSizes = new Uint32Array(candidates.length);
+  const candidateIntersections = new Uint32Array(candidates.length);
+  const candidateMasks = new Int32Array(candidates.length);
+  // The common short-query path needs no overflow list at all. Keep the
+  // long-query witness only when query tokens exceed the inline bit mask.
+  const candidateMatches: Array<readonly number[] | undefined> | undefined = queryTokenList.length > 31
+    ? new Array<readonly number[] | undefined>(candidates.length)
+    : undefined;
   for (let candidateIndex = 0; candidateIndex < candidates.length; candidateIndex += 1) {
     const record = candidates[candidateIndex]!;
     let intersection = 0;
@@ -393,12 +397,12 @@ export function queryRecall(records: readonly MemoryRecord[], input: RecallQuery
       intersection += 1;
       if (queryIndex < 31) mask |= 1 << queryIndex;
       else (matches ??= []).push(queryIndex);
+      documentFrequency.set(token, (documentFrequency.get(token) ?? 0) + 1);
     }
     candidateIntersections[candidateIndex] = intersection;
     candidateMasks[candidateIndex] = mask;
-    candidateMatches[candidateIndex] = matches === undefined || matches.length === 0 ? undefined : matches;
-    for (const token of scratchTokens) {
-      documentFrequency.set(token, (documentFrequency.get(token) ?? 0) + 1);
+    if (candidateMatches !== undefined) {
+      candidateMatches[candidateIndex] = matches === undefined || matches.length === 0 ? undefined : matches;
     }
   }
   const migration = fingerprintMigrationIndex(candidates);
@@ -422,7 +426,7 @@ export function queryRecall(records: readonly MemoryRecord[], input: RecallQuery
         break;
       }
     }
-    if (!rareExact && candidateMatches[candidateIndex] !== undefined) {
+    if (!rareExact && candidateMatches?.[candidateIndex] !== undefined) {
       for (const queryIndex of candidateMatches[candidateIndex]!) {
         const token = queryTokenList[queryIndex];
         if (token !== undefined && distinctiveToken(token) && (documentFrequency.get(token) ?? 0) <= rareFrequency) {
@@ -433,7 +437,10 @@ export function queryRecall(records: readonly MemoryRecord[], input: RecallQuery
     }
     const score = rareExact ? Math.min(1, Math.max(base, 0.06)) : base;
     if (score <= 0.05) continue;
-    const hit = { failure: record, fix: fixForFailure(fixes, record, now), score };
+    const fix = fixes.byId.size === 0 && fixes.byFailureId.size === 0
+      ? undefined
+      : fixForFailure(fixes, record, now);
+    const hit = { failure: record, fix, score };
     const key = canonicalFingerprint(record, migration);
     const previous = best.get(key);
     const shouldReplace = previous === undefined || (!previous.fix && hit.fix)
@@ -552,6 +559,7 @@ export function searchKnowledge(
   for (const entry of entries) {
     knowledgeTokens(entry.record, knowledgeScratch);
     for (const token of knowledgeScratch) {
+      if (!queryTokenSet.has(token)) continue;
       documentFrequency.set(token, (documentFrequency.get(token) ?? 0) + 1);
     }
   }
@@ -947,41 +955,11 @@ function recordBase(failure: FailureRecord): string {
 
 export function createMemoryQueries(load: () => MemoryRecord[] = loadMemory): MemoryQueries {
   const durableLoader = load === loadMemory;
-  let cached: {
-    key: string;
-    records: MemoryRecord[];
-    coverage: MemoryCoverage;
-    resolvedAt: number;
-    nextFutureTs?: number;
-  } | undefined;
   let lastCoverage: MemoryCoverage | undefined;
   const loadRecords = (requestedNow = Date.now()): MemoryRecord[] => {
     if (!durableLoader) return load();
-    const key = memorySnapshotIdentity();
-    const canReuse = cached !== undefined && key !== undefined && cached.key === key &&
-      requestedNow >= cached.resolvedAt &&
-      (cached.nextFutureTs === undefined || requestedNow < cached.nextFutureTs);
-    if (canReuse && cached !== undefined) return cached.records;
     const loaded = loadMemoryChecked(undefined, requestedNow);
     lastCoverage = loaded.coverage;
-    // A transient read-race/I/O fallback is not a cacheable snapshot. Keep
-    // the explicit incomplete result for this call, then retry after metadata
-    // changes rather than replaying a stale empty/partial answer forever.
-    if (loaded.coverage.reason === "read-race") {
-      cached = undefined;
-      return loaded.records;
-    }
-    const nextFutureTs = loaded.records.reduce<number | undefined>((earliest, record) => {
-      if (record.ts <= requestedNow) return earliest;
-      return earliest === undefined ? record.ts : Math.min(earliest, record.ts);
-    }, undefined);
-    cached = {
-      key: key ?? `unavailable\u0000${Date.now()}`,
-      records: loaded.records,
-      coverage: loaded.coverage,
-      resolvedAt: requestedNow,
-      ...(nextFutureTs === undefined ? {} : { nextFutureTs }),
-    };
     return loaded.records;
   };
   const queries: MemoryQueries = {
@@ -1014,8 +992,13 @@ export function createMemoryQueries(load: () => MemoryRecord[] = loadMemory): Me
     },
     ...(durableLoader ? {
       coverage: () => {
+        // Coverage belongs to most recent answer. Do not reload here: a
+        // transient read-race followed by a file replacement must not pair a
+        // clean scan with an answer produced from an empty fallback. A later
+        // query intentionally obtains a fresh snapshot and replaces marker.
+        if (lastCoverage !== undefined) return lastCoverage;
         loadRecords();
-        return cached?.coverage ?? lastCoverage!;
+        return lastCoverage!;
       },
     } : {}),
   };

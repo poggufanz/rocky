@@ -59,7 +59,7 @@ function readMemory(): MemoryRecord[] | undefined {
     const loaded = loadMemoryChecked();
     if (!isCompleteMemoryCoverage(loaded.coverage)) {
       sayTty("memory coverage incomplete. I do not claim prior fix. check, question");
-      detailTty(`memory coverage: scanned ${loaded.coverage.scanned}; skipped ${loaded.coverage.skipped}; truncated ${loaded.coverage.truncated}${loaded.coverage.reason === undefined ? "" : `; reason ${loaded.coverage.reason}`}`);
+      detailTty(`memory coverage: version ${loaded.coverage.version}; scanned ${loaded.coverage.scanned}; skipped ${loaded.coverage.skipped}; truncated ${loaded.coverage.truncated}${loaded.coverage.reason === undefined ? "" : `; reason ${loaded.coverage.reason}`}`);
       return undefined;
     }
     return loaded.records;

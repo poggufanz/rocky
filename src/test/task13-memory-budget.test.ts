@@ -5,6 +5,7 @@ import { appendFileSync, existsSync, mkdtempSync, readFileSync, renameSync, rmSy
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
+import { performance } from "node:perf_hooks";
 import {
   loadMemoryChecked,
   memoryReadMetrics,
@@ -82,12 +83,16 @@ test("over-cap memory returns a bounded incomplete snapshot", (t) => {
   const line = `${failure("cap")}\n`;
   writeFileSync(path, line.repeat(Math.ceil(MAX_MEMORY_FILE_BYTES / Buffer.byteLength(line, "utf8")) + 1));
 
+  const before = memoryReadMetrics();
   const result = loadMemoryChecked(path);
+  const repeat = loadMemoryChecked(path);
   const measured = coverage(result);
   assert.equal(result.complete, false);
   assert.equal(measured.complete, false);
   assert.ok(measured.truncated > 0);
   assert.ok(measured.bytesScanned <= MAX_MEMORY_FILE_BYTES);
+  assert.equal(repeat.coverage.complete, false);
+  assert.equal(memoryReadMetrics().parses - before.parses, 1);
 });
 
 test("record-cap diagnostics are explicit", (t) => {
@@ -217,6 +222,13 @@ test("memory scorecard keeps heavy workers explicit and reports bounded RSS", ()
   assert.equal(MAX_SUPPORTED_MEMORY_RECORDS, referenceRuntime ? MAX_MEMORY_RECORDS : 10_000);
 });
 
+test("run, hook, and watch incomplete diagnostics disclose memory version", () => {
+  for (const command of ["run", "hook", "watch"]) {
+    const source = readFileSync(join(process.cwd(), "src", "commands", `${command}.ts`), "utf8");
+    assert.match(source, /memory coverage[^`\n]*version \$\{loaded\.coverage\.version\}/u, `${command} coverage version`);
+  }
+});
+
 test("canonical fetch not-found carries skipped-line coverage", async (t) => {
   const root = mkdtempSync(join(tmpdir(), "rocky-task13-fetch-coverage-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
@@ -278,6 +290,87 @@ test("hostile coverage stays explicit on bounded and AI-error MCP paths", async 
   assert.ok((aiContent.memoryCoverage?.truncated ?? 0) > 0);
 });
 
+test("MCP rejects clean coverage with impossible byte equality", async () => {
+  const impossible = {
+    version: 1 as const,
+    scanned: 0,
+    skipped: 0,
+    truncated: 0,
+    bytesScanned: 0,
+    bytesTotal: 10,
+    complete: true,
+  };
+  const memory = {
+    recall: () => [],
+    recentFailures: () => [],
+    stats: () => ({ failures: 0, fixEvents: 0, resolved: 0, unresolved: 0 }),
+    searchKnowledge: () => [],
+    fetchRecord: () => undefined,
+    whyFile: () => [],
+    coverage: () => impossible,
+  };
+  const result = await createToolRegistry({ exposure: "sanitized", memory, recallWithAi: disabledRecallWithAi })
+    .call("stats", {}, new AbortController().signal);
+  const structured = result.structuredContent as { memoryCoverageIncomplete?: boolean; memoryCoverage?: { complete?: boolean; truncated?: number } };
+  assert.equal(structured.memoryCoverageIncomplete, true);
+  assert.equal(structured.memoryCoverage?.complete, false);
+  assert.ok((structured.memoryCoverage?.truncated ?? 0) > 0);
+
+  const atBoundary = {
+    ...impossible,
+    bytesScanned: MAX_MEMORY_FILE_BYTES,
+    bytesTotal: MAX_MEMORY_FILE_BYTES,
+    complete: false,
+    truncated: 1,
+    reason: "file-size-cap" as const,
+  };
+  const boundaryResult = await createToolRegistry({
+    exposure: "sanitized",
+    memory: { ...memory, coverage: () => atBoundary },
+    recallWithAi: disabledRecallWithAi,
+  }).call("stats", {}, new AbortController().signal);
+  const boundaryContent = boundaryResult.structuredContent as { memoryCoverage?: { reason?: string; complete?: boolean } };
+  assert.equal(boundaryContent.memoryCoverage?.complete, false);
+  assert.equal(boundaryContent.memoryCoverage?.reason, "read-race");
+});
+
+test("MCP provider read errors cannot become clean fallback answers", async () => {
+  const clean = {
+    version: 1 as const,
+    scanned: 0,
+    skipped: 0,
+    truncated: 0,
+    bytesScanned: 0,
+    bytesTotal: 0,
+    complete: true,
+  };
+  const memory = {
+    recall: () => { throw new Error("provider read"); },
+    recentFailures: () => [],
+    stats: () => { throw new Error("provider read"); },
+    searchKnowledge: () => [],
+    fetchRecord: () => undefined,
+    whyFile: () => [],
+    coverage: () => clean,
+  };
+  const registry = createToolRegistry({
+    exposure: "sanitized",
+    memory,
+    recallWithAi: { run: async () => { const error = new Error("AI down"); (error as Error & { code?: string }).code = "EIO"; throw error; } },
+  });
+  const stats = await registry.call("stats", {}, new AbortController().signal);
+  const statsContent = stats.structuredContent as { memoryCoverageIncomplete?: boolean; memoryCoverage?: { complete?: boolean; reason?: string } };
+  assert.equal(statsContent.memoryCoverageIncomplete, true);
+  assert.equal(statsContent.memoryCoverage?.complete, false);
+  assert.equal(statsContent.memoryCoverage?.reason, "read-race");
+  const ai = await registry.call("recall_with_ai", { query: "needle" }, new AbortController().signal);
+  const aiContent = ai.structuredContent as { memoryCoverageIncomplete?: boolean; memoryCoverage?: { complete?: boolean; reason?: string } };
+  assert.equal(ai.isError, true);
+  assert.equal(aiContent.memoryCoverageIncomplete, true);
+  assert.equal(aiContent.memoryCoverage?.complete, false);
+  assert.equal(aiContent.memoryCoverage?.reason, "read-race");
+});
+
 test("legitimate skipped-only coverage is preserved", async () => {
   const memory = {
     recall: () => [],
@@ -335,23 +428,98 @@ test("unexpected short read is incomplete once and is not cached", (t) => {
     "syncBuiltinESMExports();",
   ].join("\n"), "utf8");
   const modulePath = join(process.cwd(), "dist", "core", "memory-query.js");
+  const replacement = `${failure("after-race")}\n`;
   const child = spawnSync(process.execPath, ["--input-type=module", "--eval", [
     `const { createMemoryQueries } = await import(${JSON.stringify(pathToFileURL(modulePath).href)});`,
+    `const fs = await import("node:fs");`,
     "const queries = createMemoryQueries();",
     "const first = queries.stats();",
+    `fs.writeFileSync(process.env.ROCKY_TEST_MEMORY, process.env.ROCKY_TEST_REPLACEMENT, "utf8");`,
+    "const firstCoverage = queries.coverage?.();",
     "const second = queries.stats();",
-    "process.stdout.write(JSON.stringify({ first, second }));",
+    "const secondCoverage = queries.coverage?.();",
+    "process.stdout.write(JSON.stringify({ first, firstCoverage, second, secondCoverage }));",
   ].join("\n")], {
-    env: { ...process.env, NODE_OPTIONS: `--require=${preload}`, ROCKY_HOME: root, ROCKY_TEST_MEMORY: path, ROCKY_TEST_SHORT_READ_MARKER: marker },
+    env: { ...process.env, NODE_OPTIONS: `--require=${preload}`, ROCKY_HOME: root, ROCKY_TEST_MEMORY: path, ROCKY_TEST_SHORT_READ_MARKER: marker, ROCKY_TEST_REPLACEMENT: replacement },
     encoding: "utf8",
     timeout: 20_000,
     windowsHide: true,
   });
   assert.equal(child.status, 0, child.stderr);
   assert.equal(existsSync(marker), true, "short-read seam must fire");
-  const output = JSON.parse(child.stdout) as { first: { total?: number }; second: { total?: number } };
+  const output = JSON.parse(child.stdout) as {
+    first: { total?: number };
+    firstCoverage?: { complete?: boolean; reason?: string; truncated?: number };
+    second: { total?: number };
+    secondCoverage?: { complete?: boolean };
+  };
   assert.equal(output.first.total, 0);
+  assert.equal(output.firstCoverage?.complete, false);
+  assert.equal(output.firstCoverage?.reason, "read-race");
+  assert.ok((output.firstCoverage?.truncated ?? 0) > 0);
   assert.equal(output.second.total, 1);
+  assert.equal(output.secondCoverage?.complete, true);
+});
+
+test("bounded reader rejects same-metadata rewrites before fix linking", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "rocky-task13-witness-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const path = join(root, "memory.jsonl");
+  const first = failure("a29");
+  const replacement = JSON.stringify({
+    kind: "failure", id: "b29", ts: 1, cwd: "/budget", cmd: "other", exitCode: 1,
+    fingerprint: "b".repeat(16), signature: ["other"], excerpt: "other",
+  });
+  assert.equal(Buffer.byteLength(first), Buffer.byteLength(replacement));
+  writeFileSync(path, `${first}\n`, "utf8");
+  const preload = join(root, "same-metadata.cjs");
+  writeFileSync(preload, [
+    "const fs = require('node:fs');",
+    "const { syncBuiltinESMExports } = require('node:module');",
+    "const originalLstat = fs.lstatSync.bind(fs);",
+    "const originalFstat = fs.fstatSync.bind(fs);",
+    "const target = process.env.ROCKY_TEST_MEMORY;",
+    "const spoof = (stats) => new Proxy(stats, { get(target, property, receiver) {",
+    "  if (property === 'dev') return 701n;",
+    "  if (property === 'ino') return 702n;",
+    "  if (property === 'mtimeNs') return 703n;",
+    "  if (property === 'ctimeNs') return 704n;",
+    "  return Reflect.get(target, property, receiver);",
+    "} });",
+    "fs.lstatSync = (value, ...args) => { const stats = originalLstat(value, ...args); return String(value) === target ? spoof(stats) : stats; };",
+    "const originalOpen = fs.openSync.bind(fs);",
+    "const originalClose = fs.closeSync.bind(fs);",
+    "const descriptors = new Set();",
+    "fs.openSync = (value, ...args) => { const fd = originalOpen(value, ...args); if (String(value) === target) descriptors.add(fd); return fd; };",
+    "fs.fstatSync = (value, ...args) => { const stats = originalFstat(value, ...args); return descriptors.has(value) ? spoof(stats) : stats; };",
+    "fs.closeSync = (value) => { descriptors.delete(value); return originalClose(value); };",
+    "syncBuiltinESMExports();",
+  ].join("\n"), "utf8");
+  const modulePath = join(process.cwd(), "dist", "core", "memory-read.js");
+  const memoryModule = join(process.cwd(), "dist", "core", "memory.js");
+  const child = spawnSync(process.execPath, ["--input-type=module", "--eval", [
+    `const fs = await import("node:fs");`,
+    `const { loadMemoryChecked } = await import(${JSON.stringify(pathToFileURL(modulePath).href)});`,
+    `const { resolveFixOnSuccess, touchPending } = await import(${JSON.stringify(pathToFileURL(memoryModule).href)});`,
+    `const first = loadMemoryChecked(${JSON.stringify(path)}).records.map((record) => record.id);`,
+    "touchPending();",
+    `fs.writeFileSync(${JSON.stringify(path)}, ${JSON.stringify(`${replacement}\n`)}, "utf8");`,
+    `resolveFixOnSuccess("false", "/budget", { now: 2 });`,
+    `const durable = fs.readFileSync(${JSON.stringify(path)}, "utf8");`,
+    `const second = loadMemoryChecked(${JSON.stringify(path)}).records.map((record) => record.id);`,
+    `process.stdout.write(JSON.stringify({ first, second, linkedAbsent: !durable.includes('\\\"failureIds\\\":[\\\"a29\\\"]'), pending: fs.existsSync(${JSON.stringify(join(root, "pending"))}) }));`,
+  ].join("\n")], {
+    env: { ...process.env, NODE_OPTIONS: `--require=${preload}`, ROCKY_HOME: root, ROCKY_TEST_MEMORY: path },
+    encoding: "utf8",
+    timeout: 20_000,
+    windowsHide: true,
+  });
+  assert.equal(child.status, 0, child.stderr);
+  const output = JSON.parse(child.stdout) as { first: string[]; second: string[]; linkedAbsent: boolean; pending: boolean };
+  assert.deepEqual(output.first, ["a29"]);
+  assert.deepEqual(output.second, ["b29"]);
+  assert.equal(output.linkedAbsent, true);
+  assert.equal(output.pending, true);
 });
 
 test("durable query cache re-resolves fixes across time travel", (t) => {
@@ -377,7 +545,7 @@ test("durable query cache re-resolves fixes across time travel", (t) => {
 test("production query cache reuses one parsed snapshot for 200 concurrent MCP stats calls", async (t) => {
   const root = mkdtempSync(join(tmpdir(), "rocky-task13-concurrent-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
-  writeFileSync(join(root, "memory.jsonl"), `${failure("concurrent")}\n`);
+  writeFileSync(join(root, "memory.jsonl"), Array.from({ length: 10_000 }, (_, index) => `${failure(`concurrent-${index}`)}\n`).join(""));
   const previous = process.env.ROCKY_HOME;
   process.env.ROCKY_HOME = root;
   t.after(() => {
@@ -389,9 +557,12 @@ test("production query cache reuses one parsed snapshot for 200 concurrent MCP s
   const tools = createToolRegistry({ exposure: "sanitized", memory: queries, recallWithAi: disabledRecallWithAi });
   const signal = new AbortController().signal;
   const first = await tools.call("stats", {}, signal);
+  const started = performance.now();
   const values = await Promise.all(Array.from({ length: 200 }, () => tools.call("stats", {}, signal)));
+  const elapsedMs = performance.now() - started;
   const after = memoryReadMetrics();
   assert.deepEqual(values.map((value) => value.structuredContent.total), values.map(() => first.structuredContent.total));
   assert.equal(after.parses - before.parses, 1);
-  assert.equal(after.cacheHits - before.cacheHits, 0);
+  assert.ok(after.cacheHits - before.cacheHits >= 200);
+  assert.ok(elapsedMs < 10_000, `bounded cache calls took ${elapsedMs.toFixed(1)}ms`);
 });

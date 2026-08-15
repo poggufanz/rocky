@@ -23,7 +23,7 @@ import { filesystemIdentity, NO_BLOCK_FLAG, NO_FOLLOW_FLAG, regularDescriptorSaf
 import { isSafeNonNegativeInteger } from "../core/memory-read.js";
 import { recordTripleOnce } from "../core/memory.js";
 import type { TripleFile, TripleRecord } from "../core/memory.js";
-import { isCompleteMemoryCoverage, loadMemory, loadMemoryChecked, MAX_TRIPLE_FILES, pathIdentityHash, rememberTripleFileIdentity } from "../core/memory-read.js";
+import { isCompleteMemoryCoverage, loadMemoryChecked, MAX_TRIPLE_FILES, pathIdentityHash, rememberTripleFileIdentity } from "../core/memory-read.js";
 import { digestBuckets } from "../core/dictionary.js";
 import { loadConfig, type ConfigLoadResult } from "../core/config-read.js";
 import { redactSecretsAtBoundary, replaceAnsiAndControls, stripInvisibleControls } from "../core/redact.js";

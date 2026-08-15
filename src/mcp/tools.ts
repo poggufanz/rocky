@@ -681,10 +681,13 @@ function hasOperationalCode(error: unknown): boolean {
 }
 
 /** Third-party MemoryQueries are an untrusted read boundary. */
-function safeReadMemory<T>(operation: () => T, fallback: T, canonical = false): T {
+interface SafeMemoryReadState { failed: boolean }
+
+function safeReadMemory<T>(operation: () => T, fallback: T, canonical = false, state?: SafeMemoryReadState): T {
   try {
     return operation();
   } catch (error) {
+    if (state !== undefined) state.failed = true;
     if (canonical && error instanceof ToolExecutionError) throw error;
     if (canonical && hasOperationalCode(error)) throw new ToolExecutionError("memory_unavailable", "memory unavailable");
     return fallback;
@@ -758,7 +761,8 @@ function unknownMemoryCoverage(): MemoryCoverage {
   });
 }
 
-function memoryCoverage(memory: MemoryQueries): MemoryCoverage | undefined {
+function memoryCoverage(memory: MemoryQueries, forceUnknown = false): MemoryCoverage | undefined {
+  if (forceUnknown) return unknownMemoryCoverage();
   try {
     const supplied: unknown = memory.coverage?.();
     if (supplied === undefined) return undefined;
@@ -773,9 +777,10 @@ function memoryCoverage(memory: MemoryQueries): MemoryCoverage | undefined {
     // may count only valid records as scanned while reporting corrupt lines
     // separately. Do not reject a legitimate 0-valid/10-skipped snapshot.
     if ((value.bytesScanned as number) > (value.bytesTotal as number)) return unknownMemoryCoverage();
-    if (value.complete === true && ((value.skipped as number) > 0 || (value.truncated as number) > 0 || value.reason !== undefined)) return unknownMemoryCoverage();
+    if (value.complete === true && ((value.bytesScanned as number) !== (value.bytesTotal as number) ||
+        (value.skipped as number) > 0 || (value.truncated as number) > 0 || value.reason !== undefined)) return unknownMemoryCoverage();
     if (value.reason === "read-race" && (value.complete === true || (value.truncated as number) === 0)) return unknownMemoryCoverage();
-    if (value.reason === "file-size-cap" && (value.complete === true || (value.truncated as number) === 0 || (value.bytesTotal as number) < MAX_MEMORY_FILE_BYTES)) return unknownMemoryCoverage();
+    if (value.reason === "file-size-cap" && (value.complete === true || (value.truncated as number) === 0 || (value.bytesTotal as number) <= MAX_MEMORY_FILE_BYTES)) return unknownMemoryCoverage();
     if (value.reason === "record-cap" && (value.complete === true || (value.truncated as number) === 0 || (value.scanned as number) < MAX_SUPPORTED_MEMORY_RECORDS)) return unknownMemoryCoverage();
     return Object.freeze({
       version: 1 as const,
@@ -922,13 +927,16 @@ export function createToolRegistry(options: CreateToolRegistryOptions): McpToolR
     list: () => definitions,
     async call(name, args, signal) {
       if (!definitions.some((definition) => definition.name === name)) throw new McpInvalidParamsError("unknown tool");
+      let pairedCoverage: MemoryCoverage | undefined;
       try {
         const canonicalMemory = hasCanonicalMemoryQueries(options.memory);
         switch (name) {
           case "recall": {
             const input = parseRecallArgs(args, options.exposure);
-            const hits = safeReadMemory(() => options.memory.recall(input), [], canonicalMemory);
-            const coverage = memoryCoverage(options.memory);
+            const readState: SafeMemoryReadState = { failed: false };
+            const hits = safeReadMemory(() => options.memory.recall(input), [], canonicalMemory, readState);
+            const coverage = memoryCoverage(options.memory, readState.failed);
+            pairedCoverage = coverage;
             const projected = safeProjection(
               () => projectRecallHits(hits, options.exposure),
               { exposure: options.exposure, items: [], truncated: true, ...memoryCoveragePayload(coverage) },
@@ -941,8 +949,10 @@ export function createToolRegistry(options: CreateToolRegistryOptions): McpToolR
           }
           case "recent_failures": {
             const input = parseRecentArgs(args, options.exposure);
-            const hits = safeReadMemory(() => options.memory.recentFailures(input), [], canonicalMemory);
-            const coverage = memoryCoverage(options.memory);
+            const readState: SafeMemoryReadState = { failed: false };
+            const hits = safeReadMemory(() => options.memory.recentFailures(input), [], canonicalMemory, readState);
+            const coverage = memoryCoverage(options.memory, readState.failed);
+            pairedCoverage = coverage;
             const projected = safeProjection(
               () => projectRecentFailures(hits, options.exposure),
               { exposure: options.exposure, items: [], truncated: true, ...memoryCoveragePayload(coverage) },
@@ -955,8 +965,10 @@ export function createToolRegistry(options: CreateToolRegistryOptions): McpToolR
           }
           case "stats": {
             const input = parseStatsArgs(args, options.exposure);
-            const stats = safeReadMemory<unknown>(() => options.memory.stats(input), {}, canonicalMemory);
-            const coverage = memoryCoverage(options.memory);
+            const readState: SafeMemoryReadState = { failed: false };
+            const stats = safeReadMemory<unknown>(() => options.memory.stats(input), {}, canonicalMemory, readState);
+            const coverage = memoryCoverage(options.memory, readState.failed);
+            pairedCoverage = coverage;
             const result = {
               exposure: options.exposure,
               ...safeMemoryStats(stats, canonicalMemory),
@@ -970,8 +982,10 @@ export function createToolRegistry(options: CreateToolRegistryOptions): McpToolR
           }
           case "search_knowledge": {
             const input = parseKnowledgeArgs(args);
-            const hits = safeReadMemory(() => options.memory.searchKnowledge(input), [], canonicalMemory);
-            const coverage = memoryCoverage(options.memory);
+            const readState: SafeMemoryReadState = { failed: false };
+            const hits = safeReadMemory(() => options.memory.searchKnowledge(input), [], canonicalMemory, readState);
+            const coverage = memoryCoverage(options.memory, readState.failed);
+            pairedCoverage = coverage;
             const { projector, pending } = createPendingKnowledgeIdProjector();
             const projected = safeProjection(
               () => projectKnowledgeHits(hits, options.exposure, projector),
@@ -995,9 +1009,11 @@ export function createToolRegistry(options: CreateToolRegistryOptions): McpToolR
           }
           case "fetch_record": {
             const id = parseFetchArgs(args);
-            const record = safeReadMemory(() => options.memory.fetchRecord(resolveKnowledgeId(id)), undefined, canonicalMemory);
+            const readState: SafeMemoryReadState = { failed: false };
+            const record = safeReadMemory(() => options.memory.fetchRecord(resolveKnowledgeId(id)), undefined, canonicalMemory, readState);
+            const coverage = memoryCoverage(options.memory, readState.failed);
+            pairedCoverage = coverage;
             try {
-              const coverage = memoryCoverage(options.memory);
               if (record === undefined || typeof record !== "object" || record === null || Array.isArray(record) || record.kind === "note") return notFoundResult(coverage);
               if (record.kind === "failure" && record.origin !== undefined &&
                   record.origin !== "run" && record.origin !== "hook" && record.origin !== "watch") return notFoundResult(coverage);
@@ -1010,7 +1026,7 @@ export function createToolRegistry(options: CreateToolRegistryOptions): McpToolR
                 { exposure: options.exposure, record: null, truncated: true, ...memoryCoveragePayload(coverage) },
               );
             } catch {
-              return notFoundResult(memoryCoverage(options.memory));
+              return notFoundResult(coverage);
             }
           }
           case "why_file": {
@@ -1024,10 +1040,12 @@ export function createToolRegistry(options: CreateToolRegistryOptions): McpToolR
               coverage: { status: "unknown", complete: false, filesCovered: 0, truncatedFiles: 0 },
               coverageIncomplete: true,
             };
+            const readState: SafeMemoryReadState = { failed: false };
             const rawEvidence = safeReadMemory(() => customEvidence
               ? customEvidence(input.path, input.limit)
-              : getFallback(), unknownEvidence, canonicalMemory);
-            const memoryScan = memoryCoverage(options.memory);
+              : getFallback(), unknownEvidence, canonicalMemory, readState);
+            const memoryScan = memoryCoverage(options.memory, readState.failed);
+            pairedCoverage = memoryScan;
             const evidence = safeProjection(
               () => customEvidence === undefined
                 ? rawEvidence
@@ -1048,8 +1066,10 @@ export function createToolRegistry(options: CreateToolRegistryOptions): McpToolR
           }
           case "recall_with_ai": {
             const input = parseRecallArgs(args, options.exposure, 10);
-            const hits = safeReadMemory(() => options.memory.recall(input), [], canonicalMemory);
-            const coverage = memoryCoverage(options.memory);
+            const readState: SafeMemoryReadState = { failed: false };
+            const hits = safeReadMemory(() => options.memory.recall(input), [], canonicalMemory, readState);
+            const coverage = memoryCoverage(options.memory, readState.failed);
+            pairedCoverage = coverage;
             const projected = safeProjection(
               () => projectRecallHits(hits, options.exposure),
               { exposure: options.exposure, items: [], truncated: true, ...memoryCoveragePayload(coverage) },
@@ -1076,7 +1096,7 @@ export function createToolRegistry(options: CreateToolRegistryOptions): McpToolR
         }
       } catch (error) {
         if (error instanceof McpInvalidParamsError) throw error;
-        if (error instanceof ToolExecutionError) return safeErrorResult(error, memoryCoverage(options.memory));
+        if (error instanceof ToolExecutionError) return safeErrorResult(error, pairedCoverage ?? unknownMemoryCoverage());
         throw error;
       }
     },

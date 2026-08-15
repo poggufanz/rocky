@@ -8,6 +8,7 @@ import {
   fingerprintTokens,
   legacyFingerprint,
   normalizeLine,
+  normalizeRetrievalLine,
   queryTokens,
   retrievalTokens,
   tokens,
@@ -175,12 +176,40 @@ test("retrieval tokenization is Unicode NFC and keeps separate fingerprint role"
   const volatile = retrievalTokens("line 41 pid 1234 at 2026-08-14T10:11:12Z");
   assert.equal([...volatile].some((token) => /^(?:41|1234|2026|10|11|12)$/u.test(token)), false);
   const sourceLocation = retrievalTokens("file.ts:41:7");
+  assert.ok(retrievalTokens("failed 2026-08-14").has("<time>"));
+  assert.ok(retrievalTokens("hash deadbeef").has("<hex>"));
+  assert.ok(retrievalTokens("address 0xdeadbeef").has("<hex>"));
   assert.equal([...sourceLocation].some((token) => /^(?:41|7)$/u.test(token)), false);
   const unicodeClock = retrievalTokens("time ١٢:٣٤");
   assert.equal([...unicodeClock].some((token) => /^(?:١٢|٣٤)$/u.test(token)), false);
   assert.ok(fingerprintTokens("line 41").has("#"));
   assert.ok(tokens("some-missing-package").has("some-missing-package"));
   assert.ok(tokens("some-missing-package").has("missing"));
+});
+
+test("retrieval fast path agrees with the full volatile-line corpus", () => {
+  const corpus: Array<[string, string]> = [
+    ["plain command words 404", "plain command words 404"],
+    ["component-name_2.1", "component-name_2.1"],
+    ["caf\u00e9 12", "caf\u00e9 12"],
+    ["failed 2026-08-14", "failed <time>"],
+    ["line-41", "line-41"],
+    ["request-id-17", "request-id-17"],
+    ["trace_42", "trace_42"],
+    ["line 41", "line #"],
+    ["request id 17", "request id #"],
+    ["trace id 42", "trace id #"],
+    ["hash deadbeef", "hash <hex>"],
+    ["address 0xdeadbeef", "address <hex>"],
+    ["uuid 550e8400-e29b-41d4-a716-446655440000", "uuid <hex>"],
+    ["sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "sha256:<hex>"],
+  ];
+  for (const [line, expected] of corpus) assert.equal(normalizeRetrievalLine(line), expected, line);
+  const safeCorpus = ["alpha beta", "node task-17", "error code 404", "unicode \u03a3\u03c6\u03ac\u03bb\u03bc\u03b1"];
+  for (const line of safeCorpus) {
+    const expected = line.normalize("NFC").trim().replace(/\s+/gu, " ").toLowerCase();
+    assert.equal(normalizeRetrievalLine(line), expected, line);
+  }
 });
 
 test("volatile numeric labels stay masked across ASCII and Unicode decimal fuzz", () => {

@@ -50,6 +50,17 @@ const VOLATILE_NUMBER_CHAIN = /(?:^|[^\p{L}\p{N}_])(?:pid|process(?:[-_ ]?id)?|w
 
 const STOP_WORDS = new Set(["the", "a", "an", "at", "in", "on", "of", "to", "is", "was", "for", "and", "or"]);
 const TOKEN = /<[^>\s]+>|#[\p{L}\p{N}_-]*|[\p{L}\p{N}\p{M}]+(?:[-_.][\p{L}\p{N}\p{M}]+)+|[\p{L}\p{N}\p{M}]+/gu;
+// Most persisted command/signature evidence is ordinary ASCII command text.
+// Keep this guard deliberately conservative: only lines that cannot contain
+// paths, URLs, source locations, hashes, or punctuation-sensitive volatile
+// labels may skip the full normalizer.
+const SIMPLE_RETRIEVAL_LINE = /^[\p{L}\p{N}\s._-]+$/u;
+const SIMPLE_RETRIEVAL_VOLATILE = /(?:^|[^\p{L}\p{N}_])(?:pid|process(?:[-_ ]?id)?|worker|thread|line|index|attempt|timestamp|time|date|column|col|request(?:[-_ ]?id)?|job(?:[-_ ]?id)?|trace(?:[-_ ]?id)?|span(?:[-_ ]?id)?|session(?:[-_ ]?id)?)\s*[-:=]?\s*\p{Nd}+/iu;
+const SIMPLE_RETRIEVAL_HEX = /(?:^|[^\p{L}\p{N}_])[0-9a-f]{7,40}(?![\p{L}\p{N}_])/iu;
+const SIMPLE_RETRIEVAL_DIGEST = /(?:^|[^\p{L}\p{N}_])(?:[0-9a-f]{40}|[0-9a-f]{64}|[0-9a-f]{128})(?![\p{L}\p{N}_])/iu;
+const SIMPLE_RETRIEVAL_ADDRESS = /(?:^|[^\p{L}\p{N}_])0x[0-9a-f]+(?![\p{L}\p{N}_])/iu;
+const SIMPLE_RETRIEVAL_DATE = /(?:^|[^\p{L}\p{N}_])\p{Nd}{4}-\p{Nd}{2}-\p{Nd}{2}(?![\p{L}\p{N}_])/u;
+const SIMPLE_RETRIEVAL_UUID = /(?:^|[^\p{L}\p{N}_])[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?![\p{L}\p{N}_])/iu;
 
 function rangeInPattern(text: string, pattern: RegExp, start: number, end: number): boolean {
   pattern.lastIndex = 0;
@@ -210,6 +221,12 @@ export function normalizeLine(line: string): string {
 
 /** Retrieval text retains semantic numeric evidence while masking volatile numbers. */
 export function normalizeRetrievalLine(line: string): string {
+  if (SIMPLE_RETRIEVAL_LINE.test(line) && !SIMPLE_RETRIEVAL_VOLATILE.test(line) &&
+      !SIMPLE_RETRIEVAL_HEX.test(line) && !SIMPLE_RETRIEVAL_DIGEST.test(line) &&
+      !SIMPLE_RETRIEVAL_ADDRESS.test(line) && !SIMPLE_RETRIEVAL_DATE.test(line) &&
+      !SIMPLE_RETRIEVAL_UUID.test(line)) {
+    return line.normalize("NFC").trim().replace(/\s+/gu, " ").toLowerCase();
+  }
   return normalizeWithNumbers(line, "retrieval");
 }
 
