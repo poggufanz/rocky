@@ -206,7 +206,17 @@ The registry lookup is consent-gated: the first time it would run, Rocky states 
 
 Only a secret or a missing package ever holds a push. Registry unreachable, a git command that fails, a Rocky bug — during a push all of it fails open with one plain line, because a broken Rocky must never be the reason you cannot ship. `git push --no-verify` remains git's own escape hatch.
 
-Run by hand there is no push to protect, so the exit code says plainly what happened: **0** nothing found, **1** something found, **2** Rocky could not check — git failed, or the diff was too large to read, so the range went uninspected. A script that treats 0 as "clean" is then telling the truth. During a push the codes differ on purpose: a finding exits 3 and only that holds the push, while everything else exits 0.
+Run by hand there is no push to protect, so the exit code says plainly what happened:
+
+| Mode and result | Exit |
+|---|---:|
+| Manual, Git scope established and no finding (including a valid empty diff) | 0 |
+| Manual, finding | 1 |
+| Manual, no Git repository or incomplete/uninspected workspace | 2 |
+| Pre-push, finding | 3 |
+| Pre-push, clean or incomplete/uninspected (fail-open) | 0 |
+
+A valid Git empty diff is checked-clean and exits 0. With no Git repository, a manual run exits 2; it never reports a clean 0 when no workspace was inspected. In pre-push mode an incomplete or uninspected workspace remains fail-open at exit 0, but stderr contains the stable `INCOMPLETE: no clean result` diagnostic. Only exit 3 holds a push; the managed hook maps that one finding code to a blocked push and lets every other result through.
 
 ## The ears (v0.2, implemented)
 

@@ -1,7 +1,7 @@
 import { resolve } from "node:path";
 import {
   parsePrePushStdin,
-  parseUnifiedZeroDiff,
+  parseUnifiedZeroDiffChecked,
   rangeForPush,
   type AddedLine,
   type PushRange,
@@ -37,6 +37,8 @@ interface DiffRange {
 interface CheckState {
   finding: boolean;
   prePush: boolean;
+  /** Git scope was established before any scan result was classified. */
+  scope: "unavailable" | "established";
   /** A stage could not run, so part of the range went uninspected. */
   incomplete: boolean;
 }
@@ -55,9 +57,10 @@ function findingExit(state: CheckState): number {
 }
 
 function scanResult(state: CheckState): ScanResult {
-  if (state.finding && state.incomplete) return "finding-plus-incomplete";
+  const incomplete = state.incomplete || state.scope !== "established";
+  if (state.finding && incomplete) return "finding-plus-incomplete";
   if (state.finding) return "finding";
-  if (state.incomplete) return "incomplete";
+  if (incomplete) return "incomplete";
   return "clean";
 }
 
@@ -189,6 +192,9 @@ async function resolveNewRef(head: string): Promise<DiffRange> {
 }
 
 async function pushRanges(state: CheckState): Promise<DiffRange[]> {
+  const repo = await gitMaybe(["rev-parse", "--git-dir"]);
+  requireGitScope(repo);
+  state.scope = "established";
   const ranges: DiffRange[] = [];
   for (const ref of parsePrePushStdin(await readCheckInput())) {
     const range = rangeForPush(ref);
@@ -207,19 +213,25 @@ async function pushRanges(state: CheckState): Promise<DiffRange[]> {
   return ranges;
 }
 
-/** Thrown when there is simply nothing to inspect, as opposed to a failed attempt. */
-class NothingToCheck extends Error {}
+function gitScopeFailure(result: GitResult): string {
+  if (result.code === 127 && /(?:ENOENT|not found|spawn)/i.test(result.stderr)) {
+    return "git scope unavailable: git executable could not start; no workspace inspected";
+  }
+  if (/not a git repository/i.test(result.stderr)) {
+    return "git scope unavailable: no git repository here; no workspace inspected";
+  }
+  return "git scope unavailable: git could not establish repository scope; no workspace inspected";
+}
+
+function requireGitScope(result: GitResult): void {
+  if (result.code !== 0 || result.stdout.trim().length === 0) {
+    throw new Error(gitScopeFailure(result));
+  }
+}
 
 async function manualRange(): Promise<DiffRange> {
   const repo = await gitMaybe(["rev-parse", "--git-dir"]);
-  if (repo.code !== 0) {
-    // Missing repository and broken repository both exit 128; only git's own
-    // message separates them, and only the first one means "nothing to check".
-    if (/not a git repository/i.test(repo.stderr)) {
-      throw new NothingToCheck("no git repository here. nothing to check");
-    }
-    throw new Error("git rev-parse failed");
-  }
+  requireGitScope(repo);
   const upstream = await gitMaybe(["rev-parse", "--verify", "@{upstream}"]);
   if (upstream.code === 0) return { base: "@{upstream}", head: "HEAD" };
   return { base: await emptyTree(), head: "HEAD" };
@@ -232,7 +244,11 @@ async function addedLines(ranges: readonly DiffRange[], state: CheckState): Prom
       "diff", "--unified=0", "--no-color", "--no-ext-diff",
       range.base, range.head, "--",
     ], undefined, { maxOutputBytes: MAX_READ_BYTES, notInspected: "secret lines" });
-    added.push(...parseUnifiedZeroDiff(diff));
+    const parsed = parseUnifiedZeroDiffChecked(diff);
+    if (!parsed.complete) {
+      throw new Error("git diff output was malformed or ambiguous; secret lines not inspected");
+    }
+    added.push(...parsed.added);
   }
   if (added.length > MAX_LINES) {
     state.incomplete = true;
@@ -270,11 +286,15 @@ async function showFile(rev: string, path: string): Promise<string | null> {
 async function packageCandidates(ranges: readonly DiffRange[], state: CheckState): Promise<PackageCandidate[]> {
   const candidates: PackageCandidate[] = [];
   for (const range of ranges) {
-    const paths = (await git(
+    const output = await git(
       ["diff", "--name-only", "-z", range.base, range.head, "--"],
       undefined,
       { maxOutputBytes: MAX_READ_BYTES, notInspected: "package paths" },
-    ))
+    );
+    if (output.length > 0 && !output.endsWith("\0")) {
+      throw new Error("git diff package-path output was malformed or ambiguous; package paths not inspected");
+    }
+    const paths = output
       .split("\0")
       .filter(isPackageJson);
     for (const path of paths) {
@@ -422,6 +442,8 @@ function usage(): number {
   detail("  --offline        skip the registry lookup for this run");
   detail("  --quiet          plain facts only, no persona, no question");
   detail("  --pre-push       read ref updates from git on stdin (hook mode)");
+  detail("  manual exits: 0 checked-clean, 1 finding, 2 Git scope or inspection incomplete");
+  detail("  pre-push exits: 3 finding, 0 clean or fail-open incomplete (stderr says INCOMPLETE)");
   detail("env: ROCKY_NO_QUIZ=1 skips the comprehension question");
   return 0;
 }
@@ -448,6 +470,7 @@ async function runCheck(rest: readonly string[], state: CheckState): Promise<num
   if (flags.has("--install-hook")) return installHookFlow(quiet);
 
   const ranges = state.prePush ? await pushRanges(state) : [await manualRange()];
+  if (!state.prePush) state.scope = "established";
   if (ranges.length === 0) return scanResult(state) === "incomplete" && !state.prePush ? 2 : findingExit(state);
   let lines: AddedLine[] = [];
 
@@ -478,17 +501,16 @@ async function runCheck(rest: readonly string[], state: CheckState): Promise<num
 }
 
 export async function check(rest: string[]): Promise<number> {
-  const state: CheckState = { finding: false, prePush: rest.includes("--pre-push"), incomplete: false };
+  const state: CheckState = {
+    finding: false,
+    prePush: rest.includes("--pre-push"),
+    scope: "unavailable",
+    incomplete: false,
+  };
   try {
     return await runCheck(rest, state);
   } catch (error) {
-    if (error instanceof NothingToCheck) {
-      // Documented in the spec as exit 0: no repository means no range, which
-      // is not the same as a check that was attempted and failed.
-      detail(errorMessage(error));
-      return findingExit(state);
-    }
-    detail(`rocky check could not run: ${errorMessage(error)}`);
+    incompleteDetail(`rocky check could not run: ${errorMessage(error)}`);
     state.incomplete = true;
     // A finding already made is never erased by a later failure.
     if (state.finding) return findingExit(state);

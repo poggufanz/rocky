@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
-import { chmodSync, closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import test, { type TestContext } from "node:test";
@@ -19,7 +19,7 @@ interface Sandbox {
 }
 
 function sandbox(t: TestContext): Sandbox {
-  const root = mkdtempSync(join(packageRoot, ".rocky-check-command-"));
+  const root = mkdtempSync(join(tmpdir(), "rocky-check-command-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const repo = join(root, "repo");
   const home = join(root, "home");
@@ -83,7 +83,7 @@ function runCheck(
   args: readonly string[],
   input?: string,
   preload?: string,
-): Promise<{ error?: Error; signal: NodeJS.Signals | null; status: number | null; stderr: string; pid: number }> {
+): Promise<{ error?: Error; signal: NodeJS.Signals | null; status: number | null; stdout: string; stderr: string; pid: number }> {
   const nodeArgs = preload === undefined
     ? [entry, "check", ...args]
     : ["--require", preload, entry, "check", ...args];
@@ -114,6 +114,7 @@ function runCheck(
         ...(spawnError === undefined ? {} : { error: spawnError }),
         status,
         signal,
+        stdout: readFileSync(stdoutPath, "utf8"),
         stderr: readFileSync(stderrPath, "utf8"),
         pid: child.pid ?? 0,
       });
@@ -124,13 +125,14 @@ function runCheck(
 function assertCompleted(
   result: { error?: Error; signal: NodeJS.Signals | null; status: number | null; stderr: string },
   status: number,
+  message?: string,
 ): void {
   if (result.error !== undefined) {
     assert.equal((result.error as NodeJS.ErrnoException).code, "EPERM");
     assert.notEqual(result.status, null);
   }
   assert.equal(result.signal, null);
-  assert.equal(result.status, status, result.stderr);
+  assert.equal(result.status, status, message === undefined ? result.stderr : `${message}: ${result.stderr}`);
 }
 
 function enableRegistry(box: Sandbox): void {
@@ -197,12 +199,22 @@ function throwingStderrPreload(box: Sandbox, target: string, registry404 = false
 
 function installGitShim(
   box: Sandbox,
-  mode: "merge-base-128" | "diff-hang-once" | "diff-flood" | "diff-stderr-flood" | "rev-parse-flood" | "show-flood" | "show-128",
+  mode: "merge-base-128" | "diff-hang-once" | "diff-flood" | "diff-stderr-flood" | "diff-malformed" | "diff-ambiguous" | "diff-index-only" | "diff-old-mode" | "diff-rename-from" | "diff-marker-only" | "diff-hunk-empty" | "diff-binary-patch" | "rev-parse-flood" | "show-flood" | "show-128",
 ): void {
-  const realGit = (box.env.PATH ?? "")
+  let realGit = (box.env.PATH ?? "")
     .split(delimiter)
-    .map((directory) => join(directory, "git"))
+    .flatMap((directory) => [join(directory, "git"), join(directory, "git.exe"), join(directory, "git.cmd")])
     .find(existsSync);
+  if (realGit === undefined && process.platform === "win32") {
+    try {
+      realGit = execFileSync("where.exe", ["git"], { encoding: "utf8" })
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .find((line) => line.length > 0 && existsSync(line));
+    } catch {
+      /* the assertion below reports a missing test prerequisite */
+    }
+  }
   assert.ok(realGit, "git executable must be present on PATH");
   const bin = join(box.root, "git-shim-bin");
   const script = join(bin, "git-shim.cjs");
@@ -216,6 +228,14 @@ function installGitShim(
     "if (mode === 'merge-base-128' && args.includes('merge-base')) process.exit(128);",
     "if (mode === 'diff-flood' && args.includes('--unified=0')) { require('node:fs').writeSync(1, Buffer.alloc(1024 * 1024 + 1, 120)); process.exit(0); }",
     "if (mode === 'diff-stderr-flood' && args.includes('--unified=0')) { require('node:fs').writeSync(2, Buffer.alloc(1024 * 1024 + 1, 120)); process.exit(0); }",
+    "if (mode === 'diff-malformed' && args.includes('--unified=0')) { require('node:fs').writeSync(1, 'not a unified diff\\n'); process.exit(0); }",
+    "if (mode === 'diff-ambiguous' && args.includes('--unified=0')) { require('node:fs').writeSync(1, 'diff --git a/file.ts b/file.ts\\n'); process.exit(0); }",
+    "if (mode === 'diff-index-only' && args.includes('--unified=0')) { require('node:fs').writeSync(1, 'diff --git a/file.ts b/file.ts\\nindex 1234567..89abcde 100644\\n'); process.exit(0); }",
+    "if (mode === 'diff-old-mode' && args.includes('--unified=0')) { require('node:fs').writeSync(1, 'diff --git a/file.ts b/file.ts\\nold mode 100644\\n'); process.exit(0); }",
+    "if (mode === 'diff-rename-from' && args.includes('--unified=0')) { require('node:fs').writeSync(1, 'diff --git a/file.ts b/renamed.ts\\nsimilarity index 100%\\nrename from file.ts\\n'); process.exit(0); }",
+    "if (mode === 'diff-marker-only' && args.includes('--unified=0')) { require('node:fs').writeSync(1, 'diff --git a/file.ts b/file.ts\\n--- a/file.ts\\n'); process.exit(0); }",
+    "if (mode === 'diff-hunk-empty' && args.includes('--unified=0')) { require('node:fs').writeSync(1, 'diff --git a/file.ts b/file.ts\\n--- a/file.ts\\n+++ b/file.ts\\n@@ -1 +1 @@\\n'); process.exit(0); }",
+    "if (mode === 'diff-binary-patch' && args.includes('--unified=0')) { require('node:fs').writeSync(1, 'diff --git a/file.bin b/file.bin\\nGIT binary patch\\nliteral 42\\n'); process.exit(0); }",
     "if (mode === 'rev-parse-flood' && args.includes('--git-dir')) { require('node:fs').writeSync(1, Buffer.alloc(1024 * 1024 + 1, 120)); process.exit(0); }",
     "if (mode === 'show-flood' && args.includes('show')) { require('node:fs').writeSync(1, Buffer.alloc(1024 * 1024 + 1, 120)); process.exit(0); }",
     "if (mode === 'show-128' && args.includes('show')) process.exit(128);",
@@ -228,12 +248,20 @@ function installGitShim(
     "process.exit(result.status === null ? 1 : result.status);",
     "",
   ].join("\n"), "utf8");
-  chmodSync(script, 0o755);
-  symlinkSync("git-shim.cjs", join(bin, "git"));
-  box.env.PATH = `${bin}:${box.env.PATH ?? ""}`;
+  if (process.platform === "win32") {
+    writeFileSync(join(bin, "git.cmd"), `@"${process.execPath}" "${script}" %*\r\n`, "utf8");
+  } else {
+    chmodSync(script, 0o755);
+    symlinkSync("git-shim.cjs", join(bin, "git"));
+  }
+  box.env.PATH = `${bin}${delimiter}${box.env.PATH ?? ""}`;
   box.env.ROCKY_REAL_GIT = realGit;
   box.env.ROCKY_GIT_SHIM_MODE = mode;
   box.env.ROCKY_GIT_SHIM_MARKER = join(box.root, "git-shim.marker");
+}
+
+function rockyHomeSnapshot(home: string): string {
+  return JSON.stringify(readdirSync(home).sort().map((name) => [name, readFileSync(join(home, name), "utf8")]));
 }
 
 test("pre-push check finds a planted secret and uses finding exit 3", async (t) => {
@@ -545,19 +573,105 @@ test("pre-push registry outages stay fail-open but announce incompleteness", asy
   assert.doesNotMatch(result.stderr, /checked.clean/i);
 });
 
-test("not a git repository reports one line and exits 0", async (t) => {
-  // The shared sandbox lives inside the package worktree, so a run there finds
-  // the enclosing repository and tests something else entirely. A genuine
-  // "no repository" case has to sit outside any repo.
+test("not a git repository is incomplete, exits 2 manually, and does not mutate quiet state", async (t) => {
+  // Keep this case in a separately-created directory so it cannot inherit a
+  // repository from the package checkout.
   const outside = mkdtempSync(join(tmpdir(), "rocky-no-repo-"));
   t.after(() => rmSync(outside, { recursive: true, force: true }));
   const box = sandbox(t);
+  const before = rockyHomeSnapshot(box.rockyHome);
 
-  const result = await runCheck({ ...box, repo: outside }, ["--offline"]);
+  const result = await runCheck({ ...box, repo: outside }, ["--offline", "--quiet"]);
+
+  assertCompleted(result, 2);
+  assert.equal(result.stderr.trim().split(/\r?\n/).length, 1);
+  assert.match(result.stderr, /INCOMPLETE/i);
+  assert.match(result.stderr, /no workspace inspected/i);
+  assert.equal(result.stdout, "");
+  assert.equal(rockyHomeSnapshot(box.rockyHome), before, "manual offline quiet check must not write config or memory");
+});
+
+test("pre-push outside a git repository fails open but reports no inspection", async (t) => {
+  const outside = mkdtempSync(join(tmpdir(), "rocky-no-repo-pre-push-"));
+  t.after(() => rmSync(outside, { recursive: true, force: true }));
+  const box = sandbox(t);
+  const before = rockyHomeSnapshot(box.rockyHome);
+  const line = prePushLine("a".repeat(40), "b".repeat(40));
+
+  const result = await runCheck({ ...box, repo: outside }, ["--offline", "--quiet", "--pre-push"], line);
 
   assertCompleted(result, 0);
-  assert.equal(result.stderr.trim().split(/\r?\n/).length, 1);
-  assert.match(result.stderr, /nothing to check/);
+  assert.match(result.stderr, /INCOMPLETE/i);
+  assert.match(result.stderr, /no workspace inspected/i);
+  assert.equal(result.stdout, "");
+  assert.equal(rockyHomeSnapshot(box.rockyHome), before, "pre-push no-repo check must not write config or memory");
+});
+
+test("a valid git repository with an empty pushed diff is checked-clean", async (t) => {
+  const box = sandbox(t);
+  const commits = initRepo(box, { "README.md": "clean\n" });
+
+  const result = await runCheck(box, ["--offline", "--quiet", "--pre-push"], prePushLine(commits.first, commits.first));
+
+  assertCompleted(result, 0);
+  assert.equal(result.stderr, "");
+  assert.equal(result.stdout, "");
+});
+
+test("git executable spawn failure is incomplete manually and fail-open in pre-push mode", async (t) => {
+  const box = sandbox(t);
+  const commits = initRepo(box, { "README.md": "clean\n" }, { "src/value.ts": "export const value = 1;\n" });
+  const missingGit = join(box.root, "no-git-bin");
+  mkdirSync(missingGit);
+  box.env.PATH = missingGit;
+
+  const manual = await runCheck(box, ["--offline", "--quiet"]);
+  assertCompleted(manual, 2);
+  assert.match(manual.stderr, /INCOMPLETE/i);
+  assert.match(manual.stderr, /git.*(scope|executable)|no workspace inspected/i);
+  assert.equal(manual.stdout, "");
+
+  const hook = await runCheck(box, ["--offline", "--quiet", "--pre-push"], prePushLine(commits.second!, commits.first));
+  assertCompleted(hook, 0);
+  assert.match(hook.stderr, /INCOMPLETE/i);
+  assert.match(hook.stderr, /git.*(scope|executable)|no workspace inspected/i);
+  assert.equal(hook.stdout, "");
+});
+
+test("malformed or ambiguous git diff output is incomplete, not clean", async (t) => {
+  for (const mode of [
+    "diff-malformed",
+    "diff-ambiguous",
+    "diff-index-only",
+    "diff-old-mode",
+    "diff-rename-from",
+    "diff-marker-only",
+    "diff-hunk-empty",
+    "diff-binary-patch",
+  ] as const) {
+    const box = sandbox(t);
+    const commits = initRepo(box, { "README.md": "clean\n" }, { "src/value.ts": "export const value = 1;\n" });
+    installGitShim(box, mode);
+
+    const manual = await runCheck(box, ["--offline", "--quiet"]);
+    assertCompleted(manual, 2, mode);
+    assert.match(manual.stderr, /INCOMPLETE|malformed|ambiguous/i, mode);
+    assert.equal(manual.stdout, "", mode);
+
+    const hook = await runCheck(box, ["--offline", "--quiet", "--pre-push"], prePushLine(commits.second!, commits.first));
+    assertCompleted(hook, 0, mode);
+    assert.match(hook.stderr, /INCOMPLETE|malformed|ambiguous/i, mode);
+    assert.equal(hook.stdout, "", mode);
+  }
+});
+
+test("README and pre-push hook document the same clean/incomplete mapping", () => {
+  const readme = readFileSync(join(packageRoot, "README.md"), "utf8");
+  const hook = readFileSync(join(packageRoot, "src", "check", "pre-push.ts"), "utf8");
+  assert.match(readme, /no git repository.*exits? 2|exits? 2.*no git repository/is);
+  assert.match(readme, /pre-push.*incomplete.*exit 0/is);
+  assert.match(readme, /empty diff.*exit 0/is);
+  assert.match(hook, /only.*exit 3.*blocks|exit 3.*only.*finding/is);
 });
 
 test("ROCKY_NO_QUIZ and missing TTY never block comprehension", async (t) => {
