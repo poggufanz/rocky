@@ -1439,7 +1439,7 @@ test("recall_with_ai preflights final envelope before sending large candidates",
     async run(input) {
       observed = input.hits.map((hit) => hit.failure.id);
       return {
-        aiStatus: "used", act: "unresolved", confidence: 0.9999999999999999,
+        aiStatus: "used", act: "unresolved", confidence: 2.2250738585072014e-308,
         explanation: "🙂".repeat(300),
         rankedCandidateIds: input.hits.map((_, index) => `c${index + 1}`),
       };
@@ -1464,7 +1464,7 @@ test("recall_with_ai snapshots hostile outcome metadata before final capping", a
   }));
   let explanationReads = 0;
   const outcome = new Proxy({
-    aiStatus: "used", act: "unresolved", confidence: 0.9999999999999999,
+    aiStatus: "used", act: "unresolved", confidence: 2.2250738585072014e-308,
     rankedCandidateIds: ["c1", "c2", "c3", "c4", "c5"],
     explanation: "🙂".repeat(300),
   }, {

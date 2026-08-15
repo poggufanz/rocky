@@ -1247,7 +1247,10 @@ function retainAiHitsForEnvelope(payload: object, hits: readonly RecallHit[]): r
     const worstOutcome: RecallAiOutcome = {
       aiStatus: "invalid_output",
       act: "unresolved",
-      confidence: 0.9999999999999999,
+      // A finite in-range subnormal/normal confidence can serialize with a
+      // longer scientific form than a near-one decimal; keep that witness in
+      // the preflight envelope proof.
+      confidence: 2.2250738585072014e-308,
       // JSON.stringify escapes controls to six bytes each; this is a larger
       // valid explanation witness than astral text and keeps the cap proof
       // conservative for every 300-code-point explanation.
