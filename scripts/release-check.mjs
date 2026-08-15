@@ -27,6 +27,7 @@ const CANONICAL_REPOSITORY_URL = "https://github.com/poggufanz/rocky.git";
 const CANONICAL_PACKAGE_ROOT = "rocky/";
 const COMMAND_TIMEOUT_MS = 10 * 60 * 1_000;
 const MAX_COMMAND_OUTPUT_BYTES = 32 * 1024 * 1024;
+const HIDDEN_MARKER = "\u0000";
 
 class UsageError extends Error {}
 class StepError extends Error {}
@@ -327,6 +328,19 @@ function isEmptyDependencyRecord(value) {
   return Object.keys(value).length === 0;
 }
 
+function isEmptyBundleMetadata(value) {
+  return value === undefined || value === null || (Array.isArray(value) && value.length === 0);
+}
+
+function isCanonicalBinary(value, target) {
+  const binary = objectRecord(value);
+  if (binary === undefined) return false;
+  const prototype = Object.getPrototypeOf(binary);
+  return (prototype === Object.prototype || prototype === null)
+    && Object.keys(binary).length === 1
+    && binary[PACKAGE_BINARY] === target;
+}
+
 function objectRecord(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value) ? value : undefined;
 }
@@ -347,11 +361,52 @@ function fullGitObjectId(value) {
   return typeof value === "string" && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(value);
 }
 
+function blankHiddenMarkdownSpans(text) {
+  if (text.includes(HIDDEN_MARKER)) return text.replace(/[^\r\n]/gu, HIDDEN_MARKER);
+  const output = text.split("");
+  const blank = (start, end) => {
+    for (let index = start; index < end; index += 1) {
+      if (output[index] !== "\n" && output[index] !== "\r") output[index] = HIDDEN_MARKER;
+    }
+  };
+  const isPreOpening = (index) => {
+    if (text.slice(index, index + 4).toLowerCase() !== "<pre") return false;
+    const next = text[index + 4];
+    return next === ">" || (next !== undefined && /[ \t\r\n\f]/u.test(next));
+  };
+  let index = 0;
+  while (index < text.length) {
+    if (text.startsWith("<!--", index)) {
+      const close = text.indexOf("-->", index + 4);
+      const end = close < 0 ? text.length : close + 3;
+      blank(index, end);
+      index = end;
+      continue;
+    }
+    if (isPreOpening(index)) {
+      const openingEnd = text.indexOf(">", index + 4);
+      if (openingEnd < 0) {
+        blank(index, text.length);
+        break;
+      }
+      const close = /<\/pre[ \t\r\n\f]*>/iu.exec(text.slice(openingEnd + 1));
+      if (close === null) {
+        blank(index, text.length);
+        break;
+      }
+      const end = openingEnd + 1 + close.index + close[0].length;
+      blank(index, end);
+      index = end;
+      continue;
+    }
+    index += 1;
+  }
+  return output.join("");
+}
+
 function markdownSourceLines(text) {
   let fence;
-  let htmlComment = false;
-  let htmlPre = false;
-  return text.split(/\r?\n/u).map((line) => {
+  return blankHiddenMarkdownSpans(text).split(/\r?\n/u).map((line) => {
     const opening = /^\s{0,3}(`{3,}|~{3,})/.exec(line)?.[1];
     if (fence !== undefined) {
       const closing = /^\s{0,3}(`{3,}|~{3,})\s*$/u.exec(line)?.[1];
@@ -362,24 +417,8 @@ function markdownSourceLines(text) {
       fence = { character: opening[0], length: opening.length };
       return "";
     }
-    if (htmlComment) {
-      if (/-->/u.test(line)) htmlComment = false;
-      return "";
-    }
-    if (/<!--/u.test(line)) {
-      if (!/<!--[\s\S]*-->/u.test(line)) htmlComment = true;
-      return "";
-    }
-    if (htmlPre) {
-      if (/<\/pre\s*>/iu.test(line)) htmlPre = false;
-      return "";
-    }
-    if (/<pre\b[^>]*>/iu.test(line)) {
-      if (!/<pre\b[^>]*>[\s\S]*<\/pre\s*>/iu.test(line)) htmlPre = true;
-      return "";
-    }
-    if (/^(?: {4}|\t)/u.test(line)) return "";
-    return line;
+    if (/^(?: {4}|\t)/u.test(line.replaceAll(HIDDEN_MARKER, ""))) return "";
+    return line.replaceAll(HIDDEN_MARKER, " ");
   });
 }
 
@@ -398,7 +437,7 @@ function markdownTextBlocks(text) {
     }
     if (/^\s{0,3}#{1,6}\s+/u.test(line)) {
       flush();
-      blocks.push(trimmed);
+      current.push(trimmed);
       continue;
     }
     if (/^\s{0,3}(?:[-*+]\s+|\d+[.)]\s+|>)/u.test(line)) {
@@ -440,8 +479,8 @@ function releaseClauses(line) {
 function directlyNegated(clause, start, end) {
   const before = clause.slice(0, start);
   const after = clause.slice(end);
-  if (/(?:^|\s)\b(?:not|never)(?:\s+yet)?(?:\s+been)?\s*$/i.test(before)) return true;
-  if (/(?:^|\s)\b(?:no|without)(?:\s+package)?(?:\s+(?:is|are|was|were|has|have|had|been)){0,2}\s*$/i.test(before)) {
+  if (/(?:^|\s)\b(?:not|never)(?:\s+(?:currently|actually|yet|been))*\s*$/i.test(before)) return true;
+  if (/(?:^|\s)\b(?:no|without)(?:\s+(?:npm|the|package|publication|version|release|registry)){0,3}\s*$/i.test(before)) {
     return true;
   }
   if (/\bno\s+version\s+bump\s+or\s*$/i.test(before)) return true;
@@ -449,7 +488,7 @@ function directlyNegated(clause, start, end) {
 }
 
 function hasPositivePublicationClaim(text) {
-  const context = /(?:\bnpm\b|\bpackage\b|\brelease\b|\bversion\b|\btarball\b|\bartifact\b|\bregistry\b|\bv\d+\.\d+(?:\.\d+)?\b|@poggufanz\/rocky-cli)/i;
+  const context = /(?:\bnpm\b|\bpackage\b|\brelease\b|\bversion\b|\btarball\b|\bartifact\b|\bregistry\b|\bv?\d+\.\d+\.\d+\b|@poggufanz\/rocky-cli)/i;
   const signals = [
     /\b(?:publish\w*|publication\w*)\b/gi,
     /\b(?:available|availability|live)\b[\s\S]{0,80}\b(?:on|from|via|in)\s+(?:npm|the npm registry|npm registry|the registry|registry\.npmjs\.org)\b/gi,
@@ -489,7 +528,10 @@ export function validateReleaseTruth(snapshot) {
   const lockRoot = lockPackages === undefined ? undefined : objectRecord(lockPackages[""]);
   if (lock === undefined || lock.name !== PACKAGE_NAME || lock.version !== expectedVersion
       || lockRoot === undefined || lockRoot.name !== PACKAGE_NAME || lockRoot.version !== expectedVersion
-      || !isEmptyDependencyRecord(lockRoot.dependencies) || !isEmptyDependencyRecord(lockRoot.optionalDependencies)) {
+      || !isEmptyDependencyRecord(lockRoot.dependencies) || !isEmptyDependencyRecord(lockRoot.optionalDependencies)
+      || !isEmptyDependencyRecord(lockRoot.peerDependencies) || !isEmptyDependencyRecord(lockRoot.peerDependenciesMeta)
+      || !isEmptyBundleMetadata(lockRoot.bundledDependencies) || !isEmptyBundleMetadata(lockRoot.bundleDependencies)
+      || !isCanonicalBinary(lockRoot.bin, "dist/index.js")) {
     errors.push("package lock does not match canonical release identity");
   }
 
@@ -622,9 +664,13 @@ export function validateReleaseMetadata(value) {
     if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
     return isEmptyDependencyRecord(value.dependencies)
       && isEmptyDependencyRecord(value.optionalDependencies)
+      && isEmptyDependencyRecord(value.peerDependencies)
+      && isEmptyDependencyRecord(value.peerDependenciesMeta)
+      && isEmptyBundleMetadata(value.bundledDependencies)
+      && isEmptyBundleMetadata(value.bundleDependencies)
       && value.name === PACKAGE_NAME
       && value.version === PACKAGE_VERSION
-      && JSON.stringify(value.bin) === JSON.stringify({ rocky: "./dist/index.js" })
+      && isCanonicalBinary(value.bin, "./dist/index.js")
       && value.engines?.node === ">=18"
       && value.license === "MIT"
       && value.author === "Muhammad Faiq"

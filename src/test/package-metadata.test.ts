@@ -252,7 +252,7 @@ test("release metadata validation rejects malformed dependency fields without th
     validateReleaseMetadata(value: unknown): boolean;
   };
   const metadata = readJson(join(packageRoot, "package.json"));
-  for (const field of ["dependencies", "optionalDependencies"]) {
+  for (const field of ["dependencies", "optionalDependencies", "peerDependencies", "peerDependenciesMeta"]) {
     for (const value of [false, 0, 1, "", [], ["package"], { package: "^1.0.0" }, new Date()]) {
       assert.equal(
         releaseCheck.validateReleaseMetadata({ ...metadata, [field]: value }),
@@ -263,6 +263,17 @@ test("release metadata validation rejects malformed dependency fields without th
     assert.equal(releaseCheck.validateReleaseMetadata({ ...metadata, [field]: null }), true);
     assert.equal(releaseCheck.validateReleaseMetadata({ ...metadata, [field]: {} }), true);
   }
+  for (const field of ["bundledDependencies", "bundleDependencies"]) {
+    for (const value of [false, 0, 1, "", {}, ["package"], new Date()]) {
+      assert.equal(
+        releaseCheck.validateReleaseMetadata({ ...metadata, [field]: value }),
+        false,
+        `${field}=${String(value)} must fail validation`,
+      );
+    }
+    assert.equal(releaseCheck.validateReleaseMetadata({ ...metadata, [field]: null }), true);
+    assert.equal(releaseCheck.validateReleaseMetadata({ ...metadata, [field]: [] }), true);
+  }
 });
 
 test("package and lock contain no runtime or optional dependencies", () => {
@@ -270,14 +281,23 @@ test("package and lock contain no runtime or optional dependencies", () => {
   const lock = readJson(join(packageRoot, "package-lock.json"));
   assert.deepEqual(metadata.dependencies ?? {}, {});
   assert.deepEqual(metadata.optionalDependencies ?? {}, {});
+  assert.deepEqual(metadata.peerDependencies ?? {}, {});
+  assert.deepEqual(metadata.peerDependenciesMeta ?? {}, {});
+  assert.deepEqual(metadata.bundledDependencies ?? [], []);
+  assert.deepEqual(metadata.bundleDependencies ?? [], []);
   assert.equal(lock.name, "@poggufanz/rocky-cli");
   assert.equal(lock.version, "0.5.0");
   const packages = object(lock.packages, "lock packages");
   const root = object(packages[""], "lock root");
   assert.equal(root.name, "@poggufanz/rocky-cli");
   assert.equal(root.version, "0.5.0");
+  assert.deepEqual(root.bin, { rocky: "dist/index.js" });
   assert.deepEqual(root.dependencies ?? {}, {});
   assert.deepEqual(root.optionalDependencies ?? {}, {});
+  assert.deepEqual(root.peerDependencies ?? {}, {});
+  assert.deepEqual(root.peerDependenciesMeta ?? {}, {});
+  assert.deepEqual(root.bundledDependencies ?? [], []);
+  assert.deepEqual(root.bundleDependencies ?? [], []);
   for (const [path, value] of Object.entries(packages)) {
     if (path !== "") assert.equal(object(value, path).dev, true, `${path} is not dev-only`);
   }
@@ -396,6 +416,9 @@ test("canonical release truth rejects drift in every release marker", async () =
     ["README package never published", { ...snapshot, readme: `${snapshot.readme}\nThe package was never published on npm.\n` }],
     ["CHANGELOG publication not complete", { ...snapshot, changelog: `${snapshot.changelog}\nnpm publication is not complete.\n` }],
     ["README no saving percentage", { ...snapshot, readme: `${snapshot.readme}\nThis project publishes no saving percentage.\n` }],
+    ["README no npm publication occurred", { ...snapshot, readme: `${snapshot.readme}\nNo npm publication occurred.\n` }],
+    ["README never actually published", { ...snapshot, readme: `${snapshot.readme}\nThe package was never actually published.\n` }],
+    ["README not currently available", { ...snapshot, readme: `${snapshot.readme}\nThe package is not currently available on npm.\n` }],
   ] as const) {
     assert.deepEqual(releaseCheck.validateReleaseTruth(mutated), [], `${label} must remain allowed`);
   }
@@ -421,6 +444,7 @@ test("canonical release truth rejects drift in every release marker", async () =
     ["availability in npm registry", { ...snapshot, readme: `${snapshot.readme}\nThe package is now available in the npm registry.\n` }],
     ["package now on npm", { ...snapshot, readme: `${snapshot.readme}\nThe package is now on npm.\n` }],
     ["semver publication", { ...snapshot, changelog: `${snapshot.changelog}\nVersion 0.5.0 was published.\n` }],
+    ["bare numeric publication", { ...snapshot, readme: `${snapshot.readme}\n0.5.0 was published.\n` }],
     ["bare semver publication", { ...snapshot, readme: `${snapshot.readme}\nv0.5.0 was published.\n` }],
     ["bare semver availability", { ...snapshot, readme: `${snapshot.readme}\nv0.5.0 is now on npm.\n` }],
     ["wrapped package availability", { ...snapshot, readme: `${snapshot.readme}\nThe package is now\non npm.\n` }],
@@ -429,6 +453,8 @@ test("canonical release truth rejects drift in every release marker", async () =
     ["package landed on npm", { ...snapshot, readme: `${snapshot.readme}\nThe package landed on npm.\n` }],
     ["package downloadable from npm", { ...snapshot, readme: `${snapshot.readme}\nThe package is downloadable from npm.\n` }],
     ["heading publication", { ...snapshot, readme: `${snapshot.readme}\n## v0.5.0 was published\n` }],
+    ["numeric heading publication", { ...snapshot, readme: `${snapshot.readme}\n## 0.5.0 was published\n` }],
+    ["wrapped numeric heading publication", { ...snapshot, readme: `${snapshot.readme}\n## 0.5.0\nwas published.\n` }],
   ] as const) {
     assert.notDeepEqual(releaseCheck.validateReleaseTruth(mutated), [], `${label} must fail`);
   }
@@ -469,6 +495,20 @@ test("canonical release truth rejects drift in every release marker", async () =
     [],
     "README release markers and headings inside raw HTML preformatted content must not satisfy truth",
   );
+  const multilineHtmlFakeReadme = `${readmeWithoutRealMarkers.replace(/^## Roadmap\r?\n/im, "")}\n<pre\n>\nCurrent release: \`${PACKAGE_NAME}@${PACKAGE_VERSION}\`\n## Roadmap\n- **v0.5 — fake (current release)**\n</pre>\n`;
+  assert.notDeepEqual(
+    releaseCheck.validateReleaseTruth({ ...snapshot, readme: multilineHtmlFakeReadme }),
+    [],
+    "README release markers inside a multiline raw HTML pre block must not satisfy truth",
+  );
+  assert.notDeepEqual(
+    releaseCheck.validateReleaseTruth({
+      ...snapshot,
+      readme: `${readmeWithoutRealMarkers.replace(/^## Roadmap\r?\n/im, "")}\n<pre\n>\nCurrent release: \`${PACKAGE_NAME}@${PACKAGE_VERSION}\`\n## Roadmap\n- **v0.5 — fake (current release)**\n`,
+    }),
+    [],
+    "an open-ended multiline README pre block must fail closed",
+  );
   const htmlCommentFakeReadme = `${readmeWithoutRealMarkers.replace(/^## Roadmap\r?\n/im, "")}\n<!--\nCurrent release: \`${PACKAGE_NAME}@${PACKAGE_VERSION}\`\n## Roadmap\n- **v0.5 — fake (current release)**\n-->\n`;
   assert.notDeepEqual(
     releaseCheck.validateReleaseTruth({ ...snapshot, readme: htmlCommentFakeReadme }),
@@ -504,6 +544,38 @@ test("canonical release truth rejects drift in every release marker", async () =
     [],
     "CHANGELOG release headings inside HTML comments must not satisfy truth",
   );
+  const multilineHtmlFakeChangelog = `${changelogHeadingRemoved}\n<pre\n>\n## 0.5.0 — fake\nFake release section.\n</pre>\n`;
+  assert.notDeepEqual(
+    releaseCheck.validateReleaseTruth({ ...snapshot, changelog: multilineHtmlFakeChangelog }),
+    [],
+    "CHANGELOG release headings inside a multiline raw HTML pre block must not satisfy truth",
+  );
+  assert.notDeepEqual(
+    releaseCheck.validateReleaseTruth({
+      ...snapshot,
+      changelog: `${changelogHeadingRemoved}\n<!--\n## 0.5.0 — fake\nFake release section.\n`,
+    }),
+    [],
+    "an open-ended CHANGELOG comment must fail closed",
+  );
+  assert.notDeepEqual(
+    releaseCheck.validateReleaseTruth({ ...snapshot, readme: `${snapshot.readme}\n\u0000\n` }),
+    [],
+    "a source sentinel collision must fail closed",
+  );
+  for (const [label, readme] of [
+    ["visible publication before same-line comment", `${snapshot.readme}\nThe package is now available on npm. <!-- hidden note -->\n`],
+    ["visible publication after same-line comment", `${snapshot.readme}\n<!-- hidden note --> The package is now available on npm.\n`],
+    ["visible publication before same-line pre", `${snapshot.readme}\nThe package is now available on npm. <pre>hidden note</pre>\n`],
+    ["visible publication after same-line pre", `${snapshot.readme}\n<pre>hidden note</pre> The package is now available on npm.\n`],
+    ["visible publication after non-HTML pre spacing", `${snapshot.readme}\n<pre\u00a0>hidden note</pre> The package is now available on npm.\n`],
+  ] as const) {
+    assert.notDeepEqual(
+      releaseCheck.validateReleaseTruth({ ...snapshot, readme }),
+      [],
+      `${label} must remain visible to publication validation`,
+    );
+  }
   for (const [label, mutated] of [
     ["README canonical upstream URL", { ...snapshot, readme: snapshot.readme.replace("https://github.com/poggufanz/rocky.git", "https://github.com/example/rocky.git") }],
     ["README canonical developer branch", { ...snapshot, readme: snapshot.readme.replace("Canonical developer branch is `main`", "Canonical developer branch is `develop`") }],
@@ -572,6 +644,39 @@ test("canonical release truth rejects drift in every release marker", async () =
 
   const lock = object(snapshot.lock.packages, "lock packages");
   const lockRoot = object(lock[""], "lock root");
+  for (const [field, value] of [
+    ["peerDependencies", { peer: "^1.0.0" }],
+    ["peerDependenciesMeta", { peer: { optional: true } }],
+    ["bundledDependencies", ["runtime-package"]],
+    ["bundleDependencies", ["runtime-package"]],
+  ] as const) {
+    assert.notDeepEqual(
+      releaseCheck.validateReleaseTruth({
+        ...snapshot,
+        lock: { ...snapshot.lock, packages: { ...lock, "": { ...lockRoot, [field]: value } } },
+      }),
+      [],
+      `lock root ${field} must not carry runtime metadata`,
+    );
+  }
+  for (const [label, bin] of [
+    ["missing", undefined],
+    ["wrong path", { rocky: "./dist/index.js" }],
+    ["extra key", { rocky: "dist/index.js", other: "dist/other.js" }],
+    ["malformed", ["dist/index.js"]],
+  ] as const) {
+    const mutatedRoot = { ...lockRoot };
+    if (bin === undefined) delete mutatedRoot.bin;
+    else mutatedRoot.bin = bin;
+    assert.notDeepEqual(
+      releaseCheck.validateReleaseTruth({
+        ...snapshot,
+        lock: { ...snapshot.lock, packages: { ...lock, "": mutatedRoot } },
+      }),
+      [],
+      `lock root bin ${label} must fail canonical validation`,
+    );
+  }
   const mutations: Array<[string, Record<string, unknown>]> = [
     ["package metadata", { ...snapshot, metadata: { ...snapshot.metadata, name: "@wrong/rocky" } }],
     ["lockfile", { ...snapshot, lock: { ...snapshot.lock, version: "9.9.9" } }],
