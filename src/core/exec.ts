@@ -13,6 +13,7 @@ import { statSync } from "node:fs";
 import { constants } from "node:os";
 import { isAbsolute } from "node:path";
 import { StringDecoder } from "node:string_decoder";
+import { finishChildStderr, startChildStderr, trackChildStderr } from "../ui/rocky.js";
 
 export const TAIL_LINES = 200;
 export const MAX_LINE_BYTES = 4096;
@@ -240,6 +241,7 @@ export function runProcess(cmd: string, options: ExecOptions = {}): Promise<Exec
   const buffer = createTailBuffer(options.tailLines, options.maxLineBytes);
   const decoder = new StringDecoder("utf8");
   let lastActivity = start;
+  startChildStderr();
 
   return new Promise((resolve) => {
     const child = spawn(cmd, {
@@ -253,6 +255,12 @@ export function runProcess(cmd: string, options: ExecOptions = {}): Promise<Exec
     // so this never holds the process open; cleared on both close and error
     // so it can never fire after runProcess has already resolved.
     let idleTimer: NodeJS.Timeout | undefined;
+    let stderrFinished = false;
+    const finishStderr = (): void => {
+      if (stderrFinished) return;
+      stderrFinished = true;
+      finishChildStderr();
+    };
     if (options.idleMs !== undefined) {
       const idleMs = options.idleMs;
       idleTimer = setInterval(() => {
@@ -265,11 +273,13 @@ export function runProcess(cmd: string, options: ExecOptions = {}): Promise<Exec
     child.stderr?.on("data", (chunk: Buffer) => {
       lastActivity = Date.now();
       buffer.push(decoder.write(chunk));
+      trackChildStderr(chunk);
       process.stderr.write(chunk); // stream through untouched, unbounded, unmodified
     });
 
     child.on("close", (code, signal) => {
       if (idleTimer) clearInterval(idleTimer);
+      finishStderr();
       buffer.push(decoder.end());
       const tail = buffer.end();
       resolve({ code: code ?? signalExit(signal), stderr: tail.join("\n"), tail, durationMs: Date.now() - start });
@@ -278,7 +288,9 @@ export function runProcess(cmd: string, options: ExecOptions = {}): Promise<Exec
     child.on("error", (err) => {
       if (idleTimer) clearInterval(idleTimer);
       const message = `${err.message}\n`;
+      trackChildStderr(Buffer.from(message));
       process.stderr.write(message);
+      finishStderr();
       buffer.push(decoder.end());
       buffer.push(message);
       const tail = buffer.end();

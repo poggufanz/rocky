@@ -19,7 +19,7 @@ import { DEFAULT_WATCH_NOTIFY, loadConfig } from "../core/config-read.js";
 import { formatDuration, notify as realNotify, spokenDuration, type NotifyInput } from "../core/notify.js";
 import { watchLogName, writeWatchLog } from "../core/watch-log.js";
 import { linkFixOnSuccess, speakFailureMemory } from "./run.js";
-import { detail, phrase, say } from "../ui/rocky.js";
+import { detail, phrase, say, writeRockyStderr } from "../ui/rocky.js";
 import { safeTerminalBlock, safeTerminalLine } from "../ui/sanitize.js";
 import { NO_FOLLOW_FLAG, regularDescriptorSafe, sameFilesystemIdentity } from "../core/fs-safety.js";
 
@@ -183,9 +183,9 @@ function notifyEnabled(): boolean {
 
 /** `--quiet`'s entire output: no persona, just the facts, written directly (not through `say`). */
 function plainFacts(result: ExecResult, logPath: string | undefined): void {
-  process.stderr.write(`duration: ${formatDuration(result.durationMs)}\n`);
-  process.stderr.write(`exit: ${result.code}\n`);
-  if (logPath !== undefined) process.stderr.write(`log: ${logPath}\n`);
+  writeRockyStderr(`duration: ${formatDuration(result.durationMs)}\n`);
+  writeRockyStderr(`exit: ${result.code}\n`);
+  if (logPath !== undefined) writeRockyStderr(`log: ${logPath}\n`);
 }
 
 function onWatchSuccess(cmd: string, cwd: string, quiet: boolean, result: ExecResult): void {

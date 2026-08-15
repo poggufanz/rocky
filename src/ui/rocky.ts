@@ -21,6 +21,55 @@ const amberStderr = (s: string) => (useStderrColor ? `\u001b[33m${s}\u001b[0m` :
 const dimStderr = (s: string) => (useStderrColor ? `\u001b[2m${s}\u001b[0m` : s);
 const boldStderr = (s: string) => (useStderrColor ? `\u001b[1m${s}\u001b[0m` : s);
 
+// ponytail: one active child stream; per-run boundary context if wrappers ever run concurrently.
+let childStderrActive = false;
+let childStderrLastByteWasLf = true;
+let childStderrCommentaryStarted = false;
+let childStderrReset: NodeJS.Immediate | undefined;
+
+/** Begin tracking raw child stderr until the first Rocky-owned output. */
+export function startChildStderr(): void {
+  if (childStderrReset !== undefined) clearImmediate(childStderrReset);
+  childStderrReset = undefined;
+  childStderrActive = true;
+  childStderrLastByteWasLf = true;
+  childStderrCommentaryStarted = false;
+}
+
+/** Record the final raw byte without decoding or sanitizing the child stream. */
+export function trackChildStderr(chunk: Uint8Array): void {
+  if (childStderrActive && chunk.length > 0) {
+    childStderrLastByteWasLf = chunk[chunk.length - 1] === 0x0a;
+  }
+}
+
+/** Stop live tracking while retaining one pending boundary for post-exit output. */
+export function finishChildStderr(): void {
+  childStderrActive = false;
+  if (childStderrReset !== undefined) clearImmediate(childStderrReset);
+  childStderrReset = setImmediate(() => {
+    childStderrReset = undefined;
+    if (!childStderrActive && !childStderrCommentaryStarted) {
+      childStderrLastByteWasLf = true;
+    }
+  });
+  childStderrReset.unref();
+}
+
+function startsWithLf(chunk: string | Uint8Array): boolean {
+  return typeof chunk === "string" ? chunk.charCodeAt(0) === 0x0a : chunk[0] === 0x0a;
+}
+
+/** Write Rocky-owned stderr, inserting at most one needed line separator. */
+export function writeRockyStderr(chunk: string | Uint8Array): void {
+  const boundaryPending = childStderrActive || childStderrReset !== undefined;
+  if (boundaryPending && !childStderrCommentaryStarted) {
+    childStderrCommentaryStarted = true;
+    if (!childStderrLastByteWasLf && !startsWithLf(chunk)) process.stderr.write("\n");
+  }
+  process.stderr.write(chunk);
+}
+
 /**
  * Rocky, seen from the front: pentagonal carapace, five radial legs,
  * breathing slits on top, no face. He hangs from the ceiling of his
@@ -40,7 +89,7 @@ export function face(): string {
 
 /** One Rocky line, prefixed. */
 export function say(msg: string): void {
-  process.stderr.write(`${amberStderr("[Rocky]")} ${safeTerminalLine(msg)}\n`);
+  writeRockyStderr(`${amberStderr("[Rocky]")} ${safeTerminalLine(msg)}\n`);
 }
 
 /** Rocky prompt text; readline writes it to the prompt port's stderr stream. */
@@ -50,15 +99,15 @@ export function prompt(msg: string): string {
 
 /** Rocky line without trailing newline context — for multi-line blocks. */
 export function block(lines: string[]): void {
-  for (const l of lines) process.stderr.write(`${amberStderr("♫")} ${safeTerminalLine(l)}\n`);
+  for (const l of lines) writeRockyStderr(`${amberStderr("♫")} ${safeTerminalLine(l)}\n`);
 }
 
 export function heading(msg: string): void {
-  process.stderr.write(`\n${boldStderr(safeTerminalLine(msg))}\n`);
+  writeRockyStderr(`\n${boldStderr(safeTerminalLine(msg))}\n`);
 }
 
 export function detail(msg: string): void {
-  process.stderr.write(`${dimStderr(safeTerminalBlock(msg))}\n`);
+  writeRockyStderr(`${dimStderr(safeTerminalBlock(msg))}\n`);
 }
 
 /** "just now", "2 minutes", "6 hours", "3 days" — the bare span, no suffix. */
