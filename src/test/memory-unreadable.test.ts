@@ -55,7 +55,7 @@ function unreadableHome(name: string): string {
   return home;
 }
 
-test("recall() treats a non-regular memory path as empty without raw Node error text", async () => {
+test("recall() fails closed for a non-regular memory path without raw Node error text", async () => {
   // recall()'s default dependencies resolve the memory path from ROCKY_HOME,
   // so this exercises the actual path rather than an injected query seam.
   const home = unreadableHome("recall-unreadable");
@@ -63,7 +63,8 @@ test("recall() treats a non-regular memory path as empty without raw Node error 
 
   const { result, stderr } = await captureStderr(() => recall(["anything"]));
 
-  assert.equal(result, 0);
+  assert.equal(result, 1);
+  assert.match(stderr, /memory coverage incomplete:.*reason read-race/u);
   assert.doesNotMatch(stderr, /memory file does not open for me\. I answer from nothing\./);
   assert.doesNotMatch(stderr, /EISDIR/);
   assert.doesNotMatch(stderr, /Error:/);

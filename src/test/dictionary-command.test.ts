@@ -2,7 +2,7 @@ import { strict as assert } from "node:assert";
 import { Buffer } from "node:buffer";
 import { test } from "node:test";
 import { digest, exportCommand, how, quiz, what, why } from "../commands/dictionary.js";
-import type { MemoryRecord, TripleRecord } from "../core/memory-read.js";
+import type { MemoryCoverage, MemoryRecord, TripleRecord } from "../core/memory-read.js";
 
 const fullHostileMatrix = [
   "unicode-🪨-工程-e\u0301",
@@ -97,6 +97,33 @@ test("what speaks tentative mapping and evidence for a hit", async () => {
   assert.ok(outLines[0]?.includes("src/app.css"));
   assert.ok(!sayLines.some((line) => line.includes("src/app.css")));
   assert.ok(!outLines.some((line) => line.includes("you say")));
+});
+
+test("what and how disclose incomplete coverage even when a hit exists", async () => {
+  const incomplete: MemoryCoverage = {
+    version: 1,
+    scanned: 1,
+    skipped: 1,
+    truncated: 0,
+    bytesScanned: 10,
+    bytesTotal: 10,
+    complete: false,
+  };
+  const whatOutput = sinks();
+  assert.equal(await what(["naikin"], {
+    load: seeded,
+    coverage: () => incomplete,
+    ...whatOutput.deps,
+  }), 0);
+  assert.ok(whatOutput.outLines.some((line) => line.includes("memory coverage incomplete")));
+
+  const howOutput = sinks();
+  assert.equal(how(["naikin"], {
+    load: seeded,
+    coverage: () => incomplete,
+    ...howOutput.deps,
+  }), 0);
+  assert.ok(howOutput.outLines.some((line) => line.includes("memory coverage incomplete")));
 });
 
 test("export emits every raw record once in loaded order and keeps sinks separate", () => {

@@ -89,10 +89,11 @@ function delayedMemoryReadPreload(path: string): void {
     "const fs = require('node:fs');",
     "const { syncBuiltinESMExports } = require('node:module');",
     "const originalOpen = fs.openSync.bind(fs);",
-    "const originalRead = fs.readFileSync.bind(fs);",
+    "const originalRead = fs.readSync.bind(fs);",
     "const memoryFds = new Set();",
+    "let delayed = false;",
     "fs.openSync = (path, ...args) => { const fd = originalOpen(path, ...args); if (String(path) === process.env.ROCKY_TEST_MEMORY) memoryFds.add(fd); return fd; };",
-    "fs.readFileSync = (path, ...args) => { const value = originalRead(path, ...args); if (typeof path === 'number' && memoryFds.has(path)) { const signal = new Int32Array(new SharedArrayBuffer(4)); Atomics.wait(signal, 0, 0, Number(process.env.ROCKY_TEST_READ_DELAY_MS || 15)); } return value; };",
+    "fs.readSync = (fd, ...args) => { if (!delayed && memoryFds.has(fd)) { delayed = true; if (process.env.ROCKY_TEST_READ_MARKER) fs.writeFileSync(process.env.ROCKY_TEST_READ_MARKER, 'fired'); const signal = new Int32Array(new SharedArrayBuffer(4)); Atomics.wait(signal, 0, 0, Number(process.env.ROCKY_TEST_READ_DELAY_MS || 15)); } return originalRead(fd, ...args); };",
     "syncBuiltinESMExports();",
   ].join("\n"), "utf8");
 }
@@ -102,14 +103,14 @@ function mutationReloadFailurePreload(path: string): void {
     "const fs = require('node:fs');",
     "const { syncBuiltinESMExports } = require('node:module');",
     "const originalOpen = fs.openSync.bind(fs);",
-    "const originalRead = fs.readFileSync.bind(fs);",
+    "const originalRead = fs.readSync.bind(fs);",
     "const originalLstat = fs.lstatSync.bind(fs);",
     "const memoryFds = new Set();",
     "let reads = 0;",
     "let lists = 0;",
     "fs.openSync = (path, ...args) => { const fd = originalOpen(path, ...args); if (String(path) === process.env.ROCKY_TEST_MEMORY) memoryFds.add(fd); return fd; };",
-    "fs.readFileSync = (path, ...args) => { if (process.env.ROCKY_TEST_RELOAD_MODE === 'read' && typeof path === 'number' && memoryFds.has(path) && ++reads === 2) throw new Error('injected mutation reload failure'); return originalRead(path, ...args); };",
-    "fs.lstatSync = (path, ...args) => { const stats = originalLstat(path, ...args); if (process.env.ROCKY_TEST_RELOAD_MODE === 'identity' && String(path) === process.env.ROCKY_TEST_MEMORY && ++lists === 3) { const replacement = Object.create(Object.getPrototypeOf(stats)); Object.assign(replacement, stats, { ino: Number(stats.ino) + 1 }); return replacement; } return stats; };",
+    "fs.readSync = (fd, ...args) => { if (process.env.ROCKY_TEST_RELOAD_MODE === 'read' && memoryFds.has(fd) && ++reads === 2) { if (process.env.ROCKY_TEST_READ_MARKER) fs.writeFileSync(process.env.ROCKY_TEST_READ_MARKER, 'fired'); throw new Error('injected mutation reload failure'); } return originalRead(fd, ...args); };",
+    "fs.lstatSync = (path, ...args) => { const stats = originalLstat(path, ...args); if (process.env.ROCKY_TEST_RELOAD_MODE === 'identity' && String(path) === process.env.ROCKY_TEST_MEMORY && ++lists === 3) { if (process.env.ROCKY_TEST_LSTAT_MARKER) fs.writeFileSync(process.env.ROCKY_TEST_LSTAT_MARKER, 'fired'); const replacement = Object.create(Object.getPrototypeOf(stats)); Object.assign(replacement, stats, { ino: Number(stats.ino) + 1 }); return replacement; } return stats; };",
     "syncBuiltinESMExports();",
   ].join("\n"), "utf8");
 }
@@ -119,11 +120,11 @@ function initialMemoryReadFailurePreload(path: string): void {
     "const fs = require('node:fs');",
     "const { syncBuiltinESMExports } = require('node:module');",
     "const originalOpen = fs.openSync.bind(fs);",
-    "const originalRead = fs.readFileSync.bind(fs);",
+    "const originalRead = fs.readSync.bind(fs);",
     "const memoryFds = new Set();",
     "let reads = 0;",
     "fs.openSync = (path, ...args) => { const fd = originalOpen(path, ...args); if (String(path) === process.env.ROCKY_TEST_MEMORY) memoryFds.add(fd); return fd; };",
-    "fs.readFileSync = (path, ...args) => { if (typeof path === 'number' && memoryFds.has(path) && ++reads === 1) throw new Error('injected initial memory read failure'); return originalRead(path, ...args); };",
+    "fs.readSync = (fd, ...args) => { if (memoryFds.has(fd) && ++reads === 1) { if (process.env.ROCKY_TEST_READ_MARKER) fs.writeFileSync(process.env.ROCKY_TEST_READ_MARKER, 'fired'); throw new Error('injected initial memory read failure'); } return originalRead(fd, ...args); };",
     "syncBuiltinESMExports();",
   ].join("\n"), "utf8");
 }
@@ -194,6 +195,7 @@ async function concurrentSuccesses(t: TestContext, count: number): Promise<void>
   const ready = join(home, "ready");
   const start = join(home, "start");
   const preload = join(home, "delay-memory.cjs");
+  const readMarker = join(home, "read-fired");
   mkdirSync(ready);
   delayedMemoryReadPreload(preload);
 
@@ -218,6 +220,7 @@ async function concurrentSuccesses(t: TestContext, count: number): Promise<void>
     ROCKY_HOME: home,
     ROCKY_TEST_MEMORY: join(home, "memory.jsonl"),
     ROCKY_TEST_READ_DELAY_MS: "5",
+    ROCKY_TEST_READ_MARKER: readMarker,
     NODE_OPTIONS: `--require=${preload}`,
   };
   const children = Array.from({ length: count }, () => spawn(process.execPath, [
@@ -234,6 +237,7 @@ async function concurrentSuccesses(t: TestContext, count: number): Promise<void>
   await waitFor(() => readdirSync(ready).length === count, 45_000, `${count} success workers`);
   writeFileSync(start, "start", "utf8");
   assert.deepEqual(await Promise.all(completions), Array<number>(count).fill(0));
+  assert.equal(existsSync(readMarker), true, "readSync delay seam must fire");
 
   const records = memory.loadMemory(join(home, "memory.jsonl"));
   const fixes = records.filter((record) => record.kind === "fix");
@@ -485,6 +489,7 @@ test("a reload failure after fix append fails closed and preserves pending", { t
   const cmd = "node stable-command.js";
   seed(home, [failure("reload-resolved", cmd, cwd), failure("reload-remaining", "cargo build", cwd)]);
   const preload = join(home, "reload-failure.cjs");
+  const readMarker = join(home, "reload-read-fired");
   mutationReloadFailurePreload(preload);
   const result = spawnSync(process.execPath, [cli, "_hooksuccess", cmd, cwd], {
     env: {
@@ -492,6 +497,7 @@ test("a reload failure after fix append fails closed and preserves pending", { t
       ROCKY_HOME: home,
       ROCKY_TEST_MEMORY: join(home, "memory.jsonl"),
       ROCKY_TEST_RELOAD_MODE: "read",
+      ROCKY_TEST_READ_MARKER: readMarker,
       NODE_OPTIONS: `--require=${preload}`,
     },
     encoding: "utf8",
@@ -499,6 +505,7 @@ test("a reload failure after fix append fails closed and preserves pending", { t
     windowsHide: true,
   });
   assert.equal(result.status, 0, result.stderr);
+  assert.equal(existsSync(readMarker), true, "readSync reload seam must fire");
   const records = memory.loadMemory(join(home, "memory.jsonl"));
   assert.equal(records.filter((record) => record.kind === "fix").length, 1);
   assert.equal(records.find((record): record is FailureRecord =>
@@ -513,6 +520,7 @@ test("a reload failure after fix append fails closed and preserves pending", { t
       ROCKY_HOME: identityHome,
       ROCKY_TEST_MEMORY: join(identityHome, "memory.jsonl"),
       ROCKY_TEST_RELOAD_MODE: "identity",
+      ROCKY_TEST_LSTAT_MARKER: join(identityHome, "lstat-fired"),
       NODE_OPTIONS: `--require=${preload}`,
     },
     encoding: "utf8",
@@ -520,6 +528,7 @@ test("a reload failure after fix append fails closed and preserves pending", { t
     windowsHide: true,
   });
   assert.equal(identityResult.status, 0, identityResult.stderr);
+  assert.equal(existsSync(join(identityHome, "lstat-fired")), true, "lstat identity seam must fire");
   const identityRecords = memory.loadMemory(join(identityHome, "memory.jsonl"));
   assert.equal(identityRecords.filter((record) => record.kind === "fix").length, 1);
   assert.equal(existsSync(join(identityHome, "pending")), true);
@@ -649,17 +658,20 @@ test("a delayed exact success recovers crash resolution beyond the link window w
   };
   seed(incompleteHome, [incompleteFailure, incompleteFix]);
   const incompletePreload = join(incompleteHome, "incomplete-read.cjs");
+  const incompleteReadMarker = join(incompleteHome, "initial-read-fired");
   initialMemoryReadFailurePreload(incompletePreload);
   const incomplete = spawnSync(process.execPath, [cli, "_hooksuccess", incompleteCmd, incompleteCwd], {
     env: {
       ...process.env,
       ROCKY_HOME: incompleteHome,
       ROCKY_TEST_MEMORY: join(incompleteHome, "memory.jsonl"),
+      ROCKY_TEST_READ_MARKER: incompleteReadMarker,
       NODE_OPTIONS: `--require=${incompletePreload}`,
     },
     encoding: "utf8", timeout: 10_000, windowsHide: true,
   });
   assert.equal(incomplete.status, 0, incomplete.stderr);
+  assert.equal(existsSync(incompleteReadMarker), true, "initial readSync failure seam must fire");
   assert.equal(existsSync(join(incompleteHome, "pending")), true, "incomplete loader snapshot must retain pending");
 });
 

@@ -1,9 +1,9 @@
 import { dictionaryRankPortFromConfig, type DictionaryRankPort } from "../ai/dictionary-ai.js";
 import { loadConfig } from "../core/config.js";
 import { digestBuckets, queryDictionary, quizCandidates, type DictionaryHit } from "../core/dictionary.js";
-import { canonicalPath } from "../core/memory-read.js";
+import { canonicalPath, isCompleteMemoryCoverage, loadMemoryChecked } from "../core/memory-read.js";
 import { whyFile, whyFileEvidence } from "../core/memory-query.js";
-import { loadMemory, type MemoryRecord } from "../core/memory-read.js";
+import type { MemoryCoverage, MemoryRecord } from "../core/memory-read.js";
 import { resolveRockyPaths } from "../core/state-paths.js";
 import { createTtyPromptPort } from "../setup/prompt.js";
 import { truncateUtf8 } from "../mcp/privacy.js";
@@ -23,6 +23,7 @@ const EXPORT_KINDS: ReadonlySet<MemoryRecord["kind"]> = new Set(["failure", "fix
 
 export interface DictionaryCommandDeps {
   load?: () => MemoryRecord[];
+  coverage?: () => MemoryCoverage;
   say?: (line: string) => void;
   out?: (line: string) => void;
   rank?: DictionaryRankPort;
@@ -32,10 +33,36 @@ interface Sinks {
   speak: (line: string) => void;
   support: (line: string) => void;
   records: () => MemoryRecord[];
+  coverage: () => MemoryCoverage | undefined;
 }
 
 function resolve(deps: DictionaryCommandDeps): Sinks {
-  return { speak: deps.say ?? say, support: deps.out ?? detail, records: deps.load ?? loadMemory };
+  if (deps.load !== undefined) {
+    return {
+      speak: deps.say ?? say,
+      support: deps.out ?? detail,
+      records: deps.load,
+      coverage: deps.coverage ?? (() => undefined),
+    };
+  }
+  let loaded: ReturnType<typeof loadMemoryChecked> | undefined;
+  const loadOnce = (): ReturnType<typeof loadMemoryChecked> => loaded ??= loadMemoryChecked();
+  return {
+    speak: deps.say ?? say,
+    support: deps.out ?? detail,
+    // Keep argument/usage validation lazy: invalid commands must not touch
+    // the memory file. All valid surfaces in one invocation share one load.
+    records: () => loadOnce().records,
+    coverage: deps.coverage ?? (() => loadOnce().coverage),
+  };
+}
+
+function coverageIncomplete(value: MemoryCoverage | undefined): boolean {
+  return value !== undefined && !isCompleteMemoryCoverage(value);
+}
+
+function coverageLine(value: MemoryCoverage): string {
+  return `memory coverage incomplete: version ${value.version}; scanned ${value.scanned}; skipped ${value.skipped}; truncated ${value.truncated}; bytes ${value.bytesScanned}/${value.bytesTotal}${value.reason === undefined ? "" : `; reason ${value.reason}`}`;
 }
 
 type ExportCommandDeps = DictionaryCommandDeps & {
@@ -63,7 +90,7 @@ function exportSince(value: string, now: number): number | undefined {
 // `export` is reserved as a command name, so this function keeps the explicit suffix.
 // stdout carries raw JSONL data; say/out remain persona and supporting stderr sinks.
 export function exportCommand(argv: string[], deps: ExportCommandDeps = {}): number {
-  const { speak, records } = resolve(deps);
+  const { speak, support, records, coverage } = resolve(deps);
   const now = deps.now ?? Date.now();
   const kinds = new Set<MemoryRecord["kind"]>();
   let cutoff: number | undefined;
@@ -91,6 +118,12 @@ export function exportCommand(argv: string[], deps: ExportCommandDeps = {}): num
     return exportUsage(speak);
   }
 
+  const scan = coverage();
+  if (scan !== undefined && coverageIncomplete(scan)) {
+    speak("memory coverage incomplete. export stops. no false file, question");
+    support(coverageLine(scan));
+    return 1;
+  }
   const selected = records().filter((record) => (
     (kinds.size === 0 || kinds.has(record.kind))
     && (cutoff === undefined || record.ts >= cutoff)
@@ -162,7 +195,7 @@ function reorder(hits: readonly DictionaryHit[], rankedIds: readonly string[]): 
 }
 
 export async function what(argv: string[], deps: DictionaryCommandDeps = {}): Promise<number> {
-  const { speak, support, records } = resolve(deps);
+  const { speak, support, records, coverage } = resolve(deps);
   let parsed;
   try {
     parsed = parseQueryArgs(argv, {
@@ -179,11 +212,18 @@ export async function what(argv: string[], deps: DictionaryCommandDeps = {}): Pr
     speak('what needs word to look up. rocky what "naikin", question');
     return 2;
   }
+  const scan = coverage();
   const hits = queryDictionary(records(), query);
   if (hits.length === 0) {
+    if (scan !== undefined && coverageIncomplete(scan)) {
+      speak("memory coverage incomplete. I cannot say no memory. check, question");
+      support(coverageLine(scan));
+      return 0;
+    }
     speak(terminalSafe(`"${terminalSafe(query, MAX_QUERY_DISPLAY_BYTES)}"... I not hear this before. I listen now.`, MAX_OUTPUT_LINE_BYTES));
     return 0;
   }
+  if (scan !== undefined && coverageIncomplete(scan)) support(coverageLine(scan));
   let displayed = hits;
   if (useAi) {
     let rank = deps.rank;
@@ -216,7 +256,7 @@ export async function what(argv: string[], deps: DictionaryCommandDeps = {}): Pr
 }
 
 export function how(argv: string[], deps: DictionaryCommandDeps = {}): number {
-  const { speak, support, records } = resolve(deps);
+  const { speak, support, records, coverage } = resolve(deps);
   let query: string;
   try {
     query = parseQueryArgs(argv, {
@@ -231,11 +271,18 @@ export function how(argv: string[], deps: DictionaryCommandDeps = {}): number {
     speak('how needs word to remember. rocky how "naikin", question');
     return 2;
   }
+  const scan = coverage();
   const hits = queryDictionary(records(), query);
   if (hits.length === 0) {
+    if (scan !== undefined && coverageIncomplete(scan)) {
+      speak("memory coverage incomplete. I cannot say no memory. check, question");
+      support(coverageLine(scan));
+      return 0;
+    }
     speak(terminalSafe(`"${terminalSafe(query, MAX_QUERY_DISPLAY_BYTES)}"... no memory. you teach me when you work. good good.`, MAX_OUTPUT_LINE_BYTES));
     return 0;
   }
+  if (scan !== undefined && coverageIncomplete(scan)) support(coverageLine(scan));
   const safeQuery = terminalSafe(query, MAX_QUERY_DISPLAY_BYTES);
   const safeSubject = subject(hits[0]);
   speak(terminalSafe(`last time you say "${safeQuery}", it become ${safeSubject}. maybe you mean ${safeSubject}, question`, MAX_OUTPUT_LINE_BYTES));
@@ -244,7 +291,7 @@ export function how(argv: string[], deps: DictionaryCommandDeps = {}): number {
 }
 
 export function why(argv: string[], deps: DictionaryCommandDeps = {}): number {
-  const { speak, support, records } = resolve(deps);
+  const { speak, support, records, coverage } = resolve(deps);
   let path: string;
   try {
     path = parseQueryArgs(argv, {
@@ -260,6 +307,7 @@ export function why(argv: string[], deps: DictionaryCommandDeps = {}): number {
     return 2;
   }
   const safePath = terminalSafe(path, MAX_PATH_DISPLAY_BYTES);
+  const scan = coverage();
   const memory = records();
   const evidenceResult = whyFileEvidence(memory, path);
   // Legacy triples may contain an exact file witness without the newer
@@ -271,14 +319,16 @@ export function why(argv: string[], deps: DictionaryCommandDeps = {}): number {
       ? whyFile(memory, path)
       : evidenceResult.matches;
   if (hits.length === 0) {
-    if (evidenceResult.coverageIncomplete || evidenceResult.possible.length > 0) {
+    if ((scan !== undefined && coverageIncomplete(scan)) || evidenceResult.coverageIncomplete || evidenceResult.possible.length > 0) {
       speak(terminalSafe(`"${safePath}"... I not know if agent touch. coverage incomplete.`, MAX_OUTPUT_LINE_BYTES));
+      if (scan !== undefined && coverageIncomplete(scan)) support(coverageLine(scan));
       support(terminalSafe(`coverage status: ${evidenceResult.coverage.status}; possible path omitted.`, MAX_OUTPUT_LINE_BYTES));
       return 0;
     }
     speak(terminalSafe(`"${safePath}"... nobody touch this while I listen.`, MAX_OUTPUT_LINE_BYTES));
     return 0;
   }
+  if (scan !== undefined && coverageIncomplete(scan)) support(coverageLine(scan));
   if (evidenceResult.coverageIncomplete) {
     support(terminalSafe(`coverage status: ${evidenceResult.coverage.status}; some path may be omitted.`, MAX_OUTPUT_LINE_BYTES));
   }
@@ -303,7 +353,7 @@ export function why(argv: string[], deps: DictionaryCommandDeps = {}): number {
 }
 
 export function digest(argv: string[], deps: DictionaryCommandDeps & { now?: number } = {}): number {
-  const { speak, support, records } = resolve(deps);
+  const { speak, support, records, coverage } = resolve(deps);
   try {
     parseNoArgs(argv, "rocky digest");
   } catch (error) {
@@ -312,12 +362,19 @@ export function digest(argv: string[], deps: DictionaryCommandDeps & { now?: num
     throw error;
   }
   const now = deps.now ?? Date.now();
+  const scan = coverage();
   const memory = records();
   const buckets = digestBuckets(memory, now);
   if (buckets.length === 0) {
+    if (scan !== undefined && coverageIncomplete(scan)) {
+      speak("memory coverage incomplete. I cannot say week is quiet, question");
+      support(coverageLine(scan));
+      return 0;
+    }
     speak("quiet week. no intent I hear. quiet good good.");
     return 0;
   }
+  if (scan !== undefined && coverageIncomplete(scan)) support(coverageLine(scan));
 
   const count = memory.filter((record) => record.kind === "triple"
     && record.ts <= now
@@ -344,7 +401,7 @@ export async function quiz(
     now?: number;
   } = {},
 ): Promise<number> {
-  const { speak, support, records } = resolve(deps);
+  const { speak, support, records, coverage } = resolve(deps);
   try {
     parseNoArgs(argv, "rocky quiz");
   } catch (error) {
@@ -367,11 +424,18 @@ export async function quiz(
   }
 
   const now = deps.now ?? Date.now();
+  const scan = coverage();
   const candidates = quizCandidates(records(), now, 3);
   if (candidates.length === 0) {
+    if (scan !== undefined && coverageIncomplete(scan)) {
+      speak("memory coverage incomplete. I cannot say nothing old enough, question");
+      support(coverageLine(scan));
+      return 0;
+    }
     speak("nothing old enough to ask. work more, come back, question");
     return 0;
   }
+  if (scan !== undefined && coverageIncomplete(scan)) support(coverageLine(scan));
 
   for (const candidate of candidates) {
     const intent = terminalSafe(candidate.intent?.text ?? "this change", MAX_INTENT_DISPLAY_BYTES);

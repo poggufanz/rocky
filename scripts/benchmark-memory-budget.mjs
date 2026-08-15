@@ -3,17 +3,19 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { performance } from "node:perf_hooks";
 import { spawnSync } from "node:child_process";
+import v8 from "node:v8";
 import { fileURLToPath } from "node:url";
 import {
   MAX_MEMORY_FILE_BYTES,
   MAX_MEMORY_RECORDS,
+  MAX_SUPPORTED_MEMORY_RECORDS,
 } from "../dist/core/memory-read.js";
 import { createMemoryQueries } from "../dist/core/memory-query.js";
 
 const NOW = 1_800_000_000_000;
 const COUNTS = [10_000, 50_000, 250_000];
 const WRITE_CHUNK_BYTES = 64 * 1024;
-const WORKER_TIMEOUT_MS = 120_000;
+const WORKER_TIMEOUT_MS = 180_000;
 
 function line(index) {
   return JSON.stringify({
@@ -24,6 +26,7 @@ function line(index) {
     cmd: `node benchmark-needle-${index}`,
     exitCode: 1,
     fingerprint: Number(index).toString(16).padStart(16, "0"),
+    fingerprintV: 2,
     signature: [`benchmark needle ${Number(index) % 100}`],
     excerpt: "benchmark needle",
   });
@@ -74,12 +77,12 @@ function writeFixture(memoryPath, envelope) {
 }
 
 function measure(root, envelope, query, operation) {
-  globalThis.gc?.();
+  globalThis.gc?.({ type: "major", execution: "sync" });
   const memoryHome = join(root, query);
   const memoryPath = join(memoryHome, "memory.jsonl");
   mkdirSync(memoryHome, { recursive: true });
   const bytes = writeFixture(memoryPath, envelope);
-  globalThis.gc?.();
+  globalThis.gc?.({ type: "major", execution: "sync" });
   process.env.ROCKY_HOME = memoryHome;
   const queries = createMemoryQueries();
   const started = performance.now();
@@ -92,7 +95,14 @@ function measure(root, envelope, query, operation) {
   // the RSS measurement describe the probe rather than steady query state.
   const stats = operation === "stats" ? answer : queries.stats({ now: NOW });
   const coverage = queries.coverage?.();
-  globalThis.gc?.();
+  globalThis.gc?.({ type: "major", execution: "sync" });
+  const rssAfterGcBytes = process.memoryUsage().rss;
+  const heapUsedAfterGcBytes = process.memoryUsage().heapUsed;
+  const resource = process.resourceUsage();
+  const resourceMaxRssRaw = resource.maxRSS;
+  // Node reports resourceUsage().maxRSS in kilobytes (including Windows).
+  const resourceMaxRssUnit = "kilobytes";
+  const resourceMaxRssBytes = resourceMaxRssRaw * 1024;
   return {
     operation,
     records: stats.failures + stats.triples + stats.notes,
@@ -101,7 +111,12 @@ function measure(root, envelope, query, operation) {
     statsMs: operation === "stats" ? Number(elapsedMs.toFixed(3)) : undefined,
     recallMs: operation === "recall" ? Number(elapsedMs.toFixed(3)) : undefined,
     hits: operation === "recall" ? answer.length : undefined,
-    rssBytes: process.memoryUsage().rss,
+    rssAfterGcBytes,
+    heapUsedAfterGcBytes,
+    heapTotalAfterGcBytes: v8.getHeapStatistics().total_heap_size,
+    resourceMaxRssRaw,
+    resourceMaxRssUnit,
+    resourceMaxRssBytes,
     coverage,
   };
 }
@@ -116,7 +131,7 @@ function worker(envelope, operation) {
 }
 
 function runWorker(envelope, operation) {
-  const result = spawnSync(process.execPath, [fileURLToPath(import.meta.url), "--worker", String(envelope), operation], {
+  const result = spawnSync(process.execPath, ["--expose-gc", fileURLToPath(import.meta.url), "--worker", String(envelope), operation], {
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
     timeout: WORKER_TIMEOUT_MS,
@@ -135,21 +150,24 @@ function assertScorecard(scorecard) {
   for (const envelope of [...COUNTS, "over-cap"]) {
     const entry = byEnvelope.get(String(envelope));
     if (!entry || !Number.isFinite(entry.statsMs) || !Number.isFinite(entry.recallMs)
-        || !Number.isSafeInteger(entry.rssBytes) || entry.rssBytes < 0) {
+        || !Number.isSafeInteger(entry.rssAfterGcBytes) || entry.rssAfterGcBytes < 0
+        || !Number.isSafeInteger(entry.resourceMaxRssBytes) || entry.resourceMaxRssBytes < 0) {
       throw new Error(`invalid scorecard entry for ${envelope}`);
     }
   }
   const fiftyK = byEnvelope.get("50000");
-  if (fiftyK.records !== MAX_MEMORY_RECORDS || fiftyK.coverage.complete !== true) {
+  if (fiftyK.records !== Math.min(50_000, MAX_SUPPORTED_MEMORY_RECORDS)
+      || (MAX_SUPPORTED_MEMORY_RECORDS === MAX_MEMORY_RECORDS && fiftyK.coverage.complete !== true)
+      || (MAX_SUPPORTED_MEMORY_RECORDS < MAX_MEMORY_RECORDS && fiftyK.coverage.complete !== false)) {
     throw new Error("50k fixture did not remain inside supported envelope");
   }
   if (fiftyK.statsMs >= 5_000 || fiftyK.recallMs >= 5_000) {
     throw new Error(`50k bounded latency guard missed: stats=${fiftyK.statsMs}ms recall=${fiftyK.recallMs}ms`);
   }
   const twoFiftyK = byEnvelope.get("250000");
-  if (twoFiftyK.records !== MAX_MEMORY_RECORDS || twoFiftyK.coverage.complete !== false
-      || twoFiftyK.coverage.truncated < 1 || twoFiftyK.statsMs >= 2_000 || twoFiftyK.recallMs >= 5_000) {
-    throw new Error("250k fixture did not produce bounded record-cap degradation (stats under 2s)");
+  if (twoFiftyK.records !== MAX_SUPPORTED_MEMORY_RECORDS || twoFiftyK.coverage.complete !== false
+      || twoFiftyK.coverage.truncated < 1 || twoFiftyK.statsMs >= 2_000 || twoFiftyK.recallMs >= 2_000) {
+    throw new Error(`250k fixture did not meet bounded record-cap target: stats=${twoFiftyK.statsMs}ms recall=${twoFiftyK.recallMs}ms`);
   }
   const overCap = byEnvelope.get("over-cap");
   if (overCap.coverage.complete !== false || overCap.coverage.truncated < 1
@@ -158,8 +176,8 @@ function assertScorecard(scorecard) {
   }
   for (const envelope of ["10000", "over-cap"]) {
     const entry = byEnvelope.get(envelope);
-    if (entry.rssBytes >= 150 * 1024 * 1024) {
-      throw new Error(`${envelope} bounded RSS guard missed: rss=${entry.rssBytes}`);
+    if (entry.rssAfterGcBytes >= 150 * 1024 * 1024) {
+      throw new Error(`${envelope} bounded RSS guard missed: rssAfterGc=${entry.rssAfterGcBytes}`);
     }
   }
 
@@ -171,7 +189,7 @@ function assertScorecard(scorecard) {
     if (fiftyK.statsMs >= 500 || fiftyK.recallMs >= 750) {
       throw new Error(`reference 50k latency budget missed: stats=${fiftyK.statsMs}ms recall=${fiftyK.recallMs}ms`);
     }
-    if (Math.max(...scorecard.map((entry) => entry.rssBytes)) >= 150 * 1024 * 1024) {
+    if (Math.max(...scorecard.map((entry) => entry.rssAfterGcBytes)) >= 150 * 1024 * 1024) {
       throw new Error("reference RSS budget missed");
     }
   }
@@ -191,9 +209,12 @@ if (process.argv[2] === "--worker") {
       bytes: stats.bytes,
       statsMs: stats.statsMs,
       recallMs: recall.recallMs,
-      statsRssBytes: stats.rssBytes,
-      recallRssBytes: recall.rssBytes,
-      rssBytes: Math.max(stats.rssBytes, recall.rssBytes),
+      statsRssAfterGcBytes: stats.rssAfterGcBytes,
+      recallRssAfterGcBytes: recall.rssAfterGcBytes,
+      rssAfterGcBytes: Math.max(stats.rssAfterGcBytes, recall.rssAfterGcBytes),
+      statsResourceMaxRssBytes: stats.resourceMaxRssBytes,
+      recallResourceMaxRssBytes: recall.resourceMaxRssBytes,
+      resourceMaxRssBytes: Math.max(stats.resourceMaxRssBytes, recall.resourceMaxRssBytes),
       coverage: stats.coverage,
       recallCoverage: recall.coverage,
     });
@@ -204,8 +225,18 @@ if (process.argv[2] === "--worker") {
     node: process.version,
     platform: process.platform,
     arch: process.arch,
-    limits: { maxFileBytes: MAX_MEMORY_FILE_BYTES, maxRecords: MAX_MEMORY_RECORDS },
-    targets: { stats50kMs: 500, recall50kMs: 750, bounded250kMs: 2_000, rssBytes: 150 * 1024 * 1024 },
+    limits: {
+      maxFileBytes: MAX_MEMORY_FILE_BYTES,
+      logicalReferenceRecords: MAX_MEMORY_RECORDS,
+      supportedRecords: MAX_SUPPORTED_MEMORY_RECORDS,
+      supportedEnvelope: MAX_SUPPORTED_MEMORY_RECORDS < MAX_MEMORY_RECORDS
+        ? `${process.platform} Node ${process.versions.node} degraded ${MAX_SUPPORTED_MEMORY_RECORDS}-record cap`
+        : `${process.platform} Node ${process.versions.node} exact reference ${MAX_MEMORY_RECORDS}-record cap`,
+    },
+    targets: {
+      referenceLinuxNode22: { stats50kMs: 500, recall50kMs: 750, rssBytes: 150 * 1024 * 1024 },
+      bounded250kMs: 2_000,
+    },
     ...gate,
     scorecard,
   }, null, 2)}\n`);

@@ -23,7 +23,7 @@ import { filesystemIdentity, NO_BLOCK_FLAG, NO_FOLLOW_FLAG, regularDescriptorSaf
 import { isSafeNonNegativeInteger } from "../core/memory-read.js";
 import { recordTripleOnce } from "../core/memory.js";
 import type { TripleFile, TripleRecord } from "../core/memory.js";
-import { loadMemory, MAX_TRIPLE_FILES, pathIdentityHash, rememberTripleFileIdentity } from "../core/memory-read.js";
+import { isCompleteMemoryCoverage, loadMemory, loadMemoryChecked, MAX_TRIPLE_FILES, pathIdentityHash, rememberTripleFileIdentity } from "../core/memory-read.js";
 import { digestBuckets } from "../core/dictionary.js";
 import { loadConfig, type ConfigLoadResult } from "../core/config-read.js";
 import { redactSecretsAtBoundary, replaceAnsiAndControls, stripInvisibleControls } from "../core/redact.js";
@@ -367,7 +367,8 @@ export function maybeQueueDigestHint(paths: RockyPaths, now = Date.now()): void 
     if (!lease) return;
     const state = digestHintState(paths.digestHint, now);
     if (state === "recent" || state === "unsafe") return;
-    if (digestBuckets(loadMemory(paths.memory), now).length === 0) return;
+    const loaded = loadMemoryChecked(paths.memory, now);
+    if (!isCompleteMemoryCoverage(loaded.coverage) || digestBuckets(loaded.records, now).length === 0) return;
     if (!writeDigestHint(paths.digestHint, String(now), now)) return;
     defaultQueueLabel("week of work in memory. rocky digest, question", paths);
   } catch {

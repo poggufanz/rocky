@@ -14,7 +14,8 @@ import { closeSync, constants, fstatSync, lstatSync, openSync, readSync, type Bi
 import { fingerprintCandidates } from "../core/fingerprint.js";
 import { CANCEL_CODES, runProcess, type ExecResult } from "../core/exec.js";
 import { resolveRockyPaths } from "../core/state-paths.js";
-import { loadMemory, recordWatchFailure, type MemoryRecord } from "../core/memory.js";
+import { recordWatchFailure, type MemoryRecord } from "../core/memory.js";
+import { isCompleteMemoryCoverage, loadMemoryChecked } from "../core/memory-read.js";
 import { DEFAULT_WATCH_NOTIFY, loadConfig } from "../core/config-read.js";
 import { formatDuration, notify as realNotify, spokenDuration, type NotifyInput } from "../core/notify.js";
 import { watchLogName, writeWatchLog } from "../core/watch-log.js";
@@ -154,7 +155,17 @@ function unrefTimer(timer: WatchTimer): void {
  */
 function readMemory(quiet: boolean): MemoryRecord[] | undefined {
   try {
-    return loadMemory();
+    const loaded = loadMemoryChecked();
+    if (!isCompleteMemoryCoverage(loaded.coverage)) {
+      const diagnostic = `memory coverage incomplete: scanned ${loaded.coverage.scanned}; skipped ${loaded.coverage.skipped}; truncated ${loaded.coverage.truncated}${loaded.coverage.reason === undefined ? "" : `; reason ${loaded.coverage.reason}`}`;
+      if (quiet) writeRockyStderr(`${diagnostic}\n`);
+      else {
+        say("memory coverage incomplete. I do not claim prior fix. check, question");
+        detail(`    ${diagnostic}`);
+      }
+      return undefined;
+    }
+    return loaded.records;
   } catch {
     if (!quiet) {
       say("memory file does not open for me. I answer from nothing.");

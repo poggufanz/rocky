@@ -27,12 +27,12 @@ import {
 } from "../core/hook-block.js";
 import { resolveRockyPaths } from "../core/state-paths.js";
 import {
-  loadMemory,
   recordHookFailure,
   resolveFixOnSuccess,
   type ResolveFixOptions,
   type MemoryRecord,
 } from "../core/memory.js";
+import { isCompleteMemoryCoverage, loadMemoryChecked } from "../core/memory-read.js";
 import { findByFingerprint, fixFromElsewhere, getFix } from "../core/memory-query.js";
 import {
   atomicWriteBytesIfUnchanged,
@@ -56,7 +56,13 @@ import { safeTerminalLine } from "../ui/sanitize.js";
  */
 function readMemory(): MemoryRecord[] | undefined {
   try {
-    return loadMemory();
+    const loaded = loadMemoryChecked();
+    if (!isCompleteMemoryCoverage(loaded.coverage)) {
+      sayTty("memory coverage incomplete. I do not claim prior fix. check, question");
+      detailTty(`memory coverage: scanned ${loaded.coverage.scanned}; skipped ${loaded.coverage.skipped}; truncated ${loaded.coverage.truncated}${loaded.coverage.reason === undefined ? "" : `; reason ${loaded.coverage.reason}`}`);
+      return undefined;
+    }
+    return loaded.records;
   } catch {
     sayTty("memory file does not open for me. I answer from nothing.");
     detailTty(`memory: ${resolveRockyPaths().memory}`);

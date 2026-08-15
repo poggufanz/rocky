@@ -31,8 +31,8 @@ import {
 } from "./fingerprint.js";
 import { resolveRockyPaths } from "./state-paths.js";
 import type { RockyPaths } from "./state-paths.js";
-import { boundTripleMechanism, isKnownPathPlatform, isSafeNonNegativeInteger, loadMemoryChecked, MAX_MEMORY_LINE_BYTES } from "./memory-read.js";
-import type { AssociationRecord, FailureRecord, FixRecord, MemoryRecord, NoteRecord, TripleRecord } from "./memory-read.js";
+import { boundTripleMechanism, isCompleteMemoryCoverage, isKnownPathPlatform, isSafeNonNegativeInteger, loadMemoryChecked, MAX_MEMORY_FILE_BYTES, MAX_MEMORY_LINE_BYTES, MAX_MEMORY_RECORDS, MAX_SUPPORTED_MEMORY_RECORDS } from "./memory-read.js";
+import type { AssociationRecord, FailureRecord, FixRecord, MemoryCoverage, MemoryRecord, NoteRecord, TripleRecord } from "./memory-read.js";
 import { LINK_WINDOW_MS, recentUnresolvedFailures, type UnresolvedLink } from "./memory-query.js";
 
 export type { AssociationRecord, FailureRecord, FixRecord, MemoryCoverage, MemoryRecord, NoteRecord, TripleFile, TripleRecord } from "./memory-read.js";
@@ -45,6 +45,7 @@ export {
   parseMemoryRecord,
   MAX_MEMORY_LINE_BYTES,
   MAX_MEMORY_RECORDS,
+  MAX_SUPPORTED_MEMORY_RECORDS,
   MAX_TRIPLE_FILES,
 } from "./memory-read.js";
 
@@ -634,8 +635,11 @@ export interface MemoryTransaction {
   readonly records: readonly MemoryRecord[];
   /** False when the loader could not prove the snapshot complete. */
   readonly complete: boolean;
+  readonly coverage: MemoryCoverage;
   append(record: MemoryRecord): void;
   reload(): readonly MemoryRecord[];
+  /** True only when this append can still be reloaded as a complete snapshot. */
+  canAppendComplete(records: readonly MemoryRecord[]): boolean;
 }
 
 export interface MemoryTransactionOptions {
@@ -653,11 +657,13 @@ export function withMemoryTransaction<T>(
   const initial = loadMemoryChecked(paths.memory, now);
   let records = initial.records;
   let complete = initial.complete;
+  let coverage = initial.coverage;
   const transaction: MemoryTransaction = {
     paths,
     now,
     get records() { return records; },
     get complete() { return complete; },
+    get coverage() { return coverage; },
     append(record) {
       appendUnlocked(record, paths);
       records = [...records, record];
@@ -667,7 +673,18 @@ export function withMemoryTransaction<T>(
       if (!loaded.complete) throw new Error("Rocky memory reload is incomplete");
       records = loaded.records;
       complete = true;
+      coverage = loaded.coverage;
       return records;
+    },
+    canAppendComplete(nextRecords) {
+      if (!complete || !isCompleteMemoryCoverage(coverage)) return false;
+      if (records.length + nextRecords.length > MAX_SUPPORTED_MEMORY_RECORDS) return false;
+      const addedBytes = nextRecords.reduce((total, record) => {
+        const encoded = Buffer.byteLength(`${JSON.stringify(record)}\n`, "utf8");
+        return total > Number.MAX_SAFE_INTEGER - encoded ? Number.MAX_SAFE_INTEGER : total + encoded;
+      }, 0);
+      return coverage.bytesTotal <= MAX_MEMORY_FILE_BYTES
+        && addedBytes <= MAX_MEMORY_FILE_BYTES - coverage.bytesTotal;
     },
   };
   try {
@@ -731,6 +748,10 @@ function appendFixRecordsUnlocked(
   cwd: string,
   now: number,
 ): WrittenFixRecords {
+  // Fix attribution proves absence/resolution from the whole snapshot. A
+  // capped, skipped, or raced read may still accept new failure/note evidence,
+  // but it must never append a FixRecord based on partial knowledge.
+  if (!transaction.complete || !isCompleteMemoryCoverage(transaction.coverage)) return {};
   const identity = commandIdentity(cmd);
   const chosen = links.slice(-MAX_FIX_LINKS);
   const confirmed = chosen.filter((link) => link.confidence === "confirmed");
@@ -753,7 +774,6 @@ function appendFixRecordsUnlocked(
       selected = selected.slice(Math.ceil(selected.length / 2));
       fix = buildFix();
     }
-    transaction.append(fix);
   }
   let association: AssociationRecord | undefined;
   if (possible.length > 0) {
@@ -768,8 +788,15 @@ function appendFixRecordsUnlocked(
       selected = selected.slice(Math.ceil(selected.length / 2));
       association = buildAssociation();
     }
-    transaction.append(association);
   }
+  const pending = [
+    ...(fix === undefined ? [] : [fix]),
+    ...(association === undefined ? [] : [association]),
+  ];
+  // Never append then discover that the reload would be capped. This keeps
+  // read/modify/write fail-closed without disabling append-only new evidence.
+  if (!transaction.canAppendComplete(pending)) return {};
+  for (const record of pending) transaction.append(record);
   return {
     ...(fix === undefined ? {} : { fix }),
     ...(association === undefined ? {} : { association }),
@@ -850,6 +877,11 @@ export function resolveFixOnSuccess(
     const now = transaction.now;
     const windowMs = options.windowMs ?? LINK_WINDOW_MS;
     const links = recentUnresolvedFailures(transaction.records, cmd, { cwd, now, windowMs });
+    if (!transaction.complete || !isCompleteMemoryCoverage(transaction.coverage)) {
+      // No definitive fix or pending deletion from an incomplete snapshot.
+      // New failure/note/triple append paths remain available independently.
+      return { confirmedResolved: 0, possibleAssociated: 0 };
+    }
     if (links.length === 0) {
       // A prior process may have durably appended its FixRecord and died
       // before pending reconciliation.  Only a loader-confirmed resolution
@@ -863,8 +895,16 @@ export function resolveFixOnSuccess(
 
     const written = appendFixRecordsUnlocked(transaction, cmd, links, cwd, now);
     if (written.fix) {
-      const latest = transaction.reload();
-      reconcilePendingUnlocked(latest, transaction.paths, windowMs, now);
+      // The append was preflighted against the bounded snapshot. A hostile
+      // external replacement can still race the reload; retain pending and
+      // return the durable attribution rather than append-then-throw.
+      try {
+        const latest = transaction.reload();
+        reconcilePendingUnlocked(latest, transaction.paths, windowMs, now);
+      } catch {
+        // Explicit degraded mode: FixRecord remains evidence, pending remains
+        // present until a complete future read can reconcile it.
+      }
     }
     return {
       ...written,
@@ -918,6 +958,7 @@ export function clearPendingIfResolved(
 ): void {
   const selectedNow = now ?? Date.now();
   withMemoryTransaction((transaction) => {
+    if (!transaction.complete || !isCompleteMemoryCoverage(transaction.coverage)) return;
     if (hasRecentConfirmedResolution(transaction.records, windowMs, selectedNow) &&
         !hasUnresolvedRecent(transaction.records, windowMs, selectedNow)) {
       rmSync(transaction.paths.pending, { force: true });
@@ -1010,6 +1051,9 @@ export function recordTripleOnce(
   const target = paths ?? resolveRockyPaths();
   const id = tripleIdForClaim(claimId);
   return withMemoryTransaction((transaction) => {
+    if (!transaction.complete || !isCompleteMemoryCoverage(transaction.coverage)) {
+      throw new Error("Rocky triple claim requires complete memory coverage");
+    }
     const existing = transaction.records.find((record): record is TripleRecord => record.kind === "triple" && record.id === id);
     if (existing) return { record: existing, appended: false };
 

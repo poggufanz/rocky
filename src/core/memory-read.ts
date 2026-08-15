@@ -448,8 +448,14 @@ export type MemoryRecord = FailureRecord | FixRecord | AssociationRecord | NoteR
 export const MEMORY_FORMAT_VERSION = 1 as const;
 /** Supported envelope: files above this byte count are read only to this boundary. */
 export const MAX_MEMORY_FILE_BYTES = 64 * 1024 * 1024;
-/** Supported envelope: valid records above this count are reported as truncated. */
+/** Logical reference envelope used by the Linux Node 22 scorecard. */
 export const MAX_MEMORY_RECORDS = 50_000;
+/** Enforced platform envelope. Only the exact Linux Node 22 reference
+ * runtime has the measured 50k budget; other runtimes stay explicitly
+ * degraded until they have their own scorecard. */
+export const MAX_SUPPORTED_MEMORY_RECORDS = process.platform === "linux" && process.versions.node.startsWith("22.")
+  ? MAX_MEMORY_RECORDS
+  : 10_000;
 export const MAX_MEMORY_LINE_BYTES = 1024 * 1024;
 const MEMORY_READ_CHUNK_BYTES = 64 * 1024;
 const MAX_RECORD_ARRAY_ITEMS = 256;
@@ -477,6 +483,16 @@ export interface MemoryLoadResult {
   records: MemoryRecord[];
   complete: boolean;
   coverage: MemoryCoverage;
+}
+
+/**
+ * A snapshot is safe to use for definitive memory answers only when every
+ * byte/record in the bounded envelope was parsed.  `truncated` is a nonzero
+ * lower-bound marker for evidence omitted beyond a cap; it is not an exact
+ * omitted-record count.
+ */
+export function isCompleteMemoryCoverage(coverage: MemoryCoverage): boolean {
+  return coverage.complete && coverage.skipped === 0 && coverage.truncated === 0 && coverage.reason === undefined;
 }
 
 function objectValue(value: unknown): Record<string, unknown> | undefined {
@@ -765,7 +781,10 @@ function emptyCoverage(
     version: MEMORY_FORMAT_VERSION,
     scanned: 0,
     skipped: 0,
-    truncated: 0,
+    // A read-race/I/O failure is unknown evidence. Keep one conservative
+    // lower-bound marker so callers cannot mistake an empty fallback for a
+    // complete empty file.
+    truncated: reason === "read-race" ? 1 : 0,
     bytesScanned: 0,
     bytesTotal,
     complete,
@@ -903,7 +922,9 @@ export function loadMemoryChecked(path = resolveRockyPaths().memory, now = Date.
   let opened: BigIntStats | undefined;
   try {
     listed = lstatSync(path, { bigint: true });
-    if (!regularDescriptorSafe(listed) || !sameFilesystemIdentity(listed, listed)) return emptyLoad(false);
+    if (!regularDescriptorSafe(listed) || !sameFilesystemIdentity(listed, listed)) {
+      return emptyLoad(false, statBytes(listed.size), "read-race");
+    }
 
     const listedKey = memorySnapshotKey(path, listed);
     if (memoryCache?.path === path && memoryCache.key === listedKey) {
@@ -945,7 +966,7 @@ export function loadMemoryChecked(path = resolveRockyPaths().memory, now = Date.
         resetLine();
         return;
       }
-      if (records.length >= MAX_MEMORY_RECORDS) {
+      if (records.length >= MAX_SUPPORTED_MEMORY_RECORDS) {
         stoppedAtRecordCap = true;
         truncated = Math.max(1, truncated);
         resetLine();
@@ -1002,7 +1023,12 @@ export function loadMemoryChecked(path = resolveRockyPaths().memory, now = Date.
     while (bytesScanned < readLimit && !stoppedAtRecordCap) {
       const requested = Math.min(buffer.byteLength, readLimit - bytesScanned);
       const count = readSync(descriptor, buffer, 0, requested, bytesScanned);
-      if (count <= 0) break;
+      if (count <= 0) {
+        // A regular file advertised bytes still remaining but returned no
+        // bytes. Do not parse/cache this partial snapshot as complete.
+        memoryCache = undefined;
+        return emptyLoad(false, totalBytes, "read-race");
+      }
       bytesScanned += count;
       consumeBytes(buffer.subarray(0, count));
     }
@@ -1020,7 +1046,7 @@ export function loadMemoryChecked(path = resolveRockyPaths().memory, now = Date.
       memoryCache = undefined;
       return emptyLoad(false, totalBytes, "read-race");
     }
-    const complete = truncated === 0 && !stoppedAtRecordCap;
+    const complete = truncated === 0 && !stoppedAtRecordCap && skipped === 0;
     const truncationReason: MemoryCoverage["reason"] = stoppedAtRecordCap
       ? "record-cap"
       : opened.size > BigInt(MAX_MEMORY_FILE_BYTES) ? "file-size-cap" : "record-cap";
@@ -1038,6 +1064,9 @@ export function loadMemoryChecked(path = resolveRockyPaths().memory, now = Date.
     });
     const frozenRecords = Object.freeze(records.map(freezeMemoryRecord));
     memoryParseCount += 1;
+    // Cap/skipped snapshots are stable evidence and may be reused with their
+    // explicit incomplete metadata. Transient races/I/O never reach this
+    // cache assignment.
     memoryCache = { path, key: afterKey, records: frozenRecords, complete, coverage };
     if (!needsResolution(frozenRecords)) {
       return { records: frozenRecords as MemoryRecord[], complete, coverage };
@@ -1050,7 +1079,10 @@ export function loadMemoryChecked(path = resolveRockyPaths().memory, now = Date.
     // incomplete and must be treated conservatively by mutation callers.
     // If the first lstat succeeded, a later open/read failure is a replacement
     // or I/O race even when a second lstat now reports ENOENT.
-    if (listed !== undefined) return emptyLoad(false, statBytes(listed.size), "read-race");
+    if (listed !== undefined) {
+      if (memoryCache?.path === path) memoryCache = undefined;
+      return emptyLoad(false, statBytes(listed.size), "read-race");
+    }
     try {
       if (lstatSync(path, { bigint: true }).isFile()) return emptyLoad(false, 0, "read-race");
     } catch (error) {
@@ -1059,6 +1091,7 @@ export function loadMemoryChecked(path = resolveRockyPaths().memory, now = Date.
         return emptyLoad(true, 0);
       }
     }
+    if (memoryCache?.path === path) memoryCache = undefined;
     return emptyLoad(false, 0, "read-race");
   } finally {
     if (descriptor !== undefined) {

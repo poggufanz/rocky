@@ -60,6 +60,55 @@ test("queryRecall preserves fuzzy matching and exact cwd filter", () => {
   assert.deepEqual(queryRecall(records, { query: "module missing", cwd: "/work/b" }), []);
 });
 
+test("queryRecall preserves explicit zero limit", () => {
+  assert.deepEqual(queryRecall([failureA], { query: "module missing", limit: 0 }), []);
+});
+
+test("queryRecall deduplicates a fingerprint family before applying limit ordering", () => {
+  const familyOne: FailureRecord = {
+    ...failureA,
+    id: "family-a1",
+    ts: 100,
+    cwd: "/work/family",
+    cmd: "needle",
+    fingerprint: "family-fingerprint",
+    fingerprintV: 2,
+    signature: ["needle"],
+    excerpt: "needle",
+  };
+  const middle: FailureRecord = {
+    ...familyOne,
+    id: "family-b",
+    ts: 200,
+    fingerprint: "middle-fingerprint",
+    cmd: "needle broad extra",
+    signature: ["needle broad extra"],
+    excerpt: "needle broad extra",
+  };
+  const familyTwo: FailureRecord = {
+    ...familyOne,
+    id: "family-a2",
+    ts: 300,
+    resolvedBy: "family-fix",
+    cmd: "needle broad extra many tokens",
+    signature: ["needle broad extra many tokens"],
+    excerpt: "needle broad extra many tokens",
+  };
+  const fix: FixRecord = {
+    kind: "fix",
+    id: "family-fix",
+    ts: 400,
+    cwd: "/work/family",
+    cmd: "fix family",
+    failureIds: [familyTwo.id],
+  };
+  assert.deepEqual(
+    queryRecall([familyOne, middle, familyTwo, fix], { query: "needle", cwd: "/work/family", limit: 1 })
+      .map((hit) => hit.failure.id),
+    [middle.id],
+  );
+});
+
 test("queryStats reports all remembered knowledge kinds and fix confidence", () => {
   const possible: AssociationRecord = {
     kind: "association", id: "possible-a", ts: 250, cwd: "/work/a", cmd: "npm run build",

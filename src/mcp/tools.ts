@@ -14,7 +14,7 @@ import {
   projectTriple,
   safeOpaqueIdentifier,
 } from "./privacy.js";
-import { boundTripleRecord, canonicalPath, isKnownPathPlatform, isSafeNonNegativeInteger, parseMemoryRecord, pathIdentityHash } from "../core/memory-read.js";
+import { boundTripleRecord, canonicalPath, isKnownPathPlatform, isSafeNonNegativeInteger, MAX_MEMORY_FILE_BYTES, MAX_SUPPORTED_MEMORY_RECORDS, parseMemoryRecord, pathIdentityHash } from "../core/memory-read.js";
 import type { MemoryCoverage, TripleRecord } from "../core/memory-read.js";
 
 /** Versioned read-only catalog used by MCP discovery and setup health. */
@@ -666,8 +666,8 @@ function normalizeWhyEvidence(value: unknown, fallback: WhyFileEvidence, path: s
   }
 }
 
-function safeErrorResult(error: ToolExecutionError): ToolCallResult {
-  return cappedResult({ error: { code: error.safeCode, message: error.message } }, true);
+function safeErrorResult(error: ToolExecutionError, coverage?: MemoryCoverage): ToolCallResult {
+  return cappedResult({ error: { code: error.safeCode, message: error.message }, ...memoryCoveragePayload(coverage) }, true);
 }
 
 function hasOperationalCode(error: unknown): boolean {
@@ -743,27 +743,52 @@ function safeMemoryStats(value: unknown, canonical = false): Record<string, unkn
   }
 }
 
+function unknownMemoryCoverage(): MemoryCoverage {
+  // Conservative explicit unknown: the marker is a lower bound, not an
+  // estimate of how many records were omitted.
+  return Object.freeze({
+    version: 1 as const,
+    scanned: 0,
+    skipped: 0,
+    truncated: 1,
+    bytesScanned: 0,
+    bytesTotal: 0,
+    complete: false,
+    reason: "read-race" as const,
+  });
+}
+
 function memoryCoverage(memory: MemoryQueries): MemoryCoverage | undefined {
   try {
-    const value = memory.coverage?.();
-    if (value === undefined || typeof value !== "object" || value === null) return undefined;
+    const supplied: unknown = memory.coverage?.();
+    if (supplied === undefined) return undefined;
+    if (typeof supplied !== "object" || supplied === null || Array.isArray(supplied)) return unknownMemoryCoverage();
+    const value = supplied as Record<string, unknown>;
     if (value.version !== 1 || !isSafeNonNegativeInteger(value.scanned) ||
         !isSafeNonNegativeInteger(value.skipped) || !isSafeNonNegativeInteger(value.truncated) ||
         !isSafeNonNegativeInteger(value.bytesScanned) || !isSafeNonNegativeInteger(value.bytesTotal) ||
         typeof value.complete !== "boolean" ||
-        (value.reason !== undefined && value.reason !== "file-size-cap" && value.reason !== "record-cap" && value.reason !== "read-race")) return undefined;
+        (value.reason !== undefined && value.reason !== "file-size-cap" && value.reason !== "record-cap" && value.reason !== "read-race")) return unknownMemoryCoverage();
+    // `scanned` and `skipped` are independent evidence counters: a provider
+    // may count only valid records as scanned while reporting corrupt lines
+    // separately. Do not reject a legitimate 0-valid/10-skipped snapshot.
+    if ((value.bytesScanned as number) > (value.bytesTotal as number)) return unknownMemoryCoverage();
+    if (value.complete === true && ((value.skipped as number) > 0 || (value.truncated as number) > 0 || value.reason !== undefined)) return unknownMemoryCoverage();
+    if (value.reason === "read-race" && (value.complete === true || (value.truncated as number) === 0)) return unknownMemoryCoverage();
+    if (value.reason === "file-size-cap" && (value.complete === true || (value.truncated as number) === 0 || (value.bytesTotal as number) < MAX_MEMORY_FILE_BYTES)) return unknownMemoryCoverage();
+    if (value.reason === "record-cap" && (value.complete === true || (value.truncated as number) === 0 || (value.scanned as number) < MAX_SUPPORTED_MEMORY_RECORDS)) return unknownMemoryCoverage();
     return Object.freeze({
       version: 1 as const,
-      scanned: value.scanned,
-      skipped: value.skipped,
-      truncated: value.truncated,
-      bytesScanned: value.bytesScanned,
-      bytesTotal: value.bytesTotal,
-      complete: value.complete,
+      scanned: value.scanned as number,
+      skipped: value.skipped as number,
+      truncated: value.truncated as number,
+      bytesScanned: value.bytesScanned as number,
+      bytesTotal: value.bytesTotal as number,
+      complete: value.complete as boolean,
       ...(value.reason === undefined ? {} : { reason: value.reason }),
     });
   } catch {
-    return undefined;
+    return unknownMemoryCoverage();
   }
 }
 
@@ -935,15 +960,12 @@ export function createToolRegistry(options: CreateToolRegistryOptions): McpToolR
             const result = {
               exposure: options.exposure,
               ...safeMemoryStats(stats, canonicalMemory),
-              ...(coverage === undefined ? {} : { ...memoryCoveragePayload(coverage), coverageIncomplete: !coverage.complete || coverage.skipped > 0 || coverage.truncated > 0 }),
+              ...memoryCoveragePayload(coverage),
             };
             return safeProjection(() => cappedResult(result), cappedResult({
               exposure: options.exposure,
               ...safeMemoryStats({}),
-              ...(coverage === undefined ? {} : {
-                ...memoryCoveragePayload(coverage),
-                coverageIncomplete: !coverage.complete || coverage.skipped > 0 || coverage.truncated > 0,
-              }),
+              ...memoryCoveragePayload(coverage),
             }));
           }
           case "search_knowledge": {
@@ -1054,7 +1076,7 @@ export function createToolRegistry(options: CreateToolRegistryOptions): McpToolR
         }
       } catch (error) {
         if (error instanceof McpInvalidParamsError) throw error;
-        if (error instanceof ToolExecutionError) return safeErrorResult(error);
+        if (error instanceof ToolExecutionError) return safeErrorResult(error, memoryCoverage(options.memory));
         throw error;
       }
     },

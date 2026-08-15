@@ -13,13 +13,13 @@ import { fingerprintCandidates } from "../core/fingerprint.js";
 import { CANCEL_CODES, runProcess, type ExecResult } from "../core/exec.js";
 import { resolveRockyPaths } from "../core/state-paths.js";
 import {
-  loadMemory,
   recordFailure,
   resolveFixOnSuccess,
   type ResolveFixOptions,
   type ResolveFixResult,
   type MemoryRecord,
 } from "../core/memory.js";
+import { isCompleteMemoryCoverage, loadMemoryChecked } from "../core/memory-read.js";
 import { findByFingerprint, fixFromElsewhere, getFix } from "../core/memory-query.js";
 import { ago, detail, elapsed, say } from "../ui/rocky.js";
 import { safeTerminalLine } from "../ui/sanitize.js";
@@ -50,7 +50,13 @@ export async function run(cmd: string): Promise<number> {
 /** An unreadable memory file is spoken, not thrown — callers get `undefined` and carry on. */
 function readMemory(): MemoryRecord[] | undefined {
   try {
-    return loadMemory();
+    const loaded = loadMemoryChecked();
+    if (!isCompleteMemoryCoverage(loaded.coverage)) {
+      say("memory coverage incomplete. I do not claim prior fix. check, question");
+      detail(`    memory coverage: scanned ${loaded.coverage.scanned}; skipped ${loaded.coverage.skipped}; truncated ${loaded.coverage.truncated}${loaded.coverage.reason === undefined ? "" : `; reason ${loaded.coverage.reason}`}`);
+      return undefined;
+    }
+    return loaded.records;
   } catch {
     say("memory file does not open for me. I answer from nothing.");
     detail(`    memory: ${resolveRockyPaths().memory}`);

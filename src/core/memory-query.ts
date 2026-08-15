@@ -5,6 +5,7 @@ import {
   fingerprintSignature,
   legacyFingerprint,
   legacyFingerprintSignature,
+  fillRetrievalTokens,
   queryTokens,
   retrievalTokens,
   similarity,
@@ -179,6 +180,11 @@ function trustedCurrentEvidence(record: FailureRecord, current: string): boolean
  * outside the proven legacy set.
  */
 function fingerprintMigrationIndex(records: readonly FailureRecord[]): FingerprintMigrationIndex {
+  // Modern records already carry their current fingerprint witness. Avoid a
+  // 50k-entry hash/array index when there is no legacy family to migrate.
+  if (!records.some((record) => record.fingerprintV !== 2)) {
+    return { migrated: new Map(), provenLegacyRecords: new Set() };
+  }
   const currentByHash = new Map<string, FailureRecord[]>();
   for (const record of records) {
     if (record.fingerprintV !== 2 || !FINGERPRINT_TEXT.test(record.fingerprint)) continue;
@@ -259,6 +265,19 @@ export function retrievalEvidenceTokens(record: FailureRecord): Set<string> {
   return evidence;
 }
 
+/** Reuse one caller-owned token bag during bounded scans. */
+function fillRetrievalEvidenceTokens(record: FailureRecord, target: Set<string>): void {
+  fillRetrievalTokens(`${record.cmd} ${record.signature.join(" ")}`, target);
+  if (record.fingerprintV === 2 || record.origin === "hook" || record.signature.length === 0 || record.excerpt.length === 0) return;
+  const signature = record.signature.join("\n");
+  const proven = legacyFingerprintSignature(record.signature, record.cmd, record.exitCode) === record.fingerprint ||
+    legacyFingerprint(signature, record.cmd, record.exitCode) === record.fingerprint ||
+    legacyFingerprint(record.excerpt, record.cmd, record.exitCode) === record.fingerprint;
+  if (!proven) return;
+  const excerptTokens = retrievalTokens(record.excerpt);
+  for (const token of excerptTokens) target.add(token);
+}
+
 export function findByFingerprint(records: readonly MemoryRecord[], fp: FingerprintLookup, now = Date.now()): FailureRecord[] {
   const candidates = lookupFingerprints(fp);
   return uniqueRecords(records).filter((record): record is FailureRecord =>
@@ -305,6 +324,7 @@ function confirmedLocalFix(index: FixIndex, failure: FailureRecord, now: number)
 }
 
 function fixForFailure(index: FixIndex, failure: FailureRecord, now = Date.now()): FixRecord | undefined {
+  if (index.byId.size === 0 && index.byFailureId.size === 0) return undefined;
   const local = confirmedLocalFix(index, failure, now);
   if (local !== undefined) return local;
   // A fix remembered in another directory remains useful for recall and
@@ -341,24 +361,84 @@ export function queryRecall(records: readonly MemoryRecord[], input: RecallQuery
   const unique = uniqueRecords(records);
   const now = input.now ?? Date.now();
   const fixes = fixesIndex(unique, now);
+  // Preserve the public contract exactly: `undefined` defaults to three, but
+  // explicit zero/negative limits are honored by the final slice.
   const limit = input.limit ?? 3;
   const queryTokenSet = queryTokens(input.query);
+  const queryTokenList = [...queryTokenSet];
+  const queryTokenIndex = new Map(queryTokenList.map((token, index) => [token, index]));
   const candidates = unique
     .filter((record): record is FailureRecord => record.kind === "failure" && record.ts <= now &&
-      (input.cwd === undefined || record.cwd === input.cwd))
-    .map((record) => ({ record, tokenSet: retrievalEvidenceTokens(record) }));
-  const documentFrequency = tokenDocumentFrequency(candidates.map((candidate) => candidate.tokenSet));
-  const migration = fingerprintMigrationIndex(candidates.map(({ record }) => record));
+      (input.cwd === undefined || record.cwd === input.cwd));
+  // Do not retain one Set per failure. A 50k snapshot used to keep tens of
+  // thousands of token hash tables alive for the whole query, pushing cold
+  // recall well beyond the supported RSS envelope. Recompute one bounded set
+  // while scoring after the compact frequency pass.
+  const documentFrequency = new Map<string, number>();
+  const scratchTokens = new Set<string>();
+  const candidateSizes: number[] = [];
+  const candidateIntersections: number[] = [];
+  const candidateMasks: number[] = [];
+  const candidateMatches: Array<readonly number[] | undefined> = [];
+  for (let candidateIndex = 0; candidateIndex < candidates.length; candidateIndex += 1) {
+    const record = candidates[candidateIndex]!;
+    let intersection = 0;
+    let mask = 0;
+    let matches: number[] | undefined;
+    fillRetrievalEvidenceTokens(record, scratchTokens);
+    candidateSizes[candidateIndex] = scratchTokens.size;
+    for (const token of scratchTokens) {
+      const queryIndex = queryTokenIndex.get(token);
+      if (queryIndex === undefined) continue;
+      intersection += 1;
+      if (queryIndex < 31) mask |= 1 << queryIndex;
+      else (matches ??= []).push(queryIndex);
+    }
+    candidateIntersections[candidateIndex] = intersection;
+    candidateMasks[candidateIndex] = mask;
+    candidateMatches[candidateIndex] = matches === undefined || matches.length === 0 ? undefined : matches;
+    for (const token of scratchTokens) {
+      documentFrequency.set(token, (documentFrequency.get(token) ?? 0) + 1);
+    }
+  }
+  const migration = fingerprintMigrationIndex(candidates);
   const best = new Map<string, RecallHit>();
-  for (const { record, tokenSet } of candidates) {
-    const score = semanticScore(queryTokenSet, tokenSet, documentFrequency, candidates.length);
+  const rareFrequency = candidates.length >= 10
+    ? Math.min(8, Math.max(2, Math.ceil(candidates.length * 0.05)))
+    : 1;
+  for (let candidateIndex = 0; candidateIndex < candidates.length; candidateIndex += 1) {
+    const record = candidates[candidateIndex]!;
+    const candidateSize = candidateSizes[candidateIndex] ?? 0;
+    const intersection = candidateIntersections[candidateIndex] ?? 0;
+    const denominator = queryTokenSet.size + candidateSize - intersection;
+    const base = denominator <= 0 ? 0 : intersection / denominator;
+    let rareExact = false;
+    const mask = candidateMasks[candidateIndex] ?? 0;
+    for (let queryIndex = 0; queryIndex < Math.min(31, queryTokenList.length); queryIndex += 1) {
+      if ((mask & (1 << queryIndex)) === 0) continue;
+      const token = queryTokenList[queryIndex]!;
+      if (distinctiveToken(token) && (documentFrequency.get(token) ?? 0) <= rareFrequency) {
+        rareExact = true;
+        break;
+      }
+    }
+    if (!rareExact && candidateMatches[candidateIndex] !== undefined) {
+      for (const queryIndex of candidateMatches[candidateIndex]!) {
+        const token = queryTokenList[queryIndex];
+        if (token !== undefined && distinctiveToken(token) && (documentFrequency.get(token) ?? 0) <= rareFrequency) {
+          rareExact = true;
+          break;
+        }
+      }
+    }
+    const score = rareExact ? Math.min(1, Math.max(base, 0.06)) : base;
     if (score <= 0.05) continue;
     const hit = { failure: record, fix: fixForFailure(fixes, record, now), score };
     const key = canonicalFingerprint(record, migration);
     const previous = best.get(key);
-    if (!previous || (!previous.fix && hit.fix) || (!!previous.fix === !!hit.fix && record.ts > previous.failure.ts)) {
-      best.set(key, hit);
-    }
+    const shouldReplace = previous === undefined || (!previous.fix && hit.fix)
+      || (!!previous.fix === !!hit.fix && record.ts > previous.failure.ts);
+    if (shouldReplace) best.set(key, hit);
   }
   return [...best.values()].sort((a, b) => b.score - a.score || b.failure.ts - a.failure.ts).slice(0, limit);
 }
@@ -432,40 +512,58 @@ export function searchKnowledge(
   const hits: KnowledgeSearchHit[] = [];
   const wants = (kind: KnowledgeSearchHit["kind"]): boolean => input.kind === undefined || input.kind === kind;
 
-  const entries: Array<{ record: MemoryRecord; tokenSet: Set<string>; snippet: string }> = [];
+  const entries: Array<{ record: MemoryRecord; snippet: string }> = [];
   for (const sourceRecord of uniqueRecords(records)) {
     const record = sourceRecord.kind === "triple" ? boundTripleRecord(sourceRecord) : sourceRecord;
     if (record.ts > now) continue;
     if (record.kind === "failure" && wants("failure")) {
       entries.push({
         record,
-        tokenSet: retrievalEvidenceTokens(record),
         snippet: record.cmd.slice(0, 120),
       });
     } else if (record.kind === "fix" && wants("fix")) {
-      entries.push({ record, tokenSet: retrievalTokens(record.cmd), snippet: record.cmd.slice(0, 120) });
+      entries.push({ record, snippet: record.cmd.slice(0, 120) });
     } else if (record.kind === "triple" && wants("triple") && record.intent) {
       entries.push({
         record,
-        tokenSet: retrievalTokens(`${record.intent.text} ${record.rationale?.tags.join(" ") ?? ""}`),
         snippet: record.intent.text.slice(0, 120),
       });
     } else if (record.kind === "note" && wants("note")) {
       entries.push({
         record,
-        tokenSet: retrievalTokens(`${record.cmd} ${record.file} ${record.subject} ${record.answer}`),
         snippet: `${record.subject}: ${record.answer}`.slice(0, 120),
       });
     }
   }
-  const documentFrequency = tokenDocumentFrequency(entries.map((entry) => entry.tokenSet));
+  const knowledgeTokens = (record: MemoryRecord, target: Set<string>): void => {
+    target.clear();
+    if (record.kind === "failure") {
+      fillRetrievalEvidenceTokens(record, target);
+    } else if (record.kind === "fix") {
+      fillRetrievalTokens(record.cmd, target);
+    } else if (record.kind === "triple") {
+      fillRetrievalTokens(`${record.intent?.text ?? ""} ${record.rationale?.tags.join(" ") ?? ""}`, target);
+    } else if (record.kind === "note") {
+      fillRetrievalTokens(`${record.cmd} ${record.file} ${record.subject} ${record.answer}`, target);
+    }
+  };
+  const documentFrequency = new Map<string, number>();
+  const knowledgeScratch = new Set<string>();
+  for (const entry of entries) {
+    knowledgeTokens(entry.record, knowledgeScratch);
+    for (const token of knowledgeScratch) {
+      documentFrequency.set(token, (documentFrequency.get(token) ?? 0) + 1);
+    }
+  }
   const migration = fingerprintMigrationIndex(
     entries
-      .filter((entry): entry is { record: FailureRecord; tokenSet: Set<string>; snippet: string } => entry.record.kind === "failure")
+      .filter((entry): entry is { record: FailureRecord; snippet: string } => entry.record.kind === "failure")
       .map((entry) => entry.record),
   );
   const failureHits = new Map<string, { hit: KnowledgeSearchHit; current: boolean }>();
-  for (const { record, tokenSet, snippet } of entries) {
+  for (const { record, snippet } of entries) {
+    knowledgeTokens(record, knowledgeScratch);
+    const tokenSet = knowledgeScratch;
     const score = semanticScore(queryTokenSet, tokenSet, documentFrequency, entries.length);
     if (record.kind === "failure") {
       if (score > 0) {
@@ -856,6 +954,7 @@ export function createMemoryQueries(load: () => MemoryRecord[] = loadMemory): Me
     resolvedAt: number;
     nextFutureTs?: number;
   } | undefined;
+  let lastCoverage: MemoryCoverage | undefined;
   const loadRecords = (requestedNow = Date.now()): MemoryRecord[] => {
     if (!durableLoader) return load();
     const key = memorySnapshotIdentity();
@@ -864,6 +963,14 @@ export function createMemoryQueries(load: () => MemoryRecord[] = loadMemory): Me
       (cached.nextFutureTs === undefined || requestedNow < cached.nextFutureTs);
     if (canReuse && cached !== undefined) return cached.records;
     const loaded = loadMemoryChecked(undefined, requestedNow);
+    lastCoverage = loaded.coverage;
+    // A transient read-race/I/O fallback is not a cacheable snapshot. Keep
+    // the explicit incomplete result for this call, then retry after metadata
+    // changes rather than replaying a stale empty/partial answer forever.
+    if (loaded.coverage.reason === "read-race") {
+      cached = undefined;
+      return loaded.records;
+    }
     const nextFutureTs = loaded.records.reduce<number | undefined>((earliest, record) => {
       if (record.ts <= requestedNow) return earliest;
       return earliest === undefined ? record.ts : Math.min(earliest, record.ts);
@@ -908,7 +1015,7 @@ export function createMemoryQueries(load: () => MemoryRecord[] = loadMemory): Me
     ...(durableLoader ? {
       coverage: () => {
         loadRecords();
-        return cached!.coverage;
+        return cached?.coverage ?? lastCoverage!;
       },
     } : {}),
   };

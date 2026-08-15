@@ -1,7 +1,7 @@
 import { Buffer } from "node:buffer";
 import { loadConfig, type ConfigLoadResult } from "../core/config-read.js";
 import { tokens } from "../core/fingerprint.js";
-import { loadMemory, type MemoryRecord, type TripleRecord } from "../core/memory-read.js";
+import { isCompleteMemoryCoverage, loadMemoryChecked, type MemoryRecord, type TripleRecord } from "../core/memory-read.js";
 import { resolveRockyPaths, type RockyPaths } from "../core/state-paths.js";
 import { defaultQueueLabel } from "./annotate.js";
 import { createOllamaClient, type OllamaClient } from "../ai/ollama.js";
@@ -213,7 +213,12 @@ export async function checkAmbiguity(intentText: string, deps: AmbiguityDeps = {
     if (model === undefined) return undefined;
 
     const boundedIntent = boundedText(intentText, MAX_INTENT_CHARS);
-    const records = deps.load ? deps.load() : loadMemory(paths.memory);
+    const records = deps.load
+      ? deps.load()
+      : (() => {
+        const loaded = loadMemoryChecked(paths.memory);
+        return isCompleteMemoryCoverage(loaded.coverage) ? loaded.records : undefined;
+      })();
     if (!Array.isArray(records)) return undefined;
     const candidates = candidateValues(records, boundedIntent);
 

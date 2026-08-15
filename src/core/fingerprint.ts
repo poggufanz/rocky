@@ -270,26 +270,45 @@ export function retrievalTokens(text: string): Set<string> {
   return tokenBag(normalizeRetrievalLine(text));
 }
 
+/** Fill one caller-owned token bag, avoiding one hash table allocation per
+ * record in bounded recall scans. The caller may clear/reuse it between
+ * records; no reference is retained by this module. */
+export function fillRetrievalTokens(text: string, target: Set<string>): void {
+  target.clear();
+  fillTokenBag(normalizeRetrievalLine(text), target);
+}
+
 function tokenBag(text: string): Set<string> {
   const bag = new Set<string>();
+  fillTokenBag(text, bag);
+  return bag;
+}
+
+function fillTokenBag(text: string, bag: Set<string>): void {
   for (const match of text.normalize("NFC").toLowerCase().matchAll(TOKEN)) {
     const raw = match[0];
     if (raw === undefined) continue;
-    const special = raw.startsWith("<") || raw.startsWith("#");
-    const ascii = /^[\x00-\x7F]+$/u.test(raw);
-    const numeric = /^\d+$/u.test(raw);
-    if (!special && ascii && raw.length <= 2 && !numeric) continue;
-    if (!special && STOP_WORDS.has(raw)) continue;
-    bag.add(raw);
-    // Preserve the old recall contract: a compound command/error token is
-    // searchable both as a whole and by each meaningful component.
-    if (!special && /[-_.]/u.test(raw)) {
-      for (const part of raw.split(/[-_.]+/u)) {
-        if (part.length > 2 && !STOP_WORDS.has(part)) bag.add(part);
-      }
+    addToken(raw, bag);
+  }
+}
+
+function addToken(raw: string, bag: Set<string>): void {
+  addTokenBase(raw, bag);
+  const special = raw.startsWith("<") || raw.startsWith("#");
+  if (!special && /[-_.]/u.test(raw)) {
+    for (const part of raw.split(/[-_.]+/u)) {
+      if (part.length > 2 && !STOP_WORDS.has(part)) bag.add(part);
     }
   }
-  return bag;
+}
+
+function addTokenBase(raw: string, bag: Set<string>): void {
+  const special = raw.startsWith("<") || raw.startsWith("#");
+  const ascii = /^[\x00-\x7F]+$/u.test(raw);
+  const numeric = /^\d+$/u.test(raw);
+  if (!special && ascii && raw.length <= 2 && !numeric) return;
+  if (!special && STOP_WORDS.has(raw)) return;
+  bag.add(raw);
 }
 
 /** Backward-compatible name used by recall, dictionary, and agent surfaces. */
