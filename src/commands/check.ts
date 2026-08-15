@@ -489,6 +489,13 @@ async function runCheck(rest: readonly string[], state: CheckState): Promise<num
   const ownedArgs = state.prePush
     ? rest.slice(0, rest.indexOf("--pre-push") + 1)
     : rest;
+  const positional = ownedArgs.filter((arg) => !arg.startsWith("--"));
+  if (positional.length > 0) {
+    say("check accepts flags only. bad bad.");
+    detail(`unexpected: ${positional.join(", ")}`);
+    usage();
+    return 2;
+  }
   const flags = new Set(ownedArgs.filter((arg) => arg.startsWith("--")));
   if (flags.has("--help")) return usage();
   // An unrecognised flag must not silently degrade into a full check: someone

@@ -9,6 +9,7 @@ import { createTtyPromptPort } from "../setup/prompt.js";
 import { truncateUtf8 } from "../mcp/privacy.js";
 import { ago, detail, say } from "../ui/rocky.js";
 import { safeTerminalLine } from "../ui/sanitize.js";
+import { parseNoArgs, parseQueryArgs, reportCliUsage } from "./cli-args.js";
 
 const MAX_QUERY_DISPLAY_BYTES = 160;
 const MAX_SUBJECT_DISPLAY_BYTES = 120;
@@ -162,8 +163,18 @@ function reorder(hits: readonly DictionaryHit[], rankedIds: readonly string[]): 
 
 export async function what(argv: string[], deps: DictionaryCommandDeps = {}): Promise<number> {
   const { speak, support, records } = resolve(deps);
-  const useAi = argv.includes("--ai");
-  const query = argv.filter((argument) => argument !== "--ai").join(" ").trim();
+  let parsed;
+  try {
+    parsed = parseQueryArgs(argv, {
+      allowAi: true,
+      usage: "rocky what [--ai] [--] <query...>",
+    });
+  } catch (error) {
+    const code = reportCliUsage(error, speak, support);
+    if (code !== undefined) return code;
+    throw error;
+  }
+  const { query, useAi } = parsed;
   if (!query) {
     speak('what needs word to look up. rocky what "naikin", question');
     return 2;
@@ -206,7 +217,16 @@ export async function what(argv: string[], deps: DictionaryCommandDeps = {}): Pr
 
 export function how(argv: string[], deps: DictionaryCommandDeps = {}): number {
   const { speak, support, records } = resolve(deps);
-  const query = argv.join(" ").trim();
+  let query: string;
+  try {
+    query = parseQueryArgs(argv, {
+      usage: "rocky how [--] <query...>",
+    }).query;
+  } catch (error) {
+    const code = reportCliUsage(error, speak, support);
+    if (code !== undefined) return code;
+    throw error;
+  }
   if (!query) {
     speak('how needs word to remember. rocky how "naikin", question');
     return 2;
@@ -225,7 +245,16 @@ export function how(argv: string[], deps: DictionaryCommandDeps = {}): number {
 
 export function why(argv: string[], deps: DictionaryCommandDeps = {}): number {
   const { speak, support, records } = resolve(deps);
-  const path = argv.join(" ").trim();
+  let path: string;
+  try {
+    path = parseQueryArgs(argv, {
+      usage: "rocky why [--] <file>",
+    }).query;
+  } catch (error) {
+    const code = reportCliUsage(error, speak, support);
+    if (code !== undefined) return code;
+    throw error;
+  }
   if (!path) {
     speak("why needs file to remember. rocky why src/app.css, question");
     return 2;
@@ -273,8 +302,15 @@ export function why(argv: string[], deps: DictionaryCommandDeps = {}): number {
   return 0;
 }
 
-export function digest(_argv: string[], deps: DictionaryCommandDeps & { now?: number } = {}): number {
+export function digest(argv: string[], deps: DictionaryCommandDeps & { now?: number } = {}): number {
   const { speak, support, records } = resolve(deps);
+  try {
+    parseNoArgs(argv, "rocky digest");
+  } catch (error) {
+    const code = reportCliUsage(error, speak, support);
+    if (code !== undefined) return code;
+    throw error;
+  }
   const now = deps.now ?? Date.now();
   const memory = records();
   const buckets = digestBuckets(memory, now);
@@ -302,13 +338,20 @@ export function digest(_argv: string[], deps: DictionaryCommandDeps & { now?: nu
 }
 
 export async function quiz(
-  _argv: string[],
+  argv: string[],
   deps: DictionaryCommandDeps & {
     ask?: (msg: string) => Promise<string | undefined>;
     now?: number;
   } = {},
 ): Promise<number> {
-  const { speak, records } = resolve(deps);
+  const { speak, support, records } = resolve(deps);
+  try {
+    parseNoArgs(argv, "rocky quiz");
+  } catch (error) {
+    const code = reportCliUsage(error, speak, support);
+    if (code !== undefined) return code;
+    throw error;
+  }
   let ask = deps.ask;
   if (ask === undefined) {
     if (process.stdin.isTTY !== true) {

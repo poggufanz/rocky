@@ -1,8 +1,16 @@
 import { loadMemory, memoryPath, type MemoryRecord } from "../core/memory.js";
 import { queryStats } from "../core/memory-query.js";
+import { parseNoArgs, reportCliUsage } from "./cli-args.js";
 import { detail, face, say } from "../ui/rocky.js";
 
-export function stats(): number {
+export function stats(argv: readonly string[] = []): number {
+  try {
+    parseNoArgs(argv, "rocky stats");
+  } catch (error) {
+    const code = reportCliUsage(error, say, detail);
+    if (code !== undefined) return code;
+    throw error;
+  }
   let records: MemoryRecord[];
   try {
     records = loadMemory();
