@@ -295,6 +295,75 @@ test("uses the configured bounded timeout without retrying", async () => {
   assert.equal(calls.filter((call) => urlOf(call).endsWith("/api/generate")).length, 1);
 });
 
+test("bounds a non-cooperative response reader and requests body cancellation", async () => {
+  let cancellations = 0;
+  let cancellationReason: unknown;
+  let requestSignal: AbortSignal | undefined;
+  const response = {
+    ok: true,
+    body: {
+      getReader() {
+        return {
+          read: () => new Promise<ReadableStreamReadResult<Uint8Array>>(() => {}),
+          cancel: async (reason: unknown) => {
+            cancellations += 1;
+            cancellationReason = reason;
+          },
+          releaseLock() {},
+        };
+      },
+    },
+  } as unknown as Response;
+  const client = createOllamaClient({
+    timeoutMs: 10,
+    fetchImpl: async (_input, init) => {
+      requestSignal = init?.signal ?? undefined;
+      return response;
+    },
+  });
+
+  const started = Date.now();
+  await assert.rejects(client.generateStructured("model", "prompt", {}), /Ollama request timed out/);
+  assert.ok(Date.now() - started < 500);
+  assert.equal(requestSignal?.aborted, true);
+  assert.equal(cancellations, 1);
+  assert.equal(cancellationReason instanceof Error ? cancellationReason.message : cancellationReason, "Ollama request timed out");
+});
+
+test("preserves caller abort reason with a non-cooperative response reader", async () => {
+  let cancellations = 0;
+  let cancellationReason: unknown;
+  const response = {
+    ok: true,
+    body: {
+      getReader() {
+        return {
+          read: () => new Promise<ReadableStreamReadResult<Uint8Array>>(() => {}),
+          cancel: (reason: unknown) => {
+            cancellations += 1;
+            cancellationReason = reason;
+            return Promise.reject(new Error("body cancel failed"));
+          },
+          releaseLock() {},
+        };
+      },
+    },
+  } as unknown as Response;
+  const controller = new AbortController();
+  const callerReason = new Error("caller cancelled while reading");
+  const client = createOllamaClient({
+    timeoutMs: 1_000,
+    fetchImpl: async () => response,
+  });
+
+  const request = client.generateStructured("model", "prompt", {}, controller.signal);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  controller.abort(callerReason);
+  await assert.rejects(request, callerReason);
+  assert.equal(cancellations, 1);
+  assert.strictEqual(cancellationReason, callerReason);
+});
+
 test("propagates a pre-aborted caller signal from a model probe without fetching", async () => {
   const controller = new AbortController();
   const callerReason = new Error("probe already cancelled");

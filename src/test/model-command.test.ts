@@ -207,6 +207,63 @@ test("model use shares one bounded deadline across discovery and probe", async (
   assert.deepEqual(saved?.ai, { enabled: true, provider: "ollama", model: "installed-model", exposure: "sanitized" });
 });
 
+test("model use returns on a non-cooperative discovery call without saving", async () => {
+  let saved = false;
+  const never = new Promise<readonly OllamaModel[]>(() => {});
+  const output = await captureStderr(() => model(["use", "installed-model"], {
+    ollama: {
+      listInstalledModels: async () => never,
+      probeModel: async () => ({ supported: true }),
+      generateStructured: async () => ({}),
+    },
+    deadlineMs: 10,
+    loadConfig: configLoader({ status: "missing", path: "/tmp/model-deadline-discovery.json", config: { version: 1, ai: { enabled: false } } }),
+    saveConfigAtomic: () => { saved = true; return { path: "/tmp/model-deadline-discovery.json" }; },
+  }));
+
+  assert.equal(output.code, 1);
+  assert.equal(saved, false);
+});
+
+test("model use returns on a non-cooperative probe call without saving", async () => {
+  let saved = false;
+  const never = new Promise<ProbeResult>(() => {});
+  const output = await captureStderr(() => model(["use", "installed-model"], {
+    ollama: {
+      listInstalledModels: async () => [{ name: "installed-model", size: 1 }],
+      probeModel: async () => never,
+      generateStructured: async () => ({}),
+    },
+    deadlineMs: 10,
+    loadConfig: configLoader({ status: "missing", path: "/tmp/model-deadline-probe.json", config: { version: 1, ai: { enabled: false } } }),
+    saveConfigAtomic: () => { saved = true; return { path: "/tmp/model-deadline-probe.json" }; },
+  }));
+
+  assert.equal(output.code, 1);
+  assert.equal(saved, false);
+});
+
+test("model use re-checks deadline before saving a late probe result", async () => {
+  let saved = false;
+  let resolveProbe: ((result: ProbeResult) => void) | undefined;
+  const probe = new Promise<ProbeResult>((resolve) => { resolveProbe = resolve; });
+  const outputPromise = model(["use", "installed-model"], {
+    ollama: {
+      listInstalledModels: async () => [{ name: "installed-model", size: 1 }],
+      probeModel: async () => probe,
+      generateStructured: async () => ({}),
+    },
+    deadlineMs: 10,
+    loadConfig: configLoader({ status: "missing", path: "/tmp/model-deadline-late.json", config: { version: 1, ai: { enabled: false } } }),
+    saveConfigAtomic: () => { saved = true; return { path: "/tmp/model-deadline-late.json" }; },
+  });
+  const output = await outputPromise;
+  resolveProbe?.({ supported: true });
+
+  assert.equal(output, 1);
+  assert.equal(saved, false);
+});
+
 test("model use accepts raw only through the exact exposure option", async () => {
   const directory = mkdtempSync(join(tmpdir(), "rocky-model-raw-"));
   const configPath = join(directory, "config.json");

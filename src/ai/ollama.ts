@@ -88,6 +88,67 @@ function requireRecord(value: unknown, message: string): Record<string, unknown>
   return value as Record<string, unknown>;
 }
 
+function cancelReader(reader: ReadableStreamDefaultReader<Uint8Array>, reason: unknown): void {
+  try {
+    void Promise.resolve(reader.cancel(reason)).catch(() => {
+      // The bounded error remains the useful failure when cancellation races the stream.
+    });
+  } catch {
+    // The bounded error remains the useful failure when cancellation races the stream.
+  }
+}
+
+function readWithAbort(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  boundary: BoundedSignal,
+): Promise<ReadableStreamReadResult<Uint8Array>> {
+  if (boundary.signal.aborted) {
+    const reason = abortReason(boundary.signal);
+    cancelReader(reader, reason);
+    return Promise.reject(reason);
+  }
+
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const cleanup = () => boundary.signal.removeEventListener("abort", onAbort);
+    const onAbort = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      const reason = abortReason(boundary.signal);
+      cancelReader(reader, reason);
+      reject(reason);
+    };
+    boundary.signal.addEventListener("abort", onAbort, { once: true });
+
+    let read: Promise<ReadableStreamReadResult<Uint8Array>>;
+    try {
+      read = reader.read();
+    } catch (error) {
+      settled = true;
+      cleanup();
+      reject(boundary.signal.aborted ? abortReason(boundary.signal) : error);
+      return;
+    }
+    void read.then(
+      (result) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        if (boundary.signal.aborted) reject(abortReason(boundary.signal));
+        else resolve(result);
+      },
+      (error: unknown) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        if (boundary.signal.aborted) reject(abortReason(boundary.signal));
+        else reject(error);
+      },
+    );
+  });
+}
+
 async function readJson(response: Response, boundary: BoundedSignal): Promise<unknown> {
   if (!response.body) throw new Error("Ollama response has no body");
   const reader = response.body.getReader();
@@ -95,32 +156,23 @@ async function readJson(response: Response, boundary: BoundedSignal): Promise<un
   let total = 0;
   try {
     while (true) {
-      if (boundary.signal.aborted) throw abortReason(boundary.signal);
-      let result: ReadableStreamReadResult<Uint8Array>;
-      try {
-        result = await reader.read();
-      } catch (error) {
-        if (boundary.signal.aborted) throw abortReason(boundary.signal);
-        throw error;
-      }
-      const { done, value } = result;
-      if (boundary.signal.aborted) throw abortReason(boundary.signal);
+      const { done, value } = await readWithAbort(reader, boundary);
       if (done) break;
       total += value.byteLength;
       if (total > OLLAMA_RESPONSE_LIMIT) {
         const error = new OllamaResponseTooLargeError();
         boundary.abort(error);
-        try {
-          await reader.cancel(error);
-        } catch {
-          // The bounded error remains the useful failure when cancellation races the stream.
-        }
+        cancelReader(reader, error);
         throw error;
       }
       chunks.push(value);
     }
   } finally {
-    reader.releaseLock();
+    try {
+      reader.releaseLock();
+    } catch {
+      // A non-cooperative reader may still be pending after cancellation.
+    }
   }
 
   const bytes = new Uint8Array(total);

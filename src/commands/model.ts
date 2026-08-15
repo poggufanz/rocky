@@ -24,6 +24,8 @@ export interface ModelDependencies {
   ollama: OllamaClient;
   loadConfig: typeof loadConfig;
   saveConfigAtomic: typeof saveConfigAtomic;
+  /** Narrow seam for deadline tests; production uses the fixed 30-second deadline. */
+  deadlineMs?: number;
 }
 
 interface UseRequest {
@@ -84,17 +86,61 @@ function printChoices(): void {
   detail(`ollama pull ${BALANCED.name}`);
 }
 
+function abortReason(signal: AbortSignal): unknown {
+  return signal.reason ?? new Error("model use deadline exceeded");
+}
+
+function callUntilDeadline<T>(call: () => Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) return Promise.reject(abortReason(signal));
+  let operation: Promise<T>;
+  try {
+    operation = Promise.resolve(call());
+  } catch (error) {
+    return Promise.reject(error);
+  }
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const cleanup = () => signal.removeEventListener("abort", onAbort);
+    const onAbort = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(abortReason(signal));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    void operation.then(
+      (value) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        if (signal.aborted) reject(abortReason(signal));
+        else resolve(value);
+      },
+      (error: unknown) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        if (signal.aborted) reject(abortReason(signal));
+        else reject(error);
+      },
+    );
+  });
+}
+
 async function useModel(request: UseRequest, deps: ModelDependencies): Promise<number> {
   const current = readConfiguration(deps);
   if (current === undefined) return 1;
   if (current.status === "invalid") return configurationFailure(current.path, "invalid");
 
   const deadline = new AbortController();
-  const deadlineTimer = setTimeout(() => deadline.abort(new Error("model use deadline exceeded")), MODEL_USE_DEADLINE_MS);
+  const deadlineTimer = setTimeout(
+    () => deadline.abort(new Error("model use deadline exceeded")),
+    deps.deadlineMs ?? MODEL_USE_DEADLINE_MS,
+  );
   try {
     let installed;
     try {
-      installed = await deps.ollama.listInstalledModels(deadline.signal);
+      installed = await callUntilDeadline(() => deps.ollama.listInstalledModels(deadline.signal), deadline.signal);
     } catch {
       say("Ollama not available. memory still works.");
       detail("Ollama unavailable while listing installed models");
@@ -116,7 +162,7 @@ async function useModel(request: UseRequest, deps: ModelDependencies): Promise<n
 
     let probe;
     try {
-      probe = await deps.ollama.probeModel(request.model, deadline.signal);
+      probe = await callUntilDeadline(() => deps.ollama.probeModel(request.model, deadline.signal), deadline.signal);
     } catch {
       say("model probe not work. configuration stays same. bad bad.");
       detail(`Ollama probe failed: ${request.model}`);
@@ -125,6 +171,12 @@ async function useModel(request: UseRequest, deps: ModelDependencies): Promise<n
     if (!probe.supported) {
       say("model probe not work. configuration stays same. bad bad.");
       detail(`Ollama probe unsupported: ${request.model}`);
+      return 1;
+    }
+
+    if (deadline.signal.aborted) {
+      say("model use deadline reached. configuration stays same. bad bad.");
+      detail("Ollama model use deadline exceeded");
       return 1;
     }
 
