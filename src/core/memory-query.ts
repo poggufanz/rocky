@@ -705,6 +705,84 @@ interface WhyFilePathMatch {
   identity: string;
 }
 
+/** Shared origin-aware path relation used by core, CLI rendering, and MCP. */
+export interface WhyFilePathRelation {
+  exact: boolean;
+  suffix: boolean;
+  suffixIdentities: readonly string[];
+  witness?: TripleRecord["mechanism"]["files"][number];
+  witnessIdentity?: string;
+}
+
+function absolutePathRoot(value: string): boolean {
+  return value.startsWith("/") || /^[A-Za-z]:\//u.test(value);
+}
+
+/**
+ * Resolve one triple's path relation without granting a suffix across roots.
+ * Hash identity is the strongest witness and wins the display witness too.
+ */
+export function whyFilePathRelation(triple: TripleRecord, path: string): WhyFilePathRelation {
+  try {
+    const platform = triple.platform ?? "unknown";
+    const targetDisplay = canonicalPath(path, { platform });
+    const targetIdentity = canonicalPath(path, { platform, cwd: triple.cwd });
+    if (!targetDisplay || !targetIdentity) return { exact: false, suffix: false, suffixIdentities: [] };
+    const targetHash = pathIdentityHash(targetIdentity, { platform, canonical: true });
+    const knownRoot = canonicalPath(triple.cwd, { platform });
+    const rootAbsolute = absolutePathRoot(knownRoot);
+    const trustedRoot = triple.platform !== undefined && rootAbsolute;
+    const hashWitnesses: Array<{ file: TripleRecord["mechanism"]["files"][number]; identity: string }> = [];
+    const pathWitnesses: Array<{ file: TripleRecord["mechanism"]["files"][number]; identity: string }> = [];
+    const suffixWitnesses: Array<{ file: TripleRecord["mechanism"]["files"][number]; identity: string }> = [];
+    const suffixIdentities = new Set<string>();
+    for (const file of triple.mechanism.files) {
+      const candidateDisplay = canonicalPath(file.path, { platform });
+      const candidateIdentity = canonicalPath(file.path, { platform, cwd: triple.cwd });
+      if (!candidateDisplay || !candidateIdentity) continue;
+      const hashValid = typeof file.identityHash === "string" && /^[0-9a-f]{32}$/u.test(file.identityHash);
+      const hashExact = hashValid && file.identityHash === targetHash;
+      const hashMismatch = hashValid && file.identityHash !== targetHash;
+      const exact = hashExact || (!hashMismatch && (candidateDisplay === targetDisplay || candidateIdentity === targetIdentity));
+      const identity = hashMismatch ? `hash:${file.identityHash}` : candidateIdentity;
+      if (exact) {
+        (hashExact ? hashWitnesses : pathWitnesses).push({ file, identity });
+        continue;
+      }
+      const relativeEscapesRoot = !candidateDisplay.startsWith("/") && !/^[A-Za-z]:\//u.test(candidateDisplay)
+        && (candidateDisplay === ".." || candidateDisplay.startsWith("../"));
+      const candidateWithinRoot = !relativeEscapesRoot && (!rootAbsolute || candidateIdentity === knownRoot
+        || candidateIdentity.startsWith(`${knownRoot}/`));
+      const targetWithinRoot = !rootAbsolute || targetIdentity === knownRoot
+        || targetIdentity.startsWith(`${knownRoot}/`);
+      const suffix = targetDisplay.length > 0 && candidateWithinRoot && targetWithinRoot
+        && candidateDisplay.endsWith(`/${targetDisplay}`);
+      if (!suffix) continue;
+      suffixIdentities.add(identity);
+      if (!trustedRoot) suffixWitnesses.push({ file, identity });
+    }
+    const exactWitness = hashWitnesses[0] ?? pathWitnesses[0];
+    if (exactWitness !== undefined) {
+      return {
+        exact: true,
+        suffix: false,
+        suffixIdentities: [],
+        witness: exactWitness.file,
+        witnessIdentity: exactWitness.identity,
+      };
+    }
+    const suffixWitness = suffixWitnesses[0];
+    return {
+      exact: false,
+      suffix: suffixWitness !== undefined,
+      suffixIdentities: [...suffixIdentities],
+      ...(suffixWitness === undefined ? {} : { witness: suffixWitness.file, witnessIdentity: suffixWitness.identity }),
+    };
+  } catch {
+    return { exact: false, suffix: false, suffixIdentities: [] };
+  }
+}
+
 const MAX_WHY_RECORDS = 20_000;
 const MAX_RAW_TRIPLE_FILES = 256;
 
@@ -762,42 +840,18 @@ function whyFilePathMatches(records: readonly MemoryRecord[], path: string, limi
   traversalIncomplete: boolean;
 } {
   const candidates: WhyFilePathMatch[] = [];
-  const collisionIdentities = new Set<string>();
+  const suffixIdentities = new Set<string>();
   const collection = safeTripleCollection(records);
   for (const triple of collection.triples.filter((record) => isOperationalMemoryRecord(record, now))) {
-    const platform = triple.platform ?? "unknown";
-    const targetDisplay = canonicalPath(path, { platform });
-    const targetIdentity = canonicalPath(path, { platform, cwd: triple.cwd });
-    const targetHash = targetIdentity ? pathIdentityHash(targetIdentity, { platform, canonical: true }) : undefined;
-    const trustedRoot = triple.platform !== undefined && (
-      canonicalPath(triple.cwd, { platform }).startsWith("/")
-      || /^[A-Za-z]:\//u.test(canonicalPath(triple.cwd, { platform }))
-    );
-    for (const file of triple.mechanism.files) {
-      const candidateDisplay = canonicalPath(file.path, { platform });
-      const identity = canonicalPath(file.path, { platform, cwd: triple.cwd });
-      if (!candidateDisplay || !identity) continue;
-      const hashExact = targetHash !== undefined && file.identityHash !== undefined && file.identityHash === targetHash;
-      const hashValid = typeof file.identityHash === "string" && /^[0-9a-f]{32}$/u.test(file.identityHash);
-      const hashMismatch = hashValid && targetHash !== undefined && file.identityHash !== targetHash;
-      const exact = hashExact || (!hashMismatch && (identity === targetIdentity || candidateDisplay === targetDisplay));
-      // Suffix matching is a legacy compatibility escape hatch. A trusted
-      // cwd/root makes ../other and /repo paths distinct, so never attach
-      // rationale through suffix alone in that case.
-      const suffix = !exact && !trustedRoot && targetDisplay.length > 0 && candidateDisplay.endsWith(`/${targetDisplay}`);
-      if (exact || suffix) candidates.push({
-        triple,
-        exact,
-        suffix,
-        identity: hashMismatch ? `hash:${file.identityHash}` : identity,
-      });
-      else if (!exact && trustedRoot && targetDisplay.length > 0 && candidateDisplay.endsWith(`/${targetDisplay}`)) {
-        // Trusted roots reject suffix-only evidence, but retaining its
-        // identity lets callers disclose a basename collision instead of
-        // collapsing two possible roots into a generic absence.
-        collisionIdentities.add(hashMismatch ? `hash:${file.identityHash}` : identity);
-      }
-    }
+    const relation = whyFilePathRelation(triple, path);
+    for (const identity of relation.suffixIdentities) suffixIdentities.add(identity);
+    if (relation.witness === undefined || relation.witnessIdentity === undefined) continue;
+    candidates.push({
+      triple,
+      exact: relation.exact,
+      suffix: relation.suffix,
+      identity: relation.witnessIdentity,
+    });
   }
   const exact = candidates.filter((candidate) => candidate.exact);
   const suffixCandidates = candidates.filter((candidate) => candidate.suffix);
@@ -809,7 +863,7 @@ function whyFilePathMatches(records: readonly MemoryRecord[], path: string, limi
   if (exact.length === 0) {
     const distinctSuffixes = new Set([
       ...suffixCandidates.map((candidate) => candidate.identity),
-      ...collisionIdentities,
+      ...suffixIdentities,
     ]);
     if (distinctSuffixes.size > 1) return { matches: [], suffixAmbiguous: true, traversalIncomplete: !collection.complete };
   }
@@ -846,6 +900,7 @@ export function whyFileEvidence(records: readonly MemoryRecord[], path: string, 
     sawTriple = true;
     try {
       const bounded = boundTripleRecord(source);
+      const relation = whyFilePathRelation(bounded, path);
       const rawPaths = rawTripleFiles(source);
       const platform = bounded.platform ?? "unknown";
       const targetIdentity = canonicalPath(path, { platform, cwd: bounded.cwd });
@@ -868,7 +923,9 @@ export function whyFileEvidence(records: readonly MemoryRecord[], path: string, 
         if (sourceStatus === "complete" && !completeTriple(bounded)) status = "unknown";
         else if (sourceStatus === "truncated") status = worstCoverageStatus(status, "truncated");
         truncatedFiles = safeCoverageAdd(truncatedFiles, bounded.mechanism.truncatedFiles);
-        if ((!boundedContainsTarget || (rawContainsTarget && !boundedContainsTarget) || !boundedMatches.has(source.id))
+        const pathRelated = relation.exact || relation.suffix || relation.suffixIdentities.length > 0
+          || bounded.mechanism.truncatedFiles > 0;
+        if (pathRelated && (!boundedContainsTarget || (rawContainsTarget && !boundedContainsTarget) || !boundedMatches.has(source.id))
             && possible.length < limit) {
           possible.push({ id: source.id, ts: source.ts, source: source.origin, reason: "path_may_be_omitted" });
         }
@@ -879,13 +936,8 @@ export function whyFileEvidence(records: readonly MemoryRecord[], path: string, 
       status = "unknown";
     }
   }
-  const trustedRootPresent = collection.triples.some((triple) => {
-    const platform = triple.platform ?? "unknown";
-    const root = canonicalPath(triple.cwd, { platform });
-    return (root.startsWith("/") || /^[A-Za-z]:\//u.test(root)) && triple.platform !== undefined;
-  });
   if (!sawTriple || strictMatches.suffixAmbiguous || !sourceCollection.complete || !collection.complete
-      || (strictMatches.matches.length === 0 && trustedRootPresent)) {
+      || strictMatches.matches.length === 0) {
     hasIncomplete = true;
     status = worstCoverageStatus(status, "unknown");
   }

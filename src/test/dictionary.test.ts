@@ -30,6 +30,15 @@ test("queryDictionary ranks token overlap, skips non-triples and intentless trip
   assert.ok(hits[0].score > 0);
 });
 
+test("queryDictionary skips intent-only triples without a file witness", () => {
+  const intentOnly: TripleRecord = {
+    ...triple({ ts: NOW, intent: "change button" }),
+    id: "intent-only",
+    mechanism: { files: [], truncatedFiles: 0, baseline: "captured", coverageStatus: "complete" },
+  };
+  assert.deepEqual(queryDictionary([intentOnly], "change button"), []);
+});
+
 test("queryDictionary dedups by mechanism identity; newest wins among equal scores", () => {
   // Identical intents => identical Jaccard scores => ts desc decides => newer survives dedup.
   const older = triple({ ts: NOW - 2 * DAY, intent: "naikin margin", props: ["margin-top"] });

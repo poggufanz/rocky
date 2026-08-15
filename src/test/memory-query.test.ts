@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import type { AssociationRecord, FailureRecord, FixRecord, MemoryRecord, NoteRecord, TripleRecord } from "../core/memory.js";
 import { fingerprint, fingerprintSignature, legacyFingerprint, signatureLines } from "../core/fingerprint.js";
+import { pathIdentityHash } from "../core/memory-read.js";
 import {
   LINK_WINDOW_MS,
   createMemoryQueries,
@@ -12,6 +13,7 @@ import {
   queryStats,
   recentUnresolvedFailures,
   searchKnowledge,
+  whyFile,
   whyFileEvidence,
   getFix,
 } from "../core/memory-query.js";
@@ -504,6 +506,70 @@ test("why-file evidence discloses trusted-root basename collisions without selec
   assert.equal(evidence.ambiguousPath, true);
   assert.equal(evidence.coverageIncomplete, true);
   assert.equal(evidence.coverage.status, "unknown");
+});
+
+test("why-file evidence keeps an unmatched relative-root path unknown", () => {
+  const record: TripleRecord = {
+    ...tripleA,
+    id: "known-relative",
+    ts: 100,
+    cwd: "project",
+    platform: "linux",
+    mechanism: {
+      files: [{ path: "src/known.ts", plusMinus: [1, 0], props: ["known"], provenance: "tool-observed" }],
+      truncatedFiles: 0,
+      baseline: "captured",
+      coverageStatus: "complete",
+    },
+  };
+  const evidence = whyFileEvidence([record], "src/missing.ts", 5, 100);
+  assert.deepEqual(evidence.matches, []);
+  assert.equal(evidence.coverageIncomplete, true);
+  assert.equal(evidence.coverage.complete, false);
+  assert.equal(evidence.coverage.status, "unknown");
+});
+
+test("why-file evidence honors an identity-hash witness before display suffixes", () => {
+  const record: TripleRecord = {
+    ...tripleA,
+    id: "hashed-witness",
+    ts: 100,
+    cwd: "/repo",
+    platform: "linux",
+    mechanism: {
+      files: [
+        {
+          path: "[redacted]",
+          identityHash: pathIdentityHash("/repo/src/index.ts", { platform: "linux", canonical: true }),
+          plusMinus: [9, 2], props: ["hashed"], provenance: "tool-observed",
+        },
+        { path: "web/src/index.ts", plusMinus: [1, 0], props: ["suffix"], provenance: "tool-observed" },
+      ],
+      truncatedFiles: 0, baseline: "captured", coverageStatus: "complete",
+    },
+  };
+  const evidence = whyFileEvidence([record], "src/index.ts", 5, 100);
+  assert.deepEqual(evidence.matches.map((candidate) => candidate.id), ["hashed-witness"]);
+  assert.equal(evidence.coverageIncomplete, false);
+});
+
+test("why-file evidence rejects absolute cross-root legacy suffixes without platform", () => {
+  const record: TripleRecord = {
+    ...tripleA,
+    id: "cross-root-legacy",
+    ts: 100,
+    cwd: "/repo",
+    mechanism: {
+      files: [{ path: "/other/src/index.ts", plusMinus: [1, 0], props: ["other"], provenance: "tool-observed" }],
+      truncatedFiles: 0, baseline: "captured", coverageStatus: "complete",
+    },
+  };
+  const evidence = whyFileEvidence([record], "src/index.ts", 5, 100);
+  assert.deepEqual(evidence.matches, []);
+  assert.deepEqual(evidence.possible, []);
+  assert.equal(evidence.coverageIncomplete, true);
+  assert.equal(evidence.coverage.status, "unknown");
+  assert.deepEqual(whyFile([record], "src/index.ts", 5, 100), []);
 });
 
 test("knowledge hits expose record provenance and bounded file coverage", () => {

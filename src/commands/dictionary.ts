@@ -2,8 +2,8 @@ import { Buffer } from "node:buffer";
 import { dictionaryRankPortFromConfig, type DictionaryRankPort } from "../ai/dictionary-ai.js";
 import { loadConfig } from "../core/config.js";
 import { digestBuckets, queryDictionary, queryNotes, quizCandidates, type DictionaryHit, type NoteHit } from "../core/dictionary.js";
-import { canonicalPath, isCompleteMemoryCoverage, isOperationalMemoryRecord, loadMemoryChecked } from "../core/memory-read.js";
-import { whyFile, whyFileEvidence } from "../core/memory-query.js";
+import { isCompleteMemoryCoverage, isOperationalMemoryRecord, loadMemoryChecked } from "../core/memory-read.js";
+import { whyFile, whyFileEvidence, whyFilePathRelation } from "../core/memory-query.js";
 import type { MemoryCoverage, MemoryRecord } from "../core/memory-read.js";
 import { resolveRockyPaths } from "../core/state-paths.js";
 import { createTtyPromptPort } from "../setup/prompt.js";
@@ -246,19 +246,7 @@ function evidence(hits: LookupHit[], support: (line: string) => void): void {
 }
 
 function fileForQuery(triple: DictionaryHit["triple"], query: string): DictionaryHit["triple"]["mechanism"]["files"][number] | undefined {
-  const platform = triple.platform ?? "unknown";
-  const normalized = canonicalPath(query, { platform, cwd: triple.cwd });
-  const normalizedDisplay = canonicalPath(query, { platform });
-  const exact = triple.mechanism.files.find((file) => {
-    const candidate = canonicalPath(file.path, { platform, cwd: triple.cwd });
-    const candidateDisplay = canonicalPath(file.path, { platform });
-    return candidate === normalized || candidateDisplay === normalizedDisplay;
-  });
-  if (exact !== undefined) return exact;
-  return triple.mechanism.files.find((file) => {
-    const candidateDisplay = canonicalPath(file.path, { platform });
-    return normalizedDisplay.length > 0 && candidateDisplay.endsWith(`/${normalizedDisplay}`);
-  });
+  return whyFilePathRelation(triple, query).witness;
 }
 
 function reorder(hits: readonly DictionaryHit[], rankedIds: readonly string[]): DictionaryHit[] | undefined {
@@ -362,7 +350,7 @@ export async function what(argv: string[], deps: DictionaryCommandDeps = {}): Pr
     }
     speak(terminalSafe(futureTeachingMatch(memory, query, now)
       ? `"${terminalSafe(query, MAX_QUERY_DISPLAY_BYTES)}"... I not know yet. evidence future. check, question`
-      : `"${terminalSafe(query, MAX_QUERY_DISPLAY_BYTES)}"... I not hear this before. I listen now.`, MAX_OUTPUT_LINE_BYTES));
+      : `"${terminalSafe(query, MAX_QUERY_DISPLAY_BYTES)}"... I not know. I not hear this before. I listen now.`, MAX_OUTPUT_LINE_BYTES));
     return 0;
   }
   if (scan !== undefined && coverageIncomplete(scan)) support(coverageLine(scan));
@@ -432,7 +420,7 @@ export function how(argv: string[], deps: DictionaryCommandDeps = {}): number {
     }
     speak(terminalSafe(futureTeachingMatch(memory, query, now)
       ? `"${terminalSafe(query, MAX_QUERY_DISPLAY_BYTES)}"... I not know yet. evidence future. check, question`
-      : `"${terminalSafe(query, MAX_QUERY_DISPLAY_BYTES)}"... no memory. you teach me when you work. good good.`, MAX_OUTPUT_LINE_BYTES));
+      : `"${terminalSafe(query, MAX_QUERY_DISPLAY_BYTES)}"... I not know. no memory. you teach me when you work. good good.`, MAX_OUTPUT_LINE_BYTES));
     return 0;
   }
   if (scan !== undefined && coverageIncomplete(scan)) support(coverageLine(scan));

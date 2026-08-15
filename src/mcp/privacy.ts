@@ -260,7 +260,7 @@ function projectOpaqueId(value: string, path: string, truncation: Truncation, sa
   if (boundedInput.length !== value.length) truncation.fields.push(path);
   const safe = sanitize && safeOpaqueIdentifier(boundedInput)
     ? boundedInput
-    : sanitize ? redactText(boundedInput) : normalizeOutputText(boundedInput);
+    : sanitize ? "[redacted]" : normalizeOutputText(boundedInput);
   const clipped = truncateUtf8(safe, MAX_FIELD_BYTES);
   if (clipped.truncated) truncation.fields.push(path);
   return clipped.value;
@@ -380,7 +380,7 @@ export function projectWhyPossible(
       if (/[\u0000-\u001f\u007f-\u009f]/u.test(value.id)) continue;
       const truncation: Truncation = { fields: [] };
       output.push({
-        id: projectText(value.id, exposure, "possible.id", truncation),
+        id: projectOpaqueId(value.id, "possible.id", truncation, exposure === "sanitized"),
         ts,
         source: "agent-hook",
         reason: "path_may_be_omitted",

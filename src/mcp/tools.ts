@@ -1,8 +1,8 @@
 import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
 import type { Exposure } from "../core/config-read.js";
-import { hasCanonicalMemoryQueries, hasDurableMemoryQueries, loadDurableMemorySnapshot, queryStats } from "../core/memory-query.js";
-import type { DurableMemorySnapshot, KnowledgeCoverageSummary, KnowledgeSearchQuery, MemoryQueries, RecallHit, RecallQuery, RecentFailuresQuery, StatsQuery, WhyFileEvidence } from "../core/memory-query.js";
+import { hasCanonicalMemoryQueries, hasDurableMemoryQueries, loadDurableMemorySnapshot, queryStats, whyFilePathRelation } from "../core/memory-query.js";
+import type { DurableMemorySnapshot, KnowledgeCoverageSummary, KnowledgeSearchQuery, MemoryQueries, RecallHit, RecallQuery, RecentFailuresQuery, StatsQuery, WhyFileEvidence, WhyFilePathRelation } from "../core/memory-query.js";
 import type { RecallAiOutcome, RecallWithAiPort } from "../ai/port.js";
 import {
   MAX_RESPONSE_BYTES,
@@ -14,7 +14,7 @@ import {
   projectTriple,
   safeOpaqueIdentifier,
 } from "./privacy.js";
-import { boundTripleRecord, canonicalPath, isKnownPathPlatform, isSafeNonNegativeInteger, MAX_MEMORY_FILE_BYTES, MAX_SUPPORTED_MEMORY_RECORDS, parseMemoryRecord, pathIdentityHash } from "../core/memory-read.js";
+import { boundTripleRecord, isKnownPathPlatform, isSafeNonNegativeInteger, MAX_MEMORY_FILE_BYTES, MAX_SUPPORTED_MEMORY_RECORDS, parseMemoryRecord } from "../core/memory-read.js";
 import type { MemoryCoverage, TripleRecord } from "../core/memory-read.js";
 
 /** Versioned read-only catalog used by MCP discovery and setup health. */
@@ -499,51 +499,9 @@ function coverageForTriples(matches: readonly TripleRecord[]): KnowledgeCoverage
   return { status: complete ? "complete" : status, complete, filesCovered, truncatedFiles };
 }
 
-interface WhyPathRelation {
-  exact: boolean;
-  suffix: boolean;
-  suffixIdentities: readonly string[];
-}
-
-function whyPathRelation(candidate: TripleRecord, path: string): WhyPathRelation {
-  const platform = candidate.platform ?? "unknown";
-  const targetDisplay = canonicalPath(path, { platform });
-  const targetIdentity = canonicalPath(path, { platform, cwd: candidate.cwd });
-  const targetHash = targetIdentity.length > 0
-    ? pathIdentityHash(targetIdentity, { platform, canonical: true })
-    : undefined;
-  if (!targetDisplay || !targetIdentity) return { exact: false, suffix: false, suffixIdentities: [] };
-  const suffixIdentities = new Set<string>();
-  for (const file of candidate.mechanism.files) {
-    const candidateDisplay = canonicalPath(file.path, { platform });
-    const candidateIdentity = canonicalPath(file.path, { platform, cwd: candidate.cwd });
-    if (!candidateDisplay || !candidateIdentity) continue;
-    const hashExact = targetHash !== undefined && file.identityHash !== undefined
-      && /^[0-9a-f]{32}$/u.test(file.identityHash) && file.identityHash === targetHash;
-    const hashValid = typeof file.identityHash === "string" && /^[0-9a-f]{32}$/u.test(file.identityHash);
-    const hashMismatch = hashValid && targetHash !== undefined && file.identityHash !== targetHash;
-    if (hashExact || (!hashMismatch && (candidateDisplay === targetDisplay || candidateIdentity === targetIdentity))) {
-      return { exact: true, suffix: false, suffixIdentities: [] };
-    }
-    const knownRoot = canonicalPath(candidate.cwd, { platform });
-    const rootAbsolute = /^\/(?:|[^/])/u.test(knownRoot) || /^[A-Za-z]:\//u.test(knownRoot);
-    const trustedRoot = candidate.platform !== undefined && rootAbsolute;
-    const relativeEscapesRoot = !candidateDisplay.startsWith("/") && !/^[A-Za-z]:\//u.test(candidateDisplay)
-      && (candidateDisplay === ".." || candidateDisplay.startsWith("../"));
-    const candidateWithinRoot = !relativeEscapesRoot && (!rootAbsolute || candidateIdentity === knownRoot
-      || candidateIdentity.startsWith(`${knownRoot}/`));
-    const targetWithinRoot = !rootAbsolute || targetIdentity === knownRoot
-      || targetIdentity.startsWith(`${knownRoot}/`);
-    if (!trustedRoot && candidateWithinRoot && targetWithinRoot && candidateDisplay.endsWith(`/${targetDisplay}`)) {
-      suffixIdentities.add(hashMismatch ? `hash:${file.identityHash}` : candidateIdentity);
-    }
-  }
-  return { exact: false, suffix: suffixIdentities.size > 0, suffixIdentities: [...suffixIdentities] };
-}
-
 interface WhyCandidate {
   candidate: TripleRecord;
-  relation: WhyPathRelation;
+  relation: WhyFilePathRelation;
 }
 
 function whyTripleComplete(candidate: TripleRecord): boolean {
@@ -576,12 +534,12 @@ function selectWhyCandidates(
 ): { matches: TripleRecord[]; possible: WhyFileEvidence["possible"]; ambiguousSuffix: boolean } {
   const related: WhyCandidate[] = candidates.map((candidate) => ({
     candidate,
-    relation: whyPathRelation(candidate, path),
+    relation: whyFilePathRelation(candidate, path),
   })).filter(({ candidate }) => candidate.ts <= now);
   const hasExact = related.some(({ relation }) => relation.exact);
   const suffixIdentities = new Set(
     related
-      .filter(({ relation }) => !relation.exact && relation.suffix)
+      .filter(({ relation }) => !relation.exact)
       .flatMap(({ relation }) => relation.suffixIdentities),
   );
   const ambiguousSuffix = !hasExact && suffixIdentities.size > 1;
@@ -637,7 +595,9 @@ function normalizeWhyEvidence(value: unknown, fallback: WhyFileEvidence, path: s
       .map((entry) => safeTripleRecord(entry))
       .filter((entry): entry is TripleRecord => entry !== undefined);
     const selected = selectWhyCandidates(candidates, path, limit, now);
-    const derived = coverageForTriples(selected.matches);
+    const ambiguous = selected.ambiguousSuffix || raw.ambiguousPath === true;
+    const matches = ambiguous ? [] : selected.matches;
+    const derived = coverageForTriples(matches);
     const boundedPossible = boundedProviderArray(raw.possible, MAX_WHY_EVIDENCE_INPUTS);
     const providerPossible: WhyFileEvidence["possible"] = [];
     for (let index = 0; index < boundedPossible.values.length && providerPossible.length < limit; index += 1) {
@@ -666,13 +626,13 @@ function normalizeWhyEvidence(value: unknown, fallback: WhyFileEvidence, path: s
       }
     }
     if (raw.coverageIncomplete === true || boundedMatches.truncated || boundedPossible.truncated) coverage = { ...coverage, status: "unknown", complete: false };
-    if (possible.length > 0 || selected.ambiguousSuffix || raw.ambiguousPath === true) coverage = { ...coverage, status: "unknown", complete: false };
+    if (possible.length > 0 || ambiguous) coverage = { ...coverage, status: "unknown", complete: false };
     return {
-      matches: selected.matches,
+      matches,
       possible,
       coverage,
       coverageIncomplete: !coverage.complete || possible.length > 0 || raw.coverageIncomplete === true,
-      ...((selected.ambiguousSuffix || raw.ambiguousPath === true) ? { ambiguousPath: true } : {}),
+      ...(ambiguous ? { ambiguousPath: true } : {}),
     };
   } catch {
     return fallback;

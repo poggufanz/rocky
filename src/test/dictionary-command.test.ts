@@ -3,6 +3,7 @@ import { Buffer } from "node:buffer";
 import { test } from "node:test";
 import { digest, exportCommand, how, quiz, what, why } from "../commands/dictionary.js";
 import type { MemoryCoverage, MemoryRecord, TripleRecord } from "../core/memory-read.js";
+import { pathIdentityHash } from "../core/memory-read.js";
 
 const fullHostileMatrix = [
   "unicode-🪨-工程-e\u0301",
@@ -304,6 +305,26 @@ test("what with no memory stays in voice and returns 0", async () => {
   assert.deepEqual(outLines, []);
 });
 
+test("what and how do not conclude from intent-only triples", async () => {
+  const intentOnly: TripleRecord = {
+    ...seeded()[0] as TripleRecord,
+    id: "intent-only",
+    intent: { text: "change button" },
+    mechanism: { files: [], truncatedFiles: 0, baseline: "captured", coverageStatus: "complete" },
+  };
+  const whatOutput = sinks();
+  assert.equal(await what(["change", "button"], { load: () => [intentOnly], now: intentOnly.ts, ...whatOutput.deps }), 0);
+  assert.ok(whatOutput.sayLines.some((line) => line.includes("I not know")));
+  assert.equal(whatOutput.sayLines.some((line) => line.includes("it is")), false);
+  assert.deepEqual(whatOutput.outLines, []);
+
+  const howOutput = sinks();
+  assert.equal(how(["change", "button"], { load: () => [intentOnly], now: intentOnly.ts, ...howOutput.deps }), 0);
+  assert.ok(howOutput.sayLines.some((line) => line.includes("I not know")));
+  assert.equal(howOutput.sayLines.some((line) => line.includes("it become")), false);
+  assert.deepEqual(howOutput.outLines, []);
+});
+
 test("how reminds vocabulary without writing a prompt", () => {
   const { sayLines, outLines, deps } = sinks();
   assert.equal(how(["naikin"], { load: seeded, ...deps }), 0);
@@ -375,6 +396,66 @@ test("why discloses ambiguous index suffixes instead of choosing one rationale",
   assert.ok(output.sayLines.some((line) => line.includes("multiple possible paths")));
   assert.equal(output.sayLines.some((line) => line.includes("agent say: one")), false);
   assert.equal(output.sayLines.some((line) => line.includes("agent say: two")), false);
+});
+
+test("why keeps unmatched relative-root paths unknown", () => {
+  const triple: TripleRecord = {
+    ...seeded()[0] as TripleRecord,
+    id: "known-relative",
+    ts: 100,
+    cwd: "project",
+    platform: "linux",
+    mechanism: {
+      files: [{ path: "src/known.ts", plusMinus: [1, 0], props: ["known"], provenance: "tool-observed" }],
+      truncatedFiles: 0, baseline: "captured", coverageStatus: "complete",
+    },
+  };
+  const output = sinks();
+  assert.equal(why(["src/missing.ts"], { load: () => [triple], now: 100, ...output.deps }), 0);
+  assert.ok(output.sayLines.some((line) => line.includes("I not know if agent touch")));
+  assert.equal(output.sayLines.some((line) => line.includes("nobody touch")), false);
+});
+
+test("why displays the shared identity-hash witness selected by core", () => {
+  const triple: TripleRecord = {
+    ...seeded()[0] as TripleRecord,
+    id: "hashed-witness-cli",
+    ts: 100,
+    cwd: "/repo",
+    platform: "linux",
+    mechanism: {
+      files: [
+        {
+          path: "[redacted]",
+          identityHash: pathIdentityHash("/repo/src/index.ts", { platform: "linux", canonical: true }),
+          plusMinus: [9, 2], props: ["hashed"], provenance: "tool-observed",
+        },
+        { path: "web/src/index.ts", plusMinus: [1, 0], props: ["suffix"], provenance: "tool-observed" },
+      ],
+      truncatedFiles: 0, baseline: "captured", coverageStatus: "complete",
+    },
+  };
+  const output = sinks();
+  assert.equal(why(["src/index.ts"], { load: () => [triple], now: 100, ...output.deps }), 0);
+  assert.ok(output.outLines.some((line) => line.includes("[redacted] +9 -2")));
+  assert.equal(output.outLines.some((line) => line.includes("web/src/index.ts +1 -0")), false);
+});
+
+test("why rejects absolute cross-root legacy suffixes without platform", () => {
+  const triple: TripleRecord = {
+    ...seeded()[0] as TripleRecord,
+    id: "cross-root-legacy-cli",
+    ts: 100,
+    cwd: "/repo",
+    mechanism: {
+      files: [{ path: "/other/src/index.ts", plusMinus: [1, 0], props: ["other"], provenance: "tool-observed" }],
+      truncatedFiles: 0, baseline: "captured", coverageStatus: "complete",
+    },
+  };
+  const output = sinks();
+  assert.equal(why(["src/index.ts"], { load: () => [triple], now: 100, ...output.deps }), 0);
+  assert.ok(output.sayLines.some((line) => line.includes("I not know if agent touch")));
+  assert.equal(output.sayLines.some((line) => line.includes("nobody touch")), false);
 });
 
 test("future dictionary evidence says I do not know and does not enter teaching answers", async () => {

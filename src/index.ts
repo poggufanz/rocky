@@ -54,7 +54,8 @@ usage:
   rocky why [--] <file>     hear why remembered change touched file.
   rocky digest              hear this week's remembered intent pattern.
   rocky quiz                practice newest remembered intent or note; asks, then reveals,
-                            deterministic newest-first and never grades.
+                            deterministic newest-first, stable id tie-break, repeats unchanged
+                            candidates, and never grades.
   rocky export [--kind failure|fix|note|triple] [--since ISO|Nd]
                             dump raw memory as JSONL on stdout.
   rocky model status         report local-AI configuration without loading a model.

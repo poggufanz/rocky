@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import type { MemoryRecord, TripleRecord } from "../core/memory-read.js";
 import { createMemoryQueries } from "../core/memory-query.js";
+import { pathIdentityHash } from "../core/memory-read.js";
 import { disabledRecallWithAi, type RecallWithAiPort } from "../ai/port.js";
 import { createToolRegistry, McpInvalidParamsError, ToolExecutionError, TOOL_ENVELOPE_RESERVE_BYTES } from "../mcp/tools.js";
 import { MAX_RESPONSE_BYTES } from "../mcp/privacy.js";
@@ -199,6 +200,134 @@ test("why_file keeps two index suffixes ambiguous and future knowledge inert", a
   const customWhy = await customFuture.call("why_file", { path: "src/future.ts" }, new AbortController().signal);
   assert.deepEqual(customWhy.structuredContent.items, []);
   assert.equal(customWhy.structuredContent.coverageIncomplete, true);
+});
+
+test("why_file suppresses custom matches marked ambiguous", async () => {
+  const known: TripleRecord = {
+    ...triple,
+    id: "custom-ambiguous",
+    ts: 10,
+    cwd: "/repo",
+    platform: "linux",
+    mechanism: {
+      files: [{ path: "src/known.ts", plusMinus: [1, 0], props: ["known"], provenance: "tool-observed" }],
+      truncatedFiles: 0, baseline: "captured", coverageStatus: "complete",
+    },
+  };
+  const memory = {
+    ...createMemoryQueries(() => [known]),
+    whyFile: () => [known],
+    whyFileEvidence: () => ({
+      matches: [known], possible: [], ambiguousPath: true,
+      coverage: { status: "complete" as const, complete: true, filesCovered: 1, truncatedFiles: 0 },
+      coverageIncomplete: false,
+    }),
+  };
+  const result = await createToolRegistry({
+    exposure: "sanitized", memory, recallWithAi: disabledRecallWithAi,
+  }).call("why_file", { path: "src/known.ts" }, new AbortController().signal);
+  assert.deepEqual(result.structuredContent.items, []);
+  assert.equal(result.structuredContent.ambiguousPath, true);
+  assert.equal(result.structuredContent.coverageIncomplete, true);
+  assert.equal(result.structuredContent.coverageStatus, "unknown");
+});
+
+test("why_file keeps unmatched relative-root paths unknown", async () => {
+  const known: TripleRecord = {
+    ...triple,
+    id: "known-relative-mcp",
+    ts: 10,
+    cwd: "project",
+    platform: "linux",
+    mechanism: {
+      files: [{ path: "src/known.ts", plusMinus: [1, 0], props: ["known"], provenance: "tool-observed" }],
+      truncatedFiles: 0, baseline: "captured", coverageStatus: "complete",
+    },
+  };
+  const result = await createToolRegistry({
+    exposure: "sanitized",
+    memory: createMemoryQueries(() => [known]),
+    recallWithAi: disabledRecallWithAi,
+  }).call("why_file", { path: "src/missing.ts" }, new AbortController().signal);
+  assert.deepEqual(result.structuredContent.items, []);
+  assert.equal(result.structuredContent.coverageIncomplete, true);
+  assert.equal(result.structuredContent.coverageStatus, "unknown");
+});
+
+test("why_file retains the shared identity-hash witness triple", async () => {
+  const known: TripleRecord = {
+    ...triple,
+    id: "hashed-witness-mcp",
+    ts: 10,
+    cwd: "/repo",
+    platform: "linux",
+    mechanism: {
+      files: [
+        {
+          path: "[redacted]",
+          identityHash: pathIdentityHash("/repo/src/index.ts", { platform: "linux", canonical: true }),
+          plusMinus: [9, 2], props: ["hashed"], provenance: "tool-observed",
+        },
+        { path: "web/src/index.ts", plusMinus: [1, 0], props: ["suffix"], provenance: "tool-observed" },
+      ],
+      truncatedFiles: 0, baseline: "captured", coverageStatus: "complete",
+    },
+  };
+  const result = await createToolRegistry({
+    exposure: "sanitized",
+    memory: createMemoryQueries(() => [known]),
+    recallWithAi: disabledRecallWithAi,
+  }).call("why_file", { path: "src/index.ts" }, new AbortController().signal);
+  const item = (result.structuredContent.items as Array<{ id: string; files: Array<{ path: string; plusMinus: [number, number] }> }>)[0];
+  assert.equal(item?.id, "hashed-witness-mcp");
+  assert.ok(item?.files.some((file) => file.path === "[redacted]" && file.plusMinus[0] === 9 && file.plusMinus[1] === 2));
+  assert.ok(item?.files.some((file) => file.path === "web/src/index.ts" && file.plusMinus[0] === 1 && file.plusMinus[1] === 0));
+});
+
+test("why_file fallback rejects absolute cross-root legacy suffixes without platform", async () => {
+  const crossRoot: TripleRecord = {
+    ...triple,
+    id: "cross-root-legacy-mcp",
+    ts: 10,
+    cwd: "/repo",
+    mechanism: {
+      files: [{ path: "/other/src/index.ts", plusMinus: [1, 0], props: ["other"], provenance: "tool-observed" }],
+      truncatedFiles: 0, baseline: "captured", coverageStatus: "complete",
+    },
+  };
+  const memory = {
+    ...createMemoryQueries(() => [crossRoot]),
+    whyFile: () => [crossRoot],
+    whyFileEvidence: undefined,
+  };
+  const result = await createToolRegistry({
+    exposure: "sanitized", memory, recallWithAi: disabledRecallWithAi,
+  }).call("why_file", { path: "src/index.ts" }, new AbortController().signal);
+  assert.deepEqual(result.structuredContent.items, []);
+  assert.equal(result.structuredContent.coverageIncomplete, true);
+  assert.equal(result.structuredContent.coverageStatus, "unknown");
+});
+
+test("why_file sanitizes custom possible IDs while raw remains explicit", async () => {
+  const evidence = {
+    matches: [],
+    possible: [{ id: "user-secret-answer", ts: 10, source: "agent-hook" as const, reason: "path_may_be_omitted" as const }],
+    coverage: { status: "unknown" as const, complete: false, filesCovered: 0, truncatedFiles: 0 },
+    coverageIncomplete: true,
+  };
+  const memory = {
+    ...createMemoryQueries(() => []),
+    whyFile: () => [],
+    whyFileEvidence: () => evidence,
+  };
+  const sanitized = await createToolRegistry({
+    exposure: "sanitized", memory, recallWithAi: disabledRecallWithAi,
+  }).call("why_file", { path: "src/missing.ts" }, new AbortController().signal);
+  assert.doesNotMatch(JSON.stringify(sanitized), /user-secret-answer/u);
+  const raw = await createToolRegistry({
+    exposure: "raw", memory, recallWithAi: disabledRecallWithAi,
+  }).call("why_file", { path: "src/missing.ts" }, new AbortController().signal);
+  assert.match(JSON.stringify(raw), /user-secret-answer/u);
 });
 
 test("stats keeps legacy fields and adds bounded knowledge counters for old query implementations", async () => {

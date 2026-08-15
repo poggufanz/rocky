@@ -27,6 +27,8 @@ export function queryDictionary(records: readonly MemoryRecord[], query: string,
   for (const triple of triples(records)) {
     if (!isOperationalMemoryRecord(triple, now)) continue;
     if (!triple.intent) continue;
+    const witness = triple.mechanism.files[0];
+    if (witness === undefined || typeof witness.path !== "string" || witness.path.trim().length === 0) continue;
     const haystack = `${triple.intent.text} ${triple.rationale?.tags.join(" ") ?? ""}`;
     const score = similarity(queryTokens, tokens(haystack));
     if (score > 0) scored.push({ triple, score });
