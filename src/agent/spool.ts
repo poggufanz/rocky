@@ -1705,17 +1705,20 @@ function bindClaimCoverageLocked(
     if (written.kind !== "regular" || !written.stats) return false;
     const currentLive = inspectFile(livePath);
     if (currentLive.kind !== "regular" || !currentLive.stats || !sameIdentity(live.stats, currentLive.stats)) {
-      removeRegular(target, written.stats);
+      // Cleanup is itself a mutation: recheck the parent identity first and
+      // remove only the inode this operation proved it published.
+      if (appendLockUsable(lock)) removeRegular(target, written.stats);
       return false;
     }
     if (!appendLockUsable(lock)) {
-      removeRegular(target, written.stats);
+      // Parent identity was lost after publish; no further path mutation is
+      // trustworthy. Leave the identity-bound artifact for the locked sweep.
       return false;
     }
     unlinkSync(livePath);
     const after = inspectFile(livePath);
     if (after.kind === "missing") return true;
-    removeRegular(target, written.stats);
+    if (appendLockUsable(lock)) removeRegular(target, written.stats);
     return false;
   } catch {
     if (temporary !== undefined) {
