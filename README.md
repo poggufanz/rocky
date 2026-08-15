@@ -141,6 +141,8 @@ rocky run "python manage.py migrate"
 What happens:
 
 - **The command runs exactly as normal.** Output streams through untouched; the exit code is preserved. Rocky only speaks after your tool is done.
+
+On native Windows, `rocky run` and `rocky watch` use `shell: true`, so `cmd.exe`'s practical command-line ceiling is around 8,191 characters (quoting and expansion can change the exact boundary). Rocky's audited boundary is a 7,111-character command that reaches the child successfully; a 9,111-character command may fail before normal child execution. A shell that starts and then reports an error is still a started child result, so its exit code 127 remains a real failure. Use a response file, configuration file, or script when a command is near this boundary. Rocky does not silently rewrite the command, change quoting, or switch its shell.
 - **On failure**, Rocky fingerprints the error and files it. If he has heard this exact error before, he says so — and if a later run fixed it, he tells you what the fix was.
 - **On success**, Rocky confirms a fix only for the same reliable command identity that failed in this directory within eight hours. A same-program-only match is kept separately as a possible association; it never resolves the failure.
 
@@ -275,6 +277,8 @@ rocky model off
 When no model is installed, Rocky suggests a tiny `qwen3:0.6b-q4_K_M` model at about 523 MB or a balanced `qwen3.5:2b-q4_K_M` model at about 1.9 GB. Those are optional quantized download estimates, not Rocky tarball contents or peak-RAM guarantees; runtime, context, KV cache, and platform overhead can use more memory.
 
 Each Rocky generation request sends `keep_alive: 0`, asking Ollama to unload that model after the request. Rocky cannot stop a shared Ollama daemon or unload a model globally on behalf of other clients.
+
+The optional local AI boundary is fixed plain HTTP to `127.0.0.1` with an explicit port. Each generation request is capped at 64 KiB, each response at 256 KiB, and each request at 20 seconds; `rocky model use` shares a 30-second deadline across installed-model discovery and the capability probe. Invalid, unavailable, cancelled, or over-limit model output falls back to deterministic evidence, and configuration is saved only after both discovery and probe succeed.
 
 ## Project structure
 

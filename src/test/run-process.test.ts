@@ -5,10 +5,49 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { commandFingerprint } from "../core/fingerprint.js";
-import { speakFailureMemory } from "../commands/run.js";
+import { run, speakFailureMemory } from "../commands/run.js";
+import type { ExecResult } from "../core/exec.js";
 
 const packageRoot = process.cwd();
 const cli = join(packageRoot, "dist", "index.js");
+
+function fakeExecResult(started: boolean, code: number): ExecResult {
+  return { started, code, stderr: "spawn ENOENT", tail: ["spawn ENOENT"], durationMs: 5 };
+}
+
+test("run does not record a spawn-not-started result", async (t) => {
+  const home = mkdtempSync(join(tmpdir(), "rocky-run-not-started-"));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const original = process.env.ROCKY_HOME;
+  process.env.ROCKY_HOME = home;
+  try {
+    const result = await run("synthetic-not-started", async () => fakeExecResult(false, 127));
+    assert.equal(result, 127);
+    assert.equal(existsSync(join(home, "memory.jsonl")), false);
+  } finally {
+    if (original === undefined) delete process.env.ROCKY_HOME;
+    else process.env.ROCKY_HOME = original;
+  }
+});
+
+test("run records a started child that exits 127", async (t) => {
+  const home = mkdtempSync(join(tmpdir(), "rocky-run-started-127-"));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const original = process.env.ROCKY_HOME;
+  process.env.ROCKY_HOME = home;
+  try {
+    const result = await run("synthetic-started-127", async () => fakeExecResult(true, 127));
+    assert.equal(result, 127);
+    const records = readFileSync(join(home, "memory.jsonl"), "utf8")
+      .trim().split("\n").map((line) => JSON.parse(line) as { kind: string; exitCode?: number });
+    assert.equal(records.length, 1);
+    assert.equal(records[0]?.kind, "failure");
+    assert.equal(records[0]?.exitCode, 127);
+  } finally {
+    if (original === undefined) delete process.env.ROCKY_HOME;
+    else process.env.ROCKY_HOME = original;
+  }
+});
 
 test("run speech discloses cross-directory fix as possible, never strong", () => {
   const failureCwd = join(tmpdir(), "rocky-run-failure");

@@ -527,6 +527,16 @@ test("README keeps the sanitized-default, raw-opt-in, and loopback-only network 
   assert.ok(readme.includes("127.0.0.1"), "README must name the loopback address for optional AI");
 });
 
+test("README documents the native Windows command boundary and bounded loopback AI contract", () => {
+  assert.match(readme, /8,191 characters/);
+  assert.match(readme, /7,111-character command/);
+  assert.match(readme, /9,111-character command/);
+  assert.match(readme, /response file, configuration file, or script/);
+  assert.match(readme, /does not silently rewrite the command/);
+  assert.match(readme, /64 KiB.*256 KiB.*20 seconds/);
+  assert.match(readme, /30-second deadline.*discovery.*probe/);
+});
+
 function topLevelCommandSurface(indexSource: string): Set<string> {
   // Scrape only the outer `switch (command)` in main() - not the nested `hook`
   // sub-switch (install/uninstall/status are never dispatched as `rocky <word>`,

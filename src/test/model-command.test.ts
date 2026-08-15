@@ -4,7 +4,7 @@ import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { OllamaClient, OllamaModel, ProbeResult } from "../ai/ollama.js";
-import { model } from "../commands/model.js";
+import { MODEL_USE_DEADLINE_MS, model } from "../commands/model.js";
 import { loadConfig, saveConfigAtomic, type ConfigLoadResult, type RockyConfigV1 } from "../core/config.js";
 
 interface FakeOllama {
@@ -176,6 +176,35 @@ test("model use probes an exact installed name before atomically saving sanitize
     },
   });
   assert.match(output.stderr, /AI: enabled.*qwen3:0\.6b-q4_K_M.*sanitized/);
+});
+
+test("model use shares one bounded deadline across discovery and probe", async () => {
+  const signals: AbortSignal[] = [];
+  let saved: RockyConfigV1 | undefined;
+  const ollama: OllamaClient = {
+    async listInstalledModels(signal) {
+      assert.ok(signal);
+      signals.push(signal);
+      return [{ name: "installed-model", size: 1 }];
+    },
+    async probeModel(_name, signal) {
+      assert.ok(signal);
+      signals.push(signal);
+      return { supported: true };
+    },
+    async generateStructured() { throw new Error("model use must not generate"); },
+  };
+
+  assert.equal(await model(["use", "installed-model"], {
+    ollama,
+    loadConfig: configLoader({ status: "missing", path: "/tmp/task16-model-deadline.json", config: { version: 1, ai: { enabled: false } } }),
+    saveConfigAtomic: (config) => { saved = config; return { path: "/tmp/task16-model-deadline.json" }; },
+  }), 0);
+  assert.equal(MODEL_USE_DEADLINE_MS, 30_000);
+  assert.equal(signals.length, 2);
+  assert.strictEqual(signals[0], signals[1], "tags and probe must share one aggregate deadline signal");
+  assert.equal(signals[0]?.aborted, false);
+  assert.deepEqual(saved?.ai, { enabled: true, provider: "ollama", model: "installed-model", exposure: "sanitized" });
 });
 
 test("model use accepts raw only through the exact exposure option", async () => {

@@ -1,7 +1,9 @@
 export const OLLAMA_ORIGIN = "http://127.0.0.1:11434";
+export const OLLAMA_REQUEST_LIMIT = 64 * 1024;
 export const OLLAMA_RESPONSE_LIMIT = 256 * 1024;
 
 const DEFAULT_TIMEOUT_MS = 20_000;
+const MAX_TIMEOUT_MS = 120_000;
 
 export interface OllamaModel {
   name: string;
@@ -28,6 +30,15 @@ export interface OllamaClient {
 export interface OllamaClientOptions {
   fetchImpl?: typeof fetch;
   timeoutMs?: number;
+  /** Internal test seam; production callers use the fixed loopback origin. */
+  origin?: string;
+}
+
+export class OllamaRequestTooLargeError extends Error {
+  constructor() {
+    super(`Ollama request exceeds ${OLLAMA_REQUEST_LIMIT} byte limit`);
+    this.name = "OllamaRequestTooLargeError";
+  }
 }
 
 export class OllamaResponseTooLargeError extends Error {
@@ -85,7 +96,14 @@ async function readJson(response: Response, boundary: BoundedSignal): Promise<un
   try {
     while (true) {
       if (boundary.signal.aborted) throw abortReason(boundary.signal);
-      const { done, value } = await reader.read();
+      let result: ReadableStreamReadResult<Uint8Array>;
+      try {
+        result = await reader.read();
+      } catch (error) {
+        if (boundary.signal.aborted) throw abortReason(boundary.signal);
+        throw error;
+      }
+      const { done, value } = result;
       if (boundary.signal.aborted) throw abortReason(boundary.signal);
       if (done) break;
       total += value.byteLength;
@@ -130,21 +148,48 @@ function errorReason(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+function validateOrigin(origin: string): string {
+  const match = /^http:\/\/127\.0\.0\.1:([1-9][0-9]{0,4})$/u.exec(origin);
+  if (!match) throw new Error("Ollama origin must be explicit plain HTTP loopback");
+  const port = Number(match[1]);
+  if (!Number.isInteger(port) || port < 1 || port > 65_535) {
+    throw new Error("Ollama origin port must be between 1 and 65535");
+  }
+  return `http://127.0.0.1:${port}`;
+}
+
+function boundedRequestBody(value: unknown): string {
+  const body = JSON.stringify(value);
+  if (typeof body !== "string") throw new Error("Ollama request body is not JSON");
+  if (Buffer.byteLength(body, "utf8") > OLLAMA_REQUEST_LIMIT) throw new OllamaRequestTooLargeError();
+  return body;
+}
+
 export function createOllamaClient(options: OllamaClientOptions = {}): OllamaClient {
   const fetchImpl = options.fetchImpl ?? globalThis.fetch;
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const origin = validateOrigin(options.origin ?? OLLAMA_ORIGIN);
 
   if (typeof fetchImpl !== "function") throw new Error("fetch is unavailable");
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0 || timeoutMs > MAX_TIMEOUT_MS) {
+    throw new Error(`Ollama timeout must be finite and between 1 and ${MAX_TIMEOUT_MS} ms`);
+  }
 
   async function requestJson(path: string, init: RequestInit, parent?: AbortSignal): Promise<unknown> {
     const boundary = boundedSignal(parent, timeoutMs);
     try {
       if (boundary.signal.aborted) throw abortReason(boundary.signal);
-      const response = await fetchImpl(`${OLLAMA_ORIGIN}${path}`, {
-        ...init,
-        signal: boundary.signal,
-        redirect: "error",
-      });
+      let response: Response;
+      try {
+        response = await fetchImpl(`${origin}${path}`, {
+          ...init,
+          signal: boundary.signal,
+          redirect: "error",
+        });
+      } catch (error) {
+        if (boundary.signal.aborted) throw abortReason(boundary.signal);
+        throw error;
+      }
       if (boundary.signal.aborted) throw abortReason(boundary.signal);
       rejectHttpResponse(response, boundary);
       return await readJson(response, boundary);
@@ -159,18 +204,19 @@ export function createOllamaClient(options: OllamaClientOptions = {}): OllamaCli
     schema: Record<string, unknown>,
     signal?: AbortSignal,
   ): Promise<unknown> {
+    const body = boundedRequestBody({
+      model,
+      prompt,
+      format: schema,
+      keep_alive: 0,
+      stream: false,
+      think: false,
+      options: { temperature: 0, num_ctx: 2048, num_predict: 256 },
+    });
     return requestJson("/api/generate", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        model,
-        prompt,
-        format: schema,
-        keep_alive: 0,
-        stream: false,
-        think: false,
-        options: { temperature: 0, num_ctx: 2048, num_predict: 256 },
-      }),
+      body,
     }, signal);
   }
 
@@ -215,6 +261,7 @@ export function createOllamaClient(options: OllamaClientOptions = {}): OllamaCli
     async probeModel(model, signal) {
       const schema = {
         type: "object",
+        additionalProperties: false,
         required: ["ok"],
         properties: { ok: { const: true } },
       };

@@ -24,25 +24,27 @@ import { findByFingerprint, fixFromElsewhere, getFix } from "../core/memory-quer
 import { ago, detail, elapsed, say } from "../ui/rocky.js";
 import { safeTerminalLine } from "../ui/sanitize.js";
 
-export async function run(cmd: string): Promise<number> {
+export async function run(cmd: string, processRunner: (cmd: string) => Promise<ExecResult> = runProcess): Promise<number> {
   if (!cmd || cmd.trim().length === 0) {
     say("no command. give command, question");
     return 2;
   }
 
-  const result = await runProcess(cmd);
+  const result = await processRunner(cmd);
 
   // Memory is bookkeeping. It must never change what the wrapped command did,
   // so a storage failure is reported and swallowed rather than propagated.
-  try {
-    if (result.code === 0) {
-      onSuccess(cmd);
-    } else if (!CANCEL_CODES.has(result.code)) {
-      onFailure(cmd, result);
+  if (result.started) {
+    try {
+      if (result.code === 0) {
+        onSuccess(cmd);
+      } else if (!CANCEL_CODES.has(result.code)) {
+        onFailure(cmd, result);
+      }
+    } catch {
+      say("I cannot write memory. this one I forget.");
+      detail(`    memory: ${resolveRockyPaths().memory}`);
     }
-  } catch {
-    say("I cannot write memory. this one I forget.");
-    detail(`    memory: ${resolveRockyPaths().memory}`);
   }
   return result.code;
 }

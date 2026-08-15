@@ -8,6 +8,7 @@ import { fingerprint, FINGERPRINT_ALGORITHM_VERSION } from "../core/fingerprint.
 import { quoteShellPath } from "../core/shell-quote.js";
 import { validateRockyPhrase } from "../ui/phrases.js";
 import type { NotifyInput } from "../core/notify.js";
+import type { ExecResult } from "../core/exec.js";
 
 function sandboxHome(t: TestContext): string {
   const root = mkdtempSync(join(tmpdir(), "rocky-watch-cmd-"));
@@ -328,6 +329,50 @@ test("Ctrl-C-style exit codes (130, 143) pass through with no memory record, no 
     assert.deepEqual(notifier.calls, []);
     assert.equal(existsSync(join(home, "memory.jsonl")), false);
   }
+});
+
+test("watch keeps spawn-not-started out of memory/logs but preserves facts and notification", async (t) => {
+  const quietHome = sandboxHome(t);
+  const quietResult: ExecResult = {
+    started: false, code: 127, stderr: "spawn ENOENT", tail: ["spawn ENOENT"], durationMs: 5,
+  };
+  const quiet = await withRockyHome(quietHome, () => captureStderr(() => watch(
+    ["--quiet", "synthetic-not-started"],
+    { notify: () => { throw new Error("quiet watch must not notify"); }, runProcess: async () => quietResult },
+  )));
+  assert.equal(quiet.result, 127);
+  assert.match(quiet.stderr, /duration:/);
+  assert.match(quiet.stderr, /exit: 127/);
+  assert.doesNotMatch(quiet.stderr, /log:/);
+  assert.equal(existsSync(join(quietHome, "memory.jsonl")), false);
+  assert.equal(existsSync(join(quietHome, "watch")), false);
+
+  const publicHome = sandboxHome(t);
+  const notifier = fakeNotifier();
+  const publicResult = await withRockyHome(publicHome, () => captureStderr(() => watch(
+    ["synthetic-not-started"],
+    { notify: notifier.notify, runProcess: async () => quietResult },
+  )));
+  assert.equal(publicResult.result, 127);
+  assert.deepEqual(notifier.calls, [{ cmd: "synthetic-not-started", ok: false, durationMs: 5 }]);
+  assert.equal(existsSync(join(publicHome, "memory.jsonl")), false);
+  assert.equal(existsSync(join(publicHome, "watch")), false);
+});
+
+test("watch records a started child that exits 127", async (t) => {
+  const home = sandboxHome(t);
+  const notifier = fakeNotifier();
+  const childResult: ExecResult = {
+    started: true, code: 127, stderr: "child-127", tail: ["child-127"], durationMs: 5,
+  };
+  const result = await withRockyHome(home, () => captureStderr(() => watch(
+    ["synthetic-started-127"],
+    { notify: notifier.notify, runProcess: async () => childResult },
+  )));
+  assert.equal(result.result, 127);
+  assert.equal(existsSync(join(home, "memory.jsonl")), true);
+  assert.equal(existsSync(join(home, "watch")), true);
+  assert.deepEqual(notifier.calls, [{ cmd: "synthetic-started-127", ok: false, durationMs: 5 }]);
 });
 
 test("watch's failure path admits when the remembered fix comes from a different directory", async (t) => {

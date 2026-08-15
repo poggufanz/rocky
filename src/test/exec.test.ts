@@ -35,6 +35,32 @@ test("win32 command construction for a real-child spawn double-quotes, not POSIX
   assert.ok(!command.includes("'"), "cmd.exe cannot parse POSIX single quotes");
 });
 
+test("native Windows command boundary distinguishes normal child execution from shell-length failure", {
+  skip: process.platform !== "win32" && "requires native Windows cmd.exe command-length behavior",
+}, async () => {
+  const marker = "task16-boundary-child";
+  const script = `process.stderr.write('${marker}'); process.exit(0)`;
+  const exactLengthCommand = (length: number): string => {
+    const prefix = `${nodeCommand(script)} "`;
+    const suffix = `"`;
+    const fillerLength = length - prefix.length - suffix.length;
+    assert.ok(fillerLength > 0);
+    return `${prefix}${"x".repeat(fillerLength)}${suffix}`;
+  };
+
+  const auditedPass = await runProcess(exactLengthCommand(7_111));
+  assert.equal(auditedPass.started, true);
+  assert.equal(auditedPass.code, 0);
+  assert.equal(auditedPass.stderr, marker);
+
+  const overBoundary = await runProcess(exactLengthCommand(9_111));
+  assert.notEqual(overBoundary.code, 0);
+  assert.notEqual(overBoundary.stderr, marker, "over-limit command must not claim normal child execution");
+  // cmd.exe may start and then reject its command line, or CreateProcess may
+  // reject it before a child starts. Both are honest outcomes at this boundary.
+  assert.equal(typeof overBoundary.started, "boolean");
+});
+
 test("createTailBuffer keeps only the last N lines, in order", () => {
   const buf = createTailBuffer(200);
   for (let i = 1; i <= 500; i++) buf.push(`line ${i}\n`);
@@ -125,9 +151,41 @@ test("createTailBuffer caps the in-progress partial line as it accumulates acros
 test("runProcess: nonzero exit with stderr", async () => {
   const result = await runProcess(nodeCommand("process.stderr.write('boom\\n'); process.exit(3)"));
   assert.equal(result.code, 3);
+  assert.equal(result.started, true);
   assert.ok(result.tail.includes("boom"));
   assert.equal(result.stderr, "boom");
   assert.ok(result.durationMs >= 0);
+});
+
+test("runProcess: a started child that exits 127 remains a real child result", async () => {
+  const result = await runProcess(nodeCommand("process.stderr.write('child-127\\n'); process.exit(127)"));
+  assert.equal(result.started, true);
+  assert.equal(result.code, 127);
+  assert.equal(result.stderr, "child-127");
+});
+
+test("runProcess: a spawn error reports not-started separately from code 127", async () => {
+  const missing = join(tmpdir(), `rocky-exec-missing-${process.pid}-${Date.now()}`);
+  const result = await runProcess(missing, { shell: false });
+  assert.equal(result.started, false);
+  assert.equal(result.code, 127);
+  assert.match(result.stderr, /spawn|ENOENT|not found/iu);
+});
+
+test("runProcess: separate argv still streams a started child", async () => {
+  const result = await runProcess(process.execPath, {
+    shell: false,
+    args: ["-e", "process.stderr.write('argv-child\\n'); process.exit(7)"],
+  });
+  assert.equal(result.started, true);
+  assert.equal(result.code, 7);
+  assert.equal(result.stderr, "argv-child");
+});
+
+test("runProcess: signal exit retains started evidence", { skip: process.platform === "win32" ? "POSIX signal exit is unavailable on native Windows" : false }, async () => {
+  const result = await runProcess(nodeCommand("process.kill(process.pid, 'SIGTERM')"));
+  assert.equal(result.started, true);
+  assert.equal(result.code, 143);
 });
 
 test("runProcess: a multi-byte character split across a real child's stderr chunks decodes intact", async (t) => {

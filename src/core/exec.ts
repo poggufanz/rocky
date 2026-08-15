@@ -29,6 +29,10 @@ export const CANCEL_CODES: ReadonlySet<number> = new Set([130, 143]);
 export interface ExecOptions {
   tailLines?: number; // default TAIL_LINES
   maxLineBytes?: number; // default MAX_LINE_BYTES
+  /** Shell mode for the child; defaults to true for the public command path. */
+  shell?: boolean | string;
+  /** Optional argv following the executable when shell is false. */
+  args?: readonly string[];
   /** Silence threshold. undefined = no timer at all (the `run` behavior). */
   idleMs?: number;
   /** Called every time the threshold is crossed again; ms since last stderr. */
@@ -36,6 +40,8 @@ export interface ExecOptions {
 }
 
 export interface ExecResult {
+  /** True only after Node reports that the child process was spawned. */
+  started: boolean;
   code: number;
   /** The bounded tail joined with "\n" — what fingerprinting consumes. */
   stderr: string;
@@ -243,17 +249,28 @@ export function runProcess(cmd: string, options: ExecOptions = {}): Promise<Exec
   let lastActivity = start;
 
   return new Promise((resolve) => {
-    const child = spawn(cmd, {
-      shell: true,
+    const child = spawn(cmd, options.args ?? [], {
+      shell: options.shell ?? true,
       stdio: ["inherit", "inherit", "pipe"],
     });
+    let started = false;
+    let settled = false;
+    let idleTimer: NodeJS.Timeout | undefined;
+
+    child.once("spawn", () => { started = true; });
+
+    const finish = (code: number, tail: string[], stderr: string): void => {
+      if (settled) return;
+      settled = true;
+      if (idleTimer) clearInterval(idleTimer);
+      resolve({ started, code, stderr, tail, durationMs: Date.now() - start });
+    };
 
     // Repeating, not one-shot: with the child silent, every idleMs tick's
     // elapsed-since-activity keeps clearing the threshold again (idleMs,
     // 2*idleMs, 3*idleMs, ...), so onIdle fires on each crossing. unref()
     // so this never holds the process open; cleared on both close and error
     // so it can never fire after runProcess has already resolved.
-    let idleTimer: NodeJS.Timeout | undefined;
     if (options.idleMs !== undefined) {
       const idleMs = options.idleMs;
       idleTimer = setInterval(() => {
@@ -271,21 +288,19 @@ export function runProcess(cmd: string, options: ExecOptions = {}): Promise<Exec
     });
 
     child.on("close", (code, signal) => {
-      if (idleTimer) clearInterval(idleTimer);
       buffer.push(decoder.end());
       const tail = buffer.end();
-      resolve({ code: code ?? signalExit(signal), stderr: tail.join("\n"), tail, durationMs: Date.now() - start });
+      finish(code ?? signalExit(signal), tail, tail.join("\n"));
     });
 
     child.on("error", (err) => {
-      if (idleTimer) clearInterval(idleTimer);
       const message = `${err.message}\n`;
       trackChildStderr(Buffer.from(message));
       process.stderr.write(message);
       buffer.push(decoder.end());
       buffer.push(message);
       const tail = buffer.end();
-      resolve({ code: 127, stderr: tail.join("\n"), tail, durationMs: Date.now() - start });
+      finish(127, tail, tail.join("\n"));
     });
   });
 }

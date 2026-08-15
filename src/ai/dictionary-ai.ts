@@ -4,8 +4,9 @@ import { createOllamaClient, type OllamaClient } from "./ollama.js";
 
 export const DICTIONARY_RANK_SCHEMA: Record<string, unknown> = {
   type: "object",
+  additionalProperties: false,
   properties: {
-    ranked_ids: { type: "array", items: { type: "string" } },
+    ranked_ids: { type: "array", minItems: 1, maxItems: 20, uniqueItems: true, items: { type: "string" } },
   },
   required: ["ranked_ids"],
 };
@@ -20,8 +21,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 export function parseRankOutput(value: unknown, hits: readonly DictionaryHit[]): readonly string[] | undefined {
   if (!isRecord(value) || !Object.prototype.hasOwnProperty.call(value, "ranked_ids")) return undefined;
+  if (Object.keys(value).length !== 1) return undefined;
   const rankedIds = value.ranked_ids;
-  if (!Array.isArray(rankedIds) || rankedIds.length === 0 || !rankedIds.every((id) => typeof id === "string")) {
+  if (!Array.isArray(rankedIds) || rankedIds.length === 0 || rankedIds.length > 20
+      || !rankedIds.every((id) => typeof id === "string")) {
     return undefined;
   }
 
@@ -29,10 +32,9 @@ export function parseRankOutput(value: unknown, hits: readonly DictionaryHit[]):
   const result: string[] = [];
   const seen = new Set<string>();
   for (const id of rankedIds) {
-    if (knownIds.has(id) && !seen.has(id)) {
-      seen.add(id);
-      result.push(id);
-    }
+    if (!knownIds.has(id) || seen.has(id)) return undefined;
+    seen.add(id);
+    result.push(id);
   }
   return result.length === 0 ? undefined : result;
 }

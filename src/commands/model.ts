@@ -33,6 +33,7 @@ interface UseRequest {
 
 const TINY = { label: "Tiny", name: "qwen3:0.6b-q4_K_M", size: "523 MB" } as const;
 const BALANCED = { label: "Balanced", name: "qwen3.5:2b-q4_K_M", size: "1.9 GB" } as const;
+export const MODEL_USE_DEADLINE_MS = 30_000;
 
 function defaultDependencies(): ModelDependencies {
   return { ollama: createOllamaClient(), loadConfig, saveConfigAtomic };
@@ -88,58 +89,64 @@ async function useModel(request: UseRequest, deps: ModelDependencies): Promise<n
   if (current === undefined) return 1;
   if (current.status === "invalid") return configurationFailure(current.path, "invalid");
 
-  let installed;
+  const deadline = new AbortController();
+  const deadlineTimer = setTimeout(() => deadline.abort(new Error("model use deadline exceeded")), MODEL_USE_DEADLINE_MS);
   try {
-    installed = await deps.ollama.listInstalledModels();
-  } catch {
-    say("Ollama not available. memory still works.");
-    detail("Ollama unavailable while listing installed models");
-    return 1;
-  }
-
-  if (!installed.some((candidate) => candidate.name === request.model)) {
-    if (installed.length === 0) printChoices();
-    else {
-      say("requested model not installed. pull it yourself. then use it.");
-      detail(`ollama pull ${request.model}`);
+    let installed;
+    try {
+      installed = await deps.ollama.listInstalledModels(deadline.signal);
+    } catch {
+      say("Ollama not available. memory still works.");
+      detail("Ollama unavailable while listing installed models");
+      return 1;
     }
-    return 1;
-  }
 
-  if (request.exposure === "raw") {
-    detail("raw exposure sends unredacted recall evidence to local Ollama.");
-  }
+    if (!installed.some((candidate) => candidate.name === request.model)) {
+      if (installed.length === 0) printChoices();
+      else {
+        say("requested model not installed. pull it yourself. then use it.");
+        detail(`ollama pull ${request.model}`);
+      }
+      return 1;
+    }
 
-  let probe;
-  try {
-    probe = await deps.ollama.probeModel(request.model);
-  } catch {
-    say("model probe not work. configuration stays same. bad bad.");
-    detail(`Ollama probe failed: ${request.model}`);
-    return 1;
-  }
-  if (!probe.supported) {
-    say("model probe not work. configuration stays same. bad bad.");
-    detail(`Ollama probe unsupported: ${request.model}`);
-    return 1;
-  }
+    if (request.exposure === "raw") {
+      detail("raw exposure sends unredacted recall evidence to local Ollama.");
+    }
 
-  const config: RockyConfigV1 = {
-    version: 1,
-    ai: { enabled: true, provider: "ollama", model: request.model, exposure: request.exposure },
-    ...preservedKeys(current),
-  };
-  try {
-    deps.saveConfigAtomic(config);
-  } catch {
-    say("configuration not saved. memory still works. bad bad.");
-    detail(`AI config could not save: ${current.path}`);
-    return 1;
-  }
+    let probe;
+    try {
+      probe = await deps.ollama.probeModel(request.model, deadline.signal);
+    } catch {
+      say("model probe not work. configuration stays same. bad bad.");
+      detail(`Ollama probe failed: ${request.model}`);
+      return 1;
+    }
+    if (!probe.supported) {
+      say("model probe not work. configuration stays same. bad bad.");
+      detail(`Ollama probe unsupported: ${request.model}`);
+      return 1;
+    }
 
-  say("small model configured. memory still works.");
-  detail(`AI: enabled (${request.model}, ${request.exposure})`);
-  return 0;
+    const config: RockyConfigV1 = {
+      version: 1,
+      ai: { enabled: true, provider: "ollama", model: request.model, exposure: request.exposure },
+      ...preservedKeys(current),
+    };
+    try {
+      deps.saveConfigAtomic(config);
+    } catch {
+      say("configuration not saved. memory still works. bad bad.");
+      detail(`AI config could not save: ${current.path}`);
+      return 1;
+    }
+
+    say("small model configured. memory still works.");
+    detail(`AI: enabled (${request.model}, ${request.exposure})`);
+    return 0;
+  } finally {
+    clearTimeout(deadlineTimer);
+  }
 }
 
 export async function model(argv: readonly string[], dependencies?: ModelDependencies): Promise<number> {

@@ -641,13 +641,13 @@ test("what --ai reorders known hits and appends every omitted hit exactly once",
   const rank = {
     async run(_query: string, hits: readonly { triple: { id: string } }[]) {
       assert.equal(hits.length, 3);
-      return ["t1", "unknown", "t1", "t2"];
+      return ["t2", "t1"];
     },
   };
   assert.equal(await what(["--ai", "naikin", "button"], { load: multiSeeded, rank, ...deps }), 0);
-  assert.equal(sayLines[0], 'you say "naikin button". it is margin-top. I think. check, question');
+  assert.equal(sayLines[0], 'you say "naikin button". it is color. I think. check, question');
   assert.equal(outLines.length, 3);
-  const expectedOrder = ["src/first.css", "src/second.css", "src/third.css"];
+  const expectedOrder = ["src/second.css", "src/first.css", "src/third.css"];
   assert.deepEqual(outLines.map((line) => expectedOrder.find((path) => line.includes(path))), expectedOrder);
   for (const path of expectedOrder) {
     assert.equal(outLines.filter((line) => line.includes(path)).length, 1, path);

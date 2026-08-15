@@ -184,6 +184,7 @@ test("parseAmbiguityOutput rejects junk and caps referent", () => {
 test("ambiguity schema is exact and evidence count uses distinct paths", () => {
   assert.deepEqual(AMBIGUITY_SCHEMA, {
     type: "object",
+    additionalProperties: false,
     properties: {
       ambiguous: { type: "boolean" },
       referent: { type: "string" },

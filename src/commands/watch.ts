@@ -12,7 +12,7 @@
 
 import { closeSync, constants, fstatSync, lstatSync, openSync, readSync, type BigIntStats } from "node:fs";
 import { fingerprintCandidates } from "../core/fingerprint.js";
-import { CANCEL_CODES, runProcess, type ExecResult } from "../core/exec.js";
+import { CANCEL_CODES, runProcess, type ExecOptions, type ExecResult } from "../core/exec.js";
 import { resolveRockyPaths } from "../core/state-paths.js";
 import { recordWatchFailure, type MemoryRecord } from "../core/memory.js";
 import { isCompleteMemoryCoverage, loadMemoryChecked } from "../core/memory-read.js";
@@ -81,6 +81,7 @@ export function unseenLabels(seen: Set<string>, fileContent: string): string[] {
 
 export interface WatchDependencies {
   notify: (input: NotifyInput) => void;
+  runProcess?: (cmd: string, options: ExecOptions) => Promise<ExecResult>;
   /** Test seams; omitted callers retain the real read, timer, and persona behavior. */
   readLabels?: (path: string) => string;
   setInterval?: (callback: () => void, delayMs: number) => WatchTimer;
@@ -263,6 +264,7 @@ export async function watch(
   const seen = new Set<string>();
   const labelsPath = resolveRockyPaths().labels;
   const readLabels = dependencies.readLabels ?? readLabelsFile;
+  const execute = dependencies.runProcess ?? runProcess;
   const schedulePoll = dependencies.setInterval ?? setInterval;
   const cancelPoll = dependencies.clearInterval ?? clearInterval;
   const speakLabel = dependencies.say ?? say;
@@ -295,7 +297,7 @@ export async function watch(
         labelTimer = undefined;
       }
     }
-    result = await runProcess(cmd, {
+    result = await execute(cmd, {
       idleMs: WATCH_IDLE_MS,
       onIdle: quiet ? undefined : (elapsedMs: number) => say(idleLine(elapsedMs)),
     });
@@ -314,16 +316,18 @@ export async function watch(
   // Memory/log bookkeeping must never change what the wrapped command did —
   // same contract as run.ts — so a storage failure is reported and swallowed.
   let logPath: string | undefined;
-  try {
-    if (result.code === 0) {
-      onWatchSuccess(cmd, cwd, quiet, result);
-    } else {
-      logPath = onWatchFailure(cmd, cwd, quiet, result);
-    }
-  } catch {
-    if (!quiet) {
-      say("I cannot write memory. this one I forget.");
-      detail(`    memory: ${resolveRockyPaths().memory}`);
+  if (result.started) {
+    try {
+      if (result.code === 0) {
+        onWatchSuccess(cmd, cwd, quiet, result);
+      } else {
+        logPath = onWatchFailure(cmd, cwd, quiet, result);
+      }
+    } catch {
+      if (!quiet) {
+        say("I cannot write memory. this one I forget.");
+        detail(`    memory: ${resolveRockyPaths().memory}`);
+      }
     }
   }
 

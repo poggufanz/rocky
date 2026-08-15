@@ -84,6 +84,37 @@ function completion(child: ChildProcess): Promise<number> {
   });
 }
 
+type WorkerOutcome = {
+  code: number | null;
+  signal: NodeJS.Signals | null;
+  pid: number | null;
+  stderr: string;
+  spawnError: { name: string; message: string; code?: string } | null;
+};
+
+function completionWithStderr(child: ChildProcess): Promise<WorkerOutcome> {
+  let stderr = "";
+  child.stderr?.on("data", (chunk) => { stderr += String(chunk); });
+  let spawnError: WorkerOutcome["spawnError"] = null;
+  child.once("error", (error) => {
+    const candidate = error as NodeJS.ErrnoException;
+    spawnError = {
+      name: error.name,
+      message: error.message,
+      ...(typeof candidate.code === "string" ? { code: candidate.code } : {}),
+    };
+  });
+  return new Promise<WorkerOutcome>((resolve) => {
+    child.once("close", (code, signal) => resolve({
+      code,
+      signal,
+      pid: child.pid ?? null,
+      stderr,
+      spawnError,
+    }));
+  });
+}
+
 function delayedMemoryReadPreload(path: string): void {
   writeFileSync(path, [
     "const fs = require('node:fs');",
@@ -226,17 +257,24 @@ async function concurrentSuccesses(t: TestContext, count: number): Promise<void>
   const children = Array.from({ length: count }, () => spawn(process.execPath, [
     "--input-type=module", "--eval", worker,
     memoryModuleUrl, runModuleUrl, home, cwd, cmd, ready, start,
-  ], { env, stdio: "ignore", windowsHide: true }));
+  ], { env, stdio: ["ignore", "ignore", "pipe"], windowsHide: true }));
   t.after(() => {
     for (const child of children) {
       try { child.kill(); } catch { /* already gone */ }
     }
   });
-  const completions = children.map(completion);
+  const completions = children.map(completionWithStderr);
 
   await waitFor(() => readdirSync(ready).length === count, 45_000, `${count} success workers`);
   writeFileSync(start, "start", "utf8");
-  assert.deepEqual(await Promise.all(completions), Array<number>(count).fill(0));
+  const outcomes = await Promise.all(completions);
+  const lock = join(home, "memory.jsonl.triple.lock");
+  const lockState = existsSync(lock) ? readFileSync(lock, "utf8") : "absent";
+  assert.deepEqual(
+    outcomes.map(({ code }) => code),
+    Array<number>(count).fill(0),
+    `worker outcomes: ${JSON.stringify({ outcomes, lockState })}`,
+  );
   assert.equal(existsSync(readMarker), true, "readSync delay seam must fire");
 
   const records = memory.loadMemory(join(home, "memory.jsonl"));

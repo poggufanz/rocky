@@ -14,6 +14,7 @@ const MAX_PAYLOAD_BYTES = 16 * 1024;
 
 export const AMBIGUITY_SCHEMA: Record<string, unknown> = {
   type: "object",
+  additionalProperties: false,
   properties: {
     ambiguous: { type: "boolean" },
     referent: { type: "string" },

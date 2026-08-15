@@ -286,19 +286,17 @@ function fileForQuery(triple: DictionaryHit["triple"], query: string): Dictionar
 
 function reorder(hits: readonly DictionaryHit[], rankedIds: readonly string[]): DictionaryHit[] | undefined {
   const result: DictionaryHit[] = [];
-  const used = new Set<number>();
+  const known = new Set(hits.map((hit) => hit.triple.id));
+  const seen = new Set<string>();
   for (const id of rankedIds) {
-    for (let index = 0; index < hits.length; index += 1) {
-      if (!used.has(index) && hits[index]?.triple.id === id) {
-        used.add(index);
-        result.push(hits[index] as DictionaryHit);
-      }
-    }
+    if (!known.has(id) || seen.has(id)) return undefined;
+    seen.add(id);
+    const match = hits.find((hit) => hit.triple.id === id);
+    if (match === undefined) return undefined;
+    result.push(match);
   }
   if (result.length === 0) return undefined;
-  for (let index = 0; index < hits.length; index += 1) {
-    if (!used.has(index)) result.push(hits[index] as DictionaryHit);
-  }
+  for (const hit of hits) if (!seen.has(hit.triple.id)) result.push(hit);
   return result;
 }
 

@@ -3,7 +3,9 @@ import assert from "node:assert/strict";
 import {
   createOllamaClient,
   OLLAMA_ORIGIN,
+  OLLAMA_REQUEST_LIMIT,
   OLLAMA_RESPONSE_LIMIT,
+  OllamaRequestTooLargeError,
   OllamaResponseTooLargeError,
 } from "../ai/ollama.js";
 
@@ -62,6 +64,41 @@ function boundedJsonResponse(bytes: number): Response {
   assert.equal(Buffer.byteLength(payload, "utf8"), bytes);
   return new Response(payload, { headers: { "content-type": "application/json" } });
 }
+
+test("loopback origin seam accepts only explicit plain HTTP 127.0.0.1 ports", () => {
+  for (const origin of [
+    "http://127.0.0.1",
+    "http://127.0.0.1:0",
+    "http://127.0.0.1:65536",
+    "http://localhost:11434",
+    "https://127.0.0.1:11434",
+    "http://127.0.0.1:11434/path",
+    "http://127.0.0.1:11434?query",
+    "http://127.0.0.1:11434#fragment",
+    "http://user@127.0.0.1:11434",
+    "http://[::1]:11434",
+  ]) {
+    assert.throws(() => createOllamaClient({ origin }), /origin/iu, origin);
+  }
+  assert.doesNotThrow(() => createOllamaClient({ origin: "http://127.0.0.1:1" }));
+  assert.doesNotThrow(() => createOllamaClient({ origin: "http://127.0.0.1:65535" }));
+});
+
+test("rejects non-positive, non-finite, and unbounded request timeouts", () => {
+  for (const timeoutMs of [0, -1, Number.NaN, Number.POSITIVE_INFINITY, 120_001]) {
+    assert.throws(() => createOllamaClient({ timeoutMs }), /timeout/iu, String(timeoutMs));
+  }
+});
+
+test("rejects an oversized outbound request before contacting loopback", async () => {
+  const { fetchImpl, calls } = fetchFrom([]);
+  const client = createOllamaClient({ fetchImpl });
+  await assert.rejects(
+    client.generateStructured("model", "x".repeat(OLLAMA_REQUEST_LIMIT), {}),
+    OllamaRequestTooLargeError,
+  );
+  assert.equal(calls.length, 0);
+});
 
 test("lists canonical installed models from loopback tags", async () => {
   const { fetchImpl, calls } = fetchFrom([jsonResponse(tagsResponse)]);
@@ -303,6 +340,7 @@ test("probes structured non-thinking support and reports unsupported capability"
     assert.equal(body.think, false);
     assert.deepEqual(body.format, {
       type: "object",
+      additionalProperties: false,
       required: ["ok"],
       properties: { ok: { const: true } },
     });
