@@ -8,6 +8,13 @@ import { spawnSync } from "node:child_process";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
+test("CI invokes the shared release-truth gate without a version literal", () => {
+  const workflow = readFileSync(join(repoRoot, ".github", "workflows", "ci.yml"), "utf8");
+  assert.match(workflow, /fetch-depth:\s*0/);
+  assert.match(workflow, /npm run release:check -- --truth-only --report/);
+  assert.doesNotMatch(workflow, /0\.5\.0/);
+});
+
 test("copy-assets copies only LF shell assets through Node", (t) => {
   const root = mkdtempSync(join(tmpdir(), "rocky assets "));
   t.after(() => rmSync(root, { recursive: true, force: true }));

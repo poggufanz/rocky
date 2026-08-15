@@ -33,6 +33,7 @@ rocky — he remembers, so you don't have to.
 
 install:
   npm install -g ${PACKAGE_NAME}
+  version: ${PACKAGE_NAME}@${PACKAGE_VERSION}
 
 usage:
   rocky run "<command>"     run command through Rocky. failures are remembered;

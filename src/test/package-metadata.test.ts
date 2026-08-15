@@ -336,3 +336,41 @@ test("npm pack dry-run exposes only the bounded production payload", (t) => {
   assert.ok(paths.some((path) => path.startsWith("dist/mcp/")), "MCP production modules are missing");
   assert.ok(paths.some((path) => path.startsWith("dist/agent/")), "agent production modules are missing");
 });
+
+test("canonical release truth rejects drift in every release marker", async () => {
+  const releaseCheck = await import(pathToFileURL(join(packageRoot, "scripts", "release-check.mjs")).href) as {
+    readReleaseTruthSnapshot(root: string): {
+      metadata: Record<string, unknown>;
+      lock: Record<string, unknown>;
+      packageInfoSource: string;
+      readme: string;
+      changelog: string;
+      help: string;
+      versionOutput: string;
+      helpCompleted: boolean;
+      versionCompleted: boolean;
+    };
+    validateReleaseTruth(snapshot: unknown): string[];
+  };
+  const snapshot = releaseCheck.readReleaseTruthSnapshot(packageRoot);
+  assert.deepEqual(releaseCheck.validateReleaseTruth(snapshot), []);
+
+  const lock = object(snapshot.lock.packages, "lock packages");
+  const lockRoot = object(lock[""], "lock root");
+  const mutations: Array<[string, Record<string, unknown>]> = [
+    ["package metadata", { ...snapshot, metadata: { ...snapshot.metadata, name: "@wrong/rocky" } }],
+    ["lockfile", { ...snapshot, lock: { ...snapshot.lock, version: "9.9.9" } }],
+    ["lock root", { ...snapshot, lock: { ...snapshot.lock, packages: { ...lock, "": { ...lockRoot, version: "9.9.9" } } } }],
+    ["package-info", { ...snapshot, packageInfoSource: snapshot.packageInfoSource.replace('PACKAGE_VERSION = "0.5.0"', 'PACKAGE_VERSION = "9.9.9"') }],
+    ["README", { ...snapshot, readme: snapshot.readme.replace("@poggufanz/rocky-cli@0.5.0", "@poggufanz/rocky-cli@9.9.9") }],
+    ["README current roadmap", { ...snapshot, readme: snapshot.readme.replace("v0.4 — his diligence (implemented)", "v0.4 — his diligence (current release)") }],
+    ["CHANGELOG", { ...snapshot, changelog: snapshot.changelog.replace("## 0.5.0", "## 9.9.9") }],
+    ["help", { ...snapshot, help: snapshot.help.replace("@poggufanz/rocky-cli@0.5.0", "@poggufanz/rocky-cli@9.9.9") }],
+    ["version output", { ...snapshot, versionOutput: "9.9.9\n" }],
+    ["help process", { ...snapshot, helpCompleted: false }],
+    ["version process", { ...snapshot, versionCompleted: false }],
+  ];
+  for (const [label, mutated] of mutations) {
+    assert.notDeepEqual(releaseCheck.validateReleaseTruth(mutated), [], `${label} drift must fail`);
+  }
+});

@@ -601,6 +601,13 @@ test("README states zero runtime/optional dependencies, reusing package metadata
   assert.match(readme, /zero runtime dep/i, "README must state zero runtime dependencies");
 });
 
+test("documentation names one canonical source and package root", () => {
+  assert.match(readme, /fresh clone[\s\S]*package root/i);
+  assert.match(readme, /outer workspace[\s\S]*rocky\//i);
+  assert.match(readme, /canonical (?:developer )?(?:line|branch)[\s\S]*main/i);
+  assert.doesNotMatch(readme, /published package version is/i);
+});
+
 test("scientific grounding keeps v0.5 learning mechanisms planned and evidence claims bounded", () => {
   assert.match(grounding, /planned v0\.5 dictionary is designed to help close the comprehension loop/i);
   assert.match(grounding, /asking and follow-up behavior[^\n]*planned v0\.5/i);

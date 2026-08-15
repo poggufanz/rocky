@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpath
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test, { type TestContext } from "node:test";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { fingerprint, FINGERPRINT_ALGORITHM_VERSION } from "../core/fingerprint.js";
 import { quoteShellPath } from "../core/shell-quote.js";
 import { PACKAGE_VERSION } from "../core/package-info.js";
@@ -296,6 +296,81 @@ test("release checker source has no registry-mutation subprocess argument", () =
   const source = readFileSync(join(packageRoot, "scripts", "release-check.mjs"), "utf8");
   assert.doesNotMatch(source, /npm\s+(?:publish|deprecate|dist-tag)\b/i);
   assert.doesNotMatch(source, /\[\s*["'](?:publish|deprecate|dist-tag)["']/i);
+});
+
+test("release truth keeps branch and immutable-tag modes distinct", async () => {
+  const releaseCheck = await import(pathToFileURL(join(packageRoot, "scripts", "release-check.mjs")).href) as {
+    validateGitReleaseState(state: unknown): string[];
+    readGitReleaseState(root: string, mode: string, runner: (root: string, args: string[]) => string | undefined): {
+      branch: string;
+      head?: string;
+      status: string;
+      tagCommit?: string;
+      mode: string;
+    };
+    releaseCheckCommandPlan(npm: string, root: string): Record<string, { file: string; args: string[] }>;
+  };
+  const branch = {
+    branch: "iq",
+    head: "post-release-remediation",
+    status: "",
+    tagCommit: "20bc32090843334afa0ee92c0f0705fde625d1c3",
+    mode: "branch",
+  };
+  assert.deepEqual(releaseCheck.validateGitReleaseState(branch), []);
+  assert.notDeepEqual(
+    releaseCheck.validateGitReleaseState({ ...branch, status: " M README.md" }),
+    [],
+  );
+  assert.notDeepEqual(
+    releaseCheck.validateGitReleaseState({ ...branch, tagCommit: undefined }),
+    [],
+  );
+  assert.notDeepEqual(
+    releaseCheck.validateGitReleaseState({ ...branch, mode: "release" }),
+    [],
+    "release mode must require HEAD to equal the immutable tag commit",
+  );
+  assert.deepEqual(
+    releaseCheck.validateGitReleaseState({
+      ...branch,
+      mode: "release",
+      head: "20bc32090843334afa0ee92c0f0705fde625d1c3",
+    }),
+    [],
+  );
+
+  const fixture = mkdtempSync(join(tmpdir(), "rocky-release-git "));
+  try {
+    const calls: string[][] = [];
+    const runner = (_root: string, args: string[]): string | undefined => {
+      calls.push(args);
+      const command = args.join(" ");
+      if (command.startsWith("symbolic-ref")) return "iq";
+      if (command === "rev-parse HEAD") return "post-release-remediation";
+      if (command.startsWith("status")) return "";
+      return "20bc32090843334afa0ee92c0f0705fde625d1c3";
+    };
+    const fixtureState = releaseCheck.readGitReleaseState(fixture, "branch", runner);
+    assert.deepEqual(releaseCheck.validateGitReleaseState(fixtureState), []);
+    assert.ok(calls.some((args) => args.join(" ") === "status --short --untracked-files=all --"));
+    assert.ok(calls.some((args) => args.join(" ") === "rev-parse --verify v0.5.0^{commit}"));
+    const dirtyRunner = (_root: string, args: string[]): string | undefined => (
+      args[0] === "status" ? "?? dirty.txt" : runner(_root, args)
+    );
+    assert.notDeepEqual(
+      releaseCheck.validateGitReleaseState(releaseCheck.readGitReleaseState(fixture, "branch", dirtyRunner)),
+      [],
+    );
+  } finally {
+    rmSync(fixture, { recursive: true, force: true });
+  }
+
+  const plan = releaseCheck.releaseCheckCommandPlan("npm", packageRoot);
+  assert.deepEqual({ file: plan.fullTest.file, args: plan.fullTest.args }, { file: "npm", args: ["test"] });
+  assert.deepEqual(plan.pack.args, ["pack", "--dry-run", "--json"]);
+  assert.equal(plan.smoke.file, process.execPath);
+  assert.deepEqual(plan.smoke.args, [join(packageRoot, "scripts", "package-smoke.mjs")]);
 });
 
 test("release checker partial report preserves a spawn failure without inventing exit 1", (t) => {

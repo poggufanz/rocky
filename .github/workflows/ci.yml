@@ -25,6 +25,8 @@ jobs:
             node: node
     steps:
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
       - uses: actions/setup-node@v6
         with:
           node-version: ${{ matrix.node }}
@@ -43,3 +45,5 @@ jobs:
         run: npm run package:smoke
       - if: matrix.os == 'windows-latest'
         run: npm run package:smoke
+      - if: matrix.os == 'ubuntu-latest' && matrix.node == 'node'
+        run: npm run release:check -- --truth-only --report "${{ runner.temp }}/rocky-release-check.md"

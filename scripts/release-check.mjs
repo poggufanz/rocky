@@ -20,6 +20,10 @@ const packageRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const packageMetadata = JSON.parse(readFileSync(join(packageRoot, "package.json"), "utf8"));
 const PACKAGE_NAME = "@poggufanz/rocky-cli";
 const PACKAGE_VERSION = packageMetadata.version;
+const PACKAGE_BINARY = "rocky";
+const RELEASE_TAG = "v0.5.0";
+const RELEASE_COMMIT = "20bc32090843334afa0ee92c0f0705fde625d1c3";
+const CANONICAL_BRANCH = "main";
 const COMMAND_TIMEOUT_MS = 10 * 60 * 1_000;
 const MAX_COMMAND_OUTPUT_BYTES = 32 * 1024 * 1024;
 
@@ -73,10 +77,13 @@ function outsidePackagePath(value, label) {
 
 function reportArgument(argv) {
   if (argv.includes("--publish")) throw new UsageError("publishing arguments are refused");
-  if (argv.length !== 2 || argv[0] !== "--report" || !argv[1]) {
-    throw new UsageError("usage: release-check --report <absolute path outside package>");
+  const mode = argv.includes("--release") ? "release" : "branch";
+  const truthOnly = argv.includes("--truth-only");
+  const reportArgs = argv.filter((argument) => argument !== "--release" && argument !== "--truth-only");
+  if (reportArgs.length !== 2 || reportArgs[0] !== "--report" || !reportArgs[1]) {
+    throw new UsageError("usage: release-check [--release] [--truth-only] --report <absolute path outside package>");
   }
-  return outsidePackagePath(argv[1], "report");
+  return { path: outsidePackagePath(reportArgs[1], "report"), mode, truthOnly };
 }
 
 function resolveNpmExecutable() {
@@ -95,6 +102,19 @@ function resolveNpmExecutable() {
     }
   }
   throw new StepError("npm executable is unavailable");
+}
+
+export function releaseCheckCommandPlan(npm, root = packageRoot) {
+  return {
+    npmVersion: { file: npm, args: ["--version"], display: "npm --version" },
+    fullTest: { file: npm, args: ["test"], display: "npm test" },
+    pack: { file: npm, args: ["pack", "--dry-run", "--json"], display: "npm pack --dry-run --json" },
+    smoke: {
+      file: process.execPath,
+      args: [join(root, "scripts", "package-smoke.mjs")],
+      display: "node scripts/package-smoke.mjs",
+    },
+  };
 }
 
 function isolatedEnvironment(root) {
@@ -174,12 +194,167 @@ function runStep(state, env, label, file, args, display) {
   return result.stdout;
 }
 
+function gitOutput(root, args) {
+  const result = spawnSync("git", args, {
+    cwd: root,
+    encoding: "utf8",
+    timeout: COMMAND_TIMEOUT_MS,
+    maxBuffer: MAX_COMMAND_OUTPUT_BYTES,
+    windowsHide: true,
+  });
+  if (result.error !== undefined || result.status !== 0 || result.signal !== null) return undefined;
+  return result.stdout.trim();
+}
+
+export function readGitReleaseState(root, mode, runner = gitOutput) {
+  return {
+    branch: runner(root, ["symbolic-ref", "--quiet", "--short", "HEAD"]) ?? "(detached)",
+    head: runner(root, ["rev-parse", "HEAD"]),
+    status: runner(root, ["status", "--short", "--untracked-files=all", "--"]) ?? "(git status unavailable)",
+    tagCommit: runner(root, ["rev-parse", "--verify", `${RELEASE_TAG}^{commit}`]),
+    mode,
+  };
+}
+
+export function assertReleaseTruth(state, { root = packageRoot, mode = "branch" } = {}) {
+  const snapshot = readReleaseTruthSnapshot(root);
+  const documentErrors = validateReleaseTruth(snapshot);
+  const git = readGitReleaseState(root, mode);
+  const gitErrors = validateGitReleaseState(git);
+  state.releaseTruth = {
+    mode,
+    canonicalBranch: CANONICAL_BRANCH,
+    tag: RELEASE_TAG,
+    immutableCommit: RELEASE_COMMIT,
+    packageRoot: root,
+    documents: documentErrors.length === 0 ? "passed" : "failed",
+    git,
+  };
+  if (documentErrors.length > 0 || gitErrors.length > 0) {
+    throw new StepError(`release truth failed: ${[...documentErrors, ...gitErrors].join("; ")}`);
+  }
+}
+
 function isEmptyDependencyRecord(value) {
   if (value === undefined || value === null) return true;
   if (typeof value !== "object" || Array.isArray(value)) return false;
   const prototype = Object.getPrototypeOf(value);
   if (prototype !== Object.prototype && prototype !== null) return false;
   return Object.keys(value).length === 0;
+}
+
+function objectRecord(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value) ? value : undefined;
+}
+
+function packageInfoValues(source) {
+  const name = /export const PACKAGE_NAME = "([^"]+)"/.exec(source)?.[1];
+  const version = /export const PACKAGE_VERSION = "([^"]+)"/.exec(source)?.[1];
+  const binary = /export const PACKAGE_BINARY = "([^"]+)"/.exec(source)?.[1];
+  return { name, version, binary };
+}
+
+export function validateReleaseTruth(snapshot) {
+  const errors = [];
+  const expectedVersion = RELEASE_TAG.slice(1);
+  const value = objectRecord(snapshot);
+  if (value === undefined) return ["release truth snapshot is not an object"];
+
+  const metadata = objectRecord(value.metadata);
+  if (metadata === undefined || !validateReleaseMetadata(metadata) || metadata.version !== expectedVersion) {
+    errors.push("package metadata does not match canonical release identity");
+  }
+
+  const lock = objectRecord(value.lock);
+  const lockPackages = lock === undefined ? undefined : objectRecord(lock.packages);
+  const lockRoot = lockPackages === undefined ? undefined : objectRecord(lockPackages[""]);
+  if (lock === undefined || lock.name !== PACKAGE_NAME || lock.version !== expectedVersion
+      || lockRoot === undefined || lockRoot.name !== PACKAGE_NAME || lockRoot.version !== expectedVersion
+      || !isEmptyDependencyRecord(lockRoot.dependencies) || !isEmptyDependencyRecord(lockRoot.optionalDependencies)) {
+    errors.push("package lock does not match canonical release identity");
+  }
+
+  const info = typeof value.packageInfoSource === "string"
+    ? packageInfoValues(value.packageInfoSource)
+    : { name: undefined, version: undefined, binary: undefined };
+  if (info.name !== PACKAGE_NAME || info.version !== expectedVersion || info.binary !== PACKAGE_BINARY) {
+    errors.push("package-info constants do not match canonical release identity");
+  }
+
+  const readme = typeof value.readme === "string" ? value.readme : "";
+  const roadmap = readme.slice(readme.indexOf("## Roadmap"));
+  const currentMarkers = roadmap.match(/\(current release\)/gi) ?? [];
+  const roadmapVersion = expectedVersion.replace(/\.0$/, "").replaceAll(".", "\\.");
+  if (!readme.includes(`Current release: \`${PACKAGE_NAME}@${expectedVersion}\``)
+      || currentMarkers.length !== 1
+      || !new RegExp(`^[-*]\\s+\\*\\*v${roadmapVersion}(?:\\.0)?\\b[^\\n]*\\(current release\\)`, "im").test(roadmap)
+      || /published package version is/i.test(readme)) {
+    errors.push("README release identity or publication status is stale");
+  }
+
+  const changelog = typeof value.changelog === "string" ? value.changelog : "";
+  const heading = /^##\s+(\d+\.\d+\.\d+)\s+[—-]/m.exec(changelog);
+  if (heading?.[1] !== expectedVersion || /##\s+0\.5\.0[\s\S]{0,800}\b(?:unreleased|unpublished)\b/i.test(changelog)) {
+    errors.push("CHANGELOG release status is stale");
+  }
+
+  const help = typeof value.help === "string" ? value.help : "";
+  if (value.helpCompleted !== true || !help.includes(`version: ${PACKAGE_NAME}@${expectedVersion}`)) {
+    errors.push("CLI help does not expose canonical release identity");
+  }
+  if (value.versionCompleted !== true || value.versionOutput !== `${expectedVersion}\n`) {
+    errors.push("CLI --version does not match canonical release identity");
+  }
+  return errors;
+}
+
+export function readReleaseTruthSnapshot(root = packageRoot) {
+  const metadata = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
+  const lock = JSON.parse(readFileSync(join(root, "package-lock.json"), "utf8"));
+  const packageInfoSource = readFileSync(join(root, "src", "core", "package-info.ts"), "utf8");
+  const readme = readFileSync(join(root, "README.md"), "utf8");
+  const changelog = readFileSync(join(root, "CHANGELOG.md"), "utf8");
+  const env = { ...process.env };
+  delete env.NODE_TEST_CONTEXT;
+  const helpResult = spawnSync(process.execPath, [join(root, "dist", "index.js"), "--help"], {
+    cwd: root,
+    env,
+    encoding: "utf8",
+    timeout: COMMAND_TIMEOUT_MS,
+    maxBuffer: MAX_COMMAND_OUTPUT_BYTES,
+  });
+  const versionResult = spawnSync(process.execPath, [join(root, "dist", "index.js"), "--version"], {
+    cwd: root,
+    env,
+    encoding: "utf8",
+    timeout: COMMAND_TIMEOUT_MS,
+    maxBuffer: MAX_COMMAND_OUTPUT_BYTES,
+  });
+  return {
+    metadata,
+    lock,
+    packageInfoSource,
+    readme,
+    changelog,
+    help: `${helpResult.stdout ?? ""}${helpResult.stderr ?? ""}`,
+    versionOutput: versionResult.stdout ?? "",
+    helpCompleted: helpResult.error === undefined && helpResult.status === 0 && helpResult.signal === null,
+    versionCompleted: versionResult.error === undefined && versionResult.status === 0 && versionResult.signal === null,
+  };
+}
+
+export function validateGitReleaseState(state) {
+  const errors = [];
+  const value = objectRecord(state);
+  if (value === undefined) return ["git release state is not an object"];
+  if (typeof value.status !== "string" || value.status.trim() !== "") errors.push("package worktree is dirty");
+  if (value.tagCommit !== RELEASE_COMMIT) errors.push(`${RELEASE_TAG} does not resolve to immutable release commit`);
+  if (value.mode === "release") {
+    if (value.head !== RELEASE_COMMIT) errors.push("release mode requires HEAD at immutable release commit");
+  } else if (value.mode !== "branch") {
+    errors.push("release mode must be branch or release");
+  }
+  return errors;
 }
 
 export function validateReleaseMetadata(value) {
@@ -341,15 +516,32 @@ function markdown(state) {
     lines.push(`- Result: pending (${state.benchmark?.reason ?? "benchmark step did not complete"})`);
   }
   lines.push("", "## Git evidence", "");
+  if (state.releaseTruth === undefined) lines.push("- Release truth: not completed", "");
+  else {
+    lines.push(
+      `- Mode: ${state.releaseTruth.mode}`,
+      `- Canonical developer branch: ${state.releaseTruth.canonicalBranch}`,
+      `- Package root: ${state.releaseTruth.packageRoot}`,
+      `- Immutable tag: ${state.releaseTruth.tag}`,
+      `- Immutable release commit: ${state.releaseTruth.immutableCommit}`,
+      `- Released baseline: ${state.releaseTruth.tag} remains at that commit; branch mode does not retag remediation HEAD`,
+      `- Document markers: ${state.releaseTruth.documents}`,
+      `- Branch: ${state.releaseTruth.git.branch}`,
+      `- HEAD: ${state.releaseTruth.git.head ?? "unavailable"}`,
+      `- Tag dereference: ${state.releaseTruth.git.tagCommit ?? "unavailable"}`,
+      `- Package tree: ${state.releaseTruth.git.status?.trim() === "" ? "clean" : "dirty"}`,
+      "",
+    );
+  }
   lines.push(`- Diff check: ${state.diffCheckPassed ? "passed" : "not completed"}`);
-  lines.push("- Status (`git status --short` is evidence, not a cleanliness gate):", "", "```text");
+  lines.push("- Status (`git status --short --untracked-files=all`) is a release-truth cleanliness gate:", "", "```text");
   lines.push(state.gitStatus?.trimEnd() || "(clean or unavailable)", "```", "");
   if (state.failure !== undefined) lines.push("## Failure", "", state.failure, "");
   lines.push("This checker did not publish or mutate registry state.", "");
   return lines.join("\n");
 }
 
-async function main(reportPath) {
+async function main(reportPath, mode, truthOnly = false) {
   const state = {
     measuredAt: new Date().toISOString(),
     node: process.version,
@@ -360,51 +552,60 @@ async function main(reportPath) {
   let temporaryRoot;
   let failed = false;
   try {
-    temporaryRoot = mkdtempSync(join(tmpdir(), "rocky-release-check-"));
-    const env = isolatedEnvironment(temporaryRoot);
-    const npm = process.env.ROCKY_RELEASE_CHECK_TEST_SPAWN_ERROR === "1"
-      ? join(temporaryRoot, "missing-npm-executable")
-      : resolveNpmExecutable();
-    state.npm = runStep(state, env, "npm version", npm, ["--version"], "npm --version").trim();
-    runStep(state, env, "clean build and full tests", npm, ["test"], "npm test");
-    assertMetadata(state);
-    state.manifest = parseManifest(runStep(
-      state,
-      env,
-      "dry-run package manifest",
-      npm,
-      ["pack", "--dry-run", "--json"],
-      "npm pack --dry-run --json",
-    ));
-    runStep(
-      state,
-      env,
-      "installed tarball smoke",
-      process.execPath,
-      [join(packageRoot, "scripts", "package-smoke.mjs")],
-      "node scripts/package-smoke.mjs",
-    );
-
-    if (process.platform === "linux" && Number(process.versions.node.split(".")[0]) === 22) {
-      const benchmarkPath = join(temporaryRoot, "benchmark.json");
+    const env = truthOnly ? process.env : (() => {
+      temporaryRoot = mkdtempSync(join(tmpdir(), "rocky-release-check-"));
+      return isolatedEnvironment(temporaryRoot);
+    })();
+    if (truthOnly) {
+      assertMetadata(state);
+      state.benchmark = { status: "pending", reason: "truth-only validation" };
+    } else {
+      const npm = process.env.ROCKY_RELEASE_CHECK_TEST_SPAWN_ERROR === "1"
+        ? join(temporaryRoot, "missing-npm-executable")
+        : resolveNpmExecutable();
+      const commands = releaseCheckCommandPlan(npm, packageRoot);
+      state.npm = runStep(state, env, "npm version", commands.npmVersion.file, commands.npmVersion.args, commands.npmVersion.display).trim();
+      runStep(state, env, "clean build and full tests", commands.fullTest.file, commands.fullTest.args, commands.fullTest.display);
+      assertMetadata(state);
+      state.manifest = parseManifest(runStep(
+        state,
+        env,
+        "dry-run package manifest",
+        commands.pack.file,
+        commands.pack.args,
+        commands.pack.display,
+      ));
       runStep(
         state,
         env,
-        "MCP benchmark",
-        process.execPath,
-        [join(packageRoot, "scripts", "benchmark-mcp.mjs"), "--output", benchmarkPath],
-        "node scripts/benchmark-mcp.mjs --output <temporary-report>",
+        "installed tarball smoke",
+        commands.smoke.file,
+        commands.smoke.args,
+        commands.smoke.display,
       );
-      const report = JSON.parse(readFileSync(benchmarkPath, "utf8"));
-      if (report?.gates?.passed !== true) throw new StepError("MCP benchmark gate did not pass");
-      state.benchmark = { status: "passed", report };
-    } else {
-      state.benchmark = { status: "pending", reason: "requires Node 22 on Linux" };
+
+      if (process.platform === "linux" && Number(process.versions.node.split(".")[0]) === 22) {
+        const benchmarkPath = join(temporaryRoot, "benchmark.json");
+        runStep(
+          state,
+          env,
+          "MCP benchmark",
+          process.execPath,
+          [join(packageRoot, "scripts", "benchmark-mcp.mjs"), "--output", benchmarkPath],
+          "node scripts/benchmark-mcp.mjs --output <temporary-report>",
+        );
+        const report = JSON.parse(readFileSync(benchmarkPath, "utf8"));
+        if (report?.gates?.passed !== true) throw new StepError("MCP benchmark gate did not pass");
+        state.benchmark = { status: "passed", report };
+      } else {
+        state.benchmark = { status: "pending", reason: "requires Node 22 on Linux" };
+      }
     }
 
     runStep(state, env, "git diff check", "git", ["diff", "--check"], "git diff --check");
     state.diffCheckPassed = true;
-    state.gitStatus = runStep(state, env, "git status evidence", "git", ["status", "--short"], "git status --short");
+    state.gitStatus = runStep(state, env, "git status evidence", "git", ["status", "--short", "--untracked-files=all"], "git status --short --untracked-files=all");
+    assertReleaseTruth(state, { mode });
   } catch (error) {
     failed = true;
     state.failure = error instanceof Error ? error.message : String(error);
@@ -423,9 +624,9 @@ const launchedAsScript = process.argv[1] !== undefined
   && resolve(process.argv[1]) === resolve(fileURLToPath(import.meta.url));
 if (launchedAsScript) {
   try {
-    const report = reportArgument(process.argv.slice(2));
-    await main(report);
-    process.stdout.write(`${report}\n`);
+    const parsed = reportArgument(process.argv.slice(2));
+    await main(parsed.path, parsed.mode, parsed.truthOnly);
+    process.stdout.write(`${parsed.path}\n`);
   } catch (error) {
     process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
     process.exitCode = error instanceof UsageError ? 2 : 1;

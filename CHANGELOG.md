@@ -14,7 +14,7 @@ Notable changes per release. Dates are the release date.
 - Ollama-gated ambiguity advice after an intent append, detached and non-blocking, plus passive labels at the next shell prompt and in non-quiet `rocky watch`.
 - Three bounded read-only MCP knowledge tools: `search_knowledge`, `fetch_record`, and `why_file`, alongside the existing four memory tools.
 
-This remains an unreleased 0.5.0 branch. BYOK annotation, `brief`, `attest`, and the memory circuit breaker are outside this release; no version bump or publish is implied.
+This is the v0.5.0 release line. BYOK annotation, `brief`, `attest`, and the memory circuit breaker are outside this release; no version bump or publish is implied.
 
 ## 0.4.0 — 9 August 2026
 
