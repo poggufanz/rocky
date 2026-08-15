@@ -12,6 +12,7 @@ import {
   projectRecentFailures,
   projectWhyPossible,
   projectTriple,
+  safeOpaqueIdentifier,
 } from "./privacy.js";
 import { boundTripleRecord, canonicalPath, isKnownPathPlatform, isSafeNonNegativeInteger, parseMemoryRecord, pathIdentityHash } from "../core/memory-read.js";
 import type { TripleRecord } from "../core/memory-read.js";
@@ -329,7 +330,15 @@ function cappedResult(payload: object, isError = false): ToolCallResult {
     }
     const values = copy[key] as unknown[];
     const removed = values.pop();
-    arrayBytes.delete(key);
+    // Decrement the cached array total instead of re-serializing the whole
+    // remaining array each pop; a delete-and-refresh loop is O(N^2) and hands
+    // hostile providers seconds of CPU per call.
+    const cached = arrayBytes.get(key);
+    if (cached !== undefined) {
+      let encoded: string;
+      try { encoded = JSON.stringify(removed) ?? "null"; } catch { encoded = "null"; }
+      arrayBytes.set(key, Math.max(2, cached - Buffer.byteLength(encoded, "utf8") - (values.length > 0 ? 1 : 0)));
+    }
     if (key === "items" && isItem(removed)) {
       pruneRefs(copy, removed.candidateId);
       arrayBytes.delete("rankedCandidateIds");
@@ -691,7 +700,9 @@ function safeMemoryStats(value: unknown, canonical = false): Record<string, unkn
     // Keep legacy `total` useful as the conservative upper bound while the
     // explicit exactness/range fields tell callers that overlapping fix
     // buckets prevent treating it as an exact record count.
-    const total = exact && isSafeNonNegativeInteger(suppliedTotal)
+    // Coincident bounds prove the exact total themselves; a supplied total is
+    // only ever trusted when it is canonical or independently feasible.
+    const total = (canonical && isSafeNonNegativeInteger(suppliedTotal)) || suppliedFeasible
       ? suppliedTotal as number
       : upperBound;
     return {
@@ -754,36 +765,69 @@ function mergeAi(
 
 export function createToolRegistry(options: CreateToolRegistryOptions): McpToolRegistry {
   const definitions = freezeDeep(descriptors(options.exposure));
+  // Sanitized ID handles: sha256 handles are computed statelessly during
+  // projection and committed to the bounded registry only for hits that
+  // survive the response cap.  Registering during projection would let a
+  // hostile provider evict the handles of returned items with dropped ones,
+  // breaking the documented search-then-fetch_record flow.
   const knowledgeHandles = new Map<string, { raw: string; bytes: number }>();
-  const knowledgeHandleOrder: string[] = [];
   let knowledgeHandleBytes = 0;
-  const maxKnowledgeHandles = 1024;
-  const maxKnowledgeHandleBytes = 256 * 1024;
-  const safeDirectKnowledgeId = (value: string): boolean => value.length > 0 && value.length <= 128
-    && !/[\u0000-\u001f\u007f-\u009f]/u.test(value)
-    && (/^(?:[0-9a-f]{16,64}|[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}|(?:triple|failure|fix|association|note)-[A-Za-z0-9._-]{1,96})$/iu.test(value)
-      || (value.length <= 64 && /^[A-Za-z][A-Za-z0-9._:-]*$/u.test(value)
-        && !/(?:password|passwd|secret|token|credential|authorization|api[-_]?key)/iu.test(value)));
-  const projectKnowledgeId = (value: string): string | undefined => {
-    if (options.exposure !== "sanitized" || safeDirectKnowledgeId(value)) return undefined;
-    const existing = [...knowledgeHandles.entries()].find(([, entry]) => entry.raw === value)?.[0];
-    if (existing !== undefined) return existing;
-    const handle = `rk-h-${createHash("sha256").update(value, "utf8").digest("hex")}`;
-    const bytes = Buffer.byteLength(value, "utf8") + Buffer.byteLength(handle, "utf8");
-    if (bytes > maxKnowledgeHandleBytes) return undefined;
-    while (knowledgeHandles.size >= maxKnowledgeHandles || knowledgeHandleBytes + bytes > maxKnowledgeHandleBytes) {
-      const oldest = knowledgeHandleOrder.shift();
-      if (oldest === undefined) break;
-      const old = knowledgeHandles.get(oldest);
-      if (old !== undefined) {
-        knowledgeHandles.delete(oldest);
-        knowledgeHandleBytes -= old.bytes;
+  const maxKnowledgeHandles = 8192;
+  const maxKnowledgeHandleBytes = 4 * 1024 * 1024;
+  const maxKnowledgeHandleRawBytes = 1024;
+  const maxPendingHandleEntries = 20_000;
+  const maxPendingHandleBytes = 8 * 1024 * 1024;
+  // One shared allowlist with the privacy layer prevents silent drift.
+  const safeDirectKnowledgeId = safeOpaqueIdentifier;
+  const createPendingKnowledgeIdProjector = (): {
+    projector: (value: string) => string | undefined;
+    pending: Map<string, { raw: string; bytes: number }>;
+  } => {
+    const pending = new Map<string, { raw: string; bytes: number }>();
+    let pendingBytes = 0;
+    const projector = (value: string): string | undefined => {
+      if (options.exposure !== "sanitized" || safeDirectKnowledgeId(value)) return undefined;
+      const rawBytes = Buffer.byteLength(value, "utf8");
+      if (rawBytes > maxKnowledgeHandleRawBytes) return undefined;
+      const handle = `rk-h-${createHash("sha256").update(value, "utf8").digest("hex")}`;
+      if (pending.has(handle)) return handle;
+      const bytes = rawBytes + Buffer.byteLength(handle, "utf8");
+      if (pending.size >= maxPendingHandleEntries || pendingBytes + bytes > maxPendingHandleBytes) return undefined;
+      pending.set(handle, { raw: value, bytes });
+      pendingBytes += bytes;
+      return handle;
+    };
+    return { projector, pending };
+  };
+  const commitKnowledgeHandles = (
+    itemIds: readonly string[],
+    pending: ReadonlyMap<string, { raw: string; bytes: number }>,
+  ): void => {
+    const current = new Set(itemIds.filter((id) => pending.has(id)));
+    for (const handle of current) {
+      const entry = pending.get(handle)!;
+      if (knowledgeHandles.has(handle)) continue;
+      let admissible = true;
+      while (knowledgeHandles.size >= maxKnowledgeHandles || knowledgeHandleBytes + entry.bytes > maxKnowledgeHandleBytes) {
+        // Evict the oldest handles first, but never one returned by this call.
+        let evicted = false;
+        for (const oldest of knowledgeHandles.keys()) {
+          if (current.has(oldest)) continue;
+          const old = knowledgeHandles.get(oldest)!;
+          knowledgeHandles.delete(oldest);
+          knowledgeHandleBytes -= old.bytes;
+          evicted = true;
+          break;
+        }
+        if (!evicted) {
+          admissible = false;
+          break;
+        }
       }
+      if (!admissible) break;
+      knowledgeHandles.set(handle, entry);
+      knowledgeHandleBytes += entry.bytes;
     }
-    knowledgeHandles.set(handle, { raw: value, bytes });
-    knowledgeHandleOrder.push(handle);
-    knowledgeHandleBytes += bytes;
-    return handle;
   };
   const resolveKnowledgeId = (value: string): string => knowledgeHandles.get(value)?.raw ?? value;
   return {
@@ -829,14 +873,25 @@ export function createToolRegistry(options: CreateToolRegistryOptions): McpToolR
           case "search_knowledge": {
             const input = parseKnowledgeArgs(args);
             const hits = safeReadMemory(() => options.memory.searchKnowledge(input), [], canonicalMemory);
+            const { projector, pending } = createPendingKnowledgeIdProjector();
             const projected = safeProjection(
-              () => projectKnowledgeHits(hits, options.exposure, projectKnowledgeId),
+              () => projectKnowledgeHits(hits, options.exposure, projector),
               { exposure: options.exposure, items: [], truncated: true },
             );
-            return safeProjection(
+            const result = safeProjection(
               () => cappedResult(projected),
               cappedResult({ exposure: options.exposure, items: [], truncated: true }),
             );
+            safeProjection(() => {
+              const items = (result.structuredContent as { items?: unknown[] } | undefined)?.items;
+              const returnedIds = Array.isArray(items)
+                ? items.map((item) => (typeof item === "object" && item !== null && typeof (item as { id?: unknown }).id === "string"
+                  ? (item as { id: string }).id
+                  : ""))
+                : [];
+              commitKnowledgeHandles(returnedIds, pending);
+            }, undefined);
+            return result;
           }
           case "fetch_record": {
             const id = parseFetchArgs(args);

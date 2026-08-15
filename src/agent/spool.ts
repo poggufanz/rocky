@@ -229,7 +229,7 @@ function coveragePathSet(
   try {
     const lengthValue = (value as { length?: unknown }).length;
     if (typeof lengthValue !== "number" || !Number.isSafeInteger(lengthValue) || lengthValue < 0) {
-      return { paths: [], identityHashes: [], valid: false, overflow: true, rawCount: 0 };
+      return { paths: [], identityHashes: [], valid: false, overflow: true, rawCount: 0, platform };
     }
     const boundedLength = Math.min(lengthValue, MAX_COVERAGE_IDENTITIES * 2);
     if (lengthValue > boundedLength) overflow = true;
@@ -566,17 +566,22 @@ function mergeCoverage(previous: CoverageSnapshot | undefined, input: CoverageIn
   const incomingCount = input.candidateCount;
   const incomingCountValid = incomingCount === undefined || (Number.isSafeInteger(incomingCount) && incomingCount >= 0);
   if (!incomingCountValid) return undefined;
-  const incomingCountExact = incomingCount !== undefined && input.candidateCountExact !== false
-    && incoming.platform !== "unknown";
   // A cwd-aware adapter may report raw aliases (absolute and relative forms)
   // for one identity. Normalize that count only when the declared count is
   // exactly the bounded raw ingress length; a larger count with no matching
   // raw envelope is contradictory and must stay unknown.
   const normalizedIncomingCount = input.pathsComplete === true && incoming.platform !== "unknown"
     && incomingCount !== undefined && incomingCount <= MAX_COVERAGE_PATHS
-    && incomingCount >= incoming.rawCount
+    && incomingCount === incoming.rawCount
     ? incomingHashes.length
     : incomingCount;
+  // A payload claiming completeness whose declared count still differs from
+  // its shipped identity set is self-contradictory. Persist the count as an
+  // explicit non-exact lower-bound witness, never launder it into proof.
+  const incomingContradiction = input.pathsComplete === true
+    && normalizedIncomingCount !== undefined && normalizedIncomingCount !== incomingHashes.length;
+  const incomingCountExact = incomingCount !== undefined && input.candidateCountExact !== false
+    && incoming.platform !== "unknown" && !incomingContradiction;
   const incomingComplete = !incoming.overflow && incoming.valid && input.pathsComplete === true
     && incomingCountExact && normalizedIncomingCount === incomingHashes.length
     && incoming.platform !== "unknown";
@@ -1616,7 +1621,17 @@ function expectedClaimCoveragePath(claim: BatchClaim, paths: RockyPaths): string
 }
 
 /** Bind the sidecar inode to the immutable claim while holding append lock. */
-function bindClaimCoverageLocked(key: string, claim: BatchClaim, paths: RockyPaths, allowLive: boolean): boolean {
+function bindClaimCoverageLocked(
+  key: string,
+  claim: BatchClaim,
+  paths: RockyPaths,
+  allowLive: boolean,
+  lock: OwnedPrivateLock,
+): boolean {
+  // The claim-preparation publish path mutates the spool directory; the
+  // parent identity captured at lock acquisition must still hold before
+  // every removal, publish, and unlink below.
+  if (!appendLockUsable(lock)) return false;
   const livePath = coveragePath(paths, key);
   const target = expectedClaimCoveragePath(claim, paths);
   if (!target) return false;
@@ -1633,6 +1648,7 @@ function bindClaimCoverageLocked(key: string, claim: BatchClaim, paths: RockyPat
       if (allowLive && live.kind === "regular" && live.stats && !sameIdentity(live.stats, existingTarget.stats)) {
         const liveJsonl = inspectFile(batchPath(paths, key));
         if (liveJsonl.kind === "regular" && liveJsonl.stats && sameIdentity(liveJsonl.stats, claim.stats)) {
+          if (!appendLockUsable(lock)) return false;
           removeRegular(livePath, live.stats);
           return inspectFile(livePath).kind === "missing";
         }
@@ -1650,6 +1666,7 @@ function bindClaimCoverageLocked(key: string, claim: BatchClaim, paths: RockyPat
     // A regular but unowned/corrupt claim sidecar is not evidence. Remove it
     // only after an inode re-check, then continue with the detached claim or
     // bind the verified live generation below.
+    if (!appendLockUsable(lock)) return false;
     removeRegular(target, existingTarget.stats);
     existingTarget = inspectFile(target);
     if (inspectFile(target).kind !== "missing") return false;
@@ -1673,7 +1690,12 @@ function bindClaimCoverageLocked(key: string, claim: BatchClaim, paths: RockyPat
     const claimIno = identityToken(claimIdentity.ino);
     if (claimDev === undefined || claimIno === undefined || (claimDev === "0" && claimIno === "0")) return false;
     const owned = { ...snapshot, claimId: claim.id, claimDev, claimIno } satisfies CoverageSnapshot;
+    if (!appendLockUsable(lock)) return false;
     const writeResult = writeCoverageTargetUnlocked(target, temporary, owned);
+    if (!appendLockUsable(lock)) {
+      if (writeResult.published !== undefined) removeRegular(target, writeResult.published);
+      return false;
+    }
     if (!writeResult.written) {
       if (writeResult.published !== undefined) removeRegular(target, writeResult.published);
       else if (writeResult.prior !== undefined) removeRegular(target, writeResult.prior);
@@ -1683,6 +1705,10 @@ function bindClaimCoverageLocked(key: string, claim: BatchClaim, paths: RockyPat
     if (written.kind !== "regular" || !written.stats) return false;
     const currentLive = inspectFile(livePath);
     if (currentLive.kind !== "regular" || !currentLive.stats || !sameIdentity(live.stats, currentLive.stats)) {
+      removeRegular(target, written.stats);
+      return false;
+    }
+    if (!appendLockUsable(lock)) {
       removeRegular(target, written.stats);
       return false;
     }
@@ -1747,22 +1773,25 @@ function prepareClaimLocked(
   key: string,
   requested: BatchClaim | undefined,
   paths: RockyPaths,
+  lock: OwnedPrivateLock,
 ): BatchClaim | undefined {
+  if (!appendLockUsable(lock)) return undefined;
   const current = refreshClaimLocked(key, requested, paths);
   if (!current) return undefined;
 
   const livePath = batchPath(paths, key);
   let live = inspectFile(livePath);
   if (live.kind === "missing") {
-    return bindClaimCoverageLocked(key, current, paths, false) ? current : undefined;
+    return bindClaimCoverageLocked(key, current, paths, false, lock) ? current : undefined;
   }
   if (live.kind !== "regular" || !live.stats) return undefined;
   if (identitiesDiffer(current.stats, live.stats)) return current;
   if (!sameIdentity(current.stats, live.stats)) return undefined;
 
-  if (!bindClaimCoverageLocked(key, current, paths, true)) return undefined;
+  if (!bindClaimCoverageLocked(key, current, paths, true, lock)) return undefined;
 
   try {
+    if (!appendLockUsable(lock)) return undefined;
     unlinkSync(livePath);
   } catch {
     // Re-inspection below decides whether the canonical path is still unsafe.
@@ -1811,7 +1840,7 @@ export function prepareClaim(claim: BatchClaim, paths = resolveRockyPaths()): Ba
   const appendLock = acquireAppendLock(paths, claim.key);
   if (!appendLock) return undefined;
   try {
-    return prepareClaimLocked(claim.key, claim, paths);
+    return prepareClaimLocked(claim.key, claim, paths, appendLock);
   } finally {
     releaseAppendLock(appendLock);
   }
@@ -1827,7 +1856,7 @@ export function claimBatch(key: string, paths = resolveRockyPaths()): BatchClaim
     if (!appendLock) return undefined;
     try {
       const current = existingClaims(key, paths)[0];
-      return prepareClaimLocked(key, current, paths);
+      return prepareClaimLocked(key, current, paths, appendLock);
     } finally {
       releaseAppendLock(appendLock);
     }
@@ -1837,7 +1866,7 @@ export function claimBatch(key: string, paths = resolveRockyPaths()): BatchClaim
   if (!appendLock) return undefined;
   try {
     const afterLock = existingClaims(key, paths)[0];
-    if (afterLock) return prepareClaimLocked(key, afterLock, paths);
+    if (afterLock) return prepareClaimLocked(key, afterLock, paths, appendLock);
     const livePath = batchPath(paths, key);
     const live = inspectFile(livePath);
     if (live.kind !== "regular" || !live.stats || live.stats.size > MAX_BATCH_BYTES) return undefined;
@@ -1864,7 +1893,7 @@ export function claimBatch(key: string, paths = resolveRockyPaths()): BatchClaim
         return undefined;
       }
       const claim = claimFromName(directory, claimName(key, id));
-      return claim ? prepareClaimLocked(key, claim, paths) : undefined;
+      return claim ? prepareClaimLocked(key, claim, paths, appendLock) : undefined;
     }
     return undefined;
   } finally {

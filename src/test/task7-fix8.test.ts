@@ -84,10 +84,12 @@ test("semantic replay normalizes alias multiplicity before digest identity", () 
   const key = "alias-count-fix8";
   const aliases = ["src/a.ts", "./src/a.ts", "src//a.ts", "/repo/src/a.ts", "/repo/./src/a.ts"];
   try {
+    // Each payload declares its raw alias multiplicity honestly: n spellings
+    // of one canonical identity with candidateCount === n. All 65 replays
+    // must collapse to one exact/complete payload.
     for (let index = 0; index < 65; index += 1) {
-      const value = aliases[index % aliases.length]!;
       assert.equal(recordCoverage(key, {
-        agent: "codex", paths: [value], cwd: "/repo", candidateCount: index + 1,
+        agent: "codex", paths: [...aliases], cwd: "/repo", candidateCount: aliases.length,
         candidateCountExact: true, pathsComplete: true, platform: "linux",
       } as CoverageInput, paths), true);
     }
@@ -97,6 +99,27 @@ test("semantic replay normalizes alias multiplicity before digest identity", () 
     assert.equal(snapshot.candidateCount, 1);
     assert.equal(snapshot.candidateCountExact, true);
     assert.equal(snapshot.pathsComplete, true);
+  } finally {
+    rmSync(paths.home, { recursive: true, force: true });
+  }
+});
+
+test("contradictory candidate count with a complete claim is never normalized to complete", () => {
+  const paths = freshPaths();
+  const key = "contradictory-count-fix8";
+  try {
+    // 200 declared candidates with one shipped path and pathsComplete=true is
+    // self-contradictory; the contradiction must survive, not be laundered
+    // into an exact single-identity complete snapshot.
+    assert.equal(recordCoverage(key, {
+      agent: "codex", paths: ["src/a.ts"], cwd: "/repo", candidateCount: 200,
+      candidateCountExact: true, pathsComplete: true, platform: "linux",
+    } as CoverageInput, paths), true);
+    const snapshot = readCoverage(key, paths);
+    assert.ok(snapshot);
+    assert.equal(snapshot.pathsComplete, false);
+    assert.equal(snapshot.candidateCountExact, false);
+    assert.equal(snapshot.candidateCount, 200);
   } finally {
     rmSync(paths.home, { recursive: true, force: true });
   }
@@ -225,6 +248,23 @@ test("custom mixed stats expose safe uncertainty bounds instead of a fabricated 
   assert.equal(value.totalUpperBound, 500);
 });
 
+test("coincident bounds clamp an infeasible supplied total instead of trusting it", async () => {
+  const registry = createToolRegistry({
+    exposure: "sanitized",
+    memory: emptyMemory({ stats: () => ({ failures: 2, fixEvents: 3, possibleFixes: 0, triples: 0, notes: 0, total: 999_999 }) }),
+    recallWithAi: disabledRecallWithAi,
+  });
+  const high = (await registry.call("stats", {}, signal)).structuredContent as Record<string, unknown>;
+  assert.equal(high.total, 5);
+  assert.equal(high.totalExact, undefined);
+  const low = await createToolRegistry({
+    exposure: "sanitized",
+    memory: emptyMemory({ stats: () => ({ failures: 2, fixEvents: 3, possibleFixes: 0, triples: 0, notes: 0, total: 0 }) }),
+    recallWithAi: disabledRecallWithAi,
+  }).call("stats", {}, signal);
+  assert.equal((low.structuredContent as Record<string, unknown>).total, 5);
+});
+
 test("sanitized hostile knowledge IDs use collision-resistant registry handles that fetch", async () => {
   const ids = [
     "https://example.test/password=one/path",
@@ -236,7 +276,7 @@ test("sanitized hostile knowledge IDs use collision-resistant registry handles t
   }));
   const memory = emptyMemory({
     searchKnowledge: () => records.map((record) => ({ id: record.id, ts: record.ts, kind: "failure", snippet: record.excerpt, score: 1 })),
-    fetchRecord: (query: { id: string }) => records.find((record) => record.id === query.id),
+    fetchRecord: (id: string) => records.find((record) => record.id === id),
   });
   const registry = createToolRegistry({ exposure: "sanitized", memory, recallWithAi: disabledRecallWithAi });
   const search = await registry.call("search_knowledge", { query: "failure" }, signal);
@@ -245,7 +285,33 @@ test("sanitized hostile knowledge IDs use collision-resistant registry handles t
   assert.notEqual(items[0]?.id, items[1]?.id);
   assert.ok(!items.some((item) => item.id === "[redacted]"));
   const fetched = await registry.call("fetch_record", { id: items[0]!.id }, signal);
-  assert.equal((fetched.structuredContent as { record?: unknown }).record !== null, true);
+  const record = (fetched.structuredContent as { record?: unknown }).record;
+  assert.ok(record !== null && record !== undefined, "handle must resolve to a projected record");
+});
+
+test("every handle returned by one hostile search resolves for immediate fetch_record", async () => {
+  const count = 1_500;
+  const records: FailureRecord[] = Array.from({ length: count }, (_, index) => ({
+    kind: "failure", id: `https://example.test/password=${index}/p`, ts: index + 1, cwd: "/repo",
+    cmd: "npm test", exitCode: 1, fingerprint: "0123456789abcdef", signature: ["f"], excerpt: "f", origin: "run",
+  }));
+  const byId = new Map(records.map((record) => [record.id, record]));
+  const memory = emptyMemory({
+    searchKnowledge: () => records.map((record) => ({ id: record.id, ts: record.ts, kind: "failure", snippet: record.excerpt, score: 1 })),
+    fetchRecord: (id: string) => byId.get(id),
+  });
+  const registry = createToolRegistry({ exposure: "sanitized", memory, recallWithAi: disabledRecallWithAi });
+  const search = await registry.call("search_knowledge", { query: "f" }, signal);
+  const items = (search.structuredContent as { items?: Array<{ id: string }> }).items ?? [];
+  assert.ok(items.length >= 100);
+  let resolved = 0;
+  for (const item of items) {
+    assert.ok(item.id.startsWith("rk-h-"), `leaked raw id: ${item.id}`);
+    const fetched = await registry.call("fetch_record", { id: item.id }, signal);
+    const record = (fetched.structuredContent as { record?: unknown }).record;
+    if (record !== null && record !== undefined) resolved += 1;
+  }
+  assert.equal(resolved, items.length);
 });
 
 test("core and custom why remain ambiguous when redacted display paths have distinct hashes", async () => {
@@ -301,6 +367,16 @@ test("filesystem policy removes pathname identity fallback and uses exclusive wa
 test("coverage publish cleanup carries an expected identity rather than deleting an arbitrary target", () => {
   const source = readFileSync(join(process.cwd(), "src", "agent", "spool.ts"), "utf8");
   assert.doesNotMatch(source, /if \(!written[^\n]*\) removeRegular\(target\)/u);
+});
+
+test("claim preparation threads the append lock and rechecks directory identity", () => {
+  const source = readFileSync(join(process.cwd(), "src", "agent", "spool.ts"), "utf8");
+  const bind = /function bindClaimCoverageLocked\([\s\S]*?\n\}/u.exec(source)?.[0] ?? "";
+  const prepare = /function prepareClaimLocked\([\s\S]*?\n\}/u.exec(source)?.[0] ?? "";
+  assert.match(bind, /lock: OwnedPrivateLock/u);
+  assert.match(prepare, /lock: OwnedPrivateLock/u);
+  assert.ok((bind.match(/appendLockUsable\(lock\)/gu) ?? []).length >= 3, "bind must recheck before mutations");
+  assert.ok((prepare.match(/appendLockUsable\(lock\)/gu) ?? []).length >= 2, "prepare must recheck before unlink");
 });
 
 test("coverage snapshots persist origin platform and reject platform contradictions", () => {
