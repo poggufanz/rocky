@@ -762,6 +762,7 @@ function whyFilePathMatches(records: readonly MemoryRecord[], path: string, limi
   traversalIncomplete: boolean;
 } {
   const candidates: WhyFilePathMatch[] = [];
+  const collisionIdentities = new Set<string>();
   const collection = safeTripleCollection(records);
   for (const triple of collection.triples.filter((record) => isOperationalMemoryRecord(record, now))) {
     const platform = triple.platform ?? "unknown";
@@ -790,6 +791,12 @@ function whyFilePathMatches(records: readonly MemoryRecord[], path: string, limi
         suffix,
         identity: hashMismatch ? `hash:${file.identityHash}` : identity,
       });
+      else if (!exact && trustedRoot && targetDisplay.length > 0 && candidateDisplay.endsWith(`/${targetDisplay}`)) {
+        // Trusted roots reject suffix-only evidence, but retaining its
+        // identity lets callers disclose a basename collision instead of
+        // collapsing two possible roots into a generic absence.
+        collisionIdentities.add(hashMismatch ? `hash:${file.identityHash}` : identity);
+      }
     }
   }
   const exact = candidates.filter((candidate) => candidate.exact);
@@ -800,7 +807,10 @@ function whyFilePathMatches(records: readonly MemoryRecord[], path: string, limi
       ? suffixCandidates.filter((candidate) => completeTriple(candidate.triple))
       : suffixCandidates.filter((candidate) => candidate.triple.mechanism.truncatedFiles === 0));
   if (exact.length === 0) {
-    const distinctSuffixes = new Set(suffixCandidates.map((candidate) => candidate.identity));
+    const distinctSuffixes = new Set([
+      ...suffixCandidates.map((candidate) => candidate.identity),
+      ...collisionIdentities,
+    ]);
     if (distinctSuffixes.size > 1) return { matches: [], suffixAmbiguous: true, traversalIncomplete: !collection.complete };
   }
   const seen = new Set<string>();
@@ -820,15 +830,16 @@ function worstCoverageStatus(current: KnowledgeCoverageSummary["status"], next: 
 }
 
 export function whyFileEvidence(records: readonly MemoryRecord[], path: string, limit = 5, now = Date.now()): WhyFileEvidence {
-  const operational = safeTripleCollection(records).triples.filter((record) => isOperationalMemoryRecord(record, now));
+  const sourceCollection = safeTripleCollection(records);
+  const operational = sourceCollection.triples.filter((record) => isOperationalMemoryRecord(record, now));
   const strictMatches = whyFilePathMatches(operational, path, limit, true, now);
   const matches = strictMatches.matches.slice(0, limit);
   const boundedMatches = new Set(matches.map((record) => record.id));
   const possible: WhyFilePossible[] = [];
-  let status: KnowledgeCoverageSummary["status"] = "complete";
+  let status: KnowledgeCoverageSummary["status"] = sourceCollection.complete ? "complete" : "unknown";
   let filesCovered = 0;
   let truncatedFiles = 0;
-  let hasIncomplete = strictMatches.traversalIncomplete;
+  let hasIncomplete = !sourceCollection.complete || strictMatches.traversalIncomplete;
   let sawTriple = false;
   const collection = safeTripleCollection(operational);
   for (const source of collection.triples) {
@@ -873,10 +884,10 @@ export function whyFileEvidence(records: readonly MemoryRecord[], path: string, 
     const root = canonicalPath(triple.cwd, { platform });
     return (root.startsWith("/") || /^[A-Za-z]:\//u.test(root)) && triple.platform !== undefined;
   });
-  if (!sawTriple || strictMatches.suffixAmbiguous || !collection.complete
+  if (!sawTriple || strictMatches.suffixAmbiguous || !sourceCollection.complete || !collection.complete
       || (strictMatches.matches.length === 0 && trustedRootPresent)) {
     hasIncomplete = true;
-    status = "unknown";
+    status = worstCoverageStatus(status, "unknown");
   }
   const coverage: KnowledgeCoverageSummary = {
     status,

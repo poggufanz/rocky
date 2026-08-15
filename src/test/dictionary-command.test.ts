@@ -363,7 +363,7 @@ test("why chooses exact witness before a suffix in one triple", () => {
 
 test("why discloses ambiguous index suffixes instead of choosing one rationale", () => {
   const make = (id: string, path: string): TripleRecord => ({
-    kind: "triple", id, ts: 100, cwd: "relative", schemaV: 1, agent: "codex", origin: "agent-hook",
+    kind: "triple", id, ts: 100, cwd: "/repo", platform: "linux", schemaV: 1, agent: "codex", origin: "agent-hook",
     rationale: { text: id, tags: [], source: "notify" },
     mechanism: {
       files: [{ path, plusMinus: [1, 0], props: [id], provenance: "tool-observed" }],
@@ -592,6 +592,67 @@ test("what --ai cannot mutate or invent evidence metadata", async () => {
   assert.ok(outLines[0]?.includes("id=t1"));
   assert.ok(outLines[0]?.includes("confidence=incomplete"));
   assert.ok(outLines[0]?.includes("reason=file coverage incomplete"));
+});
+
+test("what --ai fallback keeps deterministic note and triple order", async () => {
+  const now = Date.now();
+  const triple: TripleRecord = {
+    kind: "triple", id: "triple-order", ts: now - 1, cwd: "/w", schemaV: 1,
+    agent: "codex", origin: "agent-hook", intent: { text: "naikin button extra" },
+    mechanism: { files: [{ path: "src/app.css", plusMinus: [1, 0], props: ["margin"] }], truncatedFiles: 0 },
+  };
+  const note: MemoryRecord = {
+    kind: "note", id: "note-order", ts: now, cwd: "/w", cmd: "", file: "src/app.ts", line: 1,
+    subject: "naikin", answer: "remember",
+  };
+  const records = () => [triple, note];
+  const plain = sinks();
+  assert.equal(await what(["naikin", "src", "app"], { load: records, now, ...plain.deps }), 0);
+  const deterministicEvidence = plain.outLines.map((line) => line.startsWith("note ") ? "note-order" : "triple-order");
+  assert.deepEqual(deterministicEvidence, ["note-order", "triple-order"]);
+
+  for (const rank of [
+    { async run() { return undefined; } },
+    { async run() { return ["unknown-id"]; } },
+  ]) {
+    const fallback = sinks();
+    assert.equal(await what(["--ai", "naikin", "src", "app"], { load: records, now, rank, ...fallback.deps }), 0);
+    assert.deepEqual(fallback.outLines.map((line) => line.startsWith("note ") ? "note-order" : "triple-order"), deterministicEvidence);
+    assert.equal(fallback.sayLines.filter((line) => !line.startsWith("model sleeps.")).join("\n"), plain.sayLines.join("\n"));
+  }
+});
+
+test("long triple and note evidence retain bounded provenance fields", async () => {
+  const now = Date.now();
+  const longId = "i".repeat(512);
+  const triple: TripleRecord = {
+    kind: "triple", id: longId, ts: now - 1, cwd: "/repo", platform: "linux", schemaV: 1,
+    agent: "codex", origin: "agent-hook", intent: { text: `lesson ${"x".repeat(96)}` },
+    mechanism: {
+      files: [{ path: `src/${"p".repeat(166)}.ts`, plusMinus: [3, 1], props: ["q".repeat(120)], provenance: "tool-observed" }],
+      truncatedFiles: 0, baseline: "captured", coverageStatus: "complete",
+    },
+  };
+  const note: MemoryRecord = {
+    kind: "note", id: longId.replace(/i/gu, "n"), ts: now - 2, cwd: "/repo", cmd: "rocky note",
+    file: `src/${"n".repeat(166)}.ts`, line: 7, subject: `lesson ${"s".repeat(113)}`, answer: `remember ${"a".repeat(119)}`,
+  };
+  const output = sinks();
+  assert.equal(await what(["lesson"], { load: () => [triple, note], now, ...output.deps }), 0);
+  assert.ok(output.outLines.some((line) => line.includes(triple.id)));
+  assert.ok(output.outLines.some((line) => line.includes(note.id)));
+  const tripleLine = output.outLines.find((line) => line.includes("agent="));
+  assert.ok(tripleLine);
+  for (const label of ["id=", "ts=", "source=", "agent=", "files=", "coverage=", "confidence=", "reason="]) {
+    assert.ok(tripleLine!.includes(label), label);
+  }
+  const noteLine = output.outLines.find((line) => line.includes("source=note") && line.includes("id=split"));
+  assert.ok(noteLine);
+  for (const label of ["id=", "ts=", "source=", "file=", "coverage=", "confidence=", "reason="]) {
+    assert.ok(noteLine!.includes(label), label);
+  }
+  assert.ok(noteLine!.includes("full-id-next-line"));
+  for (const line of [...output.sayLines, ...output.outLines]) assert.ok(Buffer.byteLength(line, "utf8") <= 512);
 });
 
 test("what --ai does not call model for note-only evidence", async () => {

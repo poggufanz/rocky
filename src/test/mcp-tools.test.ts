@@ -126,7 +126,7 @@ test("knowledge tools search, fetch, and explain one file", async () => {
 
 test("why_file keeps two index suffixes ambiguous and future knowledge inert", async () => {
   const first: TripleRecord = {
-    ...triple, id: "index-one", ts: 10, cwd: "relative", mechanism: {
+    ...triple, id: "index-one", ts: 10, cwd: "/repo", platform: "linux", mechanism: {
       files: [{ path: "one/index.ts", plusMinus: [1, 0], props: [], provenance: "tool-observed" }],
       truncatedFiles: 0, baseline: "captured", coverageStatus: "complete",
     },

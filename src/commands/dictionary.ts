@@ -1,3 +1,4 @@
+import { Buffer } from "node:buffer";
 import { dictionaryRankPortFromConfig, type DictionaryRankPort } from "../ai/dictionary-ai.js";
 import { loadConfig } from "../core/config.js";
 import { digestBuckets, queryDictionary, queryNotes, quizCandidates, type DictionaryHit, type NoteHit } from "../core/dictionary.js";
@@ -14,6 +15,7 @@ import { parseNoArgs, parseQueryArgs, reportCliUsage } from "./cli-args.js";
 const MAX_QUERY_DISPLAY_BYTES = 160;
 const MAX_SUBJECT_DISPLAY_BYTES = 120;
 const MAX_PATH_DISPLAY_BYTES = 180;
+const MAX_PROVENANCE_PATH_BYTES = 96;
 const MAX_INTENT_DISPLAY_BYTES = 128;
 const MAX_OUTPUT_LINE_BYTES = 512;
 const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
@@ -142,6 +144,23 @@ function terminalSafe(value: string, maximumBytes: number): string {
   return truncateUtf8(withoutControls, maximumBytes).value;
 }
 
+function fullIdLines(value: string): string[] {
+  const clean = safeTerminalLine(value)
+    .replace(/[\u200b\u2060\ufeff]/gu, " ")
+    .replace(/[?ï¼Ÿ]/gu, " ");
+  const lines: string[] = [];
+  let current = "";
+  for (const character of clean) {
+    if (current && Buffer.byteLength(`${current}${character}`, "utf8") > MAX_OUTPUT_LINE_BYTES) {
+      lines.push(current);
+      current = "";
+    }
+    current += character;
+  }
+  if (current || lines.length === 0) lines.push(current);
+  return lines;
+}
+
 function subjectForTriple(triple: DictionaryHit["triple"]): string {
   const first = triple.mechanism.files[0];
   return terminalSafe(first ? first.props[0] ?? first.path : "something", MAX_SUBJECT_DISPLAY_BYTES);
@@ -187,23 +206,42 @@ function noteConfidence(note: NoteHit["note"]): { confidence: "possible"; reason
   };
 }
 
-function evidenceLine(hit: LookupHit): string {
+function evidenceLines(hit: LookupHit): string[] {
   if ("note" in hit) {
     const note = hit.note;
     const metadata = noteConfidence(note);
-    return terminalSafe(`note ${note.id} ts=${note.ts} source=note file=${metadata.files} coverage=${metadata.coverage} confidence=${metadata.confidence} reason=${metadata.reason}; subject=${subjectForNote(note)} answer=${terminalSafe(note.answer, MAX_INTENT_DISPLAY_BYTES)}`, MAX_OUTPUT_LINE_BYTES);
+    const safeId = terminalSafe(note.id, MAX_OUTPUT_LINE_BYTES);
+    const subject = subjectForNote(note);
+    const answer = terminalSafe(note.answer, MAX_INTENT_DISPLAY_BYTES);
+    const line = `note ${safeId} ts=${note.ts} source=note file=${metadata.files} coverage=${metadata.coverage} confidence=${metadata.confidence} reason=${metadata.reason}; subject=${subject} answer=${answer}`;
+    if (Buffer.byteLength(line, "utf8") <= MAX_OUTPUT_LINE_BYTES) return [terminalSafe(line, MAX_OUTPUT_LINE_BYTES)];
+    const contentLine = `note subject=${subject} answer=${answer} file=${terminalSafe(note.file, MAX_PATH_DISPLAY_BYTES)}`;
+    const provenanceLine = `note id=split; full-id-next-line ts=${note.ts} source=note file=${terminalSafe(note.file, MAX_PROVENANCE_PATH_BYTES)} coverage=${metadata.coverage} confidence=${metadata.confidence} reason=${metadata.reason}`;
+    return [
+      terminalSafe(contentLine, MAX_OUTPUT_LINE_BYTES),
+      terminalSafe(provenanceLine, MAX_OUTPUT_LINE_BYTES),
+      ...fullIdLines(note.id),
+    ];
   }
   const triple = hit.triple;
   const first = triple.mechanism.files[0];
-  if (!first || !triple.intent) return "";
+  if (!first || !triple.intent) return [];
   const metadata = tripleConfidence(triple);
-  return terminalSafe(`${shorten(triple.intent.text)} -> ${subjectForTriple(triple)}  (${terminalSafe(first.path, MAX_PATH_DISPLAY_BYTES)} +${first.plusMinus[0]} -${first.plusMinus[1]}, ${ago(triple.ts)}; id=${triple.id} ts=${triple.ts} source=${triple.origin} agent=${triple.agent} files=${metadata.files} coverage=${metadata.coverage} confidence=${metadata.confidence} reason=${metadata.reason})`, MAX_OUTPUT_LINE_BYTES);
+  const body = `${shorten(triple.intent.text)} -> ${subjectForTriple(triple)}  (${terminalSafe(first.path, MAX_PATH_DISPLAY_BYTES)} +${first.plusMinus[0]} -${first.plusMinus[1]}, ${ago(triple.ts)};`;
+  const safeId = terminalSafe(triple.id, MAX_OUTPUT_LINE_BYTES);
+  const metadataLine = `id=${safeId} ts=${triple.ts} source=${triple.origin} agent=${triple.agent} files=${metadata.files} coverage=${metadata.coverage} confidence=${metadata.confidence} reason=${metadata.reason})`;
+  const line = `${body} ${metadataLine}`;
+  if (Buffer.byteLength(line, "utf8") <= MAX_OUTPUT_LINE_BYTES) return [terminalSafe(line, MAX_OUTPUT_LINE_BYTES)];
+  return [
+    terminalSafe(body, MAX_OUTPUT_LINE_BYTES),
+    terminalSafe(`id=split; full-id-next-line ts=${triple.ts} source=${triple.origin} agent=${triple.agent} files=${metadata.files} coverage=${metadata.coverage} confidence=${metadata.confidence} reason=${metadata.reason})`, MAX_OUTPUT_LINE_BYTES),
+    ...fullIdLines(triple.id),
+  ];
 }
 
 function evidence(hits: LookupHit[], support: (line: string) => void): void {
   for (const hit of hits) {
-    const line = evidenceLine(hit);
-    if (line) support(line);
+    for (const line of evidenceLines(hit)) support(line);
   }
 }
 
@@ -276,6 +314,18 @@ function teachingHits(records: readonly MemoryRecord[], query: string, now: numb
   return { triples, notes, all: all.slice(0, 5) };
 }
 
+function mergeRankedTeaching(base: readonly LookupHit[], ranked: readonly DictionaryHit[]): LookupHit[] {
+  const allowed = new Set(base
+    .filter((hit): hit is DictionaryHit => "triple" in hit)
+    .map((hit) => hit.triple.id));
+  const order = ranked.filter((hit) => allowed.has(hit.triple.id));
+  let tripleIndex = 0;
+  return base.map((hit) => {
+    if (!("triple" in hit)) return hit;
+    return order[tripleIndex++] ?? hit;
+  });
+}
+
 function futureTeachingMatch(records: readonly MemoryRecord[], query: string, now: number): boolean {
   if (records.every((record) => isOperationalMemoryRecord(record, now))) return false;
   return queryDictionary(records, query, 5, Number.MAX_SAFE_INTEGER).length > 0
@@ -317,6 +367,7 @@ export async function what(argv: string[], deps: DictionaryCommandDeps = {}): Pr
   }
   if (scan !== undefined && coverageIncomplete(scan)) support(coverageLine(scan));
   let displayed = teaching.triples;
+  let aiRanked = false;
   if (useAi && teaching.triples.length > 0) {
     let rank = deps.rank;
     if (rank === undefined) {
@@ -339,12 +390,13 @@ export async function what(argv: string[], deps: DictionaryCommandDeps = {}): Pr
         ? reorder(teaching.triples, rankedIds)
         : undefined;
       if (ranked === undefined) speak("model sleeps. I use my own ears.");
-      else displayed = ranked;
+      else {
+        displayed = ranked;
+        aiRanked = true;
+      }
     }
   }
-  const shown: LookupHit[] = useAi && teaching.triples.length > 0
-    ? [...displayed, ...teaching.notes].slice(0, 5)
-    : teaching.all;
+  const shown: LookupHit[] = aiRanked ? mergeRankedTeaching(teaching.all, displayed) : teaching.all;
   speak(terminalSafe("triple" in (shown[0] as LookupHit)
     ? `you say "${terminalSafe(query, MAX_QUERY_DISPLAY_BYTES)}". it is ${subject(shown[0] as LookupHit)}. I think. check, question`
     : `you say "${terminalSafe(query, MAX_QUERY_DISPLAY_BYTES)}". your note says ${subject(shown[0] as LookupHit)}. I only hear. check, question`, MAX_OUTPUT_LINE_BYTES));

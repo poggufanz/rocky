@@ -461,6 +461,51 @@ test("why-file evidence treats future triples as inert and retains unknown cover
   assert.equal(evidence.coverage.status, "unknown");
 });
 
+test("why-file evidence preserves malformed traversal incompleteness beside valid proof", () => {
+  const valid: TripleRecord = {
+    ...tripleA,
+    id: "valid-why",
+    ts: 100,
+    platform: "linux",
+    mechanism: {
+      files: [{ path: "src/a.ts", plusMinus: [1, 0], props: ["a"], provenance: "tool-observed" }],
+      truncatedFiles: 0,
+      baseline: "captured",
+      coverageStatus: "complete",
+    },
+  };
+  const malformed = { kind: "triple" } as unknown as MemoryRecord;
+  const evidence = whyFileEvidence([valid, malformed], "src/a.ts", 5, 100);
+  assert.deepEqual(evidence.matches.map((record) => record.id), ["valid-why"]);
+  assert.equal(evidence.coverageIncomplete, true);
+  assert.equal(evidence.coverage.complete, false);
+  assert.equal(evidence.coverage.status, "unknown");
+});
+
+test("why-file evidence discloses trusted-root basename collisions without selecting a suffix", () => {
+  const make = (id: string, path: string): TripleRecord => ({
+    ...tripleA,
+    id,
+    ts: 100,
+    cwd: "/repo",
+    platform: "linux",
+    mechanism: {
+      files: [{ path, plusMinus: [1, 0], props: [id], provenance: "tool-observed" }],
+      truncatedFiles: 0,
+      baseline: "captured",
+      coverageStatus: "complete",
+    },
+  });
+  const evidence = whyFileEvidence([
+    make("src-index", "src/index.ts"),
+    make("test-index", "test/index.ts"),
+  ], "index.ts", 5, 100);
+  assert.deepEqual(evidence.matches, []);
+  assert.equal(evidence.ambiguousPath, true);
+  assert.equal(evidence.coverageIncomplete, true);
+  assert.equal(evidence.coverage.status, "unknown");
+});
+
 test("knowledge hits expose record provenance and bounded file coverage", () => {
   const triple: TripleRecord = {
     ...tripleA,
