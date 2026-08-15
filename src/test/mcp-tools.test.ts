@@ -1,7 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import type { MemoryRecord, TripleRecord } from "../core/memory-read.js";
+import type { FailureRecord, MemoryRecord, TripleRecord } from "../core/memory-read.js";
 import { createMemoryQueries } from "../core/memory-query.js";
+import type { MemoryQueries } from "../core/memory-query.js";
 import { pathIdentityHash } from "../core/memory-read.js";
 import { disabledRecallWithAi, type RecallWithAiPort } from "../ai/port.js";
 import { createToolRegistry, McpInvalidParamsError, ToolExecutionError, TOOL_ENVELOPE_RESERVE_BYTES } from "../mcp/tools.js";
@@ -138,6 +139,100 @@ test("knowledge tools search, fetch, and explain one file", async () => {
   const why = await knowledgeRegistry().call("why_file", { path: "src/app.css", limit: 1 }, signal);
   assert.equal(why.isError, undefined);
   assert.equal((why.structuredContent.items as unknown[]).length, 1);
+});
+
+test("custom fetch_record snapshots triple fields before sanitized or raw projection", async () => {
+  const base = completeWhyTriple("fetch-snapshot");
+  const reads = new Map<string, number>();
+  const getters = new Map<string, () => unknown>();
+  const changing = (name: string, first: unknown, later: unknown) => {
+    const existing = getters.get(name);
+    if (existing !== undefined) return existing;
+    const getter = () => {
+      const count = (reads.get(name) ?? 0) + 1;
+      reads.set(name, count);
+      return count === 1 ? first : later;
+    };
+    getters.set(name, getter);
+    return getter;
+  };
+  const file = new Proxy(base.mechanism.files[0]!, {
+    get(target, property, receiver) {
+      if (property === "path") return changing("file.path", "src/fetch.ts", "Bearer FILE-TOPSECRET")();
+      return Reflect.get(target, property, receiver);
+    },
+    ownKeys() { throw new Error("file must not be enumerated"); },
+  });
+  const mechanism = new Proxy({ ...base.mechanism, files: [file] }, {
+    get(target, property, receiver) {
+      if (property === "files") return changing("mechanism.files", target.files, [file])();
+      return Reflect.get(target, property, receiver);
+    },
+    ownKeys() { throw new Error("mechanism must not be enumerated"); },
+  });
+  const candidate = new Proxy({ ...base, mechanism }, {
+    get(target, property, receiver) {
+      if (property === "agent") return changing("triple.agent", "codex", "Bearer AGENT-TOPSECRET")();
+      if (property === "cwd") return changing("triple.cwd", "/repo", "Bearer CWD-TOPSECRET")();
+      if (property === "kind") return changing("triple.kind", "triple", "triple")();
+      if (property === "mechanism") return changing("triple.mechanism", mechanism, { secret: "TOPSECRET" })();
+      return Reflect.get(target, property, receiver);
+    },
+    ownKeys() { throw new Error("triple must not be enumerated"); },
+  });
+  const memory = {
+    ...createMemoryQueries(() => []),
+    fetchRecord: () => candidate as unknown as MemoryRecord,
+  };
+  const sanitized = await createToolRegistry({
+    exposure: "sanitized", memory, recallWithAi: disabledRecallWithAi,
+  }).call("fetch_record", { id: base.id }, new AbortController().signal);
+  assert.equal(sanitized.isError, undefined);
+  assert.doesNotMatch(JSON.stringify(sanitized), /TOPSECRET|Bearer/u);
+  assert.equal((sanitized.structuredContent.record as { agent: string }).agent, "codex");
+  assert.equal(((sanitized.structuredContent.record as { files: Array<{ path: string }> }).files[0])?.path, "src/fetch.ts");
+
+  reads.clear();
+  getters.clear();
+  const raw = await createToolRegistry({
+    exposure: "raw", memory, recallWithAi: disabledRecallWithAi,
+  }).call("fetch_record", { id: base.id }, new AbortController().signal);
+  assert.equal(raw.isError, undefined);
+  assert.doesNotMatch(JSON.stringify(raw), /TOPSECRET|Bearer/u);
+  assert.equal((raw.structuredContent.record as { agent: string }).agent, "codex");
+  assert.equal((raw.structuredContent.record as { cwd: string }).cwd, "/repo");
+  assert.equal(reads.get("triple.agent"), 1);
+  assert.equal(reads.get("triple.cwd"), 1);
+  assert.equal(reads.get("file.path"), 1);
+});
+
+test("custom fetch_record snapshots failure origin before projection", async () => {
+  const failure: FailureRecord = {
+    kind: "failure", id: "failure-origin-snapshot", ts: 10, cwd: "/repo", cmd: "npm test",
+    exitCode: 1, fingerprint: "0123456789abcdef", signature: ["failure"], excerpt: "failure",
+  };
+  let originReads = 0;
+  const candidate = new Proxy(failure, {
+    get(target, property, receiver) {
+      if (property === "origin") {
+        originReads += 1;
+        return originReads === 1 ? undefined : "Bearer ORIGIN-TOPSECRET";
+      }
+      return Reflect.get(target, property, receiver);
+    },
+    ownKeys() { throw new Error("failure must not be enumerated"); },
+  });
+  const memory = {
+    ...createMemoryQueries(() => []),
+    fetchRecord: () => candidate,
+  };
+  const result = await createToolRegistry({
+    exposure: "sanitized", memory, recallWithAi: disabledRecallWithAi,
+  }).call("fetch_record", { id: failure.id }, new AbortController().signal);
+  assert.equal(result.isError, undefined);
+  assert.equal(originReads, 1);
+  assert.doesNotMatch(JSON.stringify(result), /Bearer|TOPSECRET/u);
+  assert.equal((result.structuredContent.record as { id: string }).id, failure.id);
 });
 
 test("why_file keeps two index suffixes ambiguous and future knowledge inert", async () => {
@@ -336,6 +431,49 @@ test("why_file rejects oversized provider cwd/path evidence before canonicalizat
   }).call("why_file", { path: longPath }, new AbortController().signal);
   assert.equal((boundedResult.structuredContent.items as unknown[]).length, 1);
   assert.equal(boundedResult.structuredContent.coverageStatus, "complete");
+});
+
+test("why_file keeps a bounded witness from an over-cap valid file array and discloses omission", async () => {
+  let beyondCapReads = 0;
+  const files = Array.from({ length: 257 }, (_, index) => ({
+    path: index === 2 ? "src/target.ts" : `src/other-${index}.ts`,
+    plusMinus: [1, 0] as [number, number],
+    props: ["known"],
+    provenance: "tool-observed" as const,
+  }));
+  const hostileFiles = new Proxy(files, {
+    get(target, property, receiver) {
+      if (typeof property === "string" && /^\d+$/u.test(property) && Number(property) >= 256) beyondCapReads += 1;
+      return Reflect.get(target, property, receiver);
+    },
+    ownKeys() { throw new Error("provider files must not be enumerated"); },
+  });
+  const candidate: TripleRecord = {
+    ...completeWhyTriple("over-cap-valid-files"),
+    mechanism: {
+      files: hostileFiles as unknown as TripleRecord["mechanism"]["files"],
+      truncatedFiles: 0, baseline: "captured", coverageStatus: "complete",
+    },
+  };
+  const result = await createToolRegistry({
+    exposure: "sanitized",
+    memory: {
+      ...createMemoryQueries(() => []),
+      whyFileEvidence: () => ({
+        matches: [candidate], possible: [],
+        coverage: { status: "complete" as const, complete: true, filesCovered: 257, truncatedFiles: 0 },
+        coverageIncomplete: false,
+      }),
+    },
+    recallWithAi: disabledRecallWithAi,
+  }).call("why_file", { path: "src/target.ts" }, new AbortController().signal);
+  const item = (result.structuredContent.items as Array<{ files: Array<{ path: string }>; truncatedFiles: number; complete: boolean }>)[0];
+  assert.ok(item?.files.some((file) => file.path === "src/target.ts"));
+  assert.ok((item?.truncatedFiles ?? 0) > 0);
+  assert.equal(item?.complete, false);
+  assert.equal(result.structuredContent.coverageIncomplete, true);
+  assert.notEqual(result.structuredContent.coverageStatus, "complete");
+  assert.equal(beyondCapReads, 0);
 });
 
 test("why_file snapshots every custom triple field once before normalization", async () => {
@@ -728,6 +866,81 @@ test("malformed custom stats disclose incomplete coverage instead of clean zero 
   }
 });
 
+test("custom stats and coverage snapshot primitive fields once and reject hostile shapes", async () => {
+  const reads = new Map<string, number>();
+  const getters = new Map<string, () => unknown>();
+  const counted = (name: string, first: unknown, later = first) => {
+    const existing = getters.get(name);
+    if (existing !== undefined) return existing;
+    const getter = () => {
+      const count = (reads.get(name) ?? 0) + 1;
+      reads.set(name, count);
+      return count === 1 ? first : later;
+    };
+    reads.set(name, 0);
+    getters.set(name, getter);
+    return getter;
+  };
+  const stats = new Proxy({}, {
+    get(_target, property: string | symbol) {
+      if (property === "toJSON") return () => ({ secret: "TOPSECRET" });
+      if (typeof property !== "string") return undefined;
+      return counted(`stats.${property}`, 0, "Bearer TOPSECRET")();
+    },
+    ownKeys() { throw new Error("stats must not be enumerated"); },
+  });
+  const coverage = new Proxy({}, {
+    get(_target, property: string | symbol) {
+      if (typeof property !== "string") return undefined;
+      const values: Record<string, unknown> = {
+        version: 1, scanned: 2, skipped: 0, truncated: 0,
+        bytesScanned: 10, bytesTotal: 10, complete: true, reason: undefined,
+      };
+      if (!(property in values)) throw new Error(`unexpected coverage getter: ${property}`);
+      return counted(`coverage.${property}`, values[property], "Bearer TOPSECRET")();
+    },
+    ownKeys() { throw new Error("coverage must not be enumerated"); },
+  });
+  const memory = {
+    ...createMemoryQueries(() => []),
+    stats: () => stats as never,
+    coverage: () => coverage as never,
+  };
+  const result = await createToolRegistry({
+    exposure: "sanitized", memory, recallWithAi: disabledRecallWithAi,
+  }).call("stats", {}, new AbortController().signal);
+  assert.equal(result.structuredContent.failures, 0);
+  assert.equal(result.structuredContent.total, 0);
+  assert.deepEqual(result.structuredContent.memoryCoverage, {
+    version: 1, scanned: 2, skipped: 0, truncated: 0,
+    bytesScanned: 10, bytesTotal: 10, complete: true,
+  });
+  assert.equal(result.structuredContent.memoryCoverageIncomplete, false);
+  assert.doesNotMatch(JSON.stringify(result), /TOPSECRET|Bearer|secret/u);
+  for (const field of ["failures", "fixEvents", "resolved", "unresolved", "confirmedFixes", "possibleFixes", "triples", "notes", "total"]) {
+    assert.equal(reads.get(`stats.${field}`), 1, `stats.${field} getter count`);
+  }
+  for (const field of ["version", "scanned", "skipped", "truncated", "bytesScanned", "bytesTotal", "complete", "reason"]) {
+    assert.equal(reads.get(`coverage.${field}`), 1, `coverage.${field} getter count`);
+  }
+
+  const malformedValues: unknown[] = [[], "scalar", 42, null, undefined, new Proxy({}, {
+    get() { throw new Error("stats getter failed"); },
+    ownKeys() { throw new Error("must not enumerate throwing stats"); },
+  })];
+  for (const malformed of malformedValues) {
+    const malformedResult = await createToolRegistry({
+      exposure: "sanitized",
+      memory: { ...createMemoryQueries(() => []), stats: () => malformed as never },
+      recallWithAi: disabledRecallWithAi,
+    }).call("stats", {}, new AbortController().signal);
+    assert.equal(malformedResult.structuredContent.failures, 0);
+    assert.equal(malformedResult.structuredContent.total, 0);
+    assert.equal(malformedResult.structuredContent.memoryCoverageIncomplete, true);
+    assert.equal((malformedResult.structuredContent.memoryCoverage as { complete: boolean }).complete, false);
+  }
+});
+
 test("oversized custom rationale tags fail why coverage closed", async () => {
   const known = completeWhyTriple("oversized-rationale-tags");
   const oversized = { ...known, rationale: { ...known.rationale!, tags: Array.from({ length: 1_000 }, (_, index) => `tag-${index}`) } };
@@ -1070,6 +1283,48 @@ test("recall_with_ai keeps requested hits while limiting AI candidates to five",
     assert.deepEqual(result.structuredContent.rankedCandidateIds, Array.from({ length: limit }, (_, index) => `c${index + 1}`));
   }
   assert.deepEqual(observed, [5, 5]);
+});
+
+test("recall_with_ai receives only a validated deterministic candidate prefix", async () => {
+  const makeFailure = (id: string, ts: number): FailureRecord => ({
+    kind: "failure", id, ts, cwd: "/repo", cmd: `needle ${id}`, exitCode: 1,
+    fingerprint: `fp-${id}`, signature: ["needle"], excerpt: "needle", origin: "run",
+  });
+  const valid = Array.from({ length: 5 }, (_, index) => makeFailure(`ai-valid-${index}`, 10 + index));
+  const future = makeFailure("ai-future", Date.now() + 60_000);
+  const hostileFailure = new Proxy(makeFailure("ai-hostile", 20), {
+    get(target, property, receiver) {
+      if (property === "id") return "Bearer AI-TOPSECRET\u001b[31m";
+      return Reflect.get(target, property, receiver);
+    },
+  });
+  const hostile = { failure: hostileFailure, score: 1 } as unknown as ReturnType<MemoryQueries["recall"]>[number];
+  const observed: string[][] = [];
+  const ai: RecallWithAiPort = {
+    async run(input) {
+      observed.push(input.hits.map((hit) => hit.failure.id));
+      assert.doesNotMatch(JSON.stringify(input.hits), /AI-TOPSECRET|Bearer|\u001b/u);
+      return { aiStatus: "disabled", rankedCandidateIds: input.hits.map((_, index) => `c${index + 1}`) };
+    },
+  };
+  const validFirst = createToolRegistry({
+    exposure: "sanitized",
+    memory: { ...createMemoryQueries(() => []), recall: () => [...valid.map((failure) => ({ failure, score: 1 })), { failure: future, score: 1 }, hostile] },
+    recallWithAi: ai,
+  });
+  const firstResult = await validFirst.call("recall_with_ai", { query: "needle", limit: 10 }, new AbortController().signal);
+  assert.deepEqual(observed[0], valid.map((failure) => failure.id));
+  assert.deepEqual((firstResult.structuredContent.items as Array<{ candidateId: string }>).map((item) => item.candidateId), ["c1", "c2", "c3", "c4", "c5"]);
+
+  const invalidFirst = createToolRegistry({
+    exposure: "sanitized",
+    memory: { ...createMemoryQueries(() => []), recall: () => [{ failure: future, score: 1 }, hostile, ...valid.map((failure) => ({ failure, score: 1 }))] },
+    recallWithAi: ai,
+  });
+  const secondResult = await invalidFirst.call("recall_with_ai", { query: "needle", limit: 10 }, new AbortController().signal);
+  assert.deepEqual(observed[1], []);
+  assert.deepEqual((secondResult.structuredContent.items as Array<{ candidateId: string }>).map((item) => item.candidateId), ["c3", "c4", "c5", "c6", "c7"]);
+  assert.deepEqual(secondResult.structuredContent.rankedCandidateIds, ["c3", "c4", "c5", "c6", "c7"]);
 });
 
 test("AI refs only name candidates retained by projection and response capping", async () => {

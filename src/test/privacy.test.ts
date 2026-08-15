@@ -410,6 +410,71 @@ test("response cap omits a whole projected item and never exceeds its byte limit
   assert.deepEqual(candidateIds, candidateIds.map((_, index) => `c${index + 1}`));
 });
 
+test("projection work budgets stop long hostile arrays after a bounded prefix", () => {
+  const large = "x".repeat(30_000);
+  const recallValues: RecallHit[] = Array.from({ length: 100 }, (_, index) => ({
+    failure: {
+      kind: "failure", id: `budget-${index}`, ts: index, cwd: "/work", cmd: "needle", exitCode: 1,
+      fingerprint: `budget-fp-${index}`, signature: [large], excerpt: large,
+    },
+    score: 1,
+  }));
+  let recallReads = 0;
+  const recallHits = new Proxy(recallValues, {
+    get(target, property, receiver) {
+      if (typeof property === "string" && /^\d+$/u.test(property)) recallReads += 1;
+      return Reflect.get(target, property, receiver);
+    },
+  });
+  const recall = projectRecallHits(recallHits, "sanitized");
+  assert.ok(recallReads > 0 && recallReads < recallValues.length, `recall accesses: ${recallReads}`);
+  assert.equal(recall.truncated, true);
+  assert.ok(Buffer.byteLength(JSON.stringify(recall), "utf8") <= MAX_RESPONSE_BYTES);
+
+  const knowledgeValues: KnowledgeSearchHit[] = Array.from({ length: 100 }, (_, index) => ({
+    id: `knowledge-budget-${index}`, ts: index, kind: "note", snippet: large, score: 1, source: "note",
+  }));
+  let knowledgeReads = 0;
+  const knowledgeHits = new Proxy(knowledgeValues, {
+    get(target, property, receiver) {
+      if (typeof property === "string" && /^\d+$/u.test(property)) knowledgeReads += 1;
+      return Reflect.get(target, property, receiver);
+    },
+  });
+  const knowledge = projectKnowledgeHits(knowledgeHits, "sanitized");
+  assert.ok(knowledgeReads > 0 && knowledgeReads < knowledgeValues.length, `knowledge accesses: ${knowledgeReads}`);
+  assert.equal(knowledge.truncated, true);
+  assert.ok(Buffer.byteLength(JSON.stringify(knowledge), "utf8") <= MAX_RESPONSE_BYTES);
+});
+
+test("projection work budgets stop malformed recall and recent arrays", () => {
+  const malformed = new Proxy({}, { get() { throw new Error("malformed hit"); } });
+  const values = Array.from({ length: 20_000 }, () => malformed);
+  let recallReads = 0;
+  const recallHits = new Proxy(values, {
+    get(target, property, receiver) {
+      if (typeof property === "string" && /^\d+$/u.test(property)) recallReads += 1;
+      return Reflect.get(target, property, receiver);
+    },
+  });
+  const recall = projectRecallHits(recallHits as unknown as RecallHit[], "sanitized");
+  assert.equal(recall.items.length, 0);
+  assert.equal(recall.truncated, true);
+  assert.ok(recallReads > 0 && recallReads < values.length, `malformed recall accesses: ${recallReads}`);
+
+  let recentReads = 0;
+  const recentHits = new Proxy(values, {
+    get(target, property, receiver) {
+      if (typeof property === "string" && /^\d+$/u.test(property)) recentReads += 1;
+      return Reflect.get(target, property, receiver);
+    },
+  });
+  const recent = projectRecentFailures(recentHits as unknown as RecentFailureHit[], "sanitized");
+  assert.equal(recent.items.length, 0);
+  assert.equal(recent.truncated, true);
+  assert.ok(recentReads > 0 && recentReads < values.length, `malformed recent accesses: ${recentReads}`);
+});
+
 test("response cap preserves source-local candidate IDs after skipping an oversized middle hit", () => {
   const third: RecallHit = {
     failure: {

@@ -15,6 +15,60 @@ const MAX_KNOWLEDGE_FILE_INPUTS = 20_000;
 const MAX_KNOWLEDGE_HIT_INPUTS = 20_000;
 const MAX_NESTED_ITEMS = 256;
 const MAX_NESTED_BYTES = 64 * 1024;
+/** Bound provider traversal even when response capping has already omitted items. */
+const PROJECTION_WORK_ITEM_BYTES = Math.max(256, Math.floor(MAX_RESPONSE_BYTES / 2_048));
+const PROJECTION_WORK_BUDGET_BYTES = MAX_RESPONSE_BYTES * 2;
+
+function projectionWorkBytes(value: unknown): number {
+  let bytes = PROJECTION_WORK_ITEM_BYTES;
+  const addString = (candidate: unknown): void => {
+    if (typeof candidate !== "string" || bytes >= PROJECTION_WORK_BUDGET_BYTES) return;
+    try {
+      bytes = Math.min(PROJECTION_WORK_BUDGET_BYTES, bytes + Math.min(MAX_FIELD_BYTES * 2, Buffer.byteLength(candidate, "utf8")));
+    } catch {
+      bytes = Math.min(PROJECTION_WORK_BUDGET_BYTES, bytes + PROJECTION_WORK_ITEM_BYTES);
+    }
+  };
+  const addArray = (candidate: unknown): void => {
+    if (!Array.isArray(candidate)) return;
+    let length = 0;
+    try { length = candidate.length; } catch { bytes = PROJECTION_WORK_BUDGET_BYTES; return; }
+    const bound = Math.min(length, MAX_NESTED_ITEMS);
+    for (let index = 0; index < bound && bytes < PROJECTION_WORK_BUDGET_BYTES; index += 1) {
+      try { addString(candidate[index]); } catch { bytes = PROJECTION_WORK_BUDGET_BYTES; return; }
+    }
+    if (length > bound) bytes = Math.min(PROJECTION_WORK_BUDGET_BYTES, bytes + MAX_FIELD_BYTES);
+  };
+  try {
+    if (typeof value !== "object" || value === null || Array.isArray(value)) return bytes;
+    const source = value as Record<string, unknown>;
+    addString(source.id);
+    addString(source.snippet);
+    addString(source.source);
+    addArray(source.filesCovered);
+    const failure = source.failure;
+    if (typeof failure === "object" && failure !== null && !Array.isArray(failure)) {
+      const record = failure as Record<string, unknown>;
+      addString(record.id);
+      addString(record.cwd);
+      addString(record.cmd);
+      addString(record.fingerprint);
+      addString(record.excerpt);
+      addArray(record.signature);
+    }
+    const fix = source.fix;
+    if (typeof fix === "object" && fix !== null && !Array.isArray(fix)) {
+      const record = fix as Record<string, unknown>;
+      addString(record.id);
+      addString(record.cwd);
+      addString(record.cmd);
+      addArray(record.failureIds);
+    }
+  } catch {
+    return Math.min(PROJECTION_WORK_BUDGET_BYTES, bytes + PROJECTION_WORK_ITEM_BYTES);
+  }
+  return bytes;
+}
 
 export interface ProjectedRecallHit {
   candidateId: string;
@@ -619,31 +673,41 @@ export function projectKnowledgeHits(
     const suffix = `],"truncated":${truncatedValue ? "true" : "false"}}`;
     return responsePrefix + serializedItemBytes + additional + (includeComma ? 1 : 0) + Buffer.byteLength(suffix, "utf8");
   };
-  const sourceHits: unknown[] = [];
   let inputTruncated = false;
+  let inputLength = 0;
   try {
     if (Array.isArray(hits)) {
       const length = hits.length;
       if (!Number.isSafeInteger(length) || length < 0) return { exposure, items, truncated: true };
       inputTruncated = length > MAX_KNOWLEDGE_HIT_INPUTS;
-      const bound = Math.min(length, MAX_KNOWLEDGE_HIT_INPUTS);
-      for (let index = 0; index < bound; index += 1) {
-        try { sourceHits.push(hits[index]); } catch { inputTruncated = true; break; }
-      }
+      inputLength = Math.min(length, MAX_KNOWLEDGE_HIT_INPUTS);
     } else {
-      inputTruncated = true;
+      return { exposure, items, truncated: true };
     }
   } catch {
-    inputTruncated = true;
+    return { exposure, items, truncated: true };
   }
   let truncated = inputTruncated;
-  for (let index = 0; index < sourceHits.length; index += 1) {
-    const candidate = sourceHits[index];
+  let workBytes = 0;
+  for (let index = 0; index < inputLength; index += 1) {
+    if (workBytes > PROJECTION_WORK_BUDGET_BYTES - PROJECTION_WORK_ITEM_BYTES) {
+      truncated = true;
+      break;
+    }
+    let candidate: unknown;
+    try {
+      candidate = hits[index];
+    } catch {
+      truncated = true;
+      break;
+    }
     const hit = normalizeKnowledgeHit(candidate);
     if (hit === undefined) {
+      workBytes += PROJECTION_WORK_ITEM_BYTES;
       truncated = true;
       continue;
     }
+    workBytes += projectionWorkBytes(hit);
     const item = project(hit, hasCanonicalKnowledgeProof(candidate));
     let serialized: string;
     try {
@@ -936,7 +1000,24 @@ function normalizeSourceHit(value: unknown, now: number): SourceHit | undefined 
   }
 }
 
-function projectHits(hits: readonly SourceHit[], exposure: Exposure, now: number): { items: ProjectedRecallHit[]; truncated: boolean } {
+function sourceScoreForAi(value: unknown): number | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+  const score = (value as Record<string, unknown>).score;
+  return typeof score === "number" && Number.isFinite(score) ? score : undefined;
+}
+
+interface ProjectedHitsResult {
+  items: ProjectedRecallHit[];
+  truncated: boolean;
+  aiHits: RecallHit[];
+}
+
+function projectHits(
+  hits: readonly SourceHit[],
+  exposure: Exposure,
+  now: number,
+  collectAi = false,
+): ProjectedHitsResult {
   const items: ProjectedRecallHit[] = [];
   let truncated = false;
   let serializedItemBytes = 0;
@@ -945,44 +1026,92 @@ function projectHits(hits: readonly SourceHit[], exposure: Exposure, now: number
     const suffix = `],"truncated":${truncatedValue ? "true" : "false"}}`;
     return responsePrefix + serializedItemBytes + additional + (includeComma ? 1 : 0) + Buffer.byteLength(suffix, "utf8");
   };
-  const source: unknown[] = [];
+  const aiHits: RecallHit[] = [];
+  let aiPrefixOpen = collectAi;
+  let inputLength = 0;
+  let inputTruncated = false;
   try {
-    if (!Array.isArray(hits) || !Number.isSafeInteger(hits.length) || hits.length < 0) return { items, truncated: true };
-    if (hits.length > MAX_KNOWLEDGE_HIT_INPUTS) truncated = true;
-    const bound = Math.min(hits.length, MAX_KNOWLEDGE_HIT_INPUTS);
-    for (let index = 0; index < bound; index += 1) {
-      try { source.push(hits[index]); } catch { truncated = true; break; }
-    }
+    if (!Array.isArray(hits) || !Number.isSafeInteger(hits.length) || hits.length < 0) return { items, truncated: true, aiHits };
+    inputTruncated = hits.length > MAX_KNOWLEDGE_HIT_INPUTS;
+    inputLength = Math.min(hits.length, MAX_KNOWLEDGE_HIT_INPUTS);
   } catch {
-    return { items, truncated: true };
+    return { items, truncated: true, aiHits };
   }
-  for (let index = 0; index < source.length; index += 1) {
+  truncated = inputTruncated;
+  let workBytes = 0;
+  for (let index = 0; index < inputLength; index += 1) {
+    if (workBytes > PROJECTION_WORK_BUDGET_BYTES - PROJECTION_WORK_ITEM_BYTES) {
+      truncated = true;
+      aiPrefixOpen = false;
+      break;
+    }
+    let sourceValue: unknown;
     try {
-      const hit = normalizeSourceHit(source[index], now);
+      sourceValue = hits[index];
+      workBytes += PROJECTION_WORK_ITEM_BYTES;
+    } catch {
+      truncated = true;
+      aiPrefixOpen = false;
+      break;
+    }
+    try {
+      const hit = normalizeSourceHit(sourceValue, now);
       if (hit === undefined) {
         truncated = true;
+        aiPrefixOpen = false;
         continue;
       }
+      workBytes += Math.max(0, projectionWorkBytes(hit) - PROJECTION_WORK_ITEM_BYTES);
       const item = projectHit(hit, exposure, `c${index + 1}`);
       const serialized = JSON.stringify(item);
       const itemBytes = Buffer.byteLength(serialized, "utf8");
       if (responseBytes(truncated, itemBytes, items.length > 0) > MAX_RESPONSE_BYTES) {
         truncated = true;
+        aiPrefixOpen = false;
         continue;
       }
       items.push(item);
       serializedItemBytes += itemBytes + (items.length > 1 ? 1 : 0);
+      if (aiPrefixOpen && aiHits.length < 5) {
+        if (index !== aiHits.length) {
+          aiPrefixOpen = false;
+        } else {
+          let score: number | undefined;
+          try { score = sourceScoreForAi(sourceValue); } catch { score = undefined; }
+          if (score === undefined) aiPrefixOpen = false;
+          else aiHits.push({ failure: hit.failure, ...(hit.fix === undefined ? {} : { fix: hit.fix }), score });
+        }
+      }
     } catch {
       // Custom MemoryQueries are untrusted at the MCP boundary.
       truncated = true;
+      aiPrefixOpen = false;
     }
   }
-  return { items, truncated };
+  return { items, truncated, aiHits };
 }
 
 export function projectRecallHits(hits: readonly RecallHit[], exposure: Exposure, now = Date.now()): ProjectedRecallResponse {
   const items = projectHits(hits, exposure, now);
   return { exposure, items: items.items, truncated: items.truncated };
+}
+
+export interface ProjectedRecallAiResponse {
+  response: ProjectedRecallResponse;
+  hits: readonly RecallHit[];
+}
+
+/** Project deterministic recall and return only its validated contiguous AI prefix. */
+export function projectRecallHitsForAi(
+  hits: readonly RecallHit[],
+  exposure: Exposure,
+  now = Date.now(),
+): ProjectedRecallAiResponse {
+  const projected = projectHits(hits, exposure, now, true);
+  return {
+    response: { exposure, items: projected.items, truncated: projected.truncated },
+    hits: projected.aiHits,
+  };
 }
 
 export function projectRecentFailures(hits: readonly RecentFailureHit[], exposure: Exposure, now = Date.now()): ProjectedRecentResponse {

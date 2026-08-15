@@ -10,13 +10,14 @@ import {
   projectKnowledgeHits,
   projectMemoryRecord,
   projectRecallHits,
+  projectRecallHitsForAi,
   projectRecentFailures,
   projectWhyPossible,
   projectTriple,
   safeOpaqueIdentifier,
 } from "./privacy.js";
 import { boundTripleRecord, isKnownPathPlatform, isSafeNonNegativeInteger, MAX_MEMORY_FILE_BYTES, MAX_SUPPORTED_MEMORY_RECORDS, parseMemoryRecord } from "../core/memory-read.js";
-import type { MemoryCoverage, TripleRecord } from "../core/memory-read.js";
+import type { FailureRecord, MemoryCoverage, TripleRecord } from "../core/memory-read.js";
 
 /** Versioned read-only catalog used by MCP discovery and setup health. */
 const MCP_TOOL_NAMES = [
@@ -398,17 +399,17 @@ function unknownCoverage(): KnowledgeCoverageSummary {
   return { status: "unknown", complete: false, filesCovered: 0, truncatedFiles: 0 };
 }
 
-function boundedProviderArray(value: unknown, maximum = MAX_PROVIDER_NESTED_ITEMS): { values: unknown[]; truncated: boolean; valid: boolean } {
+function boundedProviderArray(value: unknown, maximum = MAX_PROVIDER_NESTED_ITEMS): { values: unknown[]; truncated: boolean; valid: boolean; length: number; omitted: number } {
   try {
-    if (!Array.isArray(value)) return { values: [], truncated: false, valid: false };
+    if (!Array.isArray(value)) return { values: [], truncated: false, valid: false, length: 0, omitted: 0 };
     const length = value.length;
-    if (!Number.isSafeInteger(length) || length < 0) return { values: [], truncated: true, valid: false };
+    if (!Number.isSafeInteger(length) || length < 0) return { values: [], truncated: true, valid: false, length: 0, omitted: 0 };
     const values: unknown[] = [];
     const bound = Math.min(length, maximum);
     for (let index = 0; index < bound; index += 1) values.push(value[index]);
-    return { values, truncated: length > maximum, valid: true };
+    return { values, truncated: length > maximum, valid: true, length, omitted: Math.max(0, length - maximum) };
   } catch {
-    return { values: [], truncated: true, valid: false };
+    return { values: [], truncated: true, valid: false, length: 0, omitted: 0 };
   }
 }
 
@@ -486,7 +487,7 @@ function snapshotProviderMechanism(value: unknown): TripleRecord["mechanism"] | 
   if (!head.valid) return undefined;
   const filesValue = raw.files;
   const providerFiles = boundedProviderArray(filesValue, MAX_PROVIDER_NESTED_ITEMS);
-  if (!providerFiles.valid || providerFiles.truncated) return undefined;
+  if (!providerFiles.valid) return undefined;
   const files: TripleRecord["mechanism"]["files"] = [];
   for (const entry of providerFiles.values) {
     const file = snapshotProviderFile(entry);
@@ -500,19 +501,26 @@ function snapshotProviderMechanism(value: unknown): TripleRecord["mechanism"] | 
   if (baselineValue !== undefined && baselineValue !== "captured" && baselineValue !== "unknown") return undefined;
   if (coverageStatusValue !== undefined && coverageStatusValue !== "complete" &&
       coverageStatusValue !== "truncated" && coverageStatusValue !== "unknown") return undefined;
+  if (!Number.isSafeInteger(truncatedFilesValue + providerFiles.omitted)) return undefined;
+  const truncatedFiles = truncatedFilesValue + providerFiles.omitted;
+  const coverageStatus = coverageStatusValue === "unknown"
+    ? "unknown" as const
+    : truncatedFiles > 0
+    ? "truncated" as const
+    : coverageStatusValue;
   return {
     ...(head.value === undefined ? {} : { head: head.value }),
     files,
-    truncatedFiles: truncatedFilesValue,
+    truncatedFiles,
     ...(baselineValue === undefined ? {} : { baseline: baselineValue }),
-    ...(coverageStatusValue === undefined ? {} : { coverageStatus: coverageStatusValue }),
+    ...(coverageStatus === undefined ? {} : { coverageStatus }),
   };
 }
 
-function snapshotProviderTriple(value: unknown): TripleRecord | undefined {
+function snapshotProviderTriple(value: unknown, knownKind?: unknown): TripleRecord | undefined {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
   const raw = value as Record<string, unknown>;
-  const kind = raw.kind;
+  const kind = knownKind === undefined ? raw.kind : knownKind;
   if (kind !== "triple") return undefined;
   const idValue = raw.id;
   const id = boundedProviderText(idValue, 512, MAX_FIELD_BYTES);
@@ -570,9 +578,9 @@ function snapshotProviderTriple(value: unknown): TripleRecord | undefined {
   };
 }
 
-function safeTripleRecord(value: unknown): TripleRecord | undefined {
+function safeTripleRecord(value: unknown, knownKind?: unknown): TripleRecord | undefined {
   try {
-    const snapshot = snapshotProviderTriple(value);
+    const snapshot = snapshotProviderTriple(value, knownKind);
     if (snapshot === undefined) return undefined;
     const bounded = boundTripleRecord(snapshot);
     const safe: TripleRecord = {
@@ -580,6 +588,73 @@ function safeTripleRecord(value: unknown): TripleRecord | undefined {
       mechanism: bounded.mechanism,
     };
     return safe;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Snapshot a custom failure before the durable parser or projection can reread accessors. */
+function safeProviderFailureRecord(
+  value: unknown,
+  knownKind?: unknown,
+  knownOrigin?: unknown,
+  originSnapshotted = false,
+): FailureRecord | undefined {
+  try {
+    if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+    const raw = value as Record<string, unknown>;
+    const kind = knownKind === undefined ? raw.kind : knownKind;
+    if (kind !== "failure") return undefined;
+    const idValue = boundedProviderText(raw.id, 512, MAX_FIELD_BYTES);
+    if (!idValue.valid || idValue.value.length === 0 || /[\u0000-\u001f\u007f-\u009f]/u.test(idValue.value)) return undefined;
+    const ts = raw.ts;
+    if (!isSafeNonNegativeInteger(ts)) return undefined;
+    const cwd = boundedProviderText(raw.cwd, MAX_FIELD_BYTES * 2, MAX_FIELD_BYTES * 2);
+    const cmd = boundedProviderText(raw.cmd, MAX_FIELD_BYTES * 2, MAX_FIELD_BYTES * 2);
+    const fingerprint = boundedProviderText(raw.fingerprint, MAX_FIELD_BYTES * 2, MAX_FIELD_BYTES * 2);
+    const signature = boundedProviderStrings(raw.signature);
+    const excerpt = boundedProviderText(raw.excerpt, MAX_FIELD_BYTES * 2, MAX_FIELD_BYTES * 2);
+    if (!cwd.valid || !cmd.valid || !fingerprint.valid || !signature.valid || !excerpt.valid) return undefined;
+    const exitCode = raw.exitCode;
+    if (typeof exitCode !== "number" || !Number.isSafeInteger(exitCode)) return undefined;
+
+    const origin = originSnapshotted ? knownOrigin : raw.origin;
+    if (origin !== undefined && origin !== "run" && origin !== "hook" && origin !== "watch") return undefined;
+    const fingerprintV = raw.fingerprintV;
+    if (fingerprintV !== undefined && fingerprintV !== 1 && fingerprintV !== 2) return undefined;
+    const resolvedBy = optionalProviderText(raw.resolvedBy, 512, MAX_FIELD_BYTES);
+    if (!resolvedBy.valid) return undefined;
+
+    const commandIdentity = optionalProviderText(raw.commandIdentity, MAX_FIELD_BYTES * 2, MAX_FIELD_BYTES * 2);
+    if (!commandIdentity.valid) return undefined;
+    const identityV = raw.identityV;
+    const identityReliable = raw.identityReliable;
+    const platformValue = raw.platform;
+    const hasIdentity = commandIdentity.value !== undefined || identityV !== undefined
+      || identityReliable !== undefined || platformValue !== undefined;
+    if (hasIdentity && (commandIdentity.value === undefined || identityV !== 1
+        || typeof identityReliable !== "boolean" || !isKnownPathPlatform(platformValue))) return undefined;
+
+    return {
+      kind: "failure",
+      id: idValue.value,
+      ts,
+      cwd: cwd.value,
+      cmd: cmd.value,
+      exitCode,
+      fingerprint: fingerprint.value,
+      ...(fingerprintV === undefined ? {} : { fingerprintV }),
+      signature: signature.values,
+      excerpt: excerpt.value,
+      ...(origin === undefined ? {} : { origin }),
+      ...(resolvedBy.value === undefined ? {} : { resolvedBy: resolvedBy.value }),
+      ...(hasIdentity ? {
+        commandIdentity: commandIdentity.value!,
+        identityV: 1 as const,
+        identityReliable: identityReliable as boolean,
+        platform: platformValue as NodeJS.Platform,
+      } : {}),
+    };
   } catch {
     return undefined;
   }
@@ -818,41 +893,72 @@ function saturatedAdd(...values: readonly number[]): number {
   return total;
 }
 
-function safeMemoryStats(value: unknown, canonical = false): Record<string, unknown> {
+interface SafeStatsSnapshot {
+  value: Record<string, unknown>;
+  valid: boolean;
+}
+
+function emptyStats(): Record<string, unknown> {
+  return { failures: 0, fixEvents: 0, resolved: 0, unresolved: 0, confirmedFixes: 0, possibleFixes: 0, triples: 0, notes: 0, total: 0 };
+}
+
+function safeMemoryStats(value: unknown, canonical = false): SafeStatsSnapshot {
   try {
-    const source = typeof value === "object" && value !== null && !Array.isArray(value)
-      ? value as Record<string, unknown>
-      : {};
-    const count = (key: string): number => isSafeNonNegativeInteger(source[key]) ? source[key] as number : 0;
-    const failures = count("failures");
-    const fixEvents = count("fixEvents");
-    const resolved = count("resolved");
-    const unresolved = count("unresolved");
-    const confirmedFixes = source.confirmedFixes !== undefined ? count("confirmedFixes") : fixEvents;
-    const possibleFixes = count("possibleFixes");
-    const triples = count("triples");
-    const notes = count("notes");
+    if (typeof value !== "object" || value === null || Array.isArray(value)) {
+      return { value: emptyStats(), valid: false };
+    }
+    const source = value as Record<string, unknown>;
+    const failuresValue = source.failures;
+    const fixEventsValue = source.fixEvents;
+    const resolvedValue = source.resolved;
+    const unresolvedValue = source.unresolved;
+    const confirmedFixesValue = source.confirmedFixes;
+    const possibleFixesValue = source.possibleFixes;
+    const triplesValue = source.triples;
+    const notesValue = source.notes;
+    const totalValue = source.total;
+    const values = [
+      failuresValue, fixEventsValue, resolvedValue, unresolvedValue, confirmedFixesValue,
+      possibleFixesValue, triplesValue, notesValue, totalValue,
+    ];
+    if (values.some((entry) => entry !== undefined && !isSafeNonNegativeInteger(entry))) {
+      // Keep the legacy bounded zero schema for an object-shaped provider
+      // result.  The object was read successfully, so older custom query
+      // implementations do not acquire a synthetic memory-read failure just
+      // because one counter was malformed; top-level/throwing shapes still
+      // return `valid: false` above or from the catch below.
+      return { value: emptyStats(), valid: true };
+    }
+    const failures = failuresValue === undefined ? 0 : failuresValue as number;
+    const fixEvents = fixEventsValue === undefined ? 0 : fixEventsValue as number;
+    const resolved = resolvedValue === undefined ? 0 : resolvedValue as number;
+    const unresolved = unresolvedValue === undefined ? 0 : unresolvedValue as number;
+    const confirmedFixes = confirmedFixesValue === undefined ? fixEvents : confirmedFixesValue as number;
+    const possibleFixes = possibleFixesValue === undefined ? 0 : possibleFixesValue as number;
+    const triples = triplesValue === undefined ? 0 : triplesValue as number;
+    const notes = notesValue === undefined ? 0 : notesValue as number;
     const base = saturatedAdd(failures, triples, notes);
     const lowerBound = saturatedAdd(base, Math.max(fixEvents, possibleFixes));
     const upperBound = saturatedAdd(base, fixEvents, possibleFixes);
-    const suppliedTotal = source.total;
-    const suppliedFeasible = isSafeNonNegativeInteger(suppliedTotal)
+    const suppliedTotal = totalValue === undefined ? undefined : totalValue as number;
+    const suppliedFeasible = suppliedTotal !== undefined
       && suppliedTotal >= lowerBound && suppliedTotal <= upperBound;
-    const exact = (canonical && isSafeNonNegativeInteger(suppliedTotal)) || suppliedFeasible || lowerBound === upperBound;
+    const exact = (canonical && suppliedTotal !== undefined) || suppliedFeasible || lowerBound === upperBound;
     // Keep legacy `total` useful as the conservative upper bound while the
     // explicit exactness/range fields tell callers that overlapping fix
     // buckets prevent treating it as an exact record count.
-    // Coincident bounds prove the exact total themselves; a supplied total is
-    // only ever trusted when it is canonical or independently feasible.
-    const total = (canonical && isSafeNonNegativeInteger(suppliedTotal)) || suppliedFeasible
+    const total = (canonical && suppliedTotal !== undefined) || suppliedFeasible
       ? suppliedTotal as number
       : upperBound;
     return {
-      failures, fixEvents, resolved, unresolved, confirmedFixes, possibleFixes, triples, notes, total,
-      ...(exact ? {} : { totalExact: false, totalLowerBound: lowerBound, totalUpperBound: upperBound }),
+      valid: true,
+      value: {
+        failures, fixEvents, resolved, unresolved, confirmedFixes, possibleFixes, triples, notes, total,
+        ...(exact ? {} : { totalExact: false, totalLowerBound: lowerBound, totalUpperBound: upperBound }),
+      },
     };
   } catch {
-    return { failures: 0, fixEvents: 0, resolved: 0, unresolved: 0, confirmedFixes: 0, possibleFixes: 0, triples: 0, notes: 0, total: 0 };
+    return { value: emptyStats(), valid: false };
   }
 }
 
@@ -878,29 +984,31 @@ function memoryCoverage(memory: MemoryQueries, forceUnknown = false): MemoryCove
     if (supplied === undefined) return undefined;
     if (typeof supplied !== "object" || supplied === null || Array.isArray(supplied)) return unknownMemoryCoverage();
     const value = supplied as Record<string, unknown>;
-    if (value.version !== 1 || !isSafeNonNegativeInteger(value.scanned) ||
-        !isSafeNonNegativeInteger(value.skipped) || !isSafeNonNegativeInteger(value.truncated) ||
-        !isSafeNonNegativeInteger(value.bytesScanned) || !isSafeNonNegativeInteger(value.bytesTotal) ||
-        typeof value.complete !== "boolean" ||
-        (value.reason !== undefined && value.reason !== "file-size-cap" && value.reason !== "record-cap" && value.reason !== "read-race")) return unknownMemoryCoverage();
+    const version = value.version;
+    const scanned = value.scanned;
+    const skipped = value.skipped;
+    const truncated = value.truncated;
+    const bytesScanned = value.bytesScanned;
+    const bytesTotal = value.bytesTotal;
+    const complete = value.complete;
+    const reason = value.reason;
+    if (version !== 1 || !isSafeNonNegativeInteger(scanned) ||
+        !isSafeNonNegativeInteger(skipped) || !isSafeNonNegativeInteger(truncated) ||
+        !isSafeNonNegativeInteger(bytesScanned) || !isSafeNonNegativeInteger(bytesTotal) ||
+        typeof complete !== "boolean" ||
+        (reason !== undefined && reason !== "file-size-cap" && reason !== "record-cap" && reason !== "read-race")) return unknownMemoryCoverage();
     // `scanned` and `skipped` are independent evidence counters: a provider
     // may count only valid records as scanned while reporting corrupt lines
     // separately. Do not reject a legitimate 0-valid/10-skipped snapshot.
-    if ((value.bytesScanned as number) > (value.bytesTotal as number)) return unknownMemoryCoverage();
-    if (value.complete === true && ((value.bytesScanned as number) !== (value.bytesTotal as number) ||
-        (value.skipped as number) > 0 || (value.truncated as number) > 0 || value.reason !== undefined)) return unknownMemoryCoverage();
-    if (value.reason === "read-race" && (value.complete === true || (value.truncated as number) === 0)) return unknownMemoryCoverage();
-    if (value.reason === "file-size-cap" && (value.complete === true || (value.truncated as number) === 0 || (value.bytesTotal as number) <= MAX_MEMORY_FILE_BYTES)) return unknownMemoryCoverage();
-    if (value.reason === "record-cap" && (value.complete === true || (value.truncated as number) === 0 || (value.scanned as number) < MAX_SUPPORTED_MEMORY_RECORDS)) return unknownMemoryCoverage();
+    if (bytesScanned > bytesTotal) return unknownMemoryCoverage();
+    if (complete === true && (bytesScanned !== bytesTotal || skipped > 0 || truncated > 0 || reason !== undefined)) return unknownMemoryCoverage();
+    if (reason === "read-race" && (complete === true || truncated === 0)) return unknownMemoryCoverage();
+    if (reason === "file-size-cap" && (complete === true || truncated === 0 || bytesTotal <= MAX_MEMORY_FILE_BYTES)) return unknownMemoryCoverage();
+    if (reason === "record-cap" && (complete === true || truncated === 0 || scanned < MAX_SUPPORTED_MEMORY_RECORDS)) return unknownMemoryCoverage();
     return Object.freeze({
       version: 1 as const,
-      scanned: value.scanned as number,
-      skipped: value.skipped as number,
-      truncated: value.truncated as number,
-      bytesScanned: value.bytesScanned as number,
-      bytesTotal: value.bytesTotal as number,
-      complete: value.complete as boolean,
-      ...(value.reason === undefined ? {} : { reason: value.reason }),
+      scanned, skipped, truncated, bytesScanned, bytesTotal, complete,
+      ...(reason === undefined ? {} : { reason }),
     });
   } catch {
     return unknownMemoryCoverage();
@@ -1009,7 +1117,7 @@ function deterministicAiFallback(payload: object, aiStatus: "unavailable" | "inv
 }
 
 interface StatsFlightResult {
-  stats: unknown;
+  stats: Record<string, unknown>;
   coverage: MemoryCoverage | undefined;
   error?: unknown;
 }
@@ -1035,19 +1143,17 @@ export function createToolRegistry(options: CreateToolRegistryOptions): McpToolR
   const readStatsSnapshot = (input: StatsQuery, canonicalMemory: boolean): StatsFlightResult => {
     const readState: SafeMemoryReadState = { failed: false };
     try {
-      const stats = safeReadMemory<unknown>(() => options.memory.stats(input), {}, canonicalMemory, readState);
-      // Preserve the bounded legacy schema for malformed object-shaped stats,
-      // while null/undefined top-level results must disclose that no stats
-      // snapshot exists instead of looking like a clean zero.
-      if (stats === undefined || stats === null) readState.failed = true;
-      return { stats, coverage: memoryCoverage(options.memory, readState.failed) };
+      const rawStats = safeReadMemory<unknown>(() => options.memory.stats(input), {}, canonicalMemory, readState);
+      const snapshot = safeMemoryStats(rawStats, canonicalMemory);
+      if (!snapshot.valid) readState.failed = true;
+      return { stats: snapshot.value, coverage: memoryCoverage(options.memory, readState.failed) };
     } catch (error) {
-      return { stats: {}, coverage: memoryCoverage(options.memory, true), error };
+      return { stats: emptyStats(), coverage: memoryCoverage(options.memory, true), error };
     }
   };
   const statsFromDurableSnapshot = (snapshot: DurableMemorySnapshot | undefined, input: StatsQuery): StatsFlightResult => snapshot === undefined
     ? { stats: {}, coverage: unknownMemoryCoverage(), error: new ToolExecutionError("memory_unavailable", "memory unavailable") }
-    : { stats: queryStats(snapshot.records, input), coverage: snapshot.coverage };
+    : { stats: queryStats(snapshot.records, input) as unknown as Record<string, unknown>, coverage: snapshot.coverage };
   const readStatsFlight = (input: StatsQuery, canonicalMemory: boolean): Promise<StatsFlightResult> => {
     if (!hasDurableMemoryQueries(options.memory)) return Promise.resolve(readStatsSnapshot(input, canonicalMemory));
     const current = durableSnapshotFlight;
@@ -1170,12 +1276,12 @@ export function createToolRegistry(options: CreateToolRegistryOptions): McpToolR
             if (flight.error !== undefined) throw flight.error;
             const result = {
               exposure: options.exposure,
-              ...safeMemoryStats(flight.stats, canonicalMemory),
+              ...flight.stats,
               ...memoryCoveragePayload(coverage),
             };
             return safeProjection(() => cappedResult(result), cappedResult({
               exposure: options.exposure,
-              ...safeMemoryStats({}),
+              ...emptyStats(),
               ...memoryCoveragePayload(coverage),
             }));
           }
@@ -1217,10 +1323,18 @@ export function createToolRegistry(options: CreateToolRegistryOptions): McpToolR
             const coverage = memoryCoverage(options.memory, readState.failed);
             pairedCoverage = coverage;
             try {
-              if (record === undefined || typeof record !== "object" || record === null || Array.isArray(record) || record.kind === "note") return notFoundResult(coverage);
-              if (record.kind === "failure" && record.origin !== undefined &&
-                  record.origin !== "run" && record.origin !== "hook" && record.origin !== "watch") return notFoundResult(coverage);
-              const normalized = parseMemoryRecord(record);
+              if (record === undefined || typeof record !== "object" || record === null || Array.isArray(record)) return notFoundResult(coverage);
+              const recordObject = record as unknown as Record<string, unknown>;
+              const recordKind = recordObject.kind;
+              if (recordKind === "note") return notFoundResult(coverage);
+              const origin = recordKind === "failure" ? recordObject.origin : undefined;
+              if (recordKind === "failure" && origin !== undefined &&
+                  origin !== "run" && origin !== "hook" && origin !== "watch") return notFoundResult(coverage);
+              const normalized = !canonicalMemory && recordKind === "triple"
+                ? safeTripleRecord(record, recordKind)
+                : !canonicalMemory && recordKind === "failure"
+                ? safeProviderFailureRecord(record, recordKind, origin, true)
+                : parseMemoryRecord(record);
               if (normalized === undefined || normalized.kind === "note") return notFoundResult(coverage);
               const projected = projectMemoryRecord(normalized, options.exposure, options.exposure === "sanitized");
               if (projected === undefined) return notFoundResult(coverage);
@@ -1282,18 +1396,12 @@ export function createToolRegistry(options: CreateToolRegistryOptions): McpToolR
             const hits = safeReadMemory(() => options.memory.recall(input), [], canonicalMemory, readState);
             const coverage = memoryCoverage(options.memory, readState.failed);
             pairedCoverage = coverage;
-            const projected = safeProjection(
-              () => projectRecallHits(hits, options.exposure),
-              { exposure: options.exposure, items: [], truncated: true, ...memoryCoveragePayload(coverage) },
+            const aiProjection = safeProjection(
+              () => projectRecallHitsForAi(hits, options.exposure),
+              { response: { exposure: options.exposure, items: [], truncated: true }, hits: [] as readonly RecallHit[] },
             );
-            const enriched = { ...projected, ...memoryCoveragePayload(coverage) };
-            // Materialize only a bounded indexed prefix before any later map,
-            // serialization, or model inspection. A custom provider may hand
-            // us a Proxy array whose iterator/slice throws or never ends.
-            const aiHits = safeProjection<readonly RecallHit[]>(
-              () => boundedProviderArray(hits, 5).values as RecallHit[],
-              [],
-            );
+            const enriched = { ...aiProjection.response, ...memoryCoveragePayload(coverage) };
+            const aiHits = aiProjection.hits;
             let ai: unknown;
             try {
               ai = await runAi(() => options.recallWithAi.run(
