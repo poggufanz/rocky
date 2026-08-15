@@ -1000,7 +1000,7 @@ export function loadMemoryChecked(path = resolveRockyPaths().memory, now = Date.
     let skipped = 0;
     let bytesScanned = 0;
     let truncated = opened.size > BigInt(MAX_MEMORY_FILE_BYTES) ? 1 : 0;
-    const contentHash = createHash("sha256");
+    const contentHash = opened.size <= BigInt(MAX_MEMORY_FILE_BYTES) ? createHash("sha256") : undefined;
     const records: MemoryRecord[] = [];
     const seenIds = new Set<string>();
 
@@ -1079,7 +1079,7 @@ export function loadMemoryChecked(path = resolveRockyPaths().memory, now = Date.
       }
       bytesScanned += count;
       const bytes = buffer.subarray(0, count);
-      contentHash.update(bytes);
+      contentHash?.update(bytes);
       if (!stoppedAtRecordCap) consumeBytes(bytes);
     }
     // A partial final line is valid input when the file ends normally. A
@@ -1114,12 +1114,16 @@ export function loadMemoryChecked(path = resolveRockyPaths().memory, now = Date.
     });
     const frozenRecords = Object.freeze(records.map(freezeMemoryRecord));
     memoryParseCount += 1;
-    // Cap/skipped snapshots are stable bounded evidence and may be reused
-    // with explicit incomplete metadata. The witness covers every byte that
-    // can affect this bounded answer plus total-size/identity metadata; it is
-    // not a probabilistic sample of the file.
-    const witness = contentHash.digest("hex");
-    memoryCache = { path, key: afterKey, witness, records: frozenRecords, complete, coverage };
+    // A complete or skipped snapshot within the byte envelope is stable
+    // bounded evidence and may be reused with explicit metadata. Over-cap
+    // snapshots are intentionally not cached: their bounded parse remains
+    // safe, while avoiding a checksum pass that cannot authorize a full-file
+    // answer. The in-envelope witness covers every affecting byte and is not
+    // a probabilistic sample.
+    const witness = contentHash?.digest("hex");
+    memoryCache = witness === undefined
+      ? undefined
+      : { path, key: afterKey, witness, records: frozenRecords, complete, coverage };
     if (!needsResolution(frozenRecords)) {
       return { records: frozenRecords as MemoryRecord[], complete, coverage };
     }

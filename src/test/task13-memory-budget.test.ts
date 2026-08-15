@@ -92,7 +92,7 @@ test("over-cap memory returns a bounded incomplete snapshot", (t) => {
   assert.ok(measured.truncated > 0);
   assert.ok(measured.bytesScanned <= MAX_MEMORY_FILE_BYTES);
   assert.equal(repeat.coverage.complete, false);
-  assert.equal(memoryReadMetrics().parses - before.parses, 1);
+  assert.equal(memoryReadMetrics().parses - before.parses, 2);
 });
 
 test("record-cap diagnostics are explicit", (t) => {
