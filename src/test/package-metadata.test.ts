@@ -421,16 +421,38 @@ test("canonical release truth rejects drift in every release marker", async () =
     ["availability in npm registry", { ...snapshot, readme: `${snapshot.readme}\nThe package is now available in the npm registry.\n` }],
     ["package now on npm", { ...snapshot, readme: `${snapshot.readme}\nThe package is now on npm.\n` }],
     ["semver publication", { ...snapshot, changelog: `${snapshot.changelog}\nVersion 0.5.0 was published.\n` }],
+    ["bare semver publication", { ...snapshot, readme: `${snapshot.readme}\nv0.5.0 was published.\n` }],
+    ["bare semver availability", { ...snapshot, readme: `${snapshot.readme}\nv0.5.0 is now on npm.\n` }],
+    ["wrapped package availability", { ...snapshot, readme: `${snapshot.readme}\nThe package is now\non npm.\n` }],
+    ["wrapped package publication", { ...snapshot, readme: `${snapshot.readme}\nThe package was\npublished.\n` }],
+    ["wrapped package available", { ...snapshot, readme: `${snapshot.readme}\nThe package is available on\nnpm.\n` }],
+    ["package landed on npm", { ...snapshot, readme: `${snapshot.readme}\nThe package landed on npm.\n` }],
+    ["package downloadable from npm", { ...snapshot, readme: `${snapshot.readme}\nThe package is downloadable from npm.\n` }],
+    ["heading publication", { ...snapshot, readme: `${snapshot.readme}\n## v0.5.0 was published\n` }],
   ] as const) {
     assert.notDeepEqual(releaseCheck.validateReleaseTruth(mutated), [], `${label} must fail`);
   }
   const realRoadmapMarker = /^-\s+\*\*v0\.5\b[^\r\n]*\(current release\)[^\r\n]*$/im.exec(snapshot.readme)?.[0];
   assert.ok(realRoadmapMarker !== undefined, "canonical README roadmap marker must exist");
+  const realCurrentReleaseLine = /^\s*Current release\s*:[^\r\n]*$/im.exec(snapshot.readme)?.[0];
+  assert.ok(realCurrentReleaseLine !== undefined, "canonical README current-release marker must exist");
   const roadmapMarkerRemoved = snapshot.readme.replace(realRoadmapMarker!, realRoadmapMarker!.replace("(current release)", "(implemented)"));
   assert.notDeepEqual(
     releaseCheck.validateReleaseTruth({ ...snapshot, readme: `${roadmapMarkerRemoved}\n- **v0.5 — fake (current release)**\n` }),
     [],
     "a fake current roadmap marker outside the Roadmap section must fail",
+  );
+  const readmeWithoutRealMarkers = snapshot.readme
+    .replace(realCurrentReleaseLine!, "")
+    .replace(realRoadmapMarker!, "");
+  const roadmapStart = readmeWithoutRealMarkers.indexOf("## Roadmap");
+  const roadmapEnd = readmeWithoutRealMarkers.indexOf("\n## Contributing", roadmapStart);
+  assert.ok(roadmapStart >= 0 && roadmapEnd > roadmapStart, "canonical README Roadmap bounds must exist");
+  const indentedFakeReadme = `${readmeWithoutRealMarkers.slice(0, roadmapEnd)}\n    Current release: \`${PACKAGE_NAME}@${PACKAGE_VERSION}\`\n    - **v0.5 — fake (current release)**\n${readmeWithoutRealMarkers.slice(roadmapEnd)}`;
+  assert.notDeepEqual(
+    releaseCheck.validateReleaseTruth({ ...snapshot, readme: indentedFakeReadme }),
+    [],
+    "indented README release markers must not satisfy canonical truth",
   );
   const roadmapHeadingRemoved = roadmapMarkerRemoved.replace(/^## Roadmap\r?\n/im, "");
   assert.notDeepEqual(
@@ -441,6 +463,12 @@ test("canonical release truth rejects drift in every release marker", async () =
     [],
     "a fenced fake Roadmap heading and marker must not satisfy README truth",
   );
+  const htmlFakeReadme = `${readmeWithoutRealMarkers.replace(/^## Roadmap\r?\n/im, "")}\n<pre>\nCurrent release: \`${PACKAGE_NAME}@${PACKAGE_VERSION}\`\n## Roadmap\n- **v0.5 — fake (current release)**\n</pre>\n`;
+  assert.notDeepEqual(
+    releaseCheck.validateReleaseTruth({ ...snapshot, readme: htmlFakeReadme }),
+    [],
+    "README release markers and headings inside raw HTML preformatted content must not satisfy truth",
+  );
   const changelogHeadingRemoved = snapshot.changelog.replace(/^## 0\.5\.0[^\r\n]*\r?\n/im, "");
   assert.notDeepEqual(
     releaseCheck.validateReleaseTruth({
@@ -449,6 +477,47 @@ test("canonical release truth rejects drift in every release marker", async () =
     }),
     [],
     "a fenced fake CHANGELOG release heading must not satisfy release truth",
+  );
+  assert.notDeepEqual(
+    releaseCheck.validateReleaseTruth({
+      ...snapshot,
+      changelog: `${changelogHeadingRemoved}\n    ## 0.5.0 — fake\n    Indented fake section.\n`,
+    }),
+    [],
+    "an indented fake CHANGELOG release heading must not satisfy release truth",
+  );
+  const htmlFakeChangelog = `${changelogHeadingRemoved}\n<pre>\n## 0.5.0 — fake\nFake release section.\n</pre>\n`;
+  assert.notDeepEqual(
+    releaseCheck.validateReleaseTruth({ ...snapshot, changelog: htmlFakeChangelog }),
+    [],
+    "CHANGELOG release headings inside raw HTML preformatted content must not satisfy truth",
+  );
+  for (const [label, mutated] of [
+    ["README canonical upstream URL", { ...snapshot, readme: snapshot.readme.replace("https://github.com/poggufanz/rocky.git", "https://github.com/example/rocky.git") }],
+    ["README canonical developer branch", { ...snapshot, readme: snapshot.readme.replace("Canonical developer branch is `main`", "Canonical developer branch is `develop`") }],
+    ["README canonical outer package root", { ...snapshot, readme: snapshot.readme.replace("outer workspace, that same package root is the `rocky/` directory", "outer workspace, that same package root is the `package/` directory") }],
+  ] as const) {
+    assert.notDeepEqual(releaseCheck.validateReleaseTruth(mutated), [], `${label} drift must fail`);
+  }
+  const changedRealVersion = snapshot.packageInfoSource.replace(
+    'export const PACKAGE_VERSION = "0.5.0";',
+    'export const PACKAGE_VERSION = "9.9.9";',
+  );
+  assert.notDeepEqual(
+    releaseCheck.validateReleaseTruth({
+      ...snapshot,
+      packageInfoSource: `// export const PACKAGE_VERSION = "0.5.0";\n${changedRealVersion}`,
+    }),
+    [],
+    "commented PACKAGE_VERSION exports must not spoof executable package-info assignments",
+  );
+  assert.notDeepEqual(
+    releaseCheck.validateReleaseTruth({
+      ...snapshot,
+      packageInfoSource: `${snapshot.packageInfoSource}\nexport const PACKAGE_VERSION = "0.5.0";\n`,
+    }),
+    [],
+    "duplicate PACKAGE_VERSION exports must fail closed",
   );
   const canonicalCurrentMarker = `Current release: \`${PACKAGE_NAME}@${PACKAGE_VERSION}\``;
   assert.notDeepEqual(

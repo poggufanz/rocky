@@ -23,6 +23,8 @@ const PACKAGE_BINARY = "rocky";
 const RELEASE_TAG = "v0.5.0";
 const RELEASE_COMMIT = "20bc32090843334afa0ee92c0f0705fde625d1c3";
 const CANONICAL_BRANCH = "main";
+const CANONICAL_REPOSITORY_URL = "https://github.com/poggufanz/rocky.git";
+const CANONICAL_PACKAGE_ROOT = "rocky/";
 const COMMAND_TIMEOUT_MS = 10 * 60 * 1_000;
 const MAX_COMMAND_OUTPUT_BYTES = 32 * 1024 * 1024;
 
@@ -330,10 +332,15 @@ function objectRecord(value) {
 }
 
 function packageInfoValues(source) {
-  const name = /export const PACKAGE_NAME = "([^"]+)"/.exec(source)?.[1];
-  const version = /export const PACKAGE_VERSION = "([^"]+)"/.exec(source)?.[1];
-  const binary = /export const PACKAGE_BINARY = "([^"]+)"/.exec(source)?.[1];
-  return { name, version, binary };
+  const canonical = [
+    `export const PACKAGE_NAME = "${PACKAGE_NAME}";`,
+    `export const PACKAGE_VERSION = "${PACKAGE_VERSION}";`,
+    `export const PACKAGE_BINARY = "${PACKAGE_BINARY}";`,
+  ].join("\n") + "\n";
+  if (source.replace(/\r\n?/gu, "\n") !== canonical) {
+    return { name: undefined, version: undefined, binary: undefined };
+  }
+  return { name: PACKAGE_NAME, version: PACKAGE_VERSION, binary: PACKAGE_BINARY };
 }
 
 function fullGitObjectId(value) {
@@ -342,6 +349,7 @@ function fullGitObjectId(value) {
 
 function markdownSourceLines(text) {
   let fence;
+  let htmlPre = false;
   return text.split(/\r?\n/u).map((line) => {
     const opening = /^\s{0,3}(`{3,}|~{3,})/.exec(line)?.[1];
     if (fence !== undefined) {
@@ -353,8 +361,46 @@ function markdownSourceLines(text) {
       fence = { character: opening[0], length: opening.length };
       return "";
     }
+    if (htmlPre) {
+      if (/<\/pre\s*>/iu.test(line)) htmlPre = false;
+      return "";
+    }
+    if (/<pre\b[^>]*>/iu.test(line)) {
+      if (!/<pre\b[^>]*>[\s\S]*<\/pre\s*>/iu.test(line)) htmlPre = true;
+      return "";
+    }
+    if (/^(?: {4}|\t)/u.test(line)) return "";
     return line;
   });
+}
+
+function markdownTextBlocks(text) {
+  const blocks = [];
+  let current = [];
+  const flush = () => {
+    if (current.length > 0) blocks.push(current.join(" "));
+    current = [];
+  };
+  for (const line of markdownSourceLines(text)) {
+    const trimmed = line.trim();
+    if (trimmed === "") {
+      flush();
+      continue;
+    }
+    if (/^\s{0,3}#{1,6}\s+/u.test(line)) {
+      flush();
+      blocks.push(trimmed);
+      continue;
+    }
+    if (/^\s{0,3}(?:[-*+]\s+|\d+[.)]\s+|>)/u.test(line)) {
+      flush();
+      current.push(trimmed);
+      continue;
+    }
+    current.push(trimmed);
+  }
+  flush();
+  return blocks;
 }
 
 function markdownH2Sections(text) {
@@ -394,13 +440,14 @@ function directlyNegated(clause, start, end) {
 }
 
 function hasPositivePublicationClaim(text) {
-  const context = /(?:\bnpm\b|\bpackage\b|\brelease\b|\bversion\b|\btarball\b|\bartifact\b|\bregistry\b|@poggufanz\/rocky-cli)/i;
+  const context = /(?:\bnpm\b|\bpackage\b|\brelease\b|\bversion\b|\btarball\b|\bartifact\b|\bregistry\b|\bv\d+\.\d+(?:\.\d+)?\b|@poggufanz\/rocky-cli)/i;
   const signals = [
     /\b(?:publish\w*|publication\w*)\b/gi,
-    /\b(?:available|live)\b[\s\S]{0,80}\b(?:on|from|via|in)\s+(?:npm|the npm registry|npm registry|the registry|registry\.npmjs\.org)\b/gi,
-    /\b(?:package|version|release|tarball|artifact)\b[\s\S]{0,80}\b(?:is|are|was|were|now)\s+(?:on|from|via|in)\s+(?:npm|the npm registry|npm registry|the registry|registry\.npmjs\.org)\b/gi,
+    /\b(?:available|availability|live)\b[\s\S]{0,80}\b(?:on|from|via|in)\s+(?:npm|the npm registry|npm registry|the registry|registry\.npmjs\.org)\b/gi,
+    /\b(?:(?:is|are|was|were)\s+)?(?:now|landed|downloadable)\s+(?:on|from|via|in)\s+(?:npm|the npm registry|npm registry|the registry|registry\.npmjs\.org)\b/gi,
+    /\b(?:package|version|release|tarball|artifact|v\d+\.\d+(?:\.\d+)?)\b(?:(?!\b(?:not|never|no|without)\b)[\s\S]){0,80}\b(?:(?:is|are|was|were)\s+(?:now\s+)?(?:(?:available|availability|live|downloadable)\s+)?|(?:now\s+)?(?:available|availability|live|downloadable|landed)\s+)(?:on|from|via|in)\s+(?:npm|the npm registry|npm registry|the registry|registry\.npmjs\.org)\b/gi,
   ];
-  return markdownSourceLines(text).some((line) => releaseClauses(line).some((clause) => {
+  return markdownTextBlocks(text).some((line) => releaseClauses(line).some((clause) => {
     if (!context.test(clause)) return false;
     const matches = new Map();
     for (const signal of signals) {
@@ -455,12 +502,16 @@ export function validateReleaseTruth(snapshot) {
   const currentReleaseLines = visibleReadmeLines.filter((line) => /^\s*Current release\s*:/i.test(line));
   const currentReleaseMarkerCount = (visibleReadmeLines.join("\n").match(/\bCurrent release\s*:/gi) ?? []).length;
   const canonicalCurrentMarker = `Current release: \`${PACKAGE_NAME}@${expectedVersion}\``;
+  const canonicalLayout = `Repository layout: a fresh clone of the canonical upstream repository (\`${CANONICAL_REPOSITORY_URL}\`) is the package root; run \`npm install\`, \`npm test\`, and \`npm pack\` there. In this outer workspace, that same package root is the \`${CANONICAL_PACKAGE_ROOT}\` directory. Canonical developer branch is \`${CANONICAL_BRANCH}\`; \`iq\` is a remediation branch, not a second release line.`;
+  const canonicalLayoutLines = visibleReadmeLines.filter((line) => /^\s*Repository layout\s*:/i.test(line));
   if (currentReleaseMarkerCount !== 1
       || currentReleaseLines.length !== 1
-      || !currentReleaseLines[0].trim().startsWith(canonicalCurrentMarker)
+      || !new RegExp(`^${escapeRegExp(canonicalCurrentMarker)}(?:\\.|$)`, "u").test(currentReleaseLines[0].trim())
       || roadmap === undefined
       || currentRoadmapLines.length !== 1
       || !allowedRoadmapToken
+      || canonicalLayoutLines.length !== 1
+      || canonicalLayoutLines[0].trim() !== canonicalLayout
       || hasPositivePublicationClaim(readme)) {
     errors.push("README release identity or publication status is stale");
   }
