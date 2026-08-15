@@ -5,7 +5,7 @@ import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { OllamaClient } from "../ai/ollama.js";
-import type { RecallWithAiPort } from "../ai/port.js";
+import { disabledRecallWithAi, type RecallWithAiPort } from "../ai/port.js";
 import * as recallAi from "../ai/recall-ai.js";
 import {
   createRecallAiPort,
@@ -274,6 +274,53 @@ test("raw prompt and outcome preserve sparse source-local candidate identity", a
   });
 });
 
+test("production port preserves an explicit sparse identity map through prompt and fallbacks", async () => {
+  const third: RecallHit = {
+    failure: {
+      kind: "failure", id: "third", ts: 3, cwd: "/work", cmd: "original third command", exitCode: 1,
+      fingerprint: "third-fingerprint", signature: ["third failure"], excerpt: "third excerpt",
+    },
+    score: 1,
+  };
+  const sparseHits = [third];
+  const { port, ollama } = configuredPortReturning(validOutput({
+    ranked_candidates: ["c3"],
+    evidence_refs: ["c3.failure"],
+    act: "unresolved",
+  }), enabledConfig("raw"));
+  const sparseInput = { ...input(sparseHits, "raw"), candidateIds: ["c3"] };
+
+  const result = await port.run(sparseInput, new AbortController().signal);
+  const prompt = promptFrom(ollama);
+  const candidates = prompt.candidates as Array<{ id: string; failure: { command: string } }>;
+  assert.deepEqual(candidates.map((candidate) => candidate.id), ["c3"]);
+  assert.doesNotMatch(JSON.stringify(prompt), /original first|original second|c1|c2/u);
+  assert.deepEqual(result.rankedCandidateIds, ["c3"]);
+
+  const disabled = configuredPortReturning(validOutput(), {
+    status: "valid", path: "/test/config.json", config: { version: 1, ai: { enabled: false } },
+  }).port;
+  assert.deepEqual(await disabled.run(sparseInput, new AbortController().signal), {
+    aiStatus: "disabled", rankedCandidateIds: ["c3"],
+  });
+  assert.deepEqual(await disabledRecallWithAi.run(sparseInput, new AbortController().signal), {
+    aiStatus: "disabled", rankedCandidateIds: ["c3"],
+  });
+  assert.deepEqual(await disabledRecallWithAi.run({ ...sparseInput, candidateIds: ["c20001"] }, new AbortController().signal), {
+    aiStatus: "invalid_output", rankedCandidateIds: [],
+  });
+
+  const invalid = configuredPortReturning(validOutput({ ranked_candidates: ["c2"] }), enabledConfig("raw")).port;
+  assert.deepEqual(await invalid.run(sparseInput, new AbortController().signal), {
+    aiStatus: "invalid_output", rankedCandidateIds: ["c3"],
+  });
+
+  const overCap = configuredPortReturning(validOutput(), enabledConfig("raw")).port;
+  assert.deepEqual(await overCap.run({ ...input(sparseHits, "raw"), candidateIds: ["c20001"] }, new AbortController().signal), {
+    aiStatus: "invalid_output", rankedCandidateIds: [],
+  });
+});
+
 test("oversized CLI query produces parseable bounded prompt with query truncation marker", async () => {
   const { port, ollama } = configuredPortReturning(validOutput());
   const oversized = "very long query ".repeat(3_000);
@@ -470,6 +517,13 @@ test("single-flight returns immediate busy fallback without queuing", async () =
 
   assert.deepEqual(await port.run(input(), new AbortController().signal), {
     aiStatus: "busy", rankedCandidateIds: ["c1", "c2"],
+  });
+  const sparseInput = { ...input([hits[0]!, hits[1]!]), candidateIds: ["c1", "c3"] };
+  assert.deepEqual(await port.run(sparseInput, new AbortController().signal), {
+    aiStatus: "busy", rankedCandidateIds: ["c1", "c3"],
+  });
+  assert.deepEqual(await port.run({ ...sparseInput, candidateIds: ["c20001", "c3"] }, new AbortController().signal), {
+    aiStatus: "busy", rankedCandidateIds: [],
   });
   const moreThanFive = Object.freeze(Array.from({ length: 6 }, (_, index) => ({
     failure: Object.freeze({

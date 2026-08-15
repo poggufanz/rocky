@@ -4,10 +4,12 @@ import type { FailureOrigin } from "../core/memory-read.js";
 import type { RecallHit } from "../core/memory-query.js";
 import {
   normalizeOutputText,
-  projectRecallHits,
+  projectRecallHitsWithIds,
+  recallCandidateIdsForLength,
   redactText,
   strictestExposure,
   truncateUtf8,
+  validateRecallCandidateIds,
   type ProjectedRecallHit,
 } from "../mcp/privacy.js";
 import type { OllamaClient } from "./ollama.js";
@@ -84,12 +86,27 @@ interface PromptBuild {
   candidates: ProjectedRecallHit[];
 }
 
-function deterministicIds(hits: readonly RecallHit[]): string[] {
-  return hits.slice(0, 5).map((_, index) => `c${index + 1}`);
+function resolveCandidateIds(hits: readonly RecallHit[], candidateIds?: readonly string[]): string[] | undefined {
+  try {
+    return candidateIds === undefined
+      ? recallCandidateIdsForLength(hits.length)
+      : validateRecallCandidateIds(candidateIds, hits.length);
+  } catch {
+    return undefined;
+  }
 }
 
-function fallback(aiStatus: RecallAiOutcome["aiStatus"], hits: readonly RecallHit[]): RecallAiOutcome {
-  return { aiStatus, rankedCandidateIds: deterministicIds(hits) };
+function deterministicIds(hits: readonly RecallHit[], candidateIds?: readonly string[]): string[] {
+  const resolved = candidateIds ?? recallCandidateIdsForLength(hits.length) ?? [];
+  return resolved.slice(0, 5);
+}
+
+function fallback(
+  aiStatus: RecallAiOutcome["aiStatus"],
+  hits: readonly RecallHit[],
+  candidateIds?: readonly string[],
+): RecallAiOutcome {
+  return { aiStatus, rankedCandidateIds: deterministicIds(hits, candidateIds) };
 }
 
 export function formatModelExplanation(normalizedExplanation: string): string {
@@ -188,11 +205,12 @@ function buildBoundedPrompt(
   hits: readonly RecallHit[],
   exposure: Exposure,
   checkCancelled: () => void,
+  candidateIds: readonly string[],
 ): PromptBuild {
   checkCancelled();
   const cappedQuery = truncateUtf8(query, MAX_QUERY_INPUT_BYTES);
   checkCancelled();
-  const projected = projectRecallHits(hits.slice(0, 5), exposure).items;
+  const projected = projectRecallHitsWithIds(hits.slice(0, 5), candidateIds.slice(0, 5), exposure).items;
   checkCancelled();
   const data: PromptData = {
     instructions: INSTRUCTIONS,
@@ -266,9 +284,9 @@ function buildBoundedPrompt(
   return { prompt, candidates: projected.slice(0, data.candidates.length) };
 }
 
-function appendOmitted(ranked: readonly string[], hits: readonly RecallHit[]): string[] {
+function appendOmitted(ranked: readonly string[], candidateIds: readonly string[]): string[] {
   const result = [...ranked];
-  for (const candidateId of deterministicIds(hits)) {
+  for (const candidateId of candidateIds.slice(0, 5)) {
     if (!result.includes(candidateId)) result.push(candidateId);
   }
   return result;
@@ -293,21 +311,23 @@ export function createRecallAiPort(deps: {
   const readConfig = deps.loadConfig ?? loadConfig;
   return {
     async run(input, signal) {
+      const candidateIds = resolveCandidateIds(input.hits, input.candidateIds);
+      if (candidateIds === undefined) return { aiStatus: "invalid_output", rankedCandidateIds: [] };
       let config;
       try {
         config = readConfig();
       } catch {
-        return fallback("disabled", input.hits);
+        return fallback("disabled", input.hits, candidateIds);
       }
-      if (input.hits.length === 0) return fallback("no_hits", input.hits);
-      if (config.status !== "valid" || !config.config.ai.enabled) return fallback("disabled", input.hits);
-      if (signal.aborted) return fallback("cancelled", input.hits);
+      if (input.hits.length === 0) return fallback("no_hits", input.hits, candidateIds);
+      if (config.status !== "valid" || !config.config.ai.enabled) return fallback("disabled", input.hits, candidateIds);
+      if (signal.aborted) return fallback("cancelled", input.hits, candidateIds);
 
       const effectiveExposure = strictestExposure(input.exposure, config.config.ai.exposure);
       const deadline = recallDeadline(signal, deps.deadlineMs ?? DEFAULT_RECALL_DEADLINE_MS);
       try {
-        const bounded = buildBoundedPrompt(input.query, input.hits, effectiveExposure, deadline.check);
-        if (bounded.candidates.length === 0) return fallback("no_hits", input.hits);
+        const bounded = buildBoundedPrompt(input.query, input.hits, effectiveExposure, deadline.check, candidateIds);
+        if (bounded.candidates.length === 0) return fallback("no_hits", input.hits, candidateIds);
         const output = await deps.ollama.generateStructured(
           config.config.ai.model,
           bounded.prompt,
@@ -316,18 +336,18 @@ export function createRecallAiPort(deps: {
         );
         deadline.check();
         const parsed = parseModelRecallOutput(output, bounded.candidates);
-        if (parsed === undefined) return fallback("invalid_output", input.hits);
-        if (parsed.confidence < 0.6) return fallback("low_confidence", input.hits);
+        if (parsed === undefined) return fallback("invalid_output", input.hits, candidateIds);
+        if (parsed.confidence < 0.6) return fallback("low_confidence", input.hits, candidateIds);
         return {
           aiStatus: "used",
-          rankedCandidateIds: appendOmitted(parsed.ranked_candidates, input.hits),
+          rankedCandidateIds: appendOmitted(parsed.ranked_candidates, candidateIds),
           act: parsed.act,
           evidenceRefs: parsed.evidence_refs,
           confidence: parsed.confidence,
           explanation: parsed.explanation,
         };
       } catch (error) {
-        return fallback(statusForError(error, signal), input.hits);
+        return fallback(statusForError(error, signal), input.hits, candidateIds);
       } finally {
         deadline.close();
       }
@@ -341,7 +361,10 @@ export function singleFlightRecallAi(inner: RecallWithAiPort): RecallWithAiPort 
     async run(input, signal) {
       if (active) return {
         aiStatus: "busy",
-        rankedCandidateIds: deterministicIds(input.hits),
+        rankedCandidateIds: (() => {
+          const candidateIds = resolveCandidateIds(input.hits, input.candidateIds);
+          return candidateIds === undefined ? [] : deterministicIds(input.hits, candidateIds);
+        })(),
       };
       active = true;
       try {

@@ -1,4 +1,5 @@
 import type { AiAct } from "./port.js";
+import { validateRecallCandidateIds } from "../mcp/privacy.js";
 import type { ProjectedRecallHit } from "../mcp/privacy.js";
 
 export interface ModelRecallOutput {
@@ -23,7 +24,6 @@ export const RECALL_AI_SCHEMA: Record<string, unknown> = {
 } as const;
 
 const ACTS: readonly AiAct[] = ["known_fix", "unresolved", "ambiguous"];
-const EVIDENCE_REF = /^c[1-5]\.(failure|fix)$/;
 const ANSI_STRING_7BIT = /\u001b(?:\]|P|\^|_|X)[\s\S]*?(?:\u0007|\u009c|\u001b\\)/g;
 const ANSI_STRING_8BIT = /[\u0090\u0098\u009d\u009e\u009f][\s\S]*?(?:\u0007|\u009c|\u001b\\)/g;
 const ANSI_CSI_7BIT = /\u001b\[[0-?]*[ -/]*[@-~]/g;
@@ -67,14 +67,16 @@ export function parseModelRecallOutput(
   if (typeof value.explanation !== "string" || [...value.explanation].length > 300) return undefined;
 
   const candidateIds = hits.slice(0, 5).map((hit) => hit.candidateId);
-  const candidateSet = new Set(candidateIds);
+  const validatedCandidateIds = validateRecallCandidateIds(candidateIds, candidateIds.length);
+  if (validatedCandidateIds === undefined) return undefined;
+  const candidateSet = new Set(validatedCandidateIds);
   if (value.ranked_candidates.some((id) => !candidateSet.has(id))) return undefined;
   for (const ref of value.evidence_refs) {
-    const match = EVIDENCE_REF.exec(ref);
+    const match = /^([^.]*)\.(failure|fix)$/u.exec(ref);
     if (!match) return undefined;
-    const candidateId = match[0].split(".")[0];
+    const candidateId = match[1];
     if (!candidateSet.has(candidateId)) return undefined;
-    if (match[1] === "fix" && !hits.find((hit) => hit.candidateId === candidateId)?.hasFix) return undefined;
+    if (match[2] === "fix" && !hits.find((hit) => hit.candidateId === candidateId)?.hasFix) return undefined;
   }
 
   const explanation = normalizeExplanation(value.explanation);

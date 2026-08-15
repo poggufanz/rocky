@@ -12,12 +12,46 @@ export const MAX_FIELD_BYTES = 16 * 1024;
 export const MAX_RESPONSE_BYTES = 512 * 1024;
 /** Keep forged direct projections bounded while preserving the documented 20k probe. */
 const MAX_KNOWLEDGE_FILE_INPUTS = 20_000;
-const MAX_KNOWLEDGE_HIT_INPUTS = 20_000;
+export const MAX_KNOWLEDGE_HIT_INPUTS = 20_000;
 const MAX_NESTED_ITEMS = 256;
 const MAX_NESTED_BYTES = 64 * 1024;
 /** Bound provider traversal even when response capping has already omitted items. */
 const PROJECTION_WORK_ITEM_BYTES = Math.max(256, Math.floor(MAX_RESPONSE_BYTES / 2_048));
 const PROJECTION_WORK_BUDGET_BYTES = MAX_RESPONSE_BYTES * 2;
+
+export function isRecallCandidateId(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  const match = /^c([1-9]\d*)$/u.exec(value);
+  if (match === null) return false;
+  const index = Number(match[1]);
+  return Number.isSafeInteger(index) && index <= MAX_KNOWLEDGE_HIT_INPUTS;
+}
+
+export function validateRecallCandidateIds(value: unknown, expectedLength?: number): string[] | undefined {
+  try {
+    if (!Array.isArray(value) || value.length > MAX_KNOWLEDGE_HIT_INPUTS) return undefined;
+    if (expectedLength !== undefined &&
+      (!Number.isSafeInteger(expectedLength) || expectedLength < 0 || expectedLength > MAX_KNOWLEDGE_HIT_INPUTS ||
+        value.length !== expectedLength)) return undefined;
+    const ids: string[] = [];
+    const seen = new Set<string>();
+    for (let index = 0; index < value.length; index += 1) {
+      const candidateId = value[index];
+      if (!isRecallCandidateId(candidateId) || seen.has(candidateId)) return undefined;
+      seen.add(candidateId);
+      ids.push(candidateId);
+    }
+    return ids;
+  } catch {
+    return undefined;
+  }
+}
+
+export function recallCandidateIdsForLength(length: unknown): string[] | undefined {
+  if (!Number.isSafeInteger(length) || (length as number) < 0 || (length as number) > MAX_KNOWLEDGE_HIT_INPUTS) return undefined;
+  const ids = Array.from({ length: length as number }, (_, index) => `c${index + 1}`);
+  return validateRecallCandidateIds(ids, length as number);
+}
 
 function projectionWorkBytes(value: unknown): number {
   let bytes = PROJECTION_WORK_ITEM_BYTES;
@@ -1047,6 +1081,7 @@ interface ProjectedHitsResult {
   items: ProjectedRecallHit[];
   truncated: boolean;
   aiHits: RecallHit[];
+  aiCandidateIds: string[];
 }
 
 function projectHits(
@@ -1054,6 +1089,7 @@ function projectHits(
   exposure: Exposure,
   now: number,
   collectAi = false,
+  candidateIds?: readonly string[],
 ): ProjectedHitsResult {
   const items: ProjectedRecallHit[] = [];
   let truncated = false;
@@ -1064,15 +1100,23 @@ function projectHits(
     return responsePrefix + serializedItemBytes + additional + (includeComma ? 1 : 0) + Buffer.byteLength(suffix, "utf8");
   };
   const aiHits: RecallHit[] = [];
+  const aiCandidateIds: string[] = [];
   let aiPrefixOpen = collectAi;
   let inputLength = 0;
   let inputTruncated = false;
+  let validatedCandidateIds: readonly string[] | undefined;
   try {
-    if (!Array.isArray(hits) || !Number.isSafeInteger(hits.length) || hits.length < 0) return { items, truncated: true, aiHits };
+    if (!Array.isArray(hits) || !Number.isSafeInteger(hits.length) || hits.length < 0) {
+      return { items, truncated: true, aiHits, aiCandidateIds };
+    }
+    if (candidateIds !== undefined) {
+      validatedCandidateIds = validateRecallCandidateIds(candidateIds, hits.length);
+      if (validatedCandidateIds === undefined) return { items, truncated: true, aiHits, aiCandidateIds };
+    }
     inputTruncated = hits.length > MAX_KNOWLEDGE_HIT_INPUTS;
     inputLength = Math.min(hits.length, MAX_KNOWLEDGE_HIT_INPUTS);
   } catch {
-    return { items, truncated: true, aiHits };
+    return { items, truncated: true, aiHits, aiCandidateIds };
   }
   truncated = inputTruncated;
   let workBytes = 0;
@@ -1099,25 +1143,23 @@ function projectHits(
         continue;
       }
       workBytes += Math.max(0, projectionWorkBytes(hit) - PROJECTION_WORK_ITEM_BYTES);
-      const item = projectHit(hit, exposure, `c${index + 1}`);
+      const item = projectHit(hit, exposure, validatedCandidateIds?.[index] ?? `c${index + 1}`);
       const serialized = JSON.stringify(item);
       const itemBytes = Buffer.byteLength(serialized, "utf8");
       if (responseBytes(truncated, itemBytes, items.length > 0) > MAX_RESPONSE_BYTES) {
         truncated = true;
-        aiPrefixOpen = false;
         continue;
       }
       items.push(item);
       serializedItemBytes += itemBytes + (items.length > 1 ? 1 : 0);
-      if (aiPrefixOpen && aiHits.length < 5) {
-        if (index !== aiHits.length) {
-          aiPrefixOpen = false;
-        } else {
-          let score: number | undefined;
-          try { score = sourceScoreForAi(sourceValue); } catch { score = undefined; }
-          if (score === undefined) aiPrefixOpen = false;
-          else aiHits.push({ failure: hit.failure, ...(hit.fix === undefined ? {} : { fix: hit.fix }), score });
-        }
+      if (collectAi && aiHits.length < 5) {
+        if (!aiPrefixOpen) continue;
+        let score: number | undefined;
+        try { score = sourceScoreForAi(sourceValue); } catch { score = undefined; }
+        if (score !== undefined) {
+          aiHits.push({ failure: hit.failure, ...(hit.fix === undefined ? {} : { fix: hit.fix }), score });
+          aiCandidateIds.push(item.candidateId);
+        } else aiPrefixOpen = false;
       }
     } catch {
       // Custom MemoryQueries are untrusted at the MCP boundary.
@@ -1125,7 +1167,7 @@ function projectHits(
       aiPrefixOpen = false;
     }
   }
-  return { items, truncated, aiHits };
+  return { items, truncated, aiHits, aiCandidateIds };
 }
 
 export function projectRecallHits(hits: readonly RecallHit[], exposure: Exposure, now = Date.now()): ProjectedRecallResponse {
@@ -1136,9 +1178,20 @@ export function projectRecallHits(hits: readonly RecallHit[], exposure: Exposure
 export interface ProjectedRecallAiResponse {
   response: ProjectedRecallResponse;
   hits: readonly RecallHit[];
+  candidateIds: readonly string[];
 }
 
-/** Project deterministic recall and return only its validated contiguous AI prefix. */
+export function projectRecallHitsWithIds(
+  hits: readonly RecallHit[],
+  candidateIds: readonly string[],
+  exposure: Exposure,
+  now = Date.now(),
+): ProjectedRecallResponse {
+  const projected = projectHits(hits, exposure, now, false, candidateIds);
+  return { exposure, items: projected.items, truncated: projected.truncated };
+}
+
+/** Project deterministic recall and return only validated items that fit the final response. */
 export function projectRecallHitsForAi(
   hits: readonly RecallHit[],
   exposure: Exposure,
@@ -1148,6 +1201,7 @@ export function projectRecallHitsForAi(
   return {
     response: { exposure, items: projected.items, truncated: projected.truncated },
     hits: projected.aiHits,
+    candidateIds: projected.aiCandidateIds,
   };
 }
 

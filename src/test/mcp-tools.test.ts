@@ -1365,6 +1365,34 @@ test("recall_with_ai keeps requested hits while limiting AI candidates to five",
   assert.deepEqual(observed, [5, 5]);
 });
 
+test("recall_with_ai rejects evidence for a deterministic item not handed to AI", async () => {
+  const sixRecords: MemoryRecord[] = Array.from({ length: 6 }, (_, index) => ({
+    kind: "failure" as const, id: `evidence-${index}`, ts: index + 1, cwd: "/repo",
+    cmd: `needle ${index}`, exitCode: 1, fingerprint: `evidence-fp-${index}`,
+    signature: ["needle"], excerpt: "needle",
+  }));
+  const result = await createToolRegistry({
+    exposure: "sanitized",
+    memory: createMemoryQueries(() => sixRecords),
+    recallWithAi: {
+      async run() {
+        return {
+          aiStatus: "used" as const,
+          rankedCandidateIds: ["c1"],
+          evidenceRefs: ["c6.failure"],
+          act: "unresolved" as const,
+          confidence: 0.9,
+          explanation: "must be discarded",
+        };
+      },
+    },
+  }).call("recall_with_ai", { query: "needle", limit: 6 }, new AbortController().signal);
+
+  assert.equal(result.structuredContent.aiStatus, "invalid_output");
+  assert.deepEqual(result.structuredContent.rankedCandidateIds, ["c1", "c2", "c3", "c4", "c5", "c6"]);
+  assert.equal("evidenceRefs" in result.structuredContent, false);
+});
+
 test("recall_with_ai receives only a validated deterministic candidate prefix", async () => {
   const makeFailure = (id: string, ts: number): FailureRecord => ({
     kind: "failure", id, ts, cwd: "/repo", cmd: `needle ${id}`, exitCode: 1,

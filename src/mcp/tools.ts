@@ -7,6 +7,7 @@ import type { RecallAiOutcome, RecallWithAiPort } from "../ai/port.js";
 import {
   MAX_FIELD_BYTES,
   MAX_RESPONSE_BYTES,
+  isRecallCandidateId,
   projectKnowledgeHits,
   projectMemoryRecord,
   projectRecallHits,
@@ -14,7 +15,9 @@ import {
   projectRecentFailures,
   projectWhyPossible,
   projectTriple,
+  recallCandidateIdsForLength,
   safeOpaqueIdentifier,
+  validateRecallCandidateIds,
 } from "./privacy.js";
 import { boundTripleRecord, isKnownPathPlatform, isSafeNonNegativeInteger, MAX_MEMORY_FILE_BYTES, MAX_SUPPORTED_MEMORY_RECORDS, parseMemoryRecord } from "../core/memory-read.js";
 import type { FailureRecord, FixRecord, MemoryCoverage, TripleRecord } from "../core/memory-read.js";
@@ -290,17 +293,40 @@ function candidateIdForRef(value: unknown): string | undefined {
 
 function validRankedCandidateIds(value: readonly string[], itemIds: readonly string[]): boolean {
   return value.length <= itemIds.length && value.every((id, index) =>
-    itemIds.includes(id) && value.indexOf(id) === index,
+    isRecallCandidateId(id) && itemIds.includes(id) && value.indexOf(id) === index,
   );
 }
 
-function validEvidenceRefs(value: readonly string[], items: readonly { candidateId: string; hasFix?: unknown }[]): boolean {
+function validEvidenceRefs(
+  value: readonly string[],
+  items: readonly { candidateId: string; hasFix?: unknown }[],
+  allowedCandidateIds: readonly string[] = items.map((item) => item.candidateId),
+): boolean {
+  const allowed = new Set(allowedCandidateIds);
   return value.every((ref, index) => {
     const match = /^([^.]*)\.(failure|fix)$/.exec(ref);
     if (match === null || value.indexOf(ref) !== index) return false;
     const item = items.find((candidate) => candidate.candidateId === match[1]);
-    return item !== undefined && (match[2] === "failure" || item.hasFix === true);
+    return item !== undefined && allowed.has(match[1]) && (match[2] === "failure" || item.hasFix === true);
   });
+}
+
+function alignAiOutcome(
+  ai: RecallAiOutcome | undefined,
+  aiCandidateIds: readonly string[],
+  knownCandidateIds: readonly string[],
+): RecallAiOutcome | undefined {
+  if (ai === undefined || ai.aiStatus !== "used") return ai;
+  const known = new Set(knownCandidateIds);
+  const ranked = ai.rankedCandidateIds;
+  const structurallyValid = ranked.every((id, index) =>
+    isRecallCandidateId(id) && known.has(id) && ranked.indexOf(id) === index,
+  );
+  if (!structurallyValid) return ai;
+  const aligned = ranked.filter((id) => aiCandidateIds.includes(id));
+  if (ranked.length > 0 && aligned.length === 0) return ai;
+  if (aligned.length === ranked.length) return ai;
+  return { ...ai, rankedCandidateIds: aligned };
 }
 
 function cappedResult(payload: object, isError = false): ToolCallResult {
@@ -1190,7 +1216,7 @@ function mergeAi(
     return { ...source, aiStatus: "invalid_output", items, rankedCandidateIds: itemIds, truncated: true };
   }
   const rankedValid = validRankedCandidateIds(ai.rankedCandidateIds, aiCandidateIds);
-  const evidenceValid = ai.evidenceRefs === undefined || validEvidenceRefs(ai.evidenceRefs, items);
+  const evidenceValid = ai.evidenceRefs === undefined || validEvidenceRefs(ai.evidenceRefs, items, aiCandidateIds);
   if (ai.aiStatus === "used" && (!rankedValid || !evidenceValid)) {
     return {
       ...source,
@@ -1202,7 +1228,7 @@ function mergeAi(
 
   const useAiOrder = ai.aiStatus === "used";
   const ranked = useAiOrder
-    ? ai.rankedCandidateIds.filter((id) => itemIds.includes(id))
+    ? ai.rankedCandidateIds.filter((id) => itemIds.includes(id) && aiCandidateIds.includes(id))
     : [];
   for (const id of itemIds) if (!ranked.includes(id)) ranked.push(id);
   const reorderedItems = useAiOrder
@@ -1213,7 +1239,7 @@ function mergeAi(
   if (ai.confidence !== undefined) safeAi.confidence = ai.confidence;
   if (ai.explanation !== undefined) safeAi.explanation = ai.explanation;
   const evidenceRefs = ai.evidenceRefs?.filter((ref, index, refs) =>
-    refs.indexOf(ref) === index && validEvidenceRefs([ref], items),
+    refs.indexOf(ref) === index && validEvidenceRefs([ref], items, aiCandidateIds),
   );
   return {
     ...source,
@@ -1225,50 +1251,54 @@ function mergeAi(
 }
 
 /**
- * Keep the deterministic prefix handed to AI inside the same final envelope
- * cap used for the returned ToolCallResult.  The synthetic outcome is the
- * largest valid AI annotation, so a prefix that survives it cannot be popped
- * by a smaller real outcome.
+ * Keep only candidates that survive the same final envelope cap used for the
+ * returned ToolCallResult. The synthetic used outcome ranks each trial first,
+ * so a retained candidate cannot be popped by a smaller real outcome.
  */
-function retainAiHitsForEnvelope(payload: object, hits: readonly RecallHit[]): readonly RecallHit[] {
+interface RetainedAiHit { hit: RecallHit; candidateId: string }
+
+function retainAiHitsForEnvelope(
+  payload: object,
+  hits: readonly RecallHit[],
+  sourceCandidateIds: readonly string[],
+): readonly RetainedAiHit[] {
   const source = payload as Record<string, unknown>;
   const items = Array.isArray(source.items) ? source.items.filter(isItem) : [];
-  const maximum = Math.min(5, hits.length);
-  for (let count = maximum; count >= 0; count -= 1) {
-    const candidateIds = hits.slice(0, count).map((_, index) => `c${index + 1}`);
+  const candidateIds = validateRecallCandidateIds(sourceCandidateIds, hits.length);
+  if (candidateIds === undefined || candidateIds.some((id) => !items.some((item) => item.candidateId === id))) return [];
+  const candidates = hits.map((hit, index) => ({ hit, candidateId: candidateIds[index]! })).slice(0, 5);
+  const retained: RetainedAiHit[] = [];
+  for (const candidate of candidates) {
+    const trial = [...retained, candidate];
+    const trialIds = trial.map((item) => item.candidateId);
     const evidenceRefs: string[] = [];
-    for (const item of items) {
-      if (evidenceRefs.length >= 10) break;
-      evidenceRefs.push(`${item.candidateId}.failure`);
+    for (const candidateId of trialIds) {
+      const item = items.find((entry) => entry.candidateId === candidateId);
+      if (item === undefined || evidenceRefs.length >= 10) continue;
+      evidenceRefs.push(`${candidateId}.failure`);
       if ((item as { hasFix?: unknown }).hasFix === true && evidenceRefs.length < 10) {
-        evidenceRefs.push(`${item.candidateId}.fix`);
+        evidenceRefs.push(`${candidateId}.fix`);
       }
     }
     const worstOutcome: RecallAiOutcome = {
-      aiStatus: "invalid_output",
+      aiStatus: "used",
       act: "unresolved",
-      // A finite in-range subnormal/normal confidence can serialize with a
-      // longer scientific form than a near-one decimal; keep that witness in
-      // the preflight envelope proof.
       confidence: 2.2250738585072014e-308,
-      // JSON.stringify escapes controls to six bytes each; this is a larger
-      // valid explanation witness than astral text and keeps the cap proof
-      // conservative for every 300-code-point explanation.
       explanation: "\u0000".repeat(300),
-      rankedCandidateIds: candidateIds,
+      rankedCandidateIds: trialIds,
       evidenceRefs,
     };
     try {
-      const result = cappedResult(mergeAi(payload, worstOutcome, candidateIds));
-      const retained = Array.isArray(result.structuredContent.items)
+      const result = cappedResult(mergeAi(payload, worstOutcome, trialIds));
+      const resultIds = Array.isArray(result.structuredContent.items)
         ? result.structuredContent.items.filter(isItem).map((item) => item.candidateId)
         : [];
-      if (candidateIds.every((id) => retained.includes(id))) return hits.slice(0, count);
+      if (trialIds.every((id) => resultIds.includes(id))) retained.push(candidate);
     } catch {
-      // Try a shorter prefix. If none fits, no custom model input is safe.
+      // A candidate that cannot fit is omitted from the bounded AI request.
     }
   }
-  return [];
+  return retained;
 }
 
 function deterministicAiFallback(payload: object, aiStatus: "unavailable" | "invalid_output"): Record<string, unknown> {
@@ -1586,11 +1616,11 @@ export function createToolRegistry(options: CreateToolRegistryOptions): McpToolR
             pairedCoverage = coverage;
             const aiProjection = safeProjection(
               () => projectRecallHitsForAi(hits, options.exposure),
-              { response: { exposure: options.exposure, items: [], truncated: true }, hits: [] as readonly RecallHit[] },
+              { response: { exposure: options.exposure, items: [], truncated: true }, hits: [] as readonly RecallHit[], candidateIds: [] },
             );
             const enriched = { ...aiProjection.response, ...memoryCoveragePayload(coverage) };
-            const aiHits = retainAiHitsForEnvelope(enriched, aiProjection.hits);
-            if (aiHits.length === 0) {
+            const aiCandidates = retainAiHitsForEnvelope(enriched, aiProjection.hits, aiProjection.candidateIds);
+            if (aiCandidates.length === 0) {
               const deterministicItems = Array.isArray(enriched.items) ? enriched.items.filter(isItem) : [];
               const noHits = {
                 ...enriched,
@@ -1606,7 +1636,12 @@ export function createToolRegistry(options: CreateToolRegistryOptions): McpToolR
             let ai: unknown;
             try {
               ai = await runAi(() => options.recallWithAi.run(
-                { query: input.query, hits: aiHits, exposure: options.exposure }, signal,
+                {
+                  query: input.query,
+                  hits: aiCandidates.map((candidate) => candidate.hit),
+                  candidateIds: aiCandidates.map((candidate) => candidate.candidateId),
+                  exposure: options.exposure,
+                }, signal,
               ));
             } catch (error) {
               if (error instanceof ToolExecutionError && error.safeCode === "ai_fallback") {
@@ -1616,10 +1651,12 @@ export function createToolRegistry(options: CreateToolRegistryOptions): McpToolR
               }
             }
             const safeAi = snapshotRecallAiOutcome(ai);
-            const aiCandidateIds = aiHits.map((_, index) => `c${index + 1}`);
+            const aiCandidateIds = aiCandidates.map((candidate) => candidate.candidateId);
+            const knownCandidateIds = safeProjection(() => recallCandidateIdsForLength(hits.length) ?? [], []);
+            const alignedAi = alignAiOutcome(safeAi, aiCandidateIds, knownCandidateIds);
             return safeProjection(
-              () => cappedResult(mergeAi(enriched, safeAi, aiCandidateIds)),
-              cappedResult(deterministicAiFallback(enriched, safeAi !== undefined ? "unavailable" : "invalid_output")),
+              () => cappedResult(mergeAi(enriched, alignedAi, aiCandidateIds)),
+              cappedResult(deterministicAiFallback(enriched, alignedAi !== undefined ? "unavailable" : "invalid_output")),
             );
           }
           default:
