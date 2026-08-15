@@ -354,7 +354,7 @@ export function projectWhyPossible(
   let inputLength = 0;
   try {
     if (!Array.isArray(values)) return output;
-    inputLength = Math.min(values.length, MAX_KNOWLEDGE_FILE_INPUTS);
+    inputLength = Math.min(values.length, MAX_NESTED_ITEMS);
   } catch {
     return output;
   }
@@ -426,18 +426,45 @@ function normalizeKnowledgeHit(value: unknown): KnowledgeSearchHit | undefined {
     const truncatedValid = rawTruncatedFiles === undefined || isSafeNonNegativeInteger(rawTruncatedFiles);
     const truncatedFiles: number = truncatedValid && typeof rawTruncatedFiles === "number" ? rawTruncatedFiles : 0;
     const rawFilesCovered = raw.filesCovered;
-    const boundedRawFiles = Array.isArray(rawFilesCovered) && rawFilesCovered.length > MAX_KNOWLEDGE_FILE_INPUTS
-      ? rawFilesCovered.slice(0, MAX_KNOWLEDGE_FILE_INPUTS)
-      : rawFilesCovered;
-    const filesCovered = rawFilesCovered === undefined
-      ? undefined
-      : Array.isArray(boundedRawFiles)
-        ? boundedRawFiles.filter((file): file is string => typeof file === "string" && file.length <= MAX_FIELD_BYTES * 2)
-        : [];
-    const malformedCoverage = (rawFilesCovered !== undefined && !Array.isArray(rawFilesCovered))
-      || (Array.isArray(rawFilesCovered) && rawFilesCovered.length > MAX_KNOWLEDGE_FILE_INPUTS)
-      || (Array.isArray(boundedRawFiles) && boundedRawFiles.some((file) => typeof file !== "string"))
-      || (Array.isArray(boundedRawFiles) && boundedRawFiles.some((file) => typeof file === "string" && file.length > MAX_FIELD_BYTES * 2))
+    let filesCovered: string[] | undefined;
+    let filesCoveredLength = 0;
+    let filesCoveredTruncated = false;
+    let filesCoveredMalformed = false;
+    if (rawFilesCovered !== undefined) {
+      if (!Array.isArray(rawFilesCovered)) {
+        filesCovered = [];
+        filesCoveredMalformed = true;
+      } else {
+        let length = 0;
+        try {
+          length = rawFilesCovered.length;
+          if (!Number.isSafeInteger(length) || length < 0) {
+            filesCovered = [];
+            filesCoveredMalformed = true;
+            length = 0;
+          }
+        } catch {
+          filesCovered = [];
+          filesCoveredMalformed = true;
+        }
+        filesCoveredLength = length;
+        const bound = Math.min(length, MAX_KNOWLEDGE_FILE_INPUTS);
+        filesCoveredTruncated = length > bound;
+        const normalized: string[] = [];
+        for (let index = 0; index < bound; index += 1) {
+          let file: unknown;
+          try { file = rawFilesCovered[index]; } catch { filesCoveredMalformed = true; break; }
+          if (typeof file !== "string" || file.length > MAX_FIELD_BYTES * 2) {
+            filesCoveredMalformed = true;
+            continue;
+          }
+          normalized.push(file);
+        }
+        filesCovered = normalized;
+      }
+    }
+    const malformedCoverage = filesCoveredMalformed
+      || filesCoveredTruncated
       || !truncatedValid
       || (raw.coverageStatus !== undefined && coverageStatus === "unknown" && raw.coverageStatus !== "unknown");
     let normalizedStatus: KnowledgeSearchHit["coverageStatus"] = coverageStatus;
@@ -465,7 +492,7 @@ function normalizeKnowledgeHit(value: unknown): KnowledgeSearchHit | undefined {
       && filesCovered !== undefined;
     if (kind === "triple" && normalizedStatus === "complete" && !provenComplete) {
       normalizedComplete = false;
-      normalizedStatus = Array.isArray(rawFilesCovered) && rawFilesCovered.length > MAX_TRIPLE_FILES
+      normalizedStatus = filesCoveredTruncated || filesCoveredLength > MAX_TRIPLE_FILES
         ? "truncated"
         : "unknown";
     }
@@ -553,7 +580,7 @@ export function projectKnowledgeHits(
       complete = false;
     }
     const projected: ProjectedKnowledgeHit = {
-      id: projectOpaqueId(hit.id, "id", truncation),
+      id: projectOpaqueId(hit.id, "id", truncation, exposure === "sanitized"),
       ts: hit.ts,
       kind: hit.kind,
       snippet: projectText(hit.snippet, exposure, "snippet", truncation),

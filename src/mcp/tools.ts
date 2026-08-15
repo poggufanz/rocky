@@ -1,7 +1,7 @@
 import { Buffer } from "node:buffer";
 import type { Exposure } from "../core/config-read.js";
 import { hasCanonicalMemoryQueries } from "../core/memory-query.js";
-import type { KnowledgeCoverageSummary, KnowledgeSearchQuery, MemoryQueries, RecallQuery, RecentFailuresQuery, StatsQuery, WhyFileEvidence } from "../core/memory-query.js";
+import type { KnowledgeCoverageSummary, KnowledgeSearchQuery, MemoryQueries, RecallHit, RecallQuery, RecentFailuresQuery, StatsQuery, WhyFileEvidence } from "../core/memory-query.js";
 import type { RecallAiOutcome, RecallWithAiPort } from "../ai/port.js";
 import {
   MAX_RESPONSE_BYTES,
@@ -68,7 +68,9 @@ const ANNOTATIONS = {
   openWorldHint: false,
 } as const;
 const RESPONSE_CAP_BYTES = MAX_RESPONSE_BYTES - TOOL_ENVELOPE_RESERVE_BYTES;
-const MAX_WHY_EVIDENCE_INPUTS = 20_000;
+const MAX_WHY_EVIDENCE_INPUTS = 256;
+const MAX_PROVIDER_NESTED_ITEMS = 256;
+const MAX_PROVIDER_NESTED_BYTES = 64 * 1024;
 const MEMORY_OPERATIONAL_CODES = Object.freeze([
   "EACCES", "EPERM", "ENOENT", "EIO", "EMFILE", "ENFILE", "ENOSPC", "EROFS", "EISDIR", "ENOTDIR",
 ] as const);
@@ -317,6 +319,38 @@ function unknownCoverage(): KnowledgeCoverageSummary {
   return { status: "unknown", complete: false, filesCovered: 0, truncatedFiles: 0 };
 }
 
+function boundedProviderArray(value: unknown, maximum = MAX_PROVIDER_NESTED_ITEMS): { values: unknown[]; truncated: boolean; valid: boolean } {
+  try {
+    if (!Array.isArray(value)) return { values: [], truncated: false, valid: false };
+    const length = value.length;
+    if (!Number.isSafeInteger(length) || length < 0) return { values: [], truncated: true, valid: false };
+    const values: unknown[] = [];
+    const bound = Math.min(length, maximum);
+    for (let index = 0; index < bound; index += 1) values.push(value[index]);
+    return { values, truncated: length > maximum, valid: true };
+  } catch {
+    return { values: [], truncated: true, valid: false };
+  }
+}
+
+function boundedProviderStrings(value: unknown): { values: string[]; valid: boolean } {
+  const bounded = boundedProviderArray(value);
+  if (!bounded.valid) return { values: [], valid: false };
+  const values: string[] = [];
+  let bytes = 0;
+  try {
+    for (const item of bounded.values) {
+      if (typeof item !== "string") return { values: [], valid: false };
+      bytes += Buffer.byteLength(item, "utf8");
+      if (bytes > MAX_PROVIDER_NESTED_BYTES) return { values: [], valid: false };
+      values.push(item);
+    }
+  } catch {
+    return { values: [], valid: false };
+  }
+  return { values, valid: true };
+}
+
 function safeTripleRecord(value: unknown): TripleRecord | undefined {
   try {
     if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
@@ -342,12 +376,12 @@ function safeTripleRecord(value: unknown): TripleRecord | undefined {
     const rationale = raw.rationale;
     if (typeof rationale === "object" && rationale !== null && !Array.isArray(rationale)) {
       const candidate = rationale as Record<string, unknown>;
-      if (typeof candidate.text === "string" && Array.isArray(candidate.tags) &&
-          candidate.tags.every((tag) => typeof tag === "string") &&
+      const tags = boundedProviderStrings(candidate.tags);
+      if (typeof candidate.text === "string" && tags.valid &&
           (candidate.source === "transcript" || candidate.source === "notify")) {
         safe.rationale = {
           text: candidate.text,
-          tags: [...candidate.tags] as string[],
+          tags: tags.values,
           source: candidate.source,
         };
       }
@@ -408,7 +442,18 @@ function whyPathRelation(candidate: TripleRecord, path: string): WhyPathRelation
     if (candidateDisplay === targetDisplay || candidateIdentity === targetIdentity) {
       return { exact: true, suffix: false, suffixIdentities: [] };
     }
-    if (candidateDisplay.endsWith(`/${targetDisplay}`)) suffixIdentities.add(candidateIdentity);
+    const knownRoot = canonicalPath(candidate.cwd, { platform });
+    const rootAbsolute = /^\/(?:|[^/])/u.test(knownRoot) || /^[A-Za-z]:\//u.test(knownRoot);
+    const trustedRoot = candidate.platform !== undefined && rootAbsolute;
+    const relativeEscapesRoot = !candidateDisplay.startsWith("/") && !/^[A-Za-z]:\//u.test(candidateDisplay)
+      && (candidateDisplay === ".." || candidateDisplay.startsWith("../"));
+    const candidateWithinRoot = !relativeEscapesRoot && (!rootAbsolute || candidateIdentity === knownRoot
+      || candidateIdentity.startsWith(`${knownRoot}/`));
+    const targetWithinRoot = !rootAbsolute || targetIdentity === knownRoot
+      || targetIdentity.startsWith(`${knownRoot}/`);
+    if (!trustedRoot && candidateWithinRoot && targetWithinRoot && candidateDisplay.endsWith(`/${targetDisplay}`)) {
+      suffixIdentities.add(candidateIdentity);
+    }
   }
   return { exact: false, suffix: suffixIdentities.size > 0, suffixIdentities: [...suffixIdentities] };
 }
@@ -416,6 +461,19 @@ function whyPathRelation(candidate: TripleRecord, path: string): WhyPathRelation
 interface WhyCandidate {
   candidate: TripleRecord;
   relation: WhyPathRelation;
+}
+
+function whyTripleComplete(candidate: TripleRecord): boolean {
+  try {
+    const mechanism = candidate.mechanism;
+    return mechanism.coverageStatus === "complete"
+      && mechanism.truncatedFiles === 0
+      && mechanism.baseline === "captured"
+      && mechanism.files.length > 0
+      && mechanism.files.every((file) => file.provenance === "tool-observed" || file.provenance === "git-diff-inferred");
+  } catch {
+    return false;
+  }
 }
 
 function selectWhyCandidates(
@@ -437,7 +495,7 @@ function selectWhyCandidates(
   const matches: TripleRecord[] = [];
   const possible: WhyFileEvidence["possible"] = [];
   for (const { candidate, relation } of related) {
-    const incomplete = candidate.mechanism.coverageStatus !== "complete" || candidate.mechanism.truncatedFiles > 0;
+    const incomplete = !whyTripleComplete(candidate);
     const exactOrUnambiguousSuffix = relation.exact || (
       !hasExact && !ambiguousSuffix && relation.suffix && !incomplete
     );
@@ -457,18 +515,13 @@ function fallbackWhyEvidence(options: CreateToolRegistryOptions, path: string, l
   } catch {
     rawMatches = [];
   }
-  let boundedRawMatches: readonly unknown[] = [];
-  try {
-    boundedRawMatches = Array.isArray(rawMatches) ? rawMatches.slice(0, MAX_WHY_EVIDENCE_INPUTS) : [];
-  } catch {
-    boundedRawMatches = [];
-  }
-  const candidates = boundedRawMatches
+  const boundedRawMatches = boundedProviderArray(rawMatches, MAX_WHY_EVIDENCE_INPUTS);
+  const candidates = boundedRawMatches.values
     .map((value) => safeTripleRecord(value))
     .filter((value): value is TripleRecord => value !== undefined);
   const selected = selectWhyCandidates(candidates, path, limit);
   const coverage = coverageForTriples(candidates);
-  const incomplete = !coverage.complete || selected.possible.length > 0 || selected.ambiguousSuffix;
+  const incomplete = !coverage.complete || selected.possible.length > 0 || selected.ambiguousSuffix || boundedRawMatches.truncated;
   return {
     matches: selected.matches,
     possible: selected.possible,
@@ -481,15 +534,23 @@ function normalizeWhyEvidence(value: unknown, fallback: WhyFileEvidence, path: s
   try {
     if (typeof value !== "object" || value === null || Array.isArray(value)) return fallback;
     const raw = value as Record<string, unknown>;
-    const candidates = (Array.isArray(raw.matches) ? raw.matches.slice(0, MAX_WHY_EVIDENCE_INPUTS) : [])
+    const boundedMatches = boundedProviderArray(raw.matches, MAX_WHY_EVIDENCE_INPUTS);
+    const candidates = boundedMatches.values
       .map((entry) => safeTripleRecord(entry))
       .filter((entry): entry is TripleRecord => entry !== undefined);
     const selected = selectWhyCandidates(candidates, path, limit);
     const derived = coverageForTriples(selected.matches);
-    const possible = [
-      ...selected.possible,
-      ...(Array.isArray(raw.possible) ? raw.possible as WhyFileEvidence["possible"] : []),
-    ].slice(0, limit);
+    const boundedPossible = boundedProviderArray(raw.possible, MAX_WHY_EVIDENCE_INPUTS);
+    const providerPossible: WhyFileEvidence["possible"] = [];
+    for (let index = 0; index < boundedPossible.values.length && providerPossible.length < limit; index += 1) {
+      const candidate = boundedPossible.values[index];
+      if (typeof candidate !== "object" || candidate === null || Array.isArray(candidate)) continue;
+      const value = candidate as Record<string, unknown>;
+      if (typeof value.id !== "string" || typeof value.ts !== "number" || !Number.isSafeInteger(value.ts) || value.ts < 0
+          || value.source !== "agent-hook" || value.reason !== "path_may_be_omitted") continue;
+      providerPossible.push({ id: value.id, ts: value.ts, source: "agent-hook", reason: "path_may_be_omitted" });
+    }
+    const possible = [...selected.possible, ...providerPossible].slice(0, limit);
     const supplied = raw.coverage;
     const suppliedObject = typeof supplied === "object" && supplied !== null && !Array.isArray(supplied)
       ? supplied as Record<string, unknown>
@@ -506,7 +567,7 @@ function normalizeWhyEvidence(value: unknown, fallback: WhyFileEvidence, path: s
         coverage = { ...derived, status: "truncated", complete: false };
       }
     }
-    if (raw.coverageIncomplete === true) coverage = { ...coverage, status: "unknown", complete: false };
+    if (raw.coverageIncomplete === true || boundedMatches.truncated || boundedPossible.truncated) coverage = { ...coverage, status: "unknown", complete: false };
     if (possible.length > 0 || selected.ambiguousSuffix) coverage = { ...coverage, status: "unknown", complete: false };
     return {
       matches: selected.matches,
@@ -548,7 +609,7 @@ function safeProjection<T>(operation: () => T, fallback: T): T {
   try { return operation(); } catch { return fallback; }
 }
 
-function safeMemoryStats(value: unknown): Record<string, number> {
+function safeMemoryStats(value: unknown, canonical = false): Record<string, number> {
   try {
     const source = typeof value === "object" && value !== null && !Array.isArray(value)
       ? value as Record<string, unknown>
@@ -562,10 +623,19 @@ function safeMemoryStats(value: unknown): Record<string, number> {
     const possibleFixes = count("possibleFixes");
     const triples = count("triples");
     const notes = count("notes");
-    const total = [failures, fixEvents, possibleFixes, triples, notes].reduce((sum, entry) => {
+    const recomputedTotal = [failures, fixEvents, possibleFixes, triples, notes].reduce((sum, entry) => {
       const next = sum + entry;
       return isSafeNonNegativeInteger(next) ? next : Number.MAX_SAFE_INTEGER;
     }, 0);
+    // Canonical queryStats.total is the record-level count and already
+    // accounts for a mixed FixRecord carrying both confirmed and possible
+    // links.  Untrusted providers cannot forge this exact proof: their
+    // supplied total remains ignored and the conservative component fallback
+    // preserves the legacy response contract.
+    const suppliedTotal = source.total;
+    const total = canonical && isSafeNonNegativeInteger(suppliedTotal)
+      ? suppliedTotal
+      : recomputedTotal;
     return { failures, fixEvents, resolved, unresolved, confirmedFixes, possibleFixes, triples, notes, total };
   } catch {
     return { failures: 0, fixEvents: 0, resolved: 0, unresolved: 0, confirmedFixes: 0, possibleFixes: 0, triples: 0, notes: 0, total: 0 };
@@ -659,7 +729,7 @@ export function createToolRegistry(options: CreateToolRegistryOptions): McpToolR
             const stats = safeReadMemory<unknown>(() => options.memory.stats(input), {}, canonicalMemory);
             const result = {
               exposure: options.exposure,
-              ...safeMemoryStats(stats),
+              ...safeMemoryStats(stats, canonicalMemory),
             };
             return safeProjection(() => cappedResult(result), cappedResult({ exposure: options.exposure, ...safeMemoryStats({}) }));
           }
@@ -732,8 +802,11 @@ export function createToolRegistry(options: CreateToolRegistryOptions): McpToolR
               () => projectRecallHits(hits, options.exposure),
               { exposure: options.exposure, items: [], truncated: true },
             );
-            const aiHits = safeProjection(
-              () => Array.isArray(hits) ? hits.slice(0, 5) : [],
+            // Materialize only a bounded indexed prefix before any later map,
+            // serialization, or model inspection. A custom provider may hand
+            // us a Proxy array whose iterator/slice throws or never ends.
+            const aiHits = safeProjection<readonly RecallHit[]>(
+              () => boundedProviderArray(hits, 5).values as RecallHit[],
               [],
             );
             const ai = await runAi(() => options.recallWithAi.run(

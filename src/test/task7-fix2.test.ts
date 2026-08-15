@@ -217,7 +217,9 @@ test("redacted display collisions retain distinct bounded identities after reloa
     assert.match(readFileSync(paths.memory, "utf8"), /identityHash/);
   assert.equal(reloaded.mechanism.files.length, 2);
   assert.equal(new Set(reloaded.mechanism.files.map((item) => item.identityHash)).size, 2);
-  assert.equal(reloaded.mechanism.coverageStatus, "complete");
+  // Individual mechanism events without a turn sidecar/complete marker are
+  // now deliberately conservative after round-6 recovery hardening.
+  assert.equal(reloaded.mechanism.coverageStatus, "unknown");
 });
 
 test("parser bounds oversized coverage witness lists without claiming completeness", () => {

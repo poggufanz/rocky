@@ -1,5 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { Buffer } from "node:buffer";
+import { randomBytes } from "node:crypto";
 import {
   closeSync,
   constants,
@@ -10,11 +11,14 @@ import {
   mkdirSync,
   openSync,
   readSync,
+  renameSync,
+  unlinkSync,
   writeSync,
   type BigIntStats,
 } from "node:fs";
 import { resolveRockyPaths, type RockyPaths } from "../core/state-paths.js";
 import { canonicalPath } from "../core/memory-read.js";
+import { NO_BLOCK_FLAG, NO_FOLLOW_FLAG, regularDescriptorSafe, sameFilesystemIdentity } from "../core/fs-safety.js";
 import { isSafeNonNegativeInteger } from "../core/memory-read.js";
 import { recordTripleOnce } from "../core/memory.js";
 import type { TripleFile, TripleRecord } from "../core/memory.js";
@@ -66,8 +70,8 @@ const PROP_RE = /([a-zA-Z-]{2,})\s*:/g;
 // Internal sentinel: redactSecretsAtBoundary removes it while recording the
 // boundary restored by stripping ANSI/C0/C1 controls.
 const BOUNDARY_MARKER = "\u2065";
-const NO_FOLLOW = process.platform === "win32" ? 0 : constants.O_NOFOLLOW;
-const NO_BLOCK = process.platform === "win32" ? 0 : constants.O_NONBLOCK;
+const NO_FOLLOW = NO_FOLLOW_FLAG;
+const NO_BLOCK = NO_BLOCK_FLAG;
 const WEEK_MS = 7n * 24n * 60n * 60n * 1_000n;
 const DIGEST_HINT_LEASE_KEY = "__rocky_digest_hint__";
 
@@ -136,24 +140,26 @@ function ensureHomeDirectory(home: string): boolean {
 function readLabelLines(path: string): string[] | undefined {
   const initial = (() => {
     try {
-      return lstatSync(path);
+      return lstatSync(path, { bigint: true });
     } catch (error) {
       return (error as NodeJS.ErrnoException).code === "ENOENT" ? undefined : null;
     }
   })();
   if (initial === null) return undefined;
   if (initial === undefined) return [];
-  if (!initial.isFile() || initial.isSymbolicLink() || initial.size > MAX_LABEL_FILE_BYTES) return undefined;
+  if (!regularDescriptorSafe(initial) || !sameFilesystemIdentity(initial, initial) || initial.size > BigInt(MAX_LABEL_FILE_BYTES)) return undefined;
 
   let fd = -1;
   try {
     fd = openSync(path, constants.O_RDONLY | NO_FOLLOW);
-    const opened = fstatSync(fd);
-    if (!opened.isFile() || opened.isSymbolicLink() || opened.size > MAX_LABEL_FILE_BYTES) return undefined;
+    const opened = fstatSync(fd, { bigint: true });
+    if (!regularDescriptorSafe(opened) || !sameFilesystemIdentity(initial, opened)
+        || opened.size > BigInt(MAX_LABEL_FILE_BYTES)) return undefined;
     const bytes = Buffer.alloc(MAX_LABEL_FILE_BYTES + 1);
     const count = readSync(fd, bytes, 0, bytes.length, 0);
-    const after = fstatSync(fd);
-    if (!after.isFile() || after.isSymbolicLink() || count !== after.size || count > MAX_LABEL_FILE_BYTES) return undefined;
+    const after = fstatSync(fd, { bigint: true });
+    if (!regularDescriptorSafe(after) || !sameFilesystemIdentity(initial, after)
+        || BigInt(count) !== after.size || count > MAX_LABEL_FILE_BYTES) return undefined;
     return bytes.subarray(0, count).toString("utf8").split(/\r?\n/).filter(Boolean)
       .map((line) => safeLabel(line)).filter((line): line is string => line !== undefined);
   } catch {
@@ -165,10 +171,19 @@ function readLabelLines(path: string): string[] | undefined {
 
 function writeLabelLines(path: string, lines: readonly string[]): void {
   let fd = -1;
+  let temporary: string | undefined;
   try {
-    fd = openSync(path, constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | NO_FOLLOW, 0o600);
-    const stats = fstatSync(fd);
-    if (!stats.isFile() || stats.isSymbolicLink()) return;
+    let before: BigIntStats | undefined;
+    try {
+      before = lstatSync(path, { bigint: true });
+      if (!regularDescriptorSafe(before) || !sameFilesystemIdentity(before, before)) return;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") return;
+    }
+    temporary = `${path}.tmp.${process.pid}.${randomBytes(8).toString("hex")}`;
+    fd = openSync(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | NO_FOLLOW, 0o600);
+    const stats = fstatSync(fd, { bigint: true });
+    if (!regularDescriptorSafe(stats) || !sameFilesystemIdentity(stats, stats)) return;
     try {
       fchmodSync(fd, 0o600);
     } catch {
@@ -182,8 +197,23 @@ function writeLabelLines(path: string, lines: readonly string[]): void {
       if (written <= 0) return;
       offset += written;
     }
+    const after = fstatSync(fd, { bigint: true });
+    if (!regularDescriptorSafe(after) || !sameFilesystemIdentity(stats, after)) return;
+    closeQuietly(fd);
+    fd = -1;
+    let current: BigIntStats | null | undefined;
+    try { current = lstatSync(path, { bigint: true }); } catch (error) {
+      current = (error as NodeJS.ErrnoException).code === "ENOENT" ? undefined : null;
+    }
+    if (current === null || (before === undefined ? current !== undefined : current === undefined
+      || !sameFilesystemIdentity(before, current))) return;
+    renameSync(temporary, path);
+    temporary = undefined;
   } finally {
     if (fd >= 0) closeQuietly(fd);
+    if (temporary !== undefined) {
+      try { unlinkSync(temporary); } catch { /* best effort cleanup */ }
+    }
   }
 }
 
@@ -564,9 +594,12 @@ export async function annotateBatch(key: string, deps: AnnotateDeps = {}): Promi
           && coverageSnapshot.payloads === 1
           && coverageSnapshot.candidateCount > snapshotIdentityCount
           && snapshotIdentityCount >= MAX_COVERAGE_PATHS;
+        if (!coverageSnapshot.pathsComplete && !coverageCapProof) coverageMetadataComplete = false;
       }
+      if (!coverageSnapshot.pathsComplete && coverageSnapshot.candidateCountExact !== true) coverageMetadataComplete = false;
+      const coverageIdentityCwd = coverageSnapshot.cwd ?? identityCwd;
       for (const candidate of coverageSnapshot.paths) {
-        const candidateGitPath = pathIdentity(candidate, identityCwd);
+        const candidateGitPath = pathIdentity(candidate, coverageIdentityCwd);
         const candidatePath = canonicalPath(cleanText(candidate, MAX_PATH_CHARS));
         if (!candidateGitPath || !candidatePath) {
           coverageMetadataComplete = false;
@@ -810,6 +843,7 @@ export async function annotateBatch(key: string, deps: AnnotateDeps = {}): Promi
       && (coverageCapProof || (coverageExpectedCounts.length > 0 && coverageMetadataComplete));
     const coverageUnknown = spoolMayBeTruncated
       || (allMechanisms.length === 0 && intentText !== undefined && rationaleText !== undefined)
+      || (!coverageMetadataSeen && allMechanisms.length > 0)
       || coverageMetadataContradiction
       || (coverageMetadataSeen && !coverageMetadataComplete && !boundedCountProof)
       || coverageExpectedCountUnknown

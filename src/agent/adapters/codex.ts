@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
   batchKey,
   MAX_COVERAGE_PATHS,
@@ -240,6 +241,11 @@ function parseModern(payload: PlainRecord, now: number): ParsedHookPayload {
         ...(truncatedFiles > 0 ? { truncatedFiles } : {}),
         coveragePaths,
         coveragePathsComplete,
+        coverageCwd: cwd,
+        coverageDigest: createHash("sha256").update(JSON.stringify([...byPath.keys()]
+          .map((path) => canonicalPath(path, { platform: process.platform, cwd }))
+          .filter((path): path is string => path.length > 0)
+          .sort()), "utf8").digest("hex"),
         ...(invalidCoverage ? {} : {
           coverageCandidateCount: byPath.size,
           coverageCandidateCountExact: !invalidCoverage,

@@ -12,6 +12,7 @@ import {
   openSync,
   realpathSync,
   writeSync,
+  type BigIntStats,
 } from "node:fs";
 import { dirname } from "node:path";
 import { appendPayload } from "../agent/spool.js";
@@ -21,6 +22,7 @@ import { loadConfig } from "../core/config-read.js";
 import { redactSecretsAtBoundary, replaceAnsiAndControls } from "../core/redact.js";
 import { resolveRockyPaths, type RockyPaths } from "../core/state-paths.js";
 import { canonicalPath } from "../core/memory-read.js";
+import { NO_FOLLOW_FLAG, regularDescriptorSafe, sameFilesystemIdentity } from "../core/fs-safety.js";
 import { MAX_BASELINE_FILES, type AgentEvent, type IntentEvent, type TurnBaseline } from "../agent/schema.js";
 
 const STDIN_CAP_BYTES = 2 * 1024 * 1024;
@@ -28,7 +30,7 @@ const LOG_CAP_BYTES = 64 * 1024;
 const LOG_MESSAGE_CAP_BYTES = 2 * 1024;
 const LOG_SCAN_BYTES = 8 * 1024;
 const ADAPTER_LABEL_CAP_BYTES = 256;
-const NO_FOLLOW = process.platform === "win32" ? 0 : constants.O_NOFOLLOW;
+const NO_FOLLOW = NO_FOLLOW_FLAG;
 
 // Internal sentinel: redactSecretsAtBoundary removes it while recording the
 // boundary restored by stripping ANSI/C0/C1 controls.
@@ -122,38 +124,42 @@ export function logHookError(message: string, paths?: RockyPaths): void {
       // Windows and read-only parents may reject chmod.
     }
 
-    let listed;
+    let listed: BigIntStats | undefined;
     try {
-      listed = lstatSync(target);
+      listed = lstatSync(target, { bigint: true });
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") return;
     }
-    if (listed && (!listed.isFile() || listed.isSymbolicLink())) return;
+    if (listed && (!regularDescriptorSafe(listed) || !sameFilesystemIdentity(listed, listed))) return;
 
+    const create = listed === undefined;
     fd = openSync(
       target,
-      constants.O_WRONLY | constants.O_APPEND | constants.O_CREAT | NO_FOLLOW,
+      constants.O_WRONLY | constants.O_APPEND | (create ? constants.O_CREAT | constants.O_EXCL : constants.O_CREAT) | NO_FOLLOW,
       0o600,
     );
-    const opened = fstatSync(fd);
-    if (!opened.isFile() || opened.isSymbolicLink()) return;
+    const opened = fstatSync(fd, { bigint: true });
+    if (!regularDescriptorSafe(opened) || !sameFilesystemIdentity(opened, opened)) return;
+    if (listed && !sameFilesystemIdentity(listed, opened)) return;
     try {
       fchmodSync(fd, 0o600);
     } catch {
       // File mode is best effort on platforms without POSIX modes.
     }
 
-    if (!Number.isSafeInteger(opened.size) || opened.size < 0) return;
-    if (opened.size > LOG_CAP_BYTES || opened.size + line.byteLength > LOG_CAP_BYTES) {
+    if (opened.size < 0n) return;
+    if (opened.size > BigInt(LOG_CAP_BYTES) || opened.size + BigInt(line.byteLength) > BigInt(LOG_CAP_BYTES)) {
       ftruncateSync(fd, 0);
     }
-    const ready = fstatSync(fd);
-    if (!ready.isFile() || ready.size + line.byteLength > LOG_CAP_BYTES) return;
+    const ready = fstatSync(fd, { bigint: true });
+    if (!regularDescriptorSafe(ready) || !sameFilesystemIdentity(opened, ready)
+        || ready.size + BigInt(line.byteLength) > BigInt(LOG_CAP_BYTES)) return;
     writeAll(fd, line);
 
     // A concurrent writer must not be allowed to leave the diagnostic over the cap.
-    const after = fstatSync(fd);
-    if (after.size > LOG_CAP_BYTES) ftruncateSync(fd, LOG_CAP_BYTES);
+    const after = fstatSync(fd, { bigint: true });
+    if (!regularDescriptorSafe(after) || !sameFilesystemIdentity(opened, after)) return;
+    if (after.size > BigInt(LOG_CAP_BYTES)) ftruncateSync(fd, LOG_CAP_BYTES);
   } catch {
     // A broken log path must never break a vendor hook.
   } finally {
@@ -406,6 +412,7 @@ function applyParsedEvent(parsed: ParsedHookPayload, paths: RockyPaths, deps: Ag
     // events so a lost first/middle/last append cannot make surviving files
     // look like complete knowledge.
     const firstMechanism = parsed.events.find((event): event is Extract<AgentEvent, { kind: "mechanism" }> => event.kind === "mechanism");
+    const intentCwd = parsed.events.find((event): event is IntentEvent => event.kind === "intent")?.cwd;
     const coveragePaths = firstMechanism === undefined ? undefined : parsed.coveragePaths
       ?? parsed.events.filter((event): event is Extract<AgentEvent, { kind: "mechanism" }> => event.kind === "mechanism").map((event) => event.path);
     const coverageInput = firstMechanism === undefined || coveragePaths === undefined ? undefined : {
@@ -415,6 +422,8 @@ function applyParsedEvent(parsed: ParsedHookPayload, paths: RockyPaths, deps: Ag
       candidateCountExact: parsed.coverageCandidateCountExact ?? parsed.coveragePaths !== undefined,
       pathsComplete: parsed.coveragePathsComplete ?? firstMechanism.coveragePathsComplete
         ?? (parsed.coveragePaths === undefined && coveragePaths.length <= 256),
+      cwd: parsed.coverageCwd ?? intentCwd,
+      payloadDigest: parsed.coverageDigest,
     };
     // Keep overflow metadata attached until one mechanism append succeeds.
     // A transient first-write failure must not let later surviving events

@@ -123,6 +123,8 @@ export interface TripleRecord {
 
 /** Shared durable knowledge contract: only this many file witnesses survive. */
 export const MAX_TRIPLE_FILES = 8;
+/** Reject hostile nested file arrays before any per-entry traversal. */
+const MAX_TRIPLE_INPUT_FILES = 256;
 const KNOWN_PATH_PLATFORMS: ReadonlySet<string> = new Set([
   "aix", "android", "darwin", "freebsd", "haiku", "linux", "openbsd", "sunos", "win32",
 ]);
@@ -255,9 +257,12 @@ export function boundTripleMechanism(
     rawFilesLength = 0;
     rawFilesShapeValid = false;
   }
+  const rawFilesTooLarge = rawFilesLength > MAX_TRIPLE_INPUT_FILES;
+  const boundedRawFilesLength = Math.min(rawFilesLength, MAX_TRIPLE_INPUT_FILES);
+  const rawFilesOmitted = rawFilesTooLarge ? rawFilesLength - boundedRawFilesLength : 0;
   const contextPlatform = context.platform;
   const contextPlatformValid = contextPlatform === undefined || contextPlatform === "unknown" || isKnownPathPlatform(contextPlatform);
-  let valid = Array.isArray(source.files) && contextPlatformValid && rawFilesShapeValid;
+  let valid = Array.isArray(source.files) && contextPlatformValid && rawFilesShapeValid && !rawFilesTooLarge;
   const byIdentity = new Map<string, TripleFile>();
   const hashPaths = new Map<string, string>();
   const ordinaryPathHashes = new Map<string, string | undefined>();
@@ -265,7 +270,7 @@ export function boundTripleMechanism(
   const platform = contextPlatform ?? process.platform;
   let hasBoundablePath = false;
   try {
-    for (let index = 0; index < rawFilesLength; index += 1) {
+    for (let index = 0; index < boundedRawFilesLength; index += 1) {
       const value = rawFiles[index];
       if (typeof value !== "object" || value === null || Array.isArray(value)) continue;
       const candidate = (value as Record<string, unknown>).path;
@@ -277,7 +282,7 @@ export function boundTripleMechanism(
   } catch {
     valid = false;
   }
-  for (let fileIndex = 0; fileIndex < rawFilesLength; fileIndex += 1) {
+  for (let fileIndex = 0; fileIndex < boundedRawFilesLength; fileIndex += 1) {
     const value = rawFiles[fileIndex];
     if (typeof value !== "object" || value === null || Array.isArray(value)) {
       valid = false;
@@ -383,7 +388,10 @@ export function boundTripleMechanism(
   const allFiles = [...byIdentity.values()];
   const files = allFiles.slice(0, MAX_TRIPLE_FILES);
   const declared = source.truncatedFiles;
-  const added = addTruncatedFiles(isSafeNonNegativeInteger(declared) ? declared : 0, Math.max(0, allFiles.length - files.length));
+  const omittedFromBound = Math.max(0, allFiles.length - files.length);
+  const firstOmission = addTruncatedFiles(isSafeNonNegativeInteger(declared) ? declared : 0, rawFilesOmitted);
+  const added = addTruncatedFiles(firstOmission.value, omittedFromBound);
+  if (!firstOmission.valid || !added.valid) valid = false;
   if (!isSafeNonNegativeInteger(declared)) valid = false;
   if (source.coverageStatus !== undefined && source.coverageStatus !== "complete" &&
       source.coverageStatus !== "truncated" && source.coverageStatus !== "unknown") valid = false;

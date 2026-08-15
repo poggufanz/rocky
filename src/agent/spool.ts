@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import {
   closeSync,
   constants,
@@ -13,10 +13,12 @@ import {
   renameSync,
   unlinkSync,
   writeSync,
+  type BigIntStats,
   type Stats,
 } from "node:fs";
 import { join } from "node:path";
 import { canonicalPath, pathIdentityHash } from "../core/memory-read.js";
+import { NO_FOLLOW_FLAG, regularDescriptorSafe, sameFilesystemIdentity } from "../core/fs-safety.js";
 import { resolveRockyPaths, type RockyPaths } from "../core/state-paths.js";
 import { MAX_COVERAGE_PATHS, parseAgentEvent, type AgentEvent, type AgentName } from "./schema.js";
 
@@ -26,7 +28,7 @@ export const ORPHAN_AGE_MS = 10 * 60 * 1000;
 
 const MAX_KEY_CHARS = 120;
 const SAFE_KEY = /^[A-Za-z0-9_-]{1,120}$/;
-const NO_FOLLOW = process.platform === "win32" ? 0 : constants.O_NOFOLLOW;
+const NO_FOLLOW = NO_FOLLOW_FLAG;
 const APPEND_LOCK_SUFFIX = ".append.lock";
 const APPEND_LOCK_TOKEN_BYTES = 16;
 const LOCK_METADATA_MAX_BYTES = 128;
@@ -49,12 +51,35 @@ const COVERAGE_MAX_BYTES = 64 * 1024;
 // when replacement cannot be represented, rather than leaving stale proof.
 export const MAX_COVERAGE_IDENTITIES = 1400;
 const MAX_COVERAGE_WITNESSES = 8;
+const MAX_COVERAGE_PAYLOAD_DIGESTS = 64;
 const IDENTITY_HASH = /^[0-9a-f]{32}$/u;
+const PAYLOAD_DIGEST = /^[0-9a-f]{64}$/u;
 const CLAIM_ID = /^[a-f0-9]{32}$/u;
 const CONTROL_PATH = /[\u0000-\u001f\u007f-\u009f\u061c\u200b-\u200f\u2060-\u206f\ufeff]/u;
 
 function validIdentityNumber(value: unknown): value is number {
-  return typeof value === "number" && Number.isFinite(value) && Number.isInteger(value) && value >= 0;
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
+/**
+ * Claim ownership may outlive a process and native Windows can expose inode
+ * values above Number.MAX_SAFE_INTEGER.  Keep those values as bounded decimal
+ * strings in the sidecar; accepting an unsafe JSON number would make two
+ * different files indistinguishable after rounding.
+ */
+function identityToken(value: unknown): string | undefined {
+  if (typeof value === "bigint") {
+    if (value < 0n || value > 18_446_744_073_709_551_615n) return undefined;
+    return value.toString(10);
+  }
+  if (validIdentityNumber(value)) return String(value);
+  if (typeof value !== "string" || !/^(?:0|[1-9][0-9]{0,19})$/u.test(value)) return undefined;
+  try {
+    const parsed = BigInt(value);
+    return parsed >= 0n && parsed <= 18_446_744_073_709_551_615n ? parsed.toString(10) : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 type FileKind = "missing" | "regular" | "other";
@@ -135,36 +160,50 @@ interface CoveragePathSet {
   identityHashes: string[];
   valid: boolean;
   overflow: boolean;
+  rawCount: number;
+  cwd?: string;
 }
 
-function coveragePathSet(value: unknown): CoveragePathSet {
-  if (!Array.isArray(value)) return { paths: [], identityHashes: [], valid: false, overflow: false };
+function coveragePathSet(value: unknown, cwdValue?: unknown): CoveragePathSet {
+  try {
+    if (!Array.isArray(value)) return { paths: [], identityHashes: [], valid: false, overflow: false, rawCount: 0 };
+  } catch {
+    return { paths: [], identityHashes: [], valid: false, overflow: true, rawCount: 0 };
+  }
+  const cwd = typeof cwdValue === "string" && !CONTROL_PATH.test(cwdValue) && cwdValue.length <= 1024
+    ? canonicalPath(cwdValue, { platform: "unknown" }) || undefined
+    : undefined;
+  if (cwdValue !== undefined && cwd === undefined) return { paths: [], identityHashes: [], valid: false, overflow: false, rawCount: 0 };
   const paths: string[] = [];
   const identityHashes: string[] = [];
   const seenPaths = new Set<string>();
   const seenHashes = new Set<string>();
   let valid = true;
   let overflow = false;
-  let index = 0;
+  let rawCount = 0;
   try {
-    for (const item of value) {
-      index += 1;
+    const lengthValue = (value as { length?: unknown }).length;
+    if (typeof lengthValue !== "number" || !Number.isSafeInteger(lengthValue) || lengthValue < 0) {
+      return { paths: [], identityHashes: [], valid: false, overflow: true, rawCount: 0 };
+    }
+    const boundedLength = Math.min(lengthValue, MAX_COVERAGE_IDENTITIES * 2);
+    if (lengthValue > boundedLength) overflow = true;
+    for (let index = 0; index < boundedLength; index += 1) {
+      let item: unknown;
+      try { item = (value as unknown[])[index]; } catch { valid = false; overflow = true; continue; }
+      rawCount += 1;
       const path = canonicalCoveragePath(item);
       if (path === undefined) {
         valid = false;
         continue;
       }
-      const hash = pathIdentityHash(path, { platform: "unknown" });
-      if (seenPaths.has(path)) {
+      const hash = pathIdentityHash(path, { platform: "unknown", cwd });
+      if (seenPaths.has(path) || seenHashes.has(hash)) {
         // A duplicate path is harmless at an ingress retry boundary, but a
         // persisted sidecar must reject it. The writer deduplicates explicitly.
         continue;
       }
       seenPaths.add(path);
-      if (seenHashes.has(hash)) {
-        valid = false;
-        continue;
-      }
       if (identityHashes.length >= MAX_COVERAGE_IDENTITIES) {
         overflow = true;
         valid = false;
@@ -173,17 +212,12 @@ function coveragePathSet(value: unknown): CoveragePathSet {
       seenHashes.add(hash);
       identityHashes.push(hash);
       if (paths.length < MAX_COVERAGE_WITNESSES) paths.push(path);
-      if (index > MAX_COVERAGE_IDENTITIES * 2) {
-        overflow = true;
-        valid = false;
-        break;
-      }
     }
   } catch {
     valid = false;
     overflow = true;
   }
-  return { paths, identityHashes, valid, overflow };
+  return { paths, identityHashes, valid, overflow, rawCount, ...(cwd === undefined ? {} : { cwd }) };
 }
 
 function validCoverageHashes(value: unknown): string[] | undefined {
@@ -202,6 +236,25 @@ function validCoverageHashes(value: unknown): string[] | undefined {
   return hashes;
 }
 
+function payloadDigest(input: CoverageInput, identityHashes: readonly string[]): string {
+  return createHash("sha256")
+    .update(JSON.stringify({
+      agent: input.agent,
+      cwd: typeof input.cwd === "string" ? canonicalPath(input.cwd, { platform: "unknown" }) : undefined,
+      candidateCount: input.candidateCount ?? identityHashes.length,
+      candidateCountExact: input.candidateCountExact !== false,
+      pathsComplete: input.pathsComplete === true,
+      // Payload order is not semantic. Keep first-seen order for witnesses,
+      // but hash a sorted canonical identity set so reordered retries remain
+      // idempotent.
+      identityHashes: [...identityHashes].sort(),
+      adapterDigest: typeof input.payloadDigest === "string" && PAYLOAD_DIGEST.test(input.payloadDigest)
+        ? input.payloadDigest
+        : undefined,
+    }), "utf8")
+    .digest("hex");
+}
+
 function safeAgent(value: unknown): AgentName | undefined {
   return value === "claude-code" || value === "codex" ? value : undefined;
 }
@@ -217,14 +270,18 @@ function parseCoverageBytes(bytes: Buffer): CoverageSnapshot | undefined {
     const claimId = record.claimId;
     const claimDev = record.claimDev;
     const claimIno = record.claimIno;
+    const claimDevToken = claimDev === undefined ? undefined : identityToken(claimDev);
+    const claimInoToken = claimIno === undefined ? undefined : identityToken(claimIno);
+    const cwdValue = record.cwd;
     if (record.v !== 1 || !agent || typeof record.candidateCountExact !== "boolean" ||
         typeof record.pathsComplete !== "boolean" || typeof payloads !== "number" || !Number.isSafeInteger(payloads) || payloads < 1 ||
         payloads > Number.MAX_SAFE_INTEGER ||
         (claimId !== undefined && (typeof claimId !== "string" || !CLAIM_ID.test(claimId))) ||
-        (claimDev !== undefined && !validIdentityNumber(claimDev)) ||
-        (claimIno !== undefined && !validIdentityNumber(claimIno)) ||
-        ((claimDev === undefined) !== (claimIno === undefined)) ||
-        ((claimId === undefined) !== (claimDev === undefined)) ||
+        (claimDev !== undefined && claimDevToken === undefined) ||
+        (claimIno !== undefined && claimInoToken === undefined) ||
+        ((claimDevToken === undefined) !== (claimInoToken === undefined)) ||
+        ((claimId === undefined) !== (claimDevToken === undefined)) ||
+        (cwdValue !== undefined && (typeof cwdValue !== "string" || cwdValue.length === 0 || cwdValue.length > 1024 || CONTROL_PATH.test(cwdValue))) ||
         (candidateCount !== undefined && (typeof candidateCount !== "number" || !Number.isSafeInteger(candidateCount) || candidateCount < 0))) return undefined;
     const pathsValue = record.paths;
     if (!Array.isArray(pathsValue) || pathsValue.length > MAX_COVERAGE_WITNESSES) return undefined;
@@ -233,7 +290,7 @@ function parseCoverageBytes(bytes: Buffer): CoverageSnapshot | undefined {
     for (const item of pathsValue) {
       const path = canonicalCoveragePath(item);
       if (path === undefined || paths.includes(path)) return undefined;
-      const hash = pathIdentityHash(path, { platform: "unknown" });
+      const hash = pathIdentityHash(path, { platform: "unknown", cwd: typeof cwdValue === "string" ? cwdValue : undefined });
       if (pathHashes.has(hash)) return undefined;
       pathHashes.add(hash);
       paths.push(path);
@@ -243,7 +300,10 @@ function parseCoverageBytes(bytes: Buffer): CoverageSnapshot | undefined {
     if (rawHashes !== undefined && identityHashes === undefined) return undefined;
     if (identityHashes !== undefined) {
       const identities = new Set(identityHashes);
-      if (paths.some((path) => !identities.has(pathIdentityHash(path, { platform: "unknown" })))) return undefined;
+      if (paths.some((path) => !identities.has(pathIdentityHash(path, {
+        platform: "unknown",
+        cwd: typeof cwdValue === "string" ? cwdValue : undefined,
+      })))) return undefined;
       if (record.pathsComplete && record.candidateCountExact && candidateCount !== identityHashes.length) return undefined;
       if (record.candidateCountExact && candidateCount !== undefined && candidateCount < identityHashes.length) return undefined;
       // A capped one-payload marker may prove its omitted count only when it
@@ -256,6 +316,23 @@ function parseCoverageBytes(bytes: Buffer): CoverageSnapshot | undefined {
       // lower-bound witnesses only; never let them prove complete coverage.
       return undefined;
     }
+    const rawDigests = record.payloadDigests;
+    let payloadDigests: string[] | undefined;
+    if (rawDigests !== undefined) {
+      if (!Array.isArray(rawDigests) || rawDigests.length > MAX_COVERAGE_PAYLOAD_DIGESTS) return undefined;
+      payloadDigests = [];
+      const seen = new Set<string>();
+      for (const digest of rawDigests) {
+        if (typeof digest !== "string" || !PAYLOAD_DIGEST.test(digest) || seen.has(digest)) return undefined;
+        seen.add(digest);
+        payloadDigests.push(digest);
+      }
+      if (payloadDigests.length === 0) return undefined;
+      // While the digest ledger is below its bounded storage ceiling it must
+      // account for every payload.  A shorter forged ledger is not a proof;
+      // once the ceiling is reached the snapshot remains explicitly unknown.
+      if (payloads <= MAX_COVERAGE_PAYLOAD_DIGESTS && payloadDigests.length !== payloads) return undefined;
+    }
     if (candidateCount !== undefined && identityHashes !== undefined && candidateCount < identityHashes.length) return undefined;
     return {
       v: 1,
@@ -264,8 +341,10 @@ function parseCoverageBytes(bytes: Buffer): CoverageSnapshot | undefined {
       ...(identityHashes === undefined ? {} : { identityHashes }),
       ...(candidateCount === undefined ? {} : { candidateCount }),
       ...(claimId === undefined ? {} : { claimId }),
-      ...(claimDev === undefined ? {} : { claimDev }),
-      ...(claimIno === undefined ? {} : { claimIno }),
+      ...(claimDevToken === undefined ? {} : { claimDev: claimDevToken }),
+      ...(claimInoToken === undefined ? {} : { claimIno: claimInoToken }),
+      ...(typeof cwdValue === "string" ? { cwd: canonicalPath(cwdValue, { platform: "unknown" }) } : {}),
+      ...(payloadDigests === undefined ? {} : { payloadDigests }),
       candidateCountExact: record.candidateCountExact,
       pathsComplete: record.pathsComplete,
       payloads,
@@ -280,15 +359,17 @@ function readCoverageFileUnlocked(file: string): CoverageSnapshot | undefined {
   if (info.kind !== "regular" || !info.stats || info.stats.size > COVERAGE_MAX_BYTES) return undefined;
   let fd = -1;
   try {
+    const listed = lstatSync(file, { bigint: true });
+    if (!regularDescriptorSafe(listed) || listed.size > BigInt(COVERAGE_MAX_BYTES)) return undefined;
     fd = openSync(file, constants.O_RDONLY | NO_FOLLOW);
-    const opened = fstatSync(fd);
-    if (!opened.isFile() || opened.isSymbolicLink() || opened.size > COVERAGE_MAX_BYTES
-      || !compatibleIdentity(info.stats, opened)) return undefined;
+    const opened = fstatSync(fd, { bigint: true });
+    if (!regularDescriptorSafe(opened) || !sameFilesystemIdentity(listed, opened)
+      || opened.size > BigInt(COVERAGE_MAX_BYTES)) return undefined;
     const bytes = Buffer.alloc(COVERAGE_MAX_BYTES + 1);
     const count = readSync(fd, bytes, 0, bytes.length, 0);
-    const after = fstatSync(fd);
-    if (!after.isFile() || after.isSymbolicLink() || count !== after.size || count > COVERAGE_MAX_BYTES
-      || !compatibleIdentity(opened, after) || !compatibleIdentity(info.stats, after)) return undefined;
+    const after = fstatSync(fd, { bigint: true });
+    if (!regularDescriptorSafe(after) || !sameFilesystemIdentity(opened, after)
+      || !sameFilesystemIdentity(listed, after) || BigInt(count) !== after.size || count > COVERAGE_MAX_BYTES) return undefined;
     return parseCoverageBytes(bytes.subarray(0, count));
   } catch {
     return undefined;
@@ -308,27 +389,44 @@ function writeCoverageTargetUnlocked(target: string, temporary: string, snapshot
   try {
     const existing = inspectFile(target);
     if (existing.kind === "other") return false;
+    let existingIdentity: BigIntStats | undefined;
+    if (existing.kind === "regular") {
+      existingIdentity = lstatSync(target, { bigint: true });
+      if (!regularDescriptorSafe(existingIdentity)) return false;
+    }
     const encoded = Buffer.from(JSON.stringify(snapshot), "utf8");
     if (encoded.byteLength > COVERAGE_MAX_BYTES) {
       return false;
     }
     fd = openSync(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | NO_FOLLOW, 0o600);
-    const opened = fstatSync(fd);
-    if (!opened.isFile() || opened.isSymbolicLink()) {
+    const opened = fstatSync(fd, { bigint: true });
+    if (!regularDescriptorSafe(opened) || !sameFilesystemIdentity(opened, opened)) {
       return false;
     }
     try { fchmodSync(fd, 0o600); } catch { /* best effort */ }
     if (writeSync(fd, encoded, 0, encoded.byteLength) !== encoded.byteLength) {
       return false;
     }
-    const after = fstatSync(fd);
-    if (!after.isFile() || after.isSymbolicLink() || after.size !== encoded.byteLength) {
+    const after = fstatSync(fd, { bigint: true });
+    if (!regularDescriptorSafe(after) || !sameFilesystemIdentity(opened, after) || after.size !== BigInt(encoded.byteLength)) {
       return false;
     }
     closeQuietly(fd);
     fd = -1;
+    const beforeRename = inspectFile(target);
+    if (existing.kind === "regular") {
+      if (existingIdentity === undefined || beforeRename.kind !== "regular") return false;
+      const beforeRenameIdentity = lstatSync(target, { bigint: true });
+      if (!regularDescriptorSafe(beforeRenameIdentity)
+          || !sameFilesystemIdentity(existingIdentity, beforeRenameIdentity)) return false;
+    } else if (beforeRename.kind !== "missing") {
+      return false;
+    }
     renameSync(temporary, target);
-    return inspectFile(target).kind === "regular";
+    const renamed = inspectFile(target);
+    if (renamed.kind !== "regular") return false;
+    const renamedIdentity = lstatSync(target, { bigint: true });
+    return regularDescriptorSafe(renamedIdentity) && sameFilesystemIdentity(opened, renamedIdentity);
   } catch {
     return false;
   } finally {
@@ -359,16 +457,25 @@ function writeCoverageUnlocked(paths: RockyPaths, key: string, snapshot: Coverag
 function mergeCoverage(previous: CoverageSnapshot | undefined, input: CoverageInput): CoverageSnapshot | undefined {
   const agent = safeAgent(input.agent);
   if (!agent) return undefined;
-  const incoming = coveragePathSet(input.paths);
+  const incoming = coveragePathSet(input.paths, input.cwd);
   const incomingPaths = incoming.paths;
   const incomingHashes = incoming.identityHashes;
   const incomingCount = input.candidateCount;
   const incomingCountValid = incomingCount === undefined || (Number.isSafeInteger(incomingCount) && incomingCount >= 0);
   if (!incomingCountValid) return undefined;
   const incomingCountExact = incomingCount !== undefined && input.candidateCountExact !== false;
+  // A cwd-aware adapter may report raw aliases (absolute and relative forms)
+  // for one identity. Normalize that count only when the declared count is
+  // exactly the bounded raw ingress length; a larger count with no matching
+  // raw envelope is contradictory and must stay unknown.
+  const normalizedIncomingCount = input.pathsComplete === true && input.cwd !== undefined
+    && incomingCount !== undefined && incomingCount === incoming.rawCount
+    ? incomingHashes.length
+    : incomingCount;
   const incomingComplete = !incoming.overflow && incoming.valid && input.pathsComplete === true
-    && incomingCountExact && incomingCount === incomingHashes.length;
-  const incomingCandidateCount = incomingCount === undefined ? incomingHashes.length : incomingCount;
+    && incomingCountExact && normalizedIncomingCount === incomingHashes.length;
+  const incomingCandidateCount = normalizedIncomingCount === undefined ? incomingHashes.length : normalizedIncomingCount;
+  const incomingDigest = payloadDigest(input, incomingHashes);
   if (!previous || previous.agent !== agent) {
     return {
       v: 1, agent, paths: incomingPaths,
@@ -377,12 +484,26 @@ function mergeCoverage(previous: CoverageSnapshot | undefined, input: CoverageIn
       candidateCountExact: incomingCountExact && !incoming.overflow,
       pathsComplete: incomingComplete,
       payloads: 1,
+      payloadDigests: [incomingDigest],
+      ...(incoming.cwd === undefined ? {} : { cwd: incoming.cwd }),
     };
+  }
+  const priorDigests = previous.payloadDigests;
+  // A digest is an idempotency proof only while this ingress payload's full
+  // identity set was retained.  Once the compact sidecar itself overflowed,
+  // two different tails can share the same retained prefix; treating that
+  // digest as a replay would silently under-count a distinct payload.
+  if (!incoming.overflow && priorDigests !== undefined && priorDigests.includes(incomingDigest)) return previous;
+  const payloadDigests = priorDigests === undefined ? undefined : [...priorDigests];
+  let payloadDigestOverflow = false;
+  if (payloadDigests !== undefined) {
+    if (payloadDigests.length < MAX_COVERAGE_PAYLOAD_DIGESTS) payloadDigests.push(incomingDigest);
+    else payloadDigestOverflow = true;
   }
   const priorHashes = previous.identityHashes ?? previous.paths.map((path) => pathIdentityHash(path, { platform: "unknown" }));
   const unionHashes = [...priorHashes];
   const seenHashes = new Set(unionHashes);
-  let unionOverflow = unionHashes.length > MAX_COVERAGE_IDENTITIES;
+  let unionOverflow = unionHashes.length > MAX_COVERAGE_IDENTITIES || payloadDigestOverflow;
   for (const hash of incomingHashes) {
     if (seenHashes.has(hash)) continue;
     seenHashes.add(hash);
@@ -397,7 +518,8 @@ function mergeCoverage(previous: CoverageSnapshot | undefined, input: CoverageIn
     if (unionPaths.length < MAX_COVERAGE_WITNESSES) unionPaths.push(path);
   }
   const payloads = previous.payloads < Number.MAX_SAFE_INTEGER ? previous.payloads + 1 : Number.MAX_SAFE_INTEGER;
-  const priorExact = previous.candidateCountExact && previous.identityHashes !== undefined;
+  const priorExact = previous.candidateCountExact && previous.identityHashes !== undefined
+    && previous.payloadDigests !== undefined;
   const allComplete = previous.pathsComplete && incomingComplete && priorExact && incomingCountExact
     && !unionOverflow;
   const singleKnownCount = payloads === 1 && incomingCountExact && !incoming.overflow;
@@ -416,6 +538,8 @@ function mergeCoverage(previous: CoverageSnapshot | undefined, input: CoverageIn
     candidateCountExact: exactUnion || singleKnownCount,
     pathsComplete: exactUnion,
     payloads,
+    ...(payloadDigests === undefined ? {} : { payloadDigests }),
+    ...(previous.cwd !== undefined ? { cwd: previous.cwd } : incoming.cwd === undefined ? {} : { cwd: incoming.cwd }),
   };
 }
 
@@ -817,11 +941,32 @@ export function readCoverage(key: string, paths = resolveRockyPaths()): Coverage
 function claimCoverageOwnedBy(snapshot: CoverageSnapshot | undefined, claim: BatchClaim): boolean {
   const claimDev = snapshot?.claimDev;
   const claimIno = snapshot?.claimIno;
+  let currentDev: string | undefined;
+  let currentIno: string | undefined;
+  try {
+    const current = lstatSync(claim.path, { bigint: true });
+    if (regularDescriptorSafe(current)) {
+      currentDev = identityToken(current.dev);
+      currentIno = identityToken(current.ino);
+    }
+  } catch {
+    // Fall back to the claim's captured identity only when it is safe.  A
+    // rounded native-Windows number is never treated as ownership proof.
+  }
+  if (currentDev === undefined || currentIno === undefined) {
+    currentDev = identityToken(claim.stats.dev);
+    currentIno = identityToken(claim.stats.ino);
+  }
+  const storedDev = identityToken(claimDev);
+  const storedIno = identityToken(claimIno);
   return snapshot?.claimId === claim.id
-    && validIdentityNumber(claimDev)
-    && validIdentityNumber(claimIno)
-    && validIdentityNumber(claim.stats.dev) && validIdentityNumber(claim.stats.ino)
-    && claimDev === claim.stats.dev && claimIno === claim.stats.ino;
+    && storedDev !== undefined
+    && storedIno !== undefined
+    && currentDev !== undefined
+    && currentIno !== undefined
+    && (storedDev !== "0" || storedIno !== "0")
+    && (currentDev !== "0" || currentIno !== "0")
+    && storedDev === currentDev && storedIno === currentIno;
 }
 
 /** Read only the coverage inode bound to this immutable claim. */
@@ -1010,20 +1155,24 @@ function appendBufferLocked(file: string, candidate: Buffer): boolean {
 
   let fd = -1;
   try {
+    const create = before.kind === "missing";
     fd = openSync(
       file,
-      constants.O_WRONLY | constants.O_APPEND | constants.O_CREAT | NO_FOLLOW,
+      constants.O_WRONLY | constants.O_APPEND | (create ? constants.O_CREAT | constants.O_EXCL : constants.O_CREAT) | NO_FOLLOW,
       0o600,
     );
     const opened = fstatSync(fd);
     if (!opened.isFile() || opened.isSymbolicLink()) return false;
+    if (before.stats && !sameIdentity(before.stats, opened)) return false;
     if (opened.size + candidate.byteLength > MAX_BATCH_BYTES) return false;
     try {
       fchmodSync(fd, 0o600);
     } catch {
       // File mode is best effort on platforms that do not support it.
     }
-    return writeSync(fd, candidate, 0, candidate.byteLength) === candidate.byteLength;
+    if (writeSync(fd, candidate, 0, candidate.byteLength) !== candidate.byteLength) return false;
+    const after = fstatSync(fd);
+    return after.isFile() && !after.isSymbolicLink() && sameIdentity(opened, after);
   } catch {
     // Spool is transient; callers must never fail because it is unavailable.
     return false;
@@ -1158,6 +1307,10 @@ export interface CoverageInput {
   candidateCount?: number;
   candidateCountExact?: boolean;
   pathsComplete?: boolean;
+  /** Operational turn cwd used only to collapse relative/absolute aliases. */
+  cwd?: string;
+  /** Adapter digest over the full candidate set, when bounded paths omit identities. */
+  payloadDigest?: string;
 }
 
 export interface CoverageSnapshot {
@@ -1170,11 +1323,16 @@ export interface CoverageSnapshot {
   candidateCountExact: boolean;
   pathsComplete: boolean;
   payloads: number;
+  /** Bounded idempotency keys for payload retries. */
+  payloadDigests?: string[];
+  /** Operational cwd used to resolve relative sidecar witnesses. */
+  cwd?: string;
   /** Present only after the snapshot is copied into an immutable claim. */
   claimId?: string;
   /** Claim JSONL inode identity binds a copied sidecar to its generation. */
-  claimDev?: number;
-  claimIno?: number;
+  /** Decimal identity tokens; strings preserve native-Windows 64-bit inodes. */
+  claimDev?: string | number;
+  claimIno?: string | number;
 }
 
 export function readBatch(key: string, paths = resolveRockyPaths()): AgentEvent[] {
@@ -1282,9 +1440,19 @@ function bindClaimCoverageLocked(key: string, claim: BatchClaim, paths: RockyPat
     const owned = readCoverageFileUnlocked(target);
     if (claimCoverageOwnedBy(owned, claim)) {
       // A still-live sidecar must be the same inode that was copied into this
-      // claim.  A different inode is a newer generation and must remain live.
+      // claim.  If JSONL still names the claim inode, a different live
+      // sidecar is the crash window between copy and unlink and can be
+      // removed safely.  A different JSONL inode is a newer generation and
+      // must remain live.
       const live = inspectFile(livePath);
-      if (allowLive && live.kind === "regular" && live.stats && !sameIdentity(live.stats, existingTarget.stats)) return false;
+      if (allowLive && live.kind === "regular" && live.stats && !sameIdentity(live.stats, existingTarget.stats)) {
+        const liveJsonl = inspectFile(batchPath(paths, key));
+        if (liveJsonl.kind === "regular" && liveJsonl.stats && sameIdentity(liveJsonl.stats, claim.stats)) {
+          removeRegular(livePath, live.stats);
+          return inspectFile(livePath).kind === "missing";
+        }
+        return false;
+      }
       return true;
     }
     if (!allowLive && inspectFile(livePath).kind === "missing") {
@@ -1314,7 +1482,12 @@ function bindClaimCoverageLocked(key: string, claim: BatchClaim, paths: RockyPat
   let temporary: string | undefined;
   try {
     temporary = claimCoverageTempPath(paths, key, claim.id);
-    const owned = { ...snapshot, claimId: claim.id, claimDev: claim.stats.dev, claimIno: claim.stats.ino } satisfies CoverageSnapshot;
+    const claimIdentity = lstatSync(claim.path, { bigint: true });
+    if (!regularDescriptorSafe(claimIdentity)) return false;
+    const claimDev = identityToken(claimIdentity.dev);
+    const claimIno = identityToken(claimIdentity.ino);
+    if (claimDev === undefined || claimIno === undefined || (claimDev === "0" && claimIno === "0")) return false;
+    const owned = { ...snapshot, claimId: claim.id, claimDev, claimIno } satisfies CoverageSnapshot;
     if (!writeCoverageTargetUnlocked(target, temporary, owned)) return false;
     const written = inspectFile(target);
     if (written.kind !== "regular" || !written.stats) return false;

@@ -544,7 +544,12 @@ function rawTripleFiles(record: TripleRecord): string[] {
   const paths: string[] = [];
   try {
     const platform = record.platform ?? "unknown";
-    for (const value of (mechanism as unknown as { files: unknown[] }).files) {
+    const files = (mechanism as unknown as { files: unknown[] }).files;
+    const length = files.length;
+    if (!Number.isSafeInteger(length) || length < 0) return [];
+    const bound = Math.min(length, MAX_RAW_TRIPLE_FILES);
+    for (let index = 0; index < bound; index += 1) {
+      const value = files[index];
       if (typeof value !== "object" || value === null || Array.isArray(value)) continue;
       const path = canonicalPath(
         typeof (value as { path?: unknown }).path === "string" ? (value as { path: string }).path : "",
@@ -569,6 +574,7 @@ interface WhyFilePathMatch {
 }
 
 const MAX_WHY_RECORDS = 20_000;
+const MAX_RAW_TRIPLE_FILES = 256;
 
 interface SafeTripleCollection {
   triples: TripleRecord[];
@@ -862,6 +868,7 @@ export function createMemoryQueries(load: () => MemoryRecord[] = loadMemory): Me
       };
     },
   };
+  Object.freeze(queries);
   canonicalMemoryQueries.add(queries);
   return queries;
 }

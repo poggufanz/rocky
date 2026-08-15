@@ -5,7 +5,9 @@ import {
   lstatSync,
   openSync,
   readSync,
+  type BigIntStats,
 } from "node:fs";
+import { createHash } from "node:crypto";
 import {
   batchKey,
   MAX_COVERAGE_PATHS,
@@ -15,6 +17,7 @@ import {
   type RationaleEvent,
 } from "../schema.js";
 import { canonicalPath } from "../../core/memory-read.js";
+import { NO_FOLLOW_FLAG, regularDescriptorSafe, sameFilesystemIdentity } from "../../core/fs-safety.js";
 
 export type ParsedHookPayload =
   | {
@@ -28,6 +31,8 @@ export type ParsedHookPayload =
     /** Exact unique candidate count before bounded witness storage. */
     coverageCandidateCount?: number;
     coverageCandidateCountExact?: boolean;
+    coverageCwd?: string;
+    coverageDigest?: string;
   }
   | { action: "close"; key: string; rationale?: RationaleEvent }
   | undefined;
@@ -86,15 +91,15 @@ export function rationaleFromTranscript(transcriptPath: string): string | undefi
     if (typeof transcriptPath !== "string" || transcriptPath.length === 0) return undefined;
 
     // Check before opening, then use O_NOFOLLOW where available to avoid following a link race.
-    const listed = lstatSync(transcriptPath);
-    if (!listed.isFile()) return undefined;
-    const noFollow = process.platform === "win32" ? 0 : constants.O_NOFOLLOW;
-    fd = openSync(transcriptPath, constants.O_RDONLY | noFollow);
-    const opened = fstatSync(fd);
-    if (!opened.isFile() || !Number.isSafeInteger(opened.size) || opened.size <= 0) return undefined;
+    const listed = lstatSync(transcriptPath, { bigint: true });
+    if (!regularDescriptorSafe(listed) || !sameFilesystemIdentity(listed, listed)) return undefined;
+    fd = openSync(transcriptPath, constants.O_RDONLY | NO_FOLLOW_FLAG);
+    const opened = fstatSync(fd, { bigint: true });
+    if (!regularDescriptorSafe(opened) || !sameFilesystemIdentity(listed, opened)
+        || opened.size <= 0n) return undefined;
 
-    const length = Math.min(TRANSCRIPT_TAIL_BYTES, opened.size);
-    const start = opened.size - length;
+    const length = Number(opened.size > BigInt(TRANSCRIPT_TAIL_BYTES) ? BigInt(TRANSCRIPT_TAIL_BYTES) : opened.size);
+    const start = Number(opened.size - BigInt(length));
     const buffer = Buffer.alloc(length);
     let offset = 0;
     while (offset < length) {
@@ -103,6 +108,8 @@ export function rationaleFromTranscript(transcriptPath: string): string | undefi
       offset += bytesRead;
     }
     if (offset === 0) return undefined;
+    const after = fstatSync(fd, { bigint: true });
+    if (!regularDescriptorSafe(after) || !sameFilesystemIdentity(listed, after)) return undefined;
     return rationaleFromTail(buffer.subarray(0, offset).toString("utf8"));
   } catch {
     return undefined;
@@ -135,6 +142,7 @@ function appendPayload(
   events: AgentEvent[],
   coveragePaths?: readonly string[],
   coverageCompleteOverride?: boolean,
+  coverageCwd?: string,
 ): ParsedHookPayload {
   const bounded = events.slice(0, MAX_ADAPTER_EVENTS);
   const omitted = coveragePaths === undefined ? events.length - bounded.length : Math.max(0, coveragePaths.length - bounded.length);
@@ -155,6 +163,10 @@ function appendPayload(
       ...(coverageComplete === undefined ? {} : { coveragePathsComplete: coverageComplete }),
     }
     : event);
+  const digestPaths = coveragePaths === undefined ? [] : coveragePaths
+    .map((path) => canonicalPath(path, { platform: process.platform, cwd: coverageCwd }))
+    .filter((path): path is string => path.length > 0)
+    .sort();
   return {
     action: "append",
     key,
@@ -173,6 +185,8 @@ function appendPayload(
       // bounded event witness is capped. The witness completeness bit carries
       // the separate omission fact.
       coverageCandidateCountExact: coverageCompleteOverride !== false,
+      ...(coverageCwd === undefined ? {} : { coverageCwd }),
+      coverageDigest: createHash("sha256").update(JSON.stringify(digestPaths), "utf8").digest("hex"),
     }),
   };
 }
@@ -242,6 +256,7 @@ export function parseClaudeHookPayload(raw: unknown, now = Date.now()): ParsedHo
           [...byPath.values()],
           [...byPath.keys()],
           invalidCoverage ? false : true,
+          cwd,
         );
       }
       case "Stop": {
