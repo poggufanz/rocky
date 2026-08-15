@@ -71,7 +71,9 @@ usage:
                             install Claude Code hooks after explicit consent; print Codex TOML.
   rocky setup --uninstall-agent-hooks
                             remove Rocky Claude Code hooks; Codex config stays untouched.
-  rocky setup --status       report Claude Code agent-hook state; Codex remains manual.
+  rocky setup --status       report host/MCP registration via rocky setup --check and
+                            agent-hook state/capability; spool and Ollama/model health
+                            are not checked.
   rocky check [--pre-push|--install-hook|--offline|--quiet]
                             hull check before push.
   rocky hook install        put Rocky's ears in your bash. every command heard,

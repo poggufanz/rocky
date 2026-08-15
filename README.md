@@ -98,7 +98,7 @@ This feature adds no new egress and no daemon. Rocky does not capture screens or
 
 Claude Code setup via `rocky setup --agent-hooks` asks for explicit consent before changing settings. Use a pre-created private `~/.claude` parent (mode `0700` where supported); Rocky fails closed when that parent is missing. Codex setup prints a manual Codex TOML block and writes no Codex config; review and trust the command through Codex `/hooks` before pasting it. `rocky setup --uninstall-agent-hooks` removes Rocky's Claude hooks only and never edits Codex `config.toml`.
 
-Claude Code capture requires hook payload field `prompt_id`; without `prompt_id`, Rocky records nothing and never merges turns. `rocky setup --agent-hooks` and `rocky setup --status` print this capability boundary alongside their setup/status output.
+Claude Code capture requires hook payload field `prompt_id`; without `prompt_id`, Rocky records nothing and never merges turns. `rocky setup --agent-hooks` and `rocky setup --status` print this capability boundary alongside their setup/status output. Setup status scope is host/MCP registration via rocky setup --check and agent-hook state/capability; spool and Ollama/model health are not checked.
 
 Plan 02 dictionary and teaching surfaces ship in v0.5.0. The commands read only remembered triples and keep the original evidence intact:
 

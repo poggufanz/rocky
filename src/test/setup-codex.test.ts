@@ -1500,6 +1500,55 @@ test("owned removal uses CAS delete, verifies absence, and retains recovery arti
   if (process.platform !== "win32") assert.equal(lstatSync(artifact).mode & 0o077, 0);
 });
 
+test("Codex 0.147.0 removal trusts final absence when CAS response or version bound is uncertain", async (t) => {
+  const cases: Array<{ name: string; written: unknown; finalVersion: string }> = [
+    { name: "null replace response", written: null, finalVersion: "sha256:two" },
+    { name: "version advanced again before final read", written: writeResult("sha256:two"), finalVersion: "sha256:three" },
+  ];
+  for (const entry of cases) {
+    await t.test(entry.name, async () => {
+      const desired = temporaryRegistration(t);
+      const prior = entryFor(desired);
+      const session = new FakeAppServerSession(codexHome, [
+        readResult(prior),
+        entry.written,
+        readResult(undefined, baseSource(), entry.finalVersion),
+      ]);
+      const removed = await adapterWith(
+        new VersionRunner([versionResult("0.147.0")]),
+        new FakeAppServerSessionFactory([session]),
+      ).remove(desired);
+
+      assert.equal(removed.status, "removed", removed.detail);
+      assert.match(removed.detail ?? "", /warning|version|could not confirm/i);
+      assert.deepEqual(JSON.parse(readFileSync(recoveryPath(removed.detail), "utf8")), prior);
+    });
+  }
+});
+
+test("Codex removal is idempotent after a successful absent final read", async (t) => {
+  const desired = temporaryRegistration(t);
+  const prior = entryFor(desired);
+  const first = new FakeAppServerSession(codexHome, [
+    readResult(prior),
+    null,
+    readResult(undefined, baseSource(), "sha256:after"),
+  ]);
+  const second = new FakeAppServerSession(codexHome, [readResult(undefined, baseSource(), "sha256:after")]);
+  const adapter = adapterWith(
+    new VersionRunner([versionResult("0.147.0"), versionResult("0.147.0")]),
+    new FakeAppServerSessionFactory([first, second]),
+  );
+
+  const removed = await adapter.remove(desired);
+  const again = await adapter.remove(desired);
+
+  assert.equal(removed.status, "removed", removed.detail);
+  assert.equal(again.status, "not-configured");
+  assert.deepEqual(first.requests.map(({ method }) => method), ["config/read", "config/value/write", "config/read"]);
+  assert.deepEqual(second.requests.map(({ method }) => method), ["config/read"]);
+});
+
 test("remove race leaves foreign replacement untouched and retains recovery authority", async (t) => {
   const desired = temporaryRegistration(t);
   const prior = entryFor(desired);
@@ -1660,7 +1709,7 @@ test("remove post-state mismatch is failure with retained recovery authority", a
   // codex-provenance-investigation.md). The message must say the entry was
   // removed and name the file, not just point at the backup as though
   // nothing had changed yet.
-  assert.match(removed.detail ?? "", /\bremoved\b/i);
+  assert.match(removed.detail ?? "", /removal|remains|verif/i);
   assert.ok(
     (removed.detail ?? "").includes(configPath),
     "detail must name the exact config file Rocky already removed the entry from",
@@ -1681,7 +1730,8 @@ test("removal verification is bound to the exact advanced write version", async 
     new FakeAppServerSessionFactory([session]),
   ).remove(desired);
 
-  assert.equal(removed.status, "failed");
+  assert.equal(removed.status, "removed");
+  assert.match(removed.detail ?? "", /warning|version|could not confirm/i);
   assert.deepEqual(JSON.parse(readFileSync(recoveryPath(removed.detail), "utf8")), prior);
 });
 

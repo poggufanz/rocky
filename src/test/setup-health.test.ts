@@ -12,6 +12,11 @@ const registration: McpRegistration = {
   env: { ROCKY_MCP_EXPOSURE: "sanitized", ROCKY_HOME: "/home/ada/.rocky" },
 };
 
+const HEALTHY_TOOLS = [
+  "recall", "recent_failures", "stats", "recall_with_ai",
+  "search_knowledge", "fetch_record", "why_file",
+] as const;
+
 test("health check is unhealthy when interactive transport is unavailable", async () => {
   const runner: ProcessRunner = {
     async run() {
@@ -79,7 +84,7 @@ class PendingReadFakeSession extends FakeSession {
   }
 }
 
-function healthyLegacySession(tools = ["recall", "recent_failures", "stats", "recall_with_ai"]): FakeSession {
+function healthyLegacySession(tools = [...HEALTHY_TOOLS]): FakeSession {
   return new FakeSession((message) => {
     if (message.method === "initialize") {
       return {
@@ -190,7 +195,7 @@ test("modern health sends discovery then list and validates Rocky tools without 
         jsonrpc: "2.0",
         id: message.id,
         result: {
-          tools: ["recall", "recent_failures", "stats", "recall_with_ai"].map((name) => ({ name })),
+          tools: HEALTHY_TOOLS.map((name) => ({ name })),
         },
       };
     }
@@ -238,7 +243,7 @@ test("health rejects a JSON-RPC response containing both result and error", asyn
         jsonrpc: "2.0",
         id: message.id,
         result: {
-          tools: ["recall", "recent_failures", "stats", "recall_with_ai"].map((name) => ({ name })),
+          tools: HEALTHY_TOOLS.map((name) => ({ name })),
         },
         error: { code: -32000, message: "contradictory response" },
       });
@@ -267,7 +272,7 @@ test("health requires a clean child exit after successful protocol responses", a
         jsonrpc: "2.0",
         id: message.id,
         result: {
-          tools: ["recall", "recent_failures", "stats", "recall_with_ai"].map((name) => ({ name })),
+          tools: HEALTHY_TOOLS.map((name) => ({ name })),
         },
       });
   const runner = {
@@ -418,7 +423,7 @@ test("method-not-found closes and awaits modern child before a fresh legacy life
         jsonrpc: "2.0",
         id: message.id,
         result: {
-          tools: ["recall", "recent_failures", "stats", "recall_with_ai"].map((name) => ({ name })),
+          tools: HEALTHY_TOOLS.map((name) => ({ name })),
         },
       };
     }
@@ -610,7 +615,7 @@ test("locked modern and legacy catalogs reject a missing Rocky tool without cros
     assert.deepEqual(result, {
       healthy: false,
       era: "modern",
-      detail: "Rocky MCP tool catalog is incomplete",
+      detail: "Rocky MCP tool catalog is incomplete; upgrade needed",
     });
     assert.equal(opens, 1);
   });
@@ -636,7 +641,7 @@ test("locked modern and legacy catalogs reject a missing Rocky tool without cros
     assert.deepEqual(result, {
       healthy: false,
       era: "legacy",
-      detail: "Rocky MCP legacy tool catalog is incomplete",
+      detail: "Rocky MCP legacy tool catalog is incomplete; upgrade needed",
     });
   });
 });

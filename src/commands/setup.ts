@@ -456,6 +456,7 @@ async function runAgentHooksAction(
       return result.status === "written" || result.status === "unchanged" ? 0 : 1;
     }
     const result = agentHooksStatus(target, options);
+    detail("setup status scope: host/MCP registration via rocky setup --check and agent-hook state/capability; spool and Ollama/model health are not checked.");
     detail(`claude-code agent hooks: ${result.claudeCode}`);
     detail("codex agent hooks: manual");
     return result.claudeCode === "unreadable" ? 1 : 0;

@@ -17,8 +17,21 @@ import {
 import { boundTripleRecord, canonicalPath, isKnownPathPlatform, isSafeNonNegativeInteger, parseMemoryRecord, pathIdentityHash } from "../core/memory-read.js";
 import type { TripleRecord } from "../core/memory-read.js";
 
+/** Versioned read-only catalog used by MCP discovery and setup health. */
+export const MCP_TOOL_CATALOG_VERSION = 1 as const;
+export const MCP_TOOL_CATALOG = Object.freeze([
+  "recall",
+  "recent_failures",
+  "stats",
+  "recall_with_ai",
+  "search_knowledge",
+  "fetch_record",
+  "why_file",
+] as const);
+export type McpToolName = typeof MCP_TOOL_CATALOG[number];
+
 export interface McpToolDefinition {
-  name: "recall" | "recent_failures" | "stats" | "recall_with_ai" | "search_knowledge" | "fetch_record" | "why_file";
+  name: McpToolName;
   title: string;
   description: string;
   inputSchema: Record<string, unknown>;
@@ -169,7 +182,7 @@ function withCwd(exposure: Exposure, properties: Record<string, unknown>): Recor
 }
 
 function descriptors(exposure: Exposure): readonly McpToolDefinition[] {
-  return [
+  const definitions: readonly McpToolDefinition[] = [
     {
       name: "recall", title: "Recall failures", description: "Search remembered failures and fixes.",
       inputSchema: schema(withCwd(exposure, {
@@ -219,6 +232,11 @@ function descriptors(exposure: Exposure): readonly McpToolDefinition[] {
       }, ["path"]), annotations: ANNOTATIONS,
     },
   ];
+  const byName = new Map(definitions.map((definition) => [definition.name, definition] as const));
+  if (byName.size !== MCP_TOOL_CATALOG.length || MCP_TOOL_CATALOG.some((name) => !byName.has(name))) {
+    throw new Error("MCP tool catalog and descriptors are out of sync");
+  }
+  return MCP_TOOL_CATALOG.map((name) => byName.get(name)!);
 }
 
 function freezeDeep<T>(value: T): T {

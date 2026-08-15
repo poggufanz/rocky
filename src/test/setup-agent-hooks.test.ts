@@ -486,6 +486,7 @@ test("agent-hook capability notice precedes consent and remains visible in statu
     output = "";
     assert.equal(await setup(["--status"], dependencies), 0);
     assert.match(output, /Claude Code capture requires hook payload field `prompt_id`/);
+    assert.match(output, /setup status scope: host\/MCP registration via rocky setup --check and agent-hook state\/capability; spool and Ollama\/model health are not checked\./);
     assert.match(output, /claude-code agent hooks: installed/);
     assert.match(output, /codex agent hooks: manual/);
   } finally {

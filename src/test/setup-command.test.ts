@@ -88,7 +88,12 @@ class HealthySession implements ProcessSession {
       this.lines.push(JSON.stringify({
         jsonrpc: "2.0",
         id: message.id,
-        result: { tools: ["recall", "recent_failures", "stats", "recall_with_ai"].map((name) => ({ name })) },
+        result: {
+          tools: [
+            "recall", "recent_failures", "stats", "recall_with_ai",
+            "search_knowledge", "fetch_record", "why_file",
+          ].map((name) => ({ name })),
+        },
       }));
     } else {
       throw new Error(`unexpected probe method: ${message.method}`);
