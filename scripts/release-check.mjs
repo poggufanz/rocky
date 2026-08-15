@@ -27,7 +27,6 @@ const CANONICAL_REPOSITORY_URL = "https://github.com/poggufanz/rocky.git";
 const CANONICAL_PACKAGE_ROOT = "rocky/";
 const COMMAND_TIMEOUT_MS = 10 * 60 * 1_000;
 const MAX_COMMAND_OUTPUT_BYTES = 32 * 1024 * 1024;
-const HIDDEN_MARKER = "\u0000";
 
 class UsageError extends Error {}
 class StepError extends Error {}
@@ -361,52 +360,9 @@ function fullGitObjectId(value) {
   return typeof value === "string" && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(value);
 }
 
-function blankHiddenMarkdownSpans(text) {
-  if (text.includes(HIDDEN_MARKER)) return text.replace(/[^\r\n]/gu, HIDDEN_MARKER);
-  const output = text.split("");
-  const blank = (start, end) => {
-    for (let index = start; index < end; index += 1) {
-      if (output[index] !== "\n" && output[index] !== "\r") output[index] = HIDDEN_MARKER;
-    }
-  };
-  const isPreOpening = (index) => {
-    if (text.slice(index, index + 4).toLowerCase() !== "<pre") return false;
-    const next = text[index + 4];
-    return next === ">" || (next !== undefined && /[ \t\r\n\f]/u.test(next));
-  };
-  let index = 0;
-  while (index < text.length) {
-    if (text.startsWith("<!--", index)) {
-      const close = text.indexOf("-->", index + 4);
-      const end = close < 0 ? text.length : close + 3;
-      blank(index, end);
-      index = end;
-      continue;
-    }
-    if (isPreOpening(index)) {
-      const openingEnd = text.indexOf(">", index + 4);
-      if (openingEnd < 0) {
-        blank(index, text.length);
-        break;
-      }
-      const close = /<\/pre[ \t\r\n\f]*>/iu.exec(text.slice(openingEnd + 1));
-      if (close === null) {
-        blank(index, text.length);
-        break;
-      }
-      const end = openingEnd + 1 + close.index + close[0].length;
-      blank(index, end);
-      index = end;
-      continue;
-    }
-    index += 1;
-  }
-  return output.join("");
-}
-
 function markdownSourceLines(text) {
   let fence;
-  return blankHiddenMarkdownSpans(text).split(/\r?\n/u).map((line) => {
+  return text.split(/\r?\n/u).map((line) => {
     const opening = /^\s{0,3}(`{3,}|~{3,})/.exec(line)?.[1];
     if (fence !== undefined) {
       const closing = /^\s{0,3}(`{3,}|~{3,})\s*$/u.exec(line)?.[1];
@@ -417,8 +373,70 @@ function markdownSourceLines(text) {
       fence = { character: opening[0], length: opening.length };
       return "";
     }
-    if (/^(?: {4}|\t)/u.test(line.replaceAll(HIDDEN_MARKER, ""))) return "";
-    return line.replaceAll(HIDDEN_MARKER, " ");
+    if (/^(?: {4}|\t)/u.test(line)) return "";
+    return line;
+  });
+}
+
+function maskMarkdownInlineExclusions(text) {
+  const output = text.split("");
+  const blank = (start, end) => {
+    for (let index = start; index < end; index += 1) {
+      if (output[index] !== "\n" && output[index] !== "\r") output[index] = " ";
+    }
+  };
+  let index = 0;
+  while (index < text.length) {
+    if (text[index] === "`") {
+      let precedingBackslashes = 0;
+      for (let previous = index - 1; previous >= 0 && text[previous] === "\\"; previous -= 1) {
+        precedingBackslashes += 1;
+      }
+      if (precedingBackslashes % 2 === 1) {
+        index += 1;
+        continue;
+      }
+      let delimiterLength = 1;
+      while (text[index + delimiterLength] === "`") delimiterLength += 1;
+      const delimiter = "`".repeat(delimiterLength);
+      const close = text.indexOf(delimiter, index + delimiterLength);
+      if (close < 0) return undefined;
+      blank(index, close + delimiterLength);
+      index = close + delimiterLength;
+      continue;
+    }
+    if (text[index] === "<") {
+      const autolink = /^<(?:(?:[A-Za-z][A-Za-z0-9+.-]*:)[^<>\s\r\n]*|[^<>\s@]+@[^<>\s@]+)>/u.exec(text.slice(index));
+      if (autolink !== null) {
+        blank(index, index + autolink[0].length);
+        index += autolink[0].length;
+        continue;
+      }
+    }
+    index += 1;
+  }
+  return output.join("");
+}
+
+// Release-truth docs deliberately reject raw HTML outside Markdown code until a real parser is warranted.
+function hasUnsupportedRawHtml(text) {
+  if (text.includes("\u0000")) return true;
+  const visible = maskMarkdownInlineExclusions(markdownSourceLines(text).join("\n"));
+  if (visible === undefined) return true;
+  return /<(?:(?:!--)|(?:\?)|(?:!)|(?:\/?\s*[A-Za-z]))/u.test(visible);
+}
+
+function hasVisibleStaleReleaseStatus(text) {
+  return markdownSourceLines(text).some((line) => /\b(?:unreleased|unpublished)\b/iu.test(line));
+}
+
+function validLockPackageEntries(value) {
+  const packages = objectRecord(value);
+  if (packages === undefined) return false;
+  return Object.entries(packages).every(([path, entry]) => {
+    if (path === "") return true;
+    const packageRecord = objectRecord(entry);
+    return packageRecord !== undefined && packageRecord.dev === true;
   });
 }
 
@@ -527,6 +545,13 @@ export function validateReleaseTruth(snapshot) {
   const lockPackages = lock === undefined ? undefined : objectRecord(lock.packages);
   const lockRoot = lockPackages === undefined ? undefined : objectRecord(lockPackages[""]);
   if (lock === undefined || lock.name !== PACKAGE_NAME || lock.version !== expectedVersion
+      || !isEmptyDependencyRecord(lock.dependencies)
+      || !isEmptyDependencyRecord(lock.optionalDependencies)
+      || !isEmptyDependencyRecord(lock.peerDependencies)
+      || !isEmptyDependencyRecord(lock.peerDependenciesMeta)
+      || !isEmptyBundleMetadata(lock.bundledDependencies)
+      || !isEmptyBundleMetadata(lock.bundleDependencies)
+      || !validLockPackageEntries(lockPackages)
       || lockRoot === undefined || lockRoot.name !== PACKAGE_NAME || lockRoot.version !== expectedVersion
       || !isEmptyDependencyRecord(lockRoot.dependencies) || !isEmptyDependencyRecord(lockRoot.optionalDependencies)
       || !isEmptyDependencyRecord(lockRoot.peerDependencies) || !isEmptyDependencyRecord(lockRoot.peerDependenciesMeta)
@@ -563,6 +588,8 @@ export function validateReleaseTruth(snapshot) {
       || !allowedRoadmapToken
       || canonicalLayoutLines.length !== 1
       || canonicalLayoutLines[0].trim() !== canonicalLayout
+      || hasUnsupportedRawHtml(readme)
+      || hasVisibleStaleReleaseStatus(readme)
       || hasPositivePublicationClaim(readme)) {
     errors.push("README release identity or publication status is stale");
   }
@@ -576,6 +603,7 @@ export function validateReleaseTruth(snapshot) {
   if (headingVersion !== expectedVersion
       || expectedSections.length !== 1
       || (currentSection !== "" && /\b(?:unreleased|unpublished)\b/i.test(currentSection))
+      || hasUnsupportedRawHtml(changelog)
       || hasPositivePublicationClaim(changelog)) {
     errors.push("CHANGELOG release status is stale");
   }

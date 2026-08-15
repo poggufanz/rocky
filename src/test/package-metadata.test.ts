@@ -287,6 +287,7 @@ test("package and lock contain no runtime or optional dependencies", () => {
   assert.deepEqual(metadata.bundleDependencies ?? [], []);
   assert.equal(lock.name, "@poggufanz/rocky-cli");
   assert.equal(lock.version, "0.5.0");
+  assert.deepEqual(lock.dependencies ?? {}, {});
   const packages = object(lock.packages, "lock packages");
   const root = object(packages[""], "lock root");
   assert.equal(root.name, "@poggufanz/rocky-cli");
@@ -409,6 +410,33 @@ test("canonical release truth rejects drift in every release marker", async () =
     }),
     [],
     "release history wording must not be treated as package publication",
+  );
+  assert.notDeepEqual(
+    releaseCheck.validateReleaseTruth({
+      ...snapshot,
+      readme: `${snapshot.readme}\nThis release is unreleased.\n`,
+    }),
+    [],
+    "visible README unreleased status must fail",
+  );
+  assert.notDeepEqual(
+    releaseCheck.validateReleaseTruth({
+      ...snapshot,
+      readme: snapshot.readme.replace(
+        `Current release: \`${PACKAGE_NAME}@${PACKAGE_VERSION}\``,
+        `Current release: \`${PACKAGE_NAME}@${PACKAGE_VERSION}\`. This release is unpublished.`,
+      ),
+    }),
+    [],
+    "stale status appended to the canonical Current release line must fail",
+  );
+  assert.deepEqual(
+    releaseCheck.validateReleaseTruth({
+      ...snapshot,
+      readme: `${snapshot.readme}\n\`\`\`text\nThis release is unreleased.\n\`\`\`\n`,
+    }),
+    [],
+    "stale status inside fenced Markdown must remain ignored",
   );
   for (const [label, mutated] of [
     ["README no package publication", { ...snapshot, readme: `${snapshot.readme}\nNo package publication is implied.\n` }],
@@ -539,6 +567,80 @@ test("canonical release truth rejects drift in every release marker", async () =
     "CHANGELOG release headings inside raw HTML preformatted content must not satisfy truth",
   );
   const htmlCommentFakeChangelog = `${changelogHeadingRemoved}\n<!-- ## 0.5.0 — fake\nFake release section. -->\n`;
+  for (const [tag, closing] of [
+    ["details hidden", "details"],
+    ["div hidden", "div"],
+    ["template", "template"],
+    ["script", "script"],
+    ["style", "style"],
+  ] as const) {
+    assert.notDeepEqual(
+      releaseCheck.validateReleaseTruth({
+        ...snapshot,
+        readme: `${snapshot.readme}\n<${tag}>\nCurrent release: \`${PACKAGE_NAME}@${PACKAGE_VERSION}\`\n</${closing}>\n`,
+      }),
+      [],
+      `README raw HTML <${tag}> must fail closed`,
+    );
+    assert.notDeepEqual(
+      releaseCheck.validateReleaseTruth({
+        ...snapshot,
+        changelog: `${snapshot.changelog}\n<${tag}>\n## 0.5.0 — hidden duplicate\n</${closing}>\n`,
+      }),
+      [],
+      `CHANGELOG raw HTML <${tag}> must fail closed`,
+    );
+  }
+  assert.deepEqual(
+    releaseCheck.validateReleaseTruth({
+      ...snapshot,
+      readme: `${snapshot.readme}\nInline placeholders \`<cmd>\` and \`<path>\`; link <https://example.com/docs>.\n`,
+    }),
+    [],
+    "inline code placeholders and URL autolinks must not count as raw HTML",
+  );
+  assert.deepEqual(
+    releaseCheck.validateReleaseTruth({
+      ...snapshot,
+      readme: `${snapshot.readme}\nLinks <mailto:docs@example.com> and <urn:rocky:release>.\n`,
+    }),
+    [],
+    "URI and email autolinks must not count as raw HTML",
+  );
+  for (const [label, markup] of [
+    ["processing instruction", "<?xml version=\"1.0\">"],
+    ["CDATA section", "<![CDATA[hidden release marker]]>"],
+  ] as const) {
+    assert.notDeepEqual(
+      releaseCheck.validateReleaseTruth({ ...snapshot, readme: `${snapshot.readme}\n${markup}\n` }),
+      [],
+      `${label} must fail closed as unsupported raw HTML`,
+    );
+  }
+  assert.notDeepEqual(
+    releaseCheck.validateReleaseTruth({
+      ...snapshot,
+      readme: snapshot.readme + "\nEscaped \\` marker <details hidden> then ` visible.\n",
+    }),
+    [],
+    "escaped backticks must not hide raw HTML from release truth",
+  );
+  assert.deepEqual(
+    releaseCheck.validateReleaseTruth({
+      ...snapshot,
+      readme: `${snapshot.readme}\n\`\`\`html\n<details hidden>\nFenced HTML example.\n</details>\n\`\`\`\n`,
+    }),
+    [],
+    "raw HTML inside fenced Markdown must remain ignored",
+  );
+  assert.deepEqual(
+    releaseCheck.validateReleaseTruth({
+      ...snapshot,
+      changelog: `${snapshot.changelog}\n    <div hidden>Indented HTML example.</div>\n`,
+    }),
+    [],
+    "raw HTML inside indented Markdown must remain ignored",
+  );
   assert.notDeepEqual(
     releaseCheck.validateReleaseTruth({ ...snapshot, changelog: htmlCommentFakeChangelog }),
     [],
@@ -680,7 +782,15 @@ test("canonical release truth rejects drift in every release marker", async () =
   const mutations: Array<[string, Record<string, unknown>]> = [
     ["package metadata", { ...snapshot, metadata: { ...snapshot.metadata, name: "@wrong/rocky" } }],
     ["lockfile", { ...snapshot, lock: { ...snapshot.lock, version: "9.9.9" } }],
+    ["lock top-level runtime dependencies", { ...snapshot, lock: { ...snapshot.lock, dependencies: { runtime: "^1.0.0" } } }],
+    ["lock top-level optional dependencies", { ...snapshot, lock: { ...snapshot.lock, optionalDependencies: { runtime: "^1.0.0" } } }],
+    ["lock top-level peer dependencies", { ...snapshot, lock: { ...snapshot.lock, peerDependencies: { runtime: "^1.0.0" } } }],
+    ["lock top-level peer metadata", { ...snapshot, lock: { ...snapshot.lock, peerDependenciesMeta: { runtime: { optional: true } } } }],
+    ["lock top-level bundled dependencies", { ...snapshot, lock: { ...snapshot.lock, bundledDependencies: ["runtime"] } }],
+    ["lock top-level bundle dependencies", { ...snapshot, lock: { ...snapshot.lock, bundleDependencies: ["runtime"] } }],
     ["lock root", { ...snapshot, lock: { ...snapshot.lock, packages: { ...lock, "": { ...lockRoot, version: "9.9.9" } } } }],
+    ["lock nested runtime package", { ...snapshot, lock: { ...snapshot.lock, packages: { ...lock, "node_modules/runtime": { version: "1.0.0", dev: false } } } }],
+    ["lock nested malformed package", { ...snapshot, lock: { ...snapshot.lock, packages: { ...lock, "node_modules/runtime": null } } }],
     ["package-info", { ...snapshot, packageInfoSource: snapshot.packageInfoSource.replace('PACKAGE_VERSION = "0.5.0"', 'PACKAGE_VERSION = "9.9.9"') }],
     ["README", { ...snapshot, readme: snapshot.readme.replace("@poggufanz/rocky-cli@0.5.0", "@poggufanz/rocky-cli@9.9.9") }],
     ["README appended wrong current marker", { ...snapshot, readme: `${snapshot.readme}\nCurrent release: \`@wrong/rocky@9.9.9\`.\n` }],
