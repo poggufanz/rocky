@@ -559,15 +559,25 @@ function whyTripleComplete(candidate: TripleRecord): boolean {
   }
 }
 
+function projectWhyTriple(candidate: TripleRecord, exposure: Exposure): Record<string, unknown> {
+  const complete = whyTripleComplete(candidate);
+  return {
+    ...projectTriple(candidate, exposure, exposure === "sanitized"),
+    confidence: complete ? "confirmed" : "incomplete",
+    reason: complete ? "captured file coverage complete" : "file coverage incomplete; Rocky does not know full change",
+  };
+}
+
 function selectWhyCandidates(
   candidates: readonly TripleRecord[],
   path: string,
   limit: number,
+  now = Date.now(),
 ): { matches: TripleRecord[]; possible: WhyFileEvidence["possible"]; ambiguousSuffix: boolean } {
   const related: WhyCandidate[] = candidates.map((candidate) => ({
     candidate,
     relation: whyPathRelation(candidate, path),
-  }));
+  })).filter(({ candidate }) => candidate.ts <= now);
   const hasExact = related.some(({ relation }) => relation.exact);
   const suffixIdentities = new Set(
     related
@@ -591,7 +601,7 @@ function selectWhyCandidates(
   return { matches, possible, ambiguousSuffix };
 }
 
-function fallbackWhyEvidence(options: CreateToolRegistryOptions, path: string, limit: number, state?: SafeMemoryReadState): WhyFileEvidence {
+function fallbackWhyEvidence(options: CreateToolRegistryOptions, path: string, limit: number, state?: SafeMemoryReadState, now = Date.now()): WhyFileEvidence {
   let rawMatches: unknown;
   try {
     rawMatches = options.memory.whyFile(path, limit);
@@ -603,7 +613,7 @@ function fallbackWhyEvidence(options: CreateToolRegistryOptions, path: string, l
   const candidates = boundedRawMatches.values
     .map((value) => safeTripleRecord(value))
     .filter((value): value is TripleRecord => value !== undefined);
-  const selected = selectWhyCandidates(candidates, path, limit);
+  const selected = selectWhyCandidates(candidates, path, limit, now);
   // Coverage belongs to selected exact/unambiguous evidence only. An
   // unrelated complete triple cannot make an empty why-file result complete.
   const coverage = coverageForTriples(selected.matches);
@@ -614,10 +624,11 @@ function fallbackWhyEvidence(options: CreateToolRegistryOptions, path: string, l
     possible: selected.possible,
     coverage: incomplete ? { ...coverage, status: "unknown", complete: false } : coverage,
     coverageIncomplete: incomplete,
+    ...(selected.ambiguousSuffix ? { ambiguousPath: true } : {}),
   };
 }
 
-function normalizeWhyEvidence(value: unknown, fallback: WhyFileEvidence, path: string, limit: number): WhyFileEvidence {
+function normalizeWhyEvidence(value: unknown, fallback: WhyFileEvidence, path: string, limit: number, now = Date.now()): WhyFileEvidence {
   try {
     if (typeof value !== "object" || value === null || Array.isArray(value)) return fallback;
     const raw = value as Record<string, unknown>;
@@ -625,7 +636,7 @@ function normalizeWhyEvidence(value: unknown, fallback: WhyFileEvidence, path: s
     const candidates = boundedMatches.values
       .map((entry) => safeTripleRecord(entry))
       .filter((entry): entry is TripleRecord => entry !== undefined);
-    const selected = selectWhyCandidates(candidates, path, limit);
+    const selected = selectWhyCandidates(candidates, path, limit, now);
     const derived = coverageForTriples(selected.matches);
     const boundedPossible = boundedProviderArray(raw.possible, MAX_WHY_EVIDENCE_INPUTS);
     const providerPossible: WhyFileEvidence["possible"] = [];
@@ -633,7 +644,7 @@ function normalizeWhyEvidence(value: unknown, fallback: WhyFileEvidence, path: s
       const candidate = boundedPossible.values[index];
       if (typeof candidate !== "object" || candidate === null || Array.isArray(candidate)) continue;
       const value = candidate as Record<string, unknown>;
-      if (typeof value.id !== "string" || typeof value.ts !== "number" || !Number.isSafeInteger(value.ts) || value.ts < 0
+      if (typeof value.id !== "string" || typeof value.ts !== "number" || !Number.isSafeInteger(value.ts) || value.ts < 0 || value.ts > now
           || value.source !== "agent-hook" || value.reason !== "path_may_be_omitted") continue;
       providerPossible.push({ id: value.id, ts: value.ts, source: "agent-hook", reason: "path_may_be_omitted" });
     }
@@ -655,12 +666,13 @@ function normalizeWhyEvidence(value: unknown, fallback: WhyFileEvidence, path: s
       }
     }
     if (raw.coverageIncomplete === true || boundedMatches.truncated || boundedPossible.truncated) coverage = { ...coverage, status: "unknown", complete: false };
-    if (possible.length > 0 || selected.ambiguousSuffix) coverage = { ...coverage, status: "unknown", complete: false };
+    if (possible.length > 0 || selected.ambiguousSuffix || raw.ambiguousPath === true) coverage = { ...coverage, status: "unknown", complete: false };
     return {
       matches: selected.matches,
       possible,
       coverage,
       coverageIncomplete: !coverage.complete || possible.length > 0 || raw.coverageIncomplete === true,
+      ...((selected.ambiguousSuffix || raw.ambiguousPath === true) ? { ambiguousPath: true } : {}),
     };
   } catch {
     return fallback;
@@ -1133,11 +1145,12 @@ export function createToolRegistry(options: CreateToolRegistryOptions): McpToolR
             const projected = safeProjection(() => ({
               exposure: options.exposure,
               ...memoryCoveragePayload(memoryScan),
-              items: evidence.matches.map((triple) => projectTriple(triple, options.exposure, options.exposure === "sanitized")),
+              items: evidence.matches.map((triple) => projectWhyTriple(triple, options.exposure)),
               possible: projectWhyPossible(evidence.possible, input.limit, options.exposure),
               coverage: evidence.coverage,
               coverageStatus: evidence.coverage.status,
               coverageIncomplete: evidence.coverageIncomplete,
+              ...(evidence.ambiguousPath ? { ambiguousPath: true } : {}),
               truncated: false,
             }), { exposure: options.exposure, ...memoryCoveragePayload(memoryScan), items: [], possible: [], coverage: { status: "unknown", complete: false, filesCovered: 0, truncatedFiles: 0 }, coverageStatus: "unknown", coverageIncomplete: true, truncated: true });
             return safeProjection(() => cappedResult(projected), cappedResult({ exposure: options.exposure, ...memoryCoveragePayload(memoryScan), items: [], possible: [], coverage: { status: "unknown", complete: false, filesCovered: 0, truncatedFiles: 0 }, coverageStatus: "unknown", coverageIncomplete: true, truncated: true }));

@@ -343,6 +343,77 @@ test("why renders evidence for queried second file in one multi-file triple", ()
   assert.ok(sayLines.some((line) => line.includes("agent say: keep styles aligned")));
 });
 
+test("why chooses exact witness before a suffix in one triple", () => {
+  const triple: TripleRecord = {
+    kind: "triple", id: "exact-before-suffix", ts: Date.now(), cwd: "/w", schemaV: 1,
+    agent: "codex", origin: "agent-hook", rationale: { text: "exact witness", tags: [], source: "notify" },
+    mechanism: {
+      files: [
+        { path: "web/src/index.ts", plusMinus: [1, 0], props: ["suffix"] },
+        { path: "src/index.ts", plusMinus: [9, 2], props: ["exact"] },
+      ],
+      truncatedFiles: 0,
+    },
+  };
+  const output = sinks();
+  assert.equal(why(["src/index.ts"], { load: () => [triple], ...output.deps }), 0);
+  assert.ok(output.outLines.some((line) => line.includes("src/index.ts +9 -2")));
+  assert.equal(output.outLines.some((line) => line.includes("web/src/index.ts +1 -0")), false);
+});
+
+test("why discloses ambiguous index suffixes instead of choosing one rationale", () => {
+  const make = (id: string, path: string): TripleRecord => ({
+    kind: "triple", id, ts: 100, cwd: "relative", schemaV: 1, agent: "codex", origin: "agent-hook",
+    rationale: { text: id, tags: [], source: "notify" },
+    mechanism: {
+      files: [{ path, plusMinus: [1, 0], props: [id], provenance: "tool-observed" }],
+      truncatedFiles: 0, baseline: "captured", coverageStatus: "complete",
+    },
+  });
+  const output = sinks();
+  assert.equal(why(["index.ts"], { load: () => [make("one", "one/index.ts"), make("two", "two/index.ts")], ...output.deps, now: 100 }), 0);
+  assert.ok(output.sayLines.some((line) => line.includes("multiple possible paths")));
+  assert.equal(output.sayLines.some((line) => line.includes("agent say: one")), false);
+  assert.equal(output.sayLines.some((line) => line.includes("agent say: two")), false);
+});
+
+test("future dictionary evidence says I do not know and does not enter teaching answers", async () => {
+  const future: TripleRecord = { ...(seeded()[0] as TripleRecord), id: "future-triple", ts: 101 };
+  const note: MemoryRecord = {
+    kind: "note", id: "future-note", ts: 102, cwd: "/w", cmd: "rocky note",
+    file: "src/app.ts", line: 1, subject: "future cache", answer: "banana",
+  };
+  const output = sinks();
+  assert.equal(await what(["naikin"], { load: () => [future, note], now: 100, ...output.deps }), 0);
+  assert.ok(output.sayLines.some((line) => line.includes("I not know")));
+  const quizOutput = sinks();
+  assert.equal(await quiz([], { load: () => [future, note], now: 100, ask: async () => "answer", ...quizOutput.deps }), 0);
+  assert.ok(quizOutput.sayLines.some((line) => line.includes("I not know future")));
+  assert.equal(quizOutput.sayLines.some((line) => line.includes("banana")), false);
+});
+
+test("quiz repeats deterministic note candidates and labels answer as unverified", async () => {
+  const note: MemoryRecord = {
+    kind: "note", id: "old-note", ts: 1, cwd: "/w", cmd: "rocky note",
+    file: "src/app.ts", line: 1, subject: "cache", answer: "banana",
+  };
+  const run = async () => {
+    const output = sinks();
+    const asked: string[] = [];
+    assert.equal(await quiz([], {
+      load: () => [note], now: 2 * 24 * 60 * 60 * 1000, ask: async (message) => { asked.push(message); return "x"; }, ...output.deps,
+    }), 0);
+    return { output, asked };
+  };
+  const first = await run();
+  const second = await run();
+  assert.deepEqual(first.asked, ["your answer: "]);
+  assert.deepEqual(first.output.sayLines, second.output.sayLines);
+  assert.ok(first.output.sayLines.some((line) => line.includes("banana")));
+  assert.ok(first.output.sayLines.some((line) => line.includes("confidence=possible")));
+  assert.equal(first.output.sayLines.some((line) => line.includes("wrong") || line.includes("score")), false);
+});
+
 test("why without rationale reports change without reason", () => {
   const records = seeded().map((record) => record.kind === "triple" ? { ...record, rationale: undefined } : record);
   const { sayLines, outLines, deps } = sinks();
@@ -501,6 +572,40 @@ test("what --ai reorders known hits and appends every omitted hit exactly once",
     assert.equal(outLines.filter((line) => line.includes(path)).length, 1, path);
   }
   assert.ok(!outLines.some((line) => line.includes("unknown")));
+});
+
+test("what --ai cannot mutate or invent evidence metadata", async () => {
+  const { sayLines, outLines, deps } = sinks();
+  const rank = {
+    async run(_query: string, hits: readonly { triple: TripleRecord }[]) {
+      const first = hits[0]?.triple;
+      if (first !== undefined) {
+        first.intent = { text: "invented intent" };
+        first.mechanism.files[0]!.path = "invented/path.ts";
+      }
+      return ["invented-id", "t1"];
+    },
+  };
+  assert.equal(await what(["--ai", "naikin"], { load: seeded, rank, ...deps }), 0);
+  assert.equal(sayLines.some((line) => line.includes("invented")), false);
+  assert.ok(outLines[0]?.includes("src/app.css"));
+  assert.ok(outLines[0]?.includes("id=t1"));
+  assert.ok(outLines[0]?.includes("confidence=incomplete"));
+  assert.ok(outLines[0]?.includes("reason=file coverage incomplete"));
+});
+
+test("what --ai does not call model for note-only evidence", async () => {
+  const note: MemoryRecord = {
+    kind: "note", id: "note-only", ts: Date.now(), cwd: "/w", cmd: "rocky note",
+    file: "src/app.ts", line: 1, subject: "cache", answer: "remember cache",
+  };
+  const output = sinks();
+  let calls = 0;
+  const rank = { async run() { calls += 1; return ["forged-id"]; } };
+  assert.equal(await what(["--ai", "cache"], { load: () => [note], rank, ...output.deps }), 0);
+  assert.equal(calls, 0);
+  assert.ok(output.outLines[0]?.includes("source=note"));
+  assert.ok(output.outLines[0]?.includes("confidence=possible"));
 });
 
 test("what --ai speaks model sleeps and keeps evidence on rank failure", async () => {

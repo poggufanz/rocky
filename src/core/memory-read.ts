@@ -444,6 +444,11 @@ export function boundTripleRecord(record: TripleRecord): TripleRecord {
 
 export type MemoryRecord = FailureRecord | FixRecord | AssociationRecord | NoteRecord | TripleRecord;
 
+/** Future-dated evidence stays readable but is inert for operational answers. */
+export function isOperationalMemoryRecord(record: Pick<MemoryRecord, "ts">, now = Date.now()): boolean {
+  return Number.isSafeInteger(record.ts) && record.ts <= now;
+}
+
 /** Durable memory format version used by coverage metadata and cache entries. */
 export const MEMORY_FORMAT_VERSION = 1 as const;
 /** Supported envelope: files above this byte count are read only to this boundary. */

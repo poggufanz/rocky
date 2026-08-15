@@ -100,7 +100,7 @@ Claude Code setup via `rocky setup --agent-hooks` asks for explicit consent befo
 
 Claude Code capture requires hook payload field `prompt_id`; without `prompt_id`, Rocky records nothing and never merges turns. `rocky setup --agent-hooks` and `rocky setup --status` print this capability boundary alongside their setup/status output. Setup status scope is host/MCP registration via rocky setup --check and agent-hook state/capability; spool and Ollama/model health are not checked.
 
-Plan 02 dictionary and teaching surfaces ship in v0.5.0. The commands read only remembered triples and keep the original evidence intact:
+Plan 02 dictionary and teaching surfaces ship in v0.5.0. The commands read remembered triples and comprehension notes and keep original evidence intact:
 
 ```text
 rocky what "move button down"
@@ -113,7 +113,7 @@ rocky quiz
 
 `what` is intent→mechanism lookup. `what --ai` can rank deterministic hits through configured loopback Ollama, then falls back to the same evidence when the model sleeps. `how` is a mechanism reminder. `why` quotes the agent's stated rationale for one file. `digest` reports the last-seven-day intent pattern. `quiz` is explicit opt-in retrieval practice. Rocky never rewrites, injects, or submits the user prompt.
 
-Useful deterministic lines sound like `you say "move button down". it is margin-top. I think. check, question` and `last time you say "move button down", it become margin-top. maybe you mean margin-top, question`. Rocky hears remembered evidence; he does not turn a guess into a fact.
+Quiz uses newest eligible triples and comprehension notes, deterministic newest-first with stable id tie-breaks. Unchanged memory repeats same candidates; Rocky asks, reveals, and never grades. Useful deterministic lines sound like `you say "move button down". it is margin-top. I think. check, question` and `last time you say "move button down", it become margin-top. maybe you mean margin-top, question`. Rocky hears remembered evidence; he does not turn a guess into a fact.
 
 The curious blind friend is Ollama-gated. After an intent append, Rocky may start one detached, non-blocking ambiguity check, and asks at most one question for that turn. It consults the intent plus remembered evidence only; it never reads project files. A question is curious, not a test. If Ollama is absent, fails, or is disabled, this advisory path disappears without blocking or changing the captured turn. Ignored questions are dropped and never repeated.
 

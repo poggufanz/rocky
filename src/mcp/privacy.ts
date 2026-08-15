@@ -403,7 +403,7 @@ function safeKnowledgeId(value: unknown): string | undefined {
   return id !== undefined && id.trim().length > 0 && !/[\u0000-\u001f\u007f-\u009f]/u.test(id) ? id : undefined;
 }
 
-function normalizeKnowledgeHit(value: unknown): KnowledgeSearchHit | undefined {
+function normalizeKnowledgeHit(value: unknown, now = Date.now()): KnowledgeSearchHit | undefined {
   try {
     if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
     const raw = value as Record<string, unknown>;
@@ -413,7 +413,7 @@ function normalizeKnowledgeHit(value: unknown): KnowledgeSearchHit | undefined {
       ? raw.kind
       : undefined;
     const snippet = safeKnowledgeString(raw.snippet);
-    if (id === undefined || ts === undefined || kind === undefined || snippet === undefined) return undefined;
+    if (id === undefined || ts === undefined || ts > now || kind === undefined || snippet === undefined) return undefined;
 
     const score = typeof raw.score === "number" && Number.isFinite(raw.score)
       ? Math.min(1, Math.max(0, raw.score))

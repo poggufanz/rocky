@@ -124,6 +124,83 @@ test("knowledge tools search, fetch, and explain one file", async () => {
   assert.equal((why.structuredContent.items as unknown[]).length, 1);
 });
 
+test("why_file keeps two index suffixes ambiguous and future knowledge inert", async () => {
+  const first: TripleRecord = {
+    ...triple, id: "index-one", ts: 10, cwd: "relative", mechanism: {
+      files: [{ path: "one/index.ts", plusMinus: [1, 0], props: [], provenance: "tool-observed" }],
+      truncatedFiles: 0, baseline: "captured", coverageStatus: "complete",
+    },
+  };
+  const second: TripleRecord = {
+    ...first, id: "index-two", mechanism: {
+      files: [{ path: "two/index.ts", plusMinus: [1, 0], props: [], provenance: "tool-observed" }],
+      truncatedFiles: 0, baseline: "captured", coverageStatus: "complete",
+    },
+  };
+  const ambiguous = createToolRegistry({
+    exposure: "sanitized",
+    memory: createMemoryQueries(() => [first, second]),
+    recallWithAi: disabledRecallWithAi,
+  });
+  const result = await ambiguous.call("why_file", { path: "index.ts" }, new AbortController().signal);
+  assert.deepEqual(result.structuredContent.items, []);
+  assert.equal(result.structuredContent.ambiguousPath, true);
+  assert.equal(result.structuredContent.coverageIncomplete, true);
+
+  const futureNote: MemoryRecord = {
+    kind: "note", id: "future-search-note", ts: Date.now() + 60_000, cwd: "/private",
+    cmd: "rocky note", file: "src/app.ts", line: 1, subject: "future", answer: "banana",
+  };
+  const futureTriple: TripleRecord = {
+    ...triple, id: "future-search-triple", ts: Date.now() + 60_000,
+    intent: { text: "future path" },
+    mechanism: {
+      files: [{ path: "src/future.ts", plusMinus: [1, 0], props: ["future"], provenance: "tool-observed" }],
+      truncatedFiles: 0, baseline: "captured", coverageStatus: "complete",
+    },
+  };
+  const futureSearch = createToolRegistry({
+    exposure: "sanitized",
+    memory: createMemoryQueries(() => [futureNote, futureTriple]),
+    recallWithAi: disabledRecallWithAi,
+  });
+  const search = await futureSearch.call("search_knowledge", { query: "banana", kind: "note" }, new AbortController().signal);
+  assert.deepEqual(search.structuredContent.items, []);
+  const tripleSearch = await futureSearch.call("search_knowledge", { query: "future path", kind: "triple" }, new AbortController().signal);
+  assert.deepEqual(tripleSearch.structuredContent.items, []);
+  const futureWhy = await futureSearch.call("why_file", { path: "src/future.ts" }, new AbortController().signal);
+  assert.deepEqual(futureWhy.structuredContent.items, []);
+  assert.equal(futureWhy.structuredContent.coverageIncomplete, true);
+
+  const customFutureTs = Date.now() + 60_000;
+  const customFuture = createToolRegistry({
+    exposure: "sanitized",
+    memory: {
+      recall() { return []; },
+      recentFailures() { return []; },
+      stats() { return { failures: 0, fixEvents: 0, resolved: 0, unresolved: 0 }; },
+      searchKnowledge() {
+        return [{ id: "custom-future", ts: customFutureTs, kind: "triple", snippet: "future", score: 1 }];
+      },
+      fetchRecord() { return undefined; },
+      whyFile() { return [futureTriple]; },
+      whyFileEvidence() {
+        return {
+          matches: [futureTriple], possible: [],
+          coverage: { status: "complete", complete: true, filesCovered: 1, truncatedFiles: 0 },
+          coverageIncomplete: false,
+        };
+      },
+    },
+    recallWithAi: disabledRecallWithAi,
+  });
+  const customSearch = await customFuture.call("search_knowledge", { query: "future" }, new AbortController().signal);
+  assert.deepEqual(customSearch.structuredContent.items, []);
+  const customWhy = await customFuture.call("why_file", { path: "src/future.ts" }, new AbortController().signal);
+  assert.deepEqual(customWhy.structuredContent.items, []);
+  assert.equal(customWhy.structuredContent.coverageIncomplete, true);
+});
+
 test("stats keeps legacy fields and adds bounded knowledge counters for old query implementations", async () => {
   const memory = {
     recall() { return []; },

@@ -10,7 +10,7 @@ import {
   retrievalTokens,
   similarity,
 } from "./fingerprint.js";
-import { boundTripleRecord, canonicalPath, loadMemory, loadMemoryChecked, pathIdentityHash } from "./memory-read.js";
+import { boundTripleRecord, canonicalPath, isOperationalMemoryRecord, loadMemory, loadMemoryChecked, pathIdentityHash } from "./memory-read.js";
 import type { FailureRecord, FixRecord, LinkBasis, LinkConfidence, MemoryCoverage, MemoryRecord, TripleRecord } from "./memory-read.js";
 
 export interface RecallQuery { query: string; limit?: number; cwd?: string; now?: number }
@@ -80,6 +80,7 @@ export interface WhyFileEvidence {
   possible: WhyFilePossible[];
   coverage: KnowledgeCoverageSummary;
   coverageIncomplete: boolean;
+  ambiguousPath?: boolean;
 }
 export interface MemoryQueries {
   recall(input: RecallQuery): RecallHit[];
@@ -87,7 +88,7 @@ export interface MemoryQueries {
   stats(input?: StatsQuery): MemoryStats;
   searchKnowledge(input: KnowledgeSearchQuery): KnowledgeSearchHit[];
   fetchRecord(id: string): MemoryRecord | undefined;
-  whyFile(path: string, limit?: number): TripleRecord[];
+  whyFile(path: string, limit?: number, now?: number): TripleRecord[];
   whyFileEvidence?: (path: string, limit?: number) => WhyFileEvidence;
   /** Present for the built-in durable reader; custom providers stay legacy-shaped. */
   coverage?: () => MemoryCoverage;
@@ -391,7 +392,7 @@ export function queryRecall(records: readonly MemoryRecord[], input: RecallQuery
   const queryTokenList = [...queryTokenSet];
   const queryTokenIndex = new Map(queryTokenList.map((token, index) => [token, index]));
   const candidates = unique
-    .filter((record): record is FailureRecord => record.kind === "failure" && record.ts <= now &&
+    .filter((record): record is FailureRecord => record.kind === "failure" && isOperationalMemoryRecord(record, now) &&
       (input.cwd === undefined || record.cwd === input.cwd));
   // Do not retain one Set per failure. A 50k snapshot used to keep tens of
   // thousands of token hash tables alive for the whole query, pushing cold
@@ -482,7 +483,7 @@ export function queryRecentFailures(
   const fixes = fixesIndex(unique, now);
   return unique
     .filter((record): record is FailureRecord => record.kind === "failure")
-    .filter((failure) => failure.ts <= now)
+    .filter((failure) => isOperationalMemoryRecord(failure, now))
     .filter((failure) => input.cwd === undefined || failure.cwd === input.cwd)
     .filter((failure) => !input.unresolvedOnly || !failure.resolvedBy)
     .sort((a, b) => b.ts - a.ts)
@@ -493,7 +494,7 @@ export function queryRecentFailures(
 export function queryStats(records: readonly MemoryRecord[], input: StatsQuery = {}): MemoryStats {
   const unique = uniqueRecords(records);
   const now = input.now ?? Date.now();
-  const scoped = unique.filter((record) => record.ts <= now && (input.cwd === undefined || record.cwd === input.cwd));
+  const scoped = unique.filter((record) => isOperationalMemoryRecord(record, now) && (input.cwd === undefined || record.cwd === input.cwd));
   const failures = scoped.filter((record): record is FailureRecord => record.kind === "failure");
   const fixes = fixesIndex(unique, now);
   const confirmedFailures = unique.filter((record): record is FailureRecord =>
@@ -545,7 +546,7 @@ export function searchKnowledge(
   const entries: Array<{ record: MemoryRecord; snippet: string }> = [];
   for (const sourceRecord of uniqueRecords(records)) {
     const record = sourceRecord.kind === "triple" ? boundTripleRecord(sourceRecord) : sourceRecord;
-    if (record.ts > now) continue;
+    if (!isOperationalMemoryRecord(record, now)) continue;
     if (record.kind === "failure" && wants("failure")) {
       entries.push({
         record,
@@ -755,14 +756,14 @@ function safeTripleCollection(records: unknown): SafeTripleCollection {
   return { triples, complete };
 }
 
-function whyFilePathMatches(records: readonly MemoryRecord[], path: string, limit = 5, requireComplete = true): {
+function whyFilePathMatches(records: readonly MemoryRecord[], path: string, limit = 5, requireComplete = true, now = Date.now()): {
   matches: TripleRecord[];
   suffixAmbiguous: boolean;
   traversalIncomplete: boolean;
 } {
   const candidates: WhyFilePathMatch[] = [];
   const collection = safeTripleCollection(records);
-  for (const triple of collection.triples) {
+  for (const triple of collection.triples.filter((record) => isOperationalMemoryRecord(record, now))) {
     const platform = triple.platform ?? "unknown";
     const targetDisplay = canonicalPath(path, { platform });
     const targetIdentity = canonicalPath(path, { platform, cwd: triple.cwd });
@@ -797,8 +798,7 @@ function whyFilePathMatches(records: readonly MemoryRecord[], path: string, limi
     ? (requireComplete ? exact.filter((candidate) => completeTriple(candidate.triple)) : exact)
     : (requireComplete
       ? suffixCandidates.filter((candidate) => completeTriple(candidate.triple))
-      : suffixCandidates.filter((candidate) => candidate.triple.mechanism.coverageStatus === "complete"
-        && candidate.triple.mechanism.truncatedFiles === 0));
+      : suffixCandidates.filter((candidate) => candidate.triple.mechanism.truncatedFiles === 0));
   if (exact.length === 0) {
     const distinctSuffixes = new Set(suffixCandidates.map((candidate) => candidate.identity));
     if (distinctSuffixes.size > 1) return { matches: [], suffixAmbiguous: true, traversalIncomplete: !collection.complete };
@@ -819,8 +819,9 @@ function worstCoverageStatus(current: KnowledgeCoverageSummary["status"], next: 
   return "complete";
 }
 
-export function whyFileEvidence(records: readonly MemoryRecord[], path: string, limit = 5): WhyFileEvidence {
-  const strictMatches = whyFilePathMatches(records, path, limit);
+export function whyFileEvidence(records: readonly MemoryRecord[], path: string, limit = 5, now = Date.now()): WhyFileEvidence {
+  const operational = safeTripleCollection(records).triples.filter((record) => isOperationalMemoryRecord(record, now));
+  const strictMatches = whyFilePathMatches(operational, path, limit, true, now);
   const matches = strictMatches.matches.slice(0, limit);
   const boundedMatches = new Set(matches.map((record) => record.id));
   const possible: WhyFilePossible[] = [];
@@ -829,7 +830,7 @@ export function whyFileEvidence(records: readonly MemoryRecord[], path: string, 
   let truncatedFiles = 0;
   let hasIncomplete = strictMatches.traversalIncomplete;
   let sawTriple = false;
-  const collection = safeTripleCollection(records);
+  const collection = safeTripleCollection(operational);
   for (const source of collection.triples) {
     sawTriple = true;
     try {
@@ -883,11 +884,17 @@ export function whyFileEvidence(records: readonly MemoryRecord[], path: string, 
     filesCovered,
     truncatedFiles,
   };
-  return { matches, possible, coverage, coverageIncomplete: !coverage.complete };
+  return {
+    matches,
+    possible,
+    coverage,
+    coverageIncomplete: !coverage.complete,
+    ...(strictMatches.suffixAmbiguous ? { ambiguousPath: true } : {}),
+  };
 }
 
-export function whyFile(records: readonly MemoryRecord[], path: string, limit = 5): TripleRecord[] {
-  return whyFilePathMatches(records, path, limit, false).matches;
+export function whyFile(records: readonly MemoryRecord[], path: string, limit = 5, now = Date.now()): TripleRecord[] {
+  return whyFilePathMatches(records, path, limit, false, now).matches;
 }
 
 export const LINK_WINDOW_MS = 1000 * 60 * 60 * 8;
@@ -991,10 +998,11 @@ export function createMemoryQueries(load: () => MemoryRecord[] = loadMemory): Me
     stats: (input = {}) => queryStats(loadRecords(input.now), input),
     searchKnowledge: (input) => searchKnowledge(loadRecords(input.now), input),
     fetchRecord: (id) => fetchRecord(loadRecords(), id),
-    whyFile: (path, limit = 5) => whyFile(loadRecords(), path, limit),
+    whyFile: (path, limit = 5, now = Date.now()) => whyFile(loadRecords(now), path, limit, now),
     whyFileEvidence: (path, limit = 5) => {
-      const records = loadRecords();
-      const evidence = whyFileEvidence(records, path, limit);
+      const now = Date.now();
+      const records = loadRecords(now);
+      const evidence = whyFileEvidence(records, path, limit, now);
       // A strict pass may report an incomplete possible association while a
       // legacy provider still has an exact bounded witness. Prefer exact
       // legacy evidence when strict matches are empty; never let a possible
@@ -1004,7 +1012,7 @@ export function createMemoryQueries(load: () => MemoryRecord[] = loadMemory): Me
       // have an exact file witness but lack the new baseline/provenance proof.
       // The fallback is deliberately conservative: it retains the item only
       // as an incomplete match, never upgrades coverage to complete.
-      const legacyMatches = whyFile(records, path, limit);
+      const legacyMatches = whyFile(records, path, limit, now);
       if (legacyMatches.length === 0) return evidence;
       return {
         ...evidence,

@@ -12,6 +12,7 @@ import {
   queryStats,
   recentUnresolvedFailures,
   searchKnowledge,
+  whyFileEvidence,
   getFix,
 } from "../core/memory-query.js";
 
@@ -442,6 +443,22 @@ test("createMemoryQueries wires knowledge search, fetch, and why-file queries", 
   assert.equal(queries.fetchRecord("t1")?.kind, "triple");
   assert.equal(queries.fetchRecord("missing"), undefined);
   assert.deepEqual(queries.whyFile("src/app.css").map((record) => record.id), ["t1"]);
+});
+
+test("why-file evidence treats future triples as inert and retains unknown coverage", () => {
+  const future: TripleRecord = {
+    ...tripleA,
+    id: "future-why",
+    ts: 501,
+    mechanism: {
+      files: [{ path: "src/future.ts", plusMinus: [1, 0], props: ["future"], provenance: "tool-observed" }],
+      truncatedFiles: 0, baseline: "captured", coverageStatus: "complete",
+    },
+  };
+  const evidence = whyFileEvidence([future], "src/future.ts", 5, 500);
+  assert.deepEqual(evidence.matches, []);
+  assert.equal(evidence.coverageIncomplete, true);
+  assert.equal(evidence.coverage.status, "unknown");
 });
 
 test("knowledge hits expose record provenance and bounded file coverage", () => {
