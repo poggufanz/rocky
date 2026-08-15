@@ -475,6 +475,35 @@ test("projection work budgets stop malformed recall and recent arrays", () => {
   assert.ok(recentReads > 0 && recentReads < values.length, `malformed recent accesses: ${recentReads}`);
 });
 
+test("knowledge projection snapshots nested file witnesses before global work charging", () => {
+  const files = Array.from({ length: 20_000 }, () => "src/duplicate.ts");
+  let nestedReads = 0;
+  const hostileFiles = new Proxy(files, {
+    get(target, property, receiver) {
+      if (typeof property === "string" && /^\d+$/u.test(property)) nestedReads += 1;
+      return Reflect.get(target, property, receiver);
+    },
+    ownKeys() { throw new Error("files must not be enumerated"); },
+  });
+  const hits: KnowledgeSearchHit[] = Array.from({ length: 100 }, (_, index) => ({
+    id: `nested-budget-${index}`, ts: index, kind: "triple", snippet: "duplicate", score: 1,
+    filesCovered: hostileFiles, truncatedFiles: 0, coverageStatus: "complete", complete: true,
+  }));
+  const output = projectKnowledgeHits(hits, "sanitized");
+  assert.ok(nestedReads > 0 && nestedReads <= hits.length * 256, `nested file accesses: ${nestedReads}`);
+  assert.ok(output.items.length > 0);
+  assert.ok((output.items[0]?.truncatedFiles ?? 0) > 0);
+  assert.ok((output.items[0]?.truncatedFiles ?? 0) <= 20_000);
+  assert.equal(output.items[0]?.coverageStatus, "truncated");
+
+  const small = projectKnowledgeHits([{
+    id: "small-known", ts: 1, kind: "triple", snippet: "known", score: 1,
+    filesCovered: ["src/known.ts", "src/known.ts"], truncatedFiles: 0,
+    coverageStatus: "unknown", complete: false,
+  }], "sanitized");
+  assert.deepEqual(small.items[0]?.filesCovered, ["src/known.ts"]);
+});
+
 test("response cap preserves source-local candidate IDs after skipping an oversized middle hit", () => {
   const third: RecallHit = {
     failure: {

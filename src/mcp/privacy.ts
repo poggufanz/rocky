@@ -498,6 +498,8 @@ function normalizeKnowledgeHit(value: unknown, now = Date.now()): KnowledgeSearc
     let filesCovered: string[] | undefined;
     let filesCoveredLength = 0;
     let filesCoveredTruncated = false;
+    let filesCoveredOmitted = 0;
+    let filesCoveredBytes = 0;
     let filesCoveredMalformed = false;
     if (rawFilesCovered !== undefined) {
       if (!Array.isArray(rawFilesCovered)) {
@@ -517,25 +519,60 @@ function normalizeKnowledgeHit(value: unknown, now = Date.now()): KnowledgeSearc
           filesCoveredMalformed = true;
         }
         filesCoveredLength = length;
-        const bound = Math.min(length, MAX_KNOWLEDGE_FILE_INPUTS);
-        filesCoveredTruncated = length > bound;
+        // Snapshot only a small, byte-bounded witness prefix.  This is the
+        // trust boundary: downstream normalization and projection must never
+        // walk an attacker-controlled 20k-entry array a second time.
+        const bound = Math.min(length, MAX_NESTED_ITEMS);
         const normalized: string[] = [];
         for (let index = 0; index < bound; index += 1) {
+          if (filesCoveredBytes >= MAX_NESTED_BYTES) {
+            filesCoveredTruncated = true;
+            filesCoveredOmitted += length - index;
+            break;
+          }
           let file: unknown;
-          try { file = rawFilesCovered[index]; } catch { filesCoveredMalformed = true; break; }
+          try { file = rawFilesCovered[index]; } catch {
+            filesCoveredMalformed = true;
+            filesCoveredTruncated = true;
+            filesCoveredOmitted += Math.max(1, length - index);
+            break;
+          }
           if (typeof file !== "string" || file.length > MAX_FIELD_BYTES * 2) {
             filesCoveredMalformed = true;
             continue;
           }
+          let fileBytes: number;
+          try { fileBytes = Buffer.byteLength(file, "utf8"); } catch {
+            filesCoveredMalformed = true;
+            continue;
+          }
+          if (fileBytes > MAX_FIELD_BYTES * 2) {
+            filesCoveredMalformed = true;
+            continue;
+          }
+          if (filesCoveredBytes + fileBytes > MAX_NESTED_BYTES) {
+            filesCoveredTruncated = true;
+            filesCoveredOmitted += length - index;
+            break;
+          }
           normalized.push(file);
+          filesCoveredBytes += fileBytes;
+        }
+        if (length > bound && !filesCoveredTruncated) {
+          filesCoveredTruncated = true;
+          filesCoveredOmitted += length - bound;
         }
         filesCovered = normalized;
       }
     }
+    if (!Number.isSafeInteger(truncatedFiles + filesCoveredOmitted)) filesCoveredMalformed = true;
     const malformedCoverage = filesCoveredMalformed
-      || filesCoveredTruncated
       || !truncatedValid
       || (raw.coverageStatus !== undefined && coverageStatus === "unknown" && raw.coverageStatus !== "unknown");
+    const coverageOmission = filesCoveredTruncated || filesCoveredOmitted > 0;
+    const reportedTruncatedFiles = truncatedValid && Number.isSafeInteger(truncatedFiles + filesCoveredOmitted)
+      ? truncatedFiles + filesCoveredOmitted
+      : 0;
     let normalizedStatus: KnowledgeSearchHit["coverageStatus"] = coverageStatus;
     let normalizedComplete = rawComplete;
     if (kind !== "triple" && (rawFilesCovered !== undefined || rawTruncatedFiles !== undefined
@@ -543,7 +580,7 @@ function normalizeKnowledgeHit(value: unknown, now = Date.now()): KnowledgeSearc
       normalizedStatus = "unknown";
       normalizedComplete = false;
     }
-    if (malformedCoverage || (truncatedFiles > 0 && normalizedStatus === "complete")) {
+    if (malformedCoverage || coverageOmission || (truncatedFiles > 0 && normalizedStatus === "complete")) {
       normalizedStatus = malformedCoverage ? "unknown" : "truncated";
       normalizedComplete = false;
     }
@@ -574,7 +611,7 @@ function normalizeKnowledgeHit(value: unknown, now = Date.now()): KnowledgeSearc
       ...(agent === undefined ? {} : { agent }),
       ...(source === undefined ? {} : { source }),
       ...(filesCovered === undefined ? {} : { filesCovered }),
-      ...(rawTruncatedFiles === undefined || !truncatedValid ? {} : { truncatedFiles }),
+      ...(rawTruncatedFiles === undefined && filesCoveredOmitted === 0 || !truncatedValid ? {} : { truncatedFiles: reportedTruncatedFiles }),
       ...(normalizedComplete === undefined ? {} : { complete: normalizedComplete }),
       ...(normalizedStatus === undefined ? {} : { coverageStatus: normalizedStatus }),
     };

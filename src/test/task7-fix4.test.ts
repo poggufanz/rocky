@@ -218,12 +218,25 @@ test("custom MCP query boundaries fail open to bounded safe schemas", async () =
   const signal = new AbortController().signal;
   const stats = await registry.call("stats", {}, signal);
   const statsKeys = Object.keys(stats.structuredContent).sort();
-  assert.deepEqual(statsKeys, ["confirmedFixes", "exposure", "failures", "fixEvents", "notes", "possibleFixes", "resolved", "total", "triples", "unresolved"]);
+  assert.deepEqual(statsKeys, [
+    "confirmedFixes", "coverage", "exposure", "failures", "fixEvents", "memoryCoverage",
+    "memoryCoverageIncomplete", "memoryVersion", "notes", "possibleFixes", "resolved", "total", "triples", "unresolved",
+  ]);
   for (const key of statsKeys.filter((entry) => entry !== "exposure")) {
     const value = stats.structuredContent[key];
+    if (key === "coverage" || key === "memoryCoverage") continue;
+    if (key === "memoryCoverageIncomplete") {
+      assert.equal(value, true);
+      continue;
+    }
+    if (key === "memoryVersion") {
+      assert.equal(value, 1);
+      continue;
+    }
     assert.equal(typeof value, "number");
     assert.ok(typeof value === "number" && Number.isSafeInteger(value) && value >= 0, `${key} must be bounded`);
   }
+  assert.equal((stats.structuredContent.memoryCoverage as { complete: boolean }).complete, false);
   assert.equal(JSON.stringify(stats.structuredContent).includes("giantSecret"), false);
 
   const fetch = await registry.call("fetch_record", { id: "bad" }, signal);

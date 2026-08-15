@@ -285,7 +285,13 @@ test("hostile coverage stays explicit on bounded and AI-error MCP paths", async 
     complete: true,
   };
   const memory = {
-    recall: () => [],
+    recall: () => [{
+      failure: {
+        kind: "failure" as const, id: "hostile-coverage-hit", ts: 1, cwd: "/repo", cmd: "needle",
+        exitCode: 1, fingerprint: "0123456789abcdef", signature: ["needle"], excerpt: "needle",
+      },
+      score: 1,
+    }],
     recentFailures: () => [],
     stats: () => ({ failures: 0, fixEvents: 0, resolved: 0, unresolved: 0 }),
     searchKnowledge: () => [],
@@ -305,7 +311,7 @@ test("hostile coverage stays explicit on bounded and AI-error MCP paths", async 
   assert.ok((statsContent.memoryCoverage?.truncated ?? 0) > 0);
   const ai = await tools.call("recall_with_ai", { query: "needle" }, new AbortController().signal);
   assert.equal(ai.isError, true);
-  const aiContent = ai.structuredContent as { memoryCoverageIncomplete?: boolean; memoryCoverage?: { complete?: boolean; truncated?: number } };
+  const aiContent = ai.structuredContent as { aiStatus?: string; memoryCoverageIncomplete?: boolean; memoryCoverage?: { complete?: boolean; truncated?: number } };
   assert.equal(aiContent.memoryCoverageIncomplete, true);
   assert.equal(aiContent.memoryCoverage?.complete, false);
   assert.ok((aiContent.memoryCoverage?.truncated ?? 0) > 0);
@@ -385,8 +391,9 @@ test("MCP provider read errors cannot become clean fallback answers", async () =
   assert.equal(statsContent.memoryCoverage?.complete, false);
   assert.equal(statsContent.memoryCoverage?.reason, "read-race");
   const ai = await registry.call("recall_with_ai", { query: "needle" }, new AbortController().signal);
-  const aiContent = ai.structuredContent as { memoryCoverageIncomplete?: boolean; memoryCoverage?: { complete?: boolean; reason?: string } };
-  assert.equal(ai.isError, true);
+  const aiContent = ai.structuredContent as { aiStatus?: string; memoryCoverageIncomplete?: boolean; memoryCoverage?: { complete?: boolean; reason?: string } };
+  assert.equal(ai.isError, undefined);
+  assert.equal(aiContent.aiStatus, "no_hits");
   assert.equal(aiContent.memoryCoverageIncomplete, true);
   assert.equal(aiContent.memoryCoverage?.complete, false);
   assert.equal(aiContent.memoryCoverage?.reason, "read-race");

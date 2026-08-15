@@ -17,7 +17,7 @@ import {
   safeOpaqueIdentifier,
 } from "./privacy.js";
 import { boundTripleRecord, isKnownPathPlatform, isSafeNonNegativeInteger, MAX_MEMORY_FILE_BYTES, MAX_SUPPORTED_MEMORY_RECORDS, parseMemoryRecord } from "../core/memory-read.js";
-import type { FailureRecord, MemoryCoverage, TripleRecord } from "../core/memory-read.js";
+import type { FailureRecord, FixRecord, MemoryCoverage, TripleRecord } from "../core/memory-read.js";
 
 /** Versioned read-only catalog used by MCP discovery and setup health. */
 const MCP_TOOL_NAMES = [
@@ -660,6 +660,79 @@ function safeProviderFailureRecord(
   }
 }
 
+/** Snapshot a custom fix before it reaches the projection boundary. */
+function safeProviderFixRecord(value: unknown, knownKind?: unknown): FixRecord | undefined {
+  try {
+    if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+    const raw = value as Record<string, unknown>;
+    const kind = knownKind === undefined ? raw.kind : knownKind;
+    if (kind !== "fix") return undefined;
+    const idValue = boundedProviderText(raw.id, 512, MAX_FIELD_BYTES);
+    if (!idValue.valid || idValue.value.length === 0 || /[\u0000-\u001f\u007f-\u009f]/u.test(idValue.value)) return undefined;
+    const ts = raw.ts;
+    if (!isSafeNonNegativeInteger(ts)) return undefined;
+    const cwd = boundedProviderText(raw.cwd, MAX_FIELD_BYTES * 2, MAX_FIELD_BYTES * 2);
+    const cmd = boundedProviderText(raw.cmd, MAX_FIELD_BYTES * 2, MAX_FIELD_BYTES * 2);
+    if (!cwd.valid || !cmd.valid) return undefined;
+    const failureIds = boundedProviderStrings(raw.failureIds);
+    if (!failureIds.valid) return undefined;
+    const candidateFailureIdsValue = raw.candidateFailureIds;
+    const candidateFailureIds = candidateFailureIdsValue === undefined
+      ? { values: [] as string[], valid: true }
+      : boundedProviderStrings(candidateFailureIdsValue);
+    if (!candidateFailureIds.valid) return undefined;
+    const linksValue = raw.links;
+    let links: FixRecord["links"] | undefined;
+    if (linksValue !== undefined) {
+      const boundedLinks = boundedProviderArray(linksValue);
+      if (!boundedLinks.valid || boundedLinks.truncated) return undefined;
+      links = [];
+      for (const entry of boundedLinks.values) {
+        if (typeof entry !== "object" || entry === null || Array.isArray(entry)) return undefined;
+        const link = entry as Record<string, unknown>;
+        const linkId = boundedProviderText(link.id, 512, MAX_FIELD_BYTES);
+        const basis = link.basis;
+        const confidence = link.confidence;
+        if (!linkId.valid || linkId.value.length === 0 || /[\u0000-\u001f\u007f-\u009f]/u.test(linkId.value) ||
+            (basis !== "identity" && basis !== "signature" && basis !== "program") ||
+            (confidence !== undefined && confidence !== "confirmed" && confidence !== "possible")) return undefined;
+        links.push({
+          id: linkId.value,
+          basis,
+          ...(confidence === undefined ? {} : { confidence }),
+        });
+      }
+    }
+    const commandIdentity = optionalProviderText(raw.commandIdentity, MAX_FIELD_BYTES * 2, MAX_FIELD_BYTES * 2);
+    if (!commandIdentity.valid) return undefined;
+    const identityV = raw.identityV;
+    const identityReliable = raw.identityReliable;
+    const platformValue = raw.platform;
+    const hasIdentity = commandIdentity.value !== undefined || identityV !== undefined
+      || identityReliable !== undefined || platformValue !== undefined;
+    if (hasIdentity && (commandIdentity.value === undefined || identityV !== 1
+        || typeof identityReliable !== "boolean" || !isKnownPathPlatform(platformValue))) return undefined;
+    return {
+      kind: "fix",
+      id: idValue.value,
+      ts,
+      cwd: cwd.value,
+      cmd: cmd.value,
+      failureIds: failureIds.values,
+      ...(candidateFailureIdsValue === undefined ? {} : { candidateFailureIds: candidateFailureIds.values }),
+      ...(links === undefined ? {} : { links }),
+      ...(hasIdentity ? {
+        commandIdentity: commandIdentity.value!,
+        identityV: 1 as const,
+        identityReliable: identityReliable as boolean,
+        platform: platformValue as NodeJS.Platform,
+      } : {}),
+    };
+  } catch {
+    return undefined;
+  }
+}
+
 function boundedProviderTriples(value: ReturnType<typeof boundedProviderArray>): { candidates: TripleRecord[]; malformed: boolean; truncated: boolean } {
   const candidates: TripleRecord[] = [];
   let malformed = !value.valid;
@@ -922,12 +995,7 @@ function safeMemoryStats(value: unknown, canonical = false): SafeStatsSnapshot {
       possibleFixesValue, triplesValue, notesValue, totalValue,
     ];
     if (values.some((entry) => entry !== undefined && !isSafeNonNegativeInteger(entry))) {
-      // Keep the legacy bounded zero schema for an object-shaped provider
-      // result.  The object was read successfully, so older custom query
-      // implementations do not acquire a synthetic memory-read failure just
-      // because one counter was malformed; top-level/throwing shapes still
-      // return `valid: false` above or from the catch below.
-      return { value: emptyStats(), valid: true };
+      return { value: emptyStats(), valid: false };
     }
     const failures = failuresValue === undefined ? 0 : failuresValue as number;
     const fixEvents = fixEventsValue === undefined ? 0 : fixEventsValue as number;
@@ -977,10 +1045,14 @@ function unknownMemoryCoverage(): MemoryCoverage {
   });
 }
 
-function memoryCoverage(memory: MemoryQueries, forceUnknown = false): MemoryCoverage | undefined {
+function memoryCoverage(
+  _memory: MemoryQueries,
+  forceUnknown = false,
+  coverageReader?: () => unknown,
+): MemoryCoverage | undefined {
   if (forceUnknown) return unknownMemoryCoverage();
   try {
-    const supplied: unknown = memory.coverage?.();
+    const supplied: unknown = coverageReader === undefined ? undefined : coverageReader();
     if (supplied === undefined) return undefined;
     if (typeof supplied !== "object" || supplied === null || Array.isArray(supplied)) return unknownMemoryCoverage();
     const value = supplied as Record<string, unknown>;
@@ -1031,22 +1103,64 @@ const MCP_AI_STATUSES = Object.freeze([
 ] as const);
 const MCP_AI_ACTS = Object.freeze(["known_fix", "unresolved", "ambiguous"] as const);
 
-function isSafeRecallAiOutcome(value: unknown): value is RecallAiOutcome {
+/** Read custom AI output once into bounded plain data before any merge/cap. */
+function snapshotRecallAiOutcome(value: unknown): RecallAiOutcome | undefined {
   try {
-    if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
-    const candidate = value as Record<string, unknown>;
-    if (typeof candidate.aiStatus !== "string" || !MCP_AI_STATUSES.includes(candidate.aiStatus as typeof MCP_AI_STATUSES[number])) return false;
-    if (!Array.isArray(candidate.rankedCandidateIds) || candidate.rankedCandidateIds.length > 5 ||
-        !candidate.rankedCandidateIds.every((id) => typeof id === "string")) return false;
-    if (candidate.act !== undefined && (typeof candidate.act !== "string" || !MCP_AI_ACTS.includes(candidate.act as typeof MCP_AI_ACTS[number]))) return false;
-    if (candidate.evidenceRefs !== undefined && (!Array.isArray(candidate.evidenceRefs) || candidate.evidenceRefs.length > 10 ||
-        !candidate.evidenceRefs.every((ref) => typeof ref === "string"))) return false;
-    if (candidate.confidence !== undefined && (typeof candidate.confidence !== "number" || !Number.isFinite(candidate.confidence) ||
-        candidate.confidence < 0 || candidate.confidence > 1)) return false;
-    if (candidate.explanation !== undefined && (typeof candidate.explanation !== "string" || [...candidate.explanation].length > 300)) return false;
-    return true;
+    if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+    const source = value as Record<string, unknown>;
+    const aiStatus = source.aiStatus;
+    if (typeof aiStatus !== "string" || !MCP_AI_STATUSES.includes(aiStatus as typeof MCP_AI_STATUSES[number])) return undefined;
+    const rankedValue = source.rankedCandidateIds;
+    if (!Array.isArray(rankedValue)) return undefined;
+    const rankedLength = rankedValue.length;
+    if (!Number.isSafeInteger(rankedLength) || rankedLength > 5) return undefined;
+    const rankedCandidateIds: string[] = [];
+    for (let index = 0; index < rankedLength; index += 1) {
+      const id = rankedValue[index];
+      if (typeof id !== "string" || id.length > MAX_FIELD_BYTES * 2 || Buffer.byteLength(id, "utf8") > MAX_FIELD_BYTES * 2) return undefined;
+      rankedCandidateIds.push(id);
+    }
+
+    const act = source.act;
+    if (act !== undefined && (typeof act !== "string" || !MCP_AI_ACTS.includes(act as typeof MCP_AI_ACTS[number]))) return undefined;
+
+    const evidenceValue = source.evidenceRefs;
+    let evidenceRefs: string[] | undefined;
+    if (evidenceValue !== undefined) {
+      if (!Array.isArray(evidenceValue)) return undefined;
+      const evidenceLength = evidenceValue.length;
+      if (!Number.isSafeInteger(evidenceLength) || evidenceLength > 10) return undefined;
+      evidenceRefs = [];
+      for (let index = 0; index < evidenceLength; index += 1) {
+        const ref = evidenceValue[index];
+        if (typeof ref !== "string" || ref.length > MAX_FIELD_BYTES * 2 || Buffer.byteLength(ref, "utf8") > MAX_FIELD_BYTES * 2) return undefined;
+        evidenceRefs.push(ref);
+      }
+    }
+
+    const confidence = source.confidence;
+    if (confidence !== undefined && (typeof confidence !== "number" || !Number.isFinite(confidence) || confidence < 0 || confidence > 1)) return undefined;
+
+    const explanation = source.explanation;
+    if (explanation !== undefined) {
+      if (typeof explanation !== "string" || explanation.length > 600 || Buffer.byteLength(explanation, "utf8") > MAX_FIELD_BYTES) return undefined;
+      let codePoints = 0;
+      for (const character of explanation) {
+        void character;
+        codePoints += 1;
+        if (codePoints > 300) return undefined;
+      }
+    }
+    return {
+      aiStatus: aiStatus as RecallAiOutcome["aiStatus"],
+      rankedCandidateIds,
+      ...(act === undefined ? {} : { act: act as RecallAiOutcome["act"] }),
+      ...(evidenceRefs === undefined ? {} : { evidenceRefs }),
+      ...(confidence === undefined ? {} : { confidence }),
+      ...(explanation === undefined ? {} : { explanation }),
+    };
   } catch {
-    return false;
+    return undefined;
   }
 }
 
@@ -1066,13 +1180,13 @@ async function runAi<T>(operation: () => Promise<T>): Promise<T> {
 
 function mergeAi(
   payload: object,
-  ai: unknown,
+  ai: RecallAiOutcome | undefined,
   aiCandidateIds: readonly string[],
 ): Record<string, unknown> {
   const source = payload as Record<string, unknown>;
   const items = Array.isArray(source.items) ? source.items.filter(isItem) : [];
   const itemIds = items.map((item) => item.candidateId);
-  if (!isSafeRecallAiOutcome(ai)) {
+  if (ai === undefined) {
     return { ...source, aiStatus: "invalid_output", items, rankedCandidateIds: itemIds, truncated: true };
   }
   const rankedValid = validRankedCandidateIds(ai.rankedCandidateIds, aiCandidateIds);
@@ -1110,6 +1224,50 @@ function mergeAi(
   };
 }
 
+/**
+ * Keep the deterministic prefix handed to AI inside the same final envelope
+ * cap used for the returned ToolCallResult.  The synthetic outcome is the
+ * largest valid AI annotation, so a prefix that survives it cannot be popped
+ * by a smaller real outcome.
+ */
+function retainAiHitsForEnvelope(payload: object, hits: readonly RecallHit[]): readonly RecallHit[] {
+  const source = payload as Record<string, unknown>;
+  const items = Array.isArray(source.items) ? source.items.filter(isItem) : [];
+  const maximum = Math.min(5, hits.length);
+  for (let count = maximum; count >= 0; count -= 1) {
+    const candidateIds = hits.slice(0, count).map((_, index) => `c${index + 1}`);
+    const evidenceRefs: string[] = [];
+    for (const item of items) {
+      if (evidenceRefs.length >= 10) break;
+      evidenceRefs.push(`${item.candidateId}.failure`);
+      if ((item as { hasFix?: unknown }).hasFix === true && evidenceRefs.length < 10) {
+        evidenceRefs.push(`${item.candidateId}.fix`);
+      }
+    }
+    const worstOutcome: RecallAiOutcome = {
+      aiStatus: "invalid_output",
+      act: "unresolved",
+      confidence: 0.9999999999999999,
+      // JSON.stringify escapes controls to six bytes each; this is a larger
+      // valid explanation witness than astral text and keeps the cap proof
+      // conservative for every 300-code-point explanation.
+      explanation: "\u0000".repeat(300),
+      rankedCandidateIds: candidateIds,
+      evidenceRefs,
+    };
+    try {
+      const result = cappedResult(mergeAi(payload, worstOutcome, candidateIds));
+      const retained = Array.isArray(result.structuredContent.items)
+        ? result.structuredContent.items.filter(isItem).map((item) => item.candidateId)
+        : [];
+      if (candidateIds.every((id) => retained.includes(id))) return hits.slice(0, count);
+    } catch {
+      // Try a shorter prefix. If none fits, no custom model input is safe.
+    }
+  }
+  return [];
+}
+
 function deterministicAiFallback(payload: object, aiStatus: "unavailable" | "invalid_output"): Record<string, unknown> {
   const source = payload as Record<string, unknown>;
   const items = Array.isArray(source.items) ? source.items.filter(isItem) : [];
@@ -1124,6 +1282,21 @@ interface StatsFlightResult {
 
 export function createToolRegistry(options: CreateToolRegistryOptions): McpToolRegistry {
   const definitions = freezeDeep(descriptors(options.exposure));
+  // Snapshot optional provider method once. Clean legacy queries without a
+  // witness omit coverage; any forced-failure path emits explicit unknown.
+  let coverageReader: (() => unknown) | undefined;
+  try {
+    const coverageMethod = options.memory.coverage;
+    if (coverageMethod === undefined) {
+      coverageReader = undefined;
+    } else if (typeof coverageMethod === "function") {
+      coverageReader = () => coverageMethod.call(options.memory);
+    } else {
+      coverageReader = () => { throw new Error("invalid coverage provider"); };
+    }
+  } catch {
+    coverageReader = () => { throw new Error("coverage provider unavailable"); };
+  }
   // Sanitized ID handles: sha256 handles are computed statelessly during
   // projection and committed to the bounded registry only for hits that
   // survive the response cap.  Registering during projection would let a
@@ -1146,9 +1319,13 @@ export function createToolRegistry(options: CreateToolRegistryOptions): McpToolR
       const rawStats = safeReadMemory<unknown>(() => options.memory.stats(input), {}, canonicalMemory, readState);
       const snapshot = safeMemoryStats(rawStats, canonicalMemory);
       if (!snapshot.valid) readState.failed = true;
-      return { stats: snapshot.value, coverage: memoryCoverage(options.memory, readState.failed) };
+      return { stats: snapshot.value, coverage: memoryCoverage(options.memory, readState.failed, coverageReader) };
     } catch (error) {
-      return { stats: emptyStats(), coverage: memoryCoverage(options.memory, true), error };
+      return {
+        stats: emptyStats(),
+        coverage: memoryCoverage(options.memory, true, coverageReader),
+        error,
+      };
     }
   };
   const statsFromDurableSnapshot = (snapshot: DurableMemorySnapshot | undefined, input: StatsQuery): StatsFlightResult => snapshot === undefined
@@ -1232,7 +1409,7 @@ export function createToolRegistry(options: CreateToolRegistryOptions): McpToolR
             const input = parseRecallArgs(args, options.exposure);
             const readState: SafeMemoryReadState = { failed: false };
             const hits = safeReadMemory(() => options.memory.recall(input), [], canonicalMemory, readState);
-            const coverage = memoryCoverage(options.memory, readState.failed);
+            const coverage = memoryCoverage(options.memory, readState.failed, coverageReader);
             pairedCoverage = coverage;
             const projected = safeProjection(
               () => projectRecallHits(hits, options.exposure),
@@ -1252,7 +1429,7 @@ export function createToolRegistry(options: CreateToolRegistryOptions): McpToolR
             const input = parseRecentArgs(args, options.exposure);
             const readState: SafeMemoryReadState = { failed: false };
             const hits = safeReadMemory(() => options.memory.recentFailures(input), [], canonicalMemory, readState);
-            const coverage = memoryCoverage(options.memory, readState.failed);
+            const coverage = memoryCoverage(options.memory, readState.failed, coverageReader);
             pairedCoverage = coverage;
             const projected = safeProjection(
               () => projectRecentFailures(hits, options.exposure),
@@ -1289,7 +1466,7 @@ export function createToolRegistry(options: CreateToolRegistryOptions): McpToolR
             const input = parseKnowledgeArgs(args);
             const readState: SafeMemoryReadState = { failed: false };
             const hits = safeReadMemory(() => options.memory.searchKnowledge(input), [], canonicalMemory, readState);
-            const coverage = memoryCoverage(options.memory, readState.failed);
+            const coverage = memoryCoverage(options.memory, readState.failed, coverageReader);
             pairedCoverage = coverage;
             const { projector, pending } = createPendingKnowledgeIdProjector();
             const projected = safeProjection(
@@ -1320,7 +1497,7 @@ export function createToolRegistry(options: CreateToolRegistryOptions): McpToolR
             const id = parseFetchArgs(args);
             const readState: SafeMemoryReadState = { failed: false };
             const record = safeReadMemory(() => options.memory.fetchRecord(resolveKnowledgeId(id)), undefined, canonicalMemory, readState);
-            const coverage = memoryCoverage(options.memory, readState.failed);
+            const coverage = memoryCoverage(options.memory, readState.failed, coverageReader);
             pairedCoverage = coverage;
             try {
               if (record === undefined || typeof record !== "object" || record === null || Array.isArray(record)) return notFoundResult(coverage);
@@ -1330,11 +1507,19 @@ export function createToolRegistry(options: CreateToolRegistryOptions): McpToolR
               const origin = recordKind === "failure" ? recordObject.origin : undefined;
               if (recordKind === "failure" && origin !== undefined &&
                   origin !== "run" && origin !== "hook" && origin !== "watch") return notFoundResult(coverage);
-              const normalized = !canonicalMemory && recordKind === "triple"
+              // Custom providers are untrusted: once the discriminator is
+              // read, every supported kind must stay on a bounded snapshot
+              // path.  The durable parser may inspect canonical records, but
+              // must never reread a changing custom object.
+              const normalized = canonicalMemory
+                ? parseMemoryRecord(record)
+                : recordKind === "triple"
                 ? safeTripleRecord(record, recordKind)
-                : !canonicalMemory && recordKind === "failure"
+                : recordKind === "failure"
                 ? safeProviderFailureRecord(record, recordKind, origin, true)
-                : parseMemoryRecord(record);
+                : recordKind === "fix"
+                ? safeProviderFixRecord(record, recordKind)
+                : undefined;
               if (normalized === undefined || normalized.kind === "note") return notFoundResult(coverage);
               const projected = projectMemoryRecord(normalized, options.exposure, options.exposure === "sanitized");
               if (projected === undefined) return notFoundResult(coverage);
@@ -1375,7 +1560,7 @@ export function createToolRegistry(options: CreateToolRegistryOptions): McpToolR
                 : rawEvidence,
               unknownEvidence,
             );
-            const memoryScan = memoryCoverage(options.memory, readState.failed);
+            const memoryScan = memoryCoverage(options.memory, readState.failed, coverageReader);
             pairedCoverage = memoryScan;
             const projected = safeProjection(() => ({
               exposure: options.exposure,
@@ -1394,14 +1579,27 @@ export function createToolRegistry(options: CreateToolRegistryOptions): McpToolR
             const input = parseRecallArgs(args, options.exposure, 10);
             const readState: SafeMemoryReadState = { failed: false };
             const hits = safeReadMemory(() => options.memory.recall(input), [], canonicalMemory, readState);
-            const coverage = memoryCoverage(options.memory, readState.failed);
+            const coverage = memoryCoverage(options.memory, readState.failed, coverageReader);
             pairedCoverage = coverage;
             const aiProjection = safeProjection(
               () => projectRecallHitsForAi(hits, options.exposure),
               { response: { exposure: options.exposure, items: [], truncated: true }, hits: [] as readonly RecallHit[] },
             );
             const enriched = { ...aiProjection.response, ...memoryCoveragePayload(coverage) };
-            const aiHits = aiProjection.hits;
+            const aiHits = retainAiHitsForEnvelope(enriched, aiProjection.hits);
+            if (aiHits.length === 0) {
+              const deterministicItems = Array.isArray(enriched.items) ? enriched.items.filter(isItem) : [];
+              const noHits = {
+                ...enriched,
+                aiStatus: "no_hits",
+                items: deterministicItems,
+                rankedCandidateIds: deterministicItems.map((item) => item.candidateId),
+              };
+              return safeProjection(
+                () => cappedResult(noHits),
+                cappedResult({ ...enriched, aiStatus: "no_hits", items: [], rankedCandidateIds: [], truncated: true }),
+              );
+            }
             let ai: unknown;
             try {
               ai = await runAi(() => options.recallWithAi.run(
@@ -1414,10 +1612,11 @@ export function createToolRegistry(options: CreateToolRegistryOptions): McpToolR
                 throw error;
               }
             }
+            const safeAi = snapshotRecallAiOutcome(ai);
             const aiCandidateIds = aiHits.map((_, index) => `c${index + 1}`);
             return safeProjection(
-              () => cappedResult(mergeAi(enriched, ai, aiCandidateIds)),
-              cappedResult(deterministicAiFallback(enriched, isSafeRecallAiOutcome(ai) ? "unavailable" : "invalid_output")),
+              () => cappedResult(mergeAi(enriched, safeAi, aiCandidateIds)),
+              cappedResult(deterministicAiFallback(enriched, safeAi !== undefined ? "unavailable" : "invalid_output")),
             );
           }
           default:

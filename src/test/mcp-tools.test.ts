@@ -235,6 +235,35 @@ test("custom fetch_record snapshots failure origin before projection", async () 
   assert.equal((result.structuredContent.record as { id: string }).id, failure.id);
 });
 
+test("custom fetch_record snapshots discriminator before routing a kind-swapped record", async () => {
+  const base = completeWhyTriple("fetch-kind-snapshot");
+  let kindReads = 0;
+  let agentReads = 0;
+  const candidate = new Proxy(base, {
+    get(target, property, receiver) {
+      if (property === "kind") {
+        kindReads += 1;
+        return kindReads === 1 ? "fix" : "triple";
+      }
+      if (property === "agent") {
+        agentReads += 1;
+        return agentReads === 1 ? "codex" : "Bearer KIND-SWAP-TOPSECRET";
+      }
+      return Reflect.get(target, property, receiver);
+    },
+    ownKeys() { throw new Error("kind-swapped record must not be enumerated"); },
+  });
+  const result = await createToolRegistry({
+    exposure: "sanitized",
+    memory: { ...createMemoryQueries(() => []), fetchRecord: () => candidate as unknown as MemoryRecord },
+    recallWithAi: disabledRecallWithAi,
+  }).call("fetch_record", { id: base.id }, new AbortController().signal);
+  assert.equal(kindReads, 1);
+  assert.equal(agentReads, 0);
+  assert.doesNotMatch(JSON.stringify(result), /KIND-SWAP-TOPSECRET|Bearer/u);
+  assert.ok(result.structuredContent.record === null || result.structuredContent.error !== undefined);
+});
+
 test("why_file keeps two index suffixes ambiguous and future knowledge inert", async () => {
   const first: TripleRecord = {
     ...triple, id: "index-one", ts: 10, cwd: "/repo", platform: "linux", mechanism: {
@@ -939,6 +968,57 @@ test("custom stats and coverage snapshot primitive fields once and reject hostil
     assert.equal(malformedResult.structuredContent.memoryCoverageIncomplete, true);
     assert.equal((malformedResult.structuredContent.memoryCoverage as { complete: boolean }).complete, false);
   }
+  let coveragePropertyReads = 0;
+  const changingCoverage = {
+    ...createMemoryQueries(() => []),
+    stats: () => ({ failures: Number.NaN }) as never,
+    get coverage() {
+      coveragePropertyReads += 1;
+      return coveragePropertyReads === 1 ? undefined : (() => ({ secret: "COVERAGE-TOPSECRET" })) as never;
+    },
+  };
+  const changingCoverageResult = await createToolRegistry({
+    exposure: "sanitized", memory: changingCoverage, recallWithAi: disabledRecallWithAi,
+  }).call("stats", {}, new AbortController().signal);
+  assert.equal(coveragePropertyReads, 1);
+  assert.equal((changingCoverageResult.structuredContent.memoryCoverage as { complete: boolean }).complete, false);
+  assert.doesNotMatch(JSON.stringify(changingCoverageResult), /COVERAGE-TOPSECRET|secret/u);
+});
+
+test("present malformed custom stats counters force unknown coverage", async () => {
+  const complete = Object.freeze({
+    version: 1 as const, scanned: 1, skipped: 0, truncated: 0,
+    bytesScanned: 10, bytesTotal: 10, complete: true as const,
+  });
+  const fields = ["failures", "fixEvents", "resolved", "unresolved", "confirmedFixes", "possibleFixes", "triples", "notes", "total"] as const;
+  for (const field of fields) {
+    const stats = {
+      failures: 0, fixEvents: 0, resolved: 0, unresolved: 0, confirmedFixes: 0,
+      possibleFixes: 0, triples: 0, notes: 0, total: 0,
+      [field]: field === "total" ? "Bearer STATS-TOPSECRET" : Number.NaN,
+    };
+    const result = await createToolRegistry({
+      exposure: "sanitized",
+      memory: { ...createMemoryQueries(() => []), stats: () => stats as never, coverage: () => complete },
+      recallWithAi: disabledRecallWithAi,
+    }).call("stats", {}, new AbortController().signal);
+    assert.equal(result.structuredContent.failures, 0);
+    assert.equal(result.structuredContent.total, 0);
+    assert.equal(result.structuredContent.memoryCoverageIncomplete, true, field);
+    assert.equal((result.structuredContent.memoryCoverage as { complete: boolean }).complete, false, field);
+    assert.doesNotMatch(JSON.stringify(result), /STATS-TOPSECRET|NaN/u);
+  }
+  const legacy = await createToolRegistry({
+    exposure: "sanitized",
+    memory: {
+      ...createMemoryQueries(() => []),
+      stats: () => ({ failures: 1, fixEvents: 0, resolved: 0, unresolved: 1 }),
+    },
+    recallWithAi: disabledRecallWithAi,
+  }).call("stats", {}, new AbortController().signal);
+  assert.equal(legacy.structuredContent.failures, 1);
+  assert.equal(legacy.structuredContent.confirmedFixes, 0);
+  assert.equal(legacy.structuredContent.total, 1);
 });
 
 test("oversized custom rationale tags fail why coverage closed", async () => {
@@ -1322,7 +1402,7 @@ test("recall_with_ai receives only a validated deterministic candidate prefix", 
     recallWithAi: ai,
   });
   const secondResult = await invalidFirst.call("recall_with_ai", { query: "needle", limit: 10 }, new AbortController().signal);
-  assert.deepEqual(observed[1], []);
+  assert.equal(observed.length, 1, "no model call when no validated prefix survives");
   assert.deepEqual((secondResult.structuredContent.items as Array<{ candidateId: string }>).map((item) => item.candidateId), ["c3", "c4", "c5", "c6", "c7"]);
   assert.deepEqual(secondResult.structuredContent.rankedCandidateIds, ["c3", "c4", "c5", "c6", "c7"]);
 });
@@ -1346,6 +1426,64 @@ test("AI refs only name candidates retained by projection and response capping",
   assert.deepEqual(refs, ["c1.failure"]);
   assert.ok(refs.every((ref) => ids.has(ref.split(".")[0])));
   assert.equal(JSON.stringify(result).includes("c5"), false);
+});
+
+test("recall_with_ai preflights final envelope before sending large candidates", async () => {
+  const field = "x".repeat(9_000);
+  const largeRecords: FailureRecord[] = Array.from({ length: 5 }, (_, index) => ({
+    kind: "failure", id: `ai-envelope-${index}`, ts: index + 1, cwd: "/repo", cmd: `needle ${field}`,
+    exitCode: 1, fingerprint: `ai-envelope-fp-${index}`, signature: [field], excerpt: field, origin: "run",
+  }));
+  let observed: string[] = [];
+  const ai: RecallWithAiPort = {
+    async run(input) {
+      observed = input.hits.map((hit) => hit.failure.id);
+      return {
+        aiStatus: "used", act: "unresolved", confidence: 0.9999999999999999,
+        explanation: "🙂".repeat(300),
+        rankedCandidateIds: input.hits.map((_, index) => `c${index + 1}`),
+      };
+    },
+  };
+  const result = await createToolRegistry({
+    exposure: "raw", memory: createMemoryQueries(() => largeRecords), recallWithAi: ai,
+  }).call("recall_with_ai", { query: "needle", limit: 5 }, new AbortController().signal);
+  const finalIds = (result.structuredContent.items as Array<{ rawRecord?: { failure?: { id?: string } } }>).map(
+    (item) => item.rawRecord?.failure?.id ?? "",
+  );
+  assert.ok(observed.length < 5, `model received ${observed.length} candidates`);
+  assert.ok(observed.every((id) => finalIds.includes(id)), `model candidates missing from final output: ${observed.join(",")}`);
+  assert.ok(Buffer.byteLength(JSON.stringify(result), "utf8") <= MAX_RESPONSE_BYTES - TOOL_ENVELOPE_RESERVE_BYTES);
+});
+
+test("recall_with_ai snapshots hostile outcome metadata before final capping", async () => {
+  const field = "x".repeat(9_000);
+  const largeRecords: FailureRecord[] = Array.from({ length: 5 }, (_, index) => ({
+    kind: "failure", id: `ai-snapshot-${index}`, ts: index + 1, cwd: "/repo", cmd: `needle ${field}`,
+    exitCode: 1, fingerprint: `ai-snapshot-fp-${index}`, signature: [field], excerpt: field, origin: "run",
+  }));
+  let explanationReads = 0;
+  const outcome = new Proxy({
+    aiStatus: "used", act: "unresolved", confidence: 0.9999999999999999,
+    rankedCandidateIds: ["c1", "c2", "c3", "c4", "c5"],
+    explanation: "🙂".repeat(300),
+  }, {
+    get(target, property, receiver) {
+      if (property === "explanation") {
+        explanationReads += 1;
+        return explanationReads === 1 ? target.explanation : "Bearer AI-OUTCOME-TOPSECRET".repeat(100_000);
+      }
+      return Reflect.get(target, property, receiver);
+    },
+    ownKeys() { throw new Error("AI outcome must not be enumerated"); },
+  });
+  const result = await createToolRegistry({
+    exposure: "raw", memory: createMemoryQueries(() => largeRecords),
+    recallWithAi: { async run() { return outcome as never; } },
+  }).call("recall_with_ai", { query: "needle", limit: 5 }, new AbortController().signal);
+  assert.equal(explanationReads, 1);
+  assert.doesNotMatch(JSON.stringify(result), /AI-OUTCOME-TOPSECRET|Bearer/u);
+  assert.ok(Buffer.byteLength(JSON.stringify(result), "utf8") <= MAX_RESPONSE_BYTES - TOOL_ENVELOPE_RESERVE_BYTES);
 });
 
 test("complete tool result cap removes whole trailing items and fits modern and legacy wire envelopes", async () => {
@@ -1455,13 +1593,16 @@ test("unrecognized provider codes fail open without leaking details", async () =
   }
 });
 
-test("non-item response overflow fails open to a bounded fallback", async () => {
+test("recall_with_ai skips model output when deterministic recall is empty", async () => {
+  let calls = 0;
   const ai: RecallWithAiPort = {
-    async run() { return { aiStatus: "disabled", rankedCandidateIds: [], explanation: "x".repeat(MAX_RESPONSE_BYTES) }; },
+    async run() { calls += 1; return { aiStatus: "disabled", rankedCandidateIds: [], explanation: "x".repeat(MAX_RESPONSE_BYTES) }; },
   };
   const result = await createToolRegistry({ exposure: "sanitized", memory: createMemoryQueries(() => records), recallWithAi: ai })
     .call("recall_with_ai", { query: "not-present" }, new AbortController().signal);
   assert.equal(result.isError, undefined);
-  assert.equal(result.structuredContent.truncated, true);
+  assert.equal(calls, 0);
+  assert.equal(result.structuredContent.aiStatus, "no_hits");
+  assert.equal(result.structuredContent.truncated, false);
   assert.ok(Buffer.byteLength(JSON.stringify(result), "utf8") <= MAX_RESPONSE_BYTES);
 });
