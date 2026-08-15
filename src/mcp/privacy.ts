@@ -166,7 +166,7 @@ function projectText(value: string, exposure: Exposure, path: string, truncation
 }
 
 const ROCKY_ID = /^(?:[0-9a-f]{16,64}|[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}|(?:triple|failure|fix|association|note)-[A-Za-z0-9._-]{1,96})$/iu;
-const SENSITIVE_ID_WORD = /(?:password|passwd|secret|token|credential|authorization|api[-_]?key)/iu;
+const SENSITIVE_ID_WORD = /(?:password|passwd|secret|token|credential|authorization|api[-_]?key|gh[pousr]_[A-Za-z0-9]{8,}|github_pat_[A-Za-z0-9_]{8,}|glpat-[A-Za-z0-9_-]{8,}|sk-[A-Za-z0-9_-]{8,}|xox[baprs]-[A-Za-z0-9-]{8,}|(?:AKIA|ASIA)[0-9A-Z]{16})/iu;
 
 export function safeOpaqueIdentifier(value: string): boolean {
   return value.length > 0 && value.length <= 128 && !/[\u0000-\u001f\u007f-\u009f]/u.test(value)
@@ -283,7 +283,9 @@ function projectOpaqueIds(values: readonly string[], path: string, truncation: T
       }
       const boundedInput = boundProjectionInput(value);
       if (boundedInput.length !== value.length) wasTruncated = true;
-      const safe = sanitize ? redactText(boundedInput) : normalizeOutputText(boundedInput);
+      const safe = sanitize
+        ? (safeOpaqueIdentifier(boundedInput) ? boundedInput : "[redacted]")
+        : normalizeOutputText(boundedInput);
       const clipped = truncateUtf8(safe, MAX_FIELD_BYTES);
       if (clipped.truncated) wasTruncated = true;
       const itemBytes = Buffer.byteLength(clipped.value, "utf8");
@@ -860,7 +862,7 @@ function boundedStringArray(value: unknown, maximum = MAX_NESTED_ITEMS): string[
   }
 }
 
-function normalizeSourceHit(value: unknown): SourceHit | undefined {
+function normalizeSourceHit(value: unknown, now: number): SourceHit | undefined {
   try {
     if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
     const raw = value as Record<string, unknown>;
@@ -868,14 +870,15 @@ function normalizeSourceHit(value: unknown): SourceHit | undefined {
     if (typeof failureValue !== "object" || failureValue === null || Array.isArray(failureValue)) return undefined;
     const failureRaw = failureValue as Record<string, unknown>;
     const signature = boundedStringArray(failureRaw.signature);
+    const failureTsValue = failureRaw.ts;
     if (failureRaw.kind !== "failure" || typeof failureRaw.id !== "string" || failureRaw.id.length === 0 ||
-        /[\u0000-\u001f\u007f-\u009f]/u.test(failureRaw.id) || !isSafeNonNegativeInteger(failureRaw.ts) ||
+        /[\u0000-\u001f\u007f-\u009f]/u.test(failureRaw.id) || !isSafeNonNegativeInteger(failureTsValue) || failureTsValue > now ||
         typeof failureRaw.cwd !== "string" || typeof failureRaw.cmd !== "string" ||
         !Number.isSafeInteger(failureRaw.exitCode) || typeof failureRaw.fingerprint !== "string" ||
         signature === undefined ||
         typeof failureRaw.excerpt !== "string" ||
         (failureRaw.origin !== undefined && failureRaw.origin !== "run" && failureRaw.origin !== "hook" && failureRaw.origin !== "watch")) return undefined;
-    const failureTs = failureRaw.ts as number;
+    const failureTs = failureTsValue as number;
     const failureExitCode = failureRaw.exitCode as number;
     const failure: FailureRecord = {
       kind: "failure", id: failureRaw.id, ts: failureTs, cwd: failureRaw.cwd, cmd: failureRaw.cmd,
@@ -888,12 +891,13 @@ function normalizeSourceHit(value: unknown): SourceHit | undefined {
       if (typeof raw.fix !== "object" || raw.fix === null || Array.isArray(raw.fix)) return undefined;
       const fixRaw = raw.fix as Record<string, unknown>;
       const failureIds = boundedStringArray(fixRaw.failureIds);
+      const fixTsValue = fixRaw.ts;
       if (fixRaw.kind !== "fix" || typeof fixRaw.id !== "string" || fixRaw.id.length === 0 ||
-          /[\u0000-\u001f\u007f-\u009f]/u.test(fixRaw.id) || !isSafeNonNegativeInteger(fixRaw.ts) ||
+          /[\u0000-\u001f\u007f-\u009f]/u.test(fixRaw.id) || !isSafeNonNegativeInteger(fixTsValue) || fixTsValue > now ||
           typeof fixRaw.cwd !== "string" || typeof fixRaw.cmd !== "string" ||
           failureIds === undefined) return undefined;
       fix = {
-        kind: "fix", id: fixRaw.id, ts: fixRaw.ts, cwd: fixRaw.cwd, cmd: fixRaw.cmd,
+        kind: "fix", id: fixRaw.id, ts: fixTsValue, cwd: fixRaw.cwd, cmd: fixRaw.cmd,
         failureIds,
       };
     }
@@ -903,7 +907,7 @@ function normalizeSourceHit(value: unknown): SourceHit | undefined {
   }
 }
 
-function projectHits(hits: readonly SourceHit[], exposure: Exposure): { items: ProjectedRecallHit[]; truncated: boolean } {
+function projectHits(hits: readonly SourceHit[], exposure: Exposure, now: number): { items: ProjectedRecallHit[]; truncated: boolean } {
   const items: ProjectedRecallHit[] = [];
   let truncated = false;
   let serializedItemBytes = 0;
@@ -925,7 +929,7 @@ function projectHits(hits: readonly SourceHit[], exposure: Exposure): { items: P
   }
   for (let index = 0; index < source.length; index += 1) {
     try {
-      const hit = normalizeSourceHit(source[index]);
+      const hit = normalizeSourceHit(source[index], now);
       if (hit === undefined) {
         truncated = true;
         continue;
@@ -947,12 +951,12 @@ function projectHits(hits: readonly SourceHit[], exposure: Exposure): { items: P
   return { items, truncated };
 }
 
-export function projectRecallHits(hits: readonly RecallHit[], exposure: Exposure): ProjectedRecallResponse {
-  const items = projectHits(hits, exposure);
+export function projectRecallHits(hits: readonly RecallHit[], exposure: Exposure, now = Date.now()): ProjectedRecallResponse {
+  const items = projectHits(hits, exposure, now);
   return { exposure, items: items.items, truncated: items.truncated };
 }
 
-export function projectRecentFailures(hits: readonly RecentFailureHit[], exposure: Exposure): ProjectedRecentResponse {
-  const items = projectHits(hits, exposure);
+export function projectRecentFailures(hits: readonly RecentFailureHit[], exposure: Exposure, now = Date.now()): ProjectedRecentResponse {
+  const items = projectHits(hits, exposure, now);
   return { exposure, items: items.items, truncated: items.truncated };
 }

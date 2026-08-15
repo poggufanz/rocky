@@ -414,7 +414,7 @@ function boundedProviderArray(value: unknown, maximum = MAX_PROVIDER_NESTED_ITEM
 
 function boundedProviderStrings(value: unknown): { values: string[]; valid: boolean } {
   const bounded = boundedProviderArray(value);
-  if (!bounded.valid) return { values: [], valid: false };
+  if (!bounded.valid || bounded.truncated) return { values: [], valid: false };
   const values: string[] = [];
   let bytes = 0;
   try {
@@ -431,71 +431,154 @@ function boundedProviderStrings(value: unknown): { values: string[]; valid: bool
   return { values, valid: true };
 }
 
+function boundedProviderText(value: unknown, maximumChars: number, maximumBytes: number): { value: string; valid: true } | { value: undefined; valid: false } {
+  if (typeof value !== "string" || value.length > maximumChars) return { value: undefined, valid: false };
+  if (Buffer.byteLength(value, "utf8") > maximumBytes) return { value: undefined, valid: false };
+  return { value, valid: true };
+}
+
+function optionalProviderText(
+  value: unknown,
+  maximumChars: number,
+  maximumBytes: number,
+): { value: string | undefined; valid: true } | { value: undefined; valid: false } {
+  if (value === undefined) return { value: undefined, valid: true };
+  return boundedProviderText(value, maximumChars, maximumBytes);
+}
+
+function snapshotProviderFile(value: unknown): TripleRecord["mechanism"]["files"][number] | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+  const raw = value as Record<string, unknown>;
+  const pathValue = raw.path;
+  const path = boundedProviderText(pathValue, 1_024, MAX_FIELD_BYTES);
+  if (!path.valid || path.value.length === 0) return undefined;
+  const plusMinusValue = raw.plusMinus;
+  const plusMinus = boundedProviderArray(plusMinusValue, 2);
+  if (!plusMinus.valid || plusMinus.truncated || plusMinus.values.length !== 2
+      || !isSafeNonNegativeInteger(plusMinus.values[0]) || !isSafeNonNegativeInteger(plusMinus.values[1])) return undefined;
+  const propsValue = raw.props;
+  const props = boundedProviderStrings(propsValue);
+  if (!props.valid) return undefined;
+  const excerptValue = raw.excerpt;
+  const excerpt = optionalProviderText(excerptValue, MAX_FIELD_BYTES * 2, MAX_FIELD_BYTES * 2);
+  if (!excerpt.valid) return undefined;
+  const provenanceValue = raw.provenance;
+  if (provenanceValue !== undefined && provenanceValue !== "tool-observed" &&
+      provenanceValue !== "git-diff-inferred" && provenanceValue !== "unknown") return undefined;
+  const identityHashValue = raw.identityHash;
+  const identityHash = optionalProviderText(identityHashValue, 32, 32);
+  if (!identityHash.valid || identityHash.value !== undefined && !/^[0-9a-f]{32}$/u.test(identityHash.value)) return undefined;
+  return {
+    path: path.value,
+    plusMinus: [plusMinus.values[0] as number, plusMinus.values[1] as number],
+    props: props.values,
+    ...(excerpt.value === undefined ? {} : { excerpt: excerpt.value }),
+    ...(provenanceValue === undefined ? {} : { provenance: provenanceValue }),
+    ...(identityHash.value === undefined ? {} : { identityHash: identityHash.value }),
+  };
+}
+
+function snapshotProviderMechanism(value: unknown): TripleRecord["mechanism"] | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+  const raw = value as Record<string, unknown>;
+  const headValue = raw.head;
+  const head = optionalProviderText(headValue, MAX_FIELD_BYTES * 2, MAX_FIELD_BYTES * 2);
+  if (!head.valid) return undefined;
+  const filesValue = raw.files;
+  const providerFiles = boundedProviderArray(filesValue, MAX_PROVIDER_NESTED_ITEMS);
+  if (!providerFiles.valid || providerFiles.truncated) return undefined;
+  const files: TripleRecord["mechanism"]["files"] = [];
+  for (const entry of providerFiles.values) {
+    const file = snapshotProviderFile(entry);
+    if (file === undefined) return undefined;
+    files.push(file);
+  }
+  const truncatedFilesValue = raw.truncatedFiles;
+  const baselineValue = raw.baseline;
+  const coverageStatusValue = raw.coverageStatus;
+  if (!isSafeNonNegativeInteger(truncatedFilesValue)) return undefined;
+  if (baselineValue !== undefined && baselineValue !== "captured" && baselineValue !== "unknown") return undefined;
+  if (coverageStatusValue !== undefined && coverageStatusValue !== "complete" &&
+      coverageStatusValue !== "truncated" && coverageStatusValue !== "unknown") return undefined;
+  return {
+    ...(head.value === undefined ? {} : { head: head.value }),
+    files,
+    truncatedFiles: truncatedFilesValue,
+    ...(baselineValue === undefined ? {} : { baseline: baselineValue }),
+    ...(coverageStatusValue === undefined ? {} : { coverageStatus: coverageStatusValue }),
+  };
+}
+
+function snapshotProviderTriple(value: unknown): TripleRecord | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+  const raw = value as Record<string, unknown>;
+  const kind = raw.kind;
+  if (kind !== "triple") return undefined;
+  const idValue = raw.id;
+  const id = boundedProviderText(idValue, 512, MAX_FIELD_BYTES);
+  if (!id.valid || id.value.length === 0 || /[\u0000-\u001f\u007f-\u009f]/u.test(id.value)) return undefined;
+  const tsValue = raw.ts;
+  if (typeof tsValue !== "number" || !Number.isSafeInteger(tsValue) || tsValue < 0) return undefined;
+  const cwdValue = raw.cwd;
+  const cwd = boundedProviderText(cwdValue, MAX_FIELD_BYTES * 2, MAX_FIELD_BYTES * 2);
+  if (!cwd.valid) return undefined;
+  const schemaV = raw.schemaV;
+  if (schemaV !== 1) return undefined;
+  const agentValue = raw.agent;
+  if (agentValue !== "claude-code" && agentValue !== "codex") return undefined;
+  const originValue = raw.origin;
+  if (originValue !== "agent-hook") return undefined;
+  const platformValue = raw.platform;
+  const platform = platformValue === undefined ? undefined : isKnownPathPlatform(platformValue) ? platformValue : undefined;
+  if (platformValue !== undefined && platform === undefined) return undefined;
+  const mechanismValue = raw.mechanism;
+  const mechanism = snapshotProviderMechanism(mechanismValue);
+  if (mechanism === undefined) return undefined;
+  let intent: TripleRecord["intent"] | undefined;
+  const intentValue = raw.intent;
+  if (intentValue !== undefined) {
+    if (typeof intentValue !== "object" || intentValue === null || Array.isArray(intentValue)) return undefined;
+    const intentObject = intentValue as Record<string, unknown>;
+    const intentText = boundedProviderText(intentObject.text, MAX_FIELD_BYTES * 2, MAX_FIELD_BYTES * 2);
+    if (!intentText.valid) return undefined;
+    intent = { text: intentText.value };
+  }
+  let rationale: TripleRecord["rationale"] | undefined;
+  const rationaleValue = raw.rationale;
+  if (rationaleValue !== undefined) {
+    if (typeof rationaleValue !== "object" || rationaleValue === null || Array.isArray(rationaleValue)) return undefined;
+    const rationaleObject = rationaleValue as Record<string, unknown>;
+    const rationaleText = boundedProviderText(rationaleObject.text, MAX_FIELD_BYTES * 2, MAX_FIELD_BYTES * 2);
+    const rationaleTags = boundedProviderStrings(rationaleObject.tags);
+    const rationaleSource = rationaleObject.source;
+    if (!rationaleText.valid || !rationaleTags.valid ||
+        (rationaleSource !== "transcript" && rationaleSource !== "notify")) return undefined;
+    rationale = { text: rationaleText.value, tags: rationaleTags.values, source: rationaleSource };
+  }
+  return {
+    kind: "triple",
+    id: id.value,
+    ts: tsValue,
+    cwd: cwd.value,
+    schemaV: 1,
+    agent: agentValue,
+    origin: "agent-hook",
+    ...(platform === undefined ? {} : { platform }),
+    ...(intent === undefined ? {} : { intent }),
+    ...(rationale === undefined ? {} : { rationale }),
+    mechanism,
+  };
+}
+
 function safeTripleRecord(value: unknown): TripleRecord | undefined {
   try {
-    if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
-    const raw = value as Record<string, unknown>;
-    const ts = raw.ts;
-    if (raw.kind !== "triple" || raw.schemaV !== 1 || raw.origin !== "agent-hook" ||
-        typeof raw.id !== "string" || raw.id.length === 0 || raw.id.length > 512 ||
-        /[\u0000-\u001f\u007f-\u009f]/u.test(raw.id) || typeof ts !== "number" || !Number.isSafeInteger(ts) || ts < 0 ||
-        typeof raw.cwd !== "string" || raw.cwd.length > MAX_FIELD_BYTES * 2 ||
-        Buffer.byteLength(raw.cwd, "utf8") > MAX_FIELD_BYTES * 2 ||
-        raw.agent !== "claude-code" && raw.agent !== "codex") return undefined;
-    const platform = isKnownPathPlatform(raw.platform) ? raw.platform : undefined;
-    if (raw.platform !== undefined && platform === undefined) return undefined;
-
-    if (raw.mechanism !== undefined) {
-      if (typeof raw.mechanism !== "object" || raw.mechanism === null || Array.isArray(raw.mechanism)) return undefined;
-      const mechanism = raw.mechanism as Record<string, unknown>;
-      if (mechanism.head !== undefined && (typeof mechanism.head !== "string" || mechanism.head.length > MAX_FIELD_BYTES * 2 ||
-          Buffer.byteLength(mechanism.head, "utf8") > MAX_FIELD_BYTES * 2)) return undefined;
-      const providerFiles = boundedProviderArray(mechanism.files, MAX_PROVIDER_NESTED_ITEMS);
-      if (!providerFiles.valid) return undefined;
-      for (const value of providerFiles.values) {
-        if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
-        const file = value as Record<string, unknown>;
-        if (typeof file.path !== "string" || file.path.length === 0 || file.path.length > 1_024 ||
-            Buffer.byteLength(file.path, "utf8") > MAX_FIELD_BYTES) return undefined;
-        if (file.excerpt !== undefined && (typeof file.excerpt !== "string" || file.excerpt.length > MAX_FIELD_BYTES * 2 ||
-            Buffer.byteLength(file.excerpt, "utf8") > MAX_FIELD_BYTES * 2)) return undefined;
-      }
-    }
-    if (raw.intent !== undefined && typeof raw.intent === "object" && raw.intent !== null && !Array.isArray(raw.intent)) {
-      const intent = raw.intent as Record<string, unknown>;
-      if (typeof intent.text === "string" && (intent.text.length > MAX_FIELD_BYTES * 2 ||
-          Buffer.byteLength(intent.text, "utf8") > MAX_FIELD_BYTES * 2)) return undefined;
-    }
-    if (raw.rationale !== undefined && typeof raw.rationale === "object" && raw.rationale !== null && !Array.isArray(raw.rationale)) {
-      const rationale = raw.rationale as Record<string, unknown>;
-      if (typeof rationale.text === "string" && (rationale.text.length > MAX_FIELD_BYTES * 2 ||
-          Buffer.byteLength(rationale.text, "utf8") > MAX_FIELD_BYTES * 2)) return undefined;
-      if (rationale.tags !== undefined && !boundedProviderStrings(rationale.tags).valid) return undefined;
-    }
-    const bounded = boundTripleRecord(raw as unknown as TripleRecord);
+    const snapshot = snapshotProviderTriple(value);
+    if (snapshot === undefined) return undefined;
+    const bounded = boundTripleRecord(snapshot);
     const safe: TripleRecord = {
-      kind: "triple", id: raw.id, ts, cwd: raw.cwd, schemaV: 1,
-      agent: raw.agent, origin: "agent-hook", mechanism: bounded.mechanism,
-      ...(platform === undefined ? {} : { platform }),
+      ...snapshot,
+      mechanism: bounded.mechanism,
     };
-    const intent = raw.intent;
-    if (typeof intent === "object" && intent !== null && !Array.isArray(intent) &&
-        typeof (intent as Record<string, unknown>).text === "string") {
-      safe.intent = { text: (intent as Record<string, unknown>).text as string };
-    }
-    const rationale = raw.rationale;
-    if (typeof rationale === "object" && rationale !== null && !Array.isArray(rationale)) {
-      const candidate = rationale as Record<string, unknown>;
-      const tags = boundedProviderStrings(candidate.tags);
-      if (typeof candidate.text === "string" && tags.valid &&
-          (candidate.source === "transcript" || candidate.source === "notify")) {
-        safe.rationale = {
-          text: candidate.text,
-          tags: tags.values,
-          source: candidate.source,
-        };
-      }
-    }
     return safe;
   } catch {
     return undefined;
@@ -953,6 +1036,10 @@ export function createToolRegistry(options: CreateToolRegistryOptions): McpToolR
     const readState: SafeMemoryReadState = { failed: false };
     try {
       const stats = safeReadMemory<unknown>(() => options.memory.stats(input), {}, canonicalMemory, readState);
+      // Preserve the bounded legacy schema for malformed object-shaped stats,
+      // while null/undefined top-level results must disclose that no stats
+      // snapshot exists instead of looking like a clean zero.
+      if (stats === undefined || stats === null) readState.failed = true;
       return { stats, coverage: memoryCoverage(options.memory, readState.failed) };
     } catch (error) {
       return { stats: {}, coverage: memoryCoverage(options.memory, true), error };
@@ -1151,19 +1238,27 @@ export function createToolRegistry(options: CreateToolRegistryOptions): McpToolR
             let fallback: WhyFileEvidence | undefined;
             const getFallback = (): WhyFileEvidence => fallback ??= fallbackWhyEvidence(options, input.path, input.limit, readState);
             let customEvidence: MemoryQueries["whyFileEvidence"] | undefined;
-            try { customEvidence = options.memory.whyFileEvidence; } catch { customEvidence = undefined; }
+            let customEvidencePresent = false;
+            try {
+              const candidate = options.memory.whyFileEvidence;
+              customEvidencePresent = candidate !== undefined;
+              if (typeof candidate === "function") customEvidence = candidate;
+            } catch {
+              customEvidencePresent = true;
+              readState.failed = true;
+            }
             const unknownEvidence: WhyFileEvidence = {
               matches: [], possible: [],
               coverage: { status: "unknown", complete: false, filesCovered: 0, truncatedFiles: 0 },
               coverageIncomplete: true,
             };
-            const rawEvidence = safeReadMemory(() => customEvidence
-              ? customEvidence(input.path, input.limit)
+            const rawEvidence = safeReadMemory(() => customEvidencePresent
+              ? customEvidence === undefined ? unknownEvidence : customEvidence(input.path, input.limit)
               : getFallback(), unknownEvidence, canonicalMemory, readState);
             const evidence = safeProjection(
-              () => customEvidence === undefined
-                ? rawEvidence
-                : normalizeWhyEvidence(rawEvidence, getFallback(), input.path, input.limit),
+              () => customEvidencePresent
+                ? normalizeWhyEvidence(rawEvidence, unknownEvidence, input.path, input.limit)
+                : rawEvidence,
               unknownEvidence,
             );
             const memoryScan = memoryCoverage(options.memory, readState.failed);

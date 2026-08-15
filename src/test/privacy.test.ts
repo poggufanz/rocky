@@ -99,6 +99,37 @@ test("malformed recall and recent-failure hits disclose truncation while retaini
   assert.equal(recent.truncated, true);
 });
 
+test("future custom recall and recent hits disclose truncation while exact-now evidence stays valid", () => {
+  const now = 100;
+  const failure: FailureRecord = {
+    kind: "failure", id: "valid-now", ts: now, cwd: "/work", cmd: "npm test", exitCode: 1,
+    fingerprint: "fp-now", signature: ["failure"], excerpt: "failure", origin: "run",
+  };
+  const futureFailure = { ...failure, id: "future-failure", ts: now + 1 };
+  const fix: FixRecord = { kind: "fix", id: "fix-now", ts: now, cwd: "/work", cmd: "npm test", failureIds: [failure.id] };
+  const futureFix = { ...fix, id: "future-fix", ts: now + 1 };
+
+  const recallFailure = projectRecallHits([{ failure, score: 1 }, { failure: futureFailure, score: 1 }], "sanitized", now);
+  assert.equal(recallFailure.items.length, 1);
+  assert.equal(recallFailure.truncated, true);
+  const recallFix = projectRecallHits([{ failure, fix: futureFix, score: 1 }, { failure, fix, score: 1 }], "sanitized", now);
+  assert.equal(recallFix.items.length, 1);
+  assert.equal(recallFix.items[0]?.hasFix, true);
+  assert.equal(recallFix.truncated, true);
+  const exact = projectRecallHits([{ failure, fix, score: 1 }], "sanitized", now);
+  assert.equal(exact.items.length, 1);
+  assert.equal(exact.items[0]?.hasFix, true);
+  assert.equal(exact.truncated, false);
+
+  const recent = projectRecentFailures([{ failure }, { failure: futureFailure }], "sanitized", now);
+  assert.equal(recent.items.length, 1);
+  assert.equal(recent.truncated, true);
+  const recentFix = projectRecentFailures([{ failure, fix: futureFix }, { failure, fix }], "sanitized", now);
+  assert.equal(recentFix.items.length, 1);
+  assert.equal(recentFix.items[0]?.hasFix, true);
+  assert.equal(recentFix.truncated, true);
+});
+
 test("sanitized projection has exactly the allowlisted keys despite injected unknown data", () => {
   const hit = {
     failure: {
@@ -557,13 +588,40 @@ test("persisted IDs and link IDs stay opaque while fix arrays remain detached", 
     failureIds: [opaque, "", "second-id"],
     links: [{ id: opaque, basis: "signature" }],
   };
-  const output = projectMemoryRecord(fix, "sanitized") as {
+  const output = projectMemoryRecord(fix, "sanitized", true) as {
     id: string; failureIds: string[]; links: { id: string; basis: string }[];
   };
-  assert.equal(output.id, opaque);
-  assert.deepEqual(output.failureIds, [opaque, "", "second-id"]);
-  assert.deepEqual(output.links, [{ id: opaque, basis: "signature" }]);
+  assert.equal(output.id, "[redacted]");
+  assert.deepEqual(output.failureIds, ["[redacted]", "[redacted]", "second-id"]);
+  assert.deepEqual(output.links, [{ id: "[redacted]", basis: "signature" }]);
+  const raw = projectMemoryRecord(fix, "raw") as {
+    id: string; failureIds: string[]; links: { id: string; basis: string }[];
+  };
+  assert.equal(raw.id, opaque);
+  assert.deepEqual(raw.failureIds, [opaque, "", "second-id"]);
+  assert.deepEqual(raw.links, [{ id: opaque, basis: "signature" }]);
   assert.notEqual(output.failureIds, fix.failureIds);
   assert.notEqual(output.links, fix.links);
   assert.notEqual(output.links[0], fix.links?.[0]);
+});
+
+test("sanitized nested reserved and credential IDs never remain literal", () => {
+  const ids = ["note-secret", "triple-api-key", "failure-password", "sk-ant-abcdefghijklmnopqrstuvwxyz1234567890"];
+  const fix: FixRecord = {
+    kind: "fix", id: ids[0]!, ts: 35, cwd: "/work", cmd: "npm test",
+    failureIds: ids,
+    links: ids.map((id) => ({ id, basis: "signature" as const })),
+  };
+  const sanitized = projectMemoryRecord(fix, "sanitized", true) as {
+    id: string; failureIds: string[]; links: { id: string }[];
+  };
+  assert.equal(sanitized.id, "[redacted]");
+  assert.deepEqual(sanitized.failureIds, ids.map(() => "[redacted]"));
+  assert.deepEqual(sanitized.links.map((link) => link.id), ids.map(() => "[redacted]"));
+  const raw = projectMemoryRecord(fix, "raw") as {
+    id: string; failureIds: string[]; links: { id: string }[];
+  };
+  assert.equal(raw.id, ids[0]);
+  assert.deepEqual(raw.failureIds, ids);
+  assert.deepEqual(raw.links.map((link) => link.id), ids);
 });

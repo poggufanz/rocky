@@ -338,6 +338,220 @@ test("why_file rejects oversized provider cwd/path evidence before canonicalizat
   assert.equal(boundedResult.structuredContent.coverageStatus, "complete");
 });
 
+test("why_file snapshots every custom triple field once before normalization", async () => {
+  const reads = new Map<string, number>();
+  const oversized = "x".repeat(MAX_FIELD_BYTES * 2 + 1);
+  const changing = (name: string, first: unknown, second: unknown = oversized): (() => unknown) => () => {
+    const count = (reads.get(name) ?? 0) + 1;
+    reads.set(name, count);
+    return count === 1 ? first : second;
+  };
+  const file = new Proxy({}, {
+    get(_target, property: string | symbol) {
+      if (typeof property !== "string") throw new Error("unexpected symbol getter");
+      const getters: Record<string, () => unknown> = {
+        path: changing("file.path", "src/snapshot.ts"),
+        plusMinus: changing("file.plusMinus", [1, 0] as [number, number]),
+        props: changing("file.props", ["snapshot"]),
+        excerpt: changing("file.excerpt", "small excerpt"),
+        provenance: changing("file.provenance", "tool-observed"),
+        identityHash: changing("file.identityHash", pathIdentityHash("/repo/src/snapshot.ts", { platform: "linux" })),
+      };
+      const getter = getters[property];
+      if (!getter) throw new Error(`irrelevant file getter: ${property}`);
+      return getter();
+    },
+    ownKeys() { throw new Error("untrusted file must not be enumerated"); },
+  });
+  const mechanism = new Proxy({}, {
+    get(_target, property: string | symbol) {
+      if (typeof property !== "string") throw new Error("unexpected symbol getter");
+      const getters: Record<string, () => unknown> = {
+        head: changing("mechanism.head", "Edit"),
+        files: changing("mechanism.files", [file]),
+        truncatedFiles: changing("mechanism.truncatedFiles", 0),
+        baseline: changing("mechanism.baseline", "captured"),
+        coverageStatus: changing("mechanism.coverageStatus", "complete"),
+      };
+      const getter = getters[property];
+      if (!getter) throw new Error(`irrelevant mechanism getter: ${property}`);
+      return getter();
+    },
+    ownKeys() { throw new Error("untrusted mechanism must not be enumerated"); },
+  });
+  const intent = new Proxy({}, {
+    get(_target, property: string | symbol) {
+      if (property === "text") return changing("intent.text", "change snapshot")();
+      throw new Error(`irrelevant intent getter: ${String(property)}`);
+    },
+    ownKeys() { throw new Error("untrusted intent must not be enumerated"); },
+  });
+  const rationale = new Proxy({}, {
+    get(_target, property: string | symbol) {
+      const getters: Record<string, () => unknown> = {
+        text: changing("rationale.text", "captured reason"),
+        tags: changing("rationale.tags", ["snapshot"]),
+        source: changing("rationale.source", "transcript"),
+      };
+      if (typeof property !== "string" || getters[property] === undefined) {
+        throw new Error(`irrelevant rationale getter: ${String(property)}`);
+      }
+      return getters[property]();
+    },
+    ownKeys() { throw new Error("untrusted rationale must not be enumerated"); },
+  });
+  const candidate = new Proxy({}, {
+    get(_target, property: string | symbol) {
+      if (typeof property !== "string") throw new Error("unexpected symbol getter");
+      const getters: Record<string, () => unknown> = {
+        kind: changing("kind", "triple"),
+        id: changing("id", "snapshot-once"),
+        ts: changing("ts", 10),
+        cwd: changing("cwd", "/repo"),
+        schemaV: changing("schemaV", 1),
+        agent: changing("agent", "codex", "Bearer TOPSECRET\u001b[31mcredential"),
+        origin: changing("origin", "agent-hook"),
+        platform: changing("platform", "linux"),
+        mechanism: changing("mechanism", mechanism),
+        intent: changing("intent", intent),
+        rationale: changing("rationale", rationale),
+      };
+      const getter = getters[property];
+      if (!getter) throw new Error(`irrelevant triple getter: ${property}`);
+      return getter();
+    },
+    ownKeys() { throw new Error("untrusted triple must not be enumerated"); },
+  });
+  const registry = createToolRegistry({
+    exposure: "sanitized",
+    memory: {
+      ...createMemoryQueries(() => []),
+      whyFileEvidence: () => ({
+        matches: [candidate as unknown as TripleRecord], possible: [],
+        coverage: { status: "complete" as const, complete: true, filesCovered: 1, truncatedFiles: 0 },
+        coverageIncomplete: false,
+      }),
+    },
+    recallWithAi: disabledRecallWithAi,
+  });
+  const result = await registry.call("why_file", { path: "src/snapshot.ts" }, new AbortController().signal);
+  assert.equal((result.structuredContent.items as unknown[]).length, 1);
+  assert.equal(result.structuredContent.coverageStatus, "complete");
+  assert.equal(result.structuredContent.coverageIncomplete, false);
+  const expected = [
+    "kind", "id", "ts", "cwd", "schemaV", "agent", "origin", "platform", "mechanism", "intent", "rationale",
+    "mechanism.head", "mechanism.files", "mechanism.truncatedFiles", "mechanism.baseline", "mechanism.coverageStatus",
+    "file.path", "file.plusMinus", "file.props", "file.excerpt", "file.provenance", "file.identityHash",
+    "intent.text", "rationale.text", "rationale.tags", "rationale.source",
+  ];
+  for (const key of expected) assert.equal(reads.get(key), 1, `${key} getter count`);
+  assert.equal(reads.size, expected.length);
+  assert.doesNotMatch(JSON.stringify(result), /TOPSECRET|\u001b/gu);
+});
+
+test("why_file never falls back from malformed custom evidence", async () => {
+  const known = completeWhyTriple("custom-top-level-malformed");
+  const throwing = new Proxy({}, {
+    get(_target, property: string | symbol) {
+      if (property === "matches") throw new Error("matches getter failed");
+      return undefined;
+    },
+  });
+  const malformed: unknown[] = [undefined, null, [], throwing];
+  for (const value of malformed) {
+    const registry = createToolRegistry({
+      exposure: "sanitized",
+      memory: {
+        ...createMemoryQueries(() => [known]),
+        whyFile: () => [known],
+        whyFileEvidence: () => value as never,
+      },
+      recallWithAi: disabledRecallWithAi,
+    });
+    const result = await registry.call("why_file", { path: "src/known.ts" }, new AbortController().signal);
+    assert.deepEqual(result.structuredContent.items, []);
+    assert.equal(result.structuredContent.coverageStatus, "unknown");
+    assert.equal(result.structuredContent.coverageIncomplete, true);
+  }
+  const legacy = createToolRegistry({
+    exposure: "sanitized",
+    memory: {
+      ...createMemoryQueries(() => [known]),
+      whyFile: () => [known],
+      whyFileEvidence: undefined,
+    },
+    recallWithAi: disabledRecallWithAi,
+  });
+  const legacyResult = await legacy.call("why_file", { path: "src/known.ts" }, new AbortController().signal);
+  assert.equal((legacyResult.structuredContent.items as unknown[]).length, 1);
+  assert.equal(legacyResult.structuredContent.coverageStatus, "complete");
+});
+
+test("why_file does not emit an accessor-swapped agent credential", async () => {
+  const known = completeWhyTriple("agent-swap");
+  let agentReads = 0;
+  const candidate = new Proxy(known, {
+    get(target, property, receiver) {
+      if (property === "agent") {
+        agentReads += 1;
+        return agentReads === 1 ? "codex" : "Bearer TOPSECRET\u001b[31mcredential";
+      }
+      return Reflect.get(target, property, receiver);
+    },
+  });
+  const result = await createToolRegistry({
+    exposure: "sanitized",
+    memory: {
+      ...createMemoryQueries(() => []),
+      whyFileEvidence: () => ({
+        matches: [candidate], possible: [],
+        coverage: { status: "complete" as const, complete: true, filesCovered: 1, truncatedFiles: 0 },
+        coverageIncomplete: false,
+      }),
+    },
+    recallWithAi: disabledRecallWithAi,
+  }).call("why_file", { path: "src/known.ts" }, new AbortController().signal);
+  assert.equal((result.structuredContent.items as Array<{ agent: string }>)[0]?.agent, "codex");
+  assert.doesNotMatch(JSON.stringify(result), /TOPSECRET|\u001b/gu);
+  assert.equal(agentReads, 1);
+});
+
+test("why_file fails closed when an untrusted nested snapshot getter throws", async () => {
+  let pathReads = 0;
+  const throwingFile = new Proxy({}, {
+    get(_target, property: string | symbol) {
+      if (property === "path") {
+        pathReads += 1;
+        throw new Error("path getter failed");
+      }
+      throw new Error(`irrelevant getter: ${String(property)}`);
+    },
+    ownKeys() { throw new Error("untrusted file must not be enumerated"); },
+  });
+  const known = completeWhyTriple("throwing-snapshot");
+  const candidate = {
+    ...known,
+    mechanism: { ...known.mechanism, files: [throwingFile as unknown as TripleRecord["mechanism"]["files"][number]] },
+  };
+  const registry = createToolRegistry({
+    exposure: "sanitized",
+    memory: {
+      ...createMemoryQueries(() => []),
+      whyFileEvidence: () => ({
+        matches: [candidate], possible: [],
+        coverage: { status: "complete" as const, complete: true, filesCovered: 1, truncatedFiles: 0 },
+        coverageIncomplete: false,
+      }),
+    },
+    recallWithAi: disabledRecallWithAi,
+  });
+  const result = await registry.call("why_file", { path: "src/known.ts" }, new AbortController().signal);
+  assert.deepEqual(result.structuredContent.items, []);
+  assert.equal(result.structuredContent.coverageStatus, "unknown");
+  assert.equal(result.structuredContent.coverageIncomplete, true);
+  assert.equal(pathReads, 1);
+});
+
 test("why_file accepts ordinary and Unicode paths at the byte boundary", async () => {
   const registry = createToolRegistry({
     exposure: "sanitized",
@@ -454,7 +668,7 @@ test("why_file sanitizes custom possible IDs while raw remains explicit", async 
 });
 
 test("sanitized reserved custom IDs use opaque fetch handles while raw remains explicit", async () => {
-  const ids = ["note-secret", "triple-api-key", "failure-password"];
+  const ids = ["note-secret", "triple-api-key", "failure-password", "sk-ant-abcdefghijklmnopqrstuvwxyz1234567890"];
   for (const id of ids) {
     const record: MemoryRecord = {
       kind: "failure", id, ts: 10, cwd: "/repo", cmd: "npm test", exitCode: 1,
@@ -495,6 +709,43 @@ test("stats keeps legacy fields and adds bounded knowledge counters for old quer
     exposure: "sanitized", failures: 2, fixEvents: 1, resolved: 1, unresolved: 1,
     confirmedFixes: 1, possibleFixes: 0, triples: 0, notes: 0, total: 3,
   });
+});
+
+test("malformed custom stats disclose incomplete coverage instead of clean zero totals", async () => {
+  for (const malformed of [undefined, null]) {
+    const result = await createToolRegistry({
+      exposure: "sanitized",
+      memory: {
+        ...createMemoryQueries(() => []),
+        stats: () => malformed as never,
+      },
+      recallWithAi: disabledRecallWithAi,
+    }).call("stats", {}, new AbortController().signal);
+    assert.equal(result.structuredContent.failures, 0);
+    assert.equal(result.structuredContent.total, 0);
+    assert.equal(result.structuredContent.memoryCoverageIncomplete, true);
+    assert.equal((result.structuredContent.memoryCoverage as { complete: boolean }).complete, false);
+  }
+});
+
+test("oversized custom rationale tags fail why coverage closed", async () => {
+  const known = completeWhyTriple("oversized-rationale-tags");
+  const oversized = { ...known, rationale: { ...known.rationale!, tags: Array.from({ length: 1_000 }, (_, index) => `tag-${index}`) } };
+  const result = await createToolRegistry({
+    exposure: "sanitized",
+    memory: {
+      ...createMemoryQueries(() => []),
+      whyFileEvidence: () => ({
+        matches: [oversized], possible: [],
+        coverage: { status: "complete" as const, complete: true, filesCovered: 1, truncatedFiles: 0 },
+        coverageIncomplete: false,
+      }),
+    },
+    recallWithAi: disabledRecallWithAi,
+  }).call("why_file", { path: "src/known.ts" }, new AbortController().signal);
+  assert.deepEqual(result.structuredContent.items, []);
+  assert.equal(result.structuredContent.coverageStatus, "unknown");
+  assert.equal(result.structuredContent.coverageIncomplete, true);
 });
 
 test("note-only knowledge search stays bounded and sanitized", async () => {
