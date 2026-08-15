@@ -21,39 +21,11 @@ const amberStderr = (s: string) => (useStderrColor ? `\u001b[33m${s}\u001b[0m` :
 const dimStderr = (s: string) => (useStderrColor ? `\u001b[2m${s}\u001b[0m` : s);
 const boldStderr = (s: string) => (useStderrColor ? `\u001b[1m${s}\u001b[0m` : s);
 
-// ponytail: one active child stream; per-run boundary context if wrappers ever run concurrently.
-let childStderrActive = false;
-let childStderrLastByteWasLf = true;
-let childStderrCommentaryStarted = false;
-let childStderrReset: NodeJS.Immediate | undefined;
-
-/** Begin tracking raw child stderr until the first Rocky-owned output. */
-export function startChildStderr(): void {
-  if (childStderrReset !== undefined) clearImmediate(childStderrReset);
-  childStderrReset = undefined;
-  childStderrActive = true;
-  childStderrLastByteWasLf = true;
-  childStderrCommentaryStarted = false;
-}
+let childStderrNeedsSeparator = false;
 
 /** Record the final raw byte without decoding or sanitizing the child stream. */
 export function trackChildStderr(chunk: Uint8Array): void {
-  if (childStderrActive && chunk.length > 0) {
-    childStderrLastByteWasLf = chunk[chunk.length - 1] === 0x0a;
-  }
-}
-
-/** Stop live tracking while retaining one pending boundary for post-exit output. */
-export function finishChildStderr(): void {
-  childStderrActive = false;
-  if (childStderrReset !== undefined) clearImmediate(childStderrReset);
-  childStderrReset = setImmediate(() => {
-    childStderrReset = undefined;
-    if (!childStderrActive && !childStderrCommentaryStarted) {
-      childStderrLastByteWasLf = true;
-    }
-  });
-  childStderrReset.unref();
+  if (chunk.length > 0) childStderrNeedsSeparator = chunk[chunk.length - 1] !== 0x0a;
 }
 
 function startsWithLf(chunk: string | Uint8Array): boolean {
@@ -62,10 +34,9 @@ function startsWithLf(chunk: string | Uint8Array): boolean {
 
 /** Write Rocky-owned stderr, inserting at most one needed line separator. */
 export function writeRockyStderr(chunk: string | Uint8Array): void {
-  const boundaryPending = childStderrActive || childStderrReset !== undefined;
-  if (boundaryPending && !childStderrCommentaryStarted) {
-    childStderrCommentaryStarted = true;
-    if (!childStderrLastByteWasLf && !startsWithLf(chunk)) process.stderr.write("\n");
+  if (childStderrNeedsSeparator) {
+    childStderrNeedsSeparator = false;
+    if (!startsWithLf(chunk)) process.stderr.write("\n");
   }
   process.stderr.write(chunk);
 }

@@ -1,11 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { watch } from "../commands/watch.js";
+import { runProcess } from "../core/exec.js";
 import { quoteShellPath } from "../core/shell-quote.js";
+import { say } from "../ui/rocky.js";
 
 const packageRoot = process.cwd();
 const cli = join(packageRoot, "dist", "index.js");
@@ -22,7 +24,23 @@ function stderrCommand(bytes: Buffer, code: number): string {
 function runningStderrCommand(bytes: Buffer, durationMs: number): string {
   const encoded = bytes.toString("base64");
   return nodeCommand(
-    `process.stderr.write(Buffer.from('${encoded}','base64'));setTimeout(() => require('node:fs').writeFileSync(process.env.ROCKY_TASK12_MARKER, 'done'), 100);setTimeout(() => process.exit(0), ${durationMs})`,
+    `process.stderr.write(Buffer.from('${encoded}','base64'));setTimeout(() => process.exit(0), ${durationMs})`,
+  );
+}
+
+function twoChunkStderrCommand(first: string, second: string, gapMs: number, durationMs: number): string {
+  const firstEncoded = Buffer.from(first, "utf8").toString("base64");
+  const secondEncoded = Buffer.from(second, "utf8").toString("base64");
+  return nodeCommand(
+    `process.stderr.write(Buffer.from('${firstEncoded}','base64'));setTimeout(() => { process.stderr.write(Buffer.from('${secondEncoded}','base64')); setTimeout(() => process.exit(0), ${durationMs}); }, ${gapMs})`,
+  );
+}
+
+function tailStderrCommand(first: string, tail: string, tailDelayMs: number, exitDelayMs: number): string {
+  const firstEncoded = Buffer.from(first, "utf8").toString("base64");
+  const tailEncoded = Buffer.from(tail, "utf8").toString("base64");
+  return nodeCommand(
+    `process.stderr.write(Buffer.from('${firstEncoded}','base64'));setTimeout(() => { process.stderr.write(Buffer.from('${tailEncoded}','base64')); setTimeout(() => process.exit(0), ${exitDelayMs}); }, ${tailDelayMs})`,
   );
 }
 
@@ -114,8 +132,6 @@ test("watch cancellation with unterminated stderr adds no byte", () => {
 
 test("watch separates a label spoken while child stderr is still running", async () => {
   const childBytes = Buffer.from("running child without final newline", "utf8");
-  const markerRoot = mkdtempSync(join(tmpdir(), "rocky-terminal-line-running-"));
-  const marker = join(markerRoot, "child-wrote-stderr");
   let poll: (() => void) | undefined;
   let reads = 0;
   const timer = { unref: () => {} };
@@ -126,8 +142,6 @@ test("watch separates a label spoken while child stderr is still running", async
     stderr = Buffer.concat([stderr, bytes]);
     return true;
   }) as typeof process.stderr.write;
-  const previousMarker = process.env.ROCKY_TASK12_MARKER;
-  process.env.ROCKY_TASK12_MARKER = marker;
   try {
     const running = watch([runningStderrCommand(childBytes, 500)], {
       notify: () => {},
@@ -138,19 +152,109 @@ test("watch separates a label spoken while child stderr is still running", async
       },
       clearInterval: () => {},
     });
-    for (let attempt = 0; attempt < 100 && !existsSync(marker); attempt += 1) {
+    for (let attempt = 0; attempt < 100 && !stderr.subarray(0, childBytes.length).equals(childBytes); attempt += 1) {
       await new Promise<void>((resolve) => setTimeout(resolve, 20));
     }
-    assert.equal(existsSync(marker), true);
+    assert.deepEqual(stderr.subarray(0, childBytes.length), childBytes);
     assert.ok(poll);
     poll!();
     assert.equal(await running, 0);
   } finally {
     process.stderr.write = originalWrite;
-    if (previousMarker === undefined) delete process.env.ROCKY_TASK12_MARKER;
-    else process.env.ROCKY_TASK12_MARKER = previousMarker;
-    rmSync(markerRoot, { recursive: true, force: true });
   }
 
   assertRockyStartsAfter(stderr, childBytes, Buffer.from("[Rocky]"), true);
+});
+
+test("active stderr re-arms the boundary after idle commentary", async () => {
+  const childBytes = Buffer.from("firstsecond", "utf8");
+  let stderr = Buffer.alloc(0);
+  let spokeFirst = false;
+  let spokeSecond = false;
+  const originalWrite = process.stderr.write;
+  process.stderr.write = ((chunk: string | Uint8Array) => {
+    stderr = Buffer.concat([stderr, typeof chunk === "string" ? Buffer.from(chunk) : Buffer.from(chunk)]);
+    return true;
+  }) as typeof process.stderr.write;
+  try {
+    const result = await runProcess(twoChunkStderrCommand("first", "second", 150, 150), {
+      idleMs: 30,
+      onIdle: () => {
+        if (!spokeFirst && stderr.includes("first")) {
+          spokeFirst = true;
+          say("idle first");
+        } else if (spokeFirst && !spokeSecond && stderr.includes("second")) {
+          spokeSecond = true;
+          say("idle second");
+        }
+      },
+    });
+    assert.equal(result.code, 0);
+  } finally {
+    process.stderr.write = originalWrite;
+  }
+
+  assert.equal(spokeFirst, true);
+  assert.equal(spokeSecond, true);
+  const firstMarker = stderr.indexOf(Buffer.from("[Rocky] idle first"));
+  const secondMarker = stderr.indexOf(Buffer.from("[Rocky] idle second"));
+  assert.deepEqual(stderr.subarray(0, firstMarker), Buffer.from("first\n"));
+  assert.deepEqual(stderr.subarray(firstMarker + "[Rocky] idle first\n".length, secondMarker), Buffer.from("second\n"));
+});
+
+test("delayed first commentary keeps pending separator after child exit", async () => {
+  const childBytes = Buffer.from("delayed", "utf8");
+  let stderr = Buffer.alloc(0);
+  const originalWrite = process.stderr.write;
+  process.stderr.write = ((chunk: string | Uint8Array) => {
+    stderr = Buffer.concat([stderr, typeof chunk === "string" ? Buffer.from(chunk) : Buffer.from(chunk)]);
+    return true;
+  }) as typeof process.stderr.write;
+  try {
+    const result = await runProcess(stderrCommand(childBytes, 0));
+    assert.equal(result.code, 0);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    say("delayed commentary");
+  } finally {
+    process.stderr.write = originalWrite;
+  }
+
+  assert.deepEqual(stderr.subarray(0, childBytes.length), childBytes);
+  assert.deepEqual(stderr.subarray(childBytes.length, childBytes.length + 1), Buffer.from("\n"));
+});
+
+test("concurrent runProcess calls keep one shared physical boundary", async () => {
+  let stderr = Buffer.alloc(0);
+  const originalWrite = process.stderr.write;
+  process.stderr.write = ((chunk: string | Uint8Array) => {
+    stderr = Buffer.concat([stderr, typeof chunk === "string" ? Buffer.from(chunk) : Buffer.from(chunk)]);
+    return true;
+  }) as typeof process.stderr.write;
+  try {
+    const a = runProcess(tailStderrCommand("A", "TAIL", 1_000, 200)).then(() => say("A done"));
+    const b = runProcess(runningStderrCommand(Buffer.from("B", "utf8"), 600)).then(() => say("B done"));
+    await Promise.all([a, b]);
+  } finally {
+    process.stderr.write = originalWrite;
+  }
+
+  assert.match(stderr.toString("utf8"), /TAIL\n\[Rocky\] A done\n/u);
+});
+
+test("quiet log fact sanitizes control-bearing ROCKY_HOME path", () => {
+  const root = mkdtempSync(join(tmpdir(), "rocky-terminal-line-\u202e-"));
+  const home = join(root, "home");
+  mkdirSync(home);
+  try {
+    const result = spawnSync(process.execPath, [cli, "watch", "--quiet", stderrCommand(Buffer.from("quiet log"), 1)], {
+      env: { ...process.env, ROCKY_HOME: home, NO_COLOR: "1" },
+      encoding: "utf8",
+      windowsHide: true,
+    });
+    assert.equal(result.status, 1, result.stderr);
+    assert.doesNotMatch(result.stderr, /\u202e/u);
+    assert.match(result.stderr, /log:/u);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });

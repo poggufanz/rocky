@@ -185,7 +185,7 @@ function notifyEnabled(): boolean {
 function plainFacts(result: ExecResult, logPath: string | undefined): void {
   writeRockyStderr(`duration: ${formatDuration(result.durationMs)}\n`);
   writeRockyStderr(`exit: ${result.code}\n`);
-  if (logPath !== undefined) writeRockyStderr(`log: ${logPath}\n`);
+  if (logPath !== undefined) writeRockyStderr(`log: ${safeTerminalLine(logPath)}\n`);
 }
 
 function onWatchSuccess(cmd: string, cwd: string, quiet: boolean, result: ExecResult): void {
