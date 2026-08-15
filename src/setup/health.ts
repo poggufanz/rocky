@@ -1,7 +1,7 @@
 import type { McpRegistration } from "./clients.js";
 import { performance } from "node:perf_hooks";
 import { JSON_RPC_ERROR, MODERN_PROTOCOL_VERSION, LEGACY_PROTOCOL_VERSION } from "../mcp/protocol.js";
-import { MCP_TOOL_CATALOG } from "../mcp/tools.js";
+import { MCP_TOOL_CATALOG_CONTRACT } from "../mcp/tools.js";
 import type { ProcessResult, ProcessRunner, ProcessSession } from "./process.js";
 
 export interface HealthCheckResult {
@@ -139,8 +139,14 @@ function hasSupportedVersion(result: unknown, version: string): boolean {
 
 function hasRequiredTools(result: unknown): boolean {
   if (!isObject(result) || !Array.isArray(result.tools)) return false;
-  const names = new Set(result.tools.flatMap((tool) => isObject(tool) && typeof tool.name === "string" ? [tool.name] : []));
-  return MCP_TOOL_CATALOG.every((name) => names.has(name));
+  const names = new Set<string>();
+  for (const tool of result.tools) {
+    if (!isObject(tool) || typeof tool.name !== "string" || tool.name.length === 0 || names.has(tool.name)) {
+      return false;
+    }
+    names.add(tool.name);
+  }
+  return MCP_TOOL_CATALOG_CONTRACT.tools.every((name) => names.has(name));
 }
 
 async function cleanup(

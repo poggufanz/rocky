@@ -269,6 +269,22 @@ function readProjection(
   };
 }
 
+function malformedMcpServersRead(
+  effectiveMcpServers: unknown,
+  baseMcpServers: unknown = {},
+  version = "sha256:one",
+): Record<string, unknown> {
+  return {
+    config: { mcp_servers: effectiveMcpServers },
+    origins: {},
+    layers: [{
+      name: baseSource(),
+      version,
+      config: { mcp_servers: baseMcpServers },
+    }],
+  };
+}
+
 function writeResult(version = "sha256:two"): Record<string, unknown> {
   return {
     status: "ok",
@@ -1547,6 +1563,52 @@ test("Codex removal is idempotent after a successful absent final read", async (
   assert.equal(again.status, "not-configured");
   assert.deepEqual(first.requests.map(({ method }) => method), ["config/read", "config/value/write", "config/read"]);
   assert.deepEqual(second.requests.map(({ method }) => method), ["config/read"]);
+});
+
+test("Codex removal rejects malformed mcp_servers parents in initial and final reads", async (t) => {
+  await t.test("initial malformed parent is not not-configured", async () => {
+    const desired = temporaryRegistration(t);
+    const session = new FakeAppServerSession(codexHome, [malformedMcpServersRead("CORRUPT")]);
+    const removed = await adapterWith(
+      new VersionRunner([versionResult("0.147.0")]),
+      new FakeAppServerSessionFactory([session]),
+    ).remove(desired);
+
+    assert.equal(removed.status, "failed");
+    assert.match(removed.detail ?? "", /capability|read|manual/i);
+    assert.deepEqual(session.requests.map(({ method }) => method), ["config/read"]);
+  });
+
+  await t.test("initial malformed base parent is not trusted as absence", async () => {
+    const desired = temporaryRegistration(t);
+    const session = new FakeAppServerSession(codexHome, [malformedMcpServersRead({}, "CORRUPT")]);
+    const removed = await adapterWith(
+      new VersionRunner([versionResult("0.147.0")]),
+      new FakeAppServerSessionFactory([session]),
+    ).remove(desired);
+
+    assert.equal(removed.status, "failed");
+    assert.match(removed.detail ?? "", /capability|read|manual/i);
+    assert.deepEqual(session.requests.map(({ method }) => method), ["config/read"]);
+  });
+
+  await t.test("final malformed parent is not authoritative absence", async () => {
+    const desired = temporaryRegistration(t);
+    const prior = entryFor(desired);
+    const session = new FakeAppServerSession(codexHome, [
+      readResult(prior),
+      null,
+      malformedMcpServersRead("CORRUPT", {}, "sha256:two"),
+    ]);
+    const removed = await adapterWith(
+      new VersionRunner([versionResult("0.147.0")]),
+      new FakeAppServerSessionFactory([session]),
+    ).remove(desired);
+
+    assert.equal(removed.status, "failed");
+    assert.match(removed.detail ?? "", /could not be read|unreadable|recovery/i);
+    assert.deepEqual(JSON.parse(readFileSync(recoveryPath(removed.detail), "utf8")), prior);
+  });
 });
 
 test("remove race leaves foreign replacement untouched and retains recovery authority", async (t) => {

@@ -132,13 +132,19 @@ function entryForRegistration(registration: McpRegistration): JsonObject {
   };
 }
 
-function nested(value: unknown, keys: readonly string[]): unknown {
+type NestedRead =
+  | { kind: "missing" }
+  | { kind: "value"; value: unknown }
+  | { kind: "malformed" };
+
+function nested(value: unknown, keys: readonly string[]): NestedRead {
   let current = value;
   for (const key of keys) {
-    if (!isObject(current)) return undefined;
+    if (!isObject(current)) return { kind: "malformed" };
+    if (!Object.prototype.hasOwnProperty.call(current, key)) return { kind: "missing" };
     current = current[key];
   }
-  return current;
+  return current === undefined ? { kind: "malformed" } : { kind: "value", value: current };
 }
 
 function collectLeafPaths(value: unknown, path: string, output: Set<string>): void {
@@ -220,8 +226,11 @@ function parseConfigRead(value: unknown, configPath: string): SnapshotRead {
   }
   const baseVersion = baseLayer.version;
 
-  const effectiveEntry = nested(value.config, ["mcp_servers", "rocky"]);
-  const baseEntry = nested(baseLayer.config, ["mcp_servers", "rocky"]);
+  const effectiveRead = nested(value.config, ["mcp_servers", "rocky"]);
+  const baseRead = nested(baseLayer.config, ["mcp_servers", "rocky"]);
+  if (effectiveRead.kind === "malformed" || baseRead.kind === "malformed") return { ok: false };
+  const effectiveEntry = effectiveRead.kind === "value" ? effectiveRead.value : undefined;
+  const baseEntry = baseRead.kind === "value" ? baseRead.value : undefined;
   const originPaths = new Set(Object.keys(origins).filter((path) => (
     path === ROCKY_KEY_PATH || path.startsWith(`${ROCKY_KEY_PATH}.`)
   )));

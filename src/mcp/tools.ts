@@ -18,8 +18,7 @@ import { boundTripleRecord, canonicalPath, isKnownPathPlatform, isSafeNonNegativ
 import type { TripleRecord } from "../core/memory-read.js";
 
 /** Versioned read-only catalog used by MCP discovery and setup health. */
-export const MCP_TOOL_CATALOG_VERSION = 1 as const;
-export const MCP_TOOL_CATALOG = Object.freeze([
+const MCP_TOOL_NAMES = [
   "recall",
   "recent_failures",
   "stats",
@@ -27,7 +26,15 @@ export const MCP_TOOL_CATALOG = Object.freeze([
   "search_knowledge",
   "fetch_record",
   "why_file",
-] as const);
+] as const;
+const MCP_TOOL_NAMES_FROZEN = Object.freeze(MCP_TOOL_NAMES);
+export const MCP_TOOL_CATALOG_CONTRACT = Object.freeze({
+  version: 1 as const,
+  tools: MCP_TOOL_NAMES_FROZEN,
+});
+/** Backward-compatible aliases for callers that consumed the original exports. */
+export const MCP_TOOL_CATALOG = MCP_TOOL_CATALOG_CONTRACT.tools;
+export const MCP_TOOL_CATALOG_VERSION = MCP_TOOL_CATALOG_CONTRACT.version;
 export type McpToolName = typeof MCP_TOOL_CATALOG[number];
 
 export interface McpToolDefinition {
@@ -233,10 +240,11 @@ function descriptors(exposure: Exposure): readonly McpToolDefinition[] {
     },
   ];
   const byName = new Map(definitions.map((definition) => [definition.name, definition] as const));
-  if (byName.size !== MCP_TOOL_CATALOG.length || MCP_TOOL_CATALOG.some((name) => !byName.has(name))) {
+  const catalog = MCP_TOOL_CATALOG_CONTRACT.tools;
+  if (byName.size !== catalog.length || catalog.some((name) => !byName.has(name))) {
     throw new Error("MCP tool catalog and descriptors are out of sync");
   }
-  return MCP_TOOL_CATALOG.map((name) => byName.get(name)!);
+  return catalog.map((name) => byName.get(name)!);
 }
 
 function freezeDeep<T>(value: T): T {

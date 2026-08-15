@@ -8,10 +8,11 @@ import test from "node:test";
 import { disabledRecallWithAi } from "../ai/port.js";
 import {
   MCP_TOOL_CATALOG,
+  MCP_TOOL_CATALOG_CONTRACT,
   MCP_TOOL_CATALOG_VERSION,
   createToolRegistry,
 } from "../mcp/tools.js";
-import { MODERN_PROTOCOL_VERSION } from "../mcp/protocol.js";
+import { JSON_RPC_ERROR, LEGACY_PROTOCOL_VERSION, MODERN_PROTOCOL_VERSION } from "../mcp/protocol.js";
 import type { MemoryQueries } from "../core/memory-query.js";
 import type { McpRegistration } from "../setup/clients.js";
 import { checkMcpRegistration } from "../setup/health.js";
@@ -32,7 +33,7 @@ const expectedCatalog = [
 class ModernHealthSession implements ProcessSession {
   private readonly lines: string[] = [];
 
-  constructor(private readonly tools: readonly string[]) {}
+  constructor(private readonly tools: readonly unknown[]) {}
 
   async writeLine(line: string): Promise<void> {
     const message = JSON.parse(line) as { id?: string | number; method: string };
@@ -51,7 +52,9 @@ class ModernHealthSession implements ProcessSession {
       this.lines.push(JSON.stringify({
         jsonrpc: "2.0",
         id: message.id,
-        result: { tools: this.tools.map((name) => ({ name })) },
+        result: {
+          tools: this.tools.map((tool) => typeof tool === "string" ? { name: tool } : tool),
+        },
       }));
       return;
     }
@@ -73,7 +76,7 @@ class ModernHealthSession implements ProcessSession {
   }
 }
 
-function fakeModernRunner(tools: readonly string[]): ProcessRunner & { session: ModernHealthSession } {
+function fakeModernRunner(tools: readonly unknown[]): ProcessRunner & { session: ModernHealthSession } {
   const session = new ModernHealthSession(tools);
   return {
     session,
@@ -81,6 +84,77 @@ function fakeModernRunner(tools: readonly string[]): ProcessRunner & { session: 
       throw new Error("batch runner must not be used for protocol health");
     },
     async openSession() {
+      return session;
+    },
+  };
+}
+
+class LegacyHealthSession implements ProcessSession {
+  private readonly lines: string[] = [];
+
+  constructor(private readonly tools: readonly unknown[]) {}
+
+  async writeLine(line: string): Promise<void> {
+    const message = JSON.parse(line) as { id?: string | number; method: string };
+    if (message.method === "server/discover") {
+      this.lines.push(JSON.stringify({
+        jsonrpc: "2.0",
+        id: message.id,
+        error: { code: JSON_RPC_ERROR.METHOD_NOT_FOUND, message: "Method not found" },
+      }));
+      return;
+    }
+    if (message.method === "initialize") {
+      this.lines.push(JSON.stringify({
+        jsonrpc: "2.0",
+        id: message.id,
+        result: {
+          protocolVersion: LEGACY_PROTOCOL_VERSION,
+          capabilities: { tools: { listChanged: false } },
+        },
+      }));
+      return;
+    }
+    if (message.method === "notifications/initialized") return;
+    if (message.method === "ping") {
+      this.lines.push(JSON.stringify({ jsonrpc: "2.0", id: message.id, result: {} }));
+      return;
+    }
+    if (message.method === "tools/list") {
+      this.lines.push(JSON.stringify({
+        jsonrpc: "2.0",
+        id: message.id,
+        result: {
+          tools: this.tools.map((tool) => typeof tool === "string" ? { name: tool } : tool),
+        },
+      }));
+      return;
+    }
+    throw new Error(`unexpected legacy health method: ${message.method}`);
+  }
+
+  async readLine(): Promise<string | undefined> {
+    return this.lines.shift();
+  }
+
+  end(): void {}
+
+  kill(): void {}
+
+  async wait(): Promise<ProcessResult> {
+    return { status: 0, stdout: "", stderr: "" };
+  }
+}
+
+function fakeLegacyRunner(tools: readonly unknown[]): ProcessRunner {
+  const sessions = [new LegacyHealthSession(tools), new LegacyHealthSession(tools)];
+  return {
+    async run() {
+      throw new Error("batch runner must not be used for protocol health");
+    },
+    async openSession() {
+      const session = sessions.shift();
+      assert.ok(session, "legacy health opened more sessions than expected");
       return session;
     },
   };
@@ -96,6 +170,12 @@ const registration: McpRegistration = {
 test("MCP catalog exports one versioned seven-tool source and registry order follows it", () => {
   // These exports intentionally do not come from setup: health consumes the
   // read-only MCP catalog without importing any setup writer.
+  assert.equal(MCP_TOOL_CATALOG_CONTRACT.version, MCP_TOOL_CATALOG_VERSION);
+  assert.strictEqual(MCP_TOOL_CATALOG_CONTRACT.tools, MCP_TOOL_CATALOG);
+  assert.equal(Object.isFrozen(MCP_TOOL_CATALOG_CONTRACT), true);
+  assert.equal(Object.isFrozen(MCP_TOOL_CATALOG_CONTRACT.tools), true);
+  assert.equal(Reflect.set(MCP_TOOL_CATALOG_CONTRACT, "version", 2), false);
+  assert.throws(() => (MCP_TOOL_CATALOG as unknown as string[]).push("mutated"), TypeError);
   assert.equal(MCP_TOOL_CATALOG_VERSION, 1);
   assert.deepEqual([...MCP_TOOL_CATALOG], expectedCatalog);
   const registry = createToolRegistry({
@@ -116,6 +196,31 @@ test("health rejects legacy four-tool servers and accepts exact seven plus forei
   const modernResult = await checkMcpRegistration(registration, modern, 250);
   assert.equal(modernResult.healthy, true);
   assert.equal(modernResult.era, "modern");
+});
+
+test("health rejects duplicate, malformed, and case-variant descriptors in both eras", async (t) => {
+  const valid = expectedCatalog.map((name) => ({ name }));
+  const cases: Array<{ name: string; tools: readonly unknown[]; healthy: boolean }> = [
+    { name: "duplicate required", tools: [...valid, { name: "recall" }], healthy: false },
+    { name: "duplicate foreign", tools: [...valid, { name: "foreign_tool" }, { name: "foreign_tool" }], healthy: false },
+    { name: "missing name", tools: [...valid, { title: "not a tool descriptor" }], healthy: false },
+    { name: "null descriptor", tools: [...valid, null], healthy: false },
+    { name: "case variant", tools: [{ name: "Recall" }, ...valid.slice(1)], healthy: false },
+    { name: "unique foreign extra", tools: [...valid, { name: "foreign_tool" }], healthy: true },
+  ];
+
+  for (const entry of cases) {
+    await t.test(`modern ${entry.name}`, async () => {
+      const result = await checkMcpRegistration(registration, fakeModernRunner(entry.tools), 250);
+      assert.equal(result.healthy, entry.healthy, result.detail);
+      assert.equal(result.era, "modern");
+    });
+    await t.test(`legacy ${entry.name}`, async () => {
+      const result = await checkMcpRegistration(registration, fakeLegacyRunner(entry.tools), 250);
+      assert.equal(result.healthy, entry.healthy, result.detail);
+      assert.equal(result.era, "legacy");
+    });
+  }
 });
 
 test("setup status contract names host/MCP registration and agent-hook scope, not spool or model health", () => {
