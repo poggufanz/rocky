@@ -77,8 +77,16 @@ function outsidePackagePath(value, label) {
 
 function reportArgument(argv) {
   if (argv.includes("--publish")) throw new UsageError("publishing arguments are refused");
-  const mode = argv.includes("--release") ? "release" : "branch";
-  const truthOnly = argv.includes("--truth-only");
+  const releaseFlags = argv.filter((argument) => argument === "--release");
+  const truthOnlyFlags = argv.filter((argument) => argument === "--truth-only");
+  if (releaseFlags.length > 1 || truthOnlyFlags.length > 1) {
+    throw new UsageError("release-check accepts each mode flag at most once");
+  }
+  const mode = releaseFlags.length === 1 ? "release" : "branch";
+  const truthOnly = truthOnlyFlags.length === 1;
+  if (mode === "release" && truthOnly) {
+    throw new UsageError("--release cannot combine with --truth-only; release mode runs the full release gate");
+  }
   const reportArgs = argv.filter((argument) => argument !== "--release" && argument !== "--truth-only");
   if (reportArgs.length !== 2 || reportArgs[0] !== "--report" || !reportArgs[1]) {
     throw new UsageError("usage: release-check [--release] [--truth-only] --report <absolute path outside package>");
@@ -86,11 +94,30 @@ function reportArgument(argv) {
   return { path: outsidePackagePath(reportArgs[1], "report"), mode, truthOnly };
 }
 
-function resolveNpmExecutable() {
+export function sanitizeReleaseEnvironment(source = process.env) {
+  const env = { ...source };
+  let removed = false;
+  for (const key of Object.keys(env)) {
+    if (/^GIT_/i.test(key) || /^(?:NODE_OPTIONS|NODE_PATH|NODE_TEST_CONTEXT)$/i.test(key)) {
+      delete env[key];
+      removed = true;
+    }
+  }
+  return removed ? env : source;
+}
+
+function environmentPath(environment) {
+  return environment.PATH
+    ?? environment.Path
+    ?? Object.entries(environment).find(([key]) => key.toLowerCase() === "path")?.[1]
+    ?? "";
+}
+
+function resolveNpmExecutable(environment = process.env) {
   const names = process.platform === "win32" ? ["npm.cmd", "npm.exe"] : ["npm"];
   const candidates = [
     ...names.map((name) => join(dirname(process.execPath), name)),
-    ...(process.env.PATH ?? "").split(delimiter).flatMap((directory) =>
+    ...environmentPath(environment).split(delimiter).flatMap((directory) =>
       directory === "" ? [] : names.map((name) => join(directory, name))),
   ];
   for (const candidate of candidates) {
@@ -102,6 +129,24 @@ function resolveNpmExecutable() {
     }
   }
   throw new StepError("npm executable is unavailable");
+}
+
+export function resolveGitExecutable(environment = process.env) {
+  const names = process.platform === "win32" ? ["git.exe"] : ["git"];
+  const candidates = [
+    ...names.map((name) => join(dirname(process.execPath), name)),
+    ...environmentPath(environment).split(delimiter).flatMap((directory) =>
+      directory === "" ? [] : names.map((name) => join(directory, name))),
+  ];
+  for (const candidate of candidates) {
+    try {
+      accessSync(candidate, process.platform === "win32" ? constants.F_OK : constants.X_OK);
+      return resolve(candidate);
+    } catch {
+      // Continue through bounded PATH candidates.
+    }
+  }
+  throw new StepError("git executable is unavailable");
 }
 
 export function releaseCheckCommandPlan(npm, root = packageRoot) {
@@ -158,7 +203,7 @@ function isolatedEnvironment(root) {
   });
   delete env.NODE_OPTIONS;
   delete env.NODE_TEST_CONTEXT;
-  return env;
+  return sanitizeReleaseEnvironment(env);
 }
 
 function runStep(state, env, label, file, args, display) {
@@ -194,9 +239,13 @@ function runStep(state, env, label, file, args, display) {
   return result.stdout;
 }
 
-function gitOutput(root, args) {
-  const result = spawnSync("git", args, {
+function gitOutput(root, args, options = {}) {
+  const env = sanitizeReleaseEnvironment(options.env ?? process.env);
+  const executable = options.gitExecutable ?? resolveGitExecutable(env);
+  const result = spawnSync(executable, args, {
     cwd: root,
+    env,
+    shell: false,
     encoding: "utf8",
     timeout: COMMAND_TIMEOUT_MS,
     maxBuffer: MAX_COMMAND_OUTPUT_BYTES,
@@ -206,20 +255,25 @@ function gitOutput(root, args) {
   return result.stdout.trim();
 }
 
-export function readGitReleaseState(root, mode, runner = gitOutput) {
+export function readGitReleaseState(root, mode, runner = gitOutput, options = {}) {
+  const env = sanitizeReleaseEnvironment(options.env ?? process.env);
+  const gitExecutable = options.gitExecutable ?? (runner === gitOutput ? resolveGitExecutable(env) : undefined);
+  const run = (args) => runner(root, args, { env, gitExecutable });
   return {
-    branch: runner(root, ["symbolic-ref", "--quiet", "--short", "HEAD"]) ?? "(detached)",
-    head: runner(root, ["rev-parse", "HEAD"]),
-    status: runner(root, ["status", "--short", "--untracked-files=all", "--"]) ?? "(git status unavailable)",
-    tagCommit: runner(root, ["rev-parse", "--verify", `${RELEASE_TAG}^{commit}`]),
+    branch: run(["symbolic-ref", "--quiet", "--short", "HEAD"]) ?? "(detached)",
+    head: run(["rev-parse", "HEAD"]),
+    status: run(["status", "--short", "--untracked-files=all", "--"]) ?? "(git status unavailable)",
+    tagCommit: run(["rev-parse", "--verify", `refs/tags/${RELEASE_TAG}^{commit}`]),
     mode,
   };
 }
 
-export function assertReleaseTruth(state, { root = packageRoot, mode = "branch" } = {}) {
-  const snapshot = readReleaseTruthSnapshot(root);
+export function assertReleaseTruth(state, { root = packageRoot, mode = "branch", env, gitExecutable } = {}) {
+  const evidenceEnv = sanitizeReleaseEnvironment(env ?? process.env);
+  const evidenceGit = gitExecutable ?? resolveGitExecutable(evidenceEnv);
+  const snapshot = readReleaseTruthSnapshot(root, evidenceEnv);
   const documentErrors = validateReleaseTruth(snapshot);
-  const git = readGitReleaseState(root, mode);
+  const git = readGitReleaseState(root, mode, gitOutput, { env: evidenceEnv, gitExecutable: evidenceGit });
   const gitErrors = validateGitReleaseState(git);
   state.releaseTruth = {
     mode,
@@ -254,6 +308,18 @@ function packageInfoValues(source) {
   return { name, version, binary };
 }
 
+function fullGitObjectId(value) {
+  return typeof value === "string" && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(value);
+}
+
+function hasPositivePublicationClaim(text) {
+  return text.split(/\r?\n/u).some((line) => {
+    const releaseContext = /(?:\bnpm\b|\bpackage\b|\brelease\b|\bversion\b|\btarball\b|\bartifact\b|\bregistry\b|@poggufanz\/rocky-cli)/i.test(line);
+    const positiveClaim = /\b(?:is|was|were|has been|have been|now|already)\s+published\b|\bpublished\s+(?:package|version|release|artifact|tarball)\b|\bpublish(?:ed|es|ing)?\s+(?:to|on|as)\s+(?:npm|the registry|registry\.npmjs\.org)\b/i.test(line);
+    return releaseContext && positiveClaim;
+  });
+}
+
 export function validateReleaseTruth(snapshot) {
   const errors = [];
   const expectedVersion = RELEASE_TAG.slice(1);
@@ -283,39 +349,55 @@ export function validateReleaseTruth(snapshot) {
 
   const readme = typeof value.readme === "string" ? value.readme : "";
   const roadmap = readme.slice(readme.indexOf("## Roadmap"));
-  const currentMarkers = roadmap.match(/\(current release\)/gi) ?? [];
-  const roadmapVersion = expectedVersion.replace(/\.0$/, "").replaceAll(".", "\\.");
+  const currentRoadmapLines = roadmap.split(/\r?\n/u).filter((line) => /\(current release\)/i.test(line));
+  const roadmapToken = /^[-*]\s+\*\*(v\d+\.\d+(?:\.\d+)?)\s+/i.exec(currentRoadmapLines[0] ?? "")?.[1];
+  const allowedRoadmapTokens = new Set([`v${expectedVersion}`, `v${expectedVersion.replace(/\.0$/, "")}`]);
+  const allowedRoadmapToken = roadmapToken !== undefined && allowedRoadmapTokens.has(roadmapToken);
   if (!readme.includes(`Current release: \`${PACKAGE_NAME}@${expectedVersion}\``)
-      || currentMarkers.length !== 1
-      || !new RegExp(`^[-*]\\s+\\*\\*v${roadmapVersion}(?:\\.0)?\\b[^\\n]*\\(current release\\)`, "im").test(roadmap)
-      || /published package version is/i.test(readme)) {
+      || currentRoadmapLines.length !== 1
+      || !allowedRoadmapToken
+      || hasPositivePublicationClaim(readme)) {
     errors.push("README release identity or publication status is stale");
   }
 
   const changelog = typeof value.changelog === "string" ? value.changelog : "";
   const heading = /^##\s+(\d+\.\d+\.\d+)\s+[—-]/m.exec(changelog);
-  if (heading?.[1] !== expectedVersion || /##\s+0\.5\.0[\s\S]{0,800}\b(?:unreleased|unpublished)\b/i.test(changelog)) {
+  const escapedExpectedVersion = expectedVersion.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  if (heading?.[1] !== expectedVersion
+      || new RegExp(`##\\s+${escapedExpectedVersion}[\\s\\S]{0,800}\\b(?:unreleased|unpublished)\\b`, "i").test(changelog)
+      || hasPositivePublicationClaim(changelog)) {
     errors.push("CHANGELOG release status is stale");
   }
 
-  const help = typeof value.help === "string" ? value.help : "";
-  if (value.helpCompleted !== true || !help.includes(`version: ${PACKAGE_NAME}@${expectedVersion}`)) {
+  const helpStdout = typeof value.helpStdout === "string" ? value.helpStdout : "";
+  const helpStderr = typeof value.helpStderr === "string" ? value.helpStderr : "";
+  const helpVersionMarkers = [...helpStdout.matchAll(new RegExp(`${PACKAGE_NAME.replace("/", "\\/")}@([^\\s\\r\\n]+)`, "g"))]
+    .map((match) => match[1]);
+  const versionLines = helpStdout.split(/\r?\n/u).filter((line) => /^\s*version\s*:/i.test(line));
+  if (value.helpCompleted !== true
+      || helpStderr !== ""
+      || !helpStdout.includes(`version: ${PACKAGE_NAME}@${expectedVersion}`)
+      || helpVersionMarkers.length !== 1
+      || helpVersionMarkers[0] !== expectedVersion
+      || versionLines.length !== 1
+      || versionLines[0].trim() !== `version: ${PACKAGE_NAME}@${expectedVersion}`) {
     errors.push("CLI help does not expose canonical release identity");
   }
-  if (value.versionCompleted !== true || value.versionOutput !== `${expectedVersion}\n`) {
+  const versionStdout = typeof value.versionStdout === "string" ? value.versionStdout : "";
+  const versionStderr = typeof value.versionStderr === "string" ? value.versionStderr : "";
+  if (value.versionCompleted !== true || versionStderr !== "" || versionStdout !== `${expectedVersion}\n`) {
     errors.push("CLI --version does not match canonical release identity");
   }
   return errors;
 }
 
-export function readReleaseTruthSnapshot(root = packageRoot) {
+export function readReleaseTruthSnapshot(root = packageRoot, env = sanitizeReleaseEnvironment()) {
+  env = sanitizeReleaseEnvironment(env);
   const metadata = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
   const lock = JSON.parse(readFileSync(join(root, "package-lock.json"), "utf8"));
   const packageInfoSource = readFileSync(join(root, "src", "core", "package-info.ts"), "utf8");
   const readme = readFileSync(join(root, "README.md"), "utf8");
   const changelog = readFileSync(join(root, "CHANGELOG.md"), "utf8");
-  const env = { ...process.env };
-  delete env.NODE_TEST_CONTEXT;
   const helpResult = spawnSync(process.execPath, [join(root, "dist", "index.js"), "--help"], {
     cwd: root,
     env,
@@ -330,14 +412,22 @@ export function readReleaseTruthSnapshot(root = packageRoot) {
     timeout: COMMAND_TIMEOUT_MS,
     maxBuffer: MAX_COMMAND_OUTPUT_BYTES,
   });
+  const helpStdout = helpResult.stdout ?? "";
+  const helpStderr = helpResult.stderr ?? "";
+  const versionStdout = versionResult.stdout ?? "";
+  const versionStderr = versionResult.stderr ?? "";
   return {
     metadata,
     lock,
     packageInfoSource,
     readme,
     changelog,
-    help: `${helpResult.stdout ?? ""}${helpResult.stderr ?? ""}`,
-    versionOutput: versionResult.stdout ?? "",
+    help: `${helpStdout}${helpStderr}`,
+    helpStdout,
+    helpStderr,
+    versionOutput: versionStdout,
+    versionStdout,
+    versionStderr,
     helpCompleted: helpResult.error === undefined && helpResult.status === 0 && helpResult.signal === null,
     versionCompleted: versionResult.error === undefined && versionResult.status === 0 && versionResult.signal === null,
   };
@@ -347,6 +437,7 @@ export function validateGitReleaseState(state) {
   const errors = [];
   const value = objectRecord(state);
   if (value === undefined) return ["git release state is not an object"];
+  if (!fullGitObjectId(value.head)) errors.push("git HEAD evidence is missing or not a full object id");
   if (typeof value.status !== "string" || value.status.trim() !== "") errors.push("package worktree is dirty");
   if (value.tagCommit !== RELEASE_COMMIT) errors.push(`${RELEASE_TAG} does not resolve to immutable release commit`);
   if (value.mode === "release") {
@@ -458,10 +549,15 @@ function safeCell(value) {
 
 function markdown(state) {
   const status = state.failure === undefined ? "PASS" : "FAIL";
+  const truthOnly = state.scope === "truth-only";
   const lines = [
     `# Rocky ${PACKAGE_VERSION} release check`,
     "",
     `- Result: **${status}**`,
+    `- Scope: **${state.scope ?? "full release gate"}**`,
+    ...(truthOnly
+      ? ["- Truth-only scope: document and Git evidence only; build, tests, pack, smoke, and benchmark did not run in this invocation."]
+      : []),
     `- Measured at: ${state.measuredAt}`,
     `- Node: ${state.node}`,
     `- npm: ${state.npm ?? "not captured"}`,
@@ -489,7 +585,9 @@ function markdown(state) {
     );
   }
   lines.push("", "## Dry-run package manifest", "");
-  if (state.manifest === undefined) lines.push("Pending: manifest step did not complete.");
+  if (state.manifest === undefined) lines.push(truthOnly
+    ? "Not run: truth-only scope does not execute package pack."
+    : "Pending: manifest step did not complete.");
   else {
     lines.push(
       `- Filename: ${state.manifest.filename}`,
@@ -513,7 +611,8 @@ function markdown(state) {
       `- RSS method: ${report.steadyStateRssBytes.method}`,
     );
   } else {
-    lines.push(`- Result: pending (${state.benchmark?.reason ?? "benchmark step did not complete"})`);
+    const benchmarkStatus = state.benchmark?.status === "not-run" ? "not run" : "pending";
+    lines.push(`- Result: ${benchmarkStatus} (${state.benchmark?.reason ?? "benchmark step did not complete"})`);
   }
   lines.push("", "## Git evidence", "");
   if (state.releaseTruth === undefined) lines.push("- Release truth: not completed", "");
@@ -548,21 +647,21 @@ async function main(reportPath, mode, truthOnly = false) {
     platform: process.platform,
     arch: process.arch,
     commands: [],
+    scope: truthOnly ? "truth-only" : "full release gate",
   };
   let temporaryRoot;
   let failed = false;
   try {
-    const env = truthOnly ? process.env : (() => {
-      temporaryRoot = mkdtempSync(join(tmpdir(), "rocky-release-check-"));
-      return isolatedEnvironment(temporaryRoot);
-    })();
+    temporaryRoot = mkdtempSync(join(tmpdir(), "rocky-release-check-"));
+    const env = isolatedEnvironment(temporaryRoot);
+    const gitExecutable = resolveGitExecutable(env);
     if (truthOnly) {
       assertMetadata(state);
-      state.benchmark = { status: "pending", reason: "truth-only validation" };
+      state.benchmark = { status: "not-run", reason: "truth-only validation" };
     } else {
       const npm = process.env.ROCKY_RELEASE_CHECK_TEST_SPAWN_ERROR === "1"
         ? join(temporaryRoot, "missing-npm-executable")
-        : resolveNpmExecutable();
+        : resolveNpmExecutable(env);
       const commands = releaseCheckCommandPlan(npm, packageRoot);
       state.npm = runStep(state, env, "npm version", commands.npmVersion.file, commands.npmVersion.args, commands.npmVersion.display).trim();
       runStep(state, env, "clean build and full tests", commands.fullTest.file, commands.fullTest.args, commands.fullTest.display);
@@ -602,10 +701,10 @@ async function main(reportPath, mode, truthOnly = false) {
       }
     }
 
-    runStep(state, env, "git diff check", "git", ["diff", "--check"], "git diff --check");
+    runStep(state, env, "git diff check", gitExecutable, ["diff", "--check"], "git diff --check");
     state.diffCheckPassed = true;
-    state.gitStatus = runStep(state, env, "git status evidence", "git", ["status", "--short", "--untracked-files=all"], "git status --short --untracked-files=all");
-    assertReleaseTruth(state, { mode });
+    state.gitStatus = runStep(state, env, "git status evidence", gitExecutable, ["status", "--short", "--untracked-files=all"], "git status --short --untracked-files=all");
+    assertReleaseTruth(state, { mode, env, gitExecutable });
   } catch (error) {
     failed = true;
     state.failure = error instanceof Error ? error.message : String(error);

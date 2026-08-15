@@ -346,7 +346,11 @@ test("canonical release truth rejects drift in every release marker", async () =
       readme: string;
       changelog: string;
       help: string;
+      helpStdout: string;
+      helpStderr: string;
       versionOutput: string;
+      versionStdout: string;
+      versionStderr: string;
       helpCompleted: boolean;
       versionCompleted: boolean;
     };
@@ -354,6 +358,22 @@ test("canonical release truth rejects drift in every release marker", async () =
   };
   const snapshot = releaseCheck.readReleaseTruthSnapshot(packageRoot);
   assert.deepEqual(releaseCheck.validateReleaseTruth(snapshot), []);
+  assert.deepEqual(
+    releaseCheck.validateReleaseTruth({
+      ...snapshot,
+      readme: `${snapshot.readme}\nThe staged transaction publishes audited bytes.\n`,
+    }),
+    [],
+    "unrelated publishes wording must not be treated as package publication",
+  );
+  assert.deepEqual(
+    releaseCheck.validateReleaseTruth({
+      ...snapshot,
+      changelog: `${snapshot.changelog}\nThe v0.4 release was released on 9 August.\n`,
+    }),
+    [],
+    "release history wording must not be treated as package publication",
+  );
 
   const lock = object(snapshot.lock.packages, "lock packages");
   const lockRoot = object(lock[""], "lock root");
@@ -364,9 +384,22 @@ test("canonical release truth rejects drift in every release marker", async () =
     ["package-info", { ...snapshot, packageInfoSource: snapshot.packageInfoSource.replace('PACKAGE_VERSION = "0.5.0"', 'PACKAGE_VERSION = "9.9.9"') }],
     ["README", { ...snapshot, readme: snapshot.readme.replace("@poggufanz/rocky-cli@0.5.0", "@poggufanz/rocky-cli@9.9.9") }],
     ["README current roadmap", { ...snapshot, readme: snapshot.readme.replace("v0.4 — his diligence (implemented)", "v0.4 — his diligence (current release)") }],
+    ["README roadmap v0.5.1", { ...snapshot, readme: snapshot.readme.replace("v0.5 — his curiosity", "v0.5.1 — his curiosity") }],
+    ["README roadmap v0.5.0.1", { ...snapshot, readme: snapshot.readme.replace("v0.5 — his curiosity", "v0.5.0.1 — his curiosity") }],
+    ["README roadmap v0.5-beta", { ...snapshot, readme: snapshot.readme.replace("v0.5 — his curiosity", "v0.5-beta — his curiosity") }],
+    ["README second current marker", { ...snapshot, readme: snapshot.readme.replace("v0.4 — his diligence (implemented)", "v0.4 — his diligence (current release)") }],
     ["CHANGELOG", { ...snapshot, changelog: snapshot.changelog.replace("## 0.5.0", "## 9.9.9") }],
-    ["help", { ...snapshot, help: snapshot.help.replace("@poggufanz/rocky-cli@0.5.0", "@poggufanz/rocky-cli@9.9.9") }],
-    ["version output", { ...snapshot, versionOutput: "9.9.9\n" }],
+    ["README publication claim", { ...snapshot, readme: `${snapshot.readme}\nThe npm package was published to npm.\n` }],
+    ["README bare publication claim", { ...snapshot, readme: `${snapshot.readme}\nThe package published to npm.\n` }],
+    ["README publish-to-npm claim", { ...snapshot, readme: `${snapshot.readme}\nThe package publishes to npm.\n` }],
+    ["CHANGELOG publication claim", { ...snapshot, changelog: `${snapshot.changelog}\nThe v0.5.0 package was published to npm.\n` }],
+    ["help", { ...snapshot, helpStdout: snapshot.helpStdout.replace("@poggufanz/rocky-cli@0.5.0", "@poggufanz/rocky-cli@9.9.9") }],
+    ["help wrong stream", { ...snapshot, helpStdout: "", helpStderr: snapshot.helpStdout }],
+    ["help conflicting version", { ...snapshot, helpStdout: `${snapshot.helpStdout}\nversion: @poggufanz/rocky-cli@9.9.9\n` }],
+    ["help conflicting package", { ...snapshot, helpStdout: snapshot.helpStdout.replace("version: @poggufanz/rocky-cli@0.5.0", "version: @wrong/rocky@0.5.0") }],
+    ["version output", { ...snapshot, versionStdout: "9.9.9\n", versionOutput: "9.9.9\n" }],
+    ["version wrong stream", { ...snapshot, versionStdout: "", versionStderr: snapshot.versionStdout }],
+    ["version extra output", { ...snapshot, versionStdout: `${snapshot.versionStdout}0.5.1\n`, versionOutput: `${snapshot.versionStdout}0.5.1\n` }],
     ["help process", { ...snapshot, helpCompleted: false }],
     ["version process", { ...snapshot, versionCompleted: false }],
   ];

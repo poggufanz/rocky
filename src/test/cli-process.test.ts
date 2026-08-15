@@ -301,23 +301,30 @@ test("release checker source has no registry-mutation subprocess argument", () =
 test("release truth keeps branch and immutable-tag modes distinct", async () => {
   const releaseCheck = await import(pathToFileURL(join(packageRoot, "scripts", "release-check.mjs")).href) as {
     validateGitReleaseState(state: unknown): string[];
-    readGitReleaseState(root: string, mode: string, runner: (root: string, args: string[]) => string | undefined): {
+    readGitReleaseState(root: string, mode: string, runner: (root: string, args: string[], options?: { env?: NodeJS.ProcessEnv; gitExecutable?: string }) => string | undefined, options?: { env?: NodeJS.ProcessEnv; gitExecutable?: string }): {
       branch: string;
       head?: string;
       status: string;
       tagCommit?: string;
       mode: string;
     };
+    sanitizeReleaseEnvironment(environment: NodeJS.ProcessEnv): NodeJS.ProcessEnv;
     releaseCheckCommandPlan(npm: string, root: string): Record<string, { file: string; args: string[] }>;
   };
+  const releaseHead = "20bc32090843334afa0ee92c0f0705fde625d1c3";
+  const postReleaseHead = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+  const sha256Head = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
   const branch = {
     branch: "iq",
-    head: "post-release-remediation",
+    head: postReleaseHead,
     status: "",
-    tagCommit: "20bc32090843334afa0ee92c0f0705fde625d1c3",
+    tagCommit: releaseHead,
     mode: "branch",
   };
   assert.deepEqual(releaseCheck.validateGitReleaseState(branch), []);
+  assert.deepEqual(releaseCheck.validateGitReleaseState({ ...branch, head: sha256Head }), []);
+  assert.notDeepEqual(releaseCheck.validateGitReleaseState({ ...branch, head: undefined }), []);
+  assert.notDeepEqual(releaseCheck.validateGitReleaseState({ ...branch, head: "post-release-remediation" }), []);
   assert.notDeepEqual(
     releaseCheck.validateGitReleaseState({ ...branch, status: " M README.md" }),
     [],
@@ -335,7 +342,7 @@ test("release truth keeps branch and immutable-tag modes distinct", async () => 
     releaseCheck.validateGitReleaseState({
       ...branch,
       mode: "release",
-      head: "20bc32090843334afa0ee92c0f0705fde625d1c3",
+      head: releaseHead,
     }),
     [],
   );
@@ -343,18 +350,43 @@ test("release truth keeps branch and immutable-tag modes distinct", async () => 
   const fixture = mkdtempSync(join(tmpdir(), "rocky-release-git "));
   try {
     const calls: string[][] = [];
-    const runner = (_root: string, args: string[]): string | undefined => {
+    const runnerOptions: Array<{ env?: NodeJS.ProcessEnv; gitExecutable?: string }> = [];
+    const runner = (_root: string, args: string[], options?: { env?: NodeJS.ProcessEnv; gitExecutable?: string }): string | undefined => {
       calls.push(args);
+      if (options !== undefined) runnerOptions.push(options);
       const command = args.join(" ");
       if (command.startsWith("symbolic-ref")) return "iq";
-      if (command === "rev-parse HEAD") return "post-release-remediation";
+      if (command === "rev-parse HEAD") return postReleaseHead;
       if (command.startsWith("status")) return "";
-      return "20bc32090843334afa0ee92c0f0705fde625d1c3";
+      if (command === "rev-parse --verify refs/tags/v0.5.0^{commit}") return releaseHead;
+      return "cccccccccccccccccccccccccccccccccccccccc";
     };
-    const fixtureState = releaseCheck.readGitReleaseState(fixture, "branch", runner);
+    const polluted = {
+      ...process.env,
+      GIT_DIR: "redirected.git",
+      GIT_WORK_TREE: "redirected-worktree",
+      GIT_INDEX_FILE: "redirected-index",
+      GIT_OBJECT_DIRECTORY: "redirected-objects",
+      GIT_ALTERNATE_OBJECT_DIRECTORIES: "redirected-alternates",
+      GIT_COMMON_DIR: "redirected-common",
+      GIT_CONFIG_GLOBAL: "redirected-config",
+      NODE_OPTIONS: "--require redirected-preload.cjs",
+      NODE_PATH: "redirected-node-path",
+      NODE_TEST_CONTEXT: "redirected-test-context",
+    };
+    const sanitized = releaseCheck.sanitizeReleaseEnvironment(polluted);
+    for (const key of ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_COMMON_DIR", "GIT_CONFIG_GLOBAL", "NODE_OPTIONS", "NODE_PATH", "NODE_TEST_CONTEXT"]) {
+      assert.equal(sanitized[key], undefined, `${key} must not reach release evidence`);
+    }
+    const fixtureState = releaseCheck.readGitReleaseState(fixture, "branch", runner, {
+      env: sanitized,
+      gitExecutable: "C:\\absolute\\git.exe",
+    });
     assert.deepEqual(releaseCheck.validateGitReleaseState(fixtureState), []);
+    assert.ok(runnerOptions.length > 0);
+    assert.ok(runnerOptions.every((options) => options.gitExecutable === "C:\\absolute\\git.exe" && options.env === sanitized));
     assert.ok(calls.some((args) => args.join(" ") === "status --short --untracked-files=all --"));
-    assert.ok(calls.some((args) => args.join(" ") === "rev-parse --verify v0.5.0^{commit}"));
+    assert.ok(calls.some((args) => args.join(" ") === "rev-parse --verify refs/tags/v0.5.0^{commit}"));
     const dirtyRunner = (_root: string, args: string[]): string | undefined => (
       args[0] === "status" ? "?? dirty.txt" : runner(_root, args)
     );
@@ -371,6 +403,37 @@ test("release truth keeps branch and immutable-tag modes distinct", async () => 
   assert.deepEqual(plan.pack.args, ["pack", "--dry-run", "--json"]);
   assert.equal(plan.smoke.file, process.execPath);
   assert.deepEqual(plan.smoke.args, [join(packageRoot, "scripts", "package-smoke.mjs")]);
+});
+
+test("release checker rejects release truth-only mode before doing work", (t) => {
+  const sandbox = processSandbox(t);
+  const report = join(sandbox.root, "release-report.md");
+  const result = runNodeScript(
+    sandbox,
+    join(packageRoot, "scripts", "release-check.mjs"),
+    ["--release", "--truth-only", "--report", report],
+  );
+
+  assertCompleted(result, 2);
+  assert.match(result.stderr, /truth-only.*release|release.*truth-only|full release/i);
+  assert.equal(existsSync(report), false);
+});
+
+test("truth-only release report declares its limited scope", (t) => {
+  const sandbox = processSandbox(t);
+  const report = join(sandbox.root, "truth-only-report.md");
+  const result = runNodeScript(
+    sandbox,
+    join(packageRoot, "scripts", "release-check.mjs"),
+    ["--truth-only", "--report", report],
+  );
+
+  assert.ok(result.status === 0 || result.status === 1, result.stderr);
+  const markdown = readFileSync(report, "utf8");
+  assert.match(markdown, /Scope: \*\*truth-only\*\*/);
+  assert.match(markdown, /build, tests, pack, smoke, and benchmark did not run/);
+  assert.match(markdown, /Not run: truth-only scope does not execute package pack/);
+  assert.doesNotMatch(markdown, /npm test|npm pack|package smoke passed/);
 });
 
 test("release checker partial report preserves a spawn failure without inventing exit 1", (t) => {
