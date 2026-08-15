@@ -199,7 +199,7 @@ function throwingStderrPreload(box: Sandbox, target: string, registry404 = false
 
 function installGitShim(
   box: Sandbox,
-  mode: "merge-base-128" | "diff-hang-once" | "diff-flood" | "diff-stderr-flood" | "diff-malformed" | "diff-ambiguous" | "diff-index-only" | "diff-old-mode" | "diff-rename-from" | "diff-marker-only" | "diff-hunk-empty" | "diff-binary-patch" | "rev-parse-flood" | "show-flood" | "show-128",
+  mode: "merge-base-128" | "diff-hang-once" | "diff-flood" | "diff-stderr-flood" | "diff-malformed" | "diff-ambiguous" | "diff-index-only" | "diff-old-mode" | "diff-rename-from" | "diff-marker-only" | "diff-hunk-empty" | "diff-binary-patch" | "diff-invalid-later" | "diff-name-only-missing" | "diff-name-only-leading" | "diff-name-only-double" | "diff-name-only-bare" | "apply-numstat-orphan" | "rev-parse-flood" | "show-flood" | "show-128",
 ): void {
   let realGit = (box.env.PATH ?? "")
     .split(delimiter)
@@ -221,10 +221,11 @@ function installGitShim(
   mkdirSync(bin, { recursive: true });
   writeFileSync(script, [
     "#!/usr/bin/env node",
-    "const { existsSync, writeFileSync } = require('node:fs');",
+    "const { appendFileSync, existsSync, writeFileSync } = require('node:fs');",
     "const { spawnSync } = require('node:child_process');",
     "const args = process.argv.slice(2);",
     "const mode = process.env.ROCKY_GIT_SHIM_MODE;",
+    "appendFileSync(process.env.ROCKY_GIT_SHIM_CALL_LOG, JSON.stringify({ marker: 'rocky-git-shim', args }) + '\\n');",
     "if (mode === 'merge-base-128' && args.includes('merge-base')) process.exit(128);",
     "if (mode === 'diff-flood' && args.includes('--unified=0')) { require('node:fs').writeSync(1, Buffer.alloc(1024 * 1024 + 1, 120)); process.exit(0); }",
     "if (mode === 'diff-stderr-flood' && args.includes('--unified=0')) { require('node:fs').writeSync(2, Buffer.alloc(1024 * 1024 + 1, 120)); process.exit(0); }",
@@ -236,6 +237,12 @@ function installGitShim(
     "if (mode === 'diff-marker-only' && args.includes('--unified=0')) { require('node:fs').writeSync(1, 'diff --git a/file.ts b/file.ts\\n--- a/file.ts\\n'); process.exit(0); }",
     "if (mode === 'diff-hunk-empty' && args.includes('--unified=0')) { require('node:fs').writeSync(1, 'diff --git a/file.ts b/file.ts\\n--- a/file.ts\\n+++ b/file.ts\\n@@ -1 +1 @@\\n'); process.exit(0); }",
     "if (mode === 'diff-binary-patch' && args.includes('--unified=0')) { require('node:fs').writeSync(1, 'diff --git a/file.bin b/file.bin\\nGIT binary patch\\nliteral 42\\n'); process.exit(0); }",
+    "if (mode === 'diff-invalid-later' && args.includes('--unified=0') && args.some((arg) => /^c{40}$/.test(arg))) { require('node:fs').writeSync(1, 'not a unified diff\\n'); process.exit(0); }",
+    "if (mode === 'diff-name-only-missing' && args.includes('--name-only')) { require('node:fs').writeSync(1, 'package.json'); process.exit(0); }",
+    "if (mode === 'diff-name-only-leading' && args.includes('--name-only')) { require('node:fs').writeSync(1, '\\0package.json\\0'); process.exit(0); }",
+    "if (mode === 'diff-name-only-double' && args.includes('--name-only')) { require('node:fs').writeSync(1, 'package.json\\0\\0'); process.exit(0); }",
+    "if (mode === 'diff-name-only-bare' && args.includes('--name-only')) { require('node:fs').writeSync(1, '\\0'); process.exit(0); }",
+    "if (mode === 'apply-numstat-orphan' && args.includes('apply')) { require('node:fs').writeSync(1, '0\\t0\\tfile.ts\\0orphan\\0'); process.exit(0); }",
     "if (mode === 'rev-parse-flood' && args.includes('--git-dir')) { require('node:fs').writeSync(1, Buffer.alloc(1024 * 1024 + 1, 120)); process.exit(0); }",
     "if (mode === 'show-flood' && args.includes('show')) { require('node:fs').writeSync(1, Buffer.alloc(1024 * 1024 + 1, 120)); process.exit(0); }",
     "if (mode === 'show-128' && args.includes('show')) process.exit(128);",
@@ -258,6 +265,18 @@ function installGitShim(
   box.env.ROCKY_REAL_GIT = realGit;
   box.env.ROCKY_GIT_SHIM_MODE = mode;
   box.env.ROCKY_GIT_SHIM_MARKER = join(box.root, "git-shim.marker");
+  box.env.ROCKY_GIT_SHIM_CALL_LOG = join(box.root, "git-shim-calls.jsonl");
+  box.env.ROCKY_GIT_TEST_MODE = "1";
+  box.env.ROCKY_GIT_TEST_SHIM = JSON.stringify({ executable: process.execPath, script });
+}
+
+function shimCalls(box: Sandbox): Array<{ marker: string; args: string[] }> {
+  assert.equal(existsSync(join(box.root, "git-shim-calls.jsonl")), true, "explicit Git seam was not invoked");
+  return readFileSync(join(box.root, "git-shim-calls.jsonl"), "utf8")
+    .trim()
+    .split(/\r?\n/)
+    .filter((line) => line.length > 0)
+    .map((line) => JSON.parse(line) as { marker: string; args: string[] });
 }
 
 function rockyHomeSnapshot(home: string): string {
@@ -364,7 +383,6 @@ test("new-ref range falls back to the empty tree when no remote-tracking base ex
 });
 
 test("new-ref merge-base exit 128 skips both scans for that ref instead of using the empty tree", async (t) => {
-  if (process.platform === "win32") return;
   const box = sandbox(t);
   const secret = "AKIAHGFDSAPOIUYTREWQ";
   const commits = initRepo(box, { "src/root.ts": `export const root = "${secret}";\n` });
@@ -665,6 +683,79 @@ test("malformed or ambiguous git diff output is incomplete, not clean", async (t
   }
 });
 
+test("the bounded Git process seam intercepts argv and preserves a finding before a later invalid range", async (t) => {
+  const box = sandbox(t);
+  const secret = "AKIAABCDEFGHIJKLMNOP";
+  const commits = initRepo(box, { "README.md": "clean\n" }, {
+    "src/key.ts": `export const key = "${secret}";\n`,
+  });
+  installGitShim(box, "diff-invalid-later");
+  const invalid = "c".repeat(40);
+  const input = prePushLine(commits.second!, commits.first) + prePushLine(invalid, commits.first);
+
+  const result = await runCheck(box, ["--offline", "--pre-push"], input);
+
+  assertCompleted(result, 3);
+  assert.match(result.stderr, /src\/key\.ts:1/);
+  assert.match(result.stderr, /INCOMPLETE/i);
+  const calls = shimCalls(box);
+  assert.ok(calls.some(({ marker }) => marker === "rocky-git-shim"));
+  assert.ok(calls.some(({ args }) => args.includes("diff")), "secret diff was not intercepted");
+  assert.ok(calls.every(({ marker }) => marker === "rocky-git-shim"), "a real Git process bypassed the seam");
+});
+
+test("a package finding from an earlier range survives a later invalid range", async (t) => {
+  const box = sandbox(t);
+  const missing = NEVER_PACKAGE;
+  const commits = initRepo(box, { "package.json": "{}\n" }, {
+    "package.json": JSON.stringify({ dependencies: { [missing]: "1.0.0" } }),
+  });
+  enableRegistry(box);
+  const preload = registryMissingOnlyPreload(box, missing);
+  const invalid = "d".repeat(40);
+  const input = prePushLine(commits.second!, commits.first) + prePushLine(invalid, commits.first);
+
+  const result = await runCheck(box, ["--pre-push"], input, preload);
+
+  assertCompleted(result, 3);
+  assert.match(result.stderr, new RegExp(missing));
+  assert.match(result.stderr, /INCOMPLETE/i);
+});
+
+test("malformed name-only NUL framing is incomplete and never clean", async (t) => {
+  for (const mode of [
+    "diff-name-only-missing",
+    "diff-name-only-leading",
+    "diff-name-only-double",
+    "diff-name-only-bare",
+  ] as const) {
+    const box = sandbox(t);
+    const commits = initRepo(box, { "package.json": "{}\n" }, {
+      "package.json": JSON.stringify({ dependencies: { [NEVER_PACKAGE]: "1.0.0" } }),
+    });
+    enableRegistry(box);
+    installGitShim(box, mode);
+    const manual = await runCheck(box, ["--quiet"]);
+    assertCompleted(manual, 2, mode);
+    assert.match(manual.stderr, /INCOMPLETE|malformed|ambiguous/i, mode);
+    const hook = await runCheck(box, ["--quiet", "--pre-push"], prePushLine(commits.second!, commits.first));
+    assertCompleted(hook, 0, mode);
+    assert.match(hook.stderr, /INCOMPLETE|malformed|ambiguous/i, mode);
+  }
+});
+
+test("orphan Git apply numstat frame is incomplete and intercepted", async (t) => {
+  const box = sandbox(t);
+  initRepo(box, { "README.md": "clean\n" });
+  installGitShim(box, "apply-numstat-orphan");
+
+  const result = await runCheck(box, ["--offline", "--quiet"]);
+
+  assertCompleted(result, 2);
+  assert.match(result.stderr, /INCOMPLETE|malformed|ambiguous/i);
+  assert.ok(shimCalls(box).some(({ args }) => args.includes("apply")), "apply validator was not intercepted");
+});
+
 test("README and pre-push hook document the same clean/incomplete mapping", () => {
   const readme = readFileSync(join(packageRoot, "README.md"), "utf8");
   const hook = readFileSync(join(packageRoot, "src", "check", "pre-push.ts"), "utf8");
@@ -730,7 +821,6 @@ test("hook install writes the path reported by git in a linked worktree", async 
 });
 
 test("a hung git diff is killed after the check-path deadline and fails open with one line", async (t) => {
-  if (process.platform === "win32") return;
   const box = sandbox(t);
   const commits = initRepo(box, { "README.md": "clean\n" }, { "src/value.ts": "export const value = 1;\n" });
   installGitShim(box, "diff-hang-once");
@@ -756,7 +846,6 @@ test("pre-push stdin over one megabyte is bounded and announces uninspected refs
 });
 
 test("git diff output over one megabyte is bounded and announces uninspected secret lines", async (t) => {
-  if (process.platform === "win32") return;
   const box = sandbox(t);
   const commits = initRepo(box, { "README.md": "clean\n" }, { "src/value.ts": "export const value = 1;\n" });
   installGitShim(box, "diff-flood");
@@ -769,7 +858,6 @@ test("git diff output over one megabyte is bounded and announces uninspected sec
 });
 
 test("git output is capped by default on the check path", async (t) => {
-  if (process.platform === "win32") return;
   const box = sandbox(t);
   initRepo(box, { "README.md": "clean\n" });
   installGitShim(box, "rev-parse-flood");
@@ -784,7 +872,6 @@ test("git output is capped by default on the check path", async (t) => {
 });
 
 test("git show output over one megabyte is bounded and announces the skipped package stage", async (t) => {
-  if (process.platform === "win32") return;
   const box = sandbox(t);
   const commits = initRepo(box, { "package.json": "{}\n" }, {
     "package.json": JSON.stringify({ dependencies: { [NEVER_PACKAGE]: "1.0.0" } }),
@@ -801,7 +888,6 @@ test("git show output over one megabyte is bounded and announces the skipped pac
 });
 
 test("git diff stderr over one megabyte is bounded and announced", async (t) => {
-  if (process.platform === "win32") return;
   const box = sandbox(t);
   const commits = initRepo(box, { "README.md": "clean\n" }, { "src/value.ts": "export const value = 1;\n" });
   installGitShim(box, "diff-stderr-flood");
@@ -814,7 +900,6 @@ test("git diff stderr over one megabyte is bounded and announced", async (t) => 
 });
 
 test("git show failure skips the package stage instead of treating manifests as absent", async (t) => {
-  if (process.platform === "win32") return;
   const box = sandbox(t);
   const commits = initRepo(box, { "package.json": "{}\n" }, {
     "package.json": JSON.stringify({ dependencies: { [NEVER_PACKAGE]: "1.0.0" } }),
@@ -999,8 +1084,7 @@ test("pre-push mode never reads git's positional arguments as --help", async (t)
 });
 
 test("a manual run whose secret stage cannot read the diff exits 2, not a clean 0", async (t) => {
-  // installGitShim resolves a bare `git` on PATH, which Windows spells git.exe.
-  if (process.platform === "win32") return;
+  // installGitShim uses the explicit validated process seam on every platform.
   // Fail-open protects pushes, not exit codes. A stress audit found a manual
   // run reporting 0 — "checked, clean" to any script reading it — when the
   // range had in fact never been inspected.
@@ -1015,8 +1099,7 @@ test("a manual run whose secret stage cannot read the diff exits 2, not a clean 
 });
 
 test("the same unreadable diff still lets a push through in hook mode", async (t) => {
-  // installGitShim resolves a bare `git` on PATH, which Windows spells git.exe.
-  if (process.platform === "win32") return;
+  // installGitShim uses the explicit validated process seam on every platform.
   const box = sandbox(t);
   const commits = initRepo(box, { "README.md": "clean\n" }, { "src/a.ts": "const a = 1;\n" });
   const line = prePushLine(commits.second!, commits.first);

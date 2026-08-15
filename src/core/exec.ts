@@ -8,8 +8,10 @@
  * stderr grow past `tailLines` lines of at most `maxLineBytes` bytes each.
  */
 
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
+import { statSync } from "node:fs";
 import { constants } from "node:os";
+import { isAbsolute } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 
 export const TAIL_LINES = 200;
@@ -56,6 +58,43 @@ export interface GitOptions {
   maxOutputBytes?: number;
 }
 
+interface GitTestShim {
+  executable: string;
+  script: string;
+}
+
+interface GitSpawnCommand {
+  command: string;
+  prefix: string[];
+}
+
+/**
+ * Resolve the bounded process-test seam. Normal invocations always execute
+ * the `git` executable from PATH. Tests may provide an explicit absolute
+ * executable plus script together with the explicit test-mode marker; both
+ * are validated as regular files and argv stays separate from the command, so
+ * this cannot become a shell injection path or an ambient production override.
+ */
+function gitSpawnCommand(): GitSpawnCommand | null {
+  const raw = process.env.ROCKY_GIT_TEST_SHIM;
+  if (raw === undefined || process.env.ROCKY_GIT_TEST_MODE !== "1") {
+    return { command: "git", prefix: [] };
+  }
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (typeof parsed !== "object" || parsed === null) return null;
+    const candidate = parsed as Partial<GitTestShim>;
+    if (typeof candidate.executable !== "string" || typeof candidate.script !== "string"
+      || !isAbsolute(candidate.executable) || !isAbsolute(candidate.script)
+      || !statSync(candidate.executable).isFile() || !statSync(candidate.script).isFile()) {
+      return null;
+    }
+    return { command: candidate.executable, prefix: [candidate.script] };
+  } catch {
+    return null;
+  }
+}
+
 /** Execute git with argv boundaries intact and capture its output. */
 export function runGit(
   args: readonly string[],
@@ -66,7 +105,18 @@ export function runGit(
     // Git's fatal messages are the only way to tell "no repository here" from
     // "this repository is broken" — both exit 128 — so the locale is pinned
     // rather than left to whatever the user's shell exports.
-    const child = spawn("git", [...args], {
+    const command = gitSpawnCommand();
+    if (command === null) {
+      resolve({
+        code: 127,
+        stdout: "",
+        stderr: "invalid ROCKY_GIT_TEST_SHIM; git process not started",
+        timedOut: false,
+        outputLimitExceeded: false,
+      });
+      return;
+    }
+    const child = spawn(command.command, [...command.prefix, ...args], {
       stdio: ["pipe", "pipe", "pipe"],
       env: { ...process.env, LC_ALL: "C", LANG: "C" },
     });
@@ -124,6 +174,49 @@ export function runGit(
     }
     child.stdin.end(input);
   });
+}
+
+/**
+ * Synchronous Git invocation for syntax-only patch validation. Callers must
+ * use a bounded input and output budget; this shares the exact executable and
+ * argv seam with runGit so tests cannot silently fall through to PATH Git.
+ */
+export function runGitSync(
+  args: readonly string[],
+  input?: string,
+  options: GitOptions = {},
+): GitResult {
+  const command = gitSpawnCommand();
+  if (command === null) {
+    return {
+      code: 127,
+      stdout: "",
+      stderr: "invalid ROCKY_GIT_TEST_SHIM; git process not started",
+      timedOut: false,
+      outputLimitExceeded: false,
+    };
+  }
+  const result = spawnSync(command.command, [...command.prefix, ...args], {
+    input,
+    stdio: ["pipe", "pipe", "pipe"],
+    env: { ...process.env, LC_ALL: "C", LANG: "C" },
+    ...(options.timeoutMs === undefined ? {} : { timeout: options.timeoutMs }),
+    ...(options.maxOutputBytes === undefined ? {} : { maxBuffer: options.maxOutputBytes }),
+  });
+  const stdout = Buffer.isBuffer(result.stdout) ? result.stdout.toString("utf8") : String(result.stdout ?? "");
+  let stderr = Buffer.isBuffer(result.stderr) ? result.stderr.toString("utf8") : String(result.stderr ?? "");
+  if (result.error !== undefined && stderr.length === 0) stderr = result.error.message;
+  const errorCode = (result.error as NodeJS.ErrnoException | undefined)?.code;
+  const timedOut = errorCode === "ETIMEDOUT";
+  const outputLimitExceeded = errorCode === "ENOBUFS"
+    || /maxBuffer|ENOBUFS/i.test(result.error?.message ?? "");
+  return {
+    code: typeof result.status === "number" ? result.status : signalExit(result.signal),
+    stdout,
+    stderr,
+    timedOut,
+    outputLimitExceeded,
+  };
 }
 
 /** Exported for tests: the ring buffer, independent of any child process. */

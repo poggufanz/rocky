@@ -1,7 +1,8 @@
 import { resolve } from "node:path";
 import {
+  parseNameOnlyZero,
   parsePrePushStdin,
-  parseUnifiedZeroDiffChecked,
+  parseUnifiedZeroDiffCheckedAsync,
   rangeForPush,
   type AddedLine,
   type PushRange,
@@ -237,25 +238,40 @@ async function manualRange(): Promise<DiffRange> {
   return { base: await emptyTree(), head: "HEAD" };
 }
 
-async function addedLines(ranges: readonly DiffRange[], state: CheckState): Promise<AddedLine[]> {
+async function addedLines(ranges: readonly DiffRange[], quiet: boolean, state: CheckState): Promise<AddedLine[]> {
   const added: AddedLine[] = [];
+  let total = 0;
   for (const range of ranges) {
-    const diff = await git([
-      "diff", "--unified=0", "--no-color", "--no-ext-diff",
-      range.base, range.head, "--",
-    ], undefined, { maxOutputBytes: MAX_READ_BYTES, notInspected: "secret lines" });
-    const parsed = parseUnifiedZeroDiffChecked(diff);
-    if (!parsed.complete) {
-      throw new Error("git diff output was malformed or ambiguous; secret lines not inspected");
+    let rangeAdded: AddedLine[];
+    try {
+      const diff = await git([
+        "diff", "--unified=0", "--no-color", "--no-ext-diff",
+        range.base, range.head, "--",
+      ], undefined, { maxOutputBytes: MAX_READ_BYTES, notInspected: "secret lines" });
+      const parsed = await parseUnifiedZeroDiffCheckedAsync(diff);
+      if (!parsed.complete) {
+        throw new Error("git diff output was malformed or ambiguous; secret lines not inspected");
+      }
+      rangeAdded = parsed.added;
+    } catch (error) {
+      reportFailure(state, "secret scan", error);
+      continue;
     }
-    added.push(...parsed.added);
+    total += rangeAdded.length;
+    const remaining = Math.max(0, MAX_LINES - added.length);
+    const checked = rangeAdded.slice(0, remaining);
+    added.push(...checked);
+    try {
+      announceSecretFindings(checked, quiet, state);
+    } catch (error) {
+      reportFailure(state, "secret scan", error);
+    }
   }
-  if (added.length > MAX_LINES) {
+  if (total > MAX_LINES) {
     state.incomplete = true;
     incompleteDetail(
-      `added-line limit: ${added.length} found; first ${MAX_LINES} checked, ${added.length - MAX_LINES} skipped`,
+      `added-line limit: ${total} found; first ${MAX_LINES} checked, ${total - MAX_LINES} skipped`,
     );
-    return added.slice(0, MAX_LINES);
   }
   return added;
 }
@@ -286,27 +302,32 @@ async function showFile(rev: string, path: string): Promise<string | null> {
 async function packageCandidates(ranges: readonly DiffRange[], state: CheckState): Promise<PackageCandidate[]> {
   const candidates: PackageCandidate[] = [];
   for (const range of ranges) {
-    const output = await git(
-      ["diff", "--name-only", "-z", range.base, range.head, "--"],
-      undefined,
-      { maxOutputBytes: MAX_READ_BYTES, notInspected: "package paths" },
-    );
-    if (output.length > 0 && !output.endsWith("\0")) {
-      throw new Error("git diff package-path output was malformed or ambiguous; package paths not inspected");
-    }
-    const paths = output
-      .split("\0")
-      .filter(isPackageJson);
-    for (const path of paths) {
-      const before = await showFile(range.base, path);
-      const after = await showFile(range.head, path);
-      const dependencies = newDependencyNames(before, after);
-      if (dependencies === null) {
-        state.incomplete = true;
-        incompleteDetail(`package check skipped for ${path}: old manifest is malformed`);
-        continue;
+    try {
+      const output = await git(
+        ["diff", "--name-only", "-z", range.base, range.head, "--"],
+        undefined,
+        { maxOutputBytes: MAX_READ_BYTES, notInspected: "package paths" },
+      );
+      let paths: string[];
+      try {
+        paths = parseNameOnlyZero(output);
+      } catch {
+        throw new Error("git diff package-path output was malformed or ambiguous; package paths not inspected");
       }
-      for (const dep of dependencies) candidates.push({ dep, head: range.head });
+      const packagePaths = paths.filter(isPackageJson);
+      for (const path of packagePaths) {
+        const before = await showFile(range.base, path);
+        const after = await showFile(range.head, path);
+        const dependencies = newDependencyNames(before, after);
+        if (dependencies === null) {
+          state.incomplete = true;
+          incompleteDetail(`package check skipped for ${path}: old manifest is malformed`);
+          continue;
+        }
+        for (const dep of dependencies) candidates.push({ dep, head: range.head });
+      }
+    } catch (error) {
+      reportFailure(state, "package scan", error);
     }
   }
   return candidates;
@@ -323,13 +344,17 @@ async function checkablePackageNames(ranges: readonly DiffRange[], state: CheckS
 
   const names = new Set<string>();
   for (const [head, deps] of byHead) {
-    const npmrc = await showFile(head, ".npmrc");
-    const lockfile = await showFile(head, "package-lock.json");
-    const filtered = filterCheckable(deps, {
-      npmrc,
-      lockfilePackageKeys: parseLockfilePackageKeys(lockfile),
-    });
-    for (const name of filtered.check) names.add(name);
+    try {
+      const npmrc = await showFile(head, ".npmrc");
+      const lockfile = await showFile(head, "package-lock.json");
+      const filtered = filterCheckable(deps, {
+        npmrc,
+        lockfilePackageKeys: parseLockfilePackageKeys(lockfile),
+      });
+      for (const name of filtered.check) names.add(name);
+    } catch (error) {
+      reportFailure(state, "package scan", error);
+    }
   }
   return [...names];
 }
@@ -475,8 +500,7 @@ async function runCheck(rest: readonly string[], state: CheckState): Promise<num
   let lines: AddedLine[] = [];
 
   try {
-    lines = await addedLines(ranges, state);
-    announceSecretFindings(lines, quiet, state);
+    lines = await addedLines(ranges, quiet, state);
   } catch (error) {
     reportFailure(state, "secret scan", error);
   }
