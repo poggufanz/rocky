@@ -349,6 +349,7 @@ function fullGitObjectId(value) {
 
 function markdownSourceLines(text) {
   let fence;
+  let htmlComment = false;
   let htmlPre = false;
   return text.split(/\r?\n/u).map((line) => {
     const opening = /^\s{0,3}(`{3,}|~{3,})/.exec(line)?.[1];
@@ -359,6 +360,14 @@ function markdownSourceLines(text) {
     }
     if (opening !== undefined) {
       fence = { character: opening[0], length: opening.length };
+      return "";
+    }
+    if (htmlComment) {
+      if (/-->/u.test(line)) htmlComment = false;
+      return "";
+    }
+    if (/<!--/u.test(line)) {
+      if (!/<!--[\s\S]*-->/u.test(line)) htmlComment = true;
       return "";
     }
     if (htmlPre) {

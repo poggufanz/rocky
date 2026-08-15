@@ -469,6 +469,12 @@ test("canonical release truth rejects drift in every release marker", async () =
     [],
     "README release markers and headings inside raw HTML preformatted content must not satisfy truth",
   );
+  const htmlCommentFakeReadme = `${readmeWithoutRealMarkers.replace(/^## Roadmap\r?\n/im, "")}\n<!--\nCurrent release: \`${PACKAGE_NAME}@${PACKAGE_VERSION}\`\n## Roadmap\n- **v0.5 — fake (current release)**\n-->\n`;
+  assert.notDeepEqual(
+    releaseCheck.validateReleaseTruth({ ...snapshot, readme: htmlCommentFakeReadme }),
+    [],
+    "README release markers and headings inside HTML comments must not satisfy truth",
+  );
   const changelogHeadingRemoved = snapshot.changelog.replace(/^## 0\.5\.0[^\r\n]*\r?\n/im, "");
   assert.notDeepEqual(
     releaseCheck.validateReleaseTruth({
@@ -491,6 +497,12 @@ test("canonical release truth rejects drift in every release marker", async () =
     releaseCheck.validateReleaseTruth({ ...snapshot, changelog: htmlFakeChangelog }),
     [],
     "CHANGELOG release headings inside raw HTML preformatted content must not satisfy truth",
+  );
+  const htmlCommentFakeChangelog = `${changelogHeadingRemoved}\n<!-- ## 0.5.0 — fake\nFake release section. -->\n`;
+  assert.notDeepEqual(
+    releaseCheck.validateReleaseTruth({ ...snapshot, changelog: htmlCommentFakeChangelog }),
+    [],
+    "CHANGELOG release headings inside HTML comments must not satisfy truth",
   );
   for (const [label, mutated] of [
     ["README canonical upstream URL", { ...snapshot, readme: snapshot.readme.replace("https://github.com/poggufanz/rocky.git", "https://github.com/example/rocky.git") }],
