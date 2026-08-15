@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { Buffer } from "node:buffer";
 import { performance } from "node:perf_hooks";
 import type { KnowledgeSearchHit, RecallHit, RecentFailureHit } from "../core/memory-query.js";
-import type { FixRecord, TripleRecord } from "../core/memory-read.js";
+import type { FailureRecord, FixRecord, TripleRecord } from "../core/memory-read.js";
 import {
   MAX_FIELD_BYTES,
   MAX_RESPONSE_BYTES,
@@ -83,6 +83,20 @@ test("malformed custom knowledge hits disclose truncation instead of disappearin
   const output = projectKnowledgeHits([valid, null] as unknown as KnowledgeSearchHit[], "sanitized");
   assert.equal(output.items.length, 1);
   assert.equal(output.truncated, true);
+});
+
+test("malformed recall and recent-failure hits disclose truncation while retaining valid items", () => {
+  const failure: FailureRecord = {
+    kind: "failure", id: "valid-recall", ts: 10, cwd: "/work", cmd: "npm test", exitCode: 1,
+    fingerprint: "fp-valid", signature: ["failure"], excerpt: "failure", origin: "run",
+  };
+  const recall = projectRecallHits([{ failure, score: 1 }, null] as unknown as RecallHit[], "sanitized");
+  assert.equal(recall.items.length, 1);
+  assert.equal(recall.truncated, true);
+
+  const recent = projectRecentFailures([{ failure }, null] as unknown as RecentFailureHit[], "sanitized");
+  assert.equal(recent.items.length, 1);
+  assert.equal(recent.truncated, true);
 });
 
 test("sanitized projection has exactly the allowlisted keys despite injected unknown data", () => {

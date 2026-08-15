@@ -248,6 +248,11 @@ export function boundTripleMechanism(
   context: TriplePathIdentityContext = {},
 ): TripleRecord["mechanism"] {
   const source = (mechanism ?? {}) as unknown as Record<string, unknown>;
+  const contextCwd = context.cwd;
+  const contextCwdBounded = contextCwd === undefined
+    || (contextCwd.length <= MAX_RECORD_ITEM_CHARS * 2
+      && Buffer.byteLength(contextCwd, "utf8") <= MAX_RECORD_ITEM_CHARS * 2);
+  const canonicalCwd = contextCwdBounded ? contextCwd : undefined;
   const rawFiles = Array.isArray(source.files) ? source.files : [];
   let rawFilesLength = 0;
   let rawFilesShapeValid = true;
@@ -263,7 +268,7 @@ export function boundTripleMechanism(
   const rawFilesOmitted = rawFilesTooLarge ? rawFilesLength - boundedRawFilesLength : 0;
   const contextPlatform = context.platform;
   const contextPlatformValid = contextPlatform === undefined || contextPlatform === "unknown" || isKnownPathPlatform(contextPlatform);
-  let valid = Array.isArray(source.files) && contextPlatformValid && rawFilesShapeValid && !rawFilesTooLarge;
+  let valid = Array.isArray(source.files) && contextPlatformValid && contextCwdBounded && rawFilesShapeValid && !rawFilesTooLarge;
   const byIdentity = new Map<string, TripleFile>();
   const hashPaths = new Map<string, string>();
   const ordinaryPathHashes = new Map<string, string | undefined>();
@@ -304,8 +309,12 @@ export function boundTripleMechanism(
       valid = false;
       if (hasBoundablePath) continue;
     }
-    const path = canonicalPath(raw.path, { platform });
-    const identityPath = canonicalPath(raw.path, { platform, cwd: context.cwd }) || path;
+    const path = raw.path.length > 1024
+      ? raw.path
+      : canonicalPath(raw.path, { platform });
+    const identityPath = raw.path.length > 1024
+      ? raw.path
+      : canonicalPath(raw.path, { platform, cwd: canonicalCwd }) || path;
     const ephemeralIdentity = ephemeralTripleIdentities.get(value as object);
     const rawIdentityHash = raw.identityHash;
     const identityHash = typeof rawIdentityHash === "string" && /^[0-9a-f]{32}$/u.test(rawIdentityHash)
@@ -381,7 +390,7 @@ export function boundTripleMechanism(
       : identityHash !== undefined
       ? `hash:${identityPath}\u0000${identityHash}`
       : ephemeralIdentity !== undefined
-        ? `ephemeral:${identityPath}\u0000${canonicalPath(ephemeralIdentity, { platform, cwd: context.cwd })}`
+        ? `ephemeral:${identityPath}\u0000${canonicalPath(ephemeralIdentity, { platform, cwd: canonicalCwd })}`
       : `path:${identityPath}`;
     // Map.set replaces evidence without changing first-seen insertion order.
     byIdentity.set(key, file);
@@ -425,10 +434,14 @@ export function boundTripleMechanism(
 }
 
 export function boundTripleRecord(record: TripleRecord): TripleRecord {
+  const cwdValid = typeof record.cwd === "string" && record.cwd.length <= MAX_RECORD_ITEM_CHARS * 2
+    && Buffer.byteLength(record.cwd, "utf8") <= MAX_RECORD_ITEM_CHARS * 2;
+  const cwd = cwdValid ? record.cwd : "";
   const mechanism = boundTripleMechanism(record.mechanism, {
     platform: record.platform ?? "unknown",
-    cwd: record.cwd,
+    cwd,
   });
+  if (!cwdValid) mechanism.coverageStatus = "unknown";
   // A legacy triple without origin platform cannot prove case-sensitive path
   // identity, even when its display spelling is relative to an absolute cwd.
   // Keep it readable, but downgrade completeness until a writer supplies the
@@ -438,6 +451,7 @@ export function boundTripleRecord(record: TripleRecord): TripleRecord {
   }
   return {
     ...record,
+    cwd,
     mechanism,
   };
 }

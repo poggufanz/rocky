@@ -5,7 +5,7 @@ import { createMemoryQueries } from "../core/memory-query.js";
 import { pathIdentityHash } from "../core/memory-read.js";
 import { disabledRecallWithAi, type RecallWithAiPort } from "../ai/port.js";
 import { createToolRegistry, McpInvalidParamsError, ToolExecutionError, TOOL_ENVELOPE_RESERVE_BYTES } from "../mcp/tools.js";
-import { MAX_RESPONSE_BYTES } from "../mcp/privacy.js";
+import { MAX_FIELD_BYTES, MAX_RESPONSE_BYTES } from "../mcp/privacy.js";
 
 const records: MemoryRecord[] = [
   {
@@ -114,7 +114,7 @@ test("new tool descriptions are concrete and schemas expose their bounds", () =>
   });
   assert.deepEqual(why.inputSchema, {
     type: "object", additionalProperties: false, required: ["path"], properties: {
-      path: { type: "string" }, limit: { type: "integer", minimum: 1, maximum: 10 },
+      path: { type: "string", maxLength: MAX_FIELD_BYTES }, limit: { type: "integer", minimum: 1, maximum: 10 },
     },
   });
 });
@@ -284,6 +284,77 @@ test("why_file fallback fails closed on a malformed match", async () => {
   assert.equal((result.structuredContent.coverage as { complete: boolean }).complete, false);
 });
 
+test("why_file rejects oversized provider cwd/path evidence before canonicalization", async () => {
+  const known = completeWhyTriple("oversized-provider-known");
+  const oversizedCwd = "c".repeat(MAX_FIELD_BYTES * 2 + 1);
+  const oversizedPath = "p".repeat(1_025);
+  const hostileCwd = { ...known, cwd: oversizedCwd };
+  const hostilePath = {
+    ...known,
+    id: "oversized-provider-path",
+    mechanism: {
+      ...known.mechanism,
+      files: [{ path: oversizedPath, plusMinus: [1, 0] as [number, number], props: ["oversized"], provenance: "tool-observed" as const }],
+    },
+  };
+  const makeEvidence = (matches: unknown[]) => ({
+    matches: matches as TripleRecord[], possible: [],
+    coverage: { status: "complete" as const, complete: true, filesCovered: 1, truncatedFiles: 0 },
+    coverageIncomplete: false,
+  });
+  const cwdResult = await createToolRegistry({
+    exposure: "sanitized",
+    memory: { ...createMemoryQueries(() => []), whyFileEvidence: () => makeEvidence([hostileCwd]) },
+    recallWithAi: disabledRecallWithAi,
+  }).call("why_file", { path: "src/known.ts" }, new AbortController().signal);
+  assert.deepEqual(cwdResult.structuredContent.items, []);
+  assert.equal(cwdResult.structuredContent.coverageStatus, "unknown");
+  assert.equal(cwdResult.structuredContent.coverageIncomplete, true);
+
+  const mixedResult = await createToolRegistry({
+    exposure: "sanitized",
+    memory: { ...createMemoryQueries(() => []), whyFileEvidence: () => makeEvidence([known, hostilePath]) },
+    recallWithAi: disabledRecallWithAi,
+  }).call("why_file", { path: "src/known.ts" }, new AbortController().signal);
+  assert.deepEqual(mixedResult.structuredContent.items, []);
+  assert.equal(mixedResult.structuredContent.coverageStatus, "unknown");
+  assert.equal(mixedResult.structuredContent.coverageIncomplete, true);
+
+  const longPath = `src/${"u".repeat(1_010)}.ts`;
+  const bounded = {
+    ...known,
+    id: "bounded-long-provider-path",
+    mechanism: {
+      ...known.mechanism,
+      files: [{ path: longPath, plusMinus: [1, 0] as [number, number], props: ["bounded"], provenance: "tool-observed" as const }],
+    },
+  };
+  const boundedResult = await createToolRegistry({
+    exposure: "sanitized",
+    memory: { ...createMemoryQueries(() => []), whyFileEvidence: () => makeEvidence([bounded]) },
+    recallWithAi: disabledRecallWithAi,
+  }).call("why_file", { path: longPath }, new AbortController().signal);
+  assert.equal((boundedResult.structuredContent.items as unknown[]).length, 1);
+  assert.equal(boundedResult.structuredContent.coverageStatus, "complete");
+});
+
+test("why_file accepts ordinary and Unicode paths at the byte boundary", async () => {
+  const registry = createToolRegistry({
+    exposure: "sanitized",
+    memory: createMemoryQueries(() => []),
+    recallWithAi: disabledRecallWithAi,
+  });
+  const signal = new AbortController().signal;
+  const unicodeBoundary = "é".repeat(MAX_FIELD_BYTES / 2);
+  const unicodeResult = await registry.call("why_file", { path: unicodeBoundary }, signal);
+  assert.equal(unicodeResult.isError, undefined);
+  assert.equal(unicodeResult.structuredContent.coverageStatus, "unknown");
+  const ordinaryBoundary = "x".repeat(MAX_FIELD_BYTES);
+  const ordinaryResult = await registry.call("why_file", { path: ordinaryBoundary }, signal);
+  assert.equal(ordinaryResult.isError, undefined);
+  assert.equal(ordinaryResult.structuredContent.coverageStatus, "unknown");
+});
+
 test("why_file keeps unmatched relative-root paths unknown", async () => {
   const known: TripleRecord = {
     ...triple,
@@ -382,6 +453,32 @@ test("why_file sanitizes custom possible IDs while raw remains explicit", async 
   assert.match(JSON.stringify(raw), /user-secret-answer/u);
 });
 
+test("sanitized reserved custom IDs use opaque fetch handles while raw remains explicit", async () => {
+  const ids = ["note-secret", "triple-api-key", "failure-password"];
+  for (const id of ids) {
+    const record: MemoryRecord = {
+      kind: "failure", id, ts: 10, cwd: "/repo", cmd: "npm test", exitCode: 1,
+      fingerprint: "0123456789abcdef", signature: ["failure"], excerpt: "failure", origin: "run",
+    };
+    const memory = {
+      ...createMemoryQueries(() => []),
+      searchKnowledge: () => [{ id, ts: 10, kind: "failure" as const, snippet: "failure", score: 1, source: "run" }],
+      fetchRecord: (requested: string) => requested === id ? record : undefined,
+    };
+    const sanitized = createToolRegistry({ exposure: "sanitized", memory, recallWithAi: disabledRecallWithAi });
+    const search = await sanitized.call("search_knowledge", { query: "failure" }, new AbortController().signal);
+    const handle = (search.structuredContent.items as Array<{ id: string }>)[0]?.id;
+    assert.ok(handle?.startsWith("rk-h-"), `${id} must use opaque handle`);
+    assert.doesNotMatch(JSON.stringify(search), new RegExp(id, "u"));
+    const fetched = await sanitized.call("fetch_record", { id: handle }, new AbortController().signal);
+    assert.ok(fetched.structuredContent.record !== null && fetched.structuredContent.record !== undefined);
+
+    const raw = await createToolRegistry({ exposure: "raw", memory, recallWithAi: disabledRecallWithAi })
+      .call("search_knowledge", { query: "failure" }, new AbortController().signal);
+    assert.equal((raw.structuredContent.items as Array<{ id: string }>)[0]?.id, id);
+  }
+});
+
 test("stats keeps legacy fields and adds bounded knowledge counters for old query implementations", async () => {
   const memory = {
     recall() { return []; },
@@ -413,6 +510,27 @@ test("note-only knowledge search stays bounded and sanitized", async () => {
     source: "note", truncatedFields: [],
   }]);
   assert.equal(result.structuredContent.truncated, false);
+});
+
+test("search_knowledge discloses malformed or throwing provider output", async () => {
+  const malformed = createToolRegistry({
+    exposure: "sanitized",
+    memory: { ...createMemoryQueries(() => []), searchKnowledge: () => null as never },
+    recallWithAi: disabledRecallWithAi,
+  });
+  const malformedResult = await malformed.call("search_knowledge", { query: "anything" }, new AbortController().signal);
+  assert.deepEqual(malformedResult.structuredContent.items, []);
+  assert.equal(malformedResult.structuredContent.truncated, true);
+
+  const throwing = createToolRegistry({
+    exposure: "sanitized",
+    memory: { ...createMemoryQueries(() => []), searchKnowledge: () => { throw new Error("provider failure"); } },
+    recallWithAi: disabledRecallWithAi,
+  });
+  const throwingResult = await throwing.call("search_knowledge", { query: "anything" }, new AbortController().signal);
+  assert.equal(throwingResult.isError, undefined);
+  assert.deepEqual(throwingResult.structuredContent.items, []);
+  assert.equal(throwingResult.structuredContent.truncated, true);
 });
 
 test("search snippets and fetched failures use sanitized explicit projections", async () => {
@@ -557,6 +675,7 @@ test("knowledge tool validators reject malformed, out-of-range, and unknown argu
     ["fetch_record", { id: 1 }],
     ["why_file", {}],
     ["why_file", { path: "x", limit: 11 }],
+    ["why_file", { path: "x".repeat(MAX_FIELD_BYTES + 1) }],
   ] as const;
   for (const [name, args] of invalid) await assert.rejects(knowledgeRegistry().call(name, args, signal), McpInvalidParamsError);
 });

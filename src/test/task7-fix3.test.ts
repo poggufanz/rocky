@@ -338,6 +338,23 @@ test("duplicate identity hashes preserve distinct paths and downgrade coverage",
   assert.equal(longPath.coverageStatus, "unknown");
 });
 
+test("oversized triple cwd cannot prove a why-file match", () => {
+  const record: TripleRecord = {
+    ...legacyTriple(),
+    id: "oversized-cwd",
+    cwd: "c".repeat(64 * 1024),
+    platform: "linux",
+    mechanism: {
+      files: [{ path: "src/legacy.ts", plusMinus: [1, 0], props: ["legacy"], provenance: "tool-observed" }],
+      truncatedFiles: 0, baseline: "captured", coverageStatus: "complete",
+    },
+  };
+  const evidence = whyFileEvidence([record], "src/legacy.ts", 5, 10);
+  assert.deepEqual(evidence.matches, []);
+  assert.equal(evidence.coverageIncomplete, true);
+  assert.equal(evidence.coverage.status, "unknown");
+});
+
 test("Codex apply_patch emits Move to destinations with other patch markers", () => {
   const parsed = parseCodexHookPayload({
     event: "PostToolUse", session_id: "session", turn_id: "turn", tool_name: "apply_patch",

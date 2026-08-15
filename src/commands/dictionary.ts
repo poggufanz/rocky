@@ -139,18 +139,18 @@ export function exportCommand(argv: string[], deps: ExportCommandDeps = {}): num
 
 function terminalSafe(value: string, maximumBytes: number): string {
   const withoutControls = safeTerminalLine(value)
-    .replace(/[\u200b\u2060\ufeff]/gu, " ")
+    .replace(/[\u200b-\u200f\u2060-\u206f\ufeff]/gu, " ")
     .replace(/[?？]/gu, " ");
-  return truncateUtf8(withoutControls, maximumBytes).value;
+  return truncateUtf8(withoutControls.replace(/\uFF1F/gu, " "), maximumBytes).value;
 }
 
 function fullIdLines(value: string): string[] {
   const clean = safeTerminalLine(value)
-    .replace(/[\u200b\u2060\ufeff]/gu, " ")
-    .replace(/[?ï¼Ÿ]/gu, " ");
+    .replace(/[\u200b-\u200f\u2060-\u206f\ufeff]/gu, " ")
+    .replace(/[?\uFF1F]/gu, " ");
   const lines: string[] = [];
   let current = "";
-  for (const character of clean) {
+  for (const character of clean.replace(/\uFF1F/gu, " ")) {
     if (current && Buffer.byteLength(`${current}${character}`, "utf8") > MAX_OUTPUT_LINE_BYTES) {
       lines.push(current);
       current = "";

@@ -170,7 +170,8 @@ const SENSITIVE_ID_WORD = /(?:password|passwd|secret|token|credential|authorizat
 
 export function safeOpaqueIdentifier(value: string): boolean {
   return value.length > 0 && value.length <= 128 && !/[\u0000-\u001f\u007f-\u009f]/u.test(value)
-    && (ROCKY_ID.test(value) || (value.length <= 64 && /^[A-Za-z][A-Za-z0-9._:-]*$/u.test(value) && !SENSITIVE_ID_WORD.test(value)));
+    && !SENSITIVE_ID_WORD.test(value)
+    && (ROCKY_ID.test(value) || (value.length <= 64 && /^[A-Za-z][A-Za-z0-9._:-]*$/u.test(value)));
 }
 
 function projectSignature(
@@ -627,6 +628,8 @@ export function projectKnowledgeHits(
       for (let index = 0; index < bound; index += 1) {
         try { sourceHits.push(hits[index]); } catch { inputTruncated = true; break; }
       }
+    } else {
+      inputTruncated = true;
     }
   } catch {
     inputTruncated = true;
@@ -923,7 +926,10 @@ function projectHits(hits: readonly SourceHit[], exposure: Exposure): { items: P
   for (let index = 0; index < source.length; index += 1) {
     try {
       const hit = normalizeSourceHit(source[index]);
-      if (hit === undefined) continue;
+      if (hit === undefined) {
+        truncated = true;
+        continue;
+      }
       const item = projectHit(hit, exposure, `c${index + 1}`);
       const serialized = JSON.stringify(item);
       const itemBytes = Buffer.byteLength(serialized, "utf8");
@@ -935,6 +941,7 @@ function projectHits(hits: readonly SourceHit[], exposure: Exposure): { items: P
       serializedItemBytes += itemBytes + (items.length > 1 ? 1 : 0);
     } catch {
       // Custom MemoryQueries are untrusted at the MCP boundary.
+      truncated = true;
     }
   }
   return { items, truncated };

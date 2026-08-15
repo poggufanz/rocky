@@ -5,6 +5,7 @@ import { hasCanonicalMemoryQueries, hasDurableMemoryQueries, loadDurableMemorySn
 import type { DurableMemorySnapshot, KnowledgeCoverageSummary, KnowledgeSearchQuery, MemoryQueries, RecallHit, RecallQuery, RecentFailuresQuery, StatsQuery, WhyFileEvidence, WhyFilePathRelation } from "../core/memory-query.js";
 import type { RecallAiOutcome, RecallWithAiPort } from "../ai/port.js";
 import {
+  MAX_FIELD_BYTES,
   MAX_RESPONSE_BYTES,
   projectKnowledgeHits,
   projectMemoryRecord,
@@ -176,7 +177,9 @@ function parseFetchArgs(args: unknown): string {
 function parseWhyFileArgs(args: unknown): { path: string; limit: number } {
   const value = objectArgs(args);
   rejectUnknown(value, ["path", "limit"]);
-  if (typeof value.path !== "string") throw new McpInvalidParamsError("invalid params");
+  if (typeof value.path !== "string" || Buffer.byteLength(value.path, "utf8") > MAX_FIELD_BYTES) {
+    throw new McpInvalidParamsError("invalid params");
+  }
   return { path: value.path, limit: parseLimit(value.limit, 1, 10, 5) };
 }
 
@@ -234,7 +237,7 @@ function descriptors(exposure: Exposure): readonly McpToolDefinition[] {
       name: "why_file", title: "Why file changed",
       description: "Recent remembered reasons agents changed one file, newest first, with separate incomplete-coverage disclosure. Example: {\"path\": \"src/app.css\"}. Reasons are hearsay Rocky heard, not verified facts.",
       inputSchema: schema({
-        path: { type: "string" },
+        path: { type: "string", maxLength: MAX_FIELD_BYTES },
         limit: { type: "integer", minimum: 1, maximum: 10 },
       }, ["path"]), annotations: ANNOTATIONS,
     },
@@ -417,6 +420,7 @@ function boundedProviderStrings(value: unknown): { values: string[]; valid: bool
   try {
     for (const item of bounded.values) {
       if (typeof item !== "string") return { values: [], valid: false };
+      if (item.length > MAX_FIELD_BYTES * 2) return { values: [], valid: false };
       bytes += Buffer.byteLength(item, "utf8");
       if (bytes > MAX_PROVIDER_NESTED_BYTES) return { values: [], valid: false };
       values.push(item);
@@ -435,10 +439,40 @@ function safeTripleRecord(value: unknown): TripleRecord | undefined {
     if (raw.kind !== "triple" || raw.schemaV !== 1 || raw.origin !== "agent-hook" ||
         typeof raw.id !== "string" || raw.id.length === 0 || raw.id.length > 512 ||
         /[\u0000-\u001f\u007f-\u009f]/u.test(raw.id) || typeof ts !== "number" || !Number.isSafeInteger(ts) || ts < 0 ||
-        typeof raw.cwd !== "string" || raw.agent !== "claude-code" && raw.agent !== "codex") return undefined;
-    const bounded = boundTripleRecord(raw as unknown as TripleRecord);
+        typeof raw.cwd !== "string" || raw.cwd.length > MAX_FIELD_BYTES * 2 ||
+        Buffer.byteLength(raw.cwd, "utf8") > MAX_FIELD_BYTES * 2 ||
+        raw.agent !== "claude-code" && raw.agent !== "codex") return undefined;
     const platform = isKnownPathPlatform(raw.platform) ? raw.platform : undefined;
     if (raw.platform !== undefined && platform === undefined) return undefined;
+
+    if (raw.mechanism !== undefined) {
+      if (typeof raw.mechanism !== "object" || raw.mechanism === null || Array.isArray(raw.mechanism)) return undefined;
+      const mechanism = raw.mechanism as Record<string, unknown>;
+      if (mechanism.head !== undefined && (typeof mechanism.head !== "string" || mechanism.head.length > MAX_FIELD_BYTES * 2 ||
+          Buffer.byteLength(mechanism.head, "utf8") > MAX_FIELD_BYTES * 2)) return undefined;
+      const providerFiles = boundedProviderArray(mechanism.files, MAX_PROVIDER_NESTED_ITEMS);
+      if (!providerFiles.valid) return undefined;
+      for (const value of providerFiles.values) {
+        if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+        const file = value as Record<string, unknown>;
+        if (typeof file.path !== "string" || file.path.length === 0 || file.path.length > 1_024 ||
+            Buffer.byteLength(file.path, "utf8") > MAX_FIELD_BYTES) return undefined;
+        if (file.excerpt !== undefined && (typeof file.excerpt !== "string" || file.excerpt.length > MAX_FIELD_BYTES * 2 ||
+            Buffer.byteLength(file.excerpt, "utf8") > MAX_FIELD_BYTES * 2)) return undefined;
+      }
+    }
+    if (raw.intent !== undefined && typeof raw.intent === "object" && raw.intent !== null && !Array.isArray(raw.intent)) {
+      const intent = raw.intent as Record<string, unknown>;
+      if (typeof intent.text === "string" && (intent.text.length > MAX_FIELD_BYTES * 2 ||
+          Buffer.byteLength(intent.text, "utf8") > MAX_FIELD_BYTES * 2)) return undefined;
+    }
+    if (raw.rationale !== undefined && typeof raw.rationale === "object" && raw.rationale !== null && !Array.isArray(raw.rationale)) {
+      const rationale = raw.rationale as Record<string, unknown>;
+      if (typeof rationale.text === "string" && (rationale.text.length > MAX_FIELD_BYTES * 2 ||
+          Buffer.byteLength(rationale.text, "utf8") > MAX_FIELD_BYTES * 2)) return undefined;
+      if (rationale.tags !== undefined && !boundedProviderStrings(rationale.tags).valid) return undefined;
+    }
+    const bounded = boundTripleRecord(raw as unknown as TripleRecord);
     const safe: TripleRecord = {
       kind: "triple", id: raw.id, ts, cwd: raw.cwd, schemaV: 1,
       agent: raw.agent, origin: "agent-hook", mechanism: bounded.mechanism,
@@ -1011,7 +1045,11 @@ export function createToolRegistry(options: CreateToolRegistryOptions): McpToolR
               () => projectRecallHits(hits, options.exposure),
               { exposure: options.exposure, items: [], truncated: true, ...memoryCoveragePayload(coverage) },
             );
-            const enriched = { ...projected, ...memoryCoveragePayload(coverage) };
+            const enriched = {
+              ...projected,
+              ...memoryCoveragePayload(coverage),
+              ...(readState.failed ? { truncated: true } : {}),
+            };
             return safeProjection(
               () => cappedResult(enriched),
               cappedResult({ exposure: options.exposure, items: [], truncated: true, ...memoryCoveragePayload(coverage) }),
@@ -1027,7 +1065,11 @@ export function createToolRegistry(options: CreateToolRegistryOptions): McpToolR
               () => projectRecentFailures(hits, options.exposure),
               { exposure: options.exposure, items: [], truncated: true, ...memoryCoveragePayload(coverage) },
             );
-            const enriched = { ...projected, ...memoryCoveragePayload(coverage) };
+            const enriched = {
+              ...projected,
+              ...memoryCoveragePayload(coverage),
+              ...(readState.failed ? { truncated: true } : {}),
+            };
             return safeProjection(
               () => cappedResult(enriched),
               cappedResult({ exposure: options.exposure, items: [], truncated: true, ...memoryCoveragePayload(coverage) }),
@@ -1061,7 +1103,11 @@ export function createToolRegistry(options: CreateToolRegistryOptions): McpToolR
               () => projectKnowledgeHits(hits, options.exposure, projector),
               { exposure: options.exposure, items: [], truncated: true, ...memoryCoveragePayload(coverage) },
             );
-            const enriched = { ...projected, ...memoryCoveragePayload(coverage) };
+            const enriched = {
+              ...projected,
+              ...memoryCoveragePayload(coverage),
+              ...(readState.failed ? { truncated: true } : {}),
+            };
             const result = safeProjection(
               () => cappedResult(enriched),
               cappedResult({ exposure: options.exposure, items: [], truncated: true, ...memoryCoveragePayload(coverage) }),

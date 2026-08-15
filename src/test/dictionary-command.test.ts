@@ -736,6 +736,26 @@ test("long triple and note evidence retain bounded provenance fields", async () 
   for (const line of [...output.sayLines, ...output.outLines]) assert.ok(Buffer.byteLength(line, "utf8") <= 512);
 });
 
+test("full-id continuation neutralizes zero-width joiners and fullwidth question marks", async () => {
+  const now = Date.now();
+  const hostileId = `${"safe-"}${"i".repeat(505)}\u200c\u200d\uFF1F`;
+  const triple: TripleRecord = {
+    kind: "triple", id: hostileId, ts: now - 1, cwd: "/repo", platform: "linux", schemaV: 1,
+    agent: "codex", origin: "agent-hook", intent: { text: "change button" },
+    mechanism: {
+      files: [{ path: "src/button.ts", plusMinus: [1, 0], props: ["button"], provenance: "tool-observed" }],
+      truncatedFiles: 0, baseline: "captured", coverageStatus: "complete",
+    },
+  };
+  const output = sinks();
+  assert.equal(await what(["button"], { load: () => [triple], now, ...output.deps }), 0);
+  const lines = [...output.sayLines, ...output.outLines];
+  assert.ok(lines.some((line) => line.includes("full-id-next-line")));
+  assert.match(lines.join("\n"), /safe-i/u);
+  assert.doesNotMatch(lines.join("\n"), /[\u200c\u200d\uFF1F]/u);
+  for (const line of lines) assert.ok(Buffer.byteLength(line, "utf8") <= 512);
+});
+
 test("long why provenance stays recoverable for rationale and no-rationale triples", () => {
   const now = Date.now();
   const path = `src/${"p".repeat(166)}.ts`;
