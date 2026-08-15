@@ -32,6 +32,7 @@ export type ParsedHookPayload =
     coverageCandidateCount?: number;
     coverageCandidateCountExact?: boolean;
     coverageCwd?: string;
+    coveragePlatform?: NodeJS.Platform | "unknown";
     coverageDigest?: string;
   }
   | { action: "close"; key: string; rationale?: RationaleEvent }
@@ -145,14 +146,25 @@ function appendPayload(
   coverageCwd?: string,
 ): ParsedHookPayload {
   const bounded = events.slice(0, MAX_ADAPTER_EVENTS);
-  const omitted = coveragePaths === undefined ? events.length - bounded.length : Math.max(0, coveragePaths.length - bounded.length);
+  const originPlatform = process.platform;
+  const semanticPaths: Array<{ display: string; identity: string }> = [];
+  const semanticSeen = new Set<string>();
+  for (const value of coveragePaths ?? []) {
+    if (typeof value !== "string" || value.length === 0 || value.length > 1024 || /[\u0000-\u001f\u007f-\u009f]/u.test(value)) continue;
+    const display = canonicalPath(value, { platform: originPlatform });
+    const identity = canonicalPath(value, { platform: originPlatform, cwd: coverageCwd });
+    if (!display || !identity || semanticSeen.has(identity)) continue;
+    semanticSeen.add(identity);
+    semanticPaths.push({ display, identity });
+  }
+  const omitted = coveragePaths === undefined ? events.length - bounded.length : Math.max(0, semanticPaths.length - bounded.length);
   const truncatedFiles = omitted > 0 ? omitted : undefined;
   const hasOverflow = omitted > 0;
   const boundedCoverage = coveragePaths !== undefined
-    ? coveragePaths.slice(0, MAX_COVERAGE_PATHS)
+    ? semanticPaths.slice(0, MAX_COVERAGE_PATHS).map(({ display }) => display)
     : undefined;
   const coverageComplete = boundedCoverage === undefined ? undefined
-    : (coverageCompleteOverride ?? true) && coveragePaths!.length <= MAX_COVERAGE_PATHS;
+    : (coverageCompleteOverride ?? true) && semanticPaths.length <= MAX_COVERAGE_PATHS && semanticPaths.length > 0;
   const attachCoverage = boundedCoverage !== undefined || hasOverflow;
   const firstMechanismIndex = attachCoverage ? bounded.findIndex((event) => event.kind === "mechanism") : -1;
   const markedEvents = bounded.map((event, index) => index === firstMechanismIndex && event.kind === "mechanism"
@@ -163,14 +175,7 @@ function appendPayload(
       ...(coverageComplete === undefined ? {} : { coveragePathsComplete: coverageComplete }),
     }
     : event);
-  const digestPathSet = new Set<string>();
-  if (coveragePaths !== undefined) {
-    for (const path of coveragePaths) {
-      const canonical = canonicalPath(path, { platform: process.platform, cwd: coverageCwd });
-      if (canonical.length > 0) digestPathSet.add(canonical);
-    }
-  }
-  const digestPaths = [...digestPathSet].sort();
+  const digestPaths = semanticPaths.map(({ identity }) => identity).sort();
   return {
     action: "append",
     key,
@@ -190,6 +195,7 @@ function appendPayload(
       // the separate omission fact.
       coverageCandidateCountExact: coverageCompleteOverride !== false,
       ...(coverageCwd === undefined ? {} : { coverageCwd }),
+      coveragePlatform: originPlatform,
       coverageDigest: createHash("sha256").update(JSON.stringify(digestPaths), "utf8").digest("hex"),
     }),
   };
@@ -262,14 +268,15 @@ export function parseClaudeHookPayload(raw: unknown, now = Date.now()): ParsedHo
             invalidCoverage = true;
             continue;
           }
-          const identity = canonicalPath(path);
-          if (!identity) continue;
-          if (identity.length > 1024) {
+          const display = canonicalPath(path, { platform: process.platform });
+          const identity = canonicalPath(path, { platform: process.platform, cwd });
+          if (!display || !identity) continue;
+          if (display.length > 1024 || identity.length > 1024) {
             invalidCoverage = true;
             continue;
           }
           const event = parseAgentEvent({
-            v: 1, agent: "claude-code", kind: "mechanism", ts: now, tool, path: identity, excerpt,
+            v: 1, agent: "claude-code", kind: "mechanism", ts: now, tool, path: display, excerpt,
             provenance: "tool-observed",
           });
           if (event) byPath.set(identity, event);

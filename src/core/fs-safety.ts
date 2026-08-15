@@ -6,6 +6,15 @@ import { constants, type BigIntStats, type Stats } from "node:fs";
  * same policy.  Callers must still compare lstat/fstat identities before and
  * after a read or mutation; a zero Windows flag is never treated as proof of
  * reparse safety.
+ *
+ * Documented platform boundary (Task 10/16 follow-up): native Windows offers
+ * no path-only Node API that atomically excludes ancestor-directory reparse
+ * or replacement races.  The implemented policy is bounded before/after
+ * identity checking — capture parent and target BigInt identities, mutate,
+ * then recheck — which detects but cannot atomically prevent a race in the
+ * window between checks.  When no usable descriptor identity exists the
+ * operation fails closed; a pathname statSync fallback is forbidden because
+ * it follows reparse points.
  */
 export const NO_FOLLOW_FLAG = process.platform === "win32" ? 0 : constants.O_NOFOLLOW;
 export const NO_BLOCK_FLAG = process.platform === "win32" ? 0 : constants.O_NONBLOCK;

@@ -1,4 +1,5 @@
 import { Buffer } from "node:buffer";
+import { createHash } from "node:crypto";
 import type { Exposure } from "../core/config-read.js";
 import { hasCanonicalMemoryQueries } from "../core/memory-query.js";
 import type { KnowledgeCoverageSummary, KnowledgeSearchQuery, MemoryQueries, RecallHit, RecallQuery, RecentFailuresQuery, StatsQuery, WhyFileEvidence } from "../core/memory-query.js";
@@ -277,6 +278,33 @@ function cappedResult(payload: object, isError = false): ToolCallResult {
   for (const [key, value] of Object.entries(source)) {
     if (Array.isArray(value)) copy[key] = [...value];
   }
+  const arrayBytes = new Map<string, number>();
+  const refreshArrayBytes = (key: string): void => {
+    const values = copy[key];
+    if (!Array.isArray(values)) return;
+    let total = 2;
+    for (let index = 0; index < values.length; index += 1) {
+      let encoded: string;
+      try { encoded = JSON.stringify(values[index]); } catch { encoded = "null"; }
+      total += Buffer.byteLength(encoded, "utf8") + (index === 0 ? 0 : 1);
+    }
+    arrayBytes.set(key, total);
+  };
+  const estimatePayloadBytes = (): number => {
+    let total = 2;
+    for (const [key, value] of Object.entries(copy)) {
+      let encoded: string | undefined;
+      if (Array.isArray(value)) {
+        if (!arrayBytes.has(key)) refreshArrayBytes(key);
+        total += Buffer.byteLength(JSON.stringify(key), "utf8") + 1 + (arrayBytes.get(key) ?? 2);
+      } else {
+        try { encoded = JSON.stringify(value); } catch { encoded = "null"; }
+        total += Buffer.byteLength(JSON.stringify(key), "utf8") + 1 + Buffer.byteLength(encoded ?? "null", "utf8");
+      }
+      total += 1;
+    }
+    return total;
+  };
   const arrayPriority = Array.isArray(copy.possible) && copy.possible.length > 0
     ? ["possible", "items", "rankedCandidateIds", "evidenceRefs"]
     : ["items", "possible", "rankedCandidateIds", "evidenceRefs"];
@@ -285,8 +313,13 @@ function cappedResult(payload: object, isError = false): ToolCallResult {
     ...Object.keys(copy).filter((key) => Array.isArray(copy[key]) && !arrayPriority.includes(key)).sort(),
   ];
   while (true) {
-    const output = buildResult(copy, isError);
-    if (Buffer.byteLength(JSON.stringify(output), "utf8") <= RESPONSE_CAP_BYTES) return output;
+    // The wire envelope contains both structuredContent and its serialized
+    // text. A conservative 2x payload estimate avoids repeatedly stringifying
+    // a growing object while still checking the exact final envelope once.
+    if (estimatePayloadBytes() * 2 + 1024 <= RESPONSE_CAP_BYTES) {
+      const output = buildResult(copy, isError);
+      if (Buffer.byteLength(JSON.stringify(output), "utf8") <= RESPONSE_CAP_BYTES) return output;
+    }
     const key = arrayKeys.find((candidate) => {
       const values = copy[candidate];
       return Array.isArray(values) && values.length > 0;
@@ -296,7 +329,12 @@ function cappedResult(payload: object, isError = false): ToolCallResult {
     }
     const values = copy[key] as unknown[];
     const removed = values.pop();
-    if (key === "items" && isItem(removed)) pruneRefs(copy, removed.candidateId);
+    arrayBytes.delete(key);
+    if (key === "items" && isItem(removed)) {
+      pruneRefs(copy, removed.candidateId);
+      arrayBytes.delete("rankedCandidateIds");
+      arrayBytes.delete("evidenceRefs");
+    }
     copy.truncated = true;
   }
 }
@@ -444,7 +482,9 @@ function whyPathRelation(candidate: TripleRecord, path: string): WhyPathRelation
     if (!candidateDisplay || !candidateIdentity) continue;
     const hashExact = targetHash !== undefined && file.identityHash !== undefined
       && /^[0-9a-f]{32}$/u.test(file.identityHash) && file.identityHash === targetHash;
-    if (hashExact || candidateDisplay === targetDisplay || candidateIdentity === targetIdentity) {
+    const hashValid = typeof file.identityHash === "string" && /^[0-9a-f]{32}$/u.test(file.identityHash);
+    const hashMismatch = hashValid && targetHash !== undefined && file.identityHash !== targetHash;
+    if (hashExact || (!hashMismatch && (candidateDisplay === targetDisplay || candidateIdentity === targetIdentity))) {
       return { exact: true, suffix: false, suffixIdentities: [] };
     }
     const knownRoot = canonicalPath(candidate.cwd, { platform });
@@ -457,7 +497,7 @@ function whyPathRelation(candidate: TripleRecord, path: string): WhyPathRelation
     const targetWithinRoot = !rootAbsolute || targetIdentity === knownRoot
       || targetIdentity.startsWith(`${knownRoot}/`);
     if (!trustedRoot && candidateWithinRoot && targetWithinRoot && candidateDisplay.endsWith(`/${targetDisplay}`)) {
-      suffixIdentities.add(candidateIdentity);
+      suffixIdentities.add(hashMismatch ? `hash:${file.identityHash}` : candidateIdentity);
     }
   }
   return { exact: false, suffix: suffixIdentities.size > 0, suffixIdentities: [...suffixIdentities] };
@@ -617,7 +657,17 @@ function safeProjection<T>(operation: () => T, fallback: T): T {
   try { return operation(); } catch { return fallback; }
 }
 
-function safeMemoryStats(value: unknown, canonical = false): Record<string, number> {
+function saturatedAdd(...values: readonly number[]): number {
+  let total = 0;
+  for (const value of values) {
+    if (!isSafeNonNegativeInteger(value)) return Number.MAX_SAFE_INTEGER;
+    if (total > Number.MAX_SAFE_INTEGER - value) return Number.MAX_SAFE_INTEGER;
+    total += value;
+  }
+  return total;
+}
+
+function safeMemoryStats(value: unknown, canonical = false): Record<string, unknown> {
   try {
     const source = typeof value === "object" && value !== null && !Array.isArray(value)
       ? value as Record<string, unknown>
@@ -631,26 +681,23 @@ function safeMemoryStats(value: unknown, canonical = false): Record<string, numb
     const possibleFixes = count("possibleFixes");
     const triples = count("triples");
     const notes = count("notes");
-    const recomputedTotal = [failures, fixEvents, possibleFixes, triples, notes].reduce((sum, entry) => {
-      const next = sum + entry;
-      return isSafeNonNegativeInteger(next) ? next : Number.MAX_SAFE_INTEGER;
-    }, 0);
-    // A custom provider may report one record in both confirmed and possible
-    // fix buckets. Accept a supplied total only when it is bounded and
-    // feasible against the non-overlapping record-kind lower/upper bounds;
-    // never manufacture an exact sum by adding overlapping fix categories.
+    const base = saturatedAdd(failures, triples, notes);
+    const lowerBound = saturatedAdd(base, Math.max(fixEvents, possibleFixes));
+    const upperBound = saturatedAdd(base, fixEvents, possibleFixes);
     const suppliedTotal = source.total;
-    const nonOverlappingUpper = [failures, fixEvents, triples, notes].reduce((sum, entry) => {
-      const next = sum + entry;
-      return isSafeNonNegativeInteger(next) ? next : Number.MAX_SAFE_INTEGER;
-    }, 0);
-    const lowerBound = Math.max(failures, fixEvents, possibleFixes, triples, notes);
     const suppliedFeasible = isSafeNonNegativeInteger(suppliedTotal)
-      && suppliedTotal >= lowerBound && suppliedTotal <= nonOverlappingUpper;
-    const total = (canonical && isSafeNonNegativeInteger(suppliedTotal)) || suppliedFeasible
+      && suppliedTotal >= lowerBound && suppliedTotal <= upperBound;
+    const exact = (canonical && isSafeNonNegativeInteger(suppliedTotal)) || suppliedFeasible || lowerBound === upperBound;
+    // Keep legacy `total` useful as the conservative upper bound while the
+    // explicit exactness/range fields tell callers that overlapping fix
+    // buckets prevent treating it as an exact record count.
+    const total = exact && isSafeNonNegativeInteger(suppliedTotal)
       ? suppliedTotal as number
-      : recomputedTotal;
-    return { failures, fixEvents, resolved, unresolved, confirmedFixes, possibleFixes, triples, notes, total };
+      : upperBound;
+    return {
+      failures, fixEvents, resolved, unresolved, confirmedFixes, possibleFixes, triples, notes, total,
+      ...(exact ? {} : { totalExact: false, totalLowerBound: lowerBound, totalUpperBound: upperBound }),
+    };
   } catch {
     return { failures: 0, fixEvents: 0, resolved: 0, unresolved: 0, confirmedFixes: 0, possibleFixes: 0, triples: 0, notes: 0, total: 0 };
   }
@@ -707,6 +754,38 @@ function mergeAi(
 
 export function createToolRegistry(options: CreateToolRegistryOptions): McpToolRegistry {
   const definitions = freezeDeep(descriptors(options.exposure));
+  const knowledgeHandles = new Map<string, { raw: string; bytes: number }>();
+  const knowledgeHandleOrder: string[] = [];
+  let knowledgeHandleBytes = 0;
+  const maxKnowledgeHandles = 1024;
+  const maxKnowledgeHandleBytes = 256 * 1024;
+  const safeDirectKnowledgeId = (value: string): boolean => value.length > 0 && value.length <= 128
+    && !/[\u0000-\u001f\u007f-\u009f]/u.test(value)
+    && (/^(?:[0-9a-f]{16,64}|[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}|(?:triple|failure|fix|association|note)-[A-Za-z0-9._-]{1,96})$/iu.test(value)
+      || (value.length <= 64 && /^[A-Za-z][A-Za-z0-9._:-]*$/u.test(value)
+        && !/(?:password|passwd|secret|token|credential|authorization|api[-_]?key)/iu.test(value)));
+  const projectKnowledgeId = (value: string): string | undefined => {
+    if (options.exposure !== "sanitized" || safeDirectKnowledgeId(value)) return undefined;
+    const existing = [...knowledgeHandles.entries()].find(([, entry]) => entry.raw === value)?.[0];
+    if (existing !== undefined) return existing;
+    const handle = `rk-h-${createHash("sha256").update(value, "utf8").digest("hex")}`;
+    const bytes = Buffer.byteLength(value, "utf8") + Buffer.byteLength(handle, "utf8");
+    if (bytes > maxKnowledgeHandleBytes) return undefined;
+    while (knowledgeHandles.size >= maxKnowledgeHandles || knowledgeHandleBytes + bytes > maxKnowledgeHandleBytes) {
+      const oldest = knowledgeHandleOrder.shift();
+      if (oldest === undefined) break;
+      const old = knowledgeHandles.get(oldest);
+      if (old !== undefined) {
+        knowledgeHandles.delete(oldest);
+        knowledgeHandleBytes -= old.bytes;
+      }
+    }
+    knowledgeHandles.set(handle, { raw: value, bytes });
+    knowledgeHandleOrder.push(handle);
+    knowledgeHandleBytes += bytes;
+    return handle;
+  };
+  const resolveKnowledgeId = (value: string): string => knowledgeHandles.get(value)?.raw ?? value;
   return {
     list: () => definitions,
     async call(name, args, signal) {
@@ -751,7 +830,7 @@ export function createToolRegistry(options: CreateToolRegistryOptions): McpToolR
             const input = parseKnowledgeArgs(args);
             const hits = safeReadMemory(() => options.memory.searchKnowledge(input), [], canonicalMemory);
             const projected = safeProjection(
-              () => projectKnowledgeHits(hits, options.exposure),
+              () => projectKnowledgeHits(hits, options.exposure, projectKnowledgeId),
               { exposure: options.exposure, items: [], truncated: true },
             );
             return safeProjection(
@@ -761,7 +840,7 @@ export function createToolRegistry(options: CreateToolRegistryOptions): McpToolR
           }
           case "fetch_record": {
             const id = parseFetchArgs(args);
-            const record = safeReadMemory(() => options.memory.fetchRecord(id), undefined, canonicalMemory);
+            const record = safeReadMemory(() => options.memory.fetchRecord(resolveKnowledgeId(id)), undefined, canonicalMemory);
             try {
               if (record === undefined || typeof record !== "object" || record === null || Array.isArray(record) || record.kind === "note") return notFoundResult();
               if (record.kind === "failure" && record.origin !== undefined &&

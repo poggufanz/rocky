@@ -88,6 +88,8 @@ export interface ProjectedKnowledgeResponse {
   truncated: boolean;
 }
 
+export type KnowledgeIdProjector = (value: string) => string | undefined;
+
 export interface ProjectedWhyPossible {
   id: string;
   ts: number;
@@ -527,6 +529,7 @@ function normalizeKnowledgeHit(value: unknown): KnowledgeSearchHit | undefined {
 export function projectKnowledgeHits(
   hits: readonly KnowledgeSearchHit[],
   exposure: Exposure,
+  idProjector?: KnowledgeIdProjector,
 ): ProjectedKnowledgeResponse {
   const project = (hit: KnowledgeSearchHit, preserveCanonicalMultiplicity = false): ProjectedKnowledgeHit => {
     const truncation: Truncation = { fields: [] };
@@ -590,7 +593,8 @@ export function projectKnowledgeHits(
       complete = false;
     }
     const projected: ProjectedKnowledgeHit = {
-      id: projectOpaqueId(hit.id, "id", truncation, exposure === "sanitized"),
+      id: idProjector?.(hit.id)
+        ?? projectOpaqueId(hit.id, "id", truncation, exposure === "sanitized"),
       ts: hit.ts,
       kind: hit.kind,
       snippet: projectText(hit.snippet, exposure, "snippet", truncation),
@@ -606,6 +610,12 @@ export function projectKnowledgeHits(
     return projected;
   };
   const items: ProjectedKnowledgeHit[] = [];
+  let serializedItemBytes = 0;
+  const responsePrefix = Buffer.byteLength(JSON.stringify({ exposure, items: [] }).replace("[]}", "["), "utf8");
+  const responseBytes = (truncatedValue: boolean, additional = 0, includeComma = false): number => {
+    const suffix = `],"truncated":${truncatedValue ? "true" : "false"}}`;
+    return responsePrefix + serializedItemBytes + additional + (includeComma ? 1 : 0) + Buffer.byteLength(suffix, "utf8");
+  };
   const sourceHits: unknown[] = [];
   let inputTruncated = false;
   try {
@@ -627,12 +637,20 @@ export function projectKnowledgeHits(
     const hit = normalizeKnowledgeHit(candidate);
     if (hit === undefined) continue;
     const item = project(hit, hasCanonicalKnowledgeProof(candidate));
-    const prospective = { exposure, items: [...items, item], truncated };
-    if (Buffer.byteLength(JSON.stringify(prospective), "utf8") > MAX_RESPONSE_BYTES) {
+    let serialized: string;
+    try {
+      serialized = JSON.stringify(item);
+    } catch {
+      truncated = true;
+      continue;
+    }
+    const itemBytes = Buffer.byteLength(serialized, "utf8");
+    if (responseBytes(truncated, itemBytes, items.length > 0) > MAX_RESPONSE_BYTES) {
       truncated = true;
       continue;
     }
     items.push(item);
+    serializedItemBytes += itemBytes + (items.length > 1 ? 1 : 0);
   }
   return { exposure, items, truncated };
 }
@@ -882,6 +900,12 @@ function normalizeSourceHit(value: unknown): SourceHit | undefined {
 function projectHits(hits: readonly SourceHit[], exposure: Exposure): { items: ProjectedRecallHit[]; truncated: boolean } {
   const items: ProjectedRecallHit[] = [];
   let truncated = false;
+  let serializedItemBytes = 0;
+  const responsePrefix = Buffer.byteLength(JSON.stringify({ exposure, items: [] }).replace("[]}", "["), "utf8");
+  const responseBytes = (truncatedValue: boolean, additional = 0, includeComma = false): number => {
+    const suffix = `],"truncated":${truncatedValue ? "true" : "false"}}`;
+    return responsePrefix + serializedItemBytes + additional + (includeComma ? 1 : 0) + Buffer.byteLength(suffix, "utf8");
+  };
   const source: unknown[] = [];
   try {
     if (!Array.isArray(hits) || !Number.isSafeInteger(hits.length) || hits.length < 0) return { items, truncated: true };
@@ -898,12 +922,14 @@ function projectHits(hits: readonly SourceHit[], exposure: Exposure): { items: P
       const hit = normalizeSourceHit(source[index]);
       if (hit === undefined) continue;
       const item = projectHit(hit, exposure, `c${index + 1}`);
-      const prospective = { exposure, items: [...items, item], truncated };
-      if (Buffer.byteLength(JSON.stringify(prospective), "utf8") > MAX_RESPONSE_BYTES) {
+      const serialized = JSON.stringify(item);
+      const itemBytes = Buffer.byteLength(serialized, "utf8");
+      if (responseBytes(truncated, itemBytes, items.length > 0) > MAX_RESPONSE_BYTES) {
         truncated = true;
         continue;
       }
       items.push(item);
+      serializedItemBytes += itemBytes + (items.length > 1 ? 1 : 0);
     } catch {
       // Custom MemoryQueries are untrusted at the MCP boundary.
     }

@@ -11,14 +11,13 @@ import {
   readSync,
   readdirSync,
   renameSync,
-  statSync,
   unlinkSync,
   writeSync,
   type BigIntStats,
   type Stats,
 } from "node:fs";
 import { join } from "node:path";
-import { canonicalPath, pathIdentityHash } from "../core/memory-read.js";
+import { canonicalPath, isKnownPathPlatform, pathIdentityHash } from "../core/memory-read.js";
 import { filesystemIdentity, NO_FOLLOW_FLAG, regularDescriptorSafe, sameFilesystemIdentity } from "../core/fs-safety.js";
 import { resolveRockyPaths, type RockyPaths } from "../core/state-paths.js";
 import { MAX_COVERAGE_PATHS, parseAgentEvent, type AgentEvent, type AgentName } from "./schema.js";
@@ -101,35 +100,14 @@ function rememberStrictIdentity(stats: Stats, identity: BigIntStats): void {
   if (token !== undefined) strictIdentities.set(stats, token);
 }
 
-function pathStrictIdentity(path: string): BigIntStats | undefined {
-  try {
-    // This is only a capability fallback when a host has replaced the
-    // descriptor/lstat BigInt API with an invalid numeric shape.  A regular,
-    // non-symlink path stat still provides a bounded identity; if it cannot,
-    // callers remain fail-closed.
-    const listed = lstatSync(path);
-    if ((!listed.isFile() && !listed.isDirectory()) || listed.isSymbolicLink()) return undefined;
-    const identity = statSync(path, { bigint: true });
-    return filesystemIdentity(identity) !== undefined ? identity : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-function statWithStrictIdentity(fd: number, path?: string): Stats {
+function descriptorStats(fd: number, _path?: string): Stats {
   const stats = fstatSync(fd);
   try {
     const identity = fstatSync(fd, { bigint: true });
     if (filesystemIdentity(identity) !== undefined) rememberStrictIdentity(stats, identity);
-    else if (path !== undefined) {
-      const fallback = pathStrictIdentity(path);
-      if (fallback !== undefined) rememberStrictIdentity(stats, fallback);
-    }
   } catch {
-    if (path !== undefined) {
-      const fallback = pathStrictIdentity(path);
-      if (fallback !== undefined) rememberStrictIdentity(stats, fallback);
-    }
+    // No descriptor identity means no proof.  Pathname stat fallback is
+    // deliberately forbidden because it can follow a replacement/reparse.
   }
   return stats;
 }
@@ -139,13 +117,8 @@ function lstatWithStrictIdentity(path: string): Stats {
   try {
     const identity = lstatSync(path, { bigint: true });
     if (filesystemIdentity(identity) !== undefined) rememberStrictIdentity(stats, identity);
-    else {
-      const fallback = pathStrictIdentity(path);
-      if (fallback !== undefined) rememberStrictIdentity(stats, fallback);
-    }
   } catch {
-    const fallback = pathStrictIdentity(path);
-    if (fallback !== undefined) rememberStrictIdentity(stats, fallback);
+    // No descriptor identity means no proof. See descriptorStats.
   }
   return stats;
 }
@@ -210,9 +183,9 @@ function claimCoverageTempPath(paths: RockyPaths, key: string, id: string): stri
   return join(paths.spoolDir, `${key}.claim.${id}${COVERAGE_TEMP_SUFFIX}.${process.pid}.${randomBytes(8).toString("hex")}`);
 }
 
-function canonicalCoveragePath(value: unknown): string | undefined {
+function canonicalCoveragePath(value: unknown, platform: NodeJS.Platform | "unknown" = "unknown"): string | undefined {
   if (typeof value !== "string" || value.length === 0 || value.length > 1024 || CONTROL_PATH.test(value)) return undefined;
-  const path = canonicalPath(value, { platform: "unknown" });
+  const path = canonicalPath(value, { platform });
   return path.length > 0 && path.length <= 1024 ? path : undefined;
 }
 
@@ -223,18 +196,29 @@ interface CoveragePathSet {
   overflow: boolean;
   rawCount: number;
   cwd?: string;
+  platform?: NodeJS.Platform | "unknown";
 }
 
-function coveragePathSet(value: unknown, cwdValue?: unknown): CoveragePathSet {
+function coveragePathSet(
+  value: unknown,
+  cwdValue?: unknown,
+  platformValue: unknown = "unknown",
+): CoveragePathSet {
+  const platform: NodeJS.Platform | "unknown" = platformValue === "unknown"
+    ? "unknown"
+    : isKnownPathPlatform(platformValue) ? platformValue : "unknown";
+  const platformValid = platformValue === undefined || platformValue === "unknown" || isKnownPathPlatform(platformValue);
   try {
-    if (!Array.isArray(value)) return { paths: [], identityHashes: [], valid: false, overflow: false, rawCount: 0 };
+    if (!Array.isArray(value)) return { paths: [], identityHashes: [], valid: false, overflow: false, rawCount: 0, platform };
   } catch {
-    return { paths: [], identityHashes: [], valid: false, overflow: true, rawCount: 0 };
+    return { paths: [], identityHashes: [], valid: false, overflow: true, rawCount: 0, platform };
   }
   const cwd = typeof cwdValue === "string" && !CONTROL_PATH.test(cwdValue) && cwdValue.length <= 1024
-    ? canonicalPath(cwdValue, { platform: "unknown" }) || undefined
+    ? canonicalPath(cwdValue, { platform }) || undefined
     : undefined;
-  if (cwdValue !== undefined && cwd === undefined) return { paths: [], identityHashes: [], valid: false, overflow: false, rawCount: 0 };
+  if (!platformValid || (cwdValue !== undefined && cwd === undefined)) {
+    return { paths: [], identityHashes: [], valid: false, overflow: false, rawCount: 0, platform };
+  }
   const paths: string[] = [];
   const identityHashes: string[] = [];
   const seenPaths = new Set<string>();
@@ -253,12 +237,12 @@ function coveragePathSet(value: unknown, cwdValue?: unknown): CoveragePathSet {
       let item: unknown;
       try { item = (value as unknown[])[index]; } catch { valid = false; overflow = true; continue; }
       rawCount += 1;
-      const path = canonicalCoveragePath(item);
+      const path = canonicalCoveragePath(item, platform);
       if (path === undefined) {
         valid = false;
         continue;
       }
-      const hash = pathIdentityHash(path, { platform: "unknown", cwd });
+      const hash = pathIdentityHash(path, { platform, cwd });
       if (seenPaths.has(path) || seenHashes.has(hash)) {
         // A duplicate path is harmless at an ingress retry boundary, but a
         // persisted sidecar must reject it. The writer deduplicates explicitly.
@@ -278,15 +262,18 @@ function coveragePathSet(value: unknown, cwdValue?: unknown): CoveragePathSet {
     valid = false;
     overflow = true;
   }
-  return { paths, identityHashes, valid, overflow, rawCount, ...(cwd === undefined ? {} : { cwd }) };
+  return { paths, identityHashes, valid, overflow, rawCount, platform, ...(cwd === undefined ? {} : { cwd }) };
 }
 
 function validCoverageHashes(value: unknown): string[] | undefined {
-  if (!Array.isArray(value) || value.length > MAX_COVERAGE_IDENTITIES) return undefined;
+  if (!Array.isArray(value)) return undefined;
   const hashes: string[] = [];
   const seen = new Set<string>();
   try {
-    for (const item of value) {
+    const length = value.length;
+    if (!Number.isSafeInteger(length) || length < 0 || length > MAX_COVERAGE_IDENTITIES) return undefined;
+    for (let index = 0; index < length; index += 1) {
+      const item = value[index];
       if (typeof item !== "string" || !IDENTITY_HASH.test(item) || seen.has(item)) return undefined;
       seen.add(item);
       hashes.push(item);
@@ -297,8 +284,12 @@ function validCoverageHashes(value: unknown): string[] | undefined {
   return hashes;
 }
 
-function payloadDigest(input: CoverageInput, identityHashes: readonly string[]): string {
-  const candidateCount = input.candidateCount ?? identityHashes.length;
+function payloadDigest(
+  input: CoverageInput,
+  identityHashes: readonly string[],
+  candidateCount = identityHashes.length,
+  platform: NodeJS.Platform | "unknown" = input.platform ?? "unknown",
+): string {
   const fullEnvelopeDigest = input.pathsComplete !== true
     && candidateCount > identityHashes.length
     && typeof input.payloadDigest === "string"
@@ -308,7 +299,8 @@ function payloadDigest(input: CoverageInput, identityHashes: readonly string[]):
   return createHash("sha256")
     .update(JSON.stringify({
       agent: input.agent,
-      cwd: typeof input.cwd === "string" ? canonicalPath(input.cwd, { platform: "unknown" }) : undefined,
+      platform,
+      cwd: typeof input.cwd === "string" ? canonicalPath(input.cwd, { platform }) : undefined,
       candidateCount,
       candidateCountExact: input.candidateCountExact !== false,
       pathsComplete: input.pathsComplete === true,
@@ -339,6 +331,10 @@ function parseCoverageBytes(bytes: Buffer): CoverageSnapshot | undefined {
     const claimDevToken = claimDev === undefined ? undefined : identityToken(claimDev);
     const claimInoToken = claimIno === undefined ? undefined : identityToken(claimIno);
     const cwdValue = record.cwd;
+    const platformValue = record.platform;
+    const platform = platformValue === undefined ? undefined
+      : platformValue === "unknown" ? "unknown"
+      : isKnownPathPlatform(platformValue) ? platformValue : undefined;
     const cwdConflict = record.cwdConflict;
     const cappedDigestProof = record.cappedDigestProof;
     if (record.v !== 1 || !agent || typeof record.candidateCountExact !== "boolean" ||
@@ -346,6 +342,7 @@ function parseCoverageBytes(bytes: Buffer): CoverageSnapshot | undefined {
         payloads > Number.MAX_SAFE_INTEGER ||
         (cwdConflict !== undefined && typeof cwdConflict !== "boolean") ||
         (cappedDigestProof !== undefined && typeof cappedDigestProof !== "boolean") ||
+        (platformValue !== undefined && platform === undefined) ||
         (claimId !== undefined && (typeof claimId !== "string" || !CLAIM_ID.test(claimId))) ||
         (claimDev !== undefined && claimDevToken === undefined) ||
         (claimIno !== undefined && claimInoToken === undefined) ||
@@ -357,23 +354,32 @@ function parseCoverageBytes(bytes: Buffer): CoverageSnapshot | undefined {
     if (!Array.isArray(pathsValue) || pathsValue.length > MAX_COVERAGE_WITNESSES) return undefined;
     const paths: string[] = [];
     const pathHashes = new Set<string>();
-    for (const item of pathsValue) {
-      const path = canonicalCoveragePath(item);
-      if (path === undefined || paths.includes(path)) return undefined;
-      const hash = pathIdentityHash(path, { platform: "unknown", cwd: typeof cwdValue === "string" ? cwdValue : undefined });
+    for (let index = 0; index < pathsValue.length; index += 1) {
+      const item = pathsValue[index];
+      const canonical = canonicalCoveragePath(item, platform ?? "unknown");
+      if (canonical === undefined || paths.includes(canonical)) return undefined;
+      const hash = pathIdentityHash(canonical, {
+        platform: platform ?? "unknown",
+        cwd: typeof cwdValue === "string" ? cwdValue : undefined,
+      });
       if (pathHashes.has(hash)) return undefined;
       pathHashes.add(hash);
-      paths.push(path);
+      paths.push(canonical);
     }
     const rawHashes = record.identityHashes;
     const identityHashes = rawHashes === undefined ? undefined : validCoverageHashes(rawHashes);
     if (rawHashes !== undefined && identityHashes === undefined) return undefined;
+    let witnessMismatch = false;
     if (identityHashes !== undefined) {
       const identities = new Set(identityHashes);
       if (paths.some((path) => !identities.has(pathIdentityHash(path, {
-        platform: "unknown",
+        platform: platform ?? "unknown",
         cwd: typeof cwdValue === "string" ? cwdValue : undefined,
       })))) return undefined;
+      // A bounded sidecar must retain a display witness for every identity
+      // when the complete union fits in the public witness cap.  Without this
+      // pairing a forged hash-only record could claim exact coverage.
+      if (identityHashes.length <= MAX_COVERAGE_WITNESSES && paths.length !== identityHashes.length) witnessMismatch = true;
       if (record.pathsComplete && record.candidateCountExact && candidateCount !== identityHashes.length) return undefined;
       if (record.candidateCountExact && candidateCount !== undefined && candidateCount < identityHashes.length) return undefined;
       // A capped one-payload marker may prove its omitted count only when it
@@ -392,7 +398,8 @@ function parseCoverageBytes(bytes: Buffer): CoverageSnapshot | undefined {
       if (!Array.isArray(rawDigests) || rawDigests.length > MAX_COVERAGE_PAYLOAD_DIGESTS) return undefined;
       payloadDigests = [];
       const seen = new Set<string>();
-      for (const digest of rawDigests) {
+      for (let index = 0; index < rawDigests.length; index += 1) {
+        const digest = rawDigests[index];
         if (typeof digest !== "string" || !PAYLOAD_DIGEST.test(digest) || seen.has(digest)) return undefined;
         seen.add(digest);
         payloadDigests.push(digest);
@@ -406,7 +413,7 @@ function parseCoverageBytes(bytes: Buffer): CoverageSnapshot | undefined {
     // A bounded digest ledger cannot prove that every later payload was a
     // replay or a distinct union member. Preserve the bounded snapshot as an
     // explicit lower-bound/unknown witness, never as exact complete proof.
-    const digestLedgerOverflow = payloads > MAX_COVERAGE_PAYLOAD_DIGESTS;
+    const digestLedgerOverflow = payloads > MAX_COVERAGE_PAYLOAD_DIGESTS || payloadDigests === undefined;
     if (candidateCount !== undefined && identityHashes !== undefined && candidateCount < identityHashes.length) return undefined;
     return {
       v: 1,
@@ -417,12 +424,13 @@ function parseCoverageBytes(bytes: Buffer): CoverageSnapshot | undefined {
       ...(claimId === undefined ? {} : { claimId }),
       ...(claimDevToken === undefined ? {} : { claimDev: claimDevToken }),
       ...(claimInoToken === undefined ? {} : { claimIno: claimInoToken }),
-      ...(typeof cwdValue === "string" ? { cwd: canonicalPath(cwdValue, { platform: "unknown" }) } : {}),
+      ...(typeof cwdValue === "string" ? { cwd: canonicalPath(cwdValue, { platform: platform ?? "unknown" }) } : {}),
+      ...(platform === undefined ? {} : { platform }),
       ...(cwdConflict === true ? { cwdConflict: true } : {}),
       ...(cappedDigestProof === true ? { cappedDigestProof: true } : {}),
       ...(payloadDigests === undefined ? {} : { payloadDigests }),
-      candidateCountExact: record.candidateCountExact && !digestLedgerOverflow,
-      pathsComplete: record.pathsComplete && !digestLedgerOverflow,
+      candidateCountExact: record.candidateCountExact && !digestLedgerOverflow && !witnessMismatch,
+      pathsComplete: record.pathsComplete && !digestLedgerOverflow && !witnessMismatch,
       payloads,
     };
   } catch {
@@ -460,51 +468,62 @@ function readCoverageUnlocked(paths: RockyPaths, key: string): CoverageSnapshot 
   return readCoverageFileUnlocked(file);
 }
 
-function writeCoverageTargetUnlocked(target: string, temporary: string, snapshot: CoverageSnapshot): boolean {
+interface CoverageWriteOutcome {
+  written: boolean;
+  prior?: Stats;
+  published?: Stats;
+}
+
+function writeCoverageTargetUnlocked(target: string, temporary: string, snapshot: CoverageSnapshot): CoverageWriteOutcome {
   let fd = -1;
+  let prior: Stats | undefined;
   try {
     const existing = inspectFile(target);
-    if (existing.kind === "other") return false;
+    if (existing.kind === "other") return { written: false };
+    prior = existing.stats;
     let existingIdentity: BigIntStats | undefined;
     if (existing.kind === "regular") {
       existingIdentity = lstatSync(target, { bigint: true });
-      if (!regularDescriptorSafe(existingIdentity)) return false;
+      if (!regularDescriptorSafe(existingIdentity)) return { written: false, prior };
     }
     const encoded = Buffer.from(JSON.stringify(snapshot), "utf8");
     if (encoded.byteLength > COVERAGE_MAX_BYTES) {
-      return false;
+      return { written: false, prior };
     }
     fd = openSync(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | NO_FOLLOW, 0o600);
     const opened = fstatSync(fd, { bigint: true });
     if (!regularDescriptorSafe(opened) || !sameFilesystemIdentity(opened, opened)) {
-      return false;
+      return { written: false, prior };
     }
     try { fchmodSync(fd, 0o600); } catch { /* best effort */ }
     if (writeSync(fd, encoded, 0, encoded.byteLength) !== encoded.byteLength) {
-      return false;
+      return { written: false, prior };
     }
     const after = fstatSync(fd, { bigint: true });
     if (!regularDescriptorSafe(after) || !sameFilesystemIdentity(opened, after) || after.size !== BigInt(encoded.byteLength)) {
-      return false;
+      return { written: false, prior };
     }
     closeQuietly(fd);
     fd = -1;
     const beforeRename = inspectFile(target);
     if (existing.kind === "regular") {
-      if (existingIdentity === undefined || beforeRename.kind !== "regular") return false;
+      if (existingIdentity === undefined || beforeRename.kind !== "regular") return { written: false, prior };
       const beforeRenameIdentity = lstatSync(target, { bigint: true });
       if (!regularDescriptorSafe(beforeRenameIdentity)
-          || !sameFilesystemIdentity(existingIdentity, beforeRenameIdentity)) return false;
+          || !sameFilesystemIdentity(existingIdentity, beforeRenameIdentity)) return { written: false, prior };
     } else if (beforeRename.kind !== "missing") {
-      return false;
+      return { written: false, prior };
     }
     renameSync(temporary, target);
     const renamed = inspectFile(target);
-    if (renamed.kind !== "regular") return false;
+    if (renamed.kind !== "regular") return { written: false, prior };
     const renamedIdentity = lstatSync(target, { bigint: true });
-    return regularDescriptorSafe(renamedIdentity) && sameFilesystemIdentity(opened, renamedIdentity);
+    const published = inspectFile(target).stats;
+    return regularDescriptorSafe(renamedIdentity) && sameFilesystemIdentity(opened, renamedIdentity)
+      ? { written: true, prior, published }
+      : { written: false, prior, published };
   } catch {
-    return false;
+    return { written: false, prior };
   } finally {
     if (fd >= 0) closeQuietly(fd);
     try { unlinkSync(temporary); } catch { /* best effort */ }
@@ -515,13 +534,21 @@ function writeCoverageUnlocked(paths: RockyPaths, key: string, snapshot: Coverag
   let target: string | undefined;
   let temporary: string | undefined;
   try {
+    const directoryStats = spoolDirectoryIdentity(paths.spoolDir);
+    if (!directoryStats) return false;
     target = coveragePath(paths, key);
     temporary = coverageTempPath(paths, key);
-    const written = writeCoverageTargetUnlocked(target, temporary, snapshot);
-    if (!written && target !== undefined) removeRegular(target);
-    return written;
+    const result = writeCoverageTargetUnlocked(target, temporary, snapshot);
+    if (!sameSpoolDirectory(paths.spoolDir, directoryStats)) {
+      if (result.published !== undefined) removeRegular(target, result.published);
+      return false;
+    }
+    if (!result.written && target !== undefined) {
+      if (result.published !== undefined) removeRegular(target, result.published);
+      else if (result.prior !== undefined) removeRegular(target, result.prior);
+    }
+    return result.written;
   } catch {
-    if (target !== undefined) removeRegular(target);
     return false;
   } finally {
     if (temporary !== undefined) {
@@ -533,25 +560,28 @@ function writeCoverageUnlocked(paths: RockyPaths, key: string, snapshot: Coverag
 function mergeCoverage(previous: CoverageSnapshot | undefined, input: CoverageInput): CoverageSnapshot | undefined {
   const agent = safeAgent(input.agent);
   if (!agent) return undefined;
-  const incoming = coveragePathSet(input.paths, input.cwd);
+  const incoming = coveragePathSet(input.paths, input.cwd, input.platform ?? process.platform);
   const incomingPaths = incoming.paths;
   const incomingHashes = incoming.identityHashes;
   const incomingCount = input.candidateCount;
   const incomingCountValid = incomingCount === undefined || (Number.isSafeInteger(incomingCount) && incomingCount >= 0);
   if (!incomingCountValid) return undefined;
-  const incomingCountExact = incomingCount !== undefined && input.candidateCountExact !== false;
+  const incomingCountExact = incomingCount !== undefined && input.candidateCountExact !== false
+    && incoming.platform !== "unknown";
   // A cwd-aware adapter may report raw aliases (absolute and relative forms)
   // for one identity. Normalize that count only when the declared count is
   // exactly the bounded raw ingress length; a larger count with no matching
   // raw envelope is contradictory and must stay unknown.
-  const normalizedIncomingCount = input.pathsComplete === true && input.cwd !== undefined
-    && incomingCount !== undefined && incomingCount === incoming.rawCount
+  const normalizedIncomingCount = input.pathsComplete === true && incoming.platform !== "unknown"
+    && incomingCount !== undefined && incomingCount <= MAX_COVERAGE_PATHS
+    && incomingCount >= incoming.rawCount
     ? incomingHashes.length
     : incomingCount;
   const incomingComplete = !incoming.overflow && incoming.valid && input.pathsComplete === true
-    && incomingCountExact && normalizedIncomingCount === incomingHashes.length;
+    && incomingCountExact && normalizedIncomingCount === incomingHashes.length
+    && incoming.platform !== "unknown";
   const incomingCandidateCount = normalizedIncomingCount === undefined ? incomingHashes.length : normalizedIncomingCount;
-  const incomingDigest = payloadDigest(input, incomingHashes);
+  const incomingDigest = payloadDigest(input, incomingHashes, incomingCandidateCount, incoming.platform ?? "unknown");
   const cappedEnvelope = input.pathsComplete !== true && incomingCandidateCount > incomingHashes.length;
   const hasFullEnvelopeDigest = cappedEnvelope && typeof input.payloadDigest === "string"
     && PAYLOAD_DIGEST.test(input.payloadDigest);
@@ -565,6 +595,7 @@ function mergeCoverage(previous: CoverageSnapshot | undefined, input: CoverageIn
       payloads: 1,
       payloadDigests: [incomingDigest],
       ...(incoming.cwd === undefined ? {} : { cwd: incoming.cwd }),
+      ...(incoming.platform === undefined ? {} : { platform: incoming.platform }),
       ...(hasFullEnvelopeDigest ? { cappedDigestProof: true } : {}),
     };
   }
@@ -580,11 +611,20 @@ function mergeCoverage(previous: CoverageSnapshot | undefined, input: CoverageIn
     if (payloadDigests.length < MAX_COVERAGE_PAYLOAD_DIGESTS) payloadDigests.push(incomingDigest);
     else payloadDigestOverflow = true;
   }
-  const priorHashes = previous.identityHashes ?? previous.paths.map((path) => pathIdentityHash(path, { platform: "unknown" }));
-  const previousCwd = previous.cwd === undefined ? undefined : canonicalPath(previous.cwd, { platform: "unknown" });
-  const incomingCwd = incoming.cwd === undefined ? undefined : canonicalPath(incoming.cwd, { platform: "unknown" });
+  const previousPlatform = previous.platform;
+  const incomingPlatform = incoming.platform;
+  const platformConflict = previousPlatform === undefined || incomingPlatform === undefined
+    || previousPlatform === "unknown" || incomingPlatform === "unknown"
+    || previousPlatform !== incomingPlatform;
+  const priorHashes = previous.identityHashes ?? previous.paths.map((path) => pathIdentityHash(path, {
+    platform: previousPlatform ?? "unknown",
+    cwd: previous.cwd,
+  }));
+  const previousCwd = previous.cwd === undefined ? undefined : canonicalPath(previous.cwd, { platform: previousPlatform ?? "unknown" });
+  const incomingCwd = incoming.cwd === undefined ? undefined : canonicalPath(incoming.cwd, { platform: incomingPlatform ?? "unknown" });
   const cwdConflict = previous.cwdConflict === true
-    || (previousCwd !== undefined && incomingCwd !== undefined && previousCwd !== incomingCwd);
+    || (previousCwd !== undefined && incomingCwd !== undefined && previousCwd !== incomingCwd)
+    || (previousCwd === undefined) !== (incomingCwd === undefined);
   const unionHashes = [...priorHashes];
   const seenHashes = new Set(unionHashes);
   let unionOverflow = unionHashes.length > MAX_COVERAGE_IDENTITIES || payloadDigestOverflow;
@@ -603,9 +643,9 @@ function mergeCoverage(previous: CoverageSnapshot | undefined, input: CoverageIn
   }
   const payloads = previous.payloads < Number.MAX_SAFE_INTEGER ? previous.payloads + 1 : Number.MAX_SAFE_INTEGER;
   const priorExact = previous.candidateCountExact && previous.identityHashes !== undefined
-    && previous.payloadDigests !== undefined;
+    && previous.payloadDigests !== undefined && previousPlatform !== undefined && previousPlatform !== "unknown";
   const allComplete = previous.pathsComplete && incomingComplete && priorExact && incomingCountExact
-    && !unionOverflow && !cwdConflict;
+    && !unionOverflow && !cwdConflict && !platformConflict;
   const singleKnownCount = payloads === 1 && incomingCountExact && !incoming.overflow;
   const exactUnion = allComplete;
   const candidateCount = exactUnion
@@ -619,12 +659,13 @@ function mergeCoverage(previous: CoverageSnapshot | undefined, input: CoverageIn
     paths: unionPaths,
     identityHashes: unionHashes,
     candidateCount,
-    candidateCountExact: (exactUnion || singleKnownCount) && !cwdConflict,
-    pathsComplete: exactUnion && !cwdConflict,
+    candidateCountExact: (exactUnion || singleKnownCount) && !cwdConflict && !platformConflict,
+    pathsComplete: exactUnion && !cwdConflict && !platformConflict,
     payloads,
     ...(payloadDigests === undefined ? {} : { payloadDigests }),
     ...(previous.cwd !== undefined ? { cwd: previous.cwd } : incoming.cwd === undefined ? {} : { cwd: incoming.cwd }),
     ...(cwdConflict ? { cwdConflict: true } : {}),
+    ...(incomingPlatform !== undefined ? { platform: previousPlatform === incomingPlatform ? incomingPlatform : "unknown" } : {}),
     ...((previous.cappedDigestProof === true || (payloads === 1 && hasFullEnvelopeDigest))
       ? { cappedDigestProof: true } : {}),
   };
@@ -689,6 +730,27 @@ interface OwnedPrivateLock {
   stats: Stats;
   token: string;
   pid: number;
+  directory: string;
+  directoryStats: Stats;
+}
+
+/** Capture and recheck the parent directory for every append transaction. */
+function spoolDirectoryIdentity(path: string): Stats | undefined {
+  try {
+    const stats = lstatWithStrictIdentity(path);
+    return stats.isDirectory() && !stats.isSymbolicLink() && usableIdentity(stats) ? stats : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function sameSpoolDirectory(path: string, expected: Stats): boolean {
+  const current = spoolDirectoryIdentity(path);
+  return current !== undefined && sameIdentity(expected, current);
+}
+
+function appendLockUsable(lock: OwnedPrivateLock): boolean {
+  return sameSpoolDirectory(lock.directory, lock.directoryStats);
 }
 
 function usableIdentity(stats: Stats): boolean {
@@ -791,14 +853,14 @@ function readAnnotationLock(path: string): ReadAnnotationLock | undefined {
   let fd = -1;
   try {
     fd = openSync(path, constants.O_RDONLY | NO_FOLLOW);
-    const opened = statWithStrictIdentity(fd, path);
+    const opened = descriptorStats(fd, path);
     if (!opened.isFile() || opened.isSymbolicLink() || opened.size > ANNOTATION_METADATA_MAX_BYTES) {
       return undefined;
     }
     if (!sameIdentity(initial.stats, opened)) return undefined;
     const bounded = Buffer.alloc(ANNOTATION_METADATA_MAX_BYTES + 1);
     const count = readSync(fd, bounded, 0, bounded.length, 0);
-    const after = statWithStrictIdentity(fd, path);
+    const after = descriptorStats(fd, path);
     if (count !== after.size || after.size > ANNOTATION_METADATA_MAX_BYTES) return undefined;
     if (!sameIdentity(opened, after)) return undefined;
     if (count === 0) return { kind: "empty", stats: after };
@@ -841,13 +903,13 @@ function readPrivateMetadata(path: string): LockMetadata | undefined {
   let fd = -1;
   try {
     fd = openSync(path, constants.O_RDONLY | NO_FOLLOW);
-    const opened = statWithStrictIdentity(fd, path);
+    const opened = descriptorStats(fd, path);
     if (!opened.isFile() || opened.isSymbolicLink() || opened.size === 0 || opened.size > LOCK_METADATA_MAX_BYTES) {
       return undefined;
     }
     const bounded = Buffer.alloc(LOCK_METADATA_MAX_BYTES + 1);
     const count = readSync(fd, bounded, 0, bounded.length, 0);
-    const after = statWithStrictIdentity(fd, path);
+    const after = descriptorStats(fd, path);
     if (count !== after.size || after.size > LOCK_METADATA_MAX_BYTES || !sameIdentity(initial.stats, opened)
         || !sameIdentity(opened, after)) return undefined;
     return parseLockMetadata(bounded.subarray(0, count));
@@ -871,29 +933,31 @@ function removeCreatedPrivate(path: string, token: string, createdStats: Stats |
   }
 }
 
-function createPrivateLock(path: string): OwnedPrivateLock | undefined {
+function createPrivateLock(path: string, directory: string, directoryStats: Stats): OwnedPrivateLock | undefined {
   let fd = -1;
   let created = false;
   let createdStats: Stats | undefined;
   let token: string | undefined;
   let succeeded = false;
   try {
+    if (!sameSpoolDirectory(directory, directoryStats)) return undefined;
     token = randomBytes(APPEND_LOCK_TOKEN_BYTES).toString("hex");
     const encoded = encodeLockMetadata(token);
     if (!encoded) return undefined;
     fd = openSync(path, "wx", 0o600);
     created = true;
-    createdStats = statWithStrictIdentity(fd, path);
+    createdStats = descriptorStats(fd, path);
     if (!regularDescriptorSafe(createdStats) || !usableIdentity(createdStats)) return undefined;
     if (writeSync(fd, encoded, 0, encoded.byteLength) !== encoded.byteLength) return undefined;
-    const stats = statWithStrictIdentity(fd, path);
+    const stats = descriptorStats(fd, path);
     if (!regularDescriptorSafe(stats) || !sameIdentity(createdStats, stats) || stats.size !== encoded.byteLength) return undefined;
     try {
       fchmodSync(fd, 0o600);
     } catch {
       // File mode is best effort on platforms that do not support it.
     }
-    const owned = { fd, path, stats, token, pid: process.pid };
+    if (!sameSpoolDirectory(directory, directoryStats)) return undefined;
+    const owned = { fd, path, stats, token, pid: process.pid, directory, directoryStats };
     succeeded = true;
     fd = -1;
     return owned;
@@ -929,10 +993,10 @@ function readEmptyAppendLock(path: string): Stats | undefined {
   let fd = -1;
   try {
     fd = openSync(path, constants.O_RDONLY | NO_FOLLOW);
-    const opened = statWithStrictIdentity(fd, path);
+    const opened = descriptorStats(fd, path);
     if (!opened.isFile() || opened.isSymbolicLink() || opened.size !== 0
       || !sameIdentity(initial.stats, opened)) return undefined;
-    const after = statWithStrictIdentity(fd, path);
+    const after = descriptorStats(fd, path);
     if (!after.isFile() || after.isSymbolicLink() || after.size !== 0
       || !sameIdentity(opened, after)) return undefined;
     return after;
@@ -957,6 +1021,10 @@ function reclaimStaleEmptyAppendLock(path: string, now: number): boolean {
 }
 
 function acquireAppendLock(paths: RockyPaths, key: string): OwnedPrivateLock | undefined {
+  const directory = spoolPath(paths);
+  if (!directory) return undefined;
+  const directoryStats = spoolDirectoryIdentity(directory);
+  if (!directoryStats) return undefined;
   let path: string;
   try {
     path = appendLockPath(paths, key);
@@ -964,15 +1032,26 @@ function acquireAppendLock(paths: RockyPaths, key: string): OwnedPrivateLock | u
     return undefined;
   }
   const existing = inspectFile(path);
-  if (existing.kind === "missing") return createPrivateLock(path);
+  if (existing.kind === "missing") return createPrivateLock(path, directory, directoryStats);
   const now = Date.now();
   if (!reclaimDeadAppendLock(path, now) && !reclaimStaleEmptyAppendLock(path, now)) return undefined;
   if (inspectFile(path).kind !== "missing") return undefined;
-  return createPrivateLock(path);
+  return createPrivateLock(path, directory, directoryStats);
+}
+
+function appendLockProtects(path: string, now: number): boolean {
+  const info = inspectFile(path);
+  if (info.kind !== "regular" || !info.stats) return false;
+  const metadata = readPrivateMetadata(path);
+  if (metadata !== undefined) return ownerState(metadata.pid) !== "dead";
+  // A malformed/non-empty lock is not safe to classify as an orphan. Only a
+  // verified stale empty lock is recoverable by acquireAppendLock.
+  return !isStale(info.stats, now) || readEmptyAppendLock(path) === undefined;
 }
 
 function releaseAppendLock(lock: OwnedPrivateLock): void {
   closeQuietly(lock.fd);
+  if (!sameSpoolDirectory(lock.directory, lock.directoryStats)) return;
   const current = inspectFile(lock.path);
   if (current.kind !== "regular" || !current.stats) return;
   const metadata = readPrivateMetadata(lock.path);
@@ -997,13 +1076,14 @@ export function recordCoverage(
   const appendLock = acquireAppendLock(paths, key);
   if (!appendLock) return false;
   try {
+    if (!appendLockUsable(appendLock)) return false;
     if (!detachClaimedCoverageLiveLocked(key, paths)) return false;
     const merged = mergeCoverage(readCoverageUnlocked(paths, key), input);
     if (merged === undefined) {
       removeCoverageUnlocked(paths, key);
       return false;
     }
-    const written = writeCoverageUnlocked(paths, key, merged);
+    const written = appendLockUsable(appendLock) && writeCoverageUnlocked(paths, key, merged) && appendLockUsable(appendLock);
     if (!written) removeCoverageUnlocked(paths, key);
     return written;
   } catch {
@@ -1020,7 +1100,8 @@ export function readCoverage(key: string, paths = resolveRockyPaths()): Coverage
   const appendLock = acquireAppendLock(paths, key);
   if (!appendLock) return undefined;
   try {
-    return readCoverageUnlocked(paths, key);
+    if (!appendLockUsable(appendLock)) return undefined;
+    return appendLockUsable(appendLock) ? readCoverageUnlocked(paths, key) : undefined;
   } finally {
     releaseAppendLock(appendLock);
   }
@@ -1100,7 +1181,8 @@ export function removeCoverage(key: string, paths = resolveRockyPaths()): boolea
   const appendLock = acquireAppendLock(paths, key);
   if (!appendLock) return false;
   try {
-    return removeCoverageUnlocked(paths, key);
+    if (!appendLockUsable(appendLock)) return false;
+    return appendLockUsable(appendLock) && removeCoverageUnlocked(paths, key);
   } finally {
     releaseAppendLock(appendLock);
   }
@@ -1121,7 +1203,10 @@ export function removeClaimCoverage(claim: BatchClaim, paths = resolveRockyPaths
   if (!target || !isSpoolDirectory(paths.spoolDir)) return false;
   const appendLock = acquireAppendLock(paths, claim.key);
   if (!appendLock) return false;
-  try { return removeClaimCoverageUnlocked(claim, paths); }
+  try {
+    if (!appendLockUsable(appendLock)) return false;
+    return removeClaimCoverageUnlocked(claim, paths);
+  }
   finally { releaseAppendLock(appendLock); }
 }
 
@@ -1148,11 +1233,11 @@ function createAnnotationLease(path: string, key: string): AnnotationLease | und
     token = randomBytes(ANNOTATION_LOCK_TOKEN_BYTES).toString("hex");
     fd = openSync(path, "wx", 0o600);
     created = true;
-    createdStats = statWithStrictIdentity(fd, path);
+    createdStats = descriptorStats(fd, path);
     if (!regularDescriptorSafe(createdStats) || !usableIdentity(createdStats)) return undefined;
     const encoded = encodeAnnotationMetadata(token, createdStats);
     if (!encoded || writeSync(fd, encoded, 0, encoded.byteLength) !== encoded.byteLength) return undefined;
-    const stats = statWithStrictIdentity(fd, path);
+    const stats = descriptorStats(fd, path);
     if (!regularDescriptorSafe(stats) || !sameIdentity(createdStats, stats) || stats.size !== encoded.byteLength) return undefined;
     try {
       fchmodSync(fd, 0o600);
@@ -1248,7 +1333,7 @@ function appendBufferLocked(file: string, candidate: Buffer): boolean {
       constants.O_WRONLY | constants.O_APPEND | (create ? constants.O_CREAT | constants.O_EXCL : constants.O_CREAT) | NO_FOLLOW,
       0o600,
     );
-    const opened = statWithStrictIdentity(fd, file);
+    const opened = descriptorStats(fd, file);
     if (!regularDescriptorSafe(opened) || !usableIdentity(opened)) return false;
     if (before.stats && !sameIdentity(before.stats, opened)) return false;
     if (opened.size + candidate.byteLength > MAX_BATCH_BYTES) return false;
@@ -1258,7 +1343,7 @@ function appendBufferLocked(file: string, candidate: Buffer): boolean {
       // File mode is best effort on platforms that do not support it.
     }
     if (writeSync(fd, candidate, 0, candidate.byteLength) !== candidate.byteLength) return false;
-    const after = statWithStrictIdentity(fd, file);
+    const after = descriptorStats(fd, file);
     return after.isFile() && !after.isSymbolicLink() && sameIdentity(opened, after);
   } catch {
     // Spool is transient; callers must never fail because it is unavailable.
@@ -1290,9 +1375,12 @@ export function appendEvent(key: string, event: AgentEvent, paths = resolveRocky
   const appendLock = acquireAppendLock(paths, key);
   if (!appendLock) return false;
   try {
+    if (!appendLockUsable(appendLock)) return false;
     if (!detachClaimedLiveLocked(key, paths, file)) return false;
     if (!detachClaimedCoverageLiveLocked(key, paths)) return false;
-    return appendBufferLocked(file, candidate);
+    if (!appendLockUsable(appendLock)) return false;
+    const appended = appendBufferLocked(file, candidate);
+    return appended && appendLockUsable(appendLock);
   } finally {
     releaseAppendLock(appendLock);
   }
@@ -1353,6 +1441,7 @@ export function appendPayload(
   const appendLock = acquireAppendLock(paths, key);
   if (!appendLock) return results;
   try {
+    if (!appendLockUsable(appendLock)) return results;
     if (!detachClaimedLiveLocked(key, paths, file)) return results;
     if (!detachClaimedCoverageLiveLocked(key, paths)) return results;
     let coverageWritten = true;
@@ -1375,7 +1464,7 @@ export function appendPayload(
         : original;
       const candidate = encodeEvent(event);
       if (candidate !== undefined) {
-        results[index] = appendBufferLocked(file, candidate);
+        results[index] = appendLockUsable(appendLock) && appendBufferLocked(file, candidate) && appendLockUsable(appendLock);
         if (results[index] && fallbackCoveragePending && original.kind === "mechanism") fallbackCoveragePending = false;
       }
     }
@@ -1396,6 +1485,8 @@ export interface CoverageInput {
   pathsComplete?: boolean;
   /** Operational turn cwd used only to collapse relative/absolute aliases. */
   cwd?: string;
+  /** Origin path semantics. Unknown cannot prove complete identity. */
+  platform?: NodeJS.Platform | "unknown";
   /** Adapter digest over the full candidate set, when bounded paths omit identities. */
   payloadDigest?: string;
 }
@@ -1414,6 +1505,8 @@ export interface CoverageSnapshot {
   payloadDigests?: string[];
   /** Operational cwd used to resolve relative sidecar witnesses. */
   cwd?: string;
+  /** Validated origin path policy used for canonical identities. */
+  platform?: NodeJS.Platform | "unknown";
   /** Different complete payloads named incompatible canonical cwd roots. */
   cwdConflict?: boolean;
   /** Adapter supplied a validated full-set digest for a single capped payload. */
@@ -1450,11 +1543,11 @@ export function readBatch(key: string, paths = resolveRockyPaths()): AgentEvent[
   let bytes: Buffer;
   try {
     fd = openSync(file, constants.O_RDONLY | NO_FOLLOW);
-    const opened = statWithStrictIdentity(fd, file);
+    const opened = descriptorStats(fd, file);
     if (!regularDescriptorSafe(opened) || !sameIdentity(initial.stats, opened) || opened.size > MAX_BATCH_BYTES) return [];
     const bounded = Buffer.alloc(MAX_BATCH_BYTES + 1);
     const count = readSync(fd, bounded, 0, bounded.length, 0);
-    const after = statWithStrictIdentity(fd, file);
+    const after = descriptorStats(fd, file);
     if (count > MAX_BATCH_BYTES || after.size > MAX_BATCH_BYTES || !sameIdentity(opened, after)
       || !sameIdentity(initial.stats, after) || count !== after.size) return [];
     bytes = bounded.subarray(0, count);
@@ -1580,7 +1673,12 @@ function bindClaimCoverageLocked(key: string, claim: BatchClaim, paths: RockyPat
     const claimIno = identityToken(claimIdentity.ino);
     if (claimDev === undefined || claimIno === undefined || (claimDev === "0" && claimIno === "0")) return false;
     const owned = { ...snapshot, claimId: claim.id, claimDev, claimIno } satisfies CoverageSnapshot;
-    if (!writeCoverageTargetUnlocked(target, temporary, owned)) return false;
+    const writeResult = writeCoverageTargetUnlocked(target, temporary, owned);
+    if (!writeResult.written) {
+      if (writeResult.published !== undefined) removeRegular(target, writeResult.published);
+      else if (writeResult.prior !== undefined) removeRegular(target, writeResult.prior);
+      return false;
+    }
     const written = inspectFile(target);
     if (written.kind !== "regular" || !written.stats) return false;
     const currentLive = inspectFile(livePath);
@@ -1597,7 +1695,8 @@ function bindClaimCoverageLocked(key: string, claim: BatchClaim, paths: RockyPat
     if (temporary !== undefined) {
       try { unlinkSync(temporary); } catch { /* best effort */ }
     }
-    try { removeRegular(target); } catch { /* best effort */ }
+    // Only remove an inode this operation can prove it published. A
+    // concurrent replacement must survive cleanup.
     return false;
   } finally {
     if (temporary !== undefined) {
@@ -1752,10 +1851,17 @@ export function claimBatch(key: string, paths = resolveRockyPaths()): BatchClaim
       }
       const target = join(directory, claimName(key, id));
       if (inspectFile(target).kind !== "missing") continue;
+      if (!appendLockUsable(appendLock)) return undefined;
       try {
         linkSync(livePath, target);
       } catch {
         continue;
+      }
+      if (!appendLockUsable(appendLock)) {
+        // The link just created shares the live batch inode; that identity is
+        // the only object this cleanup is allowed to remove.
+        removeRegular(target, live.stats);
+        return undefined;
       }
       const claim = claimFromName(directory, claimName(key, id));
       return claim ? prepareClaimLocked(key, claim, paths) : undefined;
@@ -1774,12 +1880,12 @@ function readClaimBytes(claim: BatchClaim, paths: RockyPaths): Buffer | undefine
   let fd = -1;
   try {
     fd = openSync(claim.path, constants.O_RDONLY | NO_FOLLOW);
-    const opened = statWithStrictIdentity(fd, claim.path);
+    const opened = descriptorStats(fd, claim.path);
     if (!opened.isFile() || opened.isSymbolicLink() || !sameIdentity(claim.stats, opened)
       || opened.size > MAX_BATCH_BYTES || opened.size !== initial.stats.size) return undefined;
     const bounded = Buffer.alloc(MAX_BATCH_BYTES + 1);
     const count = readSync(fd, bounded, 0, bounded.length, 0);
-    const after = statWithStrictIdentity(fd, claim.path);
+    const after = descriptorStats(fd, claim.path);
     if (count !== after.size || count > MAX_BATCH_BYTES || after.size > MAX_BATCH_BYTES
       || after.size !== opened.size || !sameIdentity(opened, after)) return undefined;
     return bounded.subarray(0, count);
@@ -1823,12 +1929,13 @@ export function removeClaim(claim: BatchClaim, paths = resolveRockyPaths()): boo
   const appendLock = acquireAppendLock(paths, claim.key);
   if (!appendLock) return false;
   try {
+    if (!appendLockUsable(appendLock)) return false;
     const current = inspectFile(claim.path);
     if (current.kind !== "regular" || !current.stats || !sameIdentity(claim.stats, current.stats)) return false;
     let fd = -1;
     try {
       fd = openSync(claim.path, constants.O_RDONLY | NO_FOLLOW);
-      const opened = statWithStrictIdentity(fd, claim.path);
+      const opened = descriptorStats(fd, claim.path);
       if (!regularDescriptorSafe(opened) || !sameIdentity(claim.stats, opened)) return false;
     } catch {
       return false;
@@ -1883,6 +1990,14 @@ function removeRegular(path: string, expected?: Stats): void {
 
 const MAX_ORPHAN_ARTIFACTS = 512;
 
+function withOrphanAppendLock(paths: RockyPaths, key: string, action: () => void): void {
+  if (!isSafeKey(key)) return;
+  const guard = acquireAppendLock(paths, key);
+  if (!guard || !appendLockUsable(guard)) return;
+  try { action(); }
+  finally { releaseAppendLock(guard); }
+}
+
 /** Bounded crash cleanup for sidecars which have lost their owning JSONL. */
 function sweepOrphanCoverageArtifacts(
   names: readonly string[],
@@ -1899,8 +2014,11 @@ function sweepOrphanCoverageArtifacts(
 
       const claimCoverage = CLAIM_COVERAGE_PATTERN.exec(name);
       if (claimCoverage) {
+        const claimKey = claimCoverage[1]!;
         const claimNameValue = `${claimCoverage[1]}.claim.${claimCoverage[2]}.jsonl`;
-        if (inspectFile(join(directory, claimNameValue)).kind === "missing") removeRegular(fullPath, info.stats);
+        withOrphanAppendLock(paths, claimKey, () => {
+          if (inspectFile(join(directory, claimNameValue)).kind === "missing") removeRegular(fullPath, info.stats);
+        });
         continue;
       }
 
@@ -1910,9 +2028,9 @@ function sweepOrphanCoverageArtifacts(
         const lock = inspectFile(lockPath(paths, key));
         const appendLock = inspectFile(appendLockPath(paths, key));
         const lockSafe = lock.kind === "missing" || (lock.kind === "regular" && lock.stats && isStale(lock.stats, now));
-        const appendLockSafe = appendLock.kind === "missing" || (appendLock.kind === "regular" && appendLock.stats && isStale(appendLock.stats, now));
+        const appendLockSafe = appendLock.kind === "missing" || !appendLockProtects(appendLockPath(paths, key), now);
         if (lockSafe && appendLockSafe) {
-          removeRegular(fullPath, info.stats);
+          withOrphanAppendLock(paths, key, () => removeRegular(fullPath, info.stats));
         }
         continue;
       }
@@ -1924,9 +2042,9 @@ function sweepOrphanCoverageArtifacts(
       const lock = inspectFile(lockPath(paths, key));
       const appendLock = inspectFile(appendLockPath(paths, key));
       const lockSafe = lock.kind === "missing" || (lock.kind === "regular" && lock.stats && isStale(lock.stats, now));
-      const appendLockSafe = appendLock.kind === "missing" || (appendLock.kind === "regular" && appendLock.stats && isStale(appendLock.stats, now));
+      const appendLockSafe = appendLock.kind === "missing" || !appendLockProtects(appendLockPath(paths, key), now);
       if (lockSafe && appendLockSafe && (batch.kind === "missing" || (batch.kind === "regular" && batch.stats && isStale(batch.stats, now)))) {
-        removeRegular(fullPath, info.stats);
+        withOrphanAppendLock(paths, key, () => removeRegular(fullPath, info.stats));
       }
     } catch {
       // Orphan cleanup is best effort and must never affect hook/annotation.
@@ -1938,18 +2056,24 @@ export function removeBatch(key: string, paths = resolveRockyPaths()): void {
   if (!isSafeKey(key)) return;
   const directory = spoolPath(paths);
   if (!directory || !isSpoolDirectory(directory)) return;
+  const appendLock = acquireAppendLock(paths, key);
+  if (!appendLock || !appendLockUsable(appendLock)) return;
+  let leaseToRelease: AnnotationLease | undefined;
   try {
     removeRegular(batchPath(paths, key));
     removeCoverageUnlocked(paths, key);
     const mapKey = compatibilityLeaseKey(paths, key);
-    const lease = compatibilityLeases.get(mapKey);
-    if (lease) {
-      compatibilityLeases.delete(mapKey);
-      releaseAnnotationLease(lease, paths);
-    }
+    leaseToRelease = compatibilityLeases.get(mapKey);
+    if (leaseToRelease) compatibilityLeases.delete(mapKey);
   } catch {
     // Transient state is always best effort.
+  } finally {
+    releaseAppendLock(appendLock);
   }
+  // releaseAnnotationLease acquires the same per-key append lock.  Defer it
+  // until the transaction above has released that lock, otherwise a normal
+  // removeBatch would strand the compatibility lease forever.
+  if (leaseToRelease) releaseAnnotationLease(leaseToRelease, paths);
 }
 
 export function acquireLock(key: string, paths = resolveRockyPaths()): boolean {
@@ -1990,9 +2114,18 @@ export function listOrphanBatches(now = Date.now(), paths = resolveRockyPaths())
       continue;
     }
     const lockSafe = lock.kind === "missing" || (lock.kind === "regular" && lock.stats && isStale(lock.stats, reference));
-    const appendLockSafe = appendLock.kind === "missing" || (appendLock.kind === "regular" && appendLock.stats && isStale(appendLock.stats, reference));
-    if (lockSafe && appendLockSafe) {
-      orphans.push(key);
+    const guard = acquireAppendLock(paths, key);
+    if (!guard) continue;
+    try {
+      if (!appendLockUsable(guard)) continue;
+      const freshBatch = inspectFile(join(directory, name));
+      const freshLock = inspectFile(lockPath(paths, key));
+      const lockSafe = freshLock.kind === "missing" || (freshLock.kind === "regular" && freshLock.stats && isStale(freshLock.stats, reference));
+      if (lockSafe && freshBatch.kind === "regular" && freshBatch.stats && isStale(freshBatch.stats, reference)) {
+        orphans.push(key);
+      }
+    } finally {
+      releaseAppendLock(guard);
     }
   }
   return orphans.sort();

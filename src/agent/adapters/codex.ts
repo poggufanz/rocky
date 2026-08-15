@@ -95,16 +95,35 @@ function rationaleEvent(text: string | undefined, now: number): RationaleEvent |
   return event?.kind === "rationale" ? event : undefined;
 }
 
-function changedPaths(command: string): string[] {
+function changedPaths(command: string): { paths: string[]; invalid: boolean } {
   // Codex's apply_patch input is patch text, not a shell command. Match only
   // patch marker lines so arbitrary command text is never interpreted.
   const paths: string[] = [];
-  const marker = /^\s*\*\*\*\s+(?:(?:Update|Add|Delete)\s+File|Move\s+to):\s*(.+?)\s*$/gmu;
-  for (const match of command.matchAll(marker)) {
-    const path = match[1] === undefined ? "" : canonicalPath(match[1]);
-    if (path && !paths.includes(path)) paths.push(path);
+  let markerSeen = false;
+  let invalid = false;
+  const marker = /^[ \t]*\*\*\*[ \t]+(?:Update[ \t]+File|Add[ \t]+File|Delete[ \t]+File|Move[ \t]+to):(?:[ \t]*(.*))?$/u;
+  const markerStart = /^[ \t]*\*\*\*[ \t]+(?:(?:Update|Add|Delete)[ \t]+File|Move[ \t]+to)(?=$|[ \t:])/u;
+  for (const line of command.split(/\r?\n/u)) {
+    // Treat a recognizable marker label as a marker even when its colon or
+    // path is malformed.  This keeps a bad line from falling through to the
+    // permissive unified-diff fallback and accidentally claiming complete
+    // coverage for a different path.
+    if (!markerStart.test(line)) continue;
+    markerSeen = true;
+    const match = marker.exec(line);
+    const rawPath = match?.[1]?.trim() ?? "";
+    if (!match || !rawPath || rawPath.startsWith("@@") || /[\u0000-\u001f\u007f-\u009f]/u.test(rawPath)) {
+      invalid = true;
+      continue;
+    }
+    const path = canonicalPath(rawPath, { platform: process.platform });
+    if (!path) {
+      invalid = true;
+      continue;
+    }
+    if (!paths.includes(path)) paths.push(path);
   }
-  if (paths.length > 0) return paths;
+  if (markerSeen) return { paths, invalid };
 
   // A conservative fallback for clients that send a unified git diff.
   const diff = /^\s*diff --git a\/([^\s]+) b\/([^\s]+)\s*$/gmu;
@@ -112,7 +131,7 @@ function changedPaths(command: string): string[] {
     const path = match[2] === undefined ? "" : canonicalPath(match[2]);
     if (path && !paths.includes(path)) paths.push(path);
   }
-  return paths;
+  return { paths, invalid: false };
 }
 
 function allEdits(input: PlainRecord, tool: string): { edits: PlainRecord[]; invalid: boolean } {
@@ -169,9 +188,10 @@ function parseModern(payload: PlainRecord, now: number): ParsedHookPayload {
       const edits = editBatch.edits;
       if (edits.length === 0) return undefined;
       const command = firstString(input.command, input.patch, edits[0]?.command, edits[0]?.patch);
-      const patchPaths = tool === "apply_patch" && command ? changedPaths(command) : [];
+      const patchResult = tool === "apply_patch" && command ? changedPaths(command) : { paths: [], invalid: false };
+      const patchPaths = patchResult.paths;
       const candidates: Array<{ path: string; edit: PlainRecord; excerpt?: string }> = [];
-      let invalidCoverage = editBatch.invalid;
+      let invalidCoverage = editBatch.invalid || patchResult.invalid;
       if (patchPaths.length > 0) {
         for (const path of patchPaths) candidates.push({ path, edit: edits[0] ?? input });
       } else {
@@ -196,12 +216,13 @@ function parseModern(payload: PlainRecord, now: number): ParsedHookPayload {
               payload.filename,
             ]),
           );
-          const identity = canonicalPath(directPath ?? "");
-          if (!identity) {
+          const display = canonicalPath(directPath ?? "", { platform: process.platform });
+          const identity = canonicalPath(directPath ?? "", { platform: process.platform, cwd });
+          if (!display || !identity) {
             invalidCoverage = true;
             continue;
           }
-          candidates.push({ path: identity, edit });
+          candidates.push({ path: display, edit });
         }
       }
       const byPath = new Map<string, AgentEvent>();
@@ -230,22 +251,25 @@ function parseModern(payload: PlainRecord, now: number): ParsedHookPayload {
           invalidCoverage = true;
           continue;
         }
-        const identity = canonicalPath(candidate.path);
-        if (!identity) continue;
-        if (identity.length > 1024) {
+        const display = canonicalPath(candidate.path, { platform: process.platform });
+        const identity = canonicalPath(candidate.path, { platform: process.platform, cwd });
+        if (!display || !identity) continue;
+        if (display.length > 1024 || identity.length > 1024) {
           invalidCoverage = true;
           continue;
         }
         const event = parseAgentEvent({
           v: 1, agent: "codex", kind: "mechanism", ts: now, tool,
-          path: identity, excerpt, provenance: "tool-observed",
+          path: display, excerpt, provenance: "tool-observed",
         });
         if (event) byPath.set(identity, event);
       }
       const bounded = [...byPath.values()].slice(0, MAX_ADAPTER_EVENTS);
       if (bounded.length === 0) return undefined;
-      const truncatedFiles = byPath.size - bounded.length;
-      const coveragePaths = [...byPath.keys()].slice(0, MAX_COVERAGE_PATHS);
+      const truncatedFiles = Math.max(0, byPath.size - bounded.length);
+      const coveragePaths = [...byPath.values()].slice(0, MAX_COVERAGE_PATHS)
+        .filter((event): event is Extract<AgentEvent, { kind: "mechanism" }> => event.kind === "mechanism")
+        .map((event) => event.path);
       const coveragePathsComplete = !invalidCoverage && byPath.size <= MAX_COVERAGE_PATHS;
       const markedEvents = bounded.map((event, index) => index === 0
         ? {
@@ -262,12 +286,10 @@ function parseModern(payload: PlainRecord, now: number): ParsedHookPayload {
         coveragePaths,
         coveragePathsComplete,
         coverageCwd: cwd,
-        coverageDigest: createHash("sha256").update(JSON.stringify([...new Set([...byPath.keys()]
-          .map((path) => canonicalPath(path, { platform: process.platform, cwd }))
-          .filter((path): path is string => path.length > 0))]
-          .sort()), "utf8").digest("hex"),
+        coverageDigest: createHash("sha256").update(JSON.stringify([...byPath.keys()].sort()), "utf8").digest("hex"),
         coverageCandidateCount: byPath.size,
         coverageCandidateCountExact: !invalidCoverage,
+        coveragePlatform: process.platform,
       };
     }
     case "Stop": {

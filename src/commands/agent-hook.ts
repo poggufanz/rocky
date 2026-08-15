@@ -117,13 +117,6 @@ export function logHookError(message: string, paths?: RockyPaths): void {
     mkdirSync(parent, { recursive: true, mode: 0o700 });
     const parentStats = lstatSync(parent, { bigint: true });
     if (!parentStats.isDirectory() || parentStats.isSymbolicLink() || filesystemIdentity(parentStats) === undefined) return;
-    // mkdir's mode is the creation default; chmod is best effort for existing private dirs.
-    try {
-      chmodSync(parent, 0o700);
-    } catch {
-      // Windows and read-only parents may reject chmod.
-    }
-
     let listed: BigIntStats | undefined;
     try {
       listed = lstatSync(target, { bigint: true });
@@ -136,6 +129,13 @@ export function logHookError(message: string, paths?: RockyPaths): void {
     const parentBeforeOpen = lstatSync(parent, { bigint: true });
     if (!parentBeforeOpen.isDirectory() || parentBeforeOpen.isSymbolicLink()
         || !sameFilesystemIdentity(parentStats, parentBeforeOpen)) return;
+    // Recheck parent identity before changing permissions. chmod is a path
+    // mutation and must not target a replacement directory.
+    try {
+      chmodSync(parent, 0o700);
+    } catch {
+      // Windows and read-only parents may reject chmod.
+    }
     fd = openSync(
       target,
       constants.O_WRONLY | constants.O_APPEND | (create ? constants.O_CREAT | constants.O_EXCL : constants.O_CREAT) | NO_FOLLOW,
@@ -429,6 +429,7 @@ function applyParsedEvent(parsed: ParsedHookPayload, paths: RockyPaths, deps: Ag
       pathsComplete: parsed.coveragePathsComplete ?? firstMechanism.coveragePathsComplete
         ?? (parsed.coveragePaths === undefined && coveragePaths.length <= 256),
       cwd: parsed.coverageCwd ?? intentCwd,
+      platform: parsed.coveragePlatform ?? process.platform,
       payloadDigest: parsed.coverageDigest,
     };
     // Keep overflow metadata attached until one mechanism append succeeds.

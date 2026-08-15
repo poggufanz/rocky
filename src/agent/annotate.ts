@@ -423,9 +423,9 @@ function safeCountSum(left: number, right: number): [number, boolean] {
   return [isSafeNonNegativeInteger(value) ? value : 0, isSafeNonNegativeInteger(value)];
 }
 
-function pathIdentity(value: string, cwd?: string): string {
+function pathIdentity(value: string, cwd?: string, platform: NodeJS.Platform | "unknown" = process.platform): string {
   if (typeof value !== "string" || value.length > MAX_PATH_CHARS) return "";
-  return canonicalPath(operationalText(value, MAX_PATH_CHARS), { cwd });
+  return canonicalPath(operationalText(value, MAX_PATH_CHARS), { cwd, platform });
 }
 
 interface DiffEntry {
@@ -434,7 +434,11 @@ interface DiffEntry {
   statsKnown: boolean;
 }
 
-function parseNumstatEntries(value: string | undefined, cwd?: string): DiffEntry[] | undefined {
+function parseNumstatEntries(
+  value: string | undefined,
+  cwd?: string,
+  platform: NodeJS.Platform | "unknown" = process.platform,
+): DiffEntry[] | undefined {
   if (value === undefined) return undefined;
   const entries: DiffEntry[] = [];
   const seen = new Set<string>();
@@ -443,8 +447,8 @@ function parseNumstatEntries(value: string | undefined, cwd?: string): DiffEntry
     const match = /^\s*(\d+|-)\t(\d+|-)\t(.+?)\s*$/u.exec(line);
     if (!match) return undefined;
     const rawPath = match[3] === undefined ? "" : match[3];
-    const path = pathIdentity(rawPath, cwd);
-    const displayPath = canonicalPath(rawPath);
+    const path = pathIdentity(rawPath, cwd, platform);
+    const displayPath = canonicalPath(rawPath, { platform });
     if (!path || !displayPath) return undefined;
     if (seen.has(path)) continue;
     const plusMinus: [number, number] = [
@@ -458,26 +462,34 @@ function parseNumstatEntries(value: string | undefined, cwd?: string): DiffEntry
   return entries;
 }
 
-function parseUntrackedEntries(value: string | undefined, cwd?: string): DiffEntry[] | undefined {
+function parseUntrackedEntries(
+  value: string | undefined,
+  cwd?: string,
+  platform: NodeJS.Platform | "unknown" = process.platform,
+): DiffEntry[] | undefined {
   if (value === undefined) return undefined;
   const entries: DiffEntry[] = [];
   for (const line of value.split(/\r?\n/u)) {
     const rawPath = line.trim();
     if (!rawPath) continue;
-    const path = pathIdentity(rawPath, cwd);
-    const displayPath = canonicalPath(rawPath);
+    const path = pathIdentity(rawPath, cwd, platform);
+    const displayPath = canonicalPath(rawPath, { platform });
     if (!path || !displayPath) return undefined;
     entries.push({ path: displayPath, plusMinus: [0, 0], statsKnown: false });
   }
   return entries;
 }
 
-function mergeDiffEntries(sources: Array<DiffEntry[] | undefined>, cwd?: string): DiffEntry[] | undefined {
+function mergeDiffEntries(
+  sources: Array<DiffEntry[] | undefined>,
+  cwd?: string,
+  platform: NodeJS.Platform | "unknown" = process.platform,
+): DiffEntry[] | undefined {
   if (sources.some((source) => source === undefined)) return undefined;
   const merged = new Map<string, { path: string; plusMinus: [number, number]; statsKnown: boolean }>();
   for (const source of sources) {
     for (const entry of source ?? []) {
-      const path = pathIdentity(entry.path, cwd);
+      const path = pathIdentity(entry.path, cwd, platform);
       if (!path) continue;
       const prior = merged.get(path);
       const [added, addedOk] = prior === undefined
@@ -498,12 +510,16 @@ function mergeDiffEntries(sources: Array<DiffEntry[] | undefined>, cwd?: string)
   return [...merged.values()];
 }
 
-function baselineMap(intent: IntentEvent | undefined, cwd?: string): Map<string, [number, number]> | undefined {
+function baselineMap(
+  intent: IntentEvent | undefined,
+  cwd?: string,
+  platform: NodeJS.Platform | "unknown" = process.platform,
+): Map<string, [number, number]> | undefined {
   const baseline = intent?.baseline;
   if (baseline?.status !== "captured") return undefined;
   const mapped = new Map<string, [number, number]>();
   for (const file of baseline.files ?? []) {
-    const path = pathIdentity(file.path, cwd);
+    const path = pathIdentity(file.path, cwd, platform);
     if (!path) continue;
     const previous = mapped.get(path);
     if (!isSafeNonNegativeInteger(file.plusMinus[0]) || !isSafeNonNegativeInteger(file.plusMinus[1])) return undefined;
@@ -583,6 +599,13 @@ export async function annotateBatch(key: string, deps: AnnotateDeps = {}): Promi
     // witness appear contradictory after a lost append.  When the sidecar
     // carries cwd, it remains the authoritative operational root.
     const coverageIdentityCwd = coverageSnapshot === undefined ? identityCwd : coverageSnapshot.cwd;
+    const coveragePlatform = coverageSnapshot?.platform ?? "unknown";
+    // A claim sidecar is the origin authority for path case/root policy.  Do
+    // not re-hash its events with the annotator's reader platform after a
+    // cross-platform reload; an unknown sidecar stays conservative and is
+    // reconciled only in its unknown namespace.
+    const mechanismPlatform = coverageSnapshot === undefined ? process.platform : coveragePlatform;
+    const identityPlatform = mechanismPlatform === "unknown" ? process.platform : mechanismPlatform;
     // Mechanism events must use the same root namespace as a trusted sidecar
     // while they are reconciled.  A root-less sidecar cannot safely be joined
     // to the annotator's process cwd, but relative witnesses can still be
@@ -599,6 +622,9 @@ export async function annotateBatch(key: string, deps: AnnotateDeps = {}): Promi
     let coverageExpectedCountUnknown = false;
     let coverageCapProof = false;
     let snapshotExpectedCount: number | undefined;
+    const snapshotIdentitySet = coverageSnapshot?.identityHashes === undefined
+      ? undefined
+      : new Set(coverageSnapshot.identityHashes);
     if (coverageSnapshot) {
       coverageMetadataSeen = true;
       if (coverageSnapshot.cwdConflict === true) {
@@ -625,7 +651,7 @@ export async function annotateBatch(key: string, deps: AnnotateDeps = {}): Promi
       }
       if (!coverageSnapshot.pathsComplete && coverageSnapshot.candidateCountExact !== true) coverageMetadataComplete = false;
       for (const candidate of coverageSnapshot.paths) {
-        const candidateGitPath = pathIdentity(candidate, coverageIdentityCwd);
+        const candidateGitPath = pathIdentity(candidate, coverageIdentityCwd, mechanismPlatform);
         const candidatePath = canonicalPath(cleanText(candidate, MAX_PATH_CHARS));
         if (!candidateGitPath || !candidatePath) {
           coverageMetadataComplete = false;
@@ -649,10 +675,10 @@ export async function annotateBatch(key: string, deps: AnnotateDeps = {}): Promi
         if (event.coveragePathsComplete !== true || event.coveragePaths === undefined) {
           coverageMetadataComplete = false;
         }
-        const eventPath = pathIdentity(event.path, mechanismIdentityCwd);
+        const eventPath = pathIdentity(event.path, mechanismIdentityCwd, mechanismPlatform);
         const eventCandidates = new Set<string>();
         for (const candidate of event.coveragePaths ?? []) {
-          const candidateGitPath = pathIdentity(candidate, mechanismIdentityCwd);
+          const candidateGitPath = pathIdentity(candidate, mechanismIdentityCwd, mechanismPlatform);
           const candidatePath = canonicalPath(cleanText(candidate, MAX_PATH_CHARS));
           if (!candidateGitPath || !candidatePath || eventCandidates.has(candidateGitPath)) {
             coverageMetadataComplete = false;
@@ -660,6 +686,14 @@ export async function annotateBatch(key: string, deps: AnnotateDeps = {}): Promi
             continue;
           }
           eventCandidates.add(candidateGitPath);
+          if (snapshotIdentitySet !== undefined) {
+            const identity = canonicalPath(candidate, { platform: coveragePlatform, cwd: coverageIdentityCwd });
+            const hash = identity ? pathIdentityHash(identity, { canonical: true }) : undefined;
+            if (hash === undefined || !snapshotIdentitySet.has(hash)) {
+              coverageMetadataComplete = false;
+              coverageMetadataContradiction = true;
+            }
+          }
           coverageCandidates.set(candidateGitPath, candidatePath);
         }
         if (event.coveragePathsComplete === true && (!eventPath || !eventCandidates.has(eventPath))) {
@@ -672,12 +706,13 @@ export async function annotateBatch(key: string, deps: AnnotateDeps = {}): Promi
           coverageMetadataContradiction = true;
         }
       }
-      const gitPath = pathIdentity(event.path, mechanismIdentityCwd);
+      const gitPath = pathIdentity(event.path, mechanismIdentityCwd, mechanismPlatform);
       const gitDisplayPath = canonicalPath(operationalText(event.path, MAX_PATH_CHARS));
       const path = canonicalPath(cleanText(event.path, MAX_PATH_CHARS)) || cleanText(event.path, MAX_PATH_CHARS);
       if (!path || !gitPath || !gitDisplayPath) continue;
       materializedEventIdentities.add(pathIdentityHash(event.path, {
-        platform: "unknown", cwd: coverageIdentityCwd,
+        platform: coverageSnapshot === undefined ? identityPlatform : mechanismPlatform,
+        cwd: coverageIdentityCwd,
       }));
       const excerpt = event.excerpt === undefined ? undefined : cleanText(event.excerpt, MAX_EXCERPT_CHARS) || undefined;
       if (event.truncatedFiles !== undefined) {
@@ -706,8 +741,8 @@ export async function annotateBatch(key: string, deps: AnnotateDeps = {}): Promi
         ...(event.provenance === undefined ? {} : { provenance: event.provenance }),
       });
     }
-    if (coverageSnapshot?.candidateCountExact === true && coverageSnapshot.identityHashes !== undefined) {
-      const snapshotIdentities = new Set(coverageSnapshot.identityHashes);
+    if (coverageSnapshot?.candidateCountExact === true && snapshotIdentitySet !== undefined) {
+      const snapshotIdentities = snapshotIdentitySet;
       if (materializedEventIdentities.size > (coverageSnapshot.candidateCount ?? snapshotIdentities.size)
           || [...materializedEventIdentities].some((hash) => !snapshotIdentities.has(hash))) {
         coverageMetadataComplete = false;
@@ -730,14 +765,14 @@ export async function annotateBatch(key: string, deps: AnnotateDeps = {}): Promi
     const headRaw = runGit(git, ["rev-parse", "HEAD"], gitCwd);
     const head = headRaw === undefined ? undefined : cleanText(headRaw, MAX_HEAD_CHARS) || undefined;
     const baseline = intentEvent?.baseline;
-    const baselineByPath = baselineMap(intentEvent, identityCwd);
+    const baselineByPath = baselineMap(intentEvent, identityCwd, identityPlatform);
     const currentEntries = baselineByPath === undefined
       ? undefined
       : mergeDiffEntries([
-        parseNumstatEntries(runGit(git, ["diff", "--numstat"], gitCwd), gitCwd),
-        parseNumstatEntries(runGit(git, ["diff", "--cached", "--numstat"], gitCwd), gitCwd),
-        parseUntrackedEntries(runGit(git, ["ls-files", "--others", "--exclude-standard"], gitCwd), gitCwd),
-      ], gitCwd);
+        parseNumstatEntries(runGit(git, ["diff", "--numstat"], gitCwd), gitCwd, identityPlatform),
+        parseNumstatEntries(runGit(git, ["diff", "--cached", "--numstat"], gitCwd), gitCwd, identityPlatform),
+        parseUntrackedEntries(runGit(git, ["ls-files", "--others", "--exclude-standard"], gitCwd), gitCwd, identityPlatform),
+      ], gitCwd, identityPlatform);
     // Legacy/manual batches may have no intent baseline at all.  Persist an
     // explicit unknown marker rather than making a current diff look proven.
     let baselineStatus: "captured" | "unknown" = baseline?.status ?? "unknown";
@@ -752,7 +787,7 @@ export async function annotateBatch(key: string, deps: AnnotateDeps = {}): Promi
     }>();
     if (baselineByPath !== undefined && currentEntries !== undefined) {
       for (const entry of currentEntries) {
-        const gitPath = pathIdentity(entry.path, identityCwd);
+        const gitPath = pathIdentity(entry.path, identityCwd, identityPlatform);
         const prior = baselineByPath.get(gitPath);
         const delta: [number, number] | undefined = prior === undefined
           ? entry.plusMinus
@@ -760,7 +795,7 @@ export async function annotateBatch(key: string, deps: AnnotateDeps = {}): Promi
             isSafeNonNegativeInteger(prior[0]) && isSafeNonNegativeInteger(prior[1])
             ? [Math.max(0, entry.plusMinus[0] - prior[0]), Math.max(0, entry.plusMinus[1] - prior[1])]
             : undefined);
-        const cleanPath = canonicalPath(cleanText(entry.path, MAX_PATH_CHARS)) || cleanText(entry.path, MAX_PATH_CHARS);
+        const cleanPath = canonicalPath(cleanText(entry.path, MAX_PATH_CHARS), { platform: identityPlatform }) || cleanText(entry.path, MAX_PATH_CHARS);
         if (!cleanPath || !gitPath) continue;
         if (delta === undefined) {
           baselineStatus = "unknown";
@@ -795,11 +830,11 @@ export async function annotateBatch(key: string, deps: AnnotateDeps = {}): Promi
     // baseline head to current head when both are known; do not claim a delta
     // when provenance is unavailable.
     if (baselineByPath !== undefined && baseline?.head && head && baseline.head !== head) {
-      const committed = parseNumstatEntries(runGit(git, ["diff", "--numstat", `${baseline.head}..${head}`], gitCwd), gitCwd);
+      const committed = parseNumstatEntries(runGit(git, ["diff", "--numstat", `${baseline.head}..${head}`], gitCwd), gitCwd, identityPlatform);
       if (committed === undefined) baselineStatus = "unknown";
       for (const entry of committed ?? []) {
-        const gitPath = pathIdentity(entry.path, identityCwd);
-        const cleanPath = canonicalPath(cleanText(entry.path, MAX_PATH_CHARS)) || cleanText(entry.path, MAX_PATH_CHARS);
+        const gitPath = pathIdentity(entry.path, identityCwd, identityPlatform);
+        const cleanPath = canonicalPath(cleanText(entry.path, MAX_PATH_CHARS), { platform: identityPlatform }) || cleanText(entry.path, MAX_PATH_CHARS);
         if (!gitPath || !cleanPath) continue;
         const prior = baselineByPath.get(gitPath);
         const delta: [number, number] | undefined = prior === undefined
@@ -909,7 +944,7 @@ export async function annotateBatch(key: string, deps: AnnotateDeps = {}): Promi
         // may be redacted (including cwd secrets); the discriminator lets a
         // durable reload/query recover the original absolute-vs-relative
         // identity without persisting raw operational text.
-        identityHash: pathIdentityHash(gitPath, { platform: process.platform, canonical: true }),
+        identityHash: pathIdentityHash(gitPath, { platform: identityPlatform, canonical: true }),
       };
       rememberTripleFileIdentity(result, gitPath);
       return result;

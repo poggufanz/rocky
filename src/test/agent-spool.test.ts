@@ -435,7 +435,7 @@ test("stale zero-byte append lock left before metadata is recovered", (t) => {
   assert.equal(existsSync(lock), false);
 });
 
-test("stale zero-byte append lock recovers with unsafe filesystem identity", { timeout: 10_000 }, async (t) => {
+test("stale zero-byte append lock stays fail-closed with unsafe filesystem identity", { timeout: 10_000 }, async (t) => {
   const paths = freshPaths(t);
   const key = "unsafe-empty-writer";
   const resultPath = join(paths.home, "result.json");
@@ -474,7 +474,10 @@ test("stale zero-byte append lock recovers with unsafe filesystem identity", { t
   ], { stdio: ["pipe", "pipe", "pipe"] });
   const result = await waitForWorker(child);
   assert.equal(result.code, 0, result.stderr);
-  assert.deepEqual(JSON.parse(readFileSync(resultPath, "utf8")), { events: 1, lockExists: false });
+  // Without a provable descriptor identity there is no reparse-safe proof
+  // that the stale lock is the same object being reclaimed. The pathname
+  // statSync fallback is forbidden, so recovery must fail closed.
+  assert.deepEqual(JSON.parse(readFileSync(resultPath, "utf8")), { events: 0, lockExists: true });
 });
 
 test("fresh or malformed append locks remain fail-closed", (t) => {
@@ -789,7 +792,7 @@ test("removeBatch deletes regular batch and lock files", (t) => {
   assert.equal(acquireLock("k3", paths), true);
 });
 
-test("removeBatch releases locks when filesystem identity exceeds safe integer range", { timeout: 10_000 }, async (t) => {
+test("locking fails closed when filesystem identity exceeds safe integer range", { timeout: 10_000 }, async (t) => {
   const paths = freshPaths(t);
   const key = "unsafe-identity";
   const resultPath = join(paths.home, "result.json");
@@ -826,7 +829,9 @@ test("removeBatch releases locks when filesystem identity exceeds safe integer r
   ], { stdio: ["pipe", "pipe", "pipe"] });
   const result = await waitForWorker(child);
   assert.equal(result.code, 0, result.stderr);
-  assert.deepEqual(JSON.parse(readFileSync(resultPath, "utf8")), { first: true, second: true });
+  // Identity values outside the safe range cannot prove same-object checks,
+  // and the pathname statSync fallback is forbidden; locks must fail closed.
+  assert.deepEqual(JSON.parse(readFileSync(resultPath, "utf8")), { first: false, second: false });
 });
 
 test("listOrphanBatches returns sorted stale batches with absent or stale regular locks", (t) => {

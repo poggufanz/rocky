@@ -645,12 +645,19 @@ function whyFilePathMatches(records: readonly MemoryRecord[], path: string, limi
       const identity = canonicalPath(file.path, { platform, cwd: triple.cwd });
       if (!candidateDisplay || !identity) continue;
       const hashExact = targetHash !== undefined && file.identityHash !== undefined && file.identityHash === targetHash;
-      const exact = hashExact || identity === targetIdentity || candidateDisplay === targetDisplay;
+      const hashValid = typeof file.identityHash === "string" && /^[0-9a-f]{32}$/u.test(file.identityHash);
+      const hashMismatch = hashValid && targetHash !== undefined && file.identityHash !== targetHash;
+      const exact = hashExact || (!hashMismatch && (identity === targetIdentity || candidateDisplay === targetDisplay));
       // Suffix matching is a legacy compatibility escape hatch. A trusted
       // cwd/root makes ../other and /repo paths distinct, so never attach
       // rationale through suffix alone in that case.
       const suffix = !exact && !trustedRoot && targetDisplay.length > 0 && candidateDisplay.endsWith(`/${targetDisplay}`);
-      if (exact || suffix) candidates.push({ triple, exact, suffix, identity });
+      if (exact || suffix) candidates.push({
+        triple,
+        exact,
+        suffix,
+        identity: hashMismatch ? `hash:${file.identityHash}` : identity,
+      });
     }
   }
   const exact = candidates.filter((candidate) => candidate.exact);

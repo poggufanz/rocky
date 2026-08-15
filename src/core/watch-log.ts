@@ -6,7 +6,7 @@
  * errors rather than throwing.
  */
 
-import { closeSync, constants, fstatSync, lstatSync, mkdirSync, openSync, readdirSync, renameSync, unlinkSync, writeSync } from "node:fs";
+import { closeSync, constants, fstatSync, linkSync, lstatSync, mkdirSync, openSync, readdirSync, unlinkSync, writeSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { randomBytes } from "node:crypto";
 import { join } from "node:path";
@@ -64,7 +64,12 @@ export function writeWatchLog(dir: string, name: string, lines: readonly string[
     const beforePublishDirectory = lstatSync(dir, { bigint: true });
     if (!beforePublishDirectory.isDirectory() || beforePublishDirectory.isSymbolicLink()
         || !sameFilesystemIdentity(directory, beforePublishDirectory)) return undefined;
-    renameSync(temporary, path);
+    // Hard-link publication is exclusive: an attacker/replacement cannot be
+    // overwritten between the existence check and publication. If the host
+    // lacks hard-link support this operation fails closed and leaves the
+    // wrapped command unaffected.
+    linkSync(temporary, path);
+    unlinkSync(temporary);
     temporary = undefined;
     const published = lstatSync(path, { bigint: true });
     if (!regularDescriptorSafe(published) || !sameFilesystemIdentity(opened, published)) return undefined;
