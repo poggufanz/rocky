@@ -25,6 +25,7 @@ import {
 } from "../setup/claude-desktop.js";
 import { createPlatformServices } from "../setup/platform.js";
 import { directorySyncCapability } from "../setup/directory-sync.js";
+import { skipIfSymlinkUnavailable } from "./symlink-capability.js";
 
 const registration = {
   name: "rocky" as const,
@@ -1387,6 +1388,7 @@ test("unsupported hard links abort before displacing an existing config", async 
 });
 
 test("a symlink swapped in at displacement is preserved without a followed hard link", async (t) => {
+  if (skipIfSymlinkUnavailable(t)) return;
   const original = { theme: "dark", mcpServers: { other: { enabled: true } } };
   const path = configPath(t, original);
   const originalBytes = readFileSync(path);
@@ -1943,6 +1945,7 @@ test("next invocation restores an absent target from a displaced crash transacti
 });
 
 test("restart recovery refuses a displaced symlink swapped in during publication", async (t) => {
+  if (skipIfSymlinkUnavailable(t)) return;
   const path = configPath(t);
   const transaction = join(dirname(path), `.${basename(path)}.transaction-recovery-swap`);
   const foreign = join(dirname(path), "foreign.json");

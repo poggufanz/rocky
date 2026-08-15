@@ -22,6 +22,7 @@ import { createPlatformServices } from "../setup/platform.js";
 import { directorySyncCapability } from "../setup/directory-sync.js";
 import { createProductionAdapters } from "../commands/setup.js";
 import type { McpRegistration } from "../setup/clients.js";
+import { skipIfSymlinkUnavailable } from "./symlink-capability.js";
 
 const completeInput = {
   exposure: "sanitized" as const,
@@ -558,6 +559,7 @@ test("installed native Desktop is configurable before its first config file exis
 });
 
 test("native Desktop rejects parent replacement during fresh inspection", async (t) => {
+  if (skipIfSymlinkUnavailable(t, "dir")) return;
   const root = mkdtempSync(join(tmpdir(), "rocky-native-fresh-swap-"));
   const attackerRoot = mkdtempSync(join(tmpdir(), "rocky-native-fresh-target-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
@@ -931,6 +933,7 @@ test("native Desktop manifest cleanup revalidates after probing a rebound tempor
 
 test("native Desktop parent preparation rejects linked and non-directory topology", async (t) => {
   await t.test("symlink", async (subtest) => {
+    if (skipIfSymlinkUnavailable(subtest, "dir")) return;
     const root = mkdtempSync(join(tmpdir(), "rocky-native-topology-linked-"));
     const linkedTarget = mkdtempSync(join(tmpdir(), "rocky-native-target-"));
     subtest.after(() => rmSync(root, { recursive: true, force: true }));

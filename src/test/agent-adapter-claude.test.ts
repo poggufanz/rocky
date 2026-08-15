@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { MAX_RATIONALE_CHARS } from "../agent/schema.js";
 import { parseClaudeHookPayload, rationaleFromTranscript } from "../agent/adapters/claude-code.js";
+import { skipIfSymlinkUnavailable } from "./symlink-capability.js";
 
 const packageRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const fixture = (name: string): unknown =>
@@ -192,20 +193,18 @@ test("transcript rationale is capped and malformed lines fail safely", () => {
   }
 });
 
-test("non-regular and symlink transcript inputs return undefined", () => {
+test("non-regular and symlink transcript inputs return undefined", async (t) => {
   const dir = mkdtempSync(join(tmpdir(), "rocky-transcript-"));
-  try {
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  await t.test("non-regular", () => {
     assert.equal(rationaleFromTranscript(dir), undefined);
+  });
+  await t.test("symlink", (st) => {
+    if (skipIfSymlinkUnavailable(st)) return;
     const target = join(dir, "target.jsonl");
     const link = join(dir, "link.jsonl");
     writeFileSync(target, JSON.stringify({ type: "assistant", message: { content: "secret" } }) + "\n");
-    try {
-      symlinkSync(target, link);
-    } catch {
-      return;
-    }
+    symlinkSync(target, link);
     assert.equal(rationaleFromTranscript(link), undefined);
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
+  });
 });

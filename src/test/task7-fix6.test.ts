@@ -12,6 +12,7 @@ import { disabledRecallWithAi } from "../ai/port.js";
 import { resolveRockyPaths, type RockyPaths } from "../core/state-paths.js";
 import type { FailureRecord, FixRecord, TripleRecord } from "../core/memory-read.js";
 import { logHookError } from "../commands/agent-hook.js";
+import { skipIfSymlinkUnavailable } from "./symlink-capability.js";
 
 function freshPaths(): RockyPaths {
   const home = mkdtempSync(join(tmpdir(), "rocky-task7-fix6-"));
@@ -322,18 +323,15 @@ test("branded canonical MemoryQueries is immutable", () => {
   assert.equal(Object.isFrozen(queries), true);
 });
 
-test("hook log refuses a symlink target when the host supports symlinks", () => {
+test("hook log refuses a symlink target when the host supports symlinks", (t) => {
+  if (skipIfSymlinkUnavailable(t)) return;
   const paths = freshPaths();
   try {
     mkdirSync(paths.home, { recursive: true });
     const target = join(paths.home, "sentinel.log");
     const link = paths.agentLog;
     writeFileSync(target, "keep\n");
-    try {
-      symlinkSync(target, link);
-    } catch {
-      return;
-    }
+    symlinkSync(target, link);
     logHookError("must not follow", paths);
     assert.equal(readFileSync(target, "utf8"), "keep\n");
   } finally {

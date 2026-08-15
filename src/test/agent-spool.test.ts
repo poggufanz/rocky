@@ -39,6 +39,7 @@ import {
 import { annotateCommand } from "../agent/annotate.js";
 import { loadMemory } from "../core/memory.js";
 import type { IntentEvent } from "../agent/schema.js";
+import { skipIfSymlinkUnavailable } from "./symlink-capability.js";
 
 type CleanupContext = { after(callback: () => void): void };
 
@@ -853,37 +854,37 @@ test("listOrphanBatches returns sorted stale batches with absent or stale regula
   assert.deepEqual(listOrphanBatches(now, paths), ["old", "stale-lock"]);
 });
 
-test("append, read, lock, and orphan listing reject symlink and non-regular files", (t) => {
+test("append, read, lock, and orphan listing reject symlink and non-regular files", async (t) => {
   const paths = freshPaths(t);
   mkdirSync(paths.spoolDir, { recursive: true });
-  const targetBatch = join(paths.home, "target.jsonl");
-  writeFileSync(targetBatch, JSON.stringify(intent("target")) + "\n");
-  const symlinkBatch = join(paths.spoolDir, "link.jsonl");
-  try {
+  await t.test("symlink", (st) => {
+    if (skipIfSymlinkUnavailable(st)) return;
+    const targetBatch = join(paths.home, "target.jsonl");
+    writeFileSync(targetBatch, JSON.stringify(intent("target")) + "\n");
+    const symlinkBatch = join(paths.spoolDir, "link.jsonl");
     symlinkSync(targetBatch, symlinkBatch);
-  } catch {
-    t.skip("symlink creation unsupported on this platform");
-    return;
-  }
-  const beforeTarget = readFileSync(targetBatch, "utf8");
-  appendEvent("link", intent("must not follow"), paths);
-  assert.deepEqual(readBatch("link", paths), []);
-  assert.equal(readFileSync(targetBatch, "utf8"), beforeTarget);
-  assert.deepEqual(listOrphanBatches(Date.now() + 12 * 60 * 1000, paths), []);
+    const beforeTarget = readFileSync(targetBatch, "utf8");
+    appendEvent("link", intent("must not follow"), paths);
+    assert.deepEqual(readBatch("link", paths), []);
+    assert.equal(readFileSync(targetBatch, "utf8"), beforeTarget);
+    assert.deepEqual(listOrphanBatches(Date.now() + 12 * 60 * 1000, paths), []);
 
-  const targetLock = join(paths.home, "target.lock");
-  writeFileSync(targetLock, "target");
-  const symlinkLock = join(paths.spoolDir, "link.lock");
-  symlinkSync(targetLock, symlinkLock);
-  assert.equal(acquireLock("link", paths), false);
-  assert.equal(readFileSync(targetLock, "utf8"), "target");
+    const targetLock = join(paths.home, "target.lock");
+    writeFileSync(targetLock, "target");
+    const symlinkLock = join(paths.spoolDir, "link.lock");
+    symlinkSync(targetLock, symlinkLock);
+    assert.equal(acquireLock("link", paths), false);
+    assert.equal(readFileSync(targetLock, "utf8"), "target");
+  });
 
-  mkdirSync(join(paths.spoolDir, "directory.jsonl"));
-  mkdirSync(join(paths.spoolDir, "directory.lock"));
-  appendEvent("directory", intent("must not write directory"), paths);
-  assert.deepEqual(readBatch("directory", paths), []);
-  assert.equal(acquireLock("directory", paths), false);
-  assert.deepEqual(listOrphanBatches(Date.now() + 12 * 60 * 1000, paths), []);
+  await t.test("directory", () => {
+    mkdirSync(join(paths.spoolDir, "directory.jsonl"));
+    mkdirSync(join(paths.spoolDir, "directory.lock"));
+    appendEvent("directory", intent("must not write directory"), paths);
+    assert.deepEqual(readBatch("directory", paths), []);
+    assert.equal(acquireLock("directory", paths), false);
+    assert.deepEqual(listOrphanBatches(Date.now() + 12 * 60 * 1000, paths), []);
+  });
 });
 
 test("new spool directory and batch file use private modes where portable", (t) => {

@@ -25,6 +25,7 @@ import {
 } from "../setup/file-transaction.js";
 import type { BytesReadResult } from "../setup/file-transaction.js";
 import { directorySyncCapability } from "../setup/directory-sync.js";
+import { skipIfSymlinkUnavailable } from "./symlink-capability.js";
 
 function temporaryDirectory(t: test.TestContext): string {
   const directory = mkdtempSync(join(tmpdir(), "rocky-file-transaction-"));
@@ -409,6 +410,7 @@ test("the published-commit branch's own recovered outcome proves the retained co
 });
 
 test("recovery still reports a published transaction as manual when the target is a dangling symlink (round 11, T1/E4)", (t) => {
+  if (skipIfSymlinkUnavailable(t)) return;
   const directory = temporaryDirectory(t);
   const path = join(directory, "dangling-target-published.bin");
   const original = Buffer.from("original\n", "utf8");
@@ -620,33 +622,31 @@ test("a parent fsync failure after publish reports recovery-required with intact
   assert.deepEqual(recoverFileTransaction(path), { status: "clear" }, "idempotent on a second run");
 });
 
-test("non-regular, symlink, and multi-link targets are refused without mutation", (t) => {
+test("non-regular, symlink, and multi-link targets are refused without mutation", async (t) => {
   const directory = temporaryDirectory(t);
 
-  const directoryTarget = join(directory, "directory-target");
-  mkdirSync(directoryTarget);
-  assert.throws(
-    () => atomicWriteBytesIfUnchanged(
-      directoryTarget,
-      Buffer.from("replacement\n", "utf8"),
-      { status: "valid", bytes: Buffer.from("claimed\n", "utf8"), mode: 0o644 },
-    ),
-    /unable to write file/i,
-  );
-  assert.equal(statSync(directoryTarget).isDirectory(), true);
-  assert.deepEqual(transactionDirectories(directory, directoryTarget), []);
+  await t.test("directory target", () => {
+    const directoryTarget = join(directory, "directory-target");
+    mkdirSync(directoryTarget);
+    assert.throws(
+      () => atomicWriteBytesIfUnchanged(
+        directoryTarget,
+        Buffer.from("replacement\n", "utf8"),
+        { status: "valid", bytes: Buffer.from("claimed\n", "utf8"), mode: 0o644 },
+      ),
+      /unable to write file/i,
+    );
+    assert.equal(statSync(directoryTarget).isDirectory(), true);
+    assert.deepEqual(transactionDirectories(directory, directoryTarget), []);
+  });
 
-  const realTarget = join(directory, "real-target");
-  const realBytes = Buffer.from("real fake-secret-real\n", "utf8");
-  writeFileSync(realTarget, realBytes);
-  const linkTarget = join(directory, "link-target");
-  let symlinkAvailable = true;
-  try {
+  await t.test("symlink target", (st) => {
+    if (skipIfSymlinkUnavailable(st)) return;
+    const realTarget = join(directory, "real-target");
+    const realBytes = Buffer.from("real fake-secret-real\n", "utf8");
+    writeFileSync(realTarget, realBytes);
+    const linkTarget = join(directory, "link-target");
     symlinkSync(realTarget, linkTarget);
-  } catch {
-    symlinkAvailable = false; // Some platforms require privilege for symlinks.
-  }
-  if (symlinkAvailable) {
     assert.throws(
       () => atomicWriteBytesIfUnchanged(
         linkTarget,
@@ -658,22 +658,24 @@ test("non-regular, symlink, and multi-link targets are refused without mutation"
     assert.equal(lstatSync(linkTarget).isSymbolicLink(), true);
     assert.deepEqual(readFileSync(realTarget), realBytes);
     assert.deepEqual(transactionDirectories(directory, linkTarget), []);
-  }
+  });
 
-  const multiTarget = join(directory, "multi-target");
-  const multiBytes = Buffer.from("multi fake-secret-multi\n", "utf8");
-  writeFileSync(multiTarget, multiBytes);
-  linkSync(multiTarget, join(directory, "multi-target-alias"));
-  assert.throws(
-    () => atomicWriteBytesIfUnchanged(
-      multiTarget,
-      Buffer.from("replacement\n", "utf8"),
-      snapshotBytes(multiTarget),
-    ),
-    /unable to write file/i,
-  );
-  assert.deepEqual(readFileSync(multiTarget), multiBytes);
-  assert.deepEqual(transactionDirectories(directory, multiTarget), []);
+  await t.test("multi-link target", () => {
+    const multiTarget = join(directory, "multi-target");
+    const multiBytes = Buffer.from("multi fake-secret-multi\n", "utf8");
+    writeFileSync(multiTarget, multiBytes);
+    linkSync(multiTarget, join(directory, "multi-target-alias"));
+    assert.throws(
+      () => atomicWriteBytesIfUnchanged(
+        multiTarget,
+        Buffer.from("replacement\n", "utf8"),
+        snapshotBytes(multiTarget),
+      ),
+      /unable to write file/i,
+    );
+    assert.deepEqual(readFileSync(multiTarget), multiBytes);
+    assert.deepEqual(transactionDirectories(directory, multiTarget), []);
+  });
 });
 
 test("a concurrent mode change between snapshot and publish refuses to overwrite", (t) => {
@@ -1013,6 +1015,7 @@ test("recovery resolves an orphaned published transaction directory without touc
 });
 
 test("the complete-but-unrecorded branch refuses when displaced is not a plain regular file (M3)", (t) => {
+  if (skipIfSymlinkUnavailable(t)) return;
   const directory = temporaryDirectory(t);
   const path = join(directory, "displaced-symlink.bin");
   const elsewhere = join(directory, "elsewhere.bin");
@@ -1025,13 +1028,7 @@ test("the complete-but-unrecorded branch refuses when displaced is not a plain r
   mkdirSync(transactionDirectory, { mode: 0o700 });
   writeFileSync(path, "publishable bytes\n", "utf8");
   linkSync(path, join(transactionDirectory, "prepared"));
-  let symlinkAvailable = true;
-  try {
-    symlinkSync(elsewhere, join(transactionDirectory, "displaced"));
-  } catch {
-    symlinkAvailable = false; // Some platforms require privilege for symlinks.
-  }
-  if (!symlinkAvailable) return;
+  symlinkSync(elsewhere, join(transactionDirectory, "displaced"));
   writeFileSync(
     join(transactionDirectory, "manifest.json"),
     `${JSON.stringify({ version: 1, state: "published", target: path })}\n`,
@@ -1271,6 +1268,7 @@ test("recovery still discards only prepared when no link-probe leftover exists (
 });
 
 test("recovery retains a link-probe-only leftover instead of discarding it when the target is not proven live (round 10, s5/D10)", (t) => {
+  if (skipIfSymlinkUnavailable(t)) return;
   // r4's own test above pins only the discard side (target live, both
   // "prepared" and "link-probe" removed together). This is the missing
   // retain side: `link-probe` is the *only* surviving artifact (no
@@ -1282,13 +1280,7 @@ test("recovery retains a link-probe-only leftover instead of discarding it when 
   // shape, reintroduced under the "link-probe" name instead of "prepared".
   const directory = temporaryDirectory(t);
   const path = join(directory, "link-probe-only-dangling.bin");
-  let symlinkAvailable = true;
-  try {
-    symlinkSync(join(directory, "missing-target"), path);
-  } catch {
-    symlinkAvailable = false; // Some platforms require privilege for symlinks.
-  }
-  if (!symlinkAvailable) return;
+  symlinkSync(join(directory, "missing-target"), path);
   const transactionDirectory = writeLegacyV1TransactionFixture(directory, path, "prepared", {});
   writeFileSync(
     join(transactionDirectory, "link-probe"),

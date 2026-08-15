@@ -16,6 +16,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as memory from "../core/memory.js";
 import { resolveRockyPaths, type RockyPaths } from "../core/state-paths.js";
+import { skipIfSymlinkUnavailable } from "./symlink-capability.js";
 
 const home = mkdtempSync(join(tmpdir(), "rocky-mem-"));
 const originalRockyHome = process.env.ROCKY_HOME;
@@ -228,16 +229,13 @@ test("recordTriple corrects an existing permissive regular memory file", (t) => 
 });
 
 test("recordTriple rejects a memory symlink without modifying its target", (t) => {
+  if (skipIfSymlinkUnavailable(t)) return;
   const directory = mkdtempSync(join(tmpdir(), "rocky-mem-symlink-"));
   t.after(() => rmSync(directory, { recursive: true, force: true }));
   const resolved = freshMemoryPaths(directory);
   const target = join(directory, "target.jsonl");
   writeFileSync(target, "keep\n", "utf8");
-  try {
-    symlinkSync(target, resolved.memory);
-  } catch {
-    return;
-  }
+  symlinkSync(target, resolved.memory);
   assert.equal(lstatSync(resolved.memory).isSymbolicLink(), true);
   assert.throws(() => memory.recordTriple(tripleInput(), resolved));
   assert.equal(readFileSync(target, "utf8"), "keep\n");

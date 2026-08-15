@@ -22,6 +22,7 @@ import * as memory from "../core/memory.js";
 import type { AssociationRecord, FailureRecord, FixRecord, MemoryRecord, NoteRecord } from "../core/memory.js";
 import { LINK_WINDOW_MS, queryStats } from "../core/memory-query.js";
 import { hookSuccess } from "../commands/hook.js";
+import { probeSymlink } from "./symlink-capability.js";
 
 const packageRoot = process.cwd();
 const cli = join(packageRoot, "dist", "index.js");
@@ -1139,12 +1140,14 @@ test("reclaim-claim sweeping examines a bounded batch and preserves unsafe entri
   const replacementClaim = `${claimPrefix}${deadPid}.${"b".repeat(32)}`;
   writeFileSync(replacementTarget, "replacement", { mode: 0o600 });
   let replacementCreated = false;
-  try {
+  const symlinkCapability = probeSymlink();
+  if (symlinkCapability.available) {
     symlinkSync(replacementTarget, replacementClaim);
     replacementCreated = true;
-  } catch {
-    // Symlink support is platform-dependent; the regular replacement and
-    // unknown-name controls below still exercise bounded cleanup.
+  } else {
+    t.diagnostic(
+      `symlink file unavailable: ${symlinkCapability.code}; owner: host filesystem capability`,
+    );
   }
   for (let index = 0; index < claimCount; index++) {
     const token = index.toString(16).padStart(32, "0");

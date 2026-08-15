@@ -7,6 +7,18 @@ import { join } from "node:path";
 import { createTailBuffer, runProcess } from "../core/exec.js";
 import { quoteShellPath } from "../core/shell-quote.js";
 
+function nodeCommand(source: string): string {
+  return `${quoteShellPath(process.execPath, process.platform)} -e ${quoteShellPath(source, process.platform)}`;
+}
+
+function exitCommand(code: number): string {
+  return nodeCommand(`process.exit(${code})`);
+}
+
+function sleepCommand(ms: number): string {
+  return nodeCommand(`setTimeout(() => process.exit(0), ${ms})`);
+}
+
 // runProcess spawns with `shell: true`, which on Windows is cmd.exe — it does
 // not understand POSIX single quotes, so an executable-position argument
 // quoted with quotePosixShell fails as "filename ... syntax is incorrect".
@@ -111,7 +123,7 @@ test("createTailBuffer caps the in-progress partial line as it accumulates acros
 });
 
 test("runProcess: nonzero exit with stderr", async () => {
-  const result = await runProcess("sh -c 'echo boom >&2; exit 3'");
+  const result = await runProcess(nodeCommand("process.stderr.write('boom\\n'); process.exit(3)"));
   assert.equal(result.code, 3);
   assert.ok(result.tail.includes("boom"));
   assert.equal(result.stderr, "boom");
@@ -160,14 +172,14 @@ test("runProcess: a multi-byte character split across a real child's stderr chun
 });
 
 test("runProcess: clean exit has empty tail", async () => {
-  const result = await runProcess("sh -c 'exit 0'");
+  const result = await runProcess(exitCommand(0));
   assert.equal(result.code, 0);
   assert.deepEqual(result.tail, []);
 });
 
 test("runProcess: bounds tail to tailLines, keeping the newest", async () => {
   const result = await runProcess(
-    "sh -c 'i=1; while [ $i -le 5000 ]; do echo line-$i >&2; i=$((i+1)); done'",
+    nodeCommand("for (let i = 1; i <= 5000; i += 1) process.stderr.write(`line-${i}\\n`);"),
     { tailLines: 10 },
   );
   assert.equal(result.tail.length, 10);
@@ -184,7 +196,7 @@ test("runProcess: nonexistent binary through the shell preserves the shell's own
 
 test("runProcess: onIdle fires repeatedly, at or above the threshold, while the child stays silent", async () => {
   const idles: number[] = [];
-  const result = await runProcess("sh -c 'sleep 0.3'", {
+  const result = await runProcess(sleepCommand(300), {
     idleMs: 50,
     onIdle: (elapsedMs) => idles.push(elapsedMs),
   });
@@ -229,7 +241,7 @@ test("runProcess: onIdle never fires while the child keeps writing to stderr", a
 
 test("runProcess: idleMs omitted never calls onIdle — run's behavior stays untouched", async () => {
   const idles: number[] = [];
-  const result = await runProcess("sh -c 'sleep 0.05'", {
+  const result = await runProcess(sleepCommand(50), {
     onIdle: (elapsedMs) => idles.push(elapsedMs),
   });
   assert.equal(result.code, 0);
@@ -239,7 +251,7 @@ test("runProcess: idleMs omitted never calls onIdle — run's behavior stays unt
 test("runProcess: the idle timer is cleared on close and never fires after the promise resolves", async () => {
   const idles: number[] = [];
   const idleMs = 30;
-  await runProcess("sh -c 'sleep 0.05'", {
+  await runProcess(sleepCommand(50), {
     idleMs,
     onIdle: (elapsedMs) => idles.push(elapsedMs),
   });

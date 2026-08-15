@@ -142,11 +142,12 @@ function isolatedEnvironment(root) {
 }
 
 function runStep(state, env, label, file, args, display) {
+  const commandProcessor = env.ComSpec ?? env.COMSPEC ?? process.env.ComSpec ?? process.env.COMSPEC;
   const invocation = commandInvocation(
     file,
     args,
     process.platform,
-    env.ComSpec ?? env.COMSPEC ?? process.env.ComSpec ?? process.env.COMSPEC,
+    commandProcessor,
   );
   const result = spawnSync(invocation.file, invocation.args, {
     cwd: packageRoot,
@@ -156,6 +157,7 @@ function runStep(state, env, label, file, args, display) {
     timeout: COMMAND_TIMEOUT_MS,
     maxBuffer: MAX_COMMAND_OUTPUT_BYTES,
     windowsHide: true,
+    windowsVerbatimArguments: process.platform === "win32" && invocation.file === commandProcessor,
   });
   const status = result.status;
   const signal = result.signal;

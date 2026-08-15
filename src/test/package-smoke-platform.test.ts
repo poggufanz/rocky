@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { chmodSync, copyFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
 import { createRequire, syncBuiltinESMExports } from "node:module";
@@ -58,6 +58,26 @@ test("Windows command scripts run through ComSpec with every token quoted", asyn
       '""C:\\Program Files\\Rocky\'s CLI\\rocky.cmd" "--flag" "value with spaces""',
     ],
   });
+});
+
+test("Windows command scripts execute from spaced paths", { skip: process.platform !== "win32" && "requires native Windows cmd.exe" }, async (t) => {
+  const { commandInvocation } = await loadSupport();
+  const root = mkdtempSync(join(tmpdir(), "rocky cmd invocation "));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const script = join(root, "nested path", "harmless script.cmd");
+  mkdirSync(join(root, "nested path"), { recursive: true });
+  writeFileSync(script, "@echo off\r\nif \"%~1\"==\"value with spaces\" exit /b 0\r\nexit /b 7\r\n", "utf8");
+  const comSpec = process.env.ComSpec ?? process.env.COMSPEC;
+  assert.ok(comSpec, "ComSpec is required on Windows");
+  const invocation = commandInvocation(script, ["value with spaces"], "win32", comSpec);
+  const result = spawnSync(invocation.file, invocation.args, {
+    encoding: "utf8",
+    windowsHide: true,
+    shell: false,
+    windowsVerbatimArguments: true,
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.signal, null);
 });
 
 test("Windows command-script invocation refuses expansion and control characters", async () => {
@@ -162,6 +182,17 @@ test("copied Node fake client is intercepted by exact executable basename", asyn
     kind: "codex",
     args: ["mcp", "get", "rocky", "--json"],
   });
+});
+
+test("shell assets stay LF in source and build output", () => {
+  for (const directory of [join(packageRoot, "src", "shell"), join(packageRoot, "dist", "shell")]) {
+    const names = readdirSync(directory).filter((name) => name.endsWith(".bash") || name.endsWith(".sh"));
+    assert.ok(names.length > 0, `${directory} has no shell assets`);
+    for (const name of names) {
+      const bytes = readFileSync(join(directory, name));
+      assert.equal(bytes.includes(13), false, `${directory}/${name} contains CR bytes`);
+    }
+  }
 });
 
 test("installed setup lifecycle is enabled on every supported host", async () => {

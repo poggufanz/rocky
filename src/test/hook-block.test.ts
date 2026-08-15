@@ -26,6 +26,7 @@ import {
 import { hookInstall, hookStatus, hookUninstall } from "../commands/hook.js";
 import { inspectFileTransaction } from "../setup/file-transaction.js";
 import { directorySyncCapability } from "../setup/directory-sync.js";
+import { skipIfSymlinkUnavailable } from "./symlink-capability.js";
 
 // The exact managed block, pinned byte-for-byte from the marker format spec.
 const BEGIN = "# >>> rocky hook >>>";
@@ -587,17 +588,12 @@ test("hook uninstall refuses when bashrc changes between snapshot and publish", 
 });
 
 test("hook install and uninstall refuse a symlink bashrc without touching it", (t) => {
+  if (skipIfSymlinkUnavailable(t)) return;
   const sandbox = bashrcSandbox(t);
   const real = join(sandbox.home, "real-bashrc");
   const original = bytes("export A=1\n");
   writeFileSync(real, original);
-  let symlinkAvailable = true;
-  try {
-    symlinkSync(real, sandbox.bashrc);
-  } catch {
-    symlinkAvailable = false; // Some platforms require privilege for symlinks.
-  }
-  if (!symlinkAvailable) return;
+  symlinkSync(real, sandbox.bashrc);
 
   assert.equal(hookInstall(), 1);
   assert.match(sandbox.stderr(), /symlink/);
@@ -702,16 +698,11 @@ test("hook uninstall stops with guidance when a pending transaction is ambiguous
 // --- status shares topology/pending-transaction handling with install/uninstall ---
 
 test("hook status refuses a symlink bashrc instead of following it and claiming installed", (t) => {
+  if (skipIfSymlinkUnavailable(t)) return;
   const sandbox = bashrcSandbox(t);
   const real = join(sandbox.home, "real-bashrc");
   writeFileSync(real, bytes(`export A=1\n\n${BLOCK}`));
-  let symlinkAvailable = true;
-  try {
-    symlinkSync(real, sandbox.bashrc);
-  } catch {
-    symlinkAvailable = false;
-  }
-  if (!symlinkAvailable) return;
+  symlinkSync(real, sandbox.bashrc);
 
   assert.equal(hookStatus(), 1);
   assert.match(sandbox.stderr(), /symlink/);
@@ -721,14 +712,9 @@ test("hook status refuses a symlink bashrc instead of following it and claiming 
 });
 
 test("hook status refuses a dangling symlink instead of telling the user to run install", (t) => {
+  if (skipIfSymlinkUnavailable(t)) return;
   const sandbox = bashrcSandbox(t);
-  let symlinkAvailable = true;
-  try {
-    symlinkSync(join(sandbox.home, "missing-target"), sandbox.bashrc);
-  } catch {
-    symlinkAvailable = false;
-  }
-  if (!symlinkAvailable) return;
+  symlinkSync(join(sandbox.home, "missing-target"), sandbox.bashrc);
 
   const result = hookStatus();
 
@@ -791,16 +777,11 @@ test("hook status reports the same ambiguous-transaction guidance install gives,
 // --- Important 2: undisclosed retained copies of the previous bashrc bytes ---
 
 test("hook install writes no rocky-home assets before a topology refusal", (t) => {
+  if (skipIfSymlinkUnavailable(t)) return;
   const sandbox = bashrcSandbox(t);
   const real = join(sandbox.home, "real-bashrc");
   writeFileSync(real, bytes("export A=1\n"));
-  let symlinkAvailable = true;
-  try {
-    symlinkSync(real, sandbox.bashrc);
-  } catch {
-    symlinkAvailable = false;
-  }
-  if (!symlinkAvailable) return;
+  symlinkSync(real, sandbox.bashrc);
 
   assert.equal(hookInstall(), 1);
 
@@ -1209,19 +1190,14 @@ test("hook install never offers bashrc itself as something to remove, even when 
 // reportBashrcRecoveryStop speaks a remedy verb at all. ---------------------
 
 test("hook status never says bashrc is gone or names a remedy while a live symlink still resolves to real content (round 9, R1, PROBE N1)", (t) => {
+  if (skipIfSymlinkUnavailable(t)) return;
   const sandbox = bashrcSandbox(t);
   const dotfilesDir = join(sandbox.home, "dotfiles");
   mkdirSync(dotfilesDir, { recursive: true });
   const realBashrc = join(dotfilesDir, "bashrc");
   const liveContent = bytes("export REAL_CONTENT=live\nalias ll='ls -l'\n");
   writeFileSync(realBashrc, liveContent);
-  let symlinkAvailable = true;
-  try {
-    symlinkSync(realBashrc, sandbox.bashrc);
-  } catch {
-    symlinkAvailable = false; // Some platforms require privilege for symlinks.
-  }
-  if (!symlinkAvailable) return;
+  symlinkSync(realBashrc, sandbox.bashrc);
   // "published" with a proven `displaced` backup reaches ambiguousOutcome
   // via the generic published catch-all, with a real, provable copy to
   // name — exactly the shape whose message round 8's I2 fix got wrong for a
@@ -1248,19 +1224,14 @@ test("hook status never says bashrc is gone or names a remedy while a live symli
 });
 
 test("hook status retains a staged artifact instead of discarding it when bashrc is a valid symlink, not just a dangling one (round 9, coverage: C2)", (t) => {
+  if (skipIfSymlinkUnavailable(t)) return;
   const sandbox = bashrcSandbox(t);
   const dotfilesDir = join(sandbox.home, "dotfiles");
   mkdirSync(dotfilesDir, { recursive: true });
   const realBashrc = join(dotfilesDir, "bashrc");
   const liveContent = bytes("export REAL_CONTENT=live\n");
   writeFileSync(realBashrc, liveContent);
-  let symlinkAvailable = true;
-  try {
-    symlinkSync(realBashrc, sandbox.bashrc);
-  } catch {
-    symlinkAvailable = false;
-  }
-  if (!symlinkAvailable) return;
+  symlinkSync(realBashrc, sandbox.bashrc);
   // "prepared", no displaced: reaches resolveUndisplacedTransaction's own
   // destroy/keep decision directly. isLiveRegularFile(path) — lstat-based —
   // must say a valid symlink is not itself a proven regular file, exactly
@@ -1613,17 +1584,12 @@ test("hook status discloses what settling did even when it cannot then check bas
 // --- Round 7 final audit, F9 coverage gaps (A1) ----------------------------
 
 test("hook status never claims a safe copy exists when the displaced artifact is not a proven regular file (round 7, F9 A1)", (t) => {
+  if (skipIfSymlinkUnavailable(t)) return;
   const sandbox = bashrcSandbox(t);
   const elsewhere = join(sandbox.home, "elsewhere.txt");
   writeFileSync(elsewhere, "not the real backup\n");
   const fixture = writePendingTransactionFixture(sandbox.bashrc, "published");
-  let symlinkAvailable = true;
-  try {
-    symlinkSync(elsewhere, join(fixture, "displaced"));
-  } catch {
-    symlinkAvailable = false; // Some platforms require privilege for symlinks.
-  }
-  if (!symlinkAvailable) return;
+  symlinkSync(elsewhere, join(fixture, "displaced"));
 
   const result = hookStatus();
 
@@ -1670,14 +1636,9 @@ test("hook status reports honestly over a corrupt block after a stale prepared t
 });
 
 test("hook status never destroys the only surviving copy of a prepared write when bashrc is a dangling symlink (round 8, I2, PROBE L)", (t) => {
+  if (skipIfSymlinkUnavailable(t)) return;
   const sandbox = bashrcSandbox(t);
-  let symlinkAvailable = true;
-  try {
-    symlinkSync(join(sandbox.home, "dotfiles-bashrc-missing"), sandbox.bashrc);
-  } catch {
-    symlinkAvailable = false; // Some platforms require privilege for symlinks.
-  }
-  if (!symlinkAvailable) return;
+  symlinkSync(join(sandbox.home, "dotfiles-bashrc-missing"), sandbox.bashrc);
   const staged = bytes("export USER_SECRET=only-copy\nexport PATH=$PATH:/opt/bin\n");
   const fixture = writePendingTransactionFixture(sandbox.bashrc, "prepared", { prepared: staged });
 

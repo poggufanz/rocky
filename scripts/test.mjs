@@ -52,7 +52,10 @@ try {
   } else {
     const probe = spawnSync("bash", ["--version"], { stdio: "ignore" });
     if (probe.error || probe.status !== 0) {
-      console.log("[hook-smoke] skipped: Bash executable unavailable; hook compatibility was not evaluated.");
+      if (process.platform === "linux") {
+        throw new Error("[hook-smoke] Bash executable unavailable on Linux; hook compatibility was not evaluated.");
+      }
+      console.log(`[hook-smoke] skipped on ${process.platform}: Bash executable unavailable; hook compatibility was not evaluated.`);
     } else {
       console.log(`[hook-smoke] running (${explicitlyRequested ? "explicit request" : "Linux default"}).`);
       run("bash", [smoke]);

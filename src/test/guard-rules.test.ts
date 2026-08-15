@@ -3,8 +3,36 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { DEFAULT_RULES, renderGuardRules, rulesFileIsPristine } from "../core/guard-rules.js";
 
-const bashProbe = spawnSync("bash", ["--version"], { stdio: "ignore" });
-const hasBash = !bashProbe.error && bashProbe.status === 0;
+const bashVersionProbe = spawnSync("bash", ["--version"], { stdio: "ignore" });
+const hasBash = !bashVersionProbe.error && bashVersionProbe.status === 0;
+const forcePushRule = DEFAULT_RULES.find((candidate) => candidate.message.includes("force push"));
+const forcePushCommand = "git push -f";
+const argvProbeSeparator = "\u001f";
+const argvProbeTerminator = "\u001e";
+const bashArgvProbe = hasBash && forcePushRule
+  ? spawnSync(
+    "bash",
+    ["-c", "printf '%s\\037%s\\036' \"$1\" \"$2\"", "rocky-argv-probe", forcePushRule.pattern, forcePushCommand],
+    { encoding: "utf8" },
+  )
+  : undefined;
+const bashArgvRoundTrip = forcePushRule !== undefined
+  && bashArgvProbe?.status === 0
+  && bashArgvProbe.stdout === `${forcePushRule.pattern}${argvProbeSeparator}${forcePushCommand}${argvProbeTerminator}`;
+const bashSemanticSkipReason = !hasBash
+  ? "Bash executable unavailable; owner: Linux/WSL hook smoke CI"
+  : !forcePushRule
+    ? "force-push production rule missing; owner: guard-rules maintainers"
+  : !bashArgvRoundTrip
+    ? "Bash argv round-trip failed for representative force-push command; owner: native-Windows WSL argv bridge"
+    : false;
+
+const forcePushCases: readonly [string, boolean][] = [
+  [forcePushCommand, true],
+  ["git push origin main --force", true],
+  ["git push --force-with-lease", false],
+  ["git push origin main", false],
+];
 
 test("renderGuardRules emits tab-separated rules with hash header", () => {
   const out = renderGuardRules();
@@ -29,17 +57,19 @@ test("no rule field contains a tab or empty part", () => {
   }
 });
 
-test("force-push rule matches -f as first argument (real bash [[ =~ ]])", { skip: !hasBash }, () => {
-  const rule = DEFAULT_RULES.find((candidate) => candidate.message.includes("force push"));
-  assert.ok(rule, "force-push rule exists");
-  const cases: [string, boolean][] = [
-    ["git push -f", true],
-    ["git push origin main --force", true],
-    ["git push --force-with-lease", false],
-    ["git push origin main", false],
-  ];
-  for (const [command, expected] of cases) {
-    assert.equal(bashMatches(rule.pattern, command), expected, command);
+test("force-push production ERE semantics stay independent of Bash argv", () => {
+  assert.ok(forcePushRule, "force-push rule exists");
+  // Node has no POSIX ERE engine. This narrow translation is derived directly
+  // from the production rule, so it fails loudly if that rule gains syntax
+  // which this platform-independent semantic check cannot represent.
+  const matches = new RegExp(forcePushRule.pattern.replaceAll("[[:space:]]", "\\s"), "u");
+  for (const [command, expected] of forcePushCases) assert.equal(matches.test(command), expected, command);
+});
+
+test("force-push rule matches through Bash [[ =~ ]] when Bash argv is available", { skip: bashSemanticSkipReason }, () => {
+  assert.ok(forcePushRule, "force-push rule exists");
+  for (const [command, expected] of forcePushCases) {
+    assert.equal(bashMatches(forcePushRule.pattern, command), expected, command);
   }
 });
 

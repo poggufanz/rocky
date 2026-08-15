@@ -4,7 +4,8 @@ import { spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fingerprint } from "../core/fingerprint.js";
+import { fingerprint, FINGERPRINT_ALGORITHM_VERSION } from "../core/fingerprint.js";
+import { quoteShellPath } from "../core/shell-quote.js";
 
 const packageRoot = process.cwd();
 const cli = join(packageRoot, "dist", "index.js");
@@ -14,6 +15,10 @@ const hostile = "safe 🪨 工程 e\u0301\u001b[2J\u001b]8;;https://fixture.inva
 function assertTerminalSafe(value: string): void {
   assert.doesNotMatch(value, activeTerminalControl);
   assert.doesNotMatch(value, /\u001b/u);
+}
+
+function nodeCommand(source: string): string {
+  return `${quoteShellPath(process.execPath, process.platform)} -e ${quoteShellPath(source, process.platform)}`;
 }
 
 test("recall sanitizes stored command, excerpt, fix, and cwd while raw JSONL remains raw", (t) => {
@@ -47,10 +52,11 @@ test("recall sanitizes stored command, excerpt, fix, and cwd while raw JSONL rem
 test("repeated run sanitizes remembered fix and alternate cwd without changing live stderr", (t) => {
   const home = mkdtempSync(join(tmpdir(), "rocky-terminal-run-"));
   t.after(() => rmSync(home, { recursive: true, force: true }));
-  const cmd = `${JSON.stringify(process.execPath)} -e "process.stderr.write('synthetic-terminal-failure\\n');process.exit(67)"`;
+  const cmd = nodeCommand("process.stderr.write('synthetic-terminal-failure\\n');process.exit(67)");
   const failure = {
     kind: "failure", id: "failure-1", ts: Date.now() - 1_000, cwd: process.cwd(), cmd: `repair "line\n\t${hostile}"`,
     exitCode: 67, fingerprint: fingerprint("synthetic-terminal-failure", cmd, 67),
+    fingerprintV: FINGERPRINT_ALGORITHM_VERSION,
     signature: ["synthetic-terminal-failure"], excerpt: "synthetic-terminal-failure", resolvedBy: "fix-1",
   };
   const fix = {
@@ -100,7 +106,7 @@ test("Rocky color remains owned by TTY policy and NO_COLOR", () => {
 test("live child stderr bytes are preserved byte-for-byte as a contiguous prefix", () => {
   const childBytes = Buffer.from([0x66, 0x69, 0x78, 0x00, 0x07, 0x08, 0x0d, 0x1b, 0x5b, 0x32, 0x4a, 0x0a]);
   const encoded = childBytes.toString("base64");
-  const cmd = `${JSON.stringify(process.execPath)} -e "process.stderr.write(Buffer.from('${encoded}','base64'));process.exit(67)"`;
+  const cmd = nodeCommand(`process.stderr.write(Buffer.from('${encoded}','base64'));process.exit(67)`);
   const home = mkdtempSync(join(tmpdir(), "rocky-terminal-live-"));
   try {
     const result = spawnSync(process.execPath, [cli, "run", cmd], {

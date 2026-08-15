@@ -31,6 +31,7 @@ import {
   SYNTHETIC_NON_EOF_CONTROL_PROBES,
   SYNTHETIC_SECRET_CLOSURE_VECTORS,
 } from "./secret-vectors.js";
+import { skipIfSymlinkUnavailable } from "./symlink-capability.js";
 
 const INVISIBLE_FORMAT_CONTROLS: ReadonlyArray<readonly [string, string]> = [
   ["U+061C", "\u061C"],
@@ -1115,24 +1116,24 @@ test("degradedLabel uses exact rocky voice and strips terminal injection", () =>
   assert.equal(degradedLabel(undefined, []), undefined);
 });
 
-test("default label queue rejects symlink and non-regular destinations", (t) => {
+test("default label queue rejects symlink and non-regular destinations", async (t) => {
   const paths = freshPaths(t);
   mkdirSync(paths.home, { recursive: true });
-  const target = join(paths.home, "target-labels");
-  writeFileSync(target, "keep\n", "utf8");
-  try {
+  await t.test("symlink", (st) => {
+    if (skipIfSymlinkUnavailable(st)) return;
+    const target = join(paths.home, "target-labels");
+    writeFileSync(target, "keep\n", "utf8");
     symlinkSync(target, paths.labels);
-  } catch {
-    // Symlinks may be unavailable on a restricted Windows runner.
-  }
-  if (existsSync(paths.labels) && lstatSync(paths.labels).isSymbolicLink()) {
     defaultQueueLabel("unsafe\nline", paths);
     assert.equal(readFileSync(target, "utf8"), "keep\n");
     rmSync(paths.labels, { force: true });
-  }
-  mkdirSync(paths.labels, { recursive: true });
-  defaultQueueLabel("must not write directory", paths);
-  assert.equal(lstatSync(paths.labels).isDirectory(), true);
+  });
+  await t.test("directory", () => {
+    rmSync(paths.labels, { force: true });
+    mkdirSync(paths.labels, { recursive: true });
+    defaultQueueLabel("must not write directory", paths);
+    assert.equal(lstatSync(paths.labels).isDirectory(), true);
+  });
 });
 
 test("default label queue keeps exactly the last ten safe one-line labels", (t) => {
@@ -1365,15 +1366,11 @@ test("digest hint rejects a marker hardlink replacement before open", { timeout:
 });
 
 test("digest hint symlink target remains byte-identical and queues nothing", (t) => {
+  if (skipIfSymlinkUnavailable(t)) return;
   const paths = freshPaths(t);
   const target = join(paths.home, "digest-target");
   writeFileSync(target, "keep-target", { mode: 0o600 });
-  try {
-    symlinkSync(target, paths.digestHint);
-  } catch {
-    t.skip("symlinks are unavailable");
-    return;
-  }
+  symlinkSync(target, paths.digestHint);
   seedDigestTriple(paths, Date.now());
   maybeQueueDigestHint(paths, Date.now());
   assert.equal(readFileSync(target, "utf8"), "keep-target");

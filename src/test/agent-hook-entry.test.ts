@@ -19,6 +19,7 @@ import { test, type TestContext } from "node:test";
 import { agentEvent, logHookError } from "../commands/agent-hook.js";
 import { appendEvent, readBatch } from "../agent/spool.js";
 import { resolveRockyPaths, type RockyPaths } from "../core/state-paths.js";
+import { skipIfSymlinkUnavailable } from "./symlink-capability.js";
 
 const packageRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const entry = join(packageRoot, "dist", "index.js");
@@ -526,25 +527,24 @@ test("logHookError bounds hostile diagnostic scanning before persistence", (t) =
   assert.equal(log.includes(secret), false);
 });
 
-test("logHookError rejects symlink and non-regular destinations", (t) => {
+test("logHookError rejects symlink and non-regular destinations", async (t) => {
   const paths = freshPaths(t);
   mkdirSync(paths.home, { recursive: true });
-  const target = join(paths.home, "target.log");
-  writeFileSync(target, "target\n", "utf8");
-  try {
+  await t.test("symlink", (st) => {
+    if (skipIfSymlinkUnavailable(st)) return;
+    const target = join(paths.home, "target.log");
+    writeFileSync(target, "target\n", "utf8");
     symlinkSync(target, paths.agentLog);
-  } catch {
-    // Symlinks may be unavailable on a restricted Windows runner.
-  }
-  if (existsSync(paths.agentLog) && lstatSync(paths.agentLog).isSymbolicLink()) {
     logHookError("must not follow", paths);
     assert.equal(readFileSync(target, "utf8"), "target\n");
-  }
+  });
 
-  rmSync(paths.agentLog, { force: true });
-  mkdirSync(paths.agentLog, { recursive: true });
-  logHookError("must not write directory", paths);
-  assert.ok(lstatSync(paths.agentLog).isDirectory());
+  await t.test("directory", () => {
+    rmSync(paths.agentLog, { force: true });
+    mkdirSync(paths.agentLog, { recursive: true });
+    logHookError("must not write directory", paths);
+    assert.ok(lstatSync(paths.agentLog).isDirectory());
+  });
 });
 
 test("CLI hook agent-event dispatch emits {} and appends the Claude event", (t) => {

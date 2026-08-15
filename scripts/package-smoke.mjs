@@ -63,11 +63,12 @@ function resolveNpmExecutable() {
 }
 
 function childResult(file, args, options) {
+  const commandProcessor = options.env?.ComSpec ?? options.env?.COMSPEC ?? process.env.ComSpec ?? process.env.COMSPEC;
   const invocation = commandInvocation(
     file,
     args,
     process.platform,
-    options.env?.ComSpec ?? options.env?.COMSPEC ?? process.env.ComSpec ?? process.env.COMSPEC,
+    commandProcessor,
   );
   const result = spawnSync(invocation.file, invocation.args, {
     cwd: options.cwd ?? packageRoot,
@@ -77,6 +78,8 @@ function childResult(file, args, options) {
     maxBuffer: 16 * 1024 * 1024,
     timeout: options.timeout ?? 20_000,
     windowsHide: true,
+    shell: false,
+    windowsVerbatimArguments: process.platform === "win32" && invocation.file === commandProcessor,
   });
   if (result.error !== undefined) throw result.error;
   return {
@@ -164,6 +167,15 @@ function assertPackResult(packed) {
   assert.ok(paths.some((path) => path.startsWith("dist/mcp/")), "MCP modules are missing");
   assert.ok(paths.some((path) => path.startsWith("dist/agent/")), "agent modules are missing");
   return paths;
+}
+
+function assertLfShellAssets(root, label) {
+  const shellRoot = join(root, "dist", "shell");
+  const assets = readdirSync(shellRoot).filter((name) => name.endsWith(".bash") || name.endsWith(".sh")).sort();
+  assert.ok(assets.length > 0, `${label} has no shell assets`);
+  for (const name of assets) {
+    assert.equal(readFileSync(join(shellRoot, name)).includes(13), false, `${label}/${name} contains CR bytes`);
+  }
 }
 
 function snapshotTree(root) {
@@ -469,6 +481,7 @@ async function main() {
   for (const path of [installedEntry, installedQuoteModule, installedAgentSchema, shim]) {
     assert.equal(existsSync(path), true, `installed path is missing: ${path}`);
   }
+  assertLfShellAssets(installedRoot, "installed package");
   const installedMetadata = JSON.parse(readFileSync(join(installedRoot, "package.json"), "utf8"));
   assert.equal(installedMetadata.name, PACKAGE_NAME);
   assert.equal(installedMetadata.version, PACKAGE_VERSION);
@@ -667,7 +680,7 @@ async function main() {
   assert.equal(triple.mechanism.files.length, 1);
   assert.equal(triple.mechanism.files[0].path, "src/button.css");
   assert.match(triple.mechanism.files[0].excerpt, /margin-top: 8px/);
-  assert.match(triple.mechanism.files[0].excerpt, /\[redacted github token\]/);
+  assert.match(triple.mechanism.files[0].excerpt, /\[redacted credential assignment\]/);
   assert.match(triple.rationale.text, /\[redacted github token\]/);
   assert.doesNotMatch(JSON.stringify(triple), /ghp_/);
   assert.equal(spoolEntries().some((name) => name.endsWith(".jsonl") || name.endsWith(".lock")), false);
@@ -750,7 +763,7 @@ async function main() {
   assert.equal(codexTriple.intent?.text, "move card right");
   assert.equal(codexTriple.mechanism.files[0].path, "src/card.css");
   assert.match(codexTriple.mechanism.files[0].excerpt, /margin-left: 4px/);
-  assert.match(codexTriple.mechanism.files[0].excerpt, /\[redacted github token\]/);
+  assert.match(codexTriple.mechanism.files[0].excerpt, /\[redacted credential assignment\]/);
   assert.match(codexTriple.rationale.text, /\[redacted github token\]/);
   assert.doesNotMatch(JSON.stringify(codexTriple), /ghp_/);
   const labelsAfterCodex = readFileSync(labelsPath, "utf8").split("\n").filter(Boolean);

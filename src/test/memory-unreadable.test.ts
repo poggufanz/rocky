@@ -13,6 +13,7 @@ import { createMemoryQueries } from "../core/memory-query.js";
 import { disabledRecallWithAi } from "../ai/port.js";
 import { createToolRegistry } from "../mcp/tools.js";
 import { validateRockyPhrase } from "../ui/phrases.js";
+import { skipIfSymlinkUnavailable } from "./symlink-capability.js";
 
 const DISCLOSURE = "memory file does not open for me. I answer from nothing.";
 
@@ -93,6 +94,7 @@ test("recall() and stats() behave as today when memory.jsonl is simply absent", 
 });
 
 test("loadMemory fails closed for a memory symlink", (t) => {
+  if (skipIfSymlinkUnavailable(t)) return;
   const directory = mkdtempSync(join(tmpdir(), "rocky-memory-symlink-read-"));
   t.after(() => rmSync(directory, { recursive: true, force: true }));
   const target = join(directory, "target.jsonl");
@@ -101,12 +103,7 @@ test("loadMemory fails closed for a memory symlink", (t) => {
     kind: "failure", id: "symlink-target", ts: 1, cwd: "/w", cmd: "false", exitCode: 1,
     fingerprint: "fp", signature: ["false"], excerpt: "failed",
   }) + "\n", "utf8");
-  try {
-    symlinkSync(target, link);
-  } catch {
-    t.skip("symlink creation unsupported on this platform");
-    return;
-  }
+  symlinkSync(target, link);
 
   assert.deepEqual(loadMemory(link), []);
 });

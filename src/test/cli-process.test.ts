@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test, { type TestContext } from "node:test";
 import { fileURLToPath } from "node:url";
-import { fingerprint } from "../core/fingerprint.js";
+import { fingerprint, FINGERPRINT_ALGORITHM_VERSION } from "../core/fingerprint.js";
 import { quoteShellPath } from "../core/shell-quote.js";
 import { PACKAGE_VERSION } from "../core/package-info.js";
 
@@ -404,13 +404,18 @@ function failingCommandPrinting(marker: string): string {
   return `${quoteShellPath(process.execPath, process.platform)} -e ${quoteShellPath(script, process.platform)}`;
 }
 
+function nodeCommand(source: string): string {
+  return `${quoteShellPath(process.execPath, process.platform)} -e ${quoteShellPath(source, process.platform)}`;
+}
+
 test("run's onFailure speaks the strong link basis, not just the fix command", (t) => {
   const sandbox = processSandbox(t);
   const marker = "error rocky basis strong boom";
   const fp = fingerprint(marker, "cargo build --release", 1);
   const failure = {
     kind: "failure", id: "basis-strong-failure", ts: 1_700_000_000_000, cwd: packageRoot,
-    cmd: "cargo build --release", exitCode: 1, fingerprint: fp, signature: [marker], excerpt: marker,
+    cmd: "cargo build --release", exitCode: 1, fingerprint: fp, fingerprintV: FINGERPRINT_ALGORITHM_VERSION,
+    signature: [marker], excerpt: marker,
     origin: "run",
   };
   const fix = {
@@ -438,7 +443,8 @@ test("run's onFailure never presents a weak candidate as a remembered fix", (t) 
   const fp = fingerprint(marker, "npm run build", 1);
   const failure = {
     kind: "failure", id: "basis-weak-failure", ts: 1_700_000_000_000, cwd: packageRoot,
-    cmd: "npm run build", exitCode: 1, fingerprint: fp, signature: [marker], excerpt: marker,
+    cmd: "npm run build", exitCode: 1, fingerprint: fp, fingerprintV: FINGERPRINT_ALGORITHM_VERSION,
+    signature: [marker], excerpt: marker,
     origin: "run",
   };
   const fix = {
@@ -465,7 +471,8 @@ test("a v0.2.1-era unproven fix record is downgraded", (t) => {
   const fp = fingerprint(marker, "npm run build", 1);
   const failure = {
     kind: "failure", id: "basis-none-failure", ts: 1_700_000_000_000, cwd: packageRoot,
-    cmd: "npm run build", exitCode: 1, fingerprint: fp, signature: [marker], excerpt: marker,
+    cmd: "npm run build", exitCode: 1, fingerprint: fp, fingerprintV: FINGERPRINT_ALGORITHM_VERSION,
+    signature: [marker], excerpt: marker,
     origin: "run",
   };
   const fix = {
@@ -492,7 +499,8 @@ test("run's onFailure admits when the remembered fix comes from a different dire
   const elsewhere = join(sandbox.root, "elsewhere-project");
   const failure = {
     kind: "failure", id: "elsewhere-failure", ts: 1_700_000_000_000, cwd: packageRoot,
-    cmd: "whatever failed before", exitCode: 1, fingerprint: fp, signature: [marker], excerpt: marker,
+    cmd: "whatever failed before", exitCode: 1, fingerprint: fp, fingerprintV: FINGERPRINT_ALGORITHM_VERSION,
+    signature: [marker], excerpt: marker,
     origin: "run",
   };
   const fix = {
@@ -515,7 +523,7 @@ test("run's onFailure admits when the remembered fix comes from a different dire
 
 test("watch records a failure with origin watch and saves exactly one log file with the stderr tail", (t) => {
   const sandbox = processSandbox(t);
-  const result = runCli(sandbox, ["watch", "sh -c 'echo boom >&2; exit 3'"]);
+  const result = runCli(sandbox, ["watch", nodeCommand("process.stderr.write('boom\\n'); process.exit(3)")]);
 
   assertCompleted(result, 3);
 
@@ -541,9 +549,8 @@ test("watch records a failure with origin watch and saves exactly one log file w
 });
 
 test("watch passes a Ctrl-C-style exit code straight through, with no memory record and no log", (t) => {
-  if (process.platform === "win32") return;
   const sandbox = processSandbox(t);
-  const result = runCli(sandbox, ["watch", "sh -c 'exit 130'"]);
+  const result = runCli(sandbox, ["watch", nodeCommand("process.exit(130)")]);
 
   assert.equal(result.status, 130);
   assert.equal(existsSync(join(sandbox.rockyHome, "memory.jsonl")), false);
@@ -567,7 +574,8 @@ test("run's onFailure adds no line when the remembered fix's cwd matches the cur
   const here = realpathSync(packageRoot);
   const failure = {
     kind: "failure", id: "samecwd-failure", ts: 1_700_000_000_000, cwd: here,
-    cmd: "whatever failed before", exitCode: 1, fingerprint: fp, signature: [marker], excerpt: marker,
+    cmd: "whatever failed before", exitCode: 1, fingerprint: fp, fingerprintV: FINGERPRINT_ALGORITHM_VERSION,
+    signature: [marker], excerpt: marker,
     origin: "run",
   };
   const fix = {
