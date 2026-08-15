@@ -130,6 +130,105 @@ test("future custom recall and recent hits disclose truncation while exact-now e
   assert.equal(recentFix.truncated, true);
 });
 
+test("custom recall and recent hits snapshot every source field once", () => {
+  const reads = new Map<string, number>();
+  const values: Record<string, [unknown, unknown]> = {};
+  const setValues = (name: string, fields: Record<string, [unknown, unknown]>) => {
+    for (const [key, value] of Object.entries(fields)) values[`${name}.${key}`] = value;
+  };
+  const sourceProxy = (name: string) => new Proxy({}, {
+    get(_target, property: string | symbol) {
+      if (typeof property !== "string") return undefined;
+      const key = `${name}.${property}`;
+      const count = (reads.get(key) ?? 0) + 1;
+      reads.set(key, count);
+      if (property === "candidateFailureIds" || property === "links") {
+        throw new Error(`irrelevant getter: ${key}`);
+      }
+      if (!(key in values)) throw new Error(`unexpected getter: ${key}`);
+      return count === 1 ? values[key][0] : values[key][1];
+    },
+    ownKeys() { throw new Error(`must not enumerate ${name}`); },
+  }) as unknown as Record<string, unknown>;
+  const failureSignature = new Proxy(["failure signature"], {
+    get(target, property, receiver) {
+      const key = typeof property === "string" ? `failure.signature.${property}` : "failure.signature.symbol";
+      reads.set(key, (reads.get(key) ?? 0) + 1);
+      return Reflect.get(target, property, receiver);
+    },
+    ownKeys() { throw new Error("must not enumerate signature"); },
+  });
+  setValues("failure", {
+    kind: ["failure", "failure"], id: ["failure-once", "failure-once"], ts: [10, 10],
+    cwd: ["/work", "/work"], cmd: ["npm test", "npm test"], exitCode: [1, 1],
+    fingerprint: ["fp-once", "fp-once"], signature: [failureSignature, failureSignature],
+    excerpt: ["failure excerpt", "failure excerpt"], origin: [undefined, "Bearer TOPSECRET\u001b[31m"],
+  });
+  setValues("fix", {
+    kind: ["fix", "fix"], id: ["fix-once", "Bearer FIXTOPSECRET"], ts: [11, 11],
+    cwd: ["/work", "/work"], cmd: ["npm test", "npm test"], failureIds: [["failure-once"], ["failure-once"]],
+  });
+  const failure = sourceProxy("failure");
+  const fix = sourceProxy("fix");
+  const hit = new Proxy({}, {
+    get(_target, property: string | symbol) {
+      if (typeof property !== "string") return undefined;
+      const key = `hit.${property}`;
+      const count = (reads.get(key) ?? 0) + 1;
+      reads.set(key, count);
+      if (property === "failure") return failure;
+      if (property === "fix") return fix;
+      throw new Error(`unexpected getter: ${property}`);
+    },
+    ownKeys() { throw new Error("must not enumerate hit"); },
+  });
+
+  const output = projectRecallHits([hit as unknown as RecallHit], "sanitized", 100);
+  assert.equal(output.items.length, 1);
+  assert.equal(output.truncated, false);
+  assert.equal(output.items[0]?.origin, "run");
+  assert.doesNotMatch(JSON.stringify(output), /TOPSECRET|Bearer|\u001b/);
+  assert.equal(reads.get("hit.failure"), 1);
+  assert.equal(reads.get("hit.fix"), 1);
+  for (const field of ["kind", "id", "ts", "cwd", "cmd", "exitCode", "fingerprint", "signature", "excerpt", "origin"]) {
+    assert.equal(reads.get(`failure.${field}`), 1, `failure.${field} read count`);
+  }
+  for (const field of ["kind", "id", "ts", "cwd", "cmd", "failureIds"]) {
+    assert.equal(reads.get(`fix.${field}`), 1, `fix.${field} read count`);
+  }
+  assert.equal(reads.get("failure.signature.length"), 1);
+  assert.equal(reads.get("failure.signature.0"), 1);
+});
+
+test("over-cap custom signatures and failure IDs disclose truncation instead of accepting prefixes", () => {
+  const valid: FailureRecord = {
+    kind: "failure", id: "valid-bounded", ts: 10, cwd: "/work", cmd: "npm test", exitCode: 1,
+    fingerprint: "fp-bounded", signature: ["failure"], excerpt: "failure", origin: "run",
+  };
+  const tooManySignatures = { ...valid, id: "too-many-signatures", signature: Array.from({ length: 257 }, () => "failure") };
+  const tooManyFailureIds: FixRecord = {
+    kind: "fix", id: "too-many-failure-ids", ts: 11, cwd: "/work", cmd: "npm test",
+    failureIds: Array.from({ length: 257 }, () => valid.id),
+  };
+  const tooManyIds = { failure: valid, fix: tooManyFailureIds, score: 1 };
+  const tooManyBytes = {
+    failure: { ...valid, id: "too-many-signature-bytes", signature: ["x".repeat(22_000), "y".repeat(22_000), "z".repeat(22_000)] },
+    score: 1,
+  };
+  const hits = [
+    { failure: valid, score: 1 },
+    { failure: tooManySignatures, score: 1 },
+    tooManyIds,
+    tooManyBytes,
+  ] as unknown as RecallHit[];
+  const recall = projectRecallHits(hits, "sanitized", 100);
+  assert.deepEqual(recall.items.map((item) => item.fingerprint), ["fp-bounded"]);
+  assert.equal(recall.truncated, true);
+  const recent = projectRecentFailures(hits as unknown as RecentFailureHit[], "sanitized", 100);
+  assert.deepEqual(recent.items.map((item) => item.fingerprint), ["fp-bounded"]);
+  assert.equal(recent.truncated, true);
+});
+
 test("sanitized projection has exactly the allowlisted keys despite injected unknown data", () => {
   const hit = {
     failure: {

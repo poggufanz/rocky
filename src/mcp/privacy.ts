@@ -841,10 +841,10 @@ function boundedStringArray(value: unknown, maximum = MAX_NESTED_ITEMS): string[
     if (!Array.isArray(value)) return undefined;
     const length = value.length;
     if (!Number.isSafeInteger(length) || length < 0) return undefined;
+    if (length > maximum) return undefined;
     const output: string[] = [];
-    const bound = Math.min(length, maximum);
     let bytes = 0;
-    for (let index = 0; index < bound; index += 1) {
+    for (let index = 0; index < length; index += 1) {
       const item = value[index];
       if (typeof item !== "string") return undefined;
       if (item.length > MAX_FIELD_BYTES * 2) return undefined;
@@ -852,7 +852,7 @@ function boundedStringArray(value: unknown, maximum = MAX_NESTED_ITEMS): string[
         ? truncateUtf8(item, MAX_FIELD_BYTES * 2).value
         : item;
       const itemBytes = Buffer.byteLength(boundedItem, "utf8");
-      if (bytes + itemBytes > MAX_NESTED_BYTES) break;
+      if (bytes + itemBytes > MAX_NESTED_BYTES) return undefined;
       bytes += itemBytes;
       output.push(boundedItem);
     }
@@ -862,46 +862,75 @@ function boundedStringArray(value: unknown, maximum = MAX_NESTED_ITEMS): string[
   }
 }
 
+function boundedSourceString(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  if (value.length > MAX_FIELD_BYTES * 2) return undefined;
+  if (Buffer.byteLength(value, "utf8") > MAX_FIELD_BYTES * 2) return undefined;
+  return value;
+}
+
+function snapshotSourceFailure(value: unknown, now: number): FailureRecord | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+  const raw = value as Record<string, unknown>;
+  const kind = raw.kind;
+  if (kind !== "failure") return undefined;
+  const id = boundedSourceString(raw.id);
+  if (id === undefined || id.length === 0 || /[\u0000-\u001f\u007f-\u009f]/u.test(id)) return undefined;
+  const ts = raw.ts;
+  if (!isSafeNonNegativeInteger(ts) || ts > now) return undefined;
+  const cwd = boundedSourceString(raw.cwd);
+  if (cwd === undefined) return undefined;
+  const cmd = boundedSourceString(raw.cmd);
+  if (cmd === undefined) return undefined;
+  const exitCode = raw.exitCode;
+  if (typeof exitCode !== "number" || !Number.isSafeInteger(exitCode)) return undefined;
+  const fingerprint = boundedSourceString(raw.fingerprint);
+  if (fingerprint === undefined) return undefined;
+  const signature = boundedStringArray(raw.signature);
+  if (signature === undefined) return undefined;
+  const excerpt = boundedSourceString(raw.excerpt);
+  if (excerpt === undefined) return undefined;
+  const origin = raw.origin;
+  if (origin !== undefined && origin !== "run" && origin !== "hook" && origin !== "watch") return undefined;
+  return {
+    kind: "failure", id, ts, cwd, cmd, exitCode, fingerprint, signature, excerpt,
+    ...(origin === undefined ? {} : { origin: origin as FailureOrigin }),
+  };
+}
+
+function snapshotSourceFix(value: unknown, now: number): FixRecord | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+  const raw = value as Record<string, unknown>;
+  const kind = raw.kind;
+  if (kind !== "fix") return undefined;
+  const id = boundedSourceString(raw.id);
+  if (id === undefined || id.length === 0 || /[\u0000-\u001f\u007f-\u009f]/u.test(id)) return undefined;
+  const ts = raw.ts;
+  if (!isSafeNonNegativeInteger(ts) || ts > now) return undefined;
+  const cwd = boundedSourceString(raw.cwd);
+  if (cwd === undefined) return undefined;
+  const cmd = boundedSourceString(raw.cmd);
+  if (cmd === undefined) return undefined;
+  const failureIds = boundedStringArray(raw.failureIds);
+  if (failureIds === undefined) return undefined;
+  return { kind: "fix", id, ts, cwd, cmd, failureIds };
+}
+
+function snapshotSourceHit(value: unknown, now: number): SourceHit | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+  const raw = value as Record<string, unknown>;
+  const failure = snapshotSourceFailure(raw.failure, now);
+  if (failure === undefined) return undefined;
+  const fixValue = raw.fix;
+  if (fixValue === undefined) return { failure };
+  const fix = snapshotSourceFix(fixValue, now);
+  if (fix === undefined) return undefined;
+  return { failure, fix };
+}
+
 function normalizeSourceHit(value: unknown, now: number): SourceHit | undefined {
   try {
-    if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
-    const raw = value as Record<string, unknown>;
-    const failureValue = raw.failure;
-    if (typeof failureValue !== "object" || failureValue === null || Array.isArray(failureValue)) return undefined;
-    const failureRaw = failureValue as Record<string, unknown>;
-    const signature = boundedStringArray(failureRaw.signature);
-    const failureTsValue = failureRaw.ts;
-    if (failureRaw.kind !== "failure" || typeof failureRaw.id !== "string" || failureRaw.id.length === 0 ||
-        /[\u0000-\u001f\u007f-\u009f]/u.test(failureRaw.id) || !isSafeNonNegativeInteger(failureTsValue) || failureTsValue > now ||
-        typeof failureRaw.cwd !== "string" || typeof failureRaw.cmd !== "string" ||
-        !Number.isSafeInteger(failureRaw.exitCode) || typeof failureRaw.fingerprint !== "string" ||
-        signature === undefined ||
-        typeof failureRaw.excerpt !== "string" ||
-        (failureRaw.origin !== undefined && failureRaw.origin !== "run" && failureRaw.origin !== "hook" && failureRaw.origin !== "watch")) return undefined;
-    const failureTs = failureTsValue as number;
-    const failureExitCode = failureRaw.exitCode as number;
-    const failure: FailureRecord = {
-      kind: "failure", id: failureRaw.id, ts: failureTs, cwd: failureRaw.cwd, cmd: failureRaw.cmd,
-      exitCode: failureExitCode, fingerprint: failureRaw.fingerprint,
-      signature, excerpt: failureRaw.excerpt,
-      ...(failureRaw.origin === undefined ? {} : { origin: failureRaw.origin as FailureOrigin }),
-    };
-    let fix: FixRecord | undefined;
-    if (raw.fix !== undefined) {
-      if (typeof raw.fix !== "object" || raw.fix === null || Array.isArray(raw.fix)) return undefined;
-      const fixRaw = raw.fix as Record<string, unknown>;
-      const failureIds = boundedStringArray(fixRaw.failureIds);
-      const fixTsValue = fixRaw.ts;
-      if (fixRaw.kind !== "fix" || typeof fixRaw.id !== "string" || fixRaw.id.length === 0 ||
-          /[\u0000-\u001f\u007f-\u009f]/u.test(fixRaw.id) || !isSafeNonNegativeInteger(fixTsValue) || fixTsValue > now ||
-          typeof fixRaw.cwd !== "string" || typeof fixRaw.cmd !== "string" ||
-          failureIds === undefined) return undefined;
-      fix = {
-        kind: "fix", id: fixRaw.id, ts: fixTsValue, cwd: fixRaw.cwd, cmd: fixRaw.cmd,
-        failureIds,
-      };
-    }
-    return fix === undefined ? { failure } : { failure, fix };
+    return snapshotSourceHit(value, now);
   } catch {
     return undefined;
   }
