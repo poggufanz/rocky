@@ -221,6 +221,49 @@ function partialMetadataWritePreload(path: string): void {
   ].join("\n"), "utf8");
 }
 
+function tripleLockContentionPreload(path: string): void {
+  writeFileSync(path, [
+    "const fs = require('node:fs');",
+    "const crypto = require('node:crypto');",
+    "const { syncBuiltinESMExports } = require('node:module');",
+    "const originalOpen = fs.openSync.bind(fs);",
+    "const originalRandomBytes = crypto.randomBytes.bind(crypto);",
+    "const originalWait = Atomics.wait.bind(Atomics);",
+    "let failedOpen = false;",
+    "fs.openSync = (path, ...args) => {",
+    "  try { return originalOpen(path, ...args); }",
+    "  catch (error) {",
+    "    if (process.env.ROCKY_TEST_ROLE === 'contender' && String(path) === process.env.ROCKY_TEST_LOCK && args[0] === 'wx' && error?.code === 'EEXIST') {",
+    "      failedOpen = true; fs.appendFileSync(process.env.ROCKY_TEST_ORDER, 'open-failed\\n');",
+    "    }",
+    "    throw error;",
+    "  }",
+    "};",
+    "crypto.randomBytes = (...args) => {",
+    "  const value = originalRandomBytes(...args);",
+    "  if (process.env.ROCKY_TEST_ROLE === 'contender' && args[0] === 16) fs.appendFileSync(process.env.ROCKY_TEST_ORDER, `${failedOpen ? 'random-after-failed' : 'random-before-failed'}\\n`);",
+    "  return value;",
+    "};",
+    "Atomics.wait = (typedArray, index, value, timeout) => {",
+    "  if (process.env.ROCKY_TEST_ROLE === 'contender' && typeof timeout === 'number') fs.appendFileSync(process.env.ROCKY_TEST_WAITS, `${timeout}\\n`);",
+    "  return originalWait(typedArray, index, value, timeout);",
+    "};",
+    "syncBuiltinESMExports();",
+  ].join("\n"), "utf8");
+}
+
+function markerWaiter(path: string): void {
+  writeFileSync(path, [
+    "import { existsSync, watch } from 'node:fs';",
+    "import { basename, dirname } from 'node:path';",
+    "const target = process.argv[2];",
+    "if (existsSync(target)) process.exit(0);",
+    "const watcher = watch(dirname(target), (_event, name) => {",
+    "  if (String(name) === basename(target)) { watcher.close(); process.exit(0); }",
+    "});",
+  ].join("\n"), "utf8");
+}
+
 function pruneLockObservationPreload(path: string): void {
   writeFileSync(path, [
     "const fs = require('node:fs');",
@@ -315,6 +358,116 @@ test("16, 50, and 100 concurrent confirmed successes make one logical resolution
   for (const count of [16, 50, 100]) {
     await t.test(`${count} successes`, { timeout: 60_000 }, async (st) => concurrentSuccesses(st, count));
   }
+});
+
+test("contended triple lock phases bounded polling and waits for holder release", { timeout: 30_000 }, async (t) => {
+  const home = sandbox(t, "rocky-lock-contention-phased-");
+  const lock = join(home, "memory.jsonl.triple.lock");
+  const holderReady = join(home, "holder-ready");
+  const holderDone = join(home, "holder-done");
+  const contenderDone = join(home, "contender-done");
+  const release = join(home, "release-holder");
+  const order = join(home, "lock-order.log");
+  const waits = join(home, "lock-waits.log");
+  const preload = join(home, "lock-contention.cjs");
+  const waiter = join(home, "wait-for-marker.mjs");
+  tripleLockContentionPreload(preload);
+  markerWaiter(waiter);
+
+  const holderWorker = [
+    "const { spawnSync } = await import('node:child_process');",
+    "const { writeFileSync } = await import('node:fs');",
+    "const [modulePath, home, ready, done, release, waiter] = process.argv.slice(1);",
+    "process.env.ROCKY_HOME = home;",
+    "const memory = await import(modulePath);",
+    "memory.withMemoryTransaction((transaction) => {",
+    "  transaction.append({ kind: 'note', id: 'holder-note', ts: Date.now(), cwd: home, cmd: 'holder', file: 'holder.ts', line: 1, subject: 'holder', answer: 'holder' });",
+    "  writeFileSync(ready, 'ready');",
+    "  const result = spawnSync(process.execPath, [waiter, release], { stdio: 'ignore', windowsHide: true });",
+    "  if (result.status !== 0) throw new Error(`marker waiter failed: ${result.status}`);",
+    "});",
+    "writeFileSync(done, 'done');",
+  ].join("\n");
+  const contenderWorker = [
+    "const { writeFileSync } = await import('node:fs');",
+    "const [modulePath, home, done] = process.argv.slice(1);",
+    "process.env.ROCKY_HOME = home;",
+    "const memory = await import(modulePath);",
+    "memory.withMemoryTransaction((transaction) => transaction.append({ kind: 'note', id: 'contender-note', ts: Date.now(), cwd: home, cmd: 'contender', file: 'contender.ts', line: 1, subject: 'contender', answer: 'contender' }));",
+    "writeFileSync(done, 'done');",
+  ].join("\n");
+  const commonEnv = {
+    ...process.env,
+    ROCKY_HOME: home,
+    ROCKY_TEST_LOCK: lock,
+    ROCKY_TEST_ORDER: order,
+    ROCKY_TEST_WAITS: waits,
+  };
+  const holderEnv: NodeJS.ProcessEnv = { ...commonEnv };
+  delete holderEnv.NODE_OPTIONS;
+  const holder = spawn(process.execPath, [
+    "--input-type=module", "--eval", holderWorker,
+    memoryModuleUrl, home, holderReady, holderDone, release, waiter,
+  ], { env: holderEnv, stdio: ["ignore", "ignore", "pipe"], windowsHide: true });
+  t.after(() => {
+    try { writeFileSync(release, "cleanup"); } catch { /* best effort */ }
+    try { holder.kill(); } catch { /* already gone */ }
+  });
+  const holderResult = completionWithStderr(holder);
+  await waitFor(() => existsSync(holderReady), 10_000, "holder lock");
+
+  const contender = spawn(process.execPath, [
+    "--input-type=module", "--eval", contenderWorker,
+    memoryModuleUrl, home, contenderDone,
+  ], {
+    env: { ...commonEnv, ROCKY_TEST_ROLE: "contender", NODE_OPTIONS: `--require=${preload}` },
+    stdio: ["ignore", "ignore", "pipe"],
+    windowsHide: true,
+  });
+  t.after(() => { try { contender.kill(); } catch { /* already gone */ } });
+
+  await waitFor(() => {
+    if (!existsSync(waits)) return false;
+    return readFileSync(waits, "utf8").trim().split("\n").filter(Boolean).length >= 4;
+  }, 10_000, "phased contender waits");
+  writeFileSync(release, "release", "utf8");
+
+  const [holderOutcome, contenderOutcome] = await Promise.all([
+    holderResult,
+    completionWithStderr(contender),
+  ]);
+  assert.equal(holderOutcome.code, 0, holderOutcome.stderr);
+  assert.equal(contenderOutcome.code, 0, contenderOutcome.stderr);
+  assert.equal(existsSync(holderDone), true);
+  assert.equal(existsSync(contenderDone), true);
+
+  const events = readFileSync(order, "utf8").trim().split("\n").filter(Boolean);
+  const firstFailedOpen = events.indexOf("open-failed");
+  const firstOwnershipToken = events.indexOf("random-after-failed");
+  assert.ok(firstFailedOpen >= 0, `contender must observe lock contention: ${events.join(",")}`);
+  assert.ok(firstOwnershipToken > firstFailedOpen, `ownership token must follow failed open: ${events.join(",")}`);
+  assert.equal(events.includes("random-before-failed"), false, `token was drawn before failed open: ${events.join(",")}`);
+
+  const durations = readFileSync(waits, "utf8").trim().split("\n").filter(Boolean).map(Number);
+  assert.ok(durations.length >= 4, `expected repeated waits: ${durations.join(",")}`);
+  assert.ok(durations[0] >= 5 && durations[0] <= 11, `initial wait must be PID-phased: ${durations[0]}`);
+  for (let index = 1; index < durations.length; index++) {
+    assert.equal(durations[index], Math.min(durations[index - 1] + 5, 50), `wait ${index} must increase by 5 ms`);
+  }
+
+  const records = memory.loadMemory(join(home, "memory.jsonl"));
+  assert.deepEqual(
+    records.filter((record): record is NoteRecord => record.kind === "note").map((record) => record.id).sort(),
+    ["contender-note", "holder-note"],
+  );
+  assert.equal(records.length, 2, "contention must not duplicate or mutate records");
+  assert.equal(existsSync(lock), false, "canonical lock must be released");
+  assert.equal(existsSync(`${lock}.reclaim.guard`), false, "reclaim guard must be released");
+  const activeLockResidue = readdirSync(home).filter((name) =>
+    name === "memory.jsonl.triple.lock" ||
+    name === "memory.jsonl.triple.lock.reclaim.guard" ||
+    (name.includes(".triple.lock.reclaim.") && !name.includes(".reclaim.tombstone.")));
+  assert.deepEqual(activeLockResidue, []);
 });
 
 test("lock housekeeping starts only after canonical lock release", { timeout: 15_000 }, (t) => {

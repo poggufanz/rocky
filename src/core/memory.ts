@@ -254,15 +254,14 @@ function tripleOwnerAlive(pid: number): boolean | undefined {
 function tryTripleLock(path: string): TripleLock | undefined {
   let fd = -1;
   let created = false;
-  let token: string | undefined;
   let createdStats: Stats | undefined;
   let succeeded = false;
   try {
-    token = randomBytes(TRIPLE_LOCK_TOKEN_BYTES).toString("hex");
     fd = openSync(path, "wx", 0o600);
     created = true;
     createdStats = fstatSync(fd);
     if (!createdStats.isFile() || createdStats.isSymbolicLink()) return undefined;
+    const token = randomBytes(TRIPLE_LOCK_TOKEN_BYTES).toString("hex");
     const encoded = Buffer.from(JSON.stringify({ pid: process.pid, token }), "utf8");
     if (encoded.byteLength > TRIPLE_LOCK_MAX_BYTES) return undefined;
     let offset = 0;
@@ -422,6 +421,8 @@ function acquireTripleLock(paths: RockyPaths): TripleLock {
   const path = `${paths.memory}${TRIPLE_LOCK_SUFFIX}`;
   const wallStarted = Date.now();
   const monotonicStarted = performance.now();
+  const signal = new Int32Array(new SharedArrayBuffer(4));
+  let waitMs = 5 + (process.pid % 7);
   for (;;) {
     const lock = tryTripleLock(path);
     if (lock) {
@@ -460,12 +461,14 @@ function acquireTripleLock(paths: RockyPaths): TripleLock {
         if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
       }
     }
-    if (Date.now() - wallStarted >= TRIPLE_LOCK_WAIT_MS ||
-        performance.now() - monotonicStarted >= TRIPLE_LOCK_WAIT_MS) {
+    const wallRemaining = TRIPLE_LOCK_WAIT_MS - (Date.now() - wallStarted);
+    const monotonicRemaining = TRIPLE_LOCK_WAIT_MS - (performance.now() - monotonicStarted);
+    const remaining = Math.min(wallRemaining, monotonicRemaining);
+    if (remaining <= 0) {
       throw new Error("Rocky triple lock is busy");
     }
-    const signal = new Int32Array(new SharedArrayBuffer(4));
-    Atomics.wait(signal, 0, 0, 5);
+    Atomics.wait(signal, 0, 0, Math.min(waitMs, remaining));
+    waitMs = Math.min(waitMs + 5, 50);
   }
 }
 
