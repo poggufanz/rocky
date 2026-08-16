@@ -132,6 +132,7 @@ test("MCP source graph reaches only explicitly allowlisted read-only modules; wr
   const roots = [entry, ...descendants(join(sourceRoot, "mcp"))];
   const allowed = new Set([
     "commands/mcp.ts",
+    "commands/cli-args.ts",
     "core/config-read.ts",
     "core/dictionary.ts",
     "core/fingerprint.ts",

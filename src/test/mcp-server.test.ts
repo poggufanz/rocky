@@ -565,8 +565,22 @@ for (const era of ["modern", "legacy"] as const) {
     const response = sent.find((message) => message.id === "operational");
     assert.ok(response !== undefined && "result" in response);
     assert.equal(response.result.isError, true);
+    const unknownCoverage = {
+      version: 1,
+      scanned: 0,
+      skipped: 0,
+      truncated: 1,
+      bytesScanned: 0,
+      bytesTotal: 0,
+      complete: false,
+      reason: "read-race",
+    };
     assert.deepEqual(response.result.structuredContent, {
       error: { code: "memory_unavailable", message: "memory unavailable" },
+      coverage: unknownCoverage,
+      memoryCoverage: unknownCoverage,
+      memoryVersion: 1,
+      memoryCoverageIncomplete: true,
     });
     if (era === "modern") {
       assert.equal(response.result.resultType, "complete");

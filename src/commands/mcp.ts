@@ -6,7 +6,6 @@ import { PACKAGE_NAME, PACKAGE_VERSION } from "../core/package-info.js";
 import { runMcpStdio } from "../mcp/server.js";
 import { createToolRegistry } from "../mcp/tools.js";
 import { parseNoArgs, reportCliUsage } from "./cli-args.js";
-import { detail } from "../ui/rocky.js";
 
 export const ROCKY_SERVER_INFO = {
   name: PACKAGE_NAME,
@@ -19,7 +18,8 @@ export async function mcp(argv: readonly string[] = []): Promise<number> {
   } catch (error) {
     // MCP stdout is a protocol stream. Usage diagnostics stay on stderr and
     // must happen before the server is constructed or stdin is read.
-    const code = reportCliUsage(error, detail, detail);
+    const writeStderr = (line: string): void => { process.stderr.write(`${line}\n`); };
+    const code = reportCliUsage(error, writeStderr, writeStderr);
     if (code !== undefined) return code;
     throw error;
   }
