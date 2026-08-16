@@ -145,6 +145,7 @@ test("MCP source graph reaches only explicitly allowlisted read-only modules; wr
     // Audited pure sanitizer: no imports or filesystem side effects.
     "core/redact.ts",
     "core/state-paths.ts",
+    "core/terminal-sanitize.ts",
     "ai/ollama.ts",
     "ai/port.ts",
     "ai/recall-ai.ts",

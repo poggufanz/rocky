@@ -533,6 +533,32 @@ test("compiled CLI serves a separate legacy lifecycle and reloads externally app
   assert.deepEqual(snapshotTree(home), afterExternalAppend);
 });
 
+test("MCP usage diagnostics sanitize adversarial argv without adding protocol output", () => {
+  const home = mkdtempSync(join(tmpdir(), "rocky-mcp-usage-home-"));
+  try {
+    const hostile = "junk\u001b[2J\u0007\u009b2J\u202e\u2066\nforged";
+    const result = spawnSync(process.execPath, [cli, "mcp", hostile], {
+      cwd: repoRoot,
+      env: { ...process.env, ROCKY_HOME: home },
+      input: "",
+      encoding: "utf8",
+      timeout: 2_000,
+      windowsHide: true,
+    });
+
+    assert.equal(result.error, undefined, String(result.error));
+    assert.equal(result.signal, null);
+    assert.equal(result.status, 2, result.stderr);
+    assert.equal(result.stdout, "");
+    assert.equal(result.stderr.split("\n").length, 3, result.stderr);
+    assert.match(result.stderr, /usage: rocky mcp\n$/u);
+    const withoutFraming = result.stderr.replace(/\n/gu, "");
+    assert.doesNotMatch(withoutFraming, /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/u);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
 test("uppercase RAW exposure fails before protocol output with one concise diagnostic", { timeout: 5_000 }, async (t) => {
   const home = seedHome(t);
   const result = spawnSync(process.execPath, [cli, "mcp"], {

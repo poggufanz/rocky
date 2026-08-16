@@ -3,6 +3,7 @@ import { createRecallAiPort, singleFlightRecallAi } from "../ai/recall-ai.js";
 import { parseExposure } from "../core/config-read.js";
 import { createMemoryQueries } from "../core/memory-query.js";
 import { PACKAGE_NAME, PACKAGE_VERSION } from "../core/package-info.js";
+import { safeTerminalBlock, safeTerminalLine } from "../core/terminal-sanitize.js";
 import { runMcpStdio } from "../mcp/server.js";
 import { createToolRegistry } from "../mcp/tools.js";
 import { parseNoArgs, reportCliUsage } from "./cli-args.js";
@@ -18,7 +19,9 @@ export async function mcp(argv: readonly string[] = []): Promise<number> {
   } catch (error) {
     // MCP stdout is a protocol stream. Usage diagnostics stay on stderr and
     // must happen before the server is constructed or stdin is read.
-    const writeStderr = (line: string): void => { process.stderr.write(`${line}\n`); };
+    const writeStderr = (line: string): void => {
+      process.stderr.write(`${safeTerminalLine(safeTerminalBlock(line))}\n`);
+    };
     const code = reportCliUsage(error, writeStderr, writeStderr);
     if (code !== undefined) return code;
     throw error;
