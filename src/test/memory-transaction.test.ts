@@ -261,6 +261,8 @@ function markerWaiter(path: string): void {
     "const watcher = watch(dirname(target), (_event, name) => {",
     "  if (String(name) === basename(target)) { watcher.close(); process.exit(0); }",
     "});",
+    "if (existsSync(target)) { watcher.close(); process.exit(0); }",
+    "watcher.on('error', () => { watcher.close(); process.exit(1); });",
   ].join("\n"), "utf8");
 }
 
