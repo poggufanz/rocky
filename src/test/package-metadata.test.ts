@@ -500,7 +500,11 @@ test("canonical release truth rejects drift in every release marker", async () =
     .replace(realCurrentReleaseLine!, "")
     .replace(realRoadmapMarker!, "");
   const roadmapStart = readmeWithoutRealMarkers.indexOf("## Roadmap");
-  const roadmapEnd = readmeWithoutRealMarkers.indexOf("\n## Contributing", roadmapStart);
+  const afterRoadmapHeading = roadmapStart + "## Roadmap".length;
+  const nextHeading = /\r?\n## /u.exec(readmeWithoutRealMarkers.slice(afterRoadmapHeading));
+  const roadmapEnd = nextHeading === null
+    ? readmeWithoutRealMarkers.length
+    : afterRoadmapHeading + nextHeading.index;
   assert.ok(roadmapStart >= 0 && roadmapEnd > roadmapStart, "canonical README Roadmap bounds must exist");
   const indentedFakeReadme = `${readmeWithoutRealMarkers.slice(0, roadmapEnd)}\n    Current release: \`${PACKAGE_NAME}@${PACKAGE_VERSION}\`\n    - **v0.5 — fake (current release)**\n${readmeWithoutRealMarkers.slice(roadmapEnd)}`;
   assert.notDeepEqual(
@@ -679,7 +683,7 @@ test("canonical release truth rejects drift in every release marker", async () =
     );
   }
   for (const [label, mutated] of [
-    ["README canonical upstream URL", { ...snapshot, readme: snapshot.readme.replace("https://github.com/poggufanz/rocky.git", "https://github.com/example/rocky.git") }],
+    ["README canonical upstream URL", { ...snapshot, readme: snapshot.readme.replace("canonical upstream repository (`https://github.com/poggufanz/rocky.git`)", "canonical upstream repository (`https://github.com/example/rocky.git`)") }],
     ["README canonical developer branch", { ...snapshot, readme: snapshot.readme.replace("Canonical developer branch is `main`", "Canonical developer branch is `develop`") }],
     ["README canonical outer package root", { ...snapshot, readme: snapshot.readme.replace("outer workspace, that same package root is the `rocky/` directory", "outer workspace, that same package root is the `package/` directory") }],
   ] as const) {
@@ -795,11 +799,11 @@ test("canonical release truth rejects drift in every release marker", async () =
     ["README", { ...snapshot, readme: snapshot.readme.replace("@poggufanz/rocky-cli@0.5.1", "@poggufanz/rocky-cli@9.9.9") }],
     ["README appended wrong current marker", { ...snapshot, readme: `${snapshot.readme}\nCurrent release: \`@wrong/rocky@9.9.9\`.\n` }],
     ["README duplicate current marker", { ...snapshot, readme: `${snapshot.readme}\n${canonicalCurrentMarker}. Duplicate marker.\n` }],
-    ["README current roadmap", { ...snapshot, readme: snapshot.readme.replace("v0.4 — his diligence (implemented)", "v0.4 — his diligence (current release)") }],
-    ["README roadmap v0.6", { ...snapshot, readme: snapshot.readme.replace("v0.5 — his curiosity", "v0.6 — his curiosity") }],
-    ["README roadmap v0.5.0.1", { ...snapshot, readme: snapshot.readme.replace("v0.5 — his curiosity", "v0.5.0.1 — his curiosity") }],
-    ["README roadmap v0.5-beta", { ...snapshot, readme: snapshot.readme.replace("v0.5 — his curiosity", "v0.5-beta — his curiosity") }],
-    ["README second current marker", { ...snapshot, readme: snapshot.readme.replace("v0.4 — his diligence (implemented)", "v0.4 — his diligence (current release)") }],
+    ["README current roadmap", { ...snapshot, readme: snapshot.readme.replace("v0.4 - his diligence (implemented)", "v0.4 - his diligence (current release)") }],
+    ["README roadmap v0.6", { ...snapshot, readme: snapshot.readme.replace("v0.5 - his curiosity", "v0.6 - his curiosity") }],
+    ["README roadmap v0.5.0.1", { ...snapshot, readme: snapshot.readme.replace("v0.5 - his curiosity", "v0.5.0.1 - his curiosity") }],
+    ["README roadmap v0.5-beta", { ...snapshot, readme: snapshot.readme.replace("v0.5 - his curiosity", "v0.5-beta - his curiosity") }],
+    ["README second current marker", { ...snapshot, readme: snapshot.readme.replace("v0.4 - his diligence (implemented)", "v0.4 - his diligence (current release)") }],
     ["CHANGELOG", { ...snapshot, changelog: snapshot.changelog.replace("## 0.5.1", "## 9.9.9") }],
     ["CHANGELOG duplicate expected section", { ...snapshot, changelog: duplicateChangelogHeading }],
     ["README publication claim", { ...snapshot, readme: `${snapshot.readme}\nThe npm package was published to npm.\n` }],

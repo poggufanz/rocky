@@ -802,8 +802,8 @@ test("malformed or inconsistent Git apply numstat framing is incomplete and inte
   }
 });
 
-test("README and pre-push hook document the same clean/incomplete mapping", () => {
-  const readme = readFileSync(join(packageRoot, "README.md"), "utf8");
+test("behavior reference and pre-push hook document the same clean/incomplete mapping", () => {
+  const readme = readFileSync(join(packageRoot, "docs", "reference.md"), "utf8");
   const hook = readFileSync(join(packageRoot, "src", "check", "pre-push.ts"), "utf8");
   assert.match(readme, /no git repository.*exits? 2|exits? 2.*no git repository/is);
   assert.match(readme, /pre-push.*incomplete.*exit 0/is);
