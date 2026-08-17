@@ -35,9 +35,31 @@ export interface FailureRecord {
   platform?: NodeJS.Platform;
 }
 
-export type LinkBasis = "identity" | "signature" | "program";
+/** Basis values a current writer may emit. `sequence` is read/ranked only; no writer emits it yet. */
+export type KnownLinkBasis = "identity" | "signature" | "program" | "sequence";
+/** Durable evidence may carry a basis older/newer than this reader's known set; keep it readable. */
+export type LinkBasis = string;
 export type LinkConfidence = "confirmed" | "possible";
 export interface FixLink { id: string; basis: LinkBasis; confidence?: LinkConfidence }
+
+const LINK_BASIS_RANK: ReadonlyMap<KnownLinkBasis, number> = new Map([
+  ["identity", 0],
+  ["signature", 1],
+  ["program", 2],
+  ["sequence", 3],
+]);
+
+const CONFIRMABLE_LINK_BASES: ReadonlySet<KnownLinkBasis> = new Set(["identity", "signature"]);
+
+/** Display/ranking order: identity 0, signature 1, program 2, sequence 3, unknown 4. */
+export function linkBasisRank(basis: string): number {
+  return LINK_BASIS_RANK.get(basis as KnownLinkBasis) ?? 4;
+}
+
+/** Only `identity` and `signature` may ever back a confirmed presentation. */
+export function isConfirmableLinkBasis(basis: string): boolean {
+  return CONFIRMABLE_LINK_BASES.has(basis as KnownLinkBasis);
+}
 
 export interface FixRecord {
   kind: "fix";
@@ -622,8 +644,13 @@ function parseMemoryRecordUnsafe(value: unknown): MemoryRecord | undefined {
     const candidateFailureIds = strings(record.candidateFailureIds);
     const identity = identityFields(record);
     const links = parseFixLinks(record.links);
+    // An association may never carry evidence strong enough to back a
+    // confirmed presentation (identity/signature). Program, sequence, and
+    // unknown bases are all valid weak evidence; a link with no confidence at
+    // all is not "not possible" and must not reject the record on its own.
     if (!candidateFailureIds || !identity || !links || typeof record.cmd !== "string" ||
-        links.some((link) => link.confidence !== "possible" || link.basis !== "program")) return undefined;
+        links.some((link) => isConfirmableLinkBasis(link.basis) ||
+          (link.confidence !== undefined && link.confidence !== "possible"))) return undefined;
     return {
       kind: "association", id: record.id, ts: Number(record.ts), cwd: record.cwd, cmd: record.cmd,
       candidateFailureIds, links, ...identity,
@@ -744,17 +771,30 @@ function parseFixLinks(value: unknown): FixLink[] | undefined {
     let bytes = 0;
     for (let index = 0; index < length; index += 1) {
       const obj = objectValue(value[index]);
+      // `basis` is a bounded, control-character-free string rather than a
+      // closed whitelist: a future writer basis value must stay readable
+      // here (invariant section 2.7), not drop the whole record. Unknown
+      // bases are bounded the same way `id` already is, so a hostile file
+      // cannot grow a record past the envelope through basis strings.
       if (!obj || typeof obj.id !== "string" || obj.id.length === 0 || obj.id.length > MAX_RECORD_ITEM_CHARS
           || /[\u0000-\u001f\u007f-\u009f]/u.test(obj.id) ||
-          (obj.basis !== "identity" && obj.basis !== "signature" && obj.basis !== "program") ||
+          typeof obj.basis !== "string" || obj.basis.length === 0 || obj.basis.length > MAX_RECORD_ITEM_CHARS ||
+          /[\u0000-\u001f\u007f-\u009f]/u.test(obj.basis) ||
           (obj.confidence !== undefined && obj.confidence !== "confirmed" && obj.confidence !== "possible")) return undefined;
       const idBytes = Buffer.byteLength(obj.id, "utf8");
-      if (bytes + idBytes > MAX_RECORD_ARRAY_BYTES) return undefined;
-      bytes += idBytes;
+      const basisBytes = Buffer.byteLength(obj.basis, "utf8");
+      if (bytes + idBytes + basisBytes > MAX_RECORD_ARRAY_BYTES) return undefined;
+      bytes += idBytes + basisBytes;
+      // An unknown (or `sequence`) basis can never present as confirmed
+      // (invariants section 2.1, 2.5). Downgrade on read; never invent a
+      // value when the record carried no confidence at all.
+      const confidence: LinkConfidence | undefined = obj.confidence === undefined
+        ? undefined
+        : (!isConfirmableLinkBasis(obj.basis) && obj.confidence === "confirmed" ? "possible" : obj.confidence);
       links.push({
         id: obj.id,
         basis: obj.basis,
-        ...(obj.confidence === undefined ? {} : { confidence: obj.confidence }),
+        ...(confidence === undefined ? {} : { confidence }),
       });
     }
     return links;
