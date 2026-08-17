@@ -438,6 +438,28 @@ function publishTarget(rc: string, label: string, staged: Buffer, prior: BytesRe
   if (prior.status === "valid" && prior.mode !== undefined && (prior.mode & 0o200) === 0) {
     say(label === "bashrc" ? phrase("bashrc-write-protected") : `${label} is write-protected. I replace it anyway. your lines stay.`);
   }
+  // F1: the target's parent directory is bashrc's inherited assumption --
+  // $HOME always exists, so bashrc never needed this. `$PROFILE` breaks that
+  // assumption: `Documents\WindowsPowerShell\` is not created by a default
+  // Windows install, only by a user who has already customized their profile
+  // once, so a default-state user hits ENOENT here on the very first
+  // install. Recursive mkdir is idempotent (a no-op when the directory
+  // already exists, the bashrc case on every real machine), and this runs
+  // only here, immediately before the write it exists to enable -- every
+  // earlier refusal above (settle, symlink/non-regular/multi-link, corrupt
+  // block) has already had its chance to stop this call before anything is
+  // created. A failure here is reported with its own message, distinct from
+  // the write failure below: "directory missing" and "cannot write" send a
+  // user to check two different things, and the pre-fix message sent every
+  // reader to check disk space and permissions when the real problem was
+  // that the directory was never there to write into.
+  try {
+    mkdirSync(dirname(rc), { recursive: true });
+  } catch {
+    say(`${label}'s folder does not exist. I cannot make it. I touch nothing. check permissions, then try again.`);
+    detail(`${label}: ${rc}`);
+    return { exit: 1 };
+  }
   let result: ConditionalBytesWriteResult;
   try {
     result = atomicWriteBytesIfUnchanged(rc, staged, prior);
