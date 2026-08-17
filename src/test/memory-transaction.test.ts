@@ -231,6 +231,7 @@ function tripleLockContentionPreload(path: string): void {
     "const originalRandomBytes = crypto.randomBytes.bind(crypto);",
     "const originalWait = Atomics.wait.bind(Atomics);",
     "let failedOpen = false;",
+    "let waits = 0;",
     "fs.openSync = (path, ...args) => {",
     "  try { return originalOpen(path, ...args); }",
     "  catch (error) {",
@@ -246,8 +247,25 @@ function tripleLockContentionPreload(path: string): void {
     "  return value;",
     "};",
     "Atomics.wait = (typedArray, index, value, timeout) => {",
-    "  if (process.env.ROCKY_TEST_ROLE === 'contender' && typeof timeout === 'number') fs.appendFileSync(process.env.ROCKY_TEST_WAITS, `${timeout}\\n`);",
-    "  return originalWait(typedArray, index, value, timeout);",
+    "  let result;",
+    "  if (process.env.ROCKY_TEST_ROLE === 'contender' && typeof timeout === 'number') {",
+    "    const count = ++waits;",
+    "    fs.appendFileSync(process.env.ROCKY_TEST_WAITS, `${timeout}\\n`);",
+    "    result = originalWait(typedArray, index, value, timeout);",
+    "    if (count === 4) {",
+    "      fs.writeFileSync(process.env.ROCKY_TEST_PHASED_READY, 'ready');",
+    "      const gateSignal = new Int32Array(new SharedArrayBuffer(4));",
+    "      const gateDeadline = Date.now() + 10_000;",
+    "      while (!fs.existsSync(process.env.ROCKY_TEST_PHASED_ALLOW)) {",
+    "        if (Date.now() >= gateDeadline) throw new Error('contention release gate timed out');",
+    "        originalWait(gateSignal, 0, 0, 5);",
+    "      }",
+    "      if (fs.existsSync(process.env.ROCKY_TEST_LOCK)) throw new Error('contention gate observed live lock');",
+    "    }",
+    "  } else {",
+    "    result = originalWait(typedArray, index, value, timeout);",
+    "  }",
+    "  return result;",
     "};",
     "syncBuiltinESMExports();",
   ].join("\n"), "utf8");
@@ -396,6 +414,8 @@ test("contended triple lock phases bounded polling and waits for holder release"
   const holderDone = join(home, "holder-done");
   const contenderDone = join(home, "contender-done");
   const release = join(home, "release-holder");
+  const contenderGateReady = join(home, "contender-gate-ready");
+  const contenderGateAllow = join(home, "contender-gate-allow");
   const order = join(home, "lock-order.log");
   const waits = join(home, "lock-waits.log");
   const preload = join(home, "lock-contention.cjs");
@@ -441,6 +461,7 @@ test("contended triple lock phases bounded polling and waits for holder release"
   ], { env: holderEnv, stdio: ["ignore", "ignore", "pipe"], windowsHide: true });
   t.after(() => {
     try { writeFileSync(release, "cleanup"); } catch { /* best effort */ }
+    try { writeFileSync(contenderGateAllow, "cleanup"); } catch { /* best effort */ }
     try { holder.kill(); } catch { /* already gone */ }
   });
   const holderResult = completionWithStderr(holder);
@@ -450,25 +471,29 @@ test("contended triple lock phases bounded polling and waits for holder release"
     "--input-type=module", "--eval", contenderWorker,
     memoryModuleUrl, home, contenderDone,
   ], {
-    env: { ...commonEnv, ROCKY_TEST_ROLE: "contender", NODE_OPTIONS: `--require=${preload}` },
+    env: {
+      ...commonEnv,
+      ROCKY_TEST_ROLE: "contender",
+      ROCKY_TEST_PHASED_READY: contenderGateReady,
+      ROCKY_TEST_PHASED_ALLOW: contenderGateAllow,
+      NODE_OPTIONS: `--require=${preload}`,
+    },
     stdio: ["ignore", "ignore", "pipe"],
     windowsHide: true,
   });
   t.after(() => { try { contender.kill(); } catch { /* already gone */ } });
+  const contenderResult = completionWithStderr(contender);
 
-  await waitFor(() => {
-    if (!existsSync(waits)) return false;
-    return readFileSync(waits, "utf8").trim().split("\n").filter(Boolean).length >= 4;
-  }, 10_000, "phased contender waits");
+  await waitFor(() => existsSync(contenderGateReady), 10_000, "phased contender waits");
   writeFileSync(release, "release", "utf8");
-
-  const [holderOutcome, contenderOutcome] = await Promise.all([
-    holderResult,
-    completionWithStderr(contender),
-  ]);
+  const holderOutcome = await holderResult;
   assert.equal(holderOutcome.code, 0, holderOutcome.stderr);
-  assert.equal(contenderOutcome.code, 0, contenderOutcome.stderr);
   assert.equal(existsSync(holderDone), true);
+  assert.equal(existsSync(lock), false);
+  writeFileSync(contenderGateAllow, "allow", "utf8");
+  const contenderOutcome = await contenderResult;
+
+  assert.equal(contenderOutcome.code, 0, contenderOutcome.stderr);
   assert.equal(existsSync(contenderDone), true);
 
   const events = readFileSync(order, "utf8").trim().split("\n").filter(Boolean);
@@ -479,7 +504,7 @@ test("contended triple lock phases bounded polling and waits for holder release"
   assert.equal(events.includes("random-before-failed"), false, `token was drawn before failed open: ${events.join(",")}`);
 
   const durations = readFileSync(waits, "utf8").trim().split("\n").filter(Boolean).map(Number);
-  assert.ok(durations.length >= 4, `expected repeated waits: ${durations.join(",")}`);
+  assert.equal(durations.length, 4, `expected four same-owner waits: ${durations.join(",")}`);
   assert.ok(durations[0] >= 5 && durations[0] <= 11, `initial wait must be PID-phased: ${durations[0]}`);
   for (let index = 1; index < durations.length; index++) {
     assert.equal(durations[index], Math.min(durations[index - 1] + 5, 50), `wait ${index} must increase by 5 ms`);
