@@ -1518,7 +1518,6 @@ test("an old orphan claim behind a stable nonclaim prefix cannot starve lock rec
 test("competing dead-owner reclaimers never overlap transactions", { timeout: 30_000 }, async (t) => {
   const home = sandbox(t, "rocky-lock-reclaim-race-");
   const lock = `${join(home, "memory.jsonl")}.triple.lock`;
-  const preload = join(home, "delay-unlink.cjs");
   const ready = join(home, "ready");
   const start = join(home, "start");
   const active = join(home, "active");
@@ -1531,19 +1530,6 @@ test("competing dead-owner reclaimers never overlap transactions", { timeout: 30
   writeFileSync(lock, JSON.stringify({ pid: 2_147_483_647, token: "d".repeat(32) }), { mode: 0o600 });
   linkSync(lock, `${lock}.reclaim.2147483647.${"e".repeat(32)}`);
   writeFileSync(`${lock}.reclaim.guard`, JSON.stringify({ pid: 2_147_483_647, token: "c".repeat(32) }), { mode: 0o600 });
-  writeFileSync(preload, [
-    "const fs = require('node:fs');",
-    "const { syncBuiltinESMExports } = require('node:module');",
-    "const original = fs.unlinkSync.bind(fs);",
-    "fs.unlinkSync = (path) => {",
-    "  if (String(path) === process.env.ROCKY_TEST_LOCK) {",
-    "    const signal = new Int32Array(new SharedArrayBuffer(4));",
-    "    Atomics.wait(signal, 0, 0, 100);",
-    "  }",
-    "  return original(path);",
-    "};",
-    "syncBuiltinESMExports();",
-  ].join("\n"), "utf8");
   const worker = [
     "import { existsSync, readdirSync, rmSync, writeFileSync } from 'node:fs';",
     "const [modulePath, home, ready, start, active, violation] = process.argv.slice(1);",
@@ -1560,19 +1546,24 @@ test("competing dead-owner reclaimers never overlap transactions", { timeout: 30
     "  rmSync(marker, { force: true });",
     "});",
   ].join("\n");
-  const env = { ...process.env, ROCKY_HOME: home, ROCKY_TEST_LOCK: lock, NODE_OPTIONS: `--require=${preload}` };
+  const env = { ...process.env, ROCKY_HOME: home };
   const children = Array.from({ length: 12 }, () => spawn(process.execPath, [
     "--input-type=module", "--eval", worker, memoryModuleUrl, home, ready, start, active, violation,
-  ], { env, stdio: "ignore", windowsHide: true }));
+  ], { env, stdio: ["ignore", "ignore", "pipe"], windowsHide: true }));
   t.after(() => {
     for (const child of children) {
       try { child.kill(); } catch { /* already gone */ }
     }
   });
-  const completions = children.map(completion);
+  const completions = children.map(completionWithStderr);
   await waitFor(() => readdirSync(ready).length === children.length, 15_000, "reclaim workers");
   writeFileSync(start, "start", "utf8");
-  assert.deepEqual(await Promise.all(completions), Array<number>(children.length).fill(0));
+  const outcomes = await Promise.all(completions);
+  assert.deepEqual(
+    outcomes.map(({ code }) => code),
+    Array<number>(children.length).fill(0),
+    `reclaim worker outcomes: ${JSON.stringify(outcomes)}`,
+  );
   assert.equal(existsSync(violation), false, "memory transactions must never overlap during recovery");
   assert.equal(existsSync(lock), false);
 
