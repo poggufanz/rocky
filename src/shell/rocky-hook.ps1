@@ -68,24 +68,94 @@ $global:__rockyInnerPromptBlock = if ($__rockyInnerPromptText) {
     $null
 }
 
-# Windows PowerShell 5.1 (PSEdition "Desktop") has a long-standing native-
-# argument-passing bug, empirically reproduced and fixed in this release
-# (task-4-report.md): a captured command string containing an embedded
-# double-quote -- e.g. `cmd /c "exit 9" | Out-Null`, an entirely ordinary
-# command -- arrives at the spawned `rocky` process split into TWO argv
-# elements instead of one, corrupting the recorded command text and shifting
-# every positional argument after it (exit code, cwd). Doubling each embedded
-# `"` is the verified workaround on Desktop edition. PowerShell 7.x (PSEdition
-# "Core") never had this bug and passes the same string through correctly
-# unmodified -- doubling there was verified to actively break it (a literal
-# doubled quote lands in the argument PS7 already passed through fine), so
-# this only ever applies on Desktop edition. `(Get-Location).Path` needs no
-# such handling: `"` is a reserved character no Windows path can ever contain.
-function global:__rockyNativeArg([string]$value) {
+# Every embedded double-quote is backslash-escaped, on BOTH editions --
+# `Start-Process`'s own argument-list-to-native-command-line construction
+# uses the C-runtime/CommandLineToArgvW convention on Windows PowerShell 5.1
+# AND PowerShell 7.x alike (verified empirically, fix round 1, task-4-
+# report.md): a captured command string containing an embedded double-quote
+# -- e.g. `cmd /c "exit 9" | Out-Null`, an entirely ordinary command -- was
+# reproduced arriving at the spawned `rocky` process split into the wrong
+# number of argv elements on both hosts without this. This is a genuinely
+# different quoting convention than the ORIGINAL synchronous `&` call needed
+# (doubling, Desktop-only, since replaced) -- two different PowerShell
+# invocation mechanisms turned out to need two different fixes; verified
+# doubling here (the old fix) actively breaks PowerShell 7's `Start-Process`
+# path (a literal doubled quote lands where PS7 previously passed the
+# argument through correctly), so backslash-escaping is now the only form
+# used, unconditionally. `(Get-Location).Path` needs no such handling: `"`
+# is a reserved character no Windows path can ever contain.
+function global:__rockyQuoteArg([string]$value) {
+    return '"' + ($value -replace '"', '\"') + '"'
+}
+
+# A real npm-installed `.ps1` shim (confirmed against a real one on this
+# machine, C:\...\npm\bunx.ps1 and the same shape every npm `bin` entry gets)
+# is literally `& "<real executable>" $args` -- one more native-argument
+# hop Rocky's own code does not control the source of. On Windows PowerShell
+# 5.1 that inner hop needs the SAME doubling convention the original
+# synchronous call needed (Desktop-only, verified empirically, fix round 1);
+# on PowerShell 7 the inner hop already passes strings through correctly, so
+# adding doubling there would corrupt it a second time. This pre-compensates
+# ONLY for that inner hop, Desktop-only, BEFORE `__rockyQuoteArg` above
+# handles the outer `Start-Process` hop -- verified empirically, both hosts,
+# against a shim reproducing the real npm template exactly, that composing
+# the two in this order (pre-compensate, then quote) is the only combination
+# that survives both hops intact on Windows PowerShell 5.1 without breaking
+# PowerShell 7's already-correct inner hop.
+function global:__rockyPreCompensateForShim([string]$value) {
     if ($PSVersionTable.PSEdition -eq 'Desktop') {
         return $value -replace '"', '""'
     }
     return $value
+}
+
+# Fire-and-forget (Finding 1, fix round 1): the shell must never block on
+# Rocky's own bookkeeping the way the original synchronous `& $__rockyBin
+# ...` call did -- on a machine with real-time AV scanning of newly-spawned
+# processes, that became a repeated, perceptible stall on every denylist-
+# passing command. `-NoNewWindow`, not `-WindowStyle Hidden`, is load-
+# bearing: `-WindowStyle Hidden` allocates a NEW, separate (merely invisible)
+# console for the child, and sayTty/detailTty's `\\.\CON` write would then
+# reach THAT hidden console instead of the user's own, silently muting every
+# hookFail/hookSuccess message forever -- verified this failure mode is real
+# by checking what `-NoNewWindow` shares instead: the calling session's own
+# console, the same sharing the synchronous `&` call already relied on.
+# Verified empirically, both hosts (task-4-report.md): a real Node child
+# spawned this way still reaches `\\.\CON` exactly like the synchronous path
+# did, is genuinely non-blocking (returns in ~50-140ms regardless of how long
+# the spawned `rocky` process itself takes), and correctly preserves every
+# argument's own embedded spaces and quotes via `__rockyQuoteArg` above.
+# Output is redirected to real discard files under the temp directory, never
+# the bare device name "NUL" -- the `\\.\CON` investigation already proved a
+# bare reserved device name can silently become an ordinary file under some
+# invocation layers, and this function never re-litigates that risk for a
+# second device name. A `.ps1` target (the real npm-installed shim) cannot be
+# launched directly by `Start-Process` -- routed through the same PowerShell
+# executable this session is already running under, whichever host or
+# install location that turns out to be.
+function global:__rockySpawnDetached([string]$exe, [string[]]$scriptArgs) {
+    try {
+        $resolved = Get-Command $exe -ErrorAction SilentlyContinue
+        if (-not $resolved) { return }
+        $target = $resolved.Source
+        $discardOut = Join-Path ([System.IO.Path]::GetTempPath()) 'rocky-hook-stdout.log'
+        $discardErr = Join-Path ([System.IO.Path]::GetTempPath()) 'rocky-hook-stderr.log'
+        if ($target -match '\.ps1$') {
+            $hostExe = (Get-Process -Id $PID).Path
+            $compensated = $scriptArgs | ForEach-Object { __rockyPreCompensateForShim $_ }
+            $quotedArgs = $compensated | ForEach-Object { __rockyQuoteArg $_ }
+            $allArgs = @('-NoProfile', '-NonInteractive', '-File', (__rockyQuoteArg $target)) + $quotedArgs
+            Start-Process -FilePath $hostExe -ArgumentList $allArgs -NoNewWindow `
+                -RedirectStandardOutput $discardOut -RedirectStandardError $discardErr -ErrorAction Stop | Out-Null
+        } else {
+            $quotedArgs = $scriptArgs | ForEach-Object { __rockyQuoteArg $_ }
+            Start-Process -FilePath $target -ArgumentList $quotedArgs -NoNewWindow `
+                -RedirectStandardOutput $discardOut -RedirectStandardError $discardErr -ErrorAction Stop | Out-Null
+        }
+    } catch {
+        # A broken spawn must never reach the user as a terminating error --
+        # same contract every other fallible step in this file already keeps.
+    }
 }
 
 function global:prompt {
@@ -126,11 +196,34 @@ function global:prompt {
                 $__rockyCmd = $__rockyHistory.CommandLine
                 $__rockyFirstWord = ($__rockyCmd.TrimStart() -split '\s+', 2)[0]
                 # Denylist mirrors __rocky_precmd's case "$first_word" in
-                # rocky-hook.bash: shell navigation and Rocky's own
-                # invocations carry no information worth remembering, and a
-                # naive hook would double-record `rocky run` failures on top
-                # of run.ts's own deep record.
-                if ($__rockyFirstWord -notin @('cd', 'Set-Location', 'rocky') -and $__rockyCmd -notmatch '^\s*rocky\b') {
+                # rocky-hook.bash (cd|pushd|popd|export|alias|source|.|rocky),
+                # each entry translated to its PowerShell equivalent rather
+                # than copied as a literal string (fix round 1, Finding 3 --
+                # the narrower first draft here let a failing interactive
+                # dot-source, or Push-Location/Pop-Location, get recorded as
+                # hook-origin noise where Bash would have silently skipped
+                # it): cd -> cd/Set-Location; pushd/popd -> the identically-
+                # named PowerShell aliases plus their full cmdlet names
+                # Push-Location/Pop-Location; alias -> Set-Alias/New-Alias;
+                # source/. -> `.` (PowerShell has no separate "source"
+                # keyword -- dot-sourcing is the only spelling, and it is
+                # idiomatic and heavily used, exactly the gap this round
+                # closes). `export` has no PowerShell entry: PowerShell's
+                # nearest equivalent, `$env:X = 1`, is a variable assignment
+                # whose first word is the variable reference itself, not a
+                # command name -- there is no first-word form to denylist,
+                # so nothing was silently dropped in translation. Shell
+                # navigation and Rocky's own invocations carry no information
+                # worth remembering, and a naive hook would double-record
+                # `rocky run` failures on top of run.ts's own deep record.
+                if ($__rockyFirstWord -notin @(
+                    'cd', 'Set-Location',
+                    'pushd', 'Push-Location',
+                    'popd', 'Pop-Location',
+                    'alias', 'Set-Alias', 'New-Alias',
+                    '.',
+                    'rocky'
+                ) -and $__rockyCmd -notmatch '^\s*rocky\b') {
                     $__rockyHome = if ($env:ROCKY_HOME) { $env:ROCKY_HOME } else { Join-Path $HOME '.rocky' }
                     $__rockyBin = if ($env:ROCKY_BIN) { $env:ROCKY_BIN } else { 'rocky' }
                     if (-not (Get-Command $__rockyBin -ErrorAction SilentlyContinue)) {
@@ -167,13 +260,12 @@ function global:prompt {
                         # $null before any native command has ever run, and
                         # `$null -ne 0` is $true in PowerShell.
                         $__rockyFailed = -not $__rockyQ
-                        $__rockyCmdArg = __rockyNativeArg $__rockyCmd
                         if ($__rockyFailed) {
                             $__rockyNativeFailed = ($__rockyExit -ne $null) -and ($__rockyExit -ne 0)
                             $__rockyEffectiveExit = if ($__rockyNativeFailed) { $__rockyExit } else { 1 }
-                            & $__rockyBin _hookfail $__rockyCmdArg $__rockyEffectiveExit (Get-Location).Path *> $null
+                            __rockySpawnDetached $__rockyBin @('_hookfail', $__rockyCmd, "$__rockyEffectiveExit", (Get-Location).Path)
                         } elseif (Test-Path (Join-Path $__rockyHome 'pending')) {
-                            & $__rockyBin _hooksuccess $__rockyCmdArg (Get-Location).Path *> $null
+                            __rockySpawnDetached $__rockyBin @('_hooksuccess', $__rockyCmd, (Get-Location).Path)
                         }
                     }
                 }
