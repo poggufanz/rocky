@@ -149,22 +149,64 @@ function global:__rockyPreCompensateForShim([string]$value) {
 # by `Start-Process` -- routed through the same PowerShell executable this
 # session is already running under, whichever host or install location that
 # turns out to be.
+#
+# F2 (task-a-brief, manual PowerShell checklist): this spawn's own
+# console write can never be ordered correctly against THIS session's next
+# prompt draw -- it lands on `\\.\CON` whenever the child process happens to
+# reach that statement, asynchronously, unrelated to when Start-Process
+# itself returns. Proven on a real console (findings doc): the write arrives
+# after the prompt is already drawn (sometimes mid-message, truncated), or
+# lands on top of whatever the user has already started typing. A detached
+# child writing straight to the shared console device has no way to fix
+# this from its side -- nothing it does can make its own write race-free
+# against a sibling process's read-eval-print loop.
+#
+# ROCKY_HOOK_SPEECH_FILE is the fix: set only around this one spawn, to a
+# path unique to this invocation, so sayTty/detailTty (ui/rocky.ts) buffer
+# their lines instead of writing the console, and publish them as one
+# atomic unit under that exact name once this specific handler finishes.
+# `prompt` below is the only reader, and the only place this file's speech
+# is ever printed: correctly ordered there because nothing else runs
+# between that print and the prompt string `prompt` itself returns.
+#
+# Set/restore, not set/leave: Start-Process (CreateProcess underneath)
+# snapshots the parent's environment block once, at spawn time, so clearing
+# this session's own copy immediately after issuing the spawn cannot
+# un-deliver it to the already-launched child, and it can never leak into
+# an environment variable a command the user types themselves might read.
+# A fresh GUID per call (not a fixed name) is Finding 5's exact lesson
+# applied here too: two overlapping spawns must never collide on one name,
+# or the second rename silently discards the first message before `prompt`
+# ever reads it.
 function global:__rockySpawnDetached([string]$exe, [string[]]$scriptArgs) {
     try {
         $resolved = Get-Command $exe -ErrorAction SilentlyContinue
         if (-not $resolved) { return }
         $target = $resolved.Source
-        if ($target -match '\.ps1$') {
-            $hostExe = (Get-Process -Id $PID).Path
-            $compensated = $scriptArgs | ForEach-Object { __rockyPreCompensateForShim $_ }
-            $quotedArgs = $compensated | ForEach-Object { __rockyQuoteArg $_ }
-            $allArgs = @('-NoProfile', '-NonInteractive', '-File', (__rockyQuoteArg $target)) + $quotedArgs
-            Start-Process -FilePath $hostExe -ArgumentList $allArgs -NoNewWindow `
-                -RedirectStandardOutput '\\.\NUL' -RedirectStandardError 'NUL' -ErrorAction Stop | Out-Null
-        } else {
-            $quotedArgs = $scriptArgs | ForEach-Object { __rockyQuoteArg $_ }
-            Start-Process -FilePath $target -ArgumentList $quotedArgs -NoNewWindow `
-                -RedirectStandardOutput '\\.\NUL' -RedirectStandardError 'NUL' -ErrorAction Stop | Out-Null
+
+        $__rockyHomeForSpeech = if ($env:ROCKY_HOME) { $env:ROCKY_HOME } else { Join-Path $HOME '.rocky' }
+        $speechFile = Join-Path (Join-Path $__rockyHomeForSpeech 'hook-speech') "$([System.Guid]::NewGuid().ToString('N')).txt"
+        $previousSpeechFile = $env:ROCKY_HOOK_SPEECH_FILE
+        $env:ROCKY_HOOK_SPEECH_FILE = $speechFile
+        try {
+            if ($target -match '\.ps1$') {
+                $hostExe = (Get-Process -Id $PID).Path
+                $compensated = $scriptArgs | ForEach-Object { __rockyPreCompensateForShim $_ }
+                $quotedArgs = $compensated | ForEach-Object { __rockyQuoteArg $_ }
+                $allArgs = @('-NoProfile', '-NonInteractive', '-File', (__rockyQuoteArg $target)) + $quotedArgs
+                Start-Process -FilePath $hostExe -ArgumentList $allArgs -NoNewWindow `
+                    -RedirectStandardOutput '\\.\NUL' -RedirectStandardError 'NUL' -ErrorAction Stop | Out-Null
+            } else {
+                $quotedArgs = $scriptArgs | ForEach-Object { __rockyQuoteArg $_ }
+                Start-Process -FilePath $target -ArgumentList $quotedArgs -NoNewWindow `
+                    -RedirectStandardOutput '\\.\NUL' -RedirectStandardError 'NUL' -ErrorAction Stop | Out-Null
+            }
+        } finally {
+            if ($null -eq $previousSpeechFile) {
+                Remove-Item Env:\ROCKY_HOOK_SPEECH_FILE -ErrorAction SilentlyContinue
+            } else {
+                $env:ROCKY_HOOK_SPEECH_FILE = $previousSpeechFile
+            }
         }
     } catch {
         # A broken spawn must never reach the user as a terminating error --
@@ -204,6 +246,42 @@ function global:prompt {
 
     try {
         if (-not $global:__rockyDisabled -and -not $env:ROCKY_OFF) {
+            # F2: print whatever a previous detached spawn buffered instead
+            # of writing the console directly (see __rockySpawnDetached and
+            # ui/rocky.ts's flushHookSpeech). This is the only place any
+            # hook-origin speech is ever printed on PowerShell now, and it is
+            # correctly ordered here: nothing else in this function writes
+            # the console between this loop and the prompt string returned
+            # at the very end, so a message is never interleaved with the
+            # prompt draw or with whatever the user is already typing.
+            #
+            # A message is necessarily at least one prompt cycle behind the
+            # command it describes -- the child that produced it is still
+            # running, somewhere, when THIS prompt call starts; that lag is
+            # not a bug, it is fix round 1's non-blocking spawn (Finding 1)
+            # doing exactly what it was built to do. Only files matching the
+            # published name pattern are ever read: __rockySpawnDetached's
+            # writer only creates a name under that pattern via an atomic
+            # rename, so a reader here can never observe a half-written
+            # message. One bad/vanished entry is skipped, not fatal to the
+            # rest -- matches this file's existing rule that a broken step
+            # here must never reach the user as a terminating error.
+            $__rockyHomeForSpeech = if ($env:ROCKY_HOME) { $env:ROCKY_HOME } else { Join-Path $HOME '.rocky' }
+            $__rockySpeechDir = Join-Path $__rockyHomeForSpeech 'hook-speech'
+            if (Test-Path -LiteralPath $__rockySpeechDir) {
+                $__rockySpeechFiles = Get-ChildItem -LiteralPath $__rockySpeechDir -Filter '*.txt' -File -ErrorAction SilentlyContinue
+                foreach ($__rockySpeechEntry in $__rockySpeechFiles) {
+                    try {
+                        $__rockySpeechText = Get-Content -LiteralPath $__rockySpeechEntry.FullName -Raw -ErrorAction Stop
+                        if ($__rockySpeechText) { [Console]::Error.Write($__rockySpeechText) }
+                    } catch {
+                        # unreadable/vanished between listing and reading -- skip, never fatal
+                    } finally {
+                        Remove-Item -LiteralPath $__rockySpeechEntry.FullName -Force -ErrorAction SilentlyContinue
+                    }
+                }
+            }
+
             $__rockyHistory = Get-History -Count 1
             if ($__rockyHistory -and $__rockyHistory.Id -ne $global:__rockyLastSeenId) {
                 $global:__rockyLastSeenId = $__rockyHistory.Id
