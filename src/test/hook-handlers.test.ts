@@ -1,9 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import fs, { mkdtempSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import fs, { mkdtempSync, existsSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { spawn } from "node:child_process";
 import { commandFingerprint } from "../core/fingerprint.js";
 import { validateRockyPhrase } from "../ui/phrases.js";
 
@@ -14,12 +16,28 @@ const memory = await import("../core/memory.js");
 const { hookFail, hookSuccess } = await import("../commands/hook.js");
 
 /**
- * Hook handlers speak over /dev/tty (they run detached, stderr discarded).
- * Intercept `fs.writeFileSync` for that one path and pass every other path
- * through untouched — same technique file-transaction.test.ts and
- * hook-block.test.ts already use to observe writes a module under test makes
- * through a plain named `import { writeFileSync } from "node:fs"`.
+ * Hook handlers speak over the console device (they run detached, stderr
+ * discarded): `/dev/tty` on POSIX, `\\.\CON` on native Windows (see
+ * `ui/rocky.ts`'s `ttyDevicePath` — native Windows Node has no `/dev/tty`,
+ * so `sayTty`/`detailTty` target `\\.\CON` there instead; this interception
+ * must match whichever one the implementation actually targets on this
+ * platform, or every assertion below silently sees an empty `tty` string
+ * instead of a real interception failure). Intercept `fs.writeFileSync` for
+ * that one path and pass every other path through untouched — same
+ * technique file-transaction.test.ts and hook-block.test.ts already use to
+ * observe writes a module under test makes through a plain named
+ * `import { writeFileSync } from "node:fs"`.
+ *
+ * The bare reserved name `CON` was tried first and rejected: task-4-report.md
+ * records that `writeFileSync("CON", ...)` empirically creates an ordinary
+ * file literally named `CON` in the process's cwd, both with a console
+ * attached and fully detached/console-less (matching how hook handlers
+ * actually run) — Node's long-path handling defeats Win32's classic
+ * reserved-name interception for a bare relative path. `\\.\CON`, the
+ * explicit Win32 device-namespace form, was proven never to do that.
  */
+const TTY_DEVICE_PATH = process.platform === "win32" ? "\\\\.\\CON" : "/dev/tty";
+
 function captureTty<T>(fn: () => T): { result: T; tty: string } {
   const original = fs.writeFileSync;
   let tty = "";
@@ -28,7 +46,7 @@ function captureTty<T>(fn: () => T): { result: T; tty: string } {
     data: unknown,
     options?: fs.WriteFileOptions,
   ) => {
-    if (file === "/dev/tty") {
+    if (file === TTY_DEVICE_PATH) {
       tty += String(data);
       return;
     }
@@ -185,3 +203,48 @@ test("hookFail says nothing extra when the remembered fix's cwd matches the cwd 
 test("the elsewhere-admission line follows Rocky's voice rules", () => {
   assert.deepEqual(validateRockyPhrase("but fix comes from other place."), []);
 });
+
+/**
+ * Real (uninstrumented) `sayTty`/`detailTty`, run in a genuinely console-less
+ * child process — `stdio: "ignore"` plus `windowsHide: true` reproduces the
+ * no-window, no-console shape this codebase already uses for its other
+ * detached spawns (see `core/notify.ts`), and is the same shape task-4-report
+ * used to empirically settle the `CON` question. This is the test the task-4
+ * brief required: proof that no stray file named `CON` appears when no
+ * console is attached, using the actual shipped `ttyDevicePath()` value, not
+ * a hardcoded guess of it.
+ */
+test(
+  "sayTty/detailTty never leave a stray CON file behind when no console is attached",
+  { skip: process.platform !== "win32" && "CON-device fallback only exists on native Windows; POSIX targets /dev/tty" },
+  async () => {
+    const scratch = mkdtempSync(join(tmpdir(), "rocky-con-stray-"));
+    try {
+      const testModuleRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
+      const rockyUiModuleUrl = pathToFileURL(join(testModuleRoot, "ui", "rocky.js")).href;
+      const worker = [
+        "const [modulePath] = process.argv.slice(1);",
+        "const ui = await import(modulePath);",
+        "ui.sayTty('probe say');",
+        "ui.detailTty('probe detail');",
+      ].join("\n");
+      const child = spawn(process.execPath, ["--input-type=module", "--eval", worker, rockyUiModuleUrl], {
+        cwd: scratch,
+        stdio: "ignore",
+        windowsHide: true,
+      });
+      const exitCode: number | null = await new Promise((resolve, reject) => {
+        child.on("exit", resolve);
+        child.on("error", reject);
+      });
+      assert.equal(exitCode, 0, "the console-less child must exit cleanly on its own");
+      assert.equal(
+        existsSync(join(scratch, "CON")),
+        false,
+        "sayTty/detailTty must never create an ordinary file literally named CON",
+      );
+    } finally {
+      rmSync(scratch, { recursive: true, force: true });
+    }
+  },
+);

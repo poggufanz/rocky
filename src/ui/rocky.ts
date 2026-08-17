@@ -100,12 +100,38 @@ export function ago(ts: number): string {
 }
 
 /**
+ * The console device path a background process can still write to once its
+ * own stdio is gone. POSIX (Linux/macOS/WSL, and Git-Bash-on-Windows when
+ * Node itself is a POSIX build) keeps `/dev/tty`. Native Windows Node has no
+ * such path — `writeFileSync("/dev/tty", ...)` fails with ENOENT there (it
+ * gets parsed as a relative `dev\tty`, not a device) — so every hook-handler
+ * TTY line was silently swallowed on native Windows before this fix, which
+ * the PowerShell hook (Task 4) exposed: without it, `hookFail`/`hookSuccess`
+ * would install correctly and record memory correctly, but never actually
+ * speak to the user.
+ *
+ * The bare reserved name `CON` looked like the obvious equivalent but is
+ * unsafe: `writeFileSync("CON", ...)` was proven empirically (task-4-report,
+ * both with a console attached and fully detached/console-less, matching how
+ * hook handlers actually run) to create an ordinary 20-30 byte file literally
+ * named `CON` in the current working directory instead of reaching the
+ * console — Node's long-path handling defeats Win32's classic reserved-name
+ * interception for a bare relative path. `\\.\CON`, the explicit Win32 device
+ * namespace form, bypasses filename parsing entirely and goes straight to the
+ * device object: proven empirically, same two scenarios, to never create a
+ * stray file and never throw. That is the only form used here.
+ */
+function ttyDevicePath(): string {
+  return process.platform === "win32" ? "\\\\.\\CON" : "/dev/tty";
+}
+
+/**
  * Speak directly to the terminal from a background process (hook handlers
  * are spawned disowned with stderr discarded). No tty — no words; never throw.
  */
 export function sayTty(msg: string): void {
   try {
-    writeFileSync("/dev/tty", `[Rocky] ${safeTerminalLine(msg)}\n`);
+    writeFileSync(ttyDevicePath(), `[Rocky] ${safeTerminalLine(msg)}\n`);
   } catch {
     /* no tty (tests, CI, detached session) — Rocky stays silent */
   }
@@ -113,7 +139,7 @@ export function sayTty(msg: string): void {
 
 export function detailTty(msg: string): void {
   try {
-    writeFileSync("/dev/tty", `    ${safeTerminalLine(msg)}\n`);
+    writeFileSync(ttyDevicePath(), `    ${safeTerminalLine(msg)}\n`);
   } catch {
     /* silent */
   }
