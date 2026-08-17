@@ -41,11 +41,18 @@ class LoopbackServer {
   private readonly server: ReturnType<typeof createServer>;
   private requestWaiters: Array<(request: RequestRecord) => void> = [];
   private abortWaiters: Array<() => void> = [];
+  private requestAbortWaiters: Array<() => void> = [];
   private closeWaiters: Array<() => void> = [];
   private listening = false;
+  private closing = false;
+  private connectionAborted = false;
+  private readonly finishedSockets = new WeakSet<object>();
 
   constructor(private readonly handler: Handler) {
     this.server = createServer((incoming, response) => {
+      response.on("finish", () => {
+        if (response.socket !== null) this.finishedSockets.add(response.socket);
+      });
       const request: RequestRecord = {
         method: incoming.method ?? "",
         url: incoming.url ?? "",
@@ -59,6 +66,7 @@ class LoopbackServer {
         if (request.aborted) return;
         request.aborted = true;
         for (const waiter of this.abortWaiters.splice(0)) waiter();
+        for (const waiter of this.requestAbortWaiters.splice(0)) waiter();
       };
       incoming.on("aborted", markAborted);
       incoming.on("close", () => {
@@ -86,6 +94,22 @@ class LoopbackServer {
         void Promise.resolve(this.handler(request, response)).catch(() => response.destroy());
       });
     });
+    this.server.on("connection", (socket) => {
+      // A cancelled fetch can reset the connection before Node's HTTP parser
+      // surfaces a request; some platforms (notably Windows loopback) discard
+      // the buffered request bytes on RST, so no per-request abort event can
+      // ever fire. A connection that closes without one fully written
+      // response is therefore itself server-observed cancellation evidence.
+      socket.on("error", () => {
+        // A peer reset is expected cancellation evidence, never a crash.
+      });
+      socket.on("close", () => {
+        if (this.closing || this.finishedSockets.has(socket)) return;
+        if (this.connectionAborted) return;
+        this.connectionAborted = true;
+        for (const waiter of this.abortWaiters.splice(0)) waiter();
+      });
+    });
   }
 
   async start(): Promise<void> {
@@ -107,6 +131,7 @@ class LoopbackServer {
   async close(): Promise<void> {
     if (!this.listening) return;
     this.listening = false;
+    this.closing = true;
     const closePromise = new Promise<void>((resolve, reject) => {
       this.server.close((error) => error === undefined ? resolve() : reject(error));
     });
@@ -124,9 +149,16 @@ class LoopbackServer {
     return new Promise((resolve) => this.requestWaiters.push(resolve));
   }
 
+  /** Cancellation evidence: an aborted parsed request, or a connection torn down before any response completed. */
   waitForAbort(): Promise<void> {
-    if (this.requests.some((request) => request.aborted)) return Promise.resolve();
+    if (this.connectionAborted || this.requests.some((request) => request.aborted)) return Promise.resolve();
     return new Promise((resolve) => this.abortWaiters.push(resolve));
+  }
+
+  /** Strict per-request abort evidence for scenarios that already observed the parsed request. */
+  waitForRequestAbort(): Promise<void> {
+    if (this.requests.some((request) => request.aborted)) return Promise.resolve();
+    return new Promise((resolve) => this.requestAbortWaiters.push(resolve));
   }
 
   waitForResponseClose(): Promise<void> {
@@ -407,7 +439,7 @@ test("real loopback failures preserve deterministic recall and capture cancellat
   await boundedWait(callerAbort.waitForRequest(), "caller-abort request start");
   controller.abort(reason);
   await assert.rejects(request, reason);
-  await boundedWait(callerAbort.waitForAbort(), "caller-abort request abort", ABORT_OBSERVATION_TIMEOUT_MS);
+  await boundedWait(callerAbort.waitForRequestAbort(), "caller-abort request abort", ABORT_OBSERVATION_TIMEOUT_MS);
   assert.equal(callerAbort.requests.filter((entry) => entry.aborted).length, 1);
   await callerAbort.close();
 });
