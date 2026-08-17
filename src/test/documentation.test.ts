@@ -618,9 +618,9 @@ test("documentation names one canonical source and package root", () => {
   assert.doesNotMatch(readme, /published package version is/i);
 });
 
-test("scientific grounding keeps v0.5 learning mechanisms planned and evidence claims bounded", () => {
-  assert.match(grounding, /planned v0\.5 dictionary is designed to help close the comprehension loop/i);
-  assert.match(grounding, /asking and follow-up behavior[^\n]*planned v0\.5/i);
+test("scientific grounding keeps v0.5 learning mechanisms bounded and evidence claims honest", () => {
+  assert.match(grounding, /v0\.5 dictionary connects a user's recorded intent to the mechanism/i);
+  assert.match(grounding, /asking and follow-up behavior is implemented in the 0\.5 release line/i);
   assert.match(grounding, /consistent with/i);
   assert.ok(grounding.includes("https://pubmed.ncbi.nlm.nih.gov/25886768/"));
   assert.ok(grounding.includes("https://pmc.ncbi.nlm.nih.gov/articles/PMC7651899/"));

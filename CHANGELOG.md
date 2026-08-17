@@ -2,6 +2,19 @@
 
 Notable changes per release. Dates are the release date.
 
+## 0.5.1 — 17 August 2026
+
+### Fixed
+
+- Hull checks now distinguish a verified clean result from an uninspected workspace, preserve findings from completed ranges when a later range fails, and reject malformed Git evidence instead of treating it as clean.
+- Bounded Git patch, numstat, and name-only framing validation now covers ordinary text, binary, rename/copy, mode/type, symlink, submodule, quoted-path, and SHA-1/SHA-256 output without blocking the event loop or trusting unsupported extraction.
+- Memory, MCP, teaching, and model surfaces now keep bounded evidence, privacy, deadlines, and incomplete coverage explicit across concurrent and degraded paths.
+- Setup health/removal and package smoke paths now report actual cross-platform process and host state, including native Windows executable seams.
+
+### Changed
+
+- Release metadata, documentation, and security support policy now identify 0.5.1 as the current package line. Runtime dependencies remain at zero.
+
 ## 0.5.0 — 14 August 2026
 
 ### Added

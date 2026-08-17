@@ -532,7 +532,7 @@ function escapeRegExp(value) {
 
 export function validateReleaseTruth(snapshot) {
   const errors = [];
-  const expectedVersion = RELEASE_TAG.slice(1);
+  const expectedVersion = PACKAGE_VERSION;
   const value = objectRecord(snapshot);
   if (value === undefined) return ["release truth snapshot is not an object"];
 
@@ -573,7 +573,8 @@ export function validateReleaseTruth(snapshot) {
   const roadmap = roadmapSections.length === 1 ? roadmapSections[0] : undefined;
   const currentRoadmapLines = roadmap?.lines.filter((line) => /\(current release\)/i.test(line)) ?? [];
   const roadmapToken = /^[-*]\s+\*\*(v\d+\.\d+(?:\.\d+)?)\s+/i.exec(currentRoadmapLines[0] ?? "")?.[1];
-  const allowedRoadmapTokens = new Set([`v${expectedVersion}`, `v${expectedVersion.replace(/\.0$/, "")}`]);
+  const expectedMinorVersion = expectedVersion.split(".").slice(0, 2).join(".");
+  const allowedRoadmapTokens = new Set([`v${expectedVersion}`, `v${expectedMinorVersion}`]);
   const allowedRoadmapToken = roadmapToken !== undefined && allowedRoadmapTokens.has(roadmapToken);
   const currentReleaseLines = visibleReadmeLines.filter((line) => /^\s*Current release\s*:/i.test(line));
   const currentReleaseMarkerCount = (visibleReadmeLines.join("\n").match(/\bCurrent release\s*:/gi) ?? []).length;
