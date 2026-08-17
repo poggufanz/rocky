@@ -10,7 +10,7 @@ import { createOllamaClient } from "../ai/ollama.js";
 import { type AiAct, type AiStatus, type RecallWithAiPort } from "../ai/port.js";
 import { createRecallAiPort, formatModelExplanation, singleFlightRecallAi } from "../ai/recall-ai.js";
 import { createMemoryQueries, fixFromElsewhere, type MemoryQueries, type RecallHit } from "../core/memory-query.js";
-import { isCompleteMemoryCoverage } from "../core/memory-read.js";
+import { isCompleteMemoryCoverage, linkBasisRank } from "../core/memory-read.js";
 import { resolveRockyPaths } from "../core/state-paths.js";
 import { ago, detail, elapsed, heading, phrase, phraseForAct, say } from "../ui/rocky.js";
 import { safeTerminalBlock, safeTerminalLine } from "../ui/sanitize.js";
@@ -239,11 +239,30 @@ export async function recall(argv: readonly string[], dependencies?: RecallDepen
         const link = hit.fix.links?.find((candidate) => candidate.id === hit.failure.id);
         if (link) {
           const span = elapsed(hit.fix.ts - hit.failure.ts);
-          say(link.basis === "identity" || link.basis === "signature"
-            ? `same command, ${span} later. strong.`
-            : `same program, ${span} later. maybe not fix. check, question`);
+          if (link.basis === "identity" || link.basis === "signature") {
+            say(`same command, ${span} later. strong.`);
+          } else if (link.basis === "program") {
+            say(`same program, ${span} later. maybe not fix. check, question`);
+          } else {
+            // A recognized-but-weaker basis ("sequence") or a string this
+            // reader does not recognize yet (spec §2.5) must never grade as
+            // "same program" — that overstates evidence it doesn't have.
+            say(`different program, ${span} later. maybe not fix. check, question`);
+          }
         }
       }
+    } else if (hit.possible) {
+      // Weak candidate shown as a separate line below the hit; it never
+      // reorders results and never appears beside a confirmed fix.
+      say("no confirmed fix. but after error, you run this:");
+      detail(`    ${safeTerminalLine(hit.possible.cmd)}`);
+      if (hit.possible.fromElsewhere) {
+        say("but this comes from other place.");
+        detail(`    place: ${safeTerminalLine(hit.possible.cwd)}`);
+      }
+      say(linkBasisRank(hit.possible.basis) > linkBasisRank("program")
+        ? "different program. maybe fix, maybe not. check, question"
+        : "maybe fix, maybe not. check, question");
     } else {
       say("no fix recorded for this one. bad bad.");
     }

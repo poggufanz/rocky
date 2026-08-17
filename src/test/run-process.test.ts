@@ -97,6 +97,138 @@ test("run speech ignores a future failure at the captured clock", () => {
   assert.doesNotMatch(output, /last time, you fix with:|future\.js|future-only/);
 });
 
+test("run speech shows the top weak association candidate instead of the old no-fix text", () => {
+  const cwd = join(tmpdir(), "rocky-run-possible");
+  const cmd = "npm run broken-alpha";
+  const now = 1_800_000_000_000;
+  const failure = {
+    kind: "failure" as const, id: "run-possible-failure", ts: now - 2_000, cwd, cmd,
+    exitCode: 67, fingerprint: "run-possible-fingerprint", signature: ["synthetic failure"], excerpt: "synthetic failure",
+  };
+  const association = {
+    kind: "association" as const, id: "run-possible-association", ts: now - 1_000, cwd, cmd: "npm run unrelated-beta",
+    candidateFailureIds: [failure.id], links: [{ id: failure.id, basis: "program" as const, confidence: "possible" as const }],
+  };
+  const original = process.stderr.write;
+  let output = "";
+  process.stderr.write = ((chunk: string | Uint8Array) => { output += String(chunk); return true; }) as typeof process.stderr.write;
+  try {
+    speakFailureMemory([failure, association], failure.fingerprint, 67, cwd, now);
+  } finally {
+    process.stderr.write = original;
+  }
+  assert.match(output, /no confirmed fix\. but after error, you run this:/);
+  assert.match(output, /npm run unrelated-beta/);
+  assert.match(output, /maybe fix, maybe not\. check, question/);
+  assert.doesNotMatch(output, /no fix in memory yet/);
+});
+
+test("run speech keeps the old no-fix text unchanged, byte for byte, when no association exists", () => {
+  const cwd = join(tmpdir(), "rocky-run-no-possible");
+  const cmd = "npm run broken-alpha";
+  const now = 1_800_000_000_000;
+  const failure = {
+    kind: "failure" as const, id: "run-no-possible-failure", ts: now - 1_000, cwd, cmd,
+    exitCode: 67, fingerprint: "run-no-possible-fingerprint", signature: ["synthetic failure"], excerpt: "synthetic failure",
+  };
+  const original = process.stderr.write;
+  let output = "";
+  process.stderr.write = ((chunk: string | Uint8Array) => { output += String(chunk); return true; }) as typeof process.stderr.write;
+  try {
+    speakFailureMemory([failure], failure.fingerprint, 67, cwd, now);
+  } finally {
+    process.stderr.write = original;
+  }
+  assert.ok(output.includes("no fix in memory yet. you fix, I remember. this is good trade."));
+  assert.doesNotMatch(output, /no confirmed fix\. but after error, you run this:/);
+});
+
+test("run speech never overrides or duplicates a confirmed fix with an association", () => {
+  const cwd = join(tmpdir(), "rocky-run-confirmed-and-possible");
+  const cmd = "node stable-command.js";
+  const now = 1_800_000_000_000;
+  const failure = {
+    kind: "failure" as const, id: "run-confirmed-failure", ts: now - 3_000, cwd, cmd,
+    exitCode: 1, fingerprint: "run-confirmed-fingerprint", signature: ["failure"], excerpt: "failure",
+    resolvedBy: "run-confirmed-fix",
+  };
+  const fix = {
+    kind: "fix" as const, id: "run-confirmed-fix", ts: now - 1_000, cwd, cmd,
+    failureIds: [failure.id], links: [{ id: failure.id, basis: "identity" as const, confidence: "confirmed" as const }],
+  };
+  const association = {
+    kind: "association" as const, id: "run-confirmed-association", ts: now - 2_000, cwd, cmd: "npm run should-not-appear",
+    candidateFailureIds: [failure.id], links: [{ id: failure.id, basis: "program" as const, confidence: "possible" as const }],
+  };
+  const original = process.stderr.write;
+  let output = "";
+  process.stderr.write = ((chunk: string | Uint8Array) => { output += String(chunk); return true; }) as typeof process.stderr.write;
+  try {
+    speakFailureMemory([failure, fix, association], failure.fingerprint, 1, cwd, now);
+  } finally {
+    process.stderr.write = original;
+  }
+  assert.match(output, /last time, you fix with:/);
+  assert.match(output, /same command,.*strong\./);
+  assert.doesNotMatch(output, /no confirmed fix\. but after error, you run this:/);
+  assert.doesNotMatch(output, /should-not-appear/);
+});
+
+test("run speech marks a cross-cwd association candidate with a place line and stays weak", () => {
+  const failureCwd = join(tmpdir(), "rocky-run-possible-elsewhere-failure");
+  const associationCwd = join(tmpdir(), "rocky-run-possible-elsewhere-association");
+  const cmd = "npm run broken-alpha";
+  const now = 1_800_000_000_000;
+  const failure = {
+    kind: "failure" as const, id: "run-elsewhere-failure", ts: now - 2_000, cwd: failureCwd, cmd,
+    exitCode: 67, fingerprint: "run-elsewhere-fingerprint", signature: ["synthetic failure"], excerpt: "synthetic failure",
+  };
+  const association = {
+    kind: "association" as const, id: "run-elsewhere-association", ts: now - 1_000, cwd: associationCwd, cmd: "npm run unrelated-beta",
+    candidateFailureIds: [failure.id], links: [{ id: failure.id, basis: "program" as const, confidence: "possible" as const }],
+  };
+  const original = process.stderr.write;
+  let output = "";
+  process.stderr.write = ((chunk: string | Uint8Array) => { output += String(chunk); return true; }) as typeof process.stderr.write;
+  try {
+    speakFailureMemory([failure, association], failure.fingerprint, 67, failureCwd, now);
+  } finally {
+    process.stderr.write = original;
+  }
+  assert.match(output, /but this comes from other place\./);
+  assert.match(output, new RegExp(associationCwd.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  assert.match(output, /maybe fix, maybe not\. check, question/);
+  assert.doesNotMatch(output, /strong\./);
+});
+
+test("run speech grades an unrecognized FixRecord link basis as the weakest hedge, never silent", () => {
+  const cwd = join(tmpdir(), "rocky-run-unrecognized-basis");
+  const cmd = "node stable-command.js";
+  const now = 1_800_000_000_000;
+  const failure = {
+    kind: "failure" as const, id: "run-unrecognized-failure", ts: now - 3_000, cwd, cmd,
+    exitCode: 1, fingerprint: "run-unrecognized-fingerprint", signature: ["failure"], excerpt: "failure",
+    resolvedBy: "run-unrecognized-fix",
+  };
+  const fix = {
+    kind: "fix" as const, id: "run-unrecognized-fix", ts: now - 1_000, cwd, cmd,
+    failureIds: [failure.id],
+    links: [{ id: failure.id, basis: "future-basis-v2", confidence: "possible" as const }],
+  };
+  const original = process.stderr.write;
+  let output = "";
+  process.stderr.write = ((chunk: string | Uint8Array) => { output += String(chunk); return true; }) as typeof process.stderr.write;
+  try {
+    speakFailureMemory([failure, fix], failure.fingerprint, 1, cwd, now);
+  } finally {
+    process.stderr.write = original;
+  }
+  assert.match(output, /last time, you fix with:/);
+  assert.match(output, /different program,.*maybe not fix\. check, question/);
+  assert.doesNotMatch(output, /strong\./);
+  assert.doesNotMatch(output, /same program,/);
+});
+
 test("unrelated successful npm task is not suggested as confirmed fix", (t) => {
   const home = mkdtempSync(join(tmpdir(), "rocky-causal-fix-"));
   t.after(() => rmSync(home, { recursive: true, force: true }));
@@ -118,7 +250,17 @@ test("unrelated successful npm task is not suggested as confirmed fix", (t) => {
   const second = spawnSync(process.execPath, [cli, "run", "npm run broken-alpha"], { cwd: project, env, encoding: "utf8" });
   assert.equal(second.status, 67);
   assert.doesNotMatch(second.stderr, /last time, you fix with:/);
-  assert.doesNotMatch(second.stderr, /unrelated-beta/);
+  // v0.5.2 Fix 1: this same-cwd, same-base association is exactly the
+  // legitimate weak candidate spec T1 describes ("user sees `no fix in
+  // memory yet` although memory holds a candidate"). The original assertion
+  // here (`doesNotMatch(second.stderr, /unrelated-beta/)`) encoded that
+  // pre-fix bug — hiding a candidate memory actually holds — rather than a
+  // real requirement, so it is replaced with the intended weak-candidate
+  // display instead of being preserved unchanged.
+  assert.match(second.stderr, /no confirmed fix\. but after error, you run this:/);
+  assert.match(second.stderr, /unrelated-beta/);
+  assert.match(second.stderr, /maybe fix, maybe not\. check, question/);
+  assert.doesNotMatch(second.stderr, /no fix in memory yet/);
 
   const lines = readFileSync(join(home, "memory.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
   assert.equal(lines.some((record) => record.kind === "fix"), false);

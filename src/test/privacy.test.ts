@@ -393,6 +393,30 @@ test("raw projection caps and detaches every fix field including failure IDs", (
   ]);
 });
 
+test("RecallHit.possible (v0.5.2 Fix 1) never crosses the MCP projection boundary in raw or sanitized exposure", () => {
+  const hit: RecallHit = {
+    failure: {
+      kind: "failure", id: "f-possible-boundary", ts: 10, cwd: "/work/possible-boundary",
+      cmd: "npm run broken-alpha", exitCode: 1, fingerprint: "fp-possible-boundary",
+      signature: ["boom"], excerpt: "boom",
+    },
+    possible: {
+      cmd: "npm-run-unrelated-beta-secret-marker",
+      ts: 20,
+      cwd: "/work/possible-boundary-elsewhere-secret-marker",
+      basis: "program",
+      fromElsewhere: true,
+    },
+    score: 1,
+  };
+  for (const exposure of ["raw", "sanitized"] as const) {
+    const output = projectRecallHits([hit], exposure);
+    const serialized = JSON.stringify(output);
+    assert.doesNotMatch(serialized, /secret-marker/, `exposure=${exposure}`);
+    assert.equal(Object.hasOwn(output.items[0] as object, "possible"), false, `exposure=${exposure}`);
+  }
+});
+
 test("response cap omits a whole projected item and never exceeds its byte limit", () => {
   const field = "x".repeat(MAX_FIELD_BYTES);
   const hits: RecallHit[] = Array.from({ length: 20 }, (_, index) => ({
