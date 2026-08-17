@@ -1104,6 +1104,39 @@ test("queryRecall attaches the top possible fix only when the hit has no confirm
   assert.equal(resolvedHit?.possible, undefined, "a confirmed fix must never be paired with a possible candidate");
 });
 
+// Finding 1, final whole-branch review: recall's possible-fix search used to
+// look only at the single representative (deduplicated) failure recall's
+// scoring happened to pick, while run/watch walk every prior same-fingerprint
+// occurrence newest-first. This test pins a real scenario where recall's own
+// dedup picks the *newest* occurrence as the hit, but the only association
+// candidate is linked to an *older* occurrence of the identical (canonical)
+// fingerprint — exactly the case run/watch already surface via
+// `findByFingerprint` + `speakablePossibleFix`. It fails under the old
+// hit.failure-only search and passes once recall walks occurrences the same
+// way.
+test("queryRecall surfaces a possible fix linked to an older same-fingerprint occurrence, matching run/watch's newest-first walk", () => {
+  const sharedFingerprint = "abcdef0123456789";
+  const olderOccurrence: FailureRecord = {
+    kind: "failure", id: "dup-fp-older", ts: 10, cwd: "/work/dupfp",
+    cmd: "npm run broken-alpha", exitCode: 1, fingerprint: sharedFingerprint, fingerprintV: 2,
+    signature: ["needle recur"], excerpt: "needle recur",
+  };
+  const newerOccurrence: FailureRecord = {
+    kind: "failure", id: "dup-fp-newer", ts: 500, cwd: "/work/dupfp",
+    cmd: "npm run broken-alpha", exitCode: 1, fingerprint: sharedFingerprint, fingerprintV: 2,
+    signature: ["needle recur"], excerpt: "needle recur",
+  };
+  const association: AssociationRecord = {
+    kind: "association", id: "a-dup-fp", ts: 50, cwd: "/work/dupfp", cmd: "npm run known-fix",
+    candidateFailureIds: [olderOccurrence.id], links: [{ id: olderOccurrence.id, basis: "program", confidence: "possible" }],
+  };
+  const hit = queryRecall([olderOccurrence, newerOccurrence, association], { query: "needle recur" })[0];
+  assert.equal(hit?.failure.id, newerOccurrence.id, "recall still surfaces the newest occurrence as the representative hit");
+  assert.deepEqual(hit?.possible, {
+    cmd: "npm run known-fix", ts: 50, cwd: "/work/dupfp", basis: "program", fromElsewhere: false,
+  }, "a candidate linked only to an older occurrence of the same fingerprint must still surface, like run/watch");
+});
+
 test("rare exact token boost remains active when token appears twice among many records", () => {
   const make = (index: number, includeRare: boolean): FailureRecord => ({
     ...failureA,

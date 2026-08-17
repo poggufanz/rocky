@@ -439,6 +439,13 @@ export function queryRecall(records: readonly MemoryRecord[], input: RecallQuery
   }
   const migration = fingerprintMigrationIndex(candidates);
   const best = new Map<string, RecallHit>();
+  // Every candidate that shares a canonical fingerprint key with a hit —
+  // regardless of whether it scored high enough to become the representative
+  // hit — is a prior occurrence of the same recurring failure. Recorded here
+  // (oldest-first, matching `candidates`' own order) so `withPossibleFix` can
+  // walk the full history newest-first instead of only the single record
+  // recall's dedup happened to pick.
+  const occurrencesByKey = new Map<string, FailureRecord[]>();
   const rareFrequency = candidates.length >= 10
     ? Math.min(8, Math.max(2, Math.ceil(candidates.length * 0.05)))
     : 1;
@@ -468,21 +475,24 @@ export function queryRecall(records: readonly MemoryRecord[], input: RecallQuery
       }
     }
     const score = rareExact ? Math.min(1, Math.max(base, 0.06)) : base;
+    const key = canonicalFingerprint(record, migration);
+    const occurrences = occurrencesByKey.get(key);
+    if (occurrences === undefined) occurrencesByKey.set(key, [record]);
+    else occurrences.push(record);
     if (score <= 0.05) continue;
     const fix = fixes.byId.size === 0 && fixes.byFailureId.size === 0
       ? undefined
       : fixForFailure(fixes, record, now);
     const hit = { failure: record, fix, score };
-    const key = canonicalFingerprint(record, migration);
     const previous = best.get(key);
     const shouldReplace = previous === undefined || (!previous.fix && hit.fix)
       || (!!previous.fix === !!hit.fix && record.ts > previous.failure.ts);
     if (shouldReplace) best.set(key, hit);
   }
-  return [...best.values()]
-    .sort((a, b) => b.score - a.score || b.failure.ts - a.failure.ts)
+  return [...best.entries()]
+    .sort(([, a], [, b]) => b.score - a.score || b.failure.ts - a.failure.ts)
     .slice(0, limit)
-    .map((hit) => withPossibleFix(hit, unique, now));
+    .map(([key, hit]) => withPossibleFix(hit, occurrencesByKey.get(key) ?? [hit.failure], unique, now));
 }
 
 export function queryRecentFailures(
@@ -1021,11 +1031,22 @@ export function possibleFixesForFailure(
     .slice(0, 3);
 }
 
-/** Attach the top weak candidate only when this hit has no confirmed fix. */
-function withPossibleFix(hit: RecallHit, records: readonly MemoryRecord[], now: number): RecallHit {
+/**
+ * Attach the top weak candidate only when this hit has no confirmed fix.
+ * Walks every prior same-fingerprint occurrence newest-first, exactly like
+ * `run.ts`'s `speakablePossibleFix` walks `findByFingerprint`'s results, so
+ * a candidate attached only to an older occurrence of the same recurring
+ * failure still surfaces here instead of being silently dropped because
+ * recall's dedup happened to pick a newer occurrence as the representative
+ * hit (finding 1, final whole-branch review).
+ */
+function withPossibleFix(hit: RecallHit, occurrences: readonly FailureRecord[], records: readonly MemoryRecord[], now: number): RecallHit {
   if (hit.fix) return hit;
-  const possible = possibleFixesForFailure(records, hit.failure, now)[0];
-  return possible === undefined ? hit : { ...hit, possible };
+  for (const failure of [...occurrences].reverse()) {
+    const possible = possibleFixesForFailure(records, failure, now)[0];
+    if (possible !== undefined) return { ...hit, possible };
+  }
+  return hit;
 }
 
 export function recentUnresolvedFailures(
