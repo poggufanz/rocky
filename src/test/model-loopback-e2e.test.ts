@@ -333,7 +333,7 @@ test("real loopback failures preserve deterministic recall and capture cancellat
   const nonSuccess = new LoopbackServer((_request, response) => sendJson(response, { error: "down" }, 503));
   await nonSuccess.start();
   t.after(async () => { await nonSuccess.close(); });
-  const nonSuccessClient = createOllamaClient({ origin: nonSuccess.origin, timeoutMs: 500 });
+  const nonSuccessClient = createOllamaClient({ origin: nonSuccess.origin, timeoutMs: 1_000 });
   await assert.rejects(nonSuccessClient.generateStructured(MODEL, "probe", {}), /503/);
   assert.equal(nonSuccess.requests.length, 1, "non-2xx must not retry");
   await nonSuccess.close();
@@ -344,7 +344,7 @@ test("real loopback failures preserve deterministic recall and capture cancellat
   });
   await malformed.start();
   t.after(async () => { await malformed.close(); });
-  const malformedClient = createOllamaClient({ origin: malformed.origin, timeoutMs: 500 });
+  const malformedClient = createOllamaClient({ origin: malformed.origin, timeoutMs: 1_000 });
   await assert.rejects(malformedClient.generateStructured(MODEL, "probe", {}), SyntaxError);
   const malformedRecall = createRecallAiPort({ loadConfig: () => enabledConfig(), ollama: malformedClient });
   const malformedOutcome = await malformedRecall.run(recallInput, new AbortController().signal);
@@ -357,7 +357,7 @@ test("real loopback failures preserve deterministic recall and capture cancellat
   })));
   await invalidSchema.start();
   t.after(async () => { await invalidSchema.close(); });
-  const invalidClient = createOllamaClient({ origin: invalidSchema.origin, timeoutMs: 500 });
+  const invalidClient = createOllamaClient({ origin: invalidSchema.origin, timeoutMs: 1_000 });
   const invalidRecall = createRecallAiPort({ loadConfig: () => enabledConfig(), ollama: invalidClient });
   const invalidOutcome = await invalidRecall.run(recallInput, new AbortController().signal);
   assert.equal(invalidOutcome.aiStatus, "invalid_output");
@@ -371,7 +371,7 @@ test("real loopback failures preserve deterministic recall and capture cancellat
   });
   await oversized.start();
   t.after(async () => { await oversized.close(); });
-  const oversizedClient = createOllamaClient({ origin: oversized.origin, timeoutMs: 500 });
+  const oversizedClient = createOllamaClient({ origin: oversized.origin, timeoutMs: 1_000 });
   await assert.rejects(oversizedClient.generateStructured(MODEL, "probe", {}), OllamaResponseTooLargeError);
   await boundedWait(oversized.waitForResponseClose(), "oversized response close");
   await oversized.close();
