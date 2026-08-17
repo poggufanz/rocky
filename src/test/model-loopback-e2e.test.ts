@@ -61,10 +61,11 @@ class LoopbackServer {
       };
       incoming.on("aborted", markAborted);
       incoming.on("close", () => {
-        if (!response.writableEnded) markAborted();
+        if (!incoming.complete) markAborted();
       });
       response.on("close", () => {
         request.responseClosed = true;
+        if (!response.writableEnded) markAborted();
         for (const waiter of this.closeWaiters.splice(0)) waiter();
       });
       const chunks: Buffer[] = [];
