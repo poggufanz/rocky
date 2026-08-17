@@ -49,6 +49,7 @@ import { fileURLToPath } from "node:url";
 import { hookInstall, hookStatus, hookUninstall, detectPowerShellHosts } from "../commands/hook.js";
 import { POWERSHELL_HOOK_LINE, powershellHookBlockCodec } from "../core/hook-block.js";
 import { validateRockyPhrase } from "../ui/phrases.js";
+import { verifyShellAssetsStaged } from "./shell-assets-fixture.js";
 
 const BEGIN = "# >>> rocky hook >>>";
 const END = "# <<< rocky hook <<<";
@@ -61,20 +62,13 @@ function bytes(value: string): Buffer {
 const packageRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
 // hookInstall expects its shell assets next to the compiled commands, exactly
-// where the production build puts them — same fixture pattern hook-block.test.ts
-// and hook-install.test.ts already use, extended to pick up the .ps1 asset too
-// so this file stays runnable alone via `node scripts/test.mjs hook-powershell`.
-function ensureShellAssetsStaged(): void {
-  const source = join(packageRoot, "src", "shell");
-  const destination = join(packageRoot, ".test-dist", "shell");
-  mkdirSync(destination, { recursive: true });
-  for (const name of readdirSync(source).sort()) {
-    if (name.endsWith(".bash") || name.endsWith(".sh") || name.endsWith(".ps1")) {
-      writeFileSync(join(destination, name), readFileSync(join(source, name)));
-    }
-  }
-}
-ensureShellAssetsStaged();
+// where the production build puts them. `scripts/test.mjs` stages
+// `.test-dist/shell/` once, in a single process, before any test file is
+// spawned, so this file (like hook-block.test.ts and hook-install.test.ts)
+// only ever needs to verify that staging already happened, never write it
+// itself -- see shell-assets-fixture.ts for why writing here raced the other
+// two files' identical writes to this same shared path.
+verifyShellAssetsStaged();
 
 /**
  * Fix round 3: every real-host test below can leave a genuinely detached

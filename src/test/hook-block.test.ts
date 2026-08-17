@@ -2,7 +2,6 @@ import test, { before, type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import fs, {
   chmodSync,
-  copyFileSync,
   existsSync,
   linkSync,
   lstatSync,
@@ -17,7 +16,6 @@ import fs, {
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
 import {
   addHookBlockBytes,
   classifyHookBlock,
@@ -27,6 +25,7 @@ import { hookInstall, hookStatus, hookUninstall } from "../commands/hook.js";
 import { inspectFileTransaction } from "../setup/file-transaction.js";
 import { directorySyncCapability } from "../setup/directory-sync.js";
 import { skipIfSymlinkUnavailable } from "./symlink-capability.js";
+import { verifyShellAssetsStaged } from "./shell-assets-fixture.js";
 
 // The exact managed block, pinned byte-for-byte from the marker format spec.
 const BEGIN = "# >>> rocky hook >>>";
@@ -178,20 +177,14 @@ test("removeHookBlockBytes returns absent and corrupt input unchanged", () => {
 
 // --- command lifecycle -------------------------------------------------------
 
-const packageRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
-
-before(() => {
-  // The test build compiles sources only; hookInstall expects its shell assets
-  // next to the compiled commands, exactly where the production build puts them.
-  const source = join(packageRoot, "src", "shell");
-  const destination = join(packageRoot, ".test-dist", "shell");
-  mkdirSync(destination, { recursive: true });
-  for (const name of readdirSync(source).sort()) {
-    if (name.endsWith(".bash") || name.endsWith(".sh")) {
-      copyFileSync(join(source, name), join(destination, name));
-    }
-  }
-});
+// hookInstall expects its shell assets next to the compiled commands, exactly
+// where the production build puts them. `scripts/test.mjs` stages
+// `.test-dist/shell/` once, in a single process, before any test file is
+// spawned, so this file (like hook-install.test.ts and hook-powershell.test.ts)
+// only ever needs to verify that staging already happened, never write it
+// itself -- see shell-assets-fixture.ts for why writing here raced the other
+// two files' identical writes to this same shared path.
+before(verifyShellAssetsStaged);
 
 interface BashrcSandbox {
   home: string;
