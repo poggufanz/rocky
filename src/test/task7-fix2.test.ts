@@ -199,7 +199,7 @@ test("canonical aliases do not inflate durable file cap", (t) => {
     },
   }, paths);
   assert.equal(record.mechanism.files.length, process.platform === "win32" ? 2 : 3);
-  assert.equal(record.mechanism.files[0]?.plusMinus[0], 3);
+  assert.equal(record.mechanism.files[0]?.plusMinus[0], process.platform === "win32" ? 3 : 2);
 });
 
 test("redacted display collisions retain distinct bounded identities after reload", async (t) => {

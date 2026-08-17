@@ -223,13 +223,20 @@ test("health rejects duplicate, malformed, and case-variant descriptors in both 
   }
 });
 
-test("setup status contract names host/MCP registration and agent-hook scope, not spool or model health", () => {
+test("setup status contract names host/MCP registration and agent-hook scope, not spool or model health", (t) => {
   const indexSource = readFileSync(join(packageRoot, "src", "index.ts"), "utf8");
   const setupSource = readFileSync(join(packageRoot, "src", "commands", "setup.ts"), "utf8");
   const readme = readFileSync(join(packageRoot, "README.md"), "utf8");
-  const design = readFileSync(join(packageRoot, "..", "docs", "superpowers", "specs", "2026-08-09-v050-nervous-system-dictionary-design.md"), "utf8");
   const scope = /host\/MCP registration via rocky setup --check\s+and\s+agent-hook state\/capability/u;
-  for (const [label, value] of [["help source", indexSource], ["setup output", setupSource], ["README", readme], ["design", design]] as const) {
+  const sources: Array<readonly [string, string]> = [["help source", indexSource], ["setup output", setupSource], ["README", readme]];
+  const designPath = join(packageRoot, "..", "docs", "superpowers", "specs", "2026-08-09-v050-nervous-system-dictionary-design.md");
+  try {
+    sources.push(["design", readFileSync(designPath, "utf8")]);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    t.diagnostic(`outer design not present; skipped optional source: ${designPath}`);
+  }
+  for (const [label, value] of sources) {
     assert.match(value, scope, `${label} must state the same setup status scope`);
     assert.match(value, /spool and Ollama\/model health\s+are not\s+checked/iu, `${label} must disclose excluded health`);
   }
