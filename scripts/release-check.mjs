@@ -24,7 +24,7 @@ const PACKAGE_BINARY = "rocky";
 // (release commit, then tag, then baseline pin). Pinning before the tag is cut fails
 // validateGitReleaseState, because refs/tags/<RELEASE_TAG> cannot resolve yet.
 const RELEASE_TAG = "v0.5.2";
-const RELEASE_COMMIT = "a4afbbe234fdbd8dbce24edc95b3e8a5bf68e809";
+const RELEASE_COMMIT = "3f7f7218f4b1b3cde436307c0617306bc80ef5c3";
 const CANONICAL_BRANCH = "main";
 const CANONICAL_REPOSITORY_URL = "https://github.com/poggufanz/rocky.git";
 const CANONICAL_PACKAGE_ROOT = "rocky/";
