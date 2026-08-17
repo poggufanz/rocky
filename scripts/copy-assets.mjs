@@ -11,7 +11,7 @@ export function copyShellAssets(
   if (!existsSync(sourceDir)) return;
   mkdirSync(destinationDir, { recursive: true });
   const names = readdirSync(sourceDir)
-    .filter((name) => name.endsWith(".bash") || name.endsWith(".sh"))
+    .filter((name) => name.endsWith(".bash") || name.endsWith(".sh") || name.endsWith(".ps1"))
     .sort();
   for (const name of names) {
     const sourcePath = join(sourceDir, name);
