@@ -380,7 +380,7 @@ const DEFAULT_SMOKE_LINES = (rockyHome: string): string[] => [
   "exit",
 ];
 
-function spawnAndFeed(exe: string, rockyHome: string, shim: string, lines?: string[]): Promise<FeedResult> {
+function spawnAndFeed(exe: string, rockyHome: string, shim: string, lines?: string[], intervalMs = 400): Promise<FeedResult> {
   return new Promise((resolve) => {
     const child = spawn(exe, ["-NoProfile", "-NoLogo"], {
       env: { ...process.env, ROCKY_HOME: rockyHome, ROCKY_BIN: shim },
@@ -398,7 +398,7 @@ function spawnAndFeed(exe: string, rockyHome: string, shim: string, lines?: stri
       if (index >= feedLines.length) { clearInterval(feed); return; }
       child.stdin.write(`${feedLines[index]}\n`);
       index += 1;
-    }, 400);
+    }, intervalMs);
 
     const finish = (timedOut: boolean) => {
       if (settled) return;
@@ -680,6 +680,84 @@ test(
   { skip: realPwsh ? false : "PowerShell 7 (pwsh) is unavailable on this machine" },
   async (t) => {
     await realHostFaultInjectionSmoke(t, realPwsh!);
+  },
+);
+
+/**
+ * Finding 5 (fix round 2): the fix-round-1 diff introduced a new race —
+ * `__rockySpawnDetached`'s discard-file paths were static (not unique per
+ * invocation), so two near-concurrent spawns could collide on the redirect-
+ * file handle and silently drop a memory write. Fixed by discarding to the
+ * null device (`\\.\NUL` / `NUL`) instead of a file at all — no file, no
+ * collision, nothing to make unique. This test proves the fix on real
+ * overlap, not merely on two commands that happen to run close in time: the
+ * `ROCKY_BIN` shim does its real work (writes to memory.jsonl via the real
+ * CLI) and then deliberately stays alive for 2 additional seconds before
+ * exiting, so the *first* spawned process is still running, by construction,
+ * when the *second* spawn is issued a mere 30ms later — genuine overlap of
+ * two live detached processes, not just two closely-timed prompt renders.
+ * Both memory writes must land.
+ */
+async function realHostConcurrentSpawnSmoke(t: TestContext, exe: string): Promise<void> {
+  const root = mkdtempSync(join(tmpdir(), "rocky-hook-ps-concurrent-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const rockyHome = join(root, "rocky-home");
+  mkdirSync(rockyHome, { recursive: true });
+  writeFileSync(
+    join(rockyHome, "rocky-hook.ps1"),
+    readFileSync(join(packageRoot, ".test-dist", "shell", "rocky-hook.ps1")),
+  );
+  const shim = join(root, "rocky-shim.ps1");
+  const entry = join(packageRoot, "dist", "index.js").replace(/'/g, "''");
+  // Real work finishes fast; the wrapping process then idles for 2s so its
+  // own lifetime is long enough to guarantee genuine overlap with a second
+  // spawn issued shortly after, regardless of scheduler jitter.
+  writeFileSync(shim, `& node '${entry}' @args\n$code = $LASTEXITCODE\nStart-Sleep -Milliseconds 2000\nexit $code\n`);
+
+  const result = await spawnAndFeed(
+    exe,
+    rockyHome,
+    shim,
+    [
+      `. "${join(rockyHome, "rocky-hook.ps1")}"`,
+      "Get-Item ./__rocky_concurrent_first__ -ErrorAction SilentlyContinue 2>$null",
+      "Get-Item ./__rocky_concurrent_second__ -ErrorAction SilentlyContinue 2>$null",
+      "exit",
+    ],
+    30, // far tighter than the shim's own 2000ms lifetime -- forces real overlap
+  );
+
+  assert.equal(result.timedOut, false, "two overlapping detached spawns must never hang the shell");
+
+  const memoryPath = join(rockyHome, "memory.jsonl");
+  // The shim's own artificial 2s tail means settling takes longer than the
+  // other real-host tests' default poll window.
+  const records = await readMemoryRecordsSettled(memoryPath, 8_000);
+  const failureCmds: string[] = records.filter((r) => r.kind === "failure").map((r) => r.cmd);
+
+  assert.ok(
+    failureCmds.some((cmd) => cmd.includes("__rocky_concurrent_first__")),
+    `the first overlapping spawn's memory write must land; got: ${JSON.stringify(failureCmds)}`,
+  );
+  assert.ok(
+    failureCmds.some((cmd) => cmd.includes("__rocky_concurrent_second__")),
+    `the second overlapping spawn's memory write must land, not silently dropped by a redirect-handle collision (Finding 5); got: ${JSON.stringify(failureCmds)}`,
+  );
+}
+
+test(
+  "two genuinely overlapping detached spawns both land their memory write, Windows PowerShell 5.1 (Finding 5)",
+  { skip: windowsPowerShellAvailable ? false : "Windows PowerShell is unavailable on this machine/platform" },
+  async (t) => {
+    await realHostConcurrentSpawnSmoke(t, "powershell.exe");
+  },
+);
+
+test(
+  "two genuinely overlapping detached spawns both land their memory write, PowerShell 7.x (Finding 5)",
+  { skip: realPwsh ? false : "PowerShell 7 (pwsh) is unavailable on this machine" },
+  async (t) => {
+    await realHostConcurrentSpawnSmoke(t, realPwsh!);
   },
 );
 
