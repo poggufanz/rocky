@@ -1,3 +1,4 @@
+# Rocky
 ![Pixel art of Rocky, a faceless five-limbed mineral engineer, working at a terminal](https://raw.githubusercontent.com/poggufanz/rocky/main/assets/rocky-pixel.webp)
 
 [![CI](https://github.com/poggufanz/rocky/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/poggufanz/rocky/actions/workflows/ci.yml)
