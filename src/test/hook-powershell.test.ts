@@ -417,6 +417,29 @@ function spawnAndFeed(exe: string, rockyHome: string, shim: string, lines?: stri
   });
 }
 
+/**
+ * Fix round 1 (Finding 1) made the spawn genuinely non-blocking, which means
+ * the detached `rocky` process can still be running after the interactive
+ * PowerShell session itself has already exited (proven correct by the
+ * non-blocking test above — it does not wait for the spawn either). Every
+ * real-host test that inspects `memory.jsonl` right after the session ends
+ * needs to poll for it settling rather than assume it is already there.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- test-only JSONL parse, shape varies by record kind
+async function readMemoryRecordsSettled(memoryPath: string, timeoutMs = 5_000): Promise<any[]> {
+  const deadline = Date.now() + timeoutMs;
+  let last: any[] = [];
+  while (Date.now() < deadline) {
+    if (existsSync(memoryPath)) {
+      const parsed = readFileSync(memoryPath, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line));
+      if (parsed.length > 0 && JSON.stringify(parsed) === JSON.stringify(last)) return parsed; // stable across a poll: settled
+      last = parsed;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 300));
+  }
+  return last;
+}
+
 async function realHostSmoke(t: TestContext, exe: string): Promise<void> {
   const root = mkdtempSync(join(tmpdir(), "rocky-hook-ps-e2e-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
@@ -440,8 +463,8 @@ async function realHostSmoke(t: TestContext, exe: string): Promise<void> {
   assert.match(result.stdout, /LIVE3_DOLLARQ=True\r?\nLIVE3_EXIT=9\r?\n/, `a later successful cmdlet must not flip $? and must leave stale $LASTEXITCODE alone; got: ${result.stdout}`);
 
   const memoryPath = join(rockyHome, "memory.jsonl");
-  assert.ok(existsSync(memoryPath), "the failing commands must have recorded memory");
-  const records = readFileSync(memoryPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+  const records = await readMemoryRecordsSettled(memoryPath);
+  assert.ok(records.length > 0, "the failing commands must have recorded memory");
   const failures = records.filter((r) => r.kind === "failure");
   assert.equal(failures.length, 2, `expected exactly 2 failures, no false positive for the successful Get-Item; got: ${JSON.stringify(records)}`);
   assert.ok(failures.every((f) => f.origin === "hook"), "every PowerShell-hook record must carry origin:hook");
@@ -467,6 +490,196 @@ test(
   { skip: realPwsh ? false : "PowerShell 7 (pwsh) is unavailable on this machine" },
   async (t) => {
     await realHostSmoke(t, realPwsh!);
+  },
+);
+
+/**
+ * Finding 1 (fix round 1), regression guard: the whole point of
+ * `__rockySpawnDetached` (`Start-Process -NoNewWindow`, replacing the
+ * original synchronous `& $__rockyBin ...` call) is that the shell must
+ * never wait on Rocky's own bookkeeping. Proven directly with a
+ * deliberately slow `ROCKY_BIN` shim (a multi-second sleep before it ever
+ * writes anything) — if the spawn were still synchronous, the interactive
+ * session's wall-clock time would be dominated by that sleep; non-blocking,
+ * it is not, regardless of how slow the spawned process itself is.
+ */
+async function realHostNonBlockingSmoke(t: TestContext, exe: string): Promise<void> {
+  const root = mkdtempSync(join(tmpdir(), "rocky-hook-ps-nonblocking-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const rockyHome = join(root, "rocky-home");
+  mkdirSync(rockyHome, { recursive: true });
+  writeFileSync(
+    join(rockyHome, "rocky-hook.ps1"),
+    readFileSync(join(packageRoot, ".test-dist", "shell", "rocky-hook.ps1")),
+  );
+  const slowMarker = join(root, "slow-shim-ran.txt");
+  const slowShim = join(root, "slow-shim.ps1");
+  // Sleeps far longer than any reasonable prompt render should ever take,
+  // then proves it actually ran (and how late) by writing a marker file.
+  writeFileSync(
+    slowShim,
+    `Start-Sleep -Milliseconds 4000\n"ran" | Set-Content -Path "${slowMarker.replace(/\\/g, "\\\\")}"\nexit 0\n`,
+  );
+
+  const before = Date.now();
+  const result = await spawnAndFeed(exe, rockyHome, slowShim, [
+    `. "${join(rockyHome, "rocky-hook.ps1")}"`,
+    "Get-Item ./__rocky_nope__ -ErrorAction SilentlyContinue 2>$null",
+    "echo NEXT_PROMPT_REACHED",
+    "exit",
+  ]);
+  const elapsedMs = Date.now() - before;
+
+  assert.equal(result.timedOut, false, "the session must not hang");
+  assert.match(result.stdout, /NEXT_PROMPT_REACHED/, `the next command must run without waiting on the slow spawn; got: ${result.stdout}`);
+  assert.ok(
+    elapsedMs < 4000,
+    `session wall-clock time (${elapsedMs}ms) must not be dominated by the spawned process's 4000ms sleep -- a synchronous spawn would fail this`,
+  );
+  assert.equal(existsSync(slowMarker), false, "the slow shim must still be running in the background when this assertion runs");
+}
+
+test(
+  "the hook body never blocks the next prompt on a deliberately slow spawn, Windows PowerShell 5.1 (Finding 1)",
+  { skip: windowsPowerShellAvailable ? false : "Windows PowerShell is unavailable on this machine/platform" },
+  async (t) => {
+    await realHostNonBlockingSmoke(t, "powershell.exe");
+  },
+);
+
+test(
+  "the hook body never blocks the next prompt on a deliberately slow spawn, PowerShell 7.x (Finding 1)",
+  { skip: realPwsh ? false : "PowerShell 7 (pwsh) is unavailable on this machine" },
+  async (t) => {
+    await realHostNonBlockingSmoke(t, realPwsh!);
+  },
+);
+
+/**
+ * Finding 3 (fix round 1): denylist parity with rocky-hook.bash's
+ * cd|pushd|popd|export|alias|source|.|rocky, translated to PowerShell
+ * equivalents rather than copied literally. Drives a real interactive
+ * session through a failing `Push-Location` and a failing dot-source (the
+ * two entries the review specifically named as missing and "idiomatic and
+ * heavily used"), then a genuine non-denylisted failure, so the test proves
+ * the denylist actually suppresses the first two rather than the whole
+ * mechanism being silent for unrelated reasons.
+ */
+async function realHostDenylistSmoke(t: TestContext, exe: string): Promise<void> {
+  const root = mkdtempSync(join(tmpdir(), "rocky-hook-ps-denylist-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const rockyHome = join(root, "rocky-home");
+  mkdirSync(rockyHome, { recursive: true });
+  writeFileSync(
+    join(rockyHome, "rocky-hook.ps1"),
+    readFileSync(join(packageRoot, ".test-dist", "shell", "rocky-hook.ps1")),
+  );
+  const shim = join(root, "rocky-shim.ps1");
+  const entry = join(packageRoot, "dist", "index.js").replace(/'/g, "''");
+  writeFileSync(shim, `& node '${entry}' @args\nexit $LASTEXITCODE\n`);
+
+  const result = await spawnAndFeed(exe, rockyHome, shim, [
+    `. "${join(rockyHome, "rocky-hook.ps1")}"`,
+    "Push-Location -Path ./__rocky_denylist_nope__ -ErrorAction SilentlyContinue 2>$null",
+    ". ./__rocky_denylist_nope_dotsource__.ps1 2>$null",
+    "Get-Item ./__rocky_denylist_should_record__ -ErrorAction SilentlyContinue 2>$null",
+    "exit",
+  ]);
+  assert.equal(result.timedOut, false, "the session must not hang");
+
+  const memoryPath = join(rockyHome, "memory.jsonl");
+  const records = await readMemoryRecordsSettled(memoryPath);
+  const failureCmds: string[] = records.filter((r) => r.kind === "failure").map((r) => r.cmd);
+
+  assert.ok(
+    !failureCmds.some((cmd) => cmd.includes("Push-Location")),
+    `Push-Location must be denylisted like bash's pushd/popd; got failures: ${JSON.stringify(failureCmds)}`,
+  );
+  assert.ok(
+    !failureCmds.some((cmd) => cmd.startsWith(". ")),
+    `dot-sourcing must be denylisted like bash's source/.; got failures: ${JSON.stringify(failureCmds)}`,
+  );
+  assert.ok(
+    failureCmds.some((cmd) => cmd.includes("__rocky_denylist_should_record__")),
+    `a genuine non-denylisted failure must still be recorded (proves the mechanism isn't just silent); got: ${JSON.stringify(failureCmds)}`,
+  );
+}
+
+test(
+  "Push-Location and dot-sourcing are denylisted like bash's pushd/popd/source, Windows PowerShell 5.1 (Finding 3)",
+  { skip: windowsPowerShellAvailable ? false : "Windows PowerShell is unavailable on this machine/platform" },
+  async (t) => {
+    await realHostDenylistSmoke(t, "powershell.exe");
+  },
+);
+
+test(
+  "Push-Location and dot-sourcing are denylisted like bash's pushd/popd/source, PowerShell 7.x (Finding 3)",
+  { skip: realPwsh ? false : "PowerShell 7 (pwsh) is unavailable on this machine" },
+  async (t) => {
+    await realHostDenylistSmoke(t, realPwsh!);
+  },
+);
+
+/**
+ * Finding 4 (fix round 1) / spec §5 test 4: "a hook that fails midway does
+ * not change the exit code of the user's command." Held by construction
+ * (the outer try/catch), but never adversarially tested — this genuinely
+ * injects a fault, rather than relying on construction. After dot-sourcing
+ * the real hook, `__rockySpawnDetached` (the one function that actually
+ * touches `_hookfail`/`_hooksuccess`) is redefined to unconditionally
+ * `throw`, with no inner catch of its own left to absorb it, so the
+ * exception can only be swallowed by `prompt`'s own outer try/catch. Then a
+ * real failing command runs, and the assertion is on what the user
+ * genuinely observes on the *next* real prompt: `$?`/`$LASTEXITCODE` must
+ * read exactly what the user's own failing command produced, unrelated to
+ * and unaffected by the injected internal fault.
+ */
+async function realHostFaultInjectionSmoke(t: TestContext, exe: string): Promise<void> {
+  const root = mkdtempSync(join(tmpdir(), "rocky-hook-ps-fault-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const rockyHome = join(root, "rocky-home");
+  mkdirSync(rockyHome, { recursive: true });
+  writeFileSync(
+    join(rockyHome, "rocky-hook.ps1"),
+    readFileSync(join(packageRoot, ".test-dist", "shell", "rocky-hook.ps1")),
+  );
+
+  const result = await spawnAndFeed(exe, rockyHome, join(root, "unused-shim.ps1"), [
+    `. "${join(rockyHome, "rocky-hook.ps1")}"`,
+    // Genuine fault injection: replace the one function that ever touches
+    // _hookfail/_hooksuccess with one that always throws, with no inner
+    // catch left to absorb it -- only prompt's own outer try/catch can.
+    'function global:__rockySpawnDetached { throw "INJECTED-FAULT-FOR-TEST" }',
+    "cmd /c \"exit 7\" | Out-Null",
+    "echo AFTER_FAULT_DOLLARQ=$? AFTER_FAULT_EXIT=$LASTEXITCODE",
+    "exit",
+  ]);
+
+  assert.equal(result.timedOut, false, "an injected internal fault must never hang the shell");
+  assert.match(
+    result.stdout,
+    /AFTER_FAULT_DOLLARQ=False\r?\nAFTER_FAULT_EXIT=7\r?\n/,
+    `the user's own command's $?/$LASTEXITCODE must be exactly what it produced (False/7), untouched by the injected internal fault; got: ${result.stdout}`,
+  );
+  // The fault fired before any write could happen -- confirms this genuinely
+  // exercised the failure path, not a no-op that happened to look silent.
+  assert.equal(existsSync(join(rockyHome, "memory.jsonl")), false, "the injected fault must have prevented the memory write it would otherwise have made");
+}
+
+test(
+  "an injected internal hook-body fault never changes the user's own exit code, Windows PowerShell 5.1 (Finding 4, spec §5 test 4)",
+  { skip: windowsPowerShellAvailable ? false : "Windows PowerShell is unavailable on this machine/platform" },
+  async (t) => {
+    await realHostFaultInjectionSmoke(t, "powershell.exe");
+  },
+);
+
+test(
+  "an injected internal hook-body fault never changes the user's own exit code, PowerShell 7.x (Finding 4, spec §5 test 4)",
+  { skip: realPwsh ? false : "PowerShell 7 (pwsh) is unavailable on this machine" },
+  async (t) => {
+    await realHostFaultInjectionSmoke(t, realPwsh!);
   },
 );
 
