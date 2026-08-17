@@ -56,7 +56,7 @@ That companion line is an original Rocky project tagline inspired by the lore, n
 npm install -g @poggufanz/rocky-cli
 ```
 
-Current release: `@poggufanz/rocky-cli@0.5.1`. One install includes the `rocky` CLI and its read-only MCP server. The unrelated unscoped `rocky-cli` package is not this project and Rocky never installs, upgrades, or removes it. The binary name remains `rocky`, so npm reports any local binary-name conflict through its normal install behavior.
+Current release: `@poggufanz/rocky-cli@0.5.2`. One install includes the `rocky` CLI and its read-only MCP server. The unrelated unscoped `rocky-cli` package is not this project and Rocky never installs, upgrades, or removes it. The binary name remains `rocky`, so npm reports any local binary-name conflict through its normal install behavior.
 
 Repository layout: a fresh clone of the canonical upstream repository (`https://github.com/poggufanz/rocky.git`) is the package root; run `npm install`, `npm test`, and `npm pack` there. In this outer workspace, that same package root is the `rocky/` directory. Canonical developer branch is `main`; `iq` is a remediation branch, not a second release line.
 
@@ -138,7 +138,7 @@ What happens:
 
 On native Windows, `rocky run` and `rocky watch` use `shell: true`, so `cmd.exe`'s practical command-line ceiling is around 8,191 characters (quoting and expansion can change the exact boundary). Rocky's audited boundary is a 7,111-character command that reaches the child successfully; a 9,111-character command may fail before normal child execution. A shell that starts and then reports an error is still a started child result, so its exit code 127 remains a real failure. Use a response file, configuration file, or script when a command is near this boundary. Rocky does not silently rewrite the command, change quoting, or switch its shell.
 - **On failure**, Rocky fingerprints the error and files it. If he has heard this exact error before, he says so — and if a later run fixed it, he tells you what the fix was.
-- **On success**, Rocky confirms a fix only for the same reliable command identity that failed in this directory within eight hours. A same-program-only match is kept separately as a possible association; it never resolves the failure.
+- **On success**, Rocky confirms a fix only for the same reliable command identity that failed in this directory within eight hours. A same-program-only match is kept separately as a possible association; it never resolves the failure. When a later run repeats an unresolved failure and no confirmed fix exists, Rocky shows the newest such association as one hedged candidate — never more than one, and never in place of a confirmed fix.
 
 Ask his memory directly:
 
@@ -253,9 +253,20 @@ edited file. `ROCKY_OFF=1` makes him deaf for a session;
 
 1. **Fingerprinting** (`src/core/fingerprint.ts`) — stderr is noisy: paths, line numbers, timestamps, and addresses change between runs of the same bug. Rocky extracts the lines that carry meaning, masks the volatile parts (`/home/you/app/src/x.ts:41:7` becomes `<path>:#:#`), and hashes the result. Same bug, same fingerprint, every time.
 2. **The failure log** (`src/core/memory.ts`) — append-only JSONL. Failures store the fingerprint, the command, the directory, and a short excerpt for display. Fixes store which failures they resolved.
-3. **Fix linking** — within one per-memory transaction, Rocky reloads current state and confirms a success only for unresolved failures with the same reliable command identity (same directory, within 8h). Same-program-only candidates are stored as possible associations and never resolve failures or clear pending state. Concurrent writers share the transaction lock, so one unresolved-to-resolved transition creates one fix event.
+3. **Fix linking** — within one per-memory transaction, Rocky reloads current state and confirms a success only for unresolved failures with the same reliable command identity (same directory, within 8h). Same-program-only candidates are stored as possible associations and never resolve failures or clear pending state. Concurrent writers share the transaction lock, so one unresolved-to-resolved transition creates one fix event. `run`, `watch`, and `recall` read those associations back through `possibleFixesForFailure` and surface the newest one as a hedged candidate whenever no confirmed fix exists for the repeated failure (v0.5.2).
 4. **Recall** — token-overlap search across commands and error signatures, deduplicated per distinct error, fix shown when known.
 5. **Long-running envelope** — the reader has a 32 MiB file cap, a 1 MiB line cap, and a 50,000-record reference envelope only on the exact Linux Node 22 runtime. Windows and other runtimes use an explicit 10,000-record supported cap until their own scorecard meets the 150 MiB post-GC RSS budget; larger files stay bounded and report degraded coverage. Above any cap (including a 250,000-record stress fixture) it stops at the boundary and every MCP/diagnostic answer carries `memoryCoverage` (`version`, `scanned`, `skipped`, `truncated`, `complete`); skipped corrupt or oversized lines are counted, never silently treated as complete. A single immutable snapshot is reused only after a full bounded content witness confirms every byte that can affect the bounded answer plus file identity, size, and metadata.
+
+**Fix-link `basis` values.** Every fix or association link records how it was matched, ranked strongest to weakest:
+
+| `basis` | Meaning | Evidence |
+|---|---|---|
+| `identity` | Same reliable command identity, same directory, within the link window. | confirmed |
+| `signature` | Same normalized command shape (`commandSignature`), a stronger textual match than `identity` requires. Reserved in the type system; no shipped code path writes it yet. | confirmed |
+| `program` | Same base program, different command identity. | possible |
+| `sequence` | Different base program entirely. Readable starting in 0.5.2; no version writes it yet. | possible |
+
+A reader that meets a `basis` value outside this table treats it as weaker than every value listed above: readable, never promoted to `confirmed`, and the record is never dropped for carrying it. That rule, and the meaning of each value above, hold across releases — a future `basis` value only ever adds a new row here, it never redefines one that already shipped.
 
 The deterministic memory loop remains useful with zero AI setup and zero API keys. Rocky can optionally ask a locally running Ollama model to rank or interpret deterministic recall candidates; the model cannot create or change the underlying stored evidence, and invalid output falls back to deterministic recall.
 
@@ -337,7 +348,7 @@ Each phase is one facet of who Rocky is:
 - **v0.5 — his curiosity (current release)**: Plan 01 Nervous System agent hooks and Plan 02 dictionary/teaching surfaces ship in v0.5.0. They preserve prompt/path/excerpt/stated-rationale evidence in local memory, use deterministic fallback when Ollama is unavailable, keep rationale explicitly quoted and untrusted, and add `what`, `how`, `why`, `digest`, `quiz`, `export`, passive labels, ambiguity advice, and three bounded MCP knowledge tools. BYOK annotation, `brief`, `attest`, and the memory circuit breaker remain deferred non-goals for this release. The earlier `rocky explain` concept is superseded, not an active command.
 - **later — his care**: ambient pet mode and the desktop pet window (deferred). He notices you've been at it for four hours, and he has opinions about your sleep.
 
-The package version is v0.5.1; the Nervous System section above describes the Plan 01 and Plan 02 surfaces it ships.
+The package version is v0.5.2; the Nervous System section above describes the Plan 01 and Plan 02 surfaces it ships.
 
 ## Contributing
 

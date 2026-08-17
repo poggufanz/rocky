@@ -2,6 +2,28 @@
 
 Notable changes per release. Dates are the release date.
 
+## 0.5.2 — 17 August 2026
+
+Release: [v0.5.2](https://github.com/poggufanz/rocky/releases/tag/v0.5.2)
+
+A patch release: it repairs a read path already promised by 0.5.1's memory model and by the README, and it lands the PowerShell hook. No new record shape is written by this release.
+
+### Added
+
+- **PowerShell hook.** `rocky hook install`/`uninstall`/`status` now cover PowerShell 5.1 and 7.x, alongside the existing Bash/WSL hook. It installs one idempotent managed block into `$PROFILE`, overriding `prompt` to observe a command's result right after it finishes — the same failure/fix memory the Bash hook keeps, without a wrapper. It cannot ask for confirmation before a dangerous command the way the Bash hook does, because `prompt` never sees a command before it runs. Because `prompt` fires after a command's own stderr is already gone, PowerShell-hook failures are fingerprinted from the command text alone (the same fallback the CLI has used since 0.4.0) and are recorded without stderr, so evidence from this surface reads weaker than evidence from `rocky run`. `$LASTEXITCODE` and `$?` always reflect your own command; the one disclosed side effect is a suppressed synthetic entry Rocky pushes onto `$Error[0]`, documented in the README and in `rocky hook status`.
+- The lock-fairness change already sitting on `main` since before this branch, now included in a release for the first time: waiters queue by ticket, and the `busy` deadline bounds time without progress rather than total time spent waiting in the queue.
+
+### Fixed
+
+- **Association evidence Rocky already wrote now actually reaches you.** `resolveFixOnSuccess` has written weak-evidence `AssociationRecord`s since 0.3.0, but nothing read them back: `run` and `watch` printed `no fix in memory yet` and `recall` skipped them entirely, even when memory held a candidate. A new `possibleFixesForFailure` read (`src/core/memory-query.ts`) surfaces the newest such candidate as one explicitly hedged line — `no confirmed fix. but after error, you run this: ...` — across `run`, `watch`, and `recall`. It never overrides or duplicates a confirmed fix, and never shows more than one candidate at a time.
+- **A `FixLink` with an unrecognized `basis` no longer loses its record.** The memory reader and both MCP fix-link readers now treat any `basis` outside the currently known set as the weakest possible evidence — readable, never `confirmed`, and never dropped. Previously an unfamiliar `basis` value caused the whole record to be discarded, which meant a reader on this version would have lost data the moment a newer Rocky started writing a `basis` value it didn't recognize yet.
+- Native Windows hook speech (`sayTty`/`detailTty`) wrote to `/dev/tty`, which does not exist on native Windows, so every hook-handler line Rocky spoke there was silently swallowed. Now routed through `\\.\CON`.
+
+### Not in this release
+
+- The write side of loosening fix-link candidates — a new `sequence` basis, dropping the same-base-program requirement from candidate selection, and the 5-link cap that goes with it — is **not** shipped in 0.5.2. It waits for the tolerant reader above to circulate first: writing looser links before that would let a reader still on 0.5.0 or 0.5.1 silently drop the very records this release exists to protect. That writer lands in a later release once the tolerant reader has had time to spread.
+- `scripts/release-check.mjs`'s `RELEASE_TAG`/`RELEASE_COMMIT` still point at v0.5.1. They are re-pinned to v0.5.2 in a separate commit once the tag exists, so this branch's own CI does not go red before the tag is cut.
+
 ## 0.5.1 — 17 August 2026
 
 Release: [v0.5.1](https://github.com/poggufanz/rocky/releases/tag/v0.5.1)

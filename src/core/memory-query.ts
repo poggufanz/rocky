@@ -10,11 +10,19 @@ import {
   retrievalTokens,
   similarity,
 } from "./fingerprint.js";
-import { boundTripleRecord, canonicalPath, isOperationalMemoryRecord, loadMemory, loadMemoryChecked, pathIdentityHash } from "./memory-read.js";
+import { boundTripleRecord, canonicalPath, isOperationalMemoryRecord, linkBasisRank, loadMemory, loadMemoryChecked, pathIdentityHash } from "./memory-read.js";
 import type { FailureRecord, FixRecord, LinkBasis, LinkConfidence, MemoryCoverage, MemoryRecord, TripleRecord } from "./memory-read.js";
 
 export interface RecallQuery { query: string; limit?: number; cwd?: string; now?: number }
-export interface RecallHit { failure: FailureRecord; fix?: FixRecord; score: number }
+/**
+ * `possible` is a CLI-display-only hint (§3 Fix 1): the top weak
+ * `AssociationRecord` candidate for `failure` when no `FixRecord` exists.
+ * It is intentionally excluded from `src/mcp/privacy.ts` projection —
+ * `SourceHit`/`snapshotSourceHit` there copy only `failure`/`fix` through an
+ * explicit allowlist, so this field never crosses the MCP boundary without a
+ * deliberate future change.
+ */
+export interface RecallHit { failure: FailureRecord; fix?: FixRecord; possible?: PossibleFix; score: number }
 export interface RecentFailuresQuery { limit?: number; cwd?: string; unresolvedOnly?: boolean; now?: number }
 export interface RecentFailureHit { failure: FailureRecord; fix?: FixRecord }
 export interface StatsQuery { cwd?: string; now?: number }
@@ -431,6 +439,13 @@ export function queryRecall(records: readonly MemoryRecord[], input: RecallQuery
   }
   const migration = fingerprintMigrationIndex(candidates);
   const best = new Map<string, RecallHit>();
+  // Every candidate that shares a canonical fingerprint key with a hit —
+  // regardless of whether it scored high enough to become the representative
+  // hit — is a prior occurrence of the same recurring failure. Recorded here
+  // (oldest-first, matching `candidates`' own order) so `withPossibleFix` can
+  // walk the full history newest-first instead of only the single record
+  // recall's dedup happened to pick.
+  const occurrencesByKey = new Map<string, FailureRecord[]>();
   const rareFrequency = candidates.length >= 10
     ? Math.min(8, Math.max(2, Math.ceil(candidates.length * 0.05)))
     : 1;
@@ -460,18 +475,24 @@ export function queryRecall(records: readonly MemoryRecord[], input: RecallQuery
       }
     }
     const score = rareExact ? Math.min(1, Math.max(base, 0.06)) : base;
+    const key = canonicalFingerprint(record, migration);
+    const occurrences = occurrencesByKey.get(key);
+    if (occurrences === undefined) occurrencesByKey.set(key, [record]);
+    else occurrences.push(record);
     if (score <= 0.05) continue;
     const fix = fixes.byId.size === 0 && fixes.byFailureId.size === 0
       ? undefined
       : fixForFailure(fixes, record, now);
     const hit = { failure: record, fix, score };
-    const key = canonicalFingerprint(record, migration);
     const previous = best.get(key);
     const shouldReplace = previous === undefined || (!previous.fix && hit.fix)
       || (!!previous.fix === !!hit.fix && record.ts > previous.failure.ts);
     if (shouldReplace) best.set(key, hit);
   }
-  return [...best.values()].sort((a, b) => b.score - a.score || b.failure.ts - a.failure.ts).slice(0, limit);
+  return [...best.entries()]
+    .sort(([, a], [, b]) => b.score - a.score || b.failure.ts - a.failure.ts)
+    .slice(0, limit)
+    .map(([key, hit]) => withPossibleFix(hit, occurrencesByKey.get(key) ?? [hit.failure], unique, now));
 }
 
 export function queryRecentFailures(
@@ -963,6 +984,70 @@ export function whyFile(records: readonly MemoryRecord[], path: string, limit = 
 export const LINK_WINDOW_MS = 1000 * 60 * 60 * 8;
 
 export interface UnresolvedLink { failure: FailureRecord; basis: LinkBasis; confidence: LinkConfidence }
+
+export interface PossibleFix {
+  cmd: string;
+  ts: number;
+  cwd: string;
+  basis: LinkBasis;
+  fromElsewhere: boolean;
+}
+
+/**
+ * Weak-evidence companion to `getFix` (spec §3 Fix 1): surfaces
+ * `AssociationRecord` candidates linked to `failure` when no `FixRecord`
+ * exists yet. Pure read — writes nothing, touches no pending marker,
+ * changes no `stats` number. Newest first, tie-broken by `linkBasisRank`
+ * (lower/stronger wins), capped at 3.
+ *
+ * NOTE for v0.6.0 (`rocky brief`, roadmap §8b): the "failure/fix linked from
+ * memory within window" section of `brief` must read through this function
+ * rather than `FixRecord` alone, so association-only evidence is not
+ * silently dropped there either.
+ */
+export function possibleFixesForFailure(
+  records: readonly MemoryRecord[],
+  failure: FailureRecord,
+  now = Date.now(),
+): PossibleFix[] {
+  const candidates: PossibleFix[] = [];
+  for (const record of uniqueRecords(records)) {
+    if (record.kind !== "association" || !isOperationalMemoryRecord(record, now)) continue;
+    const link = record.links.find((entry) => entry.id === failure.id);
+    // §3 allows a match through either field; `links` carries the basis, so a
+    // candidate found only via `candidateFailureIds` falls to the weakest
+    // (unrecognized) rank rather than inventing a stronger one.
+    if (link === undefined && !record.candidateFailureIds.includes(failure.id)) continue;
+    candidates.push({
+      cmd: record.cmd,
+      ts: record.ts,
+      cwd: record.cwd,
+      basis: link?.basis ?? "unknown",
+      fromElsewhere: record.cwd !== failure.cwd,
+    });
+  }
+  return candidates
+    .sort((a, b) => b.ts - a.ts || linkBasisRank(a.basis) - linkBasisRank(b.basis))
+    .slice(0, 3);
+}
+
+/**
+ * Attach the top weak candidate only when this hit has no confirmed fix.
+ * Walks every prior same-fingerprint occurrence newest-first, exactly like
+ * `run.ts`'s `speakablePossibleFix` walks `findByFingerprint`'s results, so
+ * a candidate attached only to an older occurrence of the same recurring
+ * failure still surfaces here instead of being silently dropped because
+ * recall's dedup happened to pick a newer occurrence as the representative
+ * hit (finding 1, final whole-branch review).
+ */
+function withPossibleFix(hit: RecallHit, occurrences: readonly FailureRecord[], records: readonly MemoryRecord[], now: number): RecallHit {
+  if (hit.fix) return hit;
+  for (const failure of [...occurrences].reverse()) {
+    const possible = possibleFixesForFailure(records, failure, now)[0];
+    if (possible !== undefined) return { ...hit, possible };
+  }
+  return hit;
+}
 
 export function recentUnresolvedFailures(
   records: readonly MemoryRecord[],

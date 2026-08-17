@@ -20,6 +20,10 @@ const packageMetadata = JSON.parse(readFileSync(join(packageRoot, "package.json"
 const PACKAGE_NAME = "@poggufanz/rocky-cli";
 const PACKAGE_VERSION = packageMetadata.version;
 const PACKAGE_BINARY = "rocky";
+// v0.5.2 note: intentionally left pointing at v0.5.1 for this branch. Re-pinning these to the
+// v0.5.2 tag/commit now would fail validateGitReleaseState (refs/tags/v0.5.2 does not exist yet)
+// and turn CI red before the tag is cut. The controller re-pins both constants in a separate
+// commit once the v0.5.2 tag exists.
 const RELEASE_TAG = "v0.5.1";
 const RELEASE_COMMIT = "4fec0f3c22452a228892901de0aedb779e7b5015";
 const CANONICAL_BRANCH = "main";

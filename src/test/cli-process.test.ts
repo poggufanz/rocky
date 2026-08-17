@@ -49,6 +49,9 @@ function processSandbox(t: TestContext): ProcessSandbox {
     ROCKY_HOME: directories.rockyHome,
     ROCKY_TEST_FETCH_MARKER: join(root, "fetch-used.marker"),
     ROCKY_TEST_BACKGROUND_MARKER: join(root, "background-attempt.marker"),
+    // This sandbox is not the PowerShell-hook test suite — never let a
+    // generic CLI-process test reach this machine's real $PROFILE.
+    ROCKY_TEST_POWERSHELL_HOSTS: "[]",
   };
   delete env.NODE_OPTIONS;
   delete env.NODE_TEST_CONTEXT;
