@@ -76,10 +76,14 @@ function bashrcSandbox(t: TestContext): BashrcSandbox {
     HOME: process.env.HOME,
     USERPROFILE: process.env.USERPROFILE,
     ROCKY_HOME: process.env.ROCKY_HOME,
+    ROCKY_TEST_POWERSHELL_HOSTS: process.env.ROCKY_TEST_POWERSHELL_HOSTS,
   };
   process.env.HOME = home;
   process.env.USERPROFILE = home;
   process.env.ROCKY_HOME = join(root, "rocky-home");
+  // This sandbox exercises bashrc only — see the identical note in
+  // hook-block.test.ts's bashrcSandbox.
+  process.env.ROCKY_TEST_POWERSHELL_HOSTS = "[]";
   t.after(() => {
     for (const [key, value] of Object.entries(saved)) {
       if (value === undefined) delete process.env[key];
