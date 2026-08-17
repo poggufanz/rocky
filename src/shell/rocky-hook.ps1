@@ -125,32 +125,46 @@ function global:__rockyPreCompensateForShim([string]$value) {
 # did, is genuinely non-blocking (returns in ~50-140ms regardless of how long
 # the spawned `rocky` process itself takes), and correctly preserves every
 # argument's own embedded spaces and quotes via `__rockyQuoteArg` above.
-# Output is redirected to real discard files under the temp directory, never
-# the bare device name "NUL" -- the `\\.\CON` investigation already proved a
-# bare reserved device name can silently become an ordinary file under some
-# invocation layers, and this function never re-litigates that risk for a
-# second device name. A `.ps1` target (the real npm-installed shim) cannot be
-# launched directly by `Start-Process` -- routed through the same PowerShell
-# executable this session is already running under, whichever host or
-# install location that turns out to be.
+#
+# Output is discarded to the null device, not a file (fix round 2, Finding
+# 5): fix round 1 shipped static, non-unique discard *file* paths under the
+# temp directory, which two near-concurrent spawns (rapid consecutive
+# failures, or two PowerShell sessions on the same machine -- an ordinary
+# thing, not a corner case) could collide on, silently dropping one
+# invocation's memory write. `-RedirectStandardOutput`/`-RedirectStandardError`
+# refuse an identical value for both parameters, so this uses two distinct
+# spellings of the same device: `\\.\NUL` (the explicit Win32 device-
+# namespace form, the same style `\\.\CON` already uses) for stdout, and the
+# bare classic device name `NUL` for stderr. Verified empirically, both
+# hosts, both parameter orderings: neither creates a stray file named `NUL`
+# in the working directory and neither throws -- this is NOT the same trap
+# bare `CON` sprang for `sayTty`/`detailTty` (that was Node's own `fs`
+# layer mishandling a bare device name via long-path prefixing;
+# `Start-Process`'s redirect-file setup is a different code path, verified
+# separately, not assumed safe by analogy). No filesystem path is unique
+# per invocation because none is needed: there is no file, so there is
+# nothing to collide on and nothing to clean up.
+#
+# A `.ps1` target (the real npm-installed shim) cannot be launched directly
+# by `Start-Process` -- routed through the same PowerShell executable this
+# session is already running under, whichever host or install location that
+# turns out to be.
 function global:__rockySpawnDetached([string]$exe, [string[]]$scriptArgs) {
     try {
         $resolved = Get-Command $exe -ErrorAction SilentlyContinue
         if (-not $resolved) { return }
         $target = $resolved.Source
-        $discardOut = Join-Path ([System.IO.Path]::GetTempPath()) 'rocky-hook-stdout.log'
-        $discardErr = Join-Path ([System.IO.Path]::GetTempPath()) 'rocky-hook-stderr.log'
         if ($target -match '\.ps1$') {
             $hostExe = (Get-Process -Id $PID).Path
             $compensated = $scriptArgs | ForEach-Object { __rockyPreCompensateForShim $_ }
             $quotedArgs = $compensated | ForEach-Object { __rockyQuoteArg $_ }
             $allArgs = @('-NoProfile', '-NonInteractive', '-File', (__rockyQuoteArg $target)) + $quotedArgs
             Start-Process -FilePath $hostExe -ArgumentList $allArgs -NoNewWindow `
-                -RedirectStandardOutput $discardOut -RedirectStandardError $discardErr -ErrorAction Stop | Out-Null
+                -RedirectStandardOutput '\\.\NUL' -RedirectStandardError 'NUL' -ErrorAction Stop | Out-Null
         } else {
             $quotedArgs = $scriptArgs | ForEach-Object { __rockyQuoteArg $_ }
             Start-Process -FilePath $target -ArgumentList $quotedArgs -NoNewWindow `
-                -RedirectStandardOutput $discardOut -RedirectStandardError $discardErr -ErrorAction Stop | Out-Null
+                -RedirectStandardOutput '\\.\NUL' -RedirectStandardError 'NUL' -ErrorAction Stop | Out-Null
         }
     } catch {
         # A broken spawn must never reach the user as a terminating error --
