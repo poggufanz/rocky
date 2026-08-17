@@ -30,6 +30,16 @@
 if (Get-Variable -Name __rockyHookLoaded -Scope Global -ErrorAction SilentlyContinue) { return }
 $global:__rockyHookLoaded = $true
 
+# F2 round 2 (task-a review, Finding 1): every hook-speech file name this
+# session's own __rockySpawnDetached has ever handed to a child, so
+# `prompt`'s drain loop below only ever SPEAKS a file this exact session
+# spawned -- never a file some other session (a second open Windows
+# PowerShell/PS7 window, or this same window's own next launch, sharing the
+# same $env:ROCKY_HOME) is still waiting to claim itself. `$global:` here is
+# this one process's own global scope, not shared across processes, so this
+# starts empty on every fresh hook load and needs no cross-session storage.
+$global:__rockySpeechIds = @()
+
 # Capture whatever `prompt` was already installed -- the user's own function,
 # oh-my-posh, starship, or PowerShell's own built-in default -- exactly once,
 # at load time, never at call time. Wrapping (Ruling 1) instead of replacing
@@ -109,6 +119,55 @@ function global:__rockyPreCompensateForShim([string]$value) {
     return $value
 }
 
+# F2 round 2 (task-a review, Finding 2): re-sanitize on read, independent of
+# whether a given file actually came from Rocky's own atomic-rename write
+# path. Legitimate content is already sanitized once, at write time
+# (safeTerminalLine/safeTerminalBlock, ui/rocky.ts) -- but nothing before
+# this point proves a given file in hook-speech was ever produced that way
+# rather than dropped there by some other process running as this same user
+# (a misbehaving dependency, a compromised script). A same-user trust
+# boundary, not a privilege escalation, but a real gap in the defense in
+# depth Rocky applies everywhere else user-visible text originates from
+# something other than a hardcoded literal. Strips ANSI/CSI/OSC escape
+# sequences and raw C0/DEL control bytes -- keeping tab and the newlines
+# this file's own multi-line messages legitimately use -- before anything
+# is ever written to the console. `` `e `` (the backtick escape for ESC) is
+# PowerShell 6+ only and would silently fail to match on Windows PowerShell
+# 5.1; `[char]27`/`[char]7` work identically on both editions.
+function global:__rockySanitizeSpeechText([string]$text) {
+    if ([string]::IsNullOrEmpty($text)) { return $text }
+    $esc = [char]27
+    $bel = [char]7
+    $sanitized = [regex]::Replace($text, "$esc\][^$bel$esc]*($bel|$esc\\)", '')  # OSC ... BEL/ST
+    $sanitized = [regex]::Replace($sanitized, "$esc\[[0-9;?]*[@-~]", '')          # CSI ... final byte
+    $sanitized = [regex]::Replace($sanitized, "$esc.", '')                        # any other escape form
+    return [regex]::Replace($sanitized, '[\x00-\x08\x0B-\x1F\x7F]', '')
+}
+
+# Finding 3's other half (task-a review round 2), found while verifying the
+# read-side fix on a real host rather than trusting it alone: reading with
+# -Encoding UTF8 decodes the file correctly, but [Console]::Error.Write still
+# re-encodes that correct string using [Console]::OutputEncoding before any
+# byte reaches wherever stderr actually goes -- verified empirically (same
+# real Windows PowerShell 5.1 host) that when stderr is redirected/piped
+# rather than a live console handle, the default OutputEncoding is the
+# system codepage, not UTF-8, corrupting the same non-ASCII content a second
+# time on the way OUT. Only set when there is actually something non-empty
+# to say (most prompt cycles say nothing), and only when it is not already
+# UTF-8 -- changing OutputEncoding on Windows calls SetConsoleOutputCP under
+# the hood, a real console-wide side effect not worth paying on every idle
+# prompt draw. Wrapped defensively: a restricted or unusual host can throw
+# setting this, and that must never become a terminating error either.
+function global:__rockyEnsureUtf8ConsoleOutput() {
+    try {
+        if ([Console]::OutputEncoding.CodePage -ne [System.Text.Encoding]::UTF8.CodePage) {
+            [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+        }
+    } catch {
+        # best effort -- a failure here must not block speech from printing
+    }
+}
+
 # Fire-and-forget (Finding 1, fix round 1): the shell must never block on
 # Rocky's own bookkeeping the way the original synchronous `& $__rockyBin
 # ...` call did -- on a machine with real-time AV scanning of newly-spawned
@@ -185,7 +244,13 @@ function global:__rockySpawnDetached([string]$exe, [string[]]$scriptArgs) {
         $target = $resolved.Source
 
         $__rockyHomeForSpeech = if ($env:ROCKY_HOME) { $env:ROCKY_HOME } else { Join-Path $HOME '.rocky' }
-        $speechFile = Join-Path (Join-Path $__rockyHomeForSpeech 'hook-speech') "$([System.Guid]::NewGuid().ToString('N')).txt"
+        $__rockySpeechName = "$([System.Guid]::NewGuid().ToString('N')).txt"
+        $speechFile = Join-Path (Join-Path $__rockyHomeForSpeech 'hook-speech') $__rockySpeechName
+        # Finding 1: this session claims the name now, before the spawn --
+        # the drain loop in `prompt` will only ever speak a file whose name
+        # is in this list, so this is the one place session ownership is
+        # established.
+        $global:__rockySpeechIds += $__rockySpeechName
         $previousSpeechFile = $env:ROCKY_HOOK_SPEECH_FILE
         $env:ROCKY_HOOK_SPEECH_FILE = $speechFile
         try {
@@ -259,26 +324,63 @@ function global:prompt {
             # command it describes -- the child that produced it is still
             # running, somewhere, when THIS prompt call starts; that lag is
             # not a bug, it is fix round 1's non-blocking spawn (Finding 1)
-            # doing exactly what it was built to do. Only files matching the
-            # published name pattern are ever read: __rockySpawnDetached's
-            # writer only creates a name under that pattern via an atomic
-            # rename, so a reader here can never observe a half-written
-            # message. One bad/vanished entry is skipped, not fatal to the
-            # rest -- matches this file's existing rule that a broken step
-            # here must never reach the user as a terminating error.
+            # doing exactly what it was built to do.
             $__rockyHomeForSpeech = if ($env:ROCKY_HOME) { $env:ROCKY_HOME } else { Join-Path $HOME '.rocky' }
             $__rockySpeechDir = Join-Path $__rockyHomeForSpeech 'hook-speech'
             if (Test-Path -LiteralPath $__rockySpeechDir) {
-                $__rockySpeechFiles = Get-ChildItem -LiteralPath $__rockySpeechDir -Filter '*.txt' -File -ErrorAction SilentlyContinue
-                foreach ($__rockySpeechEntry in $__rockySpeechFiles) {
-                    try {
-                        $__rockySpeechText = Get-Content -LiteralPath $__rockySpeechEntry.FullName -Raw -ErrorAction Stop
-                        if ($__rockySpeechText) { [Console]::Error.Write($__rockySpeechText) }
-                    } catch {
-                        # unreadable/vanished between listing and reading -- skip, never fatal
-                    } finally {
+                # Finding 4 (task-a review round 2): every file in this
+                # directory is listed, not just *.txt -- an orphaned *.tmp
+                # fragment from a write interrupted mid-flight (process
+                # killed) matched nothing before and was never pruned.
+                # Finding 1's staleness cutoff below prunes those too.
+                $__rockyStaleCutoff = [DateTime]::UtcNow.AddHours(-24)
+                $__rockySpeechEntries = Get-ChildItem -LiteralPath $__rockySpeechDir -File -ErrorAction SilentlyContinue
+                foreach ($__rockySpeechEntry in $__rockySpeechEntries) {
+                    if ($__rockySpeechEntry.Name -in $global:__rockySpeechIds) {
+                        # Finding 1: this exact session spawned this file --
+                        # the only files this loop ever speaks.
+                        try {
+                            # Finding 3 (task-a review round 2, verified on a
+                            # real Windows PowerShell 5.1 host with non-ASCII
+                            # content): Get-Content with no -Encoding defaults
+                            # to the system ANSI codepage for a BOM-less file
+                            # on Windows PowerShell 5.1, corrupting any
+                            # non-ASCII byte ui/rocky.ts's UTF-8-no-BOM write
+                            # produced -- PowerShell 7 was already correct.
+                            # -Encoding UTF8 forces correct decoding on both
+                            # editions regardless of BOM.
+                            $__rockySpeechText = Get-Content -LiteralPath $__rockySpeechEntry.FullName -Raw -Encoding UTF8 -ErrorAction Stop
+                            # Finding 2: re-sanitize on read -- see
+                            # __rockySanitizeSpeechText above. Independent of
+                            # whether this file's content is already known
+                            # safe; a second, cheap layer, not a replacement
+                            # for the write-time pass.
+                            $__rockySpeechText = __rockySanitizeSpeechText $__rockySpeechText
+                            if ($__rockySpeechText) {
+                                __rockyEnsureUtf8ConsoleOutput
+                                [Console]::Error.Write($__rockySpeechText)
+                            }
+                        } catch {
+                            # unreadable/vanished between listing and reading -- skip, never fatal
+                        } finally {
+                            Remove-Item -LiteralPath $__rockySpeechEntry.FullName -Force -ErrorAction SilentlyContinue
+                            $global:__rockySpeechIds = @($global:__rockySpeechIds | Where-Object { $_ -ne $__rockySpeechEntry.Name })
+                        }
+                    } elseif ($__rockySpeechEntry.LastWriteTimeUtc -lt $__rockyStaleCutoff) {
+                        # Finding 1 + Finding 4: not ours -- possibly another
+                        # still-open session's own pending message (Windows
+                        # PowerShell and PS7 share the same $env:ROCKY_HOME by
+                        # default) -- so it is never spoken here regardless of
+                        # age. Only once it is old enough that no session
+                        # could realistically still be waiting to claim it
+                        # (the ordinary case: a session closed right after a
+                        # failure, before its own spawn even finished writing)
+                        # is it pruned, silently, never printed.
                         Remove-Item -LiteralPath $__rockySpeechEntry.FullName -Force -ErrorAction SilentlyContinue
                     }
+                    # else: not ours, but recent -- leave it alone untouched;
+                    # it may still belong to a live session that has not had
+                    # a prompt cycle yet.
                 }
             }
 
