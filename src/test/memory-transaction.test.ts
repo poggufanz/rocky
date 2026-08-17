@@ -7,6 +7,7 @@ import {
   mkdtempSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   rmSync,
   symlinkSync,
   unlinkSync,
@@ -14,7 +15,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { commandIdentity } from "../core/fingerprint.js";
@@ -252,20 +253,6 @@ function tripleLockContentionPreload(path: string): void {
   ].join("\n"), "utf8");
 }
 
-function markerWaiter(path: string): void {
-  writeFileSync(path, [
-    "import { existsSync, watch } from 'node:fs';",
-    "import { basename, dirname } from 'node:path';",
-    "const target = process.argv[2];",
-    "if (existsSync(target)) process.exit(0);",
-    "const watcher = watch(dirname(target), (_event, name) => {",
-    "  if (String(name) === basename(target)) { watcher.close(); process.exit(0); }",
-    "});",
-    "if (existsSync(target)) { watcher.close(); process.exit(0); }",
-    "watcher.on('error', () => { watcher.close(); process.exit(1); });",
-  ].join("\n"), "utf8");
-}
-
 function pruneLockObservationPreload(path: string): void {
   writeFileSync(path, [
     "const fs = require('node:fs');",
@@ -372,21 +359,22 @@ test("contended triple lock phases bounded polling and waits for holder release"
   const order = join(home, "lock-order.log");
   const waits = join(home, "lock-waits.log");
   const preload = join(home, "lock-contention.cjs");
-  const waiter = join(home, "wait-for-marker.mjs");
   tripleLockContentionPreload(preload);
-  markerWaiter(waiter);
 
   const holderWorker = [
-    "const { spawnSync } = await import('node:child_process');",
-    "const { writeFileSync } = await import('node:fs');",
-    "const [modulePath, home, ready, done, release, waiter] = process.argv.slice(1);",
+    "const { existsSync, writeFileSync } = await import('node:fs');",
+    "const [modulePath, home, ready, done, release] = process.argv.slice(1);",
     "process.env.ROCKY_HOME = home;",
     "const memory = await import(modulePath);",
     "memory.withMemoryTransaction((transaction) => {",
     "  transaction.append({ kind: 'note', id: 'holder-note', ts: Date.now(), cwd: home, cmd: 'holder', file: 'holder.ts', line: 1, subject: 'holder', answer: 'holder' });",
     "  writeFileSync(ready, 'ready');",
-    "  const result = spawnSync(process.execPath, [waiter, release], { stdio: 'ignore', windowsHide: true });",
-    "  if (result.status !== 0) throw new Error(`marker waiter failed: ${result.status}`);",
+    "  const signal = new Int32Array(new SharedArrayBuffer(4));",
+    "  const deadline = Date.now() + 10_000;",
+    "  while (!existsSync(release)) {",
+    "    if (Date.now() >= deadline) throw new Error('marker wait timed out');",
+    "    Atomics.wait(signal, 0, 0, 5);",
+    "  }",
     "});",
     "writeFileSync(done, 'done');",
   ].join("\n");
@@ -409,7 +397,7 @@ test("contended triple lock phases bounded polling and waits for holder release"
   delete holderEnv.NODE_OPTIONS;
   const holder = spawn(process.execPath, [
     "--input-type=module", "--eval", holderWorker,
-    memoryModuleUrl, home, holderReady, holderDone, release, waiter,
+    memoryModuleUrl, home, holderReady, holderDone, release,
   ], { env: holderEnv, stdio: ["ignore", "ignore", "pipe"], windowsHide: true });
   t.after(() => {
     try { writeFileSync(release, "cleanup"); } catch { /* best effort */ }
@@ -940,7 +928,7 @@ test("run, watch, and hook use the same 8-hour boundary at minus/exact/plus 1 ms
   for (const surface of surfaces) {
     for (const boundary of boundaries) {
       const home = join(root, `${surface}-${boundary.label}`);
-      const cwd = root;
+      const cwd = realpathSync(root);
       seed(home, [failure(`${surface}-${boundary.label}`, cmd, cwd, now - LINK_WINDOW_MS + boundary.delta)]);
       const env = {
         ...process.env,
@@ -1297,8 +1285,11 @@ test("an old orphan claim behind a stable nonclaim prefix cannot starve lock rec
   }
   assert.ok(Date.now() - started < 2_000, "orphan recovery must not wait for the full lock deadline");
   assert.equal(existsSync(lock), false, "dead primary lock is reclaimed");
-  assert.equal(existsSync(orphanClaim), true, "old orphan claim may remain for bounded cleanup");
-  assert.equal(readdirSync(home).filter((name) => name.startsWith("aaa-stable-prefix-")).length, 96);
+  const entries = readdirSync(home);
+  const orphanName = basename(orphanClaim);
+  assert.ok(entries.some((name) => name === orphanName || name.startsWith(`${orphanName}.reclaim.tombstone.`)),
+    "old orphan claim remains directly or as safe tombstone evidence");
+  assert.equal(entries.filter((name) => name.startsWith("aaa-stable-prefix-")).length, 96);
 });
 
 test("competing dead-owner reclaimers never overlap transactions", { timeout: 30_000 }, async (t) => {
