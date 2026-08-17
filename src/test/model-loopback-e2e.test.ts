@@ -23,6 +23,7 @@ import { checkAmbiguity } from "../agent/ambiguity.js";
 import { resolveRockyPaths, type RockyPaths } from "../core/state-paths.js";
 
 const MODEL = "task16-e2e-model";
+const ABORT_OBSERVATION_TIMEOUT_MS = 10_000;
 
 interface RequestRecord {
   method: string;
@@ -382,7 +383,7 @@ test("real loopback failures preserve deterministic recall and capture cancellat
   t.after(async () => { await delayedHeaders.close(); });
   const delayedHeaderClient = createOllamaClient({ origin: delayedHeaders.origin, timeoutMs: 40 });
   await assert.rejects(delayedHeaderClient.generateStructured(MODEL, "probe", {}), /timed out/iu);
-  await boundedWait(delayedHeaders.waitForAbort(), "delayed-header request abort");
+  await boundedWait(delayedHeaders.waitForAbort(), "delayed-header request abort", ABORT_OBSERVATION_TIMEOUT_MS);
   await delayedHeaders.close();
 
   const delayedBody = new LoopbackServer((_request, response) => {
@@ -393,7 +394,7 @@ test("real loopback failures preserve deterministic recall and capture cancellat
   t.after(async () => { await delayedBody.close(); });
   const delayedBodyClient = createOllamaClient({ origin: delayedBody.origin, timeoutMs: 40 });
   await assert.rejects(delayedBodyClient.generateStructured(MODEL, "probe", {}), /timed out/iu);
-  await boundedWait(delayedBody.waitForAbort(), "delayed-body request abort");
+  await boundedWait(delayedBody.waitForAbort(), "delayed-body request abort", ABORT_OBSERVATION_TIMEOUT_MS);
   await delayedBody.close();
 
   const callerAbort = new LoopbackServer(() => { /* Caller controls cancellation. */ });
@@ -406,7 +407,7 @@ test("real loopback failures preserve deterministic recall and capture cancellat
   await boundedWait(callerAbort.waitForRequest(), "caller-abort request start");
   controller.abort(reason);
   await assert.rejects(request, reason);
-  await boundedWait(callerAbort.waitForAbort(), "caller-abort request abort");
+  await boundedWait(callerAbort.waitForAbort(), "caller-abort request abort", ABORT_OBSERVATION_TIMEOUT_MS);
   assert.equal(callerAbort.requests.filter((entry) => entry.aborted).length, 1);
   await callerAbort.close();
 });
