@@ -32,7 +32,9 @@
 import test, { type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import {
+  chmodSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -226,6 +228,52 @@ test("PowerShell hook uninstall on an absent profile stays a quiet success", (t)
   assert.equal(hookUninstall(), 0, sandbox.stderr());
   assert.match(sandbox.stderr(), /no ears installed in Windows PowerShell/);
   assert.equal(existsSync(sandbox.profile), false);
+});
+
+// Finding 3, final whole-branch review: every other new string in this
+// release has a dedicated validateRockyPhrase test and/or a behavioral test;
+// this one (hook.ts's publishTarget, the non-bashrc branch) shipped with
+// neither. The string itself already passes the voice rules -- this closes
+// the gate, it does not change the wording.
+const WRITE_PROTECTED_PROFILE_DISCLOSURE = "Windows PowerShell profile is write-protected. I replace it anyway. your lines stay.";
+
+test("the write-protected PowerShell profile disclosure follows Rocky's voice rules", () => {
+  assert.deepEqual(validateRockyPhrase(WRITE_PROTECTED_PROFILE_DISCLOSURE), []);
+});
+
+test("hookInstall discloses a write-protected PowerShell profile, replaces it anyway, keeps mode and user lines", (t) => {
+  // Root bypasses the file mode entirely (chmod 0o400 would not stop the
+  // write), so this case would pass for the wrong reason under root. Mirrors
+  // hook-install.test.ts's identical bashrc guard.
+  if (process.getuid?.() === 0) {
+    t.skip("root bypasses file mode; write-protection cannot be exercised");
+    return;
+  }
+  const sandbox = powerShellSandbox(t);
+  writeFileSync(sandbox.profile, bytes("Set-Alias ll Get-ChildItem\n"));
+  chmodSync(sandbox.profile, 0o400);
+
+  assert.equal(hookInstall(), 0, sandbox.stderr());
+
+  assert.ok(sandbox.stderr().includes(WRITE_PROTECTED_PROFILE_DISCLOSURE), sandbox.stderr());
+  // Windows has no per-class permission bits: chmod(0o400) sets the
+  // read-only attribute, and stat reports back 0o444, not 0o400. The bit
+  // that actually matters on both platforms is the owner write bit staying
+  // absent (0o400 on POSIX, 0o444 on Windows both clear it) -- see the
+  // parallel assertion in hook-install.test.ts for bashrc.
+  assert.equal(lstatSync(sandbox.profile).mode & 0o200, 0, "owner write bit must stay absent: still write-protected");
+  const content = readFileSync(sandbox.profile, "utf8");
+  assert.ok(content.includes("Set-Alias ll Get-ChildItem"), "user line survives");
+  assert.equal(powershellHookBlockCodec.classify(bytes(content)), "managed");
+});
+
+test("hookInstall never prints the write-protected disclosure for an ordinary-mode PowerShell profile", (t) => {
+  const sandbox = powerShellSandbox(t);
+  writeFileSync(sandbox.profile, bytes("Set-Alias ll Get-ChildItem\n"));
+
+  assert.equal(hookInstall(), 0, sandbox.stderr());
+
+  assert.ok(!sandbox.stderr().includes(WRITE_PROTECTED_PROFILE_DISCLOSURE), sandbox.stderr());
 });
 
 test("PowerShell hook install refuses a corrupt block and preserves every byte", (t) => {
