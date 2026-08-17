@@ -253,6 +253,46 @@ function tripleLockContentionPreload(path: string): void {
   ].join("\n"), "utf8");
 }
 
+function turnoverLockPreload(path: string): void {
+  writeFileSync(path, [
+    "const fs = require('node:fs');",
+    "const { syncBuiltinESMExports } = require('node:module');",
+    "const originalExists = fs.existsSync.bind(fs);",
+    "const originalWrite = fs.writeFileSync.bind(fs);",
+    "const originalAppend = fs.appendFileSync.bind(fs);",
+    "const originalWait = Atomics.wait.bind(Atomics);",
+    "let waits = 0;",
+    "let proofDeadline = 0;",
+    "const gateWait = Number(process.env.ROCKY_TEST_TURNOVER_GATE_WAIT || 4);",
+    "const proofWindowMs = Number(process.env.ROCKY_TEST_TURNOVER_PROOF_MS || 1000);",
+    "const initialWait = 5 + (process.pid % 7);",
+    "Atomics.wait = (typedArray, index, value, timeout) => {",
+    "  if (process.env.ROCKY_TEST_ROLE === 'turnover' && typeof timeout === 'number') {",
+    "    const count = ++waits;",
+    "    originalAppend(process.env.ROCKY_TEST_WAITS, `${timeout}\\n`);",
+    "    if (count === gateWait) {",
+    "      originalWrite(process.env.ROCKY_TEST_TURNOVER_READY, 'ready');",
+    "      const signal = new Int32Array(new SharedArrayBuffer(4));",
+    "      const deadline = Date.now() + 10_000;",
+    "      while (!originalExists(process.env.ROCKY_TEST_TURNOVER_ALLOW)) {",
+    "        if (Date.now() >= deadline) throw new Error('turnover gate timed out');",
+    "        originalWait(signal, 0, 0, 5);",
+    "      }",
+    "      proofDeadline = Date.now() + proofWindowMs;",
+    "      originalAppend(process.env.ROCKY_TEST_TURNOVER_PROOF, 'gate-released\\n');",
+    "    }",
+    "    if (count > gateWait && timeout === initialWait) {",
+    "      const withinProof = proofDeadline > 0 && Date.now() <= proofDeadline;",
+    "      originalAppend(process.env.ROCKY_TEST_TURNOVER_PROOF, `${withinProof ? 'initial-within-window' : 'initial-after-window'}\\n`);",
+    "      if (withinProof) originalWrite(process.env.ROCKY_TEST_TURNOVER_RESET, 'reset');",
+    "    }",
+    "  }",
+    "  return originalWait(typedArray, index, value, timeout);",
+    "};",
+    "syncBuiltinESMExports();",
+  ].join("\n"), "utf8");
+}
+
 function pruneLockObservationPreload(path: string): void {
   writeFileSync(path, [
     "const fs = require('node:fs');",
@@ -458,6 +498,164 @@ test("contended triple lock phases bounded polling and waits for holder release"
     name === "memory.jsonl.triple.lock.reclaim.guard" ||
     (name.includes(".triple.lock.reclaim.") && !name.includes(".reclaim.tombstone.")));
   assert.deepEqual(activeLockResidue, []);
+});
+
+test("triple lock polling resets after validated owner turnover", { timeout: 30_000 }, async (t) => {
+  const home = sandbox(t, "rocky-lock-turnover-");
+  const lock = join(home, "memory.jsonl.triple.lock");
+  const firstReady = join(home, "first-ready");
+  const firstRelease = join(home, "first-release");
+  const firstDone = join(home, "first-done");
+  const secondStart = join(home, "second-start");
+  const secondReady = join(home, "second-ready");
+  const secondRelease = join(home, "second-release");
+  const secondDone = join(home, "second-done");
+  const contenderGateReady = join(home, "contender-gate-ready");
+  const allowContender = join(home, "allow-contender");
+  const resetObserved = join(home, "reset-observed");
+  const contenderDone = join(home, "contender-done");
+  const waits = join(home, "turnover-waits.log");
+  const proof = join(home, "turnover-proof.log");
+  const preload = join(home, "turnover-lock.cjs");
+  turnoverLockPreload(preload);
+
+  const firstWorker = [
+    "const { existsSync, writeFileSync } = await import('node:fs');",
+    "const [modulePath, home, ready, release, done] = process.argv.slice(1);",
+    "process.env.ROCKY_HOME = home;",
+    "const memory = await import(modulePath);",
+    "memory.withMemoryTransaction((transaction) => {",
+    "  transaction.append({ kind: 'note', id: 'first-owner', ts: Date.now(), cwd: home, cmd: 'first', file: 'first.ts', line: 1, subject: 'first', answer: 'first' });",
+    "  writeFileSync(ready, 'ready');",
+    "  const signal = new Int32Array(new SharedArrayBuffer(4));",
+    "  const deadline = Date.now() + 10_000;",
+    "  while (!existsSync(release)) {",
+    "    if (Date.now() >= deadline) throw new Error('first owner timed out');",
+    "    Atomics.wait(signal, 0, 0, 5);",
+    "  }",
+    "});",
+    "writeFileSync(done, 'done');",
+  ].join("\n");
+  const secondWorker = [
+    "const { existsSync, writeFileSync } = await import('node:fs');",
+    "const [modulePath, home, start, ready, release, done] = process.argv.slice(1);",
+    "process.env.ROCKY_HOME = home;",
+    "const memory = await import(modulePath);",
+    "const signal = new Int32Array(new SharedArrayBuffer(4));",
+    "const startDeadline = Date.now() + 10_000;",
+    "while (!existsSync(start)) {",
+    "  if (Date.now() >= startDeadline) throw new Error('second owner start timed out');",
+    "  Atomics.wait(signal, 0, 0, 5);",
+    "}",
+    "memory.withMemoryTransaction((transaction) => {",
+    "  transaction.append({ kind: 'note', id: 'second-owner', ts: Date.now(), cwd: home, cmd: 'second', file: 'second.ts', line: 1, subject: 'second', answer: 'second' });",
+    "  writeFileSync(ready, 'ready');",
+    "  const holdDeadline = Date.now() + 10_000;",
+    "  while (!existsSync(release)) {",
+    "    if (Date.now() >= holdDeadline) throw new Error('second owner timed out');",
+    "    Atomics.wait(signal, 0, 0, 5);",
+    "  }",
+    "});",
+    "writeFileSync(done, 'done');",
+  ].join("\n");
+  const contenderWorker = [
+    "const { writeFileSync } = await import('node:fs');",
+    "const [modulePath, home, done] = process.argv.slice(1);",
+    "process.env.ROCKY_HOME = home;",
+    "const memory = await import(modulePath);",
+    "memory.withMemoryTransaction((transaction) => transaction.append({ kind: 'note', id: 'turnover-contender', ts: Date.now(), cwd: home, cmd: 'contender', file: 'contender.ts', line: 1, subject: 'contender', answer: 'contender' }));",
+    "writeFileSync(done, 'done');",
+  ].join("\n");
+
+  const baseEnv: NodeJS.ProcessEnv = { ...process.env, ROCKY_HOME: home };
+  delete baseEnv.NODE_OPTIONS;
+  const children: ChildProcess[] = [];
+  t.after(() => {
+    for (const marker of [firstRelease, secondStart, secondRelease, allowContender]) {
+      try { writeFileSync(marker, "cleanup"); } catch { /* best effort */ }
+    }
+    for (const child of children) {
+      try { child.kill(); } catch { /* already gone */ }
+    }
+  });
+
+  const first = spawn(process.execPath, [
+    "--input-type=module", "--eval", firstWorker,
+    memoryModuleUrl, home, firstReady, firstRelease, firstDone,
+  ], { env: baseEnv, stdio: ["ignore", "ignore", "pipe"], windowsHide: true });
+  children.push(first);
+  const firstResult = completionWithStderr(first);
+  await waitFor(() => existsSync(firstReady), 10_000, "first owner lock");
+
+  const contender = spawn(process.execPath, [
+    "--input-type=module", "--eval", contenderWorker,
+    memoryModuleUrl, home, contenderDone,
+  ], {
+    env: {
+      ...baseEnv,
+      ROCKY_TEST_ROLE: "turnover",
+      ROCKY_TEST_WAITS: waits,
+      ROCKY_TEST_TURNOVER_GATE_WAIT: "4",
+      ROCKY_TEST_TURNOVER_READY: contenderGateReady,
+      ROCKY_TEST_TURNOVER_ALLOW: allowContender,
+      ROCKY_TEST_TURNOVER_RESET: resetObserved,
+      ROCKY_TEST_TURNOVER_PROOF: proof,
+      ROCKY_TEST_TURNOVER_PROOF_MS: "1000",
+      NODE_OPTIONS: `--require=${preload}`,
+    },
+    stdio: ["ignore", "ignore", "pipe"],
+    windowsHide: true,
+  });
+  children.push(contender);
+  const contenderPid = contender.pid;
+  assert.ok(contenderPid !== undefined, "contender must have a process id");
+  const contenderResult = completionWithStderr(contender);
+
+  await waitFor(() => existsSync(contenderGateReady), 10_000, "turnover contender gate");
+
+  const second = spawn(process.execPath, [
+    "--input-type=module", "--eval", secondWorker,
+    memoryModuleUrl, home, secondStart, secondReady, secondRelease, secondDone,
+  ], { env: baseEnv, stdio: ["ignore", "ignore", "pipe"], windowsHide: true });
+  children.push(second);
+  const secondResult = completionWithStderr(second);
+
+  writeFileSync(firstRelease, "release", "utf8");
+  await waitFor(() => !existsSync(lock), 10_000, "first owner release");
+  writeFileSync(secondStart, "start", "utf8");
+  await waitFor(() => existsSync(secondReady), 10_000, "second owner lock");
+  writeFileSync(allowContender, "allow", "utf8");
+  await waitFor(() => existsSync(resetObserved), 1_500, "owner-turnover backoff reset");
+  const proofEvents = readFileSync(proof, "utf8").trim().split("\n").filter(Boolean);
+  assert.ok(proofEvents.includes("gate-released"), `turnover proof did not record gate release: ${proofEvents.join(",")}`);
+  assert.ok(proofEvents.includes("initial-within-window"), `turnover reset was not within proof window: ${proofEvents.join(",")}`);
+  assert.equal(proofEvents.includes("initial-after-window"), false, `turnover reset proof exceeded window: ${proofEvents.join(",")}`);
+  writeFileSync(secondRelease, "release", "utf8");
+
+  const [firstOutcome, secondOutcome, contenderOutcome] = await Promise.all([
+    firstResult,
+    secondResult,
+    contenderResult,
+  ]);
+  assert.equal(firstOutcome.code, 0, firstOutcome.stderr);
+  assert.equal(secondOutcome.code, 0, secondOutcome.stderr);
+  assert.equal(contenderOutcome.code, 0, contenderOutcome.stderr);
+  assert.equal(existsSync(firstDone), true);
+  assert.equal(existsSync(secondDone), true);
+  assert.equal(existsSync(contenderDone), true);
+
+  const durations = readFileSync(waits, "utf8").trim().split("\n").filter(Boolean).map(Number);
+  const initialWait = 5 + (contenderPid % 7);
+  assert.deepEqual(durations.slice(0, 4), [initialWait, initialWait + 5, initialWait + 10, initialWait + 15]);
+  assert.ok(durations.slice(4).includes(initialWait), `turnover must reset polling: ${durations.join(",")}`);
+  assert.deepEqual(
+    memory.loadMemory(join(home, "memory.jsonl"))
+      .filter((record): record is NoteRecord => record.kind === "note")
+      .map((record) => record.id)
+      .sort(),
+    ["first-owner", "second-owner", "turnover-contender"],
+  );
+  assert.equal(existsSync(lock), false);
 });
 
 test("lock housekeeping starts only after canonical lock release", { timeout: 15_000 }, (t) => {

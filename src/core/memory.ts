@@ -422,7 +422,9 @@ function acquireTripleLock(paths: RockyPaths): TripleLock {
   const wallStarted = Date.now();
   const monotonicStarted = performance.now();
   const signal = new Int32Array(new SharedArrayBuffer(4));
-  let waitMs = 5 + (process.pid % 7);
+  const initialWaitMs = 5 + (process.pid % 7);
+  let waitMs = initialWaitMs;
+  let observedOwner: string | undefined;
   for (;;) {
     const lock = tryTripleLock(path);
     if (lock) {
@@ -430,6 +432,9 @@ function acquireTripleLock(paths: RockyPaths): TripleLock {
     }
     const current = readTripleLock(path);
     if (current) {
+      const owner = `${current.metadata.pid}:${current.metadata.token}`;
+      if (observedOwner !== undefined && observedOwner !== owner) waitMs = initialWaitMs;
+      observedOwner = owner;
       const alive = tripleOwnerAlive(current.metadata.pid);
       if (alive === undefined) throw new Error("Rocky triple lock owner cannot be verified");
       if (!alive) {
@@ -455,10 +460,16 @@ function acquireTripleLock(paths: RockyPaths): TripleLock {
         return verify !== undefined && sameTripleIdentity(staleMalformed, verify);
       })) continue;
 
+      let pathAbsent = false;
       try {
         if (lstatSync(path).isSymbolicLink()) throw new Error("Rocky triple lock target is unsafe");
       } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") pathAbsent = true;
+        else throw error;
+      }
+      if (pathAbsent) {
+        observedOwner = undefined;
+        waitMs = initialWaitMs;
       }
     }
     const wallRemaining = TRIPLE_LOCK_WAIT_MS - (Date.now() - wallStarted);

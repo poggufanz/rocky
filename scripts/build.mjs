@@ -22,4 +22,3 @@ copyShellAssets();
 // already-linked global `rocky` until the next npm link. Windows has no
 // POSIX mode bits to set.
 if (process.platform !== "win32") chmodSync(join(dist, "index.js"), 0o755);
-
