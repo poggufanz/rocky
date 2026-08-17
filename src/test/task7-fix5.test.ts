@@ -297,6 +297,58 @@ test("sanitized fetch bounds and cleans nested fix identifiers", async () => {
   assert.equal(encoded.includes("\u001b"), false);
 });
 
+test("custom fetch_record retains a fix link with an unrecognized basis and normalizes confirmed confidence to possible", async () => {
+  const record = {
+    kind: "fix", id: "fix-basis-unknown", ts: 1, cwd: "/work", cmd: "ok",
+    failureIds: ["f1"],
+    links: [{ id: "f1", basis: "banana", confidence: "confirmed" }],
+  } as never;
+  const registry = agentHookRegistry(emptyMemory({ fetchRecord: () => record }));
+  const result = await registry.call("fetch_record", { id: "fix-basis-unknown" }, new AbortController().signal);
+  const projected = result.structuredContent.record as { links?: { basis: string; confidence?: string }[] } | null;
+  assert.equal(projected?.links?.[0]?.basis, "banana");
+  assert.equal(projected?.links?.[0]?.confidence, "possible");
+});
+
+test("custom fetch_record still rejects a fix whose link basis is out of bounds", async () => {
+  const controlBasis = {
+    kind: "fix", id: "fix-basis-control", ts: 1, cwd: "/work", cmd: "ok",
+    failureIds: ["f1"],
+    links: [{ id: "f1", basis: "bad\u0000basis" }],
+  } as never;
+  const overLongBasis = {
+    kind: "fix", id: "fix-basis-long", ts: 1, cwd: "/work", cmd: "ok",
+    failureIds: ["f1"],
+    links: [{ id: "f1", basis: "x".repeat(16 * 1024 + 1) }],
+  } as never;
+  for (const record of [controlBasis, overLongBasis]) {
+    const registry = agentHookRegistry(emptyMemory({ fetchRecord: () => record }));
+    const result = await registry.call("fetch_record", { id: (record as { id: string }).id }, new AbortController().signal);
+    assert.ok(result.structuredContent.record === null || result.structuredContent.error !== undefined);
+  }
+});
+
+test("projectFixRecord retains a fix link with an unrecognized basis and normalizes confidence to possible", () => {
+  const fix = {
+    kind: "fix", id: "project-basis-unknown", ts: 1, cwd: "/work", cmd: "ok", failureIds: ["f1"],
+    links: [{ id: "f1", basis: "banana", confidence: "confirmed" }],
+  } as never;
+  const projected = projectMemoryRecord(fix, "sanitized", true) as { links?: { basis: string; confidence?: string }[]; truncatedFields: string[] };
+  assert.equal(projected.links?.[0]?.basis, "banana");
+  assert.equal(projected.links?.[0]?.confidence, "possible");
+  assert.equal(projected.truncatedFields.includes("record.links"), false);
+});
+
+test("projectFixRecord still truncates a fix link whose basis is out of bounds", () => {
+  const fix = {
+    kind: "fix", id: "project-basis-bad", ts: 1, cwd: "/work", cmd: "ok", failureIds: ["f1"],
+    links: [{ id: "f1", basis: "bad\u0000basis" }, { id: "f2", basis: "x".repeat(16 * 1024 + 1) }],
+  } as never;
+  const projected = projectMemoryRecord(fix, "sanitized", true) as { links?: unknown[]; truncatedFields: string[] };
+  assert.deepEqual(projected.links, []);
+  assert.equal(projected.truncatedFields.includes("record.links"), true);
+});
+
 test("custom recall bounds nested signature traversal before projection", async () => {
   let numericReads = 0;
   const signature = new Proxy(Array.from({ length: 100_000 }, () => "line"), {

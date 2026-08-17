@@ -1,9 +1,9 @@
 import { Buffer } from "node:buffer";
 import { homedir } from "node:os";
 import type { Exposure } from "../core/config-read.js";
-import { boundTripleRecord, isSafeNonNegativeInteger, MAX_TRIPLE_FILES } from "../core/memory-read.js";
+import { boundTripleRecord, isBoundedLinkBasis, isConfirmableLinkBasis, isSafeNonNegativeInteger, MAX_TRIPLE_FILES } from "../core/memory-read.js";
 import { canonicalPath } from "../core/memory-read.js";
-import type { FailureOrigin, FailureRecord, FixRecord, MemoryRecord, TripleRecord } from "../core/memory-read.js";
+import type { FailureOrigin, FailureRecord, FixRecord, LinkConfidence, MemoryRecord, TripleRecord } from "../core/memory-read.js";
 import { hasCanonicalKnowledgeProof } from "../core/memory-query.js";
 import type { KnowledgeSearchHit, RecallHit, RecentFailureHit, WhyFilePossible } from "../core/memory-query.js";
 import { redactSecretsAtBoundary, replaceAnsiAndControls, stripInvisibleControls } from "../core/redact.js";
@@ -837,13 +837,21 @@ function projectFixRecord(fix: FixRecord, exposure: Exposure, sanitizeIds = fals
       if (length > bound) truncation.fields.push("record.links");
       for (let index = 0; index < bound; index += 1) {
         const link = fix.links[index];
-        if (!link || typeof link.id !== "string"
-            || (link.basis !== "identity" && link.basis !== "signature" && link.basis !== "program")
+        // A bounded-but-unrecognized basis (e.g. sequence, or a future
+        // value) is weak evidence to project, not a reason to filter the
+        // link out of the response. Only a genuinely malformed basis keeps
+        // flagging truncatedFields the way it did before.
+        if (!link || typeof link.id !== "string" || !isBoundedLinkBasis(link.basis)
             || (link.confidence !== undefined && link.confidence !== "confirmed" && link.confidence !== "possible")) {
           truncation.fields.push("record.links");
           continue;
         }
-        links.push({ id: link.id, basis: link.basis, ...(link.confidence === undefined ? {} : { confidence: link.confidence }) });
+        // An unrecognized or non-confirmable basis can never present as
+        // confirmed. Leave an absent confidence undefined; never invent one.
+        const normalizedConfidence: LinkConfidence | undefined = link.confidence === undefined
+          ? undefined
+          : (!isConfirmableLinkBasis(link.basis) && link.confidence === "confirmed" ? "possible" : link.confidence);
+        links.push({ id: link.id, basis: link.basis, ...(normalizedConfidence === undefined ? {} : { confidence: normalizedConfidence }) });
       }
     } catch {
       truncation.fields.push("record.links");

@@ -18,8 +18,8 @@ import {
   safeOpaqueIdentifier,
   validateRecallCandidateIds,
 } from "./privacy.js";
-import { boundTripleRecord, isKnownPathPlatform, isSafeNonNegativeInteger, MAX_MEMORY_FILE_BYTES, MAX_SUPPORTED_MEMORY_RECORDS, parseMemoryRecord } from "../core/memory-read.js";
-import type { FailureRecord, FixRecord, MemoryCoverage, TripleRecord } from "../core/memory-read.js";
+import { boundTripleRecord, isBoundedLinkBasis, isConfirmableLinkBasis, isKnownPathPlatform, isSafeNonNegativeInteger, MAX_MEMORY_FILE_BYTES, MAX_SUPPORTED_MEMORY_RECORDS, parseMemoryRecord } from "../core/memory-read.js";
+import type { FailureRecord, FixRecord, LinkConfidence, MemoryCoverage, TripleRecord } from "../core/memory-read.js";
 
 /** Versioned read-only catalog used by MCP discovery and setup health. */
 const MCP_TOOL_NAMES = [
@@ -700,13 +700,22 @@ function safeProviderFixRecord(value: unknown, knownKind?: unknown): FixRecord |
         const linkId = boundedProviderText(link.id, 512, MAX_FIELD_BYTES);
         const basis = link.basis;
         const confidence = link.confidence;
+        // A bounded-but-unrecognized basis is weak evidence, not a malformed
+        // record: dropping the whole FixRecord here would violate invariant
+        // section 2.5/2.7 the same way the durable reader used to. Only a
+        // basis that fails the shared bounded-string rule still rejects.
         if (!linkId.valid || linkId.value.length === 0 || /[\u0000-\u001f\u007f-\u009f]/u.test(linkId.value) ||
-            (basis !== "identity" && basis !== "signature" && basis !== "program") ||
+            !isBoundedLinkBasis(basis) ||
             (confidence !== undefined && confidence !== "confirmed" && confidence !== "possible")) return undefined;
+        // An unrecognized or non-confirmable basis can never present as
+        // confirmed. Leave an absent confidence undefined; never invent one.
+        const normalizedConfidence: LinkConfidence | undefined = confidence === undefined
+          ? undefined
+          : (!isConfirmableLinkBasis(basis) && confidence === "confirmed" ? "possible" : confidence);
         links.push({
           id: linkId.value,
           basis,
-          ...(confidence === undefined ? {} : { confidence }),
+          ...(normalizedConfidence === undefined ? {} : { confidence: normalizedConfidence }),
         });
       }
     }

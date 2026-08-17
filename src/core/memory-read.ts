@@ -61,6 +61,21 @@ export function isConfirmableLinkBasis(basis: string): boolean {
   return CONFIRMABLE_LINK_BASES.has(basis as KnownLinkBasis);
 }
 
+const LINK_BASIS_CONTROL_CHARS = /[\u0000-\u001f\u007f-\u009f]/u;
+
+/**
+ * One rule shared by every reader that decides whether a link's `basis` is
+ * acceptable: durable memory (`parseFixLinks` below), MCP `fetch_record`
+ * (`safeProviderFixRecord`), and MCP projection (`projectFixRecord`). A
+ * bounded-but-unrecognized basis (non-empty, no control characters, at most
+ * `MAX_RECORD_ITEM_CHARS`) must never be dropped by any of the three; only a
+ * genuinely malformed basis fails this check.
+ */
+export function isBoundedLinkBasis(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0 && value.length <= MAX_RECORD_ITEM_CHARS
+    && !LINK_BASIS_CONTROL_CHARS.test(value);
+}
+
 export interface FixRecord {
   kind: "fix";
   id: string;
@@ -778,8 +793,7 @@ function parseFixLinks(value: unknown): FixLink[] | undefined {
       // cannot grow a record past the envelope through basis strings.
       if (!obj || typeof obj.id !== "string" || obj.id.length === 0 || obj.id.length > MAX_RECORD_ITEM_CHARS
           || /[\u0000-\u001f\u007f-\u009f]/u.test(obj.id) ||
-          typeof obj.basis !== "string" || obj.basis.length === 0 || obj.basis.length > MAX_RECORD_ITEM_CHARS ||
-          /[\u0000-\u001f\u007f-\u009f]/u.test(obj.basis) ||
+          !isBoundedLinkBasis(obj.basis) ||
           (obj.confidence !== undefined && obj.confidence !== "confirmed" && obj.confidence !== "possible")) return undefined;
       const idBytes = Buffer.byteLength(obj.id, "utf8");
       const basisBytes = Buffer.byteLength(obj.basis, "utf8");
