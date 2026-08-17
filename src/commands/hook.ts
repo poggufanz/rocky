@@ -876,6 +876,13 @@ function statusPowerShellHost(host: PowerShellHost): number {
     return 1;
   }
   say(`${host.label}: installed, hook version ${version}, PowerShell ${host.version}.`);
+  // Ruling 2's disclosed trade-off, named where a user actually meets it: the
+  // only way PowerShell allows forcing $? back to False after Rocky's own
+  // bookkeeping runs is a real, suppressed non-terminating error, which
+  // pushes one synthetic entry onto $Error ahead of your last real error.
+  // $LASTEXITCODE and $?'s value stay exact either way -- only $Error[0]'s
+  // position shifts, and that entry names Rocky so it is never a phantom.
+  detail("exit status stays exact. forcing it false pushes one entry into $Error first, named as mine.");
   return 0;
 }
 

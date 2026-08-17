@@ -46,6 +46,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { hookInstall, hookStatus, hookUninstall, detectPowerShellHosts } from "../commands/hook.js";
 import { POWERSHELL_HOOK_LINE, powershellHookBlockCodec } from "../core/hook-block.js";
+import { validateRockyPhrase } from "../ui/phrases.js";
 
 const BEGIN = "# >>> rocky hook >>>";
 const END = "# <<< rocky hook <<<";
@@ -208,6 +209,16 @@ test("PowerShell hook status reports absent, then installed, per host", (t) => {
   assert.equal(hookInstall(), 0, sandbox.stderr());
   assert.equal(hookStatus(), 0, sandbox.stderr());
   assert.match(sandbox.stderr(), /Windows PowerShell: installed, hook version 0\.3\.0, PowerShell 5\.1\.26100\.9168\./);
+  // Ruling 2: the $Error[0] shift must be disclosed where a user actually
+  // meets it -- rocky hook status for the PowerShell hosts.
+  assert.match(sandbox.stderr(), /\$Error/, "status must disclose the $Error shift for a PowerShell host");
+});
+
+test("the $Error-shift disclosure follows Rocky's voice rules", () => {
+  assert.deepEqual(
+    validateRockyPhrase("exit status stays exact. forcing it false pushes one entry into $Error first, named as mine."),
+    [],
+  );
 });
 
 test("PowerShell hook uninstall on an absent profile stays a quiet success", (t) => {
