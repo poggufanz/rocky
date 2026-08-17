@@ -369,7 +369,18 @@ interface FeedResult {
   timedOut: boolean;
 }
 
-function spawnAndFeed(exe: string, rockyHome: string, shim: string): Promise<FeedResult> {
+const DEFAULT_SMOKE_LINES = (rockyHome: string): string[] => [
+  `. "${join(rockyHome, "rocky-hook.ps1")}"`,
+  "Get-Item ./__rocky_nope__ -ErrorAction SilentlyContinue 2>$null",
+  "echo LIVE1_DOLLARQ=$? LIVE1_EXIT=$LASTEXITCODE",
+  'cmd /c "exit 9" | Out-Null',
+  "echo LIVE2_DOLLARQ=$? LIVE2_EXIT=$LASTEXITCODE",
+  "Get-Item .",
+  "echo LIVE3_DOLLARQ=$? LIVE3_EXIT=$LASTEXITCODE",
+  "exit",
+];
+
+function spawnAndFeed(exe: string, rockyHome: string, shim: string, lines?: string[]): Promise<FeedResult> {
   return new Promise((resolve) => {
     const child = spawn(exe, ["-NoProfile", "-NoLogo"], {
       env: { ...process.env, ROCKY_HOME: rockyHome, ROCKY_BIN: shim },
@@ -381,20 +392,11 @@ function spawnAndFeed(exe: string, rockyHome: string, shim: string): Promise<Fee
     child.stdout.on("data", (chunk: Buffer) => { stdout += chunk.toString("utf8"); });
     child.stderr.on("data", () => { /* discarded, matches how the real hook is invoked */ });
 
-    const lines = [
-      `. "${join(rockyHome, "rocky-hook.ps1")}"`,
-      "Get-Item ./__rocky_nope__ -ErrorAction SilentlyContinue 2>$null",
-      "echo LIVE1_DOLLARQ=$? LIVE1_EXIT=$LASTEXITCODE",
-      'cmd /c "exit 9" | Out-Null',
-      "echo LIVE2_DOLLARQ=$? LIVE2_EXIT=$LASTEXITCODE",
-      "Get-Item .",
-      "echo LIVE3_DOLLARQ=$? LIVE3_EXIT=$LASTEXITCODE",
-      "exit",
-    ];
+    const feedLines = lines ?? DEFAULT_SMOKE_LINES(rockyHome);
     let index = 0;
     const feed = setInterval(() => {
-      if (index >= lines.length) { clearInterval(feed); return; }
-      child.stdin.write(`${lines[index]}\n`);
+      if (index >= feedLines.length) { clearInterval(feed); return; }
+      child.stdin.write(`${feedLines[index]}\n`);
       index += 1;
     }, 400);
 
@@ -465,5 +467,58 @@ test(
   { skip: realPwsh ? false : "PowerShell 7 (pwsh) is unavailable on this machine" },
   async (t) => {
     await realHostSmoke(t, realPwsh!);
+  },
+);
+
+/**
+ * Ruling 1's central claim, checked directly rather than only via the
+ * default-prompt case above: a real, already-installed custom prompt
+ * (oh-my-posh/starship-shaped — a function whose output changes on every
+ * call, here keyed off `$MyInvocation.HistoryId`) must keep rendering, live,
+ * after `rocky-hook.ps1` wraps it. Regression guard for exactly the bug this
+ * release found and fixed: invoking the captured inner-prompt the wrong way
+ * either hangs the shell (never advancing past the *first* prompt call) or
+ * crashes it outright — either failure mode would make this test's `after-
+ * hook-2` sentinel simply never appear, and a hang is caught by the same
+ * watchdog `spawnAndFeed` already uses.
+ */
+async function realHostCustomPromptSmoke(t: TestContext, exe: string): Promise<void> {
+  const root = mkdtempSync(join(tmpdir(), "rocky-hook-ps-custom-prompt-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const rockyHome = join(root, "rocky-home");
+  mkdirSync(rockyHome, { recursive: true });
+  writeFileSync(
+    join(rockyHome, "rocky-hook.ps1"),
+    readFileSync(join(packageRoot, ".test-dist", "shell", "rocky-hook.ps1")),
+  );
+  const customPromptScript = join(root, "custom-prompt.ps1");
+  writeFileSync(customPromptScript, 'function global:prompt {\n    "CUSTOM-PROMPT[$($MyInvocation.HistoryId)]> "\n}\n');
+
+  const result = await spawnAndFeed(exe, rockyHome, join(root, "unused-shim.ps1"), [
+    `. "${customPromptScript}"`,
+    "echo before-hook",
+    `. "${join(rockyHome, "rocky-hook.ps1")}"`,
+    "echo after-hook-1",
+    "echo after-hook-2",
+    "exit",
+  ]);
+  assert.equal(result.timedOut, false, "the session must not hang (recursion/hang regression guard)");
+  assert.match(result.stdout, /CUSTOM-PROMPT\[\d+\]> echo after-hook-1/, `the custom prompt must keep rendering, live, after being wrapped; got: ${result.stdout}`);
+  assert.match(result.stdout, /CUSTOM-PROMPT\[\d+\]> echo after-hook-2/, `and keep rendering for more than one call after the wrap; got: ${result.stdout}`);
+}
+
+test(
+  "a real custom prompt keeps rendering after rocky-hook.ps1 wraps it on Windows PowerShell 5.1 (Ruling 1)",
+  { skip: windowsPowerShellAvailable ? false : "Windows PowerShell is unavailable on this machine/platform" },
+  async (t) => {
+    await realHostCustomPromptSmoke(t, "powershell.exe");
+  },
+);
+
+test(
+  "a real custom prompt keeps rendering after rocky-hook.ps1 wraps it on PowerShell 7.x (Ruling 1)",
+  { skip: realPwsh ? false : "PowerShell 7 (pwsh) is unavailable on this machine" },
+  async (t) => {
+    await realHostCustomPromptSmoke(t, realPwsh!);
   },
 );
