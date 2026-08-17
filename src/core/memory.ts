@@ -10,9 +10,11 @@ import {
   mkdirSync,
   openSync,
   opendirSync,
+  readdirSync,
   renameSync,
   readSync,
   rmSync,
+  unlinkSync,
   writeFileSync,
   writeSync,
   type Stats,
@@ -129,6 +131,8 @@ const TRIPLE_LOCK_TOKEN_BYTES = 16;
 const TRIPLE_LOCK_MAX_BYTES = 160;
 const TRIPLE_LOCK_WAIT_MS = 5_000;
 const TRIPLE_LOCK_STALE_MS = 10 * 60 * 1000;
+const TRIPLE_LOCK_TICKET_STALE_MS = 60_000;
+const TRIPLE_LOCK_HEAD_STALL_MS = 150;
 /**
  * Reclaim cleanup is best-effort housekeeping. Keep it bounded by directory
  * entries and a cooperative monotonic deadline; synchronous Node filesystem
@@ -417,15 +421,174 @@ function releaseTripleReclaimElection(election: TripleReclaimElection): void {
   });
 }
 
+interface TripleLockTicket {
+  path: string;
+  name: string;
+}
+
+/**
+ * Arrival-order tickets are an advisory fairness gate ahead of canonical lock
+ * attempts. Mutual exclusion never depends on them: on any ticket failure,
+ * unreadable directory, stale entry, or unverifiable owner, waiters degrade to
+ * plain lock contention, which stays safe but loses fairness. Without this
+ * gate, many waiters polling the canonical lock can starve the current owner
+ * of CPU and I/O on small hosts until every waiter exhausts the shared
+ * deadline.
+ */
+function createTripleLockTicket(path: string): TripleLockTicket | undefined {
+  for (let attempt = 0; attempt < 8; attempt++) {
+    const name = `${basename(path)}.ticket.${String(Date.now() + attempt).padStart(15, "0")}.${process.pid}`;
+    const ticketPath = join(dirname(path), name);
+    let fd = -1;
+    try {
+      fd = openSync(ticketPath, "wx", 0o600);
+      return { path: ticketPath, name };
+    } catch {
+      // A same-millisecond collision retries with a bumped stamp.
+    } finally {
+      if (fd >= 0) {
+        try { closeSync(fd); } catch { /* best effort */ }
+      }
+    }
+  }
+  return undefined;
+}
+
+function removeTripleLockTicket(ticket: TripleLockTicket | undefined): void {
+  if (ticket === undefined) return;
+  try { unlinkSync(ticket.path); } catch { /* best effort */ }
+}
+
+interface TripleLockQueueView {
+  head: string;
+  position: number;
+}
+
+/**
+ * The queue head is the earliest live ticket; `position` counts live tickets
+ * ahead of this waiter. Tickets older than the stale bound are ignored because
+ * a PID may have been reused since the writer crashed; verifiably dead owners
+ * are swept, unknown owners never block.
+ */
+function tripleLockTicketQueue(path: string, ticket: TripleLockTicket, now = Date.now()): TripleLockQueueView {
+  const directory = dirname(path);
+  const prefix = `${basename(path)}.ticket.`;
+  let names: string[];
+  try {
+    names = readdirSync(directory);
+  } catch {
+    return { head: ticket.name, position: 0 };
+  }
+  const entries: Array<{ name: string; ms: number; pid: number }> = [];
+  for (const name of names) {
+    if (!name.startsWith(prefix)) continue;
+    const match = /^(\d{1,15})\.([1-9][0-9]{0,9})$/u.exec(name.slice(prefix.length));
+    if (!match) continue;
+    const ms = Number(match[1]);
+    const pid = Number(match[2]);
+    if (!Number.isSafeInteger(ms) || !Number.isSafeInteger(pid)) continue;
+    entries.push({ name, ms, pid });
+  }
+  entries.sort((left, right) => left.ms - right.ms || left.pid - right.pid || (left.name < right.name ? -1 : 1));
+  let head: string | undefined;
+  let position = 0;
+  for (const entry of entries) {
+    if (entry.name === ticket.name) return { head: head ?? ticket.name, position };
+    if (now - entry.ms > TRIPLE_LOCK_TICKET_STALE_MS) continue;
+    if (entry.pid !== process.pid) {
+      const alive = tripleOwnerAlive(entry.pid);
+      if (alive === false) {
+        try { unlinkSync(join(directory, entry.name)); } catch { /* best effort */ }
+        continue;
+      }
+      if (alive !== true) continue;
+    }
+    head ??= entry.name;
+    position++;
+  }
+  return { head: ticket.name, position: 0 };
+}
+
 function acquireTripleLock(paths: RockyPaths): TripleLock {
   const path = `${paths.memory}${TRIPLE_LOCK_SUFFIX}`;
   const wallStarted = Date.now();
   const monotonicStarted = performance.now();
+  const ticket = createTripleLockTicket(path);
+  try {
+    return acquireTripleLockQueued(path, ticket, wallStarted, monotonicStarted);
+  } finally {
+    removeTripleLockTicket(ticket);
+  }
+}
+
+function tripleLockPathIdentity(path: string): string {
+  try {
+    const stats = lstatSync(path);
+    return `${stats.dev}:${stats.ino}:${stats.isSymbolicLink() ? "link" : "file"}`;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "ENOENT" ? "absent" : "unknown";
+  }
+}
+
+function acquireTripleLockQueued(
+  path: string,
+  ticket: TripleLockTicket | undefined,
+  started: number,
+  startedMonotonic: number,
+): TripleLock {
+  let wallStarted = started;
+  let monotonicStarted = startedMonotonic;
   const signal = new Int32Array(new SharedArrayBuffer(4));
   const initialWaitMs = 5 + (process.pid % 7);
   let waitMs = initialWaitMs;
   let observedOwner: string | undefined;
+  let observedHead: string | undefined;
+  let observedIdentity: string | undefined;
+  let deferReference = performance.now();
   for (;;) {
+    // The deadline bounds time WITHOUT progress, not time in queue: a stuck or
+    // starved lock still fails in TRIPLE_LOCK_WAIT_MS, while honest ownership
+    // turnover among queued writers must never convert into spurious busy
+    // errors just because the queue is long.
+    const identity = tripleLockPathIdentity(path);
+    if (observedIdentity !== undefined && observedIdentity !== identity) {
+      wallStarted = Date.now();
+      monotonicStarted = performance.now();
+      deferReference = performance.now();
+    }
+    observedIdentity = identity;
+    if (ticket !== undefined) {
+      const queue = tripleLockTicketQueue(path, ticket);
+      if (queue.head !== ticket.name) {
+        // A waiting non-head leaves the canonical lock alone so the owner
+        // keeps its CPU and I/O; polling coarsens with queue position. If the
+        // lock stays absent too long the head is stalled, and this waiter
+        // falls through to plain contention rather than queueing forever.
+        if (observedHead !== queue.head) {
+          observedHead = queue.head;
+          waitMs = initialWaitMs;
+          deferReference = performance.now();
+        }
+        if (identity !== "absent") deferReference = performance.now();
+        const stalled = performance.now() - deferReference > TRIPLE_LOCK_HEAD_STALL_MS;
+        if (!stalled) {
+          const nonHeadRemaining = Math.min(
+            TRIPLE_LOCK_WAIT_MS - (Date.now() - wallStarted),
+            TRIPLE_LOCK_WAIT_MS - (performance.now() - monotonicStarted),
+          );
+          if (nonHeadRemaining <= 0) {
+            throw new Error("Rocky triple lock is busy");
+          }
+          const nonHeadCap = Math.min(250, 25 + queue.position * 5);
+          Atomics.wait(signal, 0, 0, Math.min(waitMs, nonHeadRemaining));
+          waitMs = Math.min(waitMs + 5, nonHeadCap);
+          continue;
+        }
+      } else if (observedHead !== ticket.name) {
+        observedHead = ticket.name;
+        waitMs = Math.min(waitMs, initialWaitMs);
+      }
+    }
     const lock = tryTripleLock(path);
     if (lock) {
       return lock;
