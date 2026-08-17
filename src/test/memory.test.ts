@@ -16,6 +16,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as memory from "../core/memory.js";
 import { resolveRockyPaths, type RockyPaths } from "../core/state-paths.js";
+import { skipIfSymlinkUnavailable } from "./symlink-capability.js";
 
 const home = mkdtempSync(join(tmpdir(), "rocky-mem-"));
 const originalRockyHome = process.env.ROCKY_HOME;
@@ -53,11 +54,34 @@ test("clearPendingIfResolved removes flag only when nothing unresolved", () => {
   const failures = records.filter(
     (r): r is import("../core/memory.js").FailureRecord => r.kind === "failure"
   );
-  memory.recordFix("npm run build", failures.map((failure) => ({ failure, basis: "program" as const })));
+  // Confirmed attribution is cwd-bound. Resolve each directory's failures
+  // with a transaction scoped to that directory; cross-directory fixes remain
+  // recall material but do not clear local pending state.
+  for (const cwd of new Set(failures.map((failure) => failure.cwd))) {
+    memory.recordFix(
+      "npm run build",
+      failures
+        .filter((failure) => failure.cwd === cwd)
+        .map((failure) => ({ failure, basis: "identity" as const, confidence: "confirmed" as const })),
+      cwd,
+    );
+  }
   records = memory.loadMemory();
   assert.equal(memory.hasUnresolvedRecent(records), false);
   memory.clearPendingIfResolved(records);
   assert.ok(!existsSync(memory.pendingPath()), "flag cleared when resolved");
+});
+
+test("future failures stay out of pending unresolved state while exact now remains active", () => {
+  const now = 1_800_000_000_000;
+  const future = {
+    kind: "failure" as const, id: "future-pending", ts: now + 1, cwd: "/future", cmd: "npm test",
+    exitCode: 1, fingerprint: "future-pending", signature: ["future"], excerpt: "future",
+  };
+  const exact = { ...future, id: "exact-pending", ts: now };
+  const windowMs = 8 * 60 * 60 * 1_000;
+  assert.equal(memory.hasUnresolvedRecent([future], windowMs, now), false);
+  assert.equal(memory.hasUnresolvedRecent([exact], windowMs, now), true);
 });
 
 test("memoryPath resolves ROCKY_HOME each time", () => {
@@ -85,11 +109,14 @@ test("recordFix keeps its line readable instead of writing a record that is sile
       kind: "failure" as const, id: `failure-${i}`, ts: 1_700_000_000_000 + i, cwd: "/x",
       cmd: "true", exitCode: 1, fingerprint: "ff", signature: [] as string[], excerpt: "",
     },
-    basis: "signature" as const,
+    basis: "identity" as const,
+    confidence: "confirmed" as const,
   }));
 
   const fix = memory.recordFix("true ok", links, "/x");
 
+  assert.equal(fix.kind, "fix");
+  if (fix.kind !== "fix") throw new Error("confirmed links must produce fix record");
   assert.ok(fix.links !== undefined);
   assert.equal(fix.links.length, memory.MAX_FIX_LINKS);
   assert.equal(fix.failureIds.length, memory.MAX_FIX_LINKS);
@@ -202,16 +229,13 @@ test("recordTriple corrects an existing permissive regular memory file", (t) => 
 });
 
 test("recordTriple rejects a memory symlink without modifying its target", (t) => {
+  if (skipIfSymlinkUnavailable(t)) return;
   const directory = mkdtempSync(join(tmpdir(), "rocky-mem-symlink-"));
   t.after(() => rmSync(directory, { recursive: true, force: true }));
   const resolved = freshMemoryPaths(directory);
   const target = join(directory, "target.jsonl");
   writeFileSync(target, "keep\n", "utf8");
-  try {
-    symlinkSync(target, resolved.memory);
-  } catch {
-    return;
-  }
+  symlinkSync(target, resolved.memory);
   assert.equal(lstatSync(resolved.memory).isSymbolicLink(), true);
   assert.throws(() => memory.recordTriple(tripleInput(), resolved));
   assert.equal(readFileSync(target, "utf8"), "keep\n");

@@ -24,6 +24,14 @@ import { appendEvent, listOrphanClaims, readBatch } from "../agent/spool.js";
 import type { AgentEvent } from "../agent/schema.js";
 import { loadMemory, parseMemoryRecord, recordTriple, recordTripleOnce } from "../core/memory.js";
 import { resolveRockyPaths, type RockyPaths } from "../core/state-paths.js";
+import {
+  AMBIGUOUS_CONTINUATION_MARKER,
+  SYNTHETIC_DELIMITER_PRESERVATION_VECTORS,
+  SYNTHETIC_EOF_AMBIGUITY_VECTORS,
+  SYNTHETIC_NON_EOF_CONTROL_PROBES,
+  SYNTHETIC_SECRET_CLOSURE_VECTORS,
+} from "./secret-vectors.js";
+import { skipIfSymlinkUnavailable } from "./symlink-capability.js";
 
 const INVISIBLE_FORMAT_CONTROLS: ReadonlyArray<readonly [string, string]> = [
   ["U+061C", "\u061C"],
@@ -326,27 +334,20 @@ test("recordTripleOnce keeps a fresh zero-byte lock busy", (t) => {
   assert.equal(existsSync(paths.memory), false);
 });
 
-test("recordTripleOnce keeps stale malformed triple lock fail-closed", (t) => {
+test("recordTripleOnce safely recovers a stale malformed triple lock", (t) => {
   const paths = freshPaths(t);
   const lock = `${paths.memory}.triple.lock`;
   writeFileSync(lock, "not-owner-metadata", { mode: 0o600 });
   const stale = new Date(Date.now() - 11 * 60 * 1000);
   utimesSync(lock, stale, stale);
-  const originalNow = Date.now;
-  const base = originalNow();
-  let first = true;
-  Date.now = () => first ? (first = false, base) : base + 6_000;
-  try {
-    assert.throws(() => recordTripleOnce({
-      agent: "codex",
-      cwd: paths.home,
-      mechanism: { files: [{ path: "malformed.ts", plusMinus: [1, 1], props: [] }], truncatedFiles: 0 },
-    }, "malformed-triple-lock", paths), /triple lock is busy/u);
-  } finally {
-    Date.now = originalNow;
-  }
-  assert.equal(readFileSync(lock, "utf8"), "not-owner-metadata");
-  assert.equal(existsSync(paths.memory), false);
+  const result = recordTripleOnce({
+    agent: "codex",
+    cwd: paths.home,
+    mechanism: { files: [{ path: "malformed.ts", plusMinus: [1, 1], props: [] }], truncatedFiles: 0 },
+  }, "malformed-triple-lock", paths);
+  assert.equal(result.appended, true);
+  assert.equal(existsSync(lock), false);
+  assert.equal(loadMemory(paths.memory).filter((record) => record.kind === "triple").length, 1);
 });
 
 test("recordTripleOnce serializes check and append across processes", { timeout: 15_000 }, async (t) => {
@@ -364,12 +365,12 @@ test("recordTripleOnce serializes check and append across processes", { timeout:
     "import { pathToFileURL } from 'node:url';",
     "const [modulePath, home, gateDir, startPath, releasePath] = process.argv.slice(1);",
     "const originalOpen = fs.openSync.bind(fs);",
-    "const originalRead = fs.readFileSync.bind(fs);",
+    "const originalRead = fs.readSync.bind(fs);",
     "let memoryFd;",
     "let gated = false;",
     "const signal = new Int32Array(new SharedArrayBuffer(4));",
     "fs.openSync = (path, ...args) => { const fd = originalOpen(path, ...args); if (String(path).endsWith('memory.jsonl')) memoryFd = fd; return fd; };",
-    "fs.readFileSync = (path, ...args) => { const isMemory = typeof path === 'number' ? path === memoryFd : String(path).endsWith('memory.jsonl'); if (!gated && isMemory) { gated = true; fs.writeFileSync(`${gateDir}/${process.pid}.gate`, 'gate'); const signal = new Int32Array(new SharedArrayBuffer(4)); while (!fs.existsSync(releasePath)) Atomics.wait(signal, 0, 0, 10); } return originalRead(path, ...args); };",
+    "fs.readSync = (fd, ...args) => { if (!gated && fd === memoryFd) { gated = true; fs.writeFileSync(`${gateDir}/${process.pid}.gate`, 'gate'); const signal = new Int32Array(new SharedArrayBuffer(4)); while (!fs.existsSync(releasePath)) Atomics.wait(signal, 0, 0, 10); } return originalRead(fd, ...args); };",
     "syncBuiltinESMExports();",
     "const { recordTripleOnce } = await import(pathToFileURL(modulePath).href);",
     "fs.writeFileSync(`${gateDir}/${process.pid}.ready`, 'ready');",
@@ -566,6 +567,313 @@ test("C0-obfuscated secrets are removed before durable redaction in every text f
   assert.doesNotMatch(durable, /sk-\s*ant-/u);
   assert.doesNotMatch(durable, /abcdefghijklmnopqrst123/u);
   assert.doesNotMatch(durable, /[\u0000-\u001f\u007f\u001b\u202e]/u);
+});
+
+test("captured turn baseline excludes identical pre-existing dirty files", async (t) => {
+  const paths = freshPaths(t);
+  append("baseline-delta", [
+    {
+      v: 1, agent: "codex", kind: "intent", ts: 1, cwd: paths.home, text: "change agent file",
+      baseline: { status: "captured", head: "head", files: [{ path: "pre.ts", plusMinus: [3, 2] }] },
+    },
+    { v: 1, agent: "codex", kind: "mechanism", ts: 2, tool: "Edit", path: "agent.ts", excerpt: "value: 1", provenance: "tool-observed" },
+  ], paths);
+  const triple = await annotateBatch("baseline-delta", {
+    paths,
+    git: (args) => {
+      if (args[0] === "rev-parse") return "head";
+      if (args[0] === "diff" && args[1] === "--numstat" && args[2] === undefined) return "3\t2\tpre.ts\n2\t1\tagent.ts";
+      if (args[0] === "diff" && args[1] === "--cached") return "";
+      if (args[0] === "ls-files") return "";
+      return args[3] === "agent.ts" ? "2\t1\tagent.ts" : undefined;
+    },
+  });
+  assert.ok(triple);
+  assert.deepEqual(triple.mechanism.files.map((file) => file.path), ["agent.ts"]);
+  assert.equal(triple.mechanism.baseline, "captured");
+  assert.equal(triple.mechanism.files[0]?.provenance, "tool-observed");
+});
+
+test("shell-only turn changes are git-diff-inferred with explicit provenance", async (t) => {
+  const paths = freshPaths(t);
+  append("shell-delta", [{
+    v: 1, agent: "claude-code", kind: "intent", ts: 1, cwd: paths.home, text: "run formatter",
+    baseline: { status: "captured", head: "head" },
+  }], paths);
+  const triple = await annotateBatch("shell-delta", {
+    paths,
+    git: (args) => {
+      if (args[0] === "rev-parse") return "head";
+      if (args[0] === "diff" && args[1] === "--numstat" && args[2] === undefined) return "4\t1\tshell.ts";
+      if (args[0] === "diff" && args[1] === "--cached") return "";
+      if (args[0] === "ls-files") return "";
+      return undefined;
+    },
+  });
+  assert.ok(triple);
+  assert.deepEqual(triple.mechanism.files.map((file) => file.path), ["shell.ts"]);
+  assert.equal(triple.mechanism.files[0]?.provenance, "git-diff-inferred");
+  assert.deepEqual(triple.mechanism.files[0]?.plusMinus, [4, 1]);
+});
+
+test("new untracked shell paths are inferred even without line stats", async (t) => {
+  const paths = freshPaths(t);
+  append("shell-untracked", [{
+    v: 1, agent: "codex", kind: "intent", ts: 1, cwd: paths.home, text: "create scratch file",
+    baseline: { status: "captured", head: "head", files: [] },
+  }], paths);
+  const triple = await annotateBatch("shell-untracked", {
+    paths,
+    git: (args) => {
+      if (args[0] === "rev-parse") return "head";
+      if (args[0] === "diff" && args[1] === "--numstat" && args[2] === undefined) return "";
+      if (args[0] === "diff" && args[1] === "--cached") return "";
+      if (args[0] === "ls-files") return "scratch.txt\n";
+      return undefined;
+    },
+  });
+  assert.ok(triple);
+  assert.equal(triple.mechanism.files[0]?.path, "scratch.txt");
+  assert.equal(triple.mechanism.files[0]?.provenance, "git-diff-inferred");
+  assert.deepEqual(triple.mechanism.files[0]?.plusMinus, [0, 0]);
+});
+
+test("commit-before-Stop is retained as inferred change when head range is available", async (t) => {
+  const paths = freshPaths(t);
+  append("commit-delta", [{
+    v: 1, agent: "codex", kind: "intent", ts: 1, cwd: paths.home, text: "commit file",
+    baseline: { status: "captured", head: "old-head" },
+  }], paths);
+  const triple = await annotateBatch("commit-delta", {
+    paths,
+    git: (args) => {
+      if (args[0] === "rev-parse") return "new-head";
+      if (args[0] === "diff" && args[1] === "--numstat" && args[2] === undefined) return "";
+      if (args[0] === "diff" && args[1] === "--cached") return "";
+      if (args[0] === "ls-files") return "";
+      if (args[0] === "diff" && args[2] === "old-head..new-head") return "2\t0\tcommitted.ts";
+      return undefined;
+    },
+  });
+  assert.ok(triple);
+  assert.equal(triple.mechanism.files[0]?.provenance, "git-diff-inferred");
+  assert.equal(triple.mechanism.files[0]?.path, "committed.ts");
+  assert.deepEqual(triple.mechanism.files[0]?.plusMinus, [2, 0]);
+});
+
+test("commit-before-Stop supplies delta for tool-observed paths", async (t) => {
+  const paths = freshPaths(t);
+  append("commit-observed", [
+    {
+      v: 1, agent: "codex", kind: "intent", ts: 1, cwd: paths.home, text: "commit observed file",
+      baseline: { status: "captured", head: "old-head" },
+    },
+    { v: 1, agent: "codex", kind: "mechanism", ts: 2, tool: "Edit", path: "observed.ts", provenance: "tool-observed" },
+  ], paths);
+  const triple = await annotateBatch("commit-observed", {
+    paths,
+    git: (args) => {
+      if (args[0] === "rev-parse") return "new-head";
+      if (args[0] === "diff" && args[1] === "--numstat" && args[2] === undefined) return "";
+      if (args[0] === "diff" && args[1] === "--cached") return "";
+      if (args[0] === "ls-files") return "";
+      if (args[0] === "diff" && args[2] === "old-head..new-head") return "2\t1\tobserved.ts";
+      return undefined;
+    },
+  });
+  assert.ok(triple);
+  assert.equal(triple.mechanism.files[0]?.provenance, "tool-observed");
+  assert.deepEqual(triple.mechanism.files[0]?.plusMinus, [2, 1]);
+  assert.equal(triple.mechanism.baseline, "captured");
+});
+
+test("missing commit range marks baseline unknown instead of claiming zero change", async (t) => {
+  const paths = freshPaths(t);
+  append("commit-unknown", [
+    {
+      v: 1, agent: "codex", kind: "intent", ts: 1, cwd: paths.home, text: "commit file",
+      baseline: { status: "captured", head: "old-head" },
+    },
+    { v: 1, agent: "codex", kind: "mechanism", ts: 2, tool: "Edit", path: "committed.ts", provenance: "tool-observed" },
+  ], paths);
+  const triple = await annotateBatch("commit-unknown", {
+    paths,
+    git: (args) => {
+      if (args[0] === "rev-parse") return "new-head";
+      if (args[0] === "diff" && args[1] === "--numstat" && args[2] === undefined) return "";
+      if (args[0] === "diff" && args[1] === "--cached") return "";
+      if (args[0] === "ls-files") return "";
+      return undefined;
+    },
+  });
+  assert.ok(triple);
+  assert.equal(triple.mechanism.baseline, "unknown");
+  assert.deepEqual(triple.mechanism.files[0]?.plusMinus, [0, 0]);
+});
+
+test("durable annotation redacts modern keys and credential assignments from every sink", async (t) => {
+  const paths = freshPaths(t);
+  const modernKey = "sk-proj-aB3dE5fG7hI9-jK2mN4pQ6rS8tU0vW1xY2zA4";
+  const values = [
+    modernKey,
+    "pA7!cV2@kL9",
+    "rT8$wX3!nM6",
+    "tok_aB3d-E5fG7hI9jK2mN4pQ6",
+    "api-aB3dE5fG7hI9jK2mN4pQ6",
+    "syn_aB3dE5fG7hI9jK2mN4pQ6",
+  ];
+  const labels: string[] = [];
+  append("modern-secrets", [
+    { v: 1, agent: "codex", kind: "intent", ts: 1, text: `deploy ${modernKey}` },
+    {
+      v: 1, agent: "codex", kind: "mechanism", ts: 2, tool: "Edit",
+      path: `src/${modernKey}.ts`, excerpt: `${modernKey} password=pA7!cV2@kL9 secret='rT8$wX3!nM6'`,
+    },
+    {
+      v: 1, agent: "codex", kind: "rationale", ts: 3, source: "notify",
+      text: 'token=tok_aB3d-E5fG7hI9jK2mN4pQ6 authorization="Bearer syn_aB3dE5fG7hI9jK2mN4pQ6"',
+    },
+  ], paths);
+
+  const triple = await annotateBatch("modern-secrets", {
+    paths,
+    git: () => undefined,
+    ai: {
+      async run() {
+        return {
+          summary: `${modernKey} secret=rT8$wX3!nM6`,
+          tags: [modernKey, 'api_key="api-aB3dE5fG7hI9jK2mN4pQ6"'],
+          label: `${modernKey}, question`,
+        };
+      },
+    },
+    queueLabel: (label) => labels.push(label),
+  });
+
+  assert.ok(triple);
+  assert.match(triple.intent?.text ?? "", /\[redacted openai key\]/u);
+  assert.match(triple.mechanism.files[0]?.path ?? "", /\[redacted openai key\]/u);
+  assert.match(triple.mechanism.files[0]?.excerpt ?? "", /\[redacted openai key\].*\[redacted password assignment\]/u);
+  assert.match(triple.rationale?.text ?? "", /\[redacted openai key\].*\[redacted password assignment\]/u);
+  assert.equal(triple.rationale?.tags[0], "[redacted openai key]");
+  assert.match(triple.rationale?.tags[1] ?? "", /^\[redacted credential ass/u);
+  assert.match(labels[0] ?? "", /\[redacted openai key\]/u);
+  const durable = `${readFileSync(paths.memory, "utf8")}\n${JSON.stringify(labels)}`;
+  for (const value of values) assert.doesNotMatch(durable, new RegExp(value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "u"));
+});
+
+test("durable annotation strips controls and scrubs a boundary-truncated modern key", async (t) => {
+  const paths = freshPaths(t);
+  const obfuscated = "sk-\u202eproj-\u001b[31maB3dE5fG7hI9-jK2mN4pQ6rS8tU0vW1xY2zA4";
+  const capped = `${"\u061C".repeat(1980)}sk-proj-aB3dE5fG7hI9-jK2mN4pQ6rS8tU0vW1xY2zA4`;
+  append("modern-obfuscated", [
+    { v: 1, agent: "codex", kind: "intent", ts: 1, text: capped },
+    { v: 1, agent: "codex", kind: "mechanism", ts: 2, tool: "Edit", path: `src/${obfuscated}.ts`, excerpt: `token=${obfuscated}` },
+  ], paths);
+
+  const triple = await annotateBatch("modern-obfuscated", { paths, git: () => undefined, queueLabel: () => {} });
+  assert.ok(triple);
+  const durable = readFileSync(paths.memory, "utf8");
+  assert.doesNotMatch(durable, /sk-proj-|aB3dE5fG7hI9|\u001b|\u202e/u);
+  assert.match(triple.mechanism.files[0]?.path ?? "", /\[redacted openai key\]/u);
+});
+
+test("durable annotation closes shared quoted-key, control, realistic-word, and overlap vectors", async (t) => {
+  const paths = freshPaths(t);
+  const labels: string[] = [];
+  const [quotedPassword, quotedApi, realisticPassword, realisticAuth, tabSplit, lfSplit, crSplit, overlap] =
+    SYNTHETIC_SECRET_CLOSURE_VECTORS;
+  assert.ok(quotedPassword && quotedApi && realisticPassword && realisticAuth && tabSplit && lfSplit && crSplit && overlap);
+  append("review-secret-vectors", [
+    { v: 1, agent: "codex", kind: "intent", ts: 1, text: `${quotedPassword.text} ${lfSplit.text}` },
+    {
+      v: 1, agent: "codex", kind: "mechanism", ts: 2, tool: "Edit",
+      path: `src/${tabSplit.text}.ts`, excerpt: `${quotedApi.text} ${overlap.text} ${crSplit.text}`,
+    },
+    { v: 1, agent: "codex", kind: "rationale", ts: 3, source: "notify", text: `${realisticPassword.text} ${realisticAuth.text}` },
+  ], paths);
+
+  const triple = await annotateBatch("review-secret-vectors", {
+    paths, git: () => undefined, queueLabel: (label) => labels.push(label),
+  });
+  assert.ok(triple);
+  const durable = `${readFileSync(paths.memory, "utf8")}\n${JSON.stringify(labels)}`;
+  for (const fragment of ["pA7!cV2@kL9", "api-aB3dE5fG7hI9", "pA7!test!", "live-example-", "sk-proj-"]) {
+    assert.doesNotMatch(durable, new RegExp(fragment.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "u"), fragment);
+  }
+  assert.doesNotMatch(durable, /pass\s*word=|api_\s*key|secret=pA7/u);
+});
+
+test("durable annotation binds ambiguous control continuations", async (t) => {
+  const paths = freshPaths(t);
+  const [lf, tab, cr] = SYNTHETIC_DELIMITER_PRESERVATION_VECTORS;
+  assert.ok(lf && tab && cr);
+  append("review-delimiter-vectors", [
+    { v: 1, agent: "codex", kind: "intent", ts: 1, text: lf.text },
+    { v: 1, agent: "codex", kind: "mechanism", ts: 2, tool: "Edit", path: "src/x.ts", excerpt: tab.text },
+    { v: 1, agent: "codex", kind: "rationale", ts: 3, source: "notify", text: cr.text },
+  ], paths);
+
+  const triple = await annotateBatch("review-delimiter-vectors", {
+    paths, git: () => undefined, queueLabel: () => {},
+  });
+  assert.ok(triple);
+  assert.equal(triple.intent?.text, `before [redacted password assignment] ${AMBIGUOUS_CONTINUATION_MARKER} words`);
+  assert.equal(triple.mechanism.files[0]?.excerpt, `before [redacted credential assignment] ${AMBIGUOUS_CONTINUATION_MARKER} words`);
+  assert.equal(triple.rationale?.text, `before [redacted password assignment] ${AMBIGUOUS_CONTINUATION_MARKER} words`);
+});
+
+test("durable annotation contains the three non-EOF control-split review probes", async (t) => {
+  const paths = freshPaths(t);
+  const [first, second, quoted] = SYNTHETIC_NON_EOF_CONTROL_PROBES;
+  assert.ok(first && second && quoted);
+  append("non-eof-control-review", [
+    { v: 1, agent: "codex", kind: "intent", ts: 1, text: first.text },
+    {
+      v: 1, agent: "codex", kind: "mechanism", ts: 2, tool: "Edit", path: "src/x.ts",
+      excerpt: second.text,
+    },
+    { v: 1, agent: "codex", kind: "rationale", ts: 3, source: "notify", text: quoted.text },
+  ], paths);
+
+  const triple = await annotateBatch("non-eof-control-review", {
+    paths, git: () => undefined, queueLabel: () => {},
+  });
+  assert.ok(triple);
+  assert.equal(triple.intent?.text, first.durable.replace(/\s+/gu, " ").trim());
+  assert.equal(triple.mechanism.files[0]?.excerpt, second.durable.replace(/\s+/gu, " ").trim());
+  assert.equal(triple.rationale?.text, quoted.durable.replace(/\s+/gu, " ").trim());
+  const durable = readFileSync(paths.memory, "utf8");
+  for (const vector of SYNTHETIC_NON_EOF_CONTROL_PROBES) {
+    assert.ok(!durable.includes(vector.leakedSuffix), vector.name);
+  }
+});
+
+test("durable annotation discloses ambiguous EOF continuation redaction", async (t) => {
+  const paths = freshPaths(t);
+  const ambiguous = SYNTHETIC_EOF_AMBIGUITY_VECTORS[0];
+  assert.ok(ambiguous);
+  append("ambiguous-control-eof", [
+    { v: 1, agent: "codex", kind: "intent", ts: 1, text: ambiguous.text },
+    {
+      v: 1, agent: "codex", kind: "mechanism", ts: 2, tool: "Edit", path: "src/x.ts",
+      excerpt: "secret=pA7!\rcV2@kL9",
+    },
+  ], paths);
+
+  const triple = await annotateBatch("ambiguous-control-eof", {
+    paths, git: () => undefined, queueLabel: () => {},
+  });
+  assert.ok(triple);
+  assert.equal(
+    triple.intent?.text,
+    `before [redacted password assignment] ${AMBIGUOUS_CONTINUATION_MARKER}`,
+  );
+  assert.equal(
+    triple.mechanism.files[0]?.excerpt,
+    `[redacted password assignment] ${AMBIGUOUS_CONTINUATION_MARKER}`,
+  );
+  assert.doesNotMatch(JSON.stringify(triple), /@after|cV2@kL9/u);
 });
 
 test("every invisible format control is removed before durable redaction", async (t) => {
@@ -808,24 +1116,24 @@ test("degradedLabel uses exact rocky voice and strips terminal injection", () =>
   assert.equal(degradedLabel(undefined, []), undefined);
 });
 
-test("default label queue rejects symlink and non-regular destinations", (t) => {
+test("default label queue rejects symlink and non-regular destinations", async (t) => {
   const paths = freshPaths(t);
   mkdirSync(paths.home, { recursive: true });
-  const target = join(paths.home, "target-labels");
-  writeFileSync(target, "keep\n", "utf8");
-  try {
+  await t.test("symlink", (st) => {
+    if (skipIfSymlinkUnavailable(st)) return;
+    const target = join(paths.home, "target-labels");
+    writeFileSync(target, "keep\n", "utf8");
     symlinkSync(target, paths.labels);
-  } catch {
-    // Symlinks may be unavailable on a restricted Windows runner.
-  }
-  if (existsSync(paths.labels) && lstatSync(paths.labels).isSymbolicLink()) {
     defaultQueueLabel("unsafe\nline", paths);
     assert.equal(readFileSync(target, "utf8"), "keep\n");
     rmSync(paths.labels, { force: true });
-  }
-  mkdirSync(paths.labels, { recursive: true });
-  defaultQueueLabel("must not write directory", paths);
-  assert.equal(lstatSync(paths.labels).isDirectory(), true);
+  });
+  await t.test("directory", () => {
+    rmSync(paths.labels, { force: true });
+    mkdirSync(paths.labels, { recursive: true });
+    defaultQueueLabel("must not write directory", paths);
+    assert.equal(lstatSync(paths.labels).isDirectory(), true);
+  });
 });
 
 test("default label queue keeps exactly the last ten safe one-line labels", (t) => {
@@ -1058,15 +1366,11 @@ test("digest hint rejects a marker hardlink replacement before open", { timeout:
 });
 
 test("digest hint symlink target remains byte-identical and queues nothing", (t) => {
+  if (skipIfSymlinkUnavailable(t)) return;
   const paths = freshPaths(t);
   const target = join(paths.home, "digest-target");
   writeFileSync(target, "keep-target", { mode: 0o600 });
-  try {
-    symlinkSync(target, paths.digestHint);
-  } catch {
-    t.skip("symlinks are unavailable");
-    return;
-  }
+  symlinkSync(target, paths.digestHint);
   seedDigestTriple(paths, Date.now());
   maybeQueueDigestHint(paths, Date.now());
   assert.equal(readFileSync(target, "utf8"), "keep-target");

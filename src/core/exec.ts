@@ -9,8 +9,11 @@
  */
 
 import { spawn } from "node:child_process";
+import { statSync } from "node:fs";
 import { constants } from "node:os";
+import { isAbsolute } from "node:path";
 import { StringDecoder } from "node:string_decoder";
+import { trackChildStderr } from "../ui/rocky.js";
 
 export const TAIL_LINES = 200;
 export const MAX_LINE_BYTES = 4096;
@@ -26,6 +29,10 @@ export const CANCEL_CODES: ReadonlySet<number> = new Set([130, 143]);
 export interface ExecOptions {
   tailLines?: number; // default TAIL_LINES
   maxLineBytes?: number; // default MAX_LINE_BYTES
+  /** Shell mode for the child; defaults to true for the public command path. */
+  shell?: boolean | string;
+  /** Optional argv following the executable when shell is false. */
+  args?: readonly string[];
   /** Silence threshold. undefined = no timer at all (the `run` behavior). */
   idleMs?: number;
   /** Called every time the threshold is crossed again; ms since last stderr. */
@@ -33,6 +40,8 @@ export interface ExecOptions {
 }
 
 export interface ExecResult {
+  /** True only after Node reports that the child process was spawned. */
+  started: boolean;
   code: number;
   /** The bounded tail joined with "\n" — what fingerprinting consumes. */
   stderr: string;
@@ -56,6 +65,43 @@ export interface GitOptions {
   maxOutputBytes?: number;
 }
 
+interface GitTestShim {
+  executable: string;
+  script: string;
+}
+
+interface GitSpawnCommand {
+  command: string;
+  prefix: string[];
+}
+
+/**
+ * Resolve the bounded process-test seam. Normal invocations always execute
+ * the `git` executable from PATH. Tests may provide an explicit absolute
+ * executable plus script together with the explicit test-mode marker; both
+ * are validated as regular files and argv stays separate from the command, so
+ * this cannot become a shell injection path or an ambient production override.
+ */
+function gitSpawnCommand(): GitSpawnCommand | null {
+  const raw = process.env.ROCKY_GIT_TEST_SHIM;
+  if (raw === undefined || process.env.ROCKY_GIT_TEST_MODE !== "1") {
+    return { command: "git", prefix: [] };
+  }
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (typeof parsed !== "object" || parsed === null) return null;
+    const candidate = parsed as Partial<GitTestShim>;
+    if (typeof candidate.executable !== "string" || typeof candidate.script !== "string"
+      || !isAbsolute(candidate.executable) || !isAbsolute(candidate.script)
+      || !statSync(candidate.executable).isFile() || !statSync(candidate.script).isFile()) {
+      return null;
+    }
+    return { command: candidate.executable, prefix: [candidate.script] };
+  } catch {
+    return null;
+  }
+}
+
 /** Execute git with argv boundaries intact and capture its output. */
 export function runGit(
   args: readonly string[],
@@ -66,7 +112,19 @@ export function runGit(
     // Git's fatal messages are the only way to tell "no repository here" from
     // "this repository is broken" — both exit 128 — so the locale is pinned
     // rather than left to whatever the user's shell exports.
-    const child = spawn("git", [...args], {
+    const command = gitSpawnCommand();
+    if (command === null) {
+      resolve({
+        code: 127,
+        stdout: "",
+        stderr: "invalid ROCKY_GIT_TEST_SHIM; git process not started",
+        timedOut: false,
+        outputLimitExceeded: false,
+      });
+      return;
+    }
+    const child = spawn(command.command, [...command.prefix, ...args], {
+      shell: false,
       stdio: ["pipe", "pipe", "pipe"],
       env: { ...process.env, LC_ALL: "C", LANG: "C" },
     });
@@ -191,17 +249,28 @@ export function runProcess(cmd: string, options: ExecOptions = {}): Promise<Exec
   let lastActivity = start;
 
   return new Promise((resolve) => {
-    const child = spawn(cmd, {
-      shell: true,
+    const child = spawn(cmd, options.args ?? [], {
+      shell: options.shell ?? true,
       stdio: ["inherit", "inherit", "pipe"],
     });
+    let started = false;
+    let settled = false;
+    let idleTimer: NodeJS.Timeout | undefined;
+
+    child.once("spawn", () => { started = true; });
+
+    const finish = (code: number, tail: string[], stderr: string): void => {
+      if (settled) return;
+      settled = true;
+      if (idleTimer) clearInterval(idleTimer);
+      resolve({ started, code, stderr, tail, durationMs: Date.now() - start });
+    };
 
     // Repeating, not one-shot: with the child silent, every idleMs tick's
     // elapsed-since-activity keeps clearing the threshold again (idleMs,
     // 2*idleMs, 3*idleMs, ...), so onIdle fires on each crossing. unref()
     // so this never holds the process open; cleared on both close and error
     // so it can never fire after runProcess has already resolved.
-    let idleTimer: NodeJS.Timeout | undefined;
     if (options.idleMs !== undefined) {
       const idleMs = options.idleMs;
       idleTimer = setInterval(() => {
@@ -214,24 +283,24 @@ export function runProcess(cmd: string, options: ExecOptions = {}): Promise<Exec
     child.stderr?.on("data", (chunk: Buffer) => {
       lastActivity = Date.now();
       buffer.push(decoder.write(chunk));
+      trackChildStderr(chunk);
       process.stderr.write(chunk); // stream through untouched, unbounded, unmodified
     });
 
     child.on("close", (code, signal) => {
-      if (idleTimer) clearInterval(idleTimer);
       buffer.push(decoder.end());
       const tail = buffer.end();
-      resolve({ code: code ?? signalExit(signal), stderr: tail.join("\n"), tail, durationMs: Date.now() - start });
+      finish(code ?? signalExit(signal), tail, tail.join("\n"));
     });
 
     child.on("error", (err) => {
-      if (idleTimer) clearInterval(idleTimer);
       const message = `${err.message}\n`;
+      trackChildStderr(Buffer.from(message));
       process.stderr.write(message);
       buffer.push(decoder.end());
       buffer.push(message);
       const tail = buffer.end();
-      resolve({ code: 127, stderr: tail.join("\n"), tail, durationMs: Date.now() - start });
+      finish(127, tail, tail.join("\n"));
     });
   });
 }

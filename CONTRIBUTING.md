@@ -2,6 +2,10 @@
 
 Thanks for looking. Rocky is a small CLI with an unusually paranoid core, so this file spends most of its length on the parts where a reasonable-looking change can quietly break something important. Read the section on load-bearing code before you touch `src/setup/` or `src/mcp/`.
 
+[Code of Conduct](CODE_OF_CONDUCT.md) | [Security](SECURITY.md) | [Issue tracker](https://github.com/poggufanz/rocky/issues) | [Changelog](CHANGELOG.md) | [License](LICENSE)
+
+Use a public issue for reproducible bugs and feature proposals. Send exploitable findings through a [private security advisory](https://github.com/poggufanz/rocky/security/advisories/new), not the issue tracker.
+
 ## Getting set up
 
 You need Node 18 or newer. Rocky ships with zero runtime dependencies and only two dev dependencies, so install is quick.
@@ -73,7 +77,7 @@ No runtime dependencies. Node 18 built-ins only. TypeScript stays strict, and ES
 
 Everything Rocky says to a user follows his voice, and these rules are structural rather than decorative. Questions end with `, question` instead of a question mark. Emphasis comes from repetition, as in `good good good`. Sentences are short and present tense and drop articles. He is blind, so he never sees anything: he hears, remembers, and checks. His output goes to stderr so it never pollutes the stdout of a command he wraps. No emoji, ever, since he can't see them.
 
-README, CLI output, and `rocky/docs/` are written in English. Internal design documents under the outer `docs/` directory are in Indonesian and stay that way.
+README, CLI output, and package documentation under `docs/` are written in English. Internal design documents in the outer workspace are in Indonesian and stay that way.
 
 ## What would help most
 
@@ -86,5 +90,7 @@ More of Rocky's dialogue is welcome, in character.
 ## Pull requests
 
 Keep the change focused, explain what you observed rather than what you intended, and include the test that would have caught the bug. If you touched anything in the load-bearing section, say in the description which guard you touched and how you convinced yourself it still refuses what it used to refuse.
+
+Open pull requests against `main`. Before requesting review, run `npm test`, update public documentation when behavior changed, and add a changelog entry for a user-visible fix or feature. Maintainers own version bumps, tags, and npm publication.
 
 Rocky is MIT licensed. By contributing you agree your work ships under the same license.

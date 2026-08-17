@@ -4,10 +4,11 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { idleLine, parseWatchArgs, unseenLabels, watch, WATCH_IDLE_MS } from "../commands/watch.js";
-import { fingerprint } from "../core/fingerprint.js";
+import { fingerprint, FINGERPRINT_ALGORITHM_VERSION } from "../core/fingerprint.js";
 import { quoteShellPath } from "../core/shell-quote.js";
 import { validateRockyPhrase } from "../ui/phrases.js";
 import type { NotifyInput } from "../core/notify.js";
+import type { ExecResult } from "../core/exec.js";
 
 function sandboxHome(t: TestContext): string {
   const root = mkdtempSync(join(tmpdir(), "rocky-watch-cmd-"));
@@ -54,6 +55,23 @@ function fakeNotifier(): { calls: NotifyInput[]; notify: (input: NotifyInput) =>
 function failingCommandPrinting(marker: string): string {
   const script = `console.error('${marker}');process.exit(1)`;
   return `${quoteShellPath(process.execPath, process.platform)} -e ${quoteShellPath(script, process.platform)}`;
+}
+
+function nodeCommand(source: string): string {
+  return `${quoteShellPath(process.execPath, process.platform)} -e ${quoteShellPath(source, process.platform)}`;
+}
+
+function exitCommand(code: number): string {
+  return nodeCommand(`process.exit(${code})`);
+}
+
+function sleepCommand(ms: number): string {
+  return nodeCommand(`setTimeout(() => process.exit(0), ${ms})`);
+}
+
+function stderrExitCommand(message: string, code: number): string {
+  const literal = message.replaceAll("\\", "\\\\").replaceAll("'", "\\'");
+  return nodeCommand(`process.stderr.write('${literal}\\n'); process.exit(${code})`);
 }
 
 test("parseWatchArgs parses --quiet, a positional command, the -- escape, and rejects unknown flags", () => {
@@ -113,7 +131,7 @@ test("watch polls labels during an active command, speaks appends once, and neve
     say: (line: string) => { spoken.push(line); },
   };
 
-  const running = withRockyHome(home, () => watch(["sh -c 'sleep 0.15'"], dependencies));
+  const running = withRockyHome(home, () => watch([sleepCommand(150)], dependencies));
   assert.ok(poll, "watch must install a recurring label poll");
   assert.deepEqual(spoken, ["first"], "watch must perform an immediate poll");
   assert.equal(clearCalls, 0, "poll timer must remain active while command runs");
@@ -160,7 +178,7 @@ test("watch sanitizes terminal and invisible controls from labels read from the 
     say: (line: string) => { spoken.push(line); },
   };
 
-  const running = withRockyHome(home, () => watch(["sh -c 'sleep 0.15'"], dependencies));
+  const running = withRockyHome(home, () => watch([sleepCommand(150)], dependencies));
   assert.ok(poll, "watch must poll the real labels file");
   assert.equal(await running, 0);
 
@@ -200,7 +218,7 @@ test("watch ignores missing, empty, unchanged, and unreadable label polls", asyn
     say: (line: string) => { spoken.push(line); },
   };
 
-  const running = withRockyHome(home, () => watch(["sh -c 'sleep 0.15'"], dependencies));
+  const running = withRockyHome(home, () => watch([sleepCommand(150)], dependencies));
   assert.ok(poll);
   poll!();
   poll!();
@@ -227,7 +245,7 @@ test("quiet watch neither reads nor speaks labels", async (t) => {
   };
 
   const { result, stderr } = await withRockyHome(home, () =>
-    captureStderr(() => watch(["--quiet", "sh -c 'exit 0'"], dependencies)));
+    captureStderr(() => watch(["--quiet", exitCommand(0)], dependencies)));
   assert.equal(result, 0);
   assert.equal(reads, 0);
   assert.equal(timers, 0);
@@ -237,9 +255,9 @@ test("quiet watch neither reads nor speaks labels", async (t) => {
 
 test("watch clears its label poll timer for success, failure, and cancellation", async (t) => {
   for (const [name, command, expected] of [
-    ["success", "sh -c 'exit 0'", 0],
-    ["failure", "sh -c 'exit 1'", 1],
-    ["cancel", "sh -c 'exit 130'", 130],
+    ["success", exitCommand(0), 0],
+    ["failure", exitCommand(1), 1],
+    ["cancel", exitCommand(130), 130],
   ] as const) {
     const home = sandboxHome(t);
     let clearCalls = 0;
@@ -260,13 +278,13 @@ test("watch speaks the composed outcome line on success and on failure, and both
   const home = sandboxHome(t);
   const notifier = fakeNotifier();
 
-  const ok = await withRockyHome(home, () => captureStderr(() => watch(["sh -c 'exit 0'"], { notify: notifier.notify })));
+  const ok = await withRockyHome(home, () => captureStderr(() => watch([exitCommand(0)], { notify: notifier.notify })));
   assert.equal(ok.result, 0);
   const okLine = /\[Rocky\] (command finish\. good good\. \d+ seconds?\.)/.exec(ok.stderr);
   assert.ok(okLine, `expected a composed watch-ok line in stderr, got: ${ok.stderr}`);
   assert.deepEqual(validateRockyPhrase(okLine![1]!), []);
 
-  const fail = await withRockyHome(home, () => captureStderr(() => watch(["sh -c 'exit 1'"], { notify: notifier.notify })));
+  const fail = await withRockyHome(home, () => captureStderr(() => watch([exitCommand(1)], { notify: notifier.notify })));
   assert.equal(fail.result, 1);
   const failLine = /\[Rocky\] (command dies\. bad\. \d+ seconds?\.)/.exec(fail.stderr);
   assert.ok(failLine, `expected a composed watch-fail line in stderr, got: ${fail.stderr}`);
@@ -285,12 +303,12 @@ test("--quiet prints no [Rocky] prefix on success or failure, and never notifies
   const notifier = fakeNotifier();
 
   const ok = await withRockyHome(home, () =>
-    captureStderr(() => watch(["--quiet", "sh -c 'exit 0'"], { notify: notifier.notify })));
+    captureStderr(() => watch(["--quiet", exitCommand(0)], { notify: notifier.notify })));
   assert.equal(ok.result, 0);
   assert.doesNotMatch(ok.stderr, /\[Rocky\]/);
 
   const fail = await withRockyHome(home, () =>
-    captureStderr(() => watch(["--quiet", "sh -c \"echo boom >&2; exit 1\""], { notify: notifier.notify })));
+    captureStderr(() => watch(["--quiet", stderrExitCommand("boom", 1)], { notify: notifier.notify })));
   assert.equal(fail.result, 1);
   assert.doesNotMatch(fail.stderr, /\[Rocky\]/);
   assert.match(fail.stderr, /duration:/);
@@ -305,12 +323,56 @@ test("Ctrl-C-style exit codes (130, 143) pass through with no memory record, no 
     const home = sandboxHome(t);
     const notifier = fakeNotifier();
     const { result, stderr } = await withRockyHome(home, () =>
-      captureStderr(() => watch([`sh -c 'exit ${code}'`], { notify: notifier.notify })));
+      captureStderr(() => watch([exitCommand(code)], { notify: notifier.notify })));
     assert.equal(result, code);
     assert.equal(stderr, "");
     assert.deepEqual(notifier.calls, []);
     assert.equal(existsSync(join(home, "memory.jsonl")), false);
   }
+});
+
+test("watch keeps spawn-not-started out of memory/logs but preserves facts and notification", async (t) => {
+  const quietHome = sandboxHome(t);
+  const quietResult: ExecResult = {
+    started: false, code: 127, stderr: "spawn ENOENT", tail: ["spawn ENOENT"], durationMs: 5,
+  };
+  const quiet = await withRockyHome(quietHome, () => captureStderr(() => watch(
+    ["--quiet", "synthetic-not-started"],
+    { notify: () => { throw new Error("quiet watch must not notify"); }, runProcess: async () => quietResult },
+  )));
+  assert.equal(quiet.result, 127);
+  assert.match(quiet.stderr, /duration:/);
+  assert.match(quiet.stderr, /exit: 127/);
+  assert.doesNotMatch(quiet.stderr, /log:/);
+  assert.equal(existsSync(join(quietHome, "memory.jsonl")), false);
+  assert.equal(existsSync(join(quietHome, "watch")), false);
+
+  const publicHome = sandboxHome(t);
+  const notifier = fakeNotifier();
+  const publicResult = await withRockyHome(publicHome, () => captureStderr(() => watch(
+    ["synthetic-not-started"],
+    { notify: notifier.notify, runProcess: async () => quietResult },
+  )));
+  assert.equal(publicResult.result, 127);
+  assert.deepEqual(notifier.calls, [{ cmd: "synthetic-not-started", ok: false, durationMs: 5 }]);
+  assert.equal(existsSync(join(publicHome, "memory.jsonl")), false);
+  assert.equal(existsSync(join(publicHome, "watch")), false);
+});
+
+test("watch records a started child that exits 127", async (t) => {
+  const home = sandboxHome(t);
+  const notifier = fakeNotifier();
+  const childResult: ExecResult = {
+    started: true, code: 127, stderr: "child-127", tail: ["child-127"], durationMs: 5,
+  };
+  const result = await withRockyHome(home, () => captureStderr(() => watch(
+    ["synthetic-started-127"],
+    { notify: notifier.notify, runProcess: async () => childResult },
+  )));
+  assert.equal(result.result, 127);
+  assert.equal(existsSync(join(home, "memory.jsonl")), true);
+  assert.equal(existsSync(join(home, "watch")), true);
+  assert.deepEqual(notifier.calls, [{ cmd: "synthetic-started-127", ok: false, durationMs: 5 }]);
 });
 
 test("watch's failure path admits when the remembered fix comes from a different directory", async (t) => {
@@ -322,12 +384,13 @@ test("watch's failure path admits when the remembered fix comes from a different
   const elsewhere = join(home, "elsewhere-project");
   const failure = {
     kind: "failure", id: "w-elsewhere-failure", ts: 1_700_000_000_000, cwd: here,
-    cmd: "whatever failed before", exitCode: 1, fingerprint: fp, signature: [marker], excerpt: marker,
+    cmd: "whatever failed before", exitCode: 1, fingerprint: fp, fingerprintV: FINGERPRINT_ALGORITHM_VERSION,
+    signature: [marker], excerpt: marker,
     origin: "watch",
   };
   const fix = {
     kind: "fix", id: "w-elsewhere-fix", ts: 1_700_000_001_000, cwd: elsewhere,
-    cmd: "the remembered fix command", failureIds: ["w-elsewhere-failure"],
+    cmd: "whatever failed before", failureIds: ["w-elsewhere-failure"],
   };
   writeFileSync(join(home, "memory.jsonl"), `${JSON.stringify(failure)}\n${JSON.stringify(fix)}\n`, "utf8");
   const notifier = fakeNotifier();
@@ -346,10 +409,11 @@ test("watch's success path links a fix exactly like run's onSuccess, using the s
   const cwd = process.cwd();
   const failure = {
     kind: "failure", id: "w-fix-failure", ts: Date.now() - 1000, cwd,
-    cmd: "echo build-that-failed-before", exitCode: 1, fingerprint: "deadbeef",
-    signature: ["echo build-that-failed-before"], excerpt: "irrelevant", origin: "watch",
+    cmd: "echo all-good", exitCode: 1, fingerprint: "deadbeef",
+    signature: ["echo all-good"], excerpt: "irrelevant", origin: "watch",
   };
   writeFileSync(join(home, "memory.jsonl"), `${JSON.stringify(failure)}\n`, "utf8");
+  writeFileSync(join(home, "pending"), "", "utf8");
   const notifier = fakeNotifier();
 
   const { result, stderr } = await withRockyHome(home, () =>
@@ -357,6 +421,7 @@ test("watch's success path links a fix exactly like run's onSuccess, using the s
 
   assert.equal(result, 0);
   assert.match(stderr, /command works now\. you fix it\. I remember the fix\. good good good\./);
+  assert.equal(existsSync(join(home, "pending")), false, "run/watch shared resolver clears pending atomically");
 });
 
 test("an unwritable watch log speaks watch-log-unwritable but still records the failure", async (t) => {
@@ -367,7 +432,7 @@ test("an unwritable watch log speaks watch-log-unwritable but still records the 
   const notifier = fakeNotifier();
 
   const { result, stderr } = await withRockyHome(home, () =>
-    captureStderr(() => watch(["sh -c \"echo boom >&2; exit 1\""], { notify: notifier.notify })));
+    captureStderr(() => watch([stderrExitCommand("boom", 1)], { notify: notifier.notify })));
 
   assert.equal(result, 1);
   assert.match(stderr, /watch folder does not open for me\. no log this time\. memory still remembers\./);
@@ -386,7 +451,7 @@ test("a memory-write failure on the watch failure path still writes the watch lo
   const notifier = fakeNotifier();
 
   const { result, stderr } = await withRockyHome(home, () =>
-    captureStderr(() => watch(["sh -c \"echo boom >&2; exit 1\""], { notify: notifier.notify })));
+    captureStderr(() => watch([stderrExitCommand("boom", 1)], { notify: notifier.notify })));
 
   assert.equal(result, 1);
   assert.match(stderr, /I cannot write memory\. this one I forget\./);
@@ -399,10 +464,10 @@ test("watch notifies via the injected dependency on both success and failure", a
   const home = sandboxHome(t);
   const notifier = fakeNotifier();
 
-  const ok = await withRockyHome(home, () => captureStderr(() => watch(["sh -c 'exit 0'"], { notify: notifier.notify })));
+  const ok = await withRockyHome(home, () => captureStderr(() => watch([exitCommand(0)], { notify: notifier.notify })));
   assert.equal(ok.result, 0);
 
-  const fail = await withRockyHome(home, () => captureStderr(() => watch(["sh -c 'exit 1'"], { notify: notifier.notify })));
+  const fail = await withRockyHome(home, () => captureStderr(() => watch([exitCommand(1)], { notify: notifier.notify })));
   assert.equal(fail.result, 1);
 
   assert.equal(notifier.calls.length, 2);
@@ -420,7 +485,7 @@ test("watch skips notification when config disables it, even without --quiet", a
   );
   const notifier = fakeNotifier();
 
-  const { result } = await withRockyHome(home, () => captureStderr(() => watch(["sh -c 'exit 0'"], { notify: notifier.notify })));
+  const { result } = await withRockyHome(home, () => captureStderr(() => watch([exitCommand(0)], { notify: notifier.notify })));
 
   assert.equal(result, 0);
   assert.deepEqual(notifier.calls, []);
@@ -438,7 +503,7 @@ test("watch notifies by default when config is missing, invalid JSON, or unreada
     setup(home);
     const notifier = fakeNotifier();
     const { result } = await withRockyHome(home, () =>
-      captureStderr(() => watch(["sh -c 'exit 0'"], { notify: notifier.notify })));
+      captureStderr(() => watch([exitCommand(0)], { notify: notifier.notify })));
     assert.equal(result, 0);
     assert.equal(notifier.calls.length, 1);
   }

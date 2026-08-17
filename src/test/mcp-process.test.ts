@@ -406,7 +406,7 @@ test("MCP keeps sparse projected IDs aligned with original AI candidates", async
       async run() {
         return {
           aiStatus: "used",
-          rankedCandidateIds: ["c3", "c1", "c2"],
+          rankedCandidateIds: ["c3"],
           evidenceRefs: ["c3.failure"],
           act: "unresolved",
           confidence: 0.9,
@@ -424,6 +424,61 @@ test("MCP keeps sparse projected IDs aligned with original AI candidates", async
   );
   assert.deepEqual(result.structuredContent.rankedCandidateIds, ["c3"]);
   assert.deepEqual(result.structuredContent.evidenceRefs, ["c3.failure"]);
+});
+
+test("MCP rejects a used ranking that includes a known but unhanded sparse candidate", async () => {
+  const first: RecallHit = {
+    failure: {
+      kind: "failure", id: "first", ts: 1, cwd: "/work", cmd: "original first command", exitCode: 1,
+      fingerprint: "first-fingerprint", signature: ["needle"], excerpt: "first excerpt",
+    },
+    score: 1,
+  };
+  const third: RecallHit = {
+    failure: {
+      kind: "failure", id: "third", ts: 3, cwd: "/work", cmd: "original third command", exitCode: 1,
+      fingerprint: "third-fingerprint", signature: ["needle"], excerpt: "third excerpt",
+    },
+    score: 1,
+  };
+  const hits = [first, maximumRawHit(2), third];
+  const memory: MemoryQueries = {
+    recall() { return hits; },
+    recentFailures() { return []; },
+    stats() { return { failures: 3, fixEvents: 2, resolved: 2, unresolved: 1 }; },
+    searchKnowledge() { return []; },
+    fetchRecord() { return undefined; },
+    whyFile() { return []; },
+  };
+  let handedCandidateIds: string[] | undefined;
+  const result = await createToolRegistry({
+    exposure: "raw",
+    memory,
+    recallWithAi: {
+      async run(input) {
+        handedCandidateIds = input.candidateIds === undefined ? undefined : [...input.candidateIds];
+        return {
+          aiStatus: "used" as const,
+          rankedCandidateIds: ["c1", "c2"],
+          evidenceRefs: ["c1.failure"],
+          act: "unresolved" as const,
+          confidence: 0.9,
+          explanation: "must be discarded",
+        };
+      },
+    },
+  }).call("recall_with_ai", { query: "needle", limit: 3 }, new AbortController().signal);
+
+  assert.deepEqual(handedCandidateIds, ["c1", "c3"]);
+  assert.equal(result.structuredContent.aiStatus, "invalid_output");
+  assert.deepEqual(
+    (result.structuredContent.items as { candidateId: string }[]).map((item) => item.candidateId),
+    ["c1"],
+  );
+  assert.deepEqual(result.structuredContent.rankedCandidateIds, ["c1"]);
+  for (const field of ["act", "confidence", "explanation", "evidenceRefs"]) {
+    assert.equal(field in result.structuredContent, false, `${field} survived invalid used outcome`);
+  }
 });
 
 test("compiled CLI serves a separate legacy lifecycle and reloads externally appended memory", { timeout: 10_000 }, async (t) => {
@@ -476,6 +531,32 @@ test("compiled CLI serves a separate legacy lifecycle and reloads externally app
   assert.equal(server.stderr(), "");
   server.assertJsonOnlyStdout();
   assert.deepEqual(snapshotTree(home), afterExternalAppend);
+});
+
+test("MCP usage diagnostics sanitize adversarial argv without adding protocol output", () => {
+  const home = mkdtempSync(join(tmpdir(), "rocky-mcp-usage-home-"));
+  try {
+    const hostile = "junk\u001b[2J\u0007\u009b2J\u202e\u2066\nforged";
+    const result = spawnSync(process.execPath, [cli, "mcp", hostile], {
+      cwd: repoRoot,
+      env: { ...process.env, ROCKY_HOME: home },
+      input: "",
+      encoding: "utf8",
+      timeout: 2_000,
+      windowsHide: true,
+    });
+
+    assert.equal(result.error, undefined, String(result.error));
+    assert.equal(result.signal, null);
+    assert.equal(result.status, 2, result.stderr);
+    assert.equal(result.stdout, "");
+    assert.equal(result.stderr.split("\n").length, 3, result.stderr);
+    assert.match(result.stderr, /usage: rocky mcp\n$/u);
+    const withoutFraming = result.stderr.replace(/\n/gu, "");
+    assert.doesNotMatch(withoutFraming, /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/u);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
 });
 
 test("uppercase RAW exposure fails before protocol output with one concise diagnostic", { timeout: 5_000 }, async (t) => {

@@ -16,8 +16,10 @@ const hit = (id: string): DictionaryHit => ({
   score: 0.5,
 });
 
-test("parseRankOutput keeps only known ids, undefined on junk or empty", () => {
-  assert.deepEqual(parseRankOutput({ ranked_ids: ["b", "zz", "a"] }, [hit("a"), hit("b")]), ["b", "a"]);
+test("parseRankOutput rejects unknown, duplicate, and extra model output", () => {
+  assert.equal(parseRankOutput({ ranked_ids: ["b", "zz", "a"] }, [hit("a"), hit("b")]), undefined);
+  assert.equal(parseRankOutput({ ranked_ids: ["b", "b"] }, [hit("a"), hit("b")]), undefined);
+  assert.equal(parseRankOutput({ ranked_ids: ["b"], extra: true }, [hit("a"), hit("b")]), undefined);
   assert.equal(parseRankOutput({ ranked_ids: [] }, [hit("a")]), undefined);
   assert.equal(parseRankOutput({ ranked: ["a"] }, [hit("a")]), undefined);
   assert.equal(parseRankOutput(null, [hit("a")]), undefined);

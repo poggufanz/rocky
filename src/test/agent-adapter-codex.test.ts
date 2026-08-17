@@ -162,6 +162,46 @@ test("apply_patch extracts first Update, Add, and Delete path without executing 
   }
 });
 
+test("apply_patch emits every file marker and deduplicates paths", () => {
+  const command = [
+    "*** Begin Patch",
+    "*** Update File: first.css",
+    "@@",
+    "*** Add File: second.ts",
+    "*** Delete File: third.js",
+    "*** Update File: first.css",
+    "*** End Patch",
+  ].join("\n");
+  const parsed = parseCodexHookPayload({
+    hook_event_name: "PostToolUse",
+    session_id: "s",
+    turn_id: "t",
+    tool_name: "apply_patch",
+    tool_input: { command },
+  }, 42);
+  assert.ok(parsed && parsed.action === "append");
+  assert.deepEqual(parsed.events.filter((event) => event.kind === "mechanism").map((event) => event.path), [
+    "first.css", "second.ts", "third.js",
+  ]);
+});
+
+test("apply_patch emits ten unique paths so annotate can disclose triple cap overflow", () => {
+  const command = [
+    "*** Begin Patch",
+    ...Array.from({ length: 10 }, (_, index) => `*** Update File: file-${index}.ts`),
+    "*** End Patch",
+  ].join("\n");
+  const parsed = parseCodexHookPayload({
+    hook_event_name: "PostToolUse",
+    session_id: "s",
+    turn_id: "t",
+    tool_name: "apply_patch",
+    tool_input: { command },
+  }, 42);
+  assert.ok(parsed && parsed.action === "append");
+  assert.equal(parsed.events.filter((event) => event.kind === "mechanism").length, 10);
+});
+
 test("legacy edit aliases and first-edit aliases map one mechanism", () => {
   for (const tool of ["Edit", "Write", "MultiEdit", "write_file", "edit_file"]) {
     const input = tool === "MultiEdit"

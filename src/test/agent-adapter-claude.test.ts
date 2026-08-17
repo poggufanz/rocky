@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { MAX_RATIONALE_CHARS } from "../agent/schema.js";
 import { parseClaudeHookPayload, rationaleFromTranscript } from "../agent/adapters/claude-code.js";
+import { skipIfSymlinkUnavailable } from "./symlink-capability.js";
 
 const packageRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const fixture = (name: string): unknown =>
@@ -95,6 +96,42 @@ test("MultiEdit records only the first edit path and excerpt", () => {
   assert.equal(parsed.event.excerpt, "first change");
 });
 
+test("MultiEdit emits every unique edit path as bounded mechanism events", () => {
+  const parsed = parseClaudeHookPayload({
+    session_id: "s1",
+    prompt_id: "p2",
+    hook_event_name: "PostToolUse",
+    cwd: "/w",
+    tool_name: "MultiEdit",
+    tool_input: {
+      edits: [
+        { file_path: "first.ts", old_string: "one", new_string: "first change" },
+        { file_path: "second.ts", old_string: "two", new_string: "second change" },
+        { file_path: "first.ts", old_string: "three", new_string: "latest first change" },
+      ],
+    },
+  }, 42);
+  assert.ok(parsed && parsed.action === "append");
+  assert.deepEqual(parsed.events.filter((event) => event.kind === "mechanism").map((event) => event.path), [
+    "first.ts", "second.ts",
+  ]);
+  const first = parsed.events.find((event): event is Extract<typeof event, { kind: "mechanism" }> => event.kind === "mechanism" && event.path === "first.ts");
+  assert.equal(first?.excerpt, "latest first change");
+});
+
+test("MultiEdit reports exact unique overflow separately from bounded events", () => {
+  const edits = Array.from({ length: 70 }, (_, index) => ({
+    file_path: `file-${index}.ts`, new_string: `value-${index}`,
+  }));
+  const parsed = parseClaudeHookPayload({
+    session_id: "session", prompt_id: "prompt", hook_event_name: "PostToolUse",
+    tool_name: "MultiEdit", tool_input: { edits },
+  }, 42);
+  assert.ok(parsed && parsed.action === "append");
+  assert.equal(parsed.events.filter((event) => event.kind === "mechanism").length, 64);
+  assert.equal(parsed.truncatedFiles, 6);
+});
+
 test("missing session or prompt identity fails open instead of sharing a fallback key", () => {
   const base = fixture("user-prompt-submit.json") as Record<string, unknown>;
   assert.equal(parseClaudeHookPayload({ ...base, session_id: "" }), undefined);
@@ -156,20 +193,18 @@ test("transcript rationale is capped and malformed lines fail safely", () => {
   }
 });
 
-test("non-regular and symlink transcript inputs return undefined", () => {
+test("non-regular and symlink transcript inputs return undefined", async (t) => {
   const dir = mkdtempSync(join(tmpdir(), "rocky-transcript-"));
-  try {
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  await t.test("non-regular", () => {
     assert.equal(rationaleFromTranscript(dir), undefined);
+  });
+  await t.test("symlink", (st) => {
+    if (skipIfSymlinkUnavailable(st)) return;
     const target = join(dir, "target.jsonl");
     const link = join(dir, "link.jsonl");
     writeFileSync(target, JSON.stringify({ type: "assistant", message: { content: "secret" } }) + "\n");
-    try {
-      symlinkSync(target, link);
-    } catch {
-      return;
-    }
+    symlinkSync(target, link);
     assert.equal(rationaleFromTranscript(link), undefined);
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
+  });
 });

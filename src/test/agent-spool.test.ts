@@ -39,6 +39,7 @@ import {
 import { annotateCommand } from "../agent/annotate.js";
 import { loadMemory } from "../core/memory.js";
 import type { IntentEvent } from "../agent/schema.js";
+import { skipIfSymlinkUnavailable } from "./symlink-capability.js";
 
 type CleanupContext = { after(callback: () => void): void };
 
@@ -435,7 +436,7 @@ test("stale zero-byte append lock left before metadata is recovered", (t) => {
   assert.equal(existsSync(lock), false);
 });
 
-test("stale zero-byte append lock recovers with unsafe filesystem identity", { timeout: 10_000 }, async (t) => {
+test("stale zero-byte append lock stays fail-closed with unsafe filesystem identity", { timeout: 10_000 }, async (t) => {
   const paths = freshPaths(t);
   const key = "unsafe-empty-writer";
   const resultPath = join(paths.home, "result.json");
@@ -474,7 +475,10 @@ test("stale zero-byte append lock recovers with unsafe filesystem identity", { t
   ], { stdio: ["pipe", "pipe", "pipe"] });
   const result = await waitForWorker(child);
   assert.equal(result.code, 0, result.stderr);
-  assert.deepEqual(JSON.parse(readFileSync(resultPath, "utf8")), { events: 1, lockExists: false });
+  // Without a provable descriptor identity there is no reparse-safe proof
+  // that the stale lock is the same object being reclaimed. The pathname
+  // statSync fallback is forbidden, so recovery must fail closed.
+  assert.deepEqual(JSON.parse(readFileSync(resultPath, "utf8")), { events: 0, lockExists: true });
 });
 
 test("fresh or malformed append locks remain fail-closed", (t) => {
@@ -789,7 +793,7 @@ test("removeBatch deletes regular batch and lock files", (t) => {
   assert.equal(acquireLock("k3", paths), true);
 });
 
-test("removeBatch releases locks when filesystem identity exceeds safe integer range", { timeout: 10_000 }, async (t) => {
+test("locking fails closed when filesystem identity exceeds safe integer range", { timeout: 10_000 }, async (t) => {
   const paths = freshPaths(t);
   const key = "unsafe-identity";
   const resultPath = join(paths.home, "result.json");
@@ -826,7 +830,9 @@ test("removeBatch releases locks when filesystem identity exceeds safe integer r
   ], { stdio: ["pipe", "pipe", "pipe"] });
   const result = await waitForWorker(child);
   assert.equal(result.code, 0, result.stderr);
-  assert.deepEqual(JSON.parse(readFileSync(resultPath, "utf8")), { first: true, second: true });
+  // Identity values outside the safe range cannot prove same-object checks,
+  // and the pathname statSync fallback is forbidden; locks must fail closed.
+  assert.deepEqual(JSON.parse(readFileSync(resultPath, "utf8")), { first: false, second: false });
 });
 
 test("listOrphanBatches returns sorted stale batches with absent or stale regular locks", (t) => {
@@ -848,37 +854,37 @@ test("listOrphanBatches returns sorted stale batches with absent or stale regula
   assert.deepEqual(listOrphanBatches(now, paths), ["old", "stale-lock"]);
 });
 
-test("append, read, lock, and orphan listing reject symlink and non-regular files", (t) => {
+test("append, read, lock, and orphan listing reject symlink and non-regular files", async (t) => {
   const paths = freshPaths(t);
   mkdirSync(paths.spoolDir, { recursive: true });
-  const targetBatch = join(paths.home, "target.jsonl");
-  writeFileSync(targetBatch, JSON.stringify(intent("target")) + "\n");
-  const symlinkBatch = join(paths.spoolDir, "link.jsonl");
-  try {
+  await t.test("symlink", (st) => {
+    if (skipIfSymlinkUnavailable(st)) return;
+    const targetBatch = join(paths.home, "target.jsonl");
+    writeFileSync(targetBatch, JSON.stringify(intent("target")) + "\n");
+    const symlinkBatch = join(paths.spoolDir, "link.jsonl");
     symlinkSync(targetBatch, symlinkBatch);
-  } catch {
-    t.skip("symlink creation unsupported on this platform");
-    return;
-  }
-  const beforeTarget = readFileSync(targetBatch, "utf8");
-  appendEvent("link", intent("must not follow"), paths);
-  assert.deepEqual(readBatch("link", paths), []);
-  assert.equal(readFileSync(targetBatch, "utf8"), beforeTarget);
-  assert.deepEqual(listOrphanBatches(Date.now() + 12 * 60 * 1000, paths), []);
+    const beforeTarget = readFileSync(targetBatch, "utf8");
+    appendEvent("link", intent("must not follow"), paths);
+    assert.deepEqual(readBatch("link", paths), []);
+    assert.equal(readFileSync(targetBatch, "utf8"), beforeTarget);
+    assert.deepEqual(listOrphanBatches(Date.now() + 12 * 60 * 1000, paths), []);
 
-  const targetLock = join(paths.home, "target.lock");
-  writeFileSync(targetLock, "target");
-  const symlinkLock = join(paths.spoolDir, "link.lock");
-  symlinkSync(targetLock, symlinkLock);
-  assert.equal(acquireLock("link", paths), false);
-  assert.equal(readFileSync(targetLock, "utf8"), "target");
+    const targetLock = join(paths.home, "target.lock");
+    writeFileSync(targetLock, "target");
+    const symlinkLock = join(paths.spoolDir, "link.lock");
+    symlinkSync(targetLock, symlinkLock);
+    assert.equal(acquireLock("link", paths), false);
+    assert.equal(readFileSync(targetLock, "utf8"), "target");
+  });
 
-  mkdirSync(join(paths.spoolDir, "directory.jsonl"));
-  mkdirSync(join(paths.spoolDir, "directory.lock"));
-  appendEvent("directory", intent("must not write directory"), paths);
-  assert.deepEqual(readBatch("directory", paths), []);
-  assert.equal(acquireLock("directory", paths), false);
-  assert.deepEqual(listOrphanBatches(Date.now() + 12 * 60 * 1000, paths), []);
+  await t.test("directory", () => {
+    mkdirSync(join(paths.spoolDir, "directory.jsonl"));
+    mkdirSync(join(paths.spoolDir, "directory.lock"));
+    appendEvent("directory", intent("must not write directory"), paths);
+    assert.deepEqual(readBatch("directory", paths), []);
+    assert.equal(acquireLock("directory", paths), false);
+    assert.deepEqual(listOrphanBatches(Date.now() + 12 * 60 * 1000, paths), []);
+  });
 });
 
 test("new spool directory and batch file use private modes where portable", (t) => {

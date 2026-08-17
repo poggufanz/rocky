@@ -1,7 +1,8 @@
 import { resolve } from "node:path";
 import {
+  parseNameOnlyZero,
   parsePrePushStdin,
-  parseUnifiedZeroDiff,
+  parseUnifiedZeroDiffChecked,
   rangeForPush,
   type AddedLine,
   type PushRange,
@@ -37,9 +38,14 @@ interface DiffRange {
 interface CheckState {
   finding: boolean;
   prePush: boolean;
+  /** Git scope was established before any scan result was classified. */
+  scope: "unavailable" | "established";
   /** A stage could not run, so part of the range went uninspected. */
   incomplete: boolean;
 }
+
+/** The only four externally meaningful results of a hull scan. */
+type ScanResult = "clean" | "finding" | "incomplete" | "finding-plus-incomplete";
 
 interface PackageCandidate {
   dep: NewDep;
@@ -51,6 +57,20 @@ function findingExit(state: CheckState): number {
   return state.prePush ? 3 : 1;
 }
 
+function scanResult(state: CheckState): ScanResult {
+  const incomplete = state.incomplete || state.scope !== "established";
+  if (state.finding && incomplete) return "finding-plus-incomplete";
+  if (state.finding) return "finding";
+  if (incomplete) return "incomplete";
+  return "clean";
+}
+
+function incompleteDetail(message: string): void {
+  // Keep this on the stage's one diagnostic line. Pre-push must fail open, but
+  // its success status can never be mistaken for a complete clean scan.
+  detail(`${message}; INCOMPLETE: no clean result`);
+}
+
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -59,7 +79,7 @@ function reportFailure(state: CheckState, stage: string, error: unknown): void {
   // Printing is not enough: a stage that could not run means this range was
   // never fully inspected, and the exit code has to be able to say so.
   state.incomplete = true;
-  detail(`rocky check ${stage} could not run: ${errorMessage(error)}`);
+  incompleteDetail(`rocky check ${stage} could not run: ${errorMessage(error)}`);
 }
 
 interface GitReadOptions {
@@ -172,7 +192,10 @@ async function resolveNewRef(head: string): Promise<DiffRange> {
   return { base: await emptyTree(), head };
 }
 
-async function pushRanges(): Promise<DiffRange[]> {
+async function pushRanges(state: CheckState): Promise<DiffRange[]> {
+  const repo = await gitMaybe(["rev-parse", "--git-dir"]);
+  requireGitScope(repo);
+  state.scope = "established";
   const ranges: DiffRange[] = [];
   for (const ref of parsePrePushStdin(await readCheckInput())) {
     const range = rangeForPush(ref);
@@ -181,7 +204,8 @@ async function pushRanges(): Promise<DiffRange[]> {
       try {
         ranges.push(await resolveNewRef(range.head));
       } catch (error) {
-        detail(`ref ${ref.localRef} not inspected by secret or package stages: ${errorMessage(error)}`);
+        state.incomplete = true;
+        incompleteDetail(`ref ${ref.localRef} not inspected by secret or package stages: ${errorMessage(error)}`);
       }
     } else {
       ranges.push({ base: range.base, head: range.head });
@@ -190,36 +214,64 @@ async function pushRanges(): Promise<DiffRange[]> {
   return ranges;
 }
 
-/** Thrown when there is simply nothing to inspect, as opposed to a failed attempt. */
-class NothingToCheck extends Error {}
+function gitScopeFailure(result: GitResult): string {
+  if (result.code === 127 && /(?:ENOENT|not found|spawn)/i.test(result.stderr)) {
+    return "git scope unavailable: git executable could not start; no workspace inspected";
+  }
+  if (/not a git repository/i.test(result.stderr)) {
+    return "git scope unavailable: no git repository here; no workspace inspected";
+  }
+  return "git scope unavailable: git could not establish repository scope; no workspace inspected";
+}
+
+function requireGitScope(result: GitResult): void {
+  if (result.code !== 0 || result.stdout.trim().length === 0) {
+    throw new Error(gitScopeFailure(result));
+  }
+}
 
 async function manualRange(): Promise<DiffRange> {
   const repo = await gitMaybe(["rev-parse", "--git-dir"]);
-  if (repo.code !== 0) {
-    // Missing repository and broken repository both exit 128; only git's own
-    // message separates them, and only the first one means "nothing to check".
-    if (/not a git repository/i.test(repo.stderr)) {
-      throw new NothingToCheck("no git repository here. nothing to check");
-    }
-    throw new Error("git rev-parse failed");
-  }
+  requireGitScope(repo);
   const upstream = await gitMaybe(["rev-parse", "--verify", "@{upstream}"]);
   if (upstream.code === 0) return { base: "@{upstream}", head: "HEAD" };
   return { base: await emptyTree(), head: "HEAD" };
 }
 
-async function addedLines(ranges: readonly DiffRange[]): Promise<AddedLine[]> {
+async function addedLines(ranges: readonly DiffRange[], quiet: boolean, state: CheckState): Promise<AddedLine[]> {
   const added: AddedLine[] = [];
+  let total = 0;
   for (const range of ranges) {
-    const diff = await git([
-      "diff", "--unified=0", "--no-color", "--no-ext-diff",
-      range.base, range.head, "--",
-    ], undefined, { maxOutputBytes: MAX_READ_BYTES, notInspected: "secret lines" });
-    added.push(...parseUnifiedZeroDiff(diff));
+    let rangeAdded: AddedLine[];
+    try {
+      const diff = await git([
+        "diff", "--unified=0", "--no-color", "--no-ext-diff",
+        range.base, range.head, "--",
+      ], undefined, { maxOutputBytes: MAX_READ_BYTES, notInspected: "secret lines" });
+      const parsed = await parseUnifiedZeroDiffChecked(diff);
+      if (!parsed.complete) {
+        throw new Error("git diff output was malformed or ambiguous; secret lines not inspected");
+      }
+      rangeAdded = parsed.added;
+    } catch (error) {
+      reportFailure(state, "secret scan", error);
+      continue;
+    }
+    total += rangeAdded.length;
+    const remaining = Math.max(0, MAX_LINES - added.length);
+    const checked = rangeAdded.slice(0, remaining);
+    added.push(...checked);
+    try {
+      announceSecretFindings(checked, quiet, state);
+    } catch (error) {
+      reportFailure(state, "secret scan", error);
+    }
   }
-  if (added.length > MAX_LINES) {
-    detail(`added-line limit: ${added.length} found; first ${MAX_LINES} checked, ${added.length - MAX_LINES} not checked`);
-    return added.slice(0, MAX_LINES);
+  if (total > MAX_LINES) {
+    state.incomplete = true;
+    incompleteDetail(
+      `added-line limit: ${total} found; first ${MAX_LINES} checked, ${total - MAX_LINES} skipped`,
+    );
   }
   return added;
 }
@@ -237,7 +289,16 @@ async function showFile(rev: string, path: string): Promise<string | null> {
   if (listed.code !== 0) {
     throw new Error(`git ls-tree failed with exit ${listed.code}; package files not inspected`);
   }
-  if (listed.stdout.length === 0) return null;
+  let listedPaths: string[];
+  try {
+    listedPaths = parseNameOnlyZero(listed.stdout);
+  } catch {
+    throw new Error("git ls-tree output was malformed or ambiguous; package files not inspected");
+  }
+  if (listedPaths.length === 0) return null;
+  if (listedPaths.length !== 1 || listedPaths[0] !== path) {
+    throw new Error("git ls-tree output did not match requested package path; package files not inspected");
+  }
   const result = await gitMaybe(
     ["show", `${rev}:${path}`],
     undefined,
@@ -247,32 +308,42 @@ async function showFile(rev: string, path: string): Promise<string | null> {
   return result.stdout;
 }
 
-async function packageCandidates(ranges: readonly DiffRange[]): Promise<PackageCandidate[]> {
+async function packageCandidates(ranges: readonly DiffRange[], state: CheckState): Promise<PackageCandidate[]> {
   const candidates: PackageCandidate[] = [];
   for (const range of ranges) {
-    const paths = (await git(
-      ["diff", "--name-only", "-z", range.base, range.head, "--"],
-      undefined,
-      { maxOutputBytes: MAX_READ_BYTES, notInspected: "package paths" },
-    ))
-      .split("\0")
-      .filter(isPackageJson);
-    for (const path of paths) {
-      const before = await showFile(range.base, path);
-      const after = await showFile(range.head, path);
-      const dependencies = newDependencyNames(before, after);
-      if (dependencies === null) {
-        detail(`package check skipped for ${path}: old manifest is malformed`);
-        continue;
+    try {
+      const output = await git(
+        ["diff", "--name-only", "-z", range.base, range.head, "--"],
+        undefined,
+        { maxOutputBytes: MAX_READ_BYTES, notInspected: "package paths" },
+      );
+      let paths: string[];
+      try {
+        paths = parseNameOnlyZero(output);
+      } catch {
+        throw new Error("git diff package-path output was malformed or ambiguous; package paths not inspected");
       }
-      for (const dep of dependencies) candidates.push({ dep, head: range.head });
+      const packagePaths = paths.filter(isPackageJson);
+      for (const path of packagePaths) {
+        const before = await showFile(range.base, path);
+        const after = await showFile(range.head, path);
+        const dependencies = newDependencyNames(before, after);
+        if (dependencies === null) {
+          state.incomplete = true;
+          incompleteDetail(`package check skipped for ${path}: old manifest is malformed`);
+          continue;
+        }
+        for (const dep of dependencies) candidates.push({ dep, head: range.head });
+      }
+    } catch (error) {
+      reportFailure(state, "package scan", error);
     }
   }
   return candidates;
 }
 
-async function checkablePackageNames(ranges: readonly DiffRange[]): Promise<string[]> {
-  const candidates = await packageCandidates(ranges);
+async function checkablePackageNames(ranges: readonly DiffRange[], state: CheckState): Promise<string[]> {
+  const candidates = await packageCandidates(ranges, state);
   const byHead = new Map<string, NewDep[]>();
   for (const candidate of candidates) {
     const deps = byHead.get(candidate.head) ?? [];
@@ -282,13 +353,17 @@ async function checkablePackageNames(ranges: readonly DiffRange[]): Promise<stri
 
   const names = new Set<string>();
   for (const [head, deps] of byHead) {
-    const npmrc = await showFile(head, ".npmrc");
-    const lockfile = await showFile(head, "package-lock.json");
-    const filtered = filterCheckable(deps, {
-      npmrc,
-      lockfilePackageKeys: parseLockfilePackageKeys(lockfile),
-    });
-    for (const name of filtered.check) names.add(name);
+    try {
+      const npmrc = await showFile(head, ".npmrc");
+      const lockfile = await showFile(head, "package-lock.json");
+      const filtered = filterCheckable(deps, {
+        npmrc,
+        lockfilePackageKeys: parseLockfilePackageKeys(lockfile),
+      });
+      for (const name of filtered.check) names.add(name);
+    } catch (error) {
+      reportFailure(state, "package scan", error);
+    }
   }
   return [...names];
 }
@@ -326,14 +401,28 @@ async function packageStage(
   quiet: boolean,
   state: CheckState,
 ): Promise<void> {
-  const names = await checkablePackageNames(ranges);
-  if (offline || names.length === 0 || !(await registryConsent(quiet))) return;
-  if (names.length > MAX_PACKAGES) {
-    detail(`package limit: ${names.length} found; first ${MAX_PACKAGES} checked, ${names.length - MAX_PACKAGES} not checked`);
+  const names = await checkablePackageNames(ranges, state);
+  const capped = names.length > MAX_PACKAGES;
+  if (capped) {
+    state.incomplete = true;
+  }
+  if (offline || names.length === 0 || !(await registryConsent(quiet))) {
+    if (capped) {
+      incompleteDetail(
+        `package limit: ${names.length} found; first ${MAX_PACKAGES} eligible, ${names.length - MAX_PACKAGES} skipped`,
+      );
+    }
+    return;
+  }
+  if (capped) {
+    incompleteDetail(
+      `package limit: ${names.length} found; first ${MAX_PACKAGES} checked, ${names.length - MAX_PACKAGES} skipped`,
+    );
   }
   const result = await checkPackages(names.slice(0, MAX_PACKAGES));
   if (result.unreachable.length > 0) {
-    detail(`registry unreachable for: ${result.unreachable.join(", ")}; check stays fail-open`);
+    state.incomplete = true;
+    incompleteDetail(`registry unreachable for: ${result.unreachable.join(", ")}; check stays fail-open`);
   }
   if (result.missing.length === 0) return;
   state.finding = true;
@@ -387,6 +476,8 @@ function usage(): number {
   detail("  --offline        skip the registry lookup for this run");
   detail("  --quiet          plain facts only, no persona, no question");
   detail("  --pre-push       read ref updates from git on stdin (hook mode)");
+  detail("  manual exits: 0 checked-clean, 1 finding, 2 Git scope or inspection incomplete");
+  detail("  pre-push exits: 3 finding, 0 clean or fail-open incomplete (stderr says INCOMPLETE)");
   detail("env: ROCKY_NO_QUIZ=1 skips the comprehension question");
   return 0;
 }
@@ -398,8 +489,14 @@ async function runCheck(rest: readonly string[], state: CheckState): Promise<num
   const ownedArgs = state.prePush
     ? rest.slice(0, rest.indexOf("--pre-push") + 1)
     : rest;
+  const positional = ownedArgs.filter((arg) => !arg.startsWith("--"));
+  if (positional.length > 0) {
+    say("check accepts flags only. bad bad.");
+    detail(`unexpected: ${positional.join(", ")}`);
+    usage();
+    return 2;
+  }
   const flags = new Set(ownedArgs.filter((arg) => arg.startsWith("--")));
-  if (flags.has("--help")) return usage();
   // An unrecognised flag must not silently degrade into a full check: someone
   // who typed it meant something Rocky did not do.
   const unknown = [...flags].filter((flag) => !KNOWN_FLAGS.has(flag));
@@ -409,16 +506,17 @@ async function runCheck(rest: readonly string[], state: CheckState): Promise<num
     usage();
     return 2;
   }
+  if (flags.has("--help")) return usage();
   const quiet = flags.has("--quiet");
   if (flags.has("--install-hook")) return installHookFlow(quiet);
 
-  const ranges = state.prePush ? await pushRanges() : [await manualRange()];
-  if (ranges.length === 0) return 0;
+  const ranges = state.prePush ? await pushRanges(state) : [await manualRange()];
+  if (!state.prePush) state.scope = "established";
+  if (ranges.length === 0) return scanResult(state) === "incomplete" && !state.prePush ? 2 : findingExit(state);
   let lines: AddedLine[] = [];
 
   try {
-    lines = await addedLines(ranges);
-    announceSecretFindings(lines, quiet, state);
+    lines = await addedLines(ranges, quiet, state);
   } catch (error) {
     reportFailure(state, "secret scan", error);
   }
@@ -437,22 +535,22 @@ async function runCheck(rest: readonly string[], state: CheckState): Promise<num
     }
   }
 
-  if (!state.finding && state.incomplete && !state.prePush) return 2;
+  const result = scanResult(state);
+  if (result === "incomplete" && !state.prePush) return 2;
   return findingExit(state);
 }
 
 export async function check(rest: string[]): Promise<number> {
-  const state: CheckState = { finding: false, prePush: rest.includes("--pre-push"), incomplete: false };
+  const state: CheckState = {
+    finding: false,
+    prePush: rest.includes("--pre-push"),
+    scope: "unavailable",
+    incomplete: false,
+  };
   try {
     return await runCheck(rest, state);
   } catch (error) {
-    if (error instanceof NothingToCheck) {
-      // Documented in the spec as exit 0: no repository means no range, which
-      // is not the same as a check that was attempted and failed.
-      detail(errorMessage(error));
-      return findingExit(state);
-    }
-    detail(`rocky check could not run: ${errorMessage(error)}`);
+    incompleteDetail(`rocky check could not run: ${errorMessage(error)}`);
     state.incomplete = true;
     // A finding already made is never erased by a later failure.
     if (state.finding) return findingExit(state);

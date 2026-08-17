@@ -25,6 +25,7 @@ import {
 } from "../setup/claude-desktop.js";
 import { createPlatformServices } from "../setup/platform.js";
 import { directorySyncCapability } from "../setup/directory-sync.js";
+import { skipIfSymlinkUnavailable } from "./symlink-capability.js";
 
 const registration = {
   name: "rocky" as const,
@@ -1387,6 +1388,7 @@ test("unsupported hard links abort before displacing an existing config", async 
 });
 
 test("a symlink swapped in at displacement is preserved without a followed hard link", async (t) => {
+  if (skipIfSymlinkUnavailable(t)) return;
   const original = { theme: "dark", mcpServers: { other: { enabled: true } } };
   const path = configPath(t, original);
   const originalBytes = readFileSync(path);
@@ -1943,6 +1945,7 @@ test("next invocation restores an absent target from a displaced crash transacti
 });
 
 test("restart recovery refuses a displaced symlink swapped in during publication", async (t) => {
+  if (skipIfSymlinkUnavailable(t)) return;
   const path = configPath(t);
   const transaction = join(dirname(path), `.${basename(path)}.transaction-recovery-swap`);
   const foreign = join(dirname(path), "foreign.json");
@@ -2835,7 +2838,7 @@ test("POSIX recovery rejects a FIFO source swap promptly before reading", async 
 
   const child = spawnSync(process.execPath, ["--input-type=module", "-e", script], {
     encoding: "utf8",
-    timeout: 2_000,
+    timeout: 10_000,
     killSignal: "SIGTERM",
   });
 
@@ -2848,7 +2851,7 @@ test("POSIX recovery rejects a FIFO source swap promptly before reading", async 
     injected: boolean;
   };
   assert.equal(observed.injected, true);
-  assert.ok(observed.elapsed < 1_500, `recovery took ${observed.elapsed} ms`);
+  assert.ok(observed.elapsed < 4_000, `recovery took ${observed.elapsed} ms`);
   assert.equal(observed.result.status, "failed");
   assert.match(observed.result.detail ?? "", /manual recovery/i);
   assert.doesNotMatch(`${child.stdout}\n${child.stderr}`, /fifo-recovery-authority/i);

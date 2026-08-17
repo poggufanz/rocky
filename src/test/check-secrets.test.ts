@@ -2,6 +2,15 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { AddedLine } from "../check/diff.js";
 import { scanSecrets } from "../check/secrets.js";
+import {
+  EXACT_PLACEHOLDER_ASSIGNMENTS,
+  SYNTHETIC_DELIMITER_PRESERVATION_VECTORS,
+  SYNTHETIC_EOF_AMBIGUITY_VECTORS,
+  SYNTHETIC_EVERY_CONTROL_SPLIT_VECTORS,
+  SYNTHETIC_MULTI_CONTROL_PROBES,
+  SYNTHETIC_NON_EOF_CONTROL_PROBES,
+  SYNTHETIC_SECRET_CLOSURE_VECTORS,
+} from "./secret-vectors.js";
 
 function line(text: string): AddedLine {
   return { file: "src/x.ts", line: 7, text };
@@ -26,6 +35,70 @@ test("detects each supported secret family", () => {
     assert.equal(hits[0]!.kind, kind, text);
     assert.equal(hits[0]!.file, "src/x.ts");
     assert.equal(hits[0]!.line, 7);
+  }
+});
+
+test("detects modern prefixed keys and quoted or unquoted credential assignments", () => {
+  const cases: Array<[string, string]> = [
+    ["sk-proj-aB3dE5fG7hI9-jK2mN4pQ6rS8tU0vW1xY2zA4", "openai key"],
+    ["password=pA7!cV2@kL9", "password assignment"],
+    ["secret = 'rT8$wX3!nM6'", "password assignment"],
+    ["token=tok_aB3d-E5fG7hI9jK2mN4pQ6", "credential assignment"],
+    ['api_key = "api-aB3dE5fG7hI9jK2mN4pQ6"', "credential assignment"],
+    ['authorization="Bearer syn_aB3dE5fG7hI9jK2mN4pQ6"', "credential assignment"],
+    ["authorization: Bearer syn_aB3dE5fG7hI9jK2mN4pQ6", "credential assignment"],
+  ];
+
+  for (const [text, kind] of cases) {
+    assert.deepEqual(scanSecrets([line(text)]).map((hit) => hit.kind), [kind], text);
+  }
+});
+
+test("strips terminal controls and bidi obfuscation before secret detection", () => {
+  const cases = [
+    "sk-\u202eproj-aB3dE5fG7hI9jK2mN4pQ6rS8tU0vW1xY2zA4",
+    "sk-\u001b[31mproj-aB3dE5fG7hI9jK2mN4pQ6rS8tU0vW1xY2zA4",
+    "pass\u0000word=pA7!cV2@kL9",
+  ];
+
+  for (const text of cases) {
+    assert.equal(scanSecrets([line(text)]).length, 1, JSON.stringify(text));
+  }
+});
+
+test("shared secret vectors detect quoted keys, realistic placeholder words, controls, and overlap", () => {
+  for (const vector of SYNTHETIC_SECRET_CLOSURE_VECTORS) {
+    assert.deepEqual(scanSecrets([line(vector.text)]).map((hit) => hit.kind), [vector.kind], vector.name);
+  }
+});
+
+test("logical delimiters in ambiguous continuations do not hide hits", () => {
+  for (const vector of SYNTHETIC_DELIMITER_PRESERVATION_VECTORS) {
+    assert.deepEqual(scanSecrets([line(vector.text)]).map((hit) => hit.kind), [vector.kind], vector.name);
+  }
+});
+
+test("detects every TAB LF and CR split position across suffix contexts", () => {
+  for (const vector of SYNTHETIC_EVERY_CONTROL_SPLIT_VECTORS) {
+    assert.deepEqual(scanSecrets([line(vector.text)]).map((hit) => hit.kind), [vector.kind], vector.name);
+  }
+});
+
+test("detects the three non-EOF control-split review probes", () => {
+  for (const vector of SYNTHETIC_NON_EOF_CONTROL_PROBES) {
+    assert.deepEqual(scanSecrets([line(vector.text)]).map((hit) => hit.kind), [vector.kind], vector.name);
+  }
+});
+
+test("detects quoted and unquoted values split by multiple controls", () => {
+  for (const vector of SYNTHETIC_MULTI_CONTROL_PROBES) {
+    assert.deepEqual(scanSecrets([line(vector.text)]).map((hit) => hit.kind), [vector.kind], vector.name);
+  }
+});
+
+test("detects assignments with ambiguous EOF continuations", () => {
+  for (const vector of SYNTHETIC_EOF_AMBIGUITY_VECTORS) {
+    assert.deepEqual(scanSecrets([line(vector.text)]).map((hit) => hit.kind), [vector.kind], vector.name);
   }
 });
 
@@ -67,6 +140,13 @@ test("does not flag benign, placeholder, or test-example lines", () => {
     "const placeholder = \"sk-ant-" + "x".repeat(24) + "\";",
     "const placeholder = \"sk-" + "z".repeat(24) + "\";",
     'password = "test-password-123"',
+    "secret=example-secret",
+    "token=changeme",
+    'api_key="placeholder-value"',
+    'authorization="Bearer example-token"',
+    "authorization: Bearer placeholder-token",
+    "sk-proj-" + "x".repeat(28),
+    ...EXACT_PLACEHOLDER_ASSIGNMENTS,
   ];
 
   assert.equal(scanSecrets(benign.map(line)).length, 0);

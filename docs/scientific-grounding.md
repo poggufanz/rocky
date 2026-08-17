@@ -10,7 +10,7 @@ Rocky is not a debugging agent. Plenty of tools already write and fix code for y
 
 The first systematic survey of vibe coding (Ge et al., 2025, arXiv:2510.12399) defines the practice as developers validating AI-generated implementations "through outcome observation rather than line-by-line code comprehension" — and reports unexpected productivity *losses* alongside the speed gains. The survey's central finding is that successful vibe coding depends less on agent capability and more on systematic context engineering and well-designed human–agent collaboration models.
 
-That finding motivates Rocky's longer arc, but it does not establish Rocky's effect. The planned v0.5 dictionary is designed to help close the comprehension loop by connecting a user's recorded intent to the mechanism in their own work. v0.3.0 does not implement that dictionary, agent-change capture, ambiguity handling, digest, quiz, or proactive questions; today it provides terminal failure/fix memory, `rocky watch`, read-only MCP, and optional local interpretation of recall evidence.
+That finding motivates Rocky's longer arc, but it does not establish Rocky's effect. The v0.5 dictionary connects a user's recorded intent to the mechanism in their own work. The dictionary, bounded agent-change capture, ambiguity handling, digest, quiz, and proactive questions are implemented in the 0.5 release line; current package 0.5.1 also provides terminal failure/fix memory, `rocky watch`, read-only MCP, and optional local interpretation of recall evidence.
 
 ### 2. Developers pay a recurring "re-finding tax"
 
@@ -20,14 +20,14 @@ In other words: a meaningful share of daily engineering time is spent *re-findin
 
 `rocky run` and `rocky recall` are built for exactly this gap. Eridians have photographic memory; Rocky records error → resolution pairs as they happen, so the second time an error appears, the answer comes from your own history in milliseconds instead of from a search engine in minutes. The core CLI stores that memory in a user-controlled JSONL file and sends no telemetry. The memory, hook, recall, and MCP paths reach no external host. The project's one piece of external egress lives elsewhere: the consent-gated package-existence lookup `rocky check` performs against the npm registry. Rocky's read-only MCP server sanitizes projected records by default; a configured host governs whether selected projected content is forwarded under its own policy.
 
-### 3. Explaining beats being told: the planned v0.5 learning mechanism
+### 3. Explaining beats being told: the v0.5 learning mechanism
 
 Two robust findings from cognitive psychology shape Rocky's interaction design:
 
 - **The self-explanation effect** (Chi, de Leeuw, Chiu & LaVancher, *Cognitive Science*, 1994): learners who generate explanations of material understand it measurably better than learners who only read it — even when the explanations are prompted.
 - **The testing effect / retrieval practice** (Roediger & Karpicke, *Psychological Science*, 2006): retrieving knowledge produces stronger long-term retention than repeated passive review.
 
-Teaching modes already exist inside individual agents. Rocky's planned v0.5 Intent↔Mechanism Dictionary takes a different, longitudinal approach: it uses material from the user's own work to expose the translation between a recorded intent and a concrete change. The material matters as much as the direction: what Rocky would ask about comes from the user's own commits and own prompts rather than from a generic exercise, which is the condition the self-explanation literature above studies. That design is consistent with self-explanation and retrieval-practice principles, but Rocky's learning effect has not been established. Rocky's asking and follow-up behavior is also planned v0.5 work, not current v0.3.0 behavior.
+Teaching modes already exist inside individual agents. Rocky's v0.5 Intent↔Mechanism Dictionary takes a different, longitudinal approach: it uses material from the user's own work to expose the translation between a recorded intent and a concrete change. The material matters as much as the direction: what Rocky asks about comes from the user's own commits and own prompts rather than from a generic exercise, which is the condition the self-explanation literature above studies. That design is consistent with self-explanation and retrieval-practice principles, but Rocky's learning effect has not been established. Rocky's asking and follow-up behavior is implemented in the 0.5 release line, not a claim about the older v0.3.0 behavior.
 
 ### 4. Where automated diagnosis fits (and its known limits)
 
@@ -37,7 +37,7 @@ When Rocky offers optional interpretation during `rocky recall --ai`, and when `
 - Single-shot LLM repair struggles with fault localization and broader project context; structured, multi-stage approaches do better (Lee et al., 2024, arXiv:2404.17153, published as *UniDebugger*).
 - Integrating runtime tooling directly into the agent loop, rather than bolting it on, raised fix rates by over 20% for some models (Garg & Huang, Microsoft Research, 2026, arXiv:2602.18571).
 
-This is why current Rocky records explicit commands, stderr, exit codes, fingerprints, and fix links at the moment of failure instead of asking a model to reason from an ungrounded prompt. Capturing agent diffs belongs to the planned v0.5 Nervous System, not v0.3.0.
+This is why current Rocky records explicit commands, stderr, exit codes, fingerprints, and fix links at the moment of failure instead of asking a model to reason from an ungrounded prompt. Capturing bounded agent diffs belongs to the v0.5 Nervous System; it was not part of v0.3.0.
 
 ### 5. Code nobody understands has a measured price
 
@@ -53,7 +53,7 @@ What the numbers do support is that the bill for code nobody re-reads is real an
 
 Anthropic's guidance for long-running agentic work states the problem plainly: a progress file should record failed approaches, because "the failed approaches are important—without them, successive sessions will re-attempt the same dead ends" (*Long-running Claude for scientific computing*, 2026).
 
-The structural point is what the planned memory circuit breaker rests on: an agent inside a single iteration starts from a fresh context and therefore cannot, by construction, observe its own repetition. That pattern is visible only to an observer that lives across iterations and sessions. Loop detection that works per run loses its memory when the run ends; the contribution claimed here is persistence across time plus a human-readable account of it, and nothing more — measurable behavioural symptoms only (a repeated failure fingerprint, the same file rewritten N times), never the semantic quality of an outcome, for which Rocky has no ground truth. Negative knowledge, the circuit breaker, and every hook that would feed them are planned v0.5 work, not v0.3.0 behavior.
+The structural point is what the planned memory circuit breaker rests on: an agent inside a single iteration starts from a fresh context and therefore cannot, by construction, observe its own repetition. That pattern is visible only to an observer that lives across iterations and sessions. Loop detection that works per run loses its memory when the run ends; the contribution claimed here is persistence across time plus a human-readable account of it, and nothing more — measurable behavioural symptoms only (a repeated failure fingerprint, the same file rewritten N times), never the semantic quality of an outcome, for which Rocky has no ground truth. Negative knowledge and the circuit breaker remain deferred v0.5 work; the agent hooks that preserve their evidence are implemented in the 0.5 release line and were not part of v0.3.0.
 
 ### 7. Automation-bias evidence is motivation, not proof
 

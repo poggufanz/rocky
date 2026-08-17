@@ -30,6 +30,7 @@ import {
 import { directorySyncCapability } from "../setup/directory-sync.js";
 import { atomicWriteBytesIfUnchanged } from "../setup/file-transaction.js";
 import type { ProcessResult, ProcessRunOptions, ProcessRunner } from "../setup/process.js";
+import { skipIfSymlinkUnavailable } from "./symlink-capability.js";
 
 // This whole file exercises the claude-code adapter with platform:"linux"
 // (forced posix pathApi, see adapterDependencies below) on every CI host, so
@@ -803,6 +804,7 @@ test("config-root policy files and unsafe independent layers stop before capabil
 
   for (const topology of ["symlink", "hard-link", "directory"] as const) {
     await t.test(`independent ${topology}`, async (st) => {
+      if (topology === "symlink" && skipIfSymlinkUnavailable(st)) return;
       const setup = fixture(st, { mcpServers: {} });
       const policy = join(setup.root, "managed-policy.json");
       const target = join(setup.root, "managed-target.json");
@@ -1008,6 +1010,7 @@ test("backup timestamp must be safe epoch milliseconds inside the transform wind
 
 test("staging root rejects linked components and ancestor rebind before any runner", async (t) => {
   await t.test("final component symlink", async (st) => {
+    if (skipIfSymlinkUnavailable(st, "dir")) return;
     const setup = fixture(st, { mcpServers: {} });
     const realStageRoot = join(setup.root, "real-stage-root");
     mkdirSync(realStageRoot, { mode: 0o700 });
@@ -1024,6 +1027,7 @@ test("staging root rejects linked components and ancestor rebind before any runn
   });
 
   await t.test("stable symlink ancestor", async (st) => {
+    if (skipIfSymlinkUnavailable(st, "dir")) return;
     const setup = fixture(st, { mcpServers: {} });
     const realNamespace = join(setup.root, "real-namespace");
     const linkedNamespace = join(setup.root, "linked-namespace");
@@ -1040,6 +1044,7 @@ test("staging root rejects linked components and ancestor rebind before any runn
   });
 
   await t.test("ancestor rebound during stage creation", async (st) => {
+    if (skipIfSymlinkUnavailable(st, "dir")) return;
     const setup = fixture(st, { mcpServers: {} });
     const namespace = join(setup.root, "stage-namespace");
     const stagingRoot = join(namespace, "stages");
@@ -1237,6 +1242,7 @@ test("stage lifecycle never uses pathname-only deletion for invocation-owned ent
 test("stage symlink hard-link and rebound attacks are refused without deleting attacker state", async (t) => {
   for (const attack of ["symlink", "hard-link", "rebound"] as const) {
     await t.test(attack, async (st) => {
+      if (attack === "symlink" && skipIfSymlinkUnavailable(st)) return;
       const setup = fixture(st, { keep: true, mcpServers: {} });
       const before = readFileSync(setup.configPath);
       let sentinel: string | undefined;
@@ -2978,6 +2984,7 @@ test("unsafe target topology and malformed shapes are untouched and secret-free"
   const cases = ["symlink", "hard-link", "directory", "malformed", "array", "servers-array"] as const;
   for (const entry of cases) {
     await t.test(entry, async (st) => {
+      if (entry === "symlink" && skipIfSymlinkUnavailable(st)) return;
       const setup = fixture(st);
       const target = join(setup.root, "target.json");
       if (entry === "symlink" || entry === "hard-link") {

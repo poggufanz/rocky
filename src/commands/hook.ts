@@ -17,8 +17,8 @@ import type { Stats } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { commandFingerprint } from "../core/fingerprint.js";
 import { CANCEL_CODES } from "../core/exec.js";
+import { commandFingerprintCandidates } from "../core/fingerprint.js";
 import { renderGuardRules, rulesFileIsPristine } from "../core/guard-rules.js";
 import {
   addHookBlockBytes,
@@ -27,13 +27,13 @@ import {
 } from "../core/hook-block.js";
 import { resolveRockyPaths } from "../core/state-paths.js";
 import {
-  clearPendingIfResolved,
-  loadMemory,
-  recordFix,
   recordHookFailure,
+  resolveFixOnSuccess,
+  type ResolveFixOptions,
   type MemoryRecord,
 } from "../core/memory.js";
-import { findByFingerprint, fixFromElsewhere, getFix, recentUnresolvedFailures } from "../core/memory-query.js";
+import { isCompleteMemoryCoverage, loadMemoryChecked } from "../core/memory-read.js";
+import { findByFingerprint, fixFromElsewhere, getFix } from "../core/memory-query.js";
 import {
   atomicWriteBytesIfUnchanged,
   inspectFileTransaction,
@@ -48,6 +48,7 @@ import type {
 } from "../setup/file-transaction.js";
 import { quotePosixShell } from "../core/shell-quote.js";
 import { ago, detail, detailTty, phrase, say, sayTty } from "../ui/rocky.js";
+import { safeTerminalLine } from "../ui/sanitize.js";
 
 /**
  * An unreadable memory file is spoken over /dev/tty, not thrown — a detached
@@ -55,7 +56,13 @@ import { ago, detail, detailTty, phrase, say, sayTty } from "../ui/rocky.js";
  */
 function readMemory(): MemoryRecord[] | undefined {
   try {
-    return loadMemory();
+    const loaded = loadMemoryChecked();
+    if (!isCompleteMemoryCoverage(loaded.coverage)) {
+      sayTty("memory coverage incomplete. I do not claim prior fix. check, question");
+      detailTty(`memory coverage: version ${loaded.coverage.version}; scanned ${loaded.coverage.scanned}; skipped ${loaded.coverage.skipped}; truncated ${loaded.coverage.truncated}${loaded.coverage.reason === undefined ? "" : `; reason ${loaded.coverage.reason}`}`);
+      return undefined;
+    }
+    return loaded.records;
   } catch {
     sayTty("memory file does not open for me. I answer from nothing.");
     detailTty(`memory: ${resolveRockyPaths().memory}`);
@@ -69,31 +76,38 @@ export function hookFail(cmd: string, exitCode: number, cwd: string): number {
 
   const memory = readMemory();
 
-  recordHookFailure(cmd, exitCode, cwd);
+  try {
+    recordHookFailure(cmd, exitCode, cwd);
+  } catch {
+    sayTty("I cannot write memory. this one I forget.");
+    detailTty(`memory: ${resolveRockyPaths().memory}`);
+  }
 
   if (memory === undefined) return 0; // unreadable memory: recorded, but nothing to recall
 
-  const fp = commandFingerprint(cmd, exitCode);
-  const previous = findByFingerprint(memory, fp);
+  const now = Date.now();
+  const fp = commandFingerprintCandidates(cmd, exitCode);
+  const previous = findByFingerprint(memory, fp, now);
 
   if (previous.length === 0) return 0; // first time: passive ears stay quiet
 
-  const withFix = [...previous].reverse().find((f) => getFix(memory, f));
+  const withFix = [...previous].reverse().find((f) => getFix(memory, f, now));
   if (withFix) {
-    const fix = getFix(memory, withFix)!;
+    const fix = getFix(memory, withFix, now)!;
     sayTty(`I hear this error before. ${ago(withFix.ts)}. last time, you fix with:`);
-    detailTty(fix.cmd);
-    const elsewhere = fixFromElsewhere(fix, cwd);
+    detailTty(safeTerminalLine(fix.cmd));
+    const elsewhere = fixFromElsewhere(fix, withFix.cwd);
     if (elsewhere !== undefined) {
       sayTty("but fix comes from other place.");
-      detailTty(`place: ${elsewhere}`);
+      detailTty(`place: ${safeTerminalLine(elsewhere)}`);
+      sayTty("possible only. check, question");
     }
     sayTty("try, question");
   } else {
     const hint = deepMemoryHint(cmd);
     // No hint means the command already went through `rocky run`, so deep
     // memory exists and that run has already spoken. Passive ears stay quiet.
-    if (hint) sayTty(`this error again. deep memory need stderr. run with: ${hint}, question`);
+    if (hint) sayTty(`this error again. deep memory need stderr. run with: ${safeTerminalLine(hint)}, question`);
   }
   return 0;
 }
@@ -109,17 +123,17 @@ export function deepMemoryHint(cmd: string): string | undefined {
 }
 
 /** A command succeeded while the pending flag existed. Try to link a fix. */
-export function hookSuccess(cmd: string, cwd: string): number {
-  const memory = readMemory();
-  if (memory === undefined) return 0;
-  const unresolved = recentUnresolvedFailures(memory, cmd, { cwd });
-  if (unresolved.length > 0) {
-    recordFix(cmd, unresolved, cwd);
-    sayTty("command works now. you fix it. I remember the fix. good good good.");
+export function hookSuccess(cmd: string, cwd: string, options: ResolveFixOptions = {}): number {
+  try {
+    const result = resolveFixOnSuccess(cmd, cwd, options);
+    if (result.confirmedResolved > 0) {
+      sayTty("command works now. you fix it. I remember the fix. good good good.");
+    }
+  } catch {
+    // Detached bookkeeping must never become the hooked command's outcome.
+    sayTty("I cannot write memory. this one I forget.");
+    detailTty(`memory: ${resolveRockyPaths().memory}`);
   }
-  // Re-read: the fix just recorded above changes resolution state.
-  const latest = readMemory();
-  if (latest !== undefined) clearPendingIfResolved(latest);
   return 0;
 }
 

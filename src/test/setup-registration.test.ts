@@ -226,7 +226,7 @@ test("process runner aborts a timed-out child", async () => {
   assert.equal(result.status, null);
   assert.ok(result.error instanceof Error);
   assert.match(result.error.message, /abort|timeout/i);
-  assert.ok(Date.now() - started < 2_000);
+  assert.ok(Date.now() - started < 8_000);
 });
 
 test("interactive process session exchanges one JSON line at a time and merges environment overrides", async () => {

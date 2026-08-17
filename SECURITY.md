@@ -4,7 +4,7 @@ Rocky edits files people care about. It writes a managed block into `~/.bashrc`,
 
 ## Reporting a vulnerability
 
-Report privately through GitHub: open the [Security tab](https://github.com/poggufanz/rocky/security/advisories) on this repository and choose "Report a vulnerability". That opens a private advisory only maintainers can read.
+Report privately through a [GitHub security advisory](https://github.com/poggufanz/rocky/security/advisories/new). Only repository maintainers can read the draft report.
 
 Please don't open a public issue for anything that could be exploited before there's a fix.
 
@@ -16,7 +16,9 @@ This is a one-person side project, not a funded product. Expect a first reply wi
 
 | Version | Supported |
 | --- | --- |
-| 0.3.0 | Yes |
+| 0.5.1 | Yes |
+| 0.5.0 | No |
+| 0.3.0 | No |
 | 0.2.1-beta.1 | No |
 | 0.2.1-beta.0 | No |
 | earlier | No |
@@ -29,11 +31,20 @@ Note that `@poggufanz/rocky-cli` is the only package this project publishes. The
 
 Knowing the blast radius helps you judge whether something you found matters.
 
-Rocky writes to `~/.rocky/`, which holds the memory file, and only after you run `rocky hook install` does it add a marked block to `~/.bashrc`. Plain `rocky setup` never edits your shell config. With your consent it registers an MCP entry in a host configuration, which means `$CODEX_HOME/config.toml` for Codex, `~/.claude.json` or `$CLAUDE_CONFIG_DIR/.claude.json` for Claude Code, and the platform config path for Claude Desktop.
+Rocky's local state lives under `ROCKY_HOME`, or `~/.rocky` by default. It can include `memory.jsonl`, config, watch logs, a transient agent spool, labels, hook assets, and guard rules. `memory.jsonl` is append-only, private where the platform supports POSIX modes, and not encrypted. Rocky does not make an automatic backup of it; use `rocky export` or your normal backup tooling if you need another copy.
 
-Before Rocky changes any of those files it keeps a recovery copy of the original next to the target, in a directory named after the file. **That copy contains the file's full contents, including anything sensitive that was in it, and it is not encrypted.** Rocky keeps the most recent one and prunes older ones. This is deliberate, since it's what lets an interrupted write be recovered, but you should know those copies exist and that removing them is your call.
+`rocky hook install` is the only setup command that adds a managed block to `~/.bashrc`; plain `rocky setup` never edits shell configuration. A `.bashrc` write keeps the previous bytes, when they exist, in a sibling transaction directory under your home directory. Completed transactions prune older completed copies, while pending or ambiguous recovery artifacts are retained. `rocky hook status` does not edit the managed block, but it can settle an interrupted transaction and restore `.bashrc`.
 
-Rocky sends no telemetry, ever. The only external requests the project makes are `rocky check`'s package-existence lookups against registry.npmjs.org — one GET per new dependency name, run in parallel: package names only, no versions and no paths, gated behind a consent prompt that shows you exactly that before the first lookup, and fail-open — an unreachable registry warns and lets the push through. Redirects are not followed, so the request cannot be steered to another host. Everything else, the MCP server included, reaches no external host. MCP runs over local stdio, exposes read-only tools, and projects sanitized memory by default. Raw exposure is an explicit opt-in. A cloud host you've configured may forward whatever Rocky projects to it under that host's own policy, which is a good reason to think before choosing raw.
+Host recovery behavior is deliberately host-specific:
+
+- Codex replacement or removal saves the prior Rocky MCP entry, not the full TOML file, under `~/.rocky-setup-recovery/`. A verified replacement removes that copy; a successful removal retains it as a manual undo. An initial add has no prior entry to save.
+- Claude Desktop keeps a full timestamped sibling backup of an existing config and also uses a conditional-write transaction. Those timestamped backups are not automatically pruned.
+- Claude Code MCP automation is inactive in this release and normally returns manual instructions before publishing a config change.
+- Replacing or removing a managed voice skill moves the old directory into that host's `.rocky/backups/voice-skills/` area. Those backups are not automatically pruned.
+
+These artifacts can contain sensitive host configuration and are not encrypted. Changing `ROCKY_HOME` does not relocate `.bashrc`, host configuration, or their recovery artifacts.
+
+Rocky's own code contains no telemetry. Its only non-loopback network traffic is `rocky check` looking up eligible package names at registry.npmjs.org: package names only, no versions or paths, after consent, with no redirects, and fail-open on every result except a definitive 404. MCP runs over local stdio, exposes read-only tools, and projects sanitized memory by default. Raw exposure is an explicit opt-in. A host you launch or configure may apply its own network and data policy, so review that host before sharing raw fields.
 
 Optional AI features talk only to an Ollama service you run yourself, over loopback at `127.0.0.1`. Rocky never installs, starts, stops, or pulls a model.
 
@@ -51,9 +62,9 @@ Anything that makes the sanitized MCP projection reveal fields that raw exposure
 
 ## What doesn't count
 
-Rocky refusing to act and telling you to do something manually is the designed behavior when it can't prove a state is safe. Codex registration removal and Claude Code automation both currently end that way, which is documented and intentional in this release.
+Rocky refusing to act and telling you to do something manually is the designed behavior when it can't prove a state is safe. Claude Code MCP automation currently ends that way, and other host adapters can do the same when provenance or file state is uncertain.
 
-The recovery copies described above are working as designed. If you think the design is wrong, that's a worthwhile discussion for a public issue rather than a private advisory.
+The documented recovery artifacts are working as designed. If you think the design is wrong, that's a worthwhile discussion for a public issue rather than a private advisory.
 
 Findings that require an attacker who already has write access to your home directory are usually out of scope, since at that point they don't need Rocky. If you have a specific escalation in mind, report it anyway and explain the path.
 

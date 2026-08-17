@@ -8,7 +8,10 @@ import { fileURLToPath } from "node:url";
 import { PACKAGE_NAME, PACKAGE_VERSION } from "../core/package-info.js";
 
 const packageRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
-const readme = readFileSync(join(packageRoot, "README.md"), "utf8");
+const readmePage = readFileSync(join(packageRoot, "README.md"), "utf8");
+// Detailed behavior contracts live in the linked reference so the front page can stay useful.
+const reference = readFileSync(join(packageRoot, "docs", "reference.md"), "utf8");
+const readme = `${readmePage}\n\n${reference}`;
 const grounding = readFileSync(join(packageRoot, "docs", "scientific-grounding.md"), "utf8");
 const modelSource = readFileSync(join(packageRoot, "src", "commands", "model.ts"), "utf8");
 const unscopedRockyInstall = /\bnpm\s+(?:install|i)(?=\s)[^\n;&|#]*?[\s`'"]rocky-cli(?:@[^\s`'",;:)]+)?(?=$|[\s`'",;:.)])/i;
@@ -94,10 +97,10 @@ test("README and CLI help publish the installable command surface", () => {
     "rocky watch",
   ] as const;
 
-  assertContainsEvery(readme, "README", expected);
+  assertContainsEvery(readmePage, "README", expected);
   assertContainsEvery(help, "CLI help", expected);
 
-  for (const [label, surface] of [["README", readme], ["CLI help", help]] as const) {
+  for (const [label, surface] of [["README", readmePage], ["CLI help", help]] as const) {
     assert.equal(hasActiveUnscopedRockyInstall(surface), false, `${label} advertises unscoped Rocky install`);
     assert.doesNotMatch(surface, /never uploaded/i);
     assert.doesNotMatch(surface, /v0\.1[^\n]*(?:current|this release)/i);
@@ -105,13 +108,26 @@ test("README and CLI help publish the installable command surface", () => {
   }
 });
 
+test("README stays a concise front page with durable project links", () => {
+  assert.ok(readmePage.split("\n").length <= 180, "README detail belongs in docs/reference.md");
+  assertContainsEvery(readmePage, "README project links", [
+    "https://github.com/poggufanz/rocky/releases/tag/v0.5.1",
+    "CHANGELOG.md",
+    "LICENSE",
+    "https://github.com/poggufanz/rocky/blob/main/SECURITY.md",
+    "https://github.com/poggufanz/rocky/blob/main/CONTRIBUTING.md",
+    "https://github.com/poggufanz/rocky/blob/main/docs/reference.md",
+    "/assets/rocky-pixel.webp",
+  ]);
+});
+
 test("README identity, roadmap, and Plan 01/Plan 02 v0.5 boundary stay aligned", () => {
   assert.ok(
-    readme.includes(`${PACKAGE_NAME}@${PACKAGE_VERSION}`),
+    readmePage.includes(`${PACKAGE_NAME}@${PACKAGE_VERSION}`),
     "README package identity must come from the same name and version as package-info.ts",
   );
 
-  const roadmap = readme.slice(readme.indexOf("## Roadmap"));
+  const roadmap = readmePage.slice(readmePage.indexOf("## Roadmap"));
   const releaseOrder = ["v0.2.1", "v0.3", "v0.4", "v0.5"] as const;
   let previous = -1;
   for (const release of releaseOrder) {
@@ -176,11 +192,11 @@ test("README identity, roadmap, and Plan 01/Plan 02 v0.5 boundary stay aligned",
     "curious blind friend",
     "digest",
   ]) {
-    const row = readme.split("\n").find((line) => line.trimStart().startsWith("|") && line.toLowerCase().includes(mechanism));
+    const row = reference.split("\n").find((line) => line.trimStart().startsWith("|") && line.toLowerCase().includes(mechanism));
     assert.ok(row, `README must keep a conceptual row for ${mechanism}`);
     assert.match(row ?? "", /Plan 02 implemented/i, `${mechanism} must be marked implemented in Plan 02`);
   }
-  const recallRow = readme.split("\n").find((line) => line.toLowerCase().includes("| recall |"));
+  const recallRow = reference.split("\n").find((line) => line.toLowerCase().includes("| recall |"));
   assert.ok(recallRow, "README must keep a conceptual row for current Recall");
   assert.match(recallRow ?? "", /Plan 01 implemented\/current/i);
   assert.doesNotMatch(recallRow ?? "", /Plan 02 deferred/i);
@@ -336,8 +352,8 @@ test("README documents recoverable/conditional bashrc writes and corrupt-marker 
 test("README discloses the retained .bashrc recovery copy left by write attempts", () => {
   assert.match(
     readme,
-    /recovery copy[^\n]*previous bytes/i,
-    "README must disclose that a .bashrc write keeps a recovery copy of the previous bytes",
+    /\.bashrc`? already exists[^\n]*recovery copy[^\n]*previous bytes/i,
+    "documentation must scope the previous-bytes recovery copy to an existing .bashrc",
   );
   assert.match(
     readme,
@@ -356,23 +372,28 @@ test("README discloses the retained .bashrc recovery copy left by write attempts
   );
   assert.match(
     readme,
-    /keeps only the most recent copy/i,
-    "README must state Rocky prunes superseded recovery copies, keeping only the most recent",
+    /completed transactions keep only the most recent completed copy/i,
+    "documentation must scope pruning to completed transaction copies",
   );
   assert.match(
     readme,
-    /same recoverable-transaction mechanism[^\n]*Claude Desktop config writes/i,
-    "README must disclose the same recoverable-transaction mechanism backs Claude Desktop config writes",
+    /pending or ambiguous recovery directories are retained and can accumulate/i,
+    "documentation must disclose that unresolved recovery directories are not pruned",
   );
   assert.match(
     readme,
-    /Claude Code[^\n]*once its staged publication activates/i,
-    "README must disclose Claude Code gets the same retained-copy mechanism once its staged publication activates, without claiming it is active now",
+    /Claude Desktop uses the same conditional-transaction mechanism[^\n]*full timestamped sibling backup/i,
+    "documentation must describe Claude Desktop's transaction and timestamped backup",
   );
-  assert.doesNotMatch(
+  assert.match(
     readme,
-    /Claude Code[^\n]*config writes,? (?:today|now)|Claude Code config writes today/i,
-    "README must not claim Claude Code's config writes currently leave a retained copy",
+    /timestamped backups are not automatically pruned/i,
+    "documentation must disclose that Claude Desktop timestamped backups accumulate",
+  );
+  assert.match(
+    readme,
+    /Claude Code MCP automation is inactive[^\n]*normally makes no config write or backup/i,
+    "documentation must state that shipped Claude Code automation normally leaves no backup",
   );
 });
 
@@ -387,7 +408,7 @@ test("README discloses that hook status also settles and discloses a retained co
   // the command's own output must say so.
   assert.match(
     readme,
-    /status[^\n]*never edits the hook block itself[^\n]*settle/i,
+    /status[^\n]*never edits the hook block itself[^\n]*settl(?:e|ing)/i,
     "README must state status does not edit the hook block on its own, but does settle an interrupted transaction",
   );
   assert.match(
@@ -397,7 +418,7 @@ test("README discloses that hook status also settles and discloses a retained co
   );
   assert.match(
     readme,
-    /status[^\n]*prints that path too/i,
+    /status[^\n]*(?:prints|says so and prints)[^\n]*(?:that|the) path/i,
     "README must state status discloses a retained copy it settles, matching install/uninstall's disclosure",
   );
   assert.doesNotMatch(
@@ -527,6 +548,16 @@ test("README keeps the sanitized-default, raw-opt-in, and loopback-only network 
   assert.ok(readme.includes("127.0.0.1"), "README must name the loopback address for optional AI");
 });
 
+test("README documents the native Windows command boundary and bounded loopback AI contract", () => {
+  assert.match(readme, /8,191 characters/);
+  assert.match(readme, /7,111-character command/);
+  assert.match(readme, /9,111-character command/);
+  assert.match(readme, /response file, configuration file, or script/);
+  assert.match(readme, /does not silently rewrite the command/);
+  assert.match(readme, /64 KiB.*256 KiB.*20 seconds/);
+  assert.match(readme, /30-second deadline.*discovery.*probe/);
+});
+
 function topLevelCommandSurface(indexSource: string): Set<string> {
   // Scrape only the outer `switch (command)` in main() - not the nested `hook`
   // sub-switch (install/uninstall/status are never dispatched as `rocky <word>`,
@@ -598,12 +629,19 @@ test("README and CLI help avoid forbidden universal-support and evidence overcla
 });
 
 test("README states zero runtime/optional dependencies, reusing package metadata as source of truth", () => {
-  assert.match(readme, /zero runtime dep/i, "README must state zero runtime dependencies");
+  assert.match(readmePage, /zero runtime dep/i, "README must state zero runtime dependencies");
 });
 
-test("scientific grounding keeps v0.5 learning mechanisms planned and evidence claims bounded", () => {
-  assert.match(grounding, /planned v0\.5 dictionary is designed to help close the comprehension loop/i);
-  assert.match(grounding, /asking and follow-up behavior[^\n]*planned v0\.5/i);
+test("documentation names one canonical source and package root", () => {
+  assert.match(readmePage, /fresh clone[\s\S]*package root/i);
+  assert.match(readmePage, /outer workspace[\s\S]*rocky\//i);
+  assert.match(readmePage, /canonical (?:developer )?(?:line|branch)[\s\S]*main/i);
+  assert.doesNotMatch(readmePage, /published package version is/i);
+});
+
+test("scientific grounding keeps v0.5 learning mechanisms bounded and evidence claims honest", () => {
+  assert.match(grounding, /v0\.5 dictionary connects a user's recorded intent to the mechanism/i);
+  assert.match(grounding, /asking and follow-up behavior is implemented in the 0\.5 release line/i);
   assert.match(grounding, /consistent with/i);
   assert.ok(grounding.includes("https://pubmed.ncbi.nlm.nih.gov/25886768/"));
   assert.ok(grounding.includes("https://pmc.ncbi.nlm.nih.gov/articles/PMC7651899/"));

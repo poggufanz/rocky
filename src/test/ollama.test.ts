@@ -3,7 +3,9 @@ import assert from "node:assert/strict";
 import {
   createOllamaClient,
   OLLAMA_ORIGIN,
+  OLLAMA_REQUEST_LIMIT,
   OLLAMA_RESPONSE_LIMIT,
+  OllamaRequestTooLargeError,
   OllamaResponseTooLargeError,
 } from "../ai/ollama.js";
 
@@ -62,6 +64,41 @@ function boundedJsonResponse(bytes: number): Response {
   assert.equal(Buffer.byteLength(payload, "utf8"), bytes);
   return new Response(payload, { headers: { "content-type": "application/json" } });
 }
+
+test("loopback origin seam accepts only explicit plain HTTP 127.0.0.1 ports", () => {
+  for (const origin of [
+    "http://127.0.0.1",
+    "http://127.0.0.1:0",
+    "http://127.0.0.1:65536",
+    "http://localhost:11434",
+    "https://127.0.0.1:11434",
+    "http://127.0.0.1:11434/path",
+    "http://127.0.0.1:11434?query",
+    "http://127.0.0.1:11434#fragment",
+    "http://user@127.0.0.1:11434",
+    "http://[::1]:11434",
+  ]) {
+    assert.throws(() => createOllamaClient({ origin }), /origin/iu, origin);
+  }
+  assert.doesNotThrow(() => createOllamaClient({ origin: "http://127.0.0.1:1" }));
+  assert.doesNotThrow(() => createOllamaClient({ origin: "http://127.0.0.1:65535" }));
+});
+
+test("rejects non-positive, non-finite, and unbounded request timeouts", () => {
+  for (const timeoutMs of [0, -1, Number.NaN, Number.POSITIVE_INFINITY, 120_001]) {
+    assert.throws(() => createOllamaClient({ timeoutMs }), /timeout/iu, String(timeoutMs));
+  }
+});
+
+test("rejects an oversized outbound request before contacting loopback", async () => {
+  const { fetchImpl, calls } = fetchFrom([]);
+  const client = createOllamaClient({ fetchImpl });
+  await assert.rejects(
+    client.generateStructured("model", "x".repeat(OLLAMA_REQUEST_LIMIT), {}),
+    OllamaRequestTooLargeError,
+  );
+  assert.equal(calls.length, 0);
+});
 
 test("lists canonical installed models from loopback tags", async () => {
   const { fetchImpl, calls } = fetchFrom([jsonResponse(tagsResponse)]);
@@ -258,6 +295,109 @@ test("uses the configured bounded timeout without retrying", async () => {
   assert.equal(calls.filter((call) => urlOf(call).endsWith("/api/generate")).length, 1);
 });
 
+test("cancels a response returned after caller abort without reading its body", async () => {
+  let reads = 0;
+  let cancellations = 0;
+  let cancellationReason: unknown;
+  const response = {
+    ok: true,
+    body: {
+      getReader() {
+        reads += 1;
+        throw new Error("aborted response must not be read");
+      },
+      cancel(reason: unknown) {
+        cancellations += 1;
+        cancellationReason = reason;
+        return Promise.resolve();
+      },
+    },
+  } as unknown as Response;
+  const controller = new AbortController();
+  const callerReason = new Error("caller aborted before response");
+  const client = createOllamaClient({
+    fetchImpl: async (_input, init) => {
+      assert.strictEqual(init?.signal?.aborted, false);
+      controller.abort(callerReason);
+      return response;
+    },
+  });
+
+  await assert.rejects(client.generateStructured("model", "prompt", {}, controller.signal), callerReason);
+  assert.equal(reads, 0);
+  assert.equal(cancellations, 1);
+  assert.strictEqual(cancellationReason, callerReason);
+});
+
+test("bounds a non-cooperative response reader and requests body cancellation", async () => {
+  let cancellations = 0;
+  let cancellationReason: unknown;
+  let requestSignal: AbortSignal | undefined;
+  const response = {
+    ok: true,
+    body: {
+      getReader() {
+        return {
+          read: () => new Promise<ReadableStreamReadResult<Uint8Array>>(() => {}),
+          cancel: async (reason: unknown) => {
+            cancellations += 1;
+            cancellationReason = reason;
+          },
+          releaseLock() {},
+        };
+      },
+    },
+  } as unknown as Response;
+  const client = createOllamaClient({
+    timeoutMs: 10,
+    fetchImpl: async (_input, init) => {
+      requestSignal = init?.signal ?? undefined;
+      return response;
+    },
+  });
+
+  const started = Date.now();
+  await assert.rejects(client.generateStructured("model", "prompt", {}), /Ollama request timed out/);
+  assert.ok(Date.now() - started < 2_000);
+  assert.equal(requestSignal?.aborted, true);
+  assert.equal(cancellations, 1);
+  assert.equal(cancellationReason instanceof Error ? cancellationReason.message : cancellationReason, "Ollama request timed out");
+});
+
+test("preserves caller abort reason with a non-cooperative response reader", async () => {
+  let cancellations = 0;
+  let cancellationReason: unknown;
+  const response = {
+    ok: true,
+    body: {
+      getReader() {
+        return {
+          read: () => new Promise<ReadableStreamReadResult<Uint8Array>>(() => {}),
+          cancel: (reason: unknown) => {
+            cancellations += 1;
+            cancellationReason = reason;
+            return Promise.reject(new Error("body cancel failed"));
+          },
+          releaseLock() {},
+        };
+      },
+    },
+  } as unknown as Response;
+  const controller = new AbortController();
+  const callerReason = new Error("caller cancelled while reading");
+  const client = createOllamaClient({
+    timeoutMs: 1_000,
+    fetchImpl: async () => response,
+  });
+
+  const request = client.generateStructured("model", "prompt", {}, controller.signal);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  controller.abort(callerReason);
+  await assert.rejects(request, callerReason);
+  assert.equal(cancellations, 1);
+  assert.strictEqual(cancellationReason, callerReason);
+});
+
 test("propagates a pre-aborted caller signal from a model probe without fetching", async () => {
   const controller = new AbortController();
   const callerReason = new Error("probe already cancelled");
@@ -303,6 +443,7 @@ test("probes structured non-thinking support and reports unsupported capability"
     assert.equal(body.think, false);
     assert.deepEqual(body.format, {
       type: "object",
+      additionalProperties: false,
       required: ["ok"],
       properties: { ok: { const: true } },
     });

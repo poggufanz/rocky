@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { Buffer } from "node:buffer";
 import {
   chmodSync,
@@ -12,21 +12,25 @@ import {
   openSync,
   realpathSync,
   writeSync,
+  type BigIntStats,
 } from "node:fs";
 import { dirname } from "node:path";
-import { appendEvent } from "../agent/spool.js";
+import { appendPayload } from "../agent/spool.js";
 import { parseClaudeHookPayload, type ParsedHookPayload } from "../agent/adapters/claude-code.js";
 import { parseCodexHookPayload } from "../agent/adapters/codex.js";
 import { loadConfig } from "../core/config-read.js";
 import { redactSecretsAtBoundary, replaceAnsiAndControls } from "../core/redact.js";
 import { resolveRockyPaths, type RockyPaths } from "../core/state-paths.js";
+import { canonicalPath } from "../core/memory-read.js";
+import { filesystemIdentity, NO_FOLLOW_FLAG, regularDescriptorSafe, sameFilesystemIdentity } from "../core/fs-safety.js";
+import { MAX_BASELINE_FILES, type AgentEvent, type IntentEvent, type TurnBaseline } from "../agent/schema.js";
 
 const STDIN_CAP_BYTES = 2 * 1024 * 1024;
 const LOG_CAP_BYTES = 64 * 1024;
 const LOG_MESSAGE_CAP_BYTES = 2 * 1024;
 const LOG_SCAN_BYTES = 8 * 1024;
 const ADAPTER_LABEL_CAP_BYTES = 256;
-const NO_FOLLOW = process.platform === "win32" ? 0 : constants.O_NOFOLLOW;
+const NO_FOLLOW = NO_FOLLOW_FLAG;
 
 // Internal sentinel: redactSecretsAtBoundary removes it while recording the
 // boundary restored by stripping ANSI/C0/C1 controls.
@@ -39,6 +43,10 @@ export interface AgentHookDeps {
   spawnAmbiguity?: (text: string) => void;
   paths?: RockyPaths;
   now?: () => number;
+  /** Test seam for bounded baseline capture; production uses local git only. */
+  git?: (args: string[], cwd: string) => string | undefined;
+  /** Test seam for append-recovery coverage; production uses the guarded spool writer. */
+  appendEvent?: (key: string, event: AgentEvent, paths?: RockyPaths) => boolean;
 }
 
 function utf8Width(codePoint: number): number {
@@ -107,47 +115,57 @@ export function logHookError(message: string, paths?: RockyPaths): void {
 
     const parent = dirname(target);
     mkdirSync(parent, { recursive: true, mode: 0o700 });
-    const parentStats = lstatSync(parent);
-    if (!parentStats.isDirectory() || parentStats.isSymbolicLink()) return;
-    // mkdir's mode is the creation default; chmod is best effort for existing private dirs.
+    const parentStats = lstatSync(parent, { bigint: true });
+    if (!parentStats.isDirectory() || parentStats.isSymbolicLink() || filesystemIdentity(parentStats) === undefined) return;
+    let listed: BigIntStats | undefined;
+    try {
+      listed = lstatSync(target, { bigint: true });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") return;
+    }
+    if (listed && (!regularDescriptorSafe(listed) || !sameFilesystemIdentity(listed, listed))) return;
+
+    const create = listed === undefined;
+    const parentBeforeOpen = lstatSync(parent, { bigint: true });
+    if (!parentBeforeOpen.isDirectory() || parentBeforeOpen.isSymbolicLink()
+        || !sameFilesystemIdentity(parentStats, parentBeforeOpen)) return;
+    // Recheck parent identity before changing permissions. chmod is a path
+    // mutation and must not target a replacement directory.
     try {
       chmodSync(parent, 0o700);
     } catch {
       // Windows and read-only parents may reject chmod.
     }
-
-    let listed;
-    try {
-      listed = lstatSync(target);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") return;
-    }
-    if (listed && (!listed.isFile() || listed.isSymbolicLink())) return;
-
     fd = openSync(
       target,
-      constants.O_WRONLY | constants.O_APPEND | constants.O_CREAT | NO_FOLLOW,
+      constants.O_WRONLY | constants.O_APPEND | (create ? constants.O_CREAT | constants.O_EXCL : constants.O_CREAT) | NO_FOLLOW,
       0o600,
     );
-    const opened = fstatSync(fd);
-    if (!opened.isFile() || opened.isSymbolicLink()) return;
+    const opened = fstatSync(fd, { bigint: true });
+    if (!regularDescriptorSafe(opened) || !sameFilesystemIdentity(opened, opened)) return;
+    if (listed && !sameFilesystemIdentity(listed, opened)) return;
     try {
       fchmodSync(fd, 0o600);
     } catch {
       // File mode is best effort on platforms without POSIX modes.
     }
 
-    if (!Number.isSafeInteger(opened.size) || opened.size < 0) return;
-    if (opened.size > LOG_CAP_BYTES || opened.size + line.byteLength > LOG_CAP_BYTES) {
+    if (opened.size < 0n) return;
+    if (opened.size > BigInt(LOG_CAP_BYTES) || opened.size + BigInt(line.byteLength) > BigInt(LOG_CAP_BYTES)) {
       ftruncateSync(fd, 0);
     }
-    const ready = fstatSync(fd);
-    if (!ready.isFile() || ready.size + line.byteLength > LOG_CAP_BYTES) return;
+    const ready = fstatSync(fd, { bigint: true });
+    if (!regularDescriptorSafe(ready) || !sameFilesystemIdentity(opened, ready)
+        || ready.size + BigInt(line.byteLength) > BigInt(LOG_CAP_BYTES)) return;
     writeAll(fd, line);
 
     // A concurrent writer must not be allowed to leave the diagnostic over the cap.
-    const after = fstatSync(fd);
-    if (after.size > LOG_CAP_BYTES) ftruncateSync(fd, LOG_CAP_BYTES);
+    const after = fstatSync(fd, { bigint: true });
+    if (!regularDescriptorSafe(after) || !sameFilesystemIdentity(opened, after)) return;
+    if (after.size > BigInt(LOG_CAP_BYTES)) ftruncateSync(fd, LOG_CAP_BYTES);
+    const parentAfter = lstatSync(parent, { bigint: true });
+    if (!parentAfter.isDirectory() || parentAfter.isSymbolicLink()
+        || !sameFilesystemIdentity(parentStats, parentAfter)) return;
   } catch {
     // A broken log path must never break a vendor hook.
   } finally {
@@ -257,6 +275,93 @@ function safeAdapterLabel(adapter: unknown): string {
   }
 }
 
+function defaultBaselineGit(args: string[], cwd: string): string | undefined {
+  try {
+    const result = spawnSync("git", args, {
+      cwd,
+      encoding: "utf8",
+      timeout: 5_000,
+      maxBuffer: 128 * 1024,
+      shell: false,
+      windowsHide: true,
+    });
+    if (result.error || result.status !== 0 || result.signal) return undefined;
+    return typeof result.stdout === "string" ? result.stdout.trim() : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function parseBaselineNumstat(value: string | undefined, cwd?: string): Array<{ path: string; plusMinus: [number, number] }> | undefined {
+  if (value === undefined) return undefined;
+  const files: Array<{ path: string; plusMinus: [number, number] }> = [];
+  const seen = new Set<string>();
+  const lines = value.split(/\r?\n/u).filter((line) => line.length > 0);
+  for (const line of lines) {
+    const match = /^\s*(\d+|-)\t(\d+|-)\t(.+?)\s*$/u.exec(line);
+    if (!match) return undefined;
+    const rawPath = match[3] === undefined ? "" : match[3];
+    if (rawPath.length > 1024) return undefined;
+    const identity = canonicalPath(rawPath, { cwd });
+    const displayPath = canonicalPath(rawPath);
+    if (!identity || !displayPath || displayPath.length > 1024) return undefined;
+    if (seen.has(identity)) continue;
+    if (match[1] === "-" || match[2] === "-") return undefined;
+    const added = match[1] === "-" ? 0 : Number(match[1]);
+    const removed = match[2] === "-" ? 0 : Number(match[2]);
+    if (!Number.isSafeInteger(added) || added < 0 || !Number.isSafeInteger(removed) || removed < 0) continue;
+    seen.add(identity);
+    files.push({ path: displayPath, plusMinus: [added, removed] });
+    if (files.length > MAX_BASELINE_FILES) return undefined;
+  }
+  return files;
+}
+
+function captureTurnBaseline(cwd: string | undefined, deps: AgentHookDeps): TurnBaseline {
+  const target = typeof cwd === "string" && cwd.length > 0 ? cwd : process.cwd();
+  const git = deps.git ?? defaultBaselineGit;
+  try {
+    const head = git(["rev-parse", "HEAD"], target);
+    const unstaged = git(["diff", "--numstat"], target);
+    const staged = git(["diff", "--cached", "--numstat"], target);
+    const untracked = git(["ls-files", "--others", "--exclude-standard"], target);
+    const unstagedFiles = parseBaselineNumstat(unstaged, target);
+    const stagedFiles = parseBaselineNumstat(staged, target);
+    if (!head || unstagedFiles === undefined || stagedFiles === undefined || untracked === undefined) return { status: "unknown" };
+    const merged = new Map<string, { path: string; plusMinus: [number, number] }>();
+    for (const file of [...unstagedFiles, ...stagedFiles]) {
+      const identity = canonicalPath(file.path, { cwd: target });
+      if (!identity) continue;
+      const previous = merged.get(identity);
+      const additions = previous === undefined ? file.plusMinus[0] : previous.plusMinus[0] + file.plusMinus[0];
+      const removals = previous === undefined ? file.plusMinus[1] : previous.plusMinus[1] + file.plusMinus[1];
+      if (!Number.isSafeInteger(additions) || additions < 0 || !Number.isSafeInteger(removals) || removals < 0) return { status: "unknown" };
+      merged.set(identity, previous === undefined
+        ? { path: file.path, plusMinus: [...file.plusMinus] as [number, number] }
+        : { path: previous.path, plusMinus: [additions, removals] });
+    }
+    if (merged.size > MAX_BASELINE_FILES) return { status: "unknown" };
+    const files = [...merged.values()];
+    const seen = new Set(merged.keys());
+    for (const path of untracked.split(/\r?\n/u).map((line) => line.trim()).filter(Boolean)) {
+      if (path.length > 1024) return { status: "unknown" };
+      const identity = canonicalPath(path, { cwd: target });
+      const displayPath = canonicalPath(path);
+      if (!identity || !displayPath || seen.has(identity)) continue;
+      seen.add(identity);
+      files.push({ path: displayPath, plusMinus: [0, 0] });
+      if (files.length > MAX_BASELINE_FILES) return { status: "unknown" };
+    }
+    return {
+      status: "captured",
+      head: head.slice(0, 256),
+      ...(files.length === 0 ? {} : { files }),
+    };
+  } catch {
+    return { status: "unknown" };
+  }
+}
+
 interface StdoutLike {
   write: (chunk: string, callback?: (error?: Error) => void) => unknown;
   once?: (event: string, listener: (error: unknown) => void) => unknown;
@@ -309,23 +414,66 @@ function writeEmptyResponse(): Promise<void> {
 function applyParsedEvent(parsed: ParsedHookPayload, paths: RockyPaths, deps: AgentHookDeps): void {
   if (!parsed) return;
   if (parsed.action === "append") {
-    let appended = false;
+    // Coverage is a turn-level sidecar.  It is written before individual
+    // events so a lost first/middle/last append cannot make surviving files
+    // look like complete knowledge.
+    const firstMechanism = parsed.events.find((event): event is Extract<AgentEvent, { kind: "mechanism" }> => event.kind === "mechanism");
+    const intentCwd = parsed.events.find((event): event is IntentEvent => event.kind === "intent")?.cwd;
+    const coveragePaths = firstMechanism === undefined ? undefined : parsed.coveragePaths
+      ?? parsed.events.filter((event): event is Extract<AgentEvent, { kind: "mechanism" }> => event.kind === "mechanism").map((event) => event.path);
+    const coverageInput = firstMechanism === undefined || coveragePaths === undefined ? undefined : {
+      agent: firstMechanism.agent,
+      paths: coveragePaths,
+      candidateCount: parsed.coverageCandidateCount ?? coveragePaths.length,
+      candidateCountExact: parsed.coverageCandidateCountExact ?? parsed.coveragePaths !== undefined,
+      pathsComplete: parsed.coveragePathsComplete ?? firstMechanism.coveragePathsComplete
+        ?? (parsed.coveragePaths === undefined && coveragePaths.length <= 256),
+      cwd: parsed.coverageCwd ?? intentCwd,
+      platform: parsed.coveragePlatform ?? process.platform,
+      payloadDigest: parsed.coverageDigest,
+    };
+    // Keep overflow metadata attached until one mechanism append succeeds.
+    // A transient first-write failure must not let later surviving events
+    // silently lose the batch's exact coverage witness.
+    let coveragePending = parsed.truncatedFiles !== undefined
+      || parsed.coveragePaths !== undefined
+      || parsed.coveragePathsComplete !== undefined;
+    const preparedEvents: AgentEvent[] = [];
+    for (const original of parsed.events) {
+      const attachCoverage = original.kind === "mechanism" && coveragePending;
+      const event: AgentEvent = original.kind === "intent" && original.baseline === undefined
+        ? ({ ...original, baseline: captureTurnBaseline(original.cwd, deps) } satisfies IntentEvent)
+        : attachCoverage
+          ? {
+            ...original,
+            ...(parsed.truncatedFiles === undefined ? {} : { truncatedFiles: parsed.truncatedFiles }),
+            ...(parsed.coveragePaths === undefined ? {} : { coveragePaths: parsed.coveragePaths }),
+            ...(parsed.coveragePathsComplete === undefined ? {} : { coveragePathsComplete: parsed.coveragePathsComplete }),
+          }
+          : original;
+      preparedEvents.push(event);
+      // The transactional production path has a durable sidecar, so only one
+      // event carries the fallback marker. A replaced append seam keeps the
+      // marker pending until a surviving event is known to persist it.
+      if (deps.appendEvent === undefined && attachCoverage) coveragePending = false;
+    }
+    let results: boolean[];
     try {
-      appendEvent(parsed.key, parsed.event, paths);
-      appended = true;
+      results = appendPayload(parsed.key, preparedEvents, coverageInput, paths, deps.appendEvent);
     } catch {
+      results = preparedEvents.map(() => false);
       safeLogFailure(paths);
     }
-    if (appended && parsed.event.kind === "intent") {
-      maybeSpawnAmbiguity(parsed.event.text, paths, deps);
-    }
+    preparedEvents.forEach((event, index) => {
+      if (results[index] === true && event.kind === "intent") maybeSpawnAmbiguity(event.text, paths, deps);
+    });
     return;
   }
 
   // Rationale persistence is intentionally attempted before the one annotate spawn.
   if (parsed.rationale) {
     try {
-      appendEvent(parsed.key, parsed.rationale, paths);
+      appendPayload(parsed.key, [parsed.rationale], undefined, paths);
     } catch {
       safeLogFailure(paths);
     }

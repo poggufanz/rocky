@@ -10,17 +10,19 @@
  * idle line, and the notification — stderr gets plain facts only.
  */
 
-import { closeSync, constants, fstatSync, lstatSync, openSync, readSync } from "node:fs";
-import { fingerprint } from "../core/fingerprint.js";
-import { CANCEL_CODES, runProcess, type ExecResult } from "../core/exec.js";
+import { closeSync, constants, fstatSync, lstatSync, openSync, readSync, type BigIntStats } from "node:fs";
+import { fingerprintCandidates } from "../core/fingerprint.js";
+import { CANCEL_CODES, runProcess, type ExecOptions, type ExecResult } from "../core/exec.js";
 import { resolveRockyPaths } from "../core/state-paths.js";
-import { loadMemory, recordWatchFailure, type MemoryRecord } from "../core/memory.js";
+import { recordWatchFailure, type MemoryRecord } from "../core/memory.js";
+import { isCompleteMemoryCoverage, loadMemoryChecked } from "../core/memory-read.js";
 import { DEFAULT_WATCH_NOTIFY, loadConfig } from "../core/config-read.js";
 import { formatDuration, notify as realNotify, spokenDuration, type NotifyInput } from "../core/notify.js";
-import { replaceAnsiAndControls, stripInvisibleControls } from "../core/redact.js";
 import { watchLogName, writeWatchLog } from "../core/watch-log.js";
 import { linkFixOnSuccess, speakFailureMemory } from "./run.js";
-import { detail, phrase, say } from "../ui/rocky.js";
+import { detail, phrase, say, writeRockyStderr } from "../ui/rocky.js";
+import { safeTerminalBlock, safeTerminalLine } from "../ui/sanitize.js";
+import { NO_FOLLOW_FLAG, regularDescriptorSafe, sameFilesystemIdentity } from "../core/fs-safety.js";
 
 export interface ParsedWatch { quiet: boolean; cmd: string }
 
@@ -63,7 +65,7 @@ export const WATCH_LABEL_POLL_MS = 1000;
 const MAX_LABEL_FILE_BYTES = 64 * 1024;
 const MAX_LABEL_LINES = 10;
 const MAX_LABEL_CHARS = 400;
-const NO_FOLLOW = process.platform === "win32" ? 0 : constants.O_NOFOLLOW;
+const NO_FOLLOW = NO_FOLLOW_FLAG;
 type WatchTimer = ReturnType<typeof setInterval>;
 
 /** Return new non-empty labels in file order and remember them for this watch session. */
@@ -79,6 +81,7 @@ export function unseenLabels(seen: Set<string>, fileContent: string): string[] {
 
 export interface WatchDependencies {
   notify: (input: NotifyInput) => void;
+  runProcess?: (cmd: string, options: ExecOptions) => Promise<ExecResult>;
   /** Test seams; omitted callers retain the real read, timer, and persona behavior. */
   readLabels?: (path: string) => string;
   setInterval?: (callback: () => void, delayMs: number) => WatchTimer;
@@ -101,30 +104,33 @@ function closeQuietly(fd: number): void {
 
 /** Read labels without following links, writing, or retaining an unbounded queue. */
 function readLabelsFile(path: string): string {
-  let initial;
+  let initial: BigIntStats;
   try {
-    initial = lstatSync(path);
+    initial = lstatSync(path, { bigint: true });
   } catch {
     return "";
   }
-  if (!initial.isFile() || initial.isSymbolicLink() || initial.size > MAX_LABEL_FILE_BYTES) return "";
+  if (!regularDescriptorSafe(initial) || !sameFilesystemIdentity(initial, initial)
+      || initial.size > BigInt(MAX_LABEL_FILE_BYTES)) return "";
 
   let fd = -1;
   try {
     fd = openSync(path, constants.O_RDONLY | NO_FOLLOW);
-    const opened = fstatSync(fd);
-    if (!opened.isFile() || opened.isSymbolicLink() || opened.size > MAX_LABEL_FILE_BYTES) return "";
+    const opened = fstatSync(fd, { bigint: true });
+    if (!regularDescriptorSafe(opened) || !sameFilesystemIdentity(initial, opened)
+        || opened.size > BigInt(MAX_LABEL_FILE_BYTES)) return "";
     const bytes = Buffer.alloc(MAX_LABEL_FILE_BYTES + 1);
     const count = readSync(fd, bytes, 0, bytes.length, 0);
-    const after = fstatSync(fd);
-    if (!after.isFile() || after.isSymbolicLink() || count !== after.size || count > MAX_LABEL_FILE_BYTES) return "";
+    const after = fstatSync(fd, { bigint: true });
+    if (!regularDescriptorSafe(after) || !sameFilesystemIdentity(opened, after)
+        || !sameFilesystemIdentity(initial, after) || BigInt(count) !== after.size || count > MAX_LABEL_FILE_BYTES) return "";
 
     const content = bytes.subarray(0, count).toString("utf8");
     // Labels are user-visible terminal text. Strip escape/control payloads
     // before splitting lines so a multi-line OSC cannot leak its payload.
-    const sanitized = stripInvisibleControls(replaceAnsiAndControls(content, "", " "))
-      .replace(/[\t\u2028\u2029]/gu, " ");
-    const lines = sanitized.split(/\r\n|\n|\r/)
+    const sanitized = safeTerminalBlock(content.replace(/\r\n?/gu, "\n"))
+      .replace(/[\u200b\u2060\ufeff]/gu, "");
+    const lines = sanitized.split("\n")
       .filter((line) => line.trim().length > 0)
       .slice(-MAX_LABEL_LINES);
     return lines.map((line) => line.slice(0, MAX_LABEL_CHARS)).join("\n");
@@ -150,7 +156,17 @@ function unrefTimer(timer: WatchTimer): void {
  */
 function readMemory(quiet: boolean): MemoryRecord[] | undefined {
   try {
-    return loadMemory();
+    const loaded = loadMemoryChecked();
+    if (!isCompleteMemoryCoverage(loaded.coverage)) {
+      const diagnostic = `memory coverage incomplete: version ${loaded.coverage.version}; scanned ${loaded.coverage.scanned}; skipped ${loaded.coverage.skipped}; truncated ${loaded.coverage.truncated}${loaded.coverage.reason === undefined ? "" : `; reason ${loaded.coverage.reason}`}`;
+      if (quiet) writeRockyStderr(`${diagnostic}\n`);
+      else {
+        say("memory coverage incomplete. I do not claim prior fix. check, question");
+        detail(`    ${diagnostic}`);
+      }
+      return undefined;
+    }
+    return loaded.records;
   } catch {
     if (!quiet) {
       say("memory file does not open for me. I answer from nothing.");
@@ -179,15 +195,14 @@ function notifyEnabled(): boolean {
 
 /** `--quiet`'s entire output: no persona, just the facts, written directly (not through `say`). */
 function plainFacts(result: ExecResult, logPath: string | undefined): void {
-  process.stderr.write(`duration: ${formatDuration(result.durationMs)}\n`);
-  process.stderr.write(`exit: ${result.code}\n`);
-  if (logPath !== undefined) process.stderr.write(`log: ${logPath}\n`);
+  writeRockyStderr(`duration: ${formatDuration(result.durationMs)}\n`);
+  writeRockyStderr(`exit: ${result.code}\n`);
+  if (logPath !== undefined) writeRockyStderr(`log: ${safeTerminalLine(logPath)}\n`);
 }
 
 function onWatchSuccess(cmd: string, cwd: string, quiet: boolean, result: ExecResult): void {
   if (!quiet) say(outcomeLine(true, result.durationMs));
-  const memory = readMemory(quiet);
-  if (memory !== undefined) linkFixOnSuccess(memory, cmd, cwd, quiet);
+  linkFixOnSuccess(cmd, cwd, quiet);
 }
 
 /**
@@ -202,7 +217,7 @@ function onWatchFailure(cmd: string, cwd: string, quiet: boolean, result: ExecRe
     say(outcomeLine(false, result.durationMs));
     const memory = readMemory(false);
     if (memory !== undefined) {
-      speakFailureMemory(memory, fingerprint(result.stderr, cmd, result.code), result.code, cwd);
+      speakFailureMemory(memory, fingerprintCandidates(result.stderr, cmd, result.code), result.code, cwd);
     }
   }
 
@@ -249,6 +264,7 @@ export async function watch(
   const seen = new Set<string>();
   const labelsPath = resolveRockyPaths().labels;
   const readLabels = dependencies.readLabels ?? readLabelsFile;
+  const execute = dependencies.runProcess ?? runProcess;
   const schedulePoll = dependencies.setInterval ?? setInterval;
   const cancelPoll = dependencies.clearInterval ?? clearInterval;
   const speakLabel = dependencies.say ?? say;
@@ -264,7 +280,7 @@ export async function watch(
       return;
     }
     try {
-      for (const line of unseenLabels(seen, content)) speakLabel(line);
+      for (const line of unseenLabels(seen, content)) speakLabel(safeTerminalLine(line));
     } catch {
       // Persona output is best effort and must not alter wrapped-command behavior.
     }
@@ -281,7 +297,7 @@ export async function watch(
         labelTimer = undefined;
       }
     }
-    result = await runProcess(cmd, {
+    result = await execute(cmd, {
       idleMs: WATCH_IDLE_MS,
       onIdle: quiet ? undefined : (elapsedMs: number) => say(idleLine(elapsedMs)),
     });
@@ -300,16 +316,18 @@ export async function watch(
   // Memory/log bookkeeping must never change what the wrapped command did —
   // same contract as run.ts — so a storage failure is reported and swallowed.
   let logPath: string | undefined;
-  try {
-    if (result.code === 0) {
-      onWatchSuccess(cmd, cwd, quiet, result);
-    } else {
-      logPath = onWatchFailure(cmd, cwd, quiet, result);
-    }
-  } catch {
-    if (!quiet) {
-      say("I cannot write memory. this one I forget.");
-      detail(`    memory: ${resolveRockyPaths().memory}`);
+  if (result.started) {
+    try {
+      if (result.code === 0) {
+        onWatchSuccess(cmd, cwd, quiet, result);
+      } else {
+        logPath = onWatchFailure(cmd, cwd, quiet, result);
+      }
+    } catch {
+      if (!quiet) {
+        say("I cannot write memory. this one I forget.");
+        detail(`    memory: ${resolveRockyPaths().memory}`);
+      }
     }
   }
 

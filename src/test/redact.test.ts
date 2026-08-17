@@ -1,6 +1,15 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
 import { redactSecrets, redactSecretsAtBoundary, stripInvisibleControls } from "../core/redact.js";
+import {
+  AMBIGUOUS_CONTINUATION_MARKER,
+  SYNTHETIC_DELIMITER_PRESERVATION_VECTORS,
+  SYNTHETIC_EOF_AMBIGUITY_VECTORS,
+  SYNTHETIC_EVERY_CONTROL_SPLIT_VECTORS,
+  SYNTHETIC_MULTI_CONTROL_PROBES,
+  SYNTHETIC_NON_EOF_CONTROL_PROBES,
+  SYNTHETIC_SECRET_CLOSURE_VECTORS,
+} from "./secret-vectors.js";
 
 test("redactSecrets masks known secret shapes and keeps surrounding text", () => {
   const input = "deploy with sk-ant-abcdefghijklmnopqrst123 done";
@@ -34,6 +43,68 @@ test("redactSecrets masks password assignments", () => {
     redactSecrets('credentials: password = "pA7!cV2@kL9"'),
     "credentials: [redacted password assignment]",
   );
+});
+
+test("redactSecrets masks quoted and unquoted credential assignments without leaving value tails", () => {
+  const cases = [
+    "password=pA7!cV2@kL9",
+    "secret='rT8$wX3!nM6'",
+    "token=tok_aB3d-E5fG7hI9jK2mN4pQ6",
+    'api_key="api-aB3dE5fG7hI9jK2mN4pQ6"',
+    "authorization: Bearer syn_aB3dE5fG7hI9jK2mN4pQ6",
+  ];
+
+  for (const input of cases) {
+    assert.match(redactSecrets(input), /^\[redacted (?:password|credential) assignment\]$/u, input);
+  }
+});
+
+test("shared secret vectors redact quoted keys, exact-looking values, controls, and overlap cleanly", () => {
+  for (const vector of SYNTHETIC_SECRET_CLOSURE_VECTORS) {
+    assert.equal(redactSecretsAtBoundary(vector.text), vector.replacement, vector.name);
+  }
+});
+
+test("logical controls bind ambiguous canonical continuations and preserve only outside text", () => {
+  for (const vector of SYNTHETIC_DELIMITER_PRESERVATION_VECTORS) {
+    assert.equal(redactSecretsAtBoundary(vector.text), vector.durable, vector.name);
+  }
+});
+
+test("ambiguity disclosure marker has stable spelling", () => {
+  assert.equal(AMBIGUOUS_CONTINUATION_MARKER, "[redacted ambiguous continuation]");
+});
+
+test("every control split and suffix context maps the complete canonical span", () => {
+  for (const vector of SYNTHETIC_EVERY_CONTROL_SPLIT_VECTORS) {
+    const output = redactSecretsAtBoundary(vector.text);
+    assert.equal(output, vector.durable, vector.name);
+    assert.ok(output.includes(vector.control), vector.name);
+    if (vector.reconstructableSuffix !== undefined) {
+      assert.ok(!output.includes(vector.reconstructableSuffix), vector.name);
+    }
+    if (vector.outsideText) assert.ok(output.endsWith(vector.outsideText), vector.name);
+  }
+});
+
+test("non-EOF review probes redact full unquoted and quoted values", () => {
+  for (const vector of SYNTHETIC_NON_EOF_CONTROL_PROBES) {
+    const output = redactSecretsAtBoundary(vector.text);
+    assert.equal(output, vector.durable, vector.name);
+    assert.ok(!output.includes(vector.leakedSuffix), vector.name);
+  }
+});
+
+test("multiple logical controls preserve every delimiter under structural marker policy", () => {
+  for (const vector of SYNTHETIC_MULTI_CONTROL_PROBES) {
+    assert.equal(redactSecretsAtBoundary(vector.text), vector.durable, vector.name);
+  }
+});
+
+test("ambiguous EOF continuations use a stable conservative-redaction marker", () => {
+  for (const vector of SYNTHETIC_EOF_AMBIGUITY_VECTORS) {
+    assert.equal(redactSecretsAtBoundary(vector.text), vector.durable, vector.name);
+  }
 });
 
 test("redactSecrets masks repeated matches of one secret kind", () => {

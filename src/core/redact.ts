@@ -1,84 +1,98 @@
-/**
- * Deliberately small and strict: an added-lines checker, not a gitleaks
- * replacement. False positives escape via `git push --no-verify`.
- * Order matters: "anthropic key" must precede "openai key". First match per
- * line wins.
- */
+/** Canonical secret families shared by durable replacement and hull detection. */
 interface SecretDefinition {
-  readonly kind: string;
+  readonly replacementLabel: string;
+  readonly detectionKind: string;
   readonly source: string;
   readonly flags?: string;
   readonly leadingBoundary?: boolean;
   readonly trailingBoundary?: boolean;
   readonly fragmentSource: string;
+  readonly assignmentValueGroups?: {
+    readonly quoted: number;
+    readonly unquoted: number;
+  };
 }
 
 const SECRET_DEFINITIONS: ReadonlyArray<SecretDefinition> = [
   {
-    kind: "aws access key",
+    replacementLabel: "aws access key",
+    detectionKind: "aws access key",
     source: "AKIA[0-9A-Z]{16}",
     leadingBoundary: true,
     trailingBoundary: true,
     fragmentSource: "AKIA[0-9A-Z]{8,}",
   },
   {
-    kind: "private key",
+    replacementLabel: "private key",
+    detectionKind: "private key",
     source: "-----BEGIN [A-Z ]*PRIVATE KEY-----",
     fragmentSource: "-----BEGIN[ A-Za-z0-9_-]*",
   },
   {
-    kind: "github token",
+    replacementLabel: "github token",
+    detectionKind: "github token",
     source: "(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{22,}",
     leadingBoundary: true,
     trailingBoundary: true,
     fragmentSource: "(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_]{4,}|github_pat_[A-Za-z0-9_]{4,}",
   },
   {
-    kind: "slack token",
+    replacementLabel: "slack token",
+    detectionKind: "slack token",
     source: "xox[baprs]-[A-Za-z0-9-]{10,}",
     leadingBoundary: true,
     trailingBoundary: true,
     fragmentSource: "xox[baprs]-[A-Za-z0-9-]{4,}",
   },
   {
-    kind: "anthropic key",
+    replacementLabel: "anthropic key",
+    detectionKind: "anthropic key",
     source: "sk-ant-[A-Za-z0-9_-]{20,}",
     leadingBoundary: true,
     trailingBoundary: true,
     fragmentSource: "sk-ant-[A-Za-z0-9_-]{3,}",
   },
   {
-    kind: "openai key",
-    source: "sk-[A-Za-z0-9]{20,}",
+    replacementLabel: "openai key",
+    detectionKind: "openai key",
+    source: "sk-[A-Za-z0-9_-]{20,}",
     leadingBoundary: true,
     trailingBoundary: true,
-    fragmentSource: "sk-[A-Za-z0-9]{3,}",
+    fragmentSource: "sk-[A-Za-z0-9_-]{3,}",
   },
   {
-    kind: "npm token",
+    replacementLabel: "npm token",
+    detectionKind: "npm token",
     source: "npm_[A-Za-z0-9]{36}",
     leadingBoundary: true,
     trailingBoundary: true,
     fragmentSource: "npm_[A-Za-z0-9_]{8,}",
   },
   {
-    kind: "password assignment",
-    source: String.raw`(?:password|secret)\s*=\s*(['"])([^'"]{4,})\1`,
+    replacementLabel: "password assignment",
+    detectionKind: "password assignment",
+    source: String.raw`(?:(?:"(?:password|secret)"|'(?:password|secret)'|(?:password|secret)))\s*[:=]\s*(?:(['"])([^'"\r\n]{4,})\1|([^\s'"\x60,;]{4,}))`,
     flags: "i",
     leadingBoundary: true,
-    fragmentSource: String.raw`(?:password|secret)\s*=\s*(?:["'][^"']*|[^\s]*)`,
+    fragmentSource: String.raw`(?:(?:"(?:password|secret)"|'(?:password|secret)'|(?:password|secret)))\s*[:=]\s*(?:["'][^"']*|[^\s]*)`,
+    assignmentValueGroups: { quoted: 2, unquoted: 3 },
+  },
+  {
+    replacementLabel: "credential assignment",
+    detectionKind: "credential assignment",
+    source: String.raw`(?:(?:"(?:token|api[_-]?key|authorization)"|'(?:token|api[_-]?key|authorization)'|(?:token|api[_-]?key|authorization)))\s*[:=]\s*(?:(['"])([^'"\r\n]{4,})\1|((?:(?:Bearer|Basic|Token)\s+)?[^\s'"\x60,;]{4,}))`,
+    flags: "i",
+    leadingBoundary: true,
+    fragmentSource: String.raw`(?:(?:"(?:token|api[_-]?key|authorization)"|'(?:token|api[_-]?key|authorization)'|(?:token|api[_-]?key|authorization)))\s*[:=]\s*(?:["'][^"']*|(?:(?:Bearer|Basic|Token)\s+)?[^\s]*)`,
+    assignmentValueGroups: { quoted: 2, unquoted: 3 },
   },
 ];
 
 function patternFor(definition: SecretDefinition, boundaryFree: boolean): RegExp {
-  const leading = !boundaryFree && definition.leadingBoundary ? "\\b" : "";
-  const trailing = !boundaryFree && definition.trailingBoundary ? "\\b" : "";
+  const leading = !boundaryFree && definition.leadingBoundary ? "(?<![A-Za-z0-9_])" : "";
+  const trailing = !boundaryFree && definition.trailingBoundary ? "(?![A-Za-z0-9_])" : "";
   return new RegExp(`${leading}(?:${definition.source})${trailing}`, definition.flags ?? "");
 }
-
-export const SECRET_PATTERNS: ReadonlyArray<readonly [kind: string, re: RegExp]> = SECRET_DEFINITIONS.map(
-  (definition) => [definition.kind, patternFor(definition, false)] as const,
-);
 
 const INVISIBLE_CONTROL_SINGLE_RE = /[\u061C\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]/u;
 
@@ -203,17 +217,24 @@ export function replaceAnsiAndControls(text: string, replacement = "", c0Replace
 }
 
 const SECRET_BOUNDARY_FREE_PATTERNS: ReadonlyArray<readonly [kind: string, re: RegExp]> = SECRET_DEFINITIONS.map(
-  (definition) => [definition.kind, new RegExp(patternFor(definition, true).source, `${definition.flags ?? ""}g`)] as const,
+  (definition) => [definition.replacementLabel, new RegExp(patternFor(definition, true).source, `${definition.flags ?? ""}dg`)] as const,
 );
 
 const SECRET_FRAGMENT_PATTERNS: ReadonlyArray<readonly [kind: string, re: RegExp]> = SECRET_DEFINITIONS.map(
-  (definition) => [definition.kind, new RegExp(definition.fragmentSource, `${definition.flags ?? ""}g`)] as const,
+  (definition) => [definition.replacementLabel, new RegExp(definition.fragmentSource, `${definition.flags ?? ""}g`)] as const,
 );
 
 interface InvisibleControlStripResult {
   readonly text: string;
   /** UTF-16 offsets in `text` where one or more invisible controls were removed. */
   readonly removedOffsets: ReadonlySet<number>;
+}
+
+interface SecretBoundaryInput extends InvisibleControlStripResult {
+  readonly displayText: string;
+  readonly displayStarts: ReadonlyMap<number, number>;
+  readonly displayEnds: ReadonlyMap<number, number>;
+  readonly logicalControls: readonly { readonly offset: number; readonly character: string }[];
 }
 
 /** Remove format controls without inserting separators before secret matching. */
@@ -238,15 +259,141 @@ function stripInvisibleControlsWithOffsets(text: string): InvisibleControlStripR
   return { text: pieces.join(""), removedOffsets };
 }
 
-export function redactSecrets(text: string): string {
-  let out = text;
-  for (const [kind, re] of SECRET_PATTERNS) {
-    out = out.replace(
-      new RegExp(re.source, re.flags.includes("g") ? re.flags : re.flags + "g"),
-      `[redacted ${kind}]`,
-    );
+/**
+ * Build a control-free matching view and offsets into a safe display view.
+ * CR/LF/TAB are omitted only from matching and recorded explicitly. Replacement
+ * logic preserves them rather than treating the normalized match as one
+ * contiguous source span.
+ */
+function normalizeSecretBoundaryInput(text: string): SecretBoundaryInput {
+  if (!text) {
+    return {
+      text,
+      displayText: text,
+      removedOffsets: new Set<number>(),
+      displayStarts: new Map<number, number>(),
+      displayEnds: new Map<number, number>(),
+      logicalControls: [],
+    };
   }
-  return out;
+
+  const matching: string[] = [];
+  const display: string[] = [];
+  const removedOffsets = new Set<number>();
+  const displayStarts = new Map<number, number>();
+  const displayEnds = new Map<number, number>();
+  const logicalControls: Array<{ offset: number; character: string }> = [];
+  let sourceOffset = 0;
+  let matchingOffset = 0;
+  let displayOffset = 0;
+
+  while (sourceOffset < text.length) {
+    const code = text.charCodeAt(sourceOffset);
+    let end = sourceOffset;
+    let isSequence = false;
+    if (code === ESC) {
+      end = consumeEscape(text, sourceOffset);
+      isSequence = true;
+    } else if (code === CSI_8BIT) {
+      end = consumeCsi(text, sourceOffset + 1);
+      isSequence = true;
+    } else if (code === SS2_8BIT || code === SS3_8BIT) {
+      end = consumeShiftedGraphic(text, sourceOffset);
+      isSequence = true;
+    } else if (isControlStringStart(code)) {
+      end = consumeControlString(text, sourceOffset + 1, code === OSC_8BIT);
+      isSequence = true;
+    } else if (isC0OrC1(code)) {
+      end = sourceOffset + 1;
+    }
+
+    if (end !== sourceOffset) {
+      const isLogicalControl = code === 0x09 || code === 0x0a || code === 0x0d;
+      removedOffsets.add(matchingOffset);
+      if (isLogicalControl) {
+        const character = String.fromCharCode(code);
+        logicalControls.push({ offset: matchingOffset, character });
+        display.push(character);
+        displayOffset += 1;
+      } else if (!isSequence) {
+        display.push(" ");
+        displayOffset += 1;
+      }
+      sourceOffset = end;
+      continue;
+    }
+
+    const character = String.fromCodePoint(text.codePointAt(sourceOffset) ?? 0);
+    if (INVISIBLE_CONTROL_SINGLE_RE.test(character)) {
+      removedOffsets.add(matchingOffset);
+      sourceOffset += character.length;
+      continue;
+    }
+
+    displayStarts.set(matchingOffset, displayOffset);
+    matching.push(character);
+    display.push(character);
+    matchingOffset += character.length;
+    displayOffset += character.length;
+    displayEnds.set(matchingOffset, displayOffset);
+    sourceOffset += character.length;
+  }
+
+  return {
+    text: matching.join(""),
+    displayText: display.join(""),
+    removedOffsets,
+    displayStarts,
+    displayEnds,
+    logicalControls,
+  };
+}
+
+const EXACT_PLACEHOLDER_VALUE = /^(?:(?:test|example|dummy|placeholder)(?:[-_ ](?:password|secret|token|key|value)(?:[-_ ]\d{1,4})?)?|changeme)$/i;
+const INDIRECT_SECRET_VALUE = /^(?:process\.env\.[A-Za-z_][A-Za-z0-9_]*|env\.[A-Za-z_][A-Za-z0-9_]*|\$\{?[A-Za-z_][A-Za-z0-9_]*\}?|<[^>]+>)$/i;
+const SECRET_TOKEN_PREFIX = /^(?:AKIA|github_pat_|gh[opurs]_|xox[baprs]-|sk-(?:[A-Za-z0-9]+-)*|npm_)/;
+
+function assignmentValue(definition: SecretDefinition, match: RegExpExecArray): string | undefined {
+  const groups = definition.assignmentValueGroups;
+  if (groups === undefined) return undefined;
+  return (match[groups.quoted] ?? match[groups.unquoted])?.trim();
+}
+
+function isPlaceholderMatch(definition: SecretDefinition, match: RegExpExecArray): boolean {
+  const assigned = assignmentValue(definition, match);
+  if (assigned !== undefined) {
+    const candidate = assigned.replace(/^(?:Bearer|Basic|Token)\s+/i, "").trim();
+    return EXACT_PLACEHOLDER_VALUE.test(candidate)
+      || INDIRECT_SECRET_VALUE.test(candidate)
+      || /^([A-Za-z0-9])\1+$/.test(candidate);
+  }
+
+  const body = match[0].replace(SECRET_TOKEN_PREFIX, "");
+  return body.length > 0 && /^([A-Za-z0-9])\1+$/.test(body);
+}
+
+/**
+ * Return the first non-placeholder secret family found after removing terminal
+ * and bidi obfuscation. Detection and durable replacement compile from the
+ * same canonical family definitions above, while retaining distinct labels.
+ */
+export function detectSecretKind(text: string): string | undefined {
+  const normalized = normalizeSecretBoundaryInput(text).text;
+  for (const definition of SECRET_DEFINITIONS) {
+    const base = patternFor(definition, false);
+    const flags = `${base.flags.replace("g", "")}g`;
+    const pattern = new RegExp(base.source, flags);
+    let match: RegExpExecArray | null;
+    while ((match = pattern.exec(normalized)) !== null) {
+      if (!isPlaceholderMatch(definition, match)) return definition.detectionKind;
+      if (match[0].length === 0) pattern.lastIndex += 1;
+    }
+  }
+  return undefined;
+}
+
+export function redactSecrets(text: string): string {
+  return redactSecretsAtBoundary(text);
 }
 
 /** Boundary context for a raw value entering a durable or AI/log sink. */
@@ -271,11 +418,34 @@ function hasTrailingBoundary(text: string, end: number): boolean {
   return !isAsciiWord(text[end]);
 }
 
+type MatchShape =
+  | { readonly kind: "standalone" }
+  | {
+      readonly kind: "assignment";
+      readonly quoted: boolean;
+      readonly valueStart: number;
+    };
+
 interface Replacement {
   readonly start: number;
   readonly end: number;
   readonly value: string;
   readonly order: number;
+  readonly shape: MatchShape;
+}
+
+function matchShape(definition: SecretDefinition, match: RegExpMatchArray): MatchShape {
+  const groups = definition.assignmentValueGroups;
+  if (groups === undefined) return { kind: "standalone" };
+
+  const quoted = match[groups.quoted] !== undefined;
+  const selectedGroup = quoted ? groups.quoted : groups.unquoted;
+  const valueStart = match.indices?.[selectedGroup]?.[0];
+  // Full assignment patterns always select exactly one registered value group.
+  // Falling back to standalone is conservative if that invariant is violated.
+  return valueStart === undefined
+    ? { kind: "standalone" }
+    : { kind: "assignment", quoted, valueStart };
 }
 
 function collectReplacements(text: string, context: SecretBoundaryContext): Replacement[] {
@@ -297,7 +467,7 @@ function collectReplacements(text: string, context: SecretBoundaryContext): Repl
       const hasRecordedLeading = !definition.leadingBoundary || removedOffsets.has(start);
       const hasRecordedTrailing = !definition.trailingBoundary || removedOffsets.has(end);
       if ((!normalTrailing && !hasRecordedTrailing) || (!normalLeading && !hasRecordedLeading)) continue;
-      full.push({ start, end, value: `[redacted ${kind}]`, order });
+      full.push({ start, end, value: `[redacted ${kind}]`, order, shape: matchShape(definition, match) });
     }
   }
 
@@ -319,10 +489,37 @@ function collectReplacements(text: string, context: SecretBoundaryContext): Repl
       const normalLeading = !definition.leadingBoundary || hasLeadingBoundary(text, start);
       const hasRecordedBoundary = !definition.leadingBoundary || removedOffsets.has(start);
       if (!normalLeading && !hasRecordedBoundary) continue;
-      replacements.push({ start, end, value: "", order: SECRET_BOUNDARY_FREE_PATTERNS.length + order });
+      replacements.push({
+        start,
+        end,
+        value: "",
+        order: SECRET_BOUNDARY_FREE_PATTERNS.length + order,
+        // A bounded fragment has no proven closing quote, so controls remain
+        // ambiguous under the same fail-closed policy as standalone tokens.
+        shape: { kind: "standalone" },
+      });
     }
   }
   return replacements;
+}
+
+/** Stable disclosure that a logical-record continuation was removed conservatively. */
+export const AMBIGUOUS_SECRET_CONTINUATION = "[redacted ambiguous continuation]";
+
+function preserveLogicalControls(replacement: Replacement, input: SecretBoundaryInput): Replacement {
+  const controls = input.logicalControls.filter(
+    (control) => control.offset > replacement.start && control.offset < replacement.end,
+  );
+  if (controls.length === 0) return replacement;
+
+  return {
+    ...replacement,
+    value: replacement.value + controls.map((control) => {
+      const ambiguousValueContinuation = replacement.shape.kind === "standalone"
+        || (!replacement.shape.quoted && control.offset >= replacement.shape.valueStart);
+      return control.character + (ambiguousValueContinuation ? AMBIGUOUS_SECRET_CONTINUATION : "");
+    }).join(""),
+  };
 }
 
 /**
@@ -333,21 +530,24 @@ function collectReplacements(text: string, context: SecretBoundaryContext): Repl
  * know their input may be capped.
  */
 export function redactSecretsAtBoundary(text: string, options: SecretBoundaryOptions = {}): string {
-  const stripped = stripInvisibleControlsWithOffsets(text);
-  const replacements = collectReplacements(stripped.text, {
-    removedOffsets: stripped.removedOffsets,
+  const normalized = normalizeSecretBoundaryInput(text);
+  const replacements = collectReplacements(normalized.text, {
+    removedOffsets: normalized.removedOffsets,
     mayBeTruncated: options.mayBeTruncated,
   })
-    .sort((left, right) => right.start - left.start || left.order - right.order);
+    .sort((left, right) => left.start - right.start || right.end - left.end || left.order - right.order);
   const selected: Replacement[] = [];
   for (const replacement of replacements) {
     if (selected.some((chosen) => replacement.end > chosen.start && replacement.start < chosen.end)) continue;
     selected.push(replacement);
   }
 
-  let out = stripped.text;
-  for (const replacement of selected) {
-    out = out.slice(0, replacement.start) + replacement.value + out.slice(replacement.end);
+  let out = normalized.displayText;
+  const structured = selected.map((replacement) => preserveLogicalControls(replacement, normalized));
+  for (const replacement of structured.sort((left, right) => right.start - left.start)) {
+    const start = normalized.displayStarts.get(replacement.start) ?? replacement.start;
+    const end = normalized.displayEnds.get(replacement.end) ?? replacement.end;
+    out = out.slice(0, start) + replacement.value + out.slice(end);
   }
-  return redactSecrets(out);
+  return out;
 }

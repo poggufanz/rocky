@@ -1,4 +1,4 @@
-import { copyFileSync, existsSync, mkdirSync, readdirSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -13,7 +13,16 @@ export function copyShellAssets(
   const names = readdirSync(sourceDir)
     .filter((name) => name.endsWith(".bash") || name.endsWith(".sh"))
     .sort();
-  for (const name of names) copyFileSync(join(sourceDir, name), join(destinationDir, name));
+  for (const name of names) {
+    const sourcePath = join(sourceDir, name);
+    const destinationPath = join(destinationDir, name);
+    const source = readFileSync(sourcePath);
+    if (source.includes(13)) throw new Error(`shell asset contains CR: ${name}`);
+    copyFileSync(sourcePath, destinationPath);
+    if (readFileSync(destinationPath).includes(13)) {
+      throw new Error(`copied shell asset contains CR: ${name}`);
+    }
+  }
 }
 
 function option(name) {

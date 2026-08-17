@@ -2,7 +2,24 @@
 
 Notable changes per release. Dates are the release date.
 
+## 0.5.1 — 17 August 2026
+
+Release: [v0.5.1](https://github.com/poggufanz/rocky/releases/tag/v0.5.1)
+
+### Fixed
+
+- Hull checks now distinguish a verified clean result from an uninspected workspace, preserve findings from completed ranges when a later range fails, and reject malformed Git evidence instead of treating it as clean.
+- Bounded Git patch, numstat, and name-only framing validation now covers ordinary text, binary, rename/copy, mode/type, symlink, submodule, quoted-path, and SHA-1/SHA-256 output without blocking the event loop or trusting unsupported extraction.
+- Memory, MCP, teaching, and model surfaces now keep bounded evidence, privacy, deadlines, and incomplete coverage explicit across concurrent and degraded paths.
+- Setup health/removal and package smoke paths now report actual cross-platform process and host state, including native Windows executable seams.
+
+### Changed
+
+- Release metadata, documentation, and security support policy now identify 0.5.1 as the current package line. Runtime dependencies remain at zero.
+
 ## 0.5.0 — 14 August 2026
+
+Release: [v0.5.0](https://github.com/poggufanz/rocky/releases/tag/v0.5.0)
 
 ### Added
 
@@ -14,7 +31,7 @@ Notable changes per release. Dates are the release date.
 - Ollama-gated ambiguity advice after an intent append, detached and non-blocking, plus passive labels at the next shell prompt and in non-quiet `rocky watch`.
 - Three bounded read-only MCP knowledge tools: `search_knowledge`, `fetch_record`, and `why_file`, alongside the existing four memory tools.
 
-This remains an unreleased 0.5.0 branch. BYOK annotation, `brief`, `attest`, and the memory circuit breaker are outside this release; no version bump or publish is implied.
+BYOK annotation, `brief`, `attest`, and the memory circuit breaker did not ship in 0.5.0. They remain deferred unless a later release says otherwise.
 
 ## 0.4.0 — 9 August 2026
 

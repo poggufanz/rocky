@@ -132,13 +132,19 @@ function entryForRegistration(registration: McpRegistration): JsonObject {
   };
 }
 
-function nested(value: unknown, keys: readonly string[]): unknown {
+type NestedRead =
+  | { kind: "missing" }
+  | { kind: "value"; value: unknown }
+  | { kind: "malformed" };
+
+function nested(value: unknown, keys: readonly string[]): NestedRead {
   let current = value;
   for (const key of keys) {
-    if (!isObject(current)) return undefined;
+    if (!isObject(current)) return { kind: "malformed" };
+    if (!Object.prototype.hasOwnProperty.call(current, key)) return { kind: "missing" };
     current = current[key];
   }
-  return current;
+  return current === undefined ? { kind: "malformed" } : { kind: "value", value: current };
 }
 
 function collectLeafPaths(value: unknown, path: string, output: Set<string>): void {
@@ -220,8 +226,11 @@ function parseConfigRead(value: unknown, configPath: string): SnapshotRead {
   }
   const baseVersion = baseLayer.version;
 
-  const effectiveEntry = nested(value.config, ["mcp_servers", "rocky"]);
-  const baseEntry = nested(baseLayer.config, ["mcp_servers", "rocky"]);
+  const effectiveRead = nested(value.config, ["mcp_servers", "rocky"]);
+  const baseRead = nested(baseLayer.config, ["mcp_servers", "rocky"]);
+  if (effectiveRead.kind === "malformed" || baseRead.kind === "malformed") return { ok: false };
+  const effectiveEntry = effectiveRead.kind === "value" ? effectiveRead.value : undefined;
+  const baseEntry = baseRead.kind === "value" ? baseRead.value : undefined;
   const originPaths = new Set(Object.keys(origins).filter((path) => (
     path === ROCKY_KEY_PATH || path.startsWith(`${ROCKY_KEY_PATH}.`)
   )));
@@ -484,6 +493,47 @@ function removedWithRecovery(artifact: RecoveryArtifact): SetupResult {
     };
   }
   return failed("Codex registration was removed but recovery artifact is unavailable");
+}
+
+function removedWithWarning(
+  configPath: string,
+  artifact: RecoveryArtifact,
+): SetupResult {
+  if (recoveryArtifactIsExact(artifact)) {
+    return {
+      client: "codex",
+      status: "removed",
+      detail: `Codex removed the rocky entry from ${configPath}; exact CAS version could not be confirmed. `
+        + `Codex recovery artifact retained; manual recovery: ${artifact.path}`,
+    };
+  }
+  return failed("Codex registration was removed but recovery artifact is unavailable");
+}
+
+function classifyRemovalFinalState(
+  finalRead: SnapshotRead,
+  writtenVersion: string | undefined,
+  configPath: string,
+  artifact: RecoveryArtifact,
+  desired: McpRegistration,
+): SetupResult {
+  if (!finalRead.ok) {
+    return recoveryFailure(
+      `Codex removal final state at ${configPath} could not be read`,
+      artifact,
+      desired,
+    );
+  }
+  if (finalRead.snapshot.kind === "present") {
+    return recoveryFailure(
+      `Codex removal could not be verified: rocky entry remains in ${configPath} after removal`,
+      artifact,
+      desired,
+    );
+  }
+  return writtenVersion !== undefined && finalRead.snapshot.version === writtenVersion
+    ? removedWithRecovery(artifact)
+    : removedWithWarning(configPath, artifact);
 }
 
 export function createCodexAdapter(dependencies: CodexAdapterDependencies): SetupClientAdapter {
@@ -796,28 +846,26 @@ export function createCodexAdapter(dependencies: CodexAdapterDependencies): Setu
               : "Codex CAS removal failed";
           return recoveryFailure(prefix, recovery, registration);
         }
+        // The app-server's null/replace response is not a durable proof of
+        // its final version. Codex 0.147.0 can advance the file version again
+        // before the following read, and some successful responses carry no
+        // usable version at all. The final effective state is authoritative:
+        // absent means removed (with a warning when the exact CAS version is
+        // not bound), present means the mutation did not take.
         const writtenVersion = writeVersion(written, configPath);
-        if (writtenVersion === undefined || writtenVersion === snapshot.version) {
-          return recoveryFailure("Codex CAS removal failed", recovery, registration);
+        let verified: SnapshotRead;
+        try {
+          verified = await readFromSession(session);
+        } catch {
+          verified = { ok: false };
         }
-        const verified = await readFromSession(session);
-        if (!verified.ok
-          || verified.snapshot.kind !== "absent"
-          || verified.snapshot.version !== writtenVersion) {
-          // Real codex-cli 0.146.1 was observed hitting exactly this branch
-          // on a genuinely successful removal (see
-          // docs/superpowers/sdd/2026-08-06-v021-final-hardening-handover/
-          // codex-provenance-investigation.md): the null/replace write had
-          // already advanced the on-disk version by this point. Say the
-          // entry was removed and name the file, not just point at the
-          // backup as though the file were untouched.
-          return recoveryFailure(
-            `Codex removed the rocky entry from ${configPath}, but the removal could not be verified; check ${configPath} for mcp_servers.rocky`,
-            recovery,
-            registration,
-          );
-        }
-        return removedWithRecovery(recovery);
+        return classifyRemovalFinalState(
+          verified,
+          writtenVersion === snapshot.version ? undefined : writtenVersion,
+          configPath,
+          recovery,
+          registration,
+        );
       });
       if (operation.ok) {
         if (destructiveRecovery !== undefined

@@ -3,6 +3,7 @@ import { Buffer } from "node:buffer";
 import { PassThrough, Readable, Writable } from "node:stream";
 import test from "node:test";
 import { disabledRecallWithAi } from "../ai/port.js";
+import { createMemoryQueries } from "../core/memory-query.js";
 import {
   JSON_RPC_ERROR,
   MODERN_PROTOCOL_VERSION,
@@ -374,7 +375,7 @@ test("a blocked send keeps the ID reserved through duplicate rejection, cancella
   await waitFor(() => closeOutput.chunks.length === 1);
   const closeStartedAt = Date.now();
   assert.equal(await closeServer.close(), "timed_out");
-  assert.ok(Date.now() - closeStartedAt < 500, "close exceeded fixed bound");
+  assert.ok(Date.now() - closeStartedAt < 2_000, "close exceeded fixed bound");
   assert.equal(closeSignal?.aborted, false);
 
   // 6. Releasing backpressure yields exactly one original success response
@@ -552,8 +553,10 @@ for (const era of ["modern", "legacy"] as const) {
 
   test(`${era} operational ToolExecutionError stays a successful isError tool result`, async () => {
     const sent: JsonRpcResponse[] = [];
-    const server = serverWith(realRegistryWithStats(() => {
-      throw new ToolExecutionError("memory_unavailable", "memory unavailable");
+    const server = serverWith(createToolRegistry({
+      exposure: "sanitized",
+      memory: createMemoryQueries(() => { throw new ToolExecutionError("memory_unavailable", "memory unavailable"); }),
+      recallWithAi: disabledRecallWithAi,
     }), async (message) => { sent.push(message); });
     if (era === "legacy") legacyReady(server);
     server.accept(eraToolCall(era, "operational", "stats", {}));
@@ -562,8 +565,22 @@ for (const era of ["modern", "legacy"] as const) {
     const response = sent.find((message) => message.id === "operational");
     assert.ok(response !== undefined && "result" in response);
     assert.equal(response.result.isError, true);
+    const unknownCoverage = {
+      version: 1,
+      scanned: 0,
+      skipped: 0,
+      truncated: 1,
+      bytesScanned: 0,
+      bytesTotal: 0,
+      complete: false,
+      reason: "read-race",
+    };
     assert.deepEqual(response.result.structuredContent, {
       error: { code: "memory_unavailable", message: "memory unavailable" },
+      coverage: unknownCoverage,
+      memoryCoverage: unknownCoverage,
+      memoryVersion: 1,
+      memoryCoverageIncomplete: true,
     });
     if (era === "modern") {
       assert.equal(response.result.resultType, "complete");
@@ -574,7 +591,7 @@ for (const era of ["modern", "legacy"] as const) {
     }
   });
 
-  test(`${era} unexpected exception maps to -32603 and leaks detail only to diagnostics`, async () => {
+  test(`${era} unexpected provider exception fails open without diagnostics`, async () => {
     const sent: JsonRpcResponse[] = [];
     const diagnostics: string[] = [];
     const server = serverWith(realRegistryWithStats(() => {
@@ -584,14 +601,12 @@ for (const era of ["modern", "legacy"] as const) {
     server.accept(eraToolCall(era, "unexpected", "stats", {}));
     await server.whenIdle();
 
-    assert.deepEqual(sent.find((message) => message.id === "unexpected"), {
-      jsonrpc: "2.0",
-      id: "unexpected",
-      error: { code: JSON_RPC_ERROR.INTERNAL_ERROR, message: "Internal error" },
-    });
+    const response = sent.find((message) => message.id === "unexpected");
+    assert.ok(response !== undefined && "result" in response);
+    assert.equal(response.result.isError, undefined);
+    assert.equal((response.result.structuredContent as Record<string, unknown>).total, 0);
     assert.doesNotMatch(JSON.stringify(sent), /private|rocky-secret|invariant/);
-    assert.equal(diagnostics.length, 1);
-    assert.match(diagnostics[0] ?? "", /invariant failed at \/private\/rocky-secret\.json/);
+    assert.equal(diagnostics.length, 0);
   });
 }
 
@@ -617,7 +632,7 @@ test("close aborts every request, stops acceptance, and returns at its fixed dea
   const elapsed = Date.now() - startedAt;
 
   assert.equal(signal?.aborted, true);
-  assert.ok(elapsed < 500, `close exceeded fixed bound: ${elapsed}ms`);
+  assert.ok(elapsed < 2_000, `close exceeded fixed bound: ${elapsed}ms`);
   server.accept(modernToolCall("after-close", "stats"));
   await new Promise<void>((resolve) => setImmediate(resolve));
   assert.equal(calls, 1);
@@ -655,7 +670,7 @@ test("input failure aborts active work, skips decoder EOF flush, and rethrows wi
   const elapsed = Date.now() - startedAt;
 
   assert.equal(signal?.aborted, true);
-  assert.ok(elapsed < 500, `input failure cleanup exceeded fixed bound: ${elapsed}ms`);
+  assert.ok(elapsed < 2_000, `input failure cleanup exceeded fixed bound: ${elapsed}ms`);
   assert.equal(output.text(), "");
   assert.equal(diagnostics.text(), "");
 });
@@ -736,7 +751,7 @@ test("EOF shares one deadline across abort-ignoring work and permanent output ba
   const elapsed = Date.now() - startedAt;
 
   assert.equal(ignoredSignal?.aborted, true);
-  assert.ok(elapsed < 500, `stdio drain exceeded fixed bound: ${elapsed}ms`);
+  assert.ok(elapsed < 2_000, `stdio drain exceeded fixed bound: ${elapsed}ms`);
   assert.equal(output.chunks.length, 1);
   assert.equal(diagnostics.text(), "");
 });

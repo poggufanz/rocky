@@ -9,10 +9,11 @@
 import { createOllamaClient } from "../ai/ollama.js";
 import { type AiAct, type AiStatus, type RecallWithAiPort } from "../ai/port.js";
 import { createRecallAiPort, formatModelExplanation, singleFlightRecallAi } from "../ai/recall-ai.js";
-import { createMemoryQueries, type MemoryQueries, type RecallHit } from "../core/memory-query.js";
-import { loadMemory } from "../core/memory-read.js";
+import { createMemoryQueries, fixFromElsewhere, type MemoryQueries, type RecallHit } from "../core/memory-query.js";
+import { isCompleteMemoryCoverage } from "../core/memory-read.js";
 import { resolveRockyPaths } from "../core/state-paths.js";
 import { ago, detail, elapsed, heading, phrase, phraseForAct, say } from "../ui/rocky.js";
+import { safeTerminalBlock, safeTerminalLine } from "../ui/sanitize.js";
 
 export type ParsedRecall = { useAi: boolean; query: string };
 
@@ -46,7 +47,7 @@ export function parseRecallArgs(argv: readonly string[]): ParsedRecall {
 
 function defaultDependencies(): RecallDependencies {
   return {
-    memory: createMemoryQueries(loadMemory),
+    memory: createMemoryQueries(),
     recallWithAi: singleFlightRecallAi(createRecallAiPort({ ollama: createOllamaClient() })),
   };
 }
@@ -141,7 +142,7 @@ function isRecallAiOutcome(value: unknown): value is ValidRecallAiOutcome {
 function sayAiOutcome(outcome: ValidRecallAiOutcome): void {
   if (outcome.aiStatus === "used") {
     say(phraseForAct(outcome.act));
-    detail(formatModelExplanation(outcome.explanation));
+    detail(safeTerminalBlock(formatModelExplanation(outcome.explanation)));
     return;
   }
   switch (outcome.aiStatus) {
@@ -181,11 +182,20 @@ export async function recall(argv: readonly string[], dependencies?: RecallDepen
 
   const deps = dependencies ?? defaultDependencies();
   let hits: RecallHit[];
+  let coverage;
   try {
     hits = parsed.useAi
       ? deps.memory.recall({ query, limit: 5 }).slice(0, 5)
       : deps.memory.recall({ query });
+    try { coverage = deps.memory.coverage?.(); } catch { coverage = undefined; }
+    if (coverage !== undefined && !isCompleteMemoryCoverage(coverage)) {
+      detail(`memory coverage incomplete: version ${coverage.version}, scanned ${coverage.scanned}, skipped ${coverage.skipped}, truncated ${coverage.truncated}, complete ${coverage.complete}${coverage.reason === undefined ? "" : `, reason ${coverage.reason}`}`);
+    }
     if (hits.length === 0) {
+      if (coverage !== undefined && !isCompleteMemoryCoverage(coverage)) {
+        say("memory coverage incomplete. I cannot say no match, question");
+        return 1;
+      }
       if (deps.memory.recentFailures({ limit: 1 }).length === 0) {
         say("memory is empty. no errors yet. this is good... or you not use me yet, question");
         return 0;
@@ -216,16 +226,23 @@ export async function recall(argv: readonly string[], dependencies?: RecallDepen
   say(`I remember ${hits.length} thing${hits.length === 1 ? "" : "s"}.`);
   if (outcome !== undefined) sayAiOutcome(outcome);
   for (const [i, hit] of displayed.entries()) {
-    heading(`${i + 1}. ${hit.failure.cmd}   (${ago(hit.failure.ts)}, exit ${hit.failure.exitCode})`);
-    detail(indent(hit.failure.excerpt));
+    heading(`${i + 1}. ${safeTerminalLine(hit.failure.cmd)}   (${ago(hit.failure.ts)}, exit ${hit.failure.exitCode})`);
+    detail(indent(safeTerminalBlock(hit.failure.excerpt)));
     if (hit.fix) {
-      say(`fixed with: ${hit.fix.cmd}`);
-      const link = hit.fix.links?.find((candidate) => candidate.id === hit.failure.id);
-      if (link) {
-        const span = elapsed(hit.fix.ts - hit.failure.ts);
-        say(link.basis === "signature"
-          ? `same command, ${span} later. strong.`
-          : `same program, ${span} later. maybe not fix. check, question`);
+      say(`fixed with: ${safeTerminalLine(hit.fix.cmd)}`);
+      const elsewhere = fixFromElsewhere(hit.fix, hit.failure.cwd);
+      if (elsewhere !== undefined) {
+        say("but fix comes from other place.");
+        detail(`place: ${safeTerminalLine(elsewhere)}`);
+        say("possible only. check, question");
+      } else {
+        const link = hit.fix.links?.find((candidate) => candidate.id === hit.failure.id);
+        if (link) {
+          const span = elapsed(hit.fix.ts - hit.failure.ts);
+          say(link.basis === "identity" || link.basis === "signature"
+            ? `same command, ${span} later. strong.`
+            : `same program, ${span} later. maybe not fix. check, question`);
+        }
       }
     } else {
       say("no fix recorded for this one. bad bad.");

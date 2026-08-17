@@ -9,14 +9,37 @@
  */
 
 import { writeFileSync } from "node:fs";
+import { safeTerminalBlock, safeTerminalLine } from "./sanitize.js";
 
 export { phrase, phraseForAct, phraseKeys, validateRockyPhrase, type PhraseKey } from "./phrases.js";
 
-const useColor = process.stdout.isTTY && !process.env.NO_COLOR;
+const useStdoutColor = process.stdout.isTTY && !process.env.NO_COLOR;
+const useStderrColor = process.stderr.isTTY && !process.env.NO_COLOR;
 
-const amber = (s: string) => (useColor ? `\u001b[33m${s}\u001b[0m` : s);
-const dim = (s: string) => (useColor ? `\u001b[2m${s}\u001b[0m` : s);
-const bold = (s: string) => (useColor ? `\u001b[1m${s}\u001b[0m` : s);
+const amberStdout = (s: string) => (useStdoutColor ? `\u001b[33m${s}\u001b[0m` : s);
+const amberStderr = (s: string) => (useStderrColor ? `\u001b[33m${s}\u001b[0m` : s);
+const dimStderr = (s: string) => (useStderrColor ? `\u001b[2m${s}\u001b[0m` : s);
+const boldStderr = (s: string) => (useStderrColor ? `\u001b[1m${s}\u001b[0m` : s);
+
+let childStderrNeedsSeparator = false;
+
+/** Record the final raw byte without decoding or sanitizing the child stream. */
+export function trackChildStderr(chunk: Uint8Array): void {
+  if (chunk.length > 0) childStderrNeedsSeparator = chunk[chunk.length - 1] !== 0x0a;
+}
+
+function startsWithLf(chunk: string | Uint8Array): boolean {
+  return typeof chunk === "string" ? chunk.charCodeAt(0) === 0x0a : chunk[0] === 0x0a;
+}
+
+/** Write Rocky-owned stderr, inserting at most one needed line separator. */
+export function writeRockyStderr(chunk: string | Uint8Array): void {
+  if (childStderrNeedsSeparator) {
+    childStderrNeedsSeparator = false;
+    if (!startsWithLf(chunk)) process.stderr.write("\n");
+  }
+  process.stderr.write(chunk);
+}
 
 /**
  * Rocky, seen from the front: pentagonal carapace, five radial legs,
@@ -32,30 +55,30 @@ const FACE = [
 ];
 
 export function face(): string {
-  return FACE.map((l) => amber(l)).join("\n");
+  return FACE.map((l) => amberStdout(l)).join("\n");
 }
 
 /** One Rocky line, prefixed. */
 export function say(msg: string): void {
-  process.stderr.write(`${amber("[Rocky]")} ${msg}\n`);
+  writeRockyStderr(`${amberStderr("[Rocky]")} ${safeTerminalLine(msg)}\n`);
 }
 
 /** Rocky prompt text; readline writes it to the prompt port's stderr stream. */
 export function prompt(msg: string): string {
-  return `${amber("[Rocky]")} ${msg} `;
+  return `${amberStderr("[Rocky]")} ${safeTerminalLine(msg)} `;
 }
 
 /** Rocky line without trailing newline context — for multi-line blocks. */
 export function block(lines: string[]): void {
-  for (const l of lines) process.stderr.write(`${amber("♫")} ${l}\n`);
+  for (const l of lines) writeRockyStderr(`${amberStderr("♫")} ${safeTerminalLine(l)}\n`);
 }
 
 export function heading(msg: string): void {
-  process.stderr.write(`\n${bold(msg)}\n`);
+  writeRockyStderr(`\n${boldStderr(safeTerminalLine(msg))}\n`);
 }
 
 export function detail(msg: string): void {
-  process.stderr.write(`${dim(msg)}\n`);
+  writeRockyStderr(`${dimStderr(safeTerminalBlock(msg))}\n`);
 }
 
 /** "just now", "2 minutes", "6 hours", "3 days" — the bare span, no suffix. */
@@ -82,7 +105,7 @@ export function ago(ts: number): string {
  */
 export function sayTty(msg: string): void {
   try {
-    writeFileSync("/dev/tty", `[Rocky] ${msg}\n`);
+    writeFileSync("/dev/tty", `[Rocky] ${safeTerminalLine(msg)}\n`);
   } catch {
     /* no tty (tests, CI, detached session) — Rocky stays silent */
   }
@@ -90,7 +113,7 @@ export function sayTty(msg: string): void {
 
 export function detailTty(msg: string): void {
   try {
-    writeFileSync("/dev/tty", `    ${msg}\n`);
+    writeFileSync("/dev/tty", `    ${safeTerminalLine(msg)}\n`);
   } catch {
     /* silent */
   }

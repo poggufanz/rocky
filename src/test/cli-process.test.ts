@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import { spawnSync, type SpawnSyncReturns } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test, { type TestContext } from "node:test";
-import { fileURLToPath } from "node:url";
-import { fingerprint } from "../core/fingerprint.js";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { fingerprint, FINGERPRINT_ALGORITHM_VERSION } from "../core/fingerprint.js";
 import { quoteShellPath } from "../core/shell-quote.js";
 import { PACKAGE_VERSION } from "../core/package-info.js";
 
@@ -298,6 +298,235 @@ test("release checker source has no registry-mutation subprocess argument", () =
   assert.doesNotMatch(source, /\[\s*["'](?:publish|deprecate|dist-tag)["']/i);
 });
 
+test("release truth keeps branch and immutable-tag modes distinct", async () => {
+  const releaseCheck = await import(pathToFileURL(join(packageRoot, "scripts", "release-check.mjs")).href) as {
+    validateGitReleaseState(state: unknown): string[];
+    readGitReleaseState(root: string, mode: string, runner: (root: string, args: string[], options?: { env?: NodeJS.ProcessEnv; gitExecutable?: string }) => string | undefined, options?: { env?: NodeJS.ProcessEnv; gitExecutable?: string }): {
+      branch: string;
+      head?: string;
+      status: string;
+      tagCommit?: string;
+      mode: string;
+    };
+    sanitizeReleaseEnvironment(environment: NodeJS.ProcessEnv): NodeJS.ProcessEnv;
+    resolveGitExecutable(environment: NodeJS.ProcessEnv): string;
+    resolveNpmExecutable(environment: NodeJS.ProcessEnv): string;
+    releaseCheckCommandPlan(npm: string | { file: string; argsPrefix: string[] }, root: string): Record<string, { file: string; args: string[] }>;
+  };
+  const releaseHead = "4fec0f3c22452a228892901de0aedb779e7b5015";
+  const postReleaseHead = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+  const sha256Head = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+  const branch = {
+    branch: "iq",
+    head: postReleaseHead,
+    status: "",
+    tagCommit: releaseHead,
+    mode: "branch",
+  };
+  assert.deepEqual(releaseCheck.validateGitReleaseState(branch), []);
+  assert.deepEqual(releaseCheck.validateGitReleaseState({ ...branch, head: sha256Head }), []);
+  assert.notDeepEqual(releaseCheck.validateGitReleaseState({ ...branch, head: undefined }), []);
+  assert.notDeepEqual(releaseCheck.validateGitReleaseState({ ...branch, head: "post-release-remediation" }), []);
+  assert.notDeepEqual(
+    releaseCheck.validateGitReleaseState({ ...branch, status: " M README.md" }),
+    [],
+  );
+  assert.notDeepEqual(
+    releaseCheck.validateGitReleaseState({ ...branch, tagCommit: undefined }),
+    [],
+  );
+  assert.notDeepEqual(
+    releaseCheck.validateGitReleaseState({ ...branch, mode: "release" }),
+    [],
+    "release mode must require HEAD to equal the immutable tag commit",
+  );
+  assert.deepEqual(
+    releaseCheck.validateGitReleaseState({
+      ...branch,
+      mode: "release",
+      head: releaseHead,
+    }),
+    [],
+  );
+
+  const fixture = mkdtempSync(join(tmpdir(), "rocky-release-git "));
+  try {
+    const calls: string[][] = [];
+    const runnerOptions: Array<{ env?: NodeJS.ProcessEnv; gitExecutable?: string }> = [];
+    const runner = (_root: string, args: string[], options?: { env?: NodeJS.ProcessEnv; gitExecutable?: string }): string | undefined => {
+      calls.push(args);
+      if (options !== undefined) runnerOptions.push(options);
+      const command = args.join(" ");
+      if (command.startsWith("symbolic-ref")) return "iq";
+      if (command === "rev-parse --verify HEAD^{commit}") return postReleaseHead;
+      if (command === "rev-parse HEAD") return postReleaseHead;
+      if (command.startsWith("status")) return "";
+      if (command === "rev-parse --verify refs/tags/v0.5.1^{commit}") return releaseHead;
+      return "cccccccccccccccccccccccccccccccccccccccc";
+    };
+    const polluted = {
+      ...process.env,
+      GIT_DIR: "redirected.git",
+      GIT_WORK_TREE: "redirected-worktree",
+      GIT_INDEX_FILE: "redirected-index",
+      GIT_OBJECT_DIRECTORY: "redirected-objects",
+      GIT_ALTERNATE_OBJECT_DIRECTORIES: "redirected-alternates",
+      GIT_COMMON_DIR: "redirected-common",
+      GIT_CONFIG_GLOBAL: "redirected-config",
+      NODE_OPTIONS: "--require redirected-preload.cjs",
+      NODE_PATH: "redirected-node-path",
+      NODE_TEST_CONTEXT: "redirected-test-context",
+    };
+    const sanitized = releaseCheck.sanitizeReleaseEnvironment(polluted);
+    for (const key of ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_COMMON_DIR", "GIT_CONFIG_GLOBAL", "NODE_OPTIONS", "NODE_PATH", "NODE_TEST_CONTEXT"]) {
+      assert.equal(sanitized[key], undefined, `${key} must not reach release evidence`);
+    }
+    const fixtureState = releaseCheck.readGitReleaseState(fixture, "branch", runner, {
+      env: sanitized,
+      gitExecutable: "C:\\absolute\\git.exe",
+    });
+    assert.deepEqual(releaseCheck.validateGitReleaseState(fixtureState), []);
+    assert.ok(runnerOptions.length > 0);
+    assert.ok(runnerOptions.every((options) => options.gitExecutable === "C:\\absolute\\git.exe" && options.env === sanitized));
+    assert.ok(calls.some((args) => args.join(" ") === "status --short --untracked-files=all --"));
+    assert.ok(calls.some((args) => args.join(" ") === "rev-parse --verify HEAD^{commit}"));
+    assert.ok(calls.some((args) => args.join(" ") === "rev-parse --verify refs/tags/v0.5.1^{commit}"));
+    const objectTypeCalls: string[][] = [];
+    const objectTypeRunner = (_root: string, args: string[]): string | undefined => {
+      objectTypeCalls.push(args);
+      const command = args.join(" ");
+      if (command.startsWith("symbolic-ref")) return "iq";
+      if (command === "rev-parse HEAD") return postReleaseHead;
+      if (command === "rev-parse --verify HEAD^{commit}") return undefined;
+      if (command.startsWith("status")) return "";
+      if (command === "rev-parse --verify refs/tags/v0.5.1^{commit}") return releaseHead;
+      return "cccccccccccccccccccccccccccccccccccccccc";
+    };
+    assert.notDeepEqual(
+      releaseCheck.validateGitReleaseState(releaseCheck.readGitReleaseState(fixture, "branch", objectTypeRunner)),
+      [],
+      "a hash-shaped non-commit must not satisfy HEAD evidence",
+    );
+    assert.ok(objectTypeCalls.some((args) => args.join(" ") === "rev-parse --verify HEAD^{commit}"));
+    const dirtyRunner = (_root: string, args: string[]): string | undefined => (
+      args[0] === "status" ? "?? dirty.txt" : runner(_root, args)
+    );
+    assert.notDeepEqual(
+      releaseCheck.validateGitReleaseState(releaseCheck.readGitReleaseState(fixture, "branch", dirtyRunner)),
+      [],
+    );
+  } finally {
+    rmSync(fixture, { recursive: true, force: true });
+  }
+
+  const plan = releaseCheck.releaseCheckCommandPlan("npm", packageRoot);
+  assert.deepEqual({ file: plan.fullTest.file, args: plan.fullTest.args }, { file: "npm", args: ["test"] });
+  assert.deepEqual(plan.pack.args, ["pack", "--dry-run", "--json"]);
+  assert.equal(plan.smoke.file, process.execPath);
+  assert.deepEqual(plan.smoke.args, [join(packageRoot, "scripts", "package-smoke.mjs")]);
+});
+
+test("release evidence ignores hostile PATH and command processor", async () => {
+  const releaseCheck = await import(pathToFileURL(join(packageRoot, "scripts", "release-check.mjs")).href) as {
+    resolveGitExecutable(environment: NodeJS.ProcessEnv): string;
+    resolveNpmExecutable(environment: NodeJS.ProcessEnv): string;
+    resolveNpmInvocation(environment: NodeJS.ProcessEnv): { file: string; argsPrefix: string[] };
+    releaseCheckCommandPlan(npm: string | { file: string; argsPrefix: string[] }, root: string): Record<string, { file: string; args: string[] }>;
+  };
+  const fixture = mkdtempSync(join(tmpdir(), "rocky-release-tools "));
+  try {
+    const fakeGit = join(fixture, process.platform === "win32" ? "git.exe" : "git");
+    const fakeNpm = join(fixture, process.platform === "win32" ? "npm.cmd" : "npm");
+    writeFileSync(fakeGit, "fake git\n", "utf8");
+    writeFileSync(fakeNpm, "fake npm\n", "utf8");
+    if (process.platform !== "win32") {
+      chmodSync(fakeGit, 0o755);
+      chmodSync(fakeNpm, 0o755);
+    }
+    const hostile = {
+      ...process.env,
+      PATH: fixture,
+      Path: fixture,
+      ComSpec: join(fixture, process.platform === "win32" ? "hostile-cmd.exe" : "hostile-cmd"),
+    };
+    const git = releaseCheck.resolveGitExecutable(hostile);
+    const npm = releaseCheck.resolveNpmExecutable(hostile);
+    assert.notEqual(realpathSync(git), realpathSync(fakeGit));
+    assert.notEqual(realpathSync(npm), realpathSync(fakeNpm));
+    const npmInvocation = releaseCheck.resolveNpmInvocation(hostile);
+    assert.deepEqual(npmInvocation, { file: process.execPath, argsPrefix: [npm] });
+    const npmPlan = releaseCheck.releaseCheckCommandPlan(npmInvocation, packageRoot);
+    assert.equal(npmPlan.fullTest.file, process.execPath);
+    assert.deepEqual(npmPlan.fullTest.args, [npm, "test"]);
+    assert.equal(npmPlan.pack.file, process.execPath);
+    assert.deepEqual(npmPlan.pack.args, [npm, "pack", "--dry-run", "--json"]);
+    const source = readFileSync(join(packageRoot, "scripts", "release-check.mjs"), "utf8");
+    assert.doesNotMatch(source, /environmentPath|process\.env\.PATH/);
+    assert.doesNotMatch(source, /commandInvocation/);
+  } finally {
+    rmSync(fixture, { recursive: true, force: true });
+  }
+});
+
+test("release steps keep hostile ComSpec out of native argv", async () => {
+  const releaseCheck = await import(pathToFileURL(join(packageRoot, "scripts", "release-check.mjs")).href) as {
+    runReleaseStep(state: { commands: unknown[] }, env: NodeJS.ProcessEnv, label: string, file: string, args: string[], display: string, runner?: (...args: any[]) => SpawnSyncReturns<string>): string;
+  };
+  const calls: Array<{ file: string; args: string[]; options: Record<string, unknown> }> = [];
+  const state = { commands: [] as unknown[] };
+  const hostile = {
+    ...process.env,
+    PATH: "C:\\hostile-path",
+    ComSpec: "C:\\hostile-cmd.exe",
+  };
+  const npmCli = "C:\\trusted\\npm-cli.js";
+  const runner = (file: string, args: string[], options: Record<string, unknown>): SpawnSyncReturns<string> => {
+    calls.push({ file, args, options });
+    return { pid: 1, output: [], stdout: "ok\n", stderr: "", status: 0, signal: null, error: undefined };
+  };
+  assert.equal(
+    releaseCheck.runReleaseStep(state, hostile, "npm test", process.execPath, [npmCli, "test"], "npm test", runner),
+    "ok\n",
+  );
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].file, process.execPath);
+  assert.deepEqual(calls[0].args, [npmCli, "test"]);
+  assert.equal(calls[0].options.shell, false);
+  assert.equal(calls[0].options.env, hostile);
+  assert.equal(calls[0].options.cwd, packageRoot);
+});
+
+test("release checker rejects release truth-only mode before doing work", (t) => {
+  const sandbox = processSandbox(t);
+  const report = join(sandbox.root, "release-report.md");
+  const result = runNodeScript(
+    sandbox,
+    join(packageRoot, "scripts", "release-check.mjs"),
+    ["--release", "--truth-only", "--report", report],
+  );
+
+  assertCompleted(result, 2);
+  assert.match(result.stderr, /truth-only.*release|release.*truth-only|full release/i);
+  assert.equal(existsSync(report), false);
+});
+
+test("truth-only release report declares its limited scope", (t) => {
+  const sandbox = processSandbox(t);
+  const report = join(sandbox.root, "truth-only-report.md");
+  const result = runNodeScript(
+    sandbox,
+    join(packageRoot, "scripts", "release-check.mjs"),
+    ["--truth-only", "--report", report],
+  );
+
+  assert.ok(result.status === 0 || result.status === 1, result.stderr);
+  const markdown = readFileSync(report, "utf8");
+  assert.match(markdown, /Scope: \*\*truth-only\*\*/);
+  assert.match(markdown, /build, tests, pack, smoke, and benchmark did not run/);
+  assert.match(markdown, /Not run: truth-only scope does not execute package pack/);
+  assert.doesNotMatch(markdown, /npm test|npm pack|package smoke passed/);
+});
+
 test("release checker partial report preserves a spawn failure without inventing exit 1", (t) => {
   const sandbox = processSandbox(t);
   const report = join(sandbox.root, "partial-release-report.md");
@@ -404,19 +633,24 @@ function failingCommandPrinting(marker: string): string {
   return `${quoteShellPath(process.execPath, process.platform)} -e ${quoteShellPath(script, process.platform)}`;
 }
 
+function nodeCommand(source: string): string {
+  return `${quoteShellPath(process.execPath, process.platform)} -e ${quoteShellPath(source, process.platform)}`;
+}
+
 test("run's onFailure speaks the strong link basis, not just the fix command", (t) => {
   const sandbox = processSandbox(t);
   const marker = "error rocky basis strong boom";
   const fp = fingerprint(marker, "cargo build --release", 1);
   const failure = {
     kind: "failure", id: "basis-strong-failure", ts: 1_700_000_000_000, cwd: packageRoot,
-    cmd: "cargo build --release", exitCode: 1, fingerprint: fp, signature: [marker], excerpt: marker,
+    cmd: "cargo build --release", exitCode: 1, fingerprint: fp, fingerprintV: FINGERPRINT_ALGORITHM_VERSION,
+    signature: [marker], excerpt: marker,
     origin: "run",
   };
   const fix = {
     kind: "fix", id: "basis-strong-fix", ts: 1_700_000_120_000, cwd: packageRoot,
-    cmd: "cargo build", failureIds: ["basis-strong-failure"],
-    links: [{ id: "basis-strong-failure", basis: "signature" }],
+    cmd: "cargo build --release", failureIds: ["basis-strong-failure"],
+    links: [{ id: "basis-strong-failure", basis: "identity", confidence: "confirmed" }],
   };
   writeFileSync(
     join(sandbox.rockyHome, "memory.jsonl"),
@@ -432,13 +666,14 @@ test("run's onFailure speaks the strong link basis, not just the fix command", (
   assertNoDetectorMarkers(sandbox);
 });
 
-test("run's onFailure hedges a weak link instead of presenting it like a real match", (t) => {
+test("run's onFailure never presents a weak candidate as a remembered fix", (t) => {
   const sandbox = processSandbox(t);
   const marker = "error rocky basis weak boom";
   const fp = fingerprint(marker, "npm run build", 1);
   const failure = {
     kind: "failure", id: "basis-weak-failure", ts: 1_700_000_000_000, cwd: packageRoot,
-    cmd: "npm run build", exitCode: 1, fingerprint: fp, signature: [marker], excerpt: marker,
+    cmd: "npm run build", exitCode: 1, fingerprint: fp, fingerprintV: FINGERPRINT_ALGORITHM_VERSION,
+    signature: [marker], excerpt: marker,
     origin: "run",
   };
   const fix = {
@@ -455,18 +690,18 @@ test("run's onFailure hedges a weak link instead of presenting it like a real ma
   const result = runCli(sandbox, ["run", failingCommandPrinting(marker)]);
 
   assertCompleted(result, 1);
-  assert.match(result.stderr, /same program, 2 minutes later\. maybe not fix\. check, question/);
-  assert.doesNotMatch(result.stderr, /\bstrong\b/);
+  assert.doesNotMatch(result.stderr, /last time, you fix with:|same program|\bstrong\b/);
   assertNoDetectorMarkers(sandbox);
 });
 
-test("a v0.2.1-era fix record without links stays silent about basis", (t) => {
+test("a v0.2.1-era unproven fix record is downgraded", (t) => {
   const sandbox = processSandbox(t);
   const marker = "error rocky basis absent boom";
   const fp = fingerprint(marker, "npm run build", 1);
   const failure = {
     kind: "failure", id: "basis-none-failure", ts: 1_700_000_000_000, cwd: packageRoot,
-    cmd: "npm run build", exitCode: 1, fingerprint: fp, signature: [marker], excerpt: marker,
+    cmd: "npm run build", exitCode: 1, fingerprint: fp, fingerprintV: FINGERPRINT_ALGORITHM_VERSION,
+    signature: [marker], excerpt: marker,
     origin: "run",
   };
   const fix = {
@@ -482,8 +717,7 @@ test("a v0.2.1-era fix record without links stays silent about basis", (t) => {
   const result = runCli(sandbox, ["run", failingCommandPrinting(marker)]);
 
   assertCompleted(result, 1);
-  assert.match(result.stderr, /last time, you fix with:/);
-  assert.doesNotMatch(result.stderr, /\bstrong\b|maybe not fix/);
+  assert.doesNotMatch(result.stderr, /last time, you fix with:|\bstrong\b|maybe not fix/);
   assertNoDetectorMarkers(sandbox);
 });
 
@@ -494,12 +728,13 @@ test("run's onFailure admits when the remembered fix comes from a different dire
   const elsewhere = join(sandbox.root, "elsewhere-project");
   const failure = {
     kind: "failure", id: "elsewhere-failure", ts: 1_700_000_000_000, cwd: packageRoot,
-    cmd: "whatever failed before", exitCode: 1, fingerprint: fp, signature: [marker], excerpt: marker,
+    cmd: "whatever failed before", exitCode: 1, fingerprint: fp, fingerprintV: FINGERPRINT_ALGORITHM_VERSION,
+    signature: [marker], excerpt: marker,
     origin: "run",
   };
   const fix = {
     kind: "fix", id: "elsewhere-fix", ts: 1_700_000_001_000, cwd: elsewhere,
-    cmd: "the remembered fix command", failureIds: ["elsewhere-failure"],
+    cmd: "whatever failed before", failureIds: ["elsewhere-failure"],
   };
   writeFileSync(
     join(sandbox.rockyHome, "memory.jsonl"),
@@ -517,7 +752,7 @@ test("run's onFailure admits when the remembered fix comes from a different dire
 
 test("watch records a failure with origin watch and saves exactly one log file with the stderr tail", (t) => {
   const sandbox = processSandbox(t);
-  const result = runCli(sandbox, ["watch", "sh -c 'echo boom >&2; exit 3'"]);
+  const result = runCli(sandbox, ["watch", nodeCommand("process.stderr.write('boom\\n'); process.exit(3)")]);
 
   assertCompleted(result, 3);
 
@@ -543,9 +778,8 @@ test("watch records a failure with origin watch and saves exactly one log file w
 });
 
 test("watch passes a Ctrl-C-style exit code straight through, with no memory record and no log", (t) => {
-  if (process.platform === "win32") return;
   const sandbox = processSandbox(t);
-  const result = runCli(sandbox, ["watch", "sh -c 'exit 130'"]);
+  const result = runCli(sandbox, ["watch", nodeCommand("process.exit(130)")]);
 
   assert.equal(result.status, 130);
   assert.equal(existsSync(join(sandbox.rockyHome, "memory.jsonl")), false);
@@ -569,12 +803,13 @@ test("run's onFailure adds no line when the remembered fix's cwd matches the cur
   const here = realpathSync(packageRoot);
   const failure = {
     kind: "failure", id: "samecwd-failure", ts: 1_700_000_000_000, cwd: here,
-    cmd: "whatever failed before", exitCode: 1, fingerprint: fp, signature: [marker], excerpt: marker,
+    cmd: "whatever failed before", exitCode: 1, fingerprint: fp, fingerprintV: FINGERPRINT_ALGORITHM_VERSION,
+    signature: [marker], excerpt: marker,
     origin: "run",
   };
   const fix = {
     kind: "fix", id: "samecwd-fix", ts: 1_700_000_001_000, cwd: here,
-    cmd: "the remembered fix command", failureIds: ["samecwd-failure"],
+    cmd: "whatever failed before", failureIds: ["samecwd-failure"],
   };
   writeFileSync(
     join(sandbox.rockyHome, "memory.jsonl"),

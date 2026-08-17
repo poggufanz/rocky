@@ -24,6 +24,7 @@ export function renderPrePushScript(): string {
     "command -v rocky >/dev/null 2>&1 || exit 0",
     'rocky check --pre-push "$@"',
     "rc=$?",
+    "# Only exit 3 finding blocks push; incomplete checks stay fail-open.",
     '[ "$rc" -eq 3 ] && exit 1',
     "exit 0",
     HOOK_END,

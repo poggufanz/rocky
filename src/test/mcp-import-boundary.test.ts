@@ -132,15 +132,20 @@ test("MCP source graph reaches only explicitly allowlisted read-only modules; wr
   const roots = [entry, ...descendants(join(sourceRoot, "mcp"))];
   const allowed = new Set([
     "commands/mcp.ts",
+    "commands/cli-args.ts",
     "core/config-read.ts",
     "core/dictionary.ts",
     "core/fingerprint.ts",
+    // Audited pure filesystem identity/capability helpers; MCP never calls
+    // mutation APIs through this module.
+    "core/fs-safety.ts",
     "core/memory-query.ts",
     "core/memory-read.ts",
     "core/package-info.ts",
     // Audited pure sanitizer: no imports or filesystem side effects.
     "core/redact.ts",
     "core/state-paths.ts",
+    "core/terminal-sanitize.ts",
     "ai/ollama.ts",
     "ai/port.ts",
     "ai/recall-ai.ts",

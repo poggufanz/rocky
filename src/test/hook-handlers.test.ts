@@ -120,10 +120,10 @@ function seedElsewhereFix(failCwd: string, fixCwd: string, cmd: string, exitCode
   const fp = commandFingerprint(cmd, exitCode);
   const failure = {
     kind: "failure", id: "seed-failure", ts: Date.now() - 1000, cwd: failCwd, cmd,
-    exitCode, fingerprint: fp, signature: [cmd], excerpt: `exit ${exitCode}`, origin: "hook",
+    exitCode, fingerprint: fp, fingerprintV: 2, signature: [cmd], excerpt: `exit ${exitCode}`, origin: "hook",
   };
   const fix = {
-    kind: "fix", id: "seed-fix", ts: Date.now(), cwd: fixCwd, cmd: "the remembered fix",
+    kind: "fix", id: "seed-fix", ts: Date.now(), cwd: fixCwd, cmd,
     failureIds: ["seed-failure"],
   };
   writeFileSync(
@@ -141,8 +141,26 @@ test("hookFail admits when the remembered fix's cwd differs from the cwd argumen
   try {
     const { result, tty } = captureTty(() => hookFail("elsewhere-test-cmd", 1, failCwd));
     assert.equal(result, 0);
+    assert.match(tty, /last time, you fix with:/);
     assert.match(tty, /but fix comes from other place\./);
     assert.match(tty, new RegExp(`place: ${fixCwd.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
+    assert.doesNotMatch(tty, /strong\.|confirmed/);
+  } finally {
+    process.env.ROCKY_HOME = home;
+  }
+});
+
+test("hookFail compares elsewhere against linked failure cwd, not invocation cwd", () => {
+  const failCwd = mkdtempSync(join(tmpdir(), "rocky-linked-failure-source-"));
+  const fixCwd = mkdtempSync(join(tmpdir(), "rocky-linked-fix-current-"));
+  seedElsewhereFix(failCwd, fixCwd, "linked-cwd-test-cmd", 1);
+  try {
+    const { result, tty } = captureTty(() => hookFail("linked-cwd-test-cmd", 1, fixCwd));
+    assert.equal(result, 0);
+    assert.match(tty, /but fix comes from other place\./);
+    assert.match(tty, new RegExp(`place: ${fixCwd.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
+    assert.match(tty, /possible only/);
+    assert.doesNotMatch(tty, /strong\.|confirmed/);
   } finally {
     process.env.ROCKY_HOME = home;
   }

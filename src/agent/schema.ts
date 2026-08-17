@@ -1,6 +1,26 @@
 import { createHash } from "node:crypto";
+import { canonicalPath } from "../core/memory-read.js";
 
 export type AgentName = "claude-code" | "codex";
+
+/** Evidence source for a remembered file change. */
+export type FileProvenance = "tool-observed" | "git-diff-inferred" | "unknown";
+
+export interface TurnBaselineFile {
+  path: string;
+  plusMinus: [number, number];
+}
+
+/**
+ * A baseline is captured at UserPromptSubmit and consumed at Stop.  A missing
+ * baseline is explicit: annotation must not present current repository state
+ * as a proven turn delta.
+ */
+export interface TurnBaseline {
+  status: "captured" | "unknown";
+  head?: string;
+  files?: TurnBaselineFile[];
+}
 
 export interface IntentEvent {
   v: 1;
@@ -9,6 +29,7 @@ export interface IntentEvent {
   ts: number;
   cwd?: string;
   text: string;
+  baseline?: TurnBaseline;
 }
 
 export interface MechanismEvent {
@@ -19,7 +40,21 @@ export interface MechanismEvent {
   tool: string;
   path: string;
   excerpt?: string;
+  provenance?: FileProvenance;
+  /** Number of unique paths omitted by an adapter event cap. */
+  truncatedFiles?: number;
+  /**
+   * Bounded batch coverage witness.  Adapters attach this to the first
+   * mechanism event when their path list overflows, so annotation can union
+   * tool and Git identities instead of adding independent overflow counters.
+   */
+  coveragePaths?: string[];
+  coveragePathsComplete?: boolean;
 }
+
+export const MAX_BASELINE_FILES = 256;
+/** Keep durable coverage identity metadata bounded while retaining common multi-file turns. */
+export const MAX_COVERAGE_PATHS = 256;
 
 export interface RationaleEvent {
   v: 1;
@@ -44,12 +79,39 @@ function str(value: unknown, cap: number): string | undefined {
   return typeof value === "string" && value.length > 0 ? value.slice(0, cap) : undefined;
 }
 
+function parseBaseline(value: unknown): TurnBaseline | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+  const record = value as Record<string, unknown>;
+  if (record.status !== "captured" && record.status !== "unknown") return undefined;
+  const filesValue = record.files;
+  if (filesValue !== undefined && !Array.isArray(filesValue)) return undefined;
+  if (filesValue !== undefined && filesValue.length > MAX_BASELINE_FILES) return { status: "unknown" };
+  const files: TurnBaselineFile[] = [];
+  for (const item of filesValue ?? []) {
+    if (typeof item !== "object" || item === null || Array.isArray(item)) return undefined;
+    const file = item as Record<string, unknown>;
+    if (typeof file.path !== "string" || file.path.length === 0 || file.path.length > 1024 ||
+        !Array.isArray(file.plusMinus) || file.plusMinus.length !== 2 ||
+        typeof file.plusMinus[0] !== "number" || !Number.isSafeInteger(file.plusMinus[0]) || file.plusMinus[0] < 0 ||
+        typeof file.plusMinus[1] !== "number" || !Number.isSafeInteger(file.plusMinus[1]) || file.plusMinus[1] < 0) return undefined;
+    files.push({ path: file.path, plusMinus: [file.plusMinus[0], file.plusMinus[1]] });
+    if (files.length >= MAX_BASELINE_FILES) break;
+  }
+  const head = record.head === undefined ? undefined : str(record.head, 256);
+  if (record.head !== undefined && head === undefined) return undefined;
+  return {
+    status: record.status,
+    ...(head === undefined ? {} : { head }),
+    ...(files.length === 0 ? {} : { files }),
+  };
+}
+
 export function parseAgentEvent(value: unknown): AgentEvent | undefined {
   if (typeof value !== "object" || value === null) return undefined;
   const record = value as Record<string, unknown>;
   if (record.v !== 1) return undefined;
   if (typeof record.agent !== "string" || !AGENTS.has(record.agent)) return undefined;
-  if (typeof record.ts !== "number" || !Number.isFinite(record.ts)) return undefined;
+  if (typeof record.ts !== "number" || !Number.isSafeInteger(record.ts) || record.ts < 0) return undefined;
   const agent = record.agent as AgentName;
   const ts = record.ts;
 
@@ -58,14 +120,54 @@ export function parseAgentEvent(value: unknown): AgentEvent | undefined {
       const text = str(record.text, MAX_INTENT_CHARS);
       if (!text) return undefined;
       const cwd = typeof record.cwd === "string" ? record.cwd : undefined;
-      return { v: 1, agent, kind: "intent", ts, ...(cwd ? { cwd } : {}), text };
+      const baseline = record.baseline === undefined ? undefined : parseBaseline(record.baseline);
+      if (record.baseline !== undefined && baseline === undefined) return undefined;
+      return { v: 1, agent, kind: "intent", ts, ...(cwd ? { cwd } : {}), text, ...(baseline ? { baseline } : {}) };
     }
     case "mechanism": {
       const path = str(record.path, 1024);
       const tool = str(record.tool, 64);
-      if (!path || !tool) return undefined;
+      if (!path || !tool || typeof record.path !== "string" || record.path.length > 1024) return undefined;
       const excerpt = str(record.excerpt, MAX_EXCERPT_CHARS);
-      return { v: 1, agent, kind: "mechanism", ts, tool, path, ...(excerpt ? { excerpt } : {}) };
+      const provenance = record.provenance === undefined ? undefined : record.provenance;
+      if (provenance !== undefined && provenance !== "tool-observed" && provenance !== "git-diff-inferred" && provenance !== "unknown") {
+        return undefined;
+      }
+      const rawTruncatedFiles = record.truncatedFiles;
+      if (rawTruncatedFiles !== undefined && (typeof rawTruncatedFiles !== "number" || !Number.isSafeInteger(rawTruncatedFiles) || rawTruncatedFiles < 0)) return undefined;
+      const truncatedFiles = typeof rawTruncatedFiles === "number" ? rawTruncatedFiles : undefined;
+      const rawCoveragePaths = record.coveragePaths;
+      let coveragePaths: string[] | undefined;
+      let coveragePathsComplete: boolean | undefined;
+      if (rawCoveragePaths !== undefined) {
+        if (!Array.isArray(rawCoveragePaths)) return undefined;
+        coveragePaths = [];
+        const seen = new Set<string>();
+        for (const value of rawCoveragePaths.slice(0, MAX_COVERAGE_PATHS)) {
+          if (typeof value !== "string" || value.length === 0 || value.length > 1024) return undefined;
+          const identity = canonicalPath(value);
+          if (!identity) return undefined;
+          if (seen.has(identity)) {
+            coveragePathsComplete = false;
+            continue;
+          }
+          seen.add(identity);
+          coveragePaths.push(identity);
+        }
+        if (rawCoveragePaths.length > MAX_COVERAGE_PATHS) coveragePathsComplete = false;
+      }
+      if (record.coveragePathsComplete !== undefined) {
+        if (typeof record.coveragePathsComplete !== "boolean") return undefined;
+        coveragePathsComplete = record.coveragePathsComplete && coveragePathsComplete !== false;
+      }
+      return {
+        v: 1, agent, kind: "mechanism", ts, tool, path,
+        ...(excerpt ? { excerpt } : {}),
+        ...(provenance === undefined ? {} : { provenance }),
+        ...(truncatedFiles === undefined ? {} : { truncatedFiles }),
+        ...(coveragePaths === undefined ? {} : { coveragePaths }),
+        ...(coveragePathsComplete === undefined ? {} : { coveragePathsComplete }),
+      };
     }
     case "rationale": {
       const text = str(record.text, MAX_RATIONALE_CHARS);

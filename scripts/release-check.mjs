@@ -12,14 +12,19 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { delimiter, dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { dirname, isAbsolute, join, parse, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { commandInvocation } from "./package-smoke-support.mjs";
 
 const packageRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const packageMetadata = JSON.parse(readFileSync(join(packageRoot, "package.json"), "utf8"));
 const PACKAGE_NAME = "@poggufanz/rocky-cli";
 const PACKAGE_VERSION = packageMetadata.version;
+const PACKAGE_BINARY = "rocky";
+const RELEASE_TAG = "v0.5.1";
+const RELEASE_COMMIT = "4fec0f3c22452a228892901de0aedb779e7b5015";
+const CANONICAL_BRANCH = "main";
+const CANONICAL_REPOSITORY_URL = "https://github.com/poggufanz/rocky.git";
+const CANONICAL_PACKAGE_ROOT = "rocky/";
 const COMMAND_TIMEOUT_MS = 10 * 60 * 1_000;
 const MAX_COMMAND_OUTPUT_BYTES = 32 * 1024 * 1024;
 
@@ -73,28 +78,120 @@ function outsidePackagePath(value, label) {
 
 function reportArgument(argv) {
   if (argv.includes("--publish")) throw new UsageError("publishing arguments are refused");
-  if (argv.length !== 2 || argv[0] !== "--report" || !argv[1]) {
-    throw new UsageError("usage: release-check --report <absolute path outside package>");
+  const releaseFlags = argv.filter((argument) => argument === "--release");
+  const truthOnlyFlags = argv.filter((argument) => argument === "--truth-only");
+  if (releaseFlags.length > 1 || truthOnlyFlags.length > 1) {
+    throw new UsageError("release-check accepts each mode flag at most once");
   }
-  return outsidePackagePath(argv[1], "report");
+  const mode = releaseFlags.length === 1 ? "release" : "branch";
+  const truthOnly = truthOnlyFlags.length === 1;
+  if (mode === "release" && truthOnly) {
+    throw new UsageError("--release cannot combine with --truth-only; release mode runs the full release gate");
+  }
+  const reportArgs = argv.filter((argument) => argument !== "--release" && argument !== "--truth-only");
+  if (reportArgs.length !== 2 || reportArgs[0] !== "--report" || !reportArgs[1]) {
+    throw new UsageError("usage: release-check [--release] [--truth-only] --report <absolute path outside package>");
+  }
+  return { path: outsidePackagePath(reportArgs[1], "report"), mode, truthOnly };
 }
 
-function resolveNpmExecutable() {
-  const names = process.platform === "win32" ? ["npm.cmd", "npm.exe"] : ["npm"];
-  const candidates = [
-    ...names.map((name) => join(dirname(process.execPath), name)),
-    ...(process.env.PATH ?? "").split(delimiter).flatMap((directory) =>
-      directory === "" ? [] : names.map((name) => join(directory, name))),
-  ];
-  for (const candidate of candidates) {
-    try {
-      accessSync(candidate, process.platform === "win32" ? constants.F_OK : constants.X_OK);
-      return resolve(candidate);
-    } catch {
-      // Continue through bounded PATH candidates.
+export function sanitizeReleaseEnvironment(source = process.env) {
+  const env = { ...source };
+  let removed = false;
+  for (const key of Object.keys(env)) {
+    if (/^GIT_/i.test(key) || /^(?:NODE_OPTIONS|NODE_PATH|NODE_TEST_CONTEXT)$/i.test(key)) {
+      delete env[key];
+      removed = true;
     }
   }
-  throw new StepError("npm executable is unavailable");
+  return removed ? env : source;
+}
+
+function regularFile(candidate, executable = false) {
+  try {
+    if (!lstatSync(candidate).isFile()) return undefined;
+    if (executable && process.platform !== "win32") accessSync(candidate, constants.X_OK);
+    return resolve(candidate);
+  } catch {
+    return undefined;
+  }
+}
+
+function nodeDirectoryCandidates() {
+  const nodeDirectory = dirname(process.execPath);
+  if (process.platform !== "win32") {
+    return [nodeDirectory, "/usr/bin", "/bin", "/usr/local/bin", "/opt/homebrew/bin"];
+  }
+  const programFiles = dirname(nodeDirectory);
+  const volumeRoot = parse(process.execPath).root;
+  return [
+    nodeDirectory,
+    join(programFiles, "Git", "cmd"),
+    join(programFiles, "Git", "bin"),
+    join(volumeRoot, "Program Files", "Git", "cmd"),
+    join(volumeRoot, "Program Files", "Git", "bin"),
+    join(volumeRoot, "Program Files (x86)", "Git", "cmd"),
+    join(volumeRoot, "Program Files (x86)", "Git", "bin"),
+    join(volumeRoot, "Windows", "System32"),
+  ];
+}
+
+function trustedGitCandidates() {
+  return nodeDirectoryCandidates().map((directory) => join(directory, process.platform === "win32" ? "git.exe" : "git"));
+}
+
+function trustedNpmCandidates() {
+  const nodeDirectory = dirname(process.execPath);
+  return [
+    join(nodeDirectory, "node_modules", "npm", "bin", "npm-cli.js"),
+    join(nodeDirectory, "..", "lib", "node_modules", "npm", "bin", "npm-cli.js"),
+    join(nodeDirectory, "..", "node_modules", "npm", "bin", "npm-cli.js"),
+    join(nodeDirectory, "..", "share", "nodejs", "npm", "bin", "npm-cli.js"),
+  ];
+}
+
+function trustedCommandProcessor() {
+  if (process.platform !== "win32") return undefined;
+  const volumeRoot = parse(process.execPath).root;
+  return regularFile(join(volumeRoot, "Windows", "System32", "cmd.exe"));
+}
+
+export function resolveNpmExecutable(_environment = process.env) {
+  for (const candidate of trustedNpmCandidates()) {
+    const npmCli = regularFile(candidate);
+    if (npmCli !== undefined) return npmCli;
+  }
+  throw new StepError("npm CLI executable is unavailable");
+}
+
+export function resolveNpmInvocation(environment = process.env) {
+  return { file: process.execPath, argsPrefix: [resolveNpmExecutable(environment)] };
+}
+
+export function resolveGitExecutable(_environment = process.env) {
+  for (const candidate of trustedGitCandidates()) {
+    const git = regularFile(candidate, true);
+    if (git !== undefined) return git;
+  }
+  throw new StepError("git executable is unavailable");
+}
+
+export function releaseCheckCommandPlan(npm, root = packageRoot) {
+  const invocation = typeof npm === "string" ? { file: npm, argsPrefix: [] } : npm;
+  if (invocation === null || typeof invocation !== "object" || typeof invocation.file !== "string" || !Array.isArray(invocation.argsPrefix)) {
+    throw new StepError("npm invocation is invalid");
+  }
+  const npmArgs = (args) => [ ...invocation.argsPrefix, ...args ];
+  return {
+    npmVersion: { file: invocation.file, args: npmArgs(["--version"]), display: "npm --version" },
+    fullTest: { file: invocation.file, args: npmArgs(["test"]), display: "npm test" },
+    pack: { file: invocation.file, args: npmArgs(["pack", "--dry-run", "--json"]), display: "npm pack --dry-run --json" },
+    smoke: {
+      file: process.execPath,
+      args: [join(root, "scripts", "package-smoke.mjs")],
+      display: "node scripts/package-smoke.mjs",
+    },
+  };
 }
 
 function isolatedEnvironment(root) {
@@ -136,19 +233,19 @@ function isolatedEnvironment(root) {
     NPM_CONFIG_FUND: "false",
     NPM_CONFIG_UPDATE_NOTIFIER: "false",
   });
+  for (const key of Object.keys(env)) {
+    if (key.toLowerCase() === "path" || key.toLowerCase() === "comspec") delete env[key];
+  }
+  env.PATH = [...new Set(nodeDirectoryCandidates())].join(process.platform === "win32" ? ";" : ":");
+  const commandProcessor = trustedCommandProcessor();
+  if (commandProcessor !== undefined) env.ComSpec = commandProcessor;
   delete env.NODE_OPTIONS;
   delete env.NODE_TEST_CONTEXT;
-  return env;
+  return sanitizeReleaseEnvironment(env);
 }
 
-function runStep(state, env, label, file, args, display) {
-  const invocation = commandInvocation(
-    file,
-    args,
-    process.platform,
-    env.ComSpec ?? env.COMSPEC ?? process.env.ComSpec ?? process.env.COMSPEC,
-  );
-  const result = spawnSync(invocation.file, invocation.args, {
+export function runReleaseStep(state, env, label, file, args, display, runner = spawnSync) {
+  const result = runner(file, args, {
     cwd: packageRoot,
     env,
     shell: false,
@@ -172,6 +269,56 @@ function runStep(state, env, label, file, args, display) {
   return result.stdout;
 }
 
+function gitOutput(root, args, options = {}) {
+  const env = sanitizeReleaseEnvironment(options.env ?? process.env);
+  const executable = options.gitExecutable ?? resolveGitExecutable(env);
+  const result = spawnSync(executable, args, {
+    cwd: root,
+    env,
+    shell: false,
+    encoding: "utf8",
+    timeout: COMMAND_TIMEOUT_MS,
+    maxBuffer: MAX_COMMAND_OUTPUT_BYTES,
+    windowsHide: true,
+  });
+  if (result.error !== undefined || result.status !== 0 || result.signal !== null) return undefined;
+  return result.stdout.trim();
+}
+
+export function readGitReleaseState(root, mode, runner = gitOutput, options = {}) {
+  const env = sanitizeReleaseEnvironment(options.env ?? process.env);
+  const gitExecutable = options.gitExecutable ?? (runner === gitOutput ? resolveGitExecutable(env) : undefined);
+  const run = (args) => runner(root, args, { env, gitExecutable });
+  return {
+    branch: run(["symbolic-ref", "--quiet", "--short", "HEAD"]) ?? "(detached)",
+    head: run(["rev-parse", "--verify", "HEAD^{commit}"]),
+    status: run(["status", "--short", "--untracked-files=all", "--"]) ?? "(git status unavailable)",
+    tagCommit: run(["rev-parse", "--verify", `refs/tags/${RELEASE_TAG}^{commit}`]),
+    mode,
+  };
+}
+
+export function assertReleaseTruth(state, { root = packageRoot, mode = "branch", env, gitExecutable } = {}) {
+  const evidenceEnv = sanitizeReleaseEnvironment(env ?? process.env);
+  const evidenceGit = gitExecutable ?? resolveGitExecutable(evidenceEnv);
+  const snapshot = readReleaseTruthSnapshot(root, evidenceEnv);
+  const documentErrors = validateReleaseTruth(snapshot);
+  const git = readGitReleaseState(root, mode, gitOutput, { env: evidenceEnv, gitExecutable: evidenceGit });
+  const gitErrors = validateGitReleaseState(git);
+  state.releaseTruth = {
+    mode,
+    canonicalBranch: CANONICAL_BRANCH,
+    tag: RELEASE_TAG,
+    immutableCommit: RELEASE_COMMIT,
+    packageRoot: root,
+    documents: documentErrors.length === 0 ? "passed" : "failed",
+    git,
+  };
+  if (documentErrors.length > 0 || gitErrors.length > 0) {
+    throw new StepError(`release truth failed: ${[...documentErrors, ...gitErrors].join("; ")}`);
+  }
+}
+
 function isEmptyDependencyRecord(value) {
   if (value === undefined || value === null) return true;
   if (typeof value !== "object" || Array.isArray(value)) return false;
@@ -180,14 +327,379 @@ function isEmptyDependencyRecord(value) {
   return Object.keys(value).length === 0;
 }
 
+function isEmptyBundleMetadata(value) {
+  return value === undefined || value === null || (Array.isArray(value) && value.length === 0);
+}
+
+function isCanonicalBinary(value, target) {
+  const binary = objectRecord(value);
+  if (binary === undefined) return false;
+  const prototype = Object.getPrototypeOf(binary);
+  return (prototype === Object.prototype || prototype === null)
+    && Object.keys(binary).length === 1
+    && binary[PACKAGE_BINARY] === target;
+}
+
+function objectRecord(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value) ? value : undefined;
+}
+
+function packageInfoValues(source) {
+  const canonical = [
+    `export const PACKAGE_NAME = "${PACKAGE_NAME}";`,
+    `export const PACKAGE_VERSION = "${PACKAGE_VERSION}";`,
+    `export const PACKAGE_BINARY = "${PACKAGE_BINARY}";`,
+  ].join("\n") + "\n";
+  if (source.replace(/\r\n?/gu, "\n") !== canonical) {
+    return { name: undefined, version: undefined, binary: undefined };
+  }
+  return { name: PACKAGE_NAME, version: PACKAGE_VERSION, binary: PACKAGE_BINARY };
+}
+
+function fullGitObjectId(value) {
+  return typeof value === "string" && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(value);
+}
+
+function markdownSourceLines(text) {
+  let fence;
+  return text.split(/\r?\n/u).map((line) => {
+    const opening = /^\s{0,3}(`{3,}|~{3,})/.exec(line)?.[1];
+    if (fence !== undefined) {
+      const closing = /^\s{0,3}(`{3,}|~{3,})\s*$/u.exec(line)?.[1];
+      if (closing !== undefined && closing[0] === fence.character && closing.length >= fence.length) fence = undefined;
+      return "";
+    }
+    if (opening !== undefined) {
+      fence = { character: opening[0], length: opening.length };
+      return "";
+    }
+    if (/^(?: {4}|\t)/u.test(line)) return "";
+    return line;
+  });
+}
+
+function maskMarkdownInlineExclusions(text) {
+  const output = text.split("");
+  const blank = (start, end) => {
+    for (let index = start; index < end; index += 1) {
+      if (output[index] !== "\n" && output[index] !== "\r") output[index] = " ";
+    }
+  };
+  let index = 0;
+  while (index < text.length) {
+    if (text[index] === "`") {
+      let precedingBackslashes = 0;
+      for (let previous = index - 1; previous >= 0 && text[previous] === "\\"; previous -= 1) {
+        precedingBackslashes += 1;
+      }
+      if (precedingBackslashes % 2 === 1) {
+        index += 1;
+        continue;
+      }
+      let delimiterLength = 1;
+      while (text[index + delimiterLength] === "`") delimiterLength += 1;
+      const delimiter = "`".repeat(delimiterLength);
+      const close = text.indexOf(delimiter, index + delimiterLength);
+      if (close < 0) return undefined;
+      blank(index, close + delimiterLength);
+      index = close + delimiterLength;
+      continue;
+    }
+    if (text[index] === "<") {
+      const autolink = /^<(?:(?:[A-Za-z][A-Za-z0-9+.-]*:)[^<>\s\r\n]*|[^<>\s@]+@[^<>\s@]+)>/u.exec(text.slice(index));
+      if (autolink !== null) {
+        blank(index, index + autolink[0].length);
+        index += autolink[0].length;
+        continue;
+      }
+    }
+    index += 1;
+  }
+  return output.join("");
+}
+
+// Release-truth docs deliberately reject raw HTML outside Markdown code until a real parser is warranted.
+function hasUnsupportedRawHtml(text) {
+  if (text.includes("\u0000")) return true;
+  const visible = maskMarkdownInlineExclusions(markdownSourceLines(text).join("\n"));
+  if (visible === undefined) return true;
+  return /<(?:(?:!--)|(?:\?)|(?:!)|(?:\/?\s*[A-Za-z]))/u.test(visible);
+}
+
+function hasVisibleStaleReleaseStatus(text) {
+  return markdownSourceLines(text).some((line) => /\b(?:unreleased|unpublished)\b/iu.test(line));
+}
+
+function validLockPackageEntries(value) {
+  const packages = objectRecord(value);
+  if (packages === undefined) return false;
+  return Object.entries(packages).every(([path, entry]) => {
+    if (path === "") return true;
+    const packageRecord = objectRecord(entry);
+    return packageRecord !== undefined && packageRecord.dev === true;
+  });
+}
+
+function markdownTextBlocks(text) {
+  const blocks = [];
+  let current = [];
+  const flush = () => {
+    if (current.length > 0) blocks.push(current.join(" "));
+    current = [];
+  };
+  for (const line of markdownSourceLines(text)) {
+    const trimmed = line.trim();
+    if (trimmed === "") {
+      flush();
+      continue;
+    }
+    if (/^\s{0,3}#{1,6}\s+/u.test(line)) {
+      flush();
+      current.push(trimmed);
+      continue;
+    }
+    if (/^\s{0,3}(?:[-*+]\s+|\d+[.)]\s+|>)/u.test(line)) {
+      flush();
+      current.push(trimmed);
+      continue;
+    }
+    current.push(trimmed);
+  }
+  flush();
+  return blocks;
+}
+
+function markdownH2Sections(text) {
+  const sections = [];
+  let current;
+  for (const line of markdownSourceLines(text)) {
+    const heading = /^\s{0,3}##(?!#)\s+(.+?)\s*$/u.exec(line);
+    if (heading !== null) {
+      current = { title: heading[1].trim(), lines: [line] };
+      sections.push(current);
+    } else if (current !== undefined) {
+      current.lines.push(line);
+    }
+  }
+  return sections.map((section) => ({
+    title: section.title,
+    lines: section.lines,
+    text: section.lines.join("\n"),
+  }));
+}
+
+function releaseClauses(line) {
+  return line
+    .split(/(?:[.!?;](?=\s|$))\s*/u)
+    .flatMap((sentence) => sentence.split(/\s+\b(?:but|however|although|though)\b\s*/iu));
+}
+
+function directlyNegated(clause, start, end) {
+  const before = clause.slice(0, start);
+  const after = clause.slice(end);
+  if (/(?:^|\s)\b(?:not|never)(?:\s+(?:currently|actually|yet|been))*\s*$/i.test(before)) return true;
+  if (/(?:^|\s)\b(?:no|without)(?:\s+(?:npm|the|package|publication|version|release|registry)){0,3}\s*$/i.test(before)) {
+    return true;
+  }
+  if (/\bno\s+version\s+bump\s+or\s*$/i.test(before)) return true;
+  return /^\s*(?:(?:is|are|was|were|has|have|had|does|did|can|could|will|would)\s+)?(?:no|not|never)\b/i.test(after);
+}
+
+function hasPositivePublicationClaim(text) {
+  const context = /(?:\bnpm\b|\bpackage\b|\brelease\b|\bversion\b|\btarball\b|\bartifact\b|\bregistry\b|\bv?\d+\.\d+\.\d+\b|@poggufanz\/rocky-cli)/i;
+  const signals = [
+    /\b(?:publish\w*|publication\w*)\b/gi,
+    /\b(?:available|availability|live)\b[\s\S]{0,80}\b(?:on|from|via|in)\s+(?:npm|the npm registry|npm registry|the registry|registry\.npmjs\.org)\b/gi,
+    /\b(?:(?:is|are|was|were)\s+)?(?:now|landed|downloadable)\s+(?:on|from|via|in)\s+(?:npm|the npm registry|npm registry|the registry|registry\.npmjs\.org)\b/gi,
+    /\b(?:package|version|release|tarball|artifact|v\d+\.\d+(?:\.\d+)?)\b(?:(?!\b(?:not|never|no|without)\b)[\s\S]){0,80}\b(?:(?:is|are|was|were)\s+(?:now\s+)?(?:(?:available|availability|live|downloadable)\s+)?|(?:now\s+)?(?:available|availability|live|downloadable|landed)\s+)(?:on|from|via|in)\s+(?:npm|the npm registry|npm registry|the registry|registry\.npmjs\.org)\b/gi,
+  ];
+  return markdownTextBlocks(text).some((line) => releaseClauses(line).some((clause) => {
+    if (!context.test(clause)) return false;
+    const matches = new Map();
+    for (const signal of signals) {
+      for (const match of clause.matchAll(signal)) {
+        const start = match.index ?? 0;
+        matches.set(`${start}:${start + match[0].length}`, { start, end: start + match[0].length });
+      }
+    }
+    return [...matches.values()].some(({ start, end }) => !directlyNegated(clause, start, end));
+  }));
+}
+
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+export function validateReleaseTruth(snapshot) {
+  const errors = [];
+  const expectedVersion = PACKAGE_VERSION;
+  const value = objectRecord(snapshot);
+  if (value === undefined) return ["release truth snapshot is not an object"];
+
+  const metadata = objectRecord(value.metadata);
+  if (metadata === undefined || !validateReleaseMetadata(metadata) || metadata.version !== expectedVersion) {
+    errors.push("package metadata does not match canonical release identity");
+  }
+
+  const lock = objectRecord(value.lock);
+  const lockPackages = lock === undefined ? undefined : objectRecord(lock.packages);
+  const lockRoot = lockPackages === undefined ? undefined : objectRecord(lockPackages[""]);
+  if (lock === undefined || lock.name !== PACKAGE_NAME || lock.version !== expectedVersion
+      || !isEmptyDependencyRecord(lock.dependencies)
+      || !isEmptyDependencyRecord(lock.optionalDependencies)
+      || !isEmptyDependencyRecord(lock.peerDependencies)
+      || !isEmptyDependencyRecord(lock.peerDependenciesMeta)
+      || !isEmptyBundleMetadata(lock.bundledDependencies)
+      || !isEmptyBundleMetadata(lock.bundleDependencies)
+      || !validLockPackageEntries(lockPackages)
+      || lockRoot === undefined || lockRoot.name !== PACKAGE_NAME || lockRoot.version !== expectedVersion
+      || !isEmptyDependencyRecord(lockRoot.dependencies) || !isEmptyDependencyRecord(lockRoot.optionalDependencies)
+      || !isEmptyDependencyRecord(lockRoot.peerDependencies) || !isEmptyDependencyRecord(lockRoot.peerDependenciesMeta)
+      || !isEmptyBundleMetadata(lockRoot.bundledDependencies) || !isEmptyBundleMetadata(lockRoot.bundleDependencies)
+      || !isCanonicalBinary(lockRoot.bin, "dist/index.js")) {
+    errors.push("package lock does not match canonical release identity");
+  }
+
+  const info = typeof value.packageInfoSource === "string"
+    ? packageInfoValues(value.packageInfoSource)
+    : { name: undefined, version: undefined, binary: undefined };
+  if (info.name !== PACKAGE_NAME || info.version !== expectedVersion || info.binary !== PACKAGE_BINARY) {
+    errors.push("package-info constants do not match canonical release identity");
+  }
+
+  const readme = typeof value.readme === "string" ? value.readme : "";
+  const visibleReadmeLines = markdownSourceLines(readme);
+  const roadmapSections = markdownH2Sections(readme).filter((section) => /^Roadmap$/i.test(section.title));
+  const roadmap = roadmapSections.length === 1 ? roadmapSections[0] : undefined;
+  const currentRoadmapLines = roadmap?.lines.filter((line) => /\(current release\)/i.test(line)) ?? [];
+  const roadmapToken = /^[-*]\s+\*\*(v\d+\.\d+(?:\.\d+)?)\s+/i.exec(currentRoadmapLines[0] ?? "")?.[1];
+  const expectedMinorVersion = expectedVersion.split(".").slice(0, 2).join(".");
+  const allowedRoadmapTokens = new Set([`v${expectedVersion}`, `v${expectedMinorVersion}`]);
+  const allowedRoadmapToken = roadmapToken !== undefined && allowedRoadmapTokens.has(roadmapToken);
+  const currentReleaseLines = visibleReadmeLines.filter((line) => /^\s*Current release\s*:/i.test(line));
+  const currentReleaseMarkerCount = (visibleReadmeLines.join("\n").match(/\bCurrent release\s*:/gi) ?? []).length;
+  const canonicalCurrentMarker = `Current release: \`${PACKAGE_NAME}@${expectedVersion}\``;
+  const canonicalLayout = `Repository layout: a fresh clone of the canonical upstream repository (\`${CANONICAL_REPOSITORY_URL}\`) is the package root; run \`npm install\`, \`npm test\`, and \`npm pack\` there. In this outer workspace, that same package root is the \`${CANONICAL_PACKAGE_ROOT}\` directory. Canonical developer branch is \`${CANONICAL_BRANCH}\`; \`iq\` is a remediation branch, not a second release line.`;
+  const canonicalLayoutLines = visibleReadmeLines.filter((line) => /^\s*Repository layout\s*:/i.test(line));
+  if (currentReleaseMarkerCount !== 1
+      || currentReleaseLines.length !== 1
+      || !new RegExp(`^${escapeRegExp(canonicalCurrentMarker)}(?:\\.|$)`, "u").test(currentReleaseLines[0].trim())
+      || roadmap === undefined
+      || currentRoadmapLines.length !== 1
+      || !allowedRoadmapToken
+      || canonicalLayoutLines.length !== 1
+      || canonicalLayoutLines[0].trim() !== canonicalLayout
+      || hasUnsupportedRawHtml(readme)
+      || hasVisibleStaleReleaseStatus(readme)
+      || hasPositivePublicationClaim(readme)) {
+    errors.push("README release identity or publication status is stale");
+  }
+
+  const changelog = typeof value.changelog === "string" ? value.changelog : "";
+  const changelogSections = markdownH2Sections(changelog);
+  const releaseSections = changelogSections.filter((section) => /^\d+\.\d+\.\d+(?:\s|$)/u.test(section.title));
+  const headingVersion = /^(\d+\.\d+\.\d+)(?:\s|$)/u.exec(releaseSections[0]?.title ?? "")?.[1];
+  const expectedSections = releaseSections.filter((section) => new RegExp(`^${escapeRegExp(expectedVersion)}(?:\\s|$)`).test(section.title));
+  const currentSection = expectedSections.length === 1 ? expectedSections[0].text : "";
+  if (headingVersion !== expectedVersion
+      || expectedSections.length !== 1
+      || (currentSection !== "" && /\b(?:unreleased|unpublished)\b/i.test(currentSection))
+      || hasUnsupportedRawHtml(changelog)
+      || hasPositivePublicationClaim(changelog)) {
+    errors.push("CHANGELOG release status is stale");
+  }
+
+  const helpStdout = typeof value.helpStdout === "string" ? value.helpStdout : "";
+  const helpStderr = typeof value.helpStderr === "string" ? value.helpStderr : "";
+  const helpVersionMarkers = [...helpStdout.matchAll(new RegExp(`${PACKAGE_NAME.replace("/", "\\/")}@([^\\s\\r\\n]+)`, "g"))]
+    .map((match) => match[1]);
+  const versionLines = helpStdout.split(/\r?\n/u).filter((line) => /^\s*version\s*:/i.test(line));
+  if (value.helpCompleted !== true
+      || helpStderr !== ""
+      || !helpStdout.includes(`version: ${PACKAGE_NAME}@${expectedVersion}`)
+      || helpVersionMarkers.length !== 1
+      || helpVersionMarkers[0] !== expectedVersion
+      || versionLines.length !== 1
+      || versionLines[0].trim() !== `version: ${PACKAGE_NAME}@${expectedVersion}`) {
+    errors.push("CLI help does not expose canonical release identity");
+  }
+  const versionStdout = typeof value.versionStdout === "string" ? value.versionStdout : "";
+  const versionStderr = typeof value.versionStderr === "string" ? value.versionStderr : "";
+  if (value.versionCompleted !== true || versionStderr !== "" || versionStdout !== `${expectedVersion}\n`) {
+    errors.push("CLI --version does not match canonical release identity");
+  }
+  return errors;
+}
+
+export function readReleaseTruthSnapshot(root = packageRoot, env = sanitizeReleaseEnvironment()) {
+  env = sanitizeReleaseEnvironment(env);
+  const metadata = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
+  const lock = JSON.parse(readFileSync(join(root, "package-lock.json"), "utf8"));
+  const packageInfoSource = readFileSync(join(root, "src", "core", "package-info.ts"), "utf8");
+  const readme = readFileSync(join(root, "README.md"), "utf8");
+  const changelog = readFileSync(join(root, "CHANGELOG.md"), "utf8");
+  const helpResult = spawnSync(process.execPath, [join(root, "dist", "index.js"), "--help"], {
+    cwd: root,
+    env,
+    encoding: "utf8",
+    timeout: COMMAND_TIMEOUT_MS,
+    maxBuffer: MAX_COMMAND_OUTPUT_BYTES,
+  });
+  const versionResult = spawnSync(process.execPath, [join(root, "dist", "index.js"), "--version"], {
+    cwd: root,
+    env,
+    encoding: "utf8",
+    timeout: COMMAND_TIMEOUT_MS,
+    maxBuffer: MAX_COMMAND_OUTPUT_BYTES,
+  });
+  const helpStdout = helpResult.stdout ?? "";
+  const helpStderr = helpResult.stderr ?? "";
+  const versionStdout = versionResult.stdout ?? "";
+  const versionStderr = versionResult.stderr ?? "";
+  return {
+    metadata,
+    lock,
+    packageInfoSource,
+    readme,
+    changelog,
+    help: `${helpStdout}${helpStderr}`,
+    helpStdout,
+    helpStderr,
+    versionOutput: versionStdout,
+    versionStdout,
+    versionStderr,
+    helpCompleted: helpResult.error === undefined && helpResult.status === 0 && helpResult.signal === null,
+    versionCompleted: versionResult.error === undefined && versionResult.status === 0 && versionResult.signal === null,
+  };
+}
+
+export function validateGitReleaseState(state) {
+  const errors = [];
+  const value = objectRecord(state);
+  if (value === undefined) return ["git release state is not an object"];
+  if (!fullGitObjectId(value.head)) errors.push("git HEAD evidence is missing or not a full object id");
+  if (typeof value.status !== "string" || value.status.trim() !== "") errors.push("package worktree is dirty");
+  if (value.tagCommit !== RELEASE_COMMIT) errors.push(`${RELEASE_TAG} does not resolve to immutable release commit`);
+  if (value.mode === "release") {
+    if (value.head !== RELEASE_COMMIT) errors.push("release mode requires HEAD at immutable release commit");
+  } else if (value.mode !== "branch") {
+    errors.push("release mode must be branch or release");
+  }
+  return errors;
+}
+
 export function validateReleaseMetadata(value) {
   try {
     if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
     return isEmptyDependencyRecord(value.dependencies)
       && isEmptyDependencyRecord(value.optionalDependencies)
+      && isEmptyDependencyRecord(value.peerDependencies)
+      && isEmptyDependencyRecord(value.peerDependenciesMeta)
+      && isEmptyBundleMetadata(value.bundledDependencies)
+      && isEmptyBundleMetadata(value.bundleDependencies)
       && value.name === PACKAGE_NAME
       && value.version === PACKAGE_VERSION
-      && JSON.stringify(value.bin) === JSON.stringify({ rocky: "./dist/index.js" })
+      && isCanonicalBinary(value.bin, "./dist/index.js")
       && value.engines?.node === ">=18"
       && value.license === "MIT"
       && value.author === "Muhammad Faiq"
@@ -281,10 +793,15 @@ function safeCell(value) {
 
 function markdown(state) {
   const status = state.failure === undefined ? "PASS" : "FAIL";
+  const truthOnly = state.scope === "truth-only";
   const lines = [
     `# Rocky ${PACKAGE_VERSION} release check`,
     "",
     `- Result: **${status}**`,
+    `- Scope: **${state.scope ?? "full release gate"}**`,
+    ...(truthOnly
+      ? ["- Truth-only scope: document and Git evidence only; build, tests, pack, smoke, and benchmark did not run in this invocation."]
+      : []),
     `- Measured at: ${state.measuredAt}`,
     `- Node: ${state.node}`,
     `- npm: ${state.npm ?? "not captured"}`,
@@ -312,7 +829,9 @@ function markdown(state) {
     );
   }
   lines.push("", "## Dry-run package manifest", "");
-  if (state.manifest === undefined) lines.push("Pending: manifest step did not complete.");
+  if (state.manifest === undefined) lines.push(truthOnly
+    ? "Not run: truth-only scope does not execute package pack."
+    : "Pending: manifest step did not complete.");
   else {
     lines.push(
       `- Filename: ${state.manifest.filename}`,
@@ -336,73 +855,100 @@ function markdown(state) {
       `- RSS method: ${report.steadyStateRssBytes.method}`,
     );
   } else {
-    lines.push(`- Result: pending (${state.benchmark?.reason ?? "benchmark step did not complete"})`);
+    const benchmarkStatus = state.benchmark?.status === "not-run" ? "not run" : "pending";
+    lines.push(`- Result: ${benchmarkStatus} (${state.benchmark?.reason ?? "benchmark step did not complete"})`);
   }
   lines.push("", "## Git evidence", "");
+  if (state.releaseTruth === undefined) lines.push("- Release truth: not completed", "");
+  else {
+    lines.push(
+      `- Mode: ${state.releaseTruth.mode}`,
+      `- Canonical developer branch: ${state.releaseTruth.canonicalBranch}`,
+      `- Package root: ${state.releaseTruth.packageRoot}`,
+      `- Immutable tag: ${state.releaseTruth.tag}`,
+      `- Immutable release commit: ${state.releaseTruth.immutableCommit}`,
+      `- Released baseline: ${state.releaseTruth.tag} remains at that commit; branch mode does not retag remediation HEAD`,
+      `- Document markers: ${state.releaseTruth.documents}`,
+      `- Branch: ${state.releaseTruth.git.branch}`,
+      `- HEAD: ${state.releaseTruth.git.head ?? "unavailable"}`,
+      `- Tag dereference: ${state.releaseTruth.git.tagCommit ?? "unavailable"}`,
+      `- Package tree: ${state.releaseTruth.git.status?.trim() === "" ? "clean" : "dirty"}`,
+      "",
+    );
+  }
   lines.push(`- Diff check: ${state.diffCheckPassed ? "passed" : "not completed"}`);
-  lines.push("- Status (`git status --short` is evidence, not a cleanliness gate):", "", "```text");
+  lines.push("- Status (`git status --short --untracked-files=all`) is a release-truth cleanliness gate:", "", "```text");
   lines.push(state.gitStatus?.trimEnd() || "(clean or unavailable)", "```", "");
   if (state.failure !== undefined) lines.push("## Failure", "", state.failure, "");
   lines.push("This checker did not publish or mutate registry state.", "");
   return lines.join("\n");
 }
 
-async function main(reportPath) {
+async function main(reportPath, mode, truthOnly = false) {
   const state = {
     measuredAt: new Date().toISOString(),
     node: process.version,
     platform: process.platform,
     arch: process.arch,
     commands: [],
+    scope: truthOnly ? "truth-only" : "full release gate",
   };
   let temporaryRoot;
   let failed = false;
   try {
     temporaryRoot = mkdtempSync(join(tmpdir(), "rocky-release-check-"));
     const env = isolatedEnvironment(temporaryRoot);
-    const npm = process.env.ROCKY_RELEASE_CHECK_TEST_SPAWN_ERROR === "1"
-      ? join(temporaryRoot, "missing-npm-executable")
-      : resolveNpmExecutable();
-    state.npm = runStep(state, env, "npm version", npm, ["--version"], "npm --version").trim();
-    runStep(state, env, "clean build and full tests", npm, ["test"], "npm test");
-    assertMetadata(state);
-    state.manifest = parseManifest(runStep(
-      state,
-      env,
-      "dry-run package manifest",
-      npm,
-      ["pack", "--dry-run", "--json"],
-      "npm pack --dry-run --json",
-    ));
-    runStep(
-      state,
-      env,
-      "installed tarball smoke",
-      process.execPath,
-      [join(packageRoot, "scripts", "package-smoke.mjs")],
-      "node scripts/package-smoke.mjs",
-    );
-
-    if (process.platform === "linux" && Number(process.versions.node.split(".")[0]) === 22) {
-      const benchmarkPath = join(temporaryRoot, "benchmark.json");
-      runStep(
+    const gitExecutable = resolveGitExecutable(env);
+    if (truthOnly) {
+      assertMetadata(state);
+      state.benchmark = { status: "not-run", reason: "truth-only validation" };
+    } else {
+      const npm = process.env.ROCKY_RELEASE_CHECK_TEST_SPAWN_ERROR === "1"
+        ? { file: join(temporaryRoot, "missing-npm-executable"), argsPrefix: [] }
+        : resolveNpmInvocation(env);
+      const commands = releaseCheckCommandPlan(npm, packageRoot);
+      state.npm = runReleaseStep(state, env, "npm version", commands.npmVersion.file, commands.npmVersion.args, commands.npmVersion.display).trim();
+      runReleaseStep(state, env, "clean build and full tests", commands.fullTest.file, commands.fullTest.args, commands.fullTest.display);
+      assertMetadata(state);
+      state.manifest = parseManifest(runReleaseStep(
         state,
         env,
-        "MCP benchmark",
-        process.execPath,
-        [join(packageRoot, "scripts", "benchmark-mcp.mjs"), "--output", benchmarkPath],
-        "node scripts/benchmark-mcp.mjs --output <temporary-report>",
+        "dry-run package manifest",
+        commands.pack.file,
+        commands.pack.args,
+        commands.pack.display,
+      ));
+      runReleaseStep(
+        state,
+        env,
+        "installed tarball smoke",
+        commands.smoke.file,
+        commands.smoke.args,
+        commands.smoke.display,
       );
-      const report = JSON.parse(readFileSync(benchmarkPath, "utf8"));
-      if (report?.gates?.passed !== true) throw new StepError("MCP benchmark gate did not pass");
-      state.benchmark = { status: "passed", report };
-    } else {
-      state.benchmark = { status: "pending", reason: "requires Node 22 on Linux" };
+
+      if (process.platform === "linux" && Number(process.versions.node.split(".")[0]) === 22) {
+        const benchmarkPath = join(temporaryRoot, "benchmark.json");
+        runReleaseStep(
+          state,
+          env,
+          "MCP benchmark",
+          process.execPath,
+          [join(packageRoot, "scripts", "benchmark-mcp.mjs"), "--output", benchmarkPath],
+          "node scripts/benchmark-mcp.mjs --output <temporary-report>",
+        );
+        const report = JSON.parse(readFileSync(benchmarkPath, "utf8"));
+        if (report?.gates?.passed !== true) throw new StepError("MCP benchmark gate did not pass");
+        state.benchmark = { status: "passed", report };
+      } else {
+        state.benchmark = { status: "pending", reason: "requires Node 22 on Linux" };
+      }
     }
 
-    runStep(state, env, "git diff check", "git", ["diff", "--check"], "git diff --check");
+    runReleaseStep(state, env, "git diff check", gitExecutable, ["diff", "--check"], "git diff --check");
     state.diffCheckPassed = true;
-    state.gitStatus = runStep(state, env, "git status evidence", "git", ["status", "--short"], "git status --short");
+    state.gitStatus = runReleaseStep(state, env, "git status evidence", gitExecutable, ["status", "--short", "--untracked-files=all"], "git status --short --untracked-files=all");
+    assertReleaseTruth(state, { mode, env, gitExecutable });
   } catch (error) {
     failed = true;
     state.failure = error instanceof Error ? error.message : String(error);
@@ -421,9 +967,9 @@ const launchedAsScript = process.argv[1] !== undefined
   && resolve(process.argv[1]) === resolve(fileURLToPath(import.meta.url));
 if (launchedAsScript) {
   try {
-    const report = reportArgument(process.argv.slice(2));
-    await main(report);
-    process.stdout.write(`${report}\n`);
+    const parsed = reportArgument(process.argv.slice(2));
+    await main(parsed.path, parsed.mode, parsed.truthOnly);
+    process.stdout.write(`${parsed.path}\n`);
   } catch (error) {
     process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
     process.exitCode = error instanceof UsageError ? 2 : 1;

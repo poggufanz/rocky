@@ -29,6 +29,7 @@ import {
 } from "../setup/agent-hooks.js";
 import { createPlatformServices } from "../setup/platform.js";
 import { setup, type SetupDependencies } from "../commands/setup.js";
+import { skipIfSymlinkUnavailable } from "./symlink-capability.js";
 
 const LEGACY_CLAUDE_HOOK_COMMAND = "rocky hook agent-event claude-code";
 
@@ -341,6 +342,7 @@ test("Windows hook paths double a trailing backslash before closing quote", () =
 });
 
 test("pending transactions, symlink targets, and symlink parents fail closed", async (t) => {
+  if (skipIfSymlinkUnavailable(t)) return;
   const value = fixture(t);
   mkdirSync(dirname(value.settings), { recursive: true });
   const transaction = join(dirname(value.settings), `.${basename(value.settings)}.transaction-test`);
@@ -486,6 +488,7 @@ test("agent-hook capability notice precedes consent and remains visible in statu
     output = "";
     assert.equal(await setup(["--status"], dependencies), 0);
     assert.match(output, /Claude Code capture requires hook payload field `prompt_id`/);
+    assert.match(output, /setup status scope: host\/MCP registration via rocky setup --check and agent-hook state\/capability; spool and Ollama\/model health are not checked\./);
     assert.match(output, /claude-code agent hooks: installed/);
     assert.match(output, /codex agent hooks: manual/);
   } finally {

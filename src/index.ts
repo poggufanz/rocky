@@ -24,14 +24,16 @@ import { digest, exportCommand, how, quiz, what, why } from "./commands/dictiona
 import { agentEvent } from "./commands/agent-hook.js";
 import { annotateCommand } from "./agent/annotate.js";
 import { ambiguityCommand } from "./agent/ambiguity.js";
+import { CliUsageError, parseExactCommand, reportCliUsage } from "./commands/cli-args.js";
 import { PACKAGE_NAME, PACKAGE_VERSION } from "./core/package-info.js";
-import { face, say } from "./ui/rocky.js";
+import { detail, face, say } from "./ui/rocky.js";
 
 const HELP = `
 rocky — he remembers, so you don't have to.
 
 install:
   npm install -g ${PACKAGE_NAME}
+  version: ${PACKAGE_NAME}@${PACKAGE_VERSION}
 
 usage:
   rocky run "<command>"     run command through Rocky. failures are remembered;
@@ -47,11 +49,14 @@ usage:
                             ask Rocky's memory. matches words from error or command.
   rocky recall --ai [--] <query...>
                             --ai asks configured local Ollama after deterministic recall.
-  rocky what <query...>     look up what remembered intent became.
-  rocky how <query...>      remember how intent became code.
-  rocky why <file>          hear why remembered change touched file.
+  rocky what [--ai] [--] <query...>
+                            look up what remembered intent became.
+  rocky how [--] <query...> remember how intent became code.
+  rocky why [--] <file>     hear why remembered change touched file.
   rocky digest              hear this week's remembered intent pattern.
-  rocky quiz                practice remembered intent. Rocky asks, then reveals.
+  rocky quiz                practice newest remembered intent or note; asks, then reveals,
+                            deterministic newest-first, stable id tie-break, repeats unchanged
+                            candidates, and never grades.
   rocky export [--kind failure|fix|note|triple] [--since ISO|Nd]
                             dump raw memory as JSONL on stdout.
   rocky model status         report local-AI configuration without loading a model.
@@ -71,7 +76,9 @@ usage:
                             install Claude Code hooks after explicit consent; print Codex TOML.
   rocky setup --uninstall-agent-hooks
                             remove Rocky Claude Code hooks; Codex config stays untouched.
-  rocky setup --status       report Claude Code agent-hook state; Codex remains manual.
+  rocky setup --status       report host/MCP registration via rocky setup --check and
+                            agent-hook state/capability; spool and Ollama/model health
+                            are not checked.
   rocky check [--pre-push|--install-hook|--offline|--quiet]
                             hull check before push.
   rocky hook install        put Rocky's ears in your bash. every command heard,
@@ -87,74 +94,109 @@ yes first, offline never blocks. configured hosts control what they forward;
 optional AI uses loopback Ollama only.
 `;
 
+type HookRequest =
+  | { kind: "install" | "uninstall" | "status" }
+  | { kind: "agent-event"; adapter: "claude-code" | "codex"; argvPayload?: string };
+
+function parseHookArgs(argv: readonly string[]): HookRequest {
+  const [subcommand, ...rest] = argv;
+  if (subcommand === "install" || subcommand === "uninstall" || subcommand === "status") {
+    if (rest.length !== 0) {
+      throw new CliUsageError(`unexpected argument: ${rest[0]}`, "rocky hook install|uninstall|status");
+    }
+    return { kind: subcommand };
+  }
+  if (subcommand === "agent-event") {
+    const [adapter, payload] = rest;
+    if (adapter === "claude-code" && rest.length === 1) {
+      return { kind: "agent-event", adapter };
+    }
+    if (adapter === "codex" && (rest.length === 1 || rest.length === 2)) {
+      return payload === undefined
+        ? { kind: "agent-event", adapter }
+        : { kind: "agent-event", adapter, argvPayload: payload };
+    }
+  }
+  throw new CliUsageError("hook needs one known subcommand", "rocky hook install|uninstall|status|agent-event claude-code|codex");
+}
+
 async function main(): Promise<number> {
   const [, , command, ...rest] = process.argv;
-  const arg = rest.join(" ");
-
-  switch (command) {
-    case "run":
-      return run(arg);
-    case "watch":
-      return watch(rest);
-    case "recall":
-      return recall(rest);
-    case "model":
-      return model(rest);
-    case "stats":
-      return stats();
-    case "mcp":
-      return mcp();
-    case "setup":
-      return setup(rest);
-    case "check":
-      return check(rest);
-    case "what":
-      return what(rest);
-    case "how":
-      return how(rest);
-    case "why":
-      return why(rest);
-    case "digest":
-      return digest(rest);
-    case "quiz":
-      return quiz(rest);
-    case "export":
-      return exportCommand(rest);
-    case "hook":
-      switch (rest[0]) {
-        case "install":
-          return hookInstall();
-        case "uninstall":
-          return hookUninstall();
-        case "status":
-          return hookStatus();
-        case "agent-event":
-          return agentEvent(rest[1] ?? "", rest[1] === "codex" ? { argvPayload: rest[2] } : undefined);
-        default:
-          say("hook needs install, uninstall, or status. which one, question");
-          return 2;
+  try {
+    switch (command) {
+      case "run":
+        return run(parseExactCommand(rest, "rocky run <command>"));
+      case "watch":
+        return watch(rest);
+      case "recall":
+        return recall(rest);
+      case "model":
+        return model(rest);
+      case "stats":
+        return stats(rest);
+      case "mcp":
+        return mcp(rest);
+      case "setup":
+        return setup(rest);
+      case "check":
+        return check(rest);
+      case "what":
+        return what(rest);
+      case "how":
+        return how(rest);
+      case "why":
+        return why(rest);
+      case "digest":
+        return digest(rest);
+      case "quiz":
+        return quiz(rest);
+      case "export":
+        return exportCommand(rest);
+      case "hook": {
+        const parsed = parseHookArgs(rest);
+        switch (rest[0]) {
+          case "install":
+            return hookInstall();
+          case "uninstall":
+            return hookUninstall();
+          case "status":
+            return hookStatus();
+          case "agent-event":
+            if (parsed.kind === "agent-event") {
+              return agentEvent(parsed.adapter, parsed.argvPayload === undefined ? undefined : { argvPayload: parsed.argvPayload });
+            }
+            break;
+        }
+        throw new Error("unreachable hook request");
       }
-    case "_hookfail":
-      return hookFail(rest[0] ?? "", Number(rest[1] ?? 1), rest[2] ?? process.cwd());
-    case "_hooksuccess":
-      return hookSuccess(rest[0] ?? "", rest[1] ?? process.cwd());
-    case "_annotate":
-      return annotateCommand(rest[0] ?? "");
-    case "_ambiguity":
-      return ambiguityCommand(rest[0] ?? "");
-    case "--version":
-      console.log(PACKAGE_VERSION);
-      return 0;
-    case "--help":
-    case "-h":
-    case "help":
-    case undefined:
-      console.log(face());
-      console.log(HELP);
-      return 0;
-    default:
-      say(`"${command}" is not command I know. run --help, question`);
-      return 2;
+      case "_hookfail":
+        return hookFail(rest[0] ?? "", Number(rest[1] ?? 1), rest[2] ?? process.cwd());
+      case "_hooksuccess":
+        return hookSuccess(rest[0] ?? "", rest[1] ?? process.cwd());
+      case "_annotate":
+        return annotateCommand(rest[0] ?? "");
+      case "_ambiguity":
+        return ambiguityCommand(rest[0] ?? "");
+      case "--version":
+        if (rest.length !== 0) throw new CliUsageError(`unexpected argument: ${rest[0]}`, "rocky --version");
+        console.log(PACKAGE_VERSION);
+        return 0;
+      case "--help":
+      case "-h":
+      case "help":
+      case undefined:
+        if (rest.length !== 0) throw new CliUsageError(`unexpected argument: ${rest[0]}`, "rocky --help");
+        console.log(face());
+        console.log(HELP);
+        return 0;
+      default:
+        say(`"${command}" is not command I know. run --help, question`);
+        return 2;
+    }
+  } catch (error) {
+    const code = reportCliUsage(error, say, detail);
+    if (code !== undefined) return code;
+    throw error;
   }
 }
 

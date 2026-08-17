@@ -47,6 +47,7 @@ import {
   type VoiceSkillTarget,
 } from "../setup/voice-skill.js";
 import { detail, say } from "../ui/rocky.js";
+import { safeTerminalBlock, safeTerminalLine } from "../ui/sanitize.js";
 
 export interface ConfirmationPort {
   confirm(message: string): Promise<boolean>;
@@ -209,8 +210,8 @@ function manualAddArguments(client: "codex" | "claude-code", registration: McpRe
 }
 
 function printResult(mode: SetupMode, result: SetupResult, desired: McpRegistration): void {
-  detail(`${result.client}: ${result.status}`);
-  if (result.detail !== undefined) detail(result.detail);
+  detail(`${safeTerminalLine(result.client)}: ${safeTerminalLine(result.status)}`);
+  if (result.detail !== undefined) detail(safeTerminalBlock(result.detail));
   if (mode !== "configure") return;
   if (result.manualRegistration === undefined) return;
   if (!isIdenticalMcpRegistration(result.manualRegistration, desired)) {
@@ -443,18 +444,19 @@ async function runAgentHooksAction(
     if (action === "install") {
       const result = await installClaudeAgentHooks(target, options);
       detail(`claude-code agent hooks: ${result.status}`);
-      if (result.detail !== undefined) detail(result.detail);
+      if (result.detail !== undefined) detail(safeTerminalBlock(result.detail));
       printCodexAgentHooks(codexCommand);
       return result.status === "written" || result.status === "unchanged" ? 0 : 1;
     }
     if (action === "uninstall") {
       const result = await uninstallClaudeAgentHooks(target, options);
       detail(`claude-code agent hooks: ${result.status}`);
-      if (result.detail !== undefined) detail(result.detail);
+      if (result.detail !== undefined) detail(safeTerminalBlock(result.detail));
       detail("codex agent hooks: manual (config.toml unchanged)");
       return result.status === "written" || result.status === "unchanged" ? 0 : 1;
     }
     const result = agentHooksStatus(target, options);
+    detail("setup status scope: host/MCP registration via rocky setup --check and agent-hook state/capability; spool and Ollama/model health are not checked.");
     detail(`claude-code agent hooks: ${result.claudeCode}`);
     detail("codex agent hooks: manual");
     return result.claudeCode === "unreadable" ? 1 : 0;
@@ -518,10 +520,10 @@ async function invokeVoiceSkills(
 }
 
 function printVoiceSkillResult(result: VoiceSkillOperationResult): void {
-  detail(`voice-skill ${result.host}: ${result.status}`);
-  detail(result.detail);
+  detail(`voice-skill ${safeTerminalLine(result.host)}: ${safeTerminalLine(result.status)}`);
+  detail(safeTerminalBlock(result.detail));
   if (result.backupPath !== undefined && !result.detail.includes(result.backupPath)) {
-    detail(`voice-skill backup: ${result.backupPath}`);
+    detail(`voice-skill backup: ${safeTerminalLine(result.backupPath)}`);
   }
 }
 

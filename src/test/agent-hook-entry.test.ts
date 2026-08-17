@@ -17,8 +17,9 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test, type TestContext } from "node:test";
 import { agentEvent, logHookError } from "../commands/agent-hook.js";
-import { readBatch } from "../agent/spool.js";
+import { appendEvent, readBatch } from "../agent/spool.js";
 import { resolveRockyPaths, type RockyPaths } from "../core/state-paths.js";
+import { skipIfSymlinkUnavailable } from "./symlink-capability.js";
 
 const packageRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const entry = join(packageRoot, "dist", "index.js");
@@ -150,6 +151,56 @@ test("enabled mechanism append never spawns ambiguity and preserves exact stdout
   assert.equal(result.out, "{}");
   assert.deepEqual(spawned, []);
   assert.equal(readBatch("claude-code-s1-p2", paths).length, 1);
+});
+
+test("bounded hook fan-out persists exact adapter overflow", async (t) => {
+  const paths = freshPaths(t);
+  const edits = Array.from({ length: 70 }, (_, index) => ({
+    file_path: `file-${index}.ts`, new_string: `value-${index}`,
+  }));
+  const payload = JSON.stringify({
+    session_id: "s1", prompt_id: "overflow", hook_event_name: "PostToolUse",
+    tool_name: "MultiEdit", tool_input: { edits },
+  });
+  const result = await captureStdout(() => agentEvent("claude-code", {
+    stdin: async () => payload, paths,
+  }));
+  assert.equal(result.code, 0);
+  assert.equal(result.out, "{}");
+  const events = readBatch("claude-code-s1-overflow", paths);
+  assert.equal(events.length, 64);
+  const marked = events.find((event) => event.kind === "mechanism" && event.truncatedFiles !== undefined);
+  assert.equal(marked?.kind, "mechanism");
+  assert.equal(marked?.kind === "mechanism" ? marked.truncatedFiles : undefined, 6);
+});
+
+test("coverage metadata retries after a first mechanism append failure", async (t) => {
+  const paths = freshPaths(t);
+  const edits = Array.from({ length: 70 }, (_, index) => ({
+    file_path: `retry-${index}.ts`, new_string: `value-${index}`,
+  }));
+  let failFirst = true;
+  const result = await captureStdout(() => agentEvent("claude-code", {
+    stdin: async () => JSON.stringify({
+      session_id: "s1", prompt_id: "retry", hook_event_name: "PostToolUse",
+      tool_name: "MultiEdit", tool_input: { edits },
+    }),
+    paths,
+    appendEvent: (key, event, target) => {
+      if (failFirst) {
+        failFirst = false;
+        return false;
+      }
+      return appendEvent(key, event, target);
+    },
+  }));
+  assert.equal(result.code, 0);
+  assert.equal(result.out, "{}");
+  const marked = readBatch("claude-code-s1-retry", paths).find(
+    (event) => event.kind === "mechanism" && event.coveragePaths !== undefined,
+  );
+  assert.equal(marked?.kind, "mechanism");
+  assert.equal(marked?.kind === "mechanism" ? marked.coveragePaths?.length : undefined, 70);
 });
 
 test("disabled config does not invoke ambiguity injection seam", async (t) => {
@@ -476,25 +527,24 @@ test("logHookError bounds hostile diagnostic scanning before persistence", (t) =
   assert.equal(log.includes(secret), false);
 });
 
-test("logHookError rejects symlink and non-regular destinations", (t) => {
+test("logHookError rejects symlink and non-regular destinations", async (t) => {
   const paths = freshPaths(t);
   mkdirSync(paths.home, { recursive: true });
-  const target = join(paths.home, "target.log");
-  writeFileSync(target, "target\n", "utf8");
-  try {
+  await t.test("symlink", (st) => {
+    if (skipIfSymlinkUnavailable(st)) return;
+    const target = join(paths.home, "target.log");
+    writeFileSync(target, "target\n", "utf8");
     symlinkSync(target, paths.agentLog);
-  } catch {
-    // Symlinks may be unavailable on a restricted Windows runner.
-  }
-  if (existsSync(paths.agentLog) && lstatSync(paths.agentLog).isSymbolicLink()) {
     logHookError("must not follow", paths);
     assert.equal(readFileSync(target, "utf8"), "target\n");
-  }
+  });
 
-  rmSync(paths.agentLog, { force: true });
-  mkdirSync(paths.agentLog, { recursive: true });
-  logHookError("must not write directory", paths);
-  assert.ok(lstatSync(paths.agentLog).isDirectory());
+  await t.test("directory", () => {
+    rmSync(paths.agentLog, { force: true });
+    mkdirSync(paths.agentLog, { recursive: true });
+    logHookError("must not write directory", paths);
+    assert.ok(lstatSync(paths.agentLog).isDirectory());
+  });
 });
 
 test("CLI hook agent-event dispatch emits {} and appends the Claude event", (t) => {

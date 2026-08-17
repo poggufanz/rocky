@@ -23,6 +23,7 @@ import {
   type VoiceSkillMarker,
   type VoiceSkillTarget,
 } from "../setup/voice-skill.js";
+import { skipIfSymlinkUnavailable } from "./symlink-capability.js";
 
 const packageRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const sourceRoot = join(packageRoot, "skills", VOICE_SKILL_NAME);
@@ -262,6 +263,7 @@ test("identical unmarked directory remains untouched and unowned", async (t) => 
 });
 
 test("copy rejects source roots entries and staged paths that are symlinks or escape allowed root", async (t) => {
+  if (skipIfSymlinkUnavailable(t, "dir")) return;
   const root = temporaryRoot(t);
   const source = join(root, "source");
   const allowed = join(root, "allowed");
@@ -307,6 +309,7 @@ test("hashing sorts UTF-8 paths and excludes only root ownership marker", async 
 });
 
 test("target marker and nested installed symlinks are refused without traversal", async (t) => {
+  if (skipIfSymlinkUnavailable(t)) return;
   const root = temporaryRoot(t);
   const target = codexTarget(root);
   await installVoiceSkill(target, { replace: false });
@@ -329,6 +332,7 @@ test("target marker and nested installed symlinks are refused without traversal"
 });
 
 test("target and management-root component symlinks are refused", async (t) => {
+  if (skipIfSymlinkUnavailable(t, "dir")) return;
   const cases = ["skills", "management", "staging", "staging-leaf", "backups", "backups-leaf"] as const;
   for (const entry of cases) {
     await t.test(entry, async (t) => {
@@ -371,6 +375,7 @@ test("target and management-root component symlinks are refused", async (t) => {
 });
 
 test("target symlink itself is refused", async (t) => {
+  if (skipIfSymlinkUnavailable(t, "dir")) return;
   const root = temporaryRoot(t);
   const target = codexTarget(root);
   const elsewhere = join(root, "elsewhere");

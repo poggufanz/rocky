@@ -4,9 +4,10 @@ import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node
 import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { loadMemory } from "../core/memory.js";
+import { parseMemoryRecord } from "../core/memory-read.js";
 import { resolveRockyPaths } from "../core/state-paths.js";
 
-test("loader skips JSON-valid garbage and keeps valid legacy records", () => {
+test("loader keeps legacy records but mismatched identity does not restore resolvedBy", () => {
   const root = mkdtempSync(join(tmpdir(), "rocky-valid-"));
   const file = join(root, "memory.jsonl");
   const legacy = {
@@ -19,9 +20,94 @@ test("loader skips JSON-valid garbage and keeps valid legacy records", () => {
   const records = loadMemory(file);
   assert.equal(records.length, 2);
   assert.equal(records[0].kind, "failure");
-  assert.equal(records[0].kind === "failure" ? records[0].resolvedBy : undefined, "x1");
+  assert.equal(records[0].kind === "failure" ? records[0].resolvedBy : undefined, undefined);
   assert.deepEqual(readFileSync(file), before.bytes);
   assert.equal(statSync(file).mtimeMs, before.mtime);
+});
+
+test("failure parser preserves absent, v1, and v2 fingerprint provenance markers", () => {
+  const base = {
+    kind: "failure", id: "fingerprint-version", ts: 1, cwd: "/work", cmd: "false", exitCode: 1,
+    fingerprint: "0123456789abcdef", signature: ["failed"], excerpt: "failed",
+  };
+  assert.equal((parseMemoryRecord(base) as { fingerprintV?: number } | undefined)?.fingerprintV, undefined);
+  assert.equal((parseMemoryRecord({ ...base, fingerprintV: 1 }) as { fingerprintV?: number } | undefined)?.fingerprintV, 1);
+  assert.equal((parseMemoryRecord({ ...base, fingerprintV: 2 }) as { fingerprintV?: number } | undefined)?.fingerprintV, 2);
+  assert.equal(parseMemoryRecord({ ...base, fingerprintV: 3 }), undefined);
+});
+
+test("loader dual-reads an exact reliable historical command as confirmed", () => {
+  const root = mkdtempSync(join(tmpdir(), "rocky-legacy-exact-"));
+  const file = join(root, "memory.jsonl");
+  const failure = {
+    kind: "failure", id: "f1", ts: 1, cwd: "/work", cmd: "npm run build", exitCode: 1,
+    fingerprint: "abc", signature: ["failed"], excerpt: "failed",
+  };
+  const fix = { kind: "fix", id: "x1", ts: 2, cwd: "/work", cmd: "npm run build", failureIds: ["f1"] };
+  writeFileSync(file, `${JSON.stringify(failure)}\n${JSON.stringify(fix)}\n`);
+  const records = loadMemory(file);
+  assert.equal(records[0]?.kind === "failure" ? records[0].resolvedBy : undefined, "x1");
+});
+
+test("legacy duplicate fixes preserve the first confirmed resolution provenance", () => {
+  const root = mkdtempSync(join(tmpdir(), "rocky-legacy-duplicate-fix-"));
+  const file = join(root, "memory.jsonl");
+  const failure = {
+    kind: "failure", id: "f1", ts: 1, cwd: "/work", cmd: "npm run build", exitCode: 1,
+    fingerprint: "abc", signature: ["failed"], excerpt: "failed",
+  };
+  const first = { kind: "fix", id: "x1", ts: 2, cwd: "/work", cmd: "npm run build", failureIds: ["f1"] };
+  const duplicate = { kind: "fix", id: "x2", ts: 3, cwd: "/work", cmd: "npm run build", failureIds: ["f1"] };
+  writeFileSync(file, `${JSON.stringify(failure)}\n${JSON.stringify(first)}\n${JSON.stringify(duplicate)}\n`);
+  const records = loadMemory(file);
+  assert.equal(records[0]?.kind === "failure" ? records[0].resolvedBy : undefined, "x1");
+});
+
+test("duplicate fix IDs keep first command and one logical fix event", () => {
+  const root = mkdtempSync(join(tmpdir(), "rocky-duplicate-fix-id-"));
+  const file = join(root, "memory.jsonl");
+  const failure = {
+    kind: "failure", id: "duplicate-failure", ts: 1, cwd: "/work", cmd: "npm run build", exitCode: 1,
+    fingerprint: "abc", signature: ["failed"], excerpt: "failed",
+  };
+  const first = { kind: "fix", id: "duplicate-fix", ts: 2, cwd: "/work", cmd: "npm run build", failureIds: [failure.id] };
+  const later = { kind: "fix", id: "duplicate-fix", ts: 3, cwd: "/work", cmd: "rm -rf /", failureIds: [failure.id] };
+  writeFileSync(file, [failure, first, later].map((record) => JSON.stringify(record)).join("\n") + "\n");
+  const records = loadMemory(file, 10);
+  assert.deepEqual(records.map((record) => record.id), ["duplicate-failure", "duplicate-fix"]);
+  assert.equal(records[1]?.kind === "fix" ? records[1].cmd : undefined, "npm run build");
+  assert.equal(records[0]?.kind === "failure" ? records[0].resolvedBy : undefined, "duplicate-fix");
+});
+
+test("duplicate failure IDs keep first command and first provenance", () => {
+  const root = mkdtempSync(join(tmpdir(), "rocky-duplicate-failure-id-"));
+  const file = join(root, "memory.jsonl");
+  const first = {
+    kind: "failure", id: "duplicate-failure", ts: 1, cwd: "/work", cmd: "npm run build", exitCode: 1,
+    fingerprint: "first", signature: ["first"], excerpt: "first",
+  };
+  const later = { ...first, cmd: "rm -rf /", fingerprint: "later", signature: ["later"], excerpt: "later" };
+  const fix = { kind: "fix", id: "first-fix", ts: 2, cwd: "/work", cmd: "npm run build", failureIds: [first.id] };
+  writeFileSync(file, [first, later, fix].map((record) => JSON.stringify(record)).join("\n") + "\n");
+  const records = loadMemory(file, 10);
+  assert.equal(records.length, 2);
+  assert.equal(records[0]?.kind === "failure" ? records[0].cmd : undefined, "npm run build");
+  assert.equal(records[0]?.kind === "failure" ? records[0].resolvedBy : undefined, "first-fix");
+});
+
+test("future records stay readable but cannot resolve at an explicit clock", () => {
+  const root = mkdtempSync(join(tmpdir(), "rocky-future-loader-"));
+  const file = join(root, "memory.jsonl");
+  const now = 1_800_000_000_000;
+  const failure = {
+    kind: "failure", id: "future-failure", ts: now + 1, cwd: "/work", cmd: "npm run build", exitCode: 1,
+    fingerprint: "future", signature: ["future"], excerpt: "future",
+  };
+  const fix = { kind: "fix", id: "future-fix", ts: now + 2, cwd: "/work", cmd: "npm run build", failureIds: [failure.id] };
+  writeFileSync(file, `${JSON.stringify(failure)}\n${JSON.stringify(fix)}\n`);
+  const records = loadMemory(file, now);
+  assert.equal(records.length, 2);
+  assert.equal(records[0]?.kind === "failure" ? records[0].resolvedBy : undefined, undefined);
 });
 
 test("loader accepts a fix's links array and drops a fix with a malformed link", () => {
@@ -39,6 +125,23 @@ test("loader accepts a fix's links array and drops a fix with a malformed link",
   const records = loadMemory(file);
   assert.deepEqual(records.map((r) => r.id), ["x1"]);
   assert.equal(records[0].kind === "fix" ? records[0].links?.[0]?.basis : undefined, "signature");
+});
+
+test("loader accepts possible associations without resolving failures", () => {
+  const root = mkdtempSync(join(tmpdir(), "rocky-association-"));
+  const file = join(root, "memory.jsonl");
+  const failure = {
+    kind: "failure", id: "f1", ts: 1, cwd: "/work", cmd: "npm run broken", exitCode: 1,
+    fingerprint: "abc", signature: ["failed"], excerpt: "failed",
+  };
+  const association = {
+    kind: "association", id: "a1", ts: 2, cwd: "/work", cmd: "npm run unrelated",
+    candidateFailureIds: ["f1"], links: [{ id: "f1", basis: "program", confidence: "possible" }],
+  };
+  writeFileSync(file, `${JSON.stringify(failure)}\n${JSON.stringify(association)}\n`);
+  const records = loadMemory(file);
+  assert.deepEqual(records.map((record) => record.kind), ["failure", "association"]);
+  assert.equal(records[0]?.kind === "failure" ? records[0].resolvedBy : undefined, undefined);
 });
 
 test("state paths resolve ROCKY_HOME on every call", (t) => {
