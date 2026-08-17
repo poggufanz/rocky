@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   FINGERPRINT_ALGORITHM_VERSION,
   commandFingerprint,
+  fillRawCommandTokens,
   fingerprint,
   fingerprintCandidates,
   fingerprintTokens,
@@ -185,6 +186,28 @@ test("retrieval tokenization is Unicode NFC and keeps separate fingerprint role"
   assert.ok(fingerprintTokens("line 41").has("#"));
   assert.ok(tokens("some-missing-package").has("some-missing-package"));
   assert.ok(tokens("some-missing-package").has("missing"));
+});
+
+test("fillRawCommandTokens keeps a path segment retrievalTokens would mask", () => {
+  const cmd = "Get-Item ./another-missing-thing";
+  // retrievalTokens alone still runs the command through the same
+  // volatile-value masking the fingerprint uses (paths included), so the
+  // distinctive path word is gone from that view.
+  const masked = retrievalTokens(cmd);
+  assert.equal(masked.has("another-missing-thing"), false);
+  assert.ok(masked.has("<path>"));
+
+  const target = new Set<string>();
+  fillRawCommandTokens(cmd, target);
+  assert.ok(target.has("another-missing-thing"));
+  assert.ok(target.has("another") && target.has("missing") && target.has("thing"));
+  assert.ok(target.has("get-item") && target.has("get") && target.has("item"));
+
+  // Additive, not clearing: it must be safe to layer onto existing evidence.
+  const existing = new Set(["<path>", "get-item"]);
+  fillRawCommandTokens(cmd, existing);
+  assert.ok(existing.has("<path>"));
+  assert.ok(existing.has("another-missing-thing"));
 });
 
 test("retrieval fast path agrees with the full volatile-line corpus", () => {

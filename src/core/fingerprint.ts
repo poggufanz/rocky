@@ -295,6 +295,23 @@ export function fillRetrievalTokens(text: string, target: Set<string>): void {
   fillTokenBag(normalizeRetrievalLine(text), target);
 }
 
+/**
+ * Retrieval-only tokens from a command exactly as the user typed it: no
+ * volatile-value masking at all, not even paths. `retrievalTokens` reuses the
+ * same masking pipeline as the fingerprint (it must, for the semantic-number
+ * cases like ports/statuses), so a command containing a path collapses to
+ * `<path>` there too whenever it is combined with already-masked signature
+ * text -- the same mask that keeps a recurring fingerprint stable also erases
+ * the one distinctive word a user would search for. This is additive
+ * evidence layered on top of `retrievalTokens`, not a replacement: it never
+ * feeds fingerprint identity, recurrence matching, or any write path. Adds
+ * into the caller's bag rather than clearing it, so callers can layer this
+ * onto existing masked evidence in one bounded scratch set.
+ */
+export function fillRawCommandTokens(cmd: string, target: Set<string>): void {
+  fillTokenBag(stripAnsi(cmd).normalize("NFC").trim().replace(/\s+/gu, " ").toLowerCase(), target);
+}
+
 function tokenBag(text: string): Set<string> {
   const bag = new Set<string>();
   fillTokenBag(text, bag);
