@@ -125,7 +125,7 @@ function delayedMemoryReadPreload(path: string): void {
     "const memoryFds = new Set();",
     "let delayed = false;",
     "fs.openSync = (path, ...args) => { const fd = originalOpen(path, ...args); if (String(path) === process.env.ROCKY_TEST_MEMORY) memoryFds.add(fd); return fd; };",
-    "fs.readSync = (fd, ...args) => { if (!delayed && memoryFds.has(fd)) { delayed = true; if (process.env.ROCKY_TEST_READ_MARKER) fs.writeFileSync(process.env.ROCKY_TEST_READ_MARKER, 'fired'); const signal = new Int32Array(new SharedArrayBuffer(4)); Atomics.wait(signal, 0, 0, Number(process.env.ROCKY_TEST_READ_DELAY_MS || 15)); } return originalRead(fd, ...args); };",
+    "fs.readSync = (fd, ...args) => { if (!delayed && process.env.ROCKY_TEST_DELAY_READ === '1' && memoryFds.has(fd)) { delayed = true; if (process.env.ROCKY_TEST_READ_MARKER) fs.writeFileSync(process.env.ROCKY_TEST_READ_MARKER, 'fired'); const signal = new Int32Array(new SharedArrayBuffer(4)); Atomics.wait(signal, 0, 0, Number(process.env.ROCKY_TEST_READ_DELAY_MS || 15)); } return originalRead(fd, ...args); };",
     "syncBuiltinESMExports();",
   ].join("\n"), "utf8");
 }
@@ -305,10 +305,10 @@ async function concurrentSuccesses(t: TestContext, count: number): Promise<void>
     ROCKY_TEST_READ_MARKER: readMarker,
     NODE_OPTIONS: `--require=${preload}`,
   };
-  const children = Array.from({ length: count }, () => spawn(process.execPath, [
+  const children = Array.from({ length: count }, (_, index) => spawn(process.execPath, [
     "--input-type=module", "--eval", worker,
     memoryModuleUrl, runModuleUrl, home, cwd, cmd, ready, start,
-  ], { env, stdio: ["ignore", "ignore", "pipe"], windowsHide: true }));
+  ], { env: { ...env, ROCKY_TEST_DELAY_READ: index === 0 ? "1" : "0" }, stdio: ["ignore", "ignore", "pipe"], windowsHide: true }));
   t.after(() => {
     for (const child of children) {
       try { child.kill(); } catch { /* already gone */ }
