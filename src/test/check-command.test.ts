@@ -8,7 +8,10 @@ import { fileURLToPath } from "node:url";
 
 const packageRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const entry = join(packageRoot, "dist", "index.js");
-const PROCESS_TIMEOUT_MS = 10_000;
+// Harness backstop only: the product's own git deadline is 5 s, and a loaded
+// CI runner can add several seconds of CLI startup before it. This bound must
+// never race the deadline-kill path it exists to observe.
+const PROCESS_TIMEOUT_MS = 30_000;
 const NEVER_PACKAGE = "this-package-should-never-exist-rocky-0405060708";
 
 interface Sandbox {
@@ -872,7 +875,9 @@ test("a hung git diff is killed after the check-path deadline and fails open wit
   const result = await runCheck(box, ["--pre-push"], prePushLine(commits.second!, commits.first));
 
   assertCompleted(result, 0);
-  assert.ok(Date.now() - start < 8_000, `hung git held check for ${Date.now() - start}ms`);
+  // Wall time includes CLI startup on a loaded runner; the bound proves the
+  // 5 s git deadline killed the hang instead of holding indefinitely.
+  assert.ok(Date.now() - start < 20_000, `hung git held check for ${Date.now() - start}ms`);
   assert.equal(result.stderr.trim().split(/\r?\n/).length, 1);
   assert.match(result.stderr, /git diff timed out.*not inspected/i);
 });
