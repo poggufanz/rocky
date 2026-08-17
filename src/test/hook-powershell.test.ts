@@ -76,6 +76,38 @@ function ensureShellAssetsStaged(): void {
 }
 ensureShellAssetsStaged();
 
+/**
+ * Fix round 3: every real-host test below can leave a genuinely detached
+ * `rocky`/host-exe child process still holding its scratch sandbox open when
+ * the test function returns and `t.after` fires -- fire-and-forget (Findings
+ * 1 and 5) means nothing in this file's own control flow ever waits for that
+ * child, so a plain `rmSync` races it. Windows refuses to remove a directory
+ * a live process holds (EPERM), and that race is real, not theoretical: it
+ * was reproduced on this exact suite. The two tests with a KNOWN, deliberate
+ * spawn delay (the non-blocking test, the overlap test) additionally wait
+ * for an explicit completion marker before ever reaching their own `t.after`
+ * — that is the precise fix. This helper is the safety net underneath it for
+ * every real-host test, including the ones with no deliberate delay at all
+ * (a fast spawn still has a non-zero window): retry briefly, and tolerate
+ * EPERM/EBUSY as a known-benign end state rather than failing the test.
+ * Windows' own delayed-delete semantics reclaim an orphaned temp directory
+ * later regardless, so a cleanup that ultimately gives up here loses nothing
+ * but eagerness -- this must never become a new failure path.
+ */
+async function safeRmSync(path: string, attempts = 8, delayMs = 250): Promise<void> {
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      rmSync(path, { recursive: true, force: true });
+      return;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== "EPERM" && code !== "EBUSY" && code !== "ENOTEMPTY") throw error;
+      if (attempt === attempts - 1) return; // benign end state, not a test failure
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+  }
+}
+
 interface PowerShellSandbox {
   profile: string;
   stderr: () => string;
@@ -488,9 +520,37 @@ async function readMemoryRecordsSettled(memoryPath: string, timeoutMs = 5_000): 
   return last;
 }
 
+/**
+ * Polls for a file a detached shim writes as its own last statement, i.e. a
+ * reliable proxy for "this process's meaningful work is done and it is about
+ * to exit" -- the precise fix (fix round 3, option 1) for the two tests
+ * whose shims have a known, deliberate delay: wait for the process to
+ * actually finish rather than assume a fixed sleep duration is over, or
+ * blindly sleep past it.
+ */
+async function waitForMarker(markerPath: string, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (existsSync(markerPath)) return true;
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  }
+  return existsSync(markerPath);
+}
+
+/** Same idea as `waitForMarker`, for the overlap test's two distinct, $PID-named completion markers. */
+async function waitForMarkerCount(markerDir: string, count: number, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  const countMarkers = () => (existsSync(markerDir) ? readdirSync(markerDir).filter((f) => f.endsWith(".done")).length : 0);
+  while (Date.now() < deadline) {
+    if (countMarkers() >= count) return true;
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  }
+  return countMarkers() >= count;
+}
+
 async function realHostSmoke(t: TestContext, exe: string): Promise<void> {
   const root = mkdtempSync(join(tmpdir(), "rocky-hook-ps-e2e-"));
-  t.after(() => rmSync(root, { recursive: true, force: true }));
+  t.after(() => safeRmSync(root));
   const rockyHome = join(root, "rocky-home");
   mkdirSync(rockyHome, { recursive: true });
   writeFileSync(
@@ -553,7 +613,7 @@ test(
  */
 async function realHostNonBlockingSmoke(t: TestContext, exe: string): Promise<void> {
   const root = mkdtempSync(join(tmpdir(), "rocky-hook-ps-nonblocking-"));
-  t.after(() => rmSync(root, { recursive: true, force: true }));
+  t.after(() => safeRmSync(root));
   const rockyHome = join(root, "rocky-home");
   mkdirSync(rockyHome, { recursive: true });
   writeFileSync(
@@ -585,6 +645,18 @@ async function realHostNonBlockingSmoke(t: TestContext, exe: string): Promise<vo
     `session wall-clock time (${elapsedMs}ms) must not be dominated by the spawned process's 4000ms sleep -- a synchronous spawn would fail this`,
   );
   assert.equal(existsSync(slowMarker), false, "the slow shim must still be running in the background when this assertion runs");
+
+  // Fix round 3: the whole property this test proves is that nothing waited
+  // for the slow spawn above -- so this function's own `t.after` must not
+  // become the thing that races it either. Wait for the shim's own marker
+  // (its last statement, written only after its 4000ms sleep) so the
+  // detached process has genuinely finished and released its handle on
+  // `root` before teardown ever runs. This does not weaken what was already
+  // proven above; it only sequences cleanup after a process this test itself
+  // spawned, the same ordering discipline any of these tests would need
+  // regardless of the specific race that surfaced it.
+  const markerAppeared = await waitForMarker(slowMarker, 8_000);
+  assert.ok(markerAppeared, "the deliberately slow spawn must eventually complete on its own (not still hung)");
 }
 
 test(
@@ -615,7 +687,7 @@ test(
  */
 async function realHostDenylistSmoke(t: TestContext, exe: string): Promise<void> {
   const root = mkdtempSync(join(tmpdir(), "rocky-hook-ps-denylist-"));
-  t.after(() => rmSync(root, { recursive: true, force: true }));
+  t.after(() => safeRmSync(root));
   const rockyHome = join(root, "rocky-home");
   mkdirSync(rockyHome, { recursive: true });
   writeFileSync(
@@ -685,7 +757,7 @@ test(
  */
 async function realHostFaultInjectionSmoke(t: TestContext, exe: string): Promise<void> {
   const root = mkdtempSync(join(tmpdir(), "rocky-hook-ps-fault-"));
-  t.after(() => rmSync(root, { recursive: true, force: true }));
+  t.after(() => safeRmSync(root));
   const rockyHome = join(root, "rocky-home");
   mkdirSync(rockyHome, { recursive: true });
   writeFileSync(
@@ -748,7 +820,7 @@ test(
  */
 async function realHostConcurrentSpawnSmoke(t: TestContext, exe: string): Promise<void> {
   const root = mkdtempSync(join(tmpdir(), "rocky-hook-ps-concurrent-"));
-  t.after(() => rmSync(root, { recursive: true, force: true }));
+  t.after(() => safeRmSync(root));
   const rockyHome = join(root, "rocky-home");
   mkdirSync(rockyHome, { recursive: true });
   writeFileSync(
@@ -757,10 +829,19 @@ async function realHostConcurrentSpawnSmoke(t: TestContext, exe: string): Promis
   );
   const shim = join(root, "rocky-shim.ps1");
   const entry = join(packageRoot, "dist", "index.js").replace(/'/g, "''");
+  const markerDir = join(root, "spawn-markers");
+  mkdirSync(markerDir, { recursive: true });
+  const markerDirLiteral = markerDir.replace(/'/g, "''");
   // Real work finishes fast; the wrapping process then idles for 2s so its
   // own lifetime is long enough to guarantee genuine overlap with a second
-  // spawn issued shortly after, regardless of scheduler jitter.
-  writeFileSync(shim, `& node '${entry}' @args\n$code = $LASTEXITCODE\nStart-Sleep -Milliseconds 2000\nexit $code\n`);
+  // spawn issued shortly after, regardless of scheduler jitter. `$PID` is
+  // this specific invocation's own process id, unique between the two
+  // overlapping spawns sharing this same shim file, so each writes its own
+  // completion marker rather than colliding on one shared name.
+  writeFileSync(
+    shim,
+    `& node '${entry}' @args\n$code = $LASTEXITCODE\nStart-Sleep -Milliseconds 2000\n"done" | Set-Content -Path (Join-Path '${markerDirLiteral}' "$PID.done")\nexit $code\n`,
+  );
 
   const result = await spawnAndFeed(
     exe,
@@ -791,6 +872,14 @@ async function realHostConcurrentSpawnSmoke(t: TestContext, exe: string): Promis
     failureCmds.some((cmd) => cmd.includes("__rocky_concurrent_second__")),
     `the second overlapping spawn's memory write must land, not silently dropped by a redirect-handle collision (Finding 5); got: ${JSON.stringify(failureCmds)}`,
   );
+
+  // Fix round 3: both proofs above already stand on their own; this only
+  // sequences teardown after the two detached processes this test spawned
+  // have genuinely finished (each writes its own $PID-named marker as its
+  // last statement, after its 2000ms tail), so `t.after`'s cleanup of `root`
+  // never races a still-live child holding it open.
+  const bothMarkersAppeared = await waitForMarkerCount(markerDir, 2, 8_000);
+  assert.ok(bothMarkersAppeared, "both overlapping spawns must eventually finish on their own (not still hung)");
 }
 
 test(
@@ -823,7 +912,7 @@ test(
  */
 async function realHostCustomPromptSmoke(t: TestContext, exe: string): Promise<void> {
   const root = mkdtempSync(join(tmpdir(), "rocky-hook-ps-custom-prompt-"));
-  t.after(() => rmSync(root, { recursive: true, force: true }));
+  t.after(() => safeRmSync(root));
   const rockyHome = join(root, "rocky-home");
   mkdirSync(rockyHome, { recursive: true });
   writeFileSync(
