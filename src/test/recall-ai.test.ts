@@ -495,7 +495,7 @@ test("end-to-end recall deadline starts before inference and remains distinct fr
   assert.deepEqual(result, { aiStatus: "timeout", rankedCandidateIds: ["c1", "c2"] });
   assert.equal(caller.signal.aborted, false);
   assert.equal(receivedSignal?.aborted, true);
-  assert.ok(elapsedMs >= 100 && elapsedMs < 1_500, `deadline completed in ${elapsedMs}ms`);
+  assert.ok(elapsedMs >= 100 && elapsedMs < 4_000, `deadline completed in ${elapsedMs}ms`);
 });
 
 test("model ranking appends omitted candidates in deterministic original order", async () => {

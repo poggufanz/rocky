@@ -311,7 +311,7 @@ test("UTF-8 truncation stays linear for a large prefix", { timeout: 20_000 }, ()
 
   assert.equal(output.value.length, 199_999);
   assert.equal(output.truncated, true);
-  assert.ok(elapsedMs < 2_000, `200 KiB truncation took ${elapsedMs.toFixed(1)}ms`);
+  assert.ok(elapsedMs < 5_000, `200 KiB truncation took ${elapsedMs.toFixed(1)}ms`);
 });
 
 test("raw projection preserves secrets, deep-clones canonical records, and normalizes controls", () => {

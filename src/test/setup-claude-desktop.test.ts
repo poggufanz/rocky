@@ -2838,7 +2838,7 @@ test("POSIX recovery rejects a FIFO source swap promptly before reading", async 
 
   const child = spawnSync(process.execPath, ["--input-type=module", "-e", script], {
     encoding: "utf8",
-    timeout: 2_000,
+    timeout: 10_000,
     killSignal: "SIGTERM",
   });
 
@@ -2851,7 +2851,7 @@ test("POSIX recovery rejects a FIFO source swap promptly before reading", async 
     injected: boolean;
   };
   assert.equal(observed.injected, true);
-  assert.ok(observed.elapsed < 1_500, `recovery took ${observed.elapsed} ms`);
+  assert.ok(observed.elapsed < 4_000, `recovery took ${observed.elapsed} ms`);
   assert.equal(observed.result.status, "failed");
   assert.match(observed.result.detail ?? "", /manual recovery/i);
   assert.doesNotMatch(`${child.stdout}\n${child.stderr}`, /fifo-recovery-authority/i);

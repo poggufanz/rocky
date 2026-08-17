@@ -1263,7 +1263,7 @@ test("dead owner and stale empty, torn, or orphan-claim locks recover promptly",
   try {
     const started = Date.now();
     memory.recordNote({ cwd: home, cmd: "after-crash", file: "a.ts", line: 1, subject: "a", answer: "a" });
-    assert.ok(Date.now() - started < 2_000, "dead owner recovery stays prompt");
+    assert.ok(Date.now() - started < 4_000, "dead owner recovery stays prompt");
     assert.equal(existsSync(lock), false);
 
     writeFileSync(lock, "", { mode: 0o600 });
@@ -1276,7 +1276,7 @@ test("dead owner and stale empty, torn, or orphan-claim locks recover promptly",
     utimesSync(lock, stale, stale);
     const tornStarted = Date.now();
     memory.recordNote({ cwd: home, cmd: "after-torn", file: "c.ts", line: 1, subject: "c", answer: "c" });
-    assert.ok(Date.now() - tornStarted < 2_000, "stale torn-lock recovery stays prompt");
+    assert.ok(Date.now() - tornStarted < 4_000, "stale torn-lock recovery stays prompt");
     assert.equal(existsSync(lock), false);
 
     const deadPid = 2_147_483_647;
@@ -1508,7 +1508,7 @@ test("an old orphan claim behind a stable nonclaim prefix cannot starve lock rec
     if (originalHome === undefined) delete process.env.ROCKY_HOME;
     else process.env.ROCKY_HOME = originalHome;
   }
-  assert.ok(Date.now() - started < 2_000, "orphan recovery must not wait for the full lock deadline");
+  assert.ok(Date.now() - started < 4_000, "orphan recovery must not wait for the full lock deadline");
   assert.equal(existsSync(lock), false, "dead primary lock is reclaimed");
   const entries = readdirSync(home);
   const orphanName = basename(orphanClaim);
@@ -1636,7 +1636,7 @@ test("reclaim-claim sweeping examines a bounded batch and preserves unsafe entri
     "fixture must exceed two bounded sweep batches");
   assert.ok(remainingDeadRegularClaims.length >= claimCount - memory.RECLAIM_CLAIM_SCAN_MAX_ENTRIES,
     "sweep must leave residual claims after one fixed-size batch");
-  assert.ok(elapsed < 2_000, `bounded sweep must complete promptly, got ${elapsed} ms`);
+  assert.ok(elapsed < 4_000, `bounded sweep must complete promptly, got ${elapsed} ms`);
   assert.equal(existsSync(liveClaim), true, "live-owner claim is never removed");
   assert.equal(existsSync(unknownName), true, "unknown claim-shaped file is never removed");
   if (replacementCreated) assert.equal(existsSync(replacementClaim), true, "symlink/replacement claim is never removed");

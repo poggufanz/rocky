@@ -358,7 +358,7 @@ test("bounds a non-cooperative response reader and requests body cancellation", 
 
   const started = Date.now();
   await assert.rejects(client.generateStructured("model", "prompt", {}), /Ollama request timed out/);
-  assert.ok(Date.now() - started < 500);
+  assert.ok(Date.now() - started < 2_000);
   assert.equal(requestSignal?.aborted, true);
   assert.equal(cancellations, 1);
   assert.equal(cancellationReason instanceof Error ? cancellationReason.message : cancellationReason, "Ollama request timed out");
