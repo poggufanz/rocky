@@ -7,6 +7,7 @@ import type { FailureRecord, FixRecord, TripleRecord } from "../core/memory-read
 import {
   MAX_FIELD_BYTES,
   MAX_RESPONSE_BYTES,
+  cloneFix,
   normalizeOutputText,
   projectMemoryRecord,
   projectKnowledgeHits,
@@ -391,6 +392,44 @@ test("raw projection caps and detaches every fix field including failure IDs", (
   assert.deepEqual([...item.truncatedFields].sort(), [
     "fixCommand", "rawRecord.fix.cmd", "rawRecord.fix.cwd", "rawRecord.fix.failureIds", "rawRecord.fix.id",
   ]);
+});
+
+// Finding 2, final whole-branch review: cloneFix used to copy fix.links
+// straight through without applying the same bounded-basis rule and
+// confidence normalization projectFixRecord/parseFixLinks/safeProviderFixRecord
+// already enforce (three of four FixLink readers guarded it explicitly; this
+// one relied entirely on caller discipline). cloneFix's sole production
+// caller (projectHit, via projectRecallHits/projectRecentFailures) currently
+// strips `links` before it ever reaches cloneFix, since snapshotSourceFix
+// validates untrusted-provider input first -- so a test going through only
+// that public surface could never actually exercise this branch. cloneFix is
+// exported specifically so this invariant can be pinned directly, closing the
+// gap for whenever a future caller wires a new data source into projectHit
+// (the "landmine" the review flagged) rather than leaving it enforced only by
+// today's accidental unreachability.
+test("cloneFix downgrades a confirmed confidence to possible for an unrecognized link basis", () => {
+  const fix: FixRecord = {
+    kind: "fix", id: "x-clonefix-basis", ts: 20, cwd: "/work/clonefix", cmd: "npm rebuild",
+    failureIds: ["f-clonefix-basis"],
+    links: [{ id: "f-clonefix-basis", basis: "not-a-known-basis", confidence: "confirmed" }],
+  };
+  const cloned = cloneFix(fix, "raw", { fields: [] });
+  assert.deepEqual(cloned.links, [
+    { id: "f-clonefix-basis", basis: "not-a-known-basis", confidence: "possible" },
+  ], "an unrecognized basis can never present as confirmed, even through cloneFix's own path");
+  assert.notEqual(cloned.links, fix.links, "cloneFix must still detach the array, not alias the source");
+});
+
+test("cloneFix drops a genuinely malformed link basis and records the truncation", () => {
+  const fix: FixRecord = {
+    kind: "fix", id: "x-clonefix-malformed", ts: 20, cwd: "/work/clonefix", cmd: "npm rebuild",
+    failureIds: ["f-clonefix-malformed"],
+    links: [{ id: "f-clonefix-malformed", basis: "", confidence: "confirmed" }],
+  };
+  const truncation = { fields: [] as string[] };
+  const cloned = cloneFix(fix, "raw", truncation);
+  assert.deepEqual(cloned.links, [], "an empty basis is malformed, not just unrecognized, and must be dropped");
+  assert.ok(truncation.fields.includes("rawRecord.fix.links"), "the drop must be disclosed via truncatedFields");
 });
 
 test("RecallHit.possible (v0.5.2 Fix 1) never crosses the MCP projection boundary in raw or sanitized exposure", () => {

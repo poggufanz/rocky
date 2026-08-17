@@ -904,7 +904,13 @@ function cloneFailure(failure: FailureRecord, exposure: Exposure, truncation: Tr
   return clone;
 }
 
-function cloneFix(fix: FixRecord, exposure: Exposure, truncation: Truncation): FixRecord {
+// Exported so the bounded-basis/confidence-normalization invariant can be
+// pinned by a direct unit test (finding 2, final whole-branch review): the
+// function's sole production caller (projectHit, via the untrusted-provider
+// snapshot in snapshotSourceFix) strips `links` before this ever sees one
+// today, so a test that only went through the public projectRecallHits
+// surface could never actually exercise this branch.
+export function cloneFix(fix: FixRecord, exposure: Exposure, truncation: Truncation): FixRecord {
   const allowed = {
     kind: "fix" as const,
     id: fix.id,
@@ -924,11 +930,32 @@ function cloneFix(fix: FixRecord, exposure: Exposure, truncation: Truncation): F
     failureIds: projectOpaqueIds(allowed.failureIds, "rawRecord.fix.failureIds", truncation),
   };
   if (allowed.links !== undefined) {
-    projected.links = allowed.links.map((link, index) => ({
-      id: projectOpaqueId(link.id, `rawRecord.fix.links[${index}].id`, truncation),
-      basis: link.basis,
-      ...(link.confidence === undefined ? {} : { confidence: link.confidence }),
-    }));
+    // Same bounded-basis rule the other three FixLink readers enforce
+    // (parseFixLinks, safeProviderFixRecord/mcp/tools.ts, projectFixRecord
+    // above): the invariant must live in the code, not in caller discipline,
+    // so the next data source wired into projectHit inherits it for free
+    // (finding 2, final whole-branch review). `fix` here is already a
+    // parseFixLinks-validated FixRecord from durable memory, so this is
+    // belt-and-suspenders today, but it closes the gap for tomorrow.
+    const links: NonNullable<FixRecord["links"]> = [];
+    for (const link of allowed.links) {
+      if (!link || typeof link.id !== "string" || !isBoundedLinkBasis(link.basis)
+          || (link.confidence !== undefined && link.confidence !== "confirmed" && link.confidence !== "possible")) {
+        truncation.fields.push("rawRecord.fix.links");
+        continue;
+      }
+      // An unrecognized or non-confirmable basis can never present as
+      // confirmed. Leave an absent confidence undefined; never invent one.
+      const normalizedConfidence: LinkConfidence | undefined = link.confidence === undefined
+        ? undefined
+        : (!isConfirmableLinkBasis(link.basis) && link.confidence === "confirmed" ? "possible" : link.confidence);
+      links.push({
+        id: projectOpaqueId(link.id, `rawRecord.fix.links[${links.length}].id`, truncation),
+        basis: link.basis,
+        ...(normalizedConfidence === undefined ? {} : { confidence: normalizedConfidence }),
+      });
+    }
+    projected.links = links;
   }
   if (allowed.candidateFailureIds !== undefined) {
     projected.candidateFailureIds = projectOpaqueIds(
