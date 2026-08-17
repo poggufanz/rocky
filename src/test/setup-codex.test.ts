@@ -359,10 +359,14 @@ const initializeResult = JSON.stringify({
   },
 });
 
+// Success-path budget only: every expiry-dependent test pins its own smaller
+// value. The shared budget must survive CI scheduler preemption, because the
+// app-server deadline is checked synchronously against performance.now() and
+// a starved runner can lose tens of milliseconds between two checkpoints.
 const timeouts = {
-  startupTimeoutMs: 25,
-  requestTimeoutMs: 25,
-  shutdownTimeoutMs: 25,
+  startupTimeoutMs: 1_000,
+  requestTimeoutMs: 1_000,
+  shutdownTimeoutMs: 1_000,
 };
 
 function delay(milliseconds: number): Promise<void> {
