@@ -70,8 +70,11 @@ Rocky preserves wrapped-command stdout, stderr, TTY behavior, and exit status. P
 | --- | --- |
 | `rocky run "<cmd>"` | Run a command with deep failure memory. |
 | `rocky watch "<cmd>"` | Run a long command with completion notice and failure log. |
+| `rocky brief [--since <ref\|24h>] [--quiet] [--ai]` | Hear what changed since last brief: commits, remembered failures/fixes, touched invariant guards. Local git and memory only, no network; `--ai` stays on loopback. |
 | `rocky recall [--ai] "<query>"` | Search remembered failures and fixes. |
 | `rocky stats` | Show memory totals and coverage. |
+| `rocky journal "<note>"` | Write one line to your dogfood journal. Local file only, no network. |
+| `rocky invariants` | List remembered invariant notes and hear which globs guard nothing. |
 | `rocky check` | Inspect the commits or workspace about to be pushed. |
 | `rocky hook install\|status\|uninstall` | Manage the Bash/WSL hook, and on Windows every detected PowerShell host's hook. |
 | `rocky what`, `rocky how`, `rocky why` | Look up remembered intent and mechanism evidence. |
