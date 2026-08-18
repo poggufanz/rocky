@@ -12,6 +12,7 @@
  */
 
 import { run } from "./commands/run.js";
+import { briefCommand } from "./commands/brief.js";
 import { watch } from "./commands/watch.js";
 import { recall } from "./commands/recall.js";
 import { model } from "./commands/model.js";
@@ -47,6 +48,11 @@ usage:
                             failure, and knocks (desktop notification, or a
                             bell) when it finishes. --quiet: plain facts on
                             stderr only, no persona lines, no notification.
+  rocky brief [--since <ref|24h>] [--quiet] [--ai]
+                            hear what changed since last brief: commits by
+                            area, remembered failures and fixes, touched
+                            invariant guards, questions reviewer may ask.
+                            --ai polishes wording via loopback Ollama only.
   rocky recall [--] <query...>
                             ask Rocky's memory. matches words from error or command.
   rocky recall --ai [--] <query...>
@@ -131,6 +137,8 @@ async function main(): Promise<number> {
     switch (command) {
       case "run":
         return run(parseExactCommand(rest, "rocky run <command>"));
+      case "brief":
+        return briefCommand(rest);
       case "watch":
         return watch(rest);
       case "recall":
