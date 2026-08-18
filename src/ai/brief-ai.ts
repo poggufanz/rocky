@@ -33,8 +33,14 @@ function validStrings(value: unknown): string[] | undefined {
 
 /**
  * Polish wording of blocks 2 (changes by area) and 5 (explain-ready) only.
- * Every other line passes through verbatim. Any error or invalid model
- * output returns the deterministic input unchanged — LLM never adds facts.
+ * Every other line passes through verbatim. The model may only reword
+ * existing lines — never add, drop, or merge them — so each section's
+ * polished line count must exactly match that section's input line count
+ * (`polishedArea.length === areaLines.length` and
+ * `polishedExplain.length === explainLines.length`). Any count mismatch,
+ * error, or invalid model output returns the deterministic input `lines`
+ * array unchanged, by the same reference that was passed in, so callers can
+ * detect the fallback with `output === lines` — LLM never adds or drops facts.
  */
 export async function polishBriefLines(lines: string[], client: OllamaClient, model: string): Promise<string[]> {
   const sections = findSections(lines);
@@ -58,7 +64,7 @@ export async function polishBriefLines(lines: string[], client: OllamaClient, mo
     const polishedArea = validStrings(output.lines);
     const polishedExplain = validStrings(output.questions);
     if (polishedArea === undefined || polishedExplain === undefined) return lines;
-    if (polishedArea.length === 0 && areaLines.length > 0) return lines;
+    if (polishedArea.length !== areaLines.length || polishedExplain.length !== explainLines.length) return lines;
     return [
       ...lines.slice(0, sections.areaStart),
       ...polishedArea,
