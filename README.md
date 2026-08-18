@@ -144,7 +144,7 @@ Read the [contributing guide](https://github.com/poggufanz/rocky/blob/main/CONTR
 - **v0.5 - his curiosity (implemented)**: Nervous System hooks, intent-mechanism dictionary, teaching commands, and bounded MCP knowledge tools.
 - **v0.6 - his accountability (current release)**: `rocky brief`, `rocky journal`, `rocky invariants`, extended `rocky stats`, and the schema envelope documentation.
 
-BYOK annotation, `brief`, `attest`, and the memory circuit breaker remain deferred. The earlier `rocky explain` idea is superseded and is not an active command.
+BYOK annotation, `attest`, and the memory circuit breaker remain deferred. The earlier `rocky explain` idea is superseded and is not an active command.
 
 ## License and fan-project note
 

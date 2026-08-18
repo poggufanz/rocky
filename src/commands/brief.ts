@@ -46,6 +46,8 @@ interface ResolvedWindow {
   label: string;
   sinceTs: number;
   gitRange?: string;
+  /** The raw ref behind `gitRange`, kept separate so callers can resolve its commit time without reparsing `gitRange`. */
+  ref?: string;
 }
 
 function resolveWindow(since: string | undefined, now: number): ResolvedWindow {
@@ -59,7 +61,7 @@ function resolveWindow(since: string | undefined, now: number): ResolvedWindow {
     return { label: since, sinceTs: now - durationMs };
   }
   // Not a duration: treat as git ref, resolved by git itself in the log range.
-  return { label: `since ${since}`, sinceTs: 0, gitRange: `${since}..HEAD` };
+  return { label: `since ${since}`, sinceTs: 0, gitRange: `${since}..HEAD`, ref: since };
 }
 
 export async function briefCommand(argv: readonly string[] = [], cwd = process.cwd()): Promise<number> {
@@ -81,6 +83,19 @@ export async function briefCommand(argv: readonly string[] = [], cwd = process.c
   }
   const root = top.stdout.trim();
   const window = resolveWindow(args.since, now);
+
+  // A git-ref window has no natural sinceTs of its own (git resolves the
+  // range itself for blocks 1/2/5), so block 3's memory filter defaults to
+  // the ref's own commit time. A failing/unknown ref keeps memorySinceTs at
+  // window.sinceTs (0, fail-open) — the log call below reports the git error.
+  let memorySinceTs = window.sinceTs;
+  if (window.ref !== undefined) {
+    const refLog = await runGit(["-C", cwd, "log", "-1", "--format=%cI", window.ref], undefined, { timeoutMs: GIT_TIMEOUT_MS });
+    if (refLog.code === 0) {
+      const parsed = Date.parse(refLog.stdout.trim());
+      if (!Number.isNaN(parsed)) memorySinceTs = parsed;
+    }
+  }
 
   const logArgs = window.gitRange === undefined
     ? ["-C", cwd, "log", `--since=${new Date(window.sinceTs).toISOString()}`, "--date-order", "--pretty=format:%H%x09%s", "--numstat"]
@@ -104,7 +119,7 @@ export async function briefCommand(argv: readonly string[] = [], cwd = process.c
     const loaded = loadMemoryChecked();
     memoryHits = loaded.records
       .filter((record): record is typeof record & { kind: "failure" | "fix" } =>
-        (record.kind === "failure" || record.kind === "fix") && record.ts >= window.sinceTs && record.ts <= now)
+        (record.kind === "failure" || record.kind === "fix") && record.ts >= memorySinceTs && record.ts <= now)
       .filter((record) => {
         const normalizedCwd = canonicalPath(record.cwd);
         return normalizedCwd === normalizedRoot || normalizedCwd.startsWith(`${normalizedRoot}/`);

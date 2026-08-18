@@ -24,6 +24,33 @@ function makeRepo(): string {
   return dir;
 }
 
+// Two commits with explicit, far-apart author/committer dates (not wall-clock
+// timing), so the ref-window test below has a deterministic gap to seed
+// memory records into rather than racing real commit timestamps.
+function makeDatedRepo(): { dir: string; firstSha: string; firstIso: string } {
+  const dir = mkdtempSync(join(tmpdir(), "rocky-brief-since-"));
+  const git = (args: string[], env?: NodeJS.ProcessEnv): void => {
+    execFileSync("git", ["-C", dir, ...args], { stdio: "ignore", env: env === undefined ? process.env : { ...process.env, ...env } });
+  };
+  git(["init"]);
+  git(["config", "user.email", "t@example.com"]);
+  git(["config", "user.name", "t"]);
+
+  const firstIso = "2024-01-01T00:00:00+00:00";
+  const secondIso = "2024-01-02T00:00:00+00:00";
+
+  writeFileSync(join(dir, "a.txt"), "one\n");
+  git(["add", "."]);
+  git(["commit", "-m", "feat: first"], { GIT_AUTHOR_DATE: firstIso, GIT_COMMITTER_DATE: firstIso });
+  const firstSha = execFileSync("git", ["-C", dir, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+
+  writeFileSync(join(dir, "b.txt"), "two\n");
+  git(["add", "."]);
+  git(["commit", "-m", "feat: second"], { GIT_AUTHOR_DATE: secondIso, GIT_COMMITTER_DATE: secondIso });
+
+  return { dir, firstSha, firstIso };
+}
+
 test("parseBriefArgs handles --since, --quiet, --ai and rejects strays", () => {
   assert.deepEqual(parseBriefArgs([]), { quiet: false, ai: false });
   assert.deepEqual(parseBriefArgs(["--since", "24h", "--quiet"]), { since: "24h", quiet: true, ai: false });
@@ -92,6 +119,43 @@ test("briefCommand canonicalizes cwd so a native-separator memory record still m
     assert.equal(code, 0);
     assert.match(stdout, /failure: npm test/);
     assert.doesNotMatch(stdout, /none remembered/);
+  } finally {
+    if (previous === undefined) delete process.env.ROCKY_HOME;
+    else process.env.ROCKY_HOME = previous;
+  }
+});
+
+test("briefCommand scopes a --since <git-ref> memory window to the ref's own commit time, not epoch 0", async () => {
+  const { dir, firstSha, firstIso } = makeDatedRepo();
+  const home = mkdtempSync(join(tmpdir(), "rocky-home-"));
+  const previous = process.env.ROCKY_HOME;
+  process.env.ROCKY_HOME = home;
+  try {
+    const firstCommitTs = Date.parse(firstIso);
+    // After the first commit, before the second: should surface in block 3
+    // once --since resolves to the first commit's own timestamp.
+    const inWindow = {
+      kind: "failure", id: "since-in-window", ts: firstCommitTs + 3_600_000, cwd: dir,
+      cmd: "npm test since-in-window", exitCode: 1, fingerprint: "fp-since-in-window",
+      signature: ["boom"], excerpt: "boom",
+    };
+    // Far before the first commit: with the old unscoped sinceTs of 0 this
+    // would leak into block 3 too; it must not once the ref is resolved.
+    const beforeFirstCommit = {
+      kind: "failure", id: "since-before-first", ts: 1000, cwd: dir,
+      cmd: "npm test since-before-first", exitCode: 1, fingerprint: "fp-since-before-first",
+      signature: ["ancient boom"], excerpt: "ancient boom",
+    };
+    writeFileSync(
+      join(home, "memory.jsonl"),
+      `${JSON.stringify(beforeFirstCommit)}\n${JSON.stringify(inWindow)}\n`,
+      "utf8",
+    );
+
+    const { code, stdout } = await captureStdout(() => briefCommand(["--since", firstSha, "--quiet"], dir));
+    assert.equal(code, 0);
+    assert.match(stdout, /failure: npm test since-in-window/);
+    assert.doesNotMatch(stdout, /since-before-first/);
   } finally {
     if (previous === undefined) delete process.env.ROCKY_HOME;
     else process.env.ROCKY_HOME = previous;
