@@ -3,7 +3,7 @@ import { resolveRockyPaths } from "../core/state-paths.js";
 import { CliUsageError, reportCliUsage } from "./cli-args.js";
 import { detail, say } from "../ui/rocky.js";
 
-const USAGE = 'rocky journal "<one line note>"';
+const USAGE = 'rocky journal "<note>"';
 
 export function journalCommand(argv: readonly string[]): number {
   try {

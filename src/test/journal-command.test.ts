@@ -40,3 +40,16 @@ test("journalCommand strips leading -- separator", () => {
     else process.env.ROCKY_HOME = previous;
   }
 });
+
+test("journalCommand with whitespace-only note exits 1", () => {
+  const home = mkdtempSync(join(tmpdir(), "rocky-home-"));
+  const previous = process.env.ROCKY_HOME;
+  process.env.ROCKY_HOME = home;
+  try {
+    assert.equal(journalCommand(["   "]), 1);
+    assert.equal(readJournal(join(home, "journal.jsonl")).records.length, 0);
+  } finally {
+    if (previous === undefined) delete process.env.ROCKY_HOME;
+    else process.env.ROCKY_HOME = previous;
+  }
+});
