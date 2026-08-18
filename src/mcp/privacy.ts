@@ -1,9 +1,9 @@
 import { Buffer } from "node:buffer";
 import { homedir } from "node:os";
 import type { Exposure } from "../core/config-read.js";
-import { boundTripleRecord, isSafeNonNegativeInteger, MAX_TRIPLE_FILES } from "../core/memory-read.js";
+import { boundTripleRecord, isBoundedLinkBasis, isConfirmableLinkBasis, isSafeNonNegativeInteger, MAX_TRIPLE_FILES } from "../core/memory-read.js";
 import { canonicalPath } from "../core/memory-read.js";
-import type { FailureOrigin, FailureRecord, FixRecord, MemoryRecord, TripleRecord } from "../core/memory-read.js";
+import type { FailureOrigin, FailureRecord, FixRecord, LinkConfidence, MemoryRecord, TripleRecord } from "../core/memory-read.js";
 import { hasCanonicalKnowledgeProof } from "../core/memory-query.js";
 import type { KnowledgeSearchHit, RecallHit, RecentFailureHit, WhyFilePossible } from "../core/memory-query.js";
 import { redactSecretsAtBoundary, replaceAnsiAndControls, stripInvisibleControls } from "../core/redact.js";
@@ -837,13 +837,21 @@ function projectFixRecord(fix: FixRecord, exposure: Exposure, sanitizeIds = fals
       if (length > bound) truncation.fields.push("record.links");
       for (let index = 0; index < bound; index += 1) {
         const link = fix.links[index];
-        if (!link || typeof link.id !== "string"
-            || (link.basis !== "identity" && link.basis !== "signature" && link.basis !== "program")
+        // A bounded-but-unrecognized basis (e.g. sequence, or a future
+        // value) is weak evidence to project, not a reason to filter the
+        // link out of the response. Only a genuinely malformed basis keeps
+        // flagging truncatedFields the way it did before.
+        if (!link || typeof link.id !== "string" || !isBoundedLinkBasis(link.basis)
             || (link.confidence !== undefined && link.confidence !== "confirmed" && link.confidence !== "possible")) {
           truncation.fields.push("record.links");
           continue;
         }
-        links.push({ id: link.id, basis: link.basis, ...(link.confidence === undefined ? {} : { confidence: link.confidence }) });
+        // An unrecognized or non-confirmable basis can never present as
+        // confirmed. Leave an absent confidence undefined; never invent one.
+        const normalizedConfidence: LinkConfidence | undefined = link.confidence === undefined
+          ? undefined
+          : (!isConfirmableLinkBasis(link.basis) && link.confidence === "confirmed" ? "possible" : link.confidence);
+        links.push({ id: link.id, basis: link.basis, ...(normalizedConfidence === undefined ? {} : { confidence: normalizedConfidence }) });
       }
     } catch {
       truncation.fields.push("record.links");
@@ -896,7 +904,13 @@ function cloneFailure(failure: FailureRecord, exposure: Exposure, truncation: Tr
   return clone;
 }
 
-function cloneFix(fix: FixRecord, exposure: Exposure, truncation: Truncation): FixRecord {
+// Exported so the bounded-basis/confidence-normalization invariant can be
+// pinned by a direct unit test (finding 2, final whole-branch review): the
+// function's sole production caller (projectHit, via the untrusted-provider
+// snapshot in snapshotSourceFix) strips `links` before this ever sees one
+// today, so a test that only went through the public projectRecallHits
+// surface could never actually exercise this branch.
+export function cloneFix(fix: FixRecord, exposure: Exposure, truncation: Truncation): FixRecord {
   const allowed = {
     kind: "fix" as const,
     id: fix.id,
@@ -916,11 +930,32 @@ function cloneFix(fix: FixRecord, exposure: Exposure, truncation: Truncation): F
     failureIds: projectOpaqueIds(allowed.failureIds, "rawRecord.fix.failureIds", truncation),
   };
   if (allowed.links !== undefined) {
-    projected.links = allowed.links.map((link, index) => ({
-      id: projectOpaqueId(link.id, `rawRecord.fix.links[${index}].id`, truncation),
-      basis: link.basis,
-      ...(link.confidence === undefined ? {} : { confidence: link.confidence }),
-    }));
+    // Same bounded-basis rule the other three FixLink readers enforce
+    // (parseFixLinks, safeProviderFixRecord/mcp/tools.ts, projectFixRecord
+    // above): the invariant must live in the code, not in caller discipline,
+    // so the next data source wired into projectHit inherits it for free
+    // (finding 2, final whole-branch review). `fix` here is already a
+    // parseFixLinks-validated FixRecord from durable memory, so this is
+    // belt-and-suspenders today, but it closes the gap for tomorrow.
+    const links: NonNullable<FixRecord["links"]> = [];
+    for (const link of allowed.links) {
+      if (!link || typeof link.id !== "string" || !isBoundedLinkBasis(link.basis)
+          || (link.confidence !== undefined && link.confidence !== "confirmed" && link.confidence !== "possible")) {
+        truncation.fields.push("rawRecord.fix.links");
+        continue;
+      }
+      // An unrecognized or non-confirmable basis can never present as
+      // confirmed. Leave an absent confidence undefined; never invent one.
+      const normalizedConfidence: LinkConfidence | undefined = link.confidence === undefined
+        ? undefined
+        : (!isConfirmableLinkBasis(link.basis) && link.confidence === "confirmed" ? "possible" : link.confidence);
+      links.push({
+        id: projectOpaqueId(link.id, `rawRecord.fix.links[${links.length}].id`, truncation),
+        basis: link.basis,
+        ...(normalizedConfidence === undefined ? {} : { confidence: normalizedConfidence }),
+      });
+    }
+    projected.links = links;
   }
   if (allowed.candidateFailureIds !== undefined) {
     projected.candidateFailureIds = projectOpaqueIds(

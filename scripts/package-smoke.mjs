@@ -171,7 +171,9 @@ function assertPackResult(packed) {
 
 function assertLfShellAssets(root, label) {
   const shellRoot = join(root, "dist", "shell");
-  const assets = readdirSync(shellRoot).filter((name) => name.endsWith(".bash") || name.endsWith(".sh")).sort();
+  const assets = readdirSync(shellRoot)
+    .filter((name) => name.endsWith(".bash") || name.endsWith(".sh") || name.endsWith(".ps1"))
+    .sort();
   assert.ok(assets.length > 0, `${label} has no shell assets`);
   for (const name of assets) {
     assert.equal(readFileSync(join(shellRoot, name)).includes(13), false, `${label}/${name} contains CR bytes`);
@@ -418,6 +420,11 @@ async function main() {
     CLAUDE_CONFIG_DIR: claudeConfig,
     CODEX_HOME: codexHome,
     ROCKY_HOME: rockyHome,
+    // Never let a smoke run touch this machine's real $PROFILE for Windows
+    // PowerShell / PowerShell 7 — `hook install`/`uninstall`/`status` probe
+    // for those hosts unless this override says there are none. See
+    // task-4-report.md for the full injection-seam rationale.
+    ROCKY_TEST_POWERSHELL_HOSTS: "[]",
     ROCKY_FAKE_CLIENT_STATE: fakeClientState,
     ROCKY_PACKAGE_SMOKE_FAKE_CLIENT: fakeClientScript,
     ROCKY_PACKAGE_SMOKE_HERMETIC: "1",

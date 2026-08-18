@@ -98,9 +98,19 @@ function maskUrls(text: string): string {
   });
 }
 
-function maskCommonVolatile(text: string): string {
-  return maskUrls(text)
-    .replace(ABSOLUTE_PATH, "<path>")
+/**
+ * `maskPaths` defaults to true for every existing caller (fingerprint and
+ * retrieval representations both rely on path masking for stability). The
+ * raw-command retrieval layer is the one caller that opts out -- see
+ * `fillRawCommandTokens` -- because path masking is specifically the rule
+ * the F3 fix needs to bypass; every other volatile-value rule here (URL,
+ * UUID, digest, hex address, timestamp) is a deliberate, pre-existing design
+ * choice for matching stability that stays in force even for raw commands.
+ */
+function maskCommonVolatile(text: string, options: { maskPaths?: boolean } = {}): string {
+  const { maskPaths = true } = options;
+  const withUrlsMasked = maskUrls(text);
+  return (maskPaths ? withUrlsMasked.replace(ABSOLUTE_PATH, "<path>") : withUrlsMasked)
     .replace(UUID, "<hex>")
     .replace(DIGEST_WITH_ALGORITHM, "$1<hex>")
     .replace(BARE_DIGEST, "<hex>")
@@ -293,6 +303,61 @@ export function retrievalTokens(text: string): Set<string> {
 export function fillRetrievalTokens(text: string, target: Set<string>): void {
   target.clear();
   fillTokenBag(normalizeRetrievalLine(text), target);
+}
+
+/**
+ * Cap on how many genuinely *new* tokens (not already present in the
+ * caller's evidence set) the raw-command layer may contribute per record.
+ * Path segments are the only thing this layer un-masks relative to
+ * `retrievalTokens` (see `fillRawCommandTokens`), and an unbounded number of
+ * them can dilute a plain, common-word query -- a frequently-recorded
+ * program name like `git`, appearing across many hook-origin failures --
+ * below the 0.05 visibility floor for the one record with an unusually deep
+ * path. That is the same "remembered but not findable" failure mode F3
+ * fixes, just triggered from the query side (a common query, an uncapped
+ * record) instead of the record side (a distinctive query, a masked
+ * record). Twelve keeps every realistic path fully unmasked -- most real
+ * repos nest far less deeply than this -- while giving a firm ceiling no
+ * matter how deep a pathological path goes.
+ */
+const MAX_NEW_RAW_COMMAND_TOKENS = 12;
+
+/**
+ * Retrieval-only tokens from a command exactly as the user typed it, with
+ * every volatile-value masking rule applied EXCEPT path masking.
+ * `retrievalTokens` reuses the same masking pipeline as the fingerprint (it
+ * must, for the semantic-number cases like ports/statuses), so a command
+ * containing a path collapses to `<path>` there too whenever it is combined
+ * with already-masked signature text -- the same mask that keeps a
+ * recurring fingerprint stable also erases the one distinctive word a user
+ * would search for. Path masking is the *only* rule F3 needs to bypass:
+ * URL/UUID/digest/hex-address/timestamp masking stay in force here exactly
+ * as `retrievalTokens` already applies them, since those are a deliberate,
+ * pre-existing design choice for matching stability, not part of the bug.
+ * This is additive evidence layered on top of `retrievalTokens`, not a
+ * replacement: it never feeds fingerprint identity, recurrence matching, or
+ * any write path. Adds into the caller's bag rather than clearing it, so
+ * callers can layer this onto existing masked evidence in one bounded
+ * scratch set.
+ *
+ * Bounded to `MAX_NEW_RAW_COMMAND_TOKENS` new insertions, walked from the
+ * *end* of the command backward: the program name and leading flags rarely
+ * contain a path (so they are usually already present via the masked pass
+ * above and cost nothing from this budget), while the most distinctive part
+ * of a long path -- the filename, the leaf directories -- sits at the tail.
+ * Preferring the tail keeps the part a user would actually search for and
+ * spends the budget on shallow/generic directory prefixes last.
+ */
+export function fillRawCommandTokens(cmd: string, target: Set<string>): void {
+  const prepared = maskCommonVolatile(stripAnsi(cmd).normalize("NFC").trim(), { maskPaths: false });
+  const normalized = maskNumbers(prepared, "retrieval").replace(/\s+/gu, " ").toLowerCase();
+  const matches = [...normalized.matchAll(TOKEN)];
+  const startSize = target.size;
+  for (let index = matches.length - 1; index >= 0; index -= 1) {
+    if (target.size - startSize >= MAX_NEW_RAW_COMMAND_TOKENS) break;
+    const raw = matches[index]?.[0];
+    if (raw !== undefined) addToken(raw, target);
+  }
 }
 
 function tokenBag(text: string): Set<string> {

@@ -67,10 +67,21 @@ function waitForChild(child: ChildProcessWithoutNullStreams): Promise<{ code: nu
   });
 }
 
+// Hang guard only -- every use below bounds how long one step of the real
+// MCP child process's lifecycle may take before the wait gives up; none of
+// these values are assertions about correctness. On a loaded windows-latest
+// CI runner, Node startup plus CLI initialization alone can exceed the
+// previous 2_000ms bound, turning a healthy child into a false timeout.
+// 20s per step is generous enough to absorb that contention while still
+// catching a genuine hang; the test's own { timeout } option is widened to
+// give enough headroom for the several such steps this test performs in
+// sequence.
+const PROCESS_HANG_GUARD_MS = 20_000;
+
 async function waitFor(predicate: () => boolean, label: string): Promise<void> {
-  const deadline = Date.now() + 2_000;
+  const deadline = Date.now() + PROCESS_HANG_GUARD_MS;
   while (!predicate()) {
-    if (Date.now() >= deadline) throw new Error(`${label} exceeded 2000ms`);
+    if (Date.now() >= deadline) throw new Error(`${label} exceeded ${PROCESS_HANG_GUARD_MS}ms`);
     await new Promise<void>((resolve) => setTimeout(resolve, 10));
   }
 }
@@ -81,7 +92,7 @@ async function withTimeout<T>(promise: Promise<T>, label: string): Promise<T> {
     return await Promise.race([
       promise,
       new Promise<T>((_resolve, reject) => {
-        timer = setTimeout(() => reject(new Error(`${label} exceeded 2000ms`)), 2_000);
+        timer = setTimeout(() => reject(new Error(`${label} exceeded ${PROCESS_HANG_GUARD_MS}ms`)), PROCESS_HANG_GUARD_MS);
       }),
     ]);
   } finally {
@@ -102,7 +113,7 @@ async function stopChild(child: ChildProcessWithoutNullStreams, closed: Promise<
   }
 }
 
-test("cancelled MCP local-AI request leaves all state untouched and never emits a response", { timeout: 10_000 }, async (t) => {
+test("cancelled MCP local-AI request leaves all state untouched and never emits a response", { timeout: PROCESS_HANG_GUARD_MS * 3 }, async (t) => {
   const home = seedHome(t);
   const before = snapshotTree(home);
   const testEnv = { ...process.env, ROCKY_HOME: home, ROCKY_MCP_EXPOSURE: "sanitized" };

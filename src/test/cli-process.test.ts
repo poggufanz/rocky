@@ -12,7 +12,13 @@ import { PACKAGE_VERSION } from "../core/package-info.js";
 const packageRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const entry = join(packageRoot, "dist", "index.js");
 const throwFetch = join(packageRoot, "test", "fixtures", "throw-fetch.cjs");
-const PROCESS_TIMEOUT_MS = 5_000;
+// Hang guard only -- bounds how long a spawned child may run before
+// spawnSync gives up; it is not part of any assertion here. On a loaded
+// windows-latest CI runner, Node startup plus CLI initialization alone can
+// exceed several seconds, so a tight bound turns a healthy child into a
+// false ETIMEDOUT failure. 30s is generous enough to absorb that
+// contention while still catching a genuine hang.
+const PROCESS_TIMEOUT_MS = 30_000;
 
 interface ProcessSandbox {
   root: string;
@@ -49,6 +55,9 @@ function processSandbox(t: TestContext): ProcessSandbox {
     ROCKY_HOME: directories.rockyHome,
     ROCKY_TEST_FETCH_MARKER: join(root, "fetch-used.marker"),
     ROCKY_TEST_BACKGROUND_MARKER: join(root, "background-attempt.marker"),
+    // This sandbox is not the PowerShell-hook test suite — never let a
+    // generic CLI-process test reach this machine's real $PROFILE.
+    ROCKY_TEST_POWERSHELL_HOSTS: "[]",
   };
   delete env.NODE_OPTIONS;
   delete env.NODE_TEST_CONTEXT;
@@ -313,7 +322,7 @@ test("release truth keeps branch and immutable-tag modes distinct", async () => 
     resolveNpmExecutable(environment: NodeJS.ProcessEnv): string;
     releaseCheckCommandPlan(npm: string | { file: string; argsPrefix: string[] }, root: string): Record<string, { file: string; args: string[] }>;
   };
-  const releaseHead = "4fec0f3c22452a228892901de0aedb779e7b5015";
+  const releaseHead = "8916d713c81e21a988ae377966ed879cdbfb6d60";
   const postReleaseHead = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
   const sha256Head = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
   const branch = {
@@ -361,7 +370,7 @@ test("release truth keeps branch and immutable-tag modes distinct", async () => 
       if (command === "rev-parse --verify HEAD^{commit}") return postReleaseHead;
       if (command === "rev-parse HEAD") return postReleaseHead;
       if (command.startsWith("status")) return "";
-      if (command === "rev-parse --verify refs/tags/v0.5.1^{commit}") return releaseHead;
+      if (command === "rev-parse --verify refs/tags/v0.5.4^{commit}") return releaseHead;
       return "cccccccccccccccccccccccccccccccccccccccc";
     };
     const polluted = {
@@ -390,7 +399,7 @@ test("release truth keeps branch and immutable-tag modes distinct", async () => 
     assert.ok(runnerOptions.every((options) => options.gitExecutable === "C:\\absolute\\git.exe" && options.env === sanitized));
     assert.ok(calls.some((args) => args.join(" ") === "status --short --untracked-files=all --"));
     assert.ok(calls.some((args) => args.join(" ") === "rev-parse --verify HEAD^{commit}"));
-    assert.ok(calls.some((args) => args.join(" ") === "rev-parse --verify refs/tags/v0.5.1^{commit}"));
+    assert.ok(calls.some((args) => args.join(" ") === "rev-parse --verify refs/tags/v0.5.4^{commit}"));
     const objectTypeCalls: string[][] = [];
     const objectTypeRunner = (_root: string, args: string[]): string | undefined => {
       objectTypeCalls.push(args);
@@ -399,7 +408,7 @@ test("release truth keeps branch and immutable-tag modes distinct", async () => 
       if (command === "rev-parse HEAD") return postReleaseHead;
       if (command === "rev-parse --verify HEAD^{commit}") return undefined;
       if (command.startsWith("status")) return "";
-      if (command === "rev-parse --verify refs/tags/v0.5.1^{commit}") return releaseHead;
+      if (command === "rev-parse --verify refs/tags/v0.5.4^{commit}") return releaseHead;
       return "cccccccccccccccccccccccccccccccccccccccc";
     };
     assert.notDeepEqual(

@@ -110,16 +110,19 @@ test("future records stay readable but cannot resolve at an explicit clock", () 
   assert.equal(records[0]?.kind === "failure" ? records[0].resolvedBy : undefined, undefined);
 });
 
-test("loader accepts a fix's links array and drops a fix with a malformed link", () => {
+test("loader accepts a fix's links array and drops a fix with an out-of-bounds link", () => {
   const root = mkdtempSync(join(tmpdir(), "rocky-links-"));
   const file = join(root, "memory.jsonl");
   const goodFix = {
     kind: "fix", id: "x1", ts: 2, cwd: "/work", cmd: "true", failureIds: ["f1"],
     links: [{ id: "f1", basis: "signature" }],
   };
+  // An out-of-bounds basis (control character) is still malformed and still
+  // rejects the whole record. An unrecognized-but-bounded basis is no longer
+  // malformed on its own; see the "unrecognized basis" tests below.
   const badFix = {
     kind: "fix", id: "x2", ts: 3, cwd: "/work", cmd: "true", failureIds: ["f1"],
-    links: [{ id: "f1", basis: "maybe" }],
+    links: [{ id: "f1", basis: "bad\u0000basis" }],
   };
   writeFileSync(file, [JSON.stringify(goodFix), JSON.stringify(badFix)].join("\n") + "\n");
   const records = loadMemory(file);
@@ -142,6 +145,99 @@ test("loader accepts possible associations without resolving failures", () => {
   const records = loadMemory(file);
   assert.deepEqual(records.map((record) => record.kind), ["failure", "association"]);
   assert.equal(records[0]?.kind === "failure" ? records[0].resolvedBy : undefined, undefined);
+});
+
+test("a fix record with a link basis of \"sequence\" parses, is retained, and reads confidence as possible", () => {
+  const root = mkdtempSync(join(tmpdir(), "rocky-basis-sequence-fix-"));
+  const file = join(root, "memory.jsonl");
+  const fix = {
+    kind: "fix", id: "seq-fix", ts: 2, cwd: "/work", cmd: "true", failureIds: ["f1"],
+    links: [{ id: "f1", basis: "sequence", confidence: "possible" }],
+  };
+  writeFileSync(file, `${JSON.stringify(fix)}\n`);
+  const records = loadMemory(file);
+  assert.equal(records.length, 1);
+  const link = records[0]?.kind === "fix" ? records[0].links?.[0] : undefined;
+  assert.equal(link?.basis, "sequence");
+  assert.equal(link?.confidence, "possible");
+});
+
+test("a fix record with an unrecognized basis and confirmed confidence parses, is retained, and normalizes to possible", () => {
+  const root = mkdtempSync(join(tmpdir(), "rocky-basis-unknown-fix-"));
+  const file = join(root, "memory.jsonl");
+  const fix = {
+    kind: "fix", id: "unknown-fix", ts: 2, cwd: "/work", cmd: "true", failureIds: ["f1"],
+    links: [{ id: "f1", basis: "banana", confidence: "confirmed" }],
+  };
+  writeFileSync(file, `${JSON.stringify(fix)}\n`);
+  const records = loadMemory(file);
+  assert.equal(records.length, 1);
+  const link = records[0]?.kind === "fix" ? records[0].links?.[0] : undefined;
+  assert.equal(link?.basis, "banana");
+  assert.equal(link?.confidence, "possible");
+});
+
+test("an association record with a sequence-basis link parses and is retained", () => {
+  const root = mkdtempSync(join(tmpdir(), "rocky-basis-sequence-association-"));
+  const file = join(root, "memory.jsonl");
+  const failure = {
+    kind: "failure", id: "f1", ts: 1, cwd: "/work", cmd: "npm run broken", exitCode: 1,
+    fingerprint: "abc", signature: ["failed"], excerpt: "failed",
+  };
+  // No confidence field at all: an unknown/sequence basis with absent
+  // confidence is valid evidence and must not reject the association.
+  const association = {
+    kind: "association", id: "a-seq", ts: 2, cwd: "/work", cmd: "docker restart db",
+    candidateFailureIds: ["f1"], links: [{ id: "f1", basis: "sequence" }],
+  };
+  writeFileSync(file, `${JSON.stringify(failure)}\n${JSON.stringify(association)}\n`);
+  const records = loadMemory(file);
+  assert.deepEqual(records.map((record) => record.kind), ["failure", "association"]);
+});
+
+test("an association record with an identity-basis link is still dropped", () => {
+  const root = mkdtempSync(join(tmpdir(), "rocky-basis-identity-association-"));
+  const file = join(root, "memory.jsonl");
+  const failure = {
+    kind: "failure", id: "f1", ts: 1, cwd: "/work", cmd: "npm run broken", exitCode: 1,
+    fingerprint: "abc", signature: ["failed"], excerpt: "failed",
+  };
+  const association = {
+    kind: "association", id: "a-identity", ts: 2, cwd: "/work", cmd: "npm run broken",
+    candidateFailureIds: ["f1"], links: [{ id: "f1", basis: "identity", confidence: "confirmed" }],
+  };
+  writeFileSync(file, `${JSON.stringify(failure)}\n${JSON.stringify(association)}\n`);
+  const records = loadMemory(file);
+  assert.deepEqual(records.map((record) => record.kind), ["failure"]);
+});
+
+test("a fix link basis is bounded like id: control characters and over-length strings still reject", () => {
+  const controlBasis = {
+    kind: "fix", id: "control-basis", ts: 1, cwd: "/work", cmd: "true", failureIds: ["f1"],
+    links: [{ id: "f1", basis: "bad\u0000basis" }],
+  };
+  const overLongBasis = {
+    kind: "fix", id: "long-basis", ts: 1, cwd: "/work", cmd: "true", failureIds: ["f1"],
+    links: [{ id: "f1", basis: "x".repeat(16 * 1024 + 1) }],
+  };
+  assert.equal(parseMemoryRecord(controlBasis), undefined);
+  assert.equal(parseMemoryRecord(overLongBasis), undefined);
+});
+
+test("a failure resolved by a confirmed identity fix still gets resolvedBy set", () => {
+  const root = mkdtempSync(join(tmpdir(), "rocky-basis-identity-resolve-"));
+  const file = join(root, "memory.jsonl");
+  const failure = {
+    kind: "failure", id: "f1", ts: 1, cwd: "/work", cmd: "npm run build", exitCode: 1,
+    fingerprint: "abc", signature: ["failed"], excerpt: "failed",
+  };
+  const fix = {
+    kind: "fix", id: "x1", ts: 2, cwd: "/work", cmd: "npm run build", failureIds: ["f1"],
+    links: [{ id: "f1", basis: "identity", confidence: "confirmed" }],
+  };
+  writeFileSync(file, `${JSON.stringify(failure)}\n${JSON.stringify(fix)}\n`);
+  const records = loadMemory(file);
+  assert.equal(records[0]?.kind === "failure" ? records[0].resolvedBy : undefined, "x1");
 });
 
 test("state paths resolve ROCKY_HOME on every call", (t) => {

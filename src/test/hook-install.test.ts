@@ -2,20 +2,18 @@ import test, { before, type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import {
   chmodSync,
-  copyFileSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
-  readdirSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import { addHookBlock, hasHookBlock, hookInstall, hookUninstall, removeHookBlock } from "../commands/hook.js";
 import { phrase, validateRockyPhrase } from "../ui/phrases.js";
+import { verifyShellAssetsStaged } from "./shell-assets-fixture.js";
 
 const BLOCK_RE = /# >>> rocky hook >>>[\s\S]*# <<< rocky hook <<</;
 const DISCLOSURE = "bashrc is write-protected. I replace it anyway. your lines stay.";
@@ -44,22 +42,14 @@ test("removeHookBlock leaves content unchanged when END marker is missing", () =
 
 // --- write-protected bashrc disclosure --------------------------------------
 
-const packageRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
-
-before(() => {
-  // hookInstall expects its shell assets next to the compiled commands
-  // (matches hook-block.test.ts's fixture — this file is filtered to run
-  // alone via `node scripts/test.mjs hook-install`, so it cannot rely on
-  // another test file's before() hook having already copied them).
-  const source = join(packageRoot, "src", "shell");
-  const destination = join(packageRoot, ".test-dist", "shell");
-  mkdirSync(destination, { recursive: true });
-  for (const name of readdirSync(source).sort()) {
-    if (name.endsWith(".bash") || name.endsWith(".sh")) {
-      copyFileSync(join(source, name), join(destination, name));
-    }
-  }
-});
+// hookInstall expects its shell assets next to the compiled commands.
+// `scripts/test.mjs` stages `.test-dist/shell/` once, in a single process,
+// before any test file is spawned -- including a filtered run of this file
+// alone (`node scripts/test.mjs hook-install`), so this only ever needs to
+// verify that staging already happened, never write it itself. See
+// shell-assets-fixture.ts for why writing here raced hook-block.test.ts's and
+// hook-powershell.test.ts's identical writes to this same shared path.
+before(verifyShellAssetsStaged);
 
 interface BashrcSandbox {
   bashrc: string;
@@ -76,10 +66,14 @@ function bashrcSandbox(t: TestContext): BashrcSandbox {
     HOME: process.env.HOME,
     USERPROFILE: process.env.USERPROFILE,
     ROCKY_HOME: process.env.ROCKY_HOME,
+    ROCKY_TEST_POWERSHELL_HOSTS: process.env.ROCKY_TEST_POWERSHELL_HOSTS,
   };
   process.env.HOME = home;
   process.env.USERPROFILE = home;
   process.env.ROCKY_HOME = join(root, "rocky-home");
+  // This sandbox exercises bashrc only — see the identical note in
+  // hook-block.test.ts's bashrcSandbox.
+  process.env.ROCKY_TEST_POWERSHELL_HOSTS = "[]";
   t.after(() => {
     for (const [key, value] of Object.entries(saved)) {
       if (value === undefined) delete process.env[key];

@@ -2,6 +2,7 @@ import { existsSync, readdirSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
+import { copyShellAssets } from "./copy-assets.mjs";
 
 const packageRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const testDist = join(packageRoot, ".test-dist");
@@ -27,6 +28,12 @@ try {
     join(packageRoot, "node_modules", "typescript", "bin", "tsc"),
     "-p", join(packageRoot, "tsconfig.test.json"),
   ]);
+  // Stage shell assets into .test-dist/shell/ exactly once, in this single
+  // parent process, before any test file (each running in its own concurrent
+  // child under `node --test`) can load and try to stage the same shared
+  // path itself. See src/test/shell-assets-fixture.ts for the read-only
+  // verification every consumer does instead of writing.
+  copyShellAssets(join(packageRoot, "src", "shell"), join(testDist, "shell"));
   const allTests = readdirSync(join(testDist, "test"))
     .filter((name) => name.endsWith(".test.js"))
     .sort()

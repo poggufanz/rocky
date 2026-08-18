@@ -1,13 +1,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import type { AssociationRecord, FailureRecord, FixRecord, MemoryRecord, NoteRecord, TripleRecord } from "../core/memory.js";
-import { fingerprint, fingerprintSignature, legacyFingerprint, signatureLines } from "../core/fingerprint.js";
+import { commandFingerprint, fingerprint, fingerprintSignature, legacyFingerprint, normalizeLine, signatureLines } from "../core/fingerprint.js";
 import { pathIdentityHash } from "../core/memory-read.js";
 import {
   LINK_WINDOW_MS,
   createMemoryQueries,
   fetchRecord,
   findByFingerprint,
+  possibleFixesForFailure,
   queryRecall,
   queryRecentFailures,
   queryStats,
@@ -109,6 +110,114 @@ test("queryRecall deduplicates a fingerprint family before applying limit orderi
     queryRecall([familyOne, middle, familyTwo, fix], { query: "needle", cwd: "/work/family", limit: 1 })
       .map((hit) => hit.failure.id),
     [middle.id],
+  );
+});
+
+// F3: recall must also match tokens from the raw, unmasked command text, so
+// a hook-origin record (no stderr, so signature/excerpt are nearly empty)
+// stays findable by the distinctive word a user actually typed, even though
+// the persisted signature masks the path exactly like the fingerprint does.
+test("recall finds a hook-origin record by a path word the persisted signature masks", () => {
+  const cmd = "Get-Item ./another-missing-thing";
+  const record: FailureRecord = {
+    kind: "failure", id: "ps-hook-1", ts: 100, cwd: "/work/ps", cmd, exitCode: 1,
+    fingerprint: commandFingerprint(cmd, 1), fingerprintV: 2,
+    signature: [normalizeLine(cmd)], excerpt: "exit 1", origin: "hook",
+  };
+  // Sanity check the premise: the stored signature really is path-masked.
+  assert.equal(record.signature[0], "get-item .<path>");
+  assert.deepEqual(
+    queryRecall([record], { query: "another-missing-thing" }).map((hit) => hit.failure.id),
+    ["ps-hook-1"],
+    "the distinctive path word must find the record",
+  );
+  // Searching by program name must keep working exactly as before.
+  assert.deepEqual(
+    queryRecall([record], { query: "get-item" }).map((hit) => hit.failure.id),
+    ["ps-hook-1"],
+    "program name must still find the record",
+  );
+});
+
+test("a confirmed fix still outranks a weaker no-fix candidate for the same query", () => {
+  const query = "another-missing-thing";
+  const fixedCmd = "Get-Item ./another-missing-thing";
+  const fixed: FailureRecord = {
+    kind: "failure", id: "fixed-hit", ts: 100, cwd: "/work/ps", cmd: fixedCmd, exitCode: 1,
+    fingerprint: "fixed-hit-fp", fingerprintV: 2,
+    signature: [normalizeLine(fixedCmd)], excerpt: "exit 1", origin: "hook",
+    resolvedBy: "fixed-hit-fix",
+  };
+  const fix: FixRecord = {
+    kind: "fix", id: "fixed-hit-fix", ts: 200, cwd: "/work/ps",
+    cmd: "New-Item ./another-missing-thing", failureIds: ["fixed-hit"],
+  };
+  // A long, weakly-related command: the raw-token layer adds many more
+  // tokens to its evidence than to `fixed`'s, diluting its Jaccard score.
+  const weakCmd = "cat another-missing-thing-log-archive-2024-summary-report";
+  const weak: FailureRecord = {
+    kind: "failure", id: "weak-hit", ts: 300, cwd: "/work/ps", cmd: weakCmd, exitCode: 1,
+    fingerprint: "weak-hit-fp", fingerprintV: 2,
+    signature: [normalizeLine(weakCmd)], excerpt: "exit 1", origin: "hook",
+  };
+  const hits = queryRecall([fixed, fix, weak], { query });
+  assert.deepEqual(hits.map((hit) => hit.failure.id), ["fixed-hit", "weak-hit"]);
+  assert.ok(hits[0]?.fix, "the confirmed-fix hit must carry its fix");
+  assert.ok(
+    (hits[0]?.score ?? 0) > (hits[1]?.score ?? 0),
+    "the confirmed-fix hit must still outscore the weak one, not just tie",
+  );
+});
+
+// Fingerprint masking (and everything keyed off it -- recurrence, dedup,
+// findByFingerprint) is untouched by the recall read-path change: the same
+// error shape with a different path must still hash and match identically.
+test("fingerprint-based recurrence matching stays untouched by the raw-command retrieval layer", () => {
+  const cmdA = "Get-Item ./missing-file-one";
+  const cmdB = "Get-Item ./missing-file-two";
+  const fp = commandFingerprint(cmdA, 1);
+  assert.equal(commandFingerprint(cmdB, 1), fp, "same error shape, different path, must still hash identically");
+  const recordA: FailureRecord = {
+    kind: "failure", id: "recur-a", ts: 100, cwd: "/work/recur", cmd: cmdA, exitCode: 1,
+    fingerprint: fp, fingerprintV: 2, signature: [normalizeLine(cmdA)], excerpt: "exit 1", origin: "hook",
+  };
+  const recordB: FailureRecord = {
+    kind: "failure", id: "recur-b", ts: 200, cwd: "/work/recur", cmd: cmdB, exitCode: 1,
+    fingerprint: fp, fingerprintV: 2, signature: [normalizeLine(cmdB)], excerpt: "exit 1", origin: "hook",
+  };
+  assert.deepEqual(findByFingerprint([recordA, recordB], fp).map((record) => record.id), ["recur-a", "recur-b"]);
+});
+
+// F3 round-1 review, finding 2: the 0.06 rare-token floor only protects a
+// query token whose document frequency is <= rareFrequency (as low as 2 once
+// there are >=10 candidates). A common program name ("git", "npm", a hook
+// origin's own program) recorded across many distinct hook-origin failures
+// loses that protection, so a record whose raw command contributes a lot of
+// net-new tokens (a deep/long path) can fall below the hard 0.05 visibility
+// cutoff for that common-name query -- the same "Rocky remembers it but you
+// cannot find it" failure mode F3 was meant to cure, just triggered from the
+// other side (a shallow/common query against a token-heavy record instead of
+// a distinctive query against a masked one).
+test("a common program-name query still finds a hook record with a long path among many candidates", () => {
+  const candidateCount = 12;
+  const noise: FailureRecord[] = Array.from({ length: candidateCount - 1 }, (_, index) => {
+    const cmd = "git status";
+    return {
+      kind: "failure", id: `noise-${index}`, ts: 100 + index, cwd: "/work/probe", cmd, exitCode: 1,
+      fingerprint: `noise-${index}-fp`, fingerprintV: 2,
+      signature: [normalizeLine(cmd)], excerpt: "exit 1", origin: "hook",
+    };
+  });
+  const deepCmd = "git diff -- ./src/app/features/dashboard/widgets/charts/line/series/renderer/legacy/v2/internal/utils/helpers/format/Button.tsx";
+  const target: FailureRecord = {
+    kind: "failure", id: "deep-path-target", ts: 9_999, cwd: "/work/probe", cmd: deepCmd, exitCode: 1,
+    fingerprint: "deep-path-target-fp", fingerprintV: 2,
+    signature: [normalizeLine(deepCmd)], excerpt: "exit 1", origin: "hook",
+  };
+  const hits = queryRecall([...noise, target], { query: "git", limit: candidateCount });
+  assert.ok(
+    hits.some((hit) => hit.failure.id === "deep-path-target"),
+    "a plain program-name query must still surface a record with a long path, not just short ones",
   );
 });
 
@@ -984,6 +1093,156 @@ test("one exact distinctive token survives long signatures", () => {
     const hit = queryRecall([make(count, `long-${count}`)], { query: "needle-unique" });
     assert.equal(hit[0]?.failure.id, `long-${count}`);
   }
+});
+
+test("possibleFixesForFailure sorts newest first, tie-breaks by linkBasisRank, and caps at three", () => {
+  const failure: FailureRecord = {
+    kind: "failure", id: "possible-f1", ts: 10, cwd: "/work/possible",
+    cmd: "npm run broken-alpha", exitCode: 1, fingerprint: "fp-possible-f1",
+    signature: ["boom"], excerpt: "boom",
+  };
+  const make = (id: string, ts: number, basis: string): AssociationRecord => ({
+    kind: "association", id, ts, cwd: "/work/possible", cmd: `fix-${id}`,
+    candidateFailureIds: [failure.id], links: [{ id: failure.id, basis, confidence: "possible" }],
+  });
+  const strongTie = make("a-strong-tie", 300, "program");
+  const weakTie = make("a-weak-tie", 300, "sequence");
+  const middle = make("a-middle", 200, "program");
+  const oldest = make("a-oldest", 100, "program");
+  const unrelated: AssociationRecord = {
+    kind: "association", id: "a-unrelated", ts: 400, cwd: "/work/possible", cmd: "fix-unrelated",
+    candidateFailureIds: ["some-other-failure"], links: [{ id: "some-other-failure", basis: "program", confidence: "possible" }],
+  };
+  const found = possibleFixesForFailure([failure, strongTie, weakTie, middle, oldest, unrelated], failure);
+  assert.deepEqual(found.map((candidate) => candidate.cmd), ["fix-a-strong-tie", "fix-a-weak-tie", "fix-a-middle"]);
+  assert.equal(found.length, 3, "capped at three even though four candidates match");
+});
+
+test("possibleFixesForFailure marks a different cwd as fromElsewhere and stays weak", () => {
+  const failure: FailureRecord = {
+    kind: "failure", id: "elsewhere-f1", ts: 10, cwd: "/work/here",
+    cmd: "npm run broken-alpha", exitCode: 1, fingerprint: "fp-elsewhere-f1",
+    signature: ["boom"], excerpt: "boom",
+  };
+  const association: AssociationRecord = {
+    kind: "association", id: "a-elsewhere", ts: 100, cwd: "/work/there", cmd: "fix-elsewhere",
+    candidateFailureIds: [failure.id], links: [{ id: failure.id, basis: "program", confidence: "possible" }],
+  };
+  const [candidate] = possibleFixesForFailure([failure, association], failure);
+  assert.equal(candidate?.fromElsewhere, true);
+  assert.equal(candidate?.cwd, "/work/there");
+  assert.equal(candidate?.basis, "program");
+});
+
+test("possibleFixesForFailure falls back to the weakest rank when only candidateFailureIds matches", () => {
+  const failure: FailureRecord = {
+    kind: "failure", id: "candidate-only-f1", ts: 10, cwd: "/work/candidate-only",
+    cmd: "npm run broken-alpha", exitCode: 1, fingerprint: "fp-candidate-only-f1",
+    signature: ["boom"], excerpt: "boom",
+  };
+  const association: AssociationRecord = {
+    kind: "association", id: "a-candidate-only", ts: 100, cwd: "/work/candidate-only", cmd: "fix-candidate-only",
+    candidateFailureIds: [failure.id], links: [],
+  };
+  const [candidate] = possibleFixesForFailure([failure, association], failure);
+  assert.equal(candidate?.basis, "unknown");
+});
+
+test("possibleFixesForFailure ignores a future-dated association", () => {
+  const now = 1_800_000_000_000;
+  const failure: FailureRecord = {
+    kind: "failure", id: "future-possible-f1", ts: now - 1_000, cwd: "/work/future-possible",
+    cmd: "npm run broken-alpha", exitCode: 1, fingerprint: "fp-future-possible-f1",
+    signature: ["boom"], excerpt: "boom",
+  };
+  const future: AssociationRecord = {
+    kind: "association", id: "a-future", ts: now + 1, cwd: "/work/future-possible", cmd: "fix-future",
+    candidateFailureIds: [failure.id], links: [{ id: failure.id, basis: "program", confidence: "possible" }],
+  };
+  assert.deepEqual(possibleFixesForFailure([failure, future], failure, now), []);
+});
+
+test("possibleFixesForFailure writes nothing and never changes stats", () => {
+  const failure: FailureRecord = {
+    kind: "failure", id: "pure-read-f1", ts: 10, cwd: "/work/pure-read",
+    cmd: "npm run broken-alpha", exitCode: 1, fingerprint: "fp-pure-read-f1",
+    signature: ["boom"], excerpt: "boom",
+  };
+  const association: AssociationRecord = {
+    kind: "association", id: "a-pure-read", ts: 100, cwd: "/work/pure-read", cmd: "fix-pure-read",
+    candidateFailureIds: [failure.id], links: [{ id: failure.id, basis: "program", confidence: "possible" }],
+  };
+  const input: MemoryRecord[] = [failure, association];
+  const before = queryStats(input);
+  possibleFixesForFailure(input, failure);
+  assert.deepEqual(input, [failure, association], "records must be untouched");
+  assert.deepEqual(queryStats(input), before, "stats must not change from a read");
+});
+
+test("queryRecall attaches the top possible fix only when the hit has no confirmed fix", () => {
+  const unresolved: FailureRecord = {
+    kind: "failure", id: "recall-possible-unresolved", ts: 10, cwd: "/work/recall-possible",
+    cmd: "npm run broken-alpha", exitCode: 1, fingerprint: "fp-recall-possible-unresolved",
+    signature: ["needle unresolved"], excerpt: "needle unresolved",
+  };
+  const association: AssociationRecord = {
+    kind: "association", id: "a-recall-possible", ts: 100, cwd: "/work/recall-possible", cmd: "npm run unrelated-beta",
+    candidateFailureIds: [unresolved.id], links: [{ id: unresolved.id, basis: "program", confidence: "possible" }],
+  };
+  const unresolvedHit = queryRecall([unresolved, association], { query: "needle unresolved" })[0];
+  assert.deepEqual(unresolvedHit?.possible, {
+    cmd: "npm run unrelated-beta", ts: 100, cwd: "/work/recall-possible", basis: "program", fromElsewhere: false,
+  });
+
+  const resolved: FailureRecord = {
+    kind: "failure", id: "recall-possible-resolved", ts: 10, cwd: "/work/recall-possible",
+    cmd: "npm run broken-alpha", exitCode: 1, fingerprint: "fp-recall-possible-resolved",
+    signature: ["needle resolved"], excerpt: "needle resolved", resolvedBy: "recall-possible-fix",
+  };
+  const confirmedFix: FixRecord = {
+    kind: "fix", id: "recall-possible-fix", ts: 50, cwd: "/work/recall-possible", cmd: "npm rebuild sharp",
+    failureIds: [resolved.id],
+  };
+  const otherAssociation: AssociationRecord = {
+    kind: "association", id: "a-recall-possible-2", ts: 200, cwd: "/work/recall-possible", cmd: "npm run should-not-appear",
+    candidateFailureIds: [resolved.id], links: [{ id: resolved.id, basis: "program", confidence: "possible" }],
+  };
+  const resolvedHit = queryRecall([resolved, confirmedFix, otherAssociation], { query: "needle resolved" })[0];
+  assert.equal(resolvedHit?.fix?.id, confirmedFix.id);
+  assert.equal(resolvedHit?.possible, undefined, "a confirmed fix must never be paired with a possible candidate");
+});
+
+// Finding 1, final whole-branch review: recall's possible-fix search used to
+// look only at the single representative (deduplicated) failure recall's
+// scoring happened to pick, while run/watch walk every prior same-fingerprint
+// occurrence newest-first. This test pins a real scenario where recall's own
+// dedup picks the *newest* occurrence as the hit, but the only association
+// candidate is linked to an *older* occurrence of the identical (canonical)
+// fingerprint — exactly the case run/watch already surface via
+// `findByFingerprint` + `speakablePossibleFix`. It fails under the old
+// hit.failure-only search and passes once recall walks occurrences the same
+// way.
+test("queryRecall surfaces a possible fix linked to an older same-fingerprint occurrence, matching run/watch's newest-first walk", () => {
+  const sharedFingerprint = "abcdef0123456789";
+  const olderOccurrence: FailureRecord = {
+    kind: "failure", id: "dup-fp-older", ts: 10, cwd: "/work/dupfp",
+    cmd: "npm run broken-alpha", exitCode: 1, fingerprint: sharedFingerprint, fingerprintV: 2,
+    signature: ["needle recur"], excerpt: "needle recur",
+  };
+  const newerOccurrence: FailureRecord = {
+    kind: "failure", id: "dup-fp-newer", ts: 500, cwd: "/work/dupfp",
+    cmd: "npm run broken-alpha", exitCode: 1, fingerprint: sharedFingerprint, fingerprintV: 2,
+    signature: ["needle recur"], excerpt: "needle recur",
+  };
+  const association: AssociationRecord = {
+    kind: "association", id: "a-dup-fp", ts: 50, cwd: "/work/dupfp", cmd: "npm run known-fix",
+    candidateFailureIds: [olderOccurrence.id], links: [{ id: olderOccurrence.id, basis: "program", confidence: "possible" }],
+  };
+  const hit = queryRecall([olderOccurrence, newerOccurrence, association], { query: "needle recur" })[0];
+  assert.equal(hit?.failure.id, newerOccurrence.id, "recall still surfaces the newest occurrence as the representative hit");
+  assert.deepEqual(hit?.possible, {
+    cmd: "npm run known-fix", ts: 50, cwd: "/work/dupfp", basis: "program", fromElsewhere: false,
+  }, "a candidate linked only to an older occurrence of the same fingerprint must still surface, like run/watch");
 });
 
 test("rare exact token boost remains active when token appears twice among many records", () => {

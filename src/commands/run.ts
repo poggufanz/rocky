@@ -17,10 +17,11 @@ import {
   resolveFixOnSuccess,
   type ResolveFixOptions,
   type ResolveFixResult,
+  type FailureRecord,
   type MemoryRecord,
 } from "../core/memory.js";
-import { isCompleteMemoryCoverage, loadMemoryChecked } from "../core/memory-read.js";
-import { findByFingerprint, fixFromElsewhere, getFix } from "../core/memory-query.js";
+import { isCompleteMemoryCoverage, linkBasisRank, loadMemoryChecked } from "../core/memory-read.js";
+import { findByFingerprint, fixFromElsewhere, getFix, possibleFixesForFailure, type PossibleFix } from "../core/memory-query.js";
 import { ago, detail, elapsed, say } from "../ui/rocky.js";
 import { safeTerminalLine } from "../ui/sanitize.js";
 
@@ -105,14 +106,50 @@ export function speakFailureMemory(
         say(`same command, ${elapsed(fix.ts - withFix.ts)} later. strong.`);
       } else if (basis === "program") {
         say(`same program, ${elapsed(fix.ts - withFix.ts)} later. maybe not fix. check, question`);
+      } else if (basis !== undefined) {
+        // A recognized-but-weaker basis ("sequence") or a string a newer
+        // writer emits that this reader does not recognize yet (spec §2.5):
+        // either way it must fall to the weakest hedge, never silently print
+        // no grade line at all.
+        say(`different program, ${elapsed(fix.ts - withFix.ts)} later. maybe not fix. check, question`);
       }
       say("try, question");
     } else {
-      say("no fix in memory yet. you fix, I remember. this is good trade.");
+      const candidate = speakablePossibleFix(memory, previous, now);
+      if (candidate) {
+        say("no confirmed fix. but after error, you run this:");
+        detail(`    ${safeTerminalLine(candidate.cmd)}`);
+        if (candidate.fromElsewhere) {
+          say("but this comes from other place.");
+          detail(`    place: ${safeTerminalLine(candidate.cwd)}`);
+        }
+        say(linkBasisRank(candidate.basis) > linkBasisRank("program")
+          ? "different program. maybe fix, maybe not. check, question"
+          : "maybe fix, maybe not. check, question");
+      } else {
+        say("no fix in memory yet. you fix, I remember. this is good trade.");
+      }
     }
   } else {
     say(`new error. bad. I remember it now. exit code ${exitCode}.`);
   }
+}
+
+/**
+ * Search prior sightings of this same recurring failure, most recent first,
+ * for the top weak `AssociationRecord` candidate (spec §3 Fix 1). Mirrors
+ * the `withFix` search above it so the two evidence classes cannot drift.
+ */
+function speakablePossibleFix(
+  memory: MemoryRecord[],
+  previous: readonly FailureRecord[],
+  now: number,
+): PossibleFix | undefined {
+  for (const failure of [...previous].reverse()) {
+    const candidate = possibleFixesForFailure(memory, failure, now)[0];
+    if (candidate) return candidate;
+  }
+  return undefined;
 }
 
 function onFailure(cmd: string, result: ExecResult): void {

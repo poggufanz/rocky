@@ -172,6 +172,63 @@ test("recall speaks a weak link for a same-program fix", async () => {
   assert.deepEqual(validateRockyPhrase("same program, 6 hours later. maybe not fix. check, question"), []);
 });
 
+test("recall grades an unrecognized fix link basis as the weakest hedge, never as same program", async () => {
+  const source = memoryReturning([hitWithFix("c1", 6 * 3600_000, [{ id: "c1", basis: "sequence" }])]);
+  const noAi: RecallWithAiPort = { async run() { throw new Error("AI must not run without --ai"); } };
+  const output = await captureStderr(() => recall(["npm", "test"], { memory: source.memory, recallWithAi: noAi }));
+
+  assert.equal(output.code, 0);
+  assert.match(output.stderr, /different program, 6 hours later\. maybe not fix\. check, question/);
+  assert.doesNotMatch(output.stderr, /same program,/);
+  assert.doesNotMatch(output.stderr, /strong\./);
+  assert.deepEqual(validateRockyPhrase("different program, 6 hours later. maybe not fix. check, question"), []);
+});
+
+test("recall shows a separate weak possible-fix line below a hit with no confirmed fix", async () => {
+  const base = hit("c1");
+  const source = memoryReturning([{
+    ...base,
+    possible: { cmd: "npm run unrelated-beta", ts: base.failure.ts, cwd: base.failure.cwd, basis: "program", fromElsewhere: false },
+  }]);
+  const noAi: RecallWithAiPort = { async run() { throw new Error("AI must not run without --ai"); } };
+  const output = await captureStderr(() => recall(["npm", "test"], { memory: source.memory, recallWithAi: noAi }));
+
+  assert.equal(output.code, 0);
+  assert.match(output.stderr, /no confirmed fix\. but after error, you run this:/);
+  assert.match(output.stderr, /npm run unrelated-beta/);
+  assert.match(output.stderr, /maybe fix, maybe not\. check, question/);
+  assert.doesNotMatch(output.stderr, /no fix recorded for this one/);
+});
+
+test("recall never shows a possible-fix line beside a hit that already has a confirmed fix", async () => {
+  const source = memoryReturning([{
+    ...hitWithFix("c1", 60_000, [{ id: "c1", basis: "identity" }]),
+    possible: { cmd: "npm run should-not-appear", ts: 0, cwd: "/tmp/recall-command", basis: "program", fromElsewhere: false },
+  }]);
+  const noAi: RecallWithAiPort = { async run() { throw new Error("AI must not run without --ai"); } };
+  const output = await captureStderr(() => recall(["npm", "test"], { memory: source.memory, recallWithAi: noAi }));
+
+  assert.equal(output.code, 0);
+  assert.match(output.stderr, /fixed with: fix-for-c1/);
+  assert.doesNotMatch(output.stderr, /no confirmed fix\. but after error, you run this:/);
+  assert.doesNotMatch(output.stderr, /should-not-appear/);
+});
+
+test("recall marks a cross-cwd possible fix with a place line and the weaker hedge for a non-program basis", async () => {
+  const base = hit("c1");
+  const source = memoryReturning([{
+    ...base,
+    possible: { cmd: "docker restart db", ts: base.failure.ts, cwd: "/tmp/other-project", basis: "sequence", fromElsewhere: true },
+  }]);
+  const noAi: RecallWithAiPort = { async run() { throw new Error("AI must not run without --ai"); } };
+  const output = await captureStderr(() => recall(["npm", "test"], { memory: source.memory, recallWithAi: noAi }));
+
+  assert.equal(output.code, 0);
+  assert.match(output.stderr, /but this comes from other place\./);
+  assert.match(output.stderr, /\/tmp\/other-project/);
+  assert.match(output.stderr, /different program\. maybe fix, maybe not\. check, question/);
+});
+
 test("recall stays silent about link basis when links are missing or don't cover this failure", async () => {
   const source = memoryReturning([
     hitWithFix("c1", 60_000), // v0.2.1-era fix record: no links field at all

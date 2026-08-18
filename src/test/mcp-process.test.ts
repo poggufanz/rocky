@@ -28,6 +28,17 @@ const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const cli = join(repoRoot, "dist", "index.js");
 const fixtureMemory = join(repoRoot, "test", "fixtures", "mcp", "memory.jsonl");
 const slowFetch = join(repoRoot, "test", "fixtures", "mcp", "slow-fetch.cjs");
+
+// Hang guard only -- every use below bounds how long a spawned child (or a
+// single protocol round trip with one) may take before the wait gives up;
+// none of these values are assertions about correctness. On a loaded
+// windows-latest CI runner, Node startup plus CLI initialization alone can
+// exceed the previous 2_000ms bound, turning a healthy child into a false
+// timeout. 20s per operation is generous enough to absorb that contention
+// while still catching a genuine hang; PROCESS_HANG_GUARD_MS's own callers
+// use node:test's per-test { timeout } to allow enough headroom for tests
+// that perform several such operations in sequence.
+const PROCESS_HANG_GUARD_MS = 20_000;
 const modernMeta = {
   "io.modelcontextprotocol/protocolVersion": "2026-07-28",
   "io.modelcontextprotocol/clientCapabilities": {},
@@ -149,7 +160,7 @@ class McpCliProcess {
   }
 
   async nextResponse(): Promise<JsonRpcResponse> {
-    const next = await withTimeout(this.lineIterator.next(), 2_000, "MCP response");
+    const next = await withTimeout(this.lineIterator.next(), PROCESS_HANG_GUARD_MS, "MCP response");
     assert.equal(next.done, false, `server closed before response; stderr: ${this.stderr()}`);
     const line = next.value ?? "";
     this.stdoutLines.push(line);
@@ -162,7 +173,7 @@ class McpCliProcess {
 
   async close(): Promise<{ code: number | null; signal: NodeJS.Signals | null }> {
     this.child.stdin.end();
-    return withTimeout(this.closed, 2_000, "MCP EOF close");
+    return withTimeout(this.closed, PROCESS_HANG_GUARD_MS, "MCP EOF close");
   }
 
   stderr(): string {
@@ -181,9 +192,9 @@ class McpCliProcess {
 }
 
 async function waitFor(predicate: () => boolean, label: string): Promise<void> {
-  const deadline = Date.now() + 2_000;
+  const deadline = Date.now() + PROCESS_HANG_GUARD_MS;
   while (!predicate()) {
-    if (Date.now() >= deadline) throw new Error(`${label} exceeded 2000ms`);
+    if (Date.now() >= deadline) throw new Error(`${label} exceeded ${PROCESS_HANG_GUARD_MS}ms`);
     await new Promise<void>((resolve) => setTimeout(resolve, 10));
   }
 }
@@ -234,7 +245,7 @@ const calls = [
   ["why_file", { path: "src/app.css", limit: 1 }],
 ] as const;
 
-test("compiled CLI serves modern discovery, listing, and every read-only tool without mutating state", { timeout: 10_000 }, async (t) => {
+test("compiled CLI serves modern discovery, listing, and every read-only tool without mutating state", { timeout: PROCESS_HANG_GUARD_MS * 3 }, async (t) => {
   const home = seedHome(t);
   const before = snapshotTree(home);
   const server = new McpCliProcess(home);
@@ -263,7 +274,7 @@ test("compiled CLI serves modern discovery, listing, and every read-only tool wi
   assert.deepEqual(snapshotTree(home), before);
 });
 
-test("MCP keeps stats responsive during one local-AI request and sends strictest sanitized evidence", { timeout: 10_000 }, async (t) => {
+test("MCP keeps stats responsive during one local-AI request and sends strictest sanitized evidence", { timeout: PROCESS_HANG_GUARD_MS * 3 }, async (t) => {
   const home = seedHome(t);
   writeFileSync(join(home, "config.json"), JSON.stringify({
     version: 1,
@@ -481,7 +492,7 @@ test("MCP rejects a used ranking that includes a known but unhanded sparse candi
   }
 });
 
-test("compiled CLI serves a separate legacy lifecycle and reloads externally appended memory", { timeout: 10_000 }, async (t) => {
+test("compiled CLI serves a separate legacy lifecycle and reloads externally appended memory", { timeout: PROCESS_HANG_GUARD_MS * 3 }, async (t) => {
   const home = seedHome(t);
   const server = new McpCliProcess(home);
 
@@ -542,7 +553,7 @@ test("MCP usage diagnostics sanitize adversarial argv without adding protocol ou
       env: { ...process.env, ROCKY_HOME: home },
       input: "",
       encoding: "utf8",
-      timeout: 2_000,
+      timeout: PROCESS_HANG_GUARD_MS,
       windowsHide: true,
     });
 
@@ -559,14 +570,14 @@ test("MCP usage diagnostics sanitize adversarial argv without adding protocol ou
   }
 });
 
-test("uppercase RAW exposure fails before protocol output with one concise diagnostic", { timeout: 5_000 }, async (t) => {
+test("uppercase RAW exposure fails before protocol output with one concise diagnostic", { timeout: PROCESS_HANG_GUARD_MS + 10_000 }, async (t) => {
   const home = seedHome(t);
   const result = spawnSync(process.execPath, [cli, "mcp"], {
     cwd: repoRoot,
     env: { ...process.env, ROCKY_HOME: home, ROCKY_MCP_EXPOSURE: "RAW" },
     input: "",
     encoding: "utf8",
-    timeout: 2_000,
+    timeout: PROCESS_HANG_GUARD_MS,
   });
 
   assert.equal(result.error, undefined);
@@ -581,7 +592,7 @@ test("help advertises MCP as a stream-only command", () => {
   assert.match(result.stdout, /rocky mcp\s+serve read-only memory tools over stdio\./);
 });
 
-test("child completion waits for inherited stdout and stderr pipes before trailing-output audit", { timeout: 5_000 }, async () => {
+test("child completion waits for inherited stdout and stderr pipes before trailing-output audit", { timeout: PROCESS_HANG_GUARD_MS + 10_000 }, async () => {
   const grandchildScript = [
     "setTimeout(() => {",
     "  process.stdout.write('trailing persona\\n');",
@@ -606,7 +617,7 @@ test("child completion waits for inherited stdout and stderr pipes before traili
   child.stdout.once("end", () => { stdoutEnded = true; });
   child.stderr.once("end", () => { stderrEnded = true; });
 
-  const completed = await withTimeout(waitForChildCompletion(child), 2_000, "fixture child close");
+  const completed = await withTimeout(waitForChildCompletion(child), PROCESS_HANG_GUARD_MS, "fixture child close");
 
   assert.deepEqual(completed, { code: 0, signal: null });
   assert.equal(stdoutEnded, true, "completion preceded stdout EOF");

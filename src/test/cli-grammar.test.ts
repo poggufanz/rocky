@@ -12,6 +12,16 @@ import { parseExactCommand } from "../commands/cli-args.js";
 const packageRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const cli = join(packageRoot, "dist", "index.js");
 
+// Hang guard only -- this bounds how long a child process may run before
+// spawnSync gives up, it asserts nothing about correctness. The real
+// assertions below check exit codes, usage text, and stdout/stderr content.
+// 2_000ms was too tight: on a loaded windows-latest runner, Node startup
+// plus CLI initialization alone can exceed two seconds, which turns a
+// perfectly healthy child into a false ETIMEDOUT failure. 30s is generous
+// enough to absorb that contention while still catching a genuine hang
+// well within CI's own job-level timeout.
+const CLI_HANG_GUARD_MS = 30_000;
+
 function runCli(args: readonly string[], options: { cwd?: string; input?: string } = {}) {
   const home = mkdtempSync(join(tmpdir(), "rocky-cli-grammar-home-"));
   try {
@@ -20,7 +30,7 @@ function runCli(args: readonly string[], options: { cwd?: string; input?: string
       env: { ...process.env, ROCKY_HOME: home },
       input: options.input,
       encoding: "utf8",
-      timeout: 2_000,
+      timeout: CLI_HANG_GUARD_MS,
       windowsHide: true,
     });
   } finally {
@@ -44,7 +54,11 @@ interface OpenStdinResult {
   stderr: string;
 }
 
-async function runCliWithOpenStdin(args: readonly string[], deadlineMs = 1_500): Promise<OpenStdinResult> {
+// Same reasoning as CLI_HANG_GUARD_MS above: this deadline only exists to
+// keep a hung child from blocking the suite forever. The test's real
+// assertions (exit code, usage text, absence of protocol output) are
+// unaffected by how generous this bound is.
+async function runCliWithOpenStdin(args: readonly string[], deadlineMs = CLI_HANG_GUARD_MS): Promise<OpenStdinResult> {
   const home = mkdtempSync(join(tmpdir(), "rocky-cli-open-stdin-home-"));
   const child = spawn(process.execPath, [cli, ...args], {
     cwd: packageRoot,

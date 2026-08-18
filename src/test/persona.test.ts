@@ -47,6 +47,19 @@ test("check prompts use stable voice IDs and keep the question suffix last", () 
   assert.equal(prompt(phrase("check-answer")), "[Rocky] answer, question ");
 });
 
+test("every v0.5.2 Fix 1 possible-fix string follows Rocky voice rules", () => {
+  const strings = [
+    "no confirmed fix. but after error, you run this:",
+    "maybe fix, maybe not. check, question",
+    "different program. maybe fix, maybe not. check, question",
+    "but this comes from other place.",
+    "no fix in memory yet. you fix, I remember. this is good trade.",
+    "different program, 2 hours later. maybe not fix. check, question",
+    "different program, just now later. maybe not fix. check, question",
+  ];
+  for (const value of strings) assert.deepEqual(validateRockyPhrase(value), [], value);
+});
+
 test("every AI act uses its dedicated catalog phrase", () => {
   assert.equal(phraseForAct("known_fix"), phrase("ai-known-fix"));
   assert.equal(phraseForAct("unresolved"), phrase("ai-unresolved"));
