@@ -30,7 +30,7 @@ export async function invariantsCommand(argv: readonly string[] = [], cwd = proc
     return 0;
   }
   const { notes, errors } = parseInvariants(text);
-  const filesResult = await runGit(["-C", cwd, "ls-files"], undefined, { timeoutMs: GIT_TIMEOUT_MS, maxOutputBytes: GIT_MAX_OUTPUT_BYTES });
+  const filesResult = await runGit(["-C", root, "ls-files"], undefined, { timeoutMs: GIT_TIMEOUT_MS, maxOutputBytes: GIT_MAX_OUTPUT_BYTES });
   const files = filesResult.code === 0 ? filesResult.stdout.split("\n").filter((line) => line.length > 0) : [];
   say(`I hear ${notes.length} invariant${notes.length === 1 ? "" : "s"}.`);
   for (const note of notes) {

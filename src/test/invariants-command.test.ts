@@ -21,6 +21,20 @@ function makeRepo(): string {
   return dir;
 }
 
+async function captureStderr(run: () => Promise<number>): Promise<{ code: number; stderr: string }> {
+  const originalStderr = process.stderr.write;
+  let stderr = "";
+  process.stderr.write = ((chunk: string | Uint8Array) => {
+    stderr += String(chunk);
+    return true;
+  }) as typeof process.stderr.write;
+  try {
+    return { code: await run(), stderr };
+  } finally {
+    process.stderr.write = originalStderr;
+  }
+}
+
 test("invariantsCommand lists parsed blocks and flags globs matching nothing", async () => {
   const dir = makeRepo();
   mkdirSync(join(dir, ".rocky"), { recursive: true });
@@ -30,8 +44,25 @@ test("invariantsCommand lists parsed blocks and flags globs matching nothing", a
     "Why: duplicate settlement",
     "",
   ].join("\n"));
-  const code = await invariantsCommand([], dir);
+  const { code, stderr } = await captureStderr(() => invariantsCommand([], dir));
   assert.equal(code, 0);
+  assert.match(stderr, /src\/nonexistent\/\*\*.*guards nothing/);
+  assert.doesNotMatch(stderr, /src\/payment\/\*\*.*guards nothing/);
+});
+
+test("invariantsCommand flags dead globs correctly when run from a repo subdirectory", async () => {
+  const dir = makeRepo();
+  mkdirSync(join(dir, ".rocky"), { recursive: true });
+  writeFileSync(join(dir, ".rocky", "invariants.md"), [
+    "Invariant: payment may commit at most once",
+    "Guarded by: src/payment/**, src/nonexistent/**",
+    "Why: duplicate settlement",
+    "",
+  ].join("\n"));
+  const { code, stderr } = await captureStderr(() => invariantsCommand([], join(dir, "src")));
+  assert.equal(code, 0);
+  assert.match(stderr, /src\/nonexistent\/\*\*.*guards nothing/);
+  assert.doesNotMatch(stderr, /src\/payment\/\*\*.*guards nothing/);
 });
 
 test("invariantsCommand exits 0 with hint when file is missing", async () => {
