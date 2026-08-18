@@ -584,40 +584,61 @@ test(
 // directly here per this task's instruction not to add another real
 // `powershell.exe` spawn to this file's already load-sensitive suite.
 
+// Fixture paths must speak the host platform's own dialect: on POSIX a
+// backslash is an ordinary filename character, so a literal
+// `C:\Users\astronaut\OneDrive\...` is ONE path segment there and every
+// containment expectation built on it silently inverts (this exact mistake
+// shipped once and turned the ubuntu/macos CI lanes red while Windows stayed
+// green). Windows-only *semantics* (drive letters, backslash separators,
+// case folding) keep their Windows-literal fixtures and skip off win32.
+const FIXTURE_HOME = process.platform === "win32" ? "C:\\Users\\astronaut" : "/home/astronaut";
+const FIXTURE_PROFILE_UNDER_HOME = join(FIXTURE_HOME, "OneDrive", "Documents", "WindowsPowerShell", "Microsoft.PowerShell_profile.ps1");
+const FIXTURE_SANDBOX_HOME = process.platform === "win32"
+  ? "C:\\Users\\RUNNER~1\\AppData\\Local\\Temp\\rocky-sandbox-abcd"
+  : "/tmp/rocky-sandbox-abcd";
+const FIXTURE_PROFILE_OUTSIDE_HOME = process.platform === "win32"
+  ? "\\\\fileserver\\home\\astronaut\\Documents\\WindowsPowerShell\\Microsoft.PowerShell_profile.ps1"
+  : "/srv/fileserver/home/astronaut/.config/powershell/Microsoft.PowerShell_profile.ps1";
+
 test("profileWithinHome keeps a profile nested deep under home, including an OneDrive-redirected path", () => {
-  const home = "C:\\Users\\astronaut";
-  const profile = "C:\\Users\\astronaut\\OneDrive\\Documents\\WindowsPowerShell\\Microsoft.PowerShell_profile.ps1";
-  assert.equal(profileWithinHome(profile, home), true);
+  assert.equal(profileWithinHome(FIXTURE_PROFILE_UNDER_HOME, FIXTURE_HOME), true);
 });
 
 test("profileWithinHome drops a real user's profile when home is a sandbox temp directory (the exact bug this guard fixes)", () => {
-  const sandboxHome = "C:\\Users\\RUNNER~1\\AppData\\Local\\Temp\\rocky-sandbox-abcd";
-  const realProfile = "C:\\Users\\astronaut\\OneDrive\\Documents\\WindowsPowerShell\\Microsoft.PowerShell_profile.ps1";
-  assert.equal(profileWithinHome(realProfile, sandboxHome), false);
+  assert.equal(profileWithinHome(FIXTURE_PROFILE_UNDER_HOME, FIXTURE_SANDBOX_HOME), false);
 });
 
 test("profileWithinHome does not mistake a sibling directory whose name prefixes home for containment (prefix-boundary trap)", () => {
-  const home = "C:\\Users\\mf";
-  const profile = "C:\\Users\\mfaiq\\Documents\\WindowsPowerShell\\Microsoft.PowerShell_profile.ps1";
+  const home = process.platform === "win32" ? "C:\\Users\\mf" : "/home/mf";
+  const profile = process.platform === "win32"
+    ? "C:\\Users\\mfaiq\\Documents\\WindowsPowerShell\\Microsoft.PowerShell_profile.ps1"
+    : "/home/mfaiq/.config/powershell/Microsoft.PowerShell_profile.ps1";
   assert.equal(profileWithinHome(profile, home), false);
 });
 
 test("profileWithinHome treats the home directory itself as contained", () => {
-  const home = "C:\\Users\\astronaut";
-  assert.equal(profileWithinHome(home, home), true);
+  assert.equal(profileWithinHome(FIXTURE_HOME, FIXTURE_HOME), true);
 });
 
-test("profileWithinHome drops a profile that lives on a different drive entirely", () => {
-  const home = "C:\\Users\\astronaut";
-  const profile = "D:\\Profiles\\WindowsPowerShell\\Microsoft.PowerShell_profile.ps1";
-  assert.equal(profileWithinHome(profile, home), false);
-});
+test(
+  "profileWithinHome drops a profile that lives on a different drive entirely",
+  { skip: process.platform === "win32" ? false : "drive letters are a win32-only concept" },
+  () => {
+    const home = "C:\\Users\\astronaut";
+    const profile = "D:\\Profiles\\WindowsPowerShell\\Microsoft.PowerShell_profile.ps1";
+    assert.equal(profileWithinHome(profile, home), false);
+  },
+);
 
-test("profileWithinHome normalizes forward and back slashes before comparing", () => {
-  const home = "C:\\Users\\astronaut";
-  const profile = "C:/Users/astronaut/Documents/WindowsPowerShell/Microsoft.PowerShell_profile.ps1";
-  assert.equal(profileWithinHome(profile, home), true);
-});
+test(
+  "profileWithinHome normalizes forward and back slashes before comparing",
+  { skip: process.platform === "win32" ? false : "backslash is a path separator only on win32" },
+  () => {
+    const home = "C:\\Users\\astronaut";
+    const profile = "C:/Users/astronaut/Documents/WindowsPowerShell/Microsoft.PowerShell_profile.ps1";
+    assert.equal(profileWithinHome(profile, home), true);
+  },
+);
 
 test(
   "profileWithinHome folds case on win32, where NTFS/ReFS are case-preserving but not case-sensitive",
@@ -640,10 +661,10 @@ test("the profile-outside-home disclosure follows Rocky's voice rules", () => {
 // containment check can bless. `ROCKY_HOOK_ALLOW_PROFILE_OUTSIDE_HOME=1` is
 // the explicit-consent escape hatch; anything else keeps the guard's refusal.
 test("admitHostWithinHome drops an outside-home host unless the explicit consent env var is exactly \"1\"", () => {
-  const home = "C:\\Users\\astronaut";
+  const home = FIXTURE_HOME;
   const host = {
     label: "Windows PowerShell",
-    profile: "\\\\fileserver\\home\\astronaut\\Documents\\WindowsPowerShell\\Microsoft.PowerShell_profile.ps1",
+    profile: FIXTURE_PROFILE_OUTSIDE_HOME,
     version: "5.1",
   };
   const saved = process.env.ROCKY_HOOK_ALLOW_PROFILE_OUTSIDE_HOME;
@@ -661,10 +682,10 @@ test("admitHostWithinHome drops an outside-home host unless the explicit consent
 });
 
 test("admitHostWithinHome passes an under-home host through untouched, with or without the consent env var", () => {
-  const home = "C:\\Users\\astronaut";
+  const home = FIXTURE_HOME;
   const host = {
     label: "PowerShell 7",
-    profile: "C:\\Users\\astronaut\\OneDrive\\Documents\\PowerShell\\Microsoft.PowerShell_profile.ps1",
+    profile: FIXTURE_PROFILE_UNDER_HOME,
     version: "7.4.0",
   };
   const saved = process.env.ROCKY_HOOK_ALLOW_PROFILE_OUTSIDE_HOME;
