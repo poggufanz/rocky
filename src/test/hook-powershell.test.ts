@@ -729,15 +729,36 @@ function spawnAndFeedCapturingStderr(exe: string, rockyHome: string, shim: strin
  * non-blocking test above — it does not wait for the spawn either). Every
  * real-host test that inspects `memory.jsonl` right after the session ends
  * needs to poll for it settling rather than assume it is already there.
+ *
+ * Fix round 4 (flake class 4): the original "stable across one poll" check
+ * had no notion of how many records a caller actually expects, so a
+ * coincidental quiet gap -- one still-in-flight detached write simply not
+ * yet scheduled, genuinely common under CI load -- could read as "settled"
+ * with fewer records than were ever going to land (observed: `expected
+ * exactly 2 failures ... got: 1`). `minRecords` is the caller's own known
+ * floor (how many records this scenario is supposed to produce), required
+ * so this cannot silently decay back into a guess. `parsed.length >=
+ * minRecords` gates the settle check: below the floor, a quiet gap is never
+ * trusted, no matter how many polls agree, so the loop keeps waiting (up to
+ * `timeoutMs`) for records that are still genuinely arriving. This does not
+ * shortcut to "return the instant minRecords is reached" either -- the
+ * existing stable-across-one-poll requirement still applies once at the
+ * floor, so a straggling *extra* record (the false positive some of these
+ * tests exist to catch) still has one full poll window to show up before
+ * this returns. A scenario that never reaches `minRecords` by the deadline
+ * returns whatever it has, so the caller's own assertion fails with a clear
+ * count mismatch instead of this function hanging past its bound.
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any -- test-only JSONL parse, shape varies by record kind
-async function readMemoryRecordsSettled(memoryPath: string, timeoutMs = 5_000): Promise<any[]> {
+async function readMemoryRecordsSettled(memoryPath: string, minRecords: number, timeoutMs = 5_000): Promise<any[]> {
   const deadline = Date.now() + timeoutMs;
   let last: any[] = [];
   while (Date.now() < deadline) {
     if (existsSync(memoryPath)) {
       const parsed = readFileSync(memoryPath, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line));
-      if (parsed.length > 0 && JSON.stringify(parsed) === JSON.stringify(last)) return parsed; // stable across a poll: settled
+      // Only trust "unchanged since the last poll" as settled once the
+      // expected floor has actually been reached -- see doc comment above.
+      if (parsed.length >= minRecords && JSON.stringify(parsed) === JSON.stringify(last)) return parsed;
       last = parsed;
     }
     await new Promise((resolve) => setTimeout(resolve, 300));
@@ -796,7 +817,11 @@ async function realHostSmoke(t: TestContext, exe: string): Promise<void> {
   assert.match(result.stdout, /LIVE3_DOLLARQ=True\r?\nLIVE3_EXIT=9\r?\n/, `a later successful cmdlet must not flip $? and must leave stale $LASTEXITCODE alone; got: ${result.stdout}`);
 
   const memoryPath = join(rockyHome, "memory.jsonl");
-  const records = await readMemoryRecordsSettled(memoryPath);
+  // Two failing commands above, each its own detached write -- wait for
+  // that known floor rather than guessing from a coincidental quiet gap
+  // (flake class 4: under CI load the second write can simply not have
+  // started yet by the first poll that happens to look stable).
+  const records = await readMemoryRecordsSettled(memoryPath, 2);
   assert.ok(records.length > 0, "the failing commands must have recorded memory");
   const failures = records.filter((r) => r.kind === "failure");
   assert.equal(failures.length, 2, `expected exactly 2 failures, no false positive for the successful Get-Item; got: ${JSON.stringify(records)}`);
@@ -973,7 +998,9 @@ async function realHostDenylistSmoke(t: TestContext, exe: string): Promise<void>
   assert.equal(result.timedOut, false, "the session must not hang");
 
   const memoryPath = join(rockyHome, "memory.jsonl");
-  const records = await readMemoryRecordsSettled(memoryPath);
+  // Exactly one detached write is ever expected here: the two denylisted
+  // commands never spawn one at all.
+  const records = await readMemoryRecordsSettled(memoryPath, 1);
   const failureCmds: string[] = records.filter((r) => r.kind === "failure").map((r) => r.cmd);
 
   assert.ok(
@@ -1124,9 +1151,10 @@ async function realHostConcurrentSpawnSmoke(t: TestContext, exe: string): Promis
   assert.equal(result.timedOut, false, "two overlapping detached spawns must never hang the shell");
 
   const memoryPath = join(rockyHome, "memory.jsonl");
-  // The shim's own artificial 2s tail means settling takes longer than the
-  // other real-host tests' default poll window.
-  const records = await readMemoryRecordsSettled(memoryPath, 8_000);
+  // Both overlapping spawns must land their own write -- the shim's own
+  // artificial 2s tail means settling takes longer than the other
+  // real-host tests' default poll window, hence the taller timeoutMs.
+  const records = await readMemoryRecordsSettled(memoryPath, 2, 8_000);
   const failureCmds: string[] = records.filter((r) => r.kind === "failure").map((r) => r.cmd);
 
   assert.ok(
@@ -1269,7 +1297,9 @@ async function realHostSpeechRoundTripSmoke(t: TestContext, exe: string): Promis
   assert.equal(result.timedOut, false, "the session must not hang");
 
   const memoryPath = join(rockyHome, "memory.jsonl");
-  const records = await readMemoryRecordsSettled(memoryPath);
+  // The repeated command is fed twice, so at least 2 detached writes are
+  // expected before the file can be considered settled.
+  const records = await readMemoryRecordsSettled(memoryPath, 2);
   const failures = records.filter((r) => r.kind === "failure");
   assert.ok(
     failures.length >= 2,
