@@ -38,6 +38,8 @@ export interface MemoryStats {
   triples?: number;
   notes?: number;
   total?: number;
+  /** Operational record count per kind; new v0.6 kinds appear automatically. */
+  byKind?: Record<string, number>;
 }
 export interface LinkQuery { cwd: string; now?: number; windowMs?: number }
 export interface KnowledgeSearchQuery { query: string; kind?: "failure" | "fix" | "triple" | "note"; limit?: number; now?: number }
@@ -585,6 +587,8 @@ export function queryStats(records: readonly MemoryRecord[], input: StatsQuery =
   const result: MemoryStats = {
     failures: failures.length, fixEvents, resolved, unresolved: failures.length - resolved,
   };
+  const byKind: Record<string, number> = {};
+  for (const record of scoped) byKind[record.kind] = (byKind[record.kind] ?? 0) + 1;
   return {
     ...result,
     confirmedFixes: fixEvents,
@@ -592,6 +596,7 @@ export function queryStats(records: readonly MemoryRecord[], input: StatsQuery =
     triples: scoped.filter((record) => record.kind === "triple").length,
     notes: scoped.filter((record) => record.kind === "note").length,
     total: scoped.length,
+    byKind,
   };
 }
 
