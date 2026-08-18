@@ -356,7 +356,9 @@ test("default annotate child error is swallowed without changing hook success", 
     env: { ...process.env, ROCKY_HOME: home },
     encoding: "utf8",
     input: stop,
-    timeout: 5_000,
+    // Hang guard only, not an assertion; generous for a loaded CI runner
+    // (see cli-grammar.test.ts's CLI_HANG_GUARD_MS for the same reasoning).
+    timeout: 30_000,
     windowsHide: true,
   });
 
@@ -397,7 +399,9 @@ test("default ambiguity child is detached, base64url-encoded, and error-swallowe
     env: { ...process.env, ROCKY_HOME: home },
     encoding: "utf8",
     input: submitPayload,
-    timeout: 5_000,
+    // Hang guard only, not an assertion; generous for a loaded CI runner
+    // (see cli-grammar.test.ts's CLI_HANG_GUARD_MS for the same reasoning).
+    timeout: 30_000,
     windowsHide: true,
   });
 
@@ -555,7 +559,9 @@ test("CLI hook agent-event dispatch emits {} and appends the Claude event", (t) 
     env: { ...process.env, ROCKY_HOME: home },
     encoding: "utf8",
     input: submitPayload,
-    timeout: 5_000,
+    // Hang guard only, not an assertion; generous for a loaded CI runner
+    // (see cli-grammar.test.ts's CLI_HANG_GUARD_MS for the same reasoning).
+    timeout: 30_000,
     windowsHide: true,
   });
 

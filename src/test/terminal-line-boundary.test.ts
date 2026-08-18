@@ -50,7 +50,9 @@ function runCli(args: readonly string[]): { status: number | null; stderr: Buffe
     const result = spawnSync(process.execPath, [cli, ...args], {
       env: { ...process.env, ROCKY_HOME: home, NO_COLOR: "1" },
       encoding: null,
-      timeout: 5_000,
+      // Hang guard only, not an assertion; generous for a loaded CI runner
+      // (see cli-grammar.test.ts's CLI_HANG_GUARD_MS for the same reasoning).
+      timeout: 30_000,
       windowsHide: true,
     });
     return { status: result.status, stderr: result.stderr ?? Buffer.alloc(0) };

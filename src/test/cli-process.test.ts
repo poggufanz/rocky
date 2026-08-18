@@ -12,7 +12,13 @@ import { PACKAGE_VERSION } from "../core/package-info.js";
 const packageRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const entry = join(packageRoot, "dist", "index.js");
 const throwFetch = join(packageRoot, "test", "fixtures", "throw-fetch.cjs");
-const PROCESS_TIMEOUT_MS = 5_000;
+// Hang guard only -- bounds how long a spawned child may run before
+// spawnSync gives up; it is not part of any assertion here. On a loaded
+// windows-latest CI runner, Node startup plus CLI initialization alone can
+// exceed several seconds, so a tight bound turns a healthy child into a
+// false ETIMEDOUT failure. 30s is generous enough to absorb that
+// contention while still catching a genuine hang.
+const PROCESS_TIMEOUT_MS = 30_000;
 
 interface ProcessSandbox {
   root: string;

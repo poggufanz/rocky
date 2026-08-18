@@ -322,7 +322,9 @@ test("CLI Codex modern stdin dispatch appends and emits exact {}, while legacy a
       env: { ...process.env, ROCKY_HOME: home },
       encoding: "utf8",
       input: JSON.stringify(fixture("user-prompt-submit.json")),
-      timeout: 5_000,
+      // Hang guard only, not an assertion; generous for a loaded CI runner
+      // (see cli-grammar.test.ts's CLI_HANG_GUARD_MS for the same reasoning).
+      timeout: 30_000,
       windowsHide: true,
     });
     assert.equal(modern.status, 0, modern.stderr);
@@ -342,7 +344,9 @@ test("CLI Codex modern stdin dispatch appends and emits exact {}, while legacy a
       env: { ...process.env, ROCKY_HOME: home },
       encoding: "utf8",
       input: "must be ignored",
-      timeout: 5_000,
+      // Hang guard only, not an assertion; generous for a loaded CI runner
+      // (see cli-grammar.test.ts's CLI_HANG_GUARD_MS for the same reasoning).
+      timeout: 30_000,
       windowsHide: true,
     });
     assert.equal(legacy.status, 0, legacy.stderr);

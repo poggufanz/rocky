@@ -76,7 +76,12 @@ function append(key: string, events: readonly AgentEvent[], paths: RockyPaths): 
   for (const event of events) appendEvent(key, event, paths);
 }
 
-async function waitForMarker(path: string, timeoutMs = 5_000): Promise<void> {
+// Default is a hang guard only (not an assertion), generous for a loaded CI
+// runner spawning real `node --eval` worker children -- see
+// cli-grammar.test.ts's CLI_HANG_GUARD_MS for the same reasoning. Callers
+// that await this sequentially for multiple children widen their own
+// enclosing node:test `{ timeout }` to match.
+async function waitForMarker(path: string, timeoutMs = 20_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (!existsSync(path) && Date.now() < deadline) {
     await new Promise<void>((resolve) => setTimeout(resolve, 5));
@@ -350,7 +355,7 @@ test("recordTripleOnce safely recovers a stale malformed triple lock", (t) => {
   assert.equal(loadMemory(paths.memory).filter((record) => record.kind === "triple").length, 1);
 });
 
-test("recordTripleOnce serializes check and append across processes", { timeout: 15_000 }, async (t) => {
+test("recordTripleOnce serializes check and append across processes", { timeout: 45_000 }, async (t) => {
   const home = mkdtempSync(join(tmpdir(), "rocky-triple-once-"));
   t.after(() => rmSync(home, { recursive: true, force: true }));
   const modulePath = join(dirname(fileURLToPath(import.meta.url)), "..", "core", "memory.js");
@@ -1484,7 +1489,7 @@ test("digest hint ignores sub-millisecond rounding at seven-day boundary", { tim
   assert.equal(readFileSync(paths.digestHint, "utf8"), String(now));
 });
 
-test("digest hint lease allows exactly one label across racing processes", { timeout: 15_000 }, async (t) => {
+test("digest hint lease allows exactly one label across racing processes", { timeout: 45_000 }, async (t) => {
   const home = mkdtempSync(join(tmpdir(), "rocky-digest-race-"));
   t.after(() => rmSync(home, { recursive: true, force: true }));
   const paths = resolveRockyPaths({ ROCKY_HOME: home });
@@ -1540,7 +1545,9 @@ test("hidden _annotate dispatch is silent and uses scratch home", (t) => {
     cwd: packageRoot,
     env: { ...process.env, ROCKY_HOME: home },
     encoding: "utf8",
-    timeout: 5_000,
+    // Hang guard only, not an assertion; generous for a loaded CI runner
+    // (see cli-grammar.test.ts's CLI_HANG_GUARD_MS for the same reasoning).
+    timeout: 30_000,
     windowsHide: true,
   });
   assert.equal(result.status, 0, result.stderr);
