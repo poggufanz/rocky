@@ -37,7 +37,7 @@ import { boundTripleMechanism, isCompleteMemoryCoverage, isKnownPathPlatform, is
 import type { AssociationRecord, FailureRecord, FixRecord, MemoryCoverage, MemoryRecord, NoteRecord, TripleRecord } from "./memory-read.js";
 import { LINK_WINDOW_MS, recentUnresolvedFailures, type UnresolvedLink } from "./memory-query.js";
 
-export type { AssociationRecord, FailureRecord, FixRecord, MemoryCoverage, MemoryRecord, NoteRecord, TripleFile, TripleRecord } from "./memory-read.js";
+export type { AssociationRecord, BriefRunRecord, FailureRecord, FixRecord, InvariantTouchRecord, MemoryCoverage, MemoryRecord, NoteRecord, TripleFile, TripleRecord } from "./memory-read.js";
 export {
   boundTripleMechanism,
   boundTripleRecord,

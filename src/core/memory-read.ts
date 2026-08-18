@@ -117,6 +117,27 @@ export interface NoteRecord {
   answer: string;
 }
 
+export interface BriefRunRecord {
+  v: 1;
+  kind: "brief_run";
+  id: string;
+  ts: number;
+  cwd: string;
+  sinceTs: number;
+  commits: number;
+  files: number;
+}
+
+export interface InvariantTouchRecord {
+  v: 1;
+  kind: "invariant_touch";
+  id: string;
+  ts: number;
+  cwd: string;
+  invariant: string;
+  path: string;
+}
+
 export interface TripleFile {
   path: string;
   plusMinus: [number, number];
@@ -493,7 +514,7 @@ export function boundTripleRecord(record: TripleRecord): TripleRecord {
   };
 }
 
-export type MemoryRecord = FailureRecord | FixRecord | AssociationRecord | NoteRecord | TripleRecord;
+export type MemoryRecord = FailureRecord | FixRecord | AssociationRecord | NoteRecord | TripleRecord | BriefRunRecord | InvariantTouchRecord;
 
 /** Future-dated evidence stays readable but is inert for operational answers. */
 export function isOperationalMemoryRecord(record: Pick<MemoryRecord, "ts">, now = Date.now()): boolean {
@@ -677,6 +698,23 @@ function parseMemoryRecordUnsafe(value: unknown): MemoryRecord | undefined {
     return {
       kind: "note", id: record.id, ts: Number(record.ts), cwd: record.cwd, cmd: record.cmd,
       file: record.file, line: Number(record.line), subject: record.subject, answer: record.answer,
+    };
+  }
+  if (record.kind === "brief_run") {
+    if (record.v !== 1 || !isSafeNonNegativeInteger(record.sinceTs) ||
+        !isSafeNonNegativeInteger(record.commits) || !isSafeNonNegativeInteger(record.files)) return undefined;
+    return {
+      v: 1, kind: "brief_run", id: record.id, ts: Number(record.ts), cwd: record.cwd,
+      sinceTs: Number(record.sinceTs), commits: Number(record.commits), files: Number(record.files),
+    };
+  }
+  if (record.kind === "invariant_touch") {
+    if (record.v !== 1 ||
+        typeof record.invariant !== "string" || record.invariant.length === 0 || record.invariant.length > MAX_RECORD_ITEM_CHARS ||
+        typeof record.path !== "string" || record.path.length === 0 || record.path.length > MAX_RECORD_ITEM_CHARS) return undefined;
+    return {
+      v: 1, kind: "invariant_touch", id: record.id, ts: Number(record.ts), cwd: record.cwd,
+      invariant: record.invariant, path: record.path,
     };
   }
   if (record.kind === "triple") return parseTripleRecord(record);
