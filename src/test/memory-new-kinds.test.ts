@@ -39,3 +39,14 @@ test("legacy kinds still parse unchanged next to new kinds", () => {
   assert.ok(parsed);
   assert.equal(parsed.kind, "note");
 });
+
+test("parseMemoryRecord rejects new kinds with wrong schema version", () => {
+  assert.equal(parseMemoryRecord({ v: 2, kind: "brief_run", id: "b", ts: 1, cwd: "/", sinceTs: 0, commits: 1, files: 1 }), undefined);
+  assert.equal(parseMemoryRecord({ v: 2, kind: "invariant_touch", id: "i", ts: 1, cwd: "/", invariant: "x", path: "y" }), undefined);
+});
+
+test("parseMemoryRecord rejects invariant_touch fields over the item length cap", () => {
+  const overLong = "x".repeat(16_385);
+  assert.equal(parseMemoryRecord({ v: 1, kind: "invariant_touch", id: "i", ts: 1, cwd: "/", invariant: overLong, path: "y" }), undefined);
+  assert.equal(parseMemoryRecord({ v: 1, kind: "invariant_touch", id: "i", ts: 1, cwd: "/", invariant: "x", path: overLong }), undefined);
+});
