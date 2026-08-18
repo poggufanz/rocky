@@ -10,7 +10,7 @@ Rocky is not a debugging agent. Plenty of tools already write and fix code for y
 
 The first systematic survey of vibe coding (Ge et al., 2025, arXiv:2510.12399) defines the practice as developers validating AI-generated implementations "through outcome observation rather than line-by-line code comprehension" — and reports unexpected productivity *losses* alongside the speed gains. The survey's central finding is that successful vibe coding depends less on agent capability and more on systematic context engineering and well-designed human–agent collaboration models.
 
-That finding motivates Rocky's longer arc, but it does not establish Rocky's effect. The v0.5 dictionary connects a user's recorded intent to the mechanism in their own work. The dictionary, bounded agent-change capture, ambiguity handling, digest, quiz, and proactive questions are implemented in the 0.5 release line; current package 0.5.3 also provides terminal failure/fix memory, `rocky watch`, read-only MCP, and optional local interpretation of recall evidence.
+That finding motivates Rocky's longer arc, but it does not establish Rocky's effect. The v0.5 dictionary connects a user's recorded intent to the mechanism in their own work. The dictionary, bounded agent-change capture, ambiguity handling, digest, quiz, and proactive questions are implemented in the 0.5 release line; current package 0.5.4 also provides terminal failure/fix memory, `rocky watch`, read-only MCP, and optional local interpretation of recall evidence.
 
 ### 2. Developers pay a recurring "re-finding tax"
 

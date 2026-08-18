@@ -2,6 +2,21 @@
 
 Notable changes per release. Dates are the release date.
 
+## 0.5.4 — 18 August 2026
+
+Release: [v0.5.4](https://github.com/poggufanz/rocky/releases/tag/v0.5.4)
+
+A patch release. `rocky hook install` could install the Windows-only PowerShell hook into a non-Windows user's shell profile — a defect shipped in both 0.5.2 and 0.5.3. It is fixed here, alongside a test-only flake in the release suite found while verifying the fix.
+
+### Fixed
+
+- **`rocky hook install` could install the Windows-only PowerShell hook on Linux and macOS.** `detectPwshHost()` in `src/commands/hook.ts` probed for a `pwsh` binary with no platform gate, unlike its `detectWindowsPowerShellHost()` sibling. PowerShell 7 (`pwsh`) is a real, cross-platform binary — it ships preinstalled on GitHub's hosted `ubuntu-latest` and `macos-latest` runners and is common on developer machines that use PowerShell as a cross-platform shell — so on any of those hosts, `rocky hook install` would genuinely try to write the Windows-only `$PROFILE` hook. This shipped broken in both 0.5.2 and 0.5.3. The same missing gate also let three real-host PowerShell tests run on Linux and macOS instead of being skipped there, which is how the defect was caught: CI was red on every POSIX job and green only on Windows. `detectPwshHost()` now gates on `process.platform === "win32"` first, matching `detectWindowsPowerShellHost()`.
+- **A memory-settling wait in the release test suite could pass one record short.** `readMemoryRecordsSettled` declared a memory file settled as soon as two consecutive polls read identical content, with no notion of how many records the scenario actually expected, so a still-in-flight detached write could read as "done" a record early. Test-only; nothing shipped changed. It now waits for a known record floor before declaring settled. Reproduced under synthetic load at 4 failures in 20 runs before the fix, 20 of 20 passing after.
+
+### Not in this release
+
+- `scripts/release-check.mjs`'s `RELEASE_TAG`/`RELEASE_COMMIT` still point at v0.5.3. They are re-pinned to v0.5.4 in a separate commit once the tag exists, so this branch's own CI does not go red before the tag is cut.
+
 ## 0.5.3 — 18 August 2026
 
 Release: [v0.5.3](https://github.com/poggufanz/rocky/releases/tag/v0.5.3)
