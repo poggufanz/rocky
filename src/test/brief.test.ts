@@ -56,6 +56,31 @@ test("composeBrief emits five blocks in fixed order", () => {
   assert.ok(text.includes("what impact of src/payment/worker.ts change, question"));
 });
 
+test("composeBrief picks the impact file by total churn across commits, not a single commit's peak", () => {
+  const input: BriefInput = {
+    windowLabel: "24h",
+    commits: [
+      {
+        hash: "aaa1111", subject: "fix: part one",
+        files: [
+          { path: "src/payment/retry.ts", churn: 30 },
+          { path: "src/payment/onceoff.ts", churn: 50 },
+        ],
+      },
+      {
+        hash: "bbb2222", subject: "fix: part two",
+        files: [{ path: "src/payment/retry.ts", churn: 30 }],
+      },
+    ],
+    memoryHits: [],
+    invariantTouches: [],
+  };
+  const lines = composeBrief(input);
+  const text = lines.join("\n");
+  assert.ok(text.includes("what impact of src/payment/retry.ts change, question"));
+  assert.ok(!text.includes("what impact of src/payment/onceoff.ts change, question"));
+});
+
 test("composeBrief with empty window says so and stays quiet on invariants", () => {
   const lines = composeBrief({ windowLabel: "24h", commits: [], memoryHits: [], invariantTouches: [] });
   const text = lines.join("\n");

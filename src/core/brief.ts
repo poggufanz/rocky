@@ -105,9 +105,13 @@ export function composeBrief(input: BriefInput): string[] {
     for (const area of areas) {
       lines.push(`  why ${area} change, question`);
     }
-    const biggest = [...allFiles].sort((a, b) => b.churn - a.churn || a.path.localeCompare(b.path))[0];
-    if (biggest !== undefined && biggest.churn > 0) {
-      lines.push(`  what impact of ${biggest.path} change, question`);
+    const churnByPath = new Map<string, number>();
+    for (const file of allFiles) {
+      churnByPath.set(file.path, (churnByPath.get(file.path) ?? 0) + file.churn);
+    }
+    const biggest = [...churnByPath.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0];
+    if (biggest !== undefined && biggest[1] > 0) {
+      lines.push(`  what impact of ${biggest[0]} change, question`);
     }
   }
   return lines;
