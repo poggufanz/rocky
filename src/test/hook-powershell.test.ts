@@ -795,7 +795,44 @@ test(
  * writes anything) — if the spawn were still synchronous, the interactive
  * session's wall-clock time would be dominated by that sleep; non-blocking,
  * it is not, regardless of how slow the spawned process itself is.
+ *
+ * Task-a review round 3, Item 2: the shim's sleep and the pass/fail
+ * threshold below are deliberately far apart, not close together. A prior
+ * version used a 4000ms sleep with an `elapsedMs < 4000` ceiling -- the
+ * SAME number for both, leaving zero margin between "this session's own
+ * ordinary overhead" and "a synchronous spawn would need at least the full
+ * sleep". Reproduced directly (not guessed): a synthetic sustained load of
+ * 24-36 concurrent real `powershell.exe` processes (simulating what this
+ * suite's own many concurrent real-host test files already do to each
+ * other under `node --test`'s default per-file concurrency, on a machine
+ * with active real-time AV scanning of every freshly-spawned process -- the
+ * same interference this file's own fix-round-1 history already names)
+ * pushed this exact test's own elapsed time as high as 6268ms measured, and
+ * to a median of 4952ms at the higher end tested -- comfortably past a
+ * 4000ms ceiling despite the session genuinely never blocking (`timedOut`
+ * stayed `false` and `NEXT_PROMPT_REACHED` still arrived promptly in every
+ * one of those runs; only the WHOLE session's wall-clock time, not the
+ * spawn's own blocking-ness, was what heavy unrelated system load
+ * inflated). Widening the 4000 ceiling alone would only have hidden that
+ * conflation, not fixed it -- the actual defect is that the test measured
+ * "total session wall-clock time" as a stand-in for "did the spawn block",
+ * a proxy that degrades under load the property itself never does. The fix
+ * is a large, fixed separation between the two regimes instead: a much
+ * longer sleep (so a genuinely synchronous spawn is unmistakably far over
+ * any sane ceiling) paired with a ceiling well below that sleep but still
+ * generously above the worst overhead observed above, so ordinary
+ * contention on this exact kind of machine cannot make the two regimes
+ * ambiguous again.
  */
+const SLOW_SHIM_SLEEP_MS = 12_000;
+// Comfortably above the worst non-blocking overhead measured under
+// synthetic heavy load (6268ms) with real margin to spare, and comfortably
+// below what a genuinely blocking spawn would need at minimum
+// (SLOW_SHIM_SLEEP_MS plus this same session's own ~1.6s ordinary
+// overhead) -- the two regimes stay unambiguous even under real machine
+// contention that materially exceeds anything actually reproduced above.
+const NON_BLOCKING_CEILING_MS = 9_000;
+
 async function realHostNonBlockingSmoke(t: TestContext, exe: string): Promise<void> {
   const root = mkdtempSync(join(tmpdir(), "rocky-hook-ps-nonblocking-"));
   t.after(() => safeRmSync(root));
@@ -811,7 +848,7 @@ async function realHostNonBlockingSmoke(t: TestContext, exe: string): Promise<vo
   // then proves it actually ran (and how late) by writing a marker file.
   writeFileSync(
     slowShim,
-    `Start-Sleep -Milliseconds 4000\n"ran" | Set-Content -Path "${slowMarker.replace(/\\/g, "\\\\")}"\nexit 0\n`,
+    `Start-Sleep -Milliseconds ${SLOW_SHIM_SLEEP_MS}\n"ran" | Set-Content -Path "${slowMarker.replace(/\\/g, "\\\\")}"\nexit 0\n`,
   );
 
   const before = Date.now();
@@ -826,21 +863,24 @@ async function realHostNonBlockingSmoke(t: TestContext, exe: string): Promise<vo
   assert.equal(result.timedOut, false, "the session must not hang");
   assert.match(result.stdout, /NEXT_PROMPT_REACHED/, `the next command must run without waiting on the slow spawn; got: ${result.stdout}`);
   assert.ok(
-    elapsedMs < 4000,
-    `session wall-clock time (${elapsedMs}ms) must not be dominated by the spawned process's 4000ms sleep -- a synchronous spawn would fail this`,
+    elapsedMs < NON_BLOCKING_CEILING_MS,
+    `session wall-clock time (${elapsedMs}ms) must not be dominated by the spawned process's ${SLOW_SHIM_SLEEP_MS}ms sleep -- a synchronous spawn would fail this`,
   );
   assert.equal(existsSync(slowMarker), false, "the slow shim must still be running in the background when this assertion runs");
 
   // Fix round 3: the whole property this test proves is that nothing waited
   // for the slow spawn above -- so this function's own `t.after` must not
   // become the thing that races it either. Wait for the shim's own marker
-  // (its last statement, written only after its 4000ms sleep) so the
+  // (its last statement, written only after its full sleep) so the
   // detached process has genuinely finished and released its handle on
   // `root` before teardown ever runs. This does not weaken what was already
   // proven above; it only sequences cleanup after a process this test itself
   // spawned, the same ordering discipline any of these tests would need
-  // regardless of the specific race that surfaced it.
-  const markerAppeared = await waitForMarker(slowMarker, 8_000);
+  // regardless of the specific race that surfaced it. Bounded generously
+  // past SLOW_SHIM_SLEEP_MS itself (task-a review round 3): this wait must
+  // not become a second flake of its own once the sleep grew past this
+  // constant's old, now-too-tight 8000ms bound.
+  const markerAppeared = await waitForMarker(slowMarker, SLOW_SHIM_SLEEP_MS + 10_000);
   assert.ok(markerAppeared, "the deliberately slow spawn must eventually complete on its own (not still hung)");
 }
 
