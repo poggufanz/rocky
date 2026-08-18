@@ -1,7 +1,10 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { polishBriefLines } from "../ai/brief-ai.js";
+import { createOllamaClient } from "../ai/ollama.js";
 import { composeBrief, parseGitLog, type BriefInvariantTouch, type BriefMemoryHit } from "../core/brief.js";
 import { FALLBACK_WINDOW_MS, parseSinceDuration, readState, writeState } from "../core/brief-state.js";
+import { loadConfig } from "../core/config-read.js";
 import { matchesGlob, parseInvariants } from "../core/invariants.js";
 import { recordBriefRun, recordInvariantTouch } from "../core/memory.js";
 import { canonicalPath, loadMemoryChecked } from "../core/memory-read.js";
@@ -138,7 +141,17 @@ export async function briefCommand(argv: readonly string[] = [], cwd = process.c
   }
 
   const lines = composeBrief({ windowLabel: window.label, commits, memoryHits, invariantTouches });
-  for (const line of lines) console.log(line);
+  let output = lines;
+  if (args.ai) {
+    const config = loadConfig();
+    if (config.status === "valid" && config.config.ai.enabled) {
+      output = await polishBriefLines(lines, createOllamaClient(), config.config.ai.model);
+      if (output === lines) speak("model does not answer clean. I speak plain facts instead.");
+    } else {
+      speak("local AI not enabled. run rocky model use first, question");
+    }
+  }
+  for (const line of output) console.log(line);
 
   for (const touch of invariantTouches) {
     recordInvariantTouch({ invariant: touch.invariant, path: touch.path, cwd: root });
