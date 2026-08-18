@@ -11,6 +11,8 @@ export interface RockyPaths {
   labels: string;
   digestHint: string;
   agentLog: string;
+  journal: string;
+  state: string;
 }
 
 export function resolveRockyPaths(
@@ -30,5 +32,7 @@ export function resolveRockyPaths(
     labels: join(home, "labels"),
     digestHint: join(home, "digest-hint"),
     agentLog: join(home, "agent-hook.log"),
+    journal: join(home, "journal.jsonl"),
+    state: join(home, "state.json"),
   };
 }
