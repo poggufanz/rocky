@@ -34,10 +34,10 @@ import {
 import { resolveRockyPaths } from "./state-paths.js";
 import type { RockyPaths } from "./state-paths.js";
 import { boundTripleMechanism, isCompleteMemoryCoverage, isKnownPathPlatform, isSafeNonNegativeInteger, loadMemoryChecked, MAX_MEMORY_FILE_BYTES, MAX_MEMORY_LINE_BYTES, MAX_MEMORY_RECORDS, MAX_SUPPORTED_MEMORY_RECORDS } from "./memory-read.js";
-import type { AssociationRecord, FailureRecord, FixRecord, MemoryCoverage, MemoryRecord, NoteRecord, TripleRecord } from "./memory-read.js";
+import type { AssociationRecord, BriefRunRecord, FailureRecord, FixRecord, InvariantTouchRecord, MemoryCoverage, MemoryRecord, NoteRecord, TripleRecord } from "./memory-read.js";
 import { LINK_WINDOW_MS, recentUnresolvedFailures, type UnresolvedLink } from "./memory-query.js";
 
-export type { AssociationRecord, FailureRecord, FixRecord, MemoryCoverage, MemoryRecord, NoteRecord, TripleFile, TripleRecord } from "./memory-read.js";
+export type { AssociationRecord, BriefRunRecord, FailureRecord, FixRecord, InvariantTouchRecord, MemoryCoverage, MemoryRecord, NoteRecord, TripleFile, TripleRecord } from "./memory-read.js";
 export {
   boundTripleMechanism,
   boundTripleRecord,
@@ -1170,6 +1170,34 @@ export function recordNote(input: {
 }): void {
   const rec: NoteRecord = { kind: "note", id: randomUUID(), ts: Date.now(), ...input };
   withMemoryTransaction((transaction) => transaction.append(rec));
+}
+
+export function recordBriefRun(input: { sinceTs: number; commits: number; files: number; cwd?: string }): BriefRunRecord {
+  if (!isSafeNonNegativeInteger(input.sinceTs) || !isSafeNonNegativeInteger(input.commits) || !isSafeNonNegativeInteger(input.files)) {
+    throw new Error("Rocky brief_run evidence requires safe non-negative integers");
+  }
+  const ts = Date.now();
+  const rec: BriefRunRecord = {
+    v: 1, kind: "brief_run", id: randomUUID(), ts, cwd: input.cwd ?? process.cwd(),
+    sinceTs: input.sinceTs, commits: input.commits, files: input.files,
+  };
+  withMemoryTransaction((transaction) => { transaction.append(rec); }, resolveRockyPaths(), { now: ts });
+  return rec;
+}
+
+export function recordInvariantTouch(input: { invariant: string; path: string; cwd?: string }): InvariantTouchRecord {
+  const ts = Date.now();
+  const invariant = input.invariant.slice(0, 512);
+  const path = input.path.slice(0, 512);
+  if (invariant.length === 0 || path.length === 0) {
+    throw new Error("Rocky invariant_touch evidence requires non-empty invariant and path");
+  }
+  const rec: InvariantTouchRecord = {
+    v: 1, kind: "invariant_touch", id: randomUUID(), ts, cwd: input.cwd ?? process.cwd(),
+    invariant, path,
+  };
+  withMemoryTransaction((transaction) => { transaction.append(rec); }, resolveRockyPaths(), { now: ts });
+  return rec;
 }
 
 function safeTripleTimestamp(value: unknown): number {

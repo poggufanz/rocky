@@ -12,6 +12,7 @@
  */
 
 import { run } from "./commands/run.js";
+import { briefCommand } from "./commands/brief.js";
 import { watch } from "./commands/watch.js";
 import { recall } from "./commands/recall.js";
 import { model } from "./commands/model.js";
@@ -22,6 +23,8 @@ import { setup } from "./commands/setup.js";
 import { check } from "./commands/check.js";
 import { digest, exportCommand, how, quiz, what, why } from "./commands/dictionary.js";
 import { agentEvent } from "./commands/agent-hook.js";
+import { journalCommand } from "./commands/journal.js";
+import { invariantsCommand } from "./commands/invariants.js";
 import { annotateCommand } from "./agent/annotate.js";
 import { ambiguityCommand } from "./agent/ambiguity.js";
 import { CliUsageError, parseExactCommand, reportCliUsage } from "./commands/cli-args.js";
@@ -45,6 +48,11 @@ usage:
                             failure, and knocks (desktop notification, or a
                             bell) when it finishes. --quiet: plain facts on
                             stderr only, no persona lines, no notification.
+  rocky brief [--since <ref|24h>] [--quiet] [--ai]
+                            hear what changed since last brief: commits by
+                            area, remembered failures and fixes, touched
+                            invariant guards, questions reviewer may ask.
+                            --ai polishes wording via loopback Ollama only.
   rocky recall [--] <query...>
                             ask Rocky's memory. matches words from error or command.
   rocky recall --ai [--] <query...>
@@ -64,6 +72,9 @@ usage:
                             probe an installed Ollama model, then enable local AI.
   rocky model off            disable Rocky local AI. Ollama stays untouched.
   rocky stats               what Rocky holds in memory.
+  rocky journal "<note>"    write one line dogfood note. local file only.
+  rocky invariants          list remembered invariant notes from .rocky/invariants.md
+                            and hear globs that guard nothing.
   rocky mcp                 serve read-only memory tools over stdio.
   rocky setup               configure detected MCP hosts with sanitized exposure.
   rocky setup --check       verify owned host registrations and Rocky MCP tools.
@@ -126,6 +137,8 @@ async function main(): Promise<number> {
     switch (command) {
       case "run":
         return run(parseExactCommand(rest, "rocky run <command>"));
+      case "brief":
+        return briefCommand(rest);
       case "watch":
         return watch(rest);
       case "recall":
@@ -134,6 +147,10 @@ async function main(): Promise<number> {
         return model(rest);
       case "stats":
         return stats(rest);
+      case "journal":
+        return journalCommand(rest);
+      case "invariants":
+        return invariantsCommand(rest);
       case "mcp":
         return mcp(rest);
       case "setup":
