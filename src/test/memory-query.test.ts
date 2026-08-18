@@ -1262,3 +1262,152 @@ test("rare exact token boost remains active when token appears twice among many 
   assert.deepEqual(hits.map((hit) => hit.failure.id), ["rare-1", "rare-0"]);
   assert.ok(hits.every((hit) => hit.score >= 0.06));
 });
+
+// Finding 1 (2026-08-17/18 stress-test docs, `queryRecall` around what was
+// lines 407-510): `documentFrequency` used to count once per *record*
+// instead of once per *canonical fingerprint*. Two identical failures --
+// the same error recurring, Rocky's core use case -- doubled a distinctive
+// signature token's frequency past the 1-candidate rare-token floor
+// (`rareFrequency` is 1 below 10 candidates), collapsing the score to plain
+// Jaccard and below the 0.05 visibility cutoff. So recall lost the failure
+// exactly when a user most needed it: right after the error recurred. Repro
+// data mirrors `stress-playground/repro-recall-bug.ps1`
+// (`scenarios/web-errors.cjs`, a real multi-line npm/gyp ENOSPC failure).
+test("recall still finds a failure after the identical error is recorded twice", () => {
+  const cmd = "node scenario.cjs";
+  const stderrLines = [
+    "npm ERR! code ELIFECYCLE",
+    "npm ERR! errno 1",
+    "npm ERR! blog@1.0.0 build: vite build -c extension/vite.config.extension.js",
+    "npm ERR! Exit status 1",
+    "npm ERR! Failed at the blog@1.0.0 build script.",
+    "npm ERR! Error: ENOSPC, write",
+    "npm ERR! You are trying to install on a drive that either has no space, or has no permission to write.",
+    "gyp ERR! find Python",
+    "gyp ERR! stack Error: EACCES: permission denied, mkdir root-cache-node-gyp",
+    "gyp ERR! Failed to compile native module better-sqlite3",
+    "npm ERR! code ETARGET",
+    "npm ERR! No matching version found for left-pad@^99.0.0",
+  ];
+  const stderr = stderrLines.join("\n");
+  const sig = signatureLines(stderr);
+  const excerpt = stderrLines.slice(-4).join("\n");
+  const fp = fingerprintSignature(sig, cmd, 1);
+  const make = (id: string, ts: number): FailureRecord => ({
+    kind: "failure", id, ts, cwd: "/work/enospc", cmd, exitCode: 1,
+    fingerprint: fp, fingerprintV: 2, signature: sig, excerpt,
+  });
+
+  assert.equal(
+    queryRecall([make("enospc-once", 100)], { query: "enospc" }).length, 1,
+    "premise: a single recorded failure must already be found",
+  );
+
+  const hits = queryRecall([make("enospc-a", 100), make("enospc-b", 200)], { query: "enospc" });
+  assert.equal(hits.length, 1, "the same error recorded twice must not vanish from recall");
+  assert.equal(hits[0]?.failure.id, "enospc-b", "the two occurrences dedupe to one, newest-first, hit");
+
+  // searchKnowledge shares the same per-canonical-fingerprint df counting
+  // fix for its failure-kind entries; pin the sibling surface too.
+  const knowledgeHits = searchKnowledge(
+    [make("enospc-a", 100), make("enospc-b", 200)],
+    { query: "enospc", kind: "failure" },
+  );
+  assert.equal(knowledgeHits.length, 1, "searchKnowledge must not lose the recurring failure either");
+  assert.equal(knowledgeHits[0]?.id, "enospc-b");
+});
+
+// Precision guard for finding 1's fix: a token that is genuinely common
+// across many *distinct* recurring failures (not the same failure recorded
+// twice) must not be treated as rare just because canonical-fingerprint
+// counting replaced per-record counting.
+test("a genuinely common token across many distinct fingerprints does not trigger the rare-token floor", () => {
+  const letters = "abcdefghijkl".split("");
+  const filler = Array.from({ length: 30 }, (_, item) => `context-${item}`).join(" ");
+  const make = (letter: string, index: number): FailureRecord => {
+    const cmd = `tool diagnose --run-${letter}`;
+    return {
+      kind: "failure", id: `common-${letter}`, ts: 1_000 + index, cwd: "/work/common", cmd, exitCode: 1,
+      fingerprint: commandFingerprint(cmd, 1), fingerprintV: 2,
+      signature: [`timeout waiting for response ${filler}`], excerpt: "timeout",
+    };
+  };
+  const records = letters.map((letter, index) => make(letter, index));
+  assert.equal(new Set(records.map((r) => r.fingerprint)).size, 12, "premise: fingerprints must be genuinely distinct");
+  assert.deepEqual(
+    queryRecall(records, { query: "timeout", limit: 12 }),
+    [],
+    "a widely shared, non-recurring token must stay below the visibility cutoff, not get boosted by a false rare floor",
+  );
+});
+
+// Finding 3 (2026-08-17/18 stress-test docs): `retrievalEvidenceTokens` /
+// `fillRetrievalEvidenceTokens` used to stop indexing at `cmd + signature`
+// for every v2 record, so a distinctive word that only made it into the
+// excerpt -- not into the bounded `SIGNAL`-matched `signature` lines -- was
+// unfindable. Real case: an npm "No matching version found for
+// left-pad@^99.0.0" line never matches `SIGNAL` (no "not found", no
+// "error"), so it never becomes a signature line; it only survives in the
+// tail-of-stderr `excerpt`.
+test("recall finds a v2 record's distinctive excerpt word that never made it into the signature", () => {
+  const cmd = "node scenario.cjs";
+  const stderrLines = [
+    "npm ERR! code ELIFECYCLE",
+    "npm ERR! errno 1",
+    "npm ERR! blog@1.0.0 build: vite build -c extension/vite.config.extension.js",
+    "npm ERR! Exit status 1",
+    "npm ERR! Failed at the blog@1.0.0 build script.",
+    "npm ERR! Error: ENOSPC, write",
+    "npm ERR! You are trying to install on a drive that either has no space, or has no permission to write.",
+    "gyp ERR! find Python",
+    "gyp ERR! stack Error: EACCES: permission denied, mkdir root-cache-node-gyp",
+    "gyp ERR! Failed to compile native module better-sqlite3",
+    "npm ERR! code ETARGET",
+    "npm ERR! No matching version found for left-pad@^99.0.0",
+  ];
+  const stderr = stderrLines.join("\n");
+  const sig = signatureLines(stderr);
+  const excerpt = stderrLines.slice(-4).join("\n");
+  assert.ok(!sig.some((line) => line.includes("left-pad")), "premise: left-pad must not reach the signature");
+  assert.ok(excerpt.includes("left-pad"), "premise: left-pad must be present in the excerpt");
+  const record: FailureRecord = {
+    kind: "failure", id: "left-pad-v2", ts: 100, cwd: "/work/left-pad", cmd, exitCode: 1,
+    fingerprint: fingerprintSignature(sig, cmd, 1), fingerprintV: 2, signature: sig, excerpt,
+  };
+  assert.deepEqual(
+    queryRecall([record], { query: "left-pad" }).map((hit) => hit.failure.id),
+    ["left-pad-v2"],
+  );
+  assert.deepEqual(
+    searchKnowledge([record], { query: "left-pad", kind: "failure" }).map((hit) => hit.id),
+    ["left-pad-v2"],
+  );
+});
+
+// Finding 3 must not widen a hook-origin record's evidence: hook failures
+// carry no stderr, so their excerpt (always a synthetic `exit N`) must never
+// become searchable text, regardless of fingerprint version.
+test("a hook-origin record's excerpt never becomes retrieval evidence, even for a v2 fingerprint", () => {
+  const cmd = "npm run build";
+  const record: FailureRecord = {
+    kind: "failure", id: "hook-excerpt-guard", ts: 100, cwd: "/work/hook-guard", cmd, exitCode: 1,
+    fingerprint: commandFingerprint(cmd, 1), fingerprintV: 2,
+    signature: [normalizeLine(cmd)], excerpt: "distinctive-excerpt-only-word", origin: "hook",
+  };
+  assert.deepEqual(queryRecall([record], { query: "distinctive-excerpt-only-word" }), []);
+});
+
+// Finding 3's new v2 branch must not loosen the pre-existing v1/absent path:
+// an *unproven* legacy excerpt (its signature/excerpt do not independently
+// hash to the persisted fingerprint) stays excluded from evidence exactly as
+// before.
+test("an unproven legacy record's excerpt never becomes retrieval evidence", () => {
+  const record: FailureRecord = {
+    ...failureA,
+    id: "unproven-excerpt-guard",
+    fingerprint: "fp-unproven-guard",
+    signature: ["generic signature text"],
+    excerpt: "generic signature text and a distinctive-excerpt-only-word",
+  };
+  assert.deepEqual(queryRecall([record], { query: "distinctive-excerpt-only-word" }), []);
+});

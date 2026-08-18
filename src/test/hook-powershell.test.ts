@@ -47,7 +47,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { hookInstall, hookStatus, hookUninstall, detectPowerShellHosts } from "../commands/hook.js";
+import { hookInstall, hookStatus, hookUninstall, detectPowerShellHosts, profileWithinHome, admitHostWithinHome } from "../commands/hook.js";
 import { POWERSHELL_HOOK_LINE, powershellHookBlockCodec } from "../core/hook-block.js";
 import { validateRockyPhrase } from "../ui/phrases.js";
 import { verifyShellAssetsStaged } from "./shell-assets-fixture.js";
@@ -569,6 +569,121 @@ test(
     }
   },
 );
+
+// --- profileWithinHome: the home-containment guard (pure function) -------
+//
+// P1 fix (2026-08-18 stress-test findings, #2): `detectPowerShellHosts` used
+// to trust `$PROFILE` from a real, unsandboxed `powershell.exe`/`pwsh.exe`
+// probe unconditionally -- that probe never passes through
+// `homedir()`/`USERPROFILE`, so a sandboxed USERPROFILE/HOME (CI, tests,
+// stress sandboxes) never redirected it. `hook install`/`uninstall` run
+// inside such a sandbox could then write to, or strip the block from, this
+// machine's real profile -- reproduced for real during stress testing (a
+// real, OneDrive-redirected profile got written outside its sandbox).
+// `profileWithinHome` is the pure containment check behind the fix, tested
+// directly here per this task's instruction not to add another real
+// `powershell.exe` spawn to this file's already load-sensitive suite.
+
+test("profileWithinHome keeps a profile nested deep under home, including an OneDrive-redirected path", () => {
+  const home = "C:\\Users\\astronaut";
+  const profile = "C:\\Users\\astronaut\\OneDrive\\Documents\\WindowsPowerShell\\Microsoft.PowerShell_profile.ps1";
+  assert.equal(profileWithinHome(profile, home), true);
+});
+
+test("profileWithinHome drops a real user's profile when home is a sandbox temp directory (the exact bug this guard fixes)", () => {
+  const sandboxHome = "C:\\Users\\RUNNER~1\\AppData\\Local\\Temp\\rocky-sandbox-abcd";
+  const realProfile = "C:\\Users\\astronaut\\OneDrive\\Documents\\WindowsPowerShell\\Microsoft.PowerShell_profile.ps1";
+  assert.equal(profileWithinHome(realProfile, sandboxHome), false);
+});
+
+test("profileWithinHome does not mistake a sibling directory whose name prefixes home for containment (prefix-boundary trap)", () => {
+  const home = "C:\\Users\\mf";
+  const profile = "C:\\Users\\mfaiq\\Documents\\WindowsPowerShell\\Microsoft.PowerShell_profile.ps1";
+  assert.equal(profileWithinHome(profile, home), false);
+});
+
+test("profileWithinHome treats the home directory itself as contained", () => {
+  const home = "C:\\Users\\astronaut";
+  assert.equal(profileWithinHome(home, home), true);
+});
+
+test("profileWithinHome drops a profile that lives on a different drive entirely", () => {
+  const home = "C:\\Users\\astronaut";
+  const profile = "D:\\Profiles\\WindowsPowerShell\\Microsoft.PowerShell_profile.ps1";
+  assert.equal(profileWithinHome(profile, home), false);
+});
+
+test("profileWithinHome normalizes forward and back slashes before comparing", () => {
+  const home = "C:\\Users\\astronaut";
+  const profile = "C:/Users/astronaut/Documents/WindowsPowerShell/Microsoft.PowerShell_profile.ps1";
+  assert.equal(profileWithinHome(profile, home), true);
+});
+
+test(
+  "profileWithinHome folds case on win32, where NTFS/ReFS are case-preserving but not case-sensitive",
+  { skip: process.platform === "win32" ? false : "case-folding is a win32-only behavior of profileWithinHome" },
+  () => {
+    const home = "C:\\Users\\Astronaut";
+    const profile = "c:\\users\\astronaut\\documents\\windowspowershell\\microsoft.powershell_profile.ps1";
+    assert.equal(profileWithinHome(profile, home), true);
+  },
+);
+
+const HOST_OUTSIDE_HOME_DISCLOSURE = "Windows PowerShell profile lives outside home. I touch nothing there.";
+
+test("the profile-outside-home disclosure follows Rocky's voice rules", () => {
+  assert.deepEqual(validateRockyPhrase(HOST_OUTSIDE_HOME_DISCLOSURE), []);
+});
+
+// Group-Policy Folder Redirection points Documents (and so `$PROFILE`) at a
+// UNC share entirely outside `%USERPROFILE%` -- a legitimate setup no
+// containment check can bless. `ROCKY_HOOK_ALLOW_PROFILE_OUTSIDE_HOME=1` is
+// the explicit-consent escape hatch; anything else keeps the guard's refusal.
+test("admitHostWithinHome drops an outside-home host unless the explicit consent env var is exactly \"1\"", () => {
+  const home = "C:\\Users\\astronaut";
+  const host = {
+    label: "Windows PowerShell",
+    profile: "\\\\fileserver\\home\\astronaut\\Documents\\WindowsPowerShell\\Microsoft.PowerShell_profile.ps1",
+    version: "5.1",
+  };
+  const saved = process.env.ROCKY_HOOK_ALLOW_PROFILE_OUTSIDE_HOME;
+  try {
+    delete process.env.ROCKY_HOOK_ALLOW_PROFILE_OUTSIDE_HOME;
+    assert.equal(admitHostWithinHome(host, home), undefined);
+    process.env.ROCKY_HOOK_ALLOW_PROFILE_OUTSIDE_HOME = "true";
+    assert.equal(admitHostWithinHome(host, home), undefined, "consent must be the exact literal \"1\", never a truthy lookalike");
+    process.env.ROCKY_HOOK_ALLOW_PROFILE_OUTSIDE_HOME = "1";
+    assert.equal(admitHostWithinHome(host, home), host);
+  } finally {
+    if (saved === undefined) delete process.env.ROCKY_HOOK_ALLOW_PROFILE_OUTSIDE_HOME;
+    else process.env.ROCKY_HOOK_ALLOW_PROFILE_OUTSIDE_HOME = saved;
+  }
+});
+
+test("admitHostWithinHome passes an under-home host through untouched, with or without the consent env var", () => {
+  const home = "C:\\Users\\astronaut";
+  const host = {
+    label: "PowerShell 7",
+    profile: "C:\\Users\\astronaut\\OneDrive\\Documents\\PowerShell\\Microsoft.PowerShell_profile.ps1",
+    version: "7.4.0",
+  };
+  const saved = process.env.ROCKY_HOOK_ALLOW_PROFILE_OUTSIDE_HOME;
+  try {
+    delete process.env.ROCKY_HOOK_ALLOW_PROFILE_OUTSIDE_HOME;
+    assert.equal(admitHostWithinHome(host, home), host);
+    process.env.ROCKY_HOOK_ALLOW_PROFILE_OUTSIDE_HOME = "1";
+    assert.equal(admitHostWithinHome(host, home), host);
+  } finally {
+    if (saved === undefined) delete process.env.ROCKY_HOOK_ALLOW_PROFILE_OUTSIDE_HOME;
+    else process.env.ROCKY_HOOK_ALLOW_PROFILE_OUTSIDE_HOME = saved;
+  }
+});
+
+const HOST_OUTSIDE_HOME_CONSENT_DISCLOSURE = "Windows PowerShell profile lives outside home. you allow it, so I touch it.";
+
+test("the outside-home consent disclosure follows Rocky's voice rules", () => {
+  assert.deepEqual(validateRockyPhrase(HOST_OUTSIDE_HOME_CONSENT_DISCLOSURE), []);
+});
 
 function parseCheck(exe: string, scriptPath: string): { ok: boolean; message: string } {
   const probe = spawnSync(

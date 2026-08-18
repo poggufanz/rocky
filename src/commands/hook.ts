@@ -25,7 +25,7 @@
 import { copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import type { Stats } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync, type SpawnSyncReturns } from "node:child_process";
 import { CANCEL_CODES } from "../core/exec.js";
@@ -707,6 +707,24 @@ function runBashHookStatus(): number {
  * from the host itself, never reconstructed — this machine's own profile
  * paths are OneDrive-redirected, which a hardcoded algorithm would miss
  * entirely.
+ *
+ * That same "ask the real host" design has a sharp edge: `probePowerShellHost`
+ * spawns the real `powershell.exe`/`pwsh.exe` on `PATH`, a process Node never
+ * constructs from `homedir()`/`USERPROFILE` — it resolves `$PROFILE` through
+ * its own environment, which a sandboxed `USERPROFILE`/`HOME` (CI, tests,
+ * stress sandboxes) does not reach. Left unguarded, `detectPowerShellHosts`
+ * would report this machine's real profile even while every other target in
+ * this file (bashrc via `bashrcPath()`, rockyHome) correctly stays inside the
+ * sandbox — and `hook uninstall` run inside that sandbox would then strip the
+ * Rocky block from the real profile. Not hypothetical: stress testing hit
+ * this exactly (2026-08-18 findings, #2) — a real, OneDrive-redirected profile
+ * got written outside the sandbox it was supposed to be confined to.
+ * `detectPowerShellHosts` therefore checks every probed profile against
+ * `os.homedir()` (`profileWithinHome`, below `detectPowerShellHosts` itself)
+ * before ever admitting a host — the PowerShell equivalent of `bashrcPath()`
+ * already honoring `HOME`/`USERPROFILE` through `homedir()`, just enforced
+ * after the probe instead of before it, since `$PROFILE` is only known once
+ * the host has already answered.
  */
 export interface PowerShellHost {
   /** "Windows PowerShell" | "PowerShell 7" — bare, for status's per-host line. */
@@ -723,7 +741,11 @@ export interface PowerShellHost {
  * `hook-install.test.ts`'s `bashrcSandbox`, `cli-process.test.ts`'s
  * `processSandbox`, and `scripts/package-smoke.mjs`). Malformed JSON or a
  * non-array degrades to "no hosts" rather than throwing, matching every
- * other best-effort fallback in this file.
+ * other best-effort fallback in this file. This seam keeps absolute
+ * precedence over the home-containment guard documented on `PowerShellHost`
+ * above: `detectPowerShellHosts` returns the override, when set, before ever
+ * probing a real host or checking `profileWithinHome`, so injected test
+ * profiles never need to actually live under the test process's home.
  */
 function testOverridePowerShellHosts(): PowerShellHost[] | undefined {
   const raw = process.env.ROCKY_TEST_POWERSHELL_HOSTS;
@@ -793,14 +815,90 @@ function detectPwshHost(): PowerShellHost | undefined {
   return undefined;
 }
 
-/** Every host actually present on this machine — install/uninstall/status all loop over this same list (Ruling 3). */
+/**
+ * True when `profilePath` resolves under `home` — the containment check
+ * behind the guard documented on `PowerShellHost` above. Exported as a pure
+ * function, independent of `os.homedir()` and of ever spawning PowerShell,
+ * so the boundary logic is unit-testable directly.
+ *
+ * Uses `path.relative`, not a string prefix check, specifically because a
+ * prefix check has a real boundary bug here: `"C:\\Users\\mf"` is a string
+ * prefix of `"C:\\Users\\mfaiq\\..."` even though the latter is a sibling
+ * directory, not a descendant. `path.relative` compares path *segments*, so
+ * that trap resolves correctly (the first differing segment is `mf` vs
+ * `mfaiq`, giving a `".."`-leading result, i.e. not contained) without any
+ * separate boundary-safe special-casing. A result of `""` means the two
+ * paths are the same directory, treated as contained; a result that is
+ * itself absolute means Windows put them on different drives entirely, which
+ * `path.relative` cannot express as a `".."`-relative walk — also correctly
+ * not contained.
+ *
+ * `path.resolve` on both sides normalizes `/` vs `\` and relative segments
+ * before comparison. Case-folded only on win32: NTFS/ReFS are
+ * case-preserving but not case-sensitive, so `C:\Users\Name` and
+ * `c:\users\name` name the same directory there; POSIX filesystems are
+ * case-sensitive, and folding case there would wrongly admit a path that is
+ * genuinely distinct on disk.
+ */
+export function profileWithinHome(profilePath: string, home: string): boolean {
+  const normalize = (value: string): string => {
+    const resolved = resolve(value);
+    return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+  };
+  const resolvedProfile = normalize(profilePath);
+  const resolvedHome = normalize(home);
+  if (resolvedProfile === resolvedHome) return true;
+  const rel = relative(resolvedHome, resolvedProfile);
+  return rel !== "" && !rel.startsWith("..") && !isAbsolute(rel);
+}
+
+/**
+ * Applies the home-containment guard to one probed host: passes it through
+ * unchanged when its profile lives under `home`, otherwise discloses the
+ * refusal (once, one line, matching this file's other skip/absent
+ * disclosures) and drops it. A dropped host never silently vanishes — a real
+ * user with an exotic setup (e.g. a Documents folder moved to another drive)
+ * needs to see why `hook install`/`status` stopped finding a host that
+ * `powershell.exe`/`pwsh.exe` itself just confirmed exists.
+ *
+ * `ROCKY_HOOK_ALLOW_PROFILE_OUTSIDE_HOME=1` is the explicit-consent escape
+ * hatch for setups where `$PROFILE` legitimately lives outside
+ * `os.homedir()` — classic Group-Policy Folder Redirection points Documents
+ * (and so `$PROFILE`) at a UNC share like `\\fileserver\home\user`, which no
+ * containment check can bless. Consent must be per-invocation and explicit
+ * (an env var the user sets, never a default) because the guard exists to
+ * stop a *sandboxed* USERPROFILE from ever reaching the real profile; a
+ * config file or silent allowlist would be readable by the very sandbox the
+ * guard defends against. The admission is disclosed the same one-line way as
+ * the refusal, so `status` output always says which regime is in force.
+ */
+export function admitHostWithinHome(host: PowerShellHost | undefined, home: string): PowerShellHost | undefined {
+  if (!host) return undefined;
+  if (profileWithinHome(host.profile, home)) return host;
+  if (process.env.ROCKY_HOOK_ALLOW_PROFILE_OUTSIDE_HOME === "1") {
+    detail(`${host.label} profile lives outside home. you allow it, so I touch it.`);
+    return host;
+  }
+  detail(`${host.label} profile lives outside home. I touch nothing there.`);
+  return undefined;
+}
+
+/**
+ * Every host actually present on this machine — install/uninstall/status all
+ * loop over this same list (Ruling 3). The one choke point for the
+ * home-containment guard too (see `PowerShellHost` above): every host is
+ * passed through `admitHostWithinHome` before it ever reaches this list, so
+ * install/uninstall/status all inherit the guard uniformly rather than each
+ * needing their own copy of it.
+ */
 export function detectPowerShellHosts(): PowerShellHost[] {
   const override = testOverridePowerShellHosts();
   if (override !== undefined) return override;
+  const home = homedir();
   const hosts: PowerShellHost[] = [];
-  const windows = detectWindowsPowerShellHost();
+  const windows = admitHostWithinHome(detectWindowsPowerShellHost(), home);
   if (windows) hosts.push(windows);
-  const pwsh = detectPwshHost();
+  const pwsh = admitHostWithinHome(detectPwshHost(), home);
   if (pwsh) hosts.push(pwsh);
   return hosts;
 }
