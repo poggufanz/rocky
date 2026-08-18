@@ -2,6 +2,23 @@
 
 Notable changes per release. Dates are the release date.
 
+## 0.5.5 — 18 August 2026
+
+Release: [v0.5.5](https://github.com/poggufanz/rocky/releases/tag/v0.5.5)
+
+A patch release closing the three findings still open from the 0.5.1 and 0.5.3 stress-test audits (`docs/2026-08-17-stress-test-findings-v0-5-1.md`, `docs/2026-08-18-stress-test-findings-v0-5-3.md` in the repo root): recall dying on the exact recurring-error case it exists for, the PowerShell hook ignoring a sandboxed `USERPROFILE`, and v2 error text outside signal lines being unfindable.
+
+### Fixed
+
+- **`rocky recall` lost results the moment the same error was recorded twice.** `queryRecall` counted a token's document frequency once per stored record, but the rare-token floor for small memories is 1 — so the second occurrence of the *same* failure pushed its own distinctive token (`enospc`, a package name, an error code) past "rare", the score fell to plain Jaccard below the cutoff, and recall said nothing matches. One record worked; the recurrence — Rocky's core case — broke it. Document frequency is now counted once per canonical fingerprint, in both `queryRecall` and `searchKnowledge`, so repeats of one failure no longer dilute their own evidence.
+- **`rocky hook install`/`uninstall` could write to, or strip the hook from, the real PowerShell profile while `USERPROFILE`/`HOME` pointed at a sandbox.** The host probe asks `powershell.exe`/`pwsh.exe` for `$PROFILE` directly, and that answer never passed through `homedir()`, so a sandboxed environment (CI, stress harnesses) silently reached the real profile — reproduced for real during the 0.5.1 stress test. Every probed host is now admitted only when its profile resolves under the active home directory; a host outside it is dropped with a one-line disclosure instead of silently vanishing. Setups whose profile legitimately lives outside home (Group-Policy Folder Redirection onto a file share) can opt back in explicitly with `ROCKY_HOOK_ALLOW_PROFILE_OUTSIDE_HOME=1`, which is also disclosed. The `ROCKY_TEST_POWERSHELL_HOSTS` test seam keeps its existing precedence.
+- **Error detail outside signal lines was unfindable for current-format records.** A v2 record's excerpt was never indexed as recall evidence, so a line like `npm ERR! No matching version found for left-pad@^99.0.0` — no signal word, so no signature line — left `rocky recall "left-pad"` empty even though the excerpt stored the name. v2 non-hook excerpts now feed retrieval evidence under the same bounded token budget; hook-origin records and unproven legacy v1 excerpts stay excluded, exactly as before.
+- **The new containment tests spoke Windows paths to POSIX filesystems.** First CI round after the guard landed was red on ubuntu/macos and green on Windows: a literal `C:\Users\...\OneDrive\...` is a single path segment on POSIX, inverting three fixture expectations. Containment fixtures are now written in each platform's own path dialect; drive-letter and backslash-normalization semantics stay Windows-literal and skip elsewhere.
+
+### Not in this release
+
+- `scripts/release-check.mjs`'s `RELEASE_TAG`/`RELEASE_COMMIT` still point at v0.5.4. They are re-pinned to v0.5.5 in a separate commit once the tag exists, so this branch's own CI does not go red before the tag is cut.
+
 ## 0.5.4 — 18 August 2026
 
 Release: [v0.5.4](https://github.com/poggufanz/rocky/releases/tag/v0.5.4)
