@@ -2,6 +2,26 @@
 
 Notable changes per release. Dates are the release date.
 
+## 0.6.0 — 18 August 2026
+
+Release: [v0.6.0](https://github.com/poggufanz/rocky/releases/tag/v0.6.0)
+
+A minor release: validation and accountability surfaces on top of the v0.5 memory. `rocky brief` reads local git history and remembered failures/fixes since your last look and reports what changed, with optional loopback-Ollama narrative polish. `rocky journal` writes one dogfood note at a time to a local, append-only file. `rocky invariants` parses `.rocky/invariants.md` guard blocks with an in-house glob matcher and discloses any glob that currently matches nothing. `rocky stats` gained per-kind record counts, memory age, and journal count. The record schema envelope is documented in `docs/schema.md`, including the reserved `rationale` and `guard` kinds for future writers.
+
+### Added
+
+- **`rocky brief [--since <ref|24h>] [--quiet] [--ai]`.** Deterministic five-block composition — window state, commit churn, remembered failures/fixes, touched invariant guards, and a closing line — scoped to the current directory and a `--since` window that accepts a git ref or a duration (`90m`, `24h`, `7d`), defaulting to 24 hours since the last brief or first run. `--ai` requires exact line-count parity with the deterministic output before accepting loopback-Ollama polish, and falls back to the deterministic text on any mismatch or when Ollama is unavailable. Reads local git log and memory only; `--ai` stays on loopback.
+- **`rocky journal "<note>"`.** Appends one line to a local dogfood journal. Local file write only, no network.
+- **`rocky invariants`.** Lists remembered invariant notes parsed from `.rocky/invariants.md` and reports which guard globs match zero files in the current tree, so a stale guard doesn't silently protect nothing. Malformed blocks are never silently dropped.
+- **Extended `rocky stats`.** Per-kind record counts, memory age, and journal entry count join the existing totals and coverage summary.
+- **Schema envelope documentation.** `docs/schema.md` documents the record envelope discriminated by `kind`, including reserved `rationale` and `guard` kinds for writers that don't exist yet.
+
+### Not in this release
+
+- The reserved `rationale` kind has no writer yet — decided during design, tracked for a later release.
+- No recall-hit or guard-trigger counter in `rocky stats` yet: no evidence for either is recorded today (journal covers "Rocky helped" moments manually), so the per-kind block will pick both up automatically once a writer exists.
+- `scripts/release-check.mjs`'s `RELEASE_TAG`/`RELEASE_COMMIT` still point at v0.5.5. They are re-pinned to v0.6.0 in a separate commit once the tag exists, so this branch's own CI does not go red before the tag is cut.
+
 ## 0.5.5 — 18 August 2026
 
 Release: [v0.5.5](https://github.com/poggufanz/rocky/releases/tag/v0.5.5)

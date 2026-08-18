@@ -1074,7 +1074,7 @@ export interface PossibleFix {
  * changes no `stats` number. Newest first, tie-broken by `linkBasisRank`
  * (lower/stronger wins), capped at 3.
  *
- * NOTE for v0.6.0 (`rocky brief`, roadmap §8b): the "failure/fix linked from
+ * NOTE for `rocky brief` (roadmap §8b): the "failure/fix linked from
  * memory within window" section of `brief` must read through this function
  * rather than `FixRecord` alone, so association-only evidence is not
  * silently dropped there either.

@@ -6,7 +6,7 @@
 [![npm](https://img.shields.io/npm/v/@poggufanz/rocky-cli?style=flat-square)](https://www.npmjs.com/package/@poggufanz/rocky-cli)
 [![MIT license](https://img.shields.io/badge/license-MIT-blue.svg?style=flat-square)](LICENSE)
 
-[Release v0.5.5](https://github.com/poggufanz/rocky/releases/tag/v0.5.5) | [Changelog](CHANGELOG.md) | [License](LICENSE) | [Security](https://github.com/poggufanz/rocky/blob/main/SECURITY.md) | [Contributing](https://github.com/poggufanz/rocky/blob/main/CONTRIBUTING.md)
+[Release v0.6.0](https://github.com/poggufanz/rocky/releases/tag/v0.6.0) | [Changelog](CHANGELOG.md) | [License](LICENSE) | [Security](https://github.com/poggufanz/rocky/blob/main/SECURITY.md) | [Contributing](https://github.com/poggufanz/rocky/blob/main/CONTRIBUTING.md)
 
 Rocky is a blind engineer who lives in your terminal. He remembers failed commands and what fixed them, then brings that history back when the same trouble returns. Supported agent hooks can also keep a bounded record of what you asked for, which files changed, and why the agent said it changed them.
 
@@ -22,7 +22,7 @@ npm install -g @poggufanz/rocky-cli
 
 Requires Node.js 18 or newer. The package name is `@poggufanz/rocky-cli`; the unrelated unscoped `rocky-cli` package is not this project.
 
-Current release: `@poggufanz/rocky-cli@0.5.5`. See the [release notes](https://github.com/poggufanz/rocky/releases/tag/v0.5.5) or the full [changelog](CHANGELOG.md).
+Current release: `@poggufanz/rocky-cli@0.6.0`. See the [release notes](https://github.com/poggufanz/rocky/releases/tag/v0.6.0) or the full [changelog](CHANGELOG.md).
 
 ## Quick start
 
@@ -141,7 +141,8 @@ Read the [contributing guide](https://github.com/poggufanz/rocky/blob/main/CONTR
 - **v0.2.1 - distribution bridge (historical)**: scoped npm package, Bash/WSL hook, read-only MCP, host setup, and optional local AI.
 - **v0.3 - his patience (implemented)**: `rocky watch` for long-running work.
 - **v0.4 - his diligence (implemented)**: `rocky check` before a push.
-- **v0.5 - his curiosity (current release)**: Nervous System hooks, intent-mechanism dictionary, teaching commands, and bounded MCP knowledge tools.
+- **v0.5 - his curiosity (implemented)**: Nervous System hooks, intent-mechanism dictionary, teaching commands, and bounded MCP knowledge tools.
+- **v0.6 - his accountability (current release)**: `rocky brief`, `rocky journal`, `rocky invariants`, extended `rocky stats`, and the schema envelope documentation.
 
 BYOK annotation, `brief`, `attest`, and the memory circuit breaker remain deferred. The earlier `rocky explain` idea is superseded and is not an active command.
 
