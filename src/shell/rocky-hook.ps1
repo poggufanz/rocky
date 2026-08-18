@@ -152,19 +152,47 @@ function global:__rockySanitizeSpeechText([string]$text) {
 # real Windows PowerShell 5.1 host) that when stderr is redirected/piped
 # rather than a live console handle, the default OutputEncoding is the
 # system codepage, not UTF-8, corrupting the same non-ASCII content a second
-# time on the way OUT. Only set when there is actually something non-empty
-# to say (most prompt cycles say nothing), and only when it is not already
-# UTF-8 -- changing OutputEncoding on Windows calls SetConsoleOutputCP under
-# the hood, a real console-wide side effect not worth paying on every idle
-# prompt draw. Wrapped defensively: a restricted or unusual host can throw
-# setting this, and that must never become a terminating error either.
-function global:__rockyEnsureUtf8ConsoleOutput() {
+# time on the way OUT. Only changed when there is actually something
+# non-empty to say (most prompt cycles say nothing), and only when it is not
+# already UTF-8 -- changing OutputEncoding on Windows calls
+# SetConsoleOutputCP under the hood, a real console-wide effect not worth
+# paying on every idle prompt draw.
+#
+# Save/set/write/restore, not set/leave (task-a review round 3): every other
+# process-global mutation in this file is scrupulously undone --
+# ROCKY_HOOK_SPEECH_FILE is set/restored around every Start-Process call,
+# just above -- and OutputEncoding is no different in kind: SetConsoleOutputCP
+# is console-wide, not per-stream, so leaving it changed would alter every
+# OTHER program's subsequent output to that same console for the rest of the
+# session, directly contradicting install's own "I touch nothing" promise.
+# Verified empirically (same real Windows PowerShell 5.1 host, task-a-report
+# round 3): restoring immediately after the write does not corrupt the
+# bytes just written -- [Console]::Error.Write is synchronous, so by the
+# time OutputEncoding changes back, this call's own bytes are already fully
+# encoded and out. The restore itself is best-effort (wrapped separately, in
+# `finally`): a failure restoring must never mask a write that already
+# succeeded, and must never become a terminating error either.
+function global:__rockyWriteSpeechToConsole([string]$text) {
+    $previousEncoding = $null
+    $changed = $false
     try {
-        if ([Console]::OutputEncoding.CodePage -ne [System.Text.Encoding]::UTF8.CodePage) {
+        $previousEncoding = [Console]::OutputEncoding
+        if ($previousEncoding.CodePage -ne [System.Text.Encoding]::UTF8.CodePage) {
             [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+            $changed = $true
         }
     } catch {
-        # best effort -- a failure here must not block speech from printing
+        # best effort -- if reading/setting the encoding fails, still try the
+        # write below rather than silently dropping the whole message
+    }
+    try {
+        [Console]::Error.Write($text)
+    } catch {
+        # a broken write must never reach the user as a terminating error
+    } finally {
+        if ($changed) {
+            try { [Console]::OutputEncoding = $previousEncoding } catch { }
+        }
     }
 }
 
@@ -333,7 +361,19 @@ function global:prompt {
                 # fragment from a write interrupted mid-flight (process
                 # killed) matched nothing before and was never pruned.
                 # Finding 1's staleness cutoff below prunes those too.
-                $__rockyStaleCutoff = [DateTime]::UtcNow.AddHours(-24)
+                #
+                # 10 minutes, not 24 hours (task-a review round 3): the
+                # cutoff carries zero safety weight either way -- Finding 1's
+                # allowlist check above is what actually prevents
+                # misattribution, unconditionally, regardless of any file's
+                # age. This threshold only trades off litter lifetime against
+                # the odds of pruning a message before its own idle-but-live
+                # originating session gets back to it. Real writes finish in
+                # well under a second (Finding 5, fix round 2), so 10 minutes
+                # is already generous margin for that -- and orders of
+                # magnitude shorter than 24 hours for everything else, which
+                # is the litter this cutoff exists to bound.
+                $__rockyStaleCutoff = [DateTime]::UtcNow.AddMinutes(-10)
                 $__rockySpeechEntries = Get-ChildItem -LiteralPath $__rockySpeechDir -File -ErrorAction SilentlyContinue
                 foreach ($__rockySpeechEntry in $__rockySpeechEntries) {
                     if ($__rockySpeechEntry.Name -in $global:__rockySpeechIds) {
@@ -357,8 +397,7 @@ function global:prompt {
                             # for the write-time pass.
                             $__rockySpeechText = __rockySanitizeSpeechText $__rockySpeechText
                             if ($__rockySpeechText) {
-                                __rockyEnsureUtf8ConsoleOutput
-                                [Console]::Error.Write($__rockySpeechText)
+                                __rockyWriteSpeechToConsole $__rockySpeechText
                             }
                         } catch {
                             # unreadable/vanished between listing and reading -- skip, never fatal

@@ -104,9 +104,24 @@ function writeSpeechFixture(speechDir: string, name: string, text: string): stri
   return filePath;
 }
 
-function ageFile(filePath: string, hoursAgo: number): void {
-  const old = new Date(Date.now() - hoursAgo * 60 * 60 * 1000);
+/** Backdates a fixture's mtime, relative to the shipped 10-minute stale cutoff (rocky-hook.ps1). */
+function ageFile(filePath: string, minutesAgo: number): void {
+  const old = new Date(Date.now() - minutesAgo * 60 * 1000);
   utimesSync(filePath, old, old);
+}
+
+interface PromptRunResult {
+  stdout: string;
+  stderr: string;
+  status: number | null;
+  /** [Console]::OutputEncoding.CodePage immediately before/after the `prompt` call, per the sentinel lines every driver script prints (task-a review round 3, Item 1: proves the restore is symmetric, not just that output looked fine). */
+  outputEncodingCodePageBefore: number | undefined;
+  outputEncodingCodePageAfter: number | undefined;
+}
+
+function parseSentinel(stdout: string, name: string): number | undefined {
+  const match = new RegExp(`${name}=(\\d+)`).exec(stdout);
+  return match ? Number(match[1]) : undefined;
 }
 
 /**
@@ -117,14 +132,21 @@ function ageFile(filePath: string, hoursAgo: number): void {
  * (the next prompt string itself, irrelevant here) so only `prompt`'s own
  * stderr side effect is meaningful. `-NonInteractive` plus no stdin content
  * needed: nothing here ever reads input.
+ *
+ * Always sentinels `[Console]::OutputEncoding.CodePage` to stdout before and
+ * after the `prompt` call (task-a review round 3): cheap, and no existing
+ * test reads `stdout`, so this is free coverage for whichever test does
+ * care whether `__rockyWriteSpeechToConsole`'s restore actually happened.
  */
-function runPromptOnce(exe: string, rockyHome: string, setupLines: string[]): { stdout: string; stderr: string; status: number | null } {
+function runPromptOnce(exe: string, rockyHome: string, setupLines: string[]): PromptRunResult {
   const scriptPath = join(rockyHome, "..", "driver.ps1");
   const script = [
     `$env:ROCKY_HOME = '${rockyHome.replace(/'/g, "''")}'`,
     `. '${hookScriptPath.replace(/'/g, "''")}'`,
     ...setupLines,
+    "Write-Output \"ROCKY_TEST_ENCODING_BEFORE=$([Console]::OutputEncoding.CodePage)\"",
     "prompt | Out-Null",
+    "Write-Output \"ROCKY_TEST_ENCODING_AFTER=$([Console]::OutputEncoding.CodePage)\"",
   ].join("\n");
   writeFileSync(scriptPath, script, "utf8");
   const result = spawnSync(exe, ["-NoProfile", "-NonInteractive", "-File", scriptPath], {
@@ -132,7 +154,14 @@ function runPromptOnce(exe: string, rockyHome: string, setupLines: string[]): { 
     windowsHide: true,
     timeout: 20_000,
   });
-  return { stdout: result.stdout ?? "", stderr: result.stderr ?? "", status: result.status };
+  const stdout = result.stdout ?? "";
+  return {
+    stdout,
+    stderr: result.stderr ?? "",
+    status: result.status,
+    outputEncodingCodePageBefore: parseSentinel(stdout, "ROCKY_TEST_ENCODING_BEFORE"),
+    outputEncodingCodePageAfter: parseSentinel(stdout, "ROCKY_TEST_ENCODING_AFTER"),
+  };
 }
 
 /** `$global:__rockySpeechIds += 'name.txt'`, one line per claimed name. */
@@ -151,10 +180,10 @@ function sessionAffinitySanitizeAndPruneSmoke(t: TestContext, exe: string): void
 
   const foreignRecent = writeSpeechFixture(sandbox.speechDir, "foreign-recent.txt", "[Rocky] foreign recent message, question\n");
   const foreignStale = writeSpeechFixture(sandbox.speechDir, "foreign-stale.txt", "[Rocky] foreign stale message, question\n");
-  ageFile(foreignStale, 48);
+  ageFile(foreignStale, 60); // 1 hour: 6x the shipped 10-minute cutoff, unambiguously stale
 
   const staleTmp = writeSpeechFixture(sandbox.speechDir, "orphan.txt.9999.tmp", "half-written fragment, never completed");
-  ageFile(staleTmp, 48);
+  ageFile(staleTmp, 60);
   const recentTmp = writeSpeechFixture(sandbox.speechDir, "inflight.txt.1234.tmp", "still being written");
 
   const result = runPromptOnce(exe, sandbox.rockyHome, claimLines(["owned.txt", "owned-malicious.txt"]));
@@ -203,7 +232,7 @@ test(
   },
 );
 
-// --- Finding 3: Windows PowerShell 5.1 UTF-8-no-BOM read ------------------
+// --- Finding 3: Windows PowerShell 5.1 UTF-8-no-BOM read/write ------------
 
 function nonAsciiRoundTripSmoke(t: TestContext, exe: string): void {
   const sandbox = speechSandbox(t, "rocky-hook-speech-encoding-");
@@ -218,6 +247,20 @@ function nonAsciiRoundTripSmoke(t: TestContext, exe: string): void {
     `non-ASCII content must round-trip intact, not as mojibake (Finding 3, verified corrupt on a real 5.1 host without -Encoding UTF8); got: ${JSON.stringify(result.stderr)}`,
   );
   assert.equal(existsSync(join(sandbox.speechDir, "nonascii.txt")), false, "claimed file must still be drained normally");
+
+  // Item 1 (task-a review round 3): __rockyWriteSpeechToConsole must restore
+  // [Console]::OutputEncoding symmetrically, the same discipline
+  // ROCKY_HOOK_SPEECH_FILE already gets around every Start-Process call --
+  // this is the proof, not just an assumption, that the restore (a) happens
+  // and (b) does not corrupt the message this exact call already printed
+  // (the stderr assertion above ran against output produced *after* the
+  // restore already fired, inside this same process).
+  assert.notEqual(result.outputEncodingCodePageBefore, undefined, "the before-sentinel must have been captured");
+  assert.equal(
+    result.outputEncodingCodePageAfter,
+    result.outputEncodingCodePageBefore,
+    `OutputEncoding must be restored to its pre-call value, not left as UTF-8 for the rest of the session; before=${result.outputEncodingCodePageBefore} after=${result.outputEncodingCodePageAfter}`,
+  );
 }
 
 test(
