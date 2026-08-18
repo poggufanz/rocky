@@ -11,6 +11,11 @@ export interface InvariantParseResult {
 
 const REGEX_SPECIALS = new Set(["\\", "^", "$", ".", "|", "+", "(", ")", "[", "]", "{", "}"]);
 
+/**
+ * Deliberately minimal glob semantics: case-sensitive; `*` and `?` never
+ * cross `/` and match leading dots; `**` followed by `/` is zero-or-more
+ * segments; a mid-segment `**` (e.g. `a**b`) widens to `.*`; no braces.
+ */
 export function globToRegExp(pattern: string): RegExp {
   const normalized = pattern.replace(/\\/g, "/").replace(/^\.\//, "");
   let source = "^";
@@ -59,19 +64,19 @@ export function parseInvariants(text: string): InvariantParseResult {
   };
   for (const rawLine of text.split("\n")) {
     const line = rawLine.trim();
-    const invariantMatch = /^Invariant:\s*(.+)$/.exec(line);
+    const invariantMatch = /^Invariant:\s*(.*)$/.exec(line);
     if (invariantMatch !== null) {
       flush();
       current = { invariant: invariantMatch[1].trim(), guardedBy: [] };
       continue;
     }
     if (current === undefined) continue;
-    const guardedMatch = /^Guarded by:\s*(.+)$/.exec(line);
+    const guardedMatch = /^Guarded by:\s*(.*)$/.exec(line);
     if (guardedMatch !== null) {
-      current.guardedBy = guardedMatch[1]
+      current.guardedBy.push(...guardedMatch[1]
         .split(",")
         .map((part) => part.trim())
-        .filter((part) => part.length > 0);
+        .filter((part) => part.length > 0));
       continue;
     }
     const whyMatch = /^Why:\s*(.+)$/.exec(line);
