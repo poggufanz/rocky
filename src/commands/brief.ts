@@ -4,7 +4,7 @@ import { composeBrief, parseGitLog, type BriefInvariantTouch, type BriefMemoryHi
 import { FALLBACK_WINDOW_MS, parseSinceDuration, readState, writeState } from "../core/brief-state.js";
 import { matchesGlob, parseInvariants } from "../core/invariants.js";
 import { recordBriefRun, recordInvariantTouch } from "../core/memory.js";
-import { loadMemoryChecked } from "../core/memory-read.js";
+import { canonicalPath, loadMemoryChecked } from "../core/memory-read.js";
 import { runGit } from "../core/exec.js";
 import { CliUsageError, reportCliUsage } from "./cli-args.js";
 import { detail, say } from "../ui/rocky.js";
@@ -90,14 +90,22 @@ export async function briefCommand(argv: readonly string[] = [], cwd = process.c
   const commits = parseGitLog(log.stdout);
   const changedPaths = [...new Set(commits.flatMap((commit) => commit.files.map((file) => file.path)))];
 
-  // Memory hits: failures and fixes in window, from this repo.
+  // Memory hits: failures and fixes in window, from this repo. Both sides go
+  // through canonicalPath so a POSIX-style git toplevel (forward slashes)
+  // still matches process.cwd()-derived record.cwd (native separators on
+  // Windows), and the prefix check is separator-bounded so a sibling repo
+  // whose name merely starts with this root's name cannot match.
+  const normalizedRoot = canonicalPath(root);
   let memoryHits: BriefMemoryHit[] = [];
   try {
     const loaded = loadMemoryChecked();
     memoryHits = loaded.records
       .filter((record): record is typeof record & { kind: "failure" | "fix" } =>
         (record.kind === "failure" || record.kind === "fix") && record.ts >= window.sinceTs && record.ts <= now)
-      .filter((record) => record.cwd === root || record.cwd.startsWith(root))
+      .filter((record) => {
+        const normalizedCwd = canonicalPath(record.cwd);
+        return normalizedCwd === normalizedRoot || normalizedCwd.startsWith(`${normalizedRoot}/`);
+      })
       .map((record) => ({
         kind: record.kind,
         ts: record.ts,
