@@ -1,3 +1,9 @@
+/**
+ * Rocky's dogfood journal: user-authored one-line notes in journal.jsonl.
+ * Separate from memory.jsonl and deliberately without the transaction/lock
+ * machinery — single-user append-only log, small atomic appends.
+ */
+
 import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { dirname } from "node:path";
@@ -30,8 +36,8 @@ export function appendJournal(note: string, path = resolveRockyPaths().journal, 
   const normalized = normalizeJournalNote(note);
   if (normalized.length === 0) throw new Error("journal note is empty after normalization");
   const record: JournalRecord = { v: 1, kind: "journal", id: randomUUID(), ts: now, note: normalized };
-  mkdirSync(dirname(path), { recursive: true });
-  appendFileSync(path, `${JSON.stringify(record)}\n`, "utf8");
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  appendFileSync(path, `${JSON.stringify(record)}\n`, { encoding: "utf8", mode: 0o600 });
   return record;
 }
 

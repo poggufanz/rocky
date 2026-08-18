@@ -48,3 +48,14 @@ test("readJournal skips malformed lines without dying and reports missing file a
   assert.equal(loaded.records.length, 1);
   assert.equal(loaded.skipped, 2);
 });
+
+test("appendJournal appends, never overwrites, preserving order", () => {
+  const dir = mkdtempSync(join(tmpdir(), "rocky-journal-"));
+  const path = join(dir, "journal.jsonl");
+  appendJournal("first note", path, 1_800_000_000_000);
+  appendJournal("second note", path, 1_800_000_000_001);
+  const loaded = readJournal(path);
+  assert.equal(loaded.records.length, 2);
+  assert.equal(loaded.records[0].note, "first note");
+  assert.equal(loaded.records[1].note, "second note");
+});
