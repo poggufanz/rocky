@@ -22,6 +22,7 @@ import { setup } from "./commands/setup.js";
 import { check } from "./commands/check.js";
 import { digest, exportCommand, how, quiz, what, why } from "./commands/dictionary.js";
 import { agentEvent } from "./commands/agent-hook.js";
+import { journalCommand } from "./commands/journal.js";
 import { annotateCommand } from "./agent/annotate.js";
 import { ambiguityCommand } from "./agent/ambiguity.js";
 import { CliUsageError, parseExactCommand, reportCliUsage } from "./commands/cli-args.js";
@@ -64,6 +65,7 @@ usage:
                             probe an installed Ollama model, then enable local AI.
   rocky model off            disable Rocky local AI. Ollama stays untouched.
   rocky stats               what Rocky holds in memory.
+  rocky journal "<note>"    write one line dogfood note. local file only.
   rocky mcp                 serve read-only memory tools over stdio.
   rocky setup               configure detected MCP hosts with sanitized exposure.
   rocky setup --check       verify owned host registrations and Rocky MCP tools.
@@ -134,6 +136,8 @@ async function main(): Promise<number> {
         return model(rest);
       case "stats":
         return stats(rest);
+      case "journal":
+        return journalCommand(rest);
       case "mcp":
         return mcp(rest);
       case "setup":
