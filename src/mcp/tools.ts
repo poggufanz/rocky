@@ -1351,9 +1351,14 @@ export function createToolRegistry(options: CreateToolRegistryOptions): McpToolR
       };
     }
   };
-  const statsFromDurableSnapshot = (snapshot: DurableMemorySnapshot | undefined, input: StatsQuery): StatsFlightResult => snapshot === undefined
-    ? { stats: {}, coverage: unknownMemoryCoverage(), error: new ToolExecutionError("memory_unavailable", "memory unavailable") }
-    : { stats: queryStats(snapshot.records, input) as unknown as Record<string, unknown>, coverage: snapshot.coverage };
+  const statsFromDurableSnapshot = (snapshot: DurableMemorySnapshot | undefined, input: StatsQuery): StatsFlightResult => {
+    if (snapshot === undefined) {
+      return { stats: {}, coverage: unknownMemoryCoverage(), error: new ToolExecutionError("memory_unavailable", "memory unavailable") };
+    }
+    // byKind stays CLI-only for now; the MCP surface keeps its v0.5 field set.
+    const { byKind: _byKind, ...stats } = queryStats(snapshot.records, input);
+    return { stats, coverage: snapshot.coverage };
+  };
   const readStatsFlight = (input: StatsQuery, canonicalMemory: boolean): Promise<StatsFlightResult> => {
     if (!hasDurableMemoryQueries(options.memory)) return Promise.resolve(readStatsSnapshot(input, canonicalMemory));
     const current = durableSnapshotFlight;

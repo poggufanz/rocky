@@ -396,6 +396,7 @@ async function concurrentSuccesses(t: TestContext, count: number): Promise<void>
   assert.deepEqual(queryStats(records), {
     failures: 1, fixEvents: 1, resolved: 1, unresolved: 0,
     confirmedFixes: 1, possibleFixes: 0, triples: 0, notes: 0, total: 2,
+    byKind: { failure: 1, fix: 1 },
   });
   assert.equal(existsSync(join(home, "pending")), false);
   assert.equal(existsSync(`${join(home, "memory.jsonl")}.triple.lock`), false);
