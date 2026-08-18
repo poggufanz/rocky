@@ -279,10 +279,18 @@ function knowledgeFailureKey(record: FailureRecord, migration: FingerprintMigrat
 }
 
 /**
- * Return semantic retrieval evidence for one failure. A legacy excerpt is
+ * Return semantic retrieval evidence for one failure. A v2 excerpt is
+ * admitted unconditionally (finding 3): it was normalized/masked by the
+ * current writer at record time exactly like `signature`, so it already
+ * carries the same trust -- a `SIGNAL`-regex miss (e.g. an npm "No matching
+ * version found for left-pad@^99.0.0" line) must not make the package name
+ * unfindable just because it never made it into the bounded `signature`
+ * lines. A legacy (v1/absent) excerpt stays gated behind proof: it is
  * admitted only after the persisted v1 signature independently hashes to the
- * stored fingerprint; this makes raw numeric values searchable without
- * granting the excerpt any exact recurrence or migration authority.
+ * stored fingerprint, since an inherited excerpt cannot otherwise be trusted
+ * not to be newer, lossy, or forged relative to that hash. Hook-origin
+ * records have no stderr at all, so their excerpt (`exit N`) is never
+ * evidence either way.
  */
 export function retrievalEvidenceTokens(record: FailureRecord): Set<string> {
   const evidence = retrievalTokens(`${record.cmd} ${record.signature.join(" ")}`);
@@ -296,9 +304,12 @@ export function retrievalEvidenceTokens(record: FailureRecord): Set<string> {
   // findable by the distinctive part of the command instead of only by
   // program name.
   fillRawCommandTokens(record.cmd, evidence);
-  if (record.fingerprintV === 2 || record.origin === "hook" || record.signature.length === 0 || record.excerpt.length === 0) {
+  if (record.origin === "hook" || record.excerpt.length === 0) return evidence;
+  if (record.fingerprintV === 2) {
+    for (const token of retrievalTokens(record.excerpt)) evidence.add(token);
     return evidence;
   }
+  if (record.signature.length === 0) return evidence;
   const signature = record.signature.join("\n");
   const proven = legacyFingerprintSignature(record.signature, record.cmd, record.exitCode) === record.fingerprint ||
     legacyFingerprint(signature, record.cmd, record.exitCode) === record.fingerprint ||
@@ -308,21 +319,27 @@ export function retrievalEvidenceTokens(record: FailureRecord): Set<string> {
   return evidence;
 }
 
-/** Reuse one caller-owned token bag during bounded scans. */
+/**
+ * Reuse one caller-owned token bag during bounded scans. Kept in exact
+ * lockstep with `retrievalEvidenceTokens` above -- same v2-unconditional /
+ * legacy-proven-only excerpt admission -- so recall's scoring loop and the
+ * allocating public helper never diverge in what counts as evidence.
+ */
 function fillRetrievalEvidenceTokens(record: FailureRecord, target: Set<string>): void {
   fillRetrievalTokens(`${record.cmd} ${record.signature.join(" ")}`, target);
-  // See retrievalEvidenceTokens above: same additive raw-command layer, kept
-  // in sync with the bounded-scan variant so recall's scoring loop and the
-  // allocating public helper never diverge in what counts as evidence.
   fillRawCommandTokens(record.cmd, target);
-  if (record.fingerprintV === 2 || record.origin === "hook" || record.signature.length === 0 || record.excerpt.length === 0) return;
+  if (record.origin === "hook" || record.excerpt.length === 0) return;
+  if (record.fingerprintV === 2) {
+    for (const token of retrievalTokens(record.excerpt)) target.add(token);
+    return;
+  }
+  if (record.signature.length === 0) return;
   const signature = record.signature.join("\n");
   const proven = legacyFingerprintSignature(record.signature, record.cmd, record.exitCode) === record.fingerprint ||
     legacyFingerprint(signature, record.cmd, record.exitCode) === record.fingerprint ||
     legacyFingerprint(record.excerpt, record.cmd, record.exitCode) === record.fingerprint;
   if (!proven) return;
-  const excerptTokens = retrievalTokens(record.excerpt);
-  for (const token of excerptTokens) target.add(token);
+  for (const token of retrievalTokens(record.excerpt)) target.add(token);
 }
 
 export function findByFingerprint(records: readonly MemoryRecord[], fp: FingerprintLookup, now = Date.now()): FailureRecord[] {
@@ -417,15 +434,34 @@ export function queryRecall(records: readonly MemoryRecord[], input: RecallQuery
   const candidates = unique
     .filter((record): record is FailureRecord => record.kind === "failure" && isOperationalMemoryRecord(record, now) &&
       (input.cwd === undefined || record.cwd === input.cwd));
+  // Moved ahead of the frequency pass below (finding 1): every candidate's
+  // canonical key must be available while scoring token frequency, not only
+  // afterward while deduplicating hits.
+  const migration = fingerprintMigrationIndex(candidates);
   // Do not retain one Set per failure. A 50k snapshot used to keep tens of
   // thousands of token hash tables alive for the whole query, pushing cold
   // recall well beyond the supported RSS envelope. Recompute one bounded set
   // while scoring after the compact frequency pass.
-  const documentFrequency = new Map<string, number>();
+  //
+  // Finding 1: count each token's document frequency once per *canonical
+  // fingerprint*, not once per record. Two identical failures (the same
+  // error recurring -- Rocky's core use case) used to double-count a
+  // distinctive token like `enospc`, pushing it past the rare-token floor
+  // (`rareFrequency`, as low as 1 for small memories) and collapsing the
+  // score to plain Jaccard, below the 0.05 visibility cutoff -- the bug hit
+  // hardest exactly when a user most needs it: right after an error recurs.
+  // The value is a `Set` of canonical keys rather than a count so frequency
+  // means the number of *distinct* recurring failures a token appears in;
+  // like the count it replaces, it stays tiny because it is only populated
+  // for tokens that intersect the query.
+  const documentFrequency = new Map<string, Set<string>>();
   const scratchTokens = new Set<string>();
   const candidateSizes = new Uint32Array(candidates.length);
   const candidateIntersections = new Uint32Array(candidates.length);
   const candidateMasks = new Int32Array(candidates.length);
+  // Canonical key per candidate, computed once here and reused by the second
+  // pass below instead of calling `canonicalFingerprint` a second time.
+  const candidateKeys = new Array<string>(candidates.length);
   // The common short-query path needs no overflow list at all. Keep the
   // long-query witness only when query tokens exceed the inline bit mask.
   const candidateMatches: Array<readonly number[] | undefined> | undefined = queryTokenList.length > 31
@@ -433,6 +469,8 @@ export function queryRecall(records: readonly MemoryRecord[], input: RecallQuery
     : undefined;
   for (let candidateIndex = 0; candidateIndex < candidates.length; candidateIndex += 1) {
     const record = candidates[candidateIndex]!;
+    const key = canonicalFingerprint(record, migration);
+    candidateKeys[candidateIndex] = key;
     let intersection = 0;
     let mask = 0;
     let matches: number[] | undefined;
@@ -444,7 +482,9 @@ export function queryRecall(records: readonly MemoryRecord[], input: RecallQuery
       intersection += 1;
       if (queryIndex < 31) mask |= 1 << queryIndex;
       else (matches ??= []).push(queryIndex);
-      documentFrequency.set(token, (documentFrequency.get(token) ?? 0) + 1);
+      const seenKeys = documentFrequency.get(token);
+      if (seenKeys === undefined) documentFrequency.set(token, new Set([key]));
+      else seenKeys.add(key);
     }
     candidateIntersections[candidateIndex] = intersection;
     candidateMasks[candidateIndex] = mask;
@@ -452,7 +492,6 @@ export function queryRecall(records: readonly MemoryRecord[], input: RecallQuery
       candidateMatches[candidateIndex] = matches === undefined || matches.length === 0 ? undefined : matches;
     }
   }
-  const migration = fingerprintMigrationIndex(candidates);
   const best = new Map<string, RecallHit>();
   // Every candidate that shares a canonical fingerprint key with a hit —
   // regardless of whether it scored high enough to become the representative
@@ -475,7 +514,7 @@ export function queryRecall(records: readonly MemoryRecord[], input: RecallQuery
     for (let queryIndex = 0; queryIndex < Math.min(31, queryTokenList.length); queryIndex += 1) {
       if ((mask & (1 << queryIndex)) === 0) continue;
       const token = queryTokenList[queryIndex]!;
-      if (distinctiveToken(token) && (documentFrequency.get(token) ?? 0) <= rareFrequency) {
+      if (distinctiveToken(token) && (documentFrequency.get(token)?.size ?? 0) <= rareFrequency) {
         rareExact = true;
         break;
       }
@@ -483,14 +522,14 @@ export function queryRecall(records: readonly MemoryRecord[], input: RecallQuery
     if (!rareExact && candidateMatches?.[candidateIndex] !== undefined) {
       for (const queryIndex of candidateMatches[candidateIndex]!) {
         const token = queryTokenList[queryIndex];
-        if (token !== undefined && distinctiveToken(token) && (documentFrequency.get(token) ?? 0) <= rareFrequency) {
+        if (token !== undefined && distinctiveToken(token) && (documentFrequency.get(token)?.size ?? 0) <= rareFrequency) {
           rareExact = true;
           break;
         }
       }
     }
     const score = rareExact ? Math.min(1, Math.max(base, 0.06)) : base;
-    const key = canonicalFingerprint(record, migration);
+    const key = candidateKeys[candidateIndex]!;
     const occurrences = occurrencesByKey.get(key);
     if (occurrences === undefined) occurrencesByKey.set(key, [record]);
     else occurrences.push(record);
@@ -614,20 +653,35 @@ export function searchKnowledge(
       fillRetrievalTokens(`${record.cmd} ${record.file} ${record.subject} ${record.answer}`, target);
     }
   };
-  const documentFrequency = new Map<string, number>();
-  const knowledgeScratch = new Set<string>();
-  for (const entry of entries) {
-    knowledgeTokens(entry.record, knowledgeScratch);
-    for (const token of knowledgeScratch) {
-      if (!queryTokenSet.has(token)) continue;
-      documentFrequency.set(token, (documentFrequency.get(token) ?? 0) + 1);
-    }
-  }
+  // Moved ahead of the frequency pass below (finding 1, same fix as
+  // `queryRecall`): a failure entry's canonical key must be available while
+  // counting document frequency, not only afterward while deduplicating
+  // failure hits.
   const migration = fingerprintMigrationIndex(
     entries
       .filter((entry): entry is { record: FailureRecord; snippet: string } => entry.record.kind === "failure")
       .map((entry) => entry.record),
   );
+  // Finding 1: count each token once per document *identity*, not once per
+  // entry. A failure's identity is its canonical fingerprint, so two records
+  // of the same recurring failure no longer inflate a distinctive token's
+  // frequency past the rare-token floor (see `queryRecall` for the full
+  // rationale). Every other kind has no recurrence concept, so its identity
+  // stays one entry per record, exactly as the old per-entry count behaved.
+  const documentFrequency = new Map<string, Set<string>>();
+  const knowledgeScratch = new Set<string>();
+  for (const entry of entries) {
+    knowledgeTokens(entry.record, knowledgeScratch);
+    const docId = entry.record.kind === "failure"
+      ? knowledgeFailureKey(entry.record, migration)
+      : `${entry.record.kind}:${entry.record.id}`;
+    for (const token of knowledgeScratch) {
+      if (!queryTokenSet.has(token)) continue;
+      const seenIds = documentFrequency.get(token);
+      if (seenIds === undefined) documentFrequency.set(token, new Set([docId]));
+      else seenIds.add(docId);
+    }
+  }
   const failureHits = new Map<string, { hit: KnowledgeSearchHit; current: boolean }>();
   for (const { record, snippet } of entries) {
     knowledgeTokens(record, knowledgeScratch);
@@ -1116,7 +1170,9 @@ function distinctiveToken(token: string): boolean {
 function semanticScore(
   queryTokens: Set<string>,
   candidateTokens: Set<string>,
-  documentFrequency: Map<string, number>,
+  // A set of document identities per token (finding 1), not a raw count --
+  // see the call site in `searchKnowledge` for what an identity is per kind.
+  documentFrequency: ReadonlyMap<string, ReadonlySet<string>>,
   candidateCount: number,
 ): number {
   const base = similarity(queryTokens, candidateTokens);
@@ -1124,7 +1180,7 @@ function semanticScore(
     ? Math.min(8, Math.max(2, Math.ceil(candidateCount * 0.05)))
     : 1;
   const rareExact = [...queryTokens].some((token) =>
-    distinctiveToken(token) && candidateTokens.has(token) && (documentFrequency.get(token) ?? 0) <= rareFrequency,
+    distinctiveToken(token) && candidateTokens.has(token) && (documentFrequency.get(token)?.size ?? 0) <= rareFrequency,
   );
   if (!rareExact) return base;
   return Math.min(1, Math.max(base, 0.06));
