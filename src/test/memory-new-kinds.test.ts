@@ -67,7 +67,64 @@ test("recordBriefRun and recordInvariantTouch round-trip through memory.jsonl", 
     assert.deepEqual(kinds, ["brief_run", "invariant_touch"]);
     assert.ok(loaded.records.some((record) => record.id === briefRun.id));
     assert.ok(loaded.records.some((record) => record.id === touch.id));
+    const reloadedBrief = loaded.records.find((record) => record.id === briefRun.id);
+    assert.ok(reloadedBrief && reloadedBrief.kind === "brief_run");
+    assert.equal(reloadedBrief.sinceTs, 1_799_000_000_000);
+    assert.equal(reloadedBrief.commits, 2);
+    assert.equal(reloadedBrief.files, 5);
+    const reloadedTouch = loaded.records.find((record) => record.id === touch.id);
+    assert.ok(reloadedTouch && reloadedTouch.kind === "invariant_touch");
+    assert.equal(reloadedTouch.invariant, "payment may commit at most once");
+    assert.equal(reloadedTouch.path, "src/retry-worker.ts");
     assert.equal(loaded.coverage.skipped, 0);
+  } finally {
+    if (previous === undefined) delete process.env.ROCKY_HOME;
+    else process.env.ROCKY_HOME = previous;
+  }
+});
+
+test("recordInvariantTouch slices fields to 512 chars and round-trips", () => {
+  const home = mkdtempSync(join(tmpdir(), "rocky-home-"));
+  const previous = process.env.ROCKY_HOME;
+  process.env.ROCKY_HOME = home;
+  try {
+    const rec = recordInvariantTouch({ invariant: "x".repeat(600), path: "y".repeat(600) });
+    assert.equal(rec.invariant.length, 512);
+    assert.equal(rec.path.length, 512);
+    const loaded = loadMemoryChecked(join(home, "memory.jsonl"));
+    assert.equal(loaded.coverage.skipped, 0);
+    assert.equal(loaded.records.length, 1);
+  } finally {
+    if (previous === undefined) delete process.env.ROCKY_HOME;
+    else process.env.ROCKY_HOME = previous;
+  }
+});
+
+test("writers reject inputs their own reader would skip", () => {
+  const home = mkdtempSync(join(tmpdir(), "rocky-home-"));
+  const previous = process.env.ROCKY_HOME;
+  process.env.ROCKY_HOME = home;
+  try {
+    assert.throws(() => recordBriefRun({ sinceTs: -1, commits: 1, files: 1 }));
+    assert.throws(() => recordBriefRun({ sinceTs: 0, commits: 1.5, files: 1 }));
+    assert.throws(() => recordInvariantTouch({ invariant: "", path: "x" }));
+    assert.throws(() => recordInvariantTouch({ invariant: "x", path: "" }));
+    const loaded = loadMemoryChecked(join(home, "memory.jsonl"));
+    assert.equal(loaded.records.length, 0);
+    assert.equal(loaded.coverage.skipped, 0);
+  } finally {
+    if (previous === undefined) delete process.env.ROCKY_HOME;
+    else process.env.ROCKY_HOME = previous;
+  }
+});
+
+test("writers default cwd to process.cwd()", () => {
+  const home = mkdtempSync(join(tmpdir(), "rocky-home-"));
+  const previous = process.env.ROCKY_HOME;
+  process.env.ROCKY_HOME = home;
+  try {
+    const rec = recordBriefRun({ sinceTs: 1, commits: 1, files: 1 });
+    assert.equal(rec.cwd, process.cwd());
   } finally {
     if (previous === undefined) delete process.env.ROCKY_HOME;
     else process.env.ROCKY_HOME = previous;

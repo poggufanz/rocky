@@ -1173,6 +1173,9 @@ export function recordNote(input: {
 }
 
 export function recordBriefRun(input: { sinceTs: number; commits: number; files: number; cwd?: string }): BriefRunRecord {
+  if (!isSafeNonNegativeInteger(input.sinceTs) || !isSafeNonNegativeInteger(input.commits) || !isSafeNonNegativeInteger(input.files)) {
+    throw new Error("Rocky brief_run evidence requires safe non-negative integers");
+  }
   const ts = Date.now();
   const rec: BriefRunRecord = {
     v: 1, kind: "brief_run", id: randomUUID(), ts, cwd: input.cwd ?? process.cwd(),
@@ -1184,9 +1187,14 @@ export function recordBriefRun(input: { sinceTs: number; commits: number; files:
 
 export function recordInvariantTouch(input: { invariant: string; path: string; cwd?: string }): InvariantTouchRecord {
   const ts = Date.now();
+  const invariant = input.invariant.slice(0, 512);
+  const path = input.path.slice(0, 512);
+  if (invariant.length === 0 || path.length === 0) {
+    throw new Error("Rocky invariant_touch evidence requires non-empty invariant and path");
+  }
   const rec: InvariantTouchRecord = {
     v: 1, kind: "invariant_touch", id: randomUUID(), ts, cwd: input.cwd ?? process.cwd(),
-    invariant: input.invariant.slice(0, 512), path: input.path.slice(0, 512),
+    invariant, path,
   };
   withMemoryTransaction((transaction) => { transaction.append(rec); }, resolveRockyPaths(), { now: ts });
   return rec;
