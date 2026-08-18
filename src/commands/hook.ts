@@ -690,15 +690,23 @@ function runBashHookStatus(): number {
 }
 
 /**
- * PowerShell hosts (Ruling 3, task-4-brief). `powershell.exe` (Windows
- * PowerShell) only exists on win32; `pwsh` (PowerShell 7) is cross-platform
- * and probed everywhere, PATH first, then the two documented Windows install
- * roots — bare `pwsh` was found, on this release's own dev machine, not to
- * resolve reliably through every spawn path even though it is on `PATH` via
- * a WindowsApps execution alias, so the fallback is not speculative.
- * `$PROFILE` is always asked from the host itself, never reconstructed —
- * this machine's own profile paths are OneDrive-redirected, which a
- * hardcoded algorithm would miss entirely.
+ * PowerShell hosts (Ruling 3, task-4-brief). `rocky-hook.ps1` is a
+ * Windows-only surface — the managed-block install story, `$PROFILE`
+ * semantics, and console codepage handling it depends on do not apply
+ * off Windows. `powershell.exe` (Windows PowerShell) only ever exists on
+ * win32, so `detectWindowsPowerShellHost` naturally returns nothing
+ * elsewhere. `pwsh` (PowerShell 7) is a cross-platform *binary*, though —
+ * ubuntu-latest and macos-latest GitHub runners ship it preinstalled — so
+ * `detectPwshHost` gates on `process.platform === "win32"` explicitly too;
+ * finding a `pwsh` executable on PATH is necessary but never sufficient to
+ * decide the hook applies. On Windows, `pwsh` is probed PATH first, then
+ * the two documented Windows install roots — bare `pwsh` was found, on
+ * this release's own dev machine, not to resolve reliably through every
+ * spawn path even though it is on `PATH` via a WindowsApps execution
+ * alias, so the fallback is not speculative. `$PROFILE` is always asked
+ * from the host itself, never reconstructed — this machine's own profile
+ * paths are OneDrive-redirected, which a hardcoded algorithm would miss
+ * entirely.
  */
 export interface PowerShellHost {
   /** "Windows PowerShell" | "PowerShell 7" — bare, for status's per-host line. */
@@ -769,6 +777,11 @@ function detectWindowsPowerShellHost(): PowerShellHost | undefined {
 }
 
 function detectPwshHost(): PowerShellHost | undefined {
+  // `pwsh` is a real binary on Linux/macOS (GitHub's ubuntu-latest and
+  // macos-latest runners ship it preinstalled), but the PowerShell hook
+  // itself is Windows-only — finding the executable does not mean the
+  // hook applies. Gate on platform before ever probing for it.
+  if (process.platform !== "win32") return undefined;
   const candidates = ["pwsh"];
   if (process.env.LOCALAPPDATA) candidates.push(join(process.env.LOCALAPPDATA, "Microsoft", "WindowsApps", "pwsh.exe"));
   if (process.env.ProgramFiles) candidates.push(join(process.env.ProgramFiles, "PowerShell", "7", "pwsh.exe"));

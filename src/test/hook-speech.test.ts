@@ -80,7 +80,14 @@ function findRealPwsh(): string | undefined {
   }
   return undefined;
 }
-const realPwsh = findRealPwsh();
+// `pwsh` is a real, spawnable binary on Linux/macOS -- GitHub's ubuntu-latest
+// and macos-latest runners ship it preinstalled -- but rocky-hook.ps1 is a
+// Windows-only surface. Finding a pwsh executable is necessary but not
+// sufficient for these real-host tests to apply, so gate on platform too.
+const realPwsh = process.platform === "win32" ? findRealPwsh() : undefined;
+const pwshSkipReason = process.platform !== "win32"
+  ? `PowerShell 7.x real-host tests are a Windows-only surface, skipped on ${process.platform} even though pwsh may be on PATH there`
+  : "PowerShell 7 (pwsh) is unavailable on this machine";
 
 interface SpeechSandbox {
   root: string;
@@ -226,7 +233,7 @@ test(
 
 test(
   "session affinity, read-time sanitization, and stale pruning all hold together, PowerShell 7.x (task-a review round 2, Findings 1/2/4)",
-  { skip: realPwsh ? false : "PowerShell 7 (pwsh) is unavailable on this machine" },
+  { skip: realPwsh ? false : pwshSkipReason },
   (t) => {
     sessionAffinitySanitizeAndPruneSmoke(t, realPwsh!);
   },
@@ -273,7 +280,7 @@ test(
 
 test(
   "non-ASCII hook speech round-trips intact through both the read (-Encoding UTF8) and write (Console.OutputEncoding) fixes, PowerShell 7.x (task-a review round 2, Finding 3 regression guard)",
-  { skip: realPwsh ? false : "PowerShell 7 (pwsh) is unavailable on this machine" },
+  { skip: realPwsh ? false : pwshSkipReason },
   (t) => {
     nonAsciiRoundTripSmoke(t, realPwsh!);
   },

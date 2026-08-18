@@ -509,7 +509,19 @@ function findRealPwsh(): string | undefined {
 
 const windowsPowerShellAvailable = process.platform === "win32"
   && !spawnSync("powershell.exe", ["-NoProfile", "-Command", "exit 0"], { windowsHide: true }).error;
-const realPwsh = findRealPwsh();
+
+// `pwsh` is a real, spawnable binary on Linux/macOS -- GitHub's ubuntu-latest
+// and macos-latest runners ship it preinstalled -- but rocky-hook.ps1 is a
+// Windows-only surface (managed-block install story, `$PROFILE` semantics,
+// console codepage handling). Finding a pwsh executable is necessary but not
+// sufficient for these real-host tests to apply, so gate on platform too, not
+// just on whether the binary resolves. Skipped here, `detectPwshHost` in
+// `src/commands/hook.ts` carries the identical platform gate so `rocky hook
+// install` cannot mistake a Linux/macOS pwsh for an installable host either.
+const realPwsh = process.platform === "win32" ? findRealPwsh() : undefined;
+const pwshSkipReason = process.platform !== "win32"
+  ? `PowerShell 7.x real-host tests are a Windows-only surface, skipped on ${process.platform} even though pwsh may be on PATH there`
+  : "PowerShell 7 (pwsh) is unavailable on this machine";
 
 test(
   "detectPowerShellHosts finds real Windows PowerShell with a sane profile and version",
@@ -523,6 +535,34 @@ test(
       assert.ok(windows, "Windows PowerShell must be detected on a machine that has it");
       assert.ok(windows!.profile.length > 0);
       assert.match(windows!.version, /^\d+\.\d+/);
+    } finally {
+      if (saved === undefined) delete process.env.ROCKY_TEST_POWERSHELL_HOSTS;
+      else process.env.ROCKY_TEST_POWERSHELL_HOSTS = saved;
+    }
+  },
+);
+
+test(
+  "detectPowerShellHosts never reports a PowerShell 7 host off Windows, even when a pwsh binary is on PATH (product bug guard)",
+  () => {
+    const saved = process.env.ROCKY_TEST_POWERSHELL_HOSTS;
+    delete process.env.ROCKY_TEST_POWERSHELL_HOSTS;
+    try {
+      const hosts = detectPowerShellHosts();
+      const pwshHost = hosts.find((h) => h.label === "PowerShell 7");
+      if (process.platform === "win32") {
+        // Not this test's concern on Windows -- the earlier real-host tests
+        // in this file already cover PowerShell 7 detection there. Only
+        // assert the invariant this test exists for: never contradict the
+        // platform gate itself.
+        return;
+      }
+      assert.equal(
+        pwshHost,
+        undefined,
+        "rocky-hook.ps1 is a Windows-only surface; a pwsh binary being reachable on " +
+          process.platform + " must never make detectPowerShellHosts() report an installable host",
+      );
     } finally {
       if (saved === undefined) delete process.env.ROCKY_TEST_POWERSHELL_HOSTS;
       else process.env.ROCKY_TEST_POWERSHELL_HOSTS = saved;
@@ -554,7 +594,7 @@ test(
 
 test(
   "rocky-hook.ps1 parses without syntax errors on real PowerShell 7.x",
-  { skip: realPwsh ? false : "PowerShell 7 (pwsh) is unavailable on this machine" },
+  { skip: realPwsh ? false : pwshSkipReason },
   () => {
     const scriptPath = join(packageRoot, ".test-dist", "shell", "rocky-hook.ps1");
     const result = parseCheck(realPwsh!, scriptPath);
@@ -780,7 +820,7 @@ test(
 
 test(
   "real interactive PowerShell 7.x preserves $?/$LASTEXITCODE and records exactly the right memory (regression guard)",
-  { skip: realPwsh ? false : "PowerShell 7 (pwsh) is unavailable on this machine" },
+  { skip: realPwsh ? false : pwshSkipReason },
   async (t) => {
     await realHostSmoke(t, realPwsh!);
   },
@@ -894,7 +934,7 @@ test(
 
 test(
   "the hook body never blocks the next prompt on a deliberately slow spawn, PowerShell 7.x (Finding 1)",
-  { skip: realPwsh ? false : "PowerShell 7 (pwsh) is unavailable on this machine" },
+  { skip: realPwsh ? false : pwshSkipReason },
   async (t) => {
     await realHostNonBlockingSmoke(t, realPwsh!);
   },
@@ -960,7 +1000,7 @@ test(
 
 test(
   "Push-Location and dot-sourcing are denylisted like bash's pushd/popd/source, PowerShell 7.x (Finding 3)",
-  { skip: realPwsh ? false : "PowerShell 7 (pwsh) is unavailable on this machine" },
+  { skip: realPwsh ? false : pwshSkipReason },
   async (t) => {
     await realHostDenylistSmoke(t, realPwsh!);
   },
@@ -1022,7 +1062,7 @@ test(
 
 test(
   "an injected internal hook-body fault never changes the user's own exit code, PowerShell 7.x (Finding 4, spec §5 test 4)",
-  { skip: realPwsh ? false : "PowerShell 7 (pwsh) is unavailable on this machine" },
+  { skip: realPwsh ? false : pwshSkipReason },
   async (t) => {
     await realHostFaultInjectionSmoke(t, realPwsh!);
   },
@@ -1117,7 +1157,7 @@ test(
 
 test(
   "two genuinely overlapping detached spawns both land their memory write, PowerShell 7.x (Finding 5)",
-  { skip: realPwsh ? false : "PowerShell 7 (pwsh) is unavailable on this machine" },
+  { skip: realPwsh ? false : pwshSkipReason },
   async (t) => {
     await realHostConcurrentSpawnSmoke(t, realPwsh!);
   },
@@ -1170,7 +1210,7 @@ test(
 
 test(
   "a real custom prompt keeps rendering after rocky-hook.ps1 wraps it on PowerShell 7.x (Ruling 1)",
-  { skip: realPwsh ? false : "PowerShell 7 (pwsh) is unavailable on this machine" },
+  { skip: realPwsh ? false : pwshSkipReason },
   async (t) => {
     await realHostCustomPromptSmoke(t, realPwsh!);
   },
@@ -1261,7 +1301,7 @@ test(
 
 test(
   "a repeat-occurrence message arrives complete through this session's own stderr, PowerShell 7.x (F2, task-a-brief)",
-  { skip: realPwsh ? false : "PowerShell 7 (pwsh) is unavailable on this machine" },
+  { skip: realPwsh ? false : pwshSkipReason },
   async (t) => {
     await realHostSpeechRoundTripSmoke(t, realPwsh!);
   },
