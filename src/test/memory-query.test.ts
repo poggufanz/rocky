@@ -188,6 +188,39 @@ test("fingerprint-based recurrence matching stays untouched by the raw-command r
   assert.deepEqual(findByFingerprint([recordA, recordB], fp).map((record) => record.id), ["recur-a", "recur-b"]);
 });
 
+// F3 round-1 review, finding 2: the 0.06 rare-token floor only protects a
+// query token whose document frequency is <= rareFrequency (as low as 2 once
+// there are >=10 candidates). A common program name ("git", "npm", a hook
+// origin's own program) recorded across many distinct hook-origin failures
+// loses that protection, so a record whose raw command contributes a lot of
+// net-new tokens (a deep/long path) can fall below the hard 0.05 visibility
+// cutoff for that common-name query -- the same "Rocky remembers it but you
+// cannot find it" failure mode F3 was meant to cure, just triggered from the
+// other side (a shallow/common query against a token-heavy record instead of
+// a distinctive query against a masked one).
+test("a common program-name query still finds a hook record with a long path among many candidates", () => {
+  const candidateCount = 12;
+  const noise: FailureRecord[] = Array.from({ length: candidateCount - 1 }, (_, index) => {
+    const cmd = "git status";
+    return {
+      kind: "failure", id: `noise-${index}`, ts: 100 + index, cwd: "/work/probe", cmd, exitCode: 1,
+      fingerprint: `noise-${index}-fp`, fingerprintV: 2,
+      signature: [normalizeLine(cmd)], excerpt: "exit 1", origin: "hook",
+    };
+  });
+  const deepCmd = "git diff -- ./src/app/features/dashboard/widgets/charts/line/series/renderer/legacy/v2/internal/utils/helpers/format/Button.tsx";
+  const target: FailureRecord = {
+    kind: "failure", id: "deep-path-target", ts: 9_999, cwd: "/work/probe", cmd: deepCmd, exitCode: 1,
+    fingerprint: "deep-path-target-fp", fingerprintV: 2,
+    signature: [normalizeLine(deepCmd)], excerpt: "exit 1", origin: "hook",
+  };
+  const hits = queryRecall([...noise, target], { query: "git", limit: candidateCount });
+  assert.ok(
+    hits.some((hit) => hit.failure.id === "deep-path-target"),
+    "a plain program-name query must still surface a record with a long path, not just short ones",
+  );
+});
+
 test("queryStats reports all remembered knowledge kinds and fix confidence", () => {
   const possible: AssociationRecord = {
     kind: "association", id: "possible-a", ts: 250, cwd: "/work/a", cmd: "npm run build",
