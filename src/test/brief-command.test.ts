@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { briefCommand, parseBriefArgs } from "../commands/brief.js";
@@ -10,7 +10,13 @@ import { readState } from "../core/brief-state.js";
 import { recordWatchFailure } from "../core/memory.js";
 
 function makeRepo(): string {
-  const dir = mkdtempSync(join(tmpdir(), "rocky-brief-"));
+  // realpathSync.native resolves symlinks/short-names in the OS temp dir
+  // (macOS /var -> /private/var; Windows 8.3 short names on CI runners) so
+  // this path stays identical to what `git rev-parse --show-toplevel`
+  // reports. Without it, path-identity comparisons that rely on both sides
+  // pointing at the same filesystem path can fail in CI even though they
+  // pass locally.
+  const dir = realpathSync.native(mkdtempSync(join(tmpdir(), "rocky-brief-")));
   const git = (...args: string[]): void => {
     execFileSync("git", ["-C", dir, ...args], { stdio: "ignore" });
   };
@@ -28,7 +34,9 @@ function makeRepo(): string {
 // timing), so the ref-window test below has a deterministic gap to seed
 // memory records into rather than racing real commit timestamps.
 function makeDatedRepo(): { dir: string; firstSha: string; firstIso: string } {
-  const dir = mkdtempSync(join(tmpdir(), "rocky-brief-since-"));
+  // See makeRepo() above: realpath the temp dir so it matches git's resolved
+  // toplevel path in CI environments with symlinked/short-named temp dirs.
+  const dir = realpathSync.native(mkdtempSync(join(tmpdir(), "rocky-brief-since-")));
   const git = (args: string[], env?: NodeJS.ProcessEnv): void => {
     execFileSync("git", ["-C", dir, ...args], { stdio: "ignore", env: env === undefined ? process.env : { ...process.env, ...env } });
   };
