@@ -362,18 +362,22 @@ function global:prompt {
                 # killed) matched nothing before and was never pruned.
                 # Finding 1's staleness cutoff below prunes those too.
                 #
-                # 10 minutes, not 24 hours (task-a review round 3): the
-                # cutoff carries zero safety weight either way -- Finding 1's
-                # allowlist check above is what actually prevents
-                # misattribution, unconditionally, regardless of any file's
-                # age. This threshold only trades off litter lifetime against
-                # the odds of pruning a message before its own idle-but-live
-                # originating session gets back to it. Real writes finish in
-                # well under a second (Finding 5, fix round 2), so 10 minutes
-                # is already generous margin for that -- and orders of
-                # magnitude shorter than 24 hours for everything else, which
-                # is the litter this cutoff exists to bound.
-                $__rockyStaleCutoff = [DateTime]::UtcNow.AddMinutes(-10)
+                # 45 minutes. The cutoff carries no SAFETY weight -- Finding
+                # 1's allowlist check above is what prevents misattribution,
+                # unconditionally, regardless of any file's age. It does carry
+                # RELIABILITY weight, and an earlier 10-minute value measured
+                # that against the wrong variable: write speed (sub-second)
+                # rather than how long a live session can sit between two
+                # prompt draws. A sibling session's prompt prunes on its own
+                # cycles, so with 10 minutes an ordinary step-away -- read the
+                # error, switch tabs, come back -- was enough for another
+                # terminal to delete a message this session had not collected
+                # yet. Losing it is silent and costs only a spoken reminder
+                # (the durable memory.jsonl record is never at risk), but it
+                # is still a loss with no benefit. 45 minutes covers a
+                # realistic idle gap and stays orders of magnitude below the
+                # original 24 hours for the litter this cutoff exists to bound.
+                $__rockyStaleCutoff = [DateTime]::UtcNow.AddMinutes(-45)
                 $__rockySpeechEntries = Get-ChildItem -LiteralPath $__rockySpeechDir -File -ErrorAction SilentlyContinue
                 foreach ($__rockySpeechEntry in $__rockySpeechEntries) {
                     if ($__rockySpeechEntry.Name -in $global:__rockySpeechIds) {
