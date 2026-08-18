@@ -26,7 +26,7 @@ import { annotateCommand } from "./agent/annotate.js";
 import { ambiguityCommand } from "./agent/ambiguity.js";
 import { CliUsageError, parseExactCommand, reportCliUsage } from "./commands/cli-args.js";
 import { PACKAGE_NAME, PACKAGE_VERSION } from "./core/package-info.js";
-import { detail, face, say } from "./ui/rocky.js";
+import { detail, face, flushHookSpeech, say } from "./ui/rocky.js";
 
 const HELP = `
 rocky — he remembers, so you don't have to.
@@ -170,9 +170,22 @@ async function main(): Promise<number> {
         throw new Error("unreachable hook request");
       }
       case "_hookfail":
-        return hookFail(rest[0] ?? "", Number(rest[1] ?? 1), rest[2] ?? process.cwd());
+        // F2 (task-a-brief): flush whatever sayTty/detailTty buffered
+        // (ui/rocky.ts) exactly once, regardless of which internal branch
+        // hookFail took or whether it threw — a dropped message is
+        // acceptable, a message that never gets published because a return
+        // site was missed is not.
+        try {
+          return hookFail(rest[0] ?? "", Number(rest[1] ?? 1), rest[2] ?? process.cwd());
+        } finally {
+          flushHookSpeech();
+        }
       case "_hooksuccess":
-        return hookSuccess(rest[0] ?? "", rest[1] ?? process.cwd());
+        try {
+          return hookSuccess(rest[0] ?? "", rest[1] ?? process.cwd());
+        } finally {
+          flushHookSpeech();
+        }
       case "_annotate":
         return annotateCommand(rest[0] ?? "");
       case "_ambiguity":

@@ -2,6 +2,33 @@
 
 Notable changes per release. Dates are the release date.
 
+## 0.5.3 — 18 August 2026
+
+Release: [v0.5.3](https://github.com/poggufanz/rocky/releases/tag/v0.5.3)
+
+A patch release: hand verification of 0.5.2 on a real Windows console, rather than through the automated suite, found three defects that the automated suite and seven prior reviews had missed. All three are fixed here.
+
+### Fixed
+
+- **`rocky hook install` failed outright on Windows PowerShell whenever `$PROFILE`'s parent directory did not exist** — the default state for anyone who never customized that profile, so the hook could not be installed at all on the primary dogfood shell. The failure message also blamed disk space or permissions, sending a user to check the wrong thing. `hook install` now creates that parent directory before writing, and a genuine write failure now gets its own message distinct from a missing directory.
+- **The detached hook child's console write could collide with your prompt or your own typing.** Because the child that speaks Rocky's line runs detached from the shell, its write to the console had no guaranteed order against the next prompt being drawn: the line could land after the prompt, get truncated mid-sentence, or interleave with text you were actively typing. The child now buffers its speech instead of writing the console directly, and `prompt` drains and prints it, correctly ordered, on the next command — one prompt cycle behind, same as before. Hardening followed: per-session ownership, so a buffered message can never resurface misattributed to an unrelated later session; sanitization on read, so another same-user process cannot inject terminal control sequences into what Rocky "says"; a real encoding fix, since Windows PowerShell 5.1 read the buffered UTF-8 file as the system ANSI codepage and corrupted non-ASCII text; a second, independent encoding fix on the write side for redirected or piped stderr; a symmetric restore of the console's output codepage, so fixing this does not leave a side effect of its own; and pruning of stale buffered files.
+- **Records the hook wrote were nearly unfindable through `rocky recall`.** Paths are masked in the stored fingerprint, and hook-origin records carry no stderr, so the searchable surface collapsed to little more than the program name — Rocky could have just spoken about a failure and `recall` would still say nothing matches the words you'd actually type. `recall` now also matches tokens pulled from the raw command text, bypassing path masking for that pass alone while still masking hex, UUIDs, digests, and timestamps, and bounding how many raw tokens a single record can contribute. This is a read-path fix only; nothing about what gets written or fingerprinted changed.
+
+### Known limitations
+
+The `recall` fix above caps raw-command tokens at 12 net-new per record, collected from the end of the command backward. Three narrower, non-regressive gaps were found during review and accepted into this release rather than chased further:
+
+- A command with two distinct paths, like `cp <source> <destination>`, can let the trailing path consume the whole token budget and starve out a distinctive fragment near the front. Neither path was findable before this fix, so this is a partial win, not a loss — but the benefit skews toward commands with the distinctive part near the end.
+- The 12-token cap counts matches, not insertions — one raw match can still contribute more than 12 net-new entries once it is split on `-`/`_`/`.`, so the ceiling is a soft bound rather than the firm one it was meant to be.
+- Raw-command tokens feed the same rareness accounting recall already uses elsewhere, which could in principle dilute another candidate's protection under the rare-token floor. This was reasoned through and not reproduced.
+
+Full detail, including how each was found, is in `docs/superpowers/validation/2026-08-18-powershell-manual-checklist-findings.md`.
+
+### Not in this release
+
+- The write side of loosening fix-link candidates — the `sequence` basis, dropping the same-base-program requirement from candidate selection, and the 5-link cap that goes with it — still is not shipped. `sequence` has been readable since 0.5.2; no version writes it yet.
+- `scripts/release-check.mjs`'s `RELEASE_TAG`/`RELEASE_COMMIT` still point at v0.5.2. They are re-pinned to v0.5.3 in a separate commit once the tag exists, so this branch's own CI does not go red before the tag is cut.
+
 ## 0.5.2 — 17 August 2026
 
 Release: [v0.5.2](https://github.com/poggufanz/rocky/releases/tag/v0.5.2)

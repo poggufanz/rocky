@@ -5,6 +5,7 @@ import {
   fingerprintSignature,
   legacyFingerprint,
   legacyFingerprintSignature,
+  fillRawCommandTokens,
   fillRetrievalTokens,
   queryTokens,
   retrievalTokens,
@@ -285,6 +286,16 @@ function knowledgeFailureKey(record: FailureRecord, migration: FingerprintMigrat
  */
 export function retrievalEvidenceTokens(record: FailureRecord): Set<string> {
   const evidence = retrievalTokens(`${record.cmd} ${record.signature.join(" ")}`);
+  // Layer in the command's literal words too. `record.cmd` is raw user text
+  // (never itself masked at write time -- only `signature`/`excerpt` are),
+  // but concatenating it with already-masked signature text above can push
+  // the combined string through the same volatile-value masking the
+  // fingerprint uses, erasing a path segment that was never volatile from
+  // the user's point of view. This is what makes a hook-origin record (no
+  // stderr, so `signature`/`excerpt` carry almost no free-form evidence)
+  // findable by the distinctive part of the command instead of only by
+  // program name.
+  fillRawCommandTokens(record.cmd, evidence);
   if (record.fingerprintV === 2 || record.origin === "hook" || record.signature.length === 0 || record.excerpt.length === 0) {
     return evidence;
   }
@@ -300,6 +311,10 @@ export function retrievalEvidenceTokens(record: FailureRecord): Set<string> {
 /** Reuse one caller-owned token bag during bounded scans. */
 function fillRetrievalEvidenceTokens(record: FailureRecord, target: Set<string>): void {
   fillRetrievalTokens(`${record.cmd} ${record.signature.join(" ")}`, target);
+  // See retrievalEvidenceTokens above: same additive raw-command layer, kept
+  // in sync with the bounded-scan variant so recall's scoring loop and the
+  // allocating public helper never diverge in what counts as evidence.
+  fillRawCommandTokens(record.cmd, target);
   if (record.fingerprintV === 2 || record.origin === "hook" || record.signature.length === 0 || record.excerpt.length === 0) return;
   const signature = record.signature.join("\n");
   const proven = legacyFingerprintSignature(record.signature, record.cmd, record.exitCode) === record.fingerprint ||

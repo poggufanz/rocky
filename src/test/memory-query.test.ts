@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import type { AssociationRecord, FailureRecord, FixRecord, MemoryRecord, NoteRecord, TripleRecord } from "../core/memory.js";
-import { fingerprint, fingerprintSignature, legacyFingerprint, signatureLines } from "../core/fingerprint.js";
+import { commandFingerprint, fingerprint, fingerprintSignature, legacyFingerprint, normalizeLine, signatureLines } from "../core/fingerprint.js";
 import { pathIdentityHash } from "../core/memory-read.js";
 import {
   LINK_WINDOW_MS,
@@ -110,6 +110,114 @@ test("queryRecall deduplicates a fingerprint family before applying limit orderi
     queryRecall([familyOne, middle, familyTwo, fix], { query: "needle", cwd: "/work/family", limit: 1 })
       .map((hit) => hit.failure.id),
     [middle.id],
+  );
+});
+
+// F3: recall must also match tokens from the raw, unmasked command text, so
+// a hook-origin record (no stderr, so signature/excerpt are nearly empty)
+// stays findable by the distinctive word a user actually typed, even though
+// the persisted signature masks the path exactly like the fingerprint does.
+test("recall finds a hook-origin record by a path word the persisted signature masks", () => {
+  const cmd = "Get-Item ./another-missing-thing";
+  const record: FailureRecord = {
+    kind: "failure", id: "ps-hook-1", ts: 100, cwd: "/work/ps", cmd, exitCode: 1,
+    fingerprint: commandFingerprint(cmd, 1), fingerprintV: 2,
+    signature: [normalizeLine(cmd)], excerpt: "exit 1", origin: "hook",
+  };
+  // Sanity check the premise: the stored signature really is path-masked.
+  assert.equal(record.signature[0], "get-item .<path>");
+  assert.deepEqual(
+    queryRecall([record], { query: "another-missing-thing" }).map((hit) => hit.failure.id),
+    ["ps-hook-1"],
+    "the distinctive path word must find the record",
+  );
+  // Searching by program name must keep working exactly as before.
+  assert.deepEqual(
+    queryRecall([record], { query: "get-item" }).map((hit) => hit.failure.id),
+    ["ps-hook-1"],
+    "program name must still find the record",
+  );
+});
+
+test("a confirmed fix still outranks a weaker no-fix candidate for the same query", () => {
+  const query = "another-missing-thing";
+  const fixedCmd = "Get-Item ./another-missing-thing";
+  const fixed: FailureRecord = {
+    kind: "failure", id: "fixed-hit", ts: 100, cwd: "/work/ps", cmd: fixedCmd, exitCode: 1,
+    fingerprint: "fixed-hit-fp", fingerprintV: 2,
+    signature: [normalizeLine(fixedCmd)], excerpt: "exit 1", origin: "hook",
+    resolvedBy: "fixed-hit-fix",
+  };
+  const fix: FixRecord = {
+    kind: "fix", id: "fixed-hit-fix", ts: 200, cwd: "/work/ps",
+    cmd: "New-Item ./another-missing-thing", failureIds: ["fixed-hit"],
+  };
+  // A long, weakly-related command: the raw-token layer adds many more
+  // tokens to its evidence than to `fixed`'s, diluting its Jaccard score.
+  const weakCmd = "cat another-missing-thing-log-archive-2024-summary-report";
+  const weak: FailureRecord = {
+    kind: "failure", id: "weak-hit", ts: 300, cwd: "/work/ps", cmd: weakCmd, exitCode: 1,
+    fingerprint: "weak-hit-fp", fingerprintV: 2,
+    signature: [normalizeLine(weakCmd)], excerpt: "exit 1", origin: "hook",
+  };
+  const hits = queryRecall([fixed, fix, weak], { query });
+  assert.deepEqual(hits.map((hit) => hit.failure.id), ["fixed-hit", "weak-hit"]);
+  assert.ok(hits[0]?.fix, "the confirmed-fix hit must carry its fix");
+  assert.ok(
+    (hits[0]?.score ?? 0) > (hits[1]?.score ?? 0),
+    "the confirmed-fix hit must still outscore the weak one, not just tie",
+  );
+});
+
+// Fingerprint masking (and everything keyed off it -- recurrence, dedup,
+// findByFingerprint) is untouched by the recall read-path change: the same
+// error shape with a different path must still hash and match identically.
+test("fingerprint-based recurrence matching stays untouched by the raw-command retrieval layer", () => {
+  const cmdA = "Get-Item ./missing-file-one";
+  const cmdB = "Get-Item ./missing-file-two";
+  const fp = commandFingerprint(cmdA, 1);
+  assert.equal(commandFingerprint(cmdB, 1), fp, "same error shape, different path, must still hash identically");
+  const recordA: FailureRecord = {
+    kind: "failure", id: "recur-a", ts: 100, cwd: "/work/recur", cmd: cmdA, exitCode: 1,
+    fingerprint: fp, fingerprintV: 2, signature: [normalizeLine(cmdA)], excerpt: "exit 1", origin: "hook",
+  };
+  const recordB: FailureRecord = {
+    kind: "failure", id: "recur-b", ts: 200, cwd: "/work/recur", cmd: cmdB, exitCode: 1,
+    fingerprint: fp, fingerprintV: 2, signature: [normalizeLine(cmdB)], excerpt: "exit 1", origin: "hook",
+  };
+  assert.deepEqual(findByFingerprint([recordA, recordB], fp).map((record) => record.id), ["recur-a", "recur-b"]);
+});
+
+// F3 round-1 review, finding 2: the 0.06 rare-token floor only protects a
+// query token whose document frequency is <= rareFrequency (as low as 2 once
+// there are >=10 candidates). A common program name ("git", "npm", a hook
+// origin's own program) recorded across many distinct hook-origin failures
+// loses that protection, so a record whose raw command contributes a lot of
+// net-new tokens (a deep/long path) can fall below the hard 0.05 visibility
+// cutoff for that common-name query -- the same "Rocky remembers it but you
+// cannot find it" failure mode F3 was meant to cure, just triggered from the
+// other side (a shallow/common query against a token-heavy record instead of
+// a distinctive query against a masked one).
+test("a common program-name query still finds a hook record with a long path among many candidates", () => {
+  const candidateCount = 12;
+  const noise: FailureRecord[] = Array.from({ length: candidateCount - 1 }, (_, index) => {
+    const cmd = "git status";
+    return {
+      kind: "failure", id: `noise-${index}`, ts: 100 + index, cwd: "/work/probe", cmd, exitCode: 1,
+      fingerprint: `noise-${index}-fp`, fingerprintV: 2,
+      signature: [normalizeLine(cmd)], excerpt: "exit 1", origin: "hook",
+    };
+  });
+  const deepCmd = "git diff -- ./src/app/features/dashboard/widgets/charts/line/series/renderer/legacy/v2/internal/utils/helpers/format/Button.tsx";
+  const target: FailureRecord = {
+    kind: "failure", id: "deep-path-target", ts: 9_999, cwd: "/work/probe", cmd: deepCmd, exitCode: 1,
+    fingerprint: "deep-path-target-fp", fingerprintV: 2,
+    signature: [normalizeLine(deepCmd)], excerpt: "exit 1", origin: "hook",
+  };
+  const hits = queryRecall([...noise, target], { query: "git", limit: candidateCount });
+  assert.ok(
+    hits.some((hit) => hit.failure.id === "deep-path-target"),
+    "a plain program-name query must still surface a record with a long path, not just short ones",
   );
 });
 

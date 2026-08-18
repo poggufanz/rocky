@@ -31,7 +31,7 @@
  */
 import test, { type TestContext } from "node:test";
 import assert from "node:assert/strict";
-import {
+import fs, {
   chmodSync,
   existsSync,
   lstatSync,
@@ -42,6 +42,7 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { spawn, spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -352,6 +353,144 @@ test("hookInstall installs bash and the PowerShell host independently, aggregati
   assert.equal(powershellHookBlockCodec.classify(readFileSync(join(root, "profile7.ps1"))), "absent");
 });
 
+// --- F1 (task-a-brief): profile's parent directory does not exist ---------
+//
+// Real machine, real bug: `Documents\WindowsPowerShell\` is not created by a
+// default Windows install -- only `Documents\PowerShell\` (PowerShell 7)
+// existed, because that host had been run at least once. bashrc never hit
+// this because bashrcPath()'s parent, $HOME, always exists; $PROFILE's own
+// parent has no such guarantee. `mkdtempSync` sandboxes elsewhere in this
+// file always create their profile's parent directory (`root` itself), so
+// none of them exercise this path -- these do, deliberately.
+
+test("PowerShell hook install creates the profile's missing parent directory, for both hosts, then uninstall leaves the same one-separator-line state an ordinary install/uninstall cycle does", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "rocky-hook-ps-missing-parent-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const home = join(root, "home");
+  mkdirSync(home, { recursive: true });
+  const profile = join(root, "Documents", "WindowsPowerShell", "Microsoft.PowerShell_profile.ps1");
+  const profile7 = join(root, "Documents", "PowerShell", "Microsoft.PowerShell_profile.ps1");
+
+  const saved = {
+    HOME: process.env.HOME,
+    USERPROFILE: process.env.USERPROFILE,
+    ROCKY_HOME: process.env.ROCKY_HOME,
+    ROCKY_TEST_POWERSHELL_HOSTS: process.env.ROCKY_TEST_POWERSHELL_HOSTS,
+  };
+  process.env.HOME = home;
+  process.env.USERPROFILE = home;
+  process.env.ROCKY_HOME = join(root, "rocky-home");
+  process.env.ROCKY_TEST_POWERSHELL_HOSTS = JSON.stringify([
+    { label: "Windows PowerShell", profile, version: "5.1.26100.9168" },
+    { label: "PowerShell 7", profile: profile7, version: "7.6.5" },
+  ]);
+  t.after(() => {
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  });
+
+  assert.equal(existsSync(dirname(profile)), false, "the default state this bug reproduces: the parent must not exist yet");
+  assert.equal(existsSync(dirname(profile7)), false);
+
+  assert.equal(hookInstall(), 0);
+  assert.equal(existsSync(dirname(profile)), true, "install must create the missing parent directory");
+  assert.equal(powershellHookBlockCodec.classify(readFileSync(profile)), "managed");
+  assert.equal(existsSync(dirname(profile7)), true);
+  assert.equal(powershellHookBlockCodec.classify(readFileSync(profile7)), "managed");
+
+  assert.equal(hookUninstall(), 0);
+  // Same byte-level contract the single-host "install then uninstall" test
+  // above pins for an absent profile: install onto nothing leaves
+  // `\n${BLOCK}`, and one remove strips the block back down to just the one
+  // separator line install added.
+  assert.deepEqual(readFileSync(profile), bytes("\n"));
+  assert.deepEqual(readFileSync(profile7), bytes("\n"));
+});
+
+const MISSING_PROFILE_FOLDER_DISCLOSURE =
+  "Windows PowerShell profile's folder does not exist. I cannot make it. I touch nothing. check permissions, then try again.";
+
+test("the missing-profile-folder disclosure follows Rocky's voice rules", () => {
+  assert.deepEqual(validateRockyPhrase(MISSING_PROFILE_FOLDER_DISCLOSURE), []);
+});
+
+test("hookInstall reports a distinct message when the profile's folder genuinely cannot be created, not the generic write-fail message", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "rocky-hook-ps-unmakeable-parent-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const home = join(root, "home");
+  mkdirSync(home, { recursive: true });
+  const missingParent = join(root, "WindowsPowerShell");
+  const profile = join(missingParent, "Microsoft.PowerShell_profile.ps1");
+
+  const saved = {
+    HOME: process.env.HOME,
+    USERPROFILE: process.env.USERPROFILE,
+    ROCKY_HOME: process.env.ROCKY_HOME,
+    ROCKY_TEST_POWERSHELL_HOSTS: process.env.ROCKY_TEST_POWERSHELL_HOSTS,
+  };
+  process.env.HOME = home;
+  process.env.USERPROFILE = home;
+  process.env.ROCKY_HOME = join(root, "rocky-home");
+  process.env.ROCKY_TEST_POWERSHELL_HOSTS = JSON.stringify([
+    { label: "Windows PowerShell", profile, version: "5.1.26100.9168" },
+  ]);
+  t.after(() => {
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  });
+
+  const chunks: string[] = [];
+  const originalWrite = process.stderr.write;
+  process.stderr.write = ((chunk: unknown, ...rest: unknown[]) => {
+    chunks.push(typeof chunk === "string" ? chunk : Buffer.from(chunk as Uint8Array).toString("utf8"));
+    const callback = rest.find((argument) => typeof argument === "function") as (() => void) | undefined;
+    callback?.();
+    return true;
+  }) as typeof process.stderr.write;
+  t.after(() => {
+    process.stderr.write = originalWrite;
+  });
+
+  // Simulates a directory creation that is genuinely impossible (e.g. a real
+  // permission denial), not merely "not yet created" -- the success path
+  // proven above. Only this one path is intercepted so every other
+  // mkdirSync this same install makes (~/.rocky and its assets) is
+  // untouched, following this file's existing lstatSync-injection pattern
+  // (hook-block.test.ts's round 7 F6 test).
+  const originalMkdirSync = fs.mkdirSync;
+  (fs as unknown as { mkdirSync: typeof fs.mkdirSync }).mkdirSync = ((
+    ...args: Parameters<typeof fs.mkdirSync>
+  ) => {
+    if (args[0] === missingParent) {
+      const error = new Error("injected EACCES on profile parent mkdir") as NodeJS.ErrnoException;
+      error.code = "EACCES";
+      throw error;
+    }
+    return originalMkdirSync(...args);
+  }) as typeof fs.mkdirSync;
+  syncBuiltinESMExports();
+  t.after(() => {
+    (fs as unknown as { mkdirSync: typeof fs.mkdirSync }).mkdirSync = originalMkdirSync;
+    syncBuiltinESMExports();
+  });
+
+  const result = hookInstall();
+
+  assert.equal(result, 1);
+  const output = chunks.join("");
+  assert.ok(output.includes(MISSING_PROFILE_FOLDER_DISCLOSURE), output);
+  assert.ok(
+    !output.includes("check disk space and permissions"),
+    "must be the distinct directory-missing message, not the generic write-fail sentence",
+  );
+  assert.equal(existsSync(profile), false, "nothing was written");
+  assert.equal(existsSync(missingParent), false, "the blocked directory was genuinely never created");
+});
+
 // --- real-host tests: spec test 6, skip cleanly when the host is absent ---
 
 function findRealPwsh(): string | undefined {
@@ -491,6 +630,58 @@ function spawnAndFeed(exe: string, rockyHome: string, shim: string, lines?: stri
   });
 }
 
+interface FeedResultWithStderr extends FeedResult {
+  stderr: string;
+}
+
+/**
+ * F2 (task-a-brief): identical to `spawnAndFeed`, except stderr is captured
+ * instead of discarded. Every other real-host test in this file discards it
+ * deliberately (Item 4's `Start-Transcript` finding notes hook-origin speech
+ * reaches the console through `\\.\CON`, not through this process's own
+ * redirected streams) -- but the F2 fix moves the actual print into
+ * `prompt`, which runs inside THIS interactive session, not a detached
+ * child, so unlike a detached child's `\\.\CON` write, its
+ * `[Console]::Error` write goes through this session's own stderr handle,
+ * the exact handle Node's `spawn` already redirects to a pipe here. This is
+ * therefore the one helper in this file that can observe Rocky's actual
+ * spoken words landing, not merely infer success from memory.jsonl.
+ */
+function spawnAndFeedCapturingStderr(exe: string, rockyHome: string, shim: string, lines: string[], intervalMs = 400): Promise<FeedResultWithStderr> {
+  return new Promise((resolve) => {
+    const child = spawn(exe, ["-NoProfile", "-NoLogo"], {
+      env: { ...process.env, ROCKY_HOME: rockyHome, ROCKY_BIN: shim },
+      stdio: ["pipe", "pipe", "pipe"],
+      windowsHide: true,
+    });
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+    child.stdout.on("data", (chunk: Buffer) => { stdout += chunk.toString("utf8"); });
+    child.stderr.on("data", (chunk: Buffer) => { stderr += chunk.toString("utf8"); });
+
+    let index = 0;
+    const feed = setInterval(() => {
+      if (index >= lines.length) { clearInterval(feed); return; }
+      child.stdin.write(`${lines[index]}\n`);
+      index += 1;
+    }, intervalMs);
+
+    const finish = (timedOut: boolean) => {
+      if (settled) return;
+      settled = true;
+      clearInterval(feed);
+      clearTimeout(watchdog);
+      if (timedOut) { try { child.kill("SIGKILL"); } catch { /* best effort */ } }
+      resolve({ stdout, stderr, timedOut });
+    };
+
+    const watchdog = setTimeout(() => finish(true), 20_000);
+    child.on("exit", () => finish(false));
+    child.on("error", () => finish(false));
+  });
+}
+
 /**
  * Fix round 1 (Finding 1) made the spawn genuinely non-blocking, which means
  * the detached `rocky` process can still be running after the interactive
@@ -604,7 +795,44 @@ test(
  * writes anything) — if the spawn were still synchronous, the interactive
  * session's wall-clock time would be dominated by that sleep; non-blocking,
  * it is not, regardless of how slow the spawned process itself is.
+ *
+ * Task-a review round 3, Item 2: the shim's sleep and the pass/fail
+ * threshold below are deliberately far apart, not close together. A prior
+ * version used a 4000ms sleep with an `elapsedMs < 4000` ceiling -- the
+ * SAME number for both, leaving zero margin between "this session's own
+ * ordinary overhead" and "a synchronous spawn would need at least the full
+ * sleep". Reproduced directly (not guessed): a synthetic sustained load of
+ * 24-36 concurrent real `powershell.exe` processes (simulating what this
+ * suite's own many concurrent real-host test files already do to each
+ * other under `node --test`'s default per-file concurrency, on a machine
+ * with active real-time AV scanning of every freshly-spawned process -- the
+ * same interference this file's own fix-round-1 history already names)
+ * pushed this exact test's own elapsed time as high as 6268ms measured, and
+ * to a median of 4952ms at the higher end tested -- comfortably past a
+ * 4000ms ceiling despite the session genuinely never blocking (`timedOut`
+ * stayed `false` and `NEXT_PROMPT_REACHED` still arrived promptly in every
+ * one of those runs; only the WHOLE session's wall-clock time, not the
+ * spawn's own blocking-ness, was what heavy unrelated system load
+ * inflated). Widening the 4000 ceiling alone would only have hidden that
+ * conflation, not fixed it -- the actual defect is that the test measured
+ * "total session wall-clock time" as a stand-in for "did the spawn block",
+ * a proxy that degrades under load the property itself never does. The fix
+ * is a large, fixed separation between the two regimes instead: a much
+ * longer sleep (so a genuinely synchronous spawn is unmistakably far over
+ * any sane ceiling) paired with a ceiling well below that sleep but still
+ * generously above the worst overhead observed above, so ordinary
+ * contention on this exact kind of machine cannot make the two regimes
+ * ambiguous again.
  */
+const SLOW_SHIM_SLEEP_MS = 12_000;
+// Comfortably above the worst non-blocking overhead measured under
+// synthetic heavy load (6268ms) with real margin to spare, and comfortably
+// below what a genuinely blocking spawn would need at minimum
+// (SLOW_SHIM_SLEEP_MS plus this same session's own ~1.6s ordinary
+// overhead) -- the two regimes stay unambiguous even under real machine
+// contention that materially exceeds anything actually reproduced above.
+const NON_BLOCKING_CEILING_MS = 9_000;
+
 async function realHostNonBlockingSmoke(t: TestContext, exe: string): Promise<void> {
   const root = mkdtempSync(join(tmpdir(), "rocky-hook-ps-nonblocking-"));
   t.after(() => safeRmSync(root));
@@ -620,7 +848,7 @@ async function realHostNonBlockingSmoke(t: TestContext, exe: string): Promise<vo
   // then proves it actually ran (and how late) by writing a marker file.
   writeFileSync(
     slowShim,
-    `Start-Sleep -Milliseconds 4000\n"ran" | Set-Content -Path "${slowMarker.replace(/\\/g, "\\\\")}"\nexit 0\n`,
+    `Start-Sleep -Milliseconds ${SLOW_SHIM_SLEEP_MS}\n"ran" | Set-Content -Path "${slowMarker.replace(/\\/g, "\\\\")}"\nexit 0\n`,
   );
 
   const before = Date.now();
@@ -635,21 +863,24 @@ async function realHostNonBlockingSmoke(t: TestContext, exe: string): Promise<vo
   assert.equal(result.timedOut, false, "the session must not hang");
   assert.match(result.stdout, /NEXT_PROMPT_REACHED/, `the next command must run without waiting on the slow spawn; got: ${result.stdout}`);
   assert.ok(
-    elapsedMs < 4000,
-    `session wall-clock time (${elapsedMs}ms) must not be dominated by the spawned process's 4000ms sleep -- a synchronous spawn would fail this`,
+    elapsedMs < NON_BLOCKING_CEILING_MS,
+    `session wall-clock time (${elapsedMs}ms) must not be dominated by the spawned process's ${SLOW_SHIM_SLEEP_MS}ms sleep -- a synchronous spawn would fail this`,
   );
   assert.equal(existsSync(slowMarker), false, "the slow shim must still be running in the background when this assertion runs");
 
   // Fix round 3: the whole property this test proves is that nothing waited
   // for the slow spawn above -- so this function's own `t.after` must not
   // become the thing that races it either. Wait for the shim's own marker
-  // (its last statement, written only after its 4000ms sleep) so the
+  // (its last statement, written only after its full sleep) so the
   // detached process has genuinely finished and released its handle on
   // `root` before teardown ever runs. This does not weaken what was already
   // proven above; it only sequences cleanup after a process this test itself
   // spawned, the same ordering discipline any of these tests would need
-  // regardless of the specific race that surfaced it.
-  const markerAppeared = await waitForMarker(slowMarker, 8_000);
+  // regardless of the specific race that surfaced it. Bounded generously
+  // past SLOW_SHIM_SLEEP_MS itself (task-a review round 3): this wait must
+  // not become a second flake of its own once the sleep grew past this
+  // constant's old, now-too-tight 8000ms bound.
+  const markerAppeared = await waitForMarker(slowMarker, SLOW_SHIM_SLEEP_MS + 10_000);
   assert.ok(markerAppeared, "the deliberately slow spawn must eventually complete on its own (not still hung)");
 }
 
@@ -942,5 +1173,96 @@ test(
   { skip: realPwsh ? false : "PowerShell 7 (pwsh) is unavailable on this machine" },
   async (t) => {
     await realHostCustomPromptSmoke(t, realPwsh!);
+  },
+);
+
+/**
+ * F2 (task-a-brief), the strongest proof this harness can offer: before this
+ * fix, a repeat-occurrence message was written by a detached child straight
+ * to `\\.\CON`, invisible to any pipe (confirmed by the findings doc's own
+ * `Start-Transcript` item and by every other real-host test in this file
+ * discarding stderr on purpose). The fix moves the actual print into
+ * `prompt`, which runs inside THIS interactive session rather than a
+ * detached child, so its `[Console]::Error` write goes through the session's
+ * own redirected stderr handle -- which `spawnAndFeedCapturingStderr` (unlike
+ * every other helper here) captures. This is therefore able to assert the
+ * literal words Rocky says, not merely that memory.jsonl or a drained
+ * directory implies success.
+ *
+ * The full match through the closing quote and the ", question" suffix,
+ * terminated by a real newline, is the no-truncation proof: the exact
+ * real-console defect this fix closes cut the equivalent line off mid-word
+ * ("run with: rocky run 'Get-Item ./this-does-not"). A regression back to
+ * the old fire-and-forget console write would fail this assertion outright
+ * (nothing would ever reach this session's own stderr at all), not just
+ * produce a shorter match.
+ */
+async function realHostSpeechRoundTripSmoke(t: TestContext, exe: string): Promise<void> {
+  const root = mkdtempSync(join(tmpdir(), "rocky-hook-ps-speech-"));
+  t.after(() => safeRmSync(root));
+  const rockyHome = join(root, "rocky-home");
+  mkdirSync(rockyHome, { recursive: true });
+  writeFileSync(
+    join(rockyHome, "rocky-hook.ps1"),
+    readFileSync(join(packageRoot, ".test-dist", "shell", "rocky-hook.ps1")),
+  );
+  const shim = join(root, "rocky-shim.ps1");
+  const entry = join(packageRoot, "dist", "index.js").replace(/'/g, "''");
+  writeFileSync(shim, `& node '${entry}' @args\nexit $LASTEXITCODE\n`);
+
+  // Extra settle cycles after the repeat failure: real margin for the
+  // detached child (mkdir/write/rename a small file, plus Node startup) to
+  // finish well before the session exits -- a real host running the whole
+  // suite already shows this class of work finishing in well under a
+  // second (Finding 5's concurrent-spawn test needed an artificial 2000ms
+  // sleep specifically to force overlap that would not otherwise happen).
+  const result = await spawnAndFeedCapturingStderr(exe, rockyHome, shim, [
+    `. "${join(rockyHome, "rocky-hook.ps1")}"`,
+    "Get-Item ./__rocky_speech_repeat__ -ErrorAction SilentlyContinue 2>$null",
+    "Get-Item ./__rocky_speech_repeat__ -ErrorAction SilentlyContinue 2>$null",
+    "echo settle-1",
+    "echo settle-2",
+    "echo settle-3",
+    "echo settle-4",
+    "exit",
+  ]);
+  assert.equal(result.timedOut, false, "the session must not hang");
+
+  const memoryPath = join(rockyHome, "memory.jsonl");
+  const records = await readMemoryRecordsSettled(memoryPath);
+  const failures = records.filter((r) => r.kind === "failure");
+  assert.ok(
+    failures.length >= 2,
+    `the repeat command must have recorded at least 2 failures (Ruling 4's first-occurrence silence must not have suppressed the second too); got: ${JSON.stringify(records)}`,
+  );
+
+  assert.match(
+    result.stderr,
+    /\[Rocky\] this error again\. deep memory need stderr\. run with: rocky run '[^\r\n]*', question\r?\n/,
+    `the repeat-occurrence message must arrive complete via this session's own stderr, never truncated, never missing; got stderr: ${JSON.stringify(result.stderr)}`,
+  );
+
+  const speechDir = join(rockyHome, "hook-speech");
+  assert.ok(
+    !existsSync(speechDir) || readdirSync(speechDir).filter((f) => f.endsWith(".txt")).length === 0,
+    `every published speech file must have been read and deleted by prompt before the session exits; leftover: ${
+      existsSync(speechDir) ? JSON.stringify(readdirSync(speechDir)) : "(absent)"
+    }`,
+  );
+}
+
+test(
+  "a repeat-occurrence message arrives complete through this session's own stderr, Windows PowerShell 5.1 (F2, task-a-brief)",
+  { skip: windowsPowerShellAvailable ? false : "Windows PowerShell is unavailable on this machine/platform" },
+  async (t) => {
+    await realHostSpeechRoundTripSmoke(t, "powershell.exe");
+  },
+);
+
+test(
+  "a repeat-occurrence message arrives complete through this session's own stderr, PowerShell 7.x (F2, task-a-brief)",
+  { skip: realPwsh ? false : "PowerShell 7 (pwsh) is unavailable on this machine" },
+  async (t) => {
+    await realHostSpeechRoundTripSmoke(t, realPwsh!);
   },
 );

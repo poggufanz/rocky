@@ -8,6 +8,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { spawn } from "node:child_process";
 import { commandFingerprint } from "../core/fingerprint.js";
 import { validateRockyPhrase } from "../ui/phrases.js";
+import { detailTty, flushHookSpeech, sayTty } from "../ui/rocky.js";
 
 const home = mkdtempSync(join(tmpdir(), "rocky-hook-"));
 process.env.ROCKY_HOME = home;
@@ -248,3 +249,111 @@ test(
     }
   },
 );
+
+// --- F2 (task-a-brief): ROCKY_HOOK_SPEECH_FILE buffer/publish path --------
+//
+// Only rocky-hook.ps1's own spawn ever sets this env var (see the extensive
+// comments in __rockySpawnDetached and prompt) -- these tests drive
+// sayTty/detailTty/flushHookSpeech directly, the same functions hookFail and
+// hookSuccess already call, so they need no PowerShell process at all. The
+// real-host round-trip (a real detached child publishing, a real `prompt`
+// reading it back) is covered separately in hook-powershell.test.ts, where a
+// pipe-based harness can at least observe filesystem state even though it
+// cannot observe console rendering.
+
+test("sayTty/detailTty buffer instead of writing the console when ROCKY_HOOK_SPEECH_FILE is set", () => {
+  const scratch = mkdtempSync(join(tmpdir(), "rocky-hook-speech-"));
+  const speechFile = join(scratch, "speech", "one.txt");
+  const saved = process.env.ROCKY_HOOK_SPEECH_FILE;
+  process.env.ROCKY_HOOK_SPEECH_FILE = speechFile;
+  try {
+    const { tty } = captureTty(() => {
+      sayTty("this error again. deep memory need stderr. run with: rocky run 'x', question");
+      detailTty("place: somewhere");
+      return undefined;
+    });
+    assert.equal(tty, "", "buffered speech must never reach the console device directly");
+    assert.equal(existsSync(speechFile), false, "nothing is published until flushHookSpeech runs");
+
+    flushHookSpeech();
+
+    assert.equal(existsSync(speechFile), true, "flushHookSpeech must publish the buffered lines");
+    const published = readFileSync(speechFile, "utf8");
+    assert.match(published, /^\[Rocky\] this error again\./);
+    assert.match(published, /\n {4}place: somewhere\n$/);
+    const leftoverTemp = fs.readdirSync(dirname(speechFile)).filter((name) => name.includes(".tmp"));
+    assert.deepEqual(leftoverTemp, [], "the temp file must be renamed away, never left behind");
+  } finally {
+    if (saved === undefined) delete process.env.ROCKY_HOOK_SPEECH_FILE;
+    else process.env.ROCKY_HOOK_SPEECH_FILE = saved;
+    rmSync(scratch, { recursive: true, force: true });
+  }
+});
+
+test("flushHookSpeech is a no-op when nothing was buffered -- no empty file, no directory created", () => {
+  const scratch = mkdtempSync(join(tmpdir(), "rocky-hook-speech-empty-"));
+  const speechFile = join(scratch, "speech", "never-created.txt");
+  const saved = process.env.ROCKY_HOOK_SPEECH_FILE;
+  process.env.ROCKY_HOOK_SPEECH_FILE = speechFile;
+  try {
+    flushHookSpeech();
+    assert.equal(existsSync(dirname(speechFile)), false, "no directory is created for a message that was never said");
+    assert.equal(existsSync(speechFile), false);
+  } finally {
+    if (saved === undefined) delete process.env.ROCKY_HOOK_SPEECH_FILE;
+    else process.env.ROCKY_HOOK_SPEECH_FILE = saved;
+    rmSync(scratch, { recursive: true, force: true });
+  }
+});
+
+test("a line spoken while ROCKY_HOOK_SPEECH_FILE was unset never resurfaces in a later flush", () => {
+  const saved = process.env.ROCKY_HOOK_SPEECH_FILE;
+  delete process.env.ROCKY_HOOK_SPEECH_FILE;
+  try {
+    // Unset: sayTty writes straight to the tty device (captured here, not
+    // buffered) -- the exact unbuffered path every other test in this file
+    // above already exercises.
+    const { tty } = captureTty(() => sayTty("should go straight to tty, not buffer"));
+    assert.match(tty, /should go straight to tty, not buffer/, "unset env var: sayTty must still write the console device directly");
+
+    const scratch = mkdtempSync(join(tmpdir(), "rocky-hook-speech-noleak-"));
+    const speechFile = join(scratch, "speech", "should-stay-absent.txt");
+    process.env.ROCKY_HOOK_SPEECH_FILE = speechFile;
+    try {
+      flushHookSpeech();
+      assert.equal(existsSync(speechFile), false, "a line spoken before the env var was ever set must not resurface in a later flush");
+    } finally {
+      rmSync(scratch, { recursive: true, force: true });
+    }
+  } finally {
+    if (saved === undefined) delete process.env.ROCKY_HOOK_SPEECH_FILE;
+    else process.env.ROCKY_HOOK_SPEECH_FILE = saved;
+  }
+});
+
+test("hookFail's speech survives end to end through the buffer/publish path exactly like the direct-write path", () => {
+  const scratch = mkdtempSync(join(tmpdir(), "rocky-hook-speech-e2e-"));
+  const speechFile = join(scratch, "speech", "hookfail.txt");
+  const isolatedHome = mkdtempSync(join(tmpdir(), "rocky-hook-speech-home-"));
+  const savedHome = process.env.ROCKY_HOME;
+  const savedSpeech = process.env.ROCKY_HOOK_SPEECH_FILE;
+  process.env.ROCKY_HOME = isolatedHome;
+  process.env.ROCKY_HOOK_SPEECH_FILE = speechFile;
+  try {
+    const speechCwd = mkdtempSync(join(tmpdir(), "rocky-hook-speech-cwd-"));
+    const { result } = captureTty(() => {
+      hookFail("speech-roundtrip-cmd", 1, speechCwd); // first occurrence: silent by design
+      return hookFail("speech-roundtrip-cmd", 1, speechCwd); // second: sayTty fires
+    });
+    assert.equal(result, 0);
+    flushHookSpeech();
+    assert.equal(existsSync(speechFile), true, "hookFail's second-occurrence speech must have been buffered and published");
+    assert.match(readFileSync(speechFile, "utf8"), /this error again/);
+  } finally {
+    if (savedHome === undefined) delete process.env.ROCKY_HOME;
+    else process.env.ROCKY_HOME = savedHome;
+    if (savedSpeech === undefined) delete process.env.ROCKY_HOOK_SPEECH_FILE;
+    else process.env.ROCKY_HOOK_SPEECH_FILE = savedSpeech;
+    rmSync(scratch, { recursive: true, force: true });
+  }
+});
