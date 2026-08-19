@@ -103,6 +103,8 @@ usage:
   rocky hook status         are the ears in, question
   rocky hook agent-event claude-code|codex
                             private fail-open agent hook endpoint; stdout is always {}.
+  rocky hook agent-event generic --rationale "<text>" [--files a.ts,b.ts]
+                            any agent says why here, one line. no vendor log needed.
 
 memory lives in ~/.rocky/memory.jsonl. no telemetry. only outside call is rocky
 check asking registry.npmjs.org whether package exists — package name only, you say
@@ -112,7 +114,59 @@ optional AI uses loopback Ollama only.
 
 type HookRequest =
   | { kind: "install" | "uninstall" | "status" }
-  | { kind: "agent-event"; adapter: "claude-code" | "codex"; argvPayload?: string };
+  | {
+    kind: "agent-event";
+    adapter: "claude-code" | "codex" | "generic";
+    argvPayload?: string;
+    rationale?: string;
+    files?: string[];
+  };
+
+interface NotifyFlags {
+  rationale?: string;
+  files?: string[];
+  /** Everything left after `--rationale`/`--files` are consumed. */
+  positionals: string[];
+}
+
+function isFlagToken(value: string | undefined): boolean {
+  return typeof value === "string" && value.startsWith("--");
+}
+
+/**
+ * Pull `--rationale <text>` and `--files a,b` out of one `agent-event`
+ * invocation's trailing args, in any order, leaving everything else as
+ * positionals (codex's optional payload). A flag with a missing or
+ * flag-shaped value is dropped, not thrown — this endpoint stays fail-open
+ * end to end, including at argument parsing.
+ */
+function parseNotifyFlags(args: readonly string[]): NotifyFlags {
+  const positionals: string[] = [];
+  let rationale: string | undefined;
+  let files: string[] | undefined;
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = args[i];
+    if (arg === "--rationale") {
+      const value = args[i + 1];
+      if (typeof value === "string" && !isFlagToken(value)) {
+        rationale = value;
+        i += 1;
+      }
+      continue;
+    }
+    if (arg === "--files") {
+      const value = args[i + 1];
+      if (typeof value === "string" && !isFlagToken(value)) {
+        const list = value.split(",").map((entry) => entry.trim()).filter((entry) => entry.length > 0);
+        if (list.length > 0) files = list;
+        i += 1;
+      }
+      continue;
+    }
+    positionals.push(arg);
+  }
+  return { ...(rationale === undefined ? {} : { rationale }), ...(files === undefined ? {} : { files }), positionals };
+}
 
 function parseHookArgs(argv: readonly string[]): HookRequest {
   const [subcommand, ...rest] = argv;
@@ -123,17 +177,30 @@ function parseHookArgs(argv: readonly string[]): HookRequest {
     return { kind: subcommand };
   }
   if (subcommand === "agent-event") {
-    const [adapter, payload] = rest;
-    if (adapter === "claude-code" && rest.length === 1) {
-      return { kind: "agent-event", adapter };
+    const [adapter, ...flagArgs] = rest;
+    if (adapter === "generic" || adapter === "claude-code") {
+      const { rationale, files, positionals } = parseNotifyFlags(flagArgs);
+      if (positionals.length === 0) {
+        return { kind: "agent-event", adapter, ...(rationale === undefined ? {} : { rationale }), ...(files === undefined ? {} : { files }) };
+      }
     }
-    if (adapter === "codex" && (rest.length === 1 || rest.length === 2)) {
-      return payload === undefined
-        ? { kind: "agent-event", adapter }
-        : { kind: "agent-event", adapter, argvPayload: payload };
+    if (adapter === "codex") {
+      const { rationale, files, positionals } = parseNotifyFlags(flagArgs);
+      if (positionals.length === 0 || positionals.length === 1) {
+        return {
+          kind: "agent-event",
+          adapter,
+          ...(positionals.length === 1 ? { argvPayload: positionals[0] } : {}),
+          ...(rationale === undefined ? {} : { rationale }),
+          ...(files === undefined ? {} : { files }),
+        };
+      }
     }
   }
-  throw new CliUsageError("hook needs one known subcommand", "rocky hook install|uninstall|status|agent-event claude-code|codex");
+  throw new CliUsageError(
+    "hook needs one known subcommand",
+    "rocky hook install|uninstall|status|agent-event claude-code|codex|generic",
+  );
 }
 
 async function main(): Promise<number> {
@@ -188,7 +255,11 @@ async function main(): Promise<number> {
             return hookStatus();
           case "agent-event":
             if (parsed.kind === "agent-event") {
-              return agentEvent(parsed.adapter, parsed.argvPayload === undefined ? undefined : { argvPayload: parsed.argvPayload });
+              return agentEvent(parsed.adapter, {
+                ...(parsed.argvPayload === undefined ? {} : { argvPayload: parsed.argvPayload }),
+                ...(parsed.rationale === undefined ? {} : { rationale: parsed.rationale }),
+                ...(parsed.files === undefined ? {} : { files: parsed.files }),
+              });
             }
             break;
         }

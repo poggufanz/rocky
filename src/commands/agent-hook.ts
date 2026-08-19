@@ -22,7 +22,9 @@ import { loadConfig } from "../core/config-read.js";
 import { redactSecretsAtBoundary, replaceAnsiAndControls } from "../core/redact.js";
 import { utf8Prefix } from "../core/utf8.js";
 import { resolveRockyPaths, type RockyPaths } from "../core/state-paths.js";
-import { canonicalPath } from "../core/memory-read.js";
+import { canonicalPath, loadMemory, type MemoryRecord } from "../core/memory-read.js";
+import { recordRationale } from "../core/memory.js";
+import { weakLinkFor } from "../agent/logs/capture.js";
 import { filesystemIdentity, NO_FOLLOW_FLAG, regularDescriptorSafe, sameFilesystemIdentity } from "../core/fs-safety.js";
 import { MAX_BASELINE_FILES, type AgentEvent, type IntentEvent, type TurnBaseline } from "../agent/schema.js";
 
@@ -48,6 +50,18 @@ export interface AgentHookDeps {
   git?: (args: string[], cwd: string) => string | undefined;
   /** Test seam for append-recovery coverage; production uses the guarded spool writer. */
   appendEvent?: (key: string, event: AgentEvent, paths?: RockyPaths) => boolean;
+  /**
+   * `--rationale <text>` from the CLI. Required for `generic` (no --rationale
+   * means no record, still fail-open); on `claude-code`/`codex` it augments
+   * their normal payload handling instead of replacing it.
+   */
+  rationale?: string;
+  /**
+   * `--files a.ts,b.ts` from the CLI. Currently only accepted for interface
+   * parity — it is not persisted and does not affect linking (that stays a
+   * plain weak-link by cwd/time via `weakLinkFor`).
+   */
+  files?: string[];
 }
 
 function capUtf8(value: string, maxBytes: number): string {
@@ -252,6 +266,44 @@ function safeAdapterLabel(adapter: unknown): string {
     return typeof adapter === "string" ? utf8Prefix(adapter, ADAPTER_LABEL_CAP_BYTES) : "unknown";
   } catch {
     return "unknown";
+  }
+}
+
+/**
+ * Notify-lane rationale write, shared by `generic` and (additively) by
+ * `claude-code`/`codex`. Argv-only: no stdin, no payload parsing. A missing
+ * or blank `--rationale` is logged and skipped, never thrown — the caller's
+ * fail-open contract stays intact either way. Links via the Task 10
+ * weak-link rule (nearest same-cwd failure/fix in window); no match writes
+ * an honest unlinked record rather than guessing.
+ */
+function writeNotifyRationale(agent: "claude-code" | "codex" | "generic", deps: AgentHookDeps, paths: RockyPaths): void {
+  try {
+    const rationale = deps.rationale;
+    if (typeof rationale !== "string" || rationale.trim().length === 0) {
+      logHookError(`agent-event ${agent} missing --rationale`, paths);
+      return;
+    }
+    const now = deps.now?.() ?? Date.now();
+    const cwd = process.cwd();
+    let records: readonly MemoryRecord[] = [];
+    try {
+      records = loadMemory(paths.memory, now);
+    } catch {
+      records = [];
+    }
+    const links = weakLinkFor(records, now, cwd, now);
+    recordRationale({
+      cwd,
+      agent,
+      rationale_fidelity: "summary",
+      source: "notify",
+      text: rationale,
+      ts: now,
+      ...(links === undefined ? {} : { links }),
+    }, paths);
+  } catch {
+    safeLogFailure(paths);
   }
 }
 
@@ -481,7 +533,11 @@ export async function agentEvent(adapter: string, deps: AgentHookDeps = {}): Pro
   const effectiveDeps = (deps && typeof deps === "object" ? deps : {}) as AgentHookDeps;
   try {
     paths = effectiveDeps.paths ?? resolveRockyPaths();
-    if (adapter !== "claude-code" && adapter !== "codex") {
+    if (adapter === "generic") {
+      // Generic is argv-only: no vendor payload exists, so there is nothing
+      // to read from stdin and nothing to parse.
+      writeNotifyRationale("generic", effectiveDeps, paths);
+    } else if (adapter !== "claude-code" && adapter !== "codex") {
       logHookError(`unknown adapter ${safeAdapterLabel(adapter)}`, paths);
     } else {
       const argvPayload = effectiveDeps.argvPayload;
@@ -497,6 +553,12 @@ export async function agentEvent(adapter: string, deps: AgentHookDeps = {}): Pro
         ? parseCodexHookPayload(payload, effectiveDeps.now?.())
         : parseClaudeHookPayload(payload, effectiveDeps.now?.());
       applyParsedEvent(parsed, paths, effectiveDeps);
+      // Additive only: a --rationale flag on a vendor adapter writes a
+      // second, independent notify rationale record alongside whatever the
+      // vendor payload itself produced. No flag means no change here.
+      if (typeof effectiveDeps.rationale === "string" && effectiveDeps.rationale.trim().length > 0) {
+        writeNotifyRationale(adapter, effectiveDeps, paths);
+      }
     }
   } catch {
     safeLogFailure(paths);
