@@ -1,8 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, realpathSync, writeFileSync, mkdirSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, realpathSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, sep } from "node:path";
 
 function preToolUse(file: string): string {
   return JSON.stringify({ session_id: "s1", tool_name: "Edit", tool_input: { file_path: file }, cwd: "/work/repo" });
@@ -54,11 +54,19 @@ test("corrupt stdin and corrupt state fail open", async (t) => {
   assert.equal(gateEvent("claude-code", preToolUse("/b.ts")).exitCode, 0);
 });
 
-test("unsafe or missing session_id fails open without touching gate-state", async (t) => {
-  withRockyHome(t, realpathSync(mkdtempSync(join(tmpdir(), "rocky-gate4-"))));
+test("missing session_id fails open without touching gate-state", async (t) => {
+  const home = realpathSync(mkdtempSync(join(tmpdir(), "rocky-gate4-")));
+  withRockyHome(t, home);
   const { gateEvent } = await import("../agent/gate.js");
   const noSession = JSON.stringify({ tool_name: "Edit", tool_input: { file_path: "/c.ts" }, cwd: "/work/repo" });
   assert.equal(gateEvent("claude-code", noSession).stdout, "{}");
+  assert.equal(existsSync(join(home, "gate-state")), false, "no state file for a request with no session_id");
+});
+
+test("path-traversal session_id is sanitized: state lands inside gate-state, nothing escapes", async (t) => {
+  const home = realpathSync(mkdtempSync(join(tmpdir(), "rocky-gate4b-")));
+  withRockyHome(t, home);
+  const { gateEvent } = await import("../agent/gate.js");
   const traversal = JSON.stringify({
     session_id: "../../../evil",
     tool_name: "Edit",
@@ -67,6 +75,38 @@ test("unsafe or missing session_id fails open without touching gate-state", asyn
   });
   const result = gateEvent("claude-code", traversal);
   assert.equal(result.exitCode, 0);
+
+  // The property that matters: the traversal payload must not be able to
+  // place a file anywhere outside gate-state/. A naive `join(gateStateDir,
+  // session_id + ".jsonl")` with this exact payload would resolve two
+  // directory levels above `home` (the literal "../../../" cancels the
+  // "gate-state" segment plus climbs two more) — assert that never exists,
+  // and that whatever gateEvent did write landed inside gate-state/.
+  const escapedGuess = join(dirname(dirname(home)), "evil.jsonl");
+  assert.equal(existsSync(escapedGuess), false, "no file at the naive-join escape location");
+
+  const gateStateDir = join(home, "gate-state");
+  assert.equal(existsSync(gateStateDir), true, "gate-state directory was created");
+  const entries = readdirSync(gateStateDir);
+  assert.ok(entries.length > 0, "a state file was written for the sanitized session id");
+  const realGateStateDir = realpathSync(gateStateDir);
+  for (const entry of entries) {
+    const realEntry = realpathSync(join(gateStateDir, entry));
+    assert.ok(
+      realEntry === realGateStateDir || realEntry.startsWith(realGateStateDir + sep),
+      `state entry "${entry}" resolves inside gate-state/`,
+    );
+  }
+});
+
+test("unknown vendor allows without enforcement or touching gate-state", async (t) => {
+  const home = realpathSync(mkdtempSync(join(tmpdir(), "rocky-gate4c-")));
+  withRockyHome(t, home);
+  const { gateEvent } = await import("../agent/gate.js");
+  const result = gateEvent("some-bogus-vendor", preToolUse("/work/repo/src/q.ts"));
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.stdout, "{}", "unrecognized vendor never gets enforcement");
+  assert.equal(existsSync(join(home, "gate-state")), false, "unknown vendor never touches gate-state");
 });
 
 test("non-gated tool and missing file_path allow", async (t) => {

@@ -31,6 +31,18 @@ const GATED_TOOLS: ReadonlySet<string> = new Set(["Edit", "Write", "MultiEdit"])
 /** Session ids longer than this get hashed instead of used verbatim as a filename. */
 const MAX_RAW_SESSION_ID_LEN = 64;
 
+/**
+ * `gate-event` is only wired for Claude Code's PreToolUse hook shape today
+ * (the `{session_id, tool_name, tool_input, cwd}` payload this module
+ * parses). A vendor outside this set gets full enforcement with no way to
+ * satisfy it: the deny reason tells the agent to run
+ * `rocky hook agent-event <vendor> ...`, and Task 12's endpoint rejects any
+ * adapter other than `claude-code`/`codex`/`generic` — for an unknown
+ * gate-event vendor that instruction is unfollowable. So an unrecognized
+ * vendor allows outright, same as an unrecognized tool.
+ */
+const KNOWN_GATE_VENDORS: ReadonlySet<string> = new Set(["claude-code"]);
+
 export interface GateInput {
   vendor: string;
   toolName: string;
@@ -210,6 +222,10 @@ function logGateNote(message: string): void {
 }
 
 function dispatch(vendor: string, stdinJson: string): string {
+  if (!KNOWN_GATE_VENDORS.has(vendor)) {
+    logGateNote(`gate-event: unknown vendor "${vendor}", allowing without enforcement`);
+    return allow();
+  }
   let raw: unknown;
   try {
     raw = JSON.parse(stdinJson);
