@@ -172,7 +172,7 @@ export async function briefCommand(argv: readonly string[] = [], cwd = process.c
     recordInvariantTouch({ invariant: touch.invariant, path: touch.path, cwd: root });
   }
   recordBriefRun({ sinceTs: window.sinceTs, commits: commits.length, files: changedPaths.length, cwd: root });
-  writeState({ v: 1, lastBriefTs: now });
+  writeState({ ...readState(), v: 1, lastBriefTs: now });
   speak("brief done. you explain, I remember. good good.");
   return 0;
 }

@@ -1,4 +1,4 @@
-import { closeSync, openSync, readSync } from "node:fs";
+import { closeSync, fstatSync, openSync, readSync } from "node:fs";
 import { Buffer } from "node:buffer";
 import { MAX_LOG_OFFSETS, readState, writeState } from "../../core/brief-state.js";
 
@@ -15,8 +15,10 @@ const NEWLINE = 0x0a;
  * unfinished line begins (or end of scanned data), so a later call resumes
  * exactly there. Line boundaries are found in raw bytes, so a multi-byte
  * UTF-8 character split across a chunk boundary is never mis-decoded, and
- * the file is never loaded whole. On any I/O error the original `fromOffset`
- * is returned unchanged; this surface never throws on bad user data.
+ * the file is never loaded whole. A file that shrank below `fromOffset`
+ * (truncation/rotation) restarts at 0. On any I/O error the original
+ * `fromOffset` is returned unchanged; this surface never throws on bad
+ * user data.
  */
 export function scanJsonlLines(
   logPath: string,
@@ -29,6 +31,10 @@ export function scanJsonlLines(
   let fd: number | undefined;
   try {
     fd = openSync(logPath, "r");
+    // A file smaller than the remembered offset was truncated or rotated at
+    // the same path; the stale offset could never make progress, so restart
+    // from the beginning of the new content.
+    if (fstatSync(fd).size < fromOffset) fromOffset = 0;
     const buffer = Buffer.allocUnsafe(Math.min(SCAN_CHUNK_BYTES, maxBytes));
     let position = fromOffset;
     let scanned = 0;
@@ -66,12 +72,41 @@ export function scanJsonlLines(
           carry = carry !== undefined ? Buffer.concat([carry, rest]) : rest;
         }
       }
+      // A single unfinished line spanning the whole byte budget would return
+      // an offset at or before `fromOffset` and re-read the same bytes
+      // forever. Oversized lines are skipped instead: scan ahead, bounded by
+      // one more maxBytes, for the terminating newline and resume just past
+      // it, emitting nothing for the giant line; bytes after that newline
+      // are left unread for the next call. When the newline never shows up
+      // within the extra bound, give up at the position already reached so
+      // subsequent lines are not held hostage by one pathological line.
+      if (carry !== undefined && scanned >= maxBytes && position - carry.length <= fromOffset) {
+        let extra = 0;
+        let skippedPast = -1;
+        while (extra < maxBytes) {
+          const want = Math.min(buffer.length, maxBytes - extra);
+          const bytesRead = readSync(fd, buffer, 0, want, position);
+          if (bytesRead <= 0) break;
+          extra += bytesRead;
+          position += bytesRead;
+          const newline = buffer.subarray(0, bytesRead).indexOf(NEWLINE);
+          if (newline !== -1) {
+            skippedPast = position - bytesRead + newline + 1;
+            break;
+          }
+        }
+        return skippedPast !== -1 ? skippedPast : position;
+      }
     } finally {
       closeSync(fd);
       fd = undefined;
     }
     return position - (carry !== undefined ? carry.length : 0);
   } catch {
+    // I/O errors land here — and so does a throwing `onLine` callback: in
+    // that case the original offset is returned and the next call rescans
+    // from `fromOffset`. That full-rescan fallback is the deliberate
+    // never-throws policy of this surface, not an accident.
     try {
       if (fd !== undefined) closeSync(fd);
     } catch {
@@ -86,7 +121,12 @@ export function readAdapterOffsets(): Record<string, number> {
   return { ...readState().logOffsets };
 }
 
-/** Persist per-log byte offsets, capped at MAX_LOG_OFFSETS entries (oldest drops first). */
+/**
+ * Persist per-log byte offsets, capped at MAX_LOG_OFFSETS entries (oldest drops first).
+ * The argument REPLACES the whole `logOffsets` map: callers must read-modify-write
+ * (`writeAdapterOffsets({ ...readAdapterOffsets(), [path]: next })`) or offsets
+ * belonging to other logs are lost.
+ */
 export function writeAdapterOffsets(offsets: Record<string, number>): void {
   const state = readState();
   const entries = Object.entries(offsets)
