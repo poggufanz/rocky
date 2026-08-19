@@ -12,7 +12,9 @@ import type { MemoryRecord } from "./memory-read.js";
 /**
  * Fold `alias` records into the active phrase -> conceptId map. Records are
  * applied oldest-first by `ts`; a `retract` removes the phrase, so the last
- * action on a phrase wins regardless of array order.
+ * action on a phrase wins for any distinct-`ts` array order. Equal-`ts` ties
+ * apply in input order (the sort is stable), which matches the append-only
+ * write order of the memory file.
  */
 export function activeAliases(records: readonly MemoryRecord[]): Map<string, string> {
   const aliases = new Map<string, string>();

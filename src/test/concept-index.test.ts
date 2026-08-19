@@ -27,3 +27,15 @@ test("index counts distinct records and returns newest-first evidence", () => {
   const ev = index.evidence.get("idempotency")!;
   assert.equal(ev[0].recordId, "t2");
 });
+
+test("sinceTs boundary: ts equal is included, one below is excluded", () => {
+  const records = [
+    triple("t-old", 199, "make retry idempotent, no duplicate commit"),
+    triple("t-edge", 200, "make retry idempotent, no duplicate commit"),
+  ];
+  const index = buildConceptIndex(records, 200);
+  assert.equal(index.counts.get("idempotency"), 1);
+  const ev = index.evidence.get("idempotency")!;
+  assert.equal(ev.length, 1);
+  assert.equal(ev[0].recordId, "t-edge");
+});
