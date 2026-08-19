@@ -20,6 +20,7 @@ import { parseClaudeHookPayload, type ParsedHookPayload } from "../agent/adapter
 import { parseCodexHookPayload } from "../agent/adapters/codex.js";
 import { loadConfig } from "../core/config-read.js";
 import { redactSecretsAtBoundary, replaceAnsiAndControls } from "../core/redact.js";
+import { utf8Prefix } from "../core/utf8.js";
 import { resolveRockyPaths, type RockyPaths } from "../core/state-paths.js";
 import { canonicalPath } from "../core/memory-read.js";
 import { filesystemIdentity, NO_FOLLOW_FLAG, regularDescriptorSafe, sameFilesystemIdentity } from "../core/fs-safety.js";
@@ -47,27 +48,6 @@ export interface AgentHookDeps {
   git?: (args: string[], cwd: string) => string | undefined;
   /** Test seam for append-recovery coverage; production uses the guarded spool writer. */
   appendEvent?: (key: string, event: AgentEvent, paths?: RockyPaths) => boolean;
-}
-
-function utf8Width(codePoint: number): number {
-  if (codePoint <= 0x7f) return 1;
-  if (codePoint <= 0x7ff) return 2;
-  if (codePoint <= 0xffff) return 3;
-  return 4;
-}
-
-/** Return a bounded UTF-8 prefix without measuring or copying the full input. */
-function utf8Prefix(value: string, maxBytes: number): string {
-  let bytes = 0;
-  let offset = 0;
-  while (offset < value.length) {
-    const codePoint = value.codePointAt(offset) ?? 0;
-    const width = utf8Width(codePoint);
-    if (bytes + width > maxBytes) break;
-    bytes += width;
-    offset += codePoint > 0xffff ? 2 : 1;
-  }
-  return offset === value.length ? value : value.slice(0, offset);
 }
 
 function capUtf8(value: string, maxBytes: number): string {

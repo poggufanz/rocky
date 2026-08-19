@@ -37,6 +37,7 @@ import type { RockyPaths } from "./state-paths.js";
 import { boundTripleMechanism, isCompleteMemoryCoverage, isKnownPathPlatform, isSafeNonNegativeInteger, loadMemoryChecked, MAX_MEMORY_FILE_BYTES, MAX_MEMORY_LINE_BYTES, MAX_MEMORY_RECORDS, MAX_SUPPORTED_MEMORY_RECORDS } from "./memory-read.js";
 import type { AliasRecord, AssociationRecord, BriefRunRecord, FailureRecord, FixRecord, InvariantTouchRecord, MemoryCoverage, MemoryRecord, NoteRecord, RationaleRecord, TripleRecord } from "./memory-read.js";
 import { redactSecretsAtBoundary } from "./redact.js";
+import { utf8Slice, utf8SliceFromEnd } from "./utf8.js";
 import { LINK_WINDOW_MS, recentUnresolvedFailures, type UnresolvedLink } from "./memory-query.js";
 
 export type { AssociationRecord, BriefRunRecord, FailureRecord, FixRecord, InvariantTouchRecord, MemoryCoverage, MemoryRecord, NoteRecord, TripleFile, TripleRecord } from "./memory-read.js";
@@ -1355,55 +1356,6 @@ export function recordTripleOnce(
 }
 
 export const MAX_RATIONALE_EXCERPT_BYTES = 1200;
-
-function utf8Width(codePoint: number): number {
-  if (codePoint <= 0x7f) return 1;
-  if (codePoint <= 0x7ff) return 2;
-  if (codePoint <= 0xffff) return 3;
-  return 4;
-}
-
-/** Byte-bounded UTF-8 slice that never splits a code point. */
-function utf8Slice(value: string, startByte: number, maxBytes: number): string {
-  let bytes = 0;
-  let offset = 0;
-  while (offset < value.length && bytes < startByte) {
-    const codePoint = value.codePointAt(offset) ?? 0;
-    const width = utf8Width(codePoint);
-    if (bytes + width > startByte) break;
-    bytes += width;
-    offset += codePoint > 0xffff ? 2 : 1;
-  }
-  const start = offset;
-  bytes = 0;
-  while (offset < value.length) {
-    const codePoint = value.codePointAt(offset) ?? 0;
-    const width = utf8Width(codePoint);
-    if (bytes + width > maxBytes) break;
-    bytes += width;
-    offset += codePoint > 0xffff ? 2 : 1;
-  }
-  return value.slice(start, offset);
-}
-
-/** Byte-bounded UTF-8 suffix that never splits a code point. */
-function utf8SliceFromEnd(value: string, maxBytes: number): string {
-  let bytes = 0;
-  let offset = value.length;
-  while (offset > 0) {
-    let start = offset - 1;
-    const code = value.charCodeAt(start);
-    if (code >= 0xdc00 && code <= 0xdfff && start > 0) {
-      const high = value.charCodeAt(start - 1);
-      if (high >= 0xd800 && high <= 0xdbff) start -= 1;
-    }
-    const width = utf8Width(value.codePointAt(start) ?? 0);
-    if (bytes + width > maxBytes) break;
-    bytes += width;
-    offset = start;
-  }
-  return value.slice(offset);
-}
 
 /** Redact secrets, flatten control characters, and cap head+tail by bytes. */
 export function boundRationaleExcerpt(text: string): string {
