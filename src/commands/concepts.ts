@@ -8,7 +8,7 @@
 import { CONCEPTS } from "../core/concepts.js";
 import { activeAliases, buildConceptIndex } from "../core/concept-index.js";
 import { recordAlias } from "../core/memory.js";
-import { loadMemoryChecked } from "../core/memory-read.js";
+import { isCompleteMemoryCoverage, loadMemoryChecked, type MemoryCoverage } from "../core/memory-read.js";
 import { ago, detail, heading, say } from "../ui/rocky.js";
 
 function knownConcept(id: string): boolean {
@@ -20,25 +20,49 @@ function refuseUnknown(): number {
   return 1;
 }
 
+function coverageIncomplete(value: MemoryCoverage | undefined): boolean {
+  return value !== undefined && !isCompleteMemoryCoverage(value);
+}
+
+function coverageLine(value: MemoryCoverage): string {
+  return `memory coverage incomplete: version ${value.version}; scanned ${value.scanned}; skipped ${value.skipped}; truncated ${value.truncated}; bytes ${value.bytesScanned}/${value.bytesTotal}${value.reason === undefined ? "" : `; reason ${value.reason}`}`;
+}
+
 function aliasCommand(argv: readonly string[]): number {
   const retract = argv.includes("--retract");
   const positional = argv.filter((arg) => arg !== "--retract");
-  const [phrase, conceptId] = positional;
-  if (phrase === undefined || conceptId === undefined) {
-    say("alias needs phrase and concept id. try again, question");
+  if (positional.length !== 2) {
+    say('alias needs exactly phrase and concept id. rocky concept alias "<phrase>" <id>. try again, question');
     return 2;
   }
+  const [phrase, conceptId] = positional;
   if (!knownConcept(conceptId)) return refuseUnknown();
-  recordAlias({ alias: phrase, concept: conceptId, action: retract ? "retract" : "add" });
+  if (phrase.trim().length < 2) {
+    say("alias phrase too short. two letters minimum, else I hear noise. try again, question");
+    return 2;
+  }
+  try {
+    recordAlias({ alias: phrase, concept: conceptId, action: retract ? "retract" : "add" });
+  } catch (error) {
+    say("memory file does not open for me. alias not written.");
+    detail(`    reason: ${error instanceof Error ? error.message : String(error)}`);
+    return 1;
+  }
   say(retract ? "alias retracted. I forget phrase, concept stays." : "alias remembered. good good.");
   return 0;
 }
 
 function listConcepts(): number {
-  const records = loadMemoryChecked().records;
+  const loaded = loadMemoryChecked();
+  const records = loaded.records;
   const index = buildConceptIndex(records);
   const aliases = activeAliases(records);
   if (index.counts.size === 0 && aliases.size === 0) {
+    if (coverageIncomplete(loaded.coverage)) {
+      say("memory coverage incomplete. I cannot say nothing heard. check, question");
+      detail(coverageLine(loaded.coverage));
+      return 0;
+    }
     say("no concepts heard yet. memory grows, concepts come.");
     return 0;
   }
@@ -53,15 +77,21 @@ function listConcepts(): number {
       detail(`${phrase}  ->  ${conceptId}`);
     }
   }
+  if (coverageIncomplete(loaded.coverage)) detail(coverageLine(loaded.coverage));
   return 0;
 }
 
 function reverseLookup(conceptId: string): number {
   if (!knownConcept(conceptId)) return refuseUnknown();
-  const records = loadMemoryChecked().records;
-  const index = buildConceptIndex(records);
+  const loaded = loadMemoryChecked();
+  const index = buildConceptIndex(loaded.records);
   const evidence = index.evidence.get(conceptId) ?? [];
   if (evidence.length === 0) {
+    if (coverageIncomplete(loaded.coverage)) {
+      say(`concept ${conceptId} known. memory coverage incomplete, I cannot say nothing heard. check, question`);
+      detail(coverageLine(loaded.coverage));
+      return 0;
+    }
     say(`concept ${conceptId} known, nothing heard yet. memory grows, evidence comes.`);
     return 0;
   }
@@ -69,6 +99,7 @@ function reverseLookup(conceptId: string): number {
   for (const entry of evidence) {
     detail(`${ago(entry.ts)}  ${entry.kind}  ${entry.snippet}`);
   }
+  if (coverageIncomplete(loaded.coverage)) detail(coverageLine(loaded.coverage));
   return 0;
 }
 
