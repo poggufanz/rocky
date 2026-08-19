@@ -72,8 +72,9 @@ test("generic agent-event weak-links to the nearest same-cwd failure within the 
   const { recordWatchFailure } = await import("../core/memory.js");
   const failure = recordWatchFailure("npm test", 1, "Error: boom");
   const { agentEvent } = await import("../commands/agent-hook.js");
-  const code = await agentEvent("generic", { rationale: "retrying with backoff" });
-  assert.equal(code, 0);
+  const result = await captureStdout(() => agentEvent("generic", { rationale: "retrying with backoff" }));
+  assert.equal(result.code, 0);
+  assert.equal(result.out, "{}");
   const { loadMemory } = await import("../core/memory-read.js");
   const rec = loadMemory().find(isRationale);
   assert.ok(rec);
@@ -90,14 +91,31 @@ test("claude-code agent-event with --rationale writes vendor-agent rationale in 
     cwd: "/w",
     prompt: "naikin",
   });
-  const code = await agentEvent("claude-code", {
+  const result = await captureStdout(() => agentEvent("claude-code", {
     stdin: async () => submitPayload,
     rationale: "explaining the change",
-  });
-  assert.equal(code, 0);
+  }));
+  assert.equal(result.code, 0);
+  assert.equal(result.out, "{}");
   const { loadMemory } = await import("../core/memory-read.js");
   const rec = loadMemory().find(isRationale);
   assert.ok(rec, "a --rationale flag on claude-code writes a notify rationale record too");
+  assert.equal(rec?.agent, "claude-code");
+  assert.equal(rec?.source, "notify");
+});
+
+test("claude-code agent-event with --rationale still writes it when the vendor payload is malformed", async (t) => {
+  freshHome(t);
+  const { agentEvent } = await import("../commands/agent-hook.js");
+  const result = await captureStdout(() => agentEvent("claude-code", {
+    stdin: async () => "not json",
+    rationale: "the argv reason survives a broken payload",
+  }));
+  assert.equal(result.code, 0);
+  assert.equal(result.out, "{}");
+  const { loadMemory } = await import("../core/memory-read.js");
+  const rec = loadMemory().find(isRationale);
+  assert.ok(rec, "a malformed vendor payload must not suppress the argv-supplied rationale");
   assert.equal(rec?.agent, "claude-code");
   assert.equal(rec?.source, "notify");
 });
@@ -112,8 +130,9 @@ test("claude-code agent-event without --rationale is unchanged: no rationale rec
     cwd: "/w",
     prompt: "naikin",
   });
-  const code = await agentEvent("claude-code", { stdin: async () => submitPayload });
-  assert.equal(code, 0);
+  const result = await captureStdout(() => agentEvent("claude-code", { stdin: async () => submitPayload }));
+  assert.equal(result.code, 0);
+  assert.equal(result.out, "{}");
   const { loadMemory } = await import("../core/memory-read.js");
   assert.equal(loadMemory().find(isRationale), undefined, "no --rationale means existing behavior is untouched");
 });
@@ -121,8 +140,9 @@ test("claude-code agent-event without --rationale is unchanged: no rationale rec
 test("unknown adapter with --rationale present is still rejected at the vendor gate", async (t) => {
   freshHome(t);
   const { agentEvent } = await import("../commands/agent-hook.js");
-  const code = await agentEvent("cursor", { rationale: "should not be written" });
-  assert.equal(code, 0);
+  const result = await captureStdout(() => agentEvent("cursor", { rationale: "should not be written" }));
+  assert.equal(result.code, 0);
+  assert.equal(result.out, "{}");
   const { loadMemory } = await import("../core/memory-read.js");
   assert.equal(loadMemory().length, 0, "an unknown adapter never reaches rationale persistence");
 });

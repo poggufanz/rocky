@@ -540,22 +540,30 @@ export async function agentEvent(adapter: string, deps: AgentHookDeps = {}): Pro
     } else if (adapter !== "claude-code" && adapter !== "codex") {
       logHookError(`unknown adapter ${safeAdapterLabel(adapter)}`, paths);
     } else {
-      const argvPayload = effectiveDeps.argvPayload;
-      const hasArgvPayload = adapter === "codex"
-        && typeof argvPayload === "string"
-        && argvPayload.length > 0;
-      const raw = hasArgvPayload ? argvPayload : await (effectiveDeps.stdin ?? readStdin)();
-      if (typeof raw !== "string" || Buffer.byteLength(raw, "utf8") > STDIN_CAP_BYTES) {
-        throw new OversizedInputError();
+      // Vendor payload handling and the argv --rationale lane are
+      // independent: a malformed/missing vendor payload must not suppress a
+      // perfectly good argv-supplied reason (it is often the only evidence
+      // Rocky gets for that turn), and a rationale-write failure must not
+      // suppress vendor payload processing either. Each gets its own
+      // try/catch so neither can swallow the other; duplicate capture
+      // across lanes is allowed by design.
+      try {
+        const argvPayload = effectiveDeps.argvPayload;
+        const hasArgvPayload = adapter === "codex"
+          && typeof argvPayload === "string"
+          && argvPayload.length > 0;
+        const raw = hasArgvPayload ? argvPayload : await (effectiveDeps.stdin ?? readStdin)();
+        if (typeof raw !== "string" || Buffer.byteLength(raw, "utf8") > STDIN_CAP_BYTES) {
+          throw new OversizedInputError();
+        }
+        const payload: unknown = JSON.parse(raw);
+        const parsed = adapter === "codex"
+          ? parseCodexHookPayload(payload, effectiveDeps.now?.())
+          : parseClaudeHookPayload(payload, effectiveDeps.now?.());
+        applyParsedEvent(parsed, paths, effectiveDeps);
+      } catch {
+        safeLogFailure(paths);
       }
-      const payload: unknown = JSON.parse(raw);
-      const parsed = adapter === "codex"
-        ? parseCodexHookPayload(payload, effectiveDeps.now?.())
-        : parseClaudeHookPayload(payload, effectiveDeps.now?.());
-      applyParsedEvent(parsed, paths, effectiveDeps);
-      // Additive only: a --rationale flag on a vendor adapter writes a
-      // second, independent notify rationale record alongside whatever the
-      // vendor payload itself produced. No flag means no change here.
       if (typeof effectiveDeps.rationale === "string" && effectiveDeps.rationale.trim().length > 0) {
         writeNotifyRationale(adapter, effectiveDeps, paths);
       }
