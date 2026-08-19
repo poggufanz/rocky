@@ -24,6 +24,7 @@ import { check } from "./commands/check.js";
 import { digest, exportCommand, how, quiz, what, why } from "./commands/dictionary.js";
 import { conceptsCommand } from "./commands/concepts.js";
 import { agentEvent } from "./commands/agent-hook.js";
+import { gateEvent } from "./agent/gate.js";
 import { journalCommand } from "./commands/journal.js";
 import { invariantsCommand } from "./commands/invariants.js";
 import { annotateCommand } from "./agent/annotate.js";
@@ -105,6 +106,9 @@ usage:
                             private fail-open agent hook endpoint; stdout is always {}.
   rocky hook agent-event generic --rationale "<text>" [--files a.ts,b.ts]
                             any agent says why here, one line. no vendor log needed.
+  rocky hook gate-event claude-code
+                            PreToolUse enforcement endpoint; reads one hook payload from
+                            stdin, prints an allow/deny decision, always exits 0.
 
 memory lives in ~/.rocky/memory.jsonl. no telemetry. only outside call is rocky
 check asking registry.npmjs.org whether package exists — package name only, you say
@@ -120,7 +124,8 @@ type HookRequest =
     argvPayload?: string;
     rationale?: string;
     files?: string[];
-  };
+  }
+  | { kind: "gate-event"; vendor: string };
 
 interface NotifyFlags {
   rationale?: string;
@@ -197,10 +202,52 @@ function parseHookArgs(argv: readonly string[]): HookRequest {
       }
     }
   }
+  if (subcommand === "gate-event") {
+    const [vendor, ...extra] = rest;
+    if (typeof vendor === "string" && vendor.length > 0 && extra.length === 0) {
+      return { kind: "gate-event", vendor };
+    }
+  }
   throw new CliUsageError(
     "hook needs one known subcommand",
-    "rocky hook install|uninstall|status|agent-event claude-code|codex|generic",
+    "rocky hook install|uninstall|status|agent-event claude-code|codex|generic|gate-event <vendor>",
   );
+}
+
+const GATE_STDIN_CAP_BYTES = 2 * 1024 * 1024;
+
+/**
+ * Read all of stdin for `gate-event`, bounded. A truncated or unreadable
+ * payload is not fatal here — `gateEvent` parses tolerant JSON and fails
+ * open on anything it cannot understand, so this reader only needs to
+ * avoid unbounded memory growth, not validate the payload.
+ */
+async function readGateEventStdin(): Promise<string> {
+  const chunks: Buffer[] = [];
+  let total = 0;
+  try {
+    for await (const chunk of process.stdin) {
+      const buffer: Buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as string);
+      total += buffer.byteLength;
+      if (total > GATE_STDIN_CAP_BYTES) break;
+      chunks.push(buffer);
+    }
+  } catch {
+    // A stdin stream error still must not throw out of the gate.
+  }
+  return Buffer.concat(chunks).toString("utf8");
+}
+
+/** `rocky hook gate-event <vendor>`: read stdin, decide, print, always exit 0. */
+async function runGateEvent(vendor: string): Promise<number> {
+  const stdin = await readGateEventStdin();
+  const { stdout } = gateEvent(vendor, stdin);
+  try {
+    process.stdout.write(stdout);
+  } catch {
+    // Never fail the hook because stdout could not be written.
+  }
+  return 0;
 }
 
 async function main(): Promise<number> {
@@ -260,6 +307,11 @@ async function main(): Promise<number> {
                 ...(parsed.rationale === undefined ? {} : { rationale: parsed.rationale }),
                 ...(parsed.files === undefined ? {} : { files: parsed.files }),
               });
+            }
+            break;
+          case "gate-event":
+            if (parsed.kind === "gate-event") {
+              return runGateEvent(parsed.vendor);
             }
             break;
         }
