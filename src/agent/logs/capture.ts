@@ -24,6 +24,11 @@ const MAX_CORRELATION_RECORDS = 500;
 
 const ADAPTERS: readonly LogAdapter[] = [claudeCodeLogAdapter, dshLogAdapter];
 
+export interface CaptureDeps {
+  /** Test seam: substitute the adapter list. Production scans claude-code + dsh. */
+  adapters?: readonly LogAdapter[];
+}
+
 type CorrelationRecord = TripleRecord | FixRecord | FailureRecord;
 
 function isCorrelationRecord(record: MemoryRecord): record is CorrelationRecord {
@@ -116,7 +121,8 @@ function correlate(
  * a one-line reason into `skipped` and capture continues; this function
  * never throws.
  */
-export function captureRationales(repoCwd: string, now: number = Date.now()): CaptureResult {
+export function captureRationales(repoCwd: string, now: number = Date.now(), deps: CaptureDeps = {}): CaptureResult {
+  const adapters = deps.adapters ?? ADAPTERS;
   const result: CaptureResult = { written: 0, unlinked: 0, skipped: [] };
   try {
     let records: readonly MemoryRecord[];
@@ -142,7 +148,7 @@ export function captureRationales(repoCwd: string, now: number = Date.now()): Ca
     const nextOffsets = { ...offsets };
     let offsetsChanged = false;
 
-    for (const adapter of ADAPTERS) {
+    for (const adapter of adapters) {
       let logPaths: string[];
       try {
         logPaths = adapter.discover(repoCwd);
