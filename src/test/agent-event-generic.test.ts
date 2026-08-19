@@ -14,10 +14,15 @@ function isRationale(record: { kind: string }): record is RationaleRecord {
   return record.kind === "rationale";
 }
 
-/** Isolate ROCKY_HOME for one test and register cleanup. */
+/** Isolate ROCKY_HOME for one test, restoring the prior value (or absence) after. */
 function freshHome(t: TestContext): string {
   const home = realpathSync(mkdtempSync(join(tmpdir(), "rocky-gen-")));
-  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const previousHome = process.env.ROCKY_HOME;
+  t.after(() => {
+    if (previousHome === undefined) delete process.env.ROCKY_HOME;
+    else process.env.ROCKY_HOME = previousHome;
+    rmSync(home, { recursive: true, force: true });
+  });
   process.env.ROCKY_HOME = home;
   return home;
 }
@@ -82,7 +87,7 @@ test("generic agent-event weak-links to the nearest same-cwd failure within the 
 });
 
 test("claude-code agent-event with --rationale writes vendor-agent rationale in addition to existing behavior", async (t) => {
-  freshHome(t);
+  const home = freshHome(t);
   const { agentEvent } = await import("../commands/agent-hook.js");
   const submitPayload = JSON.stringify({
     session_id: "s1",
@@ -97,6 +102,13 @@ test("claude-code agent-event with --rationale writes vendor-agent rationale in 
   }));
   assert.equal(result.code, 0);
   assert.equal(result.out, "{}");
+  // The additive rationale lane must not displace the vendor payload's own
+  // effect: confirm the intent append that applyParsedEvent produces for
+  // this UserPromptSubmit payload still landed in the same run.
+  const { resolveRockyPaths } = await import("../core/state-paths.js");
+  const { readBatch } = await import("../agent/spool.js");
+  const paths = resolveRockyPaths({ ROCKY_HOME: home });
+  assert.equal(readBatch("claude-code-s1-p1", paths).length, 1, "the vendor payload's own intent append still happened");
   const { loadMemory } = await import("../core/memory-read.js");
   const rec = loadMemory().find(isRationale);
   assert.ok(rec, "a --rationale flag on claude-code writes a notify rationale record too");
@@ -148,7 +160,7 @@ test("unknown adapter with --rationale present is still rejected at the vendor g
 });
 
 test("CLI: rocky hook agent-event generic --rationale ... --files ... writes a notify rationale, stdout {}", (t) => {
-  const home = mkdtempSync(join(tmpdir(), "rocky-gen-cli-"));
+  const home = realpathSync(mkdtempSync(join(tmpdir(), "rocky-gen-cli-")));
   t.after(() => rmSync(home, { recursive: true, force: true }));
   // Strip NODE_* IPC/channel env before spawning a real grandchild here: this
   // test file is itself a node:test child process, and forwarding the whole
