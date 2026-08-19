@@ -8,8 +8,11 @@ import { scanJsonlLines } from "./scan.js";
 /** Never discover more than this many transcript files per repo. */
 const MAX_DISCOVERED_FILES = 5;
 
-/** Byte budget for probing the first line of a candidate transcript. */
-const PROBE_BYTES = 64 * 1024;
+/** Byte budget for probing the head of a candidate transcript. */
+const PROBE_BYTES = 256 * 1024;
+
+/** Never parse more than this many records while probing a transcript. */
+const PROBE_MAX_LINES = 10;
 
 /** Claude Code slugs a cwd by replacing path separators and `:` with `-`. */
 function slugify(cwd: string): string {
@@ -17,7 +20,9 @@ function slugify(cwd: string): string {
 }
 
 function claudeConfigDir(): string {
-  return process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), ".claude");
+  const configured = process.env.CLAUDE_CONFIG_DIR;
+  // An empty override is treated as unset, never as a relative path.
+  return configured !== undefined && configured.length > 0 ? configured : join(homedir(), ".claude");
 }
 
 function isRecord(obj: unknown): obj is Record<string, unknown> {
@@ -25,24 +30,48 @@ function isRecord(obj: unknown): obj is Record<string, unknown> {
 }
 
 /**
- * Read and parse the first JSONL line of a file. Returns undefined when the
- * file cannot be opened, is empty, or the first line does not parse. Reads at
- * most PROBE_BYTES and never throws.
+ * cwd equality: exact match everywhere, plus case-insensitive match on
+ * Windows where drive-letter case varies (`c:\work` vs `C:\work`).
  */
-function firstLineOf(logPath: string): unknown {
+function sameCwd(a: unknown, b: string): boolean {
+  if (typeof a !== "string") return false;
+  if (a === b) return true;
+  return process.platform === "win32" && a.toLowerCase() === b.toLowerCase();
+}
+
+/**
+ * Probe the head of a candidate transcript: does any of its first few
+ * parseable records carry `cwd` matching the repo? Transcripts can start
+ * with a `summary` record (post-compaction, no `cwd`) or an oversized first
+ * line, so looking only at line one misses real sessions. Reads at most
+ * PROBE_BYTES, parses at most PROBE_MAX_LINES records, never throws.
+ */
+function probeHasCwd(logPath: string, repoCwd: string): boolean {
   let fd: number | undefined;
   try {
     fd = openSync(logPath, "r");
     const buffer = Buffer.allocUnsafe(PROBE_BYTES);
     const bytesRead = readSync(fd, buffer, 0, PROBE_BYTES, 0);
-    if (bytesRead <= 0) return undefined;
+    if (bytesRead <= 0) return false;
     const head = buffer.subarray(0, bytesRead).toString("utf8");
-    const newline = head.indexOf("\n");
-    const firstLine = (newline === -1 ? head : head.slice(0, newline)).trim();
-    if (firstLine.length === 0) return undefined;
-    return JSON.parse(firstLine);
+    let parsed = 0;
+    for (const lineText of head.split("\n")) {
+      if (parsed >= PROBE_MAX_LINES) break;
+      const trimmed = lineText.trim();
+      if (trimmed.length === 0) continue;
+      let obj: unknown;
+      try {
+        obj = JSON.parse(trimmed);
+      } catch {
+        // Corrupt or boundary-truncated line: skipped, never fatal.
+        continue;
+      }
+      parsed += 1;
+      if (isRecord(obj) && sameCwd(obj.cwd, repoCwd)) return true;
+    }
+    return false;
   } catch {
-    return undefined;
+    return false;
   } finally {
     if (fd !== undefined) {
       try {
@@ -57,7 +86,7 @@ function firstLineOf(logPath: string): unknown {
 /**
  * List transcript files for a repo under `<configDir>/projects/<slug>/`.
  * The directory slug matches most checkouts; when it misses (Windows drive
- * letters make slugs vary), any file whose first parsed record carries
+ * letters make slugs vary), any file whose head records carry
  * `cwd === repoCwd` is accepted instead. Sorted newest first, capped at
  * MAX_DISCOVERED_FILES. Never throws.
  */
@@ -89,9 +118,8 @@ function discover(repoCwd: string): string[] {
         }
         if (!slugMatch) {
           // Slug heuristic missed this dir; confirm ownership by the
-          // transcript's own cwd instead.
-          const first = firstLineOf(logPath);
-          if (!isRecord(first) || first.cwd !== repoCwd) continue;
+          // transcript's own cwd records instead.
+          if (!probeHasCwd(logPath, repoCwd)) continue;
         }
         found.push({ path: logPath, mtimeMs });
       }
@@ -113,7 +141,7 @@ function scan(repoCwd: string, logPath: string, fromOffset: number, maxBytes: nu
   const events: CanonicalRationaleEvent[] = [];
   const nextOffset = scanJsonlLines(logPath, fromOffset, maxBytes, (obj) => {
     if (!isRecord(obj)) return;
-    if (obj.cwd !== repoCwd) return;
+    if (!sameCwd(obj.cwd, repoCwd)) return;
     if (obj.type !== "assistant") return;
     const message = obj.message;
     if (!isRecord(message) || !Array.isArray(message.content)) return;
@@ -151,6 +179,13 @@ function scan(repoCwd: string, logPath: string, fromOffset: number, maxBytes: nu
       // tool_use and other entry types carry no rationale text; skipped.
     }
   });
+  if (nextOffset === fromOffset && fromOffset > 0 && events.length > 0) {
+    // scanJsonlLines hit its outer-catch error path: the offset did not
+    // advance, so these events would be re-emitted on the next scan from the
+    // same offset. Dedupe-by-offset is the caller's contract, so drop them.
+    // Normal EOF at fromOffset collects zero events and is unaffected.
+    return { events: [], nextOffset: fromOffset };
+  }
   return { events, nextOffset };
 }
 
