@@ -16,5 +16,10 @@ export interface LogAdapter {
   agent: CanonicalRationaleEvent["agent"];
   /** Candidate log files for a repo; never throws. */
   discover(repoCwd: string): string[];
-  scan(logPath: string, fromOffset: number, maxBytes: number): { events: CanonicalRationaleEvent[]; nextOffset: number };
+  /**
+   * Incrementally scan one log file from a byte offset, emitting only events
+   * that belong to `repoCwd` (transcript logs mix sessions from many repos).
+   * Never throws.
+   */
+  scan(repoCwd: string, logPath: string, fromOffset: number, maxBytes: number): { events: CanonicalRationaleEvent[]; nextOffset: number };
 }
