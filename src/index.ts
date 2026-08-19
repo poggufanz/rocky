@@ -22,6 +22,7 @@ import { mcp } from "./commands/mcp.js";
 import { setup } from "./commands/setup.js";
 import { check } from "./commands/check.js";
 import { digest, exportCommand, how, quiz, what, why } from "./commands/dictionary.js";
+import { conceptsCommand } from "./commands/concepts.js";
 import { agentEvent } from "./commands/agent-hook.js";
 import { journalCommand } from "./commands/journal.js";
 import { invariantsCommand } from "./commands/invariants.js";
@@ -67,6 +68,10 @@ usage:
                             candidates, and never grades.
   rocky export [--kind failure|fix|note|triple] [--since ISO|Nd]
                             dump raw memory as JSONL on stdout.
+  rocky concepts            list concepts heard in memory, with counts and aliases.
+  rocky concept <id>        hear newest-first evidence for one concept.
+  rocky concept alias [--retract] "<phrase>" <id>
+                            teach or retract one phrase -> concept alias.
   rocky model status         report local-AI configuration without loading a model.
   rocky model use [--exposure sanitized|raw] <installed-model>
                             probe an installed Ollama model, then enable local AI.
@@ -169,6 +174,9 @@ async function main(): Promise<number> {
         return quiz(rest);
       case "export":
         return exportCommand(rest);
+      case "concepts":
+      case "concept":
+        return conceptsCommand(rest);
       case "hook": {
         const parsed = parseHookArgs(rest);
         switch (rest[0]) {
