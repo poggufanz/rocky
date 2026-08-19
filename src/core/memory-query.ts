@@ -571,7 +571,9 @@ export function queryRecentFailures(
 export function queryStats(records: readonly MemoryRecord[], input: StatsQuery = {}): MemoryStats {
   const unique = uniqueRecords(records);
   const now = input.now ?? Date.now();
-  const scoped = unique.filter((record) => isOperationalMemoryRecord(record, now) && (input.cwd === undefined || record.cwd === input.cwd));
+  // Cwd-less kinds (alias) are global knowledge; a cwd scope must not hide them.
+  const scoped = unique.filter((record) => isOperationalMemoryRecord(record, now) &&
+    (input.cwd === undefined || !("cwd" in record) || record.cwd === input.cwd));
   const failures = scoped.filter((record): record is FailureRecord => record.kind === "failure");
   const fixes = fixesIndex(unique, now);
   const confirmedFailures = unique.filter((record): record is FailureRecord =>

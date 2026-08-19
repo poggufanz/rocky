@@ -1,12 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { queryStats } from "../core/memory-query.js";
-import type { MemoryRecord } from "../core/memory-read.js";
+import type { FailureRecord, MemoryRecord } from "../core/memory-read.js";
 import { memoryAgeDays } from "../commands/stats.js";
 
 const NOW = 1_800_000_000_000;
 
-function failure(id: string): MemoryRecord {
+function failure(id: string): FailureRecord {
   return {
     kind: "failure", id, ts: NOW - 1000, cwd: "/repo", cmd: "npm test", exitCode: 1,
     fingerprint: `fp-${id}`, signature: ["err"], excerpt: "err",

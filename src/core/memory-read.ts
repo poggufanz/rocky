@@ -138,6 +138,25 @@ export interface InvariantTouchRecord {
   path: string;
 }
 
+export type RationaleFidelity = "raw" | "summary" | "none";
+export type RationaleSource = "log-thinking" | "log-response" | "notify" | "human";
+export interface RationalePointer { logPath?: string; sessionId?: string; turnRef?: string }
+export interface RationaleLinks { tripleId?: string; fixId?: string; failureId?: string }
+export interface RationaleRecord {
+  kind: "rationale"; id: string; ts: number; v: 1;
+  cwd: string;
+  agent: "claude-code" | "codex" | "dsh" | "generic" | "human";
+  rationale_fidelity: RationaleFidelity;
+  source: RationaleSource;
+  excerpt: string;
+  pointer?: RationalePointer;
+  links?: RationaleLinks;
+}
+export interface AliasRecord {
+  kind: "alias"; id: string; ts: number; v: 1;
+  alias: string; concept: string; action: "add" | "retract";
+}
+
 export interface TripleFile {
   path: string;
   plusMinus: [number, number];
@@ -514,7 +533,7 @@ export function boundTripleRecord(record: TripleRecord): TripleRecord {
   };
 }
 
-export type MemoryRecord = FailureRecord | FixRecord | AssociationRecord | NoteRecord | TripleRecord | BriefRunRecord | InvariantTouchRecord;
+export type MemoryRecord = FailureRecord | FixRecord | AssociationRecord | NoteRecord | TripleRecord | BriefRunRecord | InvariantTouchRecord | RationaleRecord | AliasRecord;
 
 /** Future-dated evidence stays readable but is inert for operational answers. */
 export function isOperationalMemoryRecord(record: Pick<MemoryRecord, "ts">, now = Date.now()): boolean {
@@ -642,8 +661,60 @@ export function parseMemoryRecord(value: unknown): MemoryRecord | undefined {
 function parseMemoryRecordUnsafe(value: unknown): MemoryRecord | undefined {
   const record = objectValue(value);
   if (!record || typeof record.id !== "string" || record.id.length === 0 || record.id.length > 512 ||
-      /[\u0000-\u001f\u007f-\u009f]/u.test(record.id) || !isSafeNonNegativeInteger(record.ts) ||
-      typeof record.cwd !== "string") return undefined;
+      /[\u0000-\u001f\u007f-\u009f]/u.test(record.id) || !isSafeNonNegativeInteger(record.ts)) return undefined;
+  if (record.kind === "alias") {
+    if (record.v !== 1 ||
+        typeof record.alias !== "string" || record.alias.length === 0 || record.alias.length > MAX_RECORD_ITEM_CHARS ||
+        typeof record.concept !== "string" || record.concept.length === 0 || record.concept.length > MAX_RECORD_ITEM_CHARS ||
+        (record.action !== "add" && record.action !== "retract")) return undefined;
+    return {
+      v: 1, kind: "alias", id: record.id, ts: Number(record.ts),
+      alias: record.alias, concept: record.concept, action: record.action,
+    };
+  }
+  if (typeof record.cwd !== "string") return undefined;
+  if (record.kind === "rationale") {
+    const agent = record.agent;
+    const fidelity = record.rationale_fidelity;
+    const source = record.source;
+    if (record.v !== 1 ||
+        (agent !== "claude-code" && agent !== "codex" && agent !== "dsh" && agent !== "generic" && agent !== "human") ||
+        (fidelity !== "raw" && fidelity !== "summary" && fidelity !== "none") ||
+        (source !== "log-thinking" && source !== "log-response" && source !== "notify" && source !== "human") ||
+        typeof record.excerpt !== "string" || record.excerpt.length === 0 || record.excerpt.length > MAX_RECORD_ITEM_CHARS) return undefined;
+    let pointer: RationalePointer | undefined;
+    if (record.pointer !== undefined) {
+      const value = objectValue(record.pointer);
+      if (!value ||
+          (value.logPath !== undefined && typeof value.logPath !== "string") ||
+          (value.sessionId !== undefined && typeof value.sessionId !== "string") ||
+          (value.turnRef !== undefined && typeof value.turnRef !== "string")) return undefined;
+      pointer = {
+        ...(value.logPath === undefined ? {} : { logPath: value.logPath }),
+        ...(value.sessionId === undefined ? {} : { sessionId: value.sessionId }),
+        ...(value.turnRef === undefined ? {} : { turnRef: value.turnRef }),
+      };
+    }
+    let links: RationaleLinks | undefined;
+    if (record.links !== undefined) {
+      const value = objectValue(record.links);
+      if (!value ||
+          (value.tripleId !== undefined && typeof value.tripleId !== "string") ||
+          (value.fixId !== undefined && typeof value.fixId !== "string") ||
+          (value.failureId !== undefined && typeof value.failureId !== "string")) return undefined;
+      links = {
+        ...(value.tripleId === undefined ? {} : { tripleId: value.tripleId }),
+        ...(value.fixId === undefined ? {} : { fixId: value.fixId }),
+        ...(value.failureId === undefined ? {} : { failureId: value.failureId }),
+      };
+    }
+    return {
+      kind: "rationale", id: record.id, ts: Number(record.ts), v: 1, cwd: record.cwd,
+      agent, rationale_fidelity: fidelity, source, excerpt: record.excerpt,
+      ...(pointer === undefined ? {} : { pointer }),
+      ...(links === undefined ? {} : { links }),
+    };
+  }
   if (record.kind === "failure") {
     const signature = strings(record.signature);
     const identity = identityFields(record);

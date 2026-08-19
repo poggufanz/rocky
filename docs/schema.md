@@ -30,7 +30,8 @@ existing kind.
 | `brief_run` | `memory.jsonl` | v0.6 | active | `cwd, sinceTs, commits, files` |
 | `invariant_touch` | `memory.jsonl` | v0.6 | active | `cwd, invariant, path` |
 | `guard` | `memory.jsonl` | — | **defined, not yet emitted** | `cwd, cmd, rule` — reserved for hook guard triggers; no writer exists yet |
-| `rationale` | `memory.jsonl` | — | **reserved for v0.7** | pointer + compressed excerpt of agent-stated rationale, `rationale_fidelity: "raw" \| "summary" \| "none"` — documentation only, no capture code in v0.6 |
+| `rationale` | `memory.jsonl` | v0.7 | active | `cwd, agent, rationale_fidelity (raw\|summary\|none), source (log-thinking\|log-response\|notify\|human), excerpt, pointer?{logPath,sessionId,turnRef}, links?{tripleId,fixId,failureId}` |
+| `alias` | `memory.jsonl` | v0.7 | active | `alias, concept, action (add\|retract)` |
 
 ## Pointer rule
 
