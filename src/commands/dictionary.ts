@@ -3,8 +3,9 @@ import { dictionaryRankPortFromConfig, type DictionaryRankPort } from "../ai/dic
 import { loadConfig } from "../core/config.js";
 import { digestBuckets, queryDictionary, queryNotes, quizCandidates, type DictionaryHit, type NoteHit } from "../core/dictionary.js";
 import { isCompleteMemoryCoverage, isOperationalMemoryRecord, loadMemoryChecked } from "../core/memory-read.js";
-import { whyFile, whyFileEvidence, whyFilePathRelation } from "../core/memory-query.js";
-import type { MemoryCoverage, MemoryRecord } from "../core/memory-read.js";
+import { recordRationale } from "../core/memory.js";
+import { LINK_WINDOW_MS, whyFile, whyFileEvidence, whyFilePathRelation } from "../core/memory-query.js";
+import type { MemoryCoverage, MemoryRecord, RationaleLinks, RationaleRecord, RationaleSource } from "../core/memory-read.js";
 import { resolveRockyPaths } from "../core/state-paths.js";
 import { createTtyPromptPort } from "../setup/prompt.js";
 import { truncateUtf8 } from "../mcp/privacy.js";
@@ -466,8 +467,62 @@ export function how(argv: string[], deps: DictionaryCommandDeps = {}): number {
   return 0;
 }
 
+/**
+ * Rationale evidence is hearsay until labeled: raw agent thinking, an
+ * agent's final reply, an agent self-reporting via `notify`, or the human
+ * typing it themselves. Exported so tasks 15/17 label the same four ways
+ * instead of re-deriving this text.
+ */
+export function rationaleSourceLabel(source: RationaleSource): string {
+  switch (source) {
+    case "log-thinking": return "heard from thinking";
+    case "log-response": return "agent said in reply";
+    case "notify": return "agent said";
+    case "human": return "you said";
+  }
+}
+
+/** Rationale records join `why` by link, not by guessing at excerpt text. */
+function linkedRationales(memory: readonly MemoryRecord[], tripleId: string): RationaleRecord[] {
+  return memory
+    .filter((record): record is RationaleRecord => record.kind === "rationale" && record.links?.tripleId === tripleId)
+    .sort((a, b) => a.ts - b.ts);
+}
+
+/** Newest failure/fix in this cwd within the fix-linker's own window — same evidence basis, not a guess. */
+function newestLinkTarget(memory: readonly MemoryRecord[], cwd: string, now: number): RationaleLinks | undefined {
+  const cutoff = now - LINK_WINDOW_MS;
+  let newest: Extract<MemoryRecord, { kind: "failure" | "fix" }> | undefined;
+  for (const record of memory) {
+    if (record.kind !== "failure" && record.kind !== "fix") continue;
+    if (record.cwd !== cwd || record.ts > now || record.ts < cutoff) continue;
+    if (newest === undefined || record.ts > newest.ts) newest = record;
+  }
+  if (newest === undefined) return undefined;
+  return newest.kind === "failure" ? { failureId: newest.id } : { fixId: newest.id };
+}
+
+function whyAdd(rawText: string, speak: (line: string) => void, records: () => MemoryRecord[], now: number): number {
+  const text = rawText.trim();
+  if (!text) {
+    speak('why --add needs word to remember. rocky why --add "some reason", question');
+    return 1;
+  }
+  const cwd = process.cwd();
+  const links = newestLinkTarget(records(), cwd, now);
+  recordRationale({
+    cwd, agent: "human", rationale_fidelity: "summary", source: "human", text,
+    ...(links === undefined ? {} : { links }),
+  });
+  speak("why remembered. you said it, rocky keeps it.");
+  return 0;
+}
+
 export function why(argv: string[], deps: DictionaryCommandDeps = {}): number {
   const { speak, support, records, coverage } = resolve(deps);
+  if (argv[0] === "--add") {
+    return whyAdd(argv.slice(1).join(" "), speak, records, deps.now ?? Date.now());
+  }
   let path: string;
   try {
     path = parseQueryArgs(argv, {
@@ -535,6 +590,12 @@ export function why(argv: string[], deps: DictionaryCommandDeps = {}): number {
     } else {
       speak(terminalSafe("change happen. no reason I hear.", MAX_OUTPUT_LINE_BYTES));
       for (const line of boundedDetailLines(`  (${where}, ${ago(triple.ts)};`, provenance, ")")) support(line);
+    }
+    for (const rationaleRecord of linkedRationales(memory, triple.id)) {
+      const label = rationaleSourceLabel(rationaleRecord.source);
+      const excerptSafe = terminalSafe(rationaleRecord.excerpt, MAX_INTENT_DISPLAY_BYTES).trim();
+      speak(terminalSafe(`${label}: ${excerptSafe}`, MAX_OUTPUT_LINE_BYTES));
+      support(terminalSafe(`  (rationale id=${rationaleRecord.id}, ${ago(rationaleRecord.ts)}, agent=${rationaleRecord.agent}, fidelity=${rationaleRecord.rationale_fidelity})`, MAX_OUTPUT_LINE_BYTES));
     }
   }
   return 0;
