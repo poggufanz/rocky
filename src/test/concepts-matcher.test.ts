@@ -22,3 +22,23 @@ test("lexicon ids are unique and lowercase", () => {
   assert.equal(new Set(ids).size, ids.length);
   for (const id of ids) assert.equal(id, id.toLowerCase());
 });
+
+test("single keyword alone does not match", () => {
+  assert.deepEqual(matchConcepts("deadlock"), []);
+});
+
+test("blank alias phrase is ignored", () => {
+  const hits = matchConcepts("anything", new Map([["", "auth"]]));
+  assert.ok(!hits.some((h) => h.concept.id === "auth"));
+});
+
+test("alias does not match inside another word", () => {
+  const hits = matchConcepts("unblock the pipeline", new Map([["lock", "locking"]]));
+  assert.ok(!hits.some((h) => h.concept.id === "locking"));
+});
+
+test("lexicon keywords are all lowercase", () => {
+  for (const concept of CONCEPTS) {
+    for (const kw of concept.keywords) assert.equal(kw, kw.toLowerCase());
+  }
+});

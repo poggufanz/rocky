@@ -38,6 +38,10 @@ export const CONCEPTS: readonly Concept[] = [
 export interface ConceptMatch { concept: Concept; score: number; matched: readonly string[] }
 export const CONCEPT_MATCH_THRESHOLD = 0.34;
 
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 export function matchConcepts(text: string, aliases?: ReadonlyMap<string, string>): ConceptMatch[] {
   const bag = new Set(tokens(text));
   const lower = text.toLowerCase();
@@ -49,7 +53,14 @@ export function matchConcepts(text: string, aliases?: ReadonlyMap<string, string
     }
     if (aliases) {
       for (const [phrase, target] of aliases) {
-        if (target === concept.id && lower.includes(phrase.toLowerCase())) matched.push(`alias:${phrase}`);
+        if (target !== concept.id) continue;
+        const trimmed = phrase.trim();
+        // A blank alias would match every text; a sub-length-2 one is noise.
+        if (trimmed.length < 2) continue;
+        // Token-boundary match: an alias must not fire inside an unrelated
+        // word (`lock` in `unblock`), while multi-word phrases still match.
+        const boundary = new RegExp(`(^|[^a-z0-9])${escapeRegExp(trimmed)}($|[^a-z0-9])`, "i");
+        if (boundary.test(text)) matched.push(`alias:${phrase}`);
       }
     }
     const aliasHit = matched.some((m) => m.startsWith("alias:"));
