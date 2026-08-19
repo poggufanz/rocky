@@ -1381,7 +1381,7 @@ test("replacement moved by a reclaim rename is preserved in its tombstone", { ti
   assert.equal(existsSync(lock), false, "next acquisition still releases canonical lock");
 });
 
-test("replacement after final tombstone validation survives because no path unlink occurs", { timeout: 20_000 }, (t) => {
+test("replacement after final tombstone validation is removed with the reclaimed tombstone", { timeout: 20_000 }, (t) => {
   const home = sandbox(t, "rocky-tombstone-predelete-");
   const lock = join(home, "memory.jsonl.triple.lock");
   const saved = join(home, "validated-tombstone.lock");
@@ -1409,11 +1409,14 @@ test("replacement after final tombstone validation survives because no path unli
   });
   assert.equal(result.status, 0, result.stderr);
   assert.equal(existsSync(saved), true, "validated inode remains preserved separately");
+  // A successful reclaim unlinks its tombstone path; whatever a hostile
+  // same-user replacement planted at that unique name after validation is
+  // removed with it, never preserved as a permanent leftover.
   const replacement = readdirSync(home)
     .filter((name) => name.includes(".reclaim.tombstone."))
     .map((name) => readFileSync(join(home, name), "utf8"))
     .find((contents) => contents.includes(`\"token\":\"${"x".repeat(32)}\"`));
-  assert.ok(replacement, "replacement at tombstone path survives");
+  assert.equal(replacement, undefined, "replacement at tombstone path is unlinked with the tombstone");
   assert.equal(existsSync(lock), false, "canonical lock remains absent after recovery");
 });
 
@@ -1453,7 +1456,7 @@ test("partial primary and guard metadata writes recover without lock timeout", {
       // 4 s still proves recovery never waited out the 5 s lock deadline.
       assert.ok(Date.now() - started < 4_000, `${target}/${mode} partial write must not wait for lock deadline`);
       assert.equal(existsSync(lock), false, `${target}/${mode} canonical lock is released`);
-      assert.ok(readdirSync(home).some((name) => name.includes(".reclaim.tombstone.")), `${target}/${mode} leaves safe tombstone evidence`);
+      assert.equal(readdirSync(home).some((name) => name.includes(".reclaim.tombstone.")), false, `${target}/${mode} successful reclaim unlinks its tombstone`);
     }
   }
 });

@@ -1,5 +1,6 @@
+import { dirname } from "node:path";
 import { readJournal } from "../core/journal.js";
-import { memoryPath, type MemoryRecord } from "../core/memory.js";
+import { countReclaimTombstones, memoryPath, type MemoryRecord } from "../core/memory.js";
 import { loadMemoryChecked } from "../core/memory-read.js";
 import { queryStats } from "../core/memory-query.js";
 import { parseNoArgs, reportCliUsage } from "./cli-args.js";
@@ -51,6 +52,8 @@ export function stats(argv: readonly string[] = []): number {
   const briefRuns = byKind["brief_run"] ?? 0;
   say(`memory age ${ageDays} day${ageDays === 1 ? "" : "s"}. ${briefRuns} brief run${briefRuns === 1 ? "" : "s"}. ${journalCount} journal note${journalCount === 1 ? "" : "s"}.`);
   detail(`memory coverage: version ${coverage.version}, scanned ${coverage.scanned}, skipped ${coverage.skipped}, truncated ${coverage.truncated}, complete ${coverage.complete}`);
+  const tombstones = countReclaimTombstones(dirname(memoryPath()));
+  if (tombstones > 0) detail(`tombstones waiting sweep: ${tombstones}`);
   if (result.unresolved > 0) say(`${result.unresolved} error${result.unresolved === 1 ? "" : "s"} still without fix. you fix, I remember. good trade.`);
   return 0;
 }

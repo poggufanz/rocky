@@ -14,6 +14,7 @@ import {
   renameSync,
   readSync,
   rmSync,
+  statSync,
   unlinkSync,
   writeFileSync,
   writeSync,
@@ -310,10 +311,13 @@ function releaseTripleLock(lock: TripleLock): boolean {
 
 /**
  * Move one canonical regular path to a unique same-directory tombstone, then
- * validate the moved inode. The canonical name and tombstone are never
- * unlinked here: a hostile same-user replacement after validation is
- * indistinguishable through Node's portable path API, so preservation is the
- * only safe outcome. Tombstones are non-blocking housekeeping evidence.
+ * validate the moved inode. On success the tombstone is unlinked right away:
+ * the claim is proven and keeping the moved inode around would only grow
+ * leftovers. On every failure path the tombstone is preserved — a hostile
+ * same-user replacement after validation is indistinguishable through Node's
+ * portable path API, so preservation is the only safe outcome. Tombstones are
+ * non-blocking housekeeping evidence; leftovers are swept later by
+ * `sweepReclaimTombstones`.
  */
 function reclaimTriplePath(
   path: string,
@@ -332,11 +336,58 @@ function reclaimTriplePath(
     const verified = lstatSync(tombstonePath);
     if (!verified.isFile() || verified.isSymbolicLink() || !sameTripleIdentity(expected, verified) ||
         !validateClaim(tombstonePath)) return false;
+    try { unlinkSync(tombstonePath); } catch { /* leftover swept later */ }
     return true;
   } catch {
     return false;
   }
 }
+
+/**
+ * Housekeeping for tombstones left behind by crashed or contested reclaims.
+ * Only tombstone-marked entries older than `TOMBSTONE_SWEEP_MAX_AGE_MS` are
+ * unlinked — a young tombstone may still be evidence of an in-flight reclaim —
+ * and each run removes at most `TOMBSTONE_SWEEP_MAX_REMOVALS` so a hostile
+ * flood cannot pin a writer in an unbounded loop. Never throws; returns the
+ * number actually removed.
+ */
+export const TOMBSTONE_SWEEP_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+export const TOMBSTONE_SWEEP_MAX_REMOVALS = 100;
+
+const RECLAIM_TOMBSTONE_MARKER_RE = /\.reclaim\.tombstone\./u;
+
+export function sweepReclaimTombstones(dir: string, now = Date.now()): number {
+  let removed = 0;
+  try {
+    for (const name of readdirSync(dir)) {
+      if (removed >= TOMBSTONE_SWEEP_MAX_REMOVALS) break;
+      if (!RECLAIM_TOMBSTONE_MARKER_RE.test(name)) continue;
+      const tombstonePath = join(dir, name);
+      try {
+        const stats = statSync(tombstonePath);
+        if (!stats.isFile()) continue;
+        if (now - stats.mtimeMs <= TOMBSTONE_SWEEP_MAX_AGE_MS) continue;
+        unlinkSync(tombstonePath);
+        removed++;
+      } catch {
+        // A concurrent sweep, removal, or replacement is a conservative no-op.
+      }
+    }
+  } catch {
+    // An unreadable or missing directory means nothing to sweep.
+  }
+  return removed;
+}
+
+export function countReclaimTombstones(dir: string): number {
+  try {
+    return readdirSync(dir).filter((name) => RECLAIM_TOMBSTONE_MARKER_RE.test(name)).length;
+  } catch {
+    return 0;
+  }
+}
+
+let tombstoneSweepDone = false;
 
 /**
  * A deterministic regular sidecar elects one reclaimer before primary
@@ -827,6 +878,13 @@ export function withMemoryTransaction<T>(
   options: MemoryTransactionOptions = {},
 ): T {
   ensureDir(paths.home);
+  if (!tombstoneSweepDone) {
+    // Tombstones are only created on this writer path, so one best-effort
+    // sweep per process here covers every producer without touching the CLI
+    // entry or read-only commands.
+    tombstoneSweepDone = true;
+    sweepReclaimTombstones(dirname(paths.memory));
+  }
   const lock = acquireTripleLock(paths);
   const now = options.now ?? Date.now();
   const initial = loadMemoryChecked(paths.memory, now);
