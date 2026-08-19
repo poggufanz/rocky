@@ -29,6 +29,7 @@ import {
   defaultAgentHooksTarget,
   installClaudeAgentHooks,
   printCodexAgentHooks,
+  rockyGateHookCommand,
   rockyHookCommand,
   uninstallClaudeAgentHooks,
 } from "../setup/agent-hooks.js";
@@ -406,6 +407,7 @@ function defaultDependencies(): SetupDependencies {
 async function runAgentHooksAction(
   action: AgentHooksAction,
   dependencies: SetupDependencies,
+  rationaleGate: boolean,
 ): Promise<number> {
   const nodeCandidate = dependencies.nodePath ?? process.execPath;
   const entryCandidate = dependencies.entryPath ?? defaultAgentHooksEntryPath();
@@ -432,9 +434,15 @@ async function runAgentHooksAction(
     const entryPath = resolveInstalledPath(entryCandidate);
     const command = rockyHookCommand("claude-code", nodePath, entryPath);
     const codexCommand = rockyHookCommand("codex", nodePath, entryPath);
+    const gateCommand = rockyGateHookCommand(nodePath, entryPath);
     const target = defaultAgentHooksTarget(dependencies.platform.home);
     const options = {
       command,
+      // Install treats this as an explicit on/off switch (--no-rationale-gate
+      // omits it); uninstall ignores it; status always validates against the
+      // canonical gate command regardless of this run's install choice,
+      // since it must recognize both installed shapes as current.
+      gateCommand: action === "install" && !rationaleGate ? undefined : gateCommand,
       confirmation: dependencies.confirmation,
       detail,
     };
@@ -556,7 +564,7 @@ export async function setup(argv: readonly string[], deps?: SetupDependencies): 
 
   const dependencies = deps ?? defaultDependencies();
   if (options.agentHooksAction !== undefined) {
-    return runAgentHooksAction(options.agentHooksAction, dependencies);
+    return runAgentHooksAction(options.agentHooksAction, dependencies, options.rationaleGate ?? true);
   }
 
   let registration: McpRegistration;

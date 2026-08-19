@@ -91,6 +91,8 @@ usage:
   rocky setup --voice-skill configure hosts and install managed voice skill explicitly.
   rocky setup --agent-hooks
                             install Claude Code hooks after explicit consent; print Codex TOML.
+                            installs the PreToolUse rationale gate too, unless you pass
+                            --no-rationale-gate. Codex has no deny hook; notify lane only.
   rocky setup --uninstall-agent-hooks
                             remove Rocky Claude Code hooks; Codex config stays untouched.
   rocky setup --status       report host/MCP registration via rocky setup --check and

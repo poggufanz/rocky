@@ -19,6 +19,8 @@ export function parseSetupArgs(argv: readonly string[]): SetupOptions {
   let yes = false;
   let voiceSkill = false;
   let agentHooksAction: AgentHooksAction | undefined;
+  let rationaleGate = true;
+  let rationaleGateProvided = false;
 
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
@@ -40,6 +42,11 @@ export function parseSetupArgs(argv: readonly string[]): SetupOptions {
     }
     if (argument === "--voice-skill") {
       voiceSkill = true;
+      continue;
+    }
+    if (argument === "--no-rationale-gate") {
+      rationaleGate = false;
+      rationaleGateProvided = true;
       continue;
     }
     if (argument === "--agent-hooks" || argument === "--uninstall-agent-hooks" || argument === "--status") {
@@ -81,7 +88,14 @@ export function parseSetupArgs(argv: readonly string[]): SetupOptions {
     if (modeOption !== undefined || replace || exposureProvided || voiceSkill) {
       throw new SetupUsageError("agent hook actions cannot combine with MCP or voice-skill options");
     }
-    return { mode, exposure, replace, yes, voiceSkill, agentHooksAction };
+    if (rationaleGateProvided && agentHooksAction !== "install") {
+      throw new SetupUsageError("--no-rationale-gate is valid only with --agent-hooks");
+    }
+    return { mode, exposure, replace, yes, voiceSkill, agentHooksAction, rationaleGate };
+  }
+
+  if (rationaleGateProvided) {
+    throw new SetupUsageError("--no-rationale-gate is valid only with --agent-hooks");
   }
 
   return { mode, exposure, replace, yes, voiceSkill };

@@ -78,6 +78,7 @@ test("setup parser selects dedicated Claude agent-hook actions", () => {
     yes: false,
     voiceSkill: false,
     agentHooksAction: "install",
+    rationaleGate: true,
   });
   assert.equal(parseSetupArgs(["--uninstall-agent-hooks"]).agentHooksAction, "uninstall");
   assert.equal(parseSetupArgs(["--status"]).agentHooksAction, "status");
