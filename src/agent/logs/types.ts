@@ -9,6 +9,13 @@ export interface CanonicalRationaleEvent {
   fidelity: "raw" | "summary";
   source: "log-thinking" | "log-response";
   logPath: string;
+  /**
+   * Files touched by Edit/Write/MultiEdit tool calls in the same turn as
+   * this event, when the adapter can see them. Used only for structural
+   * correlation in the capture pipeline; absent (not empty) when the
+   * adapter carries no file information at all (e.g. dsh).
+   */
+  touchedFiles?: string[];
 }
 
 /** One agent's log discovery and incremental scan surface. Never throws. */

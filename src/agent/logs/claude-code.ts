@@ -131,6 +131,27 @@ function discover(repoCwd: string): string[] {
   }
 }
 
+/** Tool names whose `input.file_path` counts as a structural file touch. */
+const FILE_TOOL_NAMES: ReadonlySet<string> = new Set(["Edit", "Write", "MultiEdit"]);
+
+/**
+ * Files touched by Edit/Write/MultiEdit tool_use entries in one turn's
+ * content array, for structural correlation downstream. Returns undefined
+ * (not empty) when the turn touched no files, matching the canonical
+ * event's optional field.
+ */
+function touchedFilesIn(content: readonly Record<string, unknown>[]): string[] | undefined {
+  const files: string[] = [];
+  for (const entry of content) {
+    if (entry.type !== "tool_use") continue;
+    if (typeof entry.name !== "string" || !FILE_TOOL_NAMES.has(entry.name)) continue;
+    if (!isRecord(entry.input)) continue;
+    const filePath = entry.input.file_path;
+    if (typeof filePath === "string" && filePath.length > 0) files.push(filePath);
+  }
+  return files.length > 0 ? files : undefined;
+}
+
 /**
  * Scan a transcript, emitting one event per `thinking` entry (raw fidelity)
  * and — only for turns with no thinking entry — one per `text` reply entry
@@ -150,6 +171,7 @@ function scan(repoCwd: string, logPath: string, fromOffset: number, maxBytes: nu
     const sessionId = typeof obj.sessionId === "string" ? obj.sessionId : "";
     const turnRef = typeof obj.uuid === "string" ? obj.uuid : "";
     const ts = typeof obj.timestamp === "string" ? Date.parse(obj.timestamp) : Number.NaN;
+    const touchedFiles = touchedFilesIn(content);
     for (const entry of content) {
       if (entry.type === "thinking" && typeof entry.thinking === "string" && entry.thinking.length > 0) {
         events.push({
@@ -162,6 +184,7 @@ function scan(repoCwd: string, logPath: string, fromOffset: number, maxBytes: nu
           fidelity: "raw",
           source: "log-thinking",
           logPath,
+          ...(touchedFiles === undefined ? {} : { touchedFiles }),
         });
       } else if (!hasThinking && entry.type === "text" && typeof entry.text === "string" && entry.text.length > 0) {
         events.push({
@@ -174,6 +197,7 @@ function scan(repoCwd: string, logPath: string, fromOffset: number, maxBytes: nu
           fidelity: "summary",
           source: "log-response",
           logPath,
+          ...(touchedFiles === undefined ? {} : { touchedFiles }),
         });
       }
       // tool_use and other entry types carry no rationale text; skipped.

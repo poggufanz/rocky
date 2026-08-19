@@ -34,6 +34,8 @@ test("extracts thinking as raw and reply text as summary fallback, cwd-filtered"
   assert.ok(raw && raw.turnRef === "u1" && raw.source === "log-thinking");
   assert.ok(summary && summary.turnRef === "u2" && summary.source === "log-response");
   assert.equal(events.length, 2, "cross-repo record filtered out");
+  assert.deepEqual(raw?.touchedFiles, ["/work/repo/src/q.ts"], "Edit tool_use in the same turn is captured");
+  assert.equal(summary?.touchedFiles, undefined, "u2's turn touched no files");
 });
 
 test("discover falls back to head probe when the slug misses, tolerating a summary first record", async (t) => {
