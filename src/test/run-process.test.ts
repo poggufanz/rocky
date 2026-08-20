@@ -69,7 +69,7 @@ test("run speech discloses cross-directory fix as possible, never strong", () =>
   try {
     // Invocation happens where the fix was learned, but the linked failure
     // came from another cwd; source disclosure must follow the failure.
-    speakFailureMemory([failure, fix], failure.fingerprint, 1, fixCwd);
+    speakFailureMemory([failure, fix], failure.fingerprint, cmd, 1, fixCwd);
   } finally {
     process.stderr.write = original;
   }
@@ -90,7 +90,7 @@ test("run speech ignores a future failure at the captured clock", () => {
   let output = "";
   process.stderr.write = ((chunk: string | Uint8Array) => { output += String(chunk); return true; }) as typeof process.stderr.write;
   try {
-    speakFailureMemory([future], future.fingerprint, 1, future.cwd, now);
+    speakFailureMemory([future], future.fingerprint, future.cmd, 1, future.cwd, now);
   } finally {
     process.stderr.write = original;
   }
@@ -113,7 +113,7 @@ test("run speech shows the top weak association candidate instead of the old no-
   let output = "";
   process.stderr.write = ((chunk: string | Uint8Array) => { output += String(chunk); return true; }) as typeof process.stderr.write;
   try {
-    speakFailureMemory([failure, association], failure.fingerprint, 67, cwd, now);
+    speakFailureMemory([failure, association], failure.fingerprint, cmd, 67, cwd, now);
   } finally {
     process.stderr.write = original;
   }
@@ -135,7 +135,7 @@ test("run speech keeps the old no-fix text unchanged, byte for byte, when no ass
   let output = "";
   process.stderr.write = ((chunk: string | Uint8Array) => { output += String(chunk); return true; }) as typeof process.stderr.write;
   try {
-    speakFailureMemory([failure], failure.fingerprint, 67, cwd, now);
+    speakFailureMemory([failure], failure.fingerprint, cmd, 67, cwd, now);
   } finally {
     process.stderr.write = original;
   }
@@ -164,11 +164,11 @@ test("run speech never overrides or duplicates a confirmed fix with an associati
   let output = "";
   process.stderr.write = ((chunk: string | Uint8Array) => { output += String(chunk); return true; }) as typeof process.stderr.write;
   try {
-    speakFailureMemory([failure, fix, association], failure.fingerprint, 1, cwd, now);
+    speakFailureMemory([failure, fix, association], failure.fingerprint, cmd, 1, cwd, now);
   } finally {
     process.stderr.write = original;
   }
-  assert.match(output, /last time, you fix with:/);
+  assert.match(output, /last time, something between fix it\. what, I not hear\. works again, I remember\./);
   assert.match(output, /same command,.*strong\./);
   assert.doesNotMatch(output, /no confirmed fix\. but after error, you run this:/);
   assert.doesNotMatch(output, /should-not-appear/);
@@ -191,7 +191,7 @@ test("run speech marks a cross-cwd association candidate with a place line and s
   let output = "";
   process.stderr.write = ((chunk: string | Uint8Array) => { output += String(chunk); return true; }) as typeof process.stderr.write;
   try {
-    speakFailureMemory([failure, association], failure.fingerprint, 67, failureCwd, now);
+    speakFailureMemory([failure, association], failure.fingerprint, cmd, 67, failureCwd, now);
   } finally {
     process.stderr.write = original;
   }
@@ -219,14 +219,53 @@ test("run speech grades an unrecognized FixRecord link basis as the weakest hedg
   let output = "";
   process.stderr.write = ((chunk: string | Uint8Array) => { output += String(chunk); return true; }) as typeof process.stderr.write;
   try {
-    speakFailureMemory([failure, fix], failure.fingerprint, 1, cwd, now);
+    speakFailureMemory([failure, fix], failure.fingerprint, cmd, 1, cwd, now);
   } finally {
     process.stderr.write = original;
   }
-  assert.match(output, /last time, you fix with:/);
+  assert.match(output, /last time, something between fix it\. what, I not hear\. works again, I remember\./);
   assert.match(output, /different program,.*maybe not fix\. check, question/);
   assert.doesNotMatch(output, /strong\./);
   assert.doesNotMatch(output, /same program,/);
+});
+
+/**
+ * `fingerprint()` hashes stderr signature lines alone once stderr has any
+ * (`cmd` only enters the hash as a fallback for empty-signature failures)
+ * — so this match is genuinely cmd-independent, wider than `hookFail`'s
+ * masked-cmd fingerprint gap. Two unrelated commands sharing an error shape
+ * fingerprint-collide here while their `commandIdentity` stays distinct,
+ * so a confirmed fix found through this match can carry a `cmd` whose
+ * identity differs from the currently failing command.
+ */
+test("run speech admits a stderr-matched fix may be a different command, not the fix", () => {
+  const cwd = join(tmpdir(), "rocky-run-diffcmd");
+  const now = 1_800_000_000_000;
+  const seededCmd = "cargo build --release";
+  const currentCmd = "npm test";
+  const sharedFingerprint = "run-diffcmd-fingerprint";
+  const failure = {
+    kind: "failure" as const, id: "run-diffcmd-failure", ts: now - 3_000, cwd, cmd: seededCmd,
+    exitCode: 1, fingerprint: sharedFingerprint, signature: ["failure"], excerpt: "failure",
+    resolvedBy: "run-diffcmd-fix",
+  };
+  const fix = {
+    kind: "fix" as const, id: "run-diffcmd-fix", ts: now - 1_000, cwd, cmd: seededCmd,
+    failureIds: [failure.id], links: [{ id: failure.id, basis: "identity" as const, confidence: "confirmed" as const }],
+  };
+  const original = process.stderr.write;
+  let output = "";
+  process.stderr.write = ((chunk: string | Uint8Array) => { output += String(chunk); return true; }) as typeof process.stderr.write;
+  try {
+    speakFailureMemory([failure, fix], sharedFingerprint, currentCmd, 1, cwd, now);
+  } finally {
+    process.stderr.write = original;
+  }
+  assert.doesNotMatch(output, /you fix with/);
+  assert.match(output, /last time, you run:/);
+  assert.match(output, new RegExp(seededCmd.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  assert.match(output, /possible fix only, question/);
+  assert.match(output, /try, question/);
 });
 
 test("unrelated successful npm task is not suggested as confirmed fix", (t) => {

@@ -229,7 +229,7 @@ export async function recall(argv: readonly string[], dependencies?: RecallDepen
     heading(`${i + 1}. ${safeTerminalLine(hit.failure.cmd)}   (${ago(hit.failure.ts)}, exit ${hit.failure.exitCode})`);
     detail(indent(safeTerminalBlock(hit.failure.excerpt)));
     if (hit.fix) {
-      say(`fixed with: ${safeTerminalLine(hit.fix.cmd)}`);
+      say(`resolved. works again after: ${safeTerminalLine(hit.fix.cmd)}`);
       const elsewhere = fixFromElsewhere(hit.fix, hit.failure.cwd);
       if (elsewhere !== undefined) {
         say("but fix comes from other place.");
