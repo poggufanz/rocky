@@ -59,7 +59,6 @@ import type {
   RecoveryOutcome,
 } from "../setup/file-transaction.js";
 import { quotePosixShell } from "../core/shell-quote.js";
-import { firstWord, resolvesOnPath } from "../core/path-lookup.js";
 import { ago, detail, detailTty, phrase, say, sayTty } from "../ui/rocky.js";
 import { safeTerminalLine } from "../ui/sanitize.js";
 
@@ -180,26 +179,33 @@ export function deepMemoryHint(cmd: string): string | undefined {
  * Is this failure a typo rather than a real error, question
  *
  * The deep-memory hint asks the person to re-run the command under
- * `rocky run` so Rocky can hear its stderr. That is good advice for a real
- * error and useless for a misspelling -- nobody wants to wrap `gti` in
- * anything. Typos are also the most frequent failure in any terminal, so
- * this is the message the hint produces most often.
+ * `rocky run` so Rocky can hear its stderr. Good advice for a real error,
+ * useless for a misspelling -- nobody wants to wrap `gti` in anything. And
+ * typos are the most frequent failure in any terminal, so this is the
+ * message the hint produces most often.
  *
- * Two signals, because one host cannot supply the other. Bash sends 127 for
- * command-not-found on every OS. PowerShell never does: `rocky-hook.ps1`
- * forces every non-native failure -- CommandNotFoundException, which is
- * exactly a typo, included -- to exit 1, deliberately, because treating
- * $LASTEXITCODE as an independent failure signal was an empirically-caught
- * bug. On that host only a PATH probe can tell a typo from a real failure.
+ * One signal: exit 127, the POSIX command-not-found code. Bash sends it
+ * natively; `rocky-hook.ps1` reports it when the failure was a
+ * CommandNotFoundException. Both hosts now answer the same question the
+ * same way, and Rocky never has to guess.
+ *
+ * An earlier attempt guessed from PATH instead, and it was wrong on
+ * PowerShell in the ordinary case: cmdlets, functions, and aliases live in
+ * the shell's own command table, never on the filesystem, so `Get-Item`
+ * looked exactly like a misspelling. Rocky hears what the shell tells him;
+ * he does not go looking for evidence the shell already has.
  *
  * Only command-not-found is covered. A missing *file* (`cat nofile.txt`,
  * exit 1) is indistinguishable from an ordinary failure without stderr, and
  * a detached hook handler never receives stderr. Half the symptom class is
- * simply out of reach in this lane; saying so beats pretending otherwise.
+ * out of reach in this lane; saying so beats pretending otherwise.
+ *
+ * `cmd` stays in the signature: the caller reads as a question about this
+ * failure, not about a bare number, and a future host that needs its own
+ * disambiguation will need it.
  */
 export function isTypoSymptom(cmd: string, exitCode: number): boolean {
-  if (exitCode === 127) return true;
-  return resolvesOnPath(firstWord(cmd)) === "not-found";
+  return exitCode === 127;
 }
 
 /** A command succeeded while the pending flag existed. Try to link a fix. */

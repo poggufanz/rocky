@@ -134,51 +134,13 @@ test("exit 127 is a typo symptom on every host", () => {
   assert.equal(isTypoSymptom("npm run build", 127), true);
 });
 
-test("a command absent from PATH is a typo symptom even without exit 127", () => {
-  const dir = mkdtempSync(join(tmpdir(), "rocky-typo-"));
-  const previousPath = process.env.PATH;
-  process.env.PATH = dir;
-  try {
-    // PowerShell never sends 127: rocky-hook.ps1 forces every non-native
-    // failure, CommandNotFoundException included, to exit 1.
-    assert.equal(isTypoSymptom("gti status", 1), true);
-  } finally {
-    process.env.PATH = previousPath;
-  }
-});
-
-test("a resolvable command failing is not a typo symptom", () => {
-  const dir = mkdtempSync(join(tmpdir(), "rocky-typo-"));
-  const exe = process.platform === "win32" ? "realtool.cmd" : "realtool";
-  writeFileSync(join(dir, exe), "");
-  const previousPath = process.env.PATH;
-  process.env.PATH = dir;
-  try {
-    assert.equal(isTypoSymptom("realtool --wrong-flag", 1), false);
-  } finally {
-    process.env.PATH = previousPath;
-  }
-});
-
-test("an unanswerable PATH leaves the hint speaking", () => {
-  const previousPath = process.env.PATH;
-  delete process.env.PATH;
-  try {
-    assert.equal(isTypoSymptom("gti status", 1), false);
-  } finally {
-    process.env.PATH = previousPath;
-  }
-});
-
-test("a shell keyword failing is not a typo symptom", () => {
-  const dir = mkdtempSync(join(tmpdir(), "rocky-typo-"));
-  const previousPath = process.env.PATH;
-  process.env.PATH = dir;
-  try {
-    assert.equal(isTypoSymptom("if false; then :; fi", 1), false);
-  } finally {
-    process.env.PATH = previousPath;
-  }
+test("a PATH-invisible command failing is not a typo symptom", () => {
+  // Cmdlets, shell functions, and aliases never appear on PATH. Guessing
+  // from PATH classified `Get-Item` as a typo and silenced a real hint;
+  // the exit code is the only signal that actually knows.
+  assert.equal(isTypoSymptom("Get-Item ./x -ErrorAction SilentlyContinue", 1), false);
+  assert.equal(isTypoSymptom("ll /nonexistent", 1), false);
+  assert.equal(isTypoSymptom("if false; then :; fi", 1), false);
 });
 
 /**
