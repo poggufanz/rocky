@@ -16,7 +16,8 @@ This is a one-person side project, not a funded product. Expect a first reply wi
 
 | Version | Supported |
 | --- | --- |
-| 0.7.0 | Yes |
+| 0.7.1 | Yes |
+| 0.7.0 | No |
 | 0.6.0 | No |
 | 0.5.5 | No |
 | 0.5.4 | No |
@@ -52,6 +53,8 @@ These artifacts can contain sensitive host configuration and are not encrypted. 
 
 Rocky's own code contains no telemetry. Its only non-loopback network traffic is `rocky check` looking up eligible package names at registry.npmjs.org: package names only, no versions or paths, after consent, with no redirects, and fail-open on every result except a definitive 404. MCP runs over local stdio, exposes read-only tools, and projects sanitized memory by default. Raw exposure is an explicit opt-in. A host you launch or configure may apply its own network and data policy, so review that host before sharing raw fields.
 
+Git diff correlation (`rocky why --diff`, `rocky how --diff`, and MCP `why_file`) executes local read-only `git` subprocesses. Subprocesses are invoked with `shell: false`, bounded by a strict 5-second timeout, and capped at a maximum 32 KB buffer. Diff output passes through automatic secret and credential scrubbing (`redactSecretsAtBoundary`) before being displayed or exposed over MCP, and falls back safely when git is unavailable.
+
 Optional AI features talk only to an Ollama service you run yourself, over loopback at `127.0.0.1`. Rocky never installs, starts, stops, or pulls a model.
 
 ## What counts as a vulnerability here
@@ -60,11 +63,11 @@ Anything that makes Rocky write outside the paths above, or mutate a host config
 
 Anything that makes Rocky report success it hasn't proved, or print a path it hasn't verified. Rocky's guards are built so that when it can't prove something it refuses and says so. A message that overstates what happened is a real bug in this project, not a cosmetic one, because people act on those messages.
 
-Anything that leaks file contents, credentials, or environment values into Rocky's output, its memory file, or a message shown to a host.
+Anything that leaks file contents, credentials, or environment values into Rocky's output, its memory file, git diff projections, or a message shown to a host.
 
 Anything that gets a substituted file accepted as the original, including same-path replacement, a same-bytes file at a different inode, symlink or hard-link tricks, or a race between when Rocky checks a file and when it uses it.
 
-Anything that makes the sanitized MCP projection reveal fields that raw exposure was supposed to gate.
+Anything that makes the sanitized MCP projection reveal fields that raw exposure was supposed to gate, or allows unscrubbed credentials to pass through git diff outputs.
 
 ## What doesn't count
 

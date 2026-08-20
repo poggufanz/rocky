@@ -102,12 +102,14 @@ Plan 02 dictionary and teaching surfaces ship in v0.5.0. The commands read remem
 rocky what "move button down"
 rocky what --ai "move button down"   # optional local Ollama ranking; deterministic fallback
 rocky how "move button down"
+rocky how --diff "move button down"  # show correlated git diff for latest mechanism
 rocky why src/button.css
+rocky why --diff src/button.css      # show correlated git diff alongside rationale
 rocky digest
 rocky quiz
 ```
 
-`what` is intent→mechanism lookup. `what --ai` can rank deterministic hits through configured loopback Ollama, then falls back to the same evidence when the model sleeps. `how` is a mechanism reminder. `why` quotes the agent's stated rationale for one file. `digest` reports the last-seven-day intent pattern. `quiz` is explicit opt-in retrieval practice. Rocky never rewrites, injects, or submits the user prompt.
+`what` is intent→mechanism lookup. `what --ai` can rank deterministic hits through configured loopback Ollama, then falls back to the same evidence when the model sleeps. `how` is a mechanism reminder. `why` quotes the agent's stated rationale for one file. `--diff` can be passed to `why` or `how` to correlate and display the relevant git diff for the touched file using a three-tier strategy (head commit SHA, $\pm 60$s time window, or uncommitted changes), with secret scrubbing and bounded 5s execution. `digest` reports the last-seven-day intent pattern. `quiz` is explicit opt-in retrieval practice. Rocky never rewrites, injects, or submits the user prompt.
 
 Quiz uses newest eligible triples and comprehension notes, deterministic newest-first with stable id tie-breaks. Unchanged memory repeats same candidates; Rocky asks, reveals, and never grades. Useful deterministic lines sound like `you say "move button down". it is margin-top. I think. check, question` and `last time you say "move button down", it become margin-top. maybe you mean margin-top, question`. Rocky hears remembered evidence; he does not turn a guess into a fact.
 
@@ -173,9 +175,9 @@ The CLI contains no telemetry and runs no daemon. Its only external network egre
 
 ## Read-only MCP knowledge tools
 
-`rocky mcp` serves seven bounded, read-only tools in deterministic order: `recall`, `recent_failures`, `stats`, `recall_with_ai`, `search_knowledge`, `fetch_record`, and `why_file`. Search first, then fetch: `search_knowledge` returns light metadata and bounded hits, including record id/timestamp, agent/source, covered files, and truncation status for triples; `fetch_record` retrieves one full record by the returned id. `why_file` returns remembered triples that touched one path. `stats` retains legacy counters and adds confirmed fixes, possible fixes, triples, notes, and total remembered items. Limits stay bounded, and sanitized projection is the default; raw fields require an explicit opt-in.
+`rocky mcp` serves seven bounded, read-only tools in deterministic order: `recall`, `recent_failures`, `stats`, `recall_with_ai`, `search_knowledge`, `fetch_record`, and `why_file`. Search first, then fetch: `search_knowledge` returns light metadata and bounded hits, including record id/timestamp, agent/source, covered files, and truncation status for triples; `fetch_record` retrieves one full record by the returned id. `why_file` returns remembered triples that touched one path, with an optional `diff?: boolean` parameter to include the correlated, secret-redacted git diff. `stats` retains legacy counters and adds confirmed fixes, possible fixes, triples, notes, and total remembered items. Limits stay bounded, and sanitized projection is the default; raw fields require an explicit opt-in.
 
-For example, a host can call `search_knowledge` with `{ "query": "move button down" }`, pass a returned id to `fetch_record`, or call `why_file` with `{ "path": "src/button.css" }`. Reasons are hearsay Rocky heard, not verified facts. Rationale is quoted and untrusted; MCP never presents it as fact or executes a remembered command.
+For example, a host can call `search_knowledge` with `{ "query": "move button down" }`, pass a returned id to `fetch_record`, or call `why_file` with `{ "path": "src/button.css", "diff": true }`. Reasons are hearsay Rocky heard, not verified facts. Rationale is quoted and untrusted; MCP never presents it as fact or executes a remembered command.
 
 ## `rocky watch` (v0.3, implemented)
 
