@@ -12,7 +12,7 @@ import { matchesGlob, parseInvariants } from "../core/invariants.js";
 import { recordBriefRun, recordInvariantTouch } from "../core/memory.js";
 import {
   canonicalPath, loadMemoryChecked,
-  type FailureRecord, type FixRecord, type MemoryRecord, type RationaleRecord,
+  type FailureRecord, type FixRecord, type MemoryRecord, type RationaleFidelity, type RationaleRecord,
 } from "../core/memory-read.js";
 import { runGit } from "../core/exec.js";
 import { truncateUtf8 } from "../mcp/privacy.js";
@@ -106,14 +106,36 @@ function boundedExcerpt(value: string): string {
   return truncateUtf8(value, MAX_WHY_EXCERPT_BYTES).value;
 }
 
-/** Newest rationale linked to this failure/fix by id, or undefined when none is linked. */
+/**
+ * Display rank for `rationale_fidelity`: lower wins. Duplicate capture of
+ * the same change by two lanes is allowed (append-only) and fidelity has
+ * no correlation with recency — the four capture lanes fire independently
+ * and asynchronously, so a `notify` summary can land after a `raw`
+ * thinking capture surfaces from a later log scan, or the reverse. Same
+ * ranking convention as `linkBasisRank` in memory-read.ts (evidence
+ * strength, not raw timestamp).
+ */
+const RATIONALE_FIDELITY_RANK: ReadonlyMap<RationaleFidelity, number> = new Map([
+  ["raw", 0],
+  ["summary", 1],
+  ["none", 2],
+]);
+
+/**
+ * Highest-fidelity rationale linked to this failure/fix by id (raw >
+ * summary > none), `ts` only as a tie-break inside the same fidelity tier.
+ * Undefined when none is linked.
+ */
 function linkedRationaleFor(records: readonly MemoryRecord[], hit: FailureRecord | FixRecord): RationaleRecord | undefined {
   let best: RationaleRecord | undefined;
   for (const record of records) {
     if (record.kind !== "rationale" || record.links === undefined) continue;
     const linkedId = hit.kind === "failure" ? record.links.failureId : record.links.fixId;
     if (linkedId !== hit.id) continue;
-    if (best === undefined || record.ts > best.ts) best = record;
+    if (best === undefined) { best = record; continue; }
+    const rank = RATIONALE_FIDELITY_RANK.get(record.rationale_fidelity) ?? Number.MAX_SAFE_INTEGER;
+    const bestRank = RATIONALE_FIDELITY_RANK.get(best.rationale_fidelity) ?? Number.MAX_SAFE_INTEGER;
+    if (rank < bestRank || (rank === bestRank && record.ts > best.ts)) best = record;
   }
   return best;
 }

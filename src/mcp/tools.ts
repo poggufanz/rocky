@@ -1355,8 +1355,10 @@ export function createToolRegistry(options: CreateToolRegistryOptions): McpToolR
     if (snapshot === undefined) {
       return { stats: {}, coverage: unknownMemoryCoverage(), error: new ToolExecutionError("memory_unavailable", "memory unavailable") };
     }
-    // byKind stays CLI-only for now; the MCP surface keeps its v0.5 field set.
-    const { byKind: _byKind, ...stats } = queryStats(snapshot.records, input);
+    // byKind and rationaleByFidelity stay CLI-only for now; the MCP surface
+    // keeps its v0.5 field set. Widening it is a deliberate decision that
+    // deserves its own review, not a side effect of adding a CLI counter.
+    const { byKind: _byKind, rationaleByFidelity: _rationaleByFidelity, ...stats } = queryStats(snapshot.records, input);
     return { stats, coverage: snapshot.coverage };
   };
   const readStatsFlight = (input: StatsQuery, canonicalMemory: boolean): Promise<StatsFlightResult> => {

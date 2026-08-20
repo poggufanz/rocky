@@ -274,6 +274,95 @@ test("briefCommand annotates a printed failure with its linked rationale, and pr
   }
 });
 
+test("briefCommand's why annotation prefers the highest-fidelity linked rationale over a newer, lower-fidelity one", async () => {
+  const dir = makeRepo();
+  const home = mkdtempSync(join(tmpdir(), "rocky-home-"));
+  const previous = process.env.ROCKY_HOME;
+  process.env.ROCKY_HOME = home;
+  const agentLogs = isolateAgentLogEnv(home);
+  try {
+    const now = Date.now();
+    const failure = {
+      kind: "failure", id: "fidelity-f1", ts: now - 2000, cwd: dir,
+      cmd: "npm test", exitCode: 1, fingerprint: "fp-fidelity-f1",
+      signature: ["boom"], excerpt: "boom",
+    };
+    // Older but raw fidelity: must still win display over a newer,
+    // lower-fidelity capture of the same failure. Fidelity has no
+    // correlation with recency — the four capture lanes fire independently
+    // and asynchronously (design spec section 4).
+    const rawOlder = {
+      kind: "rationale", id: "fidelity-r-raw", ts: now - 1500, v: 1, cwd: dir,
+      agent: "human", rationale_fidelity: "raw", source: "log-thinking",
+      excerpt: "raw thinking capture, older but higher fidelity",
+      links: { failureId: "fidelity-f1" },
+    };
+    const summaryNewer = {
+      kind: "rationale", id: "fidelity-r-summary", ts: now - 100, v: 1, cwd: dir,
+      agent: "human", rationale_fidelity: "summary", source: "notify",
+      excerpt: "summary capture, newer but lower fidelity",
+      links: { failureId: "fidelity-f1" },
+    };
+    // Written newer-first so a plain "last one wins" bug would also fail this.
+    writeFileSync(
+      join(home, "memory.jsonl"),
+      [failure, summaryNewer, rawOlder].map((record) => JSON.stringify(record)).join("\n") + "\n",
+      "utf8",
+    );
+
+    const { code, stderr } = await captureStdio(() => briefCommand(["--since", "1d", "--quiet"], dir));
+    assert.equal(code, 0);
+    assert.match(stderr, /why: raw thinking capture, older but higher fidelity \(heard from thinking\)/);
+    assert.doesNotMatch(stderr, /summary capture, newer but lower fidelity/);
+  } finally {
+    agentLogs.restore();
+    if (previous === undefined) delete process.env.ROCKY_HOME;
+    else process.env.ROCKY_HOME = previous;
+  }
+});
+
+test("briefCommand's why annotation truncates a long rationale excerpt at a UTF-8 character boundary, never mid-character", async () => {
+  const dir = makeRepo();
+  const home = mkdtempSync(join(tmpdir(), "rocky-home-"));
+  const previous = process.env.ROCKY_HOME;
+  process.env.ROCKY_HOME = home;
+  const agentLogs = isolateAgentLogEnv(home);
+  try {
+    const now = Date.now();
+    const failure = {
+      kind: "failure", id: "trunc-f1", ts: now - 1000, cwd: dir,
+      cmd: "npm test", exitCode: 1, fingerprint: "fp-trunc-f1",
+      signature: ["boom"], excerpt: "boom",
+    };
+    // 127 ASCII bytes, then a 3-byte UTF-8 character (euro sign, U+20AC)
+    // straddling the 128-byte truncation boundary: 127 + 3 = 130 > 128, so
+    // a boundary-respecting truncator must drop the whole character rather
+    // than split it. Text after it proves truncation actually fires — an
+    // unbounded implementation would print this tail too.
+    const longExcerpt = `${"a".repeat(127)}€ and a tail that must never reach the terminal`;
+    const rationale = {
+      kind: "rationale", id: "trunc-r1", ts: now - 500, v: 1, cwd: dir,
+      agent: "human", rationale_fidelity: "raw", source: "human",
+      excerpt: longExcerpt,
+      links: { failureId: "trunc-f1" },
+    };
+    writeFileSync(join(home, "memory.jsonl"), `${JSON.stringify(failure)}\n${JSON.stringify(rationale)}\n`, "utf8");
+
+    const { code, stderr } = await captureStdio(() => briefCommand(["--since", "1d", "--quiet"], dir));
+    assert.equal(code, 0);
+    // Exactly the 127-byte ASCII prefix; the euro sign dropped whole, not
+    // split, and the tail never reached the terminal.
+    assert.match(stderr, new RegExp(`why: ${"a".repeat(127)} \\(you said\\)`));
+    assert.doesNotMatch(stderr, /€/);
+    assert.doesNotMatch(stderr, /tail that must never reach/);
+    assert.doesNotMatch(stderr, /�/); // no replacement character from a split multi-byte sequence
+  } finally {
+    agentLogs.restore();
+    if (previous === undefined) delete process.env.ROCKY_HOME;
+    else process.env.ROCKY_HOME = previous;
+  }
+});
+
 test("briefCommand prints a repeated concepts section when memory holds the same concept twice or more in window", async () => {
   const dir = makeRepo();
   const home = mkdtempSync(join(tmpdir(), "rocky-home-"));
