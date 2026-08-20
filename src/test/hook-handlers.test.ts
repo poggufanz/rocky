@@ -160,7 +160,7 @@ test("hookFail admits when the remembered fix's cwd differs from the cwd argumen
   try {
     const { result, tty } = captureTty(() => hookFail("elsewhere-test-cmd", 1, failCwd));
     assert.equal(result, 0);
-    assert.match(tty, /last time, you fix with:/);
+    assert.match(tty, /last time, something between fix it\. what, I not hear\. works again, I remember\./);
     assert.match(tty, /but fix comes from other place\./);
     assert.match(tty, new RegExp(`place: ${fixCwd.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
     assert.doesNotMatch(tty, /strong\.|confirmed/);
@@ -195,7 +195,58 @@ test("hookFail says nothing extra when the remembered fix's cwd matches the cwd 
     assert.doesNotMatch(tty, /place:/);
     // sanity: the base fix line still speaks, proving the comparison — not
     // the whole fix branch — is what's being suppressed here.
-    assert.match(tty, /last time, you fix with:/);
+    assert.match(tty, /last time, something between fix it\. what, I not hear\. works again, I remember\./);
+  } finally {
+    process.env.ROCKY_HOME = home;
+  }
+});
+
+/**
+ * The recurrence match in `hookFail` is a coarse, masked fingerprint on
+ * `cmd` alone (no stderr reaches a detached hook handler) — `normalizeLine`
+ * masks a plain non-semantic number to `#`, so "cat file123.txt" and
+ * "cat file456.txt" (same exit code) fingerprint-collide while their
+ * `commandIdentity` values stay genuinely distinct (different literal
+ * filename token). This is the reachable case task 17b's reachability
+ * check was asked to confirm: a confirmed `FixRecord` found through this
+ * match can carry a `cmd` whose identity differs from the currently
+ * failing command, so `hookFail` must not present it as "you fix with:".
+ */
+test("hookFail admits a fingerprint-matched fix may be a different command, not the fix", () => {
+  const isolatedHome = mkdtempSync(join(tmpdir(), "rocky-diffcmd-"));
+  const diffCwd = mkdtempSync(join(tmpdir(), "rocky-diffcmd-cwd-"));
+  const seededCmd = "cat file123.txt";
+  const currentCmd = "cat file456.txt";
+  const seededFingerprint = commandFingerprint(seededCmd, 1);
+  const failure = {
+    kind: "failure", id: "diff-cmd-failure", ts: Date.now() - 1000, cwd: diffCwd,
+    cmd: seededCmd, exitCode: 1, fingerprint: seededFingerprint, fingerprintV: 2,
+    signature: [seededCmd], excerpt: "exit 1", origin: "hook",
+    resolvedBy: "diff-cmd-fix",
+  };
+  const fix = {
+    kind: "fix", id: "diff-cmd-fix", ts: Date.now(), cwd: diffCwd,
+    cmd: seededCmd, failureIds: ["diff-cmd-failure"],
+  };
+  writeFileSync(
+    join(isolatedHome, "memory.jsonl"),
+    `${JSON.stringify(failure)}\n${JSON.stringify(fix)}\n`,
+    "utf8",
+  );
+  process.env.ROCKY_HOME = isolatedHome;
+  try {
+    // Sanity: the two commands really do collide at the coarse fingerprint
+    // Rocky's hook path uses (proves the test exercises the intended gap
+    // instead of a same-command match by coincidence).
+    assert.equal(commandFingerprint(currentCmd, 1), seededFingerprint);
+
+    const { result, tty } = captureTty(() => hookFail(currentCmd, 1, diffCwd));
+    assert.equal(result, 0);
+    assert.doesNotMatch(tty, /you fix with/);
+    assert.match(tty, /last time, you run:/);
+    assert.match(tty, new RegExp(seededCmd.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+    assert.match(tty, /possible fix only, question/);
+    assert.match(tty, /try, question/);
   } finally {
     process.env.ROCKY_HOME = home;
   }

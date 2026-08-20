@@ -178,7 +178,7 @@ export function linkFixOnSuccess(
 ): ResolveFixResult {
   const result = resolveFixOnSuccess(cmd, cwd, options);
   if (!quiet && result.confirmedResolved > 0) {
-    say("command works now. you fix it. I remember the fix. good good good.");
+    say("command works now. something between fix it. what, I not hear. works again, I remember. good good good.");
   }
   return result;
 }
