@@ -97,3 +97,57 @@ test("runReplCommand help returns 0 without a dispatch table entry", async () =>
   const code = await runReplCommand("help", [], false, {});
   assert.equal(code, 0);
 });
+
+test("runReplCommand prepends --ai for recall and what, never for why, when useAi is true", async () => {
+  const { runReplCommand } = await import("../commands/repl.js");
+  const seen: Record<string, string[]> = {};
+  const spy = (name: string) => (argv: string[]) => {
+    seen[name] = argv;
+    return 0;
+  };
+  const dispatch = { recall: spy("recall"), what: spy("what"), why: spy("why"), how: spy("how") };
+  await runReplCommand("recall", ["build", "error"], true, dispatch);
+  await runReplCommand("what", ["naikin"], true, dispatch);
+  await runReplCommand("why", ["src/app.css"], true, dispatch);
+  await runReplCommand("how", ["naikin"], true, dispatch);
+  assert.deepEqual(seen.recall, ["--ai", "build", "error"]);
+  assert.deepEqual(seen.what, ["--ai", "naikin"]);
+  assert.deepEqual(seen.why, ["src/app.css"]); // never gets --ai: why has no such option
+  assert.deepEqual(seen.how, ["naikin"]); // not AI-aware at all
+});
+
+test("repl concept alias with a quoted multi-word phrase writes the full phrase, not a truncated one", async (t) => {
+  withRockyHome(t);
+  const home = process.env.ROCKY_HOME as string;
+  const { replCommand } = await import("../commands/repl.js");
+  const input = Readable.from(['concept alias "flaky test" test-isolation\n', "quit\n"]);
+  const code = await replCommand([], input);
+  assert.equal(code, 0);
+
+  const { readFileSync } = await import("node:fs");
+  const { join } = await import("node:path");
+  const lines = readFileSync(join(home, "memory.jsonl"), "utf8").split("\n").filter((l) => l.trim().length > 0);
+  const records = lines.map((l) => JSON.parse(l));
+  const alias = records.find((r) => r.kind === "alias");
+  assert.ok(alias, "expected an alias record to be written");
+  assert.equal(alias.alias, "flaky test");
+  assert.equal(alias.concept, "test-isolation");
+});
+
+test("repl refuses an unterminated quote instead of writing a truncated alias, and still exits cleanly", async (t) => {
+  withRockyHome(t);
+  const home = process.env.ROCKY_HOME as string;
+  const { replCommand } = await import("../commands/repl.js");
+  const input = Readable.from(['concept alias "flaky test test-isolation\n', "quit\n"]);
+  const code = await replCommand([], input);
+  assert.equal(code, 0);
+
+  const { existsSync, readFileSync } = await import("node:fs");
+  const { join } = await import("node:path");
+  const memoryPath = join(home, "memory.jsonl");
+  if (existsSync(memoryPath)) {
+    const lines = readFileSync(memoryPath, "utf8").split("\n").filter((l) => l.trim().length > 0);
+    const records = lines.map((l) => JSON.parse(l));
+    assert.equal(records.some((r) => r.kind === "alias"), false, "no alias record should have been written");
+  }
+});

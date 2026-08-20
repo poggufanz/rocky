@@ -4,7 +4,8 @@
  * node:readline reads one line, the first word picks a command from a
  * fixed table, the rest of the line becomes that command's argv, and the
  * matching in-process function runs. No subprocess, no model, no parsing
- * cleverness. Unknown input gets the command list back, in Rocky's voice.
+ * cleverness beyond minimal double-quote grouping. Unknown input gets the
+ * command list back, in Rocky's voice.
  *
  * The loop must never crash: a bad line loses the person's place, which is
  * worse than no repl at all. Every dispatch is wrapped so a thrown command
@@ -21,8 +22,17 @@ import { detail, prompt as rockyPrompt, say } from "../ui/rocky.js";
 const UNKNOWN_COMMAND =
   "not command. rocky hears: recall, what, why, how, concepts, sessions, help, quit. try again, question";
 
-/** Commands whose argv accepts `--ai` when the repl session itself was started with it. */
-const AI_AWARE_COMMANDS = new Set(["recall", "why"]);
+const UNTERMINATED_QUOTE =
+  "quote does not close. rocky needs matching mark. try again, question";
+
+/**
+ * Commands whose argv accepts `--ai` when the repl session itself was
+ * started with it. `recall` and `what` both support `--ai` for optional
+ * loopback-Ollama polish on top of deterministic output; `why` has no such
+ * option -- passing it there would make `why` fail every time for the rest
+ * of the session, which is worse than the repl simply not polishing it.
+ */
+const AI_AWARE_COMMANDS = new Set(["recall", "what"]);
 
 export type ReplCommandHandler = (argv: string[]) => number | Promise<number>;
 
@@ -53,7 +63,7 @@ function printHelp(): void {
 
 /**
  * Query parsers only recognize `--ai` before the query text starts, so it
- * must go first, and never twice -- both `recall` and `why` reject a
+ * must go first, and never twice -- `recall` and `what` both reject a
  * repeated `--ai` as a usage error rather than a crash, but there is no
  * reason to trigger that when the person already typed it themselves.
  */
@@ -93,17 +103,54 @@ export async function runReplCommand(
   }
 }
 
-interface ParsedLine {
-  command: string;
-  rest: string[];
+type ParsedLine =
+  | { kind: "empty" }
+  | { kind: "unterminated-quote" }
+  | { kind: "command"; command: string; rest: string[] };
+
+/**
+ * Minimal double-quote-aware tokenizer: whitespace splits tokens outside
+ * quotes, and a `"..."` run becomes one token with the quotes stripped
+ * (including an empty `""` token). No escapes, no single quotes, no other
+ * shell grammar -- an unquoted-at-EOF line ("unterminated-quote") is
+ * refused by the caller instead of guessing what the person meant. This
+ * exists only so `concept alias "<phrase>" <id>` can carry a multi-word
+ * phrase without writing a truncated phrase into the append-only alias
+ * evidence.
+ */
+function tokenize(raw: string): string[] | undefined {
+  const tokens: string[] = [];
+  let current = "";
+  let hasCurrent = false;
+  let inQuotes = false;
+  for (const ch of raw) {
+    if (ch === '"') {
+      inQuotes = !inQuotes;
+      hasCurrent = true;
+      continue;
+    }
+    if (!inQuotes && /\s/.test(ch)) {
+      if (hasCurrent) {
+        tokens.push(current);
+        current = "";
+        hasCurrent = false;
+      }
+      continue;
+    }
+    current += ch;
+    hasCurrent = true;
+  }
+  if (inQuotes) return undefined;
+  if (hasCurrent) tokens.push(current);
+  return tokens;
 }
 
-/** Whitespace-split only -- no quoting, no shell grammar. */
-function parseLine(raw: string): ParsedLine | undefined {
-  const tokens = raw.trim().split(/\s+/).filter((token) => token.length > 0);
-  if (tokens.length === 0) return undefined;
+function parseLine(raw: string): ParsedLine {
+  const tokens = tokenize(raw);
+  if (tokens === undefined) return { kind: "unterminated-quote" };
+  if (tokens.length === 0) return { kind: "empty" };
   const [command, ...rest] = tokens;
-  return { command, rest };
+  return { kind: "command", command, rest };
 }
 
 export async function replCommand(argv: readonly string[], input?: NodeJS.ReadableStream): Promise<number> {
@@ -132,7 +179,12 @@ export async function replCommand(argv: readonly string[], input?: NodeJS.Readab
     rl.on("line", (raw: string) => {
       if (finished) return;
       const parsed = parseLine(raw);
-      if (parsed === undefined) {
+      if (parsed.kind === "empty") {
+        rl.prompt();
+        return;
+      }
+      if (parsed.kind === "unterminated-quote") {
+        say(UNTERMINATED_QUOTE);
         rl.prompt();
         return;
       }

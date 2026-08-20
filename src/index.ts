@@ -90,7 +90,7 @@ usage:
   rocky sessions <index>    hear one session's evidence, chronologically.
   rocky repl [--ai]         stay in one loop over recall/what/why/how/concepts/
                             sessions instead of paying startup per call.
-                            --ai passes through to recall and why. type help
+                            --ai passes through to recall and what. type help
                             inside for the command list, quit or exit to leave.
   rocky mcp                 serve read-only memory tools over stdio.
   rocky setup               configure detected MCP hosts with sanitized exposure.
