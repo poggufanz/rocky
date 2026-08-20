@@ -64,6 +64,15 @@ import { ago, detail, detailTty, phrase, say, sayTty } from "../ui/rocky.js";
 import { safeTerminalLine } from "../ui/sanitize.js";
 
 /**
+ * The hook contract both `rocky-hook.bash` and `rocky-hook.ps1` implement.
+ * Bump it whenever an installed hook file would behave differently from the
+ * one this package ships, so `rocky hook status` can say a reinstall is
+ * needed. Both hosts always move together: this names the protocol, not a
+ * file. A test asserts both assets carry exactly this literal.
+ */
+export const ROCKY_HOOK_PROTOCOL_VERSION = "0.4.0";
+
+/**
  * An unreadable memory file is spoken over /dev/tty, not thrown — a detached
  * hook handler must never take the shell down.
  */

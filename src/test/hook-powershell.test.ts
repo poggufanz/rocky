@@ -237,7 +237,7 @@ test("PowerShell hook status reports absent, then installed, per host", (t) => {
 
   assert.equal(hookInstall(), 0, sandbox.stderr());
   assert.equal(hookStatus(), 0, sandbox.stderr());
-  assert.match(sandbox.stderr(), /Windows PowerShell: installed, hook version 0\.3\.0, PowerShell 5\.1\.26100\.9168\./);
+  assert.match(sandbox.stderr(), /Windows PowerShell: installed, hook version 0\.4\.0, PowerShell 5\.1\.26100\.9168\./);
   // Ruling 2: the $Error[0] shift must be disclosed where a user actually
   // meets it -- rocky hook status for the PowerShell hosts.
   assert.match(sandbox.stderr(), /\$Error/, "status must disclose the $Error shift for a PowerShell host");

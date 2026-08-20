@@ -471,3 +471,14 @@ test("hookFail's speech survives end to end through the buffer/publish path exac
     rmSync(scratch, { recursive: true, force: true });
   }
 });
+
+const { ROCKY_HOOK_PROTOCOL_VERSION } = await import("../commands/hook.js");
+
+test("both hook assets carry the protocol version the code expects", () => {
+  const shellDir = join(dirname(fileURLToPath(import.meta.url)), "../shell");
+  for (const asset of ["rocky-hook.bash", "rocky-hook.ps1"]) {
+    const source = readFileSync(join(shellDir, asset), "utf8");
+    const found = /ROCKY_HOOK_VERSION="([^"]+)"/.exec(source)?.[1];
+    assert.equal(found, ROCKY_HOOK_PROTOCOL_VERSION, asset);
+  }
+});

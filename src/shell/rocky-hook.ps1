@@ -23,7 +23,7 @@
 # src/core/fingerprint.ts) that the Bash hook has used since v0.4.0, via the
 # same `origin: "hook"` record shape -- no new schema, no new CLI surface.
 #
-# ROCKY_HOOK_VERSION="0.3.0" -- same hook-protocol version as rocky-hook.bash;
+# ROCKY_HOOK_VERSION="0.4.0" -- same hook-protocol version as rocky-hook.bash;
 # `rocky hook status` reads this exact literal via the same regex both hosts
 # share (src/commands/hook.ts), so this line's shape must stay byte-parseable.
 

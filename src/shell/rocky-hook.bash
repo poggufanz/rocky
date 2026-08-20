@@ -8,7 +8,7 @@
 # interactive shells only — scripts and CI never touched
 [[ $- == *i* ]] || return 0
 
-ROCKY_HOOK_VERSION="0.3.0"
+ROCKY_HOOK_VERSION="0.4.0"
 __rocky_home="${ROCKY_HOME:-$HOME/.rocky}"
 __rocky_bin="${ROCKY_BIN:-rocky}"
 __rocky_disabled=""
