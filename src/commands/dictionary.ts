@@ -11,6 +11,7 @@ import { createTtyPromptPort } from "../setup/prompt.js";
 import { truncateUtf8 } from "../mcp/privacy.js";
 import { ago, detail, say } from "../ui/rocky.js";
 import { safeTerminalLine } from "../ui/sanitize.js";
+import { formatGitDiffLines, resolveGitDiff, type GitDiffOptions, type GitDiffResult } from "../core/git-diff.js";
 import { parseNoArgs, parseQueryArgs, reportCliUsage } from "./cli-args.js";
 
 const MAX_QUERY_DISPLAY_BYTES = 160;
@@ -31,6 +32,7 @@ export interface DictionaryCommandDeps {
   out?: (line: string) => void;
   rank?: DictionaryRankPort;
   now?: number;
+  gitDiff?: (options: GitDiffOptions) => GitDiffResult | undefined;
 }
 
 interface Sinks {
@@ -429,10 +431,14 @@ export async function what(argv: string[], deps: DictionaryCommandDeps = {}): Pr
 export function how(argv: string[], deps: DictionaryCommandDeps = {}): number {
   const { speak, support, records, coverage } = resolve(deps);
   let query: string;
+  let showDiff = false;
   try {
-    query = parseQueryArgs(argv, {
-      usage: "rocky how [--] <query...>",
-    }).query;
+    const parsed = parseQueryArgs(argv, {
+      allowDiff: true,
+      usage: "rocky how [--diff] [--] <query...>",
+    });
+    query = parsed.query;
+    showDiff = parsed.diff;
   } catch (error) {
     const code = reportCliUsage(error, speak, support);
     if (code !== undefined) return code;
@@ -463,7 +469,28 @@ export function how(argv: string[], deps: DictionaryCommandDeps = {}): number {
   speak(terminalSafe("triple" in first
     ? `last time you say "${safeQuery}", it become ${subject(first)}. maybe you mean ${subject(first)}, question`
     : `last time you say "${safeQuery}", your note says ${subject(first)}. I only hear, question`, MAX_OUTPUT_LINE_BYTES));
-  evidence(teaching.all, support);
+  const gitDiffFn = deps.gitDiff ?? resolveGitDiff;
+  for (const hit of teaching.all) {
+    for (const line of evidenceLines(hit)) support(line);
+    if (showDiff && "triple" in hit) {
+      const triple = hit.triple;
+      const firstFile = triple.mechanism.files[0];
+      let diffResult: GitDiffResult | undefined;
+      try {
+        diffResult = gitDiffFn({
+          head: triple.mechanism.head,
+          ts: triple.ts,
+          file: firstFile?.path,
+          cwd: triple.cwd,
+        });
+      } catch {
+        diffResult = undefined;
+      }
+      for (const diffLine of formatGitDiffLines(diffResult)) {
+        support(diffLine);
+      }
+    }
+  }
   return 0;
 }
 
@@ -524,10 +551,14 @@ export function why(argv: string[], deps: DictionaryCommandDeps = {}): number {
     return whyAdd(argv.slice(1).join(" "), speak, records, deps.now ?? Date.now());
   }
   let path: string;
+  let showDiff = false;
   try {
-    path = parseQueryArgs(argv, {
-      usage: "rocky why [--] <file>",
-    }).query;
+    const parsed = parseQueryArgs(argv, {
+      allowDiff: true,
+      usage: 'rocky why [--diff] [--add "<text>"] [--] <file>',
+    });
+    path = parsed.query;
+    showDiff = parsed.diff;
   } catch (error) {
     const code = reportCliUsage(error, speak, support);
     if (code !== undefined) return code;
@@ -569,6 +600,7 @@ export function why(argv: string[], deps: DictionaryCommandDeps = {}): number {
   if (evidenceResult.coverageIncomplete) {
     support(terminalSafe(`coverage status: ${evidenceResult.coverage.status}; some path may be omitted.`, MAX_OUTPUT_LINE_BYTES));
   }
+  const gitDiffFn = deps.gitDiff ?? resolveGitDiff;
   for (const triple of hits) {
     const selected = fileForQuery(triple, path);
     const where = selected
@@ -596,6 +628,22 @@ export function why(argv: string[], deps: DictionaryCommandDeps = {}): number {
       const excerptSafe = terminalSafe(rationaleRecord.excerpt, MAX_INTENT_DISPLAY_BYTES).trim();
       speak(terminalSafe(`${label}: ${excerptSafe}`, MAX_OUTPUT_LINE_BYTES));
       support(terminalSafe(`  (rationale id=${rationaleRecord.id}, ${ago(rationaleRecord.ts)}, agent=${rationaleRecord.agent}, fidelity=${rationaleRecord.rationale_fidelity})`, MAX_OUTPUT_LINE_BYTES));
+    }
+    if (showDiff) {
+      let diffResult: GitDiffResult | undefined;
+      try {
+        diffResult = gitDiffFn({
+          head: triple.mechanism.head,
+          ts: triple.ts,
+          file: selected ? selected.path : path,
+          cwd: triple.cwd,
+        });
+      } catch {
+        diffResult = undefined;
+      }
+      for (const diffLine of formatGitDiffLines(diffResult)) {
+        support(diffLine);
+      }
     }
   }
   return 0;

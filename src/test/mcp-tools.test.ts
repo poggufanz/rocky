@@ -116,6 +116,7 @@ test("new tool descriptions are concrete and schemas expose their bounds", () =>
   assert.deepEqual(why.inputSchema, {
     type: "object", additionalProperties: false, required: ["path"], properties: {
       path: { type: "string", maxLength: MAX_FIELD_BYTES }, limit: { type: "integer", minimum: 1, maximum: 10 },
+      diff: { type: "boolean" },
     },
   });
 });

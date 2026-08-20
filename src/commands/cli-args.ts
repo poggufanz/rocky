@@ -13,6 +13,7 @@ export class CliUsageError extends Error {
 export interface ParsedQueryArgs {
   query: string;
   useAi: boolean;
+  diff: boolean;
 }
 
 /** Reject every argument before a command reads or mutates state. */
@@ -36,10 +37,11 @@ export function parseExactCommand(argv: readonly string[], usage: string): strin
  */
 export function parseQueryArgs(
   argv: readonly string[],
-  options: { usage: string; allowAi?: boolean },
+  options: { usage: string; allowAi?: boolean; allowDiff?: boolean },
 ): ParsedQueryArgs {
   let terminated = false;
   let useAi = false;
+  let diff = false;
   const query: string[] = [];
 
   for (const token of argv) {
@@ -54,13 +56,20 @@ export function parseQueryArgs(
       useAi = true;
       continue;
     }
+    if (!terminated && token === "--diff") {
+      if (options.allowDiff !== true || diff || query.length > 0) {
+        throw new CliUsageError(`unexpected option: ${token}`, options.usage);
+      }
+      diff = true;
+      continue;
+    }
     if (!terminated && token.startsWith("-")) {
       throw new CliUsageError(`unexpected option: ${token}`, options.usage);
     }
     query.push(token);
   }
 
-  return { query: query.join(" ").trim(), useAi };
+  return { query: query.join(" ").trim(), useAi, diff };
 }
 
 /** Render a parser error through the command's normal persona/support sinks. */

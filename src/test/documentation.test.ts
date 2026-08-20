@@ -111,12 +111,11 @@ test("README and CLI help publish the installable command surface", () => {
 test("README stays a concise front page with durable project links", () => {
   assert.ok(readmePage.split("\n").length <= 180, "README detail belongs in docs/reference.md");
   assertContainsEvery(readmePage, "README project links", [
-    "https://github.com/poggufanz/rocky/releases/tag/v0.7.0",
+    "https://github.com/poggufanz/rocky/releases/tag/v0.7.1",
     "CHANGELOG.md",
     "LICENSE",
     "https://github.com/poggufanz/rocky/blob/main/SECURITY.md",
     "https://github.com/poggufanz/rocky/blob/main/CONTRIBUTING.md",
-    "https://github.com/poggufanz/rocky/blob/main/docs/reference.md",
     "/assets/rocky-pixel.webp",
   ]);
 });

@@ -5,7 +5,7 @@
 [![npm](https://img.shields.io/npm/v/@poggufanz/rocky-cli?style=flat-square)](https://www.npmjs.com/package/@poggufanz/rocky-cli)
 [![MIT license](https://img.shields.io/badge/license-MIT-blue.svg?style=flat-square)](LICENSE)
 
-[Release v0.7.0](https://github.com/poggufanz/rocky/releases/tag/v0.7.0) | [Changelog](CHANGELOG.md) | [License](LICENSE) | [Security](https://github.com/poggufanz/rocky/blob/main/SECURITY.md) | [Contributing](https://github.com/poggufanz/rocky/blob/main/CONTRIBUTING.md)
+[Release v0.7.1](https://github.com/poggufanz/rocky/releases/tag/v0.7.1) | [Changelog](CHANGELOG.md) | [License](LICENSE) | [Security](https://github.com/poggufanz/rocky/blob/main/SECURITY.md) | [Contributing](https://github.com/poggufanz/rocky/blob/main/CONTRIBUTING.md)
 
 Rocky is a blind engineer who lives in your terminal. He remembers failed commands and what fixed them, then brings that history back when the same trouble returns. Supported agent hooks can also keep a bounded record of what you asked for, which files changed, and why the agent said it changed them.
 
@@ -21,7 +21,7 @@ npm install -g @poggufanz/rocky-cli
 
 Requires Node.js 18 or newer. The package name is `@poggufanz/rocky-cli`; the unrelated unscoped `rocky-cli` package is not this project.
 
-Current release: `@poggufanz/rocky-cli@0.7.0`. See the [release notes](https://github.com/poggufanz/rocky/releases/tag/v0.7.0) or the full [changelog](CHANGELOG.md).
+Current release: `@poggufanz/rocky-cli@0.7.1`. See the [release notes](https://github.com/poggufanz/rocky/releases/tag/v0.7.1) or the full [changelog](CHANGELOG.md).
 
 ## Quick start
 
@@ -77,7 +77,7 @@ Rocky preserves wrapped-command stdout, stderr, TTY behavior, and exit status. P
 | `rocky invariants` | List remembered invariant notes and hear which globs guard nothing. |
 | `rocky check` | Inspect the commits or workspace about to be pushed. |
 | `rocky hook install\|status\|uninstall` | Manage the Bash/WSL hook, and on Windows every detected PowerShell host's hook. |
-| `rocky what`, `rocky how`, `rocky why [--add "<text>"]` | Look up remembered intent/mechanism evidence, or teach your own rationale. |
+| `rocky what`, `rocky how [--diff]`, `rocky why [--diff] [--add "<text>"]` | Look up remembered intent/mechanism evidence, with optional correlated git diff, or teach your own rationale. |
 | `rocky digest`, `rocky quiz`, `rocky export` | Review or export recent learning records. |
 | `rocky concepts`, `rocky concept <id>`, `rocky concept alias` | List, look up, and teach concepts heard in memory. |
 | `rocky sessions [n]`, `rocky repl [--ai]` | Browse derived work sessions, or stay in one loop over recall/what/why/how. |

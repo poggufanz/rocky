@@ -2,6 +2,15 @@
 
 Notable changes per release. Dates are the release date.
 
+## 0.7.1 — 20 August 2026
+
+Release: [v0.7.1](https://github.com/poggufanz/rocky/releases/tag/v0.7.1)
+
+A patch release adding native Git Diff Correlation to Rocky's memory evidence:
+- **`rocky why <file> [--diff]` & `rocky how <query> [--diff]`:** Renders bounded, secret-redacted git patches correlated with remembered rationale and mechanism evidence.
+- **Git diff resolution with fail-open guarantee:** Correlates via commit SHA (`diff-tree`), timestamp window (`git log -n 1 --since/--until`), or uncommitted working tree diff (`git diff HEAD`). Fails open with `(git diff unavailable)` when outside a repository, when git is not installed, or upon timeout without throwing.
+- **MCP Tool enhancements:** `why_file` accepts optional `diff?: boolean` and includes projected bounded diffs.
+
 ## 0.7.0 — 20 August 2026
 
 Release: [v0.7.0](https://github.com/poggufanz/rocky/releases/tag/v0.7.0)

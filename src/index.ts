@@ -63,8 +63,10 @@ usage:
                             --ai asks configured local Ollama after deterministic recall.
   rocky what [--ai] [--] <query...>
                             look up what remembered intent became.
-  rocky how [--] <query...> remember how intent became code.
-  rocky why [--] <file>     hear why remembered change touched file.
+  rocky how [--diff] [--] <query...>
+                            remember how intent became code.
+  rocky why [--diff] [--add "<text>"] [--] <file>
+                            hear why remembered change touched file.
   rocky digest              hear this week's remembered intent pattern.
   rocky quiz                practice newest remembered intent or note; asks, then reveals,
                             deterministic newest-first, stable id tie-break, repeats unchanged
