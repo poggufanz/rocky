@@ -9,7 +9,7 @@
  * evidence remains a possible association.
  */
 
-import { fingerprintCandidates } from "../core/fingerprint.js";
+import { commandIdentity, fingerprintCandidates } from "../core/fingerprint.js";
 import { CANCEL_CODES, runProcess, type ExecResult } from "../core/exec.js";
 import { resolveRockyPaths } from "../core/state-paths.js";
 import {
@@ -78,6 +78,7 @@ function readMemory(): MemoryRecord[] | undefined {
 export function speakFailureMemory(
   memory: MemoryRecord[],
   fp: string | readonly string[],
+  cmd: string,
   exitCode: number,
   _cwd: string,
   now = Date.now(),
@@ -90,13 +91,34 @@ export function speakFailureMemory(
     const withFix = [...previous].reverse().find((f) => getFix(memory, f, now));
     if (withFix) {
       const fix = getFix(memory, withFix, now)!;
-      say(`last time, you fix with:`);
-      detail(`    ${safeTerminalLine(fix.cmd)}`);
+      // The recurrence match above is a stderr-signature fingerprint (see
+      // `fingerprint()`): when stderr carries signature lines, the hash is
+      // derived from those lines alone, never from `cmd` — so it can pair
+      // this failure with a past one from a genuinely different command
+      // that happened to produce a matching error shape. `fix.cmd` is
+      // always identity-equal to that PAST failure's command (a confirmed
+      // FixRecord only ever forms under exact identity), never to whatever
+      // actually changed between runs — so it is never "the fix", only a
+      // possibly-different command that happened to work. Say only what's
+      // true in each case, exactly like `hookFail`'s recurrence path.
+      const currentIdentity = commandIdentity(cmd);
+      const fixIdentity = commandIdentity(fix.cmd, { platform: fix.platform ?? process.platform });
+      const sameCommand = currentIdentity.reliable && fixIdentity.reliable && currentIdentity.value === fixIdentity.value;
+      if (sameCommand) {
+        say("last time, something between fix it. what, I not hear. works again, I remember.");
+      } else {
+        say("last time, you run:");
+        detail(`    ${safeTerminalLine(fix.cmd)}`);
+        say("possible fix only, question");
+      }
       const elsewhere = fixFromElsewhere(fix, withFix.cwd);
       // Say how much this link is worth. `recall` graded strong/weak from the
       // day it shipped; run/watch/hook did not, so the surfaces people actually
       // use presented a weak "same program" guess with the same confidence as a
       // real match. A wrong fix stated plainly is worse than no fix at all.
+      // This grade describes the historical fix<->failure link's own evidence
+      // basis — a separate axis from `sameCommand` above (whether that history
+      // even matches what's failing right now) — so it still prints regardless.
       const basis = fix.links?.find((link) => link.id === withFix.id)?.basis;
       if (elsewhere !== undefined) {
         say("but fix comes from other place.");
@@ -113,7 +135,7 @@ export function speakFailureMemory(
         // no grade line at all.
         say(`different program, ${elapsed(fix.ts - withFix.ts)} later. maybe not fix. check, question`);
       }
-      say("try, question");
+      if (!sameCommand) say("try, question");
     } else {
       const candidate = speakablePossibleFix(memory, previous, now);
       if (candidate) {
@@ -158,7 +180,7 @@ function onFailure(cmd: string, result: ExecResult): void {
     // result.stderr is the bounded tail (last TAIL_LINES lines, each capped
     // at MAX_LINE_BYTES), not the full stderr stream — fingerprinting now
     // sees the last 200 lines, not everything the command wrote (spec §3.6).
-    speakFailureMemory(memory, fingerprintCandidates(result.stderr, cmd, result.code), result.code, process.cwd());
+    speakFailureMemory(memory, fingerprintCandidates(result.stderr, cmd, result.code), cmd, result.code, process.cwd());
   }
 
   recordFailure(cmd, result.code, result.stderr);
@@ -178,7 +200,7 @@ export function linkFixOnSuccess(
 ): ResolveFixResult {
   const result = resolveFixOnSuccess(cmd, cwd, options);
   if (!quiet && result.confirmedResolved > 0) {
-    say("command works now. you fix it. I remember the fix. good good good.");
+    say("command works now. something between fix it. what, I not hear. works again, I remember. good good good.");
   }
   return result;
 }

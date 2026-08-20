@@ -420,7 +420,7 @@ test("watch's success path links a fix exactly like run's onSuccess, using the s
     captureStderr(() => watch(["echo all-good"], { notify: notifier.notify })));
 
   assert.equal(result, 0);
-  assert.match(stderr, /command works now\. you fix it\. I remember the fix\. good good good\./);
+  assert.match(stderr, /command works now\. something between fix it\. what, I not hear\. works again, I remember\. good good good\./);
   assert.equal(existsSync(join(home, "pending")), false, "run/watch shared resolver clears pending atomically");
 });
 

@@ -56,7 +56,7 @@ That companion line is an original Rocky project tagline inspired by the lore, n
 npm install -g @poggufanz/rocky-cli
 ```
 
-Current release: `@poggufanz/rocky-cli@0.6.0`. One install includes the `rocky` CLI and its read-only MCP server. The unrelated unscoped `rocky-cli` package is not this project and Rocky never installs, upgrades, or removes it. The binary name remains `rocky`, so npm reports any local binary-name conflict through its normal install behavior.
+Current release: `@poggufanz/rocky-cli@0.7.0`. One install includes the `rocky` CLI and its read-only MCP server. The unrelated unscoped `rocky-cli` package is not this project and Rocky never installs, upgrades, or removes it. The binary name remains `rocky`, so npm reports any local binary-name conflict through its normal install behavior.
 
 Repository layout: a fresh clone of the canonical upstream repository (`https://github.com/poggufanz/rocky.git`) is the package root; run `npm install`, `npm test`, and `npm pack` there. In this outer workspace, that same package root is the `rocky/` directory. Canonical developer branch is `main`; `iq` is a remediation branch, not a second release line.
 
@@ -121,6 +121,23 @@ rocky export --since 7d
 ```
 
 Export writes filtered raw JSONL on stdout; its count/persona line goes to stderr. `~/.rocky/memory.jsonl` is user-owned, append-only data: readable, back-up-able, and deletable by you. Triples can contain the verbatim user intent, capped paths/excerpts, and the agent's stated rationale. Rocky does not keylog or read screens. Sanitized MCP projection remains the default; raw exposure is explicit.
+
+## Rationale capture and the gate (v0.7.0)
+
+v0.7 adds a fourth evidence kind, `rationale`, alongside the triples above: Rocky now also remembers *why*, not just *what* and *how*. Evidence arrives through four lanes, ranked by how much of the agent's own words survive:
+
+| Lane | Source | Fidelity |
+| --- | --- | --- |
+| `log-thinking` | Claude Code or DSH session logs, when a thinking block exists | raw |
+| `log-response` | Claude Code session logs' response text, when no thinking block exists | summary |
+| `notify` | Any agent calling `rocky hook agent-event <adapter> --rationale "<text>"` | summary |
+| `human` | You, via `rocky why --add "<text>"` | summary |
+
+`rocky concepts` lists concepts a deterministic lexicon and matcher have heard across memory, with counts and any aliases you have taught it; `rocky concept <id>` shows newest-first evidence for one concept, and `rocky concept alias ["--retract"] "<phrase>" <id>` teaches or retracts one phrase. `rocky sessions [n]` lists work derived from memory at read time, grouped by directory and split on a 30-minute gap; `rocky sessions <index>` shows one session's evidence chronologically. `rocky repl [--ai]` keeps that lookup family — recall/what/why/how/concepts/sessions — in one loop instead of paying a fresh process start per call.
+
+The Claude Code and DSH adapters read session logs Rocky did not write, at a bounded per-file offset, and never execute or trust their contents. The DSH adapter needs Node 22.15 or newer at runtime for built-in zstd support; on an older Node, Rocky feature-detects the gap and skips DSH logs rather than guessing. Codex and Gemini log adapters remain deferred: Codex's local session format has drifted to a SQLite hybrid, and Gemini persists no thoughts to read, so neither has a `log-thinking` lane yet — both still reach Rocky through the universal `notify` lane.
+
+A PreToolUse hook, installed by default with `rocky setup --agent-hooks` and dispatched through `rocky hook gate-event claude-code`, nudges an editing agent to state a rationale before an `Edit`/`Write`/`MultiEdit` tool call: it denies once per session per file when no rationale evidence exists yet for that file, then fails open on every later call for that same file. Opt out at install with `--no-rationale-gate`, or at runtime with `ROCKY_RATIONALE_GATE=off`. Codex and other non-Claude-Code agents have no deny hook at all — they reach the `notify` lane only, and Rocky never invents enforcement it cannot perform. An unlinked file has no rationale evidence yet; that is a first-class honest state Rocky discloses, not a gap it papers over. Resolution lines no longer claim Rocky remembers the fix method itself — only that a fix command later succeeded; the mechanism stays the agent's own unread history.
 
 ## Usage
 
@@ -346,10 +363,11 @@ Each phase is one facet of who Rocky is:
 - **v0.3 — his patience (implemented)**: `rocky watch` — hand him a long build, migration, or download; he waits (he once waited 46 years), notifies you, and holds the logs if it dies.
 - **v0.4 — his diligence (implemented)**: pre-push hull check — `rocky check` verifies that AI-added packages actually exist on the registry (hallucinated-package defense), scans added lines for secrets, and asks one comprehension question about the riskiest line in the diff. Its registry lookup is this project's only external egress; network errors fail open and never hold a push.
 - **v0.5 — his curiosity (implemented)**: Plan 01 Nervous System agent hooks and Plan 02 dictionary/teaching surfaces ship in v0.5.0. They preserve prompt/path/excerpt/stated-rationale evidence in local memory, use deterministic fallback when Ollama is unavailable, keep rationale explicitly quoted and untrusted, and add `what`, `how`, `why`, `digest`, `quiz`, `export`, passive labels, ambiguity advice, and three bounded MCP knowledge tools. The earlier `rocky explain` concept is superseded, not an active command.
-- **v0.6 — his accountability (current release)**: `rocky brief` (loopback-AI-polished summary of what changed since your last check-in: commits, remembered failures/fixes, and touched invariant guards), `rocky journal`, `rocky invariants`, extended `rocky stats`, and the [schema envelope](schema.md) documentation. `brief` shipped in v0.6, no longer deferred; BYOK annotation, `attest`, and the memory circuit breaker remain deferred.
+- **v0.6 — his accountability (implemented)**: `rocky brief` (loopback-AI-polished summary of what changed since your last check-in: commits, remembered failures/fixes, and touched invariant guards), `rocky journal`, `rocky invariants`, extended `rocky stats`, and the [schema envelope](schema.md) documentation. `brief` shipped in v0.6, no longer deferred; BYOK annotation, `attest`, and the memory circuit breaker remain deferred.
+- **v0.7 — his memory of why (current release)**: a fourth evidence kind, `rationale`, captured across four lanes (`log-thinking`, `log-response`, `notify`, `human`); a deterministic concept lexicon (`rocky concepts`/`concept`/`concept alias`); derived `rocky sessions` and `rocky repl`; and a PreToolUse rationale gate (`rocky hook gate-event`, opt out with `--no-rationale-gate` or `ROCKY_RATIONALE_GATE=off`). Codex and Gemini agent-log adapters remain deferred — see the [rationale capture section](#rationale-capture-and-the-gate-v070) above.
 - **later — his care**: ambient pet mode and the desktop pet window (deferred). He notices you've been at it for four hours, and he has opinions about your sleep.
 
-The package version is v0.6.0; the Nervous System section above describes the Plan 01 and Plan 02 surfaces it ships.
+The package version is v0.7.0; the Nervous System and rationale-capture sections above describe the surfaces it ships.
 
 ## Contributing
 

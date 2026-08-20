@@ -1,5 +1,5 @@
 import { strict as assert } from "node:assert";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -9,7 +9,7 @@ import { annotateBatch } from "../agent/annotate.js";
 import { appendEvent } from "../agent/spool.js";
 import { agentEvent } from "../commands/agent-hook.js";
 import { boundTripleMechanism, canonicalPath, parseMemoryRecord, type MemoryRecord, type TripleRecord } from "../core/memory-read.js";
-import { whyFileEvidence, type MemoryQueries } from "../core/memory-query.js";
+import { createMemoryQueries, whyFileEvidence, type MemoryQueries } from "../core/memory-query.js";
 import { disabledRecallWithAi } from "../ai/port.js";
 import { createToolRegistry } from "../mcp/tools.js";
 import { projectKnowledgeHits } from "../mcp/privacy.js";
@@ -253,6 +253,54 @@ test("custom MCP query boundaries fail open to bounded safe schemas", async () =
   const why = await registry.call("why_file", { path: "src/a.ts" }, signal);
   assert.equal(why.structuredContent.coverageStatus, "unknown");
   assert.equal(why.structuredContent.coverageIncomplete, true);
+});
+
+/**
+ * The previous test proves `safeMemoryStats` (the custom-provider fallback)
+ * keeps a bounded field allowlist. Production never takes that path: `rocky
+ * mcp` wires `createMemoryQueries()` with no args, which registers as a
+ * durable loader (`hasDurableMemoryQueries` true) and goes through
+ * `statsFromDurableSnapshot` instead, which spreads `queryStats`'s full
+ * result minus an explicit exclusion list. Nothing pinned that exclusion
+ * list before, which is exactly what let `rationaleByFidelity` (Task 17)
+ * leak onto the wire unfiltered until this test was added. Real evidence
+ * (a rationale + an alias record) is on disk here specifically so a
+ * regression that stops excluding the field would make it observable in
+ * `JSON.stringify`, not just structurally absent by coincidence of empty
+ * memory.
+ */
+test("durable MCP stats path excludes byKind and rationaleByFidelity, matching the safe-path key set", async () => {
+  const paths = freshPaths();
+  const previous = process.env.ROCKY_HOME;
+  process.env.ROCKY_HOME = paths.home;
+  try {
+    const now = Date.now();
+    const records = [
+      {
+        kind: "failure", id: "durable-stats-f1", ts: now - 1000, cwd: "/durable-stats",
+        cmd: "npm test", exitCode: 1, fingerprint: "fp-durable-stats-f1", signature: ["boom"], excerpt: "boom",
+      },
+      {
+        kind: "rationale", id: "durable-stats-r1", ts: now - 500, v: 1, cwd: "/durable-stats",
+        agent: "human", rationale_fidelity: "raw", source: "human", excerpt: "why it happened",
+      },
+      { kind: "alias", id: "durable-stats-a1", ts: now - 400, v: 1, alias: "flaky", concept: "test-isolation", action: "add" },
+    ];
+    writeFileSync(paths.memory, records.map((record) => `${JSON.stringify(record)}\n`).join(""), "utf8");
+
+    const registry = createToolRegistry({ exposure: "sanitized", memory: createMemoryQueries(), recallWithAi: disabledRecallWithAi });
+    const stats = await registry.call("stats", {}, new AbortController().signal);
+    const statsKeys = Object.keys(stats.structuredContent).sort();
+    assert.deepEqual(statsKeys, [
+      "confirmedFixes", "coverage", "exposure", "failures", "fixEvents", "memoryCoverage",
+      "memoryCoverageIncomplete", "memoryVersion", "notes", "possibleFixes", "resolved", "total", "triples", "unresolved",
+    ]);
+    assert.equal(JSON.stringify(stats.structuredContent).includes("rationaleByFidelity"), false);
+    assert.equal(JSON.stringify(stats.structuredContent).includes("byKind"), false);
+  } finally {
+    if (previous === undefined) delete process.env.ROCKY_HOME;
+    else process.env.ROCKY_HOME = previous;
+  }
 });
 
 test("custom knowledge hits cannot retain complete status without canonical proof", () => {

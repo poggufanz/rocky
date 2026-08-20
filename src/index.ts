@@ -22,9 +22,13 @@ import { mcp } from "./commands/mcp.js";
 import { setup } from "./commands/setup.js";
 import { check } from "./commands/check.js";
 import { digest, exportCommand, how, quiz, what, why } from "./commands/dictionary.js";
+import { conceptsCommand } from "./commands/concepts.js";
 import { agentEvent } from "./commands/agent-hook.js";
+import { gateEvent } from "./agent/gate.js";
 import { journalCommand } from "./commands/journal.js";
 import { invariantsCommand } from "./commands/invariants.js";
+import { sessionsCommand } from "./commands/sessions.js";
+import { replCommand } from "./commands/repl.js";
 import { annotateCommand } from "./agent/annotate.js";
 import { ambiguityCommand } from "./agent/ambiguity.js";
 import { CliUsageError, parseExactCommand, reportCliUsage } from "./commands/cli-args.js";
@@ -67,6 +71,10 @@ usage:
                             candidates, and never grades.
   rocky export [--kind failure|fix|note|triple] [--since ISO|Nd]
                             dump raw memory as JSONL on stdout.
+  rocky concepts            list concepts heard in memory, with counts and aliases.
+  rocky concept <id>        hear newest-first evidence for one concept.
+  rocky concept alias [--retract] "<phrase>" <id>
+                            teach or retract one phrase -> concept alias.
   rocky model status         report local-AI configuration without loading a model.
   rocky model use [--exposure sanitized|raw] <installed-model>
                             probe an installed Ollama model, then enable local AI.
@@ -75,6 +83,15 @@ usage:
   rocky journal "<note>"    write one line dogfood note. local file only.
   rocky invariants          list remembered invariant notes from .rocky/invariants.md
                             and hear globs that guard nothing.
+  rocky sessions [--limit <n>]
+                            list work sessions derived from memory: grouped by cwd,
+                            split on a 30-minute gap. derived at read time only,
+                            newest-first.
+  rocky sessions <index>    hear one session's evidence, chronologically.
+  rocky repl [--ai]         stay in one loop over recall/what/why/how/concepts/
+                            sessions instead of paying startup per call.
+                            --ai passes through to recall and what. type help
+                            inside for command list, quit or exit to leave.
   rocky mcp                 serve read-only memory tools over stdio.
   rocky setup               configure detected MCP hosts with sanitized exposure.
   rocky setup --check       verify owned host registrations and Rocky MCP tools.
@@ -85,6 +102,8 @@ usage:
   rocky setup --voice-skill configure hosts and install managed voice skill explicitly.
   rocky setup --agent-hooks
                             install Claude Code hooks after explicit consent; print Codex TOML.
+                            installs the PreToolUse rationale gate too, unless you pass
+                            --no-rationale-gate. Codex has no deny hook; notify lane only.
   rocky setup --uninstall-agent-hooks
                             remove Rocky Claude Code hooks; Codex config stays untouched.
   rocky setup --status       report host/MCP registration via rocky setup --check and
@@ -98,6 +117,11 @@ usage:
   rocky hook status         are the ears in, question
   rocky hook agent-event claude-code|codex
                             private fail-open agent hook endpoint; stdout is always {}.
+  rocky hook agent-event generic --rationale "<text>" [--files a.ts,b.ts]
+                            any agent says why here, one line. no vendor log needed.
+  rocky hook gate-event claude-code
+                            PreToolUse enforcement endpoint; reads one hook payload from
+                            stdin, prints an allow/deny decision, always exits 0.
 
 memory lives in ~/.rocky/memory.jsonl. no telemetry. only outside call is rocky
 check asking registry.npmjs.org whether package exists — package name only, you say
@@ -107,7 +131,60 @@ optional AI uses loopback Ollama only.
 
 type HookRequest =
   | { kind: "install" | "uninstall" | "status" }
-  | { kind: "agent-event"; adapter: "claude-code" | "codex"; argvPayload?: string };
+  | {
+    kind: "agent-event";
+    adapter: "claude-code" | "codex" | "generic";
+    argvPayload?: string;
+    rationale?: string;
+    files?: string[];
+  }
+  | { kind: "gate-event"; vendor: string };
+
+interface NotifyFlags {
+  rationale?: string;
+  files?: string[];
+  /** Everything left after `--rationale`/`--files` are consumed. */
+  positionals: string[];
+}
+
+function isFlagToken(value: string | undefined): boolean {
+  return typeof value === "string" && value.startsWith("--");
+}
+
+/**
+ * Pull `--rationale <text>` and `--files a,b` out of one `agent-event`
+ * invocation's trailing args, in any order, leaving everything else as
+ * positionals (codex's optional payload). A flag with a missing or
+ * flag-shaped value is dropped, not thrown — this endpoint stays fail-open
+ * end to end, including at argument parsing.
+ */
+function parseNotifyFlags(args: readonly string[]): NotifyFlags {
+  const positionals: string[] = [];
+  let rationale: string | undefined;
+  let files: string[] | undefined;
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = args[i];
+    if (arg === "--rationale") {
+      const value = args[i + 1];
+      if (typeof value === "string" && !isFlagToken(value)) {
+        rationale = value;
+        i += 1;
+      }
+      continue;
+    }
+    if (arg === "--files") {
+      const value = args[i + 1];
+      if (typeof value === "string" && !isFlagToken(value)) {
+        const list = value.split(",").map((entry) => entry.trim()).filter((entry) => entry.length > 0);
+        if (list.length > 0) files = list;
+        i += 1;
+      }
+      continue;
+    }
+    positionals.push(arg);
+  }
+  return { ...(rationale === undefined ? {} : { rationale }), ...(files === undefined ? {} : { files }), positionals };
+}
 
 function parseHookArgs(argv: readonly string[]): HookRequest {
   const [subcommand, ...rest] = argv;
@@ -118,17 +195,72 @@ function parseHookArgs(argv: readonly string[]): HookRequest {
     return { kind: subcommand };
   }
   if (subcommand === "agent-event") {
-    const [adapter, payload] = rest;
-    if (adapter === "claude-code" && rest.length === 1) {
-      return { kind: "agent-event", adapter };
+    const [adapter, ...flagArgs] = rest;
+    if (adapter === "generic" || adapter === "claude-code") {
+      const { rationale, files, positionals } = parseNotifyFlags(flagArgs);
+      if (positionals.length === 0) {
+        return { kind: "agent-event", adapter, ...(rationale === undefined ? {} : { rationale }), ...(files === undefined ? {} : { files }) };
+      }
     }
-    if (adapter === "codex" && (rest.length === 1 || rest.length === 2)) {
-      return payload === undefined
-        ? { kind: "agent-event", adapter }
-        : { kind: "agent-event", adapter, argvPayload: payload };
+    if (adapter === "codex") {
+      const { rationale, files, positionals } = parseNotifyFlags(flagArgs);
+      if (positionals.length === 0 || positionals.length === 1) {
+        return {
+          kind: "agent-event",
+          adapter,
+          ...(positionals.length === 1 ? { argvPayload: positionals[0] } : {}),
+          ...(rationale === undefined ? {} : { rationale }),
+          ...(files === undefined ? {} : { files }),
+        };
+      }
     }
   }
-  throw new CliUsageError("hook needs one known subcommand", "rocky hook install|uninstall|status|agent-event claude-code|codex");
+  if (subcommand === "gate-event") {
+    const [vendor, ...extra] = rest;
+    if (typeof vendor === "string" && vendor.length > 0 && extra.length === 0) {
+      return { kind: "gate-event", vendor };
+    }
+  }
+  throw new CliUsageError(
+    "hook needs one known subcommand",
+    "rocky hook install|uninstall|status|agent-event claude-code|codex|generic|gate-event <vendor>",
+  );
+}
+
+const GATE_STDIN_CAP_BYTES = 2 * 1024 * 1024;
+
+/**
+ * Read all of stdin for `gate-event`, bounded. A truncated or unreadable
+ * payload is not fatal here — `gateEvent` parses tolerant JSON and fails
+ * open on anything it cannot understand, so this reader only needs to
+ * avoid unbounded memory growth, not validate the payload.
+ */
+async function readGateEventStdin(): Promise<string> {
+  const chunks: Buffer[] = [];
+  let total = 0;
+  try {
+    for await (const chunk of process.stdin) {
+      const buffer: Buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as string);
+      total += buffer.byteLength;
+      if (total > GATE_STDIN_CAP_BYTES) break;
+      chunks.push(buffer);
+    }
+  } catch {
+    // A stdin stream error still must not throw out of the gate.
+  }
+  return Buffer.concat(chunks).toString("utf8");
+}
+
+/** `rocky hook gate-event <vendor>`: read stdin, decide, print, always exit 0. */
+async function runGateEvent(vendor: string): Promise<number> {
+  const stdin = await readGateEventStdin();
+  const { stdout } = gateEvent(vendor, stdin);
+  try {
+    process.stdout.write(stdout);
+  } catch {
+    // Never fail the hook because stdout could not be written.
+  }
+  return 0;
 }
 
 async function main(): Promise<number> {
@@ -151,6 +283,10 @@ async function main(): Promise<number> {
         return journalCommand(rest);
       case "invariants":
         return invariantsCommand(rest);
+      case "sessions":
+        return sessionsCommand(rest);
+      case "repl":
+        return replCommand(rest);
       case "mcp":
         return mcp(rest);
       case "setup":
@@ -169,6 +305,9 @@ async function main(): Promise<number> {
         return quiz(rest);
       case "export":
         return exportCommand(rest);
+      case "concepts":
+      case "concept":
+        return conceptsCommand(rest);
       case "hook": {
         const parsed = parseHookArgs(rest);
         switch (rest[0]) {
@@ -180,7 +319,16 @@ async function main(): Promise<number> {
             return hookStatus();
           case "agent-event":
             if (parsed.kind === "agent-event") {
-              return agentEvent(parsed.adapter, parsed.argvPayload === undefined ? undefined : { argvPayload: parsed.argvPayload });
+              return agentEvent(parsed.adapter, {
+                ...(parsed.argvPayload === undefined ? {} : { argvPayload: parsed.argvPayload }),
+                ...(parsed.rationale === undefined ? {} : { rationale: parsed.rationale }),
+                ...(parsed.files === undefined ? {} : { files: parsed.files }),
+              });
+            }
+            break;
+          case "gate-event":
+            if (parsed.kind === "gate-event") {
+              return runGateEvent(parsed.vendor);
             }
             break;
         }

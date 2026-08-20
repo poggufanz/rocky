@@ -139,7 +139,7 @@ test("recall speaks a strong link for a same-command fix", async () => {
   const output = await captureStderr(() => recall(["npm", "test"], { memory: source.memory, recallWithAi: noAi }));
 
   assert.equal(output.code, 0);
-  assert.match(output.stderr, /fixed with: fix-for-c1/);
+  assert.match(output.stderr, /resolved\. works again after: fix-for-c1/);
   assert.match(output.stderr, /same command, 2 minutes later\. strong\./);
   assert.deepEqual(validateRockyPhrase("same command, 2 minutes later. strong."), []);
 });
@@ -209,7 +209,7 @@ test("recall never shows a possible-fix line beside a hit that already has a con
   const output = await captureStderr(() => recall(["npm", "test"], { memory: source.memory, recallWithAi: noAi }));
 
   assert.equal(output.code, 0);
-  assert.match(output.stderr, /fixed with: fix-for-c1/);
+  assert.match(output.stderr, /resolved\. works again after: fix-for-c1/);
   assert.doesNotMatch(output.stderr, /no confirmed fix\. but after error, you run this:/);
   assert.doesNotMatch(output.stderr, /should-not-appear/);
 });

@@ -12,7 +12,7 @@ import {
   similarity,
 } from "./fingerprint.js";
 import { boundTripleRecord, canonicalPath, isOperationalMemoryRecord, linkBasisRank, loadMemory, loadMemoryChecked, pathIdentityHash } from "./memory-read.js";
-import type { FailureRecord, FixRecord, LinkBasis, LinkConfidence, MemoryCoverage, MemoryRecord, TripleRecord } from "./memory-read.js";
+import type { FailureRecord, FixRecord, LinkBasis, LinkConfidence, MemoryCoverage, MemoryRecord, RationaleFidelity, TripleRecord } from "./memory-read.js";
 
 export interface RecallQuery { query: string; limit?: number; cwd?: string; now?: number }
 /**
@@ -40,6 +40,8 @@ export interface MemoryStats {
   total?: number;
   /** Operational record count per kind; new v0.6 kinds appear automatically. */
   byKind?: Record<string, number>;
+  /** Rationale evidence count by fidelity. Gate denials are never included: that state is ephemeral, never written to memory. */
+  rationaleByFidelity?: Record<RationaleFidelity, number>;
 }
 export interface LinkQuery { cwd: string; now?: number; windowMs?: number }
 export interface KnowledgeSearchQuery { query: string; kind?: "failure" | "fix" | "triple" | "note"; limit?: number; now?: number }
@@ -571,7 +573,9 @@ export function queryRecentFailures(
 export function queryStats(records: readonly MemoryRecord[], input: StatsQuery = {}): MemoryStats {
   const unique = uniqueRecords(records);
   const now = input.now ?? Date.now();
-  const scoped = unique.filter((record) => isOperationalMemoryRecord(record, now) && (input.cwd === undefined || record.cwd === input.cwd));
+  // Cwd-less kinds (alias) are global knowledge; a cwd scope must not hide them.
+  const scoped = unique.filter((record) => isOperationalMemoryRecord(record, now) &&
+    (input.cwd === undefined || !("cwd" in record) || record.cwd === input.cwd));
   const failures = scoped.filter((record): record is FailureRecord => record.kind === "failure");
   const fixes = fixesIndex(unique, now);
   const confirmedFailures = unique.filter((record): record is FailureRecord =>
@@ -589,6 +593,15 @@ export function queryStats(records: readonly MemoryRecord[], input: StatsQuery =
   };
   const byKind: Record<string, number> = {};
   for (const record of scoped) byKind[record.kind] = (byKind[record.kind] ?? 0) + 1;
+  // Rationale evidence broken down by fidelity, computed from the same
+  // deduped/operational `scoped` set as byKind so the two never disagree.
+  // Gate denials are deliberately absent: that state is ephemeral (never
+  // written to memory) and counting it would imply a durability Rocky does
+  // not have.
+  const rationaleByFidelity: Record<RationaleFidelity, number> = { raw: 0, summary: 0, none: 0 };
+  for (const record of scoped) {
+    if (record.kind === "rationale") rationaleByFidelity[record.rationale_fidelity] += 1;
+  }
   return {
     ...result,
     confirmedFixes: fixEvents,
@@ -597,6 +610,7 @@ export function queryStats(records: readonly MemoryRecord[], input: StatsQuery =
     notes: scoped.filter((record) => record.kind === "note").length,
     total: scoped.length,
     byKind,
+    rationaleByFidelity,
   };
 }
 

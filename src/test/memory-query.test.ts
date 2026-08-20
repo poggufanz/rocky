@@ -48,11 +48,13 @@ test("queryStats applies cwd consistently", () => {
     failures: 2, fixEvents: 1, resolved: 1, unresolved: 1,
     confirmedFixes: 1, possibleFixes: 0, triples: 0, notes: 0, total: 3,
     byKind: { failure: 2, fix: 1 },
+    rationaleByFidelity: { raw: 0, summary: 0, none: 0 },
   });
   assert.deepEqual(queryStats(records, { cwd: "/work/a" }), {
     failures: 1, fixEvents: 1, resolved: 1, unresolved: 0,
     confirmedFixes: 1, possibleFixes: 0, triples: 0, notes: 0, total: 2,
     byKind: { failure: 1, fix: 1 },
+    rationaleByFidelity: { raw: 0, summary: 0, none: 0 },
   });
 });
 
@@ -282,6 +284,7 @@ test("future records stay inert across operational query surfaces but remain fet
     failures: 1, fixEvents: 0, resolved: 0, unresolved: 1,
     confirmedFixes: 0, possibleFixes: 0, triples: 0, notes: 0, total: 1,
     byKind: { failure: 1 },
+    rationaleByFidelity: { raw: 0, summary: 0, none: 0 },
   });
   assert.deepEqual(searchKnowledge(input, { query: "future-only-token", now }), []);
   assert.equal(fetchRecord(input, futureFailure.id)?.id, futureFailure.id, "raw/fetch state remains retained");
@@ -315,6 +318,7 @@ test("cross-directory confirmation never counts as local stats", () => {
     failures: 1, fixEvents: 0, resolved: 0, unresolved: 1,
     confirmedFixes: 0, possibleFixes: 0, triples: 0, notes: 0, total: 2,
     byKind: { failure: 1, fix: 1 },
+    rationaleByFidelity: { raw: 0, summary: 0, none: 0 },
   });
 });
 
@@ -329,6 +333,7 @@ test("query indices are first-wins for duplicate IDs", () => {
     failures: 1, fixEvents: 1, resolved: 1, unresolved: 0,
     confirmedFixes: 1, possibleFixes: 0, triples: 0, notes: 0, total: 2,
     byKind: { failure: 1, fix: 1 },
+    rationaleByFidelity: { raw: 0, summary: 0, none: 0 },
   });
   assert.equal(queryRecall(input, { query: "module missing" })[0]?.fix?.cmd, "npm run build");
 });
@@ -397,6 +402,7 @@ test("possible associations never count as confirmed fix events", () => {
     failures: 1, fixEvents: 0, resolved: 0, unresolved: 1,
     confirmedFixes: 0, possibleFixes: 1, triples: 0, notes: 0, total: 2,
     byKind: { failure: 1, association: 1 },
+    rationaleByFidelity: { raw: 0, summary: 0, none: 0 },
   });
   const downgradedLegacy: FixRecord = {
     kind: "fix", id: "legacy-weak", ts: 301, cwd: "/work/b", cmd: "npm run unrelated",

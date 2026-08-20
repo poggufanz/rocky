@@ -29,7 +29,7 @@ import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync, type SpawnSyncReturns } from "node:child_process";
 import { CANCEL_CODES } from "../core/exec.js";
-import { commandFingerprintCandidates } from "../core/fingerprint.js";
+import { commandFingerprintCandidates, commandIdentity } from "../core/fingerprint.js";
 import { renderGuardRules, rulesFileIsPristine } from "../core/guard-rules.js";
 import {
   addHookBlockBytes,
@@ -106,15 +106,32 @@ export function hookFail(cmd: string, exitCode: number, cwd: string): number {
   const withFix = [...previous].reverse().find((f) => getFix(memory, f, now));
   if (withFix) {
     const fix = getFix(memory, withFix, now)!;
-    sayTty(`I hear this error before. ${ago(withFix.ts)}. last time, you fix with:`);
-    detailTty(safeTerminalLine(fix.cmd));
+    // The recurrence match above is a coarse, masked fingerprint on `cmd`
+    // (no stderr reaches a detached hook handler) — it can pair the current
+    // failure with a past one whose literal command differs (a masked
+    // number, a different filename). `fix.cmd` is always identity-equal to
+    // that PAST failure's command (resolveFixOnSuccess only ever confirms a
+    // fix under exact identity), never to whatever actually changed between
+    // runs — so it is never "the fix", only a possibly-different command
+    // that happened to work. Say only what's true in each case.
+    const currentIdentity = commandIdentity(cmd);
+    const fixIdentity = commandIdentity(fix.cmd, { platform: fix.platform ?? process.platform });
+    const sameCommand = currentIdentity.reliable && fixIdentity.reliable && currentIdentity.value === fixIdentity.value;
+    sayTty(`I hear this error before. ${ago(withFix.ts)}.`);
+    if (sameCommand) {
+      sayTty("last time, something between fix it. what, I not hear. works again, I remember.");
+    } else {
+      sayTty("last time, you run:");
+      detailTty(safeTerminalLine(fix.cmd));
+      sayTty("possible fix only, question");
+    }
     const elsewhere = fixFromElsewhere(fix, withFix.cwd);
     if (elsewhere !== undefined) {
       sayTty("but fix comes from other place.");
       detailTty(`place: ${safeTerminalLine(elsewhere)}`);
       sayTty("possible only. check, question");
     }
-    sayTty("try, question");
+    if (!sameCommand) sayTty("try, question");
   } else {
     const hint = deepMemoryHint(cmd);
     // No hint means the command already went through `rocky run`, so deep
@@ -139,7 +156,7 @@ export function hookSuccess(cmd: string, cwd: string, options: ResolveFixOptions
   try {
     const result = resolveFixOnSuccess(cmd, cwd, options);
     if (result.confirmedResolved > 0) {
-      sayTty("command works now. you fix it. I remember the fix. good good good.");
+      sayTty("command works now. something between fix it. what, I not hear. works again, I remember. good good good.");
     }
   } catch {
     // Detached bookkeeping must never become the hooked command's outcome.

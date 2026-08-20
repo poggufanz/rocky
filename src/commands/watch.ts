@@ -217,7 +217,7 @@ function onWatchFailure(cmd: string, cwd: string, quiet: boolean, result: ExecRe
     say(outcomeLine(false, result.durationMs));
     const memory = readMemory(false);
     if (memory !== undefined) {
-      speakFailureMemory(memory, fingerprintCandidates(result.stderr, cmd, result.code), result.code, cwd);
+      speakFailureMemory(memory, fingerprintCandidates(result.stderr, cmd, result.code), cmd, result.code, cwd);
     }
   }
 

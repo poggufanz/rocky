@@ -18,6 +18,8 @@ export interface SetupOptions {
   yes: boolean;
   voiceSkill: boolean;
   agentHooksAction?: AgentHooksAction;
+  /** Only meaningful alongside agentHooksAction "install"; default true. */
+  rationaleGate?: boolean;
 }
 
 export type SetupClientId = "codex" | "claude-code" | "claude-desktop";

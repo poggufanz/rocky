@@ -12,7 +12,10 @@ import { createPromptPort } from "./prompt.js";
 import { detail, heading, say } from "../ui/rocky.js";
 
 const CLAUDE_MARKER = "hook agent-event claude-code";
+const GATE_MARKER = "hook gate-event claude-code";
 const POST_TOOL_MATCHER = "Edit|Write|MultiEdit|NotebookEdit";
+/** Tools Task 13's gate dispatcher actually enforces on; see agent/gate.ts GATED_TOOLS. */
+const GATE_MATCHER = "Edit|Write|MultiEdit";
 const AGENT_HOOK_CONFIRMATION = "install ears for claude code, question";
 const GENERIC_ERROR = "Claude Code agent hooks update cannot complete";
 const MISSING_PARENT_PROTECTION = process.platform === "win32" ? "private ACL" : "mode 0700";
@@ -34,6 +37,14 @@ export interface AgentHooksConfirmation {
 export interface AgentHooksRuntimeOptions {
   /** Supply the already validated command from setup's injected paths. */
   command?: string;
+  /**
+   * The rationale-gate PreToolUse command. Install/uninstall treat this as
+   * an explicit on/off switch: undefined means no gate entry, full stop, no
+   * fallback derivation. Status treats a missing value as "derive the
+   * canonical gate command" instead, since status must validate whichever
+   * shape (with or without a gate) is actually on disk.
+   */
+  gateCommand?: string;
   nodePath?: string;
   entryPath?: string;
   home?: string;
@@ -160,6 +171,16 @@ export function rockyHookCommand(
   return `${quotePath(executable)} ${quotePath(script)} hook agent-event ${adapter}`;
 }
 
+/** Build one absolute, safely quoted Rocky rationale-gate PreToolUse command. */
+export function rockyGateHookCommand(
+  execPath = process.execPath,
+  scriptPath = defaultEntryPath(),
+): string {
+  const executable = requireSafeAbsolutePath(execPath, "Node");
+  const script = requireSafeAbsolutePath(scriptPath, "entry");
+  return `${quotePath(executable)} ${quotePath(script)} ${GATE_MARKER}`;
+}
+
 interface HookCommandPaths {
   executable: string;
   script: string;
@@ -271,6 +292,30 @@ function isRockyClaudeHookCommand(command: string): boolean {
   }
 }
 
+/**
+ * Recognize the exact gate command Rocky writes for the PreToolUse
+ * rationale-gate entry. The gate is new in v0.7, so unlike the agent-event
+ * marker above it has no legacy bare-`rocky` or pre-canonical spelling to
+ * stay compatible with - only the current `rockyGateHookCommand` shape.
+ */
+function isRockyGateHookCommand(command: string): boolean {
+  if (typeof command !== "string" || command.length === 0 || hasControl(command)) return false;
+  const suffix = ` ${GATE_MARKER}`;
+  if (!command.endsWith(suffix)) return false;
+  const paths = command.slice(0, -suffix.length);
+  try {
+    const first = parseQuotedCommandPath(paths, 0, true);
+    if (paths[first.next] !== " ") return false;
+    const second = parseQuotedCommandPath(paths, first.next + 1, true);
+    if (second.next !== paths.length) return false;
+    requireSafeAbsolutePath(first.value, "Node");
+    requireSafeAbsolutePath(second.value, "entry");
+    return rockyGateHookCommand(first.value, second.value) === command;
+  } catch {
+    return false;
+  }
+}
+
 function tomlBasicString(value: string): string {
   return JSON.stringify(value);
 }
@@ -312,6 +357,7 @@ export function printCodexAgentHooks(command = rockyHookCommand("codex")): void 
   detail(codexConfigSnippet(command));
   say("codex config is toml. I not touch it. you paste, I listen.");
   detail("Trust warning: review and trust changed command hooks through Codex /hooks before they run.");
+  detail("Rationale gate needs Claude Code hooks. Other agents use notify lane, no deny there.");
 }
 
 /** Build the exact Claude Code event groups owned by Rocky. */
@@ -324,6 +370,11 @@ export function buildClaudeHookEntries(command: string): Record<string, unknown>
     PostToolUse: [{ matcher: POST_TOOL_MATCHER, hooks: [{ type: "command", command }] }],
     Stop: [{ hooks: [{ type: "command", command }] }],
   };
+}
+
+/** Build the Rocky-owned PreToolUse rationale-gate group. Opt-in, so callers add it themselves. */
+function buildGateHookGroup(command: string): Record<string, unknown> {
+  return { matcher: GATE_MATCHER, hooks: [{ type: "command", command }] };
 }
 
 function validateHookItem(value: unknown): asserts value is JsonObject {
@@ -358,7 +409,8 @@ function hookCommand(value: JsonObject): string | undefined {
 
 function isRockyHook(value: JsonObject): boolean {
   const command = hookCommand(value);
-  return command !== undefined && isRockyClaudeHookCommand(command);
+  return command !== undefined
+    && (isRockyClaudeHookCommand(command) || isRockyGateHookCommand(command));
 }
 
 function stripRockyGroups(groups: readonly unknown[]): unknown[] {
@@ -400,7 +452,11 @@ function withHookArrays(root: JsonObject, callback: (hooks: JsonObject) => void)
  * Remove old Rocky groups and append exactly one current group per event.
  * Foreign root keys, events, groups, and nested hooks retain their order.
  */
-export function mergeClaudeHooks(existing: Record<string, unknown>, command: string): Record<string, unknown> {
+export function mergeClaudeHooks(
+  existing: Record<string, unknown>,
+  command: string,
+  gateCommand?: string,
+): Record<string, unknown> {
   if (!isObject(existing)) throw new Error("Claude settings root must be an object");
   const entries = buildClaudeHookEntries(command);
   return withHookArrays(existing, (hooks) => {
@@ -414,6 +470,17 @@ export function mergeClaudeHooks(existing: Record<string, unknown>, command: str
       clean.push(entry[0]);
       hooks[event] = clean;
     }
+    // PreToolUse (the rationale gate) is opt-in: rewritten from scratch like
+    // the three events above, but only re-added when a gate command is
+    // supplied. A rerun with no gate command strips a previously installed
+    // gate entry instead of leaving it stale.
+    const currentPreToolUse = hooks.PreToolUse;
+    const preToolUseGroups = currentPreToolUse === undefined ? [] : currentPreToolUse;
+    if (!Array.isArray(preToolUseGroups)) throw new Error("hook event must be an array");
+    const cleanPreToolUse = stripRockyGroups(preToolUseGroups);
+    if (gateCommand !== undefined) cleanPreToolUse.push(buildGateHookGroup(gateCommand));
+    if (cleanPreToolUse.length === 0) delete hooks.PreToolUse;
+    else hooks.PreToolUse = cleanPreToolUse;
   });
 }
 
@@ -562,9 +629,23 @@ function commandFor(options: AgentHooksRuntimeOptions): string {
   return command;
 }
 
-function printEntries(command: string, options: AgentHooksRuntimeOptions): void {
+/** Always resolvable, for status validation: absence of a gate entry on disk is still valid. */
+function gateCommandFor(options: AgentHooksRuntimeOptions): string {
+  const gateCommand = options.gateCommand ?? rockyGateHookCommand(options.nodePath, options.entryPath);
+  if (!gateCommand.includes(GATE_MARKER)) throw new Error("gate hook command is not Rocky-owned");
+  return gateCommand;
+}
+
+/** Explicit on/off switch for install: undefined means no gate entry, never a derived default. */
+function requestedGateCommand(options: AgentHooksRuntimeOptions): string | undefined {
+  return options.gateCommand === undefined ? undefined : gateCommandFor(options);
+}
+
+function printEntries(command: string, gateCommand: string | undefined, options: AgentHooksRuntimeOptions): void {
+  const entries: Record<string, unknown> = { ...buildClaudeHookEntries(command) };
+  if (gateCommand !== undefined) entries.PreToolUse = [buildGateHookGroup(gateCommand)];
   (options.detail ?? ((message: string) => process.stderr.write(`${message}\n`)))
-    (JSON.stringify(buildClaudeHookEntries(command), null, 2));
+    (JSON.stringify(entries, null, 2));
 }
 
 function writeMutation(
@@ -610,15 +691,17 @@ export async function installClaudeAgentHooks(
 ): Promise<AgentHooksOperationResult> {
   let resolved: AgentHooksTarget;
   let command: string;
+  let gateCommand: string | undefined;
   try {
     resolved = resolveTarget(target, options);
     command = commandFor(options);
+    gateCommand = requestedGateCommand(options);
     // Validate pending transactions, target topology, and JSON before any
     // display or consent. A missing parent is rejected before any proposed
     // JSON or prompt; an existing parent with missing settings stays writable
     // only after explicit consent.
     inspectCurrent(resolved.settingsPath, true);
-    printEntries(command, options);
+    printEntries(command, gateCommand, options);
   } catch (error) {
     return { status: "error", detail: operationDetail(error) };
   }
@@ -636,7 +719,7 @@ export async function installClaudeAgentHooks(
     // Re-read after the prompt. This is deliberate: user or another setup
     // process may have changed settings while consent was pending.
     const current = prepareMutation(resolved.settingsPath);
-    const merged = mergeClaudeHooks(current.read.value, command);
+    const merged = mergeClaudeHooks(current.read.value, command, gateCommand);
     return writeMutation(resolved.settingsPath, current, merged, options);
   } catch (error) {
     return { status: "error", detail: operationDetail(error) };
@@ -667,29 +750,48 @@ function matchesCurrentGroup(value: unknown, event: "UserPromptSubmit" | "PostTo
   return value.matcher === undefined;
 }
 
-function hasCurrentHooks(value: Record<string, unknown>, command: string): boolean {
+function matchesGateGroup(value: unknown, gateCommand: string): boolean {
+  if (!isObject(value) || !Array.isArray(value.hooks)) return false;
+  const hooks = value.hooks;
+  if (hooks.length !== 1 || !isObject(hooks[0]) || hooks[0].type !== "command" || hooks[0].command !== gateCommand) return false;
+  return value.matcher === GATE_MATCHER;
+}
+
+function ownedGroupsOf(groups: readonly unknown[]): unknown[] {
+  return groups.filter((groupValue) => {
+    if (!isObject(groupValue) || !Array.isArray(groupValue.hooks)) return false;
+    return (groupValue.hooks as unknown[]).some((hookValue) =>
+      isObject(hookValue) && isRockyHook(hookValue));
+  });
+}
+
+function hasCurrentHooks(value: Record<string, unknown>, command: string, gateCommand: string): boolean {
   const hooks = validateHooks(value);
   if (hooks === undefined) return false;
-  const requiredEvents = new Set(["UserPromptSubmit", "PostToolUse", "Stop"]);
+  // Events a Rocky-owned group is allowed to appear under. PreToolUse (the
+  // opt-in rationale gate) belongs here so an owned PreToolUse group never
+  // makes an otherwise-current config report "not current" - whether or not
+  // this install chose the gate. This is a separate job from the
+  // must-be-present loop below; do not fold the two back into one list.
+  const ownableEvents = new Set(["UserPromptSubmit", "PostToolUse", "Stop", "PreToolUse"]);
   for (const [event, groupsValue] of Object.entries(hooks)) {
     if (!Array.isArray(groupsValue)) return false;
-    const ownedGroups = groupsValue.filter((groupValue) => {
-      if (!isObject(groupValue) || !Array.isArray(groupValue.hooks)) return false;
-      return (groupValue.hooks as unknown[]).some((hookValue) =>
-        isObject(hookValue) && isRockyHook(hookValue));
-    }).length;
-    if (ownedGroups > 0 && !requiredEvents.has(event)) return false;
+    if (ownedGroupsOf(groupsValue).length > 0 && !ownableEvents.has(event)) return false;
   }
+  // Events that must always carry exactly one current, owned group.
+  // Deliberately excludes PreToolUse: the gate is opt-in, not required.
   for (const event of ["UserPromptSubmit", "PostToolUse", "Stop"] as const) {
     const groups = hooks[event];
     if (!Array.isArray(groups)) return false;
-    const owned = groups.filter((groupValue) => {
-      if (!isObject(groupValue) || !Array.isArray(groupValue.hooks)) return false;
-      return (groupValue.hooks as unknown[]).some((hookValue) =>
-        isObject(hookValue) && isRockyHook(hookValue));
-    });
+    const owned = ownedGroupsOf(groups);
     if (owned.length !== 1 || !matchesCurrentGroup(owned[0], event, command)) return false;
   }
+  // PreToolUse: absent is current (gate not installed this run); present
+  // must be exactly one owned group matching the canonical gate entry.
+  const preToolUseGroups = hooks.PreToolUse;
+  const ownedPreToolUse = Array.isArray(preToolUseGroups) ? ownedGroupsOf(preToolUseGroups) : [];
+  if (ownedPreToolUse.length > 1) return false;
+  if (ownedPreToolUse.length === 1 && !matchesGateGroup(ownedPreToolUse[0], gateCommand)) return false;
   return true;
 }
 
@@ -703,8 +805,9 @@ export function agentHooksStatus(
     const current = inspectCurrent(resolved.settingsPath);
     if (current.read.status === "missing") return { claudeCode: "absent" };
     const command = commandFor(options);
+    const gateCommand = gateCommandFor(options);
     try {
-      return hasCurrentHooks(current.read.value, command)
+      return hasCurrentHooks(current.read.value, command, gateCommand)
         ? { claudeCode: "installed" }
         : { claudeCode: "absent" };
     } catch {

@@ -1,5 +1,6 @@
+import { dirname } from "node:path";
 import { readJournal } from "../core/journal.js";
-import { memoryPath, type MemoryRecord } from "../core/memory.js";
+import { countReclaimTombstones, memoryPath, type MemoryRecord } from "../core/memory.js";
 import { loadMemoryChecked } from "../core/memory-read.js";
 import { queryStats } from "../core/memory-query.js";
 import { parseNoArgs, reportCliUsage } from "./cli-args.js";
@@ -50,7 +51,16 @@ export function stats(argv: readonly string[] = []): number {
   const journalCount = readJournal().records.length;
   const briefRuns = byKind["brief_run"] ?? 0;
   say(`memory age ${ageDays} day${ageDays === 1 ? "" : "s"}. ${briefRuns} brief run${briefRuns === 1 ? "" : "s"}. ${journalCount} journal note${journalCount === 1 ? "" : "s"}.`);
+  // Gate denials are never counted here: that state is ephemeral (never
+  // written to memory), and counting it would imply a durability Rocky
+  // does not have.
+  const rationaleByFidelity = result.rationaleByFidelity ?? { raw: 0, summary: 0, none: 0 };
+  const rationaleTotal = byKind["rationale"] ?? 0;
+  const aliasTotal = byKind["alias"] ?? 0;
+  say(`rationale heard ${rationaleTotal} time${rationaleTotal === 1 ? "" : "s"}. raw ${rationaleByFidelity.raw}, summary ${rationaleByFidelity.summary}, none ${rationaleByFidelity.none}. alias ${aliasTotal} remembered.`);
   detail(`memory coverage: version ${coverage.version}, scanned ${coverage.scanned}, skipped ${coverage.skipped}, truncated ${coverage.truncated}, complete ${coverage.complete}`);
+  const tombstones = countReclaimTombstones(dirname(memoryPath()));
+  if (tombstones > 0) detail(`tombstones waiting sweep: ${tombstones}`);
   if (result.unresolved > 0) say(`${result.unresolved} error${result.unresolved === 1 ? "" : "s"} still without fix. you fix, I remember. good trade.`);
   return 0;
 }

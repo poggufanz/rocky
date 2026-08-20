@@ -832,7 +832,11 @@ test("run's onFailure adds no line when the remembered fix's cwd matches the cur
   assert.doesNotMatch(result.stderr, /other place/);
   assert.doesNotMatch(result.stderr, /place:/);
   // sanity: the base fix line still speaks, proving the comparison — not the
-  // whole fix branch — is what's being suppressed here.
-  assert.match(result.stderr, /last time, you fix with:/);
+  // whole fix branch — is what's being suppressed here. The seeded fix's cmd
+  // ("whatever failed before") is a stand-in string, not the real invoked
+  // `failingCommandPrinting(marker)` text, so this lands in the
+  // different-command branch rather than the same-command honest form.
+  assert.match(result.stderr, /last time, you run:/);
+  assert.match(result.stderr, /possible fix only, question/);
   assertNoDetectorMarkers(sandbox);
 });

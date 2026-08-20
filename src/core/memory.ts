@@ -14,6 +14,7 @@ import {
   renameSync,
   readSync,
   rmSync,
+  statSync,
   unlinkSync,
   writeFileSync,
   writeSync,
@@ -34,7 +35,9 @@ import {
 import { resolveRockyPaths } from "./state-paths.js";
 import type { RockyPaths } from "./state-paths.js";
 import { boundTripleMechanism, isCompleteMemoryCoverage, isKnownPathPlatform, isSafeNonNegativeInteger, loadMemoryChecked, MAX_MEMORY_FILE_BYTES, MAX_MEMORY_LINE_BYTES, MAX_MEMORY_RECORDS, MAX_SUPPORTED_MEMORY_RECORDS } from "./memory-read.js";
-import type { AssociationRecord, BriefRunRecord, FailureRecord, FixRecord, InvariantTouchRecord, MemoryCoverage, MemoryRecord, NoteRecord, TripleRecord } from "./memory-read.js";
+import type { AliasRecord, AssociationRecord, BriefRunRecord, FailureRecord, FixRecord, InvariantTouchRecord, MemoryCoverage, MemoryRecord, NoteRecord, RationaleRecord, TripleRecord } from "./memory-read.js";
+import { redactSecretsAtBoundary } from "./redact.js";
+import { utf8Slice, utf8SliceFromEnd } from "./utf8.js";
 import { LINK_WINDOW_MS, recentUnresolvedFailures, type UnresolvedLink } from "./memory-query.js";
 
 export type { AssociationRecord, BriefRunRecord, FailureRecord, FixRecord, InvariantTouchRecord, MemoryCoverage, MemoryRecord, NoteRecord, TripleFile, TripleRecord } from "./memory-read.js";
@@ -288,7 +291,8 @@ function tryTripleLock(path: string): TripleLock | undefined {
       try { closeSync(fd); } catch { /* best effort */ }
     }
     if (created && !succeeded && createdStats) {
-      reclaimTriplePath(path, createdStats, (tombstonePath) => {
+      // Self-owned: this attempt's own just-created lock file. No litter.
+      reclaimTriplePath(path, createdStats, true, (tombstonePath) => {
         const verify = lstatSync(tombstonePath);
         return verify.isFile() && !verify.isSymbolicLink() && sameTripleIdentity(createdStats!, verify);
       });
@@ -300,7 +304,8 @@ function releaseTripleLock(lock: TripleLock): boolean {
   const current = readTripleLock(lock.path);
   if (!current || current.metadata.pid !== process.pid || current.metadata.token !== lock.token) return false;
   if (differentTripleIdentity(lock.stats, current.stats)) return false;
-  return reclaimTriplePath(lock.path, current.stats, (tombstonePath) => {
+  // Self-owned: this process's own lock, being released. No litter.
+  return reclaimTriplePath(lock.path, current.stats, true, (tombstonePath) => {
     const verify = readTripleLock(tombstonePath);
     return verify !== undefined && verify.metadata.pid === process.pid && verify.metadata.token === lock.token &&
       sameTripleIdentity(lock.stats, verify.stats);
@@ -309,14 +314,28 @@ function releaseTripleLock(lock: TripleLock): boolean {
 
 /**
  * Move one canonical regular path to a unique same-directory tombstone, then
- * validate the moved inode. The canonical name and tombstone are never
- * unlinked here: a hostile same-user replacement after validation is
- * indistinguishable through Node's portable path API, so preservation is the
- * only safe outcome. Tombstones are non-blocking housekeeping evidence.
+ * validate the moved inode. `unlinkOnSuccess` is an explicit, non-defaulted
+ * choice at every call site, because the two policies are not
+ * interchangeable and a default would silently re-merge them for whichever
+ * caller forgets to think about it:
+ *   - Self-owned artifacts — a lock or election guard this same operation
+ *     just created, reclaimed, or is releasing — leave no litter on success.
+ *     Nothing outside this operation ever needs to observe them, so pass
+ *     `true`.
+ *   - A foreign residual claim — a hard-link left behind by a *different*,
+ *     already-dead reclaimer, reclaimed via `pruneDeadReclaimClaims` — must
+ *     leave evidence that recovery happened. Pass `false` so the tombstone is
+ *     preserved.
+ * On every failure path the tombstone is preserved regardless of the flag —
+ * a hostile same-user replacement after validation is indistinguishable
+ * through Node's portable path API, so preservation is the only safe outcome
+ * there. Preserved tombstones are non-blocking housekeeping evidence;
+ * leftovers are swept later by `sweepReclaimTombstones`.
  */
 function reclaimTriplePath(
   path: string,
   expected: Stats,
+  unlinkOnSuccess: boolean,
   validateClaim: (tombstonePath: string) => boolean,
 ): boolean {
   if (!tripleIdentityKnown(expected)) return false;
@@ -331,11 +350,60 @@ function reclaimTriplePath(
     const verified = lstatSync(tombstonePath);
     if (!verified.isFile() || verified.isSymbolicLink() || !sameTripleIdentity(expected, verified) ||
         !validateClaim(tombstonePath)) return false;
+    if (unlinkOnSuccess) {
+      try { unlinkSync(tombstonePath); } catch { /* leftover swept later */ }
+    }
     return true;
   } catch {
     return false;
   }
 }
+
+/**
+ * Housekeeping for tombstones left behind by crashed or contested reclaims.
+ * Only tombstone-marked entries older than `TOMBSTONE_SWEEP_MAX_AGE_MS` are
+ * unlinked — a young tombstone may still be evidence of an in-flight reclaim —
+ * and each run removes at most `TOMBSTONE_SWEEP_MAX_REMOVALS` so a hostile
+ * flood cannot pin a writer in an unbounded loop. Never throws; returns the
+ * number actually removed.
+ */
+export const TOMBSTONE_SWEEP_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+export const TOMBSTONE_SWEEP_MAX_REMOVALS = 100;
+
+const RECLAIM_TOMBSTONE_MARKER_RE = /\.reclaim\.tombstone\./u;
+
+export function sweepReclaimTombstones(dir: string, now = Date.now()): number {
+  let removed = 0;
+  try {
+    for (const name of readdirSync(dir)) {
+      if (removed >= TOMBSTONE_SWEEP_MAX_REMOVALS) break;
+      if (!RECLAIM_TOMBSTONE_MARKER_RE.test(name)) continue;
+      const tombstonePath = join(dir, name);
+      try {
+        const stats = statSync(tombstonePath);
+        if (!stats.isFile()) continue;
+        if (now - stats.mtimeMs <= TOMBSTONE_SWEEP_MAX_AGE_MS) continue;
+        unlinkSync(tombstonePath);
+        removed++;
+      } catch {
+        // A concurrent sweep, removal, or replacement is a conservative no-op.
+      }
+    }
+  } catch {
+    // An unreadable or missing directory means nothing to sweep.
+  }
+  return removed;
+}
+
+export function countReclaimTombstones(dir: string): number {
+  try {
+    return readdirSync(dir).filter((name) => RECLAIM_TOMBSTONE_MARKER_RE.test(name)).length;
+  } catch {
+    return 0;
+  }
+}
+
+let tombstoneSweepDone = false;
 
 /**
  * A deterministic regular sidecar elects one reclaimer before primary
@@ -376,7 +444,9 @@ function tryTripleReclaimElection(path: string): TripleReclaimElection | undefin
     // reclaimed. Symlinks, unknown files, live owners, and unknown owners stay.
     const current = readTripleLock(electionPath);
     if (current && tripleOwnerAlive(current.metadata.pid) === false) {
-      reclaimTriplePath(electionPath, current.stats, (claimPath) => {
+      // Self-owned housekeeping: the election guard sidecar, not a residual
+      // claim seen by other processes. No litter.
+      reclaimTriplePath(electionPath, current.stats, true, (claimPath) => {
         const verify = readTripleLock(claimPath);
         return verify !== undefined && verify.metadata.pid === current.metadata.pid &&
           verify.metadata.token === current.metadata.token && sameTripleIdentity(current.stats, verify.stats) &&
@@ -390,7 +460,7 @@ function tryTripleReclaimElection(path: string): TripleReclaimElection | undefin
         const now = Date.now();
         const stale = staleEmptyTripleLock(electionPath, now) ?? staleMalformedTripleLock(electionPath, now);
         if (stale !== undefined) {
-          reclaimTriplePath(electionPath, stale, (claimPath) => {
+          reclaimTriplePath(electionPath, stale, true, (claimPath) => {
             const confirmedStale = staleEmptyTripleLock(claimPath, Date.now()) ?? staleMalformedTripleLock(claimPath, Date.now());
             return confirmedStale !== undefined && sameTripleIdentity(stale, confirmedStale);
           });
@@ -405,7 +475,8 @@ function tryTripleReclaimElection(path: string): TripleReclaimElection | undefin
       try { closeSync(fd); } catch { /* best effort */ }
     }
     if (created && !succeeded && createdStats) {
-      reclaimTriplePath(electionPath, createdStats, (claimPath) => {
+      // Self-owned: this attempt's own just-created guard file. No litter.
+      reclaimTriplePath(electionPath, createdStats, true, (claimPath) => {
         const verify = lstatSync(claimPath);
         return verify.isFile() && !verify.isSymbolicLink() && sameTripleIdentity(createdStats!, verify);
       });
@@ -414,7 +485,8 @@ function tryTripleReclaimElection(path: string): TripleReclaimElection | undefin
 }
 
 function releaseTripleReclaimElection(election: TripleReclaimElection): void {
-  reclaimTriplePath(election.path, election.stats, (claimPath) => {
+  // Self-owned: this process's own election guard, being released. No litter.
+  reclaimTriplePath(election.path, election.stats, true, (claimPath) => {
     const current = readTripleLock(claimPath);
     return current !== undefined && current.metadata.pid === process.pid && current.metadata.token === election.token &&
       sameTripleIdentity(election.stats, current.stats);
@@ -689,7 +761,9 @@ function reclaimTripleLock(
     if (!verifiedElection || verifiedElection.metadata.pid !== process.pid ||
         verifiedElection.metadata.token !== election.token ||
         differentTripleIdentity(election.stats, verifiedElection.stats)) return false;
-    return reclaimTriplePath(path, expected, validateClaim);
+    // Self-owned: the primary lock is being reclaimed into this process's
+    // own ownership right now. No litter.
+    return reclaimTriplePath(path, expected, true, validateClaim);
   } finally {
     releaseTripleReclaimElection(election);
   }
@@ -755,9 +829,13 @@ function pruneDeadReclaimClaims(path: string, expected?: Stats): void {
         // replaced primary permits cleanup.
         if (primary !== undefined && sameTripleIdentity(primary, claim) && expected === undefined) continue;
 
-        // Revalidate the claim immediately before moving it. The canonical
-        // path and tombstone are never unlinked by housekeeping; residual
-        // tombstones are safe evidence for a later bounded/manual sweep.
+        // Revalidate the claim immediately before moving it. This claim is
+        // foreign residual evidence — a hard-link left by a different,
+        // already-dead reclaimer, not something this operation owns — so
+        // unlike the self-owned reclaim/release/election-guard paths above,
+        // its tombstone is preserved on success (unlinkOnSuccess: false
+        // below), never unlinked by this housekeeping. Residual tombstones
+        // are safe evidence for a later bounded/manual sweep.
         const verifiedClaim = lstatSync(claimPath);
         if (!verifiedClaim.isFile() || verifiedClaim.isSymbolicLink() ||
             !sameTripleIdentity(claim, verifiedClaim)) continue;
@@ -779,7 +857,7 @@ function pruneDeadReclaimClaims(path: string, expected?: Stats): void {
         // budget has elapsed. A syscall already in progress cannot be stopped
         // by Node; this check bounds all work that follows the syscall.
         if (performance.now() - started >= RECLAIM_CLAIM_SCAN_MAX_MS) continue;
-        reclaimTriplePath(claimPath, verifiedClaim, (tombstonePath) => {
+        reclaimTriplePath(claimPath, verifiedClaim, false, (tombstonePath) => {
           const verify = readTripleLock(tombstonePath);
           if (verify !== undefined) return tripleOwnerAlive(verify.metadata.pid) === false;
           const stale = lstatSync(tombstonePath);
@@ -826,6 +904,13 @@ export function withMemoryTransaction<T>(
   options: MemoryTransactionOptions = {},
 ): T {
   ensureDir(paths.home);
+  if (!tombstoneSweepDone) {
+    // Tombstones are only created on this writer path, so one best-effort
+    // sweep per process here covers every producer without touching the CLI
+    // entry or read-only commands.
+    tombstoneSweepDone = true;
+    sweepReclaimTombstones(dirname(paths.memory));
+  }
   const lock = acquireTripleLock(paths);
   const now = options.now ?? Date.now();
   const initial = loadMemoryChecked(paths.memory, now);
@@ -1293,4 +1378,56 @@ export function recordTripleOnce(
       appended: true,
     };
   }, target);
+}
+
+export const MAX_RATIONALE_EXCERPT_BYTES = 1200;
+
+/** Redact secrets, flatten control characters, and cap head+tail by bytes. */
+export function boundRationaleExcerpt(text: string): string {
+  const clean = redactSecretsAtBoundary(text.replace(/[\u0000-\u001f\u007f-\u009f]/g, " "));
+  if (Buffer.byteLength(clean, "utf8") <= MAX_RATIONALE_EXCERPT_BYTES) return clean;
+  const half = Math.floor((MAX_RATIONALE_EXCERPT_BYTES - 5) / 2);
+  const head = utf8Slice(clean, 0, half);
+  const tail = utf8SliceFromEnd(clean, half);
+  return `${head} … ${tail}`;
+}
+
+export function recordRationale(
+  input: Omit<RationaleRecord, "kind" | "id" | "ts" | "v" | "excerpt"> & { text: string; ts?: number },
+  paths?: RockyPaths,
+): RationaleRecord {
+  const ts = input.ts ?? Date.now();
+  const rec: RationaleRecord = {
+    kind: "rationale",
+    id: randomUUID(),
+    ts,
+    v: 1,
+    cwd: input.cwd,
+    agent: input.agent,
+    rationale_fidelity: input.rationale_fidelity,
+    source: input.source,
+    excerpt: boundRationaleExcerpt(input.text),
+    ...(input.pointer === undefined ? {} : { pointer: input.pointer }),
+    ...(input.links === undefined ? {} : { links: input.links }),
+  };
+  withMemoryTransaction((transaction) => { transaction.append(rec); }, paths ?? resolveRockyPaths(), { now: ts });
+  return rec;
+}
+
+export function recordAlias(
+  input: { alias: string; concept: string; action: "add" | "retract"; ts?: number },
+  paths?: RockyPaths,
+): AliasRecord {
+  const ts = input.ts ?? Date.now();
+  const rec: AliasRecord = {
+    kind: "alias",
+    id: randomUUID(),
+    ts,
+    v: 1,
+    alias: input.alias,
+    concept: input.concept,
+    action: input.action,
+  };
+  withMemoryTransaction((transaction) => { transaction.append(rec); }, paths ?? resolveRockyPaths(), { now: ts });
+  return rec;
 }
