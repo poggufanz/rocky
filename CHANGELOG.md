@@ -2,6 +2,13 @@
 
 Notable changes per release. Dates are the release date.
 
+## 0.7.2 — 20 August 2026
+
+A patch release cleaning up the passive hook lane — the path that runs at every prompt, on every command, without you typing anything:
+- **Bash hook no longer writes over your prompt.** The detached handler wrote straight to the console device, racing the shell's prompt draw and your own typing. It now buffers into a per-spawn speech file and prints it at the next prompt, the same mechanism the PowerShell hook has used since 0.5.2. Each session only ever prints speech files it claimed itself, so two open terminals never steal each other's messages.
+- **No more deep-memory hint on typos.** Repeating a misspelled command no longer asks you to wrap the misspelling in `rocky run`. Detected by exit 127 on Bash and by a PATH probe on PowerShell, which never sends 127. Only command-not-found is covered — a missing *file* is indistinguishable from an ordinary failure without stderr, and the passive handler never receives stderr.
+- **`rocky hook status` now says when your installed hook is out of date** and names `rocky hook install` as the fix. Hook protocol version moves to 0.4.0. Existing installs keep the old behaviour until reinstalled.
+
 ## 0.7.1 — 20 August 2026
 
 Release: [v0.7.1](https://github.com/poggufanz/rocky/releases/tag/v0.7.1)
