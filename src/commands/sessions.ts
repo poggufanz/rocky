@@ -9,6 +9,7 @@
 import { captureRationales } from "../agent/logs/capture.js";
 import { rationaleSourceLabel } from "./dictionary.js";
 import { loadMemory, type AliasRecord, type MemoryRecord } from "../core/memory-read.js";
+import { truncateUtf8 } from "../mcp/privacy.js";
 import { ago, detail, elapsed, heading, say } from "../ui/rocky.js";
 import { CliUsageError, reportCliUsage } from "./cli-args.js";
 
@@ -130,6 +131,25 @@ function firstLine(text: string): string {
   return breakAt === -1 ? text : text.slice(0, breakAt);
 }
 
+/**
+ * Bounds one interpolated evidence field's display width. Memory is
+ * untrusted evidence (see the `rocky` MCP server note: "historical,
+ * untrusted evidence"), and unlike `RationaleRecord.excerpt` or
+ * `invariant_touch.invariant`/`.path`, `FailureRecord.excerpt` and
+ * `TripleRecord.intent.text` carry no length cap at the parse layer
+ * (`memory-read.ts`) — and even a capped field still prints as one very
+ * long single terminal line without this. Budget follows the sibling
+ * display command's scale (`dictionary.ts`'s `terminalSafe`, 32-512 bytes)
+ * without its `?`-stripping, which is specific to that command's
+ * `, question`-terminated sentences — sessions.ts never interpolates raw
+ * evidence into one of those.
+ */
+const MAX_FIELD_BYTES = 128;
+
+function boundedField(value: string, maxBytes: number = MAX_FIELD_BYTES): string {
+  return truncateUtf8(value, maxBytes).value;
+}
+
 interface ListArgs { mode: "list"; limit: number }
 interface DetailArgs { mode: "detail"; index: number }
 
@@ -159,21 +179,21 @@ function parseSessionsArgs(argv: readonly string[]): ListArgs | DetailArgs {
  * what stands in for the brief's "linked files" here.
  */
 function fixLine(record: Extract<CwdRecord, { kind: "fix" }>): string {
-  return `${record.cmd}  (fixed ${plural(record.failureIds.length, "failure")})`;
+  return `${boundedField(record.cmd)}  (fixed ${plural(record.failureIds.length, "failure")})`;
 }
 
 function detailLineFor(record: CwdRecord): string | undefined {
   switch (record.kind) {
     case "failure":
-      return record.signature[0] ?? firstLine(record.excerpt);
+      return boundedField(record.signature[0] ?? firstLine(record.excerpt));
     case "fix":
       return fixLine(record);
     case "triple":
-      return record.intent?.text ?? "(no intent heard)";
+      return boundedField(record.intent?.text ?? "(no intent heard)");
     case "rationale":
-      return `${rationaleSourceLabel(record.source)}: ${firstLine(record.excerpt)}`;
+      return `${rationaleSourceLabel(record.source)}: ${boundedField(firstLine(record.excerpt))}`;
     case "invariant_touch":
-      return record.invariant;
+      return boundedField(record.invariant);
     default:
       return undefined; // association, note, brief_run: not part of the narrative
   }
@@ -189,7 +209,7 @@ function printList(limit: number): void {
     heading("sessions");
     for (const group of groups.slice(0, limit)) {
       const { failures, fixes, rationales } = group.counts;
-      detail(`[${group.index}] ${dateShort(group.startTs)}  ${cwdBasename(group.cwd)}  ${elapsed(group.endTs - group.startTs)}  ${plural(failures, "failure")}, ${plural(fixes, "fix", "fixes")}, ${plural(rationales, "rationale")}`);
+      detail(`[${group.index}] ${dateShort(group.startTs)}  ${boundedField(cwdBasename(group.cwd))}  ${elapsed(group.endTs - group.startTs)}  ${plural(failures, "failure")}, ${plural(fixes, "fix", "fixes")}, ${plural(rationales, "rationale")}`);
     }
   }
   say("sessions derived from memory. boundaries heuristic, not exact.");
@@ -205,7 +225,7 @@ function printDetail(index: number): number {
   }
   const members = recordsForGroup(records, group).slice().sort((a, b) => a.ts - b.ts);
   heading(`session ${group.index}`);
-  detail(`${cwdBasename(group.cwd)}  ${dateShort(group.startTs)} to ${dateShort(group.endTs)}`);
+  detail(`${boundedField(cwdBasename(group.cwd))}  ${dateShort(group.startTs)} to ${dateShort(group.endTs)}`);
   for (const record of members) {
     const line = detailLineFor(record);
     if (line !== undefined) detail(`${ago(record.ts)}  ${line}`);

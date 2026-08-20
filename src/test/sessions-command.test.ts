@@ -249,3 +249,29 @@ test("sessionsCommand rejects an unexpected argument", () => {
     restore();
   }
 });
+
+test("long interpolated fields (excerpt, cwd) are truncated, not printed verbatim, in detail and list output", () => {
+  const { home, restore } = isolatedHome("rocky-sessions-trunc-");
+  try {
+    const longExcerpt = "x".repeat(500);
+    const longCwd = `C:/work/${"y".repeat(500)}`;
+    writeMemoryFixture(home, [
+      {
+        kind: "rationale", id: "r1", ts: BASE_TS, v: 1, cwd: longCwd, agent: "claude-code",
+        rationale_fidelity: "summary", source: "log-thinking", excerpt: longExcerpt,
+      },
+    ]);
+
+    const detailResult = captureStderr(() => sessionsCommand(["1"]));
+    assert.equal(detailResult.code, 0);
+    assert.ok(!detailResult.stderr.includes(longExcerpt), "full 500-byte excerpt must not appear verbatim");
+    assert.ok(!detailResult.stderr.includes(longCwd), "full 500-byte cwd must not appear verbatim");
+    assert.ok(detailResult.stderr.includes("x".repeat(50)), "a bounded prefix of the excerpt still appears");
+
+    const listResult = captureStderr(() => sessionsCommand([]));
+    assert.equal(listResult.code, 0);
+    assert.ok(!listResult.stderr.includes(longCwd), "the list row's cwd is bounded too");
+  } finally {
+    restore();
+  }
+});
