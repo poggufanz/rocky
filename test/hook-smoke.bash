@@ -656,6 +656,74 @@ else
   echo "ok    - UTF-8 locale label check skipped"
 fi
 
+# --- hook speech: a failing command's speech file is printed and removed ----
+# Spec §6 (Ruling 2): a failing command produces a speech file, the next
+# prompt prints it and removes it, and a name absent from the session array
+# is left untouched. Fixtures use a separate real home, mirroring the label
+# fixtures above.
+SPEECH_HOME="$TMP/speech-home"
+SPEECH_DIR="$SPEECH_HOME/hook-speech"
+mkdir -p "$SPEECH_DIR"
+cp "$ROCKY_HOME/rocky-hook.bash" "$SPEECH_HOME/rocky-hook.bash"
+cp "$ROCKY_HOME/bash-preexec.sh" "$SPEECH_HOME/bash-preexec.sh"
+SPEECH_PROBE="$TMP/rocky-speech-probe"
+cat > "$SPEECH_PROBE" <<'WRAP'
+#!/bin/sh
+# The real handler buffers and publishes via flushHookSpeech (ui/rocky.ts);
+# this shim stands in for it and writes the speech file directly, the same
+# final on-disk shape the drain reads.
+printf '[Rocky] smoke speech, question\n' > "$ROCKY_HOOK_SPEECH_FILE"
+WRAP
+chmod +x "$SPEECH_PROBE"
+SPEECH_OUT2="$TMP/speech-2.stdout"
+SPEECH_ERR2="$TMP/speech-2.stderr"
+export SPEECH_SNAPSHOT="$TMP/speech-seen.txt"
+
+# One live shell session, two prompts. Prompt 1: the failing command claims
+# a name before the spawn and hands the handler a speech file to write.
+# Prompt 2, the next prompt in the SAME session, drains it -- prints the
+# message and removes the file. Both must share one process: the claim list
+# is per-process state (session affinity, Finding 1), so a fresh bash would
+# have an empty __rocky_speech_ids and its drain would return immediately.
+# The detached shim writes asynchronously, so a bounded wait sits between
+# the two precmd calls. The claimed name is reported on stdout as the last
+# line.
+ROCKY_HOME="$SPEECH_HOME" ROCKY_BIN="$SPEECH_PROBE" \
+  bash --noprofile --norc -i -c '
+    source "$ROCKY_HOME/rocky-hook.bash"
+    __rocky_last_cmd="smoke failing cmd"
+    false
+    __rocky_precmd
+    SPEECH_TICKS=0
+    while [[ ! -f "$__rocky_speech_file" && "$SPEECH_TICKS" -lt 50 ]]; do
+      sleep 0.1
+      SPEECH_TICKS=$((SPEECH_TICKS + 1))
+    done
+    # Snapshot the claimed file before the drain removes it, so the message
+    # content can be asserted after the session ends.
+    if [[ -f "$__rocky_speech_file" ]]; then
+      cp "$__rocky_speech_file" "$SPEECH_SNAPSHOT"
+    fi
+    # An unclaimed name in the shared directory is not ours to speak: it may
+    # belong to another live session and must survive this drain untouched.
+    printf "[Rocky] foreign speech, question\n" > "$ROCKY_HOME/hook-speech/foreign.txt"
+    __rocky_last_cmd=""
+    __rocky_precmd
+    printf "%s\n" "${__rocky_speech_file:-}"
+  ' >"$SPEECH_OUT2" 2>"$SPEECH_ERR2"
+SPEECH_CLAIMED="$(tail -n 1 "$SPEECH_OUT2")"
+check "failing command claims a speech file" test -n "$SPEECH_CLAIMED"
+check_file_contains "failing command's speech file appears with its message" \
+  '[Rocky] smoke speech, question' "$SPEECH_SNAPSHOT"
+
+SPEECH_FOREIGN="$SPEECH_DIR/foreign.txt"
+check "next prompt prints the speech message" \
+  grep -qF '[Rocky] smoke speech, question' "$SPEECH_ERR2"
+check "printed speech file is removed" test ! -e "$SPEECH_CLAIMED"
+check "unclaimed speech file is left untouched" test -f "$SPEECH_FOREIGN"
+check "unclaimed speech file is never printed" \
+  bash -c '! grep -qF "foreign speech" "$1"' bash "$SPEECH_ERR2"
+
 # add a harmless test rule so guard can be exercised without danger
 printf '^touch marker\ttest rule speaks\n' >> "$ROCKY_HOME/guard.rules"
 
