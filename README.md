@@ -5,7 +5,7 @@
 [![npm](https://img.shields.io/npm/v/@poggufanz/rocky-cli?style=flat-square)](https://www.npmjs.com/package/@poggufanz/rocky-cli)
 [![MIT license](https://img.shields.io/badge/license-MIT-blue.svg?style=flat-square)](LICENSE)
 
-[Release v0.6.0](https://github.com/poggufanz/rocky/releases/tag/v0.6.0) | [Changelog](CHANGELOG.md) | [License](LICENSE) | [Security](https://github.com/poggufanz/rocky/blob/main/SECURITY.md) | [Contributing](https://github.com/poggufanz/rocky/blob/main/CONTRIBUTING.md)
+[Release v0.7.0](https://github.com/poggufanz/rocky/releases/tag/v0.7.0) | [Changelog](CHANGELOG.md) | [License](LICENSE) | [Security](https://github.com/poggufanz/rocky/blob/main/SECURITY.md) | [Contributing](https://github.com/poggufanz/rocky/blob/main/CONTRIBUTING.md)
 
 Rocky is a blind engineer who lives in your terminal. He remembers failed commands and what fixed them, then brings that history back when the same trouble returns. Supported agent hooks can also keep a bounded record of what you asked for, which files changed, and why the agent said it changed them.
 
@@ -21,7 +21,7 @@ npm install -g @poggufanz/rocky-cli
 
 Requires Node.js 18 or newer. The package name is `@poggufanz/rocky-cli`; the unrelated unscoped `rocky-cli` package is not this project.
 
-Current release: `@poggufanz/rocky-cli@0.6.0`. See the [release notes](https://github.com/poggufanz/rocky/releases/tag/v0.6.0) or the full [changelog](CHANGELOG.md).
+Current release: `@poggufanz/rocky-cli@0.7.0`. See the [release notes](https://github.com/poggufanz/rocky/releases/tag/v0.7.0) or the full [changelog](CHANGELOG.md).
 
 ## Quick start
 
@@ -60,6 +60,7 @@ The PowerShell hook is passive ears only: it overrides `prompt` to see a command
 | Nervous System | Supported Claude Code and Codex hooks record bounded intent, path, excerpt, and stated-rationale evidence. |
 | Dictionary | `what`, `how`, `why`, `digest`, and `quiz` turn remembered changes back into plain explanations. |
 | Read-only MCP | Exposes bounded memory tools over local stdio, with sanitized output by default. |
+| Rationale gate | A concept lexicon (`rocky concepts`) plus a PreToolUse gate that nudges an editing agent to state why before it touches a file; deny-once, fail-open. |
 
 Rocky preserves wrapped-command stdout, stderr, TTY behavior, and exit status. Persona lines go to stderr, so piped stdout stays clean.
 
@@ -76,11 +77,14 @@ Rocky preserves wrapped-command stdout, stderr, TTY behavior, and exit status. P
 | `rocky invariants` | List remembered invariant notes and hear which globs guard nothing. |
 | `rocky check` | Inspect the commits or workspace about to be pushed. |
 | `rocky hook install\|status\|uninstall` | Manage the Bash/WSL hook, and on Windows every detected PowerShell host's hook. |
-| `rocky what`, `rocky how`, `rocky why` | Look up remembered intent and mechanism evidence. |
+| `rocky what`, `rocky how`, `rocky why [--add "<text>"]` | Look up remembered intent/mechanism evidence, or teach your own rationale. |
 | `rocky digest`, `rocky quiz`, `rocky export` | Review or export recent learning records. |
+| `rocky concepts`, `rocky concept <id>`, `rocky concept alias` | List, look up, and teach concepts heard in memory. |
+| `rocky sessions [n]`, `rocky repl [--ai]` | Browse derived work sessions, or stay in one loop over recall/what/why/how. |
 | `rocky setup` | Register detected MCP hosts after consent. |
 | `rocky mcp` | Start the local read-only stdio server. |
 | `rocky model status\|use\|off` | Configure optional loopback Ollama. |
+| `rocky hook gate-event`, `rocky hook agent-event generic` | PreToolUse rationale-gate enforcement and the universal agent notify endpoint. |
 
 Setup stays explicit:
 
@@ -101,6 +105,19 @@ rocky model off
 ```
 
 Rocky never installs or pulls a model, and it does not start or stop the shared Ollama daemon.
+
+## Rationale evidence and the gate
+
+Stated-rationale evidence arrives through four lanes, ranked by fidelity:
+
+| Lane | Source | Fidelity |
+| --- | --- | --- |
+| `log-thinking` | Claude Code or DSH session logs, when a thinking block exists | raw |
+| `log-response` | Same logs' response text, when no thinking block exists | summary |
+| `notify` | Any agent calling `rocky hook agent-event <adapter> --rationale "<text>"` | summary |
+| `human` | You, via `rocky why --add "<text>"` | summary |
+
+An unlinked file has no rationale evidence yet; that is a first-class honest state, not a gap Rocky papers over. The DSH log adapter needs Node 22.15 or newer at runtime for built-in zstd support — on an older Node it feature-detects the gap, skips DSH logs, and discloses that instead of guessing. `rocky setup --agent-hooks` installs a PreToolUse rationale gate by default (`rocky hook gate-event claude-code`): it denies once per session per file when no rationale evidence exists yet, then fails open for that file every time after. Opt out at install with `--no-rationale-gate`, or at runtime with `ROCKY_RATIONALE_GATE=off`. Codex and other non-Claude-Code agents have no deny hook at all; they reach the `notify` lane only.
 
 ## Privacy and local state
 
@@ -141,9 +158,10 @@ Read the [contributing guide](https://github.com/poggufanz/rocky/blob/main/CONTR
 - **v0.3 - his patience (implemented)**: `rocky watch` for long-running work.
 - **v0.4 - his diligence (implemented)**: `rocky check` before a push.
 - **v0.5 - his curiosity (implemented)**: Nervous System hooks, intent-mechanism dictionary, teaching commands, and bounded MCP knowledge tools.
-- **v0.6 - his accountability (current release)**: `rocky brief`, `rocky journal`, `rocky invariants`, extended `rocky stats`, and the schema envelope documentation.
+- **v0.6 - his accountability (implemented)**: `rocky brief`, `rocky journal`, `rocky invariants`, extended `rocky stats`, and the schema envelope documentation.
+- **v0.7 - his memory of why (current release)**: stated-rationale evidence across four lanes, a concept lexicon (`rocky concepts`), derived `rocky sessions` and `rocky repl`, and the PreToolUse rationale gate.
 
-BYOK annotation, `attest`, and the memory circuit breaker remain deferred. The earlier `rocky explain` idea is superseded and is not an active command.
+BYOK annotation, `attest`, and the memory circuit breaker remain deferred. Codex and Gemini agent-log adapters are deferred too — Codex's local session format drifted to a SQLite hybrid, and Gemini persists no thoughts to read. The earlier `rocky explain` idea is superseded and is not an active command.
 
 ## License and fan-project note
 
