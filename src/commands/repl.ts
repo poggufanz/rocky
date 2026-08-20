@@ -56,6 +56,8 @@ function printHelp(): void {
   detail("how <query>      remember how intent became code.");
   detail("concepts         list concepts heard in memory.");
   detail("concept <id>     hear evidence for one concept.");
+  detail('concept alias [--retract] "<phrase>" <id>');
+  detail("                 teach or retract phrase to concept, quotes group multi-word phrase.");
   detail("sessions         list recent work sessions.");
   detail("help             show this list.");
   detail("quit, exit       leave repl.");
@@ -155,8 +157,9 @@ function parseLine(raw: string): ParsedLine {
 
 export async function replCommand(argv: readonly string[], input?: NodeJS.ReadableStream): Promise<number> {
   const useAi = argv.includes("--ai");
+  const source = input ?? process.stdin;
   const rl = createInterface({
-    input: input ?? process.stdin,
+    input: source,
     output: process.stderr,
     prompt: rockyPrompt("rocky>"),
   });
@@ -175,6 +178,13 @@ export async function replCommand(argv: readonly string[], input?: NodeJS.Readab
     rl.on("SIGINT", () => finish(0));
     // Ctrl-D / end of piped input.
     rl.on("close", () => finish(0));
+    // An unhandled 'error' on the interface or its input stream would
+    // otherwise take the whole process down regardless of how well every
+    // dispatch is guarded -- the one path the try/catch below cannot cover.
+    // Ending the loop the same clean way close does keeps the guarantee
+    // this component exists to make: the repl never crashes.
+    rl.on("error", () => finish(0));
+    source.on("error", () => finish(0));
 
     rl.on("line", (raw: string) => {
       if (finished) return;

@@ -91,7 +91,7 @@ usage:
   rocky repl [--ai]         stay in one loop over recall/what/why/how/concepts/
                             sessions instead of paying startup per call.
                             --ai passes through to recall and what. type help
-                            inside for the command list, quit or exit to leave.
+                            inside for command list, quit or exit to leave.
   rocky mcp                 serve read-only memory tools over stdio.
   rocky setup               configure detected MCP hosts with sanitized exposure.
   rocky setup --check       verify owned host registrations and Rocky MCP tools.

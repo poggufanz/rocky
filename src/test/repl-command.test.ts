@@ -151,3 +151,12 @@ test("repl refuses an unterminated quote instead of writing a truncated alias, a
     assert.equal(records.some((r) => r.kind === "alias"), false, "no alias record should have been written");
   }
 });
+
+test("repl exits cleanly instead of crashing when the input stream emits an error", async () => {
+  const input = new Readable({ read() {} });
+  const { replCommand } = await import("../commands/repl.js");
+  const promise = replCommand([], input);
+  setImmediate(() => input.emit("error", new Error("injected stream failure")));
+  const code = await promise;
+  assert.equal(code, 0);
+});
