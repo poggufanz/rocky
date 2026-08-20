@@ -129,7 +129,7 @@ v0.7 adds a fourth evidence kind, `rationale`, alongside the triples above: Rock
 | Lane | Source | Fidelity |
 | --- | --- | --- |
 | `log-thinking` | Claude Code or DSH session logs, when a thinking block exists | raw |
-| `log-response` | The same logs' response text, when no thinking block exists | summary |
+| `log-response` | Claude Code session logs' response text, when no thinking block exists | summary |
 | `notify` | Any agent calling `rocky hook agent-event <adapter> --rationale "<text>"` | summary |
 | `human` | You, via `rocky why --add "<text>"` | summary |
 
