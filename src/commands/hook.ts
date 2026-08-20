@@ -73,6 +73,21 @@ import { safeTerminalLine } from "../ui/sanitize.js";
 export const ROCKY_HOOK_PROTOCOL_VERSION = "0.4.0";
 
 /**
+ * The line `rocky hook status` speaks when the installed hook file is older
+ * (or newer) than the protocol this package implements -- or `undefined`
+ * when there is nothing to say.
+ *
+ * `missing` and `unknown` are excluded on purpose: the version line above
+ * this one already reports both, and a second line telling the person to
+ * reinstall something that is not installed is noise stacked on noise.
+ */
+export function hookStaleLine(installed: string): string | undefined {
+  if (installed === "missing" || installed === "unknown") return undefined;
+  if (installed === ROCKY_HOOK_PROTOCOL_VERSION) return undefined;
+  return `hook file not same version as me. words can land wrong. run: rocky hook install`;
+}
+
+/**
  * An unreadable memory file is spoken over /dev/tty, not thrown — a detached
  * hook handler must never take the shell down.
  */
@@ -739,6 +754,8 @@ function runBashHookStatus(): number {
     return 1;
   }
   say(`ears installed. hook version ${version}. ${ruleCount} guard rule${ruleCount === 1 ? "" : "s"} active.`);
+  const stale = hookStaleLine(version);
+  if (stale) say(stale);
   return 0;
 }
 
@@ -1062,6 +1079,8 @@ function statusPowerShellHost(host: PowerShellHost): number {
     return 1;
   }
   say(`${host.label}: installed, hook version ${version}, PowerShell ${host.version}.`);
+  const stale = hookStaleLine(version);
+  if (stale) say(stale);
   // Ruling 2's disclosed trade-off, named where a user actually meets it: the
   // only way PowerShell allows forcing $? back to False after Rocky's own
   // bookkeeping runs is a real, suppressed non-terminating error, which

@@ -482,3 +482,23 @@ test("both hook assets carry the protocol version the code expects", () => {
     assert.equal(found, ROCKY_HOOK_PROTOCOL_VERSION, asset);
   }
 });
+
+const { hookStaleLine } = await import("../commands/hook.js");
+
+test("a matching hook version produces no stale line", () => {
+  assert.equal(hookStaleLine(ROCKY_HOOK_PROTOCOL_VERSION), undefined);
+});
+
+test("a differing hook version names the reinstall command", () => {
+  const line = hookStaleLine("0.3.0");
+  assert.ok(line !== undefined);
+  assert.match(line, /rocky hook install/);
+  assert.deepEqual(validateRockyPhrase(line), []);
+});
+
+test("a missing or unreadable hook version produces no stale line", () => {
+  // "missing" and "unknown" are already reported by the version line itself;
+  // a second line about reinstalling would be noise on top of noise.
+  assert.equal(hookStaleLine("missing"), undefined);
+  assert.equal(hookStaleLine("unknown"), undefined);
+});
