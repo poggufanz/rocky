@@ -1522,6 +1522,50 @@ test("an old orphan claim behind a stable nonclaim prefix cannot starve lock rec
   assert.equal(entries.filter((name) => name.startsWith("aaa-stable-prefix-")).length, 96);
 });
 
+test("a foreign residual claim leaves tombstone evidence while self-owned reclaim leaves none", { timeout: 15_000 }, (t) => {
+  // Pins the distinction `reclaimTriplePath`'s `unlinkOnSuccess` parameter
+  // exists to enforce: a foreign claim left behind by a different,
+  // already-dead reclaimer must survive as evidence, while every artifact
+  // this operation owns (the primary lock reclaim, its release, and the
+  // election guard) must not litter. No filler entries are written here —
+  // unlike the starvation test above, the point is not scan-budget timing,
+  // it is the unlink policy itself, so the claim must be reached
+  // deterministically. A future change that collapses the two policies back
+  // into one (e.g. by giving `unlinkOnSuccess` a default, or by routing the
+  // residual-claim call through a self-owned call site) fails this test
+  // either by losing the foreign claim's evidence or by leaving a second,
+  // self-owned tombstone behind.
+  const home = sandbox(t, "rocky-reclaim-policy-split-");
+  const lock = `${join(home, "memory.jsonl")}.triple.lock`;
+  const deadPid = 2_147_483_647;
+  mkdirSync(home, { recursive: true });
+  writeFileSync(lock, JSON.stringify({ pid: deadPid, token: "d".repeat(32) }), { mode: 0o600 });
+  const orphanClaim = `${lock}.reclaim.${deadPid}.${"e".repeat(32)}`;
+  linkSync(lock, orphanClaim);
+
+  const originalHome = process.env.ROCKY_HOME;
+  process.env.ROCKY_HOME = home;
+  try {
+    memory.recordNote({ cwd: home, cmd: "reclaim-policy-split", file: "policy.ts", line: 1, subject: "policy", answer: "recovered" });
+  } finally {
+    if (originalHome === undefined) delete process.env.ROCKY_HOME;
+    else process.env.ROCKY_HOME = originalHome;
+  }
+
+  assert.equal(existsSync(lock), false, "dead primary lock is reclaimed");
+  const entries = readdirSync(home);
+  const orphanName = basename(orphanClaim);
+
+  assert.equal(entries.includes(orphanName), false, "the foreign claim is reclaimed, not left under its own name");
+  const tombstones = entries.filter((name) => name.includes(".reclaim.tombstone."));
+  assert.equal(tombstones.length, 1, "exactly one tombstone remains: the foreign claim's own evidence");
+  assert.ok(tombstones[0]!.startsWith(`${orphanName}.reclaim.tombstone.`),
+    "the surviving tombstone belongs to the foreign orphan claim, not a self-owned reclaim");
+  // If the primary-lock reclaim, its release, or the election guard leaked a
+  // tombstone of their own, `tombstones.length` above would be greater than
+  // one — self-owned reclaim leaves nothing extra behind.
+});
+
 test("competing dead-owner reclaimers never overlap transactions", { timeout: 30_000 }, async (t) => {
   const home = sandbox(t, "rocky-lock-reclaim-race-");
   const lock = `${join(home, "memory.jsonl")}.triple.lock`;
