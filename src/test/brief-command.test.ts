@@ -9,6 +9,32 @@ import { loadMemoryChecked } from "../core/memory-read.js";
 import { readState } from "../core/brief-state.js";
 import { recordWatchFailure } from "../core/memory.js";
 
+/**
+ * briefCommand now runs captureRationales() on every successful call (Task
+ * 17). Left unisolated, that would scan this host's real Claude Code /dsh
+ * session logs and could write unrelated `rationale` records into the
+ * test's fresh ROCKY_HOME memory file, making assertions about exactly
+ * which kinds got recorded non-deterministic. Point both adapters at
+ * paths that cannot exist — same guard sessions-command.test.ts uses for
+ * the same reason.
+ */
+function isolateAgentLogEnv(home: string): { restore: () => void } {
+  const previous = {
+    CLAUDE_CONFIG_DIR: process.env.CLAUDE_CONFIG_DIR,
+    DSH_SESSION_JSONL: process.env.DSH_SESSION_JSONL,
+  };
+  process.env.CLAUDE_CONFIG_DIR = join(home, "no-claude-config-here");
+  process.env.DSH_SESSION_JSONL = join(home, "no-dsh-log-here.jsonl.zstd");
+  return {
+    restore: () => {
+      for (const [key, value] of Object.entries(previous)) {
+        if (value === undefined) delete process.env[key as keyof typeof previous];
+        else process.env[key as keyof typeof previous] = value;
+      }
+    },
+  };
+}
+
 function makeRepo(): string {
   // realpathSync.native resolves symlinks/short-names in the OS temp dir
   // (macOS /var -> /private/var; Windows 8.3 short names on CI runners) so
@@ -78,6 +104,7 @@ test("briefCommand reports window, records brief_run and invariant_touch, update
   const home = mkdtempSync(join(tmpdir(), "rocky-home-"));
   const previous = process.env.ROCKY_HOME;
   process.env.ROCKY_HOME = home;
+  const agentLogs = isolateAgentLogEnv(home);
   try {
     const code = await briefCommand(["--since", "1d", "--quiet"], dir);
     assert.equal(code, 0);
@@ -90,6 +117,7 @@ test("briefCommand reports window, records brief_run and invariant_touch, update
     const state = readState(join(home, "state.json"));
     assert.ok(state.lastBriefTs !== undefined && state.lastBriefTs > 0);
   } finally {
+    agentLogs.restore();
     if (previous === undefined) delete process.env.ROCKY_HOME;
     else process.env.ROCKY_HOME = previous;
   }
@@ -110,11 +138,35 @@ async function captureStdout(run: () => Promise<number>): Promise<{ code: number
   }
 }
 
+/**
+ * Same console.log interception as captureStdout, plus process.stderr.write
+ * interception for the "why" annotation and "repeated concepts" section,
+ * which go through detail()/heading() (stderr), not console.log.
+ */
+async function captureStdio(run: () => Promise<number>): Promise<{ code: number; stdout: string; stderr: string }> {
+  const originalLog = console.log;
+  const originalStderr = process.stderr.write;
+  const lines: string[] = [];
+  let stderr = "";
+  console.log = ((...args: unknown[]) => { lines.push(args.map(String).join(" ")); }) as typeof console.log;
+  process.stderr.write = ((chunk: string | Uint8Array) => {
+    stderr += String(chunk);
+    return true;
+  }) as typeof process.stderr.write;
+  try {
+    return { code: await run(), stdout: lines.join("\n"), stderr };
+  } finally {
+    console.log = originalLog;
+    process.stderr.write = originalStderr;
+  }
+}
+
 test("briefCommand canonicalizes cwd so a native-separator memory record still matches the git-resolved (forward-slash) root", async () => {
   const dir = makeRepo();
   const home = mkdtempSync(join(tmpdir(), "rocky-home-"));
   const previous = process.env.ROCKY_HOME;
   process.env.ROCKY_HOME = home;
+  const agentLogs = isolateAgentLogEnv(home);
   try {
     // recordWatchFailure is the real writer that accepts an explicit cwd; on
     // Windows `dir` (from mkdtempSync/join) uses backslashes, exactly like
@@ -128,6 +180,7 @@ test("briefCommand canonicalizes cwd so a native-separator memory record still m
     assert.match(stdout, /failure: npm test/);
     assert.doesNotMatch(stdout, /none remembered/);
   } finally {
+    agentLogs.restore();
     if (previous === undefined) delete process.env.ROCKY_HOME;
     else process.env.ROCKY_HOME = previous;
   }
@@ -138,6 +191,7 @@ test("briefCommand scopes a --since <git-ref> memory window to the ref's own com
   const home = mkdtempSync(join(tmpdir(), "rocky-home-"));
   const previous = process.env.ROCKY_HOME;
   process.env.ROCKY_HOME = home;
+  const agentLogs = isolateAgentLogEnv(home);
   try {
     const firstCommitTs = Date.parse(firstIso);
     // After the first commit, before the second: should surface in block 3
@@ -165,6 +219,7 @@ test("briefCommand scopes a --since <git-ref> memory window to the ref's own com
     assert.match(stdout, /failure: npm test since-in-window/);
     assert.doesNotMatch(stdout, /since-before-first/);
   } finally {
+    agentLogs.restore();
     if (previous === undefined) delete process.env.ROCKY_HOME;
     else process.env.ROCKY_HOME = previous;
   }
@@ -178,6 +233,74 @@ test("briefCommand exits 1 outside a git repo", async () => {
   try {
     assert.equal(await briefCommand([], dir), 1);
   } finally {
+    if (previous === undefined) delete process.env.ROCKY_HOME;
+    else process.env.ROCKY_HOME = previous;
+  }
+});
+
+test("briefCommand annotates a printed failure with its linked rationale, and prints no repeated-concepts section for a single hit", async () => {
+  const dir = makeRepo();
+  const home = mkdtempSync(join(tmpdir(), "rocky-home-"));
+  const previous = process.env.ROCKY_HOME;
+  process.env.ROCKY_HOME = home;
+  const agentLogs = isolateAgentLogEnv(home);
+  try {
+    const now = Date.now();
+    const failure = {
+      kind: "failure", id: "why-f1", ts: now - 1000, cwd: dir,
+      cmd: "npm test", exitCode: 1, fingerprint: "fp-why-f1",
+      signature: ["boom"], excerpt: "boom",
+    };
+    // Linked by id (links.failureId), not by guessing at nearby text.
+    const rationale = {
+      kind: "rationale", id: "why-r1", ts: now - 500, v: 1, cwd: dir,
+      agent: "human", rationale_fidelity: "summary", source: "human",
+      excerpt: "second attempt double-charged the customer",
+      links: { failureId: "why-f1" },
+    };
+    writeFileSync(join(home, "memory.jsonl"), `${JSON.stringify(failure)}\n${JSON.stringify(rationale)}\n`, "utf8");
+
+    const { code, stdout, stderr } = await captureStdio(() => briefCommand(["--since", "1d", "--quiet"], dir));
+    assert.equal(code, 0);
+    assert.match(stdout, /failure: npm test/);
+    assert.match(stderr, /why: second attempt double-charged the customer \(you said\)/);
+    // Only one concept-bearing record exists: the repeated-concepts section
+    // (count >= 2) must not appear for it.
+    assert.doesNotMatch(stderr, /repeated concepts/);
+  } finally {
+    agentLogs.restore();
+    if (previous === undefined) delete process.env.ROCKY_HOME;
+    else process.env.ROCKY_HOME = previous;
+  }
+});
+
+test("briefCommand prints a repeated concepts section when memory holds the same concept twice or more in window", async () => {
+  const dir = makeRepo();
+  const home = mkdtempSync(join(tmpdir(), "rocky-home-"));
+  const previous = process.env.ROCKY_HOME;
+  process.env.ROCKY_HOME = home;
+  const agentLogs = isolateAgentLogEnv(home);
+  try {
+    const now = Date.now();
+    const triple = (id: string, ts: number, text: string) => ({
+      kind: "triple", id, ts, cwd: dir, schemaV: 1, agent: "claude-code", origin: "agent-hook",
+      intent: { text }, mechanism: { files: [], truncatedFiles: 0 },
+    });
+    writeFileSync(
+      join(home, "memory.jsonl"),
+      [
+        triple("rc-t1", now - 2000, "idempotent retry, no duplicate commit"),
+        triple("rc-t2", now - 1000, "idempotency on webhook replay"),
+      ].map((record) => JSON.stringify(record)).join("\n") + "\n",
+      "utf8",
+    );
+
+    const { code, stderr } = await captureStdio(() => briefCommand(["--since", "1d", "--quiet"], dir));
+    assert.equal(code, 0);
+    assert.match(stderr, /repeated concepts/);
+    assert.match(stderr, /idempotency heard 2 times\. same fundamental, same\./);
+  } finally {
+    agentLogs.restore();
     if (previous === undefined) delete process.env.ROCKY_HOME;
     else process.env.ROCKY_HOME = previous;
   }

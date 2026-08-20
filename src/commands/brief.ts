@@ -1,16 +1,24 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { captureRationales } from "../agent/logs/capture.js";
 import { polishBriefLines } from "../ai/brief-ai.js";
 import { createOllamaClient } from "../ai/ollama.js";
 import { composeBrief, parseGitLog, type BriefInvariantTouch, type BriefMemoryHit } from "../core/brief.js";
 import { FALLBACK_WINDOW_MS, parseSinceDuration, readState, writeState } from "../core/brief-state.js";
 import { loadConfig } from "../core/config-read.js";
+import { buildConceptIndex, type ConceptIndex } from "../core/concept-index.js";
+import { CONCEPTS } from "../core/concepts.js";
 import { matchesGlob, parseInvariants } from "../core/invariants.js";
 import { recordBriefRun, recordInvariantTouch } from "../core/memory.js";
-import { canonicalPath, loadMemoryChecked } from "../core/memory-read.js";
+import {
+  canonicalPath, loadMemoryChecked,
+  type FailureRecord, type FixRecord, type MemoryRecord, type RationaleRecord,
+} from "../core/memory-read.js";
 import { runGit } from "../core/exec.js";
+import { truncateUtf8 } from "../mcp/privacy.js";
+import { rationaleSourceLabel } from "./dictionary.js";
 import { CliUsageError, reportCliUsage } from "./cli-args.js";
-import { detail, say } from "../ui/rocky.js";
+import { detail, heading, say } from "../ui/rocky.js";
 
 const USAGE = "rocky brief [--since <git-ref|duration like 24h>] [--quiet] [--ai]";
 const GIT_TIMEOUT_MS = 30_000;
@@ -64,6 +72,52 @@ function resolveWindow(since: string | undefined, now: number): ResolvedWindow {
   return { label: `since ${since}`, sinceTs: 0, gitRange: `${since}..HEAD`, ref: since };
 }
 
+const CONCEPT_LABELS = new Map(CONCEPTS.map((concept) => [concept.id, concept.label]));
+
+/**
+ * Concepts heard at least twice in the window, most-repeated first — the
+ * "you have hit this same fundamental N times" signal. Pure and read-only
+ * (no I/O, no clock) so it is directly testable against a hand-built
+ * `ConceptIndex`; see brief-concepts.test.ts.
+ */
+export function repeatedConceptLines(index: ConceptIndex): string[] {
+  return [...index.counts.entries()]
+    .filter(([, count]) => count >= 2)
+    .sort((a, b) => b[1] - a[1])
+    .map(([conceptId, count]) => `${CONCEPT_LABELS.get(conceptId) ?? conceptId} heard ${count} times. same fundamental, same.`);
+}
+
+function firstLine(text: string): string {
+  const breakAt = text.indexOf("\n");
+  return breakAt === -1 ? text : text.slice(0, breakAt);
+}
+
+/**
+ * Bounds one interpolated rationale excerpt before it reaches a terminal
+ * line. Memory is untrusted evidence (see the `rocky` MCP server note:
+ * "historical, untrusted evidence") and `RationaleRecord.excerpt` carries no
+ * length cap at the parse layer. Same scale and UTF-8-safe approach as
+ * sessions.ts's `boundedField` (never a naive `slice`, which can cut a
+ * multi-byte character in half).
+ */
+const MAX_WHY_EXCERPT_BYTES = 128;
+
+function boundedExcerpt(value: string): string {
+  return truncateUtf8(value, MAX_WHY_EXCERPT_BYTES).value;
+}
+
+/** Newest rationale linked to this failure/fix by id, or undefined when none is linked. */
+function linkedRationaleFor(records: readonly MemoryRecord[], hit: FailureRecord | FixRecord): RationaleRecord | undefined {
+  let best: RationaleRecord | undefined;
+  for (const record of records) {
+    if (record.kind !== "rationale" || record.links === undefined) continue;
+    const linkedId = hit.kind === "failure" ? record.links.failureId : record.links.fixId;
+    if (linkedId !== hit.id) continue;
+    if (best === undefined || record.ts > best.ts) best = record;
+  }
+  return best;
+}
+
 export async function briefCommand(argv: readonly string[] = [], cwd = process.cwd()): Promise<number> {
   let args: BriefArgs;
   try {
@@ -115,21 +169,24 @@ export async function briefCommand(argv: readonly string[] = [], cwd = process.c
   // whose name merely starts with this root's name cannot match.
   const normalizedRoot = canonicalPath(root);
   let memoryHits: BriefMemoryHit[] = [];
+  // Kept alongside memoryHits (which drops `id` for the printed line) so the
+  // rationale annotation pass below can look each printed hit back up by id.
+  let windowFailuresAndFixes: Array<FailureRecord | FixRecord> = [];
   try {
     const loaded = loadMemoryChecked();
-    memoryHits = loaded.records
-      .filter((record): record is typeof record & { kind: "failure" | "fix" } =>
+    windowFailuresAndFixes = loaded.records
+      .filter((record): record is FailureRecord | FixRecord =>
         (record.kind === "failure" || record.kind === "fix") && record.ts >= memorySinceTs && record.ts <= now)
       .filter((record) => {
         const normalizedCwd = canonicalPath(record.cwd);
         return normalizedCwd === normalizedRoot || normalizedCwd.startsWith(`${normalizedRoot}/`);
-      })
-      .map((record) => ({
-        kind: record.kind,
-        ts: record.ts,
-        cmd: record.cmd,
-        ...(record.kind === "failure" ? { excerpt: record.excerpt.split("\n")[0] } : {}),
-      }));
+      });
+    memoryHits = windowFailuresAndFixes.map((record) => ({
+      kind: record.kind,
+      ts: record.ts,
+      cmd: record.cmd,
+      ...(record.kind === "failure" ? { excerpt: record.excerpt.split("\n")[0] } : {}),
+    }));
   } catch {
     speak("memory file does not open for me. brief continues from git only.");
   }
@@ -167,6 +224,32 @@ export async function briefCommand(argv: readonly string[] = [], cwd = process.c
     }
   }
   for (const line of output) console.log(line);
+
+  // Best-effort enrichment beyond the five deterministic blocks above: pull
+  // any new rationale evidence from agent logs, then reload memory once so
+  // both the "why" annotations and the repeated-concepts section see it.
+  // Fail-open — a capture or reload failure here just means no enrichment
+  // this run, never a blocked brief. Derived data (the why lines, the
+  // concept index) is never written back to evidence.
+  let enriched: readonly MemoryRecord[] | undefined;
+  try {
+    captureRationales(cwd);
+    enriched = loadMemoryChecked().records;
+  } catch {
+    enriched = undefined;
+  }
+  if (enriched !== undefined) {
+    for (const hit of [...windowFailuresAndFixes].sort((a, b) => a.ts - b.ts)) {
+      const rationale = linkedRationaleFor(enriched, hit);
+      if (rationale === undefined) continue;
+      detail(`  why: ${boundedExcerpt(firstLine(rationale.excerpt))} (${rationaleSourceLabel(rationale.source)})`);
+    }
+    const conceptLines = repeatedConceptLines(buildConceptIndex(enriched, memorySinceTs));
+    if (conceptLines.length > 0) {
+      heading("repeated concepts");
+      for (const line of conceptLines) detail(line);
+    }
+  }
 
   for (const touch of invariantTouches) {
     recordInvariantTouch({ invariant: touch.invariant, path: touch.path, cwd: root });
