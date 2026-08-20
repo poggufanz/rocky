@@ -39,3 +39,31 @@ test("sinceTs boundary: ts equal is included, one below is excluded", () => {
   assert.equal(ev.length, 1);
   assert.equal(ev[0].recordId, "t-edge");
 });
+
+test("snippet truncation is UTF-8 byte-safe across an astral-character boundary", () => {
+  // Two idempotency keywords so the match clears the score threshold, then
+  // ASCII filler padded so the string is exactly 119 UTF-16 code units long
+  // (the raw-slice bug: `text.slice(0, 120)` would then grab index 119, the
+  // *high* surrogate half of the next character, and drop its low half).
+  const keywords = "idempotent duplicate ";
+  const prefix = keywords + "x".repeat(119 - keywords.length);
+  assert.equal(prefix.length, 119);
+  const text = `${prefix}\u{1F600}${"y".repeat(50)}`; // 🙂-style astral char straddles the 120 boundary
+
+  const index = buildConceptIndex([triple("t1", 100, text)]);
+  const ev = index.evidence.get("idempotency")!;
+  assert.equal(ev.length, 1);
+  const snippet = ev[0].snippet;
+
+  // No unpaired surrogate half and no replacement character leaked through.
+  assert.doesNotMatch(snippet, /[\uD800-\uDFFF]/);
+  assert.doesNotMatch(snippet, /�/);
+  // Byte budget respected (this is a byte cap, not a UTF-16 code-unit cap).
+  assert.ok(
+    Buffer.byteLength(snippet, "utf8") <= 120,
+    `expected snippet <= 120 UTF-8 bytes, got ${Buffer.byteLength(snippet, "utf8")}`,
+  );
+  // The astral character that would have split at the boundary is dropped
+  // whole rather than corrupted; the ASCII prefix survives intact.
+  assert.equal(snippet, prefix);
+});

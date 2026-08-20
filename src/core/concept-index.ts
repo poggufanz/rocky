@@ -8,6 +8,7 @@
 
 import { matchConcepts } from "./concepts.js";
 import type { MemoryRecord } from "./memory-read.js";
+import { utf8Slice } from "./utf8.js";
 
 /**
  * Fold `alias` records into the active phrase -> conceptId map. Records are
@@ -45,7 +46,16 @@ export interface ConceptIndex {
   evidence: Map<string, ConceptEvidence[]>;
 }
 
-const SNIPPET_CHARS = 120;
+// Byte budget, not a character count: evidence text is matchable free-form
+// content (rationale/intent excerpts, failure signatures) that can contain
+// multi-byte or astral characters. A raw UTF-16 `slice` can land mid code
+// point and emit an unpaired surrogate into `rocky concept <id>` output, so
+// this goes through `utf8Slice` like every other evidence-display truncation
+// in the codebase (see `truncateUtf8` call sites). 120 keeps the prior
+// budget's magnitude for the common ASCII-evidence case; multi-byte-heavy
+// text now yields fewer visible characters, which is the correct trade-off
+// for a byte-safe cap.
+const SNIPPET_BYTES = 120;
 
 /** Text a concept match may run on; undefined means the record has none. */
 function matchableText(record: MemoryRecord): string | undefined {
@@ -86,7 +96,7 @@ export function buildConceptIndex(records: readonly MemoryRecord[], sinceTs?: nu
         recordId: record.id,
         kind: record.kind,
         ts: record.ts,
-        snippet: text.slice(0, SNIPPET_CHARS),
+        snippet: utf8Slice(text, 0, SNIPPET_BYTES),
       };
       const list = evidence.get(conceptId);
       if (list) list.push(entry);
