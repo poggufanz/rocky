@@ -27,6 +27,7 @@ import { agentEvent } from "./commands/agent-hook.js";
 import { gateEvent } from "./agent/gate.js";
 import { journalCommand } from "./commands/journal.js";
 import { invariantsCommand } from "./commands/invariants.js";
+import { sessionsCommand } from "./commands/sessions.js";
 import { annotateCommand } from "./agent/annotate.js";
 import { ambiguityCommand } from "./agent/ambiguity.js";
 import { CliUsageError, parseExactCommand, reportCliUsage } from "./commands/cli-args.js";
@@ -81,6 +82,11 @@ usage:
   rocky journal "<note>"    write one line dogfood note. local file only.
   rocky invariants          list remembered invariant notes from .rocky/invariants.md
                             and hear globs that guard nothing.
+  rocky sessions [--limit <n>]
+                            list work sessions derived from memory: grouped by cwd,
+                            split on a 30-minute gap. derived at read time only,
+                            newest-first.
+  rocky sessions <index>    hear one session's evidence, chronologically.
   rocky mcp                 serve read-only memory tools over stdio.
   rocky setup               configure detected MCP hosts with sanitized exposure.
   rocky setup --check       verify owned host registrations and Rocky MCP tools.
@@ -272,6 +278,8 @@ async function main(): Promise<number> {
         return journalCommand(rest);
       case "invariants":
         return invariantsCommand(rest);
+      case "sessions":
+        return sessionsCommand(rest);
       case "mcp":
         return mcp(rest);
       case "setup":
