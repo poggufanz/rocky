@@ -59,6 +59,7 @@ import type {
   RecoveryOutcome,
 } from "../setup/file-transaction.js";
 import { quotePosixShell } from "../core/shell-quote.js";
+import { firstWord, resolvesOnPath } from "../core/path-lookup.js";
 import { ago, detail, detailTty, phrase, say, sayTty } from "../ui/rocky.js";
 import { safeTerminalLine } from "../ui/sanitize.js";
 
@@ -132,7 +133,7 @@ export function hookFail(cmd: string, exitCode: number, cwd: string): number {
       sayTty("possible only. check, question");
     }
     if (!sameCommand) sayTty("try, question");
-  } else {
+  } else if (!isTypoSymptom(cmd, exitCode)) {
     const hint = deepMemoryHint(cmd);
     // No hint means the command already went through `rocky run`, so deep
     // memory exists and that run has already spoken. Passive ears stay quiet.
@@ -149,6 +150,32 @@ export function hookFail(cmd: string, exitCode: number, cwd: string): number {
 export function deepMemoryHint(cmd: string): string | undefined {
   if (/^\s*rocky\s+run\b/.test(cmd)) return undefined;
   return `rocky run ${quotePosixShell(cmd)}`;
+}
+
+/**
+ * Is this failure a typo rather than a real error, question
+ *
+ * The deep-memory hint asks the person to re-run the command under
+ * `rocky run` so Rocky can hear its stderr. That is good advice for a real
+ * error and useless for a misspelling -- nobody wants to wrap `gti` in
+ * anything. Typos are also the most frequent failure in any terminal, so
+ * this is the message the hint produces most often.
+ *
+ * Two signals, because one host cannot supply the other. Bash sends 127 for
+ * command-not-found on every OS. PowerShell never does: `rocky-hook.ps1`
+ * forces every non-native failure -- CommandNotFoundException, which is
+ * exactly a typo, included -- to exit 1, deliberately, because treating
+ * $LASTEXITCODE as an independent failure signal was an empirically-caught
+ * bug. On that host only a PATH probe can tell a typo from a real failure.
+ *
+ * Only command-not-found is covered. A missing *file* (`cat nofile.txt`,
+ * exit 1) is indistinguishable from an ordinary failure without stderr, and
+ * a detached hook handler never receives stderr. Half the symptom class is
+ * simply out of reach in this lane; saying so beats pretending otherwise.
+ */
+export function isTypoSymptom(cmd: string, exitCode: number): boolean {
+  if (exitCode === 127) return true;
+  return resolvesOnPath(firstWord(cmd)) === "not-found";
 }
 
 /** A command succeeded while the pending flag existed. Try to link a fix. */

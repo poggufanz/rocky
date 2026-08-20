@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import fs, { mkdtempSync, existsSync, readFileSync, writeFileSync, rmSync } from "node:fs";
+import fs, { mkdtempSync, existsSync, readFileSync, writeFileSync, rmSync, chmodSync } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -125,6 +125,60 @@ test("deep memory hint quotes the command so it can be pasted safely", () => {
 test("no deep memory hint when the command is already a rocky run", () => {
   assert.equal(deepMemoryHint('rocky run "kimi resume"'), undefined);
   assert.equal(deepMemoryHint("  rocky   run npm test"), undefined);
+});
+
+const { isTypoSymptom } = await import("../commands/hook.js");
+
+test("exit 127 is a typo symptom on every host", () => {
+  assert.equal(isTypoSymptom("gti status", 127), true);
+  assert.equal(isTypoSymptom("npm run build", 127), true);
+});
+
+test("a command absent from PATH is a typo symptom even without exit 127", () => {
+  const dir = mkdtempSync(join(tmpdir(), "rocky-typo-"));
+  const previousPath = process.env.PATH;
+  process.env.PATH = dir;
+  try {
+    // PowerShell never sends 127: rocky-hook.ps1 forces every non-native
+    // failure, CommandNotFoundException included, to exit 1.
+    assert.equal(isTypoSymptom("gti status", 1), true);
+  } finally {
+    process.env.PATH = previousPath;
+  }
+});
+
+test("a resolvable command failing is not a typo symptom", () => {
+  const dir = mkdtempSync(join(tmpdir(), "rocky-typo-"));
+  const exe = process.platform === "win32" ? "realtool.cmd" : "realtool";
+  writeFileSync(join(dir, exe), "");
+  const previousPath = process.env.PATH;
+  process.env.PATH = dir;
+  try {
+    assert.equal(isTypoSymptom("realtool --wrong-flag", 1), false);
+  } finally {
+    process.env.PATH = previousPath;
+  }
+});
+
+test("an unanswerable PATH leaves the hint speaking", () => {
+  const previousPath = process.env.PATH;
+  delete process.env.PATH;
+  try {
+    assert.equal(isTypoSymptom("gti status", 1), false);
+  } finally {
+    process.env.PATH = previousPath;
+  }
+});
+
+test("a shell keyword failing is not a typo symptom", () => {
+  const dir = mkdtempSync(join(tmpdir(), "rocky-typo-"));
+  const previousPath = process.env.PATH;
+  process.env.PATH = dir;
+  try {
+    assert.equal(isTypoSymptom("if false; then :; fi", 1), false);
+  } finally {
+    process.env.PATH = previousPath;
+  }
 });
 
 /**
@@ -390,6 +444,12 @@ test("hookFail's speech survives end to end through the buffer/publish path exac
   const savedSpeech = process.env.ROCKY_HOOK_SPEECH_FILE;
   process.env.ROCKY_HOME = isolatedHome;
   process.env.ROCKY_HOOK_SPEECH_FILE = speechFile;
+  const speechBin = mkdtempSync(join(tmpdir(), "rocky-hook-speech-bin-"));
+  const exe = process.platform === "win32" ? "speech-roundtrip-cmd.cmd" : "speech-roundtrip-cmd";
+  writeFileSync(join(speechBin, exe), "");
+  if (process.platform !== "win32") chmodSync(join(speechBin, exe), 0o755);
+  const savedPath = process.env.PATH;
+  process.env.PATH = speechBin;
   try {
     const speechCwd = mkdtempSync(join(tmpdir(), "rocky-hook-speech-cwd-"));
     const { result } = captureTty(() => {
@@ -405,6 +465,9 @@ test("hookFail's speech survives end to end through the buffer/publish path exac
     else process.env.ROCKY_HOME = savedHome;
     if (savedSpeech === undefined) delete process.env.ROCKY_HOOK_SPEECH_FILE;
     else process.env.ROCKY_HOOK_SPEECH_FILE = savedSpeech;
+    if (savedPath === undefined) delete process.env.PATH;
+    else process.env.PATH = savedPath;
+    rmSync(speechBin, { recursive: true, force: true });
     rmSync(scratch, { recursive: true, force: true });
   }
 });
