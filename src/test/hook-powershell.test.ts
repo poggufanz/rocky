@@ -237,7 +237,7 @@ test("PowerShell hook status reports absent, then installed, per host", (t) => {
 
   assert.equal(hookInstall(), 0, sandbox.stderr());
   assert.equal(hookStatus(), 0, sandbox.stderr());
-  assert.match(sandbox.stderr(), /Windows PowerShell: installed, hook version 0\.3\.0, PowerShell 5\.1\.26100\.9168\./);
+  assert.match(sandbox.stderr(), /Windows PowerShell: installed, hook version 0\.4\.0, PowerShell 5\.1\.26100\.9168\./);
   // Ruling 2: the $Error[0] shift must be disclosed where a user actually
   // meets it -- rocky hook status for the PowerShell hosts.
   assert.match(sandbox.stderr(), /\$Error/, "status must disclose the $Error shift for a PowerShell host");
@@ -1472,3 +1472,52 @@ test(
     await realHostSpeechRoundTripSmoke(t, realPwsh!);
   },
 );
+
+async function realHostNotFoundExitCodeSmoke(t: TestContext, exe: string): Promise<void> {
+  const root = mkdtempSync(join(tmpdir(), "rocky-hook-ps-notfound-"));
+  t.after(() => safeRmSync(root));
+  const rockyHome = join(root, "rocky-home");
+  mkdirSync(rockyHome, { recursive: true });
+  writeFileSync(
+    join(rockyHome, "rocky-hook.ps1"),
+    readFileSync(join(packageRoot, ".test-dist", "shell", "rocky-hook.ps1")),
+  );
+  const shim = join(root, "rocky-shim.ps1");
+  const entry = join(packageRoot, "dist", "index.js").replace(/'/g, "''");
+  writeFileSync(shim, `& node '${entry}' @args\nexit $LASTEXITCODE\n`);
+
+  await spawnAndFeedCapturingStderr(exe, rockyHome, shim, [
+    `. "${join(rockyHome, "rocky-hook.ps1")}"`,
+    "__rocky_no_such_command_at_all__",
+    "echo settle-1",
+    "echo settle-2",
+    "echo settle-3",
+    "exit",
+  ]);
+
+  const records = await readMemoryRecordsSettled(join(rockyHome, "memory.jsonl"), 1);
+  const failure = records.find((r) => r.kind === "failure");
+  assert.ok(failure, `a missing command must be recorded; got: ${JSON.stringify(records)}`);
+  assert.equal(
+    failure.exitCode,
+    127,
+    `CommandNotFoundException must reach the handler as 127, the same code Bash sends; got: ${JSON.stringify(failure)}`,
+  );
+}
+
+test(
+  "a command that does not exist reaches the handler as exit 127, Windows PowerShell 5.1",
+  { skip: windowsPowerShellAvailable ? false : "Windows PowerShell is unavailable on this machine/platform" },
+  async (t) => {
+    await realHostNotFoundExitCodeSmoke(t, "powershell.exe");
+  },
+);
+
+test(
+  "a command that does not exist reaches the handler as exit 127, PowerShell 7.x",
+  { skip: realPwsh ? false : pwshSkipReason },
+  async (t) => {
+    await realHostNotFoundExitCodeSmoke(t, realPwsh!);
+  },
+);
+

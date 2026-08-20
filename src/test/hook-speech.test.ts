@@ -314,3 +314,26 @@ test(
     assert.notEqual(probe.stdout, text, "documents the real defect: no -Encoding must NOT round-trip non-ASCII content on Windows PowerShell 5.1 -- if this now passes, the platform default changed and Finding 3's fix may no longer be necessary");
   },
 );
+
+// --- Bash hook speech-file contract (v0.7.2, Defect A) ---------------------
+//
+// The Bash hook speaks through the same buffer/publish mechanism the
+// PowerShell hook does: ROCKY_HOOK_SPEECH_FILE, read by speakTty and
+// published by flushHookSpeech (ui/rocky.ts). This shape test asserts the
+// shell contract without needing a real terminal; the supported-Bash smoke
+// lane (test/hook-smoke.bash) exercises the behavior end to end.
+
+test("the bash hook claims a speech file for every handler spawn", () => {
+  const shellDir = join(dirname(fileURLToPath(import.meta.url)), "../shell");
+  const source = readFileSync(join(shellDir, "rocky-hook.bash"), "utf8");
+
+  // Ownership is established before the spawn, never after.
+  assert.match(source, /__rocky_speech_ids\+=\(/);
+  // Both handler spawns carry the variable.
+  const spawns = source.match(/ROCKY_HOOK_SPEECH_FILE="\$__rocky_speech_file"/g) ?? [];
+  assert.equal(spawns.length, 2);
+  // The drain runs at the prompt, before the label queue.
+  assert.match(source, /__rocky_drain_speech \|\| :\s*\n\s*__rocky_drain_label \|\| :/);
+  // Possibly-empty arrays expand safely under `set -u`.
+  assert.ok(!/"\$\{__rocky_speech_ids\[@\]\}"/.test(source.replace(/\$\{__rocky_speech_ids\[@\]\+"\$\{__rocky_speech_ids\[@\]\}"\}/g, "")));
+});

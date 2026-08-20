@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import fs, { mkdtempSync, existsSync, readFileSync, writeFileSync, rmSync } from "node:fs";
+import fs, { mkdtempSync, existsSync, readFileSync, writeFileSync, rmSync, chmodSync } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -125,6 +125,22 @@ test("deep memory hint quotes the command so it can be pasted safely", () => {
 test("no deep memory hint when the command is already a rocky run", () => {
   assert.equal(deepMemoryHint('rocky run "kimi resume"'), undefined);
   assert.equal(deepMemoryHint("  rocky   run npm test"), undefined);
+});
+
+const { isTypoSymptom } = await import("../commands/hook.js");
+
+test("exit 127 is a typo symptom on every host", () => {
+  assert.equal(isTypoSymptom("gti status", 127), true);
+  assert.equal(isTypoSymptom("npm run build", 127), true);
+});
+
+test("a PATH-invisible command failing is not a typo symptom", () => {
+  // Cmdlets, shell functions, and aliases never appear on PATH. Guessing
+  // from PATH classified `Get-Item` as a typo and silenced a real hint;
+  // the exit code is the only signal that actually knows.
+  assert.equal(isTypoSymptom("Get-Item ./x -ErrorAction SilentlyContinue", 1), false);
+  assert.equal(isTypoSymptom("ll /nonexistent", 1), false);
+  assert.equal(isTypoSymptom("if false; then :; fi", 1), false);
 });
 
 /**
@@ -390,6 +406,12 @@ test("hookFail's speech survives end to end through the buffer/publish path exac
   const savedSpeech = process.env.ROCKY_HOOK_SPEECH_FILE;
   process.env.ROCKY_HOME = isolatedHome;
   process.env.ROCKY_HOOK_SPEECH_FILE = speechFile;
+  const speechBin = mkdtempSync(join(tmpdir(), "rocky-hook-speech-bin-"));
+  const exe = process.platform === "win32" ? "speech-roundtrip-cmd.cmd" : "speech-roundtrip-cmd";
+  writeFileSync(join(speechBin, exe), "");
+  if (process.platform !== "win32") chmodSync(join(speechBin, exe), 0o755);
+  const savedPath = process.env.PATH;
+  process.env.PATH = speechBin;
   try {
     const speechCwd = mkdtempSync(join(tmpdir(), "rocky-hook-speech-cwd-"));
     const { result } = captureTty(() => {
@@ -405,6 +427,40 @@ test("hookFail's speech survives end to end through the buffer/publish path exac
     else process.env.ROCKY_HOME = savedHome;
     if (savedSpeech === undefined) delete process.env.ROCKY_HOOK_SPEECH_FILE;
     else process.env.ROCKY_HOOK_SPEECH_FILE = savedSpeech;
+    if (savedPath === undefined) delete process.env.PATH;
+    else process.env.PATH = savedPath;
+    rmSync(speechBin, { recursive: true, force: true });
     rmSync(scratch, { recursive: true, force: true });
   }
+});
+
+const { ROCKY_HOOK_PROTOCOL_VERSION } = await import("../commands/hook.js");
+
+test("both hook assets carry the protocol version the code expects", () => {
+  const shellDir = join(dirname(fileURLToPath(import.meta.url)), "../shell");
+  for (const asset of ["rocky-hook.bash", "rocky-hook.ps1"]) {
+    const source = readFileSync(join(shellDir, asset), "utf8");
+    const found = /ROCKY_HOOK_VERSION="([^"]+)"/.exec(source)?.[1];
+    assert.equal(found, ROCKY_HOOK_PROTOCOL_VERSION, asset);
+  }
+});
+
+const { hookStaleLine } = await import("../commands/hook.js");
+
+test("a matching hook version produces no stale line", () => {
+  assert.equal(hookStaleLine(ROCKY_HOOK_PROTOCOL_VERSION), undefined);
+});
+
+test("a differing hook version names the reinstall command", () => {
+  const line = hookStaleLine("0.3.0");
+  assert.ok(line !== undefined);
+  assert.match(line, /rocky hook install/);
+  assert.deepEqual(validateRockyPhrase(line), []);
+});
+
+test("a missing or unreadable hook version produces no stale line", () => {
+  // "missing" and "unknown" are already reported by the version line itself;
+  // a second line about reinstalling would be noise on top of noise.
+  assert.equal(hookStaleLine("missing"), undefined);
+  assert.equal(hookStaleLine("unknown"), undefined);
 });

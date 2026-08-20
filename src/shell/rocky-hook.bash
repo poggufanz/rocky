@@ -8,13 +8,16 @@
 # interactive shells only — scripts and CI never touched
 [[ $- == *i* ]] || return 0
 
-ROCKY_HOOK_VERSION="0.3.0"
+ROCKY_HOOK_VERSION="0.4.0"
 __rocky_home="${ROCKY_HOME:-$HOME/.rocky}"
 __rocky_bin="${ROCKY_BIN:-rocky}"
 __rocky_disabled=""
 __rocky_warned=""
 __rocky_last_cmd=""
 __rocky_last_cwd=""
+__rocky_speech_seq=0
+__rocky_speech_ids=()
+__rocky_speech_file=""
 
 # bash-preexec gives us preexec/precmd (DEBUG trap + PROMPT_COMMAND, battle-tested)
 if [[ -r "$__rocky_home/bash-preexec.sh" ]]; then
@@ -454,10 +457,73 @@ __rocky_drain_label() (
   done
 )
 
+# One speech file per handler spawn, owned by THIS shell session.
+#
+# Without the speech file the detached handler writes straight to the tty
+# device, and that write races the prompt draw and the user's own typing --
+# proven on a real console during the PowerShell work, invisible to any
+# pipe-based harness. ROCKY_HOOK_SPEECH_FILE makes sayTty/detailTty buffer
+# instead, and flushHookSpeech publishes them as one atomic unit that
+# __rocky_drain_speech below prints at a moment nothing else is writing.
+#
+# The name is recorded BEFORE the spawn. That is the whole point: two
+# terminals share one $ROCKY_HOME, and a drain that reads any file in the
+# directory would print the other window's message. Only names this session
+# claimed are ever spoken.
+#
+# Sets __rocky_speech_file on success. Returns non-zero when no name could
+# be claimed, and the caller then spawns without the variable -- the old
+# direct-write path, which is worse but never silent.
+__rocky_speech_claim() {
+  local __rocky_name=""
+  __rocky_speech_file=""
+  [[ -d "$__rocky_home" && ! -L "$__rocky_home" ]] || return 1
+  (( __rocky_speech_seq += 1 ))
+  __rocky_name="$$.${RANDOM}.${RANDOM}.${__rocky_speech_seq}.txt"
+  [[ -e "$__rocky_home/hook-speech/$__rocky_name" || -L "$__rocky_home/hook-speech/$__rocky_name" ]] && return 1
+  __rocky_speech_ids+=("$__rocky_name")
+  # Bound the claim list. A handler with nothing to say never writes a file,
+  # so names would otherwise accumulate for the life of the shell. Dropping
+  # the oldest also removes its file: a message this stale is not worth
+  # printing, and leaving the file behind would leak into hook-speech/.
+  while (( ${#__rocky_speech_ids[@]} > 32 )); do
+    command rm -f "$__rocky_home/hook-speech/${__rocky_speech_ids[0]}" >/dev/null 2>&1
+    __rocky_speech_ids=(${__rocky_speech_ids[@]+"${__rocky_speech_ids[@]:1}"})
+  done
+  __rocky_speech_file="$__rocky_home/hook-speech/$__rocky_name"
+  return 0
+}
+
+# Print, then remove, every claimed speech file that has appeared. A name
+# whose file is not there yet stays claimed for a later prompt: the handler
+# is detached, so it may still be running.
+__rocky_drain_speech() {
+  local __rocky_name="" __rocky_path=""
+  local -a __rocky_keep
+  __rocky_keep=()
+  (( ${#__rocky_speech_ids[@]} )) || return 0
+  for __rocky_name in ${__rocky_speech_ids[@]+"${__rocky_speech_ids[@]}"}; do
+    __rocky_path="$__rocky_home/hook-speech/$__rocky_name"
+    # Regular files only, never a symlink: same rule __rocky_drain_label keeps.
+    if [[ -f "$__rocky_path" && ! -L "$__rocky_path" ]]; then
+      # Content already passed through safeTerminalLine before it was
+      # buffered (ui/rocky.ts), so print the bytes and interpret nothing.
+      if command cat "$__rocky_path" >&2 2>/dev/null; then
+        command rm -f "$__rocky_path" >/dev/null 2>&1
+        continue
+      fi
+    fi
+    __rocky_keep+=("$__rocky_name")
+  done
+  __rocky_speech_ids=(${__rocky_keep[@]+"${__rocky_keep[@]}"})
+  return 0
+}
+
 __rocky_precmd() {
   local exit_code=$?
   # First line captures the hooked command's exit code.
   [[ -n "$__rocky_disabled" || -n "${ROCKY_OFF:-}" ]] && return 0
+  __rocky_drain_speech || :
   __rocky_drain_label || :
   [[ -n "$__rocky_last_cmd" ]] || return 0
   local cmd="$__rocky_last_cmd"
@@ -486,10 +552,21 @@ __rocky_precmd() {
     fi
     return 0
   fi
+  # `VAR=value cmd` scopes the variable to this one spawn: no export, and so
+  # nothing to restore and nothing that can leak into a command the person
+  # types themselves.
   if [[ "$exit_code" -ne 0 ]]; then
-    { "$__rocky_bin" _hookfail "$cmd" "$exit_code" "$cwd" >/dev/null 2>&1 & disown; } 2>/dev/null
+    if __rocky_speech_claim; then
+      { ROCKY_HOOK_SPEECH_FILE="$__rocky_speech_file" "$__rocky_bin" _hookfail "$cmd" "$exit_code" "$cwd" >/dev/null 2>&1 & disown; } 2>/dev/null
+    else
+      { "$__rocky_bin" _hookfail "$cmd" "$exit_code" "$cwd" >/dev/null 2>&1 & disown; } 2>/dev/null
+    fi
   elif [[ -f "$__rocky_home/pending" ]]; then
-    { "$__rocky_bin" _hooksuccess "$cmd" "$cwd" >/dev/null 2>&1 & disown; } 2>/dev/null
+    if __rocky_speech_claim; then
+      { ROCKY_HOOK_SPEECH_FILE="$__rocky_speech_file" "$__rocky_bin" _hooksuccess "$cmd" "$cwd" >/dev/null 2>&1 & disown; } 2>/dev/null
+    else
+      { "$__rocky_bin" _hooksuccess "$cmd" "$cwd" >/dev/null 2>&1 & disown; } 2>/dev/null
+    fi
   fi
   return 0
 }
