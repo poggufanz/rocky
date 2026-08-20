@@ -316,6 +316,15 @@ function global:prompt {
     $__rockyQ = $?
     $__rockyExit = $LASTEXITCODE
 
+    # Captured here, with $LASTEXITCODE, for the same reason: this function
+    # pushes its own suppressed non-terminating error onto $Error (Ruling 2),
+    # so any later read of $Error[0] returns Rocky's entry, not the failure
+    # the person actually hit.
+    $__rockyNotFound = $false
+    if ($Error.Count -gt 0) {
+        $__rockyNotFound = $Error[0].Exception -is [System.Management.Automation.CommandNotFoundException]
+    }
+
     # 2. Call the wrapped/inner prompt FIRST, before Rocky's own bookkeeping
     #    touches anything. $?/$LASTEXITCODE are still exactly what the
     #    user's last real command left them as at this point, so a prompt
@@ -499,7 +508,14 @@ function global:prompt {
                         $__rockyFailed = -not $__rockyQ
                         if ($__rockyFailed) {
                             $__rockyNativeFailed = ($__rockyExit -ne $null) -and ($__rockyExit -ne 0)
-                            $__rockyEffectiveExit = if ($__rockyNativeFailed) { $__rockyExit } else { 1 }
+                            # 127 is the POSIX command-not-found code Bash
+                            # already sends for this exact condition. Reporting
+                            # it here gives both hosts one authoritative signal,
+                            # so the handler never has to guess from PATH --
+                            # a guess that is simply wrong on this host, where
+                            # cmdlets, functions, and aliases live in the
+                            # PowerShell command table and not on the filesystem.
+                            $__rockyEffectiveExit = if ($__rockyNativeFailed) { $__rockyExit } elseif ($__rockyNotFound) { 127 } else { 1 }
                             __rockySpawnDetached $__rockyBin @('_hookfail', $__rockyCmd, "$__rockyEffectiveExit", (Get-Location).Path)
                         } elseif (Test-Path (Join-Path $__rockyHome 'pending')) {
                             __rockySpawnDetached $__rockyBin @('_hooksuccess', $__rockyCmd, (Get-Location).Path)
