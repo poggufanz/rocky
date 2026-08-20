@@ -8,16 +8,19 @@ import {
   MAX_FIELD_BYTES,
   MAX_RESPONSE_BYTES,
   isRecallCandidateId,
+  projectDiffText,
   projectKnowledgeHits,
   projectMemoryRecord,
   projectRecallHits,
   projectRecallHitsForAi,
   projectRecentFailures,
+  projectText,
   projectWhyPossible,
   projectTriple,
   safeOpaqueIdentifier,
   validateRecallCandidateIds,
 } from "./privacy.js";
+import { resolveGitDiff } from "../core/git-diff.js";
 import { boundTripleRecord, isBoundedLinkBasis, isConfirmableLinkBasis, isKnownPathPlatform, isSafeNonNegativeInteger, MAX_MEMORY_FILE_BYTES, MAX_SUPPORTED_MEMORY_RECORDS, parseMemoryRecord } from "../core/memory-read.js";
 import type { FailureRecord, FixRecord, LinkConfidence, MemoryCoverage, TripleRecord } from "../core/memory-read.js";
 
@@ -177,13 +180,20 @@ function parseFetchArgs(args: unknown): string {
   return value.id;
 }
 
-function parseWhyFileArgs(args: unknown): { path: string; limit: number } {
+function parseWhyFileArgs(args: unknown): { path: string; limit: number; diff?: boolean } {
   const value = objectArgs(args);
-  rejectUnknown(value, ["path", "limit"]);
+  rejectUnknown(value, ["path", "limit", "diff"]);
   if (typeof value.path !== "string" || Buffer.byteLength(value.path, "utf8") > MAX_FIELD_BYTES) {
     throw new McpInvalidParamsError("invalid params");
   }
-  return { path: value.path, limit: parseLimit(value.limit, 1, 10, 5) };
+  if (value.diff !== undefined && typeof value.diff !== "boolean") {
+    throw new McpInvalidParamsError("invalid params");
+  }
+  return {
+    path: value.path,
+    limit: parseLimit(value.limit, 1, 10, 5),
+    ...(value.diff === undefined ? {} : { diff: value.diff }),
+  };
 }
 
 function schema(properties: Record<string, unknown>, required?: readonly string[]): Record<string, unknown> {
@@ -242,6 +252,7 @@ function descriptors(exposure: Exposure): readonly McpToolDefinition[] {
       inputSchema: schema({
         path: { type: "string", maxLength: MAX_FIELD_BYTES },
         limit: { type: "integer", minimum: 1, maximum: 10 },
+        diff: { type: "boolean" },
       }, ["path"]), annotations: ANNOTATIONS,
     },
   ];
@@ -812,13 +823,27 @@ function whyTripleComplete(candidate: TripleRecord): boolean {
   }
 }
 
-function projectWhyTriple(candidate: TripleRecord, exposure: Exposure): Record<string, unknown> {
+function projectWhyTriple(
+  candidate: TripleRecord,
+  exposure: Exposure,
+  diff?: string,
+  commit?: string,
+): Record<string, unknown> {
   const complete = whyTripleComplete(candidate);
-  return {
-    ...projectTriple(candidate, exposure, exposure === "sanitized"),
+  const truncation = { fields: [] as string[] };
+  const base = projectTriple(candidate, exposure, exposure === "sanitized");
+  const result: Record<string, unknown> = {
+    ...base,
     confidence: complete ? "confirmed" : "incomplete",
     reason: complete ? "captured file coverage complete" : "file coverage incomplete; Rocky does not know full change",
   };
+  if (commit !== undefined) {
+    result.commit = projectText(commit, exposure, "commit", truncation);
+  }
+  if (diff !== undefined) {
+    result.diff = projectDiffText(diff, exposure, "diff", truncation);
+  }
+  return result;
 }
 
 function selectWhyCandidates(
@@ -1590,12 +1615,33 @@ export function createToolRegistry(options: CreateToolRegistryOptions): McpToolR
                 : rawEvidence,
               unknownEvidence,
             );
+            const projectedItems = evidence.matches.map((triple) => {
+              let diffSnippet: string | undefined;
+              let commitSha: string | undefined;
+              if (input.diff === true) {
+                try {
+                  const gitDiff = resolveGitDiff({
+                    head: triple.mechanism.head,
+                    ts: triple.ts,
+                    file: input.path,
+                    cwd: triple.cwd,
+                  });
+                  if (gitDiff !== undefined) {
+                    diffSnippet = gitDiff.diff;
+                    commitSha = gitDiff.commit;
+                  }
+                } catch {
+                  // Fail open
+                }
+              }
+              return projectWhyTriple(triple, options.exposure, diffSnippet, commitSha);
+            });
             const memoryScan = memoryCoverage(options.memory, readState.failed, coverageReader);
             pairedCoverage = memoryScan;
             const projected = safeProjection(() => ({
               exposure: options.exposure,
               ...memoryCoveragePayload(memoryScan),
-              items: evidence.matches.map((triple) => projectWhyTriple(triple, options.exposure)),
+              items: projectedItems,
               possible: projectWhyPossible(evidence.possible, input.limit, options.exposure),
               coverage: evidence.coverage,
               coverageStatus: evidence.coverage.status,

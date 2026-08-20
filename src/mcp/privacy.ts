@@ -152,6 +152,9 @@ export interface ProjectedTriple {
   baseline?: "captured" | "unknown";
   coverageStatus?: "complete" | "truncated" | "unknown";
   cwd?: string;
+  head?: string;
+  commit?: string;
+  diff?: string;
   truncatedFields: readonly string[];
 }
 
@@ -244,7 +247,7 @@ function boundProjectionInput(value: string): string {
   return value.length > MAX_FIELD_BYTES * 2 ? value.slice(0, MAX_FIELD_BYTES * 2) : value;
 }
 
-function projectText(value: string, exposure: Exposure, path: string, truncation: Truncation): string {
+export function projectText(value: string, exposure: Exposure, path: string, truncation: Truncation): string {
   const boundedInput = boundProjectionInput(value);
   if (boundedInput.length !== value.length) truncation.fields.push(path);
   const normalized = exposure === "sanitized" ? redactText(boundedInput) : normalizeOutputText(boundedInput);
@@ -442,7 +445,47 @@ export function projectTriple(triple: TripleRecord, exposure: Exposure, sanitize
       tags: projectStringArray(bounded.rationale.tags, exposure, "rationale.tags", truncation),
     };
   }
+  if (bounded.mechanism.head !== undefined) {
+    projected.head = projectText(bounded.mechanism.head, exposure, "mechanism.head", truncation);
+  }
   if (exposure === "raw") projected.cwd = projectText(bounded.cwd, exposure, "cwd", truncation);
+  return projected;
+}
+
+export function projectDiffText(
+  value: string,
+  exposure: Exposure,
+  path: string,
+  truncation: Truncation,
+): string {
+  const boundedInput = boundProjectionInput(value);
+  if (boundedInput.length !== value.length) truncation.fields.push(path);
+  const redacted = redactSecretsAtBoundary(boundedInput);
+  const normalized = exposure === "sanitized"
+    ? redacted.split("\n").map((line) => redactText(line)).join("\n")
+    : replaceAnsiAndControls(stripInvisibleControls(redacted), "", " ");
+  const clipped = truncateUtf8(normalized, MAX_FIELD_BYTES);
+  if (clipped.truncated) truncation.fields.push(path);
+  return clipped.value;
+}
+
+export function projectWhyTriple(
+  triple: TripleRecord,
+  exposure: Exposure,
+  diffSnippet?: string,
+  commitSha?: string,
+): ProjectedTriple {
+  const projected = projectTriple(triple, exposure, exposure === "sanitized");
+  if (diffSnippet !== undefined) {
+    const truncation: Truncation = { fields: [] };
+    projected.diff = projectDiffText(diffSnippet, exposure, "diff", truncation);
+    if (commitSha !== undefined && commitSha !== "uncommitted") {
+      projected.head = projectText(commitSha, exposure, "head", truncation);
+    }
+    if (truncation.fields.length > 0) {
+      projected.truncatedFields = [...new Set([...projected.truncatedFields, ...truncation.fields])];
+    }
+  }
   return projected;
 }
 

@@ -8,7 +8,7 @@
  * stderr grow past `tailLines` lines of at most `maxLineBytes` bytes each.
  */
 
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { statSync } from "node:fs";
 import { constants } from "node:os";
 import { isAbsolute } from "node:path";
@@ -63,6 +63,8 @@ export interface GitOptions {
   timeoutMs?: number;
   /** Opt-in combined stdout/stderr memory cap. The child is killed as soon as it is exceeded. */
   maxOutputBytes?: number;
+  /** Working directory for the git child process. */
+  cwd?: string;
 }
 
 interface GitTestShim {
@@ -127,6 +129,7 @@ export function runGit(
       shell: false,
       stdio: ["pipe", "pipe", "pipe"],
       env: { ...process.env, LC_ALL: "C", LANG: "C" },
+      ...(options.cwd !== undefined ? { cwd: options.cwd } : {}),
     });
     const stdout: Buffer[] = [];
     const stderr: Buffer[] = [];
@@ -182,6 +185,43 @@ export function runGit(
     }
     child.stdin.end(input);
   });
+}
+
+/** Synchronous git execution with argv boundaries intact, bounded by timeout and buffer limits. */
+export function runGitSync(
+  args: readonly string[],
+  input?: string,
+  options: GitOptions = {},
+): GitResult {
+  const command = gitSpawnCommand();
+  if (command === null) {
+    return {
+      code: 127,
+      stdout: "",
+      stderr: "invalid ROCKY_GIT_TEST_SHIM; git process not started",
+      timedOut: false,
+      outputLimitExceeded: false,
+    };
+  }
+  const result = spawnSync(command.command, [...command.prefix, ...args], {
+    shell: false,
+    input,
+    stdio: ["pipe", "pipe", "pipe"],
+    encoding: "utf8",
+    maxBuffer: options.maxOutputBytes ?? 32768,
+    timeout: options.timeoutMs ?? 5000,
+    env: { ...process.env, LC_ALL: "C", LANG: "C" },
+    ...(options.cwd !== undefined ? { cwd: options.cwd } : {}),
+  });
+  const timedOut = result.error !== undefined && (result.error as any).code === "ETIMEDOUT";
+  const outputLimitExceeded = result.error !== undefined && (result.error as any).code === "ENOBUFS";
+  return {
+    code: result.status ?? (result.error ? 1 : 0),
+    stdout: result.stdout ?? "",
+    stderr: result.stderr ?? "",
+    timedOut,
+    outputLimitExceeded,
+  };
 }
 
 /** Exported for tests: the ring buffer, independent of any child process. */
