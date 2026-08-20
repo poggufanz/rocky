@@ -253,8 +253,8 @@ Claude Desktop uses the same conditional-transaction mechanism and also creates 
 
 From the next shell on: every failing command is remembered (no stderr — the
 hook hears command and exit code only; `rocky run` remains the deep-memory
-path). Deep-memory suggestion stays quiet when failing command's first word was
-never on PATH — misspelling, not error worth wrapping. When a command succeeds
+path). Deep-memory suggestion stays quiet when shell reports command not found —
+misspelling, not error worth wrapping. When a command succeeds
 where the same command recently failed, the fix
 is linked automatically; weaker same-program evidence stays only a possible
 association. And when a command looks catastrophic — `rm -rf` at a
