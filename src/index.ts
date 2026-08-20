@@ -28,6 +28,7 @@ import { gateEvent } from "./agent/gate.js";
 import { journalCommand } from "./commands/journal.js";
 import { invariantsCommand } from "./commands/invariants.js";
 import { sessionsCommand } from "./commands/sessions.js";
+import { replCommand } from "./commands/repl.js";
 import { annotateCommand } from "./agent/annotate.js";
 import { ambiguityCommand } from "./agent/ambiguity.js";
 import { CliUsageError, parseExactCommand, reportCliUsage } from "./commands/cli-args.js";
@@ -87,6 +88,10 @@ usage:
                             split on a 30-minute gap. derived at read time only,
                             newest-first.
   rocky sessions <index>    hear one session's evidence, chronologically.
+  rocky repl [--ai]         stay in one loop over recall/what/why/how/concepts/
+                            sessions instead of paying startup per call.
+                            --ai passes through to recall and why. type help
+                            inside for the command list, quit or exit to leave.
   rocky mcp                 serve read-only memory tools over stdio.
   rocky setup               configure detected MCP hosts with sanitized exposure.
   rocky setup --check       verify owned host registrations and Rocky MCP tools.
@@ -280,6 +285,8 @@ async function main(): Promise<number> {
         return invariantsCommand(rest);
       case "sessions":
         return sessionsCommand(rest);
+      case "repl":
+        return replCommand(rest);
       case "mcp":
         return mcp(rest);
       case "setup":
