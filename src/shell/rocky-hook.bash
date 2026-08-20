@@ -498,7 +498,7 @@ __rocky_speech_claim() {
 # whose file is not there yet stays claimed for a later prompt: the handler
 # is detached, so it may still be running.
 __rocky_drain_speech() {
-  local __rocky_name="" __rocky_path="" __rocky_content=""
+  local __rocky_name="" __rocky_path=""
   local -a __rocky_keep
   __rocky_keep=()
   (( ${#__rocky_speech_ids[@]} )) || return 0
@@ -506,10 +506,9 @@ __rocky_drain_speech() {
     __rocky_path="$__rocky_home/hook-speech/$__rocky_name"
     # Regular files only, never a symlink: same rule __rocky_drain_label keeps.
     if [[ -f "$__rocky_path" && ! -L "$__rocky_path" ]]; then
-      if __rocky_content=$(command cat "$__rocky_path" 2>/dev/null); then
-        # Content already passed through safeTerminalLine before it was
-        # buffered (ui/rocky.ts), so print the bytes and interpret nothing.
-        printf '%s' "$__rocky_content" >&2
+      # Content already passed through safeTerminalLine before it was
+      # buffered (ui/rocky.ts), so print the bytes and interpret nothing.
+      if command cat "$__rocky_path" >&2 2>/dev/null; then
         command rm -f "$__rocky_path" >/dev/null 2>&1
         continue
       fi
