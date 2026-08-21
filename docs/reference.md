@@ -179,6 +179,62 @@ The CLI contains no telemetry and runs no daemon. Its only external network egre
 
 For example, a host can call `search_knowledge` with `{ "query": "move button down" }`, pass a returned id to `fetch_record`, or call `why_file` with `{ "path": "src/button.css", "diff": true }`. Reasons are hearsay Rocky heard, not verified facts. Rationale is quoted and untrusted; MCP never presents it as fact or executes a remembered command.
 
+## `rocky dash` (v0.7.4, implemented)
+
+An interactive, two-pane terminal dashboard to browse and inspect your remembered history:
+
+```bash
+rocky dash
+rocky dash "build failure"   # open with an initial search filter
+```
+
+Running bare `rocky` in an interactive terminal session automatically launches `rocky dash`. In a non-interactive pipe or script, bare `rocky` prints command usage help instead.
+
+### Layout
+
+- **Left pane (Records list)**: Bounded, scrollable list of remembered items (failures, fixes, triples, rationales, comprehension notes), tagged with kind badges and relative timestamps.
+- **Right pane (Inspector)**: Detailed record view with four tabs:
+  - **Info**: Structured metadata including command text, exit status, cwd, covered files, witness evidence, and timestamps.
+  - **Rationale**: Agent rationale excerpts, source lane (`log-thinking`, `log-response`, `notify`, `human`), and fidelity.
+  - **Diff**: Correlated git diff for the record, rendered with colorized addition and deletion lines.
+  - **JSON**: Formatted raw JSONL record with sensitive tokens redacted.
+- **Header & footer**: Header displays honest memory coverage totals (scanned records, bytes, truncation status). Footer displays context-sensitive key hints.
+
+### Keymaps
+
+| Context | Key | Action |
+|---|---|---|
+| Global | `Tab` / `Shift+Tab` | Cycle focus between list and inspector panes |
+| Global | `?` | Toggle help overlay |
+| Global | `r` | Reload memory records from disk |
+| Global | `q` / `Ctrl+C` | Quit dashboard |
+| List | `j` / `k` or `↓` / `↑` | Move selection down / up |
+| List | `Ctrl+d` / `Ctrl+u` | Scroll half-page down / up |
+| List | `g` / `G` | Jump to first / last record |
+| List | `f` | Cycle kind filter (`all` -> `failure` -> `fix` -> `triple` -> `rationale` -> `note`) |
+| List | `/` | Open search filter modal |
+| List | `Enter` | Focus inspector pane |
+| Inspector | `[` / `]` | Cycle inspector tabs (`info` -> `rationale` -> `diff` -> `json`) |
+| Inspector | `j` / `k` or `↓` / `↑` | Scroll content down / up |
+| Inspector | `g` / `G` | Jump to top / bottom of content |
+| Inspector | `Ctrl+d` / `Ctrl+u` | Scroll half-page down / up |
+| Inspector | `d` | Toggle full-screen diff view |
+| Inspector | `Esc` | Return focus to list pane |
+
+`Esc` follows a strict dismissal precedence order:
+1. Close help overlay (if open).
+2. Exit search filter modal (if open).
+3. Leave full-screen diff view (if active).
+4. Return focus from inspector to list pane.
+5. Top-level no-op (never quits the dashboard).
+
+### Terminal compatibility and colors
+
+- **Non-TTY fallback**: In non-interactive environments (pipes or redirected stdio), `rocky dash` prints `rocky stats` summary to stdout and a hint to stderr: `[Rocky] dash need real terminal, this one pipe. I give stats instead. on git bash, try winpty rocky dash.`
+- **MinTTY / Git Bash**: Run `winpty rocky dash` to allocate a Windows console PTY when running inside MinTTY.
+- **Color degradation**: Honors `NO_COLOR` and `FORCE_COLOR` environment variables. Degrades gracefully across color depths: Truecolor (24-bit) -> 256 colors -> 16 ANSI colors -> monochrome (depth 1).
+- **ASCII mode**: In monochrome environments or legacy Windows console hosts without Windows Terminal (`WT_SESSION`), borders and selection markers fall back to plain ASCII characters (`+`, `-`, `|`, `*`).
+
 ## `rocky watch` (v0.3, implemented)
 
 For the commands you walk away from — a long build, a migration, a big download:
@@ -357,7 +413,7 @@ When things are serious, Rocky is serious. Diagnoses and fixes are printed plain
 
 Rocky asks because he is curious, not because he is testing you; you are always the one who knows, never the one being graded. Ignore him and he goes quiet — an ignored question is never repeated — and answering `busy` makes him wait without complaint (he once waited 46 years). Ambiguity questions are optional, Ollama-gated, and never block the captured turn.
 
-The fence never moves: Rocky hears your terminal and the explicit Plan 01 agent hooks. That's it. No keylogging, no screen reading, no capture of screen content of any kind. "Rocky can't see your screen" is a literal description of the architecture, not just lore.
+The fence never moves: Rocky hears your terminal and the explicit Plan 01 agent hooks. That's it. No keylogging, no screen reading, no capture of screen content of any kind. "Rocky can't see your screen" is a literal description of the architecture, not just lore. `rocky dash` reads raw-mode keystrokes in-process, only while the dashboard is focused; nothing is persisted or transmitted, and no global input is hooked.
 
 ## Roadmap
 

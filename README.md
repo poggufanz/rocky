@@ -23,9 +23,7 @@ Requires Node.js 18 or newer. The package name is `@poggufanz/rocky-cli`; the un
 
 Current release: `@poggufanz/rocky-cli@0.7.3`. See the [release notes](https://github.com/poggufanz/rocky/releases/tag/v0.7.3) or the full [changelog](CHANGELOG.md).
 
-### Agent self-setup (any harness)
-
-Working with an agent outside Claude Code or Codex (OpenCode, Gemini CLI, anything else)? [docs/agents/INSTALL.md](docs/agents/INSTALL.md) covers the shell hook, the notify rationale lane, and optional MCP read access, and every step that edits your files asks for approval first. On Claude Code and Codex, `rocky setup --agent-hooks` and `rocky setup` capture more, automatically. To hand it to the agent:
+**Agent self-setup (any harness).** Working with an agent outside Claude Code or Codex (OpenCode, Gemini CLI, anything else)? [docs/agents/INSTALL.md](docs/agents/INSTALL.md) covers the shell hook, the notify rationale lane, and optional MCP read access, and every step that edits your files asks for approval first. On Claude Code and Codex, `rocky setup --agent-hooks` and `rocky setup` capture more, automatically. To hand it to the agent:
 
 ```text
 Fetch and follow instructions from https://raw.githubusercontent.com/poggufanz/rocky/main/docs/agents/INSTALL.md
@@ -63,6 +61,7 @@ The PowerShell hook is passive ears only: it overrides `prompt` to see a command
 | Surface | What it does |
 | --- | --- |
 | Failure memory | Fingerprints errors, remembers later fixes, and searches your own history. |
+| `rocky dash` | Browse and inspect remembered failures, fixes, triples, and diffs in an interactive terminal dashboard. |
 | `rocky watch` | Waits with a long-running command, saves a failed stderr tail, and notifies when work ends. |
 | `rocky check` | Scans a pending push for secrets, checks new npm package names after consent, and asks one non-blocking comprehension question. |
 | Nervous System | Supported Claude Code and Codex hooks record bounded intent, path, excerpt, and stated-rationale evidence. |
@@ -77,6 +76,7 @@ Rocky preserves wrapped-command stdout, stderr, TTY behavior, and exit status. P
 | Command | Use |
 | --- | --- |
 | `rocky run "<cmd>"` | Run a command with deep failure memory. |
+| `rocky dash [query]` | Browse and inspect remembered failures, fixes, triples, and diffs in an interactive terminal dashboard. |
 | `rocky watch "<cmd>"` | Run a long command with completion notice and failure log. |
 | `rocky brief [--since <ref\|24h>] [--quiet] [--ai]` | Hear what changed since last brief: commits, remembered failures/fixes, touched invariant guards. Local git and memory only, no network; `--ai` stays on loopback. |
 | `rocky recall [--ai] "<query>"` | Search remembered failures and fixes. |

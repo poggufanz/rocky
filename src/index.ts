@@ -5,6 +5,7 @@
  * Public surface:
  *   rocky run "<command>"     run a command; Rocky remembers failures & fixes
  *   rocky recall [--ai] <query> search Rocky's memory of past errors
+ *   rocky dash                browse memory, interactive
  *   rocky hook|mcp|model|setup distribution bridge commands
  *   rocky watch|check|what|how|why|digest|quiz|export v0.3–v0.5 surfaces
  *   rocky --help
@@ -16,6 +17,7 @@ import { briefCommand } from "./commands/brief.js";
 import { watch } from "./commands/watch.js";
 import { recall } from "./commands/recall.js";
 import { model } from "./commands/model.js";
+import { dashCommand } from "./commands/dash.js";
 import { stats } from "./commands/stats.js";
 import { hookFail, hookInstall, hookStatus, hookSuccess, hookUninstall } from "./commands/hook.js";
 import { mcp } from "./commands/mcp.js";
@@ -81,6 +83,7 @@ usage:
   rocky model use [--exposure sanitized|raw] <installed-model>
                             probe an installed Ollama model, then enable local AI.
   rocky model off            disable Rocky local AI. Ollama stays untouched.
+  rocky dash                browse memory, interactive
   rocky stats               what Rocky holds in memory.
   rocky journal "<note>"    write one line dogfood note. local file only.
   rocky invariants          list remembered invariant notes from .rocky/invariants.md
@@ -267,10 +270,15 @@ async function runGateEvent(vendor: string): Promise<number> {
 
 async function main(): Promise<number> {
   const [, , command, ...rest] = process.argv;
+  if (command === undefined && process.stdout.isTTY === true && process.stdin.isTTY === true) {
+    return dashCommand([]);
+  }
   try {
     switch (command) {
       case "run":
         return run(parseExactCommand(rest, "rocky run <command>"));
+      case "dash":
+        return dashCommand(rest);
       case "brief":
         return briefCommand(rest);
       case "watch":
