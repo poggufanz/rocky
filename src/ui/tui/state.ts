@@ -62,6 +62,8 @@ export type DashEvent =
   | { type: "diff-loading"; rowId: string }
   | { type: "diff-ready"; rowId: string; lines: string[] };
 
+const FILTER_ORDER: FilterId[] = ["all", "failures", "triples", "sessions", "invariants"];
+
 const FILTER_KINDS: Record<FilterId, (kind: string) => boolean> = {
   all: () => true,
   failures: (k) => k === "failure" || k === "fix",
@@ -139,16 +141,51 @@ export function update(state: DashState, event: DashEvent): DashState {
   return handleKey(state, event.key);
 }
 
+function searchType(state: DashState, text: string): DashState {
+  const clean = text.replace(/[\x00-\x1f\x7f-\x9f]/g, "").slice(0, 120);
+  return {
+    ...state,
+    search: { active: true, query: (state.search.query + clean).slice(0, 120) },
+  };
+}
+
 function handleKey(state: DashState, key: Key): DashState {
   if (key.name === "ctrl-c") return { ...state, quit: true };
+  if (state.help) return { ...state, help: false }; // any key closes help, swallowed
+  if (state.search.active) {
+    if (key.name === "esc") return { ...state, search: { active: false, query: "" } };
+    if (key.name === "enter") return { ...state, search: { ...state.search, active: false } };
+    if (key.name === "backspace") return { ...state, search: { active: true, query: state.search.query.slice(0, -1) } };
+    if (key.name === "paste") return searchType(state, key.text);
+    if (key.name === "char") return searchType(state, key.ch);
+    return state;
+  }
+  if (key.name === "paste") return state; // inert outside search
+  if (key.name === "char" && key.ch === "?") return { ...state, help: true };
+  if (key.name === "char" && key.ch === "/") return { ...state, search: { active: true, query: "" } };
   if (key.name === "char" && key.ch === "q") return { ...state, quit: true };
   if (key.name === "char" && key.ch === "r") return { ...state, reloadRequested: true };
   if (key.name === "tab" || key.name === "shifttab") {
     return { ...state, focus: state.focus === "list" ? "inspector" : "list" };
   }
+  if (key.name === "char" && key.ch === "f" && state.focus === "list") {
+    const next = FILTER_ORDER[(FILTER_ORDER.indexOf(state.filter) + 1) % FILTER_ORDER.length];
+    return clampSelect({ ...state, filter: next }, 0);
+  }
+  if (key.name === "char" && (key.ch === "[" || key.ch === "]")) {
+    const tabs: TabId[] = ["info", "rationale", "diff", "json"];
+    const delta = key.ch === "]" ? 1 : tabs.length - 1;
+    return { ...state, tab: tabs[(tabs.indexOf(state.tab) + delta) % tabs.length] };
+  }
+  if (key.name === "char" && key.ch === "d") return { ...state, fullDiff: !state.fullDiff };
+  if (key.name === "esc") {
+    if (state.fullDiff) return { ...state, fullDiff: false };
+    if (state.focus === "inspector") return { ...state, focus: "list", inspectorOpen: false };
+    return state; // top level: no-op
+  }
 
+  const half = Math.max(1, Math.floor((state.rows - 6) / 2));
   if (state.focus === "list") {
-    const half = Math.max(1, Math.floor((state.rows - 6) / 2));
     if (key.name === "down" || (key.name === "char" && key.ch === "j")) {
       return clampSelect(state, state.selected + 1);
     }
@@ -169,6 +206,27 @@ function handleKey(state: DashState, key: Key): DashState {
     }
     if (key.name === "enter") {
       return { ...state, focus: "inspector", inspectorOpen: true };
+    }
+  }
+
+  if (state.focus === "inspector") {
+    if (key.name === "down" || (key.name === "char" && key.ch === "j")) {
+      return { ...state, scroll: { inspector: state.scroll.inspector + 1 } };
+    }
+    if (key.name === "up" || (key.name === "char" && key.ch === "k")) {
+      return { ...state, scroll: { inspector: Math.max(0, state.scroll.inspector - 1) } };
+    }
+    if (key.name === "ctrl-d") {
+      return { ...state, scroll: { inspector: state.scroll.inspector + half } };
+    }
+    if (key.name === "ctrl-u") {
+      return { ...state, scroll: { inspector: Math.max(0, state.scroll.inspector - half) } };
+    }
+    if (key.name === "char" && key.ch === "g") {
+      return { ...state, scroll: { inspector: 0 } };
+    }
+    if (key.name === "char" && key.ch === "G") {
+      return { ...state, scroll: { inspector: Number.MAX_SAFE_INTEGER } };
     }
   }
 
