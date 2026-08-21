@@ -131,6 +131,22 @@ export function runDashboard(options: RunDashboardOptions): Promise<number> {
       // Ignored if resize not supported
     }
 
+    const onSigcont = () => {
+      try {
+        screen.enter();
+        screen.resetDiff();
+        renderScreen();
+      } catch {
+        // Ignored
+      }
+    };
+
+    try {
+      process.on("SIGCONT", onSigcont);
+    } catch {
+      // Ignored on platforms without SIGCONT
+    }
+
     const tickInterval = setInterval(() => {
       const now = Date.now();
       const dueEvent = diffLoader.due(now);
@@ -153,6 +169,12 @@ export function runDashboard(options: RunDashboardOptions): Promise<number> {
 
       try {
         stdout.removeListener("resize", onResize);
+      } catch {
+        // Ignored
+      }
+
+      try {
+        process.removeListener("SIGCONT", onSigcont);
       } catch {
         // Ignored
       }
