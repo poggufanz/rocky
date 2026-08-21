@@ -2,6 +2,11 @@
 
 Notable changes per release. Dates are the release date.
 
+## 0.7.3 — 21 August 2026
+
+A patch release closing a gap the 0.7.2 hook fix left open:
+- **Hook speech never touches the console device directly anymore.** `speakTty` kept a fallback that wrote straight to `/dev/tty` (POSIX) or `\\.\CON` (Windows) whenever the speech-file environment variable was unset. On Windows that write lands on screen instead of throwing, so any process inheriting the console host — including a test run — could paint Rocky's hook output over whatever else owned the terminal. Both shipped hooks have set the speech-file variable since 0.7.2, so the fallback only ever served stray non-hook invocations; it is gone, and hook speech is silently discarded without a speech file instead.
+
 ## 0.7.2 — 20 August 2026
 
 A patch release cleaning up the passive hook lane — the path that runs at every prompt, on every command, without you typing anything:
