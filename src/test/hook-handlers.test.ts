@@ -16,49 +16,20 @@ process.env.ROCKY_HOME = home;
 const memory = await import("../core/memory.js");
 const { hookFail, hookSuccess } = await import("../commands/hook.js");
 
-/**
- * Hook handlers speak over the console device (they run detached, stderr
- * discarded): `/dev/tty` on POSIX, `\\.\CON` on native Windows (see
- * `ui/rocky.ts`'s `ttyDevicePath` — native Windows Node has no `/dev/tty`,
- * so `sayTty`/`detailTty` target `\\.\CON` there instead; this interception
- * must match whichever one the implementation actually targets on this
- * platform, or every assertion below silently sees an empty `tty` string
- * instead of a real interception failure). Intercept `fs.writeFileSync` for
- * that one path and pass every other path through untouched — same
- * technique file-transaction.test.ts and hook-block.test.ts already use to
- * observe writes a module under test makes through a plain named
- * `import { writeFileSync } from "node:fs"`.
- *
- * The bare reserved name `CON` was tried first and rejected: task-4-report.md
- * records that `writeFileSync("CON", ...)` empirically creates an ordinary
- * file literally named `CON` in the process's cwd, both with a console
- * attached and fully detached/console-less (matching how hook handlers
- * actually run) — Node's long-path handling defeats Win32's classic
- * reserved-name interception for a bare relative path. `\\.\CON`, the
- * explicit Win32 device-namespace form, was proven never to do that.
- */
-const TTY_DEVICE_PATH = process.platform === "win32" ? "\\\\.\\CON" : "/dev/tty";
-
 function captureTty<T>(fn: () => T): { result: T; tty: string } {
-  const original = fs.writeFileSync;
-  let tty = "";
-  fs.writeFileSync = ((
-    file: fs.PathOrFileDescriptor,
-    data: unknown,
-    options?: fs.WriteFileOptions,
-  ) => {
-    if (file === TTY_DEVICE_PATH) {
-      tty += String(data);
-      return;
-    }
-    return original(file, data as never, options);
-  }) as typeof fs.writeFileSync;
-  syncBuiltinESMExports();
+  const scratch = mkdtempSync(join(tmpdir(), "rocky-capture-speech-"));
+  const speechFile = join(scratch, "speech.txt");
+  const previous = process.env.ROCKY_HOOK_SPEECH_FILE;
+  process.env.ROCKY_HOOK_SPEECH_FILE = speechFile;
   try {
-    return { result: fn(), tty };
+    const result = fn();
+    flushHookSpeech();
+    const tty = existsSync(speechFile) ? readFileSync(speechFile, "utf8") : "";
+    return { result, tty };
   } finally {
-    fs.writeFileSync = original;
-    syncBuiltinESMExports();
+    if (previous === undefined) delete process.env.ROCKY_HOOK_SPEECH_FILE;
+    else process.env.ROCKY_HOOK_SPEECH_FILE = previous;
+    rmSync(scratch, { recursive: true, force: true });
   }
 }
 
@@ -334,12 +305,8 @@ test("sayTty/detailTty buffer instead of writing the console when ROCKY_HOOK_SPE
   const saved = process.env.ROCKY_HOOK_SPEECH_FILE;
   process.env.ROCKY_HOOK_SPEECH_FILE = speechFile;
   try {
-    const { tty } = captureTty(() => {
-      sayTty("this error again. deep memory need stderr. run with: rocky run 'x', question");
-      detailTty("place: somewhere");
-      return undefined;
-    });
-    assert.equal(tty, "", "buffered speech must never reach the console device directly");
+    sayTty("this error again. deep memory need stderr. run with: rocky run 'x', question");
+    detailTty("place: somewhere");
     assert.equal(existsSync(speechFile), false, "nothing is published until flushHookSpeech runs");
 
     flushHookSpeech();
@@ -377,12 +344,7 @@ test("a line spoken while ROCKY_HOOK_SPEECH_FILE was unset never resurfaces in a
   const saved = process.env.ROCKY_HOOK_SPEECH_FILE;
   delete process.env.ROCKY_HOOK_SPEECH_FILE;
   try {
-    // Unset: sayTty writes straight to the tty device (captured here, not
-    // buffered) -- the exact unbuffered path every other test in this file
-    // above already exercises.
-    const { tty } = captureTty(() => sayTty("should go straight to tty, not buffer"));
-    assert.match(tty, /should go straight to tty, not buffer/, "unset env var: sayTty must still write the console device directly");
-
+    sayTty("should not buffer");
     const scratch = mkdtempSync(join(tmpdir(), "rocky-hook-speech-noleak-"));
     const speechFile = join(scratch, "speech", "should-stay-absent.txt");
     process.env.ROCKY_HOOK_SPEECH_FILE = speechFile;
@@ -414,10 +376,8 @@ test("hookFail's speech survives end to end through the buffer/publish path exac
   process.env.PATH = speechBin;
   try {
     const speechCwd = mkdtempSync(join(tmpdir(), "rocky-hook-speech-cwd-"));
-    const { result } = captureTty(() => {
-      hookFail("speech-roundtrip-cmd", 1, speechCwd); // first occurrence: silent by design
-      return hookFail("speech-roundtrip-cmd", 1, speechCwd); // second: sayTty fires
-    });
+    hookFail("speech-roundtrip-cmd", 1, speechCwd); // first occurrence: silent by design
+    const result = hookFail("speech-roundtrip-cmd", 1, speechCwd); // second: sayTty fires
     assert.equal(result, 0);
     flushHookSpeech();
     assert.equal(existsSync(speechFile), true, "hookFail's second-occurrence speech must have been buffered and published");

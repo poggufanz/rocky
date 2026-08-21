@@ -101,59 +101,20 @@ export function ago(ts: number): string {
 }
 
 /**
- * The console device path a background process can still write to once its
- * own stdio is gone. POSIX (Linux/macOS/WSL, and Git-Bash-on-Windows when
- * Node itself is a POSIX build) keeps `/dev/tty`. Native Windows Node has no
- * such path — `writeFileSync("/dev/tty", ...)` fails with ENOENT there (it
- * gets parsed as a relative `dev\tty`, not a device) — so every hook-handler
- * TTY line was silently swallowed on native Windows before this fix, which
- * the PowerShell hook (Task 4) exposed: without it, `hookFail`/`hookSuccess`
- * would install correctly and record memory correctly, but never actually
- * speak to the user.
+ * Hook speech buffer.
  *
- * The bare reserved name `CON` looked like the obvious equivalent but is
- * unsafe: `writeFileSync("CON", ...)` was proven empirically (task-4-report,
- * both with a console attached and fully detached/console-less, matching how
- * hook handlers actually run) to create an ordinary 20-30 byte file literally
- * named `CON` in the current working directory instead of reaching the
- * console — Node's long-path handling defeats Win32's classic reserved-name
- * interception for a bare relative path. `\\.\CON`, the explicit Win32 device
- * namespace form, bypasses filename parsing entirely and goes straight to the
- * device object: proven empirically, same two scenarios, to never create a
- * stray file and never throw. That is the only form used here.
- */
-function ttyDevicePath(): string {
-  return process.platform === "win32" ? "\\\\.\\CON" : "/dev/tty";
-}
-
-/**
- * F2 (task-a-brief, manual PowerShell checklist): a detached hook
- * handler writing straight to the console device races the shell's own
- * prompt draw and the user's own typed input — proven on a real console,
- * invisible to any pipe-based harness (`rocky-hook.ps1`'s `prompt` cannot
- * see when a sibling process's raw device write actually lands). Rocky's
- * PowerShell `prompt` is the one place that write can be correctly ordered,
- * because it is the same function that returns the next prompt string — so
- * when `ROCKY_HOOK_SPEECH_FILE` is set (only `rocky-hook.ps1`'s detached
- * spawn ever sets it — `rocky-hook.bash`, `rocky run`, and every direct CLI
- * invocation leave it unset), `sayTty`/`detailTty` buffer their lines
- * in-memory instead of writing the console immediately, and
- * `flushHookSpeech` publishes them, once, as a single atomic unit `prompt`
- * can read whole or not at all — never a partial write mid-message. Nothing
- * about the unset-env-var path below changed: same device, same immediate
- * write, same silent failure.
+ * Hook handlers run as detached background processes with stdio discarded.
+ * To avoid racing the shell prompt and polluting interactive consoles (such as
+ * running tests or TUI applications), all hook speech is buffered in memory
+ * when ROCKY_HOOK_SPEECH_FILE is set (which both Bash and PowerShell hooks do)
+ * and published atomically via flushHookSpeech(). When ROCKY_HOOK_SPEECH_FILE
+ * is unset, hook speech is discarded silently without touching the console device.
  */
 let hookSpeechBuffer: string[] = [];
 
 function speakTty(line: string): void {
   if (process.env.ROCKY_HOOK_SPEECH_FILE) {
     hookSpeechBuffer.push(line);
-    return;
-  }
-  try {
-    writeFileSync(ttyDevicePath(), line);
-  } catch {
-    /* no tty (tests, CI, detached session) — Rocky stays silent */
   }
 }
 
