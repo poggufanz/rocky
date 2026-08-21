@@ -49,6 +49,7 @@ rocky hook agent-event generic --rationale "<one short sentence: why this change
 - One line, the real reason ("switch retry to idempotency key, duplicate settlement seen"), not a changelog.
 - Send it when you actually changed something; skip chatter turns. This is evidence, not ritual.
 - Fidelity is recorded as `summary` — honest labeling is part of the design.
+- **The `generic` adapter is argv-only.** It ignores stdin entirely, and a call without a non-blank `--rationale` records nothing. A harness lifecycle hook that fires `rocky hook agent-event generic` bare is a no-op — that is what the Step 6 bridge script is for.
 
 ## Step 3 — Claude Code, manual hooks *(human approval)*
 
@@ -134,13 +135,44 @@ args = ["mcp"]
 
 Tools you get: `recall`, `search_knowledge`, `why_file`, `recent_failures`, `stats`, `fetch_record`. Use them **when relevant** — `recall` when a failure looks familiar, `why_file` when you need a file's history. Do not call them on every turn. Note for the human: a configured cloud host may forward selected projected content under that host's own policy.
 
-## Step 6 — Other known harnesses
+## Step 6 — Every other harness: one universal bridge script *(human approval to save the file)*
 
-| Harness | Do this |
+Different harnesses spell their lifecycle hooks differently, and most pass their payload on stdin — which the argv-only `generic` adapter ignores. One small bridge closes that gap for all of them. Save this as `~/.rocky/agent-note.cjs`:
+
+```js
+// Universal bridge: any harness event -> rocky notify lane.
+// usage: node ~/.rocky/agent-note.cjs <agent-label> [rationale words...]
+// Reads a JSON payload from stdin when the harness pipes one; extracts
+// common fields; stays silent when there is nothing worth recording.
+const { spawnSync } = require("node:child_process");
+const { readFileSync } = require("node:fs");
+let payload = {};
+try { payload = JSON.parse(readFileSync(0, "utf8")); } catch { /* no or non-JSON stdin */ }
+const pick = (...keys) => keys.map((k) => payload[k]).find((v) => typeof v === "string" && v.trim() !== "");
+const label = process.argv[2] || "agent";
+const argText = process.argv.slice(3).join(" ").trim();
+const text = argText || pick("rationale", "prompt", "reason", "message", "text") || "";
+const file = pick("file_path", "filePath", "path", "file") || "";
+if (text === "" && file === "") process.exit(0);
+const rationale = `${label}: ${(text || `edited ${file}`).slice(0, 400)}`;
+const args = ["hook", "agent-event", "generic", "--rationale", rationale];
+if (file !== "") args.push("--files", file);
+spawnSync("rocky", args, { stdio: "ignore", shell: process.platform === "win32", timeout: 5000 });
+process.exit(0);
+```
+
+Then hang `node <home>/.rocky/agent-note.cjs <label>` on whatever event your harness offers. Known attachment points — **verify event names against the harness's current docs before writing config; these APIs are young and move**:
+
+| Harness | Where to hang it |
 | --- | --- |
+| Cursor (hooks, beta) | `~/.cursor/hooks.json` — hook events such as `afterFileEdit` / `beforeSubmitPrompt` / `stop` run a command with a JSON payload on stdin; point the command at `node <home>/.rocky/agent-note.cjs cursor`. |
+| OpenCode | A TypeScript plugin in `.opencode/plugin/` can run a shell command from its tool-execution hook (for edit/write tools): call `node <home>/.rocky/agent-note.cjs opencode "<tool summary>"`. |
+| Aider | No lifecycle hooks; nearest lever is `lint-cmd` in `.aider.conf.yml`, which runs per edited file: `lint-cmd: node <home>/.rocky/agent-note.cjs aider edited` (Aider appends the file path as the last argument). Aider's descriptive auto-commits already feed Rocky's git-diff correlation with zero wiring. |
+| Gemini CLI | No hook system (MCP and settings only): Steps 1–2 are the whole story, plus Step 5 for MCP read access. |
+| Windsurf, Cline, Roo Code, Zed, Goose, Crush, Amp | No shell-command lifecycle hooks found (plugin/SDK or MCP surfaces only). Floor: Step 1 catches every shell command they run; the agent itself sends Step 2 events; Step 5 where MCP is supported. |
 | DSH (DeepSeek Harness) | Nothing to install — Rocky's adapter reads DSH session logs directly (needs Node 22.15+ at Rocky's runtime for zstd). |
-| Gemini CLI | Steps 1–2, plus Step 5 if it speaks MCP; Gemini persists no thoughts, so the notify lane is the only rationale path. |
-| Any other agent | Steps 1–2 always work; Step 5 if it speaks MCP. |
+
+Whatever the harness, the floor never changes: Step 1 hears every shell command, and an agent that can run shell commands can always speak Step 2 itself — the bridge script only automates what the agent would otherwise say by hand.
 
 ## Step 7 — Verify
 
