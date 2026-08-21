@@ -2,6 +2,11 @@
 
 Notable changes per release. Dates are the release date.
 
+## 0.7.5 — 21 August 2026
+
+A patch release from the first day of dashboard dogfood:
+- **`rocky dash` now shows the reason text it was hiding.** Rows labeled bare `rationale`/`triple` and an empty Rationale tab were a display bug, not missing data: rationale records keep their text in `excerpt`, and triples nest `intent`/`rationale` as `{ text }` objects — field shapes the dashboard never read. Rows now label from the real text, and the Rationale tab renders the intent plus the stated why.
+
 ## 0.7.4 — 21 August 2026
 
 A minor release adding an interactive terminal dashboard, phase 1:
