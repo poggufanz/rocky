@@ -119,6 +119,7 @@ export function runDashboard(options: RunDashboardOptions): Promise<number> {
       }
       screen.leave();
       try {
+        process.removeListener("SIGTSTP", onSigtstp);
         process.kill(process.pid, "SIGTSTP");
       } catch {
         // Ignored on platforms without SIGTSTP
@@ -126,6 +127,11 @@ export function runDashboard(options: RunDashboardOptions): Promise<number> {
     }
 
     function resume() {
+      try {
+        process.on("SIGTSTP", onSigtstp);
+      } catch {
+        // Ignored
+      }
       screen.enter();
       screen.resetDiff();
       if (!detachInput) {
