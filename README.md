@@ -55,6 +55,7 @@ The PowerShell hook is passive ears only: it overrides `prompt` to see a command
 | Surface | What it does |
 | --- | --- |
 | Failure memory | Fingerprints errors, remembers later fixes, and searches your own history. |
+| `rocky dash` | Browse and inspect remembered failures, fixes, triples, and diffs in an interactive terminal dashboard. |
 | `rocky watch` | Waits with a long-running command, saves a failed stderr tail, and notifies when work ends. |
 | `rocky check` | Scans a pending push for secrets, checks new npm package names after consent, and asks one non-blocking comprehension question. |
 | Nervous System | Supported Claude Code and Codex hooks record bounded intent, path, excerpt, and stated-rationale evidence. |
@@ -69,6 +70,7 @@ Rocky preserves wrapped-command stdout, stderr, TTY behavior, and exit status. P
 | Command | Use |
 | --- | --- |
 | `rocky run "<cmd>"` | Run a command with deep failure memory. |
+| `rocky dash [query]` | Browse and inspect remembered failures, fixes, triples, and diffs in an interactive terminal dashboard. |
 | `rocky watch "<cmd>"` | Run a long command with completion notice and failure log. |
 | `rocky brief [--since <ref\|24h>] [--quiet] [--ai]` | Hear what changed since last brief: commits, remembered failures/fixes, touched invariant guards. Local git and memory only, no network; `--ai` stays on loopback. |
 | `rocky recall [--ai] "<query>"` | Search remembered failures and fixes. |
