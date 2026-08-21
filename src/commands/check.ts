@@ -14,6 +14,8 @@ import {
   type NewDep,
 } from "../check/deps.js";
 import { installPrePush } from "../check/pre-push.js";
+import { hasFreshAgentEvidence, missingWhyPaths, whyNudgeLine } from "../check/why-coverage.js";
+import { loadMemory } from "../core/memory-read.js";
 import { checkPackages } from "../check/registry.js";
 import { riskiestLine } from "../check/risk.js";
 import { scanSecrets } from "../check/secrets.js";
@@ -525,6 +527,24 @@ async function runCheck(rest: readonly string[], state: CheckState): Promise<num
     await packageStage(ranges, flags.has("--offline"), quiet, state);
   } catch (error) {
     reportFailure(state, "package scan", error);
+  }
+
+  if (!quiet) {
+    // Changesets-style why nudge: name changed files with no fresh stated
+    // reason and the exact command that records one. Never a finding, never
+    // an exit-code change, fail-open on any read error. Files with only
+    // deletions carry no added lines and are not inspected here.
+    try {
+      const now = Date.now();
+      const records = loadMemory(undefined, now);
+      if (hasFreshAgentEvidence(records, now)) {
+        const changed = [...new Set(lines.map((line) => line.file))];
+        const nudge = whyNudgeLine(missingWhyPaths(changed, records, process.cwd(), now));
+        if (nudge !== undefined) say(nudge);
+      }
+    } catch {
+      /* deaf spot stays undisclosed rather than breaking check */
+    }
   }
 
   if (!quiet && process.env.ROCKY_NO_QUIZ !== "1") {

@@ -553,7 +553,16 @@ export async function agentEvent(adapter: string, deps: AgentHookDeps = {}): Pro
         const hasArgvPayload = adapter === "codex"
           && typeof argvPayload === "string"
           && argvPayload.length > 0;
-        const raw = hasArgvPayload ? argvPayload : await (effectiveDeps.stdin ?? readStdin)();
+        // A real terminal never pipes a vendor payload, but an interactive
+        // stdin also never reaches EOF — reading it would hang the exact
+        // command the gate's deny message tells the agent to run. TTY in,
+        // vendor-payload lane out; the argv --rationale lane is independent
+        // and already handled above/below.
+        const raw = hasArgvPayload
+          ? argvPayload
+          : (effectiveDeps.stdin === undefined && process.stdin.isTTY === true
+            ? ""
+            : await (effectiveDeps.stdin ?? readStdin)());
         if (typeof raw !== "string" || Buffer.byteLength(raw, "utf8") > STDIN_CAP_BYTES) {
           throw new OversizedInputError();
         }

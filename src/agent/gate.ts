@@ -41,7 +41,7 @@ const MAX_RAW_SESSION_ID_LEN = 64;
  * gate-event vendor that instruction is unfollowable. So an unrecognized
  * vendor allows outright, same as an unrecognized tool.
  */
-const KNOWN_GATE_VENDORS: ReadonlySet<string> = new Set(["claude-code"]);
+const KNOWN_GATE_VENDORS: ReadonlySet<string> = new Set(["claude-code", "generic"]);
 
 export interface GateInput {
   vendor: string;
@@ -269,7 +269,10 @@ function dispatch(vendor: string, stdinJson: string): string {
   if (!isPlainRecord(raw)) return allow();
 
   const toolName = typeof raw.tool_name === "string" ? raw.tool_name : "";
-  if (!GATED_TOOLS.has(toolName)) return allow();
+  // The generic vendor's caller (a harness plugin) decides which of its own
+  // tools to gate, so any non-empty tool name passes; the Claude Code tool
+  // whitelist stays exact.
+  if (vendor === "generic" ? toolName.length === 0 : !GATED_TOOLS.has(toolName)) return allow();
 
   const filePath = extractFilePath(raw.tool_input);
   if (filePath === undefined) return allow();

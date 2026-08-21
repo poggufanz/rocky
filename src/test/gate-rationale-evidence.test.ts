@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { rationaleCheck, type GateInput, type GateState } from "../agent/gate.js";
+import { gateEvent, rationaleCheck, type GateInput, type GateState } from "../agent/gate.js";
 import { recordRationale } from "../core/memory.js";
 import { loadMemory } from "../core/memory-read.js";
 import { resolveRockyPaths } from "../core/state-paths.js";
