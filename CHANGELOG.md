@@ -2,6 +2,13 @@
 
 Notable changes per release. Dates are the release date.
 
+## 0.7.4 — 21 August 2026
+
+A minor release adding an interactive terminal dashboard, phase 1:
+- **`rocky dash`** browses memory (failures, fixes, triples, sessions, invariants) in a two-pane terminal UI: a records list and an inspector with Info, Rationale, Diff, and JSON tabs. Fuzzy search (`/`), a filter cycle (`f`), and a lazygit-style keymap (`j`/`k`, `Ctrl+d`/`Ctrl+u`, `[`/`]`, `?` for help) — read-only, zero runtime dependencies, and built on a pure render loop so every frame is unit-tested.
+- **Bare `rocky` on an interactive terminal now opens the dashboard directly** — the same idiom as `claude`, `lazygit`, and `k9s`. Bare `rocky` in a script or CI pipe keeps printing today's usage text unchanged, and `rocky --help` is untouched.
+- Non-TTY, Git Bash/MinTTY, and legacy consoles without VT processing all fall back to `rocky stats` with a plain explanation instead of painting garbage or hanging.
+
 ## 0.7.3 — 21 August 2026
 
 A patch release closing a gap the 0.7.2 hook fix left open:
