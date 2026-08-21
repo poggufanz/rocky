@@ -155,7 +155,7 @@ export interface RationaleRecord {
   excerpt: string;
   pointer?: RationalePointer;
   links?: RationaleLinks;
-  /** v0.7.5+: bounded file paths this stated reason covers (notify lane `--files`). */
+  /** Bounded file paths this stated reason covers (notify lane `--files`). */
   files?: string[];
 }
 export interface AliasRecord {
