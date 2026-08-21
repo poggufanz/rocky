@@ -29,7 +29,8 @@ export type Key =
         | "backspace"
         | "ctrl-c"
         | "ctrl-d"
-        | "ctrl-u";
+        | "ctrl-u"
+        | "ctrl-z";
     }
   | { name: "paste"; text: string };
 

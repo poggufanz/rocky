@@ -106,11 +106,43 @@ export function runDashboard(options: RunDashboardOptions): Promise<number> {
       };
     }
 
+    let detachInput: (() => void) | undefined;
+
+    function suspend() {
+      if (detachInput) {
+        try {
+          detachInput();
+        } catch {
+          // Ignored
+        }
+        detachInput = undefined;
+      }
+      screen.leave();
+      try {
+        process.kill(process.pid, "SIGTSTP");
+      } catch {
+        // Ignored on platforms without SIGTSTP
+      }
+    }
+
+    function resume() {
+      screen.enter();
+      screen.resetDiff();
+      if (!detachInput) {
+        detachInput = attachRawInput(stdin, keyParser);
+      }
+      renderScreen();
+    }
+
     const keyParser = createKeyParser((key) => {
+      if (key.name === "ctrl-z") {
+        suspend();
+        return;
+      }
       dispatch({ type: "key", key });
     }, scheduleTimer);
 
-    const detachInput = attachRawInput(stdin, keyParser);
+    detachInput = attachRawInput(stdin, keyParser);
 
     let resizeTimer: NodeJS.Timeout | undefined;
     const onResize = () => {
@@ -131,15 +163,19 @@ export function runDashboard(options: RunDashboardOptions): Promise<number> {
       // Ignored if resize not supported
     }
 
-    const onSigcont = () => {
-      try {
-        screen.enter();
-        screen.resetDiff();
-        renderScreen();
-      } catch {
-        // Ignored
-      }
+    const onSigtstp = () => {
+      suspend();
     };
+
+    const onSigcont = () => {
+      resume();
+    };
+
+    try {
+      process.on("SIGTSTP", onSigtstp);
+    } catch {
+      // Ignored on platforms without SIGTSTP
+    }
 
     try {
       process.on("SIGCONT", onSigcont);
@@ -174,12 +210,25 @@ export function runDashboard(options: RunDashboardOptions): Promise<number> {
       }
 
       try {
+        process.removeListener("SIGTSTP", onSigtstp);
+      } catch {
+        // Ignored
+      }
+
+      try {
         process.removeListener("SIGCONT", onSigcont);
       } catch {
         // Ignored
       }
 
-      detachInput();
+      if (detachInput) {
+        try {
+          detachInput();
+        } catch {
+          // Ignored
+        }
+        detachInput = undefined;
+      }
       screen.leave();
       resolve(code);
     }

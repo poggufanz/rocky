@@ -62,6 +62,7 @@ test("control characters and common single-byte keys", () => {
   parser.feed(Buffer.from([0x03])); // ctrl-c
   parser.feed(Buffer.from([0x04])); // ctrl-d
   parser.feed(Buffer.from([0x15])); // ctrl-u
+  parser.feed(Buffer.from([0x1a])); // ctrl-z
   parser.feed(Buffer.from([0x0d])); // enter (\r)
   parser.feed(Buffer.from([0x0a])); // enter (\n)
   parser.feed(Buffer.from([0x09])); // tab
@@ -72,6 +73,7 @@ test("control characters and common single-byte keys", () => {
     { name: "ctrl-c" },
     { name: "ctrl-d" },
     { name: "ctrl-u" },
+    { name: "ctrl-z" },
     { name: "enter" },
     { name: "enter" },
     { name: "tab" },

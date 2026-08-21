@@ -59,11 +59,6 @@ export function createScreen(stdout: NodeJS.WriteStream): Screen {
   };
   const onSigtstp = () => {
     cleanup();
-    try {
-      process.kill(process.pid, "SIGTSTP");
-    } catch {
-      // Ignored
-    }
   };
   const onUncaughtException = (err: unknown) => {
     cleanup();

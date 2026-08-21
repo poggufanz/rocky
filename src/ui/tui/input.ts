@@ -50,6 +50,10 @@ export function createKeyParser(
       emit({ name: "ctrl-u" });
       return;
     }
+    if (ch === "\x1a") {
+      emit({ name: "ctrl-z" });
+      return;
+    }
     if (ch === "\r" || ch === "\n") {
       emit({ name: "enter" });
       return;
