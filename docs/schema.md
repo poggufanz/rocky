@@ -30,7 +30,7 @@ existing kind.
 | `brief_run` | `memory.jsonl` | v0.6 | active | `cwd, sinceTs, commits, files` |
 | `invariant_touch` | `memory.jsonl` | v0.6 | active | `cwd, invariant, path` |
 | `guard` | `memory.jsonl` | — | **defined, not yet emitted** | `cwd, cmd, rule` — reserved for hook guard triggers; no writer exists yet |
-| `rationale` | `memory.jsonl` | v0.7 | active | `cwd, agent, rationale_fidelity (raw\|summary\|none), source (log-thinking\|log-response\|notify\|human), excerpt, pointer?{logPath,sessionId,turnRef}, links?{tripleId,fixId,failureId}` |
+| `rationale` | `memory.jsonl` | v0.7 | active | `cwd, agent, rationale_fidelity (raw\|summary\|none), source (log-thinking\|log-response\|notify\|human), excerpt, pointer?{logPath,sessionId,turnRef}, links?{tripleId,fixId,failureId}, files?[]` (v0.7.5+: bounded paths from notify `--files`, max 8 entries of 512 chars; the PreToolUse gate reads them as file-linked evidence) |
 | `alias` | `memory.jsonl` | v0.7 | active | `alias, concept, action (add\|retract)` |
 
 ## Adapter priority
