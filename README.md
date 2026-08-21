@@ -23,6 +23,14 @@ Requires Node.js 18 or newer. The package name is `@poggufanz/rocky-cli`; the un
 
 Current release: `@poggufanz/rocky-cli@0.7.3`. See the [release notes](https://github.com/poggufanz/rocky/releases/tag/v0.7.3) or the full [changelog](CHANGELOG.md).
 
+### Agent self-setup (any harness)
+
+Working with an agent outside Claude Code or Codex (OpenCode, Gemini CLI, anything else)? [docs/agents/INSTALL.md](docs/agents/INSTALL.md) covers the shell hook, the notify rationale lane, and optional MCP read access, and every step that edits your files asks for approval first. On Claude Code and Codex, `rocky setup --agent-hooks` and `rocky setup` capture more, automatically. To hand it to the agent:
+
+```text
+Fetch and follow instructions from https://raw.githubusercontent.com/poggufanz/rocky/main/docs/agents/INSTALL.md
+```
+
 ## Quick start
 
 Run a failure-prone command through Rocky:
