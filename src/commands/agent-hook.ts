@@ -301,6 +301,7 @@ function writeNotifyRationale(agent: "claude-code" | "codex" | "generic", deps: 
       text: rationale,
       ts: now,
       ...(links === undefined ? {} : { links }),
+      ...(deps.files === undefined ? {} : { files: deps.files }),
     }, paths);
   } catch {
     safeLogFailure(paths);

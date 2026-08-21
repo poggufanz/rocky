@@ -140,6 +140,10 @@ export interface InvariantTouchRecord {
 
 export type RationaleFidelity = "raw" | "summary" | "none";
 export type RationaleSource = "log-thinking" | "log-response" | "notify" | "human";
+/** Bounds for the optional rationale `files` list (notify lane `--files`). */
+export const MAX_RATIONALE_FILES = 8;
+export const MAX_RATIONALE_FILE_CHARS = 512;
+
 export interface RationalePointer { logPath?: string; sessionId?: string; turnRef?: string }
 export interface RationaleLinks { tripleId?: string; fixId?: string; failureId?: string }
 export interface RationaleRecord {
@@ -151,6 +155,8 @@ export interface RationaleRecord {
   excerpt: string;
   pointer?: RationalePointer;
   links?: RationaleLinks;
+  /** v0.7.5+: bounded file paths this stated reason covers (notify lane `--files`). */
+  files?: string[];
 }
 export interface AliasRecord {
   kind: "alias"; id: string; ts: number; v: 1;
@@ -708,11 +714,18 @@ function parseMemoryRecordUnsafe(value: unknown): MemoryRecord | undefined {
         ...(value.failureId === undefined ? {} : { failureId: value.failureId }),
       };
     }
+    let files: string[] | undefined;
+    if (record.files !== undefined) {
+      if (!Array.isArray(record.files) || record.files.length > MAX_RATIONALE_FILES ||
+          record.files.some((f) => typeof f !== "string" || f.length === 0 || f.length > MAX_RATIONALE_FILE_CHARS)) return undefined;
+      files = record.files as string[];
+    }
     return {
       kind: "rationale", id: record.id, ts: Number(record.ts), v: 1, cwd: record.cwd,
       agent, rationale_fidelity: fidelity, source, excerpt: record.excerpt,
       ...(pointer === undefined ? {} : { pointer }),
       ...(links === undefined ? {} : { links }),
+      ...(files === undefined ? {} : { files }),
     };
   }
   if (record.kind === "failure") {

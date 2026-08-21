@@ -18,7 +18,7 @@
 import { appendFileSync, mkdirSync, readFileSync, statSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { dirname, join } from "node:path";
-import { canonicalPath } from "../core/memory-read.js";
+import { canonicalPath, loadMemory } from "../core/memory-read.js";
 import { resolveRockyPaths } from "../core/state-paths.js";
 import { logHookError } from "../commands/agent-hook.js";
 
@@ -166,6 +166,36 @@ function createGateState(stateFile: string): GateState {
  * not the agent actually reported — enforcement here is social and
  * evidence-shaped, not a hard block, matching gateguard's deny-once model.
  */
+/** How fresh file-linked rationale evidence must be to satisfy the gate. */
+const RATIONALE_EVIDENCE_WINDOW_MS = 8 * 60 * 60 * 1000;
+
+/**
+ * True when memory holds a rationale record, fresh within the window, whose
+ * `files` list resolves to the same canonical identity as the file being
+ * edited. This is what makes the deny message's own instruction
+ * (`agent-event ... --files <file>`) actually satisfy the gate instead of
+ * relying purely on the deny-once fallback. Any read failure means "no
+ * evidence" — never a throw, never a deny on unreadable state.
+ */
+function hasFreshFileRationale(identity: string, now: number): boolean {
+  try {
+    const records = loadMemory(resolveRockyPaths().memory, now);
+    for (let i = records.length - 1; i >= 0; i--) {
+      const record = records[i];
+      if (record === undefined || record.kind !== "rationale") continue;
+      if (now - record.ts > RATIONALE_EVIDENCE_WINDOW_MS) continue;
+      const files = record.files;
+      if (files === undefined) continue;
+      for (const file of files) {
+        if (canonicalPath(file, { cwd: record.cwd }) === identity) return true;
+      }
+    }
+  } catch {
+    /* unreadable memory: treated as no evidence, deny-once path decides */
+  }
+  return false;
+}
+
 export const rationaleCheck: GateCheck = {
   id: "rationale",
   enabled(env: NodeJS.ProcessEnv): boolean {
@@ -182,6 +212,10 @@ export const rationaleCheck: GateCheck = {
     // same string and misread each other's marks.
     const key = `rationale:${identity}`;
     if (state.has(key)) return { deny: false };
+    if (hasFreshFileRationale(identity, Date.now())) {
+      state.mark(key); // remember, so later touches skip the memory read
+      return { deny: false };
+    }
     if (!state.mark(key)) return { deny: false }; // could not persist the marker: never deny unrecorded state
     return {
       deny: true,

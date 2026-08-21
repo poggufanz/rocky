@@ -34,7 +34,7 @@ import {
 } from "./fingerprint.js";
 import { resolveRockyPaths } from "./state-paths.js";
 import type { RockyPaths } from "./state-paths.js";
-import { boundTripleMechanism, isCompleteMemoryCoverage, isKnownPathPlatform, isSafeNonNegativeInteger, loadMemoryChecked, MAX_MEMORY_FILE_BYTES, MAX_MEMORY_LINE_BYTES, MAX_MEMORY_RECORDS, MAX_SUPPORTED_MEMORY_RECORDS } from "./memory-read.js";
+import { boundTripleMechanism, isCompleteMemoryCoverage, isKnownPathPlatform, isSafeNonNegativeInteger, loadMemoryChecked, MAX_MEMORY_FILE_BYTES, MAX_RATIONALE_FILES, MAX_RATIONALE_FILE_CHARS, MAX_MEMORY_LINE_BYTES, MAX_MEMORY_RECORDS, MAX_SUPPORTED_MEMORY_RECORDS } from "./memory-read.js";
 import type { AliasRecord, AssociationRecord, BriefRunRecord, FailureRecord, FixRecord, InvariantTouchRecord, MemoryCoverage, MemoryRecord, NoteRecord, RationaleRecord, TripleRecord } from "./memory-read.js";
 import { redactSecretsAtBoundary } from "./redact.js";
 import { utf8Slice, utf8SliceFromEnd } from "./utf8.js";
@@ -1392,6 +1392,16 @@ export function boundRationaleExcerpt(text: string): string {
   return `${head} … ${tail}`;
 }
 
+/** Bound the optional notify-lane files list: cap count and entry length, drop junk entries. */
+function boundedRationaleFiles(files: string[] | undefined): { files: string[] } | undefined {
+  if (!Array.isArray(files)) return undefined;
+  const bounded = files
+    .filter((f): f is string => typeof f === "string" && f.length > 0)
+    .map((f) => f.slice(0, MAX_RATIONALE_FILE_CHARS))
+    .slice(0, MAX_RATIONALE_FILES);
+  return bounded.length === 0 ? undefined : { files: bounded };
+}
+
 export function recordRationale(
   input: Omit<RationaleRecord, "kind" | "id" | "ts" | "v" | "excerpt"> & { text: string; ts?: number },
   paths?: RockyPaths,
@@ -1409,6 +1419,7 @@ export function recordRationale(
     excerpt: boundRationaleExcerpt(input.text),
     ...(input.pointer === undefined ? {} : { pointer: input.pointer }),
     ...(input.links === undefined ? {} : { links: input.links }),
+    ...(boundedRationaleFiles(input.files) ?? {}),
   };
   withMemoryTransaction((transaction) => { transaction.append(rec); }, paths ?? resolveRockyPaths(), { now: ts });
   return rec;
