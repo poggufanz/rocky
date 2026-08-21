@@ -6,6 +6,8 @@ Notable changes per release. Dates are the release date.
 
 A patch release from the first day of dashboard dogfood:
 - **`rocky dash` now shows the reason text it was hiding.** Rows labeled bare `rationale`/`triple` and an empty Rationale tab were a display bug, not missing data: rationale records keep their text in `excerpt`, and triples nest `intent`/`rationale` as `{ text }` objects — field shapes the dashboard never read. Rows now label from the real text, and the Rationale tab renders the intent plus the stated why.
+- **The rationale gate's own retry instruction now works.** Comply with `run: rocky hook agent-event claude-code --rationale ... --files ...` after a deny, and the gate recognizes that evidence: it reads memory for a fresh, file-linked rationale before denying a first-touched file, instead of relying purely on deny-once-then-fail-open. `--files` is now actually stored — it was parsed and silently dropped before.
+- **Any harness can now grow a why-trail with Rocky, not just Claude Code.** `rocky check` speaks one non-blocking line before a push naming changed files with no fresh stated reason and the exact command to record one — universal because `git push` is universal, and silent in repos with no recent agent activity. A harness that can block its own tool calls may opt into the same deny-once gate Claude Code uses via `rocky hook gate-event generic`. Fixed alongside: the notify command could hang forever when stdin was an interactive terminal instead of a vendor payload pipe.
 
 ## 0.7.4 — 21 August 2026
 
