@@ -173,3 +173,31 @@ test("search modal active and fullDiff mode hint lines", () => {
   const fullDiffText = render(s, VP, 1, false).join("\n");
   assert.ok(fullDiffText.includes("inspector"));
 });
+
+test("rationale tab shows a rationale record's excerpt string", () => {
+  const row = mk("r-not", "rationale", "rationale", {
+    excerpt: "pin release truth to v0.7.4 now that tag exists",
+    rationale_fidelity: "summary",
+    source: "notify",
+  });
+  delete (JSON.parse(row.json) as Record<string, unknown>).cmd; // sanity only
+  const noCmd = { ...row, json: JSON.stringify({ id: row.id, kind: "rationale", excerpt: "pin release truth to v0.7.4 now that tag exists" }, null, 2) };
+  let s = loaded([noCmd]);
+  s = update(s, { type: "key", key: { name: "char", ch: "]" } }); // rationale tab
+  const text = render(s, VP, 1, false).join("\n");
+  assert.ok(text.includes("pin release truth"), "excerpt string must render in rationale tab");
+  assert.ok(!text.includes("(no additional rationale recorded)"));
+});
+
+test("rationale tab shows a triple's nested intent.text and rationale.text", () => {
+  const row = { ...mk("t-not", "triple", "triple"), json: JSON.stringify({
+    id: "t-not", kind: "triple",
+    intent: { text: "add dashboard filter cycle" },
+    rationale: { text: "user asked for quick kind filtering" },
+  }, null, 2) };
+  let s = loaded([row]);
+  s = update(s, { type: "key", key: { name: "char", ch: "]" } });
+  const text = render(s, VP, 1, false).join("\n");
+  assert.ok(text.includes("add dashboard filter cycle"), "intent.text must render");
+  assert.ok(text.includes("user asked for quick kind filtering"), "rationale.text must render");
+});

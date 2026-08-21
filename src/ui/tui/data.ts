@@ -15,10 +15,20 @@ const BADGE_BY_KIND: Record<string, BadgeId> = {
   invariant_touch: "guard",
 };
 
-function labelFor(record: MemoryRecord): string {
+/** A field that may be a plain string or a nested `{ text }` object (triples nest intent/rationale that way). */
+function fieldText(value: unknown): string | undefined {
+  if (typeof value === "string" && value !== "") return value;
+  if (typeof value === "object" && value !== null && !Array.isArray(value)) {
+    const text = (value as Record<string, unknown>).text;
+    if (typeof text === "string" && text !== "") return text;
+  }
+  return undefined;
+}
+
+export function labelFor(record: MemoryRecord): string {
   const value = record as unknown as Record<string, unknown>;
   const raw =
-    [value.cmd, value.file, value.intent, value.note, value.kind].find(
+    [value.cmd, value.file, fieldText(value.intent), fieldText(value.rationale), value.excerpt, value.note, value.kind].find(
       (v): v is string => typeof v === "string" && v !== "",
     ) ?? record.kind;
   return redactSecretsAtBoundary(raw);

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadDashRows, searchRows } from "../ui/tui/data.js";
+import { labelFor, loadDashRows, searchRows } from "../ui/tui/data.js";
 import { initialState, update, visibleRows, type DashRow } from "../ui/tui/state.js";
 
 describe("tui data", () => {
@@ -225,5 +225,34 @@ describe("tui data", () => {
     state = { ...state, filter: "sessions" }; // sessions filter matches 'brief_run'
     const sessionSearch = visibleRows(state);
     assert.equal(sessionSearch.length, 0); // brief_run does not match 'typescript parser'
+  });
+});
+
+describe("labelFor reads the real field shapes agent-hook records use", () => {
+  test("rationale record labels from its excerpt string", () => {
+    const record = {
+      kind: "rationale", id: "r-x", ts: 1, v: 1, cwd: "/w", agent: "claude-code",
+      rationale_fidelity: "summary", source: "notify",
+      excerpt: "pin release truth to v0.7.4 now that tag exists",
+    };
+    assert.equal(labelFor(record as never), "pin release truth to v0.7.4 now that tag exists");
+  });
+
+  test("triple record labels from nested intent.text", () => {
+    const record = {
+      kind: "triple", id: "t-x", ts: 1, schemaV: 1, cwd: "/w", agent: "codex",
+      origin: "agent-hook", platform: "win32",
+      intent: { text: "add dashboard filter cycle" },
+      mechanism: { file: "src/x.ts" }, rationale: { text: "user asked" },
+    };
+    assert.equal(labelFor(record as never), "add dashboard filter cycle");
+  });
+
+  test("failure record still labels from cmd, array excerpt never leaks", () => {
+    const record = {
+      kind: "failure", id: "f-x", ts: 1, v: 1, cwd: "/w",
+      cmd: "npm test", fingerprint: "abc", excerpt: ["boom", "bad"],
+    };
+    assert.equal(labelFor(record as never), "npm test");
   });
 });

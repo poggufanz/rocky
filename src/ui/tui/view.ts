@@ -264,21 +264,39 @@ function renderInspectorPane(
         rawLines.push(`fingerprint ${parsed.fingerprint}`);
       }
     } else if (state.tab === "rationale") {
-      if (typeof parsed.rationale === "string" && parsed.rationale.trim()) {
-        rawLines.push(...parsed.rationale.split("\n"));
-      } else if (typeof parsed.intent === "string" && parsed.intent.trim()) {
-        rawLines.push(`intent: ${parsed.intent}`);
-      } else if (typeof parsed.note === "string" && parsed.note.trim()) {
-        rawLines.push(...parsed.note.split("\n"));
-      } else if (Array.isArray(parsed.excerpt) && parsed.excerpt.length > 0) {
-        rawLines.push("excerpt:");
-        for (const line of parsed.excerpt) {
-          rawLines.push(`  ${line}`);
+      // Fields arrive in two shapes: plain strings (rationale records keep
+      // their text in `excerpt`) and nested `{ text }` objects (triples nest
+      // intent/rationale that way).
+      const asText = (value: unknown): string | undefined => {
+        if (typeof value === "string" && value.trim()) return value;
+        if (typeof value === "object" && value !== null && !Array.isArray(value)) {
+          const text = (value as Record<string, unknown>).text;
+          if (typeof text === "string" && text.trim()) return text;
         }
-      } else {
-        rawLines.push(`label: ${selectedRow.label}`);
-        rawLines.push("");
-        rawLines.push("(no additional rationale recorded)");
+        return undefined;
+      };
+      const intentText = asText(parsed.intent);
+      const whyText = asText(parsed.rationale)
+        ?? (typeof parsed.excerpt === "string" && parsed.excerpt.trim() ? parsed.excerpt : undefined);
+      if (intentText !== undefined) {
+        rawLines.push(`intent: ${intentText}`);
+        if (whyText !== undefined) rawLines.push("");
+      }
+      if (whyText !== undefined) {
+        rawLines.push(...whyText.split("\n"));
+      } else if (intentText === undefined) {
+        if (typeof parsed.note === "string" && parsed.note.trim()) {
+          rawLines.push(...parsed.note.split("\n"));
+        } else if (Array.isArray(parsed.excerpt) && parsed.excerpt.length > 0) {
+          rawLines.push("excerpt:");
+          for (const line of parsed.excerpt) {
+            rawLines.push(`  ${line}`);
+          }
+        } else {
+          rawLines.push(`label: ${selectedRow.label}`);
+          rawLines.push("");
+          rawLines.push("(no additional rationale recorded)");
+        }
       }
     } else if (state.tab === "diff") {
       if (state.diff.state === "loading") {
