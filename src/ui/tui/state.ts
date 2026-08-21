@@ -1,3 +1,5 @@
+import { searchRows } from "./data.js";
+
 export type PaneId = "list" | "inspector";
 export type TabId = "info" | "rationale" | "diff" | "json";
 export type FilterId = "all" | "failures" | "triples" | "sessions" | "invariants";
@@ -97,7 +99,7 @@ export function initialState(cols: number, rows: number): DashState {
 export function visibleRows(state: DashState): DashRow[] {
   const matcher = FILTER_KINDS[state.filter] ?? (() => true);
   const byFilter = state.allRows.filter((r) => matcher(r.kind));
-  return state.search.query === "" ? byFilter : byFilter; // search scoring wired in Task 6
+  return searchRows(byFilter, state.search.query);
 }
 
 function clampSelect(state: DashState, next: number): DashState {
