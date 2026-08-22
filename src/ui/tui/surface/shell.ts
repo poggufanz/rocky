@@ -25,6 +25,9 @@ import { resolveRockyPaths } from "../../../core/state-paths.js";
 import { adaptHit } from "./home-data.js";
 import { tokens, similarity } from "../../../core/fingerprint.js";
 import { elapsed } from "../../rocky.js";
+import { loadDashRows, searchRows } from "../data.js";
+import type { DashRow } from "../state.js";
+import { moodFor, type Mood } from "../components/carapace.js";
 import type { Key } from "../state.js";
 import type { PickerState } from "./picker.js";
 import { updatePicker, previewPair } from "./picker.js";
@@ -72,6 +75,12 @@ export interface ShellState {
   quit: boolean;
   pendingRun?: string;
   compare?: CompareState;
+  overlay?: "browse";
+  brows: DashRow[];
+  bsel: number;
+  bquery: string;
+  btop: number;
+  brects?: Rect;
 }
 
 export type ShellEvent =
@@ -391,7 +400,111 @@ export function initialShell(cwd: string): ShellState {
     quit: false,
     pendingRun: undefined,
     compare: initialCompareState(snapshot.records),
+    overlay: undefined,
+    brows: [],
+    bsel: 0,
+    bquery: "",
+    btop: 0,
+    brects: undefined,
   };
+}
+
+export function browseVisible(state: Pick<ShellState, "brows" | "bquery">): DashRow[] {
+  return searchRows(state.brows, state.bquery);
+}
+
+export function applyMouseToBrowse(state: ShellState, ev: MouseEvent): ShellState {
+  const max = Math.max(0, browseVisible(state).length - 1);
+  if (ev.kind === "wheel-up") return { ...state, bsel: Math.max(0, state.bsel - 3) };
+  if (ev.kind === "wheel-down") return { ...state, bsel: Math.min(max, state.bsel + 3) };
+  if (ev.kind !== "press") return state;
+  const r = state.brects;
+  if (!r || ev.y < r.y || ev.y >= r.y + r.h) return state;
+  const idx = state.btop + (ev.y - r.y);
+  if (idx < 0 || idx > max) return state;
+  return { ...state, bsel: idx };
+}
+
+export function updateBrowseState(state: ShellState, key: Key): ShellState {
+  const visible = browseVisible(state);
+  const max = Math.max(0, visible.length - 1);
+  if (key.name === "esc") {
+    return { ...state, overlay: undefined, bquery: "", bsel: 0, btop: 0, brects: undefined };
+  }
+  if (key.name === "up") {
+    return { ...state, bsel: Math.max(0, state.bsel - 1) };
+  }
+  if (key.name === "down") {
+    return { ...state, bsel: Math.min(max, state.bsel + 1) };
+  }
+  if (key.name === "ctrl-u") {
+    return { ...state, bsel: Math.max(0, state.bsel - 5) };
+  }
+  if (key.name === "ctrl-d") {
+    return { ...state, bsel: Math.min(max, state.bsel + 5) };
+  }
+  if (key.name === "backspace") {
+    return { ...state, bquery: state.bquery.slice(0, -1), bsel: 0 };
+  }
+  if (key.name === "paste") {
+    return { ...state, bquery: (state.bquery + key.text).slice(0, 120), bsel: 0 };
+  }
+  if (key.name === "char") {
+    return { ...state, bquery: (state.bquery + key.ch).slice(0, 120), bsel: 0 };
+  }
+  if (key.name === "enter") {
+    const closed: ShellState = {
+      ...state,
+      overlay: undefined,
+      bquery: "",
+      bsel: 0,
+      btop: 0,
+      brects: undefined,
+    };
+    const row = visible[Math.min(state.bsel, max)];
+    if (!row) return closed;
+    return {
+      ...closed,
+      input: browsePrefill(row),
+      csel: 0,
+      view: "stream",
+      scroll: 0,
+    };
+  }
+  return state;
+}
+
+function browsePrefill(row: DashRow): string {
+  let file: string | undefined;
+  try {
+    const raw = JSON.parse(row.json) as Record<string, unknown>;
+    const candidates = [
+      raw.file,
+      raw.path,
+      (raw.mechanism as { files?: Array<{ path?: unknown }> } | undefined)?.files?.[0]?.path,
+    ];
+    for (const c of candidates) {
+      if (typeof c === "string" && c !== "") {
+        file = c;
+        break;
+      }
+    }
+  } catch {
+    file = undefined;
+  }
+  if (file) return `why ${file}`;
+  const words = row.label.split(/\s+/).filter(Boolean).slice(0, 6).join(" ");
+  return words !== "" ? `recall ${words}` : "recall ";
+}
+
+export function shellMood(s: Pick<ShellState, "cards" | "input" | "pendingRun">): Mood {
+  return moodFor({
+    runningCount:
+      s.cards.filter((c) => c.kind === "run" && c.meta === "running…").length +
+      (s.pendingRun !== undefined ? 1 : 0),
+    lastCard: s.cards[s.cards.length - 1],
+    typing: s.input !== "",
+  });
 }
 
 export interface AnswerSnapshot {
@@ -687,6 +800,15 @@ function submitInput(
         },
       };
     }
+    case "browse": {
+      let brows: DashRow[] = [];
+      try {
+        brows = loadDashRows(resolveRockyPaths(process.env).memory, now).rows;
+      } catch {
+        brows = [];
+      }
+      return { ...nextState, overlay: "browse", brows, bsel: 0, bquery: "", btop: 0 };
+    }
     case "help": {
       const card = buildHelp(COMMANDS);
       return { ...nextState, cards: [...nextState.cards, card] };
@@ -731,6 +853,13 @@ export function updateShell(
 
   if (key.name === "ctrl-c") {
     return { ...s, quit: true };
+  }
+
+  if (s.overlay === "browse") {
+    if (key.name === "mouse") {
+      return applyMouseToBrowse(s, key.event);
+    }
+    return updateBrowseState(s, key);
   }
 
   if (s.view === "compare") {

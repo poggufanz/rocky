@@ -8,9 +8,10 @@ import { CellBuffer, type Rect } from "../core/buffer.js";
 import { InputLineNode, StatusBarNode, SlashMenuNode } from "../components/chrome.js";
 import { matchCommands } from "./registry.js";
 import { pulse } from "../core/motion.js";
-import { getMemorySnapshot, filteredFiles, initialCompareState, type ShellState, type CompareState } from "./shell.js";
+import { getMemorySnapshot, filteredFiles, initialCompareState, browseVisible, shellMood, type ShellState, type CompareState } from "./shell.js";
 import { sessionItems, pickList } from "./picker.js";
 import { getCachedDiff, type CompareRec } from "./compare-data.js";
+import { CarapaceNode } from "../components/carapace.js";
 import { elapsed } from "../../rocky.js";
 import type { MemoryRecord } from "../../../core/memory-read.js";
 
@@ -212,12 +213,17 @@ export function streamView(
 
 export class SurfaceRootNode extends Node {
   private slashNode?: SlashMenuNode;
-  constructor(readonly mainColumn: Node, slashNode?: SlashMenuNode) {
+  private browseNode?: Node;
+  constructor(readonly mainColumn: Node, slashNode?: SlashMenuNode, browseOverlay?: Node) {
     super({ direction: "column" });
     this.add(mainColumn);
     if (slashNode) {
       this.slashNode = slashNode;
       this.add(slashNode);
+    }
+    if (browseOverlay) {
+      this.browseNode = browseOverlay;
+      this.add(browseOverlay);
     }
   }
 
@@ -234,6 +240,13 @@ export class SurfaceRootNode extends Node {
       const inputTop = Math.max(1, rect.h - 4);
       const my = Math.max(1, inputTop - mh);
       this.slashNode.rect = { x: 1, y: my, w: mw, h: mh };
+    }
+    if (this.browseNode) {
+      const bw = Math.min(84, Math.max(30, rect.w - 6));
+      const bh = Math.min(rect.h - 2, 18);
+      const bx = Math.max(1, rect.w - bw - 3);
+      const by = Math.max(1, Math.floor((rect.h - bh) / 2));
+      this.browseNode.rect = { x: bx, y: by, w: bw, h: bh };
     }
   }
 }
@@ -801,6 +814,113 @@ export function compareView(
   return new CompareViewNode(state, size, frame, ascii, allRecords, motionOn ?? true);
 }
 
+const LIST_TOKEN: Record<string, ThemeToken> = {
+  fail: "err",
+  fix: "ok",
+  why: "why",
+  guard: "guard",
+};
+
+function whyTextOf(json: string): string | undefined {
+  try {
+    const raw = JSON.parse(json) as Record<string, unknown>;
+    const nested = raw.rationale;
+    const text =
+      (typeof nested === "object" && nested !== null ? (nested as { text?: unknown }).text : undefined) ??
+      raw.reason ??
+      (typeof nested === "string" ? nested : undefined) ??
+      raw.excerpt ??
+      raw.note;
+    return typeof text === "string" && text.trim() !== "" ? text : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+export class BrowseOverlayNode extends Node {
+  constructor(
+    readonly state: ShellState,
+    readonly frame: number,
+    readonly ascii: boolean,
+    readonly motionOn: boolean = true,
+  ) {
+    super();
+  }
+
+  override paint(buf: CellBuffer): void {
+    const { x, y, w, h } = this.rect;
+    if (w <= 0 || h <= 0) return;
+
+    const rows = browseVisible(this.state);
+    const inner = paintBox(buf, this.rect, `browse · ${rows.length}`, true, this.ascii);
+
+    buf.blitText(inner.x, inner.y, "›", "accent");
+    const qText = this.state.bquery || "type to filter…";
+    buf.blitText(inner.x + 2, inner.y, qText, this.state.bquery ? "text" : "muted");
+    if (pulse(this.frame, this.motionOn)) {
+      const qx = inner.x + 2 + (this.state.bquery ? stringWidth(this.state.bquery) : 0);
+      buf.blitText(qx, inner.y, "▏", "accent", { x: inner.x, y: inner.y, w: inner.w, h: 1 });
+    }
+
+    const bodyTop = inner.y + 2;
+    const bodyH = Math.max(1, inner.h - 4);
+    const listW = Math.max(8, Math.floor(inner.w * 0.45));
+    const listRect: Rect = { x: inner.x, y: bodyTop, w: listW, h: bodyH };
+    this.state.brects = listRect;
+
+    if (this.state.bsel < this.state.btop) this.state.btop = this.state.bsel;
+    if (this.state.bsel >= this.state.btop + listRect.h) {
+      this.state.btop = this.state.bsel - listRect.h + 1;
+    }
+
+    for (let i = 0; i < listRect.h; i++) {
+      const row = rows[this.state.btop + i];
+      if (!row) break;
+      const yy = listRect.y + i;
+      const on = this.state.btop + i === this.state.bsel;
+      if (on) {
+        buf.set(listRect.x - 1, yy, "▎", "accent");
+      }
+      let lx = listRect.x;
+      lx += buf.blitText(lx, yy, row.badge.padEnd(5), on ? LIST_TOKEN[row.badge] ?? "why" : "muted") + 1;
+      buf.blitText(lx, yy, cut(row.label, Math.max(0, listRect.w - (lx - listRect.x))), on ? "text" : "text2");
+    }
+    if (rows.length === 0) {
+      buf.blitText(listRect.x, listRect.y, "no records match.", "muted");
+    }
+
+    const prevX = listRect.x + listRect.w + 2;
+    const prevW = Math.max(0, inner.x + inner.w - prevX);
+    const sel = rows[Math.min(this.state.bsel, Math.max(0, rows.length - 1))];
+    if (sel && prevW > 8) {
+      const token = LIST_TOKEN[sel.badge] ?? "why";
+      buf.blitText(prevX, bodyTop, sel.kind, token);
+      buf.blitText(prevX, bodyTop + 1, stamp(sel.ts), "muted");
+      let py = bodyTop + 3;
+      for (const wrapped of wrapToWidth(sel.label, prevW)) {
+        if (py >= bodyTop + bodyH) break;
+        buf.blitText(prevX, py++, wrapped, "text");
+      }
+      const why = whyTextOf(sel.json);
+      if (why && py < bodyTop + bodyH - 1) {
+        py++;
+        for (const wrapped of wrapToWidth(why, prevW)) {
+          if (py >= bodyTop + bodyH) break;
+          buf.blitText(prevX, py++, wrapped, "text2");
+        }
+      }
+    }
+
+    buf.blitText(
+      inner.x,
+      inner.y + inner.h - 1,
+      "[type] filter  [↑↓] pick  [enter] act  [esc] close",
+      "muted",
+      { x: inner.x, y: inner.y + inner.h - 1, w: inner.w, h: 1 },
+    );
+  }
+}
+
 export function surfaceRoot(
   state: ShellState,
   size: { cols: number; rows: number },
@@ -820,10 +940,19 @@ export function surfaceRoot(
   }
 
   const mainCol = new Node({ direction: "column", grow: 1 });
+  const mood = shellMood(state);
 
   // 1. Header
-  const header = new TextNode(` ROCKY  ${data.total} remembered`, "accent", { height: 1 });
-  mainCol.add(header);
+  if (state.view === "home" && !ascii) {
+    const headerZone = new Node({ direction: "row", height: 5 });
+    const titleCol = new Node({ direction: "column", grow: 1 });
+    titleCol.add(new TextNode(` ROCKY  ${data.total} remembered`, "accent", { height: 1 }));
+    headerZone.add(titleCol);
+    headerZone.add(new CarapaceNode(mood, frame, ascii, motionOn ?? true, { width: 16, height: 5 }));
+    mainCol.add(headerZone);
+  } else {
+    mainCol.add(new TextNode(` ROCKY  ${data.total} remembered`, "accent", { height: 1 }));
+  }
 
   // 2. Middle view (home vs stream)
   const middle =
@@ -874,6 +1003,10 @@ export function surfaceRoot(
     }
   }
 
-  return new SurfaceRootNode(mainCol, slashMenu);
+  // 6. Browse overlay (painted above everything)
+  const browseOverlay =
+    state.overlay === "browse" ? new BrowseOverlayNode(state, frame, ascii, motionOn ?? true) : undefined;
+
+  return new SurfaceRootNode(mainCol, slashMenu, browseOverlay);
 }
 

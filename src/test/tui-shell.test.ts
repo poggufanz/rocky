@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { initialCompareState, initialShell, updateShell, type ShellState } from "../ui/tui/surface/shell.js";
+import { browseVisible, initialCompareState, initialShell, updateShell, type ShellState } from "../ui/tui/surface/shell.js";
 import { streamView, surfaceRoot, compareView } from "../ui/tui/surface/views.js";
 import { renderToLines } from "../ui/tui/core/renderer.js";
 
@@ -286,6 +286,87 @@ test("z zoom gives the focused record pane full height without diff panes", () =
   const plain = renderToLines(compareView(u.compare!, SIZE, 0, false), SIZE.cols, SIZE.rows, 24);
   assert.equal(plainText(plain[13])[0], "└", "unzoomed record box ends above the diff panes");
 });
+
+const browseRow = (id: string, label: string, file?: string) => ({
+  id,
+  badge: "why" as const,
+  label,
+  ts: 1000,
+  kind: "triple",
+  json: JSON.stringify({ kind: "triple", ts: 1000, ...(file ? { file } : {}), intent: { text: "because the parser caches stems" } }),
+});
+
+test("/browse opens overlay, esc closes, enter prefills input from row", () => {
+  let s = type(initialShell("/proj"), "/browse");
+  s = press(s, "enter");
+  assert.equal(s.overlay, "browse");
+  assert.equal(s.view, "stream");
+  s = press(s, "esc");
+  assert.equal(s.overlay, undefined);
+
+  const seeded: ShellState = {
+    ...initialShell("/proj"),
+    overlay: "browse",
+    brows: [
+      browseRow("t1", "parser cache bug", "/proj/src/p.ts"),
+      { ...browseRow("t3", "triple carries file"), json: JSON.stringify({ kind: "triple", ts: 1000, mechanism: { files: [{ path: "/proj/src/t.ts" }] }, intent: { text: "because" } }) },
+      browseRow("t2", "unrelated note"),
+    ],
+    bsel: 0,
+    bquery: "",
+  };
+  const picked = press(seeded, "enter");
+  assert.equal(picked.overlay, undefined);
+  assert.equal(picked.input, "why /proj/src/p.ts");
+
+  const second: ShellState = { ...seeded, bsel: 1 };
+  const fromMechanism = press(second, "enter");
+  assert.equal(fromMechanism.input, "why /proj/src/t.ts");
+
+  const third: ShellState = { ...seeded, bsel: 2 };
+  const fallback = press(third, "enter");
+  assert.equal(fallback.input.startsWith("recall "), true);
+  assert.match(fallback.input, /unrelated note/);
+});
+
+test("browse overlay filters as you type and arrows move within filtered rows", () => {
+  let s: ShellState = {
+    ...initialShell("/proj"),
+    overlay: "browse",
+    brows: [browseRow("a", "alpha parser"), browseRow("b", "beta renderer"), browseRow("c", "gamma parser")],
+    bsel: 0,
+    bquery: "",
+  };
+  s = type(s, "parser");
+  assert.equal(browseVisible(s).length, 2);
+  s = press(s, "down");
+  assert.equal(s.bsel, 1);
+  s = press(s, "down");
+  assert.equal(s.bsel, 1, "selection clamps to filtered list");
+  s = press(s, "up");
+  s = press(s, "up");
+  assert.equal(s.bsel, 0);
+});
+
+test("browse overlay renders through surfaceRoot without errors", () => {
+  const s: ShellState = {
+    ...initialShell("/proj"),
+    view: "stream",
+    cards: [{ kind: "run", accent: "guard", subject: "npm test", meta: "running…", facts: ["x"], lines: [] }],
+    overlay: "browse",
+    brows: [browseRow("t1", "parser cache", "/p.ts")],
+    bsel: 0,
+    bquery: "",
+  };
+  const node = surfaceRoot(s, SIZE, 0, false);
+  const lines = renderToLines(node, SIZE.cols, SIZE.rows, 24);
+  assert.equal(lines.length, SIZE.rows);
+  assert.ok(cmpBrowseRects(s));
+});
+
+function cmpBrowseRects(state: ShellState): boolean {
+  return !!state.brects && state.brects.w > 0 && state.brects.h > 0;
+}
 
 test("compare cursors freeze when motion is off and blink on the pulse duty cycle", () => {
   const st = { ...initialShell("/proj"), view: "compare" as const, compare: initialCompareState([]) };
