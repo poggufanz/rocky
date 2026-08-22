@@ -2,7 +2,7 @@
 
 This is the detailed contract behind the shorter [project README](../README.md). It records command boundaries, evidence rules, setup transactions, recovery behavior, and platform limits.
 
-Rocky is a terminal companion inspired by the alien engineer from Andy Weir's *Project Hail Mary*. He keeps track of what you and your AI have already been through, so the second time an error appears, the answer comes from your own history — not from twenty minutes of googling.
+Rocky is a terminal companion who keeps track of what you and your AI have already been through, so the second time an error appears, the answer comes from your own history — not from twenty minutes of googling.
 
 **Teaching modes exist inside individual agents. Rocky is the layer that remembers what you learned — passive, cross-tool, and permanent.** Plan 01 of the v0.5 Nervous System and the Plan 02 dictionary/teaching surfaces ship in v0.5.0. The longer-term mission is simple: make users not forget the fundamentals.
 
@@ -48,7 +48,7 @@ The claim stops there: better direction from you, never a smarter model.
 
 > "You teach, I remember. I remind, you understand. This is good trade."
 
-That companion line is an original Rocky project tagline inspired by the lore, not a quotation from *Project Hail Mary*.
+That companion line is an original Rocky project tagline, not a quotation from an external source.
 
 ## Install
 
