@@ -17,6 +17,5 @@ export function surfaceEntry(argvCmd: string | undefined, isTTY: boolean): Surfa
   if (argvCmd === undefined) return { surface: "home" };
   if (argvCmd === "dash") return { surface: "compare" };  // owner: proto3 IS dash
   if (argvCmd === "repl") return { surface: "stream" };
-  if (argvCmd === "compare") return { surface: "compare" };
   return { passthrough: true };
 }

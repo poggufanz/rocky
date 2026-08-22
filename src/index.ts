@@ -31,7 +31,6 @@ import { journalCommand } from "./commands/journal.js";
 import { invariantsCommand } from "./commands/invariants.js";
 import { sessionsCommand } from "./commands/sessions.js";
 import { replCommand } from "./commands/repl.js";
-import { compareCommand } from "./commands/compare.js";
 import { annotateCommand } from "./agent/annotate.js";
 import { ambiguityCommand } from "./agent/ambiguity.js";
 import { CliUsageError, parseExactCommand, reportCliUsage } from "./commands/cli-args.js";
@@ -87,7 +86,6 @@ usage:
                             probe an installed Ollama model, then enable local AI.
   rocky model off            disable Rocky local AI. Ollama stays untouched.
   rocky dash                browse memory, interactive
-  rocky compare             inspect memory by file and record, side by side
   rocky stats               what Rocky holds in memory.
   rocky journal "<note>"    write one line dogfood note. local file only.
   rocky invariants          list remembered invariant notes from .rocky/invariants.md
@@ -309,8 +307,6 @@ async function main(): Promise<number> {
         return sessionsCommand(rest);
       case "repl":
         return replCommand(rest);
-      case "compare":
-        return compareCommand(rest);
       case "mcp":
         return mcp(rest);
       case "setup":

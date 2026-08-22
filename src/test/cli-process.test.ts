@@ -210,14 +210,15 @@ test("--version prints the package version to stdout, matching PACKAGE_VERSION, 
   assertNoDetectorMarkers(sandbox);
 });
 
-test("compare without a TTY speaks exactly one fallback line and exits 0", (t) => {
+test("compare is not a CLI command: dash owns the surface, no aliases", (t) => {
   const sandbox = processSandbox(t);
   const result = runCli(sandbox, ["compare"]);
 
-  assertCompleted(result, 0);
+  assertCompleted(result, 2);
   assert.equal(
     result.stderr,
-    "[Rocky] compare needs real terminal, this one pipe. try rocky recall, question\n",
+    `[Rocky] "compare" is not command I know. run --help, question
+`,
   );
   assert.equal(result.stdout, "");
   assertNoDetectorMarkers(sandbox);
