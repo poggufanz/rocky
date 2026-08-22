@@ -10,14 +10,14 @@ ROCKY 7 remembered                                                ═╦══�
 │ note 1 █████                             ││ why recorded 3                   │
 │ rationale 1 █████                        ││ local only · no egress           │
 │ 7 records · coverage partial             ││                                  │
-└─(file-size-cap)──────────────────────────┘└──────────────────────────────────┘
+└──────────────────────────────────────────┘└──────────────────────────────────┘
 ┌─ most heard files ───────────────────────┐┌─ recent ─────────────────────────┐
 │ 2 parser.ts                              ││ fail git push https://[redacted  │
 │ 1 config.ts                              ││ github                           │
 │                                          ││ token]@github.com/repo.git       │
 │                                          ││ 2 minutes ago                    │
 │                                          ││ why review finished clean        │
-└──────────────────────────────────────────┘└─5 minutes ago────────────────────┘
+└──────────────────────────────────────────┘└──────────────────────────────────┘
 ┌─ rocky · proj/demo ──────────────────────────────────────────────────────────┐
 │ › ▏/run npm test · /recall query · /help                                     │
 └──────────────────────────────────────────────────────────────────────────────┘

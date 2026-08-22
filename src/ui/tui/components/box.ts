@@ -42,11 +42,15 @@ export class BoxNode extends Node {
     const sizes = solveAxis(inner, items, this.props.gap ?? 0);
     let cursor = axis === "row" ? innerRect.x : innerRect.y;
     this.children.forEach((c, i) => {
+      // Overflowing children are clamped to the interior — a child slot must
+      // never reach the border row, or content paints over the frame.
+      const end = axis === "row" ? innerRect.x + innerRect.w : innerRect.y + innerRect.h;
+      const size = Math.min(sizes[i], Math.max(0, end - cursor));
       const r: Rect = axis === "row"
-        ? { x: cursor, y: innerRect.y, w: sizes[i], h: innerRect.h }
-        : { x: innerRect.x, y: cursor, w: innerRect.w, h: sizes[i] };
+        ? { x: cursor, y: innerRect.y, w: size, h: innerRect.h }
+        : { x: innerRect.x, y: cursor, w: innerRect.w, h: size };
       c.layout(r);
-      cursor += sizes[i] + (this.props.gap ?? 0);
+      cursor += size + (this.props.gap ?? 0);
     });
   }
 
