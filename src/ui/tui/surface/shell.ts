@@ -21,6 +21,7 @@ import { motionEnabled } from "../core/motion.js";
 import type { Rect } from "../core/buffer.js";
 import type { MouseEvent } from "../core/mouse.js";
 import { loadMemoryChecked, type MemoryRecord } from "../../../core/memory-read.js";
+import { redactSecretsAtBoundary } from "../../../core/redact.js";
 import { resolveRockyPaths } from "../../../core/state-paths.js";
 import { adaptHit } from "./home-data.js";
 import { tokens, similarity } from "../../../core/fingerprint.js";
@@ -551,7 +552,7 @@ function handleRecall(query: string, records: MemoryRecord[], now: number): Card
   return buildRecall(query, topHits);
 }
 
-function handleWhy(query: string, records: MemoryRecord[], now: number): Card {
+export function handleWhy(query: string, records: MemoryRecord[], now: number): Card {
   const qTokens = query === "why" ? new Set<string>() : tokens(query);
   const results: Array<{ text: string; source: string; agoText: string; score: number; ts: number }> = [];
 
@@ -582,7 +583,7 @@ function handleWhy(query: string, records: MemoryRecord[], now: number): Card {
 
   results.sort((a, b) => b.score - a.score || b.ts - a.ts);
   const topResults = results.slice(0, 4).map((r) => ({
-    text: r.text,
+    text: redactSecretsAtBoundary(r.text),
     source: r.source,
     agoText: r.agoText,
   }));

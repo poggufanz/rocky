@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { browseVisible, initialCompareState, initialShell, updateShell, type ShellState } from "../ui/tui/surface/shell.js";
+import { browseVisible, initialCompareState, initialShell, updateShell, handleWhy, type ShellState } from "../ui/tui/surface/shell.js";
 import { streamView, surfaceRoot, compareView } from "../ui/tui/surface/views.js";
 import { renderToLines } from "../ui/tui/core/renderer.js";
 
@@ -113,6 +113,26 @@ test("stream scrolling: ctrl-u, ctrl-d, up, down", () => {
   assert.equal(s.scroll, 0);
   s = press(s, "down");
   assert.equal(s.scroll, 0);
+});
+
+const EXCERPT_TOKEN = "ghp_111122223333444455556666777788889999";
+
+test("/why redacts stored failure excerpts at the card boundary", () => {
+  const rec = {
+    kind: "failure",
+    ts: 1000,
+    cwd: "/proj",
+    cmd: "npm test",
+    exitCode: 1,
+    fingerprint: "a".repeat(16),
+    signature: ["auth failed"],
+    excerpt: `npm ERR! auth failed for ${EXCERPT_TOKEN}`,
+  } as any;
+  const card = handleWhy("why", [rec], 2000);
+  assert.equal(card.kind, "why");
+  const all = JSON.stringify(card);
+  assert.ok(!all.includes(EXCERPT_TOKEN), "raw excerpt token must not reach the why card");
+  assert.ok(all.includes("[redacted github token]"), "card carries the redacted form instead");
 });
 
 test("cd with invalid path creates err card and keeps cwd", () => {
