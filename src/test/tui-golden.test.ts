@@ -48,7 +48,8 @@ function golden(name: string, lines: string[]): void {
     writeFileSync(file, body, "utf8");
     return;
   }
-  assert.equal(body, readFileSync(file, "utf8"), `golden drift: ${name} (UPDATE_GOLDEN=1 to accept)`);
+  const stored = readFileSync(file, "utf8").replace(/\r\n/g, "\n");
+  assert.equal(body, stored, `golden drift: ${name} (UPDATE_GOLDEN=1 to accept)`);
 }
 
 // Fixed anchor shared with tui-home.test.ts. Every fixture ts derives from it;
