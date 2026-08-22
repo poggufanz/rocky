@@ -875,6 +875,13 @@ export function updateShell(
     return { ...s, compare: nextComp };
   }
 
+  if (key.name === "mouse") {
+    if (s.view !== "stream") return s;
+    if (key.event.kind === "wheel-up") return { ...s, scroll: s.scroll + 8 };
+    if (key.event.kind === "wheel-down") return { ...s, scroll: Math.max(0, s.scroll - 8) };
+    return s;
+  }
+
   const isMenuOpen = s.input.startsWith("/") && !s.input.includes(" ");
   const menuList = isMenuOpen ? matchCommands(s.input.slice(1)) : [];
 

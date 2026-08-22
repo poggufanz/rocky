@@ -135,6 +135,35 @@ test("/why redacts stored failure excerpts at the card boundary", () => {
   assert.ok(all.includes("[redacted github token]"), "card carries the redacted form instead");
 });
 
+const wheel = (s: ShellState, kind: "wheel-up" | "wheel-down", x = 10, y = 10): ShellState =>
+  updateShell(s, { type: "key", key: { name: "mouse", event: { kind, x, y, button: kind === "wheel-up" ? 64 : 65 } } }, deps);
+
+test("stream scrolling: wheel mirrors ctrl-u and ctrl-d", () => {
+  let s: ShellState = { ...initialShell("/p"), view: "stream", input: "", scroll: 0 };
+  s = wheel(s, "wheel-up");
+  assert.equal(s.scroll, 8);
+  s = wheel(s, "wheel-down");
+  assert.equal(s.scroll, 0);
+  s = wheel(s, "wheel-down");
+  assert.equal(s.scroll, 0, "clamps at zero like ctrl-d");
+});
+
+test("mouse press and release never touch the stream scroll", () => {
+  let s: ShellState = { ...initialShell("/p"), view: "stream", input: "", scroll: 3 };
+  for (const kind of ["press", "release"] as const) {
+    s = updateShell(s, { type: "key", key: { name: "mouse", event: { kind, x: 10, y: 10, button: 0 } } }, deps);
+    assert.equal(s.scroll, 3);
+  }
+});
+
+test("home: wheel is a no-op because home has no scroll mechanism", () => {
+  let s: ShellState = { ...initialShell("/p"), view: "home", scroll: 4 };
+  s = wheel(s, "wheel-up");
+  s = wheel(s, "wheel-down");
+  assert.equal(s.view, "home");
+  assert.equal(s.scroll, 4);
+});
+
 test("cd with invalid path creates err card and keeps cwd", () => {
   let s = type(initialShell("/proj"), "/run cd nonexistent_dir");
   s = press(s, "enter");
