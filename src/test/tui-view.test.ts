@@ -19,6 +19,22 @@ function loaded(rows: DashRow[] = [mk("a", "npm test"), mk("b", "vite build")]) 
   return update(initialState(VP.cols, VP.rows), { type: "data", rows, coverageLine: "coverage full" });
 }
 
+function rowWith(overrides: Partial<DashRow> = {}): DashRow {
+  return {
+    id: "r1",
+    badge: "fail",
+    label: "default label",
+    ts: 1_700_000_000_000,
+    kind: "failure",
+    json: JSON.stringify({ id: "r1", kind: "failure", cmd: overrides.label ?? "default label" }),
+    ...overrides,
+  };
+}
+
+function stateWithRows(rows: DashRow[], cols = 60, rowsCount = 20) {
+  return update(initialState(cols, rowsCount), { type: "data", rows, coverageLine: "coverage full" });
+}
+
 function frame(state = loaded()) {
   return render(state, VP, 1, false);
 }
@@ -201,3 +217,22 @@ test("rationale tab shows a triple's nested intent.text and rationale.text", () 
   assert.ok(text.includes("add dashboard filter cycle"), "intent.text must render");
   assert.ok(text.includes("user asked for quick kind filtering"), "rationale.text must render");
 });
+
+test("inspector wraps long values instead of truncating", () => {
+  // row whose label is far wider than the pane
+  const long = "check now speaks one why-nudge line for changed files without rationale so the person keeps the why";
+  let s = stateWithRows([rowWith({ label: long })]);   // use the file's existing fixture helpers
+  s = { ...s, focus: "inspector", inspectorOpen: true, tab: "info" };
+  const lines = render(s, { cols: 60, rows: 20 }, 1, true).join("\n");
+  assert.ok(!lines.includes("…"), "wrap mode must not truncate the label");
+  assert.ok(lines.includes("why-nudge"), "middle of the label must be visible");
+});
+
+test("w off restores truncation", () => {
+  const long = "check now speaks one why-nudge line for changed files without rationale";
+  let s = stateWithRows([rowWith({ label: long })]);
+  s = { ...s, focus: "inspector", inspectorOpen: true, tab: "info", wrap: false };
+  const lines = render(s, { cols: 60, rows: 20 }, 1, true).join("\n");
+  assert.ok(lines.includes("…"), "truncate mode keeps the old single-line form");
+});
+
