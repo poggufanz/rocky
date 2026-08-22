@@ -1,4 +1,5 @@
 import { searchRows } from "./data.js";
+import { MouseEvent } from "./core/mouse.js";
 
 export type PaneId = "list" | "inspector";
 export type TabId = "info" | "rationale" | "diff" | "json";
@@ -32,7 +33,8 @@ export type Key =
         | "ctrl-u"
         | "ctrl-z";
     }
-  | { name: "paste"; text: string };
+  | { name: "paste"; text: string }
+  | { name: "mouse"; event: MouseEvent };
 
 export interface DashState {
   cols: number;
