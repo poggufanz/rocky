@@ -171,8 +171,8 @@ Read the [contributing guide](https://github.com/poggufanz/rocky/blob/main/CONTR
 
 BYOK annotation, `attest`, and the memory circuit breaker remain deferred. Codex and Gemini agent-log adapters are deferred too — Codex's local session format drifted to a SQLite hybrid, and Gemini persists no thoughts to read. The earlier `rocky explain` idea is superseded and is not an active command.
 
-## License and fan-project note
+## License and attribution
 
 Rocky CLI code, original project documentation, and the repository illustration are available under the [MIT License](LICENSE).
 
-Rocky is an unofficial fan project inspired by the character from Andy Weir's *Project Hail Mary*. It is not affiliated with Andy Weir, Ballantine Books, or Amazon MGM Studios. The illustration above is original fan art made for this repository; no film frame, poster, logo, or other studio asset is distributed here. The MIT license does not grant rights in *Project Hail Mary* or its characters.
+Rocky's character, voice, and illustration are original work created for this repository. No third-party logos, film assets, or other copyrighted material are distributed here.
