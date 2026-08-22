@@ -2,7 +2,7 @@
 
 > *“You teach, I remember. I remind, you understand. This is good trade.”*
 >
-> Original Rocky project tagline; not a quotation from Project Hail Mary.
+> Original Rocky project tagline; not a quotation from an external source.
 
 Rocky is not a debugging agent. Plenty of tools already write and fix code for you. Rocky exists because of what those tools leave behind: developers who ship code they don't fully understand, and who solve the same problem twice because the first solution never made it into memory. Both problems are documented in the research below.
 
@@ -78,4 +78,4 @@ Human-factors research on automation bias and complacency is consistent with the
 
 ---
 
-*rocky is an unofficial fan project inspired by the character Rocky from Andy Weir's novel* Project Hail Mary. *It is not affiliated with Andy Weir, Ballantine Books, or Amazon MGM Studios. No assets from the book or film are used.*
+*rocky's character, voice, and illustration are original work created for this project. No third-party assets are used.*

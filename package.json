@@ -41,8 +41,7 @@
     "cli",
     "terminal-pet",
     "developer-tools",
-    "error-memory",
-    "project-hail-mary"
+    "error-memory"
   ],
   "repository": {
     "type": "git",

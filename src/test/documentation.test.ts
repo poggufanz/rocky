@@ -649,6 +649,6 @@ test("scientific grounding keeps v0.5 learning mechanisms bounded and evidence c
   assert.doesNotMatch(grounding, /rocky remember/i);
   assert.ok(grounding.includes("You teach, I remember. I remind, you understand. This is good trade."));
   assert.ok(grounding.includes(
-    "Original Rocky project tagline; not a quotation from Project Hail Mary",
+    "Original Rocky project tagline; not a quotation from an external source",
   ));
 });
