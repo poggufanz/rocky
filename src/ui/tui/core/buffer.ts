@@ -1,4 +1,4 @@
-import { codePointWidth, stringWidth } from "./text.js";
+import { codePointWidth } from "./text.js";
 import { paint, type ColorDepth, type ThemeToken } from "../theme.js";
 
 export interface Rect { x: number; y: number; w: number; h: number }
