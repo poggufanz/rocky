@@ -6,13 +6,12 @@ import { surfaceEntry } from "../ui/tui/surface/entry.js";
 export async function dashCommand(rest: string[]): Promise<number> {
   const initialQuery = rest.find((arg) => !arg.startsWith("--")) ?? "";
   const route = surfaceEntry("dash", process.stdout.isTTY === true && process.stdin.isTTY === true);
-  if ("surface" in route && route.surface === "browse") {
+  if ("surface" in route && route.surface === "compare") {
     return runSurface({
       stdout: process.stdout,
       stdin: process.stdin,
       env: process.env,
-      view: "home",
-      initialOverlay: initialQuery === "" ? { kind: "browse" } : { kind: "browse", query: initialQuery },
+      view: "compare",
     });
   }
   say(
