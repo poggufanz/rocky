@@ -1,19 +1,22 @@
 import { say } from "../ui/rocky.js";
 import { stats } from "./stats.js";
-import { runDashboard } from "../ui/tui/dash.js";
+import { runSurface } from "../ui/tui/surface/shell.js";
+import { surfaceEntry } from "../ui/tui/surface/entry.js";
 
 export async function dashCommand(rest: string[]): Promise<number> {
   const initialQuery = rest.find((arg) => !arg.startsWith("--")) ?? "";
-  if (process.stdout.isTTY !== true || process.stdin.isTTY !== true) {
-    say(
-      "dash need real terminal, this one pipe. I give stats instead. on git bash, try winpty rocky dash.",
-    );
-    return stats([]);
+  const route = surfaceEntry("dash", process.stdout.isTTY === true && process.stdin.isTTY === true);
+  if ("surface" in route && route.surface === "browse") {
+    return runSurface({
+      stdout: process.stdout,
+      stdin: process.stdin,
+      env: process.env,
+      view: "home",
+      initialOverlay: initialQuery === "" ? { kind: "browse" } : { kind: "browse", query: initialQuery },
+    });
   }
-  return runDashboard({
-    initialQuery,
-    stdout: process.stdout,
-    stdin: process.stdin,
-    env: process.env,
-  });
+  say(
+    "dash need real terminal, this one pipe. I give stats instead. on git bash, try winpty rocky dash.",
+  );
+  return stats([]);
 }

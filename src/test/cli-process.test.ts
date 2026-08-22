@@ -210,6 +210,19 @@ test("--version prints the package version to stdout, matching PACKAGE_VERSION, 
   assertNoDetectorMarkers(sandbox);
 });
 
+test("compare without a TTY speaks exactly one fallback line and exits 0", (t) => {
+  const sandbox = processSandbox(t);
+  const result = runCli(sandbox, ["compare"]);
+
+  assertCompleted(result, 0);
+  assert.equal(
+    result.stderr,
+    "[Rocky] compare needs real terminal, this one pipe. try rocky recall, question\n",
+  );
+  assert.equal(result.stdout, "");
+  assertNoDetectorMarkers(sandbox);
+});
+
 test("run preserves path-with-spaces child streams and exit status", (t) => {
   const fixtureRoot = mkdtempSync(join(tmpdir(), "rocky child fixture "));
   t.after(() => rmSync(fixtureRoot, { recursive: true, force: true }));

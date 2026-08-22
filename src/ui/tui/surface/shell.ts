@@ -950,15 +950,39 @@ export function updateShell(
   return s;
 }
 
+/** A surface that starts with an overlay already open (dash → browse). */
+export interface InitialOverlay {
+  kind: "browse";
+  /** Seed the browse filter, so `rocky dash <query>` keeps its meaning. */
+  query?: string;
+}
+
 export function runSurface(opts: {
   stdout: NodeJS.WriteStream;
   stdin: NodeJS.ReadStream;
   env: NodeJS.ProcessEnv;
   view?: "home" | "stream" | "compare";
+  initialOverlay?: InitialOverlay;
 }): Promise<number> {
   let state = initialShell(process.cwd());
   if (opts.view) {
     state = { ...state, view: opts.view };
+  }
+  if (opts.initialOverlay?.kind === "browse") {
+    let brows: DashRow[] = [];
+    try {
+      brows = loadDashRows(resolveRockyPaths(opts.env).memory, Date.now()).rows;
+    } catch {
+      brows = [];
+    }
+    state = {
+      ...state,
+      overlay: "browse",
+      brows,
+      bsel: 0,
+      bquery: opts.initialOverlay.query ?? "",
+      btop: 0,
+    };
   }
   const ascii = opts.env.ROCKY_ASCII === "1" || opts.env.TERM === "dumb";
   const live = new Live({ stdout: opts.stdout, stdin: opts.stdin, env: opts.env });

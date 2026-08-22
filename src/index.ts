@@ -31,11 +31,14 @@ import { journalCommand } from "./commands/journal.js";
 import { invariantsCommand } from "./commands/invariants.js";
 import { sessionsCommand } from "./commands/sessions.js";
 import { replCommand } from "./commands/repl.js";
+import { compareCommand } from "./commands/compare.js";
 import { annotateCommand } from "./agent/annotate.js";
 import { ambiguityCommand } from "./agent/ambiguity.js";
 import { CliUsageError, parseExactCommand, reportCliUsage } from "./commands/cli-args.js";
 import { PACKAGE_NAME, PACKAGE_VERSION } from "./core/package-info.js";
 import { detail, face, flushHookSpeech, say } from "./ui/rocky.js";
+import { runSurface } from "./ui/tui/surface/shell.js";
+import { surfaceEntry } from "./ui/tui/surface/entry.js";
 
 const HELP = `
 rocky — he remembers, so you don't have to.
@@ -84,6 +87,7 @@ usage:
                             probe an installed Ollama model, then enable local AI.
   rocky model off            disable Rocky local AI. Ollama stays untouched.
   rocky dash                browse memory, interactive
+  rocky compare             inspect memory by file and record, side by side
   rocky stats               what Rocky holds in memory.
   rocky journal "<note>"    write one line dogfood note. local file only.
   rocky invariants          list remembered invariant notes from .rocky/invariants.md
@@ -270,8 +274,16 @@ async function runGateEvent(vendor: string): Promise<number> {
 
 async function main(): Promise<number> {
   const [, , command, ...rest] = process.argv;
-  if (command === undefined && process.stdout.isTTY === true && process.stdin.isTTY === true) {
-    return dashCommand([]);
+  if (command === undefined) {
+    const route = surfaceEntry(undefined, process.stdout.isTTY === true && process.stdin.isTTY === true);
+    if ("surface" in route && route.surface === "home") {
+      return runSurface({
+        stdout: process.stdout,
+        stdin: process.stdin,
+        env: process.env,
+        view: "home",
+      });
+    }
   }
   try {
     switch (command) {
@@ -297,6 +309,8 @@ async function main(): Promise<number> {
         return sessionsCommand(rest);
       case "repl":
         return replCommand(rest);
+      case "compare":
+        return compareCommand(rest);
       case "mcp":
         return mcp(rest);
       case "setup":
