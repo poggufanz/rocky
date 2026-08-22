@@ -336,7 +336,7 @@ test("release truth keeps branch and immutable-tag modes distinct", async () => 
     resolveNpmExecutable(environment: NodeJS.ProcessEnv): string;
     releaseCheckCommandPlan(npm: string | { file: string; argsPrefix: string[] }, root: string): Record<string, { file: string; args: string[] }>;
   };
-  const releaseHead = "d6b21cf125c2cf7468ed64e851c7a0485d2becc7";
+  const releaseHead = "e6d425486ea5dde57493fc78c6d3af017a97ac1f";
   const postReleaseHead = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
   const sha256Head = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
   const branch = {
@@ -384,7 +384,7 @@ test("release truth keeps branch and immutable-tag modes distinct", async () => 
       if (command === "rev-parse --verify HEAD^{commit}") return postReleaseHead;
       if (command === "rev-parse HEAD") return postReleaseHead;
       if (command.startsWith("status")) return "";
-      if (command === "rev-parse --verify refs/tags/v0.7.5^{commit}") return releaseHead;
+      if (command === "rev-parse --verify refs/tags/v0.7.6^{commit}") return releaseHead;
       return "cccccccccccccccccccccccccccccccccccccccc";
     };
     const polluted = {
@@ -413,7 +413,7 @@ test("release truth keeps branch and immutable-tag modes distinct", async () => 
     assert.ok(runnerOptions.every((options) => options.gitExecutable === "C:\\absolute\\git.exe" && options.env === sanitized));
     assert.ok(calls.some((args) => args.join(" ") === "status --short --untracked-files=all --"));
     assert.ok(calls.some((args) => args.join(" ") === "rev-parse --verify HEAD^{commit}"));
-    assert.ok(calls.some((args) => args.join(" ") === "rev-parse --verify refs/tags/v0.7.5^{commit}"));
+    assert.ok(calls.some((args) => args.join(" ") === "rev-parse --verify refs/tags/v0.7.6^{commit}"));
     const objectTypeCalls: string[][] = [];
     const objectTypeRunner = (_root: string, args: string[]): string | undefined => {
       objectTypeCalls.push(args);
@@ -422,7 +422,7 @@ test("release truth keeps branch and immutable-tag modes distinct", async () => 
       if (command === "rev-parse HEAD") return postReleaseHead;
       if (command === "rev-parse --verify HEAD^{commit}") return undefined;
       if (command.startsWith("status")) return "";
-      if (command === "rev-parse --verify refs/tags/v0.7.5^{commit}") return releaseHead;
+      if (command === "rev-parse --verify refs/tags/v0.7.6^{commit}") return releaseHead;
       return "cccccccccccccccccccccccccccccccccccccccc";
     };
     assert.notDeepEqual(
