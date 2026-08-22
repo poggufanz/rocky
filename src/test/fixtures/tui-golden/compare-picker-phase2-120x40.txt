@@ -1,0 +1,40 @@
+  ROCKY  7 remembered · 2 files                                                                    ≣ holding parser.ts  
+┌─  A · 2025-08-23 23:46  ──────────────┐┌─  B · 2025-08-22 23┌─ timeline · pick B ────────────────────────────────────┐
+│  why  claude-code              +12 −3 ││  why  claude-code  │ A locked · 2025-08-23 23:46                            │
+│                                       ││                    │ / ▏earch intent…                                       │
+│ intent                                ││ intent             │  session 1 · 2025-08-22 · 1 records                    │
+│ pin parser stems before memoizing     ││ split parser stems │▎08-22 23:46   why  split parser stems before memoizing │
+│ because [redacted github token]       ││                    │                                                        │
+│ leaked into CI logs                   ││                    │                                                        │
+│                                       ││                    │                                                        │
+│                                       ││                    │                                                        │
+│                                       ││                    │                                                        │
+│                                       ││                    │                                                        │
+│                                       ││                    │                                                        │
+│                                       ││                    │                                                        │
+│                                       ││                    │                                                        │
+│                                       ││                    │                                                        │
+│                                       ││                    │                                                        │
+│                                       ││                    │                                                        │
+│                                       ││                    │                                                        │
+│                                       ││                    │                                                        │
+│                                       ││                    │                                                        │
+│ 2025-08-23 23:46  commit b47…         ││ 2025-08-22 23:46  c│                                                        │
+└───────────────────────────────────────┘└─────── 0 records be│                                                        │
+┌─ diff A · commit b47c0ffe ────────────┐┌─ diff B · commit b4│                                                        │
+│ diff --git a/src/parser.ts b/src/par… ││ diff --git a/src/pa│                                                        │
+│ --- a/src/parser.ts                   ││ --- a/src/parser.ts│                                                        │
+│ +++ b/src/parser.ts                   ││ +++ b/src/parser.ts│                                                        │
+│ @@ -12,7 +12,9 @@ export function pa… ││ @@ -12,7 +12,9 @@ e│                                                        │
+│   12  12     const stems = new Set()  ││   12  12     const │                                                        │
+│   13     −   const stale = true       ││   13     −   const │                                                        │
+│       13 +   const stale = false      ││       13 +   const │                                                        │
+│       14 +   cache.warm(stems)        ││       14 +   cache.│                                                        │
+│   14  15     return walk(input)       ││   14  15     return│                                                        │
+│                                       ││                    │                                                        │
+│                                       ││                    │                                                        │
+└───────────────────────────────────9/9─┘└────────────────────│                                                        │
+┌─ filter files ──────────────────────────────────────────────│                                                        │
+│ › ▏ype part of a path…                                      │ [enter] lock B  [←→] session  [esc] unlock A           │
+└─────────────────────────────────────────────────────────────└────────────────────────────────────────────────────────┘
+ ROCKY   ↑↓  choose   enter  confirm   esc  back                                                local only · no egress  

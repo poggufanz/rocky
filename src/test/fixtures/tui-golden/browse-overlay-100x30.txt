@@ -1,0 +1,30 @@
+ROCKY 0 remembered                                                                    ═╦═══════╦═   
+                                                                                       ║ ┌───┐ ║    
+                                                                                       ╲_││││││_╱   
+                                                                                       ╱ ╲▔▔▔╱ ╲    
+                                                                                      ╱ ╱ ╲_╱ ╲ ╲   
+┌─ what rocky holds ──────────────────────────────────┐┌─ since 24h ───────────────────────────────┐
+│ no records ┌─ browse · 4 ─────────────────────────────────────────────────────────────────────┐  │
+│ coverage fu│ › ▏ype to filter…                                                                │  │
+│            │                                                                                  │  │
+│            │▎why   pin parser stems before memoi…  triple                                     │  │
+│            │ fail  npm test exits 1 on missing b…  2025-08-23 23:46                           │  │
+│            │ fix   npm ci restores the lockfile …                                             │  │
+│            │ guard rocky blocked rm -rf on repo …  pin parser stems before memoizing          │  │
+│            │                                                                                  │  │
+│            │                                                                                  │  │
+│            │                                                                                  │  │
+└────────────│                                                                                  │──┘
+┌─ most heard│                                                                                  │──┐
+│ (none heard│                                                                                  │  │
+│            │                                                                                  │  │
+│            │                                                                                  │  │
+│            │                                                                                  │  │
+│            │ [type] filter  [↑↓] pick  [enter] act  [esc] close                               │  │
+│            └──────────────────────────────────────────────────────────────────────────────────┘  │
+│                                                     ││                                           │
+└─────────────────────────────────────────────────────┘└───────────────────────────────────────────┘
+┌─ rocky · proj/demo ──────────────────────────────────────────────────────────────────────────────┐
+│ › ▏/run npm test · /recall query · /help                                                         │
+└──────────────────────────────────────────────────────────────────────────────────────────────────┘
+ type command  tab complete  enter run  ^c quit                              local only · no egress 

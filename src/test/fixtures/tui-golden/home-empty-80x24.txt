@@ -1,0 +1,24 @@
+ROCKY 0 remembered                                                ═╦═══════╦═   
+                                                                   ║ ┌───┐ ║    
+                                                                   ╲_││││││_╱   
+                                                                   ╱ ╲▔▔▔╱ ╲    
+                                                                  ╱ ╱ ╲_╱ ╲ ╲   
+┌─ what rocky holds ───────────────────────┐┌─ since 24h ──────────────────────┐
+│ no records yet                           ││ heard 0                          │
+│ coverage full                            ││ failures 0                       │
+│                                          ││ fixes 0                          │
+│                                          ││ why recorded 0                   │
+│                                          ││ local only · no egress           │
+│                                          ││                                  │
+└──────────────────────────────────────────┘└──────────────────────────────────┘
+┌─ most heard files ───────────────────────┐┌─ recent ─────────────────────────┐
+│ (none heard yet)                         ││ (no recent evidence)             │
+│                                          ││                                  │
+│                                          ││                                  │
+│                                          ││                                  │
+│                                          ││                                  │
+└──────────────────────────────────────────┘└──────────────────────────────────┘
+┌─ rocky · proj/demo ──────────────────────────────────────────────────────────┐
+│ › ▏/run npm test · /recall query · /help                                     │
+└──────────────────────────────────────────────────────────────────────────────┘
+ type command  tab complete  enter run  ^c quit          local only · no egress 

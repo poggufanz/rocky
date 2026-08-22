@@ -1,0 +1,40 @@
+ROCKY 0 remembered                                                                                        ═╦═══════╦═   
+                                                                                                           ║ ┌╍╍╍┐ ║    
+                                                                                                           ╲_││││││_╱   
+                                                                                                           ╱ ╲▔▔▔╱ ╲    
+                                                                                                          ╱ ╱ ╲_╱ ╲ ╲   
+┌─ what rocky holds ─────────────────────────────────────────────┐┌─ since 24h ────────────────────────────────────────┐
+│ no records yet                                                 ││ heard 0                                            │
+│ coverage full                                                  ││ failures 0                                         │
+│                                                                ││ fixes 0                                            │
+│                                                                ││ why recorded 0                                     │
+│                                                                ││ local only · no egress                             │
+│                                                                ││                                                    │
+│                                                                ││                                                    │
+│                                                                ││                                                    │
+│                                                                ││                                                    │
+│                                                                ││                                                    │
+│                                                                ││                                                    │
+│                                                                ││                                                    │
+│                                                                ││                                                    │
+│                                                                ││                                                    │
+│                                                                ││                                                    │
+└────────────────────────────────────────────────────────────────┘└────────────────────────────────────────────────────┘
+┌─ most heard files ─────────────────────────────────────────────┐┌─ recent ───────────────────────────────────────────┐
+│┌─ commands ───────────────────────────────────────────┐        ││ (no recent evidence)                               │
+││▎/run <cmd>       run command, rocky listens          │        ││                                                    │
+││ /recall <query>  ask memory by words                 │        ││                                                    │
+││ /why <query>     hear remembered reasons             │        ││                                                    │
+││ /sessions        work sessions derived from memory   │        ││                                                    │
+││ /brief           hear what changed since last brief  │        ││                                                    │
+││ /stats           what rocky holds in memory          │        ││                                                    │
+││ /compare         compare file moments, side by side  │        ││                                                    │
+││ /browse          browse all memory                   │        ││                                                    │
+││ /help            command list                        │        ││                                                    │
+││ /home            back to dashboard                   │        ││                                                    │
+││ /quit            leave                               │        ││                                                    │
+└└──────────────────────────────────────────────────────┘────────┘└────────────────────────────────────────────────────┘
+┌─ rocky · proj/demo ──────────────────────────────────────────────────────────────────────────────────────────────────┐
+│ › /▏                                                                                                                 │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+ type command  tab complete  enter run  ^c quit                                                  local only · no egress 
