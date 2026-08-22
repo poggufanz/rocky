@@ -2,6 +2,15 @@
 
 Notable changes per release. Dates are the release date.
 
+## 0.7.6 — 22 August 2026
+
+A minor release adding a full terminal dashboard surface and a retrieval bug fix:
+- **`rocky dash` grows a real surface line.** Home, browse, and compare now share one renderer core built on a pure cell buffer (wide-glyph/emoji-aware, SGR run collapse), a single-axis flex solver, and a keymap registry with layer resolution. Bare `rocky` on an interactive terminal opens the home surface directly; dash, repl, and compare all route through it.
+- **Compare surface**: mark-then-pick timeline with per-side diffs, a file index, and a git-diff correlation ladder that resolves the change nearest a chosen moment. `rocky dash` opens compare directly; the separate compare CLI alias is dropped.
+- **Rendering honesty**: why-card reason text is redacted at the render boundary, golden frames cover every surface at three sizes, mouse wheel scrolling and ascii-mode border degradation are in, and `ROCKY_TUI_MOTION=off` freezes motion for accessibility and deterministic tests.
+- **`recall` and the dashboard's list filter stop surfacing agent transcript envelopes as rationale.** A triple's intent text was sometimes a whole captured `<task-notification>` envelope rather than the user's stated reason; a document containing everything matched every query. Envelope text is now excluded from the retrieval token bag and the list label, read-side only — stored evidence and `memory.jsonl` are untouched.
+- Public attribution notes (README, docs) no longer name the specific work Rocky's character is inspired by; the non-affiliation and originality framing stays, the title doesn't.
+
 ## 0.7.5 — 21 August 2026
 
 A patch release from the first day of dashboard dogfood:
