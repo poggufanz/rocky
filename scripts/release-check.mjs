@@ -20,11 +20,11 @@ const packageMetadata = JSON.parse(readFileSync(join(packageRoot, "package.json"
 const PACKAGE_NAME = "@poggufanz/rocky-cli";
 const PACKAGE_VERSION = packageMetadata.version;
 const PACKAGE_BINARY = "rocky";
-// Re-pinned once the v0.7.5 tag existed, in a commit of its own — the same order v0.5.1 used
+// Re-pinned once the v0.7.6 tag existed, in a commit of its own — the same order v0.5.1 used
 // (release commit, then tag, then baseline pin). Pinning before the tag is cut fails
 // validateGitReleaseState, because refs/tags/<RELEASE_TAG> cannot resolve yet.
-const RELEASE_TAG = "v0.7.5";
-const RELEASE_COMMIT = "d6b21cf125c2cf7468ed64e851c7a0485d2becc7";
+const RELEASE_TAG = "v0.7.6";
+const RELEASE_COMMIT = "e6d425486ea5dde57493fc78c6d3af017a97ac1f";
 const CANONICAL_BRANCH = "main";
 const CANONICAL_REPOSITORY_URL = "https://github.com/poggufanz/rocky.git";
 const CANONICAL_PACKAGE_ROOT = "rocky/";
