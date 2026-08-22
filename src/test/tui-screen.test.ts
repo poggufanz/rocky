@@ -9,7 +9,7 @@ test("diffFrames: first frame homes cursor and writes all lines wrapped in synch
 
   assert.equal(
     out,
-    "\x1b[?2026h\x1b[H\x1b[1;1HLine 1\x1b[K\x1b[2;1HLine 2\x1b[K\x1b[3;1HLine 3\x1b[K\x1b[?2026l",
+    "\x1b[?2026h\x1b[H\x1b[1;1HLine 1\x1b[2;1HLine 2\x1b[3;1HLine 3\x1b[?2026l",
   );
 });
 
@@ -31,7 +31,7 @@ test("diffFrames: unchanged lines are skipped, only changed lines are addressed"
 
   assert.equal(
     out,
-    "\x1b[?2026h\x1b[2;1HStatus: New\x1b[K\x1b[?2026l",
+    "\x1b[?2026h\x1b[2;1HStatus: New\x1b[?2026l",
   );
 });
 
@@ -53,7 +53,7 @@ test("diffFrames: line addition addresses new lines", () => {
 
   assert.equal(
     out,
-    "\x1b[?2026h\x1b[3;1HLine 3\x1b[K\x1b[?2026l",
+    "\x1b[?2026h\x1b[3;1HLine 3\x1b[?2026l",
   );
 });
 
@@ -78,7 +78,7 @@ test("createScreen: enter, paint, resetDiff, and leave lifecycle", () => {
   assert.equal(written.length, 2);
   assert.equal(
     written[1],
-    "\x1b[?2026h\x1b[H\x1b[1;1HHello\x1b[K\x1b[2;1HWorld\x1b[K\x1b[?2026l",
+    "\x1b[?2026h\x1b[H\x1b[1;1HHello\x1b[2;1HWorld\x1b[?2026l",
   );
 
   // 3. Paint same lines -> no write
@@ -90,7 +90,7 @@ test("createScreen: enter, paint, resetDiff, and leave lifecycle", () => {
   assert.equal(written.length, 3);
   assert.equal(
     written[2],
-    "\x1b[?2026h\x1b[2;1HRocky\x1b[K\x1b[?2026l",
+    "\x1b[?2026h\x1b[2;1HRocky\x1b[?2026l",
   );
 
   // 5. resetDiff -> next paint acts like first frame
@@ -99,7 +99,7 @@ test("createScreen: enter, paint, resetDiff, and leave lifecycle", () => {
   assert.equal(written.length, 4);
   assert.equal(
     written[3],
-    "\x1b[?2026h\x1b[H\x1b[1;1HHello\x1b[K\x1b[2;1HRocky\x1b[K\x1b[?2026l",
+    "\x1b[?2026h\x1b[H\x1b[1;1HHello\x1b[2;1HRocky\x1b[?2026l",
   );
 
   // 6. Leave

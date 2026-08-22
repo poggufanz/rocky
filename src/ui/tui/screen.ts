@@ -5,7 +5,7 @@ export function diffFrames(previous: string[] | undefined, next: string[]): stri
     if (next.length === 0) return "";
     const parts: string[] = ["\x1b[H"];
     for (let i = 0; i < next.length; i++) {
-      parts.push(`\x1b[${i + 1};1H${next[i]}\x1b[K`);
+      parts.push(`\x1b[${i + 1};1H${next[i]}`);
     }
     return `\x1b[?2026h${parts.join("")}\x1b[?2026l`;
   }
@@ -15,7 +15,7 @@ export function diffFrames(previous: string[] | undefined, next: string[]): stri
   for (let i = 0; i < maxLen; i++) {
     if (i < next.length) {
       if (previous[i] !== next[i]) {
-        parts.push(`\x1b[${i + 1};1H${next[i]}\x1b[K`);
+        parts.push(`\x1b[${i + 1};1H${next[i]}`);
       }
     } else {
       parts.push(`\x1b[${i + 1};1H\x1b[K`);
