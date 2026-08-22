@@ -336,7 +336,7 @@ test("release truth keeps branch and immutable-tag modes distinct", async () => 
     resolveNpmExecutable(environment: NodeJS.ProcessEnv): string;
     releaseCheckCommandPlan(npm: string | { file: string; argsPrefix: string[] }, root: string): Record<string, { file: string; args: string[] }>;
   };
-  const releaseHead = "d6b21cf125c2cf7468ed64e851c7a0485d2becc7";
+  const releaseHead = "e6d425486ea5dde57493fc78c6d3af017a97ac1f";
   const postReleaseHead = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
   const sha256Head = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
   const branch = {
