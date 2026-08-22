@@ -38,6 +38,9 @@ export class Live {
     );
     this.screen = createScreen(opts.stdout, {
       mouse: mouseAllowed(opts.env, process.platform),
+      // Sync the terminal's default background to the page at truecolor so
+      // the window's pixel remainder blends instead of reading as a stripe.
+      pageBg: this.depth === 24 ? "#08080a" : undefined,
     });
   }
 

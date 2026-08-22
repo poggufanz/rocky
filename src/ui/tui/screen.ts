@@ -37,7 +37,7 @@ export interface Screen {
   leave(): void;
 }
 
-export function createScreen(stdout: NodeJS.WriteStream, options?: { mouse?: boolean }): Screen {
+export function createScreen(stdout: NodeJS.WriteStream, options?: { mouse?: boolean; pageBg?: string }): Screen {
   let previous: string[] | undefined = undefined;
   let entered = false;
 
@@ -46,7 +46,10 @@ export function createScreen(stdout: NodeJS.WriteStream, options?: { mouse?: boo
     entered = false;
     detachHandlers();
     try {
-      const restore = (options?.mouse ? MOUSE_DISABLE : "") + "\x1b[0m\x1b[?25h\x1b[?2004l\x1b[?1049l";
+      const restore =
+        (options?.mouse ? MOUSE_DISABLE : "") +
+        (options?.pageBg !== undefined ? "\x1b]111\x1b\\" : "") +
+        "\x1b[0m\x1b[?25h\x1b[?2004l\x1b[?1049l";
       stdout.write(restore);
     } catch {
       // Ignored during shutdown
@@ -95,7 +98,10 @@ export function createScreen(stdout: NodeJS.WriteStream, options?: { mouse?: boo
       entered = true;
       attachHandlers();
       try {
-        const enterSeq = "\x1b[?1049h\x1b[?25l\x1b[?2004h" + (options?.mouse ? MOUSE_ENABLE : "");
+        const enterSeq =
+          "\x1b[?1049h\x1b[?25l\x1b[?2004h" +
+          (options?.pageBg !== undefined ? `\x1b]11;${options.pageBg}\x1b\\` : "") +
+          (options?.mouse ? MOUSE_ENABLE : "");
         stdout.write(enterSeq);
       } catch {
         // Ignored
