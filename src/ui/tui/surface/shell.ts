@@ -17,6 +17,9 @@ import { COMMANDS, matchCommands, parseInput } from "./registry.js";
 import { interceptCd, spawnRun, type RunOutcome } from "./runcmd.js";
 import { Live } from "../core/live.js";
 import { surfaceRoot } from "./views.js";
+import { motionEnabled } from "../core/motion.js";
+import type { Rect } from "../core/buffer.js";
+import type { MouseEvent } from "../core/mouse.js";
 import { loadMemoryChecked, type MemoryRecord } from "../../../core/memory-read.js";
 import { resolveRockyPaths } from "../../../core/state-paths.js";
 import { adaptHit } from "./home-data.js";
@@ -56,6 +59,7 @@ export interface CompareState {
   hscrollB: number;
   showDiff: boolean;
   zoom: boolean;
+  rects?: Partial<Record<CompareFocus, Rect>>;
 }
 
 export interface ShellState {
@@ -102,6 +106,7 @@ export function initialCompareState(records: MemoryRecord[] = []): CompareState 
     hscrollB: 0,
     showDiff: true,
     zoom: false,
+    rects: {},
   };
 }
 
@@ -136,6 +141,29 @@ export function scrollComparePane(state: CompareState, focus: CompareFocus, delt
     return { ...state, dscrollB: Math.max(0, state.dscrollB + delta) };
   }
   return { ...state, cscroll: Math.max(0, state.cscroll + delta) };
+}
+
+export function comparePaneAt(rects: CompareState["rects"], x: number, y: number): CompareFocus | null {
+  for (const k of ["files", "diffA", "diffB", "recA", "recB", "compare"] as CompareFocus[]) {
+    const r = rects?.[k];
+    if (!r) continue;
+    if (x >= r.x - 2 && x < r.x + r.w + 2 && y >= r.y - 1 && y < r.y + r.h + 1) return k;
+  }
+  return null;
+}
+
+export function applyMouseToCompare(state: CompareState, ev: MouseEvent): CompareState {
+  if (ev.kind === "wheel-up" || ev.kind === "wheel-down") {
+    if (state.modal) {
+      return updateCompareState(state, ev.kind === "wheel-up" ? { name: "up" } : { name: "down" });
+    }
+    const target = comparePaneAt(state.rects, ev.x, ev.y);
+    return scrollComparePane(state, target ?? state.focus, ev.kind === "wheel-up" ? -3 : 3);
+  }
+  if (ev.kind !== "press" || state.modal) return state;
+  const target = comparePaneAt(state.rects, ev.x, ev.y);
+  if (!target) return state;
+  return { ...state, focus: target };
 }
 
 export function updateCompareState(state: CompareState, key: Key): CompareState {
@@ -707,6 +735,9 @@ export function updateShell(
 
   if (s.view === "compare") {
     const currentCompare = s.compare ?? initialCompareState();
+    if (key.name === "mouse") {
+      return { ...s, compare: applyMouseToCompare(currentCompare, key.event) };
+    }
     if (key.name === "esc" && !currentCompare.modal && !currentCompare.zoom && !currentCompare.file) {
       return { ...s, view: "home" };
     }
@@ -822,7 +853,7 @@ export function runSurface(opts: {
       live.requestFrame();
     };
 
-    live.setRoot((sz) => surfaceRoot(state, sz, live.frame, ascii));
+    live.setRoot((sz) => surfaceRoot(state, sz, live.frame, ascii, undefined, motionEnabled(opts.env)));
     live.onKey((k) => {
       dispatch({ type: "key", key: k });
     });

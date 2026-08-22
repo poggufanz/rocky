@@ -7,6 +7,7 @@ import { wrapToWidth, stringWidth } from "../core/text.js";
 import { CellBuffer, type Rect } from "../core/buffer.js";
 import { InputLineNode, StatusBarNode, SlashMenuNode } from "../components/chrome.js";
 import { matchCommands } from "./registry.js";
+import { pulse } from "../core/motion.js";
 import { getMemorySnapshot, filteredFiles, initialCompareState, type ShellState, type CompareState } from "./shell.js";
 import { sessionItems, pickList } from "./picker.js";
 import { getCachedDiff, type CompareRec } from "./compare-data.js";
@@ -319,6 +320,7 @@ export class CompareViewNode extends Node {
     readonly frame: number,
     readonly ascii: boolean,
     readonly allRecords?: MemoryRecord[],
+    readonly motionOn: boolean = true,
   ) {
     super();
   }
@@ -328,6 +330,7 @@ export class CompareViewNode extends Node {
     const rows = this.rect.h > 0 ? this.rect.h : this.size.rows;
     if (cols <= 0 || rows <= 0) return;
 
+    this.state.rects = {};
     buf.fillRect({ x: 0, y: 0, w: cols, h: rows }, " ");
 
     const totalRecs = this.allRecords?.length ?? this.state.records.length;
@@ -389,6 +392,7 @@ export class CompareViewNode extends Node {
       this.ascii,
     );
     const fileList = filteredFiles(this.state);
+    this.state.rects.files = filesInner;
     if (this.state.fsel < this.state.ftop) this.state.ftop = this.state.fsel;
     if (this.state.fsel >= this.state.ftop + filesInner.h) {
       this.state.ftop = this.state.fsel - filesInner.h + 1;
@@ -427,8 +431,9 @@ export class CompareViewNode extends Node {
       if (zoomed === "diffA") {
         this.paintDiffPane(buf, 0, top, leftW, bodyH, this.state.file.recs[0], "");
       } else {
-        const diffH = this.state.showDiff ? Math.min(13, Math.floor(bodyH / 2)) : 0;
+        const diffH = this.state.showDiff && !zoomed ? Math.min(13, Math.floor(bodyH / 2)) : 0;
         const compH = bodyH - diffH;
+        this.state.rects.compare = { x: 0, y: top, w: leftW, h: compH };
         const compInner = paintBox(
           buf,
           { x: 0, y: top, w: leftW, h: compH },
@@ -494,8 +499,14 @@ export class CompareViewNode extends Node {
         this.paintDiffPane(buf, 0, top, halfW, bodyH, this.state.recA, "A");
         this.paintDiffPane(buf, halfW, top, rightHalfW, bodyH, this.state.recB, "B");
       } else {
-        const diffH = this.state.showDiff ? Math.min(13, Math.floor(bodyH / 2)) : 0;
+        const diffH = this.state.showDiff && !zoomed ? Math.min(13, Math.floor(bodyH / 2)) : 0;
         const recH = bodyH - diffH;
+        this.state.rects.recA = { x: 0, y: top, w: halfW, h: recH };
+        this.state.rects.recB = { x: halfW, y: top, w: rightHalfW, h: recH };
+        const rowsA = this.recordBodyRows(this.state.recA, Math.max(0, halfW - 4), this.state.expA);
+        const rowsB = this.recordBodyRows(this.state.recB, Math.max(0, rightHalfW - 4), this.state.expB);
+        const viewH = Math.max(1, Math.max(1, recH - 2) - 3);
+        this.state.cscroll = Math.max(0, Math.min(this.state.cscroll, Math.max(0, Math.max(rowsA.length, rowsB.length) - viewH)));
         this.paintRecordPane(buf, 0, top, halfW, recH, this.state.recA, "A", this.state.expA, this.state.focus === "recA");
         this.paintRecordPane(buf, halfW, top, rightHalfW, recH, this.state.recB, "B", this.state.expB, this.state.focus === "recB");
 
@@ -527,7 +538,7 @@ export class CompareViewNode extends Node {
     buf.blitText(filterInner.x, filterInner.y, "›", "accent");
     const qText = this.state.fquery || "type part of a path…";
     buf.blitText(filterInner.x + 2, filterInner.y, qText, this.state.fquery ? "text" : "muted");
-    if (this.frame % 14 < 8) {
+    if (pulse(this.frame, this.motionOn)) {
       buf.blitText(filterInner.x + 2 + (this.state.fquery ? stringWidth(this.state.fquery) : 0), filterInner.y, "▏", "accent");
     }
 
@@ -587,7 +598,7 @@ export class CompareViewNode extends Node {
       );
       buf.blitText(mx + 2, my + 2, "/ ", "accent");
       buf.blitText(mx + 4, my + 2, this.state.picker.tquery || "search intent…", this.state.picker.tquery ? "text" : "muted");
-      if (this.frame % 14 < 8) {
+      if (pulse(this.frame, this.motionOn)) {
         buf.blitText(mx + 4 + (this.state.picker.tquery ? stringWidth(this.state.picker.tquery) : 0), my + 2, "▏", "accent");
       }
       if (this.state.picker.tquery) {
@@ -641,6 +652,32 @@ export class CompareViewNode extends Node {
     }
   }
 
+  private recordBodyRows(
+    rec: CompareRec | null,
+    innerW: number,
+    expanded: boolean,
+  ): Array<{ label?: string; text?: string; token?: ThemeToken }> {
+    if (!rec) return [];
+    const rows: Array<{ label?: string; text?: string; token?: ThemeToken }> = [];
+    if (rec.machine && !expanded) {
+      rows.push({ label: "intent · agent" });
+      for (const l of wrapToWidth(displayText(rec), innerW)) rows.push({ text: l, token: "text2" });
+      rows.push({ text: "machine note, not human words — [x] show raw", token: "muted" });
+    } else if (rec.intent) {
+      rows.push({ label: rec.machine ? "intent · agent raw" : "intent" });
+      for (const l of wrapToWidth(rec.intent, innerW)) rows.push({ text: l, token: "text2" });
+    }
+    if (rec.reason) {
+      rows.push({ label: "reason" });
+      for (const l of wrapToWidth(rec.reason, innerW)) rows.push({ text: l, token: "text" });
+    }
+    if (!rec.intent && !rec.reason) {
+      rows.push({ label: "heard" });
+      for (const l of wrapToWidth(displayText(rec), innerW)) rows.push({ text: l, token: "text" });
+    }
+    return rows;
+  }
+
   private paintRecordPane(
     buf: CellBuffer,
     x: number,
@@ -674,26 +711,8 @@ export class CompareViewNode extends Node {
       buf.blitText(inner.x + inner.w - stringWidth(pm), inner.y, pm, rec.plus ? "ok" : "muted");
     }
 
-    const rows: Array<{ label?: string; text?: string; token?: ThemeToken }> = [];
-    if (rec.machine && !expanded) {
-      rows.push({ label: "intent · agent" });
-      for (const l of wrapToWidth(displayText(rec), inner.w)) rows.push({ text: l, token: "text2" });
-      rows.push({ text: "machine note, not human words — [x] show raw", token: "muted" });
-    } else if (rec.intent) {
-      rows.push({ label: rec.machine ? "intent · agent raw" : "intent" });
-      for (const l of wrapToWidth(rec.intent, inner.w)) rows.push({ text: l, token: "text2" });
-    }
-    if (rec.reason) {
-      rows.push({ label: "reason" });
-      for (const l of wrapToWidth(rec.reason, inner.w)) rows.push({ text: l, token: "text" });
-    }
-    if (!rec.intent && !rec.reason) {
-      rows.push({ label: "heard" });
-      for (const l of wrapToWidth(displayText(rec), inner.w)) rows.push({ text: l, token: "text" });
-    }
-
+    const rows = this.recordBodyRows(rec, inner.w, expanded);
     const viewH = Math.max(1, inner.h - 3);
-    this.state.cscroll = Math.max(0, Math.min(this.state.cscroll, Math.max(0, rows.length - viewH)));
     for (let i = 0; i < viewH; i++) {
       const r = rows[this.state.cscroll + i];
       if (!r) break;
@@ -717,6 +736,8 @@ export class CompareViewNode extends Node {
   ): void {
     const fkey = label === "B" ? "diffB" : "diffA";
     const focused = this.state.focus === fkey;
+    if (!this.state.rects) this.state.rects = {};
+    this.state.rects[fkey] = { x, y, w, h };
     const filePath = this.state.file?.path ?? "";
     const d = rec ? getCachedDiff(filePath, rec) : { rows: [] };
     let title = label ? `diff ${label}` : "diff";
@@ -775,8 +796,9 @@ export function compareView(
   frame: number,
   ascii: boolean,
   allRecords?: MemoryRecord[],
+  motionOn?: boolean,
 ): Node {
-  return new CompareViewNode(state, size, frame, ascii, allRecords);
+  return new CompareViewNode(state, size, frame, ascii, allRecords, motionOn ?? true);
 }
 
 export function surfaceRoot(
@@ -785,6 +807,7 @@ export function surfaceRoot(
   frame: number,
   ascii: boolean,
   homeData?: HomeData,
+  motionOn?: boolean,
 ): Node {
   const snapshot = homeData ? undefined : getMemorySnapshot();
   const data =
@@ -793,7 +816,7 @@ export function surfaceRoot(
 
   if (state.view === "compare") {
     const comp = state.compare ?? initialCompareState(snapshot?.records ?? []);
-    return compareView(comp, size, frame, ascii, snapshot?.records);
+    return compareView(comp, size, frame, ascii, snapshot?.records, motionOn);
   }
 
   const mainCol = new Node({ direction: "column", grow: 1 });

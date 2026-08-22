@@ -1,8 +1,35 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { initialShell, updateShell, type ShellState } from "../ui/tui/surface/shell.js";
-import { streamView, surfaceRoot } from "../ui/tui/surface/views.js";
+import { initialCompareState, initialShell, updateShell, type ShellState } from "../ui/tui/surface/shell.js";
+import { streamView, surfaceRoot, compareView } from "../ui/tui/surface/views.js";
 import { renderToLines } from "../ui/tui/core/renderer.js";
+
+const SIZE = { cols: 100, rows: 30 };
+const plainText = (line: string) => line.replace(/\x1b\[[0-9;]*m/g, "");
+
+const cmpRec = (ts: number, intent: string) =>
+  ({ kind: "triple", ts, cwd: "/proj", source: "", machine: false, intent });
+
+function twoMoments(intentA: string, intentB: string): ShellState {
+  const recA = cmpRec(2000, intentA);
+  const recB = cmpRec(1000, intentB);
+  const entry = { path: "/proj/src/f.ts", recs: [recA, recB], count: 2, firstTs: 1000, lastTs: 2000 };
+  return {
+    ...initialShell("/proj"),
+    view: "compare",
+    compare: {
+      ...initialCompareState([]),
+      files: [entry],
+      file: entry,
+      mode: "two",
+      focus: "recA",
+      A: 2000,
+      B: 1000,
+      recA,
+      recB,
+    },
+  };
+}
 
 const deps = { exists: (p: string) => p.replace(/\\/g, "/").endsWith("/rocky"), home: () => "/h" };
 const type = (s: ShellState, text: string) =>
@@ -213,5 +240,64 @@ test("compare state: focus cycling, zoom, and diff toggle", () => {
   s = press(s, "char", "d");
   assert.equal(s.compare?.showDiff, false);
   assert.equal(s.compare?.focus, "recA");
+});
+
+test("record panes clamp the shared scroll once against the taller side", () => {
+  const long = "word ".repeat(160).trim();
+  const s = twoMoments(long, "short");
+  s.compare!.cscroll = 3;
+  renderToLines(compareView(s.compare!, SIZE, 0, false), SIZE.cols, SIZE.rows, 24);
+  assert.equal(s.compare!.cscroll, 3, "short pane B must not pin the shared scroll back to 0");
+});
+
+test("mouse wheel scrolls the pane under the cursor and click focuses it", () => {
+  const base = twoMoments("evidence ".repeat(40).trim(), "short");
+  renderToLines(compareView(base.compare!, SIZE, 0, false), SIZE.cols, SIZE.rows, 24);
+  const ra = base.compare!.rects!.recA;
+  assert.ok(ra && ra.w > 0 && ra.h > 0, "record pane registers its rect");
+
+  let n = updateShell(base, { type: "key", key: { name: "mouse", event: { kind: "wheel-down", x: ra.x + Math.floor(ra.w / 2), y: ra.y + 2, button: 65 } } }, deps);
+  assert.equal(n.compare?.cscroll, 3);
+
+  const rb = n.compare!.rects!.recB!;
+  n = updateShell(n, { type: "key", key: { name: "mouse", event: { kind: "press", x: rb.x + 2, y: rb.y + 2, button: 0 } } }, deps);
+  assert.equal(n.compare?.focus, "recB");
+
+  const cmp = {
+    ...initialCompareState([]),
+    focus: "files" as const,
+    files: Array.from({ length: 5 }, (_, i) => ({ path: `/p/g${i}.ts`, recs: [], count: 0, firstTs: 0, lastTs: 0 })),
+  };
+  const h: ShellState = { ...initialShell("/proj"), view: "compare", compare: cmp };
+  renderToLines(compareView(cmp, SIZE, 0, false), SIZE.cols, SIZE.rows, 24);
+  assert.ok(cmp.rects!.files, "files list registers its rect");
+  const fr = cmp.rects!.files!;
+  const m = updateShell(h, { type: "key", key: { name: "mouse", event: { kind: "wheel-down", x: fr.x, y: fr.y, button: 65 } } }, deps);
+  assert.equal(m.compare?.fsel, 3);
+});
+
+test("z zoom gives the focused record pane full height without diff panes", () => {
+  const z = twoMoments("fix a", "fix b");
+  z.compare!.zoom = true;
+  const zoomed = renderToLines(compareView(z.compare!, SIZE, 0, false), SIZE.cols, SIZE.rows, 24);
+  assert.equal(plainText(zoomed[13])[0], "│", "record box border continues past the old split row when zoomed");
+
+  const u = twoMoments("fix a", "fix b");
+  const plain = renderToLines(compareView(u.compare!, SIZE, 0, false), SIZE.cols, SIZE.rows, 24);
+  assert.equal(plainText(plain[13])[0], "└", "unzoomed record box ends above the diff panes");
+});
+
+test("compare cursors freeze when motion is off and blink on the pulse duty cycle", () => {
+  const st = { ...initialShell("/proj"), view: "compare" as const, compare: initialCompareState([]) };
+
+  const p6 = renderToLines(compareView(st.compare!, SIZE, 6, false), SIZE.cols, SIZE.rows, 24);
+  const p7 = renderToLines(compareView(st.compare!, SIZE, 7, false), SIZE.cols, SIZE.rows, 24);
+  assert.notDeepEqual(p6, p7, "cursor animates on the shared 7/14 pulse duty cycle");
+
+  const g6 = renderToLines(compareView(st.compare!, SIZE, 6, false, undefined, false), SIZE.cols, SIZE.rows, 24);
+  const g7 = renderToLines(compareView(st.compare!, SIZE, 7, false, undefined, false), SIZE.cols, SIZE.rows, 24);
+  const g9 = renderToLines(compareView(st.compare!, SIZE, 9, false, undefined, false), SIZE.cols, SIZE.rows, 24);
+  assert.deepEqual(g6, g7, "ROCKY_TUI_MOTION=off freezes across the pulse boundary");
+  assert.deepEqual(g7, g9, "ROCKY_TUI_MOTION=off freezes across frames");
 });
 
