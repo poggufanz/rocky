@@ -1,5 +1,6 @@
 import { StringDecoder } from "node:string_decoder";
 import { Key } from "./state.js";
+import { parseSgrMouse } from "./core/mouse.js";
 
 const PASTE_END = "\x1b[201~";
 
@@ -194,6 +195,13 @@ export function createKeyParser(
             emit({ name: "esc" });
           }
         }, 50);
+        return;
+      }
+
+      if ((ch === "M" || ch === "m") && csiBuffer.startsWith("<")) {
+        const ev = parseSgrMouse(csiBuffer.slice(1), ch);
+        if (ev !== undefined) emit({ name: "mouse", event: ev });
+        state = "NORMAL";
         return;
       }
 

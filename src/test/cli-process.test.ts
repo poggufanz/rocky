@@ -210,6 +210,20 @@ test("--version prints the package version to stdout, matching PACKAGE_VERSION, 
   assertNoDetectorMarkers(sandbox);
 });
 
+test("compare is not a CLI command: dash owns the surface, no aliases", (t) => {
+  const sandbox = processSandbox(t);
+  const result = runCli(sandbox, ["compare"]);
+
+  assertCompleted(result, 2);
+  assert.equal(
+    result.stderr,
+    `[Rocky] "compare" is not command I know. run --help, question
+`,
+  );
+  assert.equal(result.stdout, "");
+  assertNoDetectorMarkers(sandbox);
+});
+
 test("run preserves path-with-spaces child streams and exit status", (t) => {
   const fixtureRoot = mkdtempSync(join(tmpdir(), "rocky child fixture "));
   t.after(() => rmSync(fixtureRoot, { recursive: true, force: true }));

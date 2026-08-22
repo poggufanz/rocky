@@ -333,3 +333,16 @@ test("strict Esc precedence dismisses one layer per press without quitting", () 
   assert.equal(s.quit, false, "esc at top level does not quit");
   assert.equal(s.focus, "list");
 });
+
+test("w toggles wrap in inspector focus and leaves list focus alone", () => {
+  let s = initialState(100, 30);
+  assert.equal(s.wrap, true);
+  s = update(s, { type: "key", key: { name: "char", ch: "w" } }); // list focus: inert
+  assert.equal(s.wrap, true);
+  s = update(s, { type: "key", key: { name: "enter" } });          // inspector
+  s = update(s, { type: "key", key: { name: "char", ch: "w" } });
+  assert.equal(s.wrap, false);
+  s = update(s, { type: "key", key: { name: "char", ch: "w" } });
+  assert.equal(s.wrap, true);
+});
+

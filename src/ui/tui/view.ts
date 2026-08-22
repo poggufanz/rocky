@@ -1,6 +1,7 @@
 import { renderBox } from "./box.js";
 import { paint, type ColorDepth, type ThemeToken } from "./theme.js";
 import { padToWidth, truncateToWidth } from "./width.js";
+import { wrapToWidth } from "./core/text.js";
 import {
   visibleRows,
   type DashRow,
@@ -71,13 +72,13 @@ function renderHints(
   } else if (state.search.active) {
     text = " [Enter] keep filter  [Esc] cancel search  [Backspace] delete";
   } else if (state.fullDiff) {
-    text = " [Tab] pane  [[/]] tab  [j/k] scroll  [d] diff  [/] search  [?] help  [Esc] back  [q] quit";
+    text = " [Tab] pane  [[/]] tab  [j/k] scroll  [d] diff  [w] wrap  [/] search  [?] help  [Esc] back  [q] quit";
   } else if (state.focus === "inspector") {
-    text = " [Tab] pane  [[/]] tab  [j/k] scroll  [d] diff  [/] search  [?] help  [Esc] back  [q] quit";
+    text = " [Tab] pane  [[/]] tab  [j/k] scroll  [d] diff  [w] wrap  [/] search  [?] help  [Esc] back  [q] quit";
   } else {
     text = " [Tab] pane  [j/k] move  [f] filter  [/] search  [?] help  [q] quit";
   }
-  const padded = padToWidth(truncateToWidth(text, cols), cols);
+  const padded = padToWidth(text.slice(0, cols), cols);
   if (depth === 1) return padded;
   return padded.replace(/\[[^\]]+\]/g, (match) => paint("accent", match, depth));
 }
@@ -108,6 +109,7 @@ function renderHelpPane(
     "  [j] / [k], [g] / [G]    scroll content",
     "  [Ctrl+d] / [Ctrl+u]     half-page scroll",
     "  [d]                     toggle full diff",
+    "  [w]                     toggle wrap / truncate",
     "  [Esc]                   back to list",
     "",
     "esc precedence (strict order):",
@@ -317,8 +319,29 @@ function renderInspectorPane(
     }
   }
 
+  const interiorWidth = Math.max(1, width - 4);
+  const KEY_COL = 11; // "timestamp  " — the info tab's key column
+  const displayLines: string[] = state.wrap
+    ? rawLines.flatMap((line) => {
+        const keyed = state.tab === "info" && /^\S+\s{2,}/.test(line);
+        if (!keyed || interiorWidth <= KEY_COL) {
+          return wrapToWidth(line, interiorWidth);
+        }
+        const m = line.match(/^(\S+\s+)(.*)$/);
+        if (!m) return wrapToWidth(line, interiorWidth);
+        const [, key, val] = m;
+        const keyLen = Math.max(KEY_COL, key.length);
+        const avail = interiorWidth - keyLen;
+        if (avail <= 0) return wrapToWidth(line, interiorWidth);
+        const valWrapped = wrapToWidth(val, avail);
+        if (valWrapped.length === 0) return [key];
+        const pad = " ".repeat(keyLen);
+        return [key + valWrapped[0], ...valWrapped.slice(1).map((v) => pad + v)];
+      })
+    : rawLines;
+
   const scroll = Math.max(0, state.scroll.inspector);
-  const scrolledLines = rawLines.slice(scroll);
+  const scrolledLines = displayLines.slice(scroll);
 
   const box = renderBox({
     title,

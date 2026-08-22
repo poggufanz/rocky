@@ -1,0 +1,40 @@
+  ROCKY  7 remembered                                                                                           ≣ idle  
+ ▌  run  npm run wrap-demo                                                                               exit 0         
+ ▌ xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx           
+ ▌ xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx                                                               
+ ▌                                                                                                                      
+ ▌ clean exit. rocky hears, not worried.                                                                                
+ ▌                                                                                                                      
+ ▌  why  cache.ts                                                                                       heard 1         
+ ▌ "parser stems cache misses warm entries after every rewrite so rocky wraps this long sentence across many            
+ ▌ stream lines without dropping any words at all"                                                                      
+ ▌   3h ago · hook                                                                                                      
+ ▌                                                                                                                      
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+┌─ rocky · proj/demo ──────────────────────────────────────────────────────────────────────────────────────────────────┐
+│ › ▏/run npm test · /recall query · /help                                                                             │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+ esc home  ^u/^d scroll  tab complete  ^c quit                                                   local only · no egress 

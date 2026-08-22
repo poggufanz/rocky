@@ -135,6 +135,9 @@ test("MCP source graph reaches only explicitly allowlisted read-only modules; wr
     "commands/cli-args.ts",
     "core/config-read.ts",
     "core/dictionary.ts",
+    // Audited pure predicate: no imports, no filesystem access; read-side
+    // retrieval filtering only (retrieval-quality spec, step 0).
+    "core/envelope.ts",
     "core/fingerprint.ts",
     // Audited pure filesystem identity/capability helpers; MCP never calls
     // mutation APIs through this module.

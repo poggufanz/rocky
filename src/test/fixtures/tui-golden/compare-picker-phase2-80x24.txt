@@ -1,0 +1,24 @@
+  ROCKY  7 remembered · 2 files                            ≣ holding parser.ts  
+┌─  A · 2025-08-23 23:4─┐┌─  B · 2025-08┌─ timeline · pick B ──────────────────┐
+│  why  claude-co+12 −3 ││  why  claude-│ A locked · 2025-08-23 23:46          │
+│                       ││              │ / ▏earch intent…                     │
+│ intent                ││ intent       │  session 1 · 2025-08-22 · 1 records  │
+│ pin parser stems      ││ split parser │▎08-22 23:46   why  split parser ste… │
+│ before memoizing      ││ before memoiz│                                      │
+│ because [redacted     ││              │                                      │
+│ github token] leaked  ││              │                                      │
+│ 2025-08-23 2…         ││ 2025-08-22 2…│                                      │
+└──────────────── 0 records between · 24│                                      │
+┌─ diff A · commit b4… ─┐┌─ diff B · com│                                      │
+│ diff --git a/src/par… ││ diff --git a/│                                      │
+│ --- a/src/parser.ts   ││ --- a/src/par│                                      │
+│ +++ b/src/parser.ts   ││ +++ b/src/par│                                      │
+│ @@ -12,7 +12,9 @@ ex… ││ @@ -12,7 +12,│                                      │
+│   12  12     const s… ││   12  12     │                                      │
+│   13     −   const s… ││   13     −   │                                      │
+│       13 +   const s… ││       13 +   │                                      │
+└───────────────────7/9─┘└──────────────│                                      │
+┌─ filter files ────────────────────────│                                      │
+│ › ▏ype part of a path…                │ [enter] lock B  [←→] session  [esc] un
+└───────────────────────────────────────└──────────────────────────────────────┘
+ ROCKY   ↑↓  choose   enter  confirm   esc  back                                

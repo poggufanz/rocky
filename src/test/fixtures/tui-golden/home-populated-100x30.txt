@@ -1,0 +1,30 @@
+  ROCKY  7 remembered                                                                       ≣ idle  
+┌─ what rocky holds ──────────────────────────────────┐┌─ since 24h ───────────────────────────────┐
+│ triple 3 ███████████████████████████                ││ heard 5                                   │
+│ failure 1 █████████                                 ││ failures 1                                │
+│ fix 1 █████████                                     ││ fixes 1                                   │
+│ note 1 █████████                                    ││ why recorded 3                            │
+│ rationale 1 █████████                               ││ local only · no egress                    │
+│ 7 records · coverage full                           ││                                           │
+│                                                     ││                                           │
+│                                                     ││                                           │
+│                                                     ││                                           │
+│                                                     ││                                           │
+│                                                     ││                                           │
+│                                                     ││                                           │
+└─────────────────────────────────────────────────────┘└───────────────────────────────────────────┘
+┌─ most heard files ──────────────────────────────────┐┌─ recent ──────────────────────────────────┐
+│ 2 parser.ts                                         ││ fail git push https://[redacted github    │
+│ 1 config.ts                                         ││ token]@github.com/repo.git                │
+│                                                     ││ 2 minutes ago                             │
+│                                                     ││ why review finished clean                 │
+│                                                     ││ 5 minutes ago                             │
+│                                                     ││ why append-only memory keeps evidence     │
+│                                                     ││ honest                                    │
+│                                                     ││ 45 minutes ago                            │
+│                                                     ││ fix npm ci                                │
+└─────────────────────────────────────────────────────┘└───────────────────────────────────────────┘
+┌─ rocky · proj/demo ──────────────────────────────────────────────────────────────────────────────┐
+│ › ▏/run npm test · /recall query · /help                                                         │
+└──────────────────────────────────────────────────────────────────────────────────────────────────┘
+ type command  tab complete  enter run  ^c quit                              local only · no egress 

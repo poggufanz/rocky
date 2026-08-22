@@ -1,9 +1,11 @@
+import { MOUSE_ENABLE, MOUSE_DISABLE } from "./core/mouse.js";
+
 export function diffFrames(previous: string[] | undefined, next: string[]): string {
   if (previous === undefined) {
     if (next.length === 0) return "";
     const parts: string[] = ["\x1b[H"];
     for (let i = 0; i < next.length; i++) {
-      parts.push(`\x1b[${i + 1};1H${next[i]}\x1b[K`);
+      parts.push(`\x1b[${i + 1};1H${next[i]}`);
     }
     return `\x1b[?2026h${parts.join("")}\x1b[?2026l`;
   }
@@ -13,7 +15,7 @@ export function diffFrames(previous: string[] | undefined, next: string[]): stri
   for (let i = 0; i < maxLen; i++) {
     if (i < next.length) {
       if (previous[i] !== next[i]) {
-        parts.push(`\x1b[${i + 1};1H${next[i]}\x1b[K`);
+        parts.push(`\x1b[${i + 1};1H${next[i]}`);
       }
     } else {
       parts.push(`\x1b[${i + 1};1H\x1b[K`);
@@ -24,6 +26,10 @@ export function diffFrames(previous: string[] | undefined, next: string[]): stri
   return `\x1b[?2026h${parts.join("")}\x1b[?2026l`;
 }
 
+export interface ScreenOptions {
+  mouse?: boolean;
+}
+
 export interface Screen {
   enter(): void;
   paint(lines: string[]): void;
@@ -31,7 +37,7 @@ export interface Screen {
   leave(): void;
 }
 
-export function createScreen(stdout: NodeJS.WriteStream): Screen {
+export function createScreen(stdout: NodeJS.WriteStream, options?: { mouse?: boolean; pageBg?: string }): Screen {
   let previous: string[] | undefined = undefined;
   let entered = false;
 
@@ -40,7 +46,11 @@ export function createScreen(stdout: NodeJS.WriteStream): Screen {
     entered = false;
     detachHandlers();
     try {
-      stdout.write("\x1b[0m\x1b[?25h\x1b[?2004l\x1b[?1049l");
+      const restore =
+        (options?.mouse ? MOUSE_DISABLE : "") +
+        (options?.pageBg !== undefined ? "\x1b]111\x1b\\" : "") +
+        "\x1b[0m\x1b[?25h\x1b[?2004l\x1b[?1049l";
+      stdout.write(restore);
     } catch {
       // Ignored during shutdown
     }
@@ -88,7 +98,11 @@ export function createScreen(stdout: NodeJS.WriteStream): Screen {
       entered = true;
       attachHandlers();
       try {
-        stdout.write("\x1b[?1049h\x1b[?25l\x1b[?2004h");
+        const enterSeq =
+          "\x1b[?1049h\x1b[?25l\x1b[?2004h" +
+          (options?.pageBg !== undefined ? `\x1b]11;${options.pageBg}\x1b\\` : "") +
+          (options?.mouse ? MOUSE_ENABLE : "");
+        stdout.write(enterSeq);
       } catch {
         // Ignored
       }

@@ -1,0 +1,24 @@
+  ROCKY  7 remembered · 2 files                            ≣ holding parser.ts  
+┌─  A · 2025-08-23 23:4─┐┌─  B · 2025-08-22 23:4─┐┌─ file ─────────────────────┐
+│  why  claude-co+12 −3 ││  why  claude-cod+4 −1 ││ parser.ts                  │
+│                       ││                       ││ /repo/src                  │
+│ intent                ││ intent                ││                            │
+│ pin parser stems      ││ split parser stems    ││  why 2                     │
+│ before memoizing      ││ before memoizing      ││                            │
+│ because [redacted     ││                       ││ 2 records                  │
+│ github token] leaked  ││                       ││ first 1 day ago · last 2 hou
+│ 2025-08-23 2…         ││ 2025-08-22 2…         │└────────────────────────────┘
+└──────────────── 0 records between · 24h apart ─┘┌─ files · 2 ────────────────┐
+┌─ diff A · commit b4… ─┐┌─ diff B · commit b4… ─┐│▎  2 parser.ts              │
+│ diff --git a/src/par… ││ diff --git a/src/par… ││   1 config.ts              │
+│ --- a/src/parser.ts   ││ --- a/src/parser.ts   ││                            │
+│ +++ b/src/parser.ts   ││ +++ b/src/parser.ts   ││                            │
+│ @@ -12,7 +12,9 @@ ex… ││ @@ -12,7 +12,9 @@ ex… ││                            │
+│   12  12     const s… ││   12  12     const s… ││                            │
+│   13     −   const s… ││   13     −   const s… ││                            │
+│       13 +   const s… ││       13 +   const s… ││                            │
+└───────────────────7/9─┘└───────────────────7/9─┘└────────────────────────────┘
+┌─ filter files ───────────────────────────────────────────────────────────────┐
+│ › ▏ype part of a path…                                                       │
+└──────────────────────────────────────────────────────────────────────────────┘
+ ROCKY   pane  recB   j/k  scroll   z  zoom   d  hide diff   tab  next   /  filt

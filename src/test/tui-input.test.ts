@@ -261,3 +261,26 @@ test("attachRawInput handles non-TTY stream and erroring setRawMode gracefully",
   assert.equal(resumeCalled, true);
   assert.doesNotThrow(() => cleanup());
 });
+
+test("SGR mouse sequence emits one mouse key", () => {
+  const events: Key[] = [];
+  const { schedule } = createMockScheduler();
+  const parser = createKeyParser((k: Key) => events.push(k), schedule);
+
+  parser.feed(Buffer.from("\x1b[<0;10;5M"));
+  assert.equal(events.length, 1);
+  assert.equal(events[0].name, "mouse");
+  assert.deepEqual((events[0] as any).event, { kind: "press", x: 9, y: 4, button: 0 });
+});
+
+test("mouse sequence split across chunks still parses", () => {
+  const events: Key[] = [];
+  const { schedule } = createMockScheduler();
+  const parser = createKeyParser((k: Key) => events.push(k), schedule);
+
+  parser.feed(Buffer.from("\x1b[<0;1"));
+  parser.feed(Buffer.from("0;5M"));
+  assert.equal(events.length, 1);
+  assert.equal(events[0].name, "mouse");
+});
+

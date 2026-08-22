@@ -1,0 +1,24 @@
+  ROCKY  0 remembered                                                   ≣ idle  
+┌─ what rocky holds ───────────────────────┐┌─ since 24h ──────────────────────┐
+│ no records yet                           ││ heard 0                          │
+│ c┌─ browse · 4 ───────────────────────────────────────────────────────────┐  │
+│  │ › ▏ype to filter…                                                      │  │
+│  │                                                                        │  │
+│  │▎why   pin parser stems before …  triple                                │  │
+│  │ fail  npm test exits 1 on miss…  2025-08-23 23:46                      │  │
+│  │ fix   npm ci restores the lock…                                        │  │
+│  │ guard rocky blocked rm -rf on …  pin parser stems before memoizing     │  │
+└──│                                                                        │──┘
+┌─ │                                                                        │──┐
+│ (│                                                                        │  │
+│  │                                                                        │  │
+│  │                                                                        │  │
+│  │                                                                        │  │
+│  │                                                                        │  │
+│  │                                                                        │  │
+│  │                                                                        │  │
+└──│ [type] filter  [↑↓] pick  [enter] act  [esc] close                     │──┘
+┌─ └────────────────────────────────────────────────────────────────────────┘──┐
+│ › ▏/run npm test · /recall query · /help                                     │
+└──────────────────────────────────────────────────────────────────────────────┘
+ type command  tab complete  enter run  ^c quit          local only · no egress 

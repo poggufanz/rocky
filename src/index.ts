@@ -36,6 +36,8 @@ import { ambiguityCommand } from "./agent/ambiguity.js";
 import { CliUsageError, parseExactCommand, reportCliUsage } from "./commands/cli-args.js";
 import { PACKAGE_NAME, PACKAGE_VERSION } from "./core/package-info.js";
 import { detail, face, flushHookSpeech, say } from "./ui/rocky.js";
+import { runSurface } from "./ui/tui/surface/shell.js";
+import { surfaceEntry } from "./ui/tui/surface/entry.js";
 
 const HELP = `
 rocky — he remembers, so you don't have to.
@@ -270,8 +272,16 @@ async function runGateEvent(vendor: string): Promise<number> {
 
 async function main(): Promise<number> {
   const [, , command, ...rest] = process.argv;
-  if (command === undefined && process.stdout.isTTY === true && process.stdin.isTTY === true) {
-    return dashCommand([]);
+  if (command === undefined) {
+    const route = surfaceEntry(undefined, process.stdout.isTTY === true && process.stdin.isTTY === true);
+    if ("surface" in route && route.surface === "home") {
+      return runSurface({
+        stdout: process.stdout,
+        stdin: process.stdin,
+        env: process.env,
+        view: "home",
+      });
+    }
   }
   try {
     switch (command) {

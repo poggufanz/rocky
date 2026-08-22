@@ -1,0 +1,30 @@
+  ROCKY  7 remembered                                                                       ≣ idle  
+ ▌                                                                                                  
+ ▌  run  npm test                                                                        exit -4058 
+ ▌ ENOENT                                                                                           
+ ▌                                                                                                  
+ ▌ failure heard. rocky remembers this one, question                                                
+ ▌                                                                                                  
+ ▌  help  slash optional                                                                            
+ ▌ /run <cmd> run command, rocky listens                                                            
+ ▌ /recall <query>ask memory by words                                                               
+ ▌ /why <query> hear remembered reasons                                                             
+ ▌ /sessions work sessions derived from memory                                                      
+ ▌ /brief hear what changed since last brief                                                        
+ ▌ /stats what rocky holds in memory                                                                
+ ▌ /compare compare file moments, side by side                                                      
+ ▌ /browse browse all memory                                                                        
+ ▌ /help command list                                                                               
+ ▌ /home back to dashboard                                                                          
+ ▌ /quit leave                                                                                      
+ ▌                                                                                                  
+ ▌  you  recall token                                                                               
+ ▌                                                                                                  
+ ▌  ?  frobnicate                                                                                   
+ ▌ not command. rocky hears: run, recall, why, sessions, brief, stats, compare, browse, help,       
+ ▌ home, quit. try again, question                                                                  
+ ▌                                                                                                  
+┌─ rocky · proj/demo ──────────────────────────────────────────────────────────────────────────────┐
+│ › ▏/run npm test · /recall query · /help                                                         │
+└──────────────────────────────────────────────────────────────────────────────────────────────────┘
+ esc home  ^u/^d scroll  tab complete  ^c quit                               local only · no egress 

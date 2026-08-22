@@ -1,4 +1,5 @@
 import { searchRows } from "./data.js";
+import { MouseEvent } from "./core/mouse.js";
 
 export type PaneId = "list" | "inspector";
 export type TabId = "info" | "rationale" | "diff" | "json";
@@ -32,7 +33,8 @@ export type Key =
         | "ctrl-u"
         | "ctrl-z";
     }
-  | { name: "paste"; text: string };
+  | { name: "paste"; text: string }
+  | { name: "mouse"; event: MouseEvent };
 
 export interface DashState {
   cols: number;
@@ -56,6 +58,7 @@ export interface DashState {
     lines: string[];
   };
   scroll: { inspector: number };
+  wrap: boolean;
 }
 
 export type DashEvent =
@@ -94,6 +97,7 @@ export function initialState(cols: number, rows: number): DashState {
     reloadRequested: false,
     diff: { state: "idle", lines: [] },
     scroll: { inspector: 0 },
+    wrap: true,
   };
 }
 
@@ -181,6 +185,9 @@ function handleKey(state: DashState, key: Key): DashState {
     return { ...state, tab: tabs[(tabs.indexOf(state.tab) + delta) % tabs.length] };
   }
   if (key.name === "char" && key.ch === "d") return { ...state, fullDiff: !state.fullDiff };
+  if (key.name === "char" && key.ch === "w" && (state.focus === "inspector" || state.fullDiff)) {
+    return { ...state, wrap: !state.wrap };
+  }
   if (key.name === "esc") {
     if (state.fullDiff) return { ...state, fullDiff: false };
     if (state.focus === "inspector") return { ...state, focus: "list", inspectorOpen: false };
