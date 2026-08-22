@@ -200,7 +200,7 @@ export function buildError(input: string, valid: readonly Command[]): Card {
     { text: `not command. rocky hears: ${names}. try again, question`, token: "muted" },
   ];
   return {
-    kind: "error",
+    kind: "?",
     accent: "err",
     subject: input,
     meta: "",
