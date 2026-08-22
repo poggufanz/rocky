@@ -940,7 +940,7 @@ export function surfaceRoot(
 
   if (state.view === "compare") {
     const comp = state.compare ?? initialCompareState(snapshot?.records ?? []);
-    return compareView(comp, size, frame, ascii, snapshot?.records, motionOn, clock);
+    return compareView(comp, size, frame, ascii, snapshot?.records ?? comp.records, motionOn, clock);
   }
 
   const mainCol = new Node({ direction: "column", grow: 1 });

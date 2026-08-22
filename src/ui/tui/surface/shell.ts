@@ -23,7 +23,7 @@ import type { MouseEvent } from "../core/mouse.js";
 import { loadMemoryChecked, type MemoryRecord } from "../../../core/memory-read.js";
 import { redactSecretsAtBoundary } from "../../../core/redact.js";
 import { resolveRockyPaths } from "../../../core/state-paths.js";
-import { adaptHit } from "./home-data.js";
+import { adaptHit, deriveHome, type HomeData } from "./home-data.js";
 import { tokens, similarity } from "../../../core/fingerprint.js";
 import { elapsed } from "../../rocky.js";
 import { loadDashRows, searchRows } from "../data.js";
@@ -958,6 +958,11 @@ export interface InitialOverlay {
   query?: string;
 }
 
+function deriveHomeData(env: NodeJS.ProcessEnv, now: number): HomeData {
+  const snapshot = getMemorySnapshot(env, now);
+  return deriveHome(snapshot.records, snapshot.coverageReason, now);
+}
+
 export function runSurface(opts: {
   stdout: NodeJS.WriteStream;
   stdin: NodeJS.ReadStream;
@@ -988,10 +993,14 @@ export function runSurface(opts: {
   const ascii = opts.env.ROCKY_ASCII === "1" || opts.env.TERM === "dumb";
   const live = new Live({ stdout: opts.stdout, stdin: opts.stdin, env: opts.env });
   const deps = { exists: existsSync, home: homedir };
+  let homeData = deriveHomeData(opts.env, Date.now());
 
   return new Promise<number>((resolve) => {
     const dispatch = (event: ShellEvent): void => {
       state = updateShell(state, event, deps);
+      if (event.type === "card") {
+        homeData = deriveHomeData(opts.env, Date.now());
+      }
       if (state.quit) {
         live.stop();
         resolve(0);
@@ -1007,7 +1016,7 @@ export function runSurface(opts: {
       live.requestFrame();
     };
 
-    live.setRoot((sz) => surfaceRoot(state, sz, live.frame, ascii, undefined, motionEnabled(opts.env)));
+    live.setRoot((sz) => surfaceRoot(state, sz, live.frame, ascii, homeData, motionEnabled(opts.env)));
     live.onKey((k) => {
       dispatch({ type: "key", key: k });
     });
