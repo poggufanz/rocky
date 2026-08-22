@@ -1,7 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { deriveHome, adaptHit } from "../ui/tui/surface/home-data.js";
-import { homeView } from "../ui/tui/surface/views.js";
+import { homeView, surfaceRoot } from "../ui/tui/surface/views.js";
+import { initialShell } from "../ui/tui/surface/shell.js";
 import { renderToLines } from "../ui/tui/core/renderer.js";
 import { stringWidth } from "../ui/tui/core/text.js";
 import type { MemoryRecord } from "../core/memory-read.js";
@@ -82,6 +83,16 @@ test("homeView with ascii mode produces only ascii borders", () => {
   const d = deriveHome([rec("failure", 1000, { cmd: "x" })], undefined, NOW);
   const lines = renderToLines(homeView(d, { cols: 80, rows: 24 }, true), 80, 24, 1).map(strip);
   const joined = lines.join("\n");
+  assert.ok(!/[┌┐└┘─│]/.test(joined), "no box unicode characters in ascii mode");
+  assert.ok(joined.includes("+"), "ascii borders present");
+});
+
+test("surfaceRoot ascii mode degrades input line and slash menu chrome", () => {
+  const d = deriveHome([], undefined, NOW);
+  const state = { ...initialShell("/proj/demo"), view: "stream" as const, input: "/rec" };
+  const lines = renderToLines(surfaceRoot(state, { cols: 80, rows: 24 }, 0, true, d), 80, 24, 1).map(strip);
+  const joined = lines.join("\n");
+  assert.ok(joined.includes("/recall"), "slash menu visible");
   assert.ok(!/[┌┐└┘─│]/.test(joined), "no box unicode characters in ascii mode");
   assert.ok(joined.includes("+"), "ascii borders present");
 });

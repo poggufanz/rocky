@@ -26,6 +26,26 @@ test("ascii fallback uses +-| only", () => {
   assert.ok(!/[┌┐└┘─│]/.test(f.join("")));
 });
 
+test("input line ascii fallback uses +-| borders only", () => {
+  const input = new InputLineNode({
+    value: "",
+    placeholder: "",
+    cwdTail: "",
+    frame: 0,
+    motionOn: false,
+    ascii: true,
+  });
+  const f = frame(input, 50, 3);
+  assert.ok(f[0].startsWith("+"));
+  assert.ok(!/[┌┐└┘─│]/.test(f.join("")));
+});
+
+test("slash menu ascii fallback uses +-| borders only", () => {
+  const f = frame(new SlashMenuNode({ prefix: "", selected: 0, ascii: true }), 56, 14);
+  assert.ok(f[0].startsWith("+"));
+  assert.ok(!/[┌┐└┘─│]/.test(f.join("")));
+});
+
 test("content wraps inside the interior, never over the border", () => {
   const b = new BoxNode({});
   b.add(new TextNode("append-only reader bounded never rewrite evidence at all"));

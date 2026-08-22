@@ -974,6 +974,7 @@ export function surfaceRoot(
       cwdTail,
       frame,
       motionOn: true,
+      ascii,
     },
     { height: 3 },
   );
@@ -1003,7 +1004,7 @@ export function surfaceRoot(
     const cleanPrefix = state.input.slice(1);
     const matches = matchCommands(cleanPrefix);
     if (matches.length > 0) {
-      slashMenu = new SlashMenuNode({ prefix: state.input, selected: state.csel });
+      slashMenu = new SlashMenuNode({ prefix: state.input, selected: state.csel, ascii });
     }
   }
 

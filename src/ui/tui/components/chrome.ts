@@ -58,6 +58,7 @@ export interface InputLineState {
   cwdTail: string;
   frame: number;
   motionOn: boolean;
+  ascii?: boolean;
 }
 
 export class InputLineNode extends Node {
@@ -66,7 +67,7 @@ export class InputLineNode extends Node {
   constructor(readonly state: InputLineState, props: NodeProps = { height: 3 }) {
     super(props);
     const title = state.cwdTail ? `rocky · ${state.cwdTail}` : "rocky";
-    this.box = new BoxNode({ title, focused: true });
+    this.box = new BoxNode({ title, focused: true, ascii: state.ascii ?? false });
   }
 
   protected override mainBasis(axis: "row" | "column", crossSize?: number): number {
@@ -116,6 +117,7 @@ export class InputLineNode extends Node {
 export interface SlashMenuState {
   prefix: string;
   selected: number;
+  ascii?: boolean;
 }
 
 export class SlashMenuNode extends Node {
@@ -148,19 +150,23 @@ export class SlashMenuNode extends Node {
     buf.fillRect({ x, y, w, h: boxH }, " ");
 
     // Borders
-    buf.set(x, y, "┌", "border");
-    if (w > 1) buf.set(x + w - 1, y, "┐", "border");
+    const ascii = this.state.ascii ?? false;
+    const [tl, tr, bl, br, horiz, vert] = ascii
+      ? ["+", "+", "+", "+", "-", "|"]
+      : ["┌", "┐", "└", "┘", "─", "│"];
+    buf.set(x, y, tl, "border");
+    if (w > 1) buf.set(x + w - 1, y, tr, "border");
     if (boxH > 1) {
-      buf.set(x, y + boxH - 1, "└", "border");
-      if (w > 1) buf.set(x + w - 1, y + boxH - 1, "┘", "border");
+      buf.set(x, y + boxH - 1, bl, "border");
+      if (w > 1) buf.set(x + w - 1, y + boxH - 1, br, "border");
     }
     for (let c = 1; c < w - 1; c++) {
-      buf.set(x + c, y, "─", "border");
-      if (boxH > 1) buf.set(x + c, y + boxH - 1, "─", "border");
+      buf.set(x + c, y, horiz, "border");
+      if (boxH > 1) buf.set(x + c, y + boxH - 1, horiz, "border");
     }
     for (let r = 1; r < boxH - 1; r++) {
-      buf.set(x, y + r, "│", "border");
-      if (w > 1) buf.set(x + w - 1, y + r, "│", "border");
+      buf.set(x, y + r, vert, "border");
+      if (w > 1) buf.set(x + w - 1, y + r, vert, "border");
     }
 
     // Title chip
