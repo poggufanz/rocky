@@ -256,8 +256,8 @@ function stamp(ts: number): string {
   return isNaN(d.getTime()) ? "unknown" : d.toISOString().slice(0, 16).replace("T", " ");
 }
 
-function ago(ts: number): string {
-  const span = elapsed(Math.max(0, Date.now() - ts));
+function ago(ts: number, now: number): string {
+  const span = elapsed(Math.max(0, now - ts));
   return span === "just now" ? span : `${span} ago`;
 }
 
@@ -334,6 +334,7 @@ export class CompareViewNode extends Node {
     readonly ascii: boolean,
     readonly allRecords?: MemoryRecord[],
     readonly motionOn: boolean = true,
+    readonly now: number = Date.now(),
   ) {
     super();
   }
@@ -394,7 +395,7 @@ export class CompareViewNode extends Node {
         bx += 1;
       }
       buf.blitText(sumInner.x, sumInner.y + 5, `${f.count} records`, "text2");
-      buf.blitText(sumInner.x, sumInner.y + 6, `first ${ago(f.firstTs)} · last ${ago(f.lastTs)}`, "muted");
+      buf.blitText(sumInner.x, sumInner.y + 6, `first ${ago(f.firstTs, this.now)} · last ${ago(f.lastTs, this.now)}`, "muted");
     }
 
     const filesInner = paintBox(
@@ -810,8 +811,9 @@ export function compareView(
   ascii: boolean,
   allRecords?: MemoryRecord[],
   motionOn?: boolean,
+  now?: number,
 ): Node {
-  return new CompareViewNode(state, size, frame, ascii, allRecords, motionOn ?? true);
+  return new CompareViewNode(state, size, frame, ascii, allRecords, motionOn ?? true, now ?? Date.now());
 }
 
 const LIST_TOKEN: Record<string, ThemeToken> = {
@@ -928,15 +930,17 @@ export function surfaceRoot(
   ascii: boolean,
   homeData?: HomeData,
   motionOn?: boolean,
+  now?: number,
 ): Node {
+  const clock = now ?? Date.now();
   const snapshot = homeData ? undefined : getMemorySnapshot();
   const data =
     homeData ??
-    deriveHome(snapshot?.records ?? [], snapshot?.coverageReason, Date.now());
+    deriveHome(snapshot?.records ?? [], snapshot?.coverageReason, clock);
 
   if (state.view === "compare") {
     const comp = state.compare ?? initialCompareState(snapshot?.records ?? []);
-    return compareView(comp, size, frame, ascii, snapshot?.records, motionOn);
+    return compareView(comp, size, frame, ascii, snapshot?.records, motionOn, clock);
   }
 
   const mainCol = new Node({ direction: "column", grow: 1 });
