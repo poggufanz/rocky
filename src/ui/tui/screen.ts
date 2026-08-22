@@ -1,3 +1,5 @@
+import { MOUSE_ENABLE, MOUSE_DISABLE } from "./core/mouse.js";
+
 export function diffFrames(previous: string[] | undefined, next: string[]): string {
   if (previous === undefined) {
     if (next.length === 0) return "";
@@ -24,6 +26,10 @@ export function diffFrames(previous: string[] | undefined, next: string[]): stri
   return `\x1b[?2026h${parts.join("")}\x1b[?2026l`;
 }
 
+export interface ScreenOptions {
+  mouse?: boolean;
+}
+
 export interface Screen {
   enter(): void;
   paint(lines: string[]): void;
@@ -31,7 +37,7 @@ export interface Screen {
   leave(): void;
 }
 
-export function createScreen(stdout: NodeJS.WriteStream): Screen {
+export function createScreen(stdout: NodeJS.WriteStream, options?: { mouse?: boolean }): Screen {
   let previous: string[] | undefined = undefined;
   let entered = false;
 
@@ -40,7 +46,8 @@ export function createScreen(stdout: NodeJS.WriteStream): Screen {
     entered = false;
     detachHandlers();
     try {
-      stdout.write("\x1b[0m\x1b[?25h\x1b[?2004l\x1b[?1049l");
+      const restore = (options?.mouse ? MOUSE_DISABLE : "") + "\x1b[0m\x1b[?25h\x1b[?2004l\x1b[?1049l";
+      stdout.write(restore);
     } catch {
       // Ignored during shutdown
     }
@@ -88,7 +95,8 @@ export function createScreen(stdout: NodeJS.WriteStream): Screen {
       entered = true;
       attachHandlers();
       try {
-        stdout.write("\x1b[?1049h\x1b[?25l\x1b[?2004h");
+        const enterSeq = "\x1b[?1049h\x1b[?25l\x1b[?2004h" + (options?.mouse ? MOUSE_ENABLE : "");
+        stdout.write(enterSeq);
       } catch {
         // Ignored
       }
