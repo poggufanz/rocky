@@ -23,9 +23,43 @@ import { adaptHit } from "./home-data.js";
 import { tokens, similarity } from "../../../core/fingerprint.js";
 import { elapsed } from "../../rocky.js";
 import type { Key } from "../state.js";
+import type { PickerState } from "./picker.js";
+import { updatePicker, previewPair } from "./picker.js";
+import { type CompareRec, type FileEntry, fileIndex } from "./compare-data.js";
+
+export type CompareFocus = "files" | "compare" | "recA" | "recB" | "diffA" | "diffB";
+export type CompareModal = "scope" | "timeline" | null;
+export type CompareMode = "all" | "two" | null;
+
+export interface CompareState {
+  records: MemoryRecord[];
+  files: FileEntry[];
+  fquery: string;
+  fsel: number;
+  ftop: number;
+  focus: CompareFocus;
+  modal: CompareModal;
+  msel: number;
+  picker: PickerState;
+  file: FileEntry | null;
+  mode: CompareMode;
+  A: number | null;
+  B: number | null;
+  recA: CompareRec | null;
+  recB: CompareRec | null;
+  expA: boolean;
+  expB: boolean;
+  cscroll: number;
+  dscrollA: number;
+  dscrollB: number;
+  hscrollA: number;
+  hscrollB: number;
+  showDiff: boolean;
+  zoom: boolean;
+}
 
 export interface ShellState {
-  view: "home" | "stream";
+  view: "home" | "stream" | "compare";
   input: string;
   csel: number;
   scroll: number;
@@ -33,6 +67,7 @@ export interface ShellState {
   cards: Card[];
   quit: boolean;
   pendingRun?: string;
+  compare?: CompareState;
 }
 
 export type ShellEvent =
@@ -40,7 +75,284 @@ export type ShellEvent =
   | { type: "card"; card: Card }
   | { type: "cd"; next: string };
 
+export function initialCompareState(records: MemoryRecord[] = []): CompareState {
+  const files = fileIndex(records);
+  return {
+    records,
+    files,
+    fquery: "",
+    fsel: 0,
+    ftop: 0,
+    focus: "files",
+    modal: null,
+    msel: 0,
+    picker: { open: false, markA: false, tsel: 0, tquery: "" },
+    file: null,
+    mode: null,
+    A: null,
+    B: null,
+    recA: null,
+    recB: null,
+    expA: false,
+    expB: false,
+    cscroll: 0,
+    dscrollA: 0,
+    dscrollB: 0,
+    hscrollA: 0,
+    hscrollB: 0,
+    showDiff: true,
+    zoom: false,
+  };
+}
+
+export function compareFocusables(state: CompareState): CompareFocus[] {
+  const f: CompareFocus[] = ["files"];
+  if (state.file && state.mode === "two") {
+    f.push("recA", "recB");
+    if (state.showDiff) f.push("diffA", "diffB");
+  } else if (state.file) {
+    f.push("compare");
+    if (state.showDiff) f.push("diffA");
+  }
+  return f;
+}
+
+export function filteredFiles(state: CompareState): FileEntry[] {
+  if (!state.fquery) return state.files;
+  const q = state.fquery.toLowerCase();
+  return state.files.filter((f) => f.path.toLowerCase().includes(q));
+}
+
+export function scrollComparePane(state: CompareState, focus: CompareFocus, delta: number): CompareState {
+  if (focus === "files") {
+    const list = filteredFiles(state);
+    const maxIdx = Math.max(0, list.length - 1);
+    return { ...state, fsel: Math.max(0, Math.min(maxIdx, state.fsel + delta)) };
+  }
+  if (focus === "diffA") {
+    return { ...state, dscrollA: Math.max(0, state.dscrollA + delta) };
+  }
+  if (focus === "diffB") {
+    return { ...state, dscrollB: Math.max(0, state.dscrollB + delta) };
+  }
+  return { ...state, cscroll: Math.max(0, state.cscroll + delta) };
+}
+
+export function updateCompareState(state: CompareState, key: Key): CompareState {
+  if (state.modal === "scope") {
+    if (key.name === "esc") {
+      return { ...state, modal: null };
+    }
+    if (key.name === "up" || (key.name === "char" && key.ch === "k")) {
+      return { ...state, msel: Math.max(0, state.msel - 1) };
+    }
+    if (key.name === "down" || (key.name === "char" && key.ch === "j")) {
+      return { ...state, msel: Math.min(1, state.msel + 1) };
+    }
+    if (key.name === "enter") {
+      if (state.msel === 0) {
+        return { ...state, mode: "all", modal: null, cscroll: 0, focus: "compare" };
+      } else {
+        const fileRecs = state.file?.recs ?? [];
+        return {
+          ...state,
+          modal: "timeline",
+          mode: "two",
+          picker: { open: true, markA: false, tsel: 0, tquery: "" },
+          recA: null,
+          recB: null,
+          A: null,
+          B: null,
+          cscroll: 0,
+          dscrollA: 0,
+          dscrollB: 0,
+          hscrollA: 0,
+          hscrollB: 0,
+          expA: false,
+          expB: false,
+        };
+      }
+    }
+    return state;
+  }
+
+  if (state.modal === "timeline") {
+    const fileRecs = state.file?.recs ?? [];
+    const nextPicker = updatePicker(state.picker, fileRecs, key);
+    if (!nextPicker.open) {
+      if (nextPicker.recB) {
+        const recA = nextPicker.recA ?? state.recA;
+        const recB = nextPicker.recB;
+        return {
+          ...state,
+          modal: null,
+          picker: nextPicker,
+          recA,
+          recB,
+          A: recA?.ts ?? null,
+          B: recB.ts,
+          cscroll: 0,
+          dscrollA: 0,
+          dscrollB: 0,
+          hscrollA: 0,
+          hscrollB: 0,
+          expA: false,
+          expB: false,
+          focus: "recB",
+        };
+      } else {
+        return {
+          ...state,
+          modal: "scope",
+          picker: nextPicker,
+          mode: null,
+          recA: null,
+          recB: null,
+          A: null,
+          B: null,
+        };
+      }
+    } else {
+      const pair = previewPair(nextPicker, fileRecs);
+      return {
+        ...state,
+        picker: nextPicker,
+        recA: pair.a ?? null,
+        recB: pair.b ?? null,
+        A: pair.a?.ts ?? null,
+        B: pair.b?.ts ?? null,
+      };
+    }
+  }
+
+  if (key.name === "tab" || key.name === "shifttab") {
+    const focusList = compareFocusables(state);
+    const curIdx = focusList.indexOf(state.focus);
+    const delta = key.name === "shifttab" ? focusList.length - 1 : 1;
+    const nextFocus = focusList[(curIdx + delta) % focusList.length];
+    return { ...state, focus: nextFocus };
+  }
+
+  if (key.name === "esc") {
+    if (state.zoom) {
+      return { ...state, zoom: false };
+    }
+    if (state.file) {
+      return {
+        ...state,
+        file: null,
+        mode: null,
+        recA: null,
+        recB: null,
+        A: null,
+        B: null,
+        focus: "files",
+      };
+    }
+    return state;
+  }
+
+  if (state.focus === "files") {
+    if (key.name === "enter") {
+      const list = filteredFiles(state);
+      const selFile = list[state.fsel];
+      if (selFile) {
+        return { ...state, file: selFile, modal: "scope", msel: 0 };
+      }
+      return state;
+    }
+    if (key.name === "up") {
+      return { ...state, fsel: Math.max(0, state.fsel - 1) };
+    }
+    if (key.name === "down") {
+      const list = filteredFiles(state);
+      return { ...state, fsel: Math.min(Math.max(0, list.length - 1), state.fsel + 1) };
+    }
+    if (key.name === "backspace") {
+      return { ...state, fquery: state.fquery.slice(0, -1), fsel: 0, ftop: 0 };
+    }
+    if (key.name === "char") {
+      return { ...state, fquery: state.fquery + key.ch, fsel: 0, ftop: 0 };
+    }
+    if (key.name === "paste") {
+      return { ...state, fquery: state.fquery + key.text, fsel: 0, ftop: 0 };
+    }
+    return state;
+  }
+
+  if (key.name === "up" || (key.name === "char" && key.ch === "k")) {
+    return scrollComparePane(state, state.focus, -1);
+  }
+  if (key.name === "down" || (key.name === "char" && key.ch === "j")) {
+    return scrollComparePane(state, state.focus, 1);
+  }
+  if (key.name === "ctrl-u" || (key.name === "char" && key.ch === "K")) {
+    return scrollComparePane(state, state.focus, -5);
+  }
+  if (key.name === "ctrl-d" || (key.name === "char" && key.ch === "J")) {
+    return scrollComparePane(state, state.focus, 5);
+  }
+
+  if (state.focus === "diffA" || state.focus === "diffB") {
+    const hk = state.focus === "diffA" ? "hscrollA" : "hscrollB";
+    if (key.name === "char" && key.ch === "l") {
+      return { ...state, [hk]: state[hk] + 8 };
+    }
+    if (key.name === "right") {
+      return { ...state, [hk]: state[hk] + 8 };
+    }
+    if (key.name === "char" && key.ch === "h") {
+      return { ...state, [hk]: Math.max(0, state[hk] - 8) };
+    }
+    if (key.name === "left") {
+      return { ...state, [hk]: Math.max(0, state[hk] - 8) };
+    }
+    if (key.name === "char" && key.ch === "L") {
+      return { ...state, [hk]: state[hk] + 24 };
+    }
+    if (key.name === "char" && key.ch === "H") {
+      return { ...state, [hk]: Math.max(0, state[hk] - 24) };
+    }
+    if (key.name === "char" && key.ch === "0") {
+      return { ...state, [hk]: 0 };
+    }
+  }
+
+  if (key.name === "char" && key.ch === "d") {
+    if (state.file && state.mode) {
+      const nextShow = !state.showDiff;
+      let nextFocus = state.focus;
+      if (!nextShow && (state.focus === "diffA" || state.focus === "diffB")) {
+        nextFocus = state.mode === "two" ? "recA" : "compare";
+      }
+      return { ...state, showDiff: nextShow, dscrollA: 0, dscrollB: 0, focus: nextFocus };
+    }
+  }
+
+  if (key.name === "char" && key.ch === "z") {
+    return { ...state, zoom: !state.zoom };
+  }
+
+  if (key.name === "char" && key.ch === "x") {
+    if (state.focus === "recA") return { ...state, expA: !state.expA };
+    if (state.focus === "recB") return { ...state, expB: !state.expB };
+  }
+
+  if (key.name === "char" && key.ch === "/") {
+    return { ...state, focus: "files" };
+  }
+
+  if (key.name === "enter") {
+    if (state.file) {
+      return { ...state, modal: "scope", msel: 0 };
+    }
+  }
+
+  return state;
+}
+
 export function initialShell(cwd: string): ShellState {
+  const snapshot = getMemorySnapshot();
   return {
     view: "home",
     input: "",
@@ -50,6 +362,7 @@ export function initialShell(cwd: string): ShellState {
     cards: [],
     quit: false,
     pendingRun: undefined,
+    compare: initialCompareState(snapshot.records),
   };
 }
 
@@ -334,6 +647,18 @@ function submitInput(
       const card = handleStats(snapshot.records, now);
       return { ...nextState, cards: [...nextState.cards, card] };
     }
+    case "compare": {
+      const comp = s.compare ?? initialCompareState(snapshot.records);
+      return {
+        ...nextState,
+        view: "compare",
+        compare: {
+          ...comp,
+          records: snapshot.records,
+          files: fileIndex(snapshot.records),
+        },
+      };
+    }
     case "help": {
       const card = buildHelp(COMMANDS);
       return { ...nextState, cards: [...nextState.cards, card] };
@@ -378,6 +703,15 @@ export function updateShell(
 
   if (key.name === "ctrl-c") {
     return { ...s, quit: true };
+  }
+
+  if (s.view === "compare") {
+    const currentCompare = s.compare ?? initialCompareState();
+    if (key.name === "esc" && !currentCompare.modal && !currentCompare.zoom && !currentCompare.file) {
+      return { ...s, view: "home" };
+    }
+    const nextComp = updateCompareState(currentCompare, key);
+    return { ...s, compare: nextComp };
   }
 
   const isMenuOpen = s.input.startsWith("/") && !s.input.includes(" ");
@@ -460,7 +794,7 @@ export function runSurface(opts: {
   stdout: NodeJS.WriteStream;
   stdin: NodeJS.ReadStream;
   env: NodeJS.ProcessEnv;
-  view?: "home" | "stream";
+  view?: "home" | "stream" | "compare";
 }): Promise<number> {
   let state = initialShell(process.cwd());
   if (opts.view) {
@@ -495,3 +829,4 @@ export function runSurface(opts: {
     live.start();
   });
 }
+

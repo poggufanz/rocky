@@ -1,5 +1,8 @@
+import { existsSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import type { MemoryRecord } from "../../../core/memory-read.js";
 import { redactSecretsAtBoundary } from "../../../core/redact.js";
+import { resolveGitDiff } from "../../../core/git-diff.js";
 
 export interface CompareRec {
   kind: string;
@@ -273,7 +276,7 @@ export function diffFor(
   io: {
     exists(p: string): boolean;
     lsFiles(root: string): string[];
-    resolve(opts: { ts: number; head?: string; file: string; cwd: string }): { commit: string; diff: string } | undefined;
+    resolve(opts: { ts: number; head?: string; file: string; cwd: string }): { commit?: string; diff: string } | undefined;
     lastShaBefore(root: string, rel: string, tsIso: string): string;
   },
 ): DiffResult {
@@ -335,3 +338,51 @@ export function diffFor(
     };
   }
 }
+
+export const defaultDiffIo = {
+  exists: (p: string) => existsSync(p),
+  lsFiles: (root: string) => {
+    try {
+      return execFileSync("git", ["-C", root, "ls-files"], { encoding: "utf8", timeout: 8000 }).split(/\r?\n/);
+    } catch {
+      return [];
+    }
+  },
+  resolve: (opts: { ts: number; head?: string; file: string; cwd: string }) => resolveGitDiff(opts),
+  lastShaBefore: (root: string, rel: string, tsIso: string) => {
+    try {
+      return execFileSync("git", ["-C", root, "log", "-n", "1", "--format=%H", `--until=${tsIso}`, "--", rel], {
+        encoding: "utf8",
+        timeout: 4000,
+      }).trim();
+    } catch {
+      return "";
+    }
+  },
+};
+
+const diffCache = new Map<string, DiffResult>();
+
+export function clearDiffCache(): void {
+  diffCache.clear();
+}
+
+export function getCachedDiff(
+  filePath: string,
+  rec: CompareRec,
+  io: {
+    exists(p: string): boolean;
+    lsFiles(root: string): string[];
+    resolve(opts: { ts: number; head?: string; file: string; cwd: string }): { commit?: string; diff: string } | undefined;
+    lastShaBefore(root: string, rel: string, tsIso: string): string;
+  } = defaultDiffIo,
+): DiffResult {
+  const key = `${filePath}@${rec.ts}`;
+  let cached = diffCache.get(key);
+  if (!cached) {
+    cached = diffFor(filePath, rec, io);
+    diffCache.set(key, cached);
+  }
+  return cached;
+}
+

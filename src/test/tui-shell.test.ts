@@ -7,7 +7,8 @@ import { renderToLines } from "../ui/tui/core/renderer.js";
 const deps = { exists: (p: string) => p.replace(/\\/g, "/").endsWith("/rocky"), home: () => "/h" };
 const type = (s: ShellState, text: string) =>
   [...text].reduce((st, ch) => updateShell(st, { type: "key", key: { name: "char", ch } }, deps), s);
-const press = (s: ShellState, name: any) => updateShell(s, { type: "key", key: { name } }, deps);
+const press = (s: ShellState, name: any, ch?: string) =>
+  updateShell(s, { type: "key", key: (ch !== undefined ? { name: "char", ch } : { name }) as any }, deps);
 
 test("slash menu: arrows select, enter fills; no-arg command runs on enter", () => {
   let s = type(initialShell("/proj"), "/");
@@ -124,3 +125,93 @@ test("streamView and surfaceRoot render without errors", () => {
   const streamNode = streamView(s.cards, 0, { cols: 80, rows: 24 });
   assert.ok(streamNode);
 });
+
+test("/compare routes to compare view and renders via surfaceRoot", () => {
+  let s = type(initialShell("/proj"), "/compare");
+  s = press(s, "enter");
+  assert.equal(s.view, "compare");
+  assert.ok(s.compare);
+
+  const node = surfaceRoot(s, { cols: 80, rows: 24 }, 0, false);
+  const lines = renderToLines(node, 80, 24, 24);
+  assert.equal(lines.length, 24);
+
+  // Esc from top-level compare returns to home
+  s = press(s, "esc");
+  assert.equal(s.view, "home");
+});
+
+test("compare state: focus cycling, zoom, and diff toggle", () => {
+  let s: ShellState = {
+    ...initialShell("/proj"),
+    view: "compare",
+    compare: {
+      records: [],
+      files: [{
+        path: "/proj/src/f.ts",
+        recs: [
+          { kind: "triple", ts: 2000, cwd: "/proj", source: "", machine: false, intent: "fix a" },
+          { kind: "triple", ts: 1000, cwd: "/proj", source: "", machine: false, intent: "fix b" },
+        ],
+        count: 2,
+        firstTs: 1000,
+        lastTs: 2000,
+      }],
+      fquery: "",
+      fsel: 0,
+      ftop: 0,
+      focus: "files",
+      modal: null,
+      msel: 0,
+      picker: { open: false, markA: false, tsel: 0, tquery: "" },
+      file: null,
+      mode: null,
+      A: null,
+      B: null,
+      recA: null,
+      recB: null,
+      expA: false,
+      expB: false,
+      cscroll: 0,
+      dscrollA: 0,
+      dscrollB: 0,
+      hscrollA: 0,
+      hscrollB: 0,
+      showDiff: true,
+      zoom: false,
+    },
+  };
+
+  // Select file and choose two moments
+  s = press(s, "enter"); // open scope modal
+  assert.equal(s.compare?.modal, "scope");
+  s = press(s, "down");  // msel = 1 (two moments)
+  assert.equal(s.compare?.msel, 1);
+  s = press(s, "enter"); // open timeline picker
+  assert.equal(s.compare?.modal, "timeline");
+  assert.equal(s.compare?.picker.open, true);
+
+  // Lock A and B
+  s = press(s, "enter"); // lock A
+  assert.equal(s.compare?.picker.markA, true);
+  s = press(s, "enter"); // lock B -> modal closed, mode = "two", focus = "recB"
+  assert.equal(s.compare?.modal, null);
+  assert.equal(s.compare?.mode, "two");
+  assert.equal(s.compare?.focus, "recB");
+
+  // Tab cycles focus
+  s = press(s, "tab"); // diffA
+  assert.equal(s.compare?.focus, "diffA");
+
+  // Zoom toggle
+  s = press(s, "char", "z");
+  assert.equal(s.compare?.zoom, true);
+  s = press(s, "char", "z");
+  assert.equal(s.compare?.zoom, false);
+
+  // Diff toggle
+  s = press(s, "char", "d");
+  assert.equal(s.compare?.showDiff, false);
+  assert.equal(s.compare?.focus, "recA");
+});
+
