@@ -1,18 +1,18 @@
-ROCKY 0 remembered                                                ═╦═══════╦═   
-                                                                   ║ ┌╍╍╍┐ ║    
-                                                                   ╲_││││││_╱   
-                                                                   ╱ ╲▔▔▔╱ ╲    
-                                                                  ╱ ╱ ╲_╱ ╲ ╲   
+  ROCKY  0 remembered                                              ≣ listening  
 ┌─ what rocky holds ───────────────────────┐┌─ since 24h ──────────────────────┐
 │ no records yet                           ││ heard 0                          │
+│ coverage full                            ││ failures 0                       │
+│                                          ││ fixes 0                          │
+│                                          ││ why recorded 0                   │
+│                                          ││ local only · no egress           │
 │┌─ commands ───────────────────────────────────────────┐                      │
 ││▎/run <cmd>       run command, rocky listens          │                      │
-││ /recall <query>  ask memory by words                 │d 0                   │
-││ /why <query>     hear remembered reasons             │· no egress           │
-││ /sessions        work sessions derived from memory   │                      │
-└│ /brief           hear what changed since last brief  │──────────────────────┘
-┌│ /stats           what rocky holds in memory          │──────────────────────┐
-││ /compare         compare file moments, side by side  │evidence)             │
+││ /recall <query>  ask memory by words                 │                      │
+└│ /why <query>     hear remembered reasons             │──────────────────────┘
+┌│ /sessions        work sessions derived from memory   │──────────────────────┐
+││ /brief           hear what changed since last brief  │evidence)             │
+││ /stats           what rocky holds in memory          │                      │
+││ /compare         compare file moments, side by side  │                      │
 ││ /browse          browse all memory                   │                      │
 ││ /help            command list                        │                      │
 ││ /home            back to dashboard                   │                      │

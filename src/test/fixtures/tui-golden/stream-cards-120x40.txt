@@ -1,4 +1,4 @@
-ROCKY 7 remembered                                                                                                      
+  ROCKY  7 remembered                                                                                           ≣ idle  
  ▌   2d ago · hook                                                                                                      
  ▌ Agent "review" finished                                                                                              
  ▌   5h ago · claude-code                                                                                               

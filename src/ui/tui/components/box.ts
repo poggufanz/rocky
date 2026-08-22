@@ -58,8 +58,8 @@ export class BoxNode extends Node {
     const { x, y, w, h } = this.rect;
     if (w <= 0 || h <= 0) return;
 
-    // 1. Fill body
-    buf.fillRect(this.rect, " ");
+    // 1. Fill body — the panel layer sits above the page
+    buf.fillRect(this.rect, " ", undefined, "panel");
 
     // 2. Borders
     const ascii = this.props.ascii ?? false;
@@ -102,14 +102,15 @@ export class BoxNode extends Node {
       let cx = x + 2;
       let usedW = 0;
       const isFocused = this.props.focused ?? false;
-      const token: ThemeToken = isFocused ? "accent" : "text2";
+      const token: ThemeToken = isFocused ? "black" : "text2";
+      const chipBg: ThemeToken = isFocused ? "accent" : "panelHi";
       for (const ch of titleStr) {
         const cw = codePointWidth(ch.codePointAt(0) ?? 0);
         if (cw === 0) continue;
         if (usedW + cw > maxTitleW) break;
-        buf.set(cx, y, ch, token, isFocused);
+        buf.set(cx, y, ch, token, false, chipBg);
         if (cw === 2) {
-          buf.set(cx + 1, y, "\u0000", token, isFocused);
+          buf.set(cx + 1, y, "\u0000", token, false, chipBg);
         }
         cx += cw;
         usedW += cw;

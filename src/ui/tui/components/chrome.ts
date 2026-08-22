@@ -25,7 +25,7 @@ export class StatusBarNode extends Node {
     const { x, y, w, h } = this.rect;
     if (w <= 0 || h <= 0) return;
 
-    buf.fillRect(this.rect, " ");
+    buf.fillRect(this.rect, " ", undefined, "panelHi");
     const clip: Rect = { x, y, w, h };
     let sx = x;
 
@@ -146,8 +146,8 @@ export class SlashMenuNode extends Node {
     const boxH = Math.min(h, matches.length + 2);
     if (boxH < 2) return;
 
-    // Fill body
-    buf.fillRect({ x, y, w, h: boxH }, " ");
+    // Fill body — overlay sits on the panel layer
+    buf.fillRect({ x, y, w, h: boxH }, " ", undefined, "panel");
 
     // Borders
     const ascii = this.state.ascii ?? false;
@@ -174,7 +174,7 @@ export class SlashMenuNode extends Node {
       const titleStr = " commands ";
       let cx = x + 2;
       for (const ch of titleStr) {
-        buf.set(cx, y, ch, "text2", false);
+        buf.set(cx, y, ch, "text2", false, "panelHi");
         cx++;
       }
     }
@@ -188,9 +188,9 @@ export class SlashMenuNode extends Node {
 
       if (isSelected) {
         for (let dx = 1; dx < w - 1; dx++) {
-          buf.set(x + dx, yy, " ", "accent", true);
+          buf.set(x + dx, yy, " ", undefined, false, "accentDim");
         }
-        buf.set(x + 1, yy, "▎", "accent", true);
+        buf.set(x + 1, yy, "▎", "accent", false, "accentDim");
       }
 
       // Column 2: /name
@@ -198,7 +198,7 @@ export class SlashMenuNode extends Node {
       let nx = x + 2;
       for (const ch of nameStr) {
         if (nx >= x + 18 || nx >= x + w - 1) break;
-        buf.set(nx, yy, ch, isSelected ? "text" : "accent", isSelected);
+        buf.set(nx, yy, ch, isSelected ? "text" : "accent");
         nx++;
       }
 
@@ -207,7 +207,7 @@ export class SlashMenuNode extends Node {
         let ux = nx + 1;
         for (const ch of cmd.usage) {
           if (ux >= x + 18 || ux >= x + w - 1) break;
-          buf.set(ux, yy, ch, "muted", isSelected);
+          buf.set(ux, yy, ch, "muted");
           ux++;
         }
       }
@@ -217,7 +217,7 @@ export class SlashMenuNode extends Node {
       if (hx < x + w - 1) {
         for (const ch of cmd.help) {
           if (hx >= x + w - 1) break;
-          buf.set(hx, yy, ch, isSelected ? "text2" : "muted", isSelected);
+          buf.set(hx, yy, ch, isSelected ? "text2" : "muted");
           hx++;
         }
       }

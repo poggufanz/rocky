@@ -1,4 +1,4 @@
-ROCKY 7 remembered                                                                                  
+  ROCKY  7 remembered                                                                       ≣ idle  
  ▌                                                                                                  
  ▌  run  npm test                                                                        exit -4058 
  ▌ ENOENT                                                                                           

@@ -1,4 +1,4 @@
-ROCKY 7 remembered                                                              
+  ROCKY  7 remembered                                                   ≣ idle  
  ▌  help  slash optional                                                        
  ▌ /run <cmd> run command, rocky listens                                        
  ▌ /recall <query>ask memory by words                                           

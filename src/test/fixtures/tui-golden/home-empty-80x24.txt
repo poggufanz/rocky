@@ -1,8 +1,4 @@
-ROCKY 0 remembered                                                ═╦═══════╦═   
-                                                                   ║ ┌───┐ ║    
-                                                                   ╲_││││││_╱   
-                                                                   ╱ ╲▔▔▔╱ ╲    
-                                                                  ╱ ╱ ╲_╱ ╲ ╲   
+  ROCKY  0 remembered                                                   ≣ idle  
 ┌─ what rocky holds ───────────────────────┐┌─ since 24h ──────────────────────┐
 │ no records yet                           ││ heard 0                          │
 │ coverage full                            ││ failures 0                       │
@@ -10,9 +6,13 @@ ROCKY 0 remembered                                                ═╦══�
 │                                          ││ why recorded 0                   │
 │                                          ││ local only · no egress           │
 │                                          ││                                  │
+│                                          ││                                  │
+│                                          ││                                  │
 └──────────────────────────────────────────┘└──────────────────────────────────┘
 ┌─ most heard files ───────────────────────┐┌─ recent ─────────────────────────┐
 │ (none heard yet)                         ││ (no recent evidence)             │
+│                                          ││                                  │
+│                                          ││                                  │
 │                                          ││                                  │
 │                                          ││                                  │
 │                                          ││                                  │

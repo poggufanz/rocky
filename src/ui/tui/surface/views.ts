@@ -11,9 +11,25 @@ import { pulse } from "../core/motion.js";
 import { getMemorySnapshot, filteredFiles, initialCompareState, browseVisible, shellMood, type ShellState, type CompareState } from "./shell.js";
 import { sessionItems, pickList } from "./picker.js";
 import { getCachedDiff, type CompareRec } from "./compare-data.js";
-import { CarapaceNode } from "../components/carapace.js";
 import { elapsed } from "../../rocky.js";
 import type { MemoryRecord } from "../../../core/memory-read.js";
+
+/** AccentDim band with a ROCKY chip and compact mood — the proto4 header. */
+export class HeaderBarNode extends Node {
+  constructor(private readonly total: number, private readonly mood: string, props: NodeProps = {}) {
+    super(props);
+  }
+  override paint(buf: CellBuffer): void {
+    const { x, y, w, h } = this.rect;
+    if (w <= 0 || h <= 0) return;
+    buf.fillRect({ x, y, w, h: 1 }, " ", undefined, "accentDim");
+    let hx = x + 1;
+    hx += buf.blitText(hx, y, " ROCKY ", "black", undefined, "accent") + 1;
+    buf.blitText(hx, y, `${this.total} remembered`, "text", undefined, "accentDim");
+    const moodText = `≣ ${this.mood}`;
+    buf.blitText(x + w - stringWidth(moodText) - 2, y, moodText, "accent", undefined, "accentDim");
+  }
+}
 
 const KIND_TOKEN: Record<string, ThemeToken> = {
   failure: "err",
@@ -179,7 +195,7 @@ export class StreamNode extends Node {
         let cx = x + 3;
         const chip = ` ${c.kind} `;
         for (const ch of chip) {
-          buf.set(cx, lineY, ch, c.accent, true);
+          buf.set(cx, lineY, ch, "black", false, c.accent);
           cx++;
         }
         cx += 1;
@@ -282,7 +298,7 @@ function displayText(r: CompareRec): string {
 function paintBox(buf: CellBuffer, rect: Rect, title?: string, focused = false, ascii = false): Rect {
   const { x, y, w, h } = rect;
   if (w <= 0 || h <= 0) return { x, y, w: 0, h: 0 };
-  buf.fillRect(rect, " ");
+  buf.fillRect(rect, " ", undefined, "panel");
   const [tl, tr, bl, br, horiz, vert] = ascii
     ? ["+", "+", "+", "+", "-", "|"]
     : ["┌", "┐", "└", "┘", "─", "│"];
@@ -345,15 +361,16 @@ export class CompareViewNode extends Node {
     if (cols <= 0 || rows <= 0) return;
 
     this.state.rects = {};
-    buf.fillRect({ x: 0, y: 0, w: cols, h: rows }, " ");
+    buf.fillRect({ x: 0, y: 0, w: cols, h: rows }, " ", undefined, "page");
 
     const totalRecs = this.allRecords?.length ?? this.state.records.length;
     const files = this.state.files;
 
     // 1. Header line (y = 0, h = 1)
+    buf.fillRect({ x: 0, y: 0, w: cols, h: 1 }, " ", undefined, "accentDim");
     let hx = 1;
-    hx += buf.blitText(hx, 0, " ROCKY ", "accent", undefined) + 1;
-    hx += buf.blitText(hx, 0, `${totalRecs} remembered · ${files.length} files`, "text2") + 1;
+    hx += buf.blitText(hx, 0, " ROCKY ", "black", undefined, "accent") + 1;
+    hx += buf.blitText(hx, 0, `${totalRecs} remembered · ${files.length} files`, "text", undefined, "accentDim") + 1;
     const mood = this.state.file
       ? `≣ holding ${cut(this.state.file.path.split("/").slice(-1)[0], 22)}`
       : "≣ listening";
@@ -417,6 +434,7 @@ export class CompareViewNode extends Node {
       const lineY = filesInner.y + i;
       const on = this.state.ftop + i === this.state.fsel;
       if (on) {
+        buf.fillRect({ x: filesInner.x - 1, y: lineY, w: filesInner.w + 2, h: 1 }, " ", undefined, "accentDim");
         buf.set(filesInner.x - 1, lineY, "▎", "accent");
       }
       let fx = filesInner.x;
@@ -629,12 +647,14 @@ export class CompareViewNode extends Node {
         const yy = my + 3 + i;
         if (it.hdr !== undefined) {
           const hdrText = ` session ${it.hdr} · ${stamp(it.ts ?? 0).slice(0, 10)} · ${it.n} records `;
+          buf.fillRect({ x: mx + 1, y: yy, w: mw - 2, h: 1 }, " ", undefined, "panelHi");
           buf.blitText(mx + 2, yy, cut(hdrText, mw - 4), "text2");
           continue;
         }
         const r = it.rec!;
         const on = it.idx === this.state.picker.tsel;
         if (on) {
+          buf.fillRect({ x: mx + 1, y: yy, w: mw - 2, h: 1 }, " ", undefined, "accentDim");
           buf.set(mx + 1, yy, "▎", "accent");
         }
         const badge = KIND_BADGE[r.kind] ?? "why";
@@ -643,7 +663,7 @@ export class CompareViewNode extends Node {
         bx += buf.blitText(bx, yy, stamp(r.ts).slice(5) + " ", on ? "text" : "text2") + 1;
         if (on) {
           for (const ch of ` ${badge} `) {
-            buf.set(bx, yy, ch, token, true);
+            buf.set(bx, yy, ch, "black", false, token);
             bx++;
           }
           bx += 1;
@@ -789,6 +809,10 @@ export class CompareViewNode extends Node {
         buf.blitText(inner.x, yy, cut(panT, inner.w), "diffHunk");
         continue;
       }
+      const rowBg: ThemeToken | undefined =
+        r.k === "+" ? "diffAddBg" : r.k === "-" ? "diffDelBg" : undefined;
+      if (rowBg !== undefined) buf.fillRect({ x: inner.x, y: yy, w: inner.w, h: 1 }, " ", undefined, rowBg);
+      buf.fillRect({ x: inner.x, y: yy, w: NO * 2, h: 1 }, " ", undefined, "gutter");
       if (r.o !== undefined) buf.blitText(inner.x, yy, String(r.o).padStart(NO), "muted");
       if (r.n !== undefined) buf.blitText(inner.x + NO, yy, String(r.n).padStart(NO), "muted");
       const mk = r.k === "+" ? "+" : r.k === "-" ? "−" : " ";
@@ -881,6 +905,7 @@ export class BrowseOverlayNode extends Node {
       const yy = listRect.y + i;
       const on = this.state.btop + i === this.state.bsel;
       if (on) {
+        buf.fillRect({ x: listRect.x - 1, y: yy, w: listRect.w + 1, h: 1 }, " ", undefined, "accentDim");
         buf.set(listRect.x - 1, yy, "▎", "accent");
       }
       let lx = listRect.x;
@@ -946,17 +971,8 @@ export function surfaceRoot(
   const mainCol = new Node({ direction: "column", grow: 1 });
   const mood = shellMood(state);
 
-  // 1. Header
-  if (state.view === "home" && !ascii) {
-    const headerZone = new Node({ direction: "row", height: 5 });
-    const titleCol = new Node({ direction: "column", grow: 1 });
-    titleCol.add(new TextNode(` ROCKY  ${data.total} remembered`, "accent", { height: 1 }));
-    headerZone.add(titleCol);
-    headerZone.add(new CarapaceNode(mood, frame, ascii, motionOn ?? true, { width: 16, height: 5 }));
-    mainCol.add(headerZone);
-  } else {
-    mainCol.add(new TextNode(` ROCKY  ${data.total} remembered`, "accent", { height: 1 }));
-  }
+  // 1. Header — accentDim band, ROCKY chip, compact mood at the right
+  mainCol.add(new HeaderBarNode(data.total, mood, { height: 1 }));
 
   // 2. Middle view (home vs stream)
   const middle =
