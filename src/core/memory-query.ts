@@ -11,6 +11,7 @@ import {
   retrievalTokens,
   similarity,
 } from "./fingerprint.js";
+import { isAgentEnvelopeText } from "./envelope.js";
 import { boundTripleRecord, canonicalPath, isOperationalMemoryRecord, linkBasisRank, loadMemory, loadMemoryChecked, pathIdentityHash } from "./memory-read.js";
 import type { FailureRecord, FixRecord, LinkBasis, LinkConfidence, MemoryCoverage, MemoryRecord, RationaleFidelity, TripleRecord } from "./memory-read.js";
 
@@ -667,7 +668,13 @@ export function searchKnowledge(
     } else if (record.kind === "fix") {
       fillRetrievalTokens(record.cmd, target);
     } else if (record.kind === "triple") {
-      fillRetrievalTokens(`${record.intent?.text ?? ""} ${record.rationale?.tags.join(" ") ?? ""}`, target);
+      // Step 0 of the retrieval-quality spec: an agent-envelope intent is
+      // machinery, not rationale — indexing it makes the record match every
+      // query. Read-side policy only; the stored record stays whole.
+      const intentText = record.intent !== undefined && !isAgentEnvelopeText(record.intent.text)
+        ? record.intent.text
+        : "";
+      fillRetrievalTokens(`${intentText} ${record.rationale?.tags.join(" ") ?? ""}`, target);
     } else if (record.kind === "note") {
       fillRetrievalTokens(`${record.cmd} ${record.file} ${record.subject} ${record.answer}`, target);
     }

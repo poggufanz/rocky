@@ -1,4 +1,5 @@
 import { loadMemoryChecked, type MemoryRecord } from "../../core/memory-read.js";
+import { isAgentEnvelopeText } from "../../core/envelope.js";
 import { tokens, similarity } from "../../core/fingerprint.js";
 import { redactSecretsAtBoundary } from "../../core/redact.js";
 import type { BadgeId, DashRow } from "./state.js";
@@ -27,8 +28,13 @@ function fieldText(value: unknown): string | undefined {
 
 export function labelFor(record: MemoryRecord): string {
   const value = record as unknown as Record<string, unknown>;
+  // Step 0 of the retrieval-quality spec: an agent-envelope intent is
+  // machinery, not a usable label — skip it so the label falls back to the
+  // next field. The record's full JSON detail view stays unfiltered.
+  const intentText = fieldText(value.intent);
+  const intentLabel = intentText !== undefined && isAgentEnvelopeText(intentText) ? undefined : intentText;
   const raw =
-    [value.cmd, value.file, fieldText(value.intent), fieldText(value.rationale), value.excerpt, value.note, value.kind].find(
+    [value.cmd, value.file, intentLabel, fieldText(value.rationale), value.excerpt, value.note, value.kind].find(
       (v): v is string => typeof v === "string" && v !== "",
     ) ?? record.kind;
   return redactSecretsAtBoundary(raw);
