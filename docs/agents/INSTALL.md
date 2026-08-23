@@ -105,7 +105,9 @@ type = "command"
 command = 'rocky hook agent-event codex'
 ```
 
-If `notify` already has a value, keep the existing entries and ask the human how to combine them. Codex has no deny hook — the rationale gate is Claude Code only; Codex reaches the notify lane, and Rocky never invents enforcement it cannot perform.
+If `notify` already has a value, keep the existing entries and ask the human how to combine them.
+
+The blocks above are the capture lane. The rationale gate is a separate lane with its own requirements — see [The rationale gate, any harness](#the-rationale-gate-any-harness). Rocky never claims enforcement it cannot perform.
 
 ## Step 5 — MCP read access, manual per host *(human approval for config edits)*
 
@@ -173,6 +175,20 @@ Then hang `node <home>/.rocky/agent-note.cjs <label>` on whatever event your har
 | DSH (DeepSeek Harness) | Nothing to install — Rocky's adapter reads DSH session logs directly (needs Node 22.15+ at Rocky's runtime for zstd). |
 
 Whatever the harness, the floor never changes: Step 1 hears every shell command, and an agent that can run shell commands can always speak Step 2 itself — the bridge script only automates what the agent would otherwise say by hand.
+
+### The rationale gate, any harness
+
+`rocky hook gate-event <vendor>` is the gate. Pass `generic` — the vendor-neutral form — from anywhere that is not the Claude Code hook payload the `claude-code` vendor already parses.
+
+The contract is small. On stdin, one JSON object carrying a non-empty `tool_name`, a `tool_input.file_path` naming the file about to change, a `session_id`, and optionally `cwd`. On stdout, either `{}` for allow, or a deny:
+
+```json
+{ "hookSpecificOutput": { "hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": "..." } }
+```
+
+It always exits `0` by design, so the caller reads stdout to learn the decision — the exit code never carries it, and a gate failure can never take down the harness that called it.
+
+Any harness qualifies when two things are true: a hook that fires **before** the edit and can cancel it, and a payload that names the file about to change. Both vary. Some lifecycle hooks only notify, and their exit code is discarded; some report a patch or a diff rather than a path, which leaves Rocky nothing to gate on. Read your harness's current hook documentation and confirm both before wiring this up. Where either is missing, Step 2's notify lane still records the why — only the enforcement is unavailable, and Rocky says so rather than pretending otherwise.
 
 ## Step 7 — Verify
 

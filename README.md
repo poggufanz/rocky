@@ -8,7 +8,7 @@
 
 [Release v0.7.6](https://github.com/poggufanz/rocky/releases/tag/v0.7.6) | [Changelog](CHANGELOG.md) | [License](LICENSE) | [Security](https://github.com/poggufanz/rocky/blob/main/SECURITY.md) | [Contributing](https://github.com/poggufanz/rocky/blob/main/CONTRIBUTING.md)
 
-Rocky is a blind engineer who lives in your terminal. He remembers failed commands and what fixed them, then brings that history back when the same trouble returns. Supported agent hooks can also keep a bounded record of what you asked for, which files changed, and why the agent said it changed them.
+Your AI writes code. Rocky makes sure you still understand what you own. He is a blind engineer who lives in your terminal, and he remembers failed commands and what fixed them, then brings that history back when the same trouble returns — to you, and through MCP to the AI agent working beside you, so it stops retrying what already failed on this machine. Supported agent hooks can also keep a bounded record of what you asked for, which files changed, and why the agent said it changed them. He is a witness, not a judge: he never diagnoses a failure or proposes a fix he does not remember, and [docs/character.md](docs/character.md) holds the rules that boundary comes from.
 
 The useful part is local and deterministic. Rocky has no daemon, no telemetry, and zero runtime dependencies. Optional AI uses an Ollama instance that you run on loopback.
 
