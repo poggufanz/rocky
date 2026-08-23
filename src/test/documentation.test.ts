@@ -109,7 +109,8 @@ test("README and CLI help publish the installable command surface", () => {
 });
 
 test("README stays a concise front page with durable project links", () => {
-  assert.ok(readmePage.split("\n").length <= 180, "README detail belongs in docs/reference.md");
+  // 190, not 180: the demo feature wall (three scene GIFs) earns its rows.
+  assert.ok(readmePage.split("\n").length <= 190, "README detail belongs in docs/reference.md");
   assertContainsEvery(readmePage, "README project links", [
     "https://github.com/poggufanz/rocky/releases/tag/v0.7.6",
     "CHANGELOG.md",
