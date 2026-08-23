@@ -1,5 +1,6 @@
 # Rocky
 <p align="center"><img src="https://raw.githubusercontent.com/poggufanz/rocky/main/assets/rocky-pixel.webp" alt="Pixel art of Rocky, a faceless five-limbed mineral engineer, working at a terminal"></p>
+
 https://github.com/user-attachments/assets/7d2affae-291f-45f1-85bd-c852bcaa4560
 
 [![CI](https://github.com/poggufanz/rocky/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/poggufanz/rocky/actions/workflows/ci.yml)
