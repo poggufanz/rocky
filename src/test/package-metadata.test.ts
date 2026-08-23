@@ -630,15 +630,25 @@ test("canonical release truth rejects drift in every release marker", async () =
   assert.deepEqual(
     releaseCheck.validateReleaseTruth({
       ...snapshot,
-      readme: `${snapshot.readme}\n<p align="center"><video src="https://raw.githubusercontent.com/poggufanz/rocky/main/assets/demo.mp4" poster="https://raw.githubusercontent.com/poggufanz/rocky/main/assets/demo.webp" width="960" controls muted playsinline></video></p>\n`,
+      readme: `${snapshot.readme}\n<p align="center"><a href="https://raw.githubusercontent.com/poggufanz/rocky/main/assets/demo.mp4"><img src="https://raw.githubusercontent.com/poggufanz/rocky/main/assets/demo.jpg" alt="demo" width="960"></a></p>\n`,
     }),
     [],
-    "the exact-shape demo video tag must stay supported",
+    "the exact-shape poster link must stay supported",
+  );
+  assert.deepEqual(
+    releaseCheck.validateReleaseTruth({
+      ...snapshot,
+      readme: `${snapshot.readme}\n<p align="center"><video src="https://user-images.githubusercontent.com/883386/demo-abc123.mp4" poster="https://raw.githubusercontent.com/poggufanz/rocky/main/assets/demo.jpg" width="960" controls muted playsinline></video></p>\n`,
+    }),
+    [],
+    "a GitHub-hosted video tag must stay supported; that host is the only one the README sanitizer keeps",
   );
   for (const [label, markup] of [
-    ["video with an event handler", "<video src=\"https://raw.githubusercontent.com/poggufanz/rocky/main/assets/demo.mp4\" poster=\"https://raw.githubusercontent.com/poggufanz/rocky/main/assets/demo.webp\" width=\"960\" controls muted playsinline onloadstart=\"alert(1)\"></video>"],
-    ["video from an external host", "<video src=\"https://evil.example/demo.mp4\" poster=\"https://raw.githubusercontent.com/poggufanz/rocky/main/assets/demo.webp\" width=\"960\" controls muted playsinline></video>"],
-    ["video with an autoplaying source child", "<video controls><source src=\"https://raw.githubusercontent.com/poggufanz/rocky/main/assets/demo.mp4\"></video>"],
+    ["anchor to an external host", "<a href=\"https://evil.example/demo.mp4\">"],
+    ["anchor with a target attribute", "<a href=\"https://raw.githubusercontent.com/poggufanz/rocky/main/assets/demo.mp4\" target=\"_blank\">"],
+    ["video from raw.githubusercontent, which GitHub strips anyway", "<video src=\"https://raw.githubusercontent.com/poggufanz/rocky/main/assets/demo.mp4\" poster=\"https://raw.githubusercontent.com/poggufanz/rocky/main/assets/demo.jpg\" width=\"960\" controls muted playsinline></video>"],
+    ["video with an event handler", "<video src=\"https://user-images.githubusercontent.com/883386/demo.mp4\" poster=\"https://raw.githubusercontent.com/poggufanz/rocky/main/assets/demo.jpg\" width=\"960\" controls muted playsinline onloadstart=\"alert(1)\"></video>"],
+    ["video with an autoplaying source child", "<video controls><source src=\"https://user-images.githubusercontent.com/883386/demo.mp4\"></video>"],
     ["img with an event handler", "<img src=\"https://raw.githubusercontent.com/poggufanz/rocky/main/assets/x.webp\" alt=\"x\" width=\"1\" onerror=\"alert(1)\">"],
     ["img with an external source", "<img src=\"https://evil.example/x.webp\" alt=\"x\" width=\"1\">"],
     ["img with unquoted attributes", "<img src=https://raw.githubusercontent.com/poggufanz/rocky/main/assets/x.webp alt=x width=1>"],

@@ -429,7 +429,13 @@ const SUPPORTED_RAW_HTML_TAGS = [
   /<\/p>/gu,
   /<br>/gu,
   /<img src="https:\/\/raw\.githubusercontent\.com\/poggufanz\/rocky\/main\/assets\/[A-Za-z0-9._-]+" alt="[^"<>]*"(?: width="\d{1,4}")?>/gu,
-  /<video src="https:\/\/raw\.githubusercontent\.com\/poggufanz\/rocky\/main\/assets\/[A-Za-z0-9._-]+\.mp4" poster="https:\/\/raw\.githubusercontent\.com\/poggufanz\/rocky\/main\/assets\/[A-Za-z0-9._-]+" width="\d{1,4}" controls muted playsinline>/gu,
+  // Anchor around the poster image. GitHub strips <video src="raw.githubusercontent…">
+  // entirely, so the README links to the file instead of embedding a player.
+  /<a href="https:\/\/raw\.githubusercontent\.com\/poggufanz\/rocky\/main\/assets\/[A-Za-z0-9._-]+">/gu,
+  /<\/a>/gu,
+  // Kept for the day the demo is uploaded through GitHub's own attachment flow:
+  // that host is the only one whose <video> survives the README sanitizer.
+  /<video src="https:\/\/user-images\.githubusercontent\.com\/[0-9]+\/[A-Za-z0-9.-]+\.mp4" poster="https:\/\/raw\.githubusercontent\.com\/poggufanz\/rocky\/main\/assets\/[A-Za-z0-9._-]+" width="\d{1,4}" controls muted playsinline>/gu,
   /<\/video>/gu,
 ];
 
