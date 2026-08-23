@@ -16,10 +16,9 @@ The useful part is local and deterministic. Rocky has no daemon, no telemetry, a
 ## See it work
 
 | | |
-| --- | --- |
-| **Failure memory** — a failed build becomes a fingerprint; when the same error returns, Rocky replays what turned it green last time. Evidence, not a guess. | ![Rocky remembers a failed build and its fix](https://raw.githubusercontent.com/poggufanz/rocky/main/assets/demo-loop.gif) |
-| **`rocky dash`** — every remembered change to one file, side by side: the agent's stated reason and the diff that landed. | ![rocky dash compare view](https://raw.githubusercontent.com/poggufanz/rocky/main/assets/demo-dash.gif) |
-| **Rationale gate** — an editing agent must state why before it touches a file. No stated reason, no edit; deny-once, fail-open. | ![PreToolUse rationale gate denying an unexplained edit](https://raw.githubusercontent.com/poggufanz/rocky/main/assets/demo-gate.gif) |
+| **Failure memory** a failed build becomes a fingerprint; when the same error returns, Rocky replays what turned it green last time. Evidence, not a guess. | ![Rocky remembers a failed build and its fix](https://raw.githubusercontent.com/poggufanz/rocky/main/assets/demo-loop.gif) |
+| **`rocky dash`** every remembered change to one file, side by side: the agent's stated reason and the diff that landed. | ![rocky dash compare view](https://raw.githubusercontent.com/poggufanz/rocky/main/assets/demo-dash.gif) |
+| **Rationale gate** an editing agent must state why before it touches a file. No stated reason, no edit; deny-once, fail-open. | ![PreToolUse rationale gate denying an unexplained edit](https://raw.githubusercontent.com/poggufanz/rocky/main/assets/demo-gate.gif) |
 
 ## Install
 
