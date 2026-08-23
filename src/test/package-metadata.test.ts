@@ -630,15 +630,14 @@ test("canonical release truth rejects drift in every release marker", async () =
   assert.deepEqual(
     releaseCheck.validateReleaseTruth({
       ...snapshot,
-      readme: `${snapshot.readme}\n<p align="center"><a href="https://youtu.be/ZrdKPAtv7JU"><img src="https://raw.githubusercontent.com/poggufanz/rocky/main/assets/demo.jpg" alt="demo" width="960"></a></p>\n`,
+      readme: `${snapshot.readme}\n[![demo](https://raw.githubusercontent.com/poggufanz/rocky/main/assets/demo.jpg)](https://youtu.be/ZrdKPAtv7JU)\n`,
     }),
     [],
-    "the exact-shape demo poster link must stay supported",
+    "the pure-markdown demo poster link must stay supported without any HTML exception",
   );
   for (const [label, markup] of [
+    ["raw anchor tag, no longer allowlisted", "<a href=\"https://youtu.be/ZrdKPAtv7JU\">"],
     ["anchor to an unrelated host", "<a href=\"https://evil.example/demo.mp4\">"],
-    ["anchor with a target attribute", "<a href=\"https://youtu.be/ZrdKPAtv7JU\" target=\"_blank\">"],
-    ["anchor with a tracking query", "<a href=\"https://youtu.be/ZrdKPAtv7JU?utm_source=readme\">"],
     ["video tag, which the README sanitizer drops anyway", "<video src=\"https://raw.githubusercontent.com/poggufanz/rocky/main/assets/demo.mp4\" controls></video>"],
     ["iframe embed", "<iframe src=\"https://www.youtube.com/embed/ZrdKPAtv7JU\"></iframe>"],
     ["img with an event handler", "<img src=\"https://raw.githubusercontent.com/poggufanz/rocky/main/assets/x.webp\" alt=\"x\" width=\"1\" onerror=\"alert(1)\">"],

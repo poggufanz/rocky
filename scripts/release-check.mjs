@@ -429,11 +429,6 @@ const SUPPORTED_RAW_HTML_TAGS = [
   /<\/p>/gu,
   /<br>/gu,
   /<img src="https:\/\/raw\.githubusercontent\.com\/poggufanz\/rocky\/main\/assets\/[A-Za-z0-9._-]+" alt="[^"<>]*"(?: width="\d{1,4}")?>/gu,
-  // GitHub's README sanitizer drops <video>/<iframe> outright unless the source is
-  // GitHub's own user-content upload host, so the demo is a poster image linking
-  // out to YouTube instead.
-  /<a href="https:\/\/youtu\.be\/[A-Za-z0-9_-]{11}">/gu,
-  /<\/a>/gu,
 ];
 
 function hasUnsupportedRawHtml(text) {
