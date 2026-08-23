@@ -1,5 +1,5 @@
 # Rocky
-<p align="center"><img src="https://raw.githubusercontent.com/poggufanz/rocky/main/assets/rocky-pixel.webp" alt="Pixel art of Rocky, a faceless five-limbed mineral engineer, working at a terminal"></p>
+<p align="center"><img src="https://raw.githubusercontent.com/poggufanz/rocky/main/assets/rocky.webp" alt="Rocky"></p>
 
 [![CI](https://github.com/poggufanz/rocky/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/poggufanz/rocky/actions/workflows/ci.yml)
 [![npm](https://img.shields.io/npm/v/@poggufanz/rocky-cli?style=flat-square)](https://www.npmjs.com/package/@poggufanz/rocky-cli)
