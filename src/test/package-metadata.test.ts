@@ -611,6 +611,26 @@ test("canonical release truth rejects drift in every release marker", async () =
     [],
     "URI and email autolinks must not count as raw HTML",
   );
+  assert.deepEqual(
+    releaseCheck.validateReleaseTruth({
+      ...snapshot,
+      readme: `${snapshot.readme}\n<p align="center"><img src="https://raw.githubusercontent.com/poggufanz/rocky/main/assets/extra.webp" alt="extra demo" width="640"><br></p>\n`,
+    }),
+    [],
+    "the exact-shape image-header HTML subset must stay supported",
+  );
+  for (const [label, markup] of [
+    ["img with an event handler", "<img src=\"https://raw.githubusercontent.com/poggufanz/rocky/main/assets/x.webp\" alt=\"x\" width=\"1\" onerror=\"alert(1)\">"],
+    ["img with an external source", "<img src=\"https://evil.example/x.webp\" alt=\"x\" width=\"1\">"],
+    ["img with unquoted attributes", "<img src=https://raw.githubusercontent.com/poggufanz/rocky/main/assets/x.webp alt=x width=1>"],
+    ["paragraph without the center attribute", "<p>"],
+  ] as const) {
+    assert.notDeepEqual(
+      releaseCheck.validateReleaseTruth({ ...snapshot, readme: `${snapshot.readme}\n${markup}\n` }),
+      [],
+      `README raw HTML near-miss (${label}) must fail closed`,
+    );
+  }
   for (const [label, markup] of [
     ["processing instruction", "<?xml version=\"1.0\">"],
     ["CDATA section", "<![CDATA[hidden release marker]]>"],

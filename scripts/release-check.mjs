@@ -422,10 +422,20 @@ function maskMarkdownInlineExclusions(text) {
 }
 
 // Release-truth docs deliberately reject raw HTML outside Markdown code until a real parser is warranted.
+// One narrow exception: the README image header. Only these exact-shape tags are stripped before the
+// check, and only the tags themselves — text between them stays visible, so nothing can hide inside.
+const SUPPORTED_RAW_HTML_TAGS = [
+  /<p align="center">/gu,
+  /<\/p>/gu,
+  /<br>/gu,
+  /<img src="https:\/\/raw\.githubusercontent\.com\/poggufanz\/rocky\/main\/assets\/[A-Za-z0-9._-]+" alt="[^"<>]*" width="\d{1,4}">/gu,
+];
+
 function hasUnsupportedRawHtml(text) {
   if (text.includes("\u0000")) return true;
-  const visible = maskMarkdownInlineExclusions(markdownSourceLines(text).join("\n"));
+  let visible = maskMarkdownInlineExclusions(markdownSourceLines(text).join("\n"));
   if (visible === undefined) return true;
+  for (const supported of SUPPORTED_RAW_HTML_TAGS) visible = visible.replace(supported, "");
   return /<(?:(?:!--)|(?:\?)|(?:!)|(?:\/?\s*[A-Za-z]))/u.test(visible);
 }
 
