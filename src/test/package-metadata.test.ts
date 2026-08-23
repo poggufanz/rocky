@@ -619,6 +619,14 @@ test("canonical release truth rejects drift in every release marker", async () =
     [],
     "the exact-shape image-header HTML subset must stay supported",
   );
+  assert.deepEqual(
+    releaseCheck.validateReleaseTruth({
+      ...snapshot,
+      readme: `${snapshot.readme}\n<p align="center"><img src="https://raw.githubusercontent.com/poggufanz/rocky/main/assets/extra.webp" alt="extra demo"></p>\n`,
+    }),
+    [],
+    "the image-header subset must stay supported without an explicit width",
+  );
   for (const [label, markup] of [
     ["img with an event handler", "<img src=\"https://raw.githubusercontent.com/poggufanz/rocky/main/assets/x.webp\" alt=\"x\" width=\"1\" onerror=\"alert(1)\">"],
     ["img with an external source", "<img src=\"https://evil.example/x.webp\" alt=\"x\" width=\"1\">"],

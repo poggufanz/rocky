@@ -428,7 +428,7 @@ const SUPPORTED_RAW_HTML_TAGS = [
   /<p align="center">/gu,
   /<\/p>/gu,
   /<br>/gu,
-  /<img src="https:\/\/raw\.githubusercontent\.com\/poggufanz\/rocky\/main\/assets\/[A-Za-z0-9._-]+" alt="[^"<>]*" width="\d{1,4}">/gu,
+  /<img src="https:\/\/raw\.githubusercontent\.com\/poggufanz\/rocky\/main\/assets\/[A-Za-z0-9._-]+" alt="[^"<>]*"(?: width="\d{1,4}")?>/gu,
 ];
 
 function hasUnsupportedRawHtml(text) {
