@@ -429,14 +429,11 @@ const SUPPORTED_RAW_HTML_TAGS = [
   /<\/p>/gu,
   /<br>/gu,
   /<img src="https:\/\/raw\.githubusercontent\.com\/poggufanz\/rocky\/main\/assets\/[A-Za-z0-9._-]+" alt="[^"<>]*"(?: width="\d{1,4}")?>/gu,
-  // GitHub's README sanitizer only keeps <video> when its source is GitHub's own
-  // user-content upload host (the one an issue/PR comment file-drop produces) —
-  // strips it for any other host, including raw.githubusercontent.com. It also
-  // strips autoplay/loop unconditionally, confirmed against public repos whose
-  // videos actually render (see PR discussion). controls+muted is the only
-  // reachable shape; playback still requires a click.
-  /<video src="https:\/\/(?:user-images\.githubusercontent\.com\/\d+\/[A-Za-z0-9._-]+|github\.com\/poggufanz\/rocky\/assets\/\d+\/[A-Za-z0-9-]+)" controls muted playsinline>/gu,
-  /<\/video>/gu,
+  // GitHub's README sanitizer drops <video>/<iframe> outright unless the source is
+  // GitHub's own user-content upload host, so the demo is a poster image linking
+  // out to YouTube instead.
+  /<a href="https:\/\/youtu\.be\/[A-Za-z0-9_-]{11}">/gu,
+  /<\/a>/gu,
 ];
 
 function hasUnsupportedRawHtml(text) {
