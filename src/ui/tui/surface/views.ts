@@ -10,7 +10,7 @@ import { matchCommands } from "./registry.js";
 import { pulse } from "../core/motion.js";
 import { getMemorySnapshot, filteredFiles, initialCompareState, browseVisible, shellMood, type ShellState, type CompareState } from "./shell.js";
 import { sessionItems, pickList } from "./picker.js";
-import { getCachedDiff, type CompareRec } from "./compare-data.js";
+import { getCachedDiff, lineOverlapPredicate, type CompareRec } from "./compare-data.js";
 import { elapsed } from "../../rocky.js";
 import type { MemoryRecord } from "../../../core/memory-read.js";
 
@@ -619,7 +619,8 @@ export class CompareViewNode extends Node {
     }
 
     if (this.state.modal === "timeline" && this.state.file) {
-      const list = pickList(this.state.file.recs, this.state.picker);
+      const strict = this.state.picker.strict === true;
+      const list = pickList(this.state.file.recs, this.state.picker, lineOverlapPredicate(this.state.file.path));
       const mw = Math.min(58, Math.max(36, cols - 40));
       const mh = rows - 2;
       const mx = Math.max(1, cols - mw);
@@ -641,6 +642,12 @@ export class CompareViewNode extends Node {
           ? `A locked · ${stamp(this.state.A ?? 0)}`
           : "cursor previews left, enter locks A";
       buf.blitText(mx + 2, my + 1, modalHint, "muted");
+      const strictLabel = strict ? "strict · same lines" : "loose · whole file";
+      const labelX = mx + mw - stringWidth(strictLabel) - 2;
+      // narrow modals keep the hint whole; the footer still names the toggle
+      if (labelX >= mx + 3 + stringWidth(modalHint)) {
+        buf.blitText(labelX, my + 1, strictLabel, strict ? "accent" : "muted");
+      }
       buf.blitText(mx + 2, my + 2, "/ ", "accent");
       buf.blitText(mx + 4, my + 2, this.state.picker.tquery || "search intent…", this.state.picker.tquery ? "text" : "muted");
       if (pulse(this.frame, this.motionOn)) {
@@ -650,6 +657,11 @@ export class CompareViewNode extends Node {
         buf.blitText(mx + mw - stringWidth(String(list.length)) - 3, my + 2, String(list.length), "muted");
       }
 
+      const lockedSide = Boolean(this.state.picker.only || (this.state.picker.markA && this.state.picker.recA));
+      if (list.length === 0 && strict && lockedSide) {
+        buf.blitText(mx + 2, my + 4, cut("no moment touches those same lines", mw - 4), "text2");
+        buf.blitText(mx + 2, my + 5, cut("[tab] hear the whole file instead", mw - 4), "muted");
+      }
       const items = sessionItems(list);
       const viewH = mh - 5;
       const curPos = Math.max(0, items.findIndex((it) => it.idx === this.state.picker.tsel));
@@ -690,16 +702,20 @@ export class CompareViewNode extends Node {
           on ? "text" : r.machine ? "muted" : "text2",
         );
       }
-      buf.blitText(
-        mx + 2,
-        my + mh - 2,
-        only
-          ? `[enter] set ${only}  [←→] session  [esc] keep`
-          : phase2
-          ? "[enter] lock B  [←→] session  [esc] unlock A"
-          : "[enter] lock A  [←→] session  [esc] back",
-        "muted",
-      );
+      // segments in falling order of need — the last ones drop when the box is tight
+      const footSegs = [
+        only ? `[enter] set ${only}` : phase2 ? "[enter] lock B" : "[enter] lock A",
+        `[tab] ${strict ? "loose" : "strict"}`,
+        only ? "[esc] keep" : phase2 ? "[esc] unlock A" : "[esc] back",
+        "[←→] session",
+      ];
+      let footer = "";
+      for (const seg of footSegs) {
+        const next = footer ? `${footer}  ${seg}` : seg;
+        if (stringWidth(next) > mw - 4) break;
+        footer = next;
+      }
+      buf.blitText(mx + 2, my + mh - 2, footer, "muted");
     }
   }
 

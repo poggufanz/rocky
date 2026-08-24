@@ -32,7 +32,7 @@ import { moodFor, type Mood } from "../components/carapace.js";
 import type { Key } from "../state.js";
 import type { PickerState } from "./picker.js";
 import { updatePicker, previewPair, pickList } from "./picker.js";
-import { type CompareRec, type FileEntry, fileIndex } from "./compare-data.js";
+import { type CompareRec, type FileEntry, fileIndex, lineOverlapPredicate } from "./compare-data.js";
 
 export type CompareFocus = "files" | "compare" | "recA" | "recB" | "diffA" | "diffB";
 export type CompareModal = "scope" | "timeline" | null;
@@ -125,6 +125,10 @@ export function initialCompareState(records: MemoryRecord[] = []): CompareState 
  * side keeps its record, so changing A never costs a second pick for B.
  * Returns the state untouched when there is no pair to swap into.
  */
+export function relatedFor(state: CompareState): ((a: CompareRec, b: CompareRec) => boolean) | undefined {
+  return state.file ? lineOverlapPredicate(state.file.path) : undefined;
+}
+
 export function repickSide(state: CompareState, side: "A" | "B"): CompareState {
   if (state.mode !== "two" || !state.file || !state.recA || !state.recB) return state;
   const picker: PickerState = {
@@ -133,11 +137,12 @@ export function repickSide(state: CompareState, side: "A" | "B"): CompareState {
     only: side,
     recA: state.recA,
     recB: state.recB,
+    ...(state.picker.strict ? { strict: true } : {}),
     tsel: 0,
     tquery: "",
   };
   const current = side === "A" ? state.recA : state.recB;
-  const list = pickList(state.file.recs, picker);
+  const list = pickList(state.file.recs, picker, relatedFor(state));
   return {
     ...state,
     modal: "timeline",
@@ -239,7 +244,7 @@ export function updateCompareState(state: CompareState, key: Key): CompareState 
           ...state,
           modal: "timeline",
           mode: "two",
-          picker: { open: true, markA: false, tsel: 0, tquery: "" },
+          picker: { open: true, markA: false, tsel: 0, tquery: "", ...(state.picker.strict ? { strict: true } : {}) },
           recA: null,
           recB: null,
           A: null,
@@ -259,7 +264,8 @@ export function updateCompareState(state: CompareState, key: Key): CompareState 
 
   if (state.modal === "timeline") {
     const fileRecs = state.file?.recs ?? [];
-    const nextPicker = updatePicker(state.picker, fileRecs, key);
+    const related = relatedFor(state);
+    const nextPicker = updatePicker(state.picker, fileRecs, key, related);
     if (!nextPicker.open) {
       if (nextPicker.recB) {
         const recA = nextPicker.recA ?? state.recA;
@@ -294,7 +300,7 @@ export function updateCompareState(state: CompareState, key: Key): CompareState 
         };
       }
     } else {
-      const pair = previewPair(nextPicker, fileRecs);
+      const pair = previewPair(nextPicker, fileRecs, related);
       return {
         ...state,
         picker: nextPicker,

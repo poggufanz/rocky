@@ -126,6 +126,37 @@ test("esc during a swap closes with the original pair intact", () => {
   assert.equal(st.recB, recs[1]);
 });
 
+// only recs[1] shares lines with recs[0]; the rest touched the same file elsewhere
+const sameLines = (a: any, b: any) => (a === recs[0] || b === recs[0] ? a === recs[1] || b === recs[1] : false);
+
+test("strict keeps only the candidates that touched the same lines", () => {
+  const locked: PickerState = { ...open(), markA: true, recA: recs[0], strict: true };
+  const strictList = pickList(recs, locked, sameLines);
+  assert.deepEqual(strictList, [recs[1]]);
+  const looseList = pickList(recs, { ...locked, strict: false }, sameLines);
+  assert.equal(looseList.length, recs.length - 1, "loose still hears the whole file");
+});
+
+test("strict does nothing before a side is locked", () => {
+  const st: PickerState = { ...open(), strict: true };
+  assert.equal(pickList(recs, st, sameLines).length, recs.length);
+});
+
+test("tab toggles strict and re-seats the cursor", () => {
+  let st = key({ ...open(), tsel: 3 }, "tab");
+  assert.equal(st.strict, true);
+  assert.equal(st.tsel, 0);
+  st = key(st, "tab");
+  assert.equal(st.strict, false);
+});
+
+test("locking A under strict seats the cursor inside the filtered menu", () => {
+  const st = updatePicker({ ...open(), strict: true }, recs, { name: "enter" } as any, sameLines);
+  assert.equal(st.markA, true);
+  assert.equal(st.recA, recs[0]);
+  assert.equal(pickList(recs, st, sameLines)[st.tsel], recs[1]);
+});
+
 test("backspace and paste update picker search query and reset tsel", () => {
   let st = open();
   st = key(st, "char", "a");

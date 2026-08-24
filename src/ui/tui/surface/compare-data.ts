@@ -361,6 +361,38 @@ export const defaultDiffIo = {
   },
 };
 
+/**
+ * Line spans one record's diff touched, on both the old and the new side.
+ * `pad` widens each span because line numbers drift between commits — two
+ * edits to the same function can sit a few lines apart in different diffs.
+ * ponytail: hunk headers only, no content matching; if drift ever exceeds the
+ * pad, move to blame-anchored spans.
+ */
+export function touchedSpans(rows: DiffRow[], pad = 3): Array<[number, number]> {
+  const spans: Array<[number, number]> = [];
+  for (const row of rows) {
+    if (row.k !== "@") continue;
+    const m = row.t.match(/@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/);
+    if (!m) continue;
+    const o = Number(m[1]);
+    const oLen = m[2] === undefined ? 1 : Number(m[2]);
+    const n = Number(m[3]);
+    const nLen = m[4] === undefined ? 1 : Number(m[4]);
+    if (oLen > 0) spans.push([Math.max(1, o - pad), o + oLen - 1 + pad]);
+    if (nLen > 0) spans.push([Math.max(1, n - pad), n + nLen - 1 + pad]);
+  }
+  return spans;
+}
+
+export function spansOverlap(a: Array<[number, number]>, b: Array<[number, number]>): boolean {
+  for (const [as, ae] of a) {
+    for (const [bs, be] of b) {
+      if (as <= be && bs <= ae) return true;
+    }
+  }
+  return false;
+}
+
 const diffCache = new Map<string, DiffResult>();
 
 export function clearDiffCache(): void {
@@ -384,5 +416,23 @@ export function getCachedDiff(
     diffCache.set(key, cached);
   }
   return cached;
+}
+
+/**
+ * Strict-compare rule: same file is not enough, both moments must touch
+ * overlapping lines. Fails open when rocky holds no diff for a side — he never
+ * hides a record he cannot judge.
+ */
+export function lineOverlapPredicate(
+  filePath: string,
+  io: Parameters<typeof getCachedDiff>[2] = defaultDiffIo,
+): (a: CompareRec, b: CompareRec) => boolean {
+  return (a, b) => {
+    const sa = touchedSpans(getCachedDiff(filePath, a, io).rows);
+    if (sa.length === 0) return true;
+    const sb = touchedSpans(getCachedDiff(filePath, b, io).rows);
+    if (sb.length === 0) return true;
+    return spansOverlap(sa, sb);
+  };
 }
 

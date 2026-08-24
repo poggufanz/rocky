@@ -11,9 +11,17 @@ export interface PickerState {
   only?: "A" | "B";
   recA?: CompareRec;
   recB?: CompareRec;
+  /**
+   * Strict pick: the locked side sets the lines, and only moments that touched
+   * those same lines stay in the menu. Off means same file is enough.
+   */
+  strict?: boolean;
   tsel: number;
   tquery: string;
 }
+
+/** Same-lines test between the locked side and one candidate. */
+export type RelatedFn = (locked: CompareRec, candidate: CompareRec) => boolean;
 
 export interface SessionItem {
   hdr?: number;
@@ -54,10 +62,14 @@ function lockedSide(st: PickerState): CompareRec | undefined {
 }
 
 /** Pick-modal list: intent-only search; agent envelopes match on their summary. */
-export function pickList(recs: CompareRec[], st: PickerState): CompareRec[] {
+export function pickList(recs: CompareRec[], st: PickerState, related?: RelatedFn): CompareRec[] {
   // locked side leaves the menu; its pane is already wearing it
   const locked = lockedSide(st);
-  const list = locked ? recs.filter((r) => r !== locked) : recs;
+  let list = locked ? recs.filter((r) => r !== locked) : recs;
+  // strict only bites once a side is locked — nothing to line up against before that
+  if (st.strict && locked && related) {
+    list = list.filter((r) => related(locked, r));
+  }
   if (!st.tquery) return list;
   const q = st.tquery.toLowerCase();
   return list.filter((r) => {
@@ -67,8 +79,8 @@ export function pickList(recs: CompareRec[], st: PickerState): CompareRec[] {
 }
 
 /** Live preview of the pending pick pair: cursor is candidate */
-export function previewPair(st: PickerState, recs: CompareRec[]): { a?: CompareRec; b?: CompareRec } {
-  const list = pickList(recs, st);
+export function previewPair(st: PickerState, recs: CompareRec[], related?: RelatedFn): { a?: CompareRec; b?: CompareRec } {
+  const list = pickList(recs, st, related);
   const cur = list.length > 0 ? list[Math.max(0, Math.min(st.tsel, list.length - 1))] : undefined;
   if (st.only === "A") {
     return { a: cur, b: st.recB };
@@ -83,7 +95,11 @@ export function previewPair(st: PickerState, recs: CompareRec[]): { a?: CompareR
 }
 
 /** Pure reducer for timeline picker navigation and selection */
-export function updatePicker(st: PickerState, recs: CompareRec[], key: Key): PickerState {
+export function updatePicker(st: PickerState, recs: CompareRec[], key: Key, related?: RelatedFn): PickerState {
+  if (key.name === "tab" || key.name === "shifttab") {
+    return { ...st, strict: !st.strict, tsel: 0 };
+  }
+
   if (key.name === "esc") {
     if (st.tquery) {
       return { ...st, tquery: "", tsel: 0 };
@@ -99,12 +115,12 @@ export function updatePicker(st: PickerState, recs: CompareRec[], key: Key): Pic
   }
 
   if (key.name === "down") {
-    const list = pickList(recs, st);
+    const list = pickList(recs, st, related);
     return { ...st, tsel: Math.min(Math.max(0, list.length - 1), st.tsel + 1) };
   }
 
   if (key.name === "left" || key.name === "right") {
-    const list = pickList(recs, st);
+    const list = pickList(recs, st, related);
     const items = sessionItems(list);
     const starts: number[] = [];
     for (let i = 0; i < items.length - 1; i++) {
@@ -131,7 +147,7 @@ export function updatePicker(st: PickerState, recs: CompareRec[], key: Key): Pic
   }
 
   if (key.name === "enter") {
-    const list = pickList(recs, st);
+    const list = pickList(recs, st, related);
     const curIdx = Math.max(0, Math.min(st.tsel, list.length - 1));
     const rec = list[curIdx];
     if (!rec) return st;
@@ -144,14 +160,19 @@ export function updatePicker(st: PickerState, recs: CompareRec[], key: Key): Pic
       };
     }
     if (!st.markA) {
-      const idxInFull = recs.indexOf(rec);
-      return {
-        ...st,
-        markA: true,
-        recA: rec,
-        tquery: "",
-        tsel: Math.max(0, idxInFull - 1),
-      };
+      const locked: PickerState = { ...st, markA: true, recA: rec, tquery: "" };
+      // strict can thin the phase-2 menu, so seat the cursor by that menu
+      const nextList = pickList(recs, locked, related);
+      let tsel = 0;
+      let best = Infinity;
+      for (let i = 0; i < nextList.length; i++) {
+        const d = Math.abs(nextList[i].ts - rec.ts);
+        if (d < best) {
+          best = d;
+          tsel = i;
+        }
+      }
+      return { ...locked, tsel };
     } else {
       return {
         ...st,

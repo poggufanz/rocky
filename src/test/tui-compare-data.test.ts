@@ -8,6 +8,10 @@ import {
   gitRootFor,
   trueCaseRel,
   parsePatch,
+  touchedSpans,
+  spansOverlap,
+  lineOverlapPredicate,
+  clearDiffCache,
   diffFor,
   fileIndex,
   type CompareRec,
@@ -41,6 +45,32 @@ test("parsePatch numbers both gutters through hunks", () => {
   assert.equal(del?.o, 3);
   const ctx = rows.filter((r: DiffRow) => r.k === " ");
   assert.deepEqual(ctx.map((r: DiffRow) => [r.o, r.n]), [[2, 2], [4, 5]]);
+});
+
+test("touchedSpans pads both gutters and spansOverlap separates distant edits", () => {
+  const near = touchedSpans(parsePatch("@@ -12,7 +12,9 @@\n ctx\n-old\n+new"));
+  const far = touchedSpans(parsePatch("@@ -400,3 +402,3 @@\n ctx\n-old\n+new"));
+  assert.deepEqual(near, [[9, 21], [9, 23]]);
+  assert.equal(spansOverlap(near, far), false, "same file, different lines is not a comparison");
+  assert.equal(spansOverlap(near, touchedSpans(parsePatch("@@ -20,2 +20,2 @@\n-a\n+b"))), true);
+  assert.deepEqual(touchedSpans(parsePatch("no hunk here")), []);
+});
+
+test("lineOverlapPredicate hides distant edits and fails open with no diff", () => {
+  clearDiffCache();
+  const io = {
+    exists: (p: string) => ["/w/r", "/w/r/.git", "/w/r/src"].includes(p.replace(/\\/g, "/").replace(/\/+$/, "")),
+    lsFiles: () => ["src/f.ts"],
+    resolve: (o: { ts: number; head?: string; file: string; cwd: string }) =>
+      o.ts === 3 ? undefined : { commit: "c", diff: o.ts === 1 ? "@@ -12,7 +12,9 @@\n-a\n+b" : "@@ -400,3 +402,3 @@\n-a\n+b" },
+    lastShaBefore: () => "",
+  };
+  const rec = (ts: number): CompareRec => ({ kind: "triple", ts, cwd: "/w/r", source: "", machine: false, head: "h" });
+  const related = lineOverlapPredicate("/w/r/src/f.ts", io);
+  assert.equal(related(rec(1), rec(2)), false, "line 12 and line 400 are different sections");
+  assert.equal(related(rec(1), rec(1)), true);
+  assert.equal(related(rec(1), rec(3)), true, "no diff to judge means rocky keeps the record");
+  clearDiffCache();
 });
 
 test("diffFor ladder: no root refuses, head resolves, fallback labels prior", () => {
