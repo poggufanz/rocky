@@ -1110,6 +1110,39 @@ test("short claim read leaves durable evidence and writes no triple", { timeout:
   assert.deepEqual(readFileSync(join(paths.spoolDir, claimName)), originalBytes);
 });
 
+test("degradedLabel speaks the path for non-style files even when props exist", () => {
+  assert.equal(
+    degradedLabel("ingat ya database readonly", [
+      { path: "app/Http/Controllers/InventoryTransferController.php", plusMinus: [3, 1], props: ["width"] },
+    ]),
+    'you say "ingat ya database readonly". it is app/Http/Controllers/InventoryTransferController.php. I think. check, question',
+  );
+});
+
+test("machine envelope intent persists but never speaks a label", async (t) => {
+  const paths = freshPaths(t);
+  append("envelope", [
+    {
+      v: 1,
+      agent: "claude-code",
+      kind: "intent",
+      ts: 1,
+      cwd: paths.home,
+      text: "<task-notification> <task-id>a624e30e</task-id> agent finished",
+    },
+    { v: 1, agent: "claude-code", kind: "mechanism", ts: 2, tool: "Edit", path: "src/app.css", excerpt: "margin-top: 8px" },
+  ], paths);
+  const labels: string[] = [];
+  const triple = await annotateBatch("envelope", {
+    paths,
+    git: (args) => (args[0] === "rev-parse" ? "abc123" : "3\t1\tsrc/app.css"),
+    queueLabel: (line) => labels.push(line),
+  });
+  assert.ok(triple);
+  assert.ok(triple.intent?.text.startsWith("<task-notification"));
+  assert.deepEqual(labels, []);
+});
+
 test("degradedLabel uses exact rocky voice and strips terminal injection", () => {
   assert.equal(
     degradedLabel("naikin dikit", [{ path: "src/app.css", plusMinus: [3, 1], props: ["margin-top"] }]),
@@ -1141,14 +1174,14 @@ test("default label queue rejects symlink and non-regular destinations", async (
   });
 });
 
-test("default label queue keeps exactly the last ten safe one-line labels", (t) => {
+test("default label queue keeps exactly the last four safe one-line labels", (t) => {
   const paths = freshPaths(t);
   for (let i = 0; i < 12; i += 1) defaultQueueLabel(`safe-${i}`, paths);
   defaultQueueLabel("hostile\n\u001b[31mline\u202e", paths);
 
   const lines = readFileSync(paths.labels, "utf8").split("\n").filter(Boolean);
-  assert.equal(lines.length, 10);
-  assert.equal(lines[0], "safe-3");
+  assert.equal(lines.length, 4);
+  assert.equal(lines[0], "safe-9");
   assert.equal(lines.at(-1), "hostile line");
   assert.equal(/[\r\n\u001b\u202e]/u.test(lines.join("")), false);
   assert.equal(lstatSync(paths.labels).isFile(), true);

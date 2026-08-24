@@ -174,7 +174,10 @@ __rocky_drain_label() (
     __rocky_proc_pid=""
     __rocky_proc_start=""
     [[ "$__rocky_proc_target" == "self" || "$__rocky_proc_target" =~ ^[1-9][0-9]*$ ]] || return 1
-    IFS= read -r __rocky_proc_line < "/proc/$__rocky_proc_target/stat" 2>/dev/null || return 1
+    # 2>/dev/null must come BEFORE the input redirect: redirections apply left
+    # to right, and a dead owner PID makes the open itself fail — with the
+    # order reversed bash prints "No such file or directory" on every prompt.
+    IFS= read -r __rocky_proc_line 2>/dev/null < "/proc/$__rocky_proc_target/stat" || return 1
     __rocky_proc_pid="${__rocky_proc_line%% *}"
     # comm can contain spaces and ')'; strip through the final ") " so the
     # remaining fields start at state and field 22 is the twentieth token.
