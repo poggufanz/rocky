@@ -80,6 +80,52 @@ test("phase-2 enter locks B and closes picker with both recs set", () => {
   assert.equal(st.recB?.ts, 99 * MIN);
 });
 
+const swapping = (side: "A" | "B"): PickerState => ({
+  open: true,
+  markA: false,
+  only: side,
+  recA: recs[0],
+  recB: recs[1],
+  tsel: 0,
+  tquery: "",
+});
+
+test("swapping one side hides the other side's record from the candidates", () => {
+  assert.ok(!pickList(recs, swapping("A")).some((r) => r === recs[1]), "B stays out while A is swapped");
+  assert.ok(!pickList(recs, swapping("B")).some((r) => r === recs[0]), "A stays out while B is swapped");
+});
+
+test("swapping A previews against the locked B and keeps it after enter", () => {
+  let st = swapping("A");
+  st = key(st, "down"); // candidates skip B, so idx 1 is recs[2]
+  const preview = previewPair(st, recs);
+  assert.equal(preview.a?.ts, recs[2].ts);
+  assert.equal(preview.b, recs[1], "locked B previews unchanged");
+  st = key(st, "enter");
+  assert.equal(st.open, false);
+  assert.equal(st.recA, recs[2]);
+  assert.equal(st.recB, recs[1], "enter never touches the locked side");
+});
+
+test("swapping B replaces only B", () => {
+  let st = key(swapping("B"), "down"); // candidates skip A, so idx 1 is recs[2]
+  st = key(st, "enter");
+  assert.equal(st.open, false);
+  assert.equal(st.recA, recs[0], "A survives a B swap");
+  assert.equal(st.recB, recs[2]);
+});
+
+test("esc during a swap closes with the original pair intact", () => {
+  let st = key(swapping("A"), "char", "p");
+  st = key(st, "esc");
+  assert.equal(st.tquery, "", "query clears first");
+  assert.equal(st.open, true);
+  st = key(st, "esc");
+  assert.equal(st.open, false);
+  assert.equal(st.recA, recs[0]);
+  assert.equal(st.recB, recs[1]);
+});
+
 test("backspace and paste update picker search query and reset tsel", () => {
   let st = open();
   st = key(st, "char", "a");

@@ -4,6 +4,11 @@ import type { Key } from "../state.js";
 export interface PickerState {
   open: boolean;
   markA: boolean;
+  /**
+   * Re-pick one side of a pair that already exists. The other side stays
+   * locked and keeps its record, so swapping A does not cost a fresh B.
+   */
+  only?: "A" | "B";
   recA?: CompareRec;
   recB?: CompareRec;
   tsel: number;
@@ -41,10 +46,18 @@ export function sessionItems(list: CompareRec[]): SessionItem[] {
   return items;
 }
 
+/** The side that is already locked, so it never shows up as a candidate. */
+function lockedSide(st: PickerState): CompareRec | undefined {
+  if (st.only === "A") return st.recB;
+  if (st.only === "B") return st.recA;
+  return st.markA ? st.recA : undefined;
+}
+
 /** Pick-modal list: intent-only search; agent envelopes match on their summary. */
 export function pickList(recs: CompareRec[], st: PickerState): CompareRec[] {
-  // A locked: it leaves the menu; the left pane is already wearing it
-  const list = st.markA && st.recA ? recs.filter((r) => r !== st.recA) : recs;
+  // locked side leaves the menu; its pane is already wearing it
+  const locked = lockedSide(st);
+  const list = locked ? recs.filter((r) => r !== locked) : recs;
   if (!st.tquery) return list;
   const q = st.tquery.toLowerCase();
   return list.filter((r) => {
@@ -57,6 +70,12 @@ export function pickList(recs: CompareRec[], st: PickerState): CompareRec[] {
 export function previewPair(st: PickerState, recs: CompareRec[]): { a?: CompareRec; b?: CompareRec } {
   const list = pickList(recs, st);
   const cur = list.length > 0 ? list[Math.max(0, Math.min(st.tsel, list.length - 1))] : undefined;
+  if (st.only === "A") {
+    return { a: cur, b: st.recB };
+  }
+  if (st.only === "B") {
+    return { a: st.recA, b: cur };
+  }
   if (st.markA && st.recA) {
     return { a: st.recA, b: cur };
   }
@@ -116,6 +135,14 @@ export function updatePicker(st: PickerState, recs: CompareRec[], key: Key): Pic
     const curIdx = Math.max(0, Math.min(st.tsel, list.length - 1));
     const rec = list[curIdx];
     if (!rec) return st;
+    if (st.only) {
+      return {
+        ...st,
+        open: false,
+        tquery: "",
+        ...(st.only === "A" ? { recA: rec } : { recB: rec }),
+      };
+    }
     if (!st.markA) {
       const idxInFull = recs.indexOf(rec);
       return {

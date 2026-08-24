@@ -87,7 +87,7 @@ export function speakFailureMemory(
 
   if (previous.length > 0) {
     const first = previous[0];
-    say(`I remember this error. You hear it before. ${ago(first.ts)}. Same same.`);
+    say(`I remember this error. you hear it before. ${ago(first.ts)}. same same.`);
     const withFix = [...previous].reverse().find((f) => getFix(memory, f, now));
     if (withFix) {
       const fix = getFix(memory, withFix, now)!;

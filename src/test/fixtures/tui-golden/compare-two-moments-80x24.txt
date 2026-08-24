@@ -21,4 +21,4 @@
 ┌─ filter files ───────────────────────────────────────────────────────────────┐
 │ › ▏ype part of a path… !md hides .md                                         │
 └──────────────────────────────────────────────────────────────────────────────┘
- ROCKY   pane  recB   j/k  scroll   z  zoom   d  hide diff   tab  next   /  filt
+ ROCKY   a/b  swap   j/k  scroll   z  zoom   d  hide diff   tab  next   /  filte

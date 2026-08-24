@@ -31,7 +31,7 @@ import type { DashRow } from "../state.js";
 import { moodFor, type Mood } from "../components/carapace.js";
 import type { Key } from "../state.js";
 import type { PickerState } from "./picker.js";
-import { updatePicker, previewPair } from "./picker.js";
+import { updatePicker, previewPair, pickList } from "./picker.js";
 import { type CompareRec, type FileEntry, fileIndex } from "./compare-data.js";
 
 export type CompareFocus = "files" | "compare" | "recA" | "recB" | "diffA" | "diffB";
@@ -117,6 +117,31 @@ export function initialCompareState(records: MemoryRecord[] = []): CompareState 
     showDiff: true,
     zoom: false,
     rects: {},
+  };
+}
+
+/**
+ * Reopen the timeline over one side of a pair that already exists. The other
+ * side keeps its record, so changing A never costs a second pick for B.
+ * Returns the state untouched when there is no pair to swap into.
+ */
+export function repickSide(state: CompareState, side: "A" | "B"): CompareState {
+  if (state.mode !== "two" || !state.file || !state.recA || !state.recB) return state;
+  const picker: PickerState = {
+    open: true,
+    markA: false,
+    only: side,
+    recA: state.recA,
+    recB: state.recB,
+    tsel: 0,
+    tquery: "",
+  };
+  const current = side === "A" ? state.recA : state.recB;
+  const list = pickList(state.file.recs, picker);
+  return {
+    ...state,
+    modal: "timeline",
+    picker: { ...picker, tsel: Math.max(0, list.indexOf(current)) },
   };
 }
 
@@ -254,7 +279,7 @@ export function updateCompareState(state: CompareState, key: Key): CompareState 
           hscrollB: 0,
           expA: false,
           expB: false,
-          focus: "recB",
+          focus: nextPicker.only === "A" ? "recA" : "recB",
         };
       } else {
         return {
@@ -334,6 +359,11 @@ export function updateCompareState(state: CompareState, key: Key): CompareState 
       return { ...state, fquery: state.fquery + key.text, fsel: 0, ftop: 0 };
     }
     return state;
+  }
+
+  if (key.name === "char" && (key.ch === "a" || key.ch === "b")) {
+    const swapped = repickSide(state, key.ch === "a" ? "A" : "B");
+    if (swapped !== state) return swapped;
   }
 
   if (key.name === "up" || (key.name === "char" && key.ch === "k")) {

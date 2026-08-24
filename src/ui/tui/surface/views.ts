@@ -582,7 +582,11 @@ export class CompareViewNode extends Node {
       : this.state.focus === "files"
       ? [["type", "filter"], ["↑↓", "pick"], ["enter", "scope"], ["tab", "panes"]]
       : [
-          ["pane", this.state.focus],
+          // the focused box already wears the accent, so a swappable pair
+          // spends this slot on the hint the pane name cannot give
+          this.state.mode === "two" && this.state.recA && this.state.recB
+            ? ["a/b", "swap"]
+            : ["pane", this.state.focus],
           ["j/k", "scroll"],
           ["z", this.state.zoom ? "unzoom" : "zoom"],
           ["d", this.state.showDiff ? "hide diff" : "show diff"],
@@ -621,13 +625,22 @@ export class CompareViewNode extends Node {
       const mx = Math.max(1, cols - mw);
       const my = 1;
       const phase2 = this.state.picker.markA && this.state.picker.recA;
-      paintBox(buf, { x: mx, y: my, w: mw, h: mh }, phase2 ? "timeline · pick B" : "timeline · pick A", true, this.ascii);
-      buf.blitText(
-        mx + 2,
-        my + 1,
-        phase2 ? `A locked · ${stamp(this.state.A ?? 0)}` : "cursor previews left, enter locks A",
-        "muted",
-      );
+      const only = this.state.picker.only;
+      const modalTitle = only
+        ? `timeline · swap ${only}`
+        : phase2
+        ? "timeline · pick B"
+        : "timeline · pick A";
+      paintBox(buf, { x: mx, y: my, w: mw, h: mh }, modalTitle, true, this.ascii);
+      const modalHint =
+        only === "A"
+          ? `B stays · ${stamp(this.state.B ?? 0)}`
+          : only === "B"
+          ? `A stays · ${stamp(this.state.A ?? 0)}`
+          : phase2
+          ? `A locked · ${stamp(this.state.A ?? 0)}`
+          : "cursor previews left, enter locks A";
+      buf.blitText(mx + 2, my + 1, modalHint, "muted");
       buf.blitText(mx + 2, my + 2, "/ ", "accent");
       buf.blitText(mx + 4, my + 2, this.state.picker.tquery || "search intent…", this.state.picker.tquery ? "text" : "muted");
       if (pulse(this.frame, this.motionOn)) {
@@ -680,7 +693,11 @@ export class CompareViewNode extends Node {
       buf.blitText(
         mx + 2,
         my + mh - 2,
-        phase2 ? "[enter] lock B  [←→] session  [esc] unlock A" : "[enter] lock A  [←→] session  [esc] back",
+        only
+          ? `[enter] set ${only}  [←→] session  [esc] keep`
+          : phase2
+          ? "[enter] lock B  [←→] session  [esc] unlock A"
+          : "[enter] lock A  [←→] session  [esc] back",
         "muted",
       );
     }
