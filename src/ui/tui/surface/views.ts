@@ -568,7 +568,7 @@ export class CompareViewNode extends Node {
       this.ascii,
     );
     buf.blitText(filterInner.x, filterInner.y, "›", "accent");
-    const qText = this.state.fquery || "type part of a path…";
+    const qText = this.state.fquery || "type part of a path… !md hides .md";
     buf.blitText(filterInner.x + 2, filterInner.y, qText, this.state.fquery ? "text" : "muted");
     if (pulse(this.frame, this.motionOn)) {
       buf.blitText(filterInner.x + 2 + (this.state.fquery ? stringWidth(this.state.fquery) : 0), filterInner.y, "▏", "accent");

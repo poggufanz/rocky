@@ -132,10 +132,28 @@ export function compareFocusables(state: CompareState): CompareFocus[] {
   return f;
 }
 
+/**
+ * One hide term against one lower-cased path. Extension first (`md` hides
+ * `*.md` but never `cmd.ts`), then whole path segment (`node_modules`), then
+ * plain substring once the term carries a slash (`docs/api`).
+ */
+function hideMatches(path: string, term: string): boolean {
+  if (path.endsWith(term.startsWith(".") ? term : `.${term}`)) return true;
+  if (term.includes("/")) return path.includes(term);
+  return path.split("/").includes(term);
+}
+
 export function filteredFiles(state: CompareState): FileEntry[] {
   if (!state.fquery) return state.files;
-  const q = state.fquery.toLowerCase();
-  return state.files.filter((f) => f.path.toLowerCase().includes(q));
+  const terms = state.fquery.toLowerCase().split(/\s+/).filter(Boolean);
+  const hide = terms.filter((t) => t.length > 1 && (t[0] === "!" || t[0] === "-")).map((t) => t.slice(1));
+  const keep = terms.filter((t) => t[0] !== "!" && t[0] !== "-");
+  if (hide.length === 0 && keep.length === 0) return state.files;
+  return state.files.filter((f) => {
+    const p = f.path.toLowerCase();
+    if (hide.some((t) => hideMatches(p, t))) return false;
+    return keep.every((t) => p.includes(t));
+  });
 }
 
 export function scrollComparePane(state: CompareState, focus: CompareFocus, delta: number): CompareState {

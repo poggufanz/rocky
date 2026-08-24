@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { browseVisible, initialCompareState, initialShell, updateShell, handleWhy, type ShellState } from "../ui/tui/surface/shell.js";
+import { browseVisible, filteredFiles, initialCompareState, initialShell, updateShell, handleWhy, type ShellState } from "../ui/tui/surface/shell.js";
 import { streamView, surfaceRoot, compareView } from "../ui/tui/surface/views.js";
 import { renderToLines } from "../ui/tui/core/renderer.js";
 
@@ -36,6 +36,20 @@ const type = (s: ShellState, text: string) =>
   [...text].reduce((st, ch) => updateShell(st, { type: "key", key: { name: "char", ch } }, deps), s);
 const press = (s: ShellState, name: any, ch?: string) =>
   updateShell(s, { type: "key", key: (ch !== undefined ? { name: "char", ch } : { name }) as any }, deps);
+
+test("file filter: bare terms include, !term hides an extension or path segment", () => {
+  const entry = (path: string) => ({ path, recs: [], count: 0, firstTs: 0, lastTs: 0 });
+  const base = {
+    ...initialCompareState([]),
+    files: [entry("/p/docs/readme.md"), entry("/p/src/cmd.ts"), entry("/p/node_modules/x/index.js")],
+  };
+  const paths = (fquery: string) => filteredFiles({ ...base, fquery }).map((f) => f.path);
+  assert.equal(paths("").length, 3);
+  assert.deepEqual(paths("!md"), ["/p/src/cmd.ts", "/p/node_modules/x/index.js"]); // cmd.ts is not a .md
+  assert.deepEqual(paths("-.md"), ["/p/src/cmd.ts", "/p/node_modules/x/index.js"]);
+  assert.deepEqual(paths("!node_modules"), ["/p/docs/readme.md", "/p/src/cmd.ts"]);
+  assert.deepEqual(paths("src !md"), ["/p/src/cmd.ts"]);
+});
 
 test("slash menu: arrows select, enter fills; no-arg command runs on enter", () => {
   let s = type(initialShell("/proj"), "/");
