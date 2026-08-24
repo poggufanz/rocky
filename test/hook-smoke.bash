@@ -66,6 +66,23 @@ check "passive labels keep stdout empty" test ! -s "$LABEL_STDOUT"
 check "last passive label removes empty queue" test ! -e "$ROCKY_HOME/labels"
 check "normal passive drain leaves no private claim" test -z "$(find "$ROCKY_HOME" -maxdepth 1 -name '.labels.claim.*' -print -quit)"
 
+# --- stamped labels: fresh speaks without its stamp, stale never speaks -----
+STAMP_STDERR="$TMP/stamp.stderr"
+NOW="$(date +%s)"
+printf '@%s stale label\n@%s fresh label\n' "$((NOW - 4000))" "$NOW" > "$ROCKY_HOME/labels"
+bash --noprofile --norc -i -c '
+  source "$ROCKY_HOME/rocky-hook.bash"
+  __rocky_last_cmd=""
+  __rocky_precmd
+  __rocky_last_cmd=""
+  __rocky_precmd
+' >/dev/null 2>"$STAMP_STDERR"
+check "fresh stamped label prints without its stamp" \
+  grep -qF '[Rocky] fresh label' "$STAMP_STDERR"
+check "stale stamped label never prints" \
+  test "$(grep -cF 'stale label' "$STAMP_STDERR" || true)" -eq 0
+check "stale stamped label is still consumed" test ! -e "$ROCKY_HOME/labels"
+
 # Label fixtures use a separate real home, so malformed queue paths cannot
 # affect the failure/fix checks below. Prompt calls are bounded to keep a
 # regression that opens a FIFO from hanging the smoke gate.

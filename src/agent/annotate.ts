@@ -63,10 +63,17 @@ export { MAX_TRIPLE_FILES } from "../core/memory-read.js";
 const SPOOL_COMPLETENESS_MARGIN_BYTES = 8 * 1024;
 
 // Backlog cap for spoken labels. The shell hook prints one queued label per
-// prompt, so every line here is a future prompt the person must sit through;
-// dogfooding (2026-08-24) showed a long agent run banking ten stale labels
-// that then replayed one by one. Keep only the newest few.
-const MAX_LABEL_LINES = 4;
+// prompt, so every queued line is a future prompt the person must sit through;
+// dogfooding (2026-08-24) showed a long agent run banking labels that then
+// replayed one by one, long after that agent had finished. Speech coalesces:
+// the newest label replaces the queue instead of joining a line. Memory is
+// untouched by this — every triple still persists in full.
+const MAX_LABEL_LINES = 1;
+// Queue-time epoch second, written as "@<seconds> <label>". The hook drops a
+// line whose stamp proves it stale rather than speaking an agent's work into
+// an unrelated shell an hour later. A line without a stamp has unknown age and
+// is still spoken — Rocky never hides what he cannot judge.
+const LABEL_STAMP = (): string => `@${Math.floor(Date.now() / 1000)} `;
 const MAX_LABEL_CHARS = 400;
 const MAX_LABEL_FILE_BYTES = 64 * 1024;
 const MAX_PATH_CHARS = 1024;
@@ -239,7 +246,7 @@ export function defaultQueueLabel(line: string, paths: RockyPaths): void {
     if (!safe) return;
     const existing = readLabelLines(paths.labels);
     if (existing === undefined) return;
-    writeLabelLines(paths.labels, [...existing, safe].slice(-MAX_LABEL_LINES));
+    writeLabelLines(paths.labels, [...existing, `${LABEL_STAMP()}${safe}`].slice(-MAX_LABEL_LINES));
   } catch {
     // Labels are best effort and never affect durable memory.
   }

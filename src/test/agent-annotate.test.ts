@@ -107,10 +107,15 @@ function seedDigestTriple(paths: RockyPaths, ts: number): void {
   }, paths);
 }
 
-function labelLines(paths: RockyPaths): string[] {
+function rawLabelLines(paths: RockyPaths): string[] {
   return existsSync(paths.labels)
     ? readFileSync(paths.labels, "utf8").split("\n").filter(Boolean)
     : [];
+}
+
+/** Spoken text only: the hook strips the "@<seconds> " queue stamp before printing. */
+function labelLines(paths: RockyPaths): string[] {
+  return rawLabelLines(paths).map((line) => line.replace(/^@\d+ /, ""));
 }
 
 test("degraded annotate writes one redacted triple to injected memory path and removes batch", async (t) => {
@@ -234,7 +239,7 @@ test("orphan claim replay reuses one deterministic triple identity", async (t) =
     const first = loadMemory(paths.memory).filter((record) => record.kind === "triple");
     assert.equal(first.length, 1);
     const firstId = first[0]?.id;
-    assert.equal(readFileSync(paths.labels, "utf8").split("\n").filter(Boolean).length, 2);
+    assert.equal(readFileSync(paths.labels, "utf8").split("\n").filter(Boolean).length, 1);
 
     writeFileSync(claimPath, content, { mode: 0o600 });
     utimesSync(claimPath, old, old);
@@ -242,7 +247,7 @@ test("orphan claim replay reuses one deterministic triple identity", async (t) =
     const records = loadMemory(paths.memory).filter((record) => record.kind === "triple");
     assert.equal(records.length, 1);
     assert.equal(records[0]?.id, firstId);
-    assert.equal(readFileSync(paths.labels, "utf8").split("\n").filter(Boolean).length, 2);
+    assert.equal(readFileSync(paths.labels, "utf8").split("\n").filter(Boolean).length, 1);
     assert.equal(existsSync(claimPath), false);
   } finally {
     if (original === undefined) delete process.env.ROCKY_HOME;
@@ -464,7 +469,27 @@ test("crash after durable triple and label replays claim without duplicate recor
   assert.equal(records.length, 1);
   assert.equal(records[0]?.id, firstId);
   assert.equal(readdirSync(paths.spoolDir).some((name) => name.startsWith("crashed.claim.")), false);
-  assert.equal(readFileSync(paths.labels, "utf8").split("\n").filter(Boolean).length, 2);
+  assert.equal(readFileSync(paths.labels, "utf8").split("\n").filter(Boolean).length, 1);
+});
+
+test("queued labels carry a stamp and the newest one replaces the queue", async (t) => {
+  const paths = freshPaths(t);
+  const before = Math.floor(Date.now() / 1000);
+  for (const key of ["first-label", "second-label"]) {
+    append(key, [
+      { v: 1, agent: "codex", kind: "intent", ts: 1, cwd: paths.home, text: `intent ${key}` },
+      { v: 1, agent: "codex", kind: "mechanism", ts: 2, tool: "Edit", path: `${key}.ts`, excerpt: "test: pass" },
+    ], paths);
+    await annotateBatch(key, { paths, git: () => undefined });
+  }
+
+  const lines = rawLabelLines(paths);
+  assert.equal(lines.length, 1);
+  const stamp = Number(/^@(\d+) /.exec(lines[0] ?? "")?.[1]);
+  assert.ok(Number.isInteger(stamp), `label carries no stamp: ${lines[0]}`);
+  assert.ok(stamp >= before && stamp <= Math.floor(Date.now() / 1000));
+  assert.ok(lines[0]?.includes("second-label.ts"), `newest label did not win: ${lines[0]}`);
+  assert.equal(loadMemory(paths.memory).filter((record) => record.kind === "triple").length, 2);
 });
 
 test("intent-only and rationale-only batches clear without memory or labels", async (t) => {
@@ -1174,15 +1199,15 @@ test("default label queue rejects symlink and non-regular destinations", async (
   });
 });
 
-test("default label queue keeps exactly the last four safe one-line labels", (t) => {
+test("default label queue keeps exactly the newest safe one-line label", (t) => {
   const paths = freshPaths(t);
   for (let i = 0; i < 12; i += 1) defaultQueueLabel(`safe-${i}`, paths);
   defaultQueueLabel("hostile\n\u001b[31mline\u202e", paths);
 
-  const lines = readFileSync(paths.labels, "utf8").split("\n").filter(Boolean);
-  assert.equal(lines.length, 4);
-  assert.equal(lines[0], "safe-9");
-  assert.equal(lines.at(-1), "hostile line");
+  const lines = labelLines(paths);
+  assert.equal(lines.length, 1);
+  assert.equal(lines[0], "hostile line");
+  assert.match(rawLabelLines(paths)[0] ?? "", /^@\d+ hostile line$/);
   assert.equal(/[\r\n\u001b\u202e]/u.test(lines.join("")), false);
   assert.equal(lstatSync(paths.labels).isFile(), true);
 });
@@ -1255,7 +1280,10 @@ test("maybeQueueDigestHint queues once per week when recent intent exists", (t) 
   const next = now + 8 * 24 * 60 * 60 * 1_000;
   seedDigestTriple(paths, next);
   maybeQueueDigestHint(paths, next);
-  assert.equal(readFileSync(paths.labels, "utf8").trim().split("\n").filter(Boolean).length, 2);
+  // The queue coalesces, so a second week's hint replaces the first rather
+  // than stacking; the written hint file proves the new week was queued.
+  assert.equal(labelLines(paths).length, 1);
+  assert.equal(readFileSync(paths.digestHint, "utf8"), String(next));
 });
 
 test("digest hint uses exact file identity when numeric inode is unsafe", { timeout: 15_000 }, (t) => {
