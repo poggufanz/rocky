@@ -143,14 +143,18 @@ type HookRequest =
     adapter: "claude-code" | "codex" | "generic";
     argvPayload?: string;
     rationale?: string;
+    explainCode?: string;
+    explainBusiness?: string;
     files?: string[];
   }
   | { kind: "gate-event"; vendor: string };
 
 interface NotifyFlags {
   rationale?: string;
+  explainCode?: string;
+  explainBusiness?: string;
   files?: string[];
-  /** Everything left after `--rationale`/`--files` are consumed. */
+  /** Everything left after `--rationale`/`--explain-*`/`--files` are consumed. */
   positionals: string[];
 }
 
@@ -159,15 +163,17 @@ function isFlagToken(value: string | undefined): boolean {
 }
 
 /**
- * Pull `--rationale <text>` and `--files a,b` out of one `agent-event`
- * invocation's trailing args, in any order, leaving everything else as
- * positionals (codex's optional payload). A flag with a missing or
- * flag-shaped value is dropped, not thrown — this endpoint stays fail-open
- * end to end, including at argument parsing.
+ * Pull `--rationale <text>`, `--explain-code <text>`, `--explain-business <text>`
+ * and `--files a,b` out of one `agent-event` invocation's trailing args, in
+ * any order, leaving everything else as positionals (codex's optional payload).
+ * A flag with a missing or flag-shaped value is dropped, not thrown — this
+ * endpoint stays fail-open end to end, including at argument parsing.
  */
 function parseNotifyFlags(args: readonly string[]): NotifyFlags {
   const positionals: string[] = [];
   let rationale: string | undefined;
+  let explainCode: string | undefined;
+  let explainBusiness: string | undefined;
   let files: string[] | undefined;
   for (let i = 0; i < args.length; i += 1) {
     const arg = args[i];
@@ -175,6 +181,22 @@ function parseNotifyFlags(args: readonly string[]): NotifyFlags {
       const value = args[i + 1];
       if (typeof value === "string" && !isFlagToken(value)) {
         rationale = value;
+        i += 1;
+      }
+      continue;
+    }
+    if (arg === "--explain-code") {
+      const value = args[i + 1];
+      if (typeof value === "string" && !isFlagToken(value)) {
+        explainCode = value;
+        i += 1;
+      }
+      continue;
+    }
+    if (arg === "--explain-business") {
+      const value = args[i + 1];
+      if (typeof value === "string" && !isFlagToken(value)) {
+        explainBusiness = value;
         i += 1;
       }
       continue;
@@ -190,7 +212,13 @@ function parseNotifyFlags(args: readonly string[]): NotifyFlags {
     }
     positionals.push(arg);
   }
-  return { ...(rationale === undefined ? {} : { rationale }), ...(files === undefined ? {} : { files }), positionals };
+  return {
+    ...(rationale === undefined ? {} : { rationale }),
+    ...(explainCode === undefined ? {} : { explainCode }),
+    ...(explainBusiness === undefined ? {} : { explainBusiness }),
+    ...(files === undefined ? {} : { files }),
+    positionals,
+  };
 }
 
 function parseHookArgs(argv: readonly string[]): HookRequest {
@@ -204,19 +232,28 @@ function parseHookArgs(argv: readonly string[]): HookRequest {
   if (subcommand === "agent-event") {
     const [adapter, ...flagArgs] = rest;
     if (adapter === "generic" || adapter === "claude-code") {
-      const { rationale, files, positionals } = parseNotifyFlags(flagArgs);
+      const { rationale, explainCode, explainBusiness, files, positionals } = parseNotifyFlags(flagArgs);
       if (positionals.length === 0) {
-        return { kind: "agent-event", adapter, ...(rationale === undefined ? {} : { rationale }), ...(files === undefined ? {} : { files }) };
+        return {
+          kind: "agent-event",
+          adapter,
+          ...(rationale === undefined ? {} : { rationale }),
+          ...(explainCode === undefined ? {} : { explainCode }),
+          ...(explainBusiness === undefined ? {} : { explainBusiness }),
+          ...(files === undefined ? {} : { files }),
+        };
       }
     }
     if (adapter === "codex") {
-      const { rationale, files, positionals } = parseNotifyFlags(flagArgs);
+      const { rationale, explainCode, explainBusiness, files, positionals } = parseNotifyFlags(flagArgs);
       if (positionals.length === 0 || positionals.length === 1) {
         return {
           kind: "agent-event",
           adapter,
           ...(positionals.length === 1 ? { argvPayload: positionals[0] } : {}),
           ...(rationale === undefined ? {} : { rationale }),
+          ...(explainCode === undefined ? {} : { explainCode }),
+          ...(explainBusiness === undefined ? {} : { explainBusiness }),
           ...(files === undefined ? {} : { files }),
         };
       }
@@ -342,6 +379,8 @@ async function main(): Promise<number> {
               return agentEvent(parsed.adapter, {
                 ...(parsed.argvPayload === undefined ? {} : { argvPayload: parsed.argvPayload }),
                 ...(parsed.rationale === undefined ? {} : { rationale: parsed.rationale }),
+                ...(parsed.explainCode === undefined ? {} : { explainCode: parsed.explainCode }),
+                ...(parsed.explainBusiness === undefined ? {} : { explainBusiness: parsed.explainBusiness }),
                 ...(parsed.files === undefined ? {} : { files: parsed.files }),
               });
             }
