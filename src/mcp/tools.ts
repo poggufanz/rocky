@@ -1,9 +1,14 @@
 import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
+import { readFileSync, statSync } from "node:fs";
 import type { Exposure } from "../core/config-read.js";
 import { hasCanonicalMemoryQueries, hasDurableMemoryQueries, loadDurableMemorySnapshot, queryStats, whyFilePathRelation } from "../core/memory-query.js";
 import type { DurableMemorySnapshot, KnowledgeCoverageSummary, KnowledgeSearchQuery, MemoryQueries, RecallHit, RecallQuery, RecentFailuresQuery, StatsQuery, WhyFileEvidence, WhyFilePathRelation } from "../core/memory-query.js";
 import type { RecallAiOutcome, RecallWithAiPort } from "../ai/port.js";
+import { teachLookup } from "../core/teach.js";
+import { buildLadder } from "../core/teach-ladder.js";
+import { renderLadderCard, renderWitnessCard } from "../core/teach-render.js";
+import { projectExplain } from "./privacy.js";
 import {
   MAX_FIELD_BYTES,
   MAX_RESPONSE_BYTES,
@@ -22,7 +27,7 @@ import {
 } from "./privacy.js";
 import { resolveGitDiff } from "../core/git-diff.js";
 import { boundTripleRecord, isBoundedLinkBasis, isConfirmableLinkBasis, isKnownPathPlatform, isSafeNonNegativeInteger, MAX_MEMORY_FILE_BYTES, MAX_SUPPORTED_MEMORY_RECORDS, parseMemoryRecord } from "../core/memory-read.js";
-import type { FailureRecord, FixRecord, LinkConfidence, MemoryCoverage, TripleRecord } from "../core/memory-read.js";
+import type { FailureRecord, FixRecord, LinkConfidence, MemoryCoverage, MemoryRecord, TripleRecord } from "../core/memory-read.js";
 
 /** Versioned read-only catalog used by MCP discovery and setup health. */
 const MCP_TOOL_NAMES = [
@@ -33,6 +38,7 @@ const MCP_TOOL_NAMES = [
   "search_knowledge",
   "fetch_record",
   "why_file",
+  "teach_lookup",
 ] as const;
 const MCP_TOOL_NAMES_FROZEN = Object.freeze(MCP_TOOL_NAMES);
 export const MCP_TOOL_CATALOG_CONTRACT = Object.freeze({
@@ -100,6 +106,7 @@ const RESPONSE_CAP_BYTES = MAX_RESPONSE_BYTES - TOOL_ENVELOPE_RESERVE_BYTES;
 const MAX_WHY_EVIDENCE_INPUTS = 256;
 const MAX_PROVIDER_NESTED_ITEMS = 256;
 const MAX_PROVIDER_NESTED_BYTES = 64 * 1024;
+const MAX_TEACH_FILE_BYTES = 2 * 1024 * 1024;
 const MEMORY_OPERATIONAL_CODES = Object.freeze([
   "EACCES", "EPERM", "ENOENT", "EIO", "EMFILE", "ENFILE", "ENOSPC", "EROFS", "EISDIR", "ENOTDIR",
 ] as const);
@@ -196,6 +203,33 @@ function parseWhyFileArgs(args: unknown): { path: string; limit: number; diff?: 
   };
 }
 
+function parseTeachLookupArgs(args: unknown): { path: string; line?: number; snippet?: string } {
+  const value = objectArgs(args);
+  rejectUnknown(value, ["path", "line", "snippet"]);
+  if (typeof value.path !== "string" || Buffer.byteLength(value.path, "utf8") > MAX_FIELD_BYTES) {
+    throw new McpInvalidParamsError("invalid params");
+  }
+  let line: number | undefined;
+  if (value.line !== undefined) {
+    if (typeof value.line !== "number" || !Number.isInteger(value.line) || value.line < 1) {
+      throw new McpInvalidParamsError("invalid params");
+    }
+    line = value.line;
+  }
+  let snippet: string | undefined;
+  if (value.snippet !== undefined) {
+    if (typeof value.snippet !== "string" || Buffer.byteLength(value.snippet, "utf8") > MAX_FIELD_BYTES) {
+      throw new McpInvalidParamsError("invalid params");
+    }
+    snippet = value.snippet;
+  }
+  return {
+    path: value.path,
+    ...(line === undefined ? {} : { line }),
+    ...(snippet === undefined ? {} : { snippet }),
+  };
+}
+
 function schema(properties: Record<string, unknown>, required?: readonly string[]): Record<string, unknown> {
   return { type: "object", additionalProperties: false, ...(required === undefined ? {} : { required }), properties };
 }
@@ -253,6 +287,15 @@ function descriptors(exposure: Exposure): readonly McpToolDefinition[] {
         path: { type: "string", maxLength: MAX_FIELD_BYTES },
         limit: { type: "integer", minimum: 1, maximum: 10 },
         diff: { type: "boolean" },
+      }, ["path"]), annotations: ANNOTATIONS,
+    },
+    {
+      name: "teach_lookup", title: "Teach selection",
+      description: "Read-only teach card for a path and optional line or snippet: a remembered witness explanation when one matches, else an assembled evidence ladder. Example: {\"path\": \"src/app.css\", \"line\": 12}. Reasons are hearsay Rocky heard, not verified facts.",
+      inputSchema: schema({
+        path: { type: "string", maxLength: MAX_FIELD_BYTES },
+        line: { type: "integer", minimum: 1 },
+        snippet: { type: "string", maxLength: MAX_FIELD_BYTES },
       }, ["path"]), annotations: ANNOTATIONS,
     },
   ];
@@ -463,6 +506,71 @@ function optionalProviderText(
 ): { value: string | undefined; valid: true } | { value: undefined; valid: false } {
   if (value === undefined) return { value: undefined, valid: true };
   return boundedProviderText(value, maximumChars, maximumBytes);
+}
+
+/** Bounded local file read for the teach ladder; a too-large or missing file is a miss, never an error. */
+function readFileBounded(path: string, maximum = MAX_TEACH_FILE_BYTES): string | undefined {
+  try {
+    const stat = statSync(path);
+    if (!stat.isFile() || stat.size > maximum) return undefined;
+    const text = readFileSync(path, "utf8");
+    return Buffer.byteLength(text, "utf8") > maximum ? undefined : text;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Snapshot one custom explain record into plain bounded data before teachLookup touches it. */
+function snapshotTeachRecord(value: unknown): MemoryRecord | undefined {
+  try {
+    if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+    const raw = value as Record<string, unknown>;
+    if (raw.kind !== "explain") return undefined;
+    const id = boundedProviderText(raw.id, 512, MAX_FIELD_BYTES);
+    if (!id.valid || id.value.length === 0 || /[\u0000-\u001f\u007f-\u009f]/u.test(id.value)) return undefined;
+    const ts = raw.ts;
+    if (!isSafeNonNegativeInteger(ts)) return undefined;
+    const cwd = boundedProviderText(raw.cwd, MAX_FIELD_BYTES * 2, MAX_FIELD_BYTES * 2);
+    const path = boundedProviderText(raw.path, MAX_FIELD_BYTES * 2, MAX_FIELD_BYTES * 2);
+    const source = boundedProviderText(raw.source, MAX_FIELD_BYTES * 2, MAX_FIELD_BYTES * 2);
+    const code = boundedProviderText(raw.code, MAX_FIELD_BYTES * 2, MAX_FIELD_BYTES * 2);
+    const business = boundedProviderText(raw.business, MAX_FIELD_BYTES * 2, MAX_FIELD_BYTES * 2);
+    if (!cwd.valid || !path.valid || !source.valid || !code.valid || !business.valid) return undefined;
+    const snippet = optionalProviderText(raw.snippet, MAX_FIELD_BYTES * 2, MAX_FIELD_BYTES * 2);
+    if (!snippet.valid) return undefined;
+    const contentHash = optionalProviderText(raw.contentHash, 32, 32);
+    if (!contentHash.valid || contentHash.value !== undefined && !/^[0-9a-f]{32}$/u.test(contentHash.value)) return undefined;
+    return {
+      kind: "explain", id: id.value, ts, v: 1, cwd: cwd.value, path: path.value,
+      source: source.value, code: code.value, business: business.value,
+      ...(snippet.value === undefined ? {} : { snippet: snippet.value }),
+      ...(contentHash.value === undefined ? {} : { contentHash: contentHash.value }),
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Teach evidence comes from the canonical durable snapshot when available;
+ * otherwise an optional custom `records()` accessor is read once, bounded and
+ * snapshotted. A provider with neither yields no witness (ladder-only).
+ */
+function customTeachRecords(options: CreateToolRegistryOptions): readonly MemoryRecord[] {
+  try {
+    const accessor = (options.memory as unknown as { records?: unknown }).records;
+    if (typeof accessor !== "function") return [];
+    const bounded = boundedProviderArray(accessor.call(options.memory), MAX_SUPPORTED_MEMORY_RECORDS);
+    if (!bounded.valid) return [];
+    const records: MemoryRecord[] = [];
+    for (const entry of bounded.values) {
+      const record = snapshotTeachRecord(entry);
+      if (record !== undefined) records.push(record);
+    }
+    return records;
+  } catch {
+    return [];
+  }
 }
 
 function snapshotProviderFile(value: unknown): TripleRecord["mechanism"]["files"][number] | undefined {
@@ -1650,6 +1758,58 @@ export function createToolRegistry(options: CreateToolRegistryOptions): McpToolR
               truncated: false,
             }), { exposure: options.exposure, ...memoryCoveragePayload(memoryScan), items: [], possible: [], coverage: { status: "unknown", complete: false, filesCovered: 0, truncatedFiles: 0 }, coverageStatus: "unknown", coverageIncomplete: true, truncated: true });
             return safeProjection(() => cappedResult(projected), cappedResult({ exposure: options.exposure, ...memoryCoveragePayload(memoryScan), items: [], possible: [], coverage: { status: "unknown", complete: false, filesCovered: 0, truncatedFiles: 0 }, coverageStatus: "unknown", coverageIncomplete: true, truncated: true }));
+          }
+          case "teach_lookup": {
+            const input = parseTeachLookupArgs(args);
+            const readState: SafeMemoryReadState = { failed: false };
+            const snapshot = safeReadMemory<DurableMemorySnapshot | undefined>(
+              () => (hasDurableMemoryQueries(options.memory) ? loadDurableMemorySnapshot(options.memory) : undefined),
+              undefined, canonicalMemory, readState,
+            );
+            const records = snapshot !== undefined ? snapshot.records : customTeachRecords(options);
+            pairedCoverage = snapshot !== undefined
+              ? snapshot.coverage
+              : memoryCoverage(options.memory, readState.failed, coverageReader);
+            let fileText: string | undefined;
+            if (input.line !== undefined || input.snippet !== undefined) {
+              fileText = safeReadMemory(() => readFileBounded(input.path), undefined, false, readState);
+            }
+            const fileLines = fileText === undefined ? [] : fileText.split(/\r?\n/);
+            const total = fileLines.length;
+            let snippet = input.snippet;
+            let startLine = 1;
+            let endLine = total;
+            if (snippet === undefined && input.line !== undefined && fileText !== undefined) {
+              startLine = Math.max(1, input.line - 3);
+              endLine = Math.min(total, input.line + 3);
+              snippet = fileLines.slice(startLine - 1, endLine).join("\n");
+            }
+            const hit = teachLookup(records, { path: input.path, ...(snippet === undefined ? {} : { snippet }) });
+            const empty = {
+              exposure: options.exposure, header: "", lines: [] as string[], evidence: "",
+              match: "ladder" as const, truncatedFields: [] as string[], truncated: false,
+            };
+            if (hit !== undefined) {
+              const card = renderWitnessCard(hit);
+              const projected = projectExplain(card, hit.match, hit.record, options.exposure);
+              return safeProjection(
+                () => cappedResult({ exposure: options.exposure, ...projected }),
+                cappedResult({ ...empty, truncated: true }),
+              );
+            }
+            if (snippet !== undefined && fileText !== undefined) {
+              const ladder = buildLadder({ file: input.path, startLine, endLine, fileText });
+              if (ladder.rungs.length > 0) {
+                const label = input.snippet !== undefined ? "snippet" : `line ${input.line}`;
+                const card = renderLadderCard(input.path, label, ladder);
+                const projected = projectExplain(card, "ladder", undefined, options.exposure);
+                return safeProjection(
+                  () => cappedResult({ exposure: options.exposure, ...projected }),
+                  cappedResult({ ...empty, truncated: true }),
+                );
+              }
+            }
+            return cappedResult(empty);
           }
           case "recall_with_ai": {
             const input = parseRecallArgs(args, options.exposure, 10);

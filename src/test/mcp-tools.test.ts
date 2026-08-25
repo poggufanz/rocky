@@ -1,6 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import type { FailureRecord, MemoryRecord, TripleRecord } from "../core/memory-read.js";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import type { ExplainRecord, FailureRecord, MemoryRecord, TripleRecord } from "../core/memory-read.js";
 import { createMemoryQueries } from "../core/memory-query.js";
 import type { MemoryQueries } from "../core/memory-query.js";
 import { pathIdentityHash } from "../core/memory-read.js";
@@ -74,7 +77,7 @@ async function mapUnexpectedToolFailureToWire(call: () => Promise<unknown>, id: 
 test("sanitized catalog excludes cwd and stays in frozen order", () => {
   const definitions = registry().list();
   assert.deepEqual(definitions.map((tool) => tool.name), [
-    "recall", "recent_failures", "stats", "recall_with_ai", "search_knowledge", "fetch_record", "why_file",
+    "recall", "recent_failures", "stats", "recall_with_ai", "search_knowledge", "fetch_record", "why_file", "teach_lookup",
   ]);
   assert.equal(JSON.stringify(definitions).includes('"cwd"'), false);
   assert.ok(definitions.every((tool) =>
@@ -90,7 +93,7 @@ test("raw catalog adds cwd only to queries that support it", () => {
   const definitions = registry("raw").list();
   assert.equal(JSON.stringify(definitions).includes('"cwd"'), true);
   assert.deepEqual(definitions.map((tool) => tool.name), [
-    "recall", "recent_failures", "stats", "recall_with_ai", "search_knowledge", "fetch_record", "why_file",
+    "recall", "recent_failures", "stats", "recall_with_ai", "search_knowledge", "fetch_record", "why_file", "teach_lookup",
   ]);
 });
 
@@ -99,10 +102,20 @@ test("new tool descriptions are concrete and schemas expose their bounds", () =>
   const search = definitions.find((tool) => tool.name === "search_knowledge");
   const fetch = definitions.find((tool) => tool.name === "fetch_record");
   const why = definitions.find((tool) => tool.name === "why_file");
-  assert.ok(search && fetch && why);
+  const teach = definitions.find((tool) => tool.name === "teach_lookup");
+  assert.ok(search && fetch && why && teach);
   assert.match(search.description, /Example/);
   assert.match(fetch.description, /Example/);
   assert.match(why.description, /Example/);
+  assert.match(teach.description, /Example/);
+  assert.match(teach.description, /Reasons are hearsay Rocky heard, not verified facts\./);
+  assert.deepEqual(teach.inputSchema, {
+    type: "object", additionalProperties: false, required: ["path"], properties: {
+      path: { type: "string", maxLength: MAX_FIELD_BYTES },
+      line: { type: "integer", minimum: 1 },
+      snippet: { type: "string", maxLength: MAX_FIELD_BYTES },
+    },
+  });
   assert.deepEqual(search.inputSchema, {
     type: "object", additionalProperties: false, required: ["query"], properties: {
       query: { type: "string", minLength: 1, maxLength: 500 },
@@ -140,6 +153,75 @@ test("knowledge tools search, fetch, and explain one file", async () => {
   const why = await knowledgeRegistry().call("why_file", { path: "src/app.css", limit: 1 }, signal);
   assert.equal(why.isError, undefined);
   assert.equal((why.structuredContent.items as unknown[]).length, 1);
+});
+
+function teachMemory(records: readonly MemoryRecord[]): MemoryQueries & { records: () => readonly MemoryRecord[] } {
+  return { ...createMemoryQueries(() => []), records: () => records };
+}
+
+const WITNESS_EXPLAIN: ExplainRecord = {
+  kind: "explain", id: "550e8400-e29b-41d4-a716-446655440000", ts: 1_700_000_000_000, v: 1,
+  cwd: "/private/secret-project", path: "src/app.ts", source: "agent:claude-code",
+  code: "Bearer TOP-LEVEL-TOPSECRET-AAAABBBBCCCCDDDD; documents rows",
+  business: "filter rows at the boundary",
+  snippet: "const rows = await fetchRows();",
+  contentHash: "0123456789abcdef0123456789abcdef",
+};
+
+test("teach_lookup renders a sanitized witness card and keeps cwd and id opaque", async () => {
+  const signal = new AbortController().signal;
+  const memory = teachMemory([WITNESS_EXPLAIN]);
+  const sanitized = await createToolRegistry({ exposure: "sanitized", memory, recallWithAi: disabledRecallWithAi })
+    .call("teach_lookup", { path: "src/app.ts" }, signal);
+  assert.equal(sanitized.isError, undefined);
+  assert.equal(sanitized.structuredContent.header, "rocky heard this. agent say why, rocky remember");
+  assert.equal(sanitized.structuredContent.match, "similarity");
+  const sanitizedLines = sanitized.structuredContent.lines as string[];
+  assert.equal(sanitizedLines[0]?.startsWith("code: Bearer [redacted]"), true);
+  assert.equal(sanitizedLines[1], "business: filter rows at the boundary");
+  assert.match(sanitized.structuredContent.evidence as string, /^source: agent:claude-code ·/);
+  assert.equal(sanitized.structuredContent.recordId, WITNESS_EXPLAIN.id);
+  assert.doesNotMatch(JSON.stringify(sanitized), /TOP-LEVEL-TOPSECRET|Bearer TOP|\/private|secret-project/u);
+
+  const raw = await createToolRegistry({ exposure: "raw", memory, recallWithAi: disabledRecallWithAi })
+    .call("teach_lookup", { path: "src/app.ts" }, signal);
+  assert.equal(raw.isError, undefined);
+  assert.match(JSON.stringify(raw), /TOP-LEVEL-TOPSECRET/u);
+  assert.doesNotMatch(JSON.stringify(raw), /\/private|secret-project/u);
+});
+
+test("teach_lookup assembles a ladder card when no witness matches", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "rocky-mcp-teach-"));
+  const file = join(dir, "ladder.ts");
+  writeFileSync(file, [
+    "export async function loadFeed() {",
+    "  const rows = await fetchRows();",
+    "  return rows;",
+    "}",
+  ].join("\n"), "utf8");
+  const result = await registry().call("teach_lookup", { path: file, line: 2 }, new AbortController().signal);
+  assert.equal(result.isError, undefined);
+  assert.equal(result.structuredContent.header, "rocky not hear this. assembled from evidence, not witnessed");
+  assert.equal(result.structuredContent.match, "ladder");
+  assert.ok((result.structuredContent.lines as string[])[0]?.includes("· line 2"));
+  assert.ok((result.structuredContent.lines as string[])[1]?.startsWith("reason:"));
+  assert.match(result.structuredContent.evidence as string, /^evidence: /);
+});
+
+test("teach_lookup bounds oversized witness fields and fits the wire cap", async () => {
+  const big = "word ".repeat(5_000);
+  const oversized: ExplainRecord = {
+    ...WITNESS_EXPLAIN,
+    id: "teach-big-id",
+    code: big,
+    business: big,
+  };
+  const result = await createToolRegistry({
+    exposure: "sanitized", memory: teachMemory([oversized]), recallWithAi: disabledRecallWithAi,
+  }).call("teach_lookup", { path: "src/app.ts" }, new AbortController().signal);
+  assert.equal(result.isError, undefined);
+  assert.ok(Buffer.byteLength(JSON.stringify(result), "utf8") <= MAX_RESPONSE_BYTES - TOOL_ENVELOPE_RESERVE_BYTES);
+  assert.ok((result.structuredContent.truncatedFields as string[]).length > 0);
 });
 
 test("custom fetch_record snapshots triple fields before sanitized or raw projection", async () => {
@@ -1221,6 +1303,13 @@ test("knowledge tool validators reject malformed, out-of-range, and unknown argu
     ["why_file", {}],
     ["why_file", { path: "x", limit: 11 }],
     ["why_file", { path: "x".repeat(MAX_FIELD_BYTES + 1) }],
+    ["teach_lookup", {}],
+    ["teach_lookup", { path: "x", line: 0 }],
+    ["teach_lookup", { path: "x", line: 1.5 }],
+    ["teach_lookup", { path: "x", snippet: 1 }],
+    ["teach_lookup", { path: "x".repeat(MAX_FIELD_BYTES + 1) }],
+    ["teach_lookup", { path: "x", snippet: "y".repeat(MAX_FIELD_BYTES + 1) }],
+    ["teach_lookup", { path: "x", extra: true }],
   ] as const;
   for (const [name, args] of invalid) await assert.rejects(knowledgeRegistry().call(name, args, signal), McpInvalidParamsError);
 });

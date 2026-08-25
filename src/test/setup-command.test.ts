@@ -91,7 +91,7 @@ class HealthySession implements ProcessSession {
         result: {
           tools: [
             "recall", "recent_failures", "stats", "recall_with_ai",
-            "search_knowledge", "fetch_record", "why_file",
+            "search_knowledge", "fetch_record", "why_file", "teach_lookup",
           ].map((name) => ({ name })),
         },
       }));

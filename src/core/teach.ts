@@ -1,8 +1,19 @@
+import { createHash } from "node:crypto";
 import { similarity, tokens } from "./fingerprint.js";
-import { explainContentHash } from "./memory.js";
 import { canonicalPath, type ExplainRecord, type MemoryRecord } from "./memory-read.js";
 
 export const TEACH_SIMILARITY_THRESHOLD = 0.34;
+
+/**
+ * Normalize then hash a hunk for content-keyed lookup. Mirrors
+ * `explainContentHash` in `core/memory.ts` exactly but lives here so the
+ * read-only teach modules (and the MCP surface that consumes them) never
+ * reach the writable memory module.
+ */
+function explainContentHash(snippet: string): string {
+  const normalized = snippet.replace(/\s+/gu, " ").trim();
+  return createHash("sha256").update(normalized, "utf8").digest("hex").slice(0, 32);
+}
 
 export interface TeachHit {
   record: ExplainRecord;

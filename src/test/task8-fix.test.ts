@@ -28,6 +28,7 @@ const expectedCatalog = [
   "search_knowledge",
   "fetch_record",
   "why_file",
+  "teach_lookup",
 ] as const;
 
 class ModernHealthSession implements ProcessSession {
