@@ -158,6 +158,16 @@ export interface RationaleRecord {
   /** Bounded file paths this stated reason covers (notify lane `--files`). */
   files?: string[];
 }
+export interface ExplainRecord {
+  kind: "explain"; id: string; ts: number; v: 1;
+  cwd: string;
+  path: string;
+  source: string;
+  code: string;
+  business: string;
+  snippet?: string;
+  contentHash?: string;
+}
 export interface AliasRecord {
   kind: "alias"; id: string; ts: number; v: 1;
   alias: string; concept: string; action: "add" | "retract";
@@ -539,7 +549,7 @@ export function boundTripleRecord(record: TripleRecord): TripleRecord {
   };
 }
 
-export type MemoryRecord = FailureRecord | FixRecord | AssociationRecord | NoteRecord | TripleRecord | BriefRunRecord | InvariantTouchRecord | RationaleRecord | AliasRecord;
+export type MemoryRecord = FailureRecord | FixRecord | AssociationRecord | NoteRecord | TripleRecord | BriefRunRecord | InvariantTouchRecord | RationaleRecord | AliasRecord | ExplainRecord;
 
 /** Future-dated evidence stays readable but is inert for operational answers. */
 export function isOperationalMemoryRecord(record: Pick<MemoryRecord, "ts">, now = Date.now()): boolean {
@@ -726,6 +736,30 @@ function parseMemoryRecordUnsafe(value: unknown): MemoryRecord | undefined {
       ...(pointer === undefined ? {} : { pointer }),
       ...(links === undefined ? {} : { links }),
       ...(files === undefined ? {} : { files }),
+    };
+  }
+  if (record.kind === "explain") {
+    if (record.v !== 1 ||
+        typeof record.cwd !== "string" || record.cwd.length === 0 || record.cwd.length > MAX_RECORD_ITEM_CHARS ||
+        typeof record.path !== "string" || record.path.length === 0 || record.path.length > MAX_RATIONALE_FILE_CHARS ||
+        typeof record.source !== "string" || record.source.length === 0 || record.source.length > MAX_RECORD_ITEM_CHARS ||
+        typeof record.code !== "string" || record.code.length === 0 || record.code.length > MAX_RECORD_ITEM_CHARS ||
+        typeof record.business !== "string" || record.business.length === 0 || record.business.length > MAX_RECORD_ITEM_CHARS) return undefined;
+    let snippet: string | undefined;
+    if (record.snippet !== undefined) {
+      if (typeof record.snippet !== "string" || record.snippet.length === 0 || record.snippet.length > MAX_RECORD_ITEM_CHARS) return undefined;
+      snippet = record.snippet;
+    }
+    let contentHash: string | undefined;
+    if (record.contentHash !== undefined) {
+      if (typeof record.contentHash !== "string" || record.contentHash.length === 0 || record.contentHash.length > MAX_RECORD_ITEM_CHARS) return undefined;
+      contentHash = record.contentHash;
+    }
+    return {
+      kind: "explain", id: record.id, ts: Number(record.ts), v: 1, cwd: record.cwd,
+      path: record.path, source: record.source, code: record.code, business: record.business,
+      ...(snippet === undefined ? {} : { snippet }),
+      ...(contentHash === undefined ? {} : { contentHash }),
     };
   }
   if (record.kind === "failure") {

@@ -35,12 +35,12 @@ import {
 import { resolveRockyPaths } from "./state-paths.js";
 import type { RockyPaths } from "./state-paths.js";
 import { boundTripleMechanism, isCompleteMemoryCoverage, isKnownPathPlatform, isSafeNonNegativeInteger, loadMemoryChecked, MAX_MEMORY_FILE_BYTES, MAX_RATIONALE_FILES, MAX_RATIONALE_FILE_CHARS, MAX_MEMORY_LINE_BYTES, MAX_MEMORY_RECORDS, MAX_SUPPORTED_MEMORY_RECORDS } from "./memory-read.js";
-import type { AliasRecord, AssociationRecord, BriefRunRecord, FailureRecord, FixRecord, InvariantTouchRecord, MemoryCoverage, MemoryRecord, NoteRecord, RationaleRecord, TripleRecord } from "./memory-read.js";
+import type { AliasRecord, AssociationRecord, BriefRunRecord, ExplainRecord, FailureRecord, FixRecord, InvariantTouchRecord, MemoryCoverage, MemoryRecord, NoteRecord, RationaleRecord, TripleRecord } from "./memory-read.js";
 import { redactSecretsAtBoundary } from "./redact.js";
 import { utf8Slice, utf8SliceFromEnd } from "./utf8.js";
 import { LINK_WINDOW_MS, recentUnresolvedFailures, type UnresolvedLink } from "./memory-query.js";
 
-export type { AssociationRecord, BriefRunRecord, FailureRecord, FixRecord, InvariantTouchRecord, MemoryCoverage, MemoryRecord, NoteRecord, TripleFile, TripleRecord } from "./memory-read.js";
+export type { AssociationRecord, BriefRunRecord, ExplainRecord, FailureRecord, FixRecord, InvariantTouchRecord, MemoryCoverage, MemoryRecord, NoteRecord, TripleFile, TripleRecord } from "./memory-read.js";
 export {
   boundTripleMechanism,
   boundTripleRecord,
@@ -1423,6 +1423,32 @@ export function recordRationale(
   };
   withMemoryTransaction((transaction) => { transaction.append(rec); }, paths ?? resolveRockyPaths(), { now: ts });
   return rec;
+}
+
+/** Normalize then hash a hunk for content-keyed lookup. */
+export function explainContentHash(snippet: string): string {
+  const normalized = snippet.replace(/\s+/gu, " ").trim();
+  return createHash("sha256").update(normalized, "utf8").digest("hex").slice(0, 32);
+}
+
+export function recordExplain(
+  input: { cwd: string; path: string; source: string; code: string; business: string; snippet?: string; ts?: number },
+  paths: RockyPaths = resolveRockyPaths(),
+): ExplainRecord {
+  const record: ExplainRecord = {
+    kind: "explain", id: randomUUID(), ts: input.ts ?? Date.now(), v: 1,
+    cwd: input.cwd,
+    path: input.path.slice(0, MAX_RATIONALE_FILE_CHARS),
+    source: input.source,
+    code: boundRationaleExcerpt(input.code),
+    business: boundRationaleExcerpt(input.business),
+  };
+  if (input.snippet !== undefined && input.snippet.length > 0) {
+    record.snippet = boundRationaleExcerpt(input.snippet);
+    record.contentHash = explainContentHash(input.snippet);
+  }
+  withMemoryTransaction((t) => t.append(record), paths);
+  return record;
 }
 
 export function recordAlias(
