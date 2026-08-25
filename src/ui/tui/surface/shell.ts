@@ -449,6 +449,68 @@ export function applyMouseToCompare(state: CompareState, ev: MouseEvent): Compar
   return { ...state, focus: target };
 }
 
+/** Screen row of the teach line pane -> 1-based line number, null outside. */
+function teachLineAt(state: TeachState, y: number): number | null {
+  const r = state.rects?.lines;
+  if (!r) return null;
+  const row = y - r.y;
+  if (row < 0 || row >= r.h) return null;
+  const lineNo = state.ltop + row + 1;
+  if (lineNo < 1 || lineNo > state.lines.length) return null;
+  return lineNo;
+}
+
+/**
+ * Hold-left-click selection: press anchors the block, drag extends it,
+ * release runs the lookup so the why card appears without Enter. In the
+ * file phase a press opens the clicked file directly.
+ */
+export function applyMouseToTeach(state: TeachState, ev: MouseEvent, deps: ShellDeps): TeachState {
+  if (ev.kind === "wheel-up" || ev.kind === "wheel-down") {
+    const delta = ev.kind === "wheel-up" ? -3 : 3;
+    if (state.file === null) {
+      const list = filteredFiles(state);
+      const next = Math.max(0, Math.min(Math.max(0, list.length - 1), state.fsel + delta));
+      return { ...state, fsel: next };
+    }
+    return moveTeachCursor(state, delta);
+  }
+  if (state.file === null) {
+    if (ev.kind !== "press") return state;
+    const r = state.rects?.files;
+    if (!r) return state;
+    if (ev.x < r.x - 2 || ev.x >= r.x + r.w + 2 || ev.y < r.y || ev.y >= r.y + r.h) return state;
+    const idx = state.ftop + (ev.y - r.y);
+    const list = filteredFiles(state);
+    if (idx < 0 || idx >= list.length) return state;
+    return updateTeachState({ ...state, fsel: idx }, { name: "enter" } as Key, deps);
+  }
+  if (ev.kind === "press") {
+    const line = teachLineAt(state, ev.y);
+    if (line === null) return state;
+    return { ...state, lsel: line, anchor: line, start: line, end: line, extending: true };
+  }
+  if (ev.kind === "drag") {
+    if (!state.extending) return state;
+    const r = state.rects?.lines;
+    const line = teachLineAt(state, ev.y)
+      ?? (r !== undefined && ev.y < r.y
+        ? Math.max(1, state.ltop)
+        : Math.min(state.lines.length, state.ltop + (r?.h ?? 1)));
+    return {
+      ...state,
+      lsel: line,
+      start: Math.min(state.anchor, line),
+      end: Math.max(state.anchor, line),
+    };
+  }
+  if (ev.kind === "release") {
+    if (!state.extending) return state;
+    return lookupTeach({ ...state, extending: false }, deps);
+  }
+  return state;
+}
+
 export function updateCompareState(state: CompareState, key: Key): CompareState {
   if (state.modal === "scope") {
     if (key.name === "esc") {
@@ -1163,6 +1225,9 @@ export function updateShell(
 
   if (s.view === "teach") {
     const currentTeach = s.teach ?? initialTeachState();
+    if (key.name === "mouse") {
+      return { ...s, teach: applyMouseToTeach(currentTeach, key.event, deps) };
+    }
     if (key.name === "esc" && currentTeach.file === null) {
       return { ...s, view: "home" };
     }
