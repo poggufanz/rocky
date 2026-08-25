@@ -1,0 +1,1060 @@
+/*
+ * rocky gui
+ *
+ * One rule holds the whole sheet together: the page is grey, and the only
+ * colour on it is --voice. Voice means rocky heard it. A witness card is
+ * clay; an assembled card is grey. The selection tint is the same clay, so
+ * the colour travels from the drag into the answer. Nothing decorative is
+ * ever coloured -- if it has hue, rocky is claiming knowledge.
+ *
+ * Radius: interactive controls 6px, containers 0 (hairlines instead of cards).
+ * Dark only, per spec -- no theme system in v1.
+ * No external font, no external asset. System stacks only.
+ */
+
+:root {
+  --ground:  #14181b;
+  --surface: #1b2126;
+  --raised:  #232a30;
+  --line:    #2d353c;
+  --dim:     #8d9aa4;
+  --body:    #c9d3d9;
+  --bright:  #f2f7f9;
+
+  --voice:     #f2a06a;
+  --voice-dim: #a56d43;
+  --voice-tint: rgba(242, 160, 106, .24);
+
+  /* Syntax lives on the cool side on purpose. Warm belongs to rocky alone,
+     so no token may ever borrow --voice: if code could go orange, orange
+     would stop meaning "rocky heard this". */
+  --tk-key: #9ed0f7;
+  --tk-lit: #aae5bb;
+
+  /* diff carries its hue in the background, its emphasis in the text:
+     an added line is bright, a removed line has already gone dim */
+  --add-tint: rgba(147, 207, 163, .16);
+  --del-tint: rgba(231, 154, 160, .13);
+  --add-mark: #93cfa3;
+  --del-mark: #e79aa0;
+
+  --mono: ui-monospace, "SF Mono", "Cascadia Mono", "Segoe UI Mono",
+          "JetBrains Mono", Menlo, Consolas, monospace;
+  --sans: ui-sans-serif, -apple-system, "Segoe UI", Roboto,
+          "Helvetica Neue", Arial, sans-serif;
+
+  --bar-h: 52px;
+  --step: 200ms cubic-bezier(.16, 1, .3, 1);
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  display: flex;
+  flex-direction: column;
+  /* one soft source high and left, so the ground has somewhere to fall away to */
+  background: radial-gradient(1300px 560px at 12% -14%, #1b2228, var(--ground));
+  color: var(--body);
+  font: 13px/1.5 var(--mono);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* a fixed grain, so flat panels read as a surface instead of a void.
+   fixed and pointer-events none: it must never repaint on scroll. */
+body::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  pointer-events: none;
+  opacity: .035;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.82' numOctaves='3'/%3E%3C/filter%3E%3Crect width='140' height='140' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+
+::selection {
+  background: var(--voice-tint);
+  color: var(--bright);
+}
+
+:focus-visible {
+  outline: 2px solid var(--voice);
+  outline-offset: 2px;
+}
+
+/* every control answers the press, so a click never feels swallowed */
+.seg-btn:active,
+.mode-btn:active,
+.file:active,
+.moment:active,
+.side-head:active,
+.card-more:active,
+.moments-scope:active,
+.fail-retry:active {
+  transform: translateY(1px);
+}
+
+.vh {
+  position: absolute;
+  width: 1px; height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* ---- bar ------------------------------------------------------------- */
+
+/* xenonite: raised surfaces catch one hairline of light on their top edge.
+   Depth without a glow -- nothing here emits, it only reflects. */
+.bar,
+.seg,
+.moments,
+.ask {
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .05);
+}
+.moments, .ask { box-shadow: inset 0 1px 0 rgba(255, 255, 255, .07), 0 14px 40px rgba(0, 0, 0, .55); }
+
+.bar {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  flex: 0 0 var(--bar-h);
+  padding: 0 16px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface);
+}
+
+/* one settle when a surface arrives, not a per-row cascade */
+@media (prefers-reduced-motion: no-preference) {
+  .view:not([hidden]) { animation: settle .42s cubic-bezier(.16, 1, .3, 1); }
+  @keyframes settle { from { opacity: 0; transform: translateY(6px); } }
+}
+
+.mark {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--sans);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: .04em;
+  color: var(--bright);
+}
+
+.glyph {
+  width: 15px;
+  height: 15px;
+  color: var(--voice);
+  flex: 0 0 auto;
+}
+
+.tally {
+  margin-left: auto;
+  font-size: 11.5px;
+  color: var(--dim);
+}
+
+/* segmented control */
+
+.seg {
+  display: flex;
+  gap: 2px;
+  padding: 3px;
+  border-radius: 8px;
+  background: var(--ground);
+  border: 1px solid var(--line);
+}
+
+.seg-btn {
+  appearance: none;
+  border: 0;
+  border-radius: 6px;
+  padding: 5px 14px;
+  background: transparent;
+  color: var(--dim);
+  font: 500 12px/1 var(--sans);
+  cursor: pointer;
+  transition: color var(--step), background var(--step);
+}
+
+.seg-btn:hover { color: var(--body); }
+
+.seg-btn[aria-selected="true"] {
+  background: var(--raised);
+  color: var(--bright);
+}
+
+/* ---- settings -------------------------------------------------------- */
+
+.settings-btn {
+  flex: 0 0 auto;
+  padding: 5px 12px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--dim);
+  font: 500 11.5px var(--sans);
+  cursor: pointer;
+}
+.settings-btn:hover { color: var(--body); border-color: var(--voice-dim); }
+.settings-btn:active { transform: translateY(1px); }
+
+.scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  background: rgba(8, 10, 12, .62);
+}
+.scrim[hidden] { display: none; }
+
+.modal {
+  position: fixed;
+  z-index: 41;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: min(420px, calc(100vw - 32px));
+  max-height: 86vh;
+  overflow: auto;
+  padding: 18px 20px 16px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--raised);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, .07),
+    0 24px 64px rgba(0, 0, 0, .66);
+}
+.modal[hidden] { display: none; }
+
+.modal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 14px;
+}
+.modal-head h2 {
+  margin: 0;
+  font: 600 13px var(--sans);
+  color: var(--bright);
+}
+.modal-x {
+  padding: 0 6px;
+  border: 0;
+  background: transparent;
+  color: var(--dim);
+  font: 18px/1 var(--sans);
+  cursor: pointer;
+}
+.modal-x:hover { color: var(--bright); }
+
+/* the warning is the first thing read, so it is the one coloured thing here */
+.beta {
+  margin: 0 0 18px;
+  padding: 9px 11px;
+  border: 1px solid var(--voice-dim);
+  border-radius: 6px;
+  color: var(--voice);
+  font: 11.5px/1.55 var(--mono);
+}
+
+.field { display: block; margin-bottom: 14px; }
+.field-label {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--dim);
+  font: 500 11.5px var(--sans);
+}
+.field input {
+  width: 100%;
+  padding: 7px 9px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--ground);
+  color: var(--bright);
+  font: 12px var(--mono);
+}
+.field input:focus { border-color: var(--voice-dim); outline: none; }
+.field-note {
+  display: block;
+  margin-top: 6px;
+  color: var(--dim);
+  font: 11px var(--sans);
+}
+
+.seg-wide { width: 100%; }
+.seg-wide .seg-btn { flex: 1 1 0; }
+
+.modal-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 18px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
+
+.btn-quiet,
+.btn-voice {
+  padding: 6px 13px;
+  border-radius: 6px;
+  font: 500 11.5px var(--sans);
+  cursor: pointer;
+}
+.btn-quiet {
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--dim);
+}
+.btn-quiet:hover { color: var(--body); }
+.btn-voice {
+  border: 1px solid var(--voice-dim);
+  background: var(--voice);
+  color: #1a1005;
+}
+.btn-voice:hover { border-color: var(--voice); }
+.btn-quiet:active,
+.btn-voice:active { transform: translateY(1px); }
+
+/* ---- views ----------------------------------------------------------- */
+
+main {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.view {
+  height: 100%;
+  overflow: auto;
+}
+
+.view[hidden] { display: none; }
+
+.foot {
+  flex: 0 0 auto;
+  padding: 8px 16px;
+  border-top: 1px solid var(--line);
+  font-family: var(--sans);
+  font-size: 11px;
+  color: var(--dim);
+}
+
+/* ---- main ------------------------------------------------------------ */
+
+/* Recent is the pulse of a memory tool, so it takes the room. The tallies
+   are reference, so they sit in a rail and never compete with it. */
+#view-main { overflow: hidden; }
+
+.main-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 296px;
+  height: 100%;
+  min-height: 0;
+}
+
+.blk { min-height: 0; padding: 18px 0 24px; }
+
+.blk-recent {
+  display: flex;
+  flex-direction: column;
+  padding: 18px 32px 0 24px;
+}
+.blk-recent #recent {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  padding-bottom: 24px;
+}
+
+.rail {
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 0 24px 24px;
+  border-left: 1px solid var(--line);
+}
+.rail .blk + .blk { border-top: 1px solid var(--line); }
+
+.blk h2 {
+  margin: 0 0 12px;
+  font: 500 11.5px/1 var(--sans);
+  color: var(--dim);
+}
+
+/* align-content keeps rows at their own height inside a tall flex parent */
+.rows { display: grid; gap: 3px; align-content: start; }
+
+.row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  min-width: 0;
+  min-height: 21px;
+}
+
+.row-label { color: var(--body); }
+.row-num {
+  flex: 0 0 auto;
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+  color: var(--dim);
+}
+
+/* a count that is not zero has weight, not hue */
+.row-num.live { color: var(--bright); font-weight: 600; }
+/* why is rocky's own domain, so why carries the voice */
+.row-num.why  { color: var(--voice); font-weight: 600; }
+
+.row-note { color: var(--dim); font-size: 11.5px; }
+
+/* a path that outgrows the rail truncates from the left, so the filename
+   survives and the count is never pushed out of view */
+.row-path {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  direction: rtl;
+  text-align: left;
+  color: var(--body);
+}
+
+.recent-row {
+  display: grid;
+  grid-template-columns: 88px minmax(0, 1fr) auto;
+  gap: 16px;
+  align-items: baseline;
+  padding: 8px 0;
+  border-top: 1px solid var(--line);
+}
+.recent-row:first-child { border-top: 0; }
+.recent-kind { color: var(--dim); font-size: 11.5px; }
+/* why is rocky's own domain, so a why record carries the voice */
+.recent-kind.why { color: var(--voice); }
+.recent-label {
+  color: var(--body);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.recent-ago { color: var(--dim); font-size: 11.5px; }
+
+/* ---- dash ------------------------------------------------------------ */
+
+/* Two columns. Search, files and why all stack on the left so the pane keeps
+   the whole remaining width -- Compare needs it most, it splits again inside. */
+.dash {
+  display: grid;
+  grid-template-columns: 340px minmax(0, 1fr);
+  height: 100%;
+  min-height: 0;
+}
+
+.pane {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* search, the count, then the list for the whole remaining height. The why
+   answer is no longer a panel here: it opens where the question was asked. */
+.left {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border-right: 1px solid var(--line);
+}
+
+/* the TUI names each pane in its box title; here it is a plain column head */
+.col-head {
+  flex: 0 0 auto;
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--line);
+  font: 500 11.5px/1.4 var(--sans);
+  color: var(--dim);
+}
+
+/* search leads the column, the file list answers it directly below */
+.filter {
+  display: block;
+  flex: 0 0 auto;
+  padding: 10px;
+  border-bottom: 1px solid var(--line);
+}
+
+.filter input {
+  width: 100%;
+  padding: 6px 9px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--ground);
+  color: var(--bright);
+  font: 12px var(--mono);
+}
+.filter input::placeholder { color: var(--dim); font-family: var(--sans); }
+.filter input:focus { border-color: var(--voice-dim); outline: none; }
+
+.files { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 6px 0; }
+
+.file {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  width: 100%;
+  padding: 5px 10px;
+  border: 0;
+  background: transparent;
+  color: var(--body);
+  font: 12px var(--mono);
+  text-align: left;
+  cursor: pointer;
+}
+.file:hover { background: var(--surface); }
+.file[aria-selected="true"] {
+  background: var(--raised);
+  color: var(--bright);
+  box-shadow: inset 2px 0 0 var(--voice);
+}
+
+/* count leads the row, as it does in the TUI. It is a claim about how often
+   rocky heard this file, so on the chosen row it takes the voice colour. */
+.file-count {
+  flex: 0 0 auto;
+  width: 3ch;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  color: var(--dim);
+}
+.file[aria-selected="true"] .file-count { color: var(--voice); }
+
+.file-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.file-dir { color: var(--dim); }
+
+/* pane */
+
+.pane-bar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex: 0 0 auto;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--line);
+}
+
+.pane-path {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: var(--bright);
+  font-size: 12px;
+}
+
+/* the TUI shows sel lo-hi in its selection box; here it rides the pane bar */
+.sel {
+  flex: 0 0 auto;
+  color: var(--voice);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+}
+.sel:empty { display: none; }
+
+.mode { display: flex; gap: 2px; }
+
+.mode-btn {
+  appearance: none;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  padding: 3px 10px;
+  background: transparent;
+  color: var(--dim);
+  font: 500 11.5px/1.4 var(--sans);
+  cursor: pointer;
+}
+.mode-btn:hover { color: var(--body); }
+.mode-btn[aria-selected="true"] {
+  border-color: var(--line);
+  background: var(--surface);
+  color: var(--bright);
+}
+
+.pane-body { flex: 1 1 auto; overflow: auto; padding: 10px 0 32px; }
+
+/* code lines */
+
+.cl {
+  display: grid;
+  grid-template-columns: 52px minmax(0, 1fr);
+  font: 12.5px/1.6 var(--mono);
+}
+.cl .ln {
+  user-select: none;
+  padding-right: 14px;
+  text-align: right;
+  color: var(--dim);
+  font-variant-numeric: tabular-nums;
+}
+.cl .lt { white-space: pre; color: var(--body); padding-right: 16px; }
+
+/* The picked range is marked at its edge, not washed in clay. A tint across
+   the whole row sits on top of every token and flattens the syntax colours
+   underneath it, which is the one thing the code pane exists to show. */
+.cl.picked {
+  background: var(--surface);
+  box-shadow: inset 2px 0 0 var(--voice);
+}
+.cl.picked .ln { color: var(--voice); }
+
+/* syntax roles, shared by Lines and by the code inside every diff */
+.tk-c { color: var(--dim); font-style: italic; }
+.tk-k { color: var(--tk-key); }
+.tk-s,
+.tk-n { color: var(--tk-lit); }
+.tk-f { color: var(--bright); }
+
+.trunc {
+  margin: 12px 0 0 52px;
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+  color: var(--dim);
+  font-size: 11.5px;
+}
+
+/* diff */
+
+.diff-head {
+  padding: 0 16px 10px 52px;
+  color: var(--dim);
+  font-size: 11.5px;
+}
+.dl {
+  display: grid;
+  grid-template-columns: 52px minmax(0, 1fr);
+  font: 12.5px/1.6 var(--mono);
+}
+.dl { position: relative; }
+.dl .ln { user-select: none; padding-right: 14px; text-align: right; color: var(--dim); }
+.dl .lt { white-space: pre; color: var(--body); padding-right: 16px; }
+.dl-h .lt  { color: var(--dim); }
+.dl-at .lt { color: var(--dim); background: var(--surface); }
+
+/* the whole row carries the tint, so the hue survives horizontal scrolling */
+.dl-p { background: var(--add-tint); }
+.dl-m { background: var(--del-tint); }
+.dl-p .lt { color: var(--bright); }
+/* a removed line is already gone, so it reads back one step */
+.dl-m .lt { opacity: .74; }
+
+/* the sign sits in the gutter, where a diff reader looks for it */
+.dl-p .ln::after,
+.dl-m .ln::after {
+  position: absolute;
+  left: 6px;
+  font-weight: 600;
+}
+.dl-p .ln::after { content: "+"; color: var(--add-mark); }
+.dl-m .ln::after { content: "-"; color: var(--del-mark); }
+
+/* ---- record modes ------------------------------------------------------ */
+
+.pane-sub {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex: 0 0 auto;
+  padding: 7px 12px;
+  border-bottom: 1px solid var(--line);
+}
+.pane-sub[hidden] { display: none; }
+
+.toggle {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--body);
+  font: 11.5px var(--sans);
+  cursor: pointer;
+}
+.toggle input { accent-color: var(--voice); margin: 0; }
+
+.sub-note { color: var(--dim); font-size: 11.5px; }
+
+.rec {
+  padding: 10px 16px;
+  border-top: 1px solid var(--line);
+  cursor: pointer;
+}
+.rec:first-child { border-top: 0; }
+.rec:hover { background: var(--surface); }
+.rec.on { background: var(--surface); box-shadow: inset 2px 0 0 var(--voice); }
+.rec:active { transform: translateY(1px); }
+
+/* three facts, three columns. A chain of separator dots reads as decoration
+   and forces the eye to parse punctuation to find the age. */
+.rec-top {
+  display: grid;
+  grid-template-columns: 90px minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: baseline;
+  font-size: 11.5px;
+}
+.rec-kind { color: var(--dim); }
+.rec-kind.why { color: var(--voice); }
+.rec-src {
+  color: var(--dim);
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.rec-ago { color: var(--dim); }
+.rec-body { color: var(--body); margin-top: 3px; overflow-wrap: anywhere; }
+
+/* diff text is pre-formatted, so it scrolls on its own axis rather than
+   bleeding over the neighbouring column */
+.diff {
+  margin-top: 8px;
+  overflow-x: auto;
+  border-left: 1px solid var(--line);
+}
+.diff .diff-head { padding: 0 0 6px 12px; }
+.diff .dl { grid-template-columns: 40px minmax(0, 1fr); }
+
+/* two moments, side by side */
+
+.two {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  height: 100%;
+}
+.side { min-width: 0; border-left: 1px solid var(--line); position: relative; }
+.side:first-child { border-left: 0; }
+
+.side-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  width: 100%;
+  padding: 9px 14px;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  background: transparent;
+  color: var(--body);
+  font: 11.5px var(--mono);
+  text-align: left;
+  cursor: pointer;
+}
+.side-head:hover { background: var(--surface); }
+.side-tag { flex: 0 0 auto; color: var(--voice); font-weight: 600; }
+.side-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: var(--dim);
+}
+.side-body { padding: 12px 14px; }
+
+/* the timeline picker, inlined under the side it changes */
+
+.moments {
+  position: absolute;
+  z-index: 15;
+  left: 8px;
+  right: 8px;
+  max-height: 60vh;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+  box-shadow: 0 14px 40px rgba(0, 0, 0, .55);
+}
+.moments-bar {
+  display: flex;
+  gap: 8px;
+  padding: 8px;
+  border-bottom: 1px solid var(--line);
+}
+.moments-search {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 5px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--ground);
+  color: var(--bright);
+  font: 12px var(--mono);
+}
+.moments-search:focus { border-color: var(--voice-dim); outline: none; }
+.moments-scope {
+  flex: 0 0 auto;
+  padding: 4px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--dim);
+  font: 11.5px var(--sans);
+  cursor: pointer;
+}
+.moments-scope:hover { color: var(--body); border-color: var(--voice-dim); }
+.moments-list { overflow: auto; }
+
+.moment {
+  display: block;
+  width: 100%;
+  padding: 8px 12px;
+  border: 0;
+  border-top: 1px solid var(--line);
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+.moment:first-child { border-top: 0; }
+.moment:hover { background: var(--raised); }
+.moment-top { display: block; color: var(--dim); font: 11.5px var(--mono); }
+.moment-body {
+  display: block;
+  margin-top: 2px;
+  color: var(--body);
+  font: 12px var(--mono);
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* ---- card ------------------------------------------------------------ */
+
+/* The answer opens at the selection, small, and leaves when dismissed.
+   It is the reply to a question you just asked, not a panel standing by. */
+.pop {
+  position: fixed;
+  z-index: 30;
+  width: min(420px, calc(100vw - 24px));
+  max-height: 62vh;
+  overflow: auto;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--raised);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, .07),
+    0 18px 48px rgba(0, 0, 0, .6);
+}
+.pop[hidden] { display: none; }
+
+@media (prefers-reduced-motion: no-preference) {
+  .pop:not([hidden]) { animation: settle .18s cubic-bezier(.16, 1, .3, 1); }
+}
+
+/* the header is rocky speaking, so it carries the voice */
+.card-head {
+  margin: 0 0 14px;
+  font: 400 14px/1.45 var(--mono);
+  color: var(--voice);
+}
+/* his speech is written as chords in the book, so a witnessed line is sung */
+.card-head:not(.assembled)::before {
+  content: "♪ ";
+  opacity: .8;
+}
+/* assembled from evidence is not rocky speaking, so it stays grey and silent */
+.card-head.assembled { color: var(--dim); }
+
+.card-line {
+  margin: 0 0 9px;
+  color: var(--body);
+  overflow-wrap: anywhere;
+}
+.card-line b { color: var(--bright); font-weight: 600; }
+
+.card-ev {
+  margin-top: 14px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+  color: var(--dim);
+  font-size: 11.5px;
+  overflow-wrap: anywhere;
+}
+
+.card-more {
+  appearance: none;
+  margin-top: 12px;
+  padding: 5px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--body);
+  font: 500 11.5px var(--sans);
+  cursor: pointer;
+}
+.card-more:hover { color: var(--bright); border-color: var(--voice-dim); }
+
+.rung {
+  margin: 8px 0 0;
+  padding-left: 12px;
+  border-left: 1px solid var(--line);
+  color: var(--dim);
+  font-size: 12px;
+}
+
+/* ---- shared states ---------------------------------------------------- */
+
+.empty {
+  padding: 14px 16px;
+  color: var(--dim);
+  font-size: 12px;
+}
+/* the card already pads, so its empty state must not pad twice */
+.pop > .empty { padding: 0; }
+
+/* A guess sits apart from what rocky heard, and never borrows the voice
+   colour. Grey is the whole point: this part is not evidence. */
+.guess {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px dashed var(--line);
+}
+.guess-head {
+  margin: 0 0 8px;
+  color: var(--dim);
+  font: 500 11.5px var(--sans);
+}
+.guess-body {
+  margin: 0;
+  color: var(--body);
+  overflow-wrap: anywhere;
+}
+.guess .listen { padding: 22px 0; }
+.guess .card-ev { margin-top: 10px; }
+.empty p { margin: 0 0 6px; }
+.empty p:last-child { margin: 0; }
+/* an empty line keeps the blank row the TUI leaves between the two sentences */
+.empty p:empty { height: .5em; margin: 0; }
+
+.fail {
+  padding: 14px 16px;
+  color: var(--voice);
+  font-size: 12px;
+}
+.fail p { margin: 0 0 10px; }
+
+.fail-retry {
+  padding: 5px 11px;
+  border: 1px solid var(--voice-dim);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--voice);
+  font: 500 11.5px var(--sans);
+  cursor: pointer;
+}
+.fail-retry:hover { border-color: var(--voice); }
+
+/* a list keeps its own shape while it waits, so nothing jumps on arrival */
+.skel-list { padding: 6px 0; }
+.skel-row {
+  height: 9px;
+  margin: 0 10px 12px;
+  border-radius: 2px;
+  background: var(--surface);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .skel-row { animation: pulse 1.5s ease-in-out infinite; }
+  .skel-row:nth-child(2n) { animation-delay: .2s; }
+  .skel-row:nth-child(3n) { animation-delay: .4s; }
+  @keyframes pulse { 50% { opacity: .45; } }
+}
+
+/* Waiting is drawn as sound leaving a point and coming back, because that is
+   the only way rocky knows anything. It replaces the usual skeleton bars. */
+.listen {
+  display: grid;
+  place-items: center;
+  padding: 56px 0;
+}
+.rings {
+  position: relative;
+  width: 66px;
+  height: 66px;
+}
+.ring {
+  position: absolute;
+  inset: 0;
+  border: 1px solid var(--voice);
+  border-radius: 50%;
+  opacity: 0;
+}
+.core {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 5px;
+  height: 5px;
+  margin: -2.5px 0 0 -2.5px;
+  border-radius: 50%;
+  background: var(--voice);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .ring { animation: sonar 2.6s cubic-bezier(.16, 1, .3, 1) infinite; }
+  .ring:nth-child(2) { animation-delay: .6s; }
+  .ring:nth-child(3) { animation-delay: 1.2s; }
+  .core { animation: beat 2.6s ease-out infinite; }
+  @keyframes sonar {
+    0%   { transform: scale(.14); opacity: .6; }
+    72%  { opacity: .07; }
+    100% { transform: scale(1); opacity: 0; }
+  }
+  @keyframes beat { 0%, 12% { opacity: 1; } 60% { opacity: .35; } 100% { opacity: 1; } }
+}
+
+/* still, the rings read as a diagram of the same idea */
+@media (prefers-reduced-motion: reduce) {
+  .ring { opacity: .22; }
+  .ring:nth-child(1) { transform: scale(.4); }
+  .ring:nth-child(2) { transform: scale(.7); }
+}
+
+/* ---- ask ------------------------------------------------------------- */
+
+.ask {
+  position: fixed;
+  z-index: 20;
+  padding: 6px 12px;
+  border: 1px solid var(--voice-dim);
+  border-radius: 6px;
+  background: var(--raised);
+  color: var(--voice);
+  font: 12px var(--mono);
+  cursor: pointer;
+  box-shadow: 0 6px 22px rgba(0, 0, 0, .5);
+}
+.ask:hover { border-color: var(--voice); }
+.ask:active { transform: translateY(1px); }
+.ask[hidden] { display: none; }
+
+/* ---- narrow ---------------------------------------------------------- */
+
+@media (max-width: 1100px) {
+  .dash { grid-template-columns: 250px minmax(0, 1fr); }
+}
+
+@media (max-width: 720px) {
+  .main-grid { grid-template-columns: minmax(0, 1fr); padding: 20px 16px 32px; }
+  .dash { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 44vh) minmax(0, 1fr); }
+  .left { border-right: 0; border-bottom: 1px solid var(--line); }
+  .two { grid-template-columns: minmax(0, 1fr); }
+  .side:first-child { border-bottom: 1px solid var(--line); }
+}

@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { searchKnowledge } from "../core/memory-query.js";
-import { labelFor } from "../ui/tui/data.js";
+import { labelFor } from "../core/record-label.js";
 import type { MemoryRecord } from "../core/memory-read.js";
 
 const NOW = 1_756_000_000_000;

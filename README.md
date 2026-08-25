@@ -19,7 +19,7 @@ The useful part is local and deterministic. Rocky has no daemon, no telemetry, a
 | | |
 | --- | --- |
 | **Failure memory** a failed build becomes a fingerprint; when the same error returns, Rocky replays what turned it green last time. Evidence, not a guess. | ![Rocky remembers a failed build and its fix](https://raw.githubusercontent.com/poggufanz/rocky/main/assets/demo-loop.gif) |
-| **`rocky dash`** every remembered change to one file, side by side: the agent's stated reason and the diff that landed. | ![rocky dash compare view](https://raw.githubusercontent.com/poggufanz/rocky/main/assets/demo-dash.gif) |
+| **`rocky dash`** opens a local page in your browser: every remembered change to one file, side by side, the agent's stated reason next to the diff that landed. | ![rocky dash compare view](https://raw.githubusercontent.com/poggufanz/rocky/main/assets/demo-dash.gif) |
 | **Rationale gate** an editing agent must state why before it touches a file. No stated reason, no edit; deny-once, fail-open. | ![PreToolUse rationale gate denying an unexplained edit](https://raw.githubusercontent.com/poggufanz/rocky/main/assets/demo-gate.gif) |
 
 ## Install
@@ -70,7 +70,7 @@ The PowerShell hook is passive ears only: it overrides `prompt` to see a command
 | Surface | What it does |
 | --- | --- |
 | Failure memory | Fingerprints errors, remembers later fixes, and searches your own history. |
-| `rocky dash` | Browse and inspect remembered failures, fixes, triples, and diffs in an interactive terminal dashboard. |
+| `rocky` / `rocky dash` | Open the local GUI: browse remembered failures, fixes, rationales and diffs, and ask why one selection of code exists. Loopback only, token-gated. |
 | `rocky watch` | Waits with a long-running command, saves a failed stderr tail, and notifies when work ends. |
 | `rocky check` | Scans a pending push for secrets, checks new npm package names after consent, and asks one non-blocking comprehension question. |
 | Nervous System | Supported Claude Code and Codex hooks record bounded intent, path, excerpt, and stated-rationale evidence. |
@@ -85,7 +85,7 @@ Rocky preserves wrapped-command stdout, stderr, TTY behavior, and exit status. P
 | Command | Use |
 | --- | --- |
 | `rocky run "<cmd>"` | Run a command with deep failure memory. |
-| `rocky dash [query]` | Browse and inspect remembered failures, fixes, triples, and diffs in an interactive terminal dashboard. |
+| `rocky` / `rocky dash` | Open the local GUI on `127.0.0.1`. `--no-open` prints the URL instead; `--port=<n>` picks the port. |
 | `rocky watch "<cmd>"` | Run a long command with completion notice and failure log. |
 | `rocky brief [--since <ref\|24h>] [--quiet] [--ai]` | Hear what changed since last brief: commits, remembered failures/fixes, touched invariant guards. Local git and memory only, no network; `--ai` stays on loopback. |
 | `rocky recall [--ai] "<query>"` | Search remembered failures and fixes. |

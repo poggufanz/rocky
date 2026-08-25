@@ -1,6 +1,6 @@
-import type { MemoryRecord } from "../../../core/memory-read.js";
-import { redactSecretsAtBoundary } from "../../../core/redact.js";
-import { elapsed } from "../../rocky.js";
+import type { MemoryRecord } from "./memory-read.js";
+import { redactSecretsAtBoundary } from "./redact.js";
+import { elapsed } from "../ui/rocky.js";
 
 export interface HomeData {
   total: number;

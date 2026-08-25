@@ -1,8 +1,8 @@
 import { existsSync } from "node:fs";
 import { execFileSync } from "node:child_process";
-import type { MemoryRecord } from "../../../core/memory-read.js";
-import { redactSecretsAtBoundary } from "../../../core/redact.js";
-import { resolveGitDiff } from "../../../core/git-diff.js";
+import type { MemoryRecord } from "./memory-read.js";
+import { redactSecretsAtBoundary } from "./redact.js";
+import { resolveGitDiff } from "./git-diff.js";
 
 export interface CompareRec {
   kind: string;

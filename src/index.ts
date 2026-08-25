@@ -5,7 +5,7 @@
  * Public surface:
  *   rocky run "<command>"     run a command; Rocky remembers failures & fixes
  *   rocky recall [--ai] <query> search Rocky's memory of past errors
- *   rocky dash                browse memory, interactive
+ *   rocky | rocky dash        open the local GUI on 127.0.0.1
  *   rocky hook|mcp|model|setup distribution bridge commands
  *   rocky watch|check|what|how|why|digest|quiz|export v0.3–v0.5 surfaces
  *   rocky --help
@@ -18,6 +18,7 @@ import { watch } from "./commands/watch.js";
 import { recall } from "./commands/recall.js";
 import { model } from "./commands/model.js";
 import { dashCommand } from "./commands/dash.js";
+import { guiCommand } from "./commands/gui.js";
 import { stats } from "./commands/stats.js";
 import { hookFail, hookInstall, hookStatus, hookSuccess, hookUninstall } from "./commands/hook.js";
 import { mcp } from "./commands/mcp.js";
@@ -37,8 +38,6 @@ import { ambiguityCommand } from "./agent/ambiguity.js";
 import { CliUsageError, parseExactCommand, reportCliUsage } from "./commands/cli-args.js";
 import { PACKAGE_NAME, PACKAGE_VERSION } from "./core/package-info.js";
 import { detail, face, flushHookSpeech, say } from "./ui/rocky.js";
-import { runSurface } from "./ui/tui/surface/shell.js";
-import { surfaceEntry } from "./ui/tui/surface/entry.js";
 
 const HELP = `
 rocky — he remembers, so you don't have to.
@@ -87,7 +86,10 @@ usage:
   rocky model use [--exposure sanitized|raw] <installed-model>
                             probe an installed Ollama model, then enable local AI.
   rocky model off            disable Rocky local AI. Ollama stays untouched.
-  rocky dash                browse memory, interactive
+  rocky | rocky dash        open local GUI in browser. one link, one route;
+                            dash just starts on the Dash segment. loopback only,
+                            fresh token each launch. --no-open prints URL instead,
+                            --port=<n> picks port. ctrl-c stops rocky.
   rocky stats               what Rocky holds in memory.
   rocky journal "<note>"    write one line dogfood note. local file only.
   rocky invariants          list remembered invariant notes from .rocky/invariants.md
@@ -311,15 +313,11 @@ async function runGateEvent(vendor: string): Promise<number> {
 
 async function main(): Promise<number> {
   const [, , command, ...rest] = process.argv;
-  if (command === undefined) {
-    const route = surfaceEntry(undefined, process.stdout.isTTY === true && process.stdin.isTTY === true);
-    if ("surface" in route && route.surface === "home") {
-      return runSurface({
-        stdout: process.stdout,
-        stdin: process.stdin,
-        env: process.env,
-        view: "home",
-      });
+  if (command === undefined || command === "--no-open" || command?.startsWith("--port=")) {
+    const flags = command === undefined ? [] : [command, ...rest];
+    // A browser needs a human at the keyboard, so a pipe falls through to help.
+    if (process.stdout.isTTY === true && process.stdin.isTTY === true) {
+      return guiCommand(flags, "main");
     }
   }
   try {
