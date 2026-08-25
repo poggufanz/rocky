@@ -9,11 +9,11 @@
 │    const sixth = await fetchRows();                            ││ DOCENTRY documents only, token │
 │    const seventh = await fetchRows();                          ││ [redacted github token] stays  │
 │    const eighth = await fetchRows();                           ││ local                          │
-│    const ninth = await fetchRows();                            ││                                │
-│▎   const tenth = await fetchRows();                            ││ source: agent:claude-code · 2h │
-│    const eleventh = await fetchRows();                         ││ ago                            │
-│    const twelfth = await fetchRows();                          ││                                │
-│    return first;                                               ││                                │
+│    const ninth = await fetchRows();                            ││ form: async because await used │
+│▎   const tenth = await fetchRows();                            ││ at line 5 · catalog            │
+│    const eleventh = await fetchRows();                         ││                                │
+│    const twelfth = await fetchRows();                          ││ source: agent:claude-code · 2h │
+│    return first;                                               ││ ago                            │
 │  }                                                             ││                                │
 │                                                                ││                                │
 │                                                                ││                                │

@@ -34,7 +34,7 @@ import type { PickerState } from "./picker.js";
 import { updatePicker, previewPair, pickList } from "./picker.js";
 import { type CompareRec, type FileEntry, fileIndex, lineOverlapPredicate } from "./compare-data.js";
 import { teachLookup, type TeachHit } from "../../../core/teach.js";
-import { buildLadder, type LadderResult } from "../../../core/teach-ladder.js";
+import { buildLadder, defaultTeachNeighbor, type LadderResult } from "../../../core/teach-ladder.js";
 
 export type CompareFocus = "files" | "compare" | "recA" | "recB" | "diffA" | "diffB";
 export type CompareModal = "scope" | "timeline" | null;
@@ -221,7 +221,10 @@ function lookupTeach(state: TeachState, deps: ShellDeps): TeachState {
     startLine: start,
     endLine: end,
     fileText,
-    ...(deps.git === undefined ? {} : { git: deps.git }),
+    readNeighbor: defaultTeachNeighbor(state.file),
+    ...(hit !== undefined
+      ? { git: () => undefined }
+      : deps.git === undefined ? {} : { git: deps.git }),
   });
   const label = `line ${start}${end !== start ? `–${end}` : ""}`;
   if (hit !== undefined) {

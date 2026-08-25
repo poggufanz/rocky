@@ -1,10 +1,10 @@
 // src/commands/teach.ts
-import { readFileSync } from "node:fs";
-import { tokens } from "../core/fingerprint.js";
+import { readFileSync, statSync } from "node:fs";
 import { loadMemory } from "../core/memory-read.js";
-import { teachLookup, type TeachHit } from "../core/teach.js";
-import { buildLadder, type LadderResult, type Rung } from "../core/teach-ladder.js";
-import { renderLadderCard, renderLadderExpanded, renderWitnessCard } from "../core/teach-render.js";
+import { teachLookup } from "../core/teach.js";
+import { buildLadder, defaultTeachNeighbor, type LadderResult } from "../core/teach-ladder.js";
+import { gapRungFor, renderLadderCard, renderLadderExpanded, renderWitnessCard } from "../core/teach-render.js";
+import { redactSecretsAtBoundary } from "../core/redact.js";
 import { block, detail, heading, say } from "../ui/rocky.js";
 import { CliUsageError, reportCliUsage } from "./cli-args.js";
 
@@ -12,6 +12,7 @@ const EMPTY_STATE = "not heard why yet. agent explains when it writes. ask agent
 const USAGE = "rocky teach <file>[:<line>] [--stdin] [--ladder] [--quiet]";
 const SELECTION_PAD = 3;
 const TEACH_STDIN_CAP_BYTES = 2 * 1024 * 1024;
+const TEACH_READ_CAP_BYTES = 2 * 1024 * 1024;
 
 export interface TeachDeps {
   say?: (line: string) => void;
@@ -85,23 +86,6 @@ async function readTeachStdin(): Promise<string> {
   return Buffer.concat(chunks).toString("utf8");
 }
 
-/**
- * When a witness exists but its `code` paragraph shares no token with the
- * selection's hop-1 construct finding, the card gains one gap rung so the
- * reader sees which sentence is witness and which is assembly. The rung is
- * the ladder's first rung when it is catalog or ast — never fabricated.
- */
-function gapRungFor(hit: TeachHit, ladder: LadderResult | undefined): Rung | undefined {
-  const first = ladder?.rungs[0];
-  if (first === undefined) return undefined;
-  if (first.source !== "catalog" && first.source !== "ast") return undefined;
-  const codeTokens = tokens(hit.record.code);
-  for (const token of tokens(first.finding)) {
-    if (codeTokens.has(token)) return undefined;
-  }
-  return first;
-}
-
 export async function teach(argv: readonly string[], deps: TeachDeps = {}): Promise<number> {
   const speak = deps.say ?? say;
   const printHeading = deps.heading ?? heading;
@@ -120,6 +104,8 @@ export async function teach(argv: readonly string[], deps: TeachDeps = {}): Prom
 
   let fileText: string;
   try {
+    const stat = statSync(file);
+    if (!stat.isFile() || stat.size > TEACH_READ_CAP_BYTES) throw new Error("bounded teach read miss");
     fileText = readFileSync(file, "utf8");
   } catch {
     if (!quiet) speak(EMPTY_STATE);
@@ -127,24 +113,43 @@ export async function teach(argv: readonly string[], deps: TeachDeps = {}): Prom
   }
   const lines = fileText.split(/\r?\n/);
   const total = lines.length;
+  if (line !== undefined && line > total) {
+    if (!quiet) speak(EMPTY_STATE);
+    return 0;
+  }
 
   let snippet: string | undefined;
   let startLine = 1;
   let endLine = total;
+  let anchorStart = 1;
+  let anchorEnd = total;
   if (stdin) {
+    if (process.stdin.isTTY) {
+      const code = reportCliUsage(new CliUsageError("--stdin needs piped input, not a terminal", USAGE), speak, printDetail);
+      if (code !== undefined) return code;
+    }
     snippet = await readTeachStdin();
   } else if (line !== undefined) {
     startLine = Math.max(1, line - SELECTION_PAD);
     endLine = Math.min(total, line + SELECTION_PAD);
     snippet = lines.slice(startLine - 1, endLine).join("\n");
+    anchorStart = line;
+    anchorEnd = line;
   }
 
   const records = loadMemory();
-  const hit = teachLookup(records, { path: file, ...(snippet === undefined ? {} : { snippet }) });
+  const hit = teachLookup(records, { path: file, cwd: process.cwd(), ...(snippet === undefined ? {} : { snippet }) });
 
   let ladderResult: LadderResult | undefined;
   if (snippet !== undefined) {
-    ladderResult = buildLadder({ file, startLine, endLine, fileText });
+    ladderResult = buildLadder({
+      file,
+      startLine: anchorStart,
+      endLine: anchorEnd,
+      fileText,
+      readNeighbor: defaultTeachNeighbor(file),
+      ...(hit !== undefined ? { git: () => undefined } : {}),
+    });
   }
 
   if (hit !== undefined) {
@@ -160,9 +165,9 @@ export async function teach(argv: readonly string[], deps: TeachDeps = {}): Prom
     const label = stdin ? "snippet from stdin" : `line ${line}`;
     const card = renderLadderCard(file, label, ladderResult);
     printHeading(card.header);
-    printBlock([...card.lines]);
+    printBlock(card.lines.map((l) => redactSecretsAtBoundary(l)));
     printDetail(card.evidence);
-    if (ladder) printBlock([...renderLadderExpanded(ladderResult)]);
+    if (ladder) printBlock(renderLadderExpanded(ladderResult).map((l) => redactSecretsAtBoundary(l)));
     return 0;
   }
 

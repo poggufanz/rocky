@@ -76,7 +76,7 @@ test("teach renders a witness card when an explain record matches the selection"
   assert.deepEqual(headingLines, [WITNESS_HEADER]);
   assert.ok(blockLines.includes("code: documents only, no duplicates"));
   assert.ok(blockLines.includes("business: journal accepts DOCENTRY documents only"));
-  assert.ok(blockLines.some((line) => line.startsWith("form: async because await used at line 5")));
+  assert.ok(blockLines.some((line) => line.startsWith("form: async because await used at line 8")));
   assert.ok(detailLines[0]?.startsWith("source: agent:claude-code"));
   assert.deepEqual(sayLines, []);
 });

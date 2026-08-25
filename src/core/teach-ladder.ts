@@ -1,3 +1,5 @@
+import { readFileSync, statSync } from "node:fs";
+import { dirname, isAbsolute, resolve } from "node:path";
 import { tokens } from "./fingerprint.js";
 import { gitFirstTouch } from "./git-diff.js";
 
@@ -16,6 +18,35 @@ export interface LadderResult {
 }
 
 export const MAX_LADDER_HOPS = 5;
+
+export const TEACH_NEIGHBOR_CAP_BYTES = 64 * 1024;
+
+/**
+ * Default bounded neighbor reader shared by the CLI, MCP, and TUI surfaces so
+ * hop 3 (relative imports) and hop 5 (`src/test/<basename>.test.ts`) fire in
+ * production. Each candidate resolves against the process cwd and the file's
+ * own directory, reads with a 64 KB byte cap, and any missing, oversized, or
+ * unreadable file is a miss (undefined), never an error -- the same
+ * fail-open discipline the MCP surface applies to its own reads.
+ */
+export function defaultTeachNeighbor(file: string): (relPath: string) => string | undefined {
+  return (relPath: string): string | undefined => {
+    if (typeof relPath !== "string" || relPath.length === 0) return undefined;
+    const candidates: string[] = [];
+    if (isAbsolute(relPath)) candidates.push(relPath);
+    candidates.push(resolve(process.cwd(), relPath), resolve(dirname(file), relPath));
+    for (const candidate of candidates) {
+      try {
+        const stat = statSync(candidate);
+        if (!stat.isFile() || stat.size > TEACH_NEIGHBOR_CAP_BYTES) continue;
+        return readFileSync(candidate, "utf8");
+      } catch {
+        // Fail open: an unreadable neighbor is a miss, never an error.
+      }
+    }
+    return undefined;
+  };
+}
 
 export interface BuildLadderInput {
   file: string;

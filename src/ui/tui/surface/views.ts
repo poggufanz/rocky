@@ -11,7 +11,7 @@ import { pulse } from "../core/motion.js";
 import { getMemorySnapshot, filteredFiles, initialCompareState, initialTeachState, browseVisible, shellMood, type ShellState, type CompareState, type TeachState } from "./shell.js";
 import { sessionItems, pickList } from "./picker.js";
 import { getCachedDiff, lineOverlapPredicate, type CompareRec } from "./compare-data.js";
-import { renderLadderCard, renderLadderExpanded, renderWitnessCard, ageLabel } from "../../../core/teach-render.js";
+import { gapRungFor, renderLadderCard, renderLadderExpanded, renderWitnessCard, ageLabel } from "../../../core/teach-render.js";
 import { redactSecretsAtBoundary } from "../../../core/redact.js";
 import { elapsed } from "../../rocky.js";
 import type { MemoryRecord } from "../../../core/memory-read.js";
@@ -1049,7 +1049,7 @@ export class TeachViewNode extends Node {
   private paintCard(buf: CellBuffer, inner: Rect): void {
     const t = this.state;
     if (t.hit !== null) {
-      const c = renderWitnessCard(t.hit);
+      const c = renderWitnessCard(t.hit, gapRungFor(t.hit, t.ladder ?? undefined));
       const evidence = redactSecretsAtBoundary(
         `source: ${t.hit.record.source} · ${ageLabel(t.hit.record.ts, this.now)}`,
       );

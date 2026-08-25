@@ -6,8 +6,8 @@ import { hasCanonicalMemoryQueries, hasDurableMemoryQueries, loadDurableMemorySn
 import type { DurableMemorySnapshot, KnowledgeCoverageSummary, KnowledgeSearchQuery, MemoryQueries, RecallHit, RecallQuery, RecentFailuresQuery, StatsQuery, WhyFileEvidence, WhyFilePathRelation } from "../core/memory-query.js";
 import type { RecallAiOutcome, RecallWithAiPort } from "../ai/port.js";
 import { teachLookup } from "../core/teach.js";
-import { buildLadder } from "../core/teach-ladder.js";
-import { renderLadderCard, renderWitnessCard } from "../core/teach-render.js";
+import { buildLadder, defaultTeachNeighbor, type Rung } from "../core/teach-ladder.js";
+import { gapRungFor, renderLadderCard, renderWitnessCard } from "../core/teach-render.js";
 import { projectExplain } from "./privacy.js";
 import {
   MAX_FIELD_BYTES,
@@ -1776,6 +1776,13 @@ export function createToolRegistry(options: CreateToolRegistryOptions): McpToolR
             }
             const fileLines = fileText === undefined ? [] : fileText.split(/\r?\n/);
             const total = fileLines.length;
+            const empty = {
+              exposure: options.exposure, header: "", lines: [] as string[], evidence: "",
+              match: "empty" as const, truncatedFields: [] as string[], truncated: false,
+            };
+            if (input.line !== undefined && (fileText === undefined || input.line > total)) {
+              return cappedResult(empty);
+            }
             let snippet = input.snippet;
             let startLine = 1;
             let endLine = total;
@@ -1785,12 +1792,20 @@ export function createToolRegistry(options: CreateToolRegistryOptions): McpToolR
               snippet = fileLines.slice(startLine - 1, endLine).join("\n");
             }
             const hit = teachLookup(records, { path: input.path, ...(snippet === undefined ? {} : { snippet }) });
-            const empty = {
-              exposure: options.exposure, header: "", lines: [] as string[], evidence: "",
-              match: "ladder" as const, truncatedFields: [] as string[], truncated: false,
-            };
             if (hit !== undefined) {
-              const card = renderWitnessCard(hit);
+              let gapRung: Rung | undefined;
+              if (snippet !== undefined && fileText !== undefined) {
+                const ladder = buildLadder({
+                  file: input.path,
+                  startLine,
+                  endLine,
+                  fileText,
+                  readNeighbor: defaultTeachNeighbor(input.path),
+                  git: () => undefined,
+                });
+                gapRung = gapRungFor(hit, ladder);
+              }
+              const card = renderWitnessCard(hit, gapRung);
               const projected = projectExplain(card, hit.match, hit.record, options.exposure);
               return safeProjection(
                 () => cappedResult({ exposure: options.exposure, ...projected }),
@@ -1798,7 +1813,13 @@ export function createToolRegistry(options: CreateToolRegistryOptions): McpToolR
               );
             }
             if (snippet !== undefined && fileText !== undefined) {
-              const ladder = buildLadder({ file: input.path, startLine, endLine, fileText });
+              const ladder = buildLadder({
+                file: input.path,
+                startLine,
+                endLine,
+                fileText,
+                readNeighbor: defaultTeachNeighbor(input.path),
+              });
               if (ladder.rungs.length > 0) {
                 const label = input.snippet !== undefined ? "snippet" : `line ${input.line}`;
                 const card = renderLadderCard(input.path, label, ladder);

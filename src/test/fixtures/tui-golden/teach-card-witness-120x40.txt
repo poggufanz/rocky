@@ -7,10 +7,10 @@
 │    const fourth = await fetchRows();                                         ││ business: journal accepts DOCENTRY   │
 │    const fifth = await fetchRows();                                          ││ documents only, token [redacted      │
 │    const sixth = await fetchRows();                                          ││ github token] stays local            │
-│    const seventh = await fetchRows();                                        ││                                      │
-│    const eighth = await fetchRows();                                         ││ source: agent:claude-code · 2h ago   │
+│    const seventh = await fetchRows();                                        ││ form: async because await used at    │
+│    const eighth = await fetchRows();                                         ││ line 5 · catalog                     │
 │    const ninth = await fetchRows();                                          ││                                      │
-│▎   const tenth = await fetchRows();                                          ││                                      │
+│▎   const tenth = await fetchRows();                                          ││ source: agent:claude-code · 2h ago   │
 │    const eleventh = await fetchRows();                                       ││                                      │
 │    const twelfth = await fetchRows();                                        ││                                      │
 │    return first;                                                             ││                                      │
