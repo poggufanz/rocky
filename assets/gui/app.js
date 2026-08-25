@@ -44,12 +44,40 @@ function box(className, ...children) {
   return node;
 }
 
-/** Waiting, drawn the way rocky finds anything out: sound out, sound back. */
+/**
+ * Rocky himself, converted from assets/rocky-pixel.webp by masking the warm
+ * lit stone off the cold room and mapping what survived onto a density ramp.
+ * Drawn by hand it would only have been a guess at his shape.
+ */
+const FACE = [
+  "                                :-:",
+  "        %%%%#**+*#**+-         =- .-:",
+  "   *%%****+**+++*+=-..:==:     -=  --",
+  "=*#@%@#***+***+*+=-::.=+*+=:    ==.-:",
+  " :=*+==+++**++++:.:... :=--==: -*:.",
+  "   :=--===+++*+:.::...    -=#*+*++:.",
+  "    ..:==+==+-:.=  .       :==-==:",
+  " =#*- .:-----. -  .      :",
+  "++=-:  .: -:-  :.       =+*-",
+  "=.        ... -+:        -:-+:",
+  "-            ++--         .+*+:",
+  "             +**:          .==:.",
+  "            :+**:            :-:",
+  "             -::             - ::",
+  "            .*:-*",
+  ".  ::.      .-  +",
+];
+
+/** Waiting: rocky arrives a line at a time, from the top down. */
 function skeleton() {
-  return box(
-    "listen",
-    box("rings", el("div", "ring"), el("div", "ring"), el("div", "ring"), el("div", "core")),
-  );
+  const art = el("pre", "rocky-load");
+  art.setAttribute("aria-label", "rocky listening");
+  FACE.forEach((line, index) => {
+    const row = el("span", "rl-line", line);
+    row.style.setProperty("--i", String(index));
+    art.append(row);
+  });
+  return box("listen", art);
 }
 
 function empty(...lines) {
@@ -220,8 +248,8 @@ function countRow(label, count, tone) {
 async function loadMain() {
   if (state.mainLoaded) return;
   state.mainLoaded = true;
-  fill($("#holds"), skeleton(3));
-  fill($("#day"), skeleton(4));
+  fill($("#holds"), skeleton());
+  fill($("#day"), skeleton());
 
   let data;
   try {
@@ -263,18 +291,50 @@ async function loadMain() {
         })),
   );
 
+  // The newest record is the anchor: remembering is what this surface is for,
+  // so the last thing rocky heard is read first and everything else follows it.
+  const [newest, ...rest] = data.recent;
+  if (newest === undefined) {
+    fill($("#latest"));
+    fill($("#recent"), empty("no records yet"));
+    return;
+  }
+
+  const meta = el("div", "latest-meta");
+  const kind = el("span", "latest-kind", newest.kind);
+  if (WHY_KINDS.has(newest.kind)) kind.classList.add("why");
+  meta.append(kind, el("span", "latest-ago", newest.agoText));
+  fill(
+    $("#latest"),
+    el("div", "latest-eyebrow", "Last Heard"),
+    el("p", "latest-line", newest.label),
+    meta,
+  );
+
+  // The same line arriving twice is a repeat, not two things to read. It is
+  // stacked rather than hidden: the count says how many rocky actually heard.
+  const stacked = [];
+  for (const hit of [newest, ...rest]) {
+    const last = stacked[stacked.length - 1];
+    if (last && last.hit.label === hit.label && last.hit.kind === hit.kind) last.count += 1;
+    else stacked.push({ hit, count: 1 });
+  }
+
   fill(
     $("#recent"),
-    ...(data.recent.length === 0
-      ? [empty("no records yet")]
-      : data.recent.map((hit) => {
-          const row = el("div", "recent-row");
-          const kind = el("span", "recent-kind", hit.kind);
-          if (WHY_KINDS.has(hit.kind)) kind.classList.add("why");
-          row.append(kind, el("span", "recent-label", hit.label), el("span", "recent-ago", hit.agoText));
-          return row;
-        })),
+    ...stacked.slice(1).map(({ hit, count }) => {
+      const row = el("div", "recent-row");
+      const rowKind = el("span", "recent-kind", hit.kind);
+      if (WHY_KINDS.has(hit.kind)) rowKind.classList.add("why");
+      const label = el("span", "recent-label", hit.label);
+      row.append(rowKind, label, el("span", "recent-ago", hit.agoText));
+      if (count > 1) label.append(el("span", "recent-count", ` ×${count}`));
+      return row;
+    }),
   );
+
+  const twin = stacked[0].count;
+  if (twin > 1) $("#latest").append(el("span", "latest-count", `heard ×${twin}`));
 }
 
 /* ---- dash: picker ----------------------------------------------------- */
@@ -408,7 +468,7 @@ function openFile(path) {
 
 async function renderPane() {
   const body = $("#pane-body");
-  fill(body, skeleton(8));
+  fill(body, skeleton());
   try {
     if (state.mode === "lines") await renderLines(body);
     else if (state.mode === "history") await renderHistory(body);
@@ -1095,7 +1155,11 @@ async function askWhy(start, end, at) {
   if (data.expandable && (data.rungs ?? []).length > 0) {
     const more = el("button", "card-more", "show rungs");
     more.type = "button";
-    const rungs = data.rungs.map((rung) => el("p", "rung", rung));
+    // the core writes "why 1 …"; here they are numbered steps under a caption
+    const rungs = [
+      el("p", "rung-note", "Steps Rocky walked from the code to a reason. Each cites where it came from."),
+      ...data.rungs.map((rung) => el("p", "rung", rung.replace(/^why (d+)/, "#$1"))),
+    ];
     more.addEventListener("click", () => {
       const open = more.textContent === "hide rungs";
       more.textContent = open ? "show rungs" : "hide rungs";
