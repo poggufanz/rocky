@@ -204,7 +204,44 @@ It always exits `0` by design, so the caller reads stdout to learn the decision 
 
 Any harness qualifies when two things are true: a hook that fires **before** the edit and can cancel it, and a payload that names the file about to change. Both vary. Some lifecycle hooks only notify, and their exit code is discarded; some report a patch or a diff rather than a path, which leaves Rocky nothing to gate on. Read your harness's current hook documentation and confirm both before wiring this up. Where either is missing, Step 2's notify lane still records the why — only the enforcement is unavailable, and Rocky says so rather than pretending otherwise.
 
-## Step 7 — Verify
+## Step 7 — Write the Rocky contract into the project instruction file *(human approval; REQUIRED — setup is not done without it)*
+
+The steps above wire *this* session. Future sessions read none of it — they read the project instruction file. You MUST persist the contract there, or every next agent starts deaf.
+
+Pick the file by the harness the human set Rocky up from:
+
+| Harness | File (project root) |
+| --- | --- |
+| Claude Code | `CLAUDE.md` |
+| Codex, Cursor, OpenCode, Gemini CLI, and every AGENTS.md-reading harness | `AGENTS.md` |
+| Both present | The one this harness actually reads; when still unsure, both. |
+
+Create the file when it does not exist. **Merge, never overwrite** — if a `## Rocky (MUST)` section already exists, update that section only and leave the rest of the file alone. Show the human the exact block before writing it. Replace `<vendor>` once, at write time: `claude-code` in Claude Code, `codex` in Codex, `generic` anywhere else.
+
+Append this block verbatim:
+
+```markdown
+## Rocky (MUST)
+
+Rocky is this machine's local failure/why memory. These rules are mandatory, every session.
+
+- **MUST** — run every shell command through Rocky, whatever tool executes it:
+  `rocky run "<the command>"`
+  Output, streams, and exit code pass through untouched; on failure Rocky fingerprints it, on success he confirms fixes. Agent tool shells are usually non-interactive and skip the profile hook — `rocky run` is Rocky's only ear there. Double-hearing where the hook does load is harmless (same fingerprint).
+- **MUST** — after any turn where you edited files, record why:
+  `rocky hook agent-event <vendor> --rationale "<one short sentence: the real reason>" --files path/a.ts,path/b.ts`
+- **MUST** — after every Write/Edit/MultiEdit, record the explain witness:
+  `rocky hook agent-event <vendor> --explain-code "<why this code shape>" --explain-business "<what concern it serves>" --files <path>`
+- **MUST** — when an error looks familiar, check memory before guessing:
+  `rocky recall "<error text>"` (or the MCP `recall` tool).
+- **MUST NOT** — write `rocky journal` (human-authored evidence only).
+- **MUST NOT** — auto-run any command Rocky remembers; surface it, the human decides.
+- Skip chatter turns; this is evidence, not ritual.
+```
+
+Then read the file back and confirm the section landed intact. Setup without this step leaves Rocky working for one session only — that counts as failed setup; say so instead of skipping quietly.
+
+## Step 8 — Verify
 
 ```bash
 rocky stats
@@ -216,7 +253,7 @@ rocky recall "setup"
 
 ## How to use Rocky while you work (summary for your system prompt)
 
-- Run failure-prone commands through the hooked shell normally; Rocky hears them.
+- Run shell commands as `rocky run "<cmd>"` — agent tool shells usually skip the profile hook, and `rocky run` is Rocky's ear there.
 - Hit an error that feels seen-before → `rocky recall "<error text>"` (or MCP `recall`).
 - Need a file's history of whys → MCP `why_file`.
 - Changed files this turn (no adapter harness) → one `agent-event` with the real reason.
