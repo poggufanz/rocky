@@ -20,6 +20,7 @@ import { dirname, extname, join, resolve, sep } from "node:path";
 import { loadMemoryChecked } from "../core/memory-read.js";
 import { redactSecretsAtBoundary } from "../core/redact.js";
 import { publicSettings, readSettings, writeSettings } from "./settings.js";
+import { providerFor } from "./models-dev.js";
 import { deriveHome } from "../core/home-data.js";
 import { fileIndex, getCachedDiff, defaultDiffIo, lineOverlapPredicate } from "../core/compare-data.js";
 import { filteredFiles, TEACH_MAX_LINES } from "../core/file-filter.js";
@@ -288,6 +289,13 @@ async function handleApi(
       return sendJson(response, 200, { ...card, rungs: renderLadderExpanded(ladder) });
     }
     return sendJson(response, 200, null);
+  }
+
+  if (pathname === "/api/provider") {
+    // an endpoint the catalogue does not know returns nothing, so the page
+    // offers no models rather than a wrong list
+    const found = await providerFor(url.searchParams.get("endpoint") ?? "");
+    return sendJson(response, 200, found ?? null);
   }
 
   if (pathname === "/api/settings") {

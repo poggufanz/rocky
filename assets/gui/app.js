@@ -805,17 +805,102 @@ function providerMark(kind) {
   return svg;
 }
 
+/** What the catalogue said about the endpoint currently typed in Settings. */
+let provider = null;
+
+/** Rebuilds a catalogue mark from geometry alone; no foreign markup enters. */
+function markFromMeta(mark) {
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("viewBox", mark.viewBox);
+  svg.setAttribute("class", "chip-mark");
+  svg.setAttribute("aria-hidden", "true");
+  for (const d of mark.paths) {
+    const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    path.setAttribute("d", d);
+    path.setAttribute("fill", "currentColor");
+    svg.append(path);
+  }
+  return svg;
+}
+
+/** Asks the catalogue who serves an endpoint. Null means it does not know. */
+async function loadProvider(endpoint) {
+  if (!endpoint) return null;
+  try {
+    return await api(`/api/provider?endpoint=${encodeURIComponent(endpoint)}`);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The model field only ever offers models the endpoint actually serves. An
+ * endpoint the catalogue does not recognise offers none: a wrong list is
+ * worse than no list, because it would be picked and then fail at request time.
+ */
+function paintModels() {
+  const select = $("#set-model");
+  const note = $("#model-note");
+  const chosen = settings.model;
+
+  if (provider === null) {
+    fill(select);
+    select.disabled = true;
+    note.textContent = "Endpoint not known, no models to pick.";
+    return;
+  }
+
+  select.disabled = false;
+  note.textContent = `${provider.name} · ${provider.models.length} models`;
+  fill(
+    select,
+    ...provider.models.map((model) => {
+      const option = el("option", null, model.name);
+      option.value = model.id;
+      if (model.id === chosen) option.selected = true;
+      return option;
+    }),
+  );
+  // a stored model the provider no longer lists is still shown, not silently swapped
+  if (chosen && !provider.models.some((m) => m.id === chosen)) {
+    const stale = el("option", null, `${chosen} (not listed)`);
+    stale.value = chosen;
+    stale.selected = true;
+    select.prepend(stale);
+  }
+}
+
+/** Re-asks the catalogue for whatever endpoint is typed right now. */
+async function refreshModels() {
+  const note = $("#model-note");
+  note.textContent = "asking models.dev…";
+  provider = await loadProvider($("#set-endpoint").value.trim());
+  paintModels();
+}
+
+let modelTimer = 0;
+$("#set-endpoint").addEventListener("input", () => {
+  clearTimeout(modelTimer);
+  // a URL is typed a character at a time; only the pause is worth a lookup
+  modelTimer = setTimeout(refreshModels, 450);
+});
+
 /** The bar says which model would answer, so nobody has to open Settings to find out. */
-function paintModelChip() {
+async function paintModelChip() {
   const chip = $("#model-chip");
-  const fallback = PROVIDERS[settings.provider] ?? PROVIDERS.openai;
-  const model = settings.model || fallback.model;
-  if (!settings.hasKey || !model) {
+  if (!settings.hasKey || !settings.model) {
     chip.hidden = true;
     fill(chip);
     return;
   }
-  fill(chip, providerMark(providerOf(settings.endpoint || fallback.endpoint)), el("span", null, prettyModel(model)));
+
+  const known = provider ?? (await loadProvider(settings.endpoint));
+  const named = known?.models.find((m) => m.id === settings.model);
+  fill(
+    chip,
+    known?.mark ? markFromMeta(known.mark) : providerMark(providerOf(settings.endpoint)),
+    el("span", null, named?.name ?? prettyModel(settings.model)),
+  );
   chip.hidden = false;
 }
 
@@ -999,12 +1084,15 @@ for (const tab of providerTabs) {
     settings.endpoint = "";
     settings.model = "";
     paintSettings();
+    void refreshModels();
   });
 }
 
 async function openSettings() {
   await pullSettings();
   paintSettings();
+  provider = await loadProvider($("#set-endpoint").value.trim());
+  paintModels();
   $("#scrim").hidden = false;
   $("#settings").hidden = false;
   $("#set-endpoint").focus();
@@ -1029,7 +1117,7 @@ $("#settings-save").addEventListener("click", () => {
   void pushSettings({
     provider: settings.provider,
     endpoint: $("#set-endpoint").value.trim(),
-    model: $("#set-model").value.trim(),
+    model: $("#set-model").value,
     // an untouched field leaves the stored key alone rather than erasing it
     ...(typed ? { key: typed } : {}),
   });

@@ -308,6 +308,18 @@ body::after {
   color: var(--dim);
   font: 500 11.5px var(--sans);
 }
+.field select {
+  width: 100%;
+  padding: 7px 9px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--ground);
+  color: var(--bright);
+  font: 12px var(--mono);
+}
+.field select:disabled { color: var(--dim); }
+.field select:focus { border-color: var(--voice-dim); outline: none; }
+
 .field input {
   width: 100%;
   padding: 7px 9px;
