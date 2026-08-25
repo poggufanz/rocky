@@ -1,5 +1,5 @@
 import { tokens } from "./fingerprint.js";
-import type { gitFirstTouch } from "./git-diff.js";
+import { gitFirstTouch } from "./git-diff.js";
 
 export type RungSource = "catalog" | "ast" | "def" | "comment" | "test" | "git";
 
@@ -96,7 +96,7 @@ type CalleeResolution =
   | undefined;
 
 export function buildLadder(input: BuildLadderInput): LadderResult {
-  const { file, fileText, readNeighbor, git } = input;
+  const { file, fileText, readNeighbor, git = gitFirstTouch } = input;
   const lines = fileText.split(/\r?\n/);
   const total = lines.length;
   const selStart = Math.max(1, Math.min(input.startLine, total || 1));

@@ -128,6 +128,21 @@ test("git hop fires through the injected fake git", () => {
   assert.match(gitRung.finding, /feat: add lock/);
 });
 
+test("default git hop uses gitFirstTouch and fails open without a crash", () => {
+  const fileText = [
+    "function save() {",
+    "  const v = await writeRows();",
+    "  return v;",
+    "}",
+  ].join("\n");
+  let result: LadderResult = { rungs: [], stopReason: "evidence-exhausted" };
+  assert.doesNotThrow(() => {
+    result = buildLadder({ file: "src/__no_such_ladder_file__.ts", startLine: 2, endLine: 2, fileText });
+  });
+  const gitRung = result.rungs.find((r) => r.source === "git");
+  assert.equal(gitRung, undefined, "git rung must be skipped when gitFirstTouch finds no first touch");
+});
+
 test("skipped rungs leave no gap in the hop order", () => {
   const fileText = [
     "function save() {",
