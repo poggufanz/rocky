@@ -151,6 +151,7 @@ const state = {
   total: null,
   fileCount: null,
   mainLoaded: false,
+  recent: [],
   // record modes: the TUI's showDiff, strict picker, and the two chosen moments
   showDiff: true,
   strict: false,
@@ -282,11 +283,39 @@ async function loadMain() {
 async function ensureTotal() {
   if (state.total !== null) return;
   try {
-    state.total = (await api("/api/home")).total;
+    const home = await api("/api/home");
+    state.total = home.total;
+    state.recent = home.recent ?? [];
     setTally();
+    // the pane is still empty at this point, so it gets something real
+    if (state.file === null) paneWelcome();
   } catch {
     // a missing tally is not worth an error state
   }
+}
+
+/**
+ * What the pane says before a file is picked. An empty screen is an
+ * invitation to act, so it answers "what has been going on" and points at
+ * the one control that does anything.
+ */
+function paneWelcome() {
+  const parts = [el("p", "welcome-head", "Lately Heard")];
+
+  if ((state.recent ?? []).length === 0) {
+    parts.push(el("p", "welcome-note", "nothing heard yet. run something through rocky, question"));
+  } else {
+    for (const hit of state.recent) {
+      const row = el("div", "welcome-row");
+      const kind = el("span", "welcome-kind", hit.kind);
+      if (WHY_KINDS.has(hit.kind)) kind.classList.add("why");
+      row.append(kind, el("span", "welcome-label", hit.label), el("span", "welcome-ago", hit.agoText));
+      parts.push(row);
+    }
+  }
+
+  parts.push(el("p", "welcome-note", "pick file on left to hear why its lines are the way they are."));
+  fill($("#pane-body"), box("welcome", ...parts));
 }
 
 async function loadFiles() {
