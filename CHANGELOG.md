@@ -2,6 +2,14 @@
 
 Notable changes per release. Dates are the release date.
 
+## Teach mode — unreleased
+
+A new memory surface answering *why this code*: select a snippet, and Rocky returns a reason summary — the code shape's reason and the business concern it serves.
+- **Witness capture (`explain` records).** The agent states both halves itself, right after a Write/Edit/MultiEdit: `rocky hook agent-event <vendor> --explain-code "<why this code shape>" --explain-business "<what concern this serves>" --files <path>`. The PostToolUse capture lane spools the written hunk and the notify lane joins it into an append-only `explain` record — witness testimony from the writing AI, quoted as hearsay with source and age, keyed by hunk content (content hash exact, then token similarity), never by line numbers.
+- **Deterministic why-ladder on a miss.** With no witness, lookup assembles an evidence summary locally — construct catalog, enclosing function, callee definition, nearest comment, tests, and the first `git log -L` commit — capped at five hops and stopping the moment evidence runs out. Assembled answers are rendered, never stored, and never masquerade as witness testimony; lookup makes no network call.
+- **Three surfaces.** CLI `rocky teach <file>[:<line>] [--ladder]` (whole-file witness lookup, `--stdin` snippet matching, `--quiet`); bounded read-only MCP `teach_lookup` under the same sanitized projection as the other tools; and TUI teach mode in the dashboard — file pane, shift-extend range selection, and a why card with an expandable full ladder.
+- **Schema.** The `explain` record kind joins the envelope documented in `docs/schema.md`; both paragraphs and the hunk are redacted and byte-bounded at write time.
+
 ## 0.7.6 — 22 August 2026
 
 A minor release adding a full terminal dashboard surface and a retrieval bug fix:

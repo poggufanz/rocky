@@ -38,7 +38,7 @@ rocky hook status
 
 `hook install` edits the shell profile (`.bashrc` / PowerShell `$PROFILE`) through a guarded transaction — show the human first. This is the one step with no manual equivalent documented here: the installer pins the hook version and detects staleness, which a hand-pasted snippet loses. `hook status` must report the hook current.
 
-## Step 2 — Rationale notify lane (universal, no config at all)
+## Step 2 — Rationale and explain notify lanes (universal, no config at all)
 
 Rocky links *why* a change happened to *what* changed. In harnesses without a session-log adapter or hook system, you provide the why yourself: after any turn where you edited files, run:
 
@@ -50,6 +50,20 @@ rocky hook agent-event generic --rationale "<one short sentence: why this change
 - Send it when you actually changed something; skip chatter turns. This is evidence, not ritual.
 - Fidelity is recorded as `summary` — honest labeling is part of the design.
 - **The `generic` adapter is argv-only.** It ignores stdin entirely, and a call without a non-blank `--rationale` records nothing. A harness lifecycle hook that fires `rocky hook agent-event generic` bare is a no-op — that is what the Step 6 bridge script is for.
+
+### The explain declaration (teach witness)
+
+Rocky teaches by *why* a code shape exists. In any harness, you provide that why yourself: after every Write, Edit, or MultiEdit, run:
+
+```bash
+rocky hook agent-event <vendor> --explain-code "<why this code shape>" --explain-business "<what concern this serves>" --files <path>
+```
+
+- Two short phrases, the real reasons ("switch retry to idempotency key, duplicate settlement seen"), not a changelog: `--explain-code` is why the code is shaped this way, `--explain-business` is what concern it serves.
+- Send it on every edit. The PostToolUse capture lane spools the written hunk and the notify lane joins it into an append-only `explain` record — the witness `rocky teach` renders. This is evidence, not ritual.
+- No gate. This is instruction-level; the optional rationale gate in Step 3 is a separate lane.
+- **`<vendor>` is your harness's label; `generic` works in any harness.** Both `--explain-code` and `--explain-business` must be present, and `--files` must name the written file, for anything to record.
+- On a witness miss, Rocky assembles a deterministic evidence ladder from the file itself (catalog/ast/def/comment/test/git hops) — rendered, never stored, never network.
 
 ## Step 3 — Claude Code, manual hooks *(human approval)*
 
