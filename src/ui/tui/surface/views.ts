@@ -8,9 +8,11 @@ import { CellBuffer, type Rect } from "../core/buffer.js";
 import { InputLineNode, StatusBarNode, SlashMenuNode } from "../components/chrome.js";
 import { matchCommands } from "./registry.js";
 import { pulse } from "../core/motion.js";
-import { getMemorySnapshot, filteredFiles, initialCompareState, browseVisible, shellMood, type ShellState, type CompareState } from "./shell.js";
+import { getMemorySnapshot, filteredFiles, initialCompareState, initialTeachState, browseVisible, shellMood, type ShellState, type CompareState, type TeachState } from "./shell.js";
 import { sessionItems, pickList } from "./picker.js";
 import { getCachedDiff, lineOverlapPredicate, type CompareRec } from "./compare-data.js";
+import { renderLadderCard, renderLadderExpanded, renderWitnessCard, ageLabel } from "../../../core/teach-render.js";
+import { redactSecretsAtBoundary } from "../../../core/redact.js";
 import { elapsed } from "../../rocky.js";
 import type { MemoryRecord } from "../../../core/memory-read.js";
 
@@ -873,6 +875,264 @@ export function compareView(
   return new CompareViewNode(state, size, frame, ascii, allRecords, motionOn ?? true, now ?? Date.now());
 }
 
+export class TeachViewNode extends Node {
+  constructor(
+    readonly state: TeachState,
+    readonly size: { cols: number; rows: number },
+    readonly frame: number,
+    readonly ascii: boolean,
+    readonly motionOn: boolean = true,
+    readonly now: number = Date.now(),
+  ) {
+    super();
+  }
+
+  override paint(buf: CellBuffer): void {
+    const cols = this.rect.w > 0 ? this.rect.w : this.size.cols;
+    const rows = this.rect.h > 0 ? this.rect.h : this.size.rows;
+    if (cols <= 0 || rows <= 0) return;
+
+    this.state.rects = {};
+    buf.fillRect({ x: 0, y: 0, w: cols, h: rows }, " ", undefined, "page");
+
+    const t = this.state;
+    const top = 1;
+    const inputH = 3;
+    const statusH = 1;
+    const bodyH = Math.max(1, rows - top - inputH - statusH);
+    const rightW = Math.max(30, Math.min(42, Math.floor(cols * 0.34)));
+    const leftW = Math.max(1, cols - rightW);
+
+    // 1. Header line (y = 0, h = 1)
+    buf.fillRect({ x: 0, y: 0, w: cols, h: 1 }, " ", undefined, "accentDim");
+    let hx = 1;
+    hx += buf.blitText(hx, 0, " ROCKY ", "black", undefined, "accent") + 1;
+    hx += buf.blitText(hx, 0, `${t.records.length} remembered · ${t.files.length} files`, "text", undefined, "accentDim") + 1;
+    const mood = t.file ? `≣ teaching ${cut(t.file.split("/").slice(-1)[0], 22)}` : "≣ teaching";
+    buf.blitText(cols - stringWidth(mood) - 2, 0, mood, "accent");
+
+    if (t.file === null) {
+      this.paintFilesPhase(buf, cols, top, bodyH, leftW, rightW);
+    } else {
+      this.paintLinesPhase(buf, cols, top, bodyH, leftW, rightW);
+    }
+
+    // 4. Status bar (sy = rows - 1, h = 1)
+    const sy = rows - 1;
+    let sx = buf.blitText(0, sy, " ROCKY ", "accent", undefined) + 1;
+    const seg: Array<[string, string]> =
+      t.file === null
+        ? [["type", "filter"], ["↑↓", "pick"], ["enter", "open"], ["esc", "home"]]
+        : [["↑↓", "move"], ["s", "extend"], ["enter", "teach"], ["e", "expand"], ["esc", "files"]];
+    for (const [a, b] of seg) {
+      sx += buf.blitText(sx, sy, ` ${a}`, "accent") + 1;
+      sx += buf.blitText(sx, sy, ` ${b} `, "muted") + 1;
+    }
+    if (cols >= 90) {
+      buf.blitText(cols - 24, sy, "local only · no egress", "muted");
+    }
+  }
+
+  private paintFilesPhase(
+    buf: CellBuffer,
+    cols: number,
+    top: number,
+    bodyH: number,
+    leftW: number,
+    rightW: number,
+  ): void {
+    const t = this.state;
+    const filesInner = paintBox(
+      buf,
+      { x: 0, y: top, w: leftW, h: bodyH },
+      `files · ${filteredFiles(t).length}`,
+      true,
+      this.ascii,
+    );
+    const rects = this.state.rects ?? (this.state.rects = {});
+    rects.files = filesInner;
+    const list = filteredFiles(t);
+    if (t.fsel < t.ftop) t.ftop = t.fsel;
+    if (t.fsel >= t.ftop + filesInner.h) t.ftop = t.fsel - filesInner.h + 1;
+    for (let i = 0; i < filesInner.h; i++) {
+      const fi = list[t.ftop + i];
+      if (!fi) break;
+      const lineY = filesInner.y + i;
+      const on = t.ftop + i === t.fsel;
+      if (on) {
+        buf.fillRect({ x: filesInner.x - 1, y: lineY, w: filesInner.w + 2, h: 1 }, " ", undefined, "accentDim");
+        buf.set(filesInner.x - 1, lineY, "▎", "accent");
+      }
+      let fx = filesInner.x;
+      fx += buf.blitText(fx, lineY, String(fi.count).padStart(3), "accent") + 1;
+      buf.blitText(
+        fx,
+        lineY,
+        cut(fi.path.split("/").slice(-1)[0], filesInner.w - (fx - filesInner.x)),
+        on ? "text" : "text2",
+      );
+    }
+    if (list.length === 0) {
+      buf.blitText(filesInner.x, filesInner.y + 1, "no explain records heard yet.", "muted");
+    }
+
+    const whyInner = paintBox(buf, { x: leftW, y: top, w: rightW, h: bodyH }, "why", false, this.ascii);
+    buf.blitText(whyInner.x, whyInner.y + 1, "pick file, then line range.", "text2");
+    buf.blitText(whyInner.x, whyInner.y + 3, "rocky teaches what agent", "muted");
+    buf.blitText(whyInner.x, whyInner.y + 4, "said, question", "muted");
+
+    const iy = top + bodyH;
+    const filterInner = paintBox(buf, { x: 0, y: iy, w: cols, h: 3 }, "filter files", true, this.ascii);
+    buf.blitText(filterInner.x, filterInner.y, "›", "accent");
+    const qText = t.fquery || "type part of a path… !md hides .md";
+    buf.blitText(filterInner.x + 2, filterInner.y, qText, t.fquery ? "text" : "muted");
+    if (pulse(this.frame, this.motionOn)) {
+      buf.blitText(filterInner.x + 2 + (t.fquery ? stringWidth(t.fquery) : 0), filterInner.y, "▏", "accent");
+    }
+  }
+
+  private paintLinesPhase(
+    buf: CellBuffer,
+    cols: number,
+    top: number,
+    bodyH: number,
+    leftW: number,
+    rightW: number,
+  ): void {
+    const t = this.state;
+    const filePath = t.file ?? "";
+    const linesInner = paintBox(
+      buf,
+      { x: 0, y: top, w: leftW, h: bodyH },
+      `lines · ${cut(filePath.split("/").slice(-1)[0], leftW - 22)}`,
+      true,
+      this.ascii,
+    );
+    const rects = this.state.rects ?? (this.state.rects = {});
+    rects.lines = linesInner;
+    const lo = Math.min(t.start, t.end);
+    const hi = Math.max(t.start, t.end);
+    if (t.lsel <= t.ltop) t.ltop = t.lsel - 1;
+    if (t.lsel > t.ltop + linesInner.h) t.ltop = t.lsel - linesInner.h;
+    for (let i = 0; i < linesInner.h; i++) {
+      const lineNo = t.ltop + i + 1;
+      if (lineNo > t.lines.length) break;
+      const yy = linesInner.y + i;
+      const on = lineNo === t.lsel;
+      const inSel = lineNo >= lo && lineNo <= hi;
+      if (inSel) {
+        buf.fillRect({ x: linesInner.x - 1, y: yy, w: linesInner.w + 2, h: 1 }, " ", undefined, "panelHi");
+      }
+      if (on) {
+        buf.fillRect({ x: linesInner.x - 1, y: yy, w: linesInner.w + 2, h: 1 }, " ", undefined, "accentDim");
+        buf.set(linesInner.x - 1, yy, "▎", "accent");
+      }
+      buf.blitText(linesInner.x + 1, yy, cut(t.lines[lineNo - 1], linesInner.w - 1), on || inSel ? "text" : "text2");
+    }
+    if (t.missing) {
+      buf.blitText(linesInner.x, linesInner.y + 1, "file not on disk. rocky cannot", "err");
+      buf.blitText(linesInner.x, linesInner.y + 2, "read it, question", "err");
+    } else if (t.truncated) {
+      buf.blitText(linesInner.x, linesInner.y + linesInner.h - 1, "… file long, lines cut", "muted");
+    }
+
+    const whyInner = paintBox(buf, { x: leftW, y: top, w: rightW, h: bodyH }, "why", false, this.ascii);
+    this.paintCard(buf, whyInner);
+
+    const iy = top + bodyH;
+    const hintInner = paintBox(buf, { x: 0, y: iy, w: cols, h: 3 }, "selection", false, this.ascii);
+    const selText = `sel ${lo}–${hi}`;
+    buf.blitText(hintInner.x, hintInner.y, selText, "accent");
+    buf.blitText(hintInner.x + stringWidth(selText) + 2, hintInner.y, "enter teach · s extend · e expand · esc files", "muted");
+  }
+
+  private paintCard(buf: CellBuffer, inner: Rect): void {
+    const t = this.state;
+    if (t.hit !== null) {
+      const c = renderWitnessCard(t.hit);
+      const evidence = redactSecretsAtBoundary(
+        `source: ${t.hit.record.source} · ${ageLabel(t.hit.record.ts, this.now)}`,
+      );
+      this.paintCardRows(
+        buf,
+        inner,
+        c.header,
+        c.lines.map((l) => redactSecretsAtBoundary(l)),
+        evidence,
+        [],
+      );
+      return;
+    }
+    if (t.ladder !== null && t.ladder.rungs.length > 0 && t.file !== null) {
+      const c = renderLadderCard(t.file, t.label, t.ladder);
+      const expanded = t.expanded
+        ? renderLadderExpanded(t.ladder).map((l) => redactSecretsAtBoundary(l))
+        : [];
+      this.paintCardRows(
+        buf,
+        inner,
+        c.header,
+        c.lines.map((l) => redactSecretsAtBoundary(l)),
+        redactSecretsAtBoundary(c.evidence),
+        expanded,
+      );
+      return;
+    }
+    buf.blitText(inner.x, inner.y, "no witness, no ladder.", "text2");
+    buf.blitText(inner.x, inner.y + 2, "ask agent to explain,", "muted");
+    buf.blitText(inner.x, inner.y + 3, "question", "muted");
+  }
+
+  private paintCardRows(
+    buf: CellBuffer,
+    inner: Rect,
+    header: string,
+    lines: readonly string[],
+    evidence: string,
+    expanded: readonly string[],
+  ): void {
+    let py = inner.y;
+    const availW = Math.max(4, inner.w);
+    const push = (text: string, token: ThemeToken): boolean => {
+      if (py >= inner.y + inner.h) return false;
+      if (text === "") {
+        py += 1;
+        return true;
+      }
+      for (const w of wrapToWidth(text, availW)) {
+        if (py >= inner.y + inner.h) return false;
+        buf.blitText(inner.x, py, w, token);
+        py += 1;
+      }
+      return true;
+    };
+    if (!push(header, "accent")) return;
+    if (!push("", "muted")) return;
+    for (const l of lines) {
+      if (!push(l, "text2")) return;
+    }
+    if (expanded.length > 0) {
+      if (!push("", "muted")) return;
+      for (const l of expanded) {
+        if (!push(l, "muted")) return;
+      }
+    }
+    if (!push("", "muted")) return;
+    push(evidence, "muted");
+  }
+}
+
+export function teachView(
+  state: TeachState,
+  size: { cols: number; rows: number },
+  frame: number,
+  ascii: boolean,
+  motionOn?: boolean,
+  now?: number,
+): Node {
+  return new TeachViewNode(state, size, frame, ascii, motionOn ?? true, now ?? Date.now());
+}
+
 const LIST_TOKEN: Record<string, ThemeToken> = {
   fail: "err",
   fix: "ok",
@@ -999,6 +1259,11 @@ export function surfaceRoot(
   if (state.view === "compare") {
     const comp = state.compare ?? initialCompareState(snapshot?.records ?? []);
     return compareView(comp, size, frame, ascii, snapshot?.records ?? comp.records, motionOn, clock);
+  }
+
+  if (state.view === "teach") {
+    const t = state.teach ?? initialTeachState(snapshot?.records ?? []);
+    return teachView(t, size, frame, ascii, motionOn, clock);
   }
 
   const mainCol = new Node({ direction: "column", grow: 1 });

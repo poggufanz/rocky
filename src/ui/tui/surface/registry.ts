@@ -12,6 +12,7 @@ export const COMMANDS: readonly Command[] = [
   { name: "sessions", usage: "",        help: "work sessions derived from memory",      takesArgs: false },
   { name: "brief",    usage: "",        help: "hear what changed since last brief",     takesArgs: false },
   { name: "stats",    usage: "",        help: "what rocky holds in memory",             takesArgs: false },
+  { name: "teach",    usage: "",        help: "pick lines, hear the why behind them",   takesArgs: false },
   { name: "compare",  usage: "",        help: "compare file moments, side by side",     takesArgs: false },
   { name: "browse",   usage: "",        help: "browse all memory",                      takesArgs: false },
   { name: "help",     usage: "",        help: "command list",                           takesArgs: false },

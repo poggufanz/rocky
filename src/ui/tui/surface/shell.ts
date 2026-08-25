@@ -1,5 +1,5 @@
 import { homedir } from "node:os";
-import { existsSync } from "node:fs";
+import { closeSync, existsSync, fstatSync, openSync, readSync } from "node:fs";
 import type { Card } from "../cards/card.js";
 import {
   buildRecall,
@@ -33,6 +33,8 @@ import type { Key } from "../state.js";
 import type { PickerState } from "./picker.js";
 import { updatePicker, previewPair, pickList } from "./picker.js";
 import { type CompareRec, type FileEntry, fileIndex, lineOverlapPredicate } from "./compare-data.js";
+import { teachLookup, type TeachHit } from "../../../core/teach.js";
+import { buildLadder, type LadderResult } from "../../../core/teach-ladder.js";
 
 export type CompareFocus = "files" | "compare" | "recA" | "recB" | "diffA" | "diffB";
 export type CompareModal = "scope" | "timeline" | null;
@@ -67,7 +69,7 @@ export interface CompareState {
 }
 
 export interface ShellState {
-  view: "home" | "stream" | "compare";
+  view: "home" | "stream" | "compare" | "teach";
   input: string;
   csel: number;
   scroll: number;
@@ -76,12 +78,38 @@ export interface ShellState {
   quit: boolean;
   pendingRun?: string;
   compare?: CompareState;
+  teach?: TeachState;
   overlay?: "browse";
   brows: DashRow[];
   bsel: number;
   bquery: string;
   btop: number;
   brects?: Rect;
+}
+
+export type TeachFocus = "files" | "lines";
+
+export interface TeachState {
+  records: MemoryRecord[];
+  files: FileEntry[];
+  fquery: string;
+  fsel: number;
+  ftop: number;
+  file: string | null;
+  lines: string[];
+  truncated: boolean;
+  missing: boolean;
+  lsel: number;
+  ltop: number;
+  anchor: number;
+  extending: boolean;
+  start: number;
+  end: number;
+  hit: TeachHit | null;
+  ladder: LadderResult | null;
+  label: string;
+  expanded: boolean;
+  rects?: Partial<Record<TeachFocus, Rect>>;
 }
 
 export type ShellEvent =
@@ -118,6 +146,200 @@ export function initialCompareState(records: MemoryRecord[] = []): CompareState 
     zoom: false,
     rects: {},
   };
+}
+
+export const TEACH_READ_CAP_BYTES = 256 * 1024;
+export const TEACH_MAX_LINES = 2000;
+
+/** Teach mode keeps only explain records: they are the only evidence lookup hears. */
+export function initialTeachState(records: MemoryRecord[] = []): TeachState {
+  const explain = records.filter((r) => r !== undefined && r.kind === "explain");
+  return {
+    records: explain,
+    files: fileIndex(explain),
+    fquery: "",
+    fsel: 0,
+    ftop: 0,
+    file: null,
+    lines: [],
+    truncated: false,
+    missing: false,
+    lsel: 1,
+    ltop: 0,
+    anchor: 1,
+    extending: false,
+    start: 1,
+    end: 1,
+    hit: null,
+    ladder: null,
+    label: "",
+    expanded: false,
+    rects: {},
+  };
+}
+
+export interface ShellDeps {
+  exists(p: string): boolean;
+  home(): string;
+  /** Bounded file read for the teach line pane; undefined means unreadable. */
+  read?(p: string): string | undefined;
+  /** Stub for the ladder's git hop; defaults to gitFirstTouch when absent. */
+  git?(
+    file: string,
+    startLine: number,
+    endLine: number,
+    cwd?: string,
+  ): { commit: string; subject: string } | undefined;
+}
+
+function clampLine(next: number, total: number): number {
+  return Math.max(1, Math.min(Math.max(1, total), next));
+}
+
+function moveTeachCursor(state: TeachState, delta: number): TeachState {
+  const next = clampLine(state.lsel + delta, state.lines.length);
+  if (!state.extending) {
+    return { ...state, lsel: next, anchor: next, start: next, end: next };
+  }
+  return {
+    ...state,
+    lsel: next,
+    start: Math.min(state.anchor, next),
+    end: Math.max(state.anchor, next),
+  };
+}
+
+function lookupTeach(state: TeachState, deps: ShellDeps): TeachState {
+  if (state.file === null || state.missing || state.lines.length === 0) return state;
+  const start = Math.min(state.start, state.end);
+  const end = Math.max(state.start, state.end);
+  const fileText = state.lines.join("\n");
+  const snippet = state.lines.slice(start - 1, end).join("\n");
+  const hit = teachLookup(state.records, { path: state.file, snippet });
+  const ladder = buildLadder({
+    file: state.file,
+    startLine: start,
+    endLine: end,
+    fileText,
+    ...(deps.git === undefined ? {} : { git: deps.git }),
+  });
+  const label = `line ${start}${end !== start ? `–${end}` : ""}`;
+  if (hit !== undefined) {
+    return { ...state, start, end, label, expanded: false, hit, ladder };
+  }
+  if (ladder.rungs.length > 0) {
+    return { ...state, start, end, label, expanded: false, hit: null, ladder };
+  }
+  return { ...state, start, end, label, expanded: false, hit: null, ladder };
+}
+
+export function updateTeachState(state: TeachState, key: Key, deps: ShellDeps): TeachState {
+  if (state.file === null) {
+    if (key.name === "esc") return state;
+    if (key.name === "up") {
+      return { ...state, fsel: Math.max(0, state.fsel - 1) };
+    }
+    if (key.name === "down") {
+      const list = filteredFiles(state);
+      return { ...state, fsel: Math.min(Math.max(0, list.length - 1), state.fsel + 1) };
+    }
+    if (key.name === "backspace") {
+      return { ...state, fquery: state.fquery.slice(0, -1), fsel: 0, ftop: 0 };
+    }
+    if (key.name === "paste") {
+      return { ...state, fquery: state.fquery + key.text, fsel: 0, ftop: 0 };
+    }
+    if (key.name === "char") {
+      return { ...state, fquery: state.fquery + key.ch, fsel: 0, ftop: 0 };
+    }
+    if (key.name === "enter") {
+      const list = filteredFiles(state);
+      const selFile = list[state.fsel];
+      if (!selFile) return state;
+      const text = deps.read?.(selFile.path);
+      if (text === undefined) {
+        return {
+          ...state,
+          file: selFile.path,
+          lines: [],
+          truncated: false,
+          missing: true,
+          lsel: 1,
+          ltop: 0,
+          anchor: 1,
+          extending: false,
+          start: 1,
+          end: 1,
+          hit: null,
+          ladder: null,
+          label: "",
+          expanded: false,
+        };
+      }
+      const rawLines = text.split(/\r?\n/);
+      const capped = rawLines.length > TEACH_MAX_LINES ? rawLines.slice(0, TEACH_MAX_LINES) : rawLines;
+      return {
+        ...state,
+        file: selFile.path,
+        lines: capped,
+        truncated: rawLines.length > TEACH_MAX_LINES,
+        missing: false,
+        lsel: 1,
+        ltop: 0,
+        anchor: 1,
+        extending: false,
+        start: 1,
+        end: 1,
+        hit: null,
+        ladder: null,
+        label: "",
+        expanded: false,
+      };
+    }
+    return state;
+  }
+
+  if (key.name === "esc") {
+    return {
+      ...state,
+      file: null,
+      lines: [],
+      truncated: false,
+      missing: false,
+      lsel: 1,
+      ltop: 0,
+      anchor: 1,
+      extending: false,
+      start: 1,
+      end: 1,
+      hit: null,
+      ladder: null,
+      label: "",
+      expanded: false,
+    };
+  }
+  if (key.name === "char" && key.ch === "s") {
+    return { ...state, extending: !state.extending, anchor: state.lsel };
+  }
+  if (key.name === "char" && key.ch === "e") {
+    return { ...state, expanded: !state.expanded };
+  }
+  if (key.name === "up" || (key.name === "char" && key.ch === "k")) {
+    return moveTeachCursor(state, -1);
+  }
+  if (key.name === "down" || (key.name === "char" && key.ch === "j")) {
+    return moveTeachCursor(state, 1);
+  }
+  if (key.name === "ctrl-u" || (key.name === "char" && key.ch === "K")) {
+    return moveTeachCursor(state, -5);
+  }
+  if (key.name === "ctrl-d" || (key.name === "char" && key.ch === "J")) {
+    return moveTeachCursor(state, 5);
+  }
+  if (key.name === "enter") {
+    return lookupTeach(state, deps);
+  }
+  return state;
 }
 
 /**
@@ -173,7 +395,7 @@ function hideMatches(path: string, term: string): boolean {
   return path.split("/").includes(term);
 }
 
-export function filteredFiles(state: CompareState): FileEntry[] {
+export function filteredFiles(state: { files: FileEntry[]; fquery: string }): FileEntry[] {
   if (!state.fquery) return state.files;
   const terms = state.fquery.toLowerCase().split(/\s+/).filter(Boolean);
   const hide = terms.filter((t) => t.length > 1 && (t[0] === "!" || t[0] === "-")).map((t) => t.slice(1));
@@ -855,6 +1077,13 @@ function submitInput(
         },
       };
     }
+    case "teach": {
+      return {
+        ...nextState,
+        view: "teach",
+        teach: initialTeachState(snapshot.records),
+      };
+    }
     case "browse": {
       let brows: DashRow[] = [];
       try {
@@ -878,7 +1107,7 @@ function submitInput(
 export function updateShell(
   s: ShellState,
   e: ShellEvent,
-  deps: { exists(p: string): boolean; home(): string },
+  deps: ShellDeps,
 ): ShellState {
   if (e.type === "cd") {
     return { ...s, cwd: e.next };
@@ -927,6 +1156,15 @@ export function updateShell(
     }
     const nextComp = updateCompareState(currentCompare, key);
     return { ...s, compare: nextComp };
+  }
+
+  if (s.view === "teach") {
+    const currentTeach = s.teach ?? initialTeachState();
+    if (key.name === "esc" && currentTeach.file === null) {
+      return { ...s, view: "home" };
+    }
+    const nextTeach = updateTeachState(currentTeach, key, deps);
+    return { ...s, teach: nextTeach };
   }
 
   if (key.name === "mouse") {
@@ -1053,7 +1291,23 @@ export function runSurface(opts: {
   }
   const ascii = opts.env.ROCKY_ASCII === "1" || opts.env.TERM === "dumb";
   const live = new Live({ stdout: opts.stdout, stdin: opts.stdin, env: opts.env });
-  const deps = { exists: existsSync, home: homedir };
+  const readFileBounded = (p: string): string | undefined => {
+    try {
+      const fd = openSync(p, "r");
+      try {
+        const size = fstatSync(fd).size;
+        const cap = Math.max(0, Math.min(size, TEACH_READ_CAP_BYTES));
+        const buf = Buffer.alloc(cap);
+        readSync(fd, buf, 0, cap, 0);
+        return buf.toString("utf8");
+      } finally {
+        closeSync(fd);
+      }
+    } catch {
+      return undefined;
+    }
+  };
+  const deps: ShellDeps = { exists: existsSync, home: homedir, read: readFileBounded };
   let homeData = deriveHomeData(opts.env, Date.now());
 
   return new Promise<number>((resolve) => {

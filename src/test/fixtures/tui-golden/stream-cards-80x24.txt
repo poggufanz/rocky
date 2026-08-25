@@ -1,11 +1,11 @@
   ROCKY  7 remembered                                                   ≣ idle  
- ▌  help  slash optional                                                        
  ▌ /run <cmd> run command, rocky listens                                        
  ▌ /recall <query>ask memory by words                                           
  ▌ /why <query> hear remembered reasons                                         
  ▌ /sessions work sessions derived from memory                                  
  ▌ /brief hear what changed since last brief                                    
  ▌ /stats what rocky holds in memory                                            
+ ▌ /teach pick lines, hear the why behind them                                  
  ▌ /compare compare file moments, side by side                                  
  ▌ /browse browse all memory                                                    
  ▌ /help command list                                                           
@@ -15,7 +15,7 @@
  ▌  you  recall token                                                           
  ▌                                                                              
  ▌  ?  frobnicate                                                               
- ▌ not command. rocky hears: run, recall, why, sessions, brief, stats,          
+ ▌ not command. rocky hears: run, recall, why, sessions, brief, stats, teach,   
  ▌ compare, browse, help, home, quit. try again, question                       
  ▌                                                                              
 ┌─ rocky · proj/demo ──────────────────────────────────────────────────────────┐

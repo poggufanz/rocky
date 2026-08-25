@@ -1,0 +1,24 @@
+  ROCKY  2 remembered · 2 files                           ≣ teaching ladder.ts  
+┌─ lines · ladder.ts ────────────────────────────┐┌─ why ──────────────────────┐
+│  export async function loadFeed() {            ││ rocky not hear this.       │
+│▎   const rows = await fetchRows();             ││ assembled from evidence,   │
+│    return rows;                                ││ not witnessed              │
+│  }                                             ││                            │
+│                                                ││ /repo/src/ladder.ts · line │
+│                                                ││ 2                          │
+│                                                ││ reason: async because      │
+│                                                ││ await used at line 2.      │
+│                                                ││ inside loadFeed            │
+│                                                ││                            │
+│                                                ││ why 1 async because await  │
+│                                                ││ used at line 2 · catalog   │
+│                                                ││ why 2 inside loadFeed ·    │
+│                                                ││ ast                        │
+│                                                ││                            │
+│                                                ││ evidence: catalog · ast    │
+│                                                ││                            │
+└────────────────────────────────────────────────┘└────────────────────────────┘
+┌─ selection ──────────────────────────────────────────────────────────────────┐
+│ sel 2–2  enter teach · s extend · e expand · esc files                       │
+└──────────────────────────────────────────────────────────────────────────────┘
+ ROCKY   ↑↓  move   s  extend   enter  teach   e  expand   esc  files           

@@ -1,5 +1,4 @@
   ROCKY  7 remembered                                                                                           ≣ idle  
- ▌   2d ago · hook                                                                                                      
  ▌ Agent "review" finished                                                                                              
  ▌   5h ago · claude-code                                                                                               
  ▌                                                                                                                      
@@ -22,6 +21,7 @@
  ▌ /sessions work sessions derived from memory                                                                          
  ▌ /brief hear what changed since last brief                                                                            
  ▌ /stats what rocky holds in memory                                                                                    
+ ▌ /teach pick lines, hear the why behind them                                                                          
  ▌ /compare compare file moments, side by side                                                                          
  ▌ /browse browse all memory                                                                                            
  ▌ /help command list                                                                                                   
@@ -31,8 +31,8 @@
  ▌  you  recall token                                                                                                   
  ▌                                                                                                                      
  ▌  ?  frobnicate                                                                                                       
- ▌ not command. rocky hears: run, recall, why, sessions, brief, stats, compare, browse, help, home, quit. try           
- ▌ again, question                                                                                                      
+ ▌ not command. rocky hears: run, recall, why, sessions, brief, stats, teach, compare, browse, help, home,              
+ ▌ quit. try again, question                                                                                            
  ▌                                                                                                                      
 ┌─ rocky · proj/demo ──────────────────────────────────────────────────────────────────────────────────────────────────┐
 │ › ▏/run npm test · /recall query · /help                                                                             │
