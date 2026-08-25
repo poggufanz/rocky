@@ -202,6 +202,34 @@ body::after {
 
 /* ---- settings -------------------------------------------------------- */
 
+/* Which model would answer, readable without opening Settings. */
+.model-chip {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex: 0 0 auto;
+  padding: 4px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--dim);
+  font: 11.5px var(--mono);
+}
+.model-chip[hidden] { display: none; }
+.chip-mark {
+  width: 13px;
+  height: 13px;
+  flex: 0 0 auto;
+  color: var(--voice);
+}
+
+/* the ask control names what it does, so it wraps rather than truncates */
+.ask-agent {
+  display: block;
+  width: 100%;
+  text-align: left;
+  line-height: 1.45;
+}
+
 .settings-btn {
   flex: 0 0 auto;
   padding: 5px 12px;

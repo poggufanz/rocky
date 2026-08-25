@@ -753,6 +753,72 @@ document.addEventListener("keydown", (event) => {
   if (event.key === "Escape" && !pop.hidden) closePop();
 });
 
+/**
+ * `deepseek-v4-flash` reads as `Deepseek V4 Flash`. A version token keeps all
+ * its letters capitalised, because `V4` is not a word being title-cased.
+ */
+const ACRONYMS = new Set(["gpt", "glm", "ai", "api", "llm", "mimo", "hy"]);
+
+function prettyModel(id) {
+  return id
+    .split(/[-_]/)
+    .filter(Boolean)
+    .map((word) => {
+      // a version token and an acronym both keep every letter
+      if (/^v\d/i.test(word) || ACRONYMS.has(word.toLowerCase())) return word.toUpperCase();
+      return word.charAt(0).toUpperCase() + word.slice(1);
+    })
+    .join(" ");
+}
+
+/** The provider is whoever the endpoint points at, not whichever tab is lit. */
+function providerOf(endpoint) {
+  try {
+    const host = new URL(endpoint).hostname;
+    if (host.endsWith("anthropic.com")) return "anthropic";
+    if (host.endsWith("openai.com")) return "openai";
+  } catch {
+    // an unparseable endpoint is simply not a known provider
+  }
+  return "other";
+}
+
+/** Simple marks, drawn here because the page may fetch nothing from outside. */
+function providerMark(kind) {
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("viewBox", "0 0 16 16");
+  svg.setAttribute("class", "chip-mark");
+  svg.setAttribute("aria-hidden", "true");
+  const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+  path.setAttribute("fill", "currentColor");
+  if (kind === "anthropic") {
+    // the converging apex of the anthropic mark
+    path.setAttribute("d", "M6.1 2h3.8l4.1 12h-3l-.8-2.6H5.8L5 14H2L6.1 2Zm.5 6.9h2.8L8 4.6 6.6 8.9Z");
+  } else if (kind === "openai") {
+    // a hexagonal knot, the shape of the openai mark in outline
+    path.setAttribute("d", "M8 1.2 13.9 4.6v6.8L8 14.8 2.1 11.4V4.6L8 1.2Zm0 2.1L4 5.6v4.8l4 2.3 4-2.3V5.6L8 3.3Zm0 2.4a2.3 2.3 0 1 1 0 4.6 2.3 2.3 0 0 1 0-4.6Z");
+  } else {
+    // an unknown host gets a neutral mark rather than a borrowed one
+    path.setAttribute("d", "M8 1.6a6.4 6.4 0 1 0 0 12.8A6.4 6.4 0 0 0 8 1.6Zm0 2a4.4 4.4 0 1 1 0 8.8 4.4 4.4 0 0 1 0-8.8Zm0 2.6a1.8 1.8 0 1 0 0 3.6 1.8 1.8 0 0 0 0-3.6Z");
+  }
+  svg.append(path);
+  return svg;
+}
+
+/** The bar says which model would answer, so nobody has to open Settings to find out. */
+function paintModelChip() {
+  const chip = $("#model-chip");
+  const fallback = PROVIDERS[settings.provider] ?? PROVIDERS.openai;
+  const model = settings.model || fallback.model;
+  if (!settings.hasKey || !model) {
+    chip.hidden = true;
+    fill(chip);
+    return;
+  }
+  fill(chip, providerMark(providerOf(settings.endpoint || fallback.endpoint)), el("span", null, prettyModel(model)));
+  chip.hidden = false;
+}
+
 /** True once the user has filled in all three BYOK fields. */
 function byokReady() {
   const fallback = PROVIDERS[settings.provider] ?? PROVIDERS.openai;
@@ -794,7 +860,7 @@ async function askModel(anchor, prompt, keep) {
 /** Adds the ask control, but only once BYOK is actually configured. */
 function withAsk(anchor, parts, prompt) {
   if (!byokReady()) return parts;
-  const button = el("button", "card-more", "Ask Model");
+  const button = el("button", "card-more ask-agent", "Ask Agent now using the configured model.");
   button.type = "button";
   button.addEventListener("click", () => askModel(anchor, prompt, parts));
   return [...parts, button];
@@ -891,6 +957,7 @@ const settings = { provider: "openai", endpoint: "", model: "", hasKey: false };
 async function pullSettings() {
   try {
     Object.assign(settings, await api("/api/settings"));
+    paintModelChip();
   } catch {
     // an unreachable config is an unset one: the ask control simply stays away
   }
@@ -903,6 +970,7 @@ async function pushSettings(patch) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(patch),
     }));
+    paintModelChip();
   } catch {
     // nothing stored, nothing to undo
   }
