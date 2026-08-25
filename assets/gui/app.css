@@ -302,6 +302,39 @@ body::after {
 }
 
 .field { display: block; margin-bottom: 14px; }
+/* a plain display rule beats the hidden attribute, so say it back */
+.field[hidden] { display: none; }
+
+/* the provider list: ten rows, then scroll, with the search above it */
+.combo { position: relative; }
+.combo-list {
+  position: absolute;
+  z-index: 2;
+  left: 0;
+  right: 0;
+  top: calc(100% + 4px);
+  /* eight rows, then scroll: ten ran past the modal */
+  max-height: 230px;
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--raised);
+  box-shadow: 0 16px 40px rgba(0, 0, 0, .6);
+}
+.combo-list[hidden] { display: none; }
+.combo-row {
+  display: block;
+  width: 100%;
+  padding: 7px 10px;
+  border: 0;
+  background: transparent;
+  color: var(--body);
+  font: 12px var(--mono);
+  text-align: left;
+  cursor: pointer;
+}
+.combo-row:hover { background: var(--surface); color: var(--bright); }
+.combo-row.on { box-shadow: inset 2px 0 0 var(--voice); color: var(--bright); }
 .field-label {
   display: block;
   margin-bottom: 6px;

@@ -118,6 +118,47 @@ export function providerIdFor(endpoint: string, providers: Record<string, Provid
   return best?.id;
 }
 
+/**
+ * The catalogue stores a base URL, not the chat path. Anthropic answers on
+ * `/v1/messages`; everyone else speaks the OpenAI shape on
+ * `/v1/chat/completions`, and some bases already carry the `/v1`.
+ */
+export function chatEndpoint(id: string, base: string): string {
+  const trimmed = base.replace(/\/+$/, "");
+  if (id === "anthropic") return `${trimmed}/v1/messages`;
+  return trimmed.endsWith("/v1") ? `${trimmed}/chat/completions` : `${trimmed}/v1/chat/completions`;
+}
+
+/** Every provider Rocky can offer as a ready-made endpoint, by name. */
+export async function providerList(
+  env: NodeJS.ProcessEnv = process.env,
+  now = Date.now(),
+): Promise<Array<{ id: string; name: string; endpoint: string }>> {
+  const cache = readCache(env);
+  if (now - cache.fetchedAt > FRESH_MS || Object.keys(cache.providers).length === 0) {
+    const raw = await get(CATALOGUE, "json");
+    if (raw !== undefined && typeof raw === "object" && raw !== null) {
+      cache.providers = compact(raw as Record<string, any>);
+      cache.fetchedAt = now;
+      writeCache(cache, env);
+    }
+  }
+
+  const bases = new Map<string, string>(Object.entries(KNOWN_BASES).map(([base, id]) => [id, base]));
+  for (const [id, provider] of Object.entries(cache.providers)) {
+    if (provider.api !== undefined && !bases.has(id)) bases.set(id, provider.api);
+  }
+
+  return [...bases]
+    .filter(([id]) => cache.providers[id] !== undefined)
+    .map(([id, base]) => ({
+      id,
+      name: cache.providers[id].name,
+      endpoint: chatEndpoint(id, base),
+    }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
 /** Pulls the viewBox and the path geometry out, and nothing else. */
 export function markFromSvg(svg: string): ModelMark | null {
   if (svg.length > MAX_LOGO_BYTES) return null;

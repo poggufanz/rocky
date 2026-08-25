@@ -20,7 +20,7 @@ import { dirname, extname, join, resolve, sep } from "node:path";
 import { loadMemoryChecked } from "../core/memory-read.js";
 import { redactSecretsAtBoundary } from "../core/redact.js";
 import { publicSettings, readSettings, writeSettings } from "./settings.js";
-import { providerFor } from "./models-dev.js";
+import { providerFor, providerList } from "./models-dev.js";
 import { deriveHome } from "../core/home-data.js";
 import { fileIndex, getCachedDiff, defaultDiffIo, lineOverlapPredicate } from "../core/compare-data.js";
 import { filteredFiles, TEACH_MAX_LINES } from "../core/file-filter.js";
@@ -41,6 +41,48 @@ const MAX_PROMPT_CHARS = 24_000;
 const MAX_ASK_IN_FLIGHT = 2;
 
 let askInFlight = 0;
+
+/**
+ * The rules every BYOK answer is bound by, prepended here rather than in the
+ * page so a browser cannot drop them.
+ *
+ * Ported from the owner's teach agent spec, minus every instruction that
+ * needs a tool. This model has no shell, no git, and no filesystem: it sees
+ * the snippet and whatever Rocky already holds, and nothing else. Telling it
+ * to walk five hops and cite `git log -L` would only teach it to invent
+ * citations, which is the one failure this whole surface exists to prevent.
+ */
+const TEACH_RULES = [
+  "You explain why a code snippet exists. You are a witness, not a judge, and you do not invent.",
+  "",
+  "Output language: Indonesian.",
+  "",
+  "HARD STOP: you have no shell, no git, no database and no filesystem. You see only what is",
+  "quoted below. NEVER claim you ran a command, read another file, or queried a database.",
+  "NEVER imply you inspected live data. If a reason would need evidence you were not given,",
+  "say so and stop there.",
+  "",
+  "Keep two tracks separate, and do not merge them into one essay:",
+  "  KODE    why this construct is written this way in THIS file",
+  "  BISNIS  why this behaviour exists for the product",
+  "",
+  "Every claim must point at something in the text you were given: a line, a quoted comment,",
+  "or a record Rocky recorded. No support means the claim does not exist: do not write it.",
+  "NEVER say `best practice`, `lebih rapi`, or `idiomatic` without naming the alternative it",
+  "was chosen over. NEVER paraphrase a comment that is already quoted: quote it.",
+  "NEVER present your reconstruction as something an agent stated when the code was written.",
+  "",
+  "Answer in this shape, omitting any line you have no support for:",
+  "  KODE",
+  "    why 1  …",
+  "    stop   …",
+  "  BISNIS",
+  "    why 1  …",
+  "    stop   …",
+  "",
+  "Two sentences per why, at most. Thin evidence is an answer: an honest two-line card beats",
+  "a five-line story. Say plainly when you cannot tell.",
+].join("\n");
 
 const ASSET_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "assets", "gui");
 
@@ -76,10 +118,18 @@ function hostAllowed(host: string | undefined, port: number): boolean {
   return host === `127.0.0.1:${port}` || host === `localhost:${port}`;
 }
 
-/** Confines every path input to the repo the server was launched in. */
+/**
+ * Confines every path input to the repo the server was launched in.
+ *
+ * The comparison is case-insensitive on Windows because the filesystem is:
+ * memory canonicalises paths to lower case, so a case-sensitive prefix test
+ * refused the repo's own files and the page reported hearing nothing.
+ */
 function confine(root: string, candidate: string): string | undefined {
   const full = resolve(root, candidate);
-  return full === root || full.startsWith(root + sep) ? full : undefined;
+  const fold = (value: string): string => (process.platform === "win32" ? value.toLowerCase() : value);
+  const inside = fold(full) === fold(root) || fold(full).startsWith(fold(root) + sep);
+  return inside ? full : undefined;
 }
 
 async function readBody(request: IncomingMessage): Promise<unknown> {
@@ -148,9 +198,11 @@ async function ask(body: Record<string, unknown>): Promise<{ status: number; pay
 
   // This is the only text that leaves the machine, so it is redacted first:
   // a selected line can carry a key, and the provider must never see it.
-  const prompt = redactSecretsAtBoundary(
+  const asked = redactSecretsAtBoundary(
     raw.length > MAX_PROMPT_CHARS ? `${raw.slice(0, MAX_PROMPT_CHARS)}\n… cut, prompt long` : raw,
   );
+  // the rules ride here, not in the page, so a browser cannot drop them
+  const prompt = `${TEACH_RULES}\n\n---\n\n${asked}`;
 
   const anthropic = endpoint.includes("/v1/messages");
   const headers: Record<string, string> = { "Content-Type": "application/json" };
@@ -289,6 +341,10 @@ async function handleApi(
       return sendJson(response, 200, { ...card, rungs: renderLadderExpanded(ladder) });
     }
     return sendJson(response, 200, null);
+  }
+
+  if (pathname === "/api/providers") {
+    return sendJson(response, 200, await providerList());
   }
 
   if (pathname === "/api/provider") {

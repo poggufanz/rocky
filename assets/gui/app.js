@@ -519,21 +519,22 @@ async function renderHistory(pane) {
 async function renderCompare(pane) {
   $("#sub-note").textContent = state.strict ? "Strict · Same Lines" : "Loose | Whole File";
 
-  if (state.A === null || state.B === null) {
-    fill(pane, box("two", ...["A", "B"].map((side) => sideColumn(side, null, null))));
-    return;
+  // Each side draws from the moment it holds, on its own. Requiring both
+  // meant picking A showed nothing until B was picked too, which read as
+  // the pick having failed.
+  let moments = [];
+  try {
+    moments = await api(`/api/moments?path=${encodeURIComponent(state.file)}`);
+  } catch {
+    // an unreadable list leaves both sides on their pick prompt
   }
 
-  const query = `path=${encodeURIComponent(state.file)}&a=${encodeURIComponent(state.A)}&b=${encodeURIComponent(state.B)}`;
-  const data = await api(`/api/compare?${query}`);
-  fill(
-    pane,
-    box(
-      "two",
-      sideColumn("A", data.A?.record ?? null, data.A?.diff ?? null),
-      sideColumn("B", data.B?.record ?? null, data.B?.diff ?? null),
-    ),
-  );
+  const sideFor = (side, id) => {
+    const record = id === null ? null : moments.find((m) => m.id === id) ?? null;
+    return sideColumn(side, record, record?.diff ?? null);
+  };
+
+  fill(pane, box("two", sideFor("A", state.A), sideFor("B", state.B)));
 }
 
 function sideColumn(side, record, diff) {
@@ -870,12 +871,103 @@ function paintModels() {
   }
 }
 
-/** Re-asks the catalogue for whatever endpoint is typed right now. */
+/**
+ * The provider control is a filtered list, not a `<select>`: the catalogue
+ * carries 177 of them, and a native dropdown can be neither capped nor
+ * searched. Ten rows show at a time and the rest scroll.
+ */
+let providerChoices = [];
+let chosen = { endpoint: "", custom: true };
+
+/** The endpoint in force: the picked provider, or whatever Custom holds. */
+function currentEndpoint() {
+  return chosen.custom ? $("#set-endpoint").value.trim() : chosen.endpoint;
+}
+
+function closeProviders() {
+  $("#provider-list").hidden = true;
+  $("#provider-search").setAttribute("aria-expanded", "false");
+}
+
+/** Draws the rows matching what has been typed, Custom always last. */
+function paintProviderList(needle = "") {
+  const list = $("#provider-list");
+  const query = needle.trim().toLowerCase();
+  const shown = query
+    ? providerChoices.filter((p) => p.name.toLowerCase().includes(query) || p.id.includes(query))
+    : providerChoices;
+
+  const rows = shown.map((p) => {
+    const row = el("button", "combo-row", p.name);
+    row.type = "button";
+    if (!chosen.custom && p.endpoint === chosen.endpoint) row.classList.add("on");
+    row.addEventListener("click", (event) => {
+      event.stopPropagation();
+      chosen = { endpoint: p.endpoint, custom: false };
+      $("#provider-search").value = p.name;
+      // a different provider serves different models, so the old pick cannot stand
+      settings.model = "";
+      closeProviders();
+      void refreshModels();
+    });
+    return row;
+  });
+
+  const custom = el("button", "combo-row", "Custom…");
+  custom.type = "button";
+  if (chosen.custom) custom.classList.add("on");
+  custom.addEventListener("click", (event) => {
+    event.stopPropagation();
+    chosen = { endpoint: "", custom: true };
+    $("#provider-search").value = "Custom…";
+    settings.model = "";
+    closeProviders();
+    void refreshModels();
+    $("#set-endpoint").focus();
+  });
+
+  fill(list, ...rows, custom);
+  list.hidden = false;
+  $("#provider-search").setAttribute("aria-expanded", "true");
+}
+
+async function paintProviders() {
+  if (providerChoices.length === 0) {
+    try {
+      providerChoices = await api("/api/providers");
+    } catch {
+      providerChoices = [];
+    }
+  }
+  const match = providerChoices.find((p) => p.endpoint === settings.endpoint);
+  chosen = match ? { endpoint: match.endpoint, custom: false } : { endpoint: "", custom: true };
+  $("#provider-search").value = match ? match.name : "Custom…";
+  if (chosen.custom) $("#set-endpoint").value = settings.endpoint;
+  closeProviders();
+}
+
+$("#provider-search").addEventListener("focus", () => {
+  $("#provider-search").select();
+  paintProviderList("");
+});
+$("#provider-search").addEventListener("input", (event) => paintProviderList(event.target.value));
+$("#provider-search").addEventListener("keydown", (event) => {
+  if (event.key === "Escape") closeProviders();
+});
+$("#provider-list").addEventListener("click", (event) => event.stopPropagation());
+
+/** The typed endpoint is only ever visible while Custom is the choice. */
+function syncEndpointField() {
+  $("#endpoint-field").hidden = !chosen.custom;
+}
+
+/** Re-asks the catalogue for whatever endpoint is in force right now. */
 async function refreshModels() {
-  const note = $("#model-note");
-  note.textContent = "asking models.dev…";
-  provider = await loadProvider($("#set-endpoint").value.trim());
+  $("#model-note").textContent = "asking models.dev…";
+  provider = await loadProvider(currentEndpoint());
   paintModels();
+  // every path that changes the endpoint lands here, so visibility settles here
+  syncEndpointField();
 }
 
 let modelTimer = 0;
@@ -906,8 +998,7 @@ async function paintModelChip() {
 
 /** True once the user has filled in all three BYOK fields. */
 function byokReady() {
-  const fallback = PROVIDERS[settings.provider] ?? PROVIDERS.openai;
-  return Boolean(settings.hasKey && (settings.endpoint || fallback.endpoint) && (settings.model || fallback.model));
+  return Boolean(settings.hasKey && settings.endpoint && settings.model);
 }
 
 /**
@@ -916,7 +1007,6 @@ function byokReady() {
  * that borrowed that colour would be the one lie this whole surface avoids.
  */
 async function askModel(anchor, prompt, keep) {
-  const fallback = PROVIDERS[settings.provider] ?? PROVIDERS.openai;
   openPop(anchor, ...keep, box("guess", el("p", "guess-head", "Model Guess (Beta)"), skeleton()));
 
   let answer;
@@ -937,15 +1027,19 @@ async function askModel(anchor, prompt, keep) {
     "guess",
     el("p", "guess-head", "Model Guess (Beta)"),
     el("p", "guess-body", answer.text || answer.error || "model said nothing."),
-    el("div", "card-ev", `guessed by ${settings.model || fallback.model}. not evidence. cross check`),
+    el("div", "card-ev", `guessed by ${settings.model}. not evidence. cross check`),
   );
   openPop(anchor, ...keep, guess);
 }
 
 /** Adds the ask control, but only once BYOK is actually configured. */
-function withAsk(anchor, parts, prompt) {
+function withAsk(anchor, parts, prompt, held) {
   if (!byokReady()) return parts;
-  const button = el("button", "card-more ask-agent", "Ask Agent now using the configured model.");
+  // the same action, but the label admits whether rocky already answered
+  const label = held
+    ? "Re-explain this with Agent (May use your AI API)"
+    : "Use Agent to explain this (May use your AI API)";
+  const button = el("button", "card-more ask-agent", label);
   button.type = "button";
   button.addEventListener("click", () => askModel(anchor, prompt, parts));
   return [...parts, button];
@@ -1019,6 +1113,7 @@ async function askWhy(start, end, at) {
     `Rocky recorded this about the code below:\n\n${held}\n\n${askedAbout}\n\n` +
       "Explain what that recorded reason means for this code, in two or three sentences. " +
       "Do not invent history rocky did not record.",
+    true,
   ));
 }
 
@@ -1028,13 +1123,6 @@ async function askWhy(start, end, at) {
  * to a host other than 127.0.0.1, so the key lives in this browser only and
  * never reaches rocky: the evidence stays local whatever the model answers.
  */
-
-// Endpoint is editable so any OpenAI-compatible host works too: Ollama,
-// LiteLLM, OpenRouter and opencode all answer the same /v1/chat/completions.
-const PROVIDERS = {
-  openai: { endpoint: "https://api.openai.com/v1/chat/completions", model: "gpt-4o" },
-  anthropic: { endpoint: "https://api.anthropic.com/v1/messages", model: "claude-opus-5" },
-};
 
 // The key lives in rocky home, never here. `hasKey` is all the page is told.
 const settings = { provider: "openai", endpoint: "", model: "", hasKey: false };
@@ -1060,45 +1148,24 @@ async function pushSettings(patch) {
     // nothing stored, nothing to undo
   }
 }
-const providerTabs = [...document.querySelectorAll("[data-provider]")];
 
 function paintSettings() {
-  for (const tab of providerTabs) {
-    const on = tab.dataset.provider === settings.provider;
-    tab.setAttribute("aria-selected", String(on));
-    tab.tabIndex = on ? 0 : -1;
-  }
-  const fallback = PROVIDERS[settings.provider] ?? PROVIDERS.openai;
-  $("#set-endpoint").value = settings.endpoint || fallback.endpoint;
-  $("#set-endpoint").placeholder = fallback.endpoint;
-  $("#set-model").value = settings.model || fallback.model;
-  $("#set-model").placeholder = fallback.model;
   $("#set-key").value = "";
   $("#set-key").placeholder = settings.hasKey ? "key saved. type to replace" : "";
-}
-
-for (const tab of providerTabs) {
-  tab.addEventListener("click", () => {
-    // switching provider drops the other one's endpoint and model, never the key
-    settings.provider = tab.dataset.provider;
-    settings.endpoint = "";
-    settings.model = "";
-    paintSettings();
-    void refreshModels();
-  });
 }
 
 async function openSettings() {
   await pullSettings();
   paintSettings();
-  provider = await loadProvider($("#set-endpoint").value.trim());
-  paintModels();
+  await paintProviders();
+  await refreshModels();
   $("#scrim").hidden = false;
   $("#settings").hidden = false;
   $("#set-endpoint").focus();
 }
 
 function closeSettings() {
+  closeProviders();
   $("#settings").hidden = true;
   $("#scrim").hidden = true;
   $("#settings-btn").focus();
@@ -1116,7 +1183,7 @@ $("#settings-save").addEventListener("click", () => {
   const typed = $("#set-key").value;
   void pushSettings({
     provider: settings.provider,
-    endpoint: $("#set-endpoint").value.trim(),
+    endpoint: currentEndpoint(),
     model: $("#set-model").value,
     // an untouched field leaves the stored key alone rather than erasing it
     ...(typed ? { key: typed } : {}),

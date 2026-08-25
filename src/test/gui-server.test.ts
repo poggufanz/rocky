@@ -112,6 +112,19 @@ test("file reads stop at the line cap and disclose that they were cut", async ()
   });
 });
 
+test("a windows path in the wrong case still reaches its file", { skip: process.platform !== "win32" }, async () => {
+  const { root } = hermetic();
+  writeFileSync(join(root, "cased.ts"), "const a = 1;\n");
+  await withGui(root, async (h) => {
+    // memory canonicalises paths to lower case; the file must still be found
+    const lowered = join(root, "cased.ts").toLowerCase();
+    const answer = await json(h, `/api/file?path=${encodeURIComponent(lowered)}`);
+    assert.equal(answer.status, 200);
+    assert.equal(answer.body.missing, undefined, "a lower-cased repo path must not read as missing");
+    assert.deepEqual(answer.body.lines, ["const a = 1;", ""]);
+  });
+});
+
 test("teach answers with the witness card when rocky heard a why", async () => {
   const { home, root } = hermetic();
   // the recorded code line and the selected snippet must share enough tokens

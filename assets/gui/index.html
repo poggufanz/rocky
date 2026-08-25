@@ -40,15 +40,18 @@
 
   <div class="field">
     <span class="field-label">Provider</span>
-    <div class="seg seg-wide" role="tablist" aria-label="provider">
-      <button class="seg-btn" role="tab" data-provider="openai" aria-selected="true">OpenAI</button>
-      <button class="seg-btn" role="tab" data-provider="anthropic" aria-selected="false" tabindex="-1">Anthropic</button>
+    <div class="combo">
+      <input id="provider-search" type="text" spellcheck="false" autocomplete="off"
+             role="combobox" aria-expanded="false" aria-controls="provider-list"
+             placeholder="search provider…">
+      <div id="provider-list" class="combo-list" role="listbox" hidden></div>
     </div>
   </div>
 
-  <label class="field">
+  <label class="field" id="endpoint-field" hidden>
     <span class="field-label">Endpoint</span>
-    <input id="set-endpoint" type="url" spellcheck="false" autocomplete="off">
+    <input id="set-endpoint" type="url" spellcheck="false" autocomplete="off"
+           placeholder="paste an OpenAI-compatible endpoint">
   </label>
 
   <label class="field">
