@@ -235,6 +235,19 @@ Running bare `rocky` in an interactive terminal session automatically launches `
 - **Color degradation**: Honors `NO_COLOR` and `FORCE_COLOR` environment variables. Degrades gracefully across color depths: Truecolor (24-bit) -> 256 colors -> 16 ANSI colors -> monochrome (depth 1).
 - **ASCII mode**: In monochrome environments or legacy Windows console hosts without Windows Terminal (`WT_SESSION`), borders and selection markers fall back to plain ASCII characters (`+`, `-`, `|`, `*`).
 
+## `rocky teach` (v0.7.x, implemented)
+
+Ask why one selection of code exists, from a witness or from assembled local evidence:
+
+```bash
+rocky teach src/core/memory.ts:307   # line 307 plus the three lines around it
+rocky teach src/core/memory.ts       # whole file, witness lookup only
+printf 'const rows = await loadRows();' | rocky teach --stdin src/core/memory.ts
+rocky teach src/core/memory.ts:307 --ladder   # also print every hop, expanded
+```
+
+`rocky teach <file>:<line>` reads the file once, slices the selection (the line plus three lines on each side, clamped to the file), and asks memory for an `explain` record whose written hunk matches the selection — exact content hash first, token similarity second. A match renders the witness card: the writing agent's own `code` paragraph (why this code shape) and `business` paragraph (what concern it serves), quoted as hearsay with source and age. When the witness `code` paragraph shares no token with the selection's hop-1 construct finding, the card appends one labeled `form` rung (catalog or ast) so witness text and assembly never blend. On a miss, Rocky assembles a deterministic why-ladder from the file itself — construct catalog, enclosing function, callee definition, nearest comment, tests and first `git log -L` commit — and renders the summary card with one compact evidence line naming the sources used; `--ladder` also prints the full hop-by-hop view. `rocky teach <file>` is witness-only (newest explain for the file, no ladder), and `rocky teach --stdin <file>` matches the piped snippet (bounded read, same 2 MB cap as the gate-event stdin reader) against the file. No witness and no ladder rungs is a first-class honest state: Rocky has not heard why yet. Ladder output is rendered, never written to memory, and assembled answers never masquerade as witness testimony. Every flow outcome exits 0.
+
 ## `rocky watch` (v0.3, implemented)
 
 For the commands you walk away from — a long build, a migration, a big download:

@@ -96,6 +96,7 @@ Rocky preserves wrapped-command stdout, stderr, TTY behavior, and exit status. P
 | `rocky hook install\|status\|uninstall` | Manage the Bash/WSL hook, and on Windows every detected PowerShell host's hook. |
 | `rocky what`, `rocky how [--diff]`, `rocky why [--diff] [--add "<text>"]` | Look up remembered intent/mechanism evidence, with optional correlated git diff, or teach your own rationale. |
 | `rocky digest`, `rocky quiz`, `rocky export` | Review or export recent learning records. |
+| `rocky teach <file>[:<line>]` | Why this code: the writing agent's witness card, or an assembled evidence ladder when none exists. |
 | `rocky concepts`, `rocky concept <id>`, `rocky concept alias` | List, look up, and teach concepts heard in memory. |
 | `rocky sessions [n]`, `rocky repl [--ai]` | Browse derived work sessions, or stay in one loop over recall/what/why/how. |
 | `rocky setup` | Register detected MCP hosts after consent. |

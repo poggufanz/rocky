@@ -24,6 +24,7 @@ import { mcp } from "./commands/mcp.js";
 import { setup } from "./commands/setup.js";
 import { check } from "./commands/check.js";
 import { digest, exportCommand, how, quiz, what, why } from "./commands/dictionary.js";
+import { teach } from "./commands/teach.js";
 import { conceptsCommand } from "./commands/concepts.js";
 import { agentEvent } from "./commands/agent-hook.js";
 import { gateEvent } from "./agent/gate.js";
@@ -71,6 +72,7 @@ usage:
                             remember how intent became code.
   rocky why [--diff] [--add "<text>"] [--] <file>
                             hear why remembered change touched file.
+  rocky teach <file>[:<line>] [--ladder]   why this code, from witness or evidence
   rocky digest              hear this week's remembered intent pattern.
   rocky quiz                practice newest remembered intent or note; asks, then reveals,
                             deterministic newest-first, stable id tie-break, repeats unchanged
@@ -356,6 +358,8 @@ async function main(): Promise<number> {
         return how(rest);
       case "why":
         return why(rest);
+      case "teach":
+        return teach(rest);
       case "digest":
         return digest(rest);
       case "quiz":
