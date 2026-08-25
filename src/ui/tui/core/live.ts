@@ -13,9 +13,25 @@ export interface LiveOptions {
   tickMs?: number; // default 50
 }
 
+/**
+ * Plain conhost (bare cmd.exe/PowerShell with no VT-capable host behind it)
+ * never forwards SGR mouse bytes to stdin, so clicks silently die there.
+ * WT_SESSION covers Windows Terminal; the rest cover other real PTY layers
+ * on Windows (VS Code, Git Bash/MinTTY, ConEmu/Cmder, WezTerm, Hyper/Tabby)
+ * that do forward them.
+ */
+function win32HasVtPty(env: NodeJS.ProcessEnv): boolean {
+  if (env.WT_SESSION !== undefined) return true;
+  if (env.TERM_PROGRAM === "vscode" || env.TERM_PROGRAM === "WezTerm" || env.TERM_PROGRAM === "Hyper") return true;
+  if (env.ConEmuANSI === "ON") return true;
+  if (env.MSYSTEM !== undefined) return true; // Git Bash / MSYS2 / Cygwin
+  if (env.TERM?.startsWith("xterm") || env.TERM?.startsWith("screen")) return true;
+  return false;
+}
+
 export function mouseAllowed(env: NodeJS.ProcessEnv, platform: string): boolean {
   if (env.ROCKY_TUI_MOUSE === "off") return false;
-  if (platform === "win32") return env.WT_SESSION !== undefined;
+  if (platform === "win32") return win32HasVtPty(env);
   return true;
 }
 

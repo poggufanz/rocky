@@ -35,11 +35,16 @@ function fakeStdin(): { rs: NodeJS.ReadStream; emitKey: (buf: Buffer) => void } 
   };
 }
 
-test("mouseAllowed: knob off wins; win32 needs WT_SESSION", () => {
+test("mouseAllowed: knob off wins; win32 needs a VT-capable host", () => {
   assert.equal(mouseAllowed({ ROCKY_TUI_MOUSE: "off", WT_SESSION: "1" }, "win32"), false);
   assert.equal(mouseAllowed({}, "linux"), true);
-  assert.equal(mouseAllowed({}, "win32"), false);
+  assert.equal(mouseAllowed({}, "win32"), false, "bare conhost, no VT signal");
   assert.equal(mouseAllowed({ WT_SESSION: "x" }, "win32"), true);
+  assert.equal(mouseAllowed({ TERM_PROGRAM: "vscode" }, "win32"), true, "VS Code integrated terminal");
+  assert.equal(mouseAllowed({ MSYSTEM: "MINGW64" }, "win32"), true, "Git Bash / MSYS2");
+  assert.equal(mouseAllowed({ ConEmuANSI: "ON" }, "win32"), true, "ConEmu / Cmder");
+  assert.equal(mouseAllowed({ TERM: "xterm-256color" }, "win32"), true, "any xterm-family pty");
+  assert.equal(mouseAllowed({ TERM_PROGRAM: "Apple_Terminal" }, "win32"), false, "unrecognized host stays blocked");
 });
 
 test("screen with mouse option writes enable on enter and disable on leave", () => {
