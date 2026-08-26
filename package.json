@@ -17,6 +17,8 @@
     "dist/ai",
     "dist/agent",
     "dist/shell",
+    "dist/gui",
+    "assets/gui",
     "skills/rocky-voice",
     "README.md",
     "LICENSE",

@@ -30,6 +30,8 @@ const expectedFiles = [
   "dist/ai",
   "dist/agent",
   "dist/shell",
+  "dist/gui",
+  "assets/gui",
   "skills/rocky-voice",
   "README.md",
   "LICENSE",
@@ -98,6 +100,8 @@ function allowedPackPath(path: string): boolean {
     || path.startsWith("dist/ai/")
     || path.startsWith("dist/agent/")
     || path.startsWith("dist/shell/")
+    || path.startsWith("dist/gui/")
+    || path.startsWith("assets/gui/")
     || path === "skills/rocky-voice/SKILL.md"
     || path === "skills/rocky-voice/agents/openai.yaml";
 }
@@ -105,7 +109,7 @@ function allowedPackPath(path: string): boolean {
 function assertNoForbiddenArtifact(path: string): void {
   const normalized = path.replaceAll("\\", "/");
   assert.doesNotMatch(normalized, /(^|\/)test(\/|$)|\.test\.|(^|\/)src(\/|$)|fixture|cache|validation|\.rocky-managed\.json/i);
-  if (normalized !== "dist/commands/model.js") {
+  if (normalized !== "dist/commands/model.js" && normalized !== "dist/gui/models-dev.js") {
     assert.doesNotMatch(normalized, /model|weight/i);
   }
 }
