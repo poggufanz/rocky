@@ -1074,7 +1074,7 @@ function byokReady() {
  * and says so. Clay is reserved for what rocky actually heard, and a guess
  * that borrowed that colour would be the one lie this whole surface avoids.
  */
-async function askModel(anchor, prompt, keep) {
+async function askModel(anchor, prompt, keep, ctx) {
   openPop(anchor, ...keep, box("guess", el("p", "guess-head", "Model Guess (Beta)"), skeleton()));
 
   let answer;
@@ -1082,8 +1082,9 @@ async function askModel(anchor, prompt, keep) {
     answer = await api("/api/ask", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      // only the prompt travels: endpoint, model and key are read server side
-      body: JSON.stringify({ prompt }),
+      // only the prompt travels: endpoint, model and key are read server side.
+      // the file context lets rocky dig the evidence pack before forwarding.
+      body: JSON.stringify({ prompt, ...ctx }),
     });
   } catch {
     openPop(anchor, ...keep, box("guess", el("p", "guess-head", "Model Guess (Beta)"),
@@ -1134,7 +1135,7 @@ function guessNodes(text) {
 }
 
 /** Adds the ask control, but only once BYOK is actually configured. */
-function withAsk(anchor, parts, prompt, held) {
+function withAsk(anchor, parts, prompt, held, ctx) {
   if (!byokReady()) return parts;
   // the same action, but the label admits whether rocky already answered
   const label = held
@@ -1142,7 +1143,7 @@ function withAsk(anchor, parts, prompt, held) {
     : "Use Agent to explain this (May use your AI API)";
   const button = el("button", "card-more ask-agent", label);
   button.type = "button";
-  button.addEventListener("click", () => askModel(anchor, prompt, parts));
+  button.addEventListener("click", () => askModel(anchor, prompt, parts, ctx));
   return [...parts, button];
 }
 
@@ -1182,6 +1183,8 @@ async function askWhy(start, end, at) {
       anchor,
       bare,
       `Why is this code written this way? Rocky has no recorded reason for it.\n\n${askedAbout}\n\nFollow the rules and shape you were given. Ground every claim in the code quoted above, and say plainly if you cannot tell from the code alone.`,
+      undefined,
+      { path: state.file, start, end },
     ));
     return;
   }
@@ -1219,6 +1222,7 @@ async function askWhy(start, end, at) {
       "Explain what that recorded reason means for this code, following the rules and shape you were given. " +
       "Do not invent history rocky did not record; the record's labels (KODE, BISNIS, why 1, stop) are yours to use, not to quote as prose.",
     true,
+    { path: state.file, start, end },
   ));
 }
 

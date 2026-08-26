@@ -13,7 +13,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { randomBytes } from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, extname, join, resolve, sep } from "node:path";
 
@@ -25,7 +25,8 @@ import { deriveHome } from "../core/home-data.js";
 import { fileIndex, getCachedDiff, defaultDiffIo, lineOverlapPredicate } from "../core/compare-data.js";
 import { filteredFiles, TEACH_MAX_LINES } from "../core/file-filter.js";
 import { teachLookup } from "../core/teach.js";
-import { buildLadder, defaultTeachNeighbor } from "../core/teach-ladder.js";
+import { buildLadder, collectImports, defaultTeachNeighbor, isRelativeSpecifier, resolveRelativePath } from "../core/teach-ladder.js";
+import { gitFirstTouch } from "../core/git-diff.js";
 import {
   gapRungFor,
   renderLadderCard,
@@ -103,9 +104,81 @@ const teachSpec: Partial<Record<"id" | "en", string | null>> = {};
  */
 const TEACH_ENV = [
   "Environment note for this run: you have no shell, no git, no database and no filesystem.",
-  "Where the spec below tells you to read files or run commands, work only from the evidence",
-  "quoted after the rules instead, and cite that. Never claim you ran anything.",
+  "Rocky walks the hops for you and quotes what it found after the rules: the file itself,",
+  "the neighbours its imports name, the test that shares its basename, and the git commit",
+  "that first touched the selection. Cite only what is quoted; never claim you ran anything.",
 ].join("\n");
+
+const PACK_BUDGET_CHARS = 20_000;
+const PACK_NEIGHBOR_CHARS = 4_000;
+const PACK_NEIGHBOR_MAX = 3;
+
+/** A js specifier points at .js on disk as often as .ts, so both are tried. */
+function readNeighborFile(neighbor: (relPath: string) => string | undefined, rel: string): string | undefined {
+  const tries = [rel];
+  if (rel.endsWith(".js")) tries.push(`${rel.slice(0, -3)}.ts`);
+  if (!/\.[a-z]+$/.test(rel)) tries.push(`${rel}.ts`, `${rel}.js`, `${rel}.php`);
+  for (const candidate of tries) {
+    const content = neighbor(candidate);
+    if (content !== undefined) return content;
+  }
+  return undefined;
+}
+
+/**
+ * The ask model has no eyes, so rocky digs for it: the whole file (or a wide
+ * window around the selection), the neighbours its relative imports name, the
+ * test sharing its basename, and the first commit that touched the lines.
+ * Everything is bounded, and redaction happens on the joined pack before any
+ * of it may leave the machine.
+ */
+function evidencePack(full: string, rel: string, start: number, end: number): string {
+  const blocks: string[] = [];
+  try {
+    const info = statSync(full);
+    if (!info.isFile() || info.size > READ_CAP_BYTES) return "";
+    const fileText = readFileSync(full, "utf8");
+    const lines = fileText.split(/\r?\n/);
+    if (fileText.length <= PACK_BUDGET_CHARS / 2) {
+      blocks.push(`=== file ${rel} (whole) ===\n${fileText}`);
+    } else {
+      const from = Math.max(0, start - 1 - 150);
+      const to = Math.min(lines.length, end + 150);
+      blocks.push(`=== file ${rel} (lines ${from + 1}-${to} of ${lines.length}; the selection sits inside) ===\n${lines.slice(from, to).join("\n")}`);
+    }
+
+    const neighbor = defaultTeachNeighbor(full);
+    const seen = new Set<string>();
+    for (const imp of collectImports(fileText)) {
+      if (!isRelativeSpecifier(imp.specifier)) continue;
+      if (seen.size >= PACK_NEIGHBOR_MAX) break;
+      const neighborRel = resolveRelativePath(full, imp.specifier);
+      if (seen.has(neighborRel)) continue;
+      seen.add(neighborRel);
+      const content = readNeighborFile(neighbor, neighborRel);
+      if (content === undefined) continue;
+      blocks.push(`=== neighbour ${neighborRel} (imported by ${rel}) ===\n${content.slice(0, PACK_NEIGHBOR_CHARS)}`);
+    }
+
+    const base = rel.replace(/\\/g, "/").split("/").pop()?.replace(/\.[^.]+$/, "") ?? "";
+    if (base) {
+      for (const cand of [`src/test/${base}.test.ts`, `src/test/${base}.spec.ts`]) {
+        const content = neighbor(cand);
+        if (content !== undefined) {
+          blocks.push(`=== test ${cand} ===\n${content.slice(0, PACK_NEIGHBOR_CHARS)}`);
+          break;
+        }
+      }
+    }
+
+    const first = gitFirstTouch(rel, Math.max(1, start), Math.max(1, end));
+    if (first !== undefined) blocks.push(`=== git ===\nfirst touched in ${first.commit}: ${first.subject}`);
+  } catch {
+    return "";
+  }
+  const joined = blocks.join("\n\n");
+  return joined.length > PACK_BUDGET_CHARS ? `${joined.slice(0, PACK_BUDGET_CHARS)}\n… pack cut, long` : joined;
+}
 
 function loadTeachSpec(lang: "id" | "en"): string {
   if (teachSpec[lang] === undefined) {
@@ -225,8 +298,10 @@ function momentsFor(path: string, root: string, now: number) {
 }
 
 /** Forwards one prompt to the provider the page names. OpenAI-compatible
- *  hosts and Anthropic differ only in header and body shape. */
-async function ask(body: Record<string, unknown>): Promise<{ status: number; payload: unknown }> {
+ *  hosts and Anthropic differ only in header and body shape. When the page
+ *  names the file its question is about, rocky digs first and quotes what it
+ *  found: the model explains evidence, it does not have to imagine code. */
+async function ask(body: Record<string, unknown>, root: string): Promise<{ status: number; payload: unknown }> {
   // endpoint, model and key all come off disk: the page never holds the secret
   const stored = readSettings();
   const endpoint = stored.endpoint;
@@ -245,8 +320,23 @@ async function ask(body: Record<string, unknown>): Promise<{ status: number; pay
   const asked = redactSecretsAtBoundary(
     raw.length > MAX_PROMPT_CHARS ? `${raw.slice(0, MAX_PROMPT_CHARS)}\n… cut, prompt long` : raw,
   );
+
+  // the dig: whole file, imported neighbours, sibling test, first git touch --
+  // the same boundary as any other read, then redacted like the prompt itself
+  let pack = "";
+  const rel = typeof body.path === "string" ? body.path : "";
+  if (rel) {
+    const full = confine(root, rel) ?? witnessed(rel);
+    if (full !== undefined) {
+      const start = Number(body.start ?? 1);
+      const end = Number(body.end ?? start);
+      const dug = evidencePack(full, rel, start, end);
+      if (dug) pack = `\n\nEVIDENCE ROCKY GATHERED (quote only from this):\n${redactSecretsAtBoundary(dug)}`;
+    }
+  }
+
   // the rules ride here, not in the page, so a browser cannot drop them
-  const prompt = `${TEACH_ENV}\n\n${loadTeachSpec(stored.lang)}\n\n---\n\n${asked}`;
+  const prompt = `${TEACH_ENV}\n\n${loadTeachSpec(stored.lang)}\n\n---\n\n${asked}${pack}`;
 
   const anthropic = endpoint.includes("/v1/messages");
   const headers: Record<string, string> = { "Content-Type": "application/json" };
@@ -408,7 +498,7 @@ async function handleApi(
 
   if (pathname === "/api/ask" && request.method === "POST") {
     const body = (await readBody(request)) as Record<string, unknown>;
-    const { status, payload } = await ask(body);
+    const { status, payload } = await ask(body, root);
     return sendJson(response, status, payload);
   }
 

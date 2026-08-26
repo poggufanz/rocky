@@ -307,6 +307,48 @@ test("the ask rides the english spec when the settings say en", async () => {
   }
 });
 
+test("the ask digs the file and its imports before forwarding", async () => {
+  const { root } = hermetic();
+  writeFileSync(join(root, "b.ts"), 'export const MARKER_B = "found-in-b";\nconst token = "ghp_DDDDDDDDEEEEEEEEFFFFFFFFGGGGGGGG1111";\n');
+  writeFileSync(join(root, "a.ts"), 'import { MARKER_B } from "./b.js";\nconsole.log(MARKER_B);\n');
+
+  let seen = "";
+  const provider: Server = createServer(async (req, res) => {
+    let raw = "";
+    for await (const chunk of req) raw += chunk;
+    seen = JSON.parse(raw).messages[0].content;
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ choices: [{ message: { content: "ok" } }] }));
+  });
+  await new Promise<void>((up) => provider.listen(0, "127.0.0.1", () => up()));
+  const providerPort = (provider.address() as { port: number }).port;
+
+  try {
+    await withGui(root, async (h) => {
+      await json(h, "/api/settings", {
+        method: "POST",
+        body: JSON.stringify({
+          provider: "openai",
+          endpoint: `http://127.0.0.1:${providerPort}/v1/chat/completions`,
+          model: "m",
+          key: "sk-test",
+        }),
+      });
+
+      const answer = await json(h, "/api/ask", {
+        method: "POST",
+        body: JSON.stringify({ prompt: "why", path: "a.ts", start: 1, end: 2 }),
+      });
+      assert.equal(answer.status, 200);
+      assert.ok(seen.includes("=== file a.ts (whole) ==="), "the file itself did not ride the ask");
+      assert.ok(seen.includes("found-in-b"), "the imported neighbour did not ride the ask");
+      assert.ok(!seen.includes("ghp_DDDDDDDDEEEEEEEEFFFFFFFFGGGGGGGG1111"), "a neighbour's secret reached the provider");
+    });
+  } finally {
+    await new Promise<void>((down) => provider.close(() => down()));
+  }
+});
+
 test("the prompt is redacted before it leaves the machine", async () => {
   const { root } = hermetic();
   let seen = "";

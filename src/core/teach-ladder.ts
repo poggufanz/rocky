@@ -355,12 +355,12 @@ function hopGit(
   return { source: "git", finding: `first touched in ${result.commit}: ${subject}` };
 }
 
-interface ImportLine {
+export interface ImportLine {
   names: string[];
   specifier: string;
 }
 
-function collectImports(text: string): ImportLine[] {
+export function collectImports(text: string): ImportLine[] {
   const out: ImportLine[] = [];
   for (const line of text.split(/\r?\n/)) {
     const trimmed = line.trim();
@@ -384,11 +384,11 @@ function collectImports(text: string): ImportLine[] {
   return out;
 }
 
-function isRelativeSpecifier(specifier: string): boolean {
+export function isRelativeSpecifier(specifier: string): boolean {
   return specifier.startsWith("./") || specifier.startsWith("../");
 }
 
-function resolveRelativePath(file: string, specifier: string): string {
+export function resolveRelativePath(file: string, specifier: string): string {
   const f = file.replace(/\\/g, "/");
   const base = f.includes("/") ? f.slice(0, f.lastIndexOf("/")) : "";
   const parts: string[] = [];
