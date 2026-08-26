@@ -209,6 +209,22 @@ function hopCatalog(selection: string, selStart: number): Rung | undefined {
 }
 
 function hopAst(lines: readonly string[], selStart: number, selection: string): Rung & { name: string; line: number } | undefined {
+  const enc = enclosingFunction(lines, selStart);
+  if (enc === undefined) return undefined;
+  const args = argsInSelection(selection);
+  const clause = args !== undefined ? `; called with ${args}` : "";
+  return { source: "ast", name: enc.name, line: enc.start, finding: `inside ${enc.name}${clause}` };
+}
+
+/**
+ * The function wrapping a line: its header scans upward, its end comes from
+ * brace balance. A header without a body (an arrow returning an expression)
+ * ends on its own line, and a runaway count is clamped rather than trusted.
+ */
+export function enclosingFunction(
+  lines: readonly string[],
+  selStart: number,
+): { name: string; start: number; end: number } | undefined {
   for (let i = selStart - 2; i >= 0; i -= 1) {
     const line = lines[i] ?? "";
     let name: string | undefined;
@@ -218,17 +234,27 @@ function hopAst(lines: readonly string[], selStart: number, selection: string): 
       const arrow = ARROW_RE.exec(line);
       if (arrow !== null && !KEYWORDS.has(arrow[1] ?? "")) name = arrow[1];
     }
-    if (name === undefined) {
+    if (name !== undefined) {
       const method = METHOD_RE.exec(line);
       if (method !== null && !KEYWORDS.has(method[1] ?? "")) name = method[1];
     }
-    if (name !== undefined) {
-      const args = argsInSelection(selection);
-      const clause = args !== undefined ? `; called with ${args}` : "";
-      return { source: "ast", name, line: i + 1, finding: `inside ${name}${clause}` };
-    }
+    if (name !== undefined) return { name, start: i + 1, end: braceEnd(lines, i) };
   }
   return undefined;
+}
+
+function braceEnd(lines: readonly string[], headerIdx: number): number {
+  let depth = 0;
+  let opened = false;
+  for (let i = headerIdx; i < lines.length; i += 1) {
+    for (const ch of lines[i] ?? "") {
+      if (ch === "{") { depth += 1; opened = true; }
+      else if (ch === "}") depth -= 1;
+    }
+    if (opened && depth <= 0) return i + 1;
+    if (i - headerIdx > 400) return headerIdx + 1;
+  }
+  return headerIdx + 1;
 }
 
 function argsInSelection(selection: string): string | undefined {
@@ -276,10 +302,25 @@ function firstCallee(selection: string): string | undefined {
   return undefined;
 }
 
-function findDefinitionInText(name: string, text: string): { line: number; jsdoc?: string } | undefined {
+/** Every identifier called in the selection, keywords excluded, first-seen order. */
+export function calleeNames(selection: string): string[] {
+  const re = /([A-Za-z_$][\w$]*)\s*\(/g;
+  const names: string[] = [];
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(selection)) !== null) {
+    const name = m[1] ?? "";
+    if (KEYWORDS.has(name) || names.includes(name)) continue;
+    // a member call (console.log) names a method of its object, not a project symbol
+    if (m.index > 0 && selection[m.index - 1] === ".") continue;
+    names.push(name);
+  }
+  return names;
+}
+
+export function findDefinitionInText(name: string, text: string): { line: number; jsdoc?: string } | undefined {
   const n = escapeRegExp(name);
   const fnRe = new RegExp(`^(?:export\\s+)?(?:default\\s+)?(?:async\\s+)?function\\s+${n}\\s*\\(`);
-  const constRe = new RegExp(`^(?:export\\s+)?(?:const|let|var)\\s+${n}\\s*=\\s*(?:async\\s*)?(?:\\(|function)`);
+  const constRe = new RegExp(`^(?:export\\s+)?(?:const|let|var)\\s+${n}\\s*[:=]`);
   const assignRe = new RegExp(`^\\s*${n}\\s*=\\s*(?:async\\s*)?(?:\\(|function)`);
   const methodRe = new RegExp(`^\\s*(?:async\\s+)?${n}\\s*\\([^)]*\\)\\s*\\{`);
   const defLines = text.split(/\r?\n/);

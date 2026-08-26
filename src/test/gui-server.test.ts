@@ -340,7 +340,8 @@ test("the ask digs the file and its imports before forwarding", async () => {
         body: JSON.stringify({ prompt: "why", path: "a.ts", start: 1, end: 2 }),
       });
       assert.equal(answer.status, 200);
-      assert.ok(seen.includes("=== file a.ts (whole) ==="), "the file itself did not ride the ask");
+      assert.ok(seen.includes("=== file a.ts (whole, 3 lines) ==="), "the file itself did not ride the ask");
+      assert.ok(seen.includes("=== definition MARKER_B"), "the used symbol's definition did not ride the ask");
       assert.ok(seen.includes("found-in-b"), "the imported neighbour did not ride the ask");
       assert.ok(!seen.includes("ghp_DDDDDDDDEEEEEEEEFFFFFFFFGGGGGGGG1111"), "a neighbour's secret reached the provider");
     });

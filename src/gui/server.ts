@@ -13,7 +13,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { randomBytes } from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, extname, join, resolve, sep } from "node:path";
 
@@ -25,7 +25,7 @@ import { deriveHome } from "../core/home-data.js";
 import { fileIndex, getCachedDiff, defaultDiffIo, lineOverlapPredicate } from "../core/compare-data.js";
 import { filteredFiles, TEACH_MAX_LINES } from "../core/file-filter.js";
 import { teachLookup } from "../core/teach.js";
-import { buildLadder, collectImports, defaultTeachNeighbor, isRelativeSpecifier, resolveRelativePath } from "../core/teach-ladder.js";
+import { buildLadder, calleeNames, collectImports, defaultTeachNeighbor, enclosingFunction, findDefinitionInText, isRelativeSpecifier, resolveRelativePath } from "../core/teach-ladder.js";
 import { gitFirstTouch } from "../core/git-diff.js";
 import {
   gapRungFor,
@@ -104,14 +104,19 @@ const teachSpec: Partial<Record<"id" | "en", string | null>> = {};
  */
 const TEACH_ENV = [
   "Environment note for this run: you have no shell, no git, no database and no filesystem.",
-  "Rocky walks the hops for you and quotes what it found after the rules: the file itself,",
-  "the neighbours its imports name, the test that shares its basename, and the git commit",
-  "that first touched the selection. Cite only what is quoted; never claim you ran anything.",
+  "Rocky walks the hops for you and quotes what it found after the rules, selection first:",
+  "the enclosing function, the definitions of the symbols the selection uses, the comment",
+  "above it, the tests that name those symbols, and the git commit that first touched the",
+  "lines. Cite only what is quoted; never claim you ran anything.",
 ].join("\n");
 
 const PACK_BUDGET_CHARS = 20_000;
-const PACK_NEIGHBOR_CHARS = 4_000;
-const PACK_NEIGHBOR_MAX = 3;
+const PACK_DEF_CHARS = 1_200;
+const PACK_DEF_MAX = 3;
+const PACK_TEST_CHARS = 2_500;
+const PACK_TEST_MAX = 2;
+const PACK_WHOLE_FILE_LINES = 80;
+const PACK_WINDOW_PAD_LINES = 25;
 
 /** A js specifier points at .js on disk as often as .ts, so both are tried. */
 function readNeighborFile(neighbor: (relPath: string) => string | undefined, rel: string): string | undefined {
@@ -125,59 +130,179 @@ function readNeighborFile(neighbor: (relPath: string) => string | undefined, rel
   return undefined;
 }
 
+/** Test files live under a handful of names across ecosystems. */
+const TEST_FILE_RE = /(?:\.test\.[tj]s|\.spec\.[tj]s|Test\.php)$/;
+
 /**
- * The ask model has no eyes, so rocky digs for it: the whole file (or a wide
- * window around the selection), the neighbours its relative imports name, the
- * test sharing its basename, and the first commit that touched the lines.
- * Everything is bounded, and redaction happens on the joined pack before any
- * of it may leave the machine.
+ * The ask model has no eyes, so rocky digs for it, selection-first and in a
+ * written order: the selection itself, the function enclosing it (or the whole
+ * file when it is short), the definitions of the symbols the selection
+ * actually uses, the comment above, the tests that name those symbols, and
+ * the first commit that touched the lines. Everything is bounded, and
+ * redaction happens on the joined pack before any of it may leave the machine.
  */
 function evidencePack(full: string, rel: string, start: number, end: number): string {
-  const blocks: string[] = [];
   try {
     const info = statSync(full);
     if (!info.isFile() || info.size > READ_CAP_BYTES) return "";
     const fileText = readFileSync(full, "utf8");
     const lines = fileText.split(/\r?\n/);
-    if (fileText.length <= PACK_BUDGET_CHARS / 2) {
-      blocks.push(`=== file ${rel} (whole) ===\n${fileText}`);
+    const selection = lines.slice(Math.max(0, start - 1), end).join("\n");
+
+    // budget-aware assembly: a late block is dropped whole before the early
+    // ones lose a character, because the order above is the priority
+    const blocks: string[] = [];
+    let spent = 0;
+    const addBlock = (label: string, body: string, cap: number): void => {
+      const remaining = PACK_BUDGET_CHARS - spent;
+      if (remaining < 200) return;
+      const cut = body.length > Math.min(cap, remaining) ? body.slice(0, Math.min(cap, remaining)) : body;
+      const block = `${label}\n${cut}`;
+      blocks.push(block);
+      spent += block.length + 2;
+    };
+
+    addBlock(`=== selection ${rel}:${start}-${end} ===`, selection, 2_000);
+
+    if (lines.length <= PACK_WHOLE_FILE_LINES) {
+      addBlock(`=== file ${rel} (whole, ${lines.length} lines) ===`, fileText, PACK_BUDGET_CHARS / 2);
     } else {
-      const from = Math.max(0, start - 1 - 150);
-      const to = Math.min(lines.length, end + 150);
-      blocks.push(`=== file ${rel} (lines ${from + 1}-${to} of ${lines.length}; the selection sits inside) ===\n${lines.slice(from, to).join("\n")}`);
+      const enc = enclosingFunction(lines, start);
+      if (enc !== undefined) {
+        const from = Math.max(0, enc.start - 4);
+        const to = Math.min(lines.length, enc.end + 3);
+        addBlock(
+          `=== enclosing function ${enc.name} (${rel}:${from + 1}-${to}) ===`,
+          lines.slice(from, to).join("\n"),
+          PACK_BUDGET_CHARS / 2,
+        );
+      } else {
+        const from = Math.max(0, start - 1 - PACK_WINDOW_PAD_LINES);
+        const to = Math.min(lines.length, end + PACK_WINDOW_PAD_LINES);
+        addBlock(
+          `=== file ${rel} (lines ${from + 1}-${to} of ${lines.length}; the selection sits inside) ===`,
+          lines.slice(from, to).join("\n"),
+          PACK_BUDGET_CHARS / 3,
+        );
+      }
+    }
+
+    // the symbols the selection actually uses: calls, plus imported names that
+    // appear in it -- their definitions open, never a whole neighbour file
+    const imports = collectImports(fileText);
+    const symbols = [...calleeNames(selection)];
+    for (const imp of imports) {
+      for (const name of imp.names) {
+        if (!symbols.includes(name) && new RegExp(`\\b${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`).test(selection)) {
+          symbols.push(name);
+        }
+      }
     }
 
     const neighbor = defaultTeachNeighbor(full);
-    const seen = new Set<string>();
-    for (const imp of collectImports(fileText)) {
-      if (!isRelativeSpecifier(imp.specifier)) continue;
-      if (seen.size >= PACK_NEIGHBOR_MAX) break;
+    let defs = 0;
+    for (const name of symbols) {
+      if (defs >= PACK_DEF_MAX) break;
+      const inFile = findDefinitionInText(name, fileText);
+      if (inFile !== undefined) {
+        const from = Math.max(0, inFile.line - 2);
+        const body = `${inFile.jsdoc !== undefined ? `${inFile.jsdoc}\n` : ""}${lines.slice(from, inFile.line + 6).join("\n")}`;
+        addBlock(`=== definition ${name} (${rel}:${inFile.line}) ===`, body, PACK_DEF_CHARS);
+        defs += 1;
+        continue;
+      }
+      const imp = imports.find((i) => i.names.includes(name));
+      if (imp === undefined || !isRelativeSpecifier(imp.specifier)) continue;
       const neighborRel = resolveRelativePath(full, imp.specifier);
-      if (seen.has(neighborRel)) continue;
-      seen.add(neighborRel);
       const content = readNeighborFile(neighbor, neighborRel);
       if (content === undefined) continue;
-      blocks.push(`=== neighbour ${neighborRel} (imported by ${rel}) ===\n${content.slice(0, PACK_NEIGHBOR_CHARS)}`);
+      const found = findDefinitionInText(name, content);
+      if (found === undefined) continue;
+      const neighborLines = content.split(/\r?\n/);
+      const from = Math.max(0, found.line - 2);
+      const body = `${found.jsdoc !== undefined ? `${found.jsdoc}\n` : ""}${neighborLines.slice(from, found.line + 6).join("\n")}`;
+      addBlock(`=== definition ${name} (${neighborRel}:${found.line}) ===`, body, PACK_DEF_CHARS);
+      defs += 1;
     }
 
-    const base = rel.replace(/\\/g, "/").split("/").pop()?.replace(/\.[^.]+$/, "") ?? "";
-    if (base) {
-      for (const cand of [`src/test/${base}.test.ts`, `src/test/${base}.spec.ts`]) {
-        const content = neighbor(cand);
-        if (content !== undefined) {
-          blocks.push(`=== test ${cand} ===\n${content.slice(0, PACK_NEIGHBOR_CHARS)}`);
-          break;
+    // the nearest comment above the selection often carries the why verbatim
+    const comments: string[] = [];
+    for (let i = start - 2; i >= Math.max(0, start - 11); i -= 1) {
+      const trimmed = (lines[i] ?? "").trim();
+      if (trimmed.length === 0) continue;
+      if (!/^\s*(\/\/|\/\*|\*|#)/.test(lines[i] ?? "")) break;
+      comments.unshift(trimmed);
+    }
+    if (comments.length > 0) addBlock(`=== comment above the selection ===`, comments.join("\n"), 600);
+
+    // tests that name the symbol prove intent; the same-basename file is only
+    // the fallback when no test mentions it. The file's own project is scanned
+    // first; the launch cwd's test dirs count only when the file lives there.
+    if (symbols.length > 0) {
+      const dirs = [
+        resolve(dirname(full), "..", "..", "src", "test"),
+        resolve(dirname(full), "..", "..", "tests"),
+        ...(confine(process.cwd(), full) !== undefined
+          ? [resolve(process.cwd(), "src", "test"), resolve(process.cwd(), "tests")]
+          : []),
+      ];
+      let found = 0;
+      for (const dir of dirs) {
+        if (found >= PACK_TEST_MAX) break;
+        let entries: string[] = [];
+        try {
+          entries = readdirSync(dir).filter((name) => TEST_FILE_RE.test(name));
+        } catch {
+          continue;
+        }
+        for (const entry of entries) {
+          if (found >= PACK_TEST_MAX) break;
+          let content: string;
+          try {
+            const path = join(dir, entry);
+            if (statSync(path).size > 64 * 1024) continue;
+            content = readFileSync(path, "utf8");
+          } catch {
+            continue;
+          }
+          const testLines = content.split(/\r?\n/);
+          for (let i = 0; i < testLines.length; i += 1) {
+            const hit = symbols.find((name) => new RegExp(`\\b${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`).test(testLines[i] ?? ""));
+            if (hit === undefined) continue;
+            const from = Math.max(0, i - 3);
+            const to = Math.min(testLines.length, i + 4);
+            addBlock(
+              `=== test ${entry}:${i + 1} mentioning ${hit} ===`,
+              testLines.slice(from, to).join("\n"),
+              PACK_TEST_CHARS,
+            );
+            found += 1;
+            break;
+          }
+        }
+      }
+
+      if (found === 0) {
+        const base = rel.replace(/\\/g, "/").split("/").pop()?.replace(/\.[^.]+$/, "") ?? "";
+        if (base) {
+          for (const cand of [`src/test/${base}.test.ts`, `src/test/${base}.spec.ts`]) {
+            const content = neighbor(cand);
+            if (content !== undefined) {
+              addBlock(`=== test ${cand} ===`, content, PACK_TEST_CHARS);
+              break;
+            }
+          }
         }
       }
     }
 
     const first = gitFirstTouch(rel, Math.max(1, start), Math.max(1, end));
-    if (first !== undefined) blocks.push(`=== git ===\nfirst touched in ${first.commit}: ${first.subject}`);
+    if (first !== undefined) addBlock("=== git ===", `first touched in ${first.commit}: ${first.subject}`, 300);
+
+    return blocks.join("\n\n");
   } catch {
     return "";
   }
-  const joined = blocks.join("\n\n");
-  return joined.length > PACK_BUDGET_CHARS ? `${joined.slice(0, PACK_BUDGET_CHARS)}\n… pack cut, long` : joined;
 }
 
 function loadTeachSpec(lang: "id" | "en"): string {
