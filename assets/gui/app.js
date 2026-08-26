@@ -178,6 +178,9 @@ const state = {
   filter: "",
   total: null,
   fileCount: null,
+  files: [],
+  // group keys (repo names, "" for non-repo) the user hid in Filter Repo
+  repoHidden: new Set(),
   mainLoaded: false,
   recent: [],
   // record modes: the TUI's showDiff, strict picker, and the two chosen moments
@@ -389,25 +392,38 @@ function paneWelcome() {
 async function loadFiles() {
   ensureTotal();
   fill($("#files"), listSkeleton(7));
-  let files;
   try {
-    files = await api(`/api/files?q=${encodeURIComponent(state.filter)}`);
+    state.files = await api(`/api/files?q=${encodeURIComponent(state.filter)}`);
   } catch {
     fill($("#files"), failed(loadFiles));
     return;
   }
-  state.fileCount = files.length;
-  setTally();
-  $("#files-head").textContent = `Files: ${files.length}`;
+  renderFiles();
+}
 
-  if (files.length === 0) {
-    fill($("#files"), empty("no explain records heard yet."));
+/** A file's group key is its repo name; "" is the non-repo group. */
+function fileGroup(file) {
+  return file.repo ?? "";
+}
+
+function renderFiles() {
+  const files = state.files;
+  const shown = files.filter((file) => !state.repoHidden.has(fileGroup(file)));
+  state.fileCount = shown.length;
+  setTally();
+  $("#files-head").textContent = `Files: ${shown.length}`;
+  $("#repo-filter-btn").classList.toggle("on", state.repoHidden.size > 0);
+
+  if (shown.length === 0) {
+    fill($("#files"), files.length === 0
+      ? empty("no explain records heard yet.")
+      : empty("every group is hidden. filter repo opens them again."));
     return;
   }
 
   fill(
     $("#files"),
-    ...files.map((file) => {
+    ...shown.map((file) => {
       const button = el("button", "file");
       button.type = "button";
       button.title = file.path;
@@ -423,6 +439,62 @@ async function loadFiles() {
     }),
   );
 }
+
+/* ---- dash: repo filter -------------------------------------------------- */
+
+/** One checkbox row per heard group, busiest first; non-repo comes last. */
+function paintRepoFilter() {
+  const groups = new Map();
+  for (const file of state.files) {
+    const key = fileGroup(file);
+    const entry = groups.get(key) ?? { label: key === "" ? "non-repo" : key, count: 0 };
+    entry.count += 1;
+    groups.set(key, entry);
+  }
+  const rows = [...groups.entries()]
+    .sort((a, b) => b[1].count - a[1].count || a[1].label.localeCompare(b[1].label))
+    .map(([key, group]) => {
+      const row = el("label", "repo-row");
+      const check = document.createElement("input");
+      check.type = "checkbox";
+      check.checked = !state.repoHidden.has(key);
+      check.addEventListener("change", () => {
+        if (check.checked) state.repoHidden.delete(key);
+        else state.repoHidden.add(key);
+        renderFiles();
+      });
+      row.append(check, el("span", "repo-name", group.label), el("span", "repo-count", String(group.count)));
+      return row;
+    });
+  fill($("#repo-filter-list"), ...(rows.length > 0 ? rows : [empty("no repos heard yet.")]));
+}
+
+function openRepoFilter() {
+  paintRepoFilter();
+  $("#scrim").hidden = false;
+  $("#repo-filter").hidden = false;
+  $("#repo-filter-close").focus();
+}
+
+function closeRepoFilter() {
+  if ($("#repo-filter").hidden) return;
+  $("#repo-filter").hidden = true;
+  // the scrim is shared with settings; it stays while any modal does
+  if ($("#settings").hidden) $("#scrim").hidden = true;
+  $("#repo-filter-btn").focus();
+}
+
+$("#repo-filter-btn").addEventListener("click", (event) => {
+  event.stopPropagation();
+  openRepoFilter();
+});
+$("#repo-filter-close").addEventListener("click", closeRepoFilter);
+$("#repo-filter-done").addEventListener("click", closeRepoFilter);
+$("#repo-filter-reset").addEventListener("click", () => {
+  state.repoHidden.clear();
+  paintRepoFilter();
+  renderFiles();
+});
 
 let filterTimer = 0;
 $("#filter").addEventListener("input", (event) => {
@@ -1286,7 +1358,10 @@ $("#settings-btn").addEventListener("click", (event) => {
   openSettings();
 });
 $("#settings-close").addEventListener("click", closeSettings);
-$("#scrim").addEventListener("click", closeSettings);
+$("#scrim").addEventListener("click", () => {
+  closeSettings();
+  closeRepoFilter();
+});
 $("#settings").addEventListener("click", (event) => event.stopPropagation());
 
 $("#settings-save").addEventListener("click", () => {
@@ -1308,7 +1383,9 @@ $("#settings-clear").addEventListener("click", () => {
 });
 
 document.addEventListener("keydown", (event) => {
-  if (event.key === "Escape" && !$("#settings").hidden) closeSettings();
+  if (event.key !== "Escape") return;
+  if (!$("#repo-filter").hidden) closeRepoFilter();
+  else if (!$("#settings").hidden) closeSettings();
 });
 
 /* ---- boot -------------------------------------------------------------- */

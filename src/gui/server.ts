@@ -24,6 +24,7 @@ import { providerFor, providerList } from "./models-dev.js";
 import { deriveHome } from "../core/home-data.js";
 import { fileIndex, getCachedDiff, defaultDiffIo, lineOverlapPredicate } from "../core/compare-data.js";
 import { filteredFiles, TEACH_MAX_LINES } from "../core/file-filter.js";
+import { repoForPath, type RepoCache } from "../core/repo-groups.js";
 import { teachLookup } from "../core/teach.js";
 import { buildLadder, calleeNames, collectImports, defaultTeachNeighbor, enclosingFunction, findDefinitionInText, isRelativeSpecifier, resolveRelativePath } from "../core/teach-ladder.js";
 import { gitFirstTouch } from "../core/git-diff.js";
@@ -667,7 +668,13 @@ async function handleApi(
     const files = fileIndex(records().list);
     const q = url.searchParams.get("q") ?? "";
     const shown = filteredFiles({ files, fquery: q });
-    return sendJson(response, 200, shown.map((f) => ({ path: f.path, count: f.count })));
+    // one cache per answer: the dash's files share the same few repo walks
+    const repos: RepoCache = new Map();
+    return sendJson(response, 200, await Promise.all(shown.map(async (f) => ({
+      path: f.path,
+      count: f.count,
+      repo: await repoForPath(f.path, repos),
+    }))));
   }
 
   if (pathname === "/api/file") {

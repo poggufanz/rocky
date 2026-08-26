@@ -645,11 +645,52 @@ main {
 /* the TUI names each pane in its box title; here it is a plain column head */
 .col-head {
   flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
   padding: 9px 12px;
   border-bottom: 1px solid var(--line);
   font: 500 11.5px/1.4 var(--sans);
   color: var(--dim);
 }
+
+/* a quieter settings-btn: it lives inside a column head, not the header bar */
+.repo-filter-btn {
+  flex: 0 0 auto;
+  padding: 3px 9px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--dim);
+  font: 500 11px var(--sans);
+  cursor: pointer;
+}
+.repo-filter-btn:hover { color: var(--body); border-color: var(--voice-dim); }
+.repo-filter-btn:active { transform: translateY(1px); }
+.repo-filter-btn.on { color: var(--voice); border-color: var(--voice-dim); }
+
+/* one checkbox row per heard repo; the count sits at the row's end */
+.repo-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-bottom: 14px;
+}
+.repo-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 5px 6px;
+  border-radius: 6px;
+  color: var(--body);
+  font: 12px var(--mono);
+  cursor: pointer;
+}
+.repo-row:hover { background: var(--ground); }
+.repo-row input { accent-color: var(--voice); }
+.repo-name { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.repo-count { flex: 0 0 auto; color: var(--dim); }
 
 /* search leads the column, the file list answers it directly below */
 .filter {

@@ -83,6 +83,20 @@
   </div>
 </div>
 
+<div id="repo-filter" class="modal" role="dialog" aria-modal="true" aria-labelledby="repo-filter-title" hidden>
+  <div class="modal-head">
+    <h2 id="repo-filter-title">Filter Repo</h2>
+    <button id="repo-filter-close" class="modal-x" type="button" aria-label="close">×</button>
+  </div>
+
+  <div id="repo-filter-list" class="repo-list"></div>
+
+  <div class="modal-foot">
+    <button id="repo-filter-reset" class="btn-quiet" type="button">Reset</button>
+    <button id="repo-filter-done" class="btn-voice" type="button">Done</button>
+  </div>
+</div>
+
 <main>
 
   <!-- Main -->
@@ -124,7 +138,11 @@
                  autocomplete="off" spellcheck="false">
         </label>
 
-        <div class="col-head"><span id="files-head">files</span></div>
+        <div class="col-head">
+          <span id="files-head">files</span>
+          <button id="repo-filter-btn" class="repo-filter-btn" type="button"
+                  aria-haspopup="dialog" aria-controls="repo-filter">Filter Repo</button>
+        </div>
         <div id="files" class="files" role="listbox" aria-label="files rocky heard"></div>
       </aside>
 
