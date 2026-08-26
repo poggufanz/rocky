@@ -27,6 +27,19 @@ export interface FileEntry {
   lastTs: number;
 }
 
+/**
+ * A heard-file entry must be a path, not a shell fragment. Agents sometimes
+ * pass `--files "$(echo src/a.ts | tr / '/')"` through a shell that never
+ * expands it; stored as-is, the dash lists a file that can never exist on
+ * disk. Reject the characters that mark that kind of fragment -- `$` backtick
+ * `()|<>\"` -- plus control characters. `'` stays: POSIX names may carry it.
+ */
+const SHELL_FRAGMENT = /[$`()|<>"]|[\u0000-\u001f\u007f-\u009f]/u;
+
+export function plausibleFilePath(path: string): boolean {
+  return path.trim().length > 0 && !SHELL_FRAGMENT.test(path);
+}
+
 export interface DiffRow {
   k: "@" | "h" | "+" | "-" | " " | "m" | "x";
   o?: number;
@@ -44,7 +57,7 @@ export function fileIndex(records: MemoryRecord[]): FileEntry[] {
   const filesMap = new Map<string, CompareRec[]>();
 
   const push = (filePath: string, rec: CompareRec): void => {
-    if (!filePath) return;
+    if (!plausibleFilePath(filePath)) return;
     const key = filePath.replace(/\\/g, "/");
     const existing = filesMap.get(key);
     if (existing) {
