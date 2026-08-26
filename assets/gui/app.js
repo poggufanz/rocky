@@ -715,16 +715,16 @@ document.addEventListener("keydown", (event) => {
 /* a record's full intent, opened beside the record it belongs to */
 
 function showIntent(record, anchor) {
-  const parts = [el("p", "card-head assembled", record.machine ? "intent · agent raw" : "intent")];
+  const parts = [el("p", "card-head assembled", record.machine ? "intent | Agent Raw" : "intent")];
 
   if (record.machine) {
     parts.push(el("p", "card-line", "machine note, not human words"));
-    const raw = el("button", "card-more", "show raw");
+    const raw = el("button", "card-more", "Show Raw");
     raw.type = "button";
     const rawText = el("p", "rung", record.intent ?? bodyText(record));
     raw.addEventListener("click", () => {
-      const open = raw.textContent === "hide raw";
-      raw.textContent = open ? "show raw" : "hide raw";
+      const open = raw.textContent === "Hide Raw";
+      raw.textContent = open ? "Show Raw" : "Hide Raw";
       if (open) rawText.remove();
       else pop.append(rawText);
     });
