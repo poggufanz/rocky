@@ -2,25 +2,17 @@
 
 Notable changes per release. Dates are the release date.
 
-## Local GUI replaces the terminal dashboard — unreleased
+## 0.8.0 — 27 August 2026
 
-`rocky` and `rocky dash` now open a page in your browser instead of drawing a terminal surface. The terminal dashboard is removed, not deprecated: its code and its 34 test files are gone, and there is no flag that reaches it.
+A major release introducing a local browser GUI to replace the terminal dashboard, teach mode with deterministic evidence ladders and witness record capture, and bounded secret scrubbing:
 
-- **One link, one route.** Both commands serve `/` on `127.0.0.1`; they differ only in which segment of a `Main | Dash` control starts active. Default port `7777`, any free port if that one is busy. `--no-open` prints the URL instead of launching a browser, `--port=<n>` picks the port. Foreground process, Ctrl-C stops it: no daemon, no port file.
-- **Why is a gesture, not a screen.** Select lines with the mouse in the Dash pane and a `Why, question` button appears; the answer opens as a small panel at the selection. A witness card is coloured, an assembled card is grey, and nothing else on the page may use that colour.
-- **Compare survives the move.** The two-moment comparison, the moment picker with its `strict · same lines` / `loose · whole file` toggle, and the per-file history all carried over as pane modes rather than separate screens.
-- **Security.** A fresh 128-bit token per launch, carried in the URL fragment so it never reaches a log or a `Referer`, and required on every API call. Requests with a foreign `Host` are refused, which is what stops DNS rebinding. File paths are confined to the launch repository. No CORS headers, no external font, script, or CDN: the page loads nothing from outside `127.0.0.1`.
-- **BYOK model help (beta, off by default).** Settings stores an optional OpenAI-compatible or Anthropic endpoint, key, and model. The key lives in `~/.rocky/gui.json` at mode `0600` and never enters the browser; the page is told only whether one exists. A model answer renders grey and labelled `Model Guess (Beta)`, never as evidence. Prompts pass through Rocky's usual secret redaction, are length-capped, and are limited to two in flight. **This is the first and only place a Rocky surface reaches a host that is not your machine, and it stays shut until you enter a key.**
-- **The model picker knows the catalogue.** The endpoint decides the provider, resolved against models.dev by longest matching base URL, and Model becomes a list of exactly what that endpoint serves under real names. An unrecognised endpoint offers nothing rather than a wrong list. The catalogue is cached weekly in `~/.rocky/models-dev.json` and fails open; it is the second host Rocky talks to, and `docs/reference.md` says so.
-- **Non-TTY is unchanged in spirit.** A browser needs a human, so piped `rocky` still prints usage help and piped `rocky dash` still prints the stats summary.
-
-## Teach mode — unreleased
-
-A new memory surface answering *why this code*: select a snippet, and Rocky returns a reason summary — the code shape's reason and the business concern it serves.
-- **Witness capture (`explain` records).** The agent states both halves itself, right after a Write/Edit/MultiEdit: `rocky hook agent-event <vendor> --explain-code "<why this code shape>" --explain-business "<what concern this serves>" --files <path>`. The PostToolUse capture lane spools the written hunk and the notify lane joins it into an append-only `explain` record — witness testimony from the writing AI, quoted as hearsay with source and age, keyed by hunk content (content hash exact, then token similarity), never by line numbers.
-- **Deterministic why-ladder on a miss.** With no witness, lookup assembles an evidence summary locally — construct catalog, enclosing function, callee definition, nearest comment, tests, and the first `git log -L` commit — capped at five hops and stopping the moment evidence runs out. Assembled answers are rendered, never stored, and never masquerade as witness testimony; lookup makes no network call.
-- **Three surfaces.** CLI `rocky teach <file>[:<line>] [--ladder]` (whole-file witness lookup, `--stdin` snippet matching, `--quiet`); bounded read-only MCP `teach_lookup` under the same sanitized projection as the other tools; and teach in the local GUI — pick a file, select lines with the mouse, and a why card opens at the selection with an expandable full ladder.
-- **Schema.** The `explain` record kind joins the envelope documented in `docs/schema.md`; both paragraphs and the hunk are redacted and byte-bounded at write time.
+- **Local browser GUI replaces terminal dashboard.** `rocky` and `rocky dash` open a local web page on `127.0.0.1` in your default browser. Both commands share one loopback server with `Main` and `Dash` tabs. Default port is `7777` with automatic port fallback and `--no-open`/`--port` options. Security controls enforce random 128-bit launch tokens in `X-Rocky-Token` headers, `Host` header verification against DNS rebinding, and path confinement to the launch repository.
+- **Visual teach cards and repository filtering.** Selecting code in the Dash pane displays a `Why, question` action to open an inline evidence popup. The Dash file tree groups files by repository root and supports search with exclusion patterns (`!pattern`). The comparison view supports side-by-side diffs, single-side swaps, and strict line or loose file matching.
+- **Optional BYOK model provider (beta).** Settings configures an optional OpenAI-compatible or Anthropic endpoint, key, and model. Keys are stored in `~/.rocky/gui.json` with `0600` permissions. Model responses are marked `Model Guess (Beta)` in grey with prompt redaction and concurrency limits. Models.dev catalog integration caches validated options weekly.
+- **Teach mode (`rocky teach`).** Inspects why specific code exists: `rocky teach <file>[:<line>] [--ladder] [--stdin] [--quiet]`. Authoring agents record rationale into append-only `explain` records (`--explain-code` and `--explain-business`). PostToolUse hooks spool written hunks, and notify hooks link them into memory.
+- **Deterministic why-ladder on cache miss.** When no witness record exists, Rocky walks local evidence (AST constructs, enclosing functions, callee definitions, adjacent comments, test references, git log commit history, and PSR-4 PHP `use` statements) up to five hops without disk writes.
+- **Eighth MCP tool (`teach_lookup`).** Bounded read-only sanitized MCP tool returning witness cards or assembled ladders.
+- **Path hygiene.** The `--files` parser discards shell fragments, operators, and invalid paths before saving records.
 
 ## 0.7.6 — 22 August 2026
 

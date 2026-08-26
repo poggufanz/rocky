@@ -149,7 +149,7 @@ command = "rocky"
 args = ["mcp"]
 ```
 
-Tools you get: `recall`, `search_knowledge`, `why_file`, `recent_failures`, `stats`, `fetch_record`. Use them **when relevant** — `recall` when a failure looks familiar, `why_file` when you need a file's history. Do not call them on every turn. Note for the human: a configured cloud host may forward selected projected content under that host's own policy.
+Tools you get: `recall`, `search_knowledge`, `why_file`, `teach_lookup`, `recent_failures`, `stats`, `fetch_record`, `recall_with_ai`. Use them **when relevant** — `recall` when a failure looks familiar, `why_file` when you need a file's history, `teach_lookup` when you need to inspect why specific code exists. Do not call them on every turn. Note for the human: a configured cloud host may forward selected projected content under that host's own policy.
 
 ## Step 6 — Every other harness: one universal bridge script *(human approval to save the file)*
 

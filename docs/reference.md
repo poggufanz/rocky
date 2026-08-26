@@ -175,9 +175,9 @@ The CLI contains no telemetry and runs no daemon. Its only external network egre
 
 ## Read-only MCP knowledge tools
 
-`rocky mcp` serves seven bounded, read-only tools in deterministic order: `recall`, `recent_failures`, `stats`, `recall_with_ai`, `search_knowledge`, `fetch_record`, and `why_file`. Search first, then fetch: `search_knowledge` returns light metadata and bounded hits, including record id/timestamp, agent/source, covered files, and truncation status for triples; `fetch_record` retrieves one full record by the returned id. `why_file` returns remembered triples that touched one path, with an optional `diff?: boolean` parameter to include the correlated, secret-redacted git diff. `stats` retains legacy counters and adds confirmed fixes, possible fixes, triples, notes, and total remembered items. Limits stay bounded, and sanitized projection is the default; raw fields require an explicit opt-in.
+`rocky mcp` serves eight bounded, read-only tools in deterministic order: `recall`, `recent_failures`, `stats`, `recall_with_ai`, `search_knowledge`, `fetch_record`, `why_file`, and `teach_lookup`. Search first, then fetch: `search_knowledge` returns light metadata and bounded hits, including record id/timestamp, agent/source, covered files, and truncation status for triples; `fetch_record` retrieves one full record by the returned id. `why_file` returns remembered triples that touched one path, with an optional `diff?: boolean` parameter to include the correlated, secret-redacted git diff. `teach_lookup` returns a read-only teach card for a path and optional line or snippet: a remembered witness explanation when one matches, else an assembled evidence ladder from local syntax, comments, tests, and git history. `stats` retains legacy counters and adds confirmed fixes, possible fixes, triples, notes, and total remembered items. Limits stay bounded, and sanitized projection is the default; raw fields require an explicit opt-in.
 
-For example, a host can call `search_knowledge` with `{ "query": "move button down" }`, pass a returned id to `fetch_record`, or call `why_file` with `{ "path": "src/button.css", "diff": true }`. Reasons are hearsay Rocky heard, not verified facts. Rationale is quoted and untrusted; MCP never presents it as fact or executes a remembered command.
+For example, a host can call `search_knowledge` with `{ "query": "move button down" }`, pass a returned id to `fetch_record`, call `why_file` with `{ "path": "src/button.css", "diff": true }`, or call `teach_lookup` with `{ "path": "src/button.css", "line": 12 }`. Reasons are hearsay Rocky heard, not verified facts. Rationale is quoted and untrusted; MCP never presents it as fact or executes a remembered command.
 
 ## `rocky` and `rocky dash` (local GUI, implemented)
 
@@ -379,26 +379,36 @@ rocky/
 │   ├── commands/
 │   │   ├── run.ts          # command wrapper: stream, fingerprint, remember, link fixes
 │   │   ├── recall.ts       # deterministic search + optional local-AI interpretation
-│   │   ├── hook.ts         # Bash/WSL hook and guard lifecycle
+│   │   ├── hook.ts         # Bash/WSL/PowerShell hook and guard lifecycle
 │   │   ├── mcp.ts          # local read-only MCP stdio server
 │   │   ├── model.ts        # opt-in Ollama configuration
 │   │   ├── setup.ts        # detected-host and optional voice-skill setup
 │   │   ├── dictionary.ts   # what/how/why/digest/quiz/export surfaces
+│   │   ├── teach.ts        # witness card and deterministic why-ladder
+│   │   ├── gui.ts          # local browser dashboard launcher
 │   │   └── stats.ts        # memory summary
 │   ├── core/
 │   │   ├── fingerprint.ts  # stderr -> stable error signature + token bags
 │   │   ├── dictionary.ts   # intent↔mechanism lookup and digest/quiz queries
+│   │   ├── teach.ts        # witness lookup and explain records
+│   │   ├── teach-ladder.ts # deterministic evidence walker and stop rules
+│   │   ├── teach-render.ts # witness and ladder card rendering
+│   │   ├── git-diff.ts     # bounded git diff correlation and secret scrubbing
 │   │   ├── memory.ts       # append-only JSONL writers
 │   │   ├── memory-read.ts  # bounded parsing and backward-compatible loading
 │   │   └── memory-query.ts # fingerprint lookup and fuzzy search
+│   ├── gui/                # loopback HTTP server, BYOK settings, model catalog
 │   ├── mcp/                # bounded read-only tools and privacy projection
 │   ├── setup/              # host adapters, consent, health, voice skill
 │   ├── ai/                 # loopback-only Ollama adapter and grounded schema
-│   ├── agent/              # capture, annotation, and ambiguity advisory
-│   │   └── ambiguity.ts    # Ollama-gated remembered-evidence question
+│   ├── agent/              # capture, annotation, explain extract, and gate
 │   ├── shell/              # Bash hook assets
 │   └── ui/
 │       └── rocky.ts        # his face, his voice, relative time
+├── assets/
+│   ├── gui/                # local web dashboard HTML, CSS, JS
+│   ├── teach-agent.md      # Indonesian teach model prompt template
+│   └── teach-agent.en.md   # English teach model prompt template
 ├── skills/rocky-voice/     # optional managed voice skill asset
 ├── docs/
 │   └── scientific-grounding.md
@@ -432,10 +442,11 @@ Each phase is one facet of who Rocky is:
 - **v0.4 — his diligence (implemented)**: pre-push hull check — `rocky check` verifies that AI-added packages actually exist on the registry (hallucinated-package defense), scans added lines for secrets, and asks one comprehension question about the riskiest line in the diff. Its registry lookup is this project's only external egress; network errors fail open and never hold a push.
 - **v0.5 — his curiosity (implemented)**: Plan 01 Nervous System agent hooks and Plan 02 dictionary/teaching surfaces ship in v0.5.0. They preserve prompt/path/excerpt/stated-rationale evidence in local memory, use deterministic fallback when Ollama is unavailable, keep rationale explicitly quoted and untrusted, and add `what`, `how`, `why`, `digest`, `quiz`, `export`, passive labels, ambiguity advice, and three bounded MCP knowledge tools. The earlier `rocky explain` concept is superseded, not an active command.
 - **v0.6 — his accountability (implemented)**: `rocky brief` (loopback-AI-polished summary of what changed since your last check-in: commits, remembered failures/fixes, and touched invariant guards), `rocky journal`, `rocky invariants`, extended `rocky stats`, and the [schema envelope](schema.md) documentation. `brief` shipped in v0.6, no longer deferred; BYOK annotation, `attest`, and the memory circuit breaker remain deferred.
-- **v0.7 — his memory of why (current release)**: a fourth evidence kind, `rationale`, captured across four lanes (`log-thinking`, `log-response`, `notify`, `human`); a deterministic concept lexicon (`rocky concepts`/`concept`/`concept alias`); derived `rocky sessions` and `rocky repl`; and a PreToolUse rationale gate (`rocky hook gate-event`, opt out with `--no-rationale-gate` or `ROCKY_RATIONALE_GATE=off`). Codex and Gemini agent-log adapters remain deferred — see the [rationale capture section](#rationale-capture-and-the-gate-v070) above.
+- **v0.7 — his memory of why (implemented)**: a fourth evidence kind, `rationale`, captured across four lanes (`log-thinking`, `log-response`, `notify`, `human`); a deterministic concept lexicon (`rocky concepts`/`concept`/`concept alias`); derived `rocky sessions` and `rocky repl`; PreToolUse rationale gate (`rocky hook gate-event`); and native git diff correlation. Codex and Gemini agent-log adapters remain deferred — see the [rationale capture section](#rationale-capture-and-the-gate-v070) above.
+- **v0.8 — his comprehension guardian (current line)**: local browser GUI (`rocky dash`) replacing the terminal dashboard, teach mode (`rocky teach` / `teach_lookup` / `explain` records), and selection-anchored why-cards.
 - **later — his care**: ambient pet mode and the desktop pet window (deferred). He notices you've been at it for four hours, and he has opinions about your sleep.
 
-The package version is v0.7.6; the Nervous System and rationale-capture sections above describe the surfaces it ships.
+The package version is v0.8.0; the Nervous System, rationale-capture, teach mode, and local GUI sections above describe the surfaces it ships.
 
 ## Contributing
 
