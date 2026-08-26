@@ -117,9 +117,9 @@ export function deriveHome(
     .slice(0, 10)
     .map(([name, count]) => ({ name, count }));
 
-  // Recent 8 records
+  // Recent records: enough that Main's list reads as a pulse, not a stub
   const sorted = [...records].sort((a, b) => (b.ts ?? 0) - (a.ts ?? 0));
-  const recent = sorted.slice(0, 8).map((r) => adaptHit(r, now));
+  const recent = sorted.slice(0, 14).map((r) => adaptHit(r, now));
 
   return {
     total,

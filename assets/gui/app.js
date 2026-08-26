@@ -304,12 +304,19 @@ async function loadMain() {
   const kind = el("span", "latest-kind", newest.kind);
   if (WHY_KINDS.has(newest.kind)) kind.classList.add("why");
   meta.append(kind, el("span", "latest-ago", newest.agoText));
-  fill(
-    $("#latest"),
+
+  // Rocky stands beside what he last heard: the face makes the anchor his,
+  // and the whole hero rises in one short stagger so the eye lands in order.
+  const face = el("pre", "latest-face", FACE.join("\n"));
+  face.setAttribute("aria-hidden", "true");
+  const body = box(
+    "latest-body",
     el("div", "latest-eyebrow", "Last Heard"),
     el("p", "latest-line", newest.label),
     meta,
   );
+  [face, body].forEach((node, index) => node.style.setProperty("--i", String(index)));
+  fill($("#latest"), face, body);
 
   // The same line arriving twice is a repeat, not two things to read. It is
   // stacked rather than hidden: the count says how many rocky actually heard.
@@ -322,8 +329,9 @@ async function loadMain() {
 
   fill(
     $("#recent"),
-    ...stacked.slice(1).map(({ hit, count }) => {
+    ...stacked.slice(1).map(({ hit, count }, index) => {
       const row = el("div", "recent-row");
+      row.style.setProperty("--i", String(index + 2));
       const rowKind = el("span", "recent-kind", hit.kind);
       if (WHY_KINDS.has(hit.kind)) rowKind.classList.add("why");
       const label = el("span", "recent-label", hit.label);
@@ -334,7 +342,7 @@ async function loadMain() {
   );
 
   const twin = stacked[0].count;
-  if (twin > 1) $("#latest").append(el("span", "latest-count", `heard ×${twin}`));
+  if (twin > 1) meta.append(el("span", "latest-count", `heard ×${twin}`));
 }
 
 /* ---- dash: picker ----------------------------------------------------- */
@@ -1153,16 +1161,16 @@ async function askWhy(start, end, at) {
   parts.push(el("div", "card-ev", data.evidence));
 
   if (data.expandable && (data.rungs ?? []).length > 0) {
-    const more = el("button", "card-more", "show rungs");
+    const more = el("button", "card-more", "Show Rungs");
     more.type = "button";
     // the core writes "why 1 …"; here they are numbered steps under a caption
     const rungs = [
-      el("p", "rung-note", "Steps Rocky walked from the code to a reason. Each cites where it came from."),
-      ...data.rungs.map((rung) => el("p", "rung", rung.replace(/^why (d+)/, "#$1"))),
+      el("p", "rung-note", "Steps Rocky walked from the code to a reason. They exist so the reason is a chain you can check, not one jump you have to trust. Each cites where it came from."),
+      ...data.rungs.map((rung) => el("p", "rung", rung.replace(/^why (\d+)/, "#$1"))),
     ];
     more.addEventListener("click", () => {
-      const open = more.textContent === "hide rungs";
-      more.textContent = open ? "show rungs" : "hide rungs";
+      const open = more.textContent === "Hide Rungs";
+      more.textContent = open ? "Show Rungs" : "Hide Rungs";
       if (open) for (const rung of rungs) rung.remove();
       else pop.append(...rungs);
     });
