@@ -133,6 +133,90 @@ function readNeighborFile(neighbor: (relPath: string) => string | undefined, rel
 /** Test files live under a handful of names across ecosystems. */
 const TEST_FILE_RE = /(?:\.test\.[tj]s|\.spec\.[tj]s|Test\.php)$/;
 
+/** A PHP `use` line, as the pack reads it: the short name the code mentions
+ *  and the class it points at. Grouped uses (`use App\{A, B}`) stay unparsed. */
+interface PhpUse {
+  name: string;
+  fqcn: string;
+}
+
+function collectPhpUses(text: string): PhpUse[] {
+  const out: PhpUse[] = [];
+  const re = /^\s*use\s+([A-Za-z0-9_\\]+)(?:\s+as\s+([A-Za-z0-9_]+))?\s*;/gm;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text)) !== null) {
+    const fqcn = m[1] ?? "";
+    if (fqcn.includes("{")) continue;
+    out.push({ name: m[2] ?? fqcn.split("\\").pop() ?? fqcn, fqcn });
+  }
+  return out;
+}
+
+/**
+ * PSR-4 resolution: the nearest composer.json above the file maps namespace
+ * prefixes to directories; without one, the App/ and Tests/ conventions carry
+ * Laravel-shaped projects. Bounded read, a miss is a miss, never an error.
+ */
+function resolvePhpClass(full: string, fqcn: string): { path: string; content: string } | undefined {
+  let dir = dirname(full);
+  let prefixes: Record<string, string> = {};
+  for (let up = 0; up < 6; up += 1) {
+    const composerPath = join(dir, "composer.json");
+    if (existsSync(composerPath)) {
+      try {
+        const composer = JSON.parse(readFileSync(composerPath, "utf8")) as {
+          autoload?: { ["psr-4"]?: Record<string, string | string[]> };
+          ["autoload-dev"]?: { ["psr-4"]?: Record<string, string | string[]> };
+        };
+        for (const section of [composer.autoload?.["psr-4"], composer["autoload-dev"]?.["psr-4"]]) {
+          for (const [prefix, target] of Object.entries(section ?? {})) {
+            prefixes[prefix.replace(/\\+$/, "")] = Array.isArray(target) ? target[0] ?? "" : target;
+          }
+        }
+      } catch {
+        // a composer.json that will not parse falls through to conventions
+      }
+      break;
+    }
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  if (Object.keys(prefixes).length === 0) prefixes = { App: "app/", Tests: "tests/" };
+
+  const match = Object.keys(prefixes)
+    .sort((a, b) => b.length - a.length)
+    .find((prefix) => fqcn === prefix || fqcn.startsWith(`${prefix}\\`));
+  if (match === undefined) return undefined;
+  const rel = `${prefixes[match]}${fqcn.slice(match.length + 1).replace(/\\/g, "/")}.php`;
+  const candidate = resolve(dir, rel);
+  try {
+    const info = statSync(candidate);
+    if (!info.isFile() || info.size > 64 * 1024) return undefined;
+    return { path: rel.replace(/\\/g, "/"), content: readFileSync(candidate, "utf8") };
+  } catch {
+    return undefined;
+  }
+}
+
+/** Where a PHP class or one of its methods is declared, for the pack to quote. */
+function phpDefinition(
+  name: string,
+  text: string,
+): { line: number; kind: "class" | "method" } | undefined {
+  const n = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const lines = text.split(/\r?\n/);
+  const classRe = new RegExp(`^\\s*(?:abstract\\s+|final\\s+)?(?:class|interface|trait|enum)\\s+${n}\\b`);
+  for (let i = 0; i < lines.length; i += 1) {
+    if (classRe.test(lines[i] ?? "")) return { line: i + 1, kind: "class" };
+  }
+  const methodRe = new RegExp(`^\\s*(?:public|protected|private|static|final|abstract|\\s)*function\\s+${n}\\s*\\(`);
+  for (let i = 0; i < lines.length; i += 1) {
+    if (methodRe.test(lines[i] ?? "")) return { line: i + 1, kind: "method" };
+  }
+  return undefined;
+}
+
 /**
  * The ask model has no eyes, so rocky digs for it, selection-first and in a
  * written order: the selection itself, the function enclosing it (or the whole
@@ -188,18 +272,25 @@ function evidencePack(full: string, rel: string, start: number, end: number): st
     }
 
     // the symbols the selection actually uses: calls, plus imported names that
-    // appear in it -- their definitions open, never a whole neighbour file
+    // appear in it -- their definitions open, never a whole neighbour file.
+    // php names its neighbours in use statements instead of imports.
     const imports = collectImports(fileText);
     const symbols = [...calleeNames(selection)];
+    const wordIn = (name: string): boolean =>
+      new RegExp(`\\b${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`).test(selection);
     for (const imp of imports) {
       for (const name of imp.names) {
-        if (!symbols.includes(name) && new RegExp(`\\b${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`).test(selection)) {
-          symbols.push(name);
-        }
+        if (!symbols.includes(name) && wordIn(name)) symbols.push(name);
       }
+    }
+    const php = rel.endsWith(".php");
+    const phpUses = php ? collectPhpUses(fileText) : [];
+    for (const use of phpUses) {
+      if (!symbols.includes(use.name) && wordIn(use.name)) symbols.push(use.name);
     }
 
     const neighbor = defaultTeachNeighbor(full);
+    const phpResolved: Array<{ path: string; content: string }> = [];
     let defs = 0;
     for (const name of symbols) {
       if (defs >= PACK_DEF_MAX) break;
@@ -212,17 +303,67 @@ function evidencePack(full: string, rel: string, start: number, end: number): st
         continue;
       }
       const imp = imports.find((i) => i.names.includes(name));
-      if (imp === undefined || !isRelativeSpecifier(imp.specifier)) continue;
-      const neighborRel = resolveRelativePath(full, imp.specifier);
-      const content = readNeighborFile(neighbor, neighborRel);
-      if (content === undefined) continue;
-      const found = findDefinitionInText(name, content);
-      if (found === undefined) continue;
-      const neighborLines = content.split(/\r?\n/);
-      const from = Math.max(0, found.line - 2);
-      const body = `${found.jsdoc !== undefined ? `${found.jsdoc}\n` : ""}${neighborLines.slice(from, found.line + 6).join("\n")}`;
-      addBlock(`=== definition ${name} (${neighborRel}:${found.line}) ===`, body, PACK_DEF_CHARS);
-      defs += 1;
+      if (imp !== undefined && isRelativeSpecifier(imp.specifier)) {
+        const neighborRel = resolveRelativePath(full, imp.specifier);
+        const content = readNeighborFile(neighbor, neighborRel);
+        if (content === undefined) continue;
+        const found = findDefinitionInText(name, content);
+        if (found === undefined) continue;
+        const neighborLines = content.split(/\r?\n/);
+        const from = Math.max(0, found.line - 2);
+        const body = `${found.jsdoc !== undefined ? `${found.jsdoc}\n` : ""}${neighborLines.slice(from, found.line + 6).join("\n")}`;
+        addBlock(`=== definition ${name} (${neighborRel}:${found.line}) ===`, body, PACK_DEF_CHARS);
+        defs += 1;
+        continue;
+      }
+      if (php) {
+        const use = phpUses.find((u) => u.name === name);
+        if (use === undefined) continue;
+        const resolved = resolvePhpClass(full, use.fqcn);
+        if (resolved === undefined) continue;
+        phpResolved.push(resolved);
+        const def = phpDefinition(name, resolved.content);
+        if (def === undefined) continue;
+        const phpLines = resolved.content.split(/\r?\n/);
+        const from = Math.max(0, def.line - 2);
+        addBlock(
+          `=== definition ${name} (${resolved.path}:${def.line}) ===`,
+          phpLines.slice(from, def.line + 8).join("\n"),
+          PACK_DEF_CHARS,
+        );
+        defs += 1;
+      }
+    }
+
+    // php member calls name methods; their definitions sit in this file or in
+    // a class a use statement already resolved above
+    if (php) {
+      const methodRe = /(?:->|::)\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(/g;
+      const methods: string[] = [];
+      let mm: RegExpExecArray | null;
+      while ((mm = methodRe.exec(selection)) !== null) {
+        const name = mm[1] ?? "";
+        if (!methods.includes(name)) methods.push(name);
+      }
+      for (const method of methods) {
+        if (defs >= PACK_DEF_MAX) break;
+        const inFile = phpDefinition(method, fileText);
+        if (inFile !== undefined) {
+          const from = Math.max(0, inFile.line - 2);
+          addBlock(`=== definition ${method} (${rel}:${inFile.line}) ===`, lines.slice(from, inFile.line + 8).join("\n"), PACK_DEF_CHARS);
+          defs += 1;
+          continue;
+        }
+        for (const f of phpResolved) {
+          const def = phpDefinition(method, f.content);
+          if (def === undefined) continue;
+          const phpLines = f.content.split(/\r?\n/);
+          const from = Math.max(0, def.line - 2);
+          addBlock(`=== definition ${method} (${f.path}:${def.line}) ===`, phpLines.slice(from, def.line + 8).join("\n"), PACK_DEF_CHARS);
+          defs += 1;
+          break;
+        }
+      }
     }
 
     // the nearest comment above the selection often carries the why verbatim

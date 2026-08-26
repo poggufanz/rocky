@@ -350,6 +350,56 @@ test("the ask digs the file and its imports before forwarding", async () => {
   }
 });
 
+test("the ask digs a php neighbour through psr-4", async () => {
+  const { root } = hermetic();
+  mkdirSync(join(root, "app", "Http", "Controllers"), { recursive: true });
+  mkdirSync(join(root, "app", "Services"), { recursive: true });
+  writeFileSync(join(root, "composer.json"), JSON.stringify({ autoload: { "psr-4": { "App\\": "app/" } } }));
+  writeFileSync(
+    join(root, "app", "Http", "Controllers", "A.php"),
+    ["<?php", "namespace App\\Http\\Controllers;", "use App\\Services\\B;", "class A {", "    public function handle() {", "        $b = new B();", "        $b->close();", "    }", "}", ""].join("\n"),
+  );
+  writeFileSync(
+    join(root, "app", "Services", "B.php"),
+    ["<?php", "namespace App\\Services;", "class B {", "    public function close() {", "        // marker-in-b-close", "    }", "}", ""].join("\n"),
+  );
+
+  let seen = "";
+  const provider: Server = createServer(async (req, res) => {
+    let raw = "";
+    for await (const chunk of req) raw += chunk;
+    seen = JSON.parse(raw).messages[0].content;
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ choices: [{ message: { content: "ok" } }] }));
+  });
+  await new Promise<void>((up) => provider.listen(0, "127.0.0.1", () => up()));
+  const providerPort = (provider.address() as { port: number }).port;
+
+  try {
+    await withGui(root, async (h) => {
+      await json(h, "/api/settings", {
+        method: "POST",
+        body: JSON.stringify({
+          provider: "openai",
+          endpoint: `http://127.0.0.1:${providerPort}/v1/chat/completions`,
+          model: "m",
+          key: "sk-test",
+        }),
+      });
+
+      const answer = await json(h, "/api/ask", {
+        method: "POST",
+        body: JSON.stringify({ prompt: "why", path: "app/Http/Controllers/A.php", start: 6, end: 7 }),
+      });
+      assert.equal(answer.status, 200);
+      assert.ok(seen.includes("=== definition B (app/Services/B.php"), "the psr-4 neighbour class did not ride the ask");
+      assert.ok(seen.includes("marker-in-b-close"), "the neighbour method did not ride the ask");
+    });
+  } finally {
+    await new Promise<void>((down) => provider.close(() => down()));
+  }
+});
+
 test("the prompt is redacted before it leaves the machine", async () => {
   const { root } = hermetic();
   let seen = "";
