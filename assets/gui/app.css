@@ -1128,24 +1128,77 @@ main {
 .pop > .empty { padding: 0; }
 
 /* A guess sits apart from what rocky heard, and never borrows the voice
-   colour. Grey is the whole point: this part is not evidence. */
+   colour. Grey is the whole point: this part is not evidence. The dashed
+   rule on the left says the same thing spatially. */
 .guess {
   margin-top: 14px;
-  padding-top: 12px;
+  padding: 12px 0 2px 12px;
   border-top: 1px dashed var(--line);
+  border-left: 2px solid var(--line);
 }
 .guess-head {
-  margin: 0 0 8px;
+  margin: 0 0 10px;
   color: var(--dim);
-  font: 500 11.5px var(--sans);
+  font: 500 10.5px var(--sans);
+  letter-spacing: .1em;
+  text-transform: uppercase;
 }
 .guess-body {
-  margin: 0;
+  margin: 0 0 9px;
   color: var(--body);
+  font-size: 12.5px;
+  line-height: 1.65;
   overflow-wrap: anywhere;
 }
+.guess-body:last-of-type { margin-bottom: 0; }
 .guess .listen { padding: 22px 0; }
 .guess .card-ev { margin-top: 10px; }
+
+/* the teach shape, given rows of its own: cup and source are provenance,
+   a track label opens a lane, a why carries its number, stop closes softly */
+.guess-cup {
+  margin: 0 0 10px;
+  color: var(--dim);
+  font: 11px/1.4 var(--mono);
+  overflow-wrap: anywhere;
+}
+.guess-track {
+  margin: 12px 0 6px;
+  color: var(--bright);
+  font: 600 10.5px var(--sans);
+  letter-spacing: .14em;
+}
+.guess-why {
+  display: grid;
+  grid-template-columns: 26px minmax(0, 1fr);
+  gap: 8px;
+  margin: 0 0 6px;
+  color: var(--body);
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+.guess-num { color: var(--dim); font: 11px/1.7 var(--mono); }
+.guess-stop {
+  margin: 2px 0 4px 34px;
+  color: var(--dim);
+  font-size: 12px;
+  font-style: italic;
+  line-height: 1.6;
+}
+.guess-src {
+  margin: 10px 0 0;
+  color: var(--dim);
+  font: 11px/1.4 var(--mono);
+}
+.guess-warn {
+  margin: 10px 0 0;
+  padding: 8px 10px;
+  border: 1px dashed var(--voice-dim);
+  border-radius: 6px;
+  color: var(--body);
+  font-size: 12px;
+  line-height: 1.6;
+}
 .empty p { margin: 0 0 6px; }
 .empty p:last-child { margin: 0; }
 /* an empty line keeps the blank row the TUI leaves between the two sentences */

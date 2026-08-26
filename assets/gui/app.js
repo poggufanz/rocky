@@ -1091,13 +1091,46 @@ async function askModel(anchor, prompt, keep) {
     return;
   }
 
+  const paragraphs = guessNodes(answer.text || answer.error || "model said nothing.");
   const guess = box(
     "guess",
     el("p", "guess-head", "Model Guess (Beta)"),
-    el("p", "guess-body", answer.text || answer.error || "model said nothing."),
+    ...paragraphs,
     el("div", "card-ev", `guessed by ${settings.model}. not evidence. cross check`),
   );
   openPop(anchor, ...keep, guess);
+}
+
+/**
+ * The model is bound to the teach shape, so its answer is read as one:
+ * CUPINGAN heads it, KODE and BISNIS open tracks, why rows carry their
+ * number, stop closes a track, SUMBER and DISCLAIMER sign off. An answer
+ * that ignores the shape falls back to plain paragraphs, two sentences each.
+ */
+function guessNodes(text) {
+  const lines = String(text).split(/\r?\n/);
+  const shaped = lines.some((line) => /^\s*(KODE|BISNIS)\s*$/.test(line));
+  if (!shaped) {
+    const sentences = String(text).trim().replace(/([.!?]+)\s+/g, "$1\n").split("\n").filter(Boolean);
+    const paragraphs = [];
+    for (let i = 0; i < sentences.length; i += 2) paragraphs.push(sentences.slice(i, i + 2).join(" "));
+    return paragraphs.filter(Boolean).map((para) => el("p", "guess-body", para));
+  }
+
+  const nodes = [];
+  for (const raw of lines) {
+    const line = raw.trim();
+    if (!line) continue;
+    const why = line.match(/^why\s+(\d+)[.:]?\s*(.*)$/i);
+    if (/^CUPINGAN\b/.test(line)) nodes.push(el("p", "guess-cup", line.replace(/^CUPINGAN\s*/, "")));
+    else if (/^(KODE|BISNIS)\s*$/.test(line)) nodes.push(el("p", "guess-track", line));
+    else if (why) nodes.push(box("guess-why", el("span", "guess-num", `#${why[1]}`), el("span", null, why[2])));
+    else if (/^stop\b/i.test(line)) nodes.push(el("p", "guess-stop", line.replace(/^stop\s*/i, "")));
+    else if (/^SUMBER\b/.test(line)) nodes.push(el("p", "guess-src", line.replace(/^SUMBER\s*/, "")));
+    else if (/^DISCLAIMER\b/.test(line)) nodes.push(el("p", "guess-warn", line.replace(/^DISCLAIMER[:\s]*/i, "")));
+    else nodes.push(el("p", "guess-body", line));
+  }
+  return nodes;
 }
 
 /** Adds the ask control, but only once BYOK is actually configured. */
@@ -1148,7 +1181,7 @@ async function askWhy(start, end, at) {
     openPop(anchor, ...withAsk(
       anchor,
       bare,
-      `Why is this code written this way? Rocky has no recorded reason for it.\n\n${askedAbout}\n\nAnswer in two or three sentences. Say plainly if you cannot tell from the code alone.`,
+      `Why is this code written this way? Rocky has no recorded reason for it.\n\n${askedAbout}\n\nFollow the rules and shape you were given. Ground every claim in the code quoted above, and say plainly if you cannot tell from the code alone.`,
     ));
     return;
   }
@@ -1183,8 +1216,8 @@ async function askWhy(start, end, at) {
     anchor,
     parts,
     `Rocky recorded this about the code below:\n\n${held}\n\n${askedAbout}\n\n` +
-      "Explain what that recorded reason means for this code, in two or three sentences. " +
-      "Do not invent history rocky did not record.",
+      "Explain what that recorded reason means for this code, following the rules and shape you were given. " +
+      "Do not invent history rocky did not record; the record's labels (KODE, BISNIS, why 1, stop) are yours to use, not to quote as prose.",
     true,
   ));
 }
@@ -1197,7 +1230,7 @@ async function askWhy(start, end, at) {
  */
 
 // The key lives in rocky home, never here. `hasKey` is all the page is told.
-const settings = { provider: "openai", endpoint: "", model: "", hasKey: false };
+const settings = { provider: "openai", endpoint: "", model: "", lang: "id", hasKey: false };
 
 async function pullSettings() {
   try {
@@ -1224,6 +1257,7 @@ async function pushSettings(patch) {
 function paintSettings() {
   $("#set-key").value = "";
   $("#set-key").placeholder = settings.hasKey ? "key saved. type to replace" : "";
+  $("#set-lang").value = settings.lang;
 }
 
 async function openSettings() {
@@ -1257,6 +1291,7 @@ $("#settings-save").addEventListener("click", () => {
     provider: settings.provider,
     endpoint: currentEndpoint(),
     model: $("#set-model").value,
+    lang: $("#set-lang").value,
     // an untouched field leaves the stored key alone rather than erasing it
     ...(typed ? { key: typed } : {}),
   });

@@ -43,10 +43,12 @@ const MAX_ASK_IN_FLIGHT = 2;
 let askInFlight = 0;
 
 /**
- * The rules every BYOK answer is bound by, prepended here rather than in the
- * page so a browser cannot drop them.
+ * The fallback rules every BYOK answer is bound by when the spec file is not
+ * on disk, prepended here rather than in the page so a browser cannot drop
+ * them.
  *
- * Ported from the owner's teach agent spec, minus every instruction that
+ * Ported from the owner's teach agent spec (assets/teach-agent.md), minus
+ * every instruction that
  * needs a tool. This model has no shell, no git, and no filesystem: it sees
  * the snippet and whatever Rocky already holds, and nothing else. Telling it
  * to walk five hops and cite `git log -L` would only teach it to invent
@@ -85,6 +87,38 @@ const TEACH_RULES = [
 ].join("\n");
 
 const ASSET_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "assets", "gui");
+
+/** The owner's spec, whole, next to the dash assets so the package ships it. */
+const TEACH_SPEC_CAP_BYTES = 64 * 1024;
+const teachSpec: Partial<Record<"id" | "en", string | null>> = {};
+
+/**
+ * teach-agent.md is the system prompt, read whole at request time (cached
+ * after the first read) so editing the file edits the investigator. The
+ * settings pick the language: id reads teach-agent.md, en its english twin.
+ * The spec assumes tools this model does not have, so an environment note
+ * rides ahead of it; where the spec says walk hops with a shell, the model
+ * works only from the quoted evidence. TEACH_RULES stays as the fallback for
+ * a spec that is not on disk.
+ */
+const TEACH_ENV = [
+  "Environment note for this run: you have no shell, no git, no database and no filesystem.",
+  "Where the spec below tells you to read files or run commands, work only from the evidence",
+  "quoted after the rules instead, and cite that. Never claim you ran anything.",
+].join("\n");
+
+function loadTeachSpec(lang: "id" | "en"): string {
+  if (teachSpec[lang] === undefined) {
+    try {
+      const path = resolve(ASSET_ROOT, "..", lang === "en" ? "teach-agent.en.md" : "teach-agent.md");
+      const raw = readFileSync(path, "utf8");
+      teachSpec[lang] = Buffer.byteLength(raw) <= TEACH_SPEC_CAP_BYTES ? raw : null;
+    } catch {
+      teachSpec[lang] = null;
+    }
+  }
+  return teachSpec[lang] ?? TEACH_RULES;
+}
 
 const TYPES: Record<string, string> = {
   ".html": "text/html; charset=utf-8",
@@ -212,7 +246,7 @@ async function ask(body: Record<string, unknown>): Promise<{ status: number; pay
     raw.length > MAX_PROMPT_CHARS ? `${raw.slice(0, MAX_PROMPT_CHARS)}\n… cut, prompt long` : raw,
   );
   // the rules ride here, not in the page, so a browser cannot drop them
-  const prompt = `${TEACH_RULES}\n\n---\n\n${asked}`;
+  const prompt = `${TEACH_ENV}\n\n${loadTeachSpec(stored.lang)}\n\n---\n\n${asked}`;
 
   const anthropic = endpoint.includes("/v1/messages");
   const headers: Record<string, string> = { "Content-Type": "application/json" };

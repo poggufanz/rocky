@@ -271,6 +271,42 @@ test("ask refuses before a key is stored", async () => {
   });
 });
 
+test("the ask rides the english spec when the settings say en", async () => {
+  const { root } = hermetic();
+  let seen = "";
+  const provider: Server = createServer(async (req, res) => {
+    let raw = "";
+    for await (const chunk of req) raw += chunk;
+    seen = JSON.parse(raw).messages[0].content;
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ choices: [{ message: { content: "ok" } }] }));
+  });
+  await new Promise<void>((up) => provider.listen(0, "127.0.0.1", () => up()));
+  const providerPort = (provider.address() as { port: number }).port;
+
+  try {
+    await withGui(root, async (h) => {
+      await json(h, "/api/settings", {
+        method: "POST",
+        body: JSON.stringify({
+          provider: "openai",
+          endpoint: `http://127.0.0.1:${providerPort}/v1/chat/completions`,
+          model: "m",
+          key: "sk-test",
+          lang: "en",
+        }),
+      });
+
+      const answer = await json(h, "/api/ask", { method: "POST", body: JSON.stringify({ prompt: "why" }) });
+      assert.equal(answer.status, 200);
+      assert.ok(seen.includes("Output language: English."), "the english spec did not ride the ask");
+      assert.ok(!seen.includes("Output language: Indonesian."), "the wrong spec rode the ask");
+    });
+  } finally {
+    await new Promise<void>((down) => provider.close(() => down()));
+  }
+});
+
 test("the prompt is redacted before it leaves the machine", async () => {
   const { root } = hermetic();
   let seen = "";
@@ -302,6 +338,9 @@ test("the prompt is redacted before it leaves the machine", async () => {
       });
       assert.equal(answer.status, 200);
       assert.ok(!seen.includes("ghp_AAAABBBBCCCCDDDDEEEEFFFFGGGGHHHH1234"), "the secret reached the provider");
+      // the whole spec rides with every ask, so editing the file edits the investigator
+      assert.ok(seen.includes("Teach investigator"), "the teach spec did not reach the provider");
+      assert.ok(seen.includes("HARD STOP"), "the teach spec did not reach the provider whole");
     });
   } finally {
     await new Promise<void>((down) => provider.close(() => down()));

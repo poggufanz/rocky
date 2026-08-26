@@ -32,6 +32,8 @@ const expectedFiles = [
   "dist/shell",
   "dist/gui",
   "assets/gui",
+  "assets/teach-agent.md",
+  "assets/teach-agent.en.md",
   "skills/rocky-voice",
   "README.md",
   "LICENSE",
@@ -102,6 +104,8 @@ function allowedPackPath(path: string): boolean {
     || path.startsWith("dist/shell/")
     || path.startsWith("dist/gui/")
     || path.startsWith("assets/gui/")
+    || path === "assets/teach-agent.md"
+    || path === "assets/teach-agent.en.md"
     || path === "skills/rocky-voice/SKILL.md"
     || path === "skills/rocky-voice/agents/openai.yaml";
 }

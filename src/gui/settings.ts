@@ -13,6 +13,8 @@ export interface GuiSettings {
   endpoint: string;
   model: string;
   key: string;
+  /** The teach spec's output language: id reads teach-agent.md, en its twin. */
+  lang: "id" | "en";
 }
 
 /** What the page is allowed to see: everything except the secret itself. */
@@ -20,10 +22,11 @@ export interface PublicSettings {
   provider: GuiSettings["provider"];
   endpoint: string;
   model: string;
+  lang: GuiSettings["lang"];
   hasKey: boolean;
 }
 
-const EMPTY: GuiSettings = { provider: "openai", endpoint: "", model: "", key: "" };
+const EMPTY: GuiSettings = { provider: "openai", endpoint: "", model: "", key: "", lang: "id" };
 
 export function settingsPath(env: NodeJS.ProcessEnv = process.env): string {
   return join(resolveRockyPaths(env).home, "gui.json");
@@ -37,6 +40,7 @@ export function readSettings(env: NodeJS.ProcessEnv = process.env): GuiSettings 
       endpoint: typeof parsed.endpoint === "string" ? parsed.endpoint : "",
       model: typeof parsed.model === "string" ? parsed.model : "",
       key: typeof parsed.key === "string" ? parsed.key : "",
+      lang: parsed.lang === "en" ? "en" : "id",
     };
   } catch {
     // no file, unreadable file, bad json: an unset config, not an error
@@ -49,6 +53,7 @@ export function publicSettings(settings: GuiSettings): PublicSettings {
     provider: settings.provider,
     endpoint: settings.endpoint,
     model: settings.model,
+    lang: settings.lang,
     hasKey: settings.key.length > 0,
   };
 }
@@ -68,6 +73,7 @@ export function writeSettings(
     endpoint: typeof patch.endpoint === "string" ? patch.endpoint : current.endpoint,
     model: typeof patch.model === "string" ? patch.model : current.model,
     key: typeof patch.key === "string" ? patch.key : current.key,
+    lang: patch.lang === "en" ? "en" : patch.lang === "id" ? "id" : current.lang,
   };
 
   const target = settingsPath(env);
