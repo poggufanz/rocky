@@ -94,6 +94,35 @@ test("a path outside the launch repo is refused, not read", async () => {
   });
 });
 
+test("a file memory names outside the launch repo still reads", async () => {
+  const { home, root } = hermetic();
+  // memory hears files from every cwd, so a file can live outside the tree
+  // rocky was launched in; the dash lists it either way and must read it too
+  const outside = mkdtempSync(join(tmpdir(), "rocky-gui-outside-"));
+  const target = join(outside, "heard.ts");
+  writeFileSync(target, "const heard = true;\n");
+  const named = target.replace(/\\/g, "/");
+  seedMemory(home, [{
+    kind: "explain",
+    id: "e1",
+    v: 1,
+    ts: Date.now(),
+    cwd: outside,
+    path: named,
+    source: "agent:test",
+    code: "const heard = true;",
+    business: "a heard file reads wherever it lives",
+    snippet: "const heard = true;",
+  }]);
+
+  await withGui(root, async (h) => {
+    const heard = await json(h, `/api/file?path=${encodeURIComponent(named)}`);
+    assert.equal(heard.status, 200);
+    // the trailing newline splits into a final empty line, as on disk
+    assert.deepEqual(heard.body.lines, ["const heard = true;", ""]);
+  });
+});
+
 test("file reads stop at the line cap and disclose that they were cut", async () => {
   const { root } = hermetic();
   writeFileSync(join(root, "long.ts"), Array.from({ length: 2500 }, (_, i) => `const l${i} = ${i};`).join("\n"));

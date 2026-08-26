@@ -119,7 +119,10 @@ function hostAllowed(host: string | undefined, port: number): boolean {
 }
 
 /**
- * Confines every path input to the repo the server was launched in.
+ * A path input may be read two ways: it sits inside the repo the server was
+ * launched in, or memory already names it. The dash lists exactly what memory
+ * names, so refusing such a read only breaks the page when rocky was launched
+ * outside that file's tree.
  *
  * The comparison is case-insensitive on Windows because the filesystem is:
  * memory canonicalises paths to lower case, so a case-sensitive prefix test
@@ -130,6 +133,13 @@ function confine(root: string, candidate: string): string | undefined {
   const fold = (value: string): string => (process.platform === "win32" ? value.toLowerCase() : value);
   const inside = fold(full) === fold(root) || fold(full).startsWith(fold(root) + sep);
   return inside ? full : undefined;
+}
+
+/** Memory already discloses these paths to the page, so reading one leaks nothing new. */
+function witnessed(candidate: string): string | undefined {
+  const norm = candidate.replace(/\\/g, "/");
+  const heard = fileIndex(records().list).some((file) => file.path === norm);
+  return heard ? norm : undefined;
 }
 
 async function readBody(request: IncomingMessage): Promise<unknown> {
@@ -272,7 +282,7 @@ async function handleApi(
 
   if (pathname === "/api/file") {
     const rel = url.searchParams.get("path") ?? "";
-    const full = confine(root, rel);
+    const full = confine(root, rel) ?? witnessed(rel);
     if (full === undefined) return forbid(response);
     try {
       const info = await stat(full);
@@ -317,7 +327,7 @@ async function handleApi(
     const rel = String(body.path ?? "");
     const start = Number(body.start ?? 0);
     const end = Number(body.end ?? 0);
-    const full = confine(root, rel);
+    const full = confine(root, rel) ?? witnessed(rel);
     if (full === undefined) return forbid(response);
 
     const lines = existsSync(full) ? readFileSync(full, "utf8").split(/\r?\n/) : [];
