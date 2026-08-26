@@ -441,7 +441,10 @@ export function resolveRelativePath(file: string, specifier: string): string {
     }
     parts.push(seg);
   }
-  return parts.join("/");
+  // the segment walk swallows the leading slash of a posix absolute file,
+  // turning "/tmp/x/b.js" into "tmp/x/b.js"; windows survives because "c:"
+  // stays a segment. put the slash back so downstream isAbsolute holds
+  return f.startsWith("/") ? `/${parts.join("/")}` : parts.join("/");
 }
 
 function basenameWithoutExt(file: string): string {

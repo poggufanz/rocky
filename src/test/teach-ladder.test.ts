@@ -5,6 +5,7 @@ import { execFileSync } from "node:child_process";
 import {
   buildLadder,
   MAX_LADDER_HOPS,
+  resolveRelativePath,
   type LadderResult,
 } from "../core/teach-ladder.js";
 import { gitFirstTouch } from "../core/git-diff.js";
@@ -70,6 +71,15 @@ test("def hop finds a callee definition with JSDoc in the same fileText", () => 
   assert.match(def.finding, /sum/);
   assert.match(def.finding, /line 2/);
   assert.match(def.finding, /Adds two numbers together/);
+});
+
+test("resolveRelativePath keeps a posix absolute root absolute", () => {
+  // ci posix runners run the gui ask dig on absolute tmp roots; the segment
+  // walk must not drop the leading slash (windows keeps "c:" as a segment,
+  // which is why this only ever failed on linux and macos)
+  assert.equal(resolveRelativePath("/tmp/rocky-gui-root-abc/a.ts", "./b.js"), "/tmp/rocky-gui-root-abc/b.js");
+  assert.equal(resolveRelativePath("/tmp/x/sub/a.ts", "../shared/c.js"), "/tmp/x/shared/c.js");
+  assert.equal(resolveRelativePath("/a.ts", "./b.js"), "/b.js");
 });
 
 test("def hop resolves a callee through a relative import via readNeighbor", () => {
