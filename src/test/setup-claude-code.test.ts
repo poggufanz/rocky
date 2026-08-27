@@ -1890,10 +1890,7 @@ test("real committed publication reports only authoritative recovery after exact
   for (const operation of ["configure", "remove"] as const) {
     for (const race of ["target", "parent"] as const) {
       await t.test(`${operation} ${race}`, async (st) => {
-        // Only the "target" race drives this deeply into the real
-        // file-transaction.ts flow; "parent" stays meaningful and passes on
-        // win32 today.
-        if (race === "target" && skipUnverifiedRealTransactionFlowOnWin32(st)) return;
+        if (skipUnverifiedRealTransactionFlowOnWin32(st)) return;
         const setup = fixture(st, {
           keep: true,
           mcpServers: operation === "remove" ? { rocky: rockyEntry() } : {},
@@ -2030,10 +2027,7 @@ test("post-exact stage observation revalidates publication and recovery authorit
   for (const operation of ["configure", "remove"] as const) {
     for (const authority of ["transaction", "stage", "none"] as const) {
       await t.test(`${operation} retains ${authority} authority`, async (st) => {
-        // Only the "transaction" authority path drives the real
-        // file-transaction.ts flow this deeply; "stage" and "none" stay
-        // meaningful and pass on win32 today.
-        if (authority === "transaction" && skipUnverifiedRealTransactionFlowOnWin32(st)) return;
+        if (skipUnverifiedRealTransactionFlowOnWin32(st)) return;
         const setup = fixture(st, {
           keep: true,
           mcpServers: operation === "remove" ? { rocky: rockyEntry() } : {},

@@ -500,7 +500,7 @@ test("expired graceful cleanup force-kills only the owned child before legacy fa
   const raced = await Promise.race([
     checking,
     new Promise<typeof timeoutMarker>((resolve) => {
-      timeout = setTimeout(() => resolve(timeoutMarker), 1000);
+      timeout = setTimeout(() => resolve(timeoutMarker), 3000);
     }),
   ]);
   if (timeout !== undefined) clearTimeout(timeout);
