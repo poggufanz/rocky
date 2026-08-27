@@ -1,6 +1,6 @@
 # Rocky
 <p align="center"><img src="https://raw.githubusercontent.com/poggufanz/rocky/main/assets/rocky-pixel.webp" alt="Rocky"></p>
-<p align="center"><img src="https://raw.githubusercontent.com/poggufanz/rocky/main/assets/rocky.webp" alt="Rocky"></p>
+<p align="center"><img src="https://raw.githubusercontent.com/poggufanz/rocky/main/assets/rocky.webp" alt="Rocky's local GUI: what he heard lately, and what memory holds"></p>
 
 [![CI](https://github.com/poggufanz/rocky/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/poggufanz/rocky/actions/workflows/ci.yml)
 [![npm](https://img.shields.io/npm/v/@poggufanz/rocky-cli?style=flat-square)](https://www.npmjs.com/package/@poggufanz/rocky-cli)
@@ -18,7 +18,7 @@ The useful part is local and deterministic. Rocky has no daemon, no telemetry, a
 
 | | |
 | --- | --- |
-| **Failure memory** a failed build becomes a fingerprint; when the same error returns, Rocky replays what turned it green last time. Evidence, not a guess. | ![Rocky remembers a failed build and its fix](https://raw.githubusercontent.com/poggufanz/rocky/main/assets/demo-loop.gif) |
+| **Failure memory** a failed build becomes a fingerprint; when the same error returns, Rocky says he has heard it before and that it went green again after — never a fix he did not hear. Evidence, not a guess. | ![Rocky remembers a failed build and its fix](https://raw.githubusercontent.com/poggufanz/rocky/main/assets/demo-loop.gif) |
 | **`rocky dash`** opens a local page in your browser: every remembered change to one file, side by side, the agent's stated reason next to the diff that landed. | ![rocky dash compare view](https://raw.githubusercontent.com/poggufanz/rocky/main/assets/demo-dash.gif) |
 | **Rationale gate** an editing agent must state why before it touches a file. No stated reason, no edit; deny-once, fail-open. | ![PreToolUse rationale gate denying an unexplained edit](https://raw.githubusercontent.com/poggufanz/rocky/main/assets/demo-gate.gif) |
 
