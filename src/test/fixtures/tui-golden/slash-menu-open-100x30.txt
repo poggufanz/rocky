@@ -10,14 +10,14 @@
 │                                                     ││                                           │
 │                                                     ││                                           │
 │                                                     ││                                           │
-│                                                     ││                                           │
 │┌─ commands ───────────────────────────────────────────┐                                          │
-└│▎/run <cmd>       run command, rocky listens          │──────────────────────────────────────────┘
-┌│ /recall <query>  ask memory by words                 │ recent ──────────────────────────────────┐
-││ /why <query>     hear remembered reasons             │(no recent evidence)                      │
-││ /sessions        work sessions derived from memory   │                                          │
+││▎/run <cmd>       run command, rocky listens          │                                          │
+└│ /recall <query>  ask memory by words                 │──────────────────────────────────────────┘
+┌│ /why <query>     hear remembered reasons             │ recent ──────────────────────────────────┐
+││ /sessions        work sessions derived from memory   │(no recent evidence)                      │
 ││ /brief           hear what changed since last brief  │                                          │
 ││ /stats           what rocky holds in memory          │                                          │
+││ /teach           pick lines, hear the why behind them│                                          │
 ││ /compare         compare file moments, side by side  │                                          │
 ││ /browse          browse all memory                   │                                          │
 ││ /help            command list                        │                                          │

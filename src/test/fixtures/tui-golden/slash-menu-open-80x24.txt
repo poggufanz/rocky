@@ -4,14 +4,14 @@
 │ coverage full                            ││ failures 0                       │
 │                                          ││ fixes 0                          │
 │                                          ││ why recorded 0                   │
-│                                          ││ local only · no egress           │
-│┌─ commands ───────────────────────────────────────────┐                      │
+│┌─ commands ───────────────────────────────────────────┐· no egress           │
 ││▎/run <cmd>       run command, rocky listens          │                      │
 ││ /recall <query>  ask memory by words                 │                      │
-└│ /why <query>     hear remembered reasons             │──────────────────────┘
-┌│ /sessions        work sessions derived from memory   │──────────────────────┐
-││ /brief           hear what changed since last brief  │evidence)             │
-││ /stats           what rocky holds in memory          │                      │
+││ /why <query>     hear remembered reasons             │                      │
+└│ /sessions        work sessions derived from memory   │──────────────────────┘
+┌│ /brief           hear what changed since last brief  │──────────────────────┐
+││ /stats           what rocky holds in memory          │evidence)             │
+││ /teach           pick lines, hear the why behind them│                      │
 ││ /compare         compare file moments, side by side  │                      │
 ││ /browse          browse all memory                   │                      │
 ││ /help            command list                        │                      │

@@ -17,8 +17,6 @@ import { recall } from "./recall.js";
 import { how, what, why } from "./dictionary.js";
 import { conceptsCommand } from "./concepts.js";
 import { sessionsCommand } from "./sessions.js";
-import { runSurface } from "../ui/tui/surface/shell.js";
-import { surfaceEntry } from "../ui/tui/surface/entry.js";
 import { detail, prompt as rockyPrompt, say } from "../ui/rocky.js";
 
 const UNKNOWN_COMMAND =
@@ -158,21 +156,8 @@ function parseLine(raw: string): ParsedLine {
 }
 
 export async function replCommand(argv: readonly string[], input?: NodeJS.ReadableStream): Promise<number> {
-  // A real terminal opens the stream surface; anything else — including an
-  // injected input stream, which is how the never-crash tests drive this
-  // loop — keeps the readline path below byte-identical.
-  const route = surfaceEntry(
-    "repl",
-    input === undefined && process.stdout.isTTY === true && process.stdin.isTTY === true,
-  );
-  if ("surface" in route && route.surface === "stream") {
-    return runSurface({
-      stdout: process.stdout,
-      stdin: process.stdin,
-      env: process.env,
-      view: "stream",
-    });
-  }
+  // The terminal stream surface went with the tui. Everyone takes the readline
+  // loop below now, which is the path the never-crash tests already drove.
   const useAi = argv.includes("--ai");
   const source = input ?? process.stdin;
   const rl = createInterface({

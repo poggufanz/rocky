@@ -175,65 +175,71 @@ The CLI contains no telemetry and runs no daemon. Its only external network egre
 
 ## Read-only MCP knowledge tools
 
-`rocky mcp` serves seven bounded, read-only tools in deterministic order: `recall`, `recent_failures`, `stats`, `recall_with_ai`, `search_knowledge`, `fetch_record`, and `why_file`. Search first, then fetch: `search_knowledge` returns light metadata and bounded hits, including record id/timestamp, agent/source, covered files, and truncation status for triples; `fetch_record` retrieves one full record by the returned id. `why_file` returns remembered triples that touched one path, with an optional `diff?: boolean` parameter to include the correlated, secret-redacted git diff. `stats` retains legacy counters and adds confirmed fixes, possible fixes, triples, notes, and total remembered items. Limits stay bounded, and sanitized projection is the default; raw fields require an explicit opt-in.
+`rocky mcp` serves eight bounded, read-only tools in deterministic order: `recall`, `recent_failures`, `stats`, `recall_with_ai`, `search_knowledge`, `fetch_record`, `why_file`, and `teach_lookup`. Search first, then fetch: `search_knowledge` returns light metadata and bounded hits, including record id/timestamp, agent/source, covered files, and truncation status for triples; `fetch_record` retrieves one full record by the returned id. `why_file` returns remembered triples that touched one path, with an optional `diff?: boolean` parameter to include the correlated, secret-redacted git diff. `teach_lookup` returns a read-only teach card for a path and optional line or snippet: a remembered witness explanation when one matches, else an assembled evidence ladder from local syntax, comments, tests, and git history. `stats` retains legacy counters and adds confirmed fixes, possible fixes, triples, notes, and total remembered items. Limits stay bounded, and sanitized projection is the default; raw fields require an explicit opt-in.
 
-For example, a host can call `search_knowledge` with `{ "query": "move button down" }`, pass a returned id to `fetch_record`, or call `why_file` with `{ "path": "src/button.css", "diff": true }`. Reasons are hearsay Rocky heard, not verified facts. Rationale is quoted and untrusted; MCP never presents it as fact or executes a remembered command.
+For example, a host can call `search_knowledge` with `{ "query": "move button down" }`, pass a returned id to `fetch_record`, call `why_file` with `{ "path": "src/button.css", "diff": true }`, or call `teach_lookup` with `{ "path": "src/button.css", "line": 12 }`. Reasons are hearsay Rocky heard, not verified facts. Rationale is quoted and untrusted; MCP never presents it as fact or executes a remembered command.
 
-## `rocky dash` (v0.7.6, implemented)
+## `rocky` and `rocky dash` (local GUI, implemented)
 
-An interactive, two-pane terminal dashboard to browse and inspect your remembered history:
+Both open the same local page in your browser. There is one link and one route; the two commands differ only in which segment starts active.
 
 ```bash
-rocky dash
-rocky dash "build failure"   # open with an initial search filter
+rocky           # opens on Main
+rocky dash      # opens on Dash
+rocky --no-open # print the URL, do not launch a browser
+rocky --port=8123
 ```
 
-Running bare `rocky` in an interactive terminal session automatically launches `rocky dash`. In a non-interactive pipe or script, bare `rocky` prints command usage help instead.
+Rocky starts an HTTP server on `127.0.0.1`, prints the URL on stderr, and tries to open your browser. If the browser cannot be launched, the printed URL is enough. The process stays in the foreground; Ctrl-C stops it. There is no daemon, no port file, and nothing left running afterwards.
 
-### Layout
+The default port is `7777`. If that port is busy, Rocky takes any free port rather than failing.
 
-- **Left pane (Records list)**: Bounded, scrollable list of remembered items (failures, fixes, triples, rationales, comprehension notes), tagged with kind badges and relative timestamps.
-- **Right pane (Inspector)**: Detailed record view with four tabs:
-  - **Info**: Structured metadata including command text, exit status, cwd, covered files, witness evidence, and timestamps.
-  - **Rationale**: Agent rationale excerpts, source lane (`log-thinking`, `log-response`, `notify`, `human`), and fidelity.
-  - **Diff**: Correlated git diff for the record, rendered with colorized addition and deletion lines.
-  - **JSON**: Formatted raw JSONL record with sensitive tokens redacted.
-- **Header & footer**: Header displays honest memory coverage totals (scanned records, bytes, truncation status). Footer displays context-sensitive key hints.
+In a pipe or a script there is no human to look at a browser, so bare `rocky` prints usage help and `rocky dash` prints the `rocky stats` summary instead.
 
-### Keymaps
+### Segments
 
-| Context | Key | Action |
-|---|---|---|
-| Global | `Tab` / `Shift+Tab` | Cycle focus between list and inspector panes |
-| Global | `?` | Toggle help overlay |
-| Global | `r` | Reload memory records from disk |
-| Global | `q` / `Ctrl+C` | Quit dashboard |
-| List | `j` / `k` or `↓` / `↑` | Move selection down / up |
-| List | `Ctrl+d` / `Ctrl+u` | Scroll half-page down / up |
-| List | `g` / `G` | Jump to first / last record |
-| List | `f` | Cycle kind filter (`all` -> `failure` -> `fix` -> `triple` -> `rationale` -> `note`) |
-| List | `/` | Open search filter modal |
-| List | `Enter` | Focus inspector pane |
-| Inspector | `[` / `]` | Cycle inspector tabs (`info` -> `rationale` -> `diff` -> `json`) |
-| Inspector | `j` / `k` or `↓` / `↑` | Scroll content down / up |
-| Inspector | `g` / `G` | Jump to top / bottom of content |
-| Inspector | `Ctrl+d` / `Ctrl+u` | Scroll half-page down / up |
-| Inspector | `d` | Toggle full-screen diff view |
-| Inspector | `Esc` | Return focus to list pane |
+- **Main** — what Rocky holds: record counts by kind, the last 24 hours, most heard files, and the recent stream. The coverage line says how much of memory was actually read.
+- **Dash** — the working surface. A file picker on the left, and a pane with three modes:
+  - **Lines** — the file's own text. Select lines with the mouse and a `Why, question` button appears; the answer opens as a small panel at the selection.
+  - **History** — every record Rocky holds for that file, newest first, each with its diff.
+  - **Compare** — two moments side by side. Each column header opens a moment picker with a search box and a `strict · same lines` / `loose · whole file` toggle.
 
-`Esc` follows a strict dismissal precedence order:
-1. Close help overlay (if open).
-2. Exit search filter modal (if open).
-3. Leave full-screen diff view (if active).
-4. Return focus from inspector to list pane.
-5. Top-level no-op (never quits the dashboard).
+A witness card is coloured; an assembled card is grey. That is the whole colour system: warm means Rocky heard it, and nothing else on the page is allowed to borrow that colour.
 
-### Terminal compatibility and colors
+### Security
 
-- **Non-TTY fallback**: In non-interactive environments (pipes or redirected stdio), `rocky dash` prints `rocky stats` summary to stdout and a hint to stderr: `[Rocky] dash need real terminal, this one pipe. I give stats instead. on git bash, try winpty rocky dash.`
-- **MinTTY / Git Bash**: Run `winpty rocky dash` to allocate a Windows console PTY when running inside MinTTY.
-- **Color degradation**: Honors `NO_COLOR` and `FORCE_COLOR` environment variables. Degrades gracefully across color depths: Truecolor (24-bit) -> 256 colors -> 16 ANSI colors -> monochrome (depth 1).
-- **ASCII mode**: In monochrome environments or legacy Windows console hosts without Windows Terminal (`WT_SESSION`), borders and selection markers fall back to plain ASCII characters (`+`, `-`, `|`, `*`).
+- Binds `127.0.0.1` only. There is no flag to widen it.
+- Every launch mints a fresh 128-bit token, carried in the URL fragment so it never reaches a server log or a `Referer` header. The page sends it back as `X-Rocky-Token` on every API call; a request without it gets `403`.
+- Any request whose `Host` is not `127.0.0.1:<port>` or `localhost:<port>` gets `403`. This is what stops DNS rebinding.
+- File paths are confined to the repository Rocky was launched in. A path that escapes gets `403`.
+- No CORS headers at all, `Cache-Control: no-store`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`.
+- The page loads nothing from outside `127.0.0.1`: no CDN, no web font, no external script.
+
+### Settings and BYOK (beta)
+
+The `Settings` button in the header stores an optional model provider: a segmented `OpenAI | Anthropic` choice, an endpoint, an API key, and a model.
+
+This is the one place Rocky's local surface reaches a host that is not your machine, and it is off until you fill it in. What it changes: a `Ask Model` control appears on a why card, and its answer is rendered grey and labelled `Model Guess (Beta)`. A guess never borrows the colour that means Rocky heard something.
+
+- The key is stored in `~/.rocky/gui.json` at mode `0600`, never in the browser. The page is told only whether a key exists.
+- Saving the endpoint or model without retyping the key leaves the stored key alone. An empty key is an explicit erase (`Forget Key`).
+- Prompts are passed through the same secret redaction Rocky uses everywhere else before they leave the machine, capped in length, and limited to two in flight.
+- The endpoint is editable, so any OpenAI-compatible host works: Ollama, LiteLLM, OpenRouter, and opencode's `https://opencode.ai/zen/go/v1/chat/completions` all answer the same shape.
+
+Rocky's memory is evidence. A model answer is not, and the surface says so every time.
+
+## `rocky teach` (v0.7.x, implemented)
+
+Ask why one selection of code exists, from a witness or from assembled local evidence:
+
+```bash
+rocky teach src/core/memory.ts:307   # line 307 plus the three lines around it
+rocky teach src/core/memory.ts       # whole file, witness lookup only
+printf 'const rows = await loadRows();' | rocky teach --stdin src/core/memory.ts
+rocky teach src/core/memory.ts:307 --ladder   # also print every hop, expanded
+```
+
+`rocky teach <file>:<line>` reads the file once, slices the selection (the line plus three lines on each side, clamped to the file), and asks memory for an `explain` record whose written hunk matches the selection — exact content hash first, token similarity second. A match renders the witness card: the writing agent's own `code` paragraph (why this code shape) and `business` paragraph (what concern it serves), quoted as hearsay with source and age. When the witness `code` paragraph shares no token with the selection's hop-1 construct finding, the card appends one labeled `form` rung (catalog or ast) so witness text and assembly never blend. On a miss, Rocky assembles a deterministic why-ladder from the file itself — construct catalog, enclosing function, callee definition, nearest comment, tests and first `git log -L` commit — and renders the summary card with one compact evidence line naming the sources used; `--ladder` also prints the full hop-by-hop view. `rocky teach <file>` is witness-only (newest explain for the file, no ladder), and `rocky teach --stdin <file>` matches the piped snippet (bounded read, same 2 MB cap as the gate-event stdin reader) against the file. No witness and no ladder rungs is a first-class honest state: Rocky has not heard why yet. Ladder output is rendered, never written to memory, and assembled answers never masquerade as witness testimony. Every flow outcome exits 0.
 
 ## `rocky watch` (v0.3, implemented)
 
@@ -373,26 +379,36 @@ rocky/
 │   ├── commands/
 │   │   ├── run.ts          # command wrapper: stream, fingerprint, remember, link fixes
 │   │   ├── recall.ts       # deterministic search + optional local-AI interpretation
-│   │   ├── hook.ts         # Bash/WSL hook and guard lifecycle
+│   │   ├── hook.ts         # Bash/WSL/PowerShell hook and guard lifecycle
 │   │   ├── mcp.ts          # local read-only MCP stdio server
 │   │   ├── model.ts        # opt-in Ollama configuration
 │   │   ├── setup.ts        # detected-host and optional voice-skill setup
 │   │   ├── dictionary.ts   # what/how/why/digest/quiz/export surfaces
+│   │   ├── teach.ts        # witness card and deterministic why-ladder
+│   │   ├── gui.ts          # local browser dashboard launcher
 │   │   └── stats.ts        # memory summary
 │   ├── core/
 │   │   ├── fingerprint.ts  # stderr -> stable error signature + token bags
 │   │   ├── dictionary.ts   # intent↔mechanism lookup and digest/quiz queries
+│   │   ├── teach.ts        # witness lookup and explain records
+│   │   ├── teach-ladder.ts # deterministic evidence walker and stop rules
+│   │   ├── teach-render.ts # witness and ladder card rendering
+│   │   ├── git-diff.ts     # bounded git diff correlation and secret scrubbing
 │   │   ├── memory.ts       # append-only JSONL writers
 │   │   ├── memory-read.ts  # bounded parsing and backward-compatible loading
 │   │   └── memory-query.ts # fingerprint lookup and fuzzy search
+│   ├── gui/                # loopback HTTP server, BYOK settings, model catalog
 │   ├── mcp/                # bounded read-only tools and privacy projection
 │   ├── setup/              # host adapters, consent, health, voice skill
 │   ├── ai/                 # loopback-only Ollama adapter and grounded schema
-│   ├── agent/              # capture, annotation, and ambiguity advisory
-│   │   └── ambiguity.ts    # Ollama-gated remembered-evidence question
+│   ├── agent/              # capture, annotation, explain extract, and gate
 │   ├── shell/              # Bash hook assets
 │   └── ui/
 │       └── rocky.ts        # his face, his voice, relative time
+├── assets/
+│   ├── gui/                # local web dashboard HTML, CSS, JS
+│   ├── teach-agent.md      # Indonesian teach model prompt template
+│   └── teach-agent.en.md   # English teach model prompt template
 ├── skills/rocky-voice/     # optional managed voice skill asset
 ├── docs/
 │   └── scientific-grounding.md
@@ -413,7 +429,9 @@ When things are serious, Rocky is serious. Diagnoses and fixes are printed plain
 
 Rocky asks because he is curious, not because he is testing you; you are always the one who knows, never the one being graded. Ignore him and he goes quiet — an ignored question is never repeated — and answering `busy` makes him wait without complaint (he once waited 46 years). Ambiguity questions are optional, Ollama-gated, and never block the captured turn.
 
-The fence never moves: Rocky hears your terminal and the explicit Plan 01 agent hooks. That's it. No keylogging, no screen reading, no capture of screen content of any kind. "Rocky can't see your screen" is a literal description of the architecture, not just lore. `rocky dash` reads raw-mode keystrokes in-process, only while the dashboard is focused; nothing is persisted or transmitted, and no global input is hooked.
+The fence never moves: Rocky hears your terminal and the explicit Plan 01 agent hooks. That's it. No keylogging, no screen reading, no capture of screen content of any kind. "Rocky can't see your screen" is a literal description of the architecture, not just lore. The local GUI serves a page to your own browser over loopback and reads nothing the page does not ask for; no global input is hooked.
+
+The one hole in the no-egress rule is the optional BYOK proxy described under `rocky` and `rocky dash`. It stays shut until you enter a key, it sends only the prompt you triggered, and that prompt is redacted before it leaves. Memory, hooks, recall, and MCP still reach no external host.
 
 ## Roadmap
 
@@ -424,10 +442,11 @@ Each phase is one facet of who Rocky is:
 - **v0.4 — his diligence (implemented)**: pre-push hull check — `rocky check` verifies that AI-added packages actually exist on the registry (hallucinated-package defense), scans added lines for secrets, and asks one comprehension question about the riskiest line in the diff. Its registry lookup is this project's only external egress; network errors fail open and never hold a push.
 - **v0.5 — his curiosity (implemented)**: Plan 01 Nervous System agent hooks and Plan 02 dictionary/teaching surfaces ship in v0.5.0. They preserve prompt/path/excerpt/stated-rationale evidence in local memory, use deterministic fallback when Ollama is unavailable, keep rationale explicitly quoted and untrusted, and add `what`, `how`, `why`, `digest`, `quiz`, `export`, passive labels, ambiguity advice, and three bounded MCP knowledge tools. The earlier `rocky explain` concept is superseded, not an active command.
 - **v0.6 — his accountability (implemented)**: `rocky brief` (loopback-AI-polished summary of what changed since your last check-in: commits, remembered failures/fixes, and touched invariant guards), `rocky journal`, `rocky invariants`, extended `rocky stats`, and the [schema envelope](schema.md) documentation. `brief` shipped in v0.6, no longer deferred; BYOK annotation, `attest`, and the memory circuit breaker remain deferred.
-- **v0.7 — his memory of why (current release)**: a fourth evidence kind, `rationale`, captured across four lanes (`log-thinking`, `log-response`, `notify`, `human`); a deterministic concept lexicon (`rocky concepts`/`concept`/`concept alias`); derived `rocky sessions` and `rocky repl`; and a PreToolUse rationale gate (`rocky hook gate-event`, opt out with `--no-rationale-gate` or `ROCKY_RATIONALE_GATE=off`). Codex and Gemini agent-log adapters remain deferred — see the [rationale capture section](#rationale-capture-and-the-gate-v070) above.
+- **v0.7 — his memory of why (implemented)**: a fourth evidence kind, `rationale`, captured across four lanes (`log-thinking`, `log-response`, `notify`, `human`); a deterministic concept lexicon (`rocky concepts`/`concept`/`concept alias`); derived `rocky sessions` and `rocky repl`; PreToolUse rationale gate (`rocky hook gate-event`); and native git diff correlation. Codex and Gemini agent-log adapters remain deferred — see the [rationale capture section](#rationale-capture-and-the-gate-v070) above.
+- **v0.8 — his comprehension guardian (current line)**: local browser GUI (`rocky dash`) replacing the terminal dashboard, teach mode (`rocky teach` / `teach_lookup` / `explain` records), and selection-anchored why-cards.
 - **later — his care**: ambient pet mode and the desktop pet window (deferred). He notices you've been at it for four hours, and he has opinions about your sleep.
 
-The package version is v0.7.6; the Nervous System and rationale-capture sections above describe the surfaces it ships.
+The package version is v0.8.0; the Nervous System, rationale-capture, teach mode, and local GUI sections above describe the surfaces it ships.
 
 ## Contributing
 

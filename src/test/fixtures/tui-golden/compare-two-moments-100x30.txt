@@ -25,6 +25,6 @@
 │                                ││                                ││                              │
 └────────────────────────────9/9─┘└────────────────────────────9/9─┘└──────────────────────────────┘
 ┌─ filter files ───────────────────────────────────────────────────────────────────────────────────┐
-│ › ▏ype part of a path…                                                                           │
+│ › ▏ype part of a path… !md hides .md                                                             │
 └──────────────────────────────────────────────────────────────────────────────────────────────────┘
- ROCKY   pane  recB   j/k  scroll   z  zoom   d  hide diff   tab  next   /  local only · no egress  
+ ROCKY   a/b  swap   j/k  scroll   z  zoom   d  hide diff   tab  next   /  flocal only · no egress  

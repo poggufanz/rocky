@@ -19,6 +19,7 @@ import {
 import { resolveRockyPaths, type RockyPaths } from "../core/state-paths.js";
 import { dirname } from "node:path";
 import { canonicalPath } from "../core/memory-read.js";
+import { isAgentEnvelopeText } from "../core/envelope.js";
 import { filesystemIdentity, NO_BLOCK_FLAG, NO_FOLLOW_FLAG, regularDescriptorSafe, sameFilesystemIdentity } from "../core/fs-safety.js";
 import { isSafeNonNegativeInteger } from "../core/memory-read.js";
 import { recordTripleOnce } from "../core/memory.js";
@@ -61,7 +62,18 @@ export { MAX_TRIPLE_FILES } from "../core/memory-read.js";
 // batch complete merely because its surviving unique paths fit the triple cap.
 const SPOOL_COMPLETENESS_MARGIN_BYTES = 8 * 1024;
 
-const MAX_LABEL_LINES = 10;
+// Backlog cap for spoken labels. The shell hook prints one queued label per
+// prompt, so every queued line is a future prompt the person must sit through;
+// dogfooding (2026-08-24) showed a long agent run banking labels that then
+// replayed one by one, long after that agent had finished. Speech coalesces:
+// the newest label replaces the queue instead of joining a line. Memory is
+// untouched by this — every triple still persists in full.
+const MAX_LABEL_LINES = 1;
+// Queue-time epoch second, written as "@<seconds> <label>". The hook drops a
+// line whose stamp proves it stale rather than speaking an agent's work into
+// an unrelated shell an hour later. A line without a stamp has unknown age and
+// is still spoken — Rocky never hides what he cannot judge.
+const LABEL_STAMP = (): string => `@${Math.floor(Date.now() / 1000)} `;
 const MAX_LABEL_CHARS = 400;
 const MAX_LABEL_FILE_BYTES = 64 * 1024;
 const MAX_PATH_CHARS = 1024;
@@ -234,7 +246,7 @@ export function defaultQueueLabel(line: string, paths: RockyPaths): void {
     if (!safe) return;
     const existing = readLabelLines(paths.labels);
     if (existing === undefined) return;
-    writeLabelLines(paths.labels, [...existing, safe].slice(-MAX_LABEL_LINES));
+    writeLabelLines(paths.labels, [...existing, `${LABEL_STAMP()}${safe}`].slice(-MAX_LABEL_LINES));
   } catch {
     // Labels are best effort and never affect durable memory.
   }
@@ -547,12 +559,18 @@ function propsFromExcerpt(excerpt: string | undefined): string[] {
   return [...found].slice(0, 5);
 }
 
+// Props are generic `key:` captures (PROP_RE) and only read as a vocabulary
+// guess when the diff is a stylesheet; in backend diffs the same capture
+// yields junk like "width" or "feat" (dogfooding 2026-08-24), so every other
+// file speaks its path instead.
+const STYLE_FILE_RE = /\.(css|scss|sass|less|styl)$/i;
+
 export function degradedLabel(intent: string | undefined, files: readonly TripleFile[]): string | undefined {
   const cleanIntent = intent === undefined ? undefined : cleanText(intent, MAX_INTENT_CHARS);
   if (!cleanIntent || files.length === 0) return undefined;
   const first = files[0];
   if (!first) return undefined;
-  const subject = cleanText(first.props[0] ?? first.path, 160);
+  const subject = cleanText((STYLE_FILE_RE.test(first.path) ? first.props[0] : undefined) ?? first.path, 160);
   if (!subject) return undefined;
   const short = cleanIntent.length > 60 ? `${cleanIntent.slice(0, 57)}...` : cleanIntent;
   return safeLabel(`you say "${short}". it is ${subject}. I think. check, question`);
@@ -1005,7 +1023,12 @@ export async function annotateBatch(key: string, deps: AnnotateDeps = {}): Promi
     deps.afterPersist?.(persisted.record, persisted.appended);
 
     if (persisted.appended) {
-      const label = aiOutput?.label ?? degradedLabel(intentText, files);
+      // A machine envelope is agent machinery, not the person's words;
+      // announcing it as "you say" floods every prompt during long agent
+      // runs. The triple itself still persists unfiltered.
+      const label = intentText !== undefined && isAgentEnvelopeText(intentText)
+        ? undefined
+        : aiOutput?.label ?? degradedLabel(intentText, files);
       if (label) {
         try {
           const enqueue = deps.queueLabel ?? defaultQueueLabel;

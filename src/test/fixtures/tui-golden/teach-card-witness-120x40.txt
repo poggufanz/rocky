@@ -1,0 +1,40 @@
+  ROCKY  2 remembered · 2 files                                                                  ≣ teaching witness.ts  
+┌─ lines · witness.ts ─────────────────────────────────────────────────────────┐┌─ why ────────────────────────────────┐
+│  export async function loadFeed() {                                          ││ rocky heard this. agent say why,     │
+│    const first = await fetchRows();                                          ││ rocky remember                       │
+│    const second = await fetchRows();                                         ││                                      │
+│    const third = await fetchRows();                                          ││ code: documents only, no duplicates  │
+│    const fourth = await fetchRows();                                         ││ business: journal accepts DOCENTRY   │
+│    const fifth = await fetchRows();                                          ││ documents only, token [redacted      │
+│    const sixth = await fetchRows();                                          ││ github token] stays local            │
+│    const seventh = await fetchRows();                                        ││ form: async because await used at    │
+│    const eighth = await fetchRows();                                         ││ line 5 · catalog                     │
+│    const ninth = await fetchRows();                                          ││                                      │
+│▎   const tenth = await fetchRows();                                          ││ source: agent:claude-code · 2h ago   │
+│    const eleventh = await fetchRows();                                       ││                                      │
+│    const twelfth = await fetchRows();                                        ││                                      │
+│    return first;                                                             ││                                      │
+│  }                                                                           ││                                      │
+│                                                                              ││                                      │
+│                                                                              ││                                      │
+│                                                                              ││                                      │
+│                                                                              ││                                      │
+│                                                                              ││                                      │
+│                                                                              ││                                      │
+│                                                                              ││                                      │
+│                                                                              ││                                      │
+│                                                                              ││                                      │
+│                                                                              ││                                      │
+│                                                                              ││                                      │
+│                                                                              ││                                      │
+│                                                                              ││                                      │
+│                                                                              ││                                      │
+│                                                                              ││                                      │
+│                                                                              ││                                      │
+│                                                                              ││                                      │
+│                                                                              ││                                      │
+└──────────────────────────────────────────────────────────────────────────────┘└──────────────────────────────────────┘
+┌─ selection ──────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│ sel 5–11  enter teach · s extend · e expand · esc files                                                              │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+ ROCKY   ↑↓  move   s  extend   enter  teach   e  expand   esc  files                           local only · no egress  

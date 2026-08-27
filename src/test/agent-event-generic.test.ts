@@ -5,13 +5,17 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test, type TestContext } from "node:test";
-import type { RationaleRecord } from "../core/memory-read.js";
+import type { ExplainRecord, RationaleRecord } from "../core/memory-read.js";
 
 const packageRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const entry = join(packageRoot, "dist", "index.js");
 
 function isRationale(record: { kind: string }): record is RationaleRecord {
   return record.kind === "rationale";
+}
+
+function isExplain(record: { kind: string }): record is ExplainRecord {
+  return record.kind === "explain";
 }
 
 /** Isolate ROCKY_HOME for one test, restoring the prior value (or absence) after. */
@@ -130,6 +134,47 @@ test("claude-code agent-event with --rationale still writes it when the vendor p
   assert.ok(rec, "a malformed vendor payload must not suppress the argv-supplied rationale");
   assert.equal(rec?.agent, "claude-code");
   assert.equal(rec?.source, "notify");
+});
+
+test("claude-code agent-event with --explain-code and --explain-business writes an explain record joined to a spooled snippet", async (t) => {
+  freshHome(t);
+  const { spoolPendingSnippet } = await import("../agent/pending-explain.js");
+  const spooled = "C:/p/src/a.ts";
+  const plain = "C:/p/src/b.ts";
+  spoolPendingSnippet(spooled, "const x = 1;");
+  const { agentEvent } = await import("../commands/agent-hook.js");
+  const result = await captureStdout(() => agentEvent("claude-code", {
+    stdin: async () => "",
+    explainCode: "why",
+    explainBusiness: "what",
+    files: [spooled, plain],
+  }));
+  assert.equal(result.code, 0);
+  assert.equal(result.out, "{}");
+  const { loadMemory } = await import("../core/memory-read.js");
+  const records = loadMemory().filter(isExplain);
+  assert.equal(records.length, 2, "both listed files get an explain record when both flags are present");
+  const withSnippet = records.find((record) => record.path === spooled);
+  const withoutSnippet = records.find((record) => record.path === plain);
+  assert.equal(withSnippet?.source, "agent:claude-code");
+  assert.equal(withSnippet?.code, "why");
+  assert.equal(withSnippet?.business, "what");
+  assert.equal(withSnippet?.snippet, "const x = 1;", "a spooled snippet for that exact path is joined");
+  assert.equal(withoutSnippet?.snippet, undefined, "no spooled snippet means no snippet on the record");
+});
+
+test("claude-code agent-event with only --explain-code writes no explain record and still exits 0", async (t) => {
+  freshHome(t);
+  const { agentEvent } = await import("../commands/agent-hook.js");
+  const result = await captureStdout(() => agentEvent("claude-code", {
+    stdin: async () => "",
+    explainCode: "why",
+    files: ["C:/p/src/a.ts"],
+  }));
+  assert.equal(result.code, 0);
+  assert.equal(result.out, "{}");
+  const { loadMemory } = await import("../core/memory-read.js");
+  assert.equal(loadMemory().find(isExplain), undefined, "a half-formed explain flag set writes no explain record");
 });
 
 test("claude-code agent-event without --rationale is unchanged: no rationale record written", async (t) => {

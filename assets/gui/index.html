@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>rocky</title>
+<!-- an empty icon answers the browser's automatic request, so no 404 -->
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="/assets/app.css">
+</head>
+<body>
+
+<header class="bar">
+  <div class="seg" role="tablist" aria-label="surface">
+    <button class="seg-btn" role="tab" id="tab-main" data-seg="main"
+            aria-selected="true" aria-controls="view-main">Main</button>
+    <button class="seg-btn" role="tab" id="tab-dash" data-seg="dash"
+            aria-selected="false" aria-controls="view-dash" tabindex="-1">Dash</button>
+  </div>
+
+  <span class="tally" id="tally" aria-live="polite"></span>
+
+  <span id="model-chip" class="model-chip" hidden></span>
+
+  <button id="settings-btn" class="settings-btn" type="button"
+          aria-haspopup="dialog" aria-controls="settings">Settings</button>
+</header>
+
+<div id="scrim" class="scrim" hidden></div>
+
+<div id="settings" class="modal" role="dialog" aria-modal="true" aria-labelledby="settings-title" hidden>
+  <div class="modal-head">
+    <h2 id="settings-title">Settings</h2>
+    <button id="settings-close" class="modal-x" type="button" aria-label="close">×</button>
+  </div>
+
+  <p class="beta">
+    Beta
+    (This is completely optional if you want Rocky Teach to be more intelligent. However, it may not be 100% accurate and will need to be cross-checked)
+  </p>
+
+  <div class="field">
+    <span class="field-label">Provider</span>
+    <div class="combo">
+      <input id="provider-search" type="text" spellcheck="false" autocomplete="off"
+             role="combobox" aria-expanded="false" aria-controls="provider-list"
+             placeholder="search provider…">
+      <div id="provider-list" class="combo-list" role="listbox" hidden></div>
+    </div>
+  </div>
+
+  <label class="field" id="endpoint-field" hidden>
+    <span class="field-label">Endpoint</span>
+    <input id="set-endpoint" type="url" spellcheck="false" autocomplete="off"
+           placeholder="paste an OpenAI-compatible endpoint">
+  </label>
+
+  <label class="field">
+    <span class="field-label">API Key</span>
+    <input id="set-key" type="password" spellcheck="false" autocomplete="off">
+    <span class="field-note">Kept in this browser only. Never sent to rocky.</span>
+  </label>
+
+  <label class="field">
+    <span class="field-label">Model</span>
+    <select id="set-model"></select>
+    <span class="field-note" id="model-note"></span>
+  </label>
+
+  <label class="field">
+    <span class="field-label">Output Language</span>
+    <select id="set-lang">
+      <option value="id">Indonesia</option>
+      <option value="en">English</option>
+    </select>
+    <span class="field-note">The language Rocky Teach answers in.</span>
+  </label>
+
+  <div class="modal-foot">
+    <button id="settings-clear" class="btn-quiet" type="button">Forget Key</button>
+    <button id="settings-save" class="btn-voice" type="button">Save</button>
+  </div>
+</div>
+
+<div id="repo-filter" class="modal" role="dialog" aria-modal="true" aria-labelledby="repo-filter-title" hidden>
+  <div class="modal-head">
+    <h2 id="repo-filter-title">Filter Repo</h2>
+    <button id="repo-filter-close" class="modal-x" type="button" aria-label="close">×</button>
+  </div>
+
+  <div id="repo-filter-list" class="repo-list"></div>
+
+  <div class="modal-foot">
+    <button id="repo-filter-reset" class="btn-quiet" type="button">Reset</button>
+    <button id="repo-filter-done" class="btn-voice" type="button">Done</button>
+  </div>
+</div>
+
+<main>
+
+  <!-- Main -->
+  <section class="view" id="view-main" role="tabpanel" aria-labelledby="tab-main">
+    <div class="main-grid">
+      <section class="blk blk-recent">
+        <div id="latest" class="latest"></div>
+        <h2>Recent</h2>
+        <div id="recent" class="rows"></div>
+      </section>
+
+      <div class="rail">
+        <section class="blk">
+          <h2>What Rocky Holds</h2>
+          <div id="holds" class="rows"></div>
+        </section>
+
+        <section class="blk">
+          <h2>Since 24H</h2>
+          <div id="day" class="rows"></div>
+        </section>
+
+        <section class="blk">
+          <h2>Most Heard Files</h2>
+          <div id="topfiles" class="rows"></div>
+        </section>
+      </div>
+    </div>
+  </section>
+
+  <!-- Dash -->
+  <section class="view" id="view-dash" role="tabpanel" aria-labelledby="tab-dash" hidden>
+    <div class="dash">
+
+      <aside class="left">
+        <label class="filter">
+          <span class="vh">filter files</span>
+          <input id="filter" type="search" placeholder="type part of a path… !md hides .md"
+                 autocomplete="off" spellcheck="false">
+        </label>
+
+        <div class="col-head">
+          <span id="files-head">files</span>
+          <button id="repo-filter-btn" class="repo-filter-btn" type="button"
+                  aria-haspopup="dialog" aria-controls="repo-filter">Filter Repo</button>
+        </div>
+        <div id="files" class="files" role="listbox" aria-label="files rocky heard"></div>
+      </aside>
+
+      <section class="pane">
+        <div class="pane-bar">
+          <span class="pane-path" id="pane-path"></span>
+          <span class="sel" id="sel"></span>
+          <div class="mode" role="tablist" aria-label="pane mode">
+            <button class="mode-btn" role="tab" data-mode="lines" aria-selected="true">Lines</button>
+            <button class="mode-btn" role="tab" data-mode="history" aria-selected="false" tabindex="-1">History</button>
+            <button class="mode-btn" role="tab" data-mode="compare" aria-selected="false" tabindex="-1">Compare</button>
+          </div>
+        </div>
+
+        <div class="pane-sub" id="pane-sub" hidden>
+          <label class="toggle">
+            <input type="checkbox" id="show-diff" checked>
+            Show Diff
+          </label>
+          <span class="sub-note" id="sub-note"></span>
+        </div>
+
+        <div id="pane-body" class="pane-body"></div>
+      </section>
+
+    </div>
+  </section>
+
+</main>
+
+<footer class="foot">Local Only | No Egress</footer>
+
+<button id="ask" class="ask" hidden>Why, question</button>
+<div id="pop" class="pop" role="dialog" aria-label="why" aria-live="polite" hidden></div>
+
+<script src="/assets/app.js" type="module"></script>
+</body>
+</html>

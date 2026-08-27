@@ -150,6 +150,12 @@ test("MCP source graph reaches only explicitly allowlisted read-only modules; wr
     "core/redact.ts",
     "core/state-paths.ts",
     "core/terminal-sanitize.ts",
+    // Audited teach modules: teachLookup/buildLadder/renderers read the
+    // caller-supplied records and file text, or bounded read-only neighbor
+    // files through defaultTeachNeighbor; they never write memory or disk.
+    "core/teach.ts",
+    "core/teach-ladder.ts",
+    "core/teach-render.ts",
     "ai/ollama.ts",
     "ai/port.ts",
     "ai/recall-ai.ts",

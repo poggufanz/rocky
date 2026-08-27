@@ -251,7 +251,7 @@ function skippedFromInspection(
     const result: SetupResult = {
       client,
       status: "failed",
-      detail: inspection.detail ?? "Host registration cannot be read",
+      detail: inspection.detail ?? "host registration cannot be read",
     };
     if (mode === "configure" && client === "codex") {
       result.manualRegistration = registration;
@@ -261,7 +261,7 @@ function skippedFromInspection(
   return { client, status: "requires-confirmation" };
 }
 
-function failedHostOperation(client: SetupClientId, detailMessage = "Host operation failed"): SetupResult {
+function failedHostOperation(client: SetupClientId, detailMessage = "host operation failed"): SetupResult {
   return { client, status: "failed", detail: detailMessage };
 }
 
@@ -311,7 +311,7 @@ async function consentResults(
     try {
       inspections.set(adapter, await adapter.inspect(registration));
     } catch {
-      inspectionFailures.set(adapter, failedHostOperation(adapter.id, "Host inspection failed"));
+      inspectionFailures.set(adapter, failedHostOperation(adapter.id, "host inspection failed"));
     }
   }
   const orderedResults = (): SetupResult[] => adapters.map((adapter) => {
@@ -319,7 +319,7 @@ async function consentResults(
     if (failure !== undefined) return failure;
     const inspection = inspections.get(adapter);
     return inspection === undefined
-      ? failedHostOperation(adapter.id, "Host inspection failed")
+      ? failedHostOperation(adapter.id, "host inspection failed")
       : skippedFromInspection(adapter.id, inspection, mode, registration);
   });
   // Consent must cover every mutation setup() is actually about to attempt,
@@ -381,7 +381,7 @@ async function invokeAdapters(
         continue;
       }
       if (inspected.healthRegistration === undefined) {
-        results.push({ client: inspected.client, status: "failed", detail: "Owned health registration is unavailable" });
+        results.push({ client: inspected.client, status: "failed", detail: "owned health registration is unavailable" });
         continue;
       }
       const health = await checkMcpRegistration(inspected.healthRegistration, runner);
@@ -520,7 +520,7 @@ async function invokeVoiceSkills(
       results.push({
         host: target.host,
         status: "failed",
-        detail: "Voice skill host operation failed",
+        detail: "voice skill host operation failed",
       });
     }
   }

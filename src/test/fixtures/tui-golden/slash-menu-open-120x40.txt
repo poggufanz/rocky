@@ -20,7 +20,6 @@
 └────────────────────────────────────────────────────────────────┘└────────────────────────────────────────────────────┘
 ┌─ most heard files ─────────────────────────────────────────────┐┌─ recent ───────────────────────────────────────────┐
 │ (none heard yet)                                               ││ (no recent evidence)                               │
-│                                                                ││                                                    │
 │┌─ commands ───────────────────────────────────────────┐        ││                                                    │
 ││▎/run <cmd>       run command, rocky listens          │        ││                                                    │
 ││ /recall <query>  ask memory by words                 │        ││                                                    │
@@ -28,6 +27,7 @@
 ││ /sessions        work sessions derived from memory   │        ││                                                    │
 ││ /brief           hear what changed since last brief  │        ││                                                    │
 ││ /stats           what rocky holds in memory          │        ││                                                    │
+││ /teach           pick lines, hear the why behind them│        ││                                                    │
 ││ /compare         compare file moments, side by side  │        ││                                                    │
 ││ /browse          browse all memory                   │        ││                                                    │
 ││ /help            command list                        │        ││                                                    │

@@ -1,6 +1,6 @@
 {
   "name": "@poggufanz/rocky-cli",
-  "version": "0.7.6",
+  "version": "0.8.0",
   "description": "A blind engineer who lives in your terminal, never forgets an error, and makes sure you still understand your own code.",
   "type": "module",
   "bin": {
@@ -17,6 +17,10 @@
     "dist/ai",
     "dist/agent",
     "dist/shell",
+    "dist/gui",
+    "assets/gui",
+    "assets/teach-agent.md",
+    "assets/teach-agent.en.md",
     "skills/rocky-voice",
     "README.md",
     "LICENSE",

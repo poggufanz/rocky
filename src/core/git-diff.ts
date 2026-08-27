@@ -146,6 +146,40 @@ export function resolveGitDiff(options: GitDiffOptions): GitDiffResult | undefin
   return undefined;
 }
 
+/**
+ * First commit that touched a line range of a file, via `git log --reverse -L`.
+ * Returns the oldest commit plus its (secret-redacted) subject, or undefined on
+ * any failure, empty output, or timeout -- it fails open and never throws.
+ */
+export function gitFirstTouch(
+  file: string,
+  startLine: number,
+  endLine: number,
+  cwd?: string,
+): { commit: string; subject: string } | undefined {
+  if (typeof file !== "string" || file.length === 0) return undefined;
+  if (!Number.isSafeInteger(startLine) || !Number.isSafeInteger(endLine) || startLine < 1 || endLine < startLine) {
+    return undefined;
+  }
+  try {
+    const result = runGitSafe(
+      ["log", "--reverse", "-L", `${startLine},${endLine}:${file}`, "--format=%H%x09%s", "-s"],
+      { timeoutMs: GIT_DIFF_TIMEOUT_MS, maxOutputBytes: GIT_DIFF_MAX_BYTES, cwd },
+    );
+    if (result.code !== 0 || result.timedOut) return undefined;
+    const line = result.stdout.split(/\r?\n/).find((l) => l.trim().length > 0);
+    if (line === undefined) return undefined;
+    const tab = line.indexOf("\t");
+    if (tab === -1) return undefined;
+    const commit = line.slice(0, tab).trim();
+    const subject = redactSecretsAtBoundary(line.slice(tab + 1).trim());
+    if (commit.length === 0 || subject.length === 0) return undefined;
+    return { commit: commit.slice(0, 7), subject };
+  } catch {
+    return undefined;
+  }
+}
+
 /** Format diff lines for CLI support sink (e.g. detail()). */
 export function formatGitDiffLines(diffResult: GitDiffResult | undefined): string[] {
   if (diffResult === undefined || !diffResult.diff.trim()) {

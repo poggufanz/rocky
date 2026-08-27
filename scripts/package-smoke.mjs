@@ -131,6 +131,10 @@ function allowedPackPath(path) {
     || path.startsWith("dist/ai/")
     || path.startsWith("dist/agent/")
     || path.startsWith("dist/shell/")
+    || path.startsWith("dist/gui/")
+    || path.startsWith("assets/gui/")
+    || path === "assets/teach-agent.md"
+    || path === "assets/teach-agent.en.md"
     || path === "skills/rocky-voice/SKILL.md"
     || path === "skills/rocky-voice/agents/openai.yaml";
 }
@@ -150,7 +154,10 @@ function assertPackResult(packed) {
       normalized,
       /(^|\/)test(\/|$)|\.test\.|(^|\/)src(\/|$)|fixture|cache|validation|\.rocky-managed\.json/i,
     );
-    if (normalized !== "dist/commands/model.js") assert.doesNotMatch(normalized, /model|weight/i);
+    // the no-weights guard exempts the two source files whose names say
+    // "model" without shipping one: the model command and the models.dev
+    // name catalog the gui renders
+    if (normalized !== "dist/commands/model.js" && normalized !== "dist/gui/models-dev.js") assert.doesNotMatch(normalized, /model|weight/i);
   }
   for (const required of [
     "LICENSE",
@@ -691,12 +698,20 @@ async function main() {
   assert.match(triple.rationale.text, /\[redacted github token\]/);
   assert.doesNotMatch(JSON.stringify(triple), /ghp_/);
   assert.equal(spoolEntries().some((name) => name.endsWith(".jsonl") || name.endsWith(".lock")), false);
+  // Label coalescing (cap 1, "@<seconds> " stamp, newest wins): the turn's
+  // mapping label is queued inside annotateBatch, then annotateCommand queues
+  // the once-a-week digest hint, which replaces it. Wait for the final state
+  // so the assertion cannot land between the two writes.
+  waitFor(() => {
+    const lines = readFileSync(labelsPath, "utf8").split("\n").filter(Boolean);
+    return lines.some((line) => line.replace(/^@\d+ /, "") === "week of work in memory. rocky digest, question");
+  });
   const queuedLabels = readFileSync(labelsPath, "utf8").split("\n").filter(Boolean);
-  assert.equal(queuedLabels.length, 2, "installed Claude turn must queue mapping plus first weekly digest hint");
+  assert.equal(queuedLabels.length, 1, "installed Claude turn leaves one coalesced label");
   assert.match(
     queuedLabels[0] ?? "",
-    /^you say "move button down"\. it is margin-top\. I think\. check, question$/u,
-    "installed Claude turn must queue deterministic mapping label",
+    /^@\d+ week of work in memory\. rocky digest, question$/u,
+    "the surviving label is the stamped weekly digest hint",
   );
   assert.doesNotMatch(queuedLabels[0] ?? "", /ghp_/u, "queued label must not contain raw token");
   assert.doesNotMatch(
@@ -704,15 +719,11 @@ async function main() {
     /[\u0000-\u001f\u007f-\u009f\u200e\u200f\u202a-\u202e\u2066-\u2069]/u,
     "queued label must contain no control or bidi characters",
   );
-  assert.equal(
-    queuedLabels[1],
-    "week of work in memory. rocky digest, question",
-    "installed first weekly turn must queue the bounded digest hint after its mapping label",
-  );
 
   // Exercise the installed Codex adapter through both current stdin hooks and
   // legacy notify argv. The same turn identity must produce one deterministic,
-  // redacted triple and one additional passive label.
+  // redacted triple and one coalesced label; the weekly hint marker is fresh,
+  // so no second digest hint is queued.
   const codexSecret = "ghp_" + "b".repeat(36);
   const codexModernPayloads = [
     {
@@ -774,13 +785,13 @@ async function main() {
   assert.match(codexTriple.rationale.text, /\[redacted github token\]/);
   assert.doesNotMatch(JSON.stringify(codexTriple), /ghp_/);
   const labelsAfterCodex = readFileSync(labelsPath, "utf8").split("\n").filter(Boolean);
-  assert.equal(labelsAfterCodex.length, 3, "installed Codex turn must queue one additional label without repeating weekly hint");
+  assert.equal(labelsAfterCodex.length, 1, "installed Codex turn leaves one coalesced label without repeating the weekly hint");
   assert.match(
-    labelsAfterCodex[2] ?? "",
-    /^you say "move card right"\. it is margin-left\. I think\. check, question$/u,
+    labelsAfterCodex[0] ?? "",
+    /^@\d+ you say "move card right"\. it is margin-left\. I think\. check, question$/u,
     "installed Codex turn must queue deterministic mapping label",
   );
-  assert.doesNotMatch(labelsAfterCodex[2] ?? "", /ghp_/u, "Codex label must not contain raw token");
+  assert.doesNotMatch(labelsAfterCodex[0] ?? "", /ghp_/u, "Codex label must not contain raw token");
 
   // Setup dogfood uses explicit consent in an isolated HOME. The Claude
   // settings parent exists and remains private; Codex TOML is only printed.

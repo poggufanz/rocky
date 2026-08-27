@@ -6,6 +6,7 @@ import { canonicalPath } from "../core/memory-read.js";
 import type { FailureOrigin, FailureRecord, FixRecord, LinkConfidence, MemoryRecord, TripleRecord } from "../core/memory-read.js";
 import { hasCanonicalKnowledgeProof } from "../core/memory-query.js";
 import type { KnowledgeSearchHit, RecallHit, RecentFailureHit, WhyFilePossible } from "../core/memory-query.js";
+import type { ExplainRecord } from "../core/memory-read.js";
 import { redactSecretsAtBoundary, replaceAnsiAndControls, stripInvisibleControls } from "../core/redact.js";
 
 export const MAX_FIELD_BYTES = 16 * 1024;
@@ -412,6 +413,46 @@ function projectTripleFile(
   if (file.provenance !== undefined) projected.provenance = file.provenance;
   if (exposure === "raw" && file.excerpt !== undefined) {
     projected.excerpt = projectText(file.excerpt, exposure, `files[${index}].excerpt`, truncation);
+  }
+  return projected;
+}
+
+export interface ProjectedTeachCard {
+  header: string;
+  lines: readonly string[];
+  evidence: string;
+  expandable: boolean;
+  match: "hash" | "similarity" | "ladder";
+  recordId?: string;
+  source?: string;
+  truncatedFields: readonly string[];
+}
+
+/**
+ * Project a teach card (header/lines/evidence from the renderers) plus the
+ * match kind and, for a witness, the record id and source label. Under
+ * sanitized exposure every string is redacted and the record id stays opaque;
+ * the witness cwd is never projected. Assumed evidence (ladder) carries no
+ * record id at all.
+ */
+export function projectExplain(
+  card: { header: string; lines: readonly string[]; evidence: string; expandable: boolean },
+  match: "hash" | "similarity" | "ladder",
+  record: ExplainRecord | undefined,
+  exposure: Exposure,
+): ProjectedTeachCard {
+  const truncation: Truncation = { fields: [] };
+  const projected: ProjectedTeachCard = {
+    header: projectText(card.header, exposure, "header", truncation),
+    lines: projectStringArray(card.lines, exposure, "lines", truncation),
+    evidence: projectText(card.evidence, exposure, "evidence", truncation),
+    expandable: card.expandable,
+    match,
+    truncatedFields: truncation.fields,
+  };
+  if (record !== undefined) {
+    projected.recordId = projectOpaqueId(record.id, "record.id", truncation, exposure === "sanitized");
+    projected.source = projectText(record.source, exposure, "record.source", truncation);
   }
   return projected;
 }

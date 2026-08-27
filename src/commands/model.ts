@@ -33,8 +33,8 @@ interface UseRequest {
   exposure: Exposure;
 }
 
-const TINY = { label: "Tiny", name: "qwen3:0.6b-q4_K_M", size: "523 MB" } as const;
-const BALANCED = { label: "Balanced", name: "qwen3.5:2b-q4_K_M", size: "1.9 GB" } as const;
+const TINY = { label: "tiny", name: "qwen3:0.6b-q4_K_M", size: "523 MB" } as const;
+const BALANCED = { label: "balanced", name: "qwen3.5:2b-q4_K_M", size: "1.9 GB" } as const;
 export const MODEL_USE_DEADLINE_MS = 30_000;
 
 function defaultDependencies(): ModelDependencies {

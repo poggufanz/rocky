@@ -18,12 +18,14 @@ import { dirname } from "node:path";
 import { appendPayload } from "../agent/spool.js";
 import { parseClaudeHookPayload, type ParsedHookPayload } from "../agent/adapters/claude-code.js";
 import { parseCodexHookPayload } from "../agent/adapters/codex.js";
+import { snippetFromToolInput } from "../agent/explain-extract.js";
+import { spoolPendingSnippet, takePendingSnippet } from "../agent/pending-explain.js";
 import { loadConfig } from "../core/config-read.js";
 import { redactSecretsAtBoundary, replaceAnsiAndControls } from "../core/redact.js";
 import { utf8Prefix } from "../core/utf8.js";
 import { resolveRockyPaths, type RockyPaths } from "../core/state-paths.js";
-import { canonicalPath, loadMemory, type MemoryRecord } from "../core/memory-read.js";
-import { recordRationale } from "../core/memory.js";
+import { canonicalPath, loadMemory, MAX_RATIONALE_FILES, type MemoryRecord } from "../core/memory-read.js";
+import { recordExplain, recordRationale } from "../core/memory.js";
 import { weakLinkFor } from "../agent/logs/capture.js";
 import { filesystemIdentity, NO_FOLLOW_FLAG, regularDescriptorSafe, sameFilesystemIdentity } from "../core/fs-safety.js";
 import { MAX_BASELINE_FILES, type AgentEvent, type IntentEvent, type TurnBaseline } from "../agent/schema.js";
@@ -56,6 +58,14 @@ export interface AgentHookDeps {
    * their normal payload handling instead of replacing it.
    */
   rationale?: string;
+  /**
+   * `--explain-code <text>` / `--explain-business <text>` from the CLI. The
+   * notify lane writes an `explain` record per `--files` entry only when both
+   * are present and `--files` has at least one entry; the PostToolUse lane's
+   * spooled snippet is joined when it was captured for that exact path.
+   */
+  explainCode?: string;
+  explainBusiness?: string;
   /**
    * `--files a.ts,b.ts` from the CLI. Currently only accepted for interface
    * parity — it is not persisted and does not affect linking (that stays a
@@ -308,6 +318,42 @@ function writeNotifyRationale(agent: "claude-code" | "codex" | "generic", deps: 
   }
 }
 
+/**
+ * Notify-lane explain write, sibling of `writeNotifyRationale`, shared by
+ * `generic` and (additively) by `claude-code`/`codex`. Argv-only: fires only
+ * when BOTH `--explain-code` and `--explain-business` are present AND `--files`
+ * has at least one entry; any half-formed flag set is skipped, never thrown —
+ * the caller's fail-open contract stays intact. For each bounded file, a
+ * PostToolUse spooled snippet captured for that exact path is joined.
+ */
+function writeNotifyExplain(agent: "claude-code" | "codex" | "generic", deps: AgentHookDeps, paths: RockyPaths): void {
+  try {
+    const code = deps.explainCode;
+    const business = deps.explainBusiness;
+    const files = deps.files;
+    if (typeof code !== "string" || code.length === 0
+        || typeof business !== "string" || business.length === 0
+        || !Array.isArray(files) || files.length === 0) {
+      return;
+    }
+    const now = deps.now?.() ?? Date.now();
+    const cwd = process.cwd();
+    for (const file of files.slice(0, MAX_RATIONALE_FILES)) {
+      const pending = takePendingSnippet(file);
+      recordExplain({
+        cwd,
+        path: file,
+        source: `agent:${agent}`,
+        code,
+        business,
+        snippet: pending?.snippet,
+      }, paths);
+    }
+  } catch {
+    safeLogFailure(paths);
+  }
+}
+
 function defaultBaselineGit(args: string[], cwd: string): string | undefined {
   try {
     const result = spawnSync("git", args, {
@@ -526,6 +572,40 @@ function applyParsedEvent(parsed: ParsedHookPayload, paths: RockyPaths, deps: Ag
 }
 
 /**
+ * PostToolUse payload-lane spool, additive to the existing Claude payload
+ * handling: for `hook_event_name === "PostToolUse"` with tool_name in
+ * {Edit, Write, MultiEdit}, extract the written hunk via snippetFromToolInput
+ * and spool it under the file path. Never blocks or throws; a raw payload
+ * walk is independent of whether the adapter ultimately accepts the event.
+ */
+function spoolPostToolUseSnippet(payload: unknown): void {
+  try {
+    if (typeof payload !== "object" || payload === null || Array.isArray(payload)) return;
+    const record = payload as Record<string, unknown>;
+    if (record.hook_event_name !== "PostToolUse") return;
+    const toolName = typeof record.tool_name === "string" ? record.tool_name : "";
+    if (toolName !== "Edit" && toolName !== "Write" && toolName !== "MultiEdit") return;
+    const snippet = snippetFromToolInput(toolName, record.tool_input);
+    if (typeof snippet !== "string" || snippet.length === 0) return;
+    const input = record.tool_input;
+    if (typeof input !== "object" || input === null || Array.isArray(input)) return;
+    const toolInput = input as Record<string, unknown>;
+    let filePath: unknown;
+    if (toolName === "MultiEdit") {
+      const edits = toolInput.edits;
+      filePath = Array.isArray(edits) && edits.length > 0 && typeof edits[0] === "object" && edits[0] !== null
+        ? (edits[0] as Record<string, unknown>).file_path
+        : undefined;
+    } else {
+      filePath = toolInput.file_path;
+    }
+    if (typeof filePath === "string" && filePath.length > 0) spoolPendingSnippet(filePath, snippet);
+  } catch {
+    // Spooling is derived state; never block or throw from the payload lane.
+  }
+}
+
+/**
  * Consume one vendor hook payload. This boundary is deliberately fail-open:
  * every input, dependency, filesystem, and stdout failure still returns zero.
  */
@@ -538,6 +618,7 @@ export async function agentEvent(adapter: string, deps: AgentHookDeps = {}): Pro
       // Generic is argv-only: no vendor payload exists, so there is nothing
       // to read from stdin and nothing to parse.
       writeNotifyRationale("generic", effectiveDeps, paths);
+      writeNotifyExplain("generic", effectiveDeps, paths);
     } else if (adapter !== "claude-code" && adapter !== "codex") {
       logHookError(`unknown adapter ${safeAdapterLabel(adapter)}`, paths);
     } else {
@@ -567,6 +648,7 @@ export async function agentEvent(adapter: string, deps: AgentHookDeps = {}): Pro
           throw new OversizedInputError();
         }
         const payload: unknown = JSON.parse(raw);
+        if (adapter === "claude-code") spoolPostToolUseSnippet(payload);
         const parsed = adapter === "codex"
           ? parseCodexHookPayload(payload, effectiveDeps.now?.())
           : parseClaudeHookPayload(payload, effectiveDeps.now?.());
@@ -577,6 +659,7 @@ export async function agentEvent(adapter: string, deps: AgentHookDeps = {}): Pro
       if (typeof effectiveDeps.rationale === "string" && effectiveDeps.rationale.trim().length > 0) {
         writeNotifyRationale(adapter, effectiveDeps, paths);
       }
+      writeNotifyExplain(adapter, effectiveDeps, paths);
     }
   } catch {
     safeLogFailure(paths);

@@ -1,0 +1,30 @@
+  ROCKY  2 remembered · 2 files                                              ≣ teaching witness.ts  
+┌─ lines · witness.ts ───────────────────────────────────────────┐┌─ why ──────────────────────────┐
+│  export async function loadFeed() {                            ││ rocky heard this. agent say    │
+│    const first = await fetchRows();                            ││ why, rocky remember            │
+│    const second = await fetchRows();                           ││                                │
+│    const third = await fetchRows();                            ││ code: documents only, no       │
+│    const fourth = await fetchRows();                           ││ duplicates                     │
+│    const fifth = await fetchRows();                            ││ business: journal accepts      │
+│    const sixth = await fetchRows();                            ││ DOCENTRY documents only, token │
+│    const seventh = await fetchRows();                          ││ [redacted github token] stays  │
+│    const eighth = await fetchRows();                           ││ local                          │
+│    const ninth = await fetchRows();                            ││ form: async because await used │
+│▎   const tenth = await fetchRows();                            ││ at line 5 · catalog            │
+│    const eleventh = await fetchRows();                         ││                                │
+│    const twelfth = await fetchRows();                          ││ source: agent:claude-code · 2h │
+│    return first;                                               ││ ago                            │
+│  }                                                             ││                                │
+│                                                                ││                                │
+│                                                                ││                                │
+│                                                                ││                                │
+│                                                                ││                                │
+│                                                                ││                                │
+│                                                                ││                                │
+│                                                                ││                                │
+│                                                                ││                                │
+└────────────────────────────────────────────────────────────────┘└────────────────────────────────┘
+┌─ selection ──────────────────────────────────────────────────────────────────────────────────────┐
+│ sel 5–11  enter teach · s extend · e expand · esc files                                          │
+└──────────────────────────────────────────────────────────────────────────────────────────────────┘
+ ROCKY   ↑↓  move   s  extend   enter  teach   e  expand   esc  files       local only · no egress  

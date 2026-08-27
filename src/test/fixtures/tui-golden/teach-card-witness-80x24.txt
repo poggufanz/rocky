@@ -1,0 +1,24 @@
+  ROCKY  2 remembered · 2 files                          ≣ teaching witness.ts  
+┌─ lines · witness.ts ───────────────────────────┐┌─ why ──────────────────────┐
+│  export async function loadFeed() {            ││ rocky heard this. agent    │
+│    const first = await fetchRows();            ││ say why, rocky remember    │
+│    const second = await fetchRows();           ││                            │
+│    const third = await fetchRows();            ││ code: documents only, no   │
+│    const fourth = await fetchRows();           ││ duplicates                 │
+│    const fifth = await fetchRows();            ││ business: journal accepts  │
+│    const sixth = await fetchRows();            ││ DOCENTRY documents only,   │
+│    const seventh = await fetchRows();          ││ token [redacted github     │
+│    const eighth = await fetchRows();           ││ token] stays local         │
+│    const ninth = await fetchRows();            ││ form: async because await  │
+│▎   const tenth = await fetchRows();            ││ used at line 5 · catalog   │
+│    const eleventh = await fetchRows();         ││                            │
+│    const twelfth = await fetchRows();          ││ source: agent:claude-code  │
+│    return first;                               ││ · 2h ago                   │
+│  }                                             ││                            │
+│                                                ││                            │
+│                                                ││                            │
+└────────────────────────────────────────────────┘└────────────────────────────┘
+┌─ selection ──────────────────────────────────────────────────────────────────┐
+│ sel 5–11  enter teach · s extend · e expand · esc files                      │
+└──────────────────────────────────────────────────────────────────────────────┘
+ ROCKY   ↑↓  move   s  extend   enter  teach   e  expand   esc  files           

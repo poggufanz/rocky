@@ -355,9 +355,9 @@ export function codexConfigSnippet(command: string): string {
 export function printCodexAgentHooks(command = rockyHookCommand("codex")): void {
   heading("Codex agent hooks");
   detail(codexConfigSnippet(command));
-  say("codex config is toml. I not touch it. you paste, I listen.");
-  detail("Trust warning: review and trust changed command hooks through Codex /hooks before they run.");
-  detail("Rationale gate needs Claude Code hooks. Other agents use notify lane, no deny there.");
+  say("Codex config is toml. I not touch it. you paste, I listen.");
+  detail("trust warning: review and trust changed command hooks through Codex /hooks before they run.");
+  detail("rationale gate needs Claude Code hooks. other agents use notify lane, no deny there.");
 }
 
 /** Build the exact Claude Code event groups owned by Rocky. */

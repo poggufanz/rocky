@@ -2,6 +2,18 @@
 
 Notable changes per release. Dates are the release date.
 
+## 0.8.0 — 27 August 2026
+
+A major release introducing a local browser GUI to replace the terminal dashboard, teach mode with deterministic evidence ladders and witness record capture, and bounded secret scrubbing:
+
+- **Local browser GUI replaces terminal dashboard.** `rocky` and `rocky dash` open a local web page on `127.0.0.1` in your default browser. Both commands share one loopback server with `Main` and `Dash` tabs. Default port is `7777` with automatic port fallback and `--no-open`/`--port` options. Security controls enforce random 128-bit launch tokens in `X-Rocky-Token` headers, `Host` header verification against DNS rebinding, and path confinement to the launch repository.
+- **Visual teach cards and repository filtering.** Selecting code in the Dash pane displays a `Why, question` action to open an inline evidence popup. The Dash file tree groups files by repository root and supports search with exclusion patterns (`!pattern`). The comparison view supports side-by-side diffs, single-side swaps, and strict line or loose file matching.
+- **Optional BYOK model provider (beta).** Settings configures an optional OpenAI-compatible or Anthropic endpoint, key, and model. Keys are stored in `~/.rocky/gui.json` with `0600` permissions. Model responses are marked `Model Guess (Beta)` in grey with prompt redaction and concurrency limits. Models.dev catalog integration caches validated options weekly.
+- **Teach mode (`rocky teach`).** Inspects why specific code exists: `rocky teach <file>[:<line>] [--ladder] [--stdin] [--quiet]`. Authoring agents record rationale into append-only `explain` records (`--explain-code` and `--explain-business`). PostToolUse hooks spool written hunks, and notify hooks link them into memory.
+- **Deterministic why-ladder on cache miss.** When no witness record exists, Rocky walks local evidence (AST constructs, enclosing functions, callee definitions, adjacent comments, test references, git log commit history, and PSR-4 PHP `use` statements) up to five hops without disk writes.
+- **Eighth MCP tool (`teach_lookup`).** Bounded read-only sanitized MCP tool returning witness cards or assembled ladders.
+- **Path hygiene.** The `--files` parser discards shell fragments, operators, and invalid paths before saving records.
+
 ## 0.7.6 — 22 August 2026
 
 A minor release adding a full terminal dashboard surface and a retrieval bug fix:

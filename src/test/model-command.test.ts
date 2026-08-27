@@ -122,7 +122,7 @@ test("model use rejects missing names and non-exact raw exposure flags before co
   }
 });
 
-test("model use with no installed models offers Tiny and Balanced manual pulls without downloading", async () => {
+test("model use with no installed models offers tiny and balanced manual pulls without downloading", async () => {
   const ollama = fakeOllama([]);
   const output = await captureStderr(() => model(["use", "qwen3:0.6b-q4_K_M"], {
     ollama: ollama.client,
@@ -131,8 +131,8 @@ test("model use with no installed models offers Tiny and Balanced manual pulls w
   }));
 
   assert.equal(output.code, 1);
-  assert.match(output.stderr, /Tiny.*qwen3:0\.6b-q4_K_M.*523 MB/s);
-  assert.match(output.stderr, /Balanced.*qwen3\.5:2b-q4_K_M.*1\.9 GB/s);
+  assert.match(output.stderr, /^tiny.*qwen3:0\.6b-q4_K_M.*523 MB/m);
+  assert.match(output.stderr, /^balanced.*qwen3\.5:2b-q4_K_M.*1\.9 GB/m);
   assert.match(output.stderr, /download size is not peak RAM/i);
   assert.match(output.stderr, /ollama pull qwen3:0\.6b-q4_K_M/);
   assert.match(output.stderr, /ollama pull qwen3\.5:2b-q4_K_M/);

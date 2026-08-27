@@ -5,7 +5,7 @@
  * Public surface:
  *   rocky run "<command>"     run a command; Rocky remembers failures & fixes
  *   rocky recall [--ai] <query> search Rocky's memory of past errors
- *   rocky dash                browse memory, interactive
+ *   rocky | rocky dash        open the local GUI on 127.0.0.1
  *   rocky hook|mcp|model|setup distribution bridge commands
  *   rocky watch|check|what|how|why|digest|quiz|export v0.3–v0.5 surfaces
  *   rocky --help
@@ -18,12 +18,14 @@ import { watch } from "./commands/watch.js";
 import { recall } from "./commands/recall.js";
 import { model } from "./commands/model.js";
 import { dashCommand } from "./commands/dash.js";
+import { guiCommand } from "./commands/gui.js";
 import { stats } from "./commands/stats.js";
 import { hookFail, hookInstall, hookStatus, hookSuccess, hookUninstall } from "./commands/hook.js";
 import { mcp } from "./commands/mcp.js";
 import { setup } from "./commands/setup.js";
 import { check } from "./commands/check.js";
 import { digest, exportCommand, how, quiz, what, why } from "./commands/dictionary.js";
+import { teach } from "./commands/teach.js";
 import { conceptsCommand } from "./commands/concepts.js";
 import { agentEvent } from "./commands/agent-hook.js";
 import { gateEvent } from "./agent/gate.js";
@@ -36,8 +38,6 @@ import { ambiguityCommand } from "./agent/ambiguity.js";
 import { CliUsageError, parseExactCommand, reportCliUsage } from "./commands/cli-args.js";
 import { PACKAGE_NAME, PACKAGE_VERSION } from "./core/package-info.js";
 import { detail, face, flushHookSpeech, say } from "./ui/rocky.js";
-import { runSurface } from "./ui/tui/surface/shell.js";
-import { surfaceEntry } from "./ui/tui/surface/entry.js";
 
 const HELP = `
 rocky — he remembers, so you don't have to.
@@ -71,6 +71,7 @@ usage:
                             remember how intent became code.
   rocky why [--diff] [--add "<text>"] [--] <file>
                             hear why remembered change touched file.
+  rocky teach <file>[:<line>] [--ladder]   why this code, from witness or evidence
   rocky digest              hear this week's remembered intent pattern.
   rocky quiz                practice newest remembered intent or note; asks, then reveals,
                             deterministic newest-first, stable id tie-break, repeats unchanged
@@ -85,7 +86,10 @@ usage:
   rocky model use [--exposure sanitized|raw] <installed-model>
                             probe an installed Ollama model, then enable local AI.
   rocky model off            disable Rocky local AI. Ollama stays untouched.
-  rocky dash                browse memory, interactive
+  rocky | rocky dash        open local GUI in browser. one link, one route;
+                            dash just starts on the Dash segment. loopback only,
+                            fresh token each launch. --no-open prints URL instead,
+                            --port=<n> picks port. ctrl-c stops rocky.
   rocky stats               what Rocky holds in memory.
   rocky journal "<note>"    write one line dogfood note. local file only.
   rocky invariants          list remembered invariant notes from .rocky/invariants.md
@@ -143,14 +147,18 @@ type HookRequest =
     adapter: "claude-code" | "codex" | "generic";
     argvPayload?: string;
     rationale?: string;
+    explainCode?: string;
+    explainBusiness?: string;
     files?: string[];
   }
   | { kind: "gate-event"; vendor: string };
 
 interface NotifyFlags {
   rationale?: string;
+  explainCode?: string;
+  explainBusiness?: string;
   files?: string[];
-  /** Everything left after `--rationale`/`--files` are consumed. */
+  /** Everything left after `--rationale`/`--explain-*`/`--files` are consumed. */
   positionals: string[];
 }
 
@@ -159,15 +167,17 @@ function isFlagToken(value: string | undefined): boolean {
 }
 
 /**
- * Pull `--rationale <text>` and `--files a,b` out of one `agent-event`
- * invocation's trailing args, in any order, leaving everything else as
- * positionals (codex's optional payload). A flag with a missing or
- * flag-shaped value is dropped, not thrown — this endpoint stays fail-open
- * end to end, including at argument parsing.
+ * Pull `--rationale <text>`, `--explain-code <text>`, `--explain-business <text>`
+ * and `--files a,b` out of one `agent-event` invocation's trailing args, in
+ * any order, leaving everything else as positionals (codex's optional payload).
+ * A flag with a missing or flag-shaped value is dropped, not thrown — this
+ * endpoint stays fail-open end to end, including at argument parsing.
  */
 function parseNotifyFlags(args: readonly string[]): NotifyFlags {
   const positionals: string[] = [];
   let rationale: string | undefined;
+  let explainCode: string | undefined;
+  let explainBusiness: string | undefined;
   let files: string[] | undefined;
   for (let i = 0; i < args.length; i += 1) {
     const arg = args[i];
@@ -175,6 +185,22 @@ function parseNotifyFlags(args: readonly string[]): NotifyFlags {
       const value = args[i + 1];
       if (typeof value === "string" && !isFlagToken(value)) {
         rationale = value;
+        i += 1;
+      }
+      continue;
+    }
+    if (arg === "--explain-code") {
+      const value = args[i + 1];
+      if (typeof value === "string" && !isFlagToken(value)) {
+        explainCode = value;
+        i += 1;
+      }
+      continue;
+    }
+    if (arg === "--explain-business") {
+      const value = args[i + 1];
+      if (typeof value === "string" && !isFlagToken(value)) {
+        explainBusiness = value;
         i += 1;
       }
       continue;
@@ -190,7 +216,13 @@ function parseNotifyFlags(args: readonly string[]): NotifyFlags {
     }
     positionals.push(arg);
   }
-  return { ...(rationale === undefined ? {} : { rationale }), ...(files === undefined ? {} : { files }), positionals };
+  return {
+    ...(rationale === undefined ? {} : { rationale }),
+    ...(explainCode === undefined ? {} : { explainCode }),
+    ...(explainBusiness === undefined ? {} : { explainBusiness }),
+    ...(files === undefined ? {} : { files }),
+    positionals,
+  };
 }
 
 function parseHookArgs(argv: readonly string[]): HookRequest {
@@ -204,19 +236,28 @@ function parseHookArgs(argv: readonly string[]): HookRequest {
   if (subcommand === "agent-event") {
     const [adapter, ...flagArgs] = rest;
     if (adapter === "generic" || adapter === "claude-code") {
-      const { rationale, files, positionals } = parseNotifyFlags(flagArgs);
+      const { rationale, explainCode, explainBusiness, files, positionals } = parseNotifyFlags(flagArgs);
       if (positionals.length === 0) {
-        return { kind: "agent-event", adapter, ...(rationale === undefined ? {} : { rationale }), ...(files === undefined ? {} : { files }) };
+        return {
+          kind: "agent-event",
+          adapter,
+          ...(rationale === undefined ? {} : { rationale }),
+          ...(explainCode === undefined ? {} : { explainCode }),
+          ...(explainBusiness === undefined ? {} : { explainBusiness }),
+          ...(files === undefined ? {} : { files }),
+        };
       }
     }
     if (adapter === "codex") {
-      const { rationale, files, positionals } = parseNotifyFlags(flagArgs);
+      const { rationale, explainCode, explainBusiness, files, positionals } = parseNotifyFlags(flagArgs);
       if (positionals.length === 0 || positionals.length === 1) {
         return {
           kind: "agent-event",
           adapter,
           ...(positionals.length === 1 ? { argvPayload: positionals[0] } : {}),
           ...(rationale === undefined ? {} : { rationale }),
+          ...(explainCode === undefined ? {} : { explainCode }),
+          ...(explainBusiness === undefined ? {} : { explainBusiness }),
           ...(files === undefined ? {} : { files }),
         };
       }
@@ -272,15 +313,11 @@ async function runGateEvent(vendor: string): Promise<number> {
 
 async function main(): Promise<number> {
   const [, , command, ...rest] = process.argv;
-  if (command === undefined) {
-    const route = surfaceEntry(undefined, process.stdout.isTTY === true && process.stdin.isTTY === true);
-    if ("surface" in route && route.surface === "home") {
-      return runSurface({
-        stdout: process.stdout,
-        stdin: process.stdin,
-        env: process.env,
-        view: "home",
-      });
+  if (command === undefined || command === "--no-open" || command?.startsWith("--port=")) {
+    const flags = command === undefined ? [] : [command, ...rest];
+    // A browser needs a human at the keyboard, so a pipe falls through to help.
+    if (process.stdout.isTTY === true && process.stdin.isTTY === true) {
+      return guiCommand(flags, "main");
     }
   }
   try {
@@ -319,6 +356,8 @@ async function main(): Promise<number> {
         return how(rest);
       case "why":
         return why(rest);
+      case "teach":
+        return teach(rest);
       case "digest":
         return digest(rest);
       case "quiz":
@@ -342,6 +381,8 @@ async function main(): Promise<number> {
               return agentEvent(parsed.adapter, {
                 ...(parsed.argvPayload === undefined ? {} : { argvPayload: parsed.argvPayload }),
                 ...(parsed.rationale === undefined ? {} : { rationale: parsed.rationale }),
+                ...(parsed.explainCode === undefined ? {} : { explainCode: parsed.explainCode }),
+                ...(parsed.explainBusiness === undefined ? {} : { explainBusiness: parsed.explainBusiness }),
                 ...(parsed.files === undefined ? {} : { files: parsed.files }),
               });
             }

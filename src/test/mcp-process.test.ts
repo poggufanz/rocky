@@ -222,7 +222,7 @@ async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: str
 
 function assertToolCatalog(response: JsonRpcResponse): void {
   assert.deepEqual((response.result?.tools as { name: string }[]).map((tool) => tool.name), [
-    "recall", "recent_failures", "stats", "recall_with_ai", "search_knowledge", "fetch_record", "why_file",
+    "recall", "recent_failures", "stats", "recall_with_ai", "search_knowledge", "fetch_record", "why_file", "teach_lookup",
   ]);
   assert.equal(JSON.stringify(response).includes('"cwd"'), false);
 }

@@ -141,6 +141,36 @@ __rocky_sanitize_label() {
   __rocky_safe_label="$__rocky_output"
 }
 
+# Seconds a queued label may wait before it is dropped unspoken. The queue
+# drains one line per prompt, so an agent run that banked labels used to speak
+# them into whatever shell prompted next -- another repo, hours later. Anything
+# older than this is consumed silently instead.
+__rocky_label_ttl=600
+
+# Rewrites __rocky_safe_label in place: strips the "@<seconds> " queue stamp
+# and empties the label when that stamp proves it stale. A line with no stamp,
+# or a shell with no readable clock, has unknown age and still speaks -- Rocky
+# never hides what he cannot judge.
+__rocky_label_fresh() {
+  local __rocky_stamp=""
+  local __rocky_now=""
+  [[ "$__rocky_safe_label" == @* && "$__rocky_safe_label" == *" "* ]] || return 0
+  __rocky_stamp="${__rocky_safe_label#@}"
+  __rocky_stamp="${__rocky_stamp%% *}"
+  [[ "$__rocky_stamp" =~ ^[0-9]+$ ]] || return 0
+  __rocky_safe_label="${__rocky_safe_label#* }"
+  if [[ -n "${EPOCHSECONDS:-}" ]]; then
+    __rocky_now="$EPOCHSECONDS"
+  elif ! printf -v __rocky_now '%(%s)T' -1 2>/dev/null; then
+    __rocky_now=$(command date +%s 2>/dev/null)
+  fi
+  [[ "$__rocky_now" =~ ^[0-9]+$ ]] || return 0
+  if (( __rocky_now > __rocky_stamp && __rocky_now - __rocky_stamp > __rocky_label_ttl )); then
+    __rocky_safe_label=""
+  fi
+  return 0
+}
+
 __rocky_drain_label() (
   local __rocky_labels="$__rocky_home/labels"
   local __rocky_label=""
@@ -174,7 +204,10 @@ __rocky_drain_label() (
     __rocky_proc_pid=""
     __rocky_proc_start=""
     [[ "$__rocky_proc_target" == "self" || "$__rocky_proc_target" =~ ^[1-9][0-9]*$ ]] || return 1
-    IFS= read -r __rocky_proc_line < "/proc/$__rocky_proc_target/stat" 2>/dev/null || return 1
+    # 2>/dev/null must come BEFORE the input redirect: redirections apply left
+    # to right, and a dead owner PID makes the open itself fail — with the
+    # order reversed bash prints "No such file or directory" on every prompt.
+    IFS= read -r __rocky_proc_line 2>/dev/null < "/proc/$__rocky_proc_target/stat" || return 1
     __rocky_proc_pid="${__rocky_proc_line%% *}"
     # comm can contain spaces and ')'; strip through the final ") " so the
     # remaining fields start at state and field 22 is the twentieth token.
@@ -380,6 +413,7 @@ __rocky_drain_label() (
       }
     fi
     __rocky_sanitize_label "$__rocky_label"
+    __rocky_label_fresh
     # Bash 3 has read -n but not read -N. In the C locale -n 1 gives an empty
     # value for a delimiter byte; restore that byte so remainder copy is exact.
     if LC_ALL=C IFS= read -r -n 1 __rocky_probe <&9 2>/dev/null; then

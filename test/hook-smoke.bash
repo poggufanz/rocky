@@ -66,6 +66,23 @@ check "passive labels keep stdout empty" test ! -s "$LABEL_STDOUT"
 check "last passive label removes empty queue" test ! -e "$ROCKY_HOME/labels"
 check "normal passive drain leaves no private claim" test -z "$(find "$ROCKY_HOME" -maxdepth 1 -name '.labels.claim.*' -print -quit)"
 
+# --- stamped labels: fresh speaks without its stamp, stale never speaks -----
+STAMP_STDERR="$TMP/stamp.stderr"
+NOW="$(date +%s)"
+printf '@%s stale label\n@%s fresh label\n' "$((NOW - 4000))" "$NOW" > "$ROCKY_HOME/labels"
+bash --noprofile --norc -i -c '
+  source "$ROCKY_HOME/rocky-hook.bash"
+  __rocky_last_cmd=""
+  __rocky_precmd
+  __rocky_last_cmd=""
+  __rocky_precmd
+' >/dev/null 2>"$STAMP_STDERR"
+check "fresh stamped label prints without its stamp" \
+  grep -qF '[Rocky] fresh label' "$STAMP_STDERR"
+check "stale stamped label never prints" \
+  test "$(grep -cF 'stale label' "$STAMP_STDERR" || true)" -eq 0
+check "stale stamped label is still consumed" test ! -e "$ROCKY_HOME/labels"
+
 # Label fixtures use a separate real home, so malformed queue paths cannot
 # affect the failure/fix checks below. Prompt calls are bounded to keep a
 # regression that opens a FIFO from hanging the smoke gate.
@@ -373,7 +390,7 @@ check "owner rename crash claim is cleaned" \
 
 proc_start_time() { # <pid>; Linux/WSL /proc stat field 22 via final ") "
   local __proc_pid="$1" __proc_line="" __proc_rest=""
-  IFS= read -r __proc_line < "/proc/$__proc_pid/stat" 2>/dev/null || return 1
+  IFS= read -r __proc_line 2>/dev/null < "/proc/$__proc_pid/stat" || return 1
   __proc_rest="${__proc_line##*) }"
   [[ "$__proc_rest" != "$__proc_line" ]] || return 1
   set -- $__proc_rest
@@ -407,6 +424,25 @@ if [[ "$LIVE_OWNER_START" =~ ^[1-9][0-9]*$ ]]; then
   check "mismatched owner claim is cleaned" \
     test -z "$(find "$LABEL_HOME" -maxdepth 1 -name '.labels.claim.*' -print -quit)"
   rm -rf "$LABEL_HOME"/.labels.claim.*
+
+  # A dead owner PID must be reclaimed without bash leaking the failed /proc
+  # open ("No such file or directory") onto the terminal — that leak fired on
+  # every prompt during 2026-08-24 dogfooding.
+  bash -c ':' &
+  DEAD_OWNER_PID=$!
+  wait "$DEAD_OWNER_PID" >/dev/null 2>&1 || true
+  if [[ ! -e "/proc/$DEAD_OWNER_PID" ]]; then
+    rm -rf "$LABEL_HOME"/.labels.claim.* "$LABEL_RACE_DIR"
+    mkdir -p "$LABEL_RACE_DIR" "$LABEL_HOME/.labels.claim.050-dead-owner.work.$DEAD_OWNER_PID.12345.501"
+    printf 'dead owner reclaimed\n' > "$LABEL_HOME/.labels.claim.050-dead-owner.work.$DEAD_OWNER_PID.12345.501/remainder.next.1"
+    run_label_prompt "$LABEL_HOME" C "$LABEL_STDOUT" "$LABEL_STDERR"
+    check "dead owner claim is reclaimed" grep -qF '[Rocky] dead owner reclaimed' "$LABEL_STDERR"
+    check "dead owner probe leaks no bash error" \
+      test "$(grep -a -c 'No such file' "$LABEL_STDERR" || true)" -eq 0
+    rm -rf "$LABEL_HOME"/.labels.claim.*
+  else
+    echo "ok    - dead owner reclaim check skipped (pid still present)"
+  fi
 else
   echo "ok    - /proc owner identity checks skipped"
 fi
