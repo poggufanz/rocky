@@ -620,14 +620,14 @@ function headRow(record) {
 }
 
 /** A record row. Clicking it sends the full intent to the why column. */
-function recordRow(record, extra) {
+function recordRow(record, extra, hideDiff) {
   const item = el("div", `rec${extra ?? ""}`);
   item.tabIndex = 0;
   item.append(headRow(record), el("div", "rec-body", bodyText(record)));
   if (record.shared && record.diff && record.diff.commit && record.diff.commit !== "uncommitted") {
     item.append(el("div", "rec-shared", `shared by ${record.sharedCount} moments in this session`));
   }
-  if (state.showDiff && record.diff) item.append(diffBlock(record.diff));
+  if (state.showDiff && record.diff && !hideDiff) item.append(diffBlock(record.diff));
   const choose = () => {
     for (const other of document.querySelectorAll(".rec.on")) other.classList.remove("on");
     item.classList.add("on");
@@ -651,13 +651,30 @@ function recordRow(record, extra) {
 
 async function renderHistory(pane) {
   const data = await api(`/api/compare?path=${encodeURIComponent(state.file)}`);
-  state.moments = data.records ?? [];
-  $("#sub-note").textContent = `${state.moments.length} moments`;
-  if (state.moments.length === 0) {
+  const changes = data.changes ?? [];
+  const unattributed = data.unattributed ?? [];
+  const witnessCount = changes.reduce((n, c) => n + (c.witnesses?.length ?? 0), 0) + unattributed.length;
+  state.moments = [...changes.flatMap((c) => c.witnesses ?? []), ...unattributed];
+  $("#sub-note").textContent = `${changes.length} changes · ${witnessCount} moments`;
+  if (changes.length === 0 && unattributed.length === 0) {
     fill(pane, empty("nothing heard for this file yet."));
     return;
   }
-  fill(pane, ...state.moments.map((record) => recordRow(record)));
+  fill(
+    pane,
+    ...changes.map((change) => changeCard(change)),
+    ...unattributed.map((record) => recordRow(record, undefined, true)),
+  );
+}
+
+/** One unique change: a single diff block with its witness reasons beneath. */
+function changeCard(change) {
+  const card = el("div", "change");
+  card.append(diffBlock(change.diff));
+  for (const witness of change.witnesses ?? []) {
+    card.append(recordRow(witness, " wit", true));
+  }
+  return card;
 }
 
 /* mode: two moments */
