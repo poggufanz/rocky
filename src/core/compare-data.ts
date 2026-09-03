@@ -525,4 +525,79 @@ export function markSharedMoments<T extends { diff?: { commit?: string } | undef
   });
 }
 
+export interface WitnessMoment {
+  id: string;
+  diff?: { commit?: string; stored?: boolean; after?: boolean; prior?: boolean; rows: DiffRow[] } | undefined;
+}
+
+export type ChangeEpistemic = "recorded" | "committed" | "prior" | "after" | "uncommitted";
+
+export interface ChangeGroup<T> {
+  key: string;
+  commit?: string;
+  epistemic: ChangeEpistemic;
+  diff: DiffResult;
+  witnesses: T[];
+}
+
+/** Placeholder/message rows carry no evidence; only real diff rows do. */
+export function hasRealRows(rows: DiffRow[]): boolean {
+  return rows.some((r) => r.k === "@" || r.k === "+" || r.k === "-");
+}
+
+/**
+ * Group moments by the unique change they witness so one diff is never
+ * rendered twice. Moments are evidence-poor annotations; the change owns
+ * the single diff block. Order is first-witness stable. Never throws:
+ * anything unattributable lands in `unattributed` with its reason intact.
+ */
+export function groupMomentsByChange<T extends WitnessMoment>(
+  moments: T[],
+): { changes: ChangeGroup<T>[]; unattributed: T[] } {
+  const changes: ChangeGroup<T>[] = [];
+  const byKey = new Map<string, ChangeGroup<T>>();
+  const unattributed: T[] = [];
+  const snapshotText = (rows: DiffRow[]): string => rows.map((r) => `${r.k}${r.o ?? ""}:${r.n ?? ""}:${r.t}`).join("\n");
+  for (const m of moments) {
+    const d = m.diff;
+    if (!d || !hasRealRows(d.rows)) {
+      unattributed.push(m);
+      continue;
+    }
+    if (d.commit === "uncommitted") {
+      const key = "uncommitted";
+      let g = byKey.get(key);
+      if (!g) {
+        g = { key, commit: "uncommitted", epistemic: "uncommitted", diff: d as DiffResult, witnesses: [] };
+        byKey.set(key, g);
+        changes.push(g);
+      }
+      g.witnesses.push(m);
+      continue;
+    }
+    if (typeof d.commit === "string" && d.commit.length > 0) {
+      const epistemic: ChangeEpistemic = d.stored ? "recorded" : d.after ? "after" : d.prior ? "prior" : "committed";
+      const key = `${epistemic}:${d.commit}`;
+      let g = byKey.get(key);
+      if (!g) {
+        g = { key, commit: d.commit, epistemic, diff: d as DiffResult, witnesses: [] };
+        byKey.set(key, g);
+        changes.push(g);
+      }
+      g.witnesses.push(m);
+      continue;
+    }
+    const key = `recorded-snapshot:\n${snapshotText(d.rows)}`;
+    let g = byKey.get(key);
+    if (!g) {
+      g = { key, epistemic: "recorded", diff: d as DiffResult, witnesses: [] };
+      byKey.set(key, g);
+      changes.push(g);
+    }
+    g.witnesses.push(m);
+  }
+  return { changes, unattributed };
+}
+
+
 
