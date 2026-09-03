@@ -2,7 +2,7 @@ import { existsSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import type { MemoryRecord } from "./memory-read.js";
 import { redactSecretsAtBoundary } from "./redact.js";
-import { resolveGitDiff } from "./git-diff.js";
+import { resolveGitDiff, firstShaAfter } from "./git-diff.js";
 
 export interface CompareRec {
   kind: string;
@@ -14,6 +14,8 @@ export interface CompareRec {
   machine: boolean;
   summary?: string;
   head?: string;
+  baseHead?: string;
+  snapshot?: string;
   plus?: number;
   minus?: number;
   excerpt?: string;
@@ -50,6 +52,8 @@ export interface DiffRow {
 export interface DiffResult {
   commit?: string;
   prior?: boolean;
+  after?: boolean;
+  stored?: boolean;
   rows: DiffRow[];
 }
 
@@ -108,6 +112,9 @@ export function fileIndex(records: MemoryRecord[]): FileEntry[] {
 
     const source = String(raw.source ?? raw.agent ?? "");
     const head = (raw.mechanism as { head?: string } | undefined)?.head;
+    const gitAnchor = raw.git as { base?: string; snapshot?: string } | undefined;
+    const baseHead = typeof gitAnchor?.base === "string" ? gitAnchor.base : undefined;
+    const snapshot = typeof gitAnchor?.snapshot === "string" ? gitAnchor.snapshot : undefined;
     const cwd = String(raw.cwd ?? "");
 
     const baseRec: CompareRec = {
@@ -120,6 +127,8 @@ export function fileIndex(records: MemoryRecord[]): FileEntry[] {
       machine: isMachine,
       ...(summary !== undefined ? { summary: redactSecretsAtBoundary(summary) } : {}),
       ...(typeof head === "string" ? { head } : {}),
+      ...(baseHead === undefined ? {} : { baseHead }),
+      ...(snapshot === undefined ? {} : { snapshot }),
     };
 
     const seenPathsInRecord = new Set<string>();
@@ -286,6 +295,9 @@ export function parsePatch(patch: string): DiffRow[] {
   return rows;
 }
 
+/** Forward-attribution window for prospective moments; mirrors LINK_WINDOW_MS. */
+export const AFTER_CAP_MS = 8 * 60 * 60 * 1000;
+
 export function diffFor(
   filePath: string,
   rec: CompareRec,
@@ -294,6 +306,7 @@ export function diffFor(
     lsFiles(root: string): string[];
     resolve(opts: { ts: number; head?: string; file: string; cwd: string }): { commit?: string; diff: string } | undefined;
     lastShaBefore(root: string, rel: string, tsIso: string): string;
+    firstShaAfter(root: string, rel: string, opts: { base?: string; ts: number; capMs: number }): string;
   },
 ): DiffResult {
   const buildMsgRows = (messages: string[]): DiffRow[] => {
@@ -312,6 +325,17 @@ export function diffFor(
   };
 
   try {
+    if (typeof rec.snapshot === "string" && rec.snapshot.trim().length > 0) {
+      const shortBase = typeof rec.baseHead === "string" && /^[0-9a-fA-F]{4,128}$/.test(rec.baseHead)
+        ? rec.baseHead.slice(0, 7)
+        : undefined;
+      return {
+        ...(shortBase === undefined ? {} : { commit: shortBase }),
+        stored: true,
+        rows: parsePatch(rec.snapshot),
+      };
+    }
+
     let abs = filePath.replace(/\\/g, "/");
     if (!/^[a-zA-Z]:\//.test(abs) && !abs.startsWith("/") && rec.cwd) {
       abs = rec.cwd.replace(/\\/g, "/").replace(/\/+$/, "") + "/" + abs;
@@ -330,6 +354,19 @@ export function diffFor(
     const res = io.resolve({ ts: rec.ts, head: rec.head, file: rel, cwd: root });
     if (res && res.diff) {
       return { commit: res.commit, rows: parsePatch(res.diff) };
+    }
+
+    if (rec.kind === "rationale") {
+      let child = "";
+      try {
+        child = io.firstShaAfter(root, rel, { base: rec.head ?? rec.baseHead, ts: rec.ts, capMs: AFTER_CAP_MS }) || "";
+      } catch {
+        child = "";
+      }
+      const after = child ? io.resolve({ ts: rec.ts, head: child, file: rel, cwd: root }) : undefined;
+      if (after && after.diff) {
+        return { commit: after.commit, after: true, rows: parsePatch(after.diff) };
+      }
     }
 
     const until = new Date(rec.ts).toISOString();
@@ -375,6 +412,8 @@ export const defaultDiffIo = {
       return "";
     }
   },
+  firstShaAfter: (root: string, rel: string, opts: { base?: string; ts: number; capMs: number }) =>
+    firstShaAfter(root, rel, opts),
 };
 
 /**
@@ -423,6 +462,7 @@ export function getCachedDiff(
     lsFiles(root: string): string[];
     resolve(opts: { ts: number; head?: string; file: string; cwd: string }): { commit?: string; diff: string } | undefined;
     lastShaBefore(root: string, rel: string, tsIso: string): string;
+    firstShaAfter(root: string, rel: string, opts: { base?: string; ts: number; capMs: number }): string;
   } = defaultDiffIo,
 ): DiffResult {
   const key = `${filePath}@${rec.ts}`;
@@ -451,4 +491,21 @@ export function lineOverlapPredicate(
     return spansOverlap(sa, sb);
   };
 }
+
+export function markSharedMoments<T extends { diff?: { commit?: string } | undefined }>(
+  moments: T[],
+): (T & { shared: boolean; sharedCount: number })[] {
+  const counts = new Map<string, number>();
+  for (const m of moments) {
+    const c = m.diff?.commit;
+    if (typeof c === "string" && c !== "uncommitted") counts.set(c, (counts.get(c) ?? 0) + 1);
+  }
+  return moments.map((m) => {
+    const c = m.diff?.commit;
+    const n = typeof c === "string" ? counts.get(c) ?? 0 : 0;
+    const shared = n > 1;
+    return { ...m, shared, sharedCount: shared ? n : 0 };
+  });
+}
+
 
