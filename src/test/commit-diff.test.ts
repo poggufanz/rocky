@@ -72,11 +72,12 @@ test("resolveCommitDiff redacts secrets and sets truncated flag when bounded", {
     assert.ok(got.diff.includes("[redacted"));
     assert.equal(got.truncated, false);
 
-    // Truncated resolution with tiny maxOutputBytes
+    // Truncated resolution with small maxOutputBytes: strict unconditional assertions
     const truncated = resolveCommitDiff({ sha, cwd: dir, maxOutputBytes: 64 });
-    if (truncated !== undefined) {
-      assert.equal(truncated.truncated, true);
-    }
+    assert.ok(truncated !== undefined, "truncated result should not be undefined");
+    assert.equal(truncated.truncated, true, "truncated flag should be true when output exceeds maxOutputBytes");
+    assert.equal(truncated.commit, sha.slice(0, 7));
+    assert.ok(!truncated.diff.includes("ghp_123456789012345678901234567890123456"));
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

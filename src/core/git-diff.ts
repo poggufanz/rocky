@@ -46,7 +46,7 @@ function extractPatchText(raw: string): string {
 function runGitSafe(
   args: readonly string[],
   options: { timeoutMs: number; maxOutputBytes: number; cwd?: string },
-): { code: number; stdout: string; timedOut: boolean } {
+): { code: number; stdout: string; timedOut: boolean; truncated: boolean } {
   try {
     const result = spawnSync("git", args, {
       shell: false,
@@ -57,14 +57,19 @@ function runGitSafe(
       env: { ...process.env, LC_ALL: "C", LANG: "C" },
       ...(options.cwd !== undefined ? { cwd: options.cwd } : {}),
     });
-    const timedOut = result.error !== undefined && (result.error as unknown as { code?: string }).code === "ETIMEDOUT";
+    const errCode = result.error !== undefined ? (result.error as unknown as { code?: string }).code : undefined;
+    const timedOut = errCode === "ETIMEDOUT";
+    const truncated = errCode === "ENOBUFS"
+      || errCode === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER"
+      || (typeof result.stdout === "string" && result.stdout.length >= options.maxOutputBytes - 1);
     return {
       code: result.status ?? (result.error ? 1 : 0),
       stdout: result.stdout ?? "",
       timedOut,
+      truncated,
     };
   } catch {
-    return { code: 1, stdout: "", timedOut: false };
+    return { code: 1, stdout: "", timedOut: false, truncated: false };
   }
 }
 
@@ -257,7 +262,7 @@ function isValidCommitSha(ref: unknown): ref is string {
 
 /**
  * Whole-commit multi-file diff for the bundle surface, via
- * `git diff-tree -p -U2 <sha>` with NO `-- <file>` filter so one commit's
+ * `git diff-tree --root -p -U2 <sha>` with NO `-- <file>` filter so one commit's
  * files stay together. Bounded and fail-open like resolveGitDiff.
  */
 export function resolveCommitDiff(options: CommitDiffOptions): CommitDiffResult | undefined {
@@ -267,14 +272,15 @@ export function resolveCommitDiff(options: CommitDiffOptions): CommitDiffResult 
   const cwd = options.cwd ?? process.cwd();
   try {
     const result = runGitSafe(["diff-tree", "--root", "-p", "-U2", options.sha], { timeoutMs, maxOutputBytes, cwd });
-    if (result.code !== 0 || result.timedOut) return undefined;
+    if (result.timedOut) return undefined;
+    if (result.code !== 0 && !result.truncated) return undefined;
     if (result.stdout.trim().length === 0) return undefined;
     const patch = extractPatchText(result.stdout);
     if (patch.length === 0) return undefined;
     return {
       commit: options.sha.slice(0, 7),
       diff: redactSecretsAtBoundary(patch),
-      truncated: result.stdout.length >= maxOutputBytes - 1,
+      truncated: result.truncated,
     };
   } catch {
     return undefined;
