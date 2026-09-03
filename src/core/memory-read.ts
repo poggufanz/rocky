@@ -147,6 +147,7 @@ export const MAX_RATIONALE_FILE_CHARS = 512;
 export interface RationalePointer { logPath?: string; sessionId?: string; turnRef?: string }
 export interface RationaleLinks { tripleId?: string; fixId?: string; failureId?: string }
 export const MAX_GIT_SNAPSHOT_CHARS = 8 * 1024;
+export const MAX_GIT_SNAPSHOT_PRE_REDACT_CHARS = 64 * 1024;
 export interface GitAnchor {
   base?: string;
   dirty?: boolean;

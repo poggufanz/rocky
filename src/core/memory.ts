@@ -36,7 +36,7 @@ import { resolveRockyPaths } from "./state-paths.js";
 import type { RockyPaths } from "./state-paths.js";
 import { boundTripleMechanism, isCompleteMemoryCoverage, isKnownPathPlatform, isSafeNonNegativeInteger, loadMemoryChecked, MAX_MEMORY_FILE_BYTES, MAX_RATIONALE_FILES, MAX_RATIONALE_FILE_CHARS, MAX_MEMORY_LINE_BYTES, MAX_MEMORY_RECORDS, MAX_SUPPORTED_MEMORY_RECORDS } from "./memory-read.js";
 import type { AliasRecord, AssociationRecord, BriefRunRecord, ExplainRecord, FailureRecord, FixRecord, InvariantTouchRecord, MemoryCoverage, MemoryRecord, NoteRecord, RationaleRecord, TripleRecord } from "./memory-read.js";
-import { MAX_GIT_SNAPSHOT_CHARS, type GitAnchor } from "./memory-read.js";
+import { MAX_GIT_SNAPSHOT_CHARS, MAX_GIT_SNAPSHOT_PRE_REDACT_CHARS, type GitAnchor } from "./memory-read.js";
 import { redactSecretsAtBoundary } from "./redact.js";
 import { plausibleFilePath } from "./compare-data.js";
 import { utf8Slice, utf8SliceFromEnd } from "./utf8.js";
@@ -1410,7 +1410,10 @@ function boundGitAnchor(input: GitAnchor | undefined): { git?: GitAnchor } {
   if (typeof input.base === "string" && input.base.length > 0) git.base = input.base.slice(0, 256);
   if (typeof input.dirty === "boolean") git.dirty = input.dirty;
   if (typeof input.snapshot === "string" && input.snapshot.trim().length > 0) {
-    git.snapshot = redactSecretsAtBoundary(input.snapshot.slice(0, MAX_GIT_SNAPSHOT_CHARS));
+    const rawBounded = input.snapshot.length > MAX_GIT_SNAPSHOT_PRE_REDACT_CHARS
+      ? input.snapshot.slice(0, MAX_GIT_SNAPSHOT_PRE_REDACT_CHARS)
+      : input.snapshot;
+    git.snapshot = redactSecretsAtBoundary(rawBounded).slice(0, MAX_GIT_SNAPSHOT_CHARS);
   }
   if (git.base === undefined && git.dirty === undefined && git.snapshot === undefined) return {};
   return { git };

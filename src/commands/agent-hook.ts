@@ -24,7 +24,7 @@ import { loadConfig } from "../core/config-read.js";
 import { redactSecretsAtBoundary, replaceAnsiAndControls } from "../core/redact.js";
 import { utf8Prefix } from "../core/utf8.js";
 import { resolveRockyPaths, type RockyPaths } from "../core/state-paths.js";
-import { canonicalPath, loadMemory, MAX_GIT_SNAPSHOT_CHARS, MAX_RATIONALE_FILES, type GitAnchor, type MemoryRecord } from "../core/memory-read.js";
+import { canonicalPath, loadMemory, MAX_GIT_SNAPSHOT_CHARS, MAX_GIT_SNAPSHOT_PRE_REDACT_CHARS, MAX_RATIONALE_FILES, type GitAnchor, type MemoryRecord } from "../core/memory-read.js";
 import { recordExplain, recordRationale } from "../core/memory.js";
 import { weakLinkFor } from "../agent/logs/capture.js";
 import { filesystemIdentity, NO_FOLLOW_FLAG, regularDescriptorSafe, sameFilesystemIdentity } from "../core/fs-safety.js";
@@ -292,7 +292,10 @@ function captureGitAnchor(
     const dirty = status === undefined ? undefined : status.trim().length > 0;
     let snapshot: string | undefined;
     if (patch !== undefined && patch.trim().length > 0) {
-      snapshot = redactSecretsAtBoundary(patch.slice(0, MAX_GIT_SNAPSHOT_CHARS));
+      const rawBounded = patch.length > MAX_GIT_SNAPSHOT_PRE_REDACT_CHARS
+        ? patch.slice(0, MAX_GIT_SNAPSHOT_PRE_REDACT_CHARS)
+        : patch;
+      snapshot = redactSecretsAtBoundary(rawBounded).slice(0, MAX_GIT_SNAPSHOT_CHARS);
     }
     if ((head === undefined || head.length === 0) && dirty === undefined && snapshot === undefined) return undefined;
     return {

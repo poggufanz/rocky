@@ -261,3 +261,33 @@ test("generic notify still writes when git is unavailable", async (t) => {
   assert.ok(rec, "record still written without git");
 });
 
+test("generic notify captures and attaches git anchor (base, dirty, snapshot) to explain records", async (t) => {
+  freshHome(t);
+  const { agentEvent } = await import("../commands/agent-hook.js");
+  const result = await captureStdout(() => agentEvent("generic", {
+    explainCode: "refactored parsing loop",
+    explainBusiness: "faster startup time",
+    files: ["src/parser.ts"],
+    git: (args: string[]) => {
+      if (args[0] === "rev-parse") return "head456";
+      if (args[0] === "status") return " M src/parser.ts";
+      if (args[0] === "diff") return "@@ -1 +1 @@\n-slow\n+fast";
+      return "";
+    },
+  }));
+  assert.equal(result.code, 0);
+  assert.equal(result.out, "{}");
+  const { loadMemory } = await import("../core/memory-read.js");
+  const rec = loadMemory().find(isExplain);
+  assert.ok(rec, "explain record written");
+  assert.equal(rec?.path, "src/parser.ts");
+  assert.equal(rec?.code, "refactored parsing loop");
+  assert.equal(rec?.business, "faster startup time");
+  assert.deepEqual(rec?.git, {
+    base: "head456",
+    dirty: true,
+    snapshot: "@@ -1 +1 @@\n-slow\n+fast",
+  });
+});
+
+

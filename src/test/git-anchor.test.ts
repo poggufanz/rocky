@@ -51,18 +51,23 @@ test("parseMemoryRecord rejects malformed git anchors", () => {
 test("recordRationale stores a bounded redacted git anchor", async () => {
   process.env.ROCKY_HOME = mkdtempSync(join(tmpdir(), "rocky-anchor-"));
   const { recordRationale } = await import("../core/memory.js");
+  const token = "ghp_1234567890abcdefghij1234567890abcdefgh";
+  // Position the token spanning across the 8192 MAX_GIT_SNAPSHOT_CHARS boundary:
+  // 8180 'x' characters + space boundary (token starts at 8181, spans through 8224).
   const rec = recordRationale({
     cwd: "/repo", agent: "generic", rationale_fidelity: "summary", source: "notify",
     text: "why", files: ["src/a.ts"],
     git: {
       base: "abc123",
       dirty: true,
-      snapshot: "@@ -1 +1 @@\n+token ghp_1234567890abcdefghij1234567890abcdefgh\n" + "x".repeat(20000),
+      snapshot: "x".repeat(8180) + " " + token + "\n" + "y".repeat(20000),
     },
   });
   assert.equal(rec.git?.base, "abc123");
   assert.equal(rec.git?.dirty, true);
-  assert.ok(rec.git?.snapshot && !rec.git.snapshot.includes("ghp_1234567890abcdefghij1234567890abcdefgh"), "snapshot must be redacted");
+  assert.ok(rec.git?.snapshot, "snapshot must exist");
+  assert.ok(!rec.git.snapshot.includes("ghp_"), "snapshot must completely redact boundary-spanning secret without leaving fragments");
+  assert.ok(rec.git.snapshot.includes("[redacted"), "snapshot should contain redaction placeholder");
   assert.ok(Buffer.byteLength(rec.git.snapshot, "utf8") <= 8192, "snapshot must be bounded");
 });
 
