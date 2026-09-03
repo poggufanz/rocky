@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import {
   resolveGitDiff,
+  firstShaAfter,
   formatGitDiffLines,
   GIT_DIFF_TIMEOUT_MS,
   GIT_DIFF_MAX_BYTES,
@@ -305,4 +306,55 @@ test("MCP why_file supports optional diff parameter and secret redaction", async
   // 3. Call with diff: true (outside real git repo fails open cleanly without error)
   const resDiff = await registry.call("why_file", { path: "src/style.css", diff: true }, signal);
   assert.equal(resDiff.isError, undefined, "why_file with diff: true must succeed even if git diff fails open");
+});
+
+function initTempRepo(): string {
+  const dir = mkdtempSync(join(tmpdir(), "rocky-after-"));
+  execFileSync("git", ["init"], { cwd: dir, stdio: "ignore" });
+  execFileSync("git", ["config", "user.email", "t@t"], { cwd: dir, stdio: "ignore" });
+  execFileSync("git", ["config", "user.name", "t"], { cwd: dir, stdio: "ignore" });
+  return dir;
+}
+
+function commitFile(dir: string, name: string, content: string, message: string): string {
+  writeFileSync(join(dir, name), content);
+  execFileSync("git", ["add", name], { cwd: dir, stdio: "ignore" });
+  execFileSync("git", ["commit", "-m", message], { cwd: dir, stdio: "ignore" });
+  return execFileSync("git", ["rev-parse", "HEAD"], { cwd: dir, encoding: "utf8" }).trim();
+}
+
+test("firstShaAfter finds the first child touching the file", { skip: !hasGit() }, () => {
+  const dir = initTempRepo();
+  try {
+    commitFile(dir, "f.txt", "v1\n", "first");
+    const base = execFileSync("git", ["rev-parse", "HEAD"], { cwd: dir, encoding: "utf8" }).trim();
+    const child = commitFile(dir, "f.txt", "v2\n", "second");
+    assert.equal(firstShaAfter(dir, "f.txt", { base, ts: Date.now() }), child);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("firstShaAfter returns empty when there is no child", { skip: !hasGit() }, () => {
+  const dir = initTempRepo();
+  try {
+    commitFile(dir, "f.txt", "v1\n", "first");
+    const head = execFileSync("git", ["rev-parse", "HEAD"], { cwd: dir, encoding: "utf8" }).trim();
+    assert.equal(firstShaAfter(dir, "f.txt", { base: head, ts: Date.now() }), "");
+    assert.equal(firstShaAfter(dir, "f.txt", { base: "unborn", ts: Date.now() }), "");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("firstShaAfter without base respects the time cap", { skip: !hasGit() }, () => {
+  const dir = initTempRepo();
+  try {
+    commitFile(dir, "f.txt", "v1\n", "first");
+    assert.equal(firstShaAfter(dir, "f.txt", { ts: 1, capMs: 60_000 }), "");
+    const child = commitFile(dir, "f.txt", "v2\n", "second");
+    assert.equal(firstShaAfter(dir, "f.txt", { ts: Date.now() - 60_000, capMs: 8 * 60 * 60 * 1000 }), child);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

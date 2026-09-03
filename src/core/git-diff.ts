@@ -146,6 +146,39 @@ export function resolveGitDiff(options: GitDiffOptions): GitDiffResult | undefin
   return undefined;
 }
 
+function firstShaFromOutput(stdout: string): string {
+  const sha = stdout.split(/\r?\n/).map((line) => line.trim()).find((line) => /^[0-9a-fA-F]{4,128}$/.test(line));
+  return sha ?? "";
+}
+
+/**
+ * Oldest commit after a point that touched a file. With a known base anchor
+ * this is graph-based (`base..HEAD`, oldest first) because commits only point
+ * at parents; without one it is a bounded time lookup that refuses to claim
+ * the far future. Never throws: "" means "no attributable child".
+ */
+export function firstShaAfter(root: string, rel: string, opts: { base?: string; ts: number; capMs?: number }): string {
+  const runOpts = { timeoutMs: GIT_DIFF_TIMEOUT_MS, maxOutputBytes: GIT_DIFF_MAX_BYTES, cwd: root };
+  const base = opts.base;
+  if (typeof base === "string" && base !== "unborn" && isValidGitRef(base)) {
+    const res = runGitSafe(["log", "--reverse", "--format=%H", `${base}..HEAD`, "--", rel], runOpts);
+    if (res.code !== 0 || res.timedOut) return "";
+    return firstShaFromOutput(res.stdout);
+  }
+  if (typeof opts.ts !== "number" || !Number.isSafeInteger(opts.ts) || opts.ts <= 0) return "";
+  const cap = typeof opts.capMs === "number" && Number.isSafeInteger(opts.capMs) && opts.capMs > 0
+    ? opts.capMs
+    : 8 * 60 * 60 * 1000;
+  const since = new Date(opts.ts + 1000).toISOString();
+  const until = new Date(opts.ts + cap).toISOString();
+  const res = runGitSafe(
+    ["log", "--reverse", "--format=%H", "-n", "1", `--since=${since}`, `--until=${until}`, "--", rel],
+    runOpts,
+  );
+  if (res.code !== 0 || res.timedOut) return "";
+  return firstShaFromOutput(res.stdout);
+}
+
 /**
  * First commit that touched a line range of a file, via `git log --reverse -L`.
  * Returns the oldest commit plus its (secret-redacted) subject, or undefined on
