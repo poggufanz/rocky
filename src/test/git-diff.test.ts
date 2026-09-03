@@ -350,10 +350,30 @@ test("firstShaAfter returns empty when there is no child", { skip: !hasGit() }, 
 test("firstShaAfter without base respects the time cap", { skip: !hasGit() }, () => {
   const dir = initTempRepo();
   try {
-    commitFile(dir, "f.txt", "v1\n", "first");
+    commitFile(dir, "other.txt", "v1\n", "first");
     assert.equal(firstShaAfter(dir, "f.txt", { ts: 1, capMs: 60_000 }), "");
     const child = commitFile(dir, "f.txt", "v2\n", "second");
     assert.equal(firstShaAfter(dir, "f.txt", { ts: Date.now() - 60_000, capMs: 8 * 60 * 60 * 1000 }), child);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("firstShaAfter returns the earliest child commit when multiple commits touch the file", { skip: !hasGit() }, () => {
+  const dir = initTempRepo();
+  try {
+    commitFile(dir, "init.txt", "init\n", "initial");
+    const base = execFileSync("git", ["rev-parse", "HEAD"], { cwd: dir, encoding: "utf8" }).trim();
+    const firstChild = commitFile(dir, "f.txt", "v1\n", "first child");
+    const secondChild = commitFile(dir, "f.txt", "v2\n", "second child");
+
+    // Graph-based: with base, returns firstChild, not secondChild
+    assert.equal(firstShaAfter(dir, "f.txt", { base, ts: Date.now() }), firstChild);
+
+    // Time-based: without base, returns firstChild, not secondChild
+    const foundTime = firstShaAfter(dir, "f.txt", { ts: Date.now() - 60_000, capMs: 8 * 60 * 60 * 1000 });
+    assert.equal(foundTime, firstChild);
+    assert.notEqual(foundTime, secondChild);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

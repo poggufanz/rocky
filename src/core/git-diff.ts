@@ -172,7 +172,7 @@ export function firstShaAfter(root: string, rel: string, opts: { base?: string; 
   const since = new Date(opts.ts + 1000).toISOString();
   const until = new Date(opts.ts + cap).toISOString();
   const res = runGitSafe(
-    ["log", "--reverse", "--format=%H", "-n", "1", `--since=${since}`, `--until=${until}`, "--", rel],
+    ["log", "--reverse", "--format=%H", `--since=${since}`, `--until=${until}`, "--", rel],
     runOpts,
   );
   if (res.code !== 0 || res.timedOut) return "";
