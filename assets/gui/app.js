@@ -758,7 +758,26 @@ async function renderLines(body) {
     }
     const painted = codeCell(text, open);
     open = painted.openComment;
-    row.append(el("span", "ln", String(lineNum)), painted.cell);
+    const ln = el("span", "ln", String(lineNum));
+    ln.style.cursor = "pointer";
+    ln.addEventListener("click", (event) => {
+      event.stopPropagation();
+      clearPicked();
+      row.classList.add("picked");
+      pending = { rows: [row], start: lineNum, end: lineNum, rect: row.getBoundingClientRect() };
+      askWhy(lineNum, lineNum, row.getBoundingClientRect());
+    });
+    row.addEventListener("click", (event) => {
+      if (event.target === ln) return;
+      const sel = document.getSelection();
+      if (sel && !sel.isCollapsed && sel.toString().trim().length > 0) return;
+      event.stopPropagation();
+      clearPicked();
+      row.classList.add("picked");
+      pending = { rows: [row], start: lineNum, end: lineNum, rect: row.getBoundingClientRect() };
+      askWhy(lineNum, lineNum, row.getBoundingClientRect());
+    });
+    row.append(ln, painted.cell);
     return row;
   });
   if (data.truncated) rows.push(el("div", "trunc", "… file long, lines cut"));
@@ -1162,6 +1181,7 @@ function closePop() {
   pop.hidden = true;
   fill(pop);
   clearPicked();
+  $("#sel").textContent = "";
   if (state.view === "bundle") applyBundleHighlights();
 }
 
@@ -1506,7 +1526,142 @@ function snippetFor(start, end) {
     .join("\n");
 }
 
-async function askWhy(start, end, at) {
+function findFunctionSpan(originLine) {
+  const clRows = [...$("#pane-body").querySelectorAll(".cl")];
+  const lines = clRows.map((r) => r.querySelector(".lt")?.textContent ?? "");
+  const FN_RE = /^\s*(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(/;
+  const ARROW_RE = /^\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*=>/;
+  const METHOD_RE = /^\s*(?:async\s+)?([A-Za-z_$][\w$]*)\s*\([^)]*\)\s*\{/;
+  for (let i = originLine - 2; i >= 0; i -= 1) {
+    const line = lines[i] ?? "";
+    if (FN_RE.test(line) || ARROW_RE.test(line) || METHOD_RE.test(line)) {
+      let depth = 0;
+      let opened = false;
+      for (let j = i; j < lines.length; j += 1) {
+        for (const ch of lines[j] ?? "") {
+          if (ch === "{") { depth += 1; opened = true; }
+          else if (ch === "}") { depth -= 1; if (opened && depth <= 0) return { start: i + 1, end: j + 1 }; }
+        }
+      }
+      return { start: i + 1, end: Math.min(lines.length, i + 30) };
+    }
+  }
+  return null;
+}
+
+function findHunkSpan(originLine) {
+  if (state.view === "bundle" && state.selectedBundle) {
+    const bf = state.selectedBundle.files?.find((f) => f.path === state.file);
+    for (const [s, e] of bf?.spans ?? []) {
+      if (originLine >= s && originLine <= e) {
+        return { start: s, end: e };
+      }
+    }
+  }
+  if (state.bundleDiff?.files) {
+    const bf = state.bundleDiff.files.find((f) => f.path === state.file);
+    if (bf?.rows) {
+      for (const row of bf.rows) {
+        if (row.k !== "@") continue;
+        const m = /@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/.exec(row.t);
+        if (!m) continue;
+        const n = Number(m[1]);
+        const count = m[2] !== undefined ? Number(m[2]) : 1;
+        const end = n + (count > 0 ? count - 1 : 0);
+        if (originLine >= n && originLine <= end) {
+          return { start: n, end };
+        }
+      }
+    }
+  }
+  return null;
+}
+
+function buildContextTiers(originLine, expandedWhy, expandedStart, expandedEnd) {
+  const total = $("#pane-body").querySelectorAll(".cl").length;
+  const tiers = [];
+
+  // 1. line
+  tiers.push({ why: "line", start: originLine, end: originLine });
+
+  // 2. window
+  tiers.push({
+    why: "window",
+    start: Math.max(1, originLine - 3),
+    end: Math.min(total, originLine + 3),
+  });
+
+  // 3. function
+  if (expandedWhy === "function") {
+    tiers.push({ why: "function", start: expandedStart, end: expandedEnd });
+  } else {
+    const fn = findFunctionSpan(originLine);
+    if (fn) {
+      tiers.push({ why: "function", start: fn.start, end: fn.end });
+    }
+  }
+
+  // 4. hunk
+  if (expandedWhy === "hunk") {
+    tiers.push({ why: "hunk", start: expandedStart, end: expandedEnd });
+  } else {
+    const hunk = findHunkSpan(originLine);
+    if (hunk) {
+      tiers.push({ why: "hunk", start: hunk.start, end: hunk.end });
+    }
+  }
+
+  return tiers;
+}
+
+function renderContextBadge(tiers, currentIdx, originLine, anchor) {
+  const cur = tiers[currentIdx];
+  if (!cur) return;
+
+  clearPicked();
+  for (const row of $("#pane-body").querySelectorAll(".cl")) {
+    const line = Number(row.dataset.line);
+    if (line >= cur.start && line <= cur.end) {
+      row.classList.add("picked");
+    }
+  }
+
+  const badge = el("span", "ctx-badge");
+  const label = el("span", "ctx-text", `sel ${cur.start}–${cur.end} · ${cur.why}`);
+
+  const minusBtn = el("button", "ctx-btn", "−");
+  minusBtn.type = "button";
+  minusBtn.title = "Shrink context level";
+  minusBtn.disabled = currentIdx <= 0;
+  minusBtn.addEventListener("click", (event) => {
+    event.stopPropagation();
+    if (currentIdx > 0) {
+      const nextIdx = currentIdx - 1;
+      const target = tiers[nextIdx];
+      renderContextBadge(tiers, nextIdx, originLine, anchor);
+      askWhy(target.start, target.end, anchor, false);
+    }
+  });
+
+  const plusBtn = el("button", "ctx-btn", "+");
+  plusBtn.type = "button";
+  plusBtn.title = "Expand context level";
+  plusBtn.disabled = currentIdx >= tiers.length - 1;
+  plusBtn.addEventListener("click", (event) => {
+    event.stopPropagation();
+    if (currentIdx < tiers.length - 1) {
+      const nextIdx = currentIdx + 1;
+      const target = tiers[nextIdx];
+      renderContextBadge(tiers, nextIdx, originLine, anchor);
+      askWhy(target.start, target.end, anchor, false);
+    }
+  });
+
+  badge.append(label, minusBtn, plusBtn);
+  fill($("#sel"), badge);
+}
+
+async function askWhy(start, end, at, expand = (start === end)) {
   const anchor = at ?? ask.getBoundingClientRect();
   const snippet = snippetFor(start, end);
   ask.hidden = true;
@@ -1514,19 +1669,35 @@ async function askWhy(start, end, at) {
 
   let data;
   try {
+    const payload = { path: state.file, start, end };
+    if (expand) payload.expand = 1;
+    if (state.view === "bundle" && state.selectedBundle?.commit && /^[0-9a-fA-F]{4,128}$/.test(state.selectedBundle.commit)) {
+      payload.commit = state.selectedBundle.commit;
+    }
     data = await api("/api/teach", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ path: state.file, start, end }),
+      body: JSON.stringify(payload),
     });
   } catch {
-    openPop(anchor, failed(() => askWhy(start, end, anchor)));
+    openPop(anchor, failed(() => askWhy(start, end, anchor, expand)));
     return;
   }
 
-  // the TUI's wording, not the `rocky why` CLI wording -- this surface
-  // replaces the TUI, so it says what the TUI says
-  const askedAbout = `${state.file} lines ${start}-${end}\n\n${snippet}`;
+  const effectiveStart = data?.expanded?.start ?? start;
+  const effectiveEnd = data?.expanded?.end ?? end;
+  const effectiveSnippet = data?.expanded ? snippetFor(effectiveStart, effectiveEnd) : snippet;
+  const askedAbout = `${state.file} lines ${effectiveStart}-${effectiveEnd}\n\n${effectiveSnippet}`;
+
+  if (data?.expanded) {
+    const originLine = start;
+    const tiers = buildContextTiers(originLine, data.expanded.why, data.expanded.start, data.expanded.end);
+    let curIdx = tiers.findIndex((t) => t.why === data.expanded.why);
+    if (curIdx === -1) {
+      curIdx = tiers.findIndex((t) => t.start === data.expanded.start && t.end === data.expanded.end);
+    }
+    renderContextBadge(tiers, curIdx >= 0 ? curIdx : tiers.length - 1, originLine, anchor);
+  }
 
   if (data === null || data.header === undefined) {
     const bare = [empty("no witness, no ladder.", "", "ask agent to explain, question")];
@@ -1535,7 +1706,7 @@ async function askWhy(start, end, at) {
       bare,
       `Why is this code written this way? Rocky has no recorded reason for it.\n\n${askedAbout}\n\nFollow the rules and shape you were given. Ground every claim in the code quoted above, and say plainly if you cannot tell from the code alone.`,
       undefined,
-      { path: state.file, start, end },
+      { path: state.file, start: effectiveStart, end: effectiveEnd },
     ));
     return;
   }
@@ -1573,7 +1744,7 @@ async function askWhy(start, end, at) {
       "Explain what that recorded reason means for this code, following the rules and shape you were given. " +
       "Do not invent history rocky did not record; the record's labels (KODE, BISNIS, why 1, stop) are yours to use, not to quote as prose.",
     true,
-    { path: state.file, start, end },
+    { path: state.file, start: effectiveStart, end: effectiveEnd },
   ));
 }
 

@@ -784,6 +784,31 @@ main {
 }
 .sel:empty { display: none; }
 
+.ctx-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.ctx-badge button {
+  appearance: none;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--surface);
+  color: var(--body);
+  font: 11px var(--mono);
+  padding: 0 5px;
+  line-height: 16px;
+  cursor: pointer;
+}
+.ctx-badge button:hover:not(:disabled) {
+  color: var(--bright);
+  border-color: var(--voice);
+}
+.ctx-badge button:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
 .mode { display: flex; gap: 2px; }
 
 .mode-btn {
