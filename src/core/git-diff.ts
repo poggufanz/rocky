@@ -237,3 +237,46 @@ export function formatGitDiffLines(diffResult: GitDiffResult | undefined): strin
   }
   return lines;
 }
+
+export interface CommitDiffOptions {
+  sha: string;
+  cwd?: string;
+  timeoutMs?: number;
+  maxOutputBytes?: number;
+}
+
+export interface CommitDiffResult {
+  commit: string;
+  diff: string;
+  truncated: boolean;
+}
+
+function isValidCommitSha(ref: unknown): ref is string {
+  return typeof ref === "string" && /^[0-9a-fA-F]{4,128}$/.test(ref);
+}
+
+/**
+ * Whole-commit multi-file diff for the bundle surface, via
+ * `git diff-tree -p -U2 <sha>` with NO `-- <file>` filter so one commit's
+ * files stay together. Bounded and fail-open like resolveGitDiff.
+ */
+export function resolveCommitDiff(options: CommitDiffOptions): CommitDiffResult | undefined {
+  if (!isValidCommitSha(options.sha)) return undefined;
+  const timeoutMs = options.timeoutMs ?? GIT_DIFF_TIMEOUT_MS;
+  const maxOutputBytes = options.maxOutputBytes ?? GIT_DIFF_MAX_BYTES;
+  const cwd = options.cwd ?? process.cwd();
+  try {
+    const result = runGitSafe(["diff-tree", "--root", "-p", "-U2", options.sha], { timeoutMs, maxOutputBytes, cwd });
+    if (result.code !== 0 || result.timedOut) return undefined;
+    if (result.stdout.trim().length === 0) return undefined;
+    const patch = extractPatchText(result.stdout);
+    if (patch.length === 0) return undefined;
+    return {
+      commit: options.sha.slice(0, 7),
+      diff: redactSecretsAtBoundary(patch),
+      truncated: result.stdout.length >= maxOutputBytes - 1,
+    };
+  } catch {
+    return undefined;
+  }
+}
