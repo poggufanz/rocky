@@ -83,6 +83,39 @@ test("markSharedMoments flags one commit serving many moments", () => {
   assert.equal(marked[2]?.shared, false);
 });
 
+test("explain on a new file falls back to the child after the moment", () => {
+  const io = baseIo({
+    resolve: (opts) => opts.head === "child222"
+      ? { commit: "child222", diff: "@@ -0,0 +1 @@\n+new" }
+      : undefined,
+    lastShaBefore: () => "",
+    firstShaAfter: () => "child222",
+  });
+  const rec: CompareRec = { kind: "explain", ts: 1_000_000, cwd: "/r", source: "agent:generic", machine: false };
+  const out = diffFor("/r/f.ts", rec, io);
+  assert.equal(out.after, true);
+  assert.equal(out.prior, undefined);
+  assert.equal(out.commit, "child222");
+  assert.ok(out.rows.some((r) => r.k === "+"));
+});
+
+test("explain on an old file still prefers prior over after", () => {
+  const io = baseIo({
+    resolve: (opts) => opts.head === "old999"
+      ? { commit: "old999", diff: "@@ -1 +1 @@\n-x\n+y" }
+      : opts.head === "child222"
+        ? { commit: "child222", diff: "@@ -1 +1 @@\n-a\n+b" }
+        : undefined,
+    lastShaBefore: () => "old999",
+    firstShaAfter: () => "child222",
+  });
+  const rec: CompareRec = { kind: "explain", ts: 1_000_000, cwd: "/r", source: "agent:generic", machine: false };
+  const out = diffFor("/r/f.ts", rec, io);
+  assert.equal(out.prior, true);
+  assert.equal(out.after, undefined);
+  assert.equal(out.commit, "old999");
+});
+
 test("getCachedDiff does not serve stale rows after clearDiffCache", () => {
   let n = 0;
   const io = baseIo({

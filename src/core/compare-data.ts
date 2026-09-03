@@ -356,7 +356,10 @@ export function diffFor(
       return { commit: res.commit, rows: parsePatch(res.diff) };
     }
 
-    if (rec.kind === "rationale") {
+    // Prospective lookup shared by both branches below: the first commit
+    // touching this file at or after the moment. Bounded and labeled, so a
+    // miss simply yields undefined and the caller keeps its own precedence.
+    const tryAfter = (): DiffResult | undefined => {
       let child = "";
       try {
         child = io.firstShaAfter(root, rel, { base: rec.head ?? rec.baseHead, ts: rec.ts, capMs: AFTER_CAP_MS }) || "";
@@ -367,6 +370,12 @@ export function diffFor(
       if (after && after.diff) {
         return { commit: after.commit, after: true, rows: parsePatch(after.diff) };
       }
+      return undefined;
+    };
+
+    if (rec.kind === "rationale") {
+      const after = tryAfter();
+      if (after) return after;
     }
 
     const until = new Date(rec.ts).toISOString();
@@ -380,6 +389,14 @@ export function diffFor(
     const prior = sha ? io.resolve({ ts: rec.ts, head: sha, file: rel, cwd: root }) : undefined;
     if (prior && prior.diff) {
       return { commit: prior.commit, prior: true, rows: parsePatch(prior.diff) };
+    }
+
+    // A non-rationale moment about just-written code (e.g. an explain recorded
+    // mid-session for a file committed later) finds nothing behind it; one
+    // bounded look ahead heals exactly that case and nothing else.
+    if (rec.kind !== "rationale") {
+      const after = tryAfter();
+      if (after) return after;
     }
 
     return {
