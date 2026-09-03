@@ -36,6 +36,7 @@ import {
   renderLadderExpanded,
   renderWitnessCard,
 } from "../core/teach-render.js";
+import { resolveRefer, escapeRegExp, type ReferWitness } from "../core/refer-resolve.js";
 
 export const DEFAULT_GUI_PORT = 7777;
 const READ_CAP_BYTES = 2 * 1024 * 1024;
@@ -780,6 +781,111 @@ async function handleApi(
       truncated,
       total,
     });
+  }
+
+  if (pathname === "/api/refer") {
+    const rel = url.searchParams.get("path");
+    if (!rel) {
+      return sendJson(response, 400, { error: "rocky needs a file path, question" });
+    }
+    const full = confine(root, rel) ?? witnessed(rel);
+    if (full === undefined) return forbid(response);
+
+    let fileText = "";
+    try {
+      const info = await stat(full);
+      if (!info.isFile() || info.size > READ_CAP_BYTES) return sendJson(response, 200, null);
+      const raw = (await readFile(full, "utf8")).split(/\r?\n/);
+      const capped = raw.length > TEACH_MAX_LINES ? raw.slice(0, TEACH_MAX_LINES) : raw;
+      fileText = capped.join("\n");
+    } catch {
+      return sendJson(response, 200, null);
+    }
+
+    const lineParam = url.searchParams.get("line");
+    const line = lineParam !== null && !isNaN(Number(lineParam)) && Number(lineParam) > 0
+      ? Math.floor(Number(lineParam))
+      : 1;
+    const symbolParam = url.searchParams.get("symbol");
+    const symbol = symbolParam !== null && symbolParam.trim().length > 0 ? symbolParam.trim() : undefined;
+
+    let targetSymbol = symbol ?? "";
+    if (!targetSymbol) {
+      const lines = fileText.split(/\r?\n/);
+      const lineIndex = line - 1;
+      const lineText = lineIndex >= 0 && lineIndex < lines.length ? (lines[lineIndex] ?? "") : "";
+      const callees = calleeNames(lineText);
+      targetSymbol = callees[0] ?? "";
+    }
+
+    const witnesses: ReferWitness[] = [];
+    const texts = new Map<string, string>();
+
+    if (targetSymbol.length > 0) {
+      const symbolRe = new RegExp(`\\b${escapeRegExp(targetSymbol)}\\b`);
+      const { list } = records();
+      const files = fileIndex(list);
+      let matchedFiles = 0;
+      for (const file of files) {
+        if (matchedFiles >= 20) break;
+        let matchedText: string | undefined;
+        for (const rec of file.recs) {
+          for (const candidate of [rec.excerpt, rec.reason, rec.intent]) {
+            if (typeof candidate === "string" && symbolRe.test(candidate)) {
+              matchedText = candidate;
+              break;
+            }
+          }
+          if (matchedText !== undefined) break;
+        }
+
+        if (matchedText !== undefined) {
+          matchedFiles += 1;
+          const matchLine = matchedText.split(/\r?\n/).find((l) => symbolRe.test(l)) ?? matchedText;
+          witnesses.push({
+            path: file.path,
+            line: 0,
+            text: matchLine.trim(),
+          });
+
+          if (texts.size < 10) {
+            const neighborFull = confine(root, file.path) ?? witnessed(file.path);
+            if (neighborFull !== undefined) {
+              try {
+                const st = statSync(neighborFull);
+                if (st.isFile() && st.size <= 64 * 1024) {
+                  texts.set(file.path, readFileSync(neighborFull, "utf8"));
+                }
+              } catch {
+                // fail open
+              }
+            }
+          }
+        }
+      }
+    }
+
+    const result = resolveRefer({
+      path: rel,
+      fileText,
+      line,
+      symbol,
+      readNeighbor: defaultTeachNeighbor(full),
+      texts,
+      witnesses,
+    });
+
+    if (result.definition !== null) {
+      result.definition.text = redactSecretsAtBoundary(result.definition.text);
+      if (result.definition.jsdoc !== undefined) {
+        result.definition.jsdoc = redactSecretsAtBoundary(result.definition.jsdoc);
+      }
+    }
+    for (const ref of result.references) {
+      ref.text = redactSecretsAtBoundary(ref.text);
+    }
+
+    return sendJson(response, 200, result);
   }
 
   if (pathname === "/api/teach" && request.method === "POST") {

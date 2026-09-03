@@ -646,3 +646,88 @@ test("bundles groups one commit across files and bundle shows its diff", async (
   });
 });
 
+test("refer resolves symbol definition and references with redacted text", async () => {
+  const { home, root } = hermetic();
+  const mainTs = [
+    'import { helper } from "./helper.js";',
+    "const result = helper(42);",
+  ].join("\n");
+  const helperTs = [
+    "export function helper(x: number): number {",
+    "  return x + 1;",
+    "}",
+  ].join("\n");
+  writeFileSync(join(root, "main.ts"), mainTs);
+  writeFileSync(join(root, "helper.ts"), helperTs);
+
+  seedMemory(home, [
+    {
+      kind: "explain",
+      id: "e1",
+      v: 1,
+      ts: Date.now() - 1000,
+      cwd: root,
+      path: "main.ts",
+      source: "agent:test",
+      code: "const result = helper(42);",
+      business: "helper call in main",
+      snippet: "const result = helper(42);",
+      excerpt: "helper(42)",
+    },
+    {
+      kind: "explain",
+      id: "e2",
+      v: 1,
+      ts: Date.now(),
+      cwd: root,
+      path: "caller.ts",
+      source: "agent:test",
+      code: "const testCall = helper(100); // AKIA1234567890123456",
+      business: "helper call in caller",
+      snippet: "const testCall = helper(100);",
+    },
+  ]);
+
+  await withGui(root, async (h) => {
+    // 1. Missing path -> 400
+    const missing = await json(h, "/api/refer");
+    assert.equal(missing.status, 400);
+
+    // 2. Forbidden path -> 403
+    const forbidden = await json(h, `/api/refer?path=${encodeURIComponent("../outside.ts")}`);
+    assert.equal(forbidden.status, 403);
+
+    // 3. Missing file -> 200 null
+    const missingFile = await json(h, "/api/refer?path=does-not-exist.ts");
+    assert.equal(missingFile.status, 200);
+    assert.equal(missingFile.body, null);
+
+    // 4. Valid path with line resolving helper -> 200 with symbol, definition, references
+    const res = await json(h, "/api/refer?path=main.ts&line=2");
+    assert.equal(res.status, 200);
+    assert.ok(res.body !== null);
+    assert.equal(res.body.symbol, "helper");
+    assert.ok(res.body.definition !== null);
+    assert.equal(res.body.definition.path, "helper.ts");
+    assert.equal(res.body.definition.line, 1);
+    assert.ok(Array.isArray(res.body.references));
+    assert.ok(res.body.references.length > 0);
+    assert.ok(res.body.references.some((r: any) => r.path.endsWith("caller.ts")));
+    assert.ok(!res.body.references.some((r: any) => r.text.includes("AKIA1234567890123456")));
+    assert.ok(res.body.references.some((r: any) => r.text.includes("[redacted aws access key]")));
+
+    // 5. Query with explicit symbol parameter
+    const resWithSym = await json(h, "/api/refer?path=main.ts&line=1&symbol=helper");
+    assert.equal(resWithSym.status, 200);
+    assert.equal(resWithSym.body.symbol, "helper");
+    assert.ok(resWithSym.body.definition !== null);
+
+    // 6. Query with unknown symbol
+    const unknownSym = await json(h, "/api/refer?path=main.ts&line=1&symbol=nonexistent");
+    assert.equal(unknownSym.status, 200);
+    assert.equal(unknownSym.body.symbol, "nonexistent");
+    assert.equal(unknownSym.body.definition, null);
+    assert.deepEqual(unknownSym.body.references, []);
+  });
+});
+

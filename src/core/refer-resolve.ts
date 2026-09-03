@@ -43,7 +43,7 @@ export interface ReferResult {
 export const REFER_MAX = 20;
 export const REFER_TEXT_CAP = 120;
 
-function escapeRegExp(s: string): string {
+export function escapeRegExp(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
