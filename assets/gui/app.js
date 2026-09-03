@@ -401,11 +401,13 @@ function paneWelcome() {
 
 async function loadFiles() {
   ensureTotal();
-  fill($("#files"), listSkeleton(7));
+  if (!state.files || state.files.length === 0) {
+    fill($("#files"), listSkeleton(7));
+  }
   try {
     state.files = await api(`/api/files?q=${encodeURIComponent(state.filter)}`);
   } catch {
-    fill($("#files"), failed(loadFiles));
+    if (!state.files) fill($("#files"), failed(loadFiles));
     return;
   }
   renderFiles();
@@ -515,17 +517,21 @@ $("#filter").addEventListener("input", (event) => {
   filterTimer = setTimeout(() => {
     if (state.view === "bundle") loadBundles();
     else loadFiles();
-  }, 120);
+  }, 250);
 });
 
 async function loadBundles() {
   ensureTotal();
-  fill($("#files"), listSkeleton(7));
+  if (state.bundles && state.bundles.length > 0) {
+    renderBundles();
+  } else {
+    fill($("#files"), listSkeleton(7));
+  }
   try {
     const data = await api(`/api/bundles?q=${encodeURIComponent(state.filter)}`);
     state.bundles = data.bundles ?? [];
   } catch {
-    fill($("#files"), failed(loadBundles));
+    if (!state.bundles) fill($("#files"), failed(loadBundles));
     return;
   }
   renderBundles();

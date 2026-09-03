@@ -106,6 +106,7 @@ export function resolveGitDiff(options: GitDiffOptions): GitDiffResult | undefin
     } catch {
       // Fail open
     }
+    return undefined;
   }
 
   // 2. Time-window lookup
@@ -130,22 +131,24 @@ export function resolveGitDiff(options: GitDiffOptions): GitDiffResult | undefin
     }
   }
 
-  // 3. Working tree uncommitted changes
-  try {
-    const diffArgs = ["diff", "-U2", "HEAD", ...(file ? ["--", file] : [])];
-    let result = runGitSafe(diffArgs, { timeoutMs, maxOutputBytes, cwd });
-    if (result.code !== 0 && !result.timedOut) {
-      result = runGitSafe(["diff", "-U2", ...(file ? ["--", file] : [])], { timeoutMs, maxOutputBytes, cwd });
-    }
-    if (result.code === 0 && !result.timedOut && result.stdout.trim().length > 0) {
-      const patch = extractPatchText(result.stdout);
-      if (patch.length > 0) {
-        const redacted = redactSecretsAtBoundary(patch);
-        return { commit: "uncommitted", diff: redacted };
+  // 3. Working tree uncommitted changes (only for current/live moments)
+  if (options.ts === undefined || Math.abs(Date.now() - options.ts) < 10 * 60_000) {
+    try {
+      const diffArgs = ["diff", "-U2", "HEAD", ...(file ? ["--", file] : [])];
+      let result = runGitSafe(diffArgs, { timeoutMs, maxOutputBytes, cwd });
+      if (result.code !== 0 && !result.timedOut) {
+        result = runGitSafe(["diff", "-U2", ...(file ? ["--", file] : [])], { timeoutMs, maxOutputBytes, cwd });
       }
+      if (result.code === 0 && !result.timedOut && result.stdout.trim().length > 0) {
+        const patch = extractPatchText(result.stdout);
+        if (patch.length > 0) {
+          const redacted = redactSecretsAtBoundary(patch);
+          return { commit: "uncommitted", diff: redacted };
+        }
+      }
+    } catch {
+      // Fail open
     }
-  } catch {
-    // Fail open
   }
 
   return undefined;

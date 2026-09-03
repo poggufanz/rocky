@@ -337,6 +337,11 @@ export function diffFor(
     }
 
     let abs = filePath.replace(/\\/g, "/");
+    if (/[a-zA-Z]:[^/]/.test(abs)) {
+      return {
+        rows: buildMsgRows(["(malformed file path)"]),
+      };
+    }
     if (!/^[a-zA-Z]:\//.test(abs) && !abs.startsWith("/") && rec.cwd) {
       abs = rec.cwd.replace(/\\/g, "/").replace(/\/+$/, "") + "/" + abs;
     }
@@ -349,11 +354,21 @@ export function diffFor(
     }
 
     const relPath = root.endsWith("/") ? abs.slice(root.length) : abs.slice(root.length + 1);
+    if (/^[a-zA-Z]:/.test(relPath) || relPath.startsWith("../")) {
+      return {
+        rows: buildMsgRows(["(file outside git repository)"]),
+      };
+    }
     const rel = trueCaseRel(root, relPath, io.lsFiles);
 
     const res = io.resolve({ ts: rec.ts, head: rec.head, file: rel, cwd: root });
     if (res && res.diff) {
       return { commit: res.commit, rows: parsePatch(res.diff) };
+    }
+    if (rec.head && /^[0-9a-fA-F]{4,128}$/.test(rec.head) && rec.kind !== "rationale") {
+      return {
+        rows: buildMsgRows(["(no change to this file in this commit)"]),
+      };
     }
 
     // Prospective lookup shared by both branches below: the first commit
@@ -409,28 +424,49 @@ export function diffFor(
   }
 }
 
+const resolveCache = new Map<string, ReturnType<typeof resolveGitDiff>>();
+const shaBeforeCache = new Map<string, string>();
+const shaAfterCache = new Map<string, string>();
+
 export const defaultDiffIo = {
   exists: (p: string) => existsSync(p),
   lsFiles: (root: string) => {
     try {
-      return execFileSync("git", ["-C", root, "ls-files"], { encoding: "utf8", timeout: 8000 }).split(/\r?\n/);
+      return execFileSync("git", ["-C", root, "ls-files"], { encoding: "utf8", timeout: 8000, stdio: ["ignore", "pipe", "ignore"] }).split(/\r?\n/);
     } catch {
       return [];
     }
   },
-  resolve: (opts: { ts: number; head?: string; file: string; cwd: string }) => resolveGitDiff(opts),
+  resolve: (opts: { ts: number; head?: string; file: string; cwd: string }) => {
+    const key = opts.head ? `${opts.cwd}::${opts.file}::${opts.head}` : `${opts.cwd}::${opts.file}::${opts.ts}`;
+    if (resolveCache.has(key)) return resolveCache.get(key);
+    const res = resolveGitDiff(opts);
+    resolveCache.set(key, res);
+    return res;
+  },
   lastShaBefore: (root: string, rel: string, tsIso: string) => {
+    const key = `${root}::${rel}::${tsIso}`;
+    if (shaBeforeCache.has(key)) return shaBeforeCache.get(key)!;
     try {
-      return execFileSync("git", ["-C", root, "log", "-n", "1", "--format=%H", `--until=${tsIso}`, "--", rel], {
+      const res = execFileSync("git", ["-C", root, "log", "-n", "1", "--format=%H", `--until=${tsIso}`, "--", rel], {
         encoding: "utf8",
         timeout: 4000,
+        stdio: ["ignore", "pipe", "ignore"],
       }).trim();
+      shaBeforeCache.set(key, res);
+      return res;
     } catch {
+      shaBeforeCache.set(key, "");
       return "";
     }
   },
-  firstShaAfter: (root: string, rel: string, opts: { base?: string; ts: number; capMs: number }) =>
-    firstShaAfter(root, rel, opts),
+  firstShaAfter: (root: string, rel: string, opts: { base?: string; ts: number; capMs: number }) => {
+    const key = `${root}::${rel}::${opts.base ?? opts.ts}`;
+    if (shaAfterCache.has(key)) return shaAfterCache.get(key)!;
+    const res = firstShaAfter(root, rel, opts);
+    shaAfterCache.set(key, res);
+    return res;
+  },
 };
 
 /**
@@ -469,6 +505,9 @@ const diffCache = new Map<string, DiffResult>();
 
 export function clearDiffCache(): void {
   diffCache.clear();
+  resolveCache.clear();
+  shaBeforeCache.clear();
+  shaAfterCache.clear();
 }
 
 export function getCachedDiff(
@@ -482,7 +521,7 @@ export function getCachedDiff(
     firstShaAfter(root: string, rel: string, opts: { base?: string; ts: number; capMs: number }): string;
   } = defaultDiffIo,
 ): DiffResult {
-  const key = `${filePath}@${rec.ts}`;
+  const key = rec.head ? `${filePath}@head:${rec.head}` : `${filePath}@${rec.ts}`;
   let cached = diffCache.get(key);
   if (!cached) {
     cached = diffFor(filePath, rec, io);

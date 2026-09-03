@@ -22,7 +22,7 @@ import { redactSecretsAtBoundary } from "../core/redact.js";
 import { publicSettings, readSettings, writeSettings } from "./settings.js";
 import { providerFor, providerList } from "./models-dev.js";
 import { deriveHome } from "../core/home-data.js";
-import { fileIndex, getCachedDiff, clearDiffCache, groupMomentsByChange, defaultDiffIo, lineOverlapPredicate, parsePatch, type DiffRow } from "../core/compare-data.js";
+import { fileIndex, getCachedDiff, groupMomentsByChange, defaultDiffIo, lineOverlapPredicate, parsePatch, type DiffRow } from "../core/compare-data.js";
 import { resolveContext } from "../core/context-resolve.js";
 import { filteredFiles, TEACH_MAX_LINES } from "../core/file-filter.js";
 import { repoForPath, type RepoCache } from "../core/repo-groups.js";
@@ -46,6 +46,8 @@ const MAX_PROMPT_CHARS = 24_000;
 const MAX_ASK_IN_FLIGHT = 2;
 
 let askInFlight = 0;
+let bundleCache: { key: string; payload: { bundles: unknown[]; unattributed: number } } | null = null;
+let bundleInFlight: { key: string; promise: Promise<{ bundles: unknown[]; unattributed: number }> } | null = null;
 
 /**
  * The fallback rules every BYOK answer is bound by when the spec file is not
@@ -547,7 +549,6 @@ const ago = (ts: number, now: number): string => {
 
 /** One moment as the GUI reads it: identity, labels, and its diff if any. */
 function momentsFor(path: string, root: string, now: number) {
-  clearDiffCache();
   const entry = fileIndex(records().list).find((file) => file.path === path);
   if (entry === undefined) return { changes: [], unattributed: [] };
   const flat = entry.recs.map((rec, index) => {
@@ -661,6 +662,62 @@ async function serveAsset(pathname: string, response: ServerResponse): Promise<v
   }
 }
 
+async function computeBundles(q = "", repoFilter: string | null = null): Promise<{ bundles: unknown[]; unattributed: number }> {
+  const { list } = records();
+  const lastRec = list[list.length - 1];
+  const cacheKey = `${list.length}:${lastRec ? lastRec.ts : 0}:${q}:${repoFilter ?? ""}`;
+  if (bundleCache && bundleCache.key === cacheKey) {
+    return bundleCache.payload;
+  }
+  if (bundleInFlight && bundleInFlight.key === cacheKey) {
+    return bundleInFlight.promise;
+  }
+  const promise = (async () => {
+    const files = fileIndex(list);
+    const shown = filteredFiles({ files, fquery: q });
+    const repos: RepoCache = new Map();
+    const inputs: BundleInput[] = [];
+    for (const file of shown) {
+      const repo = (await repoForPath(file.path, repos)) ?? "";
+      if (repoFilter && repo !== repoFilter) continue;
+      for (const rec of file.recs) {
+        if (!repo) {
+          inputs.push({
+            path: file.path,
+            repo: "",
+            rec,
+            diff: { rows: [] },
+          });
+          continue;
+        }
+        const diff = getCachedDiff(file.path, rec, defaultDiffIo);
+        inputs.push({
+          path: file.path,
+          repo,
+          rec,
+          diff,
+        });
+      }
+    }
+    const result = bundleGroups(inputs);
+    const payload = {
+      bundles: result.bundles,
+      unattributed: result.unattributed.length,
+    };
+    bundleCache = { key: cacheKey, payload };
+    return payload;
+  })();
+
+  bundleInFlight = { key: cacheKey, promise };
+  try {
+    return await promise;
+  } finally {
+    if (bundleInFlight?.key === cacheKey) {
+      bundleInFlight = null;
+    }
+  }
+}
+
 async function handleApi(
   pathname: string,
   url: URL,
@@ -732,32 +789,10 @@ async function handleApi(
   }
 
   if (pathname === "/api/bundles") {
-    const { list } = records();
-    const files = fileIndex(list);
     const q = url.searchParams.get("q") ?? "";
-    const shown = filteredFiles({ files, fquery: q });
-    clearDiffCache();
-    const repos: RepoCache = new Map();
     const repoFilter = url.searchParams.get("repo");
-    const inputs: BundleInput[] = [];
-    for (const file of shown) {
-      const repo = (await repoForPath(file.path, repos)) ?? "";
-      if (repoFilter && repo !== repoFilter) continue;
-      for (const rec of file.recs) {
-        const diff = getCachedDiff(file.path, rec, defaultDiffIo);
-        inputs.push({
-          path: file.path,
-          repo,
-          rec,
-          diff,
-        });
-      }
-    }
-    const result = bundleGroups(inputs);
-    return sendJson(response, 200, {
-      bundles: result.bundles,
-      unattributed: result.unattributed.length,
-    });
+    const payload = await computeBundles(q, repoFilter);
+    return sendJson(response, 200, payload);
   }
 
   if (pathname === "/api/bundle") {
@@ -988,11 +1023,14 @@ export function startGui(options: { port?: number; root?: string } = {}): Promis
   const token = randomBytes(16).toString("hex");
   const root = resolve(options.root ?? process.cwd());
   const wanted = options.port ?? DEFAULT_GUI_PORT;
+  let boundPort = wanted;
+  void computeBundles().catch(() => {});
 
   const server = createServer((request, response) => {
     void (async () => {
-      const port = (server.address() as { port: number }).port;
       try {
+        const addr = server.address();
+        const port = typeof addr === "object" && addr !== null ? addr.port : boundPort;
         if (!hostAllowed(request.headers.host, port)) return forbid(response);
         const url = new URL(request.url ?? "/", `http://127.0.0.1:${port}`);
         const pathname = url.pathname;
@@ -1023,12 +1061,19 @@ export function startGui(options: { port?: number; root?: string } = {}): Promis
         fail(error);
       });
       server.listen(port, "127.0.0.1", () => {
-        const bound = (server.address() as { port: number }).port;
+        const addr = server.address();
+        boundPort = typeof addr === "object" && addr !== null ? addr.port : port;
         done({
-          port: bound,
+          port: boundPort,
           token,
-          url: `http://127.0.0.1:${bound}/#${token}`,
-          close: () => new Promise<void>((shut) => server.close(() => shut())),
+          url: `http://127.0.0.1:${boundPort}/#${token}`,
+          close: () =>
+            new Promise<void>((shut) => {
+              if (typeof (server as any).closeAllConnections === "function") {
+                (server as any).closeAllConnections();
+              }
+              server.close(() => shut());
+            }),
         });
       });
     };

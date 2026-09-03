@@ -38,8 +38,15 @@ export async function guiCommand(rest: string[], segment: "main" | "dash"): Prom
 
   // foreground until interrupted: no daemon, no port file, nothing left behind
   await new Promise<void>((done) => {
+    let stopping = false;
     const stop = (): void => {
-      void handle.close().then(done);
+      if (stopping) process.exit(0);
+      stopping = true;
+      const timer = setTimeout(() => done(), 500);
+      void handle.close().finally(() => {
+        clearTimeout(timer);
+        done();
+      });
     };
     process.once("SIGINT", stop);
     process.once("SIGTERM", stop);
