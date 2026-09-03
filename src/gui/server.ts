@@ -22,7 +22,7 @@ import { redactSecretsAtBoundary } from "../core/redact.js";
 import { publicSettings, readSettings, writeSettings } from "./settings.js";
 import { providerFor, providerList } from "./models-dev.js";
 import { deriveHome } from "../core/home-data.js";
-import { fileIndex, getCachedDiff, clearDiffCache, markSharedMoments, defaultDiffIo, lineOverlapPredicate } from "../core/compare-data.js";
+import { fileIndex, getCachedDiff, clearDiffCache, markSharedMoments, groupMomentsByChange, defaultDiffIo, lineOverlapPredicate } from "../core/compare-data.js";
 import { filteredFiles, TEACH_MAX_LINES } from "../core/file-filter.js";
 import { repoForPath, type RepoCache } from "../core/repo-groups.js";
 import { teachLookup } from "../core/teach.js";
@@ -546,8 +546,8 @@ const ago = (ts: number, now: number): string => {
 function momentsFor(path: string, root: string, now: number) {
   clearDiffCache();
   const entry = fileIndex(records().list).find((file) => file.path === path);
-  if (entry === undefined) return [];
-  return markSharedMoments(entry.recs.map((rec, index) => {
+  if (entry === undefined) return { changes: [], unattributed: [] };
+  const flat = markSharedMoments(entry.recs.map((rec, index) => {
     const diff = getCachedDiff(path, rec, defaultDiffIo) ?? undefined;
     return {
       id: `${rec.ts}-${index}`,
@@ -563,6 +563,13 @@ function momentsFor(path: string, root: string, now: number) {
       diff,
     };
   }));
+  return groupMomentsByChange(flat);
+}
+
+/** Flat moment list recovered from grouped output: compare, strict, and the
+ *  picker need per-moment granularity with diffs intact. */
+function flatMoments(grouped: ReturnType<typeof momentsFor>) {
+  return [...grouped.changes.flatMap((c) => c.witnesses), ...grouped.unattributed];
 }
 
 /** Forwards one prompt to the provider the page names. OpenAI-compatible
@@ -695,7 +702,7 @@ async function handleApi(
 
   if (pathname === "/api/moments") {
     const rel = url.searchParams.get("path") ?? "";
-    const all = momentsFor(rel, root, now);
+    const all = flatMoments(momentsFor(rel, root, now));
     if (url.searchParams.get("strict") !== "1") return sendJson(response, 200, all);
     // strict keeps only the moments touching the same lines as the other side
     const near = url.searchParams.get("near");
@@ -711,8 +718,9 @@ async function handleApi(
     const rel = url.searchParams.get("path") ?? "";
     const a = url.searchParams.get("a");
     const b = url.searchParams.get("b");
-    const all = momentsFor(rel, root, now);
-    if (a === null || b === null) return sendJson(response, 200, { records: all });
+    const grouped = momentsFor(rel, root, now);
+    if (a === null || b === null) return sendJson(response, 200, grouped);
+    const all = flatMoments(grouped);
     const pick = (id: string) => {
       const found = all.find((m) => m.id === id);
       return found ? { record: found, diff: found.diff ?? null } : null;
