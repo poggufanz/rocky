@@ -231,3 +231,33 @@ test("CLI: rocky hook agent-event generic --rationale ... --files ... writes a n
   assert.equal(result.stdout, "{}");
   assert.equal(result.stderr, "");
 });
+
+test("generic notify captures the git base anchor without blocking", async (t) => {
+  freshHome(t);
+  const { agentEvent } = await import("../commands/agent-hook.js");
+  const result = await captureStdout(() => agentEvent("generic", {
+    rationale: "add approval page",
+    files: ["src/a.ts"],
+    git: (args: string[]) => (args[0] === "rev-parse" ? "abc123def456" : ""),
+  }));
+  assert.equal(result.code, 0);
+  const { loadMemory } = await import("../core/memory-read.js");
+  const rec = loadMemory().find(isRationale);
+  assert.ok(rec, "rationale record written");
+  assert.equal(rec?.git?.base, "abc123def456");
+});
+
+test("generic notify still writes when git is unavailable", async (t) => {
+  freshHome(t);
+  const { agentEvent } = await import("../commands/agent-hook.js");
+  const result = await captureStdout(() => agentEvent("generic", {
+    rationale: "add approval page",
+    files: ["src/a.ts"],
+    git: () => undefined,
+  }));
+  assert.equal(result.code, 0);
+  const { loadMemory } = await import("../core/memory-read.js");
+  const rec = loadMemory().find(isRationale);
+  assert.ok(rec, "record still written without git");
+});
+

@@ -24,7 +24,7 @@ import { loadConfig } from "../core/config-read.js";
 import { redactSecretsAtBoundary, replaceAnsiAndControls } from "../core/redact.js";
 import { utf8Prefix } from "../core/utf8.js";
 import { resolveRockyPaths, type RockyPaths } from "../core/state-paths.js";
-import { canonicalPath, loadMemory, MAX_RATIONALE_FILES, type MemoryRecord } from "../core/memory-read.js";
+import { canonicalPath, loadMemory, MAX_GIT_SNAPSHOT_CHARS, MAX_RATIONALE_FILES, type GitAnchor, type MemoryRecord } from "../core/memory-read.js";
 import { recordExplain, recordRationale } from "../core/memory.js";
 import { weakLinkFor } from "../agent/logs/capture.js";
 import { filesystemIdentity, NO_FOLLOW_FLAG, regularDescriptorSafe, sameFilesystemIdentity } from "../core/fs-safety.js";
@@ -279,6 +279,32 @@ function safeAdapterLabel(adapter: unknown): string {
   }
 }
 
+function captureGitAnchor(
+  cwd: string,
+  files: string[] | undefined,
+  git: (args: string[], cwd: string) => string | undefined,
+): GitAnchor | undefined {
+  try {
+    const head = git(["rev-parse", "HEAD"], cwd)?.trim();
+    const wanted = (files ?? []).filter((f) => typeof f === "string" && f.length > 0 && f.length <= 1024);
+    const status = wanted.length === 0 ? undefined : git(["status", "--porcelain", "--", ...wanted], cwd);
+    const patch = wanted.length === 0 ? undefined : git(["diff", "-U2", "HEAD", "--", ...wanted], cwd);
+    const dirty = status === undefined ? undefined : status.trim().length > 0;
+    let snapshot: string | undefined;
+    if (patch !== undefined && patch.trim().length > 0) {
+      snapshot = redactSecretsAtBoundary(patch.slice(0, MAX_GIT_SNAPSHOT_CHARS));
+    }
+    if ((head === undefined || head.length === 0) && dirty === undefined && snapshot === undefined) return undefined;
+    return {
+      ...(head === undefined || head.length === 0 ? { base: "unborn" } : { base: head.slice(0, 256) }),
+      ...(dirty === undefined ? {} : { dirty }),
+      ...(snapshot === undefined ? {} : { snapshot }),
+    };
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * Notify-lane rationale write, shared by `generic` and (additively) by
  * `claude-code`/`codex`. Argv-only: no stdin, no payload parsing. A missing
@@ -303,6 +329,7 @@ function writeNotifyRationale(agent: "claude-code" | "codex" | "generic", deps: 
       records = [];
     }
     const links = weakLinkFor(records, now, cwd, now);
+    const anchor = captureGitAnchor(cwd, deps.files, deps.git ?? defaultBaselineGit);
     recordRationale({
       cwd,
       agent,
@@ -312,6 +339,7 @@ function writeNotifyRationale(agent: "claude-code" | "codex" | "generic", deps: 
       ts: now,
       ...(links === undefined ? {} : { links }),
       ...(deps.files === undefined ? {} : { files: deps.files }),
+      ...(anchor === undefined ? {} : { git: anchor }),
     }, paths);
   } catch {
     safeLogFailure(paths);
@@ -338,6 +366,7 @@ function writeNotifyExplain(agent: "claude-code" | "codex" | "generic", deps: Ag
     }
     const now = deps.now?.() ?? Date.now();
     const cwd = process.cwd();
+    const anchor = captureGitAnchor(cwd, deps.files, deps.git ?? defaultBaselineGit);
     for (const file of files.slice(0, MAX_RATIONALE_FILES)) {
       const pending = takePendingSnippet(file);
       recordExplain({
@@ -347,6 +376,7 @@ function writeNotifyExplain(agent: "claude-code" | "codex" | "generic", deps: Ag
         code,
         business,
         snippet: pending?.snippet,
+        ...(anchor === undefined ? {} : { git: anchor }),
       }, paths);
     }
   } catch {
