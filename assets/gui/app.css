@@ -1435,3 +1435,95 @@ main {
 .cl.hl {
   background: var(--voice-tint);
 }
+
+/* ---- references panel ------------------------------------------------ */
+
+.why-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin-top: 12px;
+}
+.why-actions .card-more {
+  margin-top: 0;
+}
+
+.refer-def {
+  margin: 10px 0;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--bg);
+}
+
+.refer-def-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+  font: 11px var(--mono);
+}
+
+.refer-tag {
+  color: var(--voice);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: .05em;
+  font-size: 10px;
+}
+
+.refer-link {
+  appearance: none;
+  background: transparent;
+  border: 0;
+  color: var(--dim);
+  font: 11.5px var(--mono);
+  cursor: pointer;
+  padding: 0;
+  text-decoration: underline;
+}
+.refer-link:hover {
+  color: var(--voice);
+}
+
+.refer-snippet {
+  margin: 0;
+  font: 11.5px var(--mono);
+  color: var(--body);
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.refer-list {
+  max-height: 240px;
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  margin-top: 8px;
+}
+
+.refer-hit {
+  display: block;
+  width: 100%;
+  padding: 8px 10px;
+  border: 0;
+  border-top: 1px solid var(--line);
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+.refer-hit:first-child {
+  border-top: 0;
+}
+.refer-hit:hover {
+  background: var(--hover, rgba(255, 255, 255, .04));
+}
+.refer-hit-body {
+  display: block;
+  color: var(--body);
+  font: 11.5px var(--mono);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

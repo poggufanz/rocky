@@ -1126,11 +1126,13 @@ function readSelection() {
   if (rows.length === 0) return null;
 
   const rect = range.getBoundingClientRect();
+  const text = selection.toString().trim();
   return {
     rows,
     start: Number(rows[0].dataset.line),
     end: Number(rows[rows.length - 1].dataset.line),
     rect,
+    text,
   };
 }
 
@@ -1505,17 +1507,124 @@ function guessNodes(text) {
   return nodes;
 }
 
-/** Adds the ask control, but only once BYOK is actually configured. */
+/** Adds action controls: refs button and optional BYOK ask. */
 function withAsk(anchor, parts, prompt, held, ctx) {
-  if (!byokReady()) return parts;
-  // the same action, but the label admits whether rocky already answered
-  const label = held
-    ? "Re-explain this with Agent (May use your AI API)"
-    : "Use Agent to explain this (May use your AI API)";
-  const button = el("button", "card-more ask-agent", label);
-  button.type = "button";
-  button.addEventListener("click", () => askModel(anchor, prompt, parts, ctx));
-  return [...parts, button];
+  const actions = el("div", "why-actions");
+
+  const refsBtn = el("button", "card-more refs-btn", "refs");
+  refsBtn.type = "button";
+  refsBtn.addEventListener("click", () => showReferences(anchor, ctx));
+  actions.append(refsBtn);
+
+  if (byokReady()) {
+    const label = held
+      ? "Re-explain this with Agent (May use your AI API)"
+      : "Use Agent to explain this (May use your AI API)";
+    const button = el("button", "card-more ask-agent", label);
+    button.type = "button";
+    button.addEventListener("click", () => askModel(anchor, prompt, parts, ctx));
+    actions.append(button);
+  }
+
+  return [...parts, actions];
+}
+
+async function showReferences(anchor, ctx) {
+  openPop(anchor, skeleton());
+
+  const filePath = ctx?.path ?? state.file;
+  const line = ctx?.start ?? 1;
+  let selectedSymbol = ctx?.symbol ?? "";
+  if (!/^[A-Za-z_$][\w$]*$/.test(selectedSymbol)) {
+    const m = /([A-Za-z_$][\w$]*)/.exec(selectedSymbol);
+    if (selectedSymbol.includes("(") && m) {
+      selectedSymbol = m[1];
+    } else if (selectedSymbol.split(/\s+/).length > 2) {
+      selectedSymbol = "";
+    }
+  }
+
+  let url = `/api/refer?path=${encodeURIComponent(filePath)}&line=${line}`;
+  if (selectedSymbol) {
+    url += `&symbol=${encodeURIComponent(selectedSymbol)}`;
+  }
+
+  let data;
+  try {
+    data = await api(url);
+  } catch {
+    openPop(anchor, failed(() => showReferences(anchor, ctx)));
+    return;
+  }
+
+  if (!data || (!data.definition && (!data.references || data.references.length === 0))) {
+    openPop(anchor, el("p", "card-head assembled", "rocky not hear this name, question"));
+    return;
+  }
+
+  const parts = [];
+  const sym = data.symbol || selectedSymbol;
+  parts.push(el("p", "card-head", sym ? `references for ${sym}` : "references"));
+
+  if (data.definition) {
+    const def = data.definition;
+    const defBox = el("div", "refer-def");
+    const top = el("div", "refer-def-head");
+    const link = el("button", "refer-link", `${def.path}:${def.line}`);
+    link.type = "button";
+    link.addEventListener("click", () => jumpToFileLine(def.path, def.line));
+    top.append(el("span", "refer-tag", "definition"), link);
+    const snippet = el("pre", "refer-snippet", def.text);
+    defBox.append(top, snippet);
+    parts.push(defBox);
+  }
+
+  if (data.references && data.references.length > 0) {
+    const list = el("div", "moments-list refer-list");
+    for (const ref of data.references) {
+      const item = el("button", "moment refer-hit");
+      item.type = "button";
+      const loc = ref.line > 0 ? `${ref.path}:${ref.line}` : `${ref.path} · witnessed`;
+      const top = el("span", "moment-top", `${loc} · ${ref.confidence}`);
+      const body = el("span", "moment-body", ref.text);
+      item.append(top, body);
+      item.addEventListener("click", () => {
+        jumpToFileLine(ref.path, ref.line > 0 ? ref.line : 1);
+      });
+      list.append(item);
+    }
+    parts.push(list);
+  }
+
+  openPop(anchor, ...parts);
+}
+
+async function jumpToFileLine(path, line) {
+  if (state.mode !== "lines") {
+    setMode("lines");
+  }
+  if (path && path !== state.file) {
+    openFile(path);
+    if (line > 0) {
+      for (let i = 0; i < 20; i += 1) {
+        await new Promise((r) => setTimeout(r, 50));
+        const row = $("#pane-body").querySelector(`.cl[data-line="${line}"]`);
+        if (row) {
+          row.scrollIntoView({ block: "center", behavior: "smooth" });
+          row.classList.add("picked");
+          setTimeout(() => row.classList.remove("picked"), 2000);
+          break;
+        }
+      }
+    }
+  } else if (line > 0) {
+    const row = $("#pane-body").querySelector(`.cl[data-line="${line}"]`);
+    if (row) {
+      row.scrollIntoView({ block: "center", behavior: "smooth" });
+      row.classList.add("picked");
+      setTimeout(() => row.classList.remove("picked"), 2000);
+    }
+  }
 }
 
 /** The snippet the question is about, read straight off the painted lines. */
@@ -1677,6 +1786,7 @@ function renderContextBadge(tiers, currentIdx, originLine, anchor) {
 async function askWhy(start, end, at, expand = (start === end)) {
   const anchor = at ?? ask.getBoundingClientRect();
   const snippet = snippetFor(start, end);
+  const selectedSymbol = pending?.text ?? "";
   ask.hidden = true;
   openPop(anchor, skeleton());
 
@@ -1719,7 +1829,7 @@ async function askWhy(start, end, at, expand = (start === end)) {
       bare,
       `Why is this code written this way? Rocky has no recorded reason for it.\n\n${askedAbout}\n\nFollow the rules and shape you were given. Ground every claim in the code quoted above, and say plainly if you cannot tell from the code alone.`,
       undefined,
-      { path: state.file, start: effectiveStart, end: effectiveEnd },
+      { path: state.file, start: effectiveStart, end: effectiveEnd, symbol: selectedSymbol },
     ));
     return;
   }
@@ -1757,7 +1867,7 @@ async function askWhy(start, end, at, expand = (start === end)) {
       "Explain what that recorded reason means for this code, following the rules and shape you were given. " +
       "Do not invent history rocky did not record; the record's labels (KODE, BISNIS, why 1, stop) are yours to use, not to quote as prose.",
     true,
-    { path: state.file, start: effectiveStart, end: effectiveEnd },
+    { path: state.file, start: effectiveStart, end: effectiveEnd, symbol: selectedSymbol },
   ));
 }
 
