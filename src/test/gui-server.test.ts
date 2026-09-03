@@ -201,6 +201,118 @@ test("teach never claims a witness it does not have", async () => {
   });
 });
 
+test("teach with expand: 1 on single line inside function returns expanded function span", async () => {
+  const { root } = hermetic();
+  const fnCode = [
+    "function calculateTotal(a: number, b: number) {",
+    "  const sum = a + b;",
+    "  return sum * 2;",
+    "}",
+  ].join("\n");
+  writeFileSync(join(root, "calc.ts"), fnCode + "\n");
+
+  await withGui(root, async (h) => {
+    const card = await json(h, "/api/teach", {
+      method: "POST",
+      body: JSON.stringify({ path: "calc.ts", start: 2, end: 2, expand: 1 }),
+    });
+    assert.equal(card.status, 200);
+    assert.ok(card.body);
+    assert.ok(card.body.expanded, "response must contain expanded");
+    assert.equal(card.body.expanded.why, "function");
+    assert.equal(card.body.expanded.start, 1);
+    assert.equal(card.body.expanded.end, 4);
+    assert.ok(card.body.expanded.start < card.body.expanded.end);
+  });
+});
+
+test("teach with expand: 1 when start !== end does not expand", async () => {
+  const { root } = hermetic();
+  const fnCode = [
+    "function calculateTotal(a: number, b: number) {",
+    "  const sum = a + b;",
+    "  return sum * 2;",
+    "}",
+  ].join("\n");
+  writeFileSync(join(root, "calc.ts"), fnCode + "\n");
+
+  await withGui(root, async (h) => {
+    const card = await json(h, "/api/teach", {
+      method: "POST",
+      body: JSON.stringify({ path: "calc.ts", start: 2, end: 3, expand: 1 }),
+    });
+    assert.equal(card.status, 200);
+    assert.ok(card.body);
+    assert.equal(card.body.expanded, undefined);
+  });
+});
+
+test("teach with expand: 1 and commit diff expands to hunk", async () => {
+  const { root } = hermetic();
+  execFileSync("git", ["init"], { cwd: root, stdio: "ignore" });
+  execFileSync("git", ["config", "user.email", "t@t.t"], { cwd: root, stdio: "ignore" });
+  execFileSync("git", ["config", "user.name", "t"], { cwd: root, stdio: "ignore" });
+
+  const text1 = Array.from({ length: 15 }, (_, i) => `line ${i + 1}`).join("\n") + "\n";
+  writeFileSync(join(root, "file.ts"), text1);
+  execFileSync("git", ["add", "."], { cwd: root, stdio: "ignore" });
+  execFileSync("git", ["commit", "-m", "initial"], { cwd: root, stdio: "ignore" });
+
+  const text2 = Array.from({ length: 15 }, (_, i) => (i === 4 ? "await saveItem();" : `line ${i + 1}`)).join("\n") + "\n";
+  writeFileSync(join(root, "file.ts"), text2);
+  execFileSync("git", ["add", "."], { cwd: root, stdio: "ignore" });
+  execFileSync("git", ["commit", "-m", "update line 5"], { cwd: root, stdio: "ignore" });
+  const sha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim();
+
+  await withGui(root, async (h) => {
+    const card = await json(h, "/api/teach", {
+      method: "POST",
+      body: JSON.stringify({ path: "file.ts", start: 5, end: 5, expand: 1, commit: sha }),
+    });
+    assert.equal(card.status, 200);
+    assert.ok(card.body);
+    assert.ok(card.body.expanded, "response must contain expanded hunk");
+    assert.equal(card.body.expanded.why, "hunk");
+  });
+});
+
+test("teach with expand: 1 on witness hit includes expanded without altering witness lookup", async () => {
+  const { home, root } = hermetic();
+  const fnCode = [
+    "function calculateTotal(a: number, b: number) {",
+    "  const sum = a + b;",
+    "  return sum * 2;",
+    "}",
+  ].join("\n");
+  writeFileSync(join(root, "calc.ts"), fnCode + "\n");
+  seedMemory(home, [{
+    kind: "explain",
+    id: "e-fn",
+    v: 1,
+    ts: Date.now() - 1000,
+    cwd: root,
+    path: "calc.ts",
+    source: "agent:test",
+    code: "const sum = a + b;",
+    business: "sum of numbers",
+    snippet: "const sum = a + b;",
+  }]);
+
+  await withGui(root, async (h) => {
+    const card = await json(h, "/api/teach", {
+      method: "POST",
+      body: JSON.stringify({ path: "calc.ts", start: 2, end: 2, expand: 1 }),
+    });
+    assert.equal(card.status, 200);
+    assert.ok(card.body);
+    assert.ok(String(card.body.header ?? "").startsWith("rocky heard this"));
+    assert.ok(card.body.expanded, "witness card must contain expanded");
+    assert.equal(card.body.expanded.why, "function");
+    assert.equal(card.body.expanded.start, 1);
+    assert.equal(card.body.expanded.end, 4);
+  });
+});
+
 test("the shell and its assets are served, and unknown routes are not", async () => {
   const { root } = hermetic();
   await withGui(root, async (h) => {

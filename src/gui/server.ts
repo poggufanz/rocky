@@ -22,7 +22,8 @@ import { redactSecretsAtBoundary } from "../core/redact.js";
 import { publicSettings, readSettings, writeSettings } from "./settings.js";
 import { providerFor, providerList } from "./models-dev.js";
 import { deriveHome } from "../core/home-data.js";
-import { fileIndex, getCachedDiff, clearDiffCache, groupMomentsByChange, defaultDiffIo, lineOverlapPredicate, parsePatch } from "../core/compare-data.js";
+import { fileIndex, getCachedDiff, clearDiffCache, groupMomentsByChange, defaultDiffIo, lineOverlapPredicate, parsePatch, type DiffRow } from "../core/compare-data.js";
+import { resolveContext } from "../core/context-resolve.js";
 import { filteredFiles, TEACH_MAX_LINES } from "../core/file-filter.js";
 import { repoForPath, type RepoCache } from "../core/repo-groups.js";
 import { teachLookup } from "../core/teach.js";
@@ -784,14 +785,41 @@ async function handleApi(
   if (pathname === "/api/teach" && request.method === "POST") {
     const body = (await readBody(request)) as Record<string, unknown>;
     const rel = String(body.path ?? "");
-    const start = Number(body.start ?? 0);
-    const end = Number(body.end ?? 0);
+    let start = Number(body.start ?? 0);
+    let end = Number(body.end ?? 0);
     const full = confine(root, rel) ?? witnessed(rel);
     if (full === undefined) return forbid(response);
 
     const lines = existsSync(full) ? readFileSync(full, "utf8").split(/\r?\n/) : [];
     const snippet = lines.slice(Math.max(0, start - 1), end).join("\n");
     const { list } = records();
+
+    let expanded: { start: number; end: number; why: string } | undefined;
+    if (body.expand === 1 && start === end) {
+      let rows: DiffRow[] | undefined;
+      const commit = typeof body.commit === "string" ? body.commit : "";
+      if (/^[0-9a-fA-F]{4,128}$/.test(commit)) {
+        const resolved = resolveCommitDiff({ sha: commit, cwd: root });
+        if (resolved !== undefined) {
+          const parsedRows = parsePatch(resolved.diff);
+          const byFile = splitRowsByFile(parsedRows);
+          for (const [diffPath, fileRows] of byFile.entries()) {
+            if (diffPath === rel || diffPath.endsWith("/" + rel) || rel.endsWith("/" + diffPath)) {
+              rows = fileRows;
+              break;
+            }
+          }
+        }
+      }
+      const ctx = resolveContext({
+        fileText: lines.join("\n"),
+        line: start,
+        ...(rows !== undefined ? { rows } : {}),
+      });
+      start = ctx.start;
+      end = ctx.end;
+      expanded = { start: ctx.start, end: ctx.end, why: ctx.why };
+    }
 
     const hit = teachLookup(list, { path: rel, snippet, cwd: root });
     const ladder = buildLadder({
@@ -803,11 +831,13 @@ async function handleApi(
     });
 
     if (hit !== undefined) {
-      return sendJson(response, 200, renderWitnessCard(hit, gapRungFor(hit, ladder)));
+      const card = renderWitnessCard(hit, gapRungFor(hit, ladder));
+      return sendJson(response, 200, expanded !== undefined ? { ...card, expanded } : card);
     }
     if (ladder.rungs.length > 0) {
       const card = renderLadderCard(rel, `${start}-${end}`, ladder);
-      return sendJson(response, 200, { ...card, rungs: renderLadderExpanded(ladder) });
+      const payload = { ...card, rungs: renderLadderExpanded(ladder) };
+      return sendJson(response, 200, expanded !== undefined ? { ...payload, expanded } : payload);
     }
     return sendJson(response, 200, null);
   }
