@@ -97,8 +97,11 @@ export function fileIndex(records: MemoryRecord[]): FileEntry[] {
 
     const reasonText =
       (typeof raw.rationale === "object" && raw.rationale !== null ? (raw.rationale as { text?: string }).text : undefined) ??
-      (typeof raw.rationale === "string" ? raw.rationale : undefined) ??
+      (typeof raw.rationale === "string" && raw.rationale.length > 0 ? raw.rationale : undefined) ??
+      (typeof raw.code === "string" && raw.code.length > 0 ? raw.code : undefined) ??
+      (typeof raw.business === "string" && raw.business.length > 0 ? raw.business : undefined) ??
       (typeof raw.excerpt === "string" ? raw.excerpt : undefined) ??
+      (typeof raw.snippet === "string" && raw.snippet.length > 0 ? raw.snippet : undefined) ??
       (typeof raw.note === "string" ? raw.note : undefined) ??
       (typeof raw.subject === "string" ? raw.subject : undefined) ??
       (typeof raw.invariant === "string" ? raw.invariant : undefined);

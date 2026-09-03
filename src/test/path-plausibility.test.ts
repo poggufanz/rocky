@@ -47,3 +47,34 @@ test("recordRationale omits files when every entry is a shell fragment", async (
   });
   assert.equal(rec.files, undefined);
 });
+
+test("fileIndex reads explain code into reason", () => {
+  const records = [{
+    kind: "explain", id: "e1", ts: 1, v: 1, cwd: "/repo",
+    path: "src/a.ts", source: "agent:generic",
+    code: "async because two IO calls run in sequence",
+    business: "journal accepts DOCENTRY only",
+  }];
+  const entry = fileIndex(records as never).find((f) => f.path === "/repo/src/a.ts");
+  assert.ok(entry);
+  assert.equal(entry.recs[0]?.reason, "async because two IO calls run in sequence");
+});
+
+test("fileIndex falls back to business then snippet", () => {
+  const records = [
+    {
+      kind: "explain", id: "e2", ts: 2, v: 1, cwd: "/repo",
+      path: "src/b.ts", source: "agent:generic",
+      code: "", business: "approval page needs manager sign-off",
+    },
+    {
+      kind: "explain", id: "e3", ts: 3, v: 1, cwd: "/repo",
+      path: "src/c.ts", source: "agent:generic",
+      code: "", business: "", snippet: "const x = await load();",
+    },
+  ];
+  const byPath = new Map(fileIndex(records as never).map((f) => [f.path, f]));
+  assert.equal(byPath.get("/repo/src/b.ts")?.recs[0]?.reason, "approval page needs manager sign-off");
+  assert.equal(byPath.get("/repo/src/c.ts")?.recs[0]?.reason, "const x = await load();");
+});
+
