@@ -146,6 +146,12 @@ export const MAX_RATIONALE_FILE_CHARS = 512;
 
 export interface RationalePointer { logPath?: string; sessionId?: string; turnRef?: string }
 export interface RationaleLinks { tripleId?: string; fixId?: string; failureId?: string }
+export const MAX_GIT_SNAPSHOT_CHARS = 8 * 1024;
+export interface GitAnchor {
+  base?: string;
+  dirty?: boolean;
+  snapshot?: string;
+}
 export interface RationaleRecord {
   kind: "rationale"; id: string; ts: number; v: 1;
   cwd: string;
@@ -157,6 +163,7 @@ export interface RationaleRecord {
   links?: RationaleLinks;
   /** Bounded file paths this stated reason covers (notify lane `--files`). */
   files?: string[];
+  git?: GitAnchor;
 }
 export interface ExplainRecord {
   kind: "explain"; id: string; ts: number; v: 1;
@@ -167,6 +174,7 @@ export interface ExplainRecord {
   business: string;
   snippet?: string;
   contentHash?: string;
+  git?: GitAnchor;
 }
 export interface AliasRecord {
   kind: "alias"; id: string; ts: number; v: 1;
@@ -613,6 +621,32 @@ function objectValue(value: unknown): Record<string, unknown> | undefined {
     : undefined;
 }
 
+export function parseGitAnchor(value: unknown): GitAnchor | undefined {
+  const obj = objectValue(value);
+  if (!obj) return undefined;
+  let base: string | undefined;
+  if (obj.base !== undefined) {
+    if (typeof obj.base !== "string" || obj.base.length === 0 || obj.base.length > 256) return undefined;
+    base = obj.base;
+  }
+  let dirty: boolean | undefined;
+  if (obj.dirty !== undefined) {
+    if (typeof obj.dirty !== "boolean") return undefined;
+    dirty = obj.dirty;
+  }
+  let snapshot: string | undefined;
+  if (obj.snapshot !== undefined) {
+    if (typeof obj.snapshot !== "string" || obj.snapshot.length === 0 || obj.snapshot.length > MAX_GIT_SNAPSHOT_CHARS) return undefined;
+    snapshot = obj.snapshot;
+  }
+  if (base === undefined && dirty === undefined && snapshot === undefined) return undefined;
+  return {
+    ...(base === undefined ? {} : { base }),
+    ...(dirty === undefined ? {} : { dirty }),
+    ...(snapshot === undefined ? {} : { snapshot }),
+  };
+}
+
 function strings(value: unknown): string[] | undefined {
   try {
     if (!Array.isArray(value) || value.length > MAX_RECORD_ARRAY_ITEMS) return undefined;
@@ -730,12 +764,18 @@ function parseMemoryRecordUnsafe(value: unknown): MemoryRecord | undefined {
           record.files.some((f) => typeof f !== "string" || f.length === 0 || f.length > MAX_RATIONALE_FILE_CHARS)) return undefined;
       files = record.files as string[];
     }
+    let git: GitAnchor | undefined;
+    if (record.git !== undefined) {
+      git = parseGitAnchor(record.git);
+      if (git === undefined) return undefined;
+    }
     return {
       kind: "rationale", id: record.id, ts: Number(record.ts), v: 1, cwd: record.cwd,
       agent, rationale_fidelity: fidelity, source, excerpt: record.excerpt,
       ...(pointer === undefined ? {} : { pointer }),
       ...(links === undefined ? {} : { links }),
       ...(files === undefined ? {} : { files }),
+      ...(git === undefined ? {} : { git }),
     };
   }
   if (record.kind === "explain") {
@@ -755,11 +795,17 @@ function parseMemoryRecordUnsafe(value: unknown): MemoryRecord | undefined {
       if (typeof record.contentHash !== "string" || record.contentHash.length === 0 || record.contentHash.length > MAX_RECORD_ITEM_CHARS) return undefined;
       contentHash = record.contentHash;
     }
+    let git: GitAnchor | undefined;
+    if (record.git !== undefined) {
+      git = parseGitAnchor(record.git);
+      if (git === undefined) return undefined;
+    }
     return {
       kind: "explain", id: record.id, ts: Number(record.ts), v: 1, cwd: record.cwd,
       path: record.path, source: record.source, code: record.code, business: record.business,
       ...(snippet === undefined ? {} : { snippet }),
       ...(contentHash === undefined ? {} : { contentHash }),
+      ...(git === undefined ? {} : { git }),
     };
   }
   if (record.kind === "failure") {
