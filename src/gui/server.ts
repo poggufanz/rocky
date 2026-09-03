@@ -22,12 +22,13 @@ import { redactSecretsAtBoundary } from "../core/redact.js";
 import { publicSettings, readSettings, writeSettings } from "./settings.js";
 import { providerFor, providerList } from "./models-dev.js";
 import { deriveHome } from "../core/home-data.js";
-import { fileIndex, getCachedDiff, clearDiffCache, groupMomentsByChange, defaultDiffIo, lineOverlapPredicate } from "../core/compare-data.js";
+import { fileIndex, getCachedDiff, clearDiffCache, groupMomentsByChange, defaultDiffIo, lineOverlapPredicate, parsePatch } from "../core/compare-data.js";
 import { filteredFiles, TEACH_MAX_LINES } from "../core/file-filter.js";
 import { repoForPath, type RepoCache } from "../core/repo-groups.js";
 import { teachLookup } from "../core/teach.js";
 import { buildLadder, calleeNames, collectImports, defaultTeachNeighbor, enclosingFunction, findDefinitionInText, isRelativeSpecifier, resolveRelativePath } from "../core/teach-ladder.js";
-import { gitFirstTouch } from "../core/git-diff.js";
+import { gitFirstTouch, resolveCommitDiff } from "../core/git-diff.js";
+import { bundleGroups, splitRowsByFile, BUNDLE_MAX_FILES, type BundleInput } from "../core/bundle-groups.js";
 import {
   gapRungFor,
   renderLadderCard,
@@ -726,6 +727,58 @@ async function handleApi(
       return found ? { record: found, diff: found.diff ?? null } : null;
     };
     return sendJson(response, 200, { A: pick(a), B: pick(b) });
+  }
+
+  if (pathname === "/api/bundles") {
+    const { list } = records();
+    const files = fileIndex(list);
+    const q = url.searchParams.get("q") ?? "";
+    const shown = filteredFiles({ files, fquery: q });
+    clearDiffCache();
+    const repos: RepoCache = new Map();
+    const repoFilter = url.searchParams.get("repo");
+    const inputs: BundleInput[] = [];
+    for (const file of shown) {
+      const repo = (await repoForPath(file.path, repos)) ?? "";
+      if (repoFilter && repo !== repoFilter) continue;
+      for (const rec of file.recs) {
+        const diff = getCachedDiff(file.path, rec, defaultDiffIo);
+        inputs.push({
+          path: file.path,
+          repo,
+          rec,
+          diff,
+        });
+      }
+    }
+    const result = bundleGroups(inputs);
+    return sendJson(response, 200, {
+      bundles: result.bundles,
+      unattributed: result.unattributed.length,
+    });
+  }
+
+  if (pathname === "/api/bundle") {
+    const commit = url.searchParams.get("commit");
+    if (!commit || !/^[0-9a-fA-F]{4,128}$/.test(commit)) {
+      return sendJson(response, 400, { error: "rocky needs a commit sha, question" });
+    }
+    const resolved = resolveCommitDiff({ sha: commit, cwd: root });
+    if (resolved === undefined) {
+      return sendJson(response, 200, null);
+    }
+    const rows = parsePatch(resolved.diff);
+    const byFile = splitRowsByFile(rows);
+    const files = Array.from(byFile.entries()).map(([path, fileRows]) => ({ path, rows: fileRows }));
+    const total = files.length;
+    const capped = files.slice(0, BUNDLE_MAX_FILES);
+    const truncated = resolved.truncated || total > BUNDLE_MAX_FILES;
+    return sendJson(response, 200, {
+      commit: resolved.commit,
+      files: capped,
+      truncated,
+      total,
+    });
   }
 
   if (pathname === "/api/teach" && request.method === "POST") {

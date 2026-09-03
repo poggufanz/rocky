@@ -5,6 +5,7 @@ import { createServer, type Server } from "node:http";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { execFileSync } from "node:child_process";
 
 import { startGui, type GuiHandle } from "../gui/server.js";
 import { publicSettings, readSettings, writeSettings } from "../gui/settings.js";
@@ -439,3 +440,97 @@ test("the prompt is redacted before it leaves the machine", async () => {
     await new Promise<void>((down) => provider.close(() => down()));
   }
 });
+
+test("bundles groups one commit across files and bundle shows its diff", async () => {
+  const { home, root } = hermetic();
+  execFileSync("git", ["init"], { cwd: root, stdio: "ignore" });
+  execFileSync("git", ["config", "user.email", "t@t.t"], { cwd: root, stdio: "ignore" });
+  execFileSync("git", ["config", "user.name", "t"], { cwd: root, stdio: "ignore" });
+  writeFileSync(join(root, "a.ts"), "const a = 1;\n");
+  writeFileSync(join(root, "b.ts"), "const b = 2;\n");
+  execFileSync("git", ["add", "."], { cwd: root, stdio: "ignore" });
+  execFileSync("git", ["commit", "-m", "add a and b"], { cwd: root, stdio: "ignore" });
+  const sha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim();
+
+  seedMemory(home, [
+    {
+      kind: "explain",
+      id: "e1",
+      v: 1,
+      ts: Date.now() - 1000,
+      cwd: root,
+      path: "a.ts",
+      source: "agent:test",
+      head: sha,
+      code: "const a = 1;",
+      business: "file a",
+      snippet: "const a = 1;",
+    },
+    {
+      kind: "explain",
+      id: "e2",
+      v: 1,
+      ts: Date.now(),
+      cwd: root,
+      path: "b.ts",
+      source: "agent:test",
+      head: sha,
+      code: "const b = 2;",
+      business: "file b",
+      snippet: "const b = 2;",
+    },
+  ]);
+
+  await withGui(root, async (h) => {
+    // 1. GET /api/bundles
+    const res = await json(h, "/api/bundles");
+    assert.equal(res.status, 200);
+    assert.ok(Array.isArray(res.body?.bundles));
+    assert.equal(typeof res.body?.unattributed, "number");
+    assert.equal(res.body.bundles.length, 1);
+    const bundle = res.body.bundles[0];
+    assert.equal(bundle.commit, sha.slice(0, 7));
+    assert.equal(bundle.witnessCount, 2);
+    assert.equal(bundle.files.length, 2);
+
+    // 2. GET /api/bundles with filter q=a.ts
+    const filteredQ = await json(h, "/api/bundles?q=a.ts");
+    assert.equal(filteredQ.status, 200);
+    assert.equal(filteredQ.body.bundles.length, 1);
+    assert.equal(filteredQ.body.bundles[0].files.length, 1);
+    assert.ok(filteredQ.body.bundles[0].files[0].path.endsWith("a.ts"));
+
+    // 3. GET /api/bundles with non-matching repo
+    const filteredRepo = await json(h, "/api/bundles?repo=nonexistent-repo");
+    assert.equal(filteredRepo.status, 200);
+    assert.equal(filteredRepo.body.bundles.length, 0);
+
+    // 4. GET /api/bundle?commit=--help (invalid sha)
+    const bad = await json(h, "/api/bundle?commit=--help");
+    assert.equal(bad.status, 400);
+    assert.equal(bad.body?.error, "rocky needs a commit sha, question");
+
+    // 5. GET /api/bundle (missing commit)
+    const missing = await json(h, "/api/bundle");
+    assert.equal(missing.status, 400);
+    assert.equal(missing.body?.error, "rocky needs a commit sha, question");
+
+    // 6. GET /api/bundle?commit=<nonexistent-sha>
+    const nonExistent = await json(h, "/api/bundle?commit=0123456789abcdef");
+    assert.equal(nonExistent.status, 200);
+    assert.equal(nonExistent.body, null);
+
+    // 7. GET /api/bundle?commit=<real-sha>
+    const fullBundle = await json(h, `/api/bundle?commit=${sha}`);
+    assert.equal(fullBundle.status, 200);
+    assert.equal(fullBundle.body.commit, sha.slice(0, 7));
+    assert.equal(fullBundle.body.total, 2);
+    assert.equal(fullBundle.body.truncated, false);
+    assert.ok(Array.isArray(fullBundle.body.files));
+    assert.equal(fullBundle.body.files.length, 2);
+    const paths = fullBundle.body.files.map((f: { path: string }) => f.path);
+    assert.ok(paths.includes("a.ts"));
+    assert.ok(paths.includes("b.ts"));
+  });
+});
+
