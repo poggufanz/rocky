@@ -1373,3 +1373,40 @@ main {
   .two { grid-template-columns: minmax(0, 1fr); }
   .side:first-child { border-bottom: 1px solid var(--line); }
 }
+
+/* ---- bundle mode ------------------------------------------------------ */
+
+.bundle-card {
+  display: block;
+  width: 100%;
+  padding: 8px 12px;
+  border: 0;
+  border-top: 1px solid var(--line);
+  background: transparent;
+  color: var(--body);
+  font: 12px var(--mono);
+  text-align: left;
+  cursor: pointer;
+}
+.bundle-card:first-child { border-top: 0; }
+.bundle-card:hover { background: var(--surface); }
+.bundle-card[aria-selected="true"],
+.bundle-card.picked {
+  background: var(--raised);
+  color: var(--bright);
+  box-shadow: inset 2px 0 0 var(--voice);
+}
+.bundle-card:active { transform: translateY(1px); }
+
+.bundle-files {
+  margin-bottom: 20px;
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 16px;
+}
+
+.hl {
+  background: var(--voice-tint);
+}
+.cl.hl {
+  background: var(--voice-tint);
+}

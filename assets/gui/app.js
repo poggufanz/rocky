@@ -174,11 +174,16 @@ function codeCell(text, openComment) {
 const state = {
   segment: initialSegment(),
   mode: "lines",
+  view: "individual",
   file: null,
   filter: "",
   total: null,
   fileCount: null,
+  bundleCount: null,
   files: [],
+  bundles: [],
+  selectedBundle: null,
+  bundleDiff: null,
   // group keys (repo names, "" for non-repo) the user hid in Filter Repo
   repoHidden: new Set(),
   mainLoaded: false,
@@ -194,8 +199,12 @@ const state = {
 function setTally() {
   const parts = [];
   if (state.total !== null) parts.push(`${state.total} Remembered`);
-  if (state.segment === "dash" && state.fileCount !== null) {
-    parts.push(`${state.fileCount} Files`);
+  if (state.segment === "dash") {
+    if (state.view === "bundle" && state.bundleCount !== null) {
+      parts.push(`${state.bundleCount} Bundles`);
+    } else if (state.fileCount !== null) {
+      parts.push(`${state.fileCount} Files`);
+    }
   }
   $("#tally").textContent = parts.join(" | ");
 }
@@ -213,6 +222,7 @@ function showSegment(name) {
   }
   setTally();
   if (name === "main") loadMain();
+  else if (state.view === "bundle") loadBundles();
   else loadFiles();
 }
 
@@ -461,7 +471,8 @@ function paintRepoFilter() {
       check.addEventListener("change", () => {
         if (check.checked) state.repoHidden.delete(key);
         else state.repoHidden.add(key);
-        renderFiles();
+        if (state.view === "bundle") renderBundles();
+        else renderFiles();
       });
       row.append(check, el("span", "repo-name", group.label), el("span", "repo-count", String(group.count)));
       return row;
@@ -493,15 +504,147 @@ $("#repo-filter-done").addEventListener("click", closeRepoFilter);
 $("#repo-filter-reset").addEventListener("click", () => {
   state.repoHidden.clear();
   paintRepoFilter();
-  renderFiles();
+  if (state.view === "bundle") renderBundles();
+  else renderFiles();
 });
 
 let filterTimer = 0;
 $("#filter").addEventListener("input", (event) => {
   state.filter = event.target.value.trim();
   clearTimeout(filterTimer);
-  filterTimer = setTimeout(loadFiles, 120);
+  filterTimer = setTimeout(() => {
+    if (state.view === "bundle") loadBundles();
+    else loadFiles();
+  }, 120);
 });
+
+async function loadBundles() {
+  ensureTotal();
+  fill($("#files"), listSkeleton(7));
+  try {
+    const data = await api(`/api/bundles?q=${encodeURIComponent(state.filter)}`);
+    state.bundles = data.bundles ?? [];
+  } catch {
+    fill($("#files"), failed(loadBundles));
+    return;
+  }
+  renderBundles();
+}
+
+function renderBundles() {
+  const bundles = state.bundles ?? [];
+  const shown = bundles.filter((b) => !state.repoHidden.has(b.repo ?? ""));
+  state.bundleCount = shown.length;
+  setTally();
+  $("#files-head").textContent = `Bundles: ${shown.length}`;
+  $("#repo-filter-btn").classList.toggle("on", state.repoHidden.size > 0);
+
+  if (shown.length === 0) {
+    fill($("#files"), bundles.length === 0
+      ? empty("no bundles heard yet.")
+      : empty("every group is hidden. filter repo opens them again."));
+    return;
+  }
+
+  fill(
+    $("#files"),
+    ...shown.map((bundle) => {
+      const card = el("button", "bundle-card");
+      card.type = "button";
+      card.dataset.key = bundle.key;
+      card.setAttribute("role", "option");
+      const isPicked = state.selectedBundle?.key === bundle.key;
+      card.setAttribute("aria-selected", String(isPicked));
+      if (isPicked) card.classList.add("picked");
+
+      const shortSha = bundle.commit
+        ? (bundle.commit === "uncommitted" ? "uncommitted" : bundle.commit.slice(0, 7))
+        : "snapshot";
+      const fileCount = bundle.files?.length ?? 0;
+      const fileWord = fileCount === 1 ? "1 file" : `${fileCount} files`;
+      const witCount = bundle.witnessCount ?? 0;
+      const witWord = witCount === 1 ? "1 witness" : `${witCount} witnesses`;
+
+      const top = el("div", "moment-top");
+      top.textContent = `${shortSha} · ${bundle.epistemic} · ${witWord}`;
+
+      const fileNames = (bundle.files ?? []).map((f) => f.path.split("/").pop()).join(", ");
+      const body = el("div", "moment-body");
+      body.textContent = `${fileWord}: ${fileNames}`;
+
+      card.append(top, body);
+      card.addEventListener("click", () => selectBundle(bundle));
+      return card;
+    }),
+  );
+}
+
+async function selectBundle(bundle) {
+  state.selectedBundle = bundle;
+  for (const card of $("#files").querySelectorAll(".bundle-card")) {
+    const isThis = card.dataset.key === bundle.key;
+    card.setAttribute("aria-selected", String(isThis));
+    card.classList.toggle("picked", isThis);
+  }
+
+  state.bundleDiff = null;
+  if (bundle.commit && /^[0-9a-fA-F]{4,128}$/.test(bundle.commit)) {
+    try {
+      state.bundleDiff = await api(`/api/bundle?commit=${encodeURIComponent(bundle.commit)}`);
+    } catch {
+      state.bundleDiff = null;
+    }
+  }
+
+  const inBundle = bundle.files?.some((f) => f.path === state.file);
+  if (!inBundle && bundle.files?.length > 0) {
+    state.file = bundle.files[0].path;
+  }
+  if (state.file) {
+    $("#pane-path").textContent = state.file;
+  } else {
+    $("#pane-path").textContent = bundle.commit ? `commit ${bundle.commit.slice(0, 7)}` : "bundle";
+  }
+
+  $("#sel").textContent = "";
+  closeMoments();
+  closePop();
+  renderPane();
+}
+
+const viewToggleBtn = el("button", "repo-filter-btn", "Individual");
+viewToggleBtn.id = "view-toggle-btn";
+viewToggleBtn.type = "button";
+viewToggleBtn.title = "Toggle view (individual / bundle)";
+viewToggleBtn.setAttribute("data-view", "individual");
+viewToggleBtn.style.marginLeft = "auto";
+
+function updateViewToggle() {
+  const isBundle = state.view === "bundle";
+  viewToggleBtn.textContent = isBundle ? "Bundle" : "Individual";
+  viewToggleBtn.classList.toggle("on", isBundle);
+  viewToggleBtn.setAttribute("aria-pressed", String(isBundle));
+  viewToggleBtn.setAttribute("data-view", state.view);
+  setTally();
+}
+
+viewToggleBtn.addEventListener("click", () => {
+  state.view = state.view === "bundle" ? "individual" : "bundle";
+  updateViewToggle();
+  if (state.view === "bundle") {
+    loadBundles();
+  } else {
+    state.selectedBundle = null;
+    state.bundleDiff = null;
+    loadFiles();
+    if (state.file) renderPane();
+  }
+});
+
+const repoFilterBtn = $("#repo-filter-btn");
+if (repoFilterBtn) {
+  repoFilterBtn.before(viewToggleBtn);
+}
 
 /* ---- dash: pane ------------------------------------------------------- */
 
@@ -559,22 +702,68 @@ async function renderPane() {
 }
 
 async function renderLines(body) {
-  const data = await api(`/api/file?path=${encodeURIComponent(state.file)}`);
-  if (data.missing) {
-    fill(body, empty("file not on disk. rocky cannot read it, question"));
+  if (!state.file) {
+    paneWelcome();
     return;
   }
+  const nodes = [];
+
+  if (state.view === "bundle" && state.bundleDiff?.files?.length > 0) {
+    const bundleFilesWrap = el("div", "bundle-files");
+    for (const f of state.bundleDiff.files) {
+      const section = el("div", "change");
+      const head = el("div", "change-head");
+      head.style.cursor = "pointer";
+      head.textContent = f.path;
+      if (f.path === state.file) {
+        head.style.color = "var(--voice)";
+        head.textContent += " · viewing lines below";
+      } else {
+        head.title = "Click to view file lines below";
+      }
+      head.addEventListener("click", () => {
+        state.file = f.path;
+        $("#pane-path").textContent = f.path;
+        renderPane();
+      });
+      section.append(head, diffBlock({ commit: state.bundleDiff.commit, rows: f.rows }, true));
+      bundleFilesWrap.append(section);
+    }
+    if (state.bundleDiff.truncated) {
+      bundleFilesWrap.append(el("div", "trunc", `… diff truncated (${state.bundleDiff.files.length} of ${state.bundleDiff.total} files)`));
+    }
+    nodes.push(bundleFilesWrap);
+  }
+
+  const data = await api(`/api/file?path=${encodeURIComponent(state.file)}`);
+  if (data.missing) {
+    nodes.push(empty("file not on disk. rocky cannot read it, question"));
+    fill(body, ...nodes);
+    return;
+  }
+
+  const bundleFile = state.view === "bundle"
+    ? state.selectedBundle?.files?.find((f) => f.path === state.file)
+    : null;
+  const spans = bundleFile?.spans ?? [];
+  const inSpan = (line) => spans.some(([s, e]) => line >= s && line <= e);
+
   let open = false;
   const rows = data.lines.map((text, index) => {
+    const lineNum = index + 1;
     const row = el("div", "cl");
-    row.dataset.line = String(index + 1);
+    row.dataset.line = String(lineNum);
+    if (state.view === "bundle" && inSpan(lineNum)) {
+      row.classList.add("picked", "hl");
+    }
     const painted = codeCell(text, open);
     open = painted.openComment;
-    row.append(el("span", "ln", String(index + 1)), painted.cell);
+    row.append(el("span", "ln", String(lineNum)), painted.cell);
     return row;
   });
   if (data.truncated) rows.push(el("div", "trunc", "… file long, lines cut"));
-  fill(body, ...rows);
+  nodes.push(...rows);
+  fill(body, ...nodes);
 }
 
 const KIND_CLASS = { "@": "dl-at", h: "dl-h", "+": "dl-p", "-": "dl-m" };
@@ -647,21 +836,54 @@ function recordRow(record, extra, hideDiff) {
 
 /* mode: all history */
 
+function matchesBundle(change, bundle) {
+  if (!bundle) return true;
+  if (bundle.commit && bundle.commit !== "uncommitted") {
+    const cCommit = change.commit ?? "";
+    const bCommit = bundle.commit;
+    return Boolean(cCommit && (cCommit === bCommit || cCommit.startsWith(bCommit) || bCommit.startsWith(cCommit)));
+  }
+  if (bundle.commit === "uncommitted") {
+    return change.commit === "uncommitted" || change.epistemic === "uncommitted";
+  }
+  return change.epistemic === bundle.epistemic;
+}
+
 async function renderHistory(pane) {
+  if (!state.file) {
+    paneWelcome();
+    return;
+  }
   const data = await api(`/api/compare?path=${encodeURIComponent(state.file)}`);
   const changes = data.changes ?? [];
   const unattributed = data.unattributed ?? [];
-  const witnessCount = changes.reduce((n, c) => n + (c.witnesses?.length ?? 0), 0) + unattributed.length;
-  state.moments = [...changes.flatMap((c) => c.witnesses ?? []), ...unattributed];
-  $("#sub-note").textContent = `${changes.length} changes · ${witnessCount} moments`;
-  if (changes.length === 0 && unattributed.length === 0) {
-    fill(pane, empty("nothing heard for this file yet."));
+
+  let shownChanges = changes;
+  let shownUnattributed = unattributed;
+
+  if (state.view === "bundle" && state.selectedBundle) {
+    shownChanges = changes.filter((c) => matchesBundle(c, state.selectedBundle));
+    shownUnattributed = state.selectedBundle.commit ? [] : unattributed;
+  }
+
+  const witnessCount = shownChanges.reduce((n, c) => n + (c.witnesses?.length ?? 0), 0) + shownUnattributed.length;
+  state.moments = [...shownChanges.flatMap((c) => c.witnesses ?? []), ...shownUnattributed];
+
+  const shortCommit = state.selectedBundle?.commit
+    ? (state.selectedBundle.commit === "uncommitted" ? "uncommitted" : state.selectedBundle.commit.slice(0, 7))
+    : "";
+  $("#sub-note").textContent = state.view === "bundle" && state.selectedBundle
+    ? `${shownChanges.length} changes · ${witnessCount} moments (${shortCommit})`
+    : `${changes.length} changes · ${witnessCount} moments`;
+
+  if (shownChanges.length === 0 && shownUnattributed.length === 0) {
+    fill(pane, empty(state.view === "bundle" ? "no witnesses in this bundle for this file." : "nothing heard for this file yet."));
     return;
   }
-  const cards = changes.map((change) => changeCard(change));
-  if (unattributed.length > 0) {
-    if (changes.length > 0) cards.push(el("div", "unattributed-head", "moments without an attributable change"));
-    for (const record of unattributed) cards.push(recordRow(record, undefined, true));
+  const cards = shownChanges.map((change) => changeCard(change));
+  if (shownUnattributed.length > 0) {
+    if (shownChanges.length > 0) cards.push(el("div", "unattributed-head", "moments without an attributable change"));
+    for (const record of shownUnattributed) cards.push(recordRow(record, undefined, true));
   }
   fill(pane, ...cards);
 }
@@ -859,6 +1081,20 @@ function clearPicked() {
   for (const row of document.querySelectorAll(".cl.picked")) row.classList.remove("picked");
 }
 
+function applyBundleHighlights() {
+  if (state.view !== "bundle" || !state.selectedBundle || !state.file) return;
+  const bundleFile = state.selectedBundle.files?.find((f) => f.path === state.file);
+  const spans = bundleFile?.spans ?? [];
+  if (spans.length === 0) return;
+  const inSpan = (line) => spans.some(([s, e]) => line >= s && line <= e);
+  for (const row of $("#pane-body").querySelectorAll(".cl")) {
+    const line = Number(row.dataset.line);
+    if (inSpan(line)) {
+      row.classList.add("picked", "hl");
+    }
+  }
+}
+
 function readSelection() {
   if (state.mode !== "lines") return null;
   const selection = document.getSelection();
@@ -888,6 +1124,7 @@ document.addEventListener("selectionchange", () => {
   if (picked === null) {
     ask.hidden = true;
     pending = null;
+    if (state.view === "bundle") applyBundleHighlights();
     return;
   }
   for (const row of picked.rows) row.classList.add("picked");
@@ -925,6 +1162,7 @@ function closePop() {
   pop.hidden = true;
   fill(pop);
   clearPicked();
+  if (state.view === "bundle") applyBundleHighlights();
 }
 
 pop.addEventListener("click", (event) => event.stopPropagation());
@@ -1440,5 +1678,6 @@ document.addEventListener("visibilitychange", () => {
   if (document.visibilityState !== "visible") return;
   state.mainLoaded = false;
   if (state.segment === "main") loadMain();
+  else if (state.view === "bundle") loadBundles();
   else loadFiles();
 });
