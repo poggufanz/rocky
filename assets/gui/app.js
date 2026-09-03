@@ -583,9 +583,12 @@ const KIND_CLASS = { "@": "dl-at", h: "dl-h", "+": "dl-p", "-": "dl-m" };
 function diffBlock(diff) {
   const wrap = el("div", "diff");
   if (diff.commit) {
-    wrap.append(
-      el("div", "diff-head", `${diff.prior ? "last change before · " : ""}commit ${diff.commit}`),
-    );
+    const label = diff.commit === "uncommitted"
+      ? "working tree · sementara, hilang setelah commit"
+      : `${diff.stored ? "recorded at event · " : ""}${diff.after ? "first change after · " : ""}${diff.prior ? "last change before · " : ""}commit ${diff.commit}`;
+    const head = el("div", "diff-head", label);
+    if (diff.commit === "uncommitted" || diff.after) head.classList.add("transient");
+    wrap.append(head);
   }
   let open = false;
   for (const row of diff.rows ?? []) {
