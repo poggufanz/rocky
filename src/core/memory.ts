@@ -36,12 +36,13 @@ import { resolveRockyPaths } from "./state-paths.js";
 import type { RockyPaths } from "./state-paths.js";
 import { boundTripleMechanism, isCompleteMemoryCoverage, isKnownPathPlatform, isSafeNonNegativeInteger, loadMemoryChecked, MAX_MEMORY_FILE_BYTES, MAX_RATIONALE_FILES, MAX_RATIONALE_FILE_CHARS, MAX_MEMORY_LINE_BYTES, MAX_MEMORY_RECORDS, MAX_SUPPORTED_MEMORY_RECORDS } from "./memory-read.js";
 import type { AliasRecord, AssociationRecord, BriefRunRecord, ExplainRecord, FailureRecord, FixRecord, InvariantTouchRecord, MemoryCoverage, MemoryRecord, NoteRecord, RationaleRecord, TripleRecord } from "./memory-read.js";
+import { MAX_GIT_SNAPSHOT_CHARS, type GitAnchor } from "./memory-read.js";
 import { redactSecretsAtBoundary } from "./redact.js";
 import { plausibleFilePath } from "./compare-data.js";
 import { utf8Slice, utf8SliceFromEnd } from "./utf8.js";
 import { LINK_WINDOW_MS, recentUnresolvedFailures, type UnresolvedLink } from "./memory-query.js";
 
-export type { AssociationRecord, BriefRunRecord, ExplainRecord, FailureRecord, FixRecord, InvariantTouchRecord, MemoryCoverage, MemoryRecord, NoteRecord, TripleFile, TripleRecord } from "./memory-read.js";
+export type { AssociationRecord, BriefRunRecord, ExplainRecord, FailureRecord, FixRecord, GitAnchor, InvariantTouchRecord, MemoryCoverage, MemoryRecord, NoteRecord, TripleFile, TripleRecord } from "./memory-read.js";
 export {
   boundTripleMechanism,
   boundTripleRecord,
@@ -1403,8 +1404,20 @@ function boundedRationaleFiles(files: string[] | undefined): { files: string[] }
   return bounded.length === 0 ? undefined : { files: bounded };
 }
 
+function boundGitAnchor(input: GitAnchor | undefined): { git?: GitAnchor } {
+  if (input === undefined) return {};
+  const git: GitAnchor = {};
+  if (typeof input.base === "string" && input.base.length > 0) git.base = input.base.slice(0, 256);
+  if (typeof input.dirty === "boolean") git.dirty = input.dirty;
+  if (typeof input.snapshot === "string" && input.snapshot.trim().length > 0) {
+    git.snapshot = redactSecretsAtBoundary(input.snapshot.slice(0, MAX_GIT_SNAPSHOT_CHARS));
+  }
+  if (git.base === undefined && git.dirty === undefined && git.snapshot === undefined) return {};
+  return { git };
+}
+
 export function recordRationale(
-  input: Omit<RationaleRecord, "kind" | "id" | "ts" | "v" | "excerpt"> & { text: string; ts?: number },
+  input: Omit<RationaleRecord, "kind" | "id" | "ts" | "v" | "excerpt"> & { text: string; ts?: number; git?: GitAnchor },
   paths?: RockyPaths,
 ): RationaleRecord {
   const ts = input.ts ?? Date.now();
@@ -1421,6 +1434,7 @@ export function recordRationale(
     ...(input.pointer === undefined ? {} : { pointer: input.pointer }),
     ...(input.links === undefined ? {} : { links: input.links }),
     ...(boundedRationaleFiles(input.files) ?? {}),
+    ...boundGitAnchor(input.git),
   };
   withMemoryTransaction((transaction) => { transaction.append(rec); }, paths ?? resolveRockyPaths(), { now: ts });
   return rec;
@@ -1433,7 +1447,7 @@ export function explainContentHash(snippet: string): string {
 }
 
 export function recordExplain(
-  input: { cwd: string; path: string; source: string; code: string; business: string; snippet?: string; ts?: number },
+  input: { cwd: string; path: string; source: string; code: string; business: string; snippet?: string; git?: GitAnchor; ts?: number },
   paths: RockyPaths = resolveRockyPaths(),
 ): ExplainRecord {
   const record: ExplainRecord = {
@@ -1443,6 +1457,7 @@ export function recordExplain(
     source: input.source,
     code: boundRationaleExcerpt(input.code),
     business: boundRationaleExcerpt(input.business),
+    ...boundGitAnchor(input.git),
   };
   if (input.snippet !== undefined && input.snippet.length > 0) {
     record.snippet = boundRationaleExcerpt(input.snippet);
