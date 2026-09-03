@@ -22,7 +22,7 @@ import { redactSecretsAtBoundary } from "../core/redact.js";
 import { publicSettings, readSettings, writeSettings } from "./settings.js";
 import { providerFor, providerList } from "./models-dev.js";
 import { deriveHome } from "../core/home-data.js";
-import { fileIndex, getCachedDiff, defaultDiffIo, lineOverlapPredicate } from "../core/compare-data.js";
+import { fileIndex, getCachedDiff, clearDiffCache, markSharedMoments, defaultDiffIo, lineOverlapPredicate } from "../core/compare-data.js";
 import { filteredFiles, TEACH_MAX_LINES } from "../core/file-filter.js";
 import { repoForPath, type RepoCache } from "../core/repo-groups.js";
 import { teachLookup } from "../core/teach.js";
@@ -544,9 +544,10 @@ const ago = (ts: number, now: number): string => {
 
 /** One moment as the GUI reads it: identity, labels, and its diff if any. */
 function momentsFor(path: string, root: string, now: number) {
+  clearDiffCache();
   const entry = fileIndex(records().list).find((file) => file.path === path);
   if (entry === undefined) return [];
-  return entry.recs.map((rec, index) => {
+  return markSharedMoments(entry.recs.map((rec, index) => {
     const diff = getCachedDiff(path, rec, defaultDiffIo) ?? undefined;
     return {
       id: `${rec.ts}-${index}`,
@@ -561,7 +562,7 @@ function momentsFor(path: string, root: string, now: number) {
       intent: rec.intent,
       diff,
     };
-  });
+  }));
 }
 
 /** Forwards one prompt to the provider the page names. OpenAI-compatible
