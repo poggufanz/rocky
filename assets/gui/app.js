@@ -1537,13 +1537,26 @@ function findFunctionSpan(originLine) {
     if (FN_RE.test(line) || ARROW_RE.test(line) || METHOD_RE.test(line)) {
       let depth = 0;
       let opened = false;
+      let end = -1;
       for (let j = i; j < lines.length; j += 1) {
         for (const ch of lines[j] ?? "") {
           if (ch === "{") { depth += 1; opened = true; }
-          else if (ch === "}") { depth -= 1; if (opened && depth <= 0) return { start: i + 1, end: j + 1 }; }
+          else if (ch === "}") {
+            depth -= 1;
+            if (opened && depth <= 0) {
+              end = j + 1;
+              if (originLine <= end) return { start: i + 1, end };
+              break;
+            }
+          }
         }
+        if (opened && depth <= 0) break;
       }
-      return { start: i + 1, end: Math.min(lines.length, i + 30) };
+      if (end === -1) {
+        const fallbackEnd = Math.min(lines.length, i + 30);
+        if (originLine <= fallbackEnd) return { start: i + 1, end: fallbackEnd };
+      }
+      break;
     }
   }
   return null;
