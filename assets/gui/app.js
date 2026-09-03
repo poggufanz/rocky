@@ -624,6 +624,9 @@ function recordRow(record, extra) {
   const item = el("div", `rec${extra ?? ""}`);
   item.tabIndex = 0;
   item.append(headRow(record), el("div", "rec-body", bodyText(record)));
+  if (record.shared && record.diff && record.diff.commit && record.diff.commit !== "uncommitted") {
+    item.append(el("div", "rec-shared", `shared by ${record.sharedCount} moments in this session`));
+  }
   if (state.showDiff && record.diff) item.append(diffBlock(record.diff));
   const choose = () => {
     for (const other of document.querySelectorAll(".rec.on")) other.classList.remove("on");
