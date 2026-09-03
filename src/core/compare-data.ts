@@ -509,22 +509,6 @@ export function lineOverlapPredicate(
   };
 }
 
-export function markSharedMoments<T extends { diff?: { commit?: string } | undefined }>(
-  moments: T[],
-): (T & { shared: boolean; sharedCount: number })[] {
-  const counts = new Map<string, number>();
-  for (const m of moments) {
-    const c = m.diff?.commit;
-    if (typeof c === "string" && c !== "uncommitted") counts.set(c, (counts.get(c) ?? 0) + 1);
-  }
-  return moments.map((m) => {
-    const c = m.diff?.commit;
-    const n = typeof c === "string" ? counts.get(c) ?? 0 : 0;
-    const shared = n > 1;
-    return { ...m, shared, sharedCount: shared ? n : 0 };
-  });
-}
-
 export interface WitnessMoment {
   id: string;
   diff?: { commit?: string; stored?: boolean; after?: boolean; prior?: boolean; rows: DiffRow[] } | undefined;

@@ -2,7 +2,6 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   diffFor,
-  markSharedMoments,
   getCachedDiff,
   clearDiffCache,
   type CompareRec,
@@ -68,19 +67,6 @@ test("stored snapshot wins without touching git", () => {
   assert.equal(calls, 0);
   assert.equal(out.stored, true);
   assert.ok(out.rows.some((r) => r.k === "+"));
-});
-
-test("markSharedMoments flags one commit serving many moments", () => {
-  const moments = [
-    { id: "a", diff: { commit: "abc", rows: [] } },
-    { id: "b", diff: { commit: "abc", rows: [] } },
-    { id: "c", diff: { commit: "uncommitted", rows: [] } },
-  ];
-  const marked = markSharedMoments(moments);
-  assert.equal(marked[0]?.shared, true);
-  assert.equal(marked[0]?.sharedCount, 2);
-  assert.equal(marked[1]?.shared, true);
-  assert.equal(marked[2]?.shared, false);
 });
 
 test("explain on a new file falls back to the child after the moment", () => {

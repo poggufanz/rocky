@@ -579,10 +579,11 @@ async function renderLines(body) {
 
 const KIND_CLASS = { "@": "dl-at", h: "dl-h", "+": "dl-p", "-": "dl-m" };
 
-/** One diff, the shape `diffFor` returns. */
-function diffBlock(diff) {
+/** One diff, the shape `diffFor` returns. Inside a change card the card's
+ *  own header already names the commit, so the head line stays off there. */
+function diffBlock(diff, hideHead) {
   const wrap = el("div", "diff");
-  if (diff.commit) {
+  if (diff.commit && !hideHead) {
     const label = diff.commit === "uncommitted"
       ? "working tree · sementara, hilang setelah commit"
       : `${diff.stored ? "recorded at event · " : ""}${diff.after ? "first change after · " : ""}${diff.prior ? "last change before · " : ""}commit ${diff.commit}`;
@@ -624,9 +625,6 @@ function recordRow(record, extra, hideDiff) {
   const item = el("div", `rec${extra ?? ""}`);
   item.tabIndex = 0;
   item.append(headRow(record), el("div", "rec-body", bodyText(record)));
-  if (record.shared && record.diff && record.diff.commit && record.diff.commit !== "uncommitted") {
-    item.append(el("div", "rec-shared", `shared by ${record.sharedCount} moments in this session`));
-  }
   if (state.showDiff && record.diff && !hideDiff) item.append(diffBlock(record.diff));
   const choose = () => {
     for (const other of document.querySelectorAll(".rec.on")) other.classList.remove("on");
@@ -660,21 +658,41 @@ async function renderHistory(pane) {
     fill(pane, empty("nothing heard for this file yet."));
     return;
   }
-  fill(
-    pane,
-    ...changes.map((change) => changeCard(change)),
-    ...unattributed.map((record) => recordRow(record, undefined, true)),
-  );
+  const cards = changes.map((change) => changeCard(change));
+  if (unattributed.length > 0) {
+    if (changes.length > 0) cards.push(el("div", "unattributed-head", "moments without an attributable change"));
+    for (const record of unattributed) cards.push(recordRow(record, undefined, true));
+  }
+  fill(pane, ...cards);
 }
 
-/** One unique change: a single diff block with its witness reasons beneath. */
+/** One unique change: its header names the evidence once, the single diff
+ *  follows, and every witness reason nests inside the same bordered card
+ *  so a reason can never be mistaken for the neighbouring change. */
 function changeCard(change) {
   const card = el("div", "change");
-  card.append(diffBlock(change.diff));
-  for (const witness of change.witnesses ?? []) {
-    card.append(recordRow(witness, " wit", true));
+  card.append(el("div", "change-head", changeLabel(change)));
+  card.append(diffBlock(change.diff, true));
+  const witnesses = change.witnesses ?? [];
+  if (witnesses.length > 0) {
+    const list = el("div", "witnesses");
+    for (const witness of witnesses) list.append(recordRow(witness, " wit", true));
+    card.append(list);
   }
   return card;
+}
+
+function changeLabel(change) {
+  const epi = change.epistemic === "uncommitted"
+    ? "working tree · sementara"
+    : change.epistemic === "recorded" ? "recorded at event"
+    : change.epistemic === "after" ? "first change after"
+    : change.epistemic === "prior" ? "last change before"
+    : "committed";
+  const what = change.commit && change.commit !== "uncommitted" ? ` · commit ${change.commit}` : "";
+  const n = change.witnesses?.length ?? 0;
+  const who = n === 1 ? " · 1 witness" : ` · ${n} witnesses`;
+  return `${epi}${what}${who}`;
 }
 
 /* mode: two moments */
