@@ -441,10 +441,16 @@ function renderFiles() {
       button.title = file.path;
       button.setAttribute("role", "option");
       button.setAttribute("aria-selected", String(file.path === state.file));
-      // count first, then the basename -- the same row shape the TUI paints
+      // count badge, then two-line text: basename first, directory second
+      const parts = file.path.split("/");
+      const base = parts.pop() ?? file.path;
+      const dir = parts.join("/");
+      const text = el("span", "file-text");
+      text.append(el("span", "file-name", base));
+      if (dir) text.append(el("span", "file-dir", dir));
       button.append(
         el("span", "file-count", String(file.count)),
-        el("span", "file-name", file.path.split("/").pop()),
+        text,
       );
       button.addEventListener("click", () => openFile(file.path));
       return button;
@@ -454,35 +460,51 @@ function renderFiles() {
 
 /* ---- dash: repo filter -------------------------------------------------- */
 
-/** One checkbox row per heard group, busiest first; non-repo comes last. */
+/** One card per heard group, busiest first; non-repo comes last. Each card
+ *  carries the group's newest intent and when it was heard, so the picker
+ *  reads as a list of live places rather than bare names. */
 function paintRepoFilter() {
   const groups = new Map();
   for (const file of state.files) {
     const key = fileGroup(file);
-    const entry = groups.get(key) ?? { label: key === "" ? "non-repo" : key, count: 0 };
+    const entry = groups.get(key) ?? { label: key === "" ? "non-repo" : key, count: 0, last: null };
     entry.count += 1;
+    if (file.last && (!entry.last || file.last.ts > entry.last.ts)) entry.last = file.last;
     groups.set(key, entry);
   }
+  const needle = ($("#repo-filter-search")?.value ?? "").trim().toLowerCase();
   const rows = [...groups.entries()]
+    .filter(([, group]) => !needle || group.label.toLowerCase().includes(needle))
     .sort((a, b) => b[1].count - a[1].count || a[1].label.localeCompare(b[1].label))
     .map(([key, group]) => {
-      const row = el("label", "repo-row");
+      const shown = !state.repoHidden.has(key);
+      const row = el("label", "repo-row repo-card");
+      if (!shown) row.classList.add("off");
       const check = document.createElement("input");
       check.type = "checkbox";
-      check.checked = !state.repoHidden.has(key);
+      check.checked = shown;
+      check.setAttribute("aria-label", `show ${group.label}`);
       check.addEventListener("change", () => {
         if (check.checked) state.repoHidden.delete(key);
         else state.repoHidden.add(key);
         if (state.view === "bundle") renderBundles();
         else renderFiles();
       });
-      row.append(check, el("span", "repo-name", group.label), el("span", "repo-count", String(group.count)));
+      const text = el("span", "repo-card-text");
+      const top = el("span", "repo-card-top");
+      top.append(el("span", "repo-name", group.label), el("span", "repo-count", `${group.count} files`));
+      text.append(top);
+      text.append(el("span", "repo-intent", group.last?.label || "nothing heard yet"));
+      text.append(el("span", "repo-updated", group.last ? `Updated ${group.last.agoText}` : ""));
+      row.append(check, text);
       return row;
     });
-  fill($("#repo-filter-list"), ...(rows.length > 0 ? rows : [empty("no repos heard yet.")]));
+  fill($("#repo-filter-list"), ...(rows.length > 0 ? rows : [empty("no repo matches that search.")]));
 }
 
 function openRepoFilter() {
+  const search = $("#repo-filter-search");
+  if (search) search.value = "";
   paintRepoFilter();
   $("#scrim").hidden = false;
   $("#repo-filter").hidden = false;
@@ -501,6 +523,7 @@ $("#repo-filter-btn").addEventListener("click", (event) => {
   event.stopPropagation();
   openRepoFilter();
 });
+$("#repo-filter-search").addEventListener("input", () => paintRepoFilter());
 $("#repo-filter-close").addEventListener("click", closeRepoFilter);
 $("#repo-filter-done").addEventListener("click", closeRepoFilter);
 $("#repo-filter-reset").addEventListener("click", () => {
@@ -537,6 +560,21 @@ async function loadBundles() {
   renderBundles();
 }
 
+/** Plain-English bundle labels. The list names what happened, not the storage
+ *  words (prior/after/witness) the core uses -- one mapping shared by the
+ *  bundle list and the history headers so both read the same. */
+function epistemicLabel(epistemic) {
+  if (epistemic === "uncommitted") return "Not committed yet";
+  if (epistemic === "recorded") return "Saved snapshot";
+  if (epistemic === "after") return "First change after heard";
+  if (epistemic === "prior") return "Last change before heard";
+  return "Committed change";
+}
+
+function noteWord(n) {
+  return n === 1 ? "1 note" : `${n} notes`;
+}
+
 function renderBundles() {
   const bundles = state.bundles ?? [];
   const shown = bundles.filter((b) => !state.repoHidden.has(b.repo ?? ""));
@@ -563,16 +601,15 @@ function renderBundles() {
       card.setAttribute("aria-selected", String(isPicked));
       if (isPicked) card.classList.add("picked");
 
-      const shortSha = bundle.commit
-        ? (bundle.commit === "uncommitted" ? "uncommitted" : bundle.commit.slice(0, 7))
-        : "snapshot";
+      const shaBit = bundle.commit && bundle.commit !== "uncommitted"
+        ? ` · ${bundle.commit.slice(0, 7)}`
+        : "";
       const fileCount = bundle.files?.length ?? 0;
-      const fileWord = fileCount === 1 ? "1 file" : `${fileCount} files`;
+      const fileWord = fileCount === 1 ? "1 file changed" : `${fileCount} files changed`;
       const witCount = bundle.witnessCount ?? 0;
-      const witWord = witCount === 1 ? "1 witness" : `${witCount} witnesses`;
 
       const top = el("div", "moment-top");
-      top.textContent = `${shortSha} · ${bundle.epistemic} · ${witWord}`;
+      top.textContent = `${epistemicLabel(bundle.epistemic)}${shaBit} · ${noteWord(witCount)}`;
 
       const fileNames = (bundle.files ?? []).map((f) => f.path.split("/").pop()).join(", ");
       const body = el("div", "moment-body");
@@ -930,22 +967,17 @@ function changeCard(change) {
 }
 
 function changeLabel(change) {
-  const epi = change.epistemic === "uncommitted"
-    ? "working tree · sementara"
-    : change.epistemic === "recorded" ? "recorded at event"
-    : change.epistemic === "after" ? "first change after"
-    : change.epistemic === "prior" ? "last change before"
-    : "committed";
+  const epi = epistemicLabel(change.epistemic);
   const what = change.commit && change.commit !== "uncommitted" ? ` · commit ${change.commit}` : "";
   const n = change.witnesses?.length ?? 0;
-  const who = n === 1 ? " · 1 witness" : ` · ${n} witnesses`;
+  const who = ` · ${noteWord(n)}`;
   return `${epi}${what}${who}`;
 }
 
 /* mode: two moments */
 
 async function renderCompare(pane) {
-  $("#sub-note").textContent = state.strict ? "Strict · Same Lines" : "Loose | Whole File";
+  $("#sub-note").textContent = state.strict ? "Exact lines" : "Whole file";
 
   // Each side draws from the moment it holds, on its own. Requiring both
   // meant picking A showed nothing until B was picked too, which read as
@@ -1011,8 +1043,9 @@ async function openMoments(side, anchor) {
   search.placeholder = "search intent…";
   search.autocomplete = "off";
 
-  const scope = el("button", "moments-scope", state.strict ? "Strict · Same Lines" : "Loose | Whole File");
+  const scope = el("button", "moments-scope", state.strict ? "Exact lines" : "Whole file");
   scope.type = "button";
+  scope.title = "Toggle between matching exact lines or the whole file";
   scope.addEventListener("click", () => {
     state.strict = !state.strict;
     openMoments(side, anchor);
@@ -1513,21 +1546,24 @@ function guessNodes(text) {
   return nodes;
 }
 
-/** Adds action controls: refs button and optional BYOK ask. */
+/** Adds action controls: find-usages button and optional BYOK ask. */
 function withAsk(anchor, parts, prompt, held, ctx) {
   const actions = el("div", "why-actions");
 
-  const refsBtn = el("button", "card-more refs-btn", "refs");
+  const refsBtn = el("button", "card-more refs-btn", "Find usages");
   refsBtn.type = "button";
+  refsBtn.title = "Show where this symbol is defined and used";
+  refsBtn.setAttribute("aria-label", "Find usages: show definition and usages");
   refsBtn.addEventListener("click", () => showReferences(anchor, ctx));
   actions.append(refsBtn);
 
   if (byokReady()) {
     const label = held
-      ? "Re-explain this with Agent (May use your AI API)"
-      : "Use Agent to explain this (May use your AI API)";
+      ? "Explain with AI"
+      : "Ask AI to explain";
     const button = el("button", "card-more ask-agent", label);
     button.type = "button";
+    button.title = "Uses your own API key. Rocky evidence stays local.";
     button.addEventListener("click", () => askModel(anchor, prompt, parts, ctx));
     actions.append(button);
   }
@@ -1564,13 +1600,13 @@ async function showReferences(anchor, ctx) {
   }
 
   if (!data || (!data.definition && (!data.references || data.references.length === 0))) {
-    openPop(anchor, el("p", "card-head assembled", "rocky not hear this name, question"));
+    openPop(anchor, el("p", "card-head assembled", "rocky not hear this name. try another symbol, question"));
     return;
   }
 
   const parts = [];
   const sym = data.symbol || selectedSymbol;
-  parts.push(el("p", "card-head", sym ? `references for ${sym}` : "references"));
+  parts.push(el("p", "card-head", sym ? `Usages of ${sym}` : "Usages"));
 
   if (data.definition) {
     const def = data.definition;
@@ -1579,7 +1615,7 @@ async function showReferences(anchor, ctx) {
     const link = el("button", "refer-link", `${def.path}:${def.line}`);
     link.type = "button";
     link.addEventListener("click", () => jumpToFileLine(def.path, def.line));
-    top.append(el("span", "refer-tag", "definition"), link);
+    top.append(el("span", "refer-tag", "Definition"), link);
     const snippet = el("pre", "refer-snippet", def.text);
     defBox.append(top, snippet);
     parts.push(defBox);
@@ -1848,16 +1884,17 @@ async function askWhy(start, end, at, expand = (start === end)) {
   parts.push(el("div", "card-ev", data.evidence));
 
   if (data.expandable && (data.rungs ?? []).length > 0) {
-    const more = el("button", "card-more", "Show Rungs");
+    const more = el("button", "card-more", "Show reasoning steps");
     more.type = "button";
+    more.title = "Show the checked steps Rocky used to build this reason";
     // the core writes "why 1 …"; here they are numbered steps under a caption
     const rungs = [
       el("p", "rung-note", "Steps Rocky walked from the code to a reason. They exist so the reason is a chain you can check, not one jump you have to trust. Each cites where it came from."),
       ...data.rungs.map((rung) => el("p", "rung", rung.replace(/^why (\d+)/, "#$1"))),
     ];
     more.addEventListener("click", () => {
-      const open = more.textContent === "Hide Rungs";
-      more.textContent = open ? "Show Rungs" : "Hide Rungs";
+      const open = more.textContent === "Hide reasoning steps";
+      more.textContent = open ? "Show reasoning steps" : "Hide reasoning steps";
       if (open) for (const rung of rungs) rung.remove();
       else pop.append(...rungs);
     });

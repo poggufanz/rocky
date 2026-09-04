@@ -72,7 +72,7 @@ body {
   /* one soft source high and left, so the ground has somewhere to fall away to */
   background: radial-gradient(1300px 560px at 12% -14%, #1b2228, var(--ground));
   color: var(--body);
-  font: 13px/1.5 var(--mono);
+  font: 13px/1.5 var(--sans);
   -webkit-font-smoothing: antialiased;
 }
 
@@ -556,6 +556,7 @@ main {
 .row-num {
   flex: 0 0 auto;
   margin-left: auto;
+  font: 12px var(--mono);
   font-variant-numeric: tabular-nums;
   color: var(--dim);
 }
@@ -614,7 +615,7 @@ main {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.recent-ago { color: var(--dim); font-size: 11.5px; }
+.recent-ago { color: var(--dim); font: 11.5px var(--mono); font-variant-numeric: tabular-nums; }
 
 /* ---- dash ------------------------------------------------------------ */
 
@@ -655,42 +656,130 @@ main {
   color: var(--dim);
 }
 
-/* a quieter settings-btn: it lives inside a column head, not the header bar */
+/* column-head toggles: text buttons, active state is an underline */
 .repo-filter-btn {
   flex: 0 0 auto;
-  padding: 3px 9px;
-  border: 1px solid var(--line);
-  border-radius: 6px;
+  padding: 4px 2px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
   background: transparent;
   color: var(--dim);
   font: 500 11px var(--sans);
   cursor: pointer;
 }
-.repo-filter-btn:hover { color: var(--body); border-color: var(--voice-dim); }
+.repo-filter-btn:hover { color: var(--body); }
 .repo-filter-btn:active { transform: translateY(1px); }
-.repo-filter-btn.on { color: var(--voice); border-color: var(--voice-dim); }
+.repo-filter-btn.on,
+.repo-filter-btn[aria-pressed="true"] {
+  color: var(--voice);
+  border-bottom-color: var(--voice);
+  background: transparent;
+}
 
-/* one checkbox row per heard repo; the count sits at the row's end */
+/* Filter Repo: search plus a grid of toggle cards. A shown repo carries the
+   voice border; a hidden one falls back to a dim hairline and dim text. */
+#repo-filter { width: min(660px, calc(100vw - 32px)); }
+
+.repo-search { display: block; margin-bottom: 12px; }
+.repo-search input {
+  width: 100%;
+  padding: 8px 11px;
+  border: 1px solid var(--line);
+  border-radius: 0;
+  background: var(--ground);
+  color: var(--bright);
+  font: 13px var(--sans);
+}
+.repo-search input::placeholder { color: var(--dim); }
+.repo-search input:focus { border-color: var(--voice-dim); outline: none; }
+
 .repo-list {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 8px;
+  max-height: 46vh;
+  overflow-y: auto;
   margin-bottom: 14px;
+  padding-right: 2px;
+}
+
+/* Flowing-water border for shown cards: a bright spot travels around the
+   edge via a rotating conic gradient. Pure CSS, no library. Browsers without
+   @property support get a static voice gradient instead of motion. Motion is
+   gated behind prefers-reduced-motion like every other animation here. */
+@property --flow-angle {
+  syntax: "<angle>";
+  initial-value: 0deg;
+  inherits: false;
 }
 .repo-row {
   display: flex;
-  align-items: baseline;
-  gap: 8px;
-  padding: 5px 6px;
-  border-radius: 6px;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 2px solid transparent;
+  border-radius: 3px;
+  background:
+    linear-gradient(var(--surface), var(--surface)) padding-box,
+    conic-gradient(from var(--flow-angle),
+      var(--voice-dim) 0%,
+      var(--voice) 8%,
+      var(--bright) 13%,
+      var(--voice) 18%,
+      var(--voice-dim) 30%,
+      var(--voice-dim) 58%,
+      var(--voice) 66%,
+      var(--voice-dim) 76%,
+      var(--voice-dim) 100%) border-box;
   color: var(--body);
   font: 12px var(--mono);
   cursor: pointer;
 }
-.repo-row:hover { background: var(--ground); }
-.repo-row input { accent-color: var(--voice); }
-.repo-name { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.repo-count { flex: 0 0 auto; color: var(--dim); }
+@media (prefers-reduced-motion: no-preference) {
+  .repo-row { animation: flow-border 3.5s linear infinite; }
+  @keyframes flow-border { to { --flow-angle: 360deg; } }
+  /* hover goes loud: faster lap plus a hotter border */
+  .repo-row:hover { animation-duration: 1.1s; filter: brightness(1.3) saturate(1.25); }
+}
+.repo-row.off {
+  animation: none;
+  border-color: var(--line);
+  background: transparent;
+}
+.repo-row.off .repo-name { color: var(--dim); }
+.repo-row input { margin-top: 3px; accent-color: var(--voice); }
+.repo-card-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.repo-card-top {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+.repo-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--bright);
+  font: 600 12.5px var(--sans);
+}
+.repo-count { flex: 0 0 auto; color: var(--dim); font: 12px var(--mono); }
+.repo-intent {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--body);
+  font: 12px var(--sans);
+}
+.repo-updated { color: var(--dim); font: 11px var(--mono); }
+.repo-updated:empty { display: none; }
 
 /* search leads the column, the file list answers it directly below */
 .filter {
@@ -702,15 +791,16 @@ main {
 
 .filter input {
   width: 100%;
-  padding: 6px 9px;
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  background: var(--ground);
+  padding: 6px 2px;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  border-radius: 0;
+  background: transparent;
   color: var(--bright);
-  font: 12px var(--mono);
+  font: 13px var(--sans);
 }
 .filter input::placeholder { color: var(--dim); font-family: var(--sans); }
-.filter input:focus { border-color: var(--voice-dim); outline: none; }
+.filter input:focus { border-bottom-color: var(--voice-dim); outline: none; }
 
 .files { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 6px 0; }
 
@@ -740,19 +830,32 @@ main {
   flex: 0 0 auto;
   width: 3ch;
   text-align: right;
+  font: 12px var(--mono);
   font-variant-numeric: tabular-nums;
   color: var(--dim);
 }
 .file[aria-selected="true"] .file-count { color: var(--voice); }
 
-.file-name {
+/* two-line row: basename in system type, directory muted mono below it */
+.file-text {
   flex: 1 1 auto;
   min-width: 0;
+  display: flex;
+  flex-direction: column;
+  line-height: 1.35;
+}
+.file-name {
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
 }
-.file-dir { color: var(--dim); }
+.file-dir {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: var(--dim);
+  font: 11px var(--mono);
+}
 
 /* pane */
 
@@ -813,9 +916,10 @@ main {
 
 .mode-btn {
   appearance: none;
-  border: 1px solid transparent;
-  border-radius: 6px;
-  padding: 3px 10px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  padding: 6px 10px;
   background: transparent;
   color: var(--dim);
   font: 500 11.5px/1.4 var(--sans);
@@ -823,8 +927,8 @@ main {
 }
 .mode-btn:hover { color: var(--body); }
 .mode-btn[aria-selected="true"] {
-  border-color: var(--line);
-  background: var(--surface);
+  border-bottom-color: var(--voice);
+  background: transparent;
   color: var(--bright);
 }
 
@@ -1397,6 +1501,7 @@ main {
   .left { border-right: 0; border-bottom: 1px solid var(--line); }
   .two { grid-template-columns: minmax(0, 1fr); }
   .side:first-child { border-bottom: 1px solid var(--line); }
+  .repo-list { grid-template-columns: minmax(0, 1fr); }
 }
 
 /* ---- bundle mode ------------------------------------------------------ */
@@ -1450,11 +1555,12 @@ main {
 }
 
 .refer-def {
-  margin: 10px 0;
-  padding: 8px 10px;
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  background: var(--bg);
+  margin: 10px 0 4px;
+  padding: 0 0 0 10px;
+  border: 0;
+  border-left: 2px solid var(--line);
+  border-radius: 0;
+  background: transparent;
 }
 
 .refer-def-head {
@@ -1498,9 +1604,10 @@ main {
 .refer-list {
   max-height: 240px;
   overflow-y: auto;
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  margin-top: 8px;
+  border: 0;
+  border-top: 1px solid var(--line);
+  border-radius: 0;
+  margin-top: 10px;
 }
 
 .refer-hit {
@@ -1526,4 +1633,126 @@ main {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* ---- sharp controls ----------------------------------------------------
+ *
+ * Square corners everywhere. Tab state (Main/Dash, Lines/History/Compare)
+ * is an underline, not a filled pill -- see .seg-btn / .mode-btn above.
+ * The dot below stays round: it is a status mark, not a corner.
+ */
+.model-chip,
+.settings-btn,
+.modal,
+.beta,
+.combo-list,
+.field select,
+.field input,
+.btn-quiet,
+.btn-voice,
+.recent-row,
+.repo-filter-btn,
+.ctx-badge button,
+.moments,
+.moments-search,
+.moments-scope,
+.pop,
+.card-more,
+.guess-warn,
+.fail-retry,
+.ask,
+.bundle-card,
+.change,
+.skel-row,
+.side-head { border-radius: 0; }
+
+/* ---- flowing buttons ----------------------------------------------------
+ *
+ * Same travelling voice border as the repo cards. Boxed buttons get the
+ * full ring (fills stay per-button via --btn-fill); underline tabs get a
+ * travelling highlight along the line instead. Static when reduced motion.
+ */
+.btn-voice,
+.card-more,
+.why-actions .ask-agent {
+  border: 2px solid transparent;
+  border-radius: 3px;
+  background:
+    linear-gradient(var(--btn-fill, transparent), var(--btn-fill, transparent)) padding-box,
+    conic-gradient(from var(--flow-angle),
+      var(--voice-dim) 0%,
+      var(--voice-dim) 86%,
+      var(--voice) 93%,
+      var(--bright) 96%,
+      var(--voice) 98%,
+      var(--voice-dim) 100%) border-box;
+}
+.card-more { --btn-fill: var(--surface); }
+.btn-voice { --btn-fill: var(--voice); }
+.why-actions .ask-agent { --btn-fill: var(--voice); }
+/* older hovers painted a solid border; the ring owns the border now */
+.btn-voice:hover,
+.card-more:hover { border-color: transparent; }
+
+/* quiet text buttons (Settings, Reset, Forget Key): no box at all, the
+   flowing underline only shows on hover */
+.settings-btn,
+.btn-quiet {
+  border: 0;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  background: transparent;
+}
+.settings-btn:hover,
+.btn-quiet:hover {
+  border-bottom-color: transparent;
+  background-image: repeating-linear-gradient(90deg,
+    var(--voice-dim) 0px,
+    var(--voice-dim) 20px,
+    var(--voice) 38px,
+    var(--bright) 45px,
+    var(--voice) 52px,
+    var(--voice-dim) 70px,
+    var(--voice-dim) 90px);
+  background-size: 90px 2px;
+  background-position: 0 100%;
+  background-repeat: repeat-x;
+}
+
+.mode-btn[aria-selected="true"],
+.repo-filter-btn.on,
+.repo-filter-btn[aria-pressed="true"] {
+  border-bottom-color: transparent;
+  /* seamless loop: the stripe repeats every 90px and slides exactly 90px,
+     so a highlight leaving on the right is already entering on the left.
+     one wide soft glow (long dim dwell, gentle rise) so the wrap is felt
+     as little as possible. */
+  background-image: repeating-linear-gradient(90deg,
+    var(--voice-dim) 0px,
+    var(--voice-dim) 20px,
+    var(--voice) 38px,
+    var(--bright) 45px,
+    var(--voice) 52px,
+    var(--voice-dim) 70px,
+    var(--voice-dim) 90px);
+  background-size: 90px 2px;
+  background-position: 0 100%;
+  background-repeat: repeat-x;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .btn-voice,
+  .card-more,
+  .why-actions .ask-agent { animation: flow-border 3.5s linear infinite; }
+  .btn-voice:hover,
+  .card-more:hover { animation-duration: 1.1s; filter: brightness(1.25); }
+  .settings-btn:hover,
+  .btn-quiet:hover { animation: flow-underline 2.8s linear infinite; }
+  .mode-btn[aria-selected="true"],
+  .repo-filter-btn.on,
+  .repo-filter-btn[aria-pressed="true"] { animation: flow-underline 2.8s linear infinite; }
+  @keyframes flow-underline {
+    from { background-position: 0 100%; }
+    to { background-position: 90px 100%; }
+  }
 }

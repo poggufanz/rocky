@@ -22,6 +22,7 @@ import { redactSecretsAtBoundary } from "../core/redact.js";
 import { publicSettings, readSettings, writeSettings } from "./settings.js";
 import { providerFor, providerList } from "./models-dev.js";
 import { deriveHome } from "../core/home-data.js";
+import { elapsed } from "../ui/rocky.js";
 import { fileIndex, getCachedDiff, groupMomentsByChange, defaultDiffIo, lineOverlapPredicate, parsePatch, type DiffRow } from "../core/compare-data.js";
 import { resolveContext } from "../core/context-resolve.js";
 import { filteredFiles, TEACH_MAX_LINES } from "../core/file-filter.js";
@@ -738,11 +739,28 @@ async function handleApi(
     const shown = filteredFiles({ files, fquery: q });
     // one cache per answer: the dash's files share the same few repo walks
     const repos: RepoCache = new Map();
-    return sendJson(response, 200, await Promise.all(shown.map(async (f) => ({
-      path: f.path,
-      count: f.count,
-      repo: await repoForPath(f.path, repos),
-    }))));
+    return sendJson(response, 200, await Promise.all(shown.map(async (f) => {
+      // the newest record names what this file was last heard doing, so the
+      // repo filter can card each group with its latest intent and age
+      let newest: (typeof f.recs)[number] | undefined;
+      for (const rec of f.recs) {
+        if (newest === undefined || (rec.ts ?? 0) > (newest.ts ?? 0)) newest = rec;
+      }
+      const rawLabel = (newest?.summary ?? newest?.reason ?? newest?.excerpt ?? newest?.intent ?? newest?.kind ?? "")
+        .replace(/\s+/g, " ")
+        .trim();
+      const span = newest ? elapsed(Math.max(0, now - (newest.ts ?? 0))) : "";
+      return {
+        path: f.path,
+        count: f.count,
+        repo: await repoForPath(f.path, repos),
+        last: newest ? {
+          label: redactSecretsAtBoundary(rawLabel).slice(0, 140),
+          agoText: span === "just now" ? span : `${span} ago`,
+          ts: newest.ts ?? 0,
+        } : null,
+      };
+    })));
   }
 
   if (pathname === "/api/file") {
