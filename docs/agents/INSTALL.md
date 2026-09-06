@@ -38,6 +38,8 @@ rocky hook status
 
 `hook install` edits the shell profile (`.bashrc` / PowerShell `$PROFILE`) through a guarded transaction — show the human first. This is the one step with no manual equivalent documented here: the installer pins the hook version and detects staleness, which a hand-pasted snippet loses. `hook status` must report the hook current.
 
+For non-interactive bash (Linux/macOS/WSL agent tool shells), also export `BASH_ENV="$HOME/.rocky/shell/subshell-hook.sh"` (human approval). This is telemetry only — `env -u BASH_ENV` disables it by design, `sh`/PowerShell never read it, and success paths cost nothing. Verify: `BASH_ENV="$HOME/.rocky/shell/subshell-hook.sh" bash -c 'false'`, then `rocky recall "false"` finds the failure within seconds.
+
 ## Step 2 — Rationale and explain notify lanes (universal, no config at all)
 
 Rocky links *why* a change happened to *what* changed. In harnesses without a session-log adapter or hook system, you provide the why yourself: after any turn where you edited files, run:
@@ -90,7 +92,7 @@ Merge these into `~/.claude/settings.json` under `"hooks"` (create the key if ab
 }
 ```
 
-The three `agent-event` entries capture intent, mechanism, and rationale passively. The `PreToolUse` entry is the optional rationale gate — it denies an edit once per session per file when no rationale evidence exists yet, then fails open; omit that block to skip the gate, or set `ROCKY_RATIONALE_GATE=off` to silence it at runtime.
+The three `agent-event` entries capture intent, mechanism, and rationale passively. The `PreToolUse` entry is the optional rationale gate — it denies an edit once per session per file when no rationale evidence exists yet, then fails open; omit that block to skip the gate, or set `ROCKY_RATIONALE_GATE=off` to silence it at runtime. Default mode nudges once per file then records; set `ROCKY_GATE_MODE=strict` to deny persistently until rationale plus explain evidence lands, and `ROCKY_GATE_OVERRIDE=1` (human shell only, never from the model) to bypass once with an audit line.
 
 ## Step 4 — Codex, manual config *(human approval)*
 
@@ -204,7 +206,7 @@ It always exits `0` by design, so the caller reads stdout to learn the decision 
 
 Any harness qualifies when two things are true: a hook that fires **before** the edit and can cancel it, and a payload that names the file about to change. Both vary. Some lifecycle hooks only notify, and their exit code is discarded; some report a patch or a diff rather than a path, which leaves Rocky nothing to gate on. Read your harness's current hook documentation and confirm both before wiring this up. Where either is missing, Step 2's notify lane still records the why — only the enforcement is unavailable, and Rocky says so rather than pretending otherwise.
 
-## Step 7 — Write the Rocky contract into the project instruction file *(human approval; REQUIRED — setup is not done without it)*
+## Step 7 — Project contract (fallback, opt-in — skip when global hooks from Steps 3–6 are active)
 
 The steps above wire *this* session. Future sessions read none of it — they read the project instruction file. You MUST persist the contract there, or every next agent starts deaf.
 
@@ -239,7 +241,19 @@ Rocky is this machine's local failure/why memory. These rules are mandatory, eve
 - Skip chatter turns; this is evidence, not ritual.
 ```
 
-Then read the file back and confirm the section landed intact. Setup without this step leaves Rocky working for one session only — that counts as failed setup; say so instead of skipping quietly.
+Then read the file back and confirm the section landed intact. When Steps 3–6 installed global hooks, skip this step: the hooks survive compaction because they are code, not context. Use the project block only when this machine mixes hook-less harnesses or this repo needs `ROCKY_GATE_MODE=strict`.
+
+### Enforcement honesty matrix
+
+| Harness | Hook can cancel? | Payload names file? | Active Rocky lane |
+|---|---|---|---|
+| Claude Code (CLI native, Edit/Write) | Yes (`deny` honored) | Yes (`file_path`) | gate nudge/strict + passive capture |
+| Claude Code (ExitPlanMode, Agent tool, MCP tools, Desktop/Cowork) | Unreliable (upstream issues #50660/#44534/#33106/#77708) | Partial | passive capture only; no gate claim |
+| Codex (`apply_patch`) | Unreliable (#27833) | Yes | passive capture; best-effort gate |
+| OpenCode (Edit/Write) | Yes via plugin throw (strict only) | Yes | plugin + `shell.env` |
+| Cursor/Windsurf/Cline/etc. (no hook cancel) | No | Varies | bridge `agent-note.cjs` + manual Steps 1/2 |
+| Aider/Gemini CLI | No hooks | — | `lint-cmd`/Steps 1/2 + git-diff correlation |
+| Non-interactive `sh`/PowerShell/python-exec | No `BASH_ENV` | — | `rocky run` fallback |
 
 ## Step 8 — Verify
 
