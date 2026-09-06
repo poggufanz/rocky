@@ -145,8 +145,8 @@ test("claude-code agent-event with --explain-code and --explain-business writes 
   const { agentEvent } = await import("../commands/agent-hook.js");
   const result = await captureStdout(() => agentEvent("claude-code", {
     stdin: async () => "",
-    explainCode: "why",
-    explainBusiness: "what",
+    explainCode: "why this shape is needed",
+    explainBusiness: "what concern this serves",
     files: [spooled, plain],
   }));
   assert.equal(result.code, 0);
@@ -157,8 +157,8 @@ test("claude-code agent-event with --explain-code and --explain-business writes 
   const withSnippet = records.find((record) => record.path === spooled);
   const withoutSnippet = records.find((record) => record.path === plain);
   assert.equal(withSnippet?.source, "agent:claude-code");
-  assert.equal(withSnippet?.code, "why");
-  assert.equal(withSnippet?.business, "what");
+  assert.equal(withSnippet?.code, "why this shape is needed");
+  assert.equal(withSnippet?.business, "what concern this serves");
   assert.equal(withSnippet?.snippet, "const x = 1;", "a spooled snippet for that exact path is joined");
   assert.equal(withoutSnippet?.snippet, undefined, "no spooled snippet means no snippet on the record");
 });

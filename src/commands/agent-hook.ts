@@ -31,6 +31,9 @@ import { filesystemIdentity, NO_FOLLOW_FLAG, regularDescriptorSafe, sameFilesyst
 import { MAX_BASELINE_FILES, type AgentEvent, type IntentEvent, type TurnBaseline } from "../agent/schema.js";
 
 const STDIN_CAP_BYTES = 2 * 1024 * 1024;
+const MIN_RATIONALE_WORDS = 3;
+const MIN_RATIONALE_CHARS = 12;
+const MIN_EXPLAIN_SIDE_CHARS = 8;
 const LOG_CAP_BYTES = 64 * 1024;
 const LOG_MESSAGE_CAP_BYTES = 2 * 1024;
 const LOG_SCAN_BYTES = 8 * 1024;
@@ -323,7 +326,13 @@ function writeNotifyRationale(agent: "claude-code" | "codex" | "generic", deps: 
       logHookError(`agent-event ${agent} missing --rationale`, paths);
       return;
     }
+    const words = rationale.trim().split(/\s+/u).filter((w) => w.length > 0);
+    if (rationale.trim().length < MIN_RATIONALE_CHARS || words.length < MIN_RATIONALE_WORDS) return;
     const now = deps.now?.() ?? Date.now();
+    try {
+      const recent = loadMemory(paths.memory, now).slice(-3);
+      if (recent.some((r) => r.kind === "rationale" && (r.excerpt ?? "") === rationale.trim())) return;
+    } catch { /* fail open toward recording */ }
     const cwd = process.cwd();
     let records: readonly MemoryRecord[] = [];
     try {
@@ -367,7 +376,13 @@ function writeNotifyExplain(agent: "claude-code" | "codex" | "generic", deps: Ag
         || !Array.isArray(files) || files.length === 0) {
       return;
     }
+    if (code.trim().length < MIN_EXPLAIN_SIDE_CHARS || business.trim().length < MIN_EXPLAIN_SIDE_CHARS) return;
     const now = deps.now?.() ?? Date.now();
+    try {
+      const recent = loadMemory(paths.memory, now).slice(-3);
+      const pair = `${code.trim()}\n${business.trim()}`;
+      if (recent.some((r) => r.kind === "explain" && `${r.code}\n${r.business}` === pair)) return;
+    } catch { /* fail open toward recording */ }
     const cwd = process.cwd();
     const anchor = captureGitAnchor(cwd, deps.files, deps.git ?? defaultBaselineGit);
     for (const file of files.slice(0, MAX_RATIONALE_FILES)) {
