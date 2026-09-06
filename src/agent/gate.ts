@@ -15,7 +15,7 @@
  * work by breaking.
  */
 
-import { appendFileSync, mkdirSync, readFileSync, statSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { dirname, join } from "node:path";
 import { canonicalPath, loadMemory } from "../core/memory-read.js";
@@ -168,6 +168,58 @@ function createGateState(stateFile: string): GateState {
  */
 /** How fresh file-linked rationale evidence must be to satisfy the gate. */
 const RATIONALE_EVIDENCE_WINDOW_MS = 8 * 60 * 60 * 1000;
+/** How fresh file-linked explain evidence must be to satisfy the gate. */
+const EXPLAIN_EVIDENCE_WINDOW_MS = 8 * 60 * 60 * 1000;
+
+/** Bounded per-process evidence index keyed by memory file identity. */
+interface EvidenceCache {
+  mtimeMs: number;
+  size: number;
+  rationale: Map<string, number>;
+  explain: Map<string, number>;
+}
+
+const EVIDENCE_INDEX_CAP = 2000;
+let evidenceCache: EvidenceCache | undefined;
+
+function indexEvidence(memoryPath: string): EvidenceCache {
+  const rationale = new Map<string, number>();
+  const explain = new Map<string, number>();
+  try {
+    const stats = statSync(memoryPath);
+    if (evidenceCache !== undefined && evidenceCache.mtimeMs === stats.mtimeMs && evidenceCache.size === stats.size) {
+      return evidenceCache;
+    }
+    const now = Date.now();
+    const records = loadMemory(memoryPath, now);
+    for (let i = records.length - 1; i >= 0; i--) {
+      const record = records[i];
+      if (record === undefined) continue;
+      if (record.kind === "rationale" && rationale.size < EVIDENCE_INDEX_CAP) {
+        if (now - record.ts > RATIONALE_EVIDENCE_WINDOW_MS) continue;
+        const files = record.files;
+        if (files === undefined) continue;
+        for (const file of files) {
+          const identity = canonicalPath(file, { cwd: record.cwd });
+          if (identity.length > 0 && !rationale.has(identity)) rationale.set(identity, record.ts);
+        }
+      } else if (record.kind === "explain" && explain.size < EVIDENCE_INDEX_CAP) {
+        if (now - record.ts > EXPLAIN_EVIDENCE_WINDOW_MS) continue;
+        const identity = canonicalPath(record.path, { cwd: record.cwd });
+        if (identity.length > 0 && !explain.has(identity)) explain.set(identity, record.ts);
+      }
+      if (rationale.size >= EVIDENCE_INDEX_CAP && explain.size >= EVIDENCE_INDEX_CAP) break;
+    }
+    evidenceCache = { mtimeMs: stats.mtimeMs, size: stats.size, rationale, explain };
+    return evidenceCache;
+  } catch {
+    return { mtimeMs: -1, size: -1, rationale, explain };
+  }
+}
+
+function getEvidenceCache(memoryPath: string): EvidenceCache {
+  return indexEvidence(memoryPath);
+}
 
 /**
  * True when memory holds a rationale record, fresh within the window, whose
@@ -179,17 +231,7 @@ const RATIONALE_EVIDENCE_WINDOW_MS = 8 * 60 * 60 * 1000;
  */
 function hasFreshFileRationale(identity: string, now: number): boolean {
   try {
-    const records = loadMemory(resolveRockyPaths().memory, now);
-    for (let i = records.length - 1; i >= 0; i--) {
-      const record = records[i];
-      if (record === undefined || record.kind !== "rationale") continue;
-      if (now - record.ts > RATIONALE_EVIDENCE_WINDOW_MS) continue;
-      const files = record.files;
-      if (files === undefined) continue;
-      for (const file of files) {
-        if (canonicalPath(file, { cwd: record.cwd }) === identity) return true;
-      }
-    }
+    return indexEvidence(resolveRockyPaths().memory).rationale.has(identity);
   } catch {
     /* unreadable memory: treated as no evidence, deny-once path decides */
   }
@@ -225,18 +267,9 @@ export const rationaleCheck: GateCheck = {
   },
 };
 
-/** How fresh file-linked explain evidence must be to satisfy the gate. */
-const EXPLAIN_EVIDENCE_WINDOW_MS = 8 * 60 * 60 * 1000;
-
 function hasFreshFileExplain(identity: string, now: number): boolean {
   try {
-    const records = loadMemory(resolveRockyPaths().memory, now);
-    for (let i = records.length - 1; i >= 0; i--) {
-      const record = records[i];
-      if (record === undefined || record.kind !== "explain") continue;
-      if (now - record.ts > EXPLAIN_EVIDENCE_WINDOW_MS) continue;
-      if (canonicalPath(record.path, { cwd: record.cwd }) === identity) return true;
-    }
+    return indexEvidence(resolveRockyPaths().memory).explain.has(identity);
   } catch {
     /* unreadable memory: treated as no evidence, deny-once path decides */
   }
@@ -300,6 +333,33 @@ function logGateNote(message: string): void {
   }
 }
 
+const AUDIT_MAX_BYTES = 64 * 1024;
+
+function appendGateAudit(entry: { session: string; vendor: string; tool: string; identity: string; decision: string; evidence: string }): void {
+  try {
+    const paths = resolveRockyPaths();
+    const auditFile = join(paths.home, "gate-state", "audit.jsonl");
+    mkdirSync(dirname(auditFile), { recursive: true, mode: 0o700 });
+    let existing = "";
+    try {
+      const stats = statSync(auditFile);
+      if (stats.size > AUDIT_MAX_BYTES) {
+        const content = readFileSync(auditFile, "utf8");
+        const lines = content.split("\n").filter((line) => line.trim().length > 0);
+        existing = `${lines.slice(Math.floor(lines.length / 2)).join("\n")}\n`;
+        writeFileSync(auditFile, existing, { encoding: "utf8", mode: 0o600 });
+      }
+    } catch {
+      // No audit file yet or unreadable: append below creates or skips silently.
+    }
+    void existing;
+    const line = `${JSON.stringify({ ts: Date.now(), ...entry })}\n`;
+    appendFileSync(auditFile, line, { encoding: "utf8", mode: 0o600 });
+  } catch {
+    // Audit is observability; never throw, never deny.
+  }
+}
+
 function dispatch(vendor: string, stdinJson: string): string {
   if (!KNOWN_GATE_VENDORS.has(vendor)) {
     logGateNote(`gate-event: unknown vendor "${vendor}", allowing without enforcement`);
@@ -340,6 +400,7 @@ function dispatch(vendor: string, stdinJson: string): string {
     if (!check.enabled(process.env)) continue;
     const decision = check.evaluate(input, state);
     if (decision.deny && firstDeny === undefined) {
+      appendGateAudit({ session: sessionKey, vendor, tool: toolName, identity: filePath, decision: "deny", evidence: check.id });
       firstDeny = deny(decision.reason);
     }
   }

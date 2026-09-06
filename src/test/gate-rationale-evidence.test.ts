@@ -113,3 +113,47 @@ test("stale file-linked evidence outside the window does not satisfy the gate", 
     assert.equal(decision.deny, true, "stale evidence must not open the gate");
   });
 });
+
+test("fifty gate evaluations over 5000 memory lines finish under 5 seconds", () => {
+  withSandboxHome(() => {
+    const paths = resolveRockyPaths();
+    const cwd = "C:\\work\\repo";
+    const now = Date.now();
+    for (let i = 0; i < 5000; i++) {
+      recordRationale({
+        cwd, agent: "generic", rationale_fidelity: "summary", source: "notify",
+        text: `bulk rationale ${i}`, files: [`src\\bulk-${i % 100}.ts`], ts: now - 1000,
+      }, paths);
+    }
+    const started = Date.now();
+    for (let i = 0; i < 50; i++) {
+      rationaleCheck.evaluate(gateInput(cwd, "src\\bulk-7.ts"), memState());
+    }
+    assert.ok(Date.now() - started < 5000, "evidence lookup must use the index, not a full scan per call");
+  });
+});
+
+test("deny decisions append one bounded audit line", async () => {
+  const home = mkdtempSync(join(tmpdir(), "rocky-gate-audit-"));
+  const previous = process.env.ROCKY_HOME;
+  process.env.ROCKY_HOME = home;
+  try {
+    const { gateEvent } = await import("../agent/gate.js");
+    const stdin = JSON.stringify({ session_id: "audit-1", tool_name: "Edit", tool_input: { file_path: "/work/repo/src/audit-me.ts" }, cwd: "/work/repo" });
+    const first = gateEvent("claude-code", stdin);
+    assert.equal(JSON.parse(first.stdout).hookSpecificOutput.permissionDecision, "deny");
+    const { readFileSync, existsSync } = await import("node:fs");
+    const auditFile = join(home, "gate-state", "audit.jsonl");
+    assert.equal(existsSync(auditFile), true);
+    const lines = readFileSync(auditFile, "utf8").trim().split("\n");
+    assert.equal(lines.length, 1);
+    const entry = JSON.parse(lines[0] as string) as Record<string, unknown>;
+    assert.equal(entry.session, "audit-1");
+    assert.equal(entry.decision, "deny");
+  } finally {
+    if (previous === undefined) delete process.env.ROCKY_HOME;
+    else process.env.ROCKY_HOME = previous;
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
