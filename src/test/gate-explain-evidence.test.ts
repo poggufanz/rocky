@@ -148,3 +148,33 @@ test("human override env allows everything and audits", async () => {
   }
 });
 
+test("default mode nudges sequentially: rationale first, then explain, then allows", () => {
+  withSandboxHome(() => {
+    const stdin = JSON.stringify({
+      session_id: "s-seq-nudge",
+      tool_name: "Edit",
+      tool_input: { file_path: "src/seq.ts" },
+      cwd: "C:\\work\\repo",
+    });
+
+    // Call 1: denies with rationale reason
+    const res1 = gateEvent("claude-code", stdin);
+    assert.equal(res1.exitCode, 0);
+    const parsed1 = JSON.parse(res1.stdout);
+    assert.equal(parsed1.hookSpecificOutput.permissionDecision, "deny");
+    assert.match(parsed1.hookSpecificOutput.permissionDecisionReason, /--rationale/);
+
+    // Call 2: denies with explain reason (because rationale nudge was consumed, but explain was NOT burned on Call 1)
+    const res2 = gateEvent("claude-code", stdin);
+    assert.equal(res2.exitCode, 0);
+    const parsed2 = JSON.parse(res2.stdout);
+    assert.equal(parsed2.hookSpecificOutput.permissionDecision, "deny");
+    assert.match(parsed2.hookSpecificOutput.permissionDecisionReason, /--explain-code/);
+
+    // Call 3: allows (fails open because both nudges are now consumed)
+    const res3 = gateEvent("claude-code", stdin);
+    assert.equal(res3.exitCode, 0);
+    assert.equal(res3.stdout, "{}");
+  });
+});
+

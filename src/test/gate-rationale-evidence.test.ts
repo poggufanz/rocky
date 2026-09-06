@@ -167,3 +167,35 @@ test("deny decisions append one bounded audit line", async () => {
   }
 });
 
+test("audit log rotates to audit.1.jsonl when exceeding byte limit", async () => {
+  const home = mkdtempSync(join(tmpdir(), "rocky-gate-audit-rot-"));
+  const previous = process.env.ROCKY_HOME;
+  process.env.ROCKY_HOME = home;
+  try {
+    const { gateEvent } = await import("../agent/gate.js");
+    const { writeFileSync, mkdirSync, existsSync, readFileSync } = await import("node:fs");
+    const auditDir = join(home, "gate-state");
+    mkdirSync(auditDir, { recursive: true });
+    const auditFile = join(auditDir, "audit.jsonl");
+    const rotatedFile = join(auditDir, "audit.1.jsonl");
+    // Write 65 KB to trigger rotation (> 64 * 1024)
+    const largeData = "x".repeat(65 * 1024) + "\n";
+    writeFileSync(auditFile, largeData, "utf8");
+
+    const stdin = JSON.stringify({ session_id: "rot-1", tool_name: "Edit", tool_input: { file_path: "/work/repo/src/rot.ts" }, cwd: "/work/repo" });
+    const res = gateEvent("claude-code", stdin);
+    assert.equal(JSON.parse(res.stdout).hookSpecificOutput.permissionDecision, "deny");
+
+    assert.equal(existsSync(rotatedFile), true, "rotated file audit.1.jsonl should exist");
+    assert.equal(readFileSync(rotatedFile, "utf8"), largeData);
+    assert.equal(existsSync(auditFile), true, "new audit.jsonl should exist");
+    const newLines = readFileSync(auditFile, "utf8").trim().split("\n");
+    assert.equal(newLines.length, 1);
+  } finally {
+    if (previous === undefined) delete process.env.ROCKY_HOME;
+    else process.env.ROCKY_HOME = previous;
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+

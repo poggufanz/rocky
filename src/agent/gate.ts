@@ -15,7 +15,7 @@
  * work by breaking.
  */
 
-import { appendFileSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync, renameSync, rmSync, statSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { dirname, join } from "node:path";
 import { canonicalPath, loadMemory } from "../core/memory-read.js";
@@ -358,19 +358,16 @@ function appendGateAudit(entry: { session: string; vendor: string; tool: string;
     const paths = resolveRockyPaths();
     const auditFile = join(paths.home, "gate-state", "audit.jsonl");
     mkdirSync(dirname(auditFile), { recursive: true, mode: 0o700 });
-    let existing = "";
     try {
       const stats = statSync(auditFile);
       if (stats.size > AUDIT_MAX_BYTES) {
-        const content = readFileSync(auditFile, "utf8");
-        const lines = content.split("\n").filter((line) => line.trim().length > 0);
-        existing = `${lines.slice(Math.floor(lines.length / 2)).join("\n")}\n`;
-        writeFileSync(auditFile, existing, { encoding: "utf8", mode: 0o600 });
+        const rotated = join(paths.home, "gate-state", "audit.1.jsonl");
+        try { rmSync(rotated, { force: true }); } catch { /* ignore */ }
+        try { renameSync(auditFile, rotated); } catch { /* ignore */ }
       }
     } catch {
       // No audit file yet or unreadable: append below creates or skips silently.
     }
-    void existing;
     const line = `${JSON.stringify({ ts: Date.now(), ...entry })}\n`;
     appendFileSync(auditFile, line, { encoding: "utf8", mode: 0o600 });
   } catch {
@@ -417,16 +414,14 @@ function dispatch(vendor: string, stdinJson: string): string {
   const stateFile = join(paths.home, "gate-state", `${sessionKey}.jsonl`);
   const state = createGateState(stateFile);
 
-  let firstDeny: string | undefined;
   for (const check of CHECKS) {
     if (!check.enabled(process.env)) continue;
     const decision = check.evaluate(input, state);
-    if (decision.deny && firstDeny === undefined) {
+    if (decision.deny) {
       appendGateAudit({ session: sessionKey, vendor, tool: toolName, identity: filePath, decision: "deny", evidence: check.id });
-      firstDeny = deny(decision.reason);
+      return deny(decision.reason);
     }
   }
-  if (firstDeny !== undefined) return firstDeny;
   return allow();
 }
 
