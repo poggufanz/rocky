@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { gateEvent, rationaleCheck, type GateInput, type GateState } from "../agent/gate.js";
@@ -119,12 +119,22 @@ test("fifty gate evaluations over 5000 memory lines finish under 5 seconds", () 
     const paths = resolveRockyPaths();
     const cwd = "C:\\work\\repo";
     const now = Date.now();
+    const lines: string[] = [];
     for (let i = 0; i < 5000; i++) {
-      recordRationale({
-        cwd, agent: "generic", rationale_fidelity: "summary", source: "notify",
-        text: `bulk rationale ${i}`, files: [`src\\bulk-${i % 100}.ts`], ts: now - 1000,
-      }, paths);
+      lines.push(JSON.stringify({
+        kind: "rationale",
+        id: `bulk-${i}`,
+        ts: now - 1000,
+        v: 1,
+        cwd,
+        agent: "generic",
+        rationale_fidelity: "summary",
+        source: "notify",
+        excerpt: `bulk rationale ${i}`,
+        files: [`src\\bulk-${i % 100}.ts`],
+      }));
     }
+    writeFileSync(paths.memory, lines.join("\n") + "\n", "utf8");
     const started = Date.now();
     for (let i = 0; i < 50; i++) {
       rationaleCheck.evaluate(gateInput(cwd, "src\\bulk-7.ts"), memState());

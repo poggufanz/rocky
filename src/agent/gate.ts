@@ -173,6 +173,7 @@ const EXPLAIN_EVIDENCE_WINDOW_MS = 8 * 60 * 60 * 1000;
 
 /** Bounded per-process evidence index keyed by memory file identity. */
 interface EvidenceCache {
+  memoryPath: string;
   mtimeMs: number;
   size: number;
   rationale: Map<string, number>;
@@ -187,7 +188,10 @@ function indexEvidence(memoryPath: string): EvidenceCache {
   const explain = new Map<string, number>();
   try {
     const stats = statSync(memoryPath);
-    if (evidenceCache !== undefined && evidenceCache.mtimeMs === stats.mtimeMs && evidenceCache.size === stats.size) {
+    if (evidenceCache !== undefined
+        && evidenceCache.memoryPath === memoryPath
+        && evidenceCache.mtimeMs === stats.mtimeMs
+        && evidenceCache.size === stats.size) {
       return evidenceCache;
     }
     const now = Date.now();
@@ -210,10 +214,10 @@ function indexEvidence(memoryPath: string): EvidenceCache {
       }
       if (rationale.size >= EVIDENCE_INDEX_CAP && explain.size >= EVIDENCE_INDEX_CAP) break;
     }
-    evidenceCache = { mtimeMs: stats.mtimeMs, size: stats.size, rationale, explain };
+    evidenceCache = { memoryPath, mtimeMs: stats.mtimeMs, size: stats.size, rationale, explain };
     return evidenceCache;
   } catch {
-    return { mtimeMs: -1, size: -1, rationale, explain };
+    return { memoryPath, mtimeMs: -1, size: -1, rationale, explain };
   }
 }
 
