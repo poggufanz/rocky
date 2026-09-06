@@ -3,8 +3,8 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { explainCheck, type GateInput, type GateState } from "../agent/gate.js";
-import { recordExplain } from "../core/memory.js";
+import { explainCheck, gateEvent, rationaleCheck, type GateInput, type GateState } from "../agent/gate.js";
+import { recordExplain, recordRationale } from "../core/memory.js";
 
 function memState(): GateState {
   const seen = new Set<string>();
@@ -73,10 +73,8 @@ test("stale explain evidence outside the window does not satisfy the gate", () =
   });
 });
 
-test("explain and rationale keys do not collide", async () => {
-  withSandboxHome(async () => {
-    const { rationaleCheck } = await import("../agent/gate.js");
-    const { recordRationale } = await import("../core/memory.js");
+test("explain and rationale keys do not collide", () => {
+  withSandboxHome(() => {
     const cwd = "C:\\work\\repo";
     recordRationale({
       cwd, agent: "generic", rationale_fidelity: "summary", source: "notify",
@@ -84,5 +82,21 @@ test("explain and rationale keys do not collide", async () => {
     });
     assert.equal(rationaleCheck.evaluate(gateInput(cwd, "src\\solo.ts"), memState()).deny, false);
     assert.equal(explainCheck.evaluate(gateInput(cwd, "src\\solo.ts"), memState()).deny, true);
+  });
+});
+
+test("gateEvent recognizes and gates tool_input.path when file_path is omitted", () => {
+  withSandboxHome(() => {
+    const stdin = JSON.stringify({
+      session_id: "s-path-fallback",
+      tool_name: "Edit",
+      tool_input: { path: "src/fallback.ts" },
+      cwd: "C:\\work\\repo",
+    });
+    const result = gateEvent("claude-code", stdin);
+    assert.equal(result.exitCode, 0);
+    const parsed = JSON.parse(result.stdout);
+    assert.equal(parsed.hookSpecificOutput.permissionDecision, "deny");
+    assert.match(parsed.hookSpecificOutput.permissionDecisionReason, /src\/fallback\.ts/);
   });
 });
