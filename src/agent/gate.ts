@@ -27,6 +27,10 @@ export const GATE_SESSION_TIMEOUT_MS = 30 * 60 * 1000;
 /** Bounds how many distinct keys the state fold keeps in memory per read. */
 export const GATE_MAX_ENTRIES = 500;
 
+function gateMode(env: NodeJS.ProcessEnv): "nudge" | "strict" {
+  return env.ROCKY_GATE_MODE === "strict" ? "strict" : "nudge";
+}
+
 const GATED_TOOLS: ReadonlySet<string> = new Set(["Edit", "Write", "MultiEdit"]);
 /** Session ids longer than this get hashed instead of used verbatim as a filename. */
 const MAX_RAW_SESSION_ID_LEN = 64;
@@ -262,6 +266,11 @@ export const rationaleCheck: GateCheck = {
       state.mark(key); // remember, so later touches skip the memory read
       return { deny: false };
     }
+    if (gateMode(process.env) === "strict") return {
+      deny: true,
+      reason: `state why first. run: rocky hook agent-event ${input.vendor} --rationale "<one line why>" `
+        + `--files ${filePath}. then retry. rocky remembers why, you keep why, question`,
+    };
     if (!state.mark(key)) return { deny: false }; // could not persist the marker: never deny unrecorded state
     return {
       deny: true,
@@ -296,6 +305,11 @@ export const explainCheck: GateCheck = {
       state.mark(key);
       return { deny: false };
     }
+    if (gateMode(process.env) === "strict") return {
+      deny: true,
+      reason: `state why first. run: rocky hook agent-event ${input.vendor} --explain-code "<why this code shape>" `
+        + `--explain-business "<what concern this serves>" --files ${filePath}. then retry. rocky remembers why, you keep why, question`,
+    };
     if (!state.mark(key)) return { deny: false };
     return {
       deny: true,
@@ -367,6 +381,10 @@ function appendGateAudit(entry: { session: string; vendor: string; tool: string;
 function dispatch(vendor: string, stdinJson: string): string {
   if (!KNOWN_GATE_VENDORS.has(vendor)) {
     logGateNote(`gate-event: unknown vendor "${vendor}", allowing without enforcement`);
+    return allow();
+  }
+  if (process.env.ROCKY_GATE_OVERRIDE === "1") {
+    appendGateAudit({ session: "override", vendor, tool: "override", identity: "override", decision: "allow", evidence: "override" });
     return allow();
   }
   let raw: unknown;

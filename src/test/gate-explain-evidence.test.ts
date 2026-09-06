@@ -100,3 +100,51 @@ test("gateEvent recognizes and gates tool_input.path when file_path is omitted",
     assert.match(parsed.hookSpecificOutput.permissionDecisionReason, /src\/fallback\.ts/);
   });
 });
+
+test("strict mode denies persistently until explain evidence lands", async () => {
+  const home = mkdtempSync(join(tmpdir(), "rocky-gate-strict-"));
+  const previousHome = process.env.ROCKY_HOME;
+  const previousMode = process.env.ROCKY_GATE_MODE;
+  process.env.ROCKY_HOME = home;
+  process.env.ROCKY_GATE_MODE = "strict";
+  try {
+    const { gateEvent } = await import("../agent/gate.js");
+    const { recordExplain } = await import("../core/memory.js");
+    const stdin = JSON.stringify({ session_id: "strict-1", tool_name: "Edit", tool_input: { file_path: "/work/repo/src/hard.ts" }, cwd: "/work/repo" });
+    assert.equal(JSON.parse(gateEvent("claude-code", stdin).stdout).hookSpecificOutput.permissionDecision, "deny");
+    assert.equal(JSON.parse(gateEvent("claude-code", stdin).stdout).hookSpecificOutput.permissionDecision, "deny", "strict never fails open without evidence");
+    recordExplain({ cwd: "/work/repo", path: "/work/repo/src/hard.ts", source: "notify", code: "why this shape is needed", business: "what concern this serves", ts: Date.now() });
+    const cwd = "/work/repo";
+    const { explainCheck: strictExplain } = await import("../agent/gate.js");
+    assert.deepEqual(strictExplain.evaluate(
+      { vendor: "claude-code", toolName: "Edit", filePath: "/work/repo/src/hard.ts", sessionKey: "strict-1", cwd },
+      { has: () => false, mark: () => true },
+    ), { deny: false });
+  } finally {
+    if (previousHome === undefined) delete process.env.ROCKY_HOME;
+    else process.env.ROCKY_HOME = previousHome;
+    if (previousMode === undefined) delete process.env.ROCKY_GATE_MODE;
+    else process.env.ROCKY_GATE_MODE = previousMode;
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("human override env allows everything and audits", async () => {
+  const home = mkdtempSync(join(tmpdir(), "rocky-gate-override-"));
+  const previousHome = process.env.ROCKY_HOME;
+  const previousOverride = process.env.ROCKY_GATE_OVERRIDE;
+  process.env.ROCKY_HOME = home;
+  process.env.ROCKY_GATE_OVERRIDE = "1";
+  try {
+    const { gateEvent } = await import("../agent/gate.js");
+    const stdin = JSON.stringify({ session_id: "ovr-1", tool_name: "Edit", tool_input: { file_path: "/work/repo/src/any.ts" }, cwd: "/work/repo" });
+    assert.equal(gateEvent("claude-code", stdin).stdout, "{}");
+  } finally {
+    if (previousHome === undefined) delete process.env.ROCKY_HOME;
+    else process.env.ROCKY_HOME = previousHome;
+    if (previousOverride === undefined) delete process.env.ROCKY_GATE_OVERRIDE;
+    else process.env.ROCKY_GATE_OVERRIDE = previousOverride;
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
