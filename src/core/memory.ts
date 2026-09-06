@@ -959,7 +959,8 @@ export function withMemoryTransaction<T>(
   }
 }
 
-export function recordFailure(cmd: string, exitCode: number, stderr: string): FailureRecord {
+export function recordFailure(rawCmd: string, exitCode: number, stderr: string): FailureRecord {
+  const cmd = boundCommand(rawCmd);
   const identity = commandIdentity(cmd);
   const ts = Date.now();
   const rec: FailureRecord = {
@@ -975,7 +976,8 @@ export function recordFailure(cmd: string, exitCode: number, stderr: string): Fa
   return rec;
 }
 
-export function recordWatchFailure(cmd: string, exitCode: number, stderr: string, cwd = process.cwd()): FailureRecord {
+export function recordWatchFailure(rawCmd: string, exitCode: number, stderr: string, cwd = process.cwd()): FailureRecord {
+  const cmd = boundCommand(rawCmd);
   const identity = commandIdentity(cmd);
   const ts = Date.now();
   const rec: FailureRecord = {
@@ -1231,7 +1233,8 @@ export function clearPendingIfResolved(
   }, resolveRockyPaths(), { now: selectedNow });
 }
 
-export function recordHookFailure(cmd: string, exitCode: number, cwd: string): FailureRecord {
+export function recordHookFailure(rawCmd: string, exitCode: number, cwd: string): FailureRecord {
+  const cmd = boundCommand(rawCmd);
   const identity = commandIdentity(cmd);
   const ts = Date.now();
   const rec: FailureRecord = {
@@ -1384,14 +1387,27 @@ export function recordTripleOnce(
 
 export const MAX_RATIONALE_EXCERPT_BYTES = 1200;
 
+/** Cap head+tail by bytes with a `…` marker; byte-safe on multi-byte UTF-8. */
+function boundHeadTail(text: string, capBytes: number): string {
+  if (Buffer.byteLength(text, "utf8") <= capBytes) return text;
+  const half = Math.floor((capBytes - 5) / 2);
+  const head = utf8Slice(text, 0, half);
+  const tail = utf8SliceFromEnd(text, half);
+  return `${head} … ${tail}`;
+}
+
 /** Redact secrets, flatten control characters, and cap head+tail by bytes. */
 export function boundRationaleExcerpt(text: string): string {
-  const clean = redactSecretsAtBoundary(text.replace(/[\u0000-\u001f\u007f-\u009f]/g, " "));
-  if (Buffer.byteLength(clean, "utf8") <= MAX_RATIONALE_EXCERPT_BYTES) return clean;
-  const half = Math.floor((MAX_RATIONALE_EXCERPT_BYTES - 5) / 2);
-  const head = utf8Slice(clean, 0, half);
-  const tail = utf8SliceFromEnd(clean, half);
-  return `${head} … ${tail}`;
+  const clean = redactSecretsAtBoundary(text.replace(/[ --]/g, " "));
+  return boundHeadTail(clean, MAX_RATIONALE_EXCERPT_BYTES);
+}
+
+export const MAX_COMMAND_BYTES = 1200;
+
+/** Bound a remembered command exactly like an excerpt: redact, flatten, cap head+tail. */
+export function boundCommand(cmd: string): string {
+  const clean = redactSecretsAtBoundary(cmd.replace(/[ --]/g, " "));
+  return boundHeadTail(clean, MAX_COMMAND_BYTES);
 }
 
 /** Bound the optional notify-lane files list: cap count and entry length, drop junk entries. */
