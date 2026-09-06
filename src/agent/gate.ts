@@ -225,7 +225,50 @@ export const rationaleCheck: GateCheck = {
   },
 };
 
-const CHECKS: readonly GateCheck[] = [rationaleCheck];
+/** How fresh file-linked explain evidence must be to satisfy the gate. */
+const EXPLAIN_EVIDENCE_WINDOW_MS = 8 * 60 * 60 * 1000;
+
+function hasFreshFileExplain(identity: string, now: number): boolean {
+  try {
+    const records = loadMemory(resolveRockyPaths().memory, now);
+    for (let i = records.length - 1; i >= 0; i--) {
+      const record = records[i];
+      if (record === undefined || record.kind !== "explain") continue;
+      if (now - record.ts > EXPLAIN_EVIDENCE_WINDOW_MS) continue;
+      if (canonicalPath(record.path, { cwd: record.cwd }) === identity) return true;
+    }
+  } catch {
+    /* unreadable memory: treated as no evidence, deny-once path decides */
+  }
+  return false;
+}
+
+export const explainCheck: GateCheck = {
+  id: "explain",
+  enabled(env: NodeJS.ProcessEnv): boolean {
+    return env.ROCKY_RATIONALE_GATE !== "off";
+  },
+  evaluate(input: GateInput, state: GateState): GateDecision {
+    const filePath = input.filePath;
+    if (filePath === undefined) return { deny: false };
+    const identity = canonicalPath(filePath, { cwd: input.cwd });
+    if (identity.length === 0) return { deny: false };
+    const key = `explain:${identity}`;
+    if (state.has(key)) return { deny: false };
+    if (hasFreshFileExplain(identity, Date.now())) {
+      state.mark(key);
+      return { deny: false };
+    }
+    if (!state.mark(key)) return { deny: false };
+    return {
+      deny: true,
+      reason: `state why first. run: rocky hook agent-event ${input.vendor} --explain-code "<why this code shape>" `
+        + `--explain-business "<what concern this serves>" --files ${filePath}. then retry. rocky remembers why, you keep why, question`,
+    };
+  },
+};
+
+const CHECKS: readonly GateCheck[] = [rationaleCheck, explainCheck];
 
 function allow(): string {
   return "{}";
@@ -243,8 +286,10 @@ function deny(reason: string): string {
 
 function extractFilePath(toolInput: unknown): string | undefined {
   if (!isPlainRecord(toolInput)) return undefined;
-  const path = toolInput.file_path;
-  return typeof path === "string" && path.length > 0 ? path : undefined;
+  const filePath = toolInput.file_path;
+  if (typeof filePath === "string" && filePath.length > 0) return filePath;
+  const altPath = toolInput.path;
+  return typeof altPath === "string" && altPath.length > 0 ? altPath : undefined;
 }
 
 function logGateNote(message: string): void {
@@ -290,11 +335,15 @@ function dispatch(vendor: string, stdinJson: string): string {
   const stateFile = join(paths.home, "gate-state", `${sessionKey}.jsonl`);
   const state = createGateState(stateFile);
 
+  let firstDeny: string | undefined;
   for (const check of CHECKS) {
     if (!check.enabled(process.env)) continue;
     const decision = check.evaluate(input, state);
-    if (decision.deny) return deny(decision.reason);
+    if (decision.deny && firstDeny === undefined) {
+      firstDeny = deny(decision.reason);
+    }
   }
+  if (firstDeny !== undefined) return firstDeny;
   return allow();
 }
 
