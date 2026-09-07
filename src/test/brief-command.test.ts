@@ -85,12 +85,14 @@ function makeDatedRepo(): { dir: string; firstSha: string; firstIso: string } {
   return { dir, firstSha, firstIso };
 }
 
-test("parseBriefArgs handles --since, --quiet, --ai and rejects strays", () => {
-  assert.deepEqual(parseBriefArgs([]), { quiet: false, ai: false });
-  assert.deepEqual(parseBriefArgs(["--since", "24h", "--quiet"]), { since: "24h", quiet: true, ai: false });
-  assert.deepEqual(parseBriefArgs(["--ai"]), { quiet: false, ai: true });
+test("parseBriefArgs handles --since, --quiet, --ai, --decompose and rejects strays", () => {
+  assert.deepEqual(parseBriefArgs([]), { quiet: false, ai: false, decompose: false });
+  assert.deepEqual(parseBriefArgs(["--since", "24h", "--quiet"]), { since: "24h", quiet: true, ai: false, decompose: false });
+  assert.deepEqual(parseBriefArgs(["--ai"]), { quiet: false, ai: true, decompose: false });
+  assert.deepEqual(parseBriefArgs(["--decompose"]), { quiet: false, ai: false, decompose: true });
   assert.throws(() => parseBriefArgs(["--since"]));
   assert.throws(() => parseBriefArgs(["stray"]));
+  assert.throws(() => parseBriefArgs(["--decompose", "--decompose"]));
 });
 
 test("briefCommand reports window, records brief_run and invariant_touch, updates state", async () => {

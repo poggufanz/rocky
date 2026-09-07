@@ -27,6 +27,15 @@ import {
   scorePrompt,
   type ClarityResult,
 } from "../core/prompt-clarity.js";
+import {
+  DECOMPOSE_SAY_BLANK,
+  DECOMPOSE_SAY_FILLED,
+  decomposeFilesFromDiff,
+  decomposeNudgeLine,
+  renderDecomposeCard,
+} from "../core/decompose.js";
+import { resolveGitDiff } from "../core/git-diff.js";
+import { redactSecretsAtBoundary } from "../core/redact.js";
 import { CliUsageError, reportCliUsage } from "./cli-args.js";
 import { createTtyPromptPort } from "../setup/prompt.js";
 import { detail, phrase, prompt as rockyPrompt, say } from "../ui/rocky.js";
@@ -36,6 +45,7 @@ const MAX_PACKAGES = 50;
 const PROMPT_TIMEOUT_MS = 30_000;
 const PROMPT_STDIN_CAP_BYTES = 2 * 1024 * 1024;
 const CHECK_PROMPT_USAGE = 'rocky check --prompt "<text>" [--stdin] [--quiet]';
+const CHECK_DECOMPOSE_USAGE = "rocky check --decompose [--quiet]";
 const GIT_TIMEOUT_MS = 5_000;
 const READ_TIMEOUT_MS = 5_000;
 const MAX_READ_BYTES = 1024 * 1024;
@@ -520,6 +530,30 @@ export function parsePromptRequest(args: readonly string[]): PromptRequest {
   return { ...(prompt === undefined ? {} : { prompt }), stdin, rest };
 }
 
+export interface DecomposeRequest {
+  decompose: boolean;
+  rest: string[];
+}
+
+/**
+ * Pull `--decompose` out of one `check` invocation, leaving everything else
+ * as rest. Same shape as `parsePromptRequest`: a repeated flag is a usage
+ * error (exit 2), never a silent default.
+ */
+export function parseDecomposeRequest(args: readonly string[]): DecomposeRequest {
+  let decompose = false;
+  const rest: string[] = [];
+  for (const arg of args) {
+    if (arg === "--decompose") {
+      if (decompose) throw new CliUsageError("unexpected option: --decompose", CHECK_DECOMPOSE_USAGE);
+      decompose = true;
+      continue;
+    }
+    if (arg !== undefined) rest.push(arg);
+  }
+  return { decompose, rest };
+}
+
 /**
  * Read prompt text from stdin for `check --stdin`, bounded. Same 2 MB cap
  * pattern as teach: a truncated or unreadable stream still scores whatever
@@ -579,7 +613,48 @@ async function runPromptMode(request: PromptRequest): Promise<number> {
   return 0;
 }
 
-const KNOWN_FLAGS = new Set(["--pre-push", "--install-hook", "--offline", "--quiet", "--help", "--prompt", "--stdin"]);
+/**
+ * Advisory decomposition coach: deterministic 3-step template from the
+ * staged working-tree diff, local only, no model. Always exits 0 — an
+ * undecomposed change is a nudge, never a finding. Mirrors runPromptMode's
+ * strict rest validation so a conflicting flag refuses with exit 2.
+ */
+async function runDecomposeMode(request: DecomposeRequest): Promise<number> {
+  const positional = request.rest.filter((arg) => !arg.startsWith("--"));
+  if (positional.length > 0) throw new CliUsageError(`unexpected argument: ${positional[0]}`, CHECK_DECOMPOSE_USAGE);
+  const flags = new Set(request.rest.filter((arg) => arg.startsWith("--")));
+  const unknown = [...flags].filter((flag) => flag !== "--quiet" && flag !== "--help");
+  if (unknown.length > 0) throw new CliUsageError(`unexpected option: ${unknown[0]}`, CHECK_DECOMPOSE_USAGE);
+  if (flags.has("--help")) {
+    detail(`usage: ${CHECK_DECOMPOSE_USAGE}`);
+    detail("  splits staged change into behavior, fields, verify. local only, always exits 0.");
+    return 0;
+  }
+  let files: string[] = [];
+  try {
+    // Bounded (32 KB, 5 s) and fail-open: outside a repo, on timeout, or on
+    // truncation this answers undefined and the blank template below speaks.
+    const resolved = resolveGitDiff({});
+    const safe = resolved === undefined ? "" : redactSecretsAtBoundary(resolved.diff);
+    files = decomposeFilesFromDiff(safe);
+  } catch {
+    files = [];
+  }
+  let card: string[];
+  try {
+    card = renderDecomposeCard(files);
+  } catch {
+    files = [];
+    card = renderDecomposeCard([]);
+  }
+  for (const line of card) detail(line);
+  if (!flags.has("--quiet")) {
+    say(files.length === 0 ? DECOMPOSE_SAY_BLANK : DECOMPOSE_SAY_FILLED);
+  }
+  return 0;
+}
+
+const KNOWN_FLAGS = new Set(["--pre-push", "--install-hook", "--offline", "--quiet", "--help", "--prompt", "--stdin", "--decompose"]);
 
 function usage(): number {
   detail("usage: rocky check [--pre-push] [--install-hook] [--offline] [--quiet]");
@@ -590,6 +665,7 @@ function usage(): number {
   detail("  --pre-push       read ref updates from git on stdin (hook mode)");
   detail('  --prompt "<text>" score prompt clarity locally, no model, always exits 0');
   detail("  --stdin          read prompt text from stdin (2 MB cap), alone or after --prompt");
+  detail("  --decompose      split staged change into behavior, fields, verify. local only, always exits 0");
   detail("  manual exits: 0 checked-clean, 1 finding, 2 Git scope or inspection incomplete");
   detail("  pre-push exits: 3 finding, 0 clean or fail-open incomplete (stderr says INCOMPLETE)");
   detail("env: ROCKY_NO_QUIZ=1 skips the comprehension question");
@@ -604,24 +680,32 @@ async function runCheck(rest: readonly string[], state: CheckState): Promise<num
     ? rest.slice(0, rest.indexOf("--pre-push") + 1)
     : rest;
   let promptRequest: PromptRequest;
+  let decomposeRequest: DecomposeRequest;
   try {
     promptRequest = parsePromptRequest(ownedArgs);
+    decomposeRequest = parseDecomposeRequest(promptRequest.rest);
     if (promptRequest.prompt !== undefined || promptRequest.stdin) {
+      if (decomposeRequest.decompose) {
+        throw new CliUsageError("unexpected option: --decompose", CHECK_DECOMPOSE_USAGE);
+      }
       return await runPromptMode(promptRequest);
+    }
+    if (decomposeRequest.decompose) {
+      return await runDecomposeMode(decomposeRequest);
     }
   } catch (error) {
     const code = reportCliUsage(error, say, detail);
     if (code !== undefined) return code;
     throw error;
   }
-  const positional = ownedArgs.filter((arg) => !arg.startsWith("--"));
+  const positional = decomposeRequest.rest.filter((arg) => !arg.startsWith("--"));
   if (positional.length > 0) {
     say("check accepts flags only. bad bad.");
     detail(`unexpected: ${positional.join(", ")}`);
     usage();
     return 2;
   }
-  const flags = new Set(ownedArgs.filter((arg) => arg.startsWith("--")));
+  const flags = new Set(decomposeRequest.rest.filter((arg) => arg.startsWith("--")));
   // An unrecognised flag must not silently degrade into a full check: someone
   // who typed it meant something Rocky did not do.
   const unknown = [...flags].filter((flag) => !KNOWN_FLAGS.has(flag));
@@ -667,6 +751,18 @@ async function runCheck(rest: readonly string[], state: CheckState): Promise<num
       }
     } catch {
       /* deaf spot stays undisclosed rather than breaking check */
+    }
+    try {
+      // Decomposition coach: one default line on a clean, complete pre-push
+      // with outgoing lines. Never a finding, never an exit-code change,
+      // fail-open on any error. Gated to clean plus complete so bounded-error
+      // paths keep their single diagnostic line.
+      if (state.prePush && !state.finding && !state.incomplete && lines.length > 0) {
+        const nudge = decomposeNudgeLine();
+        if (nudge !== undefined) say(nudge);
+      }
+    } catch {
+      /* a lost nudge is better than a broken check */
     }
   }
 

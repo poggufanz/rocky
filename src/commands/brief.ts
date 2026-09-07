@@ -4,6 +4,8 @@ import { captureRationales } from "../agent/logs/capture.js";
 import { polishBriefLines } from "../ai/brief-ai.js";
 import { createOllamaClient } from "../ai/ollama.js";
 import { composeBrief, parseGitLog, type BriefInvariantTouch, type BriefMemoryHit } from "../core/brief.js";
+import { renderDecomposeCard } from "../core/decompose.js";
+import { redactSecretsAtBoundary } from "../core/redact.js";
 import { FALLBACK_WINDOW_MS, parseSinceDuration, readState, writeState } from "../core/brief-state.js";
 import { loadConfig } from "../core/config-read.js";
 import { buildConceptIndex, type ConceptIndex } from "../core/concept-index.js";
@@ -20,7 +22,7 @@ import { rationaleSourceLabel } from "./dictionary.js";
 import { CliUsageError, reportCliUsage } from "./cli-args.js";
 import { detail, heading, say } from "../ui/rocky.js";
 
-const USAGE = "rocky brief [--since <git-ref|duration like 24h>] [--quiet] [--ai]";
+const USAGE = "rocky brief [--since <git-ref|duration like 24h>] [--quiet] [--ai] [--decompose]";
 const GIT_TIMEOUT_MS = 30_000;
 const GIT_MAX_OUTPUT_BYTES = 8 * 1024 * 1024;
 
@@ -28,16 +30,23 @@ export interface BriefArgs {
   since?: string;
   quiet: boolean;
   ai: boolean;
+  decompose: boolean;
 }
 
 export function parseBriefArgs(argv: readonly string[]): BriefArgs {
   let since: string | undefined;
   let quiet = false;
   let ai = false;
+  let decompose = false;
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     if (arg === "--quiet") { quiet = true; continue; }
     if (arg === "--ai") { ai = true; continue; }
+    if (arg === "--decompose") {
+      if (decompose) throw new CliUsageError("unexpected option: --decompose", USAGE);
+      decompose = true;
+      continue;
+    }
     if (arg === "--since") {
       const value = argv[index + 1];
       if (value === undefined) throw new CliUsageError("--since needs value", USAGE);
@@ -47,7 +56,7 @@ export function parseBriefArgs(argv: readonly string[]): BriefArgs {
     }
     throw new CliUsageError(`unexpected argument: ${arg}`, USAGE);
   }
-  return { ...(since === undefined ? {} : { since }), quiet, ai };
+  return { ...(since === undefined ? {} : { since }), quiet, ai, decompose };
 }
 
 interface ResolvedWindow {
@@ -271,6 +280,33 @@ export async function briefCommand(argv: readonly string[] = [], cwd = process.c
       heading("repeated concepts");
       for (const line of conceptLines) detail(line);
     }
+  }
+
+  if (args.decompose) {
+    // Decomposition checklist for the newest session files: the window's
+    // changed paths, first-seen (newest-commit) order, secret-scrubbed. The
+    // shared card bounds the names itself; an empty window renders the blank
+    // template that asks for the three lines. Fail-open — redaction or
+    // rendering never blocks the brief.
+    let checklistFiles: string[] = [];
+    try {
+      const seen = new Set<string>();
+      for (const path of changedPaths) {
+        const kept = redactSecretsAtBoundary(path).trim();
+        if (kept.length === 0 || seen.has(kept)) continue;
+        seen.add(kept);
+        checklistFiles.push(kept);
+      }
+    } catch {
+      checklistFiles = [];
+    }
+    let checklist: string[];
+    try {
+      checklist = renderDecomposeCard(checklistFiles);
+    } catch {
+      checklist = renderDecomposeCard([]);
+    }
+    for (const line of checklist) console.log(line);
   }
 
   for (const touch of invariantTouches) {

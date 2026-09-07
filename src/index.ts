@@ -56,11 +56,12 @@ usage:
                             failure, and knocks (desktop notification, or a
                             bell) when it finishes. --quiet: plain facts on
                             stderr only, no persona lines, no notification.
-  rocky brief [--since <ref|24h>] [--quiet] [--ai]
+  rocky brief [--since <ref|24h>] [--quiet] [--ai] [--decompose]
                             hear what changed since last brief: commits by
                             area, remembered failures and fixes, touched
                             invariant guards, questions reviewer may ask.
                             --ai polishes wording via loopback Ollama only.
+                            --decompose appends behavior, fields, verify checklist.
   rocky recall [--] <query...>
                             ask Rocky's memory. matches words from error or command.
   rocky recall --ai [--] <query...>
@@ -125,6 +126,9 @@ usage:
                             hull check before push.
   rocky check --prompt "<text>" [--stdin] [--quiet]
                             score prompt clarity locally, no model, always exits 0.
+  rocky check --decompose [--quiet]
+                            split staged change into behavior, fields, verify.
+                            local only, always exits 0.
   rocky hook install        put Rocky's ears in your bash. every command heard,
                             failures remembered, dangerous commands questioned.
   rocky hook uninstall      remove the ears. memory stays.
