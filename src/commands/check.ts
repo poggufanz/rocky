@@ -22,12 +22,20 @@ import { scanSecrets } from "../check/secrets.js";
 import { loadConfig, setCheckRegistry } from "../core/config.js";
 import { runGit, type GitResult } from "../core/exec.js";
 import { recordNote } from "../core/memory.js";
+import {
+  renderClarityCard,
+  scorePrompt,
+  type ClarityResult,
+} from "../core/prompt-clarity.js";
+import { CliUsageError, reportCliUsage } from "./cli-args.js";
 import { createTtyPromptPort } from "../setup/prompt.js";
 import { detail, phrase, prompt as rockyPrompt, say } from "../ui/rocky.js";
 
 const MAX_LINES = 20_000;
 const MAX_PACKAGES = 50;
 const PROMPT_TIMEOUT_MS = 30_000;
+const PROMPT_STDIN_CAP_BYTES = 2 * 1024 * 1024;
+const CHECK_PROMPT_USAGE = 'rocky check --prompt "<text>" [--stdin] [--quiet]';
 const GIT_TIMEOUT_MS = 5_000;
 const READ_TIMEOUT_MS = 5_000;
 const MAX_READ_BYTES = 1024 * 1024;
@@ -469,7 +477,109 @@ async function installHookFlow(quiet: boolean): Promise<number> {
   return result.status === "refused" ? 1 : 0;
 }
 
-const KNOWN_FLAGS = new Set(["--pre-push", "--install-hook", "--offline", "--quiet", "--help"]);
+export interface PromptRequest {
+  prompt?: string;
+  stdin: boolean;
+  rest: string[];
+}
+
+/**
+ * Pull `--prompt <text>` / `--prompt=<text>` and `--stdin` out of one
+ * `check` invocation, leaving everything else as rest. A `--prompt` with
+ * a missing or flag-shaped value is a usage error, not a silent default —
+ * scoring the wrong text would be worse than refusing.
+ */
+export function parsePromptRequest(args: readonly string[]): PromptRequest {
+  let prompt: string | undefined;
+  let stdin = false;
+  const rest: string[] = [];
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = args[i];
+    if (arg === "--prompt") {
+      const value = args[i + 1];
+      if (prompt !== undefined) throw new CliUsageError("unexpected option: --prompt", CHECK_PROMPT_USAGE);
+      if (value === undefined || value.startsWith("--")) {
+        throw new CliUsageError("rocky check --prompt needs text", CHECK_PROMPT_USAGE);
+      }
+      prompt = value;
+      i += 1;
+      continue;
+    }
+    if (arg !== undefined && arg.startsWith("--prompt=")) {
+      if (prompt !== undefined) throw new CliUsageError("unexpected option: --prompt", CHECK_PROMPT_USAGE);
+      prompt = arg.slice("--prompt=".length);
+      continue;
+    }
+    if (arg === "--stdin") {
+      if (stdin) throw new CliUsageError("unexpected option: --stdin", CHECK_PROMPT_USAGE);
+      stdin = true;
+      continue;
+    }
+    if (arg !== undefined) rest.push(arg);
+  }
+  return { ...(prompt === undefined ? {} : { prompt }), stdin, rest };
+}
+
+/**
+ * Read prompt text from stdin for `check --stdin`, bounded. Same 2 MB cap
+ * pattern as teach: a truncated or unreadable stream still scores whatever
+ * arrived, and scoring never leaves this command with a non-zero exit.
+ */
+async function readPromptStdin(): Promise<string> {
+  const chunks: Buffer[] = [];
+  let total = 0;
+  try {
+    for await (const chunk of process.stdin) {
+      const buffer: Buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as string);
+      total += buffer.byteLength;
+      if (total > PROMPT_STDIN_CAP_BYTES) break;
+      chunks.push(buffer);
+    }
+  } catch {
+    // A stdin stream error must not throw out of prompt scoring.
+  }
+  return Buffer.concat(chunks).toString("utf8");
+}
+
+/**
+ * Advisory prompt-clarity scoring: deterministic, local, no model. Always
+ * exits 0 — a vague prompt is a nudge, never a finding.
+ */
+async function runPromptMode(request: PromptRequest): Promise<number> {
+  const positional = request.rest.filter((arg) => !arg.startsWith("--"));
+  if (positional.length > 0) throw new CliUsageError(`unexpected argument: ${positional[0]}`, CHECK_PROMPT_USAGE);
+  const flags = new Set(request.rest.filter((arg) => arg.startsWith("--")));
+  const unknown = [...flags].filter((flag) => flag !== "--quiet" && flag !== "--help");
+  if (unknown.length > 0) throw new CliUsageError(`unexpected option: ${unknown[0]}`, CHECK_PROMPT_USAGE);
+  if (flags.has("--help")) {
+    detail(`usage: ${CHECK_PROMPT_USAGE}`);
+    detail("  scores prompt clarity locally, no model. always exits 0.");
+    return 0;
+  }
+  let text = request.prompt ?? "";
+  if (request.stdin) {
+    if (process.stdin.isTTY === true) {
+      throw new CliUsageError("--stdin needs piped input, not a terminal", CHECK_PROMPT_USAGE);
+    }
+    const piped = await readPromptStdin();
+    text = text.length > 0 ? `${text}\n${piped}` : piped;
+  }
+  let result: ClarityResult;
+  try {
+    result = scorePrompt(text);
+  } catch {
+    result = scorePrompt("");
+  }
+  for (const line of renderClarityCard(result)) detail(line);
+  if (!flags.has("--quiet")) {
+    if (result.band === "clear") say("prompt clear. good good good.");
+    else if (result.band === "needs-detail") say("prompt needs detail. say file and steps, question");
+    else say("prompt vague. name file and change, question");
+  }
+  return 0;
+}
+
+const KNOWN_FLAGS = new Set(["--pre-push", "--install-hook", "--offline", "--quiet", "--help", "--prompt", "--stdin"]);
 
 function usage(): number {
   detail("usage: rocky check [--pre-push] [--install-hook] [--offline] [--quiet]");
@@ -478,6 +588,8 @@ function usage(): number {
   detail("  --offline        skip the registry lookup for this run");
   detail("  --quiet          plain facts only, no persona, no question");
   detail("  --pre-push       read ref updates from git on stdin (hook mode)");
+  detail('  --prompt "<text>" score prompt clarity locally, no model, always exits 0');
+  detail("  --stdin          read prompt text from stdin (2 MB cap), alone or after --prompt");
   detail("  manual exits: 0 checked-clean, 1 finding, 2 Git scope or inspection incomplete");
   detail("  pre-push exits: 3 finding, 0 clean or fail-open incomplete (stderr says INCOMPLETE)");
   detail("env: ROCKY_NO_QUIZ=1 skips the comprehension question");
@@ -491,6 +603,17 @@ async function runCheck(rest: readonly string[], state: CheckState): Promise<num
   const ownedArgs = state.prePush
     ? rest.slice(0, rest.indexOf("--pre-push") + 1)
     : rest;
+  let promptRequest: PromptRequest;
+  try {
+    promptRequest = parsePromptRequest(ownedArgs);
+    if (promptRequest.prompt !== undefined || promptRequest.stdin) {
+      return await runPromptMode(promptRequest);
+    }
+  } catch (error) {
+    const code = reportCliUsage(error, say, detail);
+    if (code !== undefined) return code;
+    throw error;
+  }
   const positional = ownedArgs.filter((arg) => !arg.startsWith("--"));
   if (positional.length > 0) {
     say("check accepts flags only. bad bad.");

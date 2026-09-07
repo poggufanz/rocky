@@ -122,6 +122,8 @@ usage:
                             are not checked.
   rocky check [--pre-push|--install-hook|--offline|--quiet]
                             hull check before push.
+  rocky check --prompt "<text>" [--stdin] [--quiet]
+                            score prompt clarity locally, no model, always exits 0.
   rocky hook install        put Rocky's ears in your bash. every command heard,
                             failures remembered, dangerous commands questioned.
   rocky hook uninstall      remove the ears. memory stays.

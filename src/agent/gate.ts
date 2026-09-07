@@ -19,6 +19,7 @@ import { appendFileSync, mkdirSync, readFileSync, renameSync, rmSync, statSync }
 import { createHash } from "node:crypto";
 import { dirname, join } from "node:path";
 import { canonicalPath, loadMemory } from "../core/memory-read.js";
+import { clarityNudgeLine } from "../core/prompt-clarity.js";
 import { resolveRockyPaths } from "../core/state-paths.js";
 import { logHookError } from "../commands/agent-hook.js";
 
@@ -53,6 +54,11 @@ export interface GateInput {
   filePath?: string;
   sessionKey: string;
   cwd: string;
+  /**
+   * Optional rationale draft carried by the hook payload. Scored for an
+   * advisory clarity nudge only — it never influences allow/deny.
+   */
+  rationale?: string;
 }
 
 export type GateDecision = { deny: true; reason: string } | { deny: false };
@@ -246,13 +252,29 @@ function hasFreshFileRationale(identity: string, now: number): boolean {
   return false;
 }
 
+/**
+ * Optional clarity advisory for a rationale draft: appended to an already
+ * decided deny reason as text only. Never influences the decision, never
+ * throws, silent when the payload carries no rationale, when the draft is
+ * already clear, or when ROCKY_CLARITY_ADVISORY=off.
+ */
+function claritySuffix(input: GateInput): string {
+  try {
+    if (process.env.ROCKY_CLARITY_ADVISORY === "off") return "";
+    if (input.rationale === undefined) return "";
+    const line = clarityNudgeLine(input.rationale);
+    return line === undefined ? "" : ` ${line}`;
+  } catch {
+    return "";
+  }
+}
+
 export const rationaleCheck: GateCheck = {
   id: "rationale",
   enabled(env: NodeJS.ProcessEnv): boolean {
     return env.ROCKY_RATIONALE_GATE !== "off";
   },
-  evaluate(input: GateInput, state: GateState): GateDecision {
-    const filePath = input.filePath;
+  evaluate(input: GateInput, state: GateState): GateDecision {    const filePath = input.filePath;
     if (filePath === undefined) return { deny: false };
     const identity = canonicalPath(filePath, { cwd: input.cwd });
     if (identity.length === 0) return { deny: false }; // no stable identity to gate on: fail open
@@ -269,13 +291,13 @@ export const rationaleCheck: GateCheck = {
     if (gateMode(process.env) === "strict") return {
       deny: true,
       reason: `state why first. run: rocky hook agent-event ${input.vendor} --rationale "<one line why>" `
-        + `--files ${filePath}. then retry. rocky remembers why, you keep why, question`,
+        + `--files ${filePath}. then retry. rocky remembers why, you keep why, question${claritySuffix(input)}`,
     };
     if (!state.mark(key)) return { deny: false }; // could not persist the marker: never deny unrecorded state
     return {
       deny: true,
       reason: `state why first. run: rocky hook agent-event ${input.vendor} --rationale "<one line why>" `
-        + `--files ${filePath}. then retry. rocky remembers why, you keep why, question`,
+        + `--files ${filePath}. then retry. rocky remembers why, you keep why, question${claritySuffix(input)}`,
     };
   },
 };
@@ -408,7 +430,11 @@ function dispatch(vendor: string, stdinJson: string): string {
   }
 
   const cwd = typeof raw.cwd === "string" ? raw.cwd : "";
-  const input: GateInput = { vendor, toolName, filePath, sessionKey, cwd };
+  const rationale = typeof raw.rationale === "string" && raw.rationale.length > 0 ? raw.rationale : undefined;
+  const input: GateInput = {
+    vendor, toolName, filePath, sessionKey, cwd,
+    ...(rationale === undefined ? {} : { rationale }),
+  };
 
   const paths = resolveRockyPaths();
   const stateFile = join(paths.home, "gate-state", `${sessionKey}.jsonl`);
