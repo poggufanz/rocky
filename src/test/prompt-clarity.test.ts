@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Readable } from "node:stream";
 import {
   clarityNudgeLine,
   countNumberedSteps,
@@ -189,6 +190,26 @@ test("check --prompt is advisory: exit 0 for vague and clear alike", async () =>
   assert.equal(await check(["--prompt", CLEAR, "--quiet"]), 0);
   assert.equal(await check(["--prompt", "", "--quiet"]), 0);
   assert.equal(await check(["--prompt", VAGUE, "--offline"]), 2, "conflicting modes refuse");
+});
+
+test("check --stdin scores piped text and stays advisory", async (t) => {
+  const realStdin = process.stdin;
+  Object.defineProperty(process, "stdin", { value: Readable.from([CLEAR]), configurable: true });
+  t.after(() => {
+    Object.defineProperty(process, "stdin", { value: realStdin, configurable: true });
+  });
+  const originalWrite = process.stderr.write;
+  let stderr = "";
+  process.stderr.write = ((chunk: unknown) => {
+    stderr += String(chunk);
+    return true;
+  }) as typeof process.stderr.write;
+  try {
+    assert.equal(await check(["--stdin", "--quiet"]), 0);
+  } finally {
+    process.stderr.write = originalWrite;
+  }
+  assert.match(stderr, /clarity \d+\/100/);
 });
 
 function gatePayload(session: string, file: string, extra: Record<string, unknown> = {}): string {

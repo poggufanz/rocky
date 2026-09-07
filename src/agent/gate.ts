@@ -24,6 +24,7 @@ import {
   cycleNudgeLine,
   loadCycleState,
   observeFailureCycle,
+  renderCycleCard,
   saveCycleState,
 } from "../core/failure-cycle.js";
 import { fingerprint } from "../core/fingerprint.js";
@@ -366,7 +367,12 @@ export const failureCycleCheck: GateCheck = {
       let suffix = line === undefined ? "" : ` ${line}`;
       const clusters = countCycleClusters(state);
       if (suffix.length > 0 && clusters >= 2) {
-        suffix += ` ${clusters} repeats heard this session. count only, no cause named.`;
+        // Single-sourced from renderCycleCard so the card and this suffix
+        // cannot drift; the emitted string is unchanged.
+        const clusterLine = renderCycleCard(observation.count, clusters).find((entry) =>
+          entry.includes("count only, no cause named"),
+        );
+        if (clusterLine !== undefined) suffix += ` ${clusterLine}`;
       }
       rememberCycleSuffix(paths.home, input.sessionKey, suffix);
       return { deny: false };

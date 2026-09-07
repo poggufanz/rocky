@@ -79,9 +79,9 @@ Three limits are stated here, not footnoted away. First, these results are corre
 10. GitClear (2025). *AI Copilot Code Quality: 2025 Data Suggests 4x Growth in Code Clones.*
 11. GitClear (2026). *The Maintainability Gap: 2026 AI Code Quality Research.*
 12. Anthropic (2026). *Long-running Claude for scientific computing.* Published 23 March 2026.
-10. Experimental study of automation bias and complacency. PubMed PMID 25886768. https://pubmed.ncbi.nlm.nih.gov/25886768/
-11. Systematic review of automation bias in decision-support systems. PMC7651899. https://pmc.ncbi.nlm.nih.gov/articles/PMC7651899/
-13. CHI 2026 study of vibe-coding comprehension gaps (N=100 students, GUI-only pure mode, timed lab; CS instrument ICC .731, ICAR alpha .625).
+13. Experimental study of automation bias and complacency. PubMed PMID 25886768. https://pubmed.ncbi.nlm.nih.gov/25886768/
+14. Systematic review of automation bias in decision-support systems. PMC7651899. https://pmc.ncbi.nlm.nih.gov/articles/PMC7651899/
+15. CHI 2026 study of vibe-coding comprehension gaps (N=100 students, GUI-only pure mode, timed lab; CS instrument ICC .731, ICAR alpha .625).
 
 ---
 
