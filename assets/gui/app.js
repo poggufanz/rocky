@@ -1204,6 +1204,7 @@ ask.addEventListener("click", (event) => {
 /* ---- the why popover ---------------------------------------------------- */
 
 const pop = $("#pop");
+const csCard = $("#cs-card");
 
 /** Opens beside `rect`, flipping above or below to stay on screen. */
 function openPop(rect, ...nodes) {
@@ -1912,6 +1913,25 @@ async function askWhy(start, end, at, expand = (start === end)) {
     true,
     { path: state.file, start: effectiveStart, end: effectiveEnd, symbol: selectedSymbol },
   ));
+  renderCsCard(state.file, effectiveStart, effectiveEnd);
+}
+
+async function renderCsCard(path, start, end) {
+  const box = csCard || document.getElementById("cs-card");
+  if (!box) return;
+  try {
+    const res = await fetch(`/api/cs-explain?path=${encodeURIComponent(path)}&start=${start}&end=${end}`, {
+      headers: { "X-Rocky-Token": window.__rockyToken || location.hash.slice(1) },
+    });
+    const body = await res.json().catch(() => null);
+    if (!body || !body.definition) { box.hidden = true; return; }
+    if (!pop.contains(box)) pop.append(box);
+    document.getElementById("cs-title").textContent = `cs concept ${body.conceptId}`;
+    document.getElementById("cs-definition").textContent = body.definition;
+    document.getElementById("cs-trace").textContent = (body.trace || []).join("\n");
+    document.getElementById("cs-check").textContent = body.check;
+    box.hidden = false;
+  } catch { box.hidden = true; }
 }
 
 /* ---- settings ----------------------------------------------------------
