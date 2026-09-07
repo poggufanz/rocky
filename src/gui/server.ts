@@ -38,6 +38,8 @@ import {
   renderWitnessCard,
 } from "../core/teach-render.js";
 import { resolveRefer, escapeRegExp, type ReferWitness } from "../core/refer-resolve.js";
+import { matchConcepts } from "../core/concepts.js";
+import { CS_CONCEPT_IDS, explainFor } from "../core/cs-explain.js";
 
 export const DEFAULT_GUI_PORT = 7777;
 const READ_CAP_BYTES = 2 * 1024 * 1024;
@@ -1024,6 +1026,34 @@ async function handleApi(
     const body = (await readBody(request)) as Record<string, unknown>;
     const { status, payload } = await ask(body, root);
     return sendJson(response, status, payload);
+  }
+
+  if (pathname === "/api/cs-explain") {
+    const rel = url.searchParams.get("path") ?? "";
+    const start = Number(url.searchParams.get("start") ?? "1");
+    const end = Number(url.searchParams.get("end") ?? String(start));
+    const full = confine(root, rel) ?? witnessed(rel);
+    if (full === undefined) return forbid(response);
+    try {
+      const info = await stat(full);
+      if (!info.isFile() || info.size > READ_CAP_BYTES) return sendJson(response, 200, null);
+      const raw = (await readFile(full, "utf8")).split(/\r?\n/);
+      const s = Math.max(1, Math.floor(start) || 1);
+      const e = Math.max(s, Math.floor(end) || s);
+      const snippet = raw.slice(Math.max(0, s - 1), e).join("\n").slice(0, 2000);
+      const hit = matchConcepts(`${rel} ${snippet}`).find((h) => (CS_CONCEPT_IDS as readonly string[]).includes(h.concept.id));
+      if (hit === undefined) return sendJson(response, 200, null);
+      const built = explainFor(hit.concept.id, snippet);
+      if (built === undefined) return sendJson(response, 200, null);
+      return sendJson(response, 200, {
+        conceptId: redactSecretsAtBoundary(built.conceptId),
+        definition: redactSecretsAtBoundary(built.definition),
+        trace: built.trace.map((l) => redactSecretsAtBoundary(l)),
+        check: redactSecretsAtBoundary(built.check),
+      });
+    } catch {
+      return sendJson(response, 200, null);
+    }
   }
 
   response.writeHead(404, baseHeaders("text/plain; charset=utf-8")).end("no");
