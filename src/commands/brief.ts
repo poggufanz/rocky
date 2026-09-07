@@ -4,7 +4,7 @@ import { captureRationales } from "../agent/logs/capture.js";
 import { polishBriefLines } from "../ai/brief-ai.js";
 import { createOllamaClient } from "../ai/ollama.js";
 import { composeBrief, parseGitLog, type BriefInvariantTouch, type BriefMemoryHit } from "../core/brief.js";
-import { COVERAGE_MAX_LISTED, coverageFromRecords, renderUntriedCard } from "../core/coverage.js";
+import { coverageDisclosureLines, coverageFromRecords, renderUntriedCard } from "../core/coverage.js";
 import { renderDecomposeCard } from "../core/decompose.js";
 import { redactSecretsAtBoundary } from "../core/redact.js";
 import { FALLBACK_WINDOW_MS, parseSinceDuration, readState, writeState } from "../core/brief-state.js";
@@ -296,20 +296,18 @@ export async function briefCommand(argv: readonly string[] = [], cwd = process.c
   // failure skips the section, never the brief. Counts only, no cause named.
   try {
     const pool = enriched ?? loadMemoryChecked().records;
+    const memoryIncomplete = memoryCoverage !== undefined && !isCompleteMemoryCoverage(memoryCoverage);
     const coverage = coverageFromRecords(pool, {
       sessionFiles: changedPaths,
       cwd: root,
       sinceTs: memorySinceTs,
       now,
-      memoryTruncated: memoryCoverage !== undefined && !isCompleteMemoryCoverage(memoryCoverage),
+      memoryTruncated: memoryIncomplete,
     });
     heading("untried");
     for (const line of renderUntriedCard(coverage)) detail(line);
-    if (memoryCoverage !== undefined && !isCompleteMemoryCoverage(memoryCoverage)) {
-      detail(`memory coverage: version ${memoryCoverage.version}, scanned ${memoryCoverage.scanned}, skipped ${memoryCoverage.skipped}, truncated ${memoryCoverage.truncated}, complete ${memoryCoverage.complete}`);
-    } else if (coverage.truncated) {
-      detail(`coverage partial: names ${COVERAGE_MAX_LISTED} at most, ${coverage.untriedTotal} untried total.`);
-    }
+    // Both disclosure lines show when both hold; neither shadows the other.
+    for (const line of coverageDisclosureLines(coverage, memoryCoverage, memoryIncomplete)) detail(line);
   } catch {
     // fail open: no coverage section this run
   }

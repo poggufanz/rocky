@@ -8,6 +8,7 @@ import {
   COVERAGE_EMPTY_LINE,
   COVERAGE_MAX_LISTED,
   COVERAGE_MAX_SESSION_FILES,
+  coverageDisclosureLines,
   coverageFromRecords,
   renderUntriedCard,
 } from "../core/coverage.js";
@@ -203,6 +204,58 @@ test("never throws on garbage input", () => {
   assert.deepEqual(renderUntriedCard(undefined), [COVERAGE_EMPTY_LINE]);
   assert.deepEqual(renderUntriedCard(null), [COVERAGE_EMPTY_LINE]);
   assert.deepEqual(renderUntriedCard("garbage"), [COVERAGE_EMPTY_LINE]);
+});
+
+test("dash home payload carries truncated flag and totals alongside the bounded lists", () => {
+  const files = Array.from({ length: 14 }, (_, index) => `src/file-${index}.ts`);
+  const home = deriveHome([triple(files, { hunks: false })], undefined, NOW);
+  assert.equal(home.coverage.untriedTotal, 14);
+  assert.equal(home.coverage.untried.length, COVERAGE_MAX_LISTED);
+  assert.equal(home.coverage.truncated, true);
+  assert.equal(home.coverage.triedTotal, 0);
+});
+
+test("dash home payload marks truncation from an incomplete memory read, even when empty", () => {
+  const partial = deriveHome([], "file-size-cap", NOW);
+  assert.equal(partial.coverage.truncated, true);
+  assert.deepEqual(partial.coverage.tried, []);
+  assert.deepEqual(partial.coverage.untried, []);
+  const full = deriveHome([], undefined, NOW);
+  assert.equal(full.coverage.truncated, false);
+});
+
+test("disclosure lines show both memory and list-cap lines when both hold, never shadowing", () => {
+  const memory = { version: 1 as const, scanned: 10, skipped: 0, truncated: 2, bytesScanned: 100, bytesTotal: 200, complete: false as boolean };
+  const capped = coverageFromRecords(
+    [triple(Array.from({ length: 12 }, (_, index) => `src/u-${index}.ts`), { hunks: false })],
+  );
+  assert.equal(capped.truncated, true);
+  const both = coverageDisclosureLines(capped, memory, true);
+  assert.equal(both.length, 2);
+  assert.match(both[0], /memory coverage: version 1, scanned 10, skipped 0, truncated 2, complete false/);
+  assert.match(both[1], /coverage partial: names 10 at most, 12 untried named\./);
+  assert.doesNotMatch(both.join("\n"), /\?/);
+
+  const memoryOnly = coverageDisclosureLines(
+    coverageFromRecords([rationale(["src/a.ts"])], { sessionFiles: ["src/a.ts"], cwd: CWD }),
+    memory,
+    true,
+  );
+  assert.equal(memoryOnly.length, 1);
+  assert.match(memoryOnly[0], /memory coverage:/);
+
+  const capOnly = coverageDisclosureLines(capped, undefined, false);
+  assert.equal(capOnly.length, 1);
+  assert.match(capOnly[0], /coverage partial:/);
+
+  const clean = coverageDisclosureLines(
+    coverageFromRecords([rationale(["src/a.ts"])], { sessionFiles: ["src/a.ts"], cwd: CWD }),
+    { ...memory, complete: true as boolean },
+    false,
+  );
+  assert.deepEqual(clean, []);
+  assert.deepEqual(coverageDisclosureLines(undefined, undefined, false), []);
+  assert.deepEqual(coverageDisclosureLines("garbage", "garbage" as unknown as typeof memory, true), []);
 });
 
 test("dash home payload carries bounded coverage tried and untried arrays", () => {

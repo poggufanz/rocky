@@ -25,7 +25,7 @@
  * `redactSecretsAtBoundary` the diff surfaces use.
  */
 
-import { canonicalPath, type MemoryRecord } from "./memory-read.js";
+import { canonicalPath, type MemoryCoverage, type MemoryRecord } from "./memory-read.js";
 import { redactSecretsAtBoundary } from "./redact.js";
 
 /** How many tried/untried paths one result names before counting the rest. */
@@ -340,5 +340,42 @@ export function renderUntriedCard(result: unknown): string[] {
     return lines;
   } catch {
     return [COVERAGE_EMPTY_LINE];
+  }
+}
+
+/**
+ * Detail-ready disclosure lines for the Untried section, stats --cycles
+ * pattern: the memory-read line when the bounded read truncated, plus the
+ * list-cap line when the split itself capped. Both show when both hold —
+ * neither shadows the other. Totals name listed files only (a lower bound
+ * under caps), so the cap line says "named", never "total". Never throws.
+ */
+export function coverageDisclosureLines(
+  result: unknown,
+  memory: MemoryCoverage | undefined,
+  memoryIncomplete: boolean,
+): string[] {
+  try {
+    const lines: string[] = [];
+    const memOk = typeof memory === "object" && memory !== null && !Array.isArray(memory);
+    if (memOk && memoryIncomplete === true) {
+      const version = typeof memory.version === "number" ? memory.version : 0;
+      const scanned = typeof memory.scanned === "number" ? memory.scanned : 0;
+      const skipped = typeof memory.skipped === "number" ? memory.skipped : 0;
+      const truncated = typeof memory.truncated === "number" ? memory.truncated : 0;
+      lines.push(`memory coverage: version ${version}, scanned ${scanned}, skipped ${skipped}, truncated ${truncated}, complete ${memory.complete === true}`);
+    }
+    if (typeof result === "object" && result !== null && !Array.isArray(result)) {
+      const { truncated, untriedTotal } = result as Partial<CoverageResult>;
+      if (truncated === true) {
+        const named = typeof untriedTotal === "number" && Number.isSafeInteger(untriedTotal) && untriedTotal >= 0
+          ? untriedTotal
+          : 0;
+        lines.push(`coverage partial: names ${COVERAGE_MAX_LISTED} at most, ${named} untried named.`);
+      }
+    }
+    return lines;
+  } catch {
+    return [];
   }
 }
