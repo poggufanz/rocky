@@ -399,7 +399,7 @@ export function tokens(text: string): Set<string> {
 }
 
 /** Jaccard similarity between two token bags. 0..1 */
-export function similarity(a: Set<string>, b: Set<string>): number {
+export function similarity(a: ReadonlySet<string>, b: ReadonlySet<string>): number {
   if (a.size === 0 || b.size === 0) return 0;
   let inter = 0;
   for (const t of a) if (b.has(t)) inter++;

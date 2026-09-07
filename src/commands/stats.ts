@@ -1,10 +1,61 @@
 import { dirname } from "node:path";
 import { readJournal } from "../core/journal.js";
 import { countReclaimTombstones, memoryPath, type MemoryRecord } from "../core/memory.js";
-import { loadMemoryChecked } from "../core/memory-read.js";
+import { isOperationalMemoryRecord, loadMemoryChecked } from "../core/memory-read.js";
 import { queryStats } from "../core/memory-query.js";
-import { parseNoArgs, reportCliUsage } from "./cli-args.js";
+import { CYCLES_TOP, FAILURE_CYCLE_COUNT } from "../core/failure-cycle.js";
+import { CliUsageError, reportCliUsage } from "./cli-args.js";
 import { detail, face, say } from "../ui/rocky.js";
+
+const STATS_USAGE = "rocky stats [--cycles]";
+
+/** `stats` takes no arguments except the advisory `--cycles` summary flag. */
+export function parseStatsArgs(argv: readonly string[]): boolean {
+  if (argv.length === 0) return false;
+  if (argv.length === 1 && argv[0] === "--cycles") return true;
+  throw new CliUsageError(`unexpected argument: ${argv[0]}`, STATS_USAGE);
+}
+
+/**
+ * Advisory repeat summary: top failure fingerprints with counts from one
+ * bounded memory read. Counts only — a repeated fingerprint is never
+ * presented as proof of cause. Always exits 0 once memory opens.
+ */
+function statsCycles(): number {
+  let records: MemoryRecord[];
+  let coverage;
+  try {
+    const loaded = loadMemoryChecked();
+    records = loaded.records;
+    coverage = loaded.coverage;
+  } catch {
+    say("memory file does not open for me. I answer from nothing.");
+    detail(`    memory: ${memoryPath()}`);
+    return 1;
+  }
+  const now = Date.now();
+  const counts = new Map<string, number>();
+  for (const record of records) {
+    if (record.kind !== "failure" || !isOperationalMemoryRecord(record, now)) continue;
+    counts.set(record.fingerprint, (counts.get(record.fingerprint) ?? 0) + 1);
+  }
+  const ranked = [...counts.entries()]
+    .sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
+  const shown = ranked.slice(0, CYCLES_TOP);
+  console.log(face());
+  if (ranked.length === 0) {
+    say("no failure heard yet. nothing cycles.");
+  } else {
+    say(`I hear ${ranked.length} trouble shape${ranked.length === 1 ? "" : "s"}. top ${shown.length} listed.`);
+    for (const [fp, count] of shown) detail(`${fp} x${count}`);
+    const clustered = ranked.filter(([, count]) => count >= FAILURE_CYCLE_COUNT).length;
+    if (clustered > 0) {
+      detail(`${clustered} shape${clustered === 1 ? "" : "s"} heard ${FAILURE_CYCLE_COUNT} or more times. count only, no cause named.`);
+    }
+  }
+  detail(`memory coverage: version ${coverage.version}, scanned ${coverage.scanned}, skipped ${coverage.skipped}, truncated ${coverage.truncated}, complete ${coverage.complete}`);
+  return 0;
+}
 
 export function memoryAgeDays(timestamps: readonly number[], now: number): number {
   if (timestamps.length === 0) return 0;
@@ -13,13 +64,15 @@ export function memoryAgeDays(timestamps: readonly number[], now: number): numbe
 }
 
 export function stats(argv: readonly string[] = []): number {
+  let cycles = false;
   try {
-    parseNoArgs(argv, "rocky stats");
+    cycles = parseStatsArgs(argv);
   } catch (error) {
     const code = reportCliUsage(error, say, detail);
     if (code !== undefined) return code;
     throw error;
   }
+  if (cycles) return statsCycles();
   let records: MemoryRecord[];
   let coverage;
   try {

@@ -3,10 +3,9 @@
  *
  * A Claude Code PreToolUse hook calls this once per tool call. It runs a
  * small check registry against one shared, bounded, per-session state store
- * under `~/.rocky/gate-state/`. v0.7 ships exactly one check (rationale),
- * but the registry is generic: a future check (invariant reminders, a
- * failure circuit breaker) plugs in without touching this file's schema or
- * the hook install.
+ * under `~/.rocky/gate-state/`. v0.7 ships the rationale/explain checks plus
+ * one advisory failure-cycle check; the registry stays generic so a future
+ * check plugs in without touching this file's schema or the hook install.
  *
  * Hard rule: `gateEvent` NEVER throws and NEVER returns a non-zero exit
  * code. Every failure path — unparseable stdin, corrupt state, an
@@ -20,6 +19,14 @@ import { createHash } from "node:crypto";
 import { dirname, join } from "node:path";
 import { canonicalPath, loadMemory } from "../core/memory-read.js";
 import { clarityNudgeLine } from "../core/prompt-clarity.js";
+import {
+  countCycleClusters,
+  cycleNudgeLine,
+  loadCycleState,
+  observeFailureCycle,
+  saveCycleState,
+} from "../core/failure-cycle.js";
+import { fingerprint } from "../core/fingerprint.js";
 import { resolveRockyPaths } from "../core/state-paths.js";
 import { logHookError } from "../commands/agent-hook.js";
 
@@ -59,6 +66,13 @@ export interface GateInput {
    * advisory clarity nudge only — it never influences allow/deny.
    */
   rationale?: string;
+  /**
+   * Optional failure fingerprint carried by the hook payload (explicit
+   * 16-hex `fingerprint`, or derived from `stderr`/`cmd`/`exitCode` via
+   * `fingerprint()`). Feeds the advisory failure-cycle nudge only — it
+   * never influences allow/deny.
+   */
+  fingerprint?: string;
 }
 
 export type GateDecision = { deny: true; reason: string } | { deny: false };
@@ -269,6 +283,99 @@ function claritySuffix(input: GateInput): string {
   }
 }
 
+/**
+ * Failure-cycle (circuit breaker) advisory. Today's PreToolUse payloads
+ * carry no failure fields, so like the clarity advisory this is API-level
+ * until a caller sends `fingerprint` (16 hex chars) or `stderr` with an
+ * optional `cmd`/`exitCode` to derive one via `fingerprint()` — all read
+ * fail-open. The check itself never denies; it records one observation per
+ * gate event and caches that event's nudge so the denying checks below can
+ * append it as text only.
+ */
+const EXPLICIT_FINGERPRINT = /^[0-9a-f]{16}$/u;
+
+function readFailureFingerprint(raw: PlainRecord): string | undefined {
+  try {
+    const explicit = raw.fingerprint;
+    if (typeof explicit === "string" && EXPLICIT_FINGERPRINT.test(explicit)) return explicit;
+    const stderr = raw.stderr;
+    if (typeof stderr !== "string") return undefined;
+    const cmd = raw.cmd ?? raw.command;
+    const exitCode = raw.exitCode;
+    return fingerprint(
+      stderr,
+      typeof cmd === "string" ? cmd : "",
+      typeof exitCode === "number" && Number.isSafeInteger(exitCode) ? exitCode : 1,
+    );
+  } catch {
+    return undefined;
+  }
+}
+
+/** Pending one-line cycle nudge per session for the current gate event only. */
+const cycleSuffixBySession = new Map<string, string>();
+
+function cycleCacheKey(home: string, sessionKey: string): string {
+  return `${home}\0${sessionKey}`;
+}
+
+function rememberCycleSuffix(home: string, sessionKey: string, suffix: string): void {
+  try {
+    if (cycleSuffixBySession.size >= GATE_MAX_ENTRIES && !cycleSuffixBySession.has(cycleCacheKey(home, sessionKey))) {
+      const oldest = cycleSuffixBySession.keys().next();
+      if (!oldest.done) cycleSuffixBySession.delete(oldest.value);
+    }
+    cycleSuffixBySession.set(cycleCacheKey(home, sessionKey), suffix);
+  } catch {
+    // A broken cache must never break the gate; the suffix just stays silent.
+  }
+}
+
+/**
+ * Advisory-only append for deny reasons, mirroring `claritySuffix`: text
+ * only, never a decision. Reads the nudge this event's failure-cycle check
+ * already recorded — never touches state itself, so one gate event records
+ * exactly one observation no matter how many deny reasons append it.
+ */
+function cycleSuffix(input: GateInput): string {
+  try {
+    if (process.env.ROCKY_CYCLE_ADVISORY === "off") return "";
+    return cycleSuffixBySession.get(cycleCacheKey(resolveRockyPaths().home, input.sessionKey)) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+export const failureCycleCheck: GateCheck = {
+  id: "failure-cycle",
+  enabled(env: NodeJS.ProcessEnv): boolean {
+    return env.ROCKY_CYCLE_ADVISORY !== "off";
+  },
+  evaluate(input: GateInput): GateDecision {
+    try {
+      const paths = resolveRockyPaths();
+      if (input.fingerprint === undefined || input.rationale === undefined) {
+        rememberCycleSuffix(paths.home, input.sessionKey, "");
+        return { deny: false };
+      }
+      const stateFile = join(paths.home, "gate-state", `${input.sessionKey}.cycles.json`);
+      const state = loadCycleState(stateFile, Date.now());
+      const observation = observeFailureCycle(state, input.fingerprint, input.rationale);
+      saveCycleState(stateFile, state);
+      const line = cycleNudgeLine(observation.cycle);
+      let suffix = line === undefined ? "" : ` ${line}`;
+      const clusters = countCycleClusters(state);
+      if (suffix.length > 0 && clusters >= 2) {
+        suffix += ` ${clusters} repeats heard this session. count only, no cause named.`;
+      }
+      rememberCycleSuffix(paths.home, input.sessionKey, suffix);
+      return { deny: false };
+    } catch {
+      return { deny: false };
+    }
+  },
+};
+
 export const rationaleCheck: GateCheck = {
   id: "rationale",
   enabled(env: NodeJS.ProcessEnv): boolean {
@@ -291,13 +398,13 @@ export const rationaleCheck: GateCheck = {
     if (gateMode(process.env) === "strict") return {
       deny: true,
       reason: `state why first. run: rocky hook agent-event ${input.vendor} --rationale "<one line why>" `
-        + `--files ${filePath}. then retry. rocky remembers why, you keep why, question${claritySuffix(input)}`,
+        + `--files ${filePath}. then retry. rocky remembers why, you keep why, question${claritySuffix(input)}${cycleSuffix(input)}`,
     };
     if (!state.mark(key)) return { deny: false }; // could not persist the marker: never deny unrecorded state
     return {
       deny: true,
       reason: `state why first. run: rocky hook agent-event ${input.vendor} --rationale "<one line why>" `
-        + `--files ${filePath}. then retry. rocky remembers why, you keep why, question${claritySuffix(input)}`,
+        + `--files ${filePath}. then retry. rocky remembers why, you keep why, question${claritySuffix(input)}${cycleSuffix(input)}`,
     };
   },
 };
@@ -330,18 +437,24 @@ export const explainCheck: GateCheck = {
     if (gateMode(process.env) === "strict") return {
       deny: true,
       reason: `state why first. run: rocky hook agent-event ${input.vendor} --explain-code "<why this code shape>" `
-        + `--explain-business "<what concern this serves>" --files ${filePath}. then retry. rocky remembers why, you keep why, question`,
+        + `--explain-business "<what concern this serves>" --files ${filePath}. then retry. rocky remembers why, you keep why, question${cycleSuffix(input)}`,
     };
     if (!state.mark(key)) return { deny: false };
     return {
       deny: true,
       reason: `state why first. run: rocky hook agent-event ${input.vendor} --explain-code "<why this code shape>" `
-        + `--explain-business "<what concern this serves>" --files ${filePath}. then retry. rocky remembers why, you keep why, question`,
+        + `--explain-business "<what concern this serves>" --files ${filePath}. then retry. rocky remembers why, you keep why, question${cycleSuffix(input)}`,
     };
   },
 };
 
-const CHECKS: readonly GateCheck[] = [rationaleCheck, explainCheck];
+/**
+ * Registry order matters: the failure-cycle check records this event's
+ * observation (and caches its nudge) before the denying checks build their
+ * reasons, so `cycleSuffix` below always reads fresh state. The cycle check
+ * itself never denies.
+ */
+const CHECKS: readonly GateCheck[] = [failureCycleCheck, rationaleCheck, explainCheck];
 
 function allow(): string {
   return "{}";
@@ -431,9 +544,11 @@ function dispatch(vendor: string, stdinJson: string): string {
 
   const cwd = typeof raw.cwd === "string" ? raw.cwd : "";
   const rationale = typeof raw.rationale === "string" && raw.rationale.length > 0 ? raw.rationale : undefined;
+  const failureFingerprint = readFailureFingerprint(raw);
   const input: GateInput = {
     vendor, toolName, filePath, sessionKey, cwd,
     ...(rationale === undefined ? {} : { rationale }),
+    ...(failureFingerprint === undefined ? {} : { fingerprint: failureFingerprint }),
   };
 
   const paths = resolveRockyPaths();

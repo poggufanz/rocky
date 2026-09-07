@@ -90,7 +90,8 @@ usage:
                             dash just starts on the Dash segment. loopback only,
                             fresh token each launch. --no-open prints URL instead,
                             --port=<n> picks port. ctrl-c stops rocky.
-  rocky stats               what Rocky holds in memory.
+  rocky stats [--cycles]      what Rocky holds in memory. --cycles lists
+                             top failure fingerprints with counts, local only.
   rocky journal "<note>"    write one line dogfood note. local file only.
   rocky invariants          list remembered invariant notes from .rocky/invariants.md
                             and hear globs that guard nothing.
