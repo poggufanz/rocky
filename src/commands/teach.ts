@@ -6,6 +6,8 @@ import { buildLadder, defaultTeachNeighbor, type LadderResult } from "../core/te
 import { gapRungFor, renderLadderCard, renderLadderExpanded, renderWitnessCard } from "../core/teach-render.js";
 import { redactSecretsAtBoundary } from "../core/redact.js";
 import { block, detail, heading, say } from "../ui/rocky.js";
+import { matchConcepts } from "../core/concepts.js";
+import { CS_CONCEPT_IDS } from "../core/cs-explain.js";
 import { CliUsageError, reportCliUsage } from "./cli-args.js";
 
 const EMPTY_STATE = "not heard why yet. agent explains when it writes. ask agent, rocky remembers, question";
@@ -158,6 +160,7 @@ export async function teach(argv: readonly string[], deps: TeachDeps = {}): Prom
     printHeading(card.header);
     printBlock([...card.lines]);
     printDetail(card.evidence);
+    csPointerFor(file, snippet, quiet, printDetail);
     return 0;
   }
 
@@ -167,10 +170,19 @@ export async function teach(argv: readonly string[], deps: TeachDeps = {}): Prom
     printHeading(card.header);
     printBlock(card.lines.map((l) => redactSecretsAtBoundary(l)));
     printDetail(card.evidence);
+    csPointerFor(file, snippet, quiet, printDetail);
     if (ladder) printBlock(renderLadderExpanded(ladderResult).map((l) => redactSecretsAtBoundary(l)));
     return 0;
   }
 
   if (!quiet) speak(EMPTY_STATE);
   return 0;
+}
+
+function csPointerFor(file: string, snippet: string | undefined, quiet: boolean, printDetail: (line: string) => void): void {
+  if (quiet) return;
+  const hay = `${file} ${snippet ?? ""}`;
+  const hit = matchConcepts(hay).find((h) => (CS_CONCEPT_IDS as readonly string[]).includes(h.concept.id));
+  if (hit === undefined) return;
+  printDetail(`cs concept ${hit.concept.id}. full explain in dash, question`);
 }
