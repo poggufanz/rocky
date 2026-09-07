@@ -1,4 +1,5 @@
 import type { MemoryRecord } from "./memory-read.js";
+import { coverageFromRecords } from "./coverage.js";
 import { redactSecretsAtBoundary } from "./redact.js";
 import { elapsed } from "../ui/rocky.js";
 
@@ -9,6 +10,8 @@ export interface HomeData {
   day: { heard: number; failures: number; fixes: number; whys: number };
   topFiles: Array<{ name: string; count: number }>;
   recent: Array<{ label: string; agoText: string; kind: string; machine: boolean }>;
+  /** Tried versus untried heard files; untried names at most COVERAGE_MAX_LISTED. No new route. */
+  coverage: { tried: string[]; untried: string[] };
 }
 
 export function adaptHit(
@@ -121,6 +124,18 @@ export function deriveHome(
   const sorted = [...records].sort((a, b) => (b.ts ?? 0) - (a.ts ?? 0));
   const recent = sorted.slice(0, 14).map((r) => adaptHit(r, now));
 
+  // Feature coverage from the same bounded read: touched files split into
+  // tried (rationale evidence or diff hunks heard) versus untried. Pure and
+  // fail-open — a hostile record set yields an honest empty split, never a
+  // blocked dash payload.
+  let coverage: HomeData["coverage"];
+  try {
+    const split = coverageFromRecords(records);
+    coverage = { tried: split.tried, untried: split.untried };
+  } catch {
+    coverage = { tried: [], untried: [] };
+  }
+
   return {
     total,
     coverageLine,
@@ -128,5 +143,6 @@ export function deriveHome(
     day,
     topFiles,
     recent,
+    coverage,
   };
 }

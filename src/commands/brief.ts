@@ -4,6 +4,7 @@ import { captureRationales } from "../agent/logs/capture.js";
 import { polishBriefLines } from "../ai/brief-ai.js";
 import { createOllamaClient } from "../ai/ollama.js";
 import { composeBrief, parseGitLog, type BriefInvariantTouch, type BriefMemoryHit } from "../core/brief.js";
+import { COVERAGE_MAX_LISTED, coverageFromRecords, renderUntriedCard } from "../core/coverage.js";
 import { renderDecomposeCard } from "../core/decompose.js";
 import { redactSecretsAtBoundary } from "../core/redact.js";
 import { FALLBACK_WINDOW_MS, parseSinceDuration, readState, writeState } from "../core/brief-state.js";
@@ -13,8 +14,8 @@ import { CONCEPTS } from "../core/concepts.js";
 import { matchesGlob, parseInvariants } from "../core/invariants.js";
 import { recordBriefRun, recordInvariantTouch } from "../core/memory.js";
 import {
-  canonicalPath, loadMemoryChecked,
-  type FailureRecord, type FixRecord, type MemoryRecord, type RationaleFidelity, type RationaleRecord,
+  canonicalPath, isCompleteMemoryCoverage, loadMemoryChecked,
+  type FailureRecord, type FixRecord, type MemoryCoverage, type MemoryRecord, type RationaleFidelity, type RationaleRecord,
 } from "../core/memory-read.js";
 import { runGit } from "../core/exec.js";
 import { truncateUtf8 } from "../mcp/privacy.js";
@@ -200,11 +201,15 @@ export async function briefCommand(argv: readonly string[] = [], cwd = process.c
   // whose name merely starts with this root's name cannot match.
   const normalizedRoot = canonicalPath(root);
   let memoryHits: BriefMemoryHit[] = [];
+  // Bounded-read disclosure travels with the records (stats --cycles
+  // pattern): the Untried section below reports it when the read truncated.
+  let memoryCoverage: MemoryCoverage | undefined;
   // Kept alongside memoryHits (which drops `id` for the printed line) so the
   // rationale annotation pass below can look each printed hit back up by id.
   let windowFailuresAndFixes: Array<FailureRecord | FixRecord> = [];
   try {
     const loaded = loadMemoryChecked();
+    memoryCoverage = loaded.coverage;
     windowFailuresAndFixes = loaded.records
       .filter((record): record is FailureRecord | FixRecord =>
         (record.kind === "failure" || record.kind === "fix") && record.ts >= memorySinceTs && record.ts <= now)
@@ -265,7 +270,9 @@ export async function briefCommand(argv: readonly string[] = [], cwd = process.c
   let enriched: readonly MemoryRecord[] | undefined;
   try {
     captureRationales(cwd);
-    enriched = loadMemoryChecked().records;
+    const reloaded = loadMemoryChecked();
+    enriched = reloaded.records;
+    memoryCoverage = reloaded.coverage;
   } catch {
     enriched = undefined;
   }
@@ -280,6 +287,31 @@ export async function briefCommand(argv: readonly string[] = [], cwd = process.c
       heading("repeated concepts");
       for (const line of conceptLines) detail(line);
     }
+  }
+
+  // Untried section (Task 4): the window's changed paths split into tried
+  // (rationale evidence or diff hunks heard in-window) versus untried. It
+  // appends after the blocks above and never touches the --decompose
+  // template below. Advisory and fail-open — a capture, reload, or render
+  // failure skips the section, never the brief. Counts only, no cause named.
+  try {
+    const pool = enriched ?? loadMemoryChecked().records;
+    const coverage = coverageFromRecords(pool, {
+      sessionFiles: changedPaths,
+      cwd: root,
+      sinceTs: memorySinceTs,
+      now,
+      memoryTruncated: memoryCoverage !== undefined && !isCompleteMemoryCoverage(memoryCoverage),
+    });
+    heading("untried");
+    for (const line of renderUntriedCard(coverage)) detail(line);
+    if (memoryCoverage !== undefined && !isCompleteMemoryCoverage(memoryCoverage)) {
+      detail(`memory coverage: version ${memoryCoverage.version}, scanned ${memoryCoverage.scanned}, skipped ${memoryCoverage.skipped}, truncated ${memoryCoverage.truncated}, complete ${memoryCoverage.complete}`);
+    } else if (coverage.truncated) {
+      detail(`coverage partial: names ${COVERAGE_MAX_LISTED} at most, ${coverage.untriedTotal} untried total.`);
+    }
+  } catch {
+    // fail open: no coverage section this run
   }
 
   if (args.decompose) {
