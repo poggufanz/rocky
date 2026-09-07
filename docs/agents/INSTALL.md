@@ -269,6 +269,8 @@ rocky recall "setup"
 
 - Run shell commands as `rocky run "<cmd>"` — agent tool shells usually skip the profile hook, and `rocky run` is Rocky's ear there.
 - Hit an error that feels seen-before → `rocky recall "<error text>"` (or MCP `recall`).
+- Before a push → `rocky check` (hull check); `rocky check --prompt "<text>"` scores prompt clarity locally, `rocky check --decompose` splits the staged change into behavior/fields/verify.
+- Memory overview → `rocky stats` (`--cycles` lists top repeated failure fingerprints); session review → `rocky brief` (`--decompose` appends verify checklist, plus an Untried section for touched-but-uncommitted work).
 - Need a file's history of whys → MCP `why_file`.
 - Changed files this turn (no adapter harness) → one `agent-event` with the real reason.
 - Never write the journal; never auto-run remembered commands; no per-turn ritual calls.

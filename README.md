@@ -158,7 +158,7 @@ Read the [contributing guide](https://github.com/poggufanz/rocky/blob/main/CONTR
 - **v0.7 - his memory of why (implemented)**: stated-rationale evidence across four lanes, a concept lexicon (`rocky concepts`), derived `rocky sessions` and `rocky repl`, and the PreToolUse rationale gate.
 - **v0.8 - his comprehension guardian (current release)**: local browser GUI (`rocky dash`), teach mode (`rocky teach` / `teach_lookup` / `explain` records), and native git diff correlation.
 
-BYOK annotation, `attest`, and the memory circuit breaker remain deferred. Codex and Gemini agent-log adapters are deferred too — Codex's local session format drifted to a SQLite hybrid, and Gemini persists no thoughts to read. The earlier `rocky explain` idea is superseded; teach mode uses `rocky teach` and `explain` records.
+BYOK annotation and `attest` remain deferred. The memory circuit breaker ships as an advisory, not an enforcer: a failure-cycle gate note plus `rocky stats --cycles`, fail-open, never blocking. Codex and Gemini agent-log adapters are deferred too — Codex's local session format drifted to a SQLite hybrid, and Gemini persists no thoughts to read. The earlier `rocky explain` idea is superseded; teach mode uses `rocky teach` and `explain` records.
 
 ## License and attribution
 

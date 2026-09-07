@@ -59,6 +59,12 @@ The structural point is what the planned memory circuit breaker rests on: an age
 
 Human-factors research on automation bias and complacency is consistent with the risk that people may monitor automated support less carefully or accept its recommendations too readily. An experimental study of automation bias/complacency and a systematic review of automation bias in decision-support systems support that bounded motivation. They do not prove Rocky's entire proposed doom loop, and they do not prove that Rocky improves understanding. The Good Trade remains a v0.5 product hypothesis to validate through dogfooding and user research.
 
+### 8. Vibe-coding gaps measured in students: lower-bound evidence (CHI 2026)
+
+A CHI 2026 study of vibe coding (N=100 students) measured comprehension scores (CS) in a timed lab run in GUI-only pure mode — no terminal, no shell history, no cross-session memory. The CS instrument reports inter-rater reliability ICC .731 and internal consistency ICAR alpha .625. Headline results: CS accounted for roughly twice the variance of competing predictors, prompt quality mediated about 52% of the measured effect, and self-reported LLM-use frequency correlated negatively with comprehension.
+
+Three limits are stated here, not footnoted away. First, these results are correlational, not causal: they show comprehension moving with outcomes, not that raising CS produces the outcome. Second, the lab is a lower bound for Rocky's setting, not an upper one — Rocky is mixed-mode (terminal commands, shell hooks, agent rationale evidence, GUI review), so a CS effect measured under GUI-only pure mode is likely larger where Rocky operates, though that larger effect is itself unmeasured. Third, this document publishes no saving percentages: the study's variance and mediation figures describe its own lab instrument, and Rocky makes no claim that any of those numbers transfer to its users. The study motivates the same Good Trade as the rest of this document — remembering what was understood, not just what was run — and Rocky remains the hypothesis to test, not the proof.
+
 ### References
 
 1. Ge, Y. et al. (2025). *A Survey of Vibe Coding with Large Language Models.* arXiv:2510.12399.
@@ -75,6 +81,7 @@ Human-factors research on automation bias and complacency is consistent with the
 12. Anthropic (2026). *Long-running Claude for scientific computing.* Published 23 March 2026.
 10. Experimental study of automation bias and complacency. PubMed PMID 25886768. https://pubmed.ncbi.nlm.nih.gov/25886768/
 11. Systematic review of automation bias in decision-support systems. PMC7651899. https://pmc.ncbi.nlm.nih.gov/articles/PMC7651899/
+13. CHI 2026 study of vibe-coding comprehension gaps (N=100 students, GUI-only pure mode, timed lab; CS instrument ICC .731, ICAR alpha .625).
 
 ---
 
