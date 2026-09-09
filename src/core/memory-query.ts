@@ -12,7 +12,16 @@ import {
   similarity,
 } from "./fingerprint.js";
 import { isAgentEnvelopeText } from "./envelope.js";
-import { boundTripleRecord, canonicalPath, isOperationalMemoryRecord, linkBasisRank, loadMemory, loadMemoryChecked, pathIdentityHash } from "./memory-read.js";
+import {
+  boundTripleRecord,
+  canonicalPath,
+  getMemoryFingerprintIndex,
+  isOperationalMemoryRecord,
+  linkBasisRank,
+  loadMemory,
+  loadMemoryChecked,
+  pathIdentityHash,
+} from "./memory-read.js";
 import type { FailureRecord, FixRecord, LinkBasis, LinkConfidence, MemoryCoverage, MemoryRecord, RationaleFidelity, TripleRecord } from "./memory-read.js";
 
 export interface RecallQuery { query: string; limit?: number; cwd?: string; now?: number }
@@ -347,8 +356,82 @@ function fillRetrievalEvidenceTokens(record: FailureRecord, target: Set<string>)
   for (const token of retrievalTokens(record.excerpt)) target.add(token);
 }
 
+/**
+ * Byte-identical retrieval inputs imply byte-identical token bags. Compares
+ * only the fields `fillRetrievalEvidenceTokens` reads, without running the
+ * normalizer, so the fuzzy dedup fast path never diverges from a full scan.
+ */
+function sameRetrievalEvidence(left: FailureRecord, right: FailureRecord): boolean {
+  if (left === right) return true;
+  if (left.cmd !== right.cmd || left.excerpt !== right.excerpt || left.origin !== right.origin ||
+      left.fingerprintV !== right.fingerprintV || left.fingerprint !== right.fingerprint ||
+      left.exitCode !== right.exitCode) return false;
+  if (left.signature.length !== right.signature.length) return false;
+  for (let index = 0; index < left.signature.length; index += 1) {
+    if (left.signature[index] !== right.signature[index]) return false;
+  }
+  return true;
+}
+
+const FINGERPRINT_HEX = /^[0-9a-f]{16}$/u;
+
+/** Pure lookup parsing shared with the writer-side sidecar fast path. */
+export function parseFingerprintLookup(fp: FingerprintLookup): Set<string> {
+  return lookupFingerprints(fp);
+}
+
+/** Pure exact-match proof shared with the writer-side sidecar fast path. */
+export function matchFailureFingerprint(record: FailureRecord, candidates: ReadonlySet<string>): boolean {
+  return fingerprintMatches(record, candidates as Set<string>);
+}
+
+/** Hex shape shared with the writer-side sidecar fast path. */
+export function isHexFingerprint(value: string): boolean {
+  return FINGERPRINT_HEX.test(value);
+}
+
+function canUseMemIndexForQuery(index: { byFp: ReadonlyMap<string, readonly number[]>; hasLegacy: boolean }, candidates: Set<string>): boolean {
+  if (candidates.size === 0) return false;
+  // A single non-hex lookup is synthetic equality: the raw map is complete.
+  if (candidates.size === 1) {
+    const only = [...candidates][0]!;
+    if (!FINGERPRINT_HEX.test(only)) return true;
+    // A single hex lookup could match a legacy family via migration proof
+    // that the raw map alone cannot see. Fall back to the full scan there;
+    // dual (current+legacy) queries and legacy-free files stay indexed.
+    return !index.hasLegacy;
+  }
+  return true;
+}
+
 export function findByFingerprint(records: readonly MemoryRecord[], fp: FingerprintLookup, now = Date.now()): FailureRecord[] {
   const candidates = lookupFingerprints(fp);
+  const index = getMemoryFingerprintIndex(records);
+  if (index !== undefined && canUseMemIndexForQuery(index, candidates)) {
+    // Warm path: O(hits) positional reuse of the same-pass index. The raw
+    // map is advisory like the sidecar: every candidate still proves itself
+    // through `fingerprintMatches`, so a stale map can only lose speed, not
+    // correctness. File order is restored so dual-candidate answers match
+    // the full-scan contract exactly.
+    const ordered: number[] = [];
+    for (const candidate of candidates) {
+      const bucket = index.byFp.get(candidate);
+      if (bucket === undefined) continue;
+      for (const recordIndex of bucket) ordered.push(recordIndex);
+    }
+    if (ordered.length === 0) return [];
+    ordered.sort((left, right) => left - right);
+    const seen = new Set<string>();
+    const hits: FailureRecord[] = [];
+    for (const recordIndex of ordered) {
+      const record = records[recordIndex];
+      if (record === undefined || record.kind !== "failure" || record.ts > now) continue;
+      if (seen.has(record.id)) continue;
+      seen.add(record.id);
+      if (fingerprintMatches(record, candidates)) hits.push(record);
+    }
+    return hits;
+  }
   return uniqueRecords(records).filter((record): record is FailureRecord =>
     record.kind === "failure" && record.ts <= now && fingerprintMatches(record, candidates),
   );
@@ -472,15 +555,37 @@ export function queryRecall(records: readonly MemoryRecord[], input: RecallQuery
   const candidateMatches: Array<readonly number[] | undefined> | undefined = queryTokenList.length > 31
     ? new Array<readonly number[] | undefined>(candidates.length)
     : undefined;
+  // One representative tokenization per canonical fingerprint when the
+  // evidence bytes are identical (the recurring-error core case). Identical
+  // inputs imply identical token bags, so the second and later duplicates
+  // reuse size/intersection/mask without re-running the normalizer. Any
+  // divergent excerpt/command falls through to a full tokenization, keeping
+  // scores and the rare-token floor bit-identical to the unindexed scan.
+  const representativeByKey = new Map<string, {
+    record: FailureRecord;
+    size: number;
+    intersection: number;
+    mask: number;
+    matches: readonly number[] | undefined;
+  }>();
   for (let candidateIndex = 0; candidateIndex < candidates.length; candidateIndex += 1) {
     const record = candidates[candidateIndex]!;
     const key = canonicalFingerprint(record, migration);
     candidateKeys[candidateIndex] = key;
+    const representative = representativeByKey.get(key);
+    if (representative !== undefined && sameRetrievalEvidence(representative.record, record)) {
+      candidateSizes[candidateIndex] = representative.size;
+      candidateIntersections[candidateIndex] = representative.intersection;
+      candidateMasks[candidateIndex] = representative.mask;
+      if (candidateMatches !== undefined) candidateMatches[candidateIndex] = representative.matches;
+      continue;
+    }
     let intersection = 0;
     let mask = 0;
     let matches: number[] | undefined;
     fillRetrievalEvidenceTokens(record, scratchTokens);
-    candidateSizes[candidateIndex] = scratchTokens.size;
+    const size = scratchTokens.size;
+    candidateSizes[candidateIndex] = size;
     for (const token of scratchTokens) {
       const queryIndex = queryTokenIndex.get(token);
       if (queryIndex === undefined) continue;
@@ -493,8 +598,12 @@ export function queryRecall(records: readonly MemoryRecord[], input: RecallQuery
     }
     candidateIntersections[candidateIndex] = intersection;
     candidateMasks[candidateIndex] = mask;
+    const frozenMatches = matches === undefined || matches.length === 0 ? undefined : matches;
     if (candidateMatches !== undefined) {
-      candidateMatches[candidateIndex] = matches === undefined || matches.length === 0 ? undefined : matches;
+      candidateMatches[candidateIndex] = frozenMatches;
+    }
+    if (representative === undefined) {
+      representativeByKey.set(key, { record, size, intersection, mask, matches: frozenMatches });
     }
   }
   const best = new Map<string, RecallHit>();
@@ -696,7 +805,17 @@ export function searchKnowledge(
   // stays one entry per record, exactly as the old per-entry count behaved.
   const documentFrequency = new Map<string, Set<string>>();
   const knowledgeScratch = new Set<string>();
+  // Same representative fast path as `queryRecall`: identical failure
+  // evidence shares one tokenization for the frequency pass. Divergent
+  // excerpts fall through to the full scan so the rare floor never shifts.
+  const knowledgeRepByKey = new Map<string, FailureRecord>();
   for (const entry of entries) {
+    if (entry.record.kind === "failure") {
+      const key = knowledgeFailureKey(entry.record, migration);
+      const representative = knowledgeRepByKey.get(key);
+      if (representative !== undefined && sameRetrievalEvidence(representative, entry.record)) continue;
+      if (representative === undefined) knowledgeRepByKey.set(key, entry.record);
+    }
     knowledgeTokens(entry.record, knowledgeScratch);
     const docId = entry.record.kind === "failure"
       ? knowledgeFailureKey(entry.record, migration)
@@ -709,23 +828,46 @@ export function searchKnowledge(
     }
   }
   const failureHits = new Map<string, { hit: KnowledgeSearchHit; current: boolean }>();
+  const knowledgeScoreByKey = new Map<string, { record: FailureRecord; score: number }>();
   for (const { record, snippet } of entries) {
+    if (record.kind === "failure") {
+      const key = knowledgeFailureKey(record, migration);
+      const cached = knowledgeScoreByKey.get(key);
+      if (cached !== undefined && sameRetrievalEvidence(cached.record, record)) {
+        if (cached.score > 0) {
+          const hit: KnowledgeSearchHit = {
+            id: record.id, ts: record.ts, kind: "failure", snippet, score: cached.score,
+            source: record.origin ?? "run",
+          };
+          const previous = failureHits.get(key);
+          const current = record.fingerprintV === 2;
+          if (previous === undefined ||
+            (current && !previous.current) ||
+            (current === previous.current && (hit.score > previous.hit.score ||
+              (hit.score === previous.hit.score && hit.ts > previous.hit.ts)))) {
+            failureHits.set(key, { hit, current });
+          }
+        }
+        continue;
+      }
+    }
     knowledgeTokens(record, knowledgeScratch);
     const tokenSet = knowledgeScratch;
     const score = semanticScore(queryTokenSet, tokenSet, documentFrequency, entries.length);
     if (record.kind === "failure") {
+      const key = knowledgeFailureKey(record, migration);
+      if (!knowledgeScoreByKey.has(key)) knowledgeScoreByKey.set(key, { record, score });
       if (score > 0) {
-         const hit: KnowledgeSearchHit = {
+        const hit: KnowledgeSearchHit = {
           id: record.id, ts: record.ts, kind: "failure", snippet, score,
           source: record.origin ?? "run",
         };
-        const key = knowledgeFailureKey(record, migration);
         const previous = failureHits.get(key);
         const current = record.fingerprintV === 2;
         if (previous === undefined ||
-            (current && !previous.current) ||
-            (current === previous.current && (hit.score > previous.hit.score ||
-              (hit.score === previous.hit.score && hit.ts > previous.hit.ts)))) {
+          (current && !previous.current) ||
+          (current === previous.current && (hit.score > previous.hit.score ||
+            (hit.score === previous.hit.score && hit.ts > previous.hit.ts)))) {
           failureHits.set(key, { hit, current });
         }
       }

@@ -18,6 +18,7 @@ import {
   unlinkSync,
   writeFileSync,
   writeSync,
+  type BigIntStats,
   type Stats,
 } from "node:fs";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
@@ -34,13 +35,15 @@ import {
 } from "./fingerprint.js";
 import { resolveRockyPaths } from "./state-paths.js";
 import type { RockyPaths } from "./state-paths.js";
-import { boundTripleMechanism, isCompleteMemoryCoverage, isKnownPathPlatform, isSafeNonNegativeInteger, loadMemoryChecked, MAX_MEMORY_FILE_BYTES, MAX_RATIONALE_FILES, MAX_RATIONALE_FILE_CHARS, MAX_MEMORY_LINE_BYTES, MAX_MEMORY_RECORDS, MAX_SUPPORTED_MEMORY_RECORDS } from "./memory-read.js";
+import { boundTripleMechanism, getMemoryRecordOffsets, isCompleteMemoryCoverage, isKnownPathPlatform, isSafeNonNegativeInteger, loadMemoryChecked, MAX_MEMORY_FILE_BYTES, MAX_RATIONALE_FILES, MAX_RATIONALE_FILE_CHARS, MAX_MEMORY_LINE_BYTES, MAX_MEMORY_RECORDS, MAX_SUPPORTED_MEMORY_RECORDS, MEMORY_FORMAT_VERSION } from "./memory-read.js";
 import type { AliasRecord, AssociationRecord, BriefRunRecord, ExplainRecord, FailureRecord, FixRecord, InvariantTouchRecord, MemoryCoverage, MemoryRecord, NoteRecord, RationaleRecord, TripleRecord } from "./memory-read.js";
 import { MAX_GIT_SNAPSHOT_CHARS, MAX_GIT_SNAPSHOT_PRE_REDACT_CHARS, type GitAnchor } from "./memory-read.js";
 import { redactSecretsAtBoundary } from "./redact.js";
 import { plausibleFilePath } from "./compare-data.js";
 import { utf8Slice, utf8SliceFromEnd } from "./utf8.js";
 import { LINK_WINDOW_MS, recentUnresolvedFailures, type UnresolvedLink } from "./memory-query.js";
+import { writeSidecarBestEffort } from "./memory-index.js";
+import type { MemoryIndexRow } from "./memory-index.js";
 
 export type { AssociationRecord, BriefRunRecord, ExplainRecord, FailureRecord, FixRecord, GitAnchor, InvariantTouchRecord, MemoryCoverage, MemoryRecord, NoteRecord, TripleFile, TripleRecord } from "./memory-read.js";
 export {
@@ -919,6 +922,70 @@ export function withMemoryTransaction<T>(
   let records = initial.records;
   let complete = initial.complete;
   let coverage = initial.coverage;
+  // Writer-side sidecar tracking: file offsets parallel to `records`, seeded
+  // from the initial pure load. Appends only ever add at the tail under the
+  // triple lock, so old offsets stay valid. Undefined means untrackable: skip
+  // maintenance rather than publish a prefix as complete.
+  const seededOffsets = getMemoryRecordOffsets(initial.records);
+  let allOffsets: number[] | undefined = seededOffsets === undefined
+    ? (initial.records.length === 0 ? [] : undefined)
+    : [...seededOffsets];
+  let appendedCount = 0;
+  const noteAppendedOffset = (offset: number): void => {
+    if (allOffsets === undefined) return;
+    if (!Number.isSafeInteger(offset) || offset < 0) {
+      allOffsets = undefined;
+      return;
+    }
+    allOffsets.push(offset);
+  };
+  const maintainSidecar = (): void => {
+    try {
+      if (appendedCount === 0 || allOffsets === undefined) return;
+      if (!initial.complete || !complete) return;
+      if (records.length > MAX_SUPPORTED_MEMORY_RECORDS) return;
+      let post: Stats;
+      try {
+        post = statSync(paths.memory);
+      } catch {
+        return;
+      }
+      if (!post.isFile() || post.size > MAX_MEMORY_FILE_BYTES) return;
+      if (allOffsets.length !== records.length) return;
+      const rows: MemoryIndexRow[] = [];
+      let hasLegacy = false;
+      for (let index = 0; index < records.length; index += 1) {
+        const record = records[index]!;
+        if (record.kind !== "failure") continue;
+        if (record.fingerprintV !== 2 || !/^[0-9a-f]{16}$/u.test(record.fingerprint)) hasLegacy = true;
+        const offset = allOffsets[index] ?? -1;
+        if (!Number.isSafeInteger(offset) || offset < 0) continue;
+        rows.push({
+          fp: record.fingerprint,
+          offset,
+          id: record.id,
+          ts: record.ts,
+          hasFix: record.resolvedBy !== undefined,
+        });
+      }
+      let bigStats: BigIntStats;
+      try {
+        bigStats = lstatSync(paths.memory, { bigint: true });
+      } catch {
+        return;
+      }
+      writeSidecarBestEffort(paths.memory, bigStats, rows, {
+        version: MEMORY_FORMAT_VERSION,
+        fpVersion: FINGERPRINT_ALGORITHM_VERSION,
+        scanned: coverage.scanned,
+        skipped: coverage.skipped,
+        complete: true,
+        hasLegacy,
+        maxBytes: MAX_MEMORY_FILE_BYTES,
+        maxRecords: MAX_SUPPORTED_MEMORY_RECORDS,
+      });
+    } catch { /* advisory only; never fails the transaction */ }
+  };
   const transaction: MemoryTransaction = {
     paths,
     now,
@@ -926,8 +993,22 @@ export function withMemoryTransaction<T>(
     get complete() { return complete; },
     get coverage() { return coverage; },
     append(record) {
+      let offset = -1;
+      try {
+        const before = lstatSync(paths.memory, { bigint: true });
+        if (before.isFile() && !before.isSymbolicLink()) {
+          const size = Number(before.size);
+          offset = Number.isSafeInteger(size) && size >= 0 ? size : -1;
+        } else if (before.isSymbolicLink()) {
+          offset = -1;
+        }
+      } catch (error) {
+        offset = (error as NodeJS.ErrnoException).code === "ENOENT" ? 0 : -1;
+      }
       appendUnlocked(record, paths);
       records = [...records, record];
+      appendedCount += 1;
+      noteAppendedOffset(offset);
     },
     reload() {
       const loaded = loadMemoryChecked(paths.memory, now);
@@ -935,6 +1016,8 @@ export function withMemoryTransaction<T>(
       records = loaded.records;
       complete = true;
       coverage = loaded.coverage;
+      const fresh = getMemoryRecordOffsets(loaded.records);
+      allOffsets = fresh === undefined ? (loaded.records.length === 0 ? [] : undefined) : [...fresh];
       return records;
     },
     canAppendComplete(nextRecords) {
@@ -949,7 +1032,9 @@ export function withMemoryTransaction<T>(
     },
   };
   try {
-    return operation(transaction);
+    const result = operation(transaction);
+    maintainSidecar();
+    return result;
   } finally {
     if (releaseTripleLock(lock)) {
       // Sweep legacy claims only after the canonical lock is verified absent.

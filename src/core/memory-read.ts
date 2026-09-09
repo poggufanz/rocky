@@ -1070,6 +1070,66 @@ interface MemoryCacheEntry {
   records: readonly MemoryRecord[];
   complete: boolean;
   coverage: MemoryCoverage;
+  /** Raw fingerprint -> record indices, built in the same consumeBytes pass. */
+  fpByRaw: Map<string, number[]>;
+  /** File byte offset per record index; -1 for non-failure rows. */
+  fpOffsets: number[];
+  /** Raw fingerprint -> file byte offsets, built in the same pass (sidecar source). */
+  fpOffsetsByRaw: Map<string, number[]>;
+  /** Newest record index per raw fingerprint (representative for dedup). */
+  fpRepresentative: Map<string, number>;
+  /** True when any failure needs legacy/migration proof (exact fast path falls back for single-hex queries). */
+  fpHasLegacy: boolean;
+}
+
+export interface MemoryFingerprintIndex {
+  byFp: ReadonlyMap<string, readonly number[]>;
+  hasLegacy: boolean;
+}
+
+const fingerprintIndexByRecords = new WeakMap<readonly MemoryRecord[], MemoryFingerprintIndex>();
+
+/**
+ * In-memory exact index for an already-loaded snapshot. Returns undefined
+ * when the records did not come from `loadMemoryChecked` (custom providers
+ * keep the full-scan contract). Never throws.
+ */
+export function getMemoryFingerprintIndex(records: readonly MemoryRecord[]): MemoryFingerprintIndex | undefined {
+  try {
+    return fingerprintIndexByRecords.get(records);
+  } catch {
+    return undefined;
+  }
+}
+
+function publishFingerprintIndex(
+  records: readonly MemoryRecord[],
+  byFp: Map<string, number[]>,
+  hasLegacy: boolean,
+): void {
+  try {
+    fingerprintIndexByRecords.set(records, { byFp, hasLegacy });
+  } catch { /* best effort; queries fall back to scanning */ }
+}
+
+const recordOffsetsByRecords = new WeakMap<readonly MemoryRecord[], readonly number[]>();
+
+/**
+ * File byte offset per record index for writer-side sidecar maintenance.
+ * Pure read metadata; undefined for custom providers. Never throws.
+ */
+export function getMemoryRecordOffsets(records: readonly MemoryRecord[]): readonly number[] | undefined {
+  try {
+    return recordOffsetsByRecords.get(records);
+  } catch {
+    return undefined;
+  }
+}
+
+function publishRecordOffsets(records: readonly MemoryRecord[], offsets: readonly number[]): void {
+  try {
+    recordOffsetsByRecords.set(records, offsets);
+  } catch { /* best effort */ }
 }
 
 // One immutable entry is enough for the normal long-running CLI/MCP process
@@ -1288,11 +1348,17 @@ export function loadMemoryChecked(path = resolveRockyPaths().memory, now = Date.
       if (witness === memoryCache.witness) {
         memoryCacheHitCount += 1;
         if (!needsResolution(memoryCache.records)) {
-          return { records: memoryCache.records as MemoryRecord[], complete: memoryCache.complete, coverage: memoryCache.coverage };
+          const cached = memoryCache.records as MemoryRecord[];
+          publishFingerprintIndex(cached, memoryCache.fpByRaw, memoryCache.fpHasLegacy);
+          publishRecordOffsets(cached, memoryCache.fpOffsets);
+          return { records: cached, complete: memoryCache.complete, coverage: memoryCache.coverage };
         }
         const records = materializeMemoryRecords(memoryCache.records);
         resolveMemoryRecords(records, now);
-        return { records: freezeMaterializedRecords(records), complete: memoryCache.complete, coverage: memoryCache.coverage };
+        const frozen = freezeMaterializedRecords(records);
+        publishFingerprintIndex(frozen, memoryCache.fpByRaw, memoryCache.fpHasLegacy);
+        publishRecordOffsets(frozen, memoryCache.fpOffsets);
+        return { records: frozen, complete: memoryCache.complete, coverage: memoryCache.coverage };
       }
     }
 
@@ -1315,32 +1381,63 @@ export function loadMemoryChecked(path = resolveRockyPaths().memory, now = Date.
     const contentHash = opened.size <= BigInt(MAX_MEMORY_FILE_BYTES) ? createHash("sha256") : undefined;
     const records: MemoryRecord[] = [];
     const seenIds = new Set<string>();
+    // Lazy exact index, built in this same byte pass (never a second scan):
+    // raw fingerprint -> record indices + file offsets, plus the newest
+    // record index per fingerprint as the dedup representative. For modern
+    // v2-only files raw == canonical, so the representative is exact; legacy
+    // families are resolved later via the migration index in the query layer.
+    const fpByRaw = new Map<string, number[]>();
+    const fpOffsetsByRaw = new Map<string, number[]>();
+    const fpRepresentative = new Map<string, number>();
+    const recordOffsets: number[] = [];
+    let fpHasLegacy = false;
+    let lineStartFileOffset = 0;
 
     const resetLine = (): void => {
       lineChunks.length = 0;
       lineBytes = 0;
       lineOversized = false;
     };
-    const consumeLine = (): void => {
+    const trackFailureIndex = (record: MemoryRecord, fileOffset: number): void => {
+      const index = records.length - 1;
+      recordOffsets.push(fileOffset);
+      if (record.kind !== "failure") return;
+      const fp = record.fingerprint;
+      const bucket = fpByRaw.get(fp);
+      if (bucket === undefined) fpByRaw.set(fp, [index]);
+      else bucket.push(index);
+      const offsets = fpOffsetsByRaw.get(fp);
+      if (offsets === undefined) fpOffsetsByRaw.set(fp, [fileOffset]);
+      else offsets.push(fileOffset);
+      fpRepresentative.set(fp, index);
+      if (record.fingerprintV !== 2 || !/^[0-9a-f]{16}$/u.test(fp)) fpHasLegacy = true;
+    };
+    const consumeLine = (nextStart: number): void => {
       if (lineBytes === 0 && !lineOversized) {
         resetLine();
+        lineStartFileOffset = nextStart;
         return;
       }
       if (records.length >= MAX_SUPPORTED_MEMORY_RECORDS) {
         stoppedAtRecordCap = true;
         truncated = Math.max(1, truncated);
         resetLine();
+        lineStartFileOffset = nextStart;
         return;
       }
       scanned += 1;
       if (lineOversized || lineBytes > MAX_MEMORY_LINE_BYTES) {
         skipped += 1;
         resetLine();
+        lineStartFileOffset = nextStart;
         return;
       }
       const line = Buffer.concat(lineChunks, lineBytes).toString("utf8").trim();
       resetLine();
-      if (!line) return;
+      if (!line) {
+        lineStartFileOffset = nextStart;
+        return;
+      }
       try {
         const record = parseMemoryRecord(JSON.parse(line));
         // Append-only history can contain a repeated id after a crash or a
@@ -1349,6 +1446,7 @@ export function loadMemoryChecked(path = resolveRockyPaths().memory, now = Date.
         if (record && !seenIds.has(record.id)) {
           seenIds.add(record.id);
           records.push(record);
+          trackFailureIndex(record, lineStartFileOffset);
         } else {
           skipped += 1;
         }
@@ -1356,9 +1454,11 @@ export function loadMemoryChecked(path = resolveRockyPaths().memory, now = Date.
         // A corrupt line never kills the memory; the skipped count discloses it.
         skipped += 1;
       }
+      lineStartFileOffset = nextStart;
     };
-    const consumeBytes = (chunk: Buffer): void => {
+    const consumeBytes = (chunk: Buffer, chunkStart: number): void => {
       let remaining = chunk;
+      let remainingStart = chunkStart;
       while (remaining.length > 0 && !stoppedAtRecordCap) {
         const newline = remaining.indexOf(0x0a);
         const part = newline < 0 ? remaining : remaining.subarray(0, newline);
@@ -1374,8 +1474,10 @@ export function loadMemoryChecked(path = resolveRockyPaths().memory, now = Date.
           }
         }
         if (newline < 0) break;
-        consumeLine();
+        const lineEnd = remainingStart + newline;
+        consumeLine(lineEnd + 1);
         remaining = remaining.subarray(newline + 1);
+        remainingStart = lineEnd + 1;
       }
     };
 
@@ -1389,15 +1491,16 @@ export function loadMemoryChecked(path = resolveRockyPaths().memory, now = Date.
         memoryCache = undefined;
         return emptyLoad(false, totalBytes, "read-race");
       }
+      const chunkStart = bytesScanned;
       bytesScanned += count;
       const bytes = buffer.subarray(0, count);
       contentHash?.update(bytes);
-      if (!stoppedAtRecordCap) consumeBytes(bytes);
+      if (!stoppedAtRecordCap) consumeBytes(bytes, chunkStart);
     }
     // A partial final line is valid input when the file ends normally. A
     // file-size-capped partial line is deliberately left undisclosed as a
     // record; `truncated: 1` says that evidence exists beyond the boundary.
-    if (!stoppedAtRecordCap && opened.size <= BigInt(MAX_MEMORY_FILE_BYTES)) consumeLine();
+    if (!stoppedAtRecordCap && opened.size <= BigInt(MAX_MEMORY_FILE_BYTES)) consumeLine(bytesScanned);
 
     const after = fstatSync(descriptor, { bigint: true });
     const afterKey = memorySnapshotKey(path, after);
@@ -1433,15 +1536,34 @@ export function loadMemoryChecked(path = resolveRockyPaths().memory, now = Date.
     // answer. The in-envelope witness covers every affecting byte and is not
     // a probabilistic sample.
     const witness = contentHash?.digest("hex");
-    memoryCache = witness === undefined
-      ? undefined
-      : { path, key: afterKey, witness, records: frozenRecords, complete, coverage };
+    if (witness !== undefined) {
+      memoryCache = {
+        path,
+        key: afterKey,
+        witness,
+        records: frozenRecords,
+        complete,
+        coverage,
+        fpByRaw,
+        fpOffsets: [...recordOffsets],
+        fpOffsetsByRaw,
+        fpRepresentative,
+        fpHasLegacy,
+      };
+      publishFingerprintIndex(frozenRecords as MemoryRecord[], fpByRaw, fpHasLegacy);
+      publishRecordOffsets(frozenRecords as MemoryRecord[], [...recordOffsets]);
+    } else {
+      memoryCache = undefined;
+    }
     if (!needsResolution(frozenRecords)) {
       return { records: frozenRecords as MemoryRecord[], complete, coverage };
     }
     const materialized = materializeMemoryRecords(frozenRecords);
     resolveMemoryRecords(materialized, now);
-    return { records: freezeMaterializedRecords(materialized), complete, coverage };
+    const frozenMaterialized = freezeMaterializedRecords(materialized);
+    publishFingerprintIndex(frozenMaterialized, fpByRaw, fpHasLegacy);
+    publishRecordOffsets(frozenMaterialized, [...recordOffsets]);
+    return { records: frozenMaterialized, complete, coverage };
   } catch {
     // Missing memory is a complete empty state; every other read failure is
     // incomplete and must be treated conservatively by mutation callers.

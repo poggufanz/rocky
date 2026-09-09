@@ -170,6 +170,7 @@ rocky mcp                                # local read-only stdio server
 ```
 
 Memory lives in `~/.rocky/memory.jsonl`. It is a text file you can read, grep, back up, and delete. Rocky records explicit terminal commands and errors plus the operational metadata needed to link them: working directory, time, exit code, fingerprints, origin, record IDs, and fix links. Rocky does not keylog and does not capture the screen.
+Rocky may keep one advisory derived file next to it, `~/.rocky/memory.idx.jsonl` (fingerprint → file offsets plus a versioned header). It is a pure read accelerator: `memory.jsonl` stays the source of truth, and any version, size, timestamp, or corruption mismatch discards the sidecar and falls back to a full scan with explicit coverage. You can delete the sidecar at any time; Rocky rebuilds it lazily.
 
 The CLI contains no telemetry and runs no daemon. Its only external network egress is `rocky check`'s package-existence lookup against registry.npmjs.org — consent-gated, package names only, fail-open when offline. Everything else, including the local MCP server, reaches no external host at all. MCP uses local stdio, exposes read-only tools, and projects sanitized memory by default. A configured cloud host may forward selected projected content under that host's own policy, so review the host and choose raw exposure only when you intend to share those fields. Optional AI calls only a separately managed Ollama service over loopback (`127.0.0.1`).
 
