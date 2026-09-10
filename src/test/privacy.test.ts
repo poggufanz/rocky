@@ -888,3 +888,18 @@ test("projectExplain carries provenance only via the provenance field", () => {
   const out = projectExplain(card, "ladder", undefined, "sanitized");
   assert.equal(out.provenance, undefined);
 });
+
+test("projectExplain forwards bounded provenance through the fifth argument", () => {
+  const card = { header: "h", lines: ["code: x"], evidence: "evidence: git · evidence-exhausted", expandable: true };
+  const out = projectExplain(card, "ladder", undefined, "sanitized", {
+    commit: "abc1234",
+    author: "Test Author",
+    date: "Thu Sep 10 12:00:00 2026 +0000",
+    subject: "add feed sk-test-00000000000000000000",
+  });
+  assert.equal(out.provenance?.commit, "abc1234");
+  assert.equal(out.provenance?.author, "Test Author");
+  assert.equal(out.provenance?.date, "Thu Sep 10 12:00:00 2026 +0000");
+  assert.ok(out.provenance?.subject.includes("[redacted"));
+  assert.ok(!out.provenance?.subject.includes("sk-test-00000000000000000000"));
+});

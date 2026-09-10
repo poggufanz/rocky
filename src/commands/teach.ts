@@ -3,6 +3,7 @@ import { readFileSync, statSync } from "node:fs";
 import { loadMemory } from "../core/memory-read.js";
 import { teachLookup } from "../core/teach.js";
 import { buildLadder, defaultTeachNeighbor, type LadderResult } from "../core/teach-ladder.js";
+import { gitProvenanceChain } from "../core/git-diff.js";
 import { gapRungFor, renderLadderCard, renderLadderExpanded, renderWitnessCard } from "../core/teach-render.js";
 import { redactSecretsAtBoundary } from "../core/redact.js";
 import { block, detail, heading, say } from "../ui/rocky.js";
@@ -150,7 +151,7 @@ export async function teach(argv: readonly string[], deps: TeachDeps = {}): Prom
       endLine: anchorEnd,
       fileText,
       readNeighbor: defaultTeachNeighbor(file),
-      ...(hit !== undefined ? { git: () => undefined } : {}),
+      git: hit !== undefined ? () => undefined : gitProvenanceChain,
     });
   }
 

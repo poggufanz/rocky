@@ -297,7 +297,7 @@ export interface Provenance {
   subject: string;
 }
 
-function showCommitLine(sha: string, cwd?: string): Provenance | undefined {
+export function showCommitLine(sha: string, cwd?: string): Provenance | undefined {
   const out = runGitSafe(["show", "-s", "--format=%H%x09%an%x09%ad%x09%s", sha],
     { timeoutMs: GIT_DIFF_TIMEOUT_MS, maxOutputBytes: GIT_DIFF_MAX_BYTES, cwd });
   if (out.timedOut || out.code !== 0) return undefined;

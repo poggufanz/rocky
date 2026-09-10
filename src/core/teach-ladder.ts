@@ -1,7 +1,7 @@
 import { readFileSync, statSync } from "node:fs";
 import { dirname, isAbsolute, resolve } from "node:path";
 import { tokens } from "./fingerprint.js";
-import { gitProvenanceChain, pickaxeTouch } from "./git-diff.js";
+import { gitProvenanceChain, pickaxeTouch, type Provenance } from "./git-diff.js";
 
 export type RungSource = "catalog" | "ast" | "def" | "comment" | "test" | "git";
 
@@ -16,6 +16,7 @@ export interface LadderResult {
   rungs: readonly Rung[];
   stopReason: StopReason;
   provenanceExhausted: boolean;
+  provenance?: Provenance;
 }
 
 export const MAX_LADDER_HOPS = 5;
@@ -48,6 +49,11 @@ export function defaultTeachNeighbor(file: string): (relPath: string) => string 
     return undefined;
   };
 }
+export interface GitHit {
+  commit: string;
+  subject: string;
+  provenance?: Provenance;
+}
 
 export interface BuildLadderInput {
   file: string;
@@ -55,7 +61,7 @@ export interface BuildLadderInput {
   endLine: number;
   fileText: string;
   readNeighbor?: (relPath: string) => string | undefined;
-  git?: (file: string, startLine: number, endLine: number, cwd?: string) => { commit: string; subject: string } | undefined;
+  git?: (file: string, startLine: number, endLine: number, cwd?: string) => GitHit | undefined;
 }
 
 /**
@@ -178,10 +184,12 @@ export function buildLadder(input: BuildLadderInput): LadderResult {
   // Hop 5: intent -- tests naming the symbol, first git log -L commit.
   const testRung = hopTest(file, enclosingName, calleeName, readNeighbor);
   if (testRung !== undefined && add(testRung)) return { rungs, stopReason: "max-hops", provenanceExhausted: false };
-  const gitRung = hopGit(file, selStart, selEnd, git, selection, lines, selStart);
-  if (gitRung !== undefined && add(gitRung)) return { rungs, stopReason: "max-hops", provenanceExhausted: false };
+  const gitHit = hopGit(file, selStart, selEnd, git, selection, lines, selStart);
+  const gitRung = gitHit?.rung;
+  const gitProvenance = gitHit !== undefined && gitHit.provenance !== undefined ? { provenance: gitHit.provenance } : {};
+  if (gitRung !== undefined && add(gitRung)) return { rungs, stopReason: "max-hops", provenanceExhausted: false, ...gitProvenance };
 
-  return { rungs, stopReason: "evidence-exhausted", provenanceExhausted: gitRung === undefined && selection.trim().length > 0 };
+  return { rungs, stopReason: "evidence-exhausted", provenanceExhausted: gitRung === undefined && selection.trim().length > 0, ...gitProvenance };
 }
 
 function fillTemplate(template: string, token: string, line: number): string {
@@ -387,26 +395,35 @@ function hopGit(
   file: string,
   startLine: number,
   endLine: number,
-  git: ((file: string, startLine: number, endLine: number, cwd?: string) => { commit: string; subject: string } | undefined) | undefined,
+  git: ((file: string, startLine: number, endLine: number, cwd?: string) => GitHit | undefined) | undefined,
   selection: string,
   lines: readonly string[],
   selStart: number,
-): Rung | undefined {
-  const toRung = (result: { commit: string; subject: string } | undefined): Rung | undefined => {
+): { rung: Rung; provenance?: Provenance } | undefined {
+  const toRung = (result: GitHit | undefined): { rung: Rung; provenance?: Provenance } | undefined => {
     if (result === undefined) return undefined;
     const subject = result.subject.trim();
     if (subject.length === 0) return undefined;
-    return { source: "git", finding: `first touched in ${result.commit}: ${subject}` };
+    if (result.provenance === undefined) {
+      return { rung: { source: "git", finding: `first touched in ${result.commit}: ${subject}` } };
+    }
+    const { provenance } = result;
+    return {
+      rung: { source: "git", finding: `first touched in ${provenance.commit} · ${provenance.author} · ${provenance.date}: ${provenance.subject}` },
+      provenance,
+    };
   };
+  const withProvenance = (hit: Provenance | undefined): GitHit | undefined =>
+    hit === undefined ? undefined : { commit: hit.commit, subject: hit.subject, provenance: hit };
   if (git !== undefined) {
     const direct = toRung(git(file, startLine, endLine));
     if (direct !== undefined) return direct;
   }
   const calleeToken = calleeNames(selection)[0] ?? "";
-  const viaCallee = toRung(pickaxeTouch(file, calleeToken));
+  const viaCallee = toRung(withProvenance(pickaxeTouch(file, calleeToken)));
   if (viaCallee !== undefined) return viaCallee;
   const commentToken = firstCommentToken(lines, selStart);
-  if (commentToken !== undefined) return toRung(pickaxeTouch(file, commentToken));
+  if (commentToken !== undefined) return toRung(withProvenance(pickaxeTouch(file, commentToken)));
   return undefined;
 }
 

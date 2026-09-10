@@ -25,7 +25,7 @@ import {
   safeOpaqueIdentifier,
   validateRecallCandidateIds,
 } from "./privacy.js";
-import { resolveGitDiff } from "../core/git-diff.js";
+import { gitProvenanceChain, resolveGitDiff } from "../core/git-diff.js";
 import { boundTripleRecord, isBoundedLinkBasis, isConfirmableLinkBasis, isKnownPathPlatform, isSafeNonNegativeInteger, MAX_MEMORY_FILE_BYTES, MAX_SUPPORTED_MEMORY_RECORDS, parseMemoryRecord } from "../core/memory-read.js";
 import type { FailureRecord, FixRecord, LinkConfidence, MemoryCoverage, MemoryRecord, TripleRecord } from "../core/memory-read.js";
 
@@ -1819,11 +1819,12 @@ export function createToolRegistry(options: CreateToolRegistryOptions): McpToolR
                 endLine,
                 fileText,
                 readNeighbor: defaultTeachNeighbor(input.path),
+                git: gitProvenanceChain,
               });
               if (ladder.rungs.length > 0) {
                 const label = input.snippet !== undefined ? "snippet" : `line ${input.line}`;
                 const card = renderLadderCard(input.path, label, ladder);
-                const projected = projectExplain(card, "ladder", undefined, options.exposure);
+                const projected = projectExplain(card, "ladder", undefined, options.exposure, ladder.provenance);
                 return safeProjection(
                   () => cappedResult({ exposure: options.exposure, ...projected }),
                   cappedResult({ ...empty, truncated: true }),

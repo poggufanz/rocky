@@ -1,6 +1,7 @@
 // src/test/teach-command.test.ts
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -156,4 +157,51 @@ test("teach --quiet suppresses say output but keeps the card", async () => {
   assert.deepEqual(missing.headingLines, []);
   assert.deepEqual(missing.blockLines, []);
   assert.deepEqual(missing.detailLines, []);
+});
+
+test("teach --ladder on a git-tracked snippet shows commit author pointer, exit 0", async () => {
+  freshHome();
+  const dir = mkdtempSync(join(tmpdir(), "rocky-teach-git-"));
+  execFileSync("git", ["init", "-q"], { cwd: dir });
+  execFileSync("git", ["config", "user.name", "Test Author"], { cwd: dir });
+  execFileSync("git", ["config", "user.email", "author@example.com"], { cwd: dir });
+  writeFileSync(join(dir, "feed.ts"), [
+    "export async function loadFeed() {",
+    "  const rows = await fetchRows();",
+    "  return rows;",
+    "}",
+  ].join("\n"), "utf8");
+  execFileSync("git", ["add", "."], { cwd: dir });
+  execFileSync("git", ["commit", "-qm", "add feed"], { cwd: dir });
+  const prevCwd = process.cwd();
+  process.chdir(dir);
+  try {
+    const { headingLines, blockLines, detailLines, deps } = sinks();
+    assert.equal(await teach(["feed.ts:2", "--ladder"], deps), 0);
+    assert.deepEqual(headingLines, [LADDER_HEADER]);
+    assert.match(detailLines.join("\n"), /evidence-exhausted/);
+    const expanded = blockLines.join("\n");
+    assert.match(expanded, /[0-9a-f]{7}/);
+    assert.match(expanded, /Test Author/);
+  } finally {
+    process.chdir(prevCwd);
+  }
+});
+
+test("teach --ladder with exhausted provenance keeps the disclosure voice, exit 0", async () => {
+  const home = freshHome();
+  const path = fixture(home, "norepo.ts", [
+    "export async function loadFeed() {",
+    "  const rows = await fetchRows();",
+    "  return rows;",
+    "}",
+  ]);
+  const { sayLines, headingLines, blockLines, detailLines, deps } = sinks();
+  assert.equal(await teach([`${path}:2`, "--ladder"], deps), 0);
+  assert.deepEqual(headingLines, [LADDER_HEADER]);
+  assert.ok(blockLines.includes("asal usul habis. evidence lain tetap di atas, question"));
+  assert.match(detailLines.join("\n"), /evidence-exhausted/);
+  const userFacing = [...sayLines, ...headingLines, ...blockLines, ...detailLines].join("\n");
+  assert.doesNotMatch(userFacing, /\?/);
+  assert.doesNotMatch(userFacing, /[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/u);
 });

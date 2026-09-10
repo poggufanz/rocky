@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -206,6 +207,48 @@ test("teach_lookup assembles a ladder card when no witness matches", async () =>
   assert.ok((result.structuredContent.lines as string[])[0]?.includes("· line 2"));
   assert.ok((result.structuredContent.lines as string[])[1]?.startsWith("reason:"));
   assert.match(result.structuredContent.evidence as string, /^evidence: /);
+});
+
+test("teach_lookup forwards git provenance through the fifth projectExplain argument", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "rocky-mcp-teach-git-"));
+  execFileSync("git", ["init", "-q"], { cwd: dir });
+  execFileSync("git", ["config", "user.name", "Test Author"], { cwd: dir });
+  execFileSync("git", ["config", "user.email", "author@example.com"], { cwd: dir });
+  writeFileSync(join(dir, "feed.ts"), [
+    "export async function loadFeed() {",
+    "  const rows = await fetchRows();",
+    "  return rows;",
+    "}",
+  ].join("\n"), "utf8");
+  execFileSync("git", ["add", "."], { cwd: dir });
+  execFileSync("git", ["commit", "-qm", "add feed"], { cwd: dir });
+  const prevCwd = process.cwd();
+  process.chdir(dir);
+  try {
+    const result = await createToolRegistry({
+      exposure: "sanitized", memory: teachMemory([]), recallWithAi: disabledRecallWithAi,
+    }).call("teach_lookup", { path: "feed.ts", line: 2 }, new AbortController().signal);
+    assert.equal(result.isError, undefined);
+    assert.equal(result.structuredContent.match, "ladder");
+    assert.match(result.structuredContent.evidence as string, /git/);
+    assert.match(result.structuredContent.evidence as string, /evidence-exhausted/);
+    const provenance = result.structuredContent.provenance as
+      | { commit: string; author: string; date: string; subject: string } | undefined;
+    assert.ok(provenance !== undefined, "ladder git hit must project provenance");
+    assert.match(provenance.commit, /^[0-9a-f]{7}$/);
+    assert.equal(provenance.author, "Test Author");
+    assert.match(provenance.subject, /add feed/);
+  } finally {
+    process.chdir(prevCwd);
+  }
+});
+
+test("teach_lookup witness hit suppresses git and carries no provenance", async () => {
+  const result = await createToolRegistry({
+    exposure: "sanitized", memory: teachMemory([WITNESS_EXPLAIN]), recallWithAi: disabledRecallWithAi,
+  }).call("teach_lookup", { path: "src/app.ts" }, new AbortController().signal);
+  assert.equal(result.isError, undefined);
+  assert.equal(result.structuredContent.provenance, undefined);
 });
 
 test("teach_lookup bounds oversized witness fields and fits the wire cap", async () => {

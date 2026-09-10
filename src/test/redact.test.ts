@@ -1,5 +1,10 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { showCommitLine } from "../core/git-diff.js";
 import { redactSecrets, redactSecretsAtBoundary, stripInvisibleControls } from "../core/redact.js";
 import {
   AMBIGUOUS_CONTINUATION_MARKER,
@@ -9,6 +14,7 @@ import {
   SYNTHETIC_MULTI_CONTROL_PROBES,
   SYNTHETIC_NON_EOF_CONTROL_PROBES,
   SYNTHETIC_SECRET_CLOSURE_VECTORS,
+  SYNTHETIC_TEACH_PROVENANCE_VECTORS,
 } from "./secret-vectors.js";
 
 test("redactSecrets masks known secret shapes and keeps surrounding text", () => {
@@ -210,4 +216,29 @@ test("redactSecretsAtBoundary preserves embedded family-like prose", () => {
     assert.equal(redactSecretsAtBoundary(value), value, value);
     assert.equal(redactSecretsAtBoundary(value, { mayBeTruncated: true }), value, value);
   }
+});
+
+test("teach provenance subjects and comments redact 20 synthetic secret shapes at the boundary", () => {
+  assert.equal(SYNTHETIC_TEACH_PROVENANCE_VECTORS.length, 20);
+  for (const vector of SYNTHETIC_TEACH_PROVENANCE_VECTORS) {
+    const out = redactSecretsAtBoundary(vector.text);
+    assert.ok(out.includes("[redacted"), `${vector.name}: expected a redaction marker`);
+    assert.ok(!out.includes(vector.raw), `${vector.name}: raw secret leaked`);
+  }
+});
+
+test("showCommitLine redacts a fake secret smuggled in a commit message", () => {
+  const dir = mkdtempSync(join(tmpdir(), "rocky-show-"));
+  execFileSync("git", ["init", "-q"], { cwd: dir });
+  execFileSync("git", ["config", "user.name", "Test Author"], { cwd: dir });
+  execFileSync("git", ["config", "user.email", "author@example.com"], { cwd: dir });
+  writeFileSync(join(dir, "a.ts"), "export const x = 1;\n", "utf8");
+  execFileSync("git", ["add", "."], { cwd: dir });
+  execFileSync("git", ["commit", "-qm", "ship feature sk-test-00000000000000000000 done"], { cwd: dir });
+  const sha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: dir, encoding: "utf8" }).trim();
+  const hit = showCommitLine(sha, dir);
+  assert.ok(hit !== undefined, "showCommitLine must resolve the fixture commit");
+  assert.match(hit.commit, /^[0-9a-f]{7}$/);
+  assert.ok(hit.subject.includes("[redacted"), "commit subject must carry a redaction marker");
+  assert.ok(!hit.subject.includes("sk-test-00000000000000000000"), "raw fake secret must not survive the subject");
 });
