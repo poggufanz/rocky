@@ -4,4 +4,4 @@
 if [ -n "${__ROCKY_SUBSHELL:-}" ]; then return 0 2>/dev/null || exit 0; fi
 __ROCKY_SUBSHELL=1
 __rocky_cmd="${ROCKY_SUBSHELL_CMD:-<noninteractive>}"
-trap '__rocky_code=$?; [ "$__rocky_code" -ne 0 ] && { command -v rocky >/dev/null 2>&1 && rocky hook _hookfail "$__rocky_cmd" "$__rocky_code" "$PWD" >/dev/null 2>&1 & }; trap - EXIT' EXIT
+trap '__rocky_code=$?; [ "$__rocky_code" -ne 0 ] && { command -v rocky >/dev/null 2>&1 && rocky _hookfail "$__rocky_cmd" "$__rocky_code" "$PWD" >/dev/null 2>&1 & }; trap - EXIT' EXIT

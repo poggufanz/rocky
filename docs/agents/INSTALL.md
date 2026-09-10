@@ -125,6 +125,19 @@ If `notify` already has a value, keep the existing entries and ask the human how
 
 The blocks above are the capture lane. The rationale gate is a separate lane with its own requirements — see [The rationale gate, any harness](#the-rationale-gate-any-harness). Rocky never claims enforcement it cannot perform.
 
+Codex also documents `PreToolUse` hooks, which is where the gate lives. Merge *(human approval)* — the human must still review and trust it through `/hooks`:
+
+```toml
+[[hooks.PreToolUse]]
+matcher = "^(apply_patch|Bash)$"
+
+[[hooks.PreToolUse.hooks]]
+type = "command"
+command = 'rocky hook gate-event generic'
+```
+
+One shape limit: `apply_patch` input carries patch text, not a file path, so the gate has nothing per-file to deny and allows — enforcement lands where the tool names a file. Confirm the deny signal against Codex's current hook docs before relying on it.
+
 ## Step 5 — MCP read access, manual per host *(human approval for config edits)*
 
 Rocky's MCP server is read-only, local stdio, sanitized projection by default. Register it wherever this harness reads MCP config:
@@ -150,6 +163,14 @@ Rocky's MCP server is read-only, local stdio, sanitized projection by default. R
 command = "rocky"
 args = ["mcp"]
 ```
+
+**OMP / Oh My Pi** (`~/.omp/agent/mcp.json` — create the file when absent):
+
+```json
+{ "mcpServers": { "rocky": { "command": "node", "args": ["<absolute-path-to>/rocky/dist/index.js", "mcp"] } } }
+```
+
+Use the absolute dist form (Command paths): hook environments often lack the global npm bin on `PATH`.
 
 Tools you get: `recall`, `search_knowledge`, `why_file`, `teach_lookup`, `recent_failures`, `stats`, `fetch_record`, `recall_with_ai`. Use them **when relevant** — `recall` when a failure looks familiar, `why_file` when you need a file's history, `teach_lookup` when you need to inspect why specific code exists. Do not call them on every turn. Note for the human: a configured cloud host may forward selected projected content under that host's own policy.
 
@@ -183,14 +204,72 @@ Then hang `node <home>/.rocky/agent-note.cjs <label>` on whatever event your har
 
 | Harness | Where to hang it |
 | --- | --- |
-| Cursor (hooks, beta) | `~/.cursor/hooks.json` — hook events such as `afterFileEdit` / `beforeSubmitPrompt` / `stop` run a command with a JSON payload on stdin; point the command at `node <home>/.rocky/agent-note.cjs cursor`. |
-| OpenCode | A TypeScript plugin in `.opencode/plugin/` can run a shell command from its tool-execution hook (for edit/write tools): call `node <home>/.rocky/agent-note.cjs opencode "<tool summary>"`. |
+| Cursor (hooks) | `~/.cursor/hooks.json` — `preToolUse` gates with `permission: allow/deny` (see deny adapter below); `afterFileEdit` / `beforeSubmitPrompt` / `stop` are notify-only, point them at `node <home>/.rocky/agent-note.cjs cursor`. |
+| OpenCode | A TypeScript plugin in `.opencode/plugin/`: `tool.execute.before` + `throw` gates (see deny adapter below); the same hook can call `node <home>/.rocky/agent-note.cjs opencode "<tool summary>"` for capture. |
+| TS-extension harnesses | Adapter module on the pre-tool event plus the result event — see deny adapter below; prefer explicit registration over ambient discovery (one install's discovery proved blind while explicit registration gated). |
 | Aider | No lifecycle hooks; nearest lever is `lint-cmd` in `.aider.conf.yml`, which runs per edited file: `lint-cmd: node <home>/.rocky/agent-note.cjs aider edited` (Aider appends the file path as the last argument). Aider's descriptive auto-commits already feed Rocky's git-diff correlation with zero wiring. |
-| Gemini CLI | No hook system (MCP and settings only): Steps 1–2 are the whole story, plus Step 5 for MCP read access. |
-| Windsurf, Cline, Roo Code, Zed, Goose, Crush, Amp | No shell-command lifecycle hooks found (plugin/SDK or MCP surfaces only). Floor: Step 1 catches every shell command they run; the agent itself sends Step 2 events; Step 5 where MCP is supported. |
+| Gemini CLI | `BeforeTool` in `settings.json` with a `matcher` gates with `decision: deny`/`block` (see deny adapter below); `AfterTool` is notify-only. |
+| Cline | `.clinerules/hooks/PreToolUse` executable gates with `cancel: true` (see deny adapter below). |
+| Crush | `PreToolUse` in `crush.json` (Claude-compatible shell hooks) gates (see deny adapter below). |
+| Goose | Plugin `hooks/hooks.json` `PreToolUse` gates (see deny adapter below; set `on_failure: block` to fail closed). |
+| Windsurf | `pre_*` hooks in `hooks.json` gate with exit 2 per docs — verify against current docs, then see deny adapter below. |
+| Zed, Roo Code | No scriptable pre-tool hook (Zed: static `always_deny` patterns only; Roo: rules + checkpoints). Floor: Step 1 catches every shell command they run; the agent itself sends Step 2 events; Step 5 where MCP is supported. |
 | DSH (DeepSeek Harness) | Nothing to install — Rocky's adapter reads DSH session logs directly (needs Node 22.15+ at Rocky's runtime for zstd). |
 
 Whatever the harness, the floor never changes: Step 1 hears every shell command, and an agent that can run shell commands can always speak Step 2 itself — the bridge script only automates what the agent would otherwise say by hand.
+
+### Pre-tool deny adapter — if your harness supports it, add this
+
+If your harness documents a hook that fires **before** a tool runs and can **cancel** it, wire the gate there with one small adapter. The adapter is always the same three steps — only the spelling changes per harness:
+
+1. Read the harness payload, extract the tool name and the file about to change.
+2. Call `rocky hook gate-event generic` with the gate contract (`tool_name`, `tool_input.file_path`, `session_id`, `cwd`).
+3. Translate a deny into your harness's native cancel signal.
+
+Portable shell shape (adjust the `jq` paths to your harness's payload, then emit its deny form):
+
+```bash
+#!/usr/bin/env bash
+# pre-tool adapter: <your harness event> -> rocky gate-event generic.
+input=$(cat)
+tool=$(echo "$input" | jq -r '.tool_name // .tool // empty')
+file=$(echo "$input" | jq -r '.tool_input.file_path // .tool_input.path // .tool_input.filePath // empty')
+sid=$(echo "$input" | jq -r '.session_id // .sessionId // "default"')
+cwd=$(echo "$input" | jq -r '.cwd // empty')
+[ -z "$file" ] && exit 0   # no file named: nothing per-file to gate on, allow
+decision=$(printf '{"tool_name":"%s","tool_input":{"file_path":"%s"},"session_id":"%s","cwd":"%s"}' \
+  "$tool" "$file" "$sid" "$cwd" | rocky hook gate-event generic)
+echo "$decision" | grep -q '"deny"' || exit 0
+reason=$(echo "$decision" | jq -r '.hookSpecificOutput.permissionDecisionReason // "rocky gate: state why first, then retry"')
+# Emit EXACTLY ONE of your harness's deny forms below, delete the rest:
+echo "{\"decision\":\"deny\",\"reason\":\"$reason\"}"; exit 0   # Gemini-style (also Crush JSON form)
+# echo "{\"decision\":\"block\",\"reason\":\"$reason\"}"; exit 0  # Goose-style
+# echo "{\"cancel\":true,\"errorMessage\":\"$reason\"}"; exit 0   # Cline-style
+# echo "{\"permission\":\"deny\",\"reason\":\"$reason\"}"; exit 0 # Cursor-style
+# echo "$reason" >&2; exit 2                                      # exit-2 harnesses (Goose/Windsurf/Crush alt)
+```
+
+If your harness uses TypeScript plugins instead of shell hooks, the same three steps apply — only the cancel spelling differs: `throw new Error(reason)` (OpenCode `tool.execute.before`), or `return { block: true, reason }` (TS-extension harnesses; reference install deny-tested end to end: fresh-file write blocked with no file on disk, allowed after rationale plus explain evidence landed).
+
+Per-harness wiring — **confirm event names and field paths against your harness's current docs before writing config; these APIs move**:
+
+| Harness | Gate hook (config) | File field in payload |
+| --- | --- | --- |
+| Claude Code | `PreToolUse` in `~/.claude/settings.json` | `tool_input.file_path` |
+| Codex | `PreToolUse` in `~/.codex/hooks.json` or `[[hooks.PreToolUse]]` in `config.toml` (trust via `/hooks`) | patch-shaped for `apply_patch` (no path — gate allows); file fields where the tool names one |
+| OpenCode | `tool.execute.before` in `.opencode/plugin/*.ts` (throw to deny) | `output.args` (`filePath`, `command`, …) |
+| Crush | `PreToolUse` in `crush.json` (Claude-compatible) | `tool_input` fields |
+| Cline | `.clinerules/hooks/PreToolUse` executable (`cancel: true` denies) | `.preToolUse.parameters.path` |
+| Cursor | `preToolUse` in `~/.cursor/hooks.json` (`permission: deny`) | per current hook payload docs |
+| Gemini CLI | `BeforeTool` in `settings.json` with `matcher` (e.g. `write_file\|replace`) | `tool_input` (varies by tool) |
+| Goose | plugin `hooks/hooks.json` `PreToolUse` (set `on_failure: block` to fail closed) | `tool_input.path` (`developer__write`, …) |
+| Windsurf | `pre_*` hooks in `hooks.json` (exit 2 denies — verify) | per current hook payload docs |
+| VS Code agent mode | `PreToolUse` (deny > ask > allow) | per current hook payload docs |
+| TS-extension harnesses | `tool_call`-style handler returning a block object | map the native path field to `file_path` |
+| Zed, Roo Code, Aider | no scriptable pre-tool hook — skip this section | — |
+
+Verify the deny the same way regardless of harness: attempt a fresh-file edit with no rationale recorded and **check the disk, not the chat** — the file must be absent. Then record rationale (plus explain where your gate mode requires it) and confirm the retry lands with exact content.
+
 
 ### The rationale gate, any harness
 
@@ -205,6 +284,30 @@ The contract is small. On stdin, one JSON object carrying a non-empty `tool_name
 It always exits `0` by design, so the caller reads stdout to learn the decision — the exit code never carries it, and a gate failure can never take down the harness that called it.
 
 Any harness qualifies when two things are true: a hook that fires **before** the edit and can cancel it, and a payload that names the file about to change. Both vary. Some lifecycle hooks only notify, and their exit code is discarded; some report a patch or a diff rather than a path, which leaves Rocky nothing to gate on. Read your harness's current hook documentation and confirm both before wiring this up. Where either is missing, Step 2's notify lane still records the why — only the enforcement is unavailable, and Rocky says so rather than pretending otherwise.
+
+#### If your harness supports custom pre-tool hooks — otherwise skip
+
+If your harness documents a pre-tool / pre-edit hook that can deny the tool before it runs, you can enforce the gate there. If it does not, skip this section entirely — Steps 1–2 plus Step 5 remain the full install.
+
+Three facts keep the wiring honest:
+
+1. `gate-event` alone never blocks. It only prints allow (`{}`) or deny JSON on stdout and always exits `0`. Enforcement comes from a tiny adapter you own: call `gate-event`, read stdout, and translate a deny into whatever cancel/deny mechanism your harness documents.
+2. Hook config does not transfer between vendors. A hook array written for one harness runs nowhere else unless the current harness documents that compatibility. Only wire what your harness's current docs say it executes.
+3. Some privileged shortcuts (eval, browser, computer-use style actions) bypass pre-tool hooks by design in many harnesses. Do not claim gate coverage there.
+
+Adapter shape, spelled in your harness's hook language:
+
+```
+on pre-edit(file_path, tool_name, session_id, cwd):
+  decision = run("rocky hook gate-event generic",
+                 stdin = JSON({tool_name, tool_input: {file_path}, session_id, cwd}))
+  if stdout contains permissionDecision == "deny":
+    cancel with harness-native deny + decision reason
+  else:
+    allow
+```
+
+Where the harness allows it, the same hook may also rewrite arguments before execution, redact the tool result afterwards, or ask the human (confirm/select dialog) and treat a "no" as deny. If several pre-tool hooks are installed, let the first deny win, and treat an adapter crash as deny (fail-closed) so a broken gate cannot silently allow an edit.
 
 ## Step 7 — Project contract (fallback, opt-in — skip when global hooks from Steps 3–6 are active)
 
@@ -249,10 +352,18 @@ Then read the file back and confirm the section landed intact. When Steps 3–6 
 |---|---|---|---|
 | Claude Code (CLI native, Edit/Write) | Yes (`deny` honored) | Yes (`file_path`) | gate nudge/strict + passive capture |
 | Claude Code (ExitPlanMode, Agent tool, MCP tools, Desktop/Cowork) | Unreliable (upstream issues #50660/#44534/#33106/#77708) | Partial | passive capture only; no gate claim |
-| Codex (`apply_patch`) | Unreliable (#27833) | Yes | passive capture; best-effort gate |
-| OpenCode (Edit/Write) | Yes via plugin throw (strict only) | Yes | plugin + `shell.env` |
-| Cursor/Windsurf/Cline/etc. (no hook cancel) | No | Varies | bridge `agent-note.cjs` + manual Steps 1/2 |
-| Aider/Gemini CLI | No hooks | — | `lint-cmd`/Steps 1/2 + git-diff correlation |
+| Codex | Yes (`PreToolUse` documented; trust new hooks via `/hooks`) | Partial (`apply_patch` carries patch text, not a path) | capture + best-effort gate where a file is named |
+| OpenCode | Yes (plugin `tool.execute.before` + throw; primary-agent only per reports) | Yes (`output.args`) | gate + bridge capture |
+| Crush | Yes (`PreToolUse`, exit 2 or `decision: deny`; top-level agent only) | Yes | gate + capture |
+| Cline | Yes (`.clinerules/hooks/PreToolUse` → `cancel: true`) | Yes (`parameters.path`) | gate + capture |
+| Cursor | Yes (`preToolUse` → `permission: deny`) | Varies | gate + bridge capture |
+| Gemini CLI | Yes (`BeforeTool` → `decision: deny` / `block`) | Varies by tool | gate + capture |
+| Goose | Yes (plugin `PreToolUse`, exit 2 or `decision: block`; set `on_failure: block`) | Yes (namespaced tools) | gate + capture |
+| Windsurf | Yes per docs (`pre_*` hooks, exit 2 — verify against current docs) | Yes | gate (verify) + capture |
+| VS Code agent mode | Yes (`PreToolUse`, deny > ask > allow) | Varies | gate + capture |
+| TS-extension harnesses (reference install verified: omp 18.1.14) | Yes (`tool_call` → `{ block: true }`, fail-closed) | Yes (map the native path field to `file_path`) | gate + capture; eval/browser/computer shortcuts bypass |
+| Zed | No script hook (static `always_deny` patterns only) | — | manual Steps 1/2 |
+| Roo Code, Aider | No pre-tool hooks | — | rules / `lint-cmd` + Steps 1/2 |
 | Non-interactive `sh`/PowerShell/python-exec | No `BASH_ENV` | — | `rocky run` fallback |
 
 ## Step 8 — Verify
