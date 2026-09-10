@@ -289,3 +289,60 @@ export function resolveCommitDiff(options: CommitDiffOptions): CommitDiffResult 
     return undefined;
   }
 }
+
+export interface Provenance {
+  commit: string;
+  author: string;
+  date: string;
+  subject: string;
+}
+
+function showCommitLine(sha: string, cwd?: string): Provenance | undefined {
+  const out = runGitSafe(["show", "-s", "--format=%H%x09%an%x09%ad%x09%s", sha],
+    { timeoutMs: GIT_DIFF_TIMEOUT_MS, maxOutputBytes: GIT_DIFF_MAX_BYTES, cwd });
+  if (out.timedOut || out.code !== 0) return undefined;
+  const line = out.stdout.split("\n", 1)[0] ?? "";
+  const parts = line.split("\t");
+  const full = parts[0] ?? "";
+  if (!/^[0-9a-f]{4,128}$/.test(full)) return undefined;
+  return {
+    commit: full.slice(0, 7),
+    author: (parts[1] ?? "").slice(0, 120),
+    date: (parts[2] ?? "").slice(0, 120),
+    subject: redactSecretsAtBoundary(parts[3] ?? "").slice(0, 160),
+  };
+}
+
+export function blameRange(file: string, startLine: number, endLine: number, cwd?: string): Provenance | undefined {
+  if (!Number.isSafeInteger(startLine) || !Number.isSafeInteger(endLine) || startLine < 1 || endLine < startLine) return undefined;
+  const out = runGitSafe(["blame", "-L", `${startLine},${endLine}`, "--porcelain", "--", file],
+    { timeoutMs: GIT_DIFF_TIMEOUT_MS, maxOutputBytes: GIT_DIFF_MAX_BYTES, cwd });
+  if (out.timedOut || out.code !== 0) return undefined;
+  const sha = /^[0-9a-f]{4,128} /.exec(out.stdout)?.[0]?.trim();
+  if (sha === undefined) return undefined;
+  return showCommitLine(sha, cwd);
+}
+
+export function pickaxeTouch(file: string, token: string, cwd?: string): Provenance | undefined {
+  const clean = token.replace(/[^A-Za-z0-9_$]/g, "").slice(0, 64);
+  if (clean.length === 0) return undefined;
+  const log = runGitSafe(["log", "--format=%H", "-n", "1", `-S${clean}`, "--", file],
+    { timeoutMs: GIT_DIFF_TIMEOUT_MS, maxOutputBytes: GIT_DIFF_MAX_BYTES, cwd });
+  const sha = /^[0-9a-f]{4,128}$/m.exec(log.stdout)?.[0];
+  if (log.timedOut || sha === undefined) return undefined;
+  return showCommitLine(sha, cwd);
+}
+
+export function gitProvenanceChain(
+  file: string, startLine: number, endLine: number, cwd?: string,
+): { commit: string; subject: string; provenance: Provenance } | undefined {
+  const first = gitFirstTouch(file, startLine, endLine, cwd);
+  if (first !== undefined) {
+    const full = showCommitLine(first.commit, cwd);
+    const provenance = full ?? { commit: first.commit, author: "unknown", date: "unknown", subject: first.subject };
+    return { commit: provenance.commit, subject: provenance.subject, provenance };
+  }
+  const blamed = blameRange(file, startLine, endLine, cwd);
+  if (blamed !== undefined) return { commit: blamed.commit, subject: blamed.subject, provenance: blamed };
+  return undefined;
+}

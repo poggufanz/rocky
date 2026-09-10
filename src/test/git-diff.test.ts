@@ -8,6 +8,7 @@ import {
   resolveGitDiff,
   firstShaAfter,
   formatGitDiffLines,
+  blameRange,
   GIT_DIFF_TIMEOUT_MS,
   GIT_DIFF_MAX_BYTES,
   type GitDiffResult,
@@ -374,6 +375,38 @@ test("firstShaAfter returns the earliest child commit when multiple commits touc
     const foundTime = firstShaAfter(dir, "f.txt", { ts: Date.now() - 60_000, capMs: 8 * 60 * 60 * 1000 });
     assert.equal(foundTime, firstChild);
     assert.notEqual(foundTime, secondChild);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+function fixtureRepo(): string {
+  const dir = mkdtempSync(join(tmpdir(), "rocky-blame-"));
+  execFileSync("git", ["init", "-q"], { cwd: dir });
+  execFileSync("git", ["config", "user.name", "Test Author"], { cwd: dir });
+  execFileSync("git", ["config", "user.email", "author@example.com"], { cwd: dir });
+  writeFileSync(join(dir, "a.ts"), "export const x = 1;\n");
+  execFileSync("git", ["add", "."], { cwd: dir });
+  execFileSync("git", ["commit", "-qm", "add x"], { cwd: dir });
+  return dir;
+}
+
+test("blameRange parses author and 7-char commit per range", () => {
+  const dir = fixtureRepo();
+  try {
+    const hit = blameRange(join(dir, "a.ts"), 1, 1, dir);
+    assert.equal(hit?.author, "Test Author");
+    assert.match(hit?.commit ?? "", /^[0-9a-f]{7}$/);
+    assert.equal(hit?.subject, "add x");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("blameRange fails open outside a repo", () => {
+  const dir = mkdtempSync(join(tmpdir(), "rocky-norepo-"));
+  try {
+    assert.equal(blameRange(join(dir, "a.ts"), 1, 1, dir), undefined);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
