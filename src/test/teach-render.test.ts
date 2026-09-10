@@ -45,7 +45,7 @@ test("witness header is byte exact", () => {
 
 test("witness evidence line carries source and age", () => {
   const card = renderWitnessCard(witnessHit());
-  assert.equal(card.evidence, "source: agent:claude-code · 2h ago");
+  assert.equal(card.evidence, "source: agent:claude-code · 2h ago · unknown");
 });
 
 test("witness body is code then business, no gap line without gap rung", () => {
@@ -91,7 +91,7 @@ test("ladder body is one reason line, findings joined in hop order", () => {
 
 test("ladder evidence line lists exactly the sources used with comment quoted", () => {
   const card = renderLadderCard("memory.ts", "reclaimTriplePath return", LADDER);
-  assert.equal(card.evidence, 'evidence: catalog · ast · def · comment "No litter"');
+  assert.equal(card.evidence, 'evidence: catalog · ast · def · comment "No litter" · evidence-exhausted');
 });
 
 test("ladder evidence deduplicates sources in hop order", () => {
@@ -107,7 +107,7 @@ test("ladder evidence deduplicates sources in hop order", () => {
     provenanceExhausted: false,
   };
   const card = renderLadderCard("memory.ts", "reclaimTriplePath return", ladder);
-  assert.equal(card.evidence, 'evidence: def · ast · comment "A"');
+  assert.equal(card.evidence, 'evidence: def · ast · comment "A" · evidence-exhausted');
 });
 
 test("ladder card is expandable when rungs exist", () => {
@@ -128,7 +128,7 @@ test("empty ladder yields no reason line and is not expandable", () => {
   const empty: LadderResult = { rungs: [], stopReason: "evidence-exhausted", provenanceExhausted: false };
   const card = renderLadderCard("memory.ts", "reclaimTriplePath return", empty);
   assert.deepEqual(card.lines, ["memory.ts · reclaimTriplePath return"]);
-  assert.equal(card.evidence, "evidence: ");
+  assert.equal(card.evidence, "evidence:  · evidence-exhausted");
   assert.equal(card.expandable, false);
   assert.deepEqual(renderLadderExpanded(empty), []);
 });
@@ -152,4 +152,27 @@ test("age floors at minute, hour, and day boundaries", () => {
   assert.equal(ageLabel(now - 23 * 3_600_000, now), "23h ago");
   assert.equal(ageLabel(now - 86_400_000, now), "1d ago");
   assert.equal(ageLabel(now - 3 * 86_400_000, now), "3d ago");
+});
+
+test("ladder evidence appends stop reason", () => {
+  const card = renderLadderCard("a.ts", "x", {
+    rungs: [{ source: "git", finding: "first touched in abc1234: add x" }],
+    stopReason: "evidence-exhausted",
+    provenanceExhausted: false,
+  });
+  assert.match(card.evidence, /evidence-exhausted/);
+});
+
+test("exhausted provenance adds a disclosure line", () => {
+  const card = renderLadderCard("a.ts", "x", {
+    rungs: [{ source: "catalog", finding: "awaits a promise" }],
+    stopReason: "evidence-exhausted",
+    provenanceExhausted: true,
+  });
+  assert.match(card.lines.join("\n"), /asal usul habis/);
+});
+
+test("witness card with zero pointers marks unknown", () => {
+  const card = renderWitnessCard(witnessHit(), undefined);
+  assert.match(card.evidence, /source: /);
 });
