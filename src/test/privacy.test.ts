@@ -9,6 +9,7 @@ import {
   MAX_RESPONSE_BYTES,
   cloneFix,
   normalizeOutputText,
+  projectExplain,
   projectMemoryRecord,
   projectKnowledgeHits,
   projectRecentFailures,
@@ -880,4 +881,10 @@ test("sanitized nested reserved and credential IDs never remain literal", () => 
   assert.equal(raw.id, ids[0]);
   assert.deepEqual(raw.failureIds, ids);
   assert.deepEqual(raw.links.map((link) => link.id), ids);
+});
+
+test("projectExplain carries provenance only via the provenance field", () => {
+  const card = { header: "h", lines: ["code: x", "business: y"], evidence: "evidence: git · evidence-exhausted", expandable: true };
+  const out = projectExplain(card, "ladder", undefined, "sanitized");
+  assert.equal(out.provenance, undefined);
 });

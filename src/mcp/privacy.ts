@@ -425,6 +425,7 @@ export interface ProjectedTeachCard {
   match: "hash" | "similarity" | "ladder";
   recordId?: string;
   source?: string;
+  provenance?: { commit: string; author: string; date: string; subject: string };
   truncatedFields: readonly string[];
 }
 
@@ -440,6 +441,7 @@ export function projectExplain(
   match: "hash" | "similarity" | "ladder",
   record: ExplainRecord | undefined,
   exposure: Exposure,
+  provenance?: { commit: string; author: string; date: string; subject: string },
 ): ProjectedTeachCard {
   const truncation: Truncation = { fields: [] };
   const projected: ProjectedTeachCard = {
@@ -453,6 +455,14 @@ export function projectExplain(
   if (record !== undefined) {
     projected.recordId = projectOpaqueId(record.id, "record.id", truncation, exposure === "sanitized");
     projected.source = projectText(record.source, exposure, "record.source", truncation);
+  }
+  if (provenance !== undefined) {
+    projected.provenance = {
+      commit: projectText(provenance.commit, exposure, "provenance.commit", truncation),
+      author: projectText(provenance.author, exposure, "provenance.author", truncation),
+      date: projectText(provenance.date, exposure, "provenance.date", truncation),
+      subject: projectText(provenance.subject, exposure, "provenance.subject", truncation),
+    };
   }
   return projected;
 }

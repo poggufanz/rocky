@@ -42,6 +42,10 @@ existing kind.
 
 `fixCommand`, as returned by the MCP tools, is the command whose success resolved a failure — it is not the fix method itself, and MCP never presents it as one. Re-running it is not proof it still fixes anything.
 
+## teach `explain` projection (`provenance`)
+
+`teach_lookup` projects a `provenance` field shaped `{ commit, author, date, subject }` (7-char commit, git author name, commit date, redacted subject). It is `undefined` on witness hits and when provenance is exhausted (all git tiers missed). Git author names are light personal data exposed by `teach_lookup` on all surfaces per owner decision 2026-09-10.
+
 ## Pointer rule
 
 Code references are stored as pointers `{commit, path, lines}` and
