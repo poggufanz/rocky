@@ -1,7 +1,7 @@
 import { readFileSync, statSync } from "node:fs";
 import { dirname, isAbsolute, resolve } from "node:path";
 import { tokens } from "./fingerprint.js";
-import { gitFirstTouch } from "./git-diff.js";
+import { gitProvenanceChain, pickaxeTouch } from "./git-diff.js";
 
 export type RungSource = "catalog" | "ast" | "def" | "comment" | "test" | "git";
 
@@ -15,6 +15,7 @@ export type StopReason = "evidence-exhausted" | "max-hops" | "library-boundary" 
 export interface LadderResult {
   rungs: readonly Rung[];
   stopReason: StopReason;
+  provenanceExhausted: boolean;
 }
 
 export const MAX_LADDER_HOPS = 5;
@@ -54,7 +55,7 @@ export interface BuildLadderInput {
   endLine: number;
   fileText: string;
   readNeighbor?: (relPath: string) => string | undefined;
-  git?: typeof gitFirstTouch;
+  git?: (file: string, startLine: number, endLine: number, cwd?: string) => { commit: string; subject: string } | undefined;
 }
 
 /**
@@ -127,7 +128,7 @@ type CalleeResolution =
   | undefined;
 
 export function buildLadder(input: BuildLadderInput): LadderResult {
-  const { file, fileText, readNeighbor, git = gitFirstTouch } = input;
+  const { file, fileText, readNeighbor, git = gitProvenanceChain } = input;
   const lines = fileText.split(/\r?\n/);
   const total = lines.length;
   const selStart = Math.max(1, Math.min(input.startLine, total || 1));
@@ -146,41 +147,41 @@ export function buildLadder(input: BuildLadderInput): LadderResult {
 
   // Hop 1: what construct is this.
   const catalog = hopCatalog(selection, selStart);
-  if (catalog !== undefined && add(catalog)) return { rungs, stopReason: "max-hops" };
+  if (catalog !== undefined && add(catalog)) return { rungs, stopReason: "max-hops", provenanceExhausted: false };
 
   // Hop 2: why is it here -- the enclosing function.
   const ast = hopAst(lines, selStart, selection);
   if (ast !== undefined) {
     enclosingName = ast.name;
     usedDefSites.add(`${file}|${ast.line}|${ast.name}`);
-    if (add({ source: "ast", finding: ast.finding })) return { rungs, stopReason: "max-hops" };
+    if (add({ source: "ast", finding: ast.finding })) return { rungs, stopReason: "max-hops", provenanceExhausted: false };
   }
 
   // Hop 3: what does the callee do -- definition / JSDoc / neighbor.
   const def = resolveCallee(selection, file, fileText, readNeighbor);
-  if (def === "boundary") return { rungs, stopReason: "library-boundary" };
+  if (def === "boundary") return { rungs, stopReason: "library-boundary", provenanceExhausted: false };
   if (def !== undefined) {
     calleeName = def.name;
     const siteKey = `${def.site.path}|${def.site.line}|${def.name}`;
-    if (usedDefSites.has(siteKey)) return { rungs, stopReason: "cycle" };
+    if (usedDefSites.has(siteKey)) return { rungs, stopReason: "cycle", provenanceExhausted: false };
     usedDefSites.add(siteKey);
     const jsdocClause = def.site.jsdoc !== undefined ? `; JSDoc: ${def.site.jsdoc}` : "";
     const where = def.inFile ? `line ${def.site.line}` : `${def.site.path} at line ${def.site.line}`;
     const finding = `callee ${def.name} defined ${def.inFile ? "at " : "in "}${where}${jsdocClause}`;
-    if (add({ source: "def", finding })) return { rungs, stopReason: "max-hops" };
+    if (add({ source: "def", finding })) return { rungs, stopReason: "max-hops", provenanceExhausted: false };
   }
 
   // Hop 4: why at this exact point -- nearest comment above the selection.
   const comment = hopComment(lines, selStart);
-  if (comment !== undefined && add(comment)) return { rungs, stopReason: "max-hops" };
+  if (comment !== undefined && add(comment)) return { rungs, stopReason: "max-hops", provenanceExhausted: false };
 
   // Hop 5: intent -- tests naming the symbol, first git log -L commit.
   const testRung = hopTest(file, enclosingName, calleeName, readNeighbor);
-  if (testRung !== undefined && add(testRung)) return { rungs, stopReason: "max-hops" };
-  const gitRung = hopGit(file, selStart, selEnd, git);
-  if (gitRung !== undefined && add(gitRung)) return { rungs, stopReason: "max-hops" };
+  if (testRung !== undefined && add(testRung)) return { rungs, stopReason: "max-hops", provenanceExhausted: false };
+  const gitRung = hopGit(file, selStart, selEnd, git, selection, lines, selStart);
+  if (gitRung !== undefined && add(gitRung)) return { rungs, stopReason: "max-hops", provenanceExhausted: false };
 
-  return { rungs, stopReason: "evidence-exhausted" };
+  return { rungs, stopReason: "evidence-exhausted", provenanceExhausted: gitRung === undefined && selection.trim().length > 0 };
 }
 
 function fillTemplate(template: string, token: string, line: number): string {
@@ -387,13 +388,40 @@ function hopGit(
   startLine: number,
   endLine: number,
   git: ((file: string, startLine: number, endLine: number, cwd?: string) => { commit: string; subject: string } | undefined) | undefined,
+  selection: string,
+  lines: readonly string[],
+  selStart: number,
 ): Rung | undefined {
-  if (git === undefined) return undefined;
-  const result = git(file, startLine, endLine);
-  if (result === undefined) return undefined;
-  const subject = result.subject.trim();
-  if (subject.length === 0) return undefined;
-  return { source: "git", finding: `first touched in ${result.commit}: ${subject}` };
+  const toRung = (result: { commit: string; subject: string } | undefined): Rung | undefined => {
+    if (result === undefined) return undefined;
+    const subject = result.subject.trim();
+    if (subject.length === 0) return undefined;
+    return { source: "git", finding: `first touched in ${result.commit}: ${subject}` };
+  };
+  if (git !== undefined) {
+    const direct = toRung(git(file, startLine, endLine));
+    if (direct !== undefined) return direct;
+  }
+  const calleeToken = calleeNames(selection)[0] ?? "";
+  const viaCallee = toRung(pickaxeTouch(file, calleeToken));
+  if (viaCallee !== undefined) return viaCallee;
+  const commentToken = firstCommentToken(lines, selStart);
+  if (commentToken !== undefined) return toRung(pickaxeTouch(file, commentToken));
+  return undefined;
+}
+
+/** First identifier token of the nearest comment line above the selection, if any. */
+function firstCommentToken(lines: readonly string[], selStart: number): string | undefined {
+  const floor = Math.max(0, selStart - 11);
+  for (let i = selStart - 2; i >= floor; i -= 1) {
+    const line = lines[i];
+    if (line === undefined) break;
+    if (line.trim().length === 0) continue;
+    if (!isCommentLine(line)) continue;
+    const stripped = line.replace(/^\s*(\/\/|\/\*|\*)\s*/, "");
+    return /[A-Za-z_$][\w$]*/.exec(stripped)?.[0];
+  }
+  return undefined;
 }
 
 export interface ImportLine {

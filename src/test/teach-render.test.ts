@@ -35,6 +35,7 @@ const LADDER: LadderResult = {
     { source: "comment", finding: 'nearest comment "No litter"' },
   ],
   stopReason: "evidence-exhausted",
+  provenanceExhausted: false,
 };
 
 test("witness header is byte exact", () => {
@@ -103,6 +104,7 @@ test("ladder evidence deduplicates sources in hop order", () => {
       { source: "comment", finding: 'nearest comment "A"' },
     ],
     stopReason: "evidence-exhausted",
+    provenanceExhausted: false,
   };
   const card = renderLadderCard("memory.ts", "reclaimTriplePath return", ladder);
   assert.equal(card.evidence, 'evidence: def · ast · comment "A"');
@@ -123,7 +125,7 @@ test("renderLadderExpanded is one line per rung, 1-based hop, two spaces", () =>
 });
 
 test("empty ladder yields no reason line and is not expandable", () => {
-  const empty: LadderResult = { rungs: [], stopReason: "evidence-exhausted" };
+  const empty: LadderResult = { rungs: [], stopReason: "evidence-exhausted", provenanceExhausted: false };
   const card = renderLadderCard("memory.ts", "reclaimTriplePath return", empty);
   assert.deepEqual(card.lines, ["memory.ts · reclaimTriplePath return"]);
   assert.equal(card.evidence, "evidence: ");

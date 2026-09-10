@@ -145,7 +145,7 @@ test("default git hop uses gitFirstTouch and fails open without a crash", () => 
     "  return v;",
     "}",
   ].join("\n");
-  let result: LadderResult = { rungs: [], stopReason: "evidence-exhausted" };
+  let result: LadderResult = { rungs: [], stopReason: "evidence-exhausted", provenanceExhausted: false };
   assert.doesNotThrow(() => {
     result = buildLadder({ file: "src/__no_such_ladder_file__.ts", startLine: 2, endLine: 2, fileText });
   });
@@ -248,4 +248,27 @@ test("gitFirstTouch resolves the first-touch commit shape or fails open", { skip
     assert.equal(typeof result.subject, "string");
     assert.ok(result.subject.length > 0, "subject must be non-empty when present");
   }
+});
+
+test("ladder flags provenanceExhausted when every git tier misses", () => {
+  const ladder = buildLadder({
+    file: "nofile.ts",
+    startLine: 1,
+    endLine: 3,
+    fileText: "const x = 1;\n",
+    git: () => undefined,
+  });
+  assert.equal(ladder.provenanceExhausted, true);
+  assert.equal(ladder.stopReason, "evidence-exhausted");
+});
+
+test("existing ladders default provenanceExhausted to false when git fires", () => {
+  const ladder = buildLadder({
+    file: "a.ts",
+    startLine: 1,
+    endLine: 1,
+    fileText: "await skip();\n",
+    git: () => ({ commit: "abc1234", subject: "add x" }),
+  });
+  assert.equal(ladder.provenanceExhausted, false);
 });
