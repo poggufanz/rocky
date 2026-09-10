@@ -134,7 +134,11 @@ type CalleeResolution =
   | undefined;
 
 export function buildLadder(input: BuildLadderInput): LadderResult {
-  const { file, fileText, readNeighbor, git = gitProvenanceChain } = input;
+  const { file, fileText, readNeighbor } = input;
+  // Explicit `git: undefined` is full suppression (witness hit owns provenance):
+  // no tier runs, no subprocess. Only an omitted key falls back to the chain.
+  const git = "git" in input ? input.git : gitProvenanceChain;
+  const gitSuppressed = git === undefined;
   const lines = fileText.split(/\r?\n/);
   const total = lines.length;
   const selStart = Math.max(1, Math.min(input.startLine, total || 1));
@@ -189,7 +193,7 @@ export function buildLadder(input: BuildLadderInput): LadderResult {
   const gitProvenance = gitHit !== undefined && gitHit.provenance !== undefined ? { provenance: gitHit.provenance } : {};
   if (gitRung !== undefined && add(gitRung)) return { rungs, stopReason: "max-hops", provenanceExhausted: false, ...gitProvenance };
 
-  return { rungs, stopReason: "evidence-exhausted", provenanceExhausted: gitRung === undefined && selection.trim().length > 0, ...gitProvenance };
+  return { rungs, stopReason: "evidence-exhausted", provenanceExhausted: gitSuppressed ? false : (gitRung === undefined && selection.trim().length > 0), ...gitProvenance };
 }
 
 function fillTemplate(template: string, token: string, line: number): string {
@@ -413,12 +417,11 @@ function hopGit(
       provenance,
     };
   };
+  if (git === undefined) return undefined;
+  const direct = toRung(git(file, startLine, endLine));
+  if (direct !== undefined) return direct;
   const withProvenance = (hit: Provenance | undefined): GitHit | undefined =>
     hit === undefined ? undefined : { commit: hit.commit, subject: hit.subject, provenance: hit };
-  if (git !== undefined) {
-    const direct = toRung(git(file, startLine, endLine));
-    if (direct !== undefined) return direct;
-  }
   const calleeToken = calleeNames(selection)[0] ?? "";
   const viaCallee = toRung(withProvenance(pickaxeTouch(file, calleeToken)));
   if (viaCallee !== undefined) return viaCallee;

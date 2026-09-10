@@ -151,7 +151,7 @@ export async function teach(argv: readonly string[], deps: TeachDeps = {}): Prom
       endLine: anchorEnd,
       fileText,
       readNeighbor: defaultTeachNeighbor(file),
-      git: hit !== undefined ? () => undefined : gitProvenanceChain,
+      git: hit !== undefined ? undefined : gitProvenanceChain,
     });
   }
 

@@ -1801,7 +1801,7 @@ export function createToolRegistry(options: CreateToolRegistryOptions): McpToolR
                   endLine,
                   fileText,
                   readNeighbor: defaultTeachNeighbor(input.path),
-                  git: () => undefined,
+                  git: undefined,
                 });
                 gapRung = gapRungFor(hit, ladder);
               }

@@ -272,3 +272,21 @@ test("existing ladders default provenanceExhausted to false when git fires", () 
   });
   assert.equal(ladder.provenanceExhausted, false);
 });
+
+test("suppressed git runs no tier and reports no exhaustion", () => {
+  const fileText = [
+    "function save() {",
+    "  const v = await writeRows();",
+    "  return v;",
+    "}",
+  ].join("\n");
+  const ladder = buildLadder({
+    file: "src/core/teach-ladder.ts",
+    startLine: 2,
+    endLine: 2,
+    fileText,
+    git: undefined,
+  });
+  assert.equal(ladder.rungs.some((r) => r.source === "git"), false);
+  assert.equal(ladder.provenanceExhausted, false);
+});
