@@ -5,7 +5,7 @@ import { resolveRockyPaths } from "./state-paths.js";
 import { loadConfig, parseConfig, type RockyConfigV1 } from "./config-read.js";
 
 export { loadConfig, parseConfig, parseExposure } from "./config-read.js";
-export type { AiConfig, CheckConfig, ConfigLoadResult, Exposure, RockyConfigV1 } from "./config-read.js";
+export type { AiConfig, CheckConfig, ConfigLoadResult, DecisionConfig, DecisionEngineName, Exposure, JevProviderName, RockyConfigV1 } from "./config-read.js";
 
 export function setCheckRegistry(enabled: boolean): void {
   const current = loadConfig();

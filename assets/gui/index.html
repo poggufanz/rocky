@@ -61,6 +61,27 @@
     <input id="set-key" type="password" spellcheck="false" autocomplete="off">
     <span class="field-note">Kept in this browser only. Never sent to rocky.</span>
   </label>
+  <div id="jev-settings-block">
+  <label class="field" id="jevkey-field">
+    <span class="field-label">Jev Key</span>
+    <input id="set-jevkey" type="password" spellcheck="false" autocomplete="off">
+    <span class="field-note" id="jevkey-note">Server-side only. Never shown back. Enables the lightning toggle.</span>
+  </label>
+  <div class="field" id="jev-provider-field">
+    <span class="field-label">Jev Provider</span>
+    <select id="set-jevprovider">
+      <option value="typesafe">Native TypeSafe</option>
+      <option value="openrouter">OpenRouter</option>
+    </select>
+    <span class="field-note">Jev analysis runs behind the lightning toggle. Native uses your Jev key; OpenRouter uses your OpenRouter key.</span>
+  </div>
+  <label class="field" id="openrouter-key-field" hidden>
+    <span class="field-label">OpenRouter Key</span>
+    <input id="set-openrouterkey" type="password" spellcheck="false" autocomplete="off">
+    <span class="field-note" id="openrouterkey-note">Server-side only. Never shown back. Enables the lightning toggle on the OpenRouter path.</span>
+  </label>
+  <p class="field-note" id="jev-alpha-note">Jalur OpenRouter masih alpha: endpoint alpha, satu provider TypeSafe, batas konteks 32k, tagihan per-token di akun OpenRouter Anda. Kunci OpenRouter tidak pernah meninggalkan server ini.</p>
+  </div>
 
   <label class="field">
     <span class="field-label">Model</span>
@@ -79,6 +100,8 @@
 
   <div class="modal-foot">
     <button id="settings-clear" class="btn-quiet" type="button">Forget Key</button>
+    <button id="settings-clear-jev" class="btn-quiet" type="button">Forget Jev Key</button>
+    <button id="settings-clear-openrouter" class="btn-quiet" type="button">Forget OpenRouter Key</button>
     <button id="settings-save" class="btn-voice" type="button">Save</button>
   </div>
 </div>
@@ -102,35 +125,69 @@
   </div>
 </div>
 
-<main>
+ <main>
 
-  <!-- Main -->
+  <!-- Main: chat-first three-column layout. view-dash below untouched. -->
+  <!-- Static skeleton: view-main reads even with JS disabled or every /api/* failed. -->
   <section class="view" id="view-main" role="tabpanel" aria-labelledby="tab-main">
-    <div class="main-grid">
-      <section class="blk blk-recent">
-        <div id="latest" class="latest"></div>
-        <h2>Recent</h2>
-        <div id="recent" class="rows"></div>
+    <noscript><p class="empty">rocky needs JavaScript for live memory. Start rocky and open its terminal link.</p></noscript>
+    <div class="chat-shell" id="main-grid">
+      <aside class="chat-side" aria-label="conversations and memory">
+        <div class="side-block">
+          <h2>Conversations</h2>
+          <div id="latest" class="latest"><div class="empty"><p>listening…</p></div></div>
+          <div id="recent" class="rows side-recent" role="list" aria-label="recent conversations"><div class="empty"><p>listening…</p></div></div>
+        </div>
+        <div class="side-block side-memory">
+          <section class="blk">
+            <h2>What Rocky Holds</h2>
+            <div id="holds" class="rows"><div class="empty"><p>listening…</p></div></div>
+          </section>
+          <section class="blk">
+            <h2>Since 24H</h2>
+            <div id="day" class="rows"><div class="empty"><p>listening…</p></div></div>
+          </section>
+          <section class="blk">
+            <h2>Most Heard Files</h2>
+            <div id="topfiles" class="rows"><div class="empty"><p>listening…</p></div></div>
+          </section>
+        </div>
+        <div class="side-foot" aria-label="user and limits">
+          <span id="side-tally" class="side-tally" aria-live="polite"></span>
+          <span id="side-coverage" class="side-coverage"></span>
+        </div>
+      </aside>
+      <section class="blk blk-chat chat-center" id="chat-panel" aria-label="ask rocky">
+        <div id="chat-log" class="chat-log" role="log" aria-live="polite" aria-label="conversation"><div class="chat-msg chat-jev">ask what rocky heard. answers stay local.</div></div>
+        <form id="chat-form" class="chatbox" autocomplete="off">
+          <button id="chat-attach" class="cb-btn" type="button" title="attach (soon)" aria-label="attach">+</button>
+          <span id="chat-status" class="cb-dot" title="local only" aria-label="local status"></span>
+          <label class="vh" for="chat-input">ask rocky</label>
+          <input id="chat-input" type="text" placeholder="ask what rocky heard…" spellcheck="false" autocomplete="off">
+          <button id="chat-jev" class="cb-btn cb-jev" type="button" title="Jev analysis (needs key)" aria-pressed="false" aria-label="jev analysis">⚡</button>
+          <span id="chat-modelwrap" class="cb-modelwrap">
+            <select id="chat-model" class="cb-model" aria-label="chat model"></select>
+            <button id="chat-model-btn" class="cb-modelbtn" type="button" aria-haspopup="listbox" aria-expanded="false" aria-label="chat model" hidden>rocky local</button>
+            <span id="chat-model-panel" class="cb-modelpanel" role="listbox" aria-label="chat model" hidden></span>
+          </span>
+          <button id="chat-mic" class="cb-btn" type="button" title="voice input (soon)" disabled aria-label="voice input">🎙</button>
+          <button id="chat-send" class="cb-send" type="submit" aria-label="send">↑</button>
+        </form>
+        <p class="chat-note">Local analysis over what rocky heard. Nothing leaves this machine except bounded Jev/LLM calls you opt into.</p>
       </section>
-
-      <div class="rail">
-        <section class="blk">
-          <h2>What Rocky Holds</h2>
-          <div id="holds" class="rows"></div>
+      <aside class="chat-comp" aria-label="evidence and decision">
+        <section class="comp-block">
+          <h2>Evidence</h2>
+          <div id="comp-evidence" class="comp-list" aria-live="polite"></div>
         </section>
-
-        <section class="blk">
-          <h2>Since 24H</h2>
-          <div id="day" class="rows"></div>
+        <section class="comp-block">
+          <h2>Decision</h2>
+          <div id="comp-trace" class="comp-list" aria-live="polite"></div>
         </section>
-
-        <section class="blk">
-          <h2>Most Heard Files</h2>
-          <div id="topfiles" class="rows"></div>
-        </section>
-      </div>
+      </aside>
     </div>
   </section>
+
 
   <!-- Dash -->
   <section class="view" id="view-dash" role="tabpanel" aria-labelledby="tab-dash" hidden>
@@ -191,5 +248,6 @@
 </div>
 
 <script src="/assets/app.js" type="module"></script>
+<script src="/assets/chat.js" type="module"></script>
 </body>
 </html>

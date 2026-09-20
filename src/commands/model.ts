@@ -8,15 +8,16 @@ import {
 import { detail, say } from "../ui/rocky.js";
 
 /**
- * Keys this command does not own. `watch` settings and `check` registry
- * consent belong to the user, not to AI settings, so model changes preserve
- * both sections byte-for-byte.
+ * Keys this command does not own. `watch` settings, `check` registry
+ * consent, and the `decision` engine choice belong to the user, not to AI
+ * settings, so model changes preserve all three sections byte-for-byte.
  */
-function preservedKeys(current: ReturnType<typeof loadConfig>): Pick<RockyConfigV1, "watch" | "check"> {
+function preservedKeys(current: ReturnType<typeof loadConfig>): Pick<RockyConfigV1, "watch" | "check" | "decision"> {
   if (current.status === "invalid") return {};
   return {
     ...(current.config.watch === undefined ? {} : { watch: current.config.watch }),
     ...(current.config.check === undefined ? {} : { check: current.config.check }),
+    ...(current.config.decision === undefined ? {} : { decision: current.config.decision }),
   };
 }
 

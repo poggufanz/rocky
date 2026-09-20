@@ -40,6 +40,29 @@ import {
 import { resolveRefer, escapeRegExp, type ReferWitness } from "../core/refer-resolve.js";
 import { matchConcepts } from "../core/concepts.js";
 import { CS_CONCEPT_IDS, explainFor } from "../core/cs-explain.js";
+import { searchKnowledge } from "../core/memory-query.js";
+import { loadConfig } from "../core/config-read.js";
+import { saveConfigAtomic } from "../core/config.js";
+import { appendDecisionLog, hashDecisionInput } from "../ai/decision-log.js";
+import {
+  buildRelevanceQuestions,
+  createHeuristicPort,
+  type DecisionCandidate,
+  type DecisionResult,
+} from "../ai/decision.js";
+import { JEV_MODEL, JEV_OPENROUTER_MODEL, createJevPort, isUnifiedOpenRouterMode, resolveActiveJevKey, resolveJevKey, resolveOpenRouterKey, resolveUnifiedOpenRouterKey } from "../ai/jev.js";
+import { createOllamaClient } from "../ai/ollama.js";
+import { buildChatStructure } from "../ai/chat-structure.js";
+import { CHAT_RENDER_ORDER, type ChatRenderStatus } from "../ai/chat-render.js";
+import {
+  chatByokKeyPresent,
+  listChatInstalledModelNames,
+  resolveChatLlmSelection,
+  runChatRenderer,
+  runChatStructurer,
+  type ChatLlmTrace,
+} from "../ai/chat-llm.js";
+import { analyzeExplainDecision } from "../ai/explain-decision.js";
 
 export const DEFAULT_GUI_PORT = 7777;
 const READ_CAP_BYTES = 2 * 1024 * 1024;
@@ -47,6 +70,232 @@ const MAX_BODY_BYTES = 256 * 1024;
 const ASK_TIMEOUT_MS = 60_000;
 const MAX_PROMPT_CHARS = 24_000;
 const MAX_ASK_IN_FLIGHT = 2;
+const CHAT_MAX_MESSAGE_CHARS = 4_000;
+const CHAT_DEFAULT_LIMIT = 5;
+const CHAT_MAX_LIMIT = 10;
+const CHAT_MAX_SNIPPET_CHARS = 500;
+let chatInFlight = 0;
+const CHAT_MAX_IN_FLIGHT = 2;
+
+/** Jev runs only behind an explicit `decision.engine: "jev"` opt-in; absent = heuristic. */
+function readDecisionSelection(): { engine: "heuristic" | "local" | "jev"; jevProvider: "typesafe" | "openrouter" } {
+  try {
+    const loaded = loadConfig();
+    if (loaded.status === "valid" && loaded.config.decision !== undefined) {
+      return { engine: loaded.config.decision.engine, jevProvider: loaded.config.decision.jevProvider ?? "typesafe" };
+    }
+  } catch {
+    // An unreadable config keeps the heuristic default; never fail the chat.
+  }
+  return { engine: "heuristic", jevProvider: "typesafe" };
+}
+
+interface ChatEvidenceCard {
+  ref: string;
+  kind: string;
+  snippet: string;
+}
+
+interface ChatTrace {
+  engine: "heuristic" | "jev";
+  status: "used" | "disabled" | "unavailable" | "timeout" | "invalid_output" | "low_confidence";
+  confidence: number | null;
+  evidenceRefs: readonly string[];
+  latencyMs: number;
+  llm: ChatLlmTrace;
+}
+
+function toChatCards(
+  hits: readonly { id: string; kind: string; snippet: string }[],
+  limit: number,
+): ChatEvidenceCard[] {
+  return hits.slice(0, limit).map((hit) => {
+    const snippet = redactSecretsAtBoundary(String(hit.snippet ?? ""));
+    return {
+      ref: String(hit.id),
+      kind: String(hit.kind),
+      snippet: snippet.length > CHAT_MAX_SNIPPET_CHARS
+        ? `${snippet.slice(0, CHAT_MAX_SNIPPET_CHARS)}… cut, snippet long`
+        : snippet,
+    };
+  });
+}
+
+function topConfidence(result: DecisionResult): number | null {
+  if (result.status !== "used" || result.engine !== "jev") return null;
+  const top = result.evidenceRefs[0];
+  if (top === undefined) return null;
+  const answer = result.answers.find((candidate) => candidate.id === `q_${top}`);
+  return answer?.kind === "noul" ? answer.noul : null;
+}
+
+
+async function chat(
+  body: Record<string, unknown>,
+): Promise<{ status: number; payload: unknown }> {
+  if (chatInFlight >= CHAT_MAX_IN_FLIGHT) {
+    return { status: 429, payload: { error: "rocky already chatting. wait, question" } };
+  }
+  const raw = typeof body.message === "string" ? body.message : "";
+  const message = raw.trim();
+  if (message.length === 0) {
+    return { status: 400, payload: { error: "rocky needs a message, question" } };
+  }
+  const bounded = message.length > CHAT_MAX_MESSAGE_CHARS
+    ? `${message.slice(0, CHAT_MAX_MESSAGE_CHARS)}\n… cut, message long`
+    : message;
+  const asked = redactSecretsAtBoundary(bounded);
+  const requested = typeof body.limit === "number" && Number.isFinite(body.limit) ? Math.floor(body.limit) : CHAT_DEFAULT_LIMIT;
+  const limit = Math.min(CHAT_MAX_LIMIT, Math.max(1, requested));
+  chatInFlight += 1;
+  try {
+    const { list, reason } = records();
+    const hits = searchKnowledge(list, { query: asked, limit });
+    const shortlist: DecisionCandidate[] = toChatCards(hits, limit).map((card) => ({ ...card }));
+    const stored = readSettings();
+    // GUARANTEE (creator order, main chat ONLY — teach/ask untouched): when
+    // `isLlmActive(llmSelection)` is true, /api/chat MUST call the structurer
+    // then the renderer (both route to `body.model` via the selection); when
+    // false, both stages return disclosed fallbacks, never mocked text.
+    // `resolveChatLlmSelection` is the single active predicate: body.model
+    // wins, the stored default fills in; API-KEY-FIRST — a keyed BYOK id
+    // (exact stored.model + endpoint + main-slot key) resolves active before
+    // the Ollama list is consulted, so an offline daemon can never mask it.
+    // Inactive/unknown/unkeyed selections skip both LLM stages with the
+    // reason disclosed on the trace — never mocked, never silent.
+    const evidenceRefs = shortlist.map((card) => ({ ref: card.ref, kind: card.kind, snippet: card.snippet }));
+    const llmSelection = resolveChatLlmSelection({
+      requestedModel: typeof body.model === "string" ? body.model : undefined,
+      stored,
+      installed: await listChatInstalledModelNames(),
+    });
+    // LLM aktif wajib lewat: active => structurer LLM call, then renderer LLM
+    // call; inactive => disclosed fallback inside each stage. The two awaits
+    // below are unconditional so no path can skip them.
+    const structurer = await runChatStructurer(llmSelection, asked, evidenceRefs, stored);
+    // The structurer only shapes Jev state from retrieved refs (allowlisted);
+    // the Jev port below stays the decider and never sees an invented ref.
+    const jevState = structurer.structure ?? buildChatStructure(asked, evidenceRefs);
+    // Per-message lightning toggle: jev:true forces the Jev engine for this call.
+    // The key resolves server-side only: in unified OpenRouter mode the shared
+    // main credential (env OPENROUTER_API_KEY wins, stored main key falls back)
+    // drives Jev; otherwise on the active provider path (typesafe: env
+    // TYPESAFE_API_KEY wins, stored jevKey falls back; openrouter: env
+    // OPENROUTER_API_KEY wins, stored openRouterKey falls back). With no key
+    // the Jev port reports disabled plus baseline, which the trace and text
+    // disclose — never mocked, never silent. Absent toggle keeps the
+    // configured decision.engine default (heuristic when unset).
+    const jevRequested = body.jev === true;
+    const selection = readDecisionSelection();
+    const engine = jevRequested ? "jev" : selection.engine;
+    const useJev = engine === "jev";
+    // Unified OpenRouter mode: the MAIN provider is itself OpenRouter, so the
+    // Jev slots are never read here — the shared main credential (env
+    // OPENROUTER_API_KEY wins, stored main `key` falls back) drives the Jev
+    // path as typesafe/jev-1.13 behind the same key. Missing credential =
+    // disabled plus baseline, disclosed, never mocked. Non-unified keeps the
+    // existing jevProvider + Jev-key fallback exactly as before.
+    const unified = isUnifiedOpenRouterMode(stored.provider, stored.endpoint);
+    const activeJevProvider = unified ? "openrouter" : selection.jevProvider;
+    const activeApiKey = unified
+      ? resolveUnifiedOpenRouterKey(process.env, stored.key)
+      : resolveActiveJevKey(selection.jevProvider, process.env, stored.jevKey, stored.openRouterKey);
+    const activeStoredKey = unified
+      ? stored.key
+      : selection.jevProvider === "openrouter" ? stored.openRouterKey : stored.jevKey;
+    const port = useJev
+      ? createJevPort({
+        provider: activeJevProvider,
+        apiKey: activeApiKey || undefined,
+        storedKey: activeStoredKey,
+      })
+      : createHeuristicPort();
+    const questions = buildRelevanceQuestions(jevState.candidates);
+    let result: DecisionResult;
+    try {
+      // Jev stays the decider: it judges the structured state (retrieved refs
+      // only), never a free-form LLM claim.
+      result = await port.evaluate({ query: jevState.query, candidates: [...jevState.candidates] }, questions);
+    } catch {
+      result = {
+        answers: [],
+        engine: useJev ? "jev" : "heuristic",
+        status: "unavailable",
+        latencyMs: 0,
+        evidenceRefs: shortlist.map((candidate) => candidate.ref),
+      };
+    }
+    const byRef = new Map(shortlist.map((card) => [card.ref, card] as const));
+    const ordered = result.evidenceRefs
+      .map((ref) => byRef.get(ref))
+      .filter((card): card is ChatEvidenceCard => card !== undefined);
+    for (const card of shortlist) {
+      if (!ordered.some((kept) => kept.ref === card.ref)) ordered.push(card);
+    }
+    const traceBase = {
+      engine: result.engine === "jev" ? "jev" : "heuristic",
+      status: result.status,
+      confidence: topConfidence(result),
+      evidenceRefs: ordered.map((card) => card.ref),
+      latencyMs: result.latencyMs,
+    } as const;
+    // The renderer reads ONLY this fact object: the LLM structures/selects,
+    // never invents. Uncited lines are stripped and counted; failure keeps
+    // the raw template with the status disclosed — never a retry-guess.
+    const renderer = await runChatRenderer(
+      llmSelection,
+      {
+        query: asked,
+        topRef: ordered[0]?.ref,
+        topKind: ordered[0]?.kind,
+        topScore: topConfidence(result),
+        engine: traceBase.engine,
+        status: traceBase.status as ChatRenderStatus,
+        evidenceCount: ordered.length,
+        latencyMs: traceBase.latencyMs,
+        detail: result.detail,
+        coverageReason: reason,
+        evidence: ordered.map((card) => ({ ref: card.ref, kind: card.kind, snippet: card.snippet })),
+      },
+      ordered.map((card) => card.ref),
+      stored,
+    );
+    const llm: ChatLlmTrace = {
+      active: llmSelection.active,
+      model: llmSelection.modelId,
+      structurerStatus: structurer.status,
+      rendererStatus: renderer.status,
+      stripped: renderer.stripped,
+    };
+    const trace: ChatTrace = { ...traceBase, evidenceRefs: [...traceBase.evidenceRefs], llm };
+    appendDecisionLog({
+      engine: trace.engine,
+      status: trace.status,
+      input_hash: hashDecisionInput(`${asked}|${shortlist.map((candidate) => candidate.ref).join(",")}`),
+      answer: result.detail === undefined ? { order: [...trace.evidenceRefs] } : { order: [...trace.evidenceRefs], detail: result.detail },
+      latency_ms: trace.latencyMs,
+      outcome: "chat",
+      evidenceRefs: [...trace.evidenceRefs],
+      ...(result.cost === undefined ? {} : { cost: result.cost }),
+    });
+    return {
+      status: 200,
+      payload: {
+        text: renderer.text,
+        evidenceCards: ordered,
+        decisionTrace: trace,
+        llm,
+        // Evidence-first render contract: the frontend renders evidenceCards
+        // FIRST, the text bubble SECOND, decisionTrace last. Field names are
+        // unchanged; this order list only documents the display sequence.
+        renderOrder: [...CHAT_RENDER_ORDER],
+        ...(reason === undefined ? {} : { coverage: { reason } }),
+      },
+    };
+  } finally {
+    chatInFlight -= 1;
+  }
+}
 
 let askInFlight = 0;
 let bundleCache: { key: string; payload: { bundles: unknown[]; unattributed: number } } | null = null;
@@ -990,10 +1239,32 @@ async function handleApi(
       fileText: lines.join("\n"),
       readNeighbor: defaultTeachNeighbor(rel),
     });
-
     if (hit !== undefined) {
       const card = renderWitnessCard(hit, gapRungFor(hit, ladder));
-      return sendJson(response, 200, expanded !== undefined ? { ...card, expanded } : card);
+      const base = expanded !== undefined ? { ...card, expanded } : card;
+      try {
+        // Unified OpenRouter mode shares the main credential with the Jev path;
+        // otherwise the active provider path resolves its own slot.
+        const teachStored = readSettings();
+        const teachUnified = isUnifiedOpenRouterMode(teachStored.provider, teachStored.endpoint);
+        const teachSelection = readDecisionSelection();
+        const teachProvider = teachUnified ? "openrouter" : teachSelection.jevProvider;
+        const teachApiKey = teachUnified
+          ? resolveUnifiedOpenRouterKey(process.env, teachStored.key)
+          : resolveActiveJevKey(teachSelection.jevProvider, process.env, teachStored.jevKey, teachStored.openRouterKey);
+        const trace = await analyzeExplainDecision({
+          query: snippet.slice(0, 1000),
+          candidates: [{
+            ref: hit.record.id,
+            kind: "explain",
+            snippet: redactSecretsAtBoundary(hit.record.snippet ?? hit.record.code).slice(0, 500),
+          }],
+        }, { outcome: "teach", provider: teachProvider, apiKey: teachApiKey || undefined });
+        if (trace !== undefined) return sendJson(response, 200, { ...base, decision: trace });
+      } catch {
+        // Analysis is advisory: the witness card stands on its own.
+      }
+      return sendJson(response, 200, base);
     }
     if (ladder.rungs.length > 0) {
       const card = renderLadderCard(rel, `${start}-${end}`, ladder);
@@ -1013,18 +1284,116 @@ async function handleApi(
     const found = await providerFor(url.searchParams.get("endpoint") ?? "");
     return sendJson(response, 200, found ?? null);
   }
-
+  if (pathname === "/api/chat-models") {
+    // Model picker backing: the 1 keyed BYOK model named in settings
+    // (with its human-friendly catalogue label if available), plus the
+    // pinned Jev model of the ACTIVE provider when its key is present.
+    // In unified OpenRouter mode the active provider is always
+    // openrouter and the shared main credential (env OPENROUTER_API_KEY wins,
+    // stored main key falls back) is the only presence signal — the Jev slots
+    // are never read. Offline/absent BYOK falls back to Ollama or empty list.
+    const stored = readSettings();
+    const unified = isUnifiedOpenRouterMode(stored.provider, stored.endpoint);
+    const provider = unified ? "openrouter" : readDecisionSelection().jevProvider;
+    const byId: Record<string, string> = {};
+    if (stored.endpoint.length > 0 && stored.model.length > 0 &&
+      chatByokKeyPresent(stored.provider, stored.endpoint, stored.key)) {
+      let label = stored.model;
+      try {
+        const info = await providerFor(stored.endpoint);
+        const match = info?.models.find((m) => m.id === stored.model);
+        if (match?.name) label = match.name;
+      } catch {
+        // fallback to model id
+      }
+      byId[stored.model] = label;
+    }
+    if (provider === "openrouter") {
+      const shared = unified ? resolveUnifiedOpenRouterKey(process.env, stored.key) : resolveOpenRouterKey(process.env, stored.openRouterKey);
+      if (shared.length > 0 && byId[JEV_OPENROUTER_MODEL] === undefined) {
+        byId[JEV_OPENROUTER_MODEL] = JEV_OPENROUTER_MODEL;
+      }
+    } else if (resolveJevKey(process.env, stored.jevKey).length > 0 && byId[JEV_MODEL] === undefined) {
+      byId[JEV_MODEL] = JEV_MODEL;
+    }
+    if (Object.keys(byId).length === 0) {
+      try {
+        const installed = await createOllamaClient().listInstalledModels();
+        for (const model of installed) {
+          if (model.name.length > 0 && byId[model.name] === undefined) byId[model.name] = model.name;
+        }
+      } catch {
+        // Ollama offline: the picker still offers BYOK/Jev, never an error.
+      }
+    }
+    return sendJson(response, 200, {
+      models: Object.entries(byId).map(([id, label]) => ({ id, label })),
+    });
+  }
   if (pathname === "/api/settings") {
     if (request.method === "POST") {
       const patch = (await readBody(request)) as Record<string, unknown>;
-      return sendJson(response, 200, publicSettings(writeSettings(patch)));
+      // The GUI provider selector writes the non-secret choice into config.json
+      // (strict allowlist); keys stay in gui.json via writeSettings. A failed
+      // provider write keeps the previous public settings so the page can retry.
+      const requested = patch.jevProvider;
+      if (requested !== undefined) {
+        if (requested !== "typesafe" && requested !== "openrouter") {
+          return sendJson(response, 400, { error: "unknown jev provider" });
+        }
+        try {
+          const loaded = loadConfig();
+          if (loaded.status === "invalid") throw new Error("invalid config");
+          const decision = { ...(loaded.config.decision ?? { engine: "heuristic" as const }), jevProvider: requested as "typesafe" | "openrouter" };
+          saveConfigAtomic({ ...loaded.config, decision }, loaded.path);
+        } catch {
+          return sendJson(response, 200, { ...publicSettings(readSettings()), jevProvider: readDecisionSelection().jevProvider });
+        }
+      }
+      const saved = writeSettings(patch);
+      return sendJson(response, 200, { ...publicSettings(saved), jevProvider: readDecisionSelection().jevProvider });
     }
-    return sendJson(response, 200, publicSettings(readSettings()));
+    return sendJson(response, 200, { ...publicSettings(readSettings()), jevProvider: readDecisionSelection().jevProvider });
   }
 
   if (pathname === "/api/ask" && request.method === "POST") {
     const body = (await readBody(request)) as Record<string, unknown>;
     const { status, payload } = await ask(body, root);
+    if (status !== 200 || typeof payload !== "object" || payload === null) {
+      return sendJson(response, status, payload);
+    }
+    const record = payload as Record<string, unknown> & { text?: unknown };
+    if (typeof record.text !== "string") return sendJson(response, status, payload);
+    try {
+      const prompt = redactSecretsAtBoundary(String(body.prompt ?? "").slice(0, 1000));
+      const hits = searchKnowledge(records().list, { query: prompt, limit: 5 });
+      // Unified OpenRouter mode shares the main credential with the Jev path;
+      // otherwise the active provider path resolves its own slot.
+      const askStored = readSettings();
+      const askUnified = isUnifiedOpenRouterMode(askStored.provider, askStored.endpoint);
+      const askSelection = readDecisionSelection();
+      const askProvider = askUnified ? "openrouter" : askSelection.jevProvider;
+      const askApiKey = askUnified
+        ? resolveUnifiedOpenRouterKey(process.env, askStored.key)
+        : resolveActiveJevKey(askSelection.jevProvider, process.env, askStored.jevKey, askStored.openRouterKey);
+      const trace = await analyzeExplainDecision({
+        query: prompt,
+        candidates: hits.map((hit: { id: string; kind: string; snippet: string }) => ({
+          ref: hit.id,
+          kind: hit.kind,
+          snippet: redactSecretsAtBoundary(hit.snippet).slice(0, 500),
+        })),
+      }, { outcome: "ask", provider: askProvider, apiKey: askApiKey || undefined });
+      if (trace !== undefined) return sendJson(response, status, { ...record, decision: trace });
+    } catch {
+      // Analysis is advisory: the template answer stands on its own.
+    }
+    return sendJson(response, status, payload);
+  }
+
+  if (pathname === "/api/chat" && request.method === "POST") {
+    const body = (await readBody(request)) as Record<string, unknown>;
+    const { status, payload } = await chat(body);
     return sendJson(response, status, payload);
   }
 

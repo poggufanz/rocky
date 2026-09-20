@@ -34,7 +34,7 @@ function el(tag, className, text) {
 }
 
 function fill(host, ...children) {
-  host.replaceChildren(...children);
+  if (host) host.replaceChildren(...children);
 }
 
 /** el() takes text; box() takes children. */
@@ -206,7 +206,11 @@ function setTally() {
       parts.push(`${state.fileCount} Files`);
     }
   }
-  $("#tally").textContent = parts.join(" | ");
+  const text = parts.join(" | ");
+  const tally = $("#tally");
+  if (tally) tally.textContent = text;
+  const side = $("#side-tally");
+  if (side) side.textContent = text;
 }
 
 // data-seg, not .seg-btn: the provider control reuses that class and has no panel
@@ -218,10 +222,11 @@ function showSegment(name) {
     const on = tab.dataset.seg === name;
     tab.setAttribute("aria-selected", String(on));
     tab.tabIndex = on ? 0 : -1;
-    $(`#${tab.getAttribute("aria-controls")}`).hidden = !on;
+    const panel = $(`#${tab.getAttribute("aria-controls")}`);
+    if (panel) panel.hidden = !on;
   }
   setTally();
-  if (name === "main") loadMain();
+  if (name === "main") void loadMain().catch(() => {});
   else if (state.view === "bundle") loadBundles();
   else loadFiles();
 }
@@ -263,6 +268,9 @@ async function loadMain() {
   state.mainLoaded = true;
   fill($("#holds"), skeleton());
   fill($("#day"), skeleton());
+  fill($("#topfiles"), skeleton());
+  fill($("#latest"), skeleton());
+  fill($("#recent"), skeleton());
 
   let data;
   try {
@@ -270,26 +278,45 @@ async function loadMain() {
   } catch {
     state.mainLoaded = false;
     fill($("#holds"), failed(loadMain));
-    fill($("#day"));
+    fill($("#day"), failed(loadMain));
+    fill($("#topfiles"), empty("top files unknown (offline)."));
+    fill($("#latest"), empty("rocky not hear answer."));
+    fill($("#recent"), empty("recent unknown (offline). retry from the error card."));
     return;
   }
 
-  state.total = data.total;
+  // A 200 with the wrong shape must read as an error, never a blank panel.
+  const sane = data && typeof data === "object"
+    && Array.isArray(data.byKind) && data.day && typeof data.day === "object"
+    && Array.isArray(data.topFiles) && Array.isArray(data.recent);
+  if (!sane) {
+    state.mainLoaded = false;
+    fill($("#holds"), failed(loadMain));
+    fill($("#day"), failed(loadMain));
+    fill($("#topfiles"), empty("top files unknown (bad reply)."));
+    fill($("#latest"), empty("rocky not hear answer."));
+    fill($("#recent"), empty("recent unknown (bad reply). retry from the error card."));
+    return;
+  }
+
+  state.total = typeof data.total === "number" ? data.total : state.total;
   setTally();
 
   const holds = data.byKind.length === 0
     ? [empty("no records yet")]
-    : data.byKind.map((entry) => countRow(entry.kind, entry.count, "live"));
+    : data.byKind.map((entry) => countRow(entry?.kind ?? "unknown", Number(entry?.count ?? 0) || 0, "live"));
   // Coverage is rocky admitting what he did not read, so it is never hidden.
-  if (data.coverageLine) holds.push(el("div", "row-note", houseStyle(data.coverageLine)));
+  if (data.coverageLine) holds.push(el("div", "row-note", houseStyle(String(data.coverageLine))));
   fill($("#holds"), ...holds);
+  const coverage = $("#side-coverage");
+  if (coverage) coverage.textContent = data.coverageLine ? houseStyle(String(data.coverageLine)) : "";
 
   fill(
     $("#day"),
-    countRow("heard", data.day.heard, "live"),
-    countRow("failures", data.day.failures, "live"),
-    countRow("fixes", data.day.fixes, "live"),
-    countRow("why recorded", data.day.whys, "why"),
+    countRow("heard", Number(data.day.heard ?? 0) || 0, "live"),
+    countRow("failures", Number(data.day.failures ?? 0) || 0, "live"),
+    countRow("fixes", Number(data.day.fixes ?? 0) || 0, "live"),
+    countRow("why recorded", Number(data.day.whys ?? 0) || 0, "why"),
   );
 
   fill(
@@ -325,7 +352,7 @@ async function loadMain() {
   const body = box(
     "latest-body",
     el("div", "latest-eyebrow", "Last Heard"),
-    el("p", "latest-line", newest.label),
+    Object.assign(el("p", "latest-line", newest.label), { title: String(newest.label ?? "") }),
     meta,
   );
   [face, body].forEach((node, index) => node.style.setProperty("--i", String(index)));
@@ -347,7 +374,7 @@ async function loadMain() {
       row.style.setProperty("--i", String(index + 2));
       const rowKind = el("span", "recent-kind", hit.kind);
       if (WHY_KINDS.has(hit.kind)) rowKind.classList.add("why");
-      const label = el("span", "recent-label", hit.label);
+      const label = Object.assign(el("span", "recent-label", hit.label), { title: String(hit.label ?? "") });
       row.append(rowKind, label, el("span", "recent-ago", hit.agoText));
       if (count > 1) label.append(el("span", "recent-count", ` ×${count}`));
       return row;
@@ -1133,6 +1160,8 @@ function showIntent(record, anchor) {
 /* ---- dash: selection drives teach -------------------------------------- */
 
 const ask = $("#ask");
+
+/** Live drag/row selection backing the Why button; null when nothing picked. */
 let pending = null;
 
 function clearPicked() {
@@ -1178,7 +1207,7 @@ function readSelection() {
 document.addEventListener("selectionchange", () => {
   // clicking inside the answer collapses the selection; the range it answers
   // stays marked until the popover closes
-  if (!pop.hidden) return;
+  if (!ask || !pop || !pop.hidden) return;
   const picked = readSelection();
   clearPicked();
   if (picked === null) {
@@ -1189,13 +1218,14 @@ document.addEventListener("selectionchange", () => {
   }
   for (const row of picked.rows) row.classList.add("picked");
   pending = picked;
-  $("#sel").textContent = `sel ${picked.start}–${picked.end}`;
+  const sel = $("#sel");
+  if (sel) sel.textContent = `sel ${picked.start}–${picked.end}`;
   ask.hidden = false;
   ask.style.left = `${Math.max(8, picked.rect.left)}px`;
   ask.style.top = `${Math.max(8, picked.rect.top - 38)}px`;
 });
 
-ask.addEventListener("click", (event) => {
+if (ask) ask.addEventListener("click", (event) => {
   // the document listener closes the popover, so this click must not reach it
   event.stopPropagation();
   if (pending !== null) askWhy(pending.start, pending.end, ask.getBoundingClientRect());
@@ -1220,19 +1250,21 @@ function openPop(rect, ...nodes) {
 }
 
 function closePop() {
+  if (!pop) return;
   pop.hidden = true;
   fill(pop);
   clearPicked();
-  $("#sel").textContent = "";
+  const sel = $("#sel");
+  if (sel) sel.textContent = "";
   if (state.view === "bundle") applyBundleHighlights();
 }
 
-pop.addEventListener("click", (event) => event.stopPropagation());
+if (pop) pop.addEventListener("click", (event) => event.stopPropagation());
 document.addEventListener("click", () => {
-  if (!pop.hidden) closePop();
+  if (pop && !pop.hidden) closePop();
 });
 document.addEventListener("keydown", (event) => {
-  if (event.key === "Escape" && !pop.hidden) closePop();
+  if (event.key === "Escape" && pop && !pop.hidden) closePop();
 });
 
 /**
@@ -1323,6 +1355,7 @@ async function loadProvider(endpoint) {
 function paintModels() {
   const select = $("#set-model");
   const note = $("#model-note");
+  if (!select || !note) return;
   const chosen = settings.model;
 
   if (provider === null) {
@@ -1449,6 +1482,8 @@ async function refreshModels() {
   paintModels();
   // every path that changes the endpoint lands here, so visibility settles here
   syncEndpointField();
+  // an endpoint change settles unified visibility too
+  syncJevBlock();
 }
 
 let modelTimer = 0;
@@ -1458,9 +1493,9 @@ $("#set-endpoint").addEventListener("input", () => {
   modelTimer = setTimeout(refreshModels, 450);
 });
 
-/** The bar says which model would answer, so nobody has to open Settings to find out. */
 async function paintModelChip() {
   const chip = $("#model-chip");
+  if (!chip) return;
   if (!settings.hasKey || !settings.model) {
     chip.hidden = true;
     fill(chip);
@@ -1514,6 +1549,74 @@ async function askModel(anchor, prompt, keep, ctx) {
   );
   openPop(anchor, ...keep, guess);
 }
+/**
+ * Jev analysis over what rocky heard: local, no key, read-only display.
+ * Grey like a guess, never clay: only the engine mark and hold/hedge
+ * states borrow emphasis. No claims invented client-side -- every row
+ * quotes the answer, its refs, and its trace, or says what is unknown.
+ */
+async function askJev(anchor, prompt, keep, ctx) {
+  openPop(anchor, ...keep, box("jev", el("p", "jev-head", "Jev Analysis"), skeleton()));
+  let answer;
+  try {
+    answer = await api("/api/ask", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ prompt, ...ctx, analysis: "jev" }),
+    });
+  } catch {
+    openPop(anchor, ...keep, box("jev",
+      el("p", "jev-head", "Jev Analysis"),
+      el("p", "jev-body", "jev did not answer (baseline kept). retry, question")));
+    return;
+  }
+  const nodes = jevNodes(answer);
+  openPop(anchor, ...keep, box("jev", el("p", "jev-head", "Jev Analysis"), ...nodes));
+}
+/** Read-only Jev branch: evidence cards first, answer text second, trace last. */
+function jevNodes(answer) {
+  const nodes = [];
+  const cards = Array.isArray(answer?.evidenceCards) ? answer.evidenceCards : [];
+  for (const card of cards) {
+    if (card !== null && typeof card === "object") {
+      const label = card.label ?? card.title ?? card.ref ?? card.kind ?? "evidence";
+      nodes.push(el("p", "jev-ref", String(label)));
+      const body = card.detail ?? card.excerpt ?? card.snippet ?? null;
+      if (body) nodes.push(el("p", "jev-body", String(body)));
+      else if (card.ref) nodes.push(el("p", "jev-ref", String(card.ref)));
+    } else {
+      nodes.push(el("p", "jev-body", String(card)));
+    }
+  }
+  const text = answer && typeof answer.text === "string" && answer.text.length > 0
+    ? answer.text
+    : "jev held: no typed answer (baseline kept).";
+  for (const para of String(text).split(/\n{2,}|\r?\n/).map((s) => s.trim()).filter(Boolean)) {
+    nodes.push(el("p", "jev-body", para));
+  }
+  if (answer && answer.coverage && answer.coverage.reason) {
+    nodes.push(el("p", "jev-ref", `coverage: ${answer.coverage.reason}`));
+  }
+  nodes.push(jevTraceNode(answer?.decisionTrace));
+  return nodes;
+}
+/** Trace visible per answer; null confidence is named, never blank. */
+function jevTraceNode(trace) {
+  const t = trace ?? {};
+  const bits = [`engine ${t.engine ?? "jev"}`, `status ${t.status ?? "unknown"}`];
+  if (t.confidence !== undefined && t.confidence !== null) bits.push(`confidence ${t.confidence}`);
+  else bits.push("confidence withheld");
+  const refs = Array.isArray(t.evidenceRefs) ? t.evidenceRefs.length : 0;
+  bits.push(`${refs} evidence ref${refs === 1 ? "" : "s"}`);
+  const latency = t.latencyMs ?? t.latency;
+  if (latency !== undefined && latency !== null) bits.push(`${latency}ms`);
+  const node = el("p", "jev-trace", bits.join(" · "));
+  const status = String(t.status ?? "").toLowerCase();
+  if (status === "hold" || status === "hedge" || status === "held" || status === "hedged" || status === "low_confidence") {
+    node.classList.add("jev-trace-flag");
+  }
+  return node;
+}
 
 /**
  * The model is bound to the teach shape, so its answer is read as one:
@@ -1557,6 +1660,12 @@ function withAsk(anchor, parts, prompt, held, ctx) {
   refsBtn.setAttribute("aria-label", "Find usages: show definition and usages");
   refsBtn.addEventListener("click", () => showReferences(anchor, ctx));
   actions.append(refsBtn);
+  const jevBtn = el("button", "card-more jev-btn", "Explain with Jev");
+  jevBtn.type = "button";
+  jevBtn.title = "Local analysis over what rocky heard. No key needed.";
+  jevBtn.setAttribute("aria-label", "Explain with Jev: local analysis, no key needed");
+  jevBtn.addEventListener("click", () => askJev(anchor, prompt, parts, ctx));
+  actions.append(jevBtn);
 
   if (byokReady()) {
     const label = held
@@ -1827,10 +1936,11 @@ function renderContextBadge(tiers, currentIdx, originLine, anchor) {
 }
 
 async function askWhy(start, end, at, expand = (start === end)) {
-  const anchor = at ?? ask.getBoundingClientRect();
+  const anchor = at ?? ask?.getBoundingClientRect();
   const snippet = snippetFor(start, end);
   const selectedSymbol = pending?.text ?? "";
-  ask.hidden = true;
+  if (ask) ask.hidden = true;
+  if (!anchor) return;
   openPop(anchor, skeleton());
 
   let data;
@@ -1941,8 +2051,8 @@ async function renderCsCard(path, start, end) {
  * never reaches rocky: the evidence stays local whatever the model answers.
  */
 
-// The key lives in rocky home, never here. `hasKey` is all the page is told.
-const settings = { provider: "openai", endpoint: "", model: "", lang: "id", hasKey: false };
+// The keys live server-side, never here. hasKey/hasJevKey/hasOpenRouterKey is all the page is told.
+const settings = { provider: "openai", endpoint: "", model: "", lang: "id", hasKey: false, hasJevKey: false, jevProvider: "typesafe", hasOpenRouterKey: false };
 
 async function pullSettings() {
   try {
@@ -1965,11 +2075,81 @@ async function pushSettings(patch) {
     // nothing stored, nothing to undo
   }
 }
+function activeJevProvider() {
+  const select = $("#set-jevprovider");
+  if (select && (select.value === "openrouter" || select.value === "typesafe")) return select.value;
+  return settings.jevProvider === "openrouter" ? "openrouter" : "typesafe";
+}
+function syncJevProviderSections() {
+  const active = activeJevProvider();
+  const nativeField = $("#jevkey-field");
+  if (nativeField) nativeField.hidden = active !== "typesafe";
+  const orField = $("#openrouter-key-field");
+  if (orField) orField.hidden = active !== "openrouter";
+}
+
+/**
+ * Unified OpenRouter mode: the main provider serves both the LLM model and
+ * Jev (typesafe/jev-1.13) behind the single main key, so the whole Jev block
+ * stays hidden. Detection reads the catalogue id first, then falls back to
+ * endpoint/label text so a typed-but-unresolved OpenRouter endpoint hides the
+ * block too. Substring on purpose: only the base URL tells OpenRouter apart.
+ */
+function mainIsOpenRouter() {
+  try {
+    if (provider !== null && provider.id === "openrouter") return true;
+  } catch {
+    // catalogue state unreadable: fall through to the text checks
+  }
+  const candidates = [];
+  try { candidates.push(currentEndpoint()); } catch { /* modal not painted yet */ }
+  try { candidates.push(chosen.endpoint); } catch { /* picker state unreadable */ }
+  try { candidates.push(settings.endpoint); } catch { /* settings unreadable */ }
+  try { candidates.push($("#set-endpoint") ? $("#set-endpoint").value : ""); } catch { /* field absent */ }
+  try { candidates.push($("#provider-search") ? $("#provider-search").value : ""); } catch { /* field absent */ }
+  return candidates.some((text) => typeof text === "string" && text.toLowerCase().includes("openrouter"));
+}
+
+/**
+ * Hides the Jev block (fields, alpha note, both Forget buttons) as one unit
+ * in unified mode; otherwise restores it with the existing per-provider
+ * subsections unchanged.
+ */
+function syncJevBlock() {
+  const unified = mainIsOpenRouter();
+  const block = $("#jev-settings-block");
+  if (block) block.hidden = unified;
+  const clearJev = $("#settings-clear-jev");
+  if (clearJev) clearJev.hidden = unified;
+  const clearOr = $("#settings-clear-openrouter");
+  if (clearOr) clearOr.hidden = unified;
+  if (!unified) syncJevProviderSections();
+}
 
 function paintSettings() {
-  $("#set-key").value = "";
-  $("#set-key").placeholder = settings.hasKey ? "key saved. type to replace" : "";
-  $("#set-lang").value = settings.lang;
+  const key = $("#set-key");
+  if (!key) return;
+  key.value = "";
+  key.placeholder = settings.hasKey ? "key saved. type to replace" : "";
+  const jev = $("#set-jevkey");
+  if (jev) {
+    jev.value = "";
+    jev.placeholder = settings.hasJevKey ? "jev key saved. type to replace" : "";
+  }
+  const note = $("#jevkey-note");
+  if (note) note.textContent = settings.hasJevKey ? "Jev key saved server-side. Lightning toggle armed." : "Server-side only. Never shown back. Enables the lightning toggle.";
+  const providerSelect = $("#set-jevprovider");
+  if (providerSelect) providerSelect.value = settings.jevProvider === "openrouter" ? "openrouter" : "typesafe";
+  const orKey = $("#set-openrouterkey");
+  if (orKey) {
+    orKey.value = "";
+    orKey.placeholder = settings.hasOpenRouterKey ? "openrouter key saved. type to replace" : "";
+  }
+  const orNote = $("#openrouterkey-note");
+  if (orNote) orNote.textContent = settings.hasOpenRouterKey ? "OpenRouter key saved server-side. Lightning toggle armed." : "Server-side only. Never shown back. Enables the lightning toggle on the OpenRouter path.";
+  syncJevBlock();
+  const lang = $("#set-lang");
+  if (lang) lang.value = settings.lang;
 }
 
 async function openSettings() {
@@ -1989,35 +2169,63 @@ function closeSettings() {
   $("#settings-btn").focus();
 }
 
-$("#settings-btn").addEventListener("click", (event) => {
-  event.stopPropagation();
-  openSettings();
-});
-$("#settings-close").addEventListener("click", closeSettings);
-$("#scrim").addEventListener("click", () => {
-  closeSettings();
-  closeRepoFilter();
-});
-$("#settings").addEventListener("click", (event) => event.stopPropagation());
-
-$("#settings-save").addEventListener("click", () => {
-  const typed = $("#set-key").value;
-  void pushSettings({
-    provider: settings.provider,
-    endpoint: currentEndpoint(),
-    model: $("#set-model").value,
-    lang: $("#set-lang").value,
-    // an untouched field leaves the stored key alone rather than erasing it
-    ...(typed ? { key: typed } : {}),
-  });
-  closeSettings();
-});
-
-$("#settings-clear").addEventListener("click", () => {
-  $("#set-key").value = "";
-  void pushSettings({ key: "" }).then(paintSettings);
-});
-
+for (const [selector, event, handler] of [
+  ["#settings-btn", "click", (event) => { event.stopPropagation(); openSettings(); }],
+  ["#set-jevprovider", "change", () => { syncJevBlock(); }],
+  ["#settings-save", "click", () => {
+    const typed = $("#set-key").value;
+    // Unified OpenRouter mode: one main key covers LLM + Jev, so the hidden
+    // Jev fields are omitted — no stale Jev values are ever written.
+    const block = $("#jev-settings-block");
+    const unified = block ? block.hidden : mainIsOpenRouter();
+    const jevField = !unified ? $("#set-jevkey") : null;
+    const orField = !unified ? $("#set-openrouterkey") : null;
+    const jevTyped = jevField ? jevField.value : "";
+    const orTyped = orField ? orField.value : "";
+    const jevProvider = $("#set-jevprovider") ? $("#set-jevprovider").value : settings.jevProvider;
+    void pushSettings({
+      provider: settings.provider,
+      endpoint: currentEndpoint(),
+      model: $("#set-model").value,
+      lang: $("#set-lang").value,
+      ...(!unified ? { jevProvider } : {}),
+      // an untouched field leaves the stored key alone rather than erasing it
+      ...(typed ? { key: typed } : {}),
+      ...(jevTyped ? { jevKey: jevTyped } : {}),
+      ...(orTyped ? { openRouterKey: orTyped } : {}),
+    }).then(() => {
+      paintSettings();
+      window.dispatchEvent(new CustomEvent("rocky:settings-saved"));
+    });
+    closeSettings();
+  }],
+  ["#settings-clear", "click", () => {
+    $("#set-key").value = "";
+    void pushSettings({ key: "" }).then(() => {
+      paintSettings();
+      window.dispatchEvent(new CustomEvent("rocky:settings-saved"));
+    });
+  }],
+  ["#settings-clear-jev", "click", () => {
+    const field = $("#set-jevkey");
+    if (field) field.value = "";
+    void pushSettings({ jevKey: "" }).then(() => {
+      paintSettings();
+      window.dispatchEvent(new CustomEvent("rocky:settings-saved"));
+    });
+  }],
+  ["#settings-clear-openrouter", "click", () => {
+    const field = $("#set-openrouterkey");
+    if (field) field.value = "";
+    void pushSettings({ openRouterKey: "" }).then(() => {
+      paintSettings();
+      window.dispatchEvent(new CustomEvent("rocky:settings-saved"));
+    });
+  }],
+]) {
+  const node = $(selector);
+  if (node) node.addEventListener(event, handler);
+}
 document.addEventListener("keydown", (event) => {
   if (event.key !== "Escape") return;
   if (!$("#repo-filter").hidden) closeRepoFilter();
@@ -2025,10 +2233,15 @@ document.addEventListener("keydown", (event) => {
 });
 
 /* ---- boot -------------------------------------------------------------- */
-
 closePop();
-void pullSettings();
-showSegment(state.segment);
+void pullSettings().catch(() => {});
+try {
+  showSegment(state.segment);
+} catch {
+  const main = $("#view-main");
+  if (main) main.hidden = false;
+  void loadMain().catch(() => {});
+}
 
 // A read surface goes stale while the tab is away, so it refetches on return.
 document.addEventListener("visibilitychange", () => {
