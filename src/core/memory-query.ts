@@ -54,11 +54,11 @@ export interface MemoryStats {
   rationaleByFidelity?: Record<RationaleFidelity, number>;
 }
 export interface LinkQuery { cwd: string; now?: number; windowMs?: number }
-export interface KnowledgeSearchQuery { query: string; kind?: "failure" | "fix" | "triple" | "note"; limit?: number; now?: number }
+export interface KnowledgeSearchQuery { query: string; kind?: "failure" | "fix" | "triple" | "note" | "rationale" | "explain"; limit?: number; now?: number }
 export interface KnowledgeSearchHit {
   id: string;
   ts: number;
-  kind: "failure" | "fix" | "triple" | "note";
+  kind: "failure" | "fix" | "triple" | "note" | "rationale" | "explain";
   snippet: string;
   score: number;
   agent?: "claude-code" | "codex";
@@ -737,6 +737,28 @@ function completeTriple(record: TripleRecord): boolean {
   }
 }
 
+function extractRelevantSnippet(text: string, queryTokens: Set<string>, maxChars: number): string {
+  if (text.length <= maxChars) return text;
+  const lower = text.toLowerCase();
+  let earliestMatch = -1;
+  for (const token of queryTokens) {
+    if (token.length >= 3 && !token.startsWith("<") && !token.startsWith("#")) {
+      const idx = lower.indexOf(token);
+      if (idx !== -1 && (earliestMatch === -1 || idx < earliestMatch)) {
+        earliestMatch = idx;
+      }
+    }
+  }
+  if (earliestMatch === -1 || earliestMatch < 60) {
+    return `${text.slice(0, maxChars - 1)}…`;
+  }
+  const start = Math.max(0, earliestMatch - 40);
+  const end = Math.min(text.length, start + maxChars - 2);
+  const prefix = start > 0 ? "…" : "";
+  const suffix = end < text.length ? "…" : "";
+  return `${prefix}${text.slice(start, end).trim()}${suffix}`;
+}
+
 export function searchKnowledge(
   records: readonly MemoryRecord[],
   input: KnowledgeSearchQuery,
@@ -747,26 +769,100 @@ export function searchKnowledge(
   const hits: KnowledgeSearchHit[] = [];
   const wants = (kind: KnowledgeSearchHit["kind"]): boolean => input.kind === undefined || input.kind === kind;
 
+  const linkedRationalesByTriple = new Map<string, string[]>();
+  const linkedRationalesByFailure = new Map<string, string[]>();
+  for (const record of records) {
+    if (record.kind === "rationale" && record.excerpt) {
+      if (record.links?.tripleId) {
+        const list = linkedRationalesByTriple.get(record.links.tripleId) ?? [];
+        list.push(record.excerpt);
+        linkedRationalesByTriple.set(record.links.tripleId, list);
+      }
+      if (record.links?.failureId) {
+        const list = linkedRationalesByFailure.get(record.links.failureId) ?? [];
+        list.push(record.excerpt);
+        linkedRationalesByFailure.set(record.links.failureId, list);
+      }
+    }
+  }
+
+  const knownTripleIds = new Set<string>();
+  const knownFailureIds = new Set<string>();
+  for (const record of records) {
+    if (isOperationalMemoryRecord(record, now)) {
+      if (record.kind === "triple") knownTripleIds.add(record.id);
+      if (record.kind === "failure") knownFailureIds.add(record.id);
+    }
+  }
+
   const entries: Array<{ record: MemoryRecord; snippet: string }> = [];
   for (const sourceRecord of uniqueRecords(records)) {
     const record = sourceRecord.kind === "triple" ? boundTripleRecord(sourceRecord) : sourceRecord;
     if (!isOperationalMemoryRecord(record, now)) continue;
     if (record.kind === "failure" && wants("failure")) {
+      const parts = [record.cmd];
+      if (record.excerpt) parts.push(record.excerpt);
+      const linked = linkedRationalesByFailure.get(record.id);
+      if (linked && linked.length > 0) parts.push(linked.join(" | "));
       entries.push({
         record,
-        snippet: record.cmd.slice(0, 120),
+        snippet: extractRelevantSnippet(parts.join(" — "), queryTokenSet, 500),
       });
     } else if (record.kind === "fix" && wants("fix")) {
-      entries.push({ record, snippet: record.cmd.slice(0, 120) });
-    } else if (record.kind === "triple" && wants("triple") && record.intent) {
+      entries.push({ record, snippet: extractRelevantSnippet(record.cmd, queryTokenSet, 500) });
+    } else if (record.kind === "triple" && wants("triple")) {
+      const parts: string[] = [];
+      const linked = linkedRationalesByTriple.get(record.id);
+      const hasLinked = Boolean(linked && linked.length > 0);
+      const hasRationale = Boolean(record.rationale?.text || hasLinked);
+      if (record.intent?.text && !isAgentEnvelopeText(record.intent.text)) {
+        const intent = record.intent.text;
+        parts.push(hasRationale && intent.length > 180 ? extractRelevantSnippet(intent, queryTokenSet, 180) : intent);
+      }
+      if (record.rationale?.text) {
+        const rat = record.rationale.text;
+        parts.push(`Rationale: ${hasLinked && rat.length > 220 ? extractRelevantSnippet(rat, queryTokenSet, 220) : rat}`);
+      }
+      if (linked && linked.length > 0) {
+        parts.push(`Notes: ${linked.join(" | ")}`);
+      }
+      if (parts.length === 0 && record.mechanism.files.length > 0) {
+        parts.push(record.mechanism.files.map((f) => f.path).join(", "));
+      }
+      const rawSnippet = parts.join(" — ") || record.intent?.text || "triple";
+      const snippet = extractRelevantSnippet(rawSnippet, queryTokenSet, 500);
       entries.push({
         record,
-        snippet: record.intent.text.slice(0, 120),
+        snippet,
       });
     } else if (record.kind === "note" && wants("note")) {
       entries.push({
         record,
-        snippet: `${record.subject}: ${record.answer}`.slice(0, 120),
+        snippet: extractRelevantSnippet(`${record.subject}: ${record.answer}`, queryTokenSet, 500),
+      });
+    } else if (record.kind === "rationale" && wants("rationale")) {
+      const isLinkedToKnownParent = (record.links?.tripleId && knownTripleIds.has(record.links.tripleId))
+        || (record.links?.failureId && knownFailureIds.has(record.links.failureId));
+      if (!isLinkedToKnownParent || input.kind === "rationale") {
+        const parts: string[] = [];
+        if (record.excerpt) parts.push(record.excerpt);
+        if (record.files && record.files.length > 0) parts.push(record.files.join(", "));
+        const rawSnippet = parts.join(" — ") || record.excerpt || "rationale";
+        entries.push({
+          record,
+          snippet: extractRelevantSnippet(rawSnippet, queryTokenSet, 500),
+        });
+      }
+    } else if (record.kind === "explain" && wants("explain")) {
+      const parts: string[] = [];
+      if (record.path) parts.push(record.path);
+      if (record.code) parts.push(`Code: ${record.code}`);
+      if (record.business) parts.push(`Business: ${record.business}`);
+      if (record.snippet) parts.push(record.snippet);
+      const rawSnippet = parts.join(" — ") || `${record.code} — ${record.business}`;
+      entries.push({
+        record,
+        snippet: extractRelevantSnippet(rawSnippet, queryTokenSet, 500),
       });
     }
   }
@@ -774,6 +870,12 @@ export function searchKnowledge(
     target.clear();
     if (record.kind === "failure") {
       fillRetrievalEvidenceTokens(record, target);
+      const linked = linkedRationalesByFailure.get(record.id)?.join(" ");
+      if (linked) {
+        const scratch = new Set<string>();
+        fillRetrievalTokens(linked, scratch);
+        for (const token of scratch) target.add(token);
+      }
     } else if (record.kind === "fix") {
       fillRetrievalTokens(record.cmd, target);
     } else if (record.kind === "triple") {
@@ -783,9 +885,20 @@ export function searchKnowledge(
       const intentText = record.intent !== undefined && !isAgentEnvelopeText(record.intent.text)
         ? record.intent.text
         : "";
-      fillRetrievalTokens(`${intentText} ${record.rationale?.tags.join(" ") ?? ""}`, target);
+      const files = record.mechanism?.files?.map((file) => file.path.replace(/[\\/]/g, " ")).join(" ") ?? "";
+      const rationaleText = record.rationale?.text ?? "";
+      const tags = record.rationale?.tags?.join(" ") ?? "";
+      const linked = linkedRationalesByTriple.get(record.id)?.join(" ") ?? "";
+      fillRetrievalTokens(`${intentText} ${files} ${rationaleText} ${tags} ${linked}`, target);
     } else if (record.kind === "note") {
-      fillRetrievalTokens(`${record.cmd} ${record.file} ${record.subject} ${record.answer}`, target);
+      const file = record.file.replace(/[\\/]/g, " ");
+      fillRetrievalTokens(`${record.cmd} ${file} ${record.subject} ${record.answer}`, target);
+    } else if (record.kind === "rationale") {
+      const files = (record.files ?? []).map((f) => f.replace(/[\\/]/g, " ")).join(" ");
+      fillRetrievalTokens(`${record.excerpt ?? ""} ${files}`, target);
+    } else if (record.kind === "explain") {
+      const path = (record.path ?? "").replace(/[\\/]/g, " ");
+      fillRetrievalTokens(`${path} ${record.code ?? ""} ${record.business ?? ""} ${record.snippet ?? ""}`, target);
     }
   };
   // Moved ahead of the frequency pass below (finding 1, same fix as
@@ -908,6 +1021,31 @@ export function searchKnowledge(
       }
     } else if (record.kind === "note") {
       if (score > 0) hits.push({ id: record.id, ts: record.ts, kind: "note", snippet, score, source: "note" });
+    } else if (record.kind === "rationale") {
+      if (score > 0) {
+        hits.push({
+          id: record.id,
+          ts: record.ts,
+          kind: "rationale",
+          snippet,
+          score,
+          agent: record.agent === "claude-code" || record.agent === "codex" ? record.agent : undefined,
+          source: record.source,
+          filesCovered: record.files ? [...record.files] : undefined,
+        });
+      }
+    } else if (record.kind === "explain") {
+      if (score > 0) {
+        hits.push({
+          id: record.id,
+          ts: record.ts,
+          kind: "explain",
+          snippet,
+          score,
+          source: record.source || "explain",
+          filesCovered: record.path ? [record.path] : undefined,
+        });
+      }
     }
   }
 
@@ -1334,7 +1472,7 @@ function distinctiveToken(token: string): boolean {
   return token.length >= 3 || /[^\x00-\x7F]/u.test(token);
 }
 
-/** Jaccard plus an exact rare-token floor, applied before recall thresholds. */
+/** Hybrid Jaccard + query coverage score plus an exact rare-token floor. */
 function semanticScore(
   queryTokens: Set<string>,
   candidateTokens: Set<string>,
@@ -1343,7 +1481,13 @@ function semanticScore(
   documentFrequency: ReadonlyMap<string, ReadonlySet<string>>,
   candidateCount: number,
 ): number {
-  const base = similarity(queryTokens, candidateTokens);
+  if (queryTokens.size === 0 || candidateTokens.size === 0) return 0;
+  let inter = 0;
+  for (const t of queryTokens) if (candidateTokens.has(t)) inter++;
+  if (inter === 0) return 0;
+  const jaccard = inter / (queryTokens.size + candidateTokens.size - inter);
+  const coverage = inter / queryTokens.size;
+  const base = 0.5 * jaccard + 0.5 * coverage;
   const rareFrequency = candidateCount >= 10
     ? Math.min(8, Math.max(2, Math.ceil(candidateCount * 0.05)))
     : 1;
