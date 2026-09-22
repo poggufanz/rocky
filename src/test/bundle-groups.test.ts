@@ -115,3 +115,22 @@ test("splitRowsByFile assigns leading rows to (unknown)", () => {
   assert.equal(byFile.get("(unknown)")?.length, 1);
   assert.ok(byFile.has("x.ts"));
 });
+
+test("bundle files track individual witnessCount and rows", () => {
+  const diff1 = { commit: "abc1234", rows: parsePatch("diff --git a/x.ts b/x.ts\n@@ -1 +1 @@\n-a\n+b") };
+  const diff2 = { commit: "abc1234", rows: parsePatch("diff --git a/y.ts b/y.ts\n@@ -2 +2 @@\n-c\n+d") };
+  const { bundles } = bundleGroups([
+    { path: "/r/x.ts", repo: "r", rec: rec({ ts: 1000 }), diff: diff1 },
+    { path: "/r/x.ts", repo: "r", rec: rec({ ts: 2000 }), diff: diff1 },
+    { path: "/r/y.ts", repo: "r", rec: rec({ ts: 3000 }), diff: diff2 },
+  ]);
+  assert.equal(bundles.length, 1);
+  assert.equal(bundles[0]?.witnessCount, 3);
+  const fileX = bundles[0]?.files.find((f) => f.path === "/r/x.ts");
+  const fileY = bundles[0]?.files.find((f) => f.path === "/r/y.ts");
+  assert.equal(fileX?.witnessCount, 2);
+  assert.ok((fileX?.rows?.length ?? 0) > 0);
+  assert.equal(fileY?.witnessCount, 1);
+  assert.ok((fileY?.rows?.length ?? 0) > 0);
+});
+

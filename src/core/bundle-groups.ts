@@ -13,6 +13,8 @@ export interface BundleFile {
   plus?: number;
   minus?: number;
   spans: Array<[number, number]>;
+  witnessCount?: number;
+  rows?: DiffRow[];
 }
 
 export interface BundleSummary {
@@ -87,6 +89,10 @@ export function bundleGroups(inputs: readonly BundleInput[]): {
 
     const existingFile = bundle.files.find((f) => f.path === input.path);
     if (existingFile) {
+      existingFile.witnessCount = (existingFile.witnessCount ?? 0) + 1;
+      if (!existingFile.rows && d.rows && d.rows.length > 0) {
+        existingFile.rows = d.rows;
+      }
       const newSpans = touchedSpans(d.rows);
       for (const [ns, ne] of newSpans) {
         if (!existingFile.spans.some(([es, ee]) => es === ns && ee === ne)) {
@@ -115,6 +121,8 @@ export function bundleGroups(inputs: readonly BundleInput[]): {
           ...(plus !== undefined ? { plus } : {}),
           ...(minus !== undefined ? { minus } : {}),
           spans: touchedSpans(d.rows),
+          witnessCount: 1,
+          ...(d.rows && d.rows.length > 0 ? { rows: d.rows } : {}),
         });
       } else {
         bundle.truncated = true;
