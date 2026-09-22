@@ -64,6 +64,10 @@ const TEMPLATE_PREFIXES = [
   "jawaban: ",
   "kesimpulan: ",
   "catatan: ",
+  "catatan",
+  "interpretasi",
+  "interpretation",
+  "data",
   "rekomendasi: ",
   "answer: ",
   "explanation: ",
@@ -291,6 +295,7 @@ const TEMPLATE_PREFIXES = [
 
 function isTemplateLine(line: string): boolean {
   const trimmed = line.trim();
+  if (trimmed.length === 0) return true;
   if (/^\d+[\.\)]\s+/.test(trimmed)) return true;
   if (/^[-*+>#|~`\[_]/.test(trimmed)) return true;
   for (const prefix of TEMPLATE_PREFIXES) {
@@ -342,28 +347,45 @@ export interface RenderedClaimsCheck {
 
 /**
  * No-new-claims gate (citation-check pattern): every non-template line must
- * cite an evidence ref or a Jev answer id (`q_<ref>`). Anything else is an
- * extra claim — stripped and counted, never passed through.
+ * cite an evidence ref, indexed citation ([1], [2]), or Jev answer id (`q_<ref>`).
+ * Anything else is an extra ungrounded claim — stripped and counted, never passed through.
  */
 export function validateRenderedClaims(
   text: string,
   allowedRefs: ReadonlySet<string> | readonly string[],
 ): RenderedClaimsCheck {
-  const allow: ReadonlySet<string> = Array.isArray(allowedRefs)
-    ? new Set<string>(allowedRefs as readonly string[])
-    : (allowedRefs as ReadonlySet<string>);
+  const allowList: readonly string[] = Array.isArray(allowedRefs)
+    ? (allowedRefs as readonly string[])
+    : Array.from(allowedRefs as ReadonlySet<string>);
+  const allowSet = new Set<string>(allowList);
+
+  const citationMap = new Map<string, string>();
+  allowList.forEach((ref, index) => {
+    citationMap.set(`[${index + 1}]`, ref);
+    citationMap.set(`[#${index + 1}]`, ref);
+  });
+
   const kept: string[] = [];
   let dropped = 0;
   for (const line of text.split("\n")) {
-    if (line.trim().length === 0 || isTemplateLine(line)) {
+    const trimmed = line.trim();
+    if (trimmed.length === 0 || isTemplateLine(line)) {
       kept.push(line);
       continue;
     }
     let cited = false;
-    for (const ref of allow) {
+    for (const ref of allowSet) {
       if (ref.length > 0 && line.includes(ref)) {
         cited = true;
         break;
+      }
+    }
+    if (!cited) {
+      for (const [citation] of citationMap) {
+        if (line.includes(citation)) {
+          cited = true;
+          break;
+        }
       }
     }
     if (cited) {

@@ -129,3 +129,22 @@ test("English human explanation with bullet points and citations survives intact
   assert.equal(check.dropped, 0);
   assert.equal(check.stripped, englishResponse);
 });
+
+test("practical interpretation and notes section survives claims gate without being dropped", () => {
+  const response = [
+    "Interpretasi Praktis",
+    "",
+    "Dari pola catatan di atas, bisa disimpulkan beberapa hal:",
+    '1. Cross region didukung, tapi punya alur kode yang terpisah dari transfer biasa — itulah kenapa ada pertanyaan khusus soal "cross region only".',
+    "2. Proses generate-nya lewat command `app:generate-inventory-transfer-req`, yang bisa diuji dulu dengan `--dry-run` sebelum benar-benar dieksekusi.",
+    "3. Ada kompleksitas pada staging, terutama ketika transfer melibatkan DC atau lintas region. Jumlah baris staging yang muncul bisa jadi sumber kebingungan dan perlu diverifikasi ulang.",
+    "",
+    "Catatan",
+    "Data di atas berasal dari eksekusi yang pernah tercatat di memori Rocky.",
+    "Pastikan selalu melakukan uji coba sebelum deploy ke production.",
+  ].join("\n");
+
+  const check = validateRenderedClaims(response, ["failure-aaa", "fix-bbb"]);
+  assert.equal(check.dropped, 0);
+  assert.equal(check.stripped, response);
+});
