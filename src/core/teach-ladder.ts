@@ -341,14 +341,28 @@ export function findDefinitionInText(name: string, text: string): { line: number
     const line = defLines[i] ?? "";
     if (fnRe.test(line) || constRe.test(line) || assignRe.test(line) || methodRe.test(line)) {
       let jsdoc: string | undefined;
-      if (i > 0) {
-        const above = (defLines[i - 1] ?? "").trim();
-        if (isCommentLine(above)) jsdoc = above.slice(0, 120);
+      for (let j = i - 1; j >= Math.max(0, i - 6); j -= 1) {
+        const lineAbove = (defLines[j] ?? "").trim();
+        if (lineAbove.length === 0) continue;
+        if (!/^\s*(\/\/|\/\*|\*|#|<!--)/.test(lineAbove)) break;
+        if (isMeaningfulCommentLine(lineAbove)) {
+          jsdoc = lineAbove.slice(0, 120);
+          break;
+        }
       }
       return { line: i + 1, jsdoc };
     }
   }
   return undefined;
+}
+
+export function isMeaningfulCommentLine(line: string): boolean {
+  if (!/^\s*(\/\/|\/\*|\*|#|<!--)/.test(line)) return false;
+  const stripped = line
+    .replace(/^\s*(\/\/|\/\*|\*|#|<!--|-->)+\s*/, "")
+    .replace(/\s*(\*\/|-->)\s*$/, "")
+    .trim();
+  return /[a-zA-Z0-9]/.test(stripped);
 }
 
 function hopComment(lines: readonly string[], selStart: number): Rung | undefined {
@@ -358,7 +372,7 @@ function hopComment(lines: readonly string[], selStart: number): Rung | undefine
     if (line === undefined) break;
     const trimmed = line.trim();
     if (trimmed.length === 0) continue;
-    if (isCommentLine(line)) {
+    if (isMeaningfulCommentLine(line)) {
       return { source: "comment", finding: `nearest comment "${trimmed.slice(0, 80)}"` };
     }
   }
@@ -437,37 +451,101 @@ function firstCommentToken(lines: readonly string[], selStart: number): string |
     const line = lines[i];
     if (line === undefined) break;
     if (line.trim().length === 0) continue;
-    if (!isCommentLine(line)) continue;
-    const stripped = line.replace(/^\s*(\/\/|\/\*|\*)\s*/, "");
+    if (!isMeaningfulCommentLine(line)) continue;
+    const stripped = line.replace(/^\s*(\/\/|\/\*|\*|#)\s*/, "");
     return /[A-Za-z_$][\w$]*/.exec(stripped)?.[0];
   }
   return undefined;
 }
 
+export interface ImportBinding {
+  local: string;
+  imported: string;
+}
+
 export interface ImportLine {
   names: string[];
   specifier: string;
+  bindings?: ImportBinding[];
 }
 
 export function collectImports(text: string): ImportLine[] {
   const out: ImportLine[] = [];
   for (const line of text.split(/\r?\n/)) {
     const trimmed = line.trim();
-    if (!/^import\b/.test(trimmed)) continue;
-    const named = /^import\s+(?:type\s+)?(?:([A-Za-z_$][\w$]*)\s*,\s*)?\{([^}]*)\}\s*from\s*["']([^"']+)["']/.exec(trimmed);
-    if (named !== null) {
-      const names = (named[2] ?? "")
-        .split(",")
-        .map((s) => s.trim())
-        .filter((s) => s.length > 0)
-        .map((s) => (s.split(/\s+as\s+/)[0] ?? "").trim());
-      if (named[1] !== undefined) names.unshift(named[1]);
-      out.push({ names, specifier: named[3] ?? "" });
+    if (/^import\b/.test(trimmed)) {
+      const named = /^import\s+(?:type\s+)?(?:([A-Za-z_$][\w$]*)\s*,\s*)?\{([^}]*)\}\s*from\s*["']([^"']+)["']/.exec(trimmed);
+      if (named !== null) {
+        const bindings: ImportBinding[] = [];
+        const names: string[] = [];
+        for (const rawPart of (named[2] ?? "").split(",")) {
+          const s = rawPart.trim();
+          if (s.length === 0) continue;
+          const asParts = s.split(/\s+as\s+/);
+          const imported = (asParts[0] ?? "").trim();
+          const local = (asParts[1] ?? imported).trim();
+          if (local.length > 0) {
+            bindings.push({ local, imported });
+            if (!names.includes(local)) names.push(local);
+            if (!names.includes(imported)) names.push(imported);
+          }
+        }
+        if (named[1] !== undefined) {
+          bindings.push({ local: named[1], imported: "default" });
+          if (!names.includes(named[1])) names.unshift(named[1]);
+        }
+        out.push({ names, specifier: named[3] ?? "", bindings });
+        continue;
+      }
+      const simple = /^import\s+(?:type\s+)?([A-Za-z_$][\w$]*)\s+from\s*["']([^"']+)["']/.exec(trimmed);
+      if (simple !== null) {
+        const name = simple[1] ?? "";
+        out.push({
+          names: [name],
+          specifier: simple[2] ?? "",
+          bindings: [{ local: name, imported: "default" }],
+        });
+        continue;
+      }
+      const ns = /^import\s+\*\s+as\s+([A-Za-z_$][\w$]*)\s+from\s*["']([^"']+)["']/.exec(trimmed);
+      if (ns !== null) {
+        const name = ns[1] ?? "";
+        out.push({
+          names: [name],
+          specifier: ns[2] ?? "",
+          bindings: [{ local: name, imported: "*" }],
+        });
+        continue;
+      }
+    }
+    // CommonJS require patterns
+    const cjsDestructure = /^(?:const|let|var)\s+\{([^}]+)\}\s*=\s*require\(["']([^"']+)["']\)/.exec(trimmed);
+    if (cjsDestructure !== null) {
+      const bindings: ImportBinding[] = [];
+      const names: string[] = [];
+      for (const rawPart of (cjsDestructure[1] ?? "").split(",")) {
+        const s = rawPart.trim();
+        if (s.length === 0) continue;
+        const colParts = s.split(/\s*:\s*/);
+        const imported = (colParts[0] ?? "").trim();
+        const local = (colParts[1] ?? imported).trim();
+        if (local.length > 0) {
+          bindings.push({ local, imported });
+          if (!names.includes(local)) names.push(local);
+          if (!names.includes(imported)) names.push(imported);
+        }
+      }
+      out.push({ names, specifier: cjsDestructure[2] ?? "", bindings });
       continue;
     }
-    const simple = /^import\s+(?:type\s+)?([A-Za-z_$][\w$]*)\s+from\s*["']([^"']+)["']/.exec(trimmed);
-    if (simple !== null) {
-      out.push({ names: [simple[1] ?? ""], specifier: simple[2] ?? "" });
+    const cjsSimple = /^(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*require\(["']([^"']+)["']\)/.exec(trimmed);
+    if (cjsSimple !== null) {
+      const name = cjsSimple[1] ?? "";
+      out.push({
+        names: [name],
+        specifier: cjsSimple[2] ?? "",
+        bindings: [{ local: name, imported: "default" }],
+      });
     }
   }
   return out;
