@@ -240,9 +240,24 @@ export function normalizeRetrievalLine(line: string): string {
   return normalizeWithNumbers(line, "retrieval");
 }
 
+/** Expand CamelCase/PascalCase compound words so retrieval matches both full and split tokens. */
+export function expandCamelCase(text: string): string {
+  if (!/[a-z][A-Z]|[A-Z]{2,}[a-z]/u.test(text)) return text;
+  return text.replace(/\b[\p{L}\p{N}_.-]+\b/gu, (word) => {
+    if (/^\p{Nd}{4}-\p{Nd}{2}-\p{Nd}{2}T/u.test(word)) return word;
+    if (/[a-z][A-Z]|[A-Z]{2,}[a-z]/u.test(word)) {
+      const split = word
+        .replace(/([\p{Ll}])([\p{Lu}])/gu, "$1 $2")
+        .replace(/([\p{Lu}]+)([\p{Lu}][\p{Ll}]+)/gu, "$1 $2");
+      return `${word} ${split}`;
+    }
+    return word;
+  });
+}
+
 /** Query evidence keeps semantic numeric literals, including unlabeled ones. */
 export function queryTokens(text: string): Set<string> {
-  return tokenBag(normalizeWithNumbers(text, "query"));
+  return tokenBag(normalizeWithNumbers(expandCamelCase(text), "query"));
 }
 
 /**
@@ -294,7 +309,7 @@ export function fingerprintTokens(text: string): Set<string> {
 
 /** Token bag for semantic recall. Numbers such as ports/statuses remain exact. */
 export function retrievalTokens(text: string): Set<string> {
-  return tokenBag(normalizeRetrievalLine(text));
+  return tokenBag(normalizeRetrievalLine(expandCamelCase(text)));
 }
 
 /** Fill one caller-owned token bag, avoiding one hash table allocation per
@@ -302,7 +317,7 @@ export function retrievalTokens(text: string): Set<string> {
  * records; no reference is retained by this module. */
 export function fillRetrievalTokens(text: string, target: Set<string>): void {
   target.clear();
-  fillTokenBag(normalizeRetrievalLine(text), target);
+  fillTokenBag(normalizeRetrievalLine(expandCamelCase(text)), target);
 }
 
 /**
