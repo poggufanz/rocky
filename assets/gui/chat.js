@@ -93,6 +93,40 @@ function fill(host, ...children) {
   if (host) host.replaceChildren(...children);
 }
 
+function svgIcon(name, size = 14) {
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("width", String(size));
+  svg.setAttribute("height", String(size));
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("aria-hidden", "true");
+
+  if (name === "sparkle") {
+    svg.setAttribute("fill", "currentColor");
+    const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    path.setAttribute("d", "M12 2l2.4 7.2L22 12l-7.6 2.8L12 22l-2.4-7.2L2 12l7.6-2.8z");
+    svg.append(path);
+  } else if (name === "chevron-down") {
+    svg.setAttribute("fill", "none");
+    svg.setAttribute("stroke", "currentColor");
+    svg.setAttribute("stroke-width", "2.5");
+    svg.setAttribute("stroke-linecap", "round");
+    svg.setAttribute("stroke-linejoin", "round");
+    const polyline = document.createElementNS("http://www.w3.org/2000/svg", "polyline");
+    polyline.setAttribute("points", "6 9 12 15 18 9");
+    svg.append(polyline);
+  } else if (name === "check") {
+    svg.setAttribute("fill", "none");
+    svg.setAttribute("stroke", "currentColor");
+    svg.setAttribute("stroke-width", "2.5");
+    svg.setAttribute("stroke-linecap", "round");
+    svg.setAttribute("stroke-linejoin", "round");
+    const polyline = document.createElementNS("http://www.w3.org/2000/svg", "polyline");
+    polyline.setAttribute("points", "20 6 9 17 4 12");
+    svg.append(polyline);
+  }
+  return svg;
+}
+
 function formatInlineNodes(str) {
   const container = document.createDocumentFragment();
   // Match code `...`, bold **...** or __...__, italic *...* or _..._, and [ref] tags
@@ -297,7 +331,8 @@ function thinkingDrawer(body) {
   const header = document.createElement("summary");
   header.className = "thinking-header";
 
-  const icon = el("span", "thinking-icon", "✦");
+  const icon = el("span", "thinking-icon");
+  icon.append(svgIcon("sparkle", 13));
   const title = el("span", "thinking-title", "Thought Process");
 
   const metaBits = [];
@@ -306,7 +341,8 @@ function thinkingDrawer(body) {
   if (latencyText) metaBits.push(latencyText);
   const meta = el("span", "thinking-meta", `(${metaBits.join(" · ")})`);
 
-  const chevron = el("span", "thinking-chevron", "▾");
+  const chevron = el("span", "thinking-chevron");
+  chevron.append(svgIcon("chevron-down", 11));
 
   header.append(icon, title, meta, chevron);
 
@@ -377,8 +413,117 @@ function thinkingDrawer(body) {
   step3.append(s3Content);
 
   bodyNode.append(step1, step2, step3);
+
+  // Step 4: code scan. Only when a code phase actually ran -- a memory-only
+  // answer keeps this drawer byte-identical. Missing fields render as named
+  // fallbacks, exactly as traceNode() does.
+  const codeTrace = body && typeof body.codeTrace === "object" && body.codeTrace !== null ? body.codeTrace : null;
+  const codeAnswer = body && typeof body.codeAnswer === "object" && body.codeAnswer !== null ? body.codeAnswer : null;
+  const codeExcerpts = Array.isArray(body?.codeEvidence) ? body.codeEvidence : [];
+  if (codeTrace !== null || codeAnswer !== null || codeExcerpts.length > 0) {
+    const step4 = el("div", "thinking-step step-code");
+    const s4Head = el("div", "thinking-step-head");
+    s4Head.append(el("span", "step-num", "4"), el("span", "step-title", "Code Scan"));
+    step4.append(s4Head);
+
+    const s4Content = el("div", "thinking-step-content");
+    const s4Details = el("div", "thinking-details");
+    const scanned = codeTrace && codeTrace.filesScanned !== undefined && codeTrace.filesScanned !== null ? codeTrace.filesScanned : "unknown";
+    const total = codeTrace && codeTrace.filesTotal !== undefined && codeTrace.filesTotal !== null ? codeTrace.filesTotal : "unknown";
+    const mode = codeTrace && typeof codeTrace.mode === "string" && codeTrace.mode.length > 0 ? codeTrace.mode : "unknown";
+    const rounds = codeTrace && codeTrace.rounds !== undefined && codeTrace.rounds !== null ? codeTrace.rounds : "unknown";
+    s4Details.append(el("p", "detail-row", `Files scanned: ${scanned} of ${total}`));
+    s4Details.append(el("p", "detail-row", `Scan mode: ${mode}`));
+    s4Details.append(el("p", "detail-row", `Rounds: ${rounds} of 3`));
+    const scanCoverage = codeTrace && codeTrace.truncated === true
+      ? "truncated, not every file read"
+      : codeTrace && codeTrace.truncated === false
+        ? "complete"
+        : "unknown";
+    s4Details.append(el("p", "detail-row", `Scan coverage: ${scanCoverage}`));
+    if (codeTrace && codeTrace.roundsExhausted === true) {
+      s4Details.append(el("p", "detail-row", "Round budget spent; files not read are not checked"));
+    }
+    const stripped = codeAnswer && typeof codeAnswer.stripped === "number" ? codeAnswer.stripped : 0;
+    const claimText = stripped > 0 ? `${stripped} ungrounded claims stripped` : "quoted-only, no unquoted claims";
+    s4Details.append(el("p", "detail-row", `Code answer: ${codeExcerpts.length} excerpt${codeExcerpts.length === 1 ? "" : "s"}, ${claimText}`));
+    s4Content.append(s4Details);
+    step4.append(s4Content);
+    bodyNode.append(step4);
+  }
+
   container.append(header, bodyNode);
   return container;
+}
+
+/**
+ * One honest disclosure line for a code phase: the server's own disclosure
+ * first, then any codeTrace flag the user must know about. Null when the
+ * answer never touched code, so memory-only renders stay unchanged.
+ */
+function codeDisclosure(body) {
+  const answer = body && typeof body.codeAnswer === "object" && body.codeAnswer !== null ? body.codeAnswer : null;
+  const trace = body && typeof body.codeTrace === "object" && body.codeTrace !== null ? body.codeTrace : null;
+  if (!answer && !trace) return null;
+  // Server disclosure first; a trace flag only adds a line the server did not
+  // already state, so one condition never renders twice.
+  const candidates = [];
+  if (answer && typeof answer.disclosure === "string" && answer.disclosure.trim().length > 0) {
+    candidates.push({ text: answer.disclosure.trim(), markers: [] });
+  }
+  if (trace && trace.mode === "unranked") {
+    candidates.push({ text: "scan unranked: file list unavailable, excerpts come from memory-named files only.", markers: ["unranked"] });
+  }
+  if (trace && trace.truncated === true) {
+    candidates.push({ text: "scan truncated: not every file read.", markers: ["truncated"] });
+  }
+  if (trace && trace.roundsExhausted === true) {
+    candidates.push({ text: "budget spent after 3 rounds. files not read are not checked.", markers: ["budget spent", "round budget", "rounds exhausted", "not checked"] });
+  }
+  if (answer && typeof answer.stripped === "number" && answer.stripped > 0) {
+    candidates.push({ text: `model claims not backed by quoted lines: ${answer.stripped} stripped.`, markers: ["stripped"] });
+  }
+  const kept = [];
+  for (const candidate of candidates) {
+    if (candidate.markers.length > 0 && candidate.markers.some((marker) => kept.join(" ").toLowerCase().includes(marker))) continue;
+    kept.push(candidate.text);
+  }
+  return kept.length > 0 ? kept.join(" ") : null;
+}
+
+/**
+ * Code excerpts are quotes, not summaries: label `path:startLine-endLine`, a
+ * code kind chip, and the server's own lines in monospace. Read-only, no click
+ * target, no link into Dash, no open-file affordance.
+ */
+function codeEvidenceNodes(excerpts) {
+  if (!Array.isArray(excerpts) || excerpts.length === 0) return [];
+  return excerpts.map((excerpt) => {
+    const box = el("div", "chat-card chat-code-card");
+    if (excerpt === null || typeof excerpt !== "object") {
+      box.append(el("p", "chat-card-body", String(excerpt)));
+      return box;
+    }
+    const path = String(excerpt.path ?? excerpt.ref ?? "unknown");
+    const start = excerpt.startLine;
+    const end = excerpt.endLine;
+    const label = start !== undefined && start !== null
+      ? `${path}:${start}${end !== undefined && end !== null ? `-${end}` : ""}`
+      : path;
+    box.append(el("p", "chat-card-head", label));
+    box.append(el("p", "chat-card-kind", "code"));
+    const lines = Array.isArray(excerpt.lines) ? excerpt.lines : [];
+    if (lines.length > 0) {
+      const text = lines.map((line) => {
+        if (line === null || line === undefined) return "";
+        if (typeof line === "string") return line;
+        if (typeof line === "object") return String(line.text ?? line.line ?? "");
+        return String(line);
+      }).join("\n");
+      box.append(el("pre", "chat-code-lines", text));
+    }
+    return box;
+  });
 }
 
 /**
@@ -401,10 +546,33 @@ function renderAnswer(log, body) {
   if (body && body.coverage && body.coverage.reason) {
     log.append(el("p", "chat-coverage", `coverage: ${body.coverage.reason}`));
   }
+
+  // Code support (code questions only): one clearly labelled paragraph after
+  // the memory answer, then the single disclosure line. Never replaces the
+  // memory answer, and never blank when the server sent no code text.
+  const codeText = body && typeof body.codeAnswer === "object" && body.codeAnswer !== null && typeof body.codeAnswer.text === "string"
+    ? body.codeAnswer.text
+    : "";
+  if (codeText.length > 0) {
+    const codeBubble = bubble("jev", codeText);
+    codeBubble.classList.add("chat-code-answer");
+    codeBubble.prepend(el("p", "chat-code-head", "code"));
+    log.append(codeBubble);
+  }
+  const disclosure = codeDisclosure(body);
+  if (disclosure) log.append(el("p", "chat-code-disc", disclosure));
+
   log.append(traceNode(body?.decisionTrace));
 
-  // Companion panels mirror evidence and trace
-  fill($("#comp-evidence"), ...(evidenceNodes(body?.evidenceCards).length === 0 ? [el("p", "comp-empty", "no evidence cited.")] : evidenceNodes(body?.evidenceCards)));
+  // Companion panels mirror evidence and trace. Memory cards stay primary and
+  // first; code excerpts are support, quoted below them, plus the disclosure.
+  const memoryCards = evidenceNodes(body?.evidenceCards);
+  const codeBlocks = codeEvidenceNodes(body?.codeEvidence);
+  if (disclosure && codeBlocks.length > 0) codeBlocks.push(el("p", "chat-code-disc", disclosure));
+  const evidencePanel = memoryCards.length === 0 && codeBlocks.length === 0
+    ? [el("p", "comp-empty", "no evidence cited.")]
+    : [...memoryCards, ...codeBlocks];
+  fill($("#comp-evidence"), ...evidencePanel);
   fill($("#comp-trace"), traceNode(body?.decisionTrace));
   log.scrollTop = log.scrollHeight;
 }
@@ -421,12 +589,20 @@ function renderFailure(log, prompt) {
   log.scrollTop = log.scrollHeight;
 }
 
-function waitingBubble() {
+/* Waiting labels. The code label is used only when the server-side trigger is
+   certain from the page: the explicit `code:` prefix. Anything else stays
+   generic -- the label must never claim a scan that did not start. */
+const WAITING_LABEL = "Searching Rocky memory & evaluating with Jev";
+const CODE_WAITING_LABEL = "Searching memory, reading code, evaluating with Jev";
+
+function waitingBubble(prompt) {
   const node = el("div", "chat-msg chat-jev chat-waiting");
   node.setAttribute("aria-busy", "true");
   node.setAttribute("aria-label", "rocky thinking");
-  const icon = el("span", "waiting-icon", "✦");
-  const label = el("span", "waiting-label", "Searching Rocky memory & evaluating with Jev");
+  const icon = el("span", "waiting-icon");
+  icon.append(svgIcon("sparkle", 13));
+  const forcedCode = typeof prompt === "string" && /^\s*code:\s*\S/.test(prompt);
+  const label = el("span", "waiting-label", forcedCode ? CODE_WAITING_LABEL : WAITING_LABEL);
   const dots = el("span", "chat-waiting-dots");
   dots.append(el("span", "cwd-dot"), el("span", "cwd-dot"), el("span", "cwd-dot"));
   node.append(icon, label, dots);
@@ -440,7 +616,7 @@ async function send(prompt) {
   chatState.busy = true;
   log.append(bubble("you", prompt));
   if (input) input.value = "";
-  const waiting = waitingBubble();
+  const waiting = waitingBubble(prompt);
   log.append(waiting);
   log.scrollTop = log.scrollHeight;
   try {
@@ -542,7 +718,8 @@ function paintModelPanel(rows, current) {
       opt.setAttribute("role", "option");
       opt.dataset.id = row.id;
       opt.append(el("span", "cb-modelname", row.label));
-      const check = el("span", "cb-check", "\u2713");
+      const check = el("span", "cb-check");
+      check.append(svgIcon("check", 12));
       check.setAttribute("aria-hidden", "true");
       if (row.id !== current) check.hidden = true;
       opt.append(check);
@@ -704,7 +881,7 @@ function boot() {
   if (!form || !input || !log) return;
 
   try {
-    if (log.childElementCount === 0) log.append(bubble("jev", "ask what rocky heard. answers stay local."));
+    if (log.childElementCount === 0) log.append(bubble("jev", "ask what rocky heard. memory answers stay local. code questions reach the model you configure."));
   } catch {
     // static skeleton already reads; live greeting is additive only
   }

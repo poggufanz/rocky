@@ -32,7 +32,9 @@
 <div id="settings" class="modal" role="dialog" aria-modal="true" aria-labelledby="settings-title" hidden>
   <div class="modal-head">
     <h2 id="settings-title">Settings</h2>
-    <button id="settings-close" class="modal-x" type="button" aria-label="close">×</button>
+    <button id="settings-close" class="modal-x" type="button" aria-label="close">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+    </button>
   </div>
 
   <p class="beta">
@@ -109,7 +111,9 @@
 <div id="repo-filter" class="modal" role="dialog" aria-modal="true" aria-labelledby="repo-filter-title" hidden>
   <div class="modal-head">
     <h2 id="repo-filter-title">Filter Repo</h2>
-    <button id="repo-filter-close" class="modal-x" type="button" aria-label="close">×</button>
+    <button id="repo-filter-close" class="modal-x" type="button" aria-label="close">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+    </button>
   </div>
 
   <label class="repo-search">
@@ -158,22 +162,26 @@
         </div>
       </aside>
       <section class="blk blk-chat chat-center" id="chat-panel" aria-label="ask rocky">
-        <div id="chat-log" class="chat-log" role="log" aria-live="polite" aria-label="conversation"><div class="chat-msg chat-jev">ask what rocky heard. answers stay local.</div></div>
+        <div id="chat-log" class="chat-log" role="log" aria-live="polite" aria-label="conversation"><div class="chat-msg chat-jev">ask what rocky heard. memory answers stay local. code questions reach the model you configure.</div></div>
         <form id="chat-form" class="chatbox" autocomplete="off">
-          <button id="chat-attach" class="cb-btn" type="button" title="attach (soon)" aria-label="attach">+</button>
-          <span id="chat-status" class="cb-dot" title="local only" aria-label="local status"></span>
+          <button id="chat-attach" class="cb-btn" type="button" title="attach (soon)" aria-label="attach">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+          </button>
           <label class="vh" for="chat-input">ask rocky</label>
           <input id="chat-input" type="text" placeholder="ask what rocky heard…" spellcheck="false" autocomplete="off">
-          <button id="chat-jev" class="cb-btn cb-jev" type="button" title="Jev analysis (needs key)" aria-pressed="false" aria-label="jev analysis">⚡</button>
+          <button id="chat-jev" class="cb-btn cb-jev" type="button" title="Jev analysis (needs key)" aria-pressed="false" aria-label="jev analysis">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
+          </button>
           <span id="chat-modelwrap" class="cb-modelwrap">
             <select id="chat-model" class="cb-model" aria-label="chat model"></select>
             <button id="chat-model-btn" class="cb-modelbtn" type="button" aria-haspopup="listbox" aria-expanded="false" aria-label="chat model" hidden>rocky local</button>
             <span id="chat-model-panel" class="cb-modelpanel" role="listbox" aria-label="chat model" hidden></span>
           </span>
-          <button id="chat-mic" class="cb-btn" type="button" title="voice input (soon)" disabled aria-label="voice input">🎙</button>
-          <button id="chat-send" class="cb-send" type="submit" aria-label="send">↑</button>
+          <button id="chat-send" class="cb-send" type="submit" aria-label="send">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="19" x2="12" y2="5"></line><polyline points="5 12 12 5 19 12"></polyline></svg>
+          </button>
         </form>
-        <p class="chat-note">Local analysis over what rocky heard. Nothing leaves this machine except bounded Jev/LLM calls you opt into.</p>
+        <p class="chat-note">Local analysis over what rocky heard. Memory answers stay local. A code question sends your question, carved excerpts, and memory evidence to the model you configure. Prompt redacted, size capped. Nothing else leaves this machine.</p>
       </section>
       <aside class="chat-comp" aria-label="evidence and decision">
         <section class="comp-block">
@@ -235,7 +243,7 @@
 
 </main>
 
-<footer class="foot">Local Only | No Egress</footer>
+<footer class="foot"><span class="foot-main">Local analysis. Code questions send your question, carved excerpts, and memory evidence to the model you configured.</span><span class="foot-dash">Local Only | No Egress</span></footer>
 
 <button id="ask" class="ask" hidden>Why, question</button>
 <div id="pop" class="pop" role="dialog" aria-label="why" aria-live="polite" hidden>
