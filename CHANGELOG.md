@@ -2,6 +2,11 @@
 
 Notable changes per release. Dates are the release date.
 
+## Unreleased
+
+- **Main chat answers code questions with quoted evidence.** With a BYOK model configured, a code question in the GUI Main segment scans the launch repository, ranks files against the memory prior, and answers from memory first with `path:line` excerpts shown below the memory cards. Retrieval is capped at three bounded rounds; after that Rocky answers with what he read and says what was not checked. Dash panes, the `rocky recall`/`teach`/`why` CLI, and the read-only MCP tools are unchanged.
+- **The Main footer claim is now scoped.** Main states the bounded egress a code question uses: question, carved excerpts, and memory evidence, redacted and capped, to the model you configured. Dash keeps `Local Only | No Egress`. A memory-only question, and a code question with no configured model, reaches no external host.
+
 ## 0.8.0 — 27 August 2026
 
 A major release introducing a local browser GUI to replace the terminal dashboard, teach mode with deterministic evidence ladders and witness record capture, and bounded secret scrubbing:

@@ -143,8 +143,10 @@ usage:
 
 memory lives in ~/.rocky/memory.jsonl. no telemetry. only outside call is rocky
 check asking registry.npmjs.org whether package exists — package name only, you say
-yes first, offline never blocks. configured hosts control what they forward;
-optional AI uses loopback Ollama only.
+yes first, offline never blocks. GUI Main chat code questions send question, carved
+excerpts, memory evidence to model you configure — only when you set one; memory-only
+question sends nothing. configured hosts control what they forward; optional AI uses
+loopback Ollama only.
 `;
 
 type HookRequest =

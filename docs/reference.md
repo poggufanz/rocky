@@ -172,7 +172,7 @@ rocky mcp                                # local read-only stdio server
 Memory lives in `~/.rocky/memory.jsonl`. It is a text file you can read, grep, back up, and delete. Rocky records explicit terminal commands and errors plus the operational metadata needed to link them: working directory, time, exit code, fingerprints, origin, record IDs, and fix links. Rocky does not keylog and does not capture the screen.
 Rocky may keep one advisory derived file next to it, `~/.rocky/memory.idx.jsonl` (fingerprint → file offsets plus a versioned header). It is a pure read accelerator: `memory.jsonl` stays the source of truth, and any version, size, timestamp, or corruption mismatch discards the sidecar and falls back to a full scan with explicit coverage. You can delete the sidecar at any time; Rocky rebuilds it lazily.
 
-The CLI contains no telemetry and runs no daemon. Its only external network egress is `rocky check`'s package-existence lookup against registry.npmjs.org — consent-gated, package names only, fail-open when offline. Everything else, including the local MCP server, reaches no external host at all. MCP uses local stdio, exposes read-only tools, and projects sanitized memory by default. A configured cloud host may forward selected projected content under that host's own policy, so review the host and choose raw exposure only when you intend to share those fields. Optional AI calls only a separately managed Ollama service over loopback (`127.0.0.1`).
+The CLI contains no telemetry and runs no daemon. Its only external network egress is `rocky check`'s package-existence lookup against registry.npmjs.org — consent-gated, package names only, fail-open when offline. The Main chat adds one more, and only when you configure a BYOK model: a code question sends your question, carved excerpts, and memory evidence to that model, redacted and capped; a memory-only question sends nothing. Everything else, including the local MCP server, reaches no external host at all. MCP uses local stdio, exposes read-only tools, and projects sanitized memory by default. A configured cloud host may forward selected projected content under that host's own policy, so review the host and choose raw exposure only when you intend to share those fields. Optional AI calls only a separately managed Ollama service over loopback (`127.0.0.1`).
 
 ## Read-only MCP knowledge tools
 
@@ -432,7 +432,7 @@ Rocky asks because he is curious, not because he is testing you; you are always 
 
 The fence never moves: Rocky hears your terminal and the explicit Plan 01 agent hooks. That's it. No keylogging, no screen reading, no capture of screen content of any kind. "Rocky can't see your screen" is a literal description of the architecture, not just lore. The local GUI serves a page to your own browser over loopback and reads nothing the page does not ask for; no global input is hooked.
 
-The one hole in the no-egress rule is the optional BYOK proxy described under `rocky` and `rocky dash`. It stays shut until you enter a key, it sends only the prompt you triggered, and that prompt is redacted before it leaves. Memory, hooks, recall, and MCP still reach no external host.
+The one hole in the no-egress rule is the optional BYOK proxy described under `rocky` and `rocky dash`. It stays shut until you enter a key, it sends only the prompt you triggered — and, on a code question in Main, the carved excerpts and memory evidence that ground it — and all of it is redacted before it leaves. Memory, hooks, recall, and MCP still reach no external host.
 
 ## Roadmap
 
