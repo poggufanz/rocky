@@ -170,7 +170,7 @@ function parseKnowledgeArgs(args: unknown): KnowledgeSearchQuery {
   if (typeof value.query !== "string" || [...value.query].length < 1 || [...value.query].length > 500) {
     throw new McpInvalidParamsError("invalid params");
   }
-  if (value.kind !== undefined && value.kind !== "failure" && value.kind !== "fix" && value.kind !== "triple" && value.kind !== "note") {
+  if (value.kind !== undefined && value.kind !== "failure" && value.kind !== "fix" && value.kind !== "triple" && value.kind !== "note" && value.kind !== "rationale" && value.kind !== "explain") {
     throw new McpInvalidParamsError("invalid params");
   }
   return {
@@ -271,7 +271,7 @@ function descriptors(exposure: Exposure): readonly McpToolDefinition[] {
         "Example queries: 'npm permission denied', 'naikin button', 'margin'. Returns bounded metadata with record id, timestamp, source, covered files, and truncation status; call fetch_record with an id for full detail.",
       inputSchema: schema({
         query: { type: "string", minLength: 1, maxLength: 500 },
-        kind: { type: "string", enum: ["failure", "fix", "triple", "note"] },
+        kind: { type: "string", enum: ["failure", "fix", "triple", "note", "rationale", "explain"] },
         limit: { type: "integer", minimum: 1, maximum: 20 },
       }, ["query"]), annotations: ANNOTATIONS,
     },

@@ -120,7 +120,7 @@ test("new tool descriptions are concrete and schemas expose their bounds", () =>
   assert.deepEqual(search.inputSchema, {
     type: "object", additionalProperties: false, required: ["query"], properties: {
       query: { type: "string", minLength: 1, maxLength: 500 },
-      kind: { type: "string", enum: ["failure", "fix", "triple", "note"] },
+      kind: { type: "string", enum: ["failure", "fix", "triple", "note", "rationale", "explain"] },
       limit: { type: "integer", minimum: 1, maximum: 20 },
     },
   });
@@ -140,7 +140,7 @@ test("knowledge tools search, fetch, and explain one file", async () => {
   const search = await knowledgeRegistry().call("search_knowledge", { query: "naikin" }, signal);
   assert.equal(search.isError, undefined);
   assert.deepEqual(search.structuredContent.items, [{
-    id: "triple-1", ts: 300, kind: "triple", snippet: "naikin button", score: 1 / 3,
+    id: "triple-1", ts: 300, kind: "triple", snippet: "naikin button — Rationale: spacing", score: 0.5625,
     agent: "codex", source: "agent-hook", filesCovered: ["src/app.css"], truncatedFiles: 0, complete: false, coverageStatus: "unknown", truncatedFields: [],
   }]);
 
@@ -1176,7 +1176,7 @@ test("note-only knowledge search stays bounded and sanitized", async () => {
     exposure: "sanitized", memory: createMemoryQueries(() => [note]), recallWithAi: disabledRecallWithAi,
   }).call("search_knowledge", { query: "banana", kind: "note" }, new AbortController().signal);
   assert.deepEqual(result.structuredContent.items, [{
-    id: "note-search", ts: 304, kind: "note", snippet: "cache: banana", score: 1 / 6,
+    id: "note-search", ts: 304, kind: "note", snippet: "cache: banana", score: 0.5714285714285714,
     source: "note", truncatedFields: [],
   }]);
   assert.equal(result.structuredContent.truncated, false);

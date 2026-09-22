@@ -162,7 +162,7 @@ export interface ProjectedTriple {
 export interface ProjectedKnowledgeHit {
   id: string;
   ts: number;
-  kind: "failure" | "fix" | "triple" | "note";
+  kind: "failure" | "fix" | "triple" | "note" | "rationale" | "explain";
   snippet: string;
   score: number;
   agent?: "claude-code" | "codex";
@@ -594,7 +594,7 @@ function normalizeKnowledgeHit(value: unknown, now = Date.now()): KnowledgeSearc
     const raw = value as Record<string, unknown>;
     const id = safeKnowledgeId(raw.id);
     const ts = typeof raw.ts === "number" && Number.isSafeInteger(raw.ts) && raw.ts >= 0 ? raw.ts : undefined;
-    const kind = raw.kind === "failure" || raw.kind === "fix" || raw.kind === "triple" || raw.kind === "note"
+    const kind = raw.kind === "failure" || raw.kind === "fix" || raw.kind === "triple" || raw.kind === "note" || raw.kind === "rationale" || raw.kind === "explain"
       ? raw.kind
       : undefined;
     const snippet = safeKnowledgeString(raw.snippet);
@@ -610,6 +610,8 @@ function normalizeKnowledgeHit(value: unknown, now = Date.now()): KnowledgeSearc
       || (kind === "fix" && sourceValue === "fix")
       || (kind === "triple" && sourceValue === "agent-hook")
       || (kind === "note" && sourceValue === "note")
+      || (kind === "rationale" && (sourceValue === "log-thinking" || sourceValue === "log-response" || sourceValue === "notify" || sourceValue === "human" || sourceValue === "agent-hook" || sourceValue === "rationale"))
+      || (kind === "explain" && (sourceValue === "agent-hook" || sourceValue === "explain" || typeof sourceValue === "string"))
     ) ? sourceValue : undefined;
     if ((raw.agent !== undefined && agent === undefined) || (raw.source !== undefined && source === undefined)) {
       return undefined;
