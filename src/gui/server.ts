@@ -15,11 +15,30 @@ import { randomBytes } from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { dirname, extname, join, resolve, sep } from "node:path";
+import { dirname, extname, join, relative, resolve, sep } from "node:path";
 
-import { loadMemoryChecked } from "../core/memory-read.js";
+import { loadMemoryChecked, type MemoryRecord } from "../core/memory-read.js";
 import { redactSecretsAtBoundary } from "../core/redact.js";
-import { publicSettings, readSettings, writeSettings } from "./settings.js";
+import { publicSettings, readSettings, writeSettings, type GuiSettings } from "./settings.js";
+import {
+  CODE_EXCERPTS_ONLY,
+  CODE_MODEL_LOCAL,
+  CODE_NO_MATCH,
+  CODE_NO_MODEL,
+  CODE_PREFIX_EMPTY,
+  CODE_UNGROUNDED,
+  buildCodePrompt,
+  codeFallbackText,
+  collectCodeEvidence,
+  isCodeQuery,
+  memoryPriorTokens,
+  splitCodePrefix,
+  validateCodeCitations,
+  type CodeAnswer,
+  type CodeEvidenceResult,
+  type CodeExcerpt,
+  type CodeTrace,
+} from "./code-search.js";
 import { providerFor, providerList } from "./models-dev.js";
 import { deriveHome } from "../core/home-data.js";
 import { elapsed } from "../ui/rocky.js";
@@ -60,6 +79,7 @@ import {
   resolveChatLlmSelection,
   runChatRenderer,
   runChatStructurer,
+  type ChatLlmSelection,
   type ChatLlmTrace,
 } from "../ai/chat-llm.js";
 import { analyzeExplainDecision } from "../ai/explain-decision.js";
@@ -132,6 +152,7 @@ function topConfidence(result: DecisionResult): number | null {
 
 async function chat(
   body: Record<string, unknown>,
+  root: string,
 ): Promise<{ status: number; payload: unknown }> {
   if (chatInFlight >= CHAT_MAX_IN_FLIGHT) {
     return { status: 429, payload: { error: "rocky already chatting. wait, question" } };
@@ -145,12 +166,20 @@ async function chat(
     ? `${message.slice(0, CHAT_MAX_MESSAGE_CHARS)}\n… cut, message long`
     : message;
   const asked = redactSecretsAtBoundary(bounded);
+  // Q6: `code:`/`memory:` decide first, then the heuristic runs on the
+  // stripped query. When the trigger does not fire this function stays
+  // byte-identical to the memory-only path: no scan, no provider code call,
+  // no new field.
+  const split = splitCodePrefix(asked);
+  const query = split.query;
   const requested = typeof body.limit === "number" && Number.isFinite(body.limit) ? Math.floor(body.limit) : CHAT_DEFAULT_LIMIT;
   const limit = Math.min(CHAT_MAX_LIMIT, Math.max(1, requested));
   chatInFlight += 1;
   try {
     const { list, reason } = records();
-    const hits = searchKnowledge(list, { query: asked, limit });
+    const witnessedFiles = witnessedRepoPaths(list, root);
+    const codeTriggered = split.mode !== "memory" && (split.mode === "code" || isCodeQuery(query, witnessedFiles));
+    const hits = searchKnowledge(list, { query, limit });
     const shortlist: DecisionCandidate[] = toChatCards(hits, limit).map((card) => ({ ...card }));
     const stored = readSettings();
     // GUARANTEE (creator order, main chat ONLY — teach/ask untouched): when
@@ -172,10 +201,10 @@ async function chat(
     // LLM aktif wajib lewat: active => structurer LLM call, then renderer LLM
     // call; inactive => disclosed fallback inside each stage. The two awaits
     // below are unconditional so no path can skip them.
-    const structurer = await runChatStructurer(llmSelection, asked, evidenceRefs, stored);
+    const structurer = await runChatStructurer(llmSelection, query, evidenceRefs, stored);
     // The structurer only shapes Jev state from retrieved refs (allowlisted);
     // the Jev port below stays the decider and never sees an invented ref.
-    const jevState = structurer.structure ?? buildChatStructure(asked, evidenceRefs);
+    const jevState = structurer.structure ?? buildChatStructure(query, evidenceRefs);
     // Per-message lightning toggle: jev:true forces the Jev engine for this call.
     // The key resolves server-side only: in unified OpenRouter mode the shared
     // main credential (env OPENROUTER_API_KEY wins, stored main key falls back)
@@ -245,7 +274,7 @@ async function chat(
     const renderer = await runChatRenderer(
       llmSelection,
       {
-        query: asked,
+        query,
         topRef: ordered[0]?.ref,
         topKind: ordered[0]?.kind,
         topScore: topConfidence(result),
@@ -268,6 +297,22 @@ async function chat(
       stripped: renderer.stripped,
     };
     const trace: ChatTrace = { ...traceBase, evidenceRefs: [...traceBase.evidenceRefs], llm };
+    // The code phase runs after the memory answer exists, so the prompt's
+    // memory block and Jev block carry exactly the trace the user sees. One
+    // live scan, at most one provider call, never a retry (Q10, Q12).
+    const code = codeTriggered
+      ? await codeSupport({
+        root,
+        query,
+        prefixEmpty: split.prefixEmpty,
+        witnessed: witnessedFiles,
+        priorTokens: memoryPriorTokens(list, hits),
+        memoryBlock: chatMemoryBlock(ordered),
+        jevBlock: chatJevBlock(traceBase),
+        selection: llmSelection,
+        lang: stored.lang,
+      })
+      : undefined;
     appendDecisionLog({
       engine: trace.engine,
       status: trace.status,
@@ -290,6 +335,9 @@ async function chat(
         // unchanged; this order list only documents the display sequence.
         renderOrder: [...CHAT_RENDER_ORDER],
         ...(reason === undefined ? {} : { coverage: { reason } }),
+        // Appended only when the trigger fired: a memory-only question keeps
+        // today's payload byte-for-byte, with no scan and no provider call.
+        ...(code === undefined ? {} : { codeEvidence: code.evidence, codeAnswer: code.answer, codeTrace: code.trace }),
       },
     };
   } finally {
@@ -300,6 +348,131 @@ async function chat(
 let askInFlight = 0;
 let bundleCache: { key: string; payload: { bundles: unknown[]; unattributed: number } } | null = null;
 let bundleInFlight: { key: string; promise: Promise<{ bundles: unknown[]; unattributed: number }> } | null = null;
+
+/**
+ * Memory-named files, reduced to launch-root-relative paths through the same
+ * boundary every other read uses: a file outside the launch root is simply not
+ * a candidate (Q1), never an error and never a second try.
+ */
+function witnessedRepoPaths(
+  list: MemoryRecord[],
+  root: string,
+): string[] {
+  const out: string[] = [];
+  for (const file of fileIndex(list)) {
+    const full = confine(root, file.path);
+    if (full === undefined) continue;
+    const rel = relative(root, full).replace(/\\/g, "/");
+    if (rel.length > 0 && !out.includes(rel)) out.push(rel);
+  }
+  return out;
+}
+
+/** Q11: the memory block is the same cards the page shows, redacted again. */
+function chatMemoryBlock(cards: readonly ChatEvidenceCard[]): string {
+  if (cards.length === 0) return "no memory evidence for this query";
+  const lines = cards.map((card, index) => `[${index + 1}] ref: ${card.ref} | kind: ${card.kind} | snippet: ${card.snippet}`);
+  return redactSecretsAtBoundary(lines.join("\n"));
+}
+
+/** Q11: the Jev trace the page shows, as the prompt's context block. */
+function chatJevBlock(trace: {
+  engine: string;
+  status: string;
+  confidence: number | null;
+  evidenceRefs: readonly string[];
+  latencyMs: number;
+}): string {
+  const confidence = trace.confidence === null ? "none" : String(trace.confidence);
+  const refs = trace.evidenceRefs.length > 0 ? trace.evidenceRefs.join(", ") : "none";
+  const line = `engine: ${trace.engine}; status: ${trace.status}; confidence: ${confidence}; refs: ${refs}; latency: ${trace.latencyMs}ms`;
+  return redactSecretsAtBoundary(line);
+}
+
+interface CodeSupport {
+  evidence: CodeExcerpt[];
+  answer: CodeAnswer;
+  trace: CodeTrace;
+}
+
+/**
+ * The code phase of one chat: a live scan, then at most one provider call
+ * through the ask machinery. Degradation is total, never partial (Q9) — no
+ * model, a provider refusal, a timeout, a spent budget, or a non-git root all
+ * return the same shape with the excerpts and one disclosure line, and the
+ * memory answer above them is never touched. There is no retry.
+ */
+async function codeSupport(args: {
+  root: string;
+  query: string;
+  prefixEmpty: boolean;
+  witnessed: readonly string[];
+  priorTokens: ReadonlySet<string>;
+  memoryBlock: string;
+  jevBlock: string;
+  selection: ChatLlmSelection;
+  lang: GuiSettings["lang"];
+}): Promise<CodeSupport> {
+  if (args.prefixEmpty) {
+    return {
+      evidence: [],
+      trace: { mode: "unranked", filesScanned: 0, filesTotal: 0, rounds: 0, roundsExhausted: false, truncated: false },
+      answer: { text: CODE_EXCERPTS_ONLY, model: "", status: "skipped", stripped: 0, disclosure: CODE_PREFIX_EMPTY },
+    };
+  }
+
+  const collected: CodeEvidenceResult = collectCodeEvidence({
+    root: args.root,
+    query: args.query,
+    confine: (candidate) => confine(args.root, candidate),
+    witnessed: args.witnessed,
+    priorTokens: args.priorTokens,
+  });
+  const disclosures = [...collected.disclosures];
+  if (collected.evidence.length === 0) disclosures.push(CODE_NO_MATCH);
+  const fallback = codeFallbackText(collected.evidence);
+  const answer = (text: string, status: CodeAnswer["status"], stripped: number): CodeAnswer => ({
+    text,
+    model: args.selection.modelId,
+    status,
+    stripped,
+    ...(disclosures.length === 0 ? {} : { disclosure: disclosures.join(" ") }),
+  });
+
+  // Only a keyed BYOK selection can be reached from here: the code answer
+  // rides the same endpoint, key and model `/api/ask` uses. Ollama is a local
+  // daemon this route never calls, so it discloses instead of sending.
+  if (!args.selection.active || args.selection.kind !== "byok") {
+    disclosures.push(args.selection.active ? CODE_MODEL_LOCAL : CODE_NO_MODEL);
+    return { evidence: collected.evidence, trace: collected.trace, answer: answer(fallback, "no-model", 0) };
+  }
+
+  const prompt = boundedPrompt(buildCodePrompt({
+    preamble: `${TEACH_ENV}\n\n${loadTeachSpec(args.lang)}`,
+    question: args.query,
+    memoryBlock: args.memoryBlock,
+    jevBlock: args.jevBlock,
+    evidence: collected.evidence,
+  }));
+  const outcome = await requestProvider(prompt);
+  if (outcome.kind === "failed") {
+    return {
+      evidence: collected.evidence,
+      trace: collected.trace,
+      answer: answer(fallback, outcome.timedOut ? "timeout" : "unavailable", 0),
+    };
+  }
+  if (outcome.kind === "refused") {
+    return { evidence: collected.evidence, trace: collected.trace, answer: answer(fallback, "unavailable", 0) };
+  }
+
+  // The citation gate: a path:line the excerpts do not hold is stripped and
+  // counted, and the answer says so rather than reading as grounded.
+  const check = validateCodeCitations(redactSecretsAtBoundary(outcome.text), collected.evidence);
+  if (check.dropped > 0) disclosures.push(CODE_UNGROUNDED(check.dropped));
+  const text = check.stripped.trim().length > 0 ? check.stripped : fallback;
+  return { evidence: collected.evidence, trace: collected.trace, answer: answer(text, "used", check.dropped) };
+}
 
 /**
  * The fallback rules every BYOK answer is bound by when the spec file is not
@@ -828,29 +1001,101 @@ function flatMoments(grouped: ReturnType<typeof momentsFor>) {
   return [...grouped.changes.flatMap((c) => c.witnesses), ...grouped.unattributed];
 }
 
-/** Forwards one prompt to the provider the page names. OpenAI-compatible
- *  hosts and Anthropic differ only in header and body shape. When the page
- *  names the file its question is about, rocky digs first and quotes what it
- *  found: the model explains evidence, it does not have to imagine code. */
-async function ask(body: Record<string, unknown>, root: string): Promise<{ status: number; payload: unknown }> {
-  // endpoint, model and key all come off disk: the page never holds the secret
+/**
+ * The one cap and the one redaction every prompt leaving this machine goes
+ * through: a selected line can carry a key, and the provider must never see
+ * it. Callers own the prompt's content; this owns what may cross.
+ */
+function boundedPrompt(text: string): string {
+  const bounded = text.length > MAX_PROMPT_CHARS ? `${text.slice(0, MAX_PROMPT_CHARS)}\n… cut, prompt long` : text;
+  return redactSecretsAtBoundary(bounded);
+}
+
+/** Provider JSON is untrusted input: read one field, keep it `unknown`. */
+function objectField(value: unknown, key: string): unknown {
+  if (typeof value !== "object" || value === null) return undefined;
+  return (value as Record<string, unknown>)[key];
+}
+
+function stringField(value: unknown, key: string): string | undefined {
+  const field = objectField(value, key);
+  return typeof field === "string" ? field : undefined;
+}
+
+/** Anthropic answers `content[0].text`; OpenAI-compatible answers `choices[0].message.content`. */
+function providerText(data: unknown, anthropic: boolean): string {
+  if (anthropic) {
+    const content = objectField(data, "content");
+    const first = Array.isArray(content) ? content[0] : undefined;
+    return stringField(first, "text") ?? "";
+  }
+  const choices = objectField(data, "choices");
+  const first = Array.isArray(choices) ? choices[0] : undefined;
+  return stringField(objectField(first, "message"), "content") ?? "";
+}
+
+type ProviderOutcome =
+  | { kind: "text"; text: string }
+  | { kind: "refused"; status: number; error: string }
+  | { kind: "failed"; error: unknown; timedOut: boolean };
+
+/**
+ * The single provider request: OpenAI-compatible hosts and Anthropic differ
+ * only in header and body shape. endpoint, model and key all come off disk —
+ * the page never holds the secret — and the in-flight count is the existing
+ * ask budget, so the code phase and `/api/ask` share one ceiling.
+ */
+async function requestProvider(prompt: string): Promise<ProviderOutcome> {
   const stored = readSettings();
   const endpoint = stored.endpoint;
   const key = stored.key;
   const model = stored.model;
-  const raw = String(body.prompt ?? "");
-  if (!endpoint || !key || !model || !raw) {
-    return { status: 400, payload: { error: "rocky need endpoint, key, model in settings first" } };
+  if (!endpoint || !key || !model) {
+    return { kind: "refused", status: 400, error: "rocky need endpoint, key, model in settings first" };
   }
   if (askInFlight >= MAX_ASK_IN_FLIGHT) {
-    return { status: 429, payload: { error: "rocky already asking. wait, question" } };
+    return { kind: "refused", status: 429, error: "rocky already asking. wait, question" };
   }
 
-  // This is the only text that leaves the machine, so it is redacted first:
-  // a selected line can carry a key, and the provider must never see it.
-  const asked = redactSecretsAtBoundary(
-    raw.length > MAX_PROMPT_CHARS ? `${raw.slice(0, MAX_PROMPT_CHARS)}\n… cut, prompt long` : raw,
-  );
+  const anthropic = endpoint.includes("/v1/messages");
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (anthropic) {
+    headers["x-api-key"] = key;
+    headers["anthropic-version"] = "2023-06-01";
+  } else {
+    headers.Authorization = `Bearer ${key}`;
+  }
+  const payload = { model, max_tokens: 1024, messages: [{ role: "user", content: prompt }] };
+
+  askInFlight += 1;
+  try {
+    const answer = await fetch(endpoint, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(ASK_TIMEOUT_MS),
+    });
+    const data: unknown = await answer.json();
+    if (!answer.ok) {
+      return { kind: "refused", status: answer.status, error: stringField(objectField(data, "error"), "message") ?? "provider refused" };
+    }
+    return { kind: "text", text: providerText(data, anthropic) };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return { kind: "failed", error, timedOut: /timed out|timeout|abort/i.test(message) };
+  } finally {
+    askInFlight -= 1;
+  }
+}
+
+/** Forwards one prompt to the provider the page names. When the page names
+ *  the file its question is about, rocky digs first and quotes what it found:
+ *  the model explains evidence, it does not have to imagine code. */
+async function ask(body: Record<string, unknown>, root: string): Promise<{ status: number; payload: unknown }> {
+  const raw = String(body.prompt ?? "");
+  if (!raw) {
+    return { status: 400, payload: { error: "rocky need endpoint, key, model in settings first" } };
+  }
 
   // the dig: whole file, imported neighbours, sibling test, first git touch --
   // the same boundary as any other read, then redacted like the prompt itself
@@ -867,38 +1112,12 @@ async function ask(body: Record<string, unknown>, root: string): Promise<{ statu
   }
 
   // the rules ride here, not in the page, so a browser cannot drop them
-  const prompt = `${TEACH_ENV}\n\n${loadTeachSpec(stored.lang)}\n\n---\n\n${asked}${pack}`;
-
-  const anthropic = endpoint.includes("/v1/messages");
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
-  if (anthropic) {
-    headers["x-api-key"] = key;
-    headers["anthropic-version"] = "2023-06-01";
-  } else {
-    headers.Authorization = `Bearer ${key}`;
-  }
-
-  const payload = anthropic
-    ? { model, max_tokens: 1024, messages: [{ role: "user", content: prompt }] }
-    : { model, max_tokens: 1024, messages: [{ role: "user", content: prompt }] };
-
-  askInFlight += 1;
-  try {
-    const answer = await fetch(endpoint, {
-      method: "POST",
-      headers,
-      body: JSON.stringify(payload),
-      signal: AbortSignal.timeout(ASK_TIMEOUT_MS),
-    });
-    const data = (await answer.json()) as Record<string, any>;
-    if (!answer.ok) {
-      return { status: answer.status, payload: { error: data?.error?.message ?? "provider refused" } };
-    }
-    const text = anthropic ? data?.content?.[0]?.text : data?.choices?.[0]?.message?.content;
-    return { status: 200, payload: { text: typeof text === "string" ? text : "" } };
-  } finally {
-    askInFlight -= 1;
-  }
+  const prompt = `${TEACH_ENV}\n\n${loadTeachSpec(readSettings().lang)}\n\n---\n\n${boundedPrompt(raw)}${pack}`;
+  const outcome = await requestProvider(prompt);
+  if (outcome.kind === "text") return { status: 200, payload: { text: outcome.text } };
+  if (outcome.kind === "refused") return { status: outcome.status, payload: { error: outcome.error } };
+  // a transport failure stays a failure: the route's 500 contract is unchanged
+  throw outcome.error;
 }
 
 async function serveAsset(pathname: string, response: ServerResponse): Promise<void> {
@@ -1393,7 +1612,7 @@ async function handleApi(
 
   if (pathname === "/api/chat" && request.method === "POST") {
     const body = (await readBody(request)) as Record<string, unknown>;
-    const { status, payload } = await chat(body);
+    const { status, payload } = await chat(body, root);
     return sendJson(response, status, payload);
   }
 
