@@ -1412,6 +1412,33 @@ body:has(#view-dash:not([hidden])) .foot-dash { display: inline; }
   font-size: 12px;
   line-height: 1.6;
 }
+.ref-chain-drawer {
+  margin: 10px 0;
+  padding: 6px 10px;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  font-size: 12px;
+}
+.ref-chain-head {
+  cursor: pointer;
+  color: var(--dim);
+  font: 500 11px var(--mono);
+}
+.ref-chain-head:hover {
+  color: var(--bright);
+}
+.ref-chain-list {
+  margin-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.ref-chain-step {
+  color: var(--body);
+  font: 11px/1.4 var(--mono);
+  word-break: break-all;
+}
 .empty p { margin: 0 0 6px; }
 .empty p:last-child { margin: 0; }
 /* an empty line keeps the blank row the TUI leaves between the two sentences */
@@ -1544,10 +1571,122 @@ body:has(#view-dash:not([hidden])) .foot-dash { display: inline; }
 }
 .bundle-card:active { transform: translateY(1px); }
 
-.bundle-files {
-  margin-bottom: 20px;
+.bundle-summary {
+  padding: 12px 16px 14px;
   border-bottom: 1px solid var(--line);
-  padding-bottom: 16px;
+  margin-bottom: 12px;
+}
+.bundle-summary-title {
+  font: 600 13.5px/1.4 var(--sans);
+  color: var(--bright);
+}
+.bundle-summary-meta {
+  font: 12px var(--mono);
+  color: var(--dim);
+  margin-top: 4px;
+}
+
+.bundle-files {
+  padding-bottom: 24px;
+}
+
+.bundle-file-card {
+  margin: 8px 16px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  overflow: hidden;
+  background: var(--ground);
+}
+.bundle-file-card:first-child {
+  margin-top: 4px;
+}
+
+.bundle-file-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  padding: 8px 12px;
+  background: var(--surface);
+  border: 0;
+  color: var(--bright);
+  font: 12px var(--mono);
+  cursor: pointer;
+  text-align: left;
+  user-select: none;
+  transition: background 0.15s ease;
+}
+.bundle-file-head:hover {
+  background: var(--raised);
+}
+.bundle-file-head[aria-expanded="true"] {
+  border-bottom: 1px solid var(--line);
+}
+
+.bundle-file-head-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  overflow: hidden;
+}
+.bundle-file-toggle {
+  display: inline-block;
+  width: 12px;
+  color: var(--voice);
+  font-size: 11px;
+  text-align: center;
+  flex: 0 0 auto;
+}
+.bundle-file-name {
+  font-weight: 600;
+  color: var(--bright);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.bundle-file-dir {
+  color: var(--dim);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bundle-file-head-right {
+  flex: 0 0 auto;
+  margin-left: 12px;
+}
+.bundle-file-stats {
+  color: var(--dim);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.bundle-file-body {
+  padding: 0;
+}
+.bundle-file-body .diff {
+  margin: 0;
+}
+.bundle-file-body > .change {
+  margin: 10px 12px 12px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+}
+.bundle-file-body > .unattributed-head {
+  margin: 10px 12px 4px;
+}
+.bundle-file-body > .rec {
+  margin: 4px 12px;
+}
+
+.bundle-diff-empty {
+  padding: 12px 16px;
+  color: var(--dim);
+  font: 12px var(--mono);
+  font-style: italic;
+  background: var(--ground);
 }
 
 .hl {

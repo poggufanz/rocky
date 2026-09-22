@@ -585,6 +585,12 @@ async function loadBundles() {
     return;
   }
   renderBundles();
+  if (!state.selectedBundle && state.bundles.length > 0) {
+    const shown = state.bundles.filter((b) => !state.repoHidden.has(b.repo ?? ""));
+    if (shown.length > 0) {
+      selectBundle(shown[0]);
+    }
+  }
 }
 
 /** Plain-English bundle labels. The list names what happened, not the storage
@@ -670,11 +676,11 @@ async function selectBundle(bundle) {
   if (!inBundle && bundle.files?.length > 0) {
     state.file = bundle.files[0].path;
   }
-  if (state.file) {
-    $("#pane-path").textContent = state.file;
-  } else {
-    $("#pane-path").textContent = bundle.commit ? `commit ${bundle.commit.slice(0, 7)}` : "bundle";
-  }
+
+  const shaBit = bundle.commit && bundle.commit !== "uncommitted"
+    ? ` · ${bundle.commit.slice(0, 7)}`
+    : "";
+  $("#pane-path").textContent = `${epistemicLabel(bundle.epistemic)}${shaBit}`;
 
   $("#sel").textContent = "";
   closeMoments();
@@ -771,39 +777,153 @@ async function renderPane() {
   }
 }
 
+function getBundleFiles(bundle) {
+  const filesMap = new Map();
+
+  if (bundle.files) {
+    for (const f of bundle.files) {
+      filesMap.set(f.path, {
+        path: f.path,
+        witnessCount: f.witnessCount ?? 0,
+        rows: f.rows ?? null,
+        plus: f.plus,
+        minus: f.minus,
+        spans: f.spans ?? [],
+      });
+    }
+  }
+
+  if (state.bundleDiff?.files) {
+    for (const f of state.bundleDiff.files) {
+      const existing = filesMap.get(f.path);
+      if (existing) {
+        if (f.rows && f.rows.length > 0) {
+          existing.rows = f.rows;
+        }
+      } else {
+        filesMap.set(f.path, {
+          path: f.path,
+          witnessCount: 0,
+          rows: f.rows ?? null,
+          spans: [],
+        });
+      }
+    }
+  }
+
+  return Array.from(filesMap.values());
+}
+
 async function renderLines(body) {
+  if (state.view === "bundle") {
+    const bundle = state.selectedBundle;
+    if (!bundle) {
+      paneWelcome();
+      return;
+    }
+
+    const allBundleFiles = getBundleFiles(bundle);
+    const fileCount = allBundleFiles.length;
+    const totalWitnesses = bundle.witnessCount ?? allBundleFiles.reduce((sum, f) => sum + (f.witnessCount || 0), 0);
+
+    const shaBit = bundle.commit && bundle.commit !== "uncommitted"
+      ? ` · ${bundle.commit.slice(0, 7)}`
+      : "";
+
+    const nodes = [];
+
+    const summaryWrap = el("div", "bundle-summary");
+    const topTitle = el("div", "bundle-summary-title", `${epistemicLabel(bundle.epistemic)}${shaBit}`);
+    const topMeta = el("div", "bundle-summary-meta", `${fileCount} ${fileCount === 1 ? "file" : "files"} · ${noteWord(totalWitnesses)}`);
+    summaryWrap.append(topTitle, topMeta);
+    nodes.push(summaryWrap);
+
+    if (allBundleFiles.length === 0) {
+      nodes.push(empty("no files recorded in this bundle."));
+    } else {
+      const bundleFilesWrap = el("div", "bundle-files");
+      bundleFilesWrap.setAttribute("role", "list");
+
+      allBundleFiles.forEach((fileItem, index) => {
+        const card = el("div", "bundle-file-card");
+        const head = el("button", "bundle-file-head");
+        head.type = "button";
+
+        let isOpen = index === 0;
+        head.setAttribute("aria-expanded", String(isOpen));
+
+        const headLeft = el("div", "bundle-file-head-left");
+        const toggleIcon = el("span", "bundle-file-toggle", isOpen ? "▾" : "▸");
+        const parts = fileItem.path.split("/");
+        const baseName = parts.pop() ?? fileItem.path;
+        const dir = parts.join("/");
+
+        const nameSpan = el("span", "bundle-file-name", baseName);
+        headLeft.append(toggleIcon, nameSpan);
+        if (dir) {
+          const dirSpan = el("span", "bundle-file-dir", dir);
+          headLeft.append(dirSpan);
+        }
+
+        const headRight = el("div", "bundle-file-head-right");
+        const hasDiff = Boolean(fileItem.rows && fileItem.rows.length > 0);
+        const witCount = fileItem.witnessCount ?? 0;
+
+        const statParts = [];
+        if (hasDiff) {
+          statParts.push("1 change");
+        }
+        if (witCount > 0) {
+          statParts.push(noteWord(witCount));
+        } else if (!hasDiff) {
+          statParts.push("no diff");
+        }
+
+        const statsSpan = el("span", "bundle-file-stats", statParts.join(" · "));
+        headRight.append(statsSpan);
+
+        head.append(headLeft, headRight);
+
+        const bodyWrap = el("div", "bundle-file-body");
+        bodyWrap.hidden = !isOpen;
+
+        if (hasDiff) {
+          bodyWrap.append(diffBlock({ commit: bundle.commit, rows: fileItem.rows }, true));
+        } else {
+          const notice = el("div", "bundle-diff-empty", "diff not available for this file.");
+          bodyWrap.append(notice);
+        }
+
+        head.addEventListener("click", (event) => {
+          event.stopPropagation();
+          isOpen = !isOpen;
+          head.setAttribute("aria-expanded", String(isOpen));
+          toggleIcon.textContent = isOpen ? "▾" : "▸";
+          bodyWrap.hidden = !isOpen;
+          card.classList.toggle("open", isOpen);
+        });
+
+        card.append(head, bodyWrap);
+        bundleFilesWrap.append(card);
+      });
+
+      if (state.bundleDiff?.truncated || bundle.truncated) {
+        const total = state.bundleDiff?.total ?? allBundleFiles.length;
+        bundleFilesWrap.append(el("div", "trunc", `… diff truncated (${allBundleFiles.length} of ${total} files)`));
+      }
+
+      nodes.push(bundleFilesWrap);
+    }
+
+    fill(body, ...nodes);
+    return;
+  }
+
   if (!state.file) {
     paneWelcome();
     return;
   }
   const nodes = [];
-
-  if (state.view === "bundle" && state.bundleDiff?.files?.length > 0) {
-    const bundleFilesWrap = el("div", "bundle-files");
-    for (const f of state.bundleDiff.files) {
-      const section = el("div", "change");
-      const head = el("div", "change-head");
-      head.style.cursor = "pointer";
-      head.textContent = f.path;
-      if (f.path === state.file) {
-        head.style.color = "var(--voice)";
-        head.textContent += " · viewing lines below";
-      } else {
-        head.title = "Click to view file lines below";
-      }
-      head.addEventListener("click", () => {
-        state.file = f.path;
-        $("#pane-path").textContent = f.path;
-        renderPane();
-      });
-      section.append(head, diffBlock({ commit: state.bundleDiff.commit, rows: f.rows }, true));
-      bundleFilesWrap.append(section);
-    }
-    if (state.bundleDiff.truncated) {
-      bundleFilesWrap.append(el("div", "trunc", `… diff truncated (${state.bundleDiff.files.length} of ${state.bundleDiff.total} files)`));
-    }
-    nodes.push(bundleFilesWrap);
-  }
 
   const data = await api(`/api/file?path=${encodeURIComponent(state.file)}`);
   if (data.missing) {
@@ -812,20 +932,11 @@ async function renderLines(body) {
     return;
   }
 
-  const bundleFile = state.view === "bundle"
-    ? state.selectedBundle?.files?.find((f) => f.path === state.file)
-    : null;
-  const spans = bundleFile?.spans ?? [];
-  const inSpan = (line) => spans.some(([s, e]) => line >= s && line <= e);
-
   let open = false;
   const rows = data.lines.map((text, index) => {
     const lineNum = index + 1;
     const row = el("div", "cl");
     row.dataset.line = String(lineNum);
-    if (state.view === "bundle" && inSpan(lineNum)) {
-      row.classList.add("picked", "hl");
-    }
     const painted = codeCell(text, open);
     open = painted.openComment;
     const ln = el("span", "ln", String(lineNum));
@@ -939,6 +1050,174 @@ function matchesBundle(change, bundle) {
 }
 
 async function renderHistory(pane) {
+  if (state.view === "bundle") {
+    const bundle = state.selectedBundle;
+    if (!bundle) {
+      paneWelcome();
+      return;
+    }
+
+    const allBundleFiles = getBundleFiles(bundle);
+
+    const results = await Promise.allSettled(
+      allBundleFiles.map(async (fileItem) => {
+        const data = await api(`/api/compare?path=${encodeURIComponent(fileItem.path)}`);
+        const changes = data.changes ?? [];
+        const unattributed = data.unattributed ?? [];
+        const shownChanges = changes.filter((c) => matchesBundle(c, bundle));
+        const shownUnattributed = bundle.commit ? [] : unattributed;
+        return {
+          fileItem,
+          changes: shownChanges,
+          unattributed: shownUnattributed,
+        };
+      })
+    );
+
+    let totalBundleChanges = 0;
+    let totalBundleWitnesses = 0;
+    const allMoments = [];
+
+    const fileHistoryList = results.map((res, idx) => {
+      const fileItem = allBundleFiles[idx];
+      if (res.status === "fulfilled") {
+        const { changes, unattributed } = res.value;
+        const fileWitCount = changes.reduce((n, c) => n + (c.witnesses?.length ?? 0), 0) + unattributed.length;
+        totalBundleChanges += changes.length;
+        totalBundleWitnesses += fileWitCount;
+        allMoments.push(...changes.flatMap((c) => c.witnesses ?? []), ...unattributed);
+        return {
+          fileItem,
+          changes,
+          unattributed,
+          witnessCount: fileWitCount,
+          error: null,
+        };
+      } else {
+        return {
+          fileItem,
+          changes: [],
+          unattributed: [],
+          witnessCount: fileItem.witnessCount ?? 0,
+          error: res.reason,
+        };
+      }
+    });
+
+    state.moments = allMoments;
+
+    const fileCount = allBundleFiles.length;
+    const totalWit = Math.max(totalBundleWitnesses, bundle.witnessCount ?? 0);
+
+    const shaBit = bundle.commit && bundle.commit !== "uncommitted"
+      ? ` · ${bundle.commit.slice(0, 7)}`
+      : "";
+
+    const shortCommit = bundle.commit
+      ? (bundle.commit === "uncommitted" ? "uncommitted" : bundle.commit.slice(0, 7))
+      : "";
+
+    $("#sub-note").textContent = `${totalBundleChanges} changes · ${totalWit} moments (${shortCommit})`;
+
+    const nodes = [];
+
+    const summaryWrap = el("div", "bundle-summary");
+    const topTitle = el("div", "bundle-summary-title", `${epistemicLabel(bundle.epistemic)}${shaBit}`);
+    const topMeta = el("div", "bundle-summary-meta", `${fileCount} ${fileCount === 1 ? "file" : "files"} · ${noteWord(totalWit)}`);
+    summaryWrap.append(topTitle, topMeta);
+    nodes.push(summaryWrap);
+
+    if (fileHistoryList.length === 0) {
+      nodes.push(empty("no files recorded in this bundle."));
+    } else {
+      const bundleFilesWrap = el("div", "bundle-files");
+      bundleFilesWrap.setAttribute("role", "list");
+
+      fileHistoryList.forEach((entry, index) => {
+        const { fileItem, changes, unattributed, witnessCount, error } = entry;
+        const card = el("div", "bundle-file-card");
+        const head = el("button", "bundle-file-head");
+        head.type = "button";
+
+        let isOpen = index === 0;
+        head.setAttribute("aria-expanded", String(isOpen));
+
+        const headLeft = el("div", "bundle-file-head-left");
+        const toggleIcon = el("span", "bundle-file-toggle", isOpen ? "▾" : "▸");
+        const parts = fileItem.path.split("/");
+        const baseName = parts.pop() ?? fileItem.path;
+        const dir = parts.join("/");
+
+        const nameSpan = el("span", "bundle-file-name", baseName);
+        headLeft.append(toggleIcon, nameSpan);
+        if (dir) {
+          const dirSpan = el("span", "bundle-file-dir", dir);
+          headLeft.append(dirSpan);
+        }
+
+        const headRight = el("div", "bundle-file-head-right");
+        const statParts = [];
+        if (changes.length > 0) {
+          statParts.push(`${changes.length} ${changes.length === 1 ? "change" : "changes"}`);
+        }
+        if (witnessCount > 0) {
+          statParts.push(noteWord(witnessCount));
+        } else if (changes.length === 0) {
+          statParts.push(fileItem.rows && fileItem.rows.length > 0 ? "1 change" : "no diff");
+        }
+
+        const statsSpan = el("span", "bundle-file-stats", statParts.join(" · "));
+        headRight.append(statsSpan);
+
+        head.append(headLeft, headRight);
+
+        const bodyWrap = el("div", "bundle-file-body");
+        bodyWrap.hidden = !isOpen;
+
+        if (error) {
+          bodyWrap.append(el("div", "bundle-diff-empty", "rocky could not hear history for this file."));
+        } else if (changes.length === 0 && unattributed.length === 0) {
+          if (fileItem.rows && fileItem.rows.length > 0) {
+            bodyWrap.append(diffBlock({ commit: bundle.commit, rows: fileItem.rows }, true));
+          } else {
+            bodyWrap.append(el("div", "bundle-diff-empty", "no witnesses in this bundle for this file."));
+          }
+        } else {
+          for (const change of changes) {
+            const changeDiff = change.diff ?? (fileItem.rows && fileItem.rows.length > 0 ? { commit: bundle.commit, rows: fileItem.rows } : undefined);
+            bodyWrap.append(changeCard({ ...change, diff: changeDiff }));
+          }
+          if (unattributed.length > 0) {
+            if (changes.length > 0) bodyWrap.append(el("div", "unattributed-head", "moments without an attributable change"));
+            for (const record of unattributed) bodyWrap.append(recordRow(record, undefined, true));
+          }
+        }
+
+        head.addEventListener("click", (event) => {
+          event.stopPropagation();
+          isOpen = !isOpen;
+          head.setAttribute("aria-expanded", String(isOpen));
+          toggleIcon.textContent = isOpen ? "▾" : "▸";
+          bodyWrap.hidden = !isOpen;
+          card.classList.toggle("open", isOpen);
+        });
+
+        card.append(head, bodyWrap);
+        bundleFilesWrap.append(card);
+      });
+
+      if (state.bundleDiff?.truncated || bundle.truncated) {
+        const total = state.bundleDiff?.total ?? allBundleFiles.length;
+        bundleFilesWrap.append(el("div", "trunc", `… diff truncated (${allBundleFiles.length} of ${total} files)`));
+      }
+
+      nodes.push(bundleFilesWrap);
+    }
+
+    fill(pane, ...nodes);
+    return;
+  }
+
   if (!state.file) {
     paneWelcome();
     return;
@@ -947,32 +1226,19 @@ async function renderHistory(pane) {
   const changes = data.changes ?? [];
   const unattributed = data.unattributed ?? [];
 
-  let shownChanges = changes;
-  let shownUnattributed = unattributed;
+  const witnessCount = changes.reduce((n, c) => n + (c.witnesses?.length ?? 0), 0) + unattributed.length;
+  state.moments = [...changes.flatMap((c) => c.witnesses ?? []), ...unattributed];
 
-  if (state.view === "bundle" && state.selectedBundle) {
-    shownChanges = changes.filter((c) => matchesBundle(c, state.selectedBundle));
-    shownUnattributed = state.selectedBundle.commit ? [] : unattributed;
-  }
+  $("#sub-note").textContent = `${changes.length} changes · ${witnessCount} moments`;
 
-  const witnessCount = shownChanges.reduce((n, c) => n + (c.witnesses?.length ?? 0), 0) + shownUnattributed.length;
-  state.moments = [...shownChanges.flatMap((c) => c.witnesses ?? []), ...shownUnattributed];
-
-  const shortCommit = state.selectedBundle?.commit
-    ? (state.selectedBundle.commit === "uncommitted" ? "uncommitted" : state.selectedBundle.commit.slice(0, 7))
-    : "";
-  $("#sub-note").textContent = state.view === "bundle" && state.selectedBundle
-    ? `${shownChanges.length} changes · ${witnessCount} moments (${shortCommit})`
-    : `${changes.length} changes · ${witnessCount} moments`;
-
-  if (shownChanges.length === 0 && shownUnattributed.length === 0) {
-    fill(pane, empty(state.view === "bundle" ? "no witnesses in this bundle for this file." : "nothing heard for this file yet."));
+  if (changes.length === 0 && unattributed.length === 0) {
+    fill(pane, empty("nothing heard for this file yet."));
     return;
   }
-  const cards = shownChanges.map((change) => changeCard(change));
-  if (shownUnattributed.length > 0) {
-    if (shownChanges.length > 0) cards.push(el("div", "unattributed-head", "moments without an attributable change"));
-    for (const record of shownUnattributed) cards.push(recordRow(record, undefined, true));
+  const cards = changes.map((change) => changeCard(change));
+  if (unattributed.length > 0) {
+    if (changes.length > 0) cards.push(el("div", "unattributed-head", "moments without an attributable change"));
+    for (const record of unattributed) cards.push(recordRow(record, undefined, true));
   }
   fill(pane, ...cards);
 }
@@ -1541,10 +1807,24 @@ async function askModel(anchor, prompt, keep, ctx) {
   }
 
   const paragraphs = guessNodes(answer.text || answer.error || "model said nothing.");
+  const extraNodes = [];
+
+  if (answer.referenceChain && Array.isArray(answer.referenceChain) && answer.referenceChain.length > 0) {
+    const chainBox = el("details", "ref-chain-drawer");
+    const summary = el("summary", "ref-chain-head", `Reference Chain (${answer.referenceChain.length} steps)`);
+    const chainList = el("div", "ref-chain-list");
+    answer.referenceChain.forEach((step, idx) => {
+      chainList.append(el("div", "ref-chain-step", `${idx > 0 ? "  ↳ " : ""}${step}`));
+    });
+    chainBox.append(summary, chainList);
+    extraNodes.push(chainBox);
+  }
+
   const guess = box(
     "guess",
     el("p", "guess-head", "Model Guess (Beta)"),
     ...paragraphs,
+    ...extraNodes,
     el("div", "card-ev", `guessed by ${settings.model}. not evidence. cross check`),
   );
   openPop(anchor, ...keep, guess);
