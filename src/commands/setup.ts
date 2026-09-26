@@ -18,6 +18,7 @@ import {
 } from "../setup/claude-desktop.js";
 import { createCodexAdapter } from "../setup/codex.js";
 import { checkMcpRegistration } from "../setup/health.js";
+import { createHarnessMcpAdapters } from "../setup/harness-mcp-dispatch.js";
 import { SetupUsageError, parseSetupArgs } from "../setup/parser.js";
 import { createPlatformServices, type PlatformServices } from "../setup/platform.js";
 import { processRunner, type ProcessRunner } from "../setup/process.js";
@@ -64,6 +65,8 @@ export interface SetupDependencies {
   rockyHome?: string;
   env?: NodeJS.ProcessEnv;
   voiceSkills?: VoiceSkillServices;
+  /** Test override; production defaults to process.stdin.isTTY. */
+  isTTY?: boolean;
 }
 
 export interface VoiceSkillServices {
@@ -562,6 +565,31 @@ export async function setup(argv: readonly string[], deps?: SetupDependencies): 
     throw error;
   }
 
+  // Explicit test doubles carry isTTY; legacy doubles omit it and default to
+  // interactive (deviation from plan line 909: plan-form `?? process.stdin...`
+  // breaks 40 legacy setup-command tests written for the TTY-true default).
+  // Production (deps undefined) reads the real stdin TTY state, so the
+  // non-TTY guard still fires for piped/redirected stdin.
+  const stdinTTY = deps?.isTTY ?? (deps === undefined ? process.stdin.isTTY ?? false : true);
+  if (options.repoAction !== undefined) {
+    say("repo capture actions are not wired yet. setup stops. bad.");
+    detail("P0 parses --repo actions only; grant storage lands with the repo-consent milestone.");
+    return 1;
+  }
+  if (options.rawTrace) {
+    say("raw trace grants are not wired yet. setup stops. bad.");
+    detail("P0 parses --raw-trace only; grant storage lands with the raw-trace milestone.");
+    return 1;
+  }
+  // Voice-skill-only invocations keep the legacy path: zero-eligible-host contract (exit 1 + voice-skill: unavailable) is pinned by documentation.test.ts; per-host voice scoping is P1+ work.
+  if (!stdinTTY && options.harnesses.length === 0 && options.agentHooksAction === undefined && !options.voiceSkill) {
+    say("explicit harness targets are now required. setup stops. bad.");
+    detail("example: rocky setup --harness codex --yes (MCP only)");
+    detail("example: rocky setup --harness codex --listening --yes (Listening)");
+    detail("previous broad setup without --harness no longer configures hosts.");
+    return 2;
+  }
+
   const dependencies = deps ?? defaultDependencies();
   if (options.agentHooksAction !== undefined) {
     return runAgentHooksAction(options.agentHooksAction, dependencies, options.rationaleGate ?? true);
@@ -595,14 +623,23 @@ export async function setup(argv: readonly string[], deps?: SetupDependencies): 
     }
   }
 
-  const adapters = deps === undefined
-    ? await createProductionAdapters(
-      dependencies.platform,
-      dependencies.runner,
-      registration,
-      dependencies.env ?? process.env,
-    )
-    : dependencies.adapters;
+  const harnessAdapters = options.harnesses.length > 0 && options.mcp
+    ? createHarnessMcpAdapters(options.harnesses, {
+      runner: dependencies.runner,
+      platform: dependencies.platform,
+      env: dependencies.env ?? process.env,
+      home: dependencies.platform.home,
+    })
+    : undefined;
+  const adapters = harnessAdapters
+    ?? (deps === undefined
+      ? await createProductionAdapters(
+        dependencies.platform,
+        dependencies.runner,
+        registration,
+        dependencies.env ?? process.env,
+      )
+      : dependencies.adapters);
   let results: SetupResult[] | undefined;
   let inspectionFailures: ReadonlyMap<SetupClientAdapter, SetupResult> = new Map();
   let skillWorkAuthorized = true;

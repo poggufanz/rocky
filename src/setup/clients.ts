@@ -1,4 +1,5 @@
 import type { Exposure } from "../core/config-read.js";
+import type { HarnessId } from "./harness-registry.js";
 
 export interface McpRegistration {
   name: "rocky";
@@ -20,9 +21,21 @@ export interface SetupOptions {
   agentHooksAction?: AgentHooksAction;
   /** Only meaningful alongside agentHooksAction "install"; default true. */
   rationaleGate?: boolean;
+  /** Explicit harness targets, deduped in first-seen order; [] = legacy path. */
+  harnesses: readonly HarnessId[];
+  /** Feature selectors; both false at parse output means MCP-only default. */
+  mcp: boolean;
+  listening: boolean;
+  /** Absolute path for standalone repo-consent actions. */
+  repo?: string;
+  repoAction?: "allow-capture" | "revoke-capture" | "check-capture";
+  /** P0 parses + validates only; grant storage is out of scope. */
+  rawTrace: boolean;
 }
 
-export type SetupClientId = "codex" | "claude-code" | "claude-desktop";
+export type SetupClientId =
+  | "codex" | "claude-code" | "claude-desktop"
+  | "opencode" | "gemini-cli" | "copilot-cli";
 
 export type SetupStatus =
   | "configured"
