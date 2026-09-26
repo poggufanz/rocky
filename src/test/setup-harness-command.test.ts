@@ -66,3 +66,9 @@ test("non-TTY voice-skill-only bypasses the harness guard and reaches the legacy
   assert.equal(code, 1);
   assert.ok(adapter.calls.includes("configure"));
 });
+
+test("non-TTY agent-hooks actions are not forced into harness scope", async () => {
+  const adapter = new FakeAdapter();
+  const code = await setup(["--agent-hooks"], deps(adapter, false));
+  assert.notEqual(code, 2);
+});

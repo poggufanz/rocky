@@ -564,10 +564,11 @@ export async function setup(argv: readonly string[], deps?: SetupDependencies): 
     throw error;
   }
 
-  // Explicit test doubles carry isTTY; pre-existing callers (legacy tests and
-  // any deps object predating the override) omit it and keep the interactive
-  // legacy path. Production (deps undefined) reads the real stdin TTY state,
-  // so the non-TTY guard still fires for piped/redirected stdin.
+  // Explicit test doubles carry isTTY; legacy doubles omit it and default to
+  // interactive (deviation from plan line 909: plan-form `?? process.stdin...`
+  // breaks 40 legacy setup-command tests written for the TTY-true default).
+  // Production (deps undefined) reads the real stdin TTY state, so the
+  // non-TTY guard still fires for piped/redirected stdin.
   const stdinTTY = deps?.isTTY ?? (deps === undefined ? process.stdin.isTTY ?? false : true);
   if (options.repoAction !== undefined) {
     say("repo capture actions are not wired yet. setup stops. bad.");
