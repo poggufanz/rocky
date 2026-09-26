@@ -2371,23 +2371,28 @@ function syncJevProviderSections() {
 /**
  * Unified OpenRouter mode: the main provider serves both the LLM model and
  * Jev (typesafe/jev-1.13) behind the single main key, so the whole Jev block
- * stays hidden. Detection reads the catalogue id first, then falls back to
- * endpoint/label text so a typed-but-unresolved OpenRouter endpoint hides the
- * block too. Substring on purpose: only the base URL tells OpenRouter apart.
+ * stays hidden. Detection checks the active provider catalogue id first,
+ * then the currently selected or typed endpoint.
  */
 function mainIsOpenRouter() {
-  try {
-    if (provider !== null && provider.id === "openrouter") return true;
-  } catch {
-    // catalogue state unreadable: fall through to the text checks
+  if (provider !== null && typeof provider.id === "string") {
+    return provider.id === "openrouter";
   }
-  const candidates = [];
-  try { candidates.push(currentEndpoint()); } catch { /* modal not painted yet */ }
-  try { candidates.push(chosen.endpoint); } catch { /* picker state unreadable */ }
-  try { candidates.push(settings.endpoint); } catch { /* settings unreadable */ }
-  try { candidates.push($("#set-endpoint") ? $("#set-endpoint").value : ""); } catch { /* field absent */ }
-  try { candidates.push($("#provider-search") ? $("#provider-search").value : ""); } catch { /* field absent */ }
-  return candidates.some((text) => typeof text === "string" && text.toLowerCase().includes("openrouter"));
+  const ep = currentEndpoint();
+  if (ep) {
+    return ep.toLowerCase().includes("openrouter.ai");
+  }
+  if (!chosen.custom && chosen.endpoint) {
+    return chosen.endpoint.toLowerCase().includes("openrouter.ai");
+  }
+  const search = $("#provider-search") ? $("#provider-search").value.trim().toLowerCase() : "";
+  if (search && search !== "custom…" && search !== "custom...") {
+    return search.includes("openrouter");
+  }
+  if (settings.endpoint) {
+    return settings.endpoint.toLowerCase().includes("openrouter.ai");
+  }
+  return settings.provider === "openrouter";
 }
 
 /**
@@ -2434,9 +2439,9 @@ function paintSettings() {
 
 async function openSettings() {
   await pullSettings();
-  paintSettings();
   await paintProviders();
   await refreshModels();
+  paintSettings();
   $("#scrim").hidden = false;
   $("#settings").hidden = false;
   $("#set-endpoint").focus();
@@ -2445,12 +2450,17 @@ async function openSettings() {
 function closeSettings() {
   closeProviders();
   $("#settings").hidden = true;
-  $("#scrim").hidden = true;
+  if ($("#repo-filter").hidden) $("#scrim").hidden = true;
   $("#settings-btn").focus();
 }
 
 for (const [selector, event, handler] of [
   ["#settings-btn", "click", (event) => { event.stopPropagation(); openSettings(); }],
+  ["#settings-close", "click", closeSettings],
+  ["#scrim", "click", () => {
+    if (!$("#repo-filter").hidden) closeRepoFilter();
+    if (!$("#settings").hidden) closeSettings();
+  }],
   ["#set-jevprovider", "change", () => { syncJevBlock(); }],
   ["#settings-save", "click", () => {
     const typed = $("#set-key").value;
@@ -2463,8 +2473,9 @@ for (const [selector, event, handler] of [
     const jevTyped = jevField ? jevField.value : "";
     const orTyped = orField ? orField.value : "";
     const jevProvider = $("#set-jevprovider") ? $("#set-jevprovider").value : settings.jevProvider;
+    const nextProvider = unified ? "openrouter" : (provider?.id === "anthropic" ? "anthropic" : "openai");
     void pushSettings({
-      provider: settings.provider,
+      provider: nextProvider,
       endpoint: currentEndpoint(),
       model: $("#set-model").value,
       lang: $("#set-lang").value,

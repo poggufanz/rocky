@@ -4,7 +4,7 @@
  * The catalogue is models.dev. Rocky would rather show `GPT-4o` and a real
  * list of models than make the owner type an id and hope, and the only place
  * that knows is the catalogue. So this is the second host Rocky ever talks to,
- * after the BYOK proxy: cached on disk for a week, and failing open in every
+ * after the BYOK proxy: cached on disk for a day, and failing open in every
  * direction. An unreachable catalogue means no model list, never an error.
  *
  * A logo never reaches the page as markup. Only the viewBox and each path's
@@ -18,7 +18,7 @@ import { resolveRockyPaths } from "../core/state-paths.js";
 const CATALOGUE = "https://models.dev/api.json";
 const LOGO = (provider: string): string => `https://models.dev/logos/${provider}.svg`;
 
-const FRESH_MS = 7 * 24 * 60 * 60 * 1000;
+const FRESH_MS = 24 * 60 * 60 * 1000;
 const FETCH_TIMEOUT_MS = 8_000;
 const MAX_LOGO_BYTES = 32 * 1024;
 const MAX_PATHS = 24;
