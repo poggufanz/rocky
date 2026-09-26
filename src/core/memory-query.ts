@@ -763,7 +763,7 @@ export function searchKnowledge(
   records: readonly MemoryRecord[],
   input: KnowledgeSearchQuery,
 ): KnowledgeSearchHit[] {
-  const limit = Math.min(Math.max(input.limit ?? 10, 1), 20);
+  const limit = Math.min(Math.max(input.limit ?? 10, 1), Math.max(records.length, 1));
   const now = input.now ?? Date.now();
   const queryTokenSet = queryTokens(input.query);
   const hits: KnowledgeSearchHit[] = [];

@@ -98,6 +98,16 @@ test("renderer strips uncited extras and counts them", () => {
   assert.ok(!check.stripped.includes("stale DNS"));
 });
 
+test("renderer strips uncited markdown list claims and keeps cited claims", () => {
+  const uncited = validateRenderedClaims("- unrelated memory summary", ["memory-record-a"]);
+  assert.equal(uncited.dropped, 1);
+  assert.equal(uncited.stripped, "");
+
+  const cited = validateRenderedClaims("- supported memory fact [memory-record-a]", ["memory-record-a"]);
+  assert.equal(cited.dropped, 0);
+  assert.equal(cited.stripped, "- supported memory fact [memory-record-a]");
+});
+
 function hermetic(): { home: string; root: string } {
   const home = mkdtempSync(join(tmpdir(), "rocky-chatllm-home-"));
   const root = mkdtempSync(join(tmpdir(), "rocky-chatllm-root-"));
@@ -196,7 +206,7 @@ test("active model: /api/chat provably calls structurer AND renderer (stub count
   try {
     const handle = await startGui({ port: 0, root });
     try {
-      const answer = await postChat(handle, { message: "npm run build", model: "stub-chat-model" });
+      const answer = await postChat(handle, { message: "code: npm run build", model: "stub-chat-model" });
       assert.equal(answer.status, 200);
       const wire = readLlmWire(answer.parsed);
       assert.equal(structurerCalls, 1);
@@ -227,7 +237,7 @@ test("unknown model id: disclosed fallback, never mocked", async () => {
   try {
     const handle = await startGui({ port: 0, root });
     try {
-      const answer = await postChat(handle, { message: "npm run build", model: "ghost-model" });
+      const answer = await postChat(handle, { message: "code: npm run build", model: "ghost-model" });
       assert.equal(answer.status, 200);
       const wire = readLlmWire(answer.parsed);
       assert.equal(wire.active, false);
@@ -259,7 +269,7 @@ test("missing key: BYOK selection disabled with baseline, never mocked", async (
   try {
     const handle = await startGui({ port: 0, root });
     try {
-      const answer = await postChat(handle, { message: "npm run build", model: "gpt-4o-mini" });
+      const answer = await postChat(handle, { message: "code: npm run build", model: "gpt-4o-mini" });
       assert.equal(answer.status, 200);
       const wire = readLlmWire(answer.parsed);
       assert.equal(wire.active, false);
@@ -291,7 +301,7 @@ test("invalid structurer JSON falls back deterministically with disclosed status
   try {
     const handle = await startGui({ port: 0, root });
     try {
-      const answer = await postChat(handle, { message: "npm run build", model: "stub-chat-model" });
+      const answer = await postChat(handle, { message: "code: npm run build", model: "stub-chat-model" });
       assert.equal(answer.status, 200);
       const wire = readLlmWire(answer.parsed);
       assert.equal(wire.structurer, "structurer-fallback");
@@ -382,7 +392,7 @@ test("inactive path discloses the renderer status in the served text, never mock
   try {
     const handle = await startGui({ port: 0, root });
     try {
-      const answer = await postChat(handle, { message: "npm run build", model: "ghost-model" });
+      const answer = await postChat(handle, { message: "code: npm run build", model: "ghost-model" });
       assert.equal(answer.status, 200);
       const wire = readLlmWire(answer.parsed);
       assert.equal(wire.active, false);
@@ -396,46 +406,27 @@ test("inactive path discloses the renderer status in the served text, never mock
   }
 });
 
-test("user project query: LLM structures via TypeSafe rules and renders human-friendly synthesis", async () => {
+test("memory-only local renderer uses complete relevant records", async () => {
   const { home, root } = hermetic();
-  seedMemory(home, [
-    failureRecord("fail-build-001", "npm run build:extt"),
-    {
-      kind: "fix",
-      id: "fix-build-002",
-      ts: Date.now() - 500,
-      cwd: "/repo",
-      cmd: "npm --prefix rocky run build",
-      resolvedFailures: ["fail-build-001"],
-    },
-  ]);
+  seedMemory(home, [{
+    kind: "note",
+    id: "memory-build-record",
+    ts: Date.now() - 1000,
+    cwd: "/repo",
+    cmd: "rocky why --add",
+    file: "docs/build.md",
+    line: 1,
+    subject: "npm run build result",
+    answer: `Build result recorded in full. ${"detail from build log. ".repeat(32)}TAIL-WHOLE-MEMORY-RECORD`,
+  }]);
 
-  let structuredReceivedQuery = "";
   let rendererReceivedPrompt = "";
 
   __setChatLlmTestDoubles({
     listInstalledModels: async () => ["gpt-5.6-luna"],
-    ollamaStructured: async (model: string, prompt: string, schema: Record<string, unknown>) => {
-      if (String(schema.required ?? "").includes("candidates") || "candidates" in (schema.properties as Record<string, unknown>)) {
-        structuredReceivedQuery = prompt;
-        return {
-          query: "kenapa build script sempat error?",
-          candidates: [
-            { ref: "fail-build-001", kind: "failure", snippet: "npm run build:extt error" },
-            { ref: "fix-build-002", kind: "fix", snippet: "npm --prefix rocky run build resolved" },
-          ],
-        };
-      }
+    ollamaStructured: async (_model: string, prompt: string) => {
       rendererReceivedPrompt = prompt;
-      return {
-        text: [
-          "Berdasarkan rekaman memori Rocky dan evaluasi Jev:",
-          "1. Build script sempat mengalami kegagalan pada perintah `npm run build:extt` [fail-build-001].",
-          "2. Masalah ini berhasil diselesaikan dengan menjalankan `npm --prefix rocky run build` [fix-build-002].",
-          "",
-          "Ringkasan: Error terjadi karena target script yang keliru, dan sudah tercatat perbaikan yang sukses.",
-        ].join("\n"),
-      };
+      return { text: "Recorded build evidence [memory-build-record]." };
     },
   });
 
@@ -443,24 +434,238 @@ test("user project query: LLM structures via TypeSafe rules and renders human-fr
     const handle = await startGui({ port: 0, root });
     try {
       const answer = await postChat(handle, {
-        message: "kenapa build script sempat error?",
+        message: "npm run build",
         model: "gpt-5.6-luna",
       });
       assert.equal(answer.status, 200);
       const wire = readLlmWire(answer.parsed);
       assert.equal(wire.active, true);
       assert.equal(wire.model, "gpt-5.6-luna");
-      assert.equal(wire.structurer, "used");
+      assert.equal(wire.structurer, "memory-only");
       assert.equal(wire.renderer, "used");
+      const payload = answer.parsed as { text: string; evidenceCards: { ref: string; snippet: string }[] };
+      assert.equal(payload.evidenceCards.length, 1);
+      assert.equal(payload.evidenceCards[0]?.ref, "memory-build-record");
+      assert.ok(payload.evidenceCards[0]?.snippet.includes("TAIL-WHOLE-MEMORY-RECORD"));
       assert.equal(wire.stripped, 0);
+      assert.ok(payload.text.includes("memory-build-record"));
+      assert.ok(rendererReceivedPrompt.includes("TAIL-WHOLE-MEMORY-RECORD"));
+    } finally {
+      await handle.close();
+    }
+  } finally {
+    __clearChatLlmTestDoubles();
+  }
+});
+test("memory-only filters weak hits and never sends memory to remote models", async () => {
+  const { home, root } = hermetic();
+  seedMemory(home, [
+    {
+      kind: "note",
+      id: "memory-multi-line-shell",
+      ts: Date.now() - 1000,
+      cwd: "/repo",
+      cmd: "rocky why --add",
+      file: "src/shell.ts",
+      line: 1,
+      subject: "multi-line interactive PowerShell command capture",
+      answer: `apakah teks command multi-baris bisa ditangkap? ${"console transcript prompt capture ".repeat(8)}`,
+    },
+    {
+      kind: "note",
+      id: "memory-vibingfarmer-strong",
+      ts: Date.now() - 500,
+      cwd: "/repo",
+      cmd: "rocky why --add",
+      file: "docs/chain.md",
+      line: 1,
+      subject: "vibingfarmer multi chain support",
+      answer: "VibingFarmer multi chain support recorded as direct evidence.",
+    },
+  ]);
+  seedConfig(home, { version: 1, ai: { enabled: false }, decision: { engine: "jev", jevProvider: "typesafe" } });
+  writeFileSync(join(home, "gui.json"), `${JSON.stringify({
+    provider: "openai",
+    endpoint: "https://api.openai.com/v1/chat/completions",
+    model: "remote-chat-model",
+    key: "test-main-key",
+    jevKey: "test-jev-key",
+    openRouterKey: "",
+    lang: "id",
+  })}\n`);
 
-      const payload = answer.parsed as { text: string; evidenceCards: unknown[] };
-      assert.ok(payload.text.includes("Berdasarkan rekaman memori Rocky"));
-      assert.ok(payload.text.includes("npm run build:extt"));
-      assert.ok(payload.text.includes("npm --prefix rocky run build"));
-      assert.ok(payload.text.includes("renderer: used (gpt-5.6-luna)."));
-      assert.ok(Array.isArray(payload.evidenceCards));
-      assert.ok(payload.evidenceCards.length >= 1);
+  const previousFetch = globalThis.fetch;
+  const previousTypesafeKey = process.env.TYPESAFE_API_KEY;
+  const remoteCalls: string[] = [];
+  let modelCalls = 0;
+  process.env.TYPESAFE_API_KEY = "test-jev-key";
+  globalThis.fetch = (async (input, init) => {
+    const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+    if (url.startsWith("http://127.0.0.1:")) return previousFetch(input, init);
+    remoteCalls.push(url);
+    throw new Error("unexpected remote request");
+  }) as typeof fetch;
+  __setChatLlmTestDoubles({
+    listInstalledModels: async () => [],
+    byokStructured: async () => { modelCalls += 1; return {}; },
+    byokText: async () => { modelCalls += 1; return "- unrelated memory summary [memory-multi-line-shell]"; },
+  });
+
+  try {
+    const handle = await startGui({ port: 0, root });
+    try {
+      const answer = await postChat(handle, {
+        message: "apakah vibingfarmer bisa multi chian?",
+        model: "remote-chat-model",
+      });
+      assert.equal(answer.status, 200);
+      const payload = answer.parsed as {
+        text: string;
+        evidenceCards: unknown[];
+        decisionTrace: { status: string };
+      };
+      assert.deepEqual(payload.evidenceCards, []);
+      assert.equal(payload.decisionTrace.status, "low_confidence");
+      assert.match(payload.text, /tidak ada ingatan yang cukup cocok/i);
+      const matchedAnswer = await postChat(handle, {
+        message: "vibingfarmer multi chain support",
+        model: "remote-chat-model",
+      });
+      assert.equal(matchedAnswer.status, 200);
+      const matchedPayload = matchedAnswer.parsed as {
+        evidenceCards: { ref: string }[];
+        decisionTrace: { status: string };
+        llm: { active: boolean };
+      };
+      assert.deepEqual(matchedPayload.evidenceCards.map((card) => card.ref), ["memory-vibingfarmer-strong"]);
+      assert.equal(matchedPayload.decisionTrace.status, "used");
+      assert.equal(matchedPayload.llm.active, false);
+      assert.equal(modelCalls, 0, "memory-only request must not call configured BYOK model");
+      assert.deepEqual(remoteCalls, [], "memory-only request must not call remote Jev");
+    } finally {
+      await handle.close();
+    }
+  } finally {
+    __clearChatLlmTestDoubles();
+    globalThis.fetch = previousFetch;
+    if (previousTypesafeKey === undefined) delete process.env.TYPESAFE_API_KEY;
+    else process.env.TYPESAFE_API_KEY = previousTypesafeKey;
+  }
+});
+
+test("memory-only chat returns every matching record whole", async () => {
+  const { home, root } = hermetic();
+  const notes = Array.from({ length: 25 }, (_, index) => ({
+    kind: "note",
+    id: `memory-vibingfarmer-${index}`,
+    ts: Date.now() - index - 1000,
+    cwd: "/repo",
+    cmd: "rocky why --add",
+    file: "docs/memory.md",
+    line: index + 1,
+    subject: "vibingfarmer multi chain support",
+    answer: `Recorded evidence ${index}. ${"complete record detail ".repeat(18)}END-OF-RECORD-${index}`,
+  }));
+  seedMemory(home, notes);
+  __setChatLlmTestDoubles({ listInstalledModels: async () => [] });
+
+  try {
+    const handle = await startGui({ port: 0, root });
+    try {
+      const answer = await postChat(handle, { message: "vibingfarmer multi chain support" });
+      assert.equal(answer.status, 200);
+      const payload = answer.parsed as { evidenceCards: { ref: string; snippet: string }[] };
+      assert.equal(payload.evidenceCards.length, notes.length);
+      for (let index = 0; index < notes.length; index += 1) {
+        const card = payload.evidenceCards.find((candidate) => candidate.ref === `memory-vibingfarmer-${index}`);
+        assert.ok(card, `missing complete memory record ${index}`);
+        assert.ok(card.snippet.length > 500, `record ${index} was truncated`);
+        assert.ok(card.snippet.includes(`END-OF-RECORD-${index}`), `record ${index} tail was dropped`);
+        assert.ok(!card.snippet.includes("snippet long"), `record ${index} was clipped by chat card limit`);
+      }
+    } finally {
+      await handle.close();
+    }
+  } finally {
+    __clearChatLlmTestDoubles();
+  }
+});
+
+test("memory-only holds rather than truncate oversized complete matches", async () => {
+  const { home, root } = hermetic();
+  const notes = Array.from({ length: 40 }, (_, index) => ({
+    kind: "note",
+    id: `memory-large-${index}`,
+    ts: Date.now() - index - 1000,
+    cwd: "/repo",
+    cmd: "rocky why --add",
+    file: "docs/memory.md",
+    line: index + 1,
+    subject: "vibingfarmer multi chain support",
+    answer: `Recorded evidence ${index}. ${"complete memory detail ".repeat(40)}END-LARGE-RECORD-${index}`,
+  }));
+  seedMemory(home, notes);
+  let modelCalls = 0;
+  __setChatLlmTestDoubles({
+    listInstalledModels: async () => [],
+    ollamaStructured: async () => { modelCalls += 1; return { text: "unsupported" }; },
+  });
+
+  try {
+    const handle = await startGui({ port: 0, root });
+    try {
+      const answer = await postChat(handle, { message: "vibingfarmer multi chain support" });
+      assert.equal(answer.status, 200);
+      const payload = answer.parsed as {
+        evidenceCards: unknown[];
+        decisionTrace: { status: string };
+        llm: { active: boolean };
+      };
+      assert.deepEqual(payload.evidenceCards, []);
+      assert.equal(payload.decisionTrace.status, "unavailable");
+      assert.equal(payload.llm.active, false);
+      assert.equal(modelCalls, 0);
+    } finally {
+      await handle.close();
+    }
+  } finally {
+    __clearChatLlmTestDoubles();
+  }
+});
+
+test("memory-only enforces the context bound after secret redaction", async () => {
+  const { home, root } = hermetic();
+  seedMemory(home, [{
+    kind: "note",
+    id: "memory-secret-expansion",
+    ts: Date.now() - 1000,
+    cwd: "/repo",
+    cmd: "rocky why --add",
+    file: "docs/memory.md",
+    line: 1,
+    subject: "vibingfarmer multi chain support",
+    answer: `Credential assignments: ${"token=abcd ".repeat(1000)}END-SECRET-EXPANSION`,
+  }]);
+  let modelCalls = 0;
+  __setChatLlmTestDoubles({
+    listInstalledModels: async () => [],
+    ollamaStructured: async () => { modelCalls += 1; return { text: "unsupported" }; },
+  });
+
+  try {
+    const handle = await startGui({ port: 0, root });
+    try {
+      const answer = await postChat(handle, { message: "vibingfarmer multi chain support" });
+      assert.equal(answer.status, 200);
+      const payload = answer.parsed as {
+        evidenceCards: unknown[];
+        decisionTrace: { status: string };
+        llm: { active: boolean };
+      };
+      assert.deepEqual(payload.evidenceCards, []);
+      assert.equal(payload.decisionTrace.status, "unavailable");
+      assert.equal(payload.llm.active, false);
+      assert.equal(modelCalls, 0);
     } finally {
       await handle.close();
     }

@@ -134,7 +134,7 @@ test("screenshot regression: selected openrouter id + main-slot key => active, s
   try {
     const handle = await startGui({ port: 0, root });
     try {
-      const answer = await postChat(handle, { message: "npm run build", model: SCREENSHOT_MODEL });
+      const answer = await postChat(handle, { message: "code: npm run build", model: SCREENSHOT_MODEL });
       assert.equal(answer.status, 200);
       const wire = readLlmWire(answer.parsed);
       assert.equal(wire.active, true);
@@ -184,7 +184,7 @@ test("wrong-slot key: jev slots never arm the chat llm => disclosed missing-key,
   try {
     const handle = await startGui({ port: 0, root });
     try {
-      const answer = await postChat(handle, { message: "npm run build", model: SCREENSHOT_MODEL });
+      const answer = await postChat(handle, { message: "code: npm run build", model: SCREENSHOT_MODEL });
       assert.equal(answer.status, 200);
       const wire = readLlmWire(answer.parsed);
       assert.equal(wire.active, false);
@@ -217,7 +217,7 @@ test("unknown id while offline is invalid_model, never unavailable (no outage ma
   try {
     const handle = await startGui({ port: 0, root });
     try {
-      const answer = await postChat(handle, { message: "npm run build", model: "ghost-or-model" });
+      const answer = await postChat(handle, { message: "code: npm run build", model: "ghost-or-model" });
       assert.equal(answer.status, 200);
       const wire = readLlmWire(answer.parsed);
       assert.equal(wire.active, false);
@@ -244,7 +244,7 @@ test("pure ollama id while offline stays unavailable (nothing keyed to judge it)
   try {
     const handle = await startGui({ port: 0, root });
     try {
-      const answer = await postChat(handle, { message: "npm run build", model: "llama3.1" });
+      const answer = await postChat(handle, { message: "code: npm run build", model: "llama3.1" });
       assert.equal(answer.status, 200);
       const wire = readLlmWire(answer.parsed);
       assert.equal(wire.active, false);

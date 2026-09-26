@@ -130,7 +130,7 @@ test("chat with jev configured but no key reports disabled plus baseline", async
   seedConfig(home, { version: 1, ai: { enabled: false }, decision: { engine: "jev" } });
   delete process.env.TYPESAFE_API_KEY;
   await withGui(root, async (handle) => {
-    const answer = await post(handle, { message: "npm run build" });
+    const answer = await post(handle, { message: "code: npm run build" });
     assert.equal(answer.status, 200);
     assert.equal(answer.wire?.decisionTrace.engine, "jev");
     assert.equal(answer.wire?.decisionTrace.status, "disabled");
@@ -159,6 +159,6 @@ test("chat on empty memory holds with a visible trace", async () => {
     assert.equal(answer.status, 200);
     assert.deepEqual(answer.wire?.evidenceCards, []);
     assert.deepEqual(answer.wire?.decisionTrace.evidenceRefs, []);
-    assert.ok(String(answer.wire?.text ?? "").includes("heard nothing"));
+    assert.equal(answer.wire?.decisionTrace.status, "low_confidence");
   });
 });

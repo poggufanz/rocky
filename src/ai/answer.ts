@@ -66,6 +66,9 @@ export const CHAT_DEFAULT_LIMIT = 5;
 export const CHAT_MAX_LIMIT = 10;
 export const CHAT_MAX_SNIPPET_CHARS = 500;
 export const MAX_PROMPT_CHARS = 24_000;
+// A few common-token overlaps are not enough to answer a memory question.
+const CHAT_MEMORY_RELEVANCE_FLOOR = 0.4;
+const CHAT_MEMORY_PROMPT_RESERVE_CHARS = 2_048;
 export const ASK_TIMEOUT_MS = 60_000;
 
 export interface ChatEvidenceCard {
@@ -253,6 +256,31 @@ export function toChatCards(
         : snippet,
     };
   });
+}
+
+function toWholeMemoryCards(
+  memory: readonly MemoryRecord[],
+  hits: readonly { id: string; kind: string; score: number }[],
+  query: string,
+): ChatEvidenceCard[] | undefined {
+  if (!hits.some((hit) => hit.score >= CHAT_MEMORY_RELEVANCE_FLOOR)) return [];
+  const recordsById = new Map<string, MemoryRecord>();
+  for (const record of memory) recordsById.set(record.id, record);
+
+  const cards: ChatEvidenceCard[] = [];
+  let promptChars = query.length + CHAT_MEMORY_PROMPT_RESERVE_CHARS;
+  for (const hit of hits) {
+    if (hit.score < CHAT_MEMORY_RELEVANCE_FLOOR) continue;
+    const record = recordsById.get(hit.id);
+    if (record === undefined) continue;
+    const serialized = JSON.stringify(record);
+    if (serialized === undefined) continue;
+    const snippet = redactSecretsAtBoundary(serialized);
+    promptChars += snippet.length + hit.id.length + hit.kind.length + 48;
+    if (promptChars > MAX_PROMPT_CHARS) return undefined;
+    cards.push({ ref: hit.id, kind: hit.kind, snippet });
+  }
+  return cards;
 }
 
 export function topConfidence(result: DecisionResult): number | null {
@@ -456,6 +484,157 @@ export async function executeCodeSupport(args: {
   return { evidence: collected.evidence, trace: collected.trace, answer: answer(text, "used", check.dropped) };
 }
 
+function memoryOnlyAbstention(args: {
+  asked: string;
+  model: string;
+  status: "low_confidence" | "unavailable";
+  text: string;
+  coverageReason?: string;
+}): AnswerOutcome {
+  const llm: ChatLlmTrace = {
+    active: false,
+    model: args.model,
+    structurerStatus: "memory-only",
+    rendererStatus: "memory-only",
+    stripped: 0,
+  };
+  const trace: ChatTrace = {
+    engine: "heuristic",
+    status: args.status,
+    confidence: null,
+    evidenceRefs: [],
+    latencyMs: 0,
+    llm,
+  };
+  appendDecisionLog({
+    engine: trace.engine,
+    status: trace.status,
+    input_hash: hashDecisionInput(`${args.asked}|`),
+    answer: { order: [] },
+    latency_ms: trace.latencyMs,
+    outcome: "chat",
+    evidenceRefs: [],
+  });
+  return {
+    status: 200,
+    payload: {
+      text: args.text,
+      evidenceCards: [],
+      decisionTrace: trace,
+      llm,
+      renderOrder: [...CHAT_RENDER_ORDER],
+      ...(args.coverageReason === undefined ? {} : { coverage: { reason: args.coverageReason } }),
+    },
+  };
+}
+
+async function executeMemoryOnlyAnswer(args: {
+  asked: string;
+  query: string;
+  memory: readonly MemoryRecord[];
+  coverageReason: string | undefined;
+  requestedModel: string | undefined;
+  stored: GuiSettings;
+  env: NodeJS.ProcessEnv;
+}): Promise<AnswerOutcome> {
+  const lang = args.stored.lang;
+  const model = args.requestedModel ?? args.stored.model;
+  if (args.coverageReason !== undefined) {
+    return memoryOnlyAbstention({
+      asked: args.asked,
+      model,
+      status: "unavailable",
+      text: lang === "id" ? "ingatan terbaca tidak lengkap. Rocky menahan jawaban." : "memory read incomplete. Rocky holds answer.",
+      coverageReason: args.coverageReason,
+    });
+  }
+
+  const hits = searchKnowledge(args.memory, { query: args.query, limit: args.memory.length });
+  const cards = toWholeMemoryCards(args.memory, hits, args.query);
+  if (cards === undefined) {
+    return memoryOnlyAbstention({
+      asked: args.asked,
+      model,
+      status: "unavailable",
+      text: lang === "id"
+        ? "bukti memori utuh melewati batas konteks. Rocky menahan jawaban. record tetap utuh."
+        : "whole memory evidence exceeds context. Rocky holds answer. Records stay whole.",
+    });
+  }
+  if (cards.length === 0) {
+    return memoryOnlyAbstention({
+      asked: args.asked,
+      model,
+      status: "low_confidence",
+      text: lang === "id"
+        ? "tidak ada ingatan yang cukup cocok. Rocky belum tahu jawaban ini."
+        : "Rocky heard no memory that answers this question.",
+    });
+  }
+
+  const selected = await resolveChatLlmSelection({
+    requestedModel: args.requestedModel,
+    stored: args.stored,
+    installed: await listChatInstalledModelNames(),
+    env: args.env,
+  });
+  const rendererSelection: ChatLlmSelection = selected.kind === "byok"
+    ? { active: false, modelId: selected.modelId, kind: "none", endpoint: "", reason: "no-model" }
+    : selected;
+  const evidenceRefs = cards.map((card) => card.ref);
+  const traceBase = {
+    engine: "heuristic" as const,
+    status: "used" as const,
+    confidence: null,
+    evidenceRefs,
+    latencyMs: 0,
+  };
+  const renderer = await runChatRenderer(
+    rendererSelection,
+    {
+      query: args.query,
+      topRef: cards[0]?.ref,
+      topKind: cards[0]?.kind,
+      engine: traceBase.engine,
+      status: traceBase.status,
+      evidenceCount: cards.length,
+      latencyMs: traceBase.latencyMs,
+      evidence: cards.map((card) => ({ ref: card.ref, kind: card.kind, snippet: card.snippet })),
+    },
+    evidenceRefs,
+    args.stored,
+    args.env,
+  );
+  const llm: ChatLlmTrace = {
+    active: rendererSelection.active,
+    model: rendererSelection.modelId,
+    structurerStatus: "memory-only",
+    rendererStatus: renderer.status,
+    stripped: renderer.stripped,
+  };
+  const trace: ChatTrace = { ...traceBase, evidenceRefs: [...evidenceRefs], llm };
+  appendDecisionLog({
+    engine: trace.engine,
+    status: trace.status,
+    input_hash: hashDecisionInput(`${args.asked}|${evidenceRefs.join(",")}`),
+    answer: { order: [...evidenceRefs] },
+    latency_ms: trace.latencyMs,
+    outcome: "chat",
+    evidenceRefs: [...evidenceRefs],
+  });
+  return {
+    status: 200,
+    payload: {
+      text: renderer.text,
+      evidenceCards: cards,
+      decisionTrace: trace,
+      llm,
+      renderOrder: [...CHAT_RENDER_ORDER],
+    },
+  };
+}
+
+
 /**
  * Unified answering engine execution function.
  */
@@ -487,8 +666,19 @@ export async function executeAnswer(options: AnswerOptions): Promise<AnswerOutco
     chatInFlight += 1;
     try {
       const { list, reason } = records();
-      const witnessedFiles = witnessedRepoPaths(list, root);
+      const witnessedFiles = split.mode === "memory" ? [] : witnessedRepoPaths(list, root);
       const codeTriggered = split.mode !== "memory" && (split.mode === "code" || isCodeQuery(query, witnessedFiles));
+      if (!codeTriggered) {
+        return executeMemoryOnlyAnswer({
+          asked,
+          query,
+          memory: list,
+          coverageReason: reason,
+          requestedModel: typeof options.model === "string" ? options.model : undefined,
+          stored,
+          env,
+        });
+      }
       const hits = searchKnowledge(list, { query, limit });
       const shortlist: DecisionCandidate[] = toChatCards(hits, limit).map((card) => ({ ...card }));
 

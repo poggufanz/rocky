@@ -1,11 +1,9 @@
 /**
- * Chat LLM gate: the mandatory-first-pass rule for `/api/chat`.
+ * Chat LLM gate for code questions and local-memory rendering.
  *
- * Creator order: when a real chat model is active, the request MUST go
- * through the LLM first — structuring the Jev state, then rendering the
- * human text from the code-owned fact object. The LLM never decides:
- * Jev + Rocky evidence stay the decider, and the strict renderer strips
- * every line the LLM adds without a citation.
+ * Memory-only chat searches complete local records and never calls BYOK or
+ * remote Jev. It may call loopback Ollama only after relevance filtering.
+ * Code questions retain BYOK-capable structurer and renderer stages.
  *
  * Active predicate (`isLlmActive`, documented here, single definition):
  * a selected model id — `body.model` when the page names one, else the
@@ -277,13 +275,14 @@ function rendererSystemPrompt(): string {
   lines.push("You help developers understand their project's execution history, errors, successful fixes, and reasoning recorded by Rocky.");
   lines.push("");
   lines.push("Rules for your response:");
-  lines.push("1. Narrative Priority: Deliver a fluent, cohesive, and comprehensive narrative explanation that directly answers the user's question.");
+  lines.push("1. Direct Answer: Answer only what the user's question asks. Do not turn weakly related history into a summary.");
   lines.push("2. Language Matching: Reply in Bahasa Indonesia if the user asks in Indonesian, or in English if the user asks in English.");
-  lines.push("3. Grounded in Evidence: Base your response ONLY on the provided Rocky Memory records and Jev decision facts without hallucinating unrecorded facts.");
-  lines.push("4. Clean Human Tone: Do NOT clutter your sentences with raw hash IDs (like [triple-...] or [fail-...]); explain the actual events, actions, contexts, and insights smoothly in natural human terms. (The UI already displays the raw record IDs and snippets in the collapsible Thought Process drawer).");
-  lines.push("5. If No Evidence: If Rocky's memory has no matching records, explain politely that no recorded failures or fixes were found in memory yet.");
-  lines.push("6. Format: Write well-formatted markdown with natural paragraphs, bold terms, bullet points where helpful, and clean structure.");
-  lines.push("7. IMPORTANT: Do NOT output raw template tags or debug lines like 'top: ...' or 'detail: ...' or 'renderer: ...'. Speak naturally like a senior AI engineer.");
+  lines.push("3. Grounded in Evidence: Use ONLY the provided Rocky Memory records and Jev decision facts; do not add outside facts.");
+  lines.push("4. Evidence Citations: Cite every factual sentence and each list item with an allowed evidence reference such as [1] or [2].");
+  lines.push("5. Relevance: If no supplied record directly answers the question, say Rocky has no matching memory and stop. Do not summarize merely related records.");
+  lines.push("6. Clean Human Tone: Avoid raw hash IDs; use numbered citations. The UI displays raw record IDs and snippets in the Thought Process drawer.");
+  lines.push("7. Format: Use concise markdown with natural paragraphs, bold terms, and bullets only when useful.");
+  lines.push("8. IMPORTANT: Do NOT output raw template tags or debug lines like 'top: ...' or 'detail: ...' or 'renderer: ...'. Speak naturally.");
   return lines.join("\n");
 }
 
@@ -426,10 +425,9 @@ export interface ChatStructurerOutcome {
 }
 
 /**
- * Mandatory first pass (a): ask the active chat model for Jev state JSON,
- * then gate it through the ref allowlist. Canonical snippets come from
- * Rocky retrieval, never from the model. Any failure falls back to the
- * deterministic builder with the status disclosed — never silent.
+ * Code-question first pass: ask the active model for Jev state JSON, then
+ * gate it through the retrieved-ref allowlist. Memory-only requests never
+ * call this stage. Failures fall back deterministically with status disclosed.
  */
 export async function runChatStructurer(
   selection: ChatLlmSelection,
@@ -490,10 +488,9 @@ export interface ChatRendererOutcome {
 }
 
 /**
- * Mandatory second pass (b): the LLM renders from the code-owned fact
- * object only. Every line goes through `validateRenderedClaims`; extras
- * are stripped and counted. Renderer failure degrades to the raw
- * template — never a retry-guess.
+ * Rendering pass for code answers and local-memory synthesis. The caller
+ * supplies whole code-owned facts; every factual line must cite an allowed
+ * ref. Failure degrades to the deterministic template with status disclosed.
  */
 export async function runChatRenderer(
   selection: ChatLlmSelection,

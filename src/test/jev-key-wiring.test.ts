@@ -150,7 +150,7 @@ test("chat with jev:true and no key reports disabled plus baseline, disclosed", 
   delete process.env.TYPESAFE_API_KEY;
   try {
     await withGui(root, async (handle) => {
-      const answer = await postChat(handle, { message: "npm run build", jev: true });
+      const answer = await postChat(handle, { message: "code: npm run build", jev: true });
       assert.equal(answer.status, 200);
       const wire = readChatWire(answer.parsed);
       assert.equal(wire.engine, "jev");
@@ -174,7 +174,7 @@ test("chat on the openrouter path with no openrouter key reports disabled plus b
   delete process.env.OPENROUTER_API_KEY;
   try {
     await withGui(root, async (handle) => {
-      const answer = await postChat(handle, { message: "npm run build", jev: true });
+      const answer = await postChat(handle, { message: "code: npm run build", jev: true });
       assert.equal(answer.status, 200);
       const wire = readChatWire(answer.parsed);
       assert.equal(wire.engine, "jev");

@@ -190,13 +190,13 @@ const inRoot = (root: string) => (candidate: string): string | undefined => {
 };
 
 test("ranking reads the file the question names, quotes it verbatim, and caps the excerpts", () => {
-  const root = "/fake/root";
+  const root = resolve(tmpdir(), "fake-root");
   const declaration = "export function fingerprint(stderr: string): string {";
   const io = fakeIo(root, {
-    "/fake/root/src/core/fingerprint.ts": `${declaration}\n  return hash(text);\n}\n`,
-    "/fake/root/src/gui/server.ts": "const unrelated = 1;\n",
-    "/fake/root/docs/notes.md": "# notes\n",
-    "/fake/root/../../etc/passwd": "root:x:0:0:root:/root:/bin/bash\n",
+    [join(root, "src", "core", "fingerprint.ts")]: `${declaration}\n  return hash(text);\n}\n`,
+    [join(root, "src", "gui", "server.ts")]: "const unrelated = 1;\n",
+    [join(root, "docs", "notes.md")]: "# notes\n",
+    [resolve(root, "..", "..", "etc", "passwd")]: "root:x:0:0:root:/root:/bin/bash\n",
   });
   const result = collectCodeEvidence({
     root,
@@ -216,10 +216,10 @@ test("ranking reads the file the question names, quotes it verbatim, and caps th
 });
 
 test("a symbol question finds a file whose name is only part of the symbol", () => {
-  const root = "/fake/root";
+  const root = resolve(tmpdir(), "fake-root");
   const io = fakeIo(root, {
-    "/fake/root/src/memory.ts": "const A = 1;\nexport function loadMemory(path: string) {\n  return read(path);\n}\n",
-    "/fake/root/src/other.ts": "const B = 2;\n",
+    [join(root, "src", "memory.ts")]: "const A = 1;\nexport function loadMemory(path: string) {\n  return read(path);\n}\n",
+    [join(root, "src", "other.ts")]: "const B = 2;\n",
   });
   const result = collectCodeEvidence({ root, query: "where is loadMemory defined", confine: inRoot(root), io, now: () => 0 });
   assert.equal(result.evidence[0]?.path, "src/memory.ts");
@@ -227,10 +227,10 @@ test("a symbol question finds a file whose name is only part of the symbol", () 
 });
 
 test("a secret in a quoted window is redacted before it can leave", () => {
-  const root = "/fake/root";
+  const root = resolve(tmpdir(), "fake-root");
   const secret = "sk-ant-abcdefghijklmnopqrst123";
   const io = fakeIo(root, {
-    "/fake/root/src/unit.ts": `export function loadConfig() {\n  const key = "${secret}";\n  return key;\n}\n`,
+    [join(root, "src", "unit.ts")]: `export function loadConfig() {\n  const key = "${secret}";\n  return key;\n}\n`,
   });
   const result = collectCodeEvidence({ root, query: "where is loadConfig defined", confine: inRoot(root), io, now: () => 0 });
   assert.ok(result.evidence.length >= 1);
@@ -240,7 +240,7 @@ test("a secret in a quoted window is redacted before it can leave", () => {
 });
 
 test("a non-git root scans unranked over the memory-named files only", () => {
-  const root = "/fake/root";
+  const root = resolve(tmpdir(), "fake-root");
   const io: CodeScanIo = {
     lsFiles: () => undefined,
     statSize: (full) => (full.endsWith("a.ts") ? 40 : undefined),
@@ -262,12 +262,12 @@ test("a non-git root scans unranked over the memory-named files only", () => {
 });
 
 test("oversize files are a miss with a disclosure, and a spent round discloses its timeout", () => {
-  const root = "/fake/root";
+  const root = resolve(tmpdir(), "fake-root");
   const oversize = collectCodeEvidence({
     root,
     query: "where is parsePatch defined",
     confine: inRoot(root),
-    io: { ...fakeIo(root, { "/fake/root/big.ts": "x".repeat(10) }), statSize: () => 4 * 1024 * 1024 },
+    io: { ...fakeIo(root, { [join(root, "big.ts")]: "x".repeat(10) }), statSize: () => 4 * 1024 * 1024 },
     now: () => 0,
   });
   assert.deepEqual(oversize.evidence, []);
@@ -280,7 +280,7 @@ test("oversize files are a miss with a disclosure, and a spent round discloses i
     root,
     query: "where is parsePatch defined",
     confine: inRoot(root),
-    io: fakeIo(root, Object.fromEntries(Array.from({ length: 20 }, (_, index) => [`/fake/root/f${index}.ts`, "const x = 1;\n"]))),
+    io: fakeIo(root, Object.fromEntries(Array.from({ length: 20 }, (_, index) => [join(root, `f${index}.ts`), "const x = 1;\n"]))),
     now: () => (clock += 1000),
   });
   assert.ok(stalled.trace.rounds >= 1 && stalled.trace.rounds <= 3);

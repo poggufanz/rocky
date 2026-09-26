@@ -144,7 +144,7 @@ function readModelsWire(parsed: unknown): string[] {
 async function chatUsedViaSharedKey(root: string, ref: string): Promise<void> {
   await withUnifiedStub(`q_${ref}`, async () => {
     await withGui(root, async (handle) => {
-      const answer = await postChat(handle, { message: "npm run build", jev: true });
+      const answer = await postChat(handle, { message: "code: npm run build", jev: true, model: "unused-chat-model" });
       assert.equal(answer.status, 200);
       const wire = readChatWire(answer.parsed);
       assert.equal(wire.engine, "jev");
@@ -250,7 +250,7 @@ test("unified mode without any credential reports disabled plus baseline", async
       model: "m",
     });
     await withGui(root, async (handle) => {
-      const answer = await postChat(handle, { message: "npm run build", jev: true });
+      const answer = await postChat(handle, { message: "code: npm run build", jev: true });
       assert.equal(answer.status, 200);
       const wire = readChatWire(answer.parsed);
       assert.equal(wire.engine, "jev");
@@ -278,7 +278,7 @@ test("native path unchanged: an openrouter env key never arms typesafe Jev", asy
     // Default settings: main provider openai with no endpoint — not unified —
     // so the native slot stays the only reader and stays empty.
     await withGui(root, async (handle) => {
-      const answer = await postChat(handle, { message: "npm run build", jev: true });
+      const answer = await postChat(handle, { message: "code: npm run build", jev: true });
       assert.equal(answer.status, 200);
       const wire = readChatWire(answer.parsed);
       assert.equal(wire.engine, "jev");
