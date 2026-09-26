@@ -33,7 +33,9 @@ export interface SetupOptions {
   rawTrace: boolean;
 }
 
-export type SetupClientId = "codex" | "claude-code" | "claude-desktop";
+export type SetupClientId =
+  | "codex" | "claude-code" | "claude-desktop"
+  | "opencode" | "gemini-cli" | "copilot-cli";
 
 export type SetupStatus =
   | "configured"
