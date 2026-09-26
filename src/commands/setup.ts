@@ -64,6 +64,8 @@ export interface SetupDependencies {
   rockyHome?: string;
   env?: NodeJS.ProcessEnv;
   voiceSkills?: VoiceSkillServices;
+  /** Test override; production defaults to process.stdin.isTTY. */
+  isTTY?: boolean;
 }
 
 export interface VoiceSkillServices {
@@ -560,6 +562,30 @@ export async function setup(argv: readonly string[], deps?: SetupDependencies): 
       return 2;
     }
     throw error;
+  }
+
+  // Explicit test doubles carry isTTY; pre-existing callers (legacy tests and
+  // any deps object predating the override) omit it and keep the interactive
+  // legacy path. Production (deps undefined) reads the real stdin TTY state,
+  // so the non-TTY guard still fires for piped/redirected stdin.
+  const stdinTTY = deps?.isTTY ?? (deps === undefined ? process.stdin.isTTY ?? false : true);
+  if (options.repoAction !== undefined) {
+    say("repo capture actions are not wired yet. setup stops. bad.");
+    detail("P0 parses --repo actions only; grant storage lands with the repo-consent milestone.");
+    return 1;
+  }
+  if (options.rawTrace) {
+    say("raw trace grants are not wired yet. setup stops. bad.");
+    detail("P0 parses --raw-trace only; grant storage lands with the raw-trace milestone.");
+    return 1;
+  }
+  // Voice-skill-only invocations keep the legacy path: zero-eligible-host contract (exit 1 + voice-skill: unavailable) is pinned by documentation.test.ts; per-host voice scoping is P1+ work.
+  if (!stdinTTY && options.harnesses.length === 0 && options.agentHooksAction === undefined && !options.voiceSkill) {
+    say("explicit harness targets are now required. setup stops. bad.");
+    detail("example: rocky setup --harness codex --yes (MCP only)");
+    detail("example: rocky setup --harness codex --listening --yes (Listening)");
+    detail("previous broad setup without --harness no longer configures hosts.");
+    return 2;
   }
 
   const dependencies = deps ?? defaultDependencies();
