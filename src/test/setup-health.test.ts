@@ -15,6 +15,7 @@ const registration: McpRegistration = {
 const HEALTHY_TOOLS = [
   "recall", "recent_failures", "stats", "recall_with_ai",
   "search_knowledge", "fetch_record", "why_file", "teach_lookup",
+  "activity_recent", "activity_for_file", "bundles_list", "bundle_get", "session_timeline",
 ] as const;
 
 test("health check is unhealthy when interactive transport is unavailable", async () => {
