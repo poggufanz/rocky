@@ -58,6 +58,8 @@ class HealthySession {
           tools: [
             "recall", "recent_failures", "stats", "recall_with_ai",
             "search_knowledge", "fetch_record", "why_file", "teach_lookup",
+            "activity_recent", "activity_for_file", "bundles_list", "bundle_get",
+            "session_timeline",
           ].map((name) => ({ name })),
         },
       }));
