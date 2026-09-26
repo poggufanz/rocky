@@ -35,7 +35,7 @@ test("wizard title is exactly Select your Harness and output is ASCII-only", asy
   const out = collectOutput();
   const pending = runHarnessWizard(scriptedPrompt([]), { input, output: out.stream });
   await tick();
-  input.emit("data", Buffer.from("")); // Esc cancels
+  input.emit("data", Buffer.from("\u001b")); // Esc cancels
   const result = await pending;
   assert.equal(result.cancelled, true);
   assert.deepEqual(result.selections, []);
@@ -72,7 +72,7 @@ test("ctrl-c cancels and restores the terminal", async () => {
   const out = collectOutput();
   const pending = runHarnessWizard(scriptedPrompt([]), { input, output: out.stream });
   await tick();
-  input.emit("data", Buffer.from(""));
+  input.emit("data", Buffer.from("\u0003"));
   const result = await pending;
   assert.equal(result.cancelled, true);
   assert.ok(rawCalls.includes(false), "raw mode must be restored on cancel");

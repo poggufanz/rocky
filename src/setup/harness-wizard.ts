@@ -23,10 +23,10 @@ export interface HarnessWizardStreams {
   output: NodeJS.WritableStream;
 }
 
-const UP = "[A";
-const DOWN = "[B";
-const ESC = "";
-const CTRL_C = "";
+const UP = "\u001b[A";
+const DOWN = "\u001b[B";
+const ESC = "\u001b";
+const CTRL_C = "\u0003";
 const ENTER = "\r";
 const SPACE = " ";
 
