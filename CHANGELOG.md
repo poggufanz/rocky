@@ -4,8 +4,10 @@ Notable changes per release. Dates are the release date.
 
 ## Unreleased
 
+- **Memory-only Main chat searches whole records locally.** On complete bounded snapshots, it scans every record, keeps complete relevant matches, rejects weak overlaps, and holds instead of clipping when coverage is incomplete or full evidence exceeds the context bound. Memory-only questions never call BYOK or remote Jev; loopback Ollama remains local. Code-question BYOK behavior is unchanged.
 - **Main chat answers code questions with quoted evidence.** With a BYOK model configured, a code question in the GUI Main segment scans the launch repository, ranks files against the memory prior, and answers from memory first with `path:line` excerpts shown below the memory cards. Retrieval is capped at three bounded rounds; after that Rocky answers with what he read and says what was not checked. Dash panes, the `rocky recall`/`teach`/`why` CLI, and the read-only MCP tools are unchanged.
 - **The Main footer claim is now scoped.** Main states the bounded egress a code question uses: question, carved excerpts, and memory evidence, redacted and capped, to the model you configured. Dash keeps `Local Only | No Egress`. A memory-only question, and a code question with no configured model, reaches no external host.
+- **Main chat now follows a familiar conversation flow.** The welcome occupies the empty state, active turns stay near the composer, input grows to multiple lines, Enter sends, and Shift+Enter adds a line. Loading feedback uses a restrained typing indicator and respects reduced motion. The inactive attachment control is removed; the composer keeps the model and Jev controls, and the duplicate header model chip hides on narrow screens.
 
 ## 0.8.0 — 27 August 2026
 
