@@ -1,12 +1,12 @@
 /*
- * rocky chat pane -- Jev surface over what rocky heard.
+ * rocky chat pane -- whole-record local memory search and code questions.
  *
- * One rule from the sheet still holds here: colour is a claim. A Jev
- * answer is local analysis over evidence rocky already holds, never a
- * witness record, so it stays grey like a model guess; only the engine
- * mark and hold/hedge states borrow emphasis. The one exception is the
- * lightning toggle: while armed it glows, because the glow is the state,
- * not a claim about the world.
+ * Memory-only turns scan locally, require relevant records, and hold instead
+ * of summarizing weak matches. BYOK and remote Jev are for code questions;
+ * loopback Ollama may render whole relevant memory records.
+ *
+ * Colour is a claim: only engine and hold/hedge states borrow emphasis. The
+ * lightning toggle marks explicit Jev state, not truth.
  *
  * No keys ever travel: POST /api/chat carries only { message, jev, model? }.
  * The token rides the same X-Rocky-Token header the rest of the page uses.
@@ -312,14 +312,13 @@ function evidenceNodes(cards) {
   });
 }
 
-/**
- * Collapsible Thinking / Track Record drawer (Rocky Memory + Jev + LLM)
- * Mirroring Claude-style reasoning with step-by-step progressive animation.
- */
+/** Collapsible trace for memory search, relevance decisions, model use, and code scans. */
 function thinkingDrawer(body) {
   const t = body?.decisionTrace ?? {};
   const llm = t.llm ?? {};
   const cards = Array.isArray(body?.evidenceCards) ? body.evidenceCards : [];
+  const memoryOnly = llm.structurerStatus === "memory-only";
+  const coverageReason = typeof body?.coverage?.reason === "string" ? body.coverage.reason : "";
   const latency = t.latencyMs ?? t.latency ?? null;
   const latencyText = latency !== null ? `${latency}ms` : "";
 
@@ -352,12 +351,16 @@ function thinkingDrawer(body) {
   // Step 1: Rocky Memory Heard
   const step1 = el("div", "thinking-step step-rocky");
   const s1Head = el("div", "thinking-step-head");
-  s1Head.append(el("span", "step-num", "1"), el("span", "step-title", `Rocky Memory (${cards.length} records heard)`));
+  const memoryLabel = memoryOnly ? `Rocky Memory (${cards.length} whole records)` : `Rocky Memory (${cards.length} evidence cards)`;
+  s1Head.append(el("span", "step-num", "1"), el("span", "step-title", memoryLabel));
   step1.append(s1Head);
 
   const s1Content = el("div", "thinking-step-content");
   if (cards.length === 0) {
-    s1Content.append(el("p", "thinking-empty", "No prior matching failures, fixes, or triples found in memory."));
+    const emptyEvidenceText = memoryOnly
+      ? (coverageReason.length > 0 ? "Memory coverage incomplete; answer held." : "No whole memory records included in answer.")
+      : (coverageReason.length > 0 ? "Memory coverage incomplete; code answer may miss memory evidence." : "No matching memory evidence for this code question.");
+    s1Content.append(el("p", "thinking-empty", emptyEvidenceText));
   } else {
     const list = el("div", "thinking-items");
     for (const card of cards) {
@@ -379,26 +382,32 @@ function thinkingDrawer(body) {
   }
   step1.append(s1Content);
 
-  // Step 2: TypeSafe Jev Decision Engine
+  // Step 2: local memory relevance or Jev decision, depending on route.
   const step2 = el("div", "thinking-step step-jev");
   const s2Head = el("div", "thinking-step-head");
-  s2Head.append(el("span", "step-num", "2"), el("span", "step-title", `TypeSafe Jev Engine (${t.engine ?? "heuristic"})`));
+  const decisionTitle = memoryOnly ? "Local Memory Relevance Gate" : `TypeSafe Jev Engine (${t.engine ?? "heuristic"})`;
+  s2Head.append(el("span", "step-num", "2"), el("span", "step-title", decisionTitle));
   step2.append(s2Head);
 
   const s2Content = el("div", "thinking-step-content");
   const s2Details = el("div", "thinking-details");
   const confText = t.confidence !== undefined && t.confidence !== null ? String(t.confidence) : "withheld / null";
   s2Details.append(el("p", "detail-row", `Decision status: ${t.status ?? "unknown"}`));
-  s2Details.append(el("p", "detail-row", `Candidate confidence: ${confText}`));
-  s2Details.append(el("p", "detail-row", `Evidence shortlist evaluated: ${Array.isArray(t.evidenceRefs) ? t.evidenceRefs.length : 0} items`));
+  s2Details.append(el("p", "detail-row", `${memoryOnly ? "Memory relevance score" : "Candidate confidence"}: ${confText}`));
+  const decisionCount = Array.isArray(t.evidenceRefs) ? t.evidenceRefs.length : 0;
+  const decisionCountLabel = memoryOnly ? `Whole records accepted: ${decisionCount}` : `Evidence shortlist evaluated: ${decisionCount} items`;
+  s2Details.append(el("p", "detail-row", decisionCountLabel));
   s2Content.append(s2Details);
   step2.append(s2Content);
 
-  // Step 3: LLM Synthesis & Claims Gate
+  // Step 3: local renderer or code-chat LLM stages.
   const step3 = el("div", "thinking-step step-llm");
   const s3Head = el("div", "thinking-step-head");
   const modelName = typeof llm.model === "string" && llm.model.length > 0 ? llm.model : "rocky local";
-  s3Head.append(el("span", "step-num", "3"), el("span", "step-title", `LLM Grounded Synthesis (${modelName})`));
+  const synthesisTitle = memoryOnly
+    ? (llm.active === true ? `Local Memory Renderer (${modelName})` : "No remote model used")
+    : `LLM Grounded Synthesis (${modelName})`;
+  s3Head.append(el("span", "step-num", "3"), el("span", "step-title", synthesisTitle));
   step3.append(s3Head);
 
   const s3Content = el("div", "thinking-step-content");
@@ -406,17 +415,15 @@ function thinkingDrawer(body) {
   s3Details.append(el("p", "detail-row", `Structurer: ${llm.structurerStatus ?? "baseline"}`));
   s3Details.append(el("p", "detail-row", `Renderer: ${llm.rendererStatus ?? "baseline"}`));
   const strippedText = llm.stripped && llm.stripped > 0
-    ? `${llm.stripped} ungrounded claims stripped`
-    : "100% grounded in Rocky evidence";
-  s3Details.append(el("p", "detail-row", `Claims verification: ${strippedText}`));
+    ? `${llm.stripped} uncited claims stripped`
+    : "no uncited factual lines detected";
+  s3Details.append(el("p", "detail-row", `Citation check: ${strippedText}`));
   s3Content.append(s3Details);
   step3.append(s3Content);
 
   bodyNode.append(step1, step2, step3);
 
-  // Step 4: code scan. Only when a code phase actually ran -- a memory-only
-  // answer keeps this drawer byte-identical. Missing fields render as named
-  // fallbacks, exactly as traceNode() does.
+  // Step 4: append code scan details only when that phase actually ran.
   const codeTrace = body && typeof body.codeTrace === "object" && body.codeTrace !== null ? body.codeTrace : null;
   const codeAnswer = body && typeof body.codeAnswer === "object" && body.codeAnswer !== null ? body.codeAnswer : null;
   const codeExcerpts = Array.isArray(body?.codeEvidence) ? body.codeEvidence : [];
@@ -526,25 +533,33 @@ function codeEvidenceNodes(excerpts) {
   });
 }
 
+function scrollToLatest(log) {
+  if (window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches) {
+    log.scrollTop = log.scrollHeight;
+    return;
+  }
+  log.scrollTo({ top: log.scrollHeight, behavior: "smooth" });
+}
+
 /**
  * Defensive render: the backend owns the shape, so every field falls back
  * to something readable. A failure shows the baseline plus its status --
  * the pane never goes silent and never invents an answer. Each answer also
  * mirrors its cards and trace into the right companion panel.
  */
-function renderAnswer(log, body) {
+function renderAnswer(thread, log, body) {
   const text = body && typeof body.text === "string" && body.text.length > 0
     ? body.text
     : "rocky heard nothing matching that yet.";
 
   // Thinking / Track Record drawer with full Rocky + Jev + LLM breakdown
   const drawer = thinkingDrawer(body);
-  log.append(drawer);
+  thread.append(drawer);
 
   // Human-readable synthesized answer bubble
-  log.append(bubble("jev", text));
+  thread.append(bubble("jev", text));
   if (body && body.coverage && body.coverage.reason) {
-    log.append(el("p", "chat-coverage", `coverage: ${body.coverage.reason}`));
+    thread.append(el("p", "chat-coverage", `coverage: ${body.coverage.reason}`));
   }
 
   // Code support (code questions only): one clearly labelled paragraph after
@@ -557,12 +572,12 @@ function renderAnswer(log, body) {
     const codeBubble = bubble("jev", codeText);
     codeBubble.classList.add("chat-code-answer");
     codeBubble.prepend(el("p", "chat-code-head", "code"));
-    log.append(codeBubble);
+    thread.append(codeBubble);
   }
   const disclosure = codeDisclosure(body);
-  if (disclosure) log.append(el("p", "chat-code-disc", disclosure));
+  if (disclosure) thread.append(el("p", "chat-code-disc", disclosure));
 
-  log.append(traceNode(body?.decisionTrace));
+  thread.append(traceNode(body?.decisionTrace));
 
   // Companion panels mirror evidence and trace. Memory cards stay primary and
   // first; code excerpts are support, quoted below them, plus the disclosure.
@@ -574,29 +589,28 @@ function renderAnswer(log, body) {
     : [...memoryCards, ...codeBlocks];
   fill($("#comp-evidence"), ...evidencePanel);
   fill($("#comp-trace"), traceNode(body?.decisionTrace));
-  log.scrollTop = log.scrollHeight;
+  scrollToLatest(log);
 }
 
-function renderFailure(log, prompt) {
+function renderFailure(thread, log, prompt) {
   const row = el("div", "chat-msg chat-fail");
   row.append(el("span", null, "chat did not answer (baseline kept). "));
   const button = el("button", "fail-retry", "retry");
   button.type = "button";
   button.addEventListener("click", () => void send(prompt));
   row.append(button);
-  log.append(row, traceNode({ engine: chatState.jev ? "jev" : "heuristic", status: "error" }));
+  thread.append(row, traceNode({ engine: chatState.jev ? "jev" : "heuristic", status: "error" }));
   fill($("#comp-trace"), traceNode({ engine: chatState.jev ? "jev" : "heuristic", status: "error" }));
-  log.scrollTop = log.scrollHeight;
+  scrollToLatest(log);
 }
 
-/* Waiting labels. The code label is used only when the server-side trigger is
-   certain from the page: the explicit `code:` prefix. Anything else stays
-   generic -- the label must never claim a scan that did not start. */
-const WAITING_LABEL = "Searching Rocky memory & evaluating with Jev";
-const CODE_WAITING_LABEL = "Searching memory, reading code, evaluating with Jev";
+/* Memory turns search local records; code turns may read repository files. */
+const WAITING_LABEL = "Searching available memory; checking relevance";
+const CODE_WAITING_LABEL = "Searching memory, reading code, checking evidence";
 
 function waitingBubble(prompt) {
   const node = el("div", "chat-msg chat-jev chat-waiting");
+  node.setAttribute("role", "status");
   node.setAttribute("aria-busy", "true");
   node.setAttribute("aria-label", "rocky thinking");
   const icon = el("span", "waiting-icon");
@@ -604,32 +618,54 @@ function waitingBubble(prompt) {
   const forcedCode = typeof prompt === "string" && /^\s*code:\s*\S/.test(prompt);
   const label = el("span", "waiting-label", forcedCode ? CODE_WAITING_LABEL : WAITING_LABEL);
   const dots = el("span", "chat-waiting-dots");
-  dots.append(el("span", "cwd-dot"), el("span", "cwd-dot"), el("span", "cwd-dot"));
+  dots.append(el("span", "chat-waiting-dot"), el("span", "chat-waiting-dot"), el("span", "chat-waiting-dot"));
   node.append(icon, label, dots);
   return node;
 }
 
+function resizeChatInput(input) {
+  const maxHeight = 160;
+  input.style.height = "auto";
+  input.style.height = `${Math.min(input.scrollHeight, maxHeight)}px`;
+  input.style.overflowY = input.scrollHeight > maxHeight ? "auto" : "hidden";
+}
+
 async function send(prompt) {
   const log = $("#chat-log");
+  const thread = $("#chat-thread");
   const input = $("#chat-input");
-  if (!log || chatState.busy) return;
+  const sendButton = $("#chat-send");
+  if (!log || !thread || chatState.busy) return;
+  if (log.classList.contains("chat-log-empty")) {
+    log.classList.remove("chat-log-empty");
+    $("#chat-welcome")?.remove();
+  }
   chatState.busy = true;
-  log.append(bubble("you", prompt));
-  if (input) input.value = "";
+  log.setAttribute("aria-busy", "true");
+  if (sendButton) sendButton.disabled = true;
+  thread.append(bubble("you", prompt));
+  if (input) {
+    input.value = "";
+    resizeChatInput(input);
+    input.focus();
+  }
   const waiting = waitingBubble(prompt);
-  log.append(waiting);
-  log.scrollTop = log.scrollHeight;
+  thread.append(waiting);
+  scrollToLatest(log);
   try {
     const body = await chatApi(prompt);
     waiting.remove();
-    renderAnswer(log, body);
+    renderAnswer(thread, log, body);
   } catch {
     waiting.remove();
-    renderFailure(log, prompt);
+    renderFailure(thread, log, prompt);
   } finally {
     chatState.busy = false;
+    log.setAttribute("aria-busy", "false");
+    if (sendButton) sendButton.disabled = false;
   }
 }
+
 
 /** The model box only ever offers models the server says it serves. */
 async function paintChatModels() {
@@ -859,8 +895,8 @@ function paintJevToggle() {
         : (state.provider === "openrouter" ? state.hasOpenRouterKey : state.hasJevKey);
       const path = state.unified ? "OpenRouter (shared key)" : (state.provider === "openrouter" ? "OpenRouter" : "Native TypeSafe");
       toggle.title = armed
-        ? `Jev analysis armed for the next message (${path})`
-        : "Jev analysis (needs key — save one in Settings)";
+        ? `Jev analysis armed for next code question (${path})`
+        : "Jev analysis for code questions (needs key; save one in Settings)";
     } catch {
       // title is advisory; a missing toggle target never blocks chat
     }
@@ -871,20 +907,16 @@ function boot() {
   let form = null;
   let input = null;
   let log = null;
+  let thread = null;
   try {
     form = $("#chat-form");
     input = $("#chat-input");
     log = $("#chat-log");
+    thread = $("#chat-thread");
   } catch {
     return;
   }
-  if (!form || !input || !log) return;
-
-  try {
-    if (log.childElementCount === 0) log.append(bubble("jev", "ask what rocky heard. memory answers stay local. code questions reach the model you configure."));
-  } catch {
-    // static skeleton already reads; live greeting is additive only
-  }
+  if (!form || !input || !log || !thread) return;
 
   try {
     void paintChatModels().catch(() => {});
@@ -897,8 +929,6 @@ function boot() {
     // toggle is additive; chat sends without it
   }
 
-  const attach = $("#chat-attach");
-  if (attach) attach.addEventListener("click", () => input.focus());
 
   // ?v=chat stays a valid explicit flag: the chat layout is already default,
   // so it only brings the focus to the box.
@@ -909,6 +939,13 @@ function boot() {
     // focus hint is additive
   }
 
+  input.addEventListener("input", () => resizeChatInput(input));
+  input.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter" || event.shiftKey || event.isComposing) return;
+    event.preventDefault();
+    form.requestSubmit();
+  });
+  resizeChatInput(input);
   form.addEventListener("submit", (event) => {
     event.preventDefault();
     const prompt = input.value.trim();

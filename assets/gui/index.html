@@ -162,14 +162,15 @@
         </div>
       </aside>
       <section class="blk blk-chat chat-center" id="chat-panel" aria-label="ask rocky">
-        <div id="chat-log" class="chat-log" role="log" aria-live="polite" aria-label="conversation"><div class="chat-msg chat-jev">ask what rocky heard. memory answers stay local. code questions reach the model you configure.</div></div>
+        <div id="chat-log" class="chat-log chat-log-empty" role="log" aria-live="polite" aria-label="conversation">
+          <div id="chat-thread" class="chat-thread">
+            <div id="chat-welcome" class="chat-welcome">ask what rocky heard. memory search checks whole local records and holds on weak evidence. code questions reach the model you configure.</div>
+          </div>
+        </div>
         <form id="chat-form" class="chatbox" autocomplete="off">
-          <button id="chat-attach" class="cb-btn" type="button" title="attach (soon)" aria-label="attach">
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
-          </button>
           <label class="vh" for="chat-input">ask rocky</label>
-          <input id="chat-input" type="text" placeholder="ask what rocky heard…" spellcheck="false" autocomplete="off">
-          <button id="chat-jev" class="cb-btn cb-jev" type="button" title="Jev analysis (needs key)" aria-pressed="false" aria-label="jev analysis">
+          <textarea id="chat-input" rows="1" placeholder="ask what rocky heard…" spellcheck="false" autocomplete="off"></textarea>
+          <button id="chat-jev" class="cb-btn cb-jev" type="button" title="Jev for code questions (needs key)" aria-pressed="false" aria-label="jev analysis for code questions">
             <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
           </button>
           <span id="chat-modelwrap" class="cb-modelwrap">
@@ -181,7 +182,7 @@
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="19" x2="12" y2="5"></line><polyline points="5 12 12 5 19 12"></polyline></svg>
           </button>
         </form>
-        <p class="chat-note">Local analysis over what rocky heard. Memory answers stay local. A code question sends your question, carved excerpts, and memory evidence to the model you configure. Prompt redacted, size capped. Nothing else leaves this machine.</p>
+        <p class="chat-note">Memory-only questions stay local, use complete matching records, and hold on weak, incomplete, or oversized evidence. No BYOK or remote Jev. Code questions send your question, carved excerpts, and memory evidence to the model you configure. Prompt redacted, size capped. Nothing else leaves this machine.</p>
       </section>
       <aside class="chat-comp" aria-label="evidence and decision">
         <section class="comp-block">
