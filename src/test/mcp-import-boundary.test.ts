@@ -165,6 +165,16 @@ test("MCP source graph reaches only explicitly allowlisted read-only modules; wr
     "mcp/server.ts",
     "mcp/stdio.ts",
     "mcp/tools.ts",
+    // Listening v1 read-only projection side (spec §9): tools import only
+    // these. graph-store and event-log-read project durable state,
+    // repo-consent-read gates on explicit consent. Writer modules
+    // (event-log, consent, collector, watcher, hook-ingress) stay out.
+    "listening/types.ts",
+    "listening/event-codec.ts",
+    "listening/store-paths.ts",
+    "listening/event-log-read.ts",
+    "listening/repo-consent-read.ts",
+    "listening/graph-store.ts",
   ]);
   for (const writable of ["core/config.ts", "core/memory.ts", "core/watch-log.ts"] as const) {
     assert.equal(allowed.has(writable), false, `writable core module must remain outside MCP allowlist: ${writable}`);

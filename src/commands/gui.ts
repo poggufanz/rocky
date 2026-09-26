@@ -14,7 +14,8 @@ function openBrowser(url: string): void {
   }
 }
 
-export async function guiCommand(rest: string[], segment: "main" | "dash"): Promise<number> {
+export type GuiSegment = "main" | "dash" | "listening";
+export async function guiCommand(rest: string[], segment: GuiSegment): Promise<number> {
   const noOpen = rest.includes("--no-open");
   const portArg = rest.find((arg) => arg.startsWith("--port="));
   const port = portArg ? Number(portArg.slice("--port=".length)) : DEFAULT_GUI_PORT;
@@ -29,7 +30,9 @@ export async function guiCommand(rest: string[], segment: "main" | "dash"): Prom
 
   const url = segment === "dash"
     ? `http://127.0.0.1:${handle.port}/?v=dash#${handle.token}`
-    : handle.url;
+    : segment === "listening"
+      ? `http://127.0.0.1:${handle.port}/?v=listening#${handle.token}`
+      : handle.url;
 
   heading("rocky listening");
   detail(`heard at ${url}`);

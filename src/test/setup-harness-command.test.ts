@@ -53,13 +53,6 @@ test("TTY without harness keeps the legacy consent path", async () => {
   assert.ok(adapter.calls.includes("configure"));
 });
 
-test("repo actions exit without mutating in P0", async () => {
-  const adapter = new FakeAdapter();
-  const code = await setup(["--repo", "/tmp", "--check-capture"], deps(adapter, false));
-  assert.equal(code, 1);
-  assert.deepEqual(adapter.calls, []);
-});
-
 test("non-TTY voice-skill-only bypasses the harness guard and reaches the legacy voice path", async () => {
   const adapter = new FakeAdapter();
   const code = await setup(["--voice-skill"], deps(adapter, false));

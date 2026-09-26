@@ -17,8 +17,10 @@ import {
   createNativeDesktopConfig,
 } from "../setup/claude-desktop.js";
 import { createCodexAdapter } from "../setup/codex.js";
-import { checkMcpRegistration } from "../setup/health.js";
 import { createHarnessMcpAdapters } from "../setup/harness-mcp-dispatch.js";
+import { checkMcpRegistration } from "../setup/health.js";
+import { setRepoCapture } from "../listening/consent.js";
+import { getRepoConsentDetail } from "../listening/repo-consent-read.js";
 import { SetupUsageError, parseSetupArgs } from "../setup/parser.js";
 import { createPlatformServices, type PlatformServices } from "../setup/platform.js";
 import { processRunner, type ProcessRunner } from "../setup/process.js";
@@ -407,6 +409,43 @@ function defaultDependencies(): SetupDependencies {
   };
 }
 
+async function runRepoCaptureAction(
+  repo: string,
+  action: "allow-capture" | "revoke-capture" | "check-capture",
+  yes: boolean,
+  confirmation: ConfirmationPort,
+): Promise<number> {
+  const probe = getRepoConsentDetail(repo);
+  if (probe.root.length === 0) {
+    say("repo path does not resolve. setup stops. bad.");
+    return 2;
+  }
+  detail(`canon root ${probe.root}`);
+  if (action === "check-capture") {
+    detail(probe.allowed ? "capture allowed" : "capture off");
+    return 0;
+  }
+  say("snapshot text stays bounded and redacted. secret may remain. bad bad if host shares it.");
+  say("sanitized MCP metadata may list repo and file names. rocky sends nothing itself.");
+  if (!yes) {
+    const allowed = await confirmation.confirm(
+      action === "allow-capture" ? "allow capture for this repo now, question" : "revoke capture for this repo now, question",
+    );
+    if (!allowed) {
+      say("consent withheld. setup stops. no change.");
+      return 1;
+    }
+  }
+  const result = setRepoCapture(repo, action === "allow-capture", { yes: true, actor: "cli" });
+  if (!result.ok) {
+    detail(result.reason ?? "capture action failed");
+    return result.reason === "requires-confirmation" ? 2 : 1;
+  }
+  detail(action === "allow-capture" ? `capture allowed: ${result.root ?? probe.root}` : `capture revoked: ${result.root ?? probe.root}`);
+  if (action === "revoke-capture") detail("history stays. revoke stops new capture only");
+  return 0;
+}
+
 async function runAgentHooksAction(
   action: AgentHooksAction,
   dependencies: SetupDependencies,
@@ -571,10 +610,9 @@ export async function setup(argv: readonly string[], deps?: SetupDependencies): 
   // Production (deps undefined) reads the real stdin TTY state, so the
   // non-TTY guard still fires for piped/redirected stdin.
   const stdinTTY = deps?.isTTY ?? (deps === undefined ? process.stdin.isTTY ?? false : true);
-  if (options.repoAction !== undefined) {
-    say("repo capture actions are not wired yet. setup stops. bad.");
-    detail("P0 parses --repo actions only; grant storage lands with the repo-consent milestone.");
-    return 1;
+  const dependencies = deps ?? defaultDependencies();
+  if (options.repoAction !== undefined && options.repo !== undefined) {
+    return runRepoCaptureAction(options.repo, options.repoAction, options.yes, dependencies.confirmation);
   }
   if (options.rawTrace) {
     say("raw trace grants are not wired yet. setup stops. bad.");
@@ -590,7 +628,6 @@ export async function setup(argv: readonly string[], deps?: SetupDependencies): 
     return 2;
   }
 
-  const dependencies = deps ?? defaultDependencies();
   if (options.agentHooksAction !== undefined) {
     return runAgentHooksAction(options.agentHooksAction, dependencies, options.rationaleGate ?? true);
   }

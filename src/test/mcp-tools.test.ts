@@ -79,6 +79,7 @@ test("sanitized catalog excludes cwd and stays in frozen order", () => {
   const definitions = registry().list();
   assert.deepEqual(definitions.map((tool) => tool.name), [
     "recall", "recent_failures", "stats", "recall_with_ai", "search_knowledge", "fetch_record", "why_file", "teach_lookup",
+    "activity_recent", "activity_for_file", "bundles_list", "bundle_get", "session_timeline",
   ]);
   assert.equal(JSON.stringify(definitions).includes('"cwd"'), false);
   assert.ok(definitions.every((tool) =>
@@ -95,6 +96,7 @@ test("raw catalog adds cwd only to queries that support it", () => {
   assert.equal(JSON.stringify(definitions).includes('"cwd"'), true);
   assert.deepEqual(definitions.map((tool) => tool.name), [
     "recall", "recent_failures", "stats", "recall_with_ai", "search_knowledge", "fetch_record", "why_file", "teach_lookup",
+    "activity_recent", "activity_for_file", "bundles_list", "bundle_get", "session_timeline",
   ]);
 });
 

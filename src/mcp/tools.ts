@@ -9,6 +9,9 @@ import { teachLookup } from "../core/teach.js";
 import { buildLadder, defaultTeachNeighbor, type Rung } from "../core/teach-ladder.js";
 import { gapRungFor, renderLadderCard, renderWitnessCard } from "../core/teach-render.js";
 import { projectExplain } from "./privacy.js";
+import { readListeningTail } from "../listening/event-log-read.js";
+import { projectGraph } from "../listening/graph-store.js";
+import { isRepoCaptureAllowed } from "../listening/repo-consent-read.js";
 import {
   MAX_FIELD_BYTES,
   MAX_RESPONSE_BYTES,
@@ -39,6 +42,11 @@ const MCP_TOOL_NAMES = [
   "fetch_record",
   "why_file",
   "teach_lookup",
+  "activity_recent",
+  "activity_for_file",
+  "bundles_list",
+  "bundle_get",
+  "session_timeline",
 ] as const;
 const MCP_TOOL_NAMES_FROZEN = Object.freeze(MCP_TOOL_NAMES);
 export const MCP_TOOL_CATALOG_CONTRACT = Object.freeze({
@@ -298,6 +306,51 @@ function descriptors(exposure: Exposure): readonly McpToolDefinition[] {
         snippet: { type: "string", maxLength: MAX_FIELD_BYTES },
       }, ["path"]), annotations: ANNOTATIONS,
     },
+    {
+      name: "activity_recent", title: "Recent listening activity",
+      description: "Newest listening events with metadata only: locators, hashes, evidence IDs, edge basis, coverage. Example: {\"repo\": \"/work/repo\", \"limit\": 20}. Requests cause no scan, write, network, or consent change.",
+      inputSchema: schema({
+        repo: { type: "string", maxLength: MAX_FIELD_BYTES },
+        limit: { type: "integer", minimum: 1, maximum: 50 },
+        cursor: { type: "string", maxLength: MAX_FIELD_BYTES },
+      }, ["repo"]), annotations: ANNOTATIONS,
+    },
+    {
+      name: "activity_for_file", title: "Listening evidence for file",
+      description: "Evidence chain for one relative path in a consented repo: metadata only, weak links stay candidates. Example: {\"repo\": \"/work/repo\", \"path\": \"src/app.ts\"}. Requests cause no scan, write, network, or consent change.",
+      inputSchema: schema({
+        repo: { type: "string", maxLength: MAX_FIELD_BYTES },
+        path: { type: "string", maxLength: MAX_FIELD_BYTES },
+        limit: { type: "integer", minimum: 1, maximum: 50 },
+      }, ["repo", "path"]), annotations: ANNOTATIONS,
+    },
+    {
+      name: "bundles_list", title: "List work bundles",
+      description: "Work-episode and commit bundles from exact IDs only, never time similarity. Example: {\"repo\": \"/work/repo\", \"limit\": 20}. Requests cause no scan, write, network, or consent change.",
+      inputSchema: schema({
+        repo: { type: "string", maxLength: MAX_FIELD_BYTES },
+        limit: { type: "integer", minimum: 1, maximum: 50 },
+        cursor: { type: "string", maxLength: MAX_FIELD_BYTES },
+      }, ["repo"]), annotations: ANNOTATIONS,
+    },
+    {
+      name: "bundle_get", title: "Get one bundle",
+      description: "Graph subview for one bundle: per-file evidence, sources, edge bases, coverage. Example: {\"repo\": \"/work/repo\", \"bundle\": \"episode-1\"}. Requests cause no scan, write, network, or consent change.",
+      inputSchema: schema({
+        repo: { type: "string", maxLength: MAX_FIELD_BYTES },
+        bundle: { type: "string", maxLength: MAX_FIELD_BYTES },
+      }, ["repo", "bundle"]), annotations: ANNOTATIONS,
+    },
+    {
+      name: "session_timeline", title: "Native session timeline",
+      description: "Graph events for one native session with pagination, metadata only. Example: {\"repo\": \"/work/repo\", \"session\": \"s1\"}. Requests cause no scan, write, network, or consent change.",
+      inputSchema: schema({
+        repo: { type: "string", maxLength: MAX_FIELD_BYTES },
+        session: { type: "string", maxLength: MAX_FIELD_BYTES },
+        limit: { type: "integer", minimum: 1, maximum: 50 },
+        cursor: { type: "string", maxLength: MAX_FIELD_BYTES },
+      }, ["repo", "session"]), annotations: ANNOTATIONS,
+    },
   ];
   const byName = new Map(definitions.map((definition) => [definition.name, definition] as const));
   const catalog = MCP_TOOL_CATALOG_CONTRACT.tools;
@@ -437,6 +490,36 @@ function cappedResult(payload: object, isError = false): ToolCallResult {
     }
     copy.truncated = true;
   }
+}
+
+/** Listening metadata-first projection: locators, hashes, IDs, bases, coverage. Never raw bodies. */
+function listeningMeta(e: {
+  eventId: string; source: string; harnessId?: string; surface?: string; ts: number;
+  edge?: { basis?: string }; coverage?: string; refs?: Record<string, unknown>;
+}): Record<string, unknown> {
+  return {
+    eventId: e.eventId, source: e.source,
+    ...(e.harnessId === undefined ? {} : { harnessId: e.harnessId }),
+    ...(e.surface === undefined ? {} : { surface: e.surface }),
+    ts: e.ts,
+    linkBasis: e.edge?.basis ?? "unknown",
+    coverage: e.coverage ?? "unknown",
+    ...(e.refs?.fileRel === undefined ? {} : { fileRel: e.refs.fileRel }),
+    ...(e.refs?.commit === undefined ? {} : { commit: e.refs.commit }),
+    ...(e.refs?.session === undefined ? {} : { session: e.refs.session }),
+    ...(e.refs?.episode === undefined ? {} : { episode: e.refs.episode }),
+  };
+}
+
+/** Node/edge records through the same metadata gate: basis and coverage survive, bodies do not. */
+function listeningMetaRecord(value: unknown): Record<string, unknown> {
+  if (typeof value !== "object" || value === null) return {};
+  const rec = value as Record<string, unknown>;
+  const out: Record<string, unknown> = {};
+  for (const key of ["id", "kind", "basis", "from", "to", "fileRel", "session", "episode", "commit", "source", "coverage", "count"]) {
+    if (rec[key] !== undefined) out[key] = rec[key];
+  }
+  return out;
 }
 
 function boundedSingleResult(
@@ -1881,6 +1964,92 @@ export function createToolRegistry(options: CreateToolRegistryOptions): McpToolR
               () => cappedResult(mergeAi(enriched, safeAi, aiCandidateIds)),
               cappedResult(deterministicAiFallback(enriched, safeAi !== undefined ? "unavailable" : "invalid_output")),
             );
+          }
+          case "activity_recent": {
+            const value = objectArgs(args);
+            rejectUnknown(value, ["repo", "limit", "cursor"]);
+            if (typeof value.repo !== "string" || value.repo.length === 0) throw new McpInvalidParamsError("invalid params");
+            const limit = parseLimit(value.limit, 1, 50, 20);
+            const cursor = value.cursor === undefined ? undefined : String(value.cursor);
+            if (!isRepoCaptureAllowed(value.repo)) {
+              return cappedResult({ events: [], nextCursor: cursor ?? "", coverage: "unknown", consent: false, collector: "visible-only" });
+            }
+            const tail = readListeningTail(value.repo, { limit, ...(cursor === undefined ? {} : { cursor }) });
+            return cappedResult({
+              events: tail.events.map((e) => listeningMeta(e)),
+              nextCursor: tail.nextCursor, coverage: tail.coverage, consent: true, collector: "visible-only",
+            });
+          }
+          case "activity_for_file": {
+            const value = objectArgs(args);
+            rejectUnknown(value, ["repo", "path", "limit"]);
+            if (typeof value.repo !== "string" || value.repo.length === 0) throw new McpInvalidParamsError("invalid params");
+            if (typeof value.path !== "string" || value.path.length === 0) throw new McpInvalidParamsError("invalid params");
+            const limit = parseLimit(value.limit, 1, 50, 20);
+            if (!isRepoCaptureAllowed(value.repo)) {
+              return cappedResult({ chain: [], coverage: "unknown", consent: false, collector: "visible-only" });
+            }
+            const graph = projectGraph(value.repo, { file: value.path, limit });
+            return cappedResult({
+              chain: graph.edges.map((e) => listeningMetaRecord(e)),
+              nodes: graph.nodes.map((n) => listeningMetaRecord(n)),
+              coverage: graph.coverage, truncated: graph.truncated, consent: true, collector: "visible-only",
+            });
+          }
+          case "bundles_list": {
+            const value = objectArgs(args);
+            rejectUnknown(value, ["repo", "limit", "cursor"]);
+            if (typeof value.repo !== "string" || value.repo.length === 0) throw new McpInvalidParamsError("invalid params");
+            const limit = parseLimit(value.limit, 1, 50, 20);
+            if (!isRepoCaptureAllowed(value.repo)) {
+              return cappedResult({ bundles: [], coverage: "unknown", consent: false, collector: "visible-only" });
+            }
+            const graph = projectGraph(value.repo, { limit });
+            const episodes = new Map<string, { id: string; count: number }>();
+            for (const node of graph.nodes) {
+              const rec = node as Record<string, unknown>;
+              if (rec["kind"] === "work_episode" && typeof rec["id"] === "string") {
+                const id = rec["id"] as string;
+                episodes.set(id, { id, count: (episodes.get(id)?.count ?? 0) + 1 });
+              }
+            }
+            return cappedResult({
+              bundles: [...episodes.values()].slice(0, limit),
+              coverage: graph.coverage, truncated: graph.truncated, consent: true, collector: "visible-only",
+            });
+          }
+          case "bundle_get": {
+            const value = objectArgs(args);
+            rejectUnknown(value, ["repo", "bundle"]);
+            if (typeof value.repo !== "string" || value.repo.length === 0) throw new McpInvalidParamsError("invalid params");
+            if (typeof value.bundle !== "string" || value.bundle.length === 0) throw new McpInvalidParamsError("invalid params");
+            if (!isRepoCaptureAllowed(value.repo)) {
+              return cappedResult({ bundle: null, coverage: "unknown", consent: false, collector: "visible-only" });
+            }
+            const graph = projectGraph(value.repo, { episode: value.bundle, limit: 200 });
+            return cappedResult({
+              bundle: value.bundle,
+              nodes: graph.nodes.map((n) => listeningMetaRecord(n)),
+              edges: graph.edges.map((e) => listeningMetaRecord(e)),
+              coverage: graph.coverage, truncated: graph.truncated, consent: true, collector: "visible-only",
+            });
+          }
+          case "session_timeline": {
+            const value = objectArgs(args);
+            rejectUnknown(value, ["repo", "session", "limit", "cursor"]);
+            if (typeof value.repo !== "string" || value.repo.length === 0) throw new McpInvalidParamsError("invalid params");
+            if (typeof value.session !== "string" || value.session.length === 0) throw new McpInvalidParamsError("invalid params");
+            const limit = parseLimit(value.limit, 1, 50, 20);
+            if (!isRepoCaptureAllowed(value.repo)) {
+              return cappedResult({ events: [], coverage: "unknown", consent: false, collector: "visible-only" });
+            }
+            const graph = projectGraph(value.repo, { session: value.session, limit });
+            return cappedResult({
+              session: value.session,
+              nodes: graph.nodes.map((n) => listeningMetaRecord(n)),
+              edges: graph.edges.map((e) => listeningMetaRecord(e)),
+              coverage: graph.coverage, truncated: graph.truncated, consent: true, collector: "visible-only",
+            });
           }
           default:
             throw new McpInvalidParamsError("unknown tool");
