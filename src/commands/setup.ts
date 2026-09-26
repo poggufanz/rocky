@@ -404,6 +404,45 @@ function defaultDependencies(): SetupDependencies {
   };
 }
 
+async function runRepoCaptureAction(
+  repo: string,
+  action: "allow-capture" | "revoke-capture" | "check-capture",
+  yes: boolean,
+  confirmation: ConfirmationPort,
+): Promise<number> {
+  const { getRepoConsentDetail } = await import("../listening/repo-consent-read.js");
+  const probe = getRepoConsentDetail(repo);
+  if (probe.root.length === 0) {
+    say("repo path does not resolve. setup stops. bad.");
+    return 2;
+  }
+  detail(`canon root ${probe.root}`);
+  if (action === "check-capture") {
+    detail(probe.allowed ? "capture allowed" : "capture off");
+    return 0;
+  }
+  say("snapshot text stays bounded and redacted. secret may remain. bad bad if host shares it.");
+  say("sanitized MCP metadata may list repo and file names. rocky sends nothing itself.");
+  if (!yes) {
+    const allowed = await confirmation.confirm(
+      action === "allow-capture" ? "allow capture for this repo now, question" : "revoke capture for this repo now, question",
+    );
+    if (!allowed) {
+      say("consent withheld. setup stops. no change.");
+      return 1;
+    }
+  }
+  const { setRepoCapture } = await import("../listening/consent.js");
+  const result = setRepoCapture(repo, action === "allow-capture", { yes: true, actor: "cli" });
+  if (!result.ok) {
+    detail(result.reason ?? "capture action failed");
+    return result.reason === "requires-confirmation" ? 2 : 1;
+  }
+  detail(action === "allow-capture" ? `capture allowed: ${result.root ?? probe.root}` : `capture revoked: ${result.root ?? probe.root}`);
+  if (action === "revoke-capture") detail("history stays. revoke stops new capture only");
+  return 0;
+}
+
 async function runAgentHooksAction(
   action: AgentHooksAction,
   dependencies: SetupDependencies,
@@ -563,6 +602,9 @@ export async function setup(argv: readonly string[], deps?: SetupDependencies): 
   }
 
   const dependencies = deps ?? defaultDependencies();
+  if (options.repoAction !== undefined && options.repo !== undefined) {
+    return runRepoCaptureAction(options.repo, options.repoAction, options.yes, dependencies.confirmation);
+  }
   if (options.agentHooksAction !== undefined) {
     return runAgentHooksAction(options.agentHooksAction, dependencies, options.rationaleGate ?? true);
   }

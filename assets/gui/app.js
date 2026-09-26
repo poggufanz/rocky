@@ -1,8 +1,10 @@
 /*
- * rocky gui -- one page, one route, two segments.
+ * rocky gui -- one page, one route, three segments.
  *
  * The server hands the token in the URL fragment; every fetch carries it back
- * as X-Rocky-Token. Nothing here mutates evidence: the whole surface is reads.
+ * as X-Rocky-Token. Main and Dash read memory; Listening reads the
+ * change-lineage projection. Nothing here mutates evidence except the
+ * explicit Listening repo-consent Add/Revoke control.
  * Teach has no view of its own -- it is what selecting lines does.
  */
 
@@ -12,7 +14,9 @@ const TOKEN = location.hash.slice(1);
 function initialSegment() {
   const all = new URLSearchParams(location.search).getAll("v");
   const value = all.length === 1 ? all[0] : "";
-  return value === "dash" ? "dash" : "main";
+  if (value === "dash") return "dash";
+  if (value === "listening") return "listening";
+  return "main";
 }
 
 async function api(path, options = {}) {
@@ -188,6 +192,12 @@ const state = {
   repoHidden: new Set(),
   mainLoaded: false,
   recent: [],
+  // Listening tab: poll timer + checkpoint cursor. Hidden tab stops polling
+  // and render only; the foreground process owns the watcher throughout.
+  listenTimer: 0,
+  listenCursor: "",
+  listenRepo: "",
+  listenResolved: false,
   // record modes: the TUI's showDiff, strict picker, and the two chosen moments
   showDiff: true,
   strict: false,
@@ -225,8 +235,10 @@ function showSegment(name) {
     const panel = $(`#${tab.getAttribute("aria-controls")}`);
     if (panel) panel.hidden = !on;
   }
+  if (name !== "listening") stopListeningPoll();
   setTally();
   if (name === "main") void loadMain().catch(() => {});
+  else if (name === "listening") void loadListening().catch(() => {});
   else if (state.view === "bundle") loadBundles();
   else loadFiles();
 }
@@ -2523,6 +2535,144 @@ document.addEventListener("keydown", (event) => {
   else if (!$("#settings").hidden) closeSettings();
 });
 
+/* ---- listening ------------------------------------------------------
+ * Third tab: portable change-lineage graph. Polling and render stop when
+ * the tab hides; the foreground process owns the watcher throughout.
+ * On re-show the checkpoint cursor resumes and missing intermediates
+ * render as partial, never as causal claims.
+ */
+function stopListeningPoll() {
+  if (state.listenTimer) { clearInterval(state.listenTimer); state.listenTimer = 0; }
+}
+function listenSpin() {
+  const s = el("span", "listen-spin");
+  s.setAttribute("aria-hidden", "true");
+  return s;
+}
+function listenRepo() {
+  const input = $("#listen-repo-input");
+  const typed = input && typeof input.value === "string" ? input.value.trim() : "";
+  return typed || state.listenRepo || "";
+}
+function listenStatus(text, resolved) {
+  const node = $("#listen-status");
+  if (!node) return;
+  node.replaceChildren();
+  node.append(`${text} `, resolved ? "\u2713" : listenSpin());
+}
+function listenRow(item) {
+  const li = el("li", "listen-row");
+  const basis = (item.edge && item.edge.basis) || "unknown";
+  if (basis === "candidate_link" || basis === "temporal_candidate") li.classList.add("weak-candidate");
+  if (item.coverage === "partial") li.classList.add("is-partial");
+  const head = el("div", "listen-row-head",
+    `${item.source || "unknown"} \u00B7 ${basis} \u00B7 ${item.coverage || "unknown"}`);
+  const meta = el("div", "listen-row-meta",
+    `event ${item.eventId || "?"} \u00B7 harness ${item.harnessId || "unknown"} \u00B7 surface ${item.surface || "unknown"} \u00B7 redacted ${item.redaction && item.redaction.applied ? "yes" : "no"} \u00B7 consent repo ${item.consent && item.consent.repo ? "yes" : "no"}`);
+  li.append(head, meta);
+  if (item.refs && item.refs.fileRel) li.append(el("div", "listen-row-file", `file ${item.refs.fileRel}`));
+  li.addEventListener("click", () => listenDetail(item));
+  return li;
+}
+function listenDetail(item) {
+  const host = $("#listen-detail");
+  if (!host) return;
+  host.hidden = false;
+  host.replaceChildren();
+  host.append(el("div", "listen-detail-head", `evidence ${item.eventId || "?"}`));
+  for (const [key, value] of Object.entries({
+    source: item.source, link_basis: (item.edge && item.edge.basis) || "unknown",
+    redaction: item.redaction && item.redaction.applied ? "applied" : "missing",
+    consent: `host ${item.consent && item.consent.host ? "yes" : "no"} / repo ${item.consent && item.consent.repo ? "yes" : "no"}`,
+    coverage: item.coverage || "unknown", node: item.node || "unknown", commit: (item.refs && item.refs.commit) || "unknown",
+  })) host.append(el("div", "listen-detail-row", `${key}: ${value}`));
+  host.append(el("div", "listen-warn", "Secret may remain despite redaction. Snapshot text stays bounded."));
+}
+async function refreshListening(first) {
+  const repo = listenRepo();
+  const consentHost = $("#listen-consent");
+  const coverageHost = $("#listen-coverage");
+  const chain = $("#listen-chain");
+  if (!repo) {
+    if (consentHost) consentHost.textContent = "Name one repo root to check capture consent. Opening a repo never grants.";
+    if (coverageHost) coverageHost.textContent = "coverage: unknown";
+    listenStatus("Getting rationale", false);
+    return;
+  }
+  state.listenRepo = repo;
+  let consent = { allowed: false, root: repo };
+  try {
+    consent = await api(`/api/listening/consent?repo=${encodeURIComponent(repo)}`);
+  } catch { /* fail open: skeleton stays */ }
+  if (consentHost) {
+    consentHost.replaceChildren();
+    consentHost.append(el("span", "listen-consent-state", consent.allowed ? `capture allowed: ${consent.root}` : "capture off: unknown activity, not no activity"));
+    for (const action of ["allow", "revoke"]) {
+      const btn = el("button", "listen-consent-btn", action === "allow" ? "Add" : "Revoke");
+      btn.type = "button";
+      btn.addEventListener("click", async () => {
+        try {
+          await api("/api/listening/consent", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ repo, action, yes: true }) });
+        } catch { /* fail open */ }
+        void refreshListening(true).catch(() => {});
+      });
+      consentHost.append(btn);
+    }
+  }
+  if (!consent.allowed) {
+    if (coverageHost) coverageHost.textContent = "coverage: unknown (no repo consent)";
+    if (chain) chain.replaceChildren();
+    listenStatus("Getting rationale", false);
+    return;
+  }
+  const session = ($("#listen-session") || {}).value || "";
+  const file = ($("#listen-file") || {}).value || "";
+  const since = ($("#listen-since") || {}).value || "";
+  const params = new URLSearchParams({ repo, limit: "50" });
+  if (state.listenCursor && !first) params.set("cursor", state.listenCursor);
+  if (session.trim()) params.set("session", session.trim());
+  if (file.trim()) params.set("file", file.trim());
+  if (since.trim()) params.set("since", since.trim());
+  let tail = { events: [], nextCursor: "", coverage: "unknown" };
+  let graph = { nodes: [], edges: [], coverage: { status: "unknown", reasons: [] }, truncated: false };
+  try {
+    tail = await api(`/api/listening/events?${params.toString()}`);
+    graph = await api(`/api/listening/graph?${params.toString()}`);
+  } catch { /* fail open */ }
+  if (chain) {
+    chain.replaceChildren();
+    if (state.listenCursor && tail.events.length > 0 && state.listenCursor !== (tail.events[0] || {}).eventId && !first) {
+      chain.append(el("li", "listen-row is-partial", "missing intermediates: partial"));
+    }
+    for (const item of tail.events) chain.append(listenRow(item));
+  }
+  if (coverageHost) {
+    const reasons = (graph.coverage && graph.coverage.reasons) || [];
+    coverageHost.textContent = `coverage: ${tail.coverage || graph.coverage.status}${reasons.length ? ` (${reasons.join(", ")})` : ""}${graph.truncated ? " truncated" : ""}`;
+  }
+  if (tail.events.length > 0) state.listenCursor = tail.nextCursor || state.listenCursor;
+  state.listenResolved = tail.events.length > 0;
+  listenStatus(state.listenResolved ? "Evidence chain resolves" : "Getting rationale", state.listenResolved);
+  const headerSpin = $("#listen-spin");
+  if (headerSpin && state.listenResolved) headerSpin.remove();
+}
+async function loadListening() {
+  stopListeningPoll();
+  listenStatus("Getting rationale", false);
+  try { await refreshListening(true); } catch { /* skeleton stays */ }
+  stopListeningPoll();
+  state.listenTimer = setInterval(() => {
+    if (state.segment !== "listening" || document.visibilityState !== "visible") return;
+    void refreshListening(false).catch(() => {});
+  }, 5000);
+}
+const listenForm = $("#listen-filters");
+if (listenForm) listenForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  state.listenCursor = "";
+  void refreshListening(true).catch(() => {});
+});
+
 /* ---- boot -------------------------------------------------------------- */
 closePop();
 void pullSettings().catch(() => {});
@@ -2539,6 +2689,7 @@ document.addEventListener("visibilitychange", () => {
   if (document.visibilityState !== "visible") return;
   state.mainLoaded = false;
   if (state.segment === "main") loadMain();
+  else if (state.segment === "listening") { state.listenCursor = state.listenCursor; void loadListening().catch(() => {}); }
   else if (state.view === "bundle") loadBundles();
   else loadFiles();
 });

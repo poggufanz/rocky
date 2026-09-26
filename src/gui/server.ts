@@ -55,6 +55,12 @@ import { createOllamaClient } from "../ai/ollama.js";
 import { chatByokKeyPresent } from "../ai/chat-llm.js";
 import { analyzeExplainDecision } from "../ai/explain-decision.js";
 import { executeAnswer } from "../ai/answer.js";
+// Listening v1 seams: read-only projection plus GUI repo-consent writes.
+// handleApi stays read-only; only the consent POST route writes.
+import { getRepoConsentDetail, isRepoCaptureAllowed } from "../listening/repo-consent-read.js";
+import { readListeningTail } from "../listening/event-log-read.js";
+import { projectGraph } from "../listening/graph-store.js";
+import { setRepoCapture } from "../listening/consent.js";
 
 export const DEFAULT_GUI_PORT = 7777;
 const READ_CAP_BYTES = 2 * 1024 * 1024;
@@ -737,7 +743,82 @@ async function handleApi(
       return sendJson(response, 200, null);
     }
   }
+  if (pathname === "/api/listening/events") {
+    const repo = url.searchParams.get("repo") ?? url.searchParams.get("repoRoot") ?? "";
+    const limitRaw = Number(url.searchParams.get("limit") ?? "50");
+    const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(1, Math.floor(limitRaw)), 200) : 50;
+    const cursor = url.searchParams.get("cursor") ?? undefined;
+    if (!repo) return sendJson(response, 400, { error: "rocky needs repo root, question" });
+    try {
+      if (!isRepoCaptureAllowed(repo)) {
+        return sendJson(response, 200, { events: [], nextCursor: cursor ?? "", coverage: "unknown", consent: false });
+      }
+      const tail = readListeningTail(repo, { limit, ...(cursor === undefined ? {} : { cursor }) });
+      return sendJson(response, 200, { ...tail, consent: true });
+    } catch {
+      return sendJson(response, 200, { events: [], nextCursor: cursor ?? "", coverage: "unknown", consent: "unknown" });
+    }
+  }
 
+  if (pathname === "/api/listening/graph") {
+    const repo = url.searchParams.get("repo") ?? url.searchParams.get("repoRoot") ?? "";
+    const limitRaw = Number(url.searchParams.get("limit") ?? "200");
+    const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(1, Math.floor(limitRaw)), 500) : 200;
+    if (!repo) return sendJson(response, 400, { error: "rocky needs repo root, question" });
+    try {
+      if (!isRepoCaptureAllowed(repo)) {
+        return sendJson(response, 200, { nodes: [], edges: [], coverage: { status: "unknown", reasons: ["no-repo-consent"] }, truncated: false, consent: false });
+      }
+      const episode = url.searchParams.get("episode");
+      const session = url.searchParams.get("session");
+      const file = url.searchParams.get("file");
+      const sinceRaw = url.searchParams.get("since");
+      const untilRaw = url.searchParams.get("until");
+      const q = {
+        ...(episode ? { episode } : {}),
+        ...(session ? { session } : {}),
+        ...(file ? { file } : {}),
+        ...(sinceRaw && Number.isFinite(Number(sinceRaw)) ? { since: Number(sinceRaw) } : {}),
+        ...(untilRaw && Number.isFinite(Number(untilRaw)) ? { until: Number(untilRaw) } : {}),
+        limit,
+      };
+      return sendJson(response, 200, { ...projectGraph(repo, q), consent: true });
+    } catch {
+      return sendJson(response, 200, { nodes: [], edges: [], coverage: { status: "unknown", reasons: ["projection-unavailable"] }, truncated: false, consent: "unknown" });
+    }
+  }
+
+  if (pathname === "/api/listening/consent") {
+    const repo = url.searchParams.get("repo") ?? url.searchParams.get("repoRoot") ?? "";
+    if (request.method === "GET") {
+      if (!repo) return sendJson(response, 400, { error: "rocky needs repo root, question" });
+      try {
+        return sendJson(response, 200, getRepoConsentDetail(repo));
+      } catch {
+        return sendJson(response, 200, { allowed: false, root: repo });
+      }
+    }
+    if (request.method === "POST") {
+      const body = (await readBody(request)) as Record<string, unknown>;
+      const target = typeof body.repo === "string" ? body.repo : repo;
+      const action = body.action;
+      if (!target) return sendJson(response, 400, { error: "rocky needs repo root, question" });
+      if (action !== "allow" && action !== "revoke") {
+        return sendJson(response, 400, { error: "rocky needs action allow or revoke, question" });
+      }
+      if (body.yes !== true) {
+        return sendJson(response, 403, { ok: false, reason: "requires-confirmation" });
+      }
+      try {
+        const result = setRepoCapture(target, action === "allow", { yes: true, actor: "gui" });
+        if (!result.ok) return sendJson(response, 400, result);
+        return sendJson(response, 200, result);
+      } catch {
+        return sendJson(response, 500, { error: "rocky cannot reach consent store, question" });
+      }
+    }
+    return sendJson(response, 405, { error: "rocky hears GET or POST here, question" });
+  }
   response.writeHead(404, baseHeaders("text/plain; charset=utf-8")).end("no");
 }
 
