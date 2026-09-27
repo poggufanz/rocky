@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { resolveRockyPaths } from "../core/state-paths.js";
+import { canonicalPath } from "../core/memory-read.js";
 
 /**
  * Pure listening store-path derivation (spec §7). Zero node:fs imports:
@@ -13,9 +14,13 @@ export function listeningHome(home?: string): string {
   return join(resolveRockyPaths().home, "listening");
 }
 
-/** Stable per-repo directory name. Hash, never the raw root (no traversal). */
+/**
+ * Stable per-repo directory name. Hash, never the raw root (no traversal).
+ * Hashes the canonical spelling so watcher (realpath), hook ingress
+ * (canonical key), and GUI reads (typed path) land in one directory.
+ */
 export function repoSlug(canonicalRoot: string): string {
-  return createHash("sha256").update(canonicalRoot, "utf8").digest("hex").slice(0, 32);
+  return createHash("sha256").update(canonicalPath(canonicalRoot), "utf8").digest("hex").slice(0, 32);
 }
 
 export function repoDir(canonicalRoot: string, home?: string): string {
