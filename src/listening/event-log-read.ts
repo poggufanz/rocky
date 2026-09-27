@@ -34,13 +34,16 @@ function parseAll(lines: string[]): { events: EventEnvelope[]; malformed: number
 /** Newest-first tail page. Malformed lines are skipped, never thrown. */
 export function readListeningTail(
   repoRoot: string,
-  opts: { limit: number; cursor?: string },
+  opts: { limit: number; cursor?: string; newest?: boolean },
   home?: string,
 ): { events: EventEnvelope[]; nextCursor: string; coverage: string } {
   const limit = Math.min(Math.max(1, Math.floor(opts.limit)), 200);
   const { events, malformed } = parseAll(readLines(eventsPath(repoRoot, home)));
   let start = 0;
-  if (opts.cursor !== undefined && opts.cursor.length > 0) {
+  // newest: the last `limit` events, for a live view that re-reads each poll
+  if (opts.newest === true) {
+    start = Math.max(0, events.length - limit);
+  } else if (opts.cursor !== undefined && opts.cursor.length > 0) {
     const at = events.findIndex((e) => e.eventId === opts.cursor);
     start = at < 0 ? 0 : at + 1;
   }

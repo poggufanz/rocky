@@ -13,9 +13,9 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { randomBytes } from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
-import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { dirname, extname, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 import { loadMemoryChecked, type MemoryRecord } from "../core/memory-read.js";
 import { redactSecretsAtBoundary } from "../core/redact.js";
@@ -61,6 +61,7 @@ import { getRepoConsentDetail, isRepoCaptureAllowed, listConsentedRepos } from "
 import { readListeningTail } from "../listening/event-log-read.js";
 import { projectGraph } from "../listening/graph-store.js";
 import { setRepoCapture } from "../listening/consent.js";
+import { repoSlug } from "../listening/store-paths.js";
 import { startCollectorLoop, type CollectorLoop } from "../listening/collector-loop.js";
 
 export const DEFAULT_GUI_PORT = 7777;
@@ -317,6 +318,44 @@ async function computeBundles(q = "", repoFilter: string | null = null): Promise
       bundleInFlight = null;
     }
   }
+}
+
+/**
+ * Nearest ancestor holding `.git`, so a subfolder pick lifts to its repo
+ * root. Realpath'd like setRepoCapture, so a short or aliased spelling
+ * still meets the consent key and the store directory.
+ */
+function gitTopFor(dir: string): string {
+  let current = resolve(dir);
+  for (;;) {
+    if (existsSync(join(current, ".git"))) break;
+    const parent = dirname(current);
+    if (parent === current) return dir;
+    current = parent;
+  }
+  try {
+    return realpathSync(current);
+  } catch {
+    return current;
+  }
+}
+
+const LISTEN_REPO_ID = /^[0-9a-f]{32}$/;
+
+/**
+ * A Listening repo pick: either a consented-repo id from the context list
+ * (the absolute path never crosses the wire) or a typed path, lifted to its
+ * Git root. An unknown id resolves to "" (no repo). Resolving never grants.
+ */
+function resolveListenRepo(value: string | null): string {
+  const picked = (value ?? "").trim();
+  if (LISTEN_REPO_ID.test(picked)) return listConsentedRepos().find((key) => repoSlug(key) === picked) ?? "";
+  if (picked.length === 0 || !isAbsolute(picked)) return picked;
+  return gitTopFor(picked);
+}
+
+function listenRepoParam(url: URL): string {
+  return resolveListenRepo(url.searchParams.get("repo") ?? url.searchParams.get("repoRoot"));
 }
 
 async function handleApi(
@@ -746,16 +785,17 @@ async function handleApi(
     }
   }
   if (pathname === "/api/listening/events") {
-    const repo = url.searchParams.get("repo") ?? url.searchParams.get("repoRoot") ?? "";
+    const repo = listenRepoParam(url);
     const limitRaw = Number(url.searchParams.get("limit") ?? "50");
     const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(1, Math.floor(limitRaw)), 200) : 50;
     const cursor = url.searchParams.get("cursor") ?? undefined;
+    const newest = url.searchParams.get("newest") === "1";
     if (!repo) return sendJson(response, 400, { error: "rocky needs repo root, question" });
     try {
       if (!isRepoCaptureAllowed(repo)) {
         return sendJson(response, 200, { events: [], nextCursor: cursor ?? "", coverage: "unknown", consent: false });
       }
-      const tail = readListeningTail(repo, { limit, ...(cursor === undefined ? {} : { cursor }) });
+      const tail = readListeningTail(repo, { limit, newest, ...(cursor === undefined ? {} : { cursor }) });
       return sendJson(response, 200, { ...tail, consent: true });
     } catch {
       return sendJson(response, 200, { events: [], nextCursor: cursor ?? "", coverage: "unknown", consent: "unknown" });
@@ -763,7 +803,7 @@ async function handleApi(
   }
 
   if (pathname === "/api/listening/graph") {
-    const repo = url.searchParams.get("repo") ?? url.searchParams.get("repoRoot") ?? "";
+    const repo = listenRepoParam(url);
     const limitRaw = Number(url.searchParams.get("limit") ?? "200");
     const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(1, Math.floor(limitRaw)), 500) : 200;
     if (!repo) return sendJson(response, 400, { error: "rocky needs repo root, question" });
@@ -790,31 +830,39 @@ async function handleApi(
     }
   }
   if (pathname === "/api/listening/context") {
-    // Read-only suggestion source for the Listening tab: the launch repo root
-    // plus a consented-repo COUNT only. Serializing the full consented list
-    // would leak every consented project path to any token holder, and the
-    // tab prefill only ever needs one suggestion (the launch root, always
-    // set). Naming a repo here grants nothing and starts no capture; only
-    // the explicit consent POST writes.
+    // Read-only picker source for the Listening tab: the launch repo (its Git
+    // root, which the viewer already launched from) plus every OTHER consented
+    // repo as {id, label} only. The id is the store slug hash and the label a
+    // folder name, so no consented absolute path reaches a token holder; the
+    // GUI sends the id back and the server resolves it. Listing grants
+    // nothing and starts no capture; only the explicit consent POST writes.
+    const launch = gitTopFor(root);
     try {
-      return sendJson(response, 200, { launchRoot: root, consentedCount: listConsentedRepos().length });
+      const launchId = repoSlug(launch);
+      const repos = listConsentedRepos()
+        .filter((key) => repoSlug(key) !== launchId)
+        .map((key) => ({ id: repoSlug(key), label: basename(key) || key.slice(-24) }));
+      return sendJson(response, 200, { launchRoot: launch, launchLabel: basename(launch), launchConsented: isRepoCaptureAllowed(launch), repos });
     } catch {
-      return sendJson(response, 200, { launchRoot: root, consentedCount: 0 });
+      return sendJson(response, 200, { launchRoot: launch, launchLabel: basename(launch), launchConsented: false, repos: [] });
     }
   }
   if (pathname === "/api/listening/consent") {
-    const repo = url.searchParams.get("repo") ?? url.searchParams.get("repoRoot") ?? "";
+    // Replies carry {id, label}, never the resolved root: an id pick must
+    // not turn back into an absolute path on the wire.
     if (request.method === "GET") {
+      const repo = listenRepoParam(url);
       if (!repo) return sendJson(response, 400, { error: "rocky needs repo root, question" });
       try {
-        return sendJson(response, 200, getRepoConsentDetail(repo));
+        const detail = getRepoConsentDetail(repo);
+        return sendJson(response, 200, { allowed: detail.allowed, id: repoSlug(repo), label: basename(repo) });
       } catch {
-        return sendJson(response, 200, { allowed: false, root: repo });
+        return sendJson(response, 200, { allowed: false, id: "", label: basename(repo) });
       }
     }
     if (request.method === "POST") {
       const body = (await readBody(request)) as Record<string, unknown>;
-      const target = typeof body.repo === "string" ? body.repo : repo;
+      const target = resolveListenRepo(typeof body.repo === "string" ? body.repo : url.searchParams.get("repo"));
       const action = body.action;
       if (!target) return sendJson(response, 400, { error: "rocky needs repo root, question" });
       if (action !== "allow" && action !== "revoke") {
@@ -825,10 +873,10 @@ async function handleApi(
       }
       try {
         const result = setRepoCapture(target, action === "allow", { yes: true, actor: "gui" });
-        if (!result.ok) return sendJson(response, 400, result);
+        if (!result.ok) return sendJson(response, 400, { ok: false, reason: result.reason });
         // allow starts capture on the next tick now; revoke releases the lease
         collectors?.kick();
-        return sendJson(response, 200, result);
+        return sendJson(response, 200, { ok: true, id: repoSlug(target), label: basename(target) });
       } catch {
         return sendJson(response, 500, { error: "rocky cannot reach consent store, question" });
       }
