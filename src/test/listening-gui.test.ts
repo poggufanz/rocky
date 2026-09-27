@@ -13,7 +13,7 @@ test("listening tab and tabpanel exist with filters and screenshot states", () =
   assert.match(html, /id="tab-listening"[^>]*data-seg="listening"/);
   assert.match(html, /aria-controls="view-listening"/);
   assert.match(html, /id="view-listening"[^>]*role="tabpanel"[^>]*aria-labelledby="tab-listening"/);
-  for (const id of ["listen-repo-input", "listen-session", "listen-agent", "listen-surface", "listen-file", "listen-since"]) {
+  for (const id of ["listen-repo-pick", "listen-session", "listen-agent", "listen-surface", "listen-file", "listen-since"]) {
     assert.ok(html.includes(`id="${id}"`), `missing filter ${id}`);
   }
   assert.ok(html.includes("Rocky Listen"), "missing header state");
@@ -52,23 +52,34 @@ test("listening js resolves rationale and wires every filter", () => {
   }
 });
 
-test("listening repo suggests server context without granting capture", () => {
-  assert.ok(html.includes('id="listen-hint"'), "missing auto-vs-manual hint");
-  assert.ok(html.includes("never grants capture"), "hint must state the suggestion grants nothing");
-  assert.ok(html.includes("manual:"), "manual fields must be labeled as manual");
-  assert.ok(app.includes("prefillListening"), "missing suggest-only prefill");
-  assert.ok(app.includes("/api/listening/context"), "prefill must read the read-only context endpoint");
-  assert.ok(app.includes("listenPrefilled") || app.includes("state.listenRepo"), "prefill must not clobber user input");
-  assert.ok(!app.includes("context.consented)"), "prefill must not read a consented path list");
+test("listening needs one pick and one Listen click, nothing typed", () => {
+  assert.match(html, /<select id="listen-repo-pick">/, "repo is a picker, not a typed path");
+  assert.ok(html.includes('id="listen-hint"'), "missing grant hint");
+  assert.ok(html.includes("never grants capture"), "hint must state picking grants nothing");
+  assert.ok(!html.includes("manual:"), "no filter may ask for manual typing");
+  assert.ok(!html.includes('id="listen-apply"'), "filters apply on change, no Apply button");
+  for (const id of ["listen-session", "listen-agent", "listen-file", "listen-since"]) {
+    assert.match(html, new RegExp(`<select id="${id}">`), `${id} must be a select`);
+  }
+  assert.match(html, /<details class="listen-more"/, "filters stay collapsed by default");
+  assert.ok(app.includes("loadListenRepos"), "missing picker loader");
+  assert.ok(app.includes("/api/listening/context"), "picker must read the read-only context endpoint");
+  assert.ok(app.includes("fillListenFilter"), "filter choices must come from heard events");
+  // Grant stays one explicit click; choosing a repo only refreshes.
+  assert.match(app, /function listenConsentButton[\s\S]*?yes: true/, "Listen button must send the explicit yes");
+  const choose = /function chooseListenRepo[\s\S]*?\r?\n}\r?\n/.exec(app)?.[0] ?? "";
+  assert.ok(choose.length > 0, "missing chooseListenRepo");
+  assert.ok(!choose.includes("/api/listening/consent"), "choosing a repo never posts consent");
 });
 
-test("listening context endpoint is read-only and leaks no repo list", () => {
+test("listening context endpoint is read-only and leaks no consented path", () => {
   const server = readFileSync(join(root, "src", "gui", "server.ts"), "utf8");
   assert.ok(server.includes("/api/listening/context"), "missing context route");
   assert.ok(server.includes("launchRoot"), "context must carry the launch root");
-  assert.ok(server.includes("consentedCount"), "context must carry only a consented-repo count");
   assert.ok(!/consented:\s*listConsentedRepos\(\)/.test(server), "context must not serialize the consented list");
-  assert.ok(server.includes("listConsentedRepos().length"), "context must reuse the consented-repo read side for the count");
+  assert.match(server, /\.map\(\(key\) => \(\{ id: repoSlug\(key\), label: basename\(key\)/, "consented repos cross the wire as {id, label} only");
+  const consentRoute = server.slice(server.indexOf('pathname === "/api/listening/consent"'));
+  assert.ok(consentRoute.length > 0 && !consentRoute.includes("sendJson(response, 200, result)"), "consent replies must not echo the resolved root");
   const read = readFileSync(join(root, "src", "listening", "repo-consent-read.ts"), "utf8");
   assert.ok(read.includes("listConsentedRepos"), "missing read-only consented list");
   assert.ok(!read.includes("writeFileSync"), "read side must stay writer-free");
