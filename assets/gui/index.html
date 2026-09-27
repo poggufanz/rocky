@@ -247,14 +247,14 @@
   <!-- Listening: portable change-lineage graph. Static skeleton reads with
        JS disabled or every /api/listening/* failed. -->
   <section class="view" id="view-listening" role="tabpanel" aria-labelledby="tab-listening" hidden>
-    <div class="listen" id="listen-root">
+    <div class="listen-tab" id="listen-root">
       <h2 id="listen-header">Rocky Listen <span class="listen-spin" id="listen-spin" aria-hidden="true"></span></h2>
       <p class="listen-repo" id="listen-repo">Listen To Repo Main</p>
       <p class="listen-status" id="listen-status">Getting rationale <span class="listen-spin" aria-hidden="true"></span></p>
       <form class="listen-filters" id="listen-filters" autocomplete="off">
-        <label>Repo <input id="listen-repo-input" type="text" placeholder="absolute repo root" spellcheck="false"></label>
-        <label>Session <input id="listen-session" type="text" placeholder="session id" spellcheck="false"></label>
-        <label>Agent <input id="listen-agent" type="text" placeholder="harness id" spellcheck="false"></label>
+        <label class="wide">Repo <input id="listen-repo-input" type="text" placeholder="suggested from server, edit freely" spellcheck="false"></label>
+        <label>Session <input id="listen-session" type="text" placeholder="manual: native session id" spellcheck="false"></label>
+        <label>Agent <input id="listen-agent" type="text" placeholder="manual: harness id" spellcheck="false"></label>
         <label>Surface
           <select id="listen-surface">
             <option value="">any</option>
@@ -263,10 +263,11 @@
             <option value="local">local</option>
           </select>
         </label>
-        <label>File <input id="listen-file" type="text" placeholder="relative path" spellcheck="false"></label>
-        <label>Since <input id="listen-since" type="text" placeholder="epoch ms" inputmode="numeric" spellcheck="false"></label>
-        <button id="listen-apply" type="submit">Apply</button>
+        <label class="wide">File <input id="listen-file" type="text" placeholder="manual: repo-relative path" spellcheck="false"></label>
+        <label>Since <input id="listen-since" type="text" placeholder="manual: epoch ms" inputmode="numeric" spellcheck="false"></label>
+        <button class="listen-apply" id="listen-apply" type="submit">Apply</button>
       </form>
+      <p class="listen-hint" id="listen-hint">Repo suggests the launch root; the suggestion never grants capture. Session, agent, surface, file, and since stay manual: copy them from an event row, then Apply.</p>
       <div class="listen-consent" id="listen-consent" aria-live="polite"></div>
       <div class="listen-coverage" id="listen-coverage" aria-live="polite"></div>
       <ol class="listen-chain" id="listen-chain" aria-live="polite"></ol>

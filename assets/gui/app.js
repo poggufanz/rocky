@@ -247,7 +247,9 @@ for (const tab of tabs) {
   tab.addEventListener("click", () => showSegment(tab.dataset.seg));
   tab.addEventListener("keydown", (event) => {
     if (event.key !== "ArrowRight" && event.key !== "ArrowLeft") return;
-    const next = tabs[(tabs.indexOf(tab) + 1) % tabs.length];
+    event.preventDefault();
+    const step = event.key === "ArrowLeft" ? tabs.length - 1 : 1;
+    const next = tabs[(tabs.indexOf(tab) + step) % tabs.length];
     next.focus();
     showSegment(next.dataset.seg);
   });
@@ -2549,6 +2551,10 @@ function listenSpin() {
   s.setAttribute("aria-hidden", "true");
   return s;
 }
+// A rationale wait must end: first load resolves, errors, or states the
+// empty outcome within one poll interval, so the spinner never reads stuck.
+const LISTEN_TIMEOUT_MS = 5000;
+let listenDeadline = 0;
 function listenRepo() {
   const input = $("#listen-repo-input");
   const typed = input && typeof input.value === "string" ? input.value.trim() : "";
@@ -2559,6 +2565,14 @@ function listenStatus(text, resolved) {
   if (!node) return;
   node.replaceChildren();
   node.append(`${text} `, resolved ? "\u2713" : listenSpin());
+}
+function listenEmpty(title, hint) {
+  const li = el("li", "listen-empty");
+  const head = el("p", null, title);
+  const bold = el("b", null, title);
+  head.replaceChildren(bold);
+  li.append(head, el("p", null, hint));
+  return li;
 }
 function listenRow(item) {
   const li = el("li", "listen-row");
@@ -2596,7 +2610,11 @@ async function refreshListening(first) {
   if (!repo) {
     if (consentHost) consentHost.textContent = "Name one repo root to check capture consent. Opening a repo never grants.";
     if (coverageHost) coverageHost.textContent = "coverage: unknown";
-    listenStatus("Getting rationale", false);
+    if (chain) {
+      chain.replaceChildren();
+      chain.append(listenEmpty("No repo selected.", "Type an absolute repo root above, then Apply. Nothing is captured until consent is added for that repo."));
+    }
+    listenStatus("Waiting for a repo", true);
     return;
   }
   state.listenRepo = repo;
@@ -2621,11 +2639,16 @@ async function refreshListening(first) {
   }
   if (!consent.allowed) {
     if (coverageHost) coverageHost.textContent = "coverage: unknown (no repo consent)";
-    if (chain) chain.replaceChildren();
-    listenStatus("Getting rationale", false);
+    if (chain) {
+      chain.replaceChildren();
+      chain.append(listenEmpty("Capture is off for this repo.", "Unknown activity is not no activity. Add consent above to start the evidence chain."));
+    }
+    listenStatus("Waiting for consent", true);
     return;
   }
   const session = ($("#listen-session") || {}).value || "";
+  const agent = ($("#listen-agent") || {}).value || "";
+  const surface = ($("#listen-surface") || {}).value || "";
   const file = ($("#listen-file") || {}).value || "";
   const since = ($("#listen-since") || {}).value || "";
   const params = new URLSearchParams({ repo, limit: "50" });
@@ -2633,33 +2656,86 @@ async function refreshListening(first) {
   if (session.trim()) params.set("session", session.trim());
   if (file.trim()) params.set("file", file.trim());
   if (since.trim()) params.set("since", since.trim());
+  // Graph projection filters episode, session, file, and since; agent and
+  // surface apply client-side over the tail page below.
+  const graphParams = new URLSearchParams(params);
   let tail = { events: [], nextCursor: "", coverage: "unknown" };
   let graph = { nodes: [], edges: [], coverage: { status: "unknown", reasons: [] }, truncated: false };
+  let failed = false;
   try {
     tail = await api(`/api/listening/events?${params.toString()}`);
-    graph = await api(`/api/listening/graph?${params.toString()}`);
-  } catch { /* fail open */ }
+    graph = await api(`/api/listening/graph?${graphParams.toString()}`);
+  } catch { failed = true; }
+  const shown = tail.events.filter((item) => {
+    if (agent.trim() && (item.harnessId || "") !== agent.trim()) return false;
+    if (surface && (item.surface || "") !== surface) return false;
+    return true;
+  });
   if (chain) {
     chain.replaceChildren();
-    if (state.listenCursor && tail.events.length > 0 && state.listenCursor !== (tail.events[0] || {}).eventId && !first) {
-      chain.append(el("li", "listen-row is-partial", "missing intermediates: partial"));
+    if (failed) {
+      chain.append(listenEmpty("Listening read failed.", "The request did not finish. Retry Apply, or check the server log."));
+    } else {
+      if (state.listenCursor && shown.length > 0 && state.listenCursor !== (shown[0] || {}).eventId && !first) {
+        chain.append(el("li", "listen-row is-partial", "missing intermediates: partial"));
+      }
+      for (const item of shown) chain.append(listenRow(item));
+      if (shown.length === 0 && Date.now() >= listenDeadline) {
+        chain.append(listenEmpty("No events match these filters.", "Loosen session, agent, surface, file, or since, then Apply. Coverage stays unknown until an event lands."));
+      }
     }
-    for (const item of tail.events) chain.append(listenRow(item));
   }
   if (coverageHost) {
     const reasons = (graph.coverage && graph.coverage.reasons) || [];
     coverageHost.textContent = `coverage: ${tail.coverage || graph.coverage.status}${reasons.length ? ` (${reasons.join(", ")})` : ""}${graph.truncated ? " truncated" : ""}`;
   }
   if (tail.events.length > 0) state.listenCursor = tail.nextCursor || state.listenCursor;
-  state.listenResolved = tail.events.length > 0;
-  listenStatus(state.listenResolved ? "Evidence chain resolves" : "Getting rationale", state.listenResolved);
+  state.listenResolved = shown.length > 0 || failed || Date.now() >= listenDeadline;
+  if (failed) listenStatus("Listening read failed", true);
+  else listenStatus(state.listenResolved ? (shown.length > 0 ? "Evidence chain resolves" : "No events match") : "Getting rationale", state.listenResolved);
   const headerSpin = $("#listen-spin");
   if (headerSpin && state.listenResolved) headerSpin.remove();
 }
+// Suggest-only prefill: fills the empty Repo box from /api/listening/context
+// (the launch root only; the endpoint carries a consented-repo count, never
+// the consented paths). Never grants consent, never starts capture, and
+// never overwrites a value the user already typed or applied.
+async function prefillListening() {
+  const input = $("#listen-repo-input");
+  if (!input || (typeof input.value === "string" && input.value.trim()) || state.listenRepo) return;
+  let context = null;
+  try { context = await api("/api/listening/context"); } catch { return; }
+  if (!context || typeof context !== "object") return;
+  const launch = typeof context.launchRoot === "string" ? context.launchRoot.trim() : "";
+  const count = typeof context.consentedCount === "number" && Number.isFinite(context.consentedCount) ? Math.max(0, Math.floor(context.consentedCount)) : 0;
+  if (launch) {
+    if ((typeof input.value === "string" && input.value.trim()) || state.listenRepo) return;
+    input.value = launch;
+    state.listenPrefilled = true;
+  }
+  if (count > 0 && !launch) nudgeListenHint(count);
+}
+// Count-gated hint: names no consented path, only how many exist.
+function nudgeListenHint(count) {
+  const hint = $("#listen-hint");
+  if (!hint || hint.dataset.counted) return;
+  hint.dataset.counted = "1";
+  hint.textContent += ` ${count} consented repo${count === 1 ? "" : "s"} on file: type one to inspect it.`;
+}
+
 async function loadListening() {
   stopListeningPoll();
+  listenDeadline = Date.now() + LISTEN_TIMEOUT_MS;
   listenStatus("Getting rationale", false);
-  try { await refreshListening(true); } catch { /* skeleton stays */ }
+  try { await prefillListening(); } catch { /* manual typing always works */ }
+  try { await refreshListening(true); } catch {
+    const chain = $("#listen-chain");
+    if (chain) {
+      chain.replaceChildren();
+      chain.append(listenEmpty("Listening read failed.", "The request did not finish. Retry Apply, or check the server log."));
+    }
+    listenStatus("Listening read failed", true);
+  }
   stopListeningPoll();
   state.listenTimer = setInterval(() => {
     if (state.segment !== "listening" || document.visibilityState !== "visible") return;
@@ -2670,6 +2746,8 @@ const listenForm = $("#listen-filters");
 if (listenForm) listenForm.addEventListener("submit", (event) => {
   event.preventDefault();
   state.listenCursor = "";
+  listenDeadline = Date.now() + LISTEN_TIMEOUT_MS;
+  listenStatus("Getting rationale", false);
   void refreshListening(true).catch(() => {});
 });
 

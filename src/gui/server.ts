@@ -57,7 +57,7 @@ import { analyzeExplainDecision } from "../ai/explain-decision.js";
 import { executeAnswer } from "../ai/answer.js";
 // Listening v1 seams: read-only projection plus GUI repo-consent writes.
 // handleApi stays read-only; only the consent POST route writes.
-import { getRepoConsentDetail, isRepoCaptureAllowed } from "../listening/repo-consent-read.js";
+import { getRepoConsentDetail, isRepoCaptureAllowed, listConsentedRepos } from "../listening/repo-consent-read.js";
 import { readListeningTail } from "../listening/event-log-read.js";
 import { projectGraph } from "../listening/graph-store.js";
 import { setRepoCapture } from "../listening/consent.js";
@@ -787,7 +787,19 @@ async function handleApi(
       return sendJson(response, 200, { nodes: [], edges: [], coverage: { status: "unknown", reasons: ["projection-unavailable"] }, truncated: false, consent: "unknown" });
     }
   }
-
+  if (pathname === "/api/listening/context") {
+    // Read-only suggestion source for the Listening tab: the launch repo root
+    // plus a consented-repo COUNT only. Serializing the full consented list
+    // would leak every consented project path to any token holder, and the
+    // tab prefill only ever needs one suggestion (the launch root, always
+    // set). Naming a repo here grants nothing and starts no capture; only
+    // the explicit consent POST writes.
+    try {
+      return sendJson(response, 200, { launchRoot: root, consentedCount: listConsentedRepos().length });
+    } catch {
+      return sendJson(response, 200, { launchRoot: root, consentedCount: 0 });
+    }
+  }
   if (pathname === "/api/listening/consent") {
     const repo = url.searchParams.get("repo") ?? url.searchParams.get("repoRoot") ?? "";
     if (request.method === "GET") {

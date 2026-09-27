@@ -45,6 +45,11 @@ export function getRepoConsentDetail(
   if (root.length === 0) return { allowed: false, root: "" };
   return { allowed: readConsents(home)[root] === true, root };
 }
+/** Read-only list of canonical roots with capture consent. Listing names
+ *  grants nothing and starts no capture: it only lets the GUI suggest. */
+export function listConsentedRepos(home?: string): string[] {
+  return Object.keys(readConsents(home));
+}
 
 export function consentStoreExists(home?: string): boolean {
   try {
