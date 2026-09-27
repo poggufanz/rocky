@@ -15,6 +15,7 @@ import {
   realpathSync,
   statSync,
 } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { Buffer } from "node:buffer";
 import { isAbsolute, join, relative } from "node:path";
@@ -141,7 +142,53 @@ function knownVersions(root: string, home?: string): Map<string, KnownVersion> {
   return known;
 }
 
+/**
+ * Tracked plus untracked-not-ignored paths, so gitignored bulk
+ * (node_modules, dist) never snapshots. Undefined when Git cannot list
+ * this root; the caller falls back to the plain walk.
+ */
+function gitListedFiles(root: string): string[] | undefined {
+  try {
+    const out = execFileSync("git", ["ls-files", "-z", "--cached", "--others", "--exclude-standard"], {
+      cwd: root,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+      timeout: 10_000,
+      maxBuffer: 64 * 1024 * 1024,
+      windowsHide: true,
+    });
+    // unmerged index entries repeat a path; one rel is one file
+    return [...new Set(out.split("\0").filter((rel) => rel.length > 0))].sort();
+  } catch {
+    return undefined;
+  }
+}
+
+function listedFiles(root: string, listed: string[], cap: number): { rels: string[]; truncated: boolean; gaps: string[] } {
+  const rels: string[] = [];
+  const gaps: string[] = [];
+  for (const rel of listed) {
+    if (rels.length >= cap) return { rels, truncated: true, gaps };
+    let stats;
+    try {
+      stats = lstatSync(join(root, rel));
+    } catch (error) {
+      // tracked but deleted: reconcile records the deletion, not a gap
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") gaps.push(rel);
+      continue;
+    }
+    if (stats.isSymbolicLink() || !stats.isFile()) {
+      gaps.push(rel);
+      continue;
+    }
+    rels.push(rel);
+  }
+  return { rels, truncated: false, gaps };
+}
+
 function walkFiles(root: string, cap: number): { rels: string[]; truncated: boolean; gaps: string[] } {
+  const listed = gitListedFiles(root);
+  if (listed !== undefined) return listedFiles(root, listed, cap);
   const rels: string[] = [];
   const gaps: string[] = [];
   const stack: string[] = [""];
