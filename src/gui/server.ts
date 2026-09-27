@@ -61,6 +61,7 @@ import { getRepoConsentDetail, isRepoCaptureAllowed, listConsentedRepos } from "
 import { readListeningTail } from "../listening/event-log-read.js";
 import { projectGraph } from "../listening/graph-store.js";
 import { setRepoCapture } from "../listening/consent.js";
+import { startCollectorLoop, type CollectorLoop } from "../listening/collector-loop.js";
 
 export const DEFAULT_GUI_PORT = 7777;
 const READ_CAP_BYTES = 2 * 1024 * 1024;
@@ -324,6 +325,7 @@ async function handleApi(
   request: IncomingMessage,
   response: ServerResponse,
   root: string,
+  collectors?: CollectorLoop,
 ): Promise<void> {
   const now = Date.now();
 
@@ -824,6 +826,8 @@ async function handleApi(
       try {
         const result = setRepoCapture(target, action === "allow", { yes: true, actor: "gui" });
         if (!result.ok) return sendJson(response, 400, result);
+        // allow starts capture on the next tick now; revoke releases the lease
+        collectors?.kick();
         return sendJson(response, 200, result);
       } catch {
         return sendJson(response, 500, { error: "rocky cannot reach consent store, question" });
@@ -842,11 +846,13 @@ export interface GuiHandle {
 }
 
 /** Starts the surface. Resolves once bound, so the caller can print the URL. */
-export function startGui(options: { port?: number; root?: string } = {}): Promise<GuiHandle> {
+export function startGui(options: { port?: number; root?: string; collect?: boolean } = {}): Promise<GuiHandle> {
   const token = randomBytes(16).toString("hex");
   const root = resolve(options.root ?? process.cwd());
   const wanted = options.port ?? DEFAULT_GUI_PORT;
   let boundPort = wanted;
+  // Opt-in (the CLI passes it): an embedded or test server never captures.
+  let collectors: CollectorLoop | undefined;
   void computeBundles().catch(() => {});
 
   const server = createServer((request, response) => {
@@ -862,7 +868,7 @@ export function startGui(options: { port?: number; root?: string } = {}): Promis
           // the shell and its assets load before any script can send a header,
           // so only the api is token-gated
           if (request.headers["x-rocky-token"] !== token) return forbid(response);
-          return await handleApi(pathname, url, request, response, root);
+          return await handleApi(pathname, url, request, response, root, collectors);
         }
         if (pathname === "/" || pathname.startsWith("/assets/")) {
           return await serveAsset(pathname, response);
@@ -886,12 +892,14 @@ export function startGui(options: { port?: number; root?: string } = {}): Promis
       server.listen(port, "127.0.0.1", () => {
         const addr = server.address();
         boundPort = typeof addr === "object" && addr !== null ? addr.port : port;
+        if (options.collect === true) collectors = startCollectorLoop({ proc: "gui" });
         done({
           port: boundPort,
           token,
           url: `http://127.0.0.1:${boundPort}/#${token}`,
           close: () =>
             new Promise<void>((shut) => {
+              collectors?.stop();
               if (typeof (server as any).closeAllConnections === "function") {
                 (server as any).closeAllConnections();
               }

@@ -22,7 +22,8 @@ export async function guiCommand(rest: string[], segment: GuiSegment): Promise<n
 
   let handle;
   try {
-    handle = await startGui({ port: Number.isFinite(port) ? port : DEFAULT_GUI_PORT });
+    // the foreground CLI owns the collector for every consented repo (spec §3)
+    handle = await startGui({ port: Number.isFinite(port) ? port : DEFAULT_GUI_PORT, collect: true });
   } catch {
     say("rocky cannot open door here. port busy, question");
     return 1;
