@@ -1,14 +1,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { setRepoCapture } from "../listening/consent.js";
-import { startCollectorLoop } from "../listening/collector-loop.js";
+import { startCollectorLoop, type CollectorLoop } from "../listening/collector-loop.js";
 import { readListeningTail } from "../listening/event-log-read.js";
 import { collectorPath } from "../listening/store-paths.js";
-import { startGui } from "../gui/server.js";
+import { startGui, type GuiHandle } from "../gui/server.js";
 
 function hasGit(): boolean {
   try {
@@ -64,32 +64,94 @@ async function until(check: () => boolean, ms = 10_000): Promise<boolean> {
 test("collector loop captures a consented repo with no manual step and skips gitignored bulk", { skip: noGit }, async (t) => {
   const home = scratch("rocky-loop-home-");
   const repo = makeRepo();
-  t.after(() => cleanup(home, repo));
+  let loop: CollectorLoop | undefined;
+  t.after(async () => {
+    await loop?.stop();
+    cleanup(home, repo);
+  });
   assert.equal(setRepoCapture(repo, true, { yes: true, actor: "cli" }, home).ok, true);
   // a long tick proves the first capture comes from the start-up tick alone
-  const loop = startCollectorLoop({ proc: "gui", home, tickMs: 60_000 });
-  t.after(() => loop.stop());
+  loop = startCollectorLoop({ proc: "gui", home, tickMs: 60_000 });
   assert.ok(await until(() => heardFiles(repo, home).includes("kept.txt")), "consented file must be captured automatically");
   const heard = heardFiles(repo, home);
   assert.ok(heard.includes(".gitignore"), "untracked, not-ignored files count too");
   assert.ok(!heard.some((rel) => rel.startsWith("ignored/")), "gitignored files must never snapshot");
-  loop.stop();
+  await loop.stop();
   assert.equal(leaseExpires(repo, home), 0, "stop releases the lease for the next owner");
 });
 
 test("collector loop releases a revoked repo and keeps its history", { skip: noGit }, async (t) => {
   const home = scratch("rocky-loop-home-");
   const repo = makeRepo();
-  t.after(() => cleanup(home, repo));
+  let loop: CollectorLoop | undefined;
+  t.after(async () => {
+    await loop?.stop();
+    cleanup(home, repo);
+  });
   setRepoCapture(repo, true, { yes: true, actor: "cli" }, home);
-  const loop = startCollectorLoop({ proc: "gui", home, tickMs: 60_000 });
-  t.after(() => loop.stop());
+  loop = startCollectorLoop({ proc: "gui", home, tickMs: 60_000 });
   assert.ok(await until(() => heardFiles(repo, home).includes("kept.txt")));
   assert.ok((leaseExpires(repo, home) ?? 0) > Date.now(), "owner holds a live lease while listening");
   assert.equal(setRepoCapture(repo, false, { yes: true, actor: "cli" }, home).ok, true);
   loop.kick();
   assert.ok(await until(() => leaseExpires(repo, home) === 0), "revoke releases the lease on the next tick");
   assert.ok(heardFiles(repo, home).includes("kept.txt"), "revoke keeps history");
+});
+
+test("GUI responds while a consented collector waits for Git, then captures its files", { skip: noGit }, async (t) => {
+  const home = scratch("rocky-loop-home-");
+  const repo = makeRepo();
+  const previousHome = process.env.ROCKY_HOME;
+  process.env.ROCKY_HOME = home;
+  const entered = join(repo, ".git", "monitor-entered");
+  const released = join(repo, ".git", "monitor-released");
+  let handle: GuiHandle | undefined;
+  t.after(async () => {
+    writeFileSync(released, "");
+    await handle?.close();
+    if (previousHome === undefined) delete process.env.ROCKY_HOME;
+    else process.env.ROCKY_HOME = previousHome;
+    cleanup(home, repo);
+  });
+  execFileSync("git", ["add", "kept.txt"], { cwd: repo, stdio: "ignore" });
+  const hook = join(repo, ".git", "slow-monitor.cjs");
+  // Git runs in another process: fake timers cannot drive it. The release
+  // file is the awaited condition; the real deadline only breaks a deadlock.
+  writeFileSync(hook, `#!/usr/bin/env node
+const fs = require("node:fs");
+fs.writeFileSync(__dirname + "/monitor-entered", "");
+const deadline = Date.now() + 6000;
+function wait() {
+  if (fs.existsSync(__dirname + "/monitor-released") || Date.now() >= deadline) {
+    process.stdout.write("ready\\0");
+  } else {
+    setTimeout(wait, 25);
+  }
+}
+wait();
+`, { mode: 0o755 });
+  execFileSync("git", ["config", "core.fsmonitor", hook.replace(/\\/g, "/")], { cwd: repo, stdio: "ignore" });
+  assert.equal(setRepoCapture(repo, true, { yes: true, actor: "cli" }).ok, true);
+  handle = await startGui({ port: 0, root: repo, collect: true });
+  const base = `http://127.0.0.1:${handle.port}`;
+  const started = performance.now();
+  const responses = Promise.all([
+    fetch(`${base}/`).then(async (response) => {
+      await response.text();
+      return response.status;
+    }),
+    fetch(`${base}/api/listening/consent?repo=${encodeURIComponent(repo)}`, {
+      headers: { "X-Rocky-Token": handle.token },
+    }).then(async (response) => ({ status: response.status, body: await response.json() })),
+  ]).then((result) => ({ result, elapsedMs: performance.now() - started }));
+  assert.ok(await until(() => existsSync(entered)), "collector must reach the slow Git operation");
+  const { result, elapsedMs } = await responses;
+  assert.equal(result[0], 200);
+  assert.equal(result[1].status, 200);
+  assert.equal(result[1].body.allowed, true);
+  assert.ok(elapsedMs < 5000, "snapshot collection must not hold up HTML or Listening API responses");
+  writeFileSync(released, "");
+  assert.ok(await until(() => heardFiles(repo).includes("kept.txt")), "keeping GUI responsive must not disable capture");
 });
 
 test("gui picker lists consented repos as id and label and resolves picks without granting", { skip: noGit }, async (t) => {

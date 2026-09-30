@@ -2,13 +2,14 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { request } from "node:http";
 import { createServer, type Server } from "node:http";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 
 import { startGui, type GuiHandle } from "../gui/server.js";
 import { publicSettings, readSettings, writeSettings } from "../gui/settings.js";
+import { defaultDiffIo } from "../core/compare-data.js";
 
 /**
  * Every test gets its own ROCKY_HOME and its own repo root, so nothing here
@@ -57,6 +58,39 @@ const json = async (h: GuiHandle, path: string, init: RequestInit = {}): Promise
   });
   return { status: res.status, body: await res.json().catch(() => null) };
 };
+
+test("GUI shell and home respond without waiting for slow historical Git reads", async (t) => {
+  const previousHome = process.env.ROCKY_HOME;
+  const { home, root } = hermetic();
+  t.after(() => {
+    if (previousHome === undefined) delete process.env.ROCKY_HOME;
+    else process.env.ROCKY_HOME = previousHome;
+    for (const dir of [home, root]) rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+  });
+  mkdirSync(join(root, ".git"));
+  writeFileSync(join(root, "heard.ts"), "const heard = true;\n");
+  seedMemory(home, [{
+    kind: "explain", id: "slow-history", v: 1, ts: Date.now(), cwd: root,
+    path: "heard.ts", source: "agent:test", code: "const heard = true;",
+    business: "remember why this file exists", snippet: "const heard = true;",
+  }]);
+  // Model a slow external Git read, not a slow HTTP server.
+  const gate = new Int32Array(new SharedArrayBuffer(4));
+  t.mock.method(defaultDiffIo, "lsFiles", () => {
+    Atomics.wait(gate, 0, 0, 6000);
+    return ["heard.ts"];
+  });
+
+  const started = performance.now();
+  await withGui(root, async (h) => {
+    const shell = await rawGet(h.port, "/", { Host: `127.0.0.1:${h.port}` });
+    assert.equal(shell.status, 200);
+    const home = await json(h, "/api/home");
+    assert.equal(home.status, 200);
+    assert.equal(home.body.total, 1);
+  });
+  assert.ok(performance.now() - started < 5000, "unrequested historical diffs must not hold up GUI startup");
+});
 
 test("api refuses a request with no token and with the wrong token", async () => {
   const { root } = hermetic();

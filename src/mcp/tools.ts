@@ -1567,28 +1567,33 @@ export function createToolRegistry(options: CreateToolRegistryOptions): McpToolR
       };
     }
   };
-  const statsFromDurableSnapshot = (snapshot: DurableMemorySnapshot | undefined, input: StatsQuery): StatsFlightResult => {
+  const statsFromDurableSnapshot = (
+    snapshot: DurableMemorySnapshot | undefined,
+    input: StatsQuery,
+    canonicalMemory = true,
+  ): StatsFlightResult => {
     if (snapshot === undefined) {
       return { stats: {}, coverage: unknownMemoryCoverage(), error: new ToolExecutionError("memory_unavailable", "memory unavailable") };
     }
-    // byKind and rationaleByFidelity stay CLI-only for now; the MCP surface
-    // keeps its v0.5 field set. Widening it is a deliberate decision that
-    // deserves its own review, not a side effect of adding a CLI counter.
-    const { byKind: _byKind, rationaleByFidelity: _rationaleByFidelity, ...stats } = queryStats(snapshot.records, input);
-    return { stats, coverage: snapshot.coverage };
+    // CLI-only breakdowns (byKind, rationaleByFidelity, guard counters and
+    // per-rule metadata) stay out of MCP: project through the same v0.5
+    // allowlist as the safe path so a new CLI counter cannot widen the wire
+    // shape by accident.
+    const projected = safeMemoryStats(queryStats(snapshot.records, input), canonicalMemory);
+    return { stats: projected.value, coverage: snapshot.coverage };
   };
   const readStatsFlight = (input: StatsQuery, canonicalMemory: boolean): Promise<StatsFlightResult> => {
     if (!hasDurableMemoryQueries(options.memory)) return Promise.resolve(readStatsSnapshot(input, canonicalMemory));
     const current = durableSnapshotFlight;
     if (current !== undefined) {
-      return current.then((snapshot) => statsFromDurableSnapshot(snapshot, input));
+      return current.then((snapshot) => statsFromDurableSnapshot(snapshot, input, canonicalMemory));
     }
     let flight: Promise<DurableMemorySnapshot | undefined>;
     flight = Promise.resolve().then(() => loadDurableMemorySnapshot(options.memory)).finally(() => {
       if (durableSnapshotFlight === flight) durableSnapshotFlight = undefined;
     });
     durableSnapshotFlight = flight;
-    return flight.then((snapshot) => statsFromDurableSnapshot(snapshot, input));
+    return flight.then((snapshot) => statsFromDurableSnapshot(snapshot, input, canonicalMemory));
   };
   // One shared allowlist with the privacy layer prevents silent drift.
   const safeDirectKnowledgeId = safeOpaqueIdentifier;

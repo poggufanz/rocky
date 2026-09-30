@@ -901,7 +901,6 @@ export function startGui(options: { port?: number; root?: string; collect?: bool
   let boundPort = wanted;
   // Opt-in (the CLI passes it): an embedded or test server never captures.
   let collectors: CollectorLoop | undefined;
-  void computeBundles().catch(() => {});
 
   const server = createServer((request, response) => {
     void (async () => {
@@ -945,14 +944,15 @@ export function startGui(options: { port?: number; root?: string; collect?: bool
           port: boundPort,
           token,
           url: `http://127.0.0.1:${boundPort}/#${token}`,
-          close: () =>
-            new Promise<void>((shut) => {
-              collectors?.stop();
+          close: async () => {
+            await collectors?.stop();
+            return new Promise<void>((shut) => {
               if (typeof (server as any).closeAllConnections === "function") {
                 (server as any).closeAllConnections();
               }
               server.close(() => shut());
-            }),
+            });
+          },
         });
       });
     };

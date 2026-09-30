@@ -260,16 +260,15 @@ test("custom MCP query boundaries fail open to bounded safe schemas", async () =
  * keeps a bounded field allowlist. Production never takes that path: `rocky
  * mcp` wires `createMemoryQueries()` with no args, which registers as a
  * durable loader (`hasDurableMemoryQueries` true) and goes through
- * `statsFromDurableSnapshot` instead, which spreads `queryStats`'s full
- * result minus an explicit exclusion list. Nothing pinned that exclusion
- * list before, which is exactly what let `rationaleByFidelity` (Task 17)
- * leak onto the wire unfiltered until this test was added. Real evidence
- * (a rationale + an alias record) is on disk here specifically so a
- * regression that stops excluding the field would make it observable in
- * `JSON.stringify`, not just structurally absent by coincidence of empty
- * memory.
+ * `statsFromDurableSnapshot` instead, which projects `queryStats` through the
+ * same allowlist. Nothing pinned that projection before, which is exactly
+ * what let `rationaleByFidelity` (Task 17) leak onto the wire unfiltered
+ * until this test was added. Supported evidence (a rationale + an alias
+ * record) keeps this fixture independent of future record writers. The
+ * field allowlist also excludes future CLI-only guard counters, even when
+ * those counters are zero.
  */
-test("durable MCP stats path excludes byKind and rationaleByFidelity, matching the safe-path key set", async () => {
+test("durable MCP stats path matches the safe-path stats shape", async () => {
   const paths = freshPaths();
   const previous = process.env.ROCKY_HOME;
   process.env.ROCKY_HOME = paths.home;
@@ -290,13 +289,18 @@ test("durable MCP stats path excludes byKind and rationaleByFidelity, matching t
 
     const registry = createToolRegistry({ exposure: "sanitized", memory: createMemoryQueries(), recallWithAi: disabledRecallWithAi });
     const stats = await registry.call("stats", {}, new AbortController().signal);
-    const statsKeys = Object.keys(stats.structuredContent).sort();
+    const content = stats.structuredContent as Record<string, unknown>;
+    assert.equal(content.failures, 1);
+    assert.equal(content.total, 3);
+    assert.equal(content.exposure, "sanitized");
+    const statsKeys = Object.keys(content).sort();
     assert.deepEqual(statsKeys, [
       "confirmedFixes", "coverage", "exposure", "failures", "fixEvents", "memoryCoverage",
       "memoryCoverageIncomplete", "memoryVersion", "notes", "possibleFixes", "resolved", "total", "triples", "unresolved",
     ]);
-    assert.equal(JSON.stringify(stats.structuredContent).includes("rationaleByFidelity"), false);
-    assert.equal(JSON.stringify(stats.structuredContent).includes("byKind"), false);
+    for (const leaked of ["byKind", "rationaleByFidelity", "guardTotal", "guardCancelled", "guardProceeded", "guardByRule"]) {
+      assert.equal(JSON.stringify(content).includes(leaked), false, `${leaked} must not leak onto the MCP wire`);
+    }
   } finally {
     if (previous === undefined) delete process.env.ROCKY_HOME;
     else process.env.ROCKY_HOME = previous;
