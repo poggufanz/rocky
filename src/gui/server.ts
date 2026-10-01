@@ -58,9 +58,10 @@ import { executeAnswer } from "../ai/answer.js";
 // Listening v1 seams: read-only projection plus GUI repo-consent writes.
 // handleApi stays read-only; only the consent POST route writes.
 import { getRepoConsentDetail, isRepoCaptureAllowed, listConsentedRepos } from "../listening/repo-consent-read.js";
-import { readListeningTail } from "../listening/event-log-read.js";
+import { listeningStoreUsage, readListeningTail } from "../listening/event-log-read.js";
+import { LISTENING_DISK_BUDGET_BYTES_PER_REPO } from "../listening/types.js";
 import { projectGraph } from "../listening/graph-store.js";
-import { setRepoCapture } from "../listening/consent.js";
+import { purgeRepoCapture, setRepoCapture } from "../listening/consent.js";
 import { repoSlug } from "../listening/store-paths.js";
 import { startCollectorLoop, type CollectorLoop } from "../listening/collector-loop.js";
 
@@ -855,7 +856,8 @@ async function handleApi(
       if (!repo) return sendJson(response, 400, { error: "rocky needs repo root, question" });
       try {
         const detail = getRepoConsentDetail(repo);
-        return sendJson(response, 200, { allowed: detail.allowed, id: repoSlug(repo), label: basename(repo) });
+        const usage = { ...listeningStoreUsage(repo), budgetBytes: LISTENING_DISK_BUDGET_BYTES_PER_REPO };
+        return sendJson(response, 200, { allowed: detail.allowed, id: repoSlug(repo), label: basename(repo), usage });
       } catch {
         return sendJson(response, 200, { allowed: false, id: "", label: basename(repo) });
       }
@@ -865,11 +867,22 @@ async function handleApi(
       const target = resolveListenRepo(typeof body.repo === "string" ? body.repo : url.searchParams.get("repo"));
       const action = body.action;
       if (!target) return sendJson(response, 400, { error: "rocky needs repo root, question" });
-      if (action !== "allow" && action !== "revoke") {
-        return sendJson(response, 400, { error: "rocky needs action allow or revoke, question" });
+      if (action !== "allow" && action !== "revoke" && action !== "purge") {
+        return sendJson(response, 400, { error: "rocky needs action allow, revoke, or purge, question" });
       }
       if (body.yes !== true) {
         return sendJson(response, 403, { ok: false, reason: "requires-confirmation" });
+      }
+      if (action === "purge") {
+        try {
+          const purged = purgeRepoCapture(target, { yes: true, actor: "gui" });
+          // revoke inside purge releases the lease on the next tick
+          collectors?.kick();
+          if (!purged.ok) return sendJson(response, 400, { ok: false, reason: purged.reason });
+          return sendJson(response, 200, { ok: true, id: repoSlug(target), label: basename(target), freedBytes: purged.freedBytes });
+        } catch {
+          return sendJson(response, 500, { error: "rocky cannot reach listening store, question" });
+        }
       }
       try {
         const result = setRepoCapture(target, action === "allow", { yes: true, actor: "gui" });

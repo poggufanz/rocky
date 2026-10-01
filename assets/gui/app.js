@@ -3209,26 +3209,62 @@ const LISTEN_REASONS = {
   "symlink-rejected": "Symlinked repo roots stay off.",
   "store-unavailable": "Rocky could not write the consent store.",
 };
+// Posts one consent action; a refusal shows its reason and returns null.
+async function postListenConsent(repo, action) {
+  let result = null;
+  try {
+    // raw fetch: a refusal carries its reason in a 400 body
+    const response = await fetch("/api/listening/consent", {
+      method: "POST",
+      headers: { "X-Rocky-Token": TOKEN, "Content-Type": "application/json" },
+      body: JSON.stringify({ repo, action, yes: true }),
+    });
+    result = await response.json().catch(() => null);
+  } catch { /* reported below */ }
+  if (result && result.ok) return result;
+  const host = $("#listen-consent");
+  const reason = result && typeof result.reason === "string" ? result.reason : "";
+  if (host) host.append(el("p", "listen-refused", LISTEN_REASONS[reason] || "Rocky could not change capture. Try again."));
+  return null;
+}
+// No undo, so the first click only arms; a second click inside the window deletes.
+const LISTEN_PURGE_CONFIRM_MS = 5000;
+function listenPurgeButton(repo) {
+  const idle = "Delete history";
+  const btn = el("button", "listen-consent-btn listen-purge", idle);
+  btn.type = "button";
+  let armed = false;
+  const disarm = () => {
+    armed = false;
+    btn.textContent = idle;
+    btn.classList.remove("is-confirming");
+  };
+  btn.addEventListener("click", async () => {
+    if (!armed) {
+      armed = true;
+      btn.textContent = "Click again to delete, no undo";
+      btn.classList.add("is-confirming");
+      setTimeout(() => { if (armed) disarm(); }, LISTEN_PURGE_CONFIRM_MS);
+      return;
+    }
+    disarm();
+    btn.disabled = true;
+    const result = await postListenConsent(repo, "purge");
+    btn.disabled = false;
+    if (!result) return;
+    await loadListenRepos();
+    void refreshListening(true).catch(() => {});
+  });
+  return btn;
+}
 function listenConsentButton(action, text, repo) {
   const btn = el("button", action === "allow" ? "listen-go" : "listen-consent-btn", text);
   btn.type = "button";
   btn.addEventListener("click", async () => {
     btn.disabled = true;
-    let result = null;
-    try {
-      // raw fetch: a refusal carries its reason in a 400 body
-      const response = await fetch("/api/listening/consent", {
-        method: "POST",
-        headers: { "X-Rocky-Token": TOKEN, "Content-Type": "application/json" },
-        body: JSON.stringify({ repo, action, yes: true }),
-      });
-      result = await response.json().catch(() => null);
-    } catch { /* reported below */ }
-    if (!result || !result.ok) {
+    const result = await postListenConsent(repo, action);
+    if (!result) {
       btn.disabled = false;
-      const host = $("#listen-consent");
-      const reason = result && typeof result.reason === "string" ? result.reason : "";
-      if (host) host.append(el("p", "listen-refused", LISTEN_REASONS[reason] || "Rocky could not change capture. Try again."));
       return;
     }
     // a pasted path becomes its consented id, so the pick survives reloads
@@ -3240,25 +3276,45 @@ function listenConsentButton(action, text, repo) {
   return btn;
 }
 // One explicit click grants; picking a repo never does (spec §3, §8).
+function listenDiskText(usage) {
+  if (!usage || typeof usage.budgetBytes !== "number") return "";
+  const mib = (bytes) => `${Number((bytes / 1048576).toFixed(1))} MiB`;
+  const held = (usage.eventsBytes || 0) + (usage.objectsBytes || 0);
+  return `Disk: ${mib(held)} of ${mib(usage.budgetBytes)} budget held for this repo.`;
+}
 function renderListenConsent(host, consent, repo) {
   const label = consent.label || "this repo";
-  // a repaint each poll would drop focus off the button and re-announce it
+  // a repaint each poll would drop focus off the button and re-announce it,
+  // so the disk line changes text in place and stays out of the signature
   const sig = `${repo}|${consent.allowed ? 1 : 0}|${label}`;
-  if (host.dataset.sig === sig) return;
-  host.dataset.sig = sig;
-  host.replaceChildren();
+  if (host.dataset.sig !== sig) {
+    host.dataset.sig = sig;
+    host.replaceChildren();
+    buildListenConsent(host, consent, repo, label);
+  }
+  const disk = host.querySelector(".listen-disk");
+  if (disk) disk.textContent = listenDiskText(consent.usage);
+  const purge = host.querySelector(".listen-purge");
+  const usage = consent.usage || {};
+  if (purge) purge.hidden = (usage.eventsBytes || 0) + (usage.objectsBytes || 0) === 0;
+}
+function buildListenConsent(host, consent, repo, label) {
   if (consent.allowed) {
     const line = el("p", "listen-consent-state");
     line.append(el("b", null, "Listening."),
       ` Rocky checks the text files Git tracks here every ${LISTEN_TICK_S} seconds, while rocky dash stays open.`);
-    host.append(line, listenConsentButton("revoke", "Stop listening", repo));
+    host.append(line, el("p", "listen-disk"), listenConsentButton("revoke", "Stop listening", repo), listenPurgeButton(repo));
     return;
   }
   const card = el("div", "listen-offer");
   card.append(
     el("p", "listen-offer-title", `Rocky is not listening to ${label} yet.`),
     el("p", null, "Listen keeps redacted, bounded snapshots of the text files Git tracks here, while rocky dash stays open. Secret may remain despite redaction. Stop anytime; history stays."),
+    // Budget number is pinned to LISTENING_DISK_BUDGET_BYTES_PER_REPO by listening-disk-budget.test.ts.
+    el("p", null, "Disk budget: up to 160 MiB for this repo on this machine. Oldest snapshots go first when full. Delete history with rocky setup --repo <path> --purge-capture."),
+    el("p", "listen-disk"),
     listenConsentButton("allow", `Listen to ${label}`, repo),
+    listenPurgeButton(repo),
   );
   host.append(card);
 }

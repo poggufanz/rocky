@@ -14,6 +14,7 @@ import {
   readFileSync,
   readdirSync,
   renameSync,
+  rmSync,
   unlinkSync,
   writeFileSync,
   writeSync,
@@ -43,6 +44,7 @@ import {
   repoDir,
 } from "./store-paths.js";
 import { isRepoCaptureAllowed } from "./repo-consent-read.js";
+import { listeningStoreUsage } from "./event-log-read.js";
 import { parseListeningEventLine } from "./event-codec.js";
 
 export type AppendResult =
@@ -357,4 +359,26 @@ export function storeListeningObject(
     return { ok: false, reason: "object-write-failed" };
   }
   return { ok: true, ref, evicted };
+}
+
+/**
+ * Delete one repo's whole Listening history: events, snapshot objects, and
+ * collector state. Refuses while capture is still allowed, so the caller
+ * revokes first and no new capture can follow. A write already past its own
+ * consent check can still land one late file after this returns; rerunning
+ * purge clears it. The directory name is a hash, so no input can reach
+ * outside listening/repos.
+ */
+export function purgeListeningStore(
+  repoRoot: string,
+  home?: string,
+): { ok: boolean; freedBytes: number; reason?: string } {
+  if (isRepoCaptureAllowed(repoRoot, home)) return { ok: false, freedBytes: 0, reason: "revoke-first" };
+  const usage = listeningStoreUsage(repoRoot, home);
+  try {
+    rmSync(repoDir(repoRoot, home), { recursive: true, force: true });
+  } catch {
+    return { ok: false, freedBytes: 0, reason: "store-unavailable" };
+  }
+  return { ok: true, freedBytes: usage.eventsBytes + usage.objectsBytes };
 }

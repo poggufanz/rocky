@@ -66,7 +66,8 @@ test("listening needs one pick and one Listen click, nothing typed", () => {
   assert.ok(app.includes("/api/listening/context"), "picker must read the read-only context endpoint");
   assert.ok(app.includes("fillListenFilter"), "filter choices must come from heard events");
   // Grant stays one explicit click; choosing a repo only refreshes.
-  assert.match(app, /function listenConsentButton[\s\S]*?yes: true/, "Listen button must send the explicit yes");
+  assert.match(app, /function postListenConsent[\s\S]*?yes: true/, "consent POST must send the explicit yes");
+  assert.match(app, /function listenConsentButton[\s\S]*?postListenConsent\(/, "Listen button must post through the explicit-yes helper");
   const choose = /function chooseListenRepo[\s\S]*?\r?\n}\r?\n/.exec(app)?.[0] ?? "";
   assert.ok(choose.length > 0, "missing chooseListenRepo");
   assert.ok(!choose.includes("/api/listening/consent"), "choosing a repo never posts consent");

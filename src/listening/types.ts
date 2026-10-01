@@ -128,13 +128,19 @@ export interface FileVersionObject {
 
 /** candidate_link / temporal_candidate: weak non-causal context. NEVER promoted to direct, content_mapped, validated_by, episode membership, hunk attribution, or bundle grouping. Promotion is simply never performed anywhere in this codebase. */
 
-// --- Bounds: all PROPOSAL, need owner approval before v1.0.0 (spec §11). ---
+// --- Bounds (spec §11): owner-approved as the v1 defaults. The PROPOSAL_
+// prefix stays so callers and listening-types.test.ts keep one stable name.
+// Event + object caps form the per-repo disk budget told to users at consent;
+// the file-version and path caps are internal safety bounds, not budget. ---
 
-/** PROPOSAL: max snapshot/file-version size. Needs owner approval. */
+/** Safety bound: max snapshot/file-version size; larger files keep no snapshot. */
 export const PROPOSAL_MAX_FILE_VERSION_BYTES = 1 * 1024 * 1024;
-/** PROPOSAL: max paths walked per reconciliation. Needs owner approval. */
+/** Safety bound: max paths walked per reconciliation. */
 export const PROPOSAL_MAX_PATHS_PER_RECONCILIATION = 10_000;
-/** PROPOSAL: max content object store per repo, oldest-first + gap. Needs owner approval. */
+/** Disk budget: max content object store per repo, oldest-first eviction. */
 export const PROPOSAL_MAX_OBJECT_STORE_BYTES_PER_REPO = 128 * 1024 * 1024;
-/** PROPOSAL: max graph event store per repo, oldest-first + gap tombstone. Needs owner approval. */
+/** Disk budget: max graph event store per repo, oldest-first + gap tombstone. */
 export const PROPOSAL_MAX_EVENT_STORE_BYTES_PER_REPO = 32 * 1024 * 1024;
+/** Per-repo disk budget users are told about: events plus objects. */
+export const LISTENING_DISK_BUDGET_BYTES_PER_REPO =
+  PROPOSAL_MAX_EVENT_STORE_BYTES_PER_REPO + PROPOSAL_MAX_OBJECT_STORE_BYTES_PER_REPO;

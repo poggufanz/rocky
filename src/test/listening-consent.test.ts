@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, realpathSync, readFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
@@ -72,6 +72,23 @@ test("revoke stops future capture but keeps history", () => {
   assert.equal(isRepoCaptureAllowed(root, home), false);
   const raw = readFileSync(consentsPath(home), "utf8");
   assert.ok(!raw.includes(root));
+});
+
+// A consent made before a root went stale (its .git removed, or the folder
+// gone) must stay revocable: only a grant needs a live Git root.
+test("revoke works for a root that is no longer a git root or no longer exists", () => {
+  const home = freshHome();
+  const stale = gitRepo();
+  const gone = gitRepo();
+  assert.equal(setRepoCapture(stale, true, { yes: true, actor: "cli" }, home).ok, true);
+  assert.equal(setRepoCapture(gone, true, { yes: true, actor: "cli" }, home).ok, true);
+  rmSync(join(stale, ".git"), { recursive: true, force: true });
+  rmSync(gone, { recursive: true, force: true });
+  assert.equal(setRepoCapture(stale, false, { yes: true, actor: "cli" }, home).ok, true);
+  assert.equal(setRepoCapture(gone, false, { yes: true, actor: "cli" }, home).ok, true);
+  assert.equal(isRepoCaptureAllowed(stale, home), false);
+  assert.equal(isRepoCaptureAllowed(gone, home), false);
+  assert.equal(setRepoCapture(stale, true, { yes: true, actor: "cli" }, home).ok, false, "a grant still needs a live root");
 });
 
 test("read side carries no writer imports", () => {

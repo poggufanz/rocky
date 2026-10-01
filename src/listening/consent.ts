@@ -10,6 +10,7 @@ import { isAbsolute, join } from "node:path";
 import { canonicalPath } from "../core/memory-read.js";
 import { consentsPath, listeningHome } from "./store-paths.js";
 import { normalizeRepoRoot } from "./repo-consent-read.js";
+import { purgeListeningStore } from "./event-log.js";
 
 function isGitRoot(canonicalRoot: string): boolean {
   try {
@@ -30,7 +31,9 @@ function isGitRoot(canonicalRoot: string): boolean {
       timeout: 10_000,
       windowsHide: true,
     }).trim();
-    return top.length > 0 && canonicalPath(realpathSync(top)) === canonicalPath(canonicalRoot);
+    // .native on both sides: the JS realpath keeps 8.3 short names
+    // (C:\Users\RUNNER~1) while Git reports the long one, so a real root failed.
+    return top.length > 0 && canonicalPath(realpathSync.native(top)) === canonicalPath(realpathSync.native(canonicalRoot));
   } catch {
     return false;
   }
@@ -51,20 +54,25 @@ export function setRepoCapture(
   if (typeof canonicalRoot !== "string" || !isAbsolute(canonicalRoot)) {
     return { ok: false, reason: "path-must-be-absolute" };
   }
+  // Only a grant needs a live, real Git root. A revoke must still clear a
+  // consent whose folder moved, vanished, or lost its .git.
   let real: string;
   try {
     real = realpathSync(canonicalRoot);
   } catch {
-    return { ok: false, reason: "path-unresolvable" };
+    if (allow) return { ok: false, reason: "path-unresolvable" };
+    real = canonicalRoot;
   }
-  try {
-    if (lstatSync(canonicalRoot).isSymbolicLink()) return { ok: false, reason: "symlink-rejected" };
-  } catch {
-    return { ok: false, reason: "path-unresolvable" };
+  if (allow) {
+    try {
+      if (lstatSync(canonicalRoot).isSymbolicLink()) return { ok: false, reason: "symlink-rejected" };
+    } catch {
+      return { ok: false, reason: "path-unresolvable" };
+    }
   }
   const root = canonicalPath(real);
   if (root.length === 0) return { ok: false, reason: "path-unresolvable" };
-  if (!isGitRoot(real)) return { ok: false, reason: "not-a-git-root" };
+  if (allow && !isGitRoot(real)) return { ok: false, reason: "not-a-git-root" };
   let current: Record<string, unknown> = {};
   try {
     const raw = readFileSync(consentsPath(home), "utf8");
@@ -94,4 +102,31 @@ export function setRepoCapture(
     return { ok: false, reason: "store-unavailable" };
   }
   return { ok: true, root };
+}
+
+/**
+ * Stop capture and delete one repo's Listening history; the setup CLI and
+ * the GUI share it. Revoke always runs first (idempotent, and it clears a
+ * key stored under the realpath spelling), so no writer starts again. The
+ * store is then deleted under both the typed and the realpath spelling,
+ * which can hash to different directories.
+ */
+export function purgeRepoCapture(
+  target: string,
+  opts: { yes: boolean; actor: "cli" | "gui" },
+  home?: string,
+): { ok: boolean; freedBytes: number; root?: string; reason?: string } {
+  if (opts.yes !== true) return { ok: false, freedBytes: 0, reason: "requires-confirmation" };
+  const typed = normalizeRepoRoot(target);
+  if (typed.length === 0) return { ok: false, freedBytes: 0, reason: "path-unresolvable" };
+  const revoked = setRepoCapture(target, false, opts, home);
+  if (!revoked.ok) return { ok: false, freedBytes: 0, reason: revoked.reason };
+  const root = revoked.root ?? typed;
+  let freedBytes = 0;
+  for (const spelling of new Set([typed, root])) {
+    const purged = purgeListeningStore(spelling, home);
+    if (!purged.ok) return { ok: false, freedBytes, reason: purged.reason };
+    freedBytes += purged.freedBytes;
+  }
+  return { ok: true, freedBytes, root };
 }

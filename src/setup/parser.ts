@@ -1,6 +1,6 @@
 import { isHarnessId, type HarnessId } from "./harness-registry.js";
  import type { Exposure } from "../core/config-read.js";
- import type { AgentHooksAction, SetupMode, SetupOptions } from "./clients.js";
+ import type { AgentHooksAction, RepoCaptureAction, SetupMode, SetupOptions } from "./clients.js";
 
 export class SetupUsageError extends Error {
   readonly exitCode = 2;
@@ -110,15 +110,18 @@ export function parseSetupArgs(argv: readonly string[]): SetupOptions {
       index += 1;
       continue;
     }
-    if (argument === "--allow-capture" || argument === "--revoke-capture" || argument === "--check-capture") {
+    if (
+      argument === "--allow-capture"
+      || argument === "--revoke-capture"
+      || argument === "--check-capture"
+      || argument === "--purge-capture"
+    ) {
       if (repoAction !== undefined) {
-        throw new SetupUsageError("--repo action flags --allow-capture, --revoke-capture, and --check-capture are mutually exclusive");
+        throw new SetupUsageError(
+          "--repo action flags --allow-capture, --revoke-capture, --check-capture, and --purge-capture are mutually exclusive",
+        );
       }
-      repoAction = argument === "--allow-capture"
-        ? "allow-capture"
-        : argument === "--revoke-capture"
-          ? "revoke-capture"
-          : "check-capture";
+      repoAction = argument.slice(2) as RepoCaptureAction;
       continue;
     }
     if (argument === "--raw-trace") {

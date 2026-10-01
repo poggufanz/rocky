@@ -3,7 +3,7 @@ import { HARNESS_IDS, isHarnessId, type HarnessId } from "./harness-registry.js"
 
 export { HARNESS_IDS, isHarnessId };
 export type { HarnessId };
-export type RepoCaptureAction = "allow-capture" | "revoke-capture" | "check-capture";
+export type RepoCaptureAction = "allow-capture" | "revoke-capture" | "check-capture" | "purge-capture";
 
 export interface McpRegistration {
   name: "rocky";

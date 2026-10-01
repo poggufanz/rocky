@@ -1,5 +1,5 @@
-import { lstatSync, realpathSync } from "node:fs";
-import { basename, join, posix, win32 } from "node:path";
+import { existsSync, lstatSync, realpathSync } from "node:fs";
+import { basename, join, posix, resolve, win32 } from "node:path";
 import type {
   InspectionResult,
   McpRegistration,
@@ -19,8 +19,14 @@ import {
 import { createCodexAdapter } from "../setup/codex.js";
 import { createHarnessMcpAdapters } from "../setup/harness-mcp-dispatch.js";
 import { checkMcpRegistration } from "../setup/health.js";
-import { setRepoCapture } from "../listening/consent.js";
+import { purgeRepoCapture, setRepoCapture } from "../listening/consent.js";
+import { listeningStoreUsage } from "../listening/event-log-read.js";
 import { getRepoConsentDetail } from "../listening/repo-consent-read.js";
+import {
+  LISTENING_DISK_BUDGET_BYTES_PER_REPO,
+  PROPOSAL_MAX_EVENT_STORE_BYTES_PER_REPO,
+  PROPOSAL_MAX_OBJECT_STORE_BYTES_PER_REPO,
+} from "../listening/types.js";
 import { SetupUsageError, parseSetupArgs } from "../setup/parser.js";
 import { createPlatformServices, type PlatformServices } from "../setup/platform.js";
 import { processRunner, type ProcessRunner } from "../setup/process.js";
@@ -36,7 +42,7 @@ import {
   rockyHookCommand,
   uninstallClaudeAgentHooks,
 } from "../setup/agent-hooks.js";
-import type { AgentHooksAction } from "../setup/clients.js";
+import type { AgentHooksAction, RepoCaptureAction } from "../setup/clients.js";
 import {
   isEphemeralInstall,
   isIdenticalMcpRegistration,
@@ -409,13 +415,59 @@ function defaultDependencies(): SetupDependencies {
   };
 }
 
-async function runRepoCaptureAction(
+const MIB = 1024 * 1024;
+
+function mib(bytes: number): string {
+  return `${Number((bytes / MIB).toFixed(1))} MiB`;
+}
+
+function reportStoreUsage(root: string, allowed: boolean, home: string | undefined): void {
+  const usage = listeningStoreUsage(root, home);
+  const held = usage.eventsBytes + usage.objectsBytes;
+  detail(`disk ${mib(held)} of ${mib(LISTENING_DISK_BUDGET_BYTES_PER_REPO)} budget`);
+  detail(`events ${mib(usage.eventsBytes)}, snapshots ${mib(usage.objectsBytes)} in ${usage.objects} file${usage.objects === 1 ? "" : "s"}`);
+  if (!allowed && held > 0) detail(`history still held. delete it: rocky setup --repo ${root} --purge-capture`);
+}
+
+async function runPurgeCapture(
   repo: string,
-  action: "allow-capture" | "revoke-capture" | "check-capture",
+  probe: { allowed: boolean; root: string },
   yes: boolean,
   confirmation: ConfirmationPort,
+  home: string | undefined,
 ): Promise<number> {
-  const probe = getRepoConsentDetail(repo);
+  const held = listeningStoreUsage(probe.root, home);
+  say(`purge deletes listening history for this repo, ${mib(held.eventsBytes + held.objectsBytes)}. no undo. bad bad.`);
+  if (!yes && !(await confirmation.confirm("purge listening history for this repo now, question"))) {
+    say("consent withheld. setup stops. no change.");
+    return 1;
+  }
+  const purged = purgeRepoCapture(repo, { yes: true, actor: "cli" }, home);
+  if (!purged.ok) {
+    detail(purged.reason ?? "purge failed");
+    return 1;
+  }
+  if (probe.allowed) detail(`capture revoked: ${purged.root ?? probe.root}`);
+  detail(`history purged: ${mib(purged.freedBytes)} freed`);
+  return 0;
+}
+
+async function runRepoCaptureAction(
+  repo: string,
+  action: RepoCaptureAction,
+  yes: boolean,
+  confirmation: ConfirmationPort,
+  home: string | undefined,
+): Promise<number> {
+  // Relative --repo means relative to cwd. Revoke and purge still accept a
+  // path that is gone, so a stale consent stays removable.
+  const target = resolve(repo);
+  if (!existsSync(target) && (action === "allow-capture" || action === "check-capture")) {
+    say("repo path does not exist. setup stops. bad.");
+    detail(`heard ${target}`);
+    return 2;
+  }
+  const probe = getRepoConsentDetail(target, home);
   if (probe.root.length === 0) {
     say("repo path does not resolve. setup stops. bad.");
     return 2;
@@ -423,10 +475,18 @@ async function runRepoCaptureAction(
   detail(`canon root ${probe.root}`);
   if (action === "check-capture") {
     detail(probe.allowed ? "capture allowed" : "capture off");
+    reportStoreUsage(probe.root, probe.allowed, home);
     return 0;
   }
+  if (action === "purge-capture") return runPurgeCapture(target, probe, yes, confirmation, home);
   say("snapshot text stays bounded and redacted. secret may remain. bad bad if host shares it.");
   say("sanitized MCP metadata may list repo and file names. rocky sends nothing itself.");
+  if (action === "allow-capture") {
+    say(
+      `disk budget per repo ${mib(LISTENING_DISK_BUDGET_BYTES_PER_REPO)}: events ${mib(PROPOSAL_MAX_EVENT_STORE_BYTES_PER_REPO)}, `
+        + `snapshots ${mib(PROPOSAL_MAX_OBJECT_STORE_BYTES_PER_REPO)}. oldest goes first when full.`,
+    );
+  }
   if (!yes) {
     const allowed = await confirmation.confirm(
       action === "allow-capture" ? "allow capture for this repo now, question" : "revoke capture for this repo now, question",
@@ -436,13 +496,16 @@ async function runRepoCaptureAction(
       return 1;
     }
   }
-  const result = setRepoCapture(repo, action === "allow-capture", { yes: true, actor: "cli" });
+  const result = setRepoCapture(target, action === "allow-capture", { yes: true, actor: "cli" }, home);
   if (!result.ok) {
     detail(result.reason ?? "capture action failed");
     return result.reason === "requires-confirmation" ? 2 : 1;
   }
   detail(action === "allow-capture" ? `capture allowed: ${result.root ?? probe.root}` : `capture revoked: ${result.root ?? probe.root}`);
-  if (action === "revoke-capture") detail("history stays. revoke stops new capture only");
+  if (action === "revoke-capture") {
+    detail("history stays. revoke stops new capture only");
+    detail(`delete it: rocky setup --repo ${result.root ?? probe.root} --purge-capture`);
+  }
   return 0;
 }
 
@@ -612,7 +675,7 @@ export async function setup(argv: readonly string[], deps?: SetupDependencies): 
   const stdinTTY = deps?.isTTY ?? (deps === undefined ? process.stdin.isTTY ?? false : true);
   const dependencies = deps ?? defaultDependencies();
   if (options.repoAction !== undefined && options.repo !== undefined) {
-    return runRepoCaptureAction(options.repo, options.repoAction, options.yes, dependencies.confirmation);
+    return runRepoCaptureAction(options.repo, options.repoAction, options.yes, dependencies.confirmation, dependencies.rockyHome);
   }
   if (options.rawTrace) {
     say("raw trace grants are not wired yet. setup stops. bad.");

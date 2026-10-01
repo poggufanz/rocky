@@ -27,11 +27,21 @@ const hasBash = (() => {
 })();
 const bashSkip = "Bash executable unavailable; owner: Linux/WSL hook smoke CI";
 
-// Git Bash mangles backslash paths (C:\... arrives as one word), so every
-// path crossing into bash uses the /mnt/<drive>/... form (no-op on POSIX).
+// Which bash answers on PATH decides the path form. Git Bash (MSYS, what
+// Windows CI and a Git-for-Windows PATH resolve) takes C:/... but has no
+// /mnt; WSL bash needs /mnt/<drive>/...; POSIX paths pass through untouched.
+const bashFlavor = (() => {
+  if (!hasBash) return "";
+  const probe = spawnSync("bash", ["-c", "uname -s"], { encoding: "utf8", timeout: 5000 });
+  return (probe.stdout ?? "").trim();
+})();
+
 function toBashPath(native: string): string {
-  const match = /^([A-Za-z]):[/\\](.*)$/.exec(native.replace(/\\/g, "/"));
-  return match ? `/mnt/${match[1].toLowerCase()}/${match[2]}` : native;
+  const forward = native.replace(/\\/g, "/");
+  const match = /^([A-Za-z]):\/(.*)$/.exec(forward);
+  if (!match) return native;
+  if (/^(MINGW|MSYS|CYGWIN)/i.test(bashFlavor)) return forward;
+  return `/mnt/${match[1].toLowerCase()}/${match[2]}`;
 }
 
 /** The exact shipped __rocky_guard_note + __rocky_guard bodies, nothing else. */

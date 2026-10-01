@@ -2,11 +2,49 @@
  * Read-only listening log access (spec §7). MCP-safe: imports only
  * node:fs READ functions plus pure helpers. No writer-named imports.
  */
-import { readFileSync } from "node:fs";
+import { lstatSync, readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import type { EventEnvelope, HarnessId } from "./types.js";
 import { isHarnessId } from "./types.js";
 import { parseListeningEventLine } from "./event-codec.js";
-import { eventsPath, hostEventsPath } from "./store-paths.js";
+import { eventsPath, hostEventsPath, objectsDir } from "./store-paths.js";
+
+function regularFileSize(path: string): number | undefined {
+  try {
+    const stats = lstatSync(path);
+    return stats.isFile() && !stats.isSymbolicLink() ? stats.size : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Bytes Listening holds for one repo. Same accounting as eviction in
+ * event-log.ts: regular files only, symlinks and raced entries never count.
+ * ponytail: walks objects/ on every call; cache it if a hot path ever asks.
+ */
+export function listeningStoreUsage(
+  repoRoot: string,
+  home?: string,
+): { eventsBytes: number; objectsBytes: number; objects: number } {
+  const eventsBytes = regularFileSize(eventsPath(repoRoot, home)) ?? 0;
+  const dir = objectsDir(repoRoot, home);
+  let names: string[];
+  try {
+    names = readdirSync(dir);
+  } catch {
+    names = [];
+  }
+  let objectsBytes = 0;
+  let objects = 0;
+  for (const name of names) {
+    const size = regularFileSize(join(dir, name));
+    if (size === undefined) continue;
+    objectsBytes += size;
+    objects += 1;
+  }
+  return { eventsBytes, objectsBytes, objects };
+}
 
 function readLines(path: string): string[] {
   try {

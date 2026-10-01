@@ -122,6 +122,10 @@ usage:
   rocky setup --status       report host/MCP registration via rocky setup --check and
                             agent-hook state/capability; spool and Ollama/model health
                             are not checked.
+  rocky setup --repo <path> --allow-capture|--revoke-capture|--check-capture|--purge-capture
+                            listening consent for one git repo. disk budget 160 MiB per
+                            repo, oldest pruned first. check shows disk held. purge
+                            revokes and deletes history, no undo.
   rocky check [--pre-push|--install-hook|--offline|--quiet]
                             hull check before push.
   rocky check --prompt "<text>" [--stdin] [--quiet]
