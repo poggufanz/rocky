@@ -39,6 +39,7 @@ import {
 } from "../core/hook-block.js";
 import { resolveRockyPaths } from "../core/state-paths.js";
 import {
+  drainGuardPending,
   recordHookFailure,
   resolveFixOnSuccess,
   type ResolveFixOptions,
@@ -109,7 +110,11 @@ function readMemory(): MemoryRecord[] | undefined {
 /** A command failed in the hooked shell. Record it; speak only if memory has something to say. */
 export function hookFail(cmd: string, exitCode: number, cwd: string): number {
   if (CANCEL_CODES.has(exitCode)) return 0;
-
+  try {
+    drainGuardPending();
+  } catch {
+    // Detached bookkeeping must never become the hooked command's outcome.
+  }
   const memory = readMemory();
 
   try {
@@ -210,6 +215,11 @@ export function isTypoSymptom(cmd: string, exitCode: number): boolean {
 
 /** A command succeeded while the pending flag existed. Try to link a fix. */
 export function hookSuccess(cmd: string, cwd: string, options: ResolveFixOptions = {}): number {
+  try {
+    drainGuardPending();
+  } catch {
+    // Detached bookkeeping must never become the hooked command's outcome.
+  }
   try {
     const result = resolveFixOnSuccess(cmd, cwd, options);
     if (result.confirmedResolved > 0) {

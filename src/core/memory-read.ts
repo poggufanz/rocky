@@ -138,6 +138,19 @@ export interface InvariantTouchRecord {
   path: string;
 }
 
+export type GuardOutcome = "cancelled" | "proceeded";
+
+export interface GuardRecord {
+  v: 1;
+  kind: "guard";
+  id: string;
+  ts: number;
+  cwd: string;
+  cmd: string;
+  rule: string;
+  outcome: GuardOutcome;
+}
+
 export type RationaleFidelity = "raw" | "summary" | "none";
 export type RationaleSource = "log-thinking" | "log-response" | "notify" | "human";
 /** Bounds for the optional rationale `files` list (notify lane `--files`). */
@@ -568,7 +581,7 @@ export function boundTripleRecord(record: TripleRecord): TripleRecord {
   };
 }
 
-export type MemoryRecord = FailureRecord | FixRecord | AssociationRecord | NoteRecord | TripleRecord | BriefRunRecord | InvariantTouchRecord | RationaleRecord | AliasRecord | ExplainRecord;
+export type MemoryRecord = FailureRecord | FixRecord | AssociationRecord | NoteRecord | TripleRecord | BriefRunRecord | InvariantTouchRecord | RationaleRecord | AliasRecord | ExplainRecord | GuardRecord;
 
 /** Future-dated evidence stays readable but is inert for operational answers. */
 export function isOperationalMemoryRecord(record: Pick<MemoryRecord, "ts">, now = Date.now()): boolean {
@@ -914,6 +927,17 @@ function parseMemoryRecordUnsafe(value: unknown): MemoryRecord | undefined {
     return {
       v: 1, kind: "invariant_touch", id: record.id, ts: Number(record.ts), cwd: record.cwd,
       invariant: record.invariant, path: record.path,
+    };
+  }
+  if (record.kind === "guard") {
+    if (record.v !== 1 ||
+        typeof record.cwd !== "string" || record.cwd.length === 0 || record.cwd.length > MAX_RECORD_ITEM_CHARS ||
+        typeof record.cmd !== "string" || record.cmd.length === 0 || record.cmd.length > MAX_RECORD_ITEM_CHARS ||
+        typeof record.rule !== "string" || record.rule.length === 0 || record.rule.length > MAX_RECORD_ITEM_CHARS ||
+        (record.outcome !== "cancelled" && record.outcome !== "proceeded")) return undefined;
+    return {
+      v: 1, kind: "guard", id: record.id, ts: Number(record.ts), cwd: record.cwd,
+      cmd: record.cmd, rule: record.rule, outcome: record.outcome,
     };
   }
   if (record.kind === "triple") return parseTripleRecord(record);

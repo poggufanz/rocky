@@ -398,6 +398,7 @@ async function concurrentSuccesses(t: TestContext, count: number): Promise<void>
     confirmedFixes: 1, possibleFixes: 0, triples: 0, notes: 0, total: 2,
     byKind: { failure: 1, fix: 1 },
     rationaleByFidelity: { raw: 0, summary: 0, none: 0 },
+    guardTotal: 0, guardCancelled: 0, guardProceeded: 0, guardByRule: {},
   });
   assert.equal(existsSync(join(home, "pending")), false);
   assert.equal(existsSync(`${join(home, "memory.jsonl")}.triple.lock`), false);

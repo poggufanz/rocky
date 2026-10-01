@@ -22,7 +22,7 @@ import {
   loadMemoryChecked,
   pathIdentityHash,
 } from "./memory-read.js";
-import type { FailureRecord, FixRecord, LinkBasis, LinkConfidence, MemoryCoverage, MemoryRecord, RationaleFidelity, TripleRecord } from "./memory-read.js";
+import type { FailureRecord, FixRecord, GuardRecord, LinkBasis, LinkConfidence, MemoryCoverage, MemoryRecord, RationaleFidelity, TripleRecord } from "./memory-read.js";
 
 export interface RecallQuery { query: string; limit?: number; cwd?: string; now?: number }
 /**
@@ -52,6 +52,12 @@ export interface MemoryStats {
   byKind?: Record<string, number>;
   /** Rationale evidence count by fidelity. Gate denials are never included: that state is ephemeral, never written to memory. */
   rationaleByFidelity?: Record<RationaleFidelity, number>;
+  /** Guard stops: hook guard triggers, never counted as failure or fix. */
+  guardTotal?: number;
+  guardCancelled?: number;
+  guardProceeded?: number;
+  /** Guard stops by rule pattern, top entries. */
+  guardByRule?: Record<string, number>;
 }
 export interface LinkQuery { cwd: string; now?: number; windowMs?: number }
 export interface KnowledgeSearchQuery { query: string; kind?: "failure" | "fix" | "triple" | "note" | "rationale" | "explain"; limit?: number; now?: number }
@@ -712,6 +718,19 @@ export function queryStats(records: readonly MemoryRecord[], input: StatsQuery =
   for (const record of scoped) {
     if (record.kind === "rationale") rationaleByFidelity[record.rationale_fidelity] += 1;
   }
+  // Guard stops are their own kind: never failure, never fix. Count from the
+  // same deduped/operational `scoped` set so byKind stays in agreement.
+  const guards = scoped.filter((record): record is GuardRecord => record.kind === "guard");
+  const ruleCounts = new Map<string, number>();
+  let guardCancelled = 0;
+  for (const guard of guards) {
+    if (guard.outcome === "cancelled") guardCancelled += 1;
+    ruleCounts.set(guard.rule, (ruleCounts.get(guard.rule) ?? 0) + 1);
+  }
+  const guardByRule: Record<string, number> = {};
+  for (const [rule, count] of [...ruleCounts.entries()]
+    .sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
+    .slice(0, 10)) guardByRule[rule] = count;
   return {
     ...result,
     confirmedFixes: fixEvents,
@@ -721,6 +740,10 @@ export function queryStats(records: readonly MemoryRecord[], input: StatsQuery =
     total: scoped.length,
     byKind,
     rationaleByFidelity,
+    guardTotal: guards.length,
+    guardCancelled,
+    guardProceeded: guards.length - guardCancelled,
+    guardByRule,
   };
 }
 

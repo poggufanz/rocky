@@ -11,6 +11,7 @@ import {
   openSync,
   opendirSync,
   readdirSync,
+  readFileSync,
   renameSync,
   readSync,
   rmSync,
@@ -36,7 +37,7 @@ import {
 import { resolveRockyPaths } from "./state-paths.js";
 import type { RockyPaths } from "./state-paths.js";
 import { boundTripleMechanism, getMemoryRecordOffsets, isCompleteMemoryCoverage, isKnownPathPlatform, isSafeNonNegativeInteger, loadMemoryChecked, MAX_MEMORY_FILE_BYTES, MAX_RATIONALE_FILES, MAX_RATIONALE_FILE_CHARS, MAX_MEMORY_LINE_BYTES, MAX_MEMORY_RECORDS, MAX_SUPPORTED_MEMORY_RECORDS, MEMORY_FORMAT_VERSION } from "./memory-read.js";
-import type { AliasRecord, AssociationRecord, BriefRunRecord, ExplainRecord, FailureRecord, FixRecord, InvariantTouchRecord, MemoryCoverage, MemoryRecord, NoteRecord, RationaleRecord, TripleRecord } from "./memory-read.js";
+import type { AliasRecord, AssociationRecord, BriefRunRecord, ExplainRecord, FailureRecord, FixRecord, GuardOutcome, GuardRecord, InvariantTouchRecord, MemoryCoverage, MemoryRecord, NoteRecord, RationaleRecord, TripleRecord } from "./memory-read.js";
 import { MAX_GIT_SNAPSHOT_CHARS, MAX_GIT_SNAPSHOT_PRE_REDACT_CHARS, type GitAnchor } from "./memory-read.js";
 import { redactSecretsAtBoundary } from "./redact.js";
 import { plausibleFilePath } from "./compare-data.js";
@@ -45,7 +46,7 @@ import { LINK_WINDOW_MS, recentUnresolvedFailures, type UnresolvedLink } from ".
 import { writeSidecarBestEffort } from "./memory-index.js";
 import type { MemoryIndexRow } from "./memory-index.js";
 
-export type { AssociationRecord, BriefRunRecord, ExplainRecord, FailureRecord, FixRecord, GitAnchor, InvariantTouchRecord, MemoryCoverage, MemoryRecord, NoteRecord, TripleFile, TripleRecord } from "./memory-read.js";
+export type { AssociationRecord, BriefRunRecord, ExplainRecord, FailureRecord, FixRecord, GitAnchor, GuardOutcome, GuardRecord, InvariantTouchRecord, MemoryCoverage, MemoryRecord, NoteRecord, TripleFile, TripleRecord } from "./memory-read.js";
 export {
   boundTripleMechanism,
   boundTripleRecord,
@@ -1275,6 +1276,11 @@ export function pendingPath(): string {
   return resolveRockyPaths().pending;
 }
 
+export function guardPendingPath(home?: string): string {
+  if (home !== undefined) return join(home, "guard.pending");
+  return join(resolveRockyPaths().home, "guard.pending");
+}
+
 function touchPendingUnlocked(paths: RockyPaths): void {
   ensureDir(paths.home);
   writeFileSync(paths.pending, "", "utf8");
@@ -1370,6 +1376,28 @@ export function recordInvariantTouch(input: { invariant: string; path: string; c
   const rec: InvariantTouchRecord = {
     v: 1, kind: "invariant_touch", id: randomUUID(), ts, cwd: input.cwd ?? process.cwd(),
     invariant, path,
+  };
+  withMemoryTransaction((transaction) => { transaction.append(rec); }, resolveRockyPaths(), { now: ts });
+  return rec;
+}
+
+export const MAX_GUARD_RULE_CHARS = 16 * 1024;
+export const MAX_GUARD_CWD_CHARS = 512;
+export const MAX_GUARD_DRAIN_LINES = 500;
+
+export function recordGuard(input: { cwd: string; cmd: string; rule: string; outcome: GuardOutcome; ts?: number }): GuardRecord {
+  if (input.outcome !== "cancelled" && input.outcome !== "proceeded") {
+    throw new Error("Rocky guard evidence requires outcome cancelled or proceeded");
+  }
+  const cmd = boundCommand(input.cmd);
+  const cwd = input.cwd.slice(0, MAX_GUARD_CWD_CHARS);
+  const rule = input.rule.slice(0, MAX_GUARD_RULE_CHARS);
+  if (cwd.length === 0 || cmd.length === 0 || rule.length === 0) {
+    throw new Error("Rocky guard evidence requires non-empty cwd, cmd, and rule");
+  }
+  const ts = input.ts ?? Date.now();
+  const rec: GuardRecord = {
+    v: 1, kind: "guard", id: randomUUID(), ts, cwd, cmd, rule, outcome: input.outcome,
   };
   withMemoryTransaction((transaction) => { transaction.append(rec); }, resolveRockyPaths(), { now: ts });
   return rec;
@@ -1587,4 +1615,91 @@ export function recordAlias(
   };
   withMemoryTransaction((transaction) => { transaction.append(rec); }, paths ?? resolveRockyPaths(), { now: ts });
   return rec;
+}
+
+export interface GuardDrainResult { drained: number; skipped: number }
+
+/**
+ * Drain the bash guard pending file into memory. Atomic rename first so a
+ * concurrent bash append lands in a fresh file; parse at most
+ * MAX_GUARD_DRAIN_LINES per pass and leave the rest by re-appending them.
+ * Malformed lines are skipped, never thrown. Fail-silent at call sites.
+ */
+export function drainGuardPending(home?: string): GuardDrainResult {
+  const resolvedHome = home ?? resolveRockyPaths().home;
+  const paths = resolveRockyPaths();
+  const scoped: RockyPaths = home === undefined
+    ? paths
+    : { ...paths, home: resolvedHome, memory: join(resolvedHome, "memory.jsonl") };
+  const pending = join(resolvedHome, "guard.pending");
+  let pendingStats;
+  try {
+    pendingStats = lstatSync(pending);
+  } catch {
+    return { drained: 0, skipped: 0 };
+  }
+  if (!pendingStats.isFile() || pendingStats.isSymbolicLink()) return { drained: 0, skipped: 0 };
+  const drainFile = `${pending}.${randomBytes(8).toString("hex")}.drain`;
+  try {
+    renameSync(pending, drainFile);
+  } catch {
+    return { drained: 0, skipped: 0 };
+  }
+  let text: string;
+  try {
+    text = readFileSync(drainFile, "utf8");
+  } catch {
+    return { drained: 0, skipped: 0 };
+  }
+  const lines = text.split("\n").filter((line) => line.length > 0);
+  const batch = lines.slice(0, MAX_GUARD_DRAIN_LINES);
+  const rest = lines.slice(MAX_GUARD_DRAIN_LINES);
+  let skipped = 0;
+  const records: GuardRecord[] = [];
+  for (const line of batch) {
+    const parts = line.split("\t");
+    if (parts.length !== 5) { skipped += 1; continue; }
+    const [tsRaw, outcomeRaw, ruleRaw, cwdRaw, cmdRaw] = parts as [string, string, string, string, string];
+    if (!/^\d{1,19}$/u.test(tsRaw)) { skipped += 1; continue; }
+    const tsMs = Number(tsRaw) * 1000;
+    if (!isSafeNonNegativeInteger(tsMs) || (outcomeRaw !== "cancelled" && outcomeRaw !== "proceeded")) { skipped += 1; continue; }
+    if (ruleRaw.length === 0 || cwdRaw.length === 0 || cmdRaw.length === 0) { skipped += 1; continue; }
+    try {
+      const cmd = boundCommand(cmdRaw);
+      const cwd = cwdRaw.slice(0, MAX_GUARD_CWD_CHARS);
+      const rule = ruleRaw.slice(0, MAX_GUARD_RULE_CHARS);
+      if (cwd.length === 0 || cmd.length === 0 || rule.length === 0) { skipped += 1; continue; }
+      records.push({ v: 1, kind: "guard", id: randomUUID(), ts: tsMs, cwd, cmd, rule, outcome: outcomeRaw as GuardOutcome });
+    } catch {
+      skipped += 1;
+      continue;
+    }
+  }
+  let drained = 0;
+  let leftover = rest;
+  if (records.length > 0) {
+    try {
+      withMemoryTransaction((transaction) => {
+        for (const record of records) transaction.append(record);
+      }, scoped, { now: Date.now() });
+      drained = records.length;
+    } catch {
+      // Append failed: put the batch back for the next pass, nothing drained.
+      skipped += records.length;
+      leftover = [...batch, ...rest];
+    }
+  }
+  if (leftover.length > 0) {
+    try {
+      writeFileSync(pending, `${leftover.join("\n")}\n`, "utf8");
+    } catch {
+      // Leftover lines are best-effort; the drain file is still removed below.
+    }
+  }
+  try {
+    rmSync(drainFile, { force: true });
+  } catch {
+    // Best effort; a residual .drain file is inert and never re-drained.
+  }
+  return { drained, skipped };
 }

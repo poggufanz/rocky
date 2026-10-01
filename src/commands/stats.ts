@@ -1,6 +1,6 @@
 import { dirname } from "node:path";
 import { readJournal } from "../core/journal.js";
-import { countReclaimTombstones, memoryPath, type MemoryRecord } from "../core/memory.js";
+import { countReclaimTombstones, drainGuardPending, memoryPath, type MemoryRecord } from "../core/memory.js";
 import { isOperationalMemoryRecord, loadMemoryChecked } from "../core/memory-read.js";
 import { queryStats } from "../core/memory-query.js";
 import { CYCLES_TOP, FAILURE_CYCLE_COUNT } from "../core/failure-cycle.js";
@@ -73,6 +73,12 @@ export function stats(argv: readonly string[] = []): number {
     throw error;
   }
   if (cycles) return statsCycles();
+  let drainedGuard = 0;
+  try {
+    drainedGuard = drainGuardPending().drained;
+  } catch {
+    drainedGuard = 0;
+  }
   let records: MemoryRecord[];
   let coverage;
   try {
@@ -111,6 +117,18 @@ export function stats(argv: readonly string[] = []): number {
   const rationaleTotal = byKind["rationale"] ?? 0;
   const aliasTotal = byKind["alias"] ?? 0;
   say(`rationale heard ${rationaleTotal} time${rationaleTotal === 1 ? "" : "s"}. raw ${rationaleByFidelity.raw}, summary ${rationaleByFidelity.summary}, none ${rationaleByFidelity.none}. alias ${aliasTotal} remembered.`);
+  const guardTotal = result.guardTotal ?? 0;
+  const guardCancelled = result.guardCancelled ?? 0;
+  const guardProceeded = result.guardProceeded ?? 0;
+  if (guardTotal === 0) {
+    say("guard never stop bad command yet. good.");
+  } else {
+    say(`guard stop ${guardTotal} bad command${guardTotal === 1 ? "" : "s"}. ${guardCancelled} cancelled. ${guardProceeded} proceeded.`);
+    const guardByRule = result.guardByRule ?? {};
+    const topRule = Object.entries(guardByRule).sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))[0];
+    if (topRule !== undefined) detail(`top guard rule: ${topRule[0]} (${topRule[1]})`);
+  }
+  if (drainedGuard > 0) detail(`guard pending drained: ${drainedGuard}`);
   detail(`memory coverage: version ${coverage.version}, scanned ${coverage.scanned}, skipped ${coverage.skipped}, truncated ${coverage.truncated}, complete ${coverage.complete}`);
   const tombstones = countReclaimTombstones(dirname(memoryPath()));
   if (tombstones > 0) detail(`tombstones waiting sweep: ${tombstones}`);
