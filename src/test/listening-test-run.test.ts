@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -17,7 +18,7 @@ function freshHome(): string {
 
 function setupRepo(home: string): string {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "rocky-run-repo-")));
-  mkdirSync(join(root, ".git"));
+  execFileSync("git", ["init", "-q"], { cwd: root });
   assert.equal(setRepoCapture(root, true, { yes: true, actor: "cli" }, home).ok, true);
   return root;
 }

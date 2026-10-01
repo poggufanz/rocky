@@ -4,6 +4,7 @@
  * never import: it mutates the consent store. GUI Add/Revoke and the setup
  * CLI share this backend; opening or selecting a repo never grants.
  */
+import { execFileSync } from "node:child_process";
 import { lstatSync, mkdirSync, readFileSync, renameSync, realpathSync, writeFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { canonicalPath } from "../core/memory-read.js";
@@ -14,7 +15,22 @@ function isGitRoot(canonicalRoot: string): boolean {
   try {
     const gitDir = lstatSync(join(canonicalRoot, ".git"));
     if (gitDir.isSymbolicLink()) return false;
-    return gitDir.isDirectory() || gitDir.isFile();
+    if (!gitDir.isDirectory() && !gitDir.isFile()) return false;
+  } catch {
+    return false;
+  }
+  // A .git is only a root when Git itself reads it as one. A stub Git cannot
+  // read used to pass, and capture then walked the folder wholesale; a stray
+  // .git inside a repo names a subfolder, never a root.
+  try {
+    const top = execFileSync("git", ["rev-parse", "--show-toplevel"], {
+      cwd: canonicalRoot,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+      timeout: 10_000,
+      windowsHide: true,
+    }).trim();
+    return top.length > 0 && canonicalPath(realpathSync(top)) === canonicalPath(canonicalRoot);
   } catch {
     return false;
   }

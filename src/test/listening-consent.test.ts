@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, realpathSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -16,9 +17,30 @@ function freshHome(): string {
 
 function gitRepo(): string {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "rocky-consent-repo-")));
-  mkdirSync(join(root, ".git"));
+  execFileSync("git", ["init", "-q"], { cwd: root });
   return root;
 }
+
+// A .git that Git cannot read (a stub left in a workspace) used to pass the
+// existence check; capture then fell back to walking the folder wholesale.
+test("a .git that Git cannot read is refused as not-a-git-root", () => {
+  const home = freshHome();
+  const stub = realpathSync(mkdtempSync(join(tmpdir(), "rocky-consent-stub-")));
+  mkdirSync(join(stub, ".git", "info"), { recursive: true });
+  const refused = setRepoCapture(stub, true, { yes: true, actor: "cli" }, home);
+  assert.equal(refused.ok, false);
+  assert.equal(refused.reason, "not-a-git-root");
+  assert.equal(isRepoCaptureAllowed(stub, home), false);
+});
+
+// A subfolder of a repo is not a root: consent names whole repos only.
+test("a subfolder inside a repo is refused even with a stray .git", () => {
+  const home = freshHome();
+  const root = gitRepo();
+  const sub = join(root, "pkg");
+  mkdirSync(join(sub, ".git"), { recursive: true });
+  assert.equal(setRepoCapture(sub, true, { yes: true, actor: "cli" }, home).ok, false);
+});
 
 test("grant requires explicit yes and writes nothing without it", () => {
   const home = freshHome();

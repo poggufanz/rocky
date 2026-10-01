@@ -7,11 +7,9 @@
 import {
   closeSync,
   constants,
-  existsSync,
   fstatSync,
   lstatSync,
   openSync,
-  readdirSync,
   readSync,
   realpathSync,
   statSync,
@@ -146,7 +144,7 @@ function knownVersions(root: string, home?: string): Map<string, KnownVersion> {
 /**
  * Tracked plus untracked-not-ignored paths, so gitignored bulk
  * (node_modules, dist) never snapshots. Undefined when Git cannot list
- * this root; the caller falls back to the plain walk.
+ * this root; the caller then hears nothing.
  */
 function gitListedFiles(root: string): string[] | undefined {
   try {
@@ -187,66 +185,15 @@ function listedFiles(root: string, listed: string[], cap: number): { rels: strin
   return { rels, truncated: false, gaps };
 }
 
-function walkFiles(root: string, cap: number): { rels: string[]; truncated: boolean; gaps: string[] } {
+/**
+ * The files Listening may hear are the ones Git lists, nothing else.
+ * Undefined when Git cannot list the root: capture then hears nothing for
+ * that tick. A plain-walk fallback used to read the folder wholesale,
+ * ignored bulk and git internals included.
+ */
+function walkFiles(root: string, cap: number): { rels: string[]; truncated: boolean; gaps: string[] } | undefined {
   const listed = gitListedFiles(root);
-  if (listed !== undefined) return listedFiles(root, listed, cap);
-  const rels: string[] = [];
-  const gaps: string[] = [];
-  const stack: string[] = [""];
-  while (stack.length > 0) {
-    const dir = stack.pop() as string;
-    // A nested clone keeps its own ignore rules: Git lists it, so its build
-    // output and dependencies never snapshot. A .git Git cannot read falls
-    // through to the plain descent below.
-    if (dir.length > 0 && existsSync(join(root, dir, ".git"))) {
-      const nested = gitListedFiles(join(root, dir));
-      if (nested !== undefined) {
-        const out = listedFiles(root, nested.map((rel) => `${dir}/${rel}`), cap - rels.length);
-        rels.push(...out.rels);
-        gaps.push(...out.gaps);
-        if (out.truncated) return { rels, truncated: true, gaps };
-        continue;
-      }
-    }
-    let names: string[];
-    try {
-      names = readdirSync(join(root, dir));
-    } catch {
-      gaps.push(dir.length === 0 ? "." : dir);
-      continue;
-    }
-    names.sort();
-    for (const name of names) {
-      // git internals are never content, at any depth
-      if (name === ".git") continue;
-      const rel = dir.length === 0 ? name : `${dir}/${name}`;
-      if (rels.length + stack.length > cap) {
-        return { rels, truncated: true, gaps };
-      }
-      let stats;
-      try {
-        stats = lstatSync(join(root, rel));
-      } catch {
-        gaps.push(rel);
-        continue;
-      }
-      if (stats.isSymbolicLink()) {
-        gaps.push(rel);
-        continue;
-      }
-      if (stats.isDirectory()) {
-        stack.push(rel);
-        continue;
-      }
-      if (!stats.isFile()) {
-        gaps.push(rel);
-        continue;
-      }
-      rels.push(rel);
-      if (rels.length >= cap) return { rels, truncated: true, gaps };
-    }
-  }
-  return { rels, truncated: false, gaps };
+  return listed === undefined ? undefined : listedFiles(root, listed, cap);
 }
 
 function isBinary(bytes: Uint8Array): boolean {
@@ -300,7 +247,11 @@ export function reconcileRepo(
   }
   const cap = opts?.pathCap ?? WATCHER_PATH_CAP_FALLBACK;
   const baseline = opts?.baseline === true;
-  const { rels, truncated, gaps } = walkFiles(root, Math.min(Math.max(1, Math.floor(cap)), WATCHER_PATH_CAP_FALLBACK * 10));
+  const walked = walkFiles(root, Math.min(Math.max(1, Math.floor(cap)), WATCHER_PATH_CAP_FALLBACK * 10));
+  // returned before the deletion pass: an unlisted root must never read as
+  // every known file having gone
+  if (walked === undefined) return { versions: [], hunks: 0, gaps: ["git-unreadable"], coverage: "unknown" };
+  const { rels, truncated, gaps } = walked;
   const known = knownVersions(root, home);
   const versions: string[] = [];
   let hunks = 0;

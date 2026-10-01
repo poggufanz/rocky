@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { appendFileSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -36,7 +37,7 @@ test("projection drops a crafted runtime_observed envelope from durable JSON", (
   const home = realpathSync(mkdtempSync(join(tmpdir(), "rocky-listen-gates-")));
   mkdirSync(join(home, "listening"), { recursive: true });
   const root = realpathSync(mkdtempSync(join(tmpdir(), "rocky-gates-repo-")));
-  mkdirSync(join(root, ".git"));
+  execFileSync("git", ["init", "-q"], { cwd: root });
   assert.equal(setRepoCapture(root, true, { yes: true, actor: "cli" }, home).ok, true);
   appendListeningEvent(
     root,

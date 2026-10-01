@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setRepoCapture } from "../listening/consent.js";
@@ -17,7 +17,7 @@ function freshHome(): string {
 
 function consentedRepo(home: string): string {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "rocky-watch-repo-")));
-  mkdirSync(join(root, ".git"));
+  execFileSync("git", ["init", "-q"], { cwd: root });
   assert.equal(setRepoCapture(root, true, { yes: true, actor: "cli" }, home).ok, true);
   return root;
 }
@@ -71,38 +71,42 @@ test("binary, oversized, and symlink files become gaps, never versions", () => {
   assert.ok(!versioned.includes("link.txt"));
 });
 
-// A consented root whose .git git cannot read (a stub left in a workspace)
-// falls back to walking. The walk must still keep a nested repo's ignore
-// rules and never read any .git: a workspace wrapping a clone used to
-// snapshot its test build output and git internals on every tick.
-test("unreadable-git root lists nested repos through git and skips every .git", () => {
+// Listening reads the text files Git lists, nothing else. A root whose .git
+// Git can no longer read (consent kept from before, a stub left behind) is
+// never walked wholesale: a workspace like that used to snapshot a nested
+// clone's ignored test build and git internals on every tick.
+test("a consented root Git cannot list is heard as nothing, never walked", () => {
   const home = freshHome();
   const root = consentedRepo(home);
-  writeFileSync(join(root, "loose.txt"), "loose\n");
-
-  const inner = join(root, "inner");
-  mkdirSync(inner);
-  execFileSync("git", ["init", "-q"], { cwd: inner });
-  writeFileSync(join(inner, ".gitignore"), ".test-dist/\n");
-  writeFileSync(join(inner, "kept.txt"), "kept\n");
-  mkdirSync(join(inner, ".test-dist"));
-  writeFileSync(join(inner, ".test-dist", "built.js"), "built\n");
-
-  // a broken .git (no repo behind it) still never gets read
-  mkdirSync(join(root, "vendor", "thing", ".git"), { recursive: true });
-  writeFileSync(join(root, "vendor", "thing", ".git", "HEAD"), "ref: refs/heads/main\n");
-  writeFileSync(join(root, "vendor", "thing", "lib.txt"), "lib\n");
+  writeFileSync(join(root, "kept.txt"), "kept\n");
+  rmSync(join(root, ".git"), { recursive: true, force: true });
+  mkdirSync(join(root, ".git", "info"), { recursive: true });
+  mkdirSync(join(root, ".test-dist"));
+  writeFileSync(join(root, ".test-dist", "built.js"), "built\n");
 
   const out = reconcileRepo(root, {}, home);
-  assert.notEqual(out.coverage, "unknown");
+  assert.equal(out.coverage, "unknown");
+  assert.deepEqual(out.gaps, ["git-unreadable"]);
+  assert.deepEqual(out.versions, []);
+  assert.equal(loadEventsForProjection(root, home).events.length, 0);
+  assert.equal(ensureBaseline(root, home).reason, "git-unreadable");
+});
+
+// Git's own ignore rules decide what is heard in a readable repo.
+test("gitignored build output is never heard", () => {
+  const home = freshHome();
+  const root = consentedRepo(home);
+  writeFileSync(join(root, ".gitignore"), ".test-dist/\n");
+  writeFileSync(join(root, "kept.txt"), "kept\n");
+  mkdirSync(join(root, ".test-dist"));
+  writeFileSync(join(root, ".test-dist", "built.js"), "built\n");
+  reconcileRepo(root, {}, home);
   const versioned = loadEventsForProjection(root, home).events
     .filter((e) => e.node === "file_version")
     .map((e) => e.refs.fileRel);
-  for (const rel of ["loose.txt", "inner/kept.txt", "inner/.gitignore", "vendor/thing/lib.txt"]) {
-    assert.ok(versioned.includes(rel), `expected ${rel} to be heard`);
-  }
-  assert.ok(!versioned.some((rel) => rel?.includes(".test-dist/")), "ignored build output must not be heard");
-  assert.ok(!versioned.some((rel) => rel?.split("/").includes(".git")), "no .git content may be heard");
+  assert.ok(versioned.includes("kept.txt"));
+  assert.ok(!versioned.some((rel) => rel?.includes(".test-dist/")));
+  assert.ok(!versioned.some((rel) => rel?.split("/").includes(".git")));
 });
 
 test("path cap truncates with partial coverage", () => {
