@@ -2,7 +2,32 @@
 
 Notable changes per release. Dates are the release date.
 
-## Unreleased
+## 1.0.0 — 1 October 2026
+
+The first major release. Rocky now listens across consented repositories, sets up harnesses by explicit target, serves thirteen read-only MCP tools, and turns the GUI Main tab into a chat surface.
+
+Breaking changes:
+
+- **`rocky setup` needs explicit harness targets.** Non-interactive `rocky setup` without `--harness <id>` now stops with exit code 2 and no longer configures every detected host. Interactive runs open a harness picker with a numbered fallback. Use `rocky setup --harness codex --yes` for MCP only, or add `--listening` to enable Listening. `--agent-hooks`, `--uninstall-agent-hooks`, and `--voice-skill` keep their old paths.
+- **MCP serves thirteen tools instead of eight.** The eight existing tools keep their names and shapes. Five new metadata-only Listening tools follow them: `activity_recent`, `activity_for_file`, `bundles_list`, `bundle_get`, and `session_timeline`. Hosts that pin the tool list must refresh it.
+
+New:
+
+- **Listening v1.** Rocky can record file activity in repositories you consent to (`rocky setup --repo <path> --allow-capture`, `--revoke-capture`, `--check-capture`). It reads only files that `git ls-files` lists and that Git does not ignore. A root that Git cannot read is refused. Events go to a local event log, a GUI-owned collector reconciles them under a lease, and `rocky hook listen-event <harnessId>` accepts native harness events (stdin JSON only, fail-open, empty stdout). The GUI gains a Listening tab with a repo dropdown and one-click Listen.
+- **Listening has a stated disk budget and a delete path.** Each consented repository holds at most 160 MiB under `~/.rocky/listening/`: 32 MiB of events and 128 MiB of snapshots, with the oldest dropped first and a gap marker left in the event log. Consent, in the CLI and in the GUI, states this budget before you agree. `--check-capture` shows the disk held against the budget. The new `--purge-capture` revokes consent and deletes that repository's history (asks first, no undo). `--revoke-capture` still keeps history and now names the purge command. The GUI Listening tab shows the same disk figure and has a **Delete history** button that needs a second click within five seconds. `--repo` accepts a path relative to the current folder, and revoke and purge work for a consented folder that has moved, vanished, or lost its `.git`.
+- **Listening consent works on Windows short paths.** A repo reached through an 8.3 short name (such as `C:\Users\RUNNER~1\…`) was refused as not a Git root, because Rocky compared the short spelling with the long one Git reports. Both sides now resolve to the long name before comparing. Files over 1 MiB keep no snapshot, and one pass walks at most 10,000 paths; these are safety bounds, not budget.
+- **Harness registry and MCP adapters.** A closed registry names 11 harnesses. MCP adapters with detect, merge, and verify steps ship for Claude Code, Codex CLI, OpenCode, Gemini CLI, and Copilot CLI (honors `COPILOT_HOME`). `rocky setup --check` probes all thirteen tools. `--raw-trace` is parsed but not yet wired: setup stops instead of granting it.
+- **Main tab becomes a chat surface.** Chats get a sidebar with search, day groups, rename, and two-step delete (stored in browser storage, because `/api/chat` keeps no conversation). The composer gains an Auto / Memory / Code route picker, a Jev toggle, and a stop button. Answers show origin and Held badges, a decision drawer, and a sources drawer that summarizes whole memory records.
+- **Dash rework.** History groups moments by witnessed change, with one diff per change, shared-commit and after badges, and stored snapshots. New panes show cross-file bundles, a references panel (LSP-shaped resolver), and a context badge with expand and shrink. The empty pane is a guide, and the why popover leads with how Rocky knows (Witnessed / Assembled / Nothing held).
+- **Teach provenance.** Teach cards add three-tier git provenance (blame, show, log) with per-source evidence pointers and an exhaustion flag. Rationale and explain records can carry a bounded, redacted git anchor.
+- **Advisory checks, never blocking.** `rocky check --prompt` scores prompt clarity locally. `rocky check --decompose` and `rocky brief --decompose` split a staged change into behavior, fields, and verification. `rocky stats --cycles` and a gate note report failure cycles (the memory circuit breaker ships as an advisory). `rocky brief` lists untried features. All of these exit 0 and use no model.
+- **Gate hardening.** The rationale gate checks explain evidence with a file-path fallback, indexes its evidence, audits deny decisions, and offers a strict mode with a human override. Garbage rationale and explain text is rejected without being recorded.
+- **Bash guard decisions are remembered.** Each guard decision (cancelled or proceeded) becomes a bounded `guard` record, and `rocky stats` counts guard stops by rule.
+- **CS concept cards.** Four computer-science concepts join the lexicon, with a one-line terminal pointer, a GUI card, and coverage in `rocky digest`.
+- **Retrieval.** `search_knowledge` indexes rationale and explain records, expands CamelCase and PascalCase tokens, and an advisory fingerprint sidecar plus a lazy memory index make a recall miss load memory once.
+- New assets: a zero-dependency OpenCode plugin template and a `BASH_ENV` subshell hook that lets non-interactive Bash shells report failures to local memory. Nothing leaves the machine.
+
+Also in this release:
 
 - **Main and Listening stay responsive during snapshot collection.** Consent-gated reconciliation runs in a Node worker while the foreground loop renews leases and limits each repo to one pending scan. Closing the GUI waits for worker shutdown before releasing ownership. Historical bundles are computed only when requested, not at startup; stored memory, repository consent, and token/Host checks are unchanged.
 - **MCP stats use the same bounded field allowlist on both read paths.** Durable snapshots now reuse the existing safe stats projection, so new CLI-only guard counters and per-rule metadata cannot incidentally widen the MCP response. Stored guard events and `rocky stats` counts are unchanged.
