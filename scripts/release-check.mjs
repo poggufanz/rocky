@@ -712,7 +712,7 @@ export function validateReleaseMetadata(value) {
       && isEmptyBundleMetadata(value.bundleDependencies)
       && value.name === PACKAGE_NAME
       && value.version === PACKAGE_VERSION
-      && isCanonicalBinary(value.bin, "./dist/index.js")
+      && isCanonicalBinary(value.bin, "dist/index.js")
       && value.engines?.node === ">=18"
       && value.license === "MIT"
       && value.author === "Muhammad Faiq"

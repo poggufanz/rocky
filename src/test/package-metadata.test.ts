@@ -208,7 +208,7 @@ test("public package metadata pins the scoped identity and release coordinates",
   const metadata = readJson(join(packageRoot, "package.json"));
   assert.equal(metadata.name, "@poggufanz/rocky-cli");
   assert.equal(metadata.version, "1.0.0");
-  assert.deepEqual(metadata.bin, { rocky: "./dist/index.js" });
+  assert.deepEqual(metadata.bin, { rocky: "dist/index.js" });
   assert.deepEqual(metadata.engines, { node: ">=18" });
   assert.deepEqual(metadata.repository, {
     type: "git",

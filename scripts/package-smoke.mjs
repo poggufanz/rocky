@@ -500,7 +500,7 @@ async function main() {
   const installedMetadata = JSON.parse(readFileSync(join(installedRoot, "package.json"), "utf8"));
   assert.equal(installedMetadata.name, PACKAGE_NAME);
   assert.equal(installedMetadata.version, PACKAGE_VERSION);
-  assert.deepEqual(installedMetadata.bin, { [PACKAGE_BINARY]: "./dist/index.js" });
+  assert.deepEqual(installedMetadata.bin, { [PACKAGE_BINARY]: "dist/index.js" });
   assert.deepEqual(installedMetadata.dependencies ?? {}, {});
   assert.deepEqual(installedMetadata.optionalDependencies ?? {}, {});
 
