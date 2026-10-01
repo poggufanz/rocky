@@ -204,36 +204,47 @@
   <section class="view" id="view-dash" role="tabpanel" aria-labelledby="tab-dash" hidden>
     <div class="dash">
 
-      <aside class="left">
+      <aside class="left" aria-label="files rocky heard">
         <label class="filter">
           <span class="vh">filter files</span>
-          <input id="filter" type="search" placeholder="type part of a path… !md hides .md"
-                 autocomplete="off" spellcheck="false">
+          <input id="filter" type="search" placeholder="Find a file by part of its path"
+                 autocomplete="off" spellcheck="false" aria-describedby="filter-hint">
+          <span class="filter-hint" id="filter-hint">Each word narrows the list. <kbd>!md</kbd> or <kbd>-test</kbd> hides matches.</span>
         </label>
 
         <div class="col-head">
-          <span id="files-head">files</span>
+          <div class="view-seg" role="group" aria-label="list by">
+            <button class="view-seg-btn" type="button" data-view="individual" aria-pressed="true"
+                    title="One row per file">By file</button>
+            <button class="view-seg-btn" type="button" data-view="bundle" aria-pressed="false"
+                    title="Files that changed together, one row per change">By change</button>
+          </div>
           <button id="repo-filter-btn" class="repo-filter-btn" type="button"
-                  aria-haspopup="dialog" aria-controls="repo-filter">Filter Repo</button>
+                  aria-haspopup="dialog" aria-controls="repo-filter">All repos</button>
         </div>
+        <p class="col-count" id="files-head" aria-live="polite"></p>
         <div id="files" class="files" role="listbox" aria-label="files rocky heard"></div>
       </aside>
 
       <section class="pane">
         <div class="pane-bar">
-          <span class="pane-path" id="pane-path"></span>
+          <span class="pane-path" id="pane-path">No file picked</span>
           <span class="sel" id="sel"></span>
           <div class="mode" role="tablist" aria-label="pane mode">
-            <button class="mode-btn" role="tab" data-mode="lines" aria-selected="true">Lines</button>
-            <button class="mode-btn" role="tab" data-mode="history" aria-selected="false" tabindex="-1">History</button>
-            <button class="mode-btn" role="tab" data-mode="compare" aria-selected="false" tabindex="-1">Compare</button>
+            <button class="mode-btn" role="tab" data-mode="lines" aria-selected="true"
+                    title="Why each line is written this way">Lines</button>
+            <button class="mode-btn" role="tab" data-mode="history" aria-selected="false" tabindex="-1"
+                    title="Every change heard for this file, with its notes">History</button>
+            <button class="mode-btn" role="tab" data-mode="compare" aria-selected="false" tabindex="-1"
+                    title="Two moments side by side">Compare</button>
           </div>
         </div>
 
         <div class="pane-sub" id="pane-sub" hidden>
-          <label class="toggle">
+          <p class="pane-guide" id="pane-guide"></p>
+          <label class="toggle" id="diff-toggle">
             <input type="checkbox" id="show-diff" checked>
-            Show Diff
+            Show diff
           </label>
           <span class="sub-note" id="sub-note"></span>
         </div>
@@ -247,45 +258,97 @@
   <!-- Listening: portable change-lineage graph. Static skeleton reads with
        JS disabled or every /api/listening/* failed. -->
   <section class="view" id="view-listening" role="tabpanel" aria-labelledby="tab-listening" hidden>
-    <div class="listen-tab" id="listen-root">
-      <h2 id="listen-header">Rocky Listen <span class="listen-spin" id="listen-spin" aria-hidden="true"></span></h2>
-      <p class="listen-repo" id="listen-repo">Listen To Repo Main</p>
-      <p class="listen-status" id="listen-status">Getting rationale <span class="listen-spin" aria-hidden="true"></span></p>
-      <div class="listen-pick">
-        <label for="listen-repo-pick">Repo</label>
-        <select id="listen-repo-pick"><option value="">loading repos</option></select>
-        <input id="listen-repo-path" type="text" placeholder="paste any folder inside the repo, then Enter" spellcheck="false" hidden>
+    <div class="listen-tab" id="listen-root" data-state="none">
+      <div class="listen-main">
+        <header class="listen-hero">
+          <div class="listen-top">
+            <h2 id="listen-header">Rocky Listen <span class="listen-spin" id="listen-spin" aria-hidden="true"></span></h2>
+            <p class="listen-status" id="listen-status" aria-live="polite">Getting rationale <span class="listen-spin" aria-hidden="true"></span></p>
+            <div class="listen-pick">
+              <label for="listen-repo-pick">Repo</label>
+              <select id="listen-repo-pick"><option value="">loading repos</option></select>
+              <input id="listen-repo-path" type="text" placeholder="paste any folder inside the repo, then Enter" spellcheck="false" hidden>
+            </div>
+          </div>
+          <p class="listen-hint" id="listen-hint">Picking a repo never grants capture. Only the Listen button does.</p>
+          <div class="listen-ident">
+            <span class="listen-ear" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span>
+            <p class="listen-repo" id="listen-repo">Listen To Repo Main</p>
+          </div>
+          <div class="listen-consent" id="listen-consent" aria-live="polite"></div>
+          <figure class="listen-wave" id="listen-wave" hidden>
+            <div class="listen-wave-bars" id="listen-wave-bars" role="img"></div>
+            <figcaption class="listen-wave-axis"><span id="listen-wave-from"></span><span>now</span></figcaption>
+          </figure>
+          <dl class="listen-stats" id="listen-stats" hidden></dl>
+        </header>
+        <div class="listen-toolbar">
+          <details class="listen-more" id="listen-more">
+            <summary id="listen-more-label">Filters</summary>
+            <form class="listen-filters" id="listen-filters" autocomplete="off">
+              <label>Session <select id="listen-session"><option value="">any</option></select></label>
+              <label>Agent <select id="listen-agent"><option value="">any</option></select></label>
+              <label>Surface
+                <select id="listen-surface">
+                  <option value="">any</option>
+                  <option value="cli">cli</option>
+                  <option value="ide">ide</option>
+                  <option value="local">local</option>
+                </select>
+              </label>
+              <label class="wide">File <select id="listen-file"><option value="">any</option></select></label>
+              <label>Since
+                <select id="listen-since">
+                  <option value="">any time</option>
+                  <option value="3600000">last hour</option>
+                  <option value="86400000">last 24 hours</option>
+                  <option value="604800000">last 7 days</option>
+                </select>
+              </label>
+            </form>
+          </details>
+          <button class="listen-clear" id="listen-clear" type="button" hidden>Clear filters</button>
+          <p class="listen-coverage" id="listen-coverage"></p>
+        </div>
+        <ol class="listen-chain" id="listen-chain" aria-label="changes rocky heard, newest first"></ol>
       </div>
-      <p class="listen-hint" id="listen-hint">Picking a repo never grants capture. Only the Listen button does.</p>
-      <div class="listen-consent" id="listen-consent" aria-live="polite"></div>
-      <details class="listen-more" id="listen-more">
-        <summary>Filters</summary>
-        <form class="listen-filters" id="listen-filters" autocomplete="off">
-          <label>Session <select id="listen-session"><option value="">any</option></select></label>
-          <label>Agent <select id="listen-agent"><option value="">any</option></select></label>
-          <label>Surface
-            <select id="listen-surface">
-              <option value="">any</option>
-              <option value="cli">cli</option>
-              <option value="ide">ide</option>
-              <option value="local">local</option>
-            </select>
-          </label>
-          <label class="wide">File <select id="listen-file"><option value="">any</option></select></label>
-          <label>Since
-            <select id="listen-since">
-              <option value="">any time</option>
-              <option value="3600000">last hour</option>
-              <option value="86400000">last 24 hours</option>
-              <option value="604800000">last 7 days</option>
-            </select>
-          </label>
-        </form>
-      </details>
-      <div class="listen-coverage" id="listen-coverage" aria-live="polite"></div>
-      <ol class="listen-chain" id="listen-chain" aria-live="polite"></ol>
-      <div class="listen-detail" id="listen-detail" hidden></div>
-      <p class="listen-warn">Snapshot and diff text stay redacted and bounded. Secret may remain despite redaction.</p>
+
+      <!-- The guide is static on purpose: it explains the feature even when
+           every /api/listening/* call fails. -->
+      <aside class="listen-guide" aria-labelledby="listen-guide-title">
+        <section>
+          <h3 id="listen-guide-title">How Listening works</h3>
+          <ol class="listen-steps">
+            <li><b>Pick a repo.</b> Picking only opens its record. Nothing starts.</li>
+            <li><b>Press Listen.</b> One click grants capture for that repo alone.</li>
+            <li><b>Rocky checks every 10 seconds.</b> He reads the text files Git tracks, only while rocky dash stays open. No daemon.</li>
+            <li><b>Each change lands here</b> as a redacted snapshot, with how Rocky knows it.</li>
+          </ol>
+        </section>
+        <section>
+          <h3>How Rocky knows</h3>
+          <ul class="listen-legend">
+            <li class="tone-heard"><span class="lg-mark" aria-hidden="true"></span><b>Heard on disk</b> The file changed on disk. Proves the change, not who made it.</li>
+            <li class="tone-heard"><span class="lg-mark" aria-hidden="true"></span><b>Matches commit</b> Snapshot text equals a Git commit exactly.</li>
+            <li class="tone-heard"><span class="lg-mark" aria-hidden="true"></span><b>Reported by tool</b> An agent hook reported the event itself.</li>
+            <li class="tone-weak"><span class="lg-mark" aria-hidden="true"></span><b>Near in time, possible link</b> Close in time or content. Context only, never cause.</li>
+            <li class="tone-none"><span class="lg-mark" aria-hidden="true"></span><b>Snapshot only</b> Rocky holds the event with no link yet. Unknown is not nothing.</li>
+          </ul>
+        </section>
+        <section id="listen-top-wrap" hidden>
+          <h3>Most changed files</h3>
+          <ol class="listen-topfiles" id="listen-top"></ol>
+        </section>
+        <section>
+          <h3>What stays where</h3>
+          <ul class="listen-facts">
+            <li>Snapshots stay in Rocky's store on this machine. Rocky sends them nowhere.</li>
+            <li>Text is redacted and size capped before it is stored. Secret may remain despite redaction.</li>
+            <li>An MCP host you connect may forward event metadata under its own policy.</li>
+            <li>Stop listening ends capture. History stays.</li>
+          </ul>
+        </section>
+      </aside>
     </div>
   </section>
 

@@ -191,7 +191,6 @@ const state = {
   // group keys (repo names, "" for non-repo) the user hid in Filter Repo
   repoHidden: new Set(),
   mainLoaded: false,
-  recent: [],
   // Listening tab: poll timer + checkpoint cursor. Hidden tab stops polling
   // and render only; the foreground process owns the watcher throughout.
   listenTimer: 0,
@@ -200,6 +199,8 @@ const state = {
   listenLaunch: "",
   listenCustom: "",
   listenResolved: false,
+  // timeline rows the viewer expanded, kept open across the 5s re-render
+  listenOpen: new Set(),
   // record modes: the TUI's showDiff, strict picker, and the two chosen moments
   showDiff: true,
   strict: false,
@@ -409,37 +410,153 @@ async function ensureTotal() {
   try {
     const home = await api("/api/home");
     state.total = home.total;
-    state.recent = home.recent ?? [];
     setTally();
-    // the pane is still empty at this point, so it gets something real
-    if (state.file === null) paneWelcome();
   } catch {
     // a missing tally is not worth an error state
   }
 }
 
+/** A path reads from its repo down. The machine prefix above the repo root is
+ *  the same on every row, so the list drops it and the title keeps it. */
+function splitPath(path, repo) {
+  const parts = path.split("/");
+  const base = parts.pop() ?? path;
+  const at = repo ? parts.findIndex((part) => part.toLowerCase() === repo.toLowerCase()) : -1;
+  if (at >= 0) return { base, repo: parts[at], dir: parts.slice(at + 1).join("/") };
+  // outside any repo: the two nearest folders say enough about where it sits
+  const near = parts.slice(-2).join("/");
+  return { base, repo: "", dir: parts.length > 2 ? `…/${near}` : near };
+}
+
+/** What each pane mode answers, said once and shared by the welcome guide,
+ *  the mode tabs and the hint line above the pane. */
+const MODE_GUIDE = {
+  lines: {
+    name: "Lines",
+    ask: "Why a line exists",
+    how: "Click a line to ask why it exists, or drag across several and press Why. Rocky answers from the notes left when that code was written.",
+  },
+  history: {
+    name: "History",
+    ask: "What changed, and why",
+    how: "Every change Rocky heard for this file, newest first. Each change carries the notes that explain it.",
+  },
+  compare: {
+    name: "Compare",
+    ask: "Then against now",
+    how: "Pick two moments, A and B. Rocky holds them side by side with their diffs, so drift in intent shows.",
+  },
+};
+
+/** By change, the pane holds one change and every file it touched. */
+const BUNDLE_GUIDE = {
+  lines: "Every file this change touched, with its diff. Open a file row to read it.",
+  history: "Every file this change touched, with the notes Rocky heard for each.",
+  compare: MODE_GUIDE.compare.how,
+};
+
+/** Top of the pane: repo, folder, then the file name at full brightness. */
+function paintPanePath(path) {
+  const host = $("#pane-path");
+  if (!host) return;
+  host.title = path ?? "";
+  if (!path) {
+    host.textContent = "No file picked";
+    return;
+  }
+  const file = state.files.find((f) => f.path === path);
+  const { base, repo, dir } = splitPath(path, file?.repo ?? null);
+  fill(host);
+  if (repo) host.append(el("span", "pp-repo", repo));
+  if (dir) host.append(el("span", "pp-dir", dir));
+  host.append(el("span", "pp-base", base));
+}
+
+/** The hint line under the pane bar names what the current mode answers. */
+function paintPaneGuide() {
+  const picked = state.view === "bundle" ? state.selectedBundle !== null : state.file !== null;
+  $("#pane-sub").hidden = !picked;
+  $("#diff-toggle").hidden = state.mode === "lines";
+  const hint = $("#pane-guide");
+  if (hint) hint.textContent = state.view === "bundle" ? BUNDLE_GUIDE[state.mode] : MODE_GUIDE[state.mode].how;
+  if (state.mode === "lines") $("#sub-note").textContent = "";
+}
+
 /**
  * What the pane says before a file is picked. An empty screen is an
- * invitation to act, so it answers "what has been going on" and points at
- * the one control that does anything.
+ * invitation to act: it names the three questions Dash answers, lets a mode
+ * be chosen up front, and offers the files Rocky holds the most notes on.
  */
 function paneWelcome() {
-  const parts = [el("p", "welcome-head", "Lately Heard")];
+  const guide = el("div", "guide");
+  guide.append(
+    el("h2", "guide-title", "Hear why your code is the way it is"),
+    el("p", "guide-lede", "Rocky keeps the notes agents and you leave while files change. Pick a file from the list, then pick what to ask of it."),
+  );
 
-  if ((state.recent ?? []).length === 0) {
-    parts.push(el("p", "welcome-note", "nothing heard yet. run something through rocky, question"));
-  } else {
-    for (const hit of state.recent) {
-      const row = el("div", "welcome-row");
-      const kind = el("span", "welcome-kind", hit.kind);
-      if (WHY_KINDS.has(hit.kind)) kind.classList.add("why");
-      row.append(kind, el("span", "welcome-label", hit.label), el("span", "welcome-ago", hit.agoText));
-      parts.push(row);
-    }
+  const modesRow = el("div", "guide-modes");
+  modesRow.setAttribute("role", "group");
+  modesRow.setAttribute("aria-label", "what to ask of a file");
+  for (const [mode, text] of Object.entries(MODE_GUIDE)) {
+    const card = el("button", "guide-mode");
+    card.type = "button";
+    card.setAttribute("aria-pressed", String(state.mode === mode));
+    card.append(
+      el("span", "guide-mode-name", text.name),
+      el("span", "guide-mode-ask", text.ask),
+      el("span", "guide-mode-how", text.how),
+    );
+    card.addEventListener("click", () => {
+      setMode(mode);
+      for (const other of modesRow.children) other.setAttribute("aria-pressed", String(other === card));
+    });
+    modesRow.append(card);
   }
+  guide.append(modesRow);
 
-  parts.push(el("p", "welcome-note", "pick file on left to hear why its lines are the way they are."));
-  fill($("#pane-body"), box("welcome", ...parts));
+  const shown = (state.files ?? []).filter((file) => !state.repoHidden.has(fileGroup(file)));
+  const section = el("section", "guide-block");
+  section.append(el("h3", "guide-head", "Start with the files Rocky knows best"));
+  if (shown.length === 0) {
+    section.append(el("p", "guide-note", "No file notes heard yet. Run work through rocky, or connect an agent hook, and files land here."));
+  } else {
+    const top = el("div", "guide-files");
+    const most = Math.max(1, ...shown.map((file) => file.count));
+    for (const file of shown.slice(0, 5)) {
+      const { base, repo, dir } = splitPath(file.path, file.repo);
+      const row = el("button", "guide-file");
+      row.type = "button";
+      row.title = file.path;
+      row.style.setProperty("--heat", String(file.count / most));
+      const where = [repo, dir].filter(Boolean).join(" / ");
+      row.append(
+        el("span", "guide-file-count", noteWord(file.count)),
+        el("span", "guide-file-name", base),
+        el("span", "guide-file-dir", where),
+        el("span", "guide-file-ago", file.last?.agoText ?? ""),
+      );
+      row.addEventListener("click", () => openFile(file.path));
+      top.append(row);
+    }
+    section.append(top);
+  }
+  guide.append(section);
+
+  const legend = el("section", "guide-block");
+  legend.append(el("h3", "guide-head", "Reading the list"));
+  const terms = el("dl", "guide-legend");
+  for (const [term, meaning] of [
+    ["63", "Notes Rocky holds for that file. More notes, fuller answers."],
+    ["By change", "Groups files that changed together, one row per commit or uncommitted batch."],
+    ["!md", "Typed in the search box, hides .md files. Works for any word."],
+    ["All repos", "Hides whole repos from the list when one project is noise."],
+  ]) {
+    terms.append(el("dt", null, term), el("dd", null, meaning));
+  }
+  legend.append(terms);
+  guide.append(legend);
+
+  fill($("#pane-body"), guide);
 }
 
 async function loadFiles() {
@@ -461,40 +578,58 @@ function fileGroup(file) {
   return file.repo ?? "";
 }
 
+/** The repo button names the current scope, so a hidden repo is never a
+ *  surprise when a file seems to be missing. */
+function paintRepoButton() {
+  const button = $("#repo-filter-btn");
+  const hidden = state.repoHidden.size;
+  button.textContent = hidden === 0 ? "All repos" : `${hidden} repo${hidden === 1 ? "" : "s"} hidden`;
+  button.classList.toggle("on", hidden > 0);
+}
+
 function renderFiles() {
   const files = state.files;
   const shown = files.filter((file) => !state.repoHidden.has(fileGroup(file)));
   state.fileCount = shown.length;
   setTally();
-  $("#files-head").textContent = `Files: ${shown.length}`;
-  $("#repo-filter-btn").classList.toggle("on", state.repoHidden.size > 0);
+  $("#files-head").textContent = shown.length === 0
+    ? ""
+    : `${shown.length} ${shown.length === 1 ? "file" : "files"}, most notes first`;
+  paintRepoButton();
+  // Main may have loaded first, and search or repo scope changes what the
+  // guide offers; the pane never sits blank beside a list
+  if (state.file === null) paneWelcome();
 
   if (shown.length === 0) {
     fill($("#files"), files.length === 0
-      ? empty("no explain records heard yet.")
-      : empty("every group is hidden. filter repo opens them again."));
+      ? empty(state.filter ? "no heard file matches that search." : "no file notes heard yet.")
+      : empty("every repo is hidden. All repos opens them again."));
     return;
   }
 
+  const most = Math.max(1, ...shown.map((file) => file.count));
   fill(
     $("#files"),
     ...shown.map((file) => {
       const button = el("button", "file");
       button.type = "button";
-      button.title = file.path;
+      button.title = `${file.path}\n${noteWord(file.count)}`;
+      button.dataset.path = file.path;
       button.setAttribute("role", "option");
       button.setAttribute("aria-selected", String(file.path === state.file));
-      // count badge, then two-line text: basename first, directory second
-      const parts = file.path.split("/");
-      const base = parts.pop() ?? file.path;
-      const dir = parts.join("/");
+      // the heat bar is the count drawn: how much of the busiest file this one holds
+      button.style.setProperty("--heat", String(file.count / most));
+      const { base, repo, dir } = splitPath(file.path, file.repo);
+      const count = el("span", "file-count", String(file.count));
+      count.setAttribute("aria-label", noteWord(file.count));
       const text = el("span", "file-text");
-      text.append(el("span", "file-name", base));
-      if (dir) text.append(el("span", "file-dir", dir));
-      button.append(
-        el("span", "file-count", String(file.count)),
-        text,
-      );
+      const top = el("span", "file-top");
+      top.append(el("span", "file-name", base));
+      const sub = el("span", "file-sub");
+      sub.append(el("span", "file-dir", [repo, dir].filter(Boolean).join(" / ")));
+      if (file.last) sub.append(el("span", "file-ago", listenAgo(file.last.ts, Date.now())));
+      text.append(top, sub);
+      button.append(count, text);
       button.addEventListener("click", () => openFile(file.path));
       return button;
     }),
@@ -591,6 +726,9 @@ async function loadBundles() {
   if (state.bundles && state.bundles.length > 0) {
     renderBundles();
   } else {
+    // grouping asks git about every heard file, which can take a while;
+    // the wait says what it is doing instead of reading as a hang
+    $("#files-head").textContent = "Grouping files by change. Rocky asks git about each file, this can take a minute.";
     fill($("#files"), listSkeleton(7));
   }
   try {
@@ -629,8 +767,10 @@ function renderBundles() {
   const shown = bundles.filter((b) => !state.repoHidden.has(b.repo ?? ""));
   state.bundleCount = shown.length;
   setTally();
-  $("#files-head").textContent = `Bundles: ${shown.length}`;
-  $("#repo-filter-btn").classList.toggle("on", state.repoHidden.size > 0);
+  $("#files-head").textContent = shown.length === 0
+    ? ""
+    : `${shown.length} ${shown.length === 1 ? "change" : "changes"}, files grouped by commit`;
+  paintRepoButton();
 
   if (shown.length === 0) {
     fill($("#files"), bundles.length === 0
@@ -697,6 +837,8 @@ async function selectBundle(bundle) {
     ? ` · ${bundle.commit.slice(0, 7)}`
     : "";
   $("#pane-path").textContent = `${epistemicLabel(bundle.epistemic)}${shaBit}`;
+  $("#pane-path").title = "";
+  paintPaneGuide();
 
   $("#sel").textContent = "";
   closeMoments();
@@ -704,38 +846,31 @@ async function selectBundle(bundle) {
   renderPane();
 }
 
-const viewToggleBtn = el("button", "repo-filter-btn", "Individual");
-viewToggleBtn.id = "view-toggle-btn";
-viewToggleBtn.type = "button";
-viewToggleBtn.title = "Toggle view (individual / bundle)";
-viewToggleBtn.setAttribute("data-view", "individual");
-viewToggleBtn.style.marginLeft = "auto";
+/* By file / By change: two named choices, so the control says what the list
+   is now instead of a toggle whose label means either state */
+const viewButtons = [...document.querySelectorAll(".view-seg-btn")];
 
-function updateViewToggle() {
-  const isBundle = state.view === "bundle";
-  viewToggleBtn.textContent = isBundle ? "Bundle" : "Individual";
-  viewToggleBtn.classList.toggle("on", isBundle);
-  viewToggleBtn.setAttribute("aria-pressed", String(isBundle));
-  viewToggleBtn.setAttribute("data-view", state.view);
+function setView(view) {
+  if (state.view === view) return;
+  state.view = view;
+  for (const button of viewButtons) {
+    button.setAttribute("aria-pressed", String(button.dataset.view === view));
+  }
   setTally();
-}
-
-viewToggleBtn.addEventListener("click", () => {
-  state.view = state.view === "bundle" ? "individual" : "bundle";
-  updateViewToggle();
-  if (state.view === "bundle") {
+  if (view === "bundle") {
     loadBundles();
   } else {
     state.selectedBundle = null;
     state.bundleDiff = null;
+    paintPanePath(state.file);
+    paintPaneGuide();
     loadFiles();
     if (state.file) renderPane();
   }
-});
+}
 
-const repoFilterBtn = $("#repo-filter-btn");
-if (repoFilterBtn) {
-  repoFilterBtn.before(viewToggleBtn);
+for (const button of viewButtons) {
+  button.addEventListener("click", () => setView(button.dataset.view));
 }
 
 /* ---- dash: pane ------------------------------------------------------- */
@@ -750,7 +885,7 @@ function setMode(mode) {
     button.tabIndex = on ? 0 : -1;
   }
   // the diff toggle is the TUI's `d` key, and only the record modes have diffs
-  $("#pane-sub").hidden = mode === "lines";
+  paintPaneGuide();
   $("#sel").textContent = "";
   closeMoments();
   closePop();
@@ -771,11 +906,12 @@ function openFile(path) {
   // moments belong to a file, so a new file drops the pair
   state.A = null;
   state.B = null;
-  $("#pane-path").textContent = path;
+  paintPanePath(path);
+  paintPaneGuide();
   $("#sel").textContent = "";
   closeMoments();
   for (const button of $("#files").querySelectorAll(".file")) {
-    button.setAttribute("aria-selected", String(button.title === path));
+    button.setAttribute("aria-selected", String(button.dataset.path === path));
   }
   closePop();
   renderPane();
@@ -870,9 +1006,9 @@ async function renderLines(body) {
 
         const headLeft = el("div", "bundle-file-head-left");
         const toggleIcon = el("span", "bundle-file-toggle", isOpen ? "▾" : "▸");
-        const parts = fileItem.path.split("/");
-        const baseName = parts.pop() ?? fileItem.path;
-        const dir = parts.join("/");
+        const split = splitPath(fileItem.path, bundle.repo ?? null);
+        const baseName = split.base;
+        const dir = [split.repo, split.dir].filter(Boolean).join(" / ");
 
         const nameSpan = el("span", "bundle-file-name", baseName);
         headLeft.append(toggleIcon, nameSpan);
@@ -978,11 +1114,43 @@ async function renderLines(body) {
     return row;
   });
   if (data.truncated) rows.push(el("div", "trunc", "… file long, lines cut"));
+  $("#sub-note").textContent = `${data.lines.length}${data.truncated ? "+" : ""} lines`;
   nodes.push(...rows);
   fill(body, ...nodes);
 }
 
 const KIND_CLASS = { "@": "dl-at", h: "dl-h", "+": "dl-p", "-": "dl-m" };
+
+/** A stored diff can span the whole commit. Inside one file's view only that
+ *  file's sections belong, and its git header lines repeat the pane path.
+ *  When the stored diff holds only other files, the rows go but their names
+ *  stay, so the card says what was kept instead of passing another file's
+ *  change off as this one's. */
+function diffForFile(diff, path) {
+  if (!diff?.rows || !path) return diff;
+  const want = path.toLowerCase();
+  const kept = [];
+  const others = [];
+  let keep = false;
+  let sectioned = false;
+  for (const row of diff.rows) {
+    if (row.k === "h" && row.t.startsWith("diff --git ")) {
+      sectioned = true;
+      const target = /\sb\/(.+)$/.exec(row.t)?.[1] ?? "";
+      const lower = target.toLowerCase();
+      keep = lower !== "" && (want === lower || want.endsWith(`/${lower}`));
+      if (!keep && target) others.push(target);
+    }
+    if (keep && row.k !== "h") kept.push(row);
+  }
+  if (!sectioned) return diff;
+  return kept.length > 0 ? { ...diff, rows: kept } : { ...diff, rows: [], elsewhere: others };
+}
+
+/** Long diffs open folded: the first rows show the shape of the change, the
+ *  rest wait behind one button that says how much is left. */
+const DIFF_PREVIEW_ROWS = 40;
+const DIFF_FOLD_MIN = 60;
 
 /** One diff, the shape `diffFor` returns. Inside a change card the card's
  *  own header already names the commit, so the head line stays off there. */
@@ -996,8 +1164,17 @@ function diffBlock(diff, hideHead) {
     if (diff.commit === "uncommitted" || diff.after) head.classList.add("transient");
     wrap.append(head);
   }
+  const rows = diff.rows ?? [];
+  if (rows.length === 0 && diff.elsewhere?.length) {
+    const names = diff.elsewhere.map((path) => path.split("/").pop()).join(", ");
+    wrap.append(el("p", "diff-elsewhere", `Diff kept for this change covers ${names} only. No lines of this file were stored with it.`));
+    return wrap;
+  }
+  const folds = rows.length >= DIFF_FOLD_MIN;
+  const rest = el("div", "diff-rest");
+  rest.hidden = true;
   let open = false;
-  for (const row of diff.rows ?? []) {
+  rows.forEach((row, index) => {
     const line = el("div", `dl ${KIND_CLASS[row.k] ?? ""}`);
     // hunk headers are not code, so they are never tokenised
     if (row.k === "@") {
@@ -1007,7 +1184,22 @@ function diffBlock(diff, hideHead) {
       open = painted.openComment;
       line.append(el("span", "ln", row.n ? String(row.n) : ""), painted.cell);
     }
-    wrap.append(line);
+    (folds && index >= DIFF_PREVIEW_ROWS ? rest : wrap).append(line);
+  });
+  if (folds) {
+    const more = el("button", "diff-more", `Show ${rows.length - DIFF_PREVIEW_ROWS} more lines`);
+    more.type = "button";
+    more.setAttribute("aria-expanded", "false");
+    more.addEventListener("click", (event) => {
+      // a diff inside a record row must not also pick the record
+      event.stopPropagation();
+      const opening = rest.hidden;
+      rest.hidden = !opening;
+      more.setAttribute("aria-expanded", String(opening));
+      more.textContent = opening ? "Fold diff" : `Show ${rows.length - DIFF_PREVIEW_ROWS} more lines`;
+      if (!opening) more.scrollIntoView({ block: "nearest" });
+    });
+    wrap.append(rest, more);
   }
   return wrap;
 }
@@ -1160,9 +1352,9 @@ async function renderHistory(pane) {
 
         const headLeft = el("div", "bundle-file-head-left");
         const toggleIcon = el("span", "bundle-file-toggle", isOpen ? "▾" : "▸");
-        const parts = fileItem.path.split("/");
-        const baseName = parts.pop() ?? fileItem.path;
-        const dir = parts.join("/");
+        const split = splitPath(fileItem.path, bundle.repo ?? null);
+        const baseName = split.base;
+        const dir = [split.repo, split.dir].filter(Boolean).join(" / ");
 
         const nameSpan = el("span", "bundle-file-name", baseName);
         headLeft.append(toggleIcon, nameSpan);
@@ -1201,7 +1393,7 @@ async function renderHistory(pane) {
         } else {
           for (const change of changes) {
             const changeDiff = change.diff ?? (fileItem.rows && fileItem.rows.length > 0 ? { commit: bundle.commit, rows: fileItem.rows } : undefined);
-            bodyWrap.append(changeCard({ ...change, diff: changeDiff }));
+            bodyWrap.append(changeCard({ ...change, diff: diffForFile(changeDiff, fileItem.path) }));
           }
           if (unattributed.length > 0) {
             if (changes.length > 0) bodyWrap.append(el("div", "unattributed-head", "moments without an attributable change"));
@@ -1251,7 +1443,7 @@ async function renderHistory(pane) {
     fill(pane, empty("nothing heard for this file yet."));
     return;
   }
-  const cards = changes.map((change) => changeCard(change));
+  const cards = changes.map((change) => changeCard({ ...change, diff: diffForFile(change.diff, state.file) }));
   if (unattributed.length > 0) {
     if (changes.length > 0) cards.push(el("div", "unattributed-head", "moments without an attributable change"));
     for (const record of unattributed) cards.push(recordRow(record, undefined, true));
@@ -1265,7 +1457,9 @@ async function renderHistory(pane) {
 function changeCard(change) {
   const card = el("div", "change");
   card.append(el("div", "change-head", changeLabel(change)));
-  card.append(diffBlock(change.diff, true));
+  // Show diff governs History as it does Compare; a change with no stored
+  // diff keeps its notes rather than failing the whole pane
+  if (state.showDiff && change.diff) card.append(diffBlock(change.diff, true));
   const witnesses = change.witnesses ?? [];
   if (witnesses.length > 0) {
     const list = el("div", "witnesses");
@@ -1328,7 +1522,7 @@ function sideColumn(side, record, diff) {
 
   const detail = el("div", "side-body");
   detail.append(el("div", "rec-body", bodyText(record)));
-  if (state.showDiff && diff) detail.append(diffBlock(diff));
+  if (state.showDiff && diff) detail.append(diffBlock(diffForFile(diff, state.file)));
   detail.addEventListener("click", (event) => {
     event.stopPropagation();
     showIntent(record, detail.getBoundingClientRect());
@@ -1804,8 +1998,10 @@ function byokReady() {
  * and says so. Clay is reserved for what rocky actually heard, and a guess
  * that borrowed that colour would be the one lie this whole surface avoids.
  */
-async function askModel(anchor, prompt, keep, ctx) {
-  openPop(anchor, ...keep, box("guess", el("p", "guess-head", "Model Guess (Beta)"), skeleton()));
+async function askModel(anchor, prompt, keep, ctx, after = []) {
+  const name = modelLabel();
+  const shell = () => answerBox("guess", "Model guess", `${name} · not evidence`);
+  showAnswer(anchor, keep, answerWait(shell(), `Asking ${name}. It reads what Rocky holds and the lines you picked.`), after);
 
   let answer;
   try {
@@ -1814,36 +2010,109 @@ async function askModel(anchor, prompt, keep, ctx) {
       headers: { "Content-Type": "application/json" },
       // only the prompt travels: endpoint, model and key are read server side.
       // the file context lets rocky dig the evidence pack before forwarding.
-      body: JSON.stringify({ prompt, ...ctx }),
+      body: JSON.stringify({ prompt, ...askBody(ctx) }),
     });
   } catch {
-    openPop(anchor, ...keep, box("guess", el("p", "guess-head", "Model Guess (Beta)"),
-      el("p", "guess-body", "model not answer. check endpoint, key, model, question")));
+    const miss = shell();
+    miss.append(el("p", "answer-fail", `${name} did not answer. Check endpoint, key and model in Settings, then try again.`));
+    const open = el("button", "answer-link", "Open Settings");
+    open.type = "button";
+    open.addEventListener("click", () => { closePop(); void openSettings(); });
+    miss.append(open);
+    showAnswer(anchor, keep, miss, after);
     return;
   }
 
-  const paragraphs = guessNodes(answer.text || answer.error || "model said nothing.");
-  const extraNodes = [];
+  const guess = shell();
+  guess.append(...guessNodes(answer.text || answer.error || "The model returned an empty answer."));
 
-  if (answer.referenceChain && Array.isArray(answer.referenceChain) && answer.referenceChain.length > 0) {
-    const chainBox = el("details", "ref-chain-drawer");
-    const summary = el("summary", "ref-chain-head", `Reference Chain (${answer.referenceChain.length} steps)`);
-    const chainList = el("div", "ref-chain-list");
-    answer.referenceChain.forEach((step, idx) => {
-      chainList.append(el("div", "ref-chain-step", `${idx > 0 ? "  ↳ " : ""}${step}`));
-    });
-    chainBox.append(summary, chainList);
-    extraNodes.push(chainBox);
+  const chain = Array.isArray(answer.referenceChain) ? answer.referenceChain : [];
+  if (chain.length > 0) {
+    const drawer = el("details", "ref-chain-drawer");
+    drawer.append(el("summary", "ref-chain-head", `How the code connects, ${chain.length} steps`));
+    const list = el("ol", "ref-chain-list");
+    for (const step of chain) list.append(el("li", "ref-chain-step", String(step)));
+    drawer.append(list);
+    guess.append(drawer);
   }
 
-  const guess = box(
-    "guess",
-    el("p", "guess-head", "Model Guess (Beta)"),
-    ...paragraphs,
-    ...extraNodes,
-    el("div", "card-ev", `guessed by ${settings.model}. not evidence. cross check`),
-  );
-  openPop(anchor, ...keep, guess);
+  guess.append(el("p", "answer-foot", `Guessed by ${name} from what Rocky holds. Not evidence itself: cross-check before you trust it.`));
+  showAnswer(anchor, keep, guess, after);
+}
+
+/* ---- answers under the why card -------------------------------------------
+ *
+ * Every way to dig (usages, Jev, a model) answers in the same shell below
+ * the card: a badge naming who answered, what that answer is worth, then
+ * the body. The card and the dig row stay, so a second option is one click
+ * away instead of a reopened popover. */
+
+/** A path as the file list shows it: from the repo down, machine prefix off. */
+function shortPath(path) {
+  const file = state.files.find((f) => f.path.toLowerCase() === String(path).toLowerCase());
+  const { base, repo, dir } = splitPath(String(path), file?.repo ?? null);
+  return [repo, dir, base].filter(Boolean).join("/");
+}
+
+/** The ask body stays exactly what the server has always read: the clicked
+ *  line (origin) only steers Find usages and never travels to a model. */
+function askBody(ctx) {
+  const { origin: _origin, ...rest } = ctx ?? {};
+  return rest;
+}
+
+/** The model's display name, as the header chip shows it. */
+function modelLabel() {
+  // the chip already resolved the provider's own name for this model
+  const chip = $("#model-chip");
+  if (chip && !chip.hidden && chip.textContent.trim()) return chip.textContent.trim();
+  const named = provider?.models?.find((m) => m.id === settings.model)?.name;
+  // the vendor prefix ("deepseek/") repeats the model's own name
+  return named ?? prettyModel(String(settings.model).split("/").pop() ?? "");
+}
+
+function answerBox(kind, title, note) {
+  const wrap = el("section", `answer answer-${kind}`);
+  const head = el("div", "answer-head");
+  head.append(el("span", "answer-badge", title));
+  if (note) head.append(el("span", "answer-note", note));
+  wrap.append(head);
+  return wrap;
+}
+
+/** A wait says who is being asked, in the answer's own shape. */
+function answerWait(shell, text) {
+  shell.classList.add("waiting");
+  shell.append(el("p", "answer-wait", text), listSkeleton(3));
+  return shell;
+}
+
+/** Card, then the answer, then the dig row again; the answer scrolls into
+ *  view because the card above it may already fill the popover. */
+function showAnswer(anchor, keep, answer, after) {
+  openPop(anchor, ...keep, answer, ...after);
+  answer.scrollIntoView({ block: "nearest" });
+}
+
+/** "memory.ts:334" or "src/x.ts:12-20" -> a heard file and line, when the
+ *  name matches one; otherwise the cite stays plain text. */
+function citeTarget(cite) {
+  const m = /^(.+?):(\d+)(?:-\d+)?$/.exec(cite.trim());
+  if (!m) return null;
+  const want = m[1].replace(/\\/g, "/").toLowerCase();
+  const hit = [state.file, ...state.files.map((f) => f.path)]
+    .find((path) => path && (path.toLowerCase() === want || path.toLowerCase().endsWith(`/${want}`)));
+  return hit ? { path: hit, line: Number(m[2]) } : null;
+}
+
+function citeNode(cite) {
+  const target = citeTarget(cite);
+  if (!target) return el("span", "answer-cite", cite);
+  const link = el("button", "answer-cite answer-cite-link", cite);
+  link.type = "button";
+  link.title = `Open ${target.path} at line ${target.line}`;
+  link.addEventListener("click", () => jumpToFileLine(target.path, target.line));
+  return link;
 }
 /**
  * Jev analysis over what rocky heard: local, no key, read-only display.
@@ -1851,55 +2120,73 @@ async function askModel(anchor, prompt, keep, ctx) {
  * states borrow emphasis. No claims invented client-side -- every row
  * quotes the answer, its refs, and its trace, or says what is unknown.
  */
-async function askJev(anchor, prompt, keep, ctx) {
-  openPop(anchor, ...keep, box("jev", el("p", "jev-head", "Jev Analysis"), skeleton()));
+async function askJev(anchor, prompt, keep, ctx, after = []) {
+  const shell = (note) => answerBox("jev", "Jev analysis", note);
+  showAnswer(anchor, keep, answerWait(shell("reading what Rocky holds"), "Jev is weighing the evidence Rocky holds for these lines."), after);
   let answer;
   try {
     answer = await api("/api/ask", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ prompt, ...ctx, analysis: "jev" }),
+      body: JSON.stringify({ prompt, ...askBody(ctx), analysis: "jev" }),
     });
   } catch {
-    openPop(anchor, ...keep, box("jev",
-      el("p", "jev-head", "Jev Analysis"),
-      el("p", "jev-body", "jev did not answer (baseline kept). retry, question")));
+    const miss = shell("no answer");
+    miss.append(el("p", "answer-fail", "Jev did not answer. The card above still stands; try again in a moment."));
+    showAnswer(anchor, keep, miss, after);
     return;
   }
-  const nodes = jevNodes(answer);
-  openPop(anchor, ...keep, box("jev", el("p", "jev-head", "Jev Analysis"), ...nodes));
+  const status = jevStatus(answer?.decisionTrace?.status);
+  const result = shell(status.label);
+  if (status.held) result.classList.add("held");
+  result.append(...jevNodes(answer, status));
+  showAnswer(anchor, keep, result, after);
 }
-/** Read-only Jev branch: evidence cards first, answer text second, trace last. */
-function jevNodes(answer) {
+
+/** Jev's status in words: held and hedged answers say so before anything. */
+function jevStatus(raw) {
+  const status = String(raw ?? "").toLowerCase();
+  if (status === "hold" || status === "held") return { label: "held back", held: true, note: "Evidence was too thin for a firm answer, so Jev held back." };
+  if (status === "hedge" || status === "hedged" || status === "low_confidence") return { label: "unsure", held: true, note: "Jev answered, but with low confidence. Treat it as a lead." };
+  return { label: status ? status.replace(/_/g, " ") : "answered", held: false, note: "" };
+}
+
+/** Read-only Jev branch: the verdict first, then the evidence it leaned on,
+ *  then the trace. No claims invented client-side -- every row quotes the
+ *  answer, its refs, and its trace, or says what is unknown. */
+function jevNodes(answer, status) {
   const nodes = [];
-  const cards = Array.isArray(answer?.evidenceCards) ? answer.evidenceCards : [];
-  for (const card of cards) {
-    if (card !== null && typeof card === "object") {
-      const label = card.label ?? card.title ?? card.ref ?? card.kind ?? "evidence";
-      nodes.push(el("p", "jev-ref", String(label)));
-      const body = card.detail ?? card.excerpt ?? card.snippet ?? null;
-      if (body) nodes.push(el("p", "jev-body", String(body)));
-      else if (card.ref) nodes.push(el("p", "jev-ref", String(card.ref)));
-    } else {
-      nodes.push(el("p", "jev-body", String(card)));
-    }
-  }
+  if (status.note) nodes.push(el("p", "answer-flag", status.note));
   const text = answer && typeof answer.text === "string" && answer.text.length > 0
     ? answer.text
-    : "jev held: no typed answer (baseline kept).";
-  for (const para of String(text).split(/\n{2,}|\r?\n/).map((s) => s.trim()).filter(Boolean)) {
-    nodes.push(el("p", "jev-body", para));
+    : "Jev held: no typed answer, the card above stands on its own.";
+  nodes.push(...guessNodes(text));
+
+  const cards = Array.isArray(answer?.evidenceCards) ? answer.evidenceCards : [];
+  if (cards.length > 0) {
+    nodes.push(el("p", "answer-sub", `Evidence Jev leaned on, ${cards.length}`));
+    const list = el("ul", "answer-evidence");
+    for (const card of cards) {
+      const item = el("li");
+      if (card !== null && typeof card === "object") {
+        item.append(el("span", "answer-ev-label", String(card.label ?? card.title ?? card.ref ?? card.kind ?? "evidence")));
+        const body = card.detail ?? card.excerpt ?? card.snippet ?? card.ref ?? null;
+        if (body) item.append(el("span", "answer-ev-body", String(body)));
+      } else {
+        item.append(el("span", "answer-ev-body", String(card)));
+      }
+      list.append(item);
+    }
+    nodes.push(list);
   }
-  if (answer && answer.coverage && answer.coverage.reason) {
-    nodes.push(el("p", "jev-ref", `coverage: ${answer.coverage.reason}`));
-  }
+  if (answer?.coverage?.reason) nodes.push(el("p", "answer-foot", `Coverage: ${answer.coverage.reason}`));
   nodes.push(jevTraceNode(answer?.decisionTrace));
   return nodes;
 }
 /** Trace visible per answer; null confidence is named, never blank. */
 function jevTraceNode(trace) {
   const t = trace ?? {};
-  const bits = [`engine ${t.engine ?? "jev"}`, `status ${t.status ?? "unknown"}`];
+  const bits = [`engine ${t.engine ?? "jev"}`];
   if (t.confidence !== undefined && t.confidence !== null) bits.push(`confidence ${t.confidence}`);
   else bits.push("confidence withheld");
   const refs = Array.isArray(t.evidenceRefs) ? t.evidenceRefs.length : 0;
@@ -1907,10 +2194,7 @@ function jevTraceNode(trace) {
   const latency = t.latencyMs ?? t.latency;
   if (latency !== undefined && latency !== null) bits.push(`${latency}ms`);
   const node = el("p", "jev-trace", bits.join(" · "));
-  const status = String(t.status ?? "").toLowerCase();
-  if (status === "hold" || status === "hedge" || status === "held" || status === "hedged" || status === "low_confidence") {
-    node.classList.add("jev-trace-flag");
-  }
+  if (jevStatus(t.status).held) node.classList.add("jev-trace-flag");
   return node;
 }
 
@@ -1930,18 +2214,37 @@ function guessNodes(text) {
     return paragraphs.filter(Boolean).map((para) => el("p", "guess-body", para));
   }
 
+  // the protocol tokens stay in the answer text; the page names them in the
+  // same words the witness card uses, so both read as one vocabulary
+  const TRACK = { KODE: "Why this shape", BISNIS: "What it serves" };
   const nodes = [];
   for (const raw of lines) {
     const line = raw.trim();
     if (!line) continue;
     const why = line.match(/^why\s+(\d+)[.:]?\s*(.*)$/i);
-    if (/^CUPINGAN\b/.test(line)) nodes.push(el("p", "guess-cup", line.replace(/^CUPINGAN\s*/, "")));
-    else if (/^(KODE|BISNIS)\s*$/.test(line)) nodes.push(el("p", "guess-track", line));
-    else if (why) nodes.push(box("guess-why", el("span", "guess-num", `#${why[1]}`), el("span", null, why[2])));
-    else if (/^stop\b/i.test(line)) nodes.push(el("p", "guess-stop", line.replace(/^stop\s*/i, "")));
-    else if (/^SUMBER\b/.test(line)) nodes.push(el("p", "guess-src", line.replace(/^SUMBER\s*/, "")));
-    else if (/^DISCLAIMER\b/.test(line)) nodes.push(el("p", "guess-warn", line.replace(/^DISCLAIMER[:\s]*/i, "")));
-    else nodes.push(el("p", "guess-body", line));
+    if (/^CUPINGAN\b/.test(line)) {
+      const cup = el("p", "guess-cup", "Read ");
+      cup.append(citeNode(line.replace(/^CUPINGAN\s*/, "")));
+      nodes.push(cup);
+    } else if (/^(KODE|BISNIS)\s*$/.test(line)) {
+      nodes.push(el("p", "guess-track", TRACK[line] ?? line));
+    } else if (why) {
+      // a why row may end in " · path:line", its citation; that becomes a link
+      const last = why[2].lastIndexOf(" · ");
+      const cut = last >= 0 && /^\S+:\d+(?:-\d+)?$/.test(why[2].slice(last + 3).trim()) ? last : -1;
+      const text = cut >= 0 ? why[2].slice(0, cut) : why[2];
+      const row = box("guess-why", el("span", "guess-num", why[1]), el("span", "guess-text", text));
+      if (cut >= 0) row.append(citeNode(why[2].slice(cut + 3)));
+      nodes.push(row);
+    } else if (/^stop\b/i.test(line)) {
+      nodes.push(el("p", "guess-stop", `Ends at: ${line.replace(/^stop\s*/i, "")}`));
+    } else if (/^SUMBER\b/.test(line)) {
+      nodes.push(el("p", "guess-src", `Sources: ${line.replace(/^SUMBER\s*/, "")}`));
+    } else if (/^DISCLAIMER\b/.test(line)) {
+      nodes.push(el("p", "guess-warn", line.replace(/^DISCLAIMER[:\s]*/i, "")));
+    } else {
+      nodes.push(el("p", "guess-body", line));
+    }
   }
   return nodes;
 }
@@ -1949,39 +2252,41 @@ function guessNodes(text) {
 /** Adds action controls: find-usages button and optional BYOK ask. */
 function withAsk(anchor, parts, prompt, held, ctx) {
   const actions = el("div", "why-actions");
+  // the dig row is re-attached under every answer, so the next option is
+  // one click away; the option that produced the answer shows as pressed
+  const after = [el("p", "why-dig-head", "Dig deeper"), actions];
 
-  const refsBtn = el("button", "card-more refs-btn", "Find usages");
-  refsBtn.type = "button";
-  refsBtn.title = "Show where this symbol is defined and used";
-  refsBtn.setAttribute("aria-label", "Find usages: show definition and usages");
-  refsBtn.addEventListener("click", () => showReferences(anchor, ctx));
-  actions.append(refsBtn);
-  const jevBtn = el("button", "card-more jev-btn", "Explain with Jev");
-  jevBtn.type = "button";
-  jevBtn.title = "Local analysis over what rocky heard. No key needed.";
-  jevBtn.setAttribute("aria-label", "Explain with Jev: local analysis, no key needed");
-  jevBtn.addEventListener("click", () => askJev(anchor, prompt, parts, ctx));
-  actions.append(jevBtn);
-
-  if (byokReady()) {
-    const label = held
-      ? "Explain with AI"
-      : "Ask AI to explain";
-    const button = el("button", "card-more ask-agent", label);
+  // Each way to dig says what it costs in the button itself: none of them
+  // is the answer, so none of them is dressed as the primary one.
+  const dig = (className, name, note, run) => {
+    const button = el("button", `why-dig ${className}`);
     button.type = "button";
-    button.title = "Uses your own API key. Rocky evidence stays local.";
-    button.addEventListener("click", () => askModel(anchor, prompt, parts, ctx));
+    button.setAttribute("aria-pressed", "false");
+    button.append(el("span", "why-dig-name", name), el("span", "why-dig-note", note));
+    button.setAttribute("aria-label", `${name}: ${note}`);
+    button.addEventListener("click", () => {
+      for (const other of actions.children) other.setAttribute("aria-pressed", String(other === button));
+      run();
+    });
     actions.append(button);
+  };
+  dig("refs-btn", "Find usages", "Where this name is defined and used", () => showReferences(anchor, ctx, parts, after));
+  dig("jev-btn", "Explain with Jev", "Analysis over what Rocky holds", () => askJev(anchor, prompt, parts, ctx, after));
+  if (byokReady()) {
+    dig("ai-btn", held ? "Explain with AI" : "Ask AI to explain",
+      `${modelLabel()} guesses from this evidence`, () => askModel(anchor, prompt, parts, ctx, after));
   }
 
-  return [...parts, actions];
+  return [...parts, ...after];
 }
 
-async function showReferences(anchor, ctx) {
-  openPop(anchor, skeleton());
+async function showReferences(anchor, ctx, keep = [], after = []) {
+  const shell = (note) => answerBox("refs", "Usages", note);
+  showAnswer(anchor, keep, answerWait(shell("searching this repo"), "Looking for where this name is defined and used."), after);
 
   const filePath = ctx?.path ?? state.file;
-  const line = ctx?.start ?? 1;
+  // the clicked line names the symbol; the widened context window may start on a comment
+  const line = ctx?.origin ?? ctx?.start ?? 1;
   let selectedSymbol = ctx?.symbol ?? "";
   if (!/^[A-Za-z_$][\w$]*$/.test(selectedSymbol)) {
     const m = /([A-Za-z_$][\w$]*)/.exec(selectedSymbol);
@@ -2001,30 +2306,35 @@ async function showReferences(anchor, ctx) {
   try {
     data = await api(url);
   } catch {
-    openPop(anchor, failed(() => showReferences(anchor, ctx)));
+    const miss = shell("no answer");
+    miss.append(failed(() => showReferences(anchor, ctx, keep, after)));
+    showAnswer(anchor, keep, miss, after);
     return;
   }
 
   if (!data || (!data.definition && (!data.references || data.references.length === 0))) {
-    openPop(anchor, el("p", "card-head assembled", "rocky not hear this name. try another symbol, question"));
+    const none = shell(selectedSymbol || "nothing found");
+    none.append(el("p", "answer-fail", "Rocky found no definition or use of this name. Select one word, a function or variable name, then try again."));
+    showAnswer(anchor, keep, none, after);
     return;
   }
 
-  const parts = [];
   const sym = data.symbol || selectedSymbol;
-  parts.push(el("p", "card-head", sym ? `Usages of ${sym}` : "Usages"));
+  const refCount = data.references?.length ?? 0;
+  const parts = shell(`${sym ? `${sym} · ` : ""}${refCount} ${refCount === 1 ? "use" : "uses"}`);
 
   if (data.definition) {
     const def = data.definition;
     const defBox = el("div", "refer-def");
     const top = el("div", "refer-def-head");
-    const link = el("button", "refer-link", `${def.path}:${def.line}`);
+    const link = el("button", "refer-link", `${shortPath(def.path)}:${def.line}`);
     link.type = "button";
+    link.title = `${def.path}:${def.line}`;
     link.addEventListener("click", () => jumpToFileLine(def.path, def.line));
     top.append(el("span", "refer-tag", "Definition"), link);
     const snippet = el("pre", "refer-snippet", def.text);
     defBox.append(top, snippet);
-    parts.push(defBox);
+    parts.append(defBox);
   }
 
   if (data.references && data.references.length > 0) {
@@ -2032,8 +2342,10 @@ async function showReferences(anchor, ctx) {
     for (const ref of data.references) {
       const item = el("button", "moment refer-hit");
       item.type = "button";
-      const loc = ref.line > 0 ? `${ref.path}:${ref.line}` : `${ref.path} · witnessed`;
+      // a line-0 hit is a note that names the symbol, not a place in code
+      const loc = ref.line > 0 ? `${shortPath(ref.path)}:${ref.line}` : `${shortPath(ref.path)} · note`;
       const top = el("span", "moment-top", `${loc} · ${ref.confidence}`);
+      item.title = ref.line > 0 ? `${ref.path}:${ref.line}` : ref.path;
       const body = el("span", "moment-body", ref.text);
       item.append(top, body);
       item.addEventListener("click", () => {
@@ -2041,10 +2353,10 @@ async function showReferences(anchor, ctx) {
       });
       list.append(item);
     }
-    parts.push(list);
+    parts.append(list);
   }
 
-  openPop(anchor, ...parts);
+  showAnswer(anchor, keep, parts, after);
 }
 
 async function jumpToFileLine(path, line) {
@@ -2231,6 +2543,110 @@ function renderContextBadge(tiers, currentIdx, originLine, anchor) {
   fill($("#sel"), badge);
 }
 
+/* ---- the why card --------------------------------------------------------
+ *
+ * The core hands the same teach card to the CLI, MCP and this page: a
+ * header, "label: text" lines, an evidence string and "why N" rungs. The
+ * page reads that shape back into parts instead of printing it raw, so the
+ * first thing seen is how Rocky knows, then the reason, then where to dig.
+ */
+
+/** Plain names for where a reasoning step came from. */
+const RUNG_SOURCE = {
+  comment: "Comment",
+  git: "Git history",
+  ast: "Code structure",
+  catalog: "Known pattern",
+  def: "Definition",
+  test: "Test",
+};
+
+/** Why the trail ended, in words a reader can weigh. */
+const STOP_REASON = {
+  "evidence-exhausted": "Rocky ran out of evidence after this step.",
+  "max-hops": "Rocky stops after five steps, even when more evidence exists.",
+  "library-boundary": "The trail leaves this repo into a library.",
+  cycle: "The trail loops back on itself, so Rocky stopped.",
+};
+
+const WHY_KIND = {
+  heard: { badge: "Witnessed", title: "rocky heard this. agent say why, rocky remember" },
+  assembled: { badge: "Assembled", title: "rocky not hear this. assembled from evidence, not witnessed" },
+  none: { badge: "Nothing held", title: "no witness, no ladder" },
+};
+
+/** Badge, the lines asked about, and a close control that says it exists. */
+function whyTop(kind, start, end) {
+  const top = el("div", "why-top");
+  const badge = el("span", `why-badge why-${kind}`, WHY_KIND[kind].badge);
+  badge.title = WHY_KIND[kind].title;
+  const base = (state.file ?? "").split("/").pop() ?? "";
+  const where = el("span", "why-where", start === end ? `${base} · line ${start}` : `${base} · lines ${start}–${end}`);
+  where.title = state.file ?? "";
+  const close = el("button", "why-close", "×");
+  close.type = "button";
+  close.setAttribute("aria-label", "close");
+  close.addEventListener("click", () => closePop());
+  top.append(badge, where, close);
+  return top;
+}
+
+/** "label: text" -> [label, text]; a line without a label keeps it all. */
+function splitLabel(line) {
+  const m = /^([a-z]+):\s+([\s\S]*)$/.exec(line);
+  return m ? [m[1], m[2]] : ["", line];
+}
+
+/** A witness is the author's own words, so they lead, labelled by concern. */
+function witnessCard(data, start, end) {
+  const parts = [
+    whyTop("heard", start, end),
+    el("p", "why-lede", "The agent that wrote these lines recorded why, at the time."),
+  ];
+  const facts = el("dl", "why-facts");
+  const names = { code: "Why this shape", business: "What it serves", form: "Form" };
+  for (const line of data.lines ?? []) {
+    const [label, text] = splitLabel(line);
+    facts.append(el("dt", null, names[label] ?? label), el("dd", null, text));
+  }
+  parts.push(facts);
+  // "source: agent:claude-code · 3d ago" reads as who said it and when
+  parts.push(el("div", "card-ev", String(data.evidence ?? "").replace(/^source:\s*/, "Heard from ")));
+  return parts;
+}
+
+/** An assembly is a chain, not a verdict: every step shows its source, and
+ *  the reason the chain stopped is said out loud. */
+function assembledCard(data, start, end) {
+  const parts = [
+    whyTop("assembled", start, end),
+    el("p", "why-lede", "No note was recorded for these lines. Rocky pieced a reason together from the code and git. Check each step before trusting it."),
+  ];
+  const rungs = (data.rungs ?? [])
+    .map((rung) => /^why \d+\s+([\s\S]*) · (\w+)$/.exec(rung))
+    .filter(Boolean);
+  if (rungs.length > 0) {
+    const chain = el("ol", "why-chain");
+    chain.setAttribute("aria-label", "reasoning steps");
+    for (const [, finding, source] of rungs) {
+      const step = el("li", "why-step");
+      step.append(el("span", "why-step-text", finding), el("span", "why-step-src", RUNG_SOURCE[source] ?? source));
+      chain.append(step);
+    }
+    parts.push(chain);
+  }
+  // the file label and the "reason:" digest repeat what the chain shows;
+  // any other line (provenance exhausted) is kept as a note
+  for (const line of data.lines ?? []) {
+    const [label] = splitLabel(line);
+    if (label === "reason" || line.startsWith(`${state.file} · `)) continue;
+    parts.push(el("p", "why-note", line));
+  }
+  const stop = /· ([a-z-]+)$/.exec(String(data.evidence ?? ""))?.[1];
+  if (stop && STOP_REASON[stop]) parts.push(el("p", "why-stop", STOP_REASON[stop]));
+  return parts;
+}
+
 async function askWhy(start, end, at, expand = (start === end)) {
   const anchor = at ?? ask?.getBoundingClientRect();
   const snippet = snippetFor(start, end);
@@ -2272,41 +2688,22 @@ async function askWhy(start, end, at, expand = (start === end)) {
   }
 
   if (data === null || data.header === undefined) {
-    const bare = [empty("no witness, no ladder.", "", "ask agent to explain, question")];
+    const bare = [whyTop("none", effectiveStart, effectiveEnd),
+      el("p", "why-lede", "Rocky holds no note for these lines and found no evidence trail in the code or git. Dig deeper below, or ask the agent that wrote it.")];
     openPop(anchor, ...withAsk(
       anchor,
       bare,
       `Why is this code written this way? Rocky has no recorded reason for it.\n\n${askedAbout}\n\nFollow the rules and shape you were given. Ground every claim in the code quoted above, and say plainly if you cannot tell from the code alone.`,
       undefined,
-      { path: state.file, start: effectiveStart, end: effectiveEnd, symbol: selectedSymbol },
+      { path: state.file, start: effectiveStart, end: effectiveEnd, symbol: selectedSymbol, origin: start },
     ));
     return;
   }
 
-  // Witness keeps the voice colour; assembly stays grey. The header text
-  // itself already says which one it is -- the colour just agrees with it.
   const assembled = data.header.startsWith("rocky not hear");
-  const head = el("p", `card-head${assembled ? " assembled" : ""}`, data.header);
-  const parts = [head, ...data.lines.map((line) => el("p", "card-line", line))];
-  parts.push(el("div", "card-ev", data.evidence));
-
-  if (data.expandable && (data.rungs ?? []).length > 0) {
-    const more = el("button", "card-more", "Show reasoning steps");
-    more.type = "button";
-    more.title = "Show the checked steps Rocky used to build this reason";
-    // the core writes "why 1 …"; here they are numbered steps under a caption
-    const rungs = [
-      el("p", "rung-note", "Steps Rocky walked from the code to a reason. They exist so the reason is a chain you can check, not one jump you have to trust. Each cites where it came from."),
-      ...data.rungs.map((rung) => el("p", "rung", rung.replace(/^why (\d+)/, "#$1"))),
-    ];
-    more.addEventListener("click", () => {
-      const open = more.textContent === "Hide reasoning steps";
-      more.textContent = open ? "Show reasoning steps" : "Hide reasoning steps";
-      if (open) for (const rung of rungs) rung.remove();
-      else pop.append(...rungs);
-    });
-    parts.push(more);
-  }
+  const parts = assembled
+    ? assembledCard(data, effectiveStart, effectiveEnd)
+    : witnessCard(data, effectiveStart, effectiveEnd);
 
   // the model is given what rocky holds, so it interprets rather than invents
   const held = [data.header, ...data.lines, data.evidence].join("\n");
@@ -2317,7 +2714,7 @@ async function askWhy(start, end, at, expand = (start === end)) {
       "Explain what that recorded reason means for this code, following the rules and shape you were given. " +
       "Do not invent history rocky did not record; the record's labels (KODE, BISNIS, why 1, stop) are yours to use, not to quote as prose.",
     true,
-    { path: state.file, start: effectiveStart, end: effectiveEnd, symbol: selectedSymbol },
+    { path: state.file, start: effectiveStart, end: effectiveEnd, symbol: selectedSymbol, origin: start },
   ));
   renderCsCard(state.file, effectiveStart, effectiveEnd);
 }
@@ -2574,6 +2971,12 @@ function recalledListenRepo() {
 function listenStatus(text, resolved) {
   const node = $("#listen-status");
   if (!node) return;
+  // the status is a live region: repainting the same words each poll would
+  // read them aloud every five seconds
+  const said = `${text}|${resolved}`;
+  if (node.dataset.said === said) return;
+  node.dataset.said = said;
+  node.classList.toggle("is-resolved", Boolean(resolved));
   node.replaceChildren();
   node.append(`${text} `, resolved ? "\u2713" : listenSpin());
   // every terminal state ends the header spinner too, not only a resolved chain
@@ -2582,39 +2985,320 @@ function listenStatus(text, resolved) {
 }
 function listenEmpty(title, hint) {
   const li = el("li", "listen-empty");
-  const head = el("p", null, title);
-  const bold = el("b", null, title);
-  head.replaceChildren(bold);
-  li.append(head, el("p", null, hint));
+  li.append(el("b", null, title), el("p", null, hint));
   return li;
 }
-function listenRow(item) {
-  const li = el("li", "listen-row");
-  const basis = (item.edge && item.edge.basis) || "unknown";
-  if (basis === "candidate_link" || basis === "temporal_candidate") li.classList.add("weak-candidate");
-  if (item.coverage === "partial") li.classList.add("is-partial");
-  const head = el("div", "listen-row-head",
-    `${item.source || "unknown"} \u00B7 ${basis} \u00B7 ${item.coverage || "unknown"}`);
-  const meta = el("div", "listen-row-meta",
-    `event ${item.eventId || "?"} \u00B7 harness ${item.harnessId || "unknown"} \u00B7 surface ${item.surface || "unknown"} \u00B7 redacted ${item.redaction && item.redaction.applied ? "yes" : "no"} \u00B7 consent repo ${item.consent && item.consent.repo ? "yes" : "no"}`);
-  li.append(head, meta);
-  if (item.refs && item.refs.fileRel) li.append(el("div", "listen-row-file", `file ${item.refs.fileRel}`));
-  li.addEventListener("click", () => listenDetail(item));
+function setListenState(value) {
+  const root = $("#listen-root");
+  if (root) root.dataset.state = value;
+}
+
+// Mirrors COLLECTOR_TICK_MS in src/listening/collector-loop.ts.
+const LISTEN_TICK_S = 10;
+// Plain words for every v1 link basis. Weak bases read as context, never cause.
+const LISTEN_BASIS = {
+  direct: { label: "Reported by tool", tone: "heard", means: "The tool reported this event itself." },
+  filesystem_observed: { label: "Heard on disk", tone: "heard", means: "Rocky heard this file change on disk. That proves the change, not who made it." },
+  content_mapped: { label: "Matches commit", tone: "heard", means: "Snapshot text equals a Git commit exactly." },
+  candidate_link: { label: "Possible link", tone: "weak", means: "Lines up with a commit, but not exactly. Context only, never cause." },
+  temporal_candidate: { label: "Near in time", tone: "weak", means: "Happened close in time to other evidence. Context only, never cause." },
+  unknown: { label: "Snapshot only", tone: "none", means: "Rocky holds this event with no link for it. Unknown is not nothing." },
+};
+const LISTEN_SOURCE = { watcher: "File watcher", git: "Git", hook: "hook", adapter: "log" };
+const LISTEN_NODE = {
+  agent_session: "Agent session", tool_action: "Tool action", test_run: "Test run",
+  commit: "Commit", work_episode: "Work episode", repo: "Repo",
+};
+const LISTEN_COVERAGE = {
+  complete: "Complete. Every event in this record read cleanly.",
+  partial: "Partial. Some events went missing or failed to read.",
+  unknown: "Unknown. Rocky cannot tell what is missing.",
+};
+const LISTEN_FILTER_IDS = ["listen-session", "listen-agent", "listen-surface", "listen-file", "listen-since"];
+const LISTEN_WAVE_BARS = 48;
+const LISTEN_WAVE_MIN_MS = 30 * 60 * 1000;
+
+function listenClock(ts) {
+  return new Date(ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false });
+}
+function listenAgo(ts, now) {
+  const seconds = Math.max(0, Math.round((now - ts) / 1000));
+  if (seconds < 60) return `${seconds}s ago`;
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes} min ago`;
+  const hours = Math.round(minutes / 60);
+  return hours < 48 ? `${hours} h ago` : `${Math.round(hours / 24)} days ago`;
+}
+function listenDay(ts, now) {
+  const midnight = (value) => { const day = new Date(value); day.setHours(0, 0, 0, 0); return day.getTime(); };
+  // round, not floor: a DST day is 23 or 25 hours long
+  const days = Math.round((midnight(now) - midnight(ts)) / 86400000);
+  if (days === 0) return "Today";
+  if (days === 1) return "Yesterday";
+  return new Date(ts).toLocaleDateString([], { weekday: "short", month: "short", day: "numeric" });
+}
+// A path reads by its file name; the folder stays quiet beside it.
+function listenPathLabel(rel) {
+  const cut = rel.lastIndexOf("/");
+  const span = el("span", "listen-path");
+  span.title = rel;
+  if (cut >= 0) span.append(el("span", "listen-dir", rel.slice(0, cut + 1)));
+  span.append(el("span", "listen-base", rel.slice(cut + 1)));
+  return span;
+}
+
+// One file change arrives as two events, the version and its hunk. They
+// merge by version id, so the timeline shows one change, not two rows.
+function listenEntries(items) {
+  const groups = [];
+  const byVersion = new Map();
+  for (const item of items) {
+    const key = item.node === "file_version" ? item.nodeId
+      : item.edge && item.edge.kind === "generated_hunk" ? item.edge.from : "";
+    const group = key ? byVersion.get(key) : undefined;
+    if (group) { group.push(item); continue; }
+    const fresh = [item];
+    if (key) byVersion.set(key, fresh);
+    groups.push(fresh);
+  }
+  return groups.map(listenEntry);
+}
+function listenEntry(items) {
+  const first = (read) => items.map(read).find((value) => value !== undefined && value !== "");
+  const lead = items.find((item) => item.node) || items[0];
+  const linked = items.find((item) => item.edge && item.edge.basis && item.edge.basis !== "unknown")
+    || items.find((item) => item.edge);
+  const covered = items.map((item) => item.coverage || "unknown");
+  return {
+    key: lead.eventId || "",
+    items,
+    ts: Math.max(...items.map((item) => item.ts || 0)),
+    node: first((item) => item.node) || "",
+    file: first((item) => item.refs && item.refs.fileRel) || "",
+    deleted: items.some((item) => item.refs && item.refs.deleted),
+    lines: first((item) => item.refs && item.refs.lineCount),
+    commit: first((item) => item.refs && item.refs.commit) || "",
+    session: first((item) => item.refs && item.refs.session) || "",
+    basis: (linked && linked.edge.basis) || "unknown",
+    source: lead.source || "unknown",
+    harness: first((item) => item.harnessId) || "",
+    surface: first((item) => item.surface) || "",
+    redacted: items.every((item) => item.redaction && item.redaction.applied),
+    consentRepo: items.every((item) => item.consent && item.consent.repo),
+    consentHost: items.some((item) => item.consent && item.consent.host),
+    coverage: covered.includes("partial") ? "partial" : covered.includes("unknown") ? "unknown" : "complete",
+  };
+}
+function listenKind(entry) {
+  if (entry.node === "file_version" || entry.items.some((item) => item.edge && item.edge.kind === "generated_hunk")) {
+    return entry.deleted ? "Deleted" : "Changed";
+  }
+  return LISTEN_NODE[entry.node] || "Event";
+}
+function listenSourceLabel(entry) {
+  const base = LISTEN_SOURCE[entry.source];
+  if (entry.source === "hook" || entry.source === "adapter") return `${entry.harness || "agent"} ${base}`;
+  return base || entry.source;
+}
+function listenBasis(entry) {
+  const basis = LISTEN_BASIS[entry.basis] || LISTEN_BASIS.unknown;
+  // no edge on a deletion or a non-file event holds no snapshot to speak of
+  if (entry.basis === "unknown" && (entry.node !== "file_version" || entry.deleted)) return { ...basis, label: "No link yet" };
+  return basis;
+}
+function listenMeta(entry) {
+  const parts = [listenSourceLabel(entry)];
+  if (entry.surface) parts.push(entry.surface);
+  if (entry.session) parts.push(`session ${entry.session.slice(0, 8)}`);
+  if (typeof entry.lines === "number" && !entry.deleted) parts.push(`snapshot ${entry.lines} lines`);
+  if (entry.node === "file_version") parts.push(entry.redacted ? "redacted" : "not redacted");
+  if (entry.coverage === "partial") parts.push("partial");
+  return parts;
+}
+function listenEvidence(entry) {
+  const host = el("div", "listen-evidence");
+  host.append(el("p", "listen-means", listenBasis(entry).means));
+  const facts = el("dl", "listen-ev-facts");
+  const add = (term, value, isCode) => facts.append(el("dt", null, term), el("dd", isCode ? "is-code" : null, value));
+  add("Link basis", entry.basis, true);
+  add("Source", `${listenSourceLabel(entry)} (${entry.source})`);
+  if (entry.file) add("File", entry.file, true);
+  add("Commit", entry.commit || "Not matched to a commit.", Boolean(entry.commit));
+  add("Redaction", entry.redacted ? "Applied before storage. Secret may remain despite redaction." : "Not applied to this event.");
+  add("Consent", `Repo ${entry.consentRepo ? "yes" : "no"}, host ${entry.consentHost ? "yes" : "no"}`);
+  add("Record", LISTEN_COVERAGE[entry.coverage] || LISTEN_COVERAGE.unknown);
+  add(entry.items.length === 1 ? "Event" : "Events", entry.items.map((item) => item.eventId || "?").join("\n"), true);
+  host.append(facts);
+  return host;
+}
+function listenRow(entry, now) {
+  const basis = listenBasis(entry);
+  const li = el("li", `listen-row tone-${basis.tone}`);
+  li.dataset.key = entry.key;
+  // weak links never borrow the solid look of heard evidence
+  if (basis.tone === "weak") li.classList.add("weak-candidate");
+  if (entry.coverage === "partial") li.classList.add("is-partial");
+  const open = state.listenOpen.has(entry.key);
+  const head = el("button", "listen-row-main");
+  head.type = "button";
+  head.setAttribute("aria-expanded", String(open));
+  const clock = el("time", "listen-clock", listenClock(entry.ts));
+  clock.dateTime = new Date(entry.ts).toISOString();
+  const ago = el("span", "listen-ago", listenAgo(entry.ts, now));
+  ago.dataset.ts = String(entry.ts);
+  const when = el("span", "listen-when");
+  when.append(clock, ago);
+  const dot = el("span", "listen-dot");
+  dot.setAttribute("aria-hidden", "true");
+  const title = el("span", "listen-title");
+  title.append(el("span", `listen-kind${entry.deleted ? " is-deleted" : ""}`, listenKind(entry)));
+  if (entry.file) title.append(listenPathLabel(entry.file));
+  const meta = el("span", "listen-meta");
+  for (const part of listenMeta(entry)) meta.append(el("span", null, part));
+  const what = el("span", "listen-what");
+  what.append(title, meta);
+  head.append(when, dot, what, el("span", "listen-basis", basis.label));
+  const evidence = listenEvidence(entry);
+  evidence.hidden = !open;
+  head.addEventListener("click", () => {
+    const next = head.getAttribute("aria-expanded") !== "true";
+    head.setAttribute("aria-expanded", String(next));
+    evidence.hidden = !next;
+    evidence.classList.toggle("is-opening", next);
+    if (next) state.listenOpen.add(entry.key);
+    else state.listenOpen.delete(entry.key);
+  });
+  li.append(head, evidence);
   return li;
 }
-function listenDetail(item) {
-  const host = $("#listen-detail");
-  if (!host) return;
-  host.hidden = false;
-  host.replaceChildren();
-  host.append(el("div", "listen-detail-head", `evidence ${item.eventId || "?"}`));
-  for (const [key, value] of Object.entries({
-    source: item.source, link_basis: (item.edge && item.edge.basis) || "unknown",
-    redaction: item.redaction && item.redaction.applied ? "applied" : "missing",
-    consent: `host ${item.consent && item.consent.host ? "yes" : "no"} / repo ${item.consent && item.consent.repo ? "yes" : "no"}`,
-    coverage: item.coverage || "unknown", node: item.node || "unknown", commit: (item.refs && item.refs.commit) || "unknown",
-  })) host.append(el("div", "listen-detail-row", `${key}: ${value}`));
-  host.append(el("div", "listen-warn", "Secret may remain despite redaction. Snapshot text stays bounded."));
+// Repaint only when the heard set changes: a full repaint every poll would
+// throw keyboard focus out of the list. Otherwise only the ages move.
+function paintListenChain(chain, sig, rows, now) {
+  if (chain.dataset.sig === sig) {
+    for (const node of chain.querySelectorAll(".listen-ago[data-ts]")) node.textContent = listenAgo(Number(node.dataset.ts), now);
+    return;
+  }
+  const focused = chain.contains(document.activeElement) ? document.activeElement.closest("[data-key]") : null;
+  chain.dataset.sig = sig;
+  chain.replaceChildren(...rows);
+  if (focused) {
+    const again = chain.querySelector(`[data-key="${CSS.escape(focused.dataset.key)}"] .listen-row-main`);
+    if (again) again.focus();
+  }
+}
+
+// The waveform is what Rocky heard over time: one bar per slice, height by
+// change count. Quiet slices stay a flat mark, like silence on a track.
+function renderListenWave(entries, now, rise) {
+  const figure = $("#listen-wave");
+  const bars = $("#listen-wave-bars");
+  if (!figure || !bars) return;
+  figure.hidden = false;
+  const oldest = entries.reduce((low, entry) => Math.min(low, entry.ts), now);
+  const start = Math.min(oldest, now - LISTEN_WAVE_MIN_MS);
+  const slice = (now - start) / LISTEN_WAVE_BARS;
+  const counts = new Array(LISTEN_WAVE_BARS).fill(0);
+  for (const entry of entries) {
+    counts[Math.min(LISTEN_WAVE_BARS - 1, Math.max(0, Math.floor((entry.ts - start) / slice)))] += 1;
+  }
+  const peak = Math.max(1, ...counts);
+  bars.classList.toggle("is-rising", Boolean(rise));
+  bars.replaceChildren(...counts.map((count, index) => {
+    const bar = el("span", count ? "wave-bar" : "wave-bar is-quiet");
+    // square root keeps one busy minute from flattening every other bar
+    bar.style.setProperty("--h", count ? Math.max(0.12, Math.sqrt(count / peak)).toFixed(3) : "0");
+    bar.style.setProperty("--i", String(index));
+    bar.title = `${listenClock(start + index * slice).slice(0, 5)}  ${count} change${count === 1 ? "" : "s"}`;
+    return bar;
+  }));
+  const clockFrom = listenClock(start).slice(0, 5);
+  const dayFrom = listenDay(start, now);
+  const fromText = dayFrom === "Today" ? clockFrom : `${dayFrom} ${clockFrom}`;
+  const from = $("#listen-wave-from");
+  if (from) from.textContent = fromText;
+  const busiest = counts.indexOf(peak);
+  bars.setAttribute("aria-label", entries.length > 0
+    ? `${entries.length} changes heard from ${fromText} to now, busiest near ${listenClock(start + busiest * slice).slice(0, 5)}`
+    : `No changes heard from ${fromText} to now`);
+}
+function renderListenStats(entries, heard, now) {
+  const stats = $("#listen-stats");
+  if (!stats) return;
+  stats.hidden = false;
+  const files = new Set(entries.map((entry) => entry.file).filter(Boolean)).size;
+  const newest = heard.reduce((high, item) => Math.max(high, item.ts || 0), 0);
+  const cells = [
+    ["changes", String(entries.length)],
+    ["files", String(files)],
+    ["last heard", newest ? listenAgo(newest, now) : "nothing yet"],
+  ];
+  stats.replaceChildren(...cells.map(([term, value]) => {
+    const cell = el("div", "listen-stat");
+    cell.append(el("dt", null, term), el("dd", null, value));
+    return cell;
+  }));
+}
+// Most changed files double as a one-click file filter.
+function renderListenTop(entries) {
+  const wrap = $("#listen-top-wrap");
+  const list = $("#listen-top");
+  if (!wrap || !list) return;
+  const active = ($("#listen-file") || {}).value || "";
+  const counts = new Map();
+  for (const entry of entries) if (entry.file) counts.set(entry.file, (counts.get(entry.file) || 0) + 1);
+  const top = [...counts].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).slice(0, 6);
+  wrap.hidden = top.length === 0;
+  const peak = top.length > 0 ? top[0][1] : 1;
+  list.replaceChildren(...top.map(([file, count]) => {
+    const on = file === active;
+    const button = el("button", "listen-top-btn");
+    button.type = "button";
+    button.setAttribute("aria-pressed", String(on));
+    button.title = on ? "Show every file again" : `Show only ${file}`;
+    button.style.setProperty("--w", (count / peak).toFixed(3));
+    button.append(listenPathLabel(file), el("span", "listen-top-n", String(count)));
+    button.addEventListener("click", () => setListenFilter("listen-file", on ? "" : file));
+    const item = el("li");
+    item.append(button);
+    return item;
+  }));
+}
+function hideListenLive() {
+  for (const id of ["listen-wave", "listen-stats", "listen-top-wrap"]) {
+    const node = $(`#${id}`);
+    if (node) node.hidden = true;
+  }
+}
+function listenFiltersOn() {
+  return LISTEN_FILTER_IDS.filter((id) => ($(`#${id}`) || {}).value).length;
+}
+function syncListenFilterBar() {
+  const on = listenFiltersOn();
+  const label = $("#listen-more-label");
+  if (label) label.textContent = on ? `Filters (${on} on)` : "Filters";
+  const clear = $("#listen-clear");
+  if (clear) clear.hidden = on === 0;
+}
+function setListenFilter(id, value) {
+  const select = $(`#${id}`);
+  if (!select) return;
+  if (value && ![...select.options].some((option) => option.value === value)) {
+    const option = el("option", null, value);
+    option.value = value;
+    select.append(option);
+  }
+  select.value = value;
+  const form = $("#listen-filters");
+  if (form) form.dispatchEvent(new Event("change"));
+}
+function renderListenCoverage(host, status, reasons, capped) {
+  const kinds = [...new Set(reasons.map((reason) => reason.split(":")[0]))];
+  const head = status === "complete" ? "Record complete."
+    : status === "partial" ? "Record partial: some events went missing."
+      : "Record coverage unknown.";
+  host.textContent = `${head}${kinds.length ? ` (${kinds.join(", ")})` : ""}${capped ? ` Showing newest ${LISTEN_TAIL_LIMIT} events.` : ""}`;
+  host.title = reasons.join("\n");
+  host.dataset.status = status;
 }
 const LISTEN_REASONS = {
   "not-a-git-root": "That folder is not inside a Git repo.",
@@ -2655,11 +3339,17 @@ function listenConsentButton(action, text, repo) {
 }
 // One explicit click grants; picking a repo never does (spec §3, §8).
 function renderListenConsent(host, consent, repo) {
-  host.replaceChildren();
   const label = consent.label || "this repo";
+  // a repaint each poll would drop focus off the button and re-announce it
+  const sig = `${repo}|${consent.allowed ? 1 : 0}|${label}`;
+  if (host.dataset.sig === sig) return;
+  host.dataset.sig = sig;
+  host.replaceChildren();
   if (consent.allowed) {
-    host.append(el("span", "listen-consent-state", `Listening to ${label}. Capture runs while rocky dash stays open.`));
-    host.append(listenConsentButton("revoke", "Stop listening", repo));
+    const line = el("p", "listen-consent-state");
+    line.append(el("b", null, "Listening."),
+      ` Rocky checks the text files Git tracks here every ${LISTEN_TICK_S} seconds, while rocky dash stays open.`);
+    host.append(line, listenConsentButton("revoke", "Stop listening", repo));
     return;
   }
   const card = el("div", "listen-offer");
@@ -2692,12 +3382,14 @@ async function refreshListening(first) {
   const coverageHost = $("#listen-coverage");
   const chain = $("#listen-chain");
   if (!repo) {
-    if (consentHost) consentHost.textContent = "Pick one repo above. Picking never grants capture.";
-    if (coverageHost) coverageHost.textContent = "coverage: unknown";
-    if (chain) {
-      chain.replaceChildren();
-      chain.append(listenEmpty("No repo selected.", "Pick a repo above, or choose Other folder and paste any folder inside one."));
+    setListenState("none");
+    hideListenLive();
+    if (consentHost) {
+      consentHost.dataset.sig = "";
+      consentHost.textContent = "Pick one repo above. Picking never grants capture.";
     }
+    if (coverageHost) coverageHost.textContent = "";
+    if (chain) paintListenChain(chain, "none", [listenEmpty("No repo selected.", "Pick a repo above, or choose Other folder and paste any folder inside one.")], Date.now());
     listenStatus("Waiting for a repo", true);
     return;
   }
@@ -2707,17 +3399,17 @@ async function refreshListening(first) {
   } catch { /* fail open: skeleton stays */ }
   if (repo !== listenRepo()) return; // the pick changed mid-flight
   const repoLine = $("#listen-repo");
-  if (repoLine && consent.label) repoLine.textContent = `Listen to ${consent.label}`;
+  if (repoLine && consent.label) repoLine.textContent = consent.label;
   if (consentHost) renderListenConsent(consentHost, consent, repo);
   if (!consent.allowed) {
-    if (coverageHost) coverageHost.textContent = "coverage: unknown (no repo consent)";
-    if (chain) {
-      chain.replaceChildren();
-      chain.append(listenEmpty("Capture is off for this repo.", "Unknown activity is not no activity. Press Listen above to start the evidence chain."));
-    }
+    setListenState("off");
+    hideListenLive();
+    if (coverageHost) coverageHost.textContent = "Coverage unknown: capture is off, so Rocky cannot hear this repo.";
+    if (chain) paintListenChain(chain, "off", [listenEmpty("Capture is off for this repo.", "Unknown activity is not no activity. Press Listen above to start the evidence chain.")], Date.now());
     listenStatus("Waiting for consent", true);
     return;
   }
+  setListenState("on");
   const session = ($("#listen-session") || {}).value || "";
   const agent = ($("#listen-agent") || {}).value || "";
   const surface = ($("#listen-surface") || {}).value || "";
@@ -2747,36 +3439,62 @@ async function refreshListening(first) {
     return true;
   });
   // First snapshots are the consent-start state, not edits: one summary line.
-  const firsts = shown.filter((item) => item.refs && item.refs.baseline);
-  const edits = shown.filter((item) => !(item.refs && item.refs.baseline));
+  const now = Date.now();
+  const isBaseline = (item) => Boolean(item.refs && item.refs.baseline);
+  const firsts = shown.filter(isBaseline);
+  const entries = listenEntries(shown.filter((item) => !isBaseline(item)));
+  const filtersOn = listenFiltersOn();
+  syncListenFilterBar();
+  // a full page that lost the last top event skipped events in between
+  const gap = Boolean(state.listenCursor) && !first && heard.length >= LISTEN_TAIL_LIMIT
+    && !heard.some((item) => item.eventId === state.listenCursor);
+  const settled = now >= listenDeadline;
   if (chain) {
-    chain.replaceChildren();
+    const rows = [];
     if (failed) {
-      chain.append(listenEmpty("Listening read failed.", "The request did not finish. Rocky retries on the next poll, or check the server log."));
+      rows.push(listenEmpty("Listening read failed.", "The request did not finish. Rocky retries on the next poll, or check the server log."));
     } else {
-      // a full page that lost the last top event skipped events in between
-      if (state.listenCursor && !first && heard.length >= LISTEN_TAIL_LIMIT && !heard.some((item) => item.eventId === state.listenCursor)) {
-        chain.append(el("li", "listen-row is-partial", "missing intermediates: partial"));
+      if (gap) rows.push(el("li", "listen-gap is-partial", `Missing intermediates: partial. More than ${LISTEN_TAIL_LIMIT} events arrived between two checks. The older ones stay stored.`));
+      let day = "";
+      for (const entry of entries) {
+        const label = listenDay(entry.ts, now);
+        if (label !== day) {
+          day = label;
+          rows.push(el("li", "listen-day", label));
+        }
+        rows.push(listenRow(entry, now));
       }
-      for (const item of edits) chain.append(listenRow(item));
+      if (entries.length === 0 && firsts.length > 0 && filtersOn === 0) {
+        rows.push(listenEmpty("Quiet so far.", `Rocky holds the starting state. Change a tracked file and it lands here within about ${LISTEN_TICK_S} seconds.`));
+      }
       if (firsts.length > 0) {
         // a full page may hold only part of them: say so with a plus
         const count = `${firsts.length}${heard.length >= LISTEN_TAIL_LIMIT ? "+" : ""}`;
-        chain.append(el("li", "listen-row listen-firsts", `${count} first snapshot${firsts.length === 1 ? "" : "s"}: state when listening began, not edits`));
+        rows.push(el("li", "listen-firsts", `${count} first snapshot${firsts.length === 1 ? "" : "s"}: state when listening began, not edits`));
       }
-      if (shown.length === 0 && Date.now() >= listenDeadline) {
-        chain.append(listenEmpty("No events match these filters.", "Loosen a filter, or wait: Rocky checks the repo every few seconds while rocky dash stays open."));
+      if (shown.length === 0 && settled) {
+        rows.push(filtersOn > 0
+          ? listenEmpty("No events match these filters.", "Loosen a filter, or clear them all. Rocky checks the repo every few seconds while rocky dash stays open.")
+          : listenEmpty("Nothing heard yet.", `Rocky takes the starting snapshot on the next check, within about ${LISTEN_TICK_S} seconds.`));
       }
     }
+    const sig = [failed, gap, firsts.length, filtersOn, shown.length === 0 && settled, new Date(now).toDateString(),
+      ...entries.map((entry) => `${entry.key}:${entry.items.length}`)].join("|");
+    paintListenChain(chain, sig, rows, now);
+  }
+  if (!failed) {
+    renderListenWave(entries, now, first);
+    renderListenStats(entries, heard, now);
+    renderListenTop(listenEntries(heard.filter((item) => !isBaseline(item))));
   }
   if (coverageHost) {
     const reasons = (graph.coverage && graph.coverage.reasons) || [];
-    coverageHost.textContent = `coverage: ${tail.coverage || graph.coverage.status}${reasons.length ? ` (${reasons.join(", ")})` : ""}${graph.truncated ? " truncated" : ""}`;
+    renderListenCoverage(coverageHost, tail.coverage || graph.coverage.status, reasons, heard.length >= LISTEN_TAIL_LIMIT);
   }
   if (heard.length > 0) state.listenCursor = heard[0].eventId || state.listenCursor;
-  state.listenResolved = shown.length > 0 || failed || Date.now() >= listenDeadline;
+  state.listenResolved = shown.length > 0 || failed || settled;
   if (failed) listenStatus("Listening read failed", true);
-  else listenStatus(state.listenResolved ? (shown.length > 0 ? "Evidence chain resolves" : "No events match") : "Getting rationale", state.listenResolved);
+  else listenStatus(state.listenResolved ? (shown.length > 0 ? "Up to date" : "No events match") : "Getting rationale", state.listenResolved);
   const headerSpin = $("#listen-spin");
   if (headerSpin && state.listenResolved) headerSpin.remove();
 }
@@ -2814,11 +3532,13 @@ async function loadListenRepos() {
 function chooseListenRepo(value, refresh = true) {
   if (value !== state.listenRepo) {
     state.listenCursor = "";
+    state.listenOpen.clear();
     for (const id of ["listen-session", "listen-agent", "listen-file"]) {
       const select = $(`#${id}`);
       if (select) select.value = "";
       fillListenFilter(id, []);
     }
+    syncListenFilterBar();
   }
   state.listenRepo = value;
   rememberListenRepo(value);
@@ -2854,12 +3574,24 @@ if (listenForm) {
   // filters apply on change: no Apply button to forget
   listenForm.addEventListener("change", () => {
     state.listenCursor = "";
+    syncListenFilterBar();
     listenDeadline = Date.now() + LISTEN_TIMEOUT_MS;
     listenStatus("Getting rationale", false);
     void refreshListening(true).catch(() => {});
   });
   listenForm.addEventListener("submit", (event) => event.preventDefault());
 }
+const listenClear = $("#listen-clear");
+if (listenClear && listenForm) listenClear.addEventListener("click", () => {
+  for (const id of LISTEN_FILTER_IDS) {
+    const select = $(`#${id}`);
+    if (select) select.value = "";
+  }
+  listenForm.dispatchEvent(new Event("change"));
+  // the button hides itself now, so keyboard focus needs somewhere to land
+  const summary = $("#listen-more-label");
+  if (summary) summary.focus();
+});
 const listenPick = $("#listen-repo-pick");
 const listenPath = $("#listen-repo-path");
 if (listenPick) listenPick.addEventListener("change", () => {
