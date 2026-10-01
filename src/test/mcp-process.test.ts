@@ -88,9 +88,16 @@ function seedHome(t: test.TestContext): string {
   return home;
 }
 
+function isAdvisoryIndexPath(path: string): boolean {
+  const base = path.split("/").pop() ?? path;
+  const winBase = base.split("\\").pop() ?? base;
+  return winBase === "memory.idx.jsonl" || winBase.endsWith(".lock") || winBase.includes(".tmp.");
+}
+
 function snapshotTree(root: string): SnapshotEntry[] {
   const entries: SnapshotEntry[] = [];
   const visit = (path: string): void => {
+    if (path !== root && isAdvisoryIndexPath(path)) return;
     const stat = lstatSync(path, { bigint: true });
     const type = stat.isDirectory() ? "directory" : stat.isFile() ? "file" : stat.isSymbolicLink() ? "symlink" : "other";
     entries.push({
@@ -99,7 +106,9 @@ function snapshotTree(root: string): SnapshotEntry[] {
       bytes: type === "file"
         ? readFileSync(path).toString("base64")
         : type === "symlink" ? Buffer.from(readlinkSync(path), "utf8").toString("base64") : "",
-      mtimeNs: stat.mtimeNs.toString(),
+      // Directory mtimes move when an advisory sidecar is (re)built; the
+      // file list above already proves no user state was added or removed.
+      mtimeNs: type === "directory" ? "" : stat.mtimeNs.toString(),
     });
     if (type === "directory") {
       for (const name of readdirSync(path).sort()) visit(join(path, name));
@@ -223,6 +232,7 @@ async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: str
 function assertToolCatalog(response: JsonRpcResponse): void {
   assert.deepEqual((response.result?.tools as { name: string }[]).map((tool) => tool.name), [
     "recall", "recent_failures", "stats", "recall_with_ai", "search_knowledge", "fetch_record", "why_file", "teach_lookup",
+    "activity_recent", "activity_for_file", "bundles_list", "bundle_get", "session_timeline",
   ]);
   assert.equal(JSON.stringify(response).includes('"cwd"'), false);
 }

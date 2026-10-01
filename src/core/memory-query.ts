@@ -12,8 +12,17 @@ import {
   similarity,
 } from "./fingerprint.js";
 import { isAgentEnvelopeText } from "./envelope.js";
-import { boundTripleRecord, canonicalPath, isOperationalMemoryRecord, linkBasisRank, loadMemory, loadMemoryChecked, pathIdentityHash } from "./memory-read.js";
-import type { FailureRecord, FixRecord, LinkBasis, LinkConfidence, MemoryCoverage, MemoryRecord, RationaleFidelity, TripleRecord } from "./memory-read.js";
+import {
+  boundTripleRecord,
+  canonicalPath,
+  getMemoryFingerprintIndex,
+  isOperationalMemoryRecord,
+  linkBasisRank,
+  loadMemory,
+  loadMemoryChecked,
+  pathIdentityHash,
+} from "./memory-read.js";
+import type { FailureRecord, FixRecord, GuardRecord, LinkBasis, LinkConfidence, MemoryCoverage, MemoryRecord, RationaleFidelity, TripleRecord } from "./memory-read.js";
 
 export interface RecallQuery { query: string; limit?: number; cwd?: string; now?: number }
 /**
@@ -43,13 +52,19 @@ export interface MemoryStats {
   byKind?: Record<string, number>;
   /** Rationale evidence count by fidelity. Gate denials are never included: that state is ephemeral, never written to memory. */
   rationaleByFidelity?: Record<RationaleFidelity, number>;
+  /** Guard stops: hook guard triggers, never counted as failure or fix. */
+  guardTotal?: number;
+  guardCancelled?: number;
+  guardProceeded?: number;
+  /** Guard stops by rule pattern, top entries. */
+  guardByRule?: Record<string, number>;
 }
 export interface LinkQuery { cwd: string; now?: number; windowMs?: number }
-export interface KnowledgeSearchQuery { query: string; kind?: "failure" | "fix" | "triple" | "note"; limit?: number; now?: number }
+export interface KnowledgeSearchQuery { query: string; kind?: "failure" | "fix" | "triple" | "note" | "rationale" | "explain"; limit?: number; now?: number }
 export interface KnowledgeSearchHit {
   id: string;
   ts: number;
-  kind: "failure" | "fix" | "triple" | "note";
+  kind: "failure" | "fix" | "triple" | "note" | "rationale" | "explain";
   snippet: string;
   score: number;
   agent?: "claude-code" | "codex";
@@ -347,8 +362,82 @@ function fillRetrievalEvidenceTokens(record: FailureRecord, target: Set<string>)
   for (const token of retrievalTokens(record.excerpt)) target.add(token);
 }
 
+/**
+ * Byte-identical retrieval inputs imply byte-identical token bags. Compares
+ * only the fields `fillRetrievalEvidenceTokens` reads, without running the
+ * normalizer, so the fuzzy dedup fast path never diverges from a full scan.
+ */
+function sameRetrievalEvidence(left: FailureRecord, right: FailureRecord): boolean {
+  if (left === right) return true;
+  if (left.cmd !== right.cmd || left.excerpt !== right.excerpt || left.origin !== right.origin ||
+      left.fingerprintV !== right.fingerprintV || left.fingerprint !== right.fingerprint ||
+      left.exitCode !== right.exitCode) return false;
+  if (left.signature.length !== right.signature.length) return false;
+  for (let index = 0; index < left.signature.length; index += 1) {
+    if (left.signature[index] !== right.signature[index]) return false;
+  }
+  return true;
+}
+
+const FINGERPRINT_HEX = /^[0-9a-f]{16}$/u;
+
+/** Pure lookup parsing shared with the writer-side sidecar fast path. */
+export function parseFingerprintLookup(fp: FingerprintLookup): Set<string> {
+  return lookupFingerprints(fp);
+}
+
+/** Pure exact-match proof shared with the writer-side sidecar fast path. */
+export function matchFailureFingerprint(record: FailureRecord, candidates: ReadonlySet<string>): boolean {
+  return fingerprintMatches(record, candidates as Set<string>);
+}
+
+/** Hex shape shared with the writer-side sidecar fast path. */
+export function isHexFingerprint(value: string): boolean {
+  return FINGERPRINT_HEX.test(value);
+}
+
+function canUseMemIndexForQuery(index: { byFp: ReadonlyMap<string, readonly number[]>; hasLegacy: boolean }, candidates: Set<string>): boolean {
+  if (candidates.size === 0) return false;
+  // A single non-hex lookup is synthetic equality: the raw map is complete.
+  if (candidates.size === 1) {
+    const only = [...candidates][0]!;
+    if (!FINGERPRINT_HEX.test(only)) return true;
+    // A single hex lookup could match a legacy family via migration proof
+    // that the raw map alone cannot see. Fall back to the full scan there;
+    // dual (current+legacy) queries and legacy-free files stay indexed.
+    return !index.hasLegacy;
+  }
+  return true;
+}
+
 export function findByFingerprint(records: readonly MemoryRecord[], fp: FingerprintLookup, now = Date.now()): FailureRecord[] {
   const candidates = lookupFingerprints(fp);
+  const index = getMemoryFingerprintIndex(records);
+  if (index !== undefined && canUseMemIndexForQuery(index, candidates)) {
+    // Warm path: O(hits) positional reuse of the same-pass index. The raw
+    // map is advisory like the sidecar: every candidate still proves itself
+    // through `fingerprintMatches`, so a stale map can only lose speed, not
+    // correctness. File order is restored so dual-candidate answers match
+    // the full-scan contract exactly.
+    const ordered: number[] = [];
+    for (const candidate of candidates) {
+      const bucket = index.byFp.get(candidate);
+      if (bucket === undefined) continue;
+      for (const recordIndex of bucket) ordered.push(recordIndex);
+    }
+    if (ordered.length === 0) return [];
+    ordered.sort((left, right) => left - right);
+    const seen = new Set<string>();
+    const hits: FailureRecord[] = [];
+    for (const recordIndex of ordered) {
+      const record = records[recordIndex];
+      if (record === undefined || record.kind !== "failure" || record.ts > now) continue;
+      if (seen.has(record.id)) continue;
+      seen.add(record.id);
+      if (fingerprintMatches(record, candidates)) hits.push(record);
+    }
+    return hits;
+  }
   return uniqueRecords(records).filter((record): record is FailureRecord =>
     record.kind === "failure" && record.ts <= now && fingerprintMatches(record, candidates),
   );
@@ -472,15 +561,37 @@ export function queryRecall(records: readonly MemoryRecord[], input: RecallQuery
   const candidateMatches: Array<readonly number[] | undefined> | undefined = queryTokenList.length > 31
     ? new Array<readonly number[] | undefined>(candidates.length)
     : undefined;
+  // One representative tokenization per canonical fingerprint when the
+  // evidence bytes are identical (the recurring-error core case). Identical
+  // inputs imply identical token bags, so the second and later duplicates
+  // reuse size/intersection/mask without re-running the normalizer. Any
+  // divergent excerpt/command falls through to a full tokenization, keeping
+  // scores and the rare-token floor bit-identical to the unindexed scan.
+  const representativeByKey = new Map<string, {
+    record: FailureRecord;
+    size: number;
+    intersection: number;
+    mask: number;
+    matches: readonly number[] | undefined;
+  }>();
   for (let candidateIndex = 0; candidateIndex < candidates.length; candidateIndex += 1) {
     const record = candidates[candidateIndex]!;
     const key = canonicalFingerprint(record, migration);
     candidateKeys[candidateIndex] = key;
+    const representative = representativeByKey.get(key);
+    if (representative !== undefined && sameRetrievalEvidence(representative.record, record)) {
+      candidateSizes[candidateIndex] = representative.size;
+      candidateIntersections[candidateIndex] = representative.intersection;
+      candidateMasks[candidateIndex] = representative.mask;
+      if (candidateMatches !== undefined) candidateMatches[candidateIndex] = representative.matches;
+      continue;
+    }
     let intersection = 0;
     let mask = 0;
     let matches: number[] | undefined;
     fillRetrievalEvidenceTokens(record, scratchTokens);
-    candidateSizes[candidateIndex] = scratchTokens.size;
+    const size = scratchTokens.size;
+    candidateSizes[candidateIndex] = size;
     for (const token of scratchTokens) {
       const queryIndex = queryTokenIndex.get(token);
       if (queryIndex === undefined) continue;
@@ -493,8 +604,12 @@ export function queryRecall(records: readonly MemoryRecord[], input: RecallQuery
     }
     candidateIntersections[candidateIndex] = intersection;
     candidateMasks[candidateIndex] = mask;
+    const frozenMatches = matches === undefined || matches.length === 0 ? undefined : matches;
     if (candidateMatches !== undefined) {
-      candidateMatches[candidateIndex] = matches === undefined || matches.length === 0 ? undefined : matches;
+      candidateMatches[candidateIndex] = frozenMatches;
+    }
+    if (representative === undefined) {
+      representativeByKey.set(key, { record, size, intersection, mask, matches: frozenMatches });
     }
   }
   const best = new Map<string, RecallHit>();
@@ -603,6 +718,19 @@ export function queryStats(records: readonly MemoryRecord[], input: StatsQuery =
   for (const record of scoped) {
     if (record.kind === "rationale") rationaleByFidelity[record.rationale_fidelity] += 1;
   }
+  // Guard stops are their own kind: never failure, never fix. Count from the
+  // same deduped/operational `scoped` set so byKind stays in agreement.
+  const guards = scoped.filter((record): record is GuardRecord => record.kind === "guard");
+  const ruleCounts = new Map<string, number>();
+  let guardCancelled = 0;
+  for (const guard of guards) {
+    if (guard.outcome === "cancelled") guardCancelled += 1;
+    ruleCounts.set(guard.rule, (ruleCounts.get(guard.rule) ?? 0) + 1);
+  }
+  const guardByRule: Record<string, number> = {};
+  for (const [rule, count] of [...ruleCounts.entries()]
+    .sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
+    .slice(0, 10)) guardByRule[rule] = count;
   return {
     ...result,
     confirmedFixes: fixEvents,
@@ -612,6 +740,10 @@ export function queryStats(records: readonly MemoryRecord[], input: StatsQuery =
     total: scoped.length,
     byKind,
     rationaleByFidelity,
+    guardTotal: guards.length,
+    guardCancelled,
+    guardProceeded: guards.length - guardCancelled,
+    guardByRule,
   };
 }
 
@@ -628,36 +760,132 @@ function completeTriple(record: TripleRecord): boolean {
   }
 }
 
+function extractRelevantSnippet(text: string, queryTokens: Set<string>, maxChars: number): string {
+  if (text.length <= maxChars) return text;
+  const lower = text.toLowerCase();
+  let earliestMatch = -1;
+  for (const token of queryTokens) {
+    if (token.length >= 3 && !token.startsWith("<") && !token.startsWith("#")) {
+      const idx = lower.indexOf(token);
+      if (idx !== -1 && (earliestMatch === -1 || idx < earliestMatch)) {
+        earliestMatch = idx;
+      }
+    }
+  }
+  if (earliestMatch === -1 || earliestMatch < 60) {
+    return `${text.slice(0, maxChars - 1)}…`;
+  }
+  const start = Math.max(0, earliestMatch - 40);
+  const end = Math.min(text.length, start + maxChars - 2);
+  const prefix = start > 0 ? "…" : "";
+  const suffix = end < text.length ? "…" : "";
+  return `${prefix}${text.slice(start, end).trim()}${suffix}`;
+}
+
 export function searchKnowledge(
   records: readonly MemoryRecord[],
   input: KnowledgeSearchQuery,
 ): KnowledgeSearchHit[] {
-  const limit = Math.min(Math.max(input.limit ?? 10, 1), 20);
+  const limit = Math.min(Math.max(input.limit ?? 10, 1), Math.max(records.length, 1));
   const now = input.now ?? Date.now();
   const queryTokenSet = queryTokens(input.query);
   const hits: KnowledgeSearchHit[] = [];
   const wants = (kind: KnowledgeSearchHit["kind"]): boolean => input.kind === undefined || input.kind === kind;
+
+  const linkedRationalesByTriple = new Map<string, string[]>();
+  const linkedRationalesByFailure = new Map<string, string[]>();
+  for (const record of records) {
+    if (record.kind === "rationale" && record.excerpt) {
+      if (record.links?.tripleId) {
+        const list = linkedRationalesByTriple.get(record.links.tripleId) ?? [];
+        list.push(record.excerpt);
+        linkedRationalesByTriple.set(record.links.tripleId, list);
+      }
+      if (record.links?.failureId) {
+        const list = linkedRationalesByFailure.get(record.links.failureId) ?? [];
+        list.push(record.excerpt);
+        linkedRationalesByFailure.set(record.links.failureId, list);
+      }
+    }
+  }
+
+  const knownTripleIds = new Set<string>();
+  const knownFailureIds = new Set<string>();
+  for (const record of records) {
+    if (isOperationalMemoryRecord(record, now)) {
+      if (record.kind === "triple") knownTripleIds.add(record.id);
+      if (record.kind === "failure") knownFailureIds.add(record.id);
+    }
+  }
 
   const entries: Array<{ record: MemoryRecord; snippet: string }> = [];
   for (const sourceRecord of uniqueRecords(records)) {
     const record = sourceRecord.kind === "triple" ? boundTripleRecord(sourceRecord) : sourceRecord;
     if (!isOperationalMemoryRecord(record, now)) continue;
     if (record.kind === "failure" && wants("failure")) {
+      const parts = [record.cmd];
+      if (record.excerpt) parts.push(record.excerpt);
+      const linked = linkedRationalesByFailure.get(record.id);
+      if (linked && linked.length > 0) parts.push(linked.join(" | "));
       entries.push({
         record,
-        snippet: record.cmd.slice(0, 120),
+        snippet: extractRelevantSnippet(parts.join(" — "), queryTokenSet, 500),
       });
     } else if (record.kind === "fix" && wants("fix")) {
-      entries.push({ record, snippet: record.cmd.slice(0, 120) });
-    } else if (record.kind === "triple" && wants("triple") && record.intent) {
+      entries.push({ record, snippet: extractRelevantSnippet(record.cmd, queryTokenSet, 500) });
+    } else if (record.kind === "triple" && wants("triple")) {
+      const parts: string[] = [];
+      const linked = linkedRationalesByTriple.get(record.id);
+      const hasLinked = Boolean(linked && linked.length > 0);
+      const hasRationale = Boolean(record.rationale?.text || hasLinked);
+      if (record.intent?.text && !isAgentEnvelopeText(record.intent.text)) {
+        const intent = record.intent.text;
+        parts.push(hasRationale && intent.length > 180 ? extractRelevantSnippet(intent, queryTokenSet, 180) : intent);
+      }
+      if (record.rationale?.text) {
+        const rat = record.rationale.text;
+        parts.push(`Rationale: ${hasLinked && rat.length > 220 ? extractRelevantSnippet(rat, queryTokenSet, 220) : rat}`);
+      }
+      if (linked && linked.length > 0) {
+        parts.push(`Notes: ${linked.join(" | ")}`);
+      }
+      if (parts.length === 0 && record.mechanism.files.length > 0) {
+        parts.push(record.mechanism.files.map((f) => f.path).join(", "));
+      }
+      const rawSnippet = parts.join(" — ") || record.intent?.text || "triple";
+      const snippet = extractRelevantSnippet(rawSnippet, queryTokenSet, 500);
       entries.push({
         record,
-        snippet: record.intent.text.slice(0, 120),
+        snippet,
       });
     } else if (record.kind === "note" && wants("note")) {
       entries.push({
         record,
-        snippet: `${record.subject}: ${record.answer}`.slice(0, 120),
+        snippet: extractRelevantSnippet(`${record.subject}: ${record.answer}`, queryTokenSet, 500),
+      });
+    } else if (record.kind === "rationale" && wants("rationale")) {
+      const isLinkedToKnownParent = (record.links?.tripleId && knownTripleIds.has(record.links.tripleId))
+        || (record.links?.failureId && knownFailureIds.has(record.links.failureId));
+      if (!isLinkedToKnownParent || input.kind === "rationale") {
+        const parts: string[] = [];
+        if (record.excerpt) parts.push(record.excerpt);
+        if (record.files && record.files.length > 0) parts.push(record.files.join(", "));
+        const rawSnippet = parts.join(" — ") || record.excerpt || "rationale";
+        entries.push({
+          record,
+          snippet: extractRelevantSnippet(rawSnippet, queryTokenSet, 500),
+        });
+      }
+    } else if (record.kind === "explain" && wants("explain")) {
+      const parts: string[] = [];
+      if (record.path) parts.push(record.path);
+      if (record.code) parts.push(`Code: ${record.code}`);
+      if (record.business) parts.push(`Business: ${record.business}`);
+      if (record.snippet) parts.push(record.snippet);
+      const rawSnippet = parts.join(" — ") || `${record.code} — ${record.business}`;
+      entries.push({
+        record,
+        snippet: extractRelevantSnippet(rawSnippet, queryTokenSet, 500),
       });
     }
   }
@@ -665,6 +893,12 @@ export function searchKnowledge(
     target.clear();
     if (record.kind === "failure") {
       fillRetrievalEvidenceTokens(record, target);
+      const linked = linkedRationalesByFailure.get(record.id)?.join(" ");
+      if (linked) {
+        const scratch = new Set<string>();
+        fillRetrievalTokens(linked, scratch);
+        for (const token of scratch) target.add(token);
+      }
     } else if (record.kind === "fix") {
       fillRetrievalTokens(record.cmd, target);
     } else if (record.kind === "triple") {
@@ -674,9 +908,20 @@ export function searchKnowledge(
       const intentText = record.intent !== undefined && !isAgentEnvelopeText(record.intent.text)
         ? record.intent.text
         : "";
-      fillRetrievalTokens(`${intentText} ${record.rationale?.tags.join(" ") ?? ""}`, target);
+      const files = record.mechanism?.files?.map((file) => file.path.replace(/[\\/]/g, " ")).join(" ") ?? "";
+      const rationaleText = record.rationale?.text ?? "";
+      const tags = record.rationale?.tags?.join(" ") ?? "";
+      const linked = linkedRationalesByTriple.get(record.id)?.join(" ") ?? "";
+      fillRetrievalTokens(`${intentText} ${files} ${rationaleText} ${tags} ${linked}`, target);
     } else if (record.kind === "note") {
-      fillRetrievalTokens(`${record.cmd} ${record.file} ${record.subject} ${record.answer}`, target);
+      const file = record.file.replace(/[\\/]/g, " ");
+      fillRetrievalTokens(`${record.cmd} ${file} ${record.subject} ${record.answer}`, target);
+    } else if (record.kind === "rationale") {
+      const files = (record.files ?? []).map((f) => f.replace(/[\\/]/g, " ")).join(" ");
+      fillRetrievalTokens(`${record.excerpt ?? ""} ${files}`, target);
+    } else if (record.kind === "explain") {
+      const path = (record.path ?? "").replace(/[\\/]/g, " ");
+      fillRetrievalTokens(`${path} ${record.code ?? ""} ${record.business ?? ""} ${record.snippet ?? ""}`, target);
     }
   };
   // Moved ahead of the frequency pass below (finding 1, same fix as
@@ -696,7 +941,17 @@ export function searchKnowledge(
   // stays one entry per record, exactly as the old per-entry count behaved.
   const documentFrequency = new Map<string, Set<string>>();
   const knowledgeScratch = new Set<string>();
+  // Same representative fast path as `queryRecall`: identical failure
+  // evidence shares one tokenization for the frequency pass. Divergent
+  // excerpts fall through to the full scan so the rare floor never shifts.
+  const knowledgeRepByKey = new Map<string, FailureRecord>();
   for (const entry of entries) {
+    if (entry.record.kind === "failure") {
+      const key = knowledgeFailureKey(entry.record, migration);
+      const representative = knowledgeRepByKey.get(key);
+      if (representative !== undefined && sameRetrievalEvidence(representative, entry.record)) continue;
+      if (representative === undefined) knowledgeRepByKey.set(key, entry.record);
+    }
     knowledgeTokens(entry.record, knowledgeScratch);
     const docId = entry.record.kind === "failure"
       ? knowledgeFailureKey(entry.record, migration)
@@ -709,23 +964,46 @@ export function searchKnowledge(
     }
   }
   const failureHits = new Map<string, { hit: KnowledgeSearchHit; current: boolean }>();
+  const knowledgeScoreByKey = new Map<string, { record: FailureRecord; score: number }>();
   for (const { record, snippet } of entries) {
+    if (record.kind === "failure") {
+      const key = knowledgeFailureKey(record, migration);
+      const cached = knowledgeScoreByKey.get(key);
+      if (cached !== undefined && sameRetrievalEvidence(cached.record, record)) {
+        if (cached.score > 0) {
+          const hit: KnowledgeSearchHit = {
+            id: record.id, ts: record.ts, kind: "failure", snippet, score: cached.score,
+            source: record.origin ?? "run",
+          };
+          const previous = failureHits.get(key);
+          const current = record.fingerprintV === 2;
+          if (previous === undefined ||
+            (current && !previous.current) ||
+            (current === previous.current && (hit.score > previous.hit.score ||
+              (hit.score === previous.hit.score && hit.ts > previous.hit.ts)))) {
+            failureHits.set(key, { hit, current });
+          }
+        }
+        continue;
+      }
+    }
     knowledgeTokens(record, knowledgeScratch);
     const tokenSet = knowledgeScratch;
     const score = semanticScore(queryTokenSet, tokenSet, documentFrequency, entries.length);
     if (record.kind === "failure") {
+      const key = knowledgeFailureKey(record, migration);
+      if (!knowledgeScoreByKey.has(key)) knowledgeScoreByKey.set(key, { record, score });
       if (score > 0) {
-         const hit: KnowledgeSearchHit = {
+        const hit: KnowledgeSearchHit = {
           id: record.id, ts: record.ts, kind: "failure", snippet, score,
           source: record.origin ?? "run",
         };
-        const key = knowledgeFailureKey(record, migration);
         const previous = failureHits.get(key);
         const current = record.fingerprintV === 2;
         if (previous === undefined ||
-            (current && !previous.current) ||
-            (current === previous.current && (hit.score > previous.hit.score ||
-              (hit.score === previous.hit.score && hit.ts > previous.hit.ts)))) {
+          (current && !previous.current) ||
+          (current === previous.current && (hit.score > previous.hit.score ||
+            (hit.score === previous.hit.score && hit.ts > previous.hit.ts)))) {
           failureHits.set(key, { hit, current });
         }
       }
@@ -766,6 +1044,31 @@ export function searchKnowledge(
       }
     } else if (record.kind === "note") {
       if (score > 0) hits.push({ id: record.id, ts: record.ts, kind: "note", snippet, score, source: "note" });
+    } else if (record.kind === "rationale") {
+      if (score > 0) {
+        hits.push({
+          id: record.id,
+          ts: record.ts,
+          kind: "rationale",
+          snippet,
+          score,
+          agent: record.agent === "claude-code" || record.agent === "codex" ? record.agent : undefined,
+          source: record.source,
+          filesCovered: record.files ? [...record.files] : undefined,
+        });
+      }
+    } else if (record.kind === "explain") {
+      if (score > 0) {
+        hits.push({
+          id: record.id,
+          ts: record.ts,
+          kind: "explain",
+          snippet,
+          score,
+          source: record.source || "explain",
+          filesCovered: record.path ? [record.path] : undefined,
+        });
+      }
     }
   }
 
@@ -1192,7 +1495,7 @@ function distinctiveToken(token: string): boolean {
   return token.length >= 3 || /[^\x00-\x7F]/u.test(token);
 }
 
-/** Jaccard plus an exact rare-token floor, applied before recall thresholds. */
+/** Hybrid Jaccard + query coverage score plus an exact rare-token floor. */
 function semanticScore(
   queryTokens: Set<string>,
   candidateTokens: Set<string>,
@@ -1201,7 +1504,13 @@ function semanticScore(
   documentFrequency: ReadonlyMap<string, ReadonlySet<string>>,
   candidateCount: number,
 ): number {
-  const base = similarity(queryTokens, candidateTokens);
+  if (queryTokens.size === 0 || candidateTokens.size === 0) return 0;
+  let inter = 0;
+  for (const t of queryTokens) if (candidateTokens.has(t)) inter++;
+  if (inter === 0) return 0;
+  const jaccard = inter / (queryTokens.size + candidateTokens.size - inter);
+  const coverage = inter / queryTokens.size;
+  const base = 0.5 * jaccard + 0.5 * coverage;
   const rareFrequency = candidateCount >= 10
     ? Math.min(8, Math.max(2, Math.ceil(candidateCount * 0.05)))
     : 1;

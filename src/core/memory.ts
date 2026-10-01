@@ -11,6 +11,7 @@ import {
   openSync,
   opendirSync,
   readdirSync,
+  readFileSync,
   renameSync,
   readSync,
   rmSync,
@@ -18,6 +19,7 @@ import {
   unlinkSync,
   writeFileSync,
   writeSync,
+  type BigIntStats,
   type Stats,
 } from "node:fs";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
@@ -34,14 +36,17 @@ import {
 } from "./fingerprint.js";
 import { resolveRockyPaths } from "./state-paths.js";
 import type { RockyPaths } from "./state-paths.js";
-import { boundTripleMechanism, isCompleteMemoryCoverage, isKnownPathPlatform, isSafeNonNegativeInteger, loadMemoryChecked, MAX_MEMORY_FILE_BYTES, MAX_RATIONALE_FILES, MAX_RATIONALE_FILE_CHARS, MAX_MEMORY_LINE_BYTES, MAX_MEMORY_RECORDS, MAX_SUPPORTED_MEMORY_RECORDS } from "./memory-read.js";
-import type { AliasRecord, AssociationRecord, BriefRunRecord, ExplainRecord, FailureRecord, FixRecord, InvariantTouchRecord, MemoryCoverage, MemoryRecord, NoteRecord, RationaleRecord, TripleRecord } from "./memory-read.js";
+import { boundTripleMechanism, getMemoryRecordOffsets, isCompleteMemoryCoverage, isKnownPathPlatform, isSafeNonNegativeInteger, loadMemoryChecked, MAX_MEMORY_FILE_BYTES, MAX_RATIONALE_FILES, MAX_RATIONALE_FILE_CHARS, MAX_MEMORY_LINE_BYTES, MAX_MEMORY_RECORDS, MAX_SUPPORTED_MEMORY_RECORDS, MEMORY_FORMAT_VERSION } from "./memory-read.js";
+import type { AliasRecord, AssociationRecord, BriefRunRecord, ExplainRecord, FailureRecord, FixRecord, GuardOutcome, GuardRecord, InvariantTouchRecord, MemoryCoverage, MemoryRecord, NoteRecord, RationaleRecord, TripleRecord } from "./memory-read.js";
+import { MAX_GIT_SNAPSHOT_CHARS, MAX_GIT_SNAPSHOT_PRE_REDACT_CHARS, type GitAnchor } from "./memory-read.js";
 import { redactSecretsAtBoundary } from "./redact.js";
 import { plausibleFilePath } from "./compare-data.js";
 import { utf8Slice, utf8SliceFromEnd } from "./utf8.js";
 import { LINK_WINDOW_MS, recentUnresolvedFailures, type UnresolvedLink } from "./memory-query.js";
+import { writeSidecarBestEffort } from "./memory-index.js";
+import type { MemoryIndexRow } from "./memory-index.js";
 
-export type { AssociationRecord, BriefRunRecord, ExplainRecord, FailureRecord, FixRecord, InvariantTouchRecord, MemoryCoverage, MemoryRecord, NoteRecord, TripleFile, TripleRecord } from "./memory-read.js";
+export type { AssociationRecord, BriefRunRecord, ExplainRecord, FailureRecord, FixRecord, GitAnchor, GuardOutcome, GuardRecord, InvariantTouchRecord, MemoryCoverage, MemoryRecord, NoteRecord, TripleFile, TripleRecord } from "./memory-read.js";
 export {
   boundTripleMechanism,
   boundTripleRecord,
@@ -918,6 +923,70 @@ export function withMemoryTransaction<T>(
   let records = initial.records;
   let complete = initial.complete;
   let coverage = initial.coverage;
+  // Writer-side sidecar tracking: file offsets parallel to `records`, seeded
+  // from the initial pure load. Appends only ever add at the tail under the
+  // triple lock, so old offsets stay valid. Undefined means untrackable: skip
+  // maintenance rather than publish a prefix as complete.
+  const seededOffsets = getMemoryRecordOffsets(initial.records);
+  let allOffsets: number[] | undefined = seededOffsets === undefined
+    ? (initial.records.length === 0 ? [] : undefined)
+    : [...seededOffsets];
+  let appendedCount = 0;
+  const noteAppendedOffset = (offset: number): void => {
+    if (allOffsets === undefined) return;
+    if (!Number.isSafeInteger(offset) || offset < 0) {
+      allOffsets = undefined;
+      return;
+    }
+    allOffsets.push(offset);
+  };
+  const maintainSidecar = (): void => {
+    try {
+      if (appendedCount === 0 || allOffsets === undefined) return;
+      if (!initial.complete || !complete) return;
+      if (records.length > MAX_SUPPORTED_MEMORY_RECORDS) return;
+      let post: Stats;
+      try {
+        post = statSync(paths.memory);
+      } catch {
+        return;
+      }
+      if (!post.isFile() || post.size > MAX_MEMORY_FILE_BYTES) return;
+      if (allOffsets.length !== records.length) return;
+      const rows: MemoryIndexRow[] = [];
+      let hasLegacy = false;
+      for (let index = 0; index < records.length; index += 1) {
+        const record = records[index]!;
+        if (record.kind !== "failure") continue;
+        if (record.fingerprintV !== 2 || !/^[0-9a-f]{16}$/u.test(record.fingerprint)) hasLegacy = true;
+        const offset = allOffsets[index] ?? -1;
+        if (!Number.isSafeInteger(offset) || offset < 0) continue;
+        rows.push({
+          fp: record.fingerprint,
+          offset,
+          id: record.id,
+          ts: record.ts,
+          hasFix: record.resolvedBy !== undefined,
+        });
+      }
+      let bigStats: BigIntStats;
+      try {
+        bigStats = lstatSync(paths.memory, { bigint: true });
+      } catch {
+        return;
+      }
+      writeSidecarBestEffort(paths.memory, bigStats, rows, {
+        version: MEMORY_FORMAT_VERSION,
+        fpVersion: FINGERPRINT_ALGORITHM_VERSION,
+        scanned: coverage.scanned,
+        skipped: coverage.skipped,
+        complete: true,
+        hasLegacy,
+        maxBytes: MAX_MEMORY_FILE_BYTES,
+        maxRecords: MAX_SUPPORTED_MEMORY_RECORDS,
+      });
+    } catch { /* advisory only; never fails the transaction */ }
+  };
   const transaction: MemoryTransaction = {
     paths,
     now,
@@ -925,8 +994,22 @@ export function withMemoryTransaction<T>(
     get complete() { return complete; },
     get coverage() { return coverage; },
     append(record) {
+      let offset = -1;
+      try {
+        const before = lstatSync(paths.memory, { bigint: true });
+        if (before.isFile() && !before.isSymbolicLink()) {
+          const size = Number(before.size);
+          offset = Number.isSafeInteger(size) && size >= 0 ? size : -1;
+        } else if (before.isSymbolicLink()) {
+          offset = -1;
+        }
+      } catch (error) {
+        offset = (error as NodeJS.ErrnoException).code === "ENOENT" ? 0 : -1;
+      }
       appendUnlocked(record, paths);
       records = [...records, record];
+      appendedCount += 1;
+      noteAppendedOffset(offset);
     },
     reload() {
       const loaded = loadMemoryChecked(paths.memory, now);
@@ -934,6 +1017,8 @@ export function withMemoryTransaction<T>(
       records = loaded.records;
       complete = true;
       coverage = loaded.coverage;
+      const fresh = getMemoryRecordOffsets(loaded.records);
+      allOffsets = fresh === undefined ? (loaded.records.length === 0 ? [] : undefined) : [...fresh];
       return records;
     },
     canAppendComplete(nextRecords) {
@@ -948,7 +1033,9 @@ export function withMemoryTransaction<T>(
     },
   };
   try {
-    return operation(transaction);
+    const result = operation(transaction);
+    maintainSidecar();
+    return result;
   } finally {
     if (releaseTripleLock(lock)) {
       // Sweep legacy claims only after the canonical lock is verified absent.
@@ -958,7 +1045,8 @@ export function withMemoryTransaction<T>(
   }
 }
 
-export function recordFailure(cmd: string, exitCode: number, stderr: string): FailureRecord {
+export function recordFailure(rawCmd: string, exitCode: number, stderr: string): FailureRecord {
+  const cmd = boundCommand(rawCmd);
   const identity = commandIdentity(cmd);
   const ts = Date.now();
   const rec: FailureRecord = {
@@ -974,7 +1062,8 @@ export function recordFailure(cmd: string, exitCode: number, stderr: string): Fa
   return rec;
 }
 
-export function recordWatchFailure(cmd: string, exitCode: number, stderr: string, cwd = process.cwd()): FailureRecord {
+export function recordWatchFailure(rawCmd: string, exitCode: number, stderr: string, cwd = process.cwd()): FailureRecord {
+  const cmd = boundCommand(rawCmd);
   const identity = commandIdentity(cmd);
   const ts = Date.now();
   const rec: FailureRecord = {
@@ -1187,6 +1276,11 @@ export function pendingPath(): string {
   return resolveRockyPaths().pending;
 }
 
+export function guardPendingPath(home?: string): string {
+  if (home !== undefined) return join(home, "guard.pending");
+  return join(resolveRockyPaths().home, "guard.pending");
+}
+
 function touchPendingUnlocked(paths: RockyPaths): void {
   ensureDir(paths.home);
   writeFileSync(paths.pending, "", "utf8");
@@ -1230,7 +1324,8 @@ export function clearPendingIfResolved(
   }, resolveRockyPaths(), { now: selectedNow });
 }
 
-export function recordHookFailure(cmd: string, exitCode: number, cwd: string): FailureRecord {
+export function recordHookFailure(rawCmd: string, exitCode: number, cwd: string): FailureRecord {
+  const cmd = boundCommand(rawCmd);
   const identity = commandIdentity(cmd);
   const ts = Date.now();
   const rec: FailureRecord = {
@@ -1281,6 +1376,28 @@ export function recordInvariantTouch(input: { invariant: string; path: string; c
   const rec: InvariantTouchRecord = {
     v: 1, kind: "invariant_touch", id: randomUUID(), ts, cwd: input.cwd ?? process.cwd(),
     invariant, path,
+  };
+  withMemoryTransaction((transaction) => { transaction.append(rec); }, resolveRockyPaths(), { now: ts });
+  return rec;
+}
+
+export const MAX_GUARD_RULE_CHARS = 16 * 1024;
+export const MAX_GUARD_CWD_CHARS = 512;
+export const MAX_GUARD_DRAIN_LINES = 500;
+
+export function recordGuard(input: { cwd: string; cmd: string; rule: string; outcome: GuardOutcome; ts?: number }): GuardRecord {
+  if (input.outcome !== "cancelled" && input.outcome !== "proceeded") {
+    throw new Error("Rocky guard evidence requires outcome cancelled or proceeded");
+  }
+  const cmd = boundCommand(input.cmd);
+  const cwd = input.cwd.slice(0, MAX_GUARD_CWD_CHARS);
+  const rule = input.rule.slice(0, MAX_GUARD_RULE_CHARS);
+  if (cwd.length === 0 || cmd.length === 0 || rule.length === 0) {
+    throw new Error("Rocky guard evidence requires non-empty cwd, cmd, and rule");
+  }
+  const ts = input.ts ?? Date.now();
+  const rec: GuardRecord = {
+    v: 1, kind: "guard", id: randomUUID(), ts, cwd, cmd, rule, outcome: input.outcome,
   };
   withMemoryTransaction((transaction) => { transaction.append(rec); }, resolveRockyPaths(), { now: ts });
   return rec;
@@ -1383,14 +1500,27 @@ export function recordTripleOnce(
 
 export const MAX_RATIONALE_EXCERPT_BYTES = 1200;
 
+/** Cap head+tail by bytes with a `…` marker; byte-safe on multi-byte UTF-8. */
+function boundHeadTail(text: string, capBytes: number): string {
+  if (Buffer.byteLength(text, "utf8") <= capBytes) return text;
+  const half = Math.floor((capBytes - 5) / 2);
+  const head = utf8Slice(text, 0, half);
+  const tail = utf8SliceFromEnd(text, half);
+  return `${head} … ${tail}`;
+}
+
 /** Redact secrets, flatten control characters, and cap head+tail by bytes. */
 export function boundRationaleExcerpt(text: string): string {
-  const clean = redactSecretsAtBoundary(text.replace(/[\u0000-\u001f\u007f-\u009f]/g, " "));
-  if (Buffer.byteLength(clean, "utf8") <= MAX_RATIONALE_EXCERPT_BYTES) return clean;
-  const half = Math.floor((MAX_RATIONALE_EXCERPT_BYTES - 5) / 2);
-  const head = utf8Slice(clean, 0, half);
-  const tail = utf8SliceFromEnd(clean, half);
-  return `${head} … ${tail}`;
+  const clean = redactSecretsAtBoundary(text.replace(/[ --]/g, " "));
+  return boundHeadTail(clean, MAX_RATIONALE_EXCERPT_BYTES);
+}
+
+export const MAX_COMMAND_BYTES = 1200;
+
+/** Bound a remembered command exactly like an excerpt: redact, flatten, cap head+tail. */
+export function boundCommand(cmd: string): string {
+  const clean = redactSecretsAtBoundary(cmd.replace(/[ --]/g, " "));
+  return boundHeadTail(clean, MAX_COMMAND_BYTES);
 }
 
 /** Bound the optional notify-lane files list: cap count and entry length, drop junk entries. */
@@ -1403,8 +1533,23 @@ function boundedRationaleFiles(files: string[] | undefined): { files: string[] }
   return bounded.length === 0 ? undefined : { files: bounded };
 }
 
+function boundGitAnchor(input: GitAnchor | undefined): { git?: GitAnchor } {
+  if (input === undefined) return {};
+  const git: GitAnchor = {};
+  if (typeof input.base === "string" && input.base.length > 0) git.base = input.base.slice(0, 256);
+  if (typeof input.dirty === "boolean") git.dirty = input.dirty;
+  if (typeof input.snapshot === "string" && input.snapshot.trim().length > 0) {
+    const rawBounded = input.snapshot.length > MAX_GIT_SNAPSHOT_PRE_REDACT_CHARS
+      ? input.snapshot.slice(0, MAX_GIT_SNAPSHOT_PRE_REDACT_CHARS)
+      : input.snapshot;
+    git.snapshot = redactSecretsAtBoundary(rawBounded).slice(0, MAX_GIT_SNAPSHOT_CHARS);
+  }
+  if (git.base === undefined && git.dirty === undefined && git.snapshot === undefined) return {};
+  return { git };
+}
+
 export function recordRationale(
-  input: Omit<RationaleRecord, "kind" | "id" | "ts" | "v" | "excerpt"> & { text: string; ts?: number },
+  input: Omit<RationaleRecord, "kind" | "id" | "ts" | "v" | "excerpt"> & { text: string; ts?: number; git?: GitAnchor },
   paths?: RockyPaths,
 ): RationaleRecord {
   const ts = input.ts ?? Date.now();
@@ -1421,6 +1566,7 @@ export function recordRationale(
     ...(input.pointer === undefined ? {} : { pointer: input.pointer }),
     ...(input.links === undefined ? {} : { links: input.links }),
     ...(boundedRationaleFiles(input.files) ?? {}),
+    ...boundGitAnchor(input.git),
   };
   withMemoryTransaction((transaction) => { transaction.append(rec); }, paths ?? resolveRockyPaths(), { now: ts });
   return rec;
@@ -1433,7 +1579,7 @@ export function explainContentHash(snippet: string): string {
 }
 
 export function recordExplain(
-  input: { cwd: string; path: string; source: string; code: string; business: string; snippet?: string; ts?: number },
+  input: { cwd: string; path: string; source: string; code: string; business: string; snippet?: string; git?: GitAnchor; ts?: number },
   paths: RockyPaths = resolveRockyPaths(),
 ): ExplainRecord {
   const record: ExplainRecord = {
@@ -1443,6 +1589,7 @@ export function recordExplain(
     source: input.source,
     code: boundRationaleExcerpt(input.code),
     business: boundRationaleExcerpt(input.business),
+    ...boundGitAnchor(input.git),
   };
   if (input.snippet !== undefined && input.snippet.length > 0) {
     record.snippet = boundRationaleExcerpt(input.snippet);
@@ -1468,4 +1615,91 @@ export function recordAlias(
   };
   withMemoryTransaction((transaction) => { transaction.append(rec); }, paths ?? resolveRockyPaths(), { now: ts });
   return rec;
+}
+
+export interface GuardDrainResult { drained: number; skipped: number }
+
+/**
+ * Drain the bash guard pending file into memory. Atomic rename first so a
+ * concurrent bash append lands in a fresh file; parse at most
+ * MAX_GUARD_DRAIN_LINES per pass and leave the rest by re-appending them.
+ * Malformed lines are skipped, never thrown. Fail-silent at call sites.
+ */
+export function drainGuardPending(home?: string): GuardDrainResult {
+  const resolvedHome = home ?? resolveRockyPaths().home;
+  const paths = resolveRockyPaths();
+  const scoped: RockyPaths = home === undefined
+    ? paths
+    : { ...paths, home: resolvedHome, memory: join(resolvedHome, "memory.jsonl") };
+  const pending = join(resolvedHome, "guard.pending");
+  let pendingStats;
+  try {
+    pendingStats = lstatSync(pending);
+  } catch {
+    return { drained: 0, skipped: 0 };
+  }
+  if (!pendingStats.isFile() || pendingStats.isSymbolicLink()) return { drained: 0, skipped: 0 };
+  const drainFile = `${pending}.${randomBytes(8).toString("hex")}.drain`;
+  try {
+    renameSync(pending, drainFile);
+  } catch {
+    return { drained: 0, skipped: 0 };
+  }
+  let text: string;
+  try {
+    text = readFileSync(drainFile, "utf8");
+  } catch {
+    return { drained: 0, skipped: 0 };
+  }
+  const lines = text.split("\n").filter((line) => line.length > 0);
+  const batch = lines.slice(0, MAX_GUARD_DRAIN_LINES);
+  const rest = lines.slice(MAX_GUARD_DRAIN_LINES);
+  let skipped = 0;
+  const records: GuardRecord[] = [];
+  for (const line of batch) {
+    const parts = line.split("\t");
+    if (parts.length !== 5) { skipped += 1; continue; }
+    const [tsRaw, outcomeRaw, ruleRaw, cwdRaw, cmdRaw] = parts as [string, string, string, string, string];
+    if (!/^\d{1,19}$/u.test(tsRaw)) { skipped += 1; continue; }
+    const tsMs = Number(tsRaw) * 1000;
+    if (!isSafeNonNegativeInteger(tsMs) || (outcomeRaw !== "cancelled" && outcomeRaw !== "proceeded")) { skipped += 1; continue; }
+    if (ruleRaw.length === 0 || cwdRaw.length === 0 || cmdRaw.length === 0) { skipped += 1; continue; }
+    try {
+      const cmd = boundCommand(cmdRaw);
+      const cwd = cwdRaw.slice(0, MAX_GUARD_CWD_CHARS);
+      const rule = ruleRaw.slice(0, MAX_GUARD_RULE_CHARS);
+      if (cwd.length === 0 || cmd.length === 0 || rule.length === 0) { skipped += 1; continue; }
+      records.push({ v: 1, kind: "guard", id: randomUUID(), ts: tsMs, cwd, cmd, rule, outcome: outcomeRaw as GuardOutcome });
+    } catch {
+      skipped += 1;
+      continue;
+    }
+  }
+  let drained = 0;
+  let leftover = rest;
+  if (records.length > 0) {
+    try {
+      withMemoryTransaction((transaction) => {
+        for (const record of records) transaction.append(record);
+      }, scoped, { now: Date.now() });
+      drained = records.length;
+    } catch {
+      // Append failed: put the batch back for the next pass, nothing drained.
+      skipped += records.length;
+      leftover = [...batch, ...rest];
+    }
+  }
+  if (leftover.length > 0) {
+    try {
+      writeFileSync(pending, `${leftover.join("\n")}\n`, "utf8");
+    } catch {
+      // Leftover lines are best-effort; the drain file is still removed below.
+    }
+  }
+  try {
+    rmSync(drainFile, { force: true });
+  } catch {
+    // Best effort; a residual .drain file is inert and never re-drained.
+  }
+  return { drained, skipped };
 }

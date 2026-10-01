@@ -170,14 +170,32 @@ rocky mcp                                # local read-only stdio server
 ```
 
 Memory lives in `~/.rocky/memory.jsonl`. It is a text file you can read, grep, back up, and delete. Rocky records explicit terminal commands and errors plus the operational metadata needed to link them: working directory, time, exit code, fingerprints, origin, record IDs, and fix links. Rocky does not keylog and does not capture the screen.
+Rocky may keep one advisory derived file next to it, `~/.rocky/memory.idx.jsonl` (fingerprint → file offsets plus a versioned header). It is a pure read accelerator: `memory.jsonl` stays the source of truth, and any version, size, timestamp, or corruption mismatch discards the sidecar and falls back to a full scan with explicit coverage. You can delete the sidecar at any time; Rocky rebuilds it lazily.
 
-The CLI contains no telemetry and runs no daemon. Its only external network egress is `rocky check`'s package-existence lookup against registry.npmjs.org — consent-gated, package names only, fail-open when offline. Everything else, including the local MCP server, reaches no external host at all. MCP uses local stdio, exposes read-only tools, and projects sanitized memory by default. A configured cloud host may forward selected projected content under that host's own policy, so review the host and choose raw exposure only when you intend to share those fields. Optional AI calls only a separately managed Ollama service over loopback (`127.0.0.1`).
+The CLI contains no telemetry and runs no daemon. Its only external network egress is `rocky check`'s package-existence lookup against registry.npmjs.org — consent-gated, package names only, fail-open when offline. The Main chat adds one more, and only when you configure a BYOK model: a code question sends your question, carved excerpts, and memory evidence to that model, redacted and capped; a memory-only question sends nothing. Everything else, including the local MCP server, reaches no external host at all. MCP uses local stdio, exposes read-only tools, and projects sanitized memory by default. A configured cloud host may forward selected projected content under that host's own policy, so review the host and choose raw exposure only when you intend to share those fields. Optional AI calls only a separately managed Ollama service over loopback (`127.0.0.1`).
 
 ## Read-only MCP knowledge tools
 
-`rocky mcp` serves eight bounded, read-only tools in deterministic order: `recall`, `recent_failures`, `stats`, `recall_with_ai`, `search_knowledge`, `fetch_record`, `why_file`, and `teach_lookup`. Search first, then fetch: `search_knowledge` returns light metadata and bounded hits, including record id/timestamp, agent/source, covered files, and truncation status for triples; `fetch_record` retrieves one full record by the returned id. `why_file` returns remembered triples that touched one path, with an optional `diff?: boolean` parameter to include the correlated, secret-redacted git diff. `teach_lookup` returns a read-only teach card for a path and optional line or snippet: a remembered witness explanation when one matches, else an assembled evidence ladder from local syntax, comments, tests, and git history. `stats` retains legacy counters and adds confirmed fixes, possible fixes, triples, notes, and total remembered items. Limits stay bounded, and sanitized projection is the default; raw fields require an explicit opt-in.
+`rocky mcp` serves thirteen bounded, read-only tools in deterministic order: `recall`, `recent_failures`, `stats`, `recall_with_ai`, `search_knowledge`, `fetch_record`, `why_file`, `teach_lookup`, `activity_recent`, `activity_for_file`, `bundles_list`, `bundle_get`, and `session_timeline`. The last five read Listening data from a consented repository, return metadata only (locators, hashes, evidence IDs, edge basis, coverage), and never cause a scan, write, network call, or consent change. Search first, then fetch: `search_knowledge` returns light metadata and bounded hits, including record id/timestamp, agent/source, covered files, and truncation status for triples; `fetch_record` retrieves one full record by the returned id. `why_file` returns remembered triples that touched one path, with an optional `diff?: boolean` parameter to include the correlated, secret-redacted git diff. `teach_lookup` returns a read-only teach card for a path and optional line or snippet: a remembered witness explanation when one matches, else an assembled evidence ladder from local syntax, comments, tests, and git history. `stats` retains legacy counters and adds confirmed fixes, possible fixes, triples, notes, and total remembered items. Limits stay bounded, and sanitized projection is the default; raw fields require an explicit opt-in.
 
 For example, a host can call `search_knowledge` with `{ "query": "move button down" }`, pass a returned id to `fetch_record`, call `why_file` with `{ "path": "src/button.css", "diff": true }`, or call `teach_lookup` with `{ "path": "src/button.css", "line": 12 }`. Reasons are hearsay Rocky heard, not verified facts. Rationale is quoted and untrusted; MCP never presents it as fact or executes a remembered command.
+
+## Listening and its disk budget (v1.0)
+
+Listening is off until you consent per repository: `rocky setup --repo <path> --allow-capture`, or the Listen button in the GUI Listening tab. Rocky then reads only files that `git ls-files` lists and Git does not ignore, and refuses a root Git cannot read. History lives under `~/.rocky/listening/repos/<hash>/` (or `$ROCKY_HOME/listening/…`) and never leaves the machine.
+
+Each repository gets a disk budget of **160 MiB**: 32 MiB for the event log (`events.jsonl`) and 128 MiB for content snapshots (`objects/`). When either store is full, Rocky drops the oldest entries first; the event log keeps a gap marker so readers know history was trimmed. Two more limits are safety bounds, not budget: a file larger than 1 MiB keeps no snapshot, and one reconciliation pass walks at most 10,000 paths. The budget is per repository, so ten consented repositories can hold up to about 1.6 GiB.
+
+| Command | What it does |
+| --- | --- |
+| `rocky setup --repo <path> --allow-capture` | States the budget, asks for consent, starts capture. |
+| `rocky setup --repo <path> --check-capture` | Shows consent and disk held against the budget. |
+| `rocky setup --repo <path> --revoke-capture` | Stops new capture. History stays on disk. |
+| `rocky setup --repo <path> --purge-capture` | Revokes consent and deletes that repository's history. No undo. |
+
+`<path>` may be relative to the current folder. Revoke and purge also work for a consented folder that has since moved, vanished, or lost its `.git`, so a stale consent never gets stuck. In the GUI, the Listening tab shows `Disk: … of 160 MiB budget held for this repo` under the repo's status, and **Delete history** does the same as `--purge-capture`: the first click arms it, a second click within five seconds deletes.
+
+Snapshots are copies of tracked source text, bounded and redacted, though a secret can survive redaction. Purge before you hand a machine over, or when a repository should no longer be held.
 
 ## `rocky` and `rocky dash` (local GUI, implemented)
 
@@ -431,7 +449,7 @@ Rocky asks because he is curious, not because he is testing you; you are always 
 
 The fence never moves: Rocky hears your terminal and the explicit Plan 01 agent hooks. That's it. No keylogging, no screen reading, no capture of screen content of any kind. "Rocky can't see your screen" is a literal description of the architecture, not just lore. The local GUI serves a page to your own browser over loopback and reads nothing the page does not ask for; no global input is hooked.
 
-The one hole in the no-egress rule is the optional BYOK proxy described under `rocky` and `rocky dash`. It stays shut until you enter a key, it sends only the prompt you triggered, and that prompt is redacted before it leaves. Memory, hooks, recall, and MCP still reach no external host.
+The one hole in the no-egress rule is the optional BYOK proxy described under `rocky` and `rocky dash`. It stays shut until you enter a key, it sends only the prompt you triggered — and, on a code question in Main, the carved excerpts and memory evidence that ground it — and all of it is redacted before it leaves. Memory, hooks, recall, and MCP still reach no external host.
 
 ## Roadmap
 
@@ -443,10 +461,11 @@ Each phase is one facet of who Rocky is:
 - **v0.5 — his curiosity (implemented)**: Plan 01 Nervous System agent hooks and Plan 02 dictionary/teaching surfaces ship in v0.5.0. They preserve prompt/path/excerpt/stated-rationale evidence in local memory, use deterministic fallback when Ollama is unavailable, keep rationale explicitly quoted and untrusted, and add `what`, `how`, `why`, `digest`, `quiz`, `export`, passive labels, ambiguity advice, and three bounded MCP knowledge tools. The earlier `rocky explain` concept is superseded, not an active command.
 - **v0.6 — his accountability (implemented)**: `rocky brief` (loopback-AI-polished summary of what changed since your last check-in: commits, remembered failures/fixes, and touched invariant guards), `rocky journal`, `rocky invariants`, extended `rocky stats`, and the [schema envelope](schema.md) documentation. `brief` shipped in v0.6, no longer deferred; BYOK annotation, `attest`, and the memory circuit breaker remain deferred.
 - **v0.7 — his memory of why (implemented)**: a fourth evidence kind, `rationale`, captured across four lanes (`log-thinking`, `log-response`, `notify`, `human`); a deterministic concept lexicon (`rocky concepts`/`concept`/`concept alias`); derived `rocky sessions` and `rocky repl`; PreToolUse rationale gate (`rocky hook gate-event`); and native git diff correlation. Codex and Gemini agent-log adapters remain deferred — see the [rationale capture section](#rationale-capture-and-the-gate-v070) above.
-- **v0.8 — his comprehension guardian (current line)**: local browser GUI (`rocky dash`) replacing the terminal dashboard, teach mode (`rocky teach` / `teach_lookup` / `explain` records), and selection-anchored why-cards.
+- **v0.8 — his comprehension guardian (implemented)**: local browser GUI (`rocky dash`) replacing the terminal dashboard, teach mode (`rocky teach` / `teach_lookup` / `explain` records), and selection-anchored why-cards.
+- **v1.0 — his listening (current release)**: consent-gated Listening over Git-tracked files with five metadata-only MCP tools, explicit `rocky setup --harness` targets with MCP adapters for Claude Code, Codex CLI, OpenCode, Gemini CLI, and Copilot CLI, a chat-first Main tab, and advisory prompt-clarity, decomposition, and failure-cycle checks.
 - **later — his care**: ambient pet mode and the desktop pet window (deferred). He notices you've been at it for four hours, and he has opinions about your sleep.
 
-The package version is v0.8.0; the Nervous System, rationale-capture, teach mode, and local GUI sections above describe the surfaces it ships.
+The package version is v1.0.0; the Nervous System, rationale-capture, teach mode, local GUI, and MCP sections above describe the surfaces it ships.
 
 ## Contributing
 

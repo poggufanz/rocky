@@ -1,4 +1,5 @@
 import type { MemoryRecord } from "./memory-read.js";
+import { coverageFromRecords } from "./coverage.js";
 import { redactSecretsAtBoundary } from "./redact.js";
 import { elapsed } from "../ui/rocky.js";
 
@@ -9,6 +10,8 @@ export interface HomeData {
   day: { heard: number; failures: number; fixes: number; whys: number };
   topFiles: Array<{ name: string; count: number }>;
   recent: Array<{ label: string; agoText: string; kind: string; machine: boolean }>;
+  /** Tried versus untried heard files; lists name at most COVERAGE_MAX_LISTED each, totals are lower bounds under caps. No new route. */
+  coverage: { tried: string[]; untried: string[]; triedTotal: number; untriedTotal: number; truncated: boolean };
 }
 
 export function adaptHit(
@@ -121,6 +124,26 @@ export function deriveHome(
   const sorted = [...records].sort((a, b) => (b.ts ?? 0) - (a.ts ?? 0));
   const recent = sorted.slice(0, 14).map((r) => adaptHit(r, now));
 
+  // Feature coverage from the same bounded read: touched files split into
+  // tried (rationale evidence or diff hunks heard) versus untried. The
+  // truncated flag and totals travel with the lists so the GUI never
+  // silently caps — same disclosure the brief prints. Pure and fail-open —
+  // a hostile record set yields an honest empty split, never a blocked dash
+  // payload.
+  let coverage: HomeData["coverage"];
+  try {
+    const split = coverageFromRecords(records, { memoryTruncated: coverageReason !== undefined });
+    coverage = {
+      tried: split.tried,
+      untried: split.untried,
+      triedTotal: split.triedTotal,
+      untriedTotal: split.untriedTotal,
+      truncated: split.truncated,
+    };
+  } catch {
+    coverage = { tried: [], untried: [], triedTotal: 0, untriedTotal: 0, truncated: coverageReason !== undefined };
+  }
+
   return {
     total,
     coverageLine,
@@ -128,5 +151,6 @@ export function deriveHome(
     day,
     topFiles,
     recent,
+    coverage,
   };
 }

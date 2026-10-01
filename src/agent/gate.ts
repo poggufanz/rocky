@@ -3,10 +3,9 @@
  *
  * A Claude Code PreToolUse hook calls this once per tool call. It runs a
  * small check registry against one shared, bounded, per-session state store
- * under `~/.rocky/gate-state/`. v0.7 ships exactly one check (rationale),
- * but the registry is generic: a future check (invariant reminders, a
- * failure circuit breaker) plugs in without touching this file's schema or
- * the hook install.
+ * under `~/.rocky/gate-state/`. v0.7 ships the rationale/explain checks plus
+ * one advisory failure-cycle check; the registry stays generic so a future
+ * check plugs in without touching this file's schema or the hook install.
  *
  * Hard rule: `gateEvent` NEVER throws and NEVER returns a non-zero exit
  * code. Every failure path — unparseable stdin, corrupt state, an
@@ -15,10 +14,20 @@
  * work by breaking.
  */
 
-import { appendFileSync, mkdirSync, readFileSync, statSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync, renameSync, rmSync, statSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { dirname, join } from "node:path";
 import { canonicalPath, loadMemory } from "../core/memory-read.js";
+import { clarityNudgeLine } from "../core/prompt-clarity.js";
+import {
+  countCycleClusters,
+  cycleNudgeLine,
+  loadCycleState,
+  observeFailureCycle,
+  renderCycleCard,
+  saveCycleState,
+} from "../core/failure-cycle.js";
+import { fingerprint } from "../core/fingerprint.js";
 import { resolveRockyPaths } from "../core/state-paths.js";
 import { logHookError } from "../commands/agent-hook.js";
 
@@ -26,6 +35,10 @@ import { logHookError } from "../commands/agent-hook.js";
 export const GATE_SESSION_TIMEOUT_MS = 30 * 60 * 1000;
 /** Bounds how many distinct keys the state fold keeps in memory per read. */
 export const GATE_MAX_ENTRIES = 500;
+
+function gateMode(env: NodeJS.ProcessEnv): "nudge" | "strict" {
+  return env.ROCKY_GATE_MODE === "strict" ? "strict" : "nudge";
+}
 
 const GATED_TOOLS: ReadonlySet<string> = new Set(["Edit", "Write", "MultiEdit"]);
 /** Session ids longer than this get hashed instead of used verbatim as a filename. */
@@ -49,6 +62,18 @@ export interface GateInput {
   filePath?: string;
   sessionKey: string;
   cwd: string;
+  /**
+   * Optional rationale draft carried by the hook payload. Scored for an
+   * advisory clarity nudge only — it never influences allow/deny.
+   */
+  rationale?: string;
+  /**
+   * Optional failure fingerprint carried by the hook payload (explicit
+   * 16-hex `fingerprint`, or derived from `stderr`/`cmd`/`exitCode` via
+   * `fingerprint()`). Feeds the advisory failure-cycle nudge only — it
+   * never influences allow/deny.
+   */
+  fingerprint?: string;
 }
 
 export type GateDecision = { deny: true; reason: string } | { deny: false };
@@ -168,6 +193,62 @@ function createGateState(stateFile: string): GateState {
  */
 /** How fresh file-linked rationale evidence must be to satisfy the gate. */
 const RATIONALE_EVIDENCE_WINDOW_MS = 8 * 60 * 60 * 1000;
+/** How fresh file-linked explain evidence must be to satisfy the gate. */
+const EXPLAIN_EVIDENCE_WINDOW_MS = 8 * 60 * 60 * 1000;
+
+/** Bounded per-process evidence index keyed by memory file identity. */
+interface EvidenceCache {
+  memoryPath: string;
+  mtimeMs: number;
+  size: number;
+  rationale: Map<string, number>;
+  explain: Map<string, number>;
+}
+
+const EVIDENCE_INDEX_CAP = 2000;
+let evidenceCache: EvidenceCache | undefined;
+
+function indexEvidence(memoryPath: string): EvidenceCache {
+  const rationale = new Map<string, number>();
+  const explain = new Map<string, number>();
+  try {
+    const stats = statSync(memoryPath);
+    if (evidenceCache !== undefined
+        && evidenceCache.memoryPath === memoryPath
+        && evidenceCache.mtimeMs === stats.mtimeMs
+        && evidenceCache.size === stats.size) {
+      return evidenceCache;
+    }
+    const now = Date.now();
+    const records = loadMemory(memoryPath, now);
+    for (let i = records.length - 1; i >= 0; i--) {
+      const record = records[i];
+      if (record === undefined) continue;
+      if (record.kind === "rationale" && rationale.size < EVIDENCE_INDEX_CAP) {
+        if (now - record.ts > RATIONALE_EVIDENCE_WINDOW_MS) continue;
+        const files = record.files;
+        if (files === undefined) continue;
+        for (const file of files) {
+          const identity = canonicalPath(file, { cwd: record.cwd });
+          if (identity.length > 0 && !rationale.has(identity)) rationale.set(identity, record.ts);
+        }
+      } else if (record.kind === "explain" && explain.size < EVIDENCE_INDEX_CAP) {
+        if (now - record.ts > EXPLAIN_EVIDENCE_WINDOW_MS) continue;
+        const identity = canonicalPath(record.path, { cwd: record.cwd });
+        if (identity.length > 0 && !explain.has(identity)) explain.set(identity, record.ts);
+      }
+      if (rationale.size >= EVIDENCE_INDEX_CAP && explain.size >= EVIDENCE_INDEX_CAP) break;
+    }
+    evidenceCache = { memoryPath, mtimeMs: stats.mtimeMs, size: stats.size, rationale, explain };
+    return evidenceCache;
+  } catch {
+    return { memoryPath, mtimeMs: -1, size: -1, rationale, explain };
+  }
+}
+
+function getEvidenceCache(memoryPath: string): EvidenceCache {
+  return indexEvidence(memoryPath);
+}
 
 /**
  * True when memory holds a rationale record, fresh within the window, whose
@@ -179,30 +260,134 @@ const RATIONALE_EVIDENCE_WINDOW_MS = 8 * 60 * 60 * 1000;
  */
 function hasFreshFileRationale(identity: string, now: number): boolean {
   try {
-    const records = loadMemory(resolveRockyPaths().memory, now);
-    for (let i = records.length - 1; i >= 0; i--) {
-      const record = records[i];
-      if (record === undefined || record.kind !== "rationale") continue;
-      if (now - record.ts > RATIONALE_EVIDENCE_WINDOW_MS) continue;
-      const files = record.files;
-      if (files === undefined) continue;
-      for (const file of files) {
-        if (canonicalPath(file, { cwd: record.cwd }) === identity) return true;
-      }
-    }
+    return indexEvidence(resolveRockyPaths().memory).rationale.has(identity);
   } catch {
     /* unreadable memory: treated as no evidence, deny-once path decides */
   }
   return false;
 }
 
+/**
+ * Optional clarity advisory for a rationale draft: appended to an already
+ * decided deny reason as text only. Never influences the decision, never
+ * throws, silent when the payload carries no rationale, when the draft is
+ * already clear, or when ROCKY_CLARITY_ADVISORY=off.
+ */
+function claritySuffix(input: GateInput): string {
+  try {
+    if (process.env.ROCKY_CLARITY_ADVISORY === "off") return "";
+    if (input.rationale === undefined) return "";
+    const line = clarityNudgeLine(input.rationale);
+    return line === undefined ? "" : ` ${line}`;
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * Failure-cycle (circuit breaker) advisory. Today's PreToolUse payloads
+ * carry no failure fields, so like the clarity advisory this is API-level
+ * until a caller sends `fingerprint` (16 hex chars) or `stderr` with an
+ * optional `cmd`/`exitCode` to derive one via `fingerprint()` — all read
+ * fail-open. The check itself never denies; it records one observation per
+ * gate event and caches that event's nudge so the denying checks below can
+ * append it as text only.
+ */
+const EXPLICIT_FINGERPRINT = /^[0-9a-f]{16}$/u;
+
+function readFailureFingerprint(raw: PlainRecord): string | undefined {
+  try {
+    const explicit = raw.fingerprint;
+    if (typeof explicit === "string" && EXPLICIT_FINGERPRINT.test(explicit)) return explicit;
+    const stderr = raw.stderr;
+    if (typeof stderr !== "string") return undefined;
+    const cmd = raw.cmd ?? raw.command;
+    const exitCode = raw.exitCode;
+    return fingerprint(
+      stderr,
+      typeof cmd === "string" ? cmd : "",
+      typeof exitCode === "number" && Number.isSafeInteger(exitCode) ? exitCode : 1,
+    );
+  } catch {
+    return undefined;
+  }
+}
+
+/** Pending one-line cycle nudge per session for the current gate event only. */
+const cycleSuffixBySession = new Map<string, string>();
+
+function cycleCacheKey(home: string, sessionKey: string): string {
+  return `${home}\0${sessionKey}`;
+}
+
+function rememberCycleSuffix(home: string, sessionKey: string, suffix: string): void {
+  try {
+    if (cycleSuffixBySession.size >= GATE_MAX_ENTRIES && !cycleSuffixBySession.has(cycleCacheKey(home, sessionKey))) {
+      const oldest = cycleSuffixBySession.keys().next();
+      if (!oldest.done) cycleSuffixBySession.delete(oldest.value);
+    }
+    cycleSuffixBySession.set(cycleCacheKey(home, sessionKey), suffix);
+  } catch {
+    // A broken cache must never break the gate; the suffix just stays silent.
+  }
+}
+
+/**
+ * Advisory-only append for deny reasons, mirroring `claritySuffix`: text
+ * only, never a decision. Reads the nudge this event's failure-cycle check
+ * already recorded — never touches state itself, so one gate event records
+ * exactly one observation no matter how many deny reasons append it.
+ */
+function cycleSuffix(input: GateInput): string {
+  try {
+    if (process.env.ROCKY_CYCLE_ADVISORY === "off") return "";
+    return cycleSuffixBySession.get(cycleCacheKey(resolveRockyPaths().home, input.sessionKey)) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+export const failureCycleCheck: GateCheck = {
+  id: "failure-cycle",
+  enabled(env: NodeJS.ProcessEnv): boolean {
+    return env.ROCKY_CYCLE_ADVISORY !== "off";
+  },
+  evaluate(input: GateInput): GateDecision {
+    try {
+      const paths = resolveRockyPaths();
+      if (input.fingerprint === undefined || input.rationale === undefined) {
+        rememberCycleSuffix(paths.home, input.sessionKey, "");
+        return { deny: false };
+      }
+      const stateFile = join(paths.home, "gate-state", `${input.sessionKey}.cycles.json`);
+      const state = loadCycleState(stateFile, Date.now());
+      const observation = observeFailureCycle(state, input.fingerprint, input.rationale);
+      saveCycleState(stateFile, state);
+      const line = cycleNudgeLine(observation.cycle);
+      let suffix = line === undefined ? "" : ` ${line}`;
+      const clusters = countCycleClusters(state);
+      if (suffix.length > 0 && clusters >= 2) {
+        // Single-sourced from renderCycleCard so the card and this suffix
+        // cannot drift; the emitted string is unchanged.
+        const clusterLine = renderCycleCard(observation.count, clusters).find((entry) =>
+          entry.includes("count only, no cause named"),
+        );
+        if (clusterLine !== undefined) suffix += ` ${clusterLine}`;
+      }
+      rememberCycleSuffix(paths.home, input.sessionKey, suffix);
+      return { deny: false };
+    } catch {
+      return { deny: false };
+    }
+  },
+};
+
 export const rationaleCheck: GateCheck = {
   id: "rationale",
   enabled(env: NodeJS.ProcessEnv): boolean {
     return env.ROCKY_RATIONALE_GATE !== "off";
   },
-  evaluate(input: GateInput, state: GateState): GateDecision {
-    const filePath = input.filePath;
+  evaluate(input: GateInput, state: GateState): GateDecision {    const filePath = input.filePath;
     if (filePath === undefined) return { deny: false };
     const identity = canonicalPath(filePath, { cwd: input.cwd });
     if (identity.length === 0) return { deny: false }; // no stable identity to gate on: fail open
@@ -216,16 +401,66 @@ export const rationaleCheck: GateCheck = {
       state.mark(key); // remember, so later touches skip the memory read
       return { deny: false };
     }
+    if (gateMode(process.env) === "strict") return {
+      deny: true,
+      reason: `state why first. run: rocky hook agent-event ${input.vendor} --rationale "<one line why>" `
+        + `--files ${filePath}. then retry. rocky remembers why, you keep why, question${claritySuffix(input)}${cycleSuffix(input)}`,
+    };
     if (!state.mark(key)) return { deny: false }; // could not persist the marker: never deny unrecorded state
     return {
       deny: true,
       reason: `state why first. run: rocky hook agent-event ${input.vendor} --rationale "<one line why>" `
-        + `--files ${filePath}. then retry. rocky remembers why, you keep why, question`,
+        + `--files ${filePath}. then retry. rocky remembers why, you keep why, question${claritySuffix(input)}${cycleSuffix(input)}`,
     };
   },
 };
 
-const CHECKS: readonly GateCheck[] = [rationaleCheck];
+function hasFreshFileExplain(identity: string, now: number): boolean {
+  try {
+    return indexEvidence(resolveRockyPaths().memory).explain.has(identity);
+  } catch {
+    /* unreadable memory: treated as no evidence, deny-once path decides */
+  }
+  return false;
+}
+
+export const explainCheck: GateCheck = {
+  id: "explain",
+  enabled(env: NodeJS.ProcessEnv): boolean {
+    return env.ROCKY_RATIONALE_GATE !== "off";
+  },
+  evaluate(input: GateInput, state: GateState): GateDecision {
+    const filePath = input.filePath;
+    if (filePath === undefined) return { deny: false };
+    const identity = canonicalPath(filePath, { cwd: input.cwd });
+    if (identity.length === 0) return { deny: false };
+    const key = `explain:${identity}`;
+    if (state.has(key)) return { deny: false };
+    if (hasFreshFileExplain(identity, Date.now())) {
+      state.mark(key);
+      return { deny: false };
+    }
+    if (gateMode(process.env) === "strict") return {
+      deny: true,
+      reason: `state why first. run: rocky hook agent-event ${input.vendor} --explain-code "<why this code shape>" `
+        + `--explain-business "<what concern this serves>" --files ${filePath}. then retry. rocky remembers why, you keep why, question${cycleSuffix(input)}`,
+    };
+    if (!state.mark(key)) return { deny: false };
+    return {
+      deny: true,
+      reason: `state why first. run: rocky hook agent-event ${input.vendor} --explain-code "<why this code shape>" `
+        + `--explain-business "<what concern this serves>" --files ${filePath}. then retry. rocky remembers why, you keep why, question${cycleSuffix(input)}`,
+    };
+  },
+};
+
+/**
+ * Registry order matters: the failure-cycle check records this event's
+ * observation (and caches its nudge) before the denying checks build their
+ * reasons, so `cycleSuffix` below always reads fresh state. The cycle check
+ * itself never denies.
+ */
+const CHECKS: readonly GateCheck[] = [failureCycleCheck, rationaleCheck, explainCheck];
 
 function allow(): string {
   return "{}";
@@ -243,8 +478,10 @@ function deny(reason: string): string {
 
 function extractFilePath(toolInput: unknown): string | undefined {
   if (!isPlainRecord(toolInput)) return undefined;
-  const path = toolInput.file_path;
-  return typeof path === "string" && path.length > 0 ? path : undefined;
+  const filePath = toolInput.file_path;
+  if (typeof filePath === "string" && filePath.length > 0) return filePath;
+  const altPath = toolInput.path;
+  return typeof altPath === "string" && altPath.length > 0 ? altPath : undefined;
 }
 
 function logGateNote(message: string): void {
@@ -255,9 +492,37 @@ function logGateNote(message: string): void {
   }
 }
 
+const AUDIT_MAX_BYTES = 64 * 1024;
+
+function appendGateAudit(entry: { session: string; vendor: string; tool: string; identity: string; decision: string; evidence: string }): void {
+  try {
+    const paths = resolveRockyPaths();
+    const auditFile = join(paths.home, "gate-state", "audit.jsonl");
+    mkdirSync(dirname(auditFile), { recursive: true, mode: 0o700 });
+    try {
+      const stats = statSync(auditFile);
+      if (stats.size > AUDIT_MAX_BYTES) {
+        const rotated = join(paths.home, "gate-state", "audit.1.jsonl");
+        try { rmSync(rotated, { force: true }); } catch { /* ignore */ }
+        try { renameSync(auditFile, rotated); } catch { /* ignore */ }
+      }
+    } catch {
+      // No audit file yet or unreadable: append below creates or skips silently.
+    }
+    const line = `${JSON.stringify({ ts: Date.now(), ...entry })}\n`;
+    appendFileSync(auditFile, line, { encoding: "utf8", mode: 0o600 });
+  } catch {
+    // Audit is observability; never throw, never deny.
+  }
+}
+
 function dispatch(vendor: string, stdinJson: string): string {
   if (!KNOWN_GATE_VENDORS.has(vendor)) {
     logGateNote(`gate-event: unknown vendor "${vendor}", allowing without enforcement`);
+    return allow();
+  }
+  if (process.env.ROCKY_GATE_OVERRIDE === "1") {
+    appendGateAudit({ session: "override", vendor, tool: "override", identity: "override", decision: "allow", evidence: "override" });
     return allow();
   }
   let raw: unknown;
@@ -284,7 +549,13 @@ function dispatch(vendor: string, stdinJson: string): string {
   }
 
   const cwd = typeof raw.cwd === "string" ? raw.cwd : "";
-  const input: GateInput = { vendor, toolName, filePath, sessionKey, cwd };
+  const rationale = typeof raw.rationale === "string" && raw.rationale.length > 0 ? raw.rationale : undefined;
+  const failureFingerprint = readFailureFingerprint(raw);
+  const input: GateInput = {
+    vendor, toolName, filePath, sessionKey, cwd,
+    ...(rationale === undefined ? {} : { rationale }),
+    ...(failureFingerprint === undefined ? {} : { fingerprint: failureFingerprint }),
+  };
 
   const paths = resolveRockyPaths();
   const stateFile = join(paths.home, "gate-state", `${sessionKey}.jsonl`);
@@ -293,7 +564,10 @@ function dispatch(vendor: string, stdinJson: string): string {
   for (const check of CHECKS) {
     if (!check.enabled(process.env)) continue;
     const decision = check.evaluate(input, state);
-    if (decision.deny) return deny(decision.reason);
+    if (decision.deny) {
+      appendGateAudit({ session: sessionKey, vendor, tool: toolName, identity: filePath, decision: "deny", evidence: check.id });
+      return deny(decision.reason);
+    }
   }
   return allow();
 }

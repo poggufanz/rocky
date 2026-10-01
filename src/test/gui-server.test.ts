@@ -2,12 +2,14 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { request } from "node:http";
 import { createServer, type Server } from "node:http";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { execFileSync } from "node:child_process";
 
 import { startGui, type GuiHandle } from "../gui/server.js";
 import { publicSettings, readSettings, writeSettings } from "../gui/settings.js";
+import { defaultDiffIo } from "../core/compare-data.js";
 
 /**
  * Every test gets its own ROCKY_HOME and its own repo root, so nothing here
@@ -56,6 +58,39 @@ const json = async (h: GuiHandle, path: string, init: RequestInit = {}): Promise
   });
   return { status: res.status, body: await res.json().catch(() => null) };
 };
+
+test("GUI shell and home respond without waiting for slow historical Git reads", async (t) => {
+  const previousHome = process.env.ROCKY_HOME;
+  const { home, root } = hermetic();
+  t.after(() => {
+    if (previousHome === undefined) delete process.env.ROCKY_HOME;
+    else process.env.ROCKY_HOME = previousHome;
+    for (const dir of [home, root]) rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+  });
+  mkdirSync(join(root, ".git"));
+  writeFileSync(join(root, "heard.ts"), "const heard = true;\n");
+  seedMemory(home, [{
+    kind: "explain", id: "slow-history", v: 1, ts: Date.now(), cwd: root,
+    path: "heard.ts", source: "agent:test", code: "const heard = true;",
+    business: "remember why this file exists", snippet: "const heard = true;",
+  }]);
+  // Model a slow external Git read, not a slow HTTP server.
+  const gate = new Int32Array(new SharedArrayBuffer(4));
+  t.mock.method(defaultDiffIo, "lsFiles", () => {
+    Atomics.wait(gate, 0, 0, 6000);
+    return ["heard.ts"];
+  });
+
+  const started = performance.now();
+  await withGui(root, async (h) => {
+    const shell = await rawGet(h.port, "/", { Host: `127.0.0.1:${h.port}` });
+    assert.equal(shell.status, 200);
+    const home = await json(h, "/api/home");
+    assert.equal(home.status, 200);
+    assert.equal(home.body.total, 1);
+  });
+  assert.ok(performance.now() - started < 5000, "unrequested historical diffs must not hold up GUI startup");
+});
 
 test("api refuses a request with no token and with the wrong token", async () => {
   const { root } = hermetic();
@@ -197,6 +232,118 @@ test("teach never claims a witness it does not have", async () => {
     assert.equal(card.status, 200);
     const header = String(card.body?.header ?? "");
     assert.ok(header === "" || !header.startsWith("rocky heard this"));
+  });
+});
+
+test("teach with expand: 1 on single line inside function returns expanded function span", async () => {
+  const { root } = hermetic();
+  const fnCode = [
+    "function calculateTotal(a: number, b: number) {",
+    "  const sum = a + b;",
+    "  return sum * 2;",
+    "}",
+  ].join("\n");
+  writeFileSync(join(root, "calc.ts"), fnCode + "\n");
+
+  await withGui(root, async (h) => {
+    const card = await json(h, "/api/teach", {
+      method: "POST",
+      body: JSON.stringify({ path: "calc.ts", start: 2, end: 2, expand: 1 }),
+    });
+    assert.equal(card.status, 200);
+    assert.ok(card.body);
+    assert.ok(card.body.expanded, "response must contain expanded");
+    assert.equal(card.body.expanded.why, "function");
+    assert.equal(card.body.expanded.start, 1);
+    assert.equal(card.body.expanded.end, 4);
+    assert.ok(card.body.expanded.start < card.body.expanded.end);
+  });
+});
+
+test("teach with expand: 1 when start !== end does not expand", async () => {
+  const { root } = hermetic();
+  const fnCode = [
+    "function calculateTotal(a: number, b: number) {",
+    "  const sum = a + b;",
+    "  return sum * 2;",
+    "}",
+  ].join("\n");
+  writeFileSync(join(root, "calc.ts"), fnCode + "\n");
+
+  await withGui(root, async (h) => {
+    const card = await json(h, "/api/teach", {
+      method: "POST",
+      body: JSON.stringify({ path: "calc.ts", start: 2, end: 3, expand: 1 }),
+    });
+    assert.equal(card.status, 200);
+    assert.ok(card.body);
+    assert.equal(card.body.expanded, undefined);
+  });
+});
+
+test("teach with expand: 1 and commit diff expands to hunk", async () => {
+  const { root } = hermetic();
+  execFileSync("git", ["init"], { cwd: root, stdio: "ignore" });
+  execFileSync("git", ["config", "user.email", "t@t.t"], { cwd: root, stdio: "ignore" });
+  execFileSync("git", ["config", "user.name", "t"], { cwd: root, stdio: "ignore" });
+
+  const text1 = Array.from({ length: 15 }, (_, i) => `line ${i + 1}`).join("\n") + "\n";
+  writeFileSync(join(root, "file.ts"), text1);
+  execFileSync("git", ["add", "."], { cwd: root, stdio: "ignore" });
+  execFileSync("git", ["commit", "-m", "initial"], { cwd: root, stdio: "ignore" });
+
+  const text2 = Array.from({ length: 15 }, (_, i) => (i === 4 ? "await saveItem();" : `line ${i + 1}`)).join("\n") + "\n";
+  writeFileSync(join(root, "file.ts"), text2);
+  execFileSync("git", ["add", "."], { cwd: root, stdio: "ignore" });
+  execFileSync("git", ["commit", "-m", "update line 5"], { cwd: root, stdio: "ignore" });
+  const sha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim();
+
+  await withGui(root, async (h) => {
+    const card = await json(h, "/api/teach", {
+      method: "POST",
+      body: JSON.stringify({ path: "file.ts", start: 5, end: 5, expand: 1, commit: sha }),
+    });
+    assert.equal(card.status, 200);
+    assert.ok(card.body);
+    assert.ok(card.body.expanded, "response must contain expanded hunk");
+    assert.equal(card.body.expanded.why, "hunk");
+  });
+});
+
+test("teach with expand: 1 on witness hit includes expanded without altering witness lookup", async () => {
+  const { home, root } = hermetic();
+  const fnCode = [
+    "function calculateTotal(a: number, b: number) {",
+    "  const sum = a + b;",
+    "  return sum * 2;",
+    "}",
+  ].join("\n");
+  writeFileSync(join(root, "calc.ts"), fnCode + "\n");
+  seedMemory(home, [{
+    kind: "explain",
+    id: "e-fn",
+    v: 1,
+    ts: Date.now() - 1000,
+    cwd: root,
+    path: "calc.ts",
+    source: "agent:test",
+    code: "const sum = a + b;",
+    business: "sum of numbers",
+    snippet: "const sum = a + b;",
+  }]);
+
+  await withGui(root, async (h) => {
+    const card = await json(h, "/api/teach", {
+      method: "POST",
+      body: JSON.stringify({ path: "calc.ts", start: 2, end: 2, expand: 1 }),
+    });
+    assert.equal(card.status, 200);
+    assert.ok(card.body);
+    assert.ok(String(card.body.header ?? "").startsWith("rocky heard this"));
+    assert.ok(card.body.expanded, "witness card must contain expanded");
+    assert.equal(card.body.expanded.why, "function");
+    assert.equal(card.body.expanded.start, 1);
+    assert.equal(card.body.expanded.end, 4);
   });
 });
 
@@ -439,3 +586,182 @@ test("the prompt is redacted before it leaves the machine", async () => {
     await new Promise<void>((down) => provider.close(() => down()));
   }
 });
+
+test("bundles groups one commit across files and bundle shows its diff", async () => {
+  const { home, root } = hermetic();
+  execFileSync("git", ["init"], { cwd: root, stdio: "ignore" });
+  execFileSync("git", ["config", "user.email", "t@t.t"], { cwd: root, stdio: "ignore" });
+  execFileSync("git", ["config", "user.name", "t"], { cwd: root, stdio: "ignore" });
+  writeFileSync(join(root, "a.ts"), "const a = 1;\n");
+  writeFileSync(join(root, "b.ts"), "const b = 2;\n");
+  execFileSync("git", ["add", "."], { cwd: root, stdio: "ignore" });
+  execFileSync("git", ["commit", "-m", "add a and b"], { cwd: root, stdio: "ignore" });
+  const sha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim();
+
+  seedMemory(home, [
+    {
+      kind: "explain",
+      id: "e1",
+      v: 1,
+      ts: Date.now() - 1000,
+      cwd: root,
+      path: "a.ts",
+      source: "agent:test",
+      head: sha,
+      code: "const a = 1;",
+      business: "file a",
+      snippet: "const a = 1;",
+    },
+    {
+      kind: "explain",
+      id: "e2",
+      v: 1,
+      ts: Date.now(),
+      cwd: root,
+      path: "b.ts",
+      source: "agent:test",
+      head: sha,
+      code: "const b = 2;",
+      business: "file b",
+      snippet: "const b = 2;",
+    },
+  ]);
+
+  await withGui(root, async (h) => {
+    // 1. GET /api/bundles
+    const res = await json(h, "/api/bundles");
+    assert.equal(res.status, 200);
+    assert.ok(Array.isArray(res.body?.bundles));
+    assert.equal(typeof res.body?.unattributed, "number");
+    assert.equal(res.body.bundles.length, 1);
+    const bundle = res.body.bundles[0];
+    assert.equal(bundle.commit, sha.slice(0, 7));
+    assert.equal(bundle.witnessCount, 2);
+    assert.equal(bundle.files.length, 2);
+
+    // 2. GET /api/bundles with filter q=a.ts
+    const filteredQ = await json(h, "/api/bundles?q=a.ts");
+    assert.equal(filteredQ.status, 200);
+    assert.equal(filteredQ.body.bundles.length, 1);
+    assert.equal(filteredQ.body.bundles[0].files.length, 1);
+    assert.ok(filteredQ.body.bundles[0].files[0].path.endsWith("a.ts"));
+
+    // 3. GET /api/bundles with non-matching repo
+    const filteredRepo = await json(h, "/api/bundles?repo=nonexistent-repo");
+    assert.equal(filteredRepo.status, 200);
+    assert.equal(filteredRepo.body.bundles.length, 0);
+
+    // 4. GET /api/bundle?commit=--help (invalid sha)
+    const bad = await json(h, "/api/bundle?commit=--help");
+    assert.equal(bad.status, 400);
+    assert.equal(bad.body?.error, "rocky needs a commit sha, question");
+
+    // 5. GET /api/bundle (missing commit)
+    const missing = await json(h, "/api/bundle");
+    assert.equal(missing.status, 400);
+    assert.equal(missing.body?.error, "rocky needs a commit sha, question");
+
+    // 6. GET /api/bundle?commit=<nonexistent-sha>
+    const nonExistent = await json(h, "/api/bundle?commit=0123456789abcdef");
+    assert.equal(nonExistent.status, 200);
+    assert.equal(nonExistent.body, null);
+
+    // 7. GET /api/bundle?commit=<real-sha>
+    const fullBundle = await json(h, `/api/bundle?commit=${sha}`);
+    assert.equal(fullBundle.status, 200);
+    assert.equal(fullBundle.body.commit, sha.slice(0, 7));
+    assert.equal(fullBundle.body.total, 2);
+    assert.equal(fullBundle.body.truncated, false);
+    assert.ok(Array.isArray(fullBundle.body.files));
+    assert.equal(fullBundle.body.files.length, 2);
+    const paths = fullBundle.body.files.map((f: { path: string }) => f.path);
+    assert.ok(paths.includes("a.ts"));
+    assert.ok(paths.includes("b.ts"));
+  });
+});
+
+test("refer resolves symbol definition and references with redacted text", async () => {
+  const { home, root } = hermetic();
+  const mainTs = [
+    'import { helper } from "./helper.js";',
+    "const result = helper(42);",
+  ].join("\n");
+  const helperTs = [
+    "export function helper(x: number): number {",
+    "  return x + 1;",
+    "}",
+  ].join("\n");
+  writeFileSync(join(root, "main.ts"), mainTs);
+  writeFileSync(join(root, "helper.ts"), helperTs);
+
+  seedMemory(home, [
+    {
+      kind: "explain",
+      id: "e1",
+      v: 1,
+      ts: Date.now() - 1000,
+      cwd: root,
+      path: "main.ts",
+      source: "agent:test",
+      code: "const result = helper(42);",
+      business: "helper call in main",
+      snippet: "const result = helper(42);",
+      excerpt: "helper(42)",
+    },
+    {
+      kind: "explain",
+      id: "e2",
+      v: 1,
+      ts: Date.now(),
+      cwd: root,
+      path: "caller.ts",
+      source: "agent:test",
+      code: "const testCall = helper(100); // AKIA1234567890123456",
+      business: "helper call in caller",
+      snippet: "const testCall = helper(100);",
+    },
+  ]);
+
+  await withGui(root, async (h) => {
+    // 1. Missing path -> 400
+    const missing = await json(h, "/api/refer");
+    assert.equal(missing.status, 400);
+
+    // 2. Forbidden path -> 403
+    const forbidden = await json(h, `/api/refer?path=${encodeURIComponent("../outside.ts")}`);
+    assert.equal(forbidden.status, 403);
+
+    // 3. Missing file -> 200 null
+    const missingFile = await json(h, "/api/refer?path=does-not-exist.ts");
+    assert.equal(missingFile.status, 200);
+    assert.equal(missingFile.body, null);
+
+    // 4. Valid path with line resolving helper -> 200 with symbol, definition, references
+    const res = await json(h, "/api/refer?path=main.ts&line=2");
+    assert.equal(res.status, 200);
+    assert.ok(res.body !== null);
+    assert.equal(res.body.symbol, "helper");
+    assert.ok(res.body.definition !== null);
+    assert.equal(res.body.definition.path, "helper.ts");
+    assert.equal(res.body.definition.line, 1);
+    assert.ok(Array.isArray(res.body.references));
+    assert.ok(res.body.references.length > 0);
+    assert.ok(res.body.references.some((r: any) => r.path.endsWith("caller.ts")));
+    assert.ok(!res.body.references.some((r: any) => r.text.includes("AKIA1234567890123456")));
+    assert.ok(res.body.references.some((r: any) => r.text.includes("[redacted aws access key]")));
+
+    // 5. Query with explicit symbol parameter
+    const resWithSym = await json(h, "/api/refer?path=main.ts&line=1&symbol=helper");
+    assert.equal(resWithSym.status, 200);
+    assert.equal(resWithSym.body.symbol, "helper");
+    assert.ok(resWithSym.body.definition !== null);
+
+    // 6. Query with unknown symbol
+    const unknownSym = await json(h, "/api/refer?path=main.ts&line=1&symbol=nonexistent");
+    assert.equal(unknownSym.status, 200);
+    assert.equal(unknownSym.body.symbol, "nonexistent");
+    assert.equal(unknownSym.body.definition, null);
+    assert.deepEqual(unknownSym.body.references, []);
+  });
+});
+

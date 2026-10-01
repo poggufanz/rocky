@@ -4,6 +4,9 @@ import { captureRationales } from "../agent/logs/capture.js";
 import { polishBriefLines } from "../ai/brief-ai.js";
 import { createOllamaClient } from "../ai/ollama.js";
 import { composeBrief, parseGitLog, type BriefInvariantTouch, type BriefMemoryHit } from "../core/brief.js";
+import { coverageDisclosureLines, coverageFromRecords, renderUntriedCard } from "../core/coverage.js";
+import { renderDecomposeCard } from "../core/decompose.js";
+import { redactSecretsAtBoundary } from "../core/redact.js";
 import { FALLBACK_WINDOW_MS, parseSinceDuration, readState, writeState } from "../core/brief-state.js";
 import { loadConfig } from "../core/config-read.js";
 import { buildConceptIndex, type ConceptIndex } from "../core/concept-index.js";
@@ -11,8 +14,8 @@ import { CONCEPTS } from "../core/concepts.js";
 import { matchesGlob, parseInvariants } from "../core/invariants.js";
 import { recordBriefRun, recordInvariantTouch } from "../core/memory.js";
 import {
-  canonicalPath, loadMemoryChecked,
-  type FailureRecord, type FixRecord, type MemoryRecord, type RationaleFidelity, type RationaleRecord,
+  canonicalPath, isCompleteMemoryCoverage, loadMemoryChecked,
+  type FailureRecord, type FixRecord, type MemoryCoverage, type MemoryRecord, type RationaleFidelity, type RationaleRecord,
 } from "../core/memory-read.js";
 import { runGit } from "../core/exec.js";
 import { truncateUtf8 } from "../mcp/privacy.js";
@@ -20,7 +23,7 @@ import { rationaleSourceLabel } from "./dictionary.js";
 import { CliUsageError, reportCliUsage } from "./cli-args.js";
 import { detail, heading, say } from "../ui/rocky.js";
 
-const USAGE = "rocky brief [--since <git-ref|duration like 24h>] [--quiet] [--ai]";
+const USAGE = "rocky brief [--since <git-ref|duration like 24h>] [--quiet] [--ai] [--decompose]";
 const GIT_TIMEOUT_MS = 30_000;
 const GIT_MAX_OUTPUT_BYTES = 8 * 1024 * 1024;
 
@@ -28,16 +31,23 @@ export interface BriefArgs {
   since?: string;
   quiet: boolean;
   ai: boolean;
+  decompose: boolean;
 }
 
 export function parseBriefArgs(argv: readonly string[]): BriefArgs {
   let since: string | undefined;
   let quiet = false;
   let ai = false;
+  let decompose = false;
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     if (arg === "--quiet") { quiet = true; continue; }
     if (arg === "--ai") { ai = true; continue; }
+    if (arg === "--decompose") {
+      if (decompose) throw new CliUsageError("unexpected option: --decompose", USAGE);
+      decompose = true;
+      continue;
+    }
     if (arg === "--since") {
       const value = argv[index + 1];
       if (value === undefined) throw new CliUsageError("--since needs value", USAGE);
@@ -47,7 +57,7 @@ export function parseBriefArgs(argv: readonly string[]): BriefArgs {
     }
     throw new CliUsageError(`unexpected argument: ${arg}`, USAGE);
   }
-  return { ...(since === undefined ? {} : { since }), quiet, ai };
+  return { ...(since === undefined ? {} : { since }), quiet, ai, decompose };
 }
 
 interface ResolvedWindow {
@@ -191,11 +201,15 @@ export async function briefCommand(argv: readonly string[] = [], cwd = process.c
   // whose name merely starts with this root's name cannot match.
   const normalizedRoot = canonicalPath(root);
   let memoryHits: BriefMemoryHit[] = [];
+  // Bounded-read disclosure travels with the records (stats --cycles
+  // pattern): the Untried section below reports it when the read truncated.
+  let memoryCoverage: MemoryCoverage | undefined;
   // Kept alongside memoryHits (which drops `id` for the printed line) so the
   // rationale annotation pass below can look each printed hit back up by id.
   let windowFailuresAndFixes: Array<FailureRecord | FixRecord> = [];
   try {
     const loaded = loadMemoryChecked();
+    memoryCoverage = loaded.coverage;
     windowFailuresAndFixes = loaded.records
       .filter((record): record is FailureRecord | FixRecord =>
         (record.kind === "failure" || record.kind === "fix") && record.ts >= memorySinceTs && record.ts <= now)
@@ -256,7 +270,9 @@ export async function briefCommand(argv: readonly string[] = [], cwd = process.c
   let enriched: readonly MemoryRecord[] | undefined;
   try {
     captureRationales(cwd);
-    enriched = loadMemoryChecked().records;
+    const reloaded = loadMemoryChecked();
+    enriched = reloaded.records;
+    memoryCoverage = reloaded.coverage;
   } catch {
     enriched = undefined;
   }
@@ -271,6 +287,56 @@ export async function briefCommand(argv: readonly string[] = [], cwd = process.c
       heading("repeated concepts");
       for (const line of conceptLines) detail(line);
     }
+  }
+
+  // Untried section (Task 4): the window's changed paths split into tried
+  // (rationale evidence or diff hunks heard in-window) versus untried. It
+  // appends after the blocks above and never touches the --decompose
+  // template below. Advisory and fail-open — a capture, reload, or render
+  // failure skips the section, never the brief. Counts only, no cause named.
+  try {
+    const pool = enriched ?? loadMemoryChecked().records;
+    const memoryIncomplete = memoryCoverage !== undefined && !isCompleteMemoryCoverage(memoryCoverage);
+    const coverage = coverageFromRecords(pool, {
+      sessionFiles: changedPaths,
+      cwd: root,
+      sinceTs: memorySinceTs,
+      now,
+      memoryTruncated: memoryIncomplete,
+    });
+    heading("untried");
+    for (const line of renderUntriedCard(coverage)) detail(line);
+    // Both disclosure lines show when both hold; neither shadows the other.
+    for (const line of coverageDisclosureLines(coverage, memoryCoverage, memoryIncomplete)) detail(line);
+  } catch {
+    // fail open: no coverage section this run
+  }
+
+  if (args.decompose) {
+    // Decomposition checklist for the newest session files: the window's
+    // changed paths, first-seen (newest-commit) order, secret-scrubbed. The
+    // shared card bounds the names itself; an empty window renders the blank
+    // template that asks for the three lines. Fail-open — redaction or
+    // rendering never blocks the brief.
+    let checklistFiles: string[] = [];
+    try {
+      const seen = new Set<string>();
+      for (const path of changedPaths) {
+        const kept = redactSecretsAtBoundary(path).trim();
+        if (kept.length === 0 || seen.has(kept)) continue;
+        seen.add(kept);
+        checklistFiles.push(kept);
+      }
+    } catch {
+      checklistFiles = [];
+    }
+    let checklist: string[];
+    try {
+      checklist = renderDecomposeCard(checklistFiles);
+    } catch {
+      checklist = renderDecomposeCard([]);
+    }
+    for (const line of checklist) console.log(line);
   }
 
   for (const touch of invariantTouches) {

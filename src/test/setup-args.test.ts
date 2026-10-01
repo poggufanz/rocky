@@ -9,6 +9,10 @@ test("setup parser applies safe defaults", () => {
     replace: false,
     yes: false,
     voiceSkill: false,
+    harnesses: [],
+    mcp: true,
+    listening: false,
+    rawTrace: false,
   });
 });
 
@@ -19,9 +23,12 @@ test("setup parser selects check mode without changing safe defaults", () => {
     replace: false,
     yes: false,
     voiceSkill: false,
+    harnesses: [],
+    mcp: true,
+    listening: false,
+    rawTrace: false,
   });
 });
-
 test("setup parser selects remove mode and accepts ordinary confirmation bypass", () => {
   assert.deepEqual(parseSetupArgs(["--remove", "--yes"]), {
     mode: "remove",
@@ -29,9 +36,12 @@ test("setup parser selects remove mode and accepts ordinary confirmation bypass"
     replace: false,
     yes: true,
     voiceSkill: false,
+    harnesses: [],
+    mcp: true,
+    listening: false,
+    rawTrace: false,
   });
 });
-
 test("setup parser accepts configure-only options in any order", () => {
   assert.deepEqual(parseSetupArgs(["--yes", "--replace", "--mcp-exposure", "raw"]), {
     mode: "configure",
@@ -39,6 +49,10 @@ test("setup parser accepts configure-only options in any order", () => {
     replace: true,
     yes: true,
     voiceSkill: false,
+    harnesses: [],
+    mcp: true,
+    listening: false,
+    rawTrace: false,
   });
 });
 
@@ -49,6 +63,10 @@ test("setup parser selects voice skill work explicitly in every mode", () => {
     replace: false,
     yes: true,
     voiceSkill: true,
+    harnesses: [],
+    mcp: true,
+    listening: false,
+    rawTrace: false,
   });
   assert.deepEqual(parseSetupArgs(["--check", "--voice-skill"]), {
     mode: "check",
@@ -56,6 +74,10 @@ test("setup parser selects voice skill work explicitly in every mode", () => {
     replace: false,
     yes: false,
     voiceSkill: true,
+    harnesses: [],
+    mcp: true,
+    listening: false,
+    rawTrace: false,
   });
   assert.deepEqual(parseSetupArgs(["--voice-skill", "--remove", "--yes"]), {
     mode: "remove",
@@ -63,11 +85,11 @@ test("setup parser selects voice skill work explicitly in every mode", () => {
     replace: false,
     yes: true,
     voiceSkill: true,
+    harnesses: [],
+    mcp: true,
+    listening: false,
+    rawTrace: false,
   });
-});
-
-test("yes alone never selects voice skill work", () => {
-  assert.equal(parseSetupArgs(["--yes"]).voiceSkill, false);
 });
 
 test("setup parser selects dedicated Claude agent-hook actions", () => {
@@ -79,6 +101,10 @@ test("setup parser selects dedicated Claude agent-hook actions", () => {
     voiceSkill: false,
     agentHooksAction: "install",
     rationaleGate: true,
+    harnesses: [],
+    mcp: false,
+    listening: false,
+    rawTrace: false,
   });
   assert.equal(parseSetupArgs(["--uninstall-agent-hooks"]).agentHooksAction, "uninstall");
   assert.equal(parseSetupArgs(["--status"]).agentHooksAction, "status");

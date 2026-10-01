@@ -3,3 +3,4 @@ dist/
 .test-dist/
 /gui.json
 /models-dev.json
+.worktrees/

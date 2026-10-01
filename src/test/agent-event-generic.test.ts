@@ -145,8 +145,8 @@ test("claude-code agent-event with --explain-code and --explain-business writes 
   const { agentEvent } = await import("../commands/agent-hook.js");
   const result = await captureStdout(() => agentEvent("claude-code", {
     stdin: async () => "",
-    explainCode: "why",
-    explainBusiness: "what",
+    explainCode: "why this shape is needed",
+    explainBusiness: "what concern this serves",
     files: [spooled, plain],
   }));
   assert.equal(result.code, 0);
@@ -157,8 +157,8 @@ test("claude-code agent-event with --explain-code and --explain-business writes 
   const withSnippet = records.find((record) => record.path === spooled);
   const withoutSnippet = records.find((record) => record.path === plain);
   assert.equal(withSnippet?.source, "agent:claude-code");
-  assert.equal(withSnippet?.code, "why");
-  assert.equal(withSnippet?.business, "what");
+  assert.equal(withSnippet?.code, "why this shape is needed");
+  assert.equal(withSnippet?.business, "what concern this serves");
   assert.equal(withSnippet?.snippet, "const x = 1;", "a spooled snippet for that exact path is joined");
   assert.equal(withoutSnippet?.snippet, undefined, "no spooled snippet means no snippet on the record");
 });
@@ -231,3 +231,63 @@ test("CLI: rocky hook agent-event generic --rationale ... --files ... writes a n
   assert.equal(result.stdout, "{}");
   assert.equal(result.stderr, "");
 });
+
+test("generic notify captures the git base anchor without blocking", async (t) => {
+  freshHome(t);
+  const { agentEvent } = await import("../commands/agent-hook.js");
+  const result = await captureStdout(() => agentEvent("generic", {
+    rationale: "add approval page",
+    files: ["src/a.ts"],
+    git: (args: string[]) => (args[0] === "rev-parse" ? "abc123def456" : ""),
+  }));
+  assert.equal(result.code, 0);
+  const { loadMemory } = await import("../core/memory-read.js");
+  const rec = loadMemory().find(isRationale);
+  assert.ok(rec, "rationale record written");
+  assert.equal(rec?.git?.base, "abc123def456");
+});
+
+test("generic notify still writes when git is unavailable", async (t) => {
+  freshHome(t);
+  const { agentEvent } = await import("../commands/agent-hook.js");
+  const result = await captureStdout(() => agentEvent("generic", {
+    rationale: "add approval page",
+    files: ["src/a.ts"],
+    git: () => undefined,
+  }));
+  assert.equal(result.code, 0);
+  const { loadMemory } = await import("../core/memory-read.js");
+  const rec = loadMemory().find(isRationale);
+  assert.ok(rec, "record still written without git");
+});
+
+test("generic notify captures and attaches git anchor (base, dirty, snapshot) to explain records", async (t) => {
+  freshHome(t);
+  const { agentEvent } = await import("../commands/agent-hook.js");
+  const result = await captureStdout(() => agentEvent("generic", {
+    explainCode: "refactored parsing loop",
+    explainBusiness: "faster startup time",
+    files: ["src/parser.ts"],
+    git: (args: string[]) => {
+      if (args[0] === "rev-parse") return "head456";
+      if (args[0] === "status") return " M src/parser.ts";
+      if (args[0] === "diff") return "@@ -1 +1 @@\n-slow\n+fast";
+      return "";
+    },
+  }));
+  assert.equal(result.code, 0);
+  assert.equal(result.out, "{}");
+  const { loadMemory } = await import("../core/memory-read.js");
+  const rec = loadMemory().find(isExplain);
+  assert.ok(rec, "explain record written");
+  assert.equal(rec?.path, "src/parser.ts");
+  assert.equal(rec?.code, "refactored parsing loop");
+  assert.equal(rec?.business, "faster startup time");
+  assert.deepEqual(rec?.git, {
+    base: "head456",
+    dirty: true,
+    snapshot: "@@ -1 +1 @@\n-slow\n+fast",
+  });
+});
+
+

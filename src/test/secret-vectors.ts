@@ -302,3 +302,37 @@ export const SYNTHETIC_EOF_AMBIGUITY_VECTORS = [
     sanitizedMcp: `before [redacted] ${AMBIGUOUS_CONTINUATION_MARKER}`,
   },
 ] as const;
+
+export interface TeachProvenanceSecretVector {
+  name: string;
+  text: string;
+  raw: string;
+}
+
+/**
+ * Synthetic secret subjects/comments for the teach provenance redaction
+ * battery. Token shapes mirror the closure families above; `raw` is the
+ * exact fragment that must not survive `redactSecretsAtBoundary`.
+ */
+export const SYNTHETIC_TEACH_PROVENANCE_VECTORS: readonly TeachProvenanceSecretVector[] = [
+  { name: "bare synthetic test key", text: "sk-test-00000000000000000000", raw: "sk-test-00000000000000000000" },
+  { name: "commit subject carrying a test key", text: "fix login with sk-test-00000000000000000000 deployed", raw: "sk-test-00000000000000000000" },
+  { name: "openai project key", text: "sk-proj-aB3dE5fG7hI9-jK2mN4pQ6rS8tU0vW1xY2zA4", raw: "sk-proj-aB3dE5fG7hI9-jK2mN4pQ6rS8tU0vW1xY2zA4" },
+  { name: "anthropic key", text: "sk-ant-abcdefghijklmnopqrst123456", raw: "sk-ant-abcdefghijklmnopqrst123456" },
+  { name: "aws access key", text: "AKIAABCDEFGHIJKLMNOP", raw: "AKIAABCDEFGHIJKLMNOP" },
+  { name: "github personal token", text: "ghp_abcdefghijklmnopqrstuvwxyz1234567890", raw: "ghp_abcdefghijklmnopqrstuvwxyz1234567890" },
+  { name: "github fine-grained token", text: "github_pat_abcdefghijklmnopqrstuvwxyz1234567890ABCD", raw: "github_pat_abcdefghijklmnopqrstuvwxyz1234567890ABCD" },
+  { name: "github oauth token", text: "gho_abcdefghijklmnopqrstuvwxyz1234567890", raw: "gho_abcdefghijklmnopqrstuvwxyz1234567890" },
+  { name: "npm token", text: "npm_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", raw: "npm_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" },
+  { name: "slack bot token", text: "xoxb-123456789012-123456789012-AbCdEfGhIjKlMnOpQrSt", raw: "xoxb-123456789012-123456789012-AbCdEfGhIjKlMnOpQrSt" },
+  { name: "slack user token", text: "xoxp-123456789012-abcdefghij", raw: "xoxp-123456789012-abcdefghij" },
+  { name: "private key header", text: "-----BEGIN RSA PRIVATE KEY-----", raw: "-----BEGIN RSA PRIVATE KEY-----" },
+  { name: "password assignment", text: "password=pA7!cV2@kL9", raw: "pA7!cV2@kL9" },
+  { name: "quoted secret assignment", text: "secret='rT8$wX3!nM6'", raw: "rT8$wX3!nM6" },
+  { name: "bare secret assignment", text: "secret=8f3kL9!qZ2#xM7@nB4", raw: "8f3kL9!qZ2#xM7@nB4" },
+  { name: "token credential assignment", text: "token=tok_aB3d-E5fG7hI9jK2mN4pQ6", raw: "tok_aB3d-E5fG7hI9jK2mN4pQ6" },
+  { name: "api key credential assignment", text: 'api_key="api-aB3dE5fG7hI9jK2mN4pQ6"', raw: "api-aB3dE5fG7hI9jK2mN4pQ6" },
+  { name: "bearer credential assignment", text: "authorization: Bearer syn_aB3dE5fG7hI9jK2mN4pQ6", raw: "syn_aB3dE5fG7hI9jK2mN4pQ6" },
+  { name: "comment quoting an oauth token", text: "fix auth with gho_abcdefghijklmnopqrstuvwxyz1234567890 merged", raw: "gho_abcdefghijklmnopqrstuvwxyz1234567890" },
+  { name: "comment quoting a rotated slack token", text: "deploy key xoxp-123456789012-abcdefghij rotated", raw: "xoxp-123456789012-abcdefghij" },
+];

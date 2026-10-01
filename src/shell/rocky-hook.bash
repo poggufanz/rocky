@@ -30,6 +30,29 @@ fi
 # extdebug: preexec function returning non-zero cancels the command
 shopt -s extdebug
 
+# Guard decision note: appends one TSV line (ts, outcome, rule, cwd, cmd) to
+# guard.pending for the node drain to parse, redact, and bound. Flattening and
+# bounding here keep the pending file single-line-per-decision; node re-bounds.
+# Fail-silent by contract: never breaks the shell, always returns 0.
+__rocky_guard_note() {
+  local outcome="$1" rule="$2" cmd="$3" ts cwd
+  cmd="${cmd//$'\n'/ }"
+  cmd="${cmd//$'\t'/ }"
+  cmd="${cmd//$'\r'/ }"
+  cmd="${cmd:0:500}"
+  rule="${rule//$'\n'/ }"
+  rule="${rule//$'\t'/ }"
+  rule="${rule//$'\r'/ }"
+  cwd="$PWD"
+  cwd="${cwd//$'\n'/ }"
+  cwd="${cwd//$'\t'/ }"
+  cwd="${cwd//$'\r'/ }"
+  cwd="${cwd:0:512}"
+  ts="${EPOCHSECONDS:-$(date +%s)}"
+  { printf '%s\t%s\t%s\t%s\t%s\n' "$ts" "$outcome" "$rule" "$cwd" "$cmd" >> "$__rocky_home/guard.pending"; } 2>/dev/null || :
+  return 0
+}
+
 __rocky_guard() {
   local cmd="$1" regex msg ans
   [[ -r "$__rocky_home/guard.rules" ]] || return 0
@@ -40,11 +63,16 @@ __rocky_guard() {
       ans=""
       printf '[Rocky] you sure, question (y/n) ' >&2
       if read -r ans </dev/tty 2>/dev/null; then
-        [[ "$ans" == "y" || "$ans" == "Y" ]] && return 0
+        if [[ "$ans" == "y" || "$ans" == "Y" ]]; then
+          __rocky_guard_note proceeded "$regex" "$cmd" || :
+          return 0
+        fi
         printf '[Rocky] good. command not run.\n' >&2
+        __rocky_guard_note cancelled "$regex" "$cmd" || :
         return 1
       fi
       # no usable tty: warn only, never block (CI safety)
+      __rocky_guard_note proceeded "$regex" "$cmd" || :
       return 0
     fi
   done < "$__rocky_home/guard.rules"

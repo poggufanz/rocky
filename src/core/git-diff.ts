@@ -46,7 +46,7 @@ function extractPatchText(raw: string): string {
 function runGitSafe(
   args: readonly string[],
   options: { timeoutMs: number; maxOutputBytes: number; cwd?: string },
-): { code: number; stdout: string; timedOut: boolean } {
+): { code: number; stdout: string; timedOut: boolean; truncated: boolean } {
   try {
     const result = spawnSync("git", args, {
       shell: false,
@@ -57,14 +57,19 @@ function runGitSafe(
       env: { ...process.env, LC_ALL: "C", LANG: "C" },
       ...(options.cwd !== undefined ? { cwd: options.cwd } : {}),
     });
-    const timedOut = result.error !== undefined && (result.error as unknown as { code?: string }).code === "ETIMEDOUT";
+    const errCode = result.error !== undefined ? (result.error as unknown as { code?: string }).code : undefined;
+    const timedOut = errCode === "ETIMEDOUT";
+    const truncated = errCode === "ENOBUFS"
+      || errCode === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER"
+      || (typeof result.stdout === "string" && result.stdout.length >= options.maxOutputBytes - 1);
     return {
       code: result.status ?? (result.error ? 1 : 0),
       stdout: result.stdout ?? "",
       timedOut,
+      truncated,
     };
   } catch {
-    return { code: 1, stdout: "", timedOut: false };
+    return { code: 1, stdout: "", timedOut: false, truncated: false };
   }
 }
 
@@ -101,6 +106,7 @@ export function resolveGitDiff(options: GitDiffOptions): GitDiffResult | undefin
     } catch {
       // Fail open
     }
+    return undefined;
   }
 
   // 2. Time-window lookup
@@ -125,25 +131,60 @@ export function resolveGitDiff(options: GitDiffOptions): GitDiffResult | undefin
     }
   }
 
-  // 3. Working tree uncommitted changes
-  try {
-    const diffArgs = ["diff", "-U2", "HEAD", ...(file ? ["--", file] : [])];
-    let result = runGitSafe(diffArgs, { timeoutMs, maxOutputBytes, cwd });
-    if (result.code !== 0 && !result.timedOut) {
-      result = runGitSafe(["diff", "-U2", ...(file ? ["--", file] : [])], { timeoutMs, maxOutputBytes, cwd });
-    }
-    if (result.code === 0 && !result.timedOut && result.stdout.trim().length > 0) {
-      const patch = extractPatchText(result.stdout);
-      if (patch.length > 0) {
-        const redacted = redactSecretsAtBoundary(patch);
-        return { commit: "uncommitted", diff: redacted };
+  // 3. Working tree uncommitted changes (only for current/live moments)
+  if (options.ts === undefined || Math.abs(Date.now() - options.ts) < 10 * 60_000) {
+    try {
+      const diffArgs = ["diff", "-U2", "HEAD", ...(file ? ["--", file] : [])];
+      let result = runGitSafe(diffArgs, { timeoutMs, maxOutputBytes, cwd });
+      if (result.code !== 0 && !result.timedOut) {
+        result = runGitSafe(["diff", "-U2", ...(file ? ["--", file] : [])], { timeoutMs, maxOutputBytes, cwd });
       }
+      if (result.code === 0 && !result.timedOut && result.stdout.trim().length > 0) {
+        const patch = extractPatchText(result.stdout);
+        if (patch.length > 0) {
+          const redacted = redactSecretsAtBoundary(patch);
+          return { commit: "uncommitted", diff: redacted };
+        }
+      }
+    } catch {
+      // Fail open
     }
-  } catch {
-    // Fail open
   }
 
   return undefined;
+}
+
+function firstShaFromOutput(stdout: string): string {
+  const sha = stdout.split(/\r?\n/).map((line) => line.trim()).find((line) => /^[0-9a-fA-F]{4,128}$/.test(line));
+  return sha ?? "";
+}
+
+/**
+ * Oldest commit after a point that touched a file. With a known base anchor
+ * this is graph-based (`base..HEAD`, oldest first) because commits only point
+ * at parents; without one it is a bounded time lookup that refuses to claim
+ * the far future. Never throws: "" means "no attributable child".
+ */
+export function firstShaAfter(root: string, rel: string, opts: { base?: string; ts: number; capMs?: number }): string {
+  const runOpts = { timeoutMs: GIT_DIFF_TIMEOUT_MS, maxOutputBytes: GIT_DIFF_MAX_BYTES, cwd: root };
+  const base = opts.base;
+  if (typeof base === "string" && base !== "unborn" && isValidGitRef(base)) {
+    const res = runGitSafe(["log", "--reverse", "--format=%H", `${base}..HEAD`, "--", rel], runOpts);
+    if (res.code !== 0 || res.timedOut) return "";
+    return firstShaFromOutput(res.stdout);
+  }
+  if (typeof opts.ts !== "number" || !Number.isSafeInteger(opts.ts) || opts.ts <= 0) return "";
+  const cap = typeof opts.capMs === "number" && Number.isSafeInteger(opts.capMs) && opts.capMs > 0
+    ? opts.capMs
+    : 8 * 60 * 60 * 1000;
+  const since = new Date(opts.ts + 1000).toISOString();
+  const until = new Date(opts.ts + cap).toISOString();
+  const res = runGitSafe(
+    ["log", "--reverse", "--format=%H", `--since=${since}`, `--until=${until}`, "--", rel],
+    runOpts,
+  );
+  if (res.code !== 0 || res.timedOut) return "";
+  return firstShaFromOutput(res.stdout);
 }
 
 /**
@@ -203,4 +244,105 @@ export function formatGitDiffLines(diffResult: GitDiffResult | undefined): strin
     lines.push(`    ${redactSecretsAtBoundary(line)}`);
   }
   return lines;
+}
+
+export interface CommitDiffOptions {
+  sha: string;
+  cwd?: string;
+  timeoutMs?: number;
+  maxOutputBytes?: number;
+}
+
+export interface CommitDiffResult {
+  commit: string;
+  diff: string;
+  truncated: boolean;
+}
+
+function isValidCommitSha(ref: unknown): ref is string {
+  return typeof ref === "string" && /^[0-9a-fA-F]{4,128}$/.test(ref);
+}
+
+/**
+ * Whole-commit multi-file diff for the bundle surface, via
+ * `git diff-tree --root -p -U2 <sha>` with NO `-- <file>` filter so one commit's
+ * files stay together. Bounded and fail-open like resolveGitDiff.
+ */
+export function resolveCommitDiff(options: CommitDiffOptions): CommitDiffResult | undefined {
+  if (!isValidCommitSha(options.sha)) return undefined;
+  const timeoutMs = options.timeoutMs ?? GIT_DIFF_TIMEOUT_MS;
+  const maxOutputBytes = options.maxOutputBytes ?? GIT_DIFF_MAX_BYTES;
+  const cwd = options.cwd ?? process.cwd();
+  try {
+    const result = runGitSafe(["diff-tree", "--root", "-p", "-U2", options.sha], { timeoutMs, maxOutputBytes, cwd });
+    if (result.timedOut) return undefined;
+    if (result.code !== 0 && !result.truncated) return undefined;
+    if (result.stdout.trim().length === 0) return undefined;
+    const patch = extractPatchText(result.stdout);
+    if (patch.length === 0) return undefined;
+    return {
+      commit: options.sha.slice(0, 7),
+      diff: redactSecretsAtBoundary(patch),
+      truncated: result.truncated,
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+export interface Provenance {
+  commit: string;
+  author: string;
+  date: string;
+  subject: string;
+}
+
+export function showCommitLine(sha: string, cwd?: string): Provenance | undefined {
+  const out = runGitSafe(["show", "-s", "--format=%H%x09%an%x09%ad%x09%s", sha],
+    { timeoutMs: GIT_DIFF_TIMEOUT_MS, maxOutputBytes: GIT_DIFF_MAX_BYTES, cwd });
+  if (out.timedOut || out.code !== 0) return undefined;
+  const line = out.stdout.split("\n", 1)[0] ?? "";
+  const parts = line.split("\t");
+  const full = parts[0] ?? "";
+  if (!/^[0-9a-f]{4,128}$/.test(full)) return undefined;
+  return {
+    commit: full.slice(0, 7),
+    author: (parts[1] ?? "").slice(0, 120),
+    date: (parts[2] ?? "").slice(0, 120),
+    subject: redactSecretsAtBoundary(parts[3] ?? "").slice(0, 160),
+  };
+}
+
+export function blameRange(file: string, startLine: number, endLine: number, cwd?: string): Provenance | undefined {
+  if (!Number.isSafeInteger(startLine) || !Number.isSafeInteger(endLine) || startLine < 1 || endLine < startLine) return undefined;
+  const out = runGitSafe(["blame", "-L", `${startLine},${endLine}`, "--porcelain", "--", file],
+    { timeoutMs: GIT_DIFF_TIMEOUT_MS, maxOutputBytes: GIT_DIFF_MAX_BYTES, cwd });
+  if (out.timedOut || out.code !== 0) return undefined;
+  const sha = /^[0-9a-f]{4,128} /.exec(out.stdout)?.[0]?.trim();
+  if (sha === undefined) return undefined;
+  return showCommitLine(sha, cwd);
+}
+
+export function pickaxeTouch(file: string, token: string, cwd?: string): Provenance | undefined {
+  const clean = token.replace(/[^A-Za-z0-9_$]/g, "").slice(0, 64);
+  if (clean.length === 0) return undefined;
+  const log = runGitSafe(["log", "--format=%H", "-n", "1", `-S${clean}`, "--", file],
+    { timeoutMs: GIT_DIFF_TIMEOUT_MS, maxOutputBytes: GIT_DIFF_MAX_BYTES, cwd });
+  const sha = /^[0-9a-f]{4,128}$/m.exec(log.stdout)?.[0];
+  if (log.timedOut || sha === undefined) return undefined;
+  return showCommitLine(sha, cwd);
+}
+
+export function gitProvenanceChain(
+  file: string, startLine: number, endLine: number, cwd?: string,
+): { commit: string; subject: string; provenance: Provenance } | undefined {
+  const first = gitFirstTouch(file, startLine, endLine, cwd);
+  if (first !== undefined) {
+    const full = showCommitLine(first.commit, cwd);
+    const provenance = full ?? { commit: first.commit, author: "unknown", date: "unknown", subject: first.subject };
+    return { commit: provenance.commit, subject: provenance.subject, provenance };
+  }
+  const blamed = blameRange(file, startLine, endLine, cwd);
+  if (blamed !== undefined) return { commit: blamed.commit, subject: blamed.subject, provenance: blamed };
+  return undefined;
 }

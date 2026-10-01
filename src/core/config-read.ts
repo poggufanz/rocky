@@ -7,6 +7,15 @@ export type AiConfig =
   | { enabled: false }
   | { enabled: true; provider: "ollama"; model: string; exposure: Exposure };
 
+export type DecisionEngineName = "heuristic" | "local" | "jev";
+export type JevProviderName = "typesafe" | "openrouter";
+
+export interface DecisionConfig {
+  engine: DecisionEngineName;
+  /** Absent = native typesafe; the GUI writes this when the user picks a provider. */
+  jevProvider?: JevProviderName;
+}
+
 export interface WatchConfig {
   notify: boolean;
 }
@@ -22,6 +31,7 @@ export interface RockyConfigV1 {
   ai: AiConfig;
   watch?: WatchConfig;
   check?: CheckConfig;
+  decision?: DecisionConfig;
 }
 
 export type ConfigLoadResult =
@@ -53,10 +63,23 @@ function parseCheck(value: unknown): CheckConfig | undefined {
   return { registry: check.registry };
 }
 
+function parseDecision(value: unknown): DecisionConfig | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+  const decision = value as Record<string, unknown>;
+  if (Object.keys(decision).some((key) => key !== "engine" && key !== "jevProvider")) return undefined;
+  if (decision.engine !== "heuristic" && decision.engine !== "local" && decision.engine !== "jev") return undefined;
+  if (decision.jevProvider !== undefined && decision.jevProvider !== "typesafe" && decision.jevProvider !== "openrouter") {
+    return undefined;
+  }
+  return decision.jevProvider === undefined
+    ? { engine: decision.engine }
+    : { engine: decision.engine, jevProvider: decision.jevProvider };
+}
+
 export function parseConfig(value: unknown): RockyConfigV1 | undefined {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
   const root = value as Record<string, unknown>;
-  if (Object.keys(root).some((key) => key !== "version" && key !== "ai" && key !== "watch" && key !== "check")) return undefined;
+  if (Object.keys(root).some((key) => key !== "version" && key !== "ai" && key !== "watch" && key !== "check" && key !== "decision")) return undefined;
   if (root.version !== 1 || typeof root.ai !== "object" || root.ai === null || Array.isArray(root.ai)) return undefined;
   const ai = root.ai as Record<string, unknown>;
   let watch: WatchConfig | undefined;
@@ -69,6 +92,12 @@ export function parseConfig(value: unknown): RockyConfigV1 | undefined {
     check = parseCheck(root.check);
     if (!check) return undefined;
   }
+  let decision: DecisionConfig | undefined;
+  if (root.decision !== undefined) {
+    decision = parseDecision(root.decision);
+    if (!decision) return undefined;
+  }
+  const decisionSpread = decision === undefined ? {} : { decision };
   if (ai.enabled === false) {
     if (Object.keys(ai).some((key) => key !== "enabled")) return undefined;
     return {
@@ -76,6 +105,7 @@ export function parseConfig(value: unknown): RockyConfigV1 | undefined {
       ai: { enabled: false },
       ...(watch === undefined ? {} : { watch }),
       ...(check === undefined ? {} : { check }),
+      ...decisionSpread,
     };
   }
   if (Object.keys(ai).some((key) => !["enabled", "provider", "model", "exposure"].includes(key))) return undefined;
@@ -85,6 +115,7 @@ export function parseConfig(value: unknown): RockyConfigV1 | undefined {
     version: 1, ai: { enabled: true, provider: "ollama", model: ai.model, exposure: ai.exposure },
     ...(watch === undefined ? {} : { watch }),
     ...(check === undefined ? {} : { check }),
+    ...decisionSpread,
   };
 }
 

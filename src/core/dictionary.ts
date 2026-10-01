@@ -2,6 +2,8 @@ import { similarity, tokens } from "./fingerprint.js";
 import { boundTripleRecord, canonicalPath, isOperationalMemoryRecord } from "./memory-read.js";
 import { whyFile } from "./memory-query.js";
 import type { MemoryRecord, NoteRecord, TripleRecord } from "./memory-read.js";
+import { matchConcepts } from "./concepts.js";
+import { CS_CONCEPT_IDS } from "./cs-explain.js";
 
 const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
 const QUIZ_MIN_AGE_MS = 24 * 60 * 60 * 1000;
@@ -118,3 +120,25 @@ export function quizCandidates(records: readonly MemoryRecord[], now: number, li
     .sort((a, b) => b.ts - a.ts || a.id.localeCompare(b.id))
     .slice(0, limit);
 }
+
+export function csConceptCounts(records: readonly MemoryRecord[], now: number, windowMs = WEEK_MS): Map<string, number> {
+  const out = new Map<string, number>();
+  const seen = new Set<string>();
+  for (const record of records) {
+    if (seen.has(record.id)) continue;
+    seen.add(record.id);
+    if (!isOperationalMemoryRecord(record, now) || now - record.ts > windowMs) continue;
+    const text = record.kind === "triple"
+      ? `${record.intent?.text ?? ""} ${(record.rationale?.tags ?? []).join(" ")}`
+      : record.kind === "note"
+        ? `${(record as NoteRecord).subject} ${(record as NoteRecord).answer}`
+        : "";
+    if (!text.trim()) continue;
+    for (const hit of matchConcepts(text)) {
+      if (!(CS_CONCEPT_IDS as readonly string[]).includes(hit.concept.id)) continue;
+      out.set(hit.concept.id, (out.get(hit.concept.id) ?? 0) + 1);
+    }
+  }
+  return out;
+}
+

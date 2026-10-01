@@ -1,7 +1,7 @@
 import { readFileSync, statSync } from "node:fs";
 import { dirname, isAbsolute, resolve } from "node:path";
 import { tokens } from "./fingerprint.js";
-import { gitFirstTouch } from "./git-diff.js";
+import { gitProvenanceChain, pickaxeTouch, type Provenance } from "./git-diff.js";
 
 export type RungSource = "catalog" | "ast" | "def" | "comment" | "test" | "git";
 
@@ -15,6 +15,8 @@ export type StopReason = "evidence-exhausted" | "max-hops" | "library-boundary" 
 export interface LadderResult {
   rungs: readonly Rung[];
   stopReason: StopReason;
+  provenanceExhausted: boolean;
+  provenance?: Provenance;
 }
 
 export const MAX_LADDER_HOPS = 5;
@@ -47,6 +49,11 @@ export function defaultTeachNeighbor(file: string): (relPath: string) => string 
     return undefined;
   };
 }
+export interface GitHit {
+  commit: string;
+  subject: string;
+  provenance?: Provenance;
+}
 
 export interface BuildLadderInput {
   file: string;
@@ -54,7 +61,7 @@ export interface BuildLadderInput {
   endLine: number;
   fileText: string;
   readNeighbor?: (relPath: string) => string | undefined;
-  git?: typeof gitFirstTouch;
+  git?: (file: string, startLine: number, endLine: number, cwd?: string) => GitHit | undefined;
 }
 
 /**
@@ -127,7 +134,11 @@ type CalleeResolution =
   | undefined;
 
 export function buildLadder(input: BuildLadderInput): LadderResult {
-  const { file, fileText, readNeighbor, git = gitFirstTouch } = input;
+  const { file, fileText, readNeighbor } = input;
+  // Explicit `git: undefined` is full suppression (witness hit owns provenance):
+  // no tier runs, no subprocess. Only an omitted key falls back to the chain.
+  const git = "git" in input ? input.git : gitProvenanceChain;
+  const gitSuppressed = git === undefined;
   const lines = fileText.split(/\r?\n/);
   const total = lines.length;
   const selStart = Math.max(1, Math.min(input.startLine, total || 1));
@@ -146,41 +157,43 @@ export function buildLadder(input: BuildLadderInput): LadderResult {
 
   // Hop 1: what construct is this.
   const catalog = hopCatalog(selection, selStart);
-  if (catalog !== undefined && add(catalog)) return { rungs, stopReason: "max-hops" };
+  if (catalog !== undefined && add(catalog)) return { rungs, stopReason: "max-hops", provenanceExhausted: false };
 
   // Hop 2: why is it here -- the enclosing function.
   const ast = hopAst(lines, selStart, selection);
   if (ast !== undefined) {
     enclosingName = ast.name;
     usedDefSites.add(`${file}|${ast.line}|${ast.name}`);
-    if (add({ source: "ast", finding: ast.finding })) return { rungs, stopReason: "max-hops" };
+    if (add({ source: "ast", finding: ast.finding })) return { rungs, stopReason: "max-hops", provenanceExhausted: false };
   }
 
   // Hop 3: what does the callee do -- definition / JSDoc / neighbor.
   const def = resolveCallee(selection, file, fileText, readNeighbor);
-  if (def === "boundary") return { rungs, stopReason: "library-boundary" };
+  if (def === "boundary") return { rungs, stopReason: "library-boundary", provenanceExhausted: false };
   if (def !== undefined) {
     calleeName = def.name;
     const siteKey = `${def.site.path}|${def.site.line}|${def.name}`;
-    if (usedDefSites.has(siteKey)) return { rungs, stopReason: "cycle" };
+    if (usedDefSites.has(siteKey)) return { rungs, stopReason: "cycle", provenanceExhausted: false };
     usedDefSites.add(siteKey);
     const jsdocClause = def.site.jsdoc !== undefined ? `; JSDoc: ${def.site.jsdoc}` : "";
     const where = def.inFile ? `line ${def.site.line}` : `${def.site.path} at line ${def.site.line}`;
     const finding = `callee ${def.name} defined ${def.inFile ? "at " : "in "}${where}${jsdocClause}`;
-    if (add({ source: "def", finding })) return { rungs, stopReason: "max-hops" };
+    if (add({ source: "def", finding })) return { rungs, stopReason: "max-hops", provenanceExhausted: false };
   }
 
   // Hop 4: why at this exact point -- nearest comment above the selection.
   const comment = hopComment(lines, selStart);
-  if (comment !== undefined && add(comment)) return { rungs, stopReason: "max-hops" };
+  if (comment !== undefined && add(comment)) return { rungs, stopReason: "max-hops", provenanceExhausted: false };
 
   // Hop 5: intent -- tests naming the symbol, first git log -L commit.
   const testRung = hopTest(file, enclosingName, calleeName, readNeighbor);
-  if (testRung !== undefined && add(testRung)) return { rungs, stopReason: "max-hops" };
-  const gitRung = hopGit(file, selStart, selEnd, git);
-  if (gitRung !== undefined && add(gitRung)) return { rungs, stopReason: "max-hops" };
+  if (testRung !== undefined && add(testRung)) return { rungs, stopReason: "max-hops", provenanceExhausted: false };
+  const gitHit = hopGit(file, selStart, selEnd, git, selection, lines, selStart);
+  const gitRung = gitHit?.rung;
+  const gitProvenance = gitHit !== undefined && gitHit.provenance !== undefined ? { provenance: gitHit.provenance } : {};
+  if (gitRung !== undefined && add(gitRung)) return { rungs, stopReason: "max-hops", provenanceExhausted: false, ...gitProvenance };
 
-  return { rungs, stopReason: "evidence-exhausted" };
+  return { rungs, stopReason: "evidence-exhausted", provenanceExhausted: gitSuppressed ? false : (gitRung === undefined && selection.trim().length > 0), ...gitProvenance };
 }
 
 function fillTemplate(template: string, token: string, line: number): string {
@@ -328,14 +341,28 @@ export function findDefinitionInText(name: string, text: string): { line: number
     const line = defLines[i] ?? "";
     if (fnRe.test(line) || constRe.test(line) || assignRe.test(line) || methodRe.test(line)) {
       let jsdoc: string | undefined;
-      if (i > 0) {
-        const above = (defLines[i - 1] ?? "").trim();
-        if (isCommentLine(above)) jsdoc = above.slice(0, 120);
+      for (let j = i - 1; j >= Math.max(0, i - 6); j -= 1) {
+        const lineAbove = (defLines[j] ?? "").trim();
+        if (lineAbove.length === 0) continue;
+        if (!/^\s*(\/\/|\/\*|\*|#|<!--)/.test(lineAbove)) break;
+        if (isMeaningfulCommentLine(lineAbove)) {
+          jsdoc = lineAbove.slice(0, 120);
+          break;
+        }
       }
       return { line: i + 1, jsdoc };
     }
   }
   return undefined;
+}
+
+export function isMeaningfulCommentLine(line: string): boolean {
+  if (!/^\s*(\/\/|\/\*|\*|#|<!--)/.test(line)) return false;
+  const stripped = line
+    .replace(/^\s*(\/\/|\/\*|\*|#|<!--|-->)+\s*/, "")
+    .replace(/\s*(\*\/|-->)\s*$/, "")
+    .trim();
+  return /[a-zA-Z0-9]/.test(stripped);
 }
 
 function hopComment(lines: readonly string[], selStart: number): Rung | undefined {
@@ -345,7 +372,7 @@ function hopComment(lines: readonly string[], selStart: number): Rung | undefine
     if (line === undefined) break;
     const trimmed = line.trim();
     if (trimmed.length === 0) continue;
-    if (isCommentLine(line)) {
+    if (isMeaningfulCommentLine(line)) {
       return { source: "comment", finding: `nearest comment "${trimmed.slice(0, 80)}"` };
     }
   }
@@ -386,40 +413,139 @@ function hopGit(
   file: string,
   startLine: number,
   endLine: number,
-  git: ((file: string, startLine: number, endLine: number, cwd?: string) => { commit: string; subject: string } | undefined) | undefined,
-): Rung | undefined {
+  git: ((file: string, startLine: number, endLine: number, cwd?: string) => GitHit | undefined) | undefined,
+  selection: string,
+  lines: readonly string[],
+  selStart: number,
+): { rung: Rung; provenance?: Provenance } | undefined {
+  const toRung = (result: GitHit | undefined): { rung: Rung; provenance?: Provenance } | undefined => {
+    if (result === undefined) return undefined;
+    const subject = result.subject.trim();
+    if (subject.length === 0) return undefined;
+    if (result.provenance === undefined) {
+      return { rung: { source: "git", finding: `first touched in ${result.commit}: ${subject}` } };
+    }
+    const { provenance } = result;
+    return {
+      rung: { source: "git", finding: `first touched in ${provenance.commit} · ${provenance.author} · ${provenance.date}: ${provenance.subject}` },
+      provenance,
+    };
+  };
   if (git === undefined) return undefined;
-  const result = git(file, startLine, endLine);
-  if (result === undefined) return undefined;
-  const subject = result.subject.trim();
-  if (subject.length === 0) return undefined;
-  return { source: "git", finding: `first touched in ${result.commit}: ${subject}` };
+  const direct = toRung(git(file, startLine, endLine));
+  if (direct !== undefined) return direct;
+  const withProvenance = (hit: Provenance | undefined): GitHit | undefined =>
+    hit === undefined ? undefined : { commit: hit.commit, subject: hit.subject, provenance: hit };
+  const calleeToken = calleeNames(selection)[0] ?? "";
+  const viaCallee = toRung(withProvenance(pickaxeTouch(file, calleeToken)));
+  if (viaCallee !== undefined) return viaCallee;
+  const commentToken = firstCommentToken(lines, selStart);
+  if (commentToken !== undefined) return toRung(withProvenance(pickaxeTouch(file, commentToken)));
+  return undefined;
+}
+
+/** First identifier token of the nearest comment line above the selection, if any. */
+function firstCommentToken(lines: readonly string[], selStart: number): string | undefined {
+  const floor = Math.max(0, selStart - 11);
+  for (let i = selStart - 2; i >= floor; i -= 1) {
+    const line = lines[i];
+    if (line === undefined) break;
+    if (line.trim().length === 0) continue;
+    if (!isMeaningfulCommentLine(line)) continue;
+    const stripped = line.replace(/^\s*(\/\/|\/\*|\*|#)\s*/, "");
+    return /[A-Za-z_$][\w$]*/.exec(stripped)?.[0];
+  }
+  return undefined;
+}
+
+export interface ImportBinding {
+  local: string;
+  imported: string;
 }
 
 export interface ImportLine {
   names: string[];
   specifier: string;
+  bindings?: ImportBinding[];
 }
 
 export function collectImports(text: string): ImportLine[] {
   const out: ImportLine[] = [];
   for (const line of text.split(/\r?\n/)) {
     const trimmed = line.trim();
-    if (!/^import\b/.test(trimmed)) continue;
-    const named = /^import\s+(?:type\s+)?(?:([A-Za-z_$][\w$]*)\s*,\s*)?\{([^}]*)\}\s*from\s*["']([^"']+)["']/.exec(trimmed);
-    if (named !== null) {
-      const names = (named[2] ?? "")
-        .split(",")
-        .map((s) => s.trim())
-        .filter((s) => s.length > 0)
-        .map((s) => (s.split(/\s+as\s+/)[0] ?? "").trim());
-      if (named[1] !== undefined) names.unshift(named[1]);
-      out.push({ names, specifier: named[3] ?? "" });
+    if (/^import\b/.test(trimmed)) {
+      const named = /^import\s+(?:type\s+)?(?:([A-Za-z_$][\w$]*)\s*,\s*)?\{([^}]*)\}\s*from\s*["']([^"']+)["']/.exec(trimmed);
+      if (named !== null) {
+        const bindings: ImportBinding[] = [];
+        const names: string[] = [];
+        for (const rawPart of (named[2] ?? "").split(",")) {
+          const s = rawPart.trim();
+          if (s.length === 0) continue;
+          const asParts = s.split(/\s+as\s+/);
+          const imported = (asParts[0] ?? "").trim();
+          const local = (asParts[1] ?? imported).trim();
+          if (local.length > 0) {
+            bindings.push({ local, imported });
+            if (!names.includes(local)) names.push(local);
+            if (!names.includes(imported)) names.push(imported);
+          }
+        }
+        if (named[1] !== undefined) {
+          bindings.push({ local: named[1], imported: "default" });
+          if (!names.includes(named[1])) names.unshift(named[1]);
+        }
+        out.push({ names, specifier: named[3] ?? "", bindings });
+        continue;
+      }
+      const simple = /^import\s+(?:type\s+)?([A-Za-z_$][\w$]*)\s+from\s*["']([^"']+)["']/.exec(trimmed);
+      if (simple !== null) {
+        const name = simple[1] ?? "";
+        out.push({
+          names: [name],
+          specifier: simple[2] ?? "",
+          bindings: [{ local: name, imported: "default" }],
+        });
+        continue;
+      }
+      const ns = /^import\s+\*\s+as\s+([A-Za-z_$][\w$]*)\s+from\s*["']([^"']+)["']/.exec(trimmed);
+      if (ns !== null) {
+        const name = ns[1] ?? "";
+        out.push({
+          names: [name],
+          specifier: ns[2] ?? "",
+          bindings: [{ local: name, imported: "*" }],
+        });
+        continue;
+      }
+    }
+    // CommonJS require patterns
+    const cjsDestructure = /^(?:const|let|var)\s+\{([^}]+)\}\s*=\s*require\(["']([^"']+)["']\)/.exec(trimmed);
+    if (cjsDestructure !== null) {
+      const bindings: ImportBinding[] = [];
+      const names: string[] = [];
+      for (const rawPart of (cjsDestructure[1] ?? "").split(",")) {
+        const s = rawPart.trim();
+        if (s.length === 0) continue;
+        const colParts = s.split(/\s*:\s*/);
+        const imported = (colParts[0] ?? "").trim();
+        const local = (colParts[1] ?? imported).trim();
+        if (local.length > 0) {
+          bindings.push({ local, imported });
+          if (!names.includes(local)) names.push(local);
+          if (!names.includes(imported)) names.push(imported);
+        }
+      }
+      out.push({ names, specifier: cjsDestructure[2] ?? "", bindings });
       continue;
     }
-    const simple = /^import\s+(?:type\s+)?([A-Za-z_$][\w$]*)\s+from\s*["']([^"']+)["']/.exec(trimmed);
-    if (simple !== null) {
-      out.push({ names: [simple[1] ?? ""], specifier: simple[2] ?? "" });
+    const cjsSimple = /^(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*require\(["']([^"']+)["']\)/.exec(trimmed);
+    if (cjsSimple !== null) {
+      const name = cjsSimple[1] ?? "";
+      out.push({
+        names: [name],
+        specifier: cjsSimple[2] ?? "",
+        bindings: [{ local: name, imported: "default" }],
+      });
     }
   }
   return out;

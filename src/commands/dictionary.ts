@@ -1,7 +1,7 @@
 import { Buffer } from "node:buffer";
 import { dictionaryRankPortFromConfig, type DictionaryRankPort } from "../ai/dictionary-ai.js";
 import { loadConfig } from "../core/config.js";
-import { digestBuckets, queryDictionary, queryNotes, quizCandidates, type DictionaryHit, type NoteHit } from "../core/dictionary.js";
+import { csConceptCounts, digestBuckets, queryDictionary, queryNotes, quizCandidates, type DictionaryHit, type NoteHit } from "../core/dictionary.js";
 import { isCompleteMemoryCoverage, isOperationalMemoryRecord, loadMemoryChecked } from "../core/memory-read.js";
 import { recordRationale } from "../core/memory.js";
 import { LINK_WINDOW_MS, whyFile, whyFileEvidence, whyFilePathRelation } from "../core/memory-query.js";
@@ -689,6 +689,11 @@ export function digest(argv: string[], deps: DictionaryCommandDeps & { now?: num
       .map((example) => terminalSafe(example, MAX_INTENT_DISPLAY_BYTES))
       .join("; ");
     support(terminalSafe(`${tag}: ${bucket.count}  (${examples})`, MAX_OUTPUT_LINE_BYTES));
+  }
+  const csCounts = csConceptCounts(memory, now);
+  if (csCounts.size > 0) {
+    const top = [...csCounts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0] as [string, number];
+    support(`cs pattern: ${top[0]} x${top[1]} this week. full explain in dash, question`);
   }
   return 0;
 }

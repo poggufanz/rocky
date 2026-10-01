@@ -72,7 +72,7 @@ body {
   /* one soft source high and left, so the ground has somewhere to fall away to */
   background: radial-gradient(1300px 560px at 12% -14%, #1b2228, var(--ground));
   color: var(--body);
-  font: 13px/1.5 var(--mono);
+  font: 13px/1.5 var(--sans);
   -webkit-font-smoothing: antialiased;
 }
 
@@ -222,14 +222,6 @@ body::after {
   color: var(--voice);
 }
 
-/* the ask control names what it does, so it wraps rather than truncates */
-.ask-agent {
-  display: block;
-  width: 100%;
-  text-align: left;
-  line-height: 1.45;
-}
-
 .settings-btn {
   flex: 0 0 auto;
   padding: 5px 12px;
@@ -282,14 +274,20 @@ body::after {
   color: var(--bright);
 }
 .modal-x {
-  padding: 0 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
   border: 0;
+  border-radius: 6px;
   background: transparent;
   color: var(--dim);
   font: 18px/1 var(--sans);
   cursor: pointer;
 }
-.modal-x:hover { color: var(--bright); }
+.modal-x:hover { color: var(--bright); background: var(--surface); }
 
 /* the warning is the first thing read, so it is the one coloured thing here */
 .beta {
@@ -304,6 +302,9 @@ body::after {
 .field { display: block; margin-bottom: 14px; }
 /* a plain display rule beats the hidden attribute, so say it back */
 .field[hidden] { display: none; }
+/* unified OpenRouter mode: one container hides every Jev row as a unit */
+#jev-settings-block[hidden] { display: none; }
+#settings-clear-jev[hidden], #settings-clear-openrouter[hidden] { display: none; }
 
 /* the provider list: ten rows, then scroll, with the search above it */
 .combo { position: relative; }
@@ -418,8 +419,9 @@ main {
   overflow: auto;
 }
 
-.view[hidden] { display: none; }
-
+/* Hidden views must never paint: every visible rule above is display-based,
+   so state the hidden rule back with weight. Covers view-main/dash/listening. */
+.view[hidden] { display: none !important; }
 .foot {
   flex: 0 0 auto;
   padding: 8px 16px;
@@ -429,192 +431,12 @@ main {
   color: var(--dim);
 }
 
-/* ---- main ------------------------------------------------------------ */
-
-/* Recent is the pulse of a memory tool, so it takes the room. The tallies
-   are reference, so they sit in a rail and never compete with it. */
-#view-main { overflow: hidden; }
-
-.main-grid {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 296px;
-  height: 100%;
-  min-height: 0;
-}
-
-.blk { min-height: 0; padding: 18px 0 24px; }
-
-.blk-recent {
-  display: flex;
-  flex-direction: column;
-  padding: 18px 32px 0 24px;
-  /* a breath of warmth where he sits, so the ground is not a flat slab */
-  background: radial-gradient(640px 300px at 16% 0%, rgba(242, 160, 106, .05), transparent 70%);
-}
-.blk-recent #recent {
-  flex: 1 1 auto;
-  min-height: 0;
-  overflow: auto;
-  padding-bottom: 24px;
-}
-
-.rail {
-  overflow-y: auto;
-  overflow-x: hidden;
-  padding: 0 24px 24px;
-  border-left: 1px solid var(--line);
-}
-.rail .blk + .blk { border-top: 1px solid var(--line); }
-
-.blk h2 {
-  margin: 0 0 12px;
-  font: 500 11.5px/1 var(--sans);
-  color: var(--dim);
-}
-
-/* The anchor: the last thing rocky heard, read before anything else. He
-   stands beside it — the face makes the block his, and scale carries the
-   hierarchy, so the accent stays reserved. */
-.latest {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
-  gap: 26px;
-  align-items: center;
-  padding: 14px 0 26px;
-  border-bottom: 1px solid var(--line);
-  margin-bottom: 22px;
-}
-.latest:empty { display: none; }
-
-/* he idles while he listens: a slow breath, never a dance */
-.latest-face {
-  margin: 0;
-  font: 8px/1.15 var(--mono);
-  color: var(--voice-dim);
-  white-space: pre;
-  user-select: none;
-  opacity: .8;
-}
-
-.latest-eyebrow {
-  margin-bottom: 12px;
-  font: 500 11.5px/1 var(--sans);
-  letter-spacing: .08em;
-  text-transform: uppercase;
-  color: var(--dim);
-}
-.latest-line {
-  margin: 0 0 12px;
-  max-width: 62ch;
-  color: var(--bright);
-  font: 400 19px/1.5 var(--mono);
-  overflow-wrap: anywhere;
-}
-.latest-meta {
-  display: flex;
-  align-items: baseline;
-  gap: 14px;
-  font-size: 11.5px;
-  color: var(--dim);
-}
-.latest-kind.why { color: var(--voice); }
-.latest-count,
-.recent-count { color: var(--dim); }
-.latest-count { margin-left: 4px; font-size: 11.5px; }
-
-/* the hero and the rows arrive in order, so the eye lands where it should */
-@media (prefers-reduced-motion: no-preference) {
-  .latest-face,
-  .latest-body,
-  .recent-row {
-    animation: rise .45s ease-out both;
-    animation-delay: calc(var(--i, 0) * 45ms);
-  }
-  .latest-face { animation: rise .45s ease-out both, doze 5s ease-in-out .5s infinite; }
-  @keyframes rise {
-    from { opacity: 0; transform: translateY(6px); }
-  }
-  @keyframes doze { 50% { opacity: .5; } }
-}
-
-/* the rail is reference, so it recedes: smaller labels, more air between groups */
-.rail .blk h2 { margin-bottom: 10px; }
-.rail .blk { padding: 16px 0 20px; }
-
-/* align-content keeps rows at their own height inside a tall flex parent */
-.rows { display: grid; gap: 3px; align-content: start; }
-
-.row {
-  display: flex;
-  align-items: baseline;
-  gap: 10px;
-  min-width: 0;
-  min-height: 21px;
-}
-
-.row-label { color: var(--body); }
-.row-num {
-  flex: 0 0 auto;
-  margin-left: auto;
-  font-variant-numeric: tabular-nums;
-  color: var(--dim);
-}
-
-/* a count that is not zero has weight, not hue */
-.row-num.live { color: var(--bright); font-weight: 600; }
-/* why is rocky's own domain, so why carries the voice */
-.row-num.why  { color: var(--voice); font-weight: 600; }
-
-.row-note { color: var(--dim); font-size: 11.5px; }
-
-/* a path that outgrows the rail truncates from the left, so the filename
-   survives and the count is never pushed out of view */
-.row-path {
-  flex: 1 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  white-space: nowrap;
-  direction: rtl;
-  text-align: left;
-  color: var(--body);
-}
-
-.recent-row {
-  display: grid;
-  grid-template-columns: 88px minmax(0, 1fr) auto;
-  gap: 16px;
-  align-items: baseline;
-  padding: 8px 10px;
-  margin: 0 -10px;
-  border-top: 1px solid var(--line);
-  border-radius: 6px;
-}
-.recent-row:first-child { border-top: 0; }
-/* a row under the cursor admits it can be pointed at */
-@media (hover: hover) {
-  .recent-row:hover { background: var(--surface); }
-}
-/* the kind is a mark before it is a word */
-.recent-kind { color: var(--dim); font-size: 11.5px; }
-.recent-kind::before {
-  content: "";
-  display: inline-block;
-  width: 6px;
-  height: 6px;
-  margin-right: 7px;
-  border-radius: 50%;
-  background: currentColor;
-  vertical-align: 1px;
-}
-/* why is rocky's own domain, so a why record carries the voice */
-.recent-kind.why { color: var(--voice); }
-.recent-label {
-  color: var(--body);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.recent-ago { color: var(--dim); font-size: 11.5px; }
+/* One footer, two claims. Dash keeps the no-egress claim; Main states the
+   bounded egress a code question uses. With JS off, Dash stays hidden, so the
+   Main claim is what the skeleton reads. */
+.foot-dash { display: none; }
+body:has(#view-dash:not([hidden])) .foot-main { display: none; }
+body:has(#view-dash:not([hidden])) .foot-dash { display: inline; }
 
 /* ---- dash ------------------------------------------------------------ */
 
@@ -655,42 +477,130 @@ main {
   color: var(--dim);
 }
 
-/* a quieter settings-btn: it lives inside a column head, not the header bar */
+/* column-head toggles: text buttons, active state is an underline */
 .repo-filter-btn {
   flex: 0 0 auto;
-  padding: 3px 9px;
-  border: 1px solid var(--line);
-  border-radius: 6px;
+  padding: 4px 2px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
   background: transparent;
   color: var(--dim);
   font: 500 11px var(--sans);
   cursor: pointer;
 }
-.repo-filter-btn:hover { color: var(--body); border-color: var(--voice-dim); }
+.repo-filter-btn:hover { color: var(--body); }
 .repo-filter-btn:active { transform: translateY(1px); }
-.repo-filter-btn.on { color: var(--voice); border-color: var(--voice-dim); }
+.repo-filter-btn.on,
+.repo-filter-btn[aria-pressed="true"] {
+  color: var(--voice);
+  border-bottom-color: var(--voice);
+  background: transparent;
+}
 
-/* one checkbox row per heard repo; the count sits at the row's end */
+/* Filter Repo: search plus a grid of toggle cards. A shown repo carries the
+   voice border; a hidden one falls back to a dim hairline and dim text. */
+#repo-filter { width: min(660px, calc(100vw - 32px)); }
+
+.repo-search { display: block; margin-bottom: 12px; }
+.repo-search input {
+  width: 100%;
+  padding: 8px 11px;
+  border: 1px solid var(--line);
+  border-radius: 0;
+  background: var(--ground);
+  color: var(--bright);
+  font: 13px var(--sans);
+}
+.repo-search input::placeholder { color: var(--dim); }
+.repo-search input:focus { border-color: var(--voice-dim); outline: none; }
+
 .repo-list {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 8px;
+  max-height: 46vh;
+  overflow-y: auto;
   margin-bottom: 14px;
+  padding-right: 2px;
+}
+
+/* Flowing-water border for shown cards: a bright spot travels around the
+   edge via a rotating conic gradient. Pure CSS, no library. Browsers without
+   @property support get a static voice gradient instead of motion. Motion is
+   gated behind prefers-reduced-motion like every other animation here. */
+@property --flow-angle {
+  syntax: "<angle>";
+  initial-value: 0deg;
+  inherits: false;
 }
 .repo-row {
   display: flex;
-  align-items: baseline;
-  gap: 8px;
-  padding: 5px 6px;
-  border-radius: 6px;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 2px solid transparent;
+  border-radius: 3px;
+  background:
+    linear-gradient(var(--surface), var(--surface)) padding-box,
+    conic-gradient(from var(--flow-angle),
+      var(--voice-dim) 0%,
+      var(--voice) 8%,
+      var(--bright) 13%,
+      var(--voice) 18%,
+      var(--voice-dim) 30%,
+      var(--voice-dim) 58%,
+      var(--voice) 66%,
+      var(--voice-dim) 76%,
+      var(--voice-dim) 100%) border-box;
   color: var(--body);
   font: 12px var(--mono);
   cursor: pointer;
 }
-.repo-row:hover { background: var(--ground); }
-.repo-row input { accent-color: var(--voice); }
-.repo-name { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.repo-count { flex: 0 0 auto; color: var(--dim); }
+@media (prefers-reduced-motion: no-preference) {
+  .repo-row { animation: flow-border 3.5s linear infinite; }
+  @keyframes flow-border { to { --flow-angle: 360deg; } }
+  /* hover goes loud: faster lap plus a hotter border */
+  .repo-row:hover { animation-duration: 1.1s; filter: brightness(1.3) saturate(1.25); }
+}
+.repo-row.off {
+  animation: none;
+  border-color: var(--line);
+  background: transparent;
+}
+.repo-row.off .repo-name { color: var(--dim); }
+.repo-row input { margin-top: 3px; accent-color: var(--voice); }
+.repo-card-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.repo-card-top {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+.repo-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--bright);
+  font: 600 12.5px var(--sans);
+}
+.repo-count { flex: 0 0 auto; color: var(--dim); font: 12px var(--mono); }
+.repo-intent {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--body);
+  font: 12px var(--sans);
+}
+.repo-updated { color: var(--dim); font: 11px var(--mono); }
+.repo-updated:empty { display: none; }
 
 /* search leads the column, the file list answers it directly below */
 .filter {
@@ -702,30 +612,84 @@ main {
 
 .filter input {
   width: 100%;
-  padding: 6px 9px;
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  background: var(--ground);
+  padding: 6px 2px;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  border-radius: 0;
+  background: transparent;
   color: var(--bright);
-  font: 12px var(--mono);
+  font: 13px var(--sans);
 }
 .filter input::placeholder { color: var(--dim); font-family: var(--sans); }
-.filter input:focus { border-color: var(--voice-dim); outline: none; }
+.filter input:focus { border-bottom-color: var(--voice-dim); outline: none; }
 
-.files { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 6px 0; }
+/* the query grammar is taught where it is typed, not in a tooltip */
+.filter-hint {
+  display: block;
+  margin-top: 7px;
+  color: var(--dim);
+  font-size: 11px;
+  line-height: 1.45;
+}
+kbd {
+  padding: 0 4px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--ground);
+  color: var(--body);
+  font: 10.5px/1.5 var(--mono);
+}
+
+/* By file / By change: the same segmented shape as the top bar, one size down */
+.view-seg {
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--ground);
+}
+.view-seg-btn {
+  appearance: none;
+  border: 0;
+  border-radius: 5px;
+  padding: 4px 10px;
+  background: transparent;
+  color: var(--dim);
+  font: 500 11.5px/1.3 var(--sans);
+  cursor: pointer;
+  transition: color var(--step), background var(--step);
+}
+.view-seg-btn:hover { color: var(--body); }
+.view-seg-btn:active { transform: translateY(1px); }
+.view-seg-btn[aria-pressed="true"] { background: var(--raised); color: var(--bright); }
+
+.col-count {
+  flex: 0 0 auto;
+  margin: 0;
+  padding: 8px 12px 2px;
+  color: var(--dim);
+  font-size: 11px;
+}
+.col-count:empty { display: none; }
+
+.files { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 4px 0 10px; }
 
 .file {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
+  position: relative;
+  display: grid;
+  grid-template-columns: 3.5ch minmax(0, 1fr);
+  align-items: start;
+  column-gap: 10px;
   width: 100%;
-  padding: 5px 10px;
+  padding: 7px 12px 8px 8px;
   border: 0;
   background: transparent;
   color: var(--body);
   font: 12px var(--mono);
   text-align: left;
   cursor: pointer;
+  transition: background var(--step);
 }
 .file:hover { background: var(--surface); }
 .file[aria-selected="true"] {
@@ -737,22 +701,64 @@ main {
 /* count leads the row, as it does in the TUI. It is a claim about how often
    rocky heard this file, so on the chosen row it takes the voice colour. */
 .file-count {
-  flex: 0 0 auto;
-  width: 3ch;
   text-align: right;
+  font: 12px/1.35 var(--mono);
   font-variant-numeric: tabular-nums;
   color: var(--dim);
 }
 .file[aria-selected="true"] .file-count { color: var(--voice); }
 
+/* the count drawn: a hairline under the row, as long as this file's share of
+   the busiest one. It is a claim about what rocky holds, so it is clay. */
+.file::after {
+  content: "";
+  position: absolute;
+  left: calc(8px + 3.5ch + 10px);
+  bottom: 0;
+  height: 1px;
+  width: calc((100% - 8px - 3.5ch - 10px - 12px) * var(--heat, 0));
+  background: var(--voice-dim);
+  opacity: .55;
+}
+.file:hover::after,
+.file[aria-selected="true"]::after { opacity: 1; }
+
+/* two-line row: basename in system type, where-and-when muted below it */
+.file-text {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  line-height: 1.35;
+}
+.file-top { display: flex; min-width: 0; }
 .file-name {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: var(--bright);
+}
+.file-sub {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  min-width: 0;
+}
+.file-dir {
   flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
+  color: var(--dim);
+  font: 11px var(--mono);
 }
-.file-dir { color: var(--dim); }
+.file-ago {
+  flex: 0 0 auto;
+  color: var(--dim);
+  font: 11px var(--sans);
+  font-variant-numeric: tabular-nums;
+}
 
 /* pane */
 
@@ -771,9 +777,20 @@ main {
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
-  color: var(--bright);
+  color: var(--dim);
   font-size: 12px;
 }
+/* repo, folder, file: only the file itself is at full brightness */
+.pp-repo { color: var(--body); font-weight: 500; }
+.pp-dir { font-family: var(--mono); font-size: 11.5px; }
+.pp-repo + .pp-dir::before,
+.pp-repo + .pp-base::before,
+.pp-dir + .pp-base::before {
+  content: "/";
+  margin: 0 6px;
+  color: var(--line);
+}
+.pp-base { color: var(--bright); font: 600 12.5px var(--mono); }
 
 /* the TUI shows sel lo-hi in its selection box; here it rides the pane bar */
 .sel {
@@ -784,13 +801,39 @@ main {
 }
 .sel:empty { display: none; }
 
+.ctx-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.ctx-badge button {
+  appearance: none;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--surface);
+  color: var(--body);
+  font: 11px var(--mono);
+  padding: 0 5px;
+  line-height: 16px;
+  cursor: pointer;
+}
+.ctx-badge button:hover:not(:disabled) {
+  color: var(--bright);
+  border-color: var(--voice);
+}
+.ctx-badge button:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
 .mode { display: flex; gap: 2px; }
 
 .mode-btn {
   appearance: none;
-  border: 1px solid transparent;
-  border-radius: 6px;
-  padding: 3px 10px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  padding: 6px 10px;
   background: transparent;
   color: var(--dim);
   font: 500 11.5px/1.4 var(--sans);
@@ -798,8 +841,8 @@ main {
 }
 .mode-btn:hover { color: var(--body); }
 .mode-btn[aria-selected="true"] {
-  border-color: var(--line);
-  background: var(--surface);
+  border-bottom-color: var(--voice);
+  background: transparent;
   color: var(--bright);
 }
 
@@ -820,6 +863,13 @@ main {
   font-variant-numeric: tabular-nums;
 }
 .cl .lt { white-space: pre; color: var(--body); padding-right: 16px; }
+
+/* a line is a question waiting to be asked, so it answers the pointer.
+   The code keeps the text cursor: a drag across lines is a question too. */
+@media (hover: hover) {
+  .cl:hover { background: rgba(255, 255, 255, .025); }
+  .cl:hover .ln { color: var(--body); }
+}
 
 /* The picked range is marked at its edge, not washed in clay. A tint across
    the whole row sits on top of every token and flattens the syntax colours
@@ -852,13 +902,22 @@ main {
   color: var(--dim);
   font-size: 11.5px;
 }
+/* The gutter is measured in characters, not pixels: a sign lane, then room
+   for a five-digit line number. A pixel gutter let 4-digit numbers run left
+   into the +/- sign. */
 .dl {
+  position: relative;
   display: grid;
-  grid-template-columns: 52px minmax(0, 1fr);
+  grid-template-columns: 8.5ch minmax(0, 1fr);
   font: 12.5px/1.6 var(--mono);
 }
-.dl { position: relative; }
-.dl .ln { user-select: none; padding-right: 14px; text-align: right; color: var(--dim); }
+.dl .ln {
+  user-select: none;
+  padding: 0 1.5ch 0 2ch;
+  text-align: right;
+  color: var(--dim);
+  font-variant-numeric: tabular-nums;
+}
 .dl .lt { white-space: pre; color: var(--body); padding-right: 16px; }
 .dl-h .lt  { color: var(--dim); }
 .dl-at .lt { color: var(--dim); background: var(--surface); }
@@ -874,45 +933,184 @@ main {
 .dl-p .ln::after,
 .dl-m .ln::after {
   position: absolute;
-  left: 6px;
+  left: .7ch;
   font-weight: 600;
 }
+.diff-elsewhere {
+  margin: 0;
+  padding: 10px 14px;
+  color: var(--dim);
+  font-size: 12px;
+}
+
+/* a folded diff ends in one quiet line that says how much is left */
+.diff-more {
+  display: block;
+  width: 100%;
+  padding: 7px 0 7px 8.5ch;
+  border: 0;
+  border-top: 1px dashed var(--line);
+  background: transparent;
+  color: var(--dim);
+  font: 11.5px var(--sans);
+  text-align: left;
+  cursor: pointer;
+}
+.diff-more:hover { color: var(--body); background: var(--surface); }
+.diff-more:active { transform: translateY(1px); }
+
 .dl-p .ln::after { content: "+"; color: var(--add-mark); }
 .dl-m .ln::after { content: "-"; color: var(--del-mark); }
 
 /* ---- the pane before a file is picked ---------------------------------- */
 
-.welcome {
-  max-width: 780px;
-  padding: 26px 24px;
+/* A guide, not a dashboard: one title, the three questions Dash answers as
+   choosable columns, then the files worth opening first. Hairlines divide;
+   the only clay is the chosen mode and the note counts rocky holds. */
+.guide {
+  max-width: 920px;
+  padding: 40px 40px 56px;
 }
-.welcome-head {
-  margin: 0 0 16px;
-  font: 500 11.5px/1 var(--sans);
-  color: var(--dim);
+.guide-title {
+  margin: 0;
+  max-width: 30ch;
+  color: var(--bright);
+  font: 600 26px/1.18 var(--sans);
+  letter-spacing: -.015em;
+  text-wrap: balance;
 }
-.welcome-row {
-  display: grid;
-  grid-template-columns: 88px minmax(0, 1fr) auto;
-  gap: 16px;
-  align-items: baseline;
-  padding: 8px 0;
-  border-top: 1px solid var(--line);
-}
-.welcome-row:first-of-type { border-top: 0; }
-.welcome-kind { color: var(--dim); font-size: 11.5px; }
-.welcome-kind.why { color: var(--voice); }
-.welcome-label {
+.guide-lede {
+  margin: 12px 0 0;
+  max-width: 62ch;
   color: var(--body);
+  font-size: 13.5px;
+  line-height: 1.6;
+}
+
+.guide-modes {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin-top: 32px;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+}
+.guide-mode {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 18px 20px 20px;
+  border: 0;
+  border-left: 1px solid var(--line);
+  background: transparent;
+  color: var(--dim);
+  font: 12px/1.55 var(--sans);
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--step);
+}
+.guide-mode:first-child { border-left: 0; padding-left: 0; }
+.guide-mode:hover { background: rgba(255, 255, 255, .02); }
+.guide-mode:active { transform: translateY(1px); }
+/* the chosen mode is marked on the rule it sits under, as the tabs are */
+.guide-mode::before {
+  content: "";
+  position: absolute;
+  top: -1px;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: var(--voice);
+  transform: scaleX(0);
+  transform-origin: left;
+  transition: transform var(--step);
+}
+.guide-mode:first-child::before { left: 0; }
+.guide-mode[aria-pressed="true"]::before { transform: scaleX(1); }
+.guide-mode-name { color: var(--dim); font: 500 11.5px/1.3 var(--sans); }
+.guide-mode[aria-pressed="true"] .guide-mode-name { color: var(--voice); }
+.guide-mode-ask { color: var(--bright); font: 600 15px/1.3 var(--sans); }
+.guide-mode-how { max-width: 34ch; }
+
+.guide-block { margin-top: 40px; }
+.guide-head {
+  margin: 0 0 12px;
+  color: var(--body);
+  font: 600 12.5px/1.3 var(--sans);
+}
+.guide-note { margin: 0; color: var(--dim); font-size: 12.5px; }
+
+.guide-files { border-top: 1px solid var(--line); }
+.guide-file {
+  position: relative;
+  display: grid;
+  grid-template-columns: 76px minmax(0, 15rem) minmax(0, 1fr) auto;
+  gap: 18px;
+  align-items: baseline;
+  width: 100%;
+  padding: 10px 0;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  background: transparent;
+  color: var(--body);
+  font: 12.5px var(--sans);
+  text-align: left;
+  cursor: pointer;
+}
+/* the note count drawn along the row's own rule */
+.guide-file::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  bottom: -1px;
+  height: 1px;
+  width: calc(100% * var(--heat, 0));
+  background: var(--voice-dim);
+}
+.guide-file:hover { background: rgba(255, 255, 255, .02); }
+.guide-file:hover .guide-file-name { color: var(--voice); }
+.guide-file:active { transform: translateY(1px); }
+.guide-file-count { color: var(--voice); font: 11.5px var(--sans); font-variant-numeric: tabular-nums; }
+.guide-file-name {
+  min-width: 0;
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
+  color: var(--bright);
+  font: 600 12.5px var(--mono);
+  transition: color var(--step);
 }
-.welcome-ago { color: var(--dim); font-size: 11.5px; }
-.welcome-note {
-  margin: 20px 0 0;
+.guide-file-dir {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: var(--dim);
+  font: 11.5px var(--mono);
+}
+.guide-file-ago { color: var(--dim); font-size: 11.5px; }
+
+.guide-legend {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 9px 18px;
+  margin: 0;
   color: var(--dim);
   font-size: 12px;
+}
+.guide-legend dt {
+  color: var(--body);
+  font: 11.5px var(--mono);
+}
+.guide-legend dd { margin: 0; max-width: 60ch; }
+
+@media (max-width: 1100px) {
+  .guide { padding: 28px 24px 40px; }
+  .guide-modes { grid-template-columns: minmax(0, 1fr); }
+  .guide-mode { border-left: 0; border-top: 1px solid var(--line); padding: 16px 0; }
+  .guide-mode:first-child { border-top: 0; }
+  .guide-file { grid-template-columns: 70px minmax(0, 1fr) auto; }
+  .guide-file-dir { display: none; }
 }
 
 /* ---- record modes ------------------------------------------------------ */
@@ -926,6 +1124,17 @@ main {
   border-bottom: 1px solid var(--line);
 }
 .pane-sub[hidden] { display: none; }
+
+/* what the open mode answers, read once before the code or the records */
+.pane-guide {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+  color: var(--dim);
+  font-size: 11.5px;
+  line-height: 1.45;
+}
+.toggle[hidden] { display: none; }
 
 .toggle {
   display: flex;
@@ -977,7 +1186,33 @@ main {
   border-left: 1px solid var(--line);
 }
 .diff .diff-head { padding: 0 0 6px 12px; }
-.diff .dl { grid-template-columns: 40px minmax(0, 1fr); }
+
+/* one change owns exactly one diff: the bordered card says where a change
+   starts and ends, so a witness reason can never be read as belonging to
+   the change above or below it */
+.change {
+  margin: 12px 16px 0;
+  border: 1px solid var(--line);
+}
+.change:last-child { margin-bottom: 12px; }
+.change-head {
+  padding: 8px 12px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
+  color: var(--dim);
+  font-size: 11.5px;
+}
+.change .diff { margin: 8px 0 0; border-left: 0; }
+/* witnesses nest inside their change, inset from the card edge */
+.witnesses {
+  margin: 4px 0 4px 12px;
+  border-left: 2px solid var(--line);
+}
+.unattributed-head {
+  margin: 14px 16px 0;
+  color: var(--dim);
+  font-size: 11.5px;
+}
 
 /* two moments, side by side */
 
@@ -1090,7 +1325,7 @@ main {
 .pop {
   position: fixed;
   z-index: 30;
-  width: min(420px, calc(100vw - 24px));
+  width: min(460px, calc(100vw - 24px));
   max-height: 62vh;
   overflow: auto;
   padding: 14px 16px;
@@ -1158,6 +1393,166 @@ main {
   font-size: 12px;
 }
 
+/* ---- why card ---------------------------------------------------------
+ *
+ * Read top to bottom: how Rocky knows (badge), what he knows (facts or a
+ * chain of steps), then where to dig. Only a witness badge is clay: a
+ * witness is the one thing on this card Rocky actually heard. */
+.why-top {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: -2px 0 10px;
+}
+.why-badge {
+  flex: 0 0 auto;
+  padding: 2px 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--dim);
+  font: 600 11px/1.5 var(--sans);
+}
+.why-heard { border-color: var(--voice-dim); color: var(--voice); }
+.why-heard::before { content: "♪ "; opacity: .8; }
+.why-where {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: var(--body);
+  font: 12px var(--mono);
+}
+.why-close {
+  flex: 0 0 auto;
+  width: 24px;
+  height: 24px;
+  margin-right: -6px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--dim);
+  font: 16px/1 var(--sans);
+  cursor: pointer;
+}
+.why-close:hover { background: var(--surface); color: var(--bright); }
+
+.why-lede {
+  margin: 0 0 14px;
+  color: var(--dim);
+  font-size: 12.5px;
+  line-height: 1.55;
+}
+
+/* witness: the author's two answers, each under the question it answers */
+.why-facts { margin: 0; display: grid; gap: 4px; }
+.why-facts dt {
+  margin-top: 8px;
+  color: var(--dim);
+  font: 500 11px/1.4 var(--sans);
+}
+.why-facts dt:first-child { margin-top: 0; }
+.why-facts dd {
+  margin: 0;
+  color: var(--bright);
+  font-size: 13px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+/* assembly: a numbered chain, because the steps really are a sequence --
+   each one follows from the last. The rail joins them; the source rides
+   the right edge so a reader can weigh each step on its own. */
+.why-chain {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  counter-reset: why;
+}
+.why-step {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 3px;
+  padding: 0 0 12px 30px;
+  counter-increment: why;
+}
+.why-step::before {
+  content: counter(why);
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 20px;
+  height: 20px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  background: var(--raised);
+  color: var(--body);
+  font: 11px/1 var(--sans);
+}
+.why-step:not(:last-child)::after {
+  content: "";
+  position: absolute;
+  left: 10px;
+  top: 21px;
+  bottom: 1px;
+  width: 1px;
+  background: var(--line);
+}
+.why-step-text {
+  color: var(--body);
+  font-size: 12.5px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+.why-step-src { color: var(--dim); font-size: 11px; }
+.why-note,
+.why-stop {
+  margin: 2px 0 0;
+  color: var(--dim);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+.why-stop { padding-top: 10px; border-top: 1px solid var(--line); }
+
+/* dig deeper: equal-weight options, each saying what it does. None is the
+   answer, so none is filled; a model guess must never look like evidence. */
+.why-dig-head {
+  margin: 16px 0 8px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+  color: var(--body);
+  font: 600 11.5px/1.3 var(--sans);
+}
+.pop .why-actions {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  align-items: stretch;
+  gap: 6px;
+  margin-top: 0;
+}
+.why-dig {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: flex-start;
+  gap: 2px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--body);
+  text-align: left;
+  cursor: pointer;
+  transition: border-color var(--step), background var(--step);
+}
+.why-dig:hover { border-color: var(--voice-dim); background: var(--ground); }
+.why-dig:active { transform: translateY(1px); }
+.why-dig-name { color: var(--bright); font: 600 12px/1.3 var(--sans); }
+.why-dig-note { color: var(--dim); font: 11px/1.35 var(--sans); }
+
 /* ---- shared states ---------------------------------------------------- */
 
 .empty {
@@ -1168,22 +1563,84 @@ main {
 /* the card already pads, so its empty state must not pad twice */
 .pop > .empty { padding: 0; }
 
-/* A guess sits apart from what rocky heard, and never borrows the voice
-   colour. Grey is the whole point: this part is not evidence. The dashed
-   rule on the left says the same thing spatially. */
-.guess {
-  margin-top: 14px;
-  padding: 12px 0 2px 12px;
+/* An answer sits apart from what rocky heard, and never borrows the voice
+   colour. Grey is the whole point: a guess or an analysis is not evidence.
+   The dashed rule and the left rail say the same thing spatially. */
+.answer {
+  margin-top: 16px;
+  padding: 12px 0 4px 14px;
   border-top: 1px dashed var(--line);
-  border-left: 2px solid var(--line);
+  box-shadow: inset 2px 0 0 var(--line);
 }
-.guess-head {
+.answer-head {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  margin: 0 0 12px;
+}
+.answer-badge {
+  padding: 2px 8px;
+  border: 1px dashed var(--line);
+  border-radius: 999px;
+  color: var(--body);
+  font: 600 11px/1.5 var(--sans);
+}
+.answer-note { color: var(--dim); font-size: 11.5px; }
+.answer-wait { margin: 0 0 8px; color: var(--dim); font-size: 12px; }
+.answer.waiting .skel-list { padding: 0; }
+.answer-fail { margin: 0 0 10px; color: var(--body); font-size: 12.5px; line-height: 1.55; }
+.answer-flag {
   margin: 0 0 10px;
-  color: var(--dim);
-  font: 500 10.5px var(--sans);
-  letter-spacing: .1em;
-  text-transform: uppercase;
+  padding: 7px 10px;
+  border: 1px dashed var(--line);
+  border-radius: 6px;
+  color: var(--body);
+  font-size: 12px;
+  line-height: 1.5;
 }
+.answer-link {
+  padding: 0;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  background: transparent;
+  color: var(--bright);
+  font: 500 12px var(--sans);
+  cursor: pointer;
+}
+.answer-link:hover { border-bottom-color: var(--body); }
+.answer-sub {
+  margin: 14px 0 6px;
+  color: var(--dim);
+  font: 500 11px/1.3 var(--sans);
+}
+.answer-evidence { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.answer-evidence li { display: grid; gap: 2px; padding-left: 10px; border-left: 1px solid var(--line); }
+.answer-ev-label { color: var(--body); font: 11.5px var(--mono); overflow-wrap: anywhere; }
+.answer-ev-body { color: var(--dim); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+.answer-foot {
+  margin: 12px 0 0;
+  color: var(--dim);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+/* a citation is a place in the code: a link when Rocky knows the file */
+.answer-cite {
+  color: var(--dim);
+  font: 11px/1.6 var(--mono);
+  overflow-wrap: anywhere;
+}
+.answer-cite-link {
+  padding: 0;
+  border: 0;
+  border-bottom: 1px dotted var(--dim);
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+.answer-cite-link:hover { color: var(--bright); border-bottom-color: var(--bright); }
+/* the dig option that produced the answer below stays marked */
+.why-dig[aria-pressed="true"] { border-color: var(--dim); background: var(--ground); }
 .guess-body {
   margin: 0 0 9px;
   color: var(--body);
@@ -1191,9 +1648,6 @@ main {
   line-height: 1.65;
   overflow-wrap: anywhere;
 }
-.guess-body:last-of-type { margin-bottom: 0; }
-.guess .listen { padding: 22px 0; }
-.guess .card-ev { margin-top: 10px; }
 
 /* the teach shape, given rows of its own: cup and source are provenance,
    a track label opens a lane, a why carries its number, stop closes softly */
@@ -1204,23 +1658,25 @@ main {
   overflow-wrap: anywhere;
 }
 .guess-track {
-  margin: 12px 0 6px;
-  color: var(--bright);
-  font: 600 10.5px var(--sans);
-  letter-spacing: .14em;
+  margin: 14px 0 6px;
+  color: var(--dim);
+  font: 500 11px/1.4 var(--sans);
 }
+/* number, reason, then the citation under it: the cite is where to check */
 .guess-why {
   display: grid;
-  grid-template-columns: 26px minmax(0, 1fr);
-  gap: 8px;
-  margin: 0 0 6px;
+  grid-template-columns: 20px minmax(0, 1fr);
+  column-gap: 8px;
+  margin: 0 0 8px;
   color: var(--body);
   font-size: 12.5px;
   line-height: 1.6;
 }
-.guess-num { color: var(--dim); font: 11px/1.7 var(--mono); }
+.guess-text { color: var(--bright); overflow-wrap: anywhere; }
+.guess-why .answer-cite { grid-column: 2; justify-self: start; }
+.guess-num { color: var(--dim); font: 11px/1.9 var(--sans); font-variant-numeric: tabular-nums; }
 .guess-stop {
-  margin: 2px 0 4px 34px;
+  margin: 2px 0 4px 28px;
   color: var(--dim);
   font-size: 12px;
   font-style: italic;
@@ -1240,6 +1696,32 @@ main {
   font-size: 12px;
   line-height: 1.6;
 }
+.ref-chain-drawer {
+  margin: 12px 0 0;
+  padding: 7px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+  font-size: 12px;
+}
+.ref-chain-head {
+  cursor: pointer;
+  color: var(--body);
+  font: 500 11.5px var(--sans);
+}
+.ref-chain-head:hover { color: var(--bright); }
+.ref-chain-list {
+  margin: 8px 0 2px;
+  padding-left: 20px;
+  display: grid;
+  gap: 4px;
+}
+.ref-chain-step {
+  color: var(--body);
+  font: 11px/1.5 var(--mono);
+  overflow-wrap: anywhere;
+}
+.ref-chain-step::marker { color: var(--dim); }
 .empty p { margin: 0 0 6px; }
 .empty p:last-child { margin: 0; }
 /* an empty line keeps the blank row the TUI leaves between the two sentences */
@@ -1345,4 +1827,1654 @@ main {
   .left { border-right: 0; border-bottom: 1px solid var(--line); }
   .two { grid-template-columns: minmax(0, 1fr); }
   .side:first-child { border-bottom: 1px solid var(--line); }
+  .repo-list { grid-template-columns: minmax(0, 1fr); }
+}
+
+/* ---- bundle mode ------------------------------------------------------ */
+
+.bundle-card {
+  display: block;
+  width: 100%;
+  padding: 8px 12px;
+  border: 0;
+  border-top: 1px solid var(--line);
+  background: transparent;
+  color: var(--body);
+  font: 12px var(--mono);
+  text-align: left;
+  cursor: pointer;
+}
+.bundle-card:first-child { border-top: 0; }
+.bundle-card:hover { background: var(--surface); }
+.bundle-card[aria-selected="true"],
+.bundle-card.picked {
+  background: var(--raised);
+  color: var(--bright);
+  box-shadow: inset 2px 0 0 var(--voice);
+}
+.bundle-card:active { transform: translateY(1px); }
+
+.bundle-summary {
+  padding: 12px 16px 14px;
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 12px;
+}
+.bundle-summary-title {
+  font: 600 13.5px/1.4 var(--sans);
+  color: var(--bright);
+}
+.bundle-summary-meta {
+  font: 12px var(--mono);
+  color: var(--dim);
+  margin-top: 4px;
+}
+
+.bundle-files {
+  padding-bottom: 24px;
+}
+
+.bundle-file-card {
+  margin: 8px 16px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  overflow: hidden;
+  background: var(--ground);
+}
+.bundle-file-card:first-child {
+  margin-top: 4px;
+}
+
+.bundle-file-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  padding: 8px 12px;
+  background: var(--surface);
+  border: 0;
+  color: var(--bright);
+  font: 12px var(--mono);
+  cursor: pointer;
+  text-align: left;
+  user-select: none;
+  transition: background 0.15s ease;
+}
+.bundle-file-head:hover {
+  background: var(--raised);
+}
+.bundle-file-head[aria-expanded="true"] {
+  border-bottom: 1px solid var(--line);
+}
+
+.bundle-file-head-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  overflow: hidden;
+}
+.bundle-file-toggle {
+  display: inline-block;
+  width: 12px;
+  color: var(--voice);
+  font-size: 11px;
+  text-align: center;
+  flex: 0 0 auto;
+}
+.bundle-file-name {
+  font-weight: 600;
+  color: var(--bright);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.bundle-file-dir {
+  color: var(--dim);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bundle-file-head-right {
+  flex: 0 0 auto;
+  margin-left: 12px;
+}
+.bundle-file-stats {
+  color: var(--dim);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.bundle-file-body {
+  padding: 0;
+}
+.bundle-file-body .diff {
+  margin: 0;
+}
+.bundle-file-body > .change {
+  margin: 10px 12px 12px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+}
+.bundle-file-body > .unattributed-head {
+  margin: 10px 12px 4px;
+}
+.bundle-file-body > .rec {
+  margin: 4px 12px;
+}
+
+.bundle-diff-empty {
+  padding: 12px 16px;
+  color: var(--dim);
+  font: 12px var(--mono);
+  font-style: italic;
+  background: var(--ground);
+}
+
+.hl {
+  background: var(--voice-tint);
+}
+.cl.hl {
+  background: var(--voice-tint);
+}
+
+/* ---- references panel ------------------------------------------------ */
+
+.why-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin-top: 12px;
+}
+.why-actions .card-more {
+  margin-top: 0;
+}
+
+.refer-def {
+  margin: 10px 0 4px;
+  padding: 0 0 0 10px;
+  border: 0;
+  border-left: 2px solid var(--line);
+  border-radius: 0;
+  background: transparent;
+}
+
+.refer-def-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+  font: 11px var(--mono);
+}
+
+.refer-tag {
+  color: var(--voice);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: .05em;
+  font-size: 10px;
+}
+
+.refer-link {
+  appearance: none;
+  background: transparent;
+  border: 0;
+  color: var(--dim);
+  font: 11.5px var(--mono);
+  cursor: pointer;
+  padding: 0;
+  text-decoration: underline;
+}
+.refer-link:hover {
+  color: var(--voice);
+}
+
+.refer-snippet {
+  margin: 0;
+  font: 11.5px var(--mono);
+  color: var(--body);
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.refer-list {
+  max-height: 240px;
+  overflow-y: auto;
+  border: 0;
+  border-top: 1px solid var(--line);
+  border-radius: 0;
+  margin-top: 10px;
+}
+
+.refer-hit {
+  display: block;
+  width: 100%;
+  padding: 8px 10px;
+  border: 0;
+  border-top: 1px solid var(--line);
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+.refer-hit:first-child {
+  border-top: 0;
+}
+.refer-hit:hover {
+  background: var(--hover, rgba(255, 255, 255, .04));
+}
+.refer-hit-body {
+  display: block;
+  color: var(--body);
+  font: 11.5px var(--mono);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ---- sharp controls ----------------------------------------------------
+ *
+ * Square corners everywhere. Tab state (Main/Dash, Lines/History/Compare)
+ * is an underline, not a filled pill -- see .seg-btn / .mode-btn above.
+ * The dot below stays round: it is a status mark, not a corner.
+ */
+.model-chip,
+.settings-btn,
+.modal,
+.beta,
+.combo-list,
+.field select,
+.field input,
+.btn-quiet,
+.btn-voice,
+.repo-filter-btn,
+.ctx-badge button,
+.moments,
+.moments-search,
+.moments-scope,
+.pop,
+.card-more,
+.guess-warn,
+.fail-retry,
+.ask,
+.bundle-card,
+.change,
+.skel-row,
+.side-head { border-radius: 0; }
+
+/* ---- flowing buttons ----------------------------------------------------
+ *
+ * Same travelling voice border as the repo cards. Boxed buttons get the
+ * full ring (fills stay per-button via --btn-fill); underline tabs get a
+ * travelling highlight along the line instead. Static when reduced motion.
+ */
+.btn-voice,
+.card-more {
+  border: 2px solid transparent;
+  border-radius: 3px;
+  background:
+    linear-gradient(var(--btn-fill, transparent), var(--btn-fill, transparent)) padding-box,
+    conic-gradient(from var(--flow-angle),
+      var(--voice-dim) 0%,
+      var(--voice-dim) 86%,
+      var(--voice) 93%,
+      var(--bright) 96%,
+      var(--voice) 98%,
+      var(--voice-dim) 100%) border-box;
+}
+.card-more { --btn-fill: var(--surface); }
+.btn-voice { --btn-fill: var(--voice); }
+/* older hovers painted a solid border; the ring owns the border now */
+.btn-voice:hover,
+.card-more:hover { border-color: transparent; }
+
+/* quiet text buttons (Settings, Reset, Forget Key): no box at all, the
+   flowing underline only shows on hover */
+.settings-btn,
+.btn-quiet {
+  border: 0;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  background: transparent;
+}
+.settings-btn:hover,
+.btn-quiet:hover {
+  border-bottom-color: transparent;
+  background-image: repeating-linear-gradient(90deg,
+    var(--voice-dim) 0px,
+    var(--voice-dim) 20px,
+    var(--voice) 38px,
+    var(--bright) 45px,
+    var(--voice) 52px,
+    var(--voice-dim) 70px,
+    var(--voice-dim) 90px);
+  background-size: 90px 2px;
+  background-position: 0 100%;
+  background-repeat: repeat-x;
+}
+
+.mode-btn[aria-selected="true"],
+.repo-filter-btn.on,
+.repo-filter-btn[aria-pressed="true"] {
+  border-bottom-color: transparent;
+  /* seamless loop: the stripe repeats every 90px and slides exactly 90px,
+     so a highlight leaving on the right is already entering on the left.
+     one wide soft glow (long dim dwell, gentle rise) so the wrap is felt
+     as little as possible. */
+  background-image: repeating-linear-gradient(90deg,
+    var(--voice-dim) 0px,
+    var(--voice-dim) 20px,
+    var(--voice) 38px,
+    var(--bright) 45px,
+    var(--voice) 52px,
+    var(--voice-dim) 70px,
+    var(--voice-dim) 90px);
+  background-size: 90px 2px;
+  background-position: 0 100%;
+  background-repeat: repeat-x;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .btn-voice,
+  .card-more { animation: flow-border 3.5s linear infinite; }
+  .btn-voice:hover,
+  .card-more:hover { animation-duration: 1.1s; filter: brightness(1.25); }
+  .settings-btn:hover,
+  .btn-quiet:hover { animation: flow-underline 2.8s linear infinite; }
+  .mode-btn[aria-selected="true"],
+  .repo-filter-btn.on,
+  .repo-filter-btn[aria-pressed="true"] { animation: flow-underline 2.8s linear infinite; }
+  @keyframes flow-underline {
+    from { background-position: 0 100%; }
+    to { background-position: 90px 100%; }
+  }
+}
+
+/* ---- main: chat ---------------------------------------------------------
+ *
+ * A chat surface in the shape people already know: chats on the left, the
+ * thread in one centred column, the composer docked under it, sources in a
+ * drawer on the right. The sheet's rule still holds: grey everywhere, and
+ * the voice only where Rocky claims something -- his ear, a held answer, a
+ * why kind, a cited ref. The armed Jev toggle glows because the glow is the
+ * state, not a claim. Speech rounds off; panels elsewhere stay square.
+ */
+#view-main { overflow: hidden; }
+
+.modal-x svg,
+.cx svg {
+  display: block;
+  flex: none;
+  pointer-events: none;
+}
+
+.cx {
+  --side-w: 272px;
+  --src-w: 384px;
+  --col: 760px;
+  --ease: cubic-bezier(.16, 1, .3, 1);
+  position: relative;
+  display: grid;
+  grid-template-columns: var(--side-w) minmax(0, 1fr) 0;
+  height: 100%;
+  min-height: 0;
+  transition: grid-template-columns 260ms var(--ease);
+}
+.cx[data-side="closed"] { grid-template-columns: 0 minmax(0, 1fr) 0; }
+.cx[data-sources="open"] { grid-template-columns: var(--side-w) minmax(0, 1fr) var(--src-w); }
+.cx[data-side="closed"][data-sources="open"] { grid-template-columns: 0 minmax(0, 1fr) var(--src-w); }
+
+.cx button { font: inherit; color: inherit; }
+.cx button:not(:disabled) { cursor: pointer; }
+
+/* shared small controls */
+.cx-icon {
+  display: inline-grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--dim) !important;
+  transition: background var(--step), color var(--step);
+}
+.cx-icon:hover { background: var(--surface); color: var(--bright) !important; }
+
+.cx-act {
+  position: relative;
+  display: inline-grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--dim) !important;
+  transition: background var(--step), color var(--step);
+}
+.cx-act:hover { background: var(--surface); color: var(--bright) !important; }
+/* the copy result answers right where the press happened */
+.cx-act[data-done]::after {
+  content: attr(data-done);
+  position: absolute;
+  bottom: calc(100% + 4px);
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 3px 8px;
+  border-radius: 6px;
+  background: var(--raised);
+  color: var(--bright);
+  font: 500 11px/1.3 var(--sans);
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.cx-link {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--bright) !important;
+  font-size: 12.5px !important;
+  text-decoration: underline;
+  text-decoration-color: var(--line);
+  text-underline-offset: 3px;
+}
+.cx-link:hover { text-decoration-color: var(--body); }
+
+.cx-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 10px;
+  padding: 6px 12px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--body) !important;
+  font-size: 12.5px !important;
+}
+.cx-pill:hover { border-color: var(--dim); color: var(--bright) !important; }
+
+.cx-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--dim);
+  font: 500 11px/1.4 var(--sans);
+  white-space: nowrap;
+}
+/* holding back is Rocky's claim about his own evidence, so it carries the voice */
+.cx-badge.is-held { border-color: var(--voice-dim); color: var(--voice); }
+
+.cx-ref {
+  display: inline-block;
+  margin: 0 2px;
+  padding: 0 6px;
+  border: 1px solid rgba(242, 160, 106, .26);
+  border-radius: 5px;
+  background: rgba(242, 160, 106, .07);
+  color: var(--voice);
+  font: 11.5px/1.6 var(--mono);
+}
+
+/* Rocky's mark: five bars of an ear. Still while idle, moving while he listens. */
+.cx-ear {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  flex: none;
+  width: 28px;
+  height: 28px;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  background: var(--surface);
+}
+.cx-ear i {
+  width: 2px;
+  height: 28%;
+  border-radius: 1px;
+  background: var(--voice-dim);
+}
+.cx-ear i:nth-child(2), .cx-ear i:nth-child(4) { height: 50%; }
+.cx-ear i:nth-child(3) { height: 70%; }
+.cx-ear.is-listening i { background: var(--voice); }
+
+/* ---- side: chat list and memory ---- */
+.cx-side {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  padding: 10px 12px 12px;
+  border-right: 1px solid var(--line);
+  background: rgba(0, 0, 0, .16);
+}
+/* fixed inner width, so the list never reflows while the rail slides */
+.cx-side > * { flex: none; width: calc(var(--side-w) - 24px); }
+.cx[data-side="closed"] .cx-side { visibility: hidden; border-right-color: transparent; }
+
+.cx-side-head { display: flex; align-items: center; gap: 6px; }
+.cx-new {
+  display: inline-flex;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: 10px;
+  height: 38px;
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface);
+  color: var(--bright) !important;
+  font-weight: 500 !important;
+  font-size: 13px !important;
+  transition: background var(--step), border-color var(--step);
+}
+.cx-new:hover { background: var(--raised); border-color: #3a444d; }
+
+.cx-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 34px;
+  padding: 0 10px;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  color: var(--dim);
+  transition: border-color var(--step), background var(--step);
+}
+.cx-search:hover { background: var(--surface); }
+.cx-search:focus-within { border-color: var(--line); background: var(--ground); }
+.cx-search input {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: var(--bright);
+  font: 13px var(--sans);
+}
+.cx-search input::placeholder { color: var(--dim); }
+.cx-search input::-webkit-search-cancel-button { filter: invert(.6); }
+
+.cx-side > .cx-sessions {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  display: grid;
+  align-content: start;
+  gap: 16px;
+  padding: 4px 0 8px;
+}
+.cx-group-title {
+  margin: 0 0 4px;
+  padding: 0 10px;
+  color: var(--dim);
+  font: 500 11.5px/1.4 var(--sans);
+}
+.cx-items { display: grid; gap: 1px; margin: 0; padding: 0; list-style: none; }
+.cx-item {
+  position: relative;
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  border-radius: 10px;
+  transition: background var(--step);
+}
+.cx-item:hover { background: var(--surface); }
+.cx-item.is-active { background: var(--raised); }
+.cx-item-open {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--body) !important;
+  font-size: 13px !important;
+  text-align: left;
+}
+.cx-item.is-active .cx-item-open { color: var(--bright) !important; }
+.cx-item-open span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cx-item-open .cx-ear { width: 18px; height: 18px; border: 0; background: none; }
+/* tools surface on hover, focus, or a pending delete; touch keeps them shown */
+.cx-item-tools {
+  position: absolute;
+  top: 50%;
+  right: 4px;
+  display: flex;
+  padding-left: 18px;
+  border-radius: 0 10px 10px 0;
+  background: linear-gradient(90deg, transparent, var(--surface) 16px);
+  opacity: 0;
+  transform: translateY(-50%);
+  transition: opacity var(--step);
+}
+.cx-item.is-active .cx-item-tools { background: linear-gradient(90deg, transparent, var(--raised) 16px); }
+.cx-item:hover .cx-item-tools,
+.cx-item:focus-within .cx-item-tools,
+.cx-item.is-confirming .cx-item-tools { opacity: 1; }
+@media (hover: none) {
+  .cx-item-tools { opacity: 1; }
+  .cx-you-foot .cx-act { opacity: 1 !important; }
+}
+.cx-item-tools .cx-act { width: 26px; height: 26px; }
+.cx-item-confirm {
+  padding: 4px 10px;
+  border: 1px solid var(--del-mark);
+  border-radius: 8px;
+  background: var(--ground);
+  color: var(--del-mark) !important;
+  font-size: 12px !important;
+  font-weight: 500 !important;
+}
+.cx-rename {
+  width: 100%;
+  height: 34px;
+  padding: 0 10px;
+  border: 1px solid var(--dim);
+  border-radius: 10px;
+  outline: none;
+  background: var(--ground);
+  color: var(--bright);
+  font: 13px var(--sans);
+}
+.cx-sessions-empty,
+.cx-store-note {
+  margin: 0;
+  padding: 6px 10px;
+  color: var(--dim);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+.cx-store-note { color: var(--voice); }
+
+.cx-mem {
+  display: grid;
+  gap: 10px;
+  padding: 12px 4px 0;
+  border-top: 1px solid var(--line);
+}
+.cx-mem h2 { margin: 0; color: var(--dim); font: 500 11.5px/1.3 var(--sans); }
+.cx-mem-body { display: grid; gap: 10px; min-width: 0; }
+.cx-mem-total { margin: 0; color: var(--dim); font-size: 12.5px; }
+.cx-mem-total b { color: var(--bright); font: 600 15px var(--mono); font-variant-numeric: tabular-nums; }
+.cx-stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 4px; }
+.cx-stat {
+  display: grid;
+  gap: 1px;
+  padding: 6px 2px;
+  border-radius: 8px;
+  background: var(--surface);
+  text-align: center;
+}
+.cx-stat b { color: var(--bright); font: 600 13px var(--mono); font-variant-numeric: tabular-nums; }
+.cx-stat b.is-why { color: var(--voice); }
+.cx-stat span { color: var(--dim); font-size: 10.5px; white-space: nowrap; }
+/* each kind drawn as a hairline as long as its share of the biggest */
+.cx-kinds { display: grid; gap: 7px; margin: 0; padding: 0; list-style: none; }
+.cx-kinds li {
+  position: relative;
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  padding-bottom: 4px;
+  color: var(--body);
+  font-size: 12px;
+}
+.cx-kinds li::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  width: calc(var(--share, 0) * 100%);
+  height: 2px;
+  border-radius: 1px;
+  background: var(--line);
+}
+.cx-kinds li.is-why::after { background: var(--voice-dim); }
+.cx-kinds b { color: var(--dim); font: 500 11.5px var(--mono); font-variant-numeric: tabular-nums; }
+.cx-mem-last { display: grid; gap: 2px; margin: 0; min-width: 0; }
+.cx-mem-key { color: var(--dim); font-size: 11px; }
+.cx-mem-label { overflow: hidden; color: var(--body); font-size: 12.5px; text-overflow: ellipsis; white-space: nowrap; }
+.cx-mem-ago { color: var(--dim); font: 11px var(--mono); }
+.cx-mem-cov, .cx-mem-fail, .cx-mem-wait { margin: 0; color: var(--dim); font-size: 12px; line-height: 1.5; }
+.cx-side-note { margin: 0; padding: 0 4px; color: var(--dim); font-size: 11px; line-height: 1.45; }
+
+/* ---- main column ---- */
+.cx-main {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+.cx-topbar {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 2px;
+  height: 48px;
+  padding: 0 12px;
+}
+.cx[data-side="open"] #cx-side-open,
+.cx[data-side="open"] #cx-new-mini { display: none; }
+.cx-title {
+  min-width: 0;
+  margin: 0 0 0 8px;
+  overflow: hidden;
+  color: var(--body);
+  font: 500 13.5px/1.3 var(--sans);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cx[data-empty="true"] .cx-title { visibility: hidden; }
+
+.cx-log {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 8px 24px 28px;
+}
+.cx-thread {
+  display: grid;
+  gap: 28px;
+  width: min(100%, var(--col));
+  margin: 0 auto;
+}
+
+/* Empty: the welcome and the composer meet in the middle of the column,
+   the way a fresh chat opens elsewhere. Both halves grow equally. */
+.cx-welcome { display: none; }
+/* margin-top auto, not justify-content: flex-end, so a short window scrolls
+   to the face instead of cutting it off above the scroll origin */
+.cx[data-empty="true"] .cx-main { overflow-y: auto; }
+.cx[data-empty="true"] .cx-log { display: flex; flex: 1 1 0; flex-direction: column; min-height: auto; overflow: visible; }
+.cx[data-empty="true"] .cx-dock { flex: 1 1 0; }
+.cx[data-empty="true"] .cx-welcome {
+  display: grid;
+  justify-items: center;
+  gap: 10px;
+  margin-top: auto;
+  padding-bottom: 26px;
+  text-align: center;
+}
+@media (max-height: 860px) {
+  .cx-face { margin-bottom: 2px; font-size: 5.5px; }
+  .cx-hello { font-size: 24px; }
+}
+.cx-face {
+  margin: 0 0 10px;
+  color: var(--voice-dim);
+  font: 7.5px/1.12 var(--mono);
+  white-space: pre;
+  user-select: none;
+  opacity: .85;
+}
+.cx-hello {
+  margin: 0;
+  color: var(--bright);
+  font: 600 27px/1.2 var(--sans);
+  letter-spacing: -.015em;
+}
+.cx-sub {
+  max-width: 64ch;
+  margin: 0;
+  color: var(--dim);
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+/* ---- messages ---- */
+.cx-msg { min-width: 0; }
+
+.cx-you {
+  display: grid;
+  justify-self: end;
+  justify-items: end;
+  gap: 4px;
+  max-width: min(85%, 620px);
+}
+.cx-you-bubble {
+  padding: 10px 16px;
+  border-radius: 20px 20px 6px 20px;
+  background: var(--raised);
+  color: var(--bright);
+  font-size: 14.5px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.cx-you-foot { display: flex; align-items: center; gap: 2px; min-height: 30px; }
+.cx-you-foot .cx-act { opacity: 0; transition: opacity var(--step), background var(--step), color var(--step); }
+.cx-you:hover .cx-act,
+.cx-you:focus-within .cx-act { opacity: 1; }
+.cx-you-foot .cx-badge { margin-right: 4px; }
+
+.cx-rocky {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr);
+  gap: 14px;
+  align-items: start;
+}
+.cx-rocky-col { min-width: 0; padding-top: 3px; }
+.cx-rocky-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-bottom: 8px; }
+.cx-name { margin-right: 2px; color: var(--bright); font: 600 13px/1.4 var(--sans); }
+
+.cx-answer { color: var(--body); font-size: 14.5px; line-height: 1.7; overflow-wrap: anywhere; }
+.cx-answer > :last-child { margin-bottom: 0; }
+.cx-p { margin: 0 0 12px; }
+.cx-h { margin: 18px 0 8px; color: var(--bright); font-size: 15px; font-weight: 600; line-height: 1.4; }
+.cx-h:first-child { margin-top: 0; }
+.cx-ul, .cx-ol { margin: 0 0 12px; padding-left: 22px; }
+.cx-ul li, .cx-ol li { margin: 4px 0; padding-left: 2px; }
+.cx-ul li::marker, .cx-ol li::marker { color: var(--dim); }
+.cx-answer strong { color: var(--bright); font-weight: 600; }
+.cx-code-inline {
+  padding: 1px 5px;
+  border-radius: 5px;
+  background: rgba(255, 255, 255, .06);
+  color: var(--tk-key);
+  font: 12.5px var(--mono);
+}
+.cx-pre {
+  margin: 0 0 12px;
+  padding: 12px 14px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--ground);
+  color: var(--body);
+  font: 12.5px/1.55 var(--mono);
+  white-space: pre;
+}
+.cx-aside { margin: 10px 0 0; color: var(--dim); font-size: 12.5px; line-height: 1.55; }
+.cx-code-answer {
+  margin-top: 16px;
+  padding: 12px 16px 14px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+}
+.cx-code-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 8px;
+  color: var(--dim);
+  font: 500 12px var(--sans);
+}
+
+.cx-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 2px; margin-top: 12px; }
+.cx-sources-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 4px;
+  padding: 5px 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--dim) !important;
+  font-size: 12px !important;
+  transition: background var(--step), color var(--step), border-color var(--step);
+}
+.cx-sources-btn:hover { border-color: var(--dim); color: var(--bright) !important; }
+.cx-sources-btn[aria-expanded="true"] { border-color: var(--dim); background: var(--raised); color: var(--bright) !important; }
+.cx-meta {
+  display: inline-flex;
+  gap: 10px;
+  margin-left: auto;
+  color: var(--dim);
+  font: 11px var(--mono);
+}
+
+/* the decision drawer: closed by default, a quiet pill until asked */
+.cx-think { margin: 0 0 12px; }
+.cx-think-head {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 100%;
+  padding: 5px 10px 5px 9px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--dim);
+  font-size: 12.5px;
+  list-style: none;
+  cursor: pointer;
+  user-select: none;
+  transition: color var(--step), border-color var(--step);
+}
+.cx-think-head::-webkit-details-marker { display: none; }
+.cx-think-head:hover { border-color: var(--dim); color: var(--body); }
+.cx-think-title { color: var(--body); }
+.cx-think-meta { display: inline-flex; gap: 8px; font: 11px var(--mono); }
+.cx-think-chevron { display: inline-grid; transition: transform var(--step); }
+.cx-think[open] .cx-think-chevron { transform: rotate(180deg); }
+.cx-steps {
+  display: grid;
+  gap: 14px;
+  margin: 12px 0 4px 13px;
+  padding: 2px 0 2px 22px;
+  border-left: 1px solid var(--line);
+  list-style: none;
+  counter-reset: step;
+}
+/* numbered because the route really is a sequence: search, weigh, write, read */
+.cx-step { position: relative; counter-increment: step; }
+.cx-step::before {
+  content: counter(step);
+  position: absolute;
+  top: 0;
+  left: -33px;
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  background: var(--ground);
+  color: var(--dim);
+  font: 10.5px var(--mono);
+}
+.cx-step-title { margin: 1px 0 6px; color: var(--body); font-size: 13px; font-weight: 600; }
+.cx-step-row {
+  display: grid;
+  grid-template-columns: 92px minmax(0, 1fr);
+  gap: 10px;
+  margin: 0 0 2px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.cx-step-key { color: var(--dim); }
+.cx-step-val { color: var(--body); font-family: var(--mono); font-size: 11.5px; overflow-wrap: anywhere; }
+.cx-step-note { margin: 4px 0 0; color: var(--dim); font-size: 12px; line-height: 1.5; }
+.cx-step-refs { display: flex; flex-wrap: wrap; gap: 6px 2px; margin: 6px 0 8px; }
+/* inside the drawer the refs are an index, not a claim: they stay grey */
+.cx-step-refs .cx-ref { border-color: var(--line); background: var(--surface); color: var(--dim); font-size: 11px; }
+
+/* waiting: the ear moves and the line shimmers, nothing else does */
+.cx-wait-text {
+  margin: 4px 0 0;
+  color: var(--dim);
+  font-size: 13.5px;
+}
+.cx-rocky.is-failed .cx-ear i { background: var(--line); }
+.cx-fail-text { margin: 4px 0 0; color: var(--body); font-size: 14px; line-height: 1.6; }
+
+/* ---- dock: composer ---- */
+.cx-dock {
+  position: relative;
+  flex: none;
+  padding: 0 24px 14px;
+}
+.cx-composer,
+.cx-route-note,
+.cx-start { width: min(100%, var(--col)); margin-inline: auto; }
+.cx-composer {
+  display: grid;
+  gap: 8px;
+  padding: 12px 10px 10px 18px;
+  border: 1px solid var(--line);
+  border-radius: 24px;
+  background: var(--surface);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .04), 0 14px 36px rgba(0, 0, 0, .3);
+  transition: border-color var(--step);
+}
+.cx-composer:focus-within { border-color: #44505a; }
+.cx-composer textarea {
+  width: 100%;
+  min-height: 26px;
+  max-height: 200px;
+  padding: 2px 8px 0 0;
+  border: 0;
+  outline: none;
+  resize: none;
+  background: transparent;
+  color: var(--bright);
+  font: 15px/1.55 var(--sans);
+}
+.cx-composer textarea::placeholder { color: var(--dim); }
+.cx-tools { display: flex; align-items: center; gap: 6px; min-width: 0; margin-left: -8px; }
+.cx-spacer { flex: 1 1 auto; }
+
+.cx-route {
+  display: inline-flex;
+  flex: none;
+  padding: 2px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--ground);
+}
+.cx-route button {
+  padding: 6px 11px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--dim) !important;
+  font-size: 12px !important;
+  font-weight: 500 !important;
+  transition: background var(--step), color var(--step);
+}
+.cx-route button:hover { color: var(--body) !important; }
+.cx-route button[aria-checked="true"] {
+  background: var(--raised);
+  color: var(--bright) !important;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .06);
+}
+
+.cx-jev {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 5px;
+  height: 30px;
+  padding: 0 11px 0 9px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--dim) !important;
+  font-size: 12px !important;
+  font-weight: 500 !important;
+  transition: color var(--step), border-color var(--step), box-shadow var(--step);
+}
+.cx-jev:hover { border-color: var(--dim); color: var(--body) !important; }
+.cx-jev.is-on {
+  border-color: rgba(255, 215, 106, .55);
+  color: #ffd76a !important;
+  box-shadow: 0 0 10px rgba(255, 215, 106, .32), inset 0 0 6px rgba(255, 215, 106, .18);
+}
+/* on, but no key behind it: the glow would lie, so the ring breaks */
+.cx-jev.is-on.is-unarmed { border-style: dashed; box-shadow: none; color: var(--body) !important; }
+
+.cx-count { color: var(--dim); font: 11px var(--mono); font-variant-numeric: tabular-nums; }
+.cx-count.is-full { color: var(--voice); }
+
+.cx-modelwrap { position: relative; display: inline-flex; flex: 0 1 auto; align-items: center; min-width: 0; }
+.cx-modelwrap.custom .cx-model-native {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+.cx-model-native {
+  max-width: 160px;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--ground);
+  color: var(--body);
+  font: 12px var(--sans);
+  color-scheme: dark;
+}
+.cx-modelwrap.custom .cx-modelbtn[hidden] { display: inline-block; }
+.cx-modelbtn {
+  max-width: 180px;
+  min-width: 0;
+  height: 30px;
+  padding: 0 12px;
+  overflow: hidden;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--dim) !important;
+  font-size: 12.5px !important;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  transition: background var(--step), color var(--step);
+}
+.cx-modelbtn:hover,
+.cx-modelbtn[aria-expanded="true"] { background: var(--raised); color: var(--bright) !important; }
+.cx-modelpanel {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 10px);
+  z-index: 30;
+  display: grid;
+  gap: 2px;
+  min-width: 240px;
+  max-width: min(320px, calc(100vw - 32px));
+  max-height: 300px;
+  overflow: auto;
+  padding: 6px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--raised);
+  box-shadow: 0 16px 40px rgba(0, 0, 0, .55), inset 0 1px 0 rgba(255, 255, 255, .05);
+}
+.cx-modelpanel[hidden] { display: none; }
+.cx-modelopt {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 10px;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--body) !important;
+  font-size: 13px !important;
+  text-align: left;
+}
+.cx-modelopt:hover,
+.cx-modelopt:focus-visible { outline: none; background: var(--surface); color: var(--bright) !important; }
+.cx-modelname { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cx-check { color: var(--bright); visibility: hidden; }
+.cx-modelopt[aria-selected="true"] .cx-check { visibility: visible; }
+
+.cx-send {
+  display: inline-grid;
+  flex: none;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: var(--bright);
+  color: var(--ground) !important;
+  transition: background var(--step), color var(--step), transform 140ms var(--ease);
+}
+.cx-send:disabled { background: var(--raised); color: var(--dim) !important; cursor: default; }
+.cx-send:active:not(:disabled) { transform: scale(.94); }
+.cx-send-stop { display: none !important; }
+.is-busy .cx-send-go { display: none !important; }
+.is-busy .cx-send-stop { display: block !important; }
+
+.cx-route-note {
+  min-height: 1.5em;
+  margin-block: 8px 0;
+  padding: 0 18px;
+  color: var(--dim);
+  font-size: 11.5px;
+  line-height: 1.5;
+  text-align: center;
+}
+
+.cx-jump {
+  position: absolute;
+  top: -46px;
+  left: 50%;
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  background: var(--raised);
+  color: var(--body) !important;
+  box-shadow: 0 8px 20px rgba(0, 0, 0, .4);
+  transform: translateX(-50%);
+}
+.cx-jump[hidden] { display: none; }
+
+/* ---- empty-state start: suggestions and how answers work ---- */
+.cx-start { display: none; }
+.cx[data-empty="true"] .cx-start { display: grid; gap: 22px; margin-top: 18px; }
+.cx-suggest { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.cx-sug {
+  display: grid;
+  align-content: start;
+  gap: 4px;
+  min-width: 0;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: transparent;
+  text-align: left;
+  transition: background var(--step), border-color var(--step);
+}
+.cx-sug:hover { border-color: #3d4750; background: var(--surface); }
+.cx-sug-route { display: inline-flex; align-items: center; gap: 6px; color: var(--dim); font-size: 11.5px; }
+.cx-sug-text { overflow: hidden; color: var(--bright); font-size: 13.5px; line-height: 1.45; text-overflow: ellipsis; white-space: nowrap; }
+.cx-sug-hint { color: var(--dim); font-size: 11.5px; }
+
+.cx-how {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 18px;
+  margin: 0;
+  padding: 16px 4px 0;
+  border-top: 1px solid var(--line);
+  list-style: none;
+  color: var(--dim);
+  font-size: 12px;
+  line-height: 1.55;
+}
+.cx-how b { display: block; margin-bottom: 3px; color: var(--body); font-weight: 600; }
+
+/* ---- sources drawer ---- */
+.cx-sources {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  border-left: 1px solid var(--line);
+  background: rgba(0, 0, 0, .16);
+}
+.cx-sources[hidden] { display: none; }
+.cx-sources > * { flex: none; width: var(--src-w); }
+.cx-sources-head { display: flex; align-items: center; justify-content: space-between; padding: 8px 10px 4px 20px; }
+.cx-sources-head h2 { margin: 0; color: var(--bright); font: 600 14px/1.3 var(--sans); }
+.cx-sources-for {
+  margin: 0 20px 14px;
+  padding-left: 10px;
+  border-left: 2px solid var(--line);
+  color: var(--dim);
+  font-size: 12.5px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+.cx-sources > .cx-sources-body {
+  flex: 1 1 auto;
+  display: grid;
+  align-content: start;
+  gap: 22px;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0 20px 24px;
+}
+.cx-src-group { display: grid; gap: 8px; }
+.cx-src-title {
+  display: flex;
+  justify-content: space-between;
+  margin: 0;
+  color: var(--dim);
+  font: 600 12px/1.3 var(--sans);
+}
+.cx-src-count { font: 500 11.5px var(--mono); }
+.cx-src {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--ground);
+}
+.cx-src-top { display: flex; align-items: center; gap: 8px; min-width: 0; margin: 0; }
+.cx-kind {
+  flex: none;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--raised);
+  color: var(--body);
+  font: 500 11px/1.5 var(--sans);
+}
+.cx-kind.is-why { color: var(--voice); }
+.cx-src-ref { min-width: 0; overflow: hidden; color: var(--dim); font: 11px var(--mono); text-overflow: ellipsis; white-space: nowrap; }
+.cx-src-text { margin: 0; color: var(--body); font-size: 12.5px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
+.cx-src-text.is-folded {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 6;
+}
+.cx-src .cx-link { justify-self: start; font-size: 12px !important; }
+.cx-src-meta { display: flex; flex-wrap: wrap; gap: 4px 10px; margin: 0; color: var(--dim); font: 11px var(--mono); }
+.cx-src-fields {
+  display: grid;
+  grid-template-columns: 74px minmax(0, 1fr);
+  gap: 6px 10px;
+  margin: 2px 0 0;
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+.cx-src-fields dt { color: var(--dim); font-size: 11.5px; }
+/* five lines each; the whole record is one click below */
+.cx-src-fields dd {
+  display: -webkit-box;
+  margin: 0;
+  overflow: hidden;
+  color: var(--body);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 5;
+}
+.cx-src-fields dd.is-mono { font: 11.5px/1.55 var(--mono); }
+.cx-raw summary {
+  width: fit-content;
+  color: var(--dim);
+  font-size: 11.5px;
+  cursor: pointer;
+}
+.cx-raw summary:hover { color: var(--body); }
+.cx-raw[open] summary { margin-bottom: 6px; }
+.cx-raw .cx-pre { max-height: 260px; margin: 0; font-size: 11px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.cx-src .cx-pre { max-height: 280px; margin: 0; font-size: 11.5px; }
+.cx-src-empty { margin: 0; color: var(--dim); font-size: 12.5px; }
+.cx-trace { margin: 0; color: var(--dim); font: 11px/1.6 var(--mono); overflow-wrap: anywhere; }
+.cx-trace.is-held { color: var(--voice); }
+
+/* ---- motion: one arrival, one listening ear, one shimmer ---- */
+@media (prefers-reduced-motion: no-preference) {
+  .cx-msg.is-new { animation: cx-in 240ms var(--ease) both; }
+  .cx[data-empty="true"] .cx-face { animation: cx-doze 5s ease-in-out infinite; }
+  .cx-ear.is-listening i { animation: cx-ear 900ms ease-in-out infinite; }
+  .cx-ear.is-listening i:nth-child(2) { animation-delay: 90ms; }
+  .cx-ear.is-listening i:nth-child(3) { animation-delay: 180ms; }
+  .cx-ear.is-listening i:nth-child(4) { animation-delay: 270ms; }
+  .cx-ear.is-listening i:nth-child(5) { animation-delay: 360ms; }
+  .cx-wait-text {
+    background: linear-gradient(90deg, var(--dim) 0%, var(--bright) 45%, var(--dim) 70%) 0 0 / 220% 100%;
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    animation: cx-shimmer 2.2s linear infinite;
+  }
+  @keyframes cx-in { from { opacity: 0; transform: translateY(6px); } }
+  @keyframes cx-ear { 0%, 100% { transform: scaleY(.6); } 50% { transform: scaleY(1.25); } }
+  @keyframes cx-shimmer { from { background-position: 120% 0; } to { background-position: -100% 0; } }
+  @keyframes cx-doze { 50% { opacity: .5; } }
+}
+@media (prefers-reduced-motion: reduce) {
+  .cx, .cx * { transition: none !important; }
+}
+
+/* ---- narrow: the chat list and sources float over the thread ---- */
+@media (max-width: 900px) {
+  .cx,
+  .cx[data-side="closed"],
+  .cx[data-sources="open"],
+  .cx[data-side="closed"][data-sources="open"] { grid-template-columns: minmax(0, 1fr); }
+  .cx-side {
+    position: absolute;
+    inset: 0 auto 0 0;
+    z-index: 25;
+    width: min(300px, 86vw);
+    background: var(--ground);
+    box-shadow: 12px 0 40px rgba(0, 0, 0, .5);
+    transform: translateX(-102%);
+    transition: transform 240ms var(--ease);
+  }
+  .cx-side > * { width: auto; }
+  .cx[data-side="open"] .cx-side { transform: none; }
+  .cx[data-side="closed"] .cx-side { visibility: visible; }
+  .cx[data-side="open"] .cx-main::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: 20;
+    background: rgba(0, 0, 0, .45);
+  }
+  .cx[data-side="open"] #cx-side-open { display: inline-grid; }
+  .cx-sources {
+    position: absolute;
+    inset: 0 0 0 auto;
+    z-index: 26;
+    width: min(420px, 100%);
+    background: var(--ground);
+    box-shadow: -12px 0 40px rgba(0, 0, 0, .5);
+  }
+  .cx-sources > * { width: auto; }
+  .cx-log { padding: 8px 14px 24px; }
+  .cx-dock { padding: 0 12px 12px; }
+  .cx-suggest, .cx-how { grid-template-columns: minmax(0, 1fr); }
+  .cx-how { gap: 10px; }
+  .cx-modelbtn { max-width: 120px; }
+  .bar .model-chip { display: none; }
+}
+@media (max-width: 560px) {
+  .cx-route button { padding: 6px 8px; }
+  .cx-jev span { display: none; }
+  .cx-jev { padding: 0 8px; }
+  .cx-hello { font-size: 22px; }
+  .cx-face { font-size: 6px; }
+  .cx-meta { display: none; }
+}
+
+.jev-trace { margin: 10px 0 0; color: var(--dim); font: 11px/1.5 var(--mono); }
+.jev-trace-flag { color: var(--body); }
+
+/* ---- listening tab panel (suffix -tab: .listen alone is the boot loader) ---
+ * One column is the record: who is heard, a waveform of what was heard, then
+ * the timeline. The rail explains the feature and never scrolls away. The
+ * sheet rule holds: clay only where Rocky heard something, hairlines not
+ * cards, and a weak link never wears the solid look of heard evidence. */
+.listen-tab {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 300px;
+  align-items: start;
+  max-width: min(1360px, 100%);
+  min-width: 0;
+  overflow-x: clip;
+}
+/* several pieces set display, so [hidden] needs the weight back here */
+.listen-tab [hidden] { display: none !important; }
+/* the padding lives in variables so the hero and waveform can bleed out by
+   exactly that much and reach the panel edges */
+.listen-main {
+  --pad-t: 22px;
+  --pad-r: 32px;
+  --pad-l: 24px;
+  min-width: 0;
+  padding: var(--pad-t) var(--pad-r) 48px var(--pad-l);
+}
+.listen-tab button:focus-visible,
+.listen-more > summary:focus-visible { outline: 2px solid var(--voice-dim); outline-offset: 2px; }
+
+/* hero: the repo and whether Rocky hears it. Full bleed, so its warmth has
+   no seam where the column padding starts. */
+.listen-hero {
+  margin: calc(var(--pad-t) * -1) calc(var(--pad-r) * -1) 0 calc(var(--pad-l) * -1);
+  padding: var(--pad-t) var(--pad-r) 22px var(--pad-l);
+  border-bottom: 1px solid var(--line);
+}
+.listen-tab[data-state="on"] .listen-hero {
+  background: radial-gradient(520px 200px at 0% 42%, rgba(242, 160, 106, .06), transparent 70%);
+}
+.listen-top { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; }
+.listen-tab h2 { margin: 0; font: 600 13px/1.3 var(--sans); color: var(--body); }
+.listen-status { margin: 0; font-size: 12px; color: var(--dim); font-variant-numeric: tabular-nums; }
+.listen-status.is-resolved { color: var(--body); }
+.listen-ident { display: flex; align-items: center; gap: 14px; margin-top: 20px; min-width: 0; }
+.listen-repo {
+  margin: 0;
+  font: 600 clamp(22px, 1.1rem + 1vw, 30px)/1.1 var(--sans);
+  letter-spacing: -0.015em;
+  color: var(--bright);
+  overflow-wrap: anywhere;
+}
+/* the ear: five bars, grey while off, clay and slowly breathing while on */
+.listen-ear { display: inline-flex; align-items: center; gap: 3px; height: 26px; flex: none; }
+.listen-ear i { width: 3px; height: 34%; border-radius: 2px; background: var(--line); transform-origin: center; }
+.listen-ear i:nth-child(2), .listen-ear i:nth-child(4) { height: 66%; }
+.listen-ear i:nth-child(3) { height: 100%; }
+.listen-tab[data-state="on"] .listen-ear i { background: var(--voice); }
+@media (prefers-reduced-motion: no-preference) {
+  .listen-tab[data-state="on"] .listen-ear i { animation: listen-ear 2.4s ease-in-out infinite; }
+  .listen-tab[data-state="on"] .listen-ear i:nth-child(2) { animation-delay: -0.4s; }
+  .listen-tab[data-state="on"] .listen-ear i:nth-child(3) { animation-delay: -0.8s; }
+  .listen-tab[data-state="on"] .listen-ear i:nth-child(4) { animation-delay: -1.2s; }
+  .listen-tab[data-state="on"] .listen-ear i:nth-child(5) { animation-delay: -1.6s; }
+}
+@keyframes listen-ear { 0%, 100% { transform: scaleY(.55); } 50% { transform: scaleY(1); } }
+
+.listen-spin { display: inline-block; width: 11px; height: 11px; border: 2px solid var(--line); border-top-color: var(--body); border-radius: 50%; vertical-align: -1px; animation: listen-spin 0.9s linear infinite; }
+@keyframes listen-spin { to { transform: rotate(360deg); } }
+.listen-filters { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 8px 10px; align-items: end; min-width: 0; }
+.listen-filters label { display: flex; flex-direction: column; gap: 3px; font-size: 11px; color: var(--dim); min-width: 0; }
+.listen-filters label.wide { grid-column: span 2; }
+@media (max-width: 720px) { .listen-filters label.wide { grid-column: span 1; } }
+.listen-filters input, .listen-filters select { width: 100%; min-width: 0; max-width: 100%; font: 12px var(--mono); padding: 7px 9px; border: 1px solid var(--line); border-radius: 6px; background: var(--ground); color: var(--bright); color-scheme: dark; }
+.listen-filters input::placeholder { color: var(--dim); font-family: var(--sans); }
+.listen-filters input:focus, .listen-filters select:focus { border-color: var(--voice-dim); outline: none; }
+.listen-pick { display: flex; align-items: center; gap: 8px 10px; flex: 0 1 400px; min-width: 0; margin-left: auto; }
+.listen-pick label { font-size: 12px; color: var(--dim); }
+.listen-pick select, .listen-pick input { flex: 1 1 200px; min-width: 0; font: 12.5px var(--mono); padding: 7px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--ground); color: var(--bright); color-scheme: dark; }
+.listen-pick input::placeholder { color: var(--dim); font-family: var(--sans); }
+.listen-pick select:focus, .listen-pick input:focus { border-color: var(--voice-dim); outline: none; }
+.listen-pick:has(input:not([hidden])) { flex-wrap: wrap; }
+.listen-hint { margin: 6px 0 0 auto; max-width: 400px; color: var(--dim); font-size: 11.5px; line-height: 1.5; text-align: right; }
+
+.listen-consent { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; margin-top: 10px; font-size: 13px; color: var(--dim); }
+.listen-consent-state { margin: 0; max-width: 62ch; line-height: 1.55; }
+.listen-consent-state b { color: var(--voice); font-weight: 600; }
+.listen-consent-btn { padding: 5px 12px; border: 1px solid var(--line); border-radius: 6px; background: transparent; color: var(--body); font: 500 12px var(--sans); cursor: pointer; }
+.listen-consent-btn:hover { color: var(--bright); border-color: var(--dim); }
+.listen-consent-btn:active, .listen-go:active { transform: translateY(1px); }
+/* the offer is the one decision on this tab, so it gets the rail of clay */
+.listen-offer { border-left: 2px solid var(--voice-dim); padding: 2px 0 2px 16px; max-width: 62ch; line-height: 1.6; }
+.listen-offer p { margin: 0 0 8px; }
+.listen-offer-title { color: var(--bright); font-weight: 600; }
+.listen-go { margin-top: 4px; padding: 8px 18px; border: 1px solid var(--voice); border-radius: 6px; background: var(--voice); color: var(--ground); font: 600 12.5px var(--sans); cursor: pointer; }
+.listen-go:hover { background: #f6b58a; border-color: #f6b58a; }
+.listen-go:disabled, .listen-consent-btn:disabled { opacity: 0.55; cursor: progress; }
+.listen-refused { flex-basis: 100%; margin: 0; color: var(--del-mark); font-size: 12px; }
+
+/* waveform: what Rocky heard over time, one bar per slice */
+/* the track runs edge to edge; only its labels keep the column padding */
+.listen-wave { margin: 24px calc(var(--pad-r) * -1) 0 calc(var(--pad-l) * -1); }
+.listen-wave-bars { display: flex; align-items: flex-end; gap: 3px; height: 56px; border-bottom: 1px solid var(--line); }
+.wave-bar { flex: 1 1 0; min-width: 0; height: calc(var(--h) * 100%); background: var(--voice); border-radius: 1px 1px 0 0; transform-origin: bottom; }
+.wave-bar.is-quiet { height: 2px; background: var(--line); }
+.wave-bar:not(.is-quiet):hover { background: var(--bright); }
+@media (prefers-reduced-motion: no-preference) {
+  .listen-wave-bars.is-rising .wave-bar { animation: wave-rise 560ms cubic-bezier(.16, 1, .3, 1) both; animation-delay: calc(var(--i) * 10ms); }
+}
+@keyframes wave-rise { from { transform: scaleY(0); } }
+.listen-wave-axis { display: flex; justify-content: space-between; margin-top: 6px; padding: 0 var(--pad-r) 0 var(--pad-l); font-size: 11px; color: var(--dim); font-variant-numeric: tabular-nums; }
+.listen-stats { display: flex; flex-wrap: wrap; gap: 6px 28px; margin: 14px 0 0; }
+.listen-stat { display: flex; align-items: baseline; gap: 6px; }
+.listen-stat dd { order: -1; margin: 0; font: 600 15px/1 var(--sans); color: var(--bright); font-variant-numeric: tabular-nums; }
+.listen-stat dt { font-size: 12px; color: var(--dim); }
+
+/* toolbar: filters open in place, the clear control stays put on the right */
+.listen-toolbar { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: 6px 12px; padding: 16px 0 4px; }
+.listen-more { grid-column: 1; min-width: 0; }
+.listen-more > summary { display: inline-flex; align-items: center; gap: 9px; list-style: none; cursor: pointer; padding: 5px 11px; border: 1px solid var(--line); border-radius: 6px; font-size: 12px; color: var(--body); }
+.listen-more > summary::-webkit-details-marker { display: none; }
+.listen-more > summary::after { content: ""; width: 5px; height: 5px; margin-top: -3px; border-right: 1.5px solid var(--dim); border-bottom: 1.5px solid var(--dim); transform: rotate(45deg); transition: transform var(--step); }
+.listen-more[open] > summary::after { margin-top: 2px; transform: rotate(-135deg); }
+.listen-more > summary:hover { border-color: var(--dim); }
+.listen-more[open] > .listen-filters { margin-top: 10px; padding: 12px; border: 1px solid var(--line); background: var(--surface); }
+.listen-clear { grid-column: 2; grid-row: 1; padding: 5px 10px; border: 1px solid transparent; border-radius: 6px; background: none; color: var(--dim); font: 12px var(--sans); cursor: pointer; }
+.listen-clear:hover { color: var(--bright); }
+.listen-coverage { grid-column: 1 / -1; margin: 0; font-size: 11.5px; color: var(--dim); overflow-wrap: anywhere; }
+/* nothing to filter until Rocky hears the repo */
+.listen-tab:not([data-state="on"]) .listen-more,
+.listen-tab:not([data-state="on"]) .listen-clear { display: none; }
+.listen-coverage[data-status="partial"] { color: var(--body); }
+
+/* timeline: one row per change, a rail dot whose fill says how Rocky knows */
+.listen-chain { list-style: none; margin: 0; padding: 0; min-width: 0; }
+.listen-day { padding: 18px 0 6px 8px; font: 600 12px/1 var(--sans); color: var(--body); }
+.listen-row { min-width: 0; }
+.listen-row-main {
+  display: grid;
+  grid-template-columns: 76px 14px minmax(0, 1fr) auto 10px;
+  grid-template-areas: "when dot what basis chev";
+  column-gap: 12px;
+  align-items: start;
+  width: 100%;
+  padding: 10px 8px;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.listen-row-main:hover { background: rgba(255, 255, 255, .03); }
+.listen-row-main::after { grid-area: chev; content: ""; width: 5px; height: 5px; margin-top: 7px; border-right: 1.5px solid var(--dim); border-bottom: 1.5px solid var(--dim); transform: rotate(-45deg); transition: transform var(--step); }
+.listen-row-main[aria-expanded="true"]::after { transform: rotate(45deg); }
+.listen-when { grid-area: when; display: flex; flex-direction: column; gap: 2px; font-variant-numeric: tabular-nums; }
+.listen-clock { font-size: 12.5px; color: var(--body); }
+.listen-ago { font-size: 11px; color: var(--dim); }
+.listen-dot { grid-area: dot; position: relative; align-self: stretch; }
+.listen-dot::before { content: ""; position: absolute; top: -10px; bottom: -10px; left: 50%; width: 1px; background: var(--line); }
+.listen-dot::after { content: ""; position: absolute; top: 5px; left: 50%; width: 9px; height: 9px; margin-left: -4.5px; border-radius: 50%; box-sizing: border-box; box-shadow: 0 0 0 3px var(--ground); }
+.tone-heard .listen-dot::after, .tone-heard > .lg-mark { background: var(--voice); }
+.tone-weak .listen-dot::after, .tone-weak > .lg-mark { background: var(--ground); border: 1.5px dashed var(--dim); }
+.tone-none .listen-dot::after, .tone-none > .lg-mark { background: var(--ground); border: 1.5px solid var(--dim); }
+.listen-what { grid-area: what; min-width: 0; }
+.listen-title { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; }
+.listen-kind { font-size: 12px; font-weight: 500; color: var(--dim); }
+.listen-kind.is-deleted { color: var(--del-mark); }
+.listen-path { font: 12.5px/1.45 var(--mono); overflow-wrap: anywhere; }
+.listen-dir { color: var(--dim); }
+.listen-base { color: var(--bright); }
+.listen-meta { display: flex; flex-wrap: wrap; gap: 2px 14px; margin-top: 3px; font-size: 11.5px; color: var(--dim); }
+.listen-basis { grid-area: basis; padding: 2px 8px; border: 1px solid transparent; border-radius: 6px; font-size: 11.5px; color: var(--dim); white-space: nowrap; }
+.tone-heard .listen-basis { color: var(--voice); }
+/* weak non-causal context: visibly candidate, never causal styling */
+.listen-row.weak-candidate .listen-basis { border: 1px dashed var(--dim); color: var(--body); }
+.listen-row.weak-candidate .listen-base { color: var(--body); }
+
+/* 103px = row padding + time column + gap + half the dot column: the
+   border lands on the rail, so the timeline line runs through */
+.listen-evidence { margin: 0 8px 0 103px; padding: 4px 0 16px 19px; border-left: 1px solid var(--line); font-size: 12px; }
+@media (prefers-reduced-motion: no-preference) {
+  .listen-evidence.is-opening { animation: listen-open 220ms cubic-bezier(.16, 1, .3, 1); }
+}
+@keyframes listen-open { from { opacity: 0; transform: translateY(-4px); } }
+.listen-means { margin: 0 0 10px; max-width: 64ch; color: var(--body); line-height: 1.55; }
+.listen-ev-facts { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 5px 18px; margin: 0; }
+.listen-ev-facts dt { color: var(--dim); }
+.listen-ev-facts dd { margin: 0; color: var(--body); white-space: pre-line; overflow-wrap: anywhere; }
+.listen-ev-facts dd.is-code { font: 11.5px/1.5 var(--mono); }
+
+.listen-firsts { margin: 16px 0 0 8px; padding: 10px 12px; border: 1px dashed var(--line); color: var(--dim); font-size: 12px; }
+.listen-gap { margin: 10px 0; padding: 10px 12px; border: 1px dashed var(--dim); color: var(--body); font-size: 12px; }
+.listen-empty { max-width: 62ch; margin: 12px 0 0 8px; padding: 14px 16px; border: 1px dashed var(--line); color: var(--dim); font-size: 12.5px; line-height: 1.6; }
+.listen-empty b { display: block; color: var(--body); font-weight: 600; }
+.listen-empty p { margin: 0; }
+
+/* guide rail: the feature explained, static so it reads with JS off */
+.listen-guide { position: sticky; top: 0; max-height: calc(100dvh - var(--bar-h) - 36px); overflow-y: auto; padding: 22px 24px 32px; border-left: 1px solid var(--line); font-size: 12px; line-height: 1.55; color: var(--dim); }
+.listen-guide section + section { margin-top: 26px; padding-top: 22px; border-top: 1px solid var(--line); }
+.listen-guide h3 { margin: 0 0 12px; font: 600 12.5px/1.3 var(--sans); color: var(--body); }
+.listen-guide b { color: var(--body); font-weight: 600; }
+.listen-steps { list-style: none; margin: 0; padding: 0; counter-reset: step; display: grid; gap: 12px; }
+.listen-steps li { position: relative; padding-left: 30px; counter-increment: step; }
+.listen-steps li::before { content: counter(step); position: absolute; left: 0; top: -1px; width: 20px; height: 20px; display: grid; place-items: center; border: 1px solid var(--line); border-radius: 50%; font-size: 11px; color: var(--body); }
+.listen-legend { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
+.listen-legend li { position: relative; padding-left: 22px; }
+.listen-legend b { display: block; }
+.lg-mark { position: absolute; left: 2px; top: 5px; width: 9px; height: 9px; border-radius: 50%; box-sizing: border-box; }
+.listen-topfiles { list-style: none; margin: 0 -8px; padding: 0; display: grid; gap: 2px; }
+.listen-top-btn { position: relative; display: flex; align-items: baseline; justify-content: space-between; gap: 12px; width: 100%; padding: 6px 8px 8px; border: 0; border-radius: 6px; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.listen-top-btn::after { content: ""; position: absolute; left: 8px; bottom: 3px; width: calc(var(--w) * (100% - 16px)); height: 2px; border-radius: 1px; background: var(--voice-dim); }
+.listen-top-btn:hover { background: var(--surface); }
+.listen-top-btn[aria-pressed="true"] { background: var(--raised); }
+.listen-top-btn[aria-pressed="true"]::after { background: var(--voice); }
+.listen-top-btn .listen-path { font-size: 11.5px; min-width: 0; }
+.listen-top-n { color: var(--body); font-variant-numeric: tabular-nums; }
+.listen-facts { margin: 0; padding-left: 16px; display: grid; gap: 7px; }
+
+@media (max-width: 1040px) {
+  .listen-tab { grid-template-columns: minmax(0, 1fr); }
+  .listen-guide { position: static; max-height: none; overflow: visible; border-left: 0; border-top: 1px solid var(--line); padding: 22px 24px 40px; }
+}
+@media (max-width: 640px) {
+  .listen-main { --pad-t: 18px; --pad-r: 16px; --pad-l: 16px; padding-bottom: 32px; }
+  .listen-guide { padding: 22px 16px 40px; }
+  .listen-pick { flex: 1 1 100%; margin-left: 0; }
+  .listen-hint { margin-left: 0; text-align: left; }
+  .listen-row-main {
+    grid-template-columns: 14px minmax(0, 1fr) 10px;
+    grid-template-areas: "dot when chev" "dot what what" "dot basis basis";
+    row-gap: 4px;
+  }
+  .listen-when { flex-direction: row; gap: 10px; align-items: baseline; }
+  .listen-basis { justify-self: start; margin-top: 4px; }
+  .listen-row:not(.weak-candidate) .listen-basis { padding-left: 0; }
+  .listen-evidence { margin-left: 15px; }
 }

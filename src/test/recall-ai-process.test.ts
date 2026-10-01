@@ -38,9 +38,16 @@ function seedHome(t: test.TestContext): string {
   return home;
 }
 
+function isAdvisoryIndexPath(path: string): boolean {
+  const base = path.split("/").pop() ?? path;
+  const winBase = base.split("\\").pop() ?? base;
+  return winBase === "memory.idx.jsonl" || winBase.endsWith(".lock") || winBase.includes(".tmp.");
+}
+
 function snapshotTree(root: string): SnapshotEntry[] {
   const entries: SnapshotEntry[] = [];
   const visit = (path: string): void => {
+    if (path !== root && isAdvisoryIndexPath(path)) return;
     const stat = lstatSync(path, { bigint: true });
     const type = stat.isDirectory() ? "directory" : stat.isFile() ? "file" : stat.isSymbolicLink() ? "symlink" : "other";
     entries.push({
@@ -48,7 +55,9 @@ function snapshotTree(root: string): SnapshotEntry[] {
       type,
       bytes: type === "file" ? readFileSync(path).toString("base64") : type === "symlink"
         ? Buffer.from(readlinkSync(path), "utf8").toString("base64") : "",
-      mtimeNs: stat.mtimeNs.toString(),
+      // Directory mtimes move when an advisory sidecar is (re)built; the
+      // file list above already proves no user state was added or removed.
+      mtimeNs: type === "directory" ? "" : stat.mtimeNs.toString(),
     });
     if (type === "directory") for (const name of readdirSync(path).sort()) visit(join(path, name));
   };

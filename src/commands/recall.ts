@@ -9,7 +9,7 @@
 import { createOllamaClient } from "../ai/ollama.js";
 import { type AiAct, type AiStatus, type RecallWithAiPort } from "../ai/port.js";
 import { createRecallAiPort, formatModelExplanation, singleFlightRecallAi } from "../ai/recall-ai.js";
-import { createMemoryQueries, fixFromElsewhere, type MemoryQueries, type RecallHit } from "../core/memory-query.js";
+import { createMemoryQueries, fixFromElsewhere, loadDurableMemorySnapshot, queryRecall, queryRecentFailures, type MemoryQueries, type RecallHit } from "../core/memory-query.js";
 import { isCompleteMemoryCoverage, linkBasisRank } from "../core/memory-read.js";
 import { resolveRockyPaths } from "../core/state-paths.js";
 import { ago, detail, elapsed, heading, phrase, phraseForAct, say } from "../ui/rocky.js";
@@ -184,24 +184,50 @@ export async function recall(argv: readonly string[], dependencies?: RecallDepen
   let hits: RecallHit[];
   let coverage;
   try {
-    hits = parsed.useAi
-      ? deps.memory.recall({ query, limit: 5 }).slice(0, 5)
-      : deps.memory.recall({ query });
-    try { coverage = deps.memory.coverage?.(); } catch { coverage = undefined; }
-    if (coverage !== undefined && !isCompleteMemoryCoverage(coverage)) {
-      detail(`memory coverage incomplete: version ${coverage.version}, scanned ${coverage.scanned}, skipped ${coverage.skipped}, truncated ${coverage.truncated}, complete ${coverage.complete}${coverage.reason === undefined ? "" : `, reason ${coverage.reason}`}`);
-    }
-    if (hits.length === 0) {
+    const now = Date.now();
+    const snapshot = loadDurableMemorySnapshot(deps.memory, now);
+    if (snapshot !== undefined) {
+      // Single durable load: reuse the paired records+coverage for recall and
+      // the empty-memory check instead of a second full load on the miss path.
+      hits = parsed.useAi
+        ? queryRecall(snapshot.records, { query, limit: 5, now }).slice(0, 5)
+        : queryRecall(snapshot.records, { query, now });
+      coverage = snapshot.coverage;
       if (coverage !== undefined && !isCompleteMemoryCoverage(coverage)) {
-        say("memory coverage incomplete. I cannot say no match, question");
+        detail(`memory coverage incomplete: version ${coverage.version}, scanned ${coverage.scanned}, skipped ${coverage.skipped}, truncated ${coverage.truncated}, complete ${coverage.complete}${coverage.reason === undefined ? "" : `, reason ${coverage.reason}`}`);
+      }
+      if (hits.length === 0) {
+        if (coverage !== undefined && !isCompleteMemoryCoverage(coverage)) {
+          say("memory coverage incomplete. I cannot say no match, question");
+          return 1;
+        }
+        if (queryRecentFailures(snapshot.records, { limit: 1, now }).length === 0) {
+          say("memory is empty. no errors yet. this is good... or you not use me yet, question");
+          return 0;
+        }
+        say("I listen to memory. nothing match. maybe error is new, maybe words are different.");
         return 1;
       }
-      if (deps.memory.recentFailures({ limit: 1 }).length === 0) {
-        say("memory is empty. no errors yet. this is good... or you not use me yet, question");
-        return 0;
+    } else {
+      hits = parsed.useAi
+        ? deps.memory.recall({ query, limit: 5 }).slice(0, 5)
+        : deps.memory.recall({ query });
+      try { coverage = deps.memory.coverage?.(); } catch { coverage = undefined; }
+      if (coverage !== undefined && !isCompleteMemoryCoverage(coverage)) {
+        detail(`memory coverage incomplete: version ${coverage.version}, scanned ${coverage.scanned}, skipped ${coverage.skipped}, truncated ${coverage.truncated}, complete ${coverage.complete}${coverage.reason === undefined ? "" : `, reason ${coverage.reason}`}`);
       }
-      say("I listen to memory. nothing match. maybe error is new, maybe words are different.");
-      return 1;
+      if (hits.length === 0) {
+        if (coverage !== undefined && !isCompleteMemoryCoverage(coverage)) {
+          say("memory coverage incomplete. I cannot say no match, question");
+          return 1;
+        }
+        if (deps.memory.recentFailures({ limit: 1 }).length === 0) {
+          say("memory is empty. no errors yet. this is good... or you not use me yet, question");
+          return 0;
+        }
+        say("I listen to memory. nothing match. maybe error is new, maybe words are different.");
+        return 1;
+      }
     }
   } catch {
     say("memory file does not open for me. I answer from nothing.");

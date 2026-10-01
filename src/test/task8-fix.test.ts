@@ -29,6 +29,11 @@ const expectedCatalog = [
   "fetch_record",
   "why_file",
   "teach_lookup",
+  "activity_recent",
+  "activity_for_file",
+  "bundles_list",
+  "bundle_get",
+  "session_timeline",
 ] as const;
 
 class ModernHealthSession implements ProcessSession {
@@ -168,7 +173,7 @@ const registration: McpRegistration = {
   env: { ROCKY_MCP_EXPOSURE: "sanitized" },
 };
 
-test("MCP catalog exports one versioned seven-tool source and registry order follows it", () => {
+test("MCP catalog exports one versioned thirteen-tool source and registry order follows it", () => {
   // These exports intentionally do not come from setup: health consumes the
   // read-only MCP catalog without importing any setup writer.
   assert.equal(MCP_TOOL_CATALOG_CONTRACT.version, MCP_TOOL_CATALOG_VERSION);
@@ -178,7 +183,8 @@ test("MCP catalog exports one versioned seven-tool source and registry order fol
   assert.equal(Reflect.set(MCP_TOOL_CATALOG_CONTRACT, "version", 2), false);
   assert.throws(() => (MCP_TOOL_CATALOG as unknown as string[]).push("mutated"), TypeError);
   assert.equal(MCP_TOOL_CATALOG_VERSION, 1);
-  assert.deepEqual([...MCP_TOOL_CATALOG], expectedCatalog);
+  assert.deepEqual([...MCP_TOOL_CATALOG.slice(0, 8)], [...expectedCatalog.slice(0, 8)]);
+  assert.deepEqual([...MCP_TOOL_CATALOG], [...expectedCatalog]);
   const registry = createToolRegistry({
     exposure: "sanitized",
     memory: {} as MemoryQueries,
@@ -187,7 +193,7 @@ test("MCP catalog exports one versioned seven-tool source and registry order fol
   assert.deepEqual(registry.list().map((definition) => definition.name), expectedCatalog);
 });
 
-test("health rejects legacy four-tool servers and accepts exact seven plus foreign extras", async () => {
+test("health rejects legacy four-tool servers and accepts exact thirteen plus foreign extras", async () => {
   const old = fakeModernRunner(expectedCatalog.slice(0, 4));
   const oldResult = await checkMcpRegistration(registration, old, 250);
   assert.equal(oldResult.healthy, false);
@@ -251,7 +257,7 @@ test("setup status contract names host/MCP registration and agent-hook scope, no
   assert.match(`${help.stdout}${help.stderr}`, /spool and Ollama\/model health\s+are not\s+checked/iu);
 });
 
-test("isolated real Rocky MCP child process passes versioned seven-tool health", { timeout: 10_000 }, async (t) => {
+test("isolated real Rocky MCP child process passes versioned thirteen-tool health", { timeout: 10_000 }, async (t) => {
   const root = mkdtempSync(join(tmpdir(), "rocky-task8-mcp-health-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const result = await checkMcpRegistration({

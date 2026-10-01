@@ -33,6 +33,10 @@ export const CONCEPTS: readonly Concept[] = [
   { id: "serialization", label: "serialization", keywords: ["serialize", "json", "parse-error", "schema", "envelope", "round-trip"] },
   { id: "network-egress", label: "network egress", keywords: ["egress", "offline", "loopback", "request", "fetch", "registry"] },
   { id: "append-only-log", label: "append-only log", keywords: ["append-only", "jsonl", "truncation", "compaction", "tombstone", "offset"] },
+  { id: "control-flow", label: "control flow", keywords: ["loop", "branch", "condition", "iteration", "break", "continue", "control-flow"] },
+  { id: "program-state", label: "program state", keywords: ["state", "mutation", "assign", "update", "stale-state", "invariant"] },
+  { id: "decomposition", label: "decomposition", keywords: ["decompose", "subtask", "step", "function", "module", "separation"] },
+  { id: "data-aggregation", label: "data aggregation", keywords: ["aggregate", "sum", "average", "threshold", "budget", "filter", "group"] },
 ];
 
 export interface ConceptMatch { concept: Concept; score: number; matched: readonly string[] }

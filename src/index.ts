@@ -56,11 +56,12 @@ usage:
                             failure, and knocks (desktop notification, or a
                             bell) when it finishes. --quiet: plain facts on
                             stderr only, no persona lines, no notification.
-  rocky brief [--since <ref|24h>] [--quiet] [--ai]
+  rocky brief [--since <ref|24h>] [--quiet] [--ai] [--decompose]
                             hear what changed since last brief: commits by
                             area, remembered failures and fixes, touched
                             invariant guards, questions reviewer may ask.
                             --ai polishes wording via loopback Ollama only.
+                            --decompose appends behavior, fields, verify checklist.
   rocky recall [--] <query...>
                             ask Rocky's memory. matches words from error or command.
   rocky recall --ai [--] <query...>
@@ -90,7 +91,8 @@ usage:
                             dash just starts on the Dash segment. loopback only,
                             fresh token each launch. --no-open prints URL instead,
                             --port=<n> picks port. ctrl-c stops rocky.
-  rocky stats               what Rocky holds in memory.
+  rocky stats [--cycles]      what Rocky holds in memory. --cycles lists
+                             top failure fingerprints with counts, local only.
   rocky journal "<note>"    write one line dogfood note. local file only.
   rocky invariants          list remembered invariant notes from .rocky/invariants.md
                             and hear globs that guard nothing.
@@ -120,8 +122,17 @@ usage:
   rocky setup --status       report host/MCP registration via rocky setup --check and
                             agent-hook state/capability; spool and Ollama/model health
                             are not checked.
+  rocky setup --repo <path> --allow-capture|--revoke-capture|--check-capture|--purge-capture
+                            listening consent for one git repo. disk budget 160 MiB per
+                            repo, oldest pruned first. check shows disk held. purge
+                            revokes and deletes history, no undo.
   rocky check [--pre-push|--install-hook|--offline|--quiet]
                             hull check before push.
+  rocky check --prompt "<text>" [--stdin] [--quiet]
+                            score prompt clarity locally, no model, always exits 0.
+  rocky check --decompose [--quiet]
+                            split staged change into behavior, fields, verify.
+                            local only, always exits 0.
   rocky hook install        put Rocky's ears in your bash. every command heard,
                             failures remembered, dangerous commands questioned.
   rocky hook uninstall      remove the ears. memory stays.
@@ -130,14 +141,19 @@ usage:
                             private fail-open agent hook endpoint; stdout is always {}.
   rocky hook agent-event generic --rationale "<text>" [--files a.ts,b.ts]
                             any agent says why here, one line. no vendor log needed.
+  rocky hook listen-event <harnessId> --surface <cli|ide|local>
+                            one-shot native event ingress; static argv, stdin
+                            JSON only, fail-open, stdout stays empty.
   rocky hook gate-event claude-code
                             PreToolUse enforcement endpoint; reads one hook payload from
                             stdin, prints an allow/deny decision, always exits 0.
 
 memory lives in ~/.rocky/memory.jsonl. no telemetry. only outside call is rocky
 check asking registry.npmjs.org whether package exists — package name only, you say
-yes first, offline never blocks. configured hosts control what they forward;
-optional AI uses loopback Ollama only.
+yes first, offline never blocks. GUI Main chat code questions send question, carved
+excerpts, memory evidence to model you configure — only when you set one; memory-only
+question sends nothing. configured hosts control what they forward; optional AI uses
+loopback Ollama only.
 `;
 
 type HookRequest =
@@ -151,7 +167,8 @@ type HookRequest =
     explainBusiness?: string;
     files?: string[];
   }
-  | { kind: "gate-event"; vendor: string };
+  | { kind: "gate-event"; vendor: string }
+  | { kind: "listen-event"; harnessId: string; surface: string };
 
 interface NotifyFlags {
   rationale?: string;
@@ -263,6 +280,17 @@ function parseHookArgs(argv: readonly string[]): HookRequest {
       }
     }
   }
+  if (subcommand === "listen-event") {
+    const harnessId = rest[0];
+    if (typeof harnessId === "string" && harnessId.length > 0
+      && rest[1] === "--surface" && typeof rest[2] === "string" && rest[2].length > 0 && rest.length === 3) {
+      return { kind: "listen-event", harnessId, surface: rest[2] };
+    }
+    throw new CliUsageError(
+      "hook listen-event needs one harness id and one surface",
+      "rocky hook listen-event <harnessId> --surface <cli|ide|local|profile>",
+    );
+  }
   if (subcommand === "gate-event") {
     const [vendor, ...extra] = rest;
     if (typeof vendor === "string" && vendor.length > 0 && extra.length === 0) {
@@ -271,7 +299,7 @@ function parseHookArgs(argv: readonly string[]): HookRequest {
   }
   throw new CliUsageError(
     "hook needs one known subcommand",
-    "rocky hook install|uninstall|status|agent-event claude-code|codex|generic|gate-event <vendor>",
+    "rocky hook install|uninstall|status|agent-event claude-code|codex|generic|gate-event <vendor>|listen-event <harnessId> --surface <surface>",
   );
 }
 
@@ -297,6 +325,51 @@ async function readGateEventStdin(): Promise<string> {
     // A stdin stream error still must not throw out of the gate.
   }
   return Buffer.concat(chunks).toString("utf8");
+}
+
+/** Bounded stdin read for one-shot hook lanes. Never throws. */
+async function readHookStdin(capBytes: number): Promise<Uint8Array> {
+  const chunks: Buffer[] = [];
+  let total = 0;
+  try {
+    for await (const chunk of process.stdin) {
+      const buffer: Buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as string);
+      total += buffer.byteLength;
+      if (total > capBytes) break;
+      chunks.push(buffer);
+    }
+  } catch {
+    // A stdin stream error still must not throw out of the hook.
+  }
+  return Buffer.concat(chunks);
+}
+
+/** Host-consent probe for the listen lane: explicit opt-in only, never PATH/config guessing. */
+function listenHostConsent(): boolean {
+  const raw = process.env.ROCKY_LISTEN_HOSTS ?? "";
+  return raw.split(",").some((entry) => entry.trim().length > 0);
+}
+
+/** `rocky hook listen-event <harnessId> --surface <surface>`: static argv, stdin JSON, fail-open, empty stdout. */
+async function runListenEvent(harnessId: string, surface: string): Promise<number> {
+  let stdinBytes: Uint8Array;
+  try {
+    stdinBytes = await readHookStdin(64 * 1024);
+  } catch {
+    return 0;
+  }
+  try {
+    const ingress = await import("./listening/hook-ingress.js");
+    const result = await ingress.handleListenEvent(
+      ["listen-event", harnessId, "--surface", surface],
+      stdinBytes,
+      { hostConsent: listenHostConsent() },
+    );
+    void result;
+  } catch {
+    // Fail open: host work never breaks on capture trouble. Stdout stays empty.
+  }
+  return 0;
 }
 
 /** `rocky hook gate-event <vendor>`: read stdin, decide, print, always exit 0. */
@@ -390,6 +463,11 @@ async function main(): Promise<number> {
           case "gate-event":
             if (parsed.kind === "gate-event") {
               return runGateEvent(parsed.vendor);
+            }
+            break;
+          case "listen-event":
+            if (parsed.kind === "listen-event") {
+              return runListenEvent(parsed.harnessId, parsed.surface);
             }
             break;
         }

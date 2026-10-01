@@ -14,14 +14,16 @@ function openBrowser(url: string): void {
   }
 }
 
-export async function guiCommand(rest: string[], segment: "main" | "dash"): Promise<number> {
+export type GuiSegment = "main" | "dash" | "listening";
+export async function guiCommand(rest: string[], segment: GuiSegment): Promise<number> {
   const noOpen = rest.includes("--no-open");
   const portArg = rest.find((arg) => arg.startsWith("--port="));
   const port = portArg ? Number(portArg.slice("--port=".length)) : DEFAULT_GUI_PORT;
 
   let handle;
   try {
-    handle = await startGui({ port: Number.isFinite(port) ? port : DEFAULT_GUI_PORT });
+    // the foreground CLI owns the collector for every consented repo (spec §3)
+    handle = await startGui({ port: Number.isFinite(port) ? port : DEFAULT_GUI_PORT, collect: true });
   } catch {
     say("rocky cannot open door here. port busy, question");
     return 1;
@@ -29,7 +31,9 @@ export async function guiCommand(rest: string[], segment: "main" | "dash"): Prom
 
   const url = segment === "dash"
     ? `http://127.0.0.1:${handle.port}/?v=dash#${handle.token}`
-    : handle.url;
+    : segment === "listening"
+      ? `http://127.0.0.1:${handle.port}/?v=listening#${handle.token}`
+      : handle.url;
 
   heading("rocky listening");
   detail(`heard at ${url}`);
@@ -38,8 +42,15 @@ export async function guiCommand(rest: string[], segment: "main" | "dash"): Prom
 
   // foreground until interrupted: no daemon, no port file, nothing left behind
   await new Promise<void>((done) => {
+    let stopping = false;
     const stop = (): void => {
-      void handle.close().then(done);
+      if (stopping) process.exit(0);
+      stopping = true;
+      const timer = setTimeout(() => done(), 500);
+      void handle.close().finally(() => {
+        clearTimeout(timer);
+        done();
+      });
     };
     process.once("SIGINT", stop);
     process.once("SIGTERM", stop);

@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -78,6 +79,7 @@ test("sanitized catalog excludes cwd and stays in frozen order", () => {
   const definitions = registry().list();
   assert.deepEqual(definitions.map((tool) => tool.name), [
     "recall", "recent_failures", "stats", "recall_with_ai", "search_knowledge", "fetch_record", "why_file", "teach_lookup",
+    "activity_recent", "activity_for_file", "bundles_list", "bundle_get", "session_timeline",
   ]);
   assert.equal(JSON.stringify(definitions).includes('"cwd"'), false);
   assert.ok(definitions.every((tool) =>
@@ -94,6 +96,7 @@ test("raw catalog adds cwd only to queries that support it", () => {
   assert.equal(JSON.stringify(definitions).includes('"cwd"'), true);
   assert.deepEqual(definitions.map((tool) => tool.name), [
     "recall", "recent_failures", "stats", "recall_with_ai", "search_knowledge", "fetch_record", "why_file", "teach_lookup",
+    "activity_recent", "activity_for_file", "bundles_list", "bundle_get", "session_timeline",
   ]);
 });
 
@@ -119,7 +122,7 @@ test("new tool descriptions are concrete and schemas expose their bounds", () =>
   assert.deepEqual(search.inputSchema, {
     type: "object", additionalProperties: false, required: ["query"], properties: {
       query: { type: "string", minLength: 1, maxLength: 500 },
-      kind: { type: "string", enum: ["failure", "fix", "triple", "note"] },
+      kind: { type: "string", enum: ["failure", "fix", "triple", "note", "rationale", "explain"] },
       limit: { type: "integer", minimum: 1, maximum: 20 },
     },
   });
@@ -139,7 +142,7 @@ test("knowledge tools search, fetch, and explain one file", async () => {
   const search = await knowledgeRegistry().call("search_knowledge", { query: "naikin" }, signal);
   assert.equal(search.isError, undefined);
   assert.deepEqual(search.structuredContent.items, [{
-    id: "triple-1", ts: 300, kind: "triple", snippet: "naikin button", score: 1 / 3,
+    id: "triple-1", ts: 300, kind: "triple", snippet: "naikin button — Rationale: spacing", score: 0.5625,
     agent: "codex", source: "agent-hook", filesCovered: ["src/app.css"], truncatedFiles: 0, complete: false, coverageStatus: "unknown", truncatedFields: [],
   }]);
 
@@ -206,6 +209,48 @@ test("teach_lookup assembles a ladder card when no witness matches", async () =>
   assert.ok((result.structuredContent.lines as string[])[0]?.includes("· line 2"));
   assert.ok((result.structuredContent.lines as string[])[1]?.startsWith("reason:"));
   assert.match(result.structuredContent.evidence as string, /^evidence: /);
+});
+
+test("teach_lookup forwards git provenance through the fifth projectExplain argument", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "rocky-mcp-teach-git-"));
+  execFileSync("git", ["init", "-q"], { cwd: dir });
+  execFileSync("git", ["config", "user.name", "Test Author"], { cwd: dir });
+  execFileSync("git", ["config", "user.email", "author@example.com"], { cwd: dir });
+  writeFileSync(join(dir, "feed.ts"), [
+    "export async function loadFeed() {",
+    "  const rows = await fetchRows();",
+    "  return rows;",
+    "}",
+  ].join("\n"), "utf8");
+  execFileSync("git", ["add", "."], { cwd: dir });
+  execFileSync("git", ["commit", "-qm", "add feed"], { cwd: dir });
+  const prevCwd = process.cwd();
+  process.chdir(dir);
+  try {
+    const result = await createToolRegistry({
+      exposure: "sanitized", memory: teachMemory([]), recallWithAi: disabledRecallWithAi,
+    }).call("teach_lookup", { path: "feed.ts", line: 2 }, new AbortController().signal);
+    assert.equal(result.isError, undefined);
+    assert.equal(result.structuredContent.match, "ladder");
+    assert.match(result.structuredContent.evidence as string, /git/);
+    assert.match(result.structuredContent.evidence as string, /evidence-exhausted/);
+    const provenance = result.structuredContent.provenance as
+      | { commit: string; author: string; date: string; subject: string } | undefined;
+    assert.ok(provenance !== undefined, "ladder git hit must project provenance");
+    assert.match(provenance.commit, /^[0-9a-f]{7}$/);
+    assert.equal(provenance.author, "Test Author");
+    assert.match(provenance.subject, /add feed/);
+  } finally {
+    process.chdir(prevCwd);
+  }
+});
+
+test("teach_lookup witness hit suppresses git and carries no provenance", async () => {
+  const result = await createToolRegistry({
+    exposure: "sanitized", memory: teachMemory([WITNESS_EXPLAIN]), recallWithAi: disabledRecallWithAi,
+  }).call("teach_lookup", { path: "src/app.ts" }, new AbortController().signal);
+  assert.equal(result.isError, undefined);
+  assert.equal(result.structuredContent.provenance, undefined);
 });
 
 test("teach_lookup bounds oversized witness fields and fits the wire cap", async () => {
@@ -1133,7 +1178,7 @@ test("note-only knowledge search stays bounded and sanitized", async () => {
     exposure: "sanitized", memory: createMemoryQueries(() => [note]), recallWithAi: disabledRecallWithAi,
   }).call("search_knowledge", { query: "banana", kind: "note" }, new AbortController().signal);
   assert.deepEqual(result.structuredContent.items, [{
-    id: "note-search", ts: 304, kind: "note", snippet: "cache: banana", score: 1 / 6,
+    id: "note-search", ts: 304, kind: "note", snippet: "cache: banana", score: 0.5714285714285714,
     source: "note", truncatedFields: [],
   }]);
   assert.equal(result.structuredContent.truncated, false);

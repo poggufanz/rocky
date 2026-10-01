@@ -6,7 +6,7 @@
 [![npm](https://img.shields.io/npm/v/@poggufanz/rocky-cli?style=flat-square)](https://www.npmjs.com/package/@poggufanz/rocky-cli)
 [![MIT license](https://img.shields.io/badge/license-MIT-blue.svg?style=flat-square)](LICENSE)
 
-[Release v0.8.0](https://github.com/poggufanz/rocky/releases/tag/v0.8.0) | [Changelog](CHANGELOG.md) | [License](LICENSE) | [Security](https://github.com/poggufanz/rocky/blob/main/SECURITY.md) | [Contributing](https://github.com/poggufanz/rocky/blob/main/CONTRIBUTING.md)
+[Release v0.8.0](https://github.com/poggufanz/rocky/releases/tag/v1.0.0) | [Changelog](CHANGELOG.md) | [License](LICENSE) | [Security](https://github.com/poggufanz/rocky/blob/main/SECURITY.md) | [Contributing](https://github.com/poggufanz/rocky/blob/main/CONTRIBUTING.md)
 
 Your AI writes code. Rocky makes sure you still understand what you own. He is a blind engineer who lives in your terminal, and he remembers failed commands and what fixed them, then brings that history back when the same trouble returns — to you, and through MCP to the AI agent working beside you, so it stops retrying what already failed on this machine. Supported agent hooks can also keep a bounded record of what you asked for, which files changed, and why the agent said it changed them. He is a witness, not a judge: he never diagnoses a failure or proposes a fix he does not remember, and [docs/character.md](docs/character.md) holds the rules that boundary comes from.
 
@@ -30,7 +30,7 @@ npm install -g @poggufanz/rocky-cli
 
 Requires Node.js 18 or newer. The package name is `@poggufanz/rocky-cli`; the unrelated unscoped `rocky-cli` package is not this project.
 
-Current release: `@poggufanz/rocky-cli@0.8.0`. See the [release notes](https://github.com/poggufanz/rocky/releases/tag/v0.8.0) or the full [changelog](CHANGELOG.md).
+Current release: `@poggufanz/rocky-cli@1.0.0`. See the [release notes](https://github.com/poggufanz/rocky/releases/tag/v1.0.0) or the full [changelog](CHANGELOG.md).
 
 **Agent self-setup (any harness).** Working with an agent outside Claude Code or Codex (OpenCode, Gemini CLI, anything else)? [docs/agents/INSTALL.md](docs/agents/INSTALL.md) covers the shell hook, the notify rationale lane, and optional MCP read access, and every step that edits your files asks for approval first. On Claude Code and Codex, `rocky setup --agent-hooks` and `rocky setup` capture more, automatically. To hand it to the agent:
 
@@ -121,7 +121,7 @@ Persistent state lives under `ROCKY_HOME`; the default is `~/.rocky`. The main r
 
 Memory can contain commands, errors, working directories, prompts, bounded file excerpts, and an agent's stated rationale. Treat it as developer history: read it, back it up, or delete it on your terms.
 
-The CLI contains no telemetry and runs no daemon. Its only external network egress is `rocky check` asking `registry.npmjs.org` whether a newly added package name exists. The lookup is consent-gated, sends package names only, and is fail-open when offline. Everything else stays local; optional AI connects only to `127.0.0.1`. MCP projects sanitized memory by default, and raw exposure is an explicit opt-in. A configured cloud host may forward selected projected content under that host's own policy.
+The CLI contains no telemetry and runs no daemon. Its only external network egress is `rocky check` asking `registry.npmjs.org` whether a newly added package name exists; that lookup is consent-gated, sends package names only, and is fail-open when offline. The Main chat has exactly one more egress, and only when configured: a code question sends your question, carved excerpts, and memory evidence to your BYOK model, redacted and capped. Memory-only questions search all records in a complete bounded snapshot and return whole relevant records; they hold when coverage is incomplete, evidence is weak, or whole records exceed the context bound. They never call BYOK or remote Jev. Use `memory:` to force local memory search and `code:` to force code lookup; unprefixed questions use existing code-query signals. Optional local AI connects only to `127.0.0.1`. MCP projects sanitized memory by default, and raw exposure is an explicit opt-in. A configured cloud host may forward selected projected content under that host's own policy.
 
 Read the [security policy](https://github.com/poggufanz/rocky/blob/main/SECURITY.md) before enabling raw MCP exposure or installing hooks into a shell or agent host.
 
@@ -156,9 +156,10 @@ Read the [contributing guide](https://github.com/poggufanz/rocky/blob/main/CONTR
 - **v0.5 - his curiosity (implemented)**: Nervous System hooks, intent-mechanism dictionary, teaching commands, and bounded MCP knowledge tools.
 - **v0.6 - his accountability (implemented)**: `rocky brief`, `rocky journal`, `rocky invariants`, extended `rocky stats`, and the schema envelope documentation.
 - **v0.7 - his memory of why (implemented)**: stated-rationale evidence across four lanes, a concept lexicon (`rocky concepts`), derived `rocky sessions` and `rocky repl`, and the PreToolUse rationale gate.
-- **v0.8 - his comprehension guardian (current release)**: local browser GUI (`rocky dash`), teach mode (`rocky teach` / `teach_lookup` / `explain` records), and native git diff correlation.
+- **v0.8 - his comprehension guardian (implemented)**: local browser GUI (`rocky dash`), teach mode (`rocky teach` / `teach_lookup` / `explain` records), and native git diff correlation.
+- **v1.0 - his listening (current release)**: consent-gated Listening across Git-tracked files, explicit `rocky setup --harness` targets with MCP adapters for five harnesses, thirteen read-only MCP tools, a chat-first Main tab, and advisory prompt-clarity, decomposition, and failure-cycle checks.
 
-BYOK annotation, `attest`, and the memory circuit breaker remain deferred. Codex and Gemini agent-log adapters are deferred too — Codex's local session format drifted to a SQLite hybrid, and Gemini persists no thoughts to read. The earlier `rocky explain` idea is superseded; teach mode uses `rocky teach` and `explain` records.
+BYOK annotation and `attest` remain deferred. The memory circuit breaker ships as an advisory, not an enforcer: a failure-cycle gate note plus `rocky stats --cycles`, fail-open, never blocking. Codex and Gemini agent-log adapters are deferred too — Codex's local session format drifted to a SQLite hybrid, and Gemini persists no thoughts to read. The earlier `rocky explain` idea is superseded; teach mode uses `rocky teach` and `explain` records.
 
 ## License and attribution
 

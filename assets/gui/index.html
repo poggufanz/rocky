@@ -17,6 +17,8 @@
             aria-selected="true" aria-controls="view-main">Main</button>
     <button class="seg-btn" role="tab" id="tab-dash" data-seg="dash"
             aria-selected="false" aria-controls="view-dash" tabindex="-1">Dash</button>
+    <button class="seg-btn" role="tab" id="tab-listening" data-seg="listening"
+            aria-selected="false" aria-controls="view-listening" tabindex="-1">Listening</button>
   </div>
 
   <span class="tally" id="tally" aria-live="polite"></span>
@@ -32,7 +34,9 @@
 <div id="settings" class="modal" role="dialog" aria-modal="true" aria-labelledby="settings-title" hidden>
   <div class="modal-head">
     <h2 id="settings-title">Settings</h2>
-    <button id="settings-close" class="modal-x" type="button" aria-label="close">×</button>
+    <button id="settings-close" class="modal-x" type="button" aria-label="close">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+    </button>
   </div>
 
   <p class="beta">
@@ -61,6 +65,27 @@
     <input id="set-key" type="password" spellcheck="false" autocomplete="off">
     <span class="field-note">Kept in this browser only. Never sent to rocky.</span>
   </label>
+  <div id="jev-settings-block">
+  <label class="field" id="jevkey-field">
+    <span class="field-label">Jev Key</span>
+    <input id="set-jevkey" type="password" spellcheck="false" autocomplete="off">
+    <span class="field-note" id="jevkey-note">Server-side only. Never shown back. Enables the lightning toggle.</span>
+  </label>
+  <div class="field" id="jev-provider-field">
+    <span class="field-label">Jev Provider</span>
+    <select id="set-jevprovider">
+      <option value="typesafe">Native TypeSafe</option>
+      <option value="openrouter">OpenRouter</option>
+    </select>
+    <span class="field-note">Jev analysis runs behind the lightning toggle. Native uses your Jev key; OpenRouter uses your OpenRouter key.</span>
+  </div>
+  <label class="field" id="openrouter-key-field" hidden>
+    <span class="field-label">OpenRouter Key</span>
+    <input id="set-openrouterkey" type="password" spellcheck="false" autocomplete="off">
+    <span class="field-note" id="openrouterkey-note">Server-side only. Never shown back. Enables the lightning toggle on the OpenRouter path.</span>
+  </label>
+  <p class="field-note" id="jev-alpha-note">Jalur OpenRouter masih alpha: endpoint alpha, satu provider TypeSafe, batas konteks 32k, tagihan per-token di akun OpenRouter Anda. Kunci OpenRouter tidak pernah meninggalkan server ini.</p>
+  </div>
 
   <label class="field">
     <span class="field-label">Model</span>
@@ -79,6 +104,8 @@
 
   <div class="modal-foot">
     <button id="settings-clear" class="btn-quiet" type="button">Forget Key</button>
+    <button id="settings-clear-jev" class="btn-quiet" type="button">Forget Jev Key</button>
+    <button id="settings-clear-openrouter" class="btn-quiet" type="button">Forget OpenRouter Key</button>
     <button id="settings-save" class="btn-voice" type="button">Save</button>
   </div>
 </div>
@@ -86,8 +113,15 @@
 <div id="repo-filter" class="modal" role="dialog" aria-modal="true" aria-labelledby="repo-filter-title" hidden>
   <div class="modal-head">
     <h2 id="repo-filter-title">Filter Repo</h2>
-    <button id="repo-filter-close" class="modal-x" type="button" aria-label="close">×</button>
+    <button id="repo-filter-close" class="modal-x" type="button" aria-label="close">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+    </button>
   </div>
+
+  <label class="repo-search">
+    <span class="vh">search repos</span>
+    <input id="repo-filter-search" type="search" placeholder="Search repos…" autocomplete="off" spellcheck="false">
+  </label>
 
   <div id="repo-filter-list" class="repo-list"></div>
 
@@ -97,33 +131,117 @@
   </div>
 </div>
 
-<main>
+ <main>
 
-  <!-- Main -->
+  <!-- Main: a chat surface. Chats live in this browser; every answer comes
+       from POST /api/chat, one question at a time. Static skeleton reads with
+       JS disabled or every /api/* failed. -->
   <section class="view" id="view-main" role="tabpanel" aria-labelledby="tab-main">
-    <div class="main-grid">
-      <section class="blk blk-recent">
-        <div id="latest" class="latest"></div>
-        <h2>Recent</h2>
-        <div id="recent" class="rows"></div>
+    <noscript><p class="empty">rocky needs JavaScript for live memory. Start rocky and open its terminal link.</p></noscript>
+    <div class="cx" id="cx" data-side="open" data-sources="closed" data-empty="true">
+
+      <aside class="cx-side" id="cx-side" aria-label="chats">
+        <div class="cx-side-head">
+          <button id="cx-new" class="cx-new" type="button" title="New chat (Ctrl+Shift+O)">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>
+            <span>New chat</span>
+          </button>
+          <button id="cx-side-close" class="cx-icon" type="button" aria-controls="cx-side" aria-expanded="true" title="Hide chats">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M9 4v16"/></svg>
+            <span class="vh">hide chats</span>
+          </button>
+        </div>
+
+        <label class="cx-search">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
+          <span class="vh">search chats</span>
+          <input id="cx-search" type="search" placeholder="Search chats" autocomplete="off" spellcheck="false">
+        </label>
+
+        <nav id="cx-sessions" class="cx-sessions" aria-label="past chats">
+          <p class="cx-sessions-empty">No chats yet. Your questions and Rocky's answers land here.</p>
+        </nav>
+
+        <section class="cx-mem" aria-labelledby="cx-mem-title">
+          <h2 id="cx-mem-title">Rocky's memory</h2>
+          <div id="cx-mem" class="cx-mem-body" aria-live="polite"><p class="cx-mem-wait">listening…</p></div>
+        </section>
+        <p class="cx-side-note">Chats stay in this browser. Asking never changes what Rocky remembers.</p>
+      </aside>
+
+      <section class="cx-main" aria-label="ask rocky">
+        <div class="cx-topbar">
+          <button id="cx-side-open" class="cx-icon" type="button" aria-controls="cx-side" aria-expanded="false" title="Show chats">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M9 4v16"/></svg>
+            <span class="vh">show chats</span>
+          </button>
+          <button id="cx-new-mini" class="cx-icon" type="button" title="New chat (Ctrl+Shift+O)">
+            <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>
+            <span class="vh">new chat</span>
+          </button>
+          <h1 id="cx-title" class="cx-title">New chat</h1>
+        </div>
+
+        <div id="chat-log" class="cx-log" role="log" aria-live="polite" aria-label="conversation">
+          <div id="cx-welcome" class="cx-welcome">
+            <pre id="cx-face" class="cx-face" aria-hidden="true"></pre>
+            <h2 class="cx-hello">Ask Rocky what he heard</h2>
+            <p class="cx-sub" id="cx-sub">Rocky remember failures, fixes, and reasons from your terminal and your agents. Ask, question.</p>
+          </div>
+          <div id="chat-thread" class="cx-thread"></div>
+        </div>
+
+        <div class="cx-dock">
+          <form id="chat-form" class="cx-composer" autocomplete="off">
+            <label class="vh" for="chat-input">ask rocky</label>
+            <textarea id="chat-input" rows="1" maxlength="4000" placeholder="Ask about a failure, a fix, or why code looks the way it does" spellcheck="false" autocomplete="off"></textarea>
+            <div class="cx-tools">
+              <div class="cx-route" role="radiogroup" aria-label="answer from" id="cx-route">
+                <button type="button" role="radio" data-route="auto" aria-checked="true" title="Rocky picks memory or code from your words">Auto</button>
+                <button type="button" role="radio" data-route="memory" aria-checked="false" tabindex="-1" title="Local memory only. Nothing leaves this machine">Memory</button>
+                <button type="button" role="radio" data-route="code" aria-checked="false" tabindex="-1" title="Memory plus repo files, answered by your model">Code</button>
+              </div>
+              <button id="chat-jev" class="cx-jev" type="button" aria-pressed="false" title="Jev analysis for code questions (needs key)">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
+                <span>Jev</span>
+              </button>
+              <span class="cx-spacer"></span>
+              <span id="cx-count" class="cx-count" hidden></span>
+              <span id="chat-modelwrap" class="cx-modelwrap">
+                <select id="chat-model" class="cx-model-native" aria-label="chat model"></select>
+                <button id="chat-model-btn" class="cx-modelbtn" type="button" aria-haspopup="listbox" aria-expanded="false" aria-label="chat model" hidden>rocky local</button>
+                <span id="chat-model-panel" class="cx-modelpanel" role="listbox" aria-label="chat model" hidden></span>
+              </span>
+              <button id="chat-send" class="cx-send" type="submit" aria-label="send" disabled>
+                <svg class="cx-send-go" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg>
+                <svg class="cx-send-stop" width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="3"/></svg>
+              </button>
+            </div>
+          </form>
+          <p id="cx-route-note" class="cx-route-note" aria-live="polite"></p>
+
+          <div class="cx-start" id="cx-start">
+            <div id="cx-suggest" class="cx-suggest" aria-label="try asking"></div>
+            <ul class="cx-how" aria-label="how answers work">
+              <li><b>Memory</b> Rocky searches whole local records and holds when the evidence is weak. Nothing leaves this machine.</li>
+              <li><b>Code</b> Rocky also reads matching repo files and sends your question, quoted excerpts, and memory evidence to the model you picked. Redacted and size capped.</li>
+              <li><b>Jev</b> Optional second opinion on code questions. Needs a key in Settings.</li>
+            </ul>
+          </div>
+        </div>
       </section>
 
-      <div class="rail">
-        <section class="blk">
-          <h2>What Rocky Holds</h2>
-          <div id="holds" class="rows"></div>
-        </section>
-
-        <section class="blk">
-          <h2>Since 24H</h2>
-          <div id="day" class="rows"></div>
-        </section>
-
-        <section class="blk">
-          <h2>Most Heard Files</h2>
-          <div id="topfiles" class="rows"></div>
-        </section>
-      </div>
+      <aside id="cx-sources" class="cx-sources" aria-labelledby="cx-sources-title" hidden>
+        <div class="cx-sources-head">
+          <h2 id="cx-sources-title">Sources</h2>
+          <button id="cx-sources-close" class="cx-icon" type="button" title="Close sources (Esc)">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+            <span class="vh">close sources</span>
+          </button>
+        </div>
+        <p id="cx-sources-for" class="cx-sources-for"></p>
+        <div id="cx-sources-body" class="cx-sources-body"></div>
+      </aside>
     </div>
   </section>
 
@@ -131,36 +249,47 @@
   <section class="view" id="view-dash" role="tabpanel" aria-labelledby="tab-dash" hidden>
     <div class="dash">
 
-      <aside class="left">
+      <aside class="left" aria-label="files rocky heard">
         <label class="filter">
           <span class="vh">filter files</span>
-          <input id="filter" type="search" placeholder="type part of a path… !md hides .md"
-                 autocomplete="off" spellcheck="false">
+          <input id="filter" type="search" placeholder="Find a file by part of its path"
+                 autocomplete="off" spellcheck="false" aria-describedby="filter-hint">
+          <span class="filter-hint" id="filter-hint">Each word narrows the list. <kbd>!md</kbd> or <kbd>-test</kbd> hides matches.</span>
         </label>
 
         <div class="col-head">
-          <span id="files-head">files</span>
+          <div class="view-seg" role="group" aria-label="list by">
+            <button class="view-seg-btn" type="button" data-view="individual" aria-pressed="true"
+                    title="One row per file">By file</button>
+            <button class="view-seg-btn" type="button" data-view="bundle" aria-pressed="false"
+                    title="Files that changed together, one row per change">By change</button>
+          </div>
           <button id="repo-filter-btn" class="repo-filter-btn" type="button"
-                  aria-haspopup="dialog" aria-controls="repo-filter">Filter Repo</button>
+                  aria-haspopup="dialog" aria-controls="repo-filter">All repos</button>
         </div>
+        <p class="col-count" id="files-head" aria-live="polite"></p>
         <div id="files" class="files" role="listbox" aria-label="files rocky heard"></div>
       </aside>
 
       <section class="pane">
         <div class="pane-bar">
-          <span class="pane-path" id="pane-path"></span>
+          <span class="pane-path" id="pane-path">No file picked</span>
           <span class="sel" id="sel"></span>
           <div class="mode" role="tablist" aria-label="pane mode">
-            <button class="mode-btn" role="tab" data-mode="lines" aria-selected="true">Lines</button>
-            <button class="mode-btn" role="tab" data-mode="history" aria-selected="false" tabindex="-1">History</button>
-            <button class="mode-btn" role="tab" data-mode="compare" aria-selected="false" tabindex="-1">Compare</button>
+            <button class="mode-btn" role="tab" data-mode="lines" aria-selected="true"
+                    title="Why each line is written this way">Lines</button>
+            <button class="mode-btn" role="tab" data-mode="history" aria-selected="false" tabindex="-1"
+                    title="Every change heard for this file, with its notes">History</button>
+            <button class="mode-btn" role="tab" data-mode="compare" aria-selected="false" tabindex="-1"
+                    title="Two moments side by side">Compare</button>
           </div>
         </div>
 
         <div class="pane-sub" id="pane-sub" hidden>
-          <label class="toggle">
+          <p class="pane-guide" id="pane-guide"></p>
+          <label class="toggle" id="diff-toggle">
             <input type="checkbox" id="show-diff" checked>
-            Show Diff
+            Show diff
           </label>
           <span class="sub-note" id="sub-note"></span>
         </div>
@@ -171,13 +300,118 @@
     </div>
   </section>
 
+  <!-- Listening: portable change-lineage graph. Static skeleton reads with
+       JS disabled or every /api/listening/* failed. -->
+  <section class="view" id="view-listening" role="tabpanel" aria-labelledby="tab-listening" hidden>
+    <div class="listen-tab" id="listen-root" data-state="none">
+      <div class="listen-main">
+        <header class="listen-hero">
+          <div class="listen-top">
+            <h2 id="listen-header">Rocky Listen <span class="listen-spin" id="listen-spin" aria-hidden="true"></span></h2>
+            <p class="listen-status" id="listen-status" aria-live="polite">Getting rationale <span class="listen-spin" aria-hidden="true"></span></p>
+            <div class="listen-pick">
+              <label for="listen-repo-pick">Repo</label>
+              <select id="listen-repo-pick"><option value="">loading repos</option></select>
+              <input id="listen-repo-path" type="text" placeholder="paste any folder inside the repo, then Enter" spellcheck="false" hidden>
+            </div>
+          </div>
+          <p class="listen-hint" id="listen-hint">Picking a repo never grants capture. Only the Listen button does.</p>
+          <div class="listen-ident">
+            <span class="listen-ear" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span>
+            <p class="listen-repo" id="listen-repo">Listen To Repo Main</p>
+          </div>
+          <div class="listen-consent" id="listen-consent" aria-live="polite"></div>
+          <figure class="listen-wave" id="listen-wave" hidden>
+            <div class="listen-wave-bars" id="listen-wave-bars" role="img"></div>
+            <figcaption class="listen-wave-axis"><span id="listen-wave-from"></span><span>now</span></figcaption>
+          </figure>
+          <dl class="listen-stats" id="listen-stats" hidden></dl>
+        </header>
+        <div class="listen-toolbar">
+          <details class="listen-more" id="listen-more">
+            <summary id="listen-more-label">Filters</summary>
+            <form class="listen-filters" id="listen-filters" autocomplete="off">
+              <label>Session <select id="listen-session"><option value="">any</option></select></label>
+              <label>Agent <select id="listen-agent"><option value="">any</option></select></label>
+              <label>Surface
+                <select id="listen-surface">
+                  <option value="">any</option>
+                  <option value="cli">cli</option>
+                  <option value="ide">ide</option>
+                  <option value="local">local</option>
+                </select>
+              </label>
+              <label class="wide">File <select id="listen-file"><option value="">any</option></select></label>
+              <label>Since
+                <select id="listen-since">
+                  <option value="">any time</option>
+                  <option value="3600000">last hour</option>
+                  <option value="86400000">last 24 hours</option>
+                  <option value="604800000">last 7 days</option>
+                </select>
+              </label>
+            </form>
+          </details>
+          <button class="listen-clear" id="listen-clear" type="button" hidden>Clear filters</button>
+          <p class="listen-coverage" id="listen-coverage"></p>
+        </div>
+        <ol class="listen-chain" id="listen-chain" aria-label="changes rocky heard, newest first"></ol>
+      </div>
+
+      <!-- The guide is static on purpose: it explains the feature even when
+           every /api/listening/* call fails. -->
+      <aside class="listen-guide" aria-labelledby="listen-guide-title">
+        <section>
+          <h3 id="listen-guide-title">How Listening works</h3>
+          <ol class="listen-steps">
+            <li><b>Pick a repo.</b> Picking only opens its record. Nothing starts.</li>
+            <li><b>Press Listen.</b> One click grants capture for that repo alone.</li>
+            <li><b>Rocky checks every 10 seconds.</b> He reads the text files Git tracks, only while rocky dash stays open. No daemon.</li>
+            <li><b>Each change lands here</b> as a redacted snapshot, with how Rocky knows it.</li>
+          </ol>
+        </section>
+        <section>
+          <h3>How Rocky knows</h3>
+          <ul class="listen-legend">
+            <li class="tone-heard"><span class="lg-mark" aria-hidden="true"></span><b>Heard on disk</b> The file changed on disk. Proves the change, not who made it.</li>
+            <li class="tone-heard"><span class="lg-mark" aria-hidden="true"></span><b>Matches commit</b> Snapshot text equals a Git commit exactly.</li>
+            <li class="tone-heard"><span class="lg-mark" aria-hidden="true"></span><b>Reported by tool</b> An agent hook reported the event itself.</li>
+            <li class="tone-weak"><span class="lg-mark" aria-hidden="true"></span><b>Near in time, possible link</b> Close in time or content. Context only, never cause.</li>
+            <li class="tone-none"><span class="lg-mark" aria-hidden="true"></span><b>Snapshot only</b> Rocky holds the event with no link yet. Unknown is not nothing.</li>
+          </ul>
+        </section>
+        <section id="listen-top-wrap" hidden>
+          <h3>Most changed files</h3>
+          <ol class="listen-topfiles" id="listen-top"></ol>
+        </section>
+        <section>
+          <h3>What stays where</h3>
+          <ul class="listen-facts">
+            <li>Snapshots stay in Rocky's store on this machine. Rocky sends them nowhere.</li>
+            <li>Text is redacted and size capped before it is stored. Secret may remain despite redaction.</li>
+            <li>An MCP host you connect may forward event metadata under its own policy.</li>
+            <li>Stop listening ends capture. History stays.</li>
+          </ul>
+        </section>
+      </aside>
+    </div>
+  </section>
+
 </main>
 
-<footer class="foot">Local Only | No Egress</footer>
+<footer class="foot"><span class="foot-main">Local analysis. Code questions send your question, carved excerpts, and memory evidence to the model you configured.</span><span class="foot-dash">Local Only | No Egress</span></footer>
 
 <button id="ask" class="ask" hidden>Why, question</button>
-<div id="pop" class="pop" role="dialog" aria-label="why" aria-live="polite" hidden></div>
+<div id="pop" class="pop" role="dialog" aria-label="why" aria-live="polite" hidden>
+  <section id="cs-card" hidden>
+    <h3 id="cs-title">cs concept</h3>
+    <p id="cs-definition"></p>
+    <pre id="cs-trace"></pre>
+    <p id="cs-check"></p>
+  </section>
+</div>
 
 <script src="/assets/app.js" type="module"></script>
+<script src="/assets/chat.js" type="module"></script>
 </body>
 </html>

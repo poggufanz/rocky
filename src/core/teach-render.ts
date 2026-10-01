@@ -49,23 +49,26 @@ export function renderWitnessCard(hit: TeachHit, gapRung?: Rung): TeachCard {
   if (gapRung !== undefined) {
     lines.push(`form: ${gapRung.finding} · ${gapRung.source}`);
   }
+  const hasPointer = hit.record.contentHash !== undefined || gapRung !== undefined;
   return {
     header: WITNESS_HEADER,
     lines,
-    evidence: `source: ${hit.record.source} · ${ageLabel(hit.record.ts, Date.now())}`,
+    evidence: `source: ${hit.record.source} · ${ageLabel(hit.record.ts, Date.now())}${hasPointer ? "" : " · unknown"}`,
     expandable: false,
   };
 }
-
 export function renderLadderCard(file: string, label: string, ladder: LadderResult): TeachCard {
   const lines: string[] = [`${file} · ${label}`];
   if (ladder.rungs.length > 0) {
     lines.push(`reason: ${ladder.rungs.map((rung) => rung.finding).join(". ")}`);
   }
+  if (ladder.provenanceExhausted) {
+    lines.push("asal usul habis. evidence lain tetap di atas, question");
+  }
   return {
     header: LADDER_HEADER,
     lines,
-    evidence: `evidence: ${evidenceSources(ladder.rungs).join(" · ")}`,
+    evidence: `evidence: ${evidenceSources(ladder.rungs).join(" · ")} · ${ladder.stopReason}`,
     expandable: ladder.rungs.length > 0,
   };
 }

@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import type { AssociationRecord, FailureRecord, FixRecord, MemoryRecord, NoteRecord, TripleRecord } from "../core/memory.js";
 import { commandFingerprint, fingerprint, fingerprintSignature, legacyFingerprint, normalizeLine, signatureLines } from "../core/fingerprint.js";
-import { pathIdentityHash } from "../core/memory-read.js";
+import { pathIdentityHash, type ExplainRecord, type RationaleRecord } from "../core/memory-read.js";
 import {
   LINK_WINDOW_MS,
   createMemoryQueries,
@@ -49,12 +49,14 @@ test("queryStats applies cwd consistently", () => {
     confirmedFixes: 1, possibleFixes: 0, triples: 0, notes: 0, total: 3,
     byKind: { failure: 2, fix: 1 },
     rationaleByFidelity: { raw: 0, summary: 0, none: 0 },
+    guardTotal: 0, guardCancelled: 0, guardProceeded: 0, guardByRule: {},
   });
   assert.deepEqual(queryStats(records, { cwd: "/work/a" }), {
     failures: 1, fixEvents: 1, resolved: 1, unresolved: 0,
     confirmedFixes: 1, possibleFixes: 0, triples: 0, notes: 0, total: 2,
     byKind: { failure: 1, fix: 1 },
     rationaleByFidelity: { raw: 0, summary: 0, none: 0 },
+    guardTotal: 0, guardCancelled: 0, guardProceeded: 0, guardByRule: {},
   });
 });
 
@@ -285,6 +287,7 @@ test("future records stay inert across operational query surfaces but remain fet
     confirmedFixes: 0, possibleFixes: 0, triples: 0, notes: 0, total: 1,
     byKind: { failure: 1 },
     rationaleByFidelity: { raw: 0, summary: 0, none: 0 },
+    guardTotal: 0, guardCancelled: 0, guardProceeded: 0, guardByRule: {},
   });
   assert.deepEqual(searchKnowledge(input, { query: "future-only-token", now }), []);
   assert.equal(fetchRecord(input, futureFailure.id)?.id, futureFailure.id, "raw/fetch state remains retained");
@@ -319,6 +322,7 @@ test("cross-directory confirmation never counts as local stats", () => {
     confirmedFixes: 0, possibleFixes: 0, triples: 0, notes: 0, total: 2,
     byKind: { failure: 1, fix: 1 },
     rationaleByFidelity: { raw: 0, summary: 0, none: 0 },
+    guardTotal: 0, guardCancelled: 0, guardProceeded: 0, guardByRule: {},
   });
 });
 
@@ -334,6 +338,7 @@ test("query indices are first-wins for duplicate IDs", () => {
     confirmedFixes: 1, possibleFixes: 0, triples: 0, notes: 0, total: 2,
     byKind: { failure: 1, fix: 1 },
     rationaleByFidelity: { raw: 0, summary: 0, none: 0 },
+    guardTotal: 0, guardCancelled: 0, guardProceeded: 0, guardByRule: {},
   });
   assert.equal(queryRecall(input, { query: "module missing" })[0]?.fix?.cmd, "npm run build");
 });
@@ -403,6 +408,7 @@ test("possible associations never count as confirmed fix events", () => {
     confirmedFixes: 0, possibleFixes: 1, triples: 0, notes: 0, total: 2,
     byKind: { failure: 1, association: 1 },
     rationaleByFidelity: { raw: 0, summary: 0, none: 0 },
+    guardTotal: 0, guardCancelled: 0, guardProceeded: 0, guardByRule: {},
   });
   const downgradedLegacy: FixRecord = {
     kind: "fix", id: "legacy-weak", ts: 301, cwd: "/work/b", cmd: "npm run unrelated",
@@ -551,6 +557,65 @@ test("searchKnowledge merges failure, fix, and triple sources with kind filter",
   const triples = searchKnowledge(mixed, { query: "naikin" });
   assert.equal(triples[0]?.kind, "triple");
   assert.equal(searchKnowledge(mixed, { query: "npm", limit: 1 }).length, 1);
+});
+
+test("searchKnowledge matches triple files with PascalCase filenames and queries", () => {
+  const tripleWithFile: TripleRecord = {
+    kind: "triple",
+    id: "triple-cross-region",
+    ts: 1000,
+    cwd: "/repo",
+    schemaV: 1,
+    agent: "codex",
+    origin: "agent-hook",
+    intent: { text: "Task 4 review selesai" },
+    rationale: { text: "implement cross region inventory transfer logic", tags: ["inventory"], source: "notify" },
+    mechanism: {
+      files: [{ path: "app/Services/CrossRegionInventoryTransferService.php", plusMinus: [10, 2], props: ["transfer"] }],
+      truncatedFiles: 0,
+      baseline: "captured",
+      coverageStatus: "complete",
+    },
+  };
+
+  const hits = searchKnowledge([tripleWithFile], { query: "apakah bener inventory transfer bisa cross region?" });
+  assert.equal(hits.length, 1);
+  assert.equal(hits[0]?.id, "triple-cross-region");
+  assert.equal(hits[0]?.kind, "triple");
+});
+
+test("searchKnowledge matches triple and failure by linked rationale excerpts", () => {
+  const triple: TripleRecord = {
+    kind: "triple",
+    id: "triple-main",
+    ts: 1000,
+    cwd: "/repo",
+    schemaV: 1,
+    agent: "codex",
+    origin: "agent-hook",
+    intent: { text: "general refactor" },
+    mechanism: {
+      files: [{ path: "src/index.ts", plusMinus: [1, 1], props: [] }],
+      truncatedFiles: 0,
+    },
+  };
+
+  const rationale: RationaleRecord = {
+    kind: "rationale",
+    id: "rat-1",
+    ts: 1001,
+    v: 1,
+    cwd: "/repo",
+    agent: "human",
+    rationale_fidelity: "summary",
+    source: "human",
+    excerpt: "memperbaiki bug deadlock pada multi thread worker",
+    links: { tripleId: "triple-main" },
+  };
+
+  const hits = searchKnowledge([triple, rationale], { query: "deadlock multi thread worker" });
+  assert.equal(hits.length, 1);
+  assert.equal(hits[0]?.id, "triple-main");
 });
 
 test("searchKnowledge orders equal scores newest first and clamps limits", () => {
@@ -1423,3 +1488,53 @@ test("an unproven legacy record's excerpt never becomes retrieval evidence", () 
   };
   assert.deepEqual(queryRecall([record], { query: "distinctive-excerpt-only-word" }), []);
 });
+
+test("searchKnowledge retrieves standalone rationale and explain records by text and files", () => {
+  const rationale: RationaleRecord = {
+    kind: "rationale",
+    id: "rat-cctv-audit",
+    ts: 1000,
+    v: 1,
+    cwd: "/backend",
+    agent: "generic",
+    rationale_fidelity: "summary",
+    source: "notify",
+    excerpt: "Audit every CCTV watch open and denied attempt in ARI_MONITOR_WATCH_LOGS so watch activity is traceable",
+    files: ["app/Services/Monitoring/WatchSessionService.php", "app/Models/AriMonitorWatchLog.php"],
+  };
+
+  const explain: ExplainRecord = {
+    kind: "explain",
+    id: "exp-watch-service",
+    ts: 1001,
+    v: 1,
+    cwd: "/backend",
+    path: "app/Services/Monitoring/WatchSessionService.php",
+    source: "explain",
+    code: "Added audit log recording for live CCTV viewing sessions",
+    business: "Ensures compliance and traceability of CCTV monitoring access",
+  };
+
+  const rationaleHits = searchKnowledge([rationale, explain], { query: "CCTV ARI_MONITOR_WATCH_LOGS" });
+  assert.equal(rationaleHits[0]?.id, "rat-cctv-audit");
+  assert.equal(rationaleHits[0]?.kind, "rationale");
+  assert.deepEqual(rationaleHits[0]?.filesCovered, ["app/Services/Monitoring/WatchSessionService.php", "app/Models/AriMonitorWatchLog.php"]);
+
+  const onlyRationaleHits = searchKnowledge([rationale, explain], { query: "CCTV", kind: "rationale" });
+  assert.equal(onlyRationaleHits.length, 1);
+  assert.equal(onlyRationaleHits[0]?.id, "rat-cctv-audit");
+
+  const explainHits = searchKnowledge([rationale, explain], { query: "compliance traceability CCTV monitoring" });
+  assert.equal(explainHits.length, 2);
+  assert.equal(explainHits[0]?.id, "exp-watch-service");
+  assert.equal(explainHits[0]?.kind, "explain");
+  assert.deepEqual(explainHits[0]?.filesCovered, ["app/Services/Monitoring/WatchSessionService.php"]);
+
+  const onlyExplainHits = searchKnowledge([rationale, explain], { query: "compliance traceability", kind: "explain" });
+  assert.equal(onlyExplainHits.length, 1);
+  assert.equal(onlyExplainHits[0]?.id, "exp-watch-service");
+
+  const fileHits = searchKnowledge([rationale, explain], { query: "WatchSessionService" });
+  assert.equal(fileHits.length, 2);
+});
+

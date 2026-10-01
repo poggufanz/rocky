@@ -138,6 +138,19 @@ export interface InvariantTouchRecord {
   path: string;
 }
 
+export type GuardOutcome = "cancelled" | "proceeded";
+
+export interface GuardRecord {
+  v: 1;
+  kind: "guard";
+  id: string;
+  ts: number;
+  cwd: string;
+  cmd: string;
+  rule: string;
+  outcome: GuardOutcome;
+}
+
 export type RationaleFidelity = "raw" | "summary" | "none";
 export type RationaleSource = "log-thinking" | "log-response" | "notify" | "human";
 /** Bounds for the optional rationale `files` list (notify lane `--files`). */
@@ -146,6 +159,13 @@ export const MAX_RATIONALE_FILE_CHARS = 512;
 
 export interface RationalePointer { logPath?: string; sessionId?: string; turnRef?: string }
 export interface RationaleLinks { tripleId?: string; fixId?: string; failureId?: string }
+export const MAX_GIT_SNAPSHOT_CHARS = 8 * 1024;
+export const MAX_GIT_SNAPSHOT_PRE_REDACT_CHARS = 64 * 1024;
+export interface GitAnchor {
+  base?: string;
+  dirty?: boolean;
+  snapshot?: string;
+}
 export interface RationaleRecord {
   kind: "rationale"; id: string; ts: number; v: 1;
   cwd: string;
@@ -157,6 +177,18 @@ export interface RationaleRecord {
   links?: RationaleLinks;
   /** Bounded file paths this stated reason covers (notify lane `--files`). */
   files?: string[];
+  git?: GitAnchor;
+}
+export interface ExplainRecord {
+  kind: "explain"; id: string; ts: number; v: 1;
+  cwd: string;
+  path: string;
+  source: string;
+  code: string;
+  business: string;
+  snippet?: string;
+  contentHash?: string;
+  git?: GitAnchor;
 }
 export interface ExplainRecord {
   kind: "explain"; id: string; ts: number; v: 1;
@@ -549,7 +581,7 @@ export function boundTripleRecord(record: TripleRecord): TripleRecord {
   };
 }
 
-export type MemoryRecord = FailureRecord | FixRecord | AssociationRecord | NoteRecord | TripleRecord | BriefRunRecord | InvariantTouchRecord | RationaleRecord | AliasRecord | ExplainRecord;
+export type MemoryRecord = FailureRecord | FixRecord | AssociationRecord | NoteRecord | TripleRecord | BriefRunRecord | InvariantTouchRecord | RationaleRecord | AliasRecord | ExplainRecord | GuardRecord;
 
 /** Future-dated evidence stays readable but is inert for operational answers. */
 export function isOperationalMemoryRecord(record: Pick<MemoryRecord, "ts">, now = Date.now()): boolean {
@@ -611,6 +643,32 @@ function objectValue(value: unknown): Record<string, unknown> | undefined {
   return typeof value === "object" && value !== null && !Array.isArray(value)
     ? value as Record<string, unknown>
     : undefined;
+}
+
+export function parseGitAnchor(value: unknown): GitAnchor | undefined {
+  const obj = objectValue(value);
+  if (!obj) return undefined;
+  let base: string | undefined;
+  if (obj.base !== undefined) {
+    if (typeof obj.base !== "string" || obj.base.length === 0 || obj.base.length > 256) return undefined;
+    base = obj.base;
+  }
+  let dirty: boolean | undefined;
+  if (obj.dirty !== undefined) {
+    if (typeof obj.dirty !== "boolean") return undefined;
+    dirty = obj.dirty;
+  }
+  let snapshot: string | undefined;
+  if (obj.snapshot !== undefined) {
+    if (typeof obj.snapshot !== "string" || obj.snapshot.length === 0 || obj.snapshot.length > MAX_GIT_SNAPSHOT_CHARS) return undefined;
+    snapshot = obj.snapshot;
+  }
+  if (base === undefined && dirty === undefined && snapshot === undefined) return undefined;
+  return {
+    ...(base === undefined ? {} : { base }),
+    ...(dirty === undefined ? {} : { dirty }),
+    ...(snapshot === undefined ? {} : { snapshot }),
+  };
 }
 
 function strings(value: unknown): string[] | undefined {
@@ -730,12 +788,48 @@ function parseMemoryRecordUnsafe(value: unknown): MemoryRecord | undefined {
           record.files.some((f) => typeof f !== "string" || f.length === 0 || f.length > MAX_RATIONALE_FILE_CHARS)) return undefined;
       files = record.files as string[];
     }
+    let git: GitAnchor | undefined;
+    if (record.git !== undefined) {
+      git = parseGitAnchor(record.git);
+      if (git === undefined) return undefined;
+    }
     return {
       kind: "rationale", id: record.id, ts: Number(record.ts), v: 1, cwd: record.cwd,
       agent, rationale_fidelity: fidelity, source, excerpt: record.excerpt,
       ...(pointer === undefined ? {} : { pointer }),
       ...(links === undefined ? {} : { links }),
       ...(files === undefined ? {} : { files }),
+      ...(git === undefined ? {} : { git }),
+    };
+  }
+  if (record.kind === "explain") {
+    if (record.v !== 1 ||
+        typeof record.cwd !== "string" || record.cwd.length === 0 || record.cwd.length > MAX_RECORD_ITEM_CHARS ||
+        typeof record.path !== "string" || record.path.length === 0 || record.path.length > MAX_RATIONALE_FILE_CHARS ||
+        typeof record.source !== "string" || record.source.length === 0 || record.source.length > MAX_RECORD_ITEM_CHARS ||
+        typeof record.code !== "string" || record.code.length === 0 || record.code.length > MAX_RECORD_ITEM_CHARS ||
+        typeof record.business !== "string" || record.business.length === 0 || record.business.length > MAX_RECORD_ITEM_CHARS) return undefined;
+    let snippet: string | undefined;
+    if (record.snippet !== undefined) {
+      if (typeof record.snippet !== "string" || record.snippet.length === 0 || record.snippet.length > MAX_RECORD_ITEM_CHARS) return undefined;
+      snippet = record.snippet;
+    }
+    let contentHash: string | undefined;
+    if (record.contentHash !== undefined) {
+      if (typeof record.contentHash !== "string" || record.contentHash.length === 0 || record.contentHash.length > MAX_RECORD_ITEM_CHARS) return undefined;
+      contentHash = record.contentHash;
+    }
+    let git: GitAnchor | undefined;
+    if (record.git !== undefined) {
+      git = parseGitAnchor(record.git);
+      if (git === undefined) return undefined;
+    }
+    return {
+      kind: "explain", id: record.id, ts: Number(record.ts), v: 1, cwd: record.cwd,
+      path: record.path, source: record.source, code: record.code, business: record.business,
+      ...(snippet === undefined ? {} : { snippet }),
+      ...(contentHash === undefined ? {} : { contentHash }),
+      ...(git === undefined ? {} : { git }),
     };
   }
   if (record.kind === "explain") {
@@ -833,6 +927,17 @@ function parseMemoryRecordUnsafe(value: unknown): MemoryRecord | undefined {
     return {
       v: 1, kind: "invariant_touch", id: record.id, ts: Number(record.ts), cwd: record.cwd,
       invariant: record.invariant, path: record.path,
+    };
+  }
+  if (record.kind === "guard") {
+    if (record.v !== 1 ||
+        typeof record.cwd !== "string" || record.cwd.length === 0 || record.cwd.length > MAX_RECORD_ITEM_CHARS ||
+        typeof record.cmd !== "string" || record.cmd.length === 0 || record.cmd.length > MAX_RECORD_ITEM_CHARS ||
+        typeof record.rule !== "string" || record.rule.length === 0 || record.rule.length > MAX_RECORD_ITEM_CHARS ||
+        (record.outcome !== "cancelled" && record.outcome !== "proceeded")) return undefined;
+    return {
+      v: 1, kind: "guard", id: record.id, ts: Number(record.ts), cwd: record.cwd,
+      cmd: record.cmd, rule: record.rule, outcome: record.outcome,
     };
   }
   if (record.kind === "triple") return parseTripleRecord(record);
@@ -989,6 +1094,66 @@ interface MemoryCacheEntry {
   records: readonly MemoryRecord[];
   complete: boolean;
   coverage: MemoryCoverage;
+  /** Raw fingerprint -> record indices, built in the same consumeBytes pass. */
+  fpByRaw: Map<string, number[]>;
+  /** File byte offset per record index; -1 for non-failure rows. */
+  fpOffsets: number[];
+  /** Raw fingerprint -> file byte offsets, built in the same pass (sidecar source). */
+  fpOffsetsByRaw: Map<string, number[]>;
+  /** Newest record index per raw fingerprint (representative for dedup). */
+  fpRepresentative: Map<string, number>;
+  /** True when any failure needs legacy/migration proof (exact fast path falls back for single-hex queries). */
+  fpHasLegacy: boolean;
+}
+
+export interface MemoryFingerprintIndex {
+  byFp: ReadonlyMap<string, readonly number[]>;
+  hasLegacy: boolean;
+}
+
+const fingerprintIndexByRecords = new WeakMap<readonly MemoryRecord[], MemoryFingerprintIndex>();
+
+/**
+ * In-memory exact index for an already-loaded snapshot. Returns undefined
+ * when the records did not come from `loadMemoryChecked` (custom providers
+ * keep the full-scan contract). Never throws.
+ */
+export function getMemoryFingerprintIndex(records: readonly MemoryRecord[]): MemoryFingerprintIndex | undefined {
+  try {
+    return fingerprintIndexByRecords.get(records);
+  } catch {
+    return undefined;
+  }
+}
+
+function publishFingerprintIndex(
+  records: readonly MemoryRecord[],
+  byFp: Map<string, number[]>,
+  hasLegacy: boolean,
+): void {
+  try {
+    fingerprintIndexByRecords.set(records, { byFp, hasLegacy });
+  } catch { /* best effort; queries fall back to scanning */ }
+}
+
+const recordOffsetsByRecords = new WeakMap<readonly MemoryRecord[], readonly number[]>();
+
+/**
+ * File byte offset per record index for writer-side sidecar maintenance.
+ * Pure read metadata; undefined for custom providers. Never throws.
+ */
+export function getMemoryRecordOffsets(records: readonly MemoryRecord[]): readonly number[] | undefined {
+  try {
+    return recordOffsetsByRecords.get(records);
+  } catch {
+    return undefined;
+  }
+}
+
+function publishRecordOffsets(records: readonly MemoryRecord[], offsets: readonly number[]): void {
+  try {
+    recordOffsetsByRecords.set(records, offsets);
+  } catch { /* best effort */ }
 }
 
 // One immutable entry is enough for the normal long-running CLI/MCP process
@@ -1207,11 +1372,17 @@ export function loadMemoryChecked(path = resolveRockyPaths().memory, now = Date.
       if (witness === memoryCache.witness) {
         memoryCacheHitCount += 1;
         if (!needsResolution(memoryCache.records)) {
-          return { records: memoryCache.records as MemoryRecord[], complete: memoryCache.complete, coverage: memoryCache.coverage };
+          const cached = memoryCache.records as MemoryRecord[];
+          publishFingerprintIndex(cached, memoryCache.fpByRaw, memoryCache.fpHasLegacy);
+          publishRecordOffsets(cached, memoryCache.fpOffsets);
+          return { records: cached, complete: memoryCache.complete, coverage: memoryCache.coverage };
         }
         const records = materializeMemoryRecords(memoryCache.records);
         resolveMemoryRecords(records, now);
-        return { records: freezeMaterializedRecords(records), complete: memoryCache.complete, coverage: memoryCache.coverage };
+        const frozen = freezeMaterializedRecords(records);
+        publishFingerprintIndex(frozen, memoryCache.fpByRaw, memoryCache.fpHasLegacy);
+        publishRecordOffsets(frozen, memoryCache.fpOffsets);
+        return { records: frozen, complete: memoryCache.complete, coverage: memoryCache.coverage };
       }
     }
 
@@ -1234,32 +1405,63 @@ export function loadMemoryChecked(path = resolveRockyPaths().memory, now = Date.
     const contentHash = opened.size <= BigInt(MAX_MEMORY_FILE_BYTES) ? createHash("sha256") : undefined;
     const records: MemoryRecord[] = [];
     const seenIds = new Set<string>();
+    // Lazy exact index, built in this same byte pass (never a second scan):
+    // raw fingerprint -> record indices + file offsets, plus the newest
+    // record index per fingerprint as the dedup representative. For modern
+    // v2-only files raw == canonical, so the representative is exact; legacy
+    // families are resolved later via the migration index in the query layer.
+    const fpByRaw = new Map<string, number[]>();
+    const fpOffsetsByRaw = new Map<string, number[]>();
+    const fpRepresentative = new Map<string, number>();
+    const recordOffsets: number[] = [];
+    let fpHasLegacy = false;
+    let lineStartFileOffset = 0;
 
     const resetLine = (): void => {
       lineChunks.length = 0;
       lineBytes = 0;
       lineOversized = false;
     };
-    const consumeLine = (): void => {
+    const trackFailureIndex = (record: MemoryRecord, fileOffset: number): void => {
+      const index = records.length - 1;
+      recordOffsets.push(fileOffset);
+      if (record.kind !== "failure") return;
+      const fp = record.fingerprint;
+      const bucket = fpByRaw.get(fp);
+      if (bucket === undefined) fpByRaw.set(fp, [index]);
+      else bucket.push(index);
+      const offsets = fpOffsetsByRaw.get(fp);
+      if (offsets === undefined) fpOffsetsByRaw.set(fp, [fileOffset]);
+      else offsets.push(fileOffset);
+      fpRepresentative.set(fp, index);
+      if (record.fingerprintV !== 2 || !/^[0-9a-f]{16}$/u.test(fp)) fpHasLegacy = true;
+    };
+    const consumeLine = (nextStart: number): void => {
       if (lineBytes === 0 && !lineOversized) {
         resetLine();
+        lineStartFileOffset = nextStart;
         return;
       }
       if (records.length >= MAX_SUPPORTED_MEMORY_RECORDS) {
         stoppedAtRecordCap = true;
         truncated = Math.max(1, truncated);
         resetLine();
+        lineStartFileOffset = nextStart;
         return;
       }
       scanned += 1;
       if (lineOversized || lineBytes > MAX_MEMORY_LINE_BYTES) {
         skipped += 1;
         resetLine();
+        lineStartFileOffset = nextStart;
         return;
       }
       const line = Buffer.concat(lineChunks, lineBytes).toString("utf8").trim();
       resetLine();
-      if (!line) return;
+      if (!line) {
+        lineStartFileOffset = nextStart;
+        return;
+      }
       try {
         const record = parseMemoryRecord(JSON.parse(line));
         // Append-only history can contain a repeated id after a crash or a
@@ -1268,6 +1470,7 @@ export function loadMemoryChecked(path = resolveRockyPaths().memory, now = Date.
         if (record && !seenIds.has(record.id)) {
           seenIds.add(record.id);
           records.push(record);
+          trackFailureIndex(record, lineStartFileOffset);
         } else {
           skipped += 1;
         }
@@ -1275,9 +1478,11 @@ export function loadMemoryChecked(path = resolveRockyPaths().memory, now = Date.
         // A corrupt line never kills the memory; the skipped count discloses it.
         skipped += 1;
       }
+      lineStartFileOffset = nextStart;
     };
-    const consumeBytes = (chunk: Buffer): void => {
+    const consumeBytes = (chunk: Buffer, chunkStart: number): void => {
       let remaining = chunk;
+      let remainingStart = chunkStart;
       while (remaining.length > 0 && !stoppedAtRecordCap) {
         const newline = remaining.indexOf(0x0a);
         const part = newline < 0 ? remaining : remaining.subarray(0, newline);
@@ -1293,8 +1498,10 @@ export function loadMemoryChecked(path = resolveRockyPaths().memory, now = Date.
           }
         }
         if (newline < 0) break;
-        consumeLine();
+        const lineEnd = remainingStart + newline;
+        consumeLine(lineEnd + 1);
         remaining = remaining.subarray(newline + 1);
+        remainingStart = lineEnd + 1;
       }
     };
 
@@ -1308,15 +1515,16 @@ export function loadMemoryChecked(path = resolveRockyPaths().memory, now = Date.
         memoryCache = undefined;
         return emptyLoad(false, totalBytes, "read-race");
       }
+      const chunkStart = bytesScanned;
       bytesScanned += count;
       const bytes = buffer.subarray(0, count);
       contentHash?.update(bytes);
-      if (!stoppedAtRecordCap) consumeBytes(bytes);
+      if (!stoppedAtRecordCap) consumeBytes(bytes, chunkStart);
     }
     // A partial final line is valid input when the file ends normally. A
     // file-size-capped partial line is deliberately left undisclosed as a
     // record; `truncated: 1` says that evidence exists beyond the boundary.
-    if (!stoppedAtRecordCap && opened.size <= BigInt(MAX_MEMORY_FILE_BYTES)) consumeLine();
+    if (!stoppedAtRecordCap && opened.size <= BigInt(MAX_MEMORY_FILE_BYTES)) consumeLine(bytesScanned);
 
     const after = fstatSync(descriptor, { bigint: true });
     const afterKey = memorySnapshotKey(path, after);
@@ -1352,15 +1560,34 @@ export function loadMemoryChecked(path = resolveRockyPaths().memory, now = Date.
     // answer. The in-envelope witness covers every affecting byte and is not
     // a probabilistic sample.
     const witness = contentHash?.digest("hex");
-    memoryCache = witness === undefined
-      ? undefined
-      : { path, key: afterKey, witness, records: frozenRecords, complete, coverage };
+    if (witness !== undefined) {
+      memoryCache = {
+        path,
+        key: afterKey,
+        witness,
+        records: frozenRecords,
+        complete,
+        coverage,
+        fpByRaw,
+        fpOffsets: [...recordOffsets],
+        fpOffsetsByRaw,
+        fpRepresentative,
+        fpHasLegacy,
+      };
+      publishFingerprintIndex(frozenRecords as MemoryRecord[], fpByRaw, fpHasLegacy);
+      publishRecordOffsets(frozenRecords as MemoryRecord[], [...recordOffsets]);
+    } else {
+      memoryCache = undefined;
+    }
     if (!needsResolution(frozenRecords)) {
       return { records: frozenRecords as MemoryRecord[], complete, coverage };
     }
     const materialized = materializeMemoryRecords(frozenRecords);
     resolveMemoryRecords(materialized, now);
-    return { records: freezeMaterializedRecords(materialized), complete, coverage };
+    const frozenMaterialized = freezeMaterializedRecords(materialized);
+    publishFingerprintIndex(frozenMaterialized, fpByRaw, fpHasLegacy);
+    publishRecordOffsets(frozenMaterialized, [...recordOffsets]);
+    return { records: frozenMaterialized, complete, coverage };
   } catch {
     // Missing memory is a complete empty state; every other read failure is
     // incomplete and must be treated conservatively by mutation callers.

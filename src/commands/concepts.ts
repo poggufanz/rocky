@@ -9,6 +9,7 @@ import { CONCEPTS } from "../core/concepts.js";
 import { activeAliases, buildConceptIndex } from "../core/concept-index.js";
 import { recordAlias } from "../core/memory.js";
 import { isCompleteMemoryCoverage, loadMemoryChecked, type MemoryCoverage } from "../core/memory-read.js";
+import { CS_CONCEPT_IDS } from "../core/cs-explain.js";
 import { ago, detail, heading, say } from "../ui/rocky.js";
 
 function knownConcept(id: string): boolean {
@@ -96,6 +97,9 @@ function reverseLookup(conceptId: string): number {
     return 0;
   }
   heading(conceptId);
+  if ((CS_CONCEPT_IDS as readonly string[]).includes(conceptId)) {
+    detail(`cs concept ${conceptId}. full explain in dash, question`);
+  }
   for (const entry of evidence) {
     detail(`${ago(entry.ts)}  ${entry.kind}  ${entry.snippet}`);
   }

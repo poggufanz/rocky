@@ -265,3 +265,21 @@ test("fingerprint algorithm is versioned and exposes a backward lookup candidate
   assert.equal(candidates.includes(legacyFingerprint("Error: old path /tmp/x-123", "node app", 1)), true);
   assert.equal(candidates.length, 2);
 });
+
+test("tokens and retrievalTokens extract constituent parts from CamelCase and PascalCase identifiers", () => {
+  const t = tokens("CrossRegionInventoryTransferService.php");
+  assert.ok(t.has("crossregioninventorytransferservice.php"));
+  assert.ok(t.has("cross"));
+  assert.ok(t.has("region"));
+  assert.ok(t.has("inventory"));
+  assert.ok(t.has("transfer"));
+  assert.ok(t.has("service"));
+  assert.ok(t.has("php"));
+
+  const q = queryTokens("CrossRegionInventoryTransferService");
+  assert.ok(q.has("cross"));
+  assert.ok(q.has("region"));
+  assert.ok(q.has("inventory"));
+  assert.ok(q.has("transfer"));
+});
+

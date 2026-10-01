@@ -3,10 +3,14 @@ import { readFileSync, statSync } from "node:fs";
 import { loadMemory } from "../core/memory-read.js";
 import { teachLookup } from "../core/teach.js";
 import { buildLadder, defaultTeachNeighbor, type LadderResult } from "../core/teach-ladder.js";
+import { gitProvenanceChain } from "../core/git-diff.js";
 import { gapRungFor, renderLadderCard, renderLadderExpanded, renderWitnessCard } from "../core/teach-render.js";
 import { redactSecretsAtBoundary } from "../core/redact.js";
 import { block, detail, heading, say } from "../ui/rocky.js";
+import { matchConcepts } from "../core/concepts.js";
+import { CS_CONCEPT_IDS } from "../core/cs-explain.js";
 import { CliUsageError, reportCliUsage } from "./cli-args.js";
+import { analyzeExplainDecision, formatDecisionLine } from "../ai/explain-decision.js";
 
 const EMPTY_STATE = "not heard why yet. agent explains when it writes. ask agent, rocky remembers, question";
 const USAGE = "rocky teach <file>[:<line>] [--stdin] [--ladder] [--quiet]";
@@ -148,16 +152,17 @@ export async function teach(argv: readonly string[], deps: TeachDeps = {}): Prom
       endLine: anchorEnd,
       fileText,
       readNeighbor: defaultTeachNeighbor(file),
-      ...(hit !== undefined ? { git: () => undefined } : {}),
+      git: hit !== undefined ? undefined : gitProvenanceChain,
     });
   }
-
   if (hit !== undefined) {
     const gapRung = snippet === undefined ? undefined : gapRungFor(hit, ladderResult);
     const card = renderWitnessCard(hit, gapRung);
     printHeading(card.header);
     printBlock([...card.lines]);
     printDetail(card.evidence);
+    await explainDecisionDetail(file, snippet, hit.record.id, hit.record.snippet ?? hit.record.code, "teach", printDetail);
+    csPointerFor(file, snippet, quiet, printDetail);
     return 0;
   }
 
@@ -167,10 +172,43 @@ export async function teach(argv: readonly string[], deps: TeachDeps = {}): Prom
     printHeading(card.header);
     printBlock(card.lines.map((l) => redactSecretsAtBoundary(l)));
     printDetail(card.evidence);
+    csPointerFor(file, snippet, quiet, printDetail);
     if (ladder) printBlock(renderLadderExpanded(ladderResult).map((l) => redactSecretsAtBoundary(l)));
     return 0;
   }
 
   if (!quiet) speak(EMPTY_STATE);
   return 0;
+}
+
+/**
+ * Opt-in Jev analysis branch: runs only when the config carries an explicit
+ * `decision` section, alongside the existing witness/ladder output. The card
+ * above stays byte-identical; this appends one advisory template line.
+ */
+async function explainDecisionDetail(
+  file: string,
+  snippet: string | undefined,
+  ref: string,
+  evidence: string,
+  outcome: string,
+  printDetail: (line: string) => void,
+): Promise<void> {
+  try {
+    const trace = await analyzeExplainDecision({
+      query: `${file} ${snippet ?? ""}`.slice(0, 1000),
+      candidates: [{ ref, kind: "explain", snippet: redactSecretsAtBoundary(evidence).slice(0, 500) }],
+    }, { outcome });
+    if (trace !== undefined) printDetail(formatDecisionLine(trace));
+  } catch {
+    // Advisory only: the witness card above already answered.
+  }
+}
+
+function csPointerFor(file: string, snippet: string | undefined, quiet: boolean, printDetail: (line: string) => void): void {
+  if (quiet) return;
+  const hay = `${file} ${snippet ?? ""}`;
+  const hit = matchConcepts(hay).find((h) => (CS_CONCEPT_IDS as readonly string[]).includes(h.concept.id));
+  if (hit === undefined) return;
+  printDetail(`cs concept ${hit.concept.id}. full explain in dash, question`);
 }

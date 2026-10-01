@@ -16,7 +16,8 @@ This is a one-person side project, not a funded product. Expect a first reply wi
 
 | Version | Supported |
 | --- | --- |
-| 0.8.0 | Yes |
+| 1.0.0 | Yes |
+| 0.8.0 | No |
 | 0.7.6 | No |
 | 0.7.5 | No |
 | 0.7.4 | No |
@@ -57,7 +58,7 @@ Host recovery behavior is deliberately host-specific:
 
 These artifacts can contain sensitive host configuration and are not encrypted. Changing `ROCKY_HOME` does not relocate `.bashrc`, host configuration, or their recovery artifacts.
 
-Rocky's own code contains no telemetry. Its only non-loopback network traffic is `rocky check` looking up eligible package names at registry.npmjs.org: package names only, no versions or paths, after consent, with no redirects, and fail-open on every result except a definitive 404. MCP runs over local stdio, exposes read-only tools, and projects sanitized memory by default. Raw exposure is an explicit opt-in. A host you launch or configure may apply its own network and data policy, so review that host before sharing raw fields.
+Rocky's own code contains no telemetry. Its only non-loopback network traffic is `rocky check` looking up eligible package names at registry.npmjs.org: package names only, no versions or paths, after consent, with no redirects, and fail-open on every result except a definitive 404. The GUI Main chat adds one more path, and only when a BYOK model is configured: a code question sends the redacted, capped question, carved excerpts, and memory evidence to that model, while a memory-only question sends nothing. MCP runs over local stdio, exposes read-only tools, and projects sanitized memory by default. Raw exposure is an explicit opt-in. A host you launch or configure may apply its own network and data policy, so review that host before sharing raw fields.
 
 Git diff correlation (`rocky why --diff`, `rocky how --diff`, and MCP `why_file`) executes local read-only `git` subprocesses. Subprocesses are invoked with `shell: false`, bounded by a strict 5-second timeout, and capped at a maximum 32 KB buffer. Diff output passes through automatic secret and credential scrubbing (`redactSecretsAtBoundary`) before being displayed or exposed over MCP, and falls back safely when git is unavailable.
 

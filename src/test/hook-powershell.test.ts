@@ -1388,10 +1388,10 @@ test(
  * discarding stderr on purpose). The fix moves the actual print into
  * `prompt`, which runs inside THIS interactive session rather than a
  * detached child, so its `[Console]::Error` write goes through the session's
- * own redirected stderr handle -- which `spawnAndFeedCapturingStderr` (unlike
- * every other helper here) captures. This is therefore able to assert the
- * literal words Rocky says, not merely that memory.jsonl or a drained
- * directory implies success.
+ * own redirected stderr handle -- which this smoke captures, unlike every
+ * other helper here. This asserts the complete actionable command on stderr,
+ * not incidental English wording or merely that a memory write or directory
+ * drain implies success.
  *
  * The full match through the closing quote and the ", question" suffix,
  * terminated by a real newline, is the no-truncation proof: the exact
@@ -1400,7 +1400,50 @@ test(
  * the old fire-and-forget console write would fail this assertion outright
  * (nothing would ever reach this session's own stderr at all), not just
  * produce a shorter match.
+ *
+ * F2 round 5: condition-driven rendezvous for the speech round-trip,
+ * replacing the old fixed settle echoes. A detached `_hookfail` child
+ * publishes its `.txt` file asynchronously, and `prompt` only speaks a file
+ * present at a prompt draw -- so feeding `exit` on a fixed schedule races
+ * publication (observed live: memory held both failures, stderr stayed
+ * empty, the published file sat undrained after exit). Each stage below
+ * waits on the observable filesystem event it actually needs, each with its
+ * own hang guard, so no fixed sleep has to guess how slow a loaded machine
+ * is:
+ *   1. the first failure's detached memory write is durable before the
+ *      repeat is even issued (otherwise both handlers can read an empty
+ *      memory and both stay silent -- no file, nothing to drain);
+ *   2. the repeat's `.txt` publication lands before the draining prompt is
+ *      triggered (otherwise exit wins and stderr stays empty);
+ *   3. the drain itself (the file's deletion by `prompt`) happens before
+ *      `exit` is fed, so the spoken message is already on stderr.
+ * The drain trigger is `cd .`: denylisted, so it draws exactly one prompt
+ * cycle -- the one that speaks -- without spawning another detached child.
  */
+async function waitForSpeechFiles(
+  speechDir: string,
+  want: "published" | "drained",
+  timeoutMs: number,
+): Promise<string[]> {
+  // Integration exception: this polls a real detached child's filesystem
+  // publication across processes, which fake timers cannot drive, so a
+  // short real poll interval stands in for the awaited condition.
+  const deadline = Date.now() + timeoutMs;
+  let last: string[] = [];
+  for (;;) {
+    try {
+      last = existsSync(speechDir)
+        ? readdirSync(speechDir).filter((name) => name.endsWith(".txt"))
+        : [];
+    } catch {
+      last = [];
+    }
+    if (want === "published" ? last.length > 0 : last.length === 0) return last;
+    if (Date.now() >= deadline) return last;
+    await new Promise<void>((resolve) => setTimeout(resolve, 150));
+  }
+}
+
 async function realHostSpeechRoundTripSmoke(t: TestContext, exe: string): Promise<void> {
   const root = mkdtempSync(join(tmpdir(), "rocky-hook-ps-speech-"));
   t.after(() => safeRmSync(root));
@@ -1414,27 +1457,80 @@ async function realHostSpeechRoundTripSmoke(t: TestContext, exe: string): Promis
   const entry = join(packageRoot, "dist", "index.js").replace(/'/g, "''");
   writeFileSync(shim, `& node '${entry}' @args\nexit $LASTEXITCODE\n`);
 
-  // Extra settle cycles after the repeat failure: real margin for the
-  // detached child (mkdir/write/rename a small file, plus Node startup) to
-  // finish well before the session exits -- a real host running the whole
-  // suite already shows this class of work finishing in well under a
-  // second (Finding 5's concurrent-spawn test needed an artificial 2000ms
-  // sleep specifically to force overlap that would not otherwise happen).
-  const result = await spawnAndFeedCapturingStderr(exe, rockyHome, shim, [
-    `. "${join(rockyHome, "rocky-hook.ps1")}"`,
-    "Get-Item ./__rocky_speech_repeat__ -ErrorAction SilentlyContinue 2>$null",
-    "Get-Item ./__rocky_speech_repeat__ -ErrorAction SilentlyContinue 2>$null",
-    "echo settle-1",
-    "echo settle-2",
-    "echo settle-3",
-    "echo settle-4",
-    "exit",
-  ]);
-  assert.equal(result.timedOut, false, "the session must not hang");
-
   const memoryPath = join(rockyHome, "memory.jsonl");
-  // The repeated command is fed twice, so at least 2 detached writes are
-  // expected before the file can be considered settled.
+  const speechDir = join(rockyHome, "hook-speech");
+  const repeatCmd = "Get-Item ./__rocky_speech_repeat__ -ErrorAction SilentlyContinue 2>$null";
+
+  const child = spawn(exe, ["-NoProfile", "-NoLogo"], {
+    env: { ...process.env, ROCKY_HOME: rockyHome, ROCKY_BIN: shim },
+    stdio: ["pipe", "pipe", "pipe"],
+    windowsHide: true,
+  });
+  let stderr = "";
+  let timedOut = false;
+  child.stdout.resume();
+  child.stderr.setEncoding("utf8");
+  child.stderr.on("data", (chunk: string) => { stderr += chunk; });
+  const exited = new Promise<void>((resolve) => {
+    child.once("close", () => resolve());
+    child.once("error", () => resolve());
+  });
+  const feed = (line: string): void => {
+    try {
+      child.stdin.write(`${line}\n`);
+    } catch {
+      // The session is already gone; the bounded exit wait below reports it.
+    }
+  };
+  const finish = async (): Promise<void> => {
+    feed("exit");
+    // Integration exception: bounds a real interactive host process that
+    // fake timers cannot drive; the kill below is the hang guard, not a
+    // guessed settle delay.
+    const guard = setTimeout(() => {
+      timedOut = true;
+      try { child.kill("SIGKILL"); } catch { /* best effort */ }
+    }, 15_000);
+    try {
+      await exited;
+    } finally {
+      clearTimeout(guard);
+    }
+  };
+
+  try {
+    feed(`. "${join(rockyHome, "rocky-hook.ps1")}"`);
+    feed(repeatCmd);
+    const first = await readMemoryRecordsSettled(memoryPath, 1, 15_000);
+    assert.ok(
+      first.length >= 1,
+      `the first failure's detached write must be durable before the repeat is issued, or both handlers read an empty memory and both stay silent; got: ${JSON.stringify(first)}`,
+    );
+    feed(repeatCmd);
+    const second = await readMemoryRecordsSettled(memoryPath, 2, 15_000);
+    assert.ok(
+      second.length >= 2,
+      `the repeat command must have recorded at least 2 failures (Ruling 4's first-occurrence silence must not have suppressed the second too); got: ${JSON.stringify(second)}`,
+    );
+    const published = await waitForSpeechFiles(speechDir, "published", 15_000);
+    assert.ok(
+      published.length > 0,
+      `the repeat-occurrence speech file must be published before the draining prompt runs, or exit wins the race and stderr stays empty; got: ${JSON.stringify(published)}`,
+    );
+    feed("cd .");
+    const undrained = await waitForSpeechFiles(speechDir, "drained", 15_000);
+    assert.ok(
+      undrained.length === 0,
+      `prompt must have spoken and deleted the published speech before exit; leftover: ${JSON.stringify(undrained)}`,
+    );
+    await finish();
+  } catch (error) {
+    try { child.kill("SIGKILL"); } catch { /* best effort, then t.after cleans up */ }
+    await exited;
+    throw error;
+  }
+  assert.equal(timedOut, false, "the session must not hang");
+
   const records = await readMemoryRecordsSettled(memoryPath, 2);
   const failures = records.filter((r) => r.kind === "failure");
   assert.ok(
@@ -1442,13 +1538,12 @@ async function realHostSpeechRoundTripSmoke(t: TestContext, exe: string): Promis
     `the repeat command must have recorded at least 2 failures (Ruling 4's first-occurrence silence must not have suppressed the second too); got: ${JSON.stringify(records)}`,
   );
 
-  assert.match(
-    result.stderr,
-    /\[Rocky\] this error again\. deep memory need stderr\. run with: rocky run '[^\r\n]*', question\r?\n/,
-    `the repeat-occurrence message must arrive complete via this session's own stderr, never truncated, never missing; got stderr: ${JSON.stringify(result.stderr)}`,
+  assert.ok(
+    stderr.endsWith(`rocky run '${repeatCmd}', question\n`)
+      || stderr.endsWith(`rocky run '${repeatCmd}', question\r\n`),
+    `the repeat-occurrence command must arrive complete via this session's own stderr, never truncated, never missing; got stderr: ${JSON.stringify(stderr)}`,
   );
 
-  const speechDir = join(rockyHome, "hook-speech");
   assert.ok(
     !existsSync(speechDir) || readdirSync(speechDir).filter((f) => f.endsWith(".txt")).length === 0,
     `every published speech file must have been read and deleted by prompt before the session exits; leftover: ${

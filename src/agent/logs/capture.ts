@@ -9,6 +9,16 @@ import { recordRationale } from "../../core/memory.js";
 export interface CaptureResult { written: number; unlinked: number; skipped: string[] }
 
 /**
+ * Listening cutover (spec §4): the legacy passive pull must freeze for
+ * Listening-seeded hosts so raw reasoning never copies into the graph.
+ * `recordRationale` stays the memory.jsonl writer; Listening reads only
+ * verified hook ingress, never this lane. `hook_policy_reason` (a hook
+ * policy/decision note) is never agent-stated why. Default false so
+ */
+export const LEGACY_RATIONALE_PULL_FROZEN_FOR_LISTENING = false;
+
+
+/**
  * Weak-link window: an event weak-links to the nearest failure/fix in the
  * same cwd within this many ms of the event's timestamp. Exported so other
  * lanes (e.g. the notify capture path) reuse this exact rule instead of
@@ -122,6 +132,9 @@ function correlate(
  * never throws.
  */
 export function captureRationales(repoCwd: string, now: number = Date.now(), deps: CaptureDeps = {}): CaptureResult {
+  if (process.env.ROCKY_FREEZE_LEGACY_PULL === "1") {
+    return { written: 0, unlinked: 0, skipped: ["legacy pull frozen for Listening cutover"] };
+  }
   const adapters = deps.adapters ?? ADAPTERS;
   const result: CaptureResult = { written: 0, unlinked: 0, skipped: [] };
   try {

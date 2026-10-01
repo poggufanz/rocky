@@ -27,7 +27,9 @@ test("first edit denied with instruction, retry after rationale allowed", async 
   assert.match(parsed.hookSpecificOutput.permissionDecisionReason, /rocky hook agent-event/);
   assert.match(parsed.hookSpecificOutput.permissionDecisionReason, /, question/);
   const second = gateEvent("claude-code", preToolUse("/work/repo/src/q.ts"));
-  assert.equal(second.stdout, "{}", "same file second time allowed");
+  assert.equal(JSON.parse(second.stdout).hookSpecificOutput.permissionDecision, "deny");
+  const third = gateEvent("claude-code", preToolUse("/work/repo/src/q.ts"));
+  assert.equal(third.stdout, "{}", "same file third time allowed after nudges consumed");
   const other = gateEvent("claude-code", preToolUse("/work/repo/src/other.ts"));
   assert.equal(JSON.parse(other.stdout).hookSpecificOutput.permissionDecision, "deny", "new file gated");
 });
@@ -130,5 +132,7 @@ test("MultiEdit gates on its single tool_input.file_path", async (t) => {
   const first = gateEvent("claude-code", multi);
   assert.equal(JSON.parse(first.stdout).hookSpecificOutput.permissionDecision, "deny");
   const second = gateEvent("claude-code", multi);
-  assert.equal(second.stdout, "{}");
+  assert.equal(JSON.parse(second.stdout).hookSpecificOutput.permissionDecision, "deny");
+  const third = gateEvent("claude-code", multi);
+  assert.equal(third.stdout, "{}");
 });
