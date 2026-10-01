@@ -222,8 +222,6 @@ function setTally() {
   const text = parts.join(" | ");
   const tally = $("#tally");
   if (tally) tally.textContent = text;
-  const side = $("#side-tally");
-  if (side) side.textContent = text;
 }
 
 // data-seg, not .seg-btn: the provider control reuses that class and has no panel
@@ -263,42 +261,27 @@ for (const tab of tabs) {
 /** Kinds that are rocky explaining himself. These carry the voice colour. */
 const WHY_KINDS = new Set(["rationale", "explain", "triple"]);
 
-/** House style: title case, and a bar where the core sends a middle dot. */
-function houseStyle(text) {
-  return text
-    .split(" · ")
-    .map((part) => part.replace(/\b[a-z]/g, (letter) => letter.toUpperCase()))
-    .join(" | ");
-}
-
-function countRow(label, count, tone) {
-  const row = el("div", "row");
-  row.append(el("span", "row-label", label));
-  const number = el("span", "row-num", String(count));
-  if (count > 0 && tone) number.classList.add(tone);
-  row.append(number);
-  return row;
+/**
+ * Main is the chat surface; chat.js paints it. This side fetches the home
+ * payload once per visit, keeps the tally, and hands the payload over as a
+ * `rocky:home` event. A failure is handed over too, with its retry, so the
+ * memory card never goes blank.
+ */
+function announceHome(detail) {
+  window.rockyHome = detail;
+  window.dispatchEvent(new CustomEvent("rocky:home", { detail }));
 }
 
 async function loadMain() {
   if (state.mainLoaded) return;
   state.mainLoaded = true;
-  fill($("#holds"), skeleton());
-  fill($("#day"), skeleton());
-  fill($("#topfiles"), skeleton());
-  fill($("#latest"), skeleton());
-  fill($("#recent"), skeleton());
 
   let data;
   try {
     data = await api("/api/home");
   } catch {
     state.mainLoaded = false;
-    fill($("#holds"), failed(loadMain));
-    fill($("#day"), failed(loadMain));
-    fill($("#topfiles"), empty("top files unknown (offline)."));
-    fill($("#latest"), empty("rocky not hear answer."));
-    fill($("#recent"), empty("recent unknown (offline). retry from the error card."));
+    announceHome({ error: "offline", retry: loadMain });
     return;
   }
 
@@ -308,99 +291,18 @@ async function loadMain() {
     && Array.isArray(data.topFiles) && Array.isArray(data.recent);
   if (!sane) {
     state.mainLoaded = false;
-    fill($("#holds"), failed(loadMain));
-    fill($("#day"), failed(loadMain));
-    fill($("#topfiles"), empty("top files unknown (bad reply)."));
-    fill($("#latest"), empty("rocky not hear answer."));
-    fill($("#recent"), empty("recent unknown (bad reply). retry from the error card."));
+    announceHome({ error: "bad reply", retry: loadMain });
     return;
   }
 
   state.total = typeof data.total === "number" ? data.total : state.total;
   setTally();
-
-  const holds = data.byKind.length === 0
-    ? [empty("no records yet")]
-    : data.byKind.map((entry) => countRow(entry?.kind ?? "unknown", Number(entry?.count ?? 0) || 0, "live"));
-  // Coverage is rocky admitting what he did not read, so it is never hidden.
-  if (data.coverageLine) holds.push(el("div", "row-note", houseStyle(String(data.coverageLine))));
-  fill($("#holds"), ...holds);
-  const coverage = $("#side-coverage");
-  if (coverage) coverage.textContent = data.coverageLine ? houseStyle(String(data.coverageLine)) : "";
-
-  fill(
-    $("#day"),
-    countRow("heard", Number(data.day.heard ?? 0) || 0, "live"),
-    countRow("failures", Number(data.day.failures ?? 0) || 0, "live"),
-    countRow("fixes", Number(data.day.fixes ?? 0) || 0, "live"),
-    countRow("why recorded", Number(data.day.whys ?? 0) || 0, "why"),
-  );
-
-  fill(
-    $("#topfiles"),
-    ...(data.topFiles.length === 0
-      ? [empty("(none heard yet)")]
-      : data.topFiles.map((file) => {
-          const row = el("div", "row");
-          // rtl truncation keeps the filename, the mark keeps the path readable
-          row.append(el("span", "row-path", `‪${file.name}`), el("span", "row-num", String(file.count)));
-          return row;
-        })),
-  );
-
-  // The newest record is the anchor: remembering is what this surface is for,
-  // so the last thing rocky heard is read first and everything else follows it.
-  const [newest, ...rest] = data.recent;
-  if (newest === undefined) {
-    fill($("#latest"));
-    fill($("#recent"), empty("no records yet"));
-    return;
-  }
-
-  const meta = el("div", "latest-meta");
-  const kind = el("span", "latest-kind", newest.kind);
-  if (WHY_KINDS.has(newest.kind)) kind.classList.add("why");
-  meta.append(kind, el("span", "latest-ago", newest.agoText));
-
-  // Rocky stands beside what he last heard: the face makes the anchor his,
-  // and the whole hero rises in one short stagger so the eye lands in order.
-  const face = el("pre", "latest-face", FACE.join("\n"));
-  face.setAttribute("aria-hidden", "true");
-  const body = box(
-    "latest-body",
-    el("div", "latest-eyebrow", "Last Heard"),
-    Object.assign(el("p", "latest-line", newest.label), { title: String(newest.label ?? "") }),
-    meta,
-  );
-  [face, body].forEach((node, index) => node.style.setProperty("--i", String(index)));
-  fill($("#latest"), face, body);
-
-  // The same line arriving twice is a repeat, not two things to read. It is
-  // stacked rather than hidden: the count says how many rocky actually heard.
-  const stacked = [];
-  for (const hit of [newest, ...rest]) {
-    const last = stacked[stacked.length - 1];
-    if (last && last.hit.label === hit.label && last.hit.kind === hit.kind) last.count += 1;
-    else stacked.push({ hit, count: 1 });
-  }
-
-  fill(
-    $("#recent"),
-    ...stacked.slice(1).map(({ hit, count }, index) => {
-      const row = el("div", "recent-row");
-      row.style.setProperty("--i", String(index + 2));
-      const rowKind = el("span", "recent-kind", hit.kind);
-      if (WHY_KINDS.has(hit.kind)) rowKind.classList.add("why");
-      const label = Object.assign(el("span", "recent-label", hit.label), { title: String(hit.label ?? "") });
-      row.append(rowKind, label, el("span", "recent-ago", hit.agoText));
-      if (count > 1) label.append(el("span", "recent-count", ` ×${count}`));
-      return row;
-    }),
-  );
-
-  const twin = stacked[0].count;
-  if (twin > 1) meta.append(el("span", "latest-count", `heard ×${twin}`));
+  announceHome({ data });
 }
+
+// Rocky himself greets an empty chat; the face lives here with its source note.
+const cxFace = $("#cx-face");
+if (cxFace) cxFace.textContent = FACE.join("\n");
 
 /* ---- dash: picker ----------------------------------------------------- */
 

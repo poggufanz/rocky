@@ -133,72 +133,117 @@
 
  <main>
 
-  <!-- Main: chat-first three-column layout. view-dash below untouched. -->
-  <!-- Static skeleton: view-main reads even with JS disabled or every /api/* failed. -->
+  <!-- Main: a chat surface. Chats live in this browser; every answer comes
+       from POST /api/chat, one question at a time. Static skeleton reads with
+       JS disabled or every /api/* failed. -->
   <section class="view" id="view-main" role="tabpanel" aria-labelledby="tab-main">
     <noscript><p class="empty">rocky needs JavaScript for live memory. Start rocky and open its terminal link.</p></noscript>
-    <div class="chat-shell" id="main-grid">
-      <aside class="chat-side" aria-label="conversations and memory">
-        <div class="side-block">
-          <h2>Conversations</h2>
-          <div id="latest" class="latest"><div class="empty"><p>listening…</p></div></div>
-          <div id="recent" class="rows side-recent" role="list" aria-label="recent conversations"><div class="empty"><p>listening…</p></div></div>
+    <div class="cx" id="cx" data-side="open" data-sources="closed" data-empty="true">
+
+      <aside class="cx-side" id="cx-side" aria-label="chats">
+        <div class="cx-side-head">
+          <button id="cx-new" class="cx-new" type="button" title="New chat (Ctrl+Shift+O)">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>
+            <span>New chat</span>
+          </button>
+          <button id="cx-side-close" class="cx-icon" type="button" aria-controls="cx-side" aria-expanded="true" title="Hide chats">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M9 4v16"/></svg>
+            <span class="vh">hide chats</span>
+          </button>
         </div>
-        <div class="side-block side-memory">
-          <section class="blk">
-            <h2>What Rocky Holds</h2>
-            <div id="holds" class="rows"><div class="empty"><p>listening…</p></div></div>
-          </section>
-          <section class="blk">
-            <h2>Since 24H</h2>
-            <div id="day" class="rows"><div class="empty"><p>listening…</p></div></div>
-          </section>
-          <section class="blk">
-            <h2>Most Heard Files</h2>
-            <div id="topfiles" class="rows"><div class="empty"><p>listening…</p></div></div>
-          </section>
-        </div>
-        <div class="side-foot" aria-label="user and limits">
-          <span id="side-tally" class="side-tally" aria-live="polite"></span>
-          <span id="side-coverage" class="side-coverage"></span>
-        </div>
+
+        <label class="cx-search">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
+          <span class="vh">search chats</span>
+          <input id="cx-search" type="search" placeholder="Search chats" autocomplete="off" spellcheck="false">
+        </label>
+
+        <nav id="cx-sessions" class="cx-sessions" aria-label="past chats">
+          <p class="cx-sessions-empty">No chats yet. Your questions and Rocky's answers land here.</p>
+        </nav>
+
+        <section class="cx-mem" aria-labelledby="cx-mem-title">
+          <h2 id="cx-mem-title">Rocky's memory</h2>
+          <div id="cx-mem" class="cx-mem-body" aria-live="polite"><p class="cx-mem-wait">listening…</p></div>
+        </section>
+        <p class="cx-side-note">Chats stay in this browser. Asking never changes what Rocky remembers.</p>
       </aside>
-      <section class="blk blk-chat chat-center" id="chat-panel" aria-label="ask rocky">
-        <div id="chat-log" class="chat-log chat-log-empty" role="log" aria-live="polite" aria-label="conversation">
-          <div id="chat-thread" class="chat-thread">
-            <div id="chat-welcome" class="chat-welcome">ask what rocky heard. memory search checks whole local records and holds on weak evidence. code questions reach the model you configure.</div>
+
+      <section class="cx-main" aria-label="ask rocky">
+        <div class="cx-topbar">
+          <button id="cx-side-open" class="cx-icon" type="button" aria-controls="cx-side" aria-expanded="false" title="Show chats">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M9 4v16"/></svg>
+            <span class="vh">show chats</span>
+          </button>
+          <button id="cx-new-mini" class="cx-icon" type="button" title="New chat (Ctrl+Shift+O)">
+            <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>
+            <span class="vh">new chat</span>
+          </button>
+          <h1 id="cx-title" class="cx-title">New chat</h1>
+        </div>
+
+        <div id="chat-log" class="cx-log" role="log" aria-live="polite" aria-label="conversation">
+          <div id="cx-welcome" class="cx-welcome">
+            <pre id="cx-face" class="cx-face" aria-hidden="true"></pre>
+            <h2 class="cx-hello">Ask Rocky what he heard</h2>
+            <p class="cx-sub" id="cx-sub">Rocky remember failures, fixes, and reasons from your terminal and your agents. Ask, question.</p>
+          </div>
+          <div id="chat-thread" class="cx-thread"></div>
+        </div>
+
+        <div class="cx-dock">
+          <form id="chat-form" class="cx-composer" autocomplete="off">
+            <label class="vh" for="chat-input">ask rocky</label>
+            <textarea id="chat-input" rows="1" maxlength="4000" placeholder="Ask about a failure, a fix, or why code looks the way it does" spellcheck="false" autocomplete="off"></textarea>
+            <div class="cx-tools">
+              <div class="cx-route" role="radiogroup" aria-label="answer from" id="cx-route">
+                <button type="button" role="radio" data-route="auto" aria-checked="true" title="Rocky picks memory or code from your words">Auto</button>
+                <button type="button" role="radio" data-route="memory" aria-checked="false" tabindex="-1" title="Local memory only. Nothing leaves this machine">Memory</button>
+                <button type="button" role="radio" data-route="code" aria-checked="false" tabindex="-1" title="Memory plus repo files, answered by your model">Code</button>
+              </div>
+              <button id="chat-jev" class="cx-jev" type="button" aria-pressed="false" title="Jev analysis for code questions (needs key)">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
+                <span>Jev</span>
+              </button>
+              <span class="cx-spacer"></span>
+              <span id="cx-count" class="cx-count" hidden></span>
+              <span id="chat-modelwrap" class="cx-modelwrap">
+                <select id="chat-model" class="cx-model-native" aria-label="chat model"></select>
+                <button id="chat-model-btn" class="cx-modelbtn" type="button" aria-haspopup="listbox" aria-expanded="false" aria-label="chat model" hidden>rocky local</button>
+                <span id="chat-model-panel" class="cx-modelpanel" role="listbox" aria-label="chat model" hidden></span>
+              </span>
+              <button id="chat-send" class="cx-send" type="submit" aria-label="send" disabled>
+                <svg class="cx-send-go" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg>
+                <svg class="cx-send-stop" width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="3"/></svg>
+              </button>
+            </div>
+          </form>
+          <p id="cx-route-note" class="cx-route-note" aria-live="polite"></p>
+
+          <div class="cx-start" id="cx-start">
+            <div id="cx-suggest" class="cx-suggest" aria-label="try asking"></div>
+            <ul class="cx-how" aria-label="how answers work">
+              <li><b>Memory</b> Rocky searches whole local records and holds when the evidence is weak. Nothing leaves this machine.</li>
+              <li><b>Code</b> Rocky also reads matching repo files and sends your question, quoted excerpts, and memory evidence to the model you picked. Redacted and size capped.</li>
+              <li><b>Jev</b> Optional second opinion on code questions. Needs a key in Settings.</li>
+            </ul>
           </div>
         </div>
-        <form id="chat-form" class="chatbox" autocomplete="off">
-          <label class="vh" for="chat-input">ask rocky</label>
-          <textarea id="chat-input" rows="1" placeholder="ask what rocky heard…" spellcheck="false" autocomplete="off"></textarea>
-          <button id="chat-jev" class="cb-btn cb-jev" type="button" title="Jev for code questions (needs key)" aria-pressed="false" aria-label="jev analysis for code questions">
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
-          </button>
-          <span id="chat-modelwrap" class="cb-modelwrap">
-            <select id="chat-model" class="cb-model" aria-label="chat model"></select>
-            <button id="chat-model-btn" class="cb-modelbtn" type="button" aria-haspopup="listbox" aria-expanded="false" aria-label="chat model" hidden>rocky local</button>
-            <span id="chat-model-panel" class="cb-modelpanel" role="listbox" aria-label="chat model" hidden></span>
-          </span>
-          <button id="chat-send" class="cb-send" type="submit" aria-label="send">
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="19" x2="12" y2="5"></line><polyline points="5 12 12 5 19 12"></polyline></svg>
-          </button>
-        </form>
-        <p class="chat-note">Memory-only questions stay local, use complete matching records, and hold on weak, incomplete, or oversized evidence. No BYOK or remote Jev. Code questions send your question, carved excerpts, and memory evidence to the model you configure. Prompt redacted, size capped. Nothing else leaves this machine.</p>
       </section>
-      <aside class="chat-comp" aria-label="evidence and decision">
-        <section class="comp-block">
-          <h2>Evidence</h2>
-          <div id="comp-evidence" class="comp-list" aria-live="polite"></div>
-        </section>
-        <section class="comp-block">
-          <h2>Decision</h2>
-          <div id="comp-trace" class="comp-list" aria-live="polite"></div>
-        </section>
+
+      <aside id="cx-sources" class="cx-sources" aria-labelledby="cx-sources-title" hidden>
+        <div class="cx-sources-head">
+          <h2 id="cx-sources-title">Sources</h2>
+          <button id="cx-sources-close" class="cx-icon" type="button" title="Close sources (Esc)">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+            <span class="vh">close sources</span>
+          </button>
+        </div>
+        <p id="cx-sources-for" class="cx-sources-for"></p>
+        <div id="cx-sources-body" class="cx-sources-body"></div>
       </aside>
     </div>
   </section>
-
 
   <!-- Dash -->
   <section class="view" id="view-dash" role="tabpanel" aria-labelledby="tab-dash" hidden>
