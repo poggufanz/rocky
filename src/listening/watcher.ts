@@ -7,6 +7,7 @@
 import {
   closeSync,
   constants,
+  existsSync,
   fstatSync,
   lstatSync,
   openSync,
@@ -194,6 +195,19 @@ function walkFiles(root: string, cap: number): { rels: string[]; truncated: bool
   const stack: string[] = [""];
   while (stack.length > 0) {
     const dir = stack.pop() as string;
+    // A nested clone keeps its own ignore rules: Git lists it, so its build
+    // output and dependencies never snapshot. A .git Git cannot read falls
+    // through to the plain descent below.
+    if (dir.length > 0 && existsSync(join(root, dir, ".git"))) {
+      const nested = gitListedFiles(join(root, dir));
+      if (nested !== undefined) {
+        const out = listedFiles(root, nested.map((rel) => `${dir}/${rel}`), cap - rels.length);
+        rels.push(...out.rels);
+        gaps.push(...out.gaps);
+        if (out.truncated) return { rels, truncated: true, gaps };
+        continue;
+      }
+    }
     let names: string[];
     try {
       names = readdirSync(join(root, dir));
@@ -203,7 +217,8 @@ function walkFiles(root: string, cap: number): { rels: string[]; truncated: bool
     }
     names.sort();
     for (const name of names) {
-      if (dir.length === 0 && name === ".git") continue;
+      // git internals are never content, at any depth
+      if (name === ".git") continue;
       const rel = dir.length === 0 ? name : `${dir}/${name}`;
       if (rels.length + stack.length > cap) {
         return { rels, truncated: true, gaps };
