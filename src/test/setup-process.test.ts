@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -18,15 +18,15 @@ test("bounded runner kills a TERM-ignoring child and still settles", async (t) =
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const pidPath = join(root, "pid");
   const runner = createProcessRunner();
-  const running = runner.run(process.execPath, [
-    "--input-type=module",
-    "--eval",
-    [
-      "import { writeFileSync } from 'node:fs';",
-      `writeFileSync(${JSON.stringify(pidPath)}, String(process.pid));`,
-      "process.on('SIGTERM', () => {});",
-      "setInterval(() => {}, 1000);",
-    ].join("\n"),
+  // sh, not node: a node child can take longer than the 500ms timeout to
+  // boot on a loaded runner, get killed before it ignores TERM, and never
+  // test the escalation at all. `read` blocks on the runner's stdin pipe
+  // with no child process and no CPU, so SIGKILL is the only way out.
+  const running = runner.run("/bin/sh", [
+    "-c",
+    "trap '' TERM; echo $$ > \"$1\"; read -r _",
+    "sh",
+    pidPath,
   ], { timeoutMs: 500 });
   const raced = await Promise.race([
     running.then((result) => ({ settled: true as const, result })),
@@ -42,6 +42,7 @@ test("bounded runner kills a TERM-ignoring child and still settles", async (t) =
   if (raced.settled) {
     assert.notEqual(raced.result.error, undefined);
     assert.match(raced.result.error?.message ?? "", /timeout/i);
+    assert.ok(existsSync(pidPath), "child was killed before it ignored TERM; escalation untested");
     const pid = Number(readFileSync(pidPath, "utf8"));
     // The runner resolving and the OS reaping the killed child are two
     // different events. Asserting the second one instantly made this test fail
