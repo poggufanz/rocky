@@ -20,11 +20,12 @@ test("bounded runner kills a TERM-ignoring child and still settles", async (t) =
   const runner = createProcessRunner();
   // sh, not node: a node child can take longer than the 500ms timeout to
   // boot on a loaded runner, get killed before it ignores TERM, and never
-  // test the escalation at all. `read` blocks on the runner's stdin pipe
-  // with no child process and no CPU, so SIGKILL is the only way out.
+  // test the escalation at all. The ignored TERM survives `exec`, so sleep
+  // keeps the same pid and pipes with no orphan; the runner closes stdin,
+  // so nothing here may wait on it. SIGKILL is the only way out.
   const running = runner.run("/bin/sh", [
     "-c",
-    "trap '' TERM; echo $$ > \"$1\"; read -r _",
+    "trap '' TERM; echo $$ > \"$1\"; exec sleep 1000",
     "sh",
     pidPath,
   ], { timeoutMs: 500 });
