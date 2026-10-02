@@ -110,6 +110,10 @@ usage:
   rocky setup --check       verify owned host registrations and Rocky MCP tools.
   rocky setup --remove      remove owned Rocky registrations from detected hosts.
   rocky setup --replace     replace conflicting registrations after confirmation.
+  rocky setup --harness     open checkbox picker (Up/Down, Space, Enter) for hosts.
+  rocky setup --harness <id> [--harness <id>] [--yes]
+                            configure only named hosts: claude-code, codex, opencode,
+                            gemini-cli, copilot-cli have MCP adapters.
   rocky setup --mcp-exposure sanitized|raw
                             choose projected-memory exposure during configure.
   rocky setup --voice-skill configure hosts and install managed voice skill explicitly.
