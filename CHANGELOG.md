@@ -2,6 +2,14 @@
 
 Notable changes per release. Dates are the release date.
 
+## 1.0.1 — 7 October 2026
+
+Patch release: the harness picker 1.0.0 described is now reachable, and the Bash hook smoke test no longer reports false failures under a privileged user.
+
+- **Bare `rocky setup --harness` opens the harness picker 1.0.0 described.** The value-less flag stopped with a usage error, and the picker that shipped beside it was never called from setup, so no interactive run could reach it. An interactive terminal now gets a checkbox list of the five hosts with MCP adapters (Claude Code, Codex CLI, OpenCode, Gemini CLI, Copilot CLI): Up/Down move, Space toggles, Enter accepts, and the menu redraws in place instead of stacking a copy per keypress. Picks feed the existing `--harness <id>` MCP path, and every ticked host reports its own result line. A non-interactive run still stops with exit code 2 and the example command; cancelling, or accepting an empty list, changes nothing and exits 1. The picker cannot be combined with explicit harness ids or with another setup action, the per-host MCP/Listening phase is gone because setup has no Listening step per harness yet, and `rocky --help` documents the flag.
+- **The privileged-user smoke skip now happens before the hook consumes the queue.** The Bash hook smoke test made its labels queue unreadable and only probed readability after the hook had run, so a root account with `CAP_DAC_OVERRIDE` read the queue, the probe then saw a missing path, and three assertions that no privileged run can pass were reported as failures. The probe moves ahead of the hook: a privileged run skips those three checks by name, while an unprivileged run still executes all three.
+- The README release link now points at the current release instead of a stale `v0.8.0` label, and `docs/reference.md` names the current package version.
+
 ## 1.0.0 — 1 October 2026
 
 The first major release. Rocky now listens across consented repositories, sets up harnesses by explicit target, serves thirteen read-only MCP tools, and turns the GUI Main tab into a chat surface.
