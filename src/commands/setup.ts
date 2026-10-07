@@ -17,7 +17,7 @@ import {
   createNativeDesktopConfig,
 } from "../setup/claude-desktop.js";
 import { createCodexAdapter } from "../setup/codex.js";
-import { createHarnessMcpAdapters } from "../setup/harness-mcp-dispatch.js";
+import { MCP_HARNESS_IDS, createHarnessMcpAdapters } from "../setup/harness-mcp-dispatch.js";
 import { checkMcpRegistration } from "../setup/health.js";
 import { purgeRepoCapture, setRepoCapture } from "../listening/consent.js";
 import { listeningStoreUsage } from "../listening/event-log-read.js";
@@ -31,6 +31,7 @@ import { SetupUsageError, parseSetupArgs } from "../setup/parser.js";
 import { createPlatformServices, type PlatformServices } from "../setup/platform.js";
 import { processRunner, type ProcessRunner } from "../setup/process.js";
 import { createPromptPort, type PromptInput } from "../setup/prompt.js";
+import { runHarnessWizard, selectionsToSetupOptions, type HarnessWizardResult } from "../setup/harness-wizard.js";
 import {
   agentHooksStatus,
   CLAUDE_CAPTURE_CAPABILITY_NOTICE,
@@ -75,6 +76,8 @@ export interface SetupDependencies {
   voiceSkills?: VoiceSkillServices;
   /** Test override; production defaults to process.stdin.isTTY. */
   isTTY?: boolean;
+  /** Test override for the checkbox picker opened by bare `--harness`. */
+  pickHarnesses?: () => Promise<HarnessWizardResult>;
 }
 
 export interface VoiceSkillServices {
@@ -681,6 +684,26 @@ export async function setup(argv: readonly string[], deps?: SetupDependencies): 
     say("raw trace grants are not wired yet. setup stops. bad.");
     detail("P0 parses --raw-trace only; grant storage lands with the raw-trace milestone.");
     return 1;
+  }
+  if (options.wizard === true) {
+    if (!stdinTTY) {
+      say("harness picker needs interactive terminal. setup stops. bad.");
+      detail("example: rocky setup --harness codex --yes (MCP only)");
+      return 2;
+    }
+    const picked = await (dependencies.pickHarnesses ?? (() => runHarnessWizard(createPromptPort(), undefined, MCP_HARNESS_IDS)))();
+    if (picked.cancelled) {
+      say("no harness chosen. nothing changed.");
+      return 1;
+    }
+    options = selectionsToSetupOptions(options, picked.selections);
+    if (options.listening) {
+      detail("listening per harness not wired into setup yet. use rocky setup --repo <path> --allow-capture.");
+    }
+    if (options.harnesses.length === 0) {
+      say("no MCP host chosen. setup stops. bad.");
+      return 1;
+    }
   }
   // Voice-skill-only invocations keep the legacy path: zero-eligible-host contract (exit 1 + voice-skill: unavailable) is pinned by documentation.test.ts; per-host voice scoping is P1+ work.
   if (!stdinTTY && options.harnesses.length === 0 && options.agentHooksAction === undefined && !options.voiceSkill) {

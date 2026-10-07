@@ -207,7 +207,7 @@ test("package launcher diagnostics survive a missing executable and undefined st
 test("public package metadata pins the scoped identity and release coordinates", () => {
   const metadata = readJson(join(packageRoot, "package.json"));
   assert.equal(metadata.name, "@poggufanz/rocky-cli");
-  assert.equal(metadata.version, "1.0.0");
+  assert.equal(metadata.version, "1.0.1");
   assert.deepEqual(metadata.bin, { rocky: "dist/index.js" });
   assert.deepEqual(metadata.engines, { node: ">=18" });
   assert.deepEqual(metadata.repository, {
@@ -248,7 +248,7 @@ test("release metadata assertion consumes valid metadata without a scope error",
   assert.doesNotThrow(() => releaseCheck.assertMetadata(state));
   assert.deepEqual(state.metadata, {
     name: "@poggufanz/rocky-cli",
-    version: "1.0.0",
+    version: "1.0.1",
     binary: "rocky",
     license: "MIT",
     author: "Muhammad Faiq",
@@ -296,12 +296,12 @@ test("package and lock contain no runtime or optional dependencies", () => {
   assert.deepEqual(metadata.bundledDependencies ?? [], []);
   assert.deepEqual(metadata.bundleDependencies ?? [], []);
   assert.equal(lock.name, "@poggufanz/rocky-cli");
-  assert.equal(lock.version, "1.0.0");
+  assert.equal(lock.version, "1.0.1");
   assert.deepEqual(lock.dependencies ?? {}, {});
   const packages = object(lock.packages, "lock packages");
   const root = object(packages[""], "lock root");
   assert.equal(root.name, "@poggufanz/rocky-cli");
-  assert.equal(root.version, "1.0.0");
+  assert.equal(root.version, "1.0.1");
   assert.deepEqual(root.bin, { rocky: "dist/index.js" });
   assert.deepEqual(root.dependencies ?? {}, {});
   assert.deepEqual(root.optionalDependencies ?? {}, {});
@@ -330,11 +330,11 @@ test("production identity constants match package metadata without duplicate lit
     });
   assert.deepEqual(occurrences, [
     { path: "src/core/package-info.ts", literal: "@poggufanz/rocky-cli" },
-    { path: "src/core/package-info.ts", literal: "1.0.0" },
+    { path: "src/core/package-info.ts", literal: "1.0.1" },
   ]);
 });
 
-test("npm pack dry-run exposes only the bounded production payload", (t) => {
+test("npm pack dry-run exposes only the bounded production payload", async (t) => {
   const npmCli = resolveNpmCli();
   if (npmCli === undefined) {
     t.skip("no npm CLI entry point found: npm_execpath is unset (not running under an npm "
@@ -343,7 +343,7 @@ test("npm pack dry-run exposes only the bounded production payload", (t) => {
   }
   const packed = dryRunPack(t, npmCli);
   assert.equal(packed.name, "@poggufanz/rocky-cli");
-  assert.equal(packed.version, "1.0.0");
+  assert.equal(packed.version, "1.0.1");
   assert.ok(packed.size < 1_000_000, `tarball is ${packed.size} bytes`);
   assert.ok(Number.isFinite(packed.unpackedSize) && packed.unpackedSize > 0);
   const paths = packed.files.map(({ path }) => path).sort();
@@ -366,6 +366,31 @@ test("npm pack dry-run exposes only the bounded production payload", (t) => {
   }
   assert.ok(paths.some((path) => path.startsWith("dist/mcp/")), "MCP production modules are missing");
   assert.ok(paths.some((path) => path.startsWith("dist/agent/")), "agent production modules are missing");
+  // release-check.mjs keeps its own copy of this allowlist for the full release
+  // gate. The two copies drifted once already (gui, listening, and asset paths
+  // shipped while only this file's copy moved), so pin them together: every
+  // path the pack produces must also pass the gate's own predicate.
+  const releaseGate = await import(pathToFileURL(join(packageRoot, "scripts", "release-check.mjs")).href) as {
+    allowedPackPath(path: string): boolean;
+    isForbiddenModelPayload(path: string): boolean;
+  };
+  for (const path of paths) {
+    assert.equal(
+      releaseGate.allowedPackPath(path),
+      true,
+      `release-check allowlist rejects a shipped path: ${path}`,
+    );
+    assert.equal(
+      releaseGate.isForbiddenModelPayload(path),
+      false,
+      `release-check treats a shipped path as a model payload: ${path}`,
+    );
+  }
+  assert.equal(
+    releaseGate.isForbiddenModelPayload("weights/model.gguf"),
+    true,
+    "the model payload rule must still reject weights",
+  );
 });
 
 test("canonical release truth rejects drift in every release marker", async () => {
@@ -557,7 +582,7 @@ test("canonical release truth rejects drift in every release marker", async () =
     [],
     "README release markers and headings inside HTML comments must not satisfy truth",
   );
-  const changelogHeadingRemoved = snapshot.changelog.replace(/^## 1\.0\.0[^\r\n]*\r?\n/im, "");
+  const changelogHeadingRemoved = snapshot.changelog.replace(/^## 1\.0\.1[^\r\n]*\r?\n/im, "");
   assert.notDeepEqual(
     releaseCheck.validateReleaseTruth({
       ...snapshot,
@@ -740,13 +765,13 @@ test("canonical release truth rejects drift in every release marker", async () =
     assert.notDeepEqual(releaseCheck.validateReleaseTruth(mutated), [], `${label} drift must fail`);
   }
   const changedRealVersion = snapshot.packageInfoSource.replace(
-    'export const PACKAGE_VERSION = "1.0.0";',
+    'export const PACKAGE_VERSION = "1.0.1";',
     'export const PACKAGE_VERSION = "9.9.9";',
   );
   assert.notDeepEqual(
     releaseCheck.validateReleaseTruth({
       ...snapshot,
-      packageInfoSource: `// export const PACKAGE_VERSION = "1.0.0";\n${changedRealVersion}`,
+      packageInfoSource: `// export const PACKAGE_VERSION = "1.0.1";\n${changedRealVersion}`,
     }),
     [],
     "commented PACKAGE_VERSION exports must not spoof executable package-info assignments",
@@ -754,7 +779,7 @@ test("canonical release truth rejects drift in every release marker", async () =
   assert.notDeepEqual(
     releaseCheck.validateReleaseTruth({
       ...snapshot,
-      packageInfoSource: `${snapshot.packageInfoSource}\nexport const PACKAGE_VERSION = "1.0.0";\n`,
+      packageInfoSource: `${snapshot.packageInfoSource}\nexport const PACKAGE_VERSION = "1.0.1";\n`,
     }),
     [],
     "duplicate PACKAGE_VERSION exports must fail closed",
@@ -784,14 +809,14 @@ test("canonical release truth rejects drift in every release marker", async () =
     [],
     "historical unreleased wording outside current section must remain allowed",
   );
-  const currentSectionStart = snapshot.changelog.indexOf("## 1.0.0");
-  const nextSectionStart = snapshot.changelog.indexOf("\n## 0.8.0", currentSectionStart);
+  const currentSectionStart = snapshot.changelog.indexOf("## 1.0.1");
+  const nextSectionStart = snapshot.changelog.indexOf("\n## 1.0.0", currentSectionStart);
   assert.ok(currentSectionStart >= 0 && nextSectionStart > currentSectionStart, "canonical changelog sections must exist");
   const currentSection = snapshot.changelog.slice(currentSectionStart, nextSectionStart);
   const mid = Math.floor(currentSection.length / 2);
   const lateUnreleasedStatus = snapshot.changelog.replace(
     currentSection,
-    `${currentSection.slice(0, mid)}\nThis v1.0.0 release is unreleased.\n${currentSection.slice(mid)}`,
+    `${currentSection.slice(0, mid)}\nThis v1.0.1 release is unreleased.\n${currentSection.slice(mid)}`,
   );
   assert.notDeepEqual(
     releaseCheck.validateReleaseTruth({ ...snapshot, changelog: lateUnreleasedStatus }),
@@ -846,8 +871,8 @@ test("canonical release truth rejects drift in every release marker", async () =
     ["lock root", { ...snapshot, lock: { ...snapshot.lock, packages: { ...lock, "": { ...lockRoot, version: "9.9.9" } } } }],
     ["lock nested runtime package", { ...snapshot, lock: { ...snapshot.lock, packages: { ...lock, "node_modules/runtime": { version: "1.0.0", dev: false } } } }],
     ["lock nested malformed package", { ...snapshot, lock: { ...snapshot.lock, packages: { ...lock, "node_modules/runtime": null } } }],
-    ["package-info", { ...snapshot, packageInfoSource: snapshot.packageInfoSource.replace('PACKAGE_VERSION = "1.0.0"', 'PACKAGE_VERSION = "9.9.9"') }],
-    ["README", { ...snapshot, readme: snapshot.readme.replace("@poggufanz/rocky-cli@1.0.0", "@poggufanz/rocky-cli@9.9.9") }],
+    ["package-info", { ...snapshot, packageInfoSource: snapshot.packageInfoSource.replace('PACKAGE_VERSION = "1.0.1"', 'PACKAGE_VERSION = "9.9.9"') }],
+    ["README", { ...snapshot, readme: snapshot.readme.replace("@poggufanz/rocky-cli@1.0.1", "@poggufanz/rocky-cli@9.9.9") }],
     ["README appended wrong current marker", { ...snapshot, readme: `${snapshot.readme}\nCurrent release: \`@wrong/rocky@9.9.9\`.\n` }],
     ["README duplicate current marker", { ...snapshot, readme: `${snapshot.readme}\n${canonicalCurrentMarker}. Duplicate marker.\n` }],
     ["README current roadmap", { ...snapshot, readme: snapshot.readme.replace("v0.4 - his diligence (implemented)", "v0.4 - his diligence (current release)") }],
@@ -855,7 +880,7 @@ test("canonical release truth rejects drift in every release marker", async () =
     ["README roadmap v0.7.0.1", { ...snapshot, readme: snapshot.readme.replace("v1.0 - his listening", "v1.0.0.1 - his listening") }],
     ["README roadmap v0.7-beta", { ...snapshot, readme: snapshot.readme.replace("v1.0 - his listening", "v1.0-beta - his listening") }],
     ["README second current marker", { ...snapshot, readme: snapshot.readme.replace("v0.4 - his diligence (implemented)", "v0.4 - his diligence (current release)") }],
-    ["CHANGELOG", { ...snapshot, changelog: snapshot.changelog.replace("## 1.0.0", "## 9.9.9") }],
+    ["CHANGELOG", { ...snapshot, changelog: snapshot.changelog.replace("## 1.0.1", "## 9.9.9") }],
     ["CHANGELOG duplicate expected section", { ...snapshot, changelog: duplicateChangelogHeading }],
     ["README publication claim", { ...snapshot, readme: `${snapshot.readme}\nThe npm package was published to npm.\n` }],
     ["README bare publication claim", { ...snapshot, readme: `${snapshot.readme}\nThe package published to npm.\n` }],
@@ -866,10 +891,10 @@ test("canonical release truth rejects drift in every release marker", async () =
     ["README npm publish succeeded claim", { ...snapshot, readme: `${snapshot.readme}\nnpm publish succeeded.\n` }],
     ["README package available on npm claim", { ...snapshot, readme: `${snapshot.readme}\nThe package is available on npm.\n` }],
     ["CHANGELOG publication claim", { ...snapshot, changelog: `${snapshot.changelog}\nThe v0.5.1 package was published to npm.\n` }],
-    ["help", { ...snapshot, helpStdout: snapshot.helpStdout.replace("@poggufanz/rocky-cli@1.0.0", "@poggufanz/rocky-cli@9.9.9") }],
+    ["help", { ...snapshot, helpStdout: snapshot.helpStdout.replace("@poggufanz/rocky-cli@1.0.1", "@poggufanz/rocky-cli@9.9.9") }],
     ["help wrong stream", { ...snapshot, helpStdout: "", helpStderr: snapshot.helpStdout }],
     ["help conflicting version", { ...snapshot, helpStdout: `${snapshot.helpStdout}\nversion: @poggufanz/rocky-cli@9.9.9\n` }],
-    ["help conflicting package", { ...snapshot, helpStdout: snapshot.helpStdout.replace("version: @poggufanz/rocky-cli@1.0.0", "version: @wrong/rocky@1.0.0") }],
+    ["help conflicting package", { ...snapshot, helpStdout: snapshot.helpStdout.replace("version: @poggufanz/rocky-cli@1.0.1", "version: @wrong/rocky@1.0.1") }],
     ["version output", { ...snapshot, versionStdout: "9.9.9\n", versionOutput: "9.9.9\n" }],
     ["version wrong stream", { ...snapshot, versionStdout: "", versionStderr: snapshot.versionStdout }],
     ["version extra output", { ...snapshot, versionStdout: `${snapshot.versionStdout}0.6.0\n`, versionOutput: `${snapshot.versionStdout}0.6.0\n` }],

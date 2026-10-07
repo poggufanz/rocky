@@ -28,6 +28,7 @@ export function parseSetupArgs(argv: readonly string[]): SetupOptions {
   let repo: string | undefined;
   let repoAction: SetupOptions["repoAction"];
   let rawTrace = false;
+  let wizard = false;
 
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
@@ -84,7 +85,8 @@ export function parseSetupArgs(argv: readonly string[]): SetupOptions {
     if (argument === "--harness") {
       const value = argv[index + 1];
       if (value === undefined || value.startsWith("--")) {
-        throw new SetupUsageError("--harness requires a value: one of the 11 registry ids");
+        wizard = true; // bare --harness opens the picker
+        continue;
       }
       if (!isHarnessId(value)) {
         throw new SetupUsageError(`unknown harness id: ${value}`);
@@ -132,6 +134,17 @@ export function parseSetupArgs(argv: readonly string[]): SetupOptions {
       throw new SetupUsageError(`unknown setup option: ${argument}`);
     }
     throw new SetupUsageError(`setup does not accept positional input: ${argument}`);
+  }
+
+  if (wizard) {
+    if (
+      harnesses.length > 0 || mcp || listening || rawTrace || voiceSkill
+      || modeOption !== undefined || agentHooksAction !== undefined || rationaleGateProvided
+      || repo !== undefined || repoAction !== undefined
+    ) {
+      throw new SetupUsageError("--harness without a value opens the picker and cannot combine with other selectors or actions");
+    }
+    return { mode, exposure, replace, yes, voiceSkill, harnesses, mcp: true, listening: false, rawTrace: false, wizard: true };
   }
 
   if (repo !== undefined || repoAction !== undefined) {

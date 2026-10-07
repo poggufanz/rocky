@@ -465,7 +465,7 @@ Each phase is one facet of who Rocky is:
 - **v1.0 — his listening (current release)**: consent-gated Listening over Git-tracked files with five metadata-only MCP tools, explicit `rocky setup --harness` targets with MCP adapters for Claude Code, Codex CLI, OpenCode, Gemini CLI, and Copilot CLI, a chat-first Main tab, and advisory prompt-clarity, decomposition, and failure-cycle checks.
 - **later — his care**: ambient pet mode and the desktop pet window (deferred). He notices you've been at it for four hours, and he has opinions about your sleep.
 
-The package version is v1.0.0; the Nervous System, rationale-capture, teach mode, local GUI, and MCP sections above describe the surfaces it ships.
+The package version is v1.0.1; the Nervous System, rationale-capture, teach mode, local GUI, and MCP sections above describe the surfaces it ships.
 
 ## Contributing
 

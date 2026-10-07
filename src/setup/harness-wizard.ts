@@ -4,6 +4,7 @@
  * All I/O on the injected output stream (production: process.stderr).
  */
 
+import type { SetupOptions } from "./clients.js";
 import { HARNESS_IDS, type HarnessId } from "./harness-registry.js";
 import type { PromptPort } from "./prompt.js";
 
@@ -34,6 +35,8 @@ function writeLine(output: NodeJS.WritableStream, line: string): void {
   output.write(`${line}\n`);
 }
 
+const MENU_CHROME_LINES = 2; // title + hint around the rows
+
 function renderMenu(
   output: NodeJS.WritableStream,
   title: string,
@@ -48,6 +51,12 @@ function renderMenu(
     writeLine(output, `${pointer} ${mark} ${row}`);
   });
   writeLine(output, "Up/Down move, Space toggle, Enter accept, Esc cancel");
+}
+
+/** Rewind over the previous draw so the menu updates in place; TTY output only. */
+function rewindMenu(output: NodeJS.WritableStream, rowCount: number): void {
+  if ((output as { isTTY?: boolean }).isTTY !== true) return;
+  output.write(`\u001b[${rowCount + MENU_CHROME_LINES}A\u001b[J`);
 }
 
 interface KeyReader {
@@ -93,9 +102,12 @@ async function multiSelect(
   const rawCapable = typeof input.setRawMode === "function";
   if (rawCapable) input.setRawMode!(true);
   const reader = createKeyReader(input);
+  let drawn = false;
   try {
     for (;;) {
+      if (drawn) rewindMenu(output, rows.length);
       renderMenu(output, title, rows, checked, cursor);
+      drawn = true;
       const key = await reader.readKey();
       if (key === undefined || key === CTRL_C || key === ESC) return { cancelled: true, checked: [] };
       if (key === UP) cursor = (cursor + rows.length - 1) % rows.length;
@@ -133,12 +145,33 @@ async function numberedFallback(
   return { cancelled: false, checked: [...picked].sort((a, b) => a - b) };
 }
 
+/**
+ * Map picker output onto setup options. Only MCP-selected hosts reach the
+ * adapters; setup has no per-harness Listening step yet, so those picks are
+ * reported by the caller instead of silently widening the host set.
+ */
+export function selectionsToSetupOptions(
+  options: SetupOptions,
+  selections: readonly HarnessFeatureSelection[],
+): SetupOptions {
+  const mcpIds = selections.filter((selection) => selection.mcp).map((selection) => selection.id);
+  return {
+    ...options,
+    harnesses: mcpIds,
+    harness: mcpIds,
+    mcp: mcpIds.length > 0,
+    listening: selections.some((selection) => selection.listening),
+    wizard: false,
+  };
+}
+
 export async function runHarnessWizard(
   prompt: PromptPort,
   streams: HarnessWizardStreams = { input: process.stdin, output: process.stderr },
+  ids: readonly HarnessId[] = HARNESS_IDS,
 ): Promise<HarnessWizardResult> {
   const { input, output } = streams;
-  const rows = HARNESS_IDS.map((id) => id);
+  const rows = [...ids];
   const canRaw = typeof input.setRawMode === "function" && input.isTTY === true;
   const pick = canRaw
     ? await multiSelect(input, output, "Select your Harness", rows)
@@ -147,19 +180,10 @@ export async function runHarnessWizard(
       : { cancelled: true, checked: [] };
   if (pick.cancelled || pick.checked.length === 0) return { cancelled: true, selections: [] };
 
-  const selections: HarnessFeatureSelection[] = [];
-  for (const rowIndex of pick.checked) {
-    const id = HARNESS_IDS[rowIndex]!;
-    const featureRows = ["MCP", "Listening"];
-    const features = canRaw
-      ? await multiSelect(input, output, `Features for ${id}`, featureRows)
-      : await numberedFallback(prompt, output, `Features for ${id}`, featureRows);
-    if (features.cancelled) return { cancelled: true, selections: [] };
-    const mcp = features.checked.includes(0);
-    const listening = features.checked.includes(1);
-    if (!mcp && !listening) continue; // no preselected features: empty choice drops the host
-    selections.push({ id, mcp, listening });
-  }
-  if (selections.length === 0) return { cancelled: true, selections: [] };
+  // ponytail: no per-host MCP/Listening phase; setup has no Listening step per
+  // harness yet, so every pick is MCP. Restore the phase when that step lands.
+  const selections = pick.checked.map((rowIndex): HarnessFeatureSelection => (
+    { id: rows[rowIndex]!, mcp: true, listening: false }
+  ));
   return { cancelled: false, selections };
 }

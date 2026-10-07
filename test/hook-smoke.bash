@@ -642,10 +642,14 @@ check "symlink labels target is untouched" test "$(cat "$LABEL_HOME/label-target
 rm -f "$LABEL_HOME/labels"
 printf unreadable > "$LABEL_HOME/labels"
 chmod 000 "$LABEL_HOME/labels"
-run_label_prompt "$LABEL_HOME" C "$LABEL_STDOUT" "$LABEL_STDERR"
+# Probe readability before the hook runs, not after: a privileged user (root with
+# CAP_DAC_OVERRIDE) can read a 000 file, and the hook consumes the queue while doing so.
+# A post-run probe therefore read a missing path as "unreadable", ran the assertions below,
+# and reported three failures no privileged run could ever pass.
 if [[ -r "$LABEL_HOME/labels" ]]; then
   echo "ok    - unreadable labels queue check skipped for privileged user"
 else
+  run_label_prompt "$LABEL_HOME" C "$LABEL_STDOUT" "$LABEL_STDERR"
   check "unreadable labels queue is silent" test "$(grep -a -cF '[Rocky]' "$LABEL_STDERR" || true)" -eq 0
   UNREADABLE_CLAIM="$(find "$LABEL_HOME" -maxdepth 2 -type f -path "$LABEL_HOME/.labels.claim.*/queue" -print -quit)"
   check "unreadable labels queue remains recoverable" test -n "$UNREADABLE_CLAIM"

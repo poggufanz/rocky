@@ -15,7 +15,8 @@ export interface HarnessMcpDispatchDeps {
   home?: string;
 }
 
-const P1A_IDS: readonly HarnessId[] = [
+/** Hosts with an MCP adapter; the setup picker offers only these. */
+export const MCP_HARNESS_IDS: readonly HarnessId[] = [
   "claude-code",
   "codex",
   "opencode",
@@ -30,7 +31,7 @@ export function createHarnessMcpAdapters(
   const seen = new Set<HarnessId>();
   const adapters: SetupClientAdapter[] = [];
   for (const id of ids) {
-    if (seen.has(id) || !P1A_IDS.includes(id)) continue;
+    if (seen.has(id) || !MCP_HARNESS_IDS.includes(id)) continue;
     seen.add(id);
     switch (id) {
       case "claude-code":

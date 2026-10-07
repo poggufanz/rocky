@@ -35,6 +35,8 @@ export interface SetupOptions {
   repoAction?: RepoCaptureAction;
   /** P0 parses + validates only; grant storage is out of scope. */
   rawTrace: boolean;
+  /** Bare `--harness`: setup opens the checkbox picker to fill harnesses/mcp. */
+  wizard?: boolean;
   /**
    * Listening-side alias for {@link SetupOptions.harnesses}.
    * Present only when the parser populates it; kept in sync by the parser.

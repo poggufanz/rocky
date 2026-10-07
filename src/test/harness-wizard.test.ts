@@ -51,12 +51,7 @@ test("space toggles and enter accepts a harness", async () => {
   await tick();
   input.emit("data", Buffer.from(" "));   // toggle first row (claude-code = registry order)
   await tick();
-  input.emit("data", Buffer.from("\r"));  // accept phase 1
-  await tick();
-  await tick();
-  input.emit("data", Buffer.from(" "));   // toggle MCP for claude-code
-  await tick();
-  input.emit("data", Buffer.from("\r"));  // accept phase 2
+  input.emit("data", Buffer.from("\r"));  // accept; single phase, picks are MCP
   const result = await pending;
   assert.equal(result.cancelled, false);
   assert.equal(result.selections.length, 1);
