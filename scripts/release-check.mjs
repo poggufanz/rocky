@@ -743,7 +743,7 @@ export function assertMetadata(state) {
   };
 }
 
-function allowedPackPath(path) {
+export function allowedPackPath(path) {
   return path === "LICENSE"
     || path === "README.md"
     || path === "CHANGELOG.md"
@@ -758,8 +758,26 @@ function allowedPackPath(path) {
     || path.startsWith("dist/ai/")
     || path.startsWith("dist/agent/")
     || path.startsWith("dist/shell/")
+    || path.startsWith("dist/gui/")
+    || path.startsWith("dist/listening/")
+    || path.startsWith("assets/gui/")
+    || path === "assets/teach-agent.md"
+    || path === "assets/teach-agent.en.md"
     || path === "skills/rocky-voice/SKILL.md"
     || path === "skills/rocky-voice/agents/openai.yaml";
+}
+
+/**
+ * Shipped paths that merely name models; the rule exists to keep weights out of
+ * the tarball. `dist/commands/model.js` is the CLI's model configuration command
+ * and `dist/gui/models-dev.js` is the BYOK Models.dev catalogue client, so both
+ * are code the package intends to ship.
+ */
+const MODEL_CODE_EXCEPTIONS = new Set(["dist/commands/model.js", "dist/gui/models-dev.js"]);
+
+export function isForbiddenModelPayload(path) {
+  const normalized = path.replaceAll("\\", "/");
+  return !MODEL_CODE_EXCEPTIONS.has(normalized) && /model|weight/i.test(normalized);
 }
 
 function parseManifest(stdout) {
@@ -780,7 +798,7 @@ function parseManifest(stdout) {
     if (/(^|\/)test(\/|$)|\.test\.|(^|\/)src(\/|$)|fixture|cache|validation|\.rocky-managed\.json/i.test(normalized)) {
       throw new StepError(`forbidden source or test payload: ${path}`);
     }
-    if (normalized !== "dist/commands/model.js" && /model|weight/i.test(normalized)) {
+    if (isForbiddenModelPayload(path)) {
       throw new StepError(`forbidden model payload: ${path}`);
     }
   }

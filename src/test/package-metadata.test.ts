@@ -334,7 +334,7 @@ test("production identity constants match package metadata without duplicate lit
   ]);
 });
 
-test("npm pack dry-run exposes only the bounded production payload", (t) => {
+test("npm pack dry-run exposes only the bounded production payload", async (t) => {
   const npmCli = resolveNpmCli();
   if (npmCli === undefined) {
     t.skip("no npm CLI entry point found: npm_execpath is unset (not running under an npm "
@@ -366,6 +366,31 @@ test("npm pack dry-run exposes only the bounded production payload", (t) => {
   }
   assert.ok(paths.some((path) => path.startsWith("dist/mcp/")), "MCP production modules are missing");
   assert.ok(paths.some((path) => path.startsWith("dist/agent/")), "agent production modules are missing");
+  // release-check.mjs keeps its own copy of this allowlist for the full release
+  // gate. The two copies drifted once already (gui, listening, and asset paths
+  // shipped while only this file's copy moved), so pin them together: every
+  // path the pack produces must also pass the gate's own predicate.
+  const releaseGate = await import(pathToFileURL(join(packageRoot, "scripts", "release-check.mjs")).href) as {
+    allowedPackPath(path: string): boolean;
+    isForbiddenModelPayload(path: string): boolean;
+  };
+  for (const path of paths) {
+    assert.equal(
+      releaseGate.allowedPackPath(path),
+      true,
+      `release-check allowlist rejects a shipped path: ${path}`,
+    );
+    assert.equal(
+      releaseGate.isForbiddenModelPayload(path),
+      false,
+      `release-check treats a shipped path as a model payload: ${path}`,
+    );
+  }
+  assert.equal(
+    releaseGate.isForbiddenModelPayload("weights/model.gguf"),
+    true,
+    "the model payload rule must still reject weights",
+  );
 });
 
 test("canonical release truth rejects drift in every release marker", async () => {
