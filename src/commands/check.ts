@@ -252,12 +252,49 @@ function requireGitScope(result: GitResult): void {
   }
 }
 
+/** A plain fact, not persona: the widest scope a manual run can have. */
+const WHOLE_HEAD_NOTE = "no upstream and no remote branch shares history: checking all of HEAD";
+
+async function wholeHeadRange(): Promise<DiffRange> {
+  detail(WHOLE_HEAD_NOTE);
+  return { base: await emptyTree(), head: "HEAD" };
+}
+
+/**
+ * A manual run covers the commits no remote branch has yet.
+ *
+ * With an upstream the base is the merge base, never the upstream tip: a
+ * tip-to-HEAD diff turns the upstream's own commits into added lines whenever
+ * the branch has diverged. Without one, a single rev-list names the commits no
+ * remote-tracking branch reaches, plus the boundary commits where they leave
+ * the remote; one boundary is the base. More than one is the pre-push
+ * new-ref case, so that search picks the nearest remote base.
+ */
 async function manualRange(): Promise<DiffRange> {
   const repo = await gitMaybe(["rev-parse", "--git-dir"]);
   requireGitScope(repo);
   const upstream = await gitMaybe(["rev-parse", "--verify", "@{upstream}"]);
-  if (upstream.code === 0) return { base: "@{upstream}", head: "HEAD" };
-  return { base: await emptyTree(), head: "HEAD" };
+  if (upstream.code === 0) {
+    const merged = await gitMaybe(["merge-base", "@{upstream}", "HEAD"]);
+    const mergeBase = merged.stdout.trim().split(/\r?\n/)[0];
+    return { base: merged.code === 0 && mergeBase ? mergeBase : "@{upstream}", head: "HEAD" };
+  }
+  // The trailing `--` keeps a file named HEAD in the working tree from making
+  // the revision ambiguous, which git otherwise reports as a fatal error.
+  const lines = (await git(
+    ["rev-list", "--boundary", "HEAD", "--not", "--remotes", "--"],
+    undefined,
+    { notInspected: "unpushed commits" },
+  )).split(/\r?\n/).filter((line) => line.length > 0);
+  const boundaries = lines.filter((line) => line.startsWith("-")).map((line) => line.slice(1));
+  const commitCount = lines.length - boundaries.length;
+  if (boundaries.length === 0) {
+    return commitCount === 0 ? { base: "HEAD", head: "HEAD" } : wholeHeadRange();
+  }
+  if (boundaries.length === 1) return { base: boundaries[0], head: "HEAD" };
+  const nearest = await resolveNewRef("HEAD");
+  if (nearest.base === (await emptyTree())) detail(WHOLE_HEAD_NOTE);
+  return nearest;
 }
 
 async function addedLines(ranges: readonly DiffRange[], quiet: boolean, state: CheckState): Promise<AddedLine[]> {

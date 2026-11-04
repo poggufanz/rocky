@@ -15,6 +15,7 @@ const entry = join(packageRoot, "dist", "index.js");
 // never race the deadline-kill path it exists to observe.
 const PROCESS_TIMEOUT_MS = 30_000;
 const NEVER_PACKAGE = "this-package-should-never-exist-rocky-0405060708";
+const NO_SHARED_HISTORY = /no upstream and no remote branch shares history: checking all of HEAD/;
 
 interface Sandbox {
   root: string;
@@ -144,6 +145,12 @@ function assertCompleted(
   assert.equal(result.status, status, message === undefined ? result.stderr : `${message}: ${result.stderr}`);
 }
 
+/** A quiet manual run in a repo with no remote still states its scope, and says nothing else. */
+function assertOnlyScopeNote(stderr: string): void {
+  assert.match(stderr, NO_SHARED_HISTORY);
+  assert.equal(stderr.trim().split(/\r?\n/).length, 1, stderr);
+}
+
 function enableRegistry(box: Sandbox): void {
   writeFileSync(join(box.rockyHome, "config.json"), JSON.stringify({
     version: 1,
@@ -213,7 +220,7 @@ function throwingStderrPreload(box: Sandbox, target: string, registry404 = false
 
 function installGitShim(
   box: Sandbox,
-  mode: "merge-base-128" | "diff-hang-once" | "diff-flood" | "diff-stderr-flood" | "diff-malformed" | "diff-ambiguous" | "diff-index-only" | "diff-old-mode" | "diff-rename-from" | "diff-marker-only" | "diff-hunk-empty" | "diff-binary-patch" | "diff-invalid-later" | "diff-name-only-missing" | "diff-name-only-leading" | "diff-name-only-double" | "diff-name-only-bare" | "ls-tree-name-only-bare" | "apply-numstat-orphan" | "apply-numstat-bad-number" | "apply-numstat-mixed-binary" | "apply-numstat-count-mismatch" | "rev-parse-flood" | "show-flood" | "show-128",
+  mode: "merge-base-128" | "diff-hang-once" | "diff-flood" | "diff-stderr-flood" | "diff-malformed" | "diff-ambiguous" | "diff-index-only" | "diff-old-mode" | "diff-rename-from" | "diff-marker-only" | "diff-hunk-empty" | "diff-binary-patch" | "diff-invalid-later" | "diff-name-only-missing" | "diff-name-only-leading" | "diff-name-only-double" | "diff-name-only-bare" | "ls-tree-name-only-bare" | "apply-numstat-orphan" | "apply-numstat-bad-number" | "apply-numstat-mixed-binary" | "apply-numstat-count-mismatch" | "rev-parse-flood" | "show-flood" | "show-128" | "rev-list-flood",
 ): void {
   let realGit = (box.env.PATH ?? "")
     .split(delimiter)
@@ -264,6 +271,7 @@ function installGitShim(
     "if (mode === 'rev-parse-flood' && args.includes('--git-dir')) { require('node:fs').writeSync(1, Buffer.alloc(1024 * 1024 + 1, 120)); process.exit(0); }",
     "if (mode === 'show-flood' && args.includes('show')) { require('node:fs').writeSync(1, Buffer.alloc(1024 * 1024 + 1, 120)); process.exit(0); }",
     "if (mode === 'show-128' && args.includes('show')) process.exit(128);",
+    "if (mode === 'rev-list-flood' && args.includes('rev-list')) { require('node:fs').writeSync(1, Buffer.alloc(1024 * 1024 + 1, 120)); process.exit(0); }",
     "if (mode === 'diff-hang-once' && args.includes('--unified=0') && !existsSync(process.env.ROCKY_GIT_SHIM_MARKER)) {",
     "  writeFileSync(process.env.ROCKY_GIT_SHIM_MARKER, 'started');",
     "  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 30000);",
@@ -1230,9 +1238,11 @@ test("a clean manual check states its scope and --quiet stays silent", async (t)
   assert.match(loud.stderr, /checked net change: /);
   assert.equal(cleanLineCount(loud.stderr), 1, loud.stderr);
 
+  // --quiet drops the clean line. This repo has no remote, so the manual scope
+  // note is a plain fact and survives it: it is the only line left.
   const quiet = await runCheck(box, ["--offline", "--quiet"]);
   assertCompleted(quiet, 0);
-  assert.equal(quiet.stderr, "");
+  assertOnlyScopeNote(quiet.stderr);
 
   const quietPush = await runCheck(
     box,
@@ -1403,7 +1413,8 @@ test("the skipped-question line stays silent under ROCKY_NO_QUIZ, --quiet, and a
   initRepo(quiet, { "src/risky.ts": "eval(x)\n" });
   const quietRun = await runCheck(quiet, ["--offline", "--quiet"]);
   assertCompleted(quietRun, 0);
-  assert.equal(quietRun.stderr, "");
+  // The scope note is the one line --quiet keeps: no skip line, no question.
+  assertOnlyScopeNote(quietRun.stderr);
 
   const calm = sandbox(t);
   delete calm.env.ROCKY_NO_QUIZ;
@@ -1437,4 +1448,165 @@ test("a stderr failure while stating a result never changes the exit code", asyn
   assert.equal(existsSync(skipMarker), true, "the injected stderr failure never fired");
   assertCompleted(skipped, 0);
   assert.doesNotMatch(skipped.stderr, /could not run|INCOMPLETE/i);
+});
+
+function currentBranch(box: Sandbox): string {
+  return git(box.repo, ["rev-parse", "--abbrev-ref", "HEAD"]);
+}
+
+function commitFile(box: Sandbox, path: string, contents: string, message: string): void {
+  writeRepoFile(box.repo, path, contents);
+  git(box.repo, ["add", "."]);
+  git(box.repo, ["commit", "-q", "-m", message]);
+}
+
+/** A bare `origin` inside the sandbox; the current branch is pushed to it and tracks it. */
+function addBareOrigin(box: Sandbox): void {
+  const remote = join(box.root, "origin.git");
+  git(box.root, ["init", "-q", "--bare", remote]);
+  git(box.repo, ["remote", "add", "origin", remote]);
+  git(box.repo, ["push", "-q", "-u", "origin", "HEAD"]);
+}
+
+test("a branch with no upstream is checked only from where it leaves the remote", async (t) => {
+  const box = sandbox(t);
+  const oldSecret = "AKIAOLDONTHEREMOTE12";
+  initRepo(box, { "src/old.ts": `export const old = "${oldSecret}";\n` });
+  addBareOrigin(box);
+  git(box.repo, ["checkout", "-q", "-b", "feat"]);
+  commitFile(box, "src/feat.ts", "export const feat = 1;\n", "feat");
+
+  const result = await runCheck(box, ["--offline"]);
+
+  assertCompleted(result, 0);
+  assert.match(result.stderr, /checked net change: 1 new text line, 1 file\. no secret hit\./);
+  assert.doesNotMatch(result.stderr, new RegExp(oldSecret));
+  assert.doesNotMatch(result.stderr, NO_SHARED_HISTORY);
+});
+
+test("a diverged branch does not answer for commits only its upstream has", async (t) => {
+  const box = sandbox(t);
+  const oldSecret = "AKIAOLDONTHEREMOTE12";
+  const upstreamSecret = "AKIAUPSTREAMONLY1234";
+  initRepo(box, { "src/old.ts": `export const old = "${oldSecret}";\n` });
+  addBareOrigin(box);
+  // The upstream's own commit drops the old secret and adds another. The local
+  // branch then steps back to the shared base and adds one clean commit, so it
+  // is both behind and ahead. Diffing against the upstream tip would read the
+  // old secret as an added line, because the local tree still has it.
+  git(box.repo, ["rm", "-q", "src/old.ts"]);
+  commitFile(box, "src/up.ts", `export const up = "${upstreamSecret}";\n`, "upstream only");
+  git(box.repo, ["push", "-q", "origin", "HEAD"]);
+  git(box.repo, ["reset", "-q", "--hard", "HEAD~1"]);
+  commitFile(box, "src/local.ts", "export const local = 1;\n", "local only");
+  assert.equal(git(box.repo, ["rev-list", "--left-right", "--count", "@{upstream}...HEAD"]), "1\t1");
+
+  const result = await runCheck(box, ["--offline"]);
+
+  assertCompleted(result, 0);
+  assert.match(result.stderr, /checked net change: 1 new text line, 1 file\. no secret hit\./);
+  assert.doesNotMatch(result.stderr, new RegExp(`${oldSecret}|${upstreamSecret}`));
+});
+
+test("an upstream that shares no history is diffed from its own tip", async (t) => {
+  const box = sandbox(t);
+  const secret = "AKIAUNRELATEDTIP1234";
+  initRepo(box, { "src/local.ts": `export const local = "${secret}";\n` });
+  const branch = currentBranch(box);
+  const emptyTree = execFileSync("git", ["hash-object", "-t", "tree", "--stdin"], {
+    cwd: box.repo,
+    input: "",
+    encoding: "utf8",
+  }).trim();
+  const unrelated = git(box.repo, ["commit-tree", emptyTree, "-m", "unrelated"]);
+  git(box.repo, ["remote", "add", "origin", join(box.root, "never-contacted.git")]);
+  git(box.repo, ["update-ref", `refs/remotes/origin/${branch}`, unrelated]);
+  git(box.repo, ["branch", "--set-upstream-to", `origin/${branch}`]);
+
+  const result = await runCheck(box, ["--offline"]);
+
+  // No merge base exists, so the upstream tip itself is the base and all of
+  // HEAD reads as new to it.
+  assertCompleted(result, 1);
+  assert.match(result.stderr, /src\/local\.ts:1/);
+});
+
+test("a repository with no remote says it is checking all of HEAD", async (t) => {
+  const box = sandbox(t);
+  initRepo(box, { "README.md": "clean\n" });
+
+  const result = await runCheck(box, ["--offline"]);
+
+  assertCompleted(result, 0);
+  assert.equal(result.stderr.match(new RegExp(NO_SHARED_HISTORY.source, "g"))?.length, 1, result.stderr);
+  assert.match(result.stderr, /checked net change: 1 new text line, 1 file\. no secret hit\./);
+});
+
+test("a file named HEAD in the working tree does not make the revision ambiguous", async (t) => {
+  const box = sandbox(t);
+  initRepo(box, { HEAD: "just a file\n" });
+
+  const result = await runCheck(box, ["--offline"]);
+
+  assertCompleted(result, 0);
+  assert.match(result.stderr, /checked net change: 1 new text line, 1 file\. no secret hit\./);
+});
+
+test("a manual run that cannot list its unpushed commits exits 2, not a clean 0", async (t) => {
+  const flooded = sandbox(t);
+  initRepo(flooded, { "README.md": "clean\n" });
+  installGitShim(flooded, "rev-list-flood");
+  const tooMany = await runCheck(flooded, ["--offline"]);
+  assertCompleted(tooMany, 2);
+  assert.match(tooMany.stderr, /git rev-list output exceeded 1 MB; unpushed commits not inspected/);
+  assert.match(tooMany.stderr, /INCOMPLETE: no clean result/);
+  assert.doesNotMatch(tooMany.stderr, /checked net change|net change has no new text lines/);
+
+  // No commit yet, so rev-list has nothing to name HEAD with and git exits 128.
+  const unborn = sandbox(t);
+  git(unborn.repo, ["init", "-q"]);
+  const noCommits = await runCheck(unborn, ["--offline"]);
+  assertCompleted(noCommits, 2);
+  assert.match(noCommits.stderr, /INCOMPLETE: no clean result/);
+  assert.doesNotMatch(noCommits.stderr, /checked net change|net change has no new text lines/);
+});
+
+test("a branch already on a remote has no new text lines and no scope note", async (t) => {
+  const box = sandbox(t);
+  initRepo(box, { "src/old.ts": 'export const old = "AKIAOLDONTHEREMOTE12";\n' });
+  addBareOrigin(box);
+  // Same commit as the pushed branch, but with no upstream of its own.
+  git(box.repo, ["checkout", "-q", "-b", "feat"]);
+
+  const result = await runCheck(box, ["--offline"]);
+
+  assertCompleted(result, 0);
+  assert.match(result.stderr, /\[Rocky\] net change has no new text lines\.\r?\n/);
+  assert.doesNotMatch(result.stderr, NO_SHARED_HISTORY);
+});
+
+test("a branch that leaves the remote at several tips starts from the nearest one", async (t) => {
+  const box = sandbox(t);
+  initRepo(box, { "README.md": "clean\n" });
+  addBareOrigin(box);
+  const base = currentBranch(box);
+  for (const [name, files] of [["a", ["a1", "a2"]], ["b", ["b1"]]] as const) {
+    git(box.repo, ["checkout", "-q", "-b", name, base]);
+    for (const file of files) commitFile(box, `src/${file}.ts`, `export const ${file} = 1;\n`, file);
+    git(box.repo, ["push", "-q", "origin", name]);
+  }
+  git(box.repo, ["checkout", "-q", "-b", "feat", "a"]);
+  git(box.repo, ["merge", "-q", "--no-ff", "-m", "merge b", "b"]);
+  commitFile(box, "src/local.ts", "export const local = 1;\n", "local");
+  const boundaries = git(box.repo, ["rev-list", "--boundary", "HEAD", "--not", "--remotes"])
+    .split(/\r?\n/)
+    .filter((line) => line.startsWith("-"));
+  assert.equal(boundaries.length, 2, "the fixture must leave the remote at two tips");
+
+  const result = await runCheck(box, ["--offline"]);
+
+  assertCompleted(result, 0);
+  // origin/a is nearest, so what b added and the local commit both count.
+  assert.match(result.stderr, /checked net change: 2 new text lines, 2 files\. no secret hit\./);
+  assert.doesNotMatch(result.stderr, NO_SHARED_HISTORY);
 });
