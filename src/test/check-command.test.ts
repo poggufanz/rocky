@@ -54,12 +54,16 @@ function git(cwd: string, args: readonly string[]): string {
   }
 }
 
-function writeRepoFile(repo: string, path: string, contents: string): void {
+function writeRepoFile(repo: string, path: string, contents: string | Uint8Array): void {
   mkdirSync(dirname(join(repo, path)), { recursive: true });
   writeFileSync(join(repo, path), contents, "utf8");
 }
 
-function initRepo(box: Sandbox, initial: Record<string, string>, second?: Record<string, string>): {
+function initRepo(
+  box: Sandbox,
+  initial: Record<string, string | Uint8Array>,
+  second?: Record<string, string | Uint8Array>,
+): {
   first: string;
   second?: string;
 } {
@@ -293,6 +297,22 @@ test("pre-push check finds a planted secret and uses finding exit 3", async (t) 
   assertCompleted(result, 3);
   assert.match(result.stderr, /src\/key\.ts:1/);
   assert.match(result.stderr, /aws access key/);
+});
+
+test("pre-push check finds a planted secret when the last diff section is a binary file", async (t) => {
+  const box = sandbox(t);
+  const secret = "AKIAABCDEFGHIJKLMNOP";
+  // Git sorts paths, so x.png closes the diff with a section that opens no hunk.
+  const commits = initRepo(box, { "README.md": "clean\n" }, {
+    "a-key.ts": `const key = "${secret}";\n`,
+    "x.png": Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00]),
+  });
+
+  const result = await runCheck(box, ["--offline", "--pre-push"], prePushLine(commits.second!, commits.first));
+
+  assertCompleted(result, 3);
+  assert.match(result.stderr, /a-key\.ts:1/);
+  assert.match(result.stderr, /secret sits in outgoing code/);
 });
 
 test("manual check finds committed content without an upstream and exits 1", async (t) => {

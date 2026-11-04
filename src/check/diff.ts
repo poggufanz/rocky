@@ -235,7 +235,12 @@ function hasSafePatchOrder(diffText: string): boolean {
       && recognized
       && !(hasBinary && (hasHunk || oldSeen || newSeen));
   };
-  for (const raw of diffText.split(/\r?\n/)) {
+  // Git ends its output with one newline. Only a hunk body swallows the empty
+  // frame that leaves, so drop it here; a last section without a hunk (binary,
+  // rename, mode change) must not read it as a stray blank line.
+  const patchLines = diffText.split(/\r?\n/);
+  if (patchLines.at(-1) === "") patchLines.pop();
+  for (const raw of patchLines) {
     if (raw.startsWith("diff --git ")) {
       if (hasSection && !finishSection()) return false;
       if (!parseDiffHeader(raw)) return false;

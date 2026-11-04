@@ -345,6 +345,57 @@ test("checked unified diff retains additions from every exact hunk and section",
   });
 });
 
+test("checked parser keeps earlier additions when the last section opens no hunk", async () => {
+  // Git ends its output with a newline. After a section that opened a hunk the
+  // final empty frame is swallowed with the hunk body; after a binary, rename or
+  // mode-only section it used to read as a stray line and void the whole scan.
+  const keyed = [
+    "diff --git a/a-key.ts b/a-key.ts",
+    "new file mode 100644",
+    "index 0000000..1111111",
+    "--- /dev/null",
+    "+++ b/a-key.ts",
+    "@@ -0,0 +1 @@",
+    '+const key = "AKIAABCDEFGHIJKLMNOP";',
+  ];
+  const hunklessLast = [
+    [
+      "binary differ",
+      [
+        "diff --git a/x.png b/x.png",
+        "new file mode 100644",
+        "index 0000000..2222222",
+        "Binary files /dev/null and b/x.png differ",
+      ],
+    ],
+    [
+      "pure rename",
+      [
+        "diff --git a/old.txt b/z-new.txt",
+        "similarity index 100%",
+        "rename from old.txt",
+        "rename to z-new.txt",
+      ],
+    ],
+    [
+      "mode only",
+      [
+        "diff --git a/script.sh b/script.sh",
+        "old mode 100644",
+        "new mode 100755",
+      ],
+    ],
+  ] as const;
+
+  for (const [name, section] of hunklessLast) {
+    const diff = `${[...keyed, ...section].join("\n")}\n`;
+    assert.deepEqual(await parseUnifiedZeroDiffChecked(diff), {
+      complete: true,
+      added: [{ file: "a-key.ts", line: 1, text: 'const key = "AKIAABCDEFGHIJKLMNOP";' }],
+    }, name);
+  }
+});
+
 test("name-only NUL framing accepts only exact nonempty frames plus one terminator", () => {
   assert.deepEqual(parseNameOnlyZero(""), []);
   assert.deepEqual(parseNameOnlyZero("odd\nline\0ümlaut\0"), ["odd\nline", "ümlaut"]);
