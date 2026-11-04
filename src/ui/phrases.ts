@@ -20,7 +20,8 @@ export type PhraseKey =
   | "check-registry-consent"
   | "check-answer"
   | "check-comprehension"
-  | "check-unknown-flag";
+  | "check-unknown-flag"
+  | "gui-opener-failed";
 
 const PHRASES: Readonly<Record<PhraseKey, string>> = Object.freeze({
   "ai-known-fix": "memory and small model agree. old fix is strong clue. good good.",
@@ -43,6 +44,7 @@ const PHRASES: Readonly<Record<PhraseKey, string>> = Object.freeze({
   "check-answer": "answer, question",
   "check-comprehension": "I hear risky new line. what it doing, question",
   "check-unknown-flag": "that flag I do not know. bad.",
+  "gui-opener-failed": "browser opener does not start here. open link above by hand.",
 });
 
 export const phraseKeys: readonly PhraseKey[] = Object.freeze([
@@ -66,6 +68,7 @@ export const phraseKeys: readonly PhraseKey[] = Object.freeze([
   "check-answer",
   "check-comprehension",
   "check-unknown-flag",
+  "gui-opener-failed",
 ]);
 
 export function phrase(key: PhraseKey): string {

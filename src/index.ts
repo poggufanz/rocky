@@ -18,7 +18,7 @@ import { watch } from "./commands/watch.js";
 import { recall } from "./commands/recall.js";
 import { model } from "./commands/model.js";
 import { dashCommand } from "./commands/dash.js";
-import { guiCommand } from "./commands/gui.js";
+import { guiCommand, guiWanted } from "./commands/gui.js";
 import { stats } from "./commands/stats.js";
 import { hookFail, hookInstall, hookStatus, hookSuccess, hookUninstall } from "./commands/hook.js";
 import { mcp } from "./commands/mcp.js";
@@ -392,9 +392,16 @@ async function main(): Promise<number> {
   const [, , command, ...rest] = process.argv;
   if (command === undefined || command === "--no-open" || command?.startsWith("--port=")) {
     const flags = command === undefined ? [] : [command, ...rest];
-    // A browser needs a human at the keyboard, so a pipe falls through to help.
-    if (process.stdout.isTTY === true && process.stdin.isTTY === true) {
+    // A browser needs a human at the keyboard, so a pipe falls through to help,
+    // except under --no-open: that serves the page and prints the URL, so no
+    // terminal is needed.
+    if (guiWanted(flags, process.stdout.isTTY === true, process.stdin.isTTY === true)) {
       return guiCommand(flags, "main");
+    }
+    if (command?.startsWith("--port=")) {
+      console.log(face());
+      console.log(HELP);
+      return 0;
     }
   }
   try {
