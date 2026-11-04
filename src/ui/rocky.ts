@@ -82,6 +82,15 @@ export function detail(msg: string): void {
   writeRockyStderr(`${dimStderr(safeTerminalBlock(msg))}\n`);
 }
 
+/**
+ * The one switch for Rocky's internal counters. Default output speaks plain
+ * words; ROCKY_VERBOSE=1 brings back each site's raw text. Read at call time, so
+ * a shell or a test can flip it without restarting the process.
+ */
+export function isVerbose(): boolean {
+  return process.env.ROCKY_VERBOSE === "1";
+}
+
 /** "just now", "2 minutes", "6 hours", "3 days" — the bare span, no suffix. */
 export function elapsed(ms: number): string {
   const s = Math.floor(ms / 1000);

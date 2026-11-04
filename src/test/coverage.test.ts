@@ -16,6 +16,7 @@ import { deriveHome } from "../core/home-data.js";
 import { briefCommand } from "../commands/brief.js";
 import { validateRockyPhrase } from "../ui/phrases.js";
 import type { MemoryRecord } from "../core/memory-read.js";
+import { setVerbose } from "./verbose-switch.js";
 
 const NOW = 1_800_000_000_000;
 const CWD = "/work/repo";
@@ -224,15 +225,16 @@ test("dash home payload marks truncation from an incomplete memory read, even wh
   assert.equal(full.coverage.truncated, false);
 });
 
-test("disclosure lines show both memory and list-cap lines when both hold, never shadowing", () => {
+test("disclosure lines show both memory and list-cap lines when both hold, never shadowing", (t) => {
+  setVerbose(t, undefined);
   const memory = { version: 1 as const, scanned: 10, skipped: 0, truncated: 2, bytesScanned: 100, bytesTotal: 200, complete: false as boolean };
   const capped = coverageFromRecords(
     [triple(Array.from({ length: 12 }, (_, index) => `src/u-${index}.ts`), { hunks: false })],
   );
   assert.equal(capped.truncated, true);
-  const both = coverageDisclosureLines(capped, memory, true);
+  const both = coverageDisclosureLines(capped, memory, true, 10);
   assert.equal(both.length, 2);
-  assert.match(both[0], /memory coverage: version 1, scanned 10, skipped 0, truncated 2, complete false/);
+  assert.equal(both[0], "memory coverage incomplete: some lines not heard.");
   assert.match(both[1], /coverage partial: names 10 at most, 12 untried named\./);
   assert.doesNotMatch(both.join("\n"), /\?/);
 
@@ -240,11 +242,12 @@ test("disclosure lines show both memory and list-cap lines when both hold, never
     coverageFromRecords([rationale(["src/a.ts"])], { sessionFiles: ["src/a.ts"], cwd: CWD }),
     memory,
     true,
+    10,
   );
   assert.equal(memoryOnly.length, 1);
-  assert.match(memoryOnly[0], /memory coverage:/);
+  assert.match(memoryOnly[0], /^memory coverage incomplete:/);
 
-  const capOnly = coverageDisclosureLines(capped, undefined, false);
+  const capOnly = coverageDisclosureLines(capped, undefined, false, 0);
   assert.equal(capOnly.length, 1);
   assert.match(capOnly[0], /coverage partial:/);
 
@@ -252,10 +255,29 @@ test("disclosure lines show both memory and list-cap lines when both hold, never
     coverageFromRecords([rationale(["src/a.ts"])], { sessionFiles: ["src/a.ts"], cwd: CWD }),
     { ...memory, complete: true as boolean },
     false,
+    10,
   );
   assert.deepEqual(clean, []);
-  assert.deepEqual(coverageDisclosureLines(undefined, undefined, false), []);
-  assert.deepEqual(coverageDisclosureLines("garbage", "garbage" as unknown as typeof memory, true), []);
+  assert.deepEqual(coverageDisclosureLines(undefined, undefined, false, 0), []);
+  assert.deepEqual(coverageDisclosureLines("garbage", "garbage" as unknown as typeof memory, true, 0), []);
+});
+
+test("disclosure lines name a record cap with the records heard, in plain words", (t) => {
+  setVerbose(t, undefined);
+  const capped = { version: 1 as const, scanned: 40, skipped: 0, truncated: 1, bytesScanned: 900, bytesTotal: 2000, complete: false as boolean, reason: "record-cap" as const };
+  assert.deepEqual(
+    coverageDisclosureLines(undefined, capped, true, 40),
+    ["memory coverage incomplete: first 40 records heard, later lines not heard."],
+  );
+});
+
+test("disclosure lines keep the raw memory counters under ROCKY_VERBOSE", (t) => {
+  setVerbose(t, "1");
+  const memory = { version: 1 as const, scanned: 10, skipped: 0, truncated: 2, bytesScanned: 100, bytesTotal: 200, complete: false as boolean };
+  assert.deepEqual(
+    coverageDisclosureLines(undefined, memory, true, 10),
+    ["memory coverage: version 1, scanned 10, skipped 0, truncated 2, complete false"],
+  );
 });
 
 test("dash home payload carries bounded coverage tried and untried arrays", () => {

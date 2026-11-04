@@ -271,7 +271,7 @@ test("parseStatsArgs takes only --cycles", () => {
   assert.throws(() => parseStatsArgs(["--cycles", "--cycles"]), /unexpected argument/);
 });
 
-test("stats --cycles lists top fingerprints with counts from memory", async (t) => {
+function seedCycleMemory(t: import("node:test").TestContext): void {
   const home = realpathSync(mkdtempSync(join(tmpdir(), "rocky-stats-cycles-")));
   withRockyHome(t, home);
   const now = Date.now();
@@ -285,13 +285,27 @@ test("stats --cycles lists top fingerprints with counts from memory", async (t) 
       .map((record) => `${JSON.stringify(record)}\n`).join(""),
     "utf8",
   );
+}
+
+test("stats --cycles lists top fingerprints with counts from memory", async (t) => {
+  withEnv(t, "ROCKY_VERBOSE", undefined);
+  seedCycleMemory(t);
   const { result, stderr } = captureOutput(() => stats(["--cycles"]));
   assert.equal(result, 0);
   assert.match(stderr, new RegExp(`${FP_A} x3`));
   assert.match(stderr, new RegExp(`${FP_B} x1`));
   assert.match(stderr, /count only, no cause named/);
-  assert.match(stderr, /memory coverage:/);
+  // A whole read has no coverage to disclose, so default output carries no counter line.
+  assert.doesNotMatch(stderr, /memory coverage/);
   assert.doesNotMatch(stderr, /\?/);
+});
+
+test("stats --cycles prints the raw memory counters under ROCKY_VERBOSE", async (t) => {
+  withEnv(t, "ROCKY_VERBOSE", "1");
+  seedCycleMemory(t);
+  const { result, stderr } = captureOutput(() => stats(["--cycles"]));
+  assert.equal(result, 0);
+  assert.match(stderr, /memory coverage: version 1, scanned 4, skipped 0, truncated 0, complete true/);
 });
 
 test("stats --cycles is honest when memory holds no failure", async (t) => {

@@ -8,6 +8,7 @@ import type { MemoryCoverage, MemoryRecord, RationaleRecord, RationaleSource, Tr
 import { CliUsageError } from "../commands/cli-args.js";
 import { rationaleSourceLabel, why } from "../commands/dictionary.js";
 import { validateRockyPhrase } from "../ui/phrases.js";
+import { setVerbose } from "./verbose-switch.js";
 
 const WHY_ADD_USAGE = 'rocky why --add "<text>" [--files a.ts,b.ts]';
 const WHY_ADD_REMEMBERED = "why remembered. you said it, rocky keeps it.";
@@ -294,7 +295,8 @@ test("why <file> ignores reasons for other files, suffix paths, agent-log reason
   assert.deepEqual(heard.lines, [`say: "src/net.ts"... ${NO_RECORD_NAMES_FILE}`]);
 });
 
-test("why <file> prints the coverage disclosure before the stated reason and adds no absence sentence", () => {
+test("why <file> prints the coverage disclosure before the stated reason and adds no absence sentence", (t) => {
+  setVerbose(t, undefined);
   const now = Date.now();
   const scan: MemoryCoverage = { version: 1, scanned: 3, skipped: 0, truncated: 1, bytesScanned: 10, bytesTotal: 20, complete: false, reason: "file-size-cap" };
   const reason = statedReason({ id: "r1", ts: now - 120_000, files: ["src/net.ts"], excerpt: "retries stay low" });
@@ -304,7 +306,7 @@ test("why <file> prints the coverage disclosure before the stated reason and add
 
   assert.deepEqual(heard.lines, [
     `say: "src/net.ts"... ${COVERAGE_INCOMPLETE_LINE}`,
-    "out: memory coverage incomplete: version 1; scanned 3; skipped 0; truncated 1; bytes 10/20; reason file-size-cap",
+    "out: memory coverage incomplete: memory file too big. first 1 records heard, later lines not heard.",
     "say: you said: retries stay low",
     "out:   (2 minutes ago, human)",
   ]);

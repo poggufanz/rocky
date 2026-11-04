@@ -307,7 +307,7 @@ export async function briefCommand(argv: readonly string[] = [], cwd = process.c
     heading("untried");
     for (const line of renderUntriedCard(coverage)) detail(line);
     // Both disclosure lines show when both hold; neither shadows the other.
-    for (const line of coverageDisclosureLines(coverage, memoryCoverage, memoryIncomplete)) detail(line);
+    for (const line of coverageDisclosureLines(coverage, memoryCoverage, memoryIncomplete, pool.length)) detail(line);
   } catch {
     // fail open: no coverage section this run
   }

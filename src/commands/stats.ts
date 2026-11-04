@@ -1,13 +1,27 @@
 import { dirname } from "node:path";
 import { readJournal } from "../core/journal.js";
+import { describeMemoryCoverage } from "../core/coverage.js";
 import { countReclaimTombstones, drainGuardPending, memoryPath, type MemoryRecord } from "../core/memory.js";
-import { isOperationalMemoryRecord, loadMemoryChecked } from "../core/memory-read.js";
+import { isOperationalMemoryRecord, loadMemoryChecked, type MemoryCoverage } from "../core/memory-read.js";
 import { queryStats } from "../core/memory-query.js";
 import { CYCLES_TOP, FAILURE_CYCLE_COUNT } from "../core/failure-cycle.js";
 import { CliUsageError, reportCliUsage } from "./cli-args.js";
-import { detail, face, say } from "../ui/rocky.js";
+import { detail, face, isVerbose, say } from "../ui/rocky.js";
 
 const STATS_USAGE = "rocky stats [--cycles]";
+
+/**
+ * Disclosure for the counts printed above it. Whenever the read was not whole,
+ * one persona line says so in plain words and warns that these counts are not
+ * all. ROCKY_VERBOSE=1 also prints the raw counters, whole read or not.
+ */
+function speakCoverage(coverage: MemoryCoverage, recordCount: number): void {
+  const words = describeMemoryCoverage(coverage, recordCount, { counts: true });
+  if (words !== undefined) say(words);
+  if (isVerbose()) {
+    detail(`memory coverage: version ${coverage.version}, scanned ${coverage.scanned}, skipped ${coverage.skipped}, truncated ${coverage.truncated}, complete ${coverage.complete}`);
+  }
+}
 
 /** `stats` takes no arguments except the advisory `--cycles` summary flag. */
 export function parseStatsArgs(argv: readonly string[]): boolean {
@@ -53,7 +67,7 @@ function statsCycles(): number {
       detail(`${clustered} shape${clustered === 1 ? "" : "s"} heard ${FAILURE_CYCLE_COUNT} or more times. count only, no cause named.`);
     }
   }
-  detail(`memory coverage: version ${coverage.version}, scanned ${coverage.scanned}, skipped ${coverage.skipped}, truncated ${coverage.truncated}, complete ${coverage.complete}`);
+  speakCoverage(coverage, records.length);
   return 0;
 }
 
@@ -129,7 +143,7 @@ export function stats(argv: readonly string[] = []): number {
     if (topRule !== undefined) detail(`top guard rule: ${topRule[0]} (${topRule[1]})`);
   }
   if (drainedGuard > 0) detail(`guard pending drained: ${drainedGuard}`);
-  detail(`memory coverage: version ${coverage.version}, scanned ${coverage.scanned}, skipped ${coverage.skipped}, truncated ${coverage.truncated}, complete ${coverage.complete}`);
+  speakCoverage(coverage, records.length);
   const tombstones = countReclaimTombstones(dirname(memoryPath()));
   if (tombstones > 0) detail(`tombstones waiting sweep: ${tombstones}`);
   if (result.unresolved > 0) say(`${result.unresolved} error${result.unresolved === 1 ? "" : "s"} still without fix. you fix, I remember. good trade.`);

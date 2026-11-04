@@ -9,10 +9,11 @@
 import { createOllamaClient } from "../ai/ollama.js";
 import { type AiAct, type AiStatus, type RecallWithAiPort } from "../ai/port.js";
 import { createRecallAiPort, formatModelExplanation, singleFlightRecallAi } from "../ai/recall-ai.js";
+import { describeMemoryCoverage } from "../core/coverage.js";
 import { createMemoryQueries, fixFromElsewhere, loadDurableMemorySnapshot, queryRecall, queryRecentFailures, type MemoryQueries, type RecallHit } from "../core/memory-query.js";
-import { isCompleteMemoryCoverage, linkBasisRank } from "../core/memory-read.js";
+import { isCompleteMemoryCoverage, linkBasisRank, type MemoryCoverage } from "../core/memory-read.js";
 import { resolveRockyPaths } from "../core/state-paths.js";
-import { ago, detail, gapSpan, heading, phrase, phraseForAct, say } from "../ui/rocky.js";
+import { ago, detail, gapSpan, heading, isVerbose, phrase, phraseForAct, say } from "../ui/rocky.js";
 import { safeTerminalBlock, safeTerminalLine } from "../ui/sanitize.js";
 
 export type ParsedRecall = { useAi: boolean; query: string };
@@ -164,6 +165,13 @@ function sayAiOutcome(outcome: ValidRecallAiOutcome): void {
   }
 }
 
+/** Supporting line for a memory read that was not whole: plain words, or the raw counters under ROCKY_VERBOSE=1. */
+function coverageDetail(coverage: MemoryCoverage, recordCount: number): string {
+  const words = describeMemoryCoverage(coverage, recordCount, { counts: false });
+  if (!isVerbose() && words !== undefined) return words;
+  return `memory coverage incomplete: version ${coverage.version}, scanned ${coverage.scanned}, skipped ${coverage.skipped}, truncated ${coverage.truncated}, complete ${coverage.complete}${coverage.reason === undefined ? "" : `, reason ${coverage.reason}`}`;
+}
+
 export async function recall(argv: readonly string[], dependencies?: RecallDependencies): Promise<number> {
   let parsed: ParsedRecall;
   try {
@@ -194,7 +202,7 @@ export async function recall(argv: readonly string[], dependencies?: RecallDepen
         : queryRecall(snapshot.records, { query, now });
       coverage = snapshot.coverage;
       if (coverage !== undefined && !isCompleteMemoryCoverage(coverage)) {
-        detail(`memory coverage incomplete: version ${coverage.version}, scanned ${coverage.scanned}, skipped ${coverage.skipped}, truncated ${coverage.truncated}, complete ${coverage.complete}${coverage.reason === undefined ? "" : `, reason ${coverage.reason}`}`);
+        detail(coverageDetail(coverage, snapshot.records.length));
       }
       if (hits.length === 0) {
         if (coverage !== undefined && !isCompleteMemoryCoverage(coverage)) {
@@ -214,7 +222,9 @@ export async function recall(argv: readonly string[], dependencies?: RecallDepen
         : deps.memory.recall({ query });
       try { coverage = deps.memory.coverage?.(); } catch { coverage = undefined; }
       if (coverage !== undefined && !isCompleteMemoryCoverage(coverage)) {
-        detail(`memory coverage incomplete: version ${coverage.version}, scanned ${coverage.scanned}, skipped ${coverage.skipped}, truncated ${coverage.truncated}, complete ${coverage.complete}${coverage.reason === undefined ? "" : `, reason ${coverage.reason}`}`);
+        // A custom provider reports coverage without the records it read, so the
+        // nearest count is the lines it scanned less the ones it could not use.
+        detail(coverageDetail(coverage, Math.max(0, coverage.scanned - coverage.skipped)));
       }
       if (hits.length === 0) {
         if (coverage !== undefined && !isCompleteMemoryCoverage(coverage)) {

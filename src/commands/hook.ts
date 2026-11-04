@@ -37,6 +37,7 @@ import {
   powershellHookBlockCodec,
   removeHookBlockBytes,
 } from "../core/hook-block.js";
+import { describeMemoryCoverage } from "../core/coverage.js";
 import { resolveRockyPaths } from "../core/state-paths.js";
 import {
   boundCommand,
@@ -61,7 +62,7 @@ import type {
   RecoveryOutcome,
 } from "../setup/file-transaction.js";
 import { quotePosixShell } from "../core/shell-quote.js";
-import { ago, detail, detailTty, phrase, say, sayTty } from "../ui/rocky.js";
+import { ago, detail, detailTty, isVerbose, phrase, say, sayTty } from "../ui/rocky.js";
 import { safeTerminalLine } from "../ui/sanitize.js";
 
 /**
@@ -97,7 +98,10 @@ function readMemory(): MemoryRecord[] | undefined {
     const loaded = loadMemoryChecked();
     if (!isCompleteMemoryCoverage(loaded.coverage)) {
       sayTty("memory coverage incomplete. I do not claim prior fix. check, question");
-      detailTty(`memory coverage: version ${loaded.coverage.version}; scanned ${loaded.coverage.scanned}; skipped ${loaded.coverage.skipped}; truncated ${loaded.coverage.truncated}${loaded.coverage.reason === undefined ? "" : `; reason ${loaded.coverage.reason}`}`);
+      const words = describeMemoryCoverage(loaded.coverage, loaded.records.length, { counts: false });
+      detailTty(!isVerbose() && words !== undefined
+        ? words
+        : `memory coverage: version ${loaded.coverage.version}; scanned ${loaded.coverage.scanned}; skipped ${loaded.coverage.skipped}; truncated ${loaded.coverage.truncated}${loaded.coverage.reason === undefined ? "" : `; reason ${loaded.coverage.reason}`}`);
       return undefined;
     }
     return loaded.records;

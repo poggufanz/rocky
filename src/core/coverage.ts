@@ -25,7 +25,8 @@
  * `redactSecretsAtBoundary` the diff surfaces use.
  */
 
-import { canonicalPath, type MemoryCoverage, type MemoryRecord } from "./memory-read.js";
+import { isVerbose } from "../ui/rocky.js";
+import { canonicalPath, isCompleteMemoryCoverage, type MemoryCoverage, type MemoryRecord } from "./memory-read.js";
 import { redactSecretsAtBoundary } from "./redact.js";
 
 /** How many tried/untried paths one result names before counting the rest. */
@@ -343,27 +344,70 @@ export function renderUntriedCard(result: unknown): string[] {
   }
 }
 
+const COVERAGE_WORDS_PREFIX = "memory coverage incomplete: ";
+
+/**
+ * One plain-words line for a memory read that was not whole, or `undefined`
+ * when it was. `recordCount` is how many records the reader kept: a
+ * whitespace-only line counts as scanned yet is neither a record nor skipped,
+ * so no formula over the counters recovers it. `counts` is for surfaces that
+ * print totals (stats): it adds that those totals are not the whole memory.
+ * Total over every coverage shape, so an incomplete read always says
+ * something. Pure, never throws.
+ */
+export function describeMemoryCoverage(
+  coverage: MemoryCoverage,
+  recordCount: number,
+  options: { counts: boolean },
+): string | undefined {
+  if (isCompleteMemoryCoverage(coverage)) return undefined;
+  const facts: string[] = [];
+  if (coverage.skipped > 0) facts.push(`${coverage.skipped} line${coverage.skipped === 1 ? "" : "s"} I cannot use.`);
+  switch (coverage.reason) {
+    case "record-cap":
+      facts.push(`first ${recordCount} records heard, later lines not heard.`);
+      break;
+    case "file-size-cap":
+      facts.push(`memory file too big. first ${recordCount} records heard, later lines not heard.`);
+      break;
+    case "read-race":
+      facts.push("file did not hold still or open right. nothing heard this time.");
+      break;
+  }
+  if (facts.length === 0) facts.push("some lines not heard.");
+  if (options.counts) facts.push("counts here not all.");
+  return `${COVERAGE_WORDS_PREFIX}${facts.join(" ")}`;
+}
+
 /**
  * Detail-ready disclosure lines for the Untried section, stats --cycles
  * pattern: the memory-read line when the bounded read truncated, plus the
  * list-cap line when the split itself capped. Both show when both hold —
  * neither shadows the other. Totals name listed files only (a lower bound
- * under caps), so the cap line says "named", never "total". Never throws.
+ * under caps), so the cap line says "named", never "total". The memory-read
+ * line is plain words naming `recordCount` records heard; ROCKY_VERBOSE=1
+ * prints its raw counters instead. Never throws.
  */
 export function coverageDisclosureLines(
   result: unknown,
   memory: MemoryCoverage | undefined,
   memoryIncomplete: boolean,
+  recordCount: number,
 ): string[] {
   try {
     const lines: string[] = [];
     const memOk = typeof memory === "object" && memory !== null && !Array.isArray(memory);
     if (memOk && memoryIncomplete === true) {
-      const version = typeof memory.version === "number" ? memory.version : 0;
-      const scanned = typeof memory.scanned === "number" ? memory.scanned : 0;
-      const skipped = typeof memory.skipped === "number" ? memory.skipped : 0;
-      const truncated = typeof memory.truncated === "number" ? memory.truncated : 0;
-      lines.push(`memory coverage: version ${version}, scanned ${scanned}, skipped ${skipped}, truncated ${truncated}, complete ${memory.complete === true}`);
+      const words = describeMemoryCoverage(memory, recordCount, { counts: false });
+      if (words !== undefined && !isVerbose()) {
+        lines.push(words);
+      } else {
+        const version = typeof memory.version === "number" ? memory.version : 0;
+        const scanned = typeof memory.scanned === "number" ? memory.scanned : 0;
+        const skipped = typeof memory.skipped === "number" ? memory.skipped : 0;
+        const truncated = typeof memory.truncated === "number" ? memory.truncated : 0;
+        lines.push(`memory coverage: version ${version}, scanned ${scanned}, skipped ${skipped}, truncated ${truncated}, complete ${memory.complete === true}`);
+      }
     }
     if (typeof result === "object" && result !== null && !Array.isArray(result)) {
       const { truncated, untriedTotal } = result as Partial<CoverageResult>;

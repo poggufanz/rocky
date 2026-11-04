@@ -12,6 +12,7 @@
 
 import { commandIdentity, fingerprintCandidates } from "../core/fingerprint.js";
 import { CANCEL_CODES, runProcess, type ExecResult } from "../core/exec.js";
+import { describeMemoryCoverage } from "../core/coverage.js";
 import { resolveRockyPaths } from "../core/state-paths.js";
 import {
   recordFailure,
@@ -23,7 +24,7 @@ import {
 } from "../core/memory.js";
 import { isCompleteMemoryCoverage, linkBasisRank, loadMemoryChecked } from "../core/memory-read.js";
 import { findByFingerprint, fixFromElsewhere, getFix, possibleFixesForFailure, type PossibleFix } from "../core/memory-query.js";
-import { ago, detail, gapSpan, phrase, say } from "../ui/rocky.js";
+import { ago, detail, gapSpan, isVerbose, phrase, say } from "../ui/rocky.js";
 import { safeTerminalLine } from "../ui/sanitize.js";
 
 export async function run(cmd: string, processRunner: (cmd: string) => Promise<ExecResult> = runProcess): Promise<number> {
@@ -57,7 +58,10 @@ function readMemory(): MemoryRecord[] | undefined {
     const loaded = loadMemoryChecked();
     if (!isCompleteMemoryCoverage(loaded.coverage)) {
       say("memory coverage incomplete. I do not claim prior fix. check, question");
-      detail(`    memory coverage: version ${loaded.coverage.version}; scanned ${loaded.coverage.scanned}; skipped ${loaded.coverage.skipped}; truncated ${loaded.coverage.truncated}${loaded.coverage.reason === undefined ? "" : `; reason ${loaded.coverage.reason}`}`);
+      const words = describeMemoryCoverage(loaded.coverage, loaded.records.length, { counts: false });
+      detail(!isVerbose() && words !== undefined
+        ? `    ${words}`
+        : `    memory coverage: version ${loaded.coverage.version}; scanned ${loaded.coverage.scanned}; skipped ${loaded.coverage.skipped}; truncated ${loaded.coverage.truncated}${loaded.coverage.reason === undefined ? "" : `; reason ${loaded.coverage.reason}`}`);
       return undefined;
     }
     return loaded.records;

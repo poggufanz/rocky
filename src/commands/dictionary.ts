@@ -1,6 +1,7 @@
 import { Buffer } from "node:buffer";
 import { dictionaryRankPortFromConfig, type DictionaryRankPort } from "../ai/dictionary-ai.js";
 import { loadConfig } from "../core/config.js";
+import { describeMemoryCoverage } from "../core/coverage.js";
 import { csConceptCounts, digestBuckets, queryDictionary, queryNotes, quizCandidates, rationalesForFile, type DictionaryHit, type NoteHit } from "../core/dictionary.js";
 import { isCompleteMemoryCoverage, isOperationalMemoryRecord, loadMemoryChecked, sameCwd } from "../core/memory-read.js";
 import { recordRationale } from "../core/memory.js";
@@ -9,7 +10,7 @@ import type { MemoryCoverage, MemoryRecord, RationaleLinks, RationaleRecord, Rat
 import { resolveRockyPaths } from "../core/state-paths.js";
 import { createTtyPromptPort } from "../setup/prompt.js";
 import { truncateUtf8 } from "../mcp/privacy.js";
-import { ago, detail, say } from "../ui/rocky.js";
+import { ago, detail, isVerbose, say } from "../ui/rocky.js";
 import { safeTerminalLine } from "../ui/sanitize.js";
 import { formatGitDiffLines, resolveGitDiff, type GitDiffOptions, type GitDiffResult } from "../core/git-diff.js";
 import { CliUsageError, parseNoArgs, parseQueryArgs, reportCliUsage } from "./cli-args.js";
@@ -68,7 +69,9 @@ function coverageIncomplete(value: MemoryCoverage | undefined): boolean {
   return value !== undefined && !isCompleteMemoryCoverage(value);
 }
 
-function coverageLine(value: MemoryCoverage): string {
+function coverageLine(value: MemoryCoverage, recordCount: number): string {
+  const words = describeMemoryCoverage(value, recordCount, { counts: false });
+  if (!isVerbose() && words !== undefined) return words;
   return `memory coverage incomplete: version ${value.version}; scanned ${value.scanned}; skipped ${value.skipped}; truncated ${value.truncated}; bytes ${value.bytesScanned}/${value.bytesTotal}${value.reason === undefined ? "" : `; reason ${value.reason}`}`;
 }
 
@@ -128,7 +131,7 @@ export function exportCommand(argv: string[], deps: ExportCommandDeps = {}): num
   const scan = coverage();
   if (scan !== undefined && coverageIncomplete(scan)) {
     speak("memory coverage incomplete. export stops. no false file, question");
-    support(coverageLine(scan));
+    support(coverageLine(scan, records().length));
     return 1;
   }
   const selected = records().filter((record) => (
@@ -382,7 +385,7 @@ export async function what(argv: string[], deps: DictionaryCommandDeps = {}): Pr
   if (teaching.all.length === 0) {
     if (scan !== undefined && coverageIncomplete(scan)) {
       speak("memory coverage incomplete. I not know. check, question");
-      support(coverageLine(scan));
+      support(coverageLine(scan, memory.length));
       return 0;
     }
     speak(terminalSafe(futureTeachingMatch(memory, query, now)
@@ -390,7 +393,7 @@ export async function what(argv: string[], deps: DictionaryCommandDeps = {}): Pr
       : `"${terminalSafe(query, MAX_QUERY_DISPLAY_BYTES)}"... I not know. I not hear this before. I listen now.`, MAX_OUTPUT_LINE_BYTES));
     return 0;
   }
-  if (scan !== undefined && coverageIncomplete(scan)) support(coverageLine(scan));
+  if (scan !== undefined && coverageIncomplete(scan)) support(coverageLine(scan, memory.length));
   let displayed = teaching.triples;
   let aiRanked = false;
   if (useAi && teaching.triples.length > 0) {
@@ -456,7 +459,7 @@ export function how(argv: string[], deps: DictionaryCommandDeps = {}): number {
   if (teaching.all.length === 0) {
     if (scan !== undefined && coverageIncomplete(scan)) {
       speak("memory coverage incomplete. I not know. check, question");
-      support(coverageLine(scan));
+      support(coverageLine(scan, memory.length));
       return 0;
     }
     speak(terminalSafe(futureTeachingMatch(memory, query, now)
@@ -464,7 +467,7 @@ export function how(argv: string[], deps: DictionaryCommandDeps = {}): number {
       : `"${terminalSafe(query, MAX_QUERY_DISPLAY_BYTES)}"... I not know. no memory. you teach me when you work. good good.`, MAX_OUTPUT_LINE_BYTES));
     return 0;
   }
-  if (scan !== undefined && coverageIncomplete(scan)) support(coverageLine(scan));
+  if (scan !== undefined && coverageIncomplete(scan)) support(coverageLine(scan, memory.length));
   const safeQuery = terminalSafe(query, MAX_QUERY_DISPLAY_BYTES);
   const first = teaching.all[0] as LookupHit;
   speak(terminalSafe("triple" in first
@@ -664,7 +667,7 @@ export function why(argv: string[], deps: DictionaryCommandDeps = {}): number {
     const readerBounded = memory.length > MAX_WHY_RECORDS;
     if (scanIncomplete || pathMayBeOmitted || readerBounded) {
       speak(terminalSafe(`"${safePath}"... I not know if agent touch. coverage incomplete.`, MAX_OUTPUT_LINE_BYTES));
-      if (scanIncomplete) support(coverageLine(scan));
+      if (scanIncomplete) support(coverageLine(scan, memory.length));
       if (pathMayBeOmitted) {
         support(terminalSafe(`coverage status: ${evidenceResult.coverage.status}; possible path omitted.`, MAX_OUTPUT_LINE_BYTES));
       }
@@ -682,7 +685,7 @@ export function why(argv: string[], deps: DictionaryCommandDeps = {}): number {
     sayFileRationales(speak, support, fileRationales);
     return 0;
   }
-  if (scan !== undefined && coverageIncomplete(scan)) support(coverageLine(scan));
+  if (scan !== undefined && coverageIncomplete(scan)) support(coverageLine(scan, memory.length));
   if (evidenceResult.coverageIncomplete) support(someMayBeOmittedLine);
   const gitDiffFn = deps.gitDiff ?? resolveGitDiff;
   for (const triple of hits) {
@@ -748,13 +751,13 @@ export function digest(argv: string[], deps: DictionaryCommandDeps & { now?: num
   if (buckets.length === 0) {
     if (scan !== undefined && coverageIncomplete(scan)) {
       speak("memory coverage incomplete. I cannot say week is quiet, question");
-      support(coverageLine(scan));
+      support(coverageLine(scan, memory.length));
       return 0;
     }
     speak("quiet week. no intent I hear. quiet good good.");
     return 0;
   }
-  if (scan !== undefined && coverageIncomplete(scan)) support(coverageLine(scan));
+  if (scan !== undefined && coverageIncomplete(scan)) support(coverageLine(scan, memory.length));
 
   const counted = new Set<string>();
   const count = memory.filter((record) => (record.kind === "triple" || record.kind === "note")
@@ -817,7 +820,7 @@ export async function quiz(
   if (candidates.length === 0) {
     if (scan !== undefined && coverageIncomplete(scan)) {
       speak("memory coverage incomplete. I cannot say nothing old enough, question");
-      support(coverageLine(scan));
+      support(coverageLine(scan, memory.length));
       return 0;
     }
     const future = quizCandidates(memory, Number.MAX_SAFE_INTEGER, 3).filter((candidate) => candidate.ts > now);
@@ -826,7 +829,7 @@ export async function quiz(
       : "nothing old enough to ask. work more, come back, question");
     return 0;
   }
-  if (scan !== undefined && coverageIncomplete(scan)) support(coverageLine(scan));
+  if (scan !== undefined && coverageIncomplete(scan)) support(coverageLine(scan, memory.length));
 
   for (const candidate of candidates) {
     if (candidate.kind === "note") {

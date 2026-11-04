@@ -1,12 +1,13 @@
-import test from "node:test";
+import test, { type TestContext } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { queryStats } from "../core/memory-query.js";
 import type { FailureRecord, MemoryRecord } from "../core/memory-read.js";
 import { memoryAgeDays, stats } from "../commands/stats.js";
 import { resolveRockyPaths } from "../core/state-paths.js";
+import { setVerbose } from "./verbose-switch.js";
 
 const NOW = 1_800_000_000_000;
 
@@ -129,3 +130,55 @@ test("memoryAgeDays pins the age-display edge cases", () => {
   assert.equal(memoryAgeDays([NOW - 86_400_000, NOW - 5 * 86_400_000, NOW - 1000], NOW), 5);
   assert.equal(memoryAgeDays([NOW - 36 * 3_600_000], NOW), 1);
 });
+
+const SKIPPED_ONLY_WORDS = "memory coverage incomplete: 1 line I cannot use. counts here not all.";
+const SKIPPED_ONLY_COUNTERS = "memory coverage: version 1, scanned 2, skipped 1, truncated 0, complete false";
+
+/** One valid failure and one line that is not JSON: a read whole except for a line Rocky cannot use. */
+function statsOverSkippedLine(t: TestContext, argv: readonly string[]): { result: number; lines: string[] } {
+  const home = mkdtempSync(join(tmpdir(), "rocky-stats-coverage-"));
+  const previousHome = process.env.ROCKY_HOME;
+  process.env.ROCKY_HOME = home;
+  const originalStdout = process.stdout.write;
+  const originalStderr = process.stderr.write;
+  t.after(() => {
+    if (previousHome === undefined) delete process.env.ROCKY_HOME;
+    else process.env.ROCKY_HOME = previousHome;
+    rmSync(home, { recursive: true, force: true });
+  });
+  writeFileSync(resolveRockyPaths().memory, `${JSON.stringify(failure("f1"))}\nthis line is not json\n`, "utf8");
+  let stderr = "";
+  process.stdout.write = (() => true) as typeof process.stdout.write;
+  process.stderr.write = ((chunk: string | Uint8Array) => {
+    stderr += String(chunk);
+    return true;
+  }) as typeof process.stderr.write;
+  try {
+    const result = stats(argv);
+    return { result, lines: stderr.split(/\r?\n/u) };
+  } finally {
+    process.stdout.write = originalStdout;
+    process.stderr.write = originalStderr;
+  }
+}
+
+for (const argv of [[], ["--cycles"]] as const) {
+  const surface = argv.length === 0 ? "stats" : "stats --cycles";
+
+  test(`${surface} says memory coverage once and warns the counts are not all`, (t) => {
+    setVerbose(t, undefined);
+    const { result, lines } = statsOverSkippedLine(t, argv);
+    assert.equal(result, 0);
+    const said = lines.filter((line) => line.includes("memory coverage"));
+    assert.equal(said.length, 1, lines.join("\n"));
+    assert.ok(said[0]?.endsWith(SKIPPED_ONLY_WORDS), said[0]);
+  });
+
+  test(`${surface} adds the raw counter line to the same plain words under ROCKY_VERBOSE`, (t) => {
+    setVerbose(t, "1");
+    const { result, lines } = statsOverSkippedLine(t, argv);
+    assert.equal(result, 0);
+    assert.equal(lines.filter((line) => line.endsWith(SKIPPED_ONLY_WORDS)).length, 1, lines.join("\n"));
+    assert.equal(lines.filter((line) => line === SKIPPED_ONLY_COUNTERS).length, 1, lines.join("\n"));
+  });
+}

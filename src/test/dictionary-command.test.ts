@@ -6,6 +6,7 @@ import type { MemoryCoverage, MemoryRecord, TripleRecord } from "../core/memory-
 import { pathIdentityHash } from "../core/memory-read.js";
 import { MAX_WHY_RECORDS } from "../core/memory-query.js";
 import { validateRockyPhrase } from "../ui/phrases.js";
+import { setVerbose } from "./verbose-switch.js";
 
 const NO_RECORD_NAMES_FILE = "no record names this file. I not know if agent touch it.";
 const COVERAGE_INCOMPLETE_LINE = "I not know if agent touch. coverage incomplete.";
@@ -550,15 +551,27 @@ test("why keeps possible path omitted when a record may hide the file", () => {
   assert.equal([...output.sayLines, ...output.outLines].some((line) => line.includes("no record names")), false);
 });
 
-test("why discloses an incomplete memory scan without claiming a path was omitted", () => {
+test("why discloses an incomplete memory scan without claiming a path was omitted", (t) => {
+  setVerbose(t, undefined);
   const incomplete: MemoryCoverage = { version: 1, scanned: 3, skipped: 0, truncated: 1, bytesScanned: 10, bytesTotal: 20, complete: false, reason: "file-size-cap" };
   const output = sinks();
-  assert.equal(why(["package.json"], { load: () => [], coverage: () => incomplete, ...output.deps }), 0);
+  assert.equal(why(["package.json"], { load: () => fillerRecords(3), coverage: () => incomplete, ...output.deps }), 0);
+  assert.deepEqual(output.sayLines, [`"package.json"... ${COVERAGE_INCOMPLETE_LINE}`]);
+  assert.deepEqual(output.outLines, [
+    "memory coverage incomplete: memory file too big. first 3 records heard, later lines not heard.",
+  ]);
+  assert.equal([...output.sayLines, ...output.outLines].some((line) => line.includes("possible path omitted") || line.includes("no record names")), false);
+});
+
+test("why keeps the raw memory counters under ROCKY_VERBOSE", (t) => {
+  setVerbose(t, "1");
+  const incomplete: MemoryCoverage = { version: 1, scanned: 3, skipped: 0, truncated: 1, bytesScanned: 10, bytesTotal: 20, complete: false, reason: "file-size-cap" };
+  const output = sinks();
+  assert.equal(why(["package.json"], { load: () => fillerRecords(3), coverage: () => incomplete, ...output.deps }), 0);
   assert.deepEqual(output.sayLines, [`"package.json"... ${COVERAGE_INCOMPLETE_LINE}`]);
   assert.deepEqual(output.outLines, [
     "memory coverage incomplete: version 1; scanned 3; skipped 0; truncated 1; bytes 10/20; reason file-size-cap",
   ]);
-  assert.equal([...output.sayLines, ...output.outLines].some((line) => line.includes("possible path omitted") || line.includes("no record names")), false);
 });
 
 function fillerRecords(count: number): MemoryRecord[] {
