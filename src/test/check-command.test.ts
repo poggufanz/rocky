@@ -1229,7 +1229,7 @@ test("a clean pre-push check states its scope in one line", async (t) => {
   assert.equal(cleanLineCount(result.stderr), 1, result.stderr);
 });
 
-test("a clean manual check states its scope and --quiet stays silent", async (t) => {
+test("a clean manual check states its scope and --quiet drops the clean line", async (t) => {
   const box = sandbox(t);
   const commits = initRepo(box, { "README.md": "clean\n" });
 
@@ -1448,6 +1448,25 @@ test("a stderr failure while stating a result never changes the exit code", asyn
   assert.equal(existsSync(skipMarker), true, "the injected stderr failure never fired");
   assertCompleted(skipped, 0);
   assert.doesNotMatch(skipped.stderr, /could not run|INCOMPLETE/i);
+
+  // The scope note sits on the default path of every repository with no remote.
+  const noteBox = sandbox(t);
+  initRepo(noteBox, { "README.md": "clean\n" });
+  const noteMarker = join(noteBox.root, "scope-note-fired.txt");
+  const notePreload = throwingStderrPreload(
+    noteBox,
+    "no upstream and no remote branch shares history",
+    false,
+    noteMarker,
+  );
+
+  const noted = await runCheck(noteBox, ["--offline"], undefined, notePreload);
+
+  assert.equal(existsSync(noteMarker), true, "the injected stderr failure never fired");
+  assertCompleted(noted, 0);
+  assert.doesNotMatch(noted.stderr, /could not run|INCOMPLETE/i);
+  // Only the note was lost: the run still states its result.
+  assert.match(noted.stderr, /checked net change: 1 new text line, 1 file\. no secret hit\./);
 });
 
 function currentBranch(box: Sandbox): string {

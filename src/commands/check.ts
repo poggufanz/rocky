@@ -255,20 +255,35 @@ function requireGitScope(result: GitResult): void {
 /** A plain fact, not persona: the widest scope a manual run can have. */
 const WHOLE_HEAD_NOTE = "no upstream and no remote branch shares history: checking all of HEAD";
 
+/**
+ * Says the widest scope once. Guarded like the other plain result lines: this
+ * note sits on the default path of every repository with no remote, so a
+ * failed stderr write must not turn a completed run into exit 2.
+ */
+function noteWholeHead(): void {
+  try {
+    detail(WHOLE_HEAD_NOTE);
+  } catch {
+    /* a lost line must never change the exit code */
+  }
+}
+
 async function wholeHeadRange(): Promise<DiffRange> {
-  detail(WHOLE_HEAD_NOTE);
+  noteWholeHead();
   return { base: await emptyTree(), head: "HEAD" };
 }
 
 /**
  * A manual run covers the commits no remote branch has yet.
  *
- * With an upstream the base is the merge base, never the upstream tip: a
- * tip-to-HEAD diff turns the upstream's own commits into added lines whenever
- * the branch has diverged. Without one, a single rev-list names the commits no
- * remote-tracking branch reaches, plus the boundary commits where they leave
- * the remote; one boundary is the base. More than one is the pre-push
- * new-ref case, so that search picks the nearest remote base.
+ * With an upstream the base is the merge base, never the upstream tip. A diff
+ * from the tip of a diverged branch shows upstream-only additions as deletions
+ * and shows an upstream removal or rewrite of a line the local tree still has
+ * as an addition, so the upstream's own commits could raise a false secret hit.
+ * Without an upstream, a single rev-list names the commits no remote-tracking
+ * branch reaches, plus the boundary commits where they leave the remote; one
+ * boundary is the base. More than one is the pre-push new-ref case, so that
+ * search picks the nearest remote base.
  */
 async function manualRange(): Promise<DiffRange> {
   const repo = await gitMaybe(["rev-parse", "--git-dir"]);
@@ -293,7 +308,7 @@ async function manualRange(): Promise<DiffRange> {
   }
   if (boundaries.length === 1) return { base: boundaries[0], head: "HEAD" };
   const nearest = await resolveNewRef("HEAD");
-  if (nearest.base === (await emptyTree())) detail(WHOLE_HEAD_NOTE);
+  if (nearest.base === (await emptyTree())) noteWholeHead();
   return nearest;
 }
 
