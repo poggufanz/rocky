@@ -5,6 +5,8 @@ import { tmpdir } from "node:os";
 import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import test, { type TestContext } from "node:test";
 import { fileURLToPath } from "node:url";
+import { cleanLine } from "../commands/check.js";
+import { validateRockyPhrase } from "../ui/phrases.js";
 
 const packageRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const entry = join(packageRoot, "dist", "index.js");
@@ -189,13 +191,18 @@ function registryStatusPreload(box: Sandbox, statuses: Record<string, number>, f
   return path;
 }
 
-function throwingStderrPreload(box: Sandbox, target: string, registry404 = false): string {
+function throwingStderrPreload(box: Sandbox, target: string, registry404 = false, firedMarker?: string): string {
   const path = join(box.root, `stderr-throw-${registry404 ? "registry" : "plain"}.cjs`);
+  // A guard test is only meaningful when the injected failure really fired, so
+  // the optional marker file lets the test prove the throw happened.
+  const markFired = firedMarker === undefined
+    ? ""
+    : `require('node:fs').writeFileSync(${JSON.stringify(firedMarker)}, 'fired'); `;
   writeFileSync(path, [
     "const originalWrite = process.stderr.write.bind(process.stderr);",
     "let thrown = false;",
     "process.stderr.write = function (chunk, ...args) {",
-    `  if (!thrown && String(chunk).includes(${JSON.stringify(target)})) { thrown = true; throw new Error('injected stderr failure'); }`,
+    `  if (!thrown && String(chunk).includes(${JSON.stringify(target)})) { thrown = true; ${markFired}throw new Error('injected stderr failure'); }`,
     "  return originalWrite(chunk, ...args);",
     "};",
     ...(registry404 ? ["global.fetch = async () => ({ status: 404 });"] : []),
@@ -833,6 +840,9 @@ test("behavior reference and pre-push hook document the same clean/incomplete ma
 
 test("ROCKY_NO_QUIZ and missing TTY never block comprehension", async (t) => {
   const box = sandbox(t);
+  // sandbox() sets ROCKY_NO_QUIZ=1, which would make this test vacuous: the
+  // question must be reachable for the missing terminal to be what skips it.
+  delete box.env.ROCKY_NO_QUIZ;
   initRepo(box, { "src/risky.ts": "export const risky = eval('1 + 1');\n" });
 
   const result = await runCheck(box, ["--offline"]);
@@ -1177,4 +1187,254 @@ test("the same unreadable diff still lets a push through in hook mode", async (t
 
   // Exit 0: a Rocky that cannot inspect must never be the reason a push is held.
   assertCompleted(result, 0);
+});
+
+function cleanLineCount(stderr: string): number {
+  return (stderr.match(/checked net change|net change has no new text lines/g) ?? []).length;
+}
+
+test("cleanLine states only the net change it checked, with exact plurals", () => {
+  const lines = [
+    [cleanLine(3, 2, 0), "checked net change: 3 new text lines, 2 files. no secret hit."],
+    [cleanLine(1, 1, 1), "checked net change: 1 new text line, 1 file. no secret hit. 1 new package not looked up."],
+    [cleanLine(0, 0, 0), "net change has no new text lines."],
+    [cleanLine(5, 2, 3), "checked net change: 5 new text lines, 2 files. no secret hit. 3 new packages not looked up."],
+    [cleanLine(0, 0, 2), "net change has no new text lines. 2 new packages not looked up."],
+  ] as const;
+  for (const [actual, expected] of lines) {
+    assert.equal(actual, expected);
+    assert.deepEqual(validateRockyPhrase(actual), [], actual);
+  }
+});
+
+test("a clean pre-push check states its scope in one line", async (t) => {
+  const box = sandbox(t);
+  const commits = initRepo(box, { "README.md": "clean\n" }, {
+    "src/a.ts": "export const a = 1;\nexport const b = 2;\n",
+    "src/b.ts": "export const c = 3;\n",
+  });
+
+  const result = await runCheck(box, ["--offline", "--pre-push"], prePushLine(commits.second!, commits.first));
+
+  assertCompleted(result, 0);
+  assert.match(result.stderr, /\[Rocky\] checked net change: 3 new text lines, 2 files\. no secret hit\.\r?\n/);
+  assert.equal(cleanLineCount(result.stderr), 1, result.stderr);
+});
+
+test("a clean manual check states its scope and --quiet stays silent", async (t) => {
+  const box = sandbox(t);
+  const commits = initRepo(box, { "README.md": "clean\n" });
+
+  const loud = await runCheck(box, ["--offline"]);
+  assertCompleted(loud, 0);
+  assert.match(loud.stderr, /checked net change: /);
+  assert.equal(cleanLineCount(loud.stderr), 1, loud.stderr);
+
+  const quiet = await runCheck(box, ["--offline", "--quiet"]);
+  assertCompleted(quiet, 0);
+  assert.equal(quiet.stderr, "");
+
+  const quietPush = await runCheck(
+    box,
+    ["--offline", "--quiet", "--pre-push"],
+    prePushLine(commits.first, "0".repeat(40)),
+  );
+  assertCompleted(quietPush, 0);
+  assert.equal(quietPush.stderr, "");
+});
+
+test("a secret added then removed inside the pushed range never reads as nothing to check", async (t) => {
+  const box = sandbox(t);
+  const secret = "AKIAREMOVEDINRANGE12";
+  const commits = initRepo(box, { "README.md": "clean\n" }, {
+    "src/key.ts": `export const key = "${secret}";\n`,
+    "src/keep.ts": "export const keep = 1;\n",
+  });
+  git(box.repo, ["rm", "-q", "src/key.ts"]);
+  git(box.repo, ["commit", "-q", "-m", "remove key"]);
+  const head = git(box.repo, ["rev-parse", "HEAD"]);
+
+  const result = await runCheck(box, ["--offline", "--pre-push"], prePushLine(head, commits.first));
+
+  assertCompleted(result, 0);
+  assert.match(result.stderr, /checked net change: 1 new text line, 1 file\. no secret hit\./);
+  assert.doesNotMatch(result.stderr, /nothing to check/i);
+  assert.doesNotMatch(result.stderr, new RegExp(secret));
+});
+
+test("a push whose net change cancels out says it has no new text lines", async (t) => {
+  const box = sandbox(t);
+  const secret = "AKIACANCELLEDOUT1234";
+  const commits = initRepo(box, { "README.md": "clean\n" }, {
+    "src/key.ts": `export const key = "${secret}";\n`,
+  });
+  git(box.repo, ["rm", "-q", "src/key.ts"]);
+  git(box.repo, ["commit", "-q", "-m", "remove key"]);
+  const head = git(box.repo, ["rev-parse", "HEAD"]);
+
+  const result = await runCheck(box, ["--offline", "--pre-push"], prePushLine(head, commits.first));
+
+  assertCompleted(result, 0);
+  assert.match(result.stderr, /\[Rocky\] net change has no new text lines\.\r?\n/);
+  assert.doesNotMatch(result.stderr, /no secret hit|nothing to check/i);
+  assert.equal(cleanLineCount(result.stderr), 1, result.stderr);
+});
+
+test("a binary-only push says its net change has no new text lines", async (t) => {
+  const box = sandbox(t);
+  const commits = initRepo(box, { "README.md": "clean\n" }, {
+    "x.png": Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00]),
+  });
+
+  const result = await runCheck(box, ["--offline", "--pre-push"], prePushLine(commits.second!, commits.first));
+
+  assertCompleted(result, 0);
+  assert.match(result.stderr, /net change has no new text lines\./);
+  assert.doesNotMatch(result.stderr, /no secret hit/);
+});
+
+test("junk pre-push input, a finding, and an incomplete scan never print the clean line", async (t) => {
+  const junkBox = sandbox(t);
+  initRepo(junkBox, { "README.md": "clean\n" });
+  // One token is not a ref update, so no range exists: the early return stays silent.
+  const junk = await runCheck(junkBox, ["--offline", "--pre-push"], "junk\n");
+  assertCompleted(junk, 0);
+  assert.equal(cleanLineCount(junk.stderr), 0, junk.stderr);
+
+  const findingBox = sandbox(t);
+  const commits = initRepo(findingBox, { "README.md": "clean\n" }, {
+    "src/key.ts": 'export const key = "AKIAFINDINGNOCLEAN12";\n',
+  });
+  const finding = await runCheck(findingBox, ["--offline", "--pre-push"], prePushLine(commits.second!, commits.first));
+  assertCompleted(finding, 3);
+  assert.match(finding.stderr, /src\/key\.ts:1/);
+  assert.equal(cleanLineCount(finding.stderr), 0, finding.stderr);
+
+  const incompleteBox = sandbox(t);
+  initRepo(incompleteBox, { "README.md": "clean\n" }, { "src/a.ts": "const a = 1;\n" });
+  installGitShim(incompleteBox, "diff-flood");
+  const incomplete = await runCheck(incompleteBox, ["--offline"]);
+  assertCompleted(incomplete, 2);
+  assert.match(incomplete.stderr, /secret lines not inspected/i);
+  assert.equal(cleanLineCount(incomplete.stderr), 0, incomplete.stderr);
+});
+
+test("a clean check discloses new packages it did not look up", async (t) => {
+  const offline = sandbox(t);
+  const offlineCommits = initRepo(offline, { "package.json": "{}\n" }, {
+    "package.json": JSON.stringify({ dependencies: { [NEVER_PACKAGE]: "1.0.0" } }),
+  });
+  enableRegistry(offline);
+  const skippedOffline = await runCheck(
+    offline,
+    ["--offline", "--pre-push"],
+    prePushLine(offlineCommits.second!, offlineCommits.first),
+  );
+  assertCompleted(skippedOffline, 0);
+  assert.match(
+    skippedOffline.stderr,
+    /checked net change: 1 new text line, 1 file\. no secret hit\. 1 new package not looked up\./,
+  );
+
+  // No stored consent and no terminal to ask on: the lookup is skipped, and the
+  // clean line says how many names that left unchecked.
+  const unconsented = sandbox(t);
+  const unconsentedCommits = initRepo(unconsented, { "package.json": "{}\n" }, {
+    "package.json": JSON.stringify({
+      dependencies: { [NEVER_PACKAGE]: "1.0.0", [`${NEVER_PACKAGE}-two`]: "1.0.0" },
+    }),
+  });
+  const skippedWithoutConsent = await runCheck(
+    unconsented,
+    ["--pre-push"],
+    prePushLine(unconsentedCommits.second!, unconsentedCommits.first),
+  );
+  assertCompleted(skippedWithoutConsent, 0);
+  assert.match(skippedWithoutConsent.stderr, /no secret hit\. 2 new packages not looked up\./);
+
+  // A lookup that really ran leaves nothing to disclose.
+  const looked = sandbox(t);
+  const lookedCommits = initRepo(looked, { "package.json": "{}\n" }, {
+    "package.json": JSON.stringify({ dependencies: { [NEVER_PACKAGE]: "1.0.0" } }),
+  });
+  enableRegistry(looked);
+  const lookedUp = await runCheck(
+    looked,
+    ["--pre-push"],
+    prePushLine(lookedCommits.second!, lookedCommits.first),
+    registryStatusPreload(looked, {}, 200),
+  );
+  assertCompleted(lookedUp, 0);
+  assert.match(lookedUp.stderr, /checked net change: 1 new text line, 1 file\. no secret hit\./);
+  assert.doesNotMatch(lookedUp.stderr, /not looked up/);
+});
+
+test("a risky line with no terminal says the comprehension question was skipped", async (t) => {
+  const box = sandbox(t);
+  // sandbox() sets ROCKY_NO_QUIZ=1; the skip line is only reachable without it.
+  delete box.env.ROCKY_NO_QUIZ;
+  // An inert fixture line: it is written into a throwaway repo and never run.
+  initRepo(box, { "src/risky.ts": "eval(x)\n" });
+
+  const result = await runCheck(box, ["--offline"]);
+
+  assertCompleted(result, 0);
+  assert.match(result.stderr, /comprehension question skipped: no terminal/);
+  // The question header never prints without a way to answer it.
+  assert.doesNotMatch(result.stderr, /what .*doing/);
+  // A skipped question is not an incomplete scan.
+  assert.doesNotMatch(result.stderr, /INCOMPLETE/i);
+  assert.match(result.stderr, /checked net change: 1 new text line, 1 file\. no secret hit\./);
+  // The skip line is a plain fact through detail(), so it carries no persona
+  // prefix and sits outside the persona lint ("question" is a noun there).
+  assert.doesNotMatch(result.stderr, /\[Rocky\] comprehension question skipped/);
+});
+
+test("the skipped-question line stays silent under ROCKY_NO_QUIZ, --quiet, and a calm diff", async (t) => {
+  const optedOut = sandbox(t);
+  initRepo(optedOut, { "src/risky.ts": "eval(x)\n" });
+  assert.equal(optedOut.env.ROCKY_NO_QUIZ, "1");
+  const noQuiz = await runCheck(optedOut, ["--offline"]);
+  assertCompleted(noQuiz, 0);
+  assert.doesNotMatch(noQuiz.stderr, /comprehension question skipped/);
+
+  const quiet = sandbox(t);
+  delete quiet.env.ROCKY_NO_QUIZ;
+  initRepo(quiet, { "src/risky.ts": "eval(x)\n" });
+  const quietRun = await runCheck(quiet, ["--offline", "--quiet"]);
+  assertCompleted(quietRun, 0);
+  assert.equal(quietRun.stderr, "");
+
+  const calm = sandbox(t);
+  delete calm.env.ROCKY_NO_QUIZ;
+  initRepo(calm, { "src/calm.ts": "export const calm = 1;\n" });
+  const calmRun = await runCheck(calm, ["--offline"]);
+  assertCompleted(calmRun, 0);
+  assert.doesNotMatch(calmRun.stderr, /comprehension question skipped/);
+});
+
+test("a stderr failure while stating a result never changes the exit code", async (t) => {
+  const cleanBox = sandbox(t);
+  initRepo(cleanBox, { "README.md": "clean\n" });
+  const cleanMarker = join(cleanBox.root, "clean-line-fired.txt");
+  const cleanPreload = throwingStderrPreload(cleanBox, "checked net change", false, cleanMarker);
+
+  const clean = await runCheck(cleanBox, ["--offline"], undefined, cleanPreload);
+
+  assert.equal(existsSync(cleanMarker), true, "the injected stderr failure never fired");
+  // Exit 2 would mean the lost line was reported as an infrastructure failure.
+  assertCompleted(clean, 0);
+  assert.doesNotMatch(clean.stderr, /could not run|INCOMPLETE/i);
+
+  const skipBox = sandbox(t);
+  delete skipBox.env.ROCKY_NO_QUIZ;
+  initRepo(skipBox, { "src/risky.ts": "eval(x)\n" });
+  const skipMarker = join(skipBox.root, "skip-line-fired.txt");
+  const skipPreload = throwingStderrPreload(skipBox, "comprehension question skipped", false, skipMarker);
+
+  const skipped = await runCheck(skipBox, ["--offline"], undefined, skipPreload);
+
+  assert.equal(existsSync(skipMarker), true, "the injected stderr failure never fired");
+  assertCompleted(skipped, 0);
+  assert.doesNotMatch(skipped.stderr, /could not run|INCOMPLETE/i);
 });

@@ -89,7 +89,10 @@ export function createTtyPromptPort(
   fallbackOutput: NodeJS.WritableStream = process.stderr,
   controllingAsk: ControllingTerminalAsk = askTty,
 ): PromptPort | undefined {
-  if (process.stderr.isTTY !== true && fallbackInput.isTTY !== true) return undefined;
+  // The controlling terminal is /dev/tty, which only POSIX has. A TTY stderr on
+  // win32 cannot reach an answer, so there only a terminal stdin promises one.
+  const controllingTerminal = process.platform !== "win32" && process.stderr.isTTY === true;
+  if (!controllingTerminal && fallbackInput.isTTY !== true) return undefined;
   const askWithFallback = async (message: string, timeoutMs?: number): Promise<string | undefined> => {
     const result = await controllingAsk(message, timeoutMs);
     if (result.available) return result.answer;

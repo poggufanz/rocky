@@ -62,6 +62,8 @@ interface CheckState {
   scope: "unavailable" | "established";
   /** A stage could not run, so part of the range went uninspected. */
   incomplete: boolean;
+  /** New package names the registry lookup skipped (offline, or no stored consent). */
+  packagesNotLookedUp: number;
 }
 
 /** The only four externally meaningful results of a hull scan. */
@@ -427,6 +429,9 @@ async function packageStage(
     state.incomplete = true;
   }
   if (offline || names.length === 0 || !(await registryConsent(quiet))) {
+    // Checkable names that were not looked up (offline, or no stored consent)
+    // are counted so a clean result can say so instead of going quiet about them.
+    state.packagesNotLookedUp = names.length;
     if (capped) {
       incompleteDetail(
         `package limit: ${names.length} found; first ${MAX_PACKAGES} eligible, ${names.length - MAX_PACKAGES} skipped`,
@@ -471,7 +476,17 @@ async function maybeAskComprehension(lines: readonly AddedLine[], ranges: readon
   const risky = riskiestLine([...lines]);
   if (risky === undefined) return;
   const prompt = createTtyPromptPort();
-  if (prompt === undefined) return;
+  if (prompt === undefined) {
+    // A question that should have been asked but has no terminal to answer on
+    // is said once, never skipped in silence. The question never blocks, so this
+    // is not an incomplete scan, and a lost line must not break the check.
+    try {
+      detail("comprehension question skipped: no terminal");
+    } catch {
+      /* the line is lost; exit code and completeness stay untouched */
+    }
+    return;
+  }
   say(phrase("check-comprehension"));
   detail(`${risky.file}:${risky.line}  ${risky.text.trim().slice(0, 200)}`);
   const answer = await prompt.ask(rockyPrompt(phrase("check-answer")), PROMPT_TIMEOUT_MS);
@@ -689,6 +704,25 @@ function usage(): number {
   return 0;
 }
 
+function plural(count: number, noun: string): string {
+  return `${count} ${noun}${count === 1 ? "" : "s"}`;
+}
+
+/**
+ * The one line a clean, non-quiet run states. It names the scope it covered:
+ * the net change of the pushed range, not every commit inside it. A secret
+ * added by one commit and removed by a later one in the same range never
+ * reaches the net diff, so the wording claims no more than the net change.
+ */
+export function cleanLine(lineCount: number, fileCount: number, packagesNotLookedUp: number): string {
+  const scope = lineCount === 0
+    ? "net change has no new text lines."
+    : `checked net change: ${plural(lineCount, "new text line")}, ${plural(fileCount, "file")}. no secret hit.`;
+  return packagesNotLookedUp > 0
+    ? `${scope} ${plural(packagesNotLookedUp, "new package")} not looked up.`
+    : scope;
+}
+
 async function runCheck(rest: readonly string[], state: CheckState): Promise<number> {
   // Only arguments Rocky owns are parsed as flags. In hook mode git appends the
   // remote name and URL, and a remote may legitimately be called anything —
@@ -792,6 +826,13 @@ async function runCheck(rest: readonly string[], state: CheckState): Promise<num
   }
 
   const result = scanResult(state);
+  if (!quiet && result === "clean") {
+    try {
+      say(cleanLine(lines.length, new Set(lines.map((line) => line.file)).size, state.packagesNotLookedUp));
+    } catch {
+      /* a lost line must never change the exit code */
+    }
+  }
   if (result === "incomplete" && !state.prePush) return 2;
   return findingExit(state);
 }
@@ -802,6 +843,7 @@ export async function check(rest: string[]): Promise<number> {
     prePush: rest.includes("--pre-push"),
     scope: "unavailable",
     incomplete: false,
+    packagesNotLookedUp: 0,
   };
   try {
     return await runCheck(rest, state);
