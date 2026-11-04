@@ -2,7 +2,7 @@ import type { CanonicalRationaleEvent, LogAdapter } from "./types.js";
 import { claudeCodeLogAdapter } from "./claude-code.js";
 import { dshLogAdapter } from "./dsh.js";
 import { SCAN_MAX_BYTES, readAdapterOffsets, writeAdapterOffsets } from "./scan.js";
-import { loadMemory, canonicalPath } from "../../core/memory-read.js";
+import { loadMemory, canonicalPath, sameCwd } from "../../core/memory-read.js";
 import type { FailureRecord, FixRecord, MemoryRecord, RationaleLinks, TripleRecord } from "../../core/memory-read.js";
 import { recordRationale } from "../../core/memory.js";
 
@@ -75,7 +75,7 @@ function structuralLinkFor(
   if (touched === undefined) return undefined;
   let best: { tripleId: string; distance: number } | undefined;
   for (const record of records) {
-    if (record.kind !== "triple" || record.cwd !== cwd || record.ts > now) continue;
+    if (record.kind !== "triple" || !sameCwd(record.cwd, cwd, process.platform) || record.ts > now) continue;
     const distance = Math.abs(record.ts - event.ts);
     if (distance > STRUCTURAL_LINK_WINDOW_MS) continue;
     const matches = record.mechanism.files.some((file) => touched.has(canonicalPath(file.path)));
@@ -99,7 +99,7 @@ export function weakLinkFor(
   let best: { link: RationaleLinks; distance: number } | undefined;
   for (const record of records) {
     if (record.kind !== "failure" && record.kind !== "fix") continue;
-    if (record.cwd !== cwd || record.ts > now) continue;
+    if (!sameCwd(record.cwd, cwd, process.platform) || record.ts > now) continue;
     const distance = Math.abs(record.ts - ts);
     if (distance > WEAK_LINK_WINDOW_MS) continue;
     if (best === undefined || distance < best.distance) {
@@ -147,7 +147,7 @@ export function captureRationales(repoCwd: string, now: number = Date.now(), dep
     }
     const correlationRecords = records
       .filter(isCorrelationRecord)
-      .filter((record) => record.cwd === repoCwd)
+      .filter((record) => sameCwd(record.cwd, repoCwd, process.platform))
       .sort((a, b) => a.ts - b.ts)
       .slice(-MAX_CORRELATION_RECORDS);
 

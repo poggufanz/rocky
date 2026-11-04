@@ -2,6 +2,7 @@ import { closeSync, openSync, readdirSync, readSync, statSync } from "node:fs";
 import { Buffer } from "node:buffer";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { sameCwd } from "../../core/memory-read.js";
 import type { CanonicalRationaleEvent, LogAdapter } from "./types.js";
 import { scanJsonlLines } from "./scan.js";
 
@@ -30,13 +31,12 @@ function isRecord(obj: unknown): obj is Record<string, unknown> {
 }
 
 /**
- * cwd equality: exact match everywhere, plus case-insensitive match on
- * Windows where drive-letter case varies (`c:\work` vs `C:\work`).
+ * Does a transcript record's `cwd` name the repo directory? Exact match
+ * everywhere; on Windows also across drive-letter case, slash direction, and
+ * trailing separators (`c:\work` vs `C:/work/`), via the shared `sameCwd`.
  */
-function sameCwd(a: unknown, b: string): boolean {
-  if (typeof a !== "string") return false;
-  if (a === b) return true;
-  return process.platform === "win32" && a.toLowerCase() === b.toLowerCase();
+function recordedInRepo(cwd: unknown, repoCwd: string): boolean {
+  return typeof cwd === "string" && sameCwd(cwd, repoCwd, process.platform);
 }
 
 /**
@@ -67,7 +67,7 @@ function probeHasCwd(logPath: string, repoCwd: string): boolean {
         continue;
       }
       parsed += 1;
-      if (isRecord(obj) && sameCwd(obj.cwd, repoCwd)) return true;
+      if (isRecord(obj) && recordedInRepo(obj.cwd, repoCwd)) return true;
     }
     return false;
   } catch {
@@ -86,9 +86,9 @@ function probeHasCwd(logPath: string, repoCwd: string): boolean {
 /**
  * List transcript files for a repo under `<configDir>/projects/<slug>/`.
  * The directory slug matches most checkouts; when it misses (Windows drive
- * letters make slugs vary), any file whose head records carry
- * `cwd === repoCwd` is accepted instead. Sorted newest first, capped at
- * MAX_DISCOVERED_FILES. Never throws.
+ * letters make slugs vary), any file whose head records carry a `cwd`
+ * naming the same directory as `repoCwd` is accepted instead. Sorted newest
+ * first, capped at MAX_DISCOVERED_FILES. Never throws.
  */
 function discover(repoCwd: string): string[] {
   try {
@@ -162,7 +162,7 @@ function scan(repoCwd: string, logPath: string, fromOffset: number, maxBytes: nu
   const events: CanonicalRationaleEvent[] = [];
   const nextOffset = scanJsonlLines(logPath, fromOffset, maxBytes, (obj) => {
     if (!isRecord(obj)) return;
-    if (!sameCwd(obj.cwd, repoCwd)) return;
+    if (!recordedInRepo(obj.cwd, repoCwd)) return;
     if (obj.type !== "assistant") return;
     const message = obj.message;
     if (!isRecord(message) || !Array.isArray(message.content)) return;

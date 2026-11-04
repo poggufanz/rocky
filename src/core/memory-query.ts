@@ -21,6 +21,7 @@ import {
   loadMemory,
   loadMemoryChecked,
   pathIdentityHash,
+  sameCwd,
 } from "./memory-read.js";
 import type { FailureRecord, FixRecord, GuardRecord, LinkBasis, LinkConfidence, MemoryCoverage, MemoryRecord, RationaleFidelity, TripleRecord } from "./memory-read.js";
 
@@ -476,8 +477,8 @@ function fixesIndex(records: readonly MemoryRecord[], now = Date.now()): FixInde
 function confirmedLocalFix(index: FixIndex, failure: FailureRecord, now: number): FixRecord | undefined {
   if (!failure.resolvedBy) return undefined;
   const resolved = index.byId.get(failure.resolvedBy);
-  if (resolved === undefined || resolved.cwd !== failure.cwd || resolved.ts < failure.ts || resolved.ts > now ||
-      !resolved.failureIds.includes(failure.id)) return undefined;
+  if (resolved === undefined || !sameCwd(resolved.cwd, failure.cwd, process.platform) || resolved.ts < failure.ts ||
+      resolved.ts > now || !resolved.failureIds.includes(failure.id)) return undefined;
   return resolved;
 }
 
@@ -487,12 +488,12 @@ function fixForFailure(index: FixIndex, failure: FailureRecord, now = Date.now()
   if (local !== undefined) return local;
   // A fix remembered in another directory remains useful for recall and
   // passive hook speech, but it is not a local resolution: the loader leaves
-  // `resolvedBy` empty when fix.cwd differs from failure.cwd.
+  // `resolvedBy` empty when fix.cwd names a different directory than failure.cwd.
   const failureIdentity = commandIdentity(failure.cmd, { platform: failure.platform ?? "unknown" });
   if (!failureIdentity.reliable) return undefined;
   if (failure.ts > now) return undefined;
   return index.byFailureId.get(failure.id)?.find((record) => {
-    if (record.cwd === failure.cwd || record.ts < failure.ts || record.ts > now) return false;
+    if (sameCwd(record.cwd, failure.cwd, process.platform) || record.ts < failure.ts || record.ts > now) return false;
     const fixIdentity = commandIdentity(record.cmd, { platform: record.platform ?? "unknown" });
     return fixIdentity.reliable && fixIdentity.value === failureIdentity.value;
   });
@@ -506,13 +507,15 @@ export function getFix(records: readonly MemoryRecord[], failure: FailureRecord,
 /**
  * Cross-directory fix matching is kept — the same error in another project
  * often has the same cure — but a fix served from elsewhere must admit it.
- * Returns the fix's cwd when it differs from `cwd` (the caller speaks that),
- * or undefined when it matches (the caller adds no line at all). Compared as
- * stored, no normalization: memory holds whatever `process.cwd()` gave at
- * record time.
+ * Returns the fix's cwd when it names a different directory than `cwd` (the
+ * caller speaks that), or undefined when it names the same one (the caller
+ * adds no line at all). Same directory means same place, not same spelling:
+ * on Windows the Git Bash hook records `C:/p` where `rocky run` records
+ * `C:\p`. Nothing is normalized in storage, and an elsewhere answer returns
+ * the fix's own recorded spelling.
  */
 export function fixFromElsewhere(fix: FixRecord, cwd: string): string | undefined {
-  return fix.cwd === cwd ? undefined : fix.cwd;
+  return sameCwd(fix.cwd, cwd, process.platform) ? undefined : fix.cwd;
 }
 
 export function queryRecall(records: readonly MemoryRecord[], input: RecallQuery): RecallHit[] {
@@ -527,7 +530,7 @@ export function queryRecall(records: readonly MemoryRecord[], input: RecallQuery
   const queryTokenIndex = new Map(queryTokenList.map((token, index) => [token, index]));
   const candidates = unique
     .filter((record): record is FailureRecord => record.kind === "failure" && isOperationalMemoryRecord(record, now) &&
-      (input.cwd === undefined || record.cwd === input.cwd));
+      (input.cwd === undefined || sameCwd(record.cwd, input.cwd, process.platform)));
   // Moved ahead of the frequency pass below (finding 1): every candidate's
   // canonical key must be available while scoring token frequency, not only
   // afterward while deduplicating hits.
@@ -679,7 +682,7 @@ export function queryRecentFailures(
   return unique
     .filter((record): record is FailureRecord => record.kind === "failure")
     .filter((failure) => isOperationalMemoryRecord(failure, now))
-    .filter((failure) => input.cwd === undefined || failure.cwd === input.cwd)
+    .filter((failure) => input.cwd === undefined || sameCwd(failure.cwd, input.cwd, process.platform))
     .filter((failure) => !input.unresolvedOnly || !failure.resolvedBy)
     .sort((a, b) => b.ts - a.ts)
     .slice(0, input.limit ?? 10)
@@ -691,7 +694,7 @@ export function queryStats(records: readonly MemoryRecord[], input: StatsQuery =
   const now = input.now ?? Date.now();
   // Cwd-less kinds (alias) are global knowledge; a cwd scope must not hide them.
   const scoped = unique.filter((record) => isOperationalMemoryRecord(record, now) &&
-    (input.cwd === undefined || !("cwd" in record) || record.cwd === input.cwd));
+    (input.cwd === undefined || !("cwd" in record) || sameCwd(record.cwd, input.cwd, process.platform)));
   const failures = scoped.filter((record): record is FailureRecord => record.kind === "failure");
   const fixes = fixesIndex(unique, now);
   const confirmedFailures = unique.filter((record): record is FailureRecord =>
@@ -1421,7 +1424,7 @@ export function possibleFixesForFailure(
       ts: record.ts,
       cwd: record.cwd,
       basis: link?.basis ?? "unknown",
-      fromElsewhere: record.cwd !== failure.cwd,
+      fromElsewhere: !sameCwd(record.cwd, failure.cwd, process.platform),
     });
   }
   return candidates
@@ -1460,7 +1463,7 @@ export function recentUnresolvedFailures(
     .filter((record): record is FailureRecord =>
       record.kind === "failure" && !record.resolvedBy && record.ts >= cutoff &&
       record.ts <= now &&
-      record.cwd === input.cwd && recordBase(record) === base
+      sameCwd(record.cwd, input.cwd, process.platform) && recordBase(record) === base
     )
     .map((failure) => {
       const priorIdentity = identityForFailure(failure);

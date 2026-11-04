@@ -2,7 +2,7 @@ import { Buffer } from "node:buffer";
 import { dictionaryRankPortFromConfig, type DictionaryRankPort } from "../ai/dictionary-ai.js";
 import { loadConfig } from "../core/config.js";
 import { csConceptCounts, digestBuckets, queryDictionary, queryNotes, quizCandidates, type DictionaryHit, type NoteHit } from "../core/dictionary.js";
-import { isCompleteMemoryCoverage, isOperationalMemoryRecord, loadMemoryChecked } from "../core/memory-read.js";
+import { isCompleteMemoryCoverage, isOperationalMemoryRecord, loadMemoryChecked, sameCwd } from "../core/memory-read.js";
 import { recordRationale } from "../core/memory.js";
 import { LINK_WINDOW_MS, whyFile, whyFileEvidence, whyFilePathRelation } from "../core/memory-query.js";
 import type { MemoryCoverage, MemoryRecord, RationaleLinks, RationaleRecord, RationaleSource } from "../core/memory-read.js";
@@ -522,7 +522,7 @@ function newestLinkTarget(memory: readonly MemoryRecord[], cwd: string, now: num
   let newest: Extract<MemoryRecord, { kind: "failure" | "fix" }> | undefined;
   for (const record of memory) {
     if (record.kind !== "failure" && record.kind !== "fix") continue;
-    if (record.cwd !== cwd || record.ts > now || record.ts < cutoff) continue;
+    if (!sameCwd(record.cwd, cwd, process.platform) || record.ts > now || record.ts < cutoff) continue;
     if (newest === undefined || record.ts > newest.ts) newest = record;
   }
   if (newest === undefined) return undefined;

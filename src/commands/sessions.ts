@@ -8,7 +8,7 @@
 
 import { captureRationales } from "../agent/logs/capture.js";
 import { rationaleSourceLabel } from "./dictionary.js";
-import { loadMemory, type AliasRecord, type MemoryRecord } from "../core/memory-read.js";
+import { cwdIdentityKey, loadMemory, sameCwd, type AliasRecord, type MemoryRecord } from "../core/memory-read.js";
 import { truncateUtf8 } from "../mcp/privacy.js";
 import { ago, detail, elapsed, heading, say } from "../ui/rocky.js";
 import { CliUsageError, reportCliUsage } from "./cli-args.js";
@@ -44,7 +44,7 @@ function countKind(counts: SessionGroup["counts"], kind: CwdRecord["kind"]): voi
   // confirmed-evidence kinds this surface counts — ignored silently.
 }
 
-function buildGroup(cwd: string, records: readonly CwdRecord[]): Omit<SessionGroup, "index"> {
+function buildGroup(records: readonly CwdRecord[]): Omit<SessionGroup, "index"> {
   const counts = { failures: 0, fixes: 0, triples: 0, rationales: 0 };
   const agents = new Set<string>();
   for (const record of records) {
@@ -52,7 +52,8 @@ function buildGroup(cwd: string, records: readonly CwdRecord[]): Omit<SessionGro
     if (record.kind === "triple" || record.kind === "rationale") agents.add(record.agent);
   }
   return {
-    cwd,
+    // A spelling this session was actually heard under, never a normalized one.
+    cwd: records[0].cwd,
     startTs: records[0].ts,
     endTs: records[records.length - 1].ts,
     counts,
@@ -62,33 +63,37 @@ function buildGroup(cwd: string, records: readonly CwdRecord[]): Omit<SessionGro
 
 /**
  * Pure, read-only, no clock reads: group memory records into sessions by
- * `cwd`, splitting whenever consecutive records in the same `cwd` are more
- * than `SESSION_GAP_MS` apart. Ordered newest-first by `startTs`, ties
- * broken by `cwd` ascending so the order is total and deterministic, then
- * indexed 1-based in that final order.
+ * directory, splitting whenever consecutive records in the same directory
+ * are more than `SESSION_GAP_MS` apart. A directory is one directory under
+ * every spelling the host platform treats as equal (`C:/p` and `C:\p` on
+ * Windows), so the Git Bash hook and `rocky run` share a session. Ordered
+ * newest-first by `startTs`, ties broken by `cwd` ascending so the order is
+ * total and deterministic, then indexed 1-based in that final order.
  */
 export function groupSessions(records: readonly MemoryRecord[]): SessionGroup[] {
-  const byCwd = new Map<string, CwdRecord[]>();
+  // The key only buckets; it is never stored or shown (see `buildGroup`).
+  const byDirectory = new Map<string, CwdRecord[]>();
   for (const record of records) {
     if (!hasCwd(record)) continue;
-    const bucket = byCwd.get(record.cwd);
-    if (bucket === undefined) byCwd.set(record.cwd, [record]);
+    const key = cwdIdentityKey(record.cwd, process.platform);
+    const bucket = byDirectory.get(key);
+    if (bucket === undefined) byDirectory.set(key, [record]);
     else bucket.push(record);
   }
 
   const groups: Omit<SessionGroup, "index">[] = [];
-  for (const [cwd, bucket] of byCwd) {
+  for (const bucket of byDirectory.values()) {
     const sorted = [...bucket].sort((a, b) => a.ts - b.ts);
     let current: CwdRecord[] = [];
     for (const record of sorted) {
       const last = current[current.length - 1];
       if (last !== undefined && record.ts - last.ts > SESSION_GAP_MS) {
-        groups.push(buildGroup(cwd, current));
+        groups.push(buildGroup(current));
         current = [];
       }
       current.push(record);
     }
-    if (current.length > 0) groups.push(buildGroup(cwd, current));
+    if (current.length > 0) groups.push(buildGroup(current));
   }
 
   groups.sort((a, b) => (b.startTs - a.startTs) || a.cwd.localeCompare(b.cwd));
@@ -97,14 +102,16 @@ export function groupSessions(records: readonly MemoryRecord[]): SessionGroup[] 
 
 /**
  * Every record belonging to `group`. By construction this is exactly the
- * group's original members: sessions sharing a `cwd` never overlap in time
+ * group's original members: sessions of one directory never overlap in time
  * and are always separated by a gap greater than `SESSION_GAP_MS`, so the
  * inclusive `[startTs, endTs]` range for one session cannot reach into
- * another.
+ * another. Membership uses the same directory identity as `groupSessions`,
+ * so a record heard under another spelling of the group's directory stays in.
  */
 function recordsForGroup(records: readonly MemoryRecord[], group: SessionGroup): CwdRecord[] {
   return records.filter((record): record is CwdRecord =>
-    hasCwd(record) && record.cwd === group.cwd && record.ts >= group.startTs && record.ts <= group.endTs);
+    hasCwd(record) && sameCwd(record.cwd, group.cwd, process.platform) &&
+    record.ts >= group.startTs && record.ts <= group.endTs);
 }
 
 /** Splits on both separators — a record's `cwd` may have been written on a different platform than this one is reading on. */

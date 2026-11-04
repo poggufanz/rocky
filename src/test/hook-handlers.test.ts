@@ -189,6 +189,68 @@ test("hookFail says nothing extra when the remembered fix's cwd matches the cwd 
 });
 
 /**
+ * One Windows directory, two spellings: the Git Bash hook hears the
+ * MSYS-converted `C:/...` where `rocky run` and the PowerShell hook hear
+ * `C:\...`. Equality widens for exactly that on win32 and nowhere else, so
+ * the POSIX twin below proves a differing spelling never links there.
+ */
+const GIT_BASH_ONLY = { skip: process.platform !== "win32" && "the Git Bash spelling only exists on native Windows" };
+
+test("a Git Bash hook failure and a rocky run success in the same directory link", GIT_BASH_ONLY, () => {
+  process.env.ROCKY_HOME = mkdtempSync(join(tmpdir(), "rocky-hook-spelling-"));
+  try {
+    assert.equal(hookFail("node fail.js", 1, process.cwd().replaceAll("\\", "/")), 0);
+    const result = memory.resolveFixOnSuccess("node fail.js", process.cwd());
+    assert.equal(result.confirmedResolved, 1);
+  } finally {
+    process.env.ROCKY_HOME = home;
+  }
+});
+
+test("hookSuccess says the command works now when the failure was heard under the Git Bash spelling", GIT_BASH_ONLY, () => {
+  process.env.ROCKY_HOME = mkdtempSync(join(tmpdir(), "rocky-hook-spelling-works-"));
+  try {
+    hookFail("node fail.js", 1, process.cwd().replaceAll("\\", "/"));
+    const { result, tty } = captureTty(() => hookSuccess("node fail.js", process.cwd()));
+    assert.equal(result, 0);
+    assert.match(tty, /command works now\./);
+  } finally {
+    process.env.ROCKY_HOME = home;
+  }
+});
+
+test("hookFail does not call a same-directory fix 'from other place' because it was heard under another spelling", () => {
+  const gitBash = "C:/Users/x/p";
+  const native = "C:\\Users\\x\\p";
+  seedElsewhereFix(gitBash, native, "spelling-test-cmd", 1);
+  try {
+    const { result, tty } = captureTty(() => hookFail("spelling-test-cmd", 1, gitBash));
+    assert.equal(result, 0);
+    // sanity: the base fix line speaks either way, so only the elsewhere
+    // admission can differ between win32 (same directory) and POSIX (two).
+    assert.match(tty, /last time, something between fix it\. what, I not hear\. works again, I remember\./);
+    assert.equal(/other place/.test(tty), process.platform !== "win32");
+  } finally {
+    process.env.ROCKY_HOME = home;
+  }
+});
+
+test(
+  "on POSIX a differing spelling of the working directory stays a different directory and never links",
+  { skip: process.platform === "win32" && "win32 widens this spelling on purpose; the twin test above covers it" },
+  () => {
+    process.env.ROCKY_HOME = mkdtempSync(join(tmpdir(), "rocky-hook-spelling-posix-"));
+    try {
+      assert.equal(hookFail("node fail.js", 1, `${process.cwd()}/`), 0);
+      const result = memory.resolveFixOnSuccess("node fail.js", process.cwd());
+      assert.equal(result.confirmedResolved, 0);
+    } finally {
+      process.env.ROCKY_HOME = home;
+    }
+  },
+);
+
+/**
  * The recurrence match in `hookFail` is a coarse, masked fingerprint on
  * `cmd` alone (no stderr reaches a detached hook handler) — `normalizeLine`
  * masks a plain non-semantic number to `#`, so "cat file123.txt" and

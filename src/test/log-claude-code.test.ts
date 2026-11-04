@@ -103,4 +103,32 @@ if (process.platform === "win32") {
     assert.equal(events.length, 1);
     assert.equal(events[0].text, "case variant cwd");
   });
+
+  test("cwd comparison ignores slash direction and a trailing separator on Windows", async (t) => {
+    const home = realpathSync(mkdtempSync(join(tmpdir(), "rocky-cclog-slash-")));
+    const previousConfigDir = process.env.CLAUDE_CONFIG_DIR;
+    process.env.CLAUDE_CONFIG_DIR = home;
+    t.after(() => {
+      if (previousConfigDir === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+      else process.env.CLAUDE_CONFIG_DIR = previousConfigDir;
+    });
+    // The repo cwd may arrive Git Bash style while Claude Code logs its own
+    // native spelling of the very same directory.
+    const repo = "C:/Work/Repo/";
+    const dir = join(home, "projects", "unrelated-slug");
+    mkdirSync(dir, { recursive: true });
+    const log = join(dir, "sess-5.jsonl");
+    writeFileSync(log,
+      line({ sessionId: "sess-5", uuid: "u1", cwd: "C:\\Work\\Repo", timestamp: "2026-08-19T01:00:00Z", type: "assistant",
+        message: { content: [{ type: "thinking", thinking: "slash variant cwd" }] } }));
+    const { claudeCodeLogAdapter } = await import("../agent/logs/claude-code.js");
+    assert.deepEqual(claudeCodeLogAdapter.discover(repo), [log]);
+    const { events } = claudeCodeLogAdapter.scan(repo, log, 0, 1024 * 1024);
+    assert.equal(events.length, 1);
+    assert.equal(events[0].text, "slash variant cwd");
+
+    const otherRepo = "C:/Work/Repo-other/";
+    assert.deepEqual(claudeCodeLogAdapter.discover(otherRepo), [], "a different directory never matches");
+    assert.equal(claudeCodeLogAdapter.scan(otherRepo, log, 0, 1024 * 1024).events.length, 0);
+  });
 }

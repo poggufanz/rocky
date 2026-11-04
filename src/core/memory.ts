@@ -36,7 +36,7 @@ import {
 } from "./fingerprint.js";
 import { resolveRockyPaths } from "./state-paths.js";
 import type { RockyPaths } from "./state-paths.js";
-import { boundTripleMechanism, getMemoryRecordOffsets, isCompleteMemoryCoverage, isKnownPathPlatform, isSafeNonNegativeInteger, loadMemoryChecked, MAX_MEMORY_FILE_BYTES, MAX_RATIONALE_FILES, MAX_RATIONALE_FILE_CHARS, MAX_MEMORY_LINE_BYTES, MAX_MEMORY_RECORDS, MAX_SUPPORTED_MEMORY_RECORDS, MEMORY_FORMAT_VERSION } from "./memory-read.js";
+import { boundTripleMechanism, getMemoryRecordOffsets, isCompleteMemoryCoverage, isKnownPathPlatform, isSafeNonNegativeInteger, loadMemoryChecked, MAX_MEMORY_FILE_BYTES, MAX_RATIONALE_FILES, MAX_RATIONALE_FILE_CHARS, MAX_MEMORY_LINE_BYTES, MAX_MEMORY_RECORDS, MAX_SUPPORTED_MEMORY_RECORDS, MEMORY_FORMAT_VERSION, sameCwd } from "./memory-read.js";
 import type { AliasRecord, AssociationRecord, BriefRunRecord, ExplainRecord, FailureRecord, FixRecord, GuardOutcome, GuardRecord, InvariantTouchRecord, MemoryCoverage, MemoryRecord, NoteRecord, RationaleRecord, TripleRecord } from "./memory-read.js";
 import { MAX_GIT_SNAPSHOT_CHARS, MAX_GIT_SNAPSHOT_PRE_REDACT_CHARS, type GitAnchor } from "./memory-read.js";
 import { redactSecretsAtBoundary } from "./redact.js";
@@ -1195,9 +1195,9 @@ function hasConfirmedResolutionForCommand(
     if (record.kind === "fix" && !fixesById.has(record.id)) fixesById.set(record.id, record);
   }
   return records.some((record) => {
-    if (record.kind !== "failure" || record.cwd !== cwd || record.ts > now || record.resolvedBy === undefined) return false;
+    if (record.kind !== "failure" || !sameCwd(record.cwd, cwd, process.platform) || record.ts > now || record.resolvedBy === undefined) return false;
     const fix = fixesById.get(record.resolvedBy);
-    if (fix === undefined || fix.cwd !== cwd || fix.ts > now || fix.ts < record.ts || !fix.failureIds.includes(record.id)) return false;
+    if (fix === undefined || !sameCwd(fix.cwd, cwd, process.platform) || fix.ts > now || fix.ts < record.ts || !fix.failureIds.includes(record.id)) return false;
     const fixIdentity = commandIdentity(fix.cmd, { platform: fix.platform ?? process.platform });
     if (!fixIdentity.reliable || fixIdentity.value !== currentIdentity.value) return false;
     const failureIdentity = commandIdentity(record.cmd, { platform: record.platform ?? process.platform });

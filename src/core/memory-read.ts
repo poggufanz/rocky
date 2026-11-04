@@ -328,6 +328,43 @@ export function canonicalPath(value: string, options: CanonicalPathOptions = {})
   return result;
 }
 
+/**
+ * Directory identity for a stored `cwd`, on the platform that will compare it.
+ * Windows hears one directory under several spellings: the Git Bash hook
+ * records the MSYS-converted `C:/p`, `rocky run` and the PowerShell hook
+ * record `C:\p`, and a hand-typed `c:\P\` is the same place. So win32 ignores
+ * slash direction, case, and trailing separators; a root keeps its separator,
+ * because `c:\` (the drive root), `c:` (that drive's working directory) and
+ * `\` (the current drive's root) are three different directories. Every other
+ * platform compares exactly, so the key is the string itself.
+ *
+ * For comparing and grouping only. Never store it and never print it: a
+ * record keeps the spelling it was heard under. This is not `canonicalPath()`,
+ * which is file identity (it also drops `.` segments and doubled separators).
+ */
+export function cwdIdentityKey(cwd: string, platform: NodeJS.Platform | "unknown"): string {
+  if (platform !== "win32") return cwd;
+  const spelled = cwd.replaceAll("/", "\\").toLowerCase();
+  const trimmed = spelled.replace(/\\+$/u, "");
+  if (/^[a-z]:$/u.test(trimmed)) return trimmed === spelled ? trimmed : `${trimmed}\\`;
+  return trimmed.length === 0 ? spelled.slice(0, 1) : trimmed;
+}
+
+/**
+ * Do two stored cwd strings name the same directory? Widens equality on win32
+ * only, and only to spellings of one physical directory (Windows file systems
+ * are case-insensitive by default); callers pass `process.platform`. A
+ * directory that merely shares a prefix, or differs by anything beyond slash
+ * direction, case, or trailing separators, stays apart.
+ */
+export function sameCwd(a: string, b: string, platform: NodeJS.Platform | "unknown"): boolean {
+  if (a === b) return true;
+  // Memory is untrusted evidence: a malformed in-memory cwd is a different
+  // directory, never an exception thrown out of a comparison.
+  if (platform !== "win32" || typeof a !== "string" || typeof b !== "string") return false;
+  return cwdIdentityKey(a, platform) === cwdIdentityKey(b, platform);
+}
+
 export function isSafeNonNegativeInteger(value: unknown): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 }
@@ -1336,8 +1373,9 @@ function resolveMemoryRecords(records: MemoryRecord[], now: number): void {
       if (failure?.kind !== "failure" || failure.resolvedBy !== undefined || failure.ts > now || record.ts < failure.ts) continue;
       // Fix attribution is cwd-bound. Cross-directory recall still admits a
       // fix from elsewhere, but it must never mutate the failure's local
-      // resolution state or clear a local pending marker.
-      if (failure.cwd !== record.cwd) continue;
+      // resolution state or clear a local pending marker. "Same directory" is
+      // by identity, not spelling: the lanes record `C:/p` and `C:\p`.
+      if (!sameCwd(failure.cwd, record.cwd, process.platform)) continue;
       const failureIdentity = failure.identityV === 1 && failure.commandIdentity !== undefined
         ? validateStoredIdentity(failure.cmd, failure.commandIdentity, failure.identityReliable, failure.platform)
         : commandIdentity(failure.cmd, { platform: failure.platform ?? "unknown" });
