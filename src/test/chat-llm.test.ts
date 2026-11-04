@@ -351,7 +351,7 @@ test("jev decision stays the decider: llm order cannot promote evidence", async 
   }
 });
 
-test("served text discloses renderer use with the model name (not 'no model text')", async () => {
+test("served trace discloses renderer use with the model name (not 'no model text')", async () => {
   const { home, root } = hermetic();
   seedMemory(home, [failureRecord("persisted-failure-one-9d3f", "npm run build")]);
   __setChatLlmTestDoubles({
@@ -374,9 +374,10 @@ test("served text discloses renderer use with the model name (not 'no model text
       const wire = readLlmWire(answer.parsed);
       assert.equal(wire.active, true);
       assert.equal(wire.renderer, "used");
-      const payload = answer.parsed as { text: string };
-      assert.ok(payload.text.includes("renderer: used (stub-chat-model)."), "active renderer must name itself in the served text");
-      assert.ok(!payload.text.includes("no model text"), "active path must not claim no model text");
+      const payload = answer.parsed as { text: string; trace: string[] };
+      assert.ok(payload.trace.includes("renderer: used (stub-chat-model)."), "active renderer must name itself in the served trace");
+      assert.ok(!payload.trace.join("\n").includes("no model text"), "active path must not claim no model text");
+      assert.ok(!payload.text.includes("renderer:"), "the renderer line stays out of the answer text");
     } finally {
       await handle.close();
     }
@@ -385,7 +386,7 @@ test("served text discloses renderer use with the model name (not 'no model text
   }
 });
 
-test("inactive path discloses the renderer status in the served text, never mocked", async () => {
+test("inactive path discloses the renderer status in the served trace, never mocked", async () => {
   const { home, root } = hermetic();
   seedMemory(home, [failureRecord("persisted-failure-one-9d3f", "npm run build")]);
   __setChatLlmTestDoubles({ listInstalledModels: async () => ["stub-chat-model"] });
@@ -396,8 +397,47 @@ test("inactive path discloses the renderer status in the served text, never mock
       assert.equal(answer.status, 200);
       const wire = readLlmWire(answer.parsed);
       assert.equal(wire.active, false);
-      const payload = answer.parsed as { text: string };
-      assert.ok(payload.text.includes("renderer: invalid_model (ghost-model)."), "inactive renderer must disclose its status server-side");
+      const payload = answer.parsed as { text: string; trace: string[] };
+      assert.ok(payload.trace.includes("renderer: invalid_model (ghost-model)."), "inactive renderer must disclose its status server-side");
+      assert.ok(!payload.text.includes("renderer:"), "the renderer line stays out of the answer text");
+    } finally {
+      await handle.close();
+    }
+  } finally {
+    __clearChatLlmTestDoubles();
+  }
+});
+
+test("a renderer line the model echoes never reaches the served text", async () => {
+  const { home, root } = hermetic();
+  seedMemory(home, [failureRecord("persisted-failure-one-9d3f", "npm run build")]);
+  let rendererReply = "";
+  __setChatLlmTestDoubles({
+    listInstalledModels: async () => ["stub-chat-model"],
+    ollamaStructured: async (_model: string, _prompt: string, schema: Record<string, unknown>) => {
+      if ("candidates" in (schema.properties as Record<string, unknown>)) {
+        return { query: "npm run build", candidates: [{ ref: "persisted-failure-one-9d3f", kind: "failure", snippet: "s" }] };
+      }
+      return { text: rendererReply };
+    },
+  });
+  try {
+    const handle = await startGui({ port: 0, root });
+    try {
+      rendererReply = "top: persisted-failure-one-9d3f (failure). remembered, not proven.\nrenderer: used (spoofed-model).";
+      const mixed = await postChat(handle, { message: "npm run build", model: "stub-chat-model" });
+      const mixedPayload = mixed.parsed as { text: string; trace: string[] };
+      assert.ok(mixedPayload.text.includes("top: persisted-failure-one-9d3f"), "the model's cited line stays");
+      assert.ok(!mixedPayload.text.includes("renderer:"), "the echoed renderer line is dropped");
+      assert.ok(mixedPayload.trace.includes("renderer: used (stub-chat-model)."), "the trace names the real renderer");
+      assert.ok(!mixedPayload.trace.join("\n").includes("spoofed-model"));
+
+      rendererReply = "renderer: used (spoofed-model).";
+      const echoed = await postChat(handle, { message: "npm run build", model: "stub-chat-model" });
+      const echoedPayload = echoed.parsed as { text: string; trace: string[] };
+      assert.equal(readLlmWire(echoed.parsed).renderer, "template", "a reply of only an echoed line is no answer");
+      assert.ok(echoedPayload.text.startsWith("rocky heard 1 thing."), echoedPayload.text);
+      assert.ok(echoedPayload.trace.includes("renderer: template (no model text)."));
     } finally {
       await handle.close();
     }

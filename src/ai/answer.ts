@@ -10,7 +10,15 @@ import { readFileSync, statSync } from "node:fs";
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { loadMemoryChecked, type MemoryRecord } from "../core/memory-read.js";
+import {
+  isCompleteMemoryCoverage,
+  loadMemoryChecked,
+  type MemoryCoverage,
+  type MemoryLoadResult,
+  type MemoryRecord,
+} from "../core/memory-read.js";
+import { describeMemoryCoverage } from "../core/coverage.js";
+import { adaptHit } from "../core/home-data.js";
 import { redactSecretsAtBoundary } from "../core/redact.js";
 import { readSettings, type GuiSettings } from "../gui/settings.js";
 import { loadConfig } from "../core/config-read.js";
@@ -113,11 +121,15 @@ export interface AnswerOptions {
 }
 
 export interface ChatResponsePayload {
+  /** The answer, as Rocky says it. Record ids and decision lines are not in it: see `trace`. */
   text: string;
+  /** The top record's id, the decision, its detail, the coverage line and the renderer line, for the drawer. */
+  trace: readonly string[];
   evidenceCards: ChatEvidenceCard[];
   decisionTrace: ChatTrace;
   llm: ChatLlmTrace;
   renderOrder: readonly string[];
+  /** Set whenever the memory read was not whole, in plain words. Answering or holding is a separate matter. */
   coverage?: { reason: string };
   codeEvidence?: CodeExcerpt[];
   codeAnswer?: CodeAnswer;
@@ -212,10 +224,38 @@ export function readDecisionSelection(): { engine: "heuristic" | "local" | "jev"
   return { engine: "heuristic", jevProvider: "typesafe" };
 }
 
-export function records(): { list: ReturnType<typeof loadMemoryChecked>["records"]; reason: string | undefined } {
-  const loaded = loadMemoryChecked();
-  const reason = loaded.coverage?.complete === false ? loaded.coverage.reason : undefined;
-  return { list: loaded.records, reason };
+/**
+ * Memory as one chat answer sees it. Disclosing and holding are two decisions.
+ * A read that was not whole is always disclosed, in plain words. Only a read
+ * that stopped early holds the answer, because silence in it proves nothing.
+ * Lines Rocky cannot use (a repeated id, a kind this build does not know)
+ * leave every other record parsed, so Rocky answers from those and says what
+ * he could not use.
+ */
+export interface MemorySnapshot {
+  list: MemoryRecord[];
+  /** Plain words, set for every read that was not whole, skipped lines included. */
+  disclosure: string | undefined;
+  /** True when the read stopped early: a cap, a race, or a failure with no reason. */
+  hold: boolean;
+}
+
+function readStoppedEarly(coverage: MemoryCoverage): boolean {
+  if (isCompleteMemoryCoverage(coverage)) return false;
+  const skippedOnly = coverage.skipped > 0 && coverage.truncated === 0 && coverage.reason === undefined;
+  return !skippedOnly;
+}
+
+export function snapshotOf(loaded: Pick<MemoryLoadResult, "records" | "coverage">): MemorySnapshot {
+  return {
+    list: loaded.records,
+    disclosure: describeMemoryCoverage(loaded.coverage, loaded.records.length, { counts: false }),
+    hold: readStoppedEarly(loaded.coverage),
+  };
+}
+
+export function records(): MemorySnapshot {
+  return snapshotOf(loadMemoryChecked());
 }
 
 export function confine(root: string, candidate: string): string | undefined {
@@ -484,12 +524,24 @@ export async function executeCodeSupport(args: {
   return { evidence: collected.evidence, trace: collected.trace, answer: answer(text, "used", check.dropped) };
 }
 
+const CHAT_TOP_LABEL_CHARS = 140;
+
+/** The top card as the home list labels it. Never the record id: that is trace. */
+function topLabelFor(memory: readonly MemoryRecord[], ref: string | undefined): string | undefined {
+  if (ref === undefined) return undefined;
+  const record = memory.find((candidate) => candidate.id === ref);
+  if (record === undefined) return undefined;
+  const label = adaptHit(record, Date.now()).label;
+  if (label.length === 0) return undefined;
+  return label.length > CHAT_TOP_LABEL_CHARS ? `${label.slice(0, CHAT_TOP_LABEL_CHARS - 1).trimEnd()}…` : label;
+}
+
 function memoryOnlyAbstention(args: {
   asked: string;
   model: string;
   status: "low_confidence" | "unavailable";
   text: string;
-  coverageReason?: string;
+  disclosure: string | undefined;
 }): AnswerOutcome {
   const llm: ChatLlmTrace = {
     active: false,
@@ -519,11 +571,12 @@ function memoryOnlyAbstention(args: {
     status: 200,
     payload: {
       text: args.text,
+      trace: args.disclosure === undefined ? [] : [args.disclosure],
       evidenceCards: [],
       decisionTrace: trace,
       llm,
       renderOrder: [...CHAT_RENDER_ORDER],
-      ...(args.coverageReason === undefined ? {} : { coverage: { reason: args.coverageReason } }),
+      ...(args.disclosure === undefined ? {} : { coverage: { reason: args.disclosure } }),
     },
   };
 }
@@ -531,26 +584,26 @@ function memoryOnlyAbstention(args: {
 async function executeMemoryOnlyAnswer(args: {
   asked: string;
   query: string;
-  memory: readonly MemoryRecord[];
-  coverageReason: string | undefined;
+  memory: MemorySnapshot;
   requestedModel: string | undefined;
   stored: GuiSettings;
   env: NodeJS.ProcessEnv;
 }): Promise<AnswerOutcome> {
   const lang = args.stored.lang;
   const model = args.requestedModel ?? args.stored.model;
-  if (args.coverageReason !== undefined) {
+  const { list, disclosure, hold } = args.memory;
+  if (hold) {
     return memoryOnlyAbstention({
       asked: args.asked,
       model,
       status: "unavailable",
       text: lang === "id" ? "ingatan terbaca tidak lengkap. Rocky menahan jawaban." : "memory read incomplete. Rocky holds answer.",
-      coverageReason: args.coverageReason,
+      disclosure,
     });
   }
 
-  const hits = searchKnowledge(args.memory, { query: args.query, limit: args.memory.length });
-  const cards = toWholeMemoryCards(args.memory, hits, args.query);
+  const hits = searchKnowledge(list, { query: args.query, limit: list.length });
+  const cards = toWholeMemoryCards(list, hits, args.query);
   if (cards === undefined) {
     return memoryOnlyAbstention({
       asked: args.asked,
@@ -559,6 +612,7 @@ async function executeMemoryOnlyAnswer(args: {
       text: lang === "id"
         ? "bukti memori utuh melewati batas konteks. Rocky menahan jawaban. record tetap utuh."
         : "whole memory evidence exceeds context. Rocky holds answer. Records stay whole.",
+      disclosure,
     });
   }
   if (cards.length === 0) {
@@ -569,6 +623,7 @@ async function executeMemoryOnlyAnswer(args: {
       text: lang === "id"
         ? "tidak ada ingatan yang cukup cocok. Rocky belum tahu jawaban ini."
         : "Rocky heard no memory that answers this question.",
+      disclosure,
     });
   }
 
@@ -594,11 +649,13 @@ async function executeMemoryOnlyAnswer(args: {
     {
       query: args.query,
       topRef: cards[0]?.ref,
+      topLabel: topLabelFor(list, cards[0]?.ref),
       topKind: cards[0]?.kind,
       engine: traceBase.engine,
       status: traceBase.status,
       evidenceCount: cards.length,
       latencyMs: traceBase.latencyMs,
+      ...(disclosure === undefined ? {} : { coverageLine: disclosure }),
       evidence: cards.map((card) => ({ ref: card.ref, kind: card.kind, snippet: card.snippet })),
     },
     evidenceRefs,
@@ -626,10 +683,12 @@ async function executeMemoryOnlyAnswer(args: {
     status: 200,
     payload: {
       text: renderer.text,
+      trace: [...renderer.trace],
       evidenceCards: cards,
       decisionTrace: trace,
       llm,
       renderOrder: [...CHAT_RENDER_ORDER],
+      ...(disclosure === undefined ? {} : { coverage: { reason: disclosure } }),
     },
   };
 }
@@ -665,15 +724,15 @@ export async function executeAnswer(options: AnswerOptions): Promise<AnswerOutco
 
     chatInFlight += 1;
     try {
-      const { list, reason } = records();
+      const snapshot = records();
+      const { list, disclosure } = snapshot;
       const witnessedFiles = split.mode === "memory" ? [] : witnessedRepoPaths(list, root);
       const codeTriggered = split.mode !== "memory" && (split.mode === "code" || isCodeQuery(query, witnessedFiles));
       if (!codeTriggered) {
         return executeMemoryOnlyAnswer({
           asked,
           query,
-          memory: list,
-          coverageReason: reason,
+          memory: snapshot,
           requestedModel: typeof options.model === "string" ? options.model : undefined,
           stored,
           env,
@@ -746,6 +805,7 @@ export async function executeAnswer(options: AnswerOptions): Promise<AnswerOutco
         {
           query,
           topRef: ordered[0]?.ref,
+          topLabel: topLabelFor(list, ordered[0]?.ref),
           topKind: ordered[0]?.kind,
           topScore: topConfidence(result),
           engine: traceBase.engine,
@@ -753,7 +813,7 @@ export async function executeAnswer(options: AnswerOptions): Promise<AnswerOutco
           evidenceCount: ordered.length,
           latencyMs: traceBase.latencyMs,
           detail: result.detail,
-          coverageReason: reason,
+          ...(disclosure === undefined ? {} : { coverageLine: disclosure }),
           evidence: ordered.map((card) => ({ ref: card.ref, kind: card.kind, snippet: card.snippet })),
         },
         ordered.map((card) => card.ref),
@@ -800,11 +860,12 @@ export async function executeAnswer(options: AnswerOptions): Promise<AnswerOutco
         status: 200,
         payload: {
           text: renderer.text,
+          trace: [...renderer.trace],
           evidenceCards: ordered,
           decisionTrace: trace,
           llm,
           renderOrder: [...CHAT_RENDER_ORDER],
-          ...(reason === undefined ? {} : { coverage: { reason } }),
+          ...(disclosure === undefined ? {} : { coverage: { reason: disclosure } }),
           ...(code === undefined ? {} : { codeEvidence: code.evidence, codeAnswer: code.answer, codeTrace: code.trace }),
         },
       };
@@ -884,6 +945,7 @@ export async function executeAnswer(options: AnswerOptions): Promise<AnswerOutco
 
   const payload: ChatResponsePayload = {
     text: outcome.text,
+    trace: [],
     evidenceCards: [],
     decisionTrace: {
       engine: "heuristic",

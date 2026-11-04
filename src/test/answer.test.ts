@@ -5,7 +5,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer, type Server } from "node:http";
 
-import { executeAnswer } from "../ai/answer.js";
+import { executeAnswer, snapshotOf } from "../ai/answer.js";
+import { describeMemoryCoverage } from "../core/coverage.js";
+import { MAX_SUPPORTED_MEMORY_RECORDS, type MemoryCoverage } from "../core/memory-read.js";
 import { writeSettings } from "../gui/settings.js";
 
 function hermetic(): { home: string; root: string } {
@@ -151,6 +153,54 @@ test("executeAnswer in mode explain works with empty memory and passes code cont
   } finally {
     await new Promise<void>((down) => provider.close(() => down()));
   }
+});
+
+function coverage(overrides: Partial<MemoryCoverage> = {}): MemoryCoverage {
+  return { version: 1, scanned: 3, skipped: 0, truncated: 0, bytesScanned: 120, bytesTotal: 120, complete: true, ...overrides };
+}
+
+/** `disclosed`: Rocky says the read was not whole. `hold`: the read stopped early, so Rocky gives no answer. */
+const READS: readonly { name: string; coverage: MemoryCoverage; disclosed: boolean; hold: boolean }[] = [
+  { name: "a whole read", coverage: coverage(), disclosed: false, hold: false },
+  { name: "whitespace-only lines, scanned exceeds records, still whole", coverage: coverage({ scanned: 5 }), disclosed: false, hold: false },
+  { name: "one skipped line", coverage: coverage({ skipped: 1, complete: false }), disclosed: true, hold: false },
+  { name: "several skipped lines", coverage: coverage({ skipped: 4, complete: false }), disclosed: true, hold: false },
+  { name: "the record cap", coverage: coverage({ truncated: 1, complete: false, reason: "record-cap" }), disclosed: true, hold: true },
+  { name: "the file size cap", coverage: coverage({ truncated: 1, complete: false, reason: "file-size-cap" }), disclosed: true, hold: true },
+  { name: "a read race", coverage: coverage({ scanned: 0, truncated: 1, complete: false, reason: "read-race" }), disclosed: true, hold: true },
+  { name: "skipped lines plus the record cap", coverage: coverage({ skipped: 2, truncated: 1, complete: false, reason: "record-cap" }), disclosed: true, hold: true },
+  { name: "incomplete with no reason and nothing skipped", coverage: coverage({ complete: false }), disclosed: true, hold: true },
+  { name: "truncated with no reason and nothing skipped", coverage: coverage({ truncated: 2, complete: false }), disclosed: true, hold: true },
+];
+
+for (const read of READS) {
+  test(`snapshotOf separates disclosing from holding for ${read.name}`, () => {
+    const snapshot = snapshotOf({ records: [], coverage: read.coverage });
+    assert.equal(snapshot.disclosure, describeMemoryCoverage(read.coverage, 0, { counts: false }));
+    assert.equal(snapshot.disclosure !== undefined, read.disclosed);
+    assert.equal(snapshot.hold, read.hold);
+    // a held answer is always a disclosed one
+    if (snapshot.hold) assert.ok(snapshot.disclosure !== undefined);
+  });
+}
+
+test("executeAnswer holds the answer when the read stopped at the record cap, and says so in words", async () => {
+  const { home, root } = hermetic();
+  const lines = Array.from({ length: MAX_SUPPORTED_MEMORY_RECORDS + 1 }, (_, index) => JSON.stringify({
+    kind: "failure", id: `r${index}`, ts: 1, cwd: "/words", cmd: "false", exitCode: 1,
+    fingerprint: `r${index}`.padStart(16, "0"), signature: ["false"], excerpt: "false",
+  }));
+  writeFileSync(join(home, "memory.jsonl"), lines.map((line) => `${line}\n`).join(""));
+
+  const outcome = await executeAnswer({ mode: "chat", message: "false", root });
+
+  assert.equal(outcome.status, 200);
+  assert.ok("text" in outcome.payload);
+  const line = `memory coverage incomplete: first ${MAX_SUPPORTED_MEMORY_RECORDS} records heard, later lines not heard.`;
+  assert.equal(outcome.payload.decisionTrace.status, "unavailable");
+  assert.deepEqual(outcome.payload.evidenceCards, []);
+  assert.equal(outcome.payload.coverage?.reason, line);
+  assert.deepEqual(outcome.payload.trace, [line]);
 });
 
 test("executeAnswer respects unified OpenRouter key from environment", async () => {

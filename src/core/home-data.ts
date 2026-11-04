@@ -5,6 +5,7 @@ import { elapsed } from "../ui/rocky.js";
 
 export interface HomeData {
   total: number;
+  /** The plain-words line when memory was read incomplete, `coverage full` otherwise (the page hides that one). */
   coverageLine: string;
   byKind: Array<{ kind: string; count: number }>;
   day: { heard: number; failures: number; fixes: number; whys: number };
@@ -64,13 +65,18 @@ export function adaptHit(
   };
 }
 
+/**
+ * `disclosure` is the plain-words line for a memory read that was not whole
+ * (`describeMemoryCoverage`), or undefined when it was. It is shown as given,
+ * so a read that only skipped lines is not passed off as full coverage.
+ */
 export function deriveHome(
   records: MemoryRecord[],
-  coverageReason: string | undefined,
+  disclosure: string | undefined,
   now: number,
 ): HomeData {
   const total = records.length;
-  const coverageLine = coverageReason ? `coverage partial (${coverageReason})` : "coverage full";
+  const coverageLine = disclosure ?? "coverage full";
 
   // Counts by kind
   const kindCounts = new Map<string, number>();
@@ -132,7 +138,7 @@ export function deriveHome(
   // payload.
   let coverage: HomeData["coverage"];
   try {
-    const split = coverageFromRecords(records, { memoryTruncated: coverageReason !== undefined });
+    const split = coverageFromRecords(records, { memoryTruncated: disclosure !== undefined });
     coverage = {
       tried: split.tried,
       untried: split.untried,
@@ -141,7 +147,7 @@ export function deriveHome(
       truncated: split.truncated,
     };
   } catch {
-    coverage = { tried: [], untried: [], triedTotal: 0, untriedTotal: 0, truncated: coverageReason !== undefined };
+    coverage = { tried: [], untried: [], triedTotal: 0, untriedTotal: 0, truncated: disclosure !== undefined };
   }
 
   return {

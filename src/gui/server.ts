@@ -22,6 +22,7 @@ import { redactSecretsAtBoundary } from "../core/redact.js";
 import { publicSettings, readSettings, writeSettings, type GuiSettings } from "./settings.js";
 import { providerFor, providerList } from "./models-dev.js";
 import { deriveHome } from "../core/home-data.js";
+import { describeMemoryCoverage } from "../core/coverage.js";
 import { elapsed } from "../ui/rocky.js";
 import { fileIndex, getCachedDiff, groupMomentsByChange, defaultDiffIo, lineOverlapPredicate, parsePatch, type DiffRow } from "../core/compare-data.js";
 import { resolveContext } from "../core/context-resolve.js";
@@ -177,11 +178,13 @@ async function readBody(request: IncomingMessage): Promise<unknown> {
   return JSON.parse(Buffer.concat(chunks).toString("utf8"));
 }
 
-function records(): { list: ReturnType<typeof loadMemoryChecked>["records"]; reason: string | undefined } {
+function records(): { list: ReturnType<typeof loadMemoryChecked>["records"]; disclosure: string | undefined } {
   const loaded = loadMemoryChecked();
-  // an incomplete read is disclosed, never passed off as full coverage
-  const reason = loaded.coverage?.complete === false ? loaded.coverage.reason : undefined;
-  return { list: loaded.records, reason };
+  // A read that was not whole is disclosed in plain words, whatever made it so:
+  // a cap, a race, or lines Rocky cannot use. Skipped lines carry no reason code,
+  // so the words come from the coverage counters, never from a reason alone.
+  const disclosure = describeMemoryCoverage(loaded.coverage, loaded.records.length, { counts: false });
+  return { list: loaded.records, disclosure };
 }
 
 const ago = (ts: number, now: number): string => {
@@ -370,8 +373,8 @@ async function handleApi(
   const now = Date.now();
 
   if (pathname === "/api/home") {
-    const { list, reason } = records();
-    return sendJson(response, 200, deriveHome(list, reason, now));
+    const { list, disclosure } = records();
+    return sendJson(response, 200, deriveHome(list, disclosure, now));
   }
 
   if (pathname === "/api/files") {

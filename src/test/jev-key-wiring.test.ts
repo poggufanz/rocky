@@ -68,11 +68,12 @@ function envOf(value: Record<string, string>): NodeJS.ProcessEnv {
   return fabricated as NodeJS.ProcessEnv;
 }
 
-function readChatWire(parsed: unknown): { engine: string; status: string; evidenceRefs: string[]; text: string } {
+function readChatWire(parsed: unknown): { engine: string; status: string; evidenceRefs: string[]; text: string; lines: string[] } {
   if (typeof parsed !== "object" || parsed === null) throw new Error("chat body shape");
-  if (!("decisionTrace" in parsed) || !("text" in parsed)) throw new Error("chat body fields");
+  if (!("decisionTrace" in parsed) || !("text" in parsed) || !("trace" in parsed)) throw new Error("chat body fields");
   const trace: unknown = parsed.decisionTrace;
   const text: unknown = parsed.text;
+  const lines: unknown = parsed.trace;
   if (typeof trace !== "object" || trace === null) throw new Error("chat trace shape");
   if (!("engine" in trace) || !("status" in trace) || !("evidenceRefs" in trace)) {
     throw new Error("chat trace fields");
@@ -84,7 +85,8 @@ function readChatWire(parsed: unknown): { engine: string; status: string; eviden
   if (typeof status !== "string") throw new Error("chat status shape");
   if (!Array.isArray(refs)) throw new Error("chat refs shape");
   if (typeof text !== "string") throw new Error("chat text shape");
-  return { engine, status, evidenceRefs: refs.map((ref) => String(ref)), text };
+  if (!Array.isArray(lines)) throw new Error("chat trace lines shape");
+  return { engine, status, evidenceRefs: refs.map((ref) => String(ref)), text, lines: lines.map((line) => String(line)) };
 }
 
 function readSettingsWire(parsed: unknown): { hasJevKey: boolean; hasOpenRouterKey: boolean; raw: string } {
@@ -155,7 +157,8 @@ test("chat with jev:true and no key reports disabled plus baseline, disclosed", 
       const wire = readChatWire(answer.parsed);
       assert.equal(wire.engine, "jev");
       assert.equal(wire.status, "disabled");
-      assert.ok(wire.text.includes("disabled"));
+      assert.ok(wire.lines.some((line) => line.startsWith("decision: jev disabled")), wire.lines.join("\n"));
+      assert.ok(!wire.text.includes("decision: "), "the decision line stays out of the answer text");
       assert.deepEqual(wire.evidenceRefs, ["persisted-failure-one-9d3f"]);
     });
   } finally {
@@ -179,7 +182,8 @@ test("chat on the openrouter path with no openrouter key reports disabled plus b
       const wire = readChatWire(answer.parsed);
       assert.equal(wire.engine, "jev");
       assert.equal(wire.status, "disabled");
-      assert.ok(wire.text.includes("disabled"));
+      assert.ok(wire.lines.some((line) => line.startsWith("decision: jev disabled")), wire.lines.join("\n"));
+      assert.ok(!wire.text.includes("decision: "), "the decision line stays out of the answer text");
       assert.deepEqual(wire.evidenceRefs, ["persisted-failure-one-9d3f"]);
     });
   } finally {

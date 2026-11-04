@@ -270,7 +270,8 @@ function formatInlineNodes(text) {
 
 /**
  * Small Markdown for answers: headings, lists, fenced code, inline marks.
- * `renderer:` lines are disclosure, so they move into the decision drawer.
+ * Memory answers and code answers both pass through here, so it never drops
+ * a line by its prefix: that is `answerParts`' job, for answer text only.
  */
 function markdownNode(text, className) {
   const container = el("div", className);
@@ -313,7 +314,6 @@ function markdownNode(text, className) {
       closeList();
       continue;
     }
-    if (line.startsWith("renderer:")) continue;
     const heading = /^(#{1,6})\s+(.+)$/.exec(line);
     if (heading) {
       closeList();
@@ -344,6 +344,29 @@ function markdownNode(text, className) {
 }
 
 /* ---- answer anatomy ------------------------------------------------------ */
+
+// What the server inlined in answer text before it sent `trace` apart.
+const INLINE_TRACE_LINE = /^(?:top|decision|detail|renderer): /;
+
+/**
+ * The answer text and the trace lines behind it. The server sends them apart.
+ * A turn saved before that carries the lines inside its text, so they are
+ * split out here, from answer text only: code answers never come through
+ * this filter. A text that would be left empty is kept whole.
+ */
+function answerParts(body) {
+  const text = str(body?.text);
+  if (Array.isArray(body?.trace)) return { text, trace: body.trace.filter((line) => typeof line === "string") };
+  const kept = [];
+  const trace = [];
+  for (const line of text.split(/\r?\n/)) (INLINE_TRACE_LINE.test(line.trim()) ? trace : kept).push(line);
+  return kept.join("\n").trim() ? { text: kept.join("\n"), trace } : { text, trace: [] };
+}
+
+/** The server words coverage itself; a turn saved with a bare reason code keeps its old label. */
+function coverageWords(reason) {
+  return /^memory coverage incomplete:/.test(reason) ? reason : `Coverage: ${reason}`;
+}
 
 function codeRan(body) {
   return (body?.codeTrace !== null && typeof body?.codeTrace === "object")
@@ -376,7 +399,7 @@ function badges(body) {
   }
   if (str(body?.coverage?.reason)) {
     const tag = el("span", "cx-badge", "Partial memory");
-    tag.title = `Coverage: ${body.coverage.reason}`;
+    tag.title = coverageWords(body.coverage.reason);
     out.push(tag);
   }
   if (body?.decisionTrace?.engine === "jev") out.push(el("span", "cx-badge", "Jev"));
@@ -498,9 +521,6 @@ function decisionDrawer(turn) {
     stepRow("Renderer", llm.rendererStatus ?? "baseline"),
     stepRow("Citations", llm.stripped && llm.stripped > 0 ? `${llm.stripped} uncited claims stripped` : "no uncited lines found"),
   );
-  for (const line of str(body.text).split(/\r?\n/)) {
-    if (line.trim().startsWith("renderer:")) wrote.append(el("p", "cx-step-note", line.trim()));
-  }
   steps.append(wrote);
 
   if (codeRan(body)) {
@@ -517,6 +537,9 @@ function decisionDrawer(turn) {
     if (trace.roundsExhausted === true) read.append(el("p", "cx-step-note", "Round budget spent; files not read are not checked."));
     steps.append(read);
   }
+
+  const lines = answerParts(body).trace;
+  if (lines.length > 0) steps.append(step("Trace", ...lines.map((line) => el("p", "cx-step-note", line))));
 
   drawer.append(head, steps);
   return drawer;
@@ -576,9 +599,9 @@ function rockyNode(turn, isNew, isLast) {
   head.append(el("span", "cx-name", "Rocky"), ...badges(body));
   col.append(head, decisionDrawer(turn));
 
-  const text = str(body.text) || "rocky heard nothing matching that yet.";
+  const text = answerParts(body).text || "rocky heard nothing matching that yet.";
   col.append(markdownNode(text, "cx-answer"));
-  if (str(body.coverage?.reason)) col.append(el("p", "cx-aside", `Coverage: ${body.coverage.reason}`));
+  if (str(body.coverage?.reason)) col.append(el("p", "cx-aside", coverageWords(body.coverage.reason)));
 
   // Code support: a labelled second answer after the memory one, never replacing it.
   const codeText = str(body.codeAnswer?.text);

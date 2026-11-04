@@ -217,12 +217,19 @@ test("dash home payload carries truncated flag and totals alongside the bounded 
 });
 
 test("dash home payload marks truncation from an incomplete memory read, even when empty", () => {
-  const partial = deriveHome([], "file-size-cap", NOW);
+  const partial = deriveHome([], "memory coverage incomplete: first 3 records heard, later lines not heard.", NOW);
   assert.equal(partial.coverage.truncated, true);
   assert.deepEqual(partial.coverage.tried, []);
   assert.deepEqual(partial.coverage.untried, []);
   const full = deriveHome([], undefined, NOW);
   assert.equal(full.coverage.truncated, false);
+});
+
+test("dash home coverage line is the plain-words line when memory was incomplete, and coverage full otherwise", () => {
+  const words = "memory coverage incomplete: 2 lines I cannot use.";
+  assert.equal(deriveHome([], words, NOW).coverageLine, words);
+  assert.equal(deriveHome([], undefined, NOW).coverageLine, "coverage full");
+  assert.deepEqual(validateRockyPhrase(words), []);
 });
 
 test("disclosure lines show both memory and list-cap lines when both hold, never shadowing", (t) => {

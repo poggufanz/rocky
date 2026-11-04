@@ -322,7 +322,7 @@ test("a memory-only question keeps today's payload and never scans", async () =>
     assert.equal(answer.status, 200);
     assert.deepEqual(
       Object.keys(answer.payload).sort(),
-      ["decisionTrace", "evidenceCards", "llm", "renderOrder", "text"],
+      ["decisionTrace", "evidenceCards", "llm", "renderOrder", "text", "trace"],
     );
     assert.equal(answer.payload.codeEvidence, undefined);
     assert.equal(answer.payload.codeAnswer, undefined);

@@ -777,3 +777,26 @@ test("refer resolves symbol definition and references with redacted text", async
   });
 });
 
+test("home says what Rocky could not use instead of coverage full", async () => {
+  const { home, root } = hermetic();
+  const record = JSON.stringify({
+    kind: "failure", id: "home-failure-one", ts: Date.now() - 1000, cwd: "/private/one", cmd: "npm run build",
+    exitCode: 1, fingerprint: "a1b2c3d4e5f60718", signature: ["npm run build"], excerpt: "plain excerpt",
+  });
+  await withGui(root, async (h) => {
+    writeFileSync(join(home, "memory.jsonl"), `${record}\n`);
+    const whole = await json(h, "/api/home");
+    assert.equal(whole.status, 200);
+    assert.equal(whole.body.coverageLine, "coverage full");
+    assert.equal(whole.body.coverage.truncated, false);
+
+    // a line that is not JSON: every other line is parsed, yet the read is not whole
+    writeFileSync(join(home, "memory.jsonl"), `${record}\nthis line is not json\n`);
+    const partial = await json(h, "/api/home");
+    assert.equal(partial.status, 200);
+    assert.equal(partial.body.total, 1);
+    assert.equal(partial.body.coverageLine, "memory coverage incomplete: 1 line I cannot use.");
+    assert.equal(partial.body.coverage.truncated, true);
+  });
+});
+
