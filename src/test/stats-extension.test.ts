@@ -96,7 +96,8 @@ function captureStderr<T>(fn: () => T): { result: T; stderr: string } {
   }
 }
 
-test("stats() prints rationale-by-fidelity and alias totals from real memory", () => {
+test("stats() prints rationale-by-fidelity and alias totals from real memory under ROCKY_VERBOSE", (t) => {
+  setVerbose(t, "1");
   const home = mkdtempSync(join(tmpdir(), "rocky-stats-rationale-"));
   const previous = process.env.ROCKY_HOME;
   process.env.ROCKY_HOME = home;
@@ -161,6 +162,85 @@ function statsOverSkippedLine(t: TestContext, argv: readonly string[]): { result
     process.stderr.write = originalStderr;
   }
 }
+
+/** A triple the reader accepts, remembered `age` milliseconds before the real clock, which stats() reads itself. */
+function triple(id: string, age: number): Record<string, unknown> {
+  return {
+    kind: "triple", id, ts: Date.now() - age, cwd: "/repo", schemaV: 1, agent: "claude-code", origin: "agent-hook",
+    intent: { text: "tighten spacing" }, mechanism: { files: [], truncatedFiles: 0 },
+  };
+}
+
+function note(id: string, age: number): Record<string, unknown> {
+  return { kind: "note", id, ts: Date.now() - age, cwd: "/repo", cmd: "rocky note", file: "src/a.ts", line: 1, subject: "spacing", answer: "gap" };
+}
+
+/** What `stats()` says on stderr over a memory file holding `records`, plus one reclaim tombstone beside it. */
+function statsHeardOver(t: TestContext, records: readonly Record<string, unknown>[]): string {
+  const home = mkdtempSync(join(tmpdir(), "rocky-stats-words-"));
+  const previousHome = process.env.ROCKY_HOME;
+  process.env.ROCKY_HOME = home;
+  const originalStdout = process.stdout.write;
+  const originalStderr = process.stderr.write;
+  t.after(() => {
+    if (previousHome === undefined) delete process.env.ROCKY_HOME;
+    else process.env.ROCKY_HOME = previousHome;
+    rmSync(home, { recursive: true, force: true });
+  });
+  writeFileSync(resolveRockyPaths().memory, records.map((record) => `${JSON.stringify(record)}\n`).join(""), "utf8");
+  writeFileSync(join(home, "memory.jsonl.reclaim.tombstone.1.abcdef"), "", "utf8");
+  let stderr = "";
+  process.stdout.write = (() => true) as typeof process.stdout.write;
+  process.stderr.write = ((chunk: string | Uint8Array) => {
+    stderr += String(chunk);
+    return true;
+  }) as typeof process.stderr.write;
+  try {
+    assert.equal(stats(), 0);
+    return stderr;
+  } finally {
+    process.stdout.write = originalStdout;
+    process.stderr.write = originalStderr;
+  }
+}
+
+const MIXED_MEMORY = (): Record<string, unknown>[] => [
+  triple("t1", 400), triple("t2", 300), note("n1", 200), rationale("r1", "raw", Date.now() - 100) as unknown as Record<string, unknown>,
+  alias("a1", Date.now() - 50) as unknown as Record<string, unknown>,
+];
+
+test("stats says intents, and keeps the kind tally, the fidelity split and the tombstone count out of default output", (t) => {
+  setVerbose(t, undefined);
+  const heard = statsHeardOver(t, MIXED_MEMORY());
+  assert.match(heard, /memory holds 5 remembered items\. 0 confirmed fixes\. 0 possible fixes\. 2 intents\. 1 note\./u);
+  assert.doesNotMatch(heard, /triple/u);
+  assert.doesNotMatch(heard, /events by kind/u);
+  assert.doesNotMatch(heard, /rationale heard|summary \d|alias \d+ remembered/u);
+  assert.doesNotMatch(heard, /tombstone/u);
+  assert.match(heard, /memory age \d+ days?\./u);
+});
+
+test("stats says 1 intent, not 1 intents", (t) => {
+  setVerbose(t, undefined);
+  const heard = statsHeardOver(t, [triple("t1", 400)]);
+  assert.match(heard, /\. 1 intent\. 0 notes\./u);
+});
+
+test("stats keeps the triple word, the kind tally, the fidelity split and the tombstone count under ROCKY_VERBOSE", (t) => {
+  setVerbose(t, "1");
+  const heard = statsHeardOver(t, MIXED_MEMORY());
+  const lines = heard.split(/\r?\n/u);
+  assert.ok(lines.some((line) => line.endsWith("memory holds 5 remembered items. 0 confirmed fixes. 0 possible fixes. 2 triples. 1 note.")), heard);
+  assert.ok(lines.some((line) => line.endsWith("events by kind: alias 1, note 1, rationale 1, triple 2.")), heard);
+  assert.ok(lines.some((line) => line.endsWith("rationale heard 1 time. raw 1, summary 0, none 0. alias 1 remembered.")), heard);
+  assert.ok(lines.includes("tombstones waiting sweep: 1"), heard);
+});
+
+test("stats says 1 triple under ROCKY_VERBOSE", (t) => {
+  setVerbose(t, "1");
+  const heard = statsHeardOver(t, [triple("t1", 400)]);
+  assert.match(heard, /\. 1 triple\. 0 notes\./u);
+});
 
 for (const argv of [[], ["--cycles"]] as const) {
   const surface = argv.length === 0 ? "stats" : "stats --cycles";

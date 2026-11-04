@@ -109,6 +109,14 @@ test("README and CLI help publish the installable command surface", () => {
   }
 });
 
+test("CLI help glosses the triple export kind as intent and keeps id mechanics out of the quiz line", () => {
+  const help = helpOutput();
+  // The `triple` kind value is a script contract and stays; only the gloss is new.
+  assert.match(help, /rocky export \[--kind failure\|fix\|note\|triple\] \[--since ISO\|Nd\]\s+dump raw memory as JSONL on stdout\. triple = intent\./u);
+  assert.doesNotMatch(help, /tie-break/u);
+  assert.match(help, /rocky quiz\s+practice newest remembered intent or note; asks, then reveals,\s+deterministic newest-first, repeats unchanged candidates, and\s+never grades\./u);
+});
+
 test("README stays a concise front page with durable project links", () => {
   // 190, not 180: the demo feature wall (three scene GIFs) earns its rows.
   assert.ok(readmePage.split("\n").length <= 190, "README detail belongs in docs/reference.md");

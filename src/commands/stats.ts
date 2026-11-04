@@ -111,15 +111,19 @@ export function stats(argv: readonly string[] = []): number {
   const notes = result.notes ?? 0;
   const total = result.total ?? records.length;
   console.log(face());
+  // Memory stores an intent as a "triple". The plain word is the default; ROCKY_VERBOSE=1 keeps the stored one.
+  const intentWord = isVerbose() ? "triple" : "intent";
   say(`I remember ${result.failures} error${result.failures === 1 ? "" : "s"}. ${result.resolved} have fix. ${result.fixEvents} fix event${result.fixEvents === 1 ? "" : "s"} total.`);
-  say(`memory holds ${total} remembered item${total === 1 ? "" : "s"}. ${confirmedFixes} confirmed fix${confirmedFixes === 1 ? "" : "es"}. ${possibleFixes} possible fix${possibleFixes === 1 ? "" : "es"}. ${triples} triple${triples === 1 ? "" : "s"}. ${notes} note${notes === 1 ? "" : "s"}.`);
+  say(`memory holds ${total} remembered item${total === 1 ? "" : "s"}. ${confirmedFixes} confirmed fix${confirmedFixes === 1 ? "" : "es"}. ${possibleFixes} possible fix${possibleFixes === 1 ? "" : "es"}. ${triples} ${intentWord}${triples === 1 ? "" : "s"}. ${notes} note${notes === 1 ? "" : "s"}.`);
   say(`memory file: ${memoryPath()}`);
   const byKind = result.byKind ?? {};
-  const kindSummary = Object.entries(byKind)
-    .sort(([a], [b]) => a.localeCompare(b))
-    .map(([kind, count]) => `${kind} ${count}`)
-    .join(", ");
-  say(`events by kind: ${kindSummary.length === 0 ? "none yet" : kindSummary}.`);
+  if (isVerbose()) {
+    const kindSummary = Object.entries(byKind)
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([kind, count]) => `${kind} ${count}`)
+      .join(", ");
+    say(`events by kind: ${kindSummary.length === 0 ? "none yet" : kindSummary}.`);
+  }
   const ageDays = memoryAgeDays(records.map((record) => record.ts), Date.now());
   const journalCount = readJournal().records.length;
   const briefRuns = byKind["brief_run"] ?? 0;
@@ -127,10 +131,12 @@ export function stats(argv: readonly string[] = []): number {
   // Gate denials are never counted here: that state is ephemeral (never
   // written to memory), and counting it would imply a durability Rocky
   // does not have.
-  const rationaleByFidelity = result.rationaleByFidelity ?? { raw: 0, summary: 0, none: 0 };
-  const rationaleTotal = byKind["rationale"] ?? 0;
-  const aliasTotal = byKind["alias"] ?? 0;
-  say(`rationale heard ${rationaleTotal} time${rationaleTotal === 1 ? "" : "s"}. raw ${rationaleByFidelity.raw}, summary ${rationaleByFidelity.summary}, none ${rationaleByFidelity.none}. alias ${aliasTotal} remembered.`);
+  if (isVerbose()) {
+    const rationaleByFidelity = result.rationaleByFidelity ?? { raw: 0, summary: 0, none: 0 };
+    const rationaleTotal = byKind["rationale"] ?? 0;
+    const aliasTotal = byKind["alias"] ?? 0;
+    say(`rationale heard ${rationaleTotal} time${rationaleTotal === 1 ? "" : "s"}. raw ${rationaleByFidelity.raw}, summary ${rationaleByFidelity.summary}, none ${rationaleByFidelity.none}. alias ${aliasTotal} remembered.`);
+  }
   const guardTotal = result.guardTotal ?? 0;
   const guardCancelled = result.guardCancelled ?? 0;
   const guardProceeded = result.guardProceeded ?? 0;
@@ -144,8 +150,10 @@ export function stats(argv: readonly string[] = []): number {
   }
   if (drainedGuard > 0) detail(`guard pending drained: ${drainedGuard}`);
   speakCoverage(coverage, records.length);
-  const tombstones = countReclaimTombstones(dirname(memoryPath()));
-  if (tombstones > 0) detail(`tombstones waiting sweep: ${tombstones}`);
+  if (isVerbose()) {
+    const tombstones = countReclaimTombstones(dirname(memoryPath()));
+    if (tombstones > 0) detail(`tombstones waiting sweep: ${tombstones}`);
+  }
   if (result.unresolved > 0) say(`${result.unresolved} error${result.unresolved === 1 ? "" : "s"} still without fix. you fix, I remember. good trade.`);
   return 0;
 }

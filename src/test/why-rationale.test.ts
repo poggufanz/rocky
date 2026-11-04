@@ -312,7 +312,24 @@ test("why <file> prints the coverage disclosure before the stated reason and add
   ]);
 });
 
-test("why <file> prints possible path omitted before the stated reason", () => {
+test("why <file> prints possible path omitted before the stated reason", (t) => {
+  setVerbose(t, undefined);
+  const now = Date.now();
+  const reason = statedReason({ id: "r1", ts: now - 120_000, files: ["src/net.ts"], excerpt: "retries stay low" });
+  const heard = orderedSinks();
+
+  assert.equal(why(["src/net.ts"], { load: () => [truncatedTriple(now - 60_000), reason], now, ...heard.deps }), 0);
+
+  assert.deepEqual(heard.lines, [
+    `say: "src/net.ts"... ${COVERAGE_INCOMPLETE_LINE}`,
+    "out: possible path omitted.",
+    "say: you said: retries stay low",
+    "out:   (2 minutes ago, human)",
+  ]);
+});
+
+test("why <file> keeps the coverage status on the possible path line under ROCKY_VERBOSE", (t) => {
+  setVerbose(t, "1");
   const now = Date.now();
   const reason = statedReason({ id: "r1", ts: now - 120_000, files: ["src/net.ts"], excerpt: "retries stay low" });
   const heard = orderedSinks();

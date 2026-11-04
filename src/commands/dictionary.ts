@@ -26,6 +26,16 @@ const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
 const DAY_MS = 24 * 60 * 60 * 1000;
 const EXPORT_USAGE = "export takes --kind failure|fix|note|triple and --since 30d. try again, question";
 const EXPORT_KINDS: ReadonlySet<MemoryRecord["kind"]> = new Set(["failure", "fix", "note", "triple"]);
+// Default words for how far to trust one remembered change. "complete" only says
+// the agent's changed-file list was whole within Rocky's cap, as the agent
+// reported it. It never says the agent's reason is right.
+const FILES_COMPLETE_WORDS = "file list complete, as agent reported.";
+const FILES_INCOMPLETE_WORDS = "some changed files may be missing.";
+const NOTE_WORDS = "your answer. remembered, not verified.";
+// Default coverage disclosures for `why`; ROCKY_VERBOSE=1 keeps the status-word forms.
+const SOME_PATH_MAY_BE_OMITTED_WORDS = "some path may be omitted.";
+const POSSIBLE_PATH_OMITTED_WORDS = "possible path omitted.";
+const AMBIGUOUS_PATH_WORDS = "path fits more than one file. no reason picked.";
 
 export interface DictionaryCommandDeps {
   load?: () => MemoryRecord[];
@@ -178,11 +188,20 @@ interface ProvenanceFields {
   coverage: string;
   confidence: string;
   reason: string;
+  /** The plain-words form of `reason`, what default output says instead of the labelled fields. */
+  words: string;
   prefix?: string;
   bareId?: boolean;
 }
 
+/** Default provenance: who said it, then how far to trust it. No record id, time stamp, or label. */
+function plainProvenanceLine(fields: ProvenanceFields): string {
+  const agent = fields.agent === undefined ? "" : terminalSafe(fields.agent, 64).trim();
+  return agent === "" ? fields.words : `by ${agent}. ${fields.words}`;
+}
+
 function provenanceLine(fields: ProvenanceFields, split = false): string {
+  if (!isVerbose()) return plainProvenanceLine(fields);
   const id = split
     ? "id=split; full-id-next-line"
     : fields.bareId === true
@@ -225,7 +244,7 @@ function shorten(text: string): string {
   return safe.length > 40 ? `${safe.slice(0, 37)}...` : safe;
 }
 
-function tripleConfidence(triple: DictionaryHit["triple"]): { confidence: "confirmed" | "incomplete"; reason: string; coverage: string; files: string } {
+function tripleConfidence(triple: DictionaryHit["triple"]): { confidence: "confirmed" | "incomplete"; reason: string; words: string; coverage: string; files: string } {
   const complete = triple.mechanism.coverageStatus === "complete"
     && triple.mechanism.truncatedFiles === 0
     && triple.mechanism.baseline === "captured"
@@ -236,15 +255,17 @@ function tripleConfidence(triple: DictionaryHit["triple"]): { confidence: "confi
   return {
     confidence: complete ? "confirmed" : "incomplete",
     reason: complete ? "captured file coverage complete" : "file coverage incomplete; I do not know full change",
+    words: complete ? FILES_COMPLETE_WORDS : FILES_INCOMPLETE_WORDS,
     coverage: complete ? "complete" : "incomplete",
     files,
   };
 }
 
-function noteConfidence(note: NoteHit["note"]): { confidence: "possible"; reason: string; coverage: string; files: string } {
+function noteConfidence(note: NoteHit["note"]): { confidence: "possible"; reason: string; words: string; coverage: string; files: string } {
   return {
     confidence: "possible",
     reason: "user comprehension note is remembered answer, not verified ground truth",
+    words: NOTE_WORDS,
     coverage: "single-file note",
     files: terminalSafe(note.file, MAX_PATH_DISPLAY_BYTES),
   };
@@ -259,8 +280,12 @@ function evidenceLines(hit: LookupHit): string[] {
     const provenance: ProvenanceFields = {
       id: note.id, ts: note.ts, source: "note", fileLabel: "file",
       files: metadata.files, coverage: metadata.coverage, confidence: metadata.confidence,
-      reason: metadata.reason, prefix: "note ", bareId: true,
+      reason: metadata.reason, words: metadata.words, prefix: "note ", bareId: true,
     };
+    if (!isVerbose()) {
+      const body = `note ${subject}: ${answer}  (${terminalSafe(note.file, MAX_PATH_DISPLAY_BYTES)}, ${ago(note.ts)};`;
+      return boundedDetailLines(body, provenance, ")");
+    }
     const line = `${provenanceLine(provenance)}; subject=${subject} answer=${answer}`;
     if (Buffer.byteLength(line, "utf8") <= MAX_OUTPUT_LINE_BYTES) return [terminalSafe(line, MAX_OUTPUT_LINE_BYTES)];
     const contentLine = `note subject=${subject} answer=${answer} file=${terminalSafe(note.file, MAX_PATH_DISPLAY_BYTES)}`;
@@ -277,6 +302,7 @@ function evidenceLines(hit: LookupHit): string[] {
   const provenance: ProvenanceFields = {
     id: triple.id, ts: triple.ts, source: triple.origin, agent: triple.agent, fileLabel: "files",
     files: metadata.files, coverage: metadata.coverage, confidence: metadata.confidence, reason: metadata.reason,
+    words: metadata.words,
   };
   return boundedDetailLines(body, provenance, ")");
 }
@@ -536,13 +562,24 @@ function sayRationale(
   support(terminalSafe(evidence, MAX_OUTPUT_LINE_BYTES));
 }
 
+/** When and by whom a stated reason was said. No record id. */
+function reasonEvidence(record: RationaleRecord): string {
+  return `  (${ago(record.ts)}, ${record.agent})`;
+}
+
+/** The evidence line of a reason linked to a printed change: id and fidelity only under ROCKY_VERBOSE. */
+function linkedReasonEvidence(record: RationaleRecord): string {
+  if (!isVerbose()) return reasonEvidence(record);
+  return `  (rationale id=${record.id}, ${ago(record.ts)}, agent=${record.agent}, fidelity=${record.rationale_fidelity})`;
+}
+
 /** Stated reasons that name the queried file. `why` calls this last, after every disclosure line. */
 function sayFileRationales(
   speak: (line: string) => void,
   support: (line: string) => void,
   reasons: readonly RationaleRecord[],
 ): void {
-  for (const reason of reasons) sayRationale(speak, support, reason, `  (${ago(reason.ts)}, ${reason.agent})`);
+  for (const reason of reasons) sayRationale(speak, support, reason, reasonEvidence(reason));
 }
 
 /** Newest failure/fix in this cwd within the fix-linker's own window — same evidence basis, not a guess. */
@@ -641,8 +678,13 @@ export function why(argv: string[], deps: DictionaryCommandDeps = {}): number {
   const scan = coverage();
   const memory = records();
   const evidenceResult = whyFileEvidence(memory, path, 5, now);
+  // Disclosures that name the reader's coverage status are verbose-only text; the
+  // default says the same fact without the status word.
+  const coverageStatus = evidenceResult.coverage.status;
   // The one line for "the reader may have missed a path", shared by the empty and the non-empty answer.
-  const someMayBeOmittedLine = terminalSafe(`coverage status: ${evidenceResult.coverage.status}; some path may be omitted.`, MAX_OUTPUT_LINE_BYTES);
+  const someMayBeOmittedLine = terminalSafe(isVerbose()
+    ? `coverage status: ${coverageStatus}; some path may be omitted.`
+    : SOME_PATH_MAY_BE_OMITTED_WORDS, MAX_OUTPUT_LINE_BYTES);
   // Legacy triples may contain an exact file witness without the newer
   // baseline/provenance proof. Keep that historical explanation visible, but
   // preserve conservative coverage disclosure and never claim completeness.
@@ -657,7 +699,9 @@ export function why(argv: string[], deps: DictionaryCommandDeps = {}): number {
   if (hits.length === 0) {
     if (evidenceResult.ambiguousPath) {
       speak(terminalSafe(`"${safePath}"... multiple possible paths. clarify, question`, MAX_OUTPUT_LINE_BYTES));
-      support(terminalSafe(`coverage status: ${evidenceResult.coverage.status}; no silent rationale selection; confidence=incomplete reason=ambiguous path`, MAX_OUTPUT_LINE_BYTES));
+      support(terminalSafe(isVerbose()
+        ? `coverage status: ${coverageStatus}; no silent rationale selection; confidence=incomplete reason=ambiguous path`
+        : AMBIGUOUS_PATH_WORDS, MAX_OUTPUT_LINE_BYTES));
       return 0;
     }
     const scanIncomplete = scan !== undefined && coverageIncomplete(scan);
@@ -669,7 +713,9 @@ export function why(argv: string[], deps: DictionaryCommandDeps = {}): number {
       speak(terminalSafe(`"${safePath}"... I not know if agent touch. coverage incomplete.`, MAX_OUTPUT_LINE_BYTES));
       if (scanIncomplete) support(coverageLine(scan, memory.length));
       if (pathMayBeOmitted) {
-        support(terminalSafe(`coverage status: ${evidenceResult.coverage.status}; possible path omitted.`, MAX_OUTPUT_LINE_BYTES));
+        support(terminalSafe(isVerbose()
+          ? `coverage status: ${coverageStatus}; possible path omitted.`
+          : POSSIBLE_PATH_OMITTED_WORDS, MAX_OUTPUT_LINE_BYTES));
       }
       if (readerBounded) support(someMayBeOmittedLine);
     } else if (evidenceResult.coverageIncomplete) {
@@ -698,6 +744,7 @@ export function why(argv: string[], deps: DictionaryCommandDeps = {}): number {
     const provenance: ProvenanceFields = {
       id: triple.id, ts: triple.ts, source: triple.origin, agent: triple.agent, fileLabel: "files",
       files: metadata.files, coverage: metadata.coverage, confidence: metadata.confidence, reason: metadata.reason,
+      words: metadata.words,
     };
     if (rationale) {
       speak(terminalSafe(`agent say: ${rationale}. I only hear. correct, question`, MAX_OUTPUT_LINE_BYTES));
@@ -711,8 +758,7 @@ export function why(argv: string[], deps: DictionaryCommandDeps = {}): number {
       for (const line of boundedDetailLines(`  (${where}, ${ago(triple.ts)};`, provenance, ")")) support(line);
     }
     for (const rationaleRecord of linkedRationales(memory, triple.id)) {
-      sayRationale(speak, support, rationaleRecord,
-        `  (rationale id=${rationaleRecord.id}, ${ago(rationaleRecord.ts)}, agent=${rationaleRecord.agent}, fidelity=${rationaleRecord.rationale_fidelity})`);
+      sayRationale(speak, support, rationaleRecord, linkedReasonEvidence(rationaleRecord));
     }
     if (showDiff) {
       let diffResult: GitDiffResult | undefined;
@@ -837,10 +883,11 @@ export async function quiz(
       const subject = subjectForNote(candidate);
       speak(terminalSafe(`your note "${subject}". what you understand, question`, MAX_OUTPUT_LINE_BYTES));
       await ask("your answer: ");
-      speak(terminalSafe(`I remember your answer: ${terminalSafe(candidate.answer, MAX_INTENT_DISPLAY_BYTES)}. confidence=${metadata.confidence}`, MAX_OUTPUT_LINE_BYTES));
+      const remembered = `I remember your answer: ${terminalSafe(candidate.answer, MAX_INTENT_DISPLAY_BYTES)}.`;
+      speak(terminalSafe(isVerbose() ? `${remembered} confidence=${metadata.confidence}` : `${remembered} not verified.`, MAX_OUTPUT_LINE_BYTES));
       const provenance: ProvenanceFields = {
         id: candidate.id, ts: candidate.ts, source: "note", fileLabel: "file", files: metadata.files,
-        coverage: metadata.coverage, confidence: metadata.confidence, reason: metadata.reason,
+        coverage: metadata.coverage, confidence: metadata.confidence, reason: metadata.reason, words: metadata.words,
       };
       for (const line of boundedProvenanceLines(provenance)) support(line);
       continue;
@@ -855,6 +902,7 @@ export async function quiz(
     const provenance: ProvenanceFields = {
       id: candidate.id, ts: candidate.ts, source: candidate.origin, agent: candidate.agent, fileLabel: "files",
       files: metadata.files, coverage: metadata.coverage, confidence: metadata.confidence, reason: metadata.reason,
+      words: metadata.words,
     };
     for (const line of boundedDetailLines(`  (${path} +${first?.plusMinus[0] ?? 0} -${first?.plusMinus[1] ?? 0}, ${ago(candidate.ts)};`, provenance, ")")) support(line);
   }

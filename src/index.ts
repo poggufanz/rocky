@@ -80,10 +80,10 @@ usage:
   rocky teach <file>[:<line>] [--ladder]   why this code, from witness or evidence
   rocky digest              hear this week's remembered intent pattern.
   rocky quiz                practice newest remembered intent or note; asks, then reveals,
-                            deterministic newest-first, stable id tie-break, repeats unchanged
-                            candidates, and never grades.
+                            deterministic newest-first, repeats unchanged candidates, and
+                            never grades.
   rocky export [--kind failure|fix|note|triple] [--since ISO|Nd]
-                            dump raw memory as JSONL on stdout.
+                            dump raw memory as JSONL on stdout. triple = intent.
   rocky concepts            list concepts heard in memory, with counts and aliases.
   rocky concept <id>        hear newest-first evidence for one concept.
   rocky concept alias [--retract] "<phrase>" <id>

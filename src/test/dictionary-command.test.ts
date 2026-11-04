@@ -2,7 +2,7 @@ import { strict as assert } from "node:assert";
 import { Buffer } from "node:buffer";
 import { test } from "node:test";
 import { digest, exportCommand, how, quiz, what, why } from "../commands/dictionary.js";
-import type { MemoryCoverage, MemoryRecord, TripleRecord } from "../core/memory-read.js";
+import type { MemoryCoverage, MemoryRecord, RationaleRecord, TripleRecord } from "../core/memory-read.js";
 import { pathIdentityHash } from "../core/memory-read.js";
 import { MAX_WHY_RECORDS } from "../core/memory-query.js";
 import { validateRockyPhrase } from "../ui/phrases.js";
@@ -10,6 +10,8 @@ import { setVerbose } from "./verbose-switch.js";
 
 const NO_RECORD_NAMES_FILE = "no record names this file. I not know if agent touch it.";
 const COVERAGE_INCOMPLETE_LINE = "I not know if agent touch. coverage incomplete.";
+/** The record ids and internal labels that default output must not print. */
+const INTERNAL_LABELS = /id=|triple-|confidence=|source=|\bts=|fidelity=|coverage=/u;
 
 const fullHostileMatrix = [
   "unicode-🪨-工程-e\u0301",
@@ -481,26 +483,40 @@ test("future dictionary evidence says I do not know and does not enter teaching 
   assert.equal(quizOutput.sayLines.some((line) => line.includes("banana")), false);
 });
 
-test("quiz repeats deterministic note candidates and labels answer as unverified", async () => {
-  const note: MemoryRecord = {
-    kind: "note", id: "old-note", ts: 1, cwd: "/w", cmd: "rocky note",
-    file: "src/app.ts", line: 1, subject: "cache", answer: "banana",
-  };
-  const run = async () => {
-    const output = sinks();
-    const asked: string[] = [];
-    assert.equal(await quiz([], {
-      load: () => [note], now: 2 * 24 * 60 * 60 * 1000, ask: async (message) => { asked.push(message); return "x"; }, ...output.deps,
-    }), 0);
-    return { output, asked };
-  };
-  const first = await run();
-  const second = await run();
+const OLD_NOTE: MemoryRecord = {
+  kind: "note", id: "old-note", ts: 1, cwd: "/w", cmd: "rocky note",
+  file: "src/app.ts", line: 1, subject: "cache", answer: "banana",
+};
+
+async function quizOverOldNote() {
+  const output = sinks();
+  const asked: string[] = [];
+  assert.equal(await quiz([], {
+    load: () => [OLD_NOTE], now: 2 * 24 * 60 * 60 * 1000, ask: async (message) => { asked.push(message); return "x"; }, ...output.deps,
+  }), 0);
+  return { output, asked };
+}
+
+test("quiz repeats deterministic note candidates and labels answer as unverified", async (t) => {
+  setVerbose(t, undefined);
+  const first = await quizOverOldNote();
+  const second = await quizOverOldNote();
   assert.deepEqual(first.asked, ["your answer: "]);
   assert.deepEqual(first.output.sayLines, second.output.sayLines);
-  assert.ok(first.output.sayLines.some((line) => line.includes("banana")));
-  assert.ok(first.output.sayLines.some((line) => line.includes("confidence=possible")));
+  assert.ok(first.output.sayLines.includes("I remember your answer: banana. not verified."), first.output.sayLines.join("\n"));
+  assert.deepEqual(validateRockyPhrase("I remember your answer: banana. not verified."), []);
+  assert.deepEqual(first.output.outLines, ["your answer. remembered, not verified."]);
   assert.equal(first.output.sayLines.some((line) => line.includes("wrong") || line.includes("score")), false);
+  assert.doesNotMatch([...first.output.sayLines, ...first.output.outLines].join("\n"), INTERNAL_LABELS);
+});
+
+test("quiz keeps the confidence label and the full provenance line under ROCKY_VERBOSE", async (t) => {
+  setVerbose(t, "1");
+  const { output } = await quizOverOldNote();
+  assert.ok(output.sayLines.includes("I remember your answer: banana. confidence=possible"), output.sayLines.join("\n"));
+  assert.deepEqual(output.outLines, [
+    "id=old-note ts=1 source=note file=src/app.ts coverage=single-file note confidence=possible reason=user comprehension note is remembered answer, not verified ground truth",
+  ]);
 });
 
 test("why without rationale reports change without reason", () => {
@@ -536,19 +552,30 @@ test("why on a fresh memory says no record names the file and claims nothing was
   assert.deepEqual(validateRockyPhrase(`"package.json"... ${NO_RECORD_NAMES_FILE}`), []);
 });
 
-test("why keeps possible path omitted when a record may hide the file", () => {
-  const truncated: TripleRecord = {
-    kind: "triple", id: "may-hide", ts: 100, cwd: "/repo", platform: "linux", schemaV: 1, agent: "codex", origin: "agent-hook",
-    mechanism: {
-      files: [{ path: "src/other.ts", plusMinus: [1, 0], props: [], provenance: "tool-observed" }],
-      truncatedFiles: 4, baseline: "captured", coverageStatus: "truncated",
-    },
-  };
+const MAY_HIDE_THE_FILE: TripleRecord = {
+  kind: "triple", id: "may-hide", ts: 100, cwd: "/repo", platform: "linux", schemaV: 1, agent: "codex", origin: "agent-hook",
+  mechanism: {
+    files: [{ path: "src/other.ts", plusMinus: [1, 0], props: [], provenance: "tool-observed" }],
+    truncatedFiles: 4, baseline: "captured", coverageStatus: "truncated",
+  },
+};
+
+test("why keeps possible path omitted when a record may hide the file", (t) => {
+  setVerbose(t, undefined);
   const output = sinks();
-  assert.equal(why(["src/missing.ts"], { load: () => [truncated], now: 100, ...output.deps }), 0);
+  assert.equal(why(["src/missing.ts"], { load: () => [MAY_HIDE_THE_FILE], now: 100, ...output.deps }), 0);
+  assert.deepEqual(output.sayLines, [`"src/missing.ts"... ${COVERAGE_INCOMPLETE_LINE}`]);
+  assert.deepEqual(output.outLines, ["possible path omitted."]);
+  assert.equal([...output.sayLines, ...output.outLines].some((line) => line.includes("no record names")), false);
+  assert.deepEqual(validateRockyPhrase("possible path omitted."), []);
+});
+
+test("why keeps the coverage status word on the possible path line under ROCKY_VERBOSE", (t) => {
+  setVerbose(t, "1");
+  const output = sinks();
+  assert.equal(why(["src/missing.ts"], { load: () => [MAY_HIDE_THE_FILE], now: 100, ...output.deps }), 0);
   assert.deepEqual(output.sayLines, [`"src/missing.ts"... ${COVERAGE_INCOMPLETE_LINE}`]);
   assert.deepEqual(output.outLines, ["coverage status: unknown; possible path omitted."]);
-  assert.equal([...output.sayLines, ...output.outLines].some((line) => line.includes("no record names")), false);
 });
 
 test("why discloses an incomplete memory scan without claiming a path was omitted", (t) => {
@@ -580,14 +607,27 @@ function fillerRecords(count: number): MemoryRecord[] {
   }));
 }
 
-test("why does not call a reader that stopped at its record bound whole", () => {
-  // The loader held every record, so its scan is whole. The why reader still examined only the first MAX_WHY_RECORDS.
-  const whole: MemoryCoverage = { version: 1, scanned: MAX_WHY_RECORDS + 1, skipped: 0, truncated: 0, bytesScanned: 1, bytesTotal: 1, complete: true };
+// The loader held every record, so its scan is whole. The why reader still examined only the first MAX_WHY_RECORDS.
+const WHOLE_SCAN_PAST_THE_READER_BOUND: MemoryCoverage = {
+  version: 1, scanned: MAX_WHY_RECORDS + 1, skipped: 0, truncated: 0, bytesScanned: 1, bytesTotal: 1, complete: true,
+};
+
+test("why does not call a reader that stopped at its record bound whole", (t) => {
+  setVerbose(t, undefined);
   const output = sinks();
-  assert.equal(why(["package.json"], { load: () => fillerRecords(MAX_WHY_RECORDS + 1), coverage: () => whole, now: 100, ...output.deps }), 0);
+  assert.equal(why(["package.json"], { load: () => fillerRecords(MAX_WHY_RECORDS + 1), coverage: () => WHOLE_SCAN_PAST_THE_READER_BOUND, now: 100, ...output.deps }), 0);
+  assert.deepEqual(output.sayLines, [`"package.json"... ${COVERAGE_INCOMPLETE_LINE}`]);
+  assert.deepEqual(output.outLines, ["some path may be omitted."]);
+  assert.equal([...output.sayLines, ...output.outLines].some((line) => line.includes("no record names") || line.includes("possible path omitted")), false);
+  assert.deepEqual(validateRockyPhrase("some path may be omitted."), []);
+});
+
+test("why keeps the coverage status word on the some-path line under ROCKY_VERBOSE", (t) => {
+  setVerbose(t, "1");
+  const output = sinks();
+  assert.equal(why(["package.json"], { load: () => fillerRecords(MAX_WHY_RECORDS + 1), coverage: () => WHOLE_SCAN_PAST_THE_READER_BOUND, now: 100, ...output.deps }), 0);
   assert.deepEqual(output.sayLines, [`"package.json"... ${COVERAGE_INCOMPLETE_LINE}`]);
   assert.deepEqual(output.outLines, ["coverage status: unknown; some path may be omitted."]);
-  assert.equal([...output.sayLines, ...output.outLines].some((line) => line.includes("no record names") || line.includes("possible path omitted")), false);
 });
 
 test("why still calls a memory of exactly the reader's record bound whole", () => {
@@ -740,7 +780,8 @@ test("what --ai reorders known hits and appends every omitted hit exactly once",
   assert.ok(!outLines.some((line) => line.includes("unknown")));
 });
 
-test("what --ai cannot mutate or invent evidence metadata", async () => {
+test("what --ai cannot mutate or invent evidence metadata", async (t) => {
+  setVerbose(t, "1");
   const { sayLines, outLines, deps } = sinks();
   const rank = {
     async run(_query: string, hits: readonly { triple: TripleRecord }[]) {
@@ -788,7 +829,8 @@ test("what --ai fallback keeps deterministic note and triple order", async () =>
   }
 });
 
-test("long triple and note evidence retain bounded provenance fields", async () => {
+test("long triple and note evidence retain bounded provenance fields", async (t) => {
+  setVerbose(t, "1");
   const now = Date.now();
   const longId = "i".repeat(512);
   const triple: TripleRecord = {
@@ -821,7 +863,8 @@ test("long triple and note evidence retain bounded provenance fields", async () 
   for (const line of [...output.sayLines, ...output.outLines]) assert.ok(Buffer.byteLength(line, "utf8") <= 512);
 });
 
-test("full-id continuation neutralizes zero-width joiners and fullwidth question marks", async () => {
+test("full-id continuation neutralizes zero-width joiners and fullwidth question marks", async (t) => {
+  setVerbose(t, "1");
   const now = Date.now();
   const hostileId = `${"safe-"}${"i".repeat(505)}\u200c\u200d\uFF1F`;
   const triple: TripleRecord = {
@@ -841,7 +884,8 @@ test("full-id continuation neutralizes zero-width joiners and fullwidth question
   for (const line of lines) assert.ok(Buffer.byteLength(line, "utf8") <= 512);
 });
 
-test("long why provenance stays recoverable for rationale and no-rationale triples", () => {
+test("long why provenance stays recoverable for rationale and no-rationale triples", (t) => {
+  setVerbose(t, "1");
   const now = Date.now();
   const path = `src/${"p".repeat(166)}.ts`;
   const make = (id: string, rationale: TripleRecord["rationale"]): TripleRecord => ({
@@ -881,7 +925,8 @@ test("long why provenance stays recoverable for rationale and no-rationale tripl
   assert.equal(withoutReason.sayLines.some((line) => line.includes("id=")), false);
 });
 
-test("quiz long note and triple reveals keep bounded provenance and full ids", async () => {
+test("quiz long note and triple reveals keep bounded provenance and full ids", async (t) => {
+  setVerbose(t, "1");
   const now = Date.now();
   const noteId = "n".repeat(512);
   const tripleId = "t".repeat(512);
@@ -929,7 +974,8 @@ test("quiz long note and triple reveals keep bounded provenance and full ids", a
   }
 });
 
-test("what --ai does not call model for note-only evidence", async () => {
+test("what --ai does not call model for note-only evidence", async (t) => {
+  setVerbose(t, "1");
   const note: MemoryRecord = {
     kind: "note", id: "note-only", ts: Date.now(), cwd: "/w", cmd: "rocky note",
     file: "src/app.ts", line: 1, subject: "cache", answer: "remember cache",
@@ -993,6 +1039,217 @@ test("what --ai requests an exact ten-second caller signal", async () => {
     if (originalDescriptor) Object.defineProperty(AbortSignal, "timeout", originalDescriptor);
     else Reflect.deleteProperty(AbortSignal, "timeout");
   }
+});
+
+/** Everything Rocky wrote to stderr while `fn` ran, the bytes a terminal would hear. */
+async function heardOnStderr(fn: () => Promise<unknown> | unknown): Promise<string> {
+  const original = process.stderr.write;
+  let heard = "";
+  process.stderr.write = ((chunk: string | Uint8Array) => {
+    heard += String(chunk);
+    return true;
+  }) as typeof process.stderr.write;
+  try {
+    await fn();
+    return heard;
+  } finally {
+    process.stderr.write = original;
+  }
+}
+
+/** The seeded triple remembered 90 seconds ago, so `ago` says "1 minute ago" however slow the run. */
+function seededMinuteAgo(): MemoryRecord[] {
+  return seeded().map((record) => ({ ...record, ts: Date.now() - 90_000 }) as MemoryRecord);
+}
+
+/** A triple whose file list is complete by every check, remembered 90 seconds ago. */
+function completeTriple(): TripleRecord {
+  return {
+    kind: "triple", id: "complete-triple", ts: Date.now() - 90_000, cwd: "/repo", platform: "linux", schemaV: 1,
+    agent: "codex", origin: "agent-hook", intent: { text: "tighten spacing between rows" },
+    rationale: { text: "rows were touching", tags: [], source: "notify" },
+    mechanism: {
+      files: [{ path: "src/rows.css", plusMinus: [2, 1], props: ["gap"], provenance: "tool-observed" }],
+      truncatedFiles: 0, baseline: "captured", coverageStatus: "complete",
+    },
+  };
+}
+
+test("default what, how and why print no record id and no internal label", async (t) => {
+  setVerbose(t, undefined);
+  const heard = await heardOnStderr(async () => {
+    assert.equal(await what(["naikin"], { load: seeded }), 0);
+    assert.equal(how(["naikin"], { load: seeded }), 0);
+    assert.equal(why(["src/app.css"], { load: seeded }), 0);
+  });
+  assert.match(heard, /margin-top/u);
+  assert.match(heard, /by claude-code\. some changed files may be missing\./u);
+  assert.doesNotMatch(heard, /id=|triple-|confidence=|source=|\bts=/u);
+  assert.doesNotMatch(heard, INTERNAL_LABELS);
+  assert.doesNotMatch(heard, /\bt1\b/u, "the record id itself must not be printed");
+});
+
+test("default evidence line names who said it and how far to trust the file list", async (t) => {
+  setVerbose(t, undefined);
+  const whatOutput = sinks();
+  assert.equal(await what(["naikin"], { load: seededMinuteAgo, ...whatOutput.deps }), 0);
+  const howOutput = sinks();
+  assert.equal(how(["naikin"], { load: seededMinuteAgo, ...howOutput.deps }), 0);
+  const whyOutput = sinks();
+  assert.equal(why(["src/app.css"], { load: seededMinuteAgo, ...whyOutput.deps }), 0);
+  const evidenceLine = "naikin dikit buttonnya -> margin-top  (src/app.css +3 -1, 1 minute ago; by claude-code. some changed files may be missing.)";
+  assert.deepEqual(whatOutput.outLines, [evidenceLine]);
+  assert.deepEqual(howOutput.outLines, [evidenceLine]);
+  assert.deepEqual(whyOutput.outLines, [
+    "some path may be omitted.",
+    "  (src/app.css +3 -1, 1 minute ago, tags: spacing; by claude-code. some changed files may be missing.)",
+  ]);
+  assert.deepEqual(validateRockyPhrase("by claude-code. some changed files may be missing."), []);
+});
+
+test("default evidence says the file list is complete only as the agent reported it", async (t) => {
+  setVerbose(t, undefined);
+  const output = sinks();
+  assert.equal(await what(["tighten"], { load: () => [completeTriple()], ...output.deps }), 0);
+  assert.deepEqual(output.outLines, [
+    "tighten spacing between rows -> gap  (src/rows.css +2 -1, 1 minute ago; by codex. file list complete, as agent reported.)",
+  ]);
+  assert.doesNotMatch(output.outLines.join("\n"), /\b(?:sure|true|right|correct|fixed|verified)\b/iu);
+  assert.deepEqual(validateRockyPhrase("by codex. file list complete, as agent reported."), []);
+});
+
+test("default evidence for a remembered note says it is the user's answer, not verified", async (t) => {
+  setVerbose(t, undefined);
+  const note: MemoryRecord = {
+    kind: "note", id: "note-cache", ts: Date.now() - 2 * 24 * 60 * 60 * 1000 - 90_000, cwd: "/w", cmd: "rocky note",
+    file: "src/app.ts", line: 1, subject: "cache", answer: "banana",
+  };
+  const output = sinks();
+  assert.equal(await what(["cache"], { load: () => [note], ...output.deps }), 0);
+  assert.deepEqual(output.outLines, ["note cache: banana  (src/app.ts, 2 days ago; your answer. remembered, not verified.)"]);
+  assert.doesNotMatch(output.outLines.join("\n"), INTERNAL_LABELS);
+  assert.deepEqual(validateRockyPhrase("your answer. remembered, not verified."), []);
+});
+
+test("default evidence with long values splits into bounded lines and still prints no id", async (t) => {
+  setVerbose(t, undefined);
+  const now = Date.now();
+  const triple: TripleRecord = {
+    kind: "triple", id: "i".repeat(512), ts: now - 400 * 24 * 60 * 60 * 1000, cwd: "/repo", platform: "linux", schemaV: 1,
+    agent: "codex", origin: "agent-hook", intent: { text: `${"工".repeat(60)} lesson` },
+    mechanism: {
+      files: [{
+        path: `src/${"p".repeat(176)}.ts`, plusMinus: [Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER],
+        props: ["q".repeat(130)], provenance: "tool-observed",
+      }],
+      truncatedFiles: 0, baseline: "captured", coverageStatus: "complete",
+    },
+  };
+  const output = sinks();
+  assert.equal(await what(["lesson"], { load: () => [triple], now, ...output.deps }), 0);
+  assert.equal(output.outLines.length, 2, output.outLines.join("\n"));
+  for (const line of output.outLines) assert.ok(Buffer.byteLength(line, "utf8") <= 512, String(Buffer.byteLength(line, "utf8")));
+  assert.equal(output.outLines[1], "by codex. file list complete, as agent reported.");
+  assert.equal(output.outLines.some((line) => line.includes("i".repeat(32))), false, "the full record id must not be printed");
+});
+
+test("ROCKY_VERBOSE keeps the full triple provenance line byte for byte in what, how and why", async (t) => {
+  setVerbose(t, "1");
+  const records = seededMinuteAgo();
+  const { ts } = records[0] as TripleRecord;
+  const legacy = `id=t1 ts=${ts} source=agent-hook agent=claude-code files=1; witness=src/app.css coverage=incomplete confidence=incomplete reason=file coverage incomplete; I do not know full change`;
+  const whatOutput = sinks();
+  assert.equal(await what(["naikin"], { load: () => records, ...whatOutput.deps }), 0);
+  const howOutput = sinks();
+  assert.equal(how(["naikin"], { load: () => records, ...howOutput.deps }), 0);
+  const whyOutput = sinks();
+  assert.equal(why(["src/app.css"], { load: () => records, ...whyOutput.deps }), 0);
+  const evidenceLine = `naikin dikit buttonnya -> margin-top  (src/app.css +3 -1, 1 minute ago; ${legacy})`;
+  assert.deepEqual(whatOutput.outLines, [evidenceLine]);
+  assert.deepEqual(howOutput.outLines, [evidenceLine]);
+  assert.deepEqual(whyOutput.outLines, [
+    "coverage status: unknown; some path may be omitted.",
+    `  (src/app.css +3 -1, 1 minute ago, tags: spacing; ${legacy})`,
+  ]);
+});
+
+test("ROCKY_VERBOSE keeps the note provenance line byte for byte", async (t) => {
+  setVerbose(t, "1");
+  const output = sinks();
+  assert.equal(await what(["cache"], { load: () => [OLD_NOTE], now: 2 * 24 * 60 * 60 * 1000, ...output.deps }), 0);
+  assert.deepEqual(output.outLines, [
+    "note old-note ts=1 source=note file=src/app.ts coverage=single-file note confidence=possible reason=user comprehension note is remembered answer, not verified ground truth; subject=cache answer=banana",
+  ]);
+});
+
+function ambiguousIndexRecords(): MemoryRecord[] {
+  const make = (id: string, path: string): TripleRecord => ({
+    kind: "triple", id, ts: 100, cwd: "/repo", platform: "linux", schemaV: 1, agent: "codex", origin: "agent-hook",
+    rationale: { text: id, tags: [], source: "notify" },
+    mechanism: {
+      files: [{ path, plusMinus: [1, 0], props: [id], provenance: "tool-observed" }],
+      truncatedFiles: 0, baseline: "captured", coverageStatus: "complete",
+    },
+  });
+  return [make("one", "one/index.ts"), make("two", "two/index.ts")];
+}
+
+test("why says an ambiguous path in plain words", (t) => {
+  setVerbose(t, undefined);
+  const output = sinks();
+  assert.equal(why(["index.ts"], { load: ambiguousIndexRecords, now: 100, ...output.deps }), 0);
+  assert.deepEqual(output.outLines, ["path fits more than one file. no reason picked."]);
+  assert.deepEqual(validateRockyPhrase("path fits more than one file. no reason picked."), []);
+  assert.doesNotMatch(output.outLines.join("\n"), INTERNAL_LABELS);
+});
+
+test("why keeps the status and confidence labels on an ambiguous path under ROCKY_VERBOSE", (t) => {
+  setVerbose(t, "1");
+  const output = sinks();
+  assert.equal(why(["index.ts"], { load: ambiguousIndexRecords, now: 100, ...output.deps }), 0);
+  assert.deepEqual(output.outLines, ["coverage status: unknown; no silent rationale selection; confidence=incomplete reason=ambiguous path"]);
+});
+
+function linkedReasonRecords(now: number): MemoryRecord[] {
+  const triple: TripleRecord = {
+    kind: "triple", id: "triple-linked", ts: now - 1_000, cwd: "/repo", platform: "linux", schemaV: 1, agent: "codex", origin: "agent-hook",
+    mechanism: {
+      files: [{ path: "src/app.css", plusMinus: [3, 1], props: ["margin-top"], provenance: "tool-observed" }],
+      truncatedFiles: 0, baseline: "captured", coverageStatus: "complete",
+    },
+  };
+  const reason: RationaleRecord = {
+    kind: "rationale", id: "r-notify", ts: now, v: 1, cwd: "/repo", agent: "claude-code",
+    rationale_fidelity: "summary", source: "notify", excerpt: "rows stay apart", links: { tripleId: "triple-linked" },
+  };
+  return [triple, reason];
+}
+
+test("why names a linked reason by when and who said it, with no id", (t) => {
+  setVerbose(t, undefined);
+  const now = Date.now();
+  const output = sinks();
+  assert.equal(why(["src/app.css"], { load: () => linkedReasonRecords(now), now, ...output.deps }), 0);
+  assert.ok(output.sayLines.includes("agent said: rows stay apart"), output.sayLines.join("\n"));
+  assert.equal(output.outLines.at(-1), "  (just now, claude-code)");
+  assert.doesNotMatch([...output.sayLines, ...output.outLines].join("\n"), INTERNAL_LABELS);
+});
+
+test("why keeps the linked reason id and fidelity under ROCKY_VERBOSE", (t) => {
+  setVerbose(t, "1");
+  const now = Date.now();
+  const output = sinks();
+  assert.equal(why(["src/app.css"], { load: () => linkedReasonRecords(now), now, ...output.deps }), 0);
+  assert.ok(output.sayLines.includes("agent said: rows stay apart"), output.sayLines.join("\n"));
+  assert.equal(output.outLines.at(-1), "  (rationale id=r-notify, just now, agent=claude-code, fidelity=summary)");
+});
+
+test("quiz reveals a triple with the agent and file-list words and no id by default", async (t) => {
+  setVerbose(t, undefined);
+  const old = seeded().map((record) => ({ ...record, ts: Date.now() - 3 * 24 * 60 * 60 * 1000 }));
+  const output = sinks();
+  assert.equal(await quiz([], { load: () => old as MemoryRecord[], now: Date.now(), ask: async () => "margin", ...output.deps }), 0);
+  assert.deepEqual(output.outLines, ["  (src/app.css +3 -1, 3 days ago; by claude-code. some changed files may be missing.)"]);
 });
 
 test("quiz asks from own history, reveals, never grades", async () => {

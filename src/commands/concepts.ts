@@ -13,6 +13,21 @@ import { isCompleteMemoryCoverage, loadMemoryChecked, type MemoryCoverage } from
 import { CS_CONCEPT_IDS } from "../core/cs-explain.js";
 import { ago, detail, heading, isVerbose, say } from "../ui/rocky.js";
 
+/**
+ * Plain words for the kinds of record a concept is heard in: the three kinds the
+ * concept index holds today. A kind with no entry prints as stored, and
+ * ROCKY_VERBOSE=1 prints the stored kind for all of them.
+ */
+const KIND_WORDS: ReadonlyMap<string, string> = new Map([
+  ["triple", "intent"],
+  ["rationale", "reason"],
+  ["failure", "error"],
+]);
+
+function kindWord(kind: string): string {
+  return isVerbose() ? kind : KIND_WORDS.get(kind) ?? kind;
+}
+
 function knownConcept(id: string): boolean {
   return CONCEPTS.some((concept) => concept.id === id);
 }
@@ -104,7 +119,7 @@ function reverseLookup(conceptId: string): number {
     detail(`cs concept ${conceptId}. full explain in dash, question`);
   }
   for (const entry of evidence) {
-    detail(`${ago(entry.ts)}  ${entry.kind}  ${entry.snippet}`);
+    detail(`${ago(entry.ts)}  ${kindWord(entry.kind)}  ${entry.snippet}`);
   }
   if (coverageIncomplete(loaded.coverage)) detail(coverageLine(loaded.coverage, loaded.records.length));
   return 0;
