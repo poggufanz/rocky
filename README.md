@@ -60,7 +60,7 @@ rocky hook install
 
 `rocky setup` and `rocky hook install` are separate on purpose. MCP or agent setup never edits `.bashrc` or `$PROFILE`.
 
-`rocky what`, `rocky how`, `rocky why`, `rocky digest`, and `rocky quiz` answer from changes an agent recorded, so they need `rocky setup --agent-hooks` first; `rocky teach` needs a `file:line` or `explain` records.
+`rocky what`, `rocky how`, `rocky why`, `rocky digest`, and `rocky quiz` need `rocky setup --agent-hooks` first; `rocky teach` needs a `file:line` argument or `explain` records.
 
 On Windows, `rocky hook install` installs into every PowerShell host it finds on the machine — Windows PowerShell and PowerShell 7, both when present, each into its own `$PROFILE` — alongside the Bash hook if `.bashrc` is also in play (Git Bash/WSL). `rocky hook status` reports each host separately.
 

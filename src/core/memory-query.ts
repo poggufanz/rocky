@@ -1205,7 +1205,7 @@ export function whyFilePathRelation(triple: TripleRecord, path: string): WhyFile
   }
 }
 
-const MAX_WHY_RECORDS = 20_000;
+export const MAX_WHY_RECORDS = 20_000;
 const MAX_RAW_TRIPLE_FILES = 256;
 
 interface SafeTripleCollection {

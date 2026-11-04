@@ -4,6 +4,7 @@ import { test } from "node:test";
 import { digest, exportCommand, how, quiz, what, why } from "../commands/dictionary.js";
 import type { MemoryCoverage, MemoryRecord, TripleRecord } from "../core/memory-read.js";
 import { pathIdentityHash } from "../core/memory-read.js";
+import { MAX_WHY_RECORDS } from "../core/memory-query.js";
 import { validateRockyPhrase } from "../ui/phrases.js";
 
 const NO_RECORD_NAMES_FILE = "no record names this file. I not know if agent touch it.";
@@ -558,6 +559,30 @@ test("why discloses an incomplete memory scan without claiming a path was omitte
     "memory coverage incomplete: version 1; scanned 3; skipped 0; truncated 1; bytes 10/20; reason file-size-cap",
   ]);
   assert.equal([...output.sayLines, ...output.outLines].some((line) => line.includes("possible path omitted") || line.includes("no record names")), false);
+});
+
+function fillerRecords(count: number): MemoryRecord[] {
+  return Array.from({ length: count }, (_, index): MemoryRecord => ({
+    kind: "failure", id: `filler-${index}`, ts: 1, cwd: "/w", cmd: "x", exitCode: 1, fingerprint: "fp", signature: [], excerpt: "",
+  }));
+}
+
+test("why does not call a reader that stopped at its record bound whole", () => {
+  // The loader held every record, so its scan is whole. The why reader still examined only the first MAX_WHY_RECORDS.
+  const whole: MemoryCoverage = { version: 1, scanned: MAX_WHY_RECORDS + 1, skipped: 0, truncated: 0, bytesScanned: 1, bytesTotal: 1, complete: true };
+  const output = sinks();
+  assert.equal(why(["package.json"], { load: () => fillerRecords(MAX_WHY_RECORDS + 1), coverage: () => whole, now: 100, ...output.deps }), 0);
+  assert.deepEqual(output.sayLines, [`"package.json"... ${COVERAGE_INCOMPLETE_LINE}`]);
+  assert.deepEqual(output.outLines, ["coverage status: unknown; some path may be omitted."]);
+  assert.equal([...output.sayLines, ...output.outLines].some((line) => line.includes("no record names") || line.includes("possible path omitted")), false);
+});
+
+test("why still calls a memory of exactly the reader's record bound whole", () => {
+  const whole: MemoryCoverage = { version: 1, scanned: MAX_WHY_RECORDS, skipped: 0, truncated: 0, bytesScanned: 1, bytesTotal: 1, complete: true };
+  const output = sinks();
+  assert.equal(why(["package.json"], { load: () => fillerRecords(MAX_WHY_RECORDS), coverage: () => whole, now: 100, ...output.deps }), 0);
+  assert.deepEqual(output.sayLines, [`"package.json"... ${NO_RECORD_NAMES_FILE}`]);
+  assert.deepEqual(output.outLines, []);
 });
 
 test("why keeps hostile rationale, tags, and paths bounded and terminal-safe", () => {

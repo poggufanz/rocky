@@ -4,7 +4,7 @@ import { loadConfig } from "../core/config.js";
 import { csConceptCounts, digestBuckets, queryDictionary, queryNotes, quizCandidates, rationalesForFile, type DictionaryHit, type NoteHit } from "../core/dictionary.js";
 import { isCompleteMemoryCoverage, isOperationalMemoryRecord, loadMemoryChecked, sameCwd } from "../core/memory-read.js";
 import { recordRationale } from "../core/memory.js";
-import { LINK_WINDOW_MS, whyFile, whyFileEvidence, whyFilePathRelation } from "../core/memory-query.js";
+import { LINK_WINDOW_MS, MAX_WHY_RECORDS, whyFile, whyFileEvidence, whyFilePathRelation } from "../core/memory-query.js";
 import type { MemoryCoverage, MemoryRecord, RationaleLinks, RationaleRecord, RationaleSource } from "../core/memory-read.js";
 import { resolveRockyPaths } from "../core/state-paths.js";
 import { createTtyPromptPort } from "../setup/prompt.js";
@@ -638,6 +638,8 @@ export function why(argv: string[], deps: DictionaryCommandDeps = {}): number {
   const scan = coverage();
   const memory = records();
   const evidenceResult = whyFileEvidence(memory, path, 5, now);
+  // The one line for "the reader may have missed a path", shared by the empty and the non-empty answer.
+  const someMayBeOmittedLine = terminalSafe(`coverage status: ${evidenceResult.coverage.status}; some path may be omitted.`, MAX_OUTPUT_LINE_BYTES);
   // Legacy triples may contain an exact file witness without the newer
   // baseline/provenance proof. Keep that historical explanation visible, but
   // preserve conservative coverage disclosure and never claim completeness.
@@ -657,16 +659,20 @@ export function why(argv: string[], deps: DictionaryCommandDeps = {}): number {
     }
     const scanIncomplete = scan !== undefined && coverageIncomplete(scan);
     const pathMayBeOmitted = evidenceResult.possible.length > 0;
-    if (scanIncomplete || pathMayBeOmitted) {
+    // The reader examines only its first MAX_WHY_RECORDS records, yet the loader's scan can
+    // hold more: a whole scan does not mean the reader examined everything.
+    const readerBounded = memory.length > MAX_WHY_RECORDS;
+    if (scanIncomplete || pathMayBeOmitted || readerBounded) {
       speak(terminalSafe(`"${safePath}"... I not know if agent touch. coverage incomplete.`, MAX_OUTPUT_LINE_BYTES));
       if (scanIncomplete) support(coverageLine(scan));
       if (pathMayBeOmitted) {
         support(terminalSafe(`coverage status: ${evidenceResult.coverage.status}; possible path omitted.`, MAX_OUTPUT_LINE_BYTES));
       }
+      if (readerBounded) support(someMayBeOmittedLine);
     } else if (evidenceResult.coverageIncomplete) {
-      // The reader marks empty evidence incomplete by construction. With a whole scan and
-      // no record that might hide this path, nothing was omitted. Say only that no record
-      // names it, and not even that when a stated reason does.
+      // The reader marks empty evidence incomplete by construction. With a whole scan, a reader
+      // that examined every record, and no record that might hide this path, nothing was
+      // omitted. Say only that no record names it, and not even that when a stated reason does.
       if (fileRationales.length === 0) {
         speak(terminalSafe(`"${safePath}"... no record names this file. I not know if agent touch it.`, MAX_OUTPUT_LINE_BYTES));
       }
@@ -677,9 +683,7 @@ export function why(argv: string[], deps: DictionaryCommandDeps = {}): number {
     return 0;
   }
   if (scan !== undefined && coverageIncomplete(scan)) support(coverageLine(scan));
-  if (evidenceResult.coverageIncomplete) {
-    support(terminalSafe(`coverage status: ${evidenceResult.coverage.status}; some path may be omitted.`, MAX_OUTPUT_LINE_BYTES));
-  }
+  if (evidenceResult.coverageIncomplete) support(someMayBeOmittedLine);
   const gitDiffFn = deps.gitDiff ?? resolveGitDiff;
   for (const triple of hits) {
     const selected = fileForQuery(triple, path);
