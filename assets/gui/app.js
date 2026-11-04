@@ -2647,7 +2647,7 @@ async function renderCsCard(path, start, end) {
  */
 
 // The keys live server-side, never here. hasKey/hasJevKey/hasOpenRouterKey is all the page is told.
-const settings = { provider: "openai", endpoint: "", model: "", lang: "id", hasKey: false, hasJevKey: false, jevProvider: "typesafe", hasOpenRouterKey: false };
+const settings = { provider: "openai", endpoint: "", model: "", lang: "en", hasKey: false, hasJevKey: false, jevProvider: "typesafe", hasOpenRouterKey: false };
 
 async function pullSettings() {
   try {

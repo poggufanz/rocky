@@ -392,6 +392,18 @@ test("settings hand back everything except the key", async () => {
   });
 });
 
+test("settings report english as the teach language on a fresh home and keep a stored id", async () => {
+  const { root } = hermetic();
+  await withGui(root, async (h) => {
+    const fresh = await json(h, "/api/settings");
+    assert.equal(fresh.body.lang, "en");
+
+    writeSettings({ lang: "id" });
+    const stored = await json(h, "/api/settings");
+    assert.equal(stored.body.lang, "id");
+  });
+});
+
 test("saving one field leaves the stored key alone", () => {
   const { home } = hermetic();
   writeSettings({ provider: "openai", endpoint: "e", model: "m", key: "sk-keep" });

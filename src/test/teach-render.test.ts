@@ -4,6 +4,7 @@ import { ageLabel, renderLadderCard, renderLadderExpanded, renderWitnessCard } f
 import type { ExplainRecord } from "../core/memory-read.js";
 import type { TeachHit } from "../core/teach.js";
 import type { LadderResult } from "../core/teach-ladder.js";
+import { validateRockyPhrase } from "../ui/phrases.js";
 
 const WITNESS_HEADER = "rocky heard this. agent say why, rocky remember";
 const LADDER_HEADER = "rocky not hear this. assembled from evidence, not witnessed";
@@ -163,13 +164,16 @@ test("ladder evidence appends stop reason", () => {
   assert.match(card.evidence, /evidence-exhausted/);
 });
 
-test("exhausted provenance adds a disclosure line", () => {
+test("exhausted provenance adds a disclosure line in english", () => {
+  const disclosure = "no git history found for these lines. other evidence stays above.";
   const card = renderLadderCard("a.ts", "x", {
     rungs: [{ source: "catalog", finding: "awaits a promise" }],
     stopReason: "evidence-exhausted",
     provenanceExhausted: true,
   });
-  assert.match(card.lines.join("\n"), /asal usul habis/);
+  assert.ok(card.lines.includes(disclosure));
+  assert.deepEqual(validateRockyPhrase(disclosure), []);
+  assert.doesNotMatch(card.lines.join("\n"), /asal usul|di atas/);
 });
 
 test("witness card with zero pointers marks unknown", () => {

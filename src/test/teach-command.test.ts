@@ -199,9 +199,10 @@ test("teach --ladder with exhausted provenance keeps the disclosure voice, exit 
   const { sayLines, headingLines, blockLines, detailLines, deps } = sinks();
   assert.equal(await teach([`${path}:2`, "--ladder"], deps), 0);
   assert.deepEqual(headingLines, [LADDER_HEADER]);
-  assert.ok(blockLines.includes("asal usul habis. evidence lain tetap di atas, question"));
+  assert.ok(blockLines.includes("no git history found for these lines. other evidence stays above."));
   assert.match(detailLines.join("\n"), /evidence-exhausted/);
   const userFacing = [...sayLines, ...headingLines, ...blockLines, ...detailLines].join("\n");
   assert.doesNotMatch(userFacing, /\?/);
+  assert.doesNotMatch(userFacing, /asal usul|di atas/, "english output carries no indonesian disclosure");
   assert.doesNotMatch(userFacing, /[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/u);
 });

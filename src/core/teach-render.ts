@@ -63,7 +63,7 @@ export function renderLadderCard(file: string, label: string, ladder: LadderResu
     lines.push(`reason: ${ladder.rungs.map((rung) => rung.finding).join(". ")}`);
   }
   if (ladder.provenanceExhausted) {
-    lines.push("asal usul habis. evidence lain tetap di atas, question");
+    lines.push("no git history found for these lines. other evidence stays above.");
   }
   return {
     header: LADDER_HEADER,
