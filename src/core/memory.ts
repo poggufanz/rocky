@@ -31,8 +31,10 @@ import {
   commandFingerprint,
   commandIdentity,
   fingerprint,
+  firstSignalLine,
   normalizeLine,
   signatureLines,
+  stripAnsi,
 } from "./fingerprint.js";
 import { resolveRockyPaths } from "./state-paths.js";
 import type { RockyPaths } from "./state-paths.js";
@@ -1052,7 +1054,7 @@ export function recordFailure(rawCmd: string, exitCode: number, stderr: string):
   const rec: FailureRecord = {
     kind: "failure", id: randomUUID(), ts, cwd: process.cwd(), cmd, exitCode,
     fingerprint: fingerprint(stderr, cmd, exitCode), fingerprintV: FINGERPRINT_ALGORITHM_VERSION,
-    signature: signatureLines(stderr), excerpt: lastLines(stderr, 4),
+    signature: signatureLines(stderr), excerpt: failureExcerpt(stderr),
     commandIdentity: identity.value, identityV: identity.version, identityReliable: identity.reliable, platform: process.platform,
   };
   withMemoryTransaction((transaction) => {
@@ -1069,7 +1071,7 @@ export function recordWatchFailure(rawCmd: string, exitCode: number, stderr: str
   const rec: FailureRecord = {
     kind: "failure", id: randomUUID(), ts, cwd, cmd, exitCode,
     fingerprint: fingerprint(stderr, cmd, exitCode), fingerprintV: FINGERPRINT_ALGORITHM_VERSION,
-    signature: signatureLines(stderr), excerpt: lastLines(stderr, 4), origin: "watch",
+    signature: signatureLines(stderr), excerpt: failureExcerpt(stderr), origin: "watch",
     commandIdentity: identity.value, identityV: identity.version, identityReliable: identity.reliable, platform: process.platform,
   };
   withMemoryTransaction((transaction) => {
@@ -1272,9 +1274,30 @@ export function resolveFixOnSuccess(
   }, paths, { now: options.now });
 }
 
-function lastLines(text: string, n: number): string {
-  const lines = text.split("\n").map((line) => line.trimEnd()).filter((line) => line.trim().length > 0);
-  return lines.slice(-n).join("\n");
+/** Lines of stderr tail an excerpt always keeps; the decisive line is the one extra. */
+const EXCERPT_TAIL_LINES = 3;
+
+/**
+ * The stderr excerpt remembered with a failure: the first error-looking line
+ * plus the last three lines. A tool's last lines are often boilerplate (npm's
+ * log pointer, a stack tail) while the line that names the problem scrolled
+ * above them, so the tail alone loses it. A decisive line the tail already
+ * holds is not repeated: the excerpt is then simply the last four lines.
+ *
+ * Lines are ANSI-stripped and trimmed, the same text `firstSignalLine`
+ * returns, so a colored copy of that line in the tail still counts as a
+ * repeat. Secrets are redacted here, at storage, because the first error line
+ * is the one most likely to echo a token. Fingerprint and signature are
+ * computed from the raw stderr elsewhere, so redaction never changes identity.
+ */
+function failureExcerpt(stderr: string): string {
+  const lines = stripAnsi(stderr).split("\n").map((line) => line.trim()).filter((line) => line.length > 0);
+  const tail = lines.slice(-EXCERPT_TAIL_LINES);
+  const decisive = firstSignalLine(stderr);
+  const kept = decisive !== undefined && !tail.includes(decisive)
+    ? [decisive, ...tail]
+    : lines.slice(-(EXCERPT_TAIL_LINES + 1));
+  return redactSecretsAtBoundary(kept.join("\n"));
 }
 
 export function pendingPath(): string {

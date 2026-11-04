@@ -873,6 +873,102 @@ test("fix storage keeps a plain command confirmed and unchanged", (t) => {
   assert.equal(result.fix?.cmd, cmd);
 });
 
+const NPM_MISSING_SCRIPT = [
+  'npm error Missing script: "build"',
+  "npm error",
+  "npm error To see a list of scripts, run:",
+  "npm error   npm run",
+  "npm error A complete log of this run can be found in: C:\\x\\debug-0.log",
+].join("\n");
+
+const NODE_SYNTAX_CRASH = [
+  "C:\\work\\app\\broken.js:3",
+  "const answer = ;",
+  "               ^",
+  "",
+  "SyntaxError: Unexpected token ';'",
+  "    at wrapSafe (node:internal/modules/cjs/loader:1469:18)",
+  "    at Module._compile (node:internal/modules/cjs/loader:1491:20)",
+  "    at Module._extensions..js (node:internal/modules/cjs/loader:1613:10)",
+  "",
+  "Node.js v22.12.0",
+].join("\n");
+
+function storedFailure(home: string): FailureRecord {
+  const stored = memory.loadMemory(join(home, "memory.jsonl"))
+    .find((record): record is FailureRecord => record.kind === "failure");
+  assert.ok(stored !== undefined, "a failure record must be stored");
+  return stored;
+}
+
+test("failure excerpt keeps the decisive error line ahead of the log tail", (t) => {
+  const home = sandbox(t, "rocky-excerpt-npm-");
+  const rec = withRockyHome(home, () => memory.recordFailure("npm run build", 1, NPM_MISSING_SCRIPT));
+  const lines = rec.excerpt.split("\n");
+
+  assert.equal(lines[0], 'npm error Missing script: "build"');
+  assert.equal(lines.length, 4);
+  assert.equal(lines.at(-1), "npm error A complete log of this run can be found in: C:\\x\\debug-0.log");
+  assert.equal(storedFailure(home).excerpt, rec.excerpt);
+});
+
+test("failure excerpt keeps the SyntaxError line of a node crash", (t) => {
+  const home = sandbox(t, "rocky-excerpt-syntax-");
+  const rec = withRockyHome(home, () => memory.recordFailure("node broken.js", 1, NODE_SYNTAX_CRASH));
+
+  assert.deepEqual(rec.excerpt.split("\n"), [
+    "SyntaxError: Unexpected token ';'",
+    "at Module._compile (node:internal/modules/cjs/loader:1491:20)",
+    "at Module._extensions..js (node:internal/modules/cjs/loader:1613:10)",
+    "Node.js v22.12.0",
+  ]);
+});
+
+test("failure excerpt does not repeat the decisive line when the tail already holds it", (t) => {
+  const home = sandbox(t, "rocky-excerpt-dedupe-");
+  const rec = withRockyHome(home, () =>
+    memory.recordFailure("make", 2, "one\ntwo\nthree\nError: boom\nfour\nfive"));
+
+  assert.equal(rec.excerpt, "three\nError: boom\nfour\nfive");
+});
+
+test("failure excerpt drops ANSI color so a colored decisive line is not repeated", (t) => {
+  const home = sandbox(t, "rocky-excerpt-ansi-");
+  const rec = withRockyHome(home, () =>
+    memory.recordFailure("tsc", 2, "\u001b[31merror\u001b[0m TS2304: Cannot find name 'x'.\n"));
+
+  assert.equal(rec.excerpt, "error TS2304: Cannot find name 'x'.");
+});
+
+test("failure excerpt falls back to the last four lines when no line looks like an error", (t) => {
+  const home = sandbox(t, "rocky-excerpt-plain-");
+  const rec = withRockyHome(home, () => memory.recordFailure("make", 2, "one\ntwo\nthree\nfour\nfive\n"));
+
+  assert.equal(rec.excerpt, "two\nthree\nfour\nfive");
+});
+
+test("failure excerpt is redacted before it is stored", (t) => {
+  const home = sandbox(t, "rocky-excerpt-redact-");
+  const rec = withRockyHome(home, () =>
+    memory.recordFailure("node check.js", 1, `Error: bad token ${GITHUB_TOKEN}\n  at x`));
+
+  assert.doesNotMatch(rec.excerpt, /ghp_abcdef/u);
+  assert.match(rec.excerpt, /^Error: bad token \[redacted/u);
+  assert.equal(storedFailure(home).excerpt, rec.excerpt);
+});
+
+test("watch failure excerpt keeps the decisive line first and redacts secrets", (t) => {
+  const home = sandbox(t, "rocky-excerpt-watch-");
+  const stderr = `Error: bad token ${GITHUB_TOKEN}\nnoise 1\nnoise 2\nnoise 3`;
+  const rec = withRockyHome(home, () => memory.recordWatchFailure("npm test", 1, stderr, home));
+  const lines = rec.excerpt.split("\n");
+
+  assert.equal(rec.origin, "watch");
+  assert.equal(lines.length, 4);
+  assert.match(lines[0], /^Error: bad token \[redacted/u);
+  assert.doesNotMatch(rec.excerpt, /ghp_abcdef/u);
+});
+
 test("a no-link success never clears pending without a confirmed resolution", (t) => {
   const home = sandbox(t, "rocky-no-confirmed-pending-");
   const cwd = home;

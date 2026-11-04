@@ -49,8 +49,9 @@ existing kind.
 ## Pointer rule
 
 Code references are stored as pointers `{commit, path, lines}` and
-reconstructed via git when needed. Stored verbatim: stderr excerpts of at
-most 4 lines, user notes, commit messages.
+reconstructed via git when needed. Stored verbatim: user notes, commit
+messages. Stored with secrets redacted: stderr excerpts of at most 4 lines
+(the first error line plus the last three).
 
 ## Derived data
 

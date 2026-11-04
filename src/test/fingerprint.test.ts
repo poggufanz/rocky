@@ -7,11 +7,13 @@ import {
   fingerprint,
   fingerprintCandidates,
   fingerprintTokens,
+  firstSignalLine,
   legacyFingerprint,
   normalizeLine,
   normalizeRetrievalLine,
   queryTokens,
   retrievalTokens,
+  signatureLines,
   tokens,
 } from "../core/fingerprint.js";
 
@@ -48,6 +50,30 @@ test("empty-stderr failures of different commands no longer collide", () => {
 
 test("non-empty stderr fingerprint ignores cmd and exit code (unchanged behavior)", () => {
   assert.equal(fingerprint("Error: boom", "a", 1), fingerprint("Error: boom", "b", 2));
+});
+
+test("firstSignalLine returns the first error-looking line as printed, unmasked and in original case", () => {
+  const stderr = [
+    "starting build",
+    "\u001b[31m  Error: Cannot open /home/you/app/src/x.ts:41:7  \u001b[0m",
+    "Error: a later error",
+  ].join("\n");
+
+  assert.equal(firstSignalLine(stderr), "Error: Cannot open /home/you/app/src/x.ts:41:7");
+});
+
+test("firstSignalLine picks the same line signatureLines puts first", () => {
+  const stderr = "noise\n\n  npm error Missing script: \"build\"\nnpm error\nnpm error A complete log is at C:\\x\\debug-0.log";
+  const line = firstSignalLine(stderr);
+
+  assert.equal(line, "npm error Missing script: \"build\"");
+  assert.equal(normalizeLine(line ?? ""), signatureLines(stderr)[0]);
+});
+
+test("firstSignalLine is undefined when no line looks like an error", () => {
+  assert.equal(firstSignalLine(""), undefined);
+  assert.equal(firstSignalLine("   \n\n\t\n"), undefined);
+  assert.equal(firstSignalLine("all good\nstill fine\ndone"), undefined);
 });
 
 test("URL masking consumes the complete URL before path masking", () => {

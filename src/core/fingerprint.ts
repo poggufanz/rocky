@@ -276,6 +276,19 @@ export function signatureLines(stderr: string): string[] {
 }
 
 /**
+ * The first line of stderr that looks like an error, as the tool printed it:
+ * ANSI stripped and trimmed, but neither masked nor lowercased. When any line
+ * carries an error signal this is the line `signatureLines` normalizes first,
+ * kept readable for display. Returns `undefined` when none does.
+ */
+export function firstSignalLine(stderr: string): string | undefined {
+  return stripAnsi(stderr)
+    .split("\n")
+    .map((l) => l.trim())
+    .find((l) => l.length > 0 && SIGNAL.test(l));
+}
+
+/**
  * Stable hash for exact re-occurrence detection. When stderr carries no
  * signal at all, hashing "" would collapse every silent failure — any
  * command, any project — onto one constant fingerprint and fabricate

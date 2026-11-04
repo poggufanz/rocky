@@ -1,10 +1,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { performance } from "node:perf_hooks";
 import type { OllamaClient } from "../ai/ollama.js";
 import type { RecallWithAiPort } from "../ai/port.js";
 import { createRecallAiPort, formatModelExplanation } from "../ai/recall-ai.js";
 import { parseRecallArgs, recall } from "../commands/recall.js";
+import { recordFailure } from "../core/memory.js";
 import type { FixLink } from "../core/memory-read.js";
 import type { MemoryQueries, RecallHit } from "../core/memory-query.js";
 import { MAX_FIELD_BYTES } from "../mcp/privacy.js";
@@ -483,4 +487,27 @@ test("a memory read failure on the second (recentFailures) call cannot leak a ra
   assert.equal(output.code, 1);
   assert.match(output.stderr, /memory file does not open for me\. I answer from nothing\./);
   assert.doesNotMatch(output.stderr, /EISDIR/);
+});
+
+test("recall shows the decisive error line of a failure Rocky really stored", async (t) => {
+  const home = mkdtempSync(join(tmpdir(), "rocky-recall-excerpt-"));
+  const originalHome = process.env.ROCKY_HOME;
+  t.after(() => {
+    if (originalHome === undefined) delete process.env.ROCKY_HOME;
+    else process.env.ROCKY_HOME = originalHome;
+    rmSync(home, { recursive: true, force: true });
+  });
+  process.env.ROCKY_HOME = home;
+  recordFailure("npm run build", 1, [
+    'npm error Missing script: "build"',
+    "npm error",
+    "npm error To see a list of scripts, run:",
+    "npm error   npm run",
+    "npm error A complete log of this run can be found in: C:\\x\\debug-0.log",
+  ].join("\n"));
+
+  const output = await captureStderr(() => recall(["build", "failure"]));
+
+  assert.equal(output.code, 0);
+  assert.match(output.stderr, /Missing script: "build"/);
 });
