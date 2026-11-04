@@ -828,6 +828,51 @@ test("weak-only candidate records association but never clears pending", (t) => 
   assert.equal(existsSync(join(home, "pending")), true);
 });
 
+const GITHUB_TOKEN = "ghp_abcdefghijklmnopqrstuvwxyz0123456789ABCD";
+
+function withRockyHome<T>(home: string, run: () => T): T {
+  const original = process.env.ROCKY_HOME;
+  process.env.ROCKY_HOME = home;
+  try {
+    return run();
+  } finally {
+    if (original === undefined) delete process.env.ROCKY_HOME;
+    else process.env.ROCKY_HOME = original;
+  }
+}
+
+test("fix storage redacts a secret-bearing command and keeps it a possible association", (t) => {
+  const home = sandbox(t, "rocky-fix-redact-");
+  const rawCmd = `node check.js ${GITHUB_TOKEN}`;
+  const result = withRockyHome(home, () => {
+    memory.recordFailure(rawCmd, 1, "Error: boom");
+    return memory.resolveFixOnSuccess(rawCmd, process.cwd());
+  });
+  const memoryPath = join(home, "memory.jsonl");
+
+  assert.doesNotMatch(readFileSync(memoryPath, "utf8"), /ghp_abcdef/u);
+  // Matching stays on the raw command, so the redacted failure is never the
+  // same reliable identity: the success is an association, not a fix.
+  assert.equal(result.confirmedResolved, 0);
+  assert.equal(result.possibleAssociated, 1);
+  const association = memory.loadMemory(memoryPath)
+    .find((record): record is AssociationRecord => record.kind === "association");
+  assert.ok(association !== undefined, "an association record must be stored");
+  assert.match(association.cmd, /\[redacted/u);
+});
+
+test("fix storage keeps a plain command confirmed and unchanged", (t) => {
+  const home = sandbox(t, "rocky-fix-plain-");
+  const cmd = "node check.js";
+  const result = withRockyHome(home, () => {
+    memory.recordFailure(cmd, 1, "Error: boom");
+    return memory.resolveFixOnSuccess(cmd, process.cwd());
+  });
+
+  assert.equal(result.confirmedResolved, 1);
+  assert.equal(result.fix?.cmd, cmd);
+});
+
 test("a no-link success never clears pending without a confirmed resolution", (t) => {
   const home = sandbox(t, "rocky-no-confirmed-pending-");
   const cwd = home;

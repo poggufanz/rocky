@@ -1105,12 +1105,17 @@ function appendFixRecordsUnlocked(
   // capped, skipped, or raced read may still accept new failure/note evidence,
   // but it must never append a FixRecord based on partial knowledge.
   if (!transaction.complete || !isCompleteMemoryCoverage(transaction.coverage)) return {};
-  const identity = commandIdentity(cmd);
+  // Storage only: `links` were already matched on the raw command by the
+  // caller. Redacting on the matching side would make `deploy "ghp_A"` and
+  // `deploy "ghp_B"` the same command. Here the record gets the same bounded,
+  // redacted form and identity that `recordFailure` stores.
+  const storedCmd = boundCommand(cmd);
+  const identity = commandIdentity(storedCmd);
   const chosen = links.slice(-MAX_FIX_LINKS);
   const confirmed = chosen.filter((link) => link.confidence === "confirmed");
   const possible = chosen.filter((link) => link.confidence === "possible");
   const metadata = {
-    ts: now, cwd, cmd,
+    ts: now, cwd, cmd: storedCmd,
     commandIdentity: identity.value, identityV: identity.version, identityReliable: identity.reliable, platform: process.platform,
   } as const;
 

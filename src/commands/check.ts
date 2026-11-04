@@ -450,6 +450,23 @@ async function packageStage(
   for (const name of result.missing) detail(name);
 }
 
+type ComprehensionNotePayload = Parameters<typeof recordNote>[0];
+
+/**
+ * A note stores the risky diff line and the typed answer, both free text that
+ * can hold a secret, so both cross the secret boundary before they are stored.
+ * The caller caps `subject` at 200 characters, which can leave a token cut
+ * short; `mayBeTruncated` scrubs that fragment as well. The remaining fields
+ * are locations, not free text, and pass through.
+ */
+export function comprehensionNote(input: ComprehensionNotePayload): ComprehensionNotePayload {
+  return {
+    ...input,
+    subject: redactSecretsAtBoundary(input.subject, { mayBeTruncated: true }),
+    answer: redactSecretsAtBoundary(input.answer),
+  };
+}
+
 async function maybeAskComprehension(lines: readonly AddedLine[], ranges: readonly DiffRange[]): Promise<void> {
   const risky = riskiestLine([...lines]);
   if (risky === undefined) return;
@@ -459,14 +476,14 @@ async function maybeAskComprehension(lines: readonly AddedLine[], ranges: readon
   detail(`${risky.file}:${risky.line}  ${risky.text.trim().slice(0, 200)}`);
   const answer = await prompt.ask(rockyPrompt(phrase("check-answer")), PROMPT_TIMEOUT_MS);
   if (answer === undefined || answer.trim() === "") return;
-  recordNote({
+  recordNote(comprehensionNote({
     cwd: process.cwd(),
     cmd: ranges.map(({ base, head }) => `${base} ${head}`).join(", "),
     file: risky.file,
     line: risky.line,
     subject: risky.text.trim().slice(0, 200),
     answer: answer.trim(),
-  });
+  }));
 }
 
 async function installHookFlow(quiet: boolean): Promise<number> {
