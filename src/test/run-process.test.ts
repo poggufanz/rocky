@@ -168,8 +168,9 @@ test("run speech never overrides or duplicates a confirmed fix with an associati
   } finally {
     process.stderr.write = original;
   }
-  assert.match(output, /last time, something between fix it\. what, I not hear\. works again, I remember\./);
-  assert.match(output, /same command,.*strong\./);
+  assert.match(output, /last time, same command work again after\. I not hear what change\./);
+  assert.match(output, /same command, under 1 minute later\. strong\./);
+  assert.doesNotMatch(output, /something between|just now later/);
   assert.doesNotMatch(output, /no confirmed fix\. but after error, you run this:/);
   assert.doesNotMatch(output, /should-not-appear/);
 });
@@ -223,10 +224,41 @@ test("run speech grades an unrecognized FixRecord link basis as the weakest hedg
   } finally {
     process.stderr.write = original;
   }
-  assert.match(output, /last time, something between fix it\. what, I not hear\. works again, I remember\./);
-  assert.match(output, /different program,.*maybe not fix\. check, question/);
+  assert.match(output, /last time, same command work again after\. I not hear what change\./);
+  assert.match(output, /different program, under 1 minute later\. maybe not fix\. check, question/);
   assert.doesNotMatch(output, /strong\./);
   assert.doesNotMatch(output, /same program,/);
+});
+
+test("run speech grades a same-program link with the gap it heard, never 'just now'", () => {
+  const cwd = join(tmpdir(), "rocky-run-same-program-gap");
+  const cmd = "node stable-command.js";
+  const now = 1_800_000_000_000;
+  const failure = {
+    kind: "failure" as const, id: "run-gap-failure", ts: now - 3 * 60_000, cwd, cmd,
+    exitCode: 1, fingerprint: "run-gap-fingerprint", signature: ["failure"], excerpt: "failure",
+    resolvedBy: "run-gap-fix",
+  };
+  const speak = (fixGapMs: number): string => {
+    const fix = {
+      kind: "fix" as const, id: "run-gap-fix", ts: failure.ts + fixGapMs, cwd, cmd,
+      failureIds: [failure.id], links: [{ id: failure.id, basis: "program" as const, confidence: "possible" as const }],
+    };
+    const original = process.stderr.write;
+    let output = "";
+    process.stderr.write = ((chunk: string | Uint8Array) => { output += String(chunk); return true; }) as typeof process.stderr.write;
+    try {
+      speakFailureMemory([failure, fix], failure.fingerprint, cmd, 1, cwd, now);
+    } finally {
+      process.stderr.write = original;
+    }
+    return output;
+  };
+
+  const underAMinute = speak(40_000);
+  assert.match(underAMinute, /same program, under 1 minute later\. maybe not fix\. check, question/);
+  assert.doesNotMatch(underAMinute, /just now later|strong\./);
+  assert.match(speak(2 * 60_000), /same program, 2 minutes later\. maybe not fix\. check, question/);
 });
 
 /**
@@ -286,6 +318,9 @@ test("unrelated successful npm task is not suggested as confirmed fix", (t) => {
   assert.equal(first.status, 67);
   const success = spawnSync(process.execPath, [cli, "run", "npm run unrelated-beta"], { cwd: project, env, encoding: "utf8" });
   assert.equal(success.status, 0);
+  // A same-program association is only possible, never resolution: the link
+  // line is gated on a confirmed resolution, so a possible-only success stays silent.
+  assert.equal(success.stderr.includes("[Rocky]"), false, success.stderr);
   const second = spawnSync(process.execPath, [cli, "run", "npm run broken-alpha"], { cwd: project, env, encoding: "utf8" });
   assert.equal(second.status, 67);
   assert.doesNotMatch(second.stderr, /last time, you fix with:/);
@@ -310,4 +345,26 @@ test("unrelated successful npm task is not suggested as confirmed fix", (t) => {
   const stats = spawnSync(process.execPath, [cli, "stats"], { cwd: project, env, encoding: "utf8" });
   assert.equal(stats.status, 0);
   assert.match(stats.stderr, /0 fix events/);
+});
+
+test("a confirmed link run says what Rocky heard and never claims a fix", (t) => {
+  const home = mkdtempSync(join(tmpdir(), "rocky-link-voice-"));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const env = { ...process.env, ROCKY_HOME: home };
+  const project = join(home, "synthetic-project");
+  mkdirSync(project);
+
+  // The README 60-second test, minus the shell setup: one failing run, the
+  // missing file appears, the same command runs again in the same directory.
+  const first = spawnSync(process.execPath, [cli, "run", "node hello.js"], { cwd: project, env, encoding: "utf8" });
+  assert.notEqual(first.status, 0);
+  assert.equal(first.stderr.includes("link them"), false, "a failing run links nothing");
+  writeFileSync(join(project, "hello.js"), "console.log(1)\n", "utf8");
+  const second = spawnSync(process.execPath, [cli, "run", "node hello.js"], { cwd: project, env, encoding: "utf8" });
+  assert.equal(second.status, 0);
+
+  assert.match(second.stderr, /command works now\. same command fail before\. I link them\./);
+  assert.match(second.stderr, /I not hear what change\. good good good\./);
+  assert.doesNotMatch(second.stderr, /\bfixed\b|you fix it|I remember (the )?fix/i);
+  assert.doesNotMatch(second.stderr, /something between/);
 });

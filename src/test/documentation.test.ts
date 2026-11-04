@@ -5,6 +5,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { commandIdentity } from "../core/fingerprint.js";
 import { PACKAGE_NAME, PACKAGE_VERSION } from "../core/package-info.js";
 
 const packageRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -119,6 +120,62 @@ test("README stays a concise front page with durable project links", () => {
     "https://github.com/poggufanz/rocky/blob/main/CONTRIBUTING.md",
     "/assets/rocky-pixel.webp",
   ]);
+});
+
+/** One README section by exact heading line: its body, and the nearest enclosing heading above it. */
+function readmeSection(heading: string): { parent: string | undefined; body: string } {
+  const level = /^#+/.exec(heading)![0].length;
+  const lines = readmePage.split(/\r?\n/);
+  const start = lines.indexOf(heading);
+  assert.ok(start >= 0, `README must keep the section ${JSON.stringify(heading)}`);
+
+  // Heading lines only: a `# comment` inside a code fence is not a section boundary.
+  const headings: { index: number; level: number; line: string }[] = [];
+  let fenced = false;
+  lines.forEach((line, index) => {
+    if (line.startsWith("```")) { fenced = !fenced; return; }
+    const marks = fenced ? undefined : /^(#{1,6}) /.exec(line)?.[1];
+    if (marks !== undefined) headings.push({ index, level: marks.length, line });
+  });
+
+  const parent = headings.filter((entry) => entry.index < start && entry.level < level).at(-1)?.line;
+  const end = headings.find((entry) => entry.index > start && entry.level <= level)?.index ?? lines.length;
+  return { parent, body: lines.slice(start + 1, end).join("\n") };
+}
+
+test("README 60-second test runs one identical command that Rocky can link", () => {
+  const section = readmeSection("### 60-second test");
+  assert.equal(section.parent, "## Quick start", "the 60-second test belongs under Quick start");
+
+  const commands = [...section.body.matchAll(/rocky run "([^"\n]*)"/g)].map((match) => match[1]!);
+  assert.ok(commands.length >= 2, "run the command twice: once failing, once working");
+  assert.equal(
+    new Set(commands).size, 1,
+    `every rocky run in the section must be the same command, got ${JSON.stringify(commands)}`,
+  );
+  assert.equal(
+    commandIdentity(commands[0]!).reliable, true,
+    `${JSON.stringify(commands[0])} needs a reliable identity or Rocky cannot link it`,
+  );
+
+  // The section states the two honest limits, and never claims a remedy.
+  assert.match(section.body, /not what changed/i);
+  assert.match(section.body, /same command in the same directory within eight hours/i);
+  assert.match(section.body, /pipes, `&&`, globs, or `\$VARS`/);
+  assert.doesNotMatch(section.body, /\bfix(?:ed|es)?\b/i);
+});
+
+test("README, reference, and CLI help link a later success to the failure and never claim the remedy", () => {
+  const help = helpOutput();
+  assert.ok(readmePage.includes("Rocky links that success to the failure."));
+  for (const [label, surface] of [["README", readmePage], ["reference", reference], ["CLI help", help]] as const) {
+    assert.doesNotMatch(surface, /links that success as the fix/i, `${label} calls a linked success the fix`);
+    assert.doesNotMatch(
+      surface,
+      /what fixed it|what the fix was|tells you what (?:fixed|the fix)/i,
+      `${label} claims Rocky knows what fixed a failure`,
+    );
+  }
 });
 
 test("README identity, roadmap, and Plan 01/Plan 02 v0.5 boundary stay aligned", () => {

@@ -94,6 +94,18 @@ export function elapsed(ms: number): string {
   return `${d} day${d === 1 ? "" : "s"}`;
 }
 
+const ONE_MINUTE_MS = 60_000;
+
+/**
+ * `elapsed` for a span between two remembered events, said inside "<span> later".
+ * "just now later" reads as nonsense, so a gap under a minute is named plainly.
+ * `elapsed` itself stays as it is: sessions, the home page, and the GUI server
+ * share it, and `ago` relies on its "just now".
+ */
+export function gapSpan(ms: number): string {
+  return ms < ONE_MINUTE_MS ? "under 1 minute" : elapsed(ms);
+}
+
 /** "84 days ago", "3 hours ago", "just now" — Rocky counts precisely. */
 export function ago(ts: number): string {
   const span = elapsed(Date.now() - ts);

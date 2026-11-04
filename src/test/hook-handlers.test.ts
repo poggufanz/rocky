@@ -85,6 +85,58 @@ test("hookSuccess does not change process cwd", () => {
   assert.equal(fixes.at(-1)?.cwd, cwd);
 });
 
+const LINK_LINE = "[Rocky] command works now. same command fail before. I link them. I not hear what change. good good good.\n";
+
+test("hookSuccess states what Rocky heard, then names the command the late line is about", () => {
+  process.env.ROCKY_HOME = mkdtempSync(join(tmpdir(), "rocky-hook-link-voice-"));
+  const linkCwd = mkdtempSync(join(tmpdir(), "rocky-hook-link-voice-cwd-"));
+  try {
+    assert.equal(hookFail("node hello.js", 1, linkCwd), 0);
+    const { result, tty } = captureTty(() => hookSuccess("node hello.js", linkCwd));
+    assert.equal(result, 0);
+    assert.equal(tty, `${LINK_LINE}    command: node hello.js\n`);
+    assert.doesNotMatch(tty, /\bfixed\b|you fix it|I remember (the )?fix|something between/i);
+  } finally {
+    process.env.ROCKY_HOME = home;
+  }
+});
+
+test("hookSuccess names the linked command through boundCommand, never the raw argument", () => {
+  const isolatedHome = mkdtempSync(join(tmpdir(), "rocky-hook-link-bound-"));
+  const linkCwd = mkdtempSync(join(tmpdir(), "rocky-hook-link-bound-cwd-"));
+  // Built at runtime so no token-shaped literal sits in this source file.
+  const token = `ghp_${"A1b2".repeat(9)}`;
+  const cmd = `node deploy.js --token ${token}`;
+  // This stored failure still holds the raw command, as an imported or
+  // hand-written record can, so it links on that text. Only the printed line
+  // can keep the secret off the terminal.
+  const failure = {
+    kind: "failure", id: "link-bound-failure", ts: Date.now() - 1000, cwd: linkCwd, cmd,
+    exitCode: 1, fingerprint: commandFingerprint(cmd, 1), fingerprintV: 2, signature: [cmd], excerpt: "exit 1", origin: "hook",
+  };
+  writeFileSync(join(isolatedHome, "memory.jsonl"), `${JSON.stringify(failure)}\n`, "utf8");
+  process.env.ROCKY_HOME = isolatedHome;
+  try {
+    const { result, tty } = captureTty(() => hookSuccess(cmd, linkCwd));
+    assert.equal(result, 0);
+    assert.equal(tty, `${LINK_LINE}    command: node deploy.js --token [redacted github token]\n`);
+    assert.equal(tty.includes(token), false, "the raw secret must never reach the terminal");
+  } finally {
+    process.env.ROCKY_HOME = home;
+  }
+});
+
+test("hookSuccess says nothing, not even the command, when no failure links", () => {
+  process.env.ROCKY_HOME = mkdtempSync(join(tmpdir(), "rocky-hook-link-silent-"));
+  try {
+    const { result, tty } = captureTty(() => hookSuccess("node nothing-failed-before.js", cwd));
+    assert.equal(result, 0);
+    assert.equal(tty, "");
+  } finally {
+    process.env.ROCKY_HOME = home;
+  }
+});
+
 const { deepMemoryHint } = await import("../commands/hook.js");
 
 test("deep memory hint quotes the command so it can be pasted safely", () => {
@@ -147,7 +199,7 @@ test("hookFail admits when the remembered fix's cwd differs from the cwd argumen
   try {
     const { result, tty } = captureTty(() => hookFail("elsewhere-test-cmd", 1, failCwd));
     assert.equal(result, 0);
-    assert.match(tty, /last time, something between fix it\. what, I not hear\. works again, I remember\./);
+    assert.match(tty, /last time, same command work again after\. I not hear what change\./);
     assert.match(tty, /but fix comes from other place\./);
     assert.match(tty, new RegExp(`place: ${fixCwd.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
     assert.doesNotMatch(tty, /strong\.|confirmed/);
@@ -182,7 +234,7 @@ test("hookFail says nothing extra when the remembered fix's cwd matches the cwd 
     assert.doesNotMatch(tty, /place:/);
     // sanity: the base fix line still speaks, proving the comparison — not
     // the whole fix branch — is what's being suppressed here.
-    assert.match(tty, /last time, something between fix it\. what, I not hear\. works again, I remember\./);
+    assert.match(tty, /last time, same command work again after\. I not hear what change\./);
   } finally {
     process.env.ROCKY_HOME = home;
   }
@@ -228,7 +280,7 @@ test("hookFail does not call a same-directory fix 'from other place' because it 
     assert.equal(result, 0);
     // sanity: the base fix line speaks either way, so only the elsewhere
     // admission can differ between win32 (same directory) and POSIX (two).
-    assert.match(tty, /last time, something between fix it\. what, I not hear\. works again, I remember\./);
+    assert.match(tty, /last time, same command work again after\. I not hear what change\./);
     assert.equal(/other place/.test(tty), process.platform !== "win32");
   } finally {
     process.env.ROCKY_HOME = home;

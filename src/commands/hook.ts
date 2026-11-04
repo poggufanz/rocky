@@ -39,6 +39,7 @@ import {
 } from "../core/hook-block.js";
 import { resolveRockyPaths } from "../core/state-paths.js";
 import {
+  boundCommand,
   drainGuardPending,
   recordHookFailure,
   resolveFixOnSuccess,
@@ -148,7 +149,7 @@ export function hookFail(cmd: string, exitCode: number, cwd: string): number {
     const sameCommand = currentIdentity.reliable && fixIdentity.reliable && currentIdentity.value === fixIdentity.value;
     sayTty(`I hear this error before. ${ago(withFix.ts)}.`);
     if (sameCommand) {
-      sayTty("last time, something between fix it. what, I not hear. works again, I remember.");
+      sayTty(phrase("fix-recurrence-same"));
     } else {
       sayTty("last time, you run:");
       detailTty(safeTerminalLine(fix.cmd));
@@ -223,7 +224,11 @@ export function hookSuccess(cmd: string, cwd: string, options: ResolveFixOptions
   try {
     const result = resolveFixOnSuccess(cmd, cwd, options);
     if (result.confirmedResolved > 0) {
-      sayTty("command works now. something between fix it. what, I not hear. works again, I remember. good good good.");
+      sayTty(phrase("fix-linked"));
+      // The hook speaks one prompt late, so this line can read as being about
+      // the next command. Name the one it is about, bounded and redacted
+      // exactly as memory stores it, never the raw argument.
+      detailTty(`command: ${safeTerminalLine(boundCommand(cmd))}`);
     }
   } catch {
     // Detached bookkeeping must never become the hooked command's outcome.

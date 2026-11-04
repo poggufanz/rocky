@@ -21,7 +21,9 @@ export type PhraseKey =
   | "check-answer"
   | "check-comprehension"
   | "check-unknown-flag"
-  | "gui-opener-failed";
+  | "gui-opener-failed"
+  | "fix-linked"
+  | "fix-recurrence-same";
 
 const PHRASES: Readonly<Record<PhraseKey, string>> = Object.freeze({
   "ai-known-fix": "memory and small model agree. old fix is strong clue. good good.",
@@ -45,6 +47,10 @@ const PHRASES: Readonly<Record<PhraseKey, string>> = Object.freeze({
   "check-comprehension": "I hear risky new line. what it doing, question",
   "check-unknown-flag": "that flag I do not know. bad.",
   "gui-opener-failed": "browser opener does not start here. open link above by hand.",
+  // Hedged on purpose (commit 91889e0): a confirmed link means the same command
+  // worked after it failed, never that Rocky knows what changed in between.
+  "fix-linked": "command works now. same command fail before. I link them. I not hear what change. good good good.",
+  "fix-recurrence-same": "last time, same command work again after. I not hear what change.",
 });
 
 export const phraseKeys: readonly PhraseKey[] = Object.freeze([
@@ -69,6 +75,8 @@ export const phraseKeys: readonly PhraseKey[] = Object.freeze([
   "check-comprehension",
   "check-unknown-flag",
   "gui-opener-failed",
+  "fix-linked",
+  "fix-recurrence-same",
 ]);
 
 export function phrase(key: PhraseKey): string {

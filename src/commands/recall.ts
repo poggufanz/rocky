@@ -12,7 +12,7 @@ import { createRecallAiPort, formatModelExplanation, singleFlightRecallAi } from
 import { createMemoryQueries, fixFromElsewhere, loadDurableMemorySnapshot, queryRecall, queryRecentFailures, type MemoryQueries, type RecallHit } from "../core/memory-query.js";
 import { isCompleteMemoryCoverage, linkBasisRank } from "../core/memory-read.js";
 import { resolveRockyPaths } from "../core/state-paths.js";
-import { ago, detail, elapsed, heading, phrase, phraseForAct, say } from "../ui/rocky.js";
+import { ago, detail, gapSpan, heading, phrase, phraseForAct, say } from "../ui/rocky.js";
 import { safeTerminalBlock, safeTerminalLine } from "../ui/sanitize.js";
 
 export type ParsedRecall = { useAi: boolean; query: string };
@@ -264,7 +264,7 @@ export async function recall(argv: readonly string[], dependencies?: RecallDepen
       } else {
         const link = hit.fix.links?.find((candidate) => candidate.id === hit.failure.id);
         if (link) {
-          const span = elapsed(hit.fix.ts - hit.failure.ts);
+          const span = gapSpan(hit.fix.ts - hit.failure.ts);
           if (link.basis === "identity" || link.basis === "signature") {
             say(`same command, ${span} later. strong.`);
           } else if (link.basis === "program") {

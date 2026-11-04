@@ -156,7 +156,7 @@ What happens:
 - **The command runs exactly as normal.** Output streams through untouched; the exit code is preserved. Rocky only speaks after your tool is done.
 
 On native Windows, `rocky run` and `rocky watch` use `shell: true`, so `cmd.exe`'s practical command-line ceiling is around 8,191 characters (quoting and expansion can change the exact boundary). Rocky's audited boundary is a 7,111-character command that reaches the child successfully; a 9,111-character command may fail before normal child execution. A shell that starts and then reports an error is still a started child result, so its exit code 127 remains a real failure. Use a response file, configuration file, or script when a command is near this boundary. Rocky does not silently rewrite the command, change quoting, or switch its shell.
-- **On failure**, Rocky fingerprints the error and files it. If he has heard this exact error before, he says so — and if a later run fixed it, he tells you what the fix was.
+- **On failure**, Rocky fingerprints the error and files it. If he has heard this exact error before, he says so. If the same command worked again after that earlier failure, he says that and adds that he did not hear what changed; if a different command was what worked, he names it as a possibility only.
 - **On success**, Rocky confirms a fix only for the same reliable command identity that failed in this directory within eight hours. A same-program-only match is kept separately as a possible association; it never resolves the failure. When a later run repeats an unresolved failure and no confirmed fix exists, Rocky shows the newest such association as one hedged candidate — never more than one, and never in place of a confirmed fix.
 
 Ask his memory directly:

@@ -48,8 +48,8 @@ install:
 
 usage:
   rocky run "<command>"     run command through Rocky. failures are remembered;
-                            when the same error returns, Rocky tells you what
-                            fixed it last time.
+                            when the same error returns, Rocky says what worked
+                            after it last time. he does not claim what changed.
   rocky watch "<command>" [--quiet]
                             run a long command; Rocky waits, remembers failures
                             the same way run does, saves the stderr tail on

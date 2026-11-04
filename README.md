@@ -46,7 +46,7 @@ Run a failure-prone command through Rocky:
 rocky run "npm run build"
 ```
 
-When it fails, Rocky fingerprints the useful stderr lines and writes a local record. When the same reliable command later succeeds in the same directory, Rocky links that success as the fix.
+When it fails, Rocky fingerprints the useful stderr lines and writes a local record. When the same reliable command later succeeds in the same directory, Rocky links that success to the failure.
 
 ```bash
 rocky recall "build failure"
@@ -65,6 +65,18 @@ rocky hook install
 On Windows, `rocky hook install` installs into every PowerShell host it finds on the machine — Windows PowerShell and PowerShell 7, both when present, each into its own `$PROFILE` — alongside the Bash hook if `.bashrc` is also in play (Git Bash/WSL). `rocky hook status` reports each host separately.
 
 The PowerShell hook is passive ears only: it overrides `prompt` to see a command's result right after it finishes, so it remembers failures and links fixes the same way Bash does, but — unlike the Bash hook — it cannot ask for confirmation before a dangerous command runs, because `prompt` never sees a command before it executes. Because `prompt` fires after the command's own stderr is already gone, PowerShell-hook failures are fingerprinted from the command text alone, the same command-only fallback the CLI has used since v0.4.0. One disclosed side effect: the only way PowerShell allows restoring `$?` to `False` after Rocky's own bookkeeping runs is a real, suppressed non-terminating error, which pushes one synthetic entry — named so you know it is Rocky's — onto the front of `$Error`, ahead of whatever your last real command actually raised. `$LASTEXITCODE` and `$?`'s value are always exactly what your own command left them; only `$Error[0]`'s position shifts.
+
+### 60-second test
+
+```bash
+mkdir rocky-demo
+cd rocky-demo
+rocky run "node hello.js"
+node -e "require('fs').writeFileSync('hello.js','console.log(1)')"
+rocky run "node hello.js"
+```
+
+The first run fails and Rocky remembers it; the second run works, and Rocky knows only that the same command failed and then worked, not what changed. The link needs the same command in the same directory within eight hours, with no pipes, `&&`, globs, or `$VARS`.
 
 ## What ships
 

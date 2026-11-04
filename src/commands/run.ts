@@ -3,7 +3,8 @@
  *
  * Runs the command through a shell, streaming stdout/stderr untouched.
  * On failure: fingerprints stderr, checks memory for this exact error,
- * and if Rocky has heard it before (and knows what fixed it) he says so.
+ * and if Rocky has heard it before (and the same command worked again after
+ * it) he says so. He never claims to know what changed in between.
  * On success: if the same reliable command identity failed recently in this
  * directory, this success is recorded as the confirmed fix. Same-program-only
  * evidence remains a possible association.
@@ -22,7 +23,7 @@ import {
 } from "../core/memory.js";
 import { isCompleteMemoryCoverage, linkBasisRank, loadMemoryChecked } from "../core/memory-read.js";
 import { findByFingerprint, fixFromElsewhere, getFix, possibleFixesForFailure, type PossibleFix } from "../core/memory-query.js";
-import { ago, detail, elapsed, say } from "../ui/rocky.js";
+import { ago, detail, gapSpan, phrase, say } from "../ui/rocky.js";
 import { safeTerminalLine } from "../ui/sanitize.js";
 
 export async function run(cmd: string, processRunner: (cmd: string) => Promise<ExecResult> = runProcess): Promise<number> {
@@ -105,7 +106,7 @@ export function speakFailureMemory(
       const fixIdentity = commandIdentity(fix.cmd, { platform: fix.platform ?? process.platform });
       const sameCommand = currentIdentity.reliable && fixIdentity.reliable && currentIdentity.value === fixIdentity.value;
       if (sameCommand) {
-        say("last time, something between fix it. what, I not hear. works again, I remember.");
+        say(phrase("fix-recurrence-same"));
       } else {
         say("last time, you run:");
         detail(`    ${safeTerminalLine(fix.cmd)}`);
@@ -125,15 +126,15 @@ export function speakFailureMemory(
         detail(`    place: ${safeTerminalLine(elsewhere)}`);
         say("possible only. check, question");
       } else if (basis === "identity" || basis === "signature") {
-        say(`same command, ${elapsed(fix.ts - withFix.ts)} later. strong.`);
+        say(`same command, ${gapSpan(fix.ts - withFix.ts)} later. strong.`);
       } else if (basis === "program") {
-        say(`same program, ${elapsed(fix.ts - withFix.ts)} later. maybe not fix. check, question`);
+        say(`same program, ${gapSpan(fix.ts - withFix.ts)} later. maybe not fix. check, question`);
       } else if (basis !== undefined) {
         // A recognized-but-weaker basis ("sequence") or a string a newer
         // writer emits that this reader does not recognize yet (spec §2.5):
         // either way it must fall to the weakest hedge, never silently print
         // no grade line at all.
-        say(`different program, ${elapsed(fix.ts - withFix.ts)} later. maybe not fix. check, question`);
+        say(`different program, ${gapSpan(fix.ts - withFix.ts)} later. maybe not fix. check, question`);
       }
       if (!sameCommand) say("try, question");
     } else {
@@ -200,7 +201,7 @@ export function linkFixOnSuccess(
 ): ResolveFixResult {
   const result = resolveFixOnSuccess(cmd, cwd, options);
   if (!quiet && result.confirmedResolved > 0) {
-    say("command works now. something between fix it. what, I not hear. works again, I remember. good good good.");
+    say(phrase("fix-linked"));
   }
   return result;
 }

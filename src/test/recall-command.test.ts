@@ -13,7 +13,7 @@ import type { FixLink } from "../core/memory-read.js";
 import type { MemoryQueries, RecallHit } from "../core/memory-query.js";
 import { MAX_FIELD_BYTES } from "../mcp/privacy.js";
 import { phrase, phraseForAct, validateRockyPhrase } from "../ui/phrases.js";
-import { elapsed } from "../ui/rocky.js";
+import { elapsed, gapSpan } from "../ui/rocky.js";
 
 function hit(id: string, command = `command-${id}`): RecallHit {
   return {
@@ -137,6 +137,16 @@ test("elapsed returns the bare span with no suffix", () => {
   assert.equal(elapsed(3 * 86_400_000), "3 days");
 });
 
+test("gapSpan names a gap under a minute and leaves longer gaps to elapsed", () => {
+  assert.equal(gapSpan(0), "under 1 minute");
+  assert.equal(gapSpan(59_000), "under 1 minute");
+  assert.equal(gapSpan(59_999), "under 1 minute");
+  assert.equal(gapSpan(60_000), "1 minute");
+  assert.equal(gapSpan(120_000), "2 minutes");
+  assert.equal(gapSpan(6 * 3600_000), "6 hours");
+  assert.equal(gapSpan(3 * 86_400_000), "3 days");
+});
+
 test("recall speaks a strong link for a same-command fix", async () => {
   const source = memoryReturning([hitWithFix("c1", 2 * 60_000, [{ id: "c1", basis: "signature" }])]);
   const noAi: RecallWithAiPort = { async run() { throw new Error("AI must not run without --ai"); } };
@@ -186,6 +196,24 @@ test("recall grades an unrecognized fix link basis as the weakest hedge, never a
   assert.doesNotMatch(output.stderr, /same program,/);
   assert.doesNotMatch(output.stderr, /strong\./);
   assert.deepEqual(validateRockyPhrase("different program, 6 hours later. maybe not fix. check, question"), []);
+});
+
+test("recall says 'under 1 minute' on every link grade when the gap is shorter than a minute", async () => {
+  const grades = [
+    ["identity", /same command, under 1 minute later\. strong\./],
+    ["signature", /same command, under 1 minute later\. strong\./],
+    ["program", /same program, under 1 minute later\. maybe not fix\. check, question/],
+    ["sequence", /different program, under 1 minute later\. maybe not fix\. check, question/],
+  ] as const;
+  const noAi: RecallWithAiPort = { async run() { throw new Error("AI must not run without --ai"); } };
+  for (const [basis, expected] of grades) {
+    const source = memoryReturning([hitWithFix("c1", 5_000, [{ id: "c1", basis }])]);
+    const output = await captureStderr(() => recall(["npm", "test"], { memory: source.memory, recallWithAi: noAi }));
+
+    assert.equal(output.code, 0, basis);
+    assert.match(output.stderr, expected, basis);
+    assert.doesNotMatch(output.stderr, /just now later/, basis);
+  }
 });
 
 test("recall shows a separate weak possible-fix line below a hit with no confirmed fix", async () => {
