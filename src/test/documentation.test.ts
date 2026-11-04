@@ -165,6 +165,11 @@ test("README 60-second test runs one identical command that Rocky can link", () 
   assert.doesNotMatch(section.body, /\bfix(?:ed|es)?\b/i);
 });
 
+test("README Quick start and CLI help say that cmd.exe runs the command on Windows", () => {
+  assert.match(readmeSection("## Quick start").body, /On Windows, `cmd\.exe` runs the command/);
+  assert.match(helpOutput(), /on Windows, cmd\.exe runs the command/i);
+});
+
 test("README, reference, and CLI help link a later success to the failure and never claim the remedy", () => {
   const help = helpOutput();
   assert.ok(readmePage.includes("Rocky links that success to the failure."));

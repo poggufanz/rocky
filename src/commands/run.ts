@@ -175,6 +175,22 @@ function speakablePossibleFix(
   return undefined;
 }
 
+/** cmd.exe's English rejection text. Another locale words it differently and gets silence, not a guess. */
+const CMD_EXE_REJECTION = /is not recognized as an internal or external command/i;
+
+/**
+ * Names the shell when cmd.exe rejected the command. `shell: true`, the default
+ * `runProcess` path, is `%ComSpec%` (cmd.exe) on win32, so Git Bash and PowerShell
+ * words fail there and are recorded as ordinary failures. Disclosure only (spec
+ * T0-12): no cause claim and no remedy command, see the phrase. `defaultShell` has
+ * no default so each caller states whether it used that path. Shared by `run` and
+ * `watch`.
+ */
+export function cmdExeHint(stderr: string, platform: NodeJS.Platform, defaultShell: boolean): string | undefined {
+  if (platform !== "win32" || !defaultShell) return undefined;
+  return CMD_EXE_REJECTION.test(stderr) ? phrase("cmd-exe-parsed") : undefined;
+}
+
 function onFailure(cmd: string, result: ExecResult): void {
   const memory = readMemory();
   if (memory !== undefined) {
@@ -183,6 +199,11 @@ function onFailure(cmd: string, result: ExecResult): void {
     // sees the last 200 lines, not everything the command wrote (spec §3.6).
     speakFailureMemory(memory, fingerprintCandidates(result.stderr, cmd, result.code), cmd, result.code, process.cwd());
   }
+
+  // About the shell, not the history, so it is said even when memory is unreadable.
+  // `run` never overrides runProcess's default `shell: true`.
+  const hint = cmdExeHint(result.stderr, process.platform, true);
+  if (hint !== undefined) say(hint);
 
   recordFailure(cmd, result.code, result.stderr);
 }

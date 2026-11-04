@@ -19,7 +19,7 @@ import { isCompleteMemoryCoverage, loadMemoryChecked } from "../core/memory-read
 import { DEFAULT_WATCH_NOTIFY, loadConfig } from "../core/config-read.js";
 import { formatDuration, notify as realNotify, spokenDuration, type NotifyInput } from "../core/notify.js";
 import { watchLogName, writeWatchLog } from "../core/watch-log.js";
-import { linkFixOnSuccess, speakFailureMemory } from "./run.js";
+import { cmdExeHint, linkFixOnSuccess, speakFailureMemory } from "./run.js";
 import { detail, phrase, say, writeRockyStderr } from "../ui/rocky.js";
 import { safeTerminalBlock, safeTerminalLine } from "../ui/sanitize.js";
 import { NO_FOLLOW_FLAG, regularDescriptorSafe, sameFilesystemIdentity } from "../core/fs-safety.js";
@@ -219,6 +219,10 @@ function onWatchFailure(cmd: string, cwd: string, quiet: boolean, result: ExecRe
     if (memory !== undefined) {
       speakFailureMemory(memory, fingerprintCandidates(result.stderr, cmd, result.code), cmd, result.code, cwd);
     }
+    // Same disclosure as `run`. It sits in this non-quiet block because `--quiet`
+    // prints plain facts only. `watch` never overrides runProcess's default `shell: true`.
+    const hint = cmdExeHint(result.stderr, process.platform, true);
+    if (hint !== undefined) say(hint);
   }
 
   try {

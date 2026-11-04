@@ -5,8 +5,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { commandFingerprint } from "../core/fingerprint.js";
-import { run, speakFailureMemory } from "../commands/run.js";
+import { cmdExeHint, run, speakFailureMemory } from "../commands/run.js";
 import type { ExecResult } from "../core/exec.js";
+import { phraseKeys, validateRockyPhrase } from "../ui/phrases.js";
 
 const packageRoot = process.cwd();
 const cli = join(packageRoot, "dist", "index.js");
@@ -367,4 +368,68 @@ test("a confirmed link run says what Rocky heard and never claims a fix", (t) =>
   assert.match(second.stderr, /I not hear what change\. good good good\./);
   assert.doesNotMatch(second.stderr, /\bfixed\b|you fix it|I remember (the )?fix/i);
   assert.doesNotMatch(second.stderr, /something between/);
+});
+
+// `shell: true` is cmd.exe on win32. It rejects a word it cannot run in two lines on
+// stderr, and the first one carries the pattern Rocky matches.
+const CMD_EXE_REJECTION = "'FOO' is not recognized as an internal or external command,\r\noperable program or batch file.";
+const CMD_EXE_HINT = "cmd.exe parsed this command. bash or powershell words not heard there.";
+
+test("cmdExeHint names cmd.exe when it rejected a command on the default Windows shell", () => {
+  const hint = cmdExeHint("'FOO' is not recognized as an internal or external command,", "win32", true);
+  assert.equal(hint, CMD_EXE_HINT);
+  assert.deepEqual(validateRockyPhrase(hint!), []);
+  assert.ok(phraseKeys.includes("cmd-exe-parsed"), "registered, so the catalog lint covers it");
+  assert.equal(cmdExeHint(CMD_EXE_REJECTION, "win32", true), CMD_EXE_HINT, "the full two-line message matches too");
+});
+
+test("cmdExeHint stays silent off Windows, off the default shell, in another locale, and without a rejection", () => {
+  const rejection = "'FOO' is not recognized as an internal or external command,";
+  assert.equal(cmdExeHint(rejection, "linux", true), undefined);
+  assert.equal(cmdExeHint(rejection, "darwin", true), undefined);
+  assert.equal(cmdExeHint(rejection, "win32", false), undefined);
+  // A localized cmd.exe says something else. Rocky matches the English text only, so he is
+  // silent rather than guessing, and he never claims what he did not hear.
+  assert.equal(cmdExeHint("'FOO' n'est pas reconnu en tant que commande interne", "win32", true), undefined);
+  assert.equal(cmdExeHint("", "win32", true), undefined);
+  assert.equal(cmdExeHint("Error: Cannot find module 'foo'", "win32", true), undefined);
+});
+
+async function captureStderr<T>(fn: () => Promise<T>): Promise<{ result: T; stderr: string }> {
+  const original = process.stderr.write;
+  let stderr = "";
+  process.stderr.write = ((chunk: string | Uint8Array) => { stderr += String(chunk); return true; }) as typeof process.stderr.write;
+  try {
+    return { result: await fn(), stderr };
+  } finally {
+    process.stderr.write = original;
+  }
+}
+
+test("run names cmd.exe once after what memory knows, on Windows only, and records the failure either way", async (t) => {
+  const home = mkdtempSync(join(tmpdir(), "rocky-run-cmd-exe-"));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const original = process.env.ROCKY_HOME;
+  process.env.ROCKY_HOME = home;
+  t.after(() => {
+    if (original === undefined) delete process.env.ROCKY_HOME;
+    else process.env.ROCKY_HOME = original;
+  });
+
+  const rejected: ExecResult = {
+    started: true, code: 1, stderr: CMD_EXE_REJECTION, tail: CMD_EXE_REJECTION.split("\r\n"), durationMs: 5,
+  };
+  const { result, stderr } = await captureStderr(() => run("FOO", async () => rejected));
+
+  assert.equal(result, 1, "the wrapped exit code passes through");
+  const onWindows = process.platform === "win32";
+  assert.equal(stderr.split(CMD_EXE_HINT).length - 1, onWindows ? 1 : 0, stderr);
+  if (onWindows) {
+    assert.ok(stderr.indexOf("new error. bad.") < stderr.indexOf(CMD_EXE_HINT), "memory speaks first, then the shell is named");
+  }
+  // Disclosure only: the failure is recorded as it always was, never skipped or tagged.
+  const records = readFileSync(join(home, "memory.jsonl"), "utf8")
+    .trim().split("\n").map((line) => JSON.parse(line) as { kind: string; cmd?: string; exitCode?: number });
+  assert.equal(records.length, 1);
+  assert.deepEqual([records[0]?.kind, records[0]?.cmd, records[0]?.exitCode], ["failure", "FOO", 1]);
 });

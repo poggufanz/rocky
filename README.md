@@ -46,7 +46,7 @@ Run a failure-prone command through Rocky:
 rocky run "npm run build"
 ```
 
-When it fails, Rocky fingerprints the useful stderr lines and writes a local record. When the same reliable command later succeeds in the same directory, Rocky links that success to the failure.
+When it fails, Rocky fingerprints the useful stderr lines and writes a local record. When the same reliable command later succeeds in the same directory, Rocky links that success to the failure. On Windows, `cmd.exe` runs the command, not Git Bash or PowerShell.
 
 ```bash
 rocky recall "build failure"
