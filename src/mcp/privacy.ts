@@ -3,7 +3,7 @@ import { homedir } from "node:os";
 import type { Exposure } from "../core/config-read.js";
 import { boundTripleRecord, isBoundedLinkBasis, isConfirmableLinkBasis, isSafeNonNegativeInteger, MAX_TRIPLE_FILES } from "../core/memory-read.js";
 import { canonicalPath } from "../core/memory-read.js";
-import type { FailureOrigin, FailureRecord, FixRecord, LinkConfidence, MemoryRecord, TripleRecord } from "../core/memory-read.js";
+import type { FailureOrigin, FailureRecord, FixRecord, LinkConfidence, MemoryRecord, RationaleRecord, TripleRecord } from "../core/memory-read.js";
 import { hasCanonicalKnowledgeProof } from "../core/memory-query.js";
 import type { KnowledgeSearchHit, RecallHit, RecentFailureHit, WhyFilePossible } from "../core/memory-query.js";
 import type { ExplainRecord } from "../core/memory-read.js";
@@ -575,6 +575,43 @@ export function projectWhyPossible(
     }
   }
   return output;
+}
+
+export interface ProjectedWhyRationale {
+  source: "human" | "notify";
+  agent: string;
+  ts: number;
+  text: string;
+  files: string[];
+}
+
+/**
+ * Reasons a human (`why --add --files`) or the notify lane (`agent-event --files`)
+ * stated for one file, projected the way `search_knowledge` projects rationale
+ * records: the text through `projectText`, the named files through
+ * `projectStringArray`. Sanitized exposure redacts and raw exposure shows no more
+ * than that tool already does. `truncated` says a field was clipped, so a cut-short
+ * reason never passes for a whole one. Agent-log reasons never get this far: only a
+ * speaker who named files scopes a reason to them.
+ */
+export function projectWhyRationales(
+  records: readonly RationaleRecord[],
+  exposure: Exposure,
+): { rationales: ProjectedWhyRationale[]; truncated: boolean } {
+  const truncation: Truncation = { fields: [] };
+  const rationales: ProjectedWhyRationale[] = [];
+  for (const record of records) {
+    if (record.source !== "human" && record.source !== "notify") continue;
+    const at = `rationales[${rationales.length}]`;
+    rationales.push({
+      source: record.source,
+      agent: record.agent,
+      ts: record.ts,
+      text: projectText(record.excerpt, exposure, `${at}.text`, truncation),
+      files: projectStringArray(record.files ?? [], exposure, `${at}.files`, truncation),
+    });
+  }
+  return { rationales, truncated: truncation.fields.length > 0 };
 }
 
 function safeKnowledgeString(value: unknown, maximum = MAX_FIELD_BYTES): string | undefined {
