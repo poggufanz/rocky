@@ -12,7 +12,7 @@ import { truncateUtf8 } from "../mcp/privacy.js";
 import { ago, detail, say } from "../ui/rocky.js";
 import { safeTerminalLine } from "../ui/sanitize.js";
 import { formatGitDiffLines, resolveGitDiff, type GitDiffOptions, type GitDiffResult } from "../core/git-diff.js";
-import { parseNoArgs, parseQueryArgs, reportCliUsage } from "./cli-args.js";
+import { CliUsageError, parseNoArgs, parseQueryArgs, reportCliUsage } from "./cli-args.js";
 
 const MAX_QUERY_DISPLAY_BYTES = 160;
 const MAX_SUBJECT_DISPLAY_BYTES = 120;
@@ -529,33 +529,72 @@ function newestLinkTarget(memory: readonly MemoryRecord[], cwd: string, now: num
   return newest.kind === "failure" ? { failureId: newest.id } : { fixId: newest.id };
 }
 
-function whyAdd(rawText: string, speak: (line: string) => void, records: () => MemoryRecord[], now: number): number {
-  const text = rawText.trim();
+const WHY_ADD_USAGE = 'rocky why --add "<text>" [--files a.ts,b.ts]';
+
+/**
+ * `--files <csv>` may sit anywhere in the tail; every other word still joins
+ * the reason text. The comma grammar is the notify lane's, but a missing, empty,
+ * or flag-shaped value is a usage error here: that lane fails open, while a
+ * person at a terminal must hear that no file would be named.
+ */
+function parseWhyAddArgs(args: readonly string[]): { text: string; files?: string[] } {
+  const words: string[] = [];
+  let files: string[] | undefined;
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = args[i];
+    if (arg !== "--files") {
+      words.push(arg);
+      continue;
+    }
+    if (files !== undefined) throw new CliUsageError("unexpected option: --files", WHY_ADD_USAGE);
+    const value: string | undefined = args[i + 1];
+    files = value === undefined || value.startsWith("--")
+      ? []
+      : value.split(",").map((entry) => entry.trim()).filter((entry) => entry.length > 0);
+    if (files.length === 0) throw new CliUsageError("--files needs path", WHY_ADD_USAGE);
+    i += 1;
+  }
+  return { text: words.join(" ").trim(), ...(files === undefined ? {} : { files }) };
+}
+
+/**
+ * Usage errors throw `CliUsageError` before memory is read or written; the
+ * `index.ts` call site reports them with exit 2.
+ */
+function whyAdd(args: readonly string[], speak: (line: string) => void, records: () => MemoryRecord[], now: number): number {
+  const { text, files } = parseWhyAddArgs(args);
   if (!text) {
     speak('why --add needs word to remember. rocky why --add "some reason", question');
     return 1;
   }
   const cwd = process.cwd();
-  const links = newestLinkTarget(records(), cwd, now);
-  recordRationale({
+  // Named files scope the reason by themselves. Recency alone is a guess, so it
+  // links only when no file was named.
+  const links = files === undefined ? newestLinkTarget(records(), cwd, now) : undefined;
+  const stored = recordRationale({
     cwd, agent: "human", rationale_fidelity: "summary", source: "human", text,
     ...(links === undefined ? {} : { links }),
+    ...(files === undefined ? {} : { files }),
   });
-  speak("why remembered. you said it, rocky keeps it.");
+  // The bounding rules can drop a legitimate path (`app/(auth)/page.tsx`), so
+  // this line states only what was kept, never that a path was bad.
+  speak(files !== undefined && stored.files === undefined
+    ? "reason remembered. no file kept."
+    : "why remembered. you said it, rocky keeps it.");
   return 0;
 }
 
 export function why(argv: string[], deps: DictionaryCommandDeps = {}): number {
   const { speak, support, records, coverage } = resolve(deps);
   if (argv[0] === "--add") {
-    return whyAdd(argv.slice(1).join(" "), speak, records, deps.now ?? Date.now());
+    return whyAdd(argv.slice(1), speak, records, deps.now ?? Date.now());
   }
   let path: string;
   let showDiff = false;
   try {
     const parsed = parseQueryArgs(argv, {
       allowDiff: true,
-      usage: 'rocky why [--diff] [--add "<text>"] [--] <file>',
+      usage: "rocky why [--diff] [--] <file>",
     });
     path = parsed.query;
     showDiff = parsed.diff;

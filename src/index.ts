@@ -70,8 +70,12 @@ usage:
                             look up what remembered intent became.
   rocky how [--diff] [--] <query...>
                             remember how intent became code.
-  rocky why [--diff] [--add "<text>"] [--] <file>
+  rocky why [--diff] [--] <file>
                             hear why remembered change touched file.
+  rocky why --add "<text>" [--files a.ts,b.ts]
+                            remember your own reason. --files names the files it
+                            explains. without --files, it attaches to newest
+                            failure or fix heard in this directory.
   rocky teach <file>[:<line>] [--ladder]   why this code, from witness or evidence
   rocky digest              hear this week's remembered intent pattern.
   rocky quiz                practice newest remembered intent or note; asks, then reveals,

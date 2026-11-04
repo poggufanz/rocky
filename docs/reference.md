@@ -133,7 +133,7 @@ v0.7 adds a fourth evidence kind, `rationale`, alongside the triples above: Rock
 | `log-thinking` | Claude Code or DSH session logs, when a thinking block exists | raw |
 | `log-response` | Claude Code session logs' response text, when no thinking block exists | summary |
 | `notify` | Any agent calling `rocky hook agent-event <adapter> --rationale "<text>"` | summary |
-| `human` | You, via `rocky why --add "<text>"` | summary |
+| `human` | You, via `rocky why --add "<text>" [--files a.ts,b.ts]` | summary |
 
 `rocky concepts` lists concepts a deterministic lexicon and matcher have heard across memory, with counts and any aliases you have taught it; `rocky concept <id>` shows newest-first evidence for one concept, and `rocky concept alias ["--retract"] "<phrase>" <id>` teaches or retracts one phrase. `rocky sessions [n]` lists work derived from memory at read time, grouped by directory and split on a 30-minute gap; `rocky sessions <index>` shows one session's evidence chronologically. `rocky repl [--ai]` keeps that lookup family — recall/what/why/how/concepts/sessions — in one loop instead of paying a fresh process start per call.
 

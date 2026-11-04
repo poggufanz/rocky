@@ -135,6 +135,23 @@ test("dictionary query options are positional and -- makes leading flags literal
   }
 });
 
+test("why --add reports a --files value it cannot use as usage with exit 2", () => {
+  for (const args of [
+    ["why", "--add", "x", "--files"],
+    ["why", "--add", "x", "--files", ""],
+    ["why", "--add", "x", "--files", "--diff"],
+  ]) {
+    const label = args.join(" ");
+    const result = runCli(args);
+    assert.equal(result.error, undefined, `${label}: ${String(result.error)}`);
+    assert.equal(result.signal, null, label);
+    assert.equal(result.status, 2, `${label}: ${result.stderr}`);
+    assert.equal(result.stdout, "", label);
+    assert.match(result.stderr, /--files needs path/, label);
+    assert.ok(result.stderr.includes('usage: rocky why --add "<text>" [--files a.ts,b.ts]'), `${label}: ${result.stderr}`);
+  }
+});
+
 test("manual check rejects positional junk before Git inspection", () => {
   const cwd = mkdtempSync(join(tmpdir(), "rocky-cli-grammar-cwd-"));
   try {

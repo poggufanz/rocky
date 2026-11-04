@@ -112,7 +112,7 @@ Stated-rationale evidence arrives through four lanes, ranked by fidelity:
 | `log-thinking` | Claude Code or DSH session logs, when a thinking block exists | raw |
 | `log-response` | Claude Code session logs' response text, when no thinking block exists | summary |
 | `notify` | Any agent calling `rocky hook agent-event <adapter> --rationale "<text>"` | summary |
-| `human` | You, via `rocky why --add "<text>"` | summary |
+| `human` | You, via `rocky why --add "<text>" [--files a.ts,b.ts]` | summary |
 
 An unlinked file has no rationale evidence yet; that is a first-class honest state, not a gap Rocky papers over. The DSH log adapter needs Node 22.15 or newer at runtime for built-in zstd support — on an older Node it feature-detects the gap, skips DSH logs, and discloses that instead of guessing. `rocky setup --agent-hooks` installs a PreToolUse rationale gate by default (`rocky hook gate-event claude-code`): it denies once per session per file when no rationale evidence exists yet, then fails open for that file every time after. Opt out at install with `--no-rationale-gate`, or at runtime with `ROCKY_RATIONALE_GATE=off`. Codex and other non-Claude-Code agents have no deny hook at all; they reach the `notify` lane only.
 
