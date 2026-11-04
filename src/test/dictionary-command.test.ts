@@ -4,6 +4,10 @@ import { test } from "node:test";
 import { digest, exportCommand, how, quiz, what, why } from "../commands/dictionary.js";
 import type { MemoryCoverage, MemoryRecord, TripleRecord } from "../core/memory-read.js";
 import { pathIdentityHash } from "../core/memory-read.js";
+import { validateRockyPhrase } from "../ui/phrases.js";
+
+const NO_RECORD_NAMES_FILE = "no record names this file. I not know if agent touch it.";
+const COVERAGE_INCOMPLETE_LINE = "I not know if agent touch. coverage incomplete.";
 
 const fullHostileMatrix = [
   "unicode-🪨-工程-e\u0301",
@@ -412,7 +416,8 @@ test("why keeps unmatched relative-root paths unknown", () => {
   };
   const output = sinks();
   assert.equal(why(["src/missing.ts"], { load: () => [triple], now: 100, ...output.deps }), 0);
-  assert.ok(output.sayLines.some((line) => line.includes("I not know if agent touch")));
+  assert.deepEqual(output.sayLines, [`"src/missing.ts"... ${NO_RECORD_NAMES_FILE}`]);
+  assert.deepEqual(output.outLines, []);
   assert.equal(output.sayLines.some((line) => line.includes("nobody touch")), false);
 });
 
@@ -454,7 +459,8 @@ test("why rejects absolute cross-root legacy suffixes without platform", () => {
   };
   const output = sinks();
   assert.equal(why(["src/index.ts"], { load: () => [triple], now: 100, ...output.deps }), 0);
-  assert.ok(output.sayLines.some((line) => line.includes("I not know if agent touch")));
+  assert.deepEqual(output.sayLines, [`"src/index.ts"... ${NO_RECORD_NAMES_FILE}`]);
+  assert.deepEqual(output.outLines, []);
   assert.equal(output.sayLines.some((line) => line.includes("nobody touch")), false);
 });
 
@@ -505,12 +511,53 @@ test("why without rationale reports change without reason", () => {
 test("why on unknown file and missing arg", () => {
   const unknown = sinks();
   assert.equal(why(["ghost.css"], { load: () => [], ...unknown.deps }), 0);
-  assert.ok(unknown.sayLines.join("\n").includes("I not know if agent touch"));
+  assert.deepEqual(unknown.sayLines, [`"ghost.css"... ${NO_RECORD_NAMES_FILE}`]);
+  assert.deepEqual(unknown.outLines, []);
   assert.equal(unknown.sayLines.join("\n").includes("nobody touch this while I listen"), false);
 
   const missing = sinks();
   assert.equal(why([], { load: () => [], ...missing.deps }), 2);
   assert.equal(missing.outLines.length, 0);
+});
+
+test("why on a fresh memory says no record names the file and claims nothing was omitted", () => {
+  const complete: MemoryCoverage = { version: 1, scanned: 0, skipped: 0, truncated: 0, bytesScanned: 0, bytesTotal: 0, complete: true };
+  for (const coverage of [undefined, () => complete]) {
+    const output = sinks();
+    assert.equal(why(["package.json"], { load: () => [], ...(coverage === undefined ? {} : { coverage }), ...output.deps }), 0);
+    assert.deepEqual(output.sayLines, [`"package.json"... ${NO_RECORD_NAMES_FILE}`]);
+    assert.deepEqual(output.outLines, []);
+    const heard = [...output.sayLines, ...output.outLines].join("\n");
+    assert.equal(heard.includes("possible path omitted"), false);
+    assert.equal(heard.includes("coverage"), false);
+  }
+  assert.deepEqual(validateRockyPhrase(`"package.json"... ${NO_RECORD_NAMES_FILE}`), []);
+});
+
+test("why keeps possible path omitted when a record may hide the file", () => {
+  const truncated: TripleRecord = {
+    kind: "triple", id: "may-hide", ts: 100, cwd: "/repo", platform: "linux", schemaV: 1, agent: "codex", origin: "agent-hook",
+    mechanism: {
+      files: [{ path: "src/other.ts", plusMinus: [1, 0], props: [], provenance: "tool-observed" }],
+      truncatedFiles: 4, baseline: "captured", coverageStatus: "truncated",
+    },
+  };
+  const output = sinks();
+  assert.equal(why(["src/missing.ts"], { load: () => [truncated], now: 100, ...output.deps }), 0);
+  assert.deepEqual(output.sayLines, [`"src/missing.ts"... ${COVERAGE_INCOMPLETE_LINE}`]);
+  assert.deepEqual(output.outLines, ["coverage status: unknown; possible path omitted."]);
+  assert.equal([...output.sayLines, ...output.outLines].some((line) => line.includes("no record names")), false);
+});
+
+test("why discloses an incomplete memory scan without claiming a path was omitted", () => {
+  const incomplete: MemoryCoverage = { version: 1, scanned: 3, skipped: 0, truncated: 1, bytesScanned: 10, bytesTotal: 20, complete: false, reason: "file-size-cap" };
+  const output = sinks();
+  assert.equal(why(["package.json"], { load: () => [], coverage: () => incomplete, ...output.deps }), 0);
+  assert.deepEqual(output.sayLines, [`"package.json"... ${COVERAGE_INCOMPLETE_LINE}`]);
+  assert.deepEqual(output.outLines, [
+    "memory coverage incomplete: version 1; scanned 3; skipped 0; truncated 1; bytes 10/20; reason file-size-cap",
+  ]);
+  assert.equal([...output.sayLines, ...output.outLines].some((line) => line.includes("possible path omitted") || line.includes("no record names")), false);
 });
 
 test("why keeps hostile rationale, tags, and paths bounded and terminal-safe", () => {

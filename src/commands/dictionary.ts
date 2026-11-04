@@ -1,7 +1,7 @@
 import { Buffer } from "node:buffer";
 import { dictionaryRankPortFromConfig, type DictionaryRankPort } from "../ai/dictionary-ai.js";
 import { loadConfig } from "../core/config.js";
-import { csConceptCounts, digestBuckets, queryDictionary, queryNotes, quizCandidates, type DictionaryHit, type NoteHit } from "../core/dictionary.js";
+import { csConceptCounts, digestBuckets, queryDictionary, queryNotes, quizCandidates, rationalesForFile, type DictionaryHit, type NoteHit } from "../core/dictionary.js";
 import { isCompleteMemoryCoverage, isOperationalMemoryRecord, loadMemoryChecked, sameCwd } from "../core/memory-read.js";
 import { recordRationale } from "../core/memory.js";
 import { LINK_WINDOW_MS, whyFile, whyFileEvidence, whyFilePathRelation } from "../core/memory-query.js";
@@ -20,6 +20,7 @@ const MAX_PATH_DISPLAY_BYTES = 180;
 const MAX_PROVENANCE_PATH_BYTES = 96;
 const MAX_INTENT_DISPLAY_BYTES = 128;
 const MAX_OUTPUT_LINE_BYTES = 512;
+const MAX_FILE_RATIONALES = 5;
 const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
 const DAY_MS = 24 * 60 * 60 * 1000;
 const EXPORT_USAGE = "export takes --kind failure|fix|note|triple and --since 30d. try again, question";
@@ -516,6 +517,31 @@ function linkedRationales(memory: readonly MemoryRecord[], tripleId: string): Ra
     .sort((a, b) => a.ts - b.ts);
 }
 
+/**
+ * One stated reason: its excerpt, labelled by who said it, on the persona sink,
+ * then the caller's evidence line on the support sink. Both pass through
+ * `terminalSafe` here, because the excerpt is hearsay and may carry anything.
+ */
+function sayRationale(
+  speak: (line: string) => void,
+  support: (line: string) => void,
+  record: RationaleRecord,
+  evidence: string,
+): void {
+  const excerpt = terminalSafe(record.excerpt, MAX_INTENT_DISPLAY_BYTES).trim();
+  speak(terminalSafe(`${rationaleSourceLabel(record.source)}: ${excerpt}`, MAX_OUTPUT_LINE_BYTES));
+  support(terminalSafe(evidence, MAX_OUTPUT_LINE_BYTES));
+}
+
+/** Stated reasons that name the queried file. `why` calls this last, after every disclosure line. */
+function sayFileRationales(
+  speak: (line: string) => void,
+  support: (line: string) => void,
+  reasons: readonly RationaleRecord[],
+): void {
+  for (const reason of reasons) sayRationale(speak, support, reason, `  (${ago(reason.ts)}, ${reason.agent})`);
+}
+
 /** Newest failure/fix in this cwd within the fix-linker's own window — same evidence basis, not a guess. */
 function newestLinkTarget(memory: readonly MemoryRecord[], cwd: string, now: number): RationaleLinks | undefined {
   const cutoff = now - LINK_WINDOW_MS;
@@ -620,19 +646,34 @@ export function why(argv: string[], deps: DictionaryCommandDeps = {}): number {
     : evidenceResult.coverageIncomplete
       ? whyFile(memory, path, 5, now)
       : evidenceResult.matches;
+  // Reasons the human or an agent stated for exactly this file (`--files`). They
+  // are spoken last, so no disclosure line below can be pushed out by one.
+  const fileRationales = rationalesForFile(memory, path, process.cwd(), now, MAX_FILE_RATIONALES);
   if (hits.length === 0) {
     if (evidenceResult.ambiguousPath) {
       speak(terminalSafe(`"${safePath}"... multiple possible paths. clarify, question`, MAX_OUTPUT_LINE_BYTES));
       support(terminalSafe(`coverage status: ${evidenceResult.coverage.status}; no silent rationale selection; confidence=incomplete reason=ambiguous path`, MAX_OUTPUT_LINE_BYTES));
       return 0;
     }
-    if ((scan !== undefined && coverageIncomplete(scan)) || evidenceResult.coverageIncomplete || evidenceResult.possible.length > 0) {
+    const scanIncomplete = scan !== undefined && coverageIncomplete(scan);
+    const pathMayBeOmitted = evidenceResult.possible.length > 0;
+    if (scanIncomplete || pathMayBeOmitted) {
       speak(terminalSafe(`"${safePath}"... I not know if agent touch. coverage incomplete.`, MAX_OUTPUT_LINE_BYTES));
-      if (scan !== undefined && coverageIncomplete(scan)) support(coverageLine(scan));
-      support(terminalSafe(`coverage status: ${evidenceResult.coverage.status}; possible path omitted.`, MAX_OUTPUT_LINE_BYTES));
-      return 0;
+      if (scanIncomplete) support(coverageLine(scan));
+      if (pathMayBeOmitted) {
+        support(terminalSafe(`coverage status: ${evidenceResult.coverage.status}; possible path omitted.`, MAX_OUTPUT_LINE_BYTES));
+      }
+    } else if (evidenceResult.coverageIncomplete) {
+      // The reader marks empty evidence incomplete by construction. With a whole scan and
+      // no record that might hide this path, nothing was omitted. Say only that no record
+      // names it, and not even that when a stated reason does.
+      if (fileRationales.length === 0) {
+        speak(terminalSafe(`"${safePath}"... no record names this file. I not know if agent touch it.`, MAX_OUTPUT_LINE_BYTES));
+      }
+    } else {
+      speak(terminalSafe(`"${safePath}"... nobody touch this while I listen.`, MAX_OUTPUT_LINE_BYTES));
     }
-    speak(terminalSafe(`"${safePath}"... nobody touch this while I listen.`, MAX_OUTPUT_LINE_BYTES));
+    sayFileRationales(speak, support, fileRationales);
     return 0;
   }
   if (scan !== undefined && coverageIncomplete(scan)) support(coverageLine(scan));
@@ -663,10 +704,8 @@ export function why(argv: string[], deps: DictionaryCommandDeps = {}): number {
       for (const line of boundedDetailLines(`  (${where}, ${ago(triple.ts)};`, provenance, ")")) support(line);
     }
     for (const rationaleRecord of linkedRationales(memory, triple.id)) {
-      const label = rationaleSourceLabel(rationaleRecord.source);
-      const excerptSafe = terminalSafe(rationaleRecord.excerpt, MAX_INTENT_DISPLAY_BYTES).trim();
-      speak(terminalSafe(`${label}: ${excerptSafe}`, MAX_OUTPUT_LINE_BYTES));
-      support(terminalSafe(`  (rationale id=${rationaleRecord.id}, ${ago(rationaleRecord.ts)}, agent=${rationaleRecord.agent}, fidelity=${rationaleRecord.rationale_fidelity})`, MAX_OUTPUT_LINE_BYTES));
+      sayRationale(speak, support, rationaleRecord,
+        `  (rationale id=${rationaleRecord.id}, ${ago(rationaleRecord.ts)}, agent=${rationaleRecord.agent}, fidelity=${rationaleRecord.rationale_fidelity})`);
     }
     if (showDiff) {
       let diffResult: GitDiffResult | undefined;
@@ -685,6 +724,7 @@ export function why(argv: string[], deps: DictionaryCommandDeps = {}): number {
       }
     }
   }
+  sayFileRationales(speak, support, fileRationales);
   return 0;
 }
 

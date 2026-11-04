@@ -1,7 +1,7 @@
 import { similarity, tokens } from "./fingerprint.js";
 import { boundTripleRecord, canonicalPath, isOperationalMemoryRecord } from "./memory-read.js";
 import { whyFile } from "./memory-query.js";
-import type { MemoryRecord, NoteRecord, TripleRecord } from "./memory-read.js";
+import type { MemoryRecord, NoteRecord, RationaleRecord, TripleRecord } from "./memory-read.js";
 import { matchConcepts } from "./concepts.js";
 import { CS_CONCEPT_IDS } from "./cs-explain.js";
 
@@ -64,6 +64,36 @@ export function triplesForFile(records: readonly MemoryRecord[], path: string, l
   // Keep this legacy helper on the same trusted-root, platform-aware matcher
   // as why/why_file.  Dictionary consumers must not grow a weaker path rule.
   return whyFile(records, path, limit);
+}
+
+/**
+ * Stated reasons (the human's `why --add --files` and the notify lane's
+ * `--files`) whose file list names `path`, newest first. Agent-log reasons are
+ * excluded: only a speaker who named files scopes a reason to them.
+ *
+ * Identity is exact: both spellings resolve through `canonicalPath` against
+ * their own cwd (the record's for a stored file, `cwd` for the queried path),
+ * the same rule the gate and the pre-push nudge use. No suffix, no basename, so
+ * this can only under-match, never hand a reason to a file it did not name.
+ */
+export function rationalesForFile(
+  records: readonly MemoryRecord[],
+  path: string,
+  cwd: string,
+  now: number,
+  limit: number,
+): RationaleRecord[] {
+  const target = canonicalPath(path, { cwd });
+  if (target.length === 0) return [];
+  return records
+    .filter((record): record is RationaleRecord =>
+      record.kind === "rationale"
+      && (record.source === "human" || record.source === "notify")
+      && Array.isArray(record.files)
+      && isOperationalMemoryRecord(record, now)
+      && record.files.some((file) => canonicalPath(file, { cwd: record.cwd }) === target))
+    .sort((a, b) => b.ts - a.ts || a.id.localeCompare(b.id))
+    .slice(0, Math.max(0, limit));
 }
 
 function basename(path: string): string {

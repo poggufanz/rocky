@@ -1,7 +1,7 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
-import { digestBuckets, queryDictionary, queryNotes, quizCandidates, triplesForFile } from "../core/dictionary.js";
-import type { MemoryRecord, NoteRecord, TripleRecord } from "../core/memory-read.js";
+import { digestBuckets, queryDictionary, queryNotes, quizCandidates, rationalesForFile, triplesForFile } from "../core/dictionary.js";
+import type { MemoryRecord, NoteRecord, RationaleRecord, RationaleSource, TripleRecord } from "../core/memory-read.js";
 
 const DAY = 24 * 60 * 60 * 1000;
 const NOW = 1_700_000_000_000;
@@ -16,6 +16,14 @@ function triple(input: { ts: number; intent?: string; tags?: string[]; path?: st
   };
 }
 const failure: MemoryRecord = { kind: "failure", id: "f1", ts: NOW, cwd: "/w", cmd: "x", exitCode: 1, fingerprint: "fp", signature: [], excerpt: "" };
+function rationale(input: { id: string; ts: number; source?: RationaleSource; files?: string[]; cwd?: string }): RationaleRecord {
+  const source = input.source ?? "human";
+  return {
+    kind: "rationale", id: input.id, ts: input.ts, v: 1, cwd: input.cwd ?? "/repo",
+    agent: source === "human" ? "human" : "generic", rationale_fidelity: "summary", source, excerpt: `reason ${input.id}`,
+    ...(input.files === undefined ? {} : { files: input.files }),
+  };
+}
 
 test("queryDictionary ranks token overlap, skips non-triples and intentless triples", () => {
   const records: MemoryRecord[] = [
@@ -71,6 +79,64 @@ test("path identity folds Windows-origin case but keeps POSIX case distinct", ()
   const posix = { ...triple({ ts: NOW, intent: "posix", path: "SRC/App.ts" }), platform: "linux" as const };
   assert.equal(triplesForFile([windows], "src/app.ts").length, 1);
   assert.equal(triplesForFile([posix], "src/app.ts").length, 0);
+});
+
+test("rationalesForFile keeps human and notify reasons that name the file, newest first, then by id", () => {
+  const records: MemoryRecord[] = [
+    rationale({ id: "old-notify", ts: NOW - 2 * DAY, source: "notify", files: ["src/a.ts"] }),
+    rationale({ id: "newest-human", ts: NOW - DAY, source: "human", files: ["src/b.ts", "src/a.ts"] }),
+    rationale({ id: "tie-b", ts: NOW - 3 * DAY, files: ["src/a.ts"] }),
+    rationale({ id: "tie-a", ts: NOW - 3 * DAY, files: ["src/a.ts"] }),
+  ];
+  assert.deepEqual(
+    rationalesForFile(records, "src/a.ts", "/repo", NOW, 5).map((record) => record.id),
+    ["newest-human", "old-notify", "tie-a", "tie-b"],
+  );
+});
+
+test("rationalesForFile skips agent-log reasons, unscoped reasons, other files, other record kinds, and future reasons", () => {
+  const records: MemoryRecord[] = [
+    rationale({ id: "thinking", ts: NOW - 1, source: "log-thinking", files: ["src/a.ts"] }),
+    rationale({ id: "reply", ts: NOW - 1, source: "log-response", files: ["src/a.ts"] }),
+    rationale({ id: "unscoped", ts: NOW - 1 }),
+    rationale({ id: "other-file", ts: NOW - 1, files: ["src/b.ts"] }),
+    rationale({ id: "future", ts: NOW + 1, files: ["src/a.ts"] }),
+    failure,
+    triple({ ts: NOW - 1, intent: "touch a", path: "src/a.ts" }),
+  ];
+  assert.deepEqual(rationalesForFile(records, "src/a.ts", "/repo", NOW, 5), []);
+});
+
+test("rationalesForFile matches exact identity only: no suffix, no basename", () => {
+  const nested = rationale({ id: "nested", ts: NOW, files: ["web/src/a.ts"] });
+  const bare = rationale({ id: "bare", ts: NOW - 1, files: ["a.ts"] });
+  assert.deepEqual(rationalesForFile([nested, bare], "src/a.ts", "/repo", NOW, 5), []);
+  assert.deepEqual(rationalesForFile([nested, bare], "a.ts", "/repo", NOW, 5).map((record) => record.id), ["bare"]);
+});
+
+test("rationalesForFile resolves each spelling against its own cwd", () => {
+  const relative = rationale({ id: "relative", ts: NOW, cwd: "/repo", files: ["src/a.ts"] });
+  const absolute = rationale({ id: "absolute", ts: NOW - 1, cwd: "/elsewhere", files: ["/repo/src/a.ts"] });
+  const otherRoot = rationale({ id: "other-root", ts: NOW - 2, cwd: "/other", files: ["src/a.ts"] });
+  const records = [relative, absolute, otherRoot];
+  assert.deepEqual(
+    rationalesForFile(records, "src/a.ts", "/repo", NOW, 5).map((record) => record.id),
+    ["relative", "absolute"],
+  );
+  assert.deepEqual(
+    rationalesForFile(records, "/repo/src/a.ts", "/anywhere", NOW, 5).map((record) => record.id),
+    ["relative", "absolute"],
+  );
+});
+
+test("rationalesForFile bounds the result and never matches an empty path", () => {
+  const many = Array.from({ length: 7 }, (_, index) => rationale({ id: `r${index}`, ts: NOW - index, files: ["src/a.ts"] }));
+  assert.deepEqual(rationalesForFile(many, "src/a.ts", "/repo", NOW, 5).map((record) => record.id), ["r0", "r1", "r2", "r3", "r4"]);
+  assert.deepEqual(rationalesForFile(many, "src/a.ts", "/repo", NOW, 0), []);
+
+  const blank = rationale({ id: "blank", ts: NOW, files: ["", "   "] });
+  assert.deepEqual(rationalesForFile([blank], "", "/repo", NOW, 5), []);
+  assert.deepEqual(rationalesForFile([blank], "   ", "/repo", NOW, 5), []);
 });
 
 test("dictionary and note queries use shared Unicode NFC and numeric tokens", () => {
