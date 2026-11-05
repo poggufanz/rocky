@@ -582,13 +582,6 @@ export function validateReleaseTruth(snapshot) {
 
   const readme = typeof value.readme === "string" ? value.readme : "";
   const visibleReadmeLines = markdownSourceLines(readme);
-  const roadmapSections = markdownH2Sections(readme).filter((section) => /^Roadmap$/i.test(section.title));
-  const roadmap = roadmapSections.length === 1 ? roadmapSections[0] : undefined;
-  const currentRoadmapLines = roadmap?.lines.filter((line) => /\(current release\)/i.test(line)) ?? [];
-  const roadmapToken = /^[-*]\s+\*\*(v\d+\.\d+(?:\.\d+)?)\s+/i.exec(currentRoadmapLines[0] ?? "")?.[1];
-  const expectedMinorVersion = expectedVersion.split(".").slice(0, 2).join(".");
-  const allowedRoadmapTokens = new Set([`v${expectedVersion}`, `v${expectedMinorVersion}`]);
-  const allowedRoadmapToken = roadmapToken !== undefined && allowedRoadmapTokens.has(roadmapToken);
   const currentReleaseLines = visibleReadmeLines.filter((line) => /^\s*Current release\s*:/i.test(line));
   const currentReleaseMarkerCount = (visibleReadmeLines.join("\n").match(/\bCurrent release\s*:/gi) ?? []).length;
   const canonicalCurrentMarker = `Current release: \`${PACKAGE_NAME}@${expectedVersion}\``;
@@ -597,9 +590,6 @@ export function validateReleaseTruth(snapshot) {
   if (currentReleaseMarkerCount !== 1
       || currentReleaseLines.length !== 1
       || !new RegExp(`^${escapeRegExp(canonicalCurrentMarker)}(?:\\.|$)`, "u").test(currentReleaseLines[0].trim())
-      || roadmap === undefined
-      || currentRoadmapLines.length !== 1
-      || !allowedRoadmapToken
       || canonicalLayoutLines.length !== 1
       || canonicalLayoutLines[0].trim() !== canonicalLayout
       || hasUnsupportedRawHtml(readme)

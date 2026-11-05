@@ -165,20 +165,6 @@ Repository layout: a fresh clone of the canonical upstream repository (`https://
 
 Read the [contributing guide](https://github.com/poggufanz/rocky/blob/main/CONTRIBUTING.md) before changing setup, MCP, file transactions, or shell hooks. Those paths refuse uncertain state rather than guessing. The full `npm test` run is the release gate.
 
-## Roadmap
-
-- **v0.2.1 - distribution bridge (historical)**: scoped npm package, Bash/WSL hook, read-only MCP, host setup, and optional local AI.
-- **v0.3 - patience (implemented)**: `rocky watch` for long-running work.
-- **v0.4 - diligence (implemented)**: `rocky check` before a push.
-- **v0.5 - curiosity (implemented)**: Nervous System hooks, intent-mechanism dictionary, teaching commands, and bounded MCP knowledge tools.
-- **v0.6 - accountability (implemented)**: `rocky brief`, `rocky journal`, `rocky invariants`, extended `rocky stats`, and the schema envelope documentation.
-- **v0.7 - memory of why (implemented)**: stated-rationale evidence across four lanes, a concept lexicon (`rocky concepts`), derived `rocky sessions` and `rocky repl`, and the PreToolUse rationale gate.
-- **v0.8 - comprehension guardian (implemented)**: local browser GUI (`rocky dash`), teach mode (`rocky teach` / `teach_lookup` / `explain` records), and native git diff correlation.
-- **v1.0 - listening (implemented)**: consent-gated Listening across Git-tracked files, explicit `rocky setup --harness` targets with MCP adapters for five harnesses, thirteen read-only MCP tools, a chat-first Main tab, and advisory prompt-clarity, decomposition, and failure-cycle checks.
-- **v1.1 - honesty (current release)**: output that says what Rocky heard and what it did not: `rocky check` always states its result and scope, partial memory reads are named, default output drops internal ids, secrets stay out of stored commands and excerpts, and `rocky why --add --files` closes the rationale loop.
-
-BYOK annotation and `attest` remain deferred. The memory circuit breaker ships as an advisory, not an enforcer: a failure-cycle gate note plus `rocky stats --cycles`, fail-open, never blocking. Codex and Gemini agent-log adapters are deferred too — Codex's local session format drifted to a SQLite hybrid, and Gemini persists no thoughts to read. The earlier `rocky explain` idea is superseded; teach mode uses `rocky teach` and `explain` records.
-
 ## License and attribution
 
 Rocky CLI code, original project documentation, and the repository illustration are available under the [MIT License](LICENSE).

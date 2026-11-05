@@ -286,20 +286,11 @@ test("README, reference, and CLI help link a later success to the failure and ne
   }
 });
 
-test("README identity, roadmap, and Plan 01/Plan 02 v0.5 boundary stay aligned", () => {
+test("README identity and Plan 01/Plan 02 v0.5 boundary stay aligned", () => {
   assert.ok(
     readmePage.includes(`${PACKAGE_NAME}@${PACKAGE_VERSION}`),
     "README package identity must come from the same name and version as package-info.ts",
   );
-
-  const roadmap = readmePage.slice(readmePage.indexOf("## Roadmap"));
-  const releaseOrder = ["v0.2.1", "v0.3", "v0.4", "v0.5"] as const;
-  let previous = -1;
-  for (const release of releaseOrder) {
-    const current = roadmap.indexOf(release);
-    assert.ok(current > previous, `${release} must follow the preceding roadmap release`);
-    previous = current;
-  }
 
   assert.match(readme, /\*\*The Good Trade\.\*\*/);
   assert.ok(readme.includes("This is Rocky's v0.5 product hypothesis, not an established outcome."));

@@ -532,48 +532,30 @@ test("canonical release truth rejects drift in every release marker", async () =
   ] as const) {
     assert.notDeepEqual(releaseCheck.validateReleaseTruth(mutated), [], `${label} must fail`);
   }
-  const realRoadmapMarker = /^-\s+\*\*v1\.1\b[^\r\n]*\(current release\)[^\r\n]*$/im.exec(snapshot.readme)?.[0];
-  assert.ok(realRoadmapMarker !== undefined, "canonical README roadmap marker must exist");
   const realCurrentReleaseLine = /^\s*Current release\s*:[^\r\n]*$/im.exec(snapshot.readme)?.[0];
   assert.ok(realCurrentReleaseLine !== undefined, "canonical README current-release marker must exist");
-  const roadmapMarkerRemoved = snapshot.readme.replace(realRoadmapMarker!, realRoadmapMarker!.replace("(current release)", "(implemented)"));
+  const readmeWithoutRealMarkers = snapshot.readme.replace(realCurrentReleaseLine!, "");
   assert.notDeepEqual(
-    releaseCheck.validateReleaseTruth({ ...snapshot, readme: `${roadmapMarkerRemoved}\n- **v0.5 — fake (current release)**\n` }),
+    releaseCheck.validateReleaseTruth({ ...snapshot, readme: readmeWithoutRealMarkers }),
     [],
-    "a fake current roadmap marker outside the Roadmap section must fail",
+    "a README without the current-release marker must fail",
   );
-  const readmeWithoutRealMarkers = snapshot.readme
-    .replace(realCurrentReleaseLine!, "")
-    .replace(realRoadmapMarker!, "");
-  const roadmapStart = readmeWithoutRealMarkers.indexOf("## Roadmap");
-  const afterRoadmapHeading = roadmapStart + "## Roadmap".length;
-  const nextHeading = /\r?\n## /u.exec(readmeWithoutRealMarkers.slice(afterRoadmapHeading));
-  const roadmapEnd = nextHeading === null
-    ? readmeWithoutRealMarkers.length
-    : afterRoadmapHeading + nextHeading.index;
-  assert.ok(roadmapStart >= 0 && roadmapEnd > roadmapStart, "canonical README Roadmap bounds must exist");
-  const indentedFakeReadme = `${readmeWithoutRealMarkers.slice(0, roadmapEnd)}\n    Current release: \`${PACKAGE_NAME}@${PACKAGE_VERSION}\`\n    - **v0.5 — fake (current release)**\n${readmeWithoutRealMarkers.slice(roadmapEnd)}`;
   assert.notDeepEqual(
-    releaseCheck.validateReleaseTruth({ ...snapshot, readme: indentedFakeReadme }),
+    releaseCheck.validateReleaseTruth({ ...snapshot, readme: `${readmeWithoutRealMarkers}\n    Current release: \`${PACKAGE_NAME}@${PACKAGE_VERSION}\`\n` }),
     [],
-    "indented README release markers must not satisfy canonical truth",
+    "an indented README release marker must not satisfy canonical truth",
   );
-  const roadmapHeadingRemoved = roadmapMarkerRemoved.replace(/^## Roadmap\r?\n/im, "");
   assert.notDeepEqual(
-    releaseCheck.validateReleaseTruth({
-      ...snapshot,
-      readme: `${roadmapHeadingRemoved}\n\`\`\`markdown\n## Roadmap\n- **v0.5 — fake (current release)**\n\`\`\`\n`,
-    }),
+    releaseCheck.validateReleaseTruth({ ...snapshot, readme: `${readmeWithoutRealMarkers}\n\`\`\`markdown\nCurrent release: \`${PACKAGE_NAME}@${PACKAGE_VERSION}\`\n\`\`\`\n` }),
     [],
-    "a fenced fake Roadmap heading and marker must not satisfy README truth",
+    "a fenced README release marker must not satisfy canonical truth",
   );
-  const htmlFakeReadme = `${readmeWithoutRealMarkers.replace(/^## Roadmap\r?\n/im, "")}\n<pre>\nCurrent release: \`${PACKAGE_NAME}@${PACKAGE_VERSION}\`\n## Roadmap\n- **v0.5 — fake (current release)**\n</pre>\n`;
   assert.notDeepEqual(
-    releaseCheck.validateReleaseTruth({ ...snapshot, readme: htmlFakeReadme }),
+    releaseCheck.validateReleaseTruth({ ...snapshot, readme: `${readmeWithoutRealMarkers}\n<pre>\nCurrent release: \`${PACKAGE_NAME}@${PACKAGE_VERSION}\`\n</pre>\n` }),
     [],
-    "README release markers and headings inside raw HTML preformatted content must not satisfy truth",
+    "a README release marker inside raw HTML preformatted content must not satisfy truth",
   );
-  const multilineHtmlFakeReadme = `${readmeWithoutRealMarkers.replace(/^## Roadmap\r?\n/im, "")}\n<pre\n>\nCurrent release: \`${PACKAGE_NAME}@${PACKAGE_VERSION}\`\n## Roadmap\n- **v0.5 — fake (current release)**\n</pre>\n`;
+  const multilineHtmlFakeReadme = `${readmeWithoutRealMarkers}\n<pre\n>\nCurrent release: \`${PACKAGE_NAME}@${PACKAGE_VERSION}\`\n</pre>\n`;
   assert.notDeepEqual(
     releaseCheck.validateReleaseTruth({ ...snapshot, readme: multilineHtmlFakeReadme }),
     [],
@@ -582,12 +564,12 @@ test("canonical release truth rejects drift in every release marker", async () =
   assert.notDeepEqual(
     releaseCheck.validateReleaseTruth({
       ...snapshot,
-      readme: `${readmeWithoutRealMarkers.replace(/^## Roadmap\r?\n/im, "")}\n<pre\n>\nCurrent release: \`${PACKAGE_NAME}@${PACKAGE_VERSION}\`\n## Roadmap\n- **v0.5 — fake (current release)**\n`,
+      readme: `${readmeWithoutRealMarkers}\n<pre\n>\nCurrent release: \`${PACKAGE_NAME}@${PACKAGE_VERSION}\`\n`,
     }),
     [],
     "an open-ended multiline README pre block must fail closed",
   );
-  const htmlCommentFakeReadme = `${readmeWithoutRealMarkers.replace(/^## Roadmap\r?\n/im, "")}\n<!--\nCurrent release: \`${PACKAGE_NAME}@${PACKAGE_VERSION}\`\n## Roadmap\n- **v0.5 — fake (current release)**\n-->\n`;
+  const htmlCommentFakeReadme = `${readmeWithoutRealMarkers}\n<!--\nCurrent release: \`${PACKAGE_NAME}@${PACKAGE_VERSION}\`\n-->\n`;
   assert.notDeepEqual(
     releaseCheck.validateReleaseTruth({ ...snapshot, readme: htmlCommentFakeReadme }),
     [],
@@ -886,11 +868,6 @@ test("canonical release truth rejects drift in every release marker", async () =
     ["README", { ...snapshot, readme: snapshot.readme.replace("@poggufanz/rocky-cli@1.1.0", "@poggufanz/rocky-cli@9.9.9") }],
     ["README appended wrong current marker", { ...snapshot, readme: `${snapshot.readme}\nCurrent release: \`@wrong/rocky@9.9.9\`.\n` }],
     ["README duplicate current marker", { ...snapshot, readme: `${snapshot.readme}\n${canonicalCurrentMarker}. Duplicate marker.\n` }],
-    ["README current roadmap", { ...snapshot, readme: snapshot.readme.replace("v0.4 - diligence (implemented)", "v0.4 - diligence (current release)") }],
-    ["README roadmap v0.6 on current marker", { ...snapshot, readme: snapshot.readme.replace("v1.1 - honesty", "v0.6 - memory of why") }],
-    ["README roadmap v0.7.0.1", { ...snapshot, readme: snapshot.readme.replace("v1.1 - honesty", "v1.1.0.1 - honesty") }],
-    ["README roadmap v0.7-beta", { ...snapshot, readme: snapshot.readme.replace("v1.1 - honesty", "v1.1-beta - honesty") }],
-    ["README second current marker", { ...snapshot, readme: snapshot.readme.replace("v0.4 - diligence (implemented)", "v0.4 - diligence (current release)") }],
     ["CHANGELOG", { ...snapshot, changelog: snapshot.changelog.replace("## 1.1.0", "## 9.9.9") }],
     ["CHANGELOG duplicate expected section", { ...snapshot, changelog: duplicateChangelogHeading }],
     ["README publication claim", { ...snapshot, readme: `${snapshot.readme}\nThe npm package was published to npm.\n` }],
