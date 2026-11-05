@@ -5,7 +5,10 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { commandIdentity } from "../core/fingerprint.js";
 import { PACKAGE_NAME, PACKAGE_VERSION } from "../core/package-info.js";
+import { validateRockyPhrase } from "../ui/phrases.js";
+import { face } from "../ui/rocky.js";
 
 const packageRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const readmePage = readFileSync(join(packageRoot, "README.md"), "utf8");
@@ -17,16 +20,37 @@ const modelSource = readFileSync(join(packageRoot, "src", "commands", "model.ts"
 const unscopedRockyInstall = /\bnpm\s+(?:install|i)(?=\s)[^\n;&|#]*?[\s`'"]rocky-cli(?:@[^\s`'",;:)]+)?(?=$|[\s`'",;:.)])/i;
 const inactiveInstallContext = /\b(?:historical|superseded|negative test|not an active command)\b|\b(?:do not|don't|never) use\b/i;
 
-function helpOutput(): string {
+const SHORT_HELP_ARGS = ["--help"] as const;
+const FULL_HELP_ARGS = ["--help", "--all"] as const;
+const SHORT_HELP_MAX_LINES = 16;
+const HELP_MAX_COLUMNS = 78;
+const ANSI_SEQUENCE = /\u001b\[[0-9;]*m/gu;
+
+/** Run the built CLI so a test can tell stdout from stderr and read the exit status. */
+function runHelp(args: readonly string[]): { status: number | null; stdout: string; stderr: string } {
   const env: NodeJS.ProcessEnv = { ...process.env };
   delete env.NODE_TEST_CONTEXT;
-  const result = spawnSync(process.execPath, [join(packageRoot, "dist", "index.js"), "--help"], {
+  const result = spawnSync(process.execPath, [join(packageRoot, "dist", "index.js"), ...args], {
     cwd: packageRoot,
     encoding: "utf8",
     env,
   });
+  return { status: result.status, stdout: result.stdout, stderr: result.stderr };
+}
+
+/** The full reference by default: the documentation below pins its detail. */
+function helpOutput(args: readonly string[] = FULL_HELP_ARGS): string {
+  const result = runHelp(args);
   assert.equal(result.status, 0, result.stderr);
   return `${result.stdout}${result.stderr}`;
+}
+
+/** Both views, for every honesty scan: Rocky must not overclaim in either one. */
+function helpViews(): ReadonlyArray<readonly [string, string]> {
+  return [
+    ["CLI help", helpOutput(SHORT_HELP_ARGS)],
+    ["CLI help --all", helpOutput(FULL_HELP_ARGS)],
+  ];
 }
 
 function assertContainsEvery(surface: string, label: string, expected: readonly string[]): void {
@@ -108,6 +132,80 @@ test("README and CLI help publish the installable command surface", () => {
   }
 });
 
+const withoutAnsi = (text: string): string => text.replace(ANSI_SEQUENCE, "");
+
+/** The `HELP` constant of src/index.ts, with its package-info interpolations filled in. */
+function fullHelpText(): string {
+  const source = readFileSync(join(packageRoot, "src", "index.ts"), "utf8");
+  const literal = /const HELP = `([^`]*)`;/u.exec(source)?.[1];
+  assert.ok(literal !== undefined, "expected src/index.ts to define HELP as one template literal");
+  const text = literal
+    .replaceAll("${PACKAGE_NAME}", PACKAGE_NAME)
+    .replaceAll("${PACKAGE_VERSION}", PACKAGE_VERSION);
+  assert.ok(!text.includes("${"), "HELP interpolates a value this test does not fill in");
+  return text;
+}
+
+test("default help is a short grouped view that fits one screen", () => {
+  const { status, stdout, stderr } = runHelp(SHORT_HELP_ARGS);
+  assert.equal(status, 0, stderr);
+  assert.equal(stderr, "", "help speaks on stdout only");
+  assert.ok(stdout.startsWith(`${withoutAnsi(face())}\n`), "the face comes first, unchanged");
+
+  const lines = stdout.trimEnd().split("\n");
+  assert.ok(lines.length <= SHORT_HELP_MAX_LINES, `short help is ${lines.length} lines, the budget is ${SHORT_HELP_MAX_LINES}`);
+  for (const line of lines) {
+    assert.ok(
+      [...line].length <= HELP_MAX_COLUMNS,
+      `short help line is wider than ${HELP_MAX_COLUMNS} columns: ${JSON.stringify(line)}`,
+    );
+  }
+
+  const groups = lines.flatMap((line) => /^ {2}(core|review|memory|setup) {2,}\S/u.exec(line)?.[1] ?? []);
+  assert.deepEqual(groups, ["core", "review", "memory", "setup"]);
+  assert.ok(lines.some((line) => line.startsWith("usage: rocky <verb> [args]")), "short help names its usage shape");
+  assert.equal(lines.at(-1), "every flag, every endpoint: rocky --help --all");
+  assert.deepEqual(validateRockyPhrase(stdout), [], "short help keeps Rocky's voice");
+});
+
+test("default help keeps the release identity line and the network facts, and leaves hook endpoints to --all", () => {
+  const short = runHelp(SHORT_HELP_ARGS).stdout;
+  const full = runHelp(FULL_HELP_ARGS).stdout;
+
+  // The release check reads exactly one `version:` line from this output.
+  const versionLines = short.split("\n").filter((line) => /^\s*version\s*:/iu.test(line));
+  assert.deepEqual(versionLines.map((line) => line.trim()), [`version: ${PACKAGE_NAME}@${PACKAGE_VERSION}`]);
+
+  for (const fact of ["no telemetry", "registry.npmjs.org", "consent", "models.dev", "BYOK"]) {
+    assert.ok(short.includes(fact), `short help must keep the network fact ${JSON.stringify(fact)}`);
+  }
+  for (const endpoint of ["agent-event", "gate-event", "listen-event"]) {
+    assert.ok(!short.includes(endpoint), `short help must not list the hook endpoint ${endpoint}`);
+    assert.ok(full.includes(endpoint), `the full reference must list the hook endpoint ${endpoint}`);
+  }
+});
+
+test("--help --all prints the face and the full reference, unchanged", () => {
+  const { status, stdout, stderr } = runHelp(FULL_HELP_ARGS);
+  assert.equal(status, 0, stderr);
+  assert.equal(stderr, "", "help speaks on stdout only");
+  assert.equal(stdout, `${withoutAnsi(face())}\n${fullHelpText()}\n`);
+});
+
+test("the full reference documents ROCKY_VERBOSE in Rocky's voice", () => {
+  const line = helpOutput().split("\n").find((candidate) => candidate.includes("ROCKY_VERBOSE=1"));
+  assert.ok(line !== undefined, "the full reference must document ROCKY_VERBOSE=1");
+  assert.deepEqual(validateRockyPhrase(line), []);
+});
+
+test("CLI help glosses the triple export kind as intent and keeps id mechanics out of the quiz line", () => {
+  const help = helpOutput();
+  // The `triple` kind value is a script contract and stays; only the gloss is new.
+  assert.match(help, /rocky export \[--kind failure\|fix\|note\|triple\] \[--since ISO\|Nd\]\s+dump raw memory as JSONL on stdout\. triple = intent\./u);
+  assert.doesNotMatch(help, /tie-break/u);
+  assert.match(help, /rocky quiz\s+practice newest remembered intent or note; asks, then reveals,\s+deterministic newest-first, repeats unchanged candidates, and\s+never grades\./u);
+});
+
 test("README stays a concise front page with durable project links", () => {
   // 190, not 180: the demo feature wall (three scene GIFs) earns its rows.
   assert.ok(readmePage.split("\n").length <= 190, "README detail belongs in docs/reference.md");
@@ -119,6 +217,73 @@ test("README stays a concise front page with durable project links", () => {
     "https://github.com/poggufanz/rocky/blob/main/CONTRIBUTING.md",
     "/assets/rocky-pixel.webp",
   ]);
+});
+
+/** One README section by exact heading line: its body, and the nearest enclosing heading above it. */
+function readmeSection(heading: string): { parent: string | undefined; body: string } {
+  const level = /^#+/.exec(heading)![0].length;
+  const lines = readmePage.split(/\r?\n/);
+  const start = lines.indexOf(heading);
+  assert.ok(start >= 0, `README must keep the section ${JSON.stringify(heading)}`);
+
+  // Heading lines only: a `# comment` inside a code fence is not a section boundary.
+  const headings: { index: number; level: number; line: string }[] = [];
+  let fenced = false;
+  lines.forEach((line, index) => {
+    if (line.startsWith("```")) { fenced = !fenced; return; }
+    const marks = fenced ? undefined : /^(#{1,6}) /.exec(line)?.[1];
+    if (marks !== undefined) headings.push({ index, level: marks.length, line });
+  });
+
+  const parent = headings.filter((entry) => entry.index < start && entry.level < level).at(-1)?.line;
+  const end = headings.find((entry) => entry.index > start && entry.level <= level)?.index ?? lines.length;
+  return { parent, body: lines.slice(start + 1, end).join("\n") };
+}
+
+test("README 60-second test runs one identical command that Rocky can link", () => {
+  const section = readmeSection("### 60-second test");
+  assert.equal(section.parent, "## Quick start", "the 60-second test belongs under Quick start");
+
+  const commands = [...section.body.matchAll(/rocky run "([^"\n]*)"/g)].map((match) => match[1]!);
+  assert.ok(commands.length >= 2, "run the command twice: once failing, once working");
+  assert.equal(
+    new Set(commands).size, 1,
+    `every rocky run in the section must be the same command, got ${JSON.stringify(commands)}`,
+  );
+  assert.equal(
+    commandIdentity(commands[0]!).reliable, true,
+    `${JSON.stringify(commands[0])} needs a reliable identity or Rocky cannot link it`,
+  );
+
+  // The section states the two honest limits, and never claims a remedy.
+  assert.match(section.body, /not what changed/i);
+  assert.match(section.body, /same command in the same directory within eight hours/i);
+  assert.match(section.body, /pipes, `&&`, globs, or `\$VARS`/);
+  assert.doesNotMatch(section.body, /\bfix(?:ed|es)?\b/i);
+});
+
+test("README Quick start and CLI help say that cmd.exe runs the command on Windows", () => {
+  assert.match(readmeSection("## Quick start").body, /On Windows, `cmd\.exe` runs the command/);
+  assert.match(helpOutput(), /on Windows, cmd\.exe runs the command/i);
+});
+
+test("README, reference, and CLI help link a later success to the failure and never claim the remedy", () => {
+  assert.ok(readmePage.includes("Rocky links that success to the failure."));
+  const surfaces: ReadonlyArray<readonly [string, string]> = [
+    ["README", readmePage],
+    ["reference", reference],
+    ...helpViews(),
+  ];
+  for (const [label, surface] of surfaces) {
+    // Help and prose wrap lines, so a phrase split across a newline must not slip past the match.
+    const flat = surface.replace(/\s+/g, " ");
+    assert.doesNotMatch(flat, /links that success as the fix/i, `${label} calls a linked success the fix`);
+    assert.doesNotMatch(
+      flat,
+      /what fixed it|what the fix was|tells you what (?:fixed|the fix)/i,
+      `${label} claims Rocky knows what fixed a failure`,
+    );
+  }
 });
 
 test("README identity, roadmap, and Plan 01/Plan 02 v0.5 boundary stay aligned", () => {
@@ -473,24 +638,29 @@ test("README documents the Claude Code manual-fallback reality with the exact so
 });
 
 test("no shipped surface still claims the project makes no external network requests", () => {
-  // v0.4 made `rocky check` call the npm registry. A blanket no-egress claim is
-  // now false wherever it survives, and it survived in three places the first
-  // pass missed — so every shipped documentation surface is checked here, not
-  // just README, and the rejection is by claim SHAPE rather than by the one
-  // exact sentence that happened to exist (rewording would have evaded that).
+  // v0.4 made `rocky check` call the npm registry, and the GUI model picker
+  // calls models.dev. A blanket no-egress claim, or a claim that one thing is
+  // the only thing that leaves the machine, is false wherever it survives, and
+  // it survived in places each earlier pass missed — so every shipped
+  // documentation surface is checked here, not just README, and the rejection
+  // is by claim SHAPE rather than by the one exact sentence that happened to
+  // exist (rewording would have evaded that).
   const security = readFileSync(join(packageRoot, "SECURITY.md"), "utf8");
-  const surfaces = [
+  const surfaces: ReadonlyArray<readonly [string, string]> = [
     ["README", readme],
     ["SECURITY.md", security],
     ["scientific-grounding.md", grounding],
-    ["CLI help", helpOutput()],
-  ] as const;
+    ...helpViews(),
+  ];
 
   const blanketClaims = [
     /\bcore CLI[^.\n]*\bno (?:telemetry or )?external (?:network )?(?:egress|requests)/i,
     /\bCLI and (?:the )?(?:local )?MCP server[^.\n]*\bmakes? no external network requests/i,
     /\bthe project\b[^.\n]*\bmakes? no external (?:network )?requests/i,
     /\bRocky\b[^.\n]*\bmakes? no external network requests\b(?![^.\n]*(?:except|other than|apart from))/i,
+    /\bonly (?:external|non-loopback) network (?:egress|traffic)\b/i,
+    /\bproject's only external egress\b/i,
+    /\bthe one hole in the no-egress rule\b/i,
   ] as const;
 
   for (const [label, surface] of surfaces) {
@@ -499,10 +669,17 @@ test("no shipped surface still claims the project makes no external network requ
     }
   }
 
-  // And the two surfaces that describe the network contract in prose must name
-  // the one thing that does leave the machine.
-  for (const [label, surface] of [["README", readme], ["SECURITY.md", security]] as const) {
-    assert.ok(surface.includes("registry.npmjs.org"), `${label} must name the one external host Rocky contacts`);
+  // And every surface that describes the network contract in prose must name
+  // each host that does receive a request from the machine.
+  for (const [label, surface] of [
+    ["README", readmePage],
+    ["reference", reference],
+    ["SECURITY.md", security],
+    ["scientific-grounding.md", grounding],
+  ] as const) {
+    for (const host of ["registry.npmjs.org", "models.dev"]) {
+      assert.ok(surface.includes(host), `${label} must name the external host ${host}`);
+    }
   }
 });
 
@@ -510,30 +687,34 @@ test("README keeps the sanitized-default, raw-opt-in, and loopback-only network 
   assert.match(readme, /contains no telemetry/i, "README must state the CLI contains no telemetry");
   assert.match(readme, /runs no daemon/i, "README must state Rocky runs no daemon");
   // v0.4 turned the old blanket "no external network requests" claim false:
-  // `rocky check` really does call the registry. The claim is now scoped, and
-  // the scoping is pinned here so it cannot silently widen back out.
-  assert.match(
-    readme,
-    /only external network egress is `rocky check`/i,
-    "README must scope external egress to rocky check's registry lookup",
-  );
+  // `rocky check` really does call the registry, and the GUI model picker
+  // calls models.dev. The claim is scoped and names each host, and the scoping
+  // is pinned here so it cannot silently widen back out.
+  const egressClaim = /external network egress is narrow and named/i;
+  assert.match(readme, egressClaim, "README must scope external egress to the hosts it names");
   // The qualifiers must live in the SAME paragraph as the egress claim.
   // Scattered across the document they would pass a bare `includes` while
-  // leaving the sentence a reader actually sees unqualified.
-  const egressParagraph = readme
-    .split("\n\n")
-    .find((paragraph) => /only external network egress is `rocky check`/i.test(paragraph));
-  assert.ok(egressParagraph, "README must contain the scoped egress paragraph");
-  for (const [term, label] of [
-    ["registry.npmjs.org", "name the registry host"],
-    ["package names only", "state only package names leave the machine"],
-    ["consent-gated", "describe the consent gate"],
-    ["fail-open when offline", "state the lookup fails open"],
-  ] as const) {
-    assert.ok(
-      egressParagraph!.toLowerCase().includes(term.toLowerCase()),
-      `README's egress paragraph must ${label}`,
-    );
+  // leaving the sentence a reader actually sees unqualified. The reference
+  // repeats the contract, so it is held to the same terms as the README.
+  for (const [surface, page] of [["README", readmePage], ["reference", reference]] as const) {
+    const egressParagraph = page.split("\n\n").find((paragraph) => egressClaim.test(paragraph));
+    assert.ok(egressParagraph, `${surface} must contain the scoped egress paragraph`);
+    for (const [term, label] of [
+      ["registry.npmjs.org", "name the registry host"],
+      ["package names only", "state only package names leave the machine"],
+      ["consent-gated", "describe the consent gate"],
+      ["fail-open when offline", "state the registry lookup fails open"],
+      ["models.dev", "name the model catalogue host"],
+      ["24 hours", "state how long the model catalogue is cached"],
+      ["no prompt, key, memory, or code", "state what the model catalogue fetch sends"],
+      ["no consent prompt", "state the model catalogue fetch has no consent prompt"],
+      ["fails open", "state the model catalogue fetch fails open"],
+    ] as const) {
+      assert.ok(
+        egressParagraph.toLowerCase().includes(term.toLowerCase()),
+        `${surface}'s egress paragraph must ${label}`,
+      );
+    }
   }
   assert.match(
     readme,
@@ -592,27 +773,59 @@ function topLevelCommandSurface(indexSource: string): Set<string> {
   return commands;
 }
 
+/**
+ * Every verb the short view lists under a group label. A group can continue on
+ * the next, more deeply indented line, and an item such as
+ * `hook install|uninstall|status` counts by its first word.
+ */
+function groupedVerbs(help: string): string[] {
+  const groups: string[] = [];
+  let inGroup = false;
+  for (const line of help.split("\n")) {
+    const labelled: RegExpExecArray | null = /^ {2}(?:core|review|memory|setup) +(\S.*)$/u.exec(line);
+    const continued: RegExpExecArray | null = inGroup ? /^ {3,}(\S.*)$/u.exec(line) : null;
+    if (labelled !== null) groups.push(labelled[1]);
+    else if (continued !== null) groups[groups.length - 1] += ` ${continued[1]}`;
+    inGroup = labelled !== null || continued !== null;
+  }
+  return groups.join(" | ").split(/\s+\|\s+/u).map((item) => item.split(/\s+/u)[0]!).filter((verb) => verb !== "");
+}
+
 test("CLI help does not advertise a command that does not exist", () => {
-  const help = helpOutput();
   const indexSource = readFileSync(join(packageRoot, "src", "index.ts"), "utf8");
   const knownCommands = topLevelCommandSurface(indexSource);
   assert.ok(knownCommands.has("hook"), "sanity: top-level command scrape must still find `hook`");
   assert.ok(!knownCommands.has("status"), "sanity: nested hook sub-switch labels must not leak into the top-level surface");
   assert.ok(!knownCommands.has("_hookfail"), "sanity: internal dispatch markers must not leak into the top-level surface");
 
-  for (const line of help.split("\n")) {
-    const commandMatch = /^\s*rocky\s+([a-zA-Z-]+)\b/.exec(line);
-    if (commandMatch === null) continue;
-    assert.ok(
-      knownCommands.has(commandMatch[1]),
-      `help advertises "rocky ${commandMatch[1]}", which has no matching top-level case in src/index.ts main(): ${line}`,
-    );
+  // The short view names commands under group labels, not after `rocky`, so a
+  // scan of `rocky <verb>` lines alone would pass it vacuously. Prove the group
+  // reader sees an unknown verb, then that it reaches the first and last verb
+  // of every real group, the wrapped one included.
+  assert.deepEqual(groupedVerbs("  core    run | bogus\n  setup   hook install|uninstall|status\n"), ["run", "bogus", "hook"]);
+  const views = helpViews();
+  const grouped = groupedVerbs(views[0][1]);
+  for (const verb of ["run", "dash", "check", "teach", "digest", "repl", "setup", "model"]) {
+    assert.ok(grouped.includes(verb), `sanity: the short view must list ${verb} by group: ${grouped.join(", ")}`);
+  }
+
+  for (const [label, help] of views) {
+    const advertised = [
+      ...help.split("\n").flatMap((line) => /^\s*rocky\s+([a-zA-Z-]+)\b/.exec(line)?.slice(1) ?? []),
+      ...groupedVerbs(help),
+    ];
+    for (const verb of advertised) {
+      assert.ok(
+        knownCommands.has(verb),
+        `${label} advertises "${verb}", which has no matching top-level case in src/index.ts main()`,
+      );
+    }
   }
 });
 
 test("README and CLI help avoid forbidden universal-support and evidence overclaims", () => {
-  const help = helpOutput();
-  for (const [label, surface] of [["README", readme], ["CLI help", help]] as const) {
+  const surfaces: ReadonlyArray<readonly [string, string]> = [["README", readme], ...helpViews()];
+  for (const [label, surface] of surfaces) {
     assert.doesNotMatch(surface, /\buniversal\b[^\n]*(?:host|platform)/i, `${label} claims universal host/platform support`);
     assert.doesNotMatch(surface, /\bevery (?:host|platform)\b/i, `${label} claims every host/platform is supported`);
     assert.doesNotMatch(

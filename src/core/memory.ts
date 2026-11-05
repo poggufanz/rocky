@@ -31,12 +31,14 @@ import {
   commandFingerprint,
   commandIdentity,
   fingerprint,
+  firstSignalLine,
   normalizeLine,
   signatureLines,
+  stripAnsi,
 } from "./fingerprint.js";
 import { resolveRockyPaths } from "./state-paths.js";
 import type { RockyPaths } from "./state-paths.js";
-import { boundTripleMechanism, getMemoryRecordOffsets, isCompleteMemoryCoverage, isKnownPathPlatform, isSafeNonNegativeInteger, loadMemoryChecked, MAX_MEMORY_FILE_BYTES, MAX_RATIONALE_FILES, MAX_RATIONALE_FILE_CHARS, MAX_MEMORY_LINE_BYTES, MAX_MEMORY_RECORDS, MAX_SUPPORTED_MEMORY_RECORDS, MEMORY_FORMAT_VERSION } from "./memory-read.js";
+import { boundTripleMechanism, getMemoryRecordOffsets, isCompleteMemoryCoverage, isKnownPathPlatform, isSafeNonNegativeInteger, loadMemoryChecked, MAX_MEMORY_FILE_BYTES, MAX_RATIONALE_FILES, MAX_RATIONALE_FILE_CHARS, MAX_MEMORY_LINE_BYTES, MAX_MEMORY_RECORDS, MAX_SUPPORTED_MEMORY_RECORDS, MEMORY_FORMAT_VERSION, sameCwd } from "./memory-read.js";
 import type { AliasRecord, AssociationRecord, BriefRunRecord, ExplainRecord, FailureRecord, FixRecord, GuardOutcome, GuardRecord, InvariantTouchRecord, MemoryCoverage, MemoryRecord, NoteRecord, RationaleRecord, TripleRecord } from "./memory-read.js";
 import { MAX_GIT_SNAPSHOT_CHARS, MAX_GIT_SNAPSHOT_PRE_REDACT_CHARS, type GitAnchor } from "./memory-read.js";
 import { redactSecretsAtBoundary } from "./redact.js";
@@ -1052,7 +1054,7 @@ export function recordFailure(rawCmd: string, exitCode: number, stderr: string):
   const rec: FailureRecord = {
     kind: "failure", id: randomUUID(), ts, cwd: process.cwd(), cmd, exitCode,
     fingerprint: fingerprint(stderr, cmd, exitCode), fingerprintV: FINGERPRINT_ALGORITHM_VERSION,
-    signature: signatureLines(stderr), excerpt: lastLines(stderr, 4),
+    signature: signatureLines(stderr), excerpt: failureExcerpt(stderr),
     commandIdentity: identity.value, identityV: identity.version, identityReliable: identity.reliable, platform: process.platform,
   };
   withMemoryTransaction((transaction) => {
@@ -1069,7 +1071,7 @@ export function recordWatchFailure(rawCmd: string, exitCode: number, stderr: str
   const rec: FailureRecord = {
     kind: "failure", id: randomUUID(), ts, cwd, cmd, exitCode,
     fingerprint: fingerprint(stderr, cmd, exitCode), fingerprintV: FINGERPRINT_ALGORITHM_VERSION,
-    signature: signatureLines(stderr), excerpt: lastLines(stderr, 4), origin: "watch",
+    signature: signatureLines(stderr), excerpt: failureExcerpt(stderr), origin: "watch",
     commandIdentity: identity.value, identityV: identity.version, identityReliable: identity.reliable, platform: process.platform,
   };
   withMemoryTransaction((transaction) => {
@@ -1105,12 +1107,17 @@ function appendFixRecordsUnlocked(
   // capped, skipped, or raced read may still accept new failure/note evidence,
   // but it must never append a FixRecord based on partial knowledge.
   if (!transaction.complete || !isCompleteMemoryCoverage(transaction.coverage)) return {};
-  const identity = commandIdentity(cmd);
+  // Storage only: `links` were already matched on the raw command by the
+  // caller. Redacting on the matching side would make `deploy "ghp_A"` and
+  // `deploy "ghp_B"` the same command. Here the record gets the same bounded,
+  // redacted form and identity that `recordFailure` stores.
+  const storedCmd = boundCommand(cmd);
+  const identity = commandIdentity(storedCmd);
   const chosen = links.slice(-MAX_FIX_LINKS);
   const confirmed = chosen.filter((link) => link.confidence === "confirmed");
   const possible = chosen.filter((link) => link.confidence === "possible");
   const metadata = {
-    ts: now, cwd, cmd,
+    ts: now, cwd, cmd: storedCmd,
     commandIdentity: identity.value, identityV: identity.version, identityReliable: identity.reliable, platform: process.platform,
   } as const;
 
@@ -1190,9 +1197,9 @@ function hasConfirmedResolutionForCommand(
     if (record.kind === "fix" && !fixesById.has(record.id)) fixesById.set(record.id, record);
   }
   return records.some((record) => {
-    if (record.kind !== "failure" || record.cwd !== cwd || record.ts > now || record.resolvedBy === undefined) return false;
+    if (record.kind !== "failure" || !sameCwd(record.cwd, cwd, process.platform) || record.ts > now || record.resolvedBy === undefined) return false;
     const fix = fixesById.get(record.resolvedBy);
-    if (fix === undefined || fix.cwd !== cwd || fix.ts > now || fix.ts < record.ts || !fix.failureIds.includes(record.id)) return false;
+    if (fix === undefined || !sameCwd(fix.cwd, cwd, process.platform) || fix.ts > now || fix.ts < record.ts || !fix.failureIds.includes(record.id)) return false;
     const fixIdentity = commandIdentity(fix.cmd, { platform: fix.platform ?? process.platform });
     if (!fixIdentity.reliable || fixIdentity.value !== currentIdentity.value) return false;
     const failureIdentity = commandIdentity(record.cmd, { platform: record.platform ?? process.platform });
@@ -1267,9 +1274,30 @@ export function resolveFixOnSuccess(
   }, paths, { now: options.now });
 }
 
-function lastLines(text: string, n: number): string {
-  const lines = text.split("\n").map((line) => line.trimEnd()).filter((line) => line.trim().length > 0);
-  return lines.slice(-n).join("\n");
+/** Lines of stderr tail an excerpt always keeps; the decisive line is the one extra. */
+const EXCERPT_TAIL_LINES = 3;
+
+/**
+ * The stderr excerpt remembered with a failure: the first error-looking line
+ * plus the last three lines. A tool's last lines are often boilerplate (npm's
+ * log pointer, a stack tail) while the line that names the problem scrolled
+ * above them, so the tail alone loses it. A decisive line the tail already
+ * holds is not repeated: the excerpt is then simply the last four lines.
+ *
+ * Lines are ANSI-stripped and trimmed, the same text `firstSignalLine`
+ * returns, so a colored copy of that line in the tail still counts as a
+ * repeat. Secrets are redacted here, at storage, because the first error line
+ * is the one most likely to echo a token. Fingerprint and signature are
+ * computed from the raw stderr elsewhere, so redaction never changes identity.
+ */
+function failureExcerpt(stderr: string): string {
+  const lines = stripAnsi(stderr).split("\n").map((line) => line.trim()).filter((line) => line.length > 0);
+  const tail = lines.slice(-EXCERPT_TAIL_LINES);
+  const decisive = firstSignalLine(stderr);
+  const kept = decisive !== undefined && !tail.includes(decisive)
+    ? [decisive, ...tail]
+    : lines.slice(-(EXCERPT_TAIL_LINES + 1));
+  return redactSecretsAtBoundary(kept.join("\n"));
 }
 
 export function pendingPath(): string {

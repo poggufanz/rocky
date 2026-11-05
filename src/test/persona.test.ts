@@ -55,9 +55,27 @@ test("every v0.5.2 Fix 1 possible-fix string follows Rocky voice rules", () => {
     "but this comes from other place.",
     "no fix in memory yet. you fix, I remember. this is good trade.",
     "different program, 2 hours later. maybe not fix. check, question",
-    "different program, just now later. maybe not fix. check, question",
+    "different program, under 1 minute later. maybe not fix. check, question",
+    "same program, under 1 minute later. maybe not fix. check, question",
+    "same command, under 1 minute later. strong.",
   ];
   for (const value of strings) assert.deepEqual(validateRockyPhrase(value), [], value);
+});
+
+test("link and recurrence lines state what Rocky heard and never claim a fix", () => {
+  assert.equal(
+    phrase("fix-linked"),
+    "command works now. same command fail before. I link them. I not hear what change. good good good.",
+  );
+  assert.equal(
+    phrase("fix-recurrence-same"),
+    "last time, same command work again after. I not hear what change.",
+  );
+  for (const key of ["fix-linked", "fix-recurrence-same"] as const) {
+    assert.ok(phraseKeys.includes(key), `${key} must be registered so the catalog lint covers it`);
+    assert.doesNotMatch(phrase(key), /\bfix(?:ed|es)?\b/i, `${key} must not claim a remedy`);
+    assert.doesNotMatch(phrase(key), /something between|I remember/i, `${key} must not read like confusion`);
+  }
 });
 
 test("every AI act uses its dedicated catalog phrase", () => {

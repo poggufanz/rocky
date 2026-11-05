@@ -270,7 +270,8 @@ function formatInlineNodes(text) {
 
 /**
  * Small Markdown for answers: headings, lists, fenced code, inline marks.
- * `renderer:` lines are disclosure, so they move into the decision drawer.
+ * Memory answers and code answers both pass through here, so it never drops
+ * a line by its prefix: that is `answerParts`' job, for answer text only.
  */
 function markdownNode(text, className) {
   const container = el("div", className);
@@ -313,7 +314,6 @@ function markdownNode(text, className) {
       closeList();
       continue;
     }
-    if (line.startsWith("renderer:")) continue;
     const heading = /^(#{1,6})\s+(.+)$/.exec(line);
     if (heading) {
       closeList();
@@ -344,6 +344,29 @@ function markdownNode(text, className) {
 }
 
 /* ---- answer anatomy ------------------------------------------------------ */
+
+// What the server inlined in answer text before it sent `trace` apart.
+const INLINE_TRACE_LINE = /^(?:top|decision|detail|renderer): /;
+
+/**
+ * The answer text and the trace lines behind it. The server sends them apart.
+ * A turn saved before that carries the lines inside its text, so they are
+ * split out here, from answer text only: code answers never come through
+ * this filter. A text that would be left empty is kept whole.
+ */
+function answerParts(body) {
+  const text = str(body?.text);
+  if (Array.isArray(body?.trace)) return { text, trace: body.trace.filter((line) => typeof line === "string") };
+  const kept = [];
+  const trace = [];
+  for (const line of text.split(/\r?\n/)) (INLINE_TRACE_LINE.test(line.trim()) ? trace : kept).push(line);
+  return kept.join("\n").trim() ? { text: kept.join("\n"), trace } : { text, trace: [] };
+}
+
+/** The server words coverage itself; a turn saved with a bare reason code keeps its old label. */
+function coverageWords(reason) {
+  return /^memory coverage incomplete:/.test(reason) ? reason : `Coverage: ${reason}`;
+}
 
 function codeRan(body) {
   return (body?.codeTrace !== null && typeof body?.codeTrace === "object")
@@ -376,7 +399,7 @@ function badges(body) {
   }
   if (str(body?.coverage?.reason)) {
     const tag = el("span", "cx-badge", "Partial memory");
-    tag.title = `Coverage: ${body.coverage.reason}`;
+    tag.title = coverageWords(body.coverage.reason);
     out.push(tag);
   }
   if (body?.decisionTrace?.engine === "jev") out.push(el("span", "cx-badge", "Jev"));
@@ -447,6 +470,18 @@ function step(title, ...rows) {
   return li;
 }
 
+/**
+ * Why a search came back with no record, in the drawer's words. Only an
+ * "unavailable" memory answer was held; a read with lines Rocky could not use
+ * that matched nothing was answered, and says so.
+ */
+function noEvidenceNote({ memoryOnly, covered, status }) {
+  if (!memoryOnly) return covered ? "Memory coverage incomplete; code answer may miss memory evidence." : "No matching memory evidence for this question.";
+  if (!covered) return "No whole memory record matched well enough.";
+  if (String(status ?? "").toLowerCase() === "unavailable") return "Memory coverage incomplete; answer held.";
+  return "No whole memory record matched well enough. Some memory lines could not be used.";
+}
+
 /** The route Rocky took, step by step. Evidence itself lives in Sources. */
 function decisionDrawer(turn) {
   const body = turn.body ?? {};
@@ -471,10 +506,7 @@ function decisionDrawer(turn) {
   const heard = memoryOnly ? `${cards.length} whole record${cards.length === 1 ? "" : "s"} accepted` : `${cards.length} evidence card${cards.length === 1 ? "" : "s"}`;
   const searched = step("Searched memory", stepRow("Found", heard));
   if (cards.length === 0) {
-    const why = coverageReason
-      ? (memoryOnly ? "Memory coverage incomplete; answer held." : "Memory coverage incomplete; code answer may miss memory evidence.")
-      : (memoryOnly ? "No whole memory record matched well enough." : "No matching memory evidence for this question.");
-    searched.append(el("p", "cx-step-note", why));
+    searched.append(el("p", "cx-step-note", noEvidenceNote({ memoryOnly, covered: coverageReason !== "", status: t.status })));
   } else {
     const refs = el("p", "cx-step-refs");
     for (const card of cards.slice(0, 6)) refs.append(el("span", "cx-ref", String(card?.ref ?? card?.kind ?? "record")));
@@ -498,9 +530,6 @@ function decisionDrawer(turn) {
     stepRow("Renderer", llm.rendererStatus ?? "baseline"),
     stepRow("Citations", llm.stripped && llm.stripped > 0 ? `${llm.stripped} uncited claims stripped` : "no uncited lines found"),
   );
-  for (const line of str(body.text).split(/\r?\n/)) {
-    if (line.trim().startsWith("renderer:")) wrote.append(el("p", "cx-step-note", line.trim()));
-  }
   steps.append(wrote);
 
   if (codeRan(body)) {
@@ -517,6 +546,9 @@ function decisionDrawer(turn) {
     if (trace.roundsExhausted === true) read.append(el("p", "cx-step-note", "Round budget spent; files not read are not checked."));
     steps.append(read);
   }
+
+  const lines = answerParts(body).trace;
+  if (lines.length > 0) steps.append(step("Trace", ...lines.map((line) => el("p", "cx-step-note", line))));
 
   drawer.append(head, steps);
   return drawer;
@@ -576,9 +608,9 @@ function rockyNode(turn, isNew, isLast) {
   head.append(el("span", "cx-name", "Rocky"), ...badges(body));
   col.append(head, decisionDrawer(turn));
 
-  const text = str(body.text) || "rocky heard nothing matching that yet.";
+  const text = answerParts(body).text || "rocky heard nothing matching that yet.";
   col.append(markdownNode(text, "cx-answer"));
-  if (str(body.coverage?.reason)) col.append(el("p", "cx-aside", `Coverage: ${body.coverage.reason}`));
+  if (str(body.coverage?.reason)) col.append(el("p", "cx-aside", coverageWords(body.coverage.reason)));
 
   // Code support: a labelled second answer after the memory one, never replacing it.
   const codeText = str(body.codeAnswer?.text);

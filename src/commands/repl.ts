@@ -13,6 +13,7 @@
  */
 
 import { createInterface } from "node:readline";
+import { reportCliUsage } from "./cli-args.js";
 import { recall } from "./recall.js";
 import { how, what, why } from "./dictionary.js";
 import { conceptsCommand } from "./concepts.js";
@@ -75,11 +76,12 @@ function withAiFlag(command: string, rest: string[], useAi: boolean): string[] {
 }
 
 /**
- * Run one already-tokenized line against a dispatch table. Exported (not
- * just used by replCommand) because none of Rocky's real commands throw --
- * they catch their own errors and return a code -- so the only way to prove
- * this try/catch actually survives a thrown command is to inject a handler
- * that does one.
+ * Run one already-tokenized line against a dispatch table. Exported (not just
+ * used by replCommand) so a test can inject a handler that throws. Most of
+ * Rocky's real commands catch their own errors and return a code, but not all:
+ * `why --add --files` with no value throws a `CliUsageError`, which the CLI
+ * reports from `index.ts`. The catch below reports it the same way, and treats
+ * any other throw as a stumble.
  */
 export async function runReplCommand(
   command: string,
@@ -99,7 +101,9 @@ export async function runReplCommand(
   try {
     const result = handler(withAiFlag(command, rest, useAi));
     return typeof result === "number" ? result : await result;
-  } catch {
+  } catch (error) {
+    const code = reportCliUsage(error, say, detail);
+    if (code !== undefined) return code;
     say("command stumbled. rocky still here.");
     return 1;
   }

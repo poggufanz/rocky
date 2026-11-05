@@ -2,6 +2,7 @@ import test, { before, type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import {
   chmodSync,
+  existsSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
@@ -155,6 +156,70 @@ test("hookInstall never prints the write-protected disclosure for an ordinary mo
 
   assert.ok(!sandbox.stderr().includes(DISCLOSURE), sandbox.stderr());
 });
+
+// --- a bashrc made out of nothing -------------------------------------------
+//
+// On a machine whose people live in PowerShell, `hook install` still creates
+// ~/.bashrc, and the bash success line says "I hear everything there". Only
+// Git Bash reads that file on Windows, so the creation is said out loud --
+// once, only when the file really was made, and only on win32.
+
+const BASHRC_CREATED_DISCLOSURE = "bashrc missing. I make new one. only Git Bash hears it here.";
+
+test("the bashrc-created disclosure follows Rocky voice rules", () => {
+  assert.equal(phrase("bashrc-created"), BASHRC_CREATED_DISCLOSURE);
+  assert.deepEqual(validateRockyPhrase(BASHRC_CREATED_DISCLOSURE), []);
+});
+
+test(
+  "hookInstall says it made a missing bashrc on Windows, where only Git Bash reads it",
+  { skip: process.platform === "win32" ? false : "the bashrc-created line is a win32-only disclosure" },
+  (t) => {
+    const sandbox = bashrcSandbox(t);
+    assert.equal(existsSync(sandbox.bashrc), false);
+
+    assert.equal(hookInstall(), 0, sandbox.stderr());
+
+    assert.equal(existsSync(sandbox.bashrc), true, "install still creates the file");
+    assert.ok(sandbox.stderr().includes(BASHRC_CREATED_DISCLOSURE), sandbox.stderr());
+  },
+);
+
+test(
+  "hookInstall stays quiet about a missing bashrc off Windows",
+  { skip: process.platform === "win32" ? "win32 speaks this line; the test above covers it" : false },
+  (t) => {
+    const sandbox = bashrcSandbox(t);
+
+    assert.equal(hookInstall(), 0, sandbox.stderr());
+
+    assert.equal(existsSync(sandbox.bashrc), true, "install still creates the file");
+    assert.ok(!sandbox.stderr().includes(BASHRC_CREATED_DISCLOSURE), sandbox.stderr());
+  },
+);
+
+test("hookInstall never claims it made a bashrc that already existed, or one it made on an earlier call", (t) => {
+  const sandbox = bashrcSandbox(t);
+  writeFileSync(sandbox.bashrc, "export MY_VAR=1\n");
+
+  assert.equal(hookInstall(), 0, sandbox.stderr());
+  assert.equal(hookInstall(), 0, sandbox.stderr());
+
+  assert.ok(!sandbox.stderr().includes(BASHRC_CREATED_DISCLOSURE), sandbox.stderr());
+});
+
+test(
+  "a second hookInstall does not repeat the bashrc-created line",
+  { skip: process.platform === "win32" ? false : "the bashrc-created line is a win32-only disclosure" },
+  (t) => {
+    const sandbox = bashrcSandbox(t);
+
+    assert.equal(hookInstall(), 0, sandbox.stderr());
+    assert.equal(hookInstall(), 0, sandbox.stderr());
+
+    assert.equal(sandbox.stderr().split(BASHRC_CREATED_DISCLOSURE).length - 1, 1, sandbox.stderr());
+  },
+);
 
 test("hook install discloses that it changes the shell history setting", (t) => {
   // bash-preexec strips ignorespace/ignoreboth from HISTCONTROL so it can read

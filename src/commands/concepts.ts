@@ -7,10 +7,26 @@
 
 import { CONCEPTS } from "../core/concepts.js";
 import { activeAliases, buildConceptIndex } from "../core/concept-index.js";
+import { describeMemoryCoverage } from "../core/coverage.js";
 import { recordAlias } from "../core/memory.js";
 import { isCompleteMemoryCoverage, loadMemoryChecked, type MemoryCoverage } from "../core/memory-read.js";
 import { CS_CONCEPT_IDS } from "../core/cs-explain.js";
-import { ago, detail, heading, say } from "../ui/rocky.js";
+import { ago, detail, heading, isVerbose, say } from "../ui/rocky.js";
+
+/**
+ * Plain words for the kinds of record a concept is heard in: the three kinds the
+ * concept index holds today. A kind with no entry prints as stored, and
+ * ROCKY_VERBOSE=1 prints the stored kind for all of them.
+ */
+const KIND_WORDS: ReadonlyMap<string, string> = new Map([
+  ["triple", "intent"],
+  ["rationale", "reason"],
+  ["failure", "error"],
+]);
+
+function kindWord(kind: string): string {
+  return isVerbose() ? kind : KIND_WORDS.get(kind) ?? kind;
+}
 
 function knownConcept(id: string): boolean {
   return CONCEPTS.some((concept) => concept.id === id);
@@ -25,7 +41,9 @@ function coverageIncomplete(value: MemoryCoverage | undefined): boolean {
   return value !== undefined && !isCompleteMemoryCoverage(value);
 }
 
-function coverageLine(value: MemoryCoverage): string {
+function coverageLine(value: MemoryCoverage, recordCount: number): string {
+  const words = describeMemoryCoverage(value, recordCount, { counts: false });
+  if (!isVerbose() && words !== undefined) return words;
   return `memory coverage incomplete: version ${value.version}; scanned ${value.scanned}; skipped ${value.skipped}; truncated ${value.truncated}; bytes ${value.bytesScanned}/${value.bytesTotal}${value.reason === undefined ? "" : `; reason ${value.reason}`}`;
 }
 
@@ -61,7 +79,7 @@ function listConcepts(): number {
   if (index.counts.size === 0 && aliases.size === 0) {
     if (coverageIncomplete(loaded.coverage)) {
       say("memory coverage incomplete. I cannot say nothing heard. check, question");
-      detail(coverageLine(loaded.coverage));
+      detail(coverageLine(loaded.coverage, records.length));
       return 0;
     }
     say("no concepts heard yet. memory grows, concepts come.");
@@ -78,7 +96,7 @@ function listConcepts(): number {
       detail(`${phrase}  ->  ${conceptId}`);
     }
   }
-  if (coverageIncomplete(loaded.coverage)) detail(coverageLine(loaded.coverage));
+  if (coverageIncomplete(loaded.coverage)) detail(coverageLine(loaded.coverage, records.length));
   return 0;
 }
 
@@ -90,7 +108,7 @@ function reverseLookup(conceptId: string): number {
   if (evidence.length === 0) {
     if (coverageIncomplete(loaded.coverage)) {
       say(`concept ${conceptId} known. memory coverage incomplete, I cannot say nothing heard. check, question`);
-      detail(coverageLine(loaded.coverage));
+      detail(coverageLine(loaded.coverage, loaded.records.length));
       return 0;
     }
     say(`concept ${conceptId} known, nothing heard yet. memory grows, evidence comes.`);
@@ -101,9 +119,9 @@ function reverseLookup(conceptId: string): number {
     detail(`cs concept ${conceptId}. full explain in dash, question`);
   }
   for (const entry of evidence) {
-    detail(`${ago(entry.ts)}  ${entry.kind}  ${entry.snippet}`);
+    detail(`${ago(entry.ts)}  ${kindWord(entry.kind)}  ${entry.snippet}`);
   }
-  if (coverageIncomplete(loaded.coverage)) detail(coverageLine(loaded.coverage));
+  if (coverageIncomplete(loaded.coverage)) detail(coverageLine(loaded.coverage, loaded.records.length));
   return 0;
 }
 

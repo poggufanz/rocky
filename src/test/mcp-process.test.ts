@@ -597,7 +597,7 @@ test("uppercase RAW exposure fails before protocol output with one concise diagn
 });
 
 test("help advertises MCP as a stream-only command", () => {
-  const result = spawnSync(process.execPath, [cli, "--help"], { cwd: repoRoot, encoding: "utf8" });
+  const result = spawnSync(process.execPath, [cli, "--help", "--all"], { cwd: repoRoot, encoding: "utf8" });
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /rocky mcp\s+serve read-only memory tools over stdio\./);
 });

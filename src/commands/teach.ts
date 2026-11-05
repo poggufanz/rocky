@@ -1,6 +1,7 @@
 // src/commands/teach.ts
 import { readFileSync, statSync } from "node:fs";
-import { loadMemory } from "../core/memory-read.js";
+import { describeMemoryCoverage } from "../core/coverage.js";
+import { loadMemoryChecked, type MemoryLoadResult } from "../core/memory-read.js";
 import { teachLookup } from "../core/teach.js";
 import { buildLadder, defaultTeachNeighbor, type LadderResult } from "../core/teach-ladder.js";
 import { gitProvenanceChain } from "../core/git-diff.js";
@@ -90,6 +91,18 @@ async function readTeachStdin(): Promise<string> {
   return Buffer.concat(chunks).toString("utf8");
 }
 
+/**
+ * The plain-words line for a read that stopped at a cap, or undefined. A cap
+ * keeps the first records, so the lines a fresh witness would sit in are the
+ * ones left unheard: teach says so before it shows a card, a ladder, or the
+ * empty state. Other incomplete reads are not announced here.
+ */
+function capLine(loaded: MemoryLoadResult): string | undefined {
+  const { reason } = loaded.coverage;
+  if (reason !== "record-cap" && reason !== "file-size-cap") return undefined;
+  return describeMemoryCoverage(loaded.coverage, loaded.records.length, { counts: true });
+}
+
 export async function teach(argv: readonly string[], deps: TeachDeps = {}): Promise<number> {
   const speak = deps.say ?? say;
   const printHeading = deps.heading ?? heading;
@@ -141,8 +154,10 @@ export async function teach(argv: readonly string[], deps: TeachDeps = {}): Prom
     anchorEnd = line;
   }
 
-  const records = loadMemory();
-  const hit = teachLookup(records, { path: file, cwd: process.cwd(), ...(snippet === undefined ? {} : { snippet }) });
+  const loaded = loadMemoryChecked();
+  const cap = capLine(loaded);
+  if (cap !== undefined && !quiet) speak(cap);
+  const hit = teachLookup(loaded.records, { path: file, cwd: process.cwd(), ...(snippet === undefined ? {} : { snippet }) });
 
   let ladderResult: LadderResult | undefined;
   if (snippet !== undefined) {

@@ -375,6 +375,37 @@ test("watch records a started child that exits 127", async (t) => {
   assert.deepEqual(notifier.calls, [{ cmd: "synthetic-started-127", ok: false, durationMs: 5 }]);
 });
 
+test("watch names cmd.exe after a cmd.exe rejection on Windows, never under --quiet, and records the failure either way", async (t) => {
+  // `shell: true` is cmd.exe on win32; its rejection is two lines on stderr, the first holds the pattern.
+  const rejection = "'FOO' is not recognized as an internal or external command,\r\noperable program or batch file.";
+  const hint = "cmd.exe parsed this command. bash or powershell words not heard there.";
+  const rejected: ExecResult = {
+    started: true, code: 1, stderr: rejection, tail: rejection.split("\r\n"), durationMs: 5,
+  };
+  const onWindows = process.platform === "win32";
+
+  const loudHome = sandboxHome(t);
+  const notifier = fakeNotifier();
+  const loud = await withRockyHome(loudHome, () => captureStderr(() => watch(
+    ["FOO"],
+    { notify: notifier.notify, runProcess: async () => rejected },
+  )));
+  assert.equal(loud.result, 1);
+  assert.equal(loud.stderr.split(hint).length - 1, onWindows ? 1 : 0, loud.stderr);
+  assert.equal(existsSync(join(loudHome, "memory.jsonl")), true, "the failure is recorded as it always was");
+
+  const quietHome = sandboxHome(t);
+  const quiet = await withRockyHome(quietHome, () => captureStderr(() => watch(
+    ["--quiet", "FOO"],
+    { notify: () => { throw new Error("quiet watch must not notify"); }, runProcess: async () => rejected },
+  )));
+  assert.equal(quiet.result, 1);
+  assert.equal(quiet.stderr.includes(hint), false, "--quiet stays plain facts");
+  assert.doesNotMatch(quiet.stderr, /\[Rocky\]/);
+  assert.match(quiet.stderr, /exit: 1/);
+  assert.equal(existsSync(join(quietHome, "memory.jsonl")), true, "--quiet still records the failure");
+});
+
 test("watch's failure path admits when the remembered fix comes from a different directory", async (t) => {
   const home = sandboxHome(t);
   mkdirSync(home, { recursive: true });
@@ -420,7 +451,8 @@ test("watch's success path links a fix exactly like run's onSuccess, using the s
     captureStderr(() => watch(["echo all-good"], { notify: notifier.notify })));
 
   assert.equal(result, 0);
-  assert.match(stderr, /command works now\. something between fix it\. what, I not hear\. works again, I remember\. good good good\./);
+  assert.match(stderr, /command works now\. same command fail before\. I link them\. I not hear what change\. good good good\./);
+  assert.doesNotMatch(stderr, /\bfixed\b|you fix it|I remember (the )?fix|something between/i);
   assert.equal(existsSync(join(home, "pending")), false, "run/watch shared resolver clears pending atomically");
 });
 

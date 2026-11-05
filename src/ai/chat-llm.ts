@@ -40,7 +40,7 @@
 
 import { createOllamaClient } from "./ollama.js";
 import { buildChatStructure, extractCandidateRefs, validateChatStructure, type ChatEvidenceRef, type ChatStructure } from "./chat-structure.js";
-import { safeRenderChatText, validateRenderedClaims, type ChatRenderFact } from "./chat-render.js";
+import { safeRenderChatText, safeRenderChatTrace, validateRenderedClaims, type ChatRenderFact } from "./chat-render.js";
 
 export type ChatLlmKind = "ollama" | "byok";
 
@@ -315,23 +315,25 @@ function timedOut(signal: AbortSignal, error: unknown): boolean {
 }
 
 /**
- * Server-side renderer disclosure: the served text always names the renderer
+ * Server-side renderer disclosure: the served trace always names the renderer
  * outcome and model (`renderer: <status> (<model>).`), so the dash can show
- * LLM usage without a browser change. The line uses the `renderer: ` template
- * prefix, so it carries no facts and always survives `validateRenderedClaims`.
+ * LLM usage. It is a trace line, never answer text.
  */
-function withRendererDisclosure(text: string, status: string, modelId: string): string {
+function rendererLine(status: string, modelId: string): string {
   const label = modelId.trim().length > 0 ? modelId.trim() : "no model text";
-  const line = `renderer: ${status} (${label}).`;
-  const lines = text.split("\n");
-  for (let i = lines.length - 1; i >= 0; i -= 1) {
-    if (lines[i].trim().startsWith("renderer:")) {
-      lines[i] = line;
-      return lines.join("\n");
-    }
-  }
-  lines.push(line);
-  return lines.join("\n");
+  return `renderer: ${status} (${label}).`;
+}
+
+const TRACE_ONLY_LINE = /^(?:renderer|decision|detail|memory coverage incomplete):/u;
+
+/**
+ * The renderer, decision, detail and coverage lines are trace: the code writes
+ * them, and the served trace carries the real ones. A model may echo or forge
+ * one, so such a line is dropped from its answer text, never kept beside the
+ * real one.
+ */
+function withoutTraceLines(text: string): string {
+  return text.split("\n").filter((line) => !TRACE_ONLY_LINE.test(line.trim())).join("\n");
 }
 
 async function byokFetchText(args: {
@@ -483,7 +485,10 @@ export async function runChatStructurer(
 
 export interface ChatRendererOutcome {
   readonly status: ChatRendererStatus;
+  /** The answer text only: no record id, decision, detail, coverage or renderer line. */
   readonly text: string;
+  /** Those lines, in drawer order, ending with the renderer line. */
+  readonly trace: readonly string[];
   readonly stripped: number;
 }
 
@@ -491,6 +496,8 @@ export interface ChatRendererOutcome {
  * Rendering pass for code answers and local-memory synthesis. The caller
  * supplies whole code-owned facts; every factual line must cite an allowed
  * ref. Failure degrades to the deterministic template with status disclosed.
+ * Whichever stage wrote the text, the trace carries the same code-owned lines
+ * plus one renderer line naming the outcome and the model.
  */
 export async function runChatRenderer(
   selection: ChatLlmSelection,
@@ -499,10 +506,19 @@ export async function runChatRenderer(
   stored: ChatLlmStored,
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<ChatRendererOutcome> {
-  const template = withRendererDisclosure(safeRenderChatText(fact), "template", "");
+  const traceFor = (status: ChatRendererStatus, modelId: string): string[] => [
+    ...safeRenderChatTrace(fact),
+    rendererLine(status, modelId),
+  ];
+  const deterministic = (status: ChatRendererStatus, modelId: string, stripped: number): ChatRendererOutcome => ({
+    status,
+    text: safeRenderChatText(fact),
+    trace: traceFor(status, modelId),
+    stripped,
+  });
   if (!isLlmActive(selection)) {
     const status = inactiveToStageStatus(selection.reason === "ok" ? "no-model" : selection.reason).renderer;
-    return { status, text: withRendererDisclosure(safeRenderChatText(fact), status, selection.modelId), stripped: 0 };
+    return deterministic(status, selection.modelId, 0);
   }
   const allowArray: readonly string[] = Array.isArray(allowedRefs) ? allowedRefs : [...allowedRefs];
   const allowWithIds = [...allowArray, ...allowArray.map((ref) => `q_${ref}`)];
@@ -515,10 +531,10 @@ export async function runChatRenderer(
       const raw = await ollamaStructured(selection.modelId, `${sysPrompt}\n\n${userPrompt}`, CHAT_RENDER_SCHEMA, signal);
       const record = raw as Record<string, unknown>;
       rawText = typeof record.text === "string" ? record.text : "";
-      if (rawText.length === 0) return { status: "template", text: template, stripped: 0 };
+      if (rawText.length === 0) return deterministic("template", "", 0);
     } else {
       const { key, provider } = resolveByokKey(selection, stored, env);
-      if (key.length === 0) return { status: "disabled", text: withRendererDisclosure(safeRenderChatText(fact), "disabled", selection.modelId), stripped: 0 };
+      if (key.length === 0) return deterministic("disabled", selection.modelId, 0);
       rawText = await byokFetchText({
         endpoint: selection.endpoint,
         model: selection.modelId,
@@ -531,14 +547,10 @@ export async function runChatRenderer(
       });
     }
     const check = validateRenderedClaims(rawText, allowWithIds);
-    if (check.stripped.trim().length === 0) {
-      return { status: "template", text: template, stripped: check.dropped };
-    }
-    return { status: "used", text: withRendererDisclosure(check.stripped, "used", selection.modelId), stripped: check.dropped };
+    const modelText = withoutTraceLines(check.stripped);
+    if (modelText.trim().length === 0) return deterministic("template", "", check.dropped);
+    return { status: "used", text: modelText, trace: traceFor("used", selection.modelId), stripped: check.dropped };
   } catch (error) {
-    if (timedOut(signal, error)) {
-      return { status: "timeout", text: withRendererDisclosure(safeRenderChatText(fact), "timeout", selection.modelId), stripped: 0 };
-    }
-    return { status: "unavailable", text: withRendererDisclosure(safeRenderChatText(fact), "unavailable", selection.modelId), stripped: 0 };
+    return deterministic(timedOut(signal, error) ? "timeout" : "unavailable", selection.modelId, 0);
   }
 }

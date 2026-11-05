@@ -82,6 +82,15 @@ export function detail(msg: string): void {
   writeRockyStderr(`${dimStderr(safeTerminalBlock(msg))}\n`);
 }
 
+/**
+ * The one switch for Rocky's internal counters. Default output speaks plain
+ * words; ROCKY_VERBOSE=1 brings back each site's raw text. Read at call time, so
+ * a shell or a test can flip it without restarting the process.
+ */
+export function isVerbose(): boolean {
+  return process.env.ROCKY_VERBOSE === "1";
+}
+
 /** "just now", "2 minutes", "6 hours", "3 days" — the bare span, no suffix. */
 export function elapsed(ms: number): string {
   const s = Math.floor(ms / 1000);
@@ -92,6 +101,18 @@ export function elapsed(ms: number): string {
   if (h < 24) return `${h} hour${h === 1 ? "" : "s"}`;
   const d = Math.floor(h / 24);
   return `${d} day${d === 1 ? "" : "s"}`;
+}
+
+const ONE_MINUTE_MS = 60_000;
+
+/**
+ * `elapsed` for a span between two remembered events, said inside "<span> later".
+ * "just now later" reads as nonsense, so a gap under a minute is named plainly.
+ * `elapsed` itself stays as it is: sessions, the home page, and the GUI server
+ * share it, and `ago` relies on its "just now".
+ */
+export function gapSpan(ms: number): string {
+  return ms < ONE_MINUTE_MS ? "under 1 minute" : elapsed(ms);
 }
 
 /** "84 days ago", "3 hours ago", "just now" — Rocky counts precisely. */

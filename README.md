@@ -6,7 +6,7 @@
 [![npm](https://img.shields.io/npm/v/@poggufanz/rocky-cli?style=flat-square)](https://www.npmjs.com/package/@poggufanz/rocky-cli)
 [![MIT license](https://img.shields.io/badge/license-MIT-blue.svg?style=flat-square)](LICENSE)
 
-[Release v1.0.1](https://github.com/poggufanz/rocky/releases/tag/v1.0.1) | [Changelog](CHANGELOG.md) | [License](LICENSE) | [Security](https://github.com/poggufanz/rocky/blob/main/SECURITY.md) | [Contributing](https://github.com/poggufanz/rocky/blob/main/CONTRIBUTING.md)
+[Release v1.1.0](https://github.com/poggufanz/rocky/releases/tag/v1.1.0) | [Changelog](CHANGELOG.md) | [License](LICENSE) | [Security](https://github.com/poggufanz/rocky/blob/main/SECURITY.md) | [Contributing](https://github.com/poggufanz/rocky/blob/main/CONTRIBUTING.md)
 
 Your AI writes code. Rocky makes sure you still understand what you own. He is a blind engineer who lives in your terminal, and he remembers failed commands and what fixed them, then brings that history back when the same trouble returns — to you, and through MCP to the AI agent working beside you, so it stops retrying what already failed on this machine. Supported agent hooks can also keep a bounded record of what you asked for, which files changed, and why the agent said it changed them. He is a witness, not a judge: he never diagnoses a failure or proposes a fix he does not remember, and [docs/character.md](docs/character.md) holds the rules that boundary comes from.
 
@@ -30,7 +30,7 @@ npm install -g @poggufanz/rocky-cli
 
 Requires Node.js 18 or newer. The package name is `@poggufanz/rocky-cli`; the unrelated unscoped `rocky-cli` package is not this project.
 
-Current release: `@poggufanz/rocky-cli@1.0.1`. See the [release notes](https://github.com/poggufanz/rocky/releases/tag/v1.0.1) or the full [changelog](CHANGELOG.md).
+Current release: `@poggufanz/rocky-cli@1.1.0`. See the [release notes](https://github.com/poggufanz/rocky/releases/tag/v1.1.0) or the full [changelog](CHANGELOG.md).
 
 **Agent self-setup (any harness).** Working with an agent outside Claude Code or Codex (OpenCode, Gemini CLI, anything else)? [docs/agents/INSTALL.md](docs/agents/INSTALL.md) covers the shell hook, the notify rationale lane, and optional MCP read access, and every step that edits your files asks for approval first. On Claude Code and Codex, `rocky setup --agent-hooks` and `rocky setup` capture more, automatically. To hand it to the agent:
 
@@ -46,7 +46,7 @@ Run a failure-prone command through Rocky:
 rocky run "npm run build"
 ```
 
-When it fails, Rocky fingerprints the useful stderr lines and writes a local record. When the same reliable command later succeeds in the same directory, Rocky links that success as the fix.
+When it fails, Rocky fingerprints the useful stderr lines and writes a local record. When the same reliable command later succeeds in the same directory, Rocky links that success to the failure. On Windows, `cmd.exe` runs the command, not Git Bash or PowerShell.
 
 ```bash
 rocky recall "build failure"
@@ -60,9 +60,25 @@ rocky hook install
 
 `rocky setup` and `rocky hook install` are separate on purpose. MCP or agent setup never edits `.bashrc` or `$PROFILE`.
 
+`rocky what`, `rocky how`, `rocky why`, `rocky digest`, and `rocky quiz` need `rocky setup --agent-hooks` first; `rocky teach` needs a `file:line` argument or `explain` records.
+
 On Windows, `rocky hook install` installs into every PowerShell host it finds on the machine — Windows PowerShell and PowerShell 7, both when present, each into its own `$PROFILE` — alongside the Bash hook if `.bashrc` is also in play (Git Bash/WSL). `rocky hook status` reports each host separately.
 
+On Windows, install also says when it had to create a missing `.bashrc`, because only Git Bash reads that file there. It asks each PowerShell host for its effective execution policy too. When that policy is `Restricted` or `AllSigned`, PowerShell will not load the profile, so install and `status` say that and print `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` instead of reporting working ears; the profile is still written and the exit code stays 0. A `$PROFILE` outside your home directory is skipped unless you set `ROCKY_HOOK_ALLOW_PROFILE_OUTSIDE_HOME=1`, and the skip message names that variable.
+
 The PowerShell hook is passive ears only: it overrides `prompt` to see a command's result right after it finishes, so it remembers failures and links fixes the same way Bash does, but — unlike the Bash hook — it cannot ask for confirmation before a dangerous command runs, because `prompt` never sees a command before it executes. Because `prompt` fires after the command's own stderr is already gone, PowerShell-hook failures are fingerprinted from the command text alone, the same command-only fallback the CLI has used since v0.4.0. One disclosed side effect: the only way PowerShell allows restoring `$?` to `False` after Rocky's own bookkeeping runs is a real, suppressed non-terminating error, which pushes one synthetic entry — named so you know it is Rocky's — onto the front of `$Error`, ahead of whatever your last real command actually raised. `$LASTEXITCODE` and `$?`'s value are always exactly what your own command left them; only `$Error[0]`'s position shifts.
+
+### 60-second test
+
+```bash
+mkdir rocky-demo
+cd rocky-demo
+rocky run "node hello.js"
+node -e "require('fs').writeFileSync('hello.js','console.log(1)')"
+rocky run "node hello.js"
+```
+
+The first run fails and Rocky remembers it; the second run works, and Rocky knows only that the same command failed and then worked, not what changed. The link needs the same command in the same directory within eight hours, with no pipes, `&&`, globs, or `$VARS`.
 
 ## What ships
 
@@ -112,7 +128,7 @@ Stated-rationale evidence arrives through four lanes, ranked by fidelity:
 | `log-thinking` | Claude Code or DSH session logs, when a thinking block exists | raw |
 | `log-response` | Claude Code session logs' response text, when no thinking block exists | summary |
 | `notify` | Any agent calling `rocky hook agent-event <adapter> --rationale "<text>"` | summary |
-| `human` | You, via `rocky why --add "<text>"` | summary |
+| `human` | You, via `rocky why --add "<text>" [--files a.ts,b.ts]` | summary |
 
 An unlinked file has no rationale evidence yet; that is a first-class honest state, not a gap Rocky papers over. The DSH log adapter needs Node 22.15 or newer at runtime for built-in zstd support — on an older Node it feature-detects the gap, skips DSH logs, and discloses that instead of guessing. `rocky setup --agent-hooks` installs a PreToolUse rationale gate by default (`rocky hook gate-event claude-code`): it denies once per session per file when no rationale evidence exists yet, then fails open for that file every time after. Opt out at install with `--no-rationale-gate`, or at runtime with `ROCKY_RATIONALE_GATE=off`. Codex and other non-Claude-Code agents have no deny hook at all; they reach the `notify` lane only.
 
@@ -122,7 +138,7 @@ Persistent state lives under `ROCKY_HOME`; the default is `~/.rocky`. The main r
 
 Memory can contain commands, errors, working directories, prompts, bounded file excerpts, and an agent's stated rationale. Treat it as developer history: read it, back it up, or delete it on your terms.
 
-The CLI contains no telemetry and runs no daemon. Its only external network egress is `rocky check` asking `registry.npmjs.org` whether a newly added package name exists; that lookup is consent-gated, sends package names only, and is fail-open when offline. The Main chat has exactly one more egress, and only when configured: a code question sends your question, carved excerpts, and memory evidence to your BYOK model, redacted and capped. Memory-only questions search all records in a complete bounded snapshot and return whole relevant records; they hold when coverage is incomplete, evidence is weak, or whole records exceed the context bound. They never call BYOK or remote Jev. Use `memory:` to force local memory search and `code:` to force code lookup; unprefixed questions use existing code-query signals. Optional local AI connects only to `127.0.0.1`. MCP projects sanitized memory by default, and raw exposure is an explicit opt-in. A configured cloud host may forward selected projected content under that host's own policy.
+The CLI contains no telemetry and runs no daemon. Its external network egress is narrow and named. `rocky check` asks `registry.npmjs.org` whether a newly added package name exists; that lookup is consent-gated, sends package names only, and is fail-open when offline. The GUI model picker asks `models.dev` for its model catalogue: a plain GET of `https://models.dev/api.json`, cached on disk for 24 hours, plus one logo GET whose path names the provider you configured. It sends no prompt, key, memory, or code, has no consent prompt, and fails open: an unreachable `models.dev` means an empty model list, never an error. The Main chat adds one more egress, and only when configured: a code question sends your question, carved excerpts, and memory evidence to your BYOK model, redacted and capped. Memory-only questions search all records in a complete bounded snapshot and return whole relevant records; they hold when coverage is incomplete, evidence is weak, or whole records exceed the context bound. They never call BYOK or remote Jev. Remote Jev is opt-in: only when `config.json` sets `decision.engine` to `jev` and a key is present do `rocky teach` and the GUI's teach, ask, and chat answers send the query and at most ten redacted evidence snippets to `api.typesafe.ai` (or `openrouter.ai`) for ranking. Use `memory:` to force local memory search and `code:` to force code lookup; unprefixed questions use existing code-query signals. Optional local AI connects only to `127.0.0.1`. MCP projects sanitized memory by default, and raw exposure is an explicit opt-in. A configured cloud host may forward selected projected content under that host's own policy.
 
 Read the [security policy](https://github.com/poggufanz/rocky/blob/main/SECURITY.md) before enabling raw MCP exposure or installing hooks into a shell or agent host.
 
@@ -158,7 +174,8 @@ Read the [contributing guide](https://github.com/poggufanz/rocky/blob/main/CONTR
 - **v0.6 - his accountability (implemented)**: `rocky brief`, `rocky journal`, `rocky invariants`, extended `rocky stats`, and the schema envelope documentation.
 - **v0.7 - his memory of why (implemented)**: stated-rationale evidence across four lanes, a concept lexicon (`rocky concepts`), derived `rocky sessions` and `rocky repl`, and the PreToolUse rationale gate.
 - **v0.8 - his comprehension guardian (implemented)**: local browser GUI (`rocky dash`), teach mode (`rocky teach` / `teach_lookup` / `explain` records), and native git diff correlation.
-- **v1.0 - his listening (current release)**: consent-gated Listening across Git-tracked files, explicit `rocky setup --harness` targets with MCP adapters for five harnesses, thirteen read-only MCP tools, a chat-first Main tab, and advisory prompt-clarity, decomposition, and failure-cycle checks.
+- **v1.0 - his listening (implemented)**: consent-gated Listening across Git-tracked files, explicit `rocky setup --harness` targets with MCP adapters for five harnesses, thirteen read-only MCP tools, a chat-first Main tab, and advisory prompt-clarity, decomposition, and failure-cycle checks.
+- **v1.1 - his honesty (current release)**: output that says what Rocky heard and what he did not: `rocky check` always states its result and scope, partial memory reads are named, default output drops internal ids, secrets stay out of stored commands and excerpts, and `rocky why --add --files` closes the rationale loop.
 
 BYOK annotation and `attest` remain deferred. The memory circuit breaker ships as an advisory, not an enforcer: a failure-cycle gate note plus `rocky stats --cycles`, fail-open, never blocking. Codex and Gemini agent-log adapters are deferred too — Codex's local session format drifted to a SQLite hybrid, and Gemini persists no thoughts to read. The earlier `rocky explain` idea is superseded; teach mode uses `rocky teach` and `explain` records.
 

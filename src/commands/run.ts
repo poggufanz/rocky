@@ -3,7 +3,8 @@
  *
  * Runs the command through a shell, streaming stdout/stderr untouched.
  * On failure: fingerprints stderr, checks memory for this exact error,
- * and if Rocky has heard it before (and knows what fixed it) he says so.
+ * and if Rocky has heard it before (and the same command worked again after
+ * it) he says so. He never claims to know what changed in between.
  * On success: if the same reliable command identity failed recently in this
  * directory, this success is recorded as the confirmed fix. Same-program-only
  * evidence remains a possible association.
@@ -11,6 +12,7 @@
 
 import { commandIdentity, fingerprintCandidates } from "../core/fingerprint.js";
 import { CANCEL_CODES, runProcess, type ExecResult } from "../core/exec.js";
+import { describeMemoryCoverage } from "../core/coverage.js";
 import { resolveRockyPaths } from "../core/state-paths.js";
 import {
   recordFailure,
@@ -22,7 +24,7 @@ import {
 } from "../core/memory.js";
 import { isCompleteMemoryCoverage, linkBasisRank, loadMemoryChecked } from "../core/memory-read.js";
 import { findByFingerprint, fixFromElsewhere, getFix, possibleFixesForFailure, type PossibleFix } from "../core/memory-query.js";
-import { ago, detail, elapsed, say } from "../ui/rocky.js";
+import { ago, detail, gapSpan, isVerbose, phrase, say } from "../ui/rocky.js";
 import { safeTerminalLine } from "../ui/sanitize.js";
 
 export async function run(cmd: string, processRunner: (cmd: string) => Promise<ExecResult> = runProcess): Promise<number> {
@@ -56,7 +58,10 @@ function readMemory(): MemoryRecord[] | undefined {
     const loaded = loadMemoryChecked();
     if (!isCompleteMemoryCoverage(loaded.coverage)) {
       say("memory coverage incomplete. I do not claim prior fix. check, question");
-      detail(`    memory coverage: version ${loaded.coverage.version}; scanned ${loaded.coverage.scanned}; skipped ${loaded.coverage.skipped}; truncated ${loaded.coverage.truncated}${loaded.coverage.reason === undefined ? "" : `; reason ${loaded.coverage.reason}`}`);
+      const words = describeMemoryCoverage(loaded.coverage, loaded.records.length, { counts: false });
+      detail(!isVerbose() && words !== undefined
+        ? `    ${words}`
+        : `    memory coverage: version ${loaded.coverage.version}; scanned ${loaded.coverage.scanned}; skipped ${loaded.coverage.skipped}; truncated ${loaded.coverage.truncated}${loaded.coverage.reason === undefined ? "" : `; reason ${loaded.coverage.reason}`}`);
       return undefined;
     }
     return loaded.records;
@@ -105,7 +110,7 @@ export function speakFailureMemory(
       const fixIdentity = commandIdentity(fix.cmd, { platform: fix.platform ?? process.platform });
       const sameCommand = currentIdentity.reliable && fixIdentity.reliable && currentIdentity.value === fixIdentity.value;
       if (sameCommand) {
-        say("last time, something between fix it. what, I not hear. works again, I remember.");
+        say(phrase("fix-recurrence-same"));
       } else {
         say("last time, you run:");
         detail(`    ${safeTerminalLine(fix.cmd)}`);
@@ -125,15 +130,15 @@ export function speakFailureMemory(
         detail(`    place: ${safeTerminalLine(elsewhere)}`);
         say("possible only. check, question");
       } else if (basis === "identity" || basis === "signature") {
-        say(`same command, ${elapsed(fix.ts - withFix.ts)} later. strong.`);
+        say(`same command, ${gapSpan(fix.ts - withFix.ts)} later. strong.`);
       } else if (basis === "program") {
-        say(`same program, ${elapsed(fix.ts - withFix.ts)} later. maybe not fix. check, question`);
+        say(`same program, ${gapSpan(fix.ts - withFix.ts)} later. maybe not fix. check, question`);
       } else if (basis !== undefined) {
         // A recognized-but-weaker basis ("sequence") or a string a newer
         // writer emits that this reader does not recognize yet (spec §2.5):
         // either way it must fall to the weakest hedge, never silently print
         // no grade line at all.
-        say(`different program, ${elapsed(fix.ts - withFix.ts)} later. maybe not fix. check, question`);
+        say(`different program, ${gapSpan(fix.ts - withFix.ts)} later. maybe not fix. check, question`);
       }
       if (!sameCommand) say("try, question");
     } else {
@@ -174,6 +179,22 @@ function speakablePossibleFix(
   return undefined;
 }
 
+/** cmd.exe's English rejection text. Another locale words it differently and gets silence, not a guess. */
+const CMD_EXE_REJECTION = /is not recognized as an internal or external command/i;
+
+/**
+ * Names the shell when cmd.exe rejected the command. `shell: true`, the default
+ * `runProcess` path, is `%ComSpec%` (cmd.exe) on win32, so Git Bash and PowerShell
+ * words fail there and are recorded as ordinary failures. Disclosure only: it
+ * makes no cause claim and names no remedy command, see the phrase. `defaultShell`
+ * has no default so each caller states whether it used that path. Shared by `run`
+ * and `watch`.
+ */
+export function cmdExeHint(stderr: string, platform: NodeJS.Platform, defaultShell: boolean): string | undefined {
+  if (platform !== "win32" || !defaultShell) return undefined;
+  return CMD_EXE_REJECTION.test(stderr) ? phrase("cmd-exe-parsed") : undefined;
+}
+
 function onFailure(cmd: string, result: ExecResult): void {
   const memory = readMemory();
   if (memory !== undefined) {
@@ -182,6 +203,11 @@ function onFailure(cmd: string, result: ExecResult): void {
     // sees the last 200 lines, not everything the command wrote (spec §3.6).
     speakFailureMemory(memory, fingerprintCandidates(result.stderr, cmd, result.code), cmd, result.code, process.cwd());
   }
+
+  // About the shell, not the history, so it is said even when memory is unreadable.
+  // `run` never overrides runProcess's default `shell: true`.
+  const hint = cmdExeHint(result.stderr, process.platform, true);
+  if (hint !== undefined) say(hint);
 
   recordFailure(cmd, result.code, result.stderr);
 }
@@ -200,7 +226,7 @@ export function linkFixOnSuccess(
 ): ResolveFixResult {
   const result = resolveFixOnSuccess(cmd, cwd, options);
   if (!quiet && result.confirmedResolved > 0) {
-    say("command works now. something between fix it. what, I not hear. works again, I remember. good good good.");
+    say(phrase("fix-linked"));
   }
   return result;
 }

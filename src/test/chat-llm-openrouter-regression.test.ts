@@ -86,6 +86,14 @@ function readServedText(parsed: unknown): string {
   throw new Error("chat text shape");
 }
 
+function readServedTrace(parsed: unknown): string[] {
+  if (typeof parsed === "object" && parsed !== null && "trace" in parsed && Array.isArray(parsed.trace)
+    && parsed.trace.every((line: unknown) => typeof line === "string")) {
+    return parsed.trace;
+  }
+  throw new Error("chat trace shape");
+}
+
 function seedGui(home: string, patch: Record<string, string>): void {
   writeFileSync(join(home, "gui.json"), `${JSON.stringify({
     provider: "openai",
@@ -144,7 +152,8 @@ test("screenshot regression: selected openrouter id + main-slot key => active, s
       assert.equal(wire.structurer, "used");
       assert.equal(wire.renderer, "used");
       const text = readServedText(answer.parsed);
-      assert.ok(text.includes(`renderer: used (${SCREENSHOT_MODEL}).`), "served text must disclose the renderer use with the model id");
+      assert.ok(readServedTrace(answer.parsed).includes(`renderer: used (${SCREENSHOT_MODEL}).`), "served trace must disclose the renderer use with the model id");
+      assert.ok(!text.includes("renderer:"), "the renderer line stays out of the answer text");
       assert.ok(!text.includes("secret extra"), "uncited renderer line must be stripped");
       assert.ok(wire.stripped > 0, "stripped extras must be counted");
     } finally {
@@ -191,8 +200,8 @@ test("wrong-slot key: jev slots never arm the chat llm => disclosed missing-key,
       assert.equal(wire.structurer, "disabled");
       assert.equal(wire.renderer, "disabled");
       assert.equal(llmCalls, 0, "no llm transport may run without the main-slot key");
-      const text = readServedText(answer.parsed);
-      assert.ok(text.includes(`renderer: disabled (${SCREENSHOT_MODEL}).`));
+      assert.ok(readServedTrace(answer.parsed).includes(`renderer: disabled (${SCREENSHOT_MODEL}).`));
+      assert.ok(!readServedText(answer.parsed).includes("renderer:"), "the renderer line stays out of the answer text");
     } finally {
       await handle.close();
     }

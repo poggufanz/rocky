@@ -14,6 +14,7 @@ import { disabledRecallWithAi } from "../ai/port.js";
 import { createToolRegistry } from "../mcp/tools.js";
 import { validateRockyPhrase } from "../ui/phrases.js";
 import { skipIfSymlinkUnavailable } from "./symlink-capability.js";
+import { setVerbose } from "./verbose-switch.js";
 
 const DISCLOSURE = "memory file does not open for me. I answer from nothing.";
 
@@ -55,7 +56,8 @@ function unreadableHome(name: string): string {
   return home;
 }
 
-test("recall() fails closed for a non-regular memory path without raw Node error text", async () => {
+test("recall() fails closed for a non-regular memory path without raw Node error text", async (t) => {
+  setVerbose(t, undefined);
   // recall()'s default dependencies resolve the memory path from ROCKY_HOME,
   // so this exercises the actual path rather than an injected query seam.
   const home = unreadableHome("recall-unreadable");
@@ -64,10 +66,21 @@ test("recall() fails closed for a non-regular memory path without raw Node error
   const { result, stderr } = await captureStderr(() => recall(["anything"]));
 
   assert.equal(result, 1);
-  assert.match(stderr, /memory coverage incomplete:.*reason read-race/u);
+  assert.match(stderr, /memory coverage incomplete: file did not hold still or open right\. nothing heard this time\./u);
+  assert.doesNotMatch(stderr, /scanned|truncated|version 1/u);
   assert.doesNotMatch(stderr, /memory file does not open for me\. I answer from nothing\./);
   assert.doesNotMatch(stderr, /EISDIR/);
   assert.doesNotMatch(stderr, /Error:/);
+});
+
+test("recall() names the read race with its raw counters under ROCKY_VERBOSE", async (t) => {
+  setVerbose(t, "1");
+  process.env.ROCKY_HOME = unreadableHome("recall-unreadable-verbose");
+
+  const { result, stderr } = await captureStderr(() => recall(["anything"]));
+
+  assert.equal(result, 1);
+  assert.match(stderr, /memory coverage incomplete: version 1, scanned 0, skipped 0, truncated 1, complete false, reason read-race/u);
 });
 
 test("stats() treats a non-regular memory path as empty", async () => {

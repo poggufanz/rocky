@@ -1,11 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, realpathSync, writeFileSync } from "node:fs";
+import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { groupSessions, sessionsCommand } from "../commands/sessions.js";
 import { resolveRockyPaths } from "../core/state-paths.js";
-import type { MemoryRecord } from "../core/memory-read.js";
+import { MAX_SUPPORTED_MEMORY_RECORDS, type MemoryRecord } from "../core/memory-read.js";
 
 const rec = (kind: string, id: string, ts: number, cwd = "/p"): MemoryRecord =>
   ({ kind, id, ts, cwd } as unknown as MemoryRecord);
@@ -273,5 +273,76 @@ test("long interpolated fields (excerpt, cwd) are truncated, not printed verbati
     assert.ok(!listResult.stderr.includes(longCwd), "the list row's cwd is bounded too");
   } finally {
     restore();
+  }
+});
+
+const COVERAGE_PREFIX = "memory coverage incomplete";
+const CAP_LINE = `${COVERAGE_PREFIX}: first ${MAX_SUPPORTED_MEMORY_RECORDS} records heard, later lines not heard. counts here not all.`;
+
+/** One cheap failure per index, all in one directory and so in one session. */
+function failuresInOneSession(count: number): Record<string, unknown>[] {
+  return Array.from({ length: count }, (_, index) => ({
+    kind: "failure", id: `r${index}`, ts: BASE_TS + index, cwd: CWD, cmd: "false", exitCode: 1,
+    fingerprint: `r${index}`.padStart(16, "0"), signature: ["false"], excerpt: "false",
+  }));
+}
+
+test("sessionsCommand over the record cap says which lines it did not hear, once, before the listing", () => {
+  const { home, restore } = isolatedHome("rocky-sessions-cap-list-");
+  try {
+    writeMemoryFixture(home, failuresInOneSession(MAX_SUPPORTED_MEMORY_RECORDS + 1));
+    const { code, stderr } = captureStderr(() => sessionsCommand([]));
+    assert.equal(code, 0);
+    assert.equal(stderr.split(COVERAGE_PREFIX).length - 1, 1, stderr);
+    assert.ok(stderr.includes(CAP_LINE), stderr);
+    assert.ok(stderr.indexOf(CAP_LINE) < stderr.indexOf("\nsessions\n"), "the cap line comes before the listing heading");
+  } finally {
+    restore();
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("sessionsCommand <index> over the record cap says so before the session and before a miss", () => {
+  const { home, restore } = isolatedHome("rocky-sessions-cap-detail-");
+  try {
+    writeMemoryFixture(home, failuresInOneSession(MAX_SUPPORTED_MEMORY_RECORDS + 1));
+    const found = captureStderr(() => sessionsCommand(["1"]));
+    assert.equal(found.code, 0);
+    assert.equal(found.stderr.split(COVERAGE_PREFIX).length - 1, 1);
+    assert.ok(found.stderr.includes(CAP_LINE));
+    assert.ok(found.stderr.indexOf(CAP_LINE) < found.stderr.indexOf("\nsession 1\n"), "the cap line comes before the session heading");
+
+    const missed = captureStderr(() => sessionsCommand(["99"]));
+    assert.equal(missed.code, 1);
+    assert.equal(missed.stderr.split(COVERAGE_PREFIX).length - 1, 1, missed.stderr);
+    assert.ok(missed.stderr.indexOf(CAP_LINE) < missed.stderr.indexOf("session not heard"), "the cap line comes before the miss");
+  } finally {
+    restore();
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("sessionsCommand says nothing about coverage when memory is read whole, even at exactly the record cap", () => {
+  const whole = isolatedHome("rocky-sessions-whole-");
+  try {
+    writeMemoryFixture(whole.home, oneSessionFixture());
+    for (const argv of [[], ["1"]]) {
+      const { code, stderr } = captureStderr(() => sessionsCommand(argv));
+      assert.equal(code, 0);
+      assert.ok(!stderr.includes(COVERAGE_PREFIX), `argv [${argv.join(" ")}]: ${stderr}`);
+    }
+  } finally {
+    whole.restore();
+    rmSync(whole.home, { recursive: true, force: true });
+  }
+  const full = isolatedHome("rocky-sessions-full-");
+  try {
+    writeMemoryFixture(full.home, failuresInOneSession(MAX_SUPPORTED_MEMORY_RECORDS));
+    const { code, stderr } = captureStderr(() => sessionsCommand([]));
+    assert.equal(code, 0);
+    assert.ok(!stderr.includes(COVERAGE_PREFIX), stderr);
+  } finally {
+    full.restore();
+    rmSync(full.home, { recursive: true, force: true });
   }
 });

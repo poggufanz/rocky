@@ -5,6 +5,7 @@ import type { Exposure } from "../core/config-read.js";
 import { hasCanonicalMemoryQueries, hasDurableMemoryQueries, loadDurableMemorySnapshot, queryStats, whyFilePathRelation } from "../core/memory-query.js";
 import type { DurableMemorySnapshot, KnowledgeCoverageSummary, KnowledgeSearchQuery, MemoryQueries, RecallHit, RecallQuery, RecentFailuresQuery, StatsQuery, WhyFileEvidence, WhyFilePathRelation } from "../core/memory-query.js";
 import type { RecallAiOutcome, RecallWithAiPort } from "../ai/port.js";
+import { rationalesForFile } from "../core/dictionary.js";
 import { teachLookup } from "../core/teach.js";
 import { buildLadder, defaultTeachNeighbor, type Rung } from "../core/teach-ladder.js";
 import { gapRungFor, renderLadderCard, renderWitnessCard } from "../core/teach-render.js";
@@ -24,13 +25,14 @@ import {
   projectRecentFailures,
   projectText,
   projectWhyPossible,
+  projectWhyRationales,
   projectTriple,
   safeOpaqueIdentifier,
   validateRecallCandidateIds,
 } from "./privacy.js";
 import { gitProvenanceChain, resolveGitDiff } from "../core/git-diff.js";
 import { boundTripleRecord, isBoundedLinkBasis, isConfirmableLinkBasis, isKnownPathPlatform, isSafeNonNegativeInteger, MAX_MEMORY_FILE_BYTES, MAX_SUPPORTED_MEMORY_RECORDS, parseMemoryRecord } from "../core/memory-read.js";
-import type { FailureRecord, FixRecord, LinkConfidence, MemoryCoverage, MemoryRecord, TripleRecord } from "../core/memory-read.js";
+import type { FailureRecord, FixRecord, LinkConfidence, MemoryCoverage, MemoryRecord, RationaleRecord, TripleRecord } from "../core/memory-read.js";
 
 /** Versioned read-only catalog used by MCP discovery and setup health. */
 const MCP_TOOL_NAMES = [
@@ -290,7 +292,7 @@ function descriptors(exposure: Exposure): readonly McpToolDefinition[] {
     },
     {
       name: "why_file", title: "Why file changed",
-      description: "Recent remembered reasons agents changed one file, newest first, with separate incomplete-coverage disclosure. Example: {\"path\": \"src/app.css\"}. Reasons are hearsay Rocky heard, not verified facts.",
+      description: "Remembered triples that touched one file (items, plus possible ones whose path may be omitted) and the reasons a human or agent stated for it (rationales), newest first, with separate incomplete-coverage disclosure. A relative path resolves against the server's working directory. Example: {\"path\": \"src/app.css\"}. Reasons are hearsay Rocky heard, not verified facts.",
       inputSchema: schema({
         path: { type: "string", maxLength: MAX_FIELD_BYTES },
         limit: { type: "integer", minimum: 1, maximum: 10 },
@@ -1156,6 +1158,43 @@ function normalizeWhyEvidence(value: unknown, fallback: WhyFileEvidence, path: s
   }
 }
 
+interface StatedReasonsRead {
+  reasons: RationaleRecord[];
+  /** Coverage of the very scan these reasons were read from; absent when nothing was read. */
+  coverage: MemoryCoverage | undefined;
+}
+
+/**
+ * Reasons a human (`why --add --files`) or the notify lane (`agent-event --files`)
+ * stated for `path`: the ones `rocky why <file>` speaks, matched by the same exact
+ * file identity and resolved against this process's cwd, as the CLI does. They live
+ * only in the durable reader's snapshot, so any other provider offers none. A
+ * snapshot that cannot be read or matched marks the read failed, and the caller then
+ * reports unknown coverage instead of "no reasons".
+ */
+function readStatedReasons(
+  options: CreateToolRegistryOptions,
+  path: string,
+  limit: number,
+  canonicalMemory: boolean,
+  state: SafeMemoryReadState,
+): StatedReasonsRead {
+  const snapshot = safeReadMemory<DurableMemorySnapshot | undefined>(() => {
+    if (!hasDurableMemoryQueries(options.memory)) return undefined;
+    const loaded = loadDurableMemorySnapshot(options.memory);
+    // The loader swallows its own errors; an unread snapshot must not pass for "no reasons".
+    if (loaded === undefined) throw new Error("memory snapshot unavailable");
+    return loaded;
+  }, undefined, canonicalMemory, state);
+  if (snapshot === undefined) return { reasons: [], coverage: undefined };
+  // Matching reads no disk: a failure here is never an operational memory error, only a missing answer.
+  const reasons = safeReadMemory<RationaleRecord[]>(
+    () => rationalesForFile(snapshot.records, path, process.cwd(), Date.now(), limit),
+    [], false, state,
+  );
+  return { reasons, coverage: snapshot.coverage };
+}
+
 function safeErrorResult(error: ToolExecutionError, coverage?: MemoryCoverage): ToolCallResult {
   return cappedResult({ error: { code: error.safeCode, message: error.message }, ...memoryCoveragePayload(coverage) }, true);
 }
@@ -1319,13 +1358,17 @@ function memoryCoverage(
   }
 }
 
+function memoryScanIncomplete(coverage: MemoryCoverage): boolean {
+  return !coverage.complete || coverage.skipped > 0 || coverage.truncated > 0;
+}
+
 function memoryCoveragePayload(coverage: MemoryCoverage | undefined): Record<string, unknown> {
   if (coverage === undefined) return {};
   return {
     coverage,
     memoryCoverage: coverage,
     memoryVersion: coverage.version,
-    memoryCoverageIncomplete: !coverage.complete || coverage.skipped > 0 || coverage.truncated > 0,
+    memoryCoverageIncomplete: memoryScanIncomplete(coverage),
   };
 }
 
@@ -1785,6 +1828,9 @@ export function createToolRegistry(options: CreateToolRegistryOptions): McpToolR
           case "why_file": {
             const input = parseWhyFileArgs(args);
             const readState: SafeMemoryReadState = { failed: false };
+            // Read before the evidence, so the evidence read leaves its own coverage behind for
+            // `memoryCoverage` below and the two scans can be compared instead of one standing for both.
+            const stated = readStatedReasons(options, input.path, input.limit, canonicalMemory, readState);
             let fallback: WhyFileEvidence | undefined;
             const getFallback = (): WhyFileEvidence => fallback ??= fallbackWhyEvidence(options, input.path, input.limit, readState);
             let customEvidence: MemoryQueries["whyFileEvidence"] | undefined;
@@ -1832,20 +1878,29 @@ export function createToolRegistry(options: CreateToolRegistryOptions): McpToolR
               }
               return projectWhyTriple(triple, options.exposure, diffSnippet, commitSha);
             });
-            const memoryScan = memoryCoverage(options.memory, readState.failed, coverageReader);
+            // Two reads answer this call. Report the scan that says less, so a clean read never
+            // vouches for a cut-short one. The evidence scan stays first: an all-clean answer is
+            // reported exactly as it was before stated reasons were added.
+            const memoryScans = [memoryCoverage(options.memory, readState.failed, coverageReader), stated.coverage]
+              .filter((scan): scan is MemoryCoverage => scan !== undefined);
+            const memoryScan = memoryScans.find(memoryScanIncomplete) ?? memoryScans[0];
             pairedCoverage = memoryScan;
-            const projected = safeProjection(() => ({
-              exposure: options.exposure,
-              ...memoryCoveragePayload(memoryScan),
-              items: projectedItems,
-              possible: projectWhyPossible(evidence.possible, input.limit, options.exposure),
-              coverage: evidence.coverage,
-              coverageStatus: evidence.coverage.status,
-              coverageIncomplete: evidence.coverageIncomplete,
-              ...(evidence.ambiguousPath ? { ambiguousPath: true } : {}),
-              truncated: false,
-            }), { exposure: options.exposure, ...memoryCoveragePayload(memoryScan), items: [], possible: [], coverage: { status: "unknown", complete: false, filesCovered: 0, truncatedFiles: 0 }, coverageStatus: "unknown", coverageIncomplete: true, truncated: true });
-            return safeProjection(() => cappedResult(projected), cappedResult({ exposure: options.exposure, ...memoryCoveragePayload(memoryScan), items: [], possible: [], coverage: { status: "unknown", complete: false, filesCovered: 0, truncatedFiles: 0 }, coverageStatus: "unknown", coverageIncomplete: true, truncated: true }));
+            const projected = safeProjection(() => {
+              const reasons = projectWhyRationales(stated.reasons, options.exposure);
+              return {
+                exposure: options.exposure,
+                ...memoryCoveragePayload(memoryScan),
+                items: projectedItems,
+                possible: projectWhyPossible(evidence.possible, input.limit, options.exposure),
+                rationales: reasons.rationales,
+                coverage: evidence.coverage,
+                coverageStatus: evidence.coverage.status,
+                coverageIncomplete: evidence.coverageIncomplete,
+                ...(evidence.ambiguousPath ? { ambiguousPath: true } : {}),
+                truncated: reasons.truncated,
+              };
+            }, { exposure: options.exposure, ...memoryCoveragePayload(memoryScan), items: [], possible: [], rationales: [], coverage: { status: "unknown", complete: false, filesCovered: 0, truncatedFiles: 0 }, coverageStatus: "unknown", coverageIncomplete: true, truncated: true });
+            return safeProjection(() => cappedResult(projected), cappedResult({ exposure: options.exposure, ...memoryCoveragePayload(memoryScan), items: [], possible: [], rationales: [], coverage: { status: "unknown", complete: false, filesCovered: 0, truncatedFiles: 0 }, coverageStatus: "unknown", coverageIncomplete: true, truncated: true }));
           }
           case "teach_lookup": {
             const input = parseTeachLookupArgs(args);

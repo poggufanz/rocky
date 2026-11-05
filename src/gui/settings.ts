@@ -24,7 +24,11 @@ export interface GuiSettings {
   jevKey: string;
   /** OpenRouter key, stored server-side only. Env OPENROUTER_API_KEY wins when set. */
   openRouterKey: string;
-  /** The teach spec's output language: id reads teach-agent.md, en its twin. */
+  /**
+   * The teach spec's output language: id reads teach-agent.md, en its twin.
+   * English unless a stored `"id"` says otherwise, so a fresh home and an old
+   * file with no usable `lang` both read as `"en"`.
+   */
   lang: "id" | "en";
 }
 
@@ -41,7 +45,7 @@ export interface PublicSettings {
   hasOpenRouterKey: boolean;
 }
 
-const EMPTY: GuiSettings = { provider: "openai", endpoint: "", model: "", key: "", jevKey: "", openRouterKey: "", lang: "id" };
+const EMPTY: GuiSettings = { provider: "openai", endpoint: "", model: "", key: "", jevKey: "", openRouterKey: "", lang: "en" };
 
 export function settingsPath(env: NodeJS.ProcessEnv = process.env): string {
   return join(resolveRockyPaths(env).home, "gui.json");
@@ -57,7 +61,7 @@ export function readSettings(env: NodeJS.ProcessEnv = process.env): GuiSettings 
       key: typeof parsed.key === "string" ? parsed.key : "",
       jevKey: typeof parsed.jevKey === "string" ? parsed.jevKey : "",
       openRouterKey: typeof parsed.openRouterKey === "string" ? parsed.openRouterKey : "",
-      lang: parsed.lang === "en" ? "en" : "id",
+      lang: parsed.lang === "id" ? "id" : "en",
     };
   } catch {
     // no file, unreadable file, bad json: an unset config, not an error

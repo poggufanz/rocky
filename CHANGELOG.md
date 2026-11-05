@@ -2,6 +2,45 @@
 
 Notable changes per release. Dates are the release date.
 
+## 1.1.0 — 5 November 2026
+
+Minor release about honest output: Rocky says what he heard and what he did not, keeps secrets out of what he stores, and no longer goes silent or crashes where he used to.
+
+Output that changes shape (check scripts that parse it):
+
+- **Default output drops record ids and internal labels.** `what`, `how`, `why`, and `quiz` no longer print `id=`, `ts=`, `source=`, `agent=`, `coverage=`, or `confidence=`; they say who reported a change and whether its file list is complete. `stats` drops internal record names and reader counters. Set `ROCKY_VERBOSE=1` to bring the ids and counters back.
+- **`rocky --help` is a short grouped view that fits one screen.** The full reference moves behind `rocky --help --all`. Bare `rocky` and `rocky --port=N` in a pipe print that short view and exit 0 instead of reporting an unknown command.
+- **GUI chat answers keep their trace apart.** `/api/chat` answer text reads `best match: <label> (<kind>). remembered, not proven.`; the record id, decision, detail, coverage, and renderer lines move to a separate `trace` field, and `coverage.reason` is words, not a code.
+- **MCP `why_file` adds a `rationales` array.** The change is additive; existing fields keep their shape.
+
+Security:
+
+- **`rocky check` scans for secrets when the last diff section has no hunk.** A binary file, a pure rename, or a mode-only change as the last section made the parse incomplete and skipped the whole secret scan, while pre-push stayed fail-open at exit 0.
+- **Secrets stay out of stored records.** Fix and association records store the same bounded, redacted command the failure record stores, `rocky check`'s comprehension note redacts the risky line and the typed answer, and remembered excerpts are redacted.
+
+Fixes:
+
+- **`rocky check` always states its result.** A clean run prints one line naming its scope (`checked net change: N new text lines, M files. no secret hit.`). A risky line with no terminal to answer on says the question was skipped, and Windows no longer prints a question it cannot read an answer for.
+- **Manual `rocky check` covers the commits no remote has.** Without an upstream it no longer scans the whole history; with a diverged upstream it diffs from the merge base, so the upstream's own commits are not read as new lines.
+- **Fixes link across Windows spellings of one directory.** A Git Bash hook failure in `C:/Users/x/p` followed by a `rocky run` success in `C:\Users\x\p` now links, and drive-letter case or a trailing separator no longer breaks the link. Other platforms still compare exactly, and `confirmed` still needs the same command identity, the same directory, and the 8-hour window.
+- **Remembered excerpts keep the decisive error line.** The excerpt holds the first error-looking line plus the last three lines, so `npm error Missing script: "build"` or a `SyntaxError` line comes back in recall instead of npm's log pointer.
+- **The GUI stays up when no browser opener exists.** A missing `xdg-open` or `open` killed the foreground GUI right after it printed its URL; Rocky now says to open the link by hand. `--no-open` works without a terminal.
+- **File-scoped reasons close the loop.** `rocky why --add "<text>" --files a.ts,b.ts` stores a reason for those files instead of swallowing the names into the text, and `rocky why <file>` and MCP `why_file` speak the reasons recorded for that file. A reader that stopped at its record bound says so instead of claiming no record names the file.
+- **Partial memory reads are named in plain words.** When memory cannot be read whole, Rocky says how many lines he cannot use and, at the record cap, `first N records heard, later lines not heard.` `teach` and `sessions` now say it too. The rationale gate allows instead of denying when its evidence read stopped at a cap, since evidence past the cap can never satisfy it.
+- **Link lines say what Rocky heard.** A success after a failure prints `command works now. same command fail before. I link them. I not hear what change. good good good.`, the hook line names the command, and a gap under a minute reads `under 1 minute`.
+- **`rocky teach --ladder` stays in English** when no git history covers the selected lines, and the GUI Teach language defaults to English.
+- **cmd.exe is named when it rejects a command.** On Windows, `rocky run` and `rocky watch` add `cmd.exe parsed this command. bash or powershell words not heard there.` when cmd.exe's English rejection text appears. Other locales stay silent rather than guess.
+- **`rocky hook install` tells the truth about PowerShell.** When the execution policy is Restricted or AllSigned, install and status say PowerShell blocks scripts and print the `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` fix instead of claiming working ears; the profile is still written and the exit code stays 0. Windows prints a line before the slow host probe, a newly created `~/.bashrc` says only Git Bash hears it, and a refused profile outside home names `ROCKY_HOOK_ALLOW_PROFILE_OUTSIDE_HOME=1`.
+- **The repl reports a usage error the way the CLI does** instead of `command stumbled`.
+
+Performance:
+
+- **Commands load on demand.** `rocky --version`, each shell-hook spawn, and each agent-hook call no longer evaluate 147 modules before reading their arguments; the startup import closure is 8 files.
+
+Docs:
+
+- README and `docs/reference.md` name every outbound call, including the models.dev catalogue fetch and the opt-in Jev ranking call, and document `ROCKY_VERBOSE`.
+
 ## 1.0.1 — 7 October 2026
 
 Patch release: the harness picker 1.0.0 described is now reachable, and the Bash hook smoke test no longer reports false failures under a privileged user.

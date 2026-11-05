@@ -828,6 +828,172 @@ test("weak-only candidate records association but never clears pending", (t) => 
   assert.equal(existsSync(join(home, "pending")), true);
 });
 
+const GITHUB_TOKEN = "ghp_abcdefghijklmnopqrstuvwxyz0123456789ABCD";
+
+function withRockyHome<T>(home: string, run: () => T): T {
+  const original = process.env.ROCKY_HOME;
+  process.env.ROCKY_HOME = home;
+  try {
+    return run();
+  } finally {
+    if (original === undefined) delete process.env.ROCKY_HOME;
+    else process.env.ROCKY_HOME = original;
+  }
+}
+
+test("fix storage redacts a secret-bearing command and keeps it a possible association", (t) => {
+  const home = sandbox(t, "rocky-fix-redact-");
+  const rawCmd = `node check.js ${GITHUB_TOKEN}`;
+  const result = withRockyHome(home, () => {
+    memory.recordFailure(rawCmd, 1, "Error: boom");
+    return memory.resolveFixOnSuccess(rawCmd, process.cwd());
+  });
+  const memoryPath = join(home, "memory.jsonl");
+
+  assert.doesNotMatch(readFileSync(memoryPath, "utf8"), /ghp_abcdef/u);
+  // Matching stays on the raw command, so the redacted failure is never the
+  // same reliable identity: the success is an association, not a fix.
+  assert.equal(result.confirmedResolved, 0);
+  assert.equal(result.possibleAssociated, 1);
+  const association = memory.loadMemory(memoryPath)
+    .find((record): record is AssociationRecord => record.kind === "association");
+  assert.ok(association !== undefined, "an association record must be stored");
+  assert.match(association.cmd, /\[redacted/u);
+});
+
+test("fix storage never confirms a quoted-token command by what redaction made of it", (t) => {
+  // Redaction rewrites both tokens to the same `[redacted github token]`, so a match made on stored text
+  // would call a token rotation a fix. Matching stays on the raw command: two different tokens are two
+  // different commands, and the success is a possible association with no raw token left in the file.
+  const home = sandbox(t, "rocky-fix-quoted-token-");
+  const tokenA = GITHUB_TOKEN;
+  const tokenB = "ghp_ZYXWVUTSRQPONMLKJIHGFEDCBA9876543210zyxw";
+  const result = withRockyHome(home, () => {
+    memory.recordFailure(`deploy "${tokenA}"`, 1, "Error: boom");
+    return memory.resolveFixOnSuccess(`deploy "${tokenB}"`, process.cwd());
+  });
+  const memoryPath = join(home, "memory.jsonl");
+  const stored = readFileSync(memoryPath, "utf8");
+
+  assert.equal(result.confirmedResolved, 0);
+  assert.equal(result.possibleAssociated, 1);
+  assert.equal(stored.includes(tokenA), false, "the failed command's token must not be stored");
+  assert.equal(stored.includes(tokenB), false, "the successful command's token must not be stored");
+  const records = memory.loadMemory(memoryPath);
+  assert.equal(records.filter((record) => record.kind === "fix").length, 0);
+  const association = records.find((record): record is AssociationRecord => record.kind === "association");
+  assert.ok(association !== undefined, "an association record must be stored");
+  assert.match(association.cmd, /\[redacted/u);
+});
+
+test("fix storage keeps a plain command confirmed and unchanged", (t) => {
+  const home = sandbox(t, "rocky-fix-plain-");
+  const cmd = "node check.js";
+  const result = withRockyHome(home, () => {
+    memory.recordFailure(cmd, 1, "Error: boom");
+    return memory.resolveFixOnSuccess(cmd, process.cwd());
+  });
+
+  assert.equal(result.confirmedResolved, 1);
+  assert.equal(result.fix?.cmd, cmd);
+});
+
+const NPM_MISSING_SCRIPT = [
+  'npm error Missing script: "build"',
+  "npm error",
+  "npm error To see a list of scripts, run:",
+  "npm error   npm run",
+  "npm error A complete log of this run can be found in: C:\\x\\debug-0.log",
+].join("\n");
+
+const NODE_SYNTAX_CRASH = [
+  "C:\\work\\app\\broken.js:3",
+  "const answer = ;",
+  "               ^",
+  "",
+  "SyntaxError: Unexpected token ';'",
+  "    at wrapSafe (node:internal/modules/cjs/loader:1469:18)",
+  "    at Module._compile (node:internal/modules/cjs/loader:1491:20)",
+  "    at Module._extensions..js (node:internal/modules/cjs/loader:1613:10)",
+  "",
+  "Node.js v22.12.0",
+].join("\n");
+
+function storedFailure(home: string): FailureRecord {
+  const stored = memory.loadMemory(join(home, "memory.jsonl"))
+    .find((record): record is FailureRecord => record.kind === "failure");
+  assert.ok(stored !== undefined, "a failure record must be stored");
+  return stored;
+}
+
+test("failure excerpt keeps the decisive error line ahead of the log tail", (t) => {
+  const home = sandbox(t, "rocky-excerpt-npm-");
+  const rec = withRockyHome(home, () => memory.recordFailure("npm run build", 1, NPM_MISSING_SCRIPT));
+  const lines = rec.excerpt.split("\n");
+
+  assert.equal(lines[0], 'npm error Missing script: "build"');
+  assert.equal(lines.length, 4);
+  assert.equal(lines.at(-1), "npm error A complete log of this run can be found in: C:\\x\\debug-0.log");
+  assert.equal(storedFailure(home).excerpt, rec.excerpt);
+});
+
+test("failure excerpt keeps the SyntaxError line of a node crash", (t) => {
+  const home = sandbox(t, "rocky-excerpt-syntax-");
+  const rec = withRockyHome(home, () => memory.recordFailure("node broken.js", 1, NODE_SYNTAX_CRASH));
+
+  assert.deepEqual(rec.excerpt.split("\n"), [
+    "SyntaxError: Unexpected token ';'",
+    "at Module._compile (node:internal/modules/cjs/loader:1491:20)",
+    "at Module._extensions..js (node:internal/modules/cjs/loader:1613:10)",
+    "Node.js v22.12.0",
+  ]);
+});
+
+test("failure excerpt does not repeat the decisive line when the tail already holds it", (t) => {
+  const home = sandbox(t, "rocky-excerpt-dedupe-");
+  const rec = withRockyHome(home, () =>
+    memory.recordFailure("make", 2, "one\ntwo\nthree\nError: boom\nfour\nfive"));
+
+  assert.equal(rec.excerpt, "three\nError: boom\nfour\nfive");
+});
+
+test("failure excerpt drops ANSI color so a colored decisive line is not repeated", (t) => {
+  const home = sandbox(t, "rocky-excerpt-ansi-");
+  const rec = withRockyHome(home, () =>
+    memory.recordFailure("tsc", 2, "\u001b[31merror\u001b[0m TS2304: Cannot find name 'x'.\n"));
+
+  assert.equal(rec.excerpt, "error TS2304: Cannot find name 'x'.");
+});
+
+test("failure excerpt falls back to the last four lines when no line looks like an error", (t) => {
+  const home = sandbox(t, "rocky-excerpt-plain-");
+  const rec = withRockyHome(home, () => memory.recordFailure("make", 2, "one\ntwo\nthree\nfour\nfive\n"));
+
+  assert.equal(rec.excerpt, "two\nthree\nfour\nfive");
+});
+
+test("failure excerpt is redacted before it is stored", (t) => {
+  const home = sandbox(t, "rocky-excerpt-redact-");
+  const rec = withRockyHome(home, () =>
+    memory.recordFailure("node check.js", 1, `Error: bad token ${GITHUB_TOKEN}\n  at x`));
+
+  assert.doesNotMatch(rec.excerpt, /ghp_abcdef/u);
+  assert.match(rec.excerpt, /^Error: bad token \[redacted/u);
+  assert.equal(storedFailure(home).excerpt, rec.excerpt);
+});
+
+test("watch failure excerpt keeps the decisive line first and redacts secrets", (t) => {
+  const home = sandbox(t, "rocky-excerpt-watch-");
+  const stderr = `Error: bad token ${GITHUB_TOKEN}\nnoise 1\nnoise 2\nnoise 3`;
+  const rec = withRockyHome(home, () => memory.recordWatchFailure("npm test", 1, stderr, home));
+  const lines = rec.excerpt.split("\n");
+
+  assert.equal(rec.origin, "watch");
+  assert.equal(lines.length, 4);
+  assert.match(lines[0], /^Error: bad token \[redacted/u);
+  assert.doesNotMatch(rec.excerpt, /ghp_abcdef/u);
+});
+
 test("a no-link success never clears pending without a confirmed resolution", (t) => {
   const home = sandbox(t, "rocky-no-confirmed-pending-");
   const cwd = home;

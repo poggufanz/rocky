@@ -10,6 +10,7 @@ export type PhraseKey =
   | "ai-busy"
   | "ai-fallback"
   | "bashrc-write-protected"
+  | "bashrc-created"
   | "hook-histcontrol"
   | "watch-idle-tail"
   | "watch-ok"
@@ -20,7 +21,11 @@ export type PhraseKey =
   | "check-registry-consent"
   | "check-answer"
   | "check-comprehension"
-  | "check-unknown-flag";
+  | "check-unknown-flag"
+  | "gui-opener-failed"
+  | "cmd-exe-parsed"
+  | "fix-linked"
+  | "fix-recurrence-same";
 
 const PHRASES: Readonly<Record<PhraseKey, string>> = Object.freeze({
   "ai-known-fix": "memory and small model agree. old fix is strong clue. good good.",
@@ -32,6 +37,7 @@ const PHRASES: Readonly<Record<PhraseKey, string>> = Object.freeze({
   "ai-busy": "small model busy. deterministic memory speaks now.",
   "ai-fallback": "model words not grounded enough. I keep memory order.",
   "bashrc-write-protected": "bashrc is write-protected. I replace it anyway. your lines stay.",
+  "bashrc-created": "bashrc missing. I make new one. only Git Bash hears it here.",
   "hook-histcontrol": "my ears change your history setting. command typed with space in front is remembered now.",
   "watch-idle-tail": "waiting is easy for me",
   "watch-ok": "command finish. good good.",
@@ -43,6 +49,14 @@ const PHRASES: Readonly<Record<PhraseKey, string>> = Object.freeze({
   "check-answer": "answer, question",
   "check-comprehension": "I hear risky new line. what it doing, question",
   "check-unknown-flag": "that flag I do not know. bad.",
+  "gui-opener-failed": "browser opener does not start here. open link above by hand.",
+  // Disclosure only: names the shell that parsed the command. No cause, no remedy:
+  // `bash -c` on a Windows PATH can resolve to WSL's bash.exe.
+  "cmd-exe-parsed": "cmd.exe parsed this command. bash or powershell words not heard there.",
+  // Hedged on purpose (commit 91889e0): a confirmed link means the same command
+  // worked after it failed, never that Rocky knows what changed in between.
+  "fix-linked": "command works now. same command fail before. I link them. I not hear what change. good good good.",
+  "fix-recurrence-same": "last time, same command work again after. I not hear what change.",
 });
 
 export const phraseKeys: readonly PhraseKey[] = Object.freeze([
@@ -55,6 +69,7 @@ export const phraseKeys: readonly PhraseKey[] = Object.freeze([
   "ai-busy",
   "ai-fallback",
   "bashrc-write-protected",
+  "bashrc-created",
   "hook-histcontrol",
   "watch-idle-tail",
   "watch-ok",
@@ -66,6 +81,10 @@ export const phraseKeys: readonly PhraseKey[] = Object.freeze([
   "check-answer",
   "check-comprehension",
   "check-unknown-flag",
+  "gui-opener-failed",
+  "cmd-exe-parsed",
+  "fix-linked",
+  "fix-recurrence-same",
 ]);
 
 export function phrase(key: PhraseKey): string {

@@ -12,6 +12,7 @@
 
 import { closeSync, constants, fstatSync, lstatSync, openSync, readSync, type BigIntStats } from "node:fs";
 import { fingerprintCandidates } from "../core/fingerprint.js";
+import { describeMemoryCoverage } from "../core/coverage.js";
 import { CANCEL_CODES, runProcess, type ExecOptions, type ExecResult } from "../core/exec.js";
 import { resolveRockyPaths } from "../core/state-paths.js";
 import { recordWatchFailure, type MemoryRecord } from "../core/memory.js";
@@ -19,8 +20,8 @@ import { isCompleteMemoryCoverage, loadMemoryChecked } from "../core/memory-read
 import { DEFAULT_WATCH_NOTIFY, loadConfig } from "../core/config-read.js";
 import { formatDuration, notify as realNotify, spokenDuration, type NotifyInput } from "../core/notify.js";
 import { watchLogName, writeWatchLog } from "../core/watch-log.js";
-import { linkFixOnSuccess, speakFailureMemory } from "./run.js";
-import { detail, phrase, say, writeRockyStderr } from "../ui/rocky.js";
+import { cmdExeHint, linkFixOnSuccess, speakFailureMemory } from "./run.js";
+import { detail, isVerbose, phrase, say, writeRockyStderr } from "../ui/rocky.js";
 import { safeTerminalBlock, safeTerminalLine } from "../ui/sanitize.js";
 import { NO_FOLLOW_FLAG, regularDescriptorSafe, sameFilesystemIdentity } from "../core/fs-safety.js";
 
@@ -29,11 +30,12 @@ export interface ParsedWatch { quiet: boolean; cmd: string }
 /**
  * Options are honoured wherever they appear, not only before the command.
  *
- * `rocky --help` documents `rocky watch "<command>" [--quiet]` — the trailing
- * form. Stopping option parsing at the first positional appended `--quiet` to
- * the command string instead, so `rocky watch "sleep 1" --quiet` really ran
- * `sleep 1 --quiet`: a wrapped exit 0 became 1 and a failure that never
- * happened entered memory. Rocky must never change the command he was handed.
+ * `rocky --help --all` documents `rocky watch "<command>" [--quiet]` — the
+ * trailing form. Stopping option parsing at the first positional appended
+ * `--quiet` to the command string instead, so `rocky watch "sleep 1" --quiet`
+ * really ran `sleep 1 --quiet`: a wrapped exit 0 became 1 and a failure that
+ * never happened entered memory. Rocky must never change the command he was
+ * handed.
  *
  * `--` still ends option parsing, so a command that genuinely needs a literal
  * `--flag` token stays expressible.
@@ -158,7 +160,10 @@ function readMemory(quiet: boolean): MemoryRecord[] | undefined {
   try {
     const loaded = loadMemoryChecked();
     if (!isCompleteMemoryCoverage(loaded.coverage)) {
-      const diagnostic = `memory coverage incomplete: version ${loaded.coverage.version}; scanned ${loaded.coverage.scanned}; skipped ${loaded.coverage.skipped}; truncated ${loaded.coverage.truncated}${loaded.coverage.reason === undefined ? "" : `; reason ${loaded.coverage.reason}`}`;
+      const words = describeMemoryCoverage(loaded.coverage, loaded.records.length, { counts: false });
+      const diagnostic = !isVerbose() && words !== undefined
+        ? words
+        : `memory coverage incomplete: version ${loaded.coverage.version}; scanned ${loaded.coverage.scanned}; skipped ${loaded.coverage.skipped}; truncated ${loaded.coverage.truncated}${loaded.coverage.reason === undefined ? "" : `; reason ${loaded.coverage.reason}`}`;
       if (quiet) writeRockyStderr(`${diagnostic}\n`);
       else {
         say("memory coverage incomplete. I do not claim prior fix. check, question");
@@ -219,6 +224,10 @@ function onWatchFailure(cmd: string, cwd: string, quiet: boolean, result: ExecRe
     if (memory !== undefined) {
       speakFailureMemory(memory, fingerprintCandidates(result.stderr, cmd, result.code), cmd, result.code, cwd);
     }
+    // Same disclosure as `run`. It sits in this non-quiet block because `--quiet`
+    // prints plain facts only. `watch` never overrides runProcess's default `shell: true`.
+    const hint = cmdExeHint(result.stderr, process.platform, true);
+    if (hint !== undefined) say(hint);
   }
 
   try {

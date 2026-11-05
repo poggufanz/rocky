@@ -13,6 +13,29 @@ function ttyStream(): PassThrough & { isTTY: boolean } {
   return stream;
 }
 
+function pipedStream(): PassThrough & { isTTY: boolean } {
+  const stream = new PassThrough() as PassThrough & { isTTY: boolean };
+  stream.isTTY = false;
+  return stream;
+}
+
+/** The controlling-terminal seam is not part of the exported signature. */
+const createWithControllingAsk = createTtyPromptPort as unknown as (
+  fallbackInput: PassThrough & { isTTY: boolean },
+  fallbackOutput: PassThrough,
+  controllingAsk: () => Promise<{ available: boolean; answer?: string }>,
+) => PromptPort | undefined;
+
+/** Stub one property for the rest of the test; the returned function restores it exactly. */
+function stubProperty(target: object, key: string, value: unknown): () => void {
+  const original = Object.getOwnPropertyDescriptor(target, key);
+  Object.defineProperty(target, key, { value, configurable: true, enumerable: true, writable: true });
+  return () => {
+    if (original === undefined) delete (target as Record<string, unknown>)[key];
+    else Object.defineProperty(target, key, original);
+  };
+}
+
 test("prompt port returns a free-text answer", async () => {
   const input = ttyStream();
   const output = new PassThrough();
@@ -59,18 +82,63 @@ test("prompt port silently declines non-TTY input without reading", async () => 
 test("TTY prompt falls back to process-style stdin when the controlling terminal cannot open", async () => {
   const input = ttyStream();
   const output = new PassThrough();
-  const createWithFallback = createTtyPromptPort as unknown as (
-    fallbackInput: typeof input,
-    fallbackOutput: typeof output,
-    controllingAsk: () => Promise<{ available: false }>,
-  ) => PromptPort | undefined;
-  const port = createWithFallback(input, output, async () => ({ available: false }));
+  const port = createWithControllingAsk(input, output, async () => ({ available: false }));
   assert.ok(port);
 
   const answer = port.ask("answer, question ", 1_000);
   input.write("fallback works\n");
 
   assert.equal(await answer, "fallback works");
+});
+
+test("on win32 a terminal stderr alone cannot answer, so the TTY prompt declines", (t) => {
+  // /dev/tty does not exist on Windows: a TTY stderr there promised an answer
+  // nothing could give, and the question header printed with no way to reply.
+  t.after(stubProperty(process, "platform", "win32"));
+  t.after(stubProperty(process.stderr, "isTTY", true));
+
+  const port = createWithControllingAsk(pipedStream(), new PassThrough(), async () => ({ available: false }));
+
+  assert.equal(port, undefined);
+});
+
+test("on win32 a terminal stdin still prompts through the fallback", async (t) => {
+  t.after(stubProperty(process, "platform", "win32"));
+  for (const stderrIsTTY of [true, false]) {
+    const restore = stubProperty(process.stderr, "isTTY", stderrIsTTY);
+    try {
+      const input = ttyStream();
+      const port = createWithControllingAsk(input, new PassThrough(), async () => ({ available: false }));
+      assert.ok(port, `stderr TTY ${stderrIsTTY}: stdin is the terminal, so the prompt stays available`);
+
+      const answer = port.ask("answer, question ", 1_000);
+      input.write("typed on win32\n");
+
+      assert.equal(await answer, "typed on win32");
+    } finally {
+      restore();
+    }
+  }
+});
+
+test("off win32 a terminal stderr keeps the controlling-terminal prompt while stdin is piped", async (t) => {
+  t.after(stubProperty(process, "platform", "linux"));
+  t.after(stubProperty(process.stderr, "isTTY", true));
+
+  const port = createWithControllingAsk(pipedStream(), new PassThrough(), async () => ({
+    available: true,
+    answer: "from the controlling terminal",
+  }));
+
+  assert.ok(port, "POSIX behavior is unchanged: a TTY stderr is enough to reach /dev/tty");
+  assert.equal(await port.ask("answer, question ", 1_000), "from the controlling terminal");
+});
+
+test("off win32 without any terminal the TTY prompt still declines", (t) => {
+  t.after(stubProperty(process, "platform", "linux"));
+  t.after(stubProperty(process.stderr, "isTTY", false));
+
+  assert.equal(createWithControllingAsk(pipedStream(), new PassThrough(), async () => ({ available: false })), undefined);
 });
 
 test("quiet skips first consent during scans but not during hook installation", async (t) => {

@@ -16,6 +16,22 @@ function withRockyHome(t: import("node:test").TestContext): void {
   });
 }
 
+/** Everything Rocky says to stderr while `run` runs. */
+async function captureStderr(run: () => Promise<unknown>): Promise<string> {
+  const original = process.stderr.write;
+  let stderr = "";
+  process.stderr.write = ((chunk: string | Uint8Array) => {
+    stderr += String(chunk);
+    return true;
+  }) as typeof process.stderr.write;
+  try {
+    await run();
+    return stderr;
+  } finally {
+    process.stderr.write = original;
+  }
+}
+
 test("repl dispatches known commands and refuses unknown, exits on quit", async (t) => {
   withRockyHome(t);
   const { replCommand } = await import("../commands/repl.js");
@@ -84,6 +100,28 @@ test("runReplCommand survives a thrown-async command instead of rejecting", asyn
   };
   const code = await runReplCommand("boom", [], false, boom);
   assert.equal(code, 1);
+});
+
+test("runReplCommand reports a usage error as the CLI does, and says stumbled only for other throws", async (t) => {
+  withRockyHome(t);
+  const { runReplCommand } = await import("../commands/repl.js");
+
+  // `why --add --files` with no value really throws a CliUsageError, before memory is touched.
+  let code = -1;
+  const usage = await captureStderr(async () => {
+    code = await runReplCommand("why", ["--add", "keep the cap at three", "--files"], false);
+  });
+  assert.equal(code, 2);
+  assert.match(usage, /--files needs path\. run rocky --help, question/u);
+  assert.match(usage, /usage: rocky why --add "<text>" \[--files a\.ts,b\.ts\]/u);
+  assert.doesNotMatch(usage, /stumbled/u);
+
+  const stumble = await captureStderr(async () => {
+    code = await runReplCommand("boom", [], false, { boom: () => { throw new Error("kaboom"); } });
+  });
+  assert.equal(code, 1);
+  assert.match(stumble, /command stumbled\. rocky still here\./u);
+  assert.doesNotMatch(stumble, /run rocky --help/u);
 });
 
 test("runReplCommand refuses unknown command without throwing", async () => {

@@ -169,6 +169,7 @@ test("background detector blocks detached and unref attempts before they can lin
 test("help, recall, stats, and hook status finish successfully without external fetch", (t) => {
   const commands = [
     ["--help"],
+    ["--help", "--all"],
     ["recall", "missing-error"],
     ["stats"],
     ["hook", "status"],

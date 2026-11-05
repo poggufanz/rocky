@@ -134,6 +134,12 @@ test("MCP source graph reaches only explicitly allowlisted read-only modules; wr
     "commands/mcp.ts",
     "commands/cli-args.ts",
     "core/config-read.ts",
+    // Audited pure keyword matcher and static explanation table: their only
+    // import is core/fingerprint.ts and neither touches the filesystem. Both
+    // are reached through core/dictionary.ts, whose `rationalesForFile` serves
+    // why_file.
+    "core/concepts.ts",
+    "core/cs-explain.ts",
     "core/dictionary.ts",
     // Audited pure predicate: no imports, no filesystem access; read-side
     // retrieval filtering only (retrieval-quality spec, step 0).

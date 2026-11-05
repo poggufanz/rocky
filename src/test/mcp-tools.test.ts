@@ -1,13 +1,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { ExplainRecord, FailureRecord, MemoryRecord, TripleRecord } from "../core/memory-read.js";
+import type { ExplainRecord, FailureRecord, MemoryRecord, RationaleRecord, TripleRecord } from "../core/memory-read.js";
 import { createMemoryQueries } from "../core/memory-query.js";
 import type { MemoryQueries } from "../core/memory-query.js";
 import { pathIdentityHash } from "../core/memory-read.js";
+import { resolveRockyPaths } from "../core/state-paths.js";
 import { disabledRecallWithAi, type RecallWithAiPort } from "../ai/port.js";
 import { createToolRegistry, McpInvalidParamsError, ToolExecutionError, TOOL_ENVELOPE_RESERVE_BYTES } from "../mcp/tools.js";
 import { MAX_FIELD_BYTES, MAX_RESPONSE_BYTES } from "../mcp/privacy.js";
@@ -110,6 +111,10 @@ test("new tool descriptions are concrete and schemas expose their bounds", () =>
   assert.match(search.description, /Example/);
   assert.match(fetch.description, /Example/);
   assert.match(why.description, /Example/);
+  // why_file answers with triples and with stated reasons, and a relative path has one meaning.
+  assert.match(why.description, /triples/);
+  assert.match(why.description, /rationales/);
+  assert.match(why.description, /relative path resolves against the server's working directory/);
   assert.match(teach.description, /Example/);
   assert.match(teach.description, /Reasons are hearsay Rocky heard, not verified facts\./);
   assert.deepEqual(teach.inputSchema, {
@@ -1768,4 +1773,179 @@ test("recall_with_ai skips model output when deterministic recall is empty", asy
   assert.equal(result.structuredContent.aiStatus, "no_hits");
   assert.equal(result.structuredContent.truncated, false);
   assert.ok(Buffer.byteLength(JSON.stringify(result), "utf8") <= MAX_RESPONSE_BYTES);
+});
+
+// why_file also answers with the reasons a human (`why --add --files`) or the
+// notify lane (`agent-event --files`) stated for the file: the same ones
+// `rocky why <file>` speaks. Those records reach the server only through the
+// durable reader's snapshot, so these tests read a real memory.jsonl under a
+// throwaway ROCKY_HOME.
+
+interface WhyReason { source: string; agent: string; ts: number; text: string; files: string[] }
+
+/** Run `use` against a durable `createMemoryQueries()` whose memory.jsonl holds exactly `lines`. */
+async function withDurableMemory<T>(lines: readonly string[], use: (memory: MemoryQueries) => Promise<T>): Promise<T> {
+  const home = mkdtempSync(join(tmpdir(), "rocky-mcp-why-reasons-"));
+  const previous = process.env.ROCKY_HOME;
+  process.env.ROCKY_HOME = home;
+  try {
+    writeFileSync(resolveRockyPaths({ ROCKY_HOME: home }).memory, lines.map((line) => `${line}\n`).join(""), "utf8");
+    return await use(createMemoryQueries());
+  } finally {
+    if (previous === undefined) delete process.env.ROCKY_HOME;
+    else process.env.ROCKY_HOME = previous;
+    rmSync(home, { recursive: true, force: true });
+  }
+}
+
+/** A stated reason as the writers store it, anchored to this process's cwd, which is where the server resolves paths. */
+function statedReason(
+  id: string,
+  ts: number,
+  excerpt: string,
+  files?: readonly string[],
+  overrides: Partial<RationaleRecord> = {},
+): RationaleRecord {
+  return {
+    kind: "rationale", id, ts, v: 1, cwd: process.cwd(),
+    agent: "human", rationale_fidelity: "summary", source: "human", excerpt,
+    ...(files === undefined ? {} : { files: [...files] }),
+    ...overrides,
+  };
+}
+
+async function whyFromDurable(
+  lines: readonly string[],
+  args: Record<string, unknown>,
+  exposure: "sanitized" | "raw" = "sanitized",
+): Promise<Record<string, unknown>> {
+  return withDurableMemory(lines, async (memory) => {
+    const result = await createToolRegistry({ exposure, memory, recallWithAi: disabledRecallWithAi })
+      .call("why_file", args, new AbortController().signal);
+    assert.equal(result.isError, undefined);
+    return result.structuredContent;
+  });
+}
+
+test("why_file returns the reason a human stated for the file and keeps every existing key", async () => {
+  const reason = statedReason("human-1", Date.now() - 1_000, "keep the retry cap at three because the upstream rate-limits", ["src/a.ts"]);
+
+  const content = await whyFromDurable([JSON.stringify(reason)], { path: "src/a.ts" });
+
+  const rationales = content.rationales as WhyReason[];
+  assert.equal(rationales.length, 1);
+  assert.ok(rationales[0]?.text.includes("keep the retry cap at three"));
+  assert.deepEqual(rationales[0], { source: "human", agent: "human", ts: reason.ts, text: reason.excerpt, files: ["src/a.ts"] });
+  for (const key of [
+    "exposure", "items", "possible", "coverage", "coverageStatus", "coverageIncomplete", "truncated",
+    "memoryCoverage", "memoryCoverageIncomplete", "memoryVersion",
+  ]) assert.ok(key in content, `why_file must keep ${key}`);
+  assert.equal(content.truncated, false);
+});
+
+test("why_file keeps only human and notify reasons that name the file, newest first, within limit", async () => {
+  const now = Date.now();
+  const lines = [
+    statedReason("older-notify", now - 3_000, "agent says parsing moved out of the hook", ["src/a.ts"], { source: "notify", agent: "claude-code" }),
+    statedReason("newest-human", now - 1_000, "human says parsing stays out of the hook", ["src/b.ts", "src/a.ts"]),
+    statedReason("agent-log", now - 500, "log heard a change to a.ts", ["src/a.ts"], { source: "log-thinking", agent: "claude-code", rationale_fidelity: "raw" }),
+    statedReason("other-file", now - 400, "this reason is about b only", ["src/b.ts"]),
+    statedReason("unscoped", now - 300, "this reason names no file"),
+  ].map((record) => JSON.stringify(record));
+
+  const all = (await whyFromDurable(lines, { path: "src/a.ts" })).rationales as WhyReason[];
+  assert.deepEqual(all.map((reason) => [reason.source, reason.agent, reason.text]), [
+    ["human", "human", "human says parsing stays out of the hook"],
+    ["notify", "claude-code", "agent says parsing moved out of the hook"],
+  ]);
+  assert.deepEqual(all[0]?.files, ["src/b.ts", "src/a.ts"]);
+
+  const newest = (await whyFromDurable(lines, { path: "src/a.ts", limit: 1 })).rationales as WhyReason[];
+  assert.deepEqual(newest.map((reason) => reason.text), ["human says parsing stays out of the hook"]);
+});
+
+test("why_file projects stated reasons at the exposure search_knowledge applies to rationale records", async () => {
+  const secret = "sk-LIVEKEY0123456789ABCDEFGHIJKLMNO";
+  const reason = statedReason(
+    "leaky", Date.now() - 1_000,
+    `rotate the key with token=${secret} then redeploy from /home/zed/app`,
+    ["src/a.ts", "/home/zed/app/src/a.ts"],
+  );
+  for (const exposure of ["sanitized", "raw"] as const) {
+    const { why, search } = await withDurableMemory([JSON.stringify(reason)], async (memory) => {
+      const registry = createToolRegistry({ exposure, memory, recallWithAi: disabledRecallWithAi });
+      const signal = new AbortController().signal;
+      return {
+        why: (await registry.call("why_file", { path: "src/a.ts" }, signal)).structuredContent,
+        search: (await registry.call("search_knowledge", { query: "rotate redeploy", kind: "rationale" }, signal)).structuredContent,
+      };
+    });
+    const [shown] = why.rationales as WhyReason[];
+    const [found] = search.items as Array<{ filesCovered: string[] }>;
+    assert.ok(shown !== undefined && found !== undefined, `${exposure}: both tools must find the reason`);
+    // Whatever search_knowledge shows of the named files, why_file shows the same, and no more.
+    assert.deepEqual(shown.files, found.filesCovered, `${exposure}: files`);
+    if (exposure === "sanitized") {
+      assert.doesNotMatch(JSON.stringify(why), /sk-LIVEKEY|\/home\/zed/u);
+      assert.doesNotMatch(JSON.stringify(search), /sk-LIVEKEY|\/home\/zed/u);
+      assert.match(shown.text, /redeploy from \[redacted\]$/u);
+    } else {
+      assert.equal(shown.text, reason.excerpt);
+      assert.deepEqual(shown.files, ["src/a.ts", "/home/zed/app/src/a.ts"]);
+    }
+  }
+});
+
+test("why_file spells the files a reason names the way search_knowledge does: canonical, once each", async () => {
+  // `./src/a.ts` and `src/a.ts` name one file. Left raw, the first reads as an absolute path to the
+  // sanitizer and comes back as `.[redacted]`, so the two tools would disagree about the same record.
+  const reason = statedReason("spelled", Date.now() - 1_000, "keep the cap at three for the upstream", ["./src/a.ts", "src/a.ts", "src//b.ts"]);
+  for (const exposure of ["sanitized", "raw"] as const) {
+    const { why, search } = await withDurableMemory([JSON.stringify(reason)], async (memory) => {
+      const registry = createToolRegistry({ exposure, memory, recallWithAi: disabledRecallWithAi });
+      const signal = new AbortController().signal;
+      return {
+        why: (await registry.call("why_file", { path: "src/a.ts" }, signal)).structuredContent,
+        search: (await registry.call("search_knowledge", { query: "cap upstream", kind: "rationale" }, signal)).structuredContent,
+      };
+    });
+    const [shown] = why.rationales as WhyReason[];
+    const [found] = search.items as Array<{ filesCovered: string[] }>;
+    assert.ok(shown !== undefined && found !== undefined, `${exposure}: both tools must find the reason`);
+    assert.deepEqual(shown.files, ["src/a.ts", "src/b.ts"], `${exposure}: files`);
+    assert.deepEqual(shown.files, found.filesCovered, `${exposure}: parity with search_knowledge`);
+    assert.doesNotMatch(JSON.stringify(why.rationales), /redacted/u, `${exposure}: a relative name must not be redacted`);
+  }
+});
+
+test("why_file does not let a returned reason hide an incomplete memory scan", async () => {
+  const reason = statedReason("kept", Date.now() - 1_000, "kept despite a damaged neighbour line", ["src/a.ts"]);
+
+  const content = await whyFromDurable([JSON.stringify(reason), "{ this line is not a record"], { path: "src/a.ts" });
+
+  assert.equal((content.rationales as WhyReason[]).length, 1);
+  assert.equal(content.memoryCoverageIncomplete, true);
+  assert.ok((content.memoryCoverage as { skipped: number }).skipped >= 1);
+  // No triple names the file, so the evidence disclosure must stay exactly as it was.
+  assert.equal(content.coverageIncomplete, true);
+  assert.notEqual(content.coverageStatus, "complete");
+});
+
+test("why_file answers an empty rationales array when no reason names the file or the provider is not the durable reader", async () => {
+  const elsewhere = statedReason("elsewhere", Date.now() - 1_000, "this reason is about b only", ["src/b.ts"]);
+  assert.deepEqual((await whyFromDurable([JSON.stringify(elsewhere)], { path: "src/a.ts" })).rationales, []);
+
+  const custom = await knowledgeRegistry().call("why_file", { path: "src/app.css" }, new AbortController().signal);
+  assert.deepEqual(custom.structuredContent.rationales, []);
+});
+
+test("why_file flags a stated reason the projection had to clip", async () => {
+  // 16 Ki two-byte characters are a valid record, yet exceed the 16 KiB field cap once projected.
+  const long = statedReason("long", Date.now() - 1_000, "é".repeat(16 * 1024), ["src/a.ts"]);
+
+  const content = await whyFromDurable([JSON.stringify(long)], { path: "src/a.ts" });
+
+  const [reason] = content.rationales as WhyReason[];
+  assert.ok(reason !== undefined && Buffer.byteLength(reason.text, "utf8") <= MAX_FIELD_BYTES);
+  assert.equal(content.truncated, true);
 });

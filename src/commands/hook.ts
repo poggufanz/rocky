@@ -37,8 +37,10 @@ import {
   powershellHookBlockCodec,
   removeHookBlockBytes,
 } from "../core/hook-block.js";
+import { describeMemoryCoverage } from "../core/coverage.js";
 import { resolveRockyPaths } from "../core/state-paths.js";
 import {
+  boundCommand,
   drainGuardPending,
   recordHookFailure,
   resolveFixOnSuccess,
@@ -60,7 +62,7 @@ import type {
   RecoveryOutcome,
 } from "../setup/file-transaction.js";
 import { quotePosixShell } from "../core/shell-quote.js";
-import { ago, detail, detailTty, phrase, say, sayTty } from "../ui/rocky.js";
+import { ago, detail, detailTty, isVerbose, phrase, say, sayTty } from "../ui/rocky.js";
 import { safeTerminalLine } from "../ui/sanitize.js";
 
 /**
@@ -96,7 +98,10 @@ function readMemory(): MemoryRecord[] | undefined {
     const loaded = loadMemoryChecked();
     if (!isCompleteMemoryCoverage(loaded.coverage)) {
       sayTty("memory coverage incomplete. I do not claim prior fix. check, question");
-      detailTty(`memory coverage: version ${loaded.coverage.version}; scanned ${loaded.coverage.scanned}; skipped ${loaded.coverage.skipped}; truncated ${loaded.coverage.truncated}${loaded.coverage.reason === undefined ? "" : `; reason ${loaded.coverage.reason}`}`);
+      const words = describeMemoryCoverage(loaded.coverage, loaded.records.length, { counts: false });
+      detailTty(!isVerbose() && words !== undefined
+        ? words
+        : `memory coverage: version ${loaded.coverage.version}; scanned ${loaded.coverage.scanned}; skipped ${loaded.coverage.skipped}; truncated ${loaded.coverage.truncated}${loaded.coverage.reason === undefined ? "" : `; reason ${loaded.coverage.reason}`}`);
       return undefined;
     }
     return loaded.records;
@@ -148,7 +153,7 @@ export function hookFail(cmd: string, exitCode: number, cwd: string): number {
     const sameCommand = currentIdentity.reliable && fixIdentity.reliable && currentIdentity.value === fixIdentity.value;
     sayTty(`I hear this error before. ${ago(withFix.ts)}.`);
     if (sameCommand) {
-      sayTty("last time, something between fix it. what, I not hear. works again, I remember.");
+      sayTty(phrase("fix-recurrence-same"));
     } else {
       sayTty("last time, you run:");
       detailTty(safeTerminalLine(fix.cmd));
@@ -223,7 +228,11 @@ export function hookSuccess(cmd: string, cwd: string, options: ResolveFixOptions
   try {
     const result = resolveFixOnSuccess(cmd, cwd, options);
     if (result.confirmedResolved > 0) {
-      sayTty("command works now. something between fix it. what, I not hear. works again, I remember. good good good.");
+      sayTty(phrase("fix-linked"));
+      // The hook speaks one prompt late, so this line can read as being about
+      // the next command. Name the one it is about, bounded and redacted
+      // exactly as memory stores it, never the raw argument.
+      detailTty(`command: ${safeTerminalLine(boundCommand(cmd))}`);
     }
   } catch {
     // Detached bookkeeping must never become the hooked command's outcome.
@@ -649,6 +658,13 @@ function runBashHookInstall(): number {
     );
     if (published.exit !== 0) return published.exit;
     recoveryPath = published.recoveryPath;
+    // On Windows only Git Bash reads this file. On a machine where the person
+    // lives in PowerShell, the success line below would read as if every shell
+    // heard it, so a file this call really made says so. An existing file, or
+    // one made on an earlier call, is never claimed.
+    if (process.platform === "win32" && preparation.snapshot.prior.status === "missing") {
+      say(phrase("bashrc-created"));
+    }
   }
 
   const home = rockyHome();
@@ -811,12 +827,29 @@ function runBashHookStatus(): number {
  * already honoring `HOME`/`USERPROFILE` through `homedir()`, just enforced
  * after the probe instead of before it, since `$PROFILE` is only known once
  * the host has already answered.
+ *
+ * The same probe asks the host for its effective execution policy, because a
+ * profile only runs when the policy lets it: Windows PowerShell 5.1 ships
+ * `Restricted`, which refuses every script, `$PROFILE` included. Install and
+ * status say so instead of claiming working ears (`policyBlocksProfile`). The
+ * probe runs without `PSExecutionPolicyPreference`: a parent that set a
+ * Process-scope policy (`Set-ExecutionPolicy -Scope Process`, or an automation
+ * harness) hands it to every child through that variable, and
+ * `Get-ExecutionPolicy` would then report the parent's `Bypass` for a shell
+ * whose own policy refuses the profile (see `probeEnvironment`, which also
+ * drops the variable that would stop that cmdlet from loading at all).
  */
 export interface PowerShellHost {
   /** "Windows PowerShell" | "PowerShell 7" — bare, for status's per-host line. */
   label: string;
   profile: string;
   version: string;
+  /**
+   * The effective execution policy ("Restricted", "RemoteSigned", ...) exactly
+   * as the host reported it. Absent when the host did not say; Rocky makes no
+   * claim from a missing answer.
+   */
+  policy?: string;
 }
 
 /**
@@ -831,7 +864,8 @@ export interface PowerShellHost {
  * precedence over the home-containment guard documented on `PowerShellHost`
  * above: `detectPowerShellHosts` returns the override, when set, before ever
  * probing a real host or checking `profileWithinHome`, so injected test
- * profiles never need to actually live under the test process's home.
+ * profiles never need to actually live under the test process's home. An
+ * entry may also carry `policy`, standing in for the probe's third line.
  */
 function testOverridePowerShellHosts(): PowerShellHost[] | undefined {
   const raw = process.env.ROCKY_TEST_POWERSHELL_HOSTS;
@@ -850,38 +884,94 @@ function testOverridePowerShellHosts(): PowerShellHost[] | undefined {
 }
 
 /**
- * One `-NoProfile` call returns both facts a host needs: `$PROFILE` (asked,
- * never reconstructed) and the real version (`$PSVersionTable.PSVersion`,
- * never `Get-Command`'s own `Version` field — that field is a placeholder
- * `0.0.0.0` for the WindowsApps `pwsh` execution alias on this release's own
- * dev machine). `-NoProfile` matters doubly here: it keeps this probe from
- * ever loading a real, un-sandboxed profile — including one Rocky's own
- * `hook install` already manages — as a side effect of merely asking where
- * it lives.
+ * True when `policy` is one that refuses Rocky's unsigned profile block:
+ * `Restricted` runs no script at all and `AllSigned` runs only signed ones.
+ * Any other policy, and no answer at all (`undefined`), is no claim.
  */
-function probePowerShellHost(executable: string): { profile: string; version: string } | undefined {
+export function policyBlocksProfile(policy: string | undefined): boolean {
+  return policy === "Restricted" || policy === "AllSigned";
+}
+
+const POLICY_PREFERENCE_KEY = "psexecutionpolicypreference";
+const MODULE_PATH_KEY = "psmodulepath";
+
+/**
+ * `env` without `PSExecutionPolicyPreference`, matched in any letter case:
+ * Windows variable names are case-insensitive, and a plain-object copy of
+ * `process.env` is not. Returns a new object and never mutates `env`.
+ */
+export function withoutPolicyPreference(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const kept: NodeJS.ProcessEnv = {};
+  for (const [key, value] of Object.entries(env)) {
+    if (key.toLowerCase() !== POLICY_PREFERENCE_KEY) kept[key] = value;
+  }
+  return kept;
+}
+
+/**
+ * The environment a probe runs in: a fresh shell's own view of itself. Two
+ * variables make a child PowerShell answer for whichever PowerShell launched
+ * this process instead. `PSExecutionPolicyPreference` carries a Process-scope
+ * policy down (`withoutPolicyPreference`). `PSModulePath` carries the launching
+ * edition's module folders: a PowerShell 7 parent puts its own first, and
+ * Windows PowerShell 5.1 then cannot load `Microsoft.PowerShell.Security`, the
+ * module `Get-ExecutionPolicy` lives in. Each host builds its default module
+ * path itself when the variable is absent.
+ */
+function probeEnvironment(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const kept: NodeJS.ProcessEnv = {};
+  for (const [key, value] of Object.entries(withoutPolicyPreference(env))) {
+    if (key.toLowerCase() !== MODULE_PATH_KEY) kept[key] = value;
+  }
+  return kept;
+}
+
+interface HostProbe {
+  profile: string;
+  version: string;
+  policy?: string;
+}
+
+/**
+ * One `-NoProfile` call returns every fact a host needs: `$PROFILE` (asked,
+ * never reconstructed), the real version (`$PSVersionTable.PSVersion`, never
+ * `Get-Command`'s own `Version` field — that field is a placeholder `0.0.0.0`
+ * for the WindowsApps `pwsh` execution alias on this release's own dev
+ * machine) and the effective execution policy. `-NoProfile` matters doubly
+ * here: it keeps this probe from ever loading a real, un-sandboxed profile —
+ * including one Rocky's own `hook install` already manages — as a side effect
+ * of merely asking where it lives.
+ *
+ * The policy line is optional on the way back, and a missing one must never
+ * cost a host: when `Get-ExecutionPolicy` fails the exit status turns to 1
+ * although `$PROFILE` and the version already came back clean, so the exit
+ * status is not consulted. Two answers make a host whose policy Rocky makes
+ * no claim about; fewer than two make no host. A probe killed before it
+ * answered (no status at all) is not trusted either.
+ */
+function probePowerShellHost(executable: string): HostProbe | undefined {
   let result: SpawnSyncReturns<string>;
   try {
     result = spawnSync(
       executable,
-      ["-NoProfile", "-Command", "$PROFILE; $PSVersionTable.PSVersion.ToString()"],
-      { encoding: "utf8", windowsHide: true },
+      ["-NoProfile", "-Command", "$PROFILE; $PSVersionTable.PSVersion.ToString(); (Get-ExecutionPolicy).ToString()"],
+      { encoding: "utf8", windowsHide: true, env: probeEnvironment(process.env) },
     );
   } catch {
     return undefined;
   }
-  if (result.error || result.status !== 0) return undefined;
+  if (result.error || result.status === null) return undefined;
   const lines = (result.stdout ?? "").split(/\r?\n/).map((line) => line.trim()).filter((line) => line.length > 0);
   if (lines.length < 2) return undefined;
-  const [profile, version] = lines;
+  const [profile, version, policy] = lines;
   if (!profile || !version) return undefined;
-  return { profile, version };
+  return { profile, version, policy };
 }
 
 function detectWindowsPowerShellHost(): PowerShellHost | undefined {
   if (process.platform !== "win32") return undefined;
   const probe = probePowerShellHost("powershell.exe");
-  return probe && { label: "Windows PowerShell", profile: probe.profile, version: probe.version };
+  return probe && { label: "Windows PowerShell", ...probe };
 }
 
 function detectPwshHost(): PowerShellHost | undefined {
@@ -896,7 +986,7 @@ function detectPwshHost(): PowerShellHost | undefined {
   for (const candidate of candidates) {
     if (candidate !== "pwsh" && !existsSync(candidate)) continue;
     const probe = probePowerShellHost(candidate);
-    if (probe) return { label: "PowerShell 7", profile: probe.profile, version: probe.version };
+    if (probe) return { label: "PowerShell 7", ...probe };
   }
   return undefined;
 }
@@ -956,7 +1046,10 @@ export function profileWithinHome(profilePath: string, home: string): boolean {
  * stop a *sandboxed* USERPROFILE from ever reaching the real profile; a
  * config file or silent allowlist would be readable by the very sandbox the
  * guard defends against. The admission is disclosed the same one-line way as
- * the refusal, so `status` output always says which regime is in force.
+ * the refusal, so `status` output always says which regime is in force. The
+ * refusal names the variable on the same line: it is the only place a person
+ * learns the escape hatch exists, and a refusal with no way forward is a dead
+ * end. A refused host still exits clean — it is simply not a target.
  */
 export function admitHostWithinHome(host: PowerShellHost | undefined, home: string): PowerShellHost | undefined {
   if (!host) return undefined;
@@ -965,7 +1058,7 @@ export function admitHostWithinHome(host: PowerShellHost | undefined, home: stri
     detail(`${host.label} profile lives outside home. you allow it, so I touch it.`);
     return host;
   }
-  detail(`${host.label} profile lives outside home. I touch nothing there.`);
+  detail(`${host.label} profile lives outside home. I touch nothing there. to let me touch it, set ROCKY_HOOK_ALLOW_PROFILE_OUTSIDE_HOME=1.`);
   return undefined;
 }
 
@@ -980,6 +1073,11 @@ export function admitHostWithinHome(host: PowerShellHost | undefined, home: stri
 export function detectPowerShellHosts(): PowerShellHost[] {
   const override = testOverridePowerShellHosts();
   if (override !== undefined) return override;
+  // Each probe starts a real PowerShell, and a cold start takes a second or
+  // more: without a word the command looks hung. The probes stay synchronous —
+  // an async detour would save about a quarter second — so Rocky speaks once,
+  // before the first one starts. Off win32 no probe runs, so nothing is said.
+  if (process.platform === "win32") detail("I ask powershell where profile lives. wait.");
   const home = homedir();
   const hosts: PowerShellHost[] = [];
   const windows = admitHostWithinHome(detectWindowsPowerShellHost(), home);
@@ -997,6 +1095,17 @@ function powerShellTargetLabel(host: PowerShellHost): string {
 }
 
 /**
+ * What Rocky says in place of any "ears work" claim when the host's execution
+ * policy refuses to load its profile. The managed block is written either way,
+ * but a profile PowerShell will not run hears nothing. The fix named is the
+ * smallest one PowerShell offers a person without administrator rights.
+ */
+function reportBlockedPolicy(host: PowerShellHost): void {
+  say(`${host.label} blocks scripts here. my ears cannot load.`);
+  detail("fix: Set-ExecutionPolicy -Scope CurrentUser RemoteSigned");
+}
+
+/**
  * v1 is passive ears only (Ruling 4): `prompt` only sees a command after it
  * already ran, so there is no PowerShell equivalent of the Bash hook's
  * pre-execution guard confirmation, and this install path writes no
@@ -1005,6 +1114,10 @@ function powerShellTargetLabel(host: PowerShellHost): string {
  * repeated on every `hook install` — the Bash tail's warnings above describe
  * mutations this call actually makes (a changed HISTCONTROL setting, an
  * active guard); this call makes neither.
+ *
+ * A blocking execution policy changes only the words: the profile is still
+ * written and the exit code stays 0, because `hookInstall` aggregates exit
+ * codes across hosts and another host must not fail for this one's policy.
  */
 function installPowerShellHost(host: PowerShellHost): number {
   const rc = host.profile;
@@ -1041,7 +1154,11 @@ function installPowerShellHost(host: PowerShellHost): number {
     return reportRockyHomeWriteFailure(rc, label, recoveryPath, profilePublished);
   }
 
-  say(`ears installed in ${host.label}. open new shell, I hear everything there.`);
+  if (policyBlocksProfile(host.policy)) {
+    reportBlockedPolicy(host);
+  } else {
+    say(`ears installed in ${host.label}. open new shell, I hear everything there.`);
+  }
   detail(`hook: ${join(home, POWERSHELL_ASSET)}`);
   if (recoveryPath !== undefined) reportRetainedCopy(label, recoveryPath);
   say("here I only listen. I do not stop command before it runs.");
@@ -1094,7 +1211,15 @@ function statusPowerShellHost(host: PowerShellHost): number {
     detail(`${label}: ${rc}`);
     return 1;
   }
-  say(`${host.label}: installed, hook version ${version}, PowerShell ${host.version}.`);
+  // The profile holds Rocky's block, but "installed" is only true of the file.
+  // Under a blocking policy status says what install says, with the facts the
+  // ordinary line carries kept as a plain detail.
+  if (policyBlocksProfile(host.policy)) {
+    reportBlockedPolicy(host);
+    detail(`hook version ${version}, PowerShell ${host.version}.`);
+  } else {
+    say(`${host.label}: installed, hook version ${version}, PowerShell ${host.version}.`);
+  }
   const stale = hookStaleLine(version);
   if (stale) say(stale);
   // Ruling 2's disclosed trade-off, named where a user actually meets it: the
