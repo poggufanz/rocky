@@ -1,7 +1,7 @@
 {
   "name": "@poggufanz/rocky-cli",
   "version": "1.1.0",
-  "description": "A blind engineer who lives in your terminal, never forgets an error, and makes sure you still understand your own code.",
+  "description": "A local CLI that remembers failed commands and what fixed them, asks your coding agent why before it edits, and makes sure you still understand your own code.",
   "type": "module",
   "bin": {
     "rocky": "dist/index.js"

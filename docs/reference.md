@@ -12,8 +12,6 @@ He is also, unapologetically, a pet.
 
 Developers run around five search sessions a day just looking things up (Sadowski et al., FSE 2015), and debugging lookups are among the most frequent and most difficult of them (Xia et al., EMSE 2017). A lot of that time is spent *re-finding* solutions we already had once. Human memory drops them. Nothing in the toolchain catches them.
 
-Eridians have photographic memory. Rocky catches them.
-
 Code nobody understands has a measured price as well. GitClear's 2025 analysis found the share of changed lines associated with refactoring falling from 25% in 2021 to under 10% in 2024 — the first year on record in which copy/pasted lines outnumbered moved ones — and its 2026 follow-up reports duplicated blocks up 81%, constructs that mask errors up 47%, and changes touching code older than a year down 74% since 2023. Those are measurements of code, not of comprehension, and neither those reports nor this project attributes the debt to any particular group of developers.
 
 Rocky is *built to* attack that cost: fewer agent runs wasted on ambiguous direction, fewer misunderstanding loops, less debugging déjà vu. That is stated design intent for planned work, not a measured result — this project publishes no saving percentage it has not measured.
@@ -39,7 +37,7 @@ The arrow that usually breaks is *AI output → you learn from it*. Each arrow m
 | AI output → your understanding | Intent→mechanism dictionary | Shows the concrete mechanism behind your intent and the agent's change | Plan 02 implemented |
 | Your understanding → next intent | Reverse lookup (mechanism→intent) | Returns the intent you actually stored, with its change ID and time | Plan 02 implemented |
 | Your intent → AI output | Ambiguity surfacing | Shows the several mechanisms one of your own words has already produced, and lets you pick | Plan 02 implemented |
-| Your articulation → memory | The curious blind friend | One curious question turns a one-line answer into a journal entry and a dictionary entry | Plan 02 implemented |
+| Your articulation → memory | The curious question | One curious question turns a one-line answer into a journal entry and a dictionary entry | Plan 02 implemented |
 | Memory → next decision | Recall | Carries a cross-session lesson into a new decision | Plan 01 implemented/current |
 | Memory → next decision | Digest | Carries a cross-session lesson into a seven-day summary | Plan 02 implemented |
 | Memory → next decision | Memory circuit breaker | Flags repeated approaches as planned negative knowledge | Plan 02 deferred |
@@ -113,7 +111,7 @@ rocky quiz
 
 Quiz uses newest eligible triples and comprehension notes, deterministic newest-first with stable id tie-breaks. Unchanged memory repeats same candidates; Rocky asks, reveals, and never grades. Useful deterministic lines sound like `you say "move button down". it is margin-top. I think. check, question` and `last time you say "move button down", it become margin-top. maybe you mean margin-top, question`. Rocky hears remembered evidence; he does not turn a guess into a fact.
 
-The curious blind friend is Ollama-gated. After an intent append, Rocky may start one detached, non-blocking ambiguity check, and asks at most one question for that turn. It consults the intent plus remembered evidence only; it never reads project files. A question is curious, not a test. If Ollama is absent, fails, or is disabled, this advisory path disappears without blocking or changing the captured turn. Ignored questions are dropped and never repeated.
+The curious question is Ollama-gated. After an intent append, Rocky may start one detached, non-blocking ambiguity check, and asks at most one question for that turn. It consults the intent plus remembered evidence only; it never reads project files. A question is curious, not a test. If Ollama is absent, fails, or is disabled, this advisory path disappears without blocking or changing the captured turn. Ignored questions are dropped and never repeated.
 
 Export keeps ownership plain:
 
@@ -473,18 +471,18 @@ The holes in the no-egress rule are named, and there are four: `rocky check`'s c
 
 ## Roadmap
 
-Each phase is one facet of who Rocky is:
+Each phase adds one capability:
 
 - **v0.2.1 — distribution bridge (historical)**: the v0.1 memory and implemented v0.2 Bash/WSL ears, plus scoped npm distribution, read-only MCP, consent-based host setup, an optional managed voice skill, and optional loopback Ollama interpretation for recall.
-- **v0.3 — his patience (implemented)**: `rocky watch` — hand him a long build, migration, or download; he waits (he once waited 46 years), notifies you, and holds the logs if it dies.
-- **v0.4 — his diligence (implemented)**: pre-push hull check — `rocky check` verifies that AI-added packages actually exist on the registry (hallucinated-package defense), scans added lines for secrets, and asks one comprehension question about the riskiest line in the diff. Its registry lookup was Rocky's first external egress; the GUI's models.dev catalogue fetch, the optional BYOK proxy, and the opt-in Jev ranking call came later, and all four are named under Usage. Network errors fail open and never hold a push.
-- **v0.5 — his curiosity (implemented)**: Plan 01 Nervous System agent hooks and Plan 02 dictionary/teaching surfaces ship in v0.5.0. They preserve prompt/path/excerpt/stated-rationale evidence in local memory, use deterministic fallback when Ollama is unavailable, keep rationale explicitly quoted and untrusted, and add `what`, `how`, `why`, `digest`, `quiz`, `export`, passive labels, ambiguity advice, and three bounded MCP knowledge tools. The earlier `rocky explain` concept is superseded, not an active command.
-- **v0.6 — his accountability (implemented)**: `rocky brief` (loopback-AI-polished summary of what changed since your last check-in: commits, remembered failures/fixes, and touched invariant guards), `rocky journal`, `rocky invariants`, extended `rocky stats`, and the [schema envelope](schema.md) documentation. `brief` shipped in v0.6, no longer deferred; BYOK annotation, `attest`, and the memory circuit breaker remain deferred.
-- **v0.7 — his memory of why (implemented)**: a fourth evidence kind, `rationale`, captured across four lanes (`log-thinking`, `log-response`, `notify`, `human`); a deterministic concept lexicon (`rocky concepts`/`concept`/`concept alias`); derived `rocky sessions` and `rocky repl`; PreToolUse rationale gate (`rocky hook gate-event`); and native git diff correlation. Codex and Gemini agent-log adapters remain deferred — see the [rationale capture section](#rationale-capture-and-the-gate-v070) above.
-- **v0.8 — his comprehension guardian (implemented)**: local browser GUI (`rocky dash`) replacing the terminal dashboard, teach mode (`rocky teach` / `teach_lookup` / `explain` records), and selection-anchored why-cards.
-- **v1.0 — his listening (implemented)**: consent-gated Listening over Git-tracked files with five metadata-only MCP tools, explicit `rocky setup --harness` targets with MCP adapters for Claude Code, Codex CLI, OpenCode, Gemini CLI, and Copilot CLI, a chat-first Main tab, and advisory prompt-clarity, decomposition, and failure-cycle checks.
-- **v1.1 — his honesty (current release)**: output that says what Rocky heard and what he did not: `rocky check` always states its result and scope, partial memory reads are named, default output drops internal ids (`ROCKY_VERBOSE=1` brings them back), secrets stay out of stored commands and excerpts, and `rocky why --add --files` closes the rationale loop.
-- **later — his care**: ambient pet mode and the desktop pet window (deferred). He notices you've been at it for four hours, and he has opinions about your sleep.
+- **v0.3 — patience (implemented)**: `rocky watch` — hand him a long build, migration, or download; he waits (he once waited 46 years), notifies you, and holds the logs if it dies.
+- **v0.4 — diligence (implemented)**: pre-push hull check — `rocky check` verifies that AI-added packages actually exist on the registry (hallucinated-package defense), scans added lines for secrets, and asks one comprehension question about the riskiest line in the diff. Its registry lookup was Rocky's first external egress; the GUI's models.dev catalogue fetch, the optional BYOK proxy, and the opt-in Jev ranking call came later, and all four are named under Usage. Network errors fail open and never hold a push.
+- **v0.5 — curiosity (implemented)**: Plan 01 Nervous System agent hooks and Plan 02 dictionary/teaching surfaces ship in v0.5.0. They preserve prompt/path/excerpt/stated-rationale evidence in local memory, use deterministic fallback when Ollama is unavailable, keep rationale explicitly quoted and untrusted, and add `what`, `how`, `why`, `digest`, `quiz`, `export`, passive labels, ambiguity advice, and three bounded MCP knowledge tools. The earlier `rocky explain` concept is superseded, not an active command.
+- **v0.6 — accountability (implemented)**: `rocky brief` (loopback-AI-polished summary of what changed since your last check-in: commits, remembered failures/fixes, and touched invariant guards), `rocky journal`, `rocky invariants`, extended `rocky stats`, and the [schema envelope](schema.md) documentation. `brief` shipped in v0.6, no longer deferred; BYOK annotation, `attest`, and the memory circuit breaker remain deferred.
+- **v0.7 — memory of why (implemented)**: a fourth evidence kind, `rationale`, captured across four lanes (`log-thinking`, `log-response`, `notify`, `human`); a deterministic concept lexicon (`rocky concepts`/`concept`/`concept alias`); derived `rocky sessions` and `rocky repl`; PreToolUse rationale gate (`rocky hook gate-event`); and native git diff correlation. Codex and Gemini agent-log adapters remain deferred — see the [rationale capture section](#rationale-capture-and-the-gate-v070) above.
+- **v0.8 — comprehension guardian (implemented)**: local browser GUI (`rocky dash`) replacing the terminal dashboard, teach mode (`rocky teach` / `teach_lookup` / `explain` records), and selection-anchored why-cards.
+- **v1.0 — listening (implemented)**: consent-gated Listening over Git-tracked files with five metadata-only MCP tools, explicit `rocky setup --harness` targets with MCP adapters for Claude Code, Codex CLI, OpenCode, Gemini CLI, and Copilot CLI, a chat-first Main tab, and advisory prompt-clarity, decomposition, and failure-cycle checks.
+- **v1.1 — honesty (current release)**: output that says what Rocky heard and what it did not: `rocky check` always states its result and scope, partial memory reads are named, default output drops internal ids (`ROCKY_VERBOSE=1` brings them back), secrets stay out of stored commands and excerpts, and `rocky why --add --files` closes the rationale loop.
+- **later — care**: ambient pet mode and the desktop pet window (deferred). He notices you've been at it for four hours, and he has opinions about your sleep.
 
 The package version is v1.1.0; the Nervous System, rationale-capture, teach mode, local GUI, and MCP sections above describe the surfaces it ships.
 

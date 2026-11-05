@@ -8,7 +8,7 @@
 
 [Release v1.1.0](https://github.com/poggufanz/rocky/releases/tag/v1.1.0) | [Changelog](CHANGELOG.md) | [License](LICENSE) | [Security](https://github.com/poggufanz/rocky/blob/main/SECURITY.md) | [Contributing](https://github.com/poggufanz/rocky/blob/main/CONTRIBUTING.md)
 
-Your AI writes code. Rocky makes sure you still understand what you own. He is a blind engineer who lives in your terminal, and he remembers failed commands and what fixed them, then brings that history back when the same trouble returns — to you, and through MCP to the AI agent working beside you, so it stops retrying what already failed on this machine. Supported agent hooks can also keep a bounded record of what you asked for, which files changed, and why the agent said it changed them. He is a witness, not a judge: he never diagnoses a failure or proposes a fix he does not remember, and [docs/character.md](docs/character.md) holds the rules that boundary comes from.
+Your AI writes code. Rocky makes sure you still understand what you own. It is a local CLI that remembers failed commands and what fixed them, then brings that history back when the same trouble returns — to you, and through MCP to the AI agent working beside you, so it stops retrying what already failed on this machine. Supported agent hooks can also keep a bounded record of what you asked for, which files changed, and why the agent said it changed them. Rocky is a witness, not a judge: it never diagnoses a failure or proposes a fix it does not remember, and [docs/character.md](docs/character.md) holds the rules that boundary comes from.
 
 The useful part is local and deterministic. Rocky has no daemon, no telemetry, and zero runtime dependencies. Optional AI uses an Ollama instance that you run on loopback.
 
@@ -18,7 +18,7 @@ The useful part is local and deterministic. Rocky has no daemon, no telemetry, a
 
 | | |
 | --- | --- |
-| **Failure memory** a failed build becomes a fingerprint; when the same error returns, Rocky says he has heard it before and that it went green again after — never a fix he did not hear. Evidence, not a guess. | ![Rocky remembers a failed build and its fix](https://raw.githubusercontent.com/poggufanz/rocky/main/assets/demo-loop.gif) |
+| **Failure memory** a failed build becomes a fingerprint; when the same error returns, Rocky says it has heard it before and that it went green again after — never a fix he did not hear. Evidence, not a guess. | ![Rocky remembers a failed build and its fix](https://raw.githubusercontent.com/poggufanz/rocky/main/assets/demo-loop.gif) |
 | **`rocky dash`** opens a local page in your browser: every remembered change to one file, side by side, the agent's stated reason next to the diff that landed. | ![rocky dash compare view](https://raw.githubusercontent.com/poggufanz/rocky/main/assets/demo-dash.gif) |
 | **Rationale gate** an editing agent must state why before it touches a file. No stated reason, no edit; deny-once, fail-open. | ![PreToolUse rationale gate denying an unexplained edit](https://raw.githubusercontent.com/poggufanz/rocky/main/assets/demo-gate.gif) |
 
@@ -168,14 +168,14 @@ Read the [contributing guide](https://github.com/poggufanz/rocky/blob/main/CONTR
 ## Roadmap
 
 - **v0.2.1 - distribution bridge (historical)**: scoped npm package, Bash/WSL hook, read-only MCP, host setup, and optional local AI.
-- **v0.3 - his patience (implemented)**: `rocky watch` for long-running work.
-- **v0.4 - his diligence (implemented)**: `rocky check` before a push.
-- **v0.5 - his curiosity (implemented)**: Nervous System hooks, intent-mechanism dictionary, teaching commands, and bounded MCP knowledge tools.
-- **v0.6 - his accountability (implemented)**: `rocky brief`, `rocky journal`, `rocky invariants`, extended `rocky stats`, and the schema envelope documentation.
-- **v0.7 - his memory of why (implemented)**: stated-rationale evidence across four lanes, a concept lexicon (`rocky concepts`), derived `rocky sessions` and `rocky repl`, and the PreToolUse rationale gate.
-- **v0.8 - his comprehension guardian (implemented)**: local browser GUI (`rocky dash`), teach mode (`rocky teach` / `teach_lookup` / `explain` records), and native git diff correlation.
-- **v1.0 - his listening (implemented)**: consent-gated Listening across Git-tracked files, explicit `rocky setup --harness` targets with MCP adapters for five harnesses, thirteen read-only MCP tools, a chat-first Main tab, and advisory prompt-clarity, decomposition, and failure-cycle checks.
-- **v1.1 - his honesty (current release)**: output that says what Rocky heard and what he did not: `rocky check` always states its result and scope, partial memory reads are named, default output drops internal ids, secrets stay out of stored commands and excerpts, and `rocky why --add --files` closes the rationale loop.
+- **v0.3 - patience (implemented)**: `rocky watch` for long-running work.
+- **v0.4 - diligence (implemented)**: `rocky check` before a push.
+- **v0.5 - curiosity (implemented)**: Nervous System hooks, intent-mechanism dictionary, teaching commands, and bounded MCP knowledge tools.
+- **v0.6 - accountability (implemented)**: `rocky brief`, `rocky journal`, `rocky invariants`, extended `rocky stats`, and the schema envelope documentation.
+- **v0.7 - memory of why (implemented)**: stated-rationale evidence across four lanes, a concept lexicon (`rocky concepts`), derived `rocky sessions` and `rocky repl`, and the PreToolUse rationale gate.
+- **v0.8 - comprehension guardian (implemented)**: local browser GUI (`rocky dash`), teach mode (`rocky teach` / `teach_lookup` / `explain` records), and native git diff correlation.
+- **v1.0 - listening (implemented)**: consent-gated Listening across Git-tracked files, explicit `rocky setup --harness` targets with MCP adapters for five harnesses, thirteen read-only MCP tools, a chat-first Main tab, and advisory prompt-clarity, decomposition, and failure-cycle checks.
+- **v1.1 - honesty (current release)**: output that says what Rocky heard and what it did not: `rocky check` always states its result and scope, partial memory reads are named, default output drops internal ids, secrets stay out of stored commands and excerpts, and `rocky why --add --files` closes the rationale loop.
 
 BYOK annotation and `attest` remain deferred. The memory circuit breaker ships as an advisory, not an enforcer: a failure-cycle gate note plus `rocky stats --cycles`, fail-open, never blocking. Codex and Gemini agent-log adapters are deferred too — Codex's local session format drifted to a SQLite hybrid, and Gemini persists no thoughts to read. The earlier `rocky explain` idea is superseded; teach mode uses `rocky teach` and `explain` records.
 

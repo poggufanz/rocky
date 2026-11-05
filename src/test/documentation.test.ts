@@ -354,7 +354,7 @@ test("README identity, roadmap, and Plan 01/Plan 02 v0.5 boundary stay aligned",
     "intent→mechanism dictionary",
     "reverse lookup",
     "ambiguity surfacing",
-    "curious blind friend",
+    "curious question",
     "digest",
   ]) {
     const row = reference.split("\n").find((line) => line.trimStart().startsWith("|") && line.toLowerCase().includes(mechanism));
