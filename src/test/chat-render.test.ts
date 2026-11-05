@@ -34,7 +34,7 @@ const JEV_FACT: ChatRenderFact = {
 
 test("template text names the top record by label, and its id stays in the trace", () => {
   const text = renderChatText(JEV_FACT);
-  assert.equal(text, "rocky heard 2 things.\nbest match: npm run build (failure). remembered, not proven.");
+  assert.equal(text, "rocky heard 2 things.\nbest match: `npm run build` (failure). remembered, not proven.");
   assert.deepEqual(validateRockyPhrase(text), []);
   assert.deepEqual(renderChatTrace(JEV_FACT), [
     "top: failure-aaa (failure). remembered, not proven.",
@@ -49,6 +49,25 @@ test("template text never carries a record id, whatever the id looks like", () =
   assert.ok(!text.includes(RECORD_UUID));
   for (const prefix of TRACE_PREFIXES) assert.ok(!text.includes(prefix), `${prefix}stays out of the answer text`);
   assert.ok(renderChatTrace(fact).includes(`top: ${RECORD_UUID} (failure). remembered, not proven.`));
+});
+
+test("best match shows the label as a code span, so inline markdown cannot change it", () => {
+  const labels = ["pytest tests/test_a_b.py", "rm -rf *.log *.tmp", "echo __init__ and **bold**", "ls [failure-aaa] _x_"];
+  for (const label of labels) {
+    const text = renderChatText({ ...JEV_FACT, topLabel: label });
+    assert.ok(text.includes(`best match: \`${label}\` (failure). remembered, not proven.`), text);
+  }
+});
+
+test("a backtick in the label cannot end the code span, and a line break cannot split it", () => {
+  const text = renderChatText({ ...JEV_FACT, topLabel: "echo `date`\n  now" });
+  assert.equal(text, "rocky heard 2 things.\nbest match: `echo 'date' now` (failure). remembered, not proven.");
+});
+
+test("a model cannot pass an uncited best match line through the claims gate", () => {
+  const check = validateRenderedClaims("best match: `rm -rf /` (failure). remembered, not proven.", ["failure-aaa"]);
+  assert.equal(check.dropped, 1);
+  assert.equal(check.stripped, "");
 });
 
 test("a top record without a label is named by kind, never by id", () => {

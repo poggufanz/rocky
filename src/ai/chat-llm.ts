@@ -324,12 +324,16 @@ function rendererLine(status: string, modelId: string): string {
   return `renderer: ${status} (${label}).`;
 }
 
+const TRACE_ONLY_LINE = /^(?:renderer|decision|detail|memory coverage incomplete):/u;
+
 /**
- * A model may echo a renderer line of its own. The served trace names the real
- * one, so an echoed line is dropped from the answer text, never kept beside it.
+ * The renderer, decision, detail and coverage lines are trace: the code writes
+ * them, and the served trace carries the real ones. A model may echo or forge
+ * one, so such a line is dropped from its answer text, never kept beside the
+ * real one.
  */
-function withoutRendererLines(text: string): string {
-  return text.split("\n").filter((line) => !line.trim().startsWith("renderer:")).join("\n");
+function withoutTraceLines(text: string): string {
+  return text.split("\n").filter((line) => !TRACE_ONLY_LINE.test(line.trim())).join("\n");
 }
 
 async function byokFetchText(args: {
@@ -543,7 +547,7 @@ export async function runChatRenderer(
       });
     }
     const check = validateRenderedClaims(rawText, allowWithIds);
-    const modelText = withoutRendererLines(check.stripped);
+    const modelText = withoutTraceLines(check.stripped);
     if (modelText.trim().length === 0) return deterministic("template", "", check.dropped);
     return { status: "used", text: modelText, trace: traceFor("used", selection.modelId), stripped: check.dropped };
   } catch (error) {

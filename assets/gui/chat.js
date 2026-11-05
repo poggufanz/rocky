@@ -470,6 +470,18 @@ function step(title, ...rows) {
   return li;
 }
 
+/**
+ * Why a search came back with no record, in the drawer's words. Only an
+ * "unavailable" memory answer was held; a read with lines Rocky could not use
+ * that matched nothing was answered, and says so.
+ */
+function noEvidenceNote({ memoryOnly, covered, status }) {
+  if (!memoryOnly) return covered ? "Memory coverage incomplete; code answer may miss memory evidence." : "No matching memory evidence for this question.";
+  if (!covered) return "No whole memory record matched well enough.";
+  if (String(status ?? "").toLowerCase() === "unavailable") return "Memory coverage incomplete; answer held.";
+  return "No whole memory record matched well enough. Some memory lines could not be used.";
+}
+
 /** The route Rocky took, step by step. Evidence itself lives in Sources. */
 function decisionDrawer(turn) {
   const body = turn.body ?? {};
@@ -494,10 +506,7 @@ function decisionDrawer(turn) {
   const heard = memoryOnly ? `${cards.length} whole record${cards.length === 1 ? "" : "s"} accepted` : `${cards.length} evidence card${cards.length === 1 ? "" : "s"}`;
   const searched = step("Searched memory", stepRow("Found", heard));
   if (cards.length === 0) {
-    const why = coverageReason
-      ? (memoryOnly ? "Memory coverage incomplete; answer held." : "Memory coverage incomplete; code answer may miss memory evidence.")
-      : (memoryOnly ? "No whole memory record matched well enough." : "No matching memory evidence for this question.");
-    searched.append(el("p", "cx-step-note", why));
+    searched.append(el("p", "cx-step-note", noEvidenceNote({ memoryOnly, covered: coverageReason !== "", status: t.status })));
   } else {
     const refs = el("p", "cx-step-refs");
     for (const card of cards.slice(0, 6)) refs.append(el("span", "cx-ref", String(card?.ref ?? card?.kind ?? "record")));

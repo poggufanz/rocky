@@ -73,6 +73,17 @@ function hasTopRecord(fact: ChatRenderFact, count: number): fact is ChatRenderFa
 }
 
 /**
+ * The page reads answer lines as small Markdown, and that parser has no
+ * escapes: a bare `test_a_b.py` or `*.log *.tmp` would turn into italics, and
+ * Rocky would show a command other than the one he heard. A code span shows
+ * the label as it is. A backtick inside it would end the span, so it becomes an
+ * apostrophe, and a line break would split the span, so whitespace collapses.
+ */
+function labelSpan(label: string): string {
+  return `\`${label.replace(/\s+/gu, " ").replace(/`/gu, "'")}\``;
+}
+
+/**
  * The top record as the answer says it: the label Rocky heard, then its kind.
  * The id is not here; it is the first trace line. A record that says nothing
  * else is labelled by its kind, and a label that only repeats the kind names
@@ -81,7 +92,7 @@ function hasTopRecord(fact: ChatRenderFact, count: number): fact is ChatRenderFa
 function bestMatchLine(fact: ChatRenderFact): string | undefined {
   const label = fact.topLabel?.trim() ?? "";
   const kind = fact.topKind?.trim() ?? "";
-  if (label.length > 0 && label !== kind) return `best match: ${label}${kind.length > 0 ? ` (${kind})` : ""}. remembered, not proven.`;
+  if (label.length > 0 && label !== kind) return `best match: ${labelSpan(label)}${kind.length > 0 ? ` (${kind})` : ""}. remembered, not proven.`;
   if (kind.length > 0) return `best match: ${kind} record. remembered, not proven.`;
   return undefined;
 }

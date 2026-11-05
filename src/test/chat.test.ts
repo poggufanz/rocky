@@ -185,7 +185,7 @@ test("chat text names the top record by what Rocky heard and keeps its id in the
     assert.ok(wire !== null);
     assert.doesNotMatch(wire.text, UUID_SHAPE);
     for (const prefix of TRACE_PREFIXES) assert.ok(!wire.text.includes(prefix), `${prefix}stays out of the answer text`);
-    assert.ok(wire.text.includes("best match: npm run build (failure). remembered, not proven."), wire.text);
+    assert.ok(wire.text.includes("best match: `npm run build` (failure). remembered, not proven."), wire.text);
     assert.deepEqual(validateRockyPhrase(wire.text), []);
     assert.ok(wire.trace.includes(`top: ${RECORD_UUID} (failure). remembered, not proven.`), wire.trace.join("\n"));
     assert.ok(wire.trace.some((line) => line.startsWith("decision: heuristic used")));
@@ -193,6 +193,19 @@ test("chat text names the top record by what Rocky heard and keeps its id in the
     assert.equal(wire.coverage, undefined, "a whole read sets no coverage flag");
     assert.ok(!wire.trace.some((line) => line.startsWith("memory coverage incomplete:")));
   });
+});
+
+test("chat text shows a command with underscores and asterisks as Rocky heard it", async () => {
+  for (const cmd of ["pytest tests/test_a_b.py", "rm -rf *.log *.tmp"]) {
+    const { home, root } = hermetic();
+    seedMemory(home, [failureRecord("persisted-failure-one-9d3f", cmd)]);
+    await withGui(root, async (handle) => {
+      const answer = await post(handle, { message: `memory: ${cmd}` });
+      assert.equal(answer.status, 200, cmd);
+      assert.equal(answer.wire?.decisionTrace.status, "used", cmd);
+      assert.ok(answer.wire?.text.includes(`best match: \`${cmd}\` (failure).`), answer.wire?.text);
+    });
+  }
 });
 
 test("chat answers over a read with a line Rocky cannot use, and says so in words", async () => {
@@ -211,7 +224,7 @@ test("chat answers over a read with a line Rocky cannot use, and says so in word
       // Answered: one unusable line does not hold back the records Rocky can use.
       assert.equal(wire.decisionTrace.status, "used", message);
       assert.deepEqual(wire.evidenceCards.map((card) => card.ref), ["persisted-failure-one-9d3f"], message);
-      assert.ok(wire.text.includes("best match: npm run build (failure)."), wire.text);
+      assert.ok(wire.text.includes("best match: `npm run build` (failure)."), wire.text);
       // Disclosed: the flag is set, in plain words, and the trace carries the same line.
       assert.equal(wire.coverage?.reason, line, message);
       assert.ok(wire.trace.includes(line), wire.trace.join("\n"));
