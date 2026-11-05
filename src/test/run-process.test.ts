@@ -304,7 +304,8 @@ test("run speech admits a stderr-matched fix may be a different command, not the
 test("unrelated successful npm task is not suggested as confirmed fix", (t) => {
   const home = mkdtempSync(join(tmpdir(), "rocky-causal-fix-"));
   t.after(() => rmSync(home, { recursive: true, force: true }));
-  const env = { ...process.env, ROCKY_HOME: home };
+  // npm's update notice goes to stderr, which this test inspects line by line.
+  const env = { ...process.env, ROCKY_HOME: home, NPM_CONFIG_UPDATE_NOTIFIER: "false" };
   const project = join(home, "synthetic-project");
   mkdirSync(project);
   writeFileSync(join(project, "package.json"), JSON.stringify({

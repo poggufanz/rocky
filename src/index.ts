@@ -12,29 +12,10 @@
  *   rocky --version
  */
 
-import { run } from "./commands/run.js";
-import { briefCommand } from "./commands/brief.js";
-import { watch } from "./commands/watch.js";
-import { recall } from "./commands/recall.js";
-import { model } from "./commands/model.js";
-import { dashCommand } from "./commands/dash.js";
-import { guiCommand, guiWanted } from "./commands/gui.js";
-import { stats } from "./commands/stats.js";
-import { hookFail, hookInstall, hookStatus, hookSuccess, hookUninstall } from "./commands/hook.js";
-import { mcp } from "./commands/mcp.js";
-import { setup } from "./commands/setup.js";
-import { check } from "./commands/check.js";
-import { digest, exportCommand, how, quiz, what, why } from "./commands/dictionary.js";
-import { teach } from "./commands/teach.js";
-import { conceptsCommand } from "./commands/concepts.js";
-import { agentEvent } from "./commands/agent-hook.js";
-import { gateEvent } from "./agent/gate.js";
-import { journalCommand } from "./commands/journal.js";
-import { invariantsCommand } from "./commands/invariants.js";
-import { sessionsCommand } from "./commands/sessions.js";
-import { replCommand } from "./commands/repl.js";
-import { annotateCommand } from "./agent/annotate.js";
-import { ambiguityCommand } from "./agent/ambiguity.js";
+// Only these load at startup. Every command module loads on dispatch, through
+// `await import()` inside its `case`, so `rocky --version`, each shell-hook
+// spawn and each agent-hook call do not parse the whole command graph first.
+// cli-startup-boundary.test.ts walks the static import closure and keeps it so.
 import { CliUsageError, parseExactCommand, reportCliUsage } from "./commands/cli-args.js";
 import { PACKAGE_NAME, PACKAGE_VERSION } from "./core/package-info.js";
 import { detail, face, flushHookSpeech, say } from "./ui/rocky.js";
@@ -384,7 +365,14 @@ async function runListenEvent(harnessId: string, surface: string): Promise<numbe
 /** `rocky hook gate-event <vendor>`: read stdin, decide, print, always exit 0. */
 async function runGateEvent(vendor: string): Promise<number> {
   const stdin = await readGateEventStdin();
-  const { stdout } = gateEvent(vendor, stdin);
+  let stdout = "{}"; // the hook's allow decision
+  try {
+    const { gateEvent } = await import("./agent/gate.js");
+    stdout = gateEvent(vendor, stdin).stdout;
+  } catch {
+    // `gateEvent` never throws, but the module can fail to load. The gate must
+    // never block work by breaking, so a load failure allows.
+  }
   try {
     process.stdout.write(stdout);
   } catch {
@@ -400,6 +388,7 @@ async function main(): Promise<number> {
     // A browser needs a human at the keyboard, so a pipe falls through to help,
     // except under --no-open: that serves the page and prints the URL, so no
     // terminal is needed.
+    const { guiWanted, guiCommand } = await import("./commands/gui.js");
     if (guiWanted(flags, process.stdout.isTTY === true, process.stdin.isTTY === true)) {
       return guiCommand(flags, "main");
     }
@@ -411,62 +400,65 @@ async function main(): Promise<number> {
   }
   try {
     switch (command) {
-      case "run":
-        return run(parseExactCommand(rest, "rocky run <command>"));
+      case "run": {
+        const cmd = parseExactCommand(rest, "rocky run <command>");
+        return (await import("./commands/run.js")).run(cmd);
+      }
       case "dash":
-        return dashCommand(rest);
+        return (await import("./commands/dash.js")).dashCommand(rest);
       case "brief":
-        return briefCommand(rest);
+        return (await import("./commands/brief.js")).briefCommand(rest);
       case "watch":
-        return watch(rest);
+        return (await import("./commands/watch.js")).watch(rest);
       case "recall":
-        return recall(rest);
+        return (await import("./commands/recall.js")).recall(rest);
       case "model":
-        return model(rest);
+        return (await import("./commands/model.js")).model(rest);
       case "stats":
-        return stats(rest);
+        return (await import("./commands/stats.js")).stats(rest);
       case "journal":
-        return journalCommand(rest);
+        return (await import("./commands/journal.js")).journalCommand(rest);
       case "invariants":
-        return invariantsCommand(rest);
+        return (await import("./commands/invariants.js")).invariantsCommand(rest);
       case "sessions":
-        return sessionsCommand(rest);
+        return (await import("./commands/sessions.js")).sessionsCommand(rest);
       case "repl":
-        return replCommand(rest);
+        return (await import("./commands/repl.js")).replCommand(rest);
       case "mcp":
-        return mcp(rest);
+        return (await import("./commands/mcp.js")).mcp(rest);
       case "setup":
-        return setup(rest);
+        return (await import("./commands/setup.js")).setup(rest);
       case "check":
-        return check(rest);
+        return (await import("./commands/check.js")).check(rest);
       case "what":
-        return what(rest);
+        return (await import("./commands/dictionary.js")).what(rest);
       case "how":
-        return how(rest);
+        return (await import("./commands/dictionary.js")).how(rest);
       case "why":
-        return why(rest);
+        return (await import("./commands/dictionary.js")).why(rest);
       case "teach":
-        return teach(rest);
+        return (await import("./commands/teach.js")).teach(rest);
       case "digest":
-        return digest(rest);
+        return (await import("./commands/dictionary.js")).digest(rest);
       case "quiz":
-        return quiz(rest);
+        return (await import("./commands/dictionary.js")).quiz(rest);
       case "export":
-        return exportCommand(rest);
+        return (await import("./commands/dictionary.js")).exportCommand(rest);
       case "concepts":
       case "concept":
-        return conceptsCommand(rest);
+        return (await import("./commands/concepts.js")).conceptsCommand(rest);
       case "hook": {
         const parsed = parseHookArgs(rest);
         switch (rest[0]) {
           case "install":
-            return hookInstall();
+            return (await import("./commands/hook.js")).hookInstall();
           case "uninstall":
-            return hookUninstall();
+            return (await import("./commands/hook.js")).hookUninstall();
           case "status":
-            return hookStatus();
+            return (await import("./commands/hook.js")).hookStatus();
           case "agent-event":
             if (parsed.kind === "agent-event") {
+              const { agentEvent } = await import("./commands/agent-hook.js");
               return agentEvent(parsed.adapter, {
                 ...(parsed.argvPayload === undefined ? {} : { argvPayload: parsed.argvPayload }),
                 ...(parsed.rationale === undefined ? {} : { rationale: parsed.rationale }),
@@ -496,20 +488,22 @@ async function main(): Promise<number> {
         // acceptable, a message that never gets published because a return
         // site was missed is not.
         try {
+          const { hookFail } = await import("./commands/hook.js");
           return hookFail(rest[0] ?? "", Number(rest[1] ?? 1), rest[2] ?? process.cwd());
         } finally {
           flushHookSpeech();
         }
       case "_hooksuccess":
         try {
+          const { hookSuccess } = await import("./commands/hook.js");
           return hookSuccess(rest[0] ?? "", rest[1] ?? process.cwd());
         } finally {
           flushHookSpeech();
         }
       case "_annotate":
-        return annotateCommand(rest[0] ?? "");
+        return (await import("./agent/annotate.js")).annotateCommand(rest[0] ?? "");
       case "_ambiguity":
-        return ambiguityCommand(rest[0] ?? "");
+        return (await import("./agent/ambiguity.js")).ambiguityCommand(rest[0] ?? "");
       case "--version":
         if (rest.length !== 0) throw new CliUsageError(`unexpected argument: ${rest[0]}`, "rocky --version");
         console.log(PACKAGE_VERSION);
