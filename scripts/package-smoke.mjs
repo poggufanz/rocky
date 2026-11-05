@@ -24,6 +24,7 @@ import {
   nodeOptionsRequire,
   shouldRunInstalledSetup,
 } from "./package-smoke-support.mjs";
+import { packManifestEntries } from "./release-check.mjs";
 
 const PACKAGE_NAME = "@poggufanz/rocky-cli";
 const PACKAGE_BINARY = "rocky";
@@ -110,10 +111,9 @@ function assertStatus(result, expectedStatus, label) {
 }
 
 function parseSinglePackResult(stdout) {
-  const parsed = JSON.parse(stdout);
-  assert.ok(Array.isArray(parsed), "npm pack JSON must be an array");
-  assert.equal(parsed.length, 1, "npm pack must produce exactly one package");
-  return parsed[0];
+  const entries = packManifestEntries(JSON.parse(stdout));
+  assert.equal(entries.length, 1, "npm pack must produce exactly one package");
+  return entries[0];
 }
 
 function allowedPackPath(path) {

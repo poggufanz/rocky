@@ -780,10 +780,17 @@ export function isForbiddenModelPayload(path) {
   return !MODEL_CODE_EXCEPTIONS.has(normalized) && /model|weight/i.test(normalized);
 }
 
+// npm 11 and older print the dry-run manifest as [entry]; npm 12 prints
+// { "<package name>": entry }. Anything else holds no entry.
+export function packManifestEntries(parsed) {
+  if (Array.isArray(parsed)) return parsed;
+  return parsed !== null && typeof parsed === "object" ? Object.values(parsed) : [];
+}
+
 function parseManifest(stdout) {
-  const parsed = JSON.parse(stdout);
-  if (!Array.isArray(parsed) || parsed.length !== 1) throw new StepError("dry-run pack manifest is invalid");
-  const packed = parsed[0];
+  const entries = packManifestEntries(JSON.parse(stdout));
+  if (entries.length !== 1) throw new StepError("dry-run pack manifest is invalid");
+  const packed = entries[0];
   if (packed?.name !== PACKAGE_NAME || packed?.version !== PACKAGE_VERSION || !Array.isArray(packed.files)) {
     throw new StepError("dry-run pack identity is invalid");
   }

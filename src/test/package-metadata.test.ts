@@ -19,6 +19,9 @@ import {
 } from "../core/package-info.js";
 
 const packageRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
+const { packManifestEntries } = await import(pathToFileURL(join(packageRoot, "scripts", "release-check.mjs")).href) as {
+  packManifestEntries: (parsed: unknown) => unknown[];
+};
 const expectedFiles = [
   "dist/index.js",
   "dist/commands",
@@ -183,11 +186,19 @@ function dryRunPack(t: test.TestContext, npmCli: string): PackResult {
   const diagnostic = spawnDiagnostic(result);
   assert.equal(result.status, 0, diagnostic);
   assert.notEqual(result.stdout.trim(), "", diagnostic);
-  const parsed = JSON.parse(result.stdout) as unknown;
-  assert.ok(Array.isArray(parsed));
-  assert.equal(parsed.length, 1);
-  return parsed[0] as PackResult;
+  const entries = packManifestEntries(JSON.parse(result.stdout) as unknown);
+  assert.equal(entries.length, 1, diagnostic);
+  return entries[0] as PackResult;
 }
+
+test("pack manifest entries read npm 11 arrays and npm 12 name-keyed objects", () => {
+  const entry = { name: "@poggufanz/rocky-cli", version: "1.1.0", files: [] };
+  assert.deepEqual(packManifestEntries([entry]), [entry]);
+  assert.deepEqual(packManifestEntries({ "@poggufanz/rocky-cli": entry }), [entry]);
+  for (const garbage of [null, "text", 3, true, undefined]) {
+    assert.deepEqual(packManifestEntries(garbage), [], `${String(garbage)} holds no entry`);
+  }
+});
 
 test("package launcher diagnostics survive a missing executable and undefined stderr", () => {
   const missing = spawnSync(join(tmpdir(), "rocky-missing-npm-launcher"), [], {
