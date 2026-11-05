@@ -292,7 +292,7 @@ function descriptors(exposure: Exposure): readonly McpToolDefinition[] {
     },
     {
       name: "why_file", title: "Why file changed",
-      description: "Recent remembered reasons agents changed one file, newest first, with separate incomplete-coverage disclosure. Example: {\"path\": \"src/app.css\"}. Reasons are hearsay Rocky heard, not verified facts.",
+      description: "Remembered triples that touched one file (items, plus possible ones whose path may be omitted) and the reasons a human or agent stated for it (rationales), newest first, with separate incomplete-coverage disclosure. A relative path resolves against the server's working directory. Example: {\"path\": \"src/app.css\"}. Reasons are hearsay Rocky heard, not verified facts.",
       inputSchema: schema({
         path: { type: "string", maxLength: MAX_FIELD_BYTES },
         limit: { type: "integer", minimum: 1, maximum: 10 },

@@ -111,6 +111,10 @@ test("new tool descriptions are concrete and schemas expose their bounds", () =>
   assert.match(search.description, /Example/);
   assert.match(fetch.description, /Example/);
   assert.match(why.description, /Example/);
+  // why_file answers with triples and with stated reasons, and a relative path has one meaning.
+  assert.match(why.description, /triples/);
+  assert.match(why.description, /rationales/);
+  assert.match(why.description, /relative path resolves against the server's working directory/);
   assert.match(teach.description, /Example/);
   assert.match(teach.description, /Reasons are hearsay Rocky heard, not verified facts\./);
   assert.deepEqual(teach.inputSchema, {
@@ -1889,6 +1893,28 @@ test("why_file projects stated reasons at the exposure search_knowledge applies 
       assert.equal(shown.text, reason.excerpt);
       assert.deepEqual(shown.files, ["src/a.ts", "/home/zed/app/src/a.ts"]);
     }
+  }
+});
+
+test("why_file spells the files a reason names the way search_knowledge does: canonical, once each", async () => {
+  // `./src/a.ts` and `src/a.ts` name one file. Left raw, the first reads as an absolute path to the
+  // sanitizer and comes back as `.[redacted]`, so the two tools would disagree about the same record.
+  const reason = statedReason("spelled", Date.now() - 1_000, "keep the cap at three for the upstream", ["./src/a.ts", "src/a.ts", "src//b.ts"]);
+  for (const exposure of ["sanitized", "raw"] as const) {
+    const { why, search } = await withDurableMemory([JSON.stringify(reason)], async (memory) => {
+      const registry = createToolRegistry({ exposure, memory, recallWithAi: disabledRecallWithAi });
+      const signal = new AbortController().signal;
+      return {
+        why: (await registry.call("why_file", { path: "src/a.ts" }, signal)).structuredContent,
+        search: (await registry.call("search_knowledge", { query: "cap upstream", kind: "rationale" }, signal)).structuredContent,
+      };
+    });
+    const [shown] = why.rationales as WhyReason[];
+    const [found] = search.items as Array<{ filesCovered: string[] }>;
+    assert.ok(shown !== undefined && found !== undefined, `${exposure}: both tools must find the reason`);
+    assert.deepEqual(shown.files, ["src/a.ts", "src/b.ts"], `${exposure}: files`);
+    assert.deepEqual(shown.files, found.filesCovered, `${exposure}: parity with search_knowledge`);
+    assert.doesNotMatch(JSON.stringify(why.rationales), /redacted/u, `${exposure}: a relative name must not be redacted`);
   }
 });
 

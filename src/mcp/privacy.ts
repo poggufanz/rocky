@@ -586,13 +586,30 @@ export interface ProjectedWhyRationale {
 }
 
 /**
+ * The files a reason names, spelled the way `projectKnowledgeHits` spells
+ * `filesCovered`: canonical, and once each. `./src/a.ts` and `src/a.ts` are one
+ * file, and left raw the first reads as an absolute path to the sanitizer and
+ * comes back as `.[redacted]`. A stored reason carries no origin to fold case by,
+ * so the platform stays "unknown", as it does there.
+ */
+function canonicalNamedFiles(values: readonly string[]): string[] {
+  const unique = new Set<string>();
+  for (const value of values) {
+    const path = canonicalPath(value, { platform: "unknown" });
+    if (path) unique.add(path);
+  }
+  return [...unique];
+}
+
+/**
  * Reasons a human (`why --add --files`) or the notify lane (`agent-event --files`)
  * stated for one file, projected the way `search_knowledge` projects rationale
- * records: the text through `projectText`, the named files through
- * `projectStringArray`. Sanitized exposure redacts and raw exposure shows no more
- * than that tool already does. `truncated` says a field was clipped, so a cut-short
- * reason never passes for a whole one. Agent-log reasons never get this far: only a
- * speaker who named files scopes a reason to them.
+ * records: the text through `projectText`, the named files canonicalized and
+ * de-duplicated and then through `projectStringArray`. Sanitized exposure redacts
+ * and raw exposure shows no more than that tool already does. `truncated` says a
+ * field was clipped, so a cut-short reason never passes for a whole one.
+ * Agent-log reasons never get this far: only a speaker who named files scopes a
+ * reason to them.
  */
 export function projectWhyRationales(
   records: readonly RationaleRecord[],
@@ -608,7 +625,7 @@ export function projectWhyRationales(
       agent: record.agent,
       ts: record.ts,
       text: projectText(record.excerpt, exposure, `${at}.text`, truncation),
-      files: projectStringArray(record.files ?? [], exposure, `${at}.files`, truncation),
+      files: projectStringArray(canonicalNamedFiles(record.files ?? []), exposure, `${at}.files`, truncation),
     });
   }
   return { rationales, truncated: truncation.fields.length > 0 };
