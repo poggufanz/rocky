@@ -861,6 +861,31 @@ test("fix storage redacts a secret-bearing command and keeps it a possible assoc
   assert.match(association.cmd, /\[redacted/u);
 });
 
+test("fix storage never confirms a quoted-token command by what redaction made of it", (t) => {
+  // Redaction rewrites both tokens to the same `[redacted github token]`, so a match made on stored text
+  // would call a token rotation a fix. Matching stays on the raw command: two different tokens are two
+  // different commands, and the success is a possible association with no raw token left in the file.
+  const home = sandbox(t, "rocky-fix-quoted-token-");
+  const tokenA = GITHUB_TOKEN;
+  const tokenB = "ghp_ZYXWVUTSRQPONMLKJIHGFEDCBA9876543210zyxw";
+  const result = withRockyHome(home, () => {
+    memory.recordFailure(`deploy "${tokenA}"`, 1, "Error: boom");
+    return memory.resolveFixOnSuccess(`deploy "${tokenB}"`, process.cwd());
+  });
+  const memoryPath = join(home, "memory.jsonl");
+  const stored = readFileSync(memoryPath, "utf8");
+
+  assert.equal(result.confirmedResolved, 0);
+  assert.equal(result.possibleAssociated, 1);
+  assert.equal(stored.includes(tokenA), false, "the failed command's token must not be stored");
+  assert.equal(stored.includes(tokenB), false, "the successful command's token must not be stored");
+  const records = memory.loadMemory(memoryPath);
+  assert.equal(records.filter((record) => record.kind === "fix").length, 0);
+  const association = records.find((record): record is AssociationRecord => record.kind === "association");
+  assert.ok(association !== undefined, "an association record must be stored");
+  assert.match(association.cmd, /\[redacted/u);
+});
+
 test("fix storage keeps a plain command confirmed and unchanged", (t) => {
   const home = sandbox(t, "rocky-fix-plain-");
   const cmd = "node check.js";

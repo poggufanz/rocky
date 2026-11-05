@@ -228,6 +228,11 @@ test("checked unified diff rejects incomplete metadata and raw blank grammar", a
     ],
     ["leading raw blank", "\ndiff --git a/file.ts b/file.ts\n"],
     [
+      // One final newline is git's terminator; a second is a raw blank line, even after a section with no hunk.
+      "doubled terminator after a section with no hunk",
+      "diff --git a/x.png b/x.png\nnew file mode 100644\nindex 0000000..2222222\nBinary files /dev/null and b/x.png differ\n\n",
+    ],
+    [
       "interior raw blank",
       [
         "diff --git a/file.ts b/file.ts",
@@ -345,10 +350,57 @@ test("checked unified diff retains additions from every exact hunk and section",
   });
 });
 
+/** Sections git prints without opening a single hunk, one `diff --git` section each. */
+const HUNKLESS_SECTIONS = [
+  [
+    "binary differ",
+    [
+      "diff --git a/x.png b/x.png",
+      "new file mode 100644",
+      "index 0000000..2222222",
+      "Binary files /dev/null and b/x.png differ",
+    ],
+  ],
+  [
+    "pure rename",
+    [
+      "diff --git a/old.txt b/z-new.txt",
+      "similarity index 100%",
+      "rename from old.txt",
+      "rename to z-new.txt",
+    ],
+  ],
+  [
+    "mode only",
+    [
+      "diff --git a/script.sh b/script.sh",
+      "old mode 100644",
+      "new mode 100755",
+    ],
+  ],
+  [
+    "new empty file",
+    [
+      "diff --git a/empty.txt b/empty.txt",
+      "new file mode 100644",
+      "index 0000000..e69de29",
+    ],
+  ],
+  [
+    "deleted empty file",
+    [
+      "diff --git a/empty.txt b/empty.txt",
+      "deleted file mode 100644",
+      "index e69de29..0000000",
+    ],
+  ],
+] as const;
+
 test("checked parser keeps earlier additions when the last section opens no hunk", async () => {
   // Git ends its output with a newline. After a section that opened a hunk the
-  // final empty frame is swallowed with the hunk body; after a binary, rename or
-  // mode-only section it used to read as a stray line and void the whole scan.
+  // final empty frame is swallowed with the hunk body; after a binary, rename,
+  // mode-only or empty-file section it used to read as a stray line and void the
+  // whole scan.
   const keyed = [
     "diff --git a/a-key.ts b/a-key.ts",
     "new file mode 100644",
@@ -358,40 +410,22 @@ test("checked parser keeps earlier additions when the last section opens no hunk
     "@@ -0,0 +1 @@",
     '+const key = "AKIAABCDEFGHIJKLMNOP";',
   ];
-  const hunklessLast = [
-    [
-      "binary differ",
-      [
-        "diff --git a/x.png b/x.png",
-        "new file mode 100644",
-        "index 0000000..2222222",
-        "Binary files /dev/null and b/x.png differ",
-      ],
-    ],
-    [
-      "pure rename",
-      [
-        "diff --git a/old.txt b/z-new.txt",
-        "similarity index 100%",
-        "rename from old.txt",
-        "rename to z-new.txt",
-      ],
-    ],
-    [
-      "mode only",
-      [
-        "diff --git a/script.sh b/script.sh",
-        "old mode 100644",
-        "new mode 100755",
-      ],
-    ],
-  ] as const;
 
-  for (const [name, section] of hunklessLast) {
+  for (const [name, section] of HUNKLESS_SECTIONS) {
     const diff = `${[...keyed, ...section].join("\n")}\n`;
     assert.deepEqual(await parseUnifiedZeroDiffChecked(diff), {
       complete: true,
       added: [{ file: "a-key.ts", line: 1, text: 'const key = "AKIAABCDEFGHIJKLMNOP";' }],
+    }, name);
+  }
+});
+
+test("checked parser answers whole, with no additions, when the only section opens no hunk", async () => {
+  // Nothing earlier to keep: the diff is complete and simply adds no line.
+  for (const [name, section] of HUNKLESS_SECTIONS) {
+    assert.deepEqual(await parseUnifiedZeroDiffChecked(`${section.join("\n")}\n`), {
+      complete: true,
+      added: [],
     }, name);
   }
 });

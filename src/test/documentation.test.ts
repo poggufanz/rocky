@@ -275,9 +275,11 @@ test("README, reference, and CLI help link a later success to the failure and ne
     ...helpViews(),
   ];
   for (const [label, surface] of surfaces) {
-    assert.doesNotMatch(surface, /links that success as the fix/i, `${label} calls a linked success the fix`);
+    // Help and prose wrap lines, so a phrase split across a newline must not slip past the match.
+    const flat = surface.replace(/\s+/g, " ");
+    assert.doesNotMatch(flat, /links that success as the fix/i, `${label} calls a linked success the fix`);
     assert.doesNotMatch(
-      surface,
+      flat,
       /what fixed it|what the fix was|tells you what (?:fixed|the fix)/i,
       `${label} claims Rocky knows what fixed a failure`,
     );
