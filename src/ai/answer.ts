@@ -57,7 +57,7 @@ import {
   resolveUnifiedOpenRouterKey,
 } from "./jev.js";
 import { buildChatStructure } from "./chat-structure.js";
-import { CHAT_RENDER_ORDER, safeRenderChatText, type ChatRenderStatus } from "./chat-render.js";
+import { CHAT_RENDER_ORDER, type ChatRenderStatus } from "./chat-render.js";
 import {
   listChatInstalledModelNames,
   resolveChatLlmSelection,

@@ -718,15 +718,13 @@ export function why(argv: string[], deps: DictionaryCommandDeps = {}): number {
           : POSSIBLE_PATH_OMITTED_WORDS, MAX_OUTPUT_LINE_BYTES));
       }
       if (readerBounded) support(someMayBeOmittedLine);
-    } else if (evidenceResult.coverageIncomplete) {
-      // The reader marks empty evidence incomplete by construction. With a whole scan, a reader
-      // that examined every record, and no record that might hide this path, nothing was
-      // omitted. Say only that no record names it, and not even that when a stated reason does.
+    } else {
+      // The reader marks empty evidence incomplete by construction, so a whole scan, a reader that
+      // examined every record, and no record that might hide this path still leave one fact: no
+      // record names the file. Say that and no more, and not even that when a stated reason does.
       if (fileRationales.length === 0) {
         speak(terminalSafe(`"${safePath}"... no record names this file. I not know if agent touch it.`, MAX_OUTPUT_LINE_BYTES));
       }
-    } else {
-      speak(terminalSafe(`"${safePath}"... nobody touch this while I listen.`, MAX_OUTPUT_LINE_BYTES));
     }
     sayFileRationales(speak, support, fileRationales);
     return 0;

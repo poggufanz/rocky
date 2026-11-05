@@ -301,9 +301,11 @@ function knowledgeFailureKey(record: FailureRecord, migration: FingerprintMigrat
 
 /**
  * Return semantic retrieval evidence for one failure. A v2 excerpt is
- * admitted unconditionally (finding 3): it was normalized/masked by the
- * current writer at record time exactly like `signature`, so it already
- * carries the same trust -- a `SIGNAL`-regex miss (e.g. an npm "No matching
+ * admitted unconditionally (finding 3): the current writer stored it as the
+ * first error line plus the last three, ANSI-stripped and secret-redacted at
+ * write time, so it is that writer's own account of the failure. It is not
+ * masked at storage; retrieval masks its volatile values at query time, when
+ * the text is tokenized. A `SIGNAL`-regex miss (e.g. an npm "No matching
  * version found for left-pad@^99.0.0" line) must not make the package name
  * unfindable just because it never made it into the bounded `signature`
  * lines. A legacy (v1/absent) excerpt stays gated behind proof: it is

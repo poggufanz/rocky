@@ -18,8 +18,10 @@
  * tried. No causal claims: untried names where Rocky heard no why, never
  * why the change exists or whether it works.
  *
- * Every export here is pure (no I/O; `now` comes from the caller) and never
- * throws, so `brief` and the dash stay advisory and fail open. Sets are
+ * No export here does I/O (`now` comes from the caller) and none throws, so
+ * `brief` and the dash stay advisory and fail open. Every export is pure except
+ * `coverageDisclosureLines`: it reads `ROCKY_VERBOSE` through `isVerbose` at
+ * call time to pick between plain words and raw counters. Sets are
  * bounded (COVERAGE_MAX_SESSION_FILES named, the rest counted through
  * `truncated`) and paths are secret-scrubbed with the same
  * `redactSecretsAtBoundary` the diff surfaces use.
