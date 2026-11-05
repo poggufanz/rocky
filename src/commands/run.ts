@@ -185,10 +185,10 @@ const CMD_EXE_REJECTION = /is not recognized as an internal or external command/
 /**
  * Names the shell when cmd.exe rejected the command. `shell: true`, the default
  * `runProcess` path, is `%ComSpec%` (cmd.exe) on win32, so Git Bash and PowerShell
- * words fail there and are recorded as ordinary failures. Disclosure only (spec
- * T0-12): no cause claim and no remedy command, see the phrase. `defaultShell` has
- * no default so each caller states whether it used that path. Shared by `run` and
- * `watch`.
+ * words fail there and are recorded as ordinary failures. Disclosure only: it
+ * makes no cause claim and names no remedy command, see the phrase. `defaultShell`
+ * has no default so each caller states whether it used that path. Shared by `run`
+ * and `watch`.
  */
 export function cmdExeHint(stderr: string, platform: NodeJS.Platform, defaultShell: boolean): string | undefined {
   if (platform !== "win32" || !defaultShell) return undefined;

@@ -50,7 +50,7 @@ const PHRASES: Readonly<Record<PhraseKey, string>> = Object.freeze({
   "check-comprehension": "I hear risky new line. what it doing, question",
   "check-unknown-flag": "that flag I do not know. bad.",
   "gui-opener-failed": "browser opener does not start here. open link above by hand.",
-  // Disclosure only (spec T0-12): names the shell that parsed the command. No cause, no remedy:
+  // Disclosure only: names the shell that parsed the command. No cause, no remedy:
   // `bash -c` on a Windows PATH can resolve to WSL's bash.exe.
   "cmd-exe-parsed": "cmd.exe parsed this command. bash or powershell words not heard there.",
   // Hedged on purpose (commit 91889e0): a confirmed link means the same command
