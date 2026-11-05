@@ -1,13 +1,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { gateEvent, rationaleCheck, type GateInput, type GateState } from "../agent/gate.js";
+import { explainCheck, gateEvent, rationaleCheck, type GateInput, type GateState } from "../agent/gate.js";
 import { recordRationale } from "../core/memory.js";
-import { loadMemory } from "../core/memory-read.js";
+import { loadMemory, loadMemoryChecked, MAX_SUPPORTED_MEMORY_RECORDS } from "../core/memory-read.js";
 import { resolveRockyPaths } from "../core/state-paths.js";
 import { agentEvent } from "../commands/agent-hook.js";
+import { failureLines, failureLinesPastByteCap } from "./memory-cap-fixture.js";
 
 function memState(): GateState {
   const seen = new Set<string>();
@@ -196,6 +197,96 @@ test("audit log rotates to audit.1.jsonl when exceeding byte limit", async () =>
     else process.env.ROCKY_HOME = previous;
     rmSync(home, { recursive: true, force: true });
   }
+});
+
+test("gate allows on first sight when memory is past the record cap and newer evidence may sit unread", () => {
+  withSandboxHome(() => {
+    writeFileSync(resolveRockyPaths().memory, failureLines(MAX_SUPPORTED_MEMORY_RECORDS + 1), "utf8");
+    const cwd = "C:\\work\\repo";
+    // Twice: the second pass answers from the cached evidence index and must say the same.
+    for (let pass = 0; pass < 2; pass += 1) {
+      assert.deepEqual(rationaleCheck.evaluate(gateInput(cwd, "src\\unheard.ts"), memState()), { deny: false }, `rationale pass ${pass}`);
+      assert.deepEqual(explainCheck.evaluate(gateInput(cwd, "src\\unheard.ts"), memState()), { deny: false }, `explain pass ${pass}`);
+    }
+  });
+});
+
+test("gate allows on first sight when memory is past the file size cap and newer evidence may sit unread", () => {
+  withSandboxHome(() => {
+    const paths = resolveRockyPaths();
+    writeFileSync(paths.memory, failureLinesPastByteCap(), "utf8");
+    assert.equal(loadMemoryChecked(paths.memory).coverage.reason, "file-size-cap", "the fixture must stop at the byte cap, not the record cap");
+    const cwd = "C:\\work\\repo";
+    assert.deepEqual(rationaleCheck.evaluate(gateInput(cwd, "src\\unheard.ts"), memState()), { deny: false });
+    assert.deepEqual(explainCheck.evaluate(gateInput(cwd, "src\\unheard.ts"), memState()), { deny: false });
+  });
+});
+
+test("gate still denies once at exactly the record cap, where no line is unread", () => {
+  withSandboxHome(() => {
+    writeFileSync(resolveRockyPaths().memory, failureLines(MAX_SUPPORTED_MEMORY_RECORDS), "utf8");
+    const cwd = "C:\\work\\repo";
+    assert.equal(rationaleCheck.evaluate(gateInput(cwd, "src\\lonely.ts"), memState()).deny, true);
+    assert.equal(explainCheck.evaluate(gateInput(cwd, "src\\lonely.ts"), memState()).deny, true);
+  });
+});
+
+test("gate denies again once memory is back under the record cap", () => {
+  withSandboxHome(() => {
+    const paths = resolveRockyPaths();
+    const cwd = "C:\\work\\repo";
+    writeFileSync(paths.memory, failureLines(MAX_SUPPORTED_MEMORY_RECORDS + 1), "utf8");
+    assert.deepEqual(rationaleCheck.evaluate(gateInput(cwd, "src\\lonely.ts"), memState()), { deny: false });
+    writeFileSync(paths.memory, failureLines(3), "utf8");
+    assert.equal(rationaleCheck.evaluate(gateInput(cwd, "src\\lonely.ts"), memState()).deny, true);
+    assert.equal(explainCheck.evaluate(gateInput(cwd, "src\\lonely.ts"), memState()).deny, true);
+  });
+});
+
+test("gate with no memory file denies once and does not throw", () => {
+  withSandboxHome(() => {
+    const cwd = "C:\\work\\repo";
+    const rationaleState = memState();
+    const explainState = memState();
+    assert.equal(rationaleCheck.evaluate(gateInput(cwd, "src\\lonely.ts"), rationaleState).deny, true);
+    assert.equal(explainCheck.evaluate(gateInput(cwd, "src\\lonely.ts"), explainState).deny, true);
+    assert.deepEqual(rationaleCheck.evaluate(gateInput(cwd, "src\\lonely.ts"), rationaleState), { deny: false });
+    assert.deepEqual(explainCheck.evaluate(gateInput(cwd, "src\\lonely.ts"), explainState), { deny: false });
+  });
+});
+
+test("gate with unreadable memory denies once and does not throw", () => {
+  withSandboxHome(() => {
+    // A directory where the memory file belongs: it stats, but it cannot be read as memory.
+    mkdirSync(resolveRockyPaths().memory);
+    const cwd = "C:\\work\\repo";
+    assert.doesNotThrow(() => rationaleCheck.evaluate(gateInput(cwd, "src\\lonely.ts"), memState()));
+    assert.equal(rationaleCheck.evaluate(gateInput(cwd, "src\\lonely.ts"), memState()).deny, true);
+    assert.equal(explainCheck.evaluate(gateInput(cwd, "src\\lonely.ts"), memState()).deny, true);
+  });
+});
+
+test("gateEvent allows an edit, strict mode included, when memory is past the record cap", () => {
+  withSandboxHome((home) => {
+    writeFileSync(join(home, "memory.jsonl"), failureLines(MAX_SUPPORTED_MEMORY_RECORDS + 1), "utf8");
+    const previousMode = process.env.ROCKY_GATE_MODE;
+    try {
+      for (const mode of [undefined, "strict"]) {
+        if (mode === undefined) delete process.env.ROCKY_GATE_MODE;
+        else process.env.ROCKY_GATE_MODE = mode;
+        const label = mode ?? "nudge";
+        // A session of its own per mode: a file already seen in a session passes without asking memory.
+        const stdin = JSON.stringify({
+          session_id: `cap-${label}`, tool_name: "Edit", tool_input: { file_path: "/work/repo/src/unheard.ts" }, cwd: "/work/repo",
+        });
+        assert.equal(gateEvent("claude-code", stdin).stdout, "{}", `mode ${label}`);
+      }
+    } finally {
+      if (previousMode === undefined) delete process.env.ROCKY_GATE_MODE;
+      else process.env.ROCKY_GATE_MODE = previousMode;
+    }
+    assert.equal(existsSync(join(home, "gate-state", "audit.jsonl")), false, "an allow leaves no deny audit line");
+  });
 });
 
 

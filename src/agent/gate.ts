@@ -17,7 +17,7 @@
 import { appendFileSync, mkdirSync, readFileSync, renameSync, rmSync, statSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { dirname, join } from "node:path";
-import { canonicalPath, loadMemory } from "../core/memory-read.js";
+import { canonicalPath, loadMemoryChecked } from "../core/memory-read.js";
 import { clarityNudgeLine } from "../core/prompt-clarity.js";
 import {
   countCycleClusters,
@@ -201,6 +201,12 @@ interface EvidenceCache {
   memoryPath: string;
   mtimeMs: number;
   size: number;
+  /**
+   * True when the bounded read stopped at a cap. The reader keeps the first
+   * records, so the newest evidence is exactly what sits unread past the cap:
+   * the index cannot show it is absent, and the gate must not deny on it.
+   */
+  tailUnread: boolean;
   rationale: Map<string, number>;
   explain: Map<string, number>;
 }
@@ -220,7 +226,9 @@ function indexEvidence(memoryPath: string): EvidenceCache {
       return evidenceCache;
     }
     const now = Date.now();
-    const records = loadMemory(memoryPath, now);
+    const loaded = loadMemoryChecked(memoryPath, now);
+    const records = loaded.records;
+    const tailUnread = loaded.coverage.reason === "record-cap" || loaded.coverage.reason === "file-size-cap";
     for (let i = records.length - 1; i >= 0; i--) {
       const record = records[i];
       if (record === undefined) continue;
@@ -239,10 +247,10 @@ function indexEvidence(memoryPath: string): EvidenceCache {
       }
       if (rationale.size >= EVIDENCE_INDEX_CAP && explain.size >= EVIDENCE_INDEX_CAP) break;
     }
-    evidenceCache = { memoryPath, mtimeMs: stats.mtimeMs, size: stats.size, rationale, explain };
+    evidenceCache = { memoryPath, mtimeMs: stats.mtimeMs, size: stats.size, tailUnread, rationale, explain };
     return evidenceCache;
   } catch {
-    return { memoryPath, mtimeMs: -1, size: -1, rationale, explain };
+    return { memoryPath, mtimeMs: -1, size: -1, tailUnread: false, rationale, explain };
   }
 }
 
@@ -256,11 +264,15 @@ function getEvidenceCache(memoryPath: string): EvidenceCache {
  * edited. This is what makes the deny message's own instruction
  * (`agent-event ... --files <file>`) actually satisfy the gate instead of
  * relying purely on the deny-once fallback. Any read failure means "no
- * evidence" — never a throw, never a deny on unreadable state.
+ * evidence" — never a throw, never a deny on unreadable state. Also true
+ * when the read stopped at a cap: newer evidence may sit unread, so a miss
+ * proves nothing and the gate fails open instead of denying on a snapshot
+ * that cannot hold what it asks for.
  */
 function hasFreshFileRationale(identity: string, now: number): boolean {
   try {
-    return indexEvidence(resolveRockyPaths().memory).rationale.has(identity);
+    const cache = indexEvidence(resolveRockyPaths().memory);
+    return cache.tailUnread || cache.rationale.has(identity);
   } catch {
     /* unreadable memory: treated as no evidence, deny-once path decides */
   }
@@ -415,9 +427,11 @@ export const rationaleCheck: GateCheck = {
   },
 };
 
+/** Same rule as `hasFreshFileRationale`, for explain evidence: an unread tail fails open. */
 function hasFreshFileExplain(identity: string, now: number): boolean {
   try {
-    return indexEvidence(resolveRockyPaths().memory).explain.has(identity);
+    const cache = indexEvidence(resolveRockyPaths().memory);
+    return cache.tailUnread || cache.explain.has(identity);
   } catch {
     /* unreadable memory: treated as no evidence, deny-once path decides */
   }

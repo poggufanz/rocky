@@ -8,7 +8,8 @@
 
 import { captureRationales } from "../agent/logs/capture.js";
 import { rationaleSourceLabel } from "./dictionary.js";
-import { cwdIdentityKey, loadMemory, sameCwd, type AliasRecord, type MemoryRecord } from "../core/memory-read.js";
+import { describeMemoryCoverage } from "../core/coverage.js";
+import { cwdIdentityKey, loadMemoryChecked, sameCwd, type AliasRecord, type MemoryRecord } from "../core/memory-read.js";
 import { truncateUtf8 } from "../mcp/privacy.js";
 import { ago, detail, elapsed, heading, say } from "../ui/rocky.js";
 import { CliUsageError, reportCliUsage } from "./cli-args.js";
@@ -206,9 +207,21 @@ function detailLineFor(record: CwdRecord): string | undefined {
   }
 }
 
+/**
+ * The records every session below is derived from. When the read was not
+ * whole, say so once before any session output: sessions and their counts
+ * cover only what Rocky heard.
+ */
+function loadHeardRecords(): MemoryRecord[] {
+  const loaded = loadMemoryChecked();
+  const words = describeMemoryCoverage(loaded.coverage, loaded.records.length, { counts: true });
+  if (words !== undefined) say(words);
+  return loaded.records;
+}
+
 function printList(limit: number): void {
   captureRationales(process.cwd()); // fail-open enrichment; ignored on failure by design
-  const records = loadMemory();
+  const records = loadHeardRecords();
   const groups = groupSessions(records);
   if (groups.length === 0) {
     say("no sessions heard yet. memory grows, sessions come.");
@@ -223,7 +236,7 @@ function printList(limit: number): void {
 }
 
 function printDetail(index: number): number {
-  const records = loadMemory();
+  const records = loadHeardRecords();
   const groups = groupSessions(records);
   const group = groups.find((candidate) => candidate.index === index);
   if (group === undefined) {

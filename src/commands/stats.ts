@@ -13,13 +13,15 @@ const STATS_USAGE = "rocky stats [--cycles]";
 /**
  * Disclosure for the counts printed above it. Whenever the read was not whole,
  * one persona line says so in plain words and warns that these counts are not
- * all. ROCKY_VERBOSE=1 also prints the raw counters, whole read or not.
+ * all. ROCKY_VERBOSE=1 also prints the raw counters, whole read or not, ending
+ * with the reason a cap or race stopped the read when there is one.
  */
 function speakCoverage(coverage: MemoryCoverage, recordCount: number): void {
   const words = describeMemoryCoverage(coverage, recordCount, { counts: true });
   if (words !== undefined) say(words);
   if (isVerbose()) {
-    detail(`memory coverage: version ${coverage.version}, scanned ${coverage.scanned}, skipped ${coverage.skipped}, truncated ${coverage.truncated}, complete ${coverage.complete}`);
+    const reason = coverage.reason === undefined ? "" : `, reason ${coverage.reason}`;
+    detail(`memory coverage: version ${coverage.version}, scanned ${coverage.scanned}, skipped ${coverage.skipped}, truncated ${coverage.truncated}, complete ${coverage.complete}${reason}`);
   }
 }
 

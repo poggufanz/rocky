@@ -1,13 +1,16 @@
 // src/test/teach-command.test.ts
-import { test } from "node:test";
+import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { execFileSync, spawnSync, type SpawnSyncReturns } from "node:child_process";
+import { appendFileSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { teach, type TeachDeps } from "../commands/teach.js";
 import { recordExplain } from "../core/memory.js";
+import { loadMemoryChecked, MAX_SUPPORTED_MEMORY_RECORDS } from "../core/memory-read.js";
 import { resolveRockyPaths } from "../core/state-paths.js";
+import { failureLines, failureLinesPastByteCap } from "./memory-cap-fixture.js";
 
 const EMPTY_STATE = "not heard why yet. agent explains when it writes. ask agent, rocky remembers, question";
 const WITNESS_HEADER = "rocky heard this. agent say why, rocky remember";
@@ -205,4 +208,139 @@ test("teach --ladder with exhausted provenance keeps the disclosure voice, exit 
   assert.doesNotMatch(userFacing, /\?/);
   assert.doesNotMatch(userFacing, /asal usul|di atas/, "english output carries no indonesian disclosure");
   assert.doesNotMatch(userFacing, /[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/u);
+});
+
+const COVERAGE_PREFIX = "memory coverage incomplete";
+const CAP_LINE = `${COVERAGE_PREFIX}: first ${MAX_SUPPORTED_MEMORY_RECORDS} records heard, later lines not heard. counts here not all.`;
+const ASYNC_FIXTURE = [
+  "export async function loadFeed() {",
+  "  const rows = await fetchRows();",
+  "  return rows;",
+  "}",
+];
+
+/** Appends cheap failure records, so memory holds an exact record count. */
+function appendFailures(home: string, count: number): void {
+  appendFileSync(join(home, "memory.jsonl"), failureLines(count), "utf8");
+}
+
+function homeWithFailures(t: TestContext, count: number): string {
+  const home = freshHome();
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  appendFailures(home, count);
+  return home;
+}
+
+/** One ordered log across every sink, so a test can say what came before what. */
+function orderedSinks(): { events: string[]; deps: TeachDeps } {
+  const events: string[] = [];
+  const deps: TeachDeps = {
+    say: (line: string) => events.push(`say ${line}`),
+    heading: (line: string) => events.push(`heading ${line}`),
+    block: (lines: string[]) => events.push(...lines.map((line) => `block ${line}`)),
+    detail: (line: string) => events.push(`detail ${line}`),
+  };
+  return { events, deps };
+}
+
+test("teach over the record cap says which lines it did not hear, once, before the ladder card", async (t) => {
+  const home = homeWithFailures(t, MAX_SUPPORTED_MEMORY_RECORDS + 1);
+  const path = fixture(home, "capped-ladder.ts", ASYNC_FIXTURE);
+  const { events, deps } = orderedSinks();
+  assert.equal(await teach([`${path}:2`], deps), 0);
+  assert.equal(events[0], `say ${CAP_LINE}`);
+  assert.equal(events[1], `heading ${LADDER_HEADER}`);
+  assert.equal(events.filter((event) => event.includes(COVERAGE_PREFIX)).length, 1, events.join("\n"));
+});
+
+test("teach over the record cap says so before a witness card from the lines it did hear", async (t) => {
+  const home = freshHome();
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const { path, lines } = feedFixture(home, "capped-witness.ts");
+  recordExplain({
+    cwd: process.cwd(),
+    path,
+    source: "agent:claude-code",
+    code: "documents only, no duplicates",
+    business: "journal accepts DOCENTRY documents only",
+    snippet: lines.slice(4, 11).join("\n"),
+  }, resolveRockyPaths());
+  // The witness is the first record. With the cap's worth of failures after it, the last one falls past the cap.
+  appendFailures(home, MAX_SUPPORTED_MEMORY_RECORDS);
+  const { events, deps } = orderedSinks();
+  assert.equal(await teach([`${path}:8`], deps), 0);
+  assert.equal(events[0], `say ${CAP_LINE}`);
+  assert.equal(events[1], `heading ${WITNESS_HEADER}`);
+  assert.equal(events.filter((event) => event.includes(COVERAGE_PREFIX)).length, 1, events.join("\n"));
+});
+
+test("teach over the file size cap says the memory file is too big and how many records it heard", async (t) => {
+  const home = freshHome();
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const memoryPath = join(home, "memory.jsonl");
+  writeFileSync(memoryPath, failureLinesPastByteCap(), "utf8");
+  const heard = loadMemoryChecked(memoryPath);
+  assert.equal(heard.coverage.reason, "file-size-cap", "the fixture must stop at the byte cap, not the record cap");
+  const path = fixture(home, "big-memory.ts", ASYNC_FIXTURE);
+  const { events, deps } = orderedSinks();
+  assert.equal(await teach([`${path}:2`], deps), 0);
+  assert.equal(
+    events[0],
+    `say ${COVERAGE_PREFIX}: memory file too big. first ${heard.records.length} records heard, later lines not heard. counts here not all.`,
+  );
+  assert.equal(events[1], `heading ${LADDER_HEADER}`);
+});
+
+test("teach over the record cap says so before the empty state", async (t) => {
+  const home = homeWithFailures(t, MAX_SUPPORTED_MEMORY_RECORDS + 1);
+  const path = fixture(home, "capped-empty.ts", [""]);
+  const { events, deps } = orderedSinks();
+  assert.equal(await teach([`${path}:1`], deps), 0);
+  assert.deepEqual(events, [`say ${CAP_LINE}`, `say ${EMPTY_STATE}`]);
+});
+
+test("teach --quiet stays silent about the record cap and keeps the card", async (t) => {
+  const home = homeWithFailures(t, MAX_SUPPORTED_MEMORY_RECORDS + 1);
+  const path = fixture(home, "capped-quiet.ts", ASYNC_FIXTURE);
+  const { events, deps } = orderedSinks();
+  assert.equal(await teach(["--quiet", `${path}:2`], deps), 0);
+  assert.deepEqual(events.filter((event) => event.startsWith("say ")), [], events.join("\n"));
+  assert.ok(events.includes(`heading ${LADDER_HEADER}`), events.join("\n"));
+});
+
+test("teach over exactly the record cap says nothing about coverage", async (t) => {
+  const home = homeWithFailures(t, MAX_SUPPORTED_MEMORY_RECORDS);
+  const path = fixture(home, "full-ladder.ts", ASYNC_FIXTURE);
+  const { events, deps } = orderedSinks();
+  assert.equal(await teach([`${path}:2`], deps), 0);
+  assert.ok(!events.some((event) => event.includes(COVERAGE_PREFIX)), events.join("\n"));
+  assert.ok(events.includes(`heading ${LADDER_HEADER}`), events.join("\n"));
+});
+
+const packageRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
+const entry = join(packageRoot, "dist", "index.js");
+// Hang guard only: a loaded CI runner can spend seconds on Node startup alone.
+const PROCESS_TIMEOUT_MS = 30_000;
+
+function rockyTeach(home: string, args: readonly string[]): SpawnSyncReturns<string> {
+  const env: NodeJS.ProcessEnv = {
+    ...process.env, HOME: home, USERPROFILE: home, ROCKY_HOME: home, ROCKY_TEST_POWERSHELL_HOSTS: "[]",
+  };
+  delete env.NODE_OPTIONS;
+  delete env.NODE_TEST_CONTEXT;
+  delete env.ROCKY_VERBOSE;
+  return spawnSync(process.execPath, [entry, "teach", ...args], {
+    cwd: packageRoot, env, encoding: "utf8", timeout: PROCESS_TIMEOUT_MS, maxBuffer: 8 * 1024 * 1024, windowsHide: true,
+  });
+}
+
+test("rocky teach over the record cap says it on stderr, and --quiet does not", (t) => {
+  const home = homeWithFailures(t, MAX_SUPPORTED_MEMORY_RECORDS + 1);
+  const path = fixture(home, "capped-process.ts", ASYNC_FIXTURE);
+  const loud = rockyTeach(home, [`${path}:2`]);
+  assert.equal(loud.status, 0, loud.stderr);
+  assert.ok(loud.stderr.includes(CAP_LINE), loud.stderr);
+  const quiet = rockyTeach(home, ["--quiet", `${path}:2`]);
+  assert.equal(quiet.status, 0, quiet.stderr);
+  assert.ok(!quiet.stderr.includes(COVERAGE_PREFIX), quiet.stderr);
 });

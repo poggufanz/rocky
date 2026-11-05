@@ -132,6 +132,15 @@ test("rocky stats over a whole memory keeps counter text out of default output a
   const loud = rockyStatsOver(t, [failureLine(0)], "1");
   assert.equal(loud.status, 0, loud.stderr);
   assert.match(loud.stderr, /memory coverage: version 1, scanned/u);
+  // A read with no reason keeps the legacy counter text, byte for byte.
+  assert.match(loud.stderr, /^memory coverage: version 1, scanned \d+, skipped 0, truncated 0, complete true$/mu);
+});
+
+test("rocky stats over exactly the record cap says nothing about coverage", (t) => {
+  const lines = Array.from({ length: MAX_SUPPORTED_MEMORY_RECORDS }, (_, index) => failureLine(index));
+  const result = rockyStatsOver(t, lines, undefined);
+  assert.equal(result.status, 0, result.stderr);
+  assert.doesNotMatch(result.stderr, /memory coverage/u);
 });
 
 test("rocky stats over the record cap says coverage once, in plain words, and warns the counts are not all", (t) => {
@@ -143,6 +152,16 @@ test("rocky stats over the record cap says coverage once, in plain words, and wa
   assert.ok(said[0]?.endsWith(COUNTS_WARNING), said[0]);
   assert.ok(said[0]?.includes(`first ${MAX_SUPPORTED_MEMORY_RECORDS} records heard, later lines not heard.`), said[0]);
   assert.doesNotMatch(result.stderr, /scanned|truncated|version 1/u);
+});
+
+test("rocky stats over the record cap ends its ROCKY_VERBOSE counter line with the reason", (t) => {
+  const lines = Array.from({ length: MAX_SUPPORTED_MEMORY_RECORDS + 1 }, (_, index) => failureLine(index));
+  const result = rockyStatsOver(t, lines, "1");
+  assert.equal(result.status, 0, result.stderr);
+  const counters = result.stderr.split(/\r?\n/u).filter((line) => line.startsWith("memory coverage: version"));
+  assert.deepEqual(counters, [
+    `memory coverage: version 1, scanned ${MAX_SUPPORTED_MEMORY_RECORDS}, skipped 0, truncated 1, complete false, reason record-cap`,
+  ]);
 });
 
 /**
