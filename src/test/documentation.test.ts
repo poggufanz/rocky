@@ -215,7 +215,7 @@ test("README stays a concise front page with durable project links", () => {
     "LICENSE",
     "https://github.com/poggufanz/rocky/blob/main/SECURITY.md",
     "https://github.com/poggufanz/rocky/blob/main/CONTRIBUTING.md",
-    "/assets/rocky-pixel.webp",
+    "/assets/rocky-logo.svg",
   ]);
 });
 

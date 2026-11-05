@@ -49,7 +49,7 @@ function box(className, ...children) {
 }
 
 /**
- * Rocky himself, converted from assets/rocky-pixel.webp by masking the warm
+ * Rocky himself, converted from the former assets/rocky-pixel.webp by masking the warm
  * lit stone off the cold room and mapping what survived onto a density ramp.
  * Drawn by hand it would only have been a guess at his shape.
  */

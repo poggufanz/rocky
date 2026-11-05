@@ -1,6 +1,6 @@
 # Rocky
-<p align="center"><img src="https://raw.githubusercontent.com/poggufanz/rocky/main/assets/rocky-pixel.webp" alt="Rocky"></p>
-<p align="center"><img src="https://raw.githubusercontent.com/poggufanz/rocky/main/assets/rocky.webp" alt="Rocky's local GUI: what he heard lately, and what memory holds"></p>
+<p align="center"><img src="https://raw.githubusercontent.com/poggufanz/rocky/main/assets/rocky-logo.svg" alt="rocky" width="320"></p>
+<p align="center"><img src="https://raw.githubusercontent.com/poggufanz/rocky/main/assets/rocky.webp" alt="rocky dash: every change Rocky heard for one file, the diff beside the notes that explain it"></p>
 
 [![CI](https://github.com/poggufanz/rocky/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/poggufanz/rocky/actions/workflows/ci.yml)
 [![npm](https://img.shields.io/npm/v/@poggufanz/rocky-cli?style=flat-square)](https://www.npmjs.com/package/@poggufanz/rocky-cli)
