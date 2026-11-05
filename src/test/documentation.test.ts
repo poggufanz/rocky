@@ -638,11 +638,13 @@ test("README documents the Claude Code manual-fallback reality with the exact so
 });
 
 test("no shipped surface still claims the project makes no external network requests", () => {
-  // v0.4 made `rocky check` call the npm registry. A blanket no-egress claim is
-  // now false wherever it survives, and it survived in three places the first
-  // pass missed — so every shipped documentation surface is checked here, not
-  // just README, and the rejection is by claim SHAPE rather than by the one
-  // exact sentence that happened to exist (rewording would have evaded that).
+  // v0.4 made `rocky check` call the npm registry, and the GUI model picker
+  // calls models.dev. A blanket no-egress claim, or a claim that one thing is
+  // the only thing that leaves the machine, is false wherever it survives, and
+  // it survived in places each earlier pass missed — so every shipped
+  // documentation surface is checked here, not just README, and the rejection
+  // is by claim SHAPE rather than by the one exact sentence that happened to
+  // exist (rewording would have evaded that).
   const security = readFileSync(join(packageRoot, "SECURITY.md"), "utf8");
   const surfaces: ReadonlyArray<readonly [string, string]> = [
     ["README", readme],
@@ -656,6 +658,9 @@ test("no shipped surface still claims the project makes no external network requ
     /\bCLI and (?:the )?(?:local )?MCP server[^.\n]*\bmakes? no external network requests/i,
     /\bthe project\b[^.\n]*\bmakes? no external (?:network )?requests/i,
     /\bRocky\b[^.\n]*\bmakes? no external network requests\b(?![^.\n]*(?:except|other than|apart from))/i,
+    /\bonly (?:external|non-loopback) network (?:egress|traffic)\b/i,
+    /\bproject's only external egress\b/i,
+    /\bthe one hole in the no-egress rule\b/i,
   ] as const;
 
   for (const [label, surface] of surfaces) {
@@ -664,10 +669,17 @@ test("no shipped surface still claims the project makes no external network requ
     }
   }
 
-  // And the two surfaces that describe the network contract in prose must name
-  // the one thing that does leave the machine.
-  for (const [label, surface] of [["README", readme], ["SECURITY.md", security]] as const) {
-    assert.ok(surface.includes("registry.npmjs.org"), `${label} must name the one external host Rocky contacts`);
+  // And every surface that describes the network contract in prose must name
+  // each host that does receive a request from the machine.
+  for (const [label, surface] of [
+    ["README", readmePage],
+    ["reference", reference],
+    ["SECURITY.md", security],
+    ["scientific-grounding.md", grounding],
+  ] as const) {
+    for (const host of ["registry.npmjs.org", "models.dev"]) {
+      assert.ok(surface.includes(host), `${label} must name the external host ${host}`);
+    }
   }
 });
 
@@ -675,30 +687,34 @@ test("README keeps the sanitized-default, raw-opt-in, and loopback-only network 
   assert.match(readme, /contains no telemetry/i, "README must state the CLI contains no telemetry");
   assert.match(readme, /runs no daemon/i, "README must state Rocky runs no daemon");
   // v0.4 turned the old blanket "no external network requests" claim false:
-  // `rocky check` really does call the registry. The claim is now scoped, and
-  // the scoping is pinned here so it cannot silently widen back out.
-  assert.match(
-    readme,
-    /only external network egress is `rocky check`/i,
-    "README must scope external egress to rocky check's registry lookup",
-  );
+  // `rocky check` really does call the registry, and the GUI model picker
+  // calls models.dev. The claim is scoped and names each host, and the scoping
+  // is pinned here so it cannot silently widen back out.
+  const egressClaim = /external network egress is narrow and named/i;
+  assert.match(readme, egressClaim, "README must scope external egress to the hosts it names");
   // The qualifiers must live in the SAME paragraph as the egress claim.
   // Scattered across the document they would pass a bare `includes` while
-  // leaving the sentence a reader actually sees unqualified.
-  const egressParagraph = readme
-    .split("\n\n")
-    .find((paragraph) => /only external network egress is `rocky check`/i.test(paragraph));
-  assert.ok(egressParagraph, "README must contain the scoped egress paragraph");
-  for (const [term, label] of [
-    ["registry.npmjs.org", "name the registry host"],
-    ["package names only", "state only package names leave the machine"],
-    ["consent-gated", "describe the consent gate"],
-    ["fail-open when offline", "state the lookup fails open"],
-  ] as const) {
-    assert.ok(
-      egressParagraph!.toLowerCase().includes(term.toLowerCase()),
-      `README's egress paragraph must ${label}`,
-    );
+  // leaving the sentence a reader actually sees unqualified. The reference
+  // repeats the contract, so it is held to the same terms as the README.
+  for (const [surface, page] of [["README", readmePage], ["reference", reference]] as const) {
+    const egressParagraph = page.split("\n\n").find((paragraph) => egressClaim.test(paragraph));
+    assert.ok(egressParagraph, `${surface} must contain the scoped egress paragraph`);
+    for (const [term, label] of [
+      ["registry.npmjs.org", "name the registry host"],
+      ["package names only", "state only package names leave the machine"],
+      ["consent-gated", "describe the consent gate"],
+      ["fail-open when offline", "state the registry lookup fails open"],
+      ["models.dev", "name the model catalogue host"],
+      ["24 hours", "state how long the model catalogue is cached"],
+      ["no prompt, key, memory, or code", "state what the model catalogue fetch sends"],
+      ["no consent prompt", "state the model catalogue fetch has no consent prompt"],
+      ["fails open", "state the model catalogue fetch fails open"],
+    ] as const) {
+      assert.ok(
+        egressParagraph.toLowerCase().includes(term.toLowerCase()),
+        `${surface}'s egress paragraph must ${label}`,
+      );
+    }
   }
   assert.match(
     readme,
