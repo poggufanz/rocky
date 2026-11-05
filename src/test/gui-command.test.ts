@@ -186,6 +186,10 @@ for (const args of [[], ["--port=0"]] as const) {
     assert.equal(result.signal, null);
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stdout, /usage/);
+    // The short view, byte for byte what `rocky --help` prints; the endpoints stay behind --all.
+    assert.equal(result.stdout, runCli(sandbox, ["--help"]).stdout);
+    assert.match(result.stdout, /rocky --help --all/);
+    assert.doesNotMatch(result.stdout, /agent-event/);
     assertNoOpenerAttempt(sandbox);
   });
 }

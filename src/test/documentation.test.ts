@@ -7,6 +7,8 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { commandIdentity } from "../core/fingerprint.js";
 import { PACKAGE_NAME, PACKAGE_VERSION } from "../core/package-info.js";
+import { validateRockyPhrase } from "../ui/phrases.js";
+import { face } from "../ui/rocky.js";
 
 const packageRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const readmePage = readFileSync(join(packageRoot, "README.md"), "utf8");
@@ -18,16 +20,37 @@ const modelSource = readFileSync(join(packageRoot, "src", "commands", "model.ts"
 const unscopedRockyInstall = /\bnpm\s+(?:install|i)(?=\s)[^\n;&|#]*?[\s`'"]rocky-cli(?:@[^\s`'",;:)]+)?(?=$|[\s`'",;:.)])/i;
 const inactiveInstallContext = /\b(?:historical|superseded|negative test|not an active command)\b|\b(?:do not|don't|never) use\b/i;
 
-function helpOutput(): string {
+const SHORT_HELP_ARGS = ["--help"] as const;
+const FULL_HELP_ARGS = ["--help", "--all"] as const;
+const SHORT_HELP_MAX_LINES = 16;
+const HELP_MAX_COLUMNS = 78;
+const ANSI_SEQUENCE = /\u001b\[[0-9;]*m/gu;
+
+/** Run the built CLI so a test can tell stdout from stderr and read the exit status. */
+function runHelp(args: readonly string[]): { status: number | null; stdout: string; stderr: string } {
   const env: NodeJS.ProcessEnv = { ...process.env };
   delete env.NODE_TEST_CONTEXT;
-  const result = spawnSync(process.execPath, [join(packageRoot, "dist", "index.js"), "--help"], {
+  const result = spawnSync(process.execPath, [join(packageRoot, "dist", "index.js"), ...args], {
     cwd: packageRoot,
     encoding: "utf8",
     env,
   });
+  return { status: result.status, stdout: result.stdout, stderr: result.stderr };
+}
+
+/** The full reference by default: the documentation below pins its detail. */
+function helpOutput(args: readonly string[] = FULL_HELP_ARGS): string {
+  const result = runHelp(args);
   assert.equal(result.status, 0, result.stderr);
   return `${result.stdout}${result.stderr}`;
+}
+
+/** Both views, for every honesty scan: Rocky must not overclaim in either one. */
+function helpViews(): ReadonlyArray<readonly [string, string]> {
+  return [
+    ["CLI help", helpOutput(SHORT_HELP_ARGS)],
+    ["CLI help --all", helpOutput(FULL_HELP_ARGS)],
+  ];
 }
 
 function assertContainsEvery(surface: string, label: string, expected: readonly string[]): void {
@@ -109,6 +132,72 @@ test("README and CLI help publish the installable command surface", () => {
   }
 });
 
+const withoutAnsi = (text: string): string => text.replace(ANSI_SEQUENCE, "");
+
+/** The `HELP` constant of src/index.ts, with its package-info interpolations filled in. */
+function fullHelpText(): string {
+  const source = readFileSync(join(packageRoot, "src", "index.ts"), "utf8");
+  const literal = /const HELP = `([^`]*)`;/u.exec(source)?.[1];
+  assert.ok(literal !== undefined, "expected src/index.ts to define HELP as one template literal");
+  const text = literal
+    .replaceAll("${PACKAGE_NAME}", PACKAGE_NAME)
+    .replaceAll("${PACKAGE_VERSION}", PACKAGE_VERSION);
+  assert.ok(!text.includes("${"), "HELP interpolates a value this test does not fill in");
+  return text;
+}
+
+test("default help is a short grouped view that fits one screen", () => {
+  const { status, stdout, stderr } = runHelp(SHORT_HELP_ARGS);
+  assert.equal(status, 0, stderr);
+  assert.equal(stderr, "", "help speaks on stdout only");
+  assert.ok(stdout.startsWith(`${withoutAnsi(face())}\n`), "the face comes first, unchanged");
+
+  const lines = stdout.trimEnd().split("\n");
+  assert.ok(lines.length <= SHORT_HELP_MAX_LINES, `short help is ${lines.length} lines, the budget is ${SHORT_HELP_MAX_LINES}`);
+  for (const line of lines) {
+    assert.ok(
+      [...line].length <= HELP_MAX_COLUMNS,
+      `short help line is wider than ${HELP_MAX_COLUMNS} columns: ${JSON.stringify(line)}`,
+    );
+  }
+
+  const groups = lines.flatMap((line) => /^ {2}(core|review|memory|setup) {2,}\S/u.exec(line)?.[1] ?? []);
+  assert.deepEqual(groups, ["core", "review", "memory", "setup"]);
+  assert.ok(lines.some((line) => line.startsWith("usage: rocky <verb> [args]")), "short help names its usage shape");
+  assert.equal(lines.at(-1), "every flag, every endpoint: rocky --help --all");
+  assert.deepEqual(validateRockyPhrase(stdout), [], "short help keeps Rocky's voice");
+});
+
+test("default help keeps the release identity line and the network facts, and leaves hook endpoints to --all", () => {
+  const short = runHelp(SHORT_HELP_ARGS).stdout;
+  const full = runHelp(FULL_HELP_ARGS).stdout;
+
+  // The release check reads exactly one `version:` line from this output.
+  const versionLines = short.split("\n").filter((line) => /^\s*version\s*:/iu.test(line));
+  assert.deepEqual(versionLines.map((line) => line.trim()), [`version: ${PACKAGE_NAME}@${PACKAGE_VERSION}`]);
+
+  for (const fact of ["no telemetry", "registry.npmjs.org", "consent", "models.dev", "BYOK"]) {
+    assert.ok(short.includes(fact), `short help must keep the network fact ${JSON.stringify(fact)}`);
+  }
+  for (const endpoint of ["agent-event", "gate-event", "listen-event"]) {
+    assert.ok(!short.includes(endpoint), `short help must not list the hook endpoint ${endpoint}`);
+    assert.ok(full.includes(endpoint), `the full reference must list the hook endpoint ${endpoint}`);
+  }
+});
+
+test("--help --all prints the face and the full reference, unchanged", () => {
+  const { status, stdout, stderr } = runHelp(FULL_HELP_ARGS);
+  assert.equal(status, 0, stderr);
+  assert.equal(stderr, "", "help speaks on stdout only");
+  assert.equal(stdout, `${withoutAnsi(face())}\n${fullHelpText()}\n`);
+});
+
+test("the full reference documents ROCKY_VERBOSE in Rocky's voice", () => {
+  const line = helpOutput().split("\n").find((candidate) => candidate.includes("ROCKY_VERBOSE=1"));
+  assert.ok(line !== undefined, "the full reference must document ROCKY_VERBOSE=1");
+  assert.deepEqual(validateRockyPhrase(line), []);
+});
+
 test("CLI help glosses the triple export kind as intent and keeps id mechanics out of the quiz line", () => {
   const help = helpOutput();
   // The `triple` kind value is a script contract and stays; only the gloss is new.
@@ -179,9 +268,13 @@ test("README Quick start and CLI help say that cmd.exe runs the command on Windo
 });
 
 test("README, reference, and CLI help link a later success to the failure and never claim the remedy", () => {
-  const help = helpOutput();
   assert.ok(readmePage.includes("Rocky links that success to the failure."));
-  for (const [label, surface] of [["README", readmePage], ["reference", reference], ["CLI help", help]] as const) {
+  const surfaces: ReadonlyArray<readonly [string, string]> = [
+    ["README", readmePage],
+    ["reference", reference],
+    ...helpViews(),
+  ];
+  for (const [label, surface] of surfaces) {
     assert.doesNotMatch(surface, /links that success as the fix/i, `${label} calls a linked success the fix`);
     assert.doesNotMatch(
       surface,
@@ -549,12 +642,12 @@ test("no shipped surface still claims the project makes no external network requ
   // just README, and the rejection is by claim SHAPE rather than by the one
   // exact sentence that happened to exist (rewording would have evaded that).
   const security = readFileSync(join(packageRoot, "SECURITY.md"), "utf8");
-  const surfaces = [
+  const surfaces: ReadonlyArray<readonly [string, string]> = [
     ["README", readme],
     ["SECURITY.md", security],
     ["scientific-grounding.md", grounding],
-    ["CLI help", helpOutput()],
-  ] as const;
+    ...helpViews(),
+  ];
 
   const blanketClaims = [
     /\bcore CLI[^.\n]*\bno (?:telemetry or )?external (?:network )?(?:egress|requests)/i,
@@ -662,27 +755,59 @@ function topLevelCommandSurface(indexSource: string): Set<string> {
   return commands;
 }
 
+/**
+ * Every verb the short view lists under a group label. A group can continue on
+ * the next, more deeply indented line, and an item such as
+ * `hook install|uninstall|status` counts by its first word.
+ */
+function groupedVerbs(help: string): string[] {
+  const groups: string[] = [];
+  let inGroup = false;
+  for (const line of help.split("\n")) {
+    const labelled: RegExpExecArray | null = /^ {2}(?:core|review|memory|setup) +(\S.*)$/u.exec(line);
+    const continued: RegExpExecArray | null = inGroup ? /^ {3,}(\S.*)$/u.exec(line) : null;
+    if (labelled !== null) groups.push(labelled[1]);
+    else if (continued !== null) groups[groups.length - 1] += ` ${continued[1]}`;
+    inGroup = labelled !== null || continued !== null;
+  }
+  return groups.join(" | ").split(/\s+\|\s+/u).map((item) => item.split(/\s+/u)[0]!).filter((verb) => verb !== "");
+}
+
 test("CLI help does not advertise a command that does not exist", () => {
-  const help = helpOutput();
   const indexSource = readFileSync(join(packageRoot, "src", "index.ts"), "utf8");
   const knownCommands = topLevelCommandSurface(indexSource);
   assert.ok(knownCommands.has("hook"), "sanity: top-level command scrape must still find `hook`");
   assert.ok(!knownCommands.has("status"), "sanity: nested hook sub-switch labels must not leak into the top-level surface");
   assert.ok(!knownCommands.has("_hookfail"), "sanity: internal dispatch markers must not leak into the top-level surface");
 
-  for (const line of help.split("\n")) {
-    const commandMatch = /^\s*rocky\s+([a-zA-Z-]+)\b/.exec(line);
-    if (commandMatch === null) continue;
-    assert.ok(
-      knownCommands.has(commandMatch[1]),
-      `help advertises "rocky ${commandMatch[1]}", which has no matching top-level case in src/index.ts main(): ${line}`,
-    );
+  // The short view names commands under group labels, not after `rocky`, so a
+  // scan of `rocky <verb>` lines alone would pass it vacuously. Prove the group
+  // reader sees an unknown verb, then that it reaches the first and last verb
+  // of every real group, the wrapped one included.
+  assert.deepEqual(groupedVerbs("  core    run | bogus\n  setup   hook install|uninstall|status\n"), ["run", "bogus", "hook"]);
+  const views = helpViews();
+  const grouped = groupedVerbs(views[0][1]);
+  for (const verb of ["run", "dash", "check", "teach", "digest", "repl", "setup", "model"]) {
+    assert.ok(grouped.includes(verb), `sanity: the short view must list ${verb} by group: ${grouped.join(", ")}`);
+  }
+
+  for (const [label, help] of views) {
+    const advertised = [
+      ...help.split("\n").flatMap((line) => /^\s*rocky\s+([a-zA-Z-]+)\b/.exec(line)?.slice(1) ?? []),
+      ...groupedVerbs(help),
+    ];
+    for (const verb of advertised) {
+      assert.ok(
+        knownCommands.has(verb),
+        `${label} advertises "${verb}", which has no matching top-level case in src/index.ts main()`,
+      );
+    }
   }
 });
 
 test("README and CLI help avoid forbidden universal-support and evidence overclaims", () => {
-  const help = helpOutput();
-  for (const [label, surface] of [["README", readme], ["CLI help", help]] as const) {
+  const surfaces: ReadonlyArray<readonly [string, string]> = [["README", readme], ...helpViews()];
+  for (const [label, surface] of surfaces) {
     assert.doesNotMatch(surface, /\buniversal\b[^\n]*(?:host|platform)/i, `${label} claims universal host/platform support`);
     assert.doesNotMatch(surface, /\bevery (?:host|platform)\b/i, `${label} claims every host/platform is supported`);
     assert.doesNotMatch(

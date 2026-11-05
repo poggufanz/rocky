@@ -30,11 +30,12 @@ export interface ParsedWatch { quiet: boolean; cmd: string }
 /**
  * Options are honoured wherever they appear, not only before the command.
  *
- * `rocky --help` documents `rocky watch "<command>" [--quiet]` — the trailing
- * form. Stopping option parsing at the first positional appended `--quiet` to
- * the command string instead, so `rocky watch "sleep 1" --quiet` really ran
- * `sleep 1 --quiet`: a wrapped exit 0 became 1 and a failure that never
- * happened entered memory. Rocky must never change the command he was handed.
+ * `rocky --help --all` documents `rocky watch "<command>" [--quiet]` — the
+ * trailing form. Stopping option parsing at the first positional appended
+ * `--quiet` to the command string instead, so `rocky watch "sleep 1" --quiet`
+ * really ran `sleep 1 --quiet`: a wrapped exit 0 became 1 and a failure that
+ * never happened entered memory. Rocky must never change the command he was
+ * handed.
  *
  * `--` still ends option parsing, so a command that genuinely needs a literal
  * `--flag` token stays expressible.

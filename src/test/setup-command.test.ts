@@ -1056,7 +1056,7 @@ test("usage remains two and ephemeral installs stop before adapters", async () =
   const adapter = new FakeAdapter("codex", {});
   const usage = await captureStderr(() => setup(["--mcp-exposure", "RAW"], dependencies([adapter])));
   assert.equal(usage.code, 2);
-  assert.match(usage.stderr, /run rocky --help/);
+  assert.match(usage.stderr, /run rocky --help --all, question/);
   assert.doesNotMatch(usage.stderr, /rocky setup --help/);
   assert.deepEqual(adapter.calls, []);
 

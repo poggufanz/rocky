@@ -8,7 +8,7 @@
  *   rocky | rocky dash        open the local GUI on 127.0.0.1
  *   rocky hook|mcp|model|setup distribution bridge commands
  *   rocky watch|check|what|how|why|digest|quiz|export v0.3–v0.5 surfaces
- *   rocky --help
+ *   rocky --help [--all]      short grouped view; --all prints every flag and endpoint
  *   rocky --version
  */
 
@@ -19,6 +19,25 @@
 import { CliUsageError, parseExactCommand, reportCliUsage } from "./commands/cli-args.js";
 import { PACKAGE_NAME, PACKAGE_VERSION } from "./core/package-info.js";
 import { detail, face, flushHookSpeech, say } from "./ui/rocky.js";
+
+/**
+ * `rocky --help`: one screen under Rocky's face, grouped by what you do. The
+ * `version:` line stays because the release check reads it from this output;
+ * the network facts stay because a short help must not hide what leaves the
+ * machine. `HELP` below is the full reference, behind `rocky --help --all`.
+ * documentation.test.ts holds the line and column budget of this text.
+ */
+const HELP_SHORT = `rocky — he remembers, so you don't have to.
+version: ${PACKAGE_NAME}@${PACKAGE_VERSION}
+usage: rocky <verb> [args]
+  core    run | watch | recall | stats | dash
+  review  check | brief | what | how | why | teach
+  memory  digest | quiz | export | concepts | sessions | invariants |
+          journal | repl
+  setup   setup | hook install|uninstall|status | mcp | model
+no telemetry. check asks registry.npmjs.org, package names only, with consent.
+GUI asks models.dev for model list. chat code questions go to your BYOK model.
+every flag, every endpoint: rocky --help --all`;
 
 const HELP = `
 rocky — he remembers, so you don't have to.
@@ -138,13 +157,35 @@ usage:
                             PreToolUse enforcement endpoint; reads one hook payload from
                             stdin, prints an allow/deny decision, always exits 0.
 
-memory lives in ~/.rocky/memory.jsonl. no telemetry. only outside call is rocky
-check asking registry.npmjs.org whether package exists — package name only, you say
-yes first, offline never blocks. GUI Main chat code questions send question, carved
-excerpts, memory evidence to model you configure — only when you set one; memory-only
-question sends nothing. configured hosts control what they forward; optional AI uses
-loopback Ollama only.
+memory lives in ~/.rocky/memory.jsonl. no telemetry. outside calls: rocky check
+asking registry.npmjs.org whether package exists — package name only, you say yes
+first, offline never blocks; GUI model picker asking models.dev for model list.
+GUI Main chat code questions send question, carved excerpts, memory evidence to
+model you configure — only when you set one; memory-only question sends nothing.
+configured hosts control what they forward; optional AI uses loopback Ollama only.
+ROCKY_VERBOSE=1 shows internal counters and record ids. default output hides them.
 `;
+
+type HelpView = "short" | "full";
+
+/**
+ * `rocky --help [--all]`. Only a leading `--all` asks for the full reference.
+ * The token reported as unexpected is the first one that is not that leading
+ * `--all`, so `--help --all junk` blames `junk` and never the `--all`.
+ */
+function parseHelpArgs(args: readonly string[]): HelpView {
+  const full = args[0] === "--all";
+  const unexpected = args[full ? 1 : 0];
+  if (unexpected !== undefined) throw new CliUsageError(`unexpected argument: ${unexpected}`, "rocky --help [--all]");
+  return full ? "full" : "short";
+}
+
+/** Rocky's face, then the short grouped view or the full reference, on stdout. */
+function printHelp(view: HelpView): number {
+  console.log(face());
+  console.log(view === "full" ? HELP : HELP_SHORT);
+  return 0;
+}
 
 type HookRequest =
   | { kind: "install" | "uninstall" | "status" }
@@ -385,18 +426,14 @@ async function main(): Promise<number> {
   const [, , command, ...rest] = process.argv;
   if (command === undefined || command === "--no-open" || command?.startsWith("--port=")) {
     const flags = command === undefined ? [] : [command, ...rest];
-    // A browser needs a human at the keyboard, so a pipe falls through to help,
-    // except under --no-open: that serves the page and prints the URL, so no
-    // terminal is needed.
+    // A browser needs a human at the keyboard, so a pipe falls through to the
+    // short help, except under --no-open: that serves the page and prints the
+    // URL, so no terminal is needed.
     const { guiWanted, guiCommand } = await import("./commands/gui.js");
     if (guiWanted(flags, process.stdout.isTTY === true, process.stdin.isTTY === true)) {
       return guiCommand(flags, "main");
     }
-    if (command?.startsWith("--port=")) {
-      console.log(face());
-      console.log(HELP);
-      return 0;
-    }
+    if (command?.startsWith("--port=")) return printHelp("short");
   }
   try {
     switch (command) {
@@ -512,10 +549,7 @@ async function main(): Promise<number> {
       case "-h":
       case "help":
       case undefined:
-        if (rest.length !== 0) throw new CliUsageError(`unexpected argument: ${rest[0]}`, "rocky --help");
-        console.log(face());
-        console.log(HELP);
-        return 0;
+        return printHelp(parseHelpArgs(rest));
       default:
         say(`"${command}" is not command I know. run --help, question`);
         return 2;

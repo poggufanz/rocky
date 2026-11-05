@@ -216,3 +216,40 @@ test("help and version reject trailing arguments while clean version stays stdou
   assert.equal(result.stdout, `${PACKAGE_VERSION}\n`);
   assert.equal(result.stderr, "");
 });
+
+test("every help spelling prints the short view, and a leading --all prints the full reference", () => {
+  for (const spelling of ["--help", "-h", "help"]) {
+    const short = runCli([spelling]);
+    assert.equal(short.status, 0, `${spelling}: ${short.stderr}`);
+    assert.equal(short.stderr, "", spelling);
+    assert.match(short.stdout, /every flag, every endpoint: rocky --help --all/, spelling);
+    assert.doesNotMatch(short.stdout, /agent-event/, spelling);
+
+    const full = runCli([spelling, "--all"]);
+    assert.equal(full.status, 0, `${spelling} --all: ${full.stderr}`);
+    assert.equal(full.stderr, "", `${spelling} --all`);
+    assert.match(full.stdout, /agent-event/, `${spelling} --all`);
+    assert.doesNotMatch(full.stdout, /every flag, every endpoint/, `${spelling} --all`);
+  }
+});
+
+test("help --all blames the first token after a leading --all, never the --all itself", () => {
+  const cases: ReadonlyArray<readonly [readonly string[], string]> = [
+    [["--help", "--all", "extra"], "extra"],
+    [["help", "--all", "extra"], "extra"],
+    [["-h", "--all", "extra"], "extra"],
+    [["--help", "extra", "--all"], "extra"],
+    [["--help", "--all", "--all"], "--all"],
+    [["--help", "--bogus"], "--bogus"],
+  ];
+  for (const [args, stray] of cases) {
+    const label = args.join(" ");
+    const result = runCli(args);
+    assert.equal(result.error, undefined, `${label}: ${String(result.error)}`);
+    assert.equal(result.signal, null, label);
+    assert.equal(result.status, 2, `${label}: ${result.stderr}`);
+    assert.equal(result.stdout, "", label);
+    assert.ok(result.stderr.includes(`unexpected argument: ${stray}. run rocky --help, question`), `${label}: ${result.stderr}`);
+    assert.ok(result.stderr.includes("usage: rocky --help [--all]"), `${label}: ${result.stderr}`);
+  }
+});

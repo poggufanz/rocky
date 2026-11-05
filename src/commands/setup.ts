@@ -664,7 +664,7 @@ export async function setup(argv: readonly string[], deps?: SetupDependencies): 
     options = parseSetupArgs(argv);
   } catch (error) {
     if (error instanceof SetupUsageError) {
-      say(`${error.message}. run rocky --help, question`);
+      say(`${error.message}. run rocky --help --all, question`);
       return 2;
     }
     throw error;

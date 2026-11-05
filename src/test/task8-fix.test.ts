@@ -247,7 +247,7 @@ test("setup status contract names host/MCP registration and agent-hook scope, no
     assert.match(value, scope, `${label} must state the same setup status scope`);
     assert.match(value, /spool and Ollama\/model health\s+are not\s+checked/iu, `${label} must disclose excluded health`);
   }
-  const help = spawnSync(process.execPath, [join(packageRoot, "dist", "index.js"), "--help"], {
+  const help = spawnSync(process.execPath, [join(packageRoot, "dist", "index.js"), "--help", "--all"], {
     cwd: packageRoot,
     encoding: "utf8",
     env: { ...process.env, NODE_TEST_CONTEXT: undefined },
