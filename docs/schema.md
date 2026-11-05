@@ -30,7 +30,7 @@ existing kind.
 | `brief_run` | `memory.jsonl` | v0.6 | active | `cwd, sinceTs, commits, files` |
 | `invariant_touch` | `memory.jsonl` | v0.6 | active | `cwd, invariant, path` |
 | `guard` | `memory.jsonl` | v1.0 | active | `cwd, cmd, rule, outcome (cancelled\|proceeded)` — hook guard triggers; drained from `guard.pending` TSV (`ts, outcome, rule, cwd, cmd`) |
-| `rationale` | `memory.jsonl` | v0.7 | active | `cwd, agent, rationale_fidelity (raw\|summary\|none), source (log-thinking\|log-response\|notify\|human), excerpt, pointer?{logPath,sessionId,turnRef}, links?{tripleId,fixId,failureId}, files?[]` (v0.7.5+: bounded paths from notify `--files` or `rocky why --add --files`, max 8 entries of 512 chars; the PreToolUse gate reads them as file-linked evidence. `why --add` with `--files` writes no `links`; without it, `links` may name the newest failure or fix heard in that directory within 8 hours) |
+| `rationale` | `memory.jsonl` | v0.7 | active | `cwd, agent, rationale_fidelity (raw\|summary\|none), source (log-thinking\|log-response\|notify\|human), excerpt, pointer?{logPath,sessionId,turnRef}, links?{tripleId,fixId,failureId}, files?[]` (bounded paths from notify `--files` (v0.7.5+) or `rocky why --add --files`, which writes the same field, max 8 entries of 512 chars; the PreToolUse gate reads them as file-linked evidence. `why --add` with `--files` writes no `links`; without it, `links` may name the newest failure or fix heard in that directory within 8 hours) |
 | `alias` | `memory.jsonl` | v0.7 | active | `alias, concept, action (add\|retract)` |
 | `explain` | `memory.jsonl` | v0.7.x teach | active | `cwd, path (bounded 512 chars), source (agent:<harness>), code (bounded excerpt: why this code shape), business (bounded excerpt: business concern), snippet? (written hunk, ≤2048 bytes, redacted), contentHash? (sha256/32 of normalized snippet). Witness testimony from the writing AI, captured at edit time via PostToolUse pending-snippet + notify join. Hearsay, never ground truth. Ladder/assembled answers are NEVER stored as this kind. |
 
@@ -51,7 +51,8 @@ existing kind.
 Code references are stored as pointers `{commit, path, lines}` and
 reconstructed via git when needed. Stored verbatim: user notes, commit
 messages. Stored with secrets redacted: stderr excerpts of at most 4 lines
-(the first error line plus the last three).
+(the first error line plus the last three, or the last four when the
+error line is already among them).
 
 ## Derived data
 
