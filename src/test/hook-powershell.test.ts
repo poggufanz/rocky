@@ -43,11 +43,20 @@ import fs, {
   writeFileSync,
 } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
-import { spawn, spawnSync } from "node:child_process";
+import childProcess, { spawn, spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { hookInstall, hookStatus, hookUninstall, detectPowerShellHosts, profileWithinHome, admitHostWithinHome } from "../commands/hook.js";
+import {
+  hookInstall,
+  hookStatus,
+  hookUninstall,
+  detectPowerShellHosts,
+  profileWithinHome,
+  admitHostWithinHome,
+  policyBlocksProfile,
+  withoutPolicyPreference,
+} from "../commands/hook.js";
 import { POWERSHELL_HOOK_LINE, powershellHookBlockCodec } from "../core/hook-block.js";
 import { validateRockyPhrase } from "../ui/phrases.js";
 import { verifyShellAssetsStaged } from "./shell-assets-fixture.js";
@@ -112,9 +121,11 @@ interface PowerShellSandbox {
  * Injects exactly one fake "Windows PowerShell" host pointed at a temp
  * profile file, and suppresses bashrc management too (a fixed, absent-HOME
  * bashrc keeps every assertion below about PowerShell's own exit code, not a
- * bash side effect neither host under test needs).
+ * bash side effect neither host under test needs). `policy`, when given, is
+ * the effective execution policy the fake host reports; left out, the host
+ * reports none, exactly like a probe whose third line never came back.
  */
-function powerShellSandbox(t: TestContext): PowerShellSandbox {
+function powerShellSandbox(t: TestContext, policy?: string): PowerShellSandbox {
   const root = mkdtempSync(join(tmpdir(), "rocky-hook-ps-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const home = join(root, "home");
@@ -131,7 +142,7 @@ function powerShellSandbox(t: TestContext): PowerShellSandbox {
   process.env.USERPROFILE = home;
   process.env.ROCKY_HOME = join(root, "rocky-home");
   process.env.ROCKY_TEST_POWERSHELL_HOSTS = JSON.stringify([
-    { label: "Windows PowerShell", profile, version: "5.1.26100.9168" },
+    { label: "Windows PowerShell", profile, version: "5.1.26100.9168", ...(policy === undefined ? {} : { policy }) },
   ]);
   t.after(() => {
     for (const [key, value] of Object.entries(saved)) {
@@ -140,6 +151,11 @@ function powerShellSandbox(t: TestContext): PowerShellSandbox {
     }
   });
 
+  return { profile, stderr: captureStderr(t) };
+}
+
+/** Collects everything written to stderr until the test ends, so Rocky's words are asserted on and never leak into the run's output. */
+function captureStderr(t: TestContext): () => string {
   const chunks: string[] = [];
   const originalWrite = process.stderr.write;
   process.stderr.write = ((chunk: unknown, ...rest: unknown[]) => {
@@ -151,8 +167,7 @@ function powerShellSandbox(t: TestContext): PowerShellSandbox {
   t.after(() => {
     process.stderr.write = originalWrite;
   });
-
-  return { profile, stderr: () => chunks.join("") };
+  return () => chunks.join("");
 }
 
 // --- spec test 1: install then uninstall returns the profile byte-for-byte ---
@@ -255,6 +270,235 @@ test("PowerShell hook uninstall on an absent profile stays a quiet success", (t)
   assert.equal(hookUninstall(), 0, sandbox.stderr());
   assert.match(sandbox.stderr(), /no ears installed in Windows PowerShell/);
   assert.equal(existsSync(sandbox.profile), false);
+});
+
+// --- execution policy: a profile PowerShell refuses to load is not working ears ---
+//
+// Windows PowerShell 5.1 ships with the `Restricted` policy, which refuses
+// every script file, `$PROFILE` included. Install used to say "ears installed"
+// and status used to say "installed" from the file's bytes alone, so a person
+// could follow every step and still hear nothing. The seam host's optional
+// `policy` stands in for the third line the real probe reads from the host.
+
+const BLOCKED_POLICY_LINE = "Windows PowerShell blocks scripts here. my ears cannot load.";
+const EXECUTION_POLICY_FIX = "Set-ExecutionPolicy -Scope CurrentUser RemoteSigned";
+const PROBE_WAIT_LINE = "I ask powershell where profile lives. wait.";
+
+test("policyBlocksProfile is true only for the policies that refuse an unsigned profile", () => {
+  const cases: ReadonlyArray<readonly [string | undefined, boolean]> = [
+    ["Restricted", true],
+    ["AllSigned", true],
+    ["RemoteSigned", false],
+    ["Bypass", false],
+    ["Unrestricted", false],
+    [undefined, false],
+  ];
+  for (const [policy, blocks] of cases) {
+    assert.equal(policyBlocksProfile(policy), blocks, `policy ${String(policy)}`);
+  }
+});
+
+test("withoutPolicyPreference drops the preference variable in any letter case, keeps the rest, and never mutates its input", () => {
+  const env: NodeJS.ProcessEnv = {
+    psexecutionpolicypreference: "Bypass",
+    PSExecutionPolicyPreference: "Bypass",
+    PATH: "x",
+  };
+
+  const cleaned = withoutPolicyPreference(env);
+
+  assert.deepEqual(cleaned, { PATH: "x" });
+  assert.equal(env.psexecutionpolicypreference, "Bypass");
+  assert.equal(env.PSExecutionPolicyPreference, "Bypass");
+});
+
+test("the blocked-policy and probe-wait words follow Rocky's voice rules", () => {
+  for (const label of ["Windows PowerShell", "PowerShell 7"]) {
+    assert.deepEqual(validateRockyPhrase(`${label} blocks scripts here. my ears cannot load.`), [], label);
+  }
+  assert.deepEqual(validateRockyPhrase(`fix: ${EXECUTION_POLICY_FIX}`), []);
+  assert.deepEqual(validateRockyPhrase(PROBE_WAIT_LINE), []);
+});
+
+for (const policy of ["Restricted", "AllSigned"]) {
+  test(`hookInstall under ${policy} says PowerShell blocks scripts and names the fix instead of claiming ears, still writes the profile, and exits 0`, (t) => {
+    const sandbox = powerShellSandbox(t, policy);
+
+    assert.equal(hookInstall(), 0, sandbox.stderr());
+
+    const output = sandbox.stderr();
+    assert.ok(output.includes(BLOCKED_POLICY_LINE), output);
+    assert.ok(output.includes(EXECUTION_POLICY_FIX), output);
+    assert.ok(!output.includes("ears installed in"), output);
+    assert.equal(powershellHookBlockCodec.classify(readFileSync(sandbox.profile)), "managed", "the profile is still written");
+  });
+}
+
+test("hookStatus reports the same blocked state for an installed profile, still exits 0, and claims nothing before install", (t) => {
+  const sandbox = powerShellSandbox(t, "Restricted");
+
+  assert.equal(hookStatus(), 0, sandbox.stderr());
+  assert.match(sandbox.stderr(), /Windows PowerShell: not installed\. run: rocky hook install/);
+  assert.ok(!sandbox.stderr().includes(BLOCKED_POLICY_LINE), "nothing is installed yet, so nothing is blocked");
+
+  assert.equal(hookInstall(), 0, sandbox.stderr());
+  const beforeStatus = sandbox.stderr().length;
+  assert.equal(hookStatus(), 0, sandbox.stderr());
+
+  const statusOutput = sandbox.stderr().slice(beforeStatus);
+  assert.ok(statusOutput.includes(BLOCKED_POLICY_LINE), statusOutput);
+  assert.ok(statusOutput.includes(EXECUTION_POLICY_FIX), statusOutput);
+  assert.ok(!statusOutput.includes("Windows PowerShell: installed"), statusOutput);
+});
+
+for (const policy of [undefined, "RemoteSigned", "Bypass", "Unrestricted"]) {
+  test(`hookInstall under ${policy ?? "an unreported policy"} keeps the ordinary success line and makes no blocked claim`, (t) => {
+    const sandbox = powerShellSandbox(t, policy);
+
+    assert.equal(hookInstall(), 0, sandbox.stderr());
+    assert.equal(hookStatus(), 0, sandbox.stderr());
+
+    const output = sandbox.stderr();
+    assert.match(output, /ears installed in Windows PowerShell/);
+    assert.match(output, /Windows PowerShell: installed, hook version 0\.4\.0/);
+    assert.ok(!output.includes("blocks scripts"), output);
+    assert.ok(!output.includes(EXECUTION_POLICY_FIX), output);
+  });
+}
+
+// --- the real detection path, with the one process spawn it makes replaced ---
+
+interface ProbeCall {
+  executable: string;
+  command: string;
+  env: NodeJS.ProcessEnv | undefined;
+  /** Everything Rocky had already said when this probe started. */
+  spokenBefore: string;
+}
+
+/**
+ * Replaces the one process spawn `detectPowerShellHosts` makes, so its real
+ * path (the probe's command and environment, its three-line answer, the home
+ * guard, the waiting line) runs without ever starting PowerShell or reaching
+ * this machine's real profile. `powershell.exe` answers with `answer` and exits
+ * with `status`; every other executable fails to start, as `pwsh` does on a
+ * machine without it.
+ */
+function stubPowerShellProbe(t: TestContext, spoken: () => string, answer: string, status = 0): ProbeCall[] {
+  const calls: ProbeCall[] = [];
+  const original = childProcess.spawnSync;
+  (childProcess as unknown as { spawnSync: unknown }).spawnSync = (
+    executable: string,
+    args: readonly string[] = [],
+    options: { env?: NodeJS.ProcessEnv } = {},
+  ) => {
+    calls.push({ executable, command: args.at(-1) ?? "", env: options.env, spokenBefore: spoken() });
+    return executable === "powershell.exe"
+      ? { pid: 0, output: [], signal: null, status, stdout: answer, stderr: "" }
+      : { pid: 0, output: [], signal: null, status: null, stdout: "", stderr: "", error: new Error(`spawn ${executable} ENOENT`) };
+  };
+  syncBuiltinESMExports();
+  t.after(() => {
+    (childProcess as unknown as { spawnSync: unknown }).spawnSync = original;
+    syncBuiltinESMExports();
+  });
+  return calls;
+}
+
+/** Sets one environment variable for the rest of the test, then puts the caller's value back. */
+function setEnvForTest(t: TestContext, name: string, value: string | undefined): void {
+  const saved = process.env[name];
+  if (value === undefined) delete process.env[name];
+  else process.env[name] = value;
+  t.after(() => {
+    if (saved === undefined) delete process.env[name];
+    else process.env[name] = saved;
+  });
+}
+
+const WIN32_ONLY_PROBE = { skip: process.platform === "win32" ? false : "the PowerShell host probe only runs on win32" };
+
+/** The probe's answer for a profile under the sandbox home: where the real guard admits it. */
+function probeAnswerUnderHome(policyLine: string): string {
+  const profile = join(process.env.USERPROFILE ?? "", "Documents", "WindowsPowerShell", "Microsoft.PowerShell_profile.ps1");
+  return `${profile}\r\n5.1.26100.9168\r\n${policyLine}`;
+}
+
+test("the real detection path asks for the effective policy in a fresh shell's environment, and speaks before it probes", WIN32_ONLY_PROBE, (t) => {
+  const sandbox = powerShellSandbox(t);
+  // No injected host: the real detection path runs. The sandbox's own cleanup
+  // puts the caller's value for this variable back.
+  delete process.env.ROCKY_TEST_POWERSHELL_HOSTS;
+  setEnvForTest(t, "PSExecutionPolicyPreference", "Bypass");
+  setEnvForTest(t, "PSModulePath", "C:\\Program Files\\PowerShell\\7\\Modules");
+  const calls = stubPowerShellProbe(t, sandbox.stderr, probeAnswerUnderHome("Restricted\r\n"));
+
+  assert.equal(hookInstall(), 0, sandbox.stderr());
+
+  const first = calls[0];
+  assert.ok(first, "powershell.exe was probed");
+  assert.equal(first.executable, "powershell.exe");
+  assert.match(first.command, /\$PROFILE; \$PSVersionTable\.PSVersion\.ToString\(\); \(Get-ExecutionPolicy\)\.ToString\(\)/);
+  const probeEnvKeys = Object.keys(first.env ?? {}).map((key) => key.toLowerCase());
+  assert.ok(first.env !== undefined, "the probe gets an environment of its own");
+  assert.ok(!probeEnvKeys.includes("psexecutionpolicypreference"), "an inherited Process-scope policy would mask the real one");
+  assert.ok(!probeEnvKeys.includes("psmodulepath"), "a PowerShell 7 module path keeps Windows PowerShell from loading Get-ExecutionPolicy");
+  assert.ok(probeEnvKeys.includes("path"), "every other variable still reaches the probe");
+  assert.ok(first.spokenBefore.includes(PROBE_WAIT_LINE), "Rocky speaks before the first probe starts");
+  assert.equal(sandbox.stderr().split(PROBE_WAIT_LINE).length - 1, 1, "one waiting line, not one per host");
+  assert.ok(sandbox.stderr().includes(BLOCKED_POLICY_LINE), "the policy the probe read reaches the install words");
+  assert.equal(process.env.PSExecutionPolicyPreference, "Bypass", "the caller's own environment is untouched");
+  assert.equal(process.env.PSModulePath, "C:\\Program Files\\PowerShell\\7\\Modules", "the caller's own environment is untouched");
+});
+
+test("a probe answer with no policy line makes no blocked claim", WIN32_ONLY_PROBE, (t) => {
+  const sandbox = powerShellSandbox(t);
+  delete process.env.ROCKY_TEST_POWERSHELL_HOSTS;
+  stubPowerShellProbe(t, sandbox.stderr, probeAnswerUnderHome(""));
+
+  assert.equal(hookInstall(), 0, sandbox.stderr());
+
+  assert.match(sandbox.stderr(), /ears installed in Windows PowerShell/);
+  assert.ok(!sandbox.stderr().includes("blocks scripts"), sandbox.stderr());
+});
+
+// `Get-ExecutionPolicy` can fail while `$PROFILE` and the version already came
+// back (a module that will not load turns the exit status to 1). The optional
+// third line must never cost Rocky a host it found before it asked for it.
+test("a probe whose policy statement failed still yields its host, with no claim about policy", WIN32_ONLY_PROBE, (t) => {
+  const sandbox = powerShellSandbox(t);
+  delete process.env.ROCKY_TEST_POWERSHELL_HOSTS;
+  stubPowerShellProbe(t, sandbox.stderr, probeAnswerUnderHome(""), 1);
+
+  assert.equal(hookInstall(), 0, sandbox.stderr());
+
+  assert.match(sandbox.stderr(), /ears installed in Windows PowerShell/);
+  assert.ok(!sandbox.stderr().includes("blocks scripts"), sandbox.stderr());
+});
+
+test("a probe that never answered with two lines yields no host", WIN32_ONLY_PROBE, (t) => {
+  const sandbox = powerShellSandbox(t);
+  delete process.env.ROCKY_TEST_POWERSHELL_HOSTS;
+  stubPowerShellProbe(t, sandbox.stderr, "C:\\only\\a\\profile.ps1\r\n", 1);
+
+  assert.equal(hookInstall(), 0, sandbox.stderr());
+
+  assert.ok(!sandbox.stderr().includes("ears installed in"), sandbox.stderr());
+});
+
+test("a profile outside home is refused with the variable that allows it, and install still exits 0", WIN32_ONLY_PROBE, (t) => {
+  const sandbox = powerShellSandbox(t);
+  delete process.env.ROCKY_TEST_POWERSHELL_HOSTS;
+  setEnvForTest(t, "ROCKY_HOOK_ALLOW_PROFILE_OUTSIDE_HOME", undefined);
+  const outsideProfile = join(dirname(sandbox.profile), "outside-home", "Microsoft.PowerShell_profile.ps1");
+  stubPowerShellProbe(t, sandbox.stderr, `${outsideProfile}\r\n5.1.26100.9168\r\nRestricted\r\n`);
+
+  assert.equal(hookInstall(), 0, sandbox.stderr());
+
+  const output = sandbox.stderr();
+  assert.ok(output.includes(HOST_OUTSIDE_HOME_DISCLOSURE), output);
+  assert.ok(!output.includes("blocks scripts"), "a refused host is never reported on further");
+  assert.equal(existsSync(outsideProfile), false, "nothing was written outside home");
 });
 
 // Finding 3, final whole-branch review: every other new string in this
@@ -526,7 +770,9 @@ const pwshSkipReason = process.platform !== "win32"
 test(
   "detectPowerShellHosts finds real Windows PowerShell with a sane profile and version",
   { skip: windowsPowerShellAvailable ? false : "Windows PowerShell is unavailable on this machine/platform" },
-  () => {
+  (t) => {
+    // The waiting line Rocky speaks before a real probe is for people, not for this run's output.
+    const spoken = captureStderr(t);
     const saved = process.env.ROCKY_TEST_POWERSHELL_HOSTS;
     delete process.env.ROCKY_TEST_POWERSHELL_HOSTS;
     try {
@@ -535,6 +781,9 @@ test(
       assert.ok(windows, "Windows PowerShell must be detected on a machine that has it");
       assert.ok(windows!.profile.length > 0);
       assert.match(windows!.version, /^\d+\.\d+/);
+      // The one assertion no stub can make: the real host answers the policy question.
+      assert.match(windows!.policy ?? "", /^(Restricted|AllSigned|RemoteSigned|Unrestricted|Bypass)$/);
+      assert.ok(spoken().includes(PROBE_WAIT_LINE), "Rocky speaks while the real probe runs");
     } finally {
       if (saved === undefined) delete process.env.ROCKY_TEST_POWERSHELL_HOSTS;
       else process.env.ROCKY_TEST_POWERSHELL_HOSTS = saved;
@@ -544,7 +793,8 @@ test(
 
 test(
   "detectPowerShellHosts never reports a PowerShell 7 host off Windows, even when a pwsh binary is on PATH (product bug guard)",
-  () => {
+  (t) => {
+    captureStderr(t);
     const saved = process.env.ROCKY_TEST_POWERSHELL_HOSTS;
     delete process.env.ROCKY_TEST_POWERSHELL_HOSTS;
     try {
@@ -650,7 +900,11 @@ test(
   },
 );
 
-const HOST_OUTSIDE_HOME_DISCLOSURE = "Windows PowerShell profile lives outside home. I touch nothing there.";
+// The refusal is the only place a person learns the escape hatch exists, so it
+// names the variable on the same line: a refused host with no way forward was
+// the bug.
+const HOST_OUTSIDE_HOME_DISCLOSURE =
+  "Windows PowerShell profile lives outside home. I touch nothing there. to let me touch it, set ROCKY_HOOK_ALLOW_PROFILE_OUTSIDE_HOME=1.";
 
 test("the profile-outside-home disclosure follows Rocky's voice rules", () => {
   assert.deepEqual(validateRockyPhrase(HOST_OUTSIDE_HOME_DISCLOSURE), []);
@@ -660,7 +914,8 @@ test("the profile-outside-home disclosure follows Rocky's voice rules", () => {
 // UNC share entirely outside `%USERPROFILE%` -- a legitimate setup no
 // containment check can bless. `ROCKY_HOOK_ALLOW_PROFILE_OUTSIDE_HOME=1` is
 // the explicit-consent escape hatch; anything else keeps the guard's refusal.
-test("admitHostWithinHome drops an outside-home host unless the explicit consent env var is exactly \"1\"", () => {
+test("admitHostWithinHome drops an outside-home host unless the explicit consent env var is exactly \"1\"", (t) => {
+  const spoken = captureStderr(t);
   const home = FIXTURE_HOME;
   const host = {
     label: "Windows PowerShell",
@@ -671,6 +926,8 @@ test("admitHostWithinHome drops an outside-home host unless the explicit consent
   try {
     delete process.env.ROCKY_HOOK_ALLOW_PROFILE_OUTSIDE_HOME;
     assert.equal(admitHostWithinHome(host, home), undefined);
+    assert.ok(spoken().includes(HOST_OUTSIDE_HOME_DISCLOSURE), spoken());
+    assert.ok(spoken().includes("ROCKY_HOOK_ALLOW_PROFILE_OUTSIDE_HOME=1"), "the refusal names the variable that allows the profile");
     process.env.ROCKY_HOOK_ALLOW_PROFILE_OUTSIDE_HOME = "true";
     assert.equal(admitHostWithinHome(host, home), undefined, "consent must be the exact literal \"1\", never a truthy lookalike");
     process.env.ROCKY_HOOK_ALLOW_PROFILE_OUTSIDE_HOME = "1";

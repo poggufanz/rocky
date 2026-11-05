@@ -142,8 +142,9 @@ usage:
   rocky check --decompose [--quiet]
                             split staged change into behavior, fields, verify.
                             local only, always exits 0.
-  rocky hook install        put Rocky's ears in your bash. every command heard,
-                            failures remembered, dangerous commands questioned.
+  rocky hook install        put Rocky's ears in your bash and powershell.
+                            every command heard, failures remembered. bash
+                            questions dangerous commands first.
   rocky hook uninstall      remove the ears. memory stays.
   rocky hook status         are the ears in, question
   rocky hook agent-event claude-code|codex
