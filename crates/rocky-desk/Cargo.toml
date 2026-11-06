@@ -7,3 +7,16 @@ publish.workspace = true
 
 [dependencies]
 rocky-proto = { path = "../rocky-proto" }
+gpui = "=0.2.2"
+gpui-tray = "=0.3.0"
+interprocess = "=2.4.7"
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Pipes",
+    "Win32_System_Threading",
+] }
+
+[dev-dependencies]
+rockyd = { path = "../rockyd" }
+tempfile = "3"
