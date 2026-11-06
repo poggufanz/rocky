@@ -157,7 +157,7 @@ test("purge-capture revokes consent and deletes history", async () => {
   storeListeningObject(root, Buffer.from("alpha"), home);
   const out = await captureStderr(() => setup(["--repo", root, "--purge-capture", "--yes"], deps(home, true)));
   assert.equal(out.code, 0);
-  assert.match(out.stderr, /There is no undo./);
+  assert.match(out.stderr, /There is no undo\./);
   assert.equal(isRepoCaptureAllowed(root, home), false);
   assert.equal(existsSync(repoDir(root, home)), false);
 });

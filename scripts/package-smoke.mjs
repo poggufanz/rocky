@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   accessSync,
   chmodSync,
@@ -135,9 +136,7 @@ function allowedPackPath(path) {
     || path.startsWith("dist/listening/")
     || path.startsWith("assets/gui/")
     || path === "assets/teach-agent.md"
-    || path === "assets/teach-agent.en.md"
-    || path === "skills/rocky-voice/SKILL.md"
-    || path === "skills/rocky-voice/agents/openai.yaml";
+    || path === "assets/teach-agent.en.md";
 }
 
 function assertPackResult(packed) {
@@ -167,8 +166,6 @@ function assertPackResult(packed) {
     "package.json",
     "dist/index.js",
     "dist/agent/schema.js",
-    "skills/rocky-voice/SKILL.md",
-    "skills/rocky-voice/agents/openai.yaml",
   ]) {
     assert.ok(paths.includes(required), `missing packed path: ${required}`);
   }
@@ -225,18 +222,63 @@ function jsonLines(result, label) {
   return result.stdout.trim().split("\n").filter(Boolean).map((line) => JSON.parse(line));
 }
 
-function installedSetupWithConsent(installedEntry, options) {
+function installedSetupInTerminal(installedEntry, setupArguments, options) {
   // The production prompt intentionally refuses piped stdin unless it is a
-  // TTY. For deterministic tarball dogfood, this tiny Node-only runner marks
-  // its pipe as the consenting terminal, then imports the installed entry.
-  // There is no shell or command-string interpolation here.
+  // TTY, and a non-interactive setup without --harness refuses to run at all.
+  // For deterministic tarball dogfood, this tiny Node-only runner marks its
+  // pipe as the terminal, then imports the installed entry with the given
+  // setup arguments. There is no shell or command-string interpolation here.
   const entryUrl = pathToFileURL(installedEntry).href;
   const runner = [
     "Object.defineProperty(process.stdin, \"isTTY\", { value: true });",
-    `process.argv = [process.execPath, ${JSON.stringify(installedEntry)}, "setup", "--agent-hooks"];`,
+    `process.argv = [process.execPath, ${JSON.stringify(installedEntry)}, "setup", ...${JSON.stringify(setupArguments)}];`,
     `await import(${JSON.stringify(entryUrl)});`,
   ].join("\n");
   return childResult(process.execPath, ["--input-type=module", "-e", runner], options);
+}
+
+// What an old `rocky setup --voice-skill` left behind: a skill folder plus the
+// ownership marker with the content hash that release wrote. The hash format is
+// restated here, not imported, so the installed package is held to the format
+// that existing installs already use.
+function legacySkillTreeHash(root) {
+  const files = [];
+  const visit = (directory, prefix) => {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const path = prefix === "" ? entry.name : `${prefix}/${entry.name}`;
+      if (path === ".rocky-managed.json") continue;
+      if (entry.isDirectory()) visit(join(directory, entry.name), path);
+      else files.push({ path, content: readFileSync(join(directory, entry.name)) });
+    }
+  };
+  visit(root, "");
+  files.sort((left, right) => Buffer.compare(Buffer.from(left.path, "utf8"), Buffer.from(right.path, "utf8")));
+  const hash = createHash("sha256");
+  for (const file of files) {
+    const pathBytes = Buffer.from(file.path, "utf8");
+    const pathLength = Buffer.alloc(4);
+    pathLength.writeUInt32BE(pathBytes.length);
+    const contentLength = Buffer.alloc(8);
+    contentLength.writeBigUInt64BE(BigInt(file.content.length));
+    hash.update(pathLength);
+    hash.update(pathBytes);
+    hash.update(contentLength);
+    hash.update(file.content);
+  }
+  return hash.digest("hex");
+}
+
+function seedLegacyVoiceSkill(destination) {
+  mkdirSync(join(destination, "agents"), { recursive: true });
+  writeFileSync(join(destination, "SKILL.md"), "Legacy voice skill fixture\n", "utf8");
+  writeFileSync(join(destination, "agents", "openai.yaml"), "interface:\n  display_name: \"Legacy Voice\"\n", "utf8");
+  const hash = legacySkillTreeHash(destination);
+  writeFileSync(join(destination, ".rocky-managed.json"), `${JSON.stringify({
+    schemaVersion: 1,
+    packageName: "@poggufanz/rocky-cli",
+    sourceHash: hash,
+    installedHash: hash,
+  })}\n`, "utf8");
 }
 
 function waitBriefly() {
@@ -589,7 +631,7 @@ async function main() {
     { env },
   );
   assertSuccess(aiRecall, "installed no-Ollama recall --ai");
-  assert.match(`${aiRecall.stdout}\n${aiRecall.stderr}`, /small model sleeps\. memory still works\./);
+  assert.match(`${aiRecall.stdout}\n${aiRecall.stderr}`, /Local model is off\. Memory still works\./);
 
   // Installed tarball dogfood: replay one Claude turn through the real CLI.
   // Each hook has a strict stdout contract; Stop launches detached annotation,
@@ -803,8 +845,9 @@ async function main() {
     join(codexHome, "config.toml"),
   ];
   const codexBefore = codexConfigPaths.map((path) => existsSync(path) ? readFileSync(path) : undefined);
-  const agentSetup = installedSetupWithConsent(
+  const agentSetup = installedSetupInTerminal(
     installedEntry,
+    ["--agent-hooks"],
     { env, cwd: isolatedHome, input: "y\n" },
   );
   assertStatus(agentSetup, 0, "installed agent-hook setup with explicit consent");
@@ -880,15 +923,21 @@ async function main() {
   // of which these fakes can satisfy, so both correctly refuse to mutate
   // and fall back to manual guidance instead of touching state — exactly
   // README.md:56-64, and independently reproduced against fresh fake hosts
-  // by evidence-packet-b64587b.md Gate 10 (cases A6/A7/A8/A9/A10). Voice
-  // skill installation does not depend on MCP host capability, so it still
-  // succeeds against the same fake clients (they are "detected" via
-  // `--version`-shaped resolution, just not capability-complete).
-  const configured = childResult(
-    process.execPath,
-    [installedEntry, "setup", "--yes", "--voice-skill"],
-    { env },
-  );
+  // by evidence-packet-b64587b.md Gate 10 (cases A6/A7/A8/A9/A10).
+  //
+  // An old `setup --voice-skill` may have left a managed voice skill behind.
+  // Seed one for each host so the installed package proves the cleanup:
+  // configure ignores it, --check reports it without needing a detected host,
+  // --remove moves it into a backup folder, and the retired flag is now an
+  // ordinary usage error. These runs use the terminal helper because a
+  // non-interactive setup without --harness stops before any host work (the
+  // two refusals are asserted at the end).
+  const legacySkillCodex = join(isolatedHome, ".agents", "skills", "rocky-voice");
+  const legacySkillClaude = join(claudeConfig, "skills", "rocky-voice");
+  seedLegacyVoiceSkill(legacySkillCodex);
+  seedLegacyVoiceSkill(legacySkillClaude);
+
+  const configured = installedSetupInTerminal(installedEntry, ["--yes"], { env });
   assertStatus(configured, 1, "fake-client setup configure");
   assert.match(configured.stderr, /codex: failed/);
   assert.match(
@@ -902,11 +951,10 @@ async function main() {
     /Claude Code policy-equivalent automation is unavailable; use manual registration/,
   );
   assert.match(configured.stderr, /claude-code manual argv: \[/);
-  assert.match(configured.stderr, /voice-skill codex: installed/);
-  assert.match(configured.stderr, /voice-skill claude-code: installed/);
+  assert.doesNotMatch(configured.stderr, /legacy voice skill/, "configure never reports or moves the legacy skill");
   for (const markerPath of [
-    join(isolatedHome, ".agents", "skills", "rocky-voice", ".rocky-managed.json"),
-    join(claudeConfig, "skills", "rocky-voice", ".rocky-managed.json"),
+    join(legacySkillCodex, ".rocky-managed.json"),
+    join(legacySkillClaude, ".rocky-managed.json"),
   ]) {
     assert.equal(JSON.parse(readFileSync(markerPath, "utf8")).packageName, PACKAGE_NAME);
   }
@@ -917,10 +965,11 @@ async function main() {
   // since configure never wrote anything) effective config, so it correctly
   // reports `not-configured` rather than failing. Aggregate exit is 1
   // because nothing reached `healthy` (src/commands/setup.ts exitCode
-  // "check" branch). Voice-skill state is unaffected by any of this.
-  const checked = assertStateUnchanged(rockyHome, "fake-client setup check MCP", () => childResult(
-    process.execPath,
-    [installedEntry, "setup", "--check", "--voice-skill"],
+  // "check" branch). The legacy skill is reported read-only and does not
+  // change that exit code.
+  const checked = assertStateUnchanged(rockyHome, "fake-client setup check MCP", () => installedSetupInTerminal(
+    installedEntry,
+    ["--check"],
     { env, timeout: 30_000 },
   ));
   assertStatus(checked, 1, "fake-client setup check");
@@ -930,18 +979,27 @@ async function main() {
     /Codex app-server provenance and CAS capability is unavailable; use manual registration/,
   );
   assert.match(checked.stderr, /claude-code: not-configured/);
-  assert.match(checked.stderr, /voice-skill codex: unchanged/);
-  assert.match(checked.stderr, /voice-skill claude-code: unchanged/);
+  assert.match(checked.stderr, /^legacy voice skill codex: installed; rocky setup --remove removes it\.$/m);
+  assert.match(checked.stderr, /^legacy voice skill claude-code: installed; rocky setup --remove removes it\.$/m);
+  assert.equal(existsSync(join(legacySkillCodex, "SKILL.md")), true, "check must not move the legacy skill");
+
+  // The leftover skill is reported even when neither fake client is reachable
+  // on PATH: cleanup does not depend on host detection.
+  const noHostsEnv = { ...env, PATH: dirname(process.execPath), Path: dirname(process.execPath) };
+  const noHosts = assertStateUnchanged(
+    rockyHome,
+    "fake-client setup check with no detected hosts",
+    () => installedSetupInTerminal(installedEntry, ["--check"], { env: noHostsEnv }),
+  );
+  assertStatus(noHosts, 1, "fake-client setup check with no detected hosts");
+  assert.match(noHosts.stderr, /^legacy voice skill codex: installed; /m);
+  assert.match(noHosts.stderr, /^legacy voice skill claude-code: installed; /m);
 
   // Same shape for `--remove`: Codex still can't prove capability so it
   // fails; Claude Code correctly reports `not-configured` since it was
-  // never actually written. Voice-skill removal is independent and moves
-  // the managed skill to a backup, exactly as it did during `configure`.
-  const removed = childResult(
-    process.execPath,
-    [installedEntry, "setup", "--remove", "--yes", "--voice-skill"],
-    { env },
-  );
+  // never actually written. The exit code stays 1 for those MCP reasons; the
+  // legacy skills are moved into backup folders, never deleted.
+  const removed = installedSetupInTerminal(installedEntry, ["--remove", "--yes"], { env });
   assertStatus(removed, 1, "fake-client setup remove");
   assert.match(removed.stderr, /codex: failed/);
   assert.match(
@@ -949,29 +1007,36 @@ async function main() {
     /Codex app-server provenance and CAS capability is unavailable; use manual registration/,
   );
   assert.match(removed.stderr, /claude-code: not-configured/);
-  assert.match(removed.stderr, /voice-skill codex: removed/);
-  assert.match(removed.stderr, /voice-skill claude-code: removed/);
-  assert.equal(existsSync(join(isolatedHome, ".agents", "skills", "rocky-voice")), false);
-  assert.equal(existsSync(join(claudeConfig, "skills", "rocky-voice")), false);
+  for (const [host, destination, backupRoot] of [
+    ["codex", legacySkillCodex, join(isolatedHome, ".agents", ".rocky", "backups", "voice-skills")],
+    ["claude-code", legacySkillClaude, join(claudeConfig, ".rocky", "backups", "voice-skills")],
+  ]) {
+    const backup = new RegExp(`^legacy voice skill ${host}: removed; backup: (.+)$`, "m").exec(removed.stderr)?.[1];
+    assert.ok(backup, `${host} legacy skill must report its backup path: ${removed.stderr}`);
+    assert.equal(dirname(backup), backupRoot, `${host} backup lands in its own backup root`);
+    assert.equal(existsSync(destination), false, `${host} legacy skill moved out of the skills folder`);
+    assert.equal(
+      JSON.parse(readFileSync(join(backup, ".rocky-managed.json"), "utf8")).packageName,
+      PACKAGE_NAME,
+    );
+    assert.equal(readFileSync(join(backup, "SKILL.md"), "utf8"), "Legacy voice skill fixture\n");
+  }
 
-  // Zero-eligible-host shape (README.md:64): with neither fake client
-  // reachable on PATH, Rocky must not invent a per-host voice-skill result;
-  // it prints the exact `voice-skill: unavailable` literal and exits 1.
-  // This is the one manual-required literal Gate 10 pins (cases A3/A4/A5)
-  // that the fake-client flow above never exercises, since both fakes are
-  // always "detected" there.
-  const noHostsEnv = { ...env, PATH: dirname(process.execPath), Path: dirname(process.execPath) };
-  const noHosts = assertStateUnchanged(
-    rockyHome,
-    "fake-client setup with no detected hosts",
-    () => childResult(
-      process.execPath,
-      [installedEntry, "setup", "--yes", "--voice-skill"],
-      { env: noHostsEnv },
-    ),
+  const removedAgain = installedSetupInTerminal(installedEntry, ["--remove", "--yes"], { env });
+  assertStatus(removedAgain, 1, "fake-client setup remove after the legacy skill is gone");
+  assert.doesNotMatch(removedAgain.stderr, /legacy voice skill/, "nothing left to report once the skill is moved");
+
+  // Without a terminal, setup needs explicit --harness targets, and the retired
+  // flag is an unknown option rather than a way around that rule.
+  const broad = childResult(process.execPath, [installedEntry, "setup", "--yes"], { env });
+  assertStatus(broad, 2, "non-interactive setup without --harness");
+  assert.match(broad.stderr, /Setup stopped: explicit harness targets are now required\./);
+  const retired = childResult(process.execPath, [installedEntry, "setup", "--voice-skill", "--yes"], { env });
+  assertStatus(retired, 2, "retired --voice-skill flag");
+  assert.match(
+    retired.stderr,
+    /Unknown setup option: --voice-skill\. Run rocky --help --all to list every option\./,
   );
-  assertStatus(noHosts, 1, "fake-client setup with no detected hosts");
-  assert.match(noHosts.stderr, /voice-skill: unavailable/);
 
   process.stdout.write([
     "package smoke passed",

@@ -43,20 +43,19 @@ import {
   rockyHookCommand,
   uninstallClaudeAgentHooks,
 } from "../setup/agent-hooks.js";
-import type { AgentHooksAction, RepoCaptureAction } from "../setup/clients.js";
+import type { AgentHooksAction, HarnessId, RepoCaptureAction } from "../setup/clients.js";
+import {
+  checkLegacyVoiceSkill,
+  removeLegacyVoiceSkill,
+  resolveLegacyVoiceSkillTargets,
+  type LegacyVoiceSkillResult,
+  type LegacyVoiceSkillTarget,
+} from "../setup/legacy-voice-skill.js";
 import {
   isEphemeralInstall,
   isIdenticalMcpRegistration,
   resolveMcpRegistration,
 } from "../setup/registration.js";
-import {
-  checkVoiceSkill,
-  installVoiceSkill,
-  removeVoiceSkill,
-  resolveVoiceSkillTargets,
-  type VoiceSkillOperationResult,
-  type VoiceSkillTarget,
-} from "../setup/voice-skill.js";
 import { detail, prompt, say } from "../ui/rocky.js";
 import { safeTerminalBlock, safeTerminalLine } from "../ui/sanitize.js";
 
@@ -73,18 +72,18 @@ export interface SetupDependencies {
   entryPath?: string;
   rockyHome?: string;
   env?: NodeJS.ProcessEnv;
-  voiceSkills?: VoiceSkillServices;
+  /** Test override for the cleanup of a voice skill that older releases installed. */
+  legacyVoiceSkills?: LegacyVoiceSkillServices;
   /** Test override; production defaults to process.stdin.isTTY. */
   isTTY?: boolean;
   /** Test override for the checkbox picker opened by bare `--harness`. */
   pickHarnesses?: () => Promise<HarnessWizardResult>;
 }
 
-export interface VoiceSkillServices {
-  resolveTargets(env: NodeJS.ProcessEnv, home: string): readonly VoiceSkillTarget[];
-  install(target: VoiceSkillTarget, replace: boolean): Promise<VoiceSkillOperationResult>;
-  check(target: VoiceSkillTarget): Promise<VoiceSkillOperationResult>;
-  remove(target: VoiceSkillTarget): Promise<VoiceSkillOperationResult>;
+export interface LegacyVoiceSkillServices {
+  resolveTargets(env: NodeJS.ProcessEnv, home: string): readonly LegacyVoiceSkillTarget[];
+  check(target: LegacyVoiceSkillTarget): Promise<LegacyVoiceSkillResult>;
+  remove(target: LegacyVoiceSkillTarget): Promise<LegacyVoiceSkillResult>;
 }
 
 export function createConfirmationPort(
@@ -284,13 +283,9 @@ interface ConsentOutcome {
   results?: SetupResult[];
   inspectionFailures: ReadonlyMap<SetupClientAdapter, SetupResult>;
   // True only when a prompt was actually shown and answered no. "Nothing
-  // needed a prompt" (every MCP adapter blocked/unreadable AND no voice-skill
-  // host is even detected) is a different state and must not be conflated
-  // with a real decline - see setup()'s use of this flag. A detected
-  // voice-skill host is real pending work, so it forces requiresConsent below
-  // exactly like a non-blocked MCP adapter does; this is what closes the
-  // consent bypass where a detected host let voice-skill work mutate the
-  // filesystem despite every MCP adapter being blocked/unreadable.
+  // needed a prompt" (every MCP adapter blocked or unreadable, and no legacy
+  // voice skill to move) is a different state and must not be conflated with a
+  // real decline: a decline withdraws the legacy cleanup and exits 1.
   declined: boolean;
 }
 
@@ -312,13 +307,25 @@ function exitCode(mode: SetupMode, results: readonly SetupResult[]): number {
     || status === "skipped") ? 0 : 1;
 }
 
+function consentQuestion(
+  mode: Exclude<SetupMode, "check">,
+  mcpWork: boolean,
+  legacyHosts: readonly LegacyVoiceSkillTarget["host"][],
+): string {
+  if (mode === "configure") return "Configure MCP hosts now?";
+  const legacy = `the legacy voice skill (${legacyHosts.join(", ")})`;
+  if (!mcpWork) return `Remove ${legacy} now?`;
+  return legacyHosts.length === 0
+    ? "Remove rocky from MCP hosts now?"
+    : `Remove rocky from MCP hosts and ${legacy} now?`;
+}
+
 async function consentResults(
   mode: Exclude<SetupMode, "check">,
   adapters: readonly SetupClientAdapter[],
   registration: McpRegistration,
   confirmation: ConfirmationPort,
-  includeVoiceSkill: boolean,
-  voiceSkillHostDetected: boolean,
+  legacyHosts: readonly LegacyVoiceSkillTarget["host"][],
 ): Promise<ConsentOutcome> {
   const inspections = new Map<SetupClientAdapter, InspectionResult>();
   const inspectionFailures = new Map<SetupClientAdapter, SetupResult>();
@@ -337,24 +344,17 @@ async function consentResults(
       ? failedHostOperation(adapter.id, "Host inspection failed")
       : skippedFromInspection(adapter.id, inspection, mode, registration);
   });
-  // Consent must cover every mutation setup() is actually about to attempt,
-  // not just the MCP adapters. A detected Codex/Claude Code voice-skill host
-  // is real pending work exactly like a non-blocked MCP adapter, so it forces
-  // a prompt too - otherwise a machine with every MCP adapter blocked but a
-  // host binary on PATH would let --voice-skill mutate with no prompt ever
-  // shown (the exact consent bypass this function now closes).
-  const requiresConsent = [...inspections.values()].some((inspection) => inspection.state !== "blocked"
-    && inspection.state !== "unreadable")
-    || (includeVoiceSkill && voiceSkillHostDetected);
-  if (!requiresConsent) return { results: orderedResults(), inspectionFailures, declined: false };
-  const question = mode === "configure"
-    ? includeVoiceSkill
-      ? "Configure MCP hosts and the managed voice skill now?"
-      : "Configure MCP hosts now?"
-    : includeVoiceSkill
-      ? "Remove rocky from MCP hosts and the managed voice skill now?"
-      : "Remove rocky from MCP hosts now?";
-  const allowed = await confirmation.confirm(question);
+  // Consent must cover every mutation setup() is about to attempt, not just
+  // the MCP adapters. A managed legacy voice skill that --remove will move to
+  // backup is real pending work exactly like a non-blocked MCP adapter, so it
+  // forces a prompt too. Otherwise a machine with every MCP adapter blocked
+  // would lose the skill without a prompt ever being shown.
+  const mcpWork = [...inspections.values()].some((inspection) => inspection.state !== "blocked"
+    && inspection.state !== "unreadable");
+  if (!mcpWork && legacyHosts.length === 0) {
+    return { results: orderedResults(), inspectionFailures, declined: false };
+  }
+  const allowed = await confirmation.confirm(consentQuestion(mode, mcpWork, legacyHosts));
   if (allowed) return { inspectionFailures, declined: false };
   const instruction = mode === "configure" ? "rocky setup --yes" : "rocky setup --remove --yes";
   const results = orderedResults();
@@ -517,6 +517,7 @@ async function runAgentHooksAction(
   action: AgentHooksAction,
   dependencies: SetupDependencies,
   rationaleGate: boolean,
+  harnesses: readonly HarnessId[],
 ): Promise<number> {
   const nodeCandidate = dependencies.nodePath ?? process.execPath;
   const entryCandidate = dependencies.entryPath ?? defaultAgentHooksEntryPath();
@@ -576,6 +577,7 @@ async function runAgentHooksAction(
     detail("Setup status scope: host/MCP registration via rocky setup --check and agent-hook state/capability; spool and Ollama/model health are not checked.");
     detail(`claude-code agent hooks: ${result.claudeCode}`);
     detail("codex agent hooks: manual");
+    await reportLegacyVoiceSkill(harnesses, dependencies);
     return result.claudeCode === "unreadable" ? 1 : 0;
   } catch {
     say("Setup stopped: the Claude Code agent hook paths are not usable.");
@@ -583,80 +585,96 @@ async function runAgentHooksAction(
   }
 }
 
-const defaultVoiceSkillServices: VoiceSkillServices = {
-  resolveTargets: resolveVoiceSkillTargets,
-  install(target, replace) {
-    return installVoiceSkill(target, { replace });
-  },
-  check(target) {
-    return checkVoiceSkill(target);
-  },
-  remove(target) {
-    return removeVoiceSkill(target);
-  },
+/*
+ * Legacy voice skill. Older releases could install a voice skill with
+ * `setup --voice-skill`. rocky no longer ships it, so setup only cleans up a
+ * copy left behind: --check and --status report it read-only, and --remove
+ * moves an unmodified managed copy into a backup folder after the same consent
+ * as the MCP removal. A decline never touches it. When no legacy skill exists
+ * nothing is printed and no exit code changes.
+ */
+const defaultLegacyVoiceSkillServices: LegacyVoiceSkillServices = {
+  resolveTargets: resolveLegacyVoiceSkillTargets,
+  check: (target) => checkLegacyVoiceSkill(target),
+  remove: (target) => removeLegacyVoiceSkill(target),
 };
 
-function detectedVoiceSkillHosts(platform: PlatformServices): ReadonlySet<VoiceSkillTarget["host"]> {
-  const hosts = new Set<VoiceSkillTarget["host"]>();
-  try {
-    if (platform.resolveExecutable("codex") !== undefined) hosts.add("codex");
-  } catch {
-    // Missing or unreadable client discovery is treated as undetected.
-  }
-  try {
-    if (platform.resolveExecutable("claude") !== undefined) hosts.add("claude-code");
-  } catch {
-    // Missing or unreadable client discovery is treated as undetected.
-  }
-  return hosts;
+/**
+ * The legacy skill folders belong to Codex and Claude Code. With explicit
+ * --harness targets only the selected hosts are looked at, so removing one
+ * host never touches another host's files.
+ */
+function legacyTargetsFor(
+  harnesses: readonly HarnessId[],
+  dependencies: SetupDependencies,
+  services: LegacyVoiceSkillServices,
+): readonly LegacyVoiceSkillTarget[] {
+  const targets = services.resolveTargets(dependencies.env ?? process.env, dependencies.platform.home);
+  return harnesses.length === 0 ? targets : targets.filter((target) => harnesses.includes(target.host));
 }
 
-async function invokeVoiceSkills(
-  mode: SetupMode,
-  targets: readonly VoiceSkillTarget[],
-  replace: boolean,
-  services: VoiceSkillServices,
-): Promise<VoiceSkillOperationResult[]> {
-  const results: VoiceSkillOperationResult[] = [];
+async function runLegacyVoiceSkill(
+  operation: "check" | "remove",
+  target: LegacyVoiceSkillTarget,
+  services: LegacyVoiceSkillServices,
+): Promise<LegacyVoiceSkillResult> {
+  try {
+    return await services[operation](target);
+  } catch {
+    return { host: target.host, status: "failed", detail: "unexpected error" };
+  }
+}
+
+interface CheckedLegacyTarget {
+  target: LegacyVoiceSkillTarget;
+  checked: LegacyVoiceSkillResult;
+}
+
+async function checkLegacyTargets(
+  targets: readonly LegacyVoiceSkillTarget[],
+  services: LegacyVoiceSkillServices,
+): Promise<CheckedLegacyTarget[]> {
+  const entries: CheckedLegacyTarget[] = [];
   for (const target of targets) {
-    try {
-      results.push(mode === "configure"
-        ? await services.install(target, replace)
-        : mode === "check"
-          ? await services.check(target)
-          : await services.remove(target));
-    } catch {
-      results.push({
-        host: target.host,
-        status: "failed",
-        detail: "Voice skill host operation failed",
-      });
-    }
+    entries.push({ target, checked: await runLegacyVoiceSkill("check", target, services) });
+  }
+  return entries;
+}
+
+/**
+ * Remove only what the read-only check found installed. Every other state
+ * (absent, modified, refused, failed) is reported as the check saw it, so a
+ * tree that was not seen as managed, and consented to, is never moved.
+ */
+async function removeCheckedLegacyTargets(
+  entries: readonly CheckedLegacyTarget[],
+  services: LegacyVoiceSkillServices,
+): Promise<LegacyVoiceSkillResult[]> {
+  const results: LegacyVoiceSkillResult[] = [];
+  for (const { target, checked } of entries) {
+    results.push(checked.status === "installed"
+      ? await runLegacyVoiceSkill("remove", target, services)
+      : checked);
   }
   return results;
 }
 
-function printVoiceSkillResult(result: VoiceSkillOperationResult): void {
-  detail(`voice-skill ${safeTerminalLine(result.host)}: ${safeTerminalLine(result.status)}`);
-  detail(safeTerminalBlock(result.detail));
-  if (result.backupPath !== undefined && !result.detail.includes(result.backupPath)) {
-    detail(`voice-skill backup: ${safeTerminalLine(result.backupPath)}`);
+/** One line per target that had a legacy skill; absent targets print nothing. */
+function printLegacyVoiceSkillResults(results: readonly LegacyVoiceSkillResult[]): void {
+  for (const result of results) {
+    if (result.status === "absent") continue;
+    detail(`legacy voice skill ${safeTerminalLine(result.host)}: ${result.status}; ${safeTerminalLine(result.detail)}`);
   }
 }
 
-function voiceSkillSucceeded(
-  mode: SetupMode,
-  results: readonly VoiceSkillOperationResult[],
-): boolean {
-  if (mode === "configure") {
-    return results.every(({ status }) => status === "installed"
-      || status === "unchanged"
-      || status === "upgraded");
-  }
-  if (mode === "check") {
-    return results.every(({ status }) => status === "unchanged");
-  }
-  return results.every(({ status }) => status === "removed" || status === "skipped");
+async function reportLegacyVoiceSkill(
+  harnesses: readonly HarnessId[],
+  dependencies: SetupDependencies,
+): Promise<void> {
+  const services = dependencies.legacyVoiceSkills ?? defaultLegacyVoiceSkillServices;
+  const targets = legacyTargetsFor(harnesses, dependencies, services);
+  const entries = await checkLegacyTargets(targets, services);
+  printLegacyVoiceSkillResults(entries.map(({ checked }) => checked));
 }
 
 /** Parser messages are lowercase error text; the printed line is a sentence with a next step. */
@@ -712,8 +730,7 @@ export async function setup(argv: readonly string[], deps?: SetupDependencies): 
       return 1;
     }
   }
-  // Voice-skill-only invocations keep the legacy path: zero-eligible-host contract (exit 1 + voice-skill: unavailable) is pinned by documentation.test.ts; per-host voice scoping is P1+ work.
-  if (!stdinTTY && options.harnesses.length === 0 && options.agentHooksAction === undefined && !options.voiceSkill) {
+  if (!stdinTTY && options.harnesses.length === 0 && options.agentHooksAction === undefined) {
     say("Setup stopped: explicit harness targets are now required.");
     detail("Example: rocky setup --harness codex --yes (MCP only)");
     detail("Example: rocky setup --harness codex --listening --yes (Listening)");
@@ -722,7 +739,12 @@ export async function setup(argv: readonly string[], deps?: SetupDependencies): 
   }
 
   if (options.agentHooksAction !== undefined) {
-    return runAgentHooksAction(options.agentHooksAction, dependencies, options.rationaleGate ?? true);
+    return runAgentHooksAction(
+      options.agentHooksAction,
+      dependencies,
+      options.rationaleGate ?? true,
+      options.harnesses,
+    );
   }
 
   let registration: McpRegistration;
@@ -772,34 +794,28 @@ export async function setup(argv: readonly string[], deps?: SetupDependencies): 
       : dependencies.adapters);
   let results: SetupResult[] | undefined;
   let inspectionFailures: ReadonlyMap<SetupClientAdapter, SetupResult> = new Map();
-  let skillWorkAuthorized = true;
-  // Detected once, up front, so the consent gate below and the dispatch
-  // further down agree on exactly the same set of eligible hosts - computing
-  // it twice independently is how this drifted out of sync with consent in
-  // the first place.
-  const detectedVoiceHosts = options.voiceSkill
-    ? detectedVoiceSkillHosts(dependencies.platform)
-    : new Set<VoiceSkillTarget["host"]>();
+  let declined = false;
+  // A read-only look at the legacy voice skill folders. --check reports what
+  // it finds; --remove also uses it to learn whether the consent prompt has to
+  // cover moving a managed copy into a backup folder.
+  const legacyServices = dependencies.legacyVoiceSkills ?? defaultLegacyVoiceSkillServices;
+  const legacyEntries = options.mode === "configure"
+    ? []
+    : await checkLegacyTargets(legacyTargetsFor(options.harnesses, dependencies, legacyServices), legacyServices);
   if (options.mode !== "check" && !options.yes) {
+    const legacyHosts = options.mode === "remove"
+      ? legacyEntries.filter(({ checked }) => checked.status === "installed").map(({ target }) => target.host)
+      : [];
     const consent = await consentResults(
       options.mode,
       adapters,
       registration,
       dependencies.confirmation,
-      options.voiceSkill,
-      detectedVoiceHosts.size > 0,
+      legacyHosts,
     );
     results = consent.results;
     inspectionFailures = consent.inspectionFailures;
-    // Only a real decline withdraws voice-skill authorization. When nothing
-    // needed a prompt (every MCP adapter blocked/unreadable AND no voice-skill
-    // host detected), skillWorkAuthorized stays true so the zero-eligible-
-    // target check below can still run and report `voice-skill: unavailable`
-    // for an explicit --voice-skill request that genuinely has nothing to
-    // authorize. A detected host forces requiresConsent above, so this
-    // branch can never see skillWorkAuthorized stay true for real,
-    // unauthorized voice-skill work.
-    if (consent.declined) skillWorkAuthorized = false;
+    declined = consent.declined;
   }
   results ??= await invokeAdapters(
     options.mode,
@@ -813,28 +829,13 @@ export async function setup(argv: readonly string[], deps?: SetupDependencies): 
   say("Host setup results follow.");
   for (const result of results) printResult(options.mode, result, registration);
 
-  let voiceResults: VoiceSkillOperationResult[] = [];
-  let voiceUnavailable = false;
-  // --check never mutates (checkVoiceSkill only reads and hashes; it writes
-  // nothing), so it deliberately stays outside the consent gate above, the
-  // same way MCP `check` never calls consentResults either. There is no
-  // filesystem risk to authorize for a read.
-  if (options.voiceSkill && skillWorkAuthorized) {
-    const services = dependencies.voiceSkills ?? defaultVoiceSkillServices;
-    const targets = detectedVoiceHosts.size > 0
-      ? services.resolveTargets(
-        dependencies.env ?? process.env,
-        dependencies.platform.home,
-      ).filter((target) => detectedVoiceHosts.has(target.host))
-      : [];
-    if (targets.length === 0) {
-      voiceUnavailable = true;
-      detail("voice-skill: unavailable");
-    } else {
-      voiceResults = await invokeVoiceSkills(options.mode, targets, options.replace, services);
-      for (const result of voiceResults) printVoiceSkillResult(result);
-    }
-  }
+  // Only --remove mutates the legacy skill, and a decline leaves it alone: the
+  // lines then repeat what the read-only check saw. --check never needs consent
+  // for the same reason MCP check does not; a read has nothing to authorize.
+  const legacyResults = options.mode === "remove" && !declined
+    ? await removeCheckedLegacyTargets(legacyEntries, legacyServices)
+    : legacyEntries.map(({ checked }) => checked);
+  printLegacyVoiceSkillResults(legacyResults);
 
   if (options.mode === "configure"
     && dependencies.platform.shell !== undefined
@@ -843,6 +844,9 @@ export async function setup(argv: readonly string[], deps?: SetupDependencies): 
     detail("Next step: rocky hook install");
   }
 
-  const setupExit = exitCode(options.mode, results);
-  return !voiceUnavailable && setupExit === 0 && voiceSkillSucceeded(options.mode, voiceResults) ? 0 : 1;
+  // The exit code certifies the MCP work. A legacy skill that rocky refuses to
+  // touch (edited, unmarked, unsafe) is reported but does not fail the run; an
+  // unexpected failure to move a managed copy does.
+  const legacyFailed = options.mode === "remove" && legacyResults.some(({ status }) => status === "failed");
+  return exitCode(options.mode, results) === 0 && !declined && !legacyFailed ? 0 : 1;
 }

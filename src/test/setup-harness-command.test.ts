@@ -53,11 +53,24 @@ test("TTY without harness keeps the legacy consent path", async () => {
   assert.ok(adapter.calls.includes("configure"));
 });
 
-test("non-TTY voice-skill-only bypasses the harness guard and reaches the legacy voice path", async () => {
+test("non-TTY --voice-skill is an unknown option, not a way around the harness guard", async () => {
   const adapter = new FakeAdapter();
-  const code = await setup(["--voice-skill"], deps(adapter, false));
-  assert.equal(code, 1);
-  assert.ok(adapter.calls.includes("configure"));
+  const originalWrite = process.stderr.write;
+  let stderr = "";
+  process.stderr.write = ((chunk: string | Uint8Array) => {
+    stderr += String(chunk);
+    return true;
+  }) as typeof process.stderr.write;
+  let code: number;
+  try {
+    code = await setup(["--voice-skill"], deps(adapter, false));
+  } finally {
+    process.stderr.write = originalWrite;
+  }
+  assert.equal(code, 2);
+  assert.match(stderr, /Unknown setup option: --voice-skill/);
+  assert.doesNotMatch(stderr, /explicit harness targets/);
+  assert.deepEqual(adapter.calls, []);
 });
 
 test("non-TTY agent-hooks actions are not forced into harness scope", async () => {

@@ -651,7 +651,7 @@ test("setup agent-hooks prints Codex manual TOML and never touches Codex config"
   assert.match(output.stderr, /notify = \[\"/);
   assert.match(output.stderr, /\[\[hooks\.UserPromptSubmit\]\]/);
   assert.match(output.stderr, /matcher = \"\^apply_patch\$\"/);
-  assert.match(output.stderr, /Codex config is TOML, and rocky does not edit it. Paste the snippet above into your Codex config yourself./);
+  assert.match(output.stderr, /Codex config is TOML, and rocky does not edit it\. Paste the snippet above into your Codex config yourself\./);
   assert.match(output.stderr, /\/hooks/);
   assert.equal(readFileSync(configPath, "utf8"), before);
   assert.equal(existsSync(join(root, ".claude", "settings.json")), true);
@@ -663,7 +663,7 @@ test("setup agent-hooks prints Codex guidance but preserves Claude error exit", 
   const output = await captureStderr(() => setup(["--agent-hooks"], setupDependenciesFor(root, false)));
   assert.equal(output.code, 1);
   assert.match(output.stderr, /notify = \[\"/);
-  assert.match(output.stderr, /Codex config is TOML, and rocky does not edit it. Paste the snippet above into your Codex config yourself./);
+  assert.match(output.stderr, /Codex config is TOML, and rocky does not edit it\. Paste the snippet above into your Codex config yourself\./);
   assert.equal(existsSync(join(root, ".codex", "config.toml")), false);
 });
 

@@ -118,10 +118,12 @@ usage:
                             sessions instead of paying startup per call.
                             --ai passes through to recall and what. Type help
                             inside for the command list, quit or exit to leave.
-  rocky mcp                 serve the read-only memory tools over stdio.
+  rocky mcp                 serve read-only memory tools over stdio.
   rocky setup               configure detected MCP hosts with sanitized exposure.
   rocky setup --check       verify owned host registrations and the rocky MCP tools.
-  rocky setup --remove      remove owned rocky registrations from detected hosts.
+  rocky setup --remove      remove owned rocky registrations from detected hosts,
+                            and move a managed voice skill that an older release
+                            installed into a backup folder.
   rocky setup --replace     replace conflicting registrations after confirmation.
   rocky setup --harness     open a checkbox picker (Up/Down, Space, Enter) for hosts.
   rocky setup --harness <id> [--harness <id>] [--yes]
@@ -129,7 +131,6 @@ usage:
                             opencode, gemini-cli, and copilot-cli have MCP adapters.
   rocky setup --mcp-exposure sanitized|raw
                             choose the projected-memory exposure during configure.
-  rocky setup --voice-skill configure hosts and install the managed voice skill explicitly.
   rocky setup --agent-hooks
                             install Claude Code hooks after explicit consent and
                             print the Codex TOML. This installs the PreToolUse

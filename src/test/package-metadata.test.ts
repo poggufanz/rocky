@@ -38,7 +38,6 @@ const expectedFiles = [
   "assets/gui",
   "assets/teach-agent.md",
   "assets/teach-agent.en.md",
-  "skills/rocky-voice",
   "README.md",
   "LICENSE",
   "CHANGELOG.md",
@@ -110,9 +109,7 @@ function allowedPackPath(path: string): boolean {
     || path.startsWith("dist/listening/")
     || path.startsWith("assets/gui/")
     || path === "assets/teach-agent.md"
-    || path === "assets/teach-agent.en.md"
-    || path === "skills/rocky-voice/SKILL.md"
-    || path === "skills/rocky-voice/agents/openai.yaml";
+    || path === "assets/teach-agent.en.md";
 }
 
 function assertNoForbiddenArtifact(path: string): void {
@@ -370,8 +367,6 @@ test("npm pack dry-run exposes only the bounded production payload", async (t) =
     "package.json",
     "dist/index.js",
     "dist/agent/schema.js",
-    "skills/rocky-voice/SKILL.md",
-    "skills/rocky-voice/agents/openai.yaml",
   ]) {
     assert.ok(paths.includes(required), `missing packed path: ${required}`);
   }

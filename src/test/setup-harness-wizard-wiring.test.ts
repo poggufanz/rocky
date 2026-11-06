@@ -38,7 +38,7 @@ test("picker cannot mix with explicit selectors or other actions", () => {
     ["--harness", "--check"],
     ["--harness", "--remove"],
     ["--harness", "--agent-hooks"],
-    ["--harness", "--voice-skill"],
+    ["--harness", "--no-rationale-gate"],
     ["--harness", "--repo", "/r", "--allow-capture"],
   ]) {
     assert.match(usageError(argv), /picker/, argv.join(" "));
