@@ -620,7 +620,7 @@ test("why discloses an incomplete memory scan without claiming a path was omitte
   assert.equal(why(["package.json"], { load: () => fillerRecords(3), coverage: () => incomplete, ...output.deps }), 0);
   assert.deepEqual(output.sayLines, [coverageIncompleteLine("package.json")]);
   assert.deepEqual(output.outLines, [
-    "memory coverage incomplete: memory file too big. first 3 records heard, later lines not heard.",
+    "memory coverage incomplete: The memory file is too large. Only the first 3 records were read; later lines were not read.",
   ]);
   assert.equal([...output.sayLines, ...output.outLines].some((line) => line.includes("possible path was omitted") || line.includes("No record names")), false);
 });

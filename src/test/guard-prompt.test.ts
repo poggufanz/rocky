@@ -9,7 +9,7 @@ import { validateOutputLine } from "../ui/phrases.js";
 // Pinning test: the guard's y/n prompt must be printed via printf to stderr.
 // A `read -p "..." ... 2>/dev/null` writes the prompt to stderr, which the
 // line's own redirection discards — the pty smoke test cannot catch this
-// because it answers the prompt blindly.
+// because it answers the prompt without reading it.
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const hookSrc = readFileSync(join(repoRoot, "src", "shell", "rocky-hook.bash"), "utf8");
 

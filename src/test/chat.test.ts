@@ -214,7 +214,7 @@ test("chat answers over a read with a line that cannot be used, and says so in w
     join(home, "memory.jsonl"),
     `${JSON.stringify(failureRecord("persisted-failure-one-9d3f", "npm run build"))}\nthis line is not json\n`,
   );
-  const line = "memory coverage incomplete: 1 line I cannot use.";
+  const line = "memory coverage incomplete: 1 line could not be used.";
   await withGui(root, async (handle) => {
     for (const message of ["npm run build", "code: npm run build"]) {
       const answer = await post(handle, { message });
@@ -246,7 +246,7 @@ test("chat that finds no record still discloses a line that cannot be used", asy
     assert.equal(answer.status, 200);
     assert.equal(answer.wire?.decisionTrace.status, "low_confidence");
     assert.deepEqual(answer.wire?.evidenceCards, []);
-    assert.equal(answer.wire?.coverage?.reason, "memory coverage incomplete: 1 line I cannot use.");
-    assert.deepEqual(answer.wire?.trace, ["memory coverage incomplete: 1 line I cannot use."]);
+    assert.equal(answer.wire?.coverage?.reason, "memory coverage incomplete: 1 line could not be used.");
+    assert.deepEqual(answer.wire?.trace, ["memory coverage incomplete: 1 line could not be used."]);
   });
 });

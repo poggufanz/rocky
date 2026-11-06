@@ -306,7 +306,7 @@ test("why <file> prints the coverage disclosure before the stated reason and add
 
   assert.deepEqual(output.lines, [
     `say: ${coverageIncompleteLine("src/net.ts")}`,
-    "out: memory coverage incomplete: memory file too big. first 1 records heard, later lines not heard.",
+    "out: memory coverage incomplete: The memory file is too large. Only the first record was read; later lines were not read.",
     "say: You said: retries stay low",
     "out:   (2 minutes ago, human)",
   ]);

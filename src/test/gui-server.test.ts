@@ -215,7 +215,7 @@ test("teach answers with the witness card when a why was recorded", async () => 
     });
     assert.equal(card.status, 200);
     assert.ok(
-      String(card.body?.header ?? "").startsWith("rocky heard this"),
+      String(card.body?.header ?? "").startsWith("Witnessed:"),
       `expected a witness header, got ${JSON.stringify(card.body)}`,
     );
   });
@@ -231,7 +231,7 @@ test("teach never claims a witness it does not have", async () => {
     });
     assert.equal(card.status, 200);
     const header = String(card.body?.header ?? "");
-    assert.ok(header === "" || !header.startsWith("rocky heard this"));
+    assert.ok(header === "" || !header.startsWith("Witnessed:"));
   });
 });
 
@@ -339,7 +339,7 @@ test("teach with expand: 1 on witness hit includes expanded without altering wit
     });
     assert.equal(card.status, 200);
     assert.ok(card.body);
-    assert.ok(String(card.body.header ?? "").startsWith("rocky heard this"));
+    assert.ok(String(card.body.header ?? "").startsWith("Witnessed:"));
     assert.ok(card.body.expanded, "witness card must contain expanded");
     assert.equal(card.body.expanded.why, "function");
     assert.equal(card.body.expanded.start, 1);
@@ -795,7 +795,7 @@ test("home says what could not be used instead of coverage full", async () => {
     const partial = await json(h, "/api/home");
     assert.equal(partial.status, 200);
     assert.equal(partial.body.total, 1);
-    assert.equal(partial.body.coverageLine, "memory coverage incomplete: 1 line I cannot use.");
+    assert.equal(partial.body.coverageLine, "memory coverage incomplete: 1 line could not be used.");
     assert.equal(partial.body.coverage.truncated, true);
   });
 });

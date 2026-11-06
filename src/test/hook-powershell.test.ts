@@ -1176,7 +1176,7 @@ async function readMemoryRecordsSettled(memoryPath: string, minRecords: number, 
  * to exit" -- the precise fix (fix round 3, option 1) for the two tests
  * whose shims have a known, deliberate delay: wait for the process to
  * actually finish rather than assume a fixed sleep duration is over, or
- * blindly sleep past it.
+ * sleep past it without checking.
  */
 async function waitForMarker(markerPath: string, timeoutMs: number): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;

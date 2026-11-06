@@ -290,7 +290,7 @@ test("long interpolated fields (excerpt, cwd) are truncated, not printed verbati
 });
 
 const COVERAGE_PREFIX = "memory coverage incomplete";
-const CAP_LINE = `${COVERAGE_PREFIX}: first ${MAX_SUPPORTED_MEMORY_RECORDS} records heard, later lines not heard. counts here not all.`;
+const CAP_LINE = `${COVERAGE_PREFIX}: Only the first ${MAX_SUPPORTED_MEMORY_RECORDS} records were read; later lines were not read. These counts do not cover all of memory.`;
 
 /** One cheap failure per index, all in one directory and so in one session. */
 function failuresInOneSession(count: number): Record<string, unknown>[] {

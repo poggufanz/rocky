@@ -613,11 +613,11 @@ async function main() {
 
   const stats = childResult(process.execPath, [installedEntry, "stats"], { env });
   assertSuccess(stats, "installed stats");
-  assert.match(`${stats.stdout}\n${stats.stderr}`, /I remember 1 error/);
+  assert.match(`${stats.stdout}\n${stats.stderr}`, /1 error recorded\./);
 
   const hookStatus = childResult(process.execPath, [installedEntry, "hook", "status"], { env });
   assertSuccess(hookStatus, "installed hook status");
-  assert.match(`${hookStatus.stdout}\n${hookStatus.stderr}`, /ears not installed/);
+  assert.match(`${hookStatus.stdout}\n${hookStatus.stderr}`, /Bash: not installed\. Run rocky hook install to enable it\./);
 
   const networkGuard = join(packDirectory, "forbid-network.cjs");
   writeFileSync(
@@ -747,13 +747,13 @@ async function main() {
   // so the assertion cannot land between the two writes.
   waitFor(() => {
     const lines = readFileSync(labelsPath, "utf8").split("\n").filter(Boolean);
-    return lines.some((line) => line.replace(/^@\d+ /, "") === "week of work in memory. rocky digest, question");
+    return lines.some((line) => line.replace(/^@\d+ /, "") === "A week of work is recorded. Run rocky digest to see this week's intent pattern.");
   });
   const queuedLabels = readFileSync(labelsPath, "utf8").split("\n").filter(Boolean);
   assert.equal(queuedLabels.length, 1, "installed Claude turn leaves one coalesced label");
   assert.match(
     queuedLabels[0] ?? "",
-    /^@\d+ week of work in memory\. rocky digest, question$/u,
+    /^@\d+ A week of work is recorded\. Run rocky digest to see this week's intent pattern\.$/u,
     "the surviving label is the stamped weekly digest hint",
   );
   assert.doesNotMatch(queuedLabels[0] ?? "", /ghp_/u, "queued label must not contain raw token");
@@ -831,7 +831,7 @@ async function main() {
   assert.equal(labelsAfterCodex.length, 1, "installed Codex turn leaves one coalesced label without repeating the weekly hint");
   assert.match(
     labelsAfterCodex[0] ?? "",
-    /^@\d+ you say "move card right"\. it is margin-left\. I think\. check, question$/u,
+    /^@\d+ You said "move card right"\. The first change is margin-left\. Does that match\?$/u,
     "installed Codex turn must queue deterministic mapping label",
   );
   assert.doesNotMatch(labelsAfterCodex[0] ?? "", /ghp_/u, "Codex label must not contain raw token");

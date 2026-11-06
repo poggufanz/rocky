@@ -112,7 +112,6 @@ test("README and CLI help publish the installable command surface", () => {
     "rocky quiz",
     "rocky export",
     "rocky model",
-    "rocky setup --voice-skill",
     "rocky setup --agent-hooks",
     "rocky setup --uninstall-agent-hooks",
     "rocky setup --status",
@@ -121,6 +120,9 @@ test("README and CLI help publish the installable command surface", () => {
 
   assertContainsEvery(readmePage, "README", expected);
   assertContainsEvery(help, "CLI help", expected);
+  for (const [label, surface] of [["README", readmePage], ["CLI help", help]] as const) {
+    assert.doesNotMatch(surface, /--voice-skill/, `${label} still advertises the removed --voice-skill flag`);
+  }
 
   for (const [label, surface] of [["README", readmePage], ["CLI help", help]] as const) {
     assert.equal(hasActiveUnscopedRockyInstall(surface), false, `${label} advertises unscoped Rocky install`);
@@ -289,7 +291,7 @@ test("README identity and Plan 01/Plan 02 v0.5 boundary stay aligned", () => {
     "README package identity must come from the same name and version as package-info.ts",
   );
 
-  assert.match(readme, /\*\*The Good Trade\.\*\*/);
+  assert.match(readme, /\*\*The learning loop\.\*\*/);
   assert.ok(readme.includes("This is Rocky's v0.5 product hypothesis, not an established outcome."));
   assert.match(readme, /more effective/i);
   assert.match(readme, /does not mean (?:the )?model weights change/i);
@@ -319,10 +321,10 @@ test("README identity and Plan 01/Plan 02 v0.5 boundary stay aligned", () => {
     "search_knowledge",
     "fetch_record",
     "why_file",
-    "Reasons are hearsay Rocky heard, not verified facts.",
+    "Reasons are quotes recorded from a human or agent, not verified facts.",
   ]);
   assert.match(readme, /filtered raw JSONL on stdout/i);
-  assert.match(readme, /count\/persona line goes to stderr/i);
+  assert.match(readme, /count line goes to stderr/i);
   assert.match(readme, /user-owned, append-only data/i);
   assert.match(readme, /at most one question for that turn/i);
   assert.match(readme, /detached, non-blocking ambiguity check/i);
@@ -331,7 +333,7 @@ test("README identity and Plan 01/Plan 02 v0.5 boundary stay aligned", () => {
   assert.match(readme, /next shell prompt shows at most one label/i);
   assert.match(readme, /non-quiet `rocky watch` also shows it/i);
   assert.match(readme, /Labels never enter agent context/i);
-  assert.match(readme, /`watch --quiet` stays plain-facts mode and does not poll persona labels/i);
+  assert.match(readme, /`watch --quiet` stays plain-facts mode and does not poll dictionary labels/i);
   assert.match(readme, /Claude[^\n]*explicit consent/i);
   assert.match(readme, /pre-created[^\n]*\.claude/i);
   assert.match(readme, /Claude Code capture requires hook payload field `prompt_id`/i);
@@ -342,7 +344,7 @@ test("README identity and Plan 01/Plan 02 v0.5 boundary stay aligned", () => {
     "intent→mechanism dictionary",
     "reverse lookup",
     "ambiguity surfacing",
-    "curious question",
+    "ambiguity question",
     "digest",
   ]) {
     const row = reference.split("\n").find((line) => line.trimStart().startsWith("|") && line.toLowerCase().includes(mechanism));
@@ -400,43 +402,24 @@ test("README documents capability-gated Codex and staged Claude Code setup, not 
   );
 });
 
-test("README documents zero-eligible-host voice-skill behavior and Claude Desktop exclusion", () => {
-  assert.ok(
-    readme.includes("voice-skill: unavailable"),
-    "README must contain the exact aggregate detail line `voice-skill: unavailable`",
-  );
-  assert.match(
-    readme,
-    /voice-skill: unavailable[^\n]*exit(?:s|ing)? 1|exit(?:s|ing)? 1[^\n]*voice-skill: unavailable/i,
-    "README must pair `voice-skill: unavailable` with exit 1",
-  );
-  assert.match(
-    readme,
-    /prints `?voice-skill: unavailable`? and exits 1/i,
-    "README must describe a single aggregate `voice-skill: unavailable` result, not an invented per-host result",
-  );
-  assert.match(
-    readme,
-    /Claude Desktop never receives the voice skill/i,
-    "README must state Claude Desktop is never a voice-skill target",
-  );
+test("reference documents legacy voice skill cleanup on check and remove", () => {
+  assert.match(readme, /setup --check`? and `?rocky setup --status`? report a leftover copy/i);
+  assert.match(readme, /`rocky setup --remove` moves a managed copy into that host's backup folder after the same consent/i);
+  assert.match(readme, /left in place for you to delete/i);
+  assert.match(readme, /never change the exit code/i);
 });
 
-test("README status string for zero-eligible voice-skill matches the source literal exactly", () => {
-  const setupSource = readFileSync(join(packageRoot, "src", "commands", "setup.ts"), "utf8");
-  const match = /detail\("(voice-skill: [^"]+)"\)/.exec(setupSource);
-  assert.ok(match, "expected src/commands/setup.ts to contain the voice-skill unavailable detail literal");
-  assert.ok(
-    readme.includes(match![1]),
-    `README must contain the exact source literal ${JSON.stringify(match![1])}`,
-  );
+test("reference legacy voice skill line matches the source literal exactly", () => {
+  const source = readFileSync(join(packageRoot, "src", "setup", "legacy-voice-skill.ts"), "utf8");
+  const match = /status: "installed", detail: "([^"]+)"/.exec(source);
+  assert.ok(match, "expected src/setup/legacy-voice-skill.ts to contain the installed-detail literal");
+  const line = `legacy voice skill codex: installed; ${match![1]}`;
+  assert.ok(readme.includes(line), `reference must quote the exact line ${JSON.stringify(line)}`);
 });
 
 function isolatedCliRun(args: readonly string[]): { status: number | null; stdout: string; stderr: string } {
-  // Isolated HOME plus a PATH that resolves only `node` reproduces the default
-  // first-run state for a Linux user with no Codex CLI, no Claude Code CLI, and
-  // no Claude Desktop config - the exact scenario README's zero-eligible-host
-  // voice-skill sentence describes.
+  // Isolated HOME plus a PATH that resolves only `node`: a first-run user with
+  // no Codex CLI, no Claude Code CLI, and no Claude Desktop config.
   const root = mkdtempSync(join(tmpdir(), "rocky-doc-cli-"));
   try {
     const home = join(root, "home");
@@ -457,11 +440,7 @@ function isolatedCliRun(args: readonly string[]): { status: number | null; stdou
   }
 }
 
-test("compiled CLI honors the single zero-eligible-host voice-skill contract without --yes, matching README", async (t) => {
-  // This is the end-to-end proof behind the prose assertions above: the
-  // README claim holds against the real compiled CLI, not only against a
-  // string grep, for the exact flagless invocations the whole-branch review
-  // found diverging from the documented contract.
+test("compiled CLI rejects the removed --voice-skill flag as an unknown option", async (t) => {
   const cases = [
     { name: "configure", argv: ["setup", "--voice-skill"] },
     { name: "remove", argv: ["setup", "--remove", "--voice-skill"] },
@@ -470,11 +449,8 @@ test("compiled CLI honors the single zero-eligible-host voice-skill contract wit
   for (const entry of cases) {
     await t.test(entry.name, () => {
       const result = isolatedCliRun(entry.argv);
-      assert.equal(result.status, 1, `stderr: ${result.stderr}`);
-      assert.ok(
-        result.stderr.split("\n").includes("voice-skill: unavailable"),
-        `expected the exact "voice-skill: unavailable" line, got: ${result.stderr}`,
-      );
+      assert.equal(result.status, 2, `stderr: ${result.stderr}`);
+      assert.match(result.stderr, /^rocky: Unknown setup option: --voice-skill./m);
     });
   }
 });
@@ -849,7 +825,7 @@ test("scientific grounding keeps v0.5 learning mechanisms bounded and evidence c
   assert.doesNotMatch(grounding, /closes the comprehension loop/i);
   assert.doesNotMatch(grounding, /Rocky, probably/i);
   assert.doesNotMatch(grounding, /rocky remember/i);
-  assert.ok(grounding.includes("You teach, I remember. I remind, you understand. This is good trade."));
+  assert.ok(grounding.includes("You teach, it remembers. It reminds, you understand."));
   assert.ok(grounding.includes(
     "Original Rocky project tagline; not a quotation from an external source",
   ));

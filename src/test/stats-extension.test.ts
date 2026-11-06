@@ -133,7 +133,7 @@ test("memoryAgeDays pins the age-display edge cases", () => {
   assert.equal(memoryAgeDays([NOW - 36 * 3_600_000], NOW), 1);
 });
 
-const SKIPPED_ONLY_WORDS = "memory coverage incomplete: 1 line I cannot use. counts here not all.";
+const SKIPPED_ONLY_WORDS = "memory coverage incomplete: 1 line could not be used. These counts do not cover all of memory.";
 const SKIPPED_ONLY_COUNTERS = "memory coverage: version 1, scanned 2, skipped 1, truncated 0, complete false";
 
 /** One valid failure and one line that is not JSON: a read whole except for a line that cannot be used. */

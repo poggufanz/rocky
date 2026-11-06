@@ -16,7 +16,7 @@ test("output validator flags each retired voice marker", () => {
   assert.deepEqual(validateOutputLine("you fix, I remember"), ["first-person"]);
   assert.deepEqual(validateOutputLine("rocky binary gone. my hook stops."), ["first-person"]);
   assert.deepEqual(validateOutputLine("rocky hears the failure"), ["lore"]);
-  assert.deepEqual(validateOutputLine("a blind engineer"), ["lore"]);
+  assert.deepEqual(validateOutputLine("the hook's ears sleep now"), ["lore"]);
   assert.deepEqual(validateOutputLine("memory works 👀"), ["emoji"]);
 });
 
@@ -37,6 +37,7 @@ test("output validator accepts plain sentences, questions, and articles", () => 
 test("output validator does not flag words that only contain a marker", () => {
   assert.deepEqual(validateOutputLine("Readme and mypy and mine-field stay plain."), []);
   assert.deepEqual(validateOutputLine("goodness and badge are not verdicts."), []);
+  assert.deepEqual(validateOutputLine("Disk I/O stalled for 3 seconds."), []);
 });
 
 test("every catalog phrase follows the output rules", () => {

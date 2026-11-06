@@ -1809,7 +1809,7 @@ test("hook install reports a broken guard.rules write instead of dying with a ra
   assert.equal(result, 1);
   const output = sandbox.stderr();
   assert.ok(!/^Error:/m.test(output), "no raw Node error string ever reaches the user (a rocky message, not Node's) (C13)");
-  assert.ok(!output.includes("something break inside me"), "does not fall through to the generic top-level catch");
+  assert.ok(!output.includes("Unexpected internal error"), "does not fall through to the generic top-level catch");
   assert.deepEqual(
     readFileSync(sandbox.bashrc),
     bytes(`export SECRET=hunter2\n\n${BLOCK}`),
@@ -1888,7 +1888,7 @@ test("hook status reports a rocky message instead of a raw error when rocky-hook
   assert.equal(result, 1);
   const output = sandbox.stderr();
   assert.ok(!/^Error:/m.test(output), "no raw Node error string ever reaches the user (a rocky message, not Node's)");
-  assert.ok(!output.includes("something break inside me"), "does not fall through to the generic top-level catch");
+  assert.ok(!output.includes("Unexpected internal error"), "does not fall through to the generic top-level catch");
   assert.match(output, /Bash: installed, but the rocky home folder could not be checked\./);
   assert.deepEqual(readFileSync(sandbox.bashrc), bytes(`export A=1\n\n${BLOCK}`), "bashrc itself is untouched");
 });
@@ -1906,7 +1906,7 @@ test("hook status reports a rocky message instead of a raw error when guard.rule
   assert.equal(result, 1);
   const output = sandbox.stderr();
   assert.ok(!/^Error:/m.test(output), "no raw Node error string ever reaches the user");
-  assert.ok(!output.includes("something break inside me"), "does not fall through to the generic top-level catch");
+  assert.ok(!output.includes("Unexpected internal error"), "does not fall through to the generic top-level catch");
   assert.deepEqual(readFileSync(sandbox.bashrc), bytes(`export A=1\n\n${BLOCK}`), "bashrc itself is untouched");
 });
 

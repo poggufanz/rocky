@@ -335,7 +335,7 @@ test("real loopback E2E covers model use, recall, what, annotation, and ambiguit
     paths: resolveRockyPaths(),
     queueLabel: (line) => queued.push(line),
   });
-  assert.equal(ambiguity, 'you say "button". I hear 2 button before. which one, question');
+  assert.equal(ambiguity, 'You said "button". It matches 2 places in memory. Which one?');
   assert.deepEqual(queued, [ambiguity]);
   assert.equal(JSON.stringify(records), recordsBefore, "ambiguity model cannot mutate durable evidence");
 
