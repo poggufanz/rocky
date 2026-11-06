@@ -223,7 +223,7 @@ test("hookFail admits when the remembered fix's cwd differs from the cwd argumen
     const { result, tty } = captureTty(() => hookFail("elsewhere-test-cmd", 1, failCwd));
     assert.equal(result, 0);
     assert.ok(tty.includes(RECURRENCE_SAME_LINE), tty);
-    assert.match(tty, /The fix was recorded in a different place\./);
+    assert.match(tty, /But that fix comes from a different directory\./);
     assert.match(tty, new RegExp(`place: ${fixCwd.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
     assert.doesNotMatch(tty, /strong\.|confirmed/);
     assertPlainSpeech(tty);
@@ -239,9 +239,9 @@ test("hookFail compares elsewhere against linked failure cwd, not invocation cwd
   try {
     const { result, tty } = captureTty(() => hookFail("linked-cwd-test-cmd", 1, fixCwd));
     assert.equal(result, 0);
-    assert.match(tty, /The fix was recorded in a different place\./);
+    assert.match(tty, /But that fix comes from a different directory\./);
     assert.match(tty, new RegExp(`place: ${fixCwd.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
-    assert.match(tty, /possible only/);
+    assert.match(tty, /Possible only\. Check before acting\./);
     assert.doesNotMatch(tty, /strong\.|confirmed/);
   } finally {
     process.env.ROCKY_HOME = home;
@@ -254,7 +254,7 @@ test("hookFail says nothing extra when the remembered fix's cwd matches the cwd 
   try {
     const { result, tty } = captureTty(() => hookFail("samecwd-test-cmd", 1, sameCwd));
     assert.equal(result, 0);
-    assert.doesNotMatch(tty, /different place/);
+    assert.doesNotMatch(tty, /different directory/);
     assert.doesNotMatch(tty, /place:/);
     // sanity: the base fix line still speaks, proving the comparison — not
     // the whole fix branch — is what's being suppressed here.
@@ -295,7 +295,7 @@ test("hookSuccess says the command passes now when the failure was recorded unde
   }
 });
 
-test("hookFail does not call a same-directory fix 'a different place' because it was recorded under another spelling", () => {
+test("hookFail does not call a same-directory fix 'a different directory' because it was recorded under another spelling", () => {
   const gitBash = "C:/Users/x/p";
   const native = "C:\\Users\\x\\p";
   seedElsewhereFix(gitBash, native, "spelling-test-cmd", 1);
@@ -305,7 +305,7 @@ test("hookFail does not call a same-directory fix 'a different place' because it
     // sanity: the base fix line speaks either way, so only the elsewhere
     // admission can differ between win32 (same directory) and POSIX (two).
     assert.ok(tty.includes(RECURRENCE_SAME_LINE), tty);
-    assert.equal(/different place/.test(tty), process.platform !== "win32");
+    assert.equal(/different directory/.test(tty), process.platform !== "win32");
   } finally {
     process.env.ROCKY_HOME = home;
   }
@@ -368,10 +368,10 @@ test("hookFail admits a fingerprint-matched fix may be a different command, not 
     const { result, tty } = captureTty(() => hookFail(currentCmd, 1, diffCwd));
     assert.equal(result, 0);
     assert.doesNotMatch(tty, /you fix with/);
-    assert.match(tty, /Last time, this command passed afterward:/);
+    assert.match(tty, /Last time, you ran:/);
     assert.match(tty, new RegExp(seededCmd.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
-    assert.match(tty, /It is only a possible fix\./);
-    assert.match(tty, /Try it if it applies\./);
+    assert.match(tty, /Possible fix only\./);
+    assert.match(tty, /Try that command\?/);
     assertPlainSpeech(tty);
   } finally {
     process.env.ROCKY_HOME = home;
@@ -379,8 +379,8 @@ test("hookFail admits a fingerprint-matched fix may be a different command, not 
 });
 
 test("the elsewhere-admission lines follow the output rules", () => {
-  assert.deepEqual(validateOutputLine("The fix was recorded in a different place."), []);
-  assert.deepEqual(validateOutputLine("Treat it as possible only, and check it first."), []);
+  assert.deepEqual(validateOutputLine("But that fix comes from a different directory."), []);
+  assert.deepEqual(validateOutputLine("Possible only. Check before acting."), []);
 });
 
 test("hookFail speaks the full-record hint with the quoted command last, and plainly", () => {
@@ -471,7 +471,7 @@ test("hookFail discloses incomplete memory coverage without claiming a prior fix
     assert.equal(result, 0);
     assert.match(tty, /^rocky: Memory coverage is incomplete, so no prior fix is claimed\. Check the details below\.$/m);
     assert.match(tty, /^ {4}\S/m, "a detail line follows the notice");
-    assert.doesNotMatch(tty, /Same error|passed afterward/);
+    assert.doesNotMatch(tty, /Same error|Last time, you ran/);
     assertPlainSpeech(tty);
   } finally {
     process.env.ROCKY_HOME = home;

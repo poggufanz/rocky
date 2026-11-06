@@ -155,17 +155,17 @@ export function hookFail(cmd: string, exitCode: number, cwd: string): number {
     if (sameCommand) {
       sayTty(phrase("fix-recurrence-same"));
     } else {
-      sayTty("Last time, this command passed afterward:");
+      sayTty("Last time, you ran:");
       detailTty(safeTerminalLine(fix.cmd));
-      sayTty("It is only a possible fix.");
+      sayTty("Possible fix only.");
     }
     const elsewhere = fixFromElsewhere(fix, withFix.cwd);
     if (elsewhere !== undefined) {
-      sayTty("The fix was recorded in a different place.");
+      sayTty("But that fix comes from a different directory.");
       detailTty(`place: ${safeTerminalLine(elsewhere)}`);
-      sayTty("Treat it as possible only, and check it first.");
+      sayTty("Possible only. Check before acting.");
     }
-    if (!sameCommand) sayTty("Try it if it applies.");
+    if (!sameCommand) sayTty("Try that command?");
   } else if (!isTypoSymptom(cmd, exitCode)) {
     const hint = deepMemoryHint(cmd);
     // No hint means the command already went through `rocky run`, so the full
