@@ -1,5 +1,7 @@
-// Rocky global OpenCode plugin template — nudge plus capture, never strict by default.
+// rocky global OpenCode plugin template — nudge plus capture, never strict by default.
 // Installed by `rocky setup` to ~/.config/opencode/plugins/rocky.ts. Zero dependencies.
+const BLOCK_PREFIX = "rocky: Edit blocked";
+
 export const RockyPlugin = async () => ({
   "shell.env": async (_input: any, output: any) => {
     try {
@@ -26,9 +28,9 @@ export const RockyPlugin = async () => ({
       });
       const result = spawnSync("rocky", ["hook", "gate-event", "generic"], { input: payload, encoding: "utf8", timeout: 1500 });
       const stdout = String((result as { stdout?: unknown }).stdout ?? "");
-      if (stdout.includes('"deny"')) throw new Error(`Rocky Policy: edit blocked until why is recorded. run rocky hook agent-event generic --rationale "<why>" --files ${file}`);
+      if (stdout.includes('"deny"')) throw new Error(`${BLOCK_PREFIX} until the reason is recorded. Record it with: rocky hook agent-event generic --rationale "<why>" --files ${file}`);
     } catch (error) {
-      if (error instanceof Error && error.message.startsWith("Rocky Policy:")) throw error;
+      if (error instanceof Error && error.message.startsWith(BLOCK_PREFIX)) throw error;
       /* fail open */
     }
   },

@@ -181,12 +181,12 @@ function claimLines(names: string[]): string[] {
 function sessionAffinitySanitizeAndPruneSmoke(t: TestContext, exe: string): void {
   const sandbox = speechSandbox(t, "rocky-hook-speech-affinity-");
 
-  writeSpeechFixture(sandbox.speechDir, "owned.txt", "[Rocky] owned message, question\n");
-  const maliciousText = `[Rocky] safe-before${String.fromCharCode(0x1b)}[2Jsafe-after, question\n`;
+  writeSpeechFixture(sandbox.speechDir, "owned.txt", "rocky: Owned message.\n");
+  const maliciousText = `rocky: safe-before${String.fromCharCode(0x1b)}[2Jsafe-after.\n`;
   writeSpeechFixture(sandbox.speechDir, "owned-malicious.txt", maliciousText);
 
-  const foreignRecent = writeSpeechFixture(sandbox.speechDir, "foreign-recent.txt", "[Rocky] foreign recent message, question\n");
-  const foreignStale = writeSpeechFixture(sandbox.speechDir, "foreign-stale.txt", "[Rocky] foreign stale message, question\n");
+  const foreignRecent = writeSpeechFixture(sandbox.speechDir, "foreign-recent.txt", "rocky: Foreign recent message.\n");
+  const foreignStale = writeSpeechFixture(sandbox.speechDir, "foreign-stale.txt", "rocky: Foreign stale message.\n");
   ageFile(foreignStale, 60); // 1 hour: 6x the shipped 10-minute cutoff, unambiguously stale
 
   const staleTmp = writeSpeechFixture(sandbox.speechDir, "orphan.txt.9999.tmp", "half-written fragment, never completed");
@@ -198,9 +198,9 @@ function sessionAffinitySanitizeAndPruneSmoke(t: TestContext, exe: string): void
   assert.equal(result.status, 0, `driver script must exit cleanly; stderr: ${result.stderr}`);
 
   // Finding 1: only this session's own claimed files are ever spoken.
-  assert.match(result.stderr, /owned message, question/, `owned file must be spoken; got: ${result.stderr}`);
+  assert.match(result.stderr, /rocky: Owned message\./, `owned file must be spoken; got: ${result.stderr}`);
   assert.ok(
-    !result.stderr.includes("foreign recent message") && !result.stderr.includes("foreign stale message"),
+    !result.stderr.includes("Foreign recent message") && !result.stderr.includes("Foreign stale message"),
     `unclaimed files must never be spoken, regardless of age; got: ${result.stderr}`,
   );
 
@@ -243,7 +243,7 @@ test(
 
 function nonAsciiRoundTripSmoke(t: TestContext, exe: string): void {
   const sandbox = speechSandbox(t, "rocky-hook-speech-encoding-");
-  const text = "[Rocky] this error again. deep memory need stderr. run with: rocky run 'Get-Item ./café-müller-日本語', question\n    place: café-dir\n";
+  const text = "rocky: Same error again. The hook captures only the command, not stderr. To capture stderr too, run: rocky run 'Get-Item ./café-müller-日本語'\n    place: café-dir\n";
   writeSpeechFixture(sandbox.speechDir, "nonascii.txt", text);
 
   const result = runPromptOnce(exe, sandbox.rockyHome, claimLines(["nonascii.txt"]));

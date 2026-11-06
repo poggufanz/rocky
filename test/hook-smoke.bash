@@ -54,14 +54,14 @@ bash --noprofile --norc -i -c '
   __rocky_precmd
 ' >"$LABEL_STDOUT" 2>"$LABEL_STDERR"
 check "first passive label prints once to stderr" \
-  grep -qF '[Rocky] first label' "$LABEL_STDERR"
+  grep -qF 'rocky: first label' "$LABEL_STDERR"
 check "second passive label prints once to stderr" \
-  grep -qF '[Rocky] second label' "$LABEL_STDERR"
+  grep -qF 'rocky: second label' "$LABEL_STDERR"
 check "passive labels preserve FIFO order" \
-  test "$(grep -nF '[Rocky] first label' "$LABEL_STDERR" | head -n 1 | cut -d: -f1)" -lt \
-       "$(grep -nF '[Rocky] second label' "$LABEL_STDERR" | head -n 1 | cut -d: -f1)"
+  test "$(grep -nF 'rocky: first label' "$LABEL_STDERR" | head -n 1 | cut -d: -f1)" -lt \
+       "$(grep -nF 'rocky: second label' "$LABEL_STDERR" | head -n 1 | cut -d: -f1)"
 check "third empty prompt is silent" \
-  test "$(grep -cF '[Rocky]' "$LABEL_STDERR" || true)" -eq 2
+  test "$(grep -cF 'rocky: ' "$LABEL_STDERR" || true)" -eq 2
 check "passive labels keep stdout empty" test ! -s "$LABEL_STDOUT"
 check "last passive label removes empty queue" test ! -e "$ROCKY_HOME/labels"
 check "normal passive drain leaves no private claim" test -z "$(find "$ROCKY_HOME" -maxdepth 1 -name '.labels.claim.*' -print -quit)"
@@ -78,7 +78,7 @@ bash --noprofile --norc -i -c '
   __rocky_precmd
 ' >/dev/null 2>"$STAMP_STDERR"
 check "fresh stamped label prints without its stamp" \
-  grep -qF '[Rocky] fresh label' "$STAMP_STDERR"
+  grep -qF 'rocky: fresh label' "$STAMP_STDERR"
 check "stale stamped label never prints" \
   test "$(grep -cF 'stale label' "$STAMP_STDERR" || true)" -eq 0
 check "stale stamped label is still consumed" test ! -e "$ROCKY_HOME/labels"
@@ -346,7 +346,7 @@ run_label_prompt "$LABEL_HOME" C "$LABEL_STDOUT" "$LABEL_STDERR" "" "$LABEL_RACE
 check "claim crash is bounded" test "$RACE_STATUS" -eq 0
 check "claim crash leaves marker" test -e "$LABEL_RACE_MARKER"
 run_label_prompt "$LABEL_HOME" C "$LABEL_STDOUT" "$LABEL_STDERR"
-check "crashed claim retries once" grep -qF '[Rocky] crash retry label' "$LABEL_STDERR"
+check "crashed claim retries once" grep -qF 'rocky: crash retry label' "$LABEL_STDERR"
 check "crashed claim is cleaned" test -z "$(find "$LABEL_HOME" -maxdepth 1 -name '.labels.claim.*' -print -quit)"
 
 # Atomic ownership is a directory rename boundary, not a marker publication.
@@ -362,7 +362,7 @@ mkdir -p "$LABEL_RACE_DIR" "$LABEL_HOME/.labels.claim.010-rename-boundary"
 printf 'atomic retained head\n' > "$LABEL_HOME/.labels.claim.010-rename-boundary/remainder.next.1"
 run_two_label_prompts "$LABEL_HOME" C "$CONCURRENT_OUT1" "$CONCURRENT_ERR1" \
   "$CONCURRENT_OUT2" "$CONCURRENT_ERR2" "$LABEL_RACE_BIN" atomic-rename-boundary
-ATOMIC_HEAD_COUNT="$(cat "$CONCURRENT_ERR1" "$CONCURRENT_ERR2" | grep -a -cF '[Rocky] atomic retained head' || true)"
+ATOMIC_HEAD_COUNT="$(cat "$CONCURRENT_ERR1" "$CONCURRENT_ERR2" | grep -a -cF 'rocky: atomic retained head' || true)"
 check "ownership rename race barrier fires" test -e "$LABEL_RACE_DIR/rename-boundary"
 check "ownership rename race prints once" test "$ATOMIC_HEAD_COUNT" -eq 1
 check "ownership rename race leaves no source" \
@@ -380,11 +380,11 @@ run_label_prompt "$LABEL_HOME" C "$LABEL_STDOUT" "$LABEL_STDERR" "" "$LABEL_RACE
 check "owner rename crash is bounded" test "$RACE_STATUS" -eq 0
 check "owner rename crash reaches rename boundary" test -e "$LABEL_RACE_DIR/owner-rename-boundary"
 check "owner rename crash prints nothing before retry" \
-  test "$(grep -a -cF '[Rocky]' "$LABEL_STDERR" || true)" -eq 0
+  test "$(grep -a -cF 'rocky: ' "$LABEL_STDERR" || true)" -eq 0
 check "owner rename crash retains renamed claim" \
   test -n "$(find "$LABEL_HOME" -maxdepth 1 -type d -name '.labels.claim.*.work.*' -print -quit)"
 run_label_prompt "$LABEL_HOME" C "$LABEL_STDOUT" "$LABEL_STDERR"
-check "owner rename crash retries head once" grep -qF '[Rocky] owner rename crash retry' "$LABEL_STDERR"
+check "owner rename crash retries head once" grep -qF 'rocky: owner rename crash retry' "$LABEL_STDERR"
 check "owner rename crash claim is cleaned" \
   test -z "$(find "$LABEL_HOME" -maxdepth 1 -name '.labels.claim.*' -print -quit)"
 
@@ -408,7 +408,7 @@ if [[ "$LIVE_OWNER_START" =~ ^[1-9][0-9]*$ ]]; then
   printf 'younger public label\n' > "$LABEL_HOME/labels"
   run_label_prompt "$LABEL_HOME" C "$LABEL_STDOUT" "$LABEL_STDERR"
   check "exact live owner blocks younger claim" \
-    test "$(grep -a -cF '[Rocky]' "$LABEL_STDERR" || true)" -eq 0
+    test "$(grep -a -cF 'rocky: ' "$LABEL_STDERR" || true)" -eq 0
   check_file_contains "exact live owner retains head" 'live owner head' \
     "$LABEL_HOME/.labels.claim.030-live-owner.work.$LIVE_OWNER_PID.$LIVE_OWNER_START.301/remainder.next.1"
   check "exact live owner retains public queue" grep -qF 'younger public label' "$LABEL_HOME/labels"
@@ -420,7 +420,7 @@ if [[ "$LIVE_OWNER_START" =~ ^[1-9][0-9]*$ ]]; then
   mkdir -p "$LABEL_RACE_DIR" "$LABEL_HOME/.labels.claim.040-reused-owner.work.$$.$MISMATCHED_START.401"
   printf 'reused PID reclaimed\n' > "$LABEL_HOME/.labels.claim.040-reused-owner.work.$$.$MISMATCHED_START.401/remainder.next.1"
   run_label_prompt "$LABEL_HOME" C "$LABEL_STDOUT" "$LABEL_STDERR"
-  check "mismatched live PID start is reclaimed" grep -qF '[Rocky] reused PID reclaimed' "$LABEL_STDERR"
+  check "mismatched live PID start is reclaimed" grep -qF 'rocky: reused PID reclaimed' "$LABEL_STDERR"
   check "mismatched owner claim is cleaned" \
     test -z "$(find "$LABEL_HOME" -maxdepth 1 -name '.labels.claim.*' -print -quit)"
   rm -rf "$LABEL_HOME"/.labels.claim.*
@@ -436,7 +436,7 @@ if [[ "$LIVE_OWNER_START" =~ ^[1-9][0-9]*$ ]]; then
     mkdir -p "$LABEL_RACE_DIR" "$LABEL_HOME/.labels.claim.050-dead-owner.work.$DEAD_OWNER_PID.12345.501"
     printf 'dead owner reclaimed\n' > "$LABEL_HOME/.labels.claim.050-dead-owner.work.$DEAD_OWNER_PID.12345.501/remainder.next.1"
     run_label_prompt "$LABEL_HOME" C "$LABEL_STDOUT" "$LABEL_STDERR"
-    check "dead owner claim is reclaimed" grep -qF '[Rocky] dead owner reclaimed' "$LABEL_STDERR"
+    check "dead owner claim is reclaimed" grep -qF 'rocky: dead owner reclaimed' "$LABEL_STDERR"
     check "dead owner probe leaks no bash error" \
       test "$(grep -a -c 'No such file' "$LABEL_STDERR" || true)" -eq 0
     rm -rf "$LABEL_HOME"/.labels.claim.*
@@ -458,10 +458,10 @@ printf 'valid after invalid\n' > "$LABEL_HOME/.labels.claim.020-valid/remainder.
 printf 'public after retained\n' > "$LABEL_HOME/labels"
 run_label_prompt "$LABEL_HOME" C "$LABEL_STDOUT" "$LABEL_STDERR"
 check "invalid retained claim does not starve valid retained" \
-  grep -qF '[Rocky] valid after invalid' "$LABEL_STDERR"
+  grep -qF 'rocky: valid after invalid' "$LABEL_STDERR"
 run_label_prompt "$LABEL_HOME" C "$LABEL_STDOUT" "$LABEL_STDERR"
 check "invalid retained claim does not starve public queue" \
-  grep -qF '[Rocky] public after retained' "$LABEL_STDERR"
+  grep -qF 'rocky: public after retained' "$LABEL_STDERR"
 check "invalid retained claim remains private" \
   test -n "$(find "$LABEL_HOME" -type f -name 'remainder.next.bad' -print -quit)"
 rm -rf "$LABEL_HOME"/.labels.claim.* "$LABEL_RACE_DIR"
@@ -481,13 +481,13 @@ run_label_prompt "$LABEL_HOME" C "$LABEL_STDOUT" "$LABEL_STDERR" "" "$LABEL_RACE
 check "invalid-marker failure prompt stays bounded" test "$RACE_STATUS" -eq 0
 check "invalid-marker failure is exercised" test -e "$LABEL_RACE_DIR/invalid-marker-attempt"
 check "invalid-marker failure does not starve valid retained" \
-  grep -qF '[Rocky] valid after marker failure' "$LABEL_STDERR"
+  grep -qF 'rocky: valid after marker failure' "$LABEL_STDERR"
 check "invalid-marker failure keeps bytes private" \
   test -n "$(find "$LABEL_HOME" -type f -name 'remainder.next.bad' -print -quit)"
 run_label_prompt "$LABEL_HOME" C "$LABEL_STDOUT" "$LABEL_STDERR" "" "$LABEL_RACE_BIN" \
   invalid-marker-fail "$LABEL_HOME/.labels.claim.010-invalid-marker-fail/remainder.next.bad"
 check "invalid-marker failure does not starve public queue" \
-  grep -qF '[Rocky] public after marker failure' "$LABEL_STDERR"
+  grep -qF 'rocky: public after marker failure' "$LABEL_STDERR"
 rm -rf "$LABEL_HOME"/.labels.claim.* "$LABEL_HOME/labels" "$LABEL_RACE_DIR"
 
 # A crash after private remainder persistence but before display must retry the
@@ -498,11 +498,11 @@ RACE_STATUS=0
 run_label_prompt "$LABEL_HOME" C "$LABEL_STDOUT" "$LABEL_STDERR" "" "$LABEL_RACE_BIN" crash-after-remainder "$LABEL_HOME/labels"
 check "persisted remainder crash is bounded" test "$RACE_STATUS" -eq 0
 check "persisted remainder crash leaves marker" test -e "$LABEL_RACE_MARKER"
-check "persisted remainder crash prints nothing early" test "$(grep -a -cF '[Rocky]' "$LABEL_STDERR" || true)" -eq 0
+check "persisted remainder crash prints nothing early" test "$(grep -a -cF 'rocky: ' "$LABEL_STDERR" || true)" -eq 0
 run_label_prompt "$LABEL_HOME" C "$LABEL_STDOUT" "$LABEL_STDERR"
-check "persisted remainder retries original head first" grep -qF '[Rocky] persist crash first' "$LABEL_STDERR"
+check "persisted remainder retries original head first" grep -qF 'rocky: persist crash first' "$LABEL_STDERR"
 run_label_prompt "$LABEL_HOME" C "$LABEL_STDOUT" "$LABEL_STDERR"
-check "persisted remainder prints second after head" grep -qF '[Rocky] persist crash second' "$LABEL_STDERR"
+check "persisted remainder prints second after head" grep -qF 'rocky: persist crash second' "$LABEL_STDERR"
 check "persisted remainder crash claim is cleaned" test -z "$(find "$LABEL_HOME" -maxdepth 1 -name '.labels.claim.*' -print -quit)"
 
 # A public-path swap is injected after descriptor validation. The hardened path
@@ -515,7 +515,7 @@ RACE_STATUS=0
 run_label_prompt "$LABEL_HOME" C "$LABEL_STDOUT" "$LABEL_STDERR" "" "$LABEL_RACE_BIN" destination-swap "$LABEL_HOME/labels" || RACE_STATUS=$?
 check "destination swap prompt stays bounded" test "$RACE_STATUS" -eq 0
 check "destination collision is injected at descriptor boundary" test -e "$LABEL_RACE_MARKER"
-check "destination swap still prints claimed head" grep -qF '[Rocky] destination race first' "$LABEL_STDERR"
+check "destination swap still prints claimed head" grep -qF 'rocky: destination race first' "$LABEL_STDERR"
 check "destination swap does not write outside Rocky home" test -z "$(find "$LABEL_ESCAPE" -mindepth 1 -maxdepth 1 -type f -print -quit)"
 check "destination swap leaves symlink collision visible" test -L "$LABEL_HOME/labels"
 rm -f "$LABEL_HOME/labels"
@@ -530,7 +530,7 @@ run_label_prompt "$LABEL_HOME" C "$LABEL_STDOUT" "$LABEL_STDERR" "" "$LABEL_RACE
 check "destination FIFO collision stays bounded" test "$RACE_STATUS" -eq 0
 check "destination FIFO collision is injected at descriptor boundary" test -e "$LABEL_RACE_MARKER"
 check "destination FIFO collision remains visible" test -p "$LABEL_HOME/labels"
-check "destination FIFO collision still prints claimed head" grep -qF '[Rocky] destination fifo first' "$LABEL_STDERR"
+check "destination FIFO collision still prints claimed head" grep -qF 'rocky: destination fifo first' "$LABEL_STDERR"
 rm -f "$LABEL_HOME/labels"
 rm -rf "$LABEL_HOME"/.labels.claim.*
 
@@ -542,12 +542,12 @@ printf 'old before late\nold after late\n' > "$LABEL_HOME/labels"
 RACE_STATUS=0
 run_label_prompt "$LABEL_HOME" C "$LABEL_STDOUT" "$LABEL_STDERR" "" "$LABEL_RACE_BIN" late-producer "$LABEL_HOME/labels" || RACE_STATUS=$?
 check "late producer prompt stays bounded" test "$RACE_STATUS" -eq 0
-check "late producer keeps first old label" grep -qF '[Rocky] old before late' "$LABEL_STDERR"
+check "late producer keeps first old label" grep -qF 'rocky: old before late' "$LABEL_STDERR"
 check "late producer publishes newer public label" grep -qF 'late producer label' "$LABEL_HOME/labels"
 run_label_prompt "$LABEL_HOME" C "$LABEL_STDOUT" "$LABEL_STDERR"
-check "retained remainder is retried" grep -qF '[Rocky] old after late' "$LABEL_STDERR"
+check "retained remainder is retried" grep -qF 'rocky: old after late' "$LABEL_STDERR"
 run_label_prompt "$LABEL_HOME" C "$LABEL_STDOUT" "$LABEL_STDERR"
-check "late label follows retained remainder" grep -qF '[Rocky] late producer label' "$LABEL_STDERR"
+check "late label follows retained remainder" grep -qF 'rocky: late producer label' "$LABEL_STDERR"
 
 LABEL_STDOUT="$TMP/malformed-label.stdout"
 LABEL_STDERR="$TMP/malformed-label.stderr"
@@ -558,7 +558,7 @@ LABEL_VALUE="${LABEL_VALUE}"$'\342\200\256bidi\342\200\256 end'
 printf '%s\nsecond safe label\n' "$LABEL_VALUE" > "$LABEL_HOME/labels"
 run_label_prompt "$LABEL_HOME" C "$LABEL_STDOUT" "$LABEL_STDERR"
 check "label command substitution stays inert" test ! -e "$LABEL_MARKER"
-check "label percent text stays data" grep -qF '[Rocky] literal %s $(touch "' "$LABEL_STDERR"
+check "label percent text stays data" grep -qF 'rocky: literal %s $(touch "' "$LABEL_STDERR"
 check "label ANSI and controls are stripped" \
   bash -c '! LC_ALL=C grep -a -q "$(printf "\\033")" "$1"' bash "$LABEL_STDERR"
 check "label BEL is stripped" \
@@ -570,15 +570,15 @@ check "label bidi controls are stripped" \
 check "label sanitization keeps stdout empty" test ! -s "$LABEL_STDOUT"
 check "label probe is not spawned for display" test ! -e "$LABEL_SPAWN"
 run_label_prompt "$LABEL_HOME" C "$LABEL_STDOUT" "$LABEL_STDERR"
-check "sanitized label still dequeues first line" grep -qF '[Rocky] second safe label' "$LABEL_STDERR"
+check "sanitized label still dequeues first line" grep -qF 'rocky: second safe label' "$LABEL_STDERR"
 check "sanitized label drain removes private claim" test -z "$(find "$LABEL_HOME" -maxdepth 1 -name '.labels.claim.*' -print -quit)"
 
 # An empty first line is claimed without display, so it cannot block FIFO order.
 printf '\nlast after empty\n' > "$LABEL_HOME/labels"
 run_label_prompt "$LABEL_HOME" C "$LABEL_STDOUT" "$LABEL_STDERR"
-check "empty label line is silent" test "$(grep -a -cF '[Rocky]' "$LABEL_STDERR" || true)" -eq 0
+check "empty label line is silent" test "$(grep -a -cF 'rocky: ' "$LABEL_STDERR" || true)" -eq 0
 run_label_prompt "$LABEL_HOME" C "$LABEL_STDOUT" "$LABEL_STDERR"
-check "label after empty line prints" grep -qF '[Rocky] last after empty' "$LABEL_STDERR"
+check "label after empty line prints" grep -qF 'rocky: last after empty' "$LABEL_STDERR"
 check "empty-first-line claim drains" test -z "$(find "$LABEL_HOME" -maxdepth 1 -name '.labels.claim.*' -print -quit)"
 
 # Keep the shell boundary aligned with agent-hook.ts: invisible/bidi controls
@@ -588,7 +588,7 @@ LABEL_VALUE="${LABEL_VALUE}"$'\330\234\342\200\213\342\200\220\342\201\240\342\2
 LABEL_VALUE="${LABEL_VALUE} after safe"
 printf '%s\n' "$LABEL_VALUE" > "$LABEL_HOME/labels"
 run_label_prompt "$LABEL_HOME" C "$LABEL_STDOUT" "$LABEL_STDERR"
-check "C locale missing bidi controls leave benign text" grep -qF '[Rocky] before safe' "$LABEL_STDERR"
+check "C locale missing bidi controls leave benign text" grep -qF 'rocky: before safe' "$LABEL_STDERR"
 check "C locale strips U+061C" bash -c '! LC_ALL=C grep -a -q "$(printf "\\330\\234")" "$1"' bash "$LABEL_STDERR"
 check "C locale strips U+200B" bash -c '! LC_ALL=C grep -a -q "$(printf "\\342\\200\\213")" "$1"' bash "$LABEL_STDERR"
 check "C locale strips U+2060" bash -c '! LC_ALL=C grep -a -q "$(printf "\\342\\201\\240")" "$1"' bash "$LABEL_STDERR"
@@ -605,26 +605,26 @@ printf protected > "$LABEL_FIXED_TARGET"
 ln -s "$LABEL_FIXED_TARGET" "$LABEL_HOME/labels.tmp"
 printf 'unique temp label\n' > "$LABEL_HOME/labels"
 run_label_prompt "$LABEL_HOME" C "$LABEL_STDOUT" "$LABEL_STDERR"
-check "unique temp label prints" grep -qF '[Rocky] unique temp label' "$LABEL_STDERR"
+check "unique temp label prints" grep -qF 'rocky: unique temp label' "$LABEL_STDERR"
 check "fixed labels.tmp symlink remains untouched" test -L "$LABEL_HOME/labels.tmp"
 check "fixed temp symlink target remains untouched" test "$(cat "$LABEL_FIXED_TARGET")" = protected
 
 # Disabled mode leaves queued labels for the next enabled prompt.
 printf 'off label\n' > "$LABEL_HOME/labels"
 run_label_prompt "$LABEL_HOME" C "$LABEL_STDOUT" "$LABEL_STDERR" 1
-check "ROCKY_OFF suppresses label display" test "$(grep -a -cF '[Rocky]' "$LABEL_STDERR" || true)" -eq 0
+check "ROCKY_OFF suppresses label display" test "$(grep -a -cF 'rocky: ' "$LABEL_STDERR" || true)" -eq 0
 check "ROCKY_OFF leaves labels queued" grep -qF 'off label' "$LABEL_HOME/labels"
 run_label_prompt "$LABEL_HOME" C "$LABEL_STDOUT" "$LABEL_STDERR"
-check "queued label displays after ROCKY_OFF" grep -qF '[Rocky] off label' "$LABEL_STDERR"
+check "queued label displays after ROCKY_OFF" grep -qF 'rocky: off label' "$LABEL_STDERR"
 
 # Missing, empty, directory, FIFO, symlink, unreadable, and oversized queues
 # all fail open without opening special files or mutating unsafe paths.
 rm -f "$LABEL_HOME/labels"
 run_label_prompt "$LABEL_HOME" C "$LABEL_STDOUT" "$LABEL_STDERR"
-check "missing labels queue is silent" test "$(grep -a -cF '[Rocky]' "$LABEL_STDERR" || true)" -eq 0
+check "missing labels queue is silent" test "$(grep -a -cF 'rocky: ' "$LABEL_STDERR" || true)" -eq 0
 : > "$LABEL_HOME/labels"
 run_label_prompt "$LABEL_HOME" C "$LABEL_STDOUT" "$LABEL_STDERR"
-check "empty labels queue is silent" test "$(grep -a -cF '[Rocky]' "$LABEL_STDERR" || true)" -eq 0
+check "empty labels queue is silent" test "$(grep -a -cF 'rocky: ' "$LABEL_STDERR" || true)" -eq 0
 rm -f "$LABEL_HOME/labels"
 mkdir "$LABEL_HOME/labels"
 run_label_prompt "$LABEL_HOME" C "$LABEL_STDOUT" "$LABEL_STDERR"
@@ -650,7 +650,7 @@ if [[ -r "$LABEL_HOME/labels" ]]; then
   echo "ok    - unreadable labels queue check skipped for privileged user"
 else
   run_label_prompt "$LABEL_HOME" C "$LABEL_STDOUT" "$LABEL_STDERR"
-  check "unreadable labels queue is silent" test "$(grep -a -cF '[Rocky]' "$LABEL_STDERR" || true)" -eq 0
+  check "unreadable labels queue is silent" test "$(grep -a -cF 'rocky: ' "$LABEL_STDERR" || true)" -eq 0
   UNREADABLE_CLAIM="$(find "$LABEL_HOME" -maxdepth 2 -type f -path "$LABEL_HOME/.labels.claim.*/queue" -print -quit)"
   check "unreadable labels queue remains recoverable" test -n "$UNREADABLE_CLAIM"
   check "unreadable claim retains bytes" test "$(stat -c %s "$UNREADABLE_CLAIM" 2>/dev/null || stat -f %z "$UNREADABLE_CLAIM" 2>/dev/null)" -eq 10
@@ -659,7 +659,7 @@ rm -rf "$LABEL_HOME"/.labels.claim.*
 chmod 600 "$LABEL_HOME/labels" 2>/dev/null || true
 head -c 65537 /dev/zero > "$LABEL_HOME/labels"
 run_label_prompt "$LABEL_HOME" C "$LABEL_STDOUT" "$LABEL_STDERR"
-check "oversized labels queue is silent" test "$(grep -a -cF '[Rocky]' "$LABEL_STDERR" || true)" -eq 0
+check "oversized labels queue is silent" test "$(grep -a -cF 'rocky: ' "$LABEL_STDERR" || true)" -eq 0
 OVERSIZED_CLAIM="$(find "$LABEL_HOME" -maxdepth 2 -type f -path "$LABEL_HOME/.labels.claim.*/queue" -print -quit)"
 check "oversized labels claim stays recoverable" test -n "$OVERSIZED_CLAIM"
 check "oversized claim stays untouched" test "$(stat -c %s "$OVERSIZED_CLAIM" 2>/dev/null || stat -f %z "$OVERSIZED_CLAIM" 2>/dev/null)" -eq 65537
@@ -683,7 +683,7 @@ if [[ -n "$UTF8_LOCALE" ]]; then
   LABEL_VALUE="${LABEL_VALUE} after safe"
   printf '%s\n' "$LABEL_VALUE" > "$LABEL_HOME/labels"
   run_label_prompt "$LABEL_HOME" "$UTF8_LOCALE" "$LABEL_STDOUT" "$LABEL_STDERR"
-  check "UTF-8 locale missing bidi controls leave benign text" grep -qF '[Rocky] before safe' "$LABEL_STDERR"
+  check "UTF-8 locale missing bidi controls leave benign text" grep -qF 'rocky: before safe' "$LABEL_STDERR"
   check "UTF-8 locale strips U+061C" bash -c '! LC_ALL=C grep -a -q "$(printf "\\330\\234")" "$1"' bash "$LABEL_STDERR"
   check "UTF-8 locale strips U+200B" bash -c '! LC_ALL=C grep -a -q "$(printf "\\342\\200\\213")" "$1"' bash "$LABEL_STDERR"
   check "UTF-8 locale strips U+2060" bash -c '! LC_ALL=C grep -a -q "$(printf "\\342\\201\\240")" "$1"' bash "$LABEL_STDERR"
@@ -712,7 +712,7 @@ cat > "$SPEECH_PROBE" <<'WRAP'
 # The real handler buffers and publishes via flushHookSpeech (ui/rocky.ts);
 # this shim stands in for it and writes the speech file directly, the same
 # final on-disk shape the drain reads.
-printf '[Rocky] smoke speech, question\n' > "$ROCKY_HOOK_SPEECH_FILE"
+printf 'rocky: Smoke speech.\n' > "$ROCKY_HOOK_SPEECH_FILE"
 WRAP
 chmod +x "$SPEECH_PROBE"
 SPEECH_OUT2="$TMP/speech-2.stdout"
@@ -746,7 +746,7 @@ ROCKY_HOME="$SPEECH_HOME" ROCKY_BIN="$SPEECH_PROBE" \
     fi
     # An unclaimed name in the shared directory is not ours to speak: it may
     # belong to another live session and must survive this drain untouched.
-    printf "[Rocky] foreign speech, question\n" > "$ROCKY_HOME/hook-speech/foreign.txt"
+    printf "rocky: Foreign speech.\n" > "$ROCKY_HOME/hook-speech/foreign.txt"
     __rocky_last_cmd=""
     __rocky_precmd
     printf "%s\n" "${__rocky_speech_file:-}"
@@ -754,15 +754,15 @@ ROCKY_HOME="$SPEECH_HOME" ROCKY_BIN="$SPEECH_PROBE" \
 SPEECH_CLAIMED="$(tail -n 1 "$SPEECH_OUT2")"
 check "failing command claims a speech file" test -n "$SPEECH_CLAIMED"
 check_file_contains "failing command's speech file appears with its message" \
-  '[Rocky] smoke speech, question' "$SPEECH_SNAPSHOT"
+  'rocky: Smoke speech.' "$SPEECH_SNAPSHOT"
 
 SPEECH_FOREIGN="$SPEECH_DIR/foreign.txt"
 check "next prompt prints the speech message" \
-  grep -qF '[Rocky] smoke speech, question' "$SPEECH_ERR2"
+  grep -qF 'rocky: Smoke speech.' "$SPEECH_ERR2"
 check "printed speech file is removed" test ! -e "$SPEECH_CLAIMED"
 check "unclaimed speech file is left untouched" test -f "$SPEECH_FOREIGN"
 check "unclaimed speech file is never printed" \
-  bash -c '! grep -qF "foreign speech" "$1"' bash "$SPEECH_ERR2"
+  bash -c '! grep -qF "Foreign speech" "$1"' bash "$SPEECH_ERR2"
 
 # add a harmless test rule so guard can be exercised without danger
 printf '^touch marker\ttest rule speaks\n' >> "$ROCKY_HOME/guard.rules"
@@ -805,9 +805,10 @@ EOS
 
 check "guard cancel: 'n' answer stops command"  test ! -f "$TMP/marker1"
 check "guard confirm: 'y' answer runs command"  test -f "$TMP/marker2"
-grep -q "command not run" "$SESSION_OUT"; check "guard prints cancel message" test $? -eq 0
+grep -q "rocky: Command not run\." "$SESSION_OUT"; check "guard prints cancel message" test $? -eq 0
+grep -q "rocky: Run it anyway? \[y/N\]" "$SESSION_OUT"; check "guard prints the plain prompt" test $? -eq 0
 check "hook failure recorded"      grep -q '"origin":"hook"' "$ROCKY_HOME/memory.jsonl"
-check "repeat failure remembered"  grep -q "deep memory need stderr" "$SESSION_OUT"
+check "repeat failure remembered"  grep -q "The hook captures only the command, not stderr" "$SESSION_OUT"
 check "success links fix"          grep -q '"kind":"fix"' "$ROCKY_HOME/memory.jsonl"
 check "pending flag cleared"       test ! -f "$ROCKY_HOME/pending"
 

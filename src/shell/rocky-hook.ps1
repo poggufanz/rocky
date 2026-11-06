@@ -1,4 +1,4 @@
-# rocky-hook.ps1 -- Rocky's PowerShell ears. Dot-sourced from $PROFILE via
+# rocky-hook.ps1 -- the rocky PowerShell hook. Dot-sourced from $PROFILE via
 # the managed block `rocky hook install` appends. Contract: this file must
 # never throw past its own boundary, and must never leave $?/$LASTEXITCODE
 # different from what the user's own last command already set -- the one
@@ -15,15 +15,15 @@
 # release's task-4-report.md for the empirical basis of every ordering
 # decision below.
 #
-# v1 scope (Ruling 4): passive ears only. `prompt` only sees a command after
+# v1 scope (Ruling 4): passive observation only. `prompt` only sees a command after
 # it has already run, so there is no PowerShell equivalent of the Bash
-# hook's pre-execution guard confirmation -- Rocky listens here, he does not
+# hook's pre-execution guard confirmation -- rocky observes here, it does not
 # stop a command before it runs. No stderr is available either: failures use
 # the command-only fingerprint fallback (`commandFingerprint` in
 # src/core/fingerprint.ts) that the Bash hook has used since v0.4.0, via the
 # same `origin: "hook"` record shape -- no new schema, no new CLI surface.
 #
-# ROCKY_HOOK_VERSION="0.4.0" -- same hook-protocol version as rocky-hook.bash;
+# ROCKY_HOOK_VERSION="0.5.0" -- same hook-protocol version as rocky-hook.bash;
 # `rocky hook status` reads this exact literal via the same regex both hosts
 # share (src/commands/hook.ts), so this line's shape must stay byte-parseable.
 
@@ -164,7 +164,7 @@ function global:__rockySanitizeSpeechText([string]$text) {
 # just above -- and OutputEncoding is no different in kind: SetConsoleOutputCP
 # is console-wide, not per-stream, so leaving it changed would alter every
 # OTHER program's subsequent output to that same console for the rest of the
-# session, directly contradicting install's own "I touch nothing" promise.
+# session, directly contradicting install's own promise to change nothing else.
 # Verified empirically (same real Windows PowerShell 5.1 host, task-a-report
 # round 3): restoring immediately after the write does not corrupt the
 # bytes just written -- [Console]::Error.Write is synchronous, so by the
@@ -474,7 +474,7 @@ function global:prompt {
                     $__rockyBin = if ($env:ROCKY_BIN) { $env:ROCKY_BIN } else { 'rocky' }
                     if (-not (Get-Command $__rockyBin -ErrorAction SilentlyContinue)) {
                         if (-not $global:__rockyWarned) {
-                            # Rocky's voice is stderr-only (README, ui/rocky.ts) --
+                            # rocky's output is stderr-only (README, ui/rocky.ts) --
                             # Write-Host writes to the host's Information stream,
                             # not stderr, so it would not match rocky-hook.bash's
                             # `>&2` twin of this exact message. [Console]::Error
@@ -482,7 +482,7 @@ function global:prompt {
                             # the same reserved-device write sayTty/detailTty use
                             # from a detached process -- this line always runs
                             # inside the live, console-attached prompt function.
-                            [Console]::Error.WriteLine('[Rocky] rocky binary gone. my ears sleep now.')
+                            [Console]::Error.WriteLine('rocky: rocky binary not found; the hook is now inactive.')
                             $global:__rockyWarned = $true
                             $global:__rockyDisabled = $true
                         }

@@ -211,7 +211,7 @@ test("PowerShell hook install creates a missing profile with exactly the managed
   assert.equal(hookInstall(), 0, sandbox.stderr());
 
   assert.deepEqual(readFileSync(sandbox.profile), bytes(`\n${BLOCK}`));
-  assert.match(sandbox.stderr(), /ears installed in Windows PowerShell/);
+  assert.match(sandbox.stderr(), /Hook installed in Windows PowerShell\. Open a new shell to activate it\./);
 });
 
 // --- spec test 2: installing twice does not duplicate the block -----------
@@ -248,41 +248,48 @@ test("PowerShell hook status reports absent, then installed, per host", (t) => {
   const sandbox = powerShellSandbox(t);
 
   assert.equal(hookStatus(), 0, sandbox.stderr());
-  assert.match(sandbox.stderr(), /Windows PowerShell: not installed\. run: rocky hook install/);
+  assert.match(sandbox.stderr(), /Windows PowerShell: not installed\. Run rocky hook install to enable it\./);
 
   assert.equal(hookInstall(), 0, sandbox.stderr());
   assert.equal(hookStatus(), 0, sandbox.stderr());
-  assert.match(sandbox.stderr(), /Windows PowerShell: installed, hook version 0\.4\.0, PowerShell 5\.1\.26100\.9168\./);
+  assert.match(sandbox.stderr(), /Windows PowerShell: installed, hook version 0\.5\.0, PowerShell 5\.1\.26100\.9168\./);
   // Ruling 2: the $Error[0] shift must be disclosed where a user actually
   // meets it -- rocky hook status for the PowerShell hosts.
   assert.match(sandbox.stderr(), /\$Error/, "status must disclose the $Error shift for a PowerShell host");
 });
 
-test("the $Error-shift disclosure follows Rocky's voice rules", () => {
-  assert.deepEqual(
-    validateOutputLine("exit status stays exact. forcing it false pushes one entry into $Error first, named as mine."),
-    [],
+test("the $Error-shift disclosure follows the output rules and says the entry names rocky-hook", (t) => {
+  const sandbox = powerShellSandbox(t);
+  assert.equal(hookInstall(), 0, sandbox.stderr());
+  assert.equal(hookStatus(), 0, sandbox.stderr());
+
+  const line = sandbox.stderr().split("\n").find((entry) => entry.includes("$Error"));
+  assert.equal(
+    line,
+    "Exit status stays exact. Forcing it back to false pushes one entry onto $Error first; that entry names rocky-hook.",
   );
+  assert.deepEqual(validateOutputLine(line!), []);
 });
 
 test("PowerShell hook uninstall on an absent profile stays a quiet success", (t) => {
   const sandbox = powerShellSandbox(t);
   assert.equal(hookUninstall(), 0, sandbox.stderr());
-  assert.match(sandbox.stderr(), /no ears installed in Windows PowerShell/);
+  assert.match(sandbox.stderr(), /No hook installed in Windows PowerShell\. Nothing to remove\./);
   assert.equal(existsSync(sandbox.profile), false);
 });
 
-// --- execution policy: a profile PowerShell refuses to load is not working ears ---
+// --- execution policy: a profile PowerShell refuses to load is not a working hook ---
 //
 // Windows PowerShell 5.1 ships with the `Restricted` policy, which refuses
-// every script file, `$PROFILE` included. Install used to say "ears installed"
-// and status used to say "installed" from the file's bytes alone, so a person
-// could follow every step and still hear nothing. The seam host's optional
-// `policy` stands in for the third line the real probe reads from the host.
+// every script file, `$PROFILE` included. Install used to say the hook was
+// installed and status used to say "installed" from the file's bytes alone, so
+// a person could follow every step and still record nothing. The seam host's
+// optional `policy` stands in for the third line the real probe reads from the
+// host.
 
-const BLOCKED_POLICY_LINE = "Windows PowerShell blocks scripts here. my ears cannot load.";
+const BLOCKED_POLICY_LINE = "Windows PowerShell blocks scripts under its current execution policy, so the hook cannot load.";
 const EXECUTION_POLICY_FIX = "Set-ExecutionPolicy -Scope CurrentUser RemoteSigned";
-const PROBE_WAIT_LINE = "I ask powershell where profile lives. wait.";
+const PROBE_WAIT_LINE = "Asking PowerShell where its profile lives. This can take a moment.";
 
 test("policyBlocksProfile is true only for the policies that refuse an unsigned profile", () => {
   const cases: ReadonlyArray<readonly [string | undefined, boolean]> = [
@@ -312,16 +319,20 @@ test("withoutPolicyPreference drops the preference variable in any letter case, 
   assert.equal(env.PSExecutionPolicyPreference, "Bypass");
 });
 
-test("the blocked-policy and probe-wait words follow Rocky's voice rules", () => {
+test("the blocked-policy and probe-wait words follow the output rules", () => {
   for (const label of ["Windows PowerShell", "PowerShell 7"]) {
-    assert.deepEqual(validateOutputLine(`${label} blocks scripts here. my ears cannot load.`), [], label);
+    assert.deepEqual(
+      validateOutputLine(`${label} blocks scripts under its current execution policy, so the hook cannot load.`),
+      [],
+      label,
+    );
   }
   assert.deepEqual(validateOutputLine(`fix: ${EXECUTION_POLICY_FIX}`), []);
   assert.deepEqual(validateOutputLine(PROBE_WAIT_LINE), []);
 });
 
 for (const policy of ["Restricted", "AllSigned"]) {
-  test(`hookInstall under ${policy} says PowerShell blocks scripts and names the fix instead of claiming ears, still writes the profile, and exits 0`, (t) => {
+  test(`hookInstall under ${policy} says PowerShell blocks scripts and names the fix instead of claiming the hook works, still writes the profile, and exits 0`, (t) => {
     const sandbox = powerShellSandbox(t, policy);
 
     assert.equal(hookInstall(), 0, sandbox.stderr());
@@ -329,7 +340,7 @@ for (const policy of ["Restricted", "AllSigned"]) {
     const output = sandbox.stderr();
     assert.ok(output.includes(BLOCKED_POLICY_LINE), output);
     assert.ok(output.includes(EXECUTION_POLICY_FIX), output);
-    assert.ok(!output.includes("ears installed in"), output);
+    assert.doesNotMatch(output, /Hook installed in (Windows PowerShell|PowerShell 7)/, output);
     assert.equal(powershellHookBlockCodec.classify(readFileSync(sandbox.profile)), "managed", "the profile is still written");
   });
 }
@@ -338,7 +349,7 @@ test("hookStatus reports the same blocked state for an installed profile, still 
   const sandbox = powerShellSandbox(t, "Restricted");
 
   assert.equal(hookStatus(), 0, sandbox.stderr());
-  assert.match(sandbox.stderr(), /Windows PowerShell: not installed\. run: rocky hook install/);
+  assert.match(sandbox.stderr(), /Windows PowerShell: not installed\. Run rocky hook install to enable it\./);
   assert.ok(!sandbox.stderr().includes(BLOCKED_POLICY_LINE), "nothing is installed yet, so nothing is blocked");
 
   assert.equal(hookInstall(), 0, sandbox.stderr());
@@ -359,8 +370,8 @@ for (const policy of [undefined, "RemoteSigned", "Bypass", "Unrestricted"]) {
     assert.equal(hookStatus(), 0, sandbox.stderr());
 
     const output = sandbox.stderr();
-    assert.match(output, /ears installed in Windows PowerShell/);
-    assert.match(output, /Windows PowerShell: installed, hook version 0\.4\.0/);
+    assert.match(output, /Hook installed in Windows PowerShell\. Open a new shell to activate it\./);
+    assert.match(output, /Windows PowerShell: installed, hook version 0\.5\.0/);
     assert.ok(!output.includes("blocks scripts"), output);
     assert.ok(!output.includes(EXECUTION_POLICY_FIX), output);
   });
@@ -444,7 +455,7 @@ test("the real detection path asks for the effective policy in a fresh shell's e
   assert.ok(!probeEnvKeys.includes("psexecutionpolicypreference"), "an inherited Process-scope policy would mask the real one");
   assert.ok(!probeEnvKeys.includes("psmodulepath"), "a PowerShell 7 module path keeps Windows PowerShell from loading Get-ExecutionPolicy");
   assert.ok(probeEnvKeys.includes("path"), "every other variable still reaches the probe");
-  assert.ok(first.spokenBefore.includes(PROBE_WAIT_LINE), "Rocky speaks before the first probe starts");
+  assert.ok(first.spokenBefore.includes(PROBE_WAIT_LINE), "rocky says so before the first probe starts");
   assert.equal(sandbox.stderr().split(PROBE_WAIT_LINE).length - 1, 1, "one waiting line, not one per host");
   assert.ok(sandbox.stderr().includes(BLOCKED_POLICY_LINE), "the policy the probe read reaches the install words");
   assert.equal(process.env.PSExecutionPolicyPreference, "Bypass", "the caller's own environment is untouched");
@@ -458,7 +469,7 @@ test("a probe answer with no policy line makes no blocked claim", WIN32_ONLY_PRO
 
   assert.equal(hookInstall(), 0, sandbox.stderr());
 
-  assert.match(sandbox.stderr(), /ears installed in Windows PowerShell/);
+  assert.match(sandbox.stderr(), /Hook installed in Windows PowerShell\./);
   assert.ok(!sandbox.stderr().includes("blocks scripts"), sandbox.stderr());
 });
 
@@ -472,7 +483,7 @@ test("a probe whose policy statement failed still yields its host, with no claim
 
   assert.equal(hookInstall(), 0, sandbox.stderr());
 
-  assert.match(sandbox.stderr(), /ears installed in Windows PowerShell/);
+  assert.match(sandbox.stderr(), /Hook installed in Windows PowerShell\./);
   assert.ok(!sandbox.stderr().includes("blocks scripts"), sandbox.stderr());
 });
 
@@ -483,7 +494,7 @@ test("a probe that never answered with two lines yields no host", WIN32_ONLY_PRO
 
   assert.equal(hookInstall(), 0, sandbox.stderr());
 
-  assert.ok(!sandbox.stderr().includes("ears installed in"), sandbox.stderr());
+  assert.doesNotMatch(sandbox.stderr(), /Hook installed in (Windows PowerShell|PowerShell 7)/, sandbox.stderr());
 });
 
 test("a profile outside home is refused with the variable that allows it, and install still exits 0", WIN32_ONLY_PROBE, (t) => {
@@ -506,7 +517,7 @@ test("a profile outside home is refused with the variable that allows it, and in
 // this one (hook.ts's publishTarget, the non-bashrc branch) shipped with
 // neither. The string itself already passes the voice rules -- this closes
 // the gate, it does not change the wording.
-const WRITE_PROTECTED_PROFILE_DISCLOSURE = "Windows PowerShell profile is write-protected. I replace it anyway. your lines stay.";
+const WRITE_PROTECTED_PROFILE_DISCLOSURE = "Windows PowerShell profile is write-protected. Replacing it anyway; your lines are kept.";
 
 test("the write-protected PowerShell profile disclosure follows Rocky's voice rules", () => {
   assert.deepEqual(validateOutputLine(WRITE_PROTECTED_PROFILE_DISCLOSURE), []);
@@ -654,9 +665,9 @@ test("PowerShell hook install creates the profile's missing parent directory, fo
 });
 
 const MISSING_PROFILE_FOLDER_DISCLOSURE =
-  "Windows PowerShell profile's folder does not exist. I cannot make it. I touch nothing. check permissions, then try again.";
+  "Windows PowerShell profile's folder does not exist and could not be created. Nothing was changed. Check permissions, then try again.";
 
-test("the missing-profile-folder disclosure follows Rocky's voice rules", () => {
+test("the missing-profile-folder disclosure follows the output rules", () => {
   assert.deepEqual(validateOutputLine(MISSING_PROFILE_FOLDER_DISCLOSURE), []);
 });
 
@@ -783,7 +794,7 @@ test(
       assert.match(windows!.version, /^\d+\.\d+/);
       // The one assertion no stub can make: the real host answers the policy question.
       assert.match(windows!.policy ?? "", /^(Restricted|AllSigned|RemoteSigned|Unrestricted|Bypass)$/);
-      assert.ok(spoken().includes(PROBE_WAIT_LINE), "Rocky speaks while the real probe runs");
+      assert.ok(spoken().includes(PROBE_WAIT_LINE), "rocky says so while the real probe runs");
     } finally {
       if (saved === undefined) delete process.env.ROCKY_TEST_POWERSHELL_HOSTS;
       else process.env.ROCKY_TEST_POWERSHELL_HOSTS = saved;
@@ -904,9 +915,9 @@ test(
 // names the variable on the same line: a refused host with no way forward was
 // the bug.
 const HOST_OUTSIDE_HOME_DISCLOSURE =
-  "Windows PowerShell profile lives outside home. I touch nothing there. to let me touch it, set ROCKY_HOOK_ALLOW_PROFILE_OUTSIDE_HOME=1.";
+  "Windows PowerShell profile is outside the home folder, so it is skipped and nothing there is changed. To allow it, set ROCKY_HOOK_ALLOW_PROFILE_OUTSIDE_HOME=1.";
 
-test("the profile-outside-home disclosure follows Rocky's voice rules", () => {
+test("the profile-outside-home disclosure follows the output rules", () => {
   assert.deepEqual(validateOutputLine(HOST_OUTSIDE_HOME_DISCLOSURE), []);
 });
 
@@ -957,9 +968,9 @@ test("admitHostWithinHome passes an under-home host through untouched, with or w
   }
 });
 
-const HOST_OUTSIDE_HOME_CONSENT_DISCLOSURE = "Windows PowerShell profile lives outside home. you allow it, so I touch it.";
+const HOST_OUTSIDE_HOME_CONSENT_DISCLOSURE = "Windows PowerShell profile is outside the home folder. You allowed it, so it will be changed.";
 
-test("the outside-home consent disclosure follows Rocky's voice rules", () => {
+test("the outside-home consent disclosure follows the output rules", () => {
   assert.deepEqual(validateOutputLine(HOST_OUTSIDE_HOME_CONSENT_DISCLOSURE), []);
 });
 
@@ -1650,10 +1661,10 @@ test(
  * not incidental English wording or merely that a memory write or directory
  * drain implies success.
  *
- * The full match through the closing quote and the ", question" suffix,
- * terminated by a real newline, is the no-truncation proof: the exact
- * real-console defect this fix closes cut the equivalent line off mid-word
- * ("run with: rocky run 'Get-Item ./this-does-not"). A regression back to
+ * The full match through the hint command's closing quote, terminated by a
+ * real newline, is the no-truncation proof: the exact real-console defect
+ * this fix closes cut the equivalent line off mid-word
+ * ("... rocky run 'Get-Item ./this-does-not"). A regression back to
  * the old fire-and-forget console write would fail this assertion outright
  * (nothing would ever reach this session's own stderr at all), not just
  * produce a shorter match.
@@ -1796,8 +1807,8 @@ async function realHostSpeechRoundTripSmoke(t: TestContext, exe: string): Promis
   );
 
   assert.ok(
-    stderr.endsWith(`rocky run '${repeatCmd}', question\n`)
-      || stderr.endsWith(`rocky run '${repeatCmd}', question\r\n`),
+    stderr.endsWith(`rocky run '${repeatCmd}'\n`)
+      || stderr.endsWith(`rocky run '${repeatCmd}'\r\n`),
     `the repeat-occurrence command must arrive complete via this session's own stderr, never truncated, never missing; got stderr: ${JSON.stringify(stderr)}`,
   );
 
