@@ -348,3 +348,50 @@ fn stop_cmd_reaches_control_and_acks() {
         }
     );
 }
+
+#[test]
+fn snapshot_always_precedes_broadcast_deltas() {
+    let home = home();
+    let hub = Arc::new(Hub::new());
+    let (control_tx, _control_rx) = mpsc::channel();
+    let _handle = serve(
+        home.path(),
+        Arc::clone(&hub),
+        Arc::new(snapshot_msg),
+        control_tx,
+    )
+    .unwrap();
+
+    // Hammer broadcast while clients subscribe; registration + snapshot
+    // enqueue are atomic, so no delta can ever precede the snapshot.
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let hammer = thread::spawn({
+        let hub = Arc::clone(&hub);
+        let stop = Arc::clone(&stop);
+        move || {
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                hub.broadcast(&ServerMsg::Health {
+                    health: Health::default(),
+                });
+            }
+        }
+    });
+
+    let pipe = pipe_name(home.path());
+    for _ in 0..20 {
+        let mut client = connect(&pipe);
+        client.send(&encode(&ClientMsg::Hello {
+            client: "desk".into(),
+            version: "0.1.0".into(),
+        }));
+        let _hello = client.read_line().unwrap();
+        client.send(&encode(&ClientMsg::Subscribe));
+        let first: ServerMsg = decode(&client.read_line().unwrap()).unwrap();
+        assert!(
+            matches!(first, ServerMsg::Snapshot { .. }),
+            "delta preceded snapshot: {first:?}"
+        );
+    }
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    hammer.join().unwrap();
+}

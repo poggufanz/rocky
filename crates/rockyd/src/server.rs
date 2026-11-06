@@ -36,6 +36,12 @@ pub enum Control {
 
 /// Broadcast hub: one bounded queue per subscribed client. `broadcast` never
 /// blocks; a client whose queue is full or gone is disconnected instead.
+///
+/// Lock order: `Hub::add` runs the snapshot closure while holding the hub
+/// lock (so the snapshot is computed, registered, and enqueued atomically).
+/// Callers must therefore never hold a lock the snapshot closure needs (e.g.
+/// the daemon state lock) while calling `broadcast` — hub → state, never the
+/// reverse — or the daemon can deadlock.
 pub struct Hub {
     next_id: AtomicU64,
     clients: Mutex<HashMap<u64, Client>>,
@@ -56,12 +62,22 @@ impl Hub {
         }
     }
 
-    /// Register a subscribed client. Returns its id and the receiving side of
-    /// its queue, drained by the client's writer thread.
-    fn add(&self, close: Sender<()>) -> (u64, Receiver<String>) {
+    /// Register a subscribed client with its snapshot queued atomically:
+    /// snapshot computation, registration, and snapshot enqueue all happen
+    /// under one hub-lock hold, so no broadcast delta can slip between the
+    /// snapshot and (or ahead of) it. Returns the id and the receiving side
+    /// of the client's queue, drained by the client's writer thread.
+    ///
+    /// The `snapshot` closure runs while holding the hub lock; it must not
+    /// call back into the hub.
+    fn add(&self, close: Sender<()>, snapshot: &dyn Fn() -> ServerMsg) -> (u64, Receiver<String>) {
         let (tx, rx) = mpsc::sync_channel(CLIENT_QUEUE_CAP);
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        self.clients.lock().unwrap().insert(
+        let mut clients = self.clients.lock().unwrap();
+        let line = encode(&snapshot());
+        // Infallible: fresh queue with CLIENT_QUEUE_CAP free slots.
+        let _ = tx.try_send(line);
+        clients.insert(
             id,
             Client {
                 tx,
@@ -69,20 +85,6 @@ impl Hub {
             },
         );
         (id, rx)
-    }
-
-    /// Queue one message for a single client, under the hub lock (used for the
-    /// snapshot so it cannot race a broadcast: no delta is lost or delivered
-    /// before the snapshot).
-    fn send_to(&self, id: u64, line: String) {
-        let mut clients = self.clients.lock().unwrap();
-        let drop = match clients.get_mut(&id) {
-            Some(c) => c.tx.try_send(line).is_err(),
-            None => false,
-        };
-        if drop {
-            Self::remove_locked(&mut clients, id);
-        }
     }
 
     fn remove(&self, id: u64) {
@@ -171,8 +173,9 @@ mod imp {
                         let control = control.clone();
                         thread::spawn(move || handle_client(stream, &hub, &*snapshot, &control));
                     }
-                    // Accept only fails if the listener broke; keep serving.
-                    Err(_) => thread::yield_now(),
+                    // Accept only fails if the listener broke; back off briefly
+                    // rather than busy-spinning, then keep serving.
+                    Err(_) => thread::sleep(std::time::Duration::from_millis(50)),
                 }
             }
         }))
@@ -316,8 +319,10 @@ mod imp {
         // the stream is dropped, so the handle outlives both threads.
         thread::scope(|s| {
             let (close_tx, close_rx) = mpsc::channel::<()>();
-            let (id, queue) = hub.add(close_tx);
-            hub.send_to(id, encode(&snapshot()));
+            // Registration + snapshot enqueue are atomic under one hub-lock
+            // hold (see `Hub::add`): no broadcast can slip a delta ahead of
+            // the snapshot.
+            let (id, queue) = hub.add(close_tx, snapshot);
 
             let ws = &stream;
             let writer = s.spawn(move || {
