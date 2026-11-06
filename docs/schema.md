@@ -59,3 +59,41 @@ error line is already among them).
 Aggregates, rankings, and any recomputed views are never written back into
 evidence files. Raw history is the asset; intelligence is a replaceable
 layer.
+
+## Spool v1
+
+Spool files live in `<ROCKY_HOME>/desk/spool/`, one record per file. Name:
+`<recv_ms 13 digit>-<pid>[-n].json` (`-n` disambiguates retries within the
+same millisecond). Writers use `<name>.json.tmp` while writing, then rename
+to `<name>.json` so readers only see complete files.
+
+### Record shapes
+
+Event record:
+
+```json
+{"v":1,"harness":"claude-code","recv_ms":1794000000123,"kind":"event","event":{"hook_event_name":"PreToolUse","session_id":"...","tool_name":"Edit","tool_use_id":"...","target_path":"C:\\...\\a.ts","cwd":"C:\\..."}}
+```
+
+Dropped record:
+
+```json
+{"v":1,"harness":"claude-code","recv_ms":1794000000456,"kind":"dropped","reason":"oversize","bytes":9437184}
+```
+
+`reason` is `oversize` (stdin exceeded 8 MiB) or `parse` (payload was not a
+valid hook object). `bytes` is the rejected input size.
+
+### Version rule
+
+`v` starts at 1. Additive fields keep `v`. `v` rises only for breaking
+changes. Readers must tolerate unknown fields and unknown `kind` values.
+
+### Allowlist
+
+Only these fields are kept from a hook payload: `session_id`, `cwd`,
+`hook_event_name`, `agent_id`, `agent_type`, `tool_name`, `tool_use_id`,
+`transcript_path`, `agent_transcript_path`, `notification_type`, and
+`tool_input.file_path` / `tool_input.notebook_path` (merged into
+`target_path`). Ids and names cap at 256 bytes, paths at 4 KiB; truncation
+cuts at a char boundary and sets `truncated: true`.
