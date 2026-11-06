@@ -97,3 +97,38 @@ Only these fields are kept from a hook payload: `session_id`, `cwd`,
 `tool_input.file_path` / `tool_input.notebook_path` (merged into
 `target_path`). Ids and names cap at 256 bytes, paths at 4 KiB; truncation
 cuts at a char boundary and sets `truncated: true`.
+
+## Pipe v1
+
+One JSON object per line over the daemon pipe. Every message carries `v`
+(major) first and `type`. Minor additions are additive; readers must ignore
+unknown fields. A client line longer than 64 KiB gets the client
+disconnected. Each client has a bounded outbound queue of 1024 messages;
+when full the client is disconnected, reconnects, and receives a fresh
+snapshot.
+
+### Messages
+
+| Direction | `type` | Fields |
+|---|---|---|
+| desk → daemon | `hello` | `client`, `version` |
+| daemon → desk | `hello` | `daemon_version`, `pid` |
+| daemon → desk | `error` | `code: "version"`, then the connection closes when the major differs |
+| desk → daemon | `subscribe` | — |
+| daemon → desk | `snapshot` | `agents[]`, `aggregate`, `health` |
+| daemon → desk | `status` | `op: "upsert" \| "remove"`, `agent` |
+| daemon → desk | `health` | `spool_pending`, `spool_dropped`, `dropped_events`, `bad_files`, `late_events`, `hook_newer_than_daemon` |
+| desk → daemon | `cmd` | `name: "stop"`, `id` |
+| daemon → desk | `ack` | `id`, `ok`, `error?` |
+
+`agent` carries `key` (`session_id`, `agent_id`; empty `agent_id` means the
+main agent), `agent_type?`, `status` (`idle` | `working` | `needs_you` |
+`done` | `failed` | `ended`), `action?` (`tool_name`, `target_path?`,
+`tool_use_id?`), `summary?`, `failures`, `last_event_ms`, `quiet_10m`, and
+`repo` (`root?`, `name`, `branch?`).
+
+Example:
+
+```json
+{"v":1,"type":"subscribe"}
+```
