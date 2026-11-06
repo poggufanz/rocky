@@ -1,0 +1,94 @@
+//! Rotating file log: `rockyd.log` plus one `.1` backup, counts/errors/lifecycle only.
+
+use std::fs::{self, OpenOptions};
+use std::io::Write as _;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+
+const ROTATE_AT: u64 = 1024 * 1024;
+
+/// Append-only log with rotation: once the file reaches 1 MiB, the next line
+/// moves it to `<name>.1` (replacing any previous backup) and starts fresh.
+/// Only two files are ever kept. All failures are silent: logging must never
+/// crash or block the daemon.
+pub struct RotatingLog {
+    path: PathBuf,
+    // The panic hook also writes through here; a poisoned mutex still logs.
+    file: Mutex<fs::File>,
+}
+
+impl RotatingLog {
+    pub fn new(path: &Path) -> Self {
+        if let Some(parent) = path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .expect("open log file");
+        RotatingLog {
+            path: path.to_path_buf(),
+            file: Mutex::new(file),
+        }
+    }
+
+    pub fn line(&self, msg: &str) {
+        let mut file = self.file.lock().unwrap_or_else(|e| e.into_inner());
+        if file.metadata().is_ok_and(|m| m.len() >= ROTATE_AT) {
+            drop(file);
+            self.rotate();
+            file = self.file.lock().unwrap_or_else(|e| e.into_inner());
+        }
+        let _ = writeln!(file, "{msg}");
+        let _ = file.flush();
+    }
+
+    fn rotate(&self) {
+        let backup = self.path.with_extension("log.1");
+        let _ = fs::remove_file(&backup);
+        let _ = fs::rename(&self.path, &backup);
+        if let Ok(fresh) = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)
+        {
+            *self.file.lock().unwrap_or_else(|e| e.into_inner()) = fresh;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rotates_at_one_mib_keeping_two_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rockyd.log");
+        let log = RotatingLog::new(&path);
+        log.line(&"x".repeat(1024 * 1024));
+        log.line("after rotation");
+        let backup = path.with_extension("log.1");
+        assert!(backup.exists(), "rotation backup missing");
+        let backup_text = fs::read_to_string(&backup).unwrap();
+        assert!(backup_text.len() >= 1024 * 1024, "backup too small");
+        assert_eq!(fs::read_to_string(&path).unwrap(), "after rotation\n");
+        // Second rotation replaces the backup instead of adding a third file.
+        log.line(&"y".repeat(1024 * 1024));
+        log.line("third");
+        assert!(fs::read_to_string(&backup).unwrap().contains('y'));
+        assert_eq!(fs::read_to_string(&path).unwrap(), "third\n");
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 2);
+    }
+
+    #[test]
+    fn appends_and_creates_parent_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sub").join("rockyd.log");
+        let log = RotatingLog::new(&path);
+        log.line("one");
+        log.line("two");
+        assert_eq!(fs::read_to_string(&path).unwrap(), "one\ntwo\n");
+    }
+}

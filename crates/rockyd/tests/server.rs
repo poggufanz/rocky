@@ -329,7 +329,7 @@ fn stop_cmd_reaches_control_and_acks() {
             Err(mpsc::RecvTimeoutError::Disconnected) => panic!("control gone"),
         }
     };
-    let Control::Stop { id, reply } = ctrl;
+    let Control::Stop { id, reply, flushed } = ctrl;
     assert_eq!(id, 7);
     reply
         .send(ServerMsg::Ack {
@@ -338,6 +338,7 @@ fn stop_cmd_reaches_control_and_acks() {
             error: None,
         })
         .unwrap();
+    flushed.recv_timeout(GUARD).unwrap();
     let ack: ServerMsg = decode(&client.read_line().unwrap()).unwrap();
     assert_eq!(
         ack,

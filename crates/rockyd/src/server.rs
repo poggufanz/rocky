@@ -31,6 +31,9 @@ pub enum Control {
     Stop {
         id: u64,
         reply: SyncSender<ServerMsg>,
+        /// Signalled by the client thread after the ack line is flushed, so
+        /// the daemon can exit without racing the client writer thread.
+        flushed: Receiver<()>,
     },
 }
 
@@ -361,10 +364,12 @@ mod imp {
                         id,
                     }) => {
                         let (reply_tx, reply_rx) = mpsc::sync_channel(1);
+                        let (flushed_tx, flushed_rx) = mpsc::channel();
                         if control
                             .send(Control::Stop {
                                 id,
                                 reply: reply_tx,
+                                flushed: flushed_rx,
                             })
                             .is_err()
                         {
@@ -380,9 +385,9 @@ mod imp {
                         }
                         match reply_rx.recv() {
                             Ok(ack) => {
-                                if write_line(&stream, encode(&ack).as_bytes()).is_err() {
-                                    break;
-                                }
+                                let _ = write_line(&stream, encode(&ack).as_bytes());
+                                let _ = flushed_tx.send(());
+                                break;
                             }
                             Err(_) => {
                                 let ack = encode(&ServerMsg::Ack {
