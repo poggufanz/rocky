@@ -13,7 +13,7 @@ import { CS_CONCEPT_IDS } from "../core/cs-explain.js";
 import { CliUsageError, reportCliUsage } from "./cli-args.js";
 import { analyzeExplainDecision, formatDecisionLine } from "../ai/explain-decision.js";
 
-const EMPTY_STATE = "not heard why yet. agent explains when it writes. ask agent, rocky remembers, question";
+const EMPTY_STATE = "No reason recorded yet. The authoring agent records one when it writes the code; ask the agent to explain it.";
 const USAGE = "rocky teach <file>[:<line>] [--stdin] [--ladder] [--quiet]";
 const SELECTION_PAD = 3;
 const TEACH_STDIN_CAP_BYTES = 2 * 1024 * 1024;
@@ -94,7 +94,7 @@ async function readTeachStdin(): Promise<string> {
 /**
  * The plain-words line for a read that stopped at a cap, or undefined. A cap
  * keeps the first records, so the lines a fresh witness would sit in are the
- * ones left unheard: teach says so before it shows a card, a ladder, or the
+ * ones left unread: teach says so before it shows a card, a ladder, or the
  * empty state. Other incomplete reads are not announced here.
  */
 function capLine(loaded: MemoryLoadResult): string | undefined {
@@ -225,5 +225,5 @@ function csPointerFor(file: string, snippet: string | undefined, quiet: boolean,
   const hay = `${file} ${snippet ?? ""}`;
   const hit = matchConcepts(hay).find((h) => (CS_CONCEPT_IDS as readonly string[]).includes(h.concept.id));
   if (hit === undefined) return;
-  printDetail(`cs concept ${hit.concept.id}. full explain in dash, question`);
+  printDetail(`cs concept ${hit.concept.id}. Full explanation in rocky dash.`);
 }

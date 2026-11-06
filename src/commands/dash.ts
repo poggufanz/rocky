@@ -9,6 +9,6 @@ export async function dashCommand(rest: string[]): Promise<number> {
   // serves the page and prints the URL, so no terminal is needed. Piped
   // otherwise, the honest answer is the numbers, not a door nobody will walk
   // through.
-  say("dash need real terminal to open browser, this one pipe. I give stats instead.");
+  say("The dash command needs an interactive terminal to open a browser. This one is piped, so stats are shown instead.");
   return stats([]);
 }

@@ -593,7 +593,7 @@ test("uppercase RAW exposure fails before protocol output with one concise diagn
   assert.equal(result.error, undefined);
   assert.equal(result.status, 1);
   assert.equal(result.stdout, "");
-  assert.match(result.stderr, /^\[Rocky MCP\] Error: invalid exposure: RAW\n$/);
+  assert.match(result.stderr, /^rocky: Invalid exposure: RAW\.\n$/);
 });
 
 test("help advertises MCP as a stream-only command", () => {

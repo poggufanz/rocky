@@ -36,7 +36,7 @@ test("concept alias refuses extra positional argument", async () => {
 });
 
 /** Memory where one triple, one stated reason and one failure all mention the timeout concept. */
-function memoryHearingTimeoutThreeWays(t: TestContext): void {
+function memoryMatchingTimeoutThreeWays(t: TestContext): void {
   const home = realpathSync(mkdtempSync(join(tmpdir(), "rocky-cc-kinds-")));
   const previous = process.env.ROCKY_HOME;
   process.env.ROCKY_HOME = home;
@@ -63,7 +63,7 @@ function memoryHearingTimeoutThreeWays(t: TestContext): void {
   writeFileSync(join(home, "memory.jsonl"), records.map((record) => `${JSON.stringify(record)}\n`).join(""), "utf8");
 }
 
-async function heardLookup(conceptId: string): Promise<string[]> {
+async function conceptsLines(argv: string[], expectedCode = 0): Promise<string[]> {
   const { conceptsCommand } = await import("../commands/concepts.js");
   const originalStderr = process.stderr.write;
   let stderr = "";
@@ -72,17 +72,19 @@ async function heardLookup(conceptId: string): Promise<string[]> {
     return true;
   }) as typeof process.stderr.write;
   try {
-    assert.equal(conceptsCommand([conceptId]), 0);
+    assert.equal(conceptsCommand(argv), expectedCode);
   } finally {
     process.stderr.write = originalStderr;
   }
   return stderr.split(/\r?\n/u);
 }
 
+const lookupLines = (conceptId: string): Promise<string[]> => conceptsLines([conceptId]);
+
 test("concept lookup names each remembered kind in plain words by default", async (t) => {
   setVerbose(t, undefined);
-  memoryHearingTimeoutThreeWays(t);
-  const lines = await heardLookup("timeout");
+  memoryMatchingTimeoutThreeWays(t);
+  const lines = await lookupLines("timeout");
   assert.deepEqual(lines.filter((line) => line.startsWith("just now")), [
     "just now  error  timeout deadline abort reached",
     "just now  reason  timeout deadline abort again",
@@ -93,11 +95,38 @@ test("concept lookup names each remembered kind in plain words by default", asyn
 
 test("concept lookup keeps the stored kind under ROCKY_VERBOSE", async (t) => {
   setVerbose(t, "1");
-  memoryHearingTimeoutThreeWays(t);
-  const lines = await heardLookup("timeout");
+  memoryMatchingTimeoutThreeWays(t);
+  const lines = await lookupLines("timeout");
   assert.deepEqual(lines.filter((line) => line.startsWith("just now")), [
     "just now  failure  timeout deadline abort reached",
     "just now  rationale  timeout deadline abort again",
     "just now  triple  timeout deadline abort in build",
   ]);
+});
+
+test("concepts list says how many records matched each concept", async (t) => {
+  setVerbose(t, undefined);
+  memoryMatchingTimeoutThreeWays(t);
+  const lines = await conceptsLines([]);
+  assert.ok(lines.includes("timeout  matched 3 records"), lines.join("\n"));
+  assert.doesNotMatch(lines.join("\n"), /heard|\btimes\b/u);
+});
+
+test("concepts says plainly when nothing matched, a concept is unknown, or an alias is added", async (t) => {
+  setVerbose(t, undefined);
+  const home = realpathSync(mkdtempSync(join(tmpdir(), "rocky-cc-plain-")));
+  const previous = process.env.ROCKY_HOME;
+  process.env.ROCKY_HOME = home;
+  t.after(() => {
+    if (previous === undefined) delete process.env.ROCKY_HOME;
+    else process.env.ROCKY_HOME = previous;
+    rmSync(home, { recursive: true, force: true });
+  });
+  assert.ok((await conceptsLines([])).some((line) => line.endsWith("rocky: No concepts matched in memory yet.")));
+  assert.ok((await conceptsLines(["timeout"])).some((line) => line.endsWith("rocky: Concept timeout is known. No record matches it yet.")));
+  assert.ok((await conceptsLines(["no-such-concept"], 1)).some((line) => /rocky: Unknown concept\. Known concepts: .*timeout.*\.$/u.test(line)));
+  assert.ok((await conceptsLines(["alias", "retry storm", "timeout"])).some((line) => line.endsWith("rocky: Alias recorded.")));
+  assert.ok((await conceptsLines(["alias", "retry storm", "timeout", "--retract"])).some((line) => line.endsWith("rocky: Alias retracted. The concept itself stays.")));
+  assert.ok((await conceptsLines(["alias", "x", "timeout"], 2)).some((line) => line.includes("Alias phrase is too short.")));
+  assert.ok((await conceptsLines(["a", "b"], 2)).some((line) => line.endsWith("rocky: The concepts command takes no argument, one concept id, or alias.")));
 });

@@ -18,7 +18,7 @@ export async function invariantsCommand(argv: readonly string[] = [], cwd = proc
   }
   const top = await runGit(["-C", cwd, "rev-parse", "--show-toplevel"], undefined, { timeoutMs: GIT_TIMEOUT_MS });
   if (top.code !== 0) {
-    say("no git repo here. invariants live in repo root. bad bad.");
+    say("No git repository here. Invariants live in the repository root.");
     return 1;
   }
   const root = top.stdout.trim();
@@ -26,20 +26,20 @@ export async function invariantsCommand(argv: readonly string[] = [], cwd = proc
   try {
     text = readFileSync(join(root, ".rocky", "invariants.md"), "utf8");
   } catch {
-    say("no invariant file yet. you write .rocky/invariants.md, I remember what it guards, question");
+    say("No invariant file yet. Create .rocky/invariants.md to declare what each invariant guards.");
     return 0;
   }
   const { notes, errors } = parseInvariants(text);
   const filesResult = await runGit(["-C", root, "ls-files"], undefined, { timeoutMs: GIT_TIMEOUT_MS, maxOutputBytes: GIT_MAX_OUTPUT_BYTES });
   const files = filesResult.code === 0 ? filesResult.stdout.split("\n").filter((line) => line.length > 0) : [];
-  say(`I hear ${notes.length} invariant${notes.length === 1 ? "" : "s"}.`);
+  say(`Parsed ${notes.length} invariant${notes.length === 1 ? "" : "s"} from .rocky/invariants.md.`);
   for (const note of notes) {
     console.log(`invariant: ${note.invariant}`);
     console.log(`  guarded by: ${note.guardedBy.join(", ")}`);
     if (note.why !== undefined) console.log(`  why: ${note.why}`);
     for (const pattern of note.guardedBy) {
       if (files.length > 0 && !files.some((file) => matchesGlob(pattern, file))) {
-        say(`glob "${pattern}" guards nothing here. typo, question`);
+        say(`Glob "${pattern}" matches no tracked file. Possible typo.`);
       }
     }
   }

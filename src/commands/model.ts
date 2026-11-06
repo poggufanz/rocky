@@ -5,7 +5,7 @@ import {
   type Exposure,
   type RockyConfigV1,
 } from "../core/config.js";
-import { detail, say } from "../ui/rocky.js";
+import { detail, phrase, say } from "../ui/rocky.js";
 
 /**
  * Keys this command does not own. `watch` settings, `check` registry
@@ -43,7 +43,7 @@ function defaultDependencies(): ModelDependencies {
 }
 
 function usage(): number {
-  say("model needs status, use, or off. which one, question");
+  say("The model command needs status, use, or off.");
   detail("usage: rocky model status | use [--exposure sanitized|raw] <installed-model> | off");
   return 2;
 }
@@ -63,7 +63,7 @@ function useRequest(argv: readonly string[]): UseRequest | undefined {
 }
 
 function configurationFailure(path: string, message: string): number {
-  say("configuration is broken. do not overwrite. bad bad.");
+  say("Configuration is invalid. It was left unchanged.");
   detail(`AI config ${message}: ${path}`);
   return 1;
 }
@@ -72,17 +72,17 @@ function readConfiguration(deps: ModelDependencies): ReturnType<typeof loadConfi
   try {
     return deps.loadConfig();
   } catch {
-    say("configuration not available. memory still works.");
+    say("Configuration is not available. Memory still works.");
     detail("AI config unavailable");
     return undefined;
   }
 }
 
 function printChoices(): void {
-  say("no installed model. pull one yourself. then use it. good good.");
+  say("No installed model. Pull one yourself, then run rocky model use.");
   detail(`${TINY.label}: ${TINY.name} (${TINY.size}) — ranking and semantic act`);
   detail(`${BALANCED.label}: ${BALANCED.name} (${BALANCED.size}) — stronger technical interpretation`);
-  detail("download size is not peak RAM. runtime, KV cache, context, and platform can use more.");
+  detail("Download size is not peak RAM. Runtime, KV cache, context, and platform can use more.");
   detail(`ollama pull ${TINY.name}`);
   detail(`ollama pull ${BALANCED.name}`);
 }
@@ -143,7 +143,7 @@ async function useModel(request: UseRequest, deps: ModelDependencies): Promise<n
     try {
       installed = await callUntilDeadline(() => deps.ollama.listInstalledModels(deadline.signal), deadline.signal);
     } catch {
-      say("Ollama not available. memory still works.");
+      say("Ollama is not available. Memory still works.");
       detail("Ollama unavailable while listing installed models");
       return 1;
     }
@@ -151,32 +151,32 @@ async function useModel(request: UseRequest, deps: ModelDependencies): Promise<n
     if (!installed.some((candidate) => candidate.name === request.model)) {
       if (installed.length === 0) printChoices();
       else {
-        say("requested model not installed. pull it yourself. then use it.");
+        say("The requested model is not installed. Pull it yourself, then run rocky model use.");
         detail(`ollama pull ${request.model}`);
       }
       return 1;
     }
 
     if (request.exposure === "raw") {
-      detail("raw exposure sends unredacted recall evidence to local Ollama.");
+      detail("Raw exposure sends unredacted recall evidence to local Ollama.");
     }
 
     let probe;
     try {
       probe = await callUntilDeadline(() => deps.ollama.probeModel(request.model, deadline.signal), deadline.signal);
     } catch {
-      say("model probe not work. configuration stays same. bad bad.");
+      say("The model probe failed. Configuration is unchanged.");
       detail(`Ollama probe failed: ${request.model}`);
       return 1;
     }
     if (!probe.supported) {
-      say("model probe not work. configuration stays same. bad bad.");
+      say("The model probe failed. Configuration is unchanged.");
       detail(`Ollama probe unsupported: ${request.model}`);
       return 1;
     }
 
     if (deadline.signal.aborted) {
-      say("model use deadline reached. configuration stays same. bad bad.");
+      say("The model use deadline was reached. Configuration is unchanged.");
       detail("Ollama model use deadline exceeded");
       return 1;
     }
@@ -189,12 +189,12 @@ async function useModel(request: UseRequest, deps: ModelDependencies): Promise<n
     try {
       deps.saveConfigAtomic(config);
     } catch {
-      say("configuration not saved. memory still works. bad bad.");
+      say("Configuration was not saved. Memory still works.");
       detail(`AI config could not save: ${current.path}`);
       return 1;
     }
 
-    say("small model configured. memory still works.");
+    say("Local model configured. Memory still works.");
     detail(`AI: enabled (${request.model}, ${request.exposure})`);
     return 0;
   } finally {
@@ -213,11 +213,11 @@ export async function model(argv: readonly string[], dependencies?: ModelDepende
       if (current === undefined) return 1;
       if (current.status === "invalid") return configurationFailure(current.path, "invalid");
       if (!current.config.ai.enabled) {
-        say("small model sleeps. memory still works.");
+        say(phrase("ai-disabled"));
         detail(`AI: disabled (${current.status === "missing" ? "config missing: " : ""}${current.path})`);
         return 0;
       }
-      say("small model configured. memory still works.");
+      say("Local model configured. Memory still works.");
       detail(`AI: enabled (${current.config.ai.model}, ${current.config.ai.exposure}, ${current.path})`);
       return 0;
     }
@@ -229,11 +229,11 @@ export async function model(argv: readonly string[], dependencies?: ModelDepende
       try {
         deps.saveConfigAtomic({ version: 1, ai: { enabled: false }, ...preservedKeys(current) });
       } catch {
-        say("configuration not saved. memory still works. bad bad.");
+        say("Configuration was not saved. Memory still works.");
         detail(`AI config could not save: ${current.path}`);
         return 1;
       }
-      say("small model sleeps. memory still works.");
+      say(phrase("ai-disabled"));
       detail(`AI: disabled (${current.path})`);
       return 0;
     }

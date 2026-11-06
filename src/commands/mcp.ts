@@ -6,7 +6,7 @@ import { PACKAGE_NAME, PACKAGE_VERSION } from "../core/package-info.js";
 import { safeTerminalBlock, safeTerminalLine } from "../core/terminal-sanitize.js";
 import { runMcpStdio } from "../mcp/server.js";
 import { createToolRegistry } from "../mcp/tools.js";
-import { parseNoArgs, reportCliUsage } from "./cli-args.js";
+import { asSentence, parseNoArgs, reportCliUsage } from "./cli-args.js";
 
 export const ROCKY_SERVER_INFO = {
   name: PACKAGE_NAME,
@@ -30,7 +30,8 @@ export async function mcp(argv: readonly string[] = []): Promise<number> {
   try {
     exposure = parseExposure(process.env.ROCKY_MCP_EXPOSURE, "sanitized");
   } catch (error) {
-    process.stderr.write(`[Rocky MCP] ${String(error)}\n`);
+    const reason = error instanceof Error ? error.message : String(error);
+    process.stderr.write(`rocky: ${asSentence(reason)}\n`);
     return 1;
   }
 

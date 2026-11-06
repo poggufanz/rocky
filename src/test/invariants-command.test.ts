@@ -46,8 +46,10 @@ test("invariantsCommand lists parsed blocks and flags globs matching nothing", a
   ].join("\n"));
   const { code, stderr } = await captureStderr(() => invariantsCommand([], dir));
   assert.equal(code, 0);
-  assert.match(stderr, /src\/nonexistent\/\*\*.*guards nothing/);
-  assert.doesNotMatch(stderr, /src\/payment\/\*\*.*guards nothing/);
+  assert.match(stderr, /rocky: Parsed 1 invariant from \.rocky\/invariants\.md\./);
+  assert.match(stderr, /rocky: Glob "src\/nonexistent\/\*\*" matches no tracked file\. Possible typo\./);
+  assert.match(stderr, /src\/nonexistent\/\*\*.*matches no tracked file/);
+  assert.doesNotMatch(stderr, /src\/payment\/\*\*.*matches no tracked file/);
 });
 
 test("invariantsCommand flags dead globs correctly when run from a repo subdirectory", async () => {
@@ -61,16 +63,20 @@ test("invariantsCommand flags dead globs correctly when run from a repo subdirec
   ].join("\n"));
   const { code, stderr } = await captureStderr(() => invariantsCommand([], join(dir, "src")));
   assert.equal(code, 0);
-  assert.match(stderr, /src\/nonexistent\/\*\*.*guards nothing/);
-  assert.doesNotMatch(stderr, /src\/payment\/\*\*.*guards nothing/);
+  assert.match(stderr, /src\/nonexistent\/\*\*.*matches no tracked file/);
+  assert.doesNotMatch(stderr, /src\/payment\/\*\*.*matches no tracked file/);
 });
 
 test("invariantsCommand exits 0 with hint when file is missing", async () => {
   const dir = makeRepo();
-  assert.equal(await invariantsCommand([], dir), 0);
+  const { code, stderr } = await captureStderr(() => invariantsCommand([], dir));
+  assert.equal(code, 0);
+  assert.match(stderr, /rocky: No invariant file yet\. Create \.rocky\/invariants\.md to declare what each invariant guards\./);
 });
 
 test("invariantsCommand exits 1 outside a git repo", async () => {
   const dir = mkdtempSync(join(tmpdir(), "rocky-nogit-"));
-  assert.equal(await invariantsCommand([], dir), 1);
+  const { code, stderr } = await captureStderr(() => invariantsCommand([], dir));
+  assert.equal(code, 1);
+  assert.match(stderr, /rocky: No git repository here\. Invariants live in the repository root\./);
 });

@@ -4,7 +4,7 @@ import { buildConceptIndex } from "../core/concept-index.js";
 import { repeatedConceptLines } from "../commands/brief.js";
 import type { MemoryRecord } from "../core/memory-read.js";
 
-test("repeatedConceptLines emits only concepts heard twice or more in window", () => {
+test("repeatedConceptLines emits only concepts matched twice or more in window", () => {
   const triple = (id: string, ts: number, text: string) => ({
     kind: "triple", id, ts, cwd: "/p", schemaV: 1, agent: "claude-code", origin: "agent-hook",
     intent: { text }, mechanism: { files: [], truncatedFiles: 0 },
@@ -16,5 +16,5 @@ test("repeatedConceptLines emits only concepts heard twice or more in window", (
   ];
   const lines = repeatedConceptLines(buildConceptIndex(records, 0));
   assert.equal(lines.length, 1);
-  assert.match(lines[0], /idempotency heard 2 times/);
+  assert.match(lines[0], /idempotency matched 2 records in this window\./);
 });

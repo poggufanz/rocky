@@ -72,14 +72,25 @@ export function parseQueryArgs(
   return { query: query.join(" ").trim(), useAi, diff };
 }
 
-/** Render a parser error through the command's normal persona/support sinks. */
+/**
+ * Turn a short lowercase message such as `unexpected argument: foo` into a
+ * sentence: first letter capitalized unless it opens with a flag, and one
+ * closing period.
+ */
+export function asSentence(message: string): string {
+  const trimmed = message.trim();
+  const capitalized = /^[a-z]/u.test(trimmed) ? `${trimmed.charAt(0).toUpperCase()}${trimmed.slice(1)}` : trimmed;
+  return /[.!?]$/u.test(capitalized) ? capitalized : `${capitalized}.`;
+}
+
+/** Render a parser error through the command's normal rocky/support sinks. */
 export function reportCliUsage(
   error: unknown,
   speak: (line: string) => void,
   support: (line: string) => void,
 ): number | undefined {
   if (!(error instanceof CliUsageError)) return undefined;
-  speak(`${error.message}. run rocky --help, question`);
+  speak(`${asSentence(error.message)} Run rocky --help for the command list.`);
   support(`usage: ${error.usage}`);
   return 2;
 }

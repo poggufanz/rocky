@@ -141,14 +141,14 @@ test("sessionsCommand numeric arg prints chronological detail lines per kind", (
     assert.match(stderr, /npm test -- --fix/);
     assert.match(stderr, /fixed 1 failure/);
     assert.match(stderr, /fix payment retry loop/);
-    assert.match(stderr, /heard from thinking: queue timeout because retry storm/);
+    assert.match(stderr, /captured from thinking: queue timeout because retry storm/);
     assert.match(stderr, /payment may commit at most once/);
     // chronological: failure line precedes fix precedes triple precedes rationale precedes invariant
     const at = (needle: string) => stderr.indexOf(needle);
     assert.ok(at("Error: boom") < at("npm test -- --fix"));
     assert.ok(at("npm test -- --fix") < at("fix payment retry loop"));
-    assert.ok(at("fix payment retry loop") < at("heard from thinking"));
-    assert.ok(at("heard from thinking") < at("payment may commit at most once"));
+    assert.ok(at("fix payment retry loop") < at("captured from thinking"));
+    assert.ok(at("captured from thinking") < at("payment may commit at most once"));
   } finally {
     restore();
   }

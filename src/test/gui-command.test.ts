@@ -81,9 +81,9 @@ test("guiWanted wants the GUI for a real terminal or an explicit --no-open", () 
   }
 });
 
-test("opener failure speaks through the persona catalogue", () => {
+test("opener failure speaks through the phrase catalog", () => {
   assert.ok(phraseKeys.includes("gui-opener-failed"));
-  assert.equal(phrase("gui-opener-failed"), "browser opener does not start here. open link above by hand.");
+  assert.equal(phrase("gui-opener-failed"), "Browser opener did not start. Open the link above by hand.");
 });
 
 interface Sandbox {
@@ -147,7 +147,7 @@ function startCli(sandbox: Sandbox, args: readonly string[]): ChildProcessWithou
 }
 
 function waitForStderr(child: ChildProcessWithoutNullStreams, pattern: RegExp): Promise<string> {
-  const heard = new Promise<string>((resolve, reject) => {
+  const matched = new Promise<string>((resolve, reject) => {
     let seen = "";
     const onData = (chunk: Buffer): void => {
       seen += chunk.toString("utf8");
@@ -166,7 +166,7 @@ function waitForStderr(child: ChildProcessWithoutNullStreams, pattern: RegExp): 
     child.stderr.on("data", onData);
     child.once("exit", onExit);
   });
-  return antiHang(heard, PROCESS_GUARD_MS, `stderr to match ${pattern}`);
+  return antiHang(matched, PROCESS_GUARD_MS, `stderr to match ${pattern}`);
 }
 
 async function stopChild(child: ChildProcessWithoutNullStreams): Promise<void> {
@@ -194,6 +194,17 @@ for (const args of [[], ["--port=0"]] as const) {
   });
 }
 
+test("rocky dash in a pipe says why no browser opens and shows stats instead", (t) => {
+  const sandbox = createSandbox(t);
+  const result = runCli(sandbox, ["dash"]);
+
+  assert.equal(result.error, undefined, String(result.error));
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stderr, /rocky: The dash command needs an interactive terminal to open a browser\. This one is piped, so stats are shown instead\./);
+  assertNoOpenerAttempt(sandbox);
+});
+
 for (const args of [
   ["dash", "--no-open", "--port=0"],
   ["--no-open", "--port=0"],
@@ -203,7 +214,7 @@ for (const args of [
     const sandbox = createSandbox(t);
     const child = startCli(sandbox, args);
     try {
-      await waitForStderr(child, /heard at http:\/\/127\.0\.0\.1:/);
+      await waitForStderr(child, /Serving at http:\/\/127\.0\.0\.1:/);
     } finally {
       await stopChild(child);
     }

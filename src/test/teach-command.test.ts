@@ -10,9 +10,10 @@ import { teach, type TeachDeps } from "../commands/teach.js";
 import { recordExplain } from "../core/memory.js";
 import { loadMemoryChecked, MAX_SUPPORTED_MEMORY_RECORDS } from "../core/memory-read.js";
 import { resolveRockyPaths } from "../core/state-paths.js";
+import { validateOutputLine } from "../ui/phrases.js";
 import { failureLines, failureLinesPastByteCap } from "./memory-cap-fixture.js";
 
-const EMPTY_STATE = "not heard why yet. agent explains when it writes. ask agent, rocky remembers, question";
+const EMPTY_STATE = "No reason recorded yet. The authoring agent records one when it writes the code; ask the agent to explain it.";
 const WITNESS_HEADER = "rocky heard this. agent say why, rocky remember";
 const LADDER_HEADER = "rocky not hear this. assembled from evidence, not witnessed";
 
@@ -121,6 +122,7 @@ test("teach missing file speaks the empty state and exits 0", async () => {
   const { sayLines, headingLines, blockLines, detailLines, deps } = sinks();
   assert.equal(await teach([`${join(home, "ghost.ts")}:5`], deps), 0);
   assert.deepEqual(sayLines, [EMPTY_STATE]);
+  assert.deepEqual(validateOutputLine(EMPTY_STATE), []);
   assert.deepEqual(headingLines, []);
   assert.deepEqual(blockLines, []);
   assert.deepEqual(detailLines, []);

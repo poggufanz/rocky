@@ -233,8 +233,30 @@ test("briefCommand exits 1 outside a git repo", async () => {
   const previous = process.env.ROCKY_HOME;
   process.env.ROCKY_HOME = home;
   try {
-    assert.equal(await briefCommand([], dir), 1);
+    const { code, stderr } = await captureStdio(() => briefCommand([], dir));
+    assert.equal(code, 1);
+    assert.match(stderr, /rocky: No git repository here\. rocky brief reads git history\./);
   } finally {
+    if (previous === undefined) delete process.env.ROCKY_HOME;
+    else process.env.ROCKY_HOME = previous;
+  }
+});
+
+test("briefCommand closes with one plain line unless --quiet", async () => {
+  const dir = makeRepo();
+  const home = mkdtempSync(join(tmpdir(), "rocky-home-"));
+  const previous = process.env.ROCKY_HOME;
+  process.env.ROCKY_HOME = home;
+  const agentLogs = isolateAgentLogEnv(home);
+  try {
+    const loud = await captureStdio(() => briefCommand(["--since", "1d"], dir));
+    assert.equal(loud.code, 0);
+    assert.match(loud.stderr, /rocky: Brief complete\.\n$/);
+    const quiet = await captureStdio(() => briefCommand(["--since", "1d", "--quiet"], dir));
+    assert.equal(quiet.code, 0);
+    assert.doesNotMatch(quiet.stderr, /Brief complete/);
+  } finally {
+    agentLogs.restore();
     if (previous === undefined) delete process.env.ROCKY_HOME;
     else process.env.ROCKY_HOME = previous;
   }
@@ -314,7 +336,7 @@ test("briefCommand's why annotation prefers the highest-fidelity linked rational
 
     const { code, stderr } = await captureStdio(() => briefCommand(["--since", "1d", "--quiet"], dir));
     assert.equal(code, 0);
-    assert.match(stderr, /why: raw thinking capture, older but higher fidelity \(heard from thinking\)/);
+    assert.match(stderr, /why: raw thinking capture, older but higher fidelity \(captured from thinking\)/);
     assert.doesNotMatch(stderr, /summary capture, newer but lower fidelity/);
   } finally {
     agentLogs.restore();
@@ -389,7 +411,7 @@ test("briefCommand prints a repeated concepts section when memory holds the same
     const { code, stderr } = await captureStdio(() => briefCommand(["--since", "1d", "--quiet"], dir));
     assert.equal(code, 0);
     assert.match(stderr, /repeated concepts/);
-    assert.match(stderr, /idempotency heard 2 times\. same fundamental, same\./);
+    assert.match(stderr, /idempotency matched 2 records in this window\./);
   } finally {
     agentLogs.restore();
     if (previous === undefined) delete process.env.ROCKY_HOME;
