@@ -19,6 +19,8 @@ export function parseSetupArgs(argv: readonly string[]): SetupOptions {
   let replace = false;
   let yes = false;
   let agentHooksAction: AgentHooksAction | undefined;
+  let deskHooksAction: SetupOptions["deskHooksAction"];
+  let deskHookBin: string | undefined;
   let rationaleGate = true;
   let rationaleGateProvided = false;
   const harnesses: HarnessId[] = [];
@@ -62,6 +64,26 @@ export function parseSetupArgs(argv: readonly string[]): SetupOptions {
         throw new SetupUsageError("agent hook actions are mutually exclusive");
       }
       agentHooksAction = selected;
+      continue;
+    }
+    if (argument === "--desk-hooks") {
+      const value = argv[index + 1];
+      if (value === undefined || value.startsWith("--")) {
+        throw new SetupUsageError("--desk-hooks requires an absolute path value");
+      }
+      if (deskHooksAction !== undefined) {
+        throw new SetupUsageError("desk hook actions are mutually exclusive");
+      }
+      deskHooksAction = "install";
+      deskHookBin = value;
+      index += 1;
+      continue;
+    }
+    if (argument === "--uninstall-desk-hooks") {
+      if (deskHooksAction !== undefined) {
+        throw new SetupUsageError("desk hook actions are mutually exclusive");
+      }
+      deskHooksAction = "uninstall";
       continue;
     }
     if (argument === "--mcp-exposure") {
@@ -134,8 +156,8 @@ export function parseSetupArgs(argv: readonly string[]): SetupOptions {
   if (wizard) {
     if (
       harnesses.length > 0 || mcp || listening || rawTrace
-      || modeOption !== undefined || agentHooksAction !== undefined || rationaleGateProvided
-      || repo !== undefined || repoAction !== undefined
+      || modeOption !== undefined || agentHooksAction !== undefined || deskHooksAction !== undefined
+      || rationaleGateProvided || repo !== undefined || repoAction !== undefined
     ) {
       throw new SetupUsageError("--harness without a value opens the picker and cannot combine with other selectors or actions");
     }
@@ -149,7 +171,7 @@ export function parseSetupArgs(argv: readonly string[]): SetupOptions {
     if (
       harnesses.length > 0 || mcp || listening || rawTrace
       || modeOption !== undefined || replace || exposureProvided
-      || agentHooksAction !== undefined || rationaleGateProvided
+      || agentHooksAction !== undefined || deskHooksAction !== undefined || rationaleGateProvided
     ) {
       throw new SetupUsageError("--repo actions are standalone and cannot combine with host or feature flags");
     }
@@ -158,9 +180,13 @@ export function parseSetupArgs(argv: readonly string[]): SetupOptions {
 
   if (rawTrace) {
     const rawTraceModeOk = modeOption === undefined || modeOption === "--check" || modeOption === "--remove";
-    if (!listening || harnesses.length !== 1 || !rawTraceModeOk || agentHooksAction !== undefined) {
+    if (!listening || harnesses.length !== 1 || !rawTraceModeOk || agentHooksAction !== undefined || deskHooksAction !== undefined) {
       throw new SetupUsageError("--raw-trace requires --listening and exactly one --harness on setup, --check, or --remove");
     }
+  }
+
+  if (deskHooksAction !== undefined && agentHooksAction !== undefined) {
+    throw new SetupUsageError("desk hook actions cannot combine with agent hook actions");
   }
 
   if (agentHooksAction === "status" && (mcp || listening)) {
@@ -178,6 +204,16 @@ export function parseSetupArgs(argv: readonly string[]): SetupOptions {
 
   if (mode !== "configure" && (replace || exposureProvided)) {
     throw new SetupUsageError("--replace and --mcp-exposure are valid only in configure mode");
+  }
+
+  if (deskHooksAction !== undefined) {
+    if (modeOption !== undefined || replace || exposureProvided) {
+      throw new SetupUsageError("desk hook actions cannot combine with MCP options");
+    }
+    if (rationaleGateProvided) {
+      throw new SetupUsageError("--no-rationale-gate is valid only with --agent-hooks");
+    }
+    return { mode, exposure, replace, yes, deskHooksAction, ...(deskHookBin === undefined ? {} : { deskHookBin }), harnesses, ...(harnesses.length > 0 ? { harness: [...harnesses] } : {}), mcp: false, listening: false, rawTrace: false };
   }
 
   if (agentHooksAction !== undefined) {

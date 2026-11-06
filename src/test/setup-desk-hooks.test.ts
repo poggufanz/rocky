@@ -1,0 +1,237 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { dirname, join } from "node:path";
+import { tmpdir } from "node:os";
+import { fileURLToPath } from "node:url";
+import {
+  DESK_EVENTS,
+  buildDeskHookEntries,
+  deskHookCommand,
+  installDeskHooks,
+  mergeDeskHooks,
+  removeDeskHooks,
+  uninstallDeskHooks,
+} from "../setup/desk-hooks.js";
+import {
+  agentHooksStatus,
+  installClaudeAgentHooks,
+  mergeClaudeHooks,
+  removeClaudeHooks,
+  rockyGateHookCommand,
+  rockyHookCommand,
+  uninstallClaudeAgentHooks,
+} from "../setup/agent-hooks.js";
+import { SetupUsageError, parseSetupArgs } from "../setup/parser.js";
+
+const packageRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
+
+const DESK_COMMAND = process.platform === "win32"
+  ? '"C:\\tools\\rocky-hook.exe" desk-hook claude-code'
+  : '"/opt/rocky/rocky-hook" desk-hook claude-code';
+
+const EXPECTED_EVENTS = [
+  "SessionStart",
+  "UserPromptSubmit",
+  "PreToolUse",
+  "PermissionRequest",
+  "PostToolUse",
+  "PostToolUseFailure",
+  "Notification",
+  "SubagentStart",
+  "SubagentStop",
+  "Stop",
+  "StopFailure",
+  "SessionEnd",
+];
+
+function hookBinFixture(t: test.TestContext, name = "rocky-hook"): string {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "rocky-desk-hook-bin-")));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const hookBin = join(root, process.platform === "win32" ? `${name}.exe` : name);
+  writeFileSync(hookBin, "fixture");
+  return hookBin;
+}
+
+function settingsFixture(t: test.TestContext): { root: string; settings: string } {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "rocky-desk-hooks-")));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  return { root, settings: join(root, "nested", "claude-settings.json") };
+}
+
+test("desk install writes 12 events with matcher * on tool events and timeout 5", () => {
+  assert.deepEqual(DESK_EVENTS, EXPECTED_EVENTS);
+  const entries = buildDeskHookEntries(DESK_COMMAND);
+  assert.deepEqual(Object.keys(entries).sort(), [...EXPECTED_EVENTS].sort());
+  for (const [event, groups] of Object.entries(entries)) {
+    assert.ok(Array.isArray(groups), `${event} must be an array`);
+    assert.equal(groups.length, 1, `${event} must carry exactly one group`);
+    const group = groups[0] as { matcher?: unknown; hooks: Array<{ type: string; command: string; timeout: number }> };
+    if (event === "PreToolUse" || event === "PostToolUse") {
+      assert.equal(group.matcher, "*");
+    } else {
+      assert.equal(group.matcher, undefined);
+    }
+    assert.equal(group.hooks.length, 1);
+    assert.equal(group.hooks[0].type, "command");
+    assert.equal(group.hooks[0].command, DESK_COMMAND);
+    assert.equal(group.hooks[0].timeout, 5);
+  }
+});
+
+test("desk install keeps foreign hooks and mixed groups in order", () => {
+  const foreign = {
+    hooks: {
+      Stop: [
+        { name: "first", hooks: [{ type: "command", command: "other-before" }] },
+        {
+          name: "mixed",
+          hooks: [
+            { type: "command", command: "foreign-tool" },
+            { type: "command", command: DESK_COMMAND },
+          ],
+        },
+      ],
+      UserPromptSubmit: [{ hooks: [{ type: "command", command: "other-tool" }] }],
+    },
+  };
+  const merged = mergeDeskHooks(structuredClone(foreign), DESK_COMMAND);
+  const hooks = merged.hooks as Record<string, unknown[]>;
+  assert.equal(hooks.Stop?.length, 3);
+  assert.deepEqual(hooks.Stop?.[0], foreign.hooks.Stop[0]);
+  assert.deepEqual(hooks.Stop?.[1], {
+    name: "mixed",
+    hooks: [{ type: "command", command: "foreign-tool" }],
+  });
+  assert.deepEqual((hooks.UserPromptSubmit as unknown[])?.[0], foreign.hooks.UserPromptSubmit[0]);
+  const twice = mergeDeskHooks(structuredClone(merged), DESK_COMMAND);
+  assert.deepEqual(twice, merged);
+});
+
+test("agent uninstall leaves desk hooks; desk uninstall leaves agent and gate hooks", () => {
+  const command = rockyHookCommand("claude-code", process.execPath, process.execPath);
+  const gateCommand = rockyGateHookCommand(process.execPath, process.execPath);
+  const both = mergeDeskHooks(mergeClaudeHooks({}, command, gateCommand), DESK_COMMAND);
+  assert.deepEqual(removeClaudeHooks(structuredClone(both)), mergeDeskHooks({}, DESK_COMMAND));
+  assert.deepEqual(removeDeskHooks(structuredClone(both)), mergeClaudeHooks({}, command, gateCommand));
+});
+
+test("desk reinstall is idempotent (status unchanged)", async (t) => {
+  const value = settingsFixture(t);
+  const hookBin = hookBinFixture(t);
+  mkdirSync(dirname(value.settings), { recursive: true, mode: 0o700 });
+  const confirmation = { async confirm(): Promise<boolean> { return true; } };
+  const options = {
+    hookBin,
+    confirmation,
+    detail: () => undefined,
+    fileExists: (path: string) => path === hookBin,
+  };
+  const first = await installDeskHooks({ settingsPath: value.settings }, options);
+  assert.equal(first.status, "written");
+  const bytes = readFileSync(value.settings);
+  const second = await installDeskHooks({ settingsPath: value.settings }, options);
+  assert.equal(second.status, "unchanged");
+  assert.deepEqual(readFileSync(value.settings), bytes);
+});
+
+test("desk hook path with spaces is quoted; path with % or ! is rejected", (t) => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "rocky-desk spaced-")));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const spaced = join(root, process.platform === "win32" ? "rocky-hook.exe" : "rocky-hook");
+  writeFileSync(spaced, "fixture");
+  const command = deskHookCommand(spaced, () => true);
+  assert.ok(command.endsWith(" desk-hook claude-code"), command);
+  assert.ok(command.startsWith('"'), command);
+  const binName = process.platform === "win32" ? "rocky-hook.exe" : "rocky-hook";
+  for (const bad of [join(root, `%${binName}`), join(root, `!${binName}`)]) {
+    writeFileSync(bad, "fixture");
+    assert.throws(() => deskHookCommand(bad, () => true), /unsafe/, bad);
+  }
+});
+
+test("desk hook path must be absolute, exist, and be named rocky-hook(.exe)", (t) => {
+  const hookBin = hookBinFixture(t);
+  assert.throws(() => deskHookCommand("relative/rocky-hook", () => true), /absolute/);
+  assert.throws(
+    () => deskHookCommand(join(dirname(hookBin), "missing-hook"), () => false),
+    /exist/,
+  );
+  const wrongName = join(dirname(hookBin), process.platform === "win32" ? "other.exe" : "other");
+  writeFileSync(wrongName, "fixture");
+  assert.throws(() => deskHookCommand(wrongName, () => true), /rocky-hook/);
+  assert.doesNotThrow(() => deskHookCommand(hookBin, () => true));
+});
+
+test("parser: --desk-hooks needs a value and excludes --agent-hooks", () => {
+  const hookBin = process.platform === "win32" ? "C:\\tools\\rocky-hook.exe" : "/opt/rocky/rocky-hook";
+  assert.deepEqual(parseSetupArgs(["--desk-hooks", hookBin]), {
+    mode: "configure",
+    exposure: "sanitized",
+    replace: false,
+    yes: false,
+    deskHooksAction: "install",
+    deskHookBin: hookBin,
+    harnesses: [],
+    mcp: false,
+    listening: false,
+    rawTrace: false,
+  });
+  assert.equal(parseSetupArgs(["--uninstall-desk-hooks"]).deskHooksAction, "uninstall");
+  for (const argv of [
+    ["--desk-hooks"],
+    ["--desk-hooks", "--yes"],
+    ["--desk-hooks", hookBin, "--uninstall-desk-hooks"],
+    ["--desk-hooks", hookBin, "--agent-hooks"],
+    ["--uninstall-desk-hooks", "--uninstall-agent-hooks"],
+    ["--uninstall-desk-hooks", "--check"],
+  ]) {
+    assert.throws(() => parseSetupArgs(argv), (error: unknown) =>
+      error instanceof SetupUsageError && error.exitCode === 2, argv.join(" "));
+  }
+});
+
+test("desk hooks are not listed in rocky --help", () => {
+  for (const args of [["--help"], ["--help", "--all"]] as const) {
+    const env: NodeJS.ProcessEnv = { ...process.env };
+    delete env.NODE_TEST_CONTEXT;
+    const result = spawnSync(process.execPath, [join(packageRoot, "dist", "index.js"), ...args], {
+      encoding: "utf8",
+      env,
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.doesNotMatch(result.stdout, /--desk-hooks/, args.join(" "));
+    assert.doesNotMatch(result.stdout, /--uninstall-desk-hooks/, args.join(" "));
+  }
+});
+
+test("agent hook status stays installed when desk hooks are also present", async (t) => {
+  const value = settingsFixture(t);
+  const command = rockyHookCommand("claude-code", process.execPath, process.execPath);
+  mkdirSync(dirname(value.settings), { recursive: true, mode: 0o700 });
+  writeFileSync(
+    value.settings,
+    `${JSON.stringify(mergeDeskHooks(mergeClaudeHooks({}, command), DESK_COMMAND))}\n`,
+  );
+  const options = { command, confirmation: { async confirm(): Promise<boolean> { return true; } } };
+  assert.deepEqual(agentHooksStatus({ settingsPath: value.settings }, options), { claudeCode: "installed" });
+  const removed = await uninstallClaudeAgentHooks({ settingsPath: value.settings }, options);
+  assert.equal(removed.status, "written");
+  assert.deepEqual(
+    JSON.parse(readFileSync(value.settings, "utf8")) as Record<string, unknown>,
+    mergeDeskHooks({}, DESK_COMMAND),
+  );
+  const deskRemoved = await uninstallDeskHooks({ settingsPath: value.settings }, options);
+  assert.equal(deskRemoved.status, "written");
+  const agentReinstalled = await installClaudeAgentHooks({ settingsPath: value.settings }, options);
+  assert.equal(agentReinstalled.status, "written");
+  assert.deepEqual(agentHooksStatus({ settingsPath: value.settings }, options), { claudeCode: "installed" });
+});

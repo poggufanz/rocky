@@ -2,6 +2,10 @@
 
 Notable changes per release. Dates are the release date.
 
+## Unreleased
+
+Hidden `rocky setup --desk-hooks <path>` / `--uninstall-desk-hooks` for the experimental desk.
+
 ## 2.0.0 — 6 November 2026
 
 Major release: Rocky retires its mascot persona. CLI, hook, GUI, and MCP output is plain, neutral English, following [docs/output-principles.md](docs/output-principles.md). Evidence rules, hedges, coverage disclosures, `--quiet`, exit codes, and JSON shapes are unchanged.

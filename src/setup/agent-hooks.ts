@@ -18,6 +18,21 @@ const POST_TOOL_MATCHER = "Edit|Write|MultiEdit|NotebookEdit";
 const GATE_MATCHER = "Edit|Write|MultiEdit";
 const AGENT_HOOK_CONFIRMATION = "Install agent hooks for Claude Code now?";
 const GENERIC_ERROR = "Claude Code agent hooks update cannot complete";
+const GENERIC_ERROR_NOUN: HookErrorNoun = "agent hooks";
+
+/** Which hook family names the user-facing error detail. No default: every caller chooses. */
+export type HookErrorNoun = "agent hooks" | "desk hooks";
+
+function genericError(noun: HookErrorNoun): string {
+  return noun === "agent hooks" ? GENERIC_ERROR : "Claude Code desk hooks update cannot complete";
+}
+
+function retainedConfigDetail(noun: HookErrorNoun, recoveryPath: string): string {
+  const head = noun === "agent hooks"
+    ? "Claude Code agent hooks previous config retained"
+    : "Claude Code desk hooks previous config retained";
+  return `${head}; manual recovery: ${recoveryPath}`;
+}
 const MISSING_PARENT_PROTECTION = process.platform === "win32" ? "private ACL" : "mode 0700";
 const MISSING_PARENT_ERROR = `Claude Code settings parent missing; create private directory for Claude settings with ${MISSING_PARENT_PROTECTION}, then rerun setup`;
 
@@ -63,7 +78,7 @@ export interface AgentHooksStatusResult {
   claudeCode: "installed" | "absent" | "unreadable";
 }
 
-interface JsonObject {
+export interface JsonObject {
   [key: string]: unknown;
 }
 
@@ -81,7 +96,7 @@ interface Topology {
   missing: readonly string[];
 }
 
-interface CurrentConfig {
+export interface CurrentConfig {
   read: ReadableJsonResult;
   topology: Topology;
 }
@@ -117,7 +132,7 @@ function isEphemeralPath(value: string): boolean {
     || (segments.includes("node_modules") && segments.includes("cache"));
 }
 
-function requireSafeAbsolutePath(value: string, label: string): string {
+export function requireSafeAbsolutePath(value: string, label: string): string {
   if (!isAbsolutePortable(value)) throw new Error(`${label} path must be absolute`);
   if (hasControl(value)) throw new Error(`${label} path is unsafe`);
   if (isEphemeralPath(value)) throw new Error(`${label} path is ephemeral`);
@@ -141,7 +156,7 @@ function quoteWindowsPath(value: string): string {
   return `"${body}${trailing.replaceAll("\\", "\\\\")}"`;
 }
 
-function quotePath(value: string): string {
+export function quotePath(value: string): string {
   return win32.isAbsolute(value) && !posix.isAbsolute(value)
     ? quoteWindowsPath(value)
     : quotePosixPath(value);
@@ -222,7 +237,7 @@ function decodeCommandPath(raw: string, allowLegacyBang = false): string {
     : decodePosixCommandPath(raw, allowLegacyBang);
 }
 
-function parseQuotedCommandPath(
+export function parseQuotedCommandPath(
   command: string,
   start: number,
   allowLegacyBang = false,
@@ -393,7 +408,7 @@ function validateGroup(value: unknown): asserts value is JsonObject {
   for (const hook of value.hooks) validateHookItem(hook);
 }
 
-function validateHooks(root: JsonObject): JsonObject | undefined {
+export function validateHooks(root: JsonObject): JsonObject | undefined {
   if (root.hooks === undefined) return undefined;
   if (!isObject(root.hooks)) throw new Error("hooks must be an object");
   for (const value of Object.values(root.hooks)) {
@@ -413,7 +428,7 @@ function isRockyHook(value: JsonObject): boolean {
     && (isRockyClaudeHookCommand(command) || isRockyGateHookCommand(command));
 }
 
-function stripRockyGroups(groups: readonly unknown[]): unknown[] {
+export function stripOwnedGroups(groups: readonly unknown[], isOwned: (hook: JsonObject) => boolean): unknown[] {
   const kept: unknown[] = [];
   for (const groupValue of groups) {
     const group = groupValue as JsonObject;
@@ -422,7 +437,7 @@ function stripRockyGroups(groups: readonly unknown[]): unknown[] {
       continue;
     }
     const hooks = group.hooks as unknown[];
-    const foreignHooks = hooks.filter((hookValue) => !isRockyHook(hookValue as JsonObject));
+    const foreignHooks = hooks.filter((hookValue) => !isOwned(hookValue as JsonObject));
     if (foreignHooks.length === 0) {
       if (hooks.length === 0) kept.push(groupValue);
       // A group containing only Rocky hooks disappears. A foreign hook in a
@@ -438,7 +453,7 @@ function stripRockyGroups(groups: readonly unknown[]): unknown[] {
   return kept;
 }
 
-function withHookArrays(root: JsonObject, callback: (hooks: JsonObject) => void): Record<string, unknown> {
+export function withHookArrays(root: JsonObject, callback: (hooks: JsonObject) => void): Record<string, unknown> {
   const existingHooks = validateHooks(root);
   const result: JsonObject = { ...root };
   const hooks: JsonObject = existingHooks === undefined ? {} : { ...existingHooks };
@@ -464,7 +479,7 @@ export function mergeClaudeHooks(
       const current = hooks[event];
       const groups = current === undefined ? [] : current;
       if (!Array.isArray(groups)) throw new Error("hook event must be an array");
-      const clean = stripRockyGroups(groups);
+      const clean = stripOwnedGroups(groups, isRockyHook);
       const entry = entries[event];
       if (!Array.isArray(entry) || entry.length !== 1) throw new Error("hook entry shape is invalid");
       clean.push(entry[0]);
@@ -477,37 +492,45 @@ export function mergeClaudeHooks(
     const currentPreToolUse = hooks.PreToolUse;
     const preToolUseGroups = currentPreToolUse === undefined ? [] : currentPreToolUse;
     if (!Array.isArray(preToolUseGroups)) throw new Error("hook event must be an array");
-    const cleanPreToolUse = stripRockyGroups(preToolUseGroups);
+    const cleanPreToolUse = stripOwnedGroups(preToolUseGroups, isRockyHook);
     if (gateCommand !== undefined) cleanPreToolUse.push(buildGateHookGroup(gateCommand));
     if (cleanPreToolUse.length === 0) delete hooks.PreToolUse;
     else hooks.PreToolUse = cleanPreToolUse;
   });
 }
 
-/** Remove Rocky-owned groups while preserving all foreign configuration. */
-export function removeClaudeHooks(existing: Record<string, unknown>): Record<string, unknown> {
+/** Remove owned groups while preserving all foreign configuration. */
+export function removeOwnedHooks(
+  existing: Record<string, unknown>,
+  isOwned: (hook: JsonObject) => boolean,
+): Record<string, unknown> {
   if (!isObject(existing)) throw new Error("Claude settings root must be an object");
   return withHookArrays(existing, (hooks) => {
     for (const event of Object.keys(hooks)) {
       const groups = hooks[event];
       if (!Array.isArray(groups)) throw new Error("hook event must be an array");
-      const hadRocky = groups.some((groupValue) => {
+      const hadOwned = groups.some((groupValue) => {
         const group = groupValue as JsonObject;
         return isObject(group) && Array.isArray(group.hooks)
-          && (group.hooks as unknown[]).some((hook) => isObject(hook) && isRockyHook(hook));
+          && (group.hooks as unknown[]).some((hook) => isObject(hook) && isOwned(hook));
       });
-      const clean = stripRockyGroups(groups);
-      if (hadRocky && clean.length === 0) delete hooks[event];
-      else if (hadRocky) hooks[event] = clean;
+      const clean = stripOwnedGroups(groups, isOwned);
+      if (hadOwned && clean.length === 0) delete hooks[event];
+      else if (hadOwned) hooks[event] = clean;
     }
   });
+}
+
+/** Remove Rocky-owned groups while preserving all foreign configuration. */
+export function removeClaudeHooks(existing: Record<string, unknown>): Record<string, unknown> {
+  return removeOwnedHooks(existing, isRockyHook);
 }
 
 function targetFor(home = homedir()): AgentHooksTarget {
   return { settingsPath: join(home, ".claude", "settings.json") };
 }
 
-function resolveTarget(target: AgentHooksTarget | undefined, options: AgentHooksRuntimeOptions): AgentHooksTarget {
+export function resolveTarget(target: AgentHooksTarget | undefined, options: AgentHooksRuntimeOptions): AgentHooksTarget {
   const resolved = target ?? targetFor(options.home);
   requireSafeAbsolutePath(resolved.settingsPath, "Claude settings");
   return resolved;
@@ -517,10 +540,10 @@ function errorCode(error: unknown): string | undefined {
   return isObject(error) && typeof error.code === "string" ? error.code : undefined;
 }
 
-function operationDetail(error: unknown): string {
+export function operationDetail(error: unknown, noun: HookErrorNoun): string {
   return error instanceof Error && error.message === MISSING_PARENT_ERROR
     ? MISSING_PARENT_ERROR
-    : GENERIC_ERROR;
+    : genericError(noun);
 }
 
 function inspectTopology(path: string): Topology {
@@ -586,7 +609,7 @@ function targetSnapshotMatches(topology: Topology, read: ReadableJsonResult): bo
     && topology.targetIdentity.ino === read.identity.ino;
 }
 
-function inspectCurrent(path: string, requireParent = false): CurrentConfig {
+export function inspectCurrent(path: string, requireParent = false): CurrentConfig {
   let topology: Topology;
   try {
     topology = inspectTopology(path);
@@ -605,7 +628,7 @@ function inspectCurrent(path: string, requireParent = false): CurrentConfig {
   return { read, topology };
 }
 
-function prepareMutation(path: string): CurrentConfig {
+export function prepareMutation(path: string): CurrentConfig {
   const topology = inspectTopology(path);
   if (topology.missing.length > 0) throw new Error(MISSING_PARENT_ERROR);
   if (inspectJsonTransaction(path).status === "pending") throw new Error(GENERIC_ERROR);
@@ -648,11 +671,12 @@ function printEntries(command: string, gateCommand: string | undefined, options:
     (JSON.stringify(entries, null, 2));
 }
 
-function writeMutation(
+export function writeMutation(
   path: string,
   current: CurrentConfig,
   value: Record<string, unknown>,
   options: AgentHooksRuntimeOptions,
+  noun: HookErrorNoun,
 ): AgentHooksOperationResult {
   if (sameJson(current.read.value, value)) return { status: "unchanged" };
   try {
@@ -663,21 +687,21 @@ function writeMutation(
         ? { status: "written" }
         : {
           status: "written",
-          detail: `Claude Code agent hooks previous config retained; manual recovery: ${result.recoveryPath}`,
+          detail: retainedConfigDetail(noun, result.recoveryPath),
         };
     }
     return {
       status: "error",
       detail: result.recoveryPath === undefined
-        ? GENERIC_ERROR
-        : `${GENERIC_ERROR}; manual recovery: ${result.recoveryPath}`,
+        ? genericError(noun)
+        : `${genericError(noun)}; manual recovery: ${result.recoveryPath}`,
     };
   } catch {
-    return { status: "error", detail: GENERIC_ERROR };
+    return { status: "error", detail: genericError(noun) };
   }
 }
 
-function defaultConfirmation(): AgentHooksConfirmation {
+export function defaultConfirmation(): AgentHooksConfirmation {
   const prompt = createPromptPort(process.stdin, process.stderr);
   return {
     confirm(message): Promise<boolean> { return prompt.confirm(message); },
@@ -703,7 +727,7 @@ export async function installClaudeAgentHooks(
     inspectCurrent(resolved.settingsPath, true);
     printEntries(command, gateCommand, options);
   } catch (error) {
-    return { status: "error", detail: operationDetail(error) };
+    return { status: "error", detail: operationDetail(error, GENERIC_ERROR_NOUN) };
   }
 
   const confirmation = options.confirmation ?? defaultConfirmation();
@@ -720,9 +744,9 @@ export async function installClaudeAgentHooks(
     // process may have changed settings while consent was pending.
     const current = prepareMutation(resolved.settingsPath);
     const merged = mergeClaudeHooks(current.read.value, command, gateCommand);
-    return writeMutation(resolved.settingsPath, current, merged, options);
+    return writeMutation(resolved.settingsPath, current, merged, options, GENERIC_ERROR_NOUN);
   } catch (error) {
-    return { status: "error", detail: operationDetail(error) };
+    return { status: "error", detail: operationDetail(error, GENERIC_ERROR_NOUN) };
   }
 }
 
@@ -736,7 +760,7 @@ export async function uninstallClaudeAgentHooks(
     const current = inspectCurrent(resolved.settingsPath);
     if (current.read.status === "missing") return { status: "unchanged" };
     const removed = removeClaudeHooks(current.read.value);
-    return writeMutation(resolved.settingsPath, current, removed, options);
+    return writeMutation(resolved.settingsPath, current, removed, options, GENERIC_ERROR_NOUN);
   } catch {
     return { status: "error", detail: GENERIC_ERROR };
   }
