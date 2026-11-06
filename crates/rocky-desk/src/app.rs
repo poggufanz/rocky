@@ -1,9 +1,11 @@
 //! GPUI window, tray wiring, and connection controller for rocky-desk.
 //!
 //! The reader thread (see [`crate::client`]) pushes decoded messages into an
-//! `mpsc` channel. A foreground `cx.spawn` task drains that channel on a
-//! timer, applies messages to the [`Model`], and refreshes the window and
-//! tray. All respawn/stop decisions run on the foreground thread.
+//! `mpsc` channel. A foreground `cx.spawn` pump drains that channel on a timer,
+//! applies messages to the [`Model`], and refreshes the window and tray.
+//! Connection decisions live in the pure [`crate::conn::ConnState`]; the actual
+//! connect/spawn/retry work runs on a background worker thread so the UI never
+//! blocks, and its result comes back through a second channel the pump drains.
 
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver};
@@ -18,8 +20,8 @@ use gpui_tray::Tray;
 use rocky_proto::pipe::{ClientMsg, CmdName, ServerMsg, Status};
 
 use crate::client::{self, Outbox};
+use crate::conn::{Action, ConnState, ConnectOutcome};
 use crate::icons::tray_icon;
-use crate::respawn::RespawnPolicy;
 use crate::spawn::spawn_daemon;
 use crate::view::{Conn, Model};
 
@@ -32,15 +34,36 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
+/// Result of one background connect attempt, delivered to the foreground.
+struct ConnectDone {
+    outcome: ConnectOutcome,
+    /// Present on `Connected`: the live outbox + inbox.
+    live: Option<(Outbox, Receiver<Option<ServerMsg>>)>,
+    /// True when the daemon was spawned without breakaway (sticky warning).
+    tied_to_job: bool,
+}
+
+impl ConnectDone {
+    fn failed(outcome: ConnectOutcome) -> Self {
+        ConnectDone {
+            outcome,
+            live: None,
+            tied_to_job: false,
+        }
+    }
+}
+
 struct Controller {
     model: Model,
-    inbox: Receiver<Option<ServerMsg>>,
+    /// Live inbox, or `None` once its disconnect has been handled. The
+    /// `None` flip is what makes disconnect handling run exactly once.
+    inbox: Option<Receiver<Option<ServerMsg>>>,
     outbox: Option<Outbox>,
-    conn: Conn,
-    stopped: bool,
-    stop_ack_id: Option<u64>,
+    /// Background worker results; at most one worker runs at a time.
+    worker_rx: Receiver<ConnectDone>,
+    worker_tx: mpsc::Sender<ConnectDone>,
+    state: ConnState,
     cmd_id: u64,
-    policy: RespawnPolicy,
     rocky_home: PathBuf,
     last_aggregate: Status,
     last_tooltip: String,
@@ -48,82 +71,101 @@ struct Controller {
 
 impl Controller {
     fn set_conn(&mut self, c: Conn) {
-        self.conn = c;
         self.model.set_conn(c);
     }
 
-    /// Try one connect; on failure spawn the daemon first and retry with
-    /// backoff (100 ms doubling, 5 s total). Sets `conn` accordingly.
-    fn ensure_connected(&mut self) -> bool {
-        if self.outbox.is_some() {
-            return true;
-        }
-        if self.try_connect() {
-            return true;
-        }
-        // The daemon answered but is foreign or the wrong version: show the
-        // warning, do not spawn or retry.
-        if matches!(self.conn, Conn::ServerUnverified | Conn::VersionMismatch) {
-            return false;
-        }
-        let exe = std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(|d| d.join("rockyd.exe")));
-        if let Some(exe) = exe {
-            match spawn_daemon(&exe) {
-                Ok(info) => {
-                    if info.tied_to_job {
-                        self.set_conn(Conn::TiedToJob);
-                    }
-                }
-                Err(_) => {
-                    self.set_conn(Conn::Disconnected);
-                    return false;
-                }
+    /// Handle one decision from `ConnState` (foreground, non-blocking).
+    fn act(&mut self, action: Action) {
+        match action {
+            Action::None => {}
+            Action::Show(c) => self.set_conn(c),
+            Action::GiveUp => self.set_conn(Conn::KeepsCrashing),
+            Action::Connect | Action::Respawn => {
+                self.set_conn(Conn::Connecting);
+                spawn_connect_worker(self.rocky_home.clone(), self.worker_tx.clone());
             }
         }
-        let mut wait = Duration::from_millis(100);
-        let total = Duration::from_secs(5);
-        let mut spent = Duration::ZERO;
-        while spent < total {
-            std::thread::sleep(wait);
-            spent += wait;
-            if self.try_connect() {
-                return true;
-            }
-            wait = (wait * 2).min(Duration::from_secs(1));
-        }
-        // Keep ServerUnverified: a foreign pipe owner is not a disconnect.
-        if !matches!(self.conn, Conn::ServerUnverified) {
-            self.set_conn(Conn::Disconnected);
-        }
-        false
     }
 
-    fn try_connect(&mut self) -> bool {
-        let (tx, rx) = mpsc::channel();
-        match client::connect_and_subscribe(&self.rocky_home, tx) {
-            Ok(outbox) => {
-                self.inbox = rx;
+    /// Drain finished worker results (at most one is ever pending).
+    fn on_worker(&mut self) -> bool {
+        let mut changed = false;
+        while let Ok(done) = self.worker_rx.try_recv() {
+            changed = true;
+            let action = self.state.on_connect_result(done.outcome);
+            if let Some((outbox, inbox)) = done.live {
                 self.outbox = Some(outbox);
-                // TiedToJob is sticky: the warning stays visible while
-                // connected through a job-tied daemon.
-                if !matches!(self.conn, Conn::TiedToJob) {
+                self.inbox = Some(inbox);
+            }
+            if done.tied_to_job {
+                self.state.set_tied();
+                self.set_conn(Conn::TiedToJob);
+            } else {
+                self.act(action);
+                // `Connected` maps to `Action::None`; still update the chip.
+                if done.outcome == ConnectOutcome::Connected {
                     self.set_conn(Conn::Connected);
                 }
-                true
+            }
+        }
+        changed
+    }
+}
+
+/// One connect attempt: probe the pipe; on absence spawn the daemon and retry
+/// with backoff (100 ms doubling, 5 s total). Keeps the live streams of the
+/// winning attempt. Never retries foreign/wrong-version daemons. Blocking is
+/// fine: runs on a worker thread (or pre-loop at startup).
+fn connect_attempt(rocky_home: &std::path::Path) -> ConnectDone {
+    let mut first = true;
+    let mut tied = false;
+    let mut wait = Duration::from_millis(100);
+    let total = Duration::from_secs(5);
+    let mut spent = Duration::ZERO;
+    loop {
+        let (tx, rx) = mpsc::channel();
+        match client::connect_and_subscribe(rocky_home, tx) {
+            Ok(outbox) => {
+                return ConnectDone {
+                    outcome: ConnectOutcome::Connected,
+                    live: Some((outbox, rx)),
+                    tied_to_job: tied,
+                };
             }
             Err(client::ConnectError::Unverified) => {
-                self.set_conn(Conn::ServerUnverified);
-                false
+                return ConnectDone::failed(ConnectOutcome::Unverified);
             }
             Err(client::ConnectError::VersionMismatch) => {
-                self.set_conn(Conn::VersionMismatch);
-                false
+                return ConnectDone::failed(ConnectOutcome::VersionMismatch);
             }
-            Err(_) => false,
+            Err(_) => {}
         }
+        if first {
+            first = false;
+            let exe = std::env::current_exe()
+                .ok()
+                .and_then(|p| p.parent().map(|d| d.join("rockyd.exe")));
+            if let Some(exe) = exe {
+                match spawn_daemon(&exe) {
+                    Ok(info) => tied = info.tied_to_job,
+                    Err(_) => return ConnectDone::failed(ConnectOutcome::SpawnFailed),
+                }
+            }
+        }
+        if spent >= total {
+            return ConnectDone::failed(ConnectOutcome::NoDaemon);
+        }
+        std::thread::sleep(wait);
+        spent += wait;
+        wait = (wait * 2).min(Duration::from_secs(1));
     }
+}
+
+/// Spawn one worker running `connect_attempt` and delivering the result.
+fn spawn_connect_worker(rocky_home: PathBuf, tx: mpsc::Sender<ConnectDone>) {
+    std::thread::spawn(move || {
+        let _ = tx.send(connect_attempt(&rocky_home));
+    });
 }
 
 struct DeskView {
@@ -158,21 +200,31 @@ impl DeskView {
     }
 
     fn on_inbox(&mut self, cx: &mut Context<Self>) {
-        let mut changed = false;
+        let mut changed = self.ctl.on_worker();
+        let Some(inbox) = self.ctl.inbox.as_ref() else {
+            if changed {
+                cx.notify();
+            }
+            return;
+        };
         loop {
-            match self.ctl.inbox.try_recv() {
+            match inbox.try_recv() {
                 Ok(Some(msg)) => {
-                    if let ServerMsg::Ack { id, ok: true, .. } = &msg
-                        && Some(*id) == self.ctl.stop_ack_id
+                    if let ServerMsg::Ack { id, ok, .. } = &msg
+                        && self.ctl.state.on_ack(*id, *ok)
                     {
-                        self.ctl.stopped = true;
-                        self.ctl.stop_ack_id = None;
+                        // Ack state changed (stop acked or id cleared).
                     }
                     self.ctl.model.apply(msg);
                     changed = true;
                 }
                 Ok(None) | Err(mpsc::TryRecvError::Disconnected) => {
-                    self.on_disconnect();
+                    // Transition exactly once: drop the dead inbox first so
+                    // the next tick has nothing to re-handle.
+                    self.ctl.inbox = None;
+                    self.ctl.outbox = None;
+                    let action = self.ctl.state.on_disconnect(now_ms());
+                    self.ctl.act(action);
                     changed = true;
                     break;
                 }
@@ -181,22 +233,6 @@ impl DeskView {
         }
         if changed {
             cx.notify();
-        }
-    }
-
-    fn on_disconnect(&mut self) {
-        self.ctl.outbox = None;
-        if self.ctl.stopped {
-            // Expected: the daemon exited after our stop ack.
-            self.ctl.set_conn(Conn::Disconnected);
-            return;
-        }
-        if self.ctl.policy.allow(now_ms()) {
-            // ensure_connected sets conn itself (Disconnected, or keeps
-            // ServerUnverified).
-            self.ctl.ensure_connected();
-        } else {
-            self.ctl.set_conn(Conn::KeepsCrashing);
         }
     }
 }
@@ -277,21 +313,37 @@ fn chip(s: Status) -> Div {
 
 pub fn run(rocky_home: PathBuf) {
     Application::new().run(move |cx: &mut App| {
-        let (_tx, inbox) = mpsc::channel::<Option<ServerMsg>>();
+        // Blocking startup attempt (the GPUI loop is not running yet).
+        let done = connect_attempt(&rocky_home);
+        let (outcome, tied, live) = (done.outcome, done.tied_to_job, done.live);
+        let (worker_tx, worker_rx) = mpsc::channel::<ConnectDone>();
+        let state = ConnState::new(3, 300_000);
         let mut ctl = Controller {
             model: Model::new(),
-            inbox,
+            inbox: None,
             outbox: None,
-            conn: Conn::Connecting,
-            stopped: false,
-            stop_ack_id: None,
+            worker_rx,
+            worker_tx,
+            state,
             cmd_id: 0,
-            policy: RespawnPolicy::new(3, 300_000),
             rocky_home,
             last_aggregate: Status::Idle,
             last_tooltip: String::new(),
         };
-        ctl.ensure_connected();
+        let action = ctl.state.on_connect_result(outcome);
+        if let Some((outbox, inbox)) = live {
+            ctl.outbox = Some(outbox);
+            ctl.inbox = Some(inbox);
+        }
+        if tied {
+            ctl.state.set_tied();
+            ctl.set_conn(Conn::TiedToJob);
+        } else {
+            ctl.act(action);
+            if outcome == ConnectOutcome::Connected {
+                ctl.set_conn(Conn::Connected);
+            }
+        }
         let view: Entity<DeskView> = cx.new(|_cx| DeskView {
             ctl,
             window: None,
@@ -354,10 +406,11 @@ pub fn run(rocky_home: PathBuf) {
             let view = view.clone();
             move |_: &OpenRocky, cx: &mut App| {
                 view.update(cx, |v, cx| {
-                    // After a stop, Open tries one fresh connect+spawn.
-                    if v.ctl.stopped && v.ctl.outbox.is_none() {
-                        v.ctl.stopped = false;
-                        v.ctl.ensure_connected();
+                    // User-initiated: one background connect+spawn when there
+                    // is no live connection and none in flight. No slot used.
+                    if v.ctl.outbox.is_none() && !v.ctl.state.is_connecting() {
+                        let action = v.ctl.state.on_user_open();
+                        v.ctl.act(action);
                         cx.notify();
                     }
                     v.show_window(cx);
@@ -375,7 +428,7 @@ pub fn run(rocky_home: PathBuf) {
                             name: CmdName::Stop,
                             id,
                         });
-                        v.ctl.stop_ack_id = Some(id);
+                        v.ctl.state.stop_sent(id);
                     }
                     cx.notify();
                 });

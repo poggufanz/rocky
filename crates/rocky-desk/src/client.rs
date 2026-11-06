@@ -180,7 +180,13 @@ pub fn connect_and_subscribe(
     use interprocess::os::windows::named_pipe::pipe_mode::Bytes;
 
     let name = pipe_name(rocky_home);
-    let mut stream = PipeStream::<Bytes, Bytes>::connect_by_path(name.as_str())?;
+    // Bounded: Timeout(ZERO) does one CreateFile and never waits, so a hung
+    // daemon (all instances busy) fails fast instead of wedging the caller.
+    // Retry/backoff policy belongs to the caller.
+    let mut stream = PipeStream::<Bytes, Bytes>::connect_by_path_with_wait_mode(
+        name.as_str(),
+        interprocess::ConnectWaitMode::Timeout(std::time::Duration::ZERO),
+    )?;
     verify_server(stream.as_raw_handle())?;
     write_msg(
         &mut stream,

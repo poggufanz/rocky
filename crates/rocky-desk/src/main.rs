@@ -7,8 +7,9 @@ fn main() {
     let home = rocky_home();
     // Single instance: if the mutex already exists, another desk owns it.
     let _mutex = match single_instance(&desk_mutex_name(&home)) {
-        Some(m) => m,
-        None => return,
+        Ok(m) => m,
+        Err(InstanceError::AlreadyRunning) => return,
+        Err(InstanceError::Failed) => std::process::exit(1),
     };
     rocky_desk::app::run(home);
     // `_mutex` drops here, releasing the instance lock.
@@ -20,10 +21,15 @@ fn main() {
     std::process::exit(1);
 }
 
-/// Create the named mutex; returns `None` when it already exists. The handle
-/// must stay alive for the process lifetime.
 #[cfg(windows)]
-fn single_instance(name: &str) -> Option<SingleMutex> {
+enum InstanceError {
+    AlreadyRunning,
+    Failed,
+}
+
+/// Create the named mutex. The handle must stay alive for the process lifetime.
+#[cfg(windows)]
+fn single_instance(name: &str) -> Result<SingleMutex, InstanceError> {
     use std::os::windows::ffi::OsStrExt;
 
     use windows_sys::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastError};
@@ -36,24 +42,20 @@ fn single_instance(name: &str) -> Option<SingleMutex> {
         let handle =
             windows_sys::Win32::System::Threading::CreateMutexW(std::ptr::null(), 0, wide.as_ptr());
         if handle.is_null() {
-            return None;
+            return Err(InstanceError::Failed);
         }
         if GetLastError() == ERROR_ALREADY_EXISTS {
             CloseHandle(handle);
-            return None;
+            return Err(InstanceError::AlreadyRunning);
         }
-        Some(SingleMutex(handle))
+        Ok(SingleMutex(handle))
     }
 }
 
 #[cfg(windows)]
 struct SingleMutex(*mut core::ffi::c_void);
 
-// The handle is only closed on drop, on the main thread.
-#[cfg(windows)]
-unsafe impl Send for SingleMutex {}
-#[cfg(windows)]
-unsafe impl Sync for SingleMutex {}
+// Never leaves the main thread, so no Send/Sync impls.
 
 #[cfg(windows)]
 impl Drop for SingleMutex {
