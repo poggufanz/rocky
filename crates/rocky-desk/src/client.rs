@@ -8,9 +8,12 @@ use std::io::{self, Read, Write};
 use std::path::Path;
 use std::sync::mpsc::{self, Sender};
 use std::thread;
+use std::time::Duration;
 
 use rocky_proto::paths::pipe_name;
-use rocky_proto::pipe::{ClientMsg, LINE_CAP, ServerMsg, WireError, decode, encode};
+use rocky_proto::pipe::{
+    ClientMsg, LINE_CAP, ServerMsg, WireError, decode, decode_unbounded, encode,
+};
 
 #[cfg(windows)]
 use std::os::windows::io::{AsRawHandle, RawHandle};
@@ -168,9 +171,9 @@ pub fn verify_server(_pipe: *mut core::ffi::c_void) -> Result<(), VerifyError> {
 ///
 /// The reader forwards decoded messages to `tx`, then sends `None` once and
 /// exits when the connection drops for any reason (EOF, line over
-/// [`LINE_CAP`], decode error). A `Version` wire error is forwarded as
-/// `ServerMsg::Error { code: "version" }` before the `None` so the caller can
-/// show the mismatch state.
+/// `SERVER_LINE_CAP`, bad UTF-8, decode error). A `Version` wire error is
+/// forwarded as `ServerMsg::Error { code: "version" }` before the `None` so
+/// the caller can show the mismatch state.
 #[cfg(windows)]
 pub fn connect_and_subscribe(
     rocky_home: &Path,
@@ -197,8 +200,9 @@ pub fn connect_and_subscribe(
     )?;
     // Read the daemon hello BEFORE subscribing: the daemon flushes its
     // reply (a read barrier on pipes), so sending subscribe first would
-    // deadlock both flushes against each other.
-    read_hello_reply(&mut stream)?;
+    // deadlock both flushes against each other. Bounded by HELLO_TIMEOUT so
+    // a silent server fails this attempt instead of wedging the worker.
+    let mut stream = hello_handshake(stream)?;
     write_msg(&mut stream, &ClientMsg::Subscribe)?;
 
     let (cmd_tx, cmd_rx) = mpsc::channel::<ClientMsg>();
@@ -228,8 +232,13 @@ fn write_msg<W: Write>(stream: &mut W, msg: &ClientMsg) -> io::Result<()> {
 
 /// Read exactly one line for the hello handshake, byte-at-a-time so no
 /// bytes past the newline are consumed (the stream is split afterwards).
+/// Bounded: a silent server must fail this attempt, not wedge it — this runs
+/// on the connect worker thread, never the UI thread.
+const HELLO_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Blocking one-line hello read; shared by the live handshake and tests.
 #[cfg(windows)]
-fn read_hello_reply<R: Read>(r: &mut R) -> Result<(), ConnectError> {
+fn read_hello_line<R: Read>(r: &mut R) -> Result<String, ConnectError> {
     let mut buf = Vec::new();
     let mut byte = [0u8; 1];
     loop {
@@ -254,13 +263,17 @@ fn read_hello_reply<R: Read>(r: &mut R) -> Result<(), ConnectError> {
             }
         }
     }
-    let text = String::from_utf8(buf).map_err(|_| {
+    String::from_utf8(buf).map_err(|_| {
         ConnectError::Io(io::Error::new(
             io::ErrorKind::InvalidData,
             "hello is not utf-8",
         ))
-    })?;
-    match decode::<ServerMsg>(&text) {
+    })
+}
+
+#[cfg(windows)]
+fn check_hello_line(text: &str) -> Result<(), ConnectError> {
+    match decode::<ServerMsg>(text) {
         Ok(ServerMsg::Hello { .. }) => Ok(()),
         Ok(ServerMsg::Error { code }) if code == "version" => Err(ConnectError::VersionMismatch),
         Ok(_) => Err(ConnectError::Io(io::Error::new(
@@ -272,6 +285,57 @@ fn read_hello_reply<R: Read>(r: &mut R) -> Result<(), ConnectError> {
             io::ErrorKind::InvalidData,
             "bad daemon hello",
         ))),
+    }
+}
+
+/// Hello read with a bounded wait. The one-line read runs on a helper thread
+/// (the stream moves there and back through channels); on timeout the stream
+/// stays with the helper — dropped when its read ends, the attempt fails now.
+/// Returns the stream on success.
+#[cfg(windows)]
+fn hello_handshake(
+    mut stream: interprocess::os::windows::named_pipe::PipeStream<
+        interprocess::os::windows::named_pipe::pipe_mode::Bytes,
+        interprocess::os::windows::named_pipe::pipe_mode::Bytes,
+    >,
+) -> Result<
+    interprocess::os::windows::named_pipe::PipeStream<
+        interprocess::os::windows::named_pipe::pipe_mode::Bytes,
+        interprocess::os::windows::named_pipe::pipe_mode::Bytes,
+    >,
+    ConnectError,
+> {
+    let (done_tx, done_rx) = mpsc::channel::<Result<String, ConnectError>>();
+    let (back_tx, back_rx) = mpsc::channel();
+    thread::spawn(move || {
+        let line = read_hello_line(&mut stream);
+        let _ = done_tx.send(line);
+        let _ = back_tx.send(stream);
+    });
+    match done_rx.recv_timeout(HELLO_TIMEOUT) {
+        Ok(Ok(text)) => {
+            check_hello_line(&text)?;
+            back_rx.recv().map_err(|_| {
+                ConnectError::Io(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "hello helper lost the stream",
+                ))
+            })
+        }
+        Ok(Err(e)) => {
+            // Helper finished with an error; reclaim the stream to close it.
+            let _ = back_rx.recv();
+            Err(e)
+        }
+        Err(_) => {
+            // Timeout: reclaiming the stream would block on the wedged
+            // helper, so detach — the helper drops it when its read ends.
+            // The handle stays open until then; the attempt fails now.
+            Err(ConnectError::Io(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "daemon hello timed out",
+            )))
+        }
     }
 }
 
@@ -320,21 +384,27 @@ fn client_loop(
 
 /// Decode complete lines in `buf`, forwarding to `tx`. Returns false when the
 /// connection must drop (over-long line, bad UTF-8, decode error).
+///
+/// The 64 KiB spec cap applies to client→daemon lines only. Server→desk
+/// snapshots grow with agent count, so the desk allows much larger lines
+/// here — still bounded so a rogue server cannot grow memory without limit.
+const SERVER_LINE_CAP: usize = 16 * 1024 * 1024;
+
 #[cfg(windows)]
 fn drain_lines(buf: &mut Vec<u8>, tx: &Sender<Option<ServerMsg>>) -> bool {
     loop {
         let Some(i) = buf.iter().position(|&b| b == b'\n') else {
             // No complete line: reject without buffering the rest into memory.
-            return buf.len() <= LINE_CAP;
+            return buf.len() <= SERVER_LINE_CAP;
         };
         let line: Vec<u8> = buf.drain(..=i).collect();
-        if line.len() > LINE_CAP {
+        if line.len() > SERVER_LINE_CAP {
             return false;
         }
         let Ok(text) = std::str::from_utf8(&line) else {
             return false;
         };
-        match decode::<ServerMsg>(text) {
+        match decode_unbounded::<ServerMsg>(text) {
             Ok(msg) => {
                 if tx.send(Some(msg)).is_err() {
                     return false;
@@ -348,5 +418,77 @@ fn drain_lines(buf: &mut Vec<u8>, tx: &Sender<Option<ServerMsg>>) -> bool {
             }
             Err(_) => return false,
         }
+    }
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+    use rocky_proto::pipe::{AgentKey, AgentStatus, Health, RepoInfo, Status, encode};
+
+    fn big_agent(name_len: usize) -> AgentStatus {
+        AgentStatus {
+            key: AgentKey {
+                session_id: "s".into(),
+                agent_id: String::new(),
+            },
+            agent_type: None,
+            status: Status::Working,
+            action: None,
+            summary: None,
+            failures: 0,
+            last_event_ms: 1,
+            quiet_10m: false,
+            repo: RepoInfo {
+                root: None,
+                name: "n".repeat(name_len),
+                branch: None,
+            },
+        }
+    }
+
+    #[test]
+    fn server_lines_over_64kib_still_decode() {
+        // A snapshot larger than the client-line cap must not disconnect: it
+        // decodes and forwards under the larger server bound.
+        let msg = ServerMsg::Snapshot {
+            agents: vec![big_agent(LINE_CAP)],
+            aggregate: Status::Working,
+            health: Health::default(),
+        };
+        let line = encode(&msg);
+        assert!(line.len() > LINE_CAP, "fixture must exceed 64 KiB");
+        let (tx, rx) = mpsc::channel();
+        let mut buf = line.into_bytes();
+        assert!(drain_lines(&mut buf, &tx));
+        let got = rx.try_recv().unwrap().unwrap();
+        assert!(matches!(got, ServerMsg::Snapshot { .. }), "{got:?}");
+    }
+
+    #[test]
+    fn server_lines_past_16mib_disconnect() {
+        // Still bounded: a line past SERVER_LINE_CAP drops the connection.
+        let (tx, rx) = mpsc::channel();
+        let mut buf = vec![b'x'; SERVER_LINE_CAP + 1];
+        assert!(!drain_lines(&mut buf, &tx));
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn hello_line_reader_consumes_one_line() {
+        let hello = encode(&ServerMsg::Hello {
+            daemon_version: "0.1.0".into(),
+            pid: 1,
+        });
+        let trailing = encode(&ServerMsg::Health {
+            health: Health::default(),
+        });
+        let mut input = hello.as_bytes().to_vec();
+        input.extend_from_slice(trailing.as_bytes());
+        let mut cursor = io::Cursor::new(input);
+        let text = read_hello_line(&mut cursor).unwrap();
+        // Only the first line was consumed (byte-at-a-time, no over-read).
+        assert_eq!(cursor.position() as usize, hello.len());
+        check_hello_line(&text).unwrap();
     }
 }

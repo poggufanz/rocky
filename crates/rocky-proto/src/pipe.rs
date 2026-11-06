@@ -138,6 +138,13 @@ pub fn decode<T: DeserializeOwned>(line: &str) -> Result<T, WireError> {
     if line.len() > LINE_CAP {
         return Err(WireError::TooLong);
     }
+    decode_unbounded(line)
+}
+
+/// Decode one line without the client-line length check, for receivers whose
+/// peer lines are not spec-capped (e.g. the desk reading daemon snapshots).
+/// The caller must enforce its own bound.
+pub fn decode_unbounded<T: DeserializeOwned>(line: &str) -> Result<T, WireError> {
     let peek = serde_json::from_str::<VersionPeek>(line).map_err(|_| WireError::Malformed)?;
     if peek.v != PROTOCOL_VERSION {
         return Err(WireError::Version(peek.v));
