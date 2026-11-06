@@ -30,7 +30,7 @@ test("an open pre-push input times out instead of holding the push", async () =>
   );
 });
 
-test("renderPrePushScript fences the hook and blocks only Rocky exit 3", () => {
+test("renderPrePushScript fences the hook and blocks only rocky exit 3", () => {
   const script = renderPrePushScript();
 
   assert.ok(script.startsWith("#!/bin/sh"));
@@ -43,7 +43,7 @@ test("renderPrePushScript fences the hook and blocks only Rocky exit 3", () => {
   assert.ok(script.trimEnd().endsWith("exit 0") || script.includes("exit 0"));
 });
 
-test("rendered hook only turns Rocky exit 3 into a blocked push", (t) => {
+test("rendered hook only turns rocky exit 3 into a blocked push", (t) => {
   if (process.platform === "win32") return;
 
   const directory = temporaryDirectory(t);
@@ -64,11 +64,11 @@ test("rendered hook only turns Rocky exit 3 into a blocked push", (t) => {
         ROCKY_TEST_EXIT: String(rockyExit),
       },
     });
-    assert.equal(result.status, rockyExit === 3 ? 1 : 0, `Rocky exit ${rockyExit}`);
+    assert.equal(result.status, rockyExit === 3 ? 1 : 0, `rocky exit ${rockyExit}`);
   }
 });
 
-test("rendered hook allows a push when Rocky is unavailable", (t) => {
+test("rendered hook allows a push when rocky is unavailable", (t) => {
   if (process.platform === "win32") return;
 
   const directory = temporaryDirectory(t);

@@ -146,13 +146,13 @@ export function installPrePush(hookPath: string): InstallHookResult {
   const classification = classifyExisting(existing);
   if (classification === "foreign") {
     return addSettledRecovery(
-      refused(hookPath, "Existing pre-push hook belongs to another tool; install Rocky manually"),
+      refused(hookPath, "Existing pre-push hook belongs to another tool; install rocky manually"),
       settled.outcome,
     );
   }
   if (classification === "ours") {
     return addSettledRecovery(
-      { status: "already-installed", detail: `Rocky pre-push hook is already installed: ${hookPath}` },
+      { status: "already-installed", detail: `rocky pre-push hook is already installed: ${hookPath}` },
       settled.outcome,
     );
   }
@@ -166,7 +166,7 @@ export function installPrePush(hookPath: string): InstallHookResult {
       return refused(
         hookPath,
         result.status === "changed"
-          ? "Pre-push hook changed while Rocky was installing; install it manually"
+          ? "Pre-push hook changed while rocky was installing; install it manually"
           : "Pre-push hook write needs recovery",
         { path: result.recoveryPath, kind: "artifact" },
       );
@@ -177,7 +177,7 @@ export function installPrePush(hookPath: string): InstallHookResult {
   }
 
   return addSettledRecovery(
-    { status: "installed", detail: `Rocky pre-push hook installed: ${hookPath}` },
+    { status: "installed", detail: `rocky pre-push hook installed: ${hookPath}` },
     settled.outcome,
   );
 }

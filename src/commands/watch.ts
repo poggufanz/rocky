@@ -6,7 +6,7 @@
  * cross-directory admission — plus three things a long, unattended process
  * needs: a periodic idle line while stderr stays silent, a saved stderr tail
  * on failure (`~/.rocky/watch/`), and a notification (or a bell) when it's
- * done. `--quiet` keeps the recording but drops every persona line, every
+ * done. `--quiet` keeps the recording but drops every commentary line, every
  * idle line, and the notification — stderr gets plain facts only.
  */
 
@@ -34,7 +34,7 @@ export interface ParsedWatch { quiet: boolean; cmd: string }
  * trailing form. Stopping option parsing at the first positional appended
  * `--quiet` to the command string instead, so `rocky watch "sleep 1" --quiet`
  * really ran `sleep 1 --quiet`: a wrapped exit 0 became 1 and a failure that
- * never happened entered memory. Rocky must never change the command he was
+ * never happened entered memory. rocky must never change the command it was
  * handed.
  *
  * `--` still ends option parsing, so a command that genuinely needs a literal
@@ -84,7 +84,7 @@ export function unseenLabels(seen: Set<string>, fileContent: string): string[] {
 export interface WatchDependencies {
   notify: (input: NotifyInput) => void;
   runProcess?: (cmd: string, options: ExecOptions) => Promise<ExecResult>;
-  /** Test seams; omitted callers retain the real read, timer, and persona behavior. */
+  /** Test seams; omitted callers retain the real read, timer, and output behavior. */
   readLabels?: (path: string) => string;
   setInterval?: (callback: () => void, delayMs: number) => WatchTimer;
   clearInterval?: (timer: WatchTimer) => void;
@@ -154,7 +154,7 @@ function unrefTimer(timer: WatchTimer): void {
 /**
  * Equivalent of `run.ts`'s read guard, adapted for `--quiet`: reading still
  * always happens (fix-linking on success needs it regardless of quiet), but
- * the "I cannot read memory" disclosure is a persona line, so it's silenced.
+ * the unreadable-memory disclosure is a commentary line, so it's silenced.
  */
 function readMemory(quiet: boolean): MemoryRecord[] | undefined {
   try {
@@ -166,7 +166,7 @@ function readMemory(quiet: boolean): MemoryRecord[] | undefined {
         : `memory coverage incomplete: version ${loaded.coverage.version}; scanned ${loaded.coverage.scanned}; skipped ${loaded.coverage.skipped}; truncated ${loaded.coverage.truncated}${loaded.coverage.reason === undefined ? "" : `; reason ${loaded.coverage.reason}`}`;
       if (quiet) writeRockyStderr(`${diagnostic}\n`);
       else {
-        say("memory coverage incomplete. I do not claim prior fix. check, question");
+        say("Memory coverage is incomplete, so no earlier fix is claimed. Check the memory file.");
         detail(`    ${diagnostic}`);
       }
       return undefined;
@@ -174,7 +174,7 @@ function readMemory(quiet: boolean): MemoryRecord[] | undefined {
     return loaded.records;
   } catch {
     if (!quiet) {
-      say("memory file does not open for me. I answer from nothing.");
+      say("Memory file could not be opened. No records were read.");
       detail(`    memory: ${resolveRockyPaths().memory}`);
     }
     return undefined;
@@ -187,9 +187,9 @@ export function idleLine(elapsedMs: number): string {
   return `Still waiting: ${minutes} minute${minutes === 1 ? "" : "s"}.`;
 }
 
-/** "command finish. good good. 812 seconds." / "command dies. bad. 812 seconds." */
+/** "Command finished. Took 812 seconds." / "Command failed. Took 812 seconds." */
 function outcomeLine(ok: boolean, durationMs: number): string {
-  return `${phrase(ok ? "watch-ok" : "watch-fail")} ${spokenDuration(durationMs)}.`;
+  return `${phrase(ok ? "watch-ok" : "watch-fail")} Took ${spokenDuration(durationMs)}.`;
 }
 
 function notifyEnabled(): boolean {
@@ -198,7 +198,7 @@ function notifyEnabled(): boolean {
   return loaded.config.watch?.notify ?? DEFAULT_WATCH_NOTIFY;
 }
 
-/** `--quiet`'s entire output: no persona, just the facts, written directly (not through `say`). */
+/** `--quiet`'s entire output: no commentary, just the facts, written directly (not through `say`). */
 function plainFacts(result: ExecResult, logPath: string | undefined): void {
   writeRockyStderr(`duration: ${formatDuration(result.durationMs)}\n`);
   writeRockyStderr(`exit: ${result.code}\n`);
@@ -234,7 +234,7 @@ function onWatchFailure(cmd: string, cwd: string, quiet: boolean, result: ExecRe
     recordWatchFailure(cmd, result.code, result.stderr, cwd);
   } catch {
     if (!quiet) {
-      say("I cannot write memory. this one I forget.");
+      say("Could not write to memory, so this run is not recorded.");
       detail(`    memory: ${resolveRockyPaths().memory}`);
     }
   }
@@ -258,14 +258,14 @@ export async function watch(
   try {
     parsed = parseWatchArgs(argv);
   } catch (error) {
-    say("watch option is wrong. bad bad.");
+    say("Invalid option for watch.");
     detail(error instanceof Error ? error.message : "unknown option");
     return 2;
   }
 
   const { quiet, cmd } = parsed;
   if (!cmd || cmd.trim().length === 0) {
-    say("no command. give command, question");
+    say("No command given. Pass the command to run.");
     return 2;
   }
 
@@ -291,7 +291,7 @@ export async function watch(
     try {
       for (const line of unseenLabels(seen, content)) speakLabel(safeTerminalLine(line));
     } catch {
-      // Persona output is best effort and must not alter wrapped-command behavior.
+      // Label output is best effort and must not alter wrapped-command behavior.
     }
   };
 
@@ -334,7 +334,7 @@ export async function watch(
       }
     } catch {
       if (!quiet) {
-        say("I cannot write memory. this one I forget.");
+        say("Could not write to memory, so this run is not recorded.");
         detail(`    memory: ${resolveRockyPaths().memory}`);
       }
     }

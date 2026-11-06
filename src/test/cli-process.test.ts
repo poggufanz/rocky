@@ -246,7 +246,7 @@ test("run preserves path-with-spaces child streams and exit status", (t) => {
 
   assertCompleted(result, 7);
   assert.equal(result.stdout, "CHILD_STDOUT_SENTINEL\n");
-  assert.doesNotMatch(result.stdout, /new error|good trade|I remember|\/\\_/);
+  assert.doesNotMatch(result.stdout, /new error|New error recorded|rocky: |good trade|I remember|\/\\_/);
   assert.match(result.stderr, /CHILD_STDERR_SENTINEL/);
   assertNoDetectorMarkers(sandbox);
 });
@@ -298,7 +298,7 @@ test("seeded recall --ai falls back before any no-Ollama fetch", (t) => {
   const result = runCli(sandbox, ["recall", "--ai", "seeded"]);
 
   assertCompleted(result, 0);
-  assert.match(result.stderr, /small model sleeps\. memory still works\./);
+  assert.match(result.stderr, /Local model is off\. Memory still works\./);
   assertNoDetectorMarkers(sandbox);
 });
 
@@ -685,8 +685,8 @@ test("run's onFailure speaks the strong link basis, not just the fix command", (
   const result = runCli(sandbox, ["run", failingCommandPrinting(marker)]);
 
   assertCompleted(result, 1);
-  assert.match(result.stderr, /same command, 2 minutes later\. strong\./);
-  assert.doesNotMatch(result.stderr, /maybe not fix/);
+  assert.match(result.stderr, /Same command, 2 minutes later\. Strong link\./);
+  assert.doesNotMatch(result.stderr, /May not be the fix/);
   assertNoDetectorMarkers(sandbox);
 });
 
@@ -714,7 +714,7 @@ test("run's onFailure never presents a weak candidate as a remembered fix", (t) 
   const result = runCli(sandbox, ["run", failingCommandPrinting(marker)]);
 
   assertCompleted(result, 1);
-  assert.doesNotMatch(result.stderr, /last time, you fix with:|same program|\bstrong\b/);
+  assert.doesNotMatch(result.stderr, /last time, you fix with:|Last time, you ran:|Same program|Strong link/);
   assertNoDetectorMarkers(sandbox);
 });
 
@@ -741,7 +741,7 @@ test("a v0.2.1-era unproven fix record is downgraded", (t) => {
   const result = runCli(sandbox, ["run", failingCommandPrinting(marker)]);
 
   assertCompleted(result, 1);
-  assert.doesNotMatch(result.stderr, /last time, you fix with:|\bstrong\b|maybe not fix/);
+  assert.doesNotMatch(result.stderr, /last time, you fix with:|Last time, you ran:|Strong link|May not be the fix/);
   assertNoDetectorMarkers(sandbox);
 });
 
@@ -769,7 +769,7 @@ test("run's onFailure admits when the remembered fix comes from a different dire
   const result = runCli(sandbox, ["run", failingCommandPrinting(marker)]);
 
   assertCompleted(result, 1);
-  assert.match(result.stderr, /but fix comes from other place\./);
+  assert.match(result.stderr, /But that fix comes from a different directory\./);
   assert.match(result.stderr, new RegExp(`place:\\s*${elsewhere.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
   assertNoDetectorMarkers(sandbox);
 });
@@ -844,14 +844,14 @@ test("run's onFailure adds no line when the remembered fix's cwd matches the cur
   const result = runCli(sandbox, ["run", failingCommandPrinting(marker)]);
 
   assertCompleted(result, 1);
-  assert.doesNotMatch(result.stderr, /other place/);
+  assert.doesNotMatch(result.stderr, /different directory/);
   assert.doesNotMatch(result.stderr, /place:/);
   // sanity: the base fix line still speaks, proving the comparison — not the
   // whole fix branch — is what's being suppressed here. The seeded fix's cmd
   // ("whatever failed before") is a stand-in string, not the real invoked
   // `failingCommandPrinting(marker)` text, so this lands in the
   // different-command branch rather than the same-command honest form.
-  assert.match(result.stderr, /last time, you run:/);
-  assert.match(result.stderr, /possible fix only, question/);
+  assert.match(result.stderr, /Last time, you ran:/);
+  assert.match(result.stderr, /Possible fix only\./);
   assertNoDetectorMarkers(sandbox);
 });

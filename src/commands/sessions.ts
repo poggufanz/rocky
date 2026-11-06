@@ -2,8 +2,8 @@
  * `rocky sessions` — work sessions derived at read time from memory: group
  * by `cwd`, split on a time-gap heuristic. Nothing is written back; the
  * grouping only ever exists for the duration of this call, and the listing
- * says so out loud — a heuristic boundary presented as fact would be Rocky
- * claiming more than he heard.
+ * says so — a heuristic boundary presented as fact would claim more than
+ * rocky recorded.
  */
 
 import { captureRationales } from "../agent/logs/capture.js";
@@ -53,7 +53,7 @@ function buildGroup(records: readonly CwdRecord[]): Omit<SessionGroup, "index"> 
     if (record.kind === "triple" || record.kind === "rationale") agents.add(record.agent);
   }
   return {
-    // A spelling this session was actually heard under, never a normalized one.
+    // A spelling this session was actually recorded under, never a normalized one.
     cwd: records[0].cwd,
     startTs: records[0].ts,
     endTs: records[records.length - 1].ts,
@@ -107,7 +107,7 @@ export function groupSessions(records: readonly MemoryRecord[]): SessionGroup[] 
  * and are always separated by a gap greater than `SESSION_GAP_MS`, so the
  * inclusive `[startTs, endTs]` range for one session cannot reach into
  * another. Membership uses the same directory identity as `groupSessions`,
- * so a record heard under another spelling of the group's directory stays in.
+ * so a record written under another spelling of the group's directory stays in.
  */
 function recordsForGroup(records: readonly MemoryRecord[], group: SessionGroup): CwdRecord[] {
   return records.filter((record): record is CwdRecord =>
@@ -149,8 +149,8 @@ function firstLine(text: string): string {
  * long single terminal line without this. Budget follows the sibling
  * display command's scale (`dictionary.ts`'s `terminalSafe`, 32-512 bytes)
  * without its `?`-stripping, which is specific to that command's
- * `, question`-terminated sentences — sessions.ts never interpolates raw
- * evidence into one of those.
+ * question sentences — sessions.ts never interpolates raw evidence into one
+ * of those.
  */
 const MAX_FIELD_BYTES = 128;
 
@@ -197,7 +197,7 @@ function detailLineFor(record: CwdRecord): string | undefined {
     case "fix":
       return fixLine(record);
     case "triple":
-      return boundedField(record.intent?.text ?? "(no intent heard)");
+      return boundedField(record.intent?.text ?? "(no intent recorded)");
     case "rationale":
       return `${rationaleSourceLabel(record.source)}: ${boundedField(firstLine(record.excerpt))}`;
     case "invariant_touch":
@@ -210,9 +210,9 @@ function detailLineFor(record: CwdRecord): string | undefined {
 /**
  * The records every session below is derived from. When the read was not
  * whole, say so once before any session output: sessions and their counts
- * cover only what Rocky heard.
+ * cover only what was recorded and read.
  */
-function loadHeardRecords(): MemoryRecord[] {
+function loadSessionRecords(): MemoryRecord[] {
   const loaded = loadMemoryChecked();
   const words = describeMemoryCoverage(loaded.coverage, loaded.records.length, { counts: true });
   if (words !== undefined) say(words);
@@ -221,10 +221,10 @@ function loadHeardRecords(): MemoryRecord[] {
 
 function printList(limit: number): void {
   captureRationales(process.cwd()); // fail-open enrichment; ignored on failure by design
-  const records = loadHeardRecords();
+  const records = loadSessionRecords();
   const groups = groupSessions(records);
   if (groups.length === 0) {
-    say("no sessions heard yet. memory grows, sessions come.");
+    say("No sessions recorded yet.");
   } else {
     heading("sessions");
     for (const group of groups.slice(0, limit)) {
@@ -232,15 +232,15 @@ function printList(limit: number): void {
       detail(`[${group.index}] ${dateShort(group.startTs)}  ${boundedField(cwdBasename(group.cwd))}  ${elapsed(group.endTs - group.startTs)}  ${plural(failures, "failure")}, ${plural(fixes, "fix", "fixes")}, ${plural(rationales, "rationale")}`);
     }
   }
-  say("sessions derived from memory. boundaries heuristic, not exact.");
+  say("Sessions are derived from memory. Boundaries are a heuristic, not exact.");
 }
 
 function printDetail(index: number): number {
-  const records = loadHeardRecords();
+  const records = loadSessionRecords();
   const groups = groupSessions(records);
   const group = groups.find((candidate) => candidate.index === index);
   if (group === undefined) {
-    say(`session not heard. rocky counts ${groups.length} sessions, question`);
+    say(`Session ${index} not found. ${plural(groups.length, "session")} available.`);
     return 1;
   }
   const members = recordsForGroup(records, group).slice().sort((a, b) => a.ts - b.ts);

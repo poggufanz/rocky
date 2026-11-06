@@ -6,6 +6,14 @@ import { join } from "node:path";
 import { groupSessions, sessionsCommand } from "../commands/sessions.js";
 import { resolveRockyPaths } from "../core/state-paths.js";
 import { MAX_SUPPORTED_MEMORY_RECORDS, type MemoryRecord } from "../core/memory-read.js";
+import { validateOutputLine } from "../ui/phrases.js";
+
+/** Every line rocky itself wrote (the `rocky: ` ones) must follow the output rules; detail lines are data. */
+function assertRockyLinesArePlain(stderr: string): void {
+  const lines = stderr.split(/\r?\n/).filter((line) => line.startsWith("rocky: "));
+  assert.ok(lines.length > 0, `expected at least one rocky line in: ${stderr}`);
+  for (const line of lines) assert.deepEqual(validateOutputLine(line.slice("rocky: ".length)), [], line);
+}
 
 const rec = (kind: string, id: string, ts: number, cwd = "/p"): MemoryRecord =>
   ({ kind, id, ts, cwd } as unknown as MemoryRecord);
@@ -160,7 +168,8 @@ test("sessionsCommand refuses an unknown index and names how many sessions rocky
     writeMemoryFixture(home, oneSessionFixture());
     const { code, stderr } = captureStderr(() => sessionsCommand(["99"]));
     assert.equal(code, 1);
-    assert.match(stderr, /session not heard\. rocky counts 1 sessions, question/);
+    assert.match(stderr, /Session 99 not found\. 1 session available\./);
+    assertRockyLinesArePlain(stderr);
   } finally {
     restore();
   }
@@ -171,7 +180,8 @@ test("sessionsCommand unknown index against empty memory counts zero sessions", 
   try {
     const { code, stderr } = captureStderr(() => sessionsCommand(["1"]));
     assert.equal(code, 1);
-    assert.match(stderr, /session not heard\. rocky counts 0 sessions, question/);
+    assert.match(stderr, /Session 1 not found\. 0 sessions available\./);
+    assertRockyLinesArePlain(stderr);
   } finally {
     restore();
   }
@@ -193,7 +203,8 @@ test("sessionsCommand with no args lists sessions newest-first with a heuristic 
     assert.match(stderr, /\[1\].*other/);
     assert.match(stderr, /\[2\].*proj/);
     assert.match(stderr, /1 failure, 1 fix, 1 rationale/);
-    assert.match(stderr, /sessions derived from memory\. boundaries heuristic, not exact\./);
+    assert.match(stderr, /Sessions are derived from memory\. Boundaries are a heuristic, not exact\./);
+    assertRockyLinesArePlain(stderr);
   } finally {
     restore();
   }
@@ -225,6 +236,8 @@ test("sessionsCommand with no sessions yet still speaks and does not throw", () 
     const { code, stderr } = captureStderr(() => sessionsCommand([]));
     assert.equal(code, 0);
     assert.ok(stderr.length > 0);
+    assert.match(stderr, /No sessions recorded yet\./);
+    assertRockyLinesArePlain(stderr);
   } finally {
     restore();
   }
@@ -287,7 +300,7 @@ function failuresInOneSession(count: number): Record<string, unknown>[] {
   }));
 }
 
-test("sessionsCommand over the record cap says which lines it did not hear, once, before the listing", () => {
+test("sessionsCommand over the record cap says which lines it did not read, once, before the listing", () => {
   const { home, restore } = isolatedHome("rocky-sessions-cap-list-");
   try {
     writeMemoryFixture(home, failuresInOneSession(MAX_SUPPORTED_MEMORY_RECORDS + 1));
@@ -315,7 +328,7 @@ test("sessionsCommand <index> over the record cap says so before the session and
     const missed = captureStderr(() => sessionsCommand(["99"]));
     assert.equal(missed.code, 1);
     assert.equal(missed.stderr.split(COVERAGE_PREFIX).length - 1, 1, missed.stderr);
-    assert.ok(missed.stderr.indexOf(CAP_LINE) < missed.stderr.indexOf("session not heard"), "the cap line comes before the miss");
+    assert.ok(missed.stderr.indexOf(CAP_LINE) < missed.stderr.indexOf("Session 99 not found"), "the cap line comes before the miss");
   } finally {
     restore();
     rmSync(home, { recursive: true, force: true });

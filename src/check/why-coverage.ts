@@ -40,7 +40,7 @@ export function coveredWhyIdentities(records: readonly MemoryRecord[], now: numb
 /**
  * True when memory shows any fresh agent activity (a triple or rationale
  * inside the window). The nudge is contextual: a repo where no agent has
- * spoken recently gets silence, never nagging — same shape as changesets'
+ * recorded anything recently gets silence, never nagging — same shape as changesets'
  * bot, which only comments where changesets are in use.
  */
 export function hasFreshAgentEvidence(records: readonly MemoryRecord[], now: number): boolean {
@@ -66,11 +66,12 @@ export function missingWhyPaths(
   });
 }
 
-/** One non-blocking nudge line in Rocky voice, or undefined when covered. */
+/** One non-blocking nudge line, or undefined when covered. */
 export function whyNudgeLine(missing: readonly string[]): string | undefined {
   if (missing.length === 0) return undefined;
   const named = missing.slice(0, MAX_NAMED_MISSING).join(",");
   const suffix = missing.length > MAX_NAMED_MISSING ? ",…" : "";
-  return `${missing.length} changed, why not heard. not blocking, just deaf spot. `
-    + `agent can run: rocky hook agent-event generic --rationale "<one line why>" --files ${named}${suffix}`;
+  const subject = missing.length === 1 ? "1 changed file has" : `${missing.length} changed files have`;
+  return `${subject} no recorded reason. Not blocking; this is a gap in the record. `
+    + `An agent can run: rocky hook agent-event generic --rationale "<one line why>" --files ${named}${suffix}`;
 }

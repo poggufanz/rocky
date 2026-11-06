@@ -303,7 +303,8 @@ test("stats --cycles lists top fingerprints with counts from memory", async (t) 
   assert.equal(result, 0);
   assert.match(stderr, new RegExp(`${FP_A} x3`));
   assert.match(stderr, new RegExp(`${FP_B} x1`));
-  assert.match(stderr, /count only, no cause named/);
+  assert.match(stderr, /2 distinct errors recorded\. Top 2 listed\./);
+  assert.match(stderr, /1 distinct error seen 3 or more times\. Counts only; no cause is named\./);
   // A whole read has no coverage to disclose, so default output carries no counter line.
   assert.doesNotMatch(stderr, /memory coverage/);
   assert.doesNotMatch(stderr, /\?/);
@@ -322,7 +323,7 @@ test("stats --cycles is honest when memory holds no failure", async (t) => {
   withRockyHome(t, home);
   const { result, stderr } = captureOutput(() => stats(["--cycles"]));
   assert.equal(result, 0);
-  assert.match(stderr, /no failure heard yet\. nothing cycles\./);
+  assert.match(stderr, /No failures recorded yet\. Nothing repeats\./);
 });
 
 test("stats still rejects unknown flags", async (t) => {

@@ -12,11 +12,11 @@ export function journalCommand(argv: readonly string[]): number {
     try {
       appendJournal(args.join(" "));
     } catch {
-      say("note does not reach journal. empty note or file does not open. bad bad.");
+      say("Note was not saved: it is empty or the journal file could not be opened.");
       detail(`    journal: ${resolveRockyPaths().journal}`);
       return 1;
     }
-    say("I remember your note. good good.");
+    say("Journal note recorded.");
     return 0;
   } catch (error) {
     const code = reportCliUsage(error, say, detail);

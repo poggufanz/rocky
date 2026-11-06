@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { coveredWhyIdentities, hasFreshAgentEvidence, missingWhyPaths, whyNudgeLine } from "../check/why-coverage.js";
 import type { MemoryRecord } from "../core/memory-read.js";
+import { validateOutputLine } from "../ui/phrases.js";
 
 const NOW = 1_800_000_000_000;
 const CWD = "C:\\work\\repo";
@@ -51,11 +52,20 @@ test("nudge line names at most three paths, elides the rest, silent when covered
   assert.equal(whyNudgeLine([]), undefined);
   const line = whyNudgeLine(["a.ts", "b.ts", "c.ts", "d.ts", "e.ts"]);
   assert.ok(line !== undefined);
-  assert.ok(line.startsWith("5 changed, why not heard."));
+  assert.ok(line.startsWith("5 changed files have no recorded reason. Not blocking; this is a gap in the record."));
   assert.ok(line.includes("a.ts,b.ts,c.ts,…"));
   assert.ok(!line.includes("d.ts"));
   assert.ok(line.includes('rocky hook agent-event generic --rationale'));
-  assert.ok(!line.includes("?"), "voice rule: no bare question marks");
+  assert.ok(!line.includes("?"), "the nudge is a statement, not a question");
+  assert.deepEqual(validateOutputLine(line), [], line);
+});
+
+test("nudge line counts a single uncovered file in the singular", () => {
+  const line = whyNudgeLine(["a.ts"]);
+  assert.ok(line !== undefined);
+  assert.ok(line.startsWith("1 changed file has no recorded reason."));
+  assert.ok(line.endsWith("--files a.ts"));
+  assert.deepEqual(validateOutputLine(line), [], line);
 });
 
 test("hasFreshAgentEvidence gates the nudge: silent without fresh agent records", () => {

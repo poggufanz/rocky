@@ -2,9 +2,9 @@
  * `rocky run "<command>"`
  *
  * Runs the command through a shell, streaming stdout/stderr untouched.
- * On failure: fingerprints stderr, checks memory for this exact error,
- * and if Rocky has heard it before (and the same command worked again after
- * it) he says so. He never claims to know what changed in between.
+ * On failure: fingerprints stderr, checks memory for this exact error, and
+ * says so when it was recorded before (and the same command passed again
+ * after it). It never claims to know what changed in between.
  * On success: if the same reliable command identity failed recently in this
  * directory, this success is recorded as the confirmed fix. Same-program-only
  * evidence remains a possible association.
@@ -29,7 +29,7 @@ import { safeTerminalLine } from "../ui/sanitize.js";
 
 export async function run(cmd: string, processRunner: (cmd: string) => Promise<ExecResult> = runProcess): Promise<number> {
   if (!cmd || cmd.trim().length === 0) {
-    say("no command. give command, question");
+    say("No command given. Pass the command to run.");
     return 2;
   }
 
@@ -45,19 +45,19 @@ export async function run(cmd: string, processRunner: (cmd: string) => Promise<E
         onFailure(cmd, result);
       }
     } catch {
-      say("I cannot write memory. this one I forget.");
+      say("Could not write to memory, so this run is not recorded.");
       detail(`    memory: ${resolveRockyPaths().memory}`);
     }
   }
   return result.code;
 }
 
-/** An unreadable memory file is spoken, not thrown — callers get `undefined` and carry on. */
+/** An unreadable memory file is reported, not thrown — callers get `undefined` and carry on. */
 function readMemory(): MemoryRecord[] | undefined {
   try {
     const loaded = loadMemoryChecked();
     if (!isCompleteMemoryCoverage(loaded.coverage)) {
-      say("memory coverage incomplete. I do not claim prior fix. check, question");
+      say("Memory coverage is incomplete, so no earlier fix is claimed. Check the memory file.");
       const words = describeMemoryCoverage(loaded.coverage, loaded.records.length, { counts: false });
       detail(!isVerbose() && words !== undefined
         ? `    ${words}`
@@ -66,14 +66,14 @@ function readMemory(): MemoryRecord[] | undefined {
     }
     return loaded.records;
   } catch {
-    say("memory file does not open for me. I answer from nothing.");
+    say("Memory file could not be opened. No records were read.");
     detail(`    memory: ${resolveRockyPaths().memory}`);
     return undefined;
   }
 }
 
 /**
- * Speaks what memory knows about this fingerprint: a prior sighting and its
+ * Reports what memory holds for this fingerprint: a prior sighting and its
  * fix (naming the fix's own directory when it differs from linked failure cwd), or that
  * this is new. Shared by `run`'s onFailure and `watch`'s failure path — spec
  * §7 names `run`, `watch`, and `_hookfail` as the three paths that must carry
@@ -92,7 +92,7 @@ export function speakFailureMemory(
 
   if (previous.length > 0) {
     const first = previous[0];
-    say(`I remember this error. you hear it before. ${ago(first.ts)}. same same.`);
+    say(`Same error as before, first recorded ${ago(first.ts)}.`);
     const withFix = [...previous].reverse().find((f) => getFix(memory, f, now));
     if (withFix) {
       const fix = getFix(memory, withFix, now)!;
@@ -112,9 +112,9 @@ export function speakFailureMemory(
       if (sameCommand) {
         say(phrase("fix-recurrence-same"));
       } else {
-        say("last time, you run:");
+        say("Last time, you ran:");
         detail(`    ${safeTerminalLine(fix.cmd)}`);
-        say("possible fix only, question");
+        say("Possible fix only.");
       }
       const elsewhere = fixFromElsewhere(fix, withFix.cwd);
       // Say how much this link is worth. `recall` graded strong/weak from the
@@ -126,39 +126,39 @@ export function speakFailureMemory(
       // even matches what's failing right now) — so it still prints regardless.
       const basis = fix.links?.find((link) => link.id === withFix.id)?.basis;
       if (elsewhere !== undefined) {
-        say("but fix comes from other place.");
+        say("But that fix comes from a different directory.");
         detail(`    place: ${safeTerminalLine(elsewhere)}`);
-        say("possible only. check, question");
+        say("Possible only. Check before acting.");
       } else if (basis === "identity" || basis === "signature") {
-        say(`same command, ${gapSpan(fix.ts - withFix.ts)} later. strong.`);
+        say(`Same command, ${gapSpan(fix.ts - withFix.ts)} later. Strong link.`);
       } else if (basis === "program") {
-        say(`same program, ${gapSpan(fix.ts - withFix.ts)} later. maybe not fix. check, question`);
+        say(`Same program, ${gapSpan(fix.ts - withFix.ts)} later. May not be the fix. Check before acting.`);
       } else if (basis !== undefined) {
         // A recognized-but-weaker basis ("sequence") or a string a newer
         // writer emits that this reader does not recognize yet (spec §2.5):
         // either way it must fall to the weakest hedge, never silently print
         // no grade line at all.
-        say(`different program, ${gapSpan(fix.ts - withFix.ts)} later. maybe not fix. check, question`);
+        say(`Different program, ${gapSpan(fix.ts - withFix.ts)} later. May not be the fix. Check before acting.`);
       }
-      if (!sameCommand) say("try, question");
+      if (!sameCommand) say("Try that command?");
     } else {
       const candidate = speakablePossibleFix(memory, previous, now);
       if (candidate) {
-        say("no confirmed fix. but after error, you run this:");
+        say("No confirmed fix. After that error, you ran:");
         detail(`    ${safeTerminalLine(candidate.cmd)}`);
         if (candidate.fromElsewhere) {
-          say("but this comes from other place.");
+          say("But that command comes from a different directory.");
           detail(`    place: ${safeTerminalLine(candidate.cwd)}`);
         }
         say(linkBasisRank(candidate.basis) > linkBasisRank("program")
-          ? "different program. maybe fix, maybe not. check, question"
-          : "maybe fix, maybe not. check, question");
+          ? "Different program. It may or may not be a fix. Check before acting."
+          : "It may or may not be a fix. Check before acting.");
       } else {
-        say("no fix in memory yet. you fix, I remember. this is good trade.");
+        say("No fix recorded yet.");
       }
     }
   } else {
-    say(`new error. bad. I remember it now. exit code ${exitCode}.`);
+    say(`New error recorded (exit code ${exitCode}).`);
   }
 }
 

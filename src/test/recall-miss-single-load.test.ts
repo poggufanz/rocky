@@ -71,7 +71,7 @@ test("recall miss on durable memory loads once and keeps no-match message", asyn
   const after = memoryReadMetrics();
 
   assert.equal(output.code, 1);
-  assert.match(output.stderr, /nothing match/);
+  assert.match(output.stderr, /No match in memory\. The error may be new, or the words may differ\./);
   assert.equal(output.stdout, "");
   assert.equal(after.parses - before.parses, 1);
   assert.equal(after.cacheHits - before.cacheHits, 0);
@@ -88,7 +88,7 @@ test("recall empty durable memory keeps empty message", async (t) => {
   );
 
   assert.equal(output.code, 0);
-  assert.match(output.stderr, /memory is empty/);
+  assert.match(output.stderr, /Memory is empty\. No errors recorded yet\./);
   assert.equal(output.stdout, "");
 });
 
@@ -108,6 +108,6 @@ test("recall incomplete durable coverage keeps incomplete message", async (t) =>
   );
 
   assert.equal(output.code, 1);
-  assert.match(output.stderr, /memory coverage incomplete/);
+  assert.match(output.stderr, /Memory coverage is incomplete\. No match was found, but that does not prove there is none\./);
   assert.equal(output.stdout, "");
 });
