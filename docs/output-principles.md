@@ -34,6 +34,6 @@ Output is plain, neutral English, the way other command-line tools write.
 - No first person. rocky reports what was recorded, checked, or linked: `Same error as before. No fix recorded yet.`
 - No emphasis by repetition and no verdict tags such as a trailing `good.` or `bad.`. State the fact; the exit code carries success or failure.
 - Name exact commands, paths, counts, and flags. A blocked action names the command that unblocks it.
-- No emoji, no ASCII art, no mascot.
+- No emoji, no mascot, no drawings made of characters.
 
 The phrase catalog in `src/ui/phrases.ts` and its validator (`validateOutputLine`) enforce the mechanical part of these rules in tests.

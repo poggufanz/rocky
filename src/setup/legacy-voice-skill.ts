@@ -1,6 +1,6 @@
 /**
  * Cleanup of the voice skill that older releases installed with
- * `rocky setup --voice-skill`. rocky no longer ships or installs that skill.
+ * the retired voice skill flag of `rocky setup`. rocky no longer ships or installs that skill.
  * This module only finds a copy left on disk and, on request, moves it into a
  * backup folder. It never deletes anything.
  *
@@ -119,7 +119,7 @@ async function optionalLstat(path: string, ops: LegacyVoiceSkillFileOps): Promis
 
 /**
  * True when anything exists at the path. lstat follows every parent component,
- * so a symlinked skills folder that holds no rocky-voice entry reads as absent
+ * so a symlinked skills folder that holds no voice skill entry reads as absent
  * instead of as an unsafe topology. Only a real entry is worth refusing over.
  */
 async function entryExists(path: string, ops: LegacyVoiceSkillFileOps): Promise<boolean> {

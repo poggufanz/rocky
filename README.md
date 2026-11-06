@@ -12,7 +12,7 @@ Your AI writes code. Rocky makes sure you still understand what you own. It is a
 
 The useful part is local and deterministic. Rocky has no daemon, no telemetry, and zero runtime dependencies. Optional AI uses an Ollama instance that you run on loopback.
 
-> You teach, I remember. I remind, you understand. This is good trade.
+> You teach, it remembers. It reminds, you understand.
 
 ## See it work
 
@@ -66,7 +66,7 @@ On Windows, `rocky hook install` installs into every PowerShell host it finds on
 
 On Windows, install also says when it had to create a missing `.bashrc`, because only Git Bash reads that file there. It asks each PowerShell host for its effective execution policy too. When that policy is `Restricted` or `AllSigned`, PowerShell will not load the profile, so install and `status` say that and print `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` instead of reporting working ears; the profile is still written and the exit code stays 0. A `$PROFILE` outside your home directory is skipped unless you set `ROCKY_HOOK_ALLOW_PROFILE_OUTSIDE_HOME=1`, and the skip message names that variable.
 
-The PowerShell hook is passive ears only: it overrides `prompt` to see a command's result right after it finishes, so it remembers failures and links fixes the same way Bash does, but — unlike the Bash hook — it cannot ask for confirmation before a dangerous command runs, because `prompt` never sees a command before it executes. Because `prompt` fires after the command's own stderr is already gone, PowerShell-hook failures are fingerprinted from the command text alone, the same command-only fallback the CLI has used since v0.4.0. One disclosed side effect: the only way PowerShell allows restoring `$?` to `False` after Rocky's own bookkeeping runs is a real, suppressed non-terminating error, which pushes one synthetic entry — named so you know it is Rocky's — onto the front of `$Error`, ahead of whatever your last real command actually raised. `$LASTEXITCODE` and `$?`'s value are always exactly what your own command left them; only `$Error[0]`'s position shifts.
+The PowerShell hook only records: it overrides `prompt` to read a command's result right after it finishes, so it remembers failures and links fixes the same way Bash does, but — unlike the Bash hook — it cannot ask for confirmation before a dangerous command runs, because `prompt` never sees a command before it executes. Because `prompt` fires after the command's own stderr is already gone, PowerShell-hook failures are fingerprinted from the command text alone, the same command-only fallback the CLI has used since v0.4.0. One disclosed side effect: the only way PowerShell allows restoring `$?` to `False` after Rocky's own bookkeeping runs is a real, suppressed non-terminating error, which pushes one synthetic entry — named so you know it is Rocky's — onto the front of `$Error`, ahead of whatever your last real command actually raised. `$LASTEXITCODE` and `$?`'s value are always exactly what your own command left them; only `$Error[0]`'s position shifts.
 
 ### 60-second test
 

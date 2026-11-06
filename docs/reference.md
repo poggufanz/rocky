@@ -16,16 +16,16 @@ Rocky is *built to* attack that cost: fewer agent runs wasted on ambiguous direc
 
 The longer arc of this project is what we call the comprehension guardian: in an era where AI generates code faster than anyone reads it, Rocky's job is to make sure the human still understands what got built. See [scientific grounding](scientific-grounding.md) for the research this is built on.
 
-## The Good Trade
+## The learning loop
 
-**The Good Trade.** You get smarter, so your AI gets more effective. Better AI work gives you better material to learn from, so you get smarter again. Rocky exists to keep that loop spinning—because the opposite loop is a risk worth resisting.
+**The learning loop.** You get smarter, so your AI gets more effective. Better AI work gives you better material to learn from, so you get smarter again. Rocky exists to keep that loop spinning—because the opposite loop is a risk worth resisting.
 
 This is Rocky's v0.5 product hypothesis, not an established outcome. "More effective" means that a better-informed user can provide sharper direction, context, choices, and verification; it does not mean the model weights change. Rocky's impact on understanding still has to be tested through dogfooding and user research.
 
 Two loops run in opposite directions:
 
 - **The loop worth resisting** — the AI gets more capable, more of the thinking gets handed over, understanding and vigilance erode, intent and verification get worse, and the results get harder to judge at all.
-- **The Good Trade** — you understand more, your intent and decisions get sharper, the AI's work in your hands gets more useful, and that work becomes the material you learn from next.
+- **The learning loop** — you understand more, your intent and decisions get sharper, the AI's work in your hands gets more useful, and that work becomes the material you learn from next.
 
 The arrow that usually breaks is *AI output → you learn from it*. Each arrow maps to one mechanism rather than to a slogan. As of v0.5.0, Plan 01 and the dictionary/teaching surfaces of Plan 02 are implemented:
 
@@ -42,7 +42,7 @@ The arrow that usually breaks is *AI output → you learn from it*. Each arrow m
 
 The claim stops there: better direction from you, never a smarter model.
 
-> "You teach, I remember. I remind, you understand. This is good trade."
+> "You teach, it remembers. It reminds, you understand."
 
 That companion line is an original Rocky project tagline, not a quotation from an external source.
 
@@ -344,8 +344,8 @@ association. And when a command looks catastrophic — `rm -rf` at a
 strange target, a force push, `curl | bash` — Rocky holds it:
 
 ```
-[Rocky] this rm eat everything under target. bad bad.
-[Rocky] you sure, question (y/n)
+rocky: This rm deletes everything under its target.
+rocky: Run it anyway? [y/N]
 ```
 
 Answer anything but `y` and the command never runs. Rules live in

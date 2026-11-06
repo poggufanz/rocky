@@ -587,7 +587,7 @@ async function runAgentHooksAction(
 
 /*
  * Legacy voice skill. Older releases could install a voice skill with
- * `setup --voice-skill`. rocky no longer ships it, so setup only cleans up a
+ * the retired voice skill flag. rocky no longer ships it, so setup only cleans up a
  * copy left behind: --check and --status report it read-only, and --remove
  * moves an unmodified managed copy into a backup folder after the same consent
  * as the MCP removal. A decline never touches it. When no legacy skill exists
