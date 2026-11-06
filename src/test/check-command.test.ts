@@ -6,7 +6,7 @@ import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import test, { type TestContext } from "node:test";
 import { fileURLToPath } from "node:url";
 import { cleanLine } from "../commands/check.js";
-import { validateRockyPhrase } from "../ui/phrases.js";
+import { validateOutputLine } from "../ui/phrases.js";
 
 const packageRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const entry = join(packageRoot, "dist", "index.js");
@@ -1211,7 +1211,7 @@ test("cleanLine states only the net change it checked, with exact plurals", () =
   ] as const;
   for (const [actual, expected] of lines) {
     assert.equal(actual, expected);
-    assert.deepEqual(validateRockyPhrase(actual), [], actual);
+    assert.deepEqual(validateOutputLine(actual), [], actual);
   }
 });
 

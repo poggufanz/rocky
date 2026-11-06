@@ -181,10 +181,10 @@ function readMemory(quiet: boolean): MemoryRecord[] | undefined {
   }
 }
 
-/** "still waiting. 10 minutes. waiting is easy for me" — composed because the duration varies. */
+/** "Still waiting: 10 minutes." Composed because the duration varies. */
 export function idleLine(elapsedMs: number): string {
   const minutes = Math.round(elapsedMs / 60000);
-  return `still waiting. ${minutes} minute${minutes === 1 ? "" : "s"}. ${phrase("watch-idle-tail")}`;
+  return `Still waiting: ${minutes} minute${minutes === 1 ? "" : "s"}.`;
 }
 
 /** "command finish. good good. 812 seconds." / "command dies. bad. 812 seconds." */

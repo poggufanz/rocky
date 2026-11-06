@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * rocky — a blind Eridian engineer who lives in your terminal.
+ * rocky — a local CLI that remembers failed commands and what fixed them.
  *
  * Public surface:
  *   rocky run "<command>"     run a command; Rocky remembers failures & fixes
@@ -18,10 +18,10 @@
 // cli-startup-boundary.test.ts walks the static import closure and keeps it so.
 import { CliUsageError, parseExactCommand, reportCliUsage } from "./commands/cli-args.js";
 import { PACKAGE_NAME, PACKAGE_VERSION } from "./core/package-info.js";
-import { detail, face, flushHookSpeech, say } from "./ui/rocky.js";
+import { detail, flushHookSpeech, say } from "./ui/rocky.js";
 
 /**
- * `rocky --help`: one screen under Rocky's face, grouped by what you do. The
+ * `rocky --help`: one screen, grouped by what you do. The
  * `version:` line stays because the release check reads it from this output;
  * the network facts stay because a short help must not hide what leaves the
  * machine. `HELP` below is the full reference, behind `rocky --help --all`.
@@ -181,9 +181,8 @@ function parseHelpArgs(args: readonly string[]): HelpView {
   return full ? "full" : "short";
 }
 
-/** Rocky's face, then the short grouped view or the full reference, on stdout. */
+/** The short grouped view or the full reference, on stdout. */
 function printHelp(view: HelpView): number {
-  console.log(face());
   console.log(view === "full" ? HELP : HELP_SHORT);
   return 0;
 }

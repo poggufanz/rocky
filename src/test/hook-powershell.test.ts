@@ -58,7 +58,7 @@ import {
   withoutPolicyPreference,
 } from "../commands/hook.js";
 import { POWERSHELL_HOOK_LINE, powershellHookBlockCodec } from "../core/hook-block.js";
-import { validateRockyPhrase } from "../ui/phrases.js";
+import { validateOutputLine } from "../ui/phrases.js";
 import { verifyShellAssetsStaged } from "./shell-assets-fixture.js";
 
 const BEGIN = "# >>> rocky hook >>>";
@@ -260,7 +260,7 @@ test("PowerShell hook status reports absent, then installed, per host", (t) => {
 
 test("the $Error-shift disclosure follows Rocky's voice rules", () => {
   assert.deepEqual(
-    validateRockyPhrase("exit status stays exact. forcing it false pushes one entry into $Error first, named as mine."),
+    validateOutputLine("exit status stays exact. forcing it false pushes one entry into $Error first, named as mine."),
     [],
   );
 });
@@ -314,10 +314,10 @@ test("withoutPolicyPreference drops the preference variable in any letter case, 
 
 test("the blocked-policy and probe-wait words follow Rocky's voice rules", () => {
   for (const label of ["Windows PowerShell", "PowerShell 7"]) {
-    assert.deepEqual(validateRockyPhrase(`${label} blocks scripts here. my ears cannot load.`), [], label);
+    assert.deepEqual(validateOutputLine(`${label} blocks scripts here. my ears cannot load.`), [], label);
   }
-  assert.deepEqual(validateRockyPhrase(`fix: ${EXECUTION_POLICY_FIX}`), []);
-  assert.deepEqual(validateRockyPhrase(PROBE_WAIT_LINE), []);
+  assert.deepEqual(validateOutputLine(`fix: ${EXECUTION_POLICY_FIX}`), []);
+  assert.deepEqual(validateOutputLine(PROBE_WAIT_LINE), []);
 });
 
 for (const policy of ["Restricted", "AllSigned"]) {
@@ -502,14 +502,14 @@ test("a profile outside home is refused with the variable that allows it, and in
 });
 
 // Finding 3, final whole-branch review: every other new string in this
-// release has a dedicated validateRockyPhrase test and/or a behavioral test;
+// release has a dedicated validateOutputLine test and/or a behavioral test;
 // this one (hook.ts's publishTarget, the non-bashrc branch) shipped with
 // neither. The string itself already passes the voice rules -- this closes
 // the gate, it does not change the wording.
 const WRITE_PROTECTED_PROFILE_DISCLOSURE = "Windows PowerShell profile is write-protected. I replace it anyway. your lines stay.";
 
 test("the write-protected PowerShell profile disclosure follows Rocky's voice rules", () => {
-  assert.deepEqual(validateRockyPhrase(WRITE_PROTECTED_PROFILE_DISCLOSURE), []);
+  assert.deepEqual(validateOutputLine(WRITE_PROTECTED_PROFILE_DISCLOSURE), []);
 });
 
 test("hookInstall discloses a write-protected PowerShell profile, replaces it anyway, keeps mode and user lines", (t) => {
@@ -657,7 +657,7 @@ const MISSING_PROFILE_FOLDER_DISCLOSURE =
   "Windows PowerShell profile's folder does not exist. I cannot make it. I touch nothing. check permissions, then try again.";
 
 test("the missing-profile-folder disclosure follows Rocky's voice rules", () => {
-  assert.deepEqual(validateRockyPhrase(MISSING_PROFILE_FOLDER_DISCLOSURE), []);
+  assert.deepEqual(validateOutputLine(MISSING_PROFILE_FOLDER_DISCLOSURE), []);
 });
 
 test("hookInstall reports a distinct message when the profile's folder genuinely cannot be created, not the generic write-fail message", (t) => {
@@ -907,7 +907,7 @@ const HOST_OUTSIDE_HOME_DISCLOSURE =
   "Windows PowerShell profile lives outside home. I touch nothing there. to let me touch it, set ROCKY_HOOK_ALLOW_PROFILE_OUTSIDE_HOME=1.";
 
 test("the profile-outside-home disclosure follows Rocky's voice rules", () => {
-  assert.deepEqual(validateRockyPhrase(HOST_OUTSIDE_HOME_DISCLOSURE), []);
+  assert.deepEqual(validateOutputLine(HOST_OUTSIDE_HOME_DISCLOSURE), []);
 });
 
 // Group-Policy Folder Redirection points Documents (and so `$PROFILE`) at a
@@ -960,7 +960,7 @@ test("admitHostWithinHome passes an under-home host through untouched, with or w
 const HOST_OUTSIDE_HOME_CONSENT_DISCLOSURE = "Windows PowerShell profile lives outside home. you allow it, so I touch it.";
 
 test("the outside-home consent disclosure follows Rocky's voice rules", () => {
-  assert.deepEqual(validateRockyPhrase(HOST_OUTSIDE_HOME_CONSENT_DISCLOSURE), []);
+  assert.deepEqual(validateOutputLine(HOST_OUTSIDE_HOME_CONSENT_DISCLOSURE), []);
 });
 
 function parseCheck(exe: string, scriptPath: string): { ok: boolean; message: string } {

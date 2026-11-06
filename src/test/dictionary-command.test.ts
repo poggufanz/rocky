@@ -5,7 +5,7 @@ import { digest, exportCommand, how, quiz, what, why } from "../commands/diction
 import type { MemoryCoverage, MemoryRecord, RationaleRecord, TripleRecord } from "../core/memory-read.js";
 import { pathIdentityHash } from "../core/memory-read.js";
 import { MAX_WHY_RECORDS } from "../core/memory-query.js";
-import { validateRockyPhrase } from "../ui/phrases.js";
+import { validateOutputLine } from "../ui/phrases.js";
 import { setVerbose } from "./verbose-switch.js";
 
 const NO_RECORD_NAMES_FILE = "no record names this file. I not know if agent touch it.";
@@ -504,7 +504,7 @@ test("quiz repeats deterministic note candidates and labels answer as unverified
   assert.deepEqual(first.asked, ["your answer: "]);
   assert.deepEqual(first.output.sayLines, second.output.sayLines);
   assert.ok(first.output.sayLines.includes("I remember your answer: banana. not verified."), first.output.sayLines.join("\n"));
-  assert.deepEqual(validateRockyPhrase("I remember your answer: banana. not verified."), []);
+  assert.deepEqual(validateOutputLine("I remember your answer: banana. not verified."), []);
   assert.deepEqual(first.output.outLines, ["your answer. remembered, not verified."]);
   assert.equal(first.output.sayLines.some((line) => line.includes("wrong") || line.includes("score")), false);
   assert.doesNotMatch([...first.output.sayLines, ...first.output.outLines].join("\n"), INTERNAL_LABELS);
@@ -549,7 +549,7 @@ test("why on a fresh memory says no record names the file and claims nothing was
     assert.equal(heard.includes("possible path omitted"), false);
     assert.equal(heard.includes("coverage"), false);
   }
-  assert.deepEqual(validateRockyPhrase(`"package.json"... ${NO_RECORD_NAMES_FILE}`), []);
+  assert.deepEqual(validateOutputLine(`"package.json"... ${NO_RECORD_NAMES_FILE}`), []);
 });
 
 const MAY_HIDE_THE_FILE: TripleRecord = {
@@ -567,7 +567,7 @@ test("why keeps possible path omitted when a record may hide the file", (t) => {
   assert.deepEqual(output.sayLines, [`"src/missing.ts"... ${COVERAGE_INCOMPLETE_LINE}`]);
   assert.deepEqual(output.outLines, ["possible path omitted."]);
   assert.equal([...output.sayLines, ...output.outLines].some((line) => line.includes("no record names")), false);
-  assert.deepEqual(validateRockyPhrase("possible path omitted."), []);
+  assert.deepEqual(validateOutputLine("possible path omitted."), []);
 });
 
 test("why keeps the coverage status word on the possible path line under ROCKY_VERBOSE", (t) => {
@@ -619,7 +619,7 @@ test("why does not call a reader that stopped at its record bound whole", (t) =>
   assert.deepEqual(output.sayLines, [`"package.json"... ${COVERAGE_INCOMPLETE_LINE}`]);
   assert.deepEqual(output.outLines, ["some path may be omitted."]);
   assert.equal([...output.sayLines, ...output.outLines].some((line) => line.includes("no record names") || line.includes("possible path omitted")), false);
-  assert.deepEqual(validateRockyPhrase("some path may be omitted."), []);
+  assert.deepEqual(validateOutputLine("some path may be omitted."), []);
 });
 
 test("why keeps the coverage status word on the some-path line under ROCKY_VERBOSE", (t) => {
@@ -1104,7 +1104,7 @@ test("default evidence line names who said it and how far to trust the file list
     "some path may be omitted.",
     "  (src/app.css +3 -1, 1 minute ago, tags: spacing; by claude-code. some changed files may be missing.)",
   ]);
-  assert.deepEqual(validateRockyPhrase("by claude-code. some changed files may be missing."), []);
+  assert.deepEqual(validateOutputLine("by claude-code. some changed files may be missing."), []);
 });
 
 test("default evidence says the file list is complete only as the agent reported it", async (t) => {
@@ -1115,7 +1115,7 @@ test("default evidence says the file list is complete only as the agent reported
     "tighten spacing between rows -> gap  (src/rows.css +2 -1, 1 minute ago; by codex. file list complete, as agent reported.)",
   ]);
   assert.doesNotMatch(output.outLines.join("\n"), /\b(?:sure|true|right|correct|fixed|verified)\b/iu);
-  assert.deepEqual(validateRockyPhrase("by codex. file list complete, as agent reported."), []);
+  assert.deepEqual(validateOutputLine("by codex. file list complete, as agent reported."), []);
 });
 
 test("default evidence for a remembered note says it is the user's answer, not verified", async (t) => {
@@ -1128,7 +1128,7 @@ test("default evidence for a remembered note says it is the user's answer, not v
   assert.equal(await what(["cache"], { load: () => [note], ...output.deps }), 0);
   assert.deepEqual(output.outLines, ["note cache: banana  (src/app.ts, 2 days ago; your answer. remembered, not verified.)"]);
   assert.doesNotMatch(output.outLines.join("\n"), INTERNAL_LABELS);
-  assert.deepEqual(validateRockyPhrase("your answer. remembered, not verified."), []);
+  assert.deepEqual(validateOutputLine("your answer. remembered, not verified."), []);
 });
 
 test("default evidence with long values splits into bounded lines and still prints no id", async (t) => {
@@ -1199,7 +1199,7 @@ test("why says an ambiguous path in plain words", (t) => {
   const output = sinks();
   assert.equal(why(["index.ts"], { load: ambiguousIndexRecords, now: 100, ...output.deps }), 0);
   assert.deepEqual(output.outLines, ["path fits more than one file. no reason picked."]);
-  assert.deepEqual(validateRockyPhrase("path fits more than one file. no reason picked."), []);
+  assert.deepEqual(validateOutputLine("path fits more than one file. no reason picked."), []);
   assert.doesNotMatch(output.outLines.join("\n"), INTERNAL_LABELS);
 });
 

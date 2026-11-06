@@ -13,7 +13,7 @@ import { watch } from "../commands/watch.js";
 import { describeMemoryCoverage } from "../core/coverage.js";
 import type { ExecResult } from "../core/exec.js";
 import { MAX_SUPPORTED_MEMORY_RECORDS, type MemoryCoverage } from "../core/memory-read.js";
-import { validateRockyPhrase } from "../ui/phrases.js";
+import { validateOutputLine } from "../ui/phrases.js";
 import { flushHookSpeech } from "../ui/rocky.js";
 import { setVerbose } from "./verbose-switch.js";
 
@@ -88,8 +88,8 @@ for (const shape of SHAPES) {
     }
     assert.equal(plain, `${PREFIX}${shape.facts}`);
     assert.equal(counted, `${PREFIX}${shape.facts} ${COUNTS_WARNING}`);
-    assert.deepEqual(validateRockyPhrase(plain), []);
-    assert.deepEqual(validateRockyPhrase(counted as string), []);
+    assert.deepEqual(validateOutputLine(plain), []);
+    assert.deepEqual(validateOutputLine(counted as string), []);
   });
 }
 

@@ -7,7 +7,7 @@ import { spawnSync } from "node:child_process";
 import { commandFingerprint } from "../core/fingerprint.js";
 import { cmdExeHint, run, speakFailureMemory } from "../commands/run.js";
 import type { ExecResult } from "../core/exec.js";
-import { phraseKeys, validateRockyPhrase } from "../ui/phrases.js";
+import { phraseKeys, validateOutputLine } from "../ui/phrases.js";
 
 const packageRoot = process.cwd();
 const cli = join(packageRoot, "dist", "index.js");
@@ -379,7 +379,7 @@ const CMD_EXE_HINT = "cmd.exe parsed this command. bash or powershell words not 
 test("cmdExeHint names cmd.exe when it rejected a command on the default Windows shell", () => {
   const hint = cmdExeHint("'FOO' is not recognized as an internal or external command,", "win32", true);
   assert.equal(hint, CMD_EXE_HINT);
-  assert.deepEqual(validateRockyPhrase(hint!), []);
+  assert.deepEqual(validateOutputLine(hint!), []);
   assert.ok(phraseKeys.includes("cmd-exe-parsed"), "registered, so the catalog lint covers it");
   assert.equal(cmdExeHint(CMD_EXE_REJECTION, "win32", true), CMD_EXE_HINT, "the full two-line message matches too");
 });

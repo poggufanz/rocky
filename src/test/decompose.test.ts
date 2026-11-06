@@ -16,7 +16,7 @@ import {
 } from "../core/decompose.js";
 import { check, parseDecomposeRequest } from "../commands/check.js";
 import { briefCommand, parseBriefArgs } from "../commands/brief.js";
-import { validateRockyPhrase } from "../ui/phrases.js";
+import { validateOutputLine } from "../ui/phrases.js";
 
 /**
  * briefCommand runs captureRationales() on every successful call. Left
@@ -137,7 +137,7 @@ test("diff parsing extracts header names, never a dev-null entry, never throws",
 test("nudge and voice lines follow Rocky voice rules, never a question mark", () => {
   assert.equal(typeof decomposeNudgeLine(), "string");
   for (const line of [DECOMPOSE_NUDGE, DECOMPOSE_BLANK_PROMPT, DECOMPOSE_SAY_BLANK, DECOMPOSE_SAY_FILLED]) {
-    assert.deepEqual(validateRockyPhrase(line), [], line);
+    assert.deepEqual(validateOutputLine(line), [], line);
   }
   assert.match(DECOMPOSE_NUDGE, /, question$/);
 });

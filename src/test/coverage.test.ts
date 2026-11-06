@@ -14,7 +14,7 @@ import {
 } from "../core/coverage.js";
 import { deriveHome } from "../core/home-data.js";
 import { briefCommand } from "../commands/brief.js";
-import { validateRockyPhrase } from "../ui/phrases.js";
+import { validateOutputLine } from "../ui/phrases.js";
 import type { MemoryRecord } from "../core/memory-read.js";
 import { setVerbose } from "./verbose-switch.js";
 
@@ -194,7 +194,7 @@ test("rendered cards name counts and paths without shaming or question marks", (
   assert.doesNotMatch(allTried.join("\n"), /\?/);
 
   for (const line of [...card, ...allTried, COVERAGE_EMPTY_LINE]) {
-    assert.deepEqual(validateRockyPhrase(line), [], line);
+    assert.deepEqual(validateOutputLine(line), [], line);
   }
 });
 
@@ -229,7 +229,7 @@ test("dash home coverage line is the plain-words line when memory was incomplete
   const words = "memory coverage incomplete: 2 lines I cannot use.";
   assert.equal(deriveHome([], words, NOW).coverageLine, words);
   assert.equal(deriveHome([], undefined, NOW).coverageLine, "coverage full");
-  assert.deepEqual(validateRockyPhrase(words), []);
+  assert.deepEqual(validateOutputLine(words), []);
 });
 
 test("disclosure lines show both memory and list-cap lines when both hold, never shadowing", (t) => {

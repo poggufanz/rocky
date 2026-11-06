@@ -13,7 +13,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { addHookBlock, hasHookBlock, hookInstall, hookUninstall, removeHookBlock } from "../commands/hook.js";
-import { phrase, validateRockyPhrase } from "../ui/phrases.js";
+import { phrase, validateOutputLine } from "../ui/phrases.js";
 import { verifyShellAssetsStaged } from "./shell-assets-fixture.js";
 
 const BLOCK_RE = /# >>> rocky hook >>>[\s\S]*# <<< rocky hook <<</;
@@ -98,7 +98,7 @@ function bashrcSandbox(t: TestContext): BashrcSandbox {
 }
 
 test("bashrc write-protected disclosure follows Rocky voice rules", () => {
-  assert.deepEqual(validateRockyPhrase(DISCLOSURE), []);
+  assert.deepEqual(validateOutputLine(DISCLOSURE), []);
 });
 
 test("hookInstall discloses a write-protected bashrc, replaces it anyway, keeps mode and user lines", (t) => {
@@ -168,7 +168,7 @@ const BASHRC_CREATED_DISCLOSURE = "bashrc missing. I make new one. only Git Bash
 
 test("the bashrc-created disclosure follows Rocky voice rules", () => {
   assert.equal(phrase("bashrc-created"), BASHRC_CREATED_DISCLOSURE);
-  assert.deepEqual(validateRockyPhrase(BASHRC_CREATED_DISCLOSURE), []);
+  assert.deepEqual(validateOutputLine(BASHRC_CREATED_DISCLOSURE), []);
 });
 
 test(
@@ -231,5 +231,5 @@ test("hook install discloses that it changes the shell history setting", (t) => 
 
   assert.equal(hookInstall(), 0, sandbox.stderr());
   assert.ok(sandbox.stderr().includes(phrase("hook-histcontrol")), sandbox.stderr());
-  assert.deepEqual(validateRockyPhrase(phrase("hook-histcontrol")), []);
+  assert.deepEqual(validateOutputLine(phrase("hook-histcontrol")), []);
 });

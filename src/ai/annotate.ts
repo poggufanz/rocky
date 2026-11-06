@@ -1,7 +1,7 @@
 import { Buffer } from "node:buffer";
 import { loadConfig, type ConfigLoadResult } from "../core/config-read.js";
 import { redactSecretsAtBoundary } from "../core/redact.js";
-import { validateRockyPhrase } from "../ui/phrases.js";
+import { validateOutputLine } from "../ui/phrases.js";
 import { createOllamaClient, type OllamaClient } from "./ollama.js";
 
 export interface AnnotateInput {
@@ -153,7 +153,7 @@ function parseLabel(value: unknown): { valid: boolean; value?: string } {
   if (value === undefined) return { valid: true };
   if (typeof value !== "string") return { valid: false };
   const label = sanitizeText(value, MAX_LABEL_CHARS);
-  if (!label || validateRockyPhrase(label).length > 0) return { valid: true };
+  if (!label || validateOutputLine(label).length > 0) return { valid: true };
   return { valid: true, value: label };
 }
 

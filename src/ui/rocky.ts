@@ -1,23 +1,16 @@
 /**
- * Rocky's face and voice.
- *
- * Speech rules (from the book):
- *  - questions end with ", question" — never "?"
- *  - emphasis by repetition: "good good good", "bad bad"
- *  - no articles, short sentences, present tense
- *  - he is blind; he never says "I see". He hears, he remembers, he checks.
+ * Terminal output helpers. Every rocky-owned line goes to stderr, so it never
+ * mixes with a wrapped command's stdout. Wording rules: docs/output-principles.md.
  */
 
 import { mkdirSync, renameSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { safeTerminalBlock, safeTerminalLine } from "./sanitize.js";
 
-export { phrase, phraseForAct, phraseKeys, validateRockyPhrase, type PhraseKey } from "./phrases.js";
+export { phrase, phraseForAct, phraseKeys, validateOutputLine, type PhraseKey } from "./phrases.js";
 
-const useStdoutColor = process.stdout.isTTY && !process.env.NO_COLOR;
 const useStderrColor = process.stderr.isTTY && !process.env.NO_COLOR;
 
-const amberStdout = (s: string) => (useStdoutColor ? `\u001b[33m${s}\u001b[0m` : s);
 const amberStderr = (s: string) => (useStderrColor ? `\u001b[33m${s}\u001b[0m` : s);
 const dimStderr = (s: string) => (useStderrColor ? `\u001b[2m${s}\u001b[0m` : s);
 const boldStderr = (s: string) => (useStderrColor ? `\u001b[1m${s}\u001b[0m` : s);
@@ -33,7 +26,7 @@ function startsWithLf(chunk: string | Uint8Array): boolean {
   return typeof chunk === "string" ? chunk.charCodeAt(0) === 0x0a : chunk[0] === 0x0a;
 }
 
-/** Write Rocky-owned stderr, inserting at most one needed line separator. */
+/** Write rocky-owned stderr, inserting at most one needed line separator. */
 export function writeRockyStderr(chunk: string | Uint8Array): void {
   if (childStderrNeedsSeparator) {
     childStderrNeedsSeparator = false;
@@ -42,36 +35,22 @@ export function writeRockyStderr(chunk: string | Uint8Array): void {
   process.stderr.write(chunk);
 }
 
-/**
- * Rocky, seen from the front: pentagonal carapace, five radial legs,
- * breathing slits on top, no face. He hangs from the ceiling of his
- * habitat tunnel, as Eridians do.
- */
-const FACE = [
-  "  ═╦═══════╦═ ",
-  "   ║ ┌───┐ ║  ",
-  "   ╲_││││││_╱  ",
-  "   ╱ ╲▔▔▔╱ ╲  ",
-  "  ╱ ╱ ╲_╱ ╲ ╲ ",
-];
+/** The one prefix on every rocky-owned stderr line, lowercase like other CLIs. */
+export const OUTPUT_PREFIX = "rocky:";
 
-export function face(): string {
-  return FACE.map((l) => amberStdout(l)).join("\n");
-}
-
-/** One Rocky line, prefixed. */
+/** One rocky line, prefixed. */
 export function say(msg: string): void {
-  writeRockyStderr(`${amberStderr("[Rocky]")} ${safeTerminalLine(msg)}\n`);
+  writeRockyStderr(`${amberStderr(OUTPUT_PREFIX)} ${safeTerminalLine(msg)}\n`);
 }
 
-/** Rocky prompt text; readline writes it to the prompt port's stderr stream. */
+/** Prompt text; readline writes it to the prompt port's stderr stream. */
 export function prompt(msg: string): string {
-  return `${amberStderr("[Rocky]")} ${safeTerminalLine(msg)} `;
+  return `${amberStderr(OUTPUT_PREFIX)} ${safeTerminalLine(msg)} `;
 }
 
-/** Rocky line without trailing newline context — for multi-line blocks. */
+/** A multi-line block under the previous line, indented, no prefix. */
 export function block(lines: string[]): void {
-  for (const l of lines) writeRockyStderr(`${amberStderr("♫")} ${safeTerminalLine(l)}\n`);
+  for (const l of lines) writeRockyStderr(`  ${safeTerminalLine(l)}\n`);
 }
 
 export function heading(msg: string): void {
@@ -83,7 +62,7 @@ export function detail(msg: string): void {
 }
 
 /**
- * The one switch for Rocky's internal counters. Default output speaks plain
+ * The one switch for rocky's internal counters. Default output speaks plain
  * words; ROCKY_VERBOSE=1 brings back each site's raw text. Read at call time, so
  * a shell or a test can flip it without restarting the process.
  */
@@ -115,7 +94,7 @@ export function gapSpan(ms: number): string {
   return ms < ONE_MINUTE_MS ? "under 1 minute" : elapsed(ms);
 }
 
-/** "84 days ago", "3 hours ago", "just now" — Rocky counts precisely. */
+/** "84 days ago", "3 hours ago", "just now". */
 export function ago(ts: number): string {
   const span = elapsed(Date.now() - ts);
   return span === "just now" ? span : `${span} ago`;
@@ -144,7 +123,7 @@ function speakTty(line: string): void {
  * are spawned disowned with stderr discarded). No tty — no words; never throw.
  */
 export function sayTty(msg: string): void {
-  speakTty(`[Rocky] ${safeTerminalLine(msg)}\n`);
+  speakTty(`${OUTPUT_PREFIX} ${safeTerminalLine(msg)}\n`);
 }
 
 export function detailTty(msg: string): void {

@@ -7,7 +7,7 @@ import { join } from "node:path";
 import type { MemoryCoverage, MemoryRecord, RationaleRecord, RationaleSource, TripleRecord } from "../core/memory-read.js";
 import { CliUsageError } from "../commands/cli-args.js";
 import { rationaleSourceLabel, why } from "../commands/dictionary.js";
-import { validateRockyPhrase } from "../ui/phrases.js";
+import { validateOutputLine } from "../ui/phrases.js";
 import { setVerbose } from "./verbose-switch.js";
 
 const WHY_ADD_USAGE = 'rocky why --add "<text>" [--files a.ts,b.ts]';
@@ -73,7 +73,7 @@ test("why --add --files stores a file-scoped reason and skips the recency link",
   assert.deepEqual(stored[0]?.files, ["src/a.ts", "src/b.ts"]);
   assert.equal(stored[0]?.links, undefined);
   assert.deepEqual(spoken, [WHY_ADD_REMEMBERED]);
-  assert.deepEqual(validateRockyPhrase(WHY_ADD_REMEMBERED), []);
+  assert.deepEqual(validateOutputLine(WHY_ADD_REMEMBERED), []);
 });
 
 test("why --add reads --files from any position and trims its comma list", async () => {
@@ -143,7 +143,7 @@ test("why --add --files with every path dropped keeps the reason and says no fil
   assert.equal(stored[0]?.files, undefined);
   assert.equal(stored[0]?.links, undefined);
   assert.deepEqual(spoken, ["reason remembered. no file kept."]);
-  assert.deepEqual(validateRockyPhrase(spoken[0] ?? ""), []);
+  assert.deepEqual(validateOutputLine(spoken[0] ?? ""), []);
 });
 
 test("why --add --files keeps the plausible paths when only some are dropped", async () => {

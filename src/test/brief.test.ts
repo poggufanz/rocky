@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { composeBrief, parseGitLog, topLevelArea, type BriefInput } from "../core/brief.js";
-import { validateRockyPhrase } from "../ui/phrases.js";
+import { validateOutputLine } from "../ui/phrases.js";
 
 test("parseGitLog reads hash/subject headers and numstat file lines", () => {
   const stdout = [
@@ -93,7 +93,7 @@ test("composeBrief question lines pass rocky voice validation", () => {
   const lines = composeBrief(sampleInput());
   for (const line of lines) {
     if (line.includes("question")) {
-      assert.deepEqual(validateRockyPhrase(line.trim()), []);
+      assert.deepEqual(validateOutputLine(line.trim()), []);
     }
   }
 });

@@ -6,7 +6,7 @@ import { isOperationalMemoryRecord, loadMemoryChecked, type MemoryCoverage } fro
 import { queryStats } from "../core/memory-query.js";
 import { CYCLES_TOP, FAILURE_CYCLE_COUNT } from "../core/failure-cycle.js";
 import { CliUsageError, reportCliUsage } from "./cli-args.js";
-import { detail, face, isVerbose, say } from "../ui/rocky.js";
+import { detail, isVerbose, say } from "../ui/rocky.js";
 
 const STATS_USAGE = "rocky stats [--cycles]";
 
@@ -58,7 +58,6 @@ function statsCycles(): number {
   const ranked = [...counts.entries()]
     .sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
   const shown = ranked.slice(0, CYCLES_TOP);
-  console.log(face());
   if (ranked.length === 0) {
     say("no failure heard yet. nothing cycles.");
   } else {
@@ -112,7 +111,6 @@ export function stats(argv: readonly string[] = []): number {
   const triples = result.triples ?? 0;
   const notes = result.notes ?? 0;
   const total = result.total ?? records.length;
-  console.log(face());
   // Memory stores an intent as a "triple". The plain word is the default; ROCKY_VERBOSE=1 keeps the stored one.
   const intentWord = isVerbose() ? "triple" : "intent";
   say(`I remember ${result.failures} error${result.failures === 1 ? "" : "s"}. ${result.resolved} have fix. ${result.fixEvents} fix event${result.fixEvents === 1 ? "" : "s"} total.`);

@@ -7,8 +7,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { commandIdentity } from "../core/fingerprint.js";
 import { PACKAGE_NAME, PACKAGE_VERSION } from "../core/package-info.js";
-import { validateRockyPhrase } from "../ui/phrases.js";
-import { face } from "../ui/rocky.js";
+import { validateOutputLine } from "../ui/phrases.js";
 
 const packageRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const readmePage = readFileSync(join(packageRoot, "README.md"), "utf8");
@@ -24,7 +23,6 @@ const SHORT_HELP_ARGS = ["--help"] as const;
 const FULL_HELP_ARGS = ["--help", "--all"] as const;
 const SHORT_HELP_MAX_LINES = 16;
 const HELP_MAX_COLUMNS = 78;
-const ANSI_SEQUENCE = /\u001b\[[0-9;]*m/gu;
 
 /** Run the built CLI so a test can tell stdout from stderr and read the exit status. */
 function runHelp(args: readonly string[]): { status: number | null; stdout: string; stderr: string } {
@@ -132,7 +130,6 @@ test("README and CLI help publish the installable command surface", () => {
   }
 });
 
-const withoutAnsi = (text: string): string => text.replace(ANSI_SEQUENCE, "");
 
 /** The `HELP` constant of src/index.ts, with its package-info interpolations filled in. */
 function fullHelpText(): string {
@@ -150,7 +147,7 @@ test("default help is a short grouped view that fits one screen", () => {
   const { status, stdout, stderr } = runHelp(SHORT_HELP_ARGS);
   assert.equal(status, 0, stderr);
   assert.equal(stderr, "", "help speaks on stdout only");
-  assert.ok(stdout.startsWith(`${withoutAnsi(face())}\n`), "the face comes first, unchanged");
+  assert.doesNotMatch(stdout, /[─-▟]/u, "help carries no box-drawing art");
 
   const lines = stdout.trimEnd().split("\n");
   assert.ok(lines.length <= SHORT_HELP_MAX_LINES, `short help is ${lines.length} lines, the budget is ${SHORT_HELP_MAX_LINES}`);
@@ -165,7 +162,7 @@ test("default help is a short grouped view that fits one screen", () => {
   assert.deepEqual(groups, ["core", "review", "memory", "setup"]);
   assert.ok(lines.some((line) => line.startsWith("usage: rocky <verb> [args]")), "short help names its usage shape");
   assert.equal(lines.at(-1), "every flag, every endpoint: rocky --help --all");
-  assert.deepEqual(validateRockyPhrase(stdout), [], "short help keeps Rocky's voice");
+  assert.deepEqual(validateOutputLine(stdout), [], "short help follows the output rules");
 });
 
 test("default help keeps the release identity line and the network facts, and leaves hook endpoints to --all", () => {
@@ -185,17 +182,17 @@ test("default help keeps the release identity line and the network facts, and le
   }
 });
 
-test("--help --all prints the face and the full reference, unchanged", () => {
+test("--help --all prints the full reference, unchanged", () => {
   const { status, stdout, stderr } = runHelp(FULL_HELP_ARGS);
   assert.equal(status, 0, stderr);
   assert.equal(stderr, "", "help speaks on stdout only");
-  assert.equal(stdout, `${withoutAnsi(face())}\n${fullHelpText()}\n`);
+  assert.equal(stdout, `${fullHelpText()}\n`);
 });
 
-test("the full reference documents ROCKY_VERBOSE in Rocky's voice", () => {
+test("the full reference documents ROCKY_VERBOSE in plain words", () => {
   const line = helpOutput().split("\n").find((candidate) => candidate.includes("ROCKY_VERBOSE=1"));
   assert.ok(line !== undefined, "the full reference must document ROCKY_VERBOSE=1");
-  assert.deepEqual(validateRockyPhrase(line), []);
+  assert.deepEqual(validateOutputLine(line), []);
 });
 
 test("CLI help glosses the triple export kind as intent and keeps id mechanics out of the quiz line", () => {

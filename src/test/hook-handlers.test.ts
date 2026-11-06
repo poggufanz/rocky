@@ -7,7 +7,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { spawn } from "node:child_process";
 import { commandFingerprint } from "../core/fingerprint.js";
-import { validateRockyPhrase } from "../ui/phrases.js";
+import { validateOutputLine } from "../ui/phrases.js";
 import { detailTty, flushHookSpeech, sayTty } from "../ui/rocky.js";
 
 const home = mkdtempSync(join(tmpdir(), "rocky-hook-"));
@@ -354,7 +354,7 @@ test("hookFail admits a fingerprint-matched fix may be a different command, not 
 });
 
 test("the elsewhere-admission line follows Rocky's voice rules", () => {
-  assert.deepEqual(validateRockyPhrase("but fix comes from other place."), []);
+  assert.deepEqual(validateOutputLine("but fix comes from other place."), []);
 });
 
 /**
@@ -529,7 +529,7 @@ test("a differing hook version names the reinstall command", () => {
   const line = hookStaleLine("0.3.0");
   assert.ok(line !== undefined);
   assert.match(line, /rocky hook install/);
-  assert.deepEqual(validateRockyPhrase(line), []);
+  assert.deepEqual(validateOutputLine(line), []);
 });
 
 test("a missing or unreadable hook version produces no stale line", () => {

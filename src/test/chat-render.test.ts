@@ -15,7 +15,7 @@ import {
   type ChatRenderFact,
 } from "../ai/chat-render.js";
 import { startGui } from "../gui/server.js";
-import { validateRockyPhrase } from "../ui/phrases.js";
+import { validateOutputLine } from "../ui/phrases.js";
 
 const UUID_SHAPE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-/u;
 const RECORD_UUID = "3f2b8c1e-9d4a-4b7e-8a1c-5e6f7a8b9c0d";
@@ -35,7 +35,7 @@ const JEV_FACT: ChatRenderFact = {
 test("template text names the top record by label, and its id stays in the trace", () => {
   const text = renderChatText(JEV_FACT);
   assert.equal(text, "rocky heard 2 things.\nbest match: `npm run build` (failure). remembered, not proven.");
-  assert.deepEqual(validateRockyPhrase(text), []);
+  assert.deepEqual(validateOutputLine(text), []);
   assert.deepEqual(renderChatTrace(JEV_FACT), [
     "top: failure-aaa (failure). remembered, not proven.",
     "decision: jev used, top score 0.90, 12ms.",
@@ -74,7 +74,7 @@ test("a top record without a label is named by kind, never by id", () => {
   const fact: ChatRenderFact = { topRef: RECORD_UUID, topKind: "failure", engine: "heuristic", status: "used", evidenceCount: 1, latencyMs: 0 };
   const text = renderChatText(fact);
   assert.equal(text, "rocky heard 1 thing.\nbest match: failure record. remembered, not proven.");
-  assert.deepEqual(validateRockyPhrase(text), []);
+  assert.deepEqual(validateOutputLine(text), []);
   const bare = renderChatText({ engine: "heuristic", status: "used", evidenceCount: 1, latencyMs: 0 });
   assert.equal(bare, "rocky heard 1 thing.");
 });
@@ -175,7 +175,7 @@ test("renderer failure degrades to the raw template, text and trace alike", () =
   assert.equal(safeRenderChatText(hostile), RAW_CHAT_TEXT);
   assert.deepEqual(safeRenderChatTrace(hostile), RAW_CHAT_TRACE);
   for (const prefix of TRACE_PREFIXES) assert.ok(!RAW_CHAT_TEXT.includes(prefix), `${prefix}stays out of the raw text`);
-  assert.deepEqual(validateRockyPhrase(RAW_CHAT_TEXT), []);
+  assert.deepEqual(validateOutputLine(RAW_CHAT_TEXT), []);
 });
 
 test("an odd fact still renders to strings", () => {

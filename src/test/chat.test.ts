@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { startGui, type GuiHandle } from "../gui/server.js";
 import { decisionLogPath } from "../ai/decision-log.js";
-import { validateRockyPhrase } from "../ui/phrases.js";
+import { validateOutputLine } from "../ui/phrases.js";
 
 function hermetic(): { home: string; root: string } {
   const home = mkdtempSync(join(tmpdir(), "rocky-chat-home-"));
@@ -186,7 +186,7 @@ test("chat text names the top record by what Rocky heard and keeps its id in the
     assert.doesNotMatch(wire.text, UUID_SHAPE);
     for (const prefix of TRACE_PREFIXES) assert.ok(!wire.text.includes(prefix), `${prefix}stays out of the answer text`);
     assert.ok(wire.text.includes("best match: `npm run build` (failure). remembered, not proven."), wire.text);
-    assert.deepEqual(validateRockyPhrase(wire.text), []);
+    assert.deepEqual(validateOutputLine(wire.text), []);
     assert.ok(wire.trace.includes(`top: ${RECORD_UUID} (failure). remembered, not proven.`), wire.trace.join("\n"));
     assert.ok(wire.trace.some((line) => line.startsWith("decision: heuristic used")));
     assert.ok(wire.trace.some((line) => line.startsWith("renderer: ")));
@@ -231,7 +231,7 @@ test("chat answers over a read with a line Rocky cannot use, and says so in word
       assert.doesNotMatch(JSON.stringify(wire.coverage), /skipped|record-cap|file-size-cap|read-race/u);
       assert.ok(!wire.text.includes("coverage full"), message);
     }
-    assert.deepEqual(validateRockyPhrase(line), []);
+    assert.deepEqual(validateOutputLine(line), []);
   });
 });
 

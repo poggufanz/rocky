@@ -12,7 +12,7 @@ import { loadMemory } from "../core/memory-read.js";
 import { createMemoryQueries } from "../core/memory-query.js";
 import { disabledRecallWithAi } from "../ai/port.js";
 import { createToolRegistry } from "../mcp/tools.js";
-import { validateRockyPhrase } from "../ui/phrases.js";
+import { validateOutputLine } from "../ui/phrases.js";
 import { skipIfSymlinkUnavailable } from "./symlink-capability.js";
 import { setVerbose } from "./verbose-switch.js";
 
@@ -179,5 +179,5 @@ test("MCP tool path treats the same non-regular memory as empty", async () => {
 });
 
 test("the disclosure line itself follows Rocky's voice rules", () => {
-  assert.deepEqual(validateRockyPhrase(DISCLOSURE), []);
+  assert.deepEqual(validateOutputLine(DISCLOSURE), []);
 });

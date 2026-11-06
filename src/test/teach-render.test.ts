@@ -4,7 +4,7 @@ import { ageLabel, renderLadderCard, renderLadderExpanded, renderWitnessCard } f
 import type { ExplainRecord } from "../core/memory-read.js";
 import type { TeachHit } from "../core/teach.js";
 import type { LadderResult } from "../core/teach-ladder.js";
-import { validateRockyPhrase } from "../ui/phrases.js";
+import { validateOutputLine } from "../ui/phrases.js";
 
 const WITNESS_HEADER = "rocky heard this. agent say why, rocky remember";
 const LADDER_HEADER = "rocky not hear this. assembled from evidence, not witnessed";
@@ -172,7 +172,7 @@ test("exhausted provenance adds a disclosure line in english", () => {
     provenanceExhausted: true,
   });
   assert.ok(card.lines.includes(disclosure));
-  assert.deepEqual(validateRockyPhrase(disclosure), []);
+  assert.deepEqual(validateOutputLine(disclosure), []);
   assert.doesNotMatch(card.lines.join("\n"), /asal usul|di atas/);
 });
 

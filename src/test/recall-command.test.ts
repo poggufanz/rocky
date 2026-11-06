@@ -12,7 +12,7 @@ import { recordFailure } from "../core/memory.js";
 import type { FixLink } from "../core/memory-read.js";
 import type { MemoryQueries, RecallHit } from "../core/memory-query.js";
 import { MAX_FIELD_BYTES } from "../mcp/privacy.js";
-import { phrase, phraseForAct, validateRockyPhrase } from "../ui/phrases.js";
+import { phrase, phraseForAct, validateOutputLine } from "../ui/phrases.js";
 import { elapsed, gapSpan } from "../ui/rocky.js";
 
 function hit(id: string, command = `command-${id}`): RecallHit {
@@ -155,7 +155,7 @@ test("recall speaks a strong link for a same-command fix", async () => {
   assert.equal(output.code, 0);
   assert.match(output.stderr, /resolved\. works again after: fix-for-c1/);
   assert.match(output.stderr, /same command, 2 minutes later\. strong\./);
-  assert.deepEqual(validateRockyPhrase("same command, 2 minutes later. strong."), []);
+  assert.deepEqual(validateOutputLine("same command, 2 minutes later. strong."), []);
 });
 
 test("recall discloses cross-directory fix as possible and never strong", async () => {
@@ -183,7 +183,7 @@ test("recall speaks a weak link for a same-program fix", async () => {
 
   assert.equal(output.code, 0);
   assert.match(output.stderr, /same program, 6 hours later\. maybe not fix\. check, question/);
-  assert.deepEqual(validateRockyPhrase("same program, 6 hours later. maybe not fix. check, question"), []);
+  assert.deepEqual(validateOutputLine("same program, 6 hours later. maybe not fix. check, question"), []);
 });
 
 test("recall grades an unrecognized fix link basis as the weakest hedge, never as same program", async () => {
@@ -195,7 +195,7 @@ test("recall grades an unrecognized fix link basis as the weakest hedge, never a
   assert.match(output.stderr, /different program, 6 hours later\. maybe not fix\. check, question/);
   assert.doesNotMatch(output.stderr, /same program,/);
   assert.doesNotMatch(output.stderr, /strong\./);
-  assert.deepEqual(validateRockyPhrase("different program, 6 hours later. maybe not fix. check, question"), []);
+  assert.deepEqual(validateOutputLine("different program, 6 hours later. maybe not fix. check, question"), []);
 });
 
 test("recall says 'under 1 minute' on every link grade when the gap is shorter than a minute", async () => {
