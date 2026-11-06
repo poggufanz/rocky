@@ -124,6 +124,9 @@ name = "rockyd"
 version = "0.1.0"
 dependencies = [
  "rocky-proto",
+ "serde_json",
+ "tempfile",
+ "windows-sys",
 ]
 
 [[package]]
