@@ -21,7 +21,6 @@ export interface SetupOptions {
   exposure: Exposure;
   replace: boolean;
   yes: boolean;
-  voiceSkill: boolean;
   agentHooksAction?: AgentHooksAction;
   /** Only meaningful alongside agentHooksAction "install"; default true. */
   rationaleGate?: boolean;

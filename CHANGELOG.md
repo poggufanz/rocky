@@ -2,6 +2,28 @@
 
 Notable changes per release. Dates are the release date.
 
+## 2.0.0 — 6 November 2026
+
+Major release: Rocky retires its mascot persona. CLI, hook, GUI, and MCP output is plain, neutral English, following [docs/output-principles.md](docs/output-principles.md). Evidence rules, hedges, coverage disclosures, `--quiet`, exit codes, and JSON shapes are unchanged.
+
+Output that changes shape (scripts that parse the old lines will break):
+
+- **One `rocky:` prefix.** Every Rocky-owned stderr line, prompt, and hook speech line starts with `rocky:` instead of `[Rocky]`. Indented block lines lose the `♫` marker.
+- **`rocky --help` and `rocky stats` print no art on stdout.** Help output starts with its first text line.
+- **Prompts end with a question mark and show their choices.** The Bash guard asks `rocky: Run it anyway? [y/N]` (was `you sure, question (y/n)`; still only `y` runs the command), setup asks `rocky: Configure MCP hosts now? [y/N]`, the registry consent ends `Allow registry lookup? [y/N]`, and the `check` and `quiz` answer prompt is `rocky: Your answer:`.
+- **Failure and fix lines are plain sentences.** For example `New error recorded (exit code 1).`, `Same error as before, first recorded 3 days ago.`, `No fix recorded yet.`, `Command passes now; linked to the earlier failure. The change itself was not recorded.`, and `Last time, the same command passed again afterward. The change itself was not recorded.` The hook uses the same wording as `run` for a possible fix.
+- **Coverage lines keep their `memory coverage incomplete:` prefix**; the rest now reads like `Only the first 40 records were read; later lines were not read.` or `1 line could not be used.`
+- **Agent gate deny reasons are reworded.** The `rocky hook agent-event ...` command in each reason is byte-identical and now comes last, after `Run:`.
+- **Teach card headers** (CLI and GUI `/api/teach`) read `Witnessed: an agent stated why, and rocky recorded it.` and `Assembled from evidence, not witnessed.`
+- **Usage errors** read `Unknown command "x". Run rocky --help to list commands.` and `Unexpected argument: junk. Run rocky --help for the command list.`
+- **Queued dictionary labels, ambiguity questions, guard rule messages, GUI copy, model prompts, and MCP tool descriptions** are reworded. A pristine `~/.rocky/guard.rules` is rewritten on the next `rocky hook install`; an edited one is kept.
+- **Hook protocol 0.5.0.** Run `rocky hook install` once so installed hook files print the new lines; `rocky hook status` names the mismatch until then.
+
+Removed:
+
+- **`rocky setup --voice-skill`** and the bundled voice skill. The flag now exits 2 as an unknown option. `rocky setup --check` and `rocky setup --status` report a voice skill left by an older install, and `rocky setup --remove` moves a managed copy into that host's `.rocky/backups/voice-skills/` folder after the usual consent. A copy that was edited or carries no ownership marker is reported and left in place.
+- **The ASCII and pixel-art mascot** in the help, `stats`, and the GUI. `docs/character.md` is replaced by `docs/output-principles.md`.
+
 ## 1.1.0 — 5 November 2026
 
 Minor release about honest output: Rocky says what he heard and what he did not, keeps secrets out of what he stores, and no longer goes silent or crashes where he used to.

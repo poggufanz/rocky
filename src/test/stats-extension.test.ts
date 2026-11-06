@@ -7,6 +7,7 @@ import { queryStats } from "../core/memory-query.js";
 import type { FailureRecord, MemoryRecord } from "../core/memory-read.js";
 import { memoryAgeDays, stats } from "../commands/stats.js";
 import { resolveRockyPaths } from "../core/state-paths.js";
+import { validateOutputLine } from "../ui/phrases.js";
 import { setVerbose } from "./verbose-switch.js";
 
 const NOW = 1_800_000_000_000;
@@ -117,7 +118,7 @@ test("stats() prints rationale-by-fidelity and alias totals from real memory und
     writeFileSync(resolveRockyPaths().memory, records.map((record) => `${JSON.stringify(record)}\n`).join(""), "utf8");
     const { result, stderr } = captureStderr(() => stats());
     assert.equal(result, 0);
-    assert.match(stderr, /rationale heard 4 times\. raw 2, summary 1, none 1\. alias 2 remembered\./);
+    assert.match(stderr, /Rationale recorded 4 times: raw 2, summary 1, none 1\. Aliases recorded: 2\./);
   } finally {
     if (previous === undefined) delete process.env.ROCKY_HOME;
     else process.env.ROCKY_HOME = previous;
@@ -132,10 +133,10 @@ test("memoryAgeDays pins the age-display edge cases", () => {
   assert.equal(memoryAgeDays([NOW - 36 * 3_600_000], NOW), 1);
 });
 
-const SKIPPED_ONLY_WORDS = "memory coverage incomplete: 1 line I cannot use. counts here not all.";
+const SKIPPED_ONLY_WORDS = "memory coverage incomplete: 1 line could not be used. These counts do not cover all of memory.";
 const SKIPPED_ONLY_COUNTERS = "memory coverage: version 1, scanned 2, skipped 1, truncated 0, complete false";
 
-/** One valid failure and one line that is not JSON: a read whole except for a line Rocky cannot use. */
+/** One valid failure and one line that is not JSON: a read whole except for a line that cannot be used. */
 function statsOverSkippedLine(t: TestContext, argv: readonly string[]): { result: number; lines: string[] } {
   const home = mkdtempSync(join(tmpdir(), "rocky-stats-coverage-"));
   const previousHome = process.env.ROCKY_HOME;
@@ -163,7 +164,7 @@ function statsOverSkippedLine(t: TestContext, argv: readonly string[]): { result
   }
 }
 
-/** A triple the reader accepts, remembered `age` milliseconds before the real clock, which stats() reads itself. */
+/** A triple the reader accepts, recorded `age` milliseconds before the real clock, which stats() reads itself. */
 function triple(id: string, age: number): Record<string, unknown> {
   return {
     kind: "triple", id, ts: Date.now() - age, cwd: "/repo", schemaV: 1, agent: "claude-code", origin: "agent-hook",
@@ -176,7 +177,7 @@ function note(id: string, age: number): Record<string, unknown> {
 }
 
 /** What `stats()` says on stderr over a memory file holding `records`, plus one reclaim tombstone beside it. */
-function statsHeardOver(t: TestContext, records: readonly Record<string, unknown>[]): string {
+function statsOutputOver(t: TestContext, records: readonly Record<string, unknown>[]): string {
   const home = mkdtempSync(join(tmpdir(), "rocky-stats-words-"));
   const previousHome = process.env.ROCKY_HOME;
   process.env.ROCKY_HOME = home;
@@ -211,35 +212,59 @@ const MIXED_MEMORY = (): Record<string, unknown>[] => [
 
 test("stats says intents, and keeps the kind tally, the fidelity split and the tombstone count out of default output", (t) => {
   setVerbose(t, undefined);
-  const heard = statsHeardOver(t, MIXED_MEMORY());
-  assert.match(heard, /memory holds 5 remembered items\. 0 confirmed fixes\. 0 possible fixes\. 2 intents\. 1 note\./u);
-  assert.doesNotMatch(heard, /triple/u);
-  assert.doesNotMatch(heard, /events by kind/u);
-  assert.doesNotMatch(heard, /rationale heard|summary \d|alias \d+ remembered/u);
-  assert.doesNotMatch(heard, /tombstone/u);
-  assert.match(heard, /memory age \d+ days?\./u);
+  const output = statsOutputOver(t, MIXED_MEMORY());
+  assert.match(output, /Memory holds 5 recorded items\. 0 confirmed fixes\. 0 possible fixes\. 2 intents\. 1 note\./u);
+  assert.doesNotMatch(output, /triple/u);
+  assert.doesNotMatch(output, /events by kind/u);
+  assert.doesNotMatch(output, /Rationale recorded|summary \d|Aliases recorded/u);
+  assert.doesNotMatch(output, /tombstone/u);
+  assert.match(output, /Memory is \d+ days? old\./u);
 });
 
 test("stats says 1 intent, not 1 intents", (t) => {
   setVerbose(t, undefined);
-  const heard = statsHeardOver(t, [triple("t1", 400)]);
-  assert.match(heard, /\. 1 intent\. 0 notes\./u);
+  const output = statsOutputOver(t, [triple("t1", 400)]);
+  assert.match(output, /\. 1 intent\. 0 notes\./u);
 });
 
 test("stats keeps the triple word, the kind tally, the fidelity split and the tombstone count under ROCKY_VERBOSE", (t) => {
   setVerbose(t, "1");
-  const heard = statsHeardOver(t, MIXED_MEMORY());
-  const lines = heard.split(/\r?\n/u);
-  assert.ok(lines.some((line) => line.endsWith("memory holds 5 remembered items. 0 confirmed fixes. 0 possible fixes. 2 triples. 1 note.")), heard);
-  assert.ok(lines.some((line) => line.endsWith("events by kind: alias 1, note 1, rationale 1, triple 2.")), heard);
-  assert.ok(lines.some((line) => line.endsWith("rationale heard 1 time. raw 1, summary 0, none 0. alias 1 remembered.")), heard);
-  assert.ok(lines.includes("tombstones waiting sweep: 1"), heard);
+  const output = statsOutputOver(t, MIXED_MEMORY());
+  const lines = output.split(/\r?\n/u);
+  assert.ok(lines.some((line) => line.endsWith("Memory holds 5 recorded items. 0 confirmed fixes. 0 possible fixes. 2 triples. 1 note.")), output);
+  assert.ok(lines.some((line) => line.endsWith("events by kind: alias 1, note 1, rationale 1, triple 2.")), output);
+  assert.ok(lines.some((line) => line.endsWith("Rationale recorded 1 time: raw 1, summary 0, none 0. Aliases recorded: 1.")), output);
+  assert.ok(lines.includes("tombstones waiting sweep: 1"), output);
 });
 
 test("stats says 1 triple under ROCKY_VERBOSE", (t) => {
   setVerbose(t, "1");
-  const heard = statsHeardOver(t, [triple("t1", 400)]);
-  assert.match(heard, /\. 1 triple\. 0 notes\./u);
+  const output = statsOutputOver(t, [triple("t1", 400)]);
+  assert.match(output, /\. 1 triple\. 0 notes\./u);
+});
+
+test("stats default output is plain sentences with correct singulars, and every rocky line follows the output rules", (t) => {
+  setVerbose(t, undefined);
+  const realNow = Date.now();
+  const resolved = {
+    kind: "failure", id: "sf1", ts: realNow - 2_000, cwd: "/repo", cmd: "npm test", exitCode: 1,
+    fingerprint: "fp-sf1", signature: ["err"], excerpt: "err", resolvedBy: "sx1",
+  };
+  const fix = {
+    kind: "fix", id: "sx1", ts: realNow - 1_000, cwd: "/repo", cmd: "npm test", failureIds: ["sf1"],
+    links: [{ id: "sf1", basis: "identity", confidence: "confirmed" }],
+  };
+  const unresolved = { ...resolved, id: "sf2", fingerprint: "fp-sf2", resolvedBy: undefined };
+  const output = statsOutputOver(t, [resolved, fix, unresolved]);
+
+  assert.match(output, /rocky: 2 errors recorded\. 1 has a fix\. 1 fix event total\.\r?\n/u);
+  assert.match(output, /rocky: Memory holds 3 recorded items\. 1 confirmed fix\. 0 possible fixes\. 0 intents\. 0 notes\.\r?\n/u);
+  assert.match(output, /rocky: Memory is 0 days old\. 0 brief runs\. 0 journal notes\.\r?\n/u);
+  assert.match(output, /rocky: Guard has not stopped any command yet\.\r?\n/u);
+  assert.match(output, /rocky: 1 error still without a fix\.\r?\n/u);
+  const spoken = output.split(/\r?\n/u).filter((line) => line.startsWith("rocky: ") && !line.startsWith("rocky: memory file: "));
+  assert.ok(spoken.length >= 5, output);
+  for (const line of spoken) assert.deepEqual(validateOutputLine(line.slice("rocky: ".length)), [], line);
 });
 
 for (const argv of [[], ["--cycles"]] as const) {

@@ -12,7 +12,7 @@ import { recordFailure } from "../core/memory.js";
 import type { FixLink } from "../core/memory-read.js";
 import type { MemoryQueries, RecallHit } from "../core/memory-query.js";
 import { MAX_FIELD_BYTES } from "../mcp/privacy.js";
-import { phrase, phraseForAct, validateRockyPhrase } from "../ui/phrases.js";
+import { phrase, phraseForAct, validateOutputLine } from "../ui/phrases.js";
 import { elapsed, gapSpan } from "../ui/rocky.js";
 
 function hit(id: string, command = `command-${id}`): RecallHit {
@@ -100,6 +100,13 @@ function memoryReturning(
   };
 }
 
+/** Every line rocky itself wrote (the `rocky: ` ones) must follow the output rules; detail lines are data. */
+function assertRockyLinesArePlain(stderr: string): void {
+  const lines = stderr.split(/\r?\n/).filter((line) => line.startsWith("rocky: "));
+  assert.ok(lines.length > 0, `expected at least one rocky line in: ${stderr}`);
+  for (const line of lines) assert.deepEqual(validateOutputLine(line.slice("rocky: ".length)), [], line);
+}
+
 async function captureStderr(run: () => Promise<number>): Promise<{ code: number; stderr: string; stdout: string }> {
   const originalStderr = process.stderr.write;
   const originalStdout = process.stdout.write;
@@ -153,9 +160,10 @@ test("recall speaks a strong link for a same-command fix", async () => {
   const output = await captureStderr(() => recall(["npm", "test"], { memory: source.memory, recallWithAi: noAi }));
 
   assert.equal(output.code, 0);
-  assert.match(output.stderr, /resolved\. works again after: fix-for-c1/);
-  assert.match(output.stderr, /same command, 2 minutes later\. strong\./);
-  assert.deepEqual(validateRockyPhrase("same command, 2 minutes later. strong."), []);
+  assert.match(output.stderr, /Resolved\. The command passed again: fix-for-c1/);
+  assert.match(output.stderr, /Same command, 2 minutes later\. Strong link\./);
+  assert.deepEqual(validateOutputLine("Same command, 2 minutes later. Strong link."), []);
+  assertRockyLinesArePlain(output.stderr);
 });
 
 test("recall discloses cross-directory fix as possible and never strong", async () => {
@@ -171,9 +179,11 @@ test("recall discloses cross-directory fix as possible and never strong", async 
 
   assert.equal(output.code, 0);
   assert.match(output.stderr, /place: \/tmp\/other-project/);
-  assert.match(output.stderr, /possible|maybe not fix/);
-  assert.doesNotMatch(output.stderr, /strong\./);
+  assert.match(output.stderr, /But that fix comes from a different directory\./);
+  assert.match(output.stderr, /Possible only\. Check before acting\./);
+  assert.doesNotMatch(output.stderr, /Strong link/);
   assert.doesNotMatch(output.stderr, /\u001b\[31m/);
+  assertRockyLinesArePlain(output.stderr);
 });
 
 test("recall speaks a weak link for a same-program fix", async () => {
@@ -182,8 +192,9 @@ test("recall speaks a weak link for a same-program fix", async () => {
   const output = await captureStderr(() => recall(["npm", "test"], { memory: source.memory, recallWithAi: noAi }));
 
   assert.equal(output.code, 0);
-  assert.match(output.stderr, /same program, 6 hours later\. maybe not fix\. check, question/);
-  assert.deepEqual(validateRockyPhrase("same program, 6 hours later. maybe not fix. check, question"), []);
+  assert.match(output.stderr, /Same program, 6 hours later\. May not be the fix\. Check before acting\./);
+  assert.deepEqual(validateOutputLine("Same program, 6 hours later. May not be the fix. Check before acting."), []);
+  assertRockyLinesArePlain(output.stderr);
 });
 
 test("recall grades an unrecognized fix link basis as the weakest hedge, never as same program", async () => {
@@ -192,18 +203,19 @@ test("recall grades an unrecognized fix link basis as the weakest hedge, never a
   const output = await captureStderr(() => recall(["npm", "test"], { memory: source.memory, recallWithAi: noAi }));
 
   assert.equal(output.code, 0);
-  assert.match(output.stderr, /different program, 6 hours later\. maybe not fix\. check, question/);
-  assert.doesNotMatch(output.stderr, /same program,/);
-  assert.doesNotMatch(output.stderr, /strong\./);
-  assert.deepEqual(validateRockyPhrase("different program, 6 hours later. maybe not fix. check, question"), []);
+  assert.match(output.stderr, /Different program, 6 hours later\. May not be the fix\. Check before acting\./);
+  assert.doesNotMatch(output.stderr, /Same program,/);
+  assert.doesNotMatch(output.stderr, /Strong link/);
+  assert.deepEqual(validateOutputLine("Different program, 6 hours later. May not be the fix. Check before acting."), []);
+  assertRockyLinesArePlain(output.stderr);
 });
 
 test("recall says 'under 1 minute' on every link grade when the gap is shorter than a minute", async () => {
   const grades = [
-    ["identity", /same command, under 1 minute later\. strong\./],
-    ["signature", /same command, under 1 minute later\. strong\./],
-    ["program", /same program, under 1 minute later\. maybe not fix\. check, question/],
-    ["sequence", /different program, under 1 minute later\. maybe not fix\. check, question/],
+    ["identity", /Same command, under 1 minute later\. Strong link\./],
+    ["signature", /Same command, under 1 minute later\. Strong link\./],
+    ["program", /Same program, under 1 minute later\. May not be the fix\. Check before acting\./],
+    ["sequence", /Different program, under 1 minute later\. May not be the fix\. Check before acting\./],
   ] as const;
   const noAi: RecallWithAiPort = { async run() { throw new Error("AI must not run without --ai"); } };
   for (const [basis, expected] of grades) {
@@ -226,10 +238,11 @@ test("recall shows a separate weak possible-fix line below a hit with no confirm
   const output = await captureStderr(() => recall(["npm", "test"], { memory: source.memory, recallWithAi: noAi }));
 
   assert.equal(output.code, 0);
-  assert.match(output.stderr, /no confirmed fix\. but after error, you run this:/);
+  assert.match(output.stderr, /No confirmed fix\. After that error, you ran:/);
   assert.match(output.stderr, /npm run unrelated-beta/);
-  assert.match(output.stderr, /maybe fix, maybe not\. check, question/);
-  assert.doesNotMatch(output.stderr, /no fix recorded for this one/);
+  assert.match(output.stderr, /It may or may not be a fix\. Check before acting\./);
+  assert.doesNotMatch(output.stderr, /No fix recorded for this failure/);
+  assertRockyLinesArePlain(output.stderr);
 });
 
 test("recall never shows a possible-fix line beside a hit that already has a confirmed fix", async () => {
@@ -241,8 +254,8 @@ test("recall never shows a possible-fix line beside a hit that already has a con
   const output = await captureStderr(() => recall(["npm", "test"], { memory: source.memory, recallWithAi: noAi }));
 
   assert.equal(output.code, 0);
-  assert.match(output.stderr, /resolved\. works again after: fix-for-c1/);
-  assert.doesNotMatch(output.stderr, /no confirmed fix\. but after error, you run this:/);
+  assert.match(output.stderr, /Resolved\. The command passed again: fix-for-c1/);
+  assert.doesNotMatch(output.stderr, /No confirmed fix\. After that error, you ran:/);
   assert.doesNotMatch(output.stderr, /should-not-appear/);
 });
 
@@ -256,9 +269,10 @@ test("recall marks a cross-cwd possible fix with a place line and the weaker hed
   const output = await captureStderr(() => recall(["npm", "test"], { memory: source.memory, recallWithAi: noAi }));
 
   assert.equal(output.code, 0);
-  assert.match(output.stderr, /but this comes from other place\./);
+  assert.match(output.stderr, /But that command comes from a different directory\./);
   assert.match(output.stderr, /\/tmp\/other-project/);
-  assert.match(output.stderr, /different program\. maybe fix, maybe not\. check, question/);
+  assert.match(output.stderr, /Different program\. It may or may not be a fix\. Check before acting\./);
+  assertRockyLinesArePlain(output.stderr);
 });
 
 test("recall stays silent about link basis when links are missing or don't cover this failure", async () => {
@@ -270,8 +284,10 @@ test("recall stays silent about link basis when links are missing or don't cover
   const output = await captureStderr(() => recall(["npm", "test"], { memory: source.memory, recallWithAi: noAi }));
 
   assert.equal(output.code, 0);
-  assert.doesNotMatch(output.stderr, /same command,/);
-  assert.doesNotMatch(output.stderr, /same program,/);
+  assert.doesNotMatch(output.stderr, /Same command,/);
+  assert.doesNotMatch(output.stderr, /Same program,/);
+  assert.doesNotMatch(output.stderr, /Different program,/);
+  assert.doesNotMatch(output.stderr, /Strong link/);
 });
 
 test("ordinary recall preserves deterministic output and does not invoke the AI port", async () => {
@@ -283,9 +299,10 @@ test("ordinary recall preserves deterministic output and does not invoke the AI 
 
   assert.equal(output.code, 0);
   assert.deepEqual(source.inputs, [{ query: "npm test" }]);
-  assert.match(output.stderr, /I remember 1 thing/);
+  assert.match(output.stderr, /Found 1 match in memory\./);
   assert.match(output.stderr, /1\. npm test/);
   assert.equal(output.stdout, "");
+  assertRockyLinesArePlain(output.stderr);
 });
 
 test("ai recall caps evidence at five, uses raw caller exposure, and renders only validated ranked hits", async () => {
@@ -467,10 +484,11 @@ test("ai recall with no deterministic hit returns normal no-match exit without i
 
   assert.equal(output.code, 1);
   assert.equal(calls, 0);
-  assert.match(output.stderr, /nothing match/);
+  assert.match(output.stderr, /No match in memory\. The error may be new, or the words may differ\./);
+  assertRockyLinesArePlain(output.stderr);
 });
 
-test("empty memory retains Rocky's successful empty-memory result without inference", async () => {
+test("empty memory retains the successful empty-memory result without inference", async () => {
   const source = memoryReturning([]);
   let calls = 0;
   const output = await captureStderr(() => recall(["--ai", "unknown"], {
@@ -485,7 +503,8 @@ test("empty memory retains Rocky's successful empty-memory result without infere
 
   assert.equal(output.code, 0);
   assert.equal(calls, 0);
-  assert.match(output.stderr, /memory is empty/);
+  assert.match(output.stderr, /Memory is empty\. No errors recorded yet\./);
+  assertRockyLinesArePlain(output.stderr);
 });
 
 test("unknown leading recall options return usage before reading memory", async () => {
@@ -497,7 +516,9 @@ test("unknown leading recall options return usage before reading memory", async 
 
   assert.equal(output.code, 2);
   assert.deepEqual(source.inputs, []);
+  assert.match(output.stderr, /Invalid option for recall\./);
   assert.match(output.stderr, /unknown option/);
+  assertRockyLinesArePlain(output.stderr);
 });
 
 test("a memory read failure on the second (recentFailures) call cannot leak a raw Node error (Minor 3)", async () => {
@@ -513,11 +534,12 @@ test("a memory read failure on the second (recentFailures) call cannot leak a ra
   }));
 
   assert.equal(output.code, 1);
-  assert.match(output.stderr, /memory file does not open for me\. I answer from nothing\./);
+  assert.match(output.stderr, /Memory file could not be opened\. No records were read\./);
   assert.doesNotMatch(output.stderr, /EISDIR/);
+  assertRockyLinesArePlain(output.stderr);
 });
 
-test("recall shows the decisive error line of a failure Rocky really stored", async (t) => {
+test("recall shows the decisive error line of a failure rocky really stored", async (t) => {
   const home = mkdtempSync(join(tmpdir(), "rocky-recall-excerpt-"));
   const originalHome = process.env.ROCKY_HOME;
   t.after(() => {

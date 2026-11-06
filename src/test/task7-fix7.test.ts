@@ -283,7 +283,7 @@ test("custom why_file matches a trusted redacted identity hash only", async () =
   assert.equal((result.structuredContent as { coverageStatus?: string }).coverageStatus, "complete");
 });
 
-test("sanitized search IDs round-trip to fetch for valid Rocky hex IDs", async () => {
+test("sanitized search IDs round-trip to fetch for valid rocky hex IDs", async () => {
   const id = "0123456789abcdef0123456789abcdef";
   const failure: FailureRecord = {
     kind: "failure", id, ts: 1, cwd: "/repo", cmd: "npm test", exitCode: 1,

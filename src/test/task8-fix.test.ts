@@ -257,7 +257,7 @@ test("setup status contract names host/MCP registration and agent-hook scope, no
   assert.match(`${help.stdout}${help.stderr}`, /spool and Ollama\/model health\s+are not\s+checked/iu);
 });
 
-test("isolated real Rocky MCP child process passes versioned thirteen-tool health", { timeout: 10_000 }, async (t) => {
+test("isolated real rocky MCP child process passes versioned thirteen-tool health", { timeout: 10_000 }, async (t) => {
   const root = mkdtempSync(join(tmpdir(), "rocky-task8-mcp-health-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const result = await checkMcpRegistration({

@@ -53,7 +53,14 @@ test("gate denies once with followable instruction when no explain evidence exis
     if (first.deny === true) {
       assert.match(first.reason, /rocky hook agent-event/);
       assert.match(first.reason, /--explain-code/);
-      assert.match(first.reason, /, question/);
+      assert.match(
+        first.reason,
+        /^Explain this code before editing src\\lonely\.ts: why it has this shape and what concern it serves\. Then retry the edit\./,
+      );
+      assert.match(
+        first.reason,
+        /Run: rocky hook agent-event \S+ --explain-code "<why this code shape>" --explain-business "<what concern this serves>" --files src\\lonely\.ts$/,
+      );
     }
     const second = explainCheck.evaluate(gateInput(cwd, "src\\lonely.ts"), state);
     assert.deepEqual(second, { deny: false });

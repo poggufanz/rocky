@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { appendFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, posix, win32 } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -13,19 +14,26 @@ import type {
   SetupResult,
 } from "../setup/clients.js";
 import type {
-  VoiceSkillOperationResult,
-  VoiceSkillTarget,
-} from "../setup/voice-skill.js";
+  LegacyVoiceSkillResult,
+  LegacyVoiceSkillTarget,
+} from "../setup/legacy-voice-skill.js";
 import type { ProcessRunner, ProcessSession } from "../setup/process.js";
 import { createCodexAdapter } from "../setup/codex.js";
 import { createPlatformServices } from "../setup/platform.js";
+import {
+  SKILL_TEXT,
+  claudeTarget,
+  codexTarget,
+  expectedHash,
+  writeManagedTarget,
+} from "./legacy-voice-skill-fixture.js";
 import {
   createProductionAdapters,
   createConfirmationPort,
   setup,
   type ConfirmationPort,
   type SetupDependencies,
-  type VoiceSkillServices,
+  type LegacyVoiceSkillServices,
 } from "../commands/setup.js";
 
 const nodePath = process.execPath;
@@ -150,72 +158,52 @@ class FakeConfirmation implements ConfirmationPort {
   }
 }
 
-class FakeVoiceSkillServices implements VoiceSkillServices {
+class FakeLegacyVoiceSkillServices implements LegacyVoiceSkillServices {
   readonly calls: Array<{
-    method: "resolve" | "install" | "check" | "remove";
-    host?: VoiceSkillTarget["host"];
-    replace?: boolean;
+    method: "resolve" | "check" | "remove";
+    host?: LegacyVoiceSkillTarget["host"];
     home?: string;
     env?: NodeJS.ProcessEnv;
   }> = [];
 
+  /**
+   * `found` is what a check sees per host (absent unless named). `removed` is
+   * what a remove returns for a host the check found installed.
+   */
   constructor(
-    private readonly statuses: Partial<Record<
-      "install" | "check" | "remove",
-      Partial<Record<VoiceSkillTarget["host"], VoiceSkillOperationResult["status"]>>
-    >> = {},
-    private readonly observe?: (
-      method: "install" | "check" | "remove",
-      target: VoiceSkillTarget,
-    ) => void,
-    private readonly targets?: readonly VoiceSkillTarget[],
+    private readonly found: Partial<Record<LegacyVoiceSkillTarget["host"], LegacyVoiceSkillResult["status"]>> = {},
+    private readonly removed: Partial<Record<LegacyVoiceSkillTarget["host"], LegacyVoiceSkillResult["status"]>> = {},
+    private readonly observe?: (method: "check" | "remove", target: LegacyVoiceSkillTarget) => void,
   ) {}
 
-  resolveTargets(env: NodeJS.ProcessEnv, home: string): readonly VoiceSkillTarget[] {
+  resolveTargets(env: NodeJS.ProcessEnv, home: string): readonly LegacyVoiceSkillTarget[] {
     this.calls.push({ method: "resolve", env, home });
-    return this.targets ?? [
-      {
-        host: "codex",
-        destination: join(home, ".agents", "skills", "rocky-voice"),
-        backupRoot: join(home, ".agents", ".rocky", "backups", "voice-skills"),
-      },
-      {
-        host: "claude-code",
-        destination: join(home, ".claude", "skills", "rocky-voice"),
-        backupRoot: join(home, ".claude", ".rocky", "backups", "voice-skills"),
-      },
-    ];
+    return [codexTarget(home), claudeTarget(join(home, ".claude"))];
   }
 
-  private result(
-    method: "install" | "check" | "remove",
-    target: VoiceSkillTarget,
-  ): VoiceSkillOperationResult {
-    const fallback = method === "install" ? "installed" : method === "check" ? "unchanged" : "removed";
+  async check(target: LegacyVoiceSkillTarget): Promise<LegacyVoiceSkillResult> {
+    this.observe?.("check", target);
+    this.calls.push({ method: "check", host: target.host });
+    const status = this.found[target.host] ?? "absent";
     return {
       host: target.host,
-      status: this.statuses[method]?.[target.host] ?? fallback,
-      detail: `${target.host} ${method} detail`,
+      status,
+      detail: status === "installed" ? "rocky setup --remove removes it." : `${target.host} ${status} detail`,
     };
   }
 
-  async install(target: VoiceSkillTarget, replace: boolean): Promise<VoiceSkillOperationResult> {
-    this.observe?.("install", target);
-    this.calls.push({ method: "install", host: target.host, replace });
-    return this.result("install", target);
-  }
-
-  async check(target: VoiceSkillTarget): Promise<VoiceSkillOperationResult> {
-    this.observe?.("check", target);
-    this.calls.push({ method: "check", host: target.host });
-    return this.result("check", target);
-  }
-
-  async remove(target: VoiceSkillTarget): Promise<VoiceSkillOperationResult> {
+  async remove(target: LegacyVoiceSkillTarget): Promise<LegacyVoiceSkillResult> {
     this.observe?.("remove", target);
     this.calls.push({ method: "remove", host: target.host });
-    return this.result("remove", target);
+    const status = this.removed[target.host] ?? "removed";
+    return status === "removed"
+      ? { host: target.host, status, detail: `backup: /backups/${target.host}`, backupPath: `/backups/${target.host}` }
+      : { host: target.host, status, detail: `${target.host} ${status} detail` };
   }
+}
+
+function legacyCalls(legacy: FakeLegacyVoiceSkillServices): string[] {
+  return legacy.calls.map(({ method, host }) => (host === undefined ? method : `${method}:${host}`));
 }
 
 function dependencies(
@@ -227,11 +215,9 @@ function dependencies(
     bashHookInstalled?: boolean;
     home?: string;
     env?: NodeJS.ProcessEnv;
-    detected?: readonly ("codex" | "claude-code")[];
-    voiceSkills?: VoiceSkillServices;
+    legacyVoiceSkills?: LegacyVoiceSkillServices;
   } = {},
 ): SetupDependencies {
-  const detected = new Set(options.detected ?? []);
   const env = options.env ?? { PATH: "/tools", SHELL: options.shell ?? "/bin/zsh" };
   return {
     runner: options.runner ?? new HealthyRunner(),
@@ -241,10 +227,7 @@ function dependencies(
       env,
       isWsl: false,
       bashHookInstalled: options.bashHookInstalled,
-      fileExists: (path) => path === nodePath
-        || path === entryPath
-        || (path === "/tools/codex" && detected.has("codex"))
-        || (path === "/tools/claude" && detected.has("claude-code")),
+      fileExists: (path) => path === nodePath || path === entryPath,
     }),
     adapters,
     confirmation: options.confirmation ?? new FakeConfirmation(true),
@@ -252,7 +235,8 @@ function dependencies(
     entryPath,
     rockyHome,
     env,
-    voiceSkills: options.voiceSkills,
+    // Hermetic by default: no test reads the real folders of the fake home.
+    legacyVoiceSkills: options.legacyVoiceSkills ?? new FakeLegacyVoiceSkillServices(),
   };
 }
 
@@ -552,7 +536,7 @@ test("non-TTY confirmation port returns false without reading input", async () =
     read() { reads += 1; throw new Error("non-TTY stdin must not be read"); },
   });
 
-  assert.equal(await port.confirm("configure hosts, question"), false);
+  assert.equal(await port.confirm("Configure hosts now?"), false);
   assert.equal(reads, 0);
 });
 
@@ -564,300 +548,358 @@ test("yes bypasses ordinary prompt without inventing raw exposure", async () => 
   assert.equal(adapter.calls[0]?.registration.env.ROCKY_MCP_EXPOSURE, "sanitized");
 });
 
-test("yes without voice flag never plans or mutates skill targets", async () => {
-  const voiceSkills = new FakeVoiceSkillServices();
-  const adapter = new FakeAdapter("codex", {});
+/** A home with the private ~/.claude folder that `setup --status` expects to find. */
+function statusHome(t: test.TestContext): string {
+  const home = realpathSync(mkdtempSync(join(tmpdir(), "rocky-setup-status-home-")));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  mkdirSync(join(home, ".claude"), { mode: 0o700 });
+  return home;
+}
 
-  assert.equal(await setup(["--yes"], dependencies([adapter], {
-    detected: ["codex"],
-    voiceSkills,
-  })), 0);
-
-  assert.deepEqual(voiceSkills.calls, []);
-});
-
-test("voice flag dispatches after MCP to detected Codex and Claude Code but never Desktop", async (t) => {
-  const desired: McpRegistration = {
+function desiredRegistration(): McpRegistration {
+  return {
     name: "rocky",
     command: nodePath,
     args: [entryPath, "mcp"],
     env: { ROCKY_MCP_EXPOSURE: "sanitized", ROCKY_HOME: rockyHome },
   };
+}
+
+const INSTALLED_CODEX_LINE = "legacy voice skill codex: installed; rocky setup --remove removes it.";
+const REMOVED_CODEX_LINE = "legacy voice skill codex: removed; backup: /backups/codex";
+const REMOVED_CLAUDE_LINE = "legacy voice skill claude-code: removed; backup: /backups/claude-code";
+
+test("configure never looks at the legacy voice skill folders", async () => {
+  const legacy = new FakeLegacyVoiceSkillServices({ codex: "installed", "claude-code": "installed" });
+  const adapter = new FakeAdapter("codex", {});
+
+  const output = await captureStderr(() => setup(["--yes"], dependencies([adapter], { legacyVoiceSkills: legacy })));
+
+  assert.equal(output.code, 0);
+  assert.deepEqual(legacy.calls, []);
+  assert.doesNotMatch(output.stderr, /legacy voice skill/);
+});
+
+test("--voice-skill is an unknown option and exits 2 before any host or skill work", async (t) => {
+  for (const argv of [
+    ["--voice-skill"],
+    ["--yes", "--voice-skill"],
+    ["--check", "--voice-skill"],
+    ["--remove", "--yes", "--voice-skill"],
+  ]) {
+    await t.test(argv.join(" "), async () => {
+      const legacy = new FakeLegacyVoiceSkillServices({ codex: "installed" });
+      const adapter = new FakeAdapter("codex", {});
+
+      const output = await captureStderr(() => setup(argv, dependencies([adapter], { legacyVoiceSkills: legacy })));
+
+      assert.equal(output.code, 2);
+      assert.equal(
+        output.stderr,
+        "rocky: Unknown setup option: --voice-skill. Run rocky --help --all to list every option.\n",
+      );
+      assert.deepEqual(adapter.calls, []);
+      assert.deepEqual(legacy.calls, []);
+    });
+  }
+});
+
+test("check prints one line per legacy voice skill, nothing for absent folders, and keeps the exit code", async (t) => {
   const cases = [
-    { mode: "configure" as const, argv: ["--yes", "--replace", "--voice-skill"], method: "install" as const },
-    { mode: "check" as const, argv: ["--check", "--voice-skill"], method: "check" as const },
-    { mode: "remove" as const, argv: ["--remove", "--yes", "--voice-skill"], method: "remove" as const },
+    { found: "installed" as const, line: INSTALLED_CODEX_LINE },
+    { found: "modified" as const, line: "legacy voice skill codex: modified; codex modified detail" },
+    { found: "refused" as const, line: "legacy voice skill codex: refused; codex refused detail" },
+    { found: "failed" as const, line: "legacy voice skill codex: failed; codex failed detail" },
   ];
 
   for (const entry of cases) {
-    await t.test(entry.mode, async () => {
-      const adapters = (["codex", "claude-code", "claude-desktop"] as const).map((client) =>
-        new FakeAdapter(client, entry.mode === "configure"
-          ? { configure: { client, status: "configured" } }
-          : entry.mode === "check"
-            ? { check: { client, status: "healthy", healthRegistration: desired } }
-            : { remove: { client, status: "removed" } }));
-      const voiceSkills = new FakeVoiceSkillServices({}, (method) => {
-        assert.equal(method, entry.method);
-        assert.deepEqual(adapters.map((adapter) => adapter.calls.map(({ method: call }) => call)),
-          adapters.map(() => [entry.mode === "configure" ? "configure" : entry.mode]));
+    await t.test(entry.found, async () => {
+      const legacy = new FakeLegacyVoiceSkillServices({ codex: entry.found });
+      const adapter = new FakeAdapter("codex", {
+        check: { client: "codex", status: "healthy", healthRegistration: desiredRegistration() },
       });
 
-      const output = await captureStderr(() => setup(entry.argv, dependencies(adapters, {
-        detected: ["codex", "claude-code"],
-        voiceSkills,
-        env: { PATH: "/tools", CLAUDE_CONFIG_DIR: "/tmp/test-claude-config" },
+      const output = await captureStderr(() => setup(["--check"], dependencies([adapter], { legacyVoiceSkills: legacy })));
+
+      assert.equal(output.code, 0, output.stderr);
+      assert.ok(output.stderr.split("\n").includes(entry.line), output.stderr);
+      assert.doesNotMatch(output.stderr, /legacy voice skill claude-code/);
+      assert.deepEqual(legacyCalls(legacy), ["resolve", "check:codex", "check:claude-code"]);
+    });
+  }
+});
+
+test("check, remove, and status stay silent about the legacy voice skill when none exists", async (t) => {
+  const cases = [
+    {
+      name: "check",
+      argv: ["--check"],
+      adapter: () => new FakeAdapter("codex", {
+        check: { client: "codex", status: "healthy", healthRegistration: desiredRegistration() },
+      }),
+    },
+    {
+      name: "remove",
+      argv: ["--remove", "--yes"],
+      adapter: () => new FakeAdapter("codex", { remove: { client: "codex", status: "removed" } }),
+    },
+    { name: "status", argv: ["--status"], adapter: () => new FakeAdapter("codex", {}) },
+  ];
+
+  for (const entry of cases) {
+    await t.test(entry.name, async (st) => {
+      const legacy = new FakeLegacyVoiceSkillServices();
+
+      const output = await captureStderr(() => setup(entry.argv, dependencies([entry.adapter()], {
+        legacyVoiceSkills: legacy,
+        home: entry.name === "status" ? statusHome(st) : undefined,
       })));
 
       assert.equal(output.code, 0, output.stderr);
-      assert.deepEqual(voiceSkills.calls.map(({ method, host, replace }) => ({ method, host, replace })), [
-        { method: "resolve", host: undefined, replace: undefined },
-        { method: entry.method, host: "codex", replace: entry.method === "install" ? true : undefined },
-        { method: entry.method, host: "claude-code", replace: entry.method === "install" ? true : undefined },
-      ]);
-      assert.match(output.stderr, new RegExp(`voice-skill codex: ${entry.method === "install" ? "installed" : entry.method === "check" ? "unchanged" : "removed"}`));
-      assert.match(output.stderr, new RegExp(`voice-skill claude-code: ${entry.method === "install" ? "installed" : entry.method === "check" ? "unchanged" : "removed"}`));
-      assert.doesNotMatch(output.stderr, /voice-skill claude-desktop/);
-      assert.equal(output.stdout, "");
+      assert.doesNotMatch(output.stderr, /legacy voice skill/);
+      assert.equal(legacy.calls.some(({ method }) => method === "remove"), false);
     });
   }
 });
 
-test("voice skill refusal is isolated per host and contributes partial-failure exit one", async () => {
-  const adapters = [
-    new FakeAdapter("codex", { configure: { client: "codex", status: "configured" } }),
-    new FakeAdapter("claude-code", { configure: { client: "claude-code", status: "configured" } }),
-  ];
-  const voiceSkills = new FakeVoiceSkillServices({
-    install: { codex: "refused", "claude-code": "installed" },
-  });
+test("status reports the legacy voice skill read-only and keeps the exit code", async (t) => {
+  const legacy = new FakeLegacyVoiceSkillServices({ codex: "installed" });
 
-  const output = await captureStderr(() => setup(
-    ["--yes", "--voice-skill"],
-    dependencies(adapters, {
-      detected: ["codex", "claude-code"],
-      voiceSkills,
-    }),
-  ));
+  const output = await captureStderr(() => setup(["--status"], dependencies([], {
+    legacyVoiceSkills: legacy,
+    home: statusHome(t),
+  })));
 
-  assert.equal(output.code, 1);
-  assert.match(output.stderr, /codex: configured/);
-  assert.match(output.stderr, /claude-code: configured/);
-  assert.match(output.stderr, /voice-skill codex: refused/);
-  assert.match(output.stderr, /voice-skill claude-code: installed/);
-  assert.deepEqual(voiceSkills.calls.filter(({ method }) => method === "install").map(({ host }) => host), [
-    "codex", "claude-code",
-  ]);
+  assert.equal(output.code, 0, output.stderr);
+  assert.ok(output.stderr.split("\n").includes(INSTALLED_CODEX_LINE), output.stderr);
+  assert.doesNotMatch(output.stderr, /legacy voice skill claude-code/);
+  assert.deepEqual(legacyCalls(legacy), ["resolve", "check:codex", "check:claude-code"]);
 });
 
-test("declined combined consent performs no voice skill operation", async () => {
-  const confirmation = new FakeConfirmation(false);
-  const voiceSkills = new FakeVoiceSkillServices();
-  const adapter = new FakeAdapter("codex", { inspect: { state: "absent" } });
+test("remove --yes moves each managed legacy skill after the MCP removal and prints one line per skill", async () => {
+  const adapter = new FakeAdapter("codex", { remove: { client: "codex", status: "removed" } });
+  const legacy = new FakeLegacyVoiceSkillServices({ codex: "installed", "claude-code": "installed" }, {}, (method) => {
+    if (method === "remove") assert.deepEqual(adapter.calls.map(({ method: call }) => call), ["remove"]);
+  });
 
-  const output = await captureStderr(() => setup(
-    ["--voice-skill"],
-    dependencies([adapter], {
+  const output = await captureStderr(() => setup(["--remove", "--yes"], dependencies([adapter], {
+    legacyVoiceSkills: legacy,
+  })));
+
+  assert.equal(output.code, 0, output.stderr);
+  assert.equal(output.stdout, "");
+  assert.deepEqual(legacyCalls(legacy), [
+    "resolve", "check:codex", "check:claude-code", "remove:codex", "remove:claude-code",
+  ]);
+  const lines = output.stderr.split("\n");
+  assert.ok(lines.includes(REMOVED_CODEX_LINE), output.stderr);
+  assert.ok(lines.includes(REMOVED_CLAUDE_LINE), output.stderr);
+  assert.ok(lines.indexOf("rocky: Host setup results follow.") < lines.indexOf(REMOVED_CODEX_LINE));
+});
+
+test("remove moves only what the check found installed and reports the rest as the check saw it", async () => {
+  const adapter = new FakeAdapter("codex", { remove: { client: "codex", status: "removed" } });
+  const legacy = new FakeLegacyVoiceSkillServices({ codex: "installed", "claude-code": "modified" });
+
+  const output = await captureStderr(() => setup(["--remove", "--yes"], dependencies([adapter], {
+    legacyVoiceSkills: legacy,
+  })));
+
+  assert.equal(output.code, 0, output.stderr);
+  assert.deepEqual(legacyCalls(legacy), ["resolve", "check:codex", "check:claude-code", "remove:codex"]);
+  const lines = output.stderr.split("\n");
+  assert.ok(lines.includes(REMOVED_CODEX_LINE), output.stderr);
+  assert.ok(lines.includes("legacy voice skill claude-code: modified; claude-code modified detail"), output.stderr);
+});
+
+test("a refused or modified legacy removal keeps the exit code at zero and an unexpected failure makes it one", async (t) => {
+  const cases = [
+    { removed: "removed" as const, exit: 0 },
+    { removed: "refused" as const, exit: 0 },
+    { removed: "modified" as const, exit: 0 },
+    { removed: "failed" as const, exit: 1 },
+  ];
+
+  for (const entry of cases) {
+    await t.test(entry.removed, async () => {
+      const adapter = new FakeAdapter("codex", { remove: { client: "codex", status: "removed" } });
+      const legacy = new FakeLegacyVoiceSkillServices({ codex: "installed" }, { codex: entry.removed });
+
+      const output = await captureStderr(() => setup(["--remove", "--yes"], dependencies([adapter], {
+        legacyVoiceSkills: legacy,
+      })));
+
+      assert.equal(output.code, entry.exit, output.stderr);
+      assert.match(output.stderr, new RegExp(`legacy voice skill codex: ${entry.removed}; `));
+    });
+  }
+});
+
+test("remove asks one question that names the legacy voice skill and a decline moves nothing", async () => {
+  const confirmation = new FakeConfirmation(false);
+  const adapter = new FakeAdapter("codex", { inspect: { state: "absent" } });
+  const legacy = new FakeLegacyVoiceSkillServices({ codex: "installed" });
+
+  const output = await captureStderr(() => setup(["--remove"], dependencies([adapter], {
+    confirmation,
+    legacyVoiceSkills: legacy,
+  })));
+
+  assert.equal(output.code, 1);
+  assert.deepEqual(confirmation.messages, ["Remove rocky from MCP hosts and the legacy voice skill (codex) now?"]);
+  assert.equal(legacy.calls.some(({ method }) => method === "remove"), false);
+  assert.deepEqual(adapter.calls.map(({ method }) => method), ["inspect"]);
+  assert.match(output.stderr, /codex: requires-confirmation/);
+  assert.match(output.stderr, /rocky setup --remove --yes/);
+  assert.ok(output.stderr.split("\n").includes(INSTALLED_CODEX_LINE), output.stderr);
+});
+
+test("a managed legacy skill alone still needs consent before it moves", async (t) => {
+  const blocked = (): FakeAdapter => new FakeAdapter("codex", {
+    inspect: { state: "blocked", detail: "codex is not installed" },
+  });
+
+  await t.test("declined", async () => {
+    const confirmation = new FakeConfirmation(false);
+    const legacy = new FakeLegacyVoiceSkillServices({ codex: "installed" });
+
+    const output = await captureStderr(() => setup(["--remove"], dependencies([blocked()], {
       confirmation,
-      detected: ["codex"],
-      voiceSkills,
-    }),
-  ));
+      legacyVoiceSkills: legacy,
+    })));
+
+    assert.equal(output.code, 1);
+    assert.deepEqual(confirmation.messages, ["Remove the legacy voice skill (codex) now?"]);
+    assert.equal(legacy.calls.some(({ method }) => method === "remove"), false);
+    assert.ok(output.stderr.split("\n").includes(INSTALLED_CODEX_LINE), output.stderr);
+  });
+
+  await t.test("accepted", async () => {
+    const confirmation = new FakeConfirmation(true);
+    const legacy = new FakeLegacyVoiceSkillServices({ codex: "installed" });
+
+    const output = await captureStderr(() => setup(["--remove"], dependencies([blocked()], {
+      confirmation,
+      legacyVoiceSkills: legacy,
+    })));
+
+    assert.equal(output.code, 0, output.stderr);
+    assert.deepEqual(confirmation.messages, ["Remove the legacy voice skill (codex) now?"]);
+    assert.deepEqual(legacyCalls(legacy), ["resolve", "check:codex", "check:claude-code", "remove:codex"]);
+    assert.ok(output.stderr.split("\n").includes(REMOVED_CODEX_LINE), output.stderr);
+  });
+});
+
+test("nothing is asked when no managed legacy skill exists and every MCP adapter is blocked", async () => {
+  const confirmation: ConfirmationPort = { async confirm() { throw new Error("nothing to authorize must not prompt"); } };
+  const adapter = new FakeAdapter("codex", { inspect: { state: "blocked", detail: "codex is not installed" } });
+  const legacy = new FakeLegacyVoiceSkillServices({ codex: "modified" });
+
+  const output = await captureStderr(() => setup(["--remove"], dependencies([adapter], {
+    confirmation,
+    legacyVoiceSkills: legacy,
+  })));
+
+  assert.equal(output.code, 0, output.stderr);
+  assert.equal(legacy.calls.some(({ method }) => method === "remove"), false);
+  assert.ok(output.stderr.split("\n").includes("legacy voice skill codex: modified; codex modified detail"), output.stderr);
+});
+
+test("explicit --harness targets limit the legacy skill lookup to the selected hosts", async (t) => {
+  const cases = [
+    { argv: ["--check", "--harness", "claude-code"], hosts: ["claude-code"] },
+    { argv: ["--check", "--harness", "codex"], hosts: ["codex"] },
+    { argv: ["--check", "--harness", "codex", "--harness", "claude-code"], hosts: ["codex", "claude-code"] },
+    { argv: ["--check", "--harness", "opencode"], hosts: [] },
+  ];
+
+  for (const entry of cases) {
+    await t.test(entry.argv.slice(1).join(" "), async () => {
+      const legacy = new FakeLegacyVoiceSkillServices({ codex: "installed", "claude-code": "installed" });
+
+      const output = await captureStderr(() => setup(entry.argv, dependencies([], { legacyVoiceSkills: legacy })));
+
+      assert.deepEqual(
+        legacy.calls.filter(({ method }) => method === "check").map(({ host }) => host),
+        entry.hosts,
+      );
+      for (const host of ["codex", "claude-code"]) {
+        assert.equal(output.stderr.includes(`legacy voice skill ${host}:`), entry.hosts.includes(host), host);
+      }
+    });
+  }
+});
+
+test("setup --check and --remove find, report, and move a real managed legacy voice skill", async (t) => {
+  const home = mkdtempSync(join(tmpdir(), "rocky-setup-legacy-home-"));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const claudeRoot = join(home, "claude-config");
+  const codex = codexTarget(home);
+  const claude = claudeTarget(claudeRoot);
+  const hash = await writeManagedTarget(codex);
+  await writeManagedTarget(claude);
+  await appendFile(join(claude.destination, "SKILL.md"), "user edit\n", "utf8");
+  const real = (adapter: FakeAdapter): SetupDependencies => {
+    const value = dependencies([adapter], { home, env: { PATH: "/tools", CLAUDE_CONFIG_DIR: claudeRoot } });
+    delete value.legacyVoiceSkills;
+    return value;
+  };
+
+  const checked = await captureStderr(() => setup(["--check"], real(new FakeAdapter("codex", {
+    check: { client: "codex", status: "healthy", healthRegistration: desiredRegistration() },
+  }))));
+  assert.equal(checked.code, 0, checked.stderr);
+  assert.ok(checked.stderr.split("\n").includes(INSTALLED_CODEX_LINE), checked.stderr);
+  assert.match(checked.stderr, /^legacy voice skill claude-code: modified; the files changed after install/m);
+  assert.equal(readFileSync(join(codex.destination, "SKILL.md"), "utf8"), SKILL_TEXT);
+
+  const removed = await captureStderr(() => setup(["--remove", "--yes"], real(new FakeAdapter("codex", {
+    remove: { client: "codex", status: "removed" },
+  }))));
+  assert.equal(removed.code, 0, removed.stderr);
+  const backupLine = removed.stderr.split("\n").find((line) => line.startsWith("legacy voice skill codex: removed; backup: "));
+  assert.ok(backupLine !== undefined, removed.stderr);
+  const backupPath = backupLine.slice("legacy voice skill codex: removed; backup: ".length);
+  assert.ok(backupPath.startsWith(codex.backupRoot), backupPath);
+  assert.equal(existsSync(codex.destination), false);
+  assert.equal(await expectedHash(backupPath), hash);
+  assert.match(removed.stderr, /^legacy voice skill claude-code: modified; /m);
+  assert.match(readFileSync(join(claude.destination, "SKILL.md"), "utf8"), /user edit/);
+  assert.equal(existsSync(claude.backupRoot), false);
+
+  const again = await captureStderr(() => setup(["--remove", "--yes"], real(new FakeAdapter("codex", {
+    remove: { client: "codex", status: "not-configured" },
+  }))));
+  assert.equal(again.code, 0, again.stderr);
+  assert.doesNotMatch(again.stderr, /legacy voice skill codex/);
+});
+
+test("declining the real remove prompt leaves a managed legacy voice skill in place", async (t) => {
+  const home = mkdtempSync(join(tmpdir(), "rocky-setup-legacy-decline-"));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const codex = codexTarget(home);
+  await writeManagedTarget(codex);
+  const confirmation = new FakeConfirmation(false);
+  const deps = dependencies([new FakeAdapter("codex", { inspect: { state: "absent" } })], {
+    confirmation,
+    home,
+    env: { PATH: "/tools" },
+  });
+  delete deps.legacyVoiceSkills;
+
+  const output = await captureStderr(() => setup(["--remove"], deps));
 
   assert.equal(output.code, 1);
   assert.equal(confirmation.messages.length, 1);
-  assert.match(confirmation.messages[0] ?? "", /voice skill/i);
-  assert.doesNotMatch(output.stderr, /voice-skill: unavailable/);
-  assert.deepEqual(voiceSkills.calls, []);
-  assert.deepEqual(adapter.calls.map(({ method }) => method), ["inspect"]);
-});
-
-test("declined voice consent performs no voice operation and never claims unavailable", async (t) => {
-  // A real decline answers a question that was actually asked. Rocky never learned
-  // whether any voice-skill target would have been eligible, so it must not report
-  // "unavailable" - that would claim knowledge the decline never let it gather.
-  const cases: Array<{
-    name: string;
-    argv: readonly string[];
-    inspection: InspectionResult;
-    exit: number;
-  }> = [
-    {
-      name: "declined consent, configure",
-      argv: ["--voice-skill"],
-      inspection: { state: "absent" },
-      exit: 1,
-    },
-    {
-      name: "declined consent, remove",
-      argv: ["--remove", "--voice-skill"],
-      inspection: { state: "absent" },
-      exit: 1,
-    },
-  ];
-
-  for (const entry of cases) {
-    await t.test(entry.name, async () => {
-      const confirmation = new FakeConfirmation(false);
-      const adapter = new FakeAdapter("codex", { inspect: entry.inspection });
-      const voiceSkills = new FakeVoiceSkillServices();
-
-      const output = await captureStderr(() => setup(entry.argv, dependencies([adapter], {
-        confirmation,
-        voiceSkills,
-      })));
-
-      assert.equal(output.code, entry.exit);
-      assert.doesNotMatch(output.stderr, /voice-skill: unavailable/);
-      assert.deepEqual(voiceSkills.calls, []);
-      assert.equal(confirmation.messages.length, 1);
-    });
-  }
-});
-
-test("missing consent because no host needed authorization still reports zero-eligible voice unavailable", async (t) => {
-  // No adapter required a prompt at all (every one is blocked/unreadable), so
-  // consent was never withheld - there was nothing to withhold. This is a
-  // different state than a decline: an explicit --voice-skill request is still
-  // authorized, and with zero eligible hosts it must report the same
-  // `voice-skill: unavailable` result an authorized `--yes` run would, in both
-  // configure and remove mode.
-  const cases: Array<{ name: string; argv: readonly string[]; exit: number }> = [
-    { name: "configure, all hosts blocked (no prompt)", argv: ["--voice-skill"], exit: 1 },
-    { name: "remove, all hosts blocked (no prompt)", argv: ["--remove", "--voice-skill"], exit: 1 },
-  ];
-
-  for (const entry of cases) {
-    await t.test(entry.name, async () => {
-      const confirmation: ConfirmationPort = { async confirm() { throw new Error("blocked hosts must not prompt"); } };
-      const adapter = new FakeAdapter("codex", { inspect: { state: "blocked", detail: "codex is not installed" } });
-      const voiceSkills = new FakeVoiceSkillServices();
-
-      const output = await captureStderr(() => setup(entry.argv, dependencies([adapter], {
-        confirmation,
-        voiceSkills,
-      })));
-
-      assert.equal(output.code, entry.exit);
-      assert.ok(output.stderr.split("\n").includes("voice-skill: unavailable"));
-      assert.deepEqual(voiceSkills.calls, []);
-      assert.deepEqual(adapter.calls.map(({ method }) => method), ["inspect"]);
-    });
-  }
-});
-
-test("a detected voice-skill host forces real authorization before any mutation even when every MCP adapter is blocked", async (t) => {
-  // This is the exact state that hid the round-3 consent bypass: every MCP
-  // adapter is blocked/unreadable (so MCP work alone never needed a prompt),
-  // but a Codex/Claude Code executable IS detected on PATH, so there is real
-  // voice-skill work pending. Unlike the zero-detected-host test above,
-  // `detected` is non-empty here on purpose - omitting it is precisely how
-  // round 3's own regression sat in the one state where the bug was
-  // invisible. `confirm()` throwing on any call proves an invocation is a
-  // genuine prompt attempt, never a silent bypass: for a mutating mode
-  // (configure/remove) the outcome must be either a real prompt attempt or
-  // zero voice-skill calls - an unprompted mutation must never pass. `check`
-  // never mutates (see setup.ts's check-mode consent skip), so it is
-  // deliberately never gated behind a prompt; asserting it here documents
-  // that choice rather than treating it as a gap.
-  const cases: Array<{ name: string; argv: readonly string[]; mutates: boolean }> = [
-    { name: "configure", argv: ["--voice-skill"], mutates: true },
-    { name: "check", argv: ["--check", "--voice-skill"], mutates: false },
-    { name: "remove", argv: ["--remove", "--voice-skill"], mutates: true },
-  ];
-
-  for (const entry of cases) {
-    await t.test(entry.name, async () => {
-      const confirmation: ConfirmationPort = {
-        async confirm() { throw new Error("prompt attempted"); },
-      };
-      const adapter = new FakeAdapter("codex", { inspect: { state: "blocked", detail: "codex is not installed" } });
-      const voiceSkills = new FakeVoiceSkillServices();
-
-      let promptAttempted = false;
-      try {
-        await captureStderr(() => setup(entry.argv, dependencies([adapter], {
-          confirmation,
-          voiceSkills,
-          detected: ["codex"],
-        })));
-      } catch (error) {
-        assert.equal(error instanceof Error ? error.message : error, "prompt attempted");
-        promptAttempted = true;
-      }
-
-      if (entry.mutates) {
-        assert.ok(promptAttempted || voiceSkills.calls.length === 0,
-          `${entry.name}: voice skill mutated without ever being authorized`);
-      } else {
-        assert.equal(promptAttempted, false, "check must never require a consent prompt");
-      }
-    });
-  }
-});
-
-test("explicit voice skill with no detected host reports unavailable while an independent Desktop MCP result still succeeds", async (t) => {
-  const desired: McpRegistration = {
-    name: "rocky",
-    command: nodePath,
-    args: [entryPath, "mcp"],
-    env: { ROCKY_MCP_EXPOSURE: "sanitized", ROCKY_HOME: rockyHome },
-  };
-  const cases = [
-    { mode: "configure" as const, argv: ["--yes", "--voice-skill"], resultKey: "configure" as const, status: "configured" as const },
-    { mode: "check" as const, argv: ["--check", "--voice-skill"], resultKey: "check" as const, status: "healthy" as const },
-    { mode: "remove" as const, argv: ["--remove", "--yes", "--voice-skill"], resultKey: "remove" as const, status: "removed" as const },
-  ];
-
-  for (const entry of cases) {
-    await t.test(entry.mode, async () => {
-      const desktopResult: SetupResult = entry.mode === "check"
-        ? { client: "claude-desktop", status: "healthy", healthRegistration: desired }
-        : { client: "claude-desktop", status: entry.status };
-      const desktop = new FakeAdapter("claude-desktop", { [entry.resultKey]: desktopResult });
-      const voiceSkills = new FakeVoiceSkillServices();
-
-      const output = await captureStderr(() => setup(entry.argv, dependencies([desktop], {
-        voiceSkills,
-      })));
-
-      assert.equal(output.code, 1);
-      assert.equal(output.stdout, "");
-      assert.ok(output.stderr.split("\n").includes("voice-skill: unavailable"));
-      assert.match(output.stderr, new RegExp(`claude-desktop: ${entry.status}`));
-      assert.deepEqual(desktop.calls.map(({ method }) => method), [entry.mode === "configure" ? "configure" : entry.mode]);
-      assert.deepEqual(voiceSkills.calls, []);
-      assert.doesNotMatch(output.stderr, /voice-skill claude-desktop/);
-    });
-  }
-});
-
-test("detected host with no matching resolved target reports unavailable and performs zero host operations", async () => {
-  const codex = new FakeAdapter("codex", { configure: { client: "codex", status: "configured" } });
-  const voiceSkills = new FakeVoiceSkillServices({}, undefined, [
-    {
-      host: "claude-code",
-      destination: "/home/ada/.claude/skills/rocky-voice",
-      backupRoot: "/home/ada/.claude/.rocky/backups/voice-skills",
-    },
-  ]);
-
-  const output = await captureStderr(() => setup(
-    ["--yes", "--voice-skill"],
-    dependencies([codex], { detected: ["codex"], voiceSkills }),
-  ));
-
-  assert.equal(output.code, 1);
-  assert.equal(output.stdout, "");
-  assert.ok(output.stderr.split("\n").includes("voice-skill: unavailable"));
-  assert.match(output.stderr, /codex: configured/);
-  assert.deepEqual(voiceSkills.calls.map(({ method }) => method), ["resolve"]);
+  assert.match(confirmation.messages[0] ?? "", /legacy voice skill \(codex\)/);
+  assert.equal(readFileSync(join(codex.destination, "SKILL.md"), "utf8"), SKILL_TEXT);
+  assert.equal(existsSync(codex.backupRoot), false);
 });
 
 test("sanitized and raw configure print required projected-memory disclosures", async () => {
   const sanitized = new FakeAdapter("codex", {});
   const safeOutput = await captureStderr(() => setup(["--yes"], dependencies([sanitized])));
-  assert.match(safeOutput.stderr, /configured MCP host may forward selected projected memory/i);
+  assert.match(safeOutput.stderr, /A configured MCP host may forward selected projected memory\./);
   assert.doesNotMatch(safeOutput.stderr, /working director|stderr excerpt/i);
 
   const raw = new FakeAdapter("codex", {});
@@ -865,10 +907,9 @@ test("sanitized and raw configure print required projected-memory disclosures", 
     ["--yes", "--mcp-exposure", "raw"],
     dependencies([raw]),
   ));
-  assert.match(rawOutput.stderr, /configured MCP host may forward selected projected memory/i);
-  assert.match(rawOutput.stderr, /raw exposure/i);
-  assert.match(rawOutput.stderr, /working directories/i);
-  assert.match(rawOutput.stderr, /stderr excerpts/i);
+  assert.match(rawOutput.stderr, /A configured MCP host may forward selected projected memory\./);
+  assert.match(rawOutput.stderr, /Raw exposure includes working directories and stored stderr excerpts\./);
+  assert.match(rawOutput.stderr, /A host that shares them exposes that data\./);
   assert.equal(raw.calls[0]?.registration.env.ROCKY_MCP_EXPOSURE, "raw");
 });
 
@@ -1056,7 +1097,7 @@ test("usage remains two and ephemeral installs stop before adapters", async () =
   const adapter = new FakeAdapter("codex", {});
   const usage = await captureStderr(() => setup(["--mcp-exposure", "RAW"], dependencies([adapter])));
   assert.equal(usage.code, 2);
-  assert.match(usage.stderr, /run rocky --help --all, question/);
+  assert.match(usage.stderr, /^rocky: --mcp-exposure must be sanitized or raw\. Run rocky --help --all to list every option\.\n$/);
   assert.doesNotMatch(usage.stderr, /rocky setup --help/);
   assert.deepEqual(adapter.calls, []);
 

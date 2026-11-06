@@ -1,24 +1,24 @@
 # Rocky
 <p align="center"><img src="https://raw.githubusercontent.com/poggufanz/rocky/main/assets/rocky-logo.svg" alt="rocky" width="320"></p>
-<p align="center"><img src="https://raw.githubusercontent.com/poggufanz/rocky/main/assets/rocky.webp" alt="rocky dash: every change Rocky heard for one file, the diff beside the notes that explain it"></p>
+<p align="center"><img src="https://raw.githubusercontent.com/poggufanz/rocky/main/assets/rocky.webp" alt="rocky dash: every change Rocky recorded for one file, the diff beside the notes that explain it"></p>
 
 [![CI](https://github.com/poggufanz/rocky/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/poggufanz/rocky/actions/workflows/ci.yml)
 [![npm](https://img.shields.io/npm/v/@poggufanz/rocky-cli?style=flat-square)](https://www.npmjs.com/package/@poggufanz/rocky-cli)
 [![MIT license](https://img.shields.io/badge/license-MIT-blue.svg?style=flat-square)](LICENSE)
 
-[Release v1.1.0](https://github.com/poggufanz/rocky/releases/tag/v1.1.0) | [Changelog](CHANGELOG.md) | [License](LICENSE) | [Security](https://github.com/poggufanz/rocky/blob/main/SECURITY.md) | [Contributing](https://github.com/poggufanz/rocky/blob/main/CONTRIBUTING.md)
+[Release v2.0.0](https://github.com/poggufanz/rocky/releases/tag/v2.0.0) | [Changelog](CHANGELOG.md) | [License](LICENSE) | [Security](https://github.com/poggufanz/rocky/blob/main/SECURITY.md) | [Contributing](https://github.com/poggufanz/rocky/blob/main/CONTRIBUTING.md)
 
 Your AI writes code. Rocky makes sure you still understand what you own. It is a local CLI that remembers failed commands and what fixed them, then brings that history back when the same trouble returns — to you, and through MCP to the AI agent working beside you, so it stops retrying what already failed on this machine. Supported agent hooks can also keep a bounded record of what you asked for, which files changed, and why the agent said it changed them. Rocky is a witness, not a judge: it never diagnoses a failure or proposes a fix it does not remember, and [docs/character.md](docs/character.md) holds the rules that boundary comes from.
 
 The useful part is local and deterministic. Rocky has no daemon, no telemetry, and zero runtime dependencies. Optional AI uses an Ollama instance that you run on loopback.
 
-> You teach, I remember. I remind, you understand. This is good trade.
+> You teach, it remembers. It reminds, you understand.
 
 ## See it work
 
 | | |
 | --- | --- |
-| **Failure memory** a failed build becomes a fingerprint; when the same error returns, Rocky says it has heard it before and that it went green again after — never a fix he did not hear. Evidence, not a guess. | ![Rocky remembers a failed build and its fix](https://raw.githubusercontent.com/poggufanz/rocky/main/assets/demo-loop.gif) |
+| **Failure memory** a failed build becomes a fingerprint; when the same error returns, Rocky says it has recorded it before and that it went green again after — never a fix it did not record. Evidence, not a guess. | ![Rocky remembers a failed build and its fix](https://raw.githubusercontent.com/poggufanz/rocky/main/assets/demo-loop.gif) |
 | **`rocky dash`** opens a local page in your browser: every remembered change to one file, side by side, the agent's stated reason next to the diff that landed. | ![rocky dash compare view](https://raw.githubusercontent.com/poggufanz/rocky/main/assets/demo-dash.gif) |
 | **Rationale gate** an editing agent must state why before it touches a file. No stated reason, no edit; deny-once, fail-open. | ![PreToolUse rationale gate denying an unexplained edit](https://raw.githubusercontent.com/poggufanz/rocky/main/assets/demo-gate.gif) |
 
@@ -30,7 +30,7 @@ npm install -g @poggufanz/rocky-cli
 
 Requires Node.js 18 or newer. The package name is `@poggufanz/rocky-cli`; the unrelated unscoped `rocky-cli` package is not this project.
 
-Current release: `@poggufanz/rocky-cli@1.1.0`. See the [release notes](https://github.com/poggufanz/rocky/releases/tag/v1.1.0) or the full [changelog](CHANGELOG.md).
+Current release: `@poggufanz/rocky-cli@2.0.0`. See the [release notes](https://github.com/poggufanz/rocky/releases/tag/v2.0.0) or the full [changelog](CHANGELOG.md).
 
 **Agent self-setup (any harness).** Working with an agent outside Claude Code or Codex (OpenCode, Gemini CLI, anything else)? [docs/agents/INSTALL.md](docs/agents/INSTALL.md) covers the shell hook, the notify rationale lane, and optional MCP read access, and every step that edits your files asks for approval first. On Claude Code and Codex, `rocky setup --agent-hooks` and `rocky setup` capture more, automatically. To hand it to the agent:
 
@@ -66,7 +66,7 @@ On Windows, `rocky hook install` installs into every PowerShell host it finds on
 
 On Windows, install also says when it had to create a missing `.bashrc`, because only Git Bash reads that file there. It asks each PowerShell host for its effective execution policy too. When that policy is `Restricted` or `AllSigned`, PowerShell will not load the profile, so install and `status` say that and print `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` instead of reporting working ears; the profile is still written and the exit code stays 0. A `$PROFILE` outside your home directory is skipped unless you set `ROCKY_HOOK_ALLOW_PROFILE_OUTSIDE_HOME=1`, and the skip message names that variable.
 
-The PowerShell hook is passive ears only: it overrides `prompt` to see a command's result right after it finishes, so it remembers failures and links fixes the same way Bash does, but — unlike the Bash hook — it cannot ask for confirmation before a dangerous command runs, because `prompt` never sees a command before it executes. Because `prompt` fires after the command's own stderr is already gone, PowerShell-hook failures are fingerprinted from the command text alone, the same command-only fallback the CLI has used since v0.4.0. One disclosed side effect: the only way PowerShell allows restoring `$?` to `False` after Rocky's own bookkeeping runs is a real, suppressed non-terminating error, which pushes one synthetic entry — named so you know it is Rocky's — onto the front of `$Error`, ahead of whatever your last real command actually raised. `$LASTEXITCODE` and `$?`'s value are always exactly what your own command left them; only `$Error[0]`'s position shifts.
+The PowerShell hook only records: it overrides `prompt` to read a command's result right after it finishes, so it remembers failures and links fixes the same way Bash does, but — unlike the Bash hook — it cannot ask for confirmation before a dangerous command runs, because `prompt` never sees a command before it executes. Because `prompt` fires after the command's own stderr is already gone, PowerShell-hook failures are fingerprinted from the command text alone, the same command-only fallback the CLI has used since v0.4.0. One disclosed side effect: the only way PowerShell allows restoring `$?` to `False` after Rocky's own bookkeeping runs is a real, suppressed non-terminating error, which pushes one synthetic entry — named so you know it is Rocky's — onto the front of `$Error`, ahead of whatever your last real command actually raised. `$LASTEXITCODE` and `$?`'s value are always exactly what your own command left them; only `$Error[0]`'s position shifts.
 
 ### 60-second test
 
@@ -93,7 +93,7 @@ The first run fails and Rocky remembers it; the second run works, and Rocky know
 | Dictionary | `rocky what`, `rocky how`, `rocky why`, `rocky digest`, `rocky quiz`, and `rocky export` turn remembered changes back into plain explanations. |
 | `rocky mcp` | Exposes bounded memory and knowledge tools over local stdio, with sanitized output by default. |
 | Rationale gate | A concept lexicon (`rocky concepts`) plus a PreToolUse gate that nudges an editing agent to state why before touching a file; deny-once, fail-open. |
-| Host setup | `rocky setup` registers supported hosts after consent and can install the optional managed voice skill. |
+| Host setup | `rocky setup` registers supported hosts after consent; `rocky setup --remove` also removes a voice skill left by an older release. |
 | `rocky hook` | Manage the optional Bash, WSL, and PowerShell shell hooks. |
 | `rocky model` | Configure optional loopback Ollama (`status\|use\|off`). |
 | `rocky hook gate-event`, `rocky hook agent-event generic` | PreToolUse rationale-gate enforcement and the universal agent notify endpoint. |
@@ -103,7 +103,6 @@ Setup stays explicit:
 ```bash
 rocky setup
 rocky setup --harness
-rocky setup --voice-skill
 rocky setup --agent-hooks
 rocky setup --uninstall-agent-hooks
 rocky setup --status
@@ -169,4 +168,4 @@ Read the [contributing guide](https://github.com/poggufanz/rocky/blob/main/CONTR
 
 Rocky CLI code, original project documentation, and the repository illustration are available under the [MIT License](LICENSE).
 
-Rocky's character, voice, and illustration are original work created for this repository. No third-party logos, film assets, or other copyrighted material are distributed here.
+Rocky's name and logo are original work created for this repository. No third-party logos, film assets, or other copyrighted material are distributed here.

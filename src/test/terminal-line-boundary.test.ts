@@ -79,7 +79,7 @@ test("run keeps binary stderr prefix exact and separates unterminated child outp
   const result = runCli(["run", stderrCommand(childBytes, 67)]);
 
   assert.equal(result.status, 67);
-  assertRockyStartsAfter(result.stderr, childBytes, Buffer.from("[Rocky]"), true);
+  assertRockyStartsAfter(result.stderr, childBytes, Buffer.from("rocky:"), true);
 });
 
 test("run does not add a separator after LF or CRLF child output", () => {
@@ -88,7 +88,7 @@ test("run does not add a separator after LF or CRLF child output", () => {
     const result = runCli(["run", stderrCommand(childBytes, 67)]);
 
     assert.equal(result.status, 67);
-    assertRockyStartsAfter(result.stderr, childBytes, Buffer.from("[Rocky]"), false);
+    assertRockyStartsAfter(result.stderr, childBytes, Buffer.from("rocky:"), false);
   }
 });
 
@@ -113,7 +113,7 @@ test("watch separates normal commentary after unterminated child output", () => 
   const result = runCli(["watch", stderrCommand(childBytes, 1)]);
 
   assert.equal(result.status, 1);
-  assertRockyStartsAfter(result.stderr, childBytes, Buffer.from("[Rocky]"), true);
+  assertRockyStartsAfter(result.stderr, childBytes, Buffer.from("rocky:"), true);
 });
 
 test("quiet watch separates direct facts after unterminated child output", () => {
@@ -165,7 +165,7 @@ test("watch separates a label spoken while child stderr is still running", async
     process.stderr.write = originalWrite;
   }
 
-  assertRockyStartsAfter(stderr, childBytes, Buffer.from("[Rocky]"), true);
+  assertRockyStartsAfter(stderr, childBytes, Buffer.from("rocky:"), true);
 });
 
 test("active stderr re-arms the boundary after idle commentary", async () => {
@@ -198,10 +198,10 @@ test("active stderr re-arms the boundary after idle commentary", async () => {
 
   assert.equal(spokeFirst, true);
   assert.equal(spokeSecond, true);
-  const firstMarker = stderr.indexOf(Buffer.from("[Rocky] idle first"));
-  const secondMarker = stderr.indexOf(Buffer.from("[Rocky] idle second"));
+  const firstMarker = stderr.indexOf(Buffer.from("rocky: idle first"));
+  const secondMarker = stderr.indexOf(Buffer.from("rocky: idle second"));
   assert.deepEqual(stderr.subarray(0, firstMarker), Buffer.from("first\n"));
-  assert.deepEqual(stderr.subarray(firstMarker + "[Rocky] idle first\n".length, secondMarker), Buffer.from("second\n"));
+  assert.deepEqual(stderr.subarray(firstMarker + "rocky: idle first\n".length, secondMarker), Buffer.from("second\n"));
 });
 
 test("delayed first commentary keeps pending separator after child exit", async () => {
@@ -240,7 +240,7 @@ test("concurrent runProcess calls keep one shared physical boundary", async () =
     process.stderr.write = originalWrite;
   }
 
-  assert.match(stderr.toString("utf8"), /TAIL\n\[Rocky\] A done\n/u);
+  assert.match(stderr.toString("utf8"), /TAIL\nrocky: A done\n/u);
 });
 
 test("quiet log fact sanitizes control-bearing ROCKY_HOME path", () => {

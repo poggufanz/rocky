@@ -3,10 +3,11 @@ import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { run } from "../commands/run.js";
 import { idleLine, parseWatchArgs, unseenLabels, watch, WATCH_IDLE_MS } from "../commands/watch.js";
 import { fingerprint, FINGERPRINT_ALGORITHM_VERSION } from "../core/fingerprint.js";
 import { quoteShellPath } from "../core/shell-quote.js";
-import { validateRockyPhrase } from "../ui/phrases.js";
+import { validateOutputLine } from "../ui/phrases.js";
 import type { NotifyInput } from "../core/notify.js";
 import type { ExecResult } from "../core/exec.js";
 
@@ -40,6 +41,13 @@ async function captureStderr<T>(fn: () => Promise<T>): Promise<{ result: T; stde
   } finally {
     process.stderr.write = original;
   }
+}
+
+/** Every line rocky itself wrote (the `rocky: ` ones) must follow the output rules; detail lines are data. */
+function assertRockyLinesArePlain(stderr: string): void {
+  const lines = stderr.split(/\r?\n/).filter((line) => line.startsWith("rocky: "));
+  assert.ok(lines.length > 0, `expected at least one rocky line in: ${stderr}`);
+  for (const line of lines) assert.deepEqual(validateOutputLine(line.slice("rocky: ".length)), [], line);
 }
 
 function fakeNotifier(): { calls: NotifyInput[]; notify: (input: NotifyInput) => void } {
@@ -89,10 +97,10 @@ test("WATCH_IDLE_MS is ten minutes", () => {
   assert.equal(WATCH_IDLE_MS, 1000 * 60 * 10);
 });
 
-test("idleLine composes the voice-valid idle sentence for a given elapsed duration", () => {
-  assert.equal(idleLine(600_000), "still waiting. 10 minutes. waiting is easy for me");
-  assert.equal(idleLine(60_000), "still waiting. 1 minute. waiting is easy for me");
-  assert.deepEqual(validateRockyPhrase(idleLine(600_000)), []);
+test("idleLine composes the plain idle sentence for a given elapsed duration", () => {
+  assert.equal(idleLine(600_000), "Still waiting: 10 minutes.");
+  assert.equal(idleLine(60_000), "Still waiting: 1 minute.");
+  assert.deepEqual(validateOutputLine(idleLine(600_000)), []);
 });
 
 test("unseenLabels returns each non-empty label once and mutates the session set", () => {
@@ -274,43 +282,49 @@ test("watch clears its label poll timer for success, failure, and cancellation",
   }
 });
 
-test("watch speaks the composed outcome line on success and on failure, and both pass the voice validator", async (t) => {
+test("watch speaks the composed outcome line on success and on failure, and both pass the output validator", async (t) => {
   const home = sandboxHome(t);
   const notifier = fakeNotifier();
 
   const ok = await withRockyHome(home, () => captureStderr(() => watch([exitCommand(0)], { notify: notifier.notify })));
   assert.equal(ok.result, 0);
-  const okLine = /\[Rocky\] (command finish\. good good\. \d+ seconds?\.)/.exec(ok.stderr);
+  const okLine = /rocky: (Command finished\. Took \d+ seconds?\.)/.exec(ok.stderr);
   assert.ok(okLine, `expected a composed watch-ok line in stderr, got: ${ok.stderr}`);
-  assert.deepEqual(validateRockyPhrase(okLine![1]!), []);
+  assert.deepEqual(validateOutputLine(okLine![1]!), []);
 
   const fail = await withRockyHome(home, () => captureStderr(() => watch([exitCommand(1)], { notify: notifier.notify })));
   assert.equal(fail.result, 1);
-  const failLine = /\[Rocky\] (command dies\. bad\. \d+ seconds?\.)/.exec(fail.stderr);
+  const failLine = /rocky: (Command failed\. Took \d+ seconds?\.)/.exec(fail.stderr);
   assert.ok(failLine, `expected a composed watch-fail line in stderr, got: ${fail.stderr}`);
-  assert.deepEqual(validateRockyPhrase(failLine![1]!), []);
+  assert.deepEqual(validateOutputLine(failLine![1]!), []);
+  assertRockyLinesArePlain(ok.stderr);
+  assertRockyLinesArePlain(fail.stderr);
 });
 
 test("watch() with an empty command speaks the same 'no command' line run uses and exits 2", async (t) => {
   const home = sandboxHome(t);
   const { result, stderr } = await withRockyHome(home, () => captureStderr(() => watch([""])));
   assert.equal(result, 2);
-  assert.match(stderr, /no command\. give command, question/);
+  assert.match(stderr, /No command given\. Pass the command to run\./);
+  const viaRun = await withRockyHome(home, () => captureStderr(() => run("")));
+  assert.equal(viaRun.result, 2);
+  assert.equal(stderr, viaRun.stderr, "watch and run say the same line");
+  assertRockyLinesArePlain(stderr);
 });
 
-test("--quiet prints no [Rocky] prefix on success or failure, and never notifies", async (t) => {
+test("--quiet prints no rocky: prefix on success or failure, and never notifies", async (t) => {
   const home = sandboxHome(t);
   const notifier = fakeNotifier();
 
   const ok = await withRockyHome(home, () =>
     captureStderr(() => watch(["--quiet", exitCommand(0)], { notify: notifier.notify })));
   assert.equal(ok.result, 0);
-  assert.doesNotMatch(ok.stderr, /\[Rocky\]/);
+  assert.doesNotMatch(ok.stderr, /^rocky: /m);
 
   const fail = await withRockyHome(home, () =>
     captureStderr(() => watch(["--quiet", stderrExitCommand("boom", 1)], { notify: notifier.notify })));
   assert.equal(fail.result, 1);
-  assert.doesNotMatch(fail.stderr, /\[Rocky\]/);
+  assert.doesNotMatch(fail.stderr, /^rocky: /m);
   assert.match(fail.stderr, /duration:/);
   assert.match(fail.stderr, /exit: 1/);
   assert.match(fail.stderr, /log:/);
@@ -378,7 +392,7 @@ test("watch records a started child that exits 127", async (t) => {
 test("watch names cmd.exe after a cmd.exe rejection on Windows, never under --quiet, and records the failure either way", async (t) => {
   // `shell: true` is cmd.exe on win32; its rejection is two lines on stderr, the first holds the pattern.
   const rejection = "'FOO' is not recognized as an internal or external command,\r\noperable program or batch file.";
-  const hint = "cmd.exe parsed this command. bash or powershell words not heard there.";
+  const hint = "cmd.exe parsed this command; bash or PowerShell syntax does not apply there.";
   const rejected: ExecResult = {
     started: true, code: 1, stderr: rejection, tail: rejection.split("\r\n"), durationMs: 5,
   };
@@ -401,7 +415,7 @@ test("watch names cmd.exe after a cmd.exe rejection on Windows, never under --qu
   )));
   assert.equal(quiet.result, 1);
   assert.equal(quiet.stderr.includes(hint), false, "--quiet stays plain facts");
-  assert.doesNotMatch(quiet.stderr, /\[Rocky\]/);
+  assert.doesNotMatch(quiet.stderr, /^rocky: /m);
   assert.match(quiet.stderr, /exit: 1/);
   assert.equal(existsSync(join(quietHome, "memory.jsonl")), true, "--quiet still records the failure");
 });
@@ -430,8 +444,9 @@ test("watch's failure path admits when the remembered fix comes from a different
     captureStderr(() => watch([failingCommandPrinting(marker)], { notify: notifier.notify })));
 
   assert.equal(result, 1);
-  assert.match(stderr, /but fix comes from other place\./);
+  assert.match(stderr, /But that fix comes from a different directory\./);
   assert.match(stderr, new RegExp(`place:\\s*${elsewhere.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
+  assertRockyLinesArePlain(stderr);
 });
 
 test("watch's success path links a fix exactly like run's onSuccess, using the same sentence", async (t) => {
@@ -451,9 +466,10 @@ test("watch's success path links a fix exactly like run's onSuccess, using the s
     captureStderr(() => watch(["echo all-good"], { notify: notifier.notify })));
 
   assert.equal(result, 0);
-  assert.match(stderr, /command works now\. same command fail before\. I link them\. I not hear what change\. good good good\./);
-  assert.doesNotMatch(stderr, /\bfixed\b|you fix it|I remember (the )?fix|something between/i);
+  assert.match(stderr, /Command passes now; linked to the earlier failure\. The change itself was not recorded\./);
+  assert.doesNotMatch(stderr, /\bfix(?:ed|es)?\b|something between/i);
   assert.equal(existsSync(join(home, "pending")), false, "run/watch shared resolver clears pending atomically");
+  assertRockyLinesArePlain(stderr);
 });
 
 test("an unwritable watch log speaks watch-log-unwritable but still records the failure", async (t) => {
@@ -467,7 +483,8 @@ test("an unwritable watch log speaks watch-log-unwritable but still records the 
     captureStderr(() => watch([stderrExitCommand("boom", 1)], { notify: notifier.notify })));
 
   assert.equal(result, 1);
-  assert.match(stderr, /watch folder does not open for me\. no log this time\. memory still remembers\./);
+  assert.match(stderr, /Watch log folder cannot be opened\. No log this time; memory still records\./);
+  assertRockyLinesArePlain(stderr);
 
   const lines = readFileSync(join(home, "memory.jsonl"), "utf8").trim().split("\n");
   assert.equal(lines.length, 1);
@@ -486,7 +503,8 @@ test("a memory-write failure on the watch failure path still writes the watch lo
     captureStderr(() => watch([stderrExitCommand("boom", 1)], { notify: notifier.notify })));
 
   assert.equal(result, 1);
-  assert.match(stderr, /I cannot write memory\. this one I forget\./);
+  assert.match(stderr, /Could not write to memory, so this run is not recorded\./);
+  assertRockyLinesArePlain(stderr);
   const logFiles = readdirSync(join(home, "watch")).filter((name) => name.endsWith(".log"));
   assert.equal(logFiles.length, 1);
   assert.match(stderr, new RegExp(`log: .*${logFiles[0]!.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
@@ -544,7 +562,7 @@ test("watch notifies by default when config is missing, invalid JSON, or unreada
 test("options are honoured after the command, the position --help documents", () => {
   // `rocky watch "sleep 1" --quiet` used to append the flag to the command:
   // `sleep 1 --quiet` really ran, a wrapped exit 0 became 1, and a failure that
-  // never happened entered memory. Rocky must never edit the command he is handed.
+  // never happened entered memory. rocky must never edit the command it is handed.
   assert.deepEqual(parseWatchArgs(["sleep 1", "--quiet"]), { quiet: true, cmd: "sleep 1" });
   assert.deepEqual(parseWatchArgs(["--quiet", "sleep 1"]), { quiet: true, cmd: "sleep 1" });
   assert.deepEqual(parseWatchArgs(["npm", "run", "build", "--quiet"]), { quiet: true, cmd: "npm run build" });

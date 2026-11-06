@@ -3,10 +3,10 @@
  *
  * `buildChatStructure` is the fallback the chat pipeline uses when the LLM
  * structurer's output fails validation: it builds the Jev state straight
- * from the user message plus the already-retrieved Rocky evidence, bounded
+ * from the user message plus the already-retrieved rocky evidence, bounded
  * and redacted like every other Jev state in this package. `validateChatStructure`
  * is the gate in front of it: an LLM structurer may only select from refs
- * Rocky actually retrieved — any invented ref fails the allowlist and the
+ * rocky actually retrieved — any invented ref fails the allowlist and the
  * caller falls back to `buildChatStructure` with the status disclosed.
  *
  * Bounds mirror `ai/jev.ts` (query 1000, snippet 500, 10 candidates) so the
@@ -37,7 +37,7 @@ const MAX_QUERY_CHARS = 1_000;
 const MAX_SNIPPET_CHARS = 500;
 const MAX_REF_CHARS = 128;
 const MAX_KIND_CHARS = 32;
-/** Headroom for the `… cut, … long` marker `buildChatStructure` appends. */
+/** Headroom for the `… (… truncated)` marker `buildChatStructure` appends. */
 const CUT_MARKER_HEADROOM = 32;
 
 /**
@@ -50,7 +50,7 @@ export function buildChatStructure(
 ): ChatStructure {
   const boundedQuery =
     userMessage.length > MAX_QUERY_CHARS
-      ? `${userMessage.slice(0, MAX_QUERY_CHARS)}… cut, query long`
+      ? `${userMessage.slice(0, MAX_QUERY_CHARS)}… (query truncated)`
       : userMessage;
   return {
     query: redactSecretsAtBoundary(boundedQuery),
@@ -61,7 +61,7 @@ export function buildChatStructure(
         kind: String(hit.kind).slice(0, MAX_KIND_CHARS),
         snippet:
           snippet.length > MAX_SNIPPET_CHARS
-            ? `${snippet.slice(0, MAX_SNIPPET_CHARS)}… cut, snippet long`
+            ? `${snippet.slice(0, MAX_SNIPPET_CHARS)}… (snippet truncated)`
             : snippet,
       };
     }),
@@ -70,7 +70,7 @@ export function buildChatStructure(
 
 /**
  * Shape + allowlist gate for LLM structurer output. `allowed` is the exact
- * ref set Rocky retrieved for this message; a candidate naming anything else
+ * ref set rocky retrieved for this message; a candidate naming anything else
  * is an invented ref and the whole structure is rejected. Refs must also be
  * unique — the same evidence twice is a structurer bug, not coverage.
  * Extra top-level keys are ignored; missing or malformed fields reject.

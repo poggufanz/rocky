@@ -16,7 +16,8 @@ This is a one-person side project, not a funded product. Expect a first reply wi
 
 | Version | Supported |
 | --- | --- |
-| 1.1.0 | Yes |
+| 2.0.0 | Yes |
+| 1.1.0 | No |
 | 1.0.1 | No |
 | 1.0.0 | No |
 | 0.8.0 | No |
@@ -56,7 +57,7 @@ Host recovery behavior is deliberately host-specific:
 - Codex replacement or removal saves the prior Rocky MCP entry, not the full TOML file, under `~/.rocky-setup-recovery/`. A verified replacement removes that copy; a successful removal retains it as a manual undo. An initial add has no prior entry to save.
 - Claude Desktop keeps a full timestamped sibling backup of an existing config and also uses a conditional-write transaction. Those timestamped backups are not automatically pruned.
 - Claude Code MCP automation is inactive in this release and normally returns manual instructions before publishing a config change.
-- Replacing or removing a managed voice skill moves the old directory into that host's `.rocky/backups/voice-skills/` area. Those backups are not automatically pruned.
+- Removing a legacy managed voice skill with `rocky setup --remove` moves the old directory into that host's `.rocky/backups/voice-skills/` area. Those backups are not automatically pruned.
 
 These artifacts can contain sensitive host configuration and are not encrypted. Changing `ROCKY_HOME` does not relocate `.bashrc`, host configuration, or their recovery artifacts.
 

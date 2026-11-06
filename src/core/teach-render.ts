@@ -9,8 +9,8 @@ export interface TeachCard {
   expandable: boolean;
 }
 
-const WITNESS_HEADER = "rocky heard this. agent say why, rocky remember";
-const LADDER_HEADER = "rocky not hear this. assembled from evidence, not witnessed";
+const WITNESS_HEADER = "Witnessed: an agent stated why, and rocky recorded it.";
+const LADDER_HEADER = "Assembled from evidence, not witnessed.";
 
 /**
  * When a witness exists but its `code` paragraph shares no token with the
@@ -63,7 +63,7 @@ export function renderLadderCard(file: string, label: string, ladder: LadderResu
     lines.push(`reason: ${ladder.rungs.map((rung) => rung.finding).join(". ")}`);
   }
   if (ladder.provenanceExhausted) {
-    lines.push("no git history found for these lines. other evidence stays above.");
+    lines.push("No git history found for these lines. Other evidence stays above.");
   }
   return {
     header: LADDER_HEADER,

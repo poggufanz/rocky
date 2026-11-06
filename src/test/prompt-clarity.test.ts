@@ -20,6 +20,7 @@ import {
   CLARITY_MTLD_CAP,
 } from "../core/prompt-clarity.js";
 import { check, parsePromptRequest } from "../commands/check.js";
+import { validateOutputLine } from "../ui/phrases.js";
 
 const VARIED = [
   "amber", "bridge", "cinder", "drift", "ember", "flint", "grove", "harbor",
@@ -111,7 +112,7 @@ test("vague text scores below 40 with the pronoun suggestion", () => {
   assert.ok(result.score < 40, `vague score ${result.score} must be < 40`);
   assert.equal(result.band, "vague");
   assert.ok(
-    result.suggestions.some((s) => s.includes("name the file and behavior")),
+    result.suggestions.some((s) => s.includes("Name the file and behavior")),
     `suggestions: ${JSON.stringify(result.suggestions)}`,
   );
   assert.ok(result.suggestions.length <= 3);
@@ -150,13 +151,17 @@ test("long stepless text suggests steps; repeated failure suggests new info", ()
   assert.ok(capped.suggestions.length <= 3);
 });
 
-test("rendered card and nudge lines never contain a question mark", () => {
+test("rendered card and nudge lines are plain statements that pass the output rules", () => {
   for (const text of [VAGUE, CLEAR, "", longText()]) {
-    for (const line of renderClarityCard(scorePrompt(text))) assert.doesNotMatch(line, /\?/);
+    for (const line of renderClarityCard(scorePrompt(text))) {
+      assert.doesNotMatch(line, /\?/);
+      assert.deepEqual(validateOutputLine(line), [], line);
+    }
     const nudge = clarityNudgeLine(text);
     if (nudge !== undefined) {
       assert.doesNotMatch(nudge, /\?/);
-      assert.match(nudge, /, question$/);
+      assert.match(nudge, /^Prompt (?:is vague|needs detail) \(\d+\/100\)\. \S.*\.$/);
+      assert.deepEqual(validateOutputLine(nudge), [], nudge);
     }
   }
   assert.equal(clarityNudgeLine(CLEAR), undefined, "clear prompts stay silent");
@@ -229,14 +234,14 @@ test("gate advisory appends to the deny reason but never decides", async (t) => 
   const denied = gateEvent("claude-code", gatePayload("s1", "/work/repo/src/q.ts", { rationale: VAGUE }));
   assert.equal(denied.exitCode, 0);
   const reason = (JSON.parse(denied.stdout).hookSpecificOutput.permissionDecisionReason as string);
-  assert.match(reason, /prompt vague/);
+  assert.match(reason, /Prompt is vague \(\d+\/100\)\./);
 
   withEnv(t, "ROCKY_CLARITY_ADVISORY", "off");
   const silent = gateEvent("claude-code", gatePayload("s2", "/work/repo/src/q.ts", { rationale: VAGUE }));
   assert.equal(JSON.parse(silent.stdout).hookSpecificOutput.permissionDecision, "deny");
   assert.doesNotMatch(
     JSON.parse(silent.stdout).hookSpecificOutput.permissionDecisionReason as string,
-    /prompt vague/,
+    /Prompt is vague/,
   );
 });
 

@@ -72,7 +72,7 @@ const MAX_LABEL_LINES = 1;
 // Queue-time epoch second, written as "@<seconds> <label>". The hook drops a
 // line whose stamp proves it stale rather than speaking an agent's work into
 // an unrelated shell an hour later. A line without a stamp has unknown age and
-// is still spoken — Rocky never hides what he cannot judge.
+// is still shown — rocky never hides what it cannot judge.
 const LABEL_STAMP = (): string => `@${Math.floor(Date.now() / 1000)} `;
 const MAX_LABEL_CHARS = 400;
 const MAX_LABEL_FILE_BYTES = 64 * 1024;
@@ -382,7 +382,7 @@ export function maybeQueueDigestHint(paths: RockyPaths, now = Date.now()): void 
     const loaded = loadMemoryChecked(paths.memory, now);
     if (!isCompleteMemoryCoverage(loaded.coverage) || digestBuckets(loaded.records, now).length === 0) return;
     if (!writeDigestHint(paths.digestHint, String(now), now)) return;
-    defaultQueueLabel("week of work in memory. rocky digest, question", paths);
+    defaultQueueLabel("A week of work is recorded. Run rocky digest to see this week's intent pattern.", paths);
   } catch {
     // Hinting is best effort and never affects annotation success or cleanup.
   } finally {
@@ -573,7 +573,7 @@ export function degradedLabel(intent: string | undefined, files: readonly Triple
   const subject = cleanText((STYLE_FILE_RE.test(first.path) ? first.props[0] : undefined) ?? first.path, 160);
   if (!subject) return undefined;
   const short = cleanIntent.length > 60 ? `${cleanIntent.slice(0, 57)}...` : cleanIntent;
-  return safeLabel(`you say "${short}". it is ${subject}. I think. check, question`);
+  return safeLabel(`You said "${short}". The first change is ${subject}. Does that match?`);
 }
 
 export async function annotateBatch(key: string, deps: AnnotateDeps = {}): Promise<TripleRecord | undefined> {
@@ -1024,7 +1024,7 @@ export async function annotateBatch(key: string, deps: AnnotateDeps = {}): Promi
 
     if (persisted.appended) {
       // A machine envelope is agent machinery, not the person's words;
-      // announcing it as "you say" floods every prompt during long agent
+      // announcing it as "You said" floods every prompt during long agent
       // runs. The triple itself still persists unfiltered.
       const label = intentText !== undefined && isAgentEnvelopeText(intentText)
         ? undefined

@@ -1,5 +1,5 @@
 /**
- * Rocky's ears — the shell-hook side of the CLI.
+ * rocky's shell hook: the CLI side of it.
  *
  * This file owns:
  *  - hidden handlers `_hookfail` / `_hooksuccess`, spawned in the background
@@ -18,8 +18,8 @@
  * and friends) is shell-agnostic and shared by every target — bash and every
  * detected PowerShell host alike — parameterized by a `label` used only in
  * user-facing message text, never in the parser or the transaction engine
- * itself. The bash caller always passes `label: "bashrc"`, so its wording is
- * byte-for-byte what it was before this generalization.
+ * itself. The bash caller always passes `label: "bashrc"`; `targetName` turns
+ * that bare label into the prose name `.bashrc`.
  */
 
 import { copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -72,7 +72,7 @@ import { safeTerminalLine } from "../ui/sanitize.js";
  * needed. Both hosts always move together: this names the protocol, not a
  * file. A test asserts both assets carry exactly this literal.
  */
-export const ROCKY_HOOK_PROTOCOL_VERSION = "0.4.0";
+export const ROCKY_HOOK_PROTOCOL_VERSION = "0.5.0";
 
 /**
  * The line `rocky hook status` speaks when the installed hook file is older
@@ -86,7 +86,7 @@ export const ROCKY_HOOK_PROTOCOL_VERSION = "0.4.0";
 export function hookStaleLine(installed: string): string | undefined {
   if (installed === "missing" || installed === "unknown") return undefined;
   if (installed === ROCKY_HOOK_PROTOCOL_VERSION) return undefined;
-  return `hook file not same version as me. words can land wrong. run: rocky hook install`;
+  return "The installed hook file is not the version rocky expects, so hook messages can come out wrong. Run rocky hook install to update it.";
 }
 
 /**
@@ -97,7 +97,7 @@ function readMemory(): MemoryRecord[] | undefined {
   try {
     const loaded = loadMemoryChecked();
     if (!isCompleteMemoryCoverage(loaded.coverage)) {
-      sayTty("memory coverage incomplete. I do not claim prior fix. check, question");
+      sayTty("Memory coverage is incomplete, so no prior fix is claimed. Check the details below.");
       const words = describeMemoryCoverage(loaded.coverage, loaded.records.length, { counts: false });
       detailTty(!isVerbose() && words !== undefined
         ? words
@@ -106,7 +106,7 @@ function readMemory(): MemoryRecord[] | undefined {
     }
     return loaded.records;
   } catch {
-    sayTty("memory file does not open for me. I answer from nothing.");
+    sayTty("The memory file could not be opened, so nothing is recalled.");
     detailTty(`memory: ${resolveRockyPaths().memory}`);
     return undefined;
   }
@@ -125,7 +125,7 @@ export function hookFail(cmd: string, exitCode: number, cwd: string): number {
   try {
     recordHookFailure(cmd, exitCode, cwd);
   } catch {
-    sayTty("I cannot write memory. this one I forget.");
+    sayTty("The memory file could not be written. This event was not recorded.");
     detailTty(`memory: ${resolveRockyPaths().memory}`);
   }
 
@@ -135,7 +135,7 @@ export function hookFail(cmd: string, exitCode: number, cwd: string): number {
   const fp = commandFingerprintCandidates(cmd, exitCode);
   const previous = findByFingerprint(memory, fp, now);
 
-  if (previous.length === 0) return 0; // first time: passive ears stay quiet
+  if (previous.length === 0) return 0; // first time: the hook stays quiet
 
   const withFix = [...previous].reverse().find((f) => getFix(memory, f, now));
   if (withFix) {
@@ -151,26 +151,27 @@ export function hookFail(cmd: string, exitCode: number, cwd: string): number {
     const currentIdentity = commandIdentity(cmd);
     const fixIdentity = commandIdentity(fix.cmd, { platform: fix.platform ?? process.platform });
     const sameCommand = currentIdentity.reliable && fixIdentity.reliable && currentIdentity.value === fixIdentity.value;
-    sayTty(`I hear this error before. ${ago(withFix.ts)}.`);
+    sayTty(`Same error as before, recorded ${ago(withFix.ts)}.`);
     if (sameCommand) {
       sayTty(phrase("fix-recurrence-same"));
     } else {
-      sayTty("last time, you run:");
+      sayTty("Last time, you ran:");
       detailTty(safeTerminalLine(fix.cmd));
-      sayTty("possible fix only, question");
+      sayTty("Possible fix only.");
     }
     const elsewhere = fixFromElsewhere(fix, withFix.cwd);
     if (elsewhere !== undefined) {
-      sayTty("but fix comes from other place.");
+      sayTty("But that fix comes from a different directory.");
       detailTty(`place: ${safeTerminalLine(elsewhere)}`);
-      sayTty("possible only. check, question");
+      sayTty("Possible only. Check before acting.");
     }
-    if (!sameCommand) sayTty("try, question");
+    if (!sameCommand) sayTty("Try that command?");
   } else if (!isTypoSymptom(cmd, exitCode)) {
     const hint = deepMemoryHint(cmd);
-    // No hint means the command already went through `rocky run`, so deep
-    // memory exists and that run has already spoken. Passive ears stay quiet.
-    if (hint) sayTty(`this error again. deep memory need stderr. run with: ${safeTerminalLine(hint)}, question`);
+    // No hint means the command already went through `rocky run`, so the full
+    // stderr record exists and that run has already reported. The hook stays
+    // quiet.
+    if (hint) sayTty(`Same error again. The hook captures only the command, not stderr. To capture stderr too, run: ${safeTerminalLine(hint)}`);
   }
   return 0;
 }
@@ -186,10 +187,10 @@ export function deepMemoryHint(cmd: string): string | undefined {
 }
 
 /**
- * Is this failure a typo rather than a real error, question
+ * Is this failure a typo rather than a real error?
  *
  * The deep-memory hint asks the person to re-run the command under
- * `rocky run` so Rocky can hear its stderr. Good advice for a real error,
+ * `rocky run` so rocky can capture its stderr. Good advice for a real error,
  * useless for a misspelling -- nobody wants to wrap `gti` in anything. And
  * typos are the most frequent failure in any terminal, so this is the
  * message the hint produces most often.
@@ -197,13 +198,13 @@ export function deepMemoryHint(cmd: string): string | undefined {
  * One signal: exit 127, the POSIX command-not-found code. Bash sends it
  * natively; `rocky-hook.ps1` reports it when the failure was a
  * CommandNotFoundException. Both hosts now answer the same question the
- * same way, and Rocky never has to guess.
+ * same way, and rocky never has to guess.
  *
  * An earlier attempt guessed from PATH instead, and it was wrong on
  * PowerShell in the ordinary case: cmdlets, functions, and aliases live in
  * the shell's own command table, never on the filesystem, so `Get-Item`
- * looked exactly like a misspelling. Rocky hears what the shell tells him;
- * he does not go looking for evidence the shell already has.
+ * looked exactly like a misspelling. rocky takes what the shell reports; it
+ * does not go looking for evidence the shell already has.
  *
  * Only command-not-found is covered. A missing *file* (`cat nofile.txt`,
  * exit 1) is indistinguishable from an ordinary failure without stderr, and
@@ -236,7 +237,7 @@ export function hookSuccess(cmd: string, cwd: string, options: ResolveFixOptions
     }
   } catch {
     // Detached bookkeeping must never become the hooked command's outcome.
-    sayTty("I cannot write memory. this one I forget.");
+    sayTty("The memory file could not be written. This event was not recorded.");
     detailTty(`memory: ${resolveRockyPaths().memory}`);
   }
   return 0;
@@ -261,6 +262,17 @@ function rockyHome(): string {
 
 function bashrcPath(): string {
   return join(homedir(), ".bashrc");
+}
+
+/** The bare label the bash caller passes through the shared target machinery. */
+const BASHRC_LABEL = "bashrc";
+
+/**
+ * How a sentence names a target. Detail lines (`label: path`) keep the bare
+ * label; prose writes the startup file the way people do, with its dot.
+ */
+function targetName(label: string): string {
+  return label === BASHRC_LABEL ? ".bashrc" : label;
 }
 
 function assetDir(): string {
@@ -330,25 +342,26 @@ function requireOutcome(outcome: RecoveryOutcome | undefined): RecoveryOutcome {
  * passes `"bashrc"`, so its wording is unchanged.
  */
 function reportRecoveryStop(rc: string, label: string, outcome: RecoveryOutcome, fromSettle: boolean): number {
+  const name = targetName(label);
   const origin = fromSettle
-    ? `${label} keeps unclear transaction from before.`
-    : `${label} write leaves unclear state.`;
+    ? `${name} has an unclear transaction left from an earlier run.`
+    : `The write to ${name} left an unclear state.`;
   const closing = outcome.targetWritten
-    ? `${label} holds unfinished write. do not trust it.`
-    : "I touch nothing more.";
+    ? `${name} holds an unfinished write. Do not trust it.`
+    : "No further changes were made.";
 
   if (outcome.provenCopy !== undefined && outcome.targetExists) {
-    say(`${origin} I keep safe copy. ${closing}`);
+    say(`${origin} A safe copy is kept. ${closing}`);
     detail(`inspect: ${outcome.provenCopy}`);
   } else if (outcome.provenCopy !== undefined) {
     // outcome.targetExists here is `pathExists`, not `isLiveRegularFile`
     // (round 9, R1 — see the RecoveryOutcome.targetExists doc comment): this
     // branch fires only when the target truly does not exist at all, so
-    // "gone" is a fact Rocky proved, not a guess from a topology-blind check.
-    say(`${origin} ${label} gone. I keep only copy of old bytes. ${closing}`);
+    // "gone" is a fact rocky proved, not a guess from a check that ignores topology.
+    say(`${origin} ${name} is gone. Only a copy of the old bytes is kept. ${closing}`);
     detail(`safe copy: ${outcome.provenCopy}`);
   } else {
-    say(`${origin} no safe copy to name. ${closing}`);
+    say(`${origin} There is no safe copy to name. ${closing}`);
     // m2: every outcome that can reach this branch (provenCopy undefined)
     // sets `transactionDirectory` and `artifactRetainedUnproven` from the
     // same boolean — the three outcomes that could disagree always set
@@ -424,10 +437,11 @@ type TargetPreparation =
  * disclosure (`reportRetainedCopy`) makes that promise.
  */
 function reportSettledRecovery(label: string, outcome: RecoveryOutcome): void {
+  const name = targetName(label);
   if (outcome.targetWritten) {
-    say(`${label} gone. I already put old bytes back from safe copy.`);
+    say(`${name} was gone. The old bytes were already put back from the safe copy.`);
   } else {
-    say(`I keep safe copy of old ${label}.`);
+    say(`A safe copy of the old ${name} is kept.`);
   }
   if (outcome.provenCopy !== undefined) detail(`safe copy: ${outcome.provenCopy}`);
 }
@@ -461,19 +475,20 @@ function prepareTarget(rc: string, label: string): TargetPreparation {
     metadata = lstatSync(rc);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-      say(`I cannot check ${label}. I touch nothing.`);
+      say(`${targetName(label)} could not be checked. Nothing was changed.`);
       detail(`${label}: ${rc}`);
       return { status: "stop", exit: 1 };
     }
   }
 
   if (metadata !== undefined) {
+    const name = targetName(label);
     const refusal = metadata.isSymbolicLink()
-      ? `${label} is symlink. I touch nothing. I write only plain file.`
+      ? `${name} is a symlink. Nothing was changed. Only plain files are written.`
       : !metadata.isFile()
-        ? `${label} is not regular file. I touch nothing.`
+        ? `${name} is not a regular file. Nothing was changed.`
         : metadata.nlink > 1
-          ? `${label} has many names. I touch nothing. I write only file with one name.`
+          ? `${name} has more than one hard link. Nothing was changed. Only files with one link are written.`
           : undefined;
     if (refusal !== undefined) {
       say(refusal);
@@ -491,7 +506,7 @@ function prepareTarget(rc: string, label: string): TargetPreparation {
   try {
     bytes = readFileSync(rc);
   } catch {
-    say(`${label} does not open for me. I touch nothing.`);
+    say(`${targetName(label)} could not be opened. Nothing was changed.`);
     detail(`${label}: ${rc}`);
     return { status: "stop", exit: 1 };
   }
@@ -517,10 +532,9 @@ interface PublishResult {
  * whole-branch review. Once a fresh copy commits, any older superseded
  * copies for this same target are pruned so at most one survives.
  *
- * `label === "bashrc"` reuses the canned, voice-validated `phrase()` entry
- * for the write-protected disclosure so its text stays byte-for-byte
- * unchanged; every other label builds the same sentence shape inline, since
- * `phrase()` has no parameterized entries.
+ * `label === BASHRC_LABEL` reuses the catalog `phrase()` entry for the
+ * write-protected disclosure; every other label builds the same sentence
+ * shape inline, since `phrase()` has no parameterized entries.
  */
 function publishTarget(rc: string, label: string, staged: Buffer, prior: BytesReadResult): PublishResult {
   // The rename-based transaction below needs write permission on the
@@ -529,7 +543,7 @@ function publishTarget(rc: string, label: string, staged: Buffer, prior: BytesRe
   // file stated an intent — say so before touching it, rather than walking
   // past it in silence.
   if (prior.status === "valid" && prior.mode !== undefined && (prior.mode & 0o200) === 0) {
-    say(label === "bashrc" ? phrase("bashrc-write-protected") : `${label} is write-protected. I replace it anyway. your lines stay.`);
+    say(label === BASHRC_LABEL ? phrase("bashrc-write-protected") : `${label} is write-protected. Replacing it anyway; your lines are kept.`);
   }
   // F1: the target's parent directory is bashrc's inherited assumption --
   // $HOME always exists, so bashrc never needed this. `$PROFILE` breaks that
@@ -549,7 +563,7 @@ function publishTarget(rc: string, label: string, staged: Buffer, prior: BytesRe
   try {
     mkdirSync(dirname(rc), { recursive: true });
   } catch {
-    say(`${label}'s folder does not exist. I cannot make it. I touch nothing. check permissions, then try again.`);
+    say(`${targetName(label)}'s folder does not exist and could not be created. Nothing was changed. Check permissions, then try again.`);
     detail(`${label}: ${rc}`);
     return { exit: 1 };
   }
@@ -557,7 +571,7 @@ function publishTarget(rc: string, label: string, staged: Buffer, prior: BytesRe
   try {
     result = atomicWriteBytesIfUnchanged(rc, staged, prior);
   } catch {
-    say(`${label} write fails. I touch nothing. check disk space and permissions, then try again.`);
+    say(`Writing ${targetName(label)} failed. Nothing was changed. Check disk space and permissions, then try again.`);
     detail(`${label}: ${rc}`);
     return { exit: 1 };
   }
@@ -567,11 +581,11 @@ function publishTarget(rc: string, label: string, staged: Buffer, prior: BytesRe
     }
     if (result.status === "written") return { exit: 0, recoveryPath: result.recoveryPath };
     if (result.recoveryPath !== undefined) {
-      say(`${label} changed while I worked. your bytes win. I keep safe copy too.`);
+      say(`${targetName(label)} changed during the write. The newer content was kept, and a safe copy is kept too.`);
       detail(`${label}: ${rc}`);
       detail(`safe copy: ${result.recoveryPath}`);
     } else {
-      say(`${label} changed while I worked. I touch nothing. your bytes win. run command again.`);
+      say(`${targetName(label)} changed during the write, so nothing was written. Run the command again.`);
       detail(`${label}: ${rc}`);
     }
     return { exit: 1 };
@@ -581,14 +595,14 @@ function publishTarget(rc: string, label: string, staged: Buffer, prior: BytesRe
 
 /** Corrupt marker bytes are preserved byte-for-byte; repair stays manual. */
 function reportCorruptBlock(rc: string, label: string): number {
-  say(`hook block in ${label} is corrupt. I touch nothing. repair markers by hand, then call me again.`);
+  say(`The hook block in ${targetName(label)} is corrupt. Nothing was changed. Repair the markers by hand, then run the command again.`);
   detail(`${label}: ${rc}`);
   return 1;
 }
 
-/** Rocky voice, kept identical wherever a recovery copy needs disclosing. */
+/** One wording, kept identical wherever a recovery copy needs disclosing. */
 function reportRetainedCopy(label: string, recoveryPath: string): void {
-  say(`I keep safe copy of old ${label}. yours to remove, any time.`);
+  say(`A safe copy of the old ${targetName(label)} is kept. You can remove it at any time.`);
   detail(`safe copy: ${recoveryPath}`);
 }
 
@@ -597,7 +611,7 @@ function reportRetainedCopy(label: string, recoveryPath: string): void {
  * failure here (a stray `~/.rocky` file, ENOSPC, a permissions problem) must
  * never be allowed to escape as a raw, uncaught error. Before that fix it
  * did: the process died in `index.ts`'s top-level catch with an untranslated
- * Node error string, breaking Rocky's voice, and — if a write had just
+ * Node error string instead of a rocky message, and — if a write had just
  * displaced the previous `.bashrc` — leaving that retained copy's path
  * unprinted, falsifying README's unconditional promise that install prints
  * it whenever one survives.
@@ -617,12 +631,13 @@ function reportRockyHomeWriteFailure(
   recoveryPath: string | undefined,
   targetPublished: boolean,
 ): number {
+  const name = targetName(label);
   say(targetPublished
-    ? `${label} already changed, but rocky home breaks right after. ears maybe not working yet.`
-    : `${label} not touched. rocky home breaks. ears maybe not working yet.`);
+    ? `${name} was already changed, but writing to the rocky home folder failed afterward. The hook may not work yet.`
+    : `${name} was not changed, and writing to the rocky home folder failed. The hook may not work yet.`);
   detail(`${label}: ${rc}`);
   if (recoveryPath !== undefined) reportRetainedCopy(label, recoveryPath);
-  say("check disk space and permissions, then try again.");
+  say("Check disk space and permissions, then try again.");
   return 1;
 }
 
@@ -635,13 +650,13 @@ function runBashHookInstall(): number {
   const assets = ["rocky-hook.bash", "bash-preexec.sh"];
   for (const f of assets) {
     if (!existsSync(join(assetDir(), f))) {
-      say(`hook file missing from install: ${f}. install incomplete. bad.`);
+      say(`A hook file is missing from the install: ${f}. The install is incomplete.`);
       return 1;
     }
   }
 
   const rc = bashrcPath();
-  const label = "bashrc";
+  const label = BASHRC_LABEL;
   const preparation = prepareTarget(rc, label);
   if (preparation.status === "stop") return preparation.exit;
   const classification = classifyHookBlock(preparation.snapshot.bytes);
@@ -660,7 +675,7 @@ function runBashHookInstall(): number {
     recoveryPath = published.recoveryPath;
     // On Windows only Git Bash reads this file. On a machine where the person
     // lives in PowerShell, the success line below would read as if every shell
-    // heard it, so a file this call really made says so. An existing file, or
+    // has the hook, so a file this call really made says so. An existing file, or
     // one made on an earlier call, is never claimed.
     if (process.platform === "win32" && preparation.snapshot.prior.status === "missing") {
       say(phrase("bashrc-created"));
@@ -682,34 +697,34 @@ function runBashHookInstall(): number {
     if (!existsSync(rulesPath) || rulesFileIsPristine(readFileSync(rulesPath, "utf8"))) {
       writeFileSync(rulesPath, renderGuardRules(), "utf8");
     } else {
-      say("guard rules file has your edits. I keep them. good.");
+      say("The guard rules file has your edits, so it was left as is.");
     }
   } catch {
     return reportRockyHomeWriteFailure(rc, label, recoveryPath, bashrcPublished);
   }
 
-  say("ears installed. open new shell, I hear everything there.");
+  say("Hook installed in Bash. Open a new shell to activate it.");
   detail(`hook:  ${join(home, "rocky-hook.bash")}`);
   detail(`rules: ${rulesPath}`);
   if (recoveryPath !== undefined) reportRetainedCopy(label, recoveryPath);
-  say("dangerous command comes, I ask first. ROCKY_OFF=1 makes me deaf.");
+  say("The guard asks before a dangerous command runs. Set ROCKY_OFF=1 to turn the hook off.");
   // bash-preexec must read every command through `history 1`, so it strips
   // ignorespace/ignoreboth from HISTCONTROL. A command deliberately typed with
   // a leading space — the usual way to keep a token out of history — starts
-  // being recorded. Rocky changes it, so Rocky says it.
+  // being recorded. rocky changes it, so rocky says it.
   say(phrase("hook-histcontrol"));
   return 0;
 }
 
 function runBashHookUninstall(): number {
   const rc = bashrcPath();
-  const label = "bashrc";
+  const label = BASHRC_LABEL;
   const preparation = prepareTarget(rc, label);
   if (preparation.status === "stop") return preparation.exit;
   const classification = classifyHookBlock(preparation.snapshot.bytes);
   if (classification === "corrupt") return reportCorruptBlock(rc, label);
   if (classification === "absent") {
-    say("no ears installed. nothing to remove.");
+    say("No hook installed in Bash. Nothing to remove.");
     return 0;
   }
   const published = publishTarget(
@@ -719,7 +734,7 @@ function runBashHookUninstall(): number {
     preparation.snapshot.prior,
   );
   if (published.exit !== 0) return published.exit;
-  say(`ears removed from shell. memory stays in ${rockyHome()}. I still remember.`);
+  say(`Hook removed from Bash. Memory stays in ${rockyHome()}.`);
   if (published.recoveryPath !== undefined) reportRetainedCopy(label, published.recoveryPath);
   return 0;
 }
@@ -755,13 +770,13 @@ function runBashHookUninstall(): number {
  */
 function runBashHookStatus(): number {
   const rc = bashrcPath();
-  const label = "bashrc";
+  const label = BASHRC_LABEL;
   const preparation = prepareTarget(rc, label);
   if (preparation.status === "stop") return preparation.exit;
   const classification = classifyHookBlock(preparation.snapshot.bytes);
   if (classification === "corrupt") return reportCorruptBlock(rc, label);
   if (classification !== "managed") {
-    say("ears not installed. run: rocky hook install");
+    say("Bash: not installed. Run rocky hook install to enable it.");
     return 0;
   }
   // r3: these reads used to sit outside any try/catch, so a non-ENOENT
@@ -781,11 +796,11 @@ function runBashHookStatus(): number {
       ? readFileSync(rulesPath, "utf8").split("\n").filter((l) => l.trim() && !l.startsWith("#")).length
       : 0;
   } catch {
-    say("ears installed, but I cannot check rocky home.");
+    say("Bash: installed, but the rocky home folder could not be checked.");
     detail(`bashrc: ${rc}`);
     return 1;
   }
-  say(`ears installed. hook version ${version}. ${ruleCount} guard rule${ruleCount === 1 ? "" : "s"} active.`);
+  say(`Bash: installed, hook version ${version}, ${ruleCount} guard rule${ruleCount === 1 ? "" : "s"} active.`);
   const stale = hookStaleLine(version);
   if (stale) say(stale);
   return 0;
@@ -831,7 +846,7 @@ function runBashHookStatus(): number {
  * The same probe asks the host for its effective execution policy, because a
  * profile only runs when the policy lets it: Windows PowerShell 5.1 ships
  * `Restricted`, which refuses every script, `$PROFILE` included. Install and
- * status say so instead of claiming working ears (`policyBlocksProfile`). The
+ * status say so instead of claiming a working hook (`policyBlocksProfile`). The
  * probe runs without `PSExecutionPolicyPreference`: a parent that set a
  * Process-scope policy (`Set-ExecutionPolicy -Scope Process`, or an automation
  * harness) hands it to every child through that variable, and
@@ -1055,10 +1070,10 @@ export function admitHostWithinHome(host: PowerShellHost | undefined, home: stri
   if (!host) return undefined;
   if (profileWithinHome(host.profile, home)) return host;
   if (process.env.ROCKY_HOOK_ALLOW_PROFILE_OUTSIDE_HOME === "1") {
-    detail(`${host.label} profile lives outside home. you allow it, so I touch it.`);
+    detail(`${host.label} profile is outside the home folder. You allowed it, so it will be changed.`);
     return host;
   }
-  detail(`${host.label} profile lives outside home. I touch nothing there. to let me touch it, set ROCKY_HOOK_ALLOW_PROFILE_OUTSIDE_HOME=1.`);
+  detail(`${host.label} profile is outside the home folder, so it is skipped and nothing there is changed. To allow it, set ROCKY_HOOK_ALLOW_PROFILE_OUTSIDE_HOME=1.`);
   return undefined;
 }
 
@@ -1075,9 +1090,9 @@ export function detectPowerShellHosts(): PowerShellHost[] {
   if (override !== undefined) return override;
   // Each probe starts a real PowerShell, and a cold start takes a second or
   // more: without a word the command looks hung. The probes stay synchronous —
-  // an async detour would save about a quarter second — so Rocky speaks once,
+  // an async detour would save about a quarter second — so rocky says so once,
   // before the first one starts. Off win32 no probe runs, so nothing is said.
-  if (process.platform === "win32") detail("I ask powershell where profile lives. wait.");
+  if (process.platform === "win32") detail("Asking PowerShell where its profile lives. This can take a moment.");
   const home = homedir();
   const hosts: PowerShellHost[] = [];
   const windows = admitHostWithinHome(detectWindowsPowerShellHost(), home);
@@ -1095,18 +1110,18 @@ function powerShellTargetLabel(host: PowerShellHost): string {
 }
 
 /**
- * What Rocky says in place of any "ears work" claim when the host's execution
+ * What rocky says in place of any "hook works" claim when the host's execution
  * policy refuses to load its profile. The managed block is written either way,
- * but a profile PowerShell will not run hears nothing. The fix named is the
+ * but a profile PowerShell will not run records nothing. The fix named is the
  * smallest one PowerShell offers a person without administrator rights.
  */
 function reportBlockedPolicy(host: PowerShellHost): void {
-  say(`${host.label} blocks scripts here. my ears cannot load.`);
+  say(`${host.label} blocks scripts under its current execution policy, so the hook cannot load.`);
   detail("fix: Set-ExecutionPolicy -Scope CurrentUser RemoteSigned");
 }
 
 /**
- * v1 is passive ears only (Ruling 4): `prompt` only sees a command after it
+ * v1 is passive observation only (Ruling 4): `prompt` only sees a command after it
  * already ran, so there is no PowerShell equivalent of the Bash hook's
  * pre-execution guard confirmation, and this install path writes no
  * `guard.rules` and prints no HISTCONTROL-style warning — there is nothing
@@ -1124,7 +1139,7 @@ function installPowerShellHost(host: PowerShellHost): number {
   const label = powerShellTargetLabel(host);
 
   if (!existsSync(join(assetDir(), POWERSHELL_ASSET))) {
-    say(`hook file missing from install: ${POWERSHELL_ASSET}. install incomplete. bad.`);
+    say(`A hook file is missing from the install: ${POWERSHELL_ASSET}. The install is incomplete.`);
     return 1;
   }
 
@@ -1157,12 +1172,12 @@ function installPowerShellHost(host: PowerShellHost): number {
   if (policyBlocksProfile(host.policy)) {
     reportBlockedPolicy(host);
   } else {
-    say(`ears installed in ${host.label}. open new shell, I hear everything there.`);
+    say(`Hook installed in ${host.label}. Open a new shell to activate it.`);
   }
   detail(`hook: ${join(home, POWERSHELL_ASSET)}`);
   if (recoveryPath !== undefined) reportRetainedCopy(label, recoveryPath);
-  say("here I only listen. I do not stop command before it runs.");
-  say("ROCKY_OFF=1 makes me deaf.");
+  say("The hook only observes here. It does not stop a command before it runs.");
+  say("Set ROCKY_OFF=1 to turn the hook off.");
   return 0;
 }
 
@@ -1174,7 +1189,7 @@ function uninstallPowerShellHost(host: PowerShellHost): number {
   const classification = powershellHookBlockCodec.classify(preparation.snapshot.bytes);
   if (classification === "corrupt") return reportCorruptBlock(rc, label);
   if (classification === "absent") {
-    say(`no ears installed in ${host.label}. nothing to remove.`);
+    say(`No hook installed in ${host.label}. Nothing to remove.`);
     return 0;
   }
   const published = publishTarget(
@@ -1184,7 +1199,7 @@ function uninstallPowerShellHost(host: PowerShellHost): number {
     preparation.snapshot.prior,
   );
   if (published.exit !== 0) return published.exit;
-  say(`ears removed from ${host.label}. memory stays in ${rockyHome()}. I still remember.`);
+  say(`Hook removed from ${host.label}. Memory stays in ${rockyHome()}.`);
   if (published.recoveryPath !== undefined) reportRetainedCopy(label, published.recoveryPath);
   return 0;
 }
@@ -1197,7 +1212,7 @@ function statusPowerShellHost(host: PowerShellHost): number {
   const classification = powershellHookBlockCodec.classify(preparation.snapshot.bytes);
   if (classification === "corrupt") return reportCorruptBlock(rc, label);
   if (classification !== "managed") {
-    say(`${host.label}: not installed. run: rocky hook install`);
+    say(`${host.label}: not installed. Run rocky hook install to enable it.`);
     return 0;
   }
   const hookFile = join(rockyHome(), POWERSHELL_ASSET);
@@ -1207,7 +1222,7 @@ function statusPowerShellHost(host: PowerShellHost): number {
       ? /ROCKY_HOOK_VERSION="([^"]+)"/.exec(readFileSync(hookFile, "utf8"))?.[1] ?? "unknown"
       : "missing";
   } catch {
-    say(`${host.label}: installed, but I cannot check rocky home.`);
+    say(`${host.label}: installed, but the rocky home folder could not be checked.`);
     detail(`${label}: ${rc}`);
     return 1;
   }
@@ -1228,14 +1243,14 @@ function statusPowerShellHost(host: PowerShellHost): number {
   // pushes one synthetic entry onto $Error ahead of your last real error.
   // $LASTEXITCODE and $?'s value stay exact either way -- only $Error[0]'s
   // position shifts, and that entry names Rocky so it is never a phantom.
-  detail("exit status stays exact. forcing it false pushes one entry into $Error first, named as mine.");
+  detail("Exit status stays exact. Forcing it back to false pushes one entry onto $Error first; that entry names rocky-hook.");
   return 0;
 }
 
 /**
  * Bash runs unconditionally, then every detected PowerShell host runs
  * unconditionally too — a stop or refusal on one target never skips another
- * (each target is independent; a user with two shells expects ears checked
+ * (each target is independent; a user with two shells expects the hook checked
  * in both, not an early exit after the first). Exit code aggregation keeps
  * the Bash-only exit code byte-for-byte where it already was: every existing
  * bash-focused test suppresses PowerShell-host detection entirely (see

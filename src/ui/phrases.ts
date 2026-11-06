@@ -12,7 +12,6 @@ export type PhraseKey =
   | "bashrc-write-protected"
   | "bashrc-created"
   | "hook-histcontrol"
-  | "watch-idle-tail"
   | "watch-ok"
   | "watch-fail"
   | "watch-log-unwritable"
@@ -28,35 +27,34 @@ export type PhraseKey =
   | "fix-recurrence-same";
 
 const PHRASES: Readonly<Record<PhraseKey, string>> = Object.freeze({
-  "ai-known-fix": "memory and small model agree. old fix is strong clue. good good.",
-  "ai-unresolved": "memory has same pain, but no known fix. bad bad.",
-  "ai-ambiguous": "memory points many directions. uncertain. check evidence, question",
-  "ai-disabled": "small model sleeps. memory still works.",
-  "ai-unavailable": "small model not answer. memory still works.",
-  "ai-timeout": "small model takes too long. I keep old memory answer.",
-  "ai-busy": "small model busy. deterministic memory speaks now.",
-  "ai-fallback": "model words not grounded enough. I keep memory order.",
-  "bashrc-write-protected": "bashrc is write-protected. I replace it anyway. your lines stay.",
-  "bashrc-created": "bashrc missing. I make new one. only Git Bash hears it here.",
-  "hook-histcontrol": "my ears change your history setting. command typed with space in front is remembered now.",
-  "watch-idle-tail": "waiting is easy for me",
-  "watch-ok": "command finish. good good.",
-  "watch-fail": "command dies. bad.",
-  "watch-log-unwritable": "watch folder does not open for me. no log this time. memory still remembers.",
-  "check-secret": "secret sits in outgoing code. bad bad.",
-  "check-package-missing": "package does not exist. AI dream it, question",
-  "check-registry-consent": "package names only go to registry.npmjs.org. no telemetry. offline failures stay open. allow registry lookup [y/N], question",
-  "check-answer": "answer, question",
-  "check-comprehension": "I hear risky new line. what it doing, question",
-  "check-unknown-flag": "that flag I do not know. bad.",
-  "gui-opener-failed": "browser opener does not start here. open link above by hand.",
+  "ai-known-fix": "Memory and the local model agree. The recorded fix is a strong lead.",
+  "ai-unresolved": "Memory has the same failure, but no recorded fix.",
+  "ai-ambiguous": "Memory points in several directions. Check the evidence before acting.",
+  "ai-disabled": "Local model is off. Memory still works.",
+  "ai-unavailable": "Local model did not answer. Memory still works.",
+  "ai-timeout": "Local model took too long. Keeping the memory answer.",
+  "ai-busy": "Local model is busy. Showing the deterministic memory answer.",
+  "ai-fallback": "Model output was not grounded enough. Keeping memory order.",
+  "bashrc-write-protected": ".bashrc is write-protected. Replacing it anyway; your lines are kept.",
+  "bashrc-created": ".bashrc was missing, so a new one was created. Only Git Bash reads it here.",
+  "hook-histcontrol": "The hook changes your history setting: commands typed with a leading space are now recorded.",
+  "watch-ok": "Command finished.",
+  "watch-fail": "Command failed.",
+  "watch-log-unwritable": "Watch log folder cannot be opened. No log this time; memory still records.",
+  "check-secret": "A secret is in the outgoing code.",
+  "check-package-missing": "Package does not exist on the registry.",
+  "check-registry-consent": "Only package names go to registry.npmjs.org. No telemetry. Offline failures stay open. Allow registry lookup? [y/N]",
+  "check-answer": "Your answer:",
+  "check-comprehension": "Risky new line. What does it do?",
+  "check-unknown-flag": "Unknown flag.",
+  "gui-opener-failed": "Browser opener did not start. Open the link above by hand.",
   // Disclosure only: names the shell that parsed the command. No cause, no remedy:
   // `bash -c` on a Windows PATH can resolve to WSL's bash.exe.
-  "cmd-exe-parsed": "cmd.exe parsed this command. bash or powershell words not heard there.",
+  "cmd-exe-parsed": "cmd.exe parsed this command; bash or PowerShell syntax does not apply there.",
   // Hedged on purpose (commit 91889e0): a confirmed link means the same command
-  // worked after it failed, never that Rocky knows what changed in between.
-  "fix-linked": "command works now. same command fail before. I link them. I not hear what change. good good good.",
-  "fix-recurrence-same": "last time, same command work again after. I not hear what change.",
+  // worked after it failed, never that rocky knows what changed in between.
+  "fix-linked": "Command passes now; linked to the earlier failure. The change itself was not recorded.",
+  "fix-recurrence-same": "Last time, the same command passed again afterward. The change itself was not recorded.",
 });
 
 export const phraseKeys: readonly PhraseKey[] = Object.freeze([
@@ -71,7 +69,6 @@ export const phraseKeys: readonly PhraseKey[] = Object.freeze([
   "bashrc-write-protected",
   "bashrc-created",
   "hook-histcontrol",
-  "watch-idle-tail",
   "watch-ok",
   "watch-fail",
   "watch-log-unwritable",
@@ -104,20 +101,43 @@ export function phraseForAct(act: AiAct): string {
   }
 }
 
-const VISUAL_LANGUAGE = /\bi\s+(?:(?:am|are|be|been|being|can|cannot|can't|could|couldn't|did|didn't|do|does|don't|doesn't|had|has|have|is|may|might|must|never|not|shall|should|shouldn't|was|were|will|won't|would|wouldn't)\s+)*(?:see|saw|seen|seeing|look|looks|looked|looking|watch|watches|watched|watching|view|views|viewed|viewing|observe|observes|observed|observing|notice|notices|noticed|noticing|read|reads|reading|scan|scans|scanned|scanning)\b/i;
-const ARTICLE = /(?:^|[^\p{L}\p{N}_])(?:a|an|the)(?=$|[^\p{L}\p{N}_])/iu;
+/**
+ * Mechanical checks for rocky-authored output lines (docs/output-principles.md).
+ * They catch the retired mascot voice; they cannot judge tone, so review still
+ * reads new strings. Apply them to text rocky writes, never to recorded user or
+ * agent content, which may say anything.
+ */
+const OLD_PREFIX = /\[rocky\]/i;
+const QUESTION_SUFFIX = /,\s*question\b/i;
+// Emphasis by repetition, such as a word said twice in a row. Any doubled word is suspect.
+const REPEATED_WORD = /(?:^|[^\p{L}\p{N}_])(\p{L}+)(?:\s+\1)+(?=$|[^\p{L}\p{N}_])/iu;
+// "/" stays a word character here so "I/O" is not read as first person.
+const FIRST_PERSON = /(?:^|[^\p{L}\p{N}_'/-])(?:I|I'm|I've|I'll|[Mm]e|[Mm]y|[Mm]ine|[Mm]yself)(?=$|[^\p{L}\p{N}_'/-])/u;
+const LORE = /\b(?:ears?|hears?|heard|hearing)\b/i;
+// A bare trailing verdict: "command dies. bad." / "... good."
+const VERDICT_TAG = /(?:^|[.!;]\s+)(?:good|bad)[.!]?\s*$/i;
 const EMOJI = /[\u{00A9}\u{00AE}\u{203C}\u{2049}\u{2122}\u{2139}\u{2300}-\u{23FF}\u{2600}-\u{27BF}\u{2B00}-\u{2BFF}\u{3030}\u{303D}\u{3297}\u{3299}\u{1F000}-\u{1FAFF}\u{200D}\u{FE0F}]/u;
 
-export function validateRockyPhrase(value: string): readonly string[] {
-  const violations: string[] = [];
+export type OutputViolation =
+  | "old-prefix"
+  | "question-suffix"
+  | "repetition"
+  | "first-person"
+  | "lore"
+  | "verdict-tag"
+  | "emoji";
 
-  if (value.includes("?")) violations.push("question-mark");
-  if (VISUAL_LANGUAGE.test(value)) violations.push("visual-language");
-  if (ARTICLE.test(value)) violations.push("article");
+export function validateOutputLine(value: string): readonly OutputViolation[] {
+  const violations: OutputViolation[] = [];
+  const lines = value.split(/\r?\n/);
+
+  if (OLD_PREFIX.test(value)) violations.push("old-prefix");
+  if (QUESTION_SUFFIX.test(value)) violations.push("question-suffix");
+  if (lines.some((line) => REPEATED_WORD.test(line))) violations.push("repetition");
+  if (FIRST_PERSON.test(value)) violations.push("first-person");
+  if (LORE.test(value)) violations.push("lore");
+  if (lines.some((line) => VERDICT_TAG.test(line))) violations.push("verdict-tag");
   if (EMOJI.test(value)) violations.push("emoji");
-  if (value.split(/\r?\n/).some((line) => /\bquestion\b/i.test(line) && !line.endsWith(", question"))) {
-    violations.push("question-suffix");
-  }
 
   return violations;
 }

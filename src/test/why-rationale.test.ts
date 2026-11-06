@@ -7,13 +7,13 @@ import { join } from "node:path";
 import type { MemoryCoverage, MemoryRecord, RationaleRecord, RationaleSource, TripleRecord } from "../core/memory-read.js";
 import { CliUsageError } from "../commands/cli-args.js";
 import { rationaleSourceLabel, why } from "../commands/dictionary.js";
-import { validateRockyPhrase } from "../ui/phrases.js";
+import { validateOutputLine } from "../ui/phrases.js";
 import { setVerbose } from "./verbose-switch.js";
 
 const WHY_ADD_USAGE = 'rocky why --add "<text>" [--files a.ts,b.ts]';
-const WHY_ADD_REMEMBERED = "why remembered. you said it, rocky keeps it.";
-const NO_RECORD_NAMES_FILE = "no record names this file. I not know if agent touch it.";
-const COVERAGE_INCOMPLETE_LINE = "I not know if agent touch. coverage incomplete.";
+const WHY_ADD_RECORDED = "Reason recorded as stated by you.";
+const noRecordNamesFile = (path: string): string => `No record names "${path}". It is not known whether an agent touched it.`;
+const coverageIncompleteLine = (path: string): string => `Coverage is incomplete, so it is not known whether an agent touched "${path}".`;
 
 function freshHome(label: string): void {
   process.env.ROCKY_HOME = realpathSync(mkdtempSync(join(tmpdir(), `rocky-why-${label}-`)));
@@ -52,7 +52,7 @@ test("why --add refuses empty text and writes nothing", async () => {
   assert.equal(why(["--add", "   "]), 1);
   const spoken: string[] = [];
   assert.equal(why(["--add", "--files", "src/a.ts"], { say: (line) => spoken.push(line) }), 1);
-  assert.deepEqual(spoken, ['why --add needs word to remember. rocky why --add "some reason", question']);
+  assert.deepEqual(spoken, ['Missing reason text. Example: rocky why --add "some reason".']);
   const { loadMemory } = await import("../core/memory-read.js");
   assert.equal(loadMemory().some((r) => r.kind === "rationale"), false);
 });
@@ -72,8 +72,8 @@ test("why --add --files stores a file-scoped reason and skips the recency link",
   assert.equal(stored[0]?.excerpt, "because build");
   assert.deepEqual(stored[0]?.files, ["src/a.ts", "src/b.ts"]);
   assert.equal(stored[0]?.links, undefined);
-  assert.deepEqual(spoken, [WHY_ADD_REMEMBERED]);
-  assert.deepEqual(validateRockyPhrase(WHY_ADD_REMEMBERED), []);
+  assert.deepEqual(spoken, [WHY_ADD_RECORDED]);
+  assert.deepEqual(validateOutputLine(WHY_ADD_RECORDED), []);
 });
 
 test("why --add reads --files from any position and trims its comma list", async () => {
@@ -92,11 +92,11 @@ test("why --add --files without a usable path is a usage error and writes nothin
   freshHome("usage");
   const spoken: string[] = [];
   const cases: ReadonlyArray<{ argv: string[]; message: string }> = [
-    { argv: ["--add", "x", "--files"], message: "--files needs path" },
-    { argv: ["--add", "x", "--files", ""], message: "--files needs path" },
-    { argv: ["--add", "x", "--files", "   "], message: "--files needs path" },
-    { argv: ["--add", "x", "--files", " , ,"], message: "--files needs path" },
-    { argv: ["--add", "x", "--files", "--diff"], message: "--files needs path" },
+    { argv: ["--add", "x", "--files"], message: "--files needs a path" },
+    { argv: ["--add", "x", "--files", ""], message: "--files needs a path" },
+    { argv: ["--add", "x", "--files", "   "], message: "--files needs a path" },
+    { argv: ["--add", "x", "--files", " , ,"], message: "--files needs a path" },
+    { argv: ["--add", "x", "--files", "--diff"], message: "--files needs a path" },
     { argv: ["--add", "x", "--files", "a.ts", "--files", "b.ts"], message: "unexpected option: --files" },
   ];
 
@@ -125,7 +125,7 @@ test("why --add without --files keeps the recency link to the newest failure", a
   assert.equal(stored.length, 1);
   assert.equal(stored[0]?.links?.failureId, failure.id);
   assert.equal(stored[0]?.files, undefined);
-  assert.deepEqual(spoken, [WHY_ADD_REMEMBERED]);
+  assert.deepEqual(spoken, [WHY_ADD_RECORDED]);
 });
 
 test("why --add --files with every path dropped keeps the reason and says no file kept", async () => {
@@ -142,8 +142,8 @@ test("why --add --files with every path dropped keeps the reason and says no fil
   assert.equal(stored[0]?.excerpt, "route group");
   assert.equal(stored[0]?.files, undefined);
   assert.equal(stored[0]?.links, undefined);
-  assert.deepEqual(spoken, ["reason remembered. no file kept."]);
-  assert.deepEqual(validateRockyPhrase(spoken[0] ?? ""), []);
+  assert.deepEqual(spoken, ["Reason recorded. No file was kept."]);
+  assert.deepEqual(validateOutputLine(spoken[0] ?? ""), []);
 });
 
 test("why --add --files keeps the plausible paths when only some are dropped", async () => {
@@ -156,11 +156,11 @@ test("why --add --files keeps the plausible paths when only some are dropped", a
   const stored = await storedRationales();
   assert.equal(stored.length, 1);
   assert.deepEqual(stored[0]?.files, ["src/a.ts"]);
-  assert.deepEqual(spoken, [WHY_ADD_REMEMBERED]);
+  assert.deepEqual(spoken, [WHY_ADD_RECORDED]);
 });
 
-test("rationaleSourceLabel returns the four voice-approved labels", () => {
-  assert.equal(rationaleSourceLabel("log-thinking"), "heard from thinking");
+test("rationaleSourceLabel returns the four plain labels", () => {
+  assert.equal(rationaleSourceLabel("log-thinking"), "captured from thinking");
   assert.equal(rationaleSourceLabel("log-response"), "agent said in reply");
   assert.equal(rationaleSourceLabel("notify"), "agent said");
   assert.equal(rationaleSourceLabel("human"), "you said");
@@ -194,10 +194,10 @@ test("why labels source of every rationale record linked to a matched triple", (
   ];
   const sayLines: string[] = [];
   assert.equal(why([path], { load: () => memory, say: (line) => sayLines.push(line), now }), 0);
-  assert.ok(sayLines.includes("heard from thinking: excerpt-think"));
-  assert.ok(sayLines.includes("agent said in reply: excerpt-reply"));
-  assert.ok(sayLines.includes("agent said: excerpt-notify"));
-  assert.ok(sayLines.includes("you said: excerpt-human"));
+  assert.ok(sayLines.includes("Captured from thinking: excerpt-think"));
+  assert.ok(sayLines.includes("Agent said in reply: excerpt-reply"));
+  assert.ok(sayLines.includes("Agent said: excerpt-notify"));
+  assert.ok(sayLines.includes("You said: excerpt-human"));
   assert.ok(!sayLines.some((line) => line.includes("excerpt-unlinked")));
 });
 
@@ -215,7 +215,7 @@ test("why with no linked rationale prints exactly what it printed before this fe
   };
   const sayLines: string[] = [];
   assert.equal(why([path], { load: () => [triple], say: (line) => sayLines.push(line), now }), 0);
-  assert.deepEqual(sayLines, ["change happen. no reason I hear."]);
+  assert.deepEqual(sayLines, ["Change recorded. No reason recorded for this change."]);
 });
 
 type Sink = (line: string) => void;
@@ -232,7 +232,7 @@ function orderedSinks(): { lines: string[]; deps: { say: Sink; out: Sink } } {
   };
 }
 
-/** A stated reason as `why --add --files` or the notify lane stores it, heard from this directory. */
+/** A stated reason as `why --add --files` or the notify lane stores it, recorded in this directory. */
 function statedReason(input: { id: string; ts: number; source?: RationaleSource; files?: string[]; excerpt?: string }): RationaleRecord {
   const source = input.source ?? "human";
   return {
@@ -254,30 +254,30 @@ function truncatedTriple(ts: number): TripleRecord {
   };
 }
 
-test("why <file> hears the human reason that why --add --files stored for that file", () => {
-  freshHome("hear-human");
+test("why <file> shows the human reason that why --add --files stored for that file", () => {
+  freshHome("show-human");
   assert.equal(why(["--add", "retries stay low", "--files", "src/net.ts"], { say: () => undefined }), 0);
 
   // No injected `now`: recordRationale stamps Date.now(), so an older `now` would hide the record as future-dated.
-  const heard = orderedSinks();
-  assert.equal(why(["src/net.ts"], heard.deps), 0);
+  const output = orderedSinks();
+  assert.equal(why(["src/net.ts"], output.deps), 0);
 
   // Memory holds nothing but this reason, so no absence sentence may stand next to it.
-  assert.deepEqual(heard.lines, [`say: ${rationaleSourceLabel("human")}: retries stay low`, "out:   (just now, human)"]);
+  assert.deepEqual(output.lines, ["say: You said: retries stay low", "out:   (just now, human)"]);
 });
 
-test("why <file> hears a notify-lane reason that names the file", async () => {
-  freshHome("hear-notify");
+test("why <file> shows a notify-lane reason that names the file", async () => {
+  freshHome("show-notify");
   const { recordRationale } = await import("../core/memory.js");
   recordRationale({
     cwd: process.cwd(), agent: "claude-code", rationale_fidelity: "summary", source: "notify",
     text: "moved retry into client", files: ["src/net.ts"],
   });
 
-  const heard = orderedSinks();
-  assert.equal(why(["src/net.ts"], heard.deps), 0);
+  const output = orderedSinks();
+  assert.equal(why(["src/net.ts"], output.deps), 0);
 
-  assert.deepEqual(heard.lines, [`say: ${rationaleSourceLabel("notify")}: moved retry into client`, "out:   (just now, claude-code)"]);
+  assert.deepEqual(output.lines, ["say: Agent said: moved retry into client", "out:   (just now, claude-code)"]);
 });
 
 test("why <file> ignores reasons for other files, suffix paths, agent-log reasons, and reasons with no files", () => {
@@ -288,11 +288,11 @@ test("why <file> ignores reasons for other files, suffix paths, agent-log reason
     statedReason({ id: "thinking", ts: now - 1000, source: "log-thinking", files: ["src/net.ts"] }),
     statedReason({ id: "unscoped", ts: now - 1000 }),
   ];
-  const heard = orderedSinks();
+  const output = orderedSinks();
 
-  assert.equal(why(["src/net.ts"], { load: () => records, now, ...heard.deps }), 0);
+  assert.equal(why(["src/net.ts"], { load: () => records, now, ...output.deps }), 0);
 
-  assert.deepEqual(heard.lines, [`say: "src/net.ts"... ${NO_RECORD_NAMES_FILE}`]);
+  assert.deepEqual(output.lines, [`say: ${noRecordNamesFile("src/net.ts")}`]);
 });
 
 test("why <file> prints the coverage disclosure before the stated reason and adds no absence sentence", (t) => {
@@ -300,30 +300,30 @@ test("why <file> prints the coverage disclosure before the stated reason and add
   const now = Date.now();
   const scan: MemoryCoverage = { version: 1, scanned: 3, skipped: 0, truncated: 1, bytesScanned: 10, bytesTotal: 20, complete: false, reason: "file-size-cap" };
   const reason = statedReason({ id: "r1", ts: now - 120_000, files: ["src/net.ts"], excerpt: "retries stay low" });
-  const heard = orderedSinks();
+  const output = orderedSinks();
 
-  assert.equal(why(["src/net.ts"], { load: () => [reason], coverage: () => scan, now, ...heard.deps }), 0);
+  assert.equal(why(["src/net.ts"], { load: () => [reason], coverage: () => scan, now, ...output.deps }), 0);
 
-  assert.deepEqual(heard.lines, [
-    `say: "src/net.ts"... ${COVERAGE_INCOMPLETE_LINE}`,
-    "out: memory coverage incomplete: memory file too big. first 1 records heard, later lines not heard.",
-    "say: you said: retries stay low",
+  assert.deepEqual(output.lines, [
+    `say: ${coverageIncompleteLine("src/net.ts")}`,
+    "out: memory coverage incomplete: The memory file is too large. Only the first record was read; later lines were not read.",
+    "say: You said: retries stay low",
     "out:   (2 minutes ago, human)",
   ]);
 });
 
-test("why <file> prints possible path omitted before the stated reason", (t) => {
+test("why <file> says a possible path was omitted before the stated reason", (t) => {
   setVerbose(t, undefined);
   const now = Date.now();
   const reason = statedReason({ id: "r1", ts: now - 120_000, files: ["src/net.ts"], excerpt: "retries stay low" });
-  const heard = orderedSinks();
+  const output = orderedSinks();
 
-  assert.equal(why(["src/net.ts"], { load: () => [truncatedTriple(now - 60_000), reason], now, ...heard.deps }), 0);
+  assert.equal(why(["src/net.ts"], { load: () => [truncatedTriple(now - 60_000), reason], now, ...output.deps }), 0);
 
-  assert.deepEqual(heard.lines, [
-    `say: "src/net.ts"... ${COVERAGE_INCOMPLETE_LINE}`,
-    "out: possible path omitted.",
-    "say: you said: retries stay low",
+  assert.deepEqual(output.lines, [
+    `say: ${coverageIncompleteLine("src/net.ts")}`,
+    "out: A possible path was omitted.",
+    "say: You said: retries stay low",
     "out:   (2 minutes ago, human)",
   ]);
 });
@@ -332,19 +332,19 @@ test("why <file> keeps the coverage status on the possible path line under ROCKY
   setVerbose(t, "1");
   const now = Date.now();
   const reason = statedReason({ id: "r1", ts: now - 120_000, files: ["src/net.ts"], excerpt: "retries stay low" });
-  const heard = orderedSinks();
+  const output = orderedSinks();
 
-  assert.equal(why(["src/net.ts"], { load: () => [truncatedTriple(now - 60_000), reason], now, ...heard.deps }), 0);
+  assert.equal(why(["src/net.ts"], { load: () => [truncatedTriple(now - 60_000), reason], now, ...output.deps }), 0);
 
-  assert.deepEqual(heard.lines, [
-    `say: "src/net.ts"... ${COVERAGE_INCOMPLETE_LINE}`,
+  assert.deepEqual(output.lines, [
+    `say: ${coverageIncompleteLine("src/net.ts")}`,
     "out: coverage status: unknown; possible path omitted.",
-    "say: you said: retries stay low",
+    "say: You said: retries stay low",
     "out:   (2 minutes ago, human)",
   ]);
 });
 
-test("why <file> hears stated reasons after every triple it prints", () => {
+test("why <file> shows stated reasons after every triple it prints", () => {
   const now = Date.now();
   const hit: TripleRecord = {
     kind: "triple", id: "triple-hit", ts: now - 60_000, cwd: "/repo", platform: "linux", schemaV: 1, agent: "codex", origin: "agent-hook",
@@ -355,13 +355,13 @@ test("why <file> hears stated reasons after every triple it prints", () => {
     },
   };
   const reason = statedReason({ id: "r1", ts: now - 120_000, files: ["src/net.ts"], excerpt: "retries stay low" });
-  const heard = orderedSinks();
+  const output = orderedSinks();
 
-  assert.equal(why(["src/net.ts"], { load: () => [hit, reason], now, ...heard.deps }), 0);
+  assert.equal(why(["src/net.ts"], { load: () => [hit, reason], now, ...output.deps }), 0);
 
-  assert.equal(heard.lines[0], "say: change happen. no reason I hear.");
-  assert.deepEqual(heard.lines.slice(-2), ["say: you said: retries stay low", "out:   (2 minutes ago, human)"]);
-  assert.ok(heard.lines.length > 3, heard.lines.join("\n"));
+  assert.equal(output.lines[0], "say: Change recorded. No reason recorded for this change.");
+  assert.deepEqual(output.lines.slice(-2), ["say: You said: retries stay low", "out:   (2 minutes ago, human)"]);
+  assert.ok(output.lines.length > 3, output.lines.join("\n"));
 });
 
 test("why <file> says nothing of a stated reason when the path is ambiguous", () => {
@@ -374,15 +374,15 @@ test("why <file> says nothing of a stated reason when the path is ambiguous", ()
     },
   });
   const named = statedReason({ id: "named-index", ts: 100, files: ["index.ts"] });
-  const heard = orderedSinks();
+  const output = orderedSinks();
 
-  assert.equal(why(["index.ts"], { load: () => [make("one", "one/index.ts"), make("two", "two/index.ts"), named], now: 100, ...heard.deps }), 0);
+  assert.equal(why(["index.ts"], { load: () => [make("one", "one/index.ts"), make("two", "two/index.ts"), named], now: 100, ...output.deps }), 0);
 
-  assert.ok(heard.lines.some((line) => line.includes("multiple possible paths")), heard.lines.join("\n"));
-  assert.equal(heard.lines.some((line) => line.includes("named-index")), false, heard.lines.join("\n"));
+  assert.ok(output.lines.some((line) => line.includes("matches more than one path")), output.lines.join("\n"));
+  assert.equal(output.lines.some((line) => line.includes("named-index")), false, output.lines.join("\n"));
 });
 
-test("why <file> hears at most five stated reasons, newest first", () => {
+test("why <file> shows at most five stated reasons, newest first", () => {
   const now = Date.now();
   const records = Array.from({ length: 7 }, (_, index) =>
     statedReason({ id: `r${index}`, ts: now - (index + 1) * 60_000, files: ["src/net.ts"] }));
@@ -390,7 +390,7 @@ test("why <file> hears at most five stated reasons, newest first", () => {
 
   assert.equal(why(["src/net.ts"], { load: () => records, now, say: (line) => said.push(line), out: () => undefined }), 0);
 
-  assert.deepEqual(said, ["r0", "r1", "r2", "r3", "r4"].map((id) => `${rationaleSourceLabel("human")}: reason ${id}`));
+  assert.deepEqual(said, ["r0", "r1", "r2", "r3", "r4"].map((id) => `You said: reason ${id}`));
 });
 
 test("why <file> keeps a hostile stated reason bounded, terminal-safe, and question-free", () => {
@@ -399,15 +399,15 @@ test("why <file> keeps a hostile stated reason bounded, terminal-safe, and quest
     id: "hostile", ts: now - 1000, files: ["src/net.ts"],
     excerpt: `why?\u001b[31m\nsecond line\u0007${"r".repeat(8_000)}`,
   });
-  const heard = { said: [] as string[], detail: [] as string[] };
+  const output = { said: [] as string[], detail: [] as string[] };
 
   assert.equal(why(["src/net.ts"], {
-    load: () => [hostile], now, say: (line) => heard.said.push(line), out: (line) => heard.detail.push(line),
+    load: () => [hostile], now, say: (line) => output.said.push(line), out: (line) => output.detail.push(line),
   }), 0);
 
-  assert.equal(heard.said.length, 1);
-  assert.ok(heard.said[0]?.startsWith(`${rationaleSourceLabel("human")}: why`), heard.said[0]);
-  for (const line of [...heard.said, ...heard.detail]) {
+  assert.equal(output.said.length, 1);
+  assert.ok(output.said[0]?.startsWith("You said: why"), output.said[0]);
+  for (const line of [...output.said, ...output.detail]) {
     assert.ok(!line.includes("?"), JSON.stringify(line));
     assert.ok(!line.includes("\u001b"), JSON.stringify(line));
     assert.ok(!/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(line), JSON.stringify(line));

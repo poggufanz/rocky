@@ -16,7 +16,7 @@ const GATE_MARKER = "hook gate-event claude-code";
 const POST_TOOL_MATCHER = "Edit|Write|MultiEdit|NotebookEdit";
 /** Tools Task 13's gate dispatcher actually enforces on; see agent/gate.ts GATED_TOOLS. */
 const GATE_MATCHER = "Edit|Write|MultiEdit";
-const AGENT_HOOK_CONFIRMATION = "install ears for claude code, question";
+const AGENT_HOOK_CONFIRMATION = "Install agent hooks for Claude Code now?";
 const GENERIC_ERROR = "Claude Code agent hooks update cannot complete";
 const MISSING_PARENT_PROTECTION = process.platform === "win32" ? "private ACL" : "mode 0700";
 const MISSING_PARENT_ERROR = `Claude Code settings parent missing; create private directory for Claude settings with ${MISSING_PARENT_PROTECTION}, then rerun setup`;
@@ -355,9 +355,9 @@ export function codexConfigSnippet(command: string): string {
 export function printCodexAgentHooks(command = rockyHookCommand("codex")): void {
   heading("Codex agent hooks");
   detail(codexConfigSnippet(command));
-  say("Codex config is toml. I not touch it. you paste, I listen.");
-  detail("trust warning: review and trust changed command hooks through Codex /hooks before they run.");
-  detail("rationale gate needs Claude Code hooks. other agents use notify lane, no deny there.");
+  say("Codex config is TOML, and rocky does not edit it. Paste the snippet above into your Codex config yourself.");
+  detail("Trust warning: review and trust changed command hooks through Codex /hooks before they run.");
+  detail("The rationale gate needs Claude Code hooks. Other agents use the notify lane, which cannot deny.");
 }
 
 /** Build the exact Claude Code event groups owned by Rocky. */

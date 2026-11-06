@@ -30,7 +30,7 @@ export function formatDuration(ms: number): string {
   return `${seconds}s`;
 }
 
-/** "812 seconds", "1 second" — Rocky counts precisely, in total seconds. */
+/** "812 seconds", "1 second" — the exact total in seconds, never rounded up to minutes. */
 export function spokenDuration(ms: number): string {
   const totalSeconds = Math.floor(ms / 1000);
   return `${totalSeconds} second${totalSeconds === 1 ? "" : "s"}`;

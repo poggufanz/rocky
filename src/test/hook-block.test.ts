@@ -24,6 +24,7 @@ import {
 import { hookInstall, hookStatus, hookUninstall } from "../commands/hook.js";
 import { inspectFileTransaction } from "../setup/file-transaction.js";
 import { directorySyncCapability } from "../setup/directory-sync.js";
+import { validateOutputLine } from "../ui/phrases.js";
 import { skipIfSymlinkUnavailable } from "./symlink-capability.js";
 import { verifyShellAssetsStaged } from "./shell-assets-fixture.js";
 
@@ -370,7 +371,7 @@ test("hook install appends the block and preserves bytes and mode", (t) => {
 
   assert.deepEqual(readFileSync(sandbox.bashrc), Buffer.concat([original, bytes(`\n${BLOCK}`)]));
   assertModePreserved(sandbox.bashrc, 0o640);
-  assert.match(sandbox.stderr(), /ears installed/);
+  assert.match(sandbox.stderr(), /Hook installed in Bash\. Open a new shell to activate it\./);
 });
 
 test("hook install on a managed block is an idempotent no-op success", (t) => {
@@ -381,7 +382,7 @@ test("hook install on a managed block is an idempotent no-op success", (t) => {
   assert.equal(hookInstall(), 0, sandbox.stderr());
 
   assert.deepEqual(readFileSync(sandbox.bashrc), before);
-  assert.match(sandbox.stderr(), /ears installed/);
+  assert.match(sandbox.stderr(), /Hook installed in Bash\. Open a new shell to activate it\./);
   assert.deepEqual(transactionDirectories(sandbox.home), []);
 });
 
@@ -407,14 +408,14 @@ test("hook uninstall on absent markers keeps the current quiet success", (t) => 
   assert.equal(hookUninstall(), 0, sandbox.stderr());
 
   assert.deepEqual(readFileSync(sandbox.bashrc), original);
-  assert.match(sandbox.stderr(), /no ears installed/);
+  assert.match(sandbox.stderr(), /No hook installed in Bash\. Nothing to remove\./);
 });
 
 test("hook uninstall on a missing bashrc keeps the current quiet success", (t) => {
   const sandbox = bashrcSandbox(t);
 
   assert.equal(hookUninstall(), 0, sandbox.stderr());
-  assert.match(sandbox.stderr(), /no ears installed/);
+  assert.match(sandbox.stderr(), /No hook installed in Bash\. Nothing to remove\./);
   assert.equal(existsSync(sandbox.bashrc), false);
 });
 
@@ -429,7 +430,7 @@ test("hook uninstall removes exactly the block bytes and preserves mode", (t) =>
 
   assert.deepEqual(readFileSync(sandbox.bashrc), Buffer.concat([prefix, suffix]));
   assertModePreserved(sandbox.bashrc, 0o640);
-  assert.match(sandbox.stderr(), /ears removed/);
+  assert.match(sandbox.stderr(), /Hook removed from Bash\. Memory stays in /);
   assert.equal(inspectFileTransaction(sandbox.bashrc).status, "clear");
 });
 
@@ -450,13 +451,85 @@ test("hook uninstall refuses a corrupt block and preserves every byte", (t) => {
 test("hook status reports absent and managed truthfully", (t) => {
   const missing = bashrcSandbox(t);
   assert.equal(hookStatus(), 0, missing.stderr());
-  assert.match(missing.stderr(), /ears not installed/);
+  assert.match(missing.stderr(), /Bash: not installed\. Run rocky hook install to enable it\./);
 
   const managed = bashrcSandbox(t);
   writeFileSync(managed.bashrc, bytes(`export A=1\n\n${BLOCK}`));
   assert.equal(hookStatus(), 0, managed.stderr());
-  assert.match(managed.stderr(), /ears installed/);
+  assert.match(managed.stderr(), /Bash: installed, hook version /);
 });
+
+/** Every prefixed line rocky wrote, minus the prefix. Detail lines carry recorded paths and are not judged. */
+function rockyLines(stderr: string): string[] {
+  return stderr
+    .split("\n")
+    .filter((line) => line.startsWith("rocky: "))
+    .map((line) => line.slice("rocky: ".length));
+}
+
+function assertPlainLines(stderr: string, minimum: number): void {
+  const lines = rockyLines(stderr);
+  assert.ok(lines.length >= minimum, `expected at least ${minimum} rocky lines, got ${JSON.stringify(stderr)}`);
+  for (const line of lines) {
+    assert.deepEqual(validateOutputLine(line), [], line);
+    assert.match(line, /^[A-Z.]/, `sentence case: ${line}`);
+  }
+}
+
+test("hook install, status, and uninstall speak plain sentences behind the one prefix", (t) => {
+  const sandbox = bashrcSandbox(t);
+  writeFileSync(sandbox.bashrc, "export MY_VAR=1\n");
+
+  assert.equal(hookInstall(), 0, sandbox.stderr());
+  assert.equal(hookStatus(), 0, sandbox.stderr());
+  assert.equal(hookUninstall(), 0, sandbox.stderr());
+  assert.equal(hookUninstall(), 0, sandbox.stderr());
+
+  assertPlainLines(sandbox.stderr(), 7);
+  assert.ok(!sandbox.stderr().includes("[Rocky]"), "the retired prefix never appears");
+});
+
+const REFUSAL_CASES: ReadonlyArray<{ name: string; arrange: (sandbox: BashrcSandbox) => void; expected: RegExp }> = [
+  {
+    name: "a corrupt block",
+    arrange: (sandbox) => writeFileSync(sandbox.bashrc, bytes(`export A=1\n${BEGIN}\nexport B=2\n`)),
+    expected: /^The hook block in \.bashrc is corrupt\. Nothing was changed\. Repair the markers by hand, then run the command again\.$/m,
+  },
+  {
+    name: "a non-regular file",
+    arrange: (sandbox) => mkdirSync(sandbox.bashrc),
+    expected: /^\.bashrc is not a regular file\. Nothing was changed\.$/m,
+  },
+  {
+    name: "a hard-linked file",
+    arrange: (sandbox) => {
+      writeFileSync(sandbox.bashrc, bytes("export A=1\n"));
+      linkSync(sandbox.bashrc, join(sandbox.home, "bashrc-alias"));
+    },
+    expected: /^\.bashrc has more than one hard link\. Nothing was changed\. Only files with one link are written\.$/m,
+  },
+  {
+    name: "a rocky home that is a plain file",
+    arrange: (sandbox) => {
+      writeFileSync(sandbox.bashrc, bytes(`export A=1\n\n${BLOCK}`));
+      writeFileSync(process.env.ROCKY_HOME as string, "not a directory\n");
+    },
+    expected: /^\.bashrc was not changed, and writing to the rocky home folder failed\. The hook may not work yet\.$/m,
+  },
+];
+
+for (const { name, arrange, expected } of REFUSAL_CASES) {
+  test(`hook install refusing ${name} speaks a plain sentence and says what was left alone`, (t) => {
+    const sandbox = bashrcSandbox(t);
+    arrange(sandbox);
+
+    assert.equal(hookInstall(), 1, sandbox.stderr());
+
+    const output = sandbox.stderr();
+    assert.match(rockyLines(output).join("\n"), expected, output);
+    assertPlainLines(output, 1);
+  });
+}
 
 test("hook status reports a corrupt block truthfully and exits 1", (t) => {
   const sandbox = bashrcSandbox(t);
@@ -568,8 +641,32 @@ test("hook install refuses when bashrc changes between snapshot and publish", (t
   assert.equal(hookInstall(), 1);
 
   assert.deepEqual(readFileSync(sandbox.bashrc), concurrent, "user bytes win");
-  assert.match(sandbox.stderr(), /changed while I worked/);
+  // The engine displaced the file before it noticed the newer content, so the
+  // copy is disclosed (a later test pins that it exists on disk).
+  assert.match(sandbox.stderr(), /\.bashrc changed during the write\. The newer content was kept, and a safe copy is kept too\./);
   assert.ok(sandbox.stderr().includes(sandbox.bashrc));
+  assert.equal(inspectFileTransaction(sandbox.bashrc).status, "clear");
+});
+
+test("hook install says nothing was written, and names no copy, when bashrc vanishes between snapshot and publish", (t) => {
+  const sandbox = bashrcSandbox(t);
+  writeFileSync(sandbox.bashrc, bytes("export A=1\n"));
+  const originalRename = fs.renameSync;
+  fs.renameSync = ((from: fs.PathLike, to: fs.PathLike) => {
+    if (String(from) === sandbox.bashrc) rmSync(sandbox.bashrc, { force: true }); // a late delete lands before displacement
+    return originalRename(from, to);
+  }) as typeof fs.renameSync;
+  syncBuiltinESMExports();
+  t.after(() => {
+    fs.renameSync = originalRename;
+    syncBuiltinESMExports();
+  });
+
+  assert.equal(hookInstall(), 1, sandbox.stderr());
+
+  assert.match(sandbox.stderr(), /\.bashrc changed during the write, so nothing was written\. Run the command again\./);
+  assert.ok(!sandbox.stderr().includes("A safe copy"), "no copy exists, so none is claimed");
+  assert.equal(existsSync(sandbox.bashrc), false, "rocky wrote nothing");
   assert.equal(inspectFileTransaction(sandbox.bashrc).status, "clear");
 });
 
@@ -582,7 +679,7 @@ test("hook uninstall refuses when bashrc changes between snapshot and publish", 
   assert.equal(hookUninstall(), 1);
 
   assert.deepEqual(readFileSync(sandbox.bashrc), concurrent, "user bytes win");
-  assert.match(sandbox.stderr(), /changed while I worked/);
+  assert.match(sandbox.stderr(), /\.bashrc changed during the write/);
   assert.equal(inspectFileTransaction(sandbox.bashrc).status, "clear");
 });
 
@@ -612,7 +709,7 @@ test("hook install and uninstall refuse a multi-linked bashrc without touching i
   linkSync(sandbox.bashrc, join(sandbox.home, "bashrc-alias"));
 
   assert.equal(hookInstall(), 1);
-  assert.match(sandbox.stderr(), /many names|hard link/i);
+  assert.match(sandbox.stderr(), /\.bashrc has more than one hard link\. Nothing was changed\. Only files with one link are written\./);
   assert.deepEqual(readFileSync(sandbox.bashrc), original);
 
   assert.equal(hookUninstall(), 1);
@@ -626,7 +723,7 @@ test("hook install refuses a non-regular bashrc without touching it", (t) => {
 
   assert.equal(hookInstall(), 1);
 
-  assert.match(sandbox.stderr(), /not regular file/);
+  assert.match(sandbox.stderr(), /\.bashrc is not a regular file\. Nothing was changed\./);
   assert.equal(lstatSync(sandbox.bashrc).isDirectory(), true);
   assert.deepEqual(transactionDirectories(sandbox.home), []);
 });
@@ -717,12 +814,14 @@ test("hook status refuses a dangling symlink instead of telling the user to run 
 
   const result = hookStatus();
 
-  // Before the fix this claimed "ears not installed. run: rocky hook
-  // install" — a command that install then refuses. A dangling symlink is a
-  // topology refusal, exactly like install/uninstall already give it.
+  // Before the fix this claimed "not installed" and told the person to run
+  // `rocky hook install` — a command that install then refuses. A dangling
+  // symlink is a topology refusal, exactly like install/uninstall already give
+  // it.
   assert.equal(result, 1);
   assert.match(sandbox.stderr(), /symlink/);
-  assert.ok(!sandbox.stderr().includes("run: rocky hook install"));
+  assert.ok(!sandbox.stderr().includes("Run rocky hook install"));
+  assert.ok(!sandbox.stderr().includes("not installed"));
 });
 
 test("hook status refuses a multi-linked managed bashrc instead of claiming plain installed", (t) => {
@@ -732,7 +831,8 @@ test("hook status refuses a multi-linked managed bashrc instead of claiming plai
   linkSync(sandbox.bashrc, join(sandbox.home, "bashrc-alias"));
 
   assert.equal(hookStatus(), 1);
-  assert.match(sandbox.stderr(), /many names|hard link/i);
+  assert.match(sandbox.stderr(), /\.bashrc has more than one hard link\./);
+  assert.ok(!sandbox.stderr().includes("Bash: installed"), "a multi-linked file is not reported as plainly installed");
 });
 
 test("hook status settles a pending transaction instead of reporting stale state", (t) => {
@@ -752,7 +852,7 @@ test("hook status settles a pending transaction instead of reporting stale state
   // the directory vanishes here.
   assert.equal(inspectFileTransaction(sandbox.bashrc).status, "clear", "the transaction no longer blocks anything");
   assert.deepEqual(readFileSync(sandbox.bashrc), original, "bashrc itself is untouched");
-  assert.match(sandbox.stderr(), /ears not installed/);
+  assert.match(sandbox.stderr(), /Bash: not installed\. Run rocky hook install to enable it\./);
 });
 
 test("hook status reports the same ambiguous-transaction guidance install gives, not a false installed", (t) => {
@@ -788,7 +888,7 @@ test("hook install writes no rocky-home assets before a topology refusal", (t) =
   assert.equal(
     existsSync(process.env.ROCKY_HOME as string),
     false,
-    "no ~/.rocky assets written ahead of an \"I touch nothing\" refusal",
+    "no ~/.rocky assets written ahead of a \"Nothing was changed\" refusal",
   );
 });
 
@@ -818,7 +918,7 @@ test("hook install discloses a retained copy on refusal instead of claiming it t
 
   assert.deepEqual(readFileSync(sandbox.bashrc), concurrent, "user bytes win");
   assert.ok(
-    !sandbox.stderr().includes("I touch nothing"),
+    !sandbox.stderr().includes("Nothing was changed") && !sandbox.stderr().includes("nothing was written"),
     "must not claim it touched nothing while a copy was written",
   );
   const [transactionDirectory] = transactionDirectories(sandbox.home);
@@ -985,8 +1085,8 @@ test("hook status never tells the user to remove their own bashrc, even when the
   assert.equal(result, 1);
   const output = sandbox.stderr();
   assert.ok(!output.includes("remove by hand"), "no removal instruction when nothing provable survives");
-  assert.ok(!output.includes("I keep safe copy"), "must not claim a safe copy exists when none does");
-  assert.match(output, /no safe copy to name/);
+  assert.ok(!output.includes("A safe copy"), "must not claim a safe copy exists when none does");
+  assert.match(output, /There is no safe copy to name\./);
   assert.deepEqual(readFileSync(sandbox.bashrc), original, "bashrc itself is untouched");
   assert.ok(!output.includes("SECRET_TOKEN"), "diagnostics stay secret-free");
 });
@@ -1010,12 +1110,12 @@ test("hook status discloses a retained copy left behind by settling someone else
   assert.equal(result, 0, sandbox.stderr());
   const statusOutput = sandbox.stderr().slice(before);
   assert.ok(
-    statusOutput.includes("I keep safe copy"),
+    statusOutput.includes("A safe copy"),
     "status discloses the settled recovery instead of silently absorbing it",
   );
   assert.ok(!statusOutput.includes("SECRET_TOKEN"), "diagnostics stay secret-free");
   assert.equal(inspectFileTransaction(sandbox.bashrc).status, "clear");
-  assert.match(sandbox.stderr(), /ears installed/);
+  assert.match(sandbox.stderr(), /Bash: installed, hook version /);
 });
 
 // --- Minor 3: hookUninstall's disclosure must be pinned too (M15) ----------
@@ -1049,15 +1149,15 @@ test("hook status degrades informatively instead of failing hard on a stray tran
   assert.equal(result, 1, "status must not crash or silently claim installed");
   assert.deepEqual(readFileSync(sandbox.bashrc), original, "bashrc itself is untouched");
   assert.ok(sandbox.stderr().includes(junk), "the stray directory is named so the user can inspect it");
-  assert.match(sandbox.stderr(), /bashrc keeps unclear transaction/);
+  assert.match(sandbox.stderr(), /\.bashrc has an unclear transaction left from an earlier run\./);
   // Final audit, Important 2: this exact fixture — an empty directory,
   // nothing proving a copy of anything — is the shape the previous version
-  // of this test built while the code spoke "I keep safe copy" over it. That
+  // of this test built while the code spoke "A safe copy is kept" over it. That
   // was false: an empty directory is not a copy. This test previously never
   // checked for the false claim's absence, so the suite stayed green on it.
   // Corrected here to pin the honest message instead.
   assert.ok(
-    !sandbox.stderr().includes("I keep safe copy"),
+    !sandbox.stderr().includes("A safe copy"),
     "must not claim a safe copy exists over a directory proven to hold no copy",
   );
   assert.ok(
@@ -1091,12 +1191,12 @@ test("hook status names the surviving copy without instructing its removal or re
   // Round 10, S2/D7: this is the one call site where the message-only
   // `targetExists` predicate is actually observable — `path` genuinely does
   // not exist here (unlike the R1/PROBE N1 symlink case above, where a name
-  // still resolves) and a copy is proven, so Rocky must say "bashrc gone".
+  // still resolves) and a copy is proven, so rocky must say ".bashrc is gone".
   // Before this assertion, that branch was spoken by this exact fixture but
   // never pinned: mutant D7 (dropping `&& outcome.targetExists` from
-  // `hook.ts:172`, collapsing this branch into the "I keep safe copy"
+  // `hook.ts:172`, collapsing this branch into the "A safe copy is kept"
   // branch above it) survived because nothing here checked for the words.
-  assert.ok(output.includes("bashrc gone"), "bashrc truly does not exist — Rocky must say so (round 10, S2/D7)");
+  assert.ok(output.includes(".bashrc is gone"), "bashrc truly does not exist — rocky must say so (round 10, S2/D7)");
   assert.ok(
     output.includes(join(fixture, "displaced")),
     "the surviving copy's exact path is still named, so the user can find it",
@@ -1168,7 +1268,7 @@ test("hook install never offers bashrc itself as something to remove, even when 
   assert.equal(result, 1);
   const output = sandbox.stderr();
   assert.ok(!output.includes("remove by hand"), "must never instruct removing bashrc itself");
-  assert.ok(!output.includes("I keep safe copy"), "must not claim a safe copy when only bashrc itself was named");
+  assert.ok(!output.includes("A safe copy"), "must not claim a safe copy when only bashrc itself was named");
   assert.ok(!output.includes("transaction directory:"), "must not name bashrc's own path as a transaction directory");
   // The transaction directory itself was actually removed here (rmSync
   // succeeded; only the follow-up fsync threw) — round 7's outcome record
@@ -1201,7 +1301,7 @@ test("hook status never says bashrc is gone or names a remedy while a live symli
   // via the generic published catch-all, with a real, provable copy to
   // name — exactly the shape whose message round 8's I2 fix got wrong for a
   // valid (non-dangling) symlink: isLiveRegularFile(path) is false for any
-  // symlink, live or dangling alike, so it said "bashrc gone" and told the
+  // symlink, live or dangling alike, so it said ".bashrc is gone" and told the
   // user to copy the stale artifact over the bashrc path themselves — `cp`
   // follows the symlink and destroys the live file behind it.
   const fixture = writePendingTransactionFixture(sandbox.bashrc, "published", {
@@ -1212,10 +1312,13 @@ test("hook status never says bashrc is gone or names a remedy while a live symli
 
   assert.equal(result, 1);
   const output = sandbox.stderr();
-  assert.ok(!output.includes("bashrc gone"), "bashrc is not gone — the symlink still resolves to real content (R1)");
+  assert.ok(
+    !output.includes(".bashrc is gone") && !output.includes(".bashrc was gone"),
+    "bashrc is not gone — the symlink still resolves to real content (R1)",
+  );
   assert.ok(!output.includes("restore by copying"), "no remedy verb is ever spoken from this stop (round 9 primary direction)");
   assert.ok(!/\byourself\b/.test(output), "no instruction telling the user what to type");
-  assert.ok(output.includes("I keep safe copy"), "states the proven fact: a copy exists");
+  assert.ok(output.includes("A safe copy"), "states the proven fact: a copy exists");
   assert.ok(output.includes(join(fixture, "displaced")), "the copy's path is named for inspection");
   assert.equal(lstatSync(sandbox.bashrc).isSymbolicLink(), true, "the symlink itself survives untouched");
   assert.deepEqual(readFileSync(realBashrc), liveContent, "the live content behind the symlink is never touched");
@@ -1266,7 +1369,7 @@ test("hook status says plainly when settling has to put bashrc back, not just th
   assert.deepEqual(readFileSync(sandbox.bashrc), original, "settling restored bashrc from the retained copy");
   const output = sandbox.stderr();
   assert.ok(
-    output.includes("I already put old bytes back"),
+    output.includes("The old bytes were already put back"),
     "status must say it recreated bashrc, not only that a copy exists",
   );
   assert.ok(!output.includes("RESTORE_ME"), "diagnostics stay secret-free");
@@ -1282,7 +1385,7 @@ test("hook install also discloses settling having to put bashrc back, separately
   assert.equal(result, 0, sandbox.stderr());
   assert.deepEqual(readFileSync(sandbox.bashrc), bytes(`export RESTORE_ME=please\n\n${BLOCK}`));
   assert.ok(
-    sandbox.stderr().includes("I already put old bytes back"),
+    sandbox.stderr().includes("The old bytes were already put back"),
     "install must disclose the settle-time restore, not only its own new write",
   );
 });
@@ -1302,9 +1405,9 @@ test("hook status discloses a retained copy that settling only finalized, withou
 
   assert.equal(result, 0, sandbox.stderr());
   const output = sandbox.stderr();
-  assert.ok(output.includes("I keep safe copy"), "still discloses the retained copy");
+  assert.ok(output.includes("A safe copy"), "still discloses the retained copy");
   assert.ok(
-    !output.includes("I already put old bytes back"),
+    !output.includes("The old bytes were already put back"),
     "must not claim bashrc was recreated when it was already live the whole time",
   );
 });
@@ -1332,7 +1435,7 @@ test("hook status prunes a superseded retained copy when it settles a fresh one 
   const result = hookStatus();
 
   assert.equal(result, 0, sandbox.stderr());
-  assert.ok(sandbox.stderr().includes("I keep safe copy"), "the surviving GEN2 copy is disclosed before pruning");
+  assert.ok(sandbox.stderr().includes("A safe copy"), "the surviving GEN2 copy is disclosed before pruning");
   const remaining = transactionDirectories(sandbox.home);
   assert.equal(remaining.length, 1, "status prunes the superseded GEN1 copy when it settles GEN2");
   assert.ok(!remaining.includes(gen1), "the older, now-superseded copy is gone");
@@ -1381,14 +1484,14 @@ test("hook status reports an interrupted restore honestly instead of claiming to
 
   assert.equal(result, 1);
   const output = sandbox.stderr();
-  // Before this round: Rocky created a truncated bashrc during the failed
+  // Before this round: rocky created a truncated bashrc during the failed
   // restore (openSync(O_CREAT|O_EXCL) lands before the injected write
-  // fails), then said "I touch nothing more" and pointed removal at the
+  // fails), then said "No further changes were made" and pointed removal at the
   // displaced copy — the only intact copy left. Both are now false claims
   // this round refuses to make.
   assert.equal(existsSync(sandbox.bashrc), true, "the failed restore left a broken bashrc behind");
   assert.equal(readFileSync(sandbox.bashrc).length, 0, "the broken bashrc holds zero bytes, not real content");
-  assert.ok(!output.includes("I touch nothing more"), "must not claim nothing was touched after creating bashrc");
+  assert.ok(!output.includes("No further changes were made"), "must not claim nothing was touched after creating bashrc");
   assert.ok(!output.includes("remove by hand"), "no removal instruction is ever spoken from an ambiguous stop");
   assert.ok(output.includes("inspect:"), "actionable guidance still names the surviving copy");
   assert.ok(output.includes(join(fixture, "displaced")), "the surviving copy is still named for inspection");
@@ -1423,7 +1526,7 @@ test("hook commands give actionable guidance instead of a permanent dead end on 
     const result = attempt();
     assert.equal(result, 1, "no path resolves this ambiguous shape into a silent success");
     const output = sandbox.stderr();
-    assert.ok(!output.includes("I keep safe copy"), "no copy is proven for a prepared-only artifact");
+    assert.ok(!output.includes("A safe copy"), "no copy is proven for a prepared-only artifact");
     assert.ok(!output.includes("remove by hand"), "never a destructive imperative");
     assert.ok(output.includes(fixture), "the directory is named so the user has something to inspect");
     // Round 9, r9: the "removing" wording tension against README's
@@ -1452,7 +1555,7 @@ test("hook status never deletes the only surviving copy of a prepared write, and
 
   assert.equal(result, 1, "status must not silently discard the only surviving copy and exit 0");
   const output = sandbox.stderr();
-  assert.ok(!output.includes("ears not installed"), "must not report false success over a destroyed transaction");
+  assert.ok(!output.includes("Bash: not installed"), "must not report false success over a destroyed transaction");
   assert.equal(existsSync(fixture), true, "the transaction directory survives");
   assert.equal(
     existsSync(join(fixture, "prepared")),
@@ -1507,13 +1610,13 @@ test("hook install never promises permanence for a settle-disclosed copy its own
 
   assert.equal(result, 0, sandbox.stderr());
   const output = sandbox.stderr();
-  const promises = (output.match(/yours to remove, any time/g) ?? []).length;
+  const promises = (output.match(/You can remove it at any time/g) ?? []).length;
   assert.equal(
     promises,
     1,
     "only the final, genuinely-last write may promise permanence — not a settled copy this same call supersedes",
   );
-  assert.ok(output.includes("I keep safe copy"), "the settled copy is still disclosed, just without the broken promise");
+  assert.ok(output.includes("A safe copy"), "the settled copy is still disclosed, just without the broken promise");
 });
 
 test("hook install never says a transaction is 'from before' when it is this very call's own write (round 7, F5)", (t) => {
@@ -1530,7 +1633,7 @@ test("hook install never says a transaction is 'from before' when it is this ver
     !output.includes("from before"),
     "this call's own write turning ambiguous is not a transaction from before",
   );
-  assert.match(output, /bashrc write leaves unclear state/);
+  assert.match(output, /The write to \.bashrc left an unclear state\./);
 });
 
 test("hook status discloses what settling did even when it cannot then check bashrc itself (round 7, F6)", (t) => {
@@ -1572,9 +1675,9 @@ test("hook status discloses what settling did even when it cannot then check bas
 
   assert.equal(result, 1);
   const output = sandbox.stderr();
-  assert.match(output, /I cannot check bashrc/);
+  assert.match(output, /\.bashrc could not be checked\. Nothing was changed\./);
   assert.ok(
-    output.includes("I keep safe copy"),
+    output.includes("A safe copy"),
     "settling's own mutation must still be disclosed before this stop, not suppressed by it",
   );
   assert.ok(!output.includes("SECRET_TOKEN"), "diagnostics stay secret-free");
@@ -1595,7 +1698,7 @@ test("hook status never claims a safe copy exists when the displaced artifact is
   assert.equal(result, 1);
   const output = sandbox.stderr();
   assert.ok(
-    !output.includes("I keep safe copy"),
+    !output.includes("A safe copy"),
     "a symlinked displaced artifact must never be claimed as a proven copy (the .isFile() proof, not a bare existence check)",
   );
   assert.ok(!output.includes("safe copy:"), "no copy path is asserted over an unproven artifact");
@@ -1627,7 +1730,7 @@ test("hook status reports honestly over a corrupt block after a stale prepared t
   // anything -- but bashrc's own bytes, the only content this call is
   // answerable for, are genuinely untouched. Before round 8, resolving this
   // shape `rm -r`'d the whole transaction directory and reported that fact
-  // in a field nothing read (I1), so this same "I touch nothing" claim
+  // in a field nothing read (I1), so this same "Nothing was changed" claim
   // followed a real, undisclosed deletion; here the claim is simply true.
   assert.deepEqual(readFileSync(sandbox.bashrc), original, "bashrc's own corrupt bytes are untouched");
   assert.equal(existsSync(join(fixture, "prepared")), false, "the redundant staged scratch write is discarded");
@@ -1647,7 +1750,7 @@ test("hook status never destroys the only surviving copy of a prepared write whe
   // for the dangling symlink, so the resolver believed "path itself is
   // live, nothing lost" and discarded the only surviving copy of the
   // staged bytes, then this call's own later topology refusal printed
-  // "bashrc is symlink. I touch nothing." over the wreckage.
+  // ".bashrc is a symlink. Nothing was changed." over the wreckage.
   assert.equal(result, 1);
   const output = sandbox.stderr();
   assert.equal(existsSync(join(fixture, "prepared")), true, "the only surviving copy is not destroyed");
@@ -1686,7 +1789,7 @@ test("hook install reports a broken rocky-home write instead of dying with a raw
     "the retained copy's path is disclosed, not swallowed by a raw uncaught error",
   );
   assert.ok(!output.includes("SECRET"), "diagnostics stay secret-free");
-  assert.ok(!/^Error:/m.test(output), "no raw Node error string ever reaches the user (Rocky's voice, not Node's)");
+  assert.ok(!/^Error:/m.test(output), "no raw Node error string ever reaches the user (a rocky message, not Node's)");
 });
 
 test("hook install reports a broken guard.rules write instead of dying with a raw error, with the assets wrapper unaffected (round 9, coverage: C13)", (t) => {
@@ -1705,8 +1808,8 @@ test("hook install reports a broken guard.rules write instead of dying with a ra
 
   assert.equal(result, 1);
   const output = sandbox.stderr();
-  assert.ok(!/^Error:/m.test(output), "no raw Node error string ever reaches the user (Rocky's voice, not Node's) (C13)");
-  assert.ok(!output.includes("something break inside me"), "does not fall through to the generic top-level catch");
+  assert.ok(!/^Error:/m.test(output), "no raw Node error string ever reaches the user (a rocky message, not Node's) (C13)");
+  assert.ok(!output.includes("Unexpected internal error"), "does not fall through to the generic top-level catch");
   assert.deepEqual(
     readFileSync(sandbox.bashrc),
     bytes(`export SECRET=hunter2\n\n${BLOCK}`),
@@ -1747,10 +1850,10 @@ test("hook install reports rocky home breaking without claiming a bashrc mutatio
   assert.deepEqual(readFileSync(sandbox.bashrc), original, "bashrc bytes are genuinely untouched on this path");
   assert.deepEqual(transactionDirectories(sandbox.home), [], "no transaction was ever staged on this path");
   assert.ok(
-    !output.includes("bashrc already changed"),
+    !output.includes(".bashrc was already changed"),
     "must not assert a mutation that never happened (round 9, R2)",
   );
-  assert.ok(output.includes("bashrc not touched"), "states plainly that bashrc was not touched");
+  assert.ok(output.includes(".bashrc was not changed"), "states plainly that bashrc was not touched");
   assert.ok(!/^Error:/m.test(output), "no raw Node error string ever reaches the user");
 });
 
@@ -1766,13 +1869,13 @@ test("hook install still says bashrc already changed when it genuinely published
   assert.equal(result, 1);
   const output = sandbox.stderr();
   assert.deepEqual(readFileSync(sandbox.bashrc), bytes(`export A=1\n\n${BLOCK}`), "bashrc was genuinely rewritten");
-  assert.ok(output.includes("bashrc already changed"), "this path genuinely published, so the original sentence still applies");
+  assert.ok(output.includes(".bashrc was already changed"), "this path genuinely published, so the original sentence still applies");
 });
 
 // --- Round 9, r3: hookStatus's own reads must not reach index.ts's raw
 // error the same way hookInstall's writes used to (I3's class, unclosed) ---
 
-test("hook status reports a Rocky-voice message instead of a raw error when rocky-hook.bash is unreadable (round 9, r3)", (t) => {
+test("hook status reports a rocky message instead of a raw error when rocky-hook.bash is unreadable (round 9, r3)", (t) => {
   const sandbox = bashrcSandbox(t);
   writeFileSync(sandbox.bashrc, bytes(`export A=1\n\n${BLOCK}`));
   // ~/.rocky/rocky-hook.bash exists as a directory instead of a file: the
@@ -1784,13 +1887,13 @@ test("hook status reports a Rocky-voice message instead of a raw error when rock
 
   assert.equal(result, 1);
   const output = sandbox.stderr();
-  assert.ok(!/^Error:/m.test(output), "no raw Node error string ever reaches the user (Rocky's voice, not Node's)");
-  assert.ok(!output.includes("something break inside me"), "does not fall through to the generic top-level catch");
-  assert.match(output, /ears installed/);
+  assert.ok(!/^Error:/m.test(output), "no raw Node error string ever reaches the user (a rocky message, not Node's)");
+  assert.ok(!output.includes("Unexpected internal error"), "does not fall through to the generic top-level catch");
+  assert.match(output, /Bash: installed, but the rocky home folder could not be checked\./);
   assert.deepEqual(readFileSync(sandbox.bashrc), bytes(`export A=1\n\n${BLOCK}`), "bashrc itself is untouched");
 });
 
-test("hook status reports a Rocky-voice message instead of a raw error when guard.rules is unreadable (round 9, r3)", (t) => {
+test("hook status reports a rocky message instead of a raw error when guard.rules is unreadable (round 9, r3)", (t) => {
   const sandbox = bashrcSandbox(t);
   writeFileSync(sandbox.bashrc, bytes(`export A=1\n\n${BLOCK}`));
   mkdirSync(process.env.ROCKY_HOME as string, { recursive: true });
@@ -1803,7 +1906,7 @@ test("hook status reports a Rocky-voice message instead of a raw error when guar
   assert.equal(result, 1);
   const output = sandbox.stderr();
   assert.ok(!/^Error:/m.test(output), "no raw Node error string ever reaches the user");
-  assert.ok(!output.includes("something break inside me"), "does not fall through to the generic top-level catch");
+  assert.ok(!output.includes("Unexpected internal error"), "does not fall through to the generic top-level catch");
   assert.deepEqual(readFileSync(sandbox.bashrc), bytes(`export A=1\n\n${BLOCK}`), "bashrc itself is untouched");
 });
 
@@ -1850,7 +1953,7 @@ test("hook status accumulates settle facts across multiple recovered transaction
   const output = sandbox.stderr();
   assert.deepEqual(readFileSync(sandbox.bashrc), original, "the first transaction's restore survives the second's own resolution");
   assert.ok(
-    output.includes("I already put old bytes back"),
+    output.includes("The old bytes were already put back"),
     "B8: an earlier iteration's targetWritten must survive a later iteration that writes nothing itself",
   );
   assert.ok(
@@ -1914,9 +2017,12 @@ test("hook status uses the freshest targetExists fact when merging settle outcom
   const output = sandbox.stderr();
   // Before round 9's coverage fix: mergeOutcome's targetExists kept the
   // FIRST iteration's (stale, false) fact instead of the second (fresh,
-  // true) one, so this state would falsely say "bashrc gone" even though
+  // true) one, so this state would falsely say ".bashrc is gone" even though
   // bashrc now genuinely exists.
-  assert.ok(!output.includes("bashrc gone"), "must use the freshest targetExists, not the first iteration's stale one (C16)");
-  assert.ok(output.includes("I keep safe copy"), "the second transaction's proven copy is still disclosed");
+  assert.ok(
+    !output.includes(".bashrc is gone") && !output.includes(".bashrc was gone"),
+    "must use the freshest targetExists, not the first iteration's stale one (C16)",
+  );
+  assert.ok(output.includes("A safe copy"), "the second transaction's proven copy is still disclosed");
   assert.ok(existsSync(join(second, "displaced")), "the second transaction's own artifact is retained, ambiguous stop");
 });

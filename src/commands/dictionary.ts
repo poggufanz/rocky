@@ -10,7 +10,7 @@ import type { MemoryCoverage, MemoryRecord, RationaleLinks, RationaleRecord, Rat
 import { resolveRockyPaths } from "../core/state-paths.js";
 import { createTtyPromptPort } from "../setup/prompt.js";
 import { truncateUtf8 } from "../mcp/privacy.js";
-import { ago, detail, isVerbose, say } from "../ui/rocky.js";
+import { ago, detail, isVerbose, phrase, prompt as rockyPrompt, say } from "../ui/rocky.js";
 import { safeTerminalLine } from "../ui/sanitize.js";
 import { formatGitDiffLines, resolveGitDiff, type GitDiffOptions, type GitDiffResult } from "../core/git-diff.js";
 import { CliUsageError, parseNoArgs, parseQueryArgs, reportCliUsage } from "./cli-args.js";
@@ -24,18 +24,22 @@ const MAX_OUTPUT_LINE_BYTES = 512;
 const MAX_FILE_RATIONALES = 5;
 const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
 const DAY_MS = 24 * 60 * 60 * 1000;
-const EXPORT_USAGE = "export takes --kind failure|fix|note|triple and --since 30d. try again, question";
+const EXPORT_USAGE = "Export takes --kind failure|fix|note|triple and --since 30d.";
 const EXPORT_KINDS: ReadonlySet<MemoryRecord["kind"]> = new Set(["failure", "fix", "note", "triple"]);
-// Default words for how far to trust one remembered change. "complete" only says
-// the agent's changed-file list was whole within Rocky's cap, as the agent
+// Default words for how far to trust one recorded change. "complete" only says
+// the agent's changed-file list was whole within rocky's cap, as the agent
 // reported it. It never says the agent's reason is right.
-const FILES_COMPLETE_WORDS = "file list complete, as agent reported.";
-const FILES_INCOMPLETE_WORDS = "some changed files may be missing.";
-const NOTE_WORDS = "your answer. remembered, not verified.";
+const FILES_COMPLETE_WORDS = "File list complete, as the agent reported.";
+const FILES_INCOMPLETE_WORDS = "Some changed files may be missing.";
+const NOTE_WORDS = "Your answer, recorded and not verified.";
 // Default coverage disclosures for `why`; ROCKY_VERBOSE=1 keeps the status-word forms.
-const SOME_PATH_MAY_BE_OMITTED_WORDS = "some path may be omitted.";
-const POSSIBLE_PATH_OMITTED_WORDS = "possible path omitted.";
-const AMBIGUOUS_PATH_WORDS = "path fits more than one file. no reason picked.";
+const SOME_PATH_MAY_BE_OMITTED_WORDS = "Some path may be omitted.";
+const POSSIBLE_PATH_OMITTED_WORDS = "A possible path was omitted.";
+const AMBIGUOUS_PATH_WORDS = "The path fits more than one file. No reason was picked.";
+// Said when the memory read was incomplete: the answer cannot be confirmed either way.
+const SEE_COVERAGE_LINE = "See the coverage line below.";
+const COVERAGE_UNKNOWN_MATCH = `Memory coverage is incomplete, so it is not known whether anything matches. ${SEE_COVERAGE_LINE}`;
+const QUIZ_NEEDS_TERMINAL = "Quiz needs an interactive terminal. Run rocky quiz from one.";
 
 export interface DictionaryCommandDeps {
   load?: () => MemoryRecord[];
@@ -108,7 +112,7 @@ function exportSince(value: string, now: number): number | undefined {
 }
 
 // `export` is reserved as a command name, so this function keeps the explicit suffix.
-// stdout carries raw JSONL data; say/out remain persona and supporting stderr sinks.
+// stdout carries raw JSONL data; say/out remain the prefixed and supporting stderr sinks.
 export function exportCommand(argv: string[], deps: ExportCommandDeps = {}): number {
   const { speak, support, records, coverage } = resolve(deps);
   const now = deps.now ?? Date.now();
@@ -140,7 +144,7 @@ export function exportCommand(argv: string[], deps: ExportCommandDeps = {}): num
 
   const scan = coverage();
   if (scan !== undefined && coverageIncomplete(scan)) {
-    speak("memory coverage incomplete. export stops. no false file, question");
+    speak("Memory coverage is incomplete. Nothing was exported, because a partial export could pass for a complete one.");
     support(coverageLine(scan, records().length));
     return 1;
   }
@@ -150,7 +154,7 @@ export function exportCommand(argv: string[], deps: ExportCommandDeps = {}): num
   ));
   const stdout = deps.stdout ?? console.log;
   for (const record of selected) stdout(JSON.stringify(record));
-  speak(`${selected.length} record go out. memory is yours. always.`);
+  speak(`Exported ${selected.length} record${selected.length === 1 ? "" : "s"}.`);
   return 0;
 }
 
@@ -159,6 +163,15 @@ function terminalSafe(value: string, maximumBytes: number): string {
     .replace(/[\u200b-\u200f\u2060-\u206f\ufeff]/gu, " ")
     .replace(/[?？]/gu, " ");
   return truncateUtf8(withoutControls.replace(/\uFF1F/gu, " "), maximumBytes).value;
+}
+
+/**
+ * A rocky-authored question. The text is made terminal-safe first, which turns
+ * every `?` in it into a space (recorded content never carries one into a line),
+ * so the closing question mark is added afterwards and is the only one printed.
+ */
+function questionLine(text: string): string {
+  return `${terminalSafe(text, MAX_OUTPUT_LINE_BYTES - 1)}?`;
 }
 
 function fullIdLines(value: string): string[] {
@@ -254,7 +267,7 @@ function tripleConfidence(triple: DictionaryHit["triple"]): { confidence: "confi
   const files = first === undefined ? "none" : `${triple.mechanism.files.length}; witness=${terminalSafe(first.path, 96)}`;
   return {
     confidence: complete ? "confirmed" : "incomplete",
-    reason: complete ? "captured file coverage complete" : "file coverage incomplete; I do not know full change",
+    reason: complete ? "captured file coverage complete" : "file coverage incomplete; full change not recorded",
     words: complete ? FILES_COMPLETE_WORDS : FILES_INCOMPLETE_WORDS,
     coverage: complete ? "complete" : "incomplete",
     files,
@@ -264,7 +277,7 @@ function tripleConfidence(triple: DictionaryHit["triple"]): { confidence: "confi
 function noteConfidence(note: NoteHit["note"]): { confidence: "possible"; reason: string; words: string; coverage: string; files: string } {
   return {
     confidence: "possible",
-    reason: "user comprehension note is remembered answer, not verified ground truth",
+    reason: "user comprehension note is a recorded answer, not verified ground truth",
     words: NOTE_WORDS,
     coverage: "single-file note",
     files: terminalSafe(note.file, MAX_PATH_DISPLAY_BYTES),
@@ -386,6 +399,15 @@ function futureTeachingMatch(records: readonly MemoryRecord[], query: string, no
     || queryNotes(records, query, 5, Number.MAX_SAFE_INTEGER).length > 0;
 }
 
+/** The answer when a complete read finds no usable record for the query. */
+function noMatchLine(memory: readonly MemoryRecord[], query: string, now: number): string {
+  const quoted = terminalSafe(query, MAX_QUERY_DISPLAY_BYTES);
+  const line = futureTeachingMatch(memory, query, now)
+    ? `No match for "${quoted}" yet. Matching evidence is dated in the future, so it was not used.`
+    : `No record matches "${quoted}".`;
+  return terminalSafe(line, MAX_OUTPUT_LINE_BYTES);
+}
+
 export async function what(argv: string[], deps: DictionaryCommandDeps = {}): Promise<number> {
   const { speak, support, records, coverage } = resolve(deps);
   let parsed;
@@ -401,7 +423,7 @@ export async function what(argv: string[], deps: DictionaryCommandDeps = {}): Pr
   }
   const { query, useAi } = parsed;
   if (!query) {
-    speak('what needs word to look up. rocky what "naikin", question');
+    speak('Missing query. Example: rocky what "naikin".');
     return 2;
   }
   const scan = coverage();
@@ -410,13 +432,11 @@ export async function what(argv: string[], deps: DictionaryCommandDeps = {}): Pr
   const teaching = teachingHits(memory, query, now);
   if (teaching.all.length === 0) {
     if (scan !== undefined && coverageIncomplete(scan)) {
-      speak("memory coverage incomplete. I not know. check, question");
+      speak(COVERAGE_UNKNOWN_MATCH);
       support(coverageLine(scan, memory.length));
       return 0;
     }
-    speak(terminalSafe(futureTeachingMatch(memory, query, now)
-      ? `"${terminalSafe(query, MAX_QUERY_DISPLAY_BYTES)}"... I not know yet. evidence future. check, question`
-      : `"${terminalSafe(query, MAX_QUERY_DISPLAY_BYTES)}"... I not know. I not hear this before. I listen now.`, MAX_OUTPUT_LINE_BYTES));
+    speak(noMatchLine(memory, query, now));
     return 0;
   }
   if (scan !== undefined && coverageIncomplete(scan)) support(coverageLine(scan, memory.length));
@@ -432,7 +452,7 @@ export async function what(argv: string[], deps: DictionaryCommandDeps = {}): Pr
       }
     }
     if (rank === undefined) {
-      speak("model sleeps. I use my own ears.");
+      speak(phrase("ai-disabled"));
     } else {
       let rankedIds: readonly string[] | undefined;
       try {
@@ -443,7 +463,8 @@ export async function what(argv: string[], deps: DictionaryCommandDeps = {}): Pr
       const ranked = Array.isArray(rankedIds) && rankedIds.every((id) => typeof id === "string")
         ? reorder(teaching.triples, rankedIds)
         : undefined;
-      if (ranked === undefined) speak("model sleeps. I use my own ears.");
+      // No answer at all and an answer that failed the checks are different facts.
+      if (ranked === undefined) speak(phrase(Array.isArray(rankedIds) ? "ai-fallback" : "ai-unavailable"));
       else {
         displayed = ranked;
         aiRanked = true;
@@ -451,9 +472,11 @@ export async function what(argv: string[], deps: DictionaryCommandDeps = {}): Pr
     }
   }
   const shown: LookupHit[] = aiRanked ? mergeRankedTeaching(teaching.all, displayed) : teaching.all;
-  speak(terminalSafe("triple" in (shown[0] as LookupHit)
-    ? `you say "${terminalSafe(query, MAX_QUERY_DISPLAY_BYTES)}". it is ${subject(shown[0] as LookupHit)}. I think. check, question`
-    : `you say "${terminalSafe(query, MAX_QUERY_DISPLAY_BYTES)}". your note says ${subject(shown[0] as LookupHit)}. I only hear. check, question`, MAX_OUTPUT_LINE_BYTES));
+  const top = shown[0] as LookupHit;
+  const quoted = terminalSafe(query, MAX_QUERY_DISPLAY_BYTES);
+  speak(terminalSafe("triple" in top
+    ? `Possible match for "${quoted}": a recorded intent became ${subject(top)}. Check the evidence.`
+    : `Possible match for "${quoted}": your note says ${subject(top)}. It is recorded, not verified. Check the evidence.`, MAX_OUTPUT_LINE_BYTES));
   evidence(shown, support);
   return 0;
 }
@@ -475,7 +498,7 @@ export function how(argv: string[], deps: DictionaryCommandDeps = {}): number {
     throw error;
   }
   if (!query) {
-    speak('how needs word to remember. rocky how "naikin", question');
+    speak('Missing query. Example: rocky how "naikin".');
     return 2;
   }
   const scan = coverage();
@@ -484,21 +507,19 @@ export function how(argv: string[], deps: DictionaryCommandDeps = {}): number {
   const teaching = teachingHits(memory, query, now);
   if (teaching.all.length === 0) {
     if (scan !== undefined && coverageIncomplete(scan)) {
-      speak("memory coverage incomplete. I not know. check, question");
+      speak(COVERAGE_UNKNOWN_MATCH);
       support(coverageLine(scan, memory.length));
       return 0;
     }
-    speak(terminalSafe(futureTeachingMatch(memory, query, now)
-      ? `"${terminalSafe(query, MAX_QUERY_DISPLAY_BYTES)}"... I not know yet. evidence future. check, question`
-      : `"${terminalSafe(query, MAX_QUERY_DISPLAY_BYTES)}"... I not know. no memory. you teach me when you work. good good.`, MAX_OUTPUT_LINE_BYTES));
+    speak(noMatchLine(memory, query, now));
     return 0;
   }
   if (scan !== undefined && coverageIncomplete(scan)) support(coverageLine(scan, memory.length));
   const safeQuery = terminalSafe(query, MAX_QUERY_DISPLAY_BYTES);
   const first = teaching.all[0] as LookupHit;
   speak(terminalSafe("triple" in first
-    ? `last time you say "${safeQuery}", it become ${subject(first)}. maybe you mean ${subject(first)}, question`
-    : `last time you say "${safeQuery}", your note says ${subject(first)}. I only hear, question`, MAX_OUTPUT_LINE_BYTES));
+    ? `Last time you said "${safeQuery}", it became ${subject(first)}. You may mean ${subject(first)}.`
+    : `Last time you said "${safeQuery}", your note says ${subject(first)}. It is recorded, not verified.`, MAX_OUTPUT_LINE_BYTES));
   const gitDiffFn = deps.gitDiff ?? resolveGitDiff;
   for (const hit of teaching.all) {
     for (const line of evidenceLines(hit)) support(line);
@@ -525,18 +546,22 @@ export function how(argv: string[], deps: DictionaryCommandDeps = {}): number {
 }
 
 /**
- * Rationale evidence is hearsay until labeled: raw agent thinking, an
+ * Rationale evidence is unverified until labeled: raw agent thinking, an
  * agent's final reply, an agent self-reporting via `notify`, or the human
- * typing it themselves. Exported so tasks 15/17 label the same four ways
- * instead of re-deriving this text.
+ * typing it themselves. Exported so brief and sessions label the same four
+ * ways instead of re-deriving this text.
  */
 export function rationaleSourceLabel(source: RationaleSource): string {
   switch (source) {
-    case "log-thinking": return "heard from thinking";
+    case "log-thinking": return "captured from thinking";
     case "log-response": return "agent said in reply";
     case "notify": return "agent said";
     case "human": return "you said";
   }
+}
+
+function capitalizeFirst(text: string): string {
+  return `${text.charAt(0).toUpperCase()}${text.slice(1)}`;
 }
 
 /** Rationale records join `why` by link, not by guessing at excerpt text. */
@@ -547,9 +572,9 @@ function linkedRationales(memory: readonly MemoryRecord[], tripleId: string): Ra
 }
 
 /**
- * One stated reason: its excerpt, labelled by who said it, on the persona sink,
+ * One stated reason: its excerpt, labelled by who said it, on the prefixed sink,
  * then the caller's evidence line on the support sink. Both pass through
- * `terminalSafe` here, because the excerpt is hearsay and may carry anything.
+ * `terminalSafe` here, because the excerpt is unverified and may carry anything.
  */
 function sayRationale(
   speak: (line: string) => void,
@@ -558,7 +583,7 @@ function sayRationale(
   evidence: string,
 ): void {
   const excerpt = terminalSafe(record.excerpt, MAX_INTENT_DISPLAY_BYTES).trim();
-  speak(terminalSafe(`${rationaleSourceLabel(record.source)}: ${excerpt}`, MAX_OUTPUT_LINE_BYTES));
+  speak(terminalSafe(`${capitalizeFirst(rationaleSourceLabel(record.source))}: ${excerpt}`, MAX_OUTPUT_LINE_BYTES));
   support(terminalSafe(evidence, MAX_OUTPUT_LINE_BYTES));
 }
 
@@ -601,7 +626,7 @@ const WHY_ADD_USAGE = 'rocky why --add "<text>" [--files a.ts,b.ts]';
  * `--files <csv>` may sit anywhere in the tail; every other word still joins
  * the reason text. The comma grammar is the notify lane's, but a missing, empty,
  * or flag-shaped value is a usage error here: that lane fails open, while a
- * person at a terminal must hear that no file would be named.
+ * person at a terminal must be told that no file would be named.
  */
 function parseWhyAddArgs(args: readonly string[]): { text: string; files?: string[] } {
   const words: string[] = [];
@@ -617,7 +642,7 @@ function parseWhyAddArgs(args: readonly string[]): { text: string; files?: strin
     files = value === undefined || value.startsWith("--")
       ? []
       : value.split(",").map((entry) => entry.trim()).filter((entry) => entry.length > 0);
-    if (files.length === 0) throw new CliUsageError("--files needs path", WHY_ADD_USAGE);
+    if (files.length === 0) throw new CliUsageError("--files needs a path", WHY_ADD_USAGE);
     i += 1;
   }
   return { text: words.join(" ").trim(), ...(files === undefined ? {} : { files }) };
@@ -630,7 +655,7 @@ function parseWhyAddArgs(args: readonly string[]): { text: string; files?: strin
 function whyAdd(args: readonly string[], speak: (line: string) => void, records: () => MemoryRecord[], now: number): number {
   const { text, files } = parseWhyAddArgs(args);
   if (!text) {
-    speak('why --add needs word to remember. rocky why --add "some reason", question');
+    speak('Missing reason text. Example: rocky why --add "some reason".');
     return 1;
   }
   const cwd = process.cwd();
@@ -645,8 +670,8 @@ function whyAdd(args: readonly string[], speak: (line: string) => void, records:
   // The bounding rules can drop a legitimate path (`app/(auth)/page.tsx`), so
   // this line states only what was kept, never that a path was bad.
   speak(files !== undefined && stored.files === undefined
-    ? "reason remembered. no file kept."
-    : "why remembered. you said it, rocky keeps it.");
+    ? "Reason recorded. No file was kept."
+    : "Reason recorded as stated by you.");
   return 0;
 }
 
@@ -670,7 +695,7 @@ export function why(argv: string[], deps: DictionaryCommandDeps = {}): number {
     throw error;
   }
   if (!path) {
-    speak("why needs file to remember. rocky why src/app.css, question");
+    speak("Missing file. Example: rocky why src/app.css.");
     return 2;
   }
   const safePath = terminalSafe(path, MAX_PATH_DISPLAY_BYTES);
@@ -698,7 +723,7 @@ export function why(argv: string[], deps: DictionaryCommandDeps = {}): number {
   const fileRationales = rationalesForFile(memory, path, process.cwd(), now, MAX_FILE_RATIONALES);
   if (hits.length === 0) {
     if (evidenceResult.ambiguousPath) {
-      speak(terminalSafe(`"${safePath}"... multiple possible paths. clarify, question`, MAX_OUTPUT_LINE_BYTES));
+      speak(terminalSafe(`"${safePath}" matches more than one path. Clarify which path you mean.`, MAX_OUTPUT_LINE_BYTES));
       support(terminalSafe(isVerbose()
         ? `coverage status: ${coverageStatus}; no silent rationale selection; confidence=incomplete reason=ambiguous path`
         : AMBIGUOUS_PATH_WORDS, MAX_OUTPUT_LINE_BYTES));
@@ -710,7 +735,7 @@ export function why(argv: string[], deps: DictionaryCommandDeps = {}): number {
     // hold more: a whole scan does not mean the reader examined everything.
     const readerBounded = memory.length > MAX_WHY_RECORDS;
     if (scanIncomplete || pathMayBeOmitted || readerBounded) {
-      speak(terminalSafe(`"${safePath}"... I not know if agent touch. coverage incomplete.`, MAX_OUTPUT_LINE_BYTES));
+      speak(terminalSafe(`Coverage is incomplete, so it is not known whether an agent touched "${safePath}".`, MAX_OUTPUT_LINE_BYTES));
       if (scanIncomplete) support(coverageLine(scan, memory.length));
       if (pathMayBeOmitted) {
         support(terminalSafe(isVerbose()
@@ -723,7 +748,7 @@ export function why(argv: string[], deps: DictionaryCommandDeps = {}): number {
       // examined every record, and no record that might hide this path still leave one fact: no
       // record names the file. Say that and no more, and not even that when a stated reason does.
       if (fileRationales.length === 0) {
-        speak(terminalSafe(`"${safePath}"... no record names this file. I not know if agent touch it.`, MAX_OUTPUT_LINE_BYTES));
+        speak(terminalSafe(`No record names "${safePath}". It is not known whether an agent touched it.`, MAX_OUTPUT_LINE_BYTES));
       }
     }
     sayFileRationales(speak, support, fileRationales);
@@ -745,14 +770,14 @@ export function why(argv: string[], deps: DictionaryCommandDeps = {}): number {
       words: metadata.words,
     };
     if (rationale) {
-      speak(terminalSafe(`agent say: ${rationale}. I only hear. correct, question`, MAX_OUTPUT_LINE_BYTES));
+      speak(terminalSafe(`Agent said: ${rationale}. Recorded, not verified.`, MAX_OUTPUT_LINE_BYTES));
       const tags = triple.rationale?.tags
         .map((tag) => terminalSafe(tag, MAX_INTENT_DISPLAY_BYTES))
         .filter(Boolean)
         .join(" ");
       for (const line of boundedDetailLines(`  (${where}, ${ago(triple.ts)}${tags ? `, tags: ${tags}` : ""};`, provenance, ")")) support(line);
     } else {
-      speak(terminalSafe("change happen. no reason I hear.", MAX_OUTPUT_LINE_BYTES));
+      speak(terminalSafe("Change recorded. No reason recorded for this change.", MAX_OUTPUT_LINE_BYTES));
       for (const line of boundedDetailLines(`  (${where}, ${ago(triple.ts)};`, provenance, ")")) support(line);
     }
     for (const rationaleRecord of linkedRationales(memory, triple.id)) {
@@ -794,11 +819,11 @@ export function digest(argv: string[], deps: DictionaryCommandDeps & { now?: num
   const buckets = digestBuckets(memory, now);
   if (buckets.length === 0) {
     if (scan !== undefined && coverageIncomplete(scan)) {
-      speak("memory coverage incomplete. I cannot say week is quiet, question");
+      speak(`Memory coverage is incomplete, so it is not known whether the week was quiet. ${SEE_COVERAGE_LINE}`);
       support(coverageLine(scan, memory.length));
       return 0;
     }
-    speak("quiet week. no intent I hear. quiet good good.");
+    speak("No intents recorded this week.");
     return 0;
   }
   if (scan !== undefined && coverageIncomplete(scan)) support(coverageLine(scan, memory.length));
@@ -809,9 +834,10 @@ export function digest(argv: string[], deps: DictionaryCommandDeps & { now?: num
     && (counted.add(record.id), isOperationalMemoryRecord(record, now))
     && now - record.ts <= WEEK_MS).length;
   const top = buckets[0];
+  const intents = `${count} intent${count === 1 ? "" : "s"} this week.`;
   const headline = top && top.count >= 3
-    ? `${count} intent this week. ${terminalSafe(top.tag, MAX_INTENT_DISPLAY_BYTES)} again and again. pattern, question`
-    : `${count} intent this week. I remember all.`;
+    ? `${intents} "${terminalSafe(top.tag, MAX_INTENT_DISPLAY_BYTES)}" appears in ${top.count} of them.`
+    : intents;
   speak(terminalSafe(headline, MAX_OUTPUT_LINE_BYTES));
   for (const bucket of buckets) {
     const tag = terminalSafe(bucket.tag, MAX_INTENT_DISPLAY_BYTES);
@@ -823,7 +849,7 @@ export function digest(argv: string[], deps: DictionaryCommandDeps & { now?: num
   const csCounts = csConceptCounts(memory, now);
   if (csCounts.size > 0) {
     const top = [...csCounts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0] as [string, number];
-    support(`cs pattern: ${top[0]} x${top[1]} this week. full explain in dash, question`);
+    support(`cs pattern: ${top[0]} x${top[1]} this week. Full explanation in rocky dash.`);
   }
   return 0;
 }
@@ -846,12 +872,12 @@ export async function quiz(
   let ask = deps.ask;
   if (ask === undefined) {
     if (process.stdin.isTTY !== true) {
-      speak("quiz needs terminal with you in it. later, question");
+      speak(QUIZ_NEEDS_TERMINAL);
       return 0;
     }
     const port = createTtyPromptPort();
     if (port === undefined) {
-      speak("quiz needs terminal with you in it. later, question");
+      speak(QUIZ_NEEDS_TERMINAL);
       return 0;
     }
     ask = (message) => port.ask(message);
@@ -863,26 +889,27 @@ export async function quiz(
   const candidates = quizCandidates(memory, now, 3);
   if (candidates.length === 0) {
     if (scan !== undefined && coverageIncomplete(scan)) {
-      speak("memory coverage incomplete. I cannot say nothing old enough, question");
+      speak(`Memory coverage is incomplete, so it is not known whether anything is old enough to ask about. ${SEE_COVERAGE_LINE}`);
       support(coverageLine(scan, memory.length));
       return 0;
     }
     const future = quizCandidates(memory, Number.MAX_SAFE_INTEGER, 3).filter((candidate) => candidate.ts > now);
     speak(future.length > 0
-      ? "I not know future note yet. work more, come back, question"
-      : "nothing old enough to ask. work more, come back, question");
+      ? "The only candidates are dated in the future, so none were used. Come back later."
+      : "Nothing is old enough to ask about yet. Come back later.");
     return 0;
   }
   if (scan !== undefined && coverageIncomplete(scan)) support(coverageLine(scan, memory.length));
 
+  const answerPrompt = rockyPrompt(phrase("check-answer"));
   for (const candidate of candidates) {
     if (candidate.kind === "note") {
       const metadata = noteConfidence(candidate);
       const subject = subjectForNote(candidate);
-      speak(terminalSafe(`your note "${subject}". what you understand, question`, MAX_OUTPUT_LINE_BYTES));
-      await ask("your answer: ");
-      const remembered = `I remember your answer: ${terminalSafe(candidate.answer, MAX_INTENT_DISPLAY_BYTES)}.`;
-      speak(terminalSafe(isVerbose() ? `${remembered} confidence=${metadata.confidence}` : `${remembered} not verified.`, MAX_OUTPUT_LINE_BYTES));
+      speak(questionLine(`Your note "${subject}". What do you understand about it`));
+      await ask(answerPrompt);
+      const recorded = `Your recorded answer: ${terminalSafe(candidate.answer, MAX_INTENT_DISPLAY_BYTES)}.`;
+      speak(terminalSafe(isVerbose() ? `${recorded} confidence=${metadata.confidence}` : `${recorded} Not verified.`, MAX_OUTPUT_LINE_BYTES));
       const provenance: ProvenanceFields = {
         id: candidate.id, ts: candidate.ts, source: "note", fileLabel: "file", files: metadata.files,
         coverage: metadata.coverage, confidence: metadata.confidence, reason: metadata.reason, words: metadata.words,
@@ -891,12 +918,12 @@ export async function quiz(
       continue;
     }
     const intent = terminalSafe(candidate.intent?.text ?? "this change", MAX_INTENT_DISPLAY_BYTES);
-    speak(terminalSafe(`you say "${intent}". what it become, question`, MAX_OUTPUT_LINE_BYTES));
-    await ask("your answer: ");
+    speak(questionLine(`You said "${intent}". What did it become`));
+    await ask(answerPrompt);
     const first = candidate.mechanism.files[0];
     const path = terminalSafe(first?.path ?? "somewhere", MAX_PATH_DISPLAY_BYTES);
     const metadata = tripleConfidence(candidate);
-    speak(terminalSafe(`I remember: ${subjectForTriple(candidate)}.`, MAX_OUTPUT_LINE_BYTES));
+    speak(terminalSafe(`Recorded: it became ${subjectForTriple(candidate)}.`, MAX_OUTPUT_LINE_BYTES));
     const provenance: ProvenanceFields = {
       id: candidate.id, ts: candidate.ts, source: candidate.origin, agent: candidate.agent, fileLabel: "files",
       files: metadata.files, coverage: metadata.coverage, confidence: metadata.confidence, reason: metadata.reason,
@@ -904,6 +931,6 @@ export async function quiz(
     };
     for (const line of boundedDetailLines(`  (${path} +${first?.plusMinus[0] ?? 0} -${first?.plusMinus[1] ?? 0}, ${ago(candidate.ts)};`, provenance, ")")) support(line);
   }
-  speak("you know better than me. good good.");
+  speak("Quiz finished.");
   return 0;
 }

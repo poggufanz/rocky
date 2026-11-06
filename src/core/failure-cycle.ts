@@ -1,7 +1,7 @@
 /**
  * Failure-cycle / circuit breaker — deterministic, zero-dependency, no model.
  *
- * A vibe-coding failure mode from the CHI'26 gaps plan: the same trouble
+ * A vibe-coding failure mode from the CHI'26 gaps plan: the same failure
  * returns and the words around it do not change either. This module names
  * that loop from two local signals only — a repeated failure fingerprint
  * (see `core/fingerprint.ts`) and near-identical rationale drafts scored
@@ -31,7 +31,7 @@ import { mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "no
 import { dirname } from "node:path";
 import { similarity, tokens } from "./fingerprint.js";
 
-/** Same trouble seen this many times in one session before it can be a cycle. */
+/** Same failure seen this many times in one session before it can be a cycle. */
 export const FAILURE_CYCLE_COUNT = 3 as const;
 /** Jaccard similarity above this between the last two rationales counts as same words. */
 export const FAILURE_CYCLE_SIMILARITY = 0.8 as const;
@@ -39,8 +39,8 @@ export const FAILURE_CYCLE_SIMILARITY = 0.8 as const;
 export const FAILURE_CYCLE_MAX_KEYS = 500 as const;
 /** A state file older than this by mtime reads as a fresh session; mirrors GATE_SESSION_TIMEOUT_MS. */
 export const CYCLE_STATE_TIMEOUT_MS = 30 * 60 * 1000;
-/** Advisory nudge text, Rocky voice: a question ends with `, question`, never `?`. */
-export const CYCLE_NUDGE = "same trouble, same words. add new info, question" as const;
+/** Advisory nudge text for a repeated failure with unchanged wording. */
+export const CYCLE_NUDGE = "Same failure with the same wording again. Add new information before retrying." as const;
 /** How many top fingerprints `stats --cycles` lists. */
 export const CYCLES_TOP = 10 as const;
 
@@ -185,7 +185,7 @@ function isValidEntry(value: unknown): value is CycleEntry {
 /**
  * Read one session's cycle file. Stale (mtime older than the session
  * timeout), oversized, corrupt, or missing state reads as empty — the gate
- * treats that as "no loop heard", never as an error. Never throws.
+ * treats that as "no loop recorded", never as an error. Never throws.
  */
 export function loadCycleState(stateFile: string, now: number = Date.now()): Map<string, CycleEntry> {
   const state = new Map<string, CycleEntry>();
@@ -245,34 +245,43 @@ export function saveCycleState(stateFile: string, state: ReadonlyMap<string, Cyc
 
 /**
  * One-line gate/CLI nudge, or undefined when there is no loop to name.
- * Never throws, never returns a question mark. Mirrors the
+ * Never throws. Mirrors the
  * `clarityNudgeLine` advisory rendering pattern from Task 1.
  */
 export function cycleNudgeLine(detected: unknown): string | undefined {
   try {
     if (detected !== true) return undefined;
-    return `${CYCLE_NUDGE}. try rocky recall, rocky teach <file>, rocky why --diff`;
+    return `${CYCLE_NUDGE} Try rocky recall, rocky teach <file>, or rocky why --diff.`;
   } catch {
     return undefined;
   }
 }
 
 /**
+ * The cluster count line shared by the CLI card and the gate's deny-reason
+ * suffix, so the two cannot drift. A count only: it names no cause for the
+ * repeats. Callers pass `clusters >= 2`.
+ */
+export function cycleClusterLine(clusters: number): string {
+  return `${clusters} failures repeated this session. Count only, no cause named.`;
+}
+
+/**
  * Detail lines for CLI output; the advisory rendering pattern Task 1's
  * `renderClarityCard` established. The cluster line is a count only — it
- * names no cause for the repeats. Never throws, never emits `?`.
+ * names no cause for the repeats. Never throws.
  */
 export function renderCycleCard(count: number, clusters: number): string[] {
   try {
     const lines: string[] = [CYCLE_NUDGE];
     if (typeof count === "number" && Number.isSafeInteger(count) && count > 0) {
-      lines.push(`heard ${count} times this session.`);
+      lines.push(`Recorded ${count} times this session.`);
     }
     lines.push("try: rocky recall");
     lines.push("try: rocky teach <file>");
     lines.push("try: rocky why --diff");
     if (typeof clusters === "number" && Number.isSafeInteger(clusters) && clusters >= 2) {
-      lines.push(`${clusters} repeats heard this session. count only, no cause named.`);
+      lines.push(cycleClusterLine(clusters));
     }
     return lines;
   } catch {

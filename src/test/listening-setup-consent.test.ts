@@ -22,7 +22,7 @@ test("repo actions reject host and feature flags", () => {
     ["--repo", "/x", "--allow-capture", "--harness", "codex"],
     ["--repo", "/x", "--allow-capture", "--mcp"],
     ["--repo", "/x", "--allow-capture", "--listening"],
-    ["--repo", "/x", "--allow-capture", "--yes", "--voice-skill"],
+    ["--repo", "/x", "--allow-capture", "--yes", "--replace"],
     ["--repo", "/x", "--allow-capture", "--check"],
   ]) {
     assert.throws(() => parseSetupArgs(argv), SetupUsageError);

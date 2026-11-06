@@ -1878,7 +1878,7 @@ test("live owner lock is bounded bookkeeping and preserves child success", { tim
   // the wait ended at the deadline instead of holding indefinitely.
   assert.ok(elapsed >= 4_000 && elapsed < 12_000, `memory lock wait must stay bounded, got ${elapsed} ms`);
   assert.equal(existsSync(lock), true, "live owner's lock is never stolen");
-  assert.match(result.stderr, /I cannot write memory\. this one I forget\./u);
+  assert.match(result.stderr, /Could not write to memory, so this run is not recorded\./u);
 });
 
 test("hook bookkeeping also returns zero when a live owner keeps the lock", (t) => {

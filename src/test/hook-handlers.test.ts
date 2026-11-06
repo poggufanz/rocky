@@ -1,13 +1,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import fs, { mkdtempSync, existsSync, readFileSync, writeFileSync, rmSync, chmodSync } from "node:fs";
+import fs, { mkdirSync, mkdtempSync, existsSync, readFileSync, writeFileSync, rmSync, chmodSync } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { spawn } from "node:child_process";
 import { commandFingerprint } from "../core/fingerprint.js";
-import { validateRockyPhrase } from "../ui/phrases.js";
+import { phrase, validateOutputLine } from "../ui/phrases.js";
 import { detailTty, flushHookSpeech, sayTty } from "../ui/rocky.js";
 
 const home = mkdtempSync(join(tmpdir(), "rocky-hook-"));
@@ -15,6 +15,27 @@ process.env.ROCKY_HOME = home;
 
 const memory = await import("../core/memory.js");
 const { hookFail, hookSuccess } = await import("../commands/hook.js");
+
+/**
+ * Every rocky-authored line in captured hook speech: the prefixed lines, minus
+ * the prefix. Indented detail lines carry recorded data (a command, a path)
+ * that may say anything, so they are never judged against the output rules.
+ */
+function spokenLines(tty: string): string[] {
+  return tty
+    .split("\n")
+    .filter((line) => line.startsWith("rocky: "))
+    .map((line) => line.slice("rocky: ".length));
+}
+
+function assertPlainSpeech(tty: string): void {
+  const lines = spokenLines(tty);
+  assert.ok(lines.length > 0, `expected at least one spoken line in ${JSON.stringify(tty)}`);
+  for (const line of lines) assert.deepEqual(validateOutputLine(line), [], line);
+  for (const line of tty.split("\n").filter((entry) => entry.length > 0)) {
+    assert.ok(line.startsWith("rocky: ") || line.startsWith("    "), `unprefixed speech line: ${JSON.stringify(line)}`);
+  }
+}
 
 function captureTty<T>(fn: () => T): { result: T; tty: string } {
   const scratch = mkdtempSync(join(tmpdir(), "rocky-capture-speech-"));
@@ -85,9 +106,10 @@ test("hookSuccess does not change process cwd", () => {
   assert.equal(fixes.at(-1)?.cwd, cwd);
 });
 
-const LINK_LINE = "[Rocky] command works now. same command fail before. I link them. I not hear what change. good good good.\n";
+const LINK_LINE = `rocky: ${phrase("fix-linked")}\n`;
+const RECURRENCE_SAME_LINE = `rocky: ${phrase("fix-recurrence-same")}\n`;
 
-test("hookSuccess states what Rocky heard, then names the command the late line is about", () => {
+test("hookSuccess states what was recorded, then names the command the late line is about", () => {
   process.env.ROCKY_HOME = mkdtempSync(join(tmpdir(), "rocky-hook-link-voice-"));
   const linkCwd = mkdtempSync(join(tmpdir(), "rocky-hook-link-voice-cwd-"));
   try {
@@ -95,7 +117,8 @@ test("hookSuccess states what Rocky heard, then names the command the late line 
     const { result, tty } = captureTty(() => hookSuccess("node hello.js", linkCwd));
     assert.equal(result, 0);
     assert.equal(tty, `${LINK_LINE}    command: node hello.js\n`);
-    assert.doesNotMatch(tty, /\bfixed\b|you fix it|I remember (the )?fix|something between/i);
+    assert.doesNotMatch(tty, /\bfixed\b|you fixed it|remember(s|ed)? the fix|something between/i);
+    assertPlainSpeech(tty);
   } finally {
     process.env.ROCKY_HOME = home;
   }
@@ -199,10 +222,11 @@ test("hookFail admits when the remembered fix's cwd differs from the cwd argumen
   try {
     const { result, tty } = captureTty(() => hookFail("elsewhere-test-cmd", 1, failCwd));
     assert.equal(result, 0);
-    assert.match(tty, /last time, same command work again after\. I not hear what change\./);
-    assert.match(tty, /but fix comes from other place\./);
+    assert.ok(tty.includes(RECURRENCE_SAME_LINE), tty);
+    assert.match(tty, /But that fix comes from a different directory\./);
     assert.match(tty, new RegExp(`place: ${fixCwd.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
     assert.doesNotMatch(tty, /strong\.|confirmed/);
+    assertPlainSpeech(tty);
   } finally {
     process.env.ROCKY_HOME = home;
   }
@@ -215,9 +239,9 @@ test("hookFail compares elsewhere against linked failure cwd, not invocation cwd
   try {
     const { result, tty } = captureTty(() => hookFail("linked-cwd-test-cmd", 1, fixCwd));
     assert.equal(result, 0);
-    assert.match(tty, /but fix comes from other place\./);
+    assert.match(tty, /But that fix comes from a different directory\./);
     assert.match(tty, new RegExp(`place: ${fixCwd.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
-    assert.match(tty, /possible only/);
+    assert.match(tty, /Possible only\. Check before acting\./);
     assert.doesNotMatch(tty, /strong\.|confirmed/);
   } finally {
     process.env.ROCKY_HOME = home;
@@ -230,19 +254,19 @@ test("hookFail says nothing extra when the remembered fix's cwd matches the cwd 
   try {
     const { result, tty } = captureTty(() => hookFail("samecwd-test-cmd", 1, sameCwd));
     assert.equal(result, 0);
-    assert.doesNotMatch(tty, /other place/);
+    assert.doesNotMatch(tty, /different directory/);
     assert.doesNotMatch(tty, /place:/);
     // sanity: the base fix line still speaks, proving the comparison — not
     // the whole fix branch — is what's being suppressed here.
-    assert.match(tty, /last time, same command work again after\. I not hear what change\./);
+    assert.ok(tty.includes(RECURRENCE_SAME_LINE), tty);
   } finally {
     process.env.ROCKY_HOME = home;
   }
 });
 
 /**
- * One Windows directory, two spellings: the Git Bash hook hears the
- * MSYS-converted `C:/...` where `rocky run` and the PowerShell hook hear
+ * One Windows directory, two spellings: the Git Bash hook reports the
+ * MSYS-converted `C:/...` where `rocky run` and the PowerShell hook report
  * `C:\...`. Equality widens for exactly that on win32 and nowhere else, so
  * the POSIX twin below proves a differing spelling never links there.
  */
@@ -259,19 +283,19 @@ test("a Git Bash hook failure and a rocky run success in the same directory link
   }
 });
 
-test("hookSuccess says the command works now when the failure was heard under the Git Bash spelling", GIT_BASH_ONLY, () => {
+test("hookSuccess says the command passes now when the failure was recorded under the Git Bash spelling", GIT_BASH_ONLY, () => {
   process.env.ROCKY_HOME = mkdtempSync(join(tmpdir(), "rocky-hook-spelling-works-"));
   try {
     hookFail("node fail.js", 1, process.cwd().replaceAll("\\", "/"));
     const { result, tty } = captureTty(() => hookSuccess("node fail.js", process.cwd()));
     assert.equal(result, 0);
-    assert.match(tty, /command works now\./);
+    assert.ok(tty.includes(LINK_LINE), tty);
   } finally {
     process.env.ROCKY_HOME = home;
   }
 });
 
-test("hookFail does not call a same-directory fix 'from other place' because it was heard under another spelling", () => {
+test("hookFail does not call a same-directory fix 'a different directory' because it was recorded under another spelling", () => {
   const gitBash = "C:/Users/x/p";
   const native = "C:\\Users\\x\\p";
   seedElsewhereFix(gitBash, native, "spelling-test-cmd", 1);
@@ -280,8 +304,8 @@ test("hookFail does not call a same-directory fix 'from other place' because it 
     assert.equal(result, 0);
     // sanity: the base fix line speaks either way, so only the elsewhere
     // admission can differ between win32 (same directory) and POSIX (two).
-    assert.match(tty, /last time, same command work again after\. I not hear what change\./);
-    assert.equal(/other place/.test(tty), process.platform !== "win32");
+    assert.ok(tty.includes(RECURRENCE_SAME_LINE), tty);
+    assert.equal(/different directory/.test(tty), process.platform !== "win32");
   } finally {
     process.env.ROCKY_HOME = home;
   }
@@ -344,17 +368,137 @@ test("hookFail admits a fingerprint-matched fix may be a different command, not 
     const { result, tty } = captureTty(() => hookFail(currentCmd, 1, diffCwd));
     assert.equal(result, 0);
     assert.doesNotMatch(tty, /you fix with/);
-    assert.match(tty, /last time, you run:/);
+    assert.match(tty, /Last time, you ran:/);
     assert.match(tty, new RegExp(seededCmd.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
-    assert.match(tty, /possible fix only, question/);
-    assert.match(tty, /try, question/);
+    assert.match(tty, /Possible fix only\./);
+    assert.match(tty, /Try that command\?/);
+    assertPlainSpeech(tty);
   } finally {
     process.env.ROCKY_HOME = home;
   }
 });
 
-test("the elsewhere-admission line follows Rocky's voice rules", () => {
-  assert.deepEqual(validateRockyPhrase("but fix comes from other place."), []);
+test("the elsewhere-admission lines follow the output rules", () => {
+  assert.deepEqual(validateOutputLine("But that fix comes from a different directory."), []);
+  assert.deepEqual(validateOutputLine("Possible only. Check before acting."), []);
+});
+
+test("hookFail speaks the full-record hint with the quoted command last, and plainly", () => {
+  const isolatedHome = mkdtempSync(join(tmpdir(), "rocky-hook-hint-"));
+  const hintCwd = mkdtempSync(join(tmpdir(), "rocky-hook-hint-cwd-"));
+  process.env.ROCKY_HOME = isolatedHome;
+  try {
+    const failure = {
+      kind: "failure", id: "hint-failure", ts: Date.now() - 1000, cwd: hintCwd, cmd: "hint-test-cmd",
+      exitCode: 1, fingerprint: commandFingerprint("hint-test-cmd", 1), fingerprintV: 2,
+      signature: ["hint-test-cmd"], excerpt: "exit 1", origin: "hook",
+    };
+    writeFileSync(join(isolatedHome, "memory.jsonl"), `${JSON.stringify(failure)}\n`, "utf8");
+    const { result, tty } = captureTty(() => hookFail("hint-test-cmd", 1, hintCwd));
+    assert.equal(result, 0);
+    assert.equal(
+      tty,
+      "rocky: Same error again. The hook captures only the command, not stderr. To capture stderr too, run: rocky run 'hint-test-cmd'\n",
+    );
+    assertPlainSpeech(tty);
+  } finally {
+    process.env.ROCKY_HOME = home;
+  }
+});
+
+test("hookFail says when memory cannot be read or written, plainly, and still exits 0", () => {
+  const brokenHome = mkdtempSync(join(tmpdir(), "rocky-hook-broken-memory-"));
+  const brokenCwd = mkdtempSync(join(tmpdir(), "rocky-hook-broken-memory-cwd-"));
+  // A directory where the memory file belongs: it opens as neither a readable
+  // nor a writable file, on every platform. The bounded reader reports that as
+  // incomplete coverage instead of throwing.
+  mkdirSync(join(brokenHome, "memory.jsonl"));
+  process.env.ROCKY_HOME = brokenHome;
+  try {
+    const { result, tty } = captureTty(() => hookFail("broken-memory-cmd", 1, brokenCwd));
+    assert.equal(result, 0);
+    assert.match(tty, /^rocky: Memory coverage is incomplete, so no prior fix is claimed\. Check the details below\.$/m);
+    assert.match(tty, /^rocky: The memory file could not be written\. This event was not recorded\.$/m);
+    assert.match(tty, /^ {4}memory: .*memory\.jsonl$/m);
+    assertPlainSpeech(tty);
+  } finally {
+    process.env.ROCKY_HOME = home;
+  }
+});
+
+test("the memory-open failure line, which only a defensive catch can reach, follows the output rules", () => {
+  // `loadMemoryChecked` folds every read failure into incomplete coverage, so
+  // no real file state throws into `readMemory`'s catch. The sentence is pinned
+  // from the shipped source instead of left unchecked.
+  const source = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "..", "src", "commands", "hook.ts"), "utf8");
+  const line = /sayTty\("(The memory file could not be opened[^"]*)"\)/.exec(source)?.[1];
+  assert.equal(line, "The memory file could not be opened, so nothing is recalled.");
+  assert.deepEqual(validateOutputLine(line!), []);
+});
+
+const RUNNING_AS_ROOT = { skip: process.getuid?.() === 0 && "root bypasses file mode; a read-only memory file cannot be exercised" };
+
+test("hookFail says when only the write fails, naming the memory file", RUNNING_AS_ROOT, () => {
+  const readOnlyHome = mkdtempSync(join(tmpdir(), "rocky-hook-readonly-memory-"));
+  const readOnlyCwd = mkdtempSync(join(tmpdir(), "rocky-hook-readonly-memory-cwd-"));
+  const memoryPath = join(readOnlyHome, "memory.jsonl");
+  writeFileSync(memoryPath, "", "utf8");
+  chmodSync(memoryPath, 0o444);
+  process.env.ROCKY_HOME = readOnlyHome;
+  try {
+    const { result, tty } = captureTty(() => hookFail("readonly-memory-cmd", 1, readOnlyCwd));
+    assert.equal(result, 0);
+    assert.equal(
+      tty,
+      `rocky: The memory file could not be written. This event was not recorded.\n    memory: ${memoryPath}\n`,
+    );
+    assertPlainSpeech(tty);
+  } finally {
+    process.env.ROCKY_HOME = home;
+    chmodSync(memoryPath, 0o644);
+  }
+});
+
+test("hookFail discloses incomplete memory coverage without claiming a prior fix", () => {
+  const partialHome = mkdtempSync(join(tmpdir(), "rocky-hook-partial-memory-"));
+  const partialCwd = mkdtempSync(join(tmpdir(), "rocky-hook-partial-memory-cwd-"));
+  // One unparseable line makes the bounded reader skip a record, which is
+  // exactly the incomplete coverage the hook must disclose.
+  writeFileSync(join(partialHome, "memory.jsonl"), "this line is not json\n", "utf8");
+  process.env.ROCKY_HOME = partialHome;
+  try {
+    const { result, tty } = captureTty(() => hookFail("partial-memory-cmd", 1, partialCwd));
+    assert.equal(result, 0);
+    assert.match(tty, /^rocky: Memory coverage is incomplete, so no prior fix is claimed\. Check the details below\.$/m);
+    assert.match(tty, /^ {4}\S/m, "a detail line follows the notice");
+    assert.doesNotMatch(tty, /Same error|Last time, you ran/);
+    assertPlainSpeech(tty);
+  } finally {
+    process.env.ROCKY_HOME = home;
+  }
+});
+
+test("hookSuccess says when the fix link cannot be written, plainly, and still exits 0", RUNNING_AS_ROOT, () => {
+  const readOnlyHome = mkdtempSync(join(tmpdir(), "rocky-hook-readonly-success-"));
+  const readOnlyCwd = mkdtempSync(join(tmpdir(), "rocky-hook-readonly-success-cwd-"));
+  const memoryPath = join(readOnlyHome, "memory.jsonl");
+  process.env.ROCKY_HOME = readOnlyHome;
+  try {
+    // A recorded failure plus the pending flag it sets: the next pass has a
+    // fix to link, and the write that would record the link is the one that fails.
+    assert.equal(hookFail("readonly-success-cmd", 1, readOnlyCwd), 0);
+    chmodSync(memoryPath, 0o444);
+    const { result, tty } = captureTty(() => hookSuccess("readonly-success-cmd", readOnlyCwd));
+    assert.equal(result, 0);
+    assert.equal(
+      tty,
+      `rocky: The memory file could not be written. This event was not recorded.\n    memory: ${memoryPath}\n`,
+    );
+    assertPlainSpeech(tty);
+  } finally {
+    process.env.ROCKY_HOME = home;
+    chmodSync(memoryPath, 0o644);
+  }
 });
 
 /**
@@ -419,7 +563,7 @@ test("sayTty/detailTty buffer instead of writing the console when ROCKY_HOOK_SPE
   const saved = process.env.ROCKY_HOOK_SPEECH_FILE;
   process.env.ROCKY_HOOK_SPEECH_FILE = speechFile;
   try {
-    sayTty("this error again. deep memory need stderr. run with: rocky run 'x', question");
+    sayTty("Same error again. The hook captures only the command, not stderr. To capture stderr too, run: rocky run 'x'");
     detailTty("place: somewhere");
     assert.equal(existsSync(speechFile), false, "nothing is published until flushHookSpeech runs");
 
@@ -427,7 +571,7 @@ test("sayTty/detailTty buffer instead of writing the console when ROCKY_HOOK_SPE
 
     assert.equal(existsSync(speechFile), true, "flushHookSpeech must publish the buffered lines");
     const published = readFileSync(speechFile, "utf8");
-    assert.match(published, /^\[Rocky\] this error again\./);
+    assert.match(published, /^rocky: Same error again\./);
     assert.match(published, /\n {4}place: somewhere\n$/);
     const leftoverTemp = fs.readdirSync(dirname(speechFile)).filter((name) => name.includes(".tmp"));
     assert.deepEqual(leftoverTemp, [], "the temp file must be renamed away, never left behind");
@@ -495,7 +639,7 @@ test("hookFail's speech survives end to end through the buffer/publish path exac
     assert.equal(result, 0);
     flushHookSpeech();
     assert.equal(existsSync(speechFile), true, "hookFail's second-occurrence speech must have been buffered and published");
-    assert.match(readFileSync(speechFile, "utf8"), /this error again/);
+    assert.match(readFileSync(speechFile, "utf8"), /Same error again/);
   } finally {
     if (savedHome === undefined) delete process.env.ROCKY_HOME;
     else process.env.ROCKY_HOME = savedHome;
@@ -529,7 +673,7 @@ test("a differing hook version names the reinstall command", () => {
   const line = hookStaleLine("0.3.0");
   assert.ok(line !== undefined);
   assert.match(line, /rocky hook install/);
-  assert.deepEqual(validateRockyPhrase(line), []);
+  assert.deepEqual(validateOutputLine(line), []);
 });
 
 test("a missing or unreadable hook version produces no stale line", () => {

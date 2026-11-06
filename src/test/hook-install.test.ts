@@ -13,11 +13,11 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { addHookBlock, hasHookBlock, hookInstall, hookUninstall, removeHookBlock } from "../commands/hook.js";
-import { phrase, validateRockyPhrase } from "../ui/phrases.js";
+import { phrase, validateOutputLine } from "../ui/phrases.js";
 import { verifyShellAssetsStaged } from "./shell-assets-fixture.js";
 
 const BLOCK_RE = /# >>> rocky hook >>>[\s\S]*# <<< rocky hook <<</;
-const DISCLOSURE = "bashrc is write-protected. I replace it anyway. your lines stay.";
+const DISCLOSURE = phrase("bashrc-write-protected");
 
 test("addHookBlock appends managed block once", () => {
   const once = addHookBlock("# my bashrc\nalias ll='ls -l'\n");
@@ -97,8 +97,9 @@ function bashrcSandbox(t: TestContext): BashrcSandbox {
   return { bashrc: join(home, ".bashrc"), stderr: () => chunks.join("") };
 }
 
-test("bashrc write-protected disclosure follows Rocky voice rules", () => {
-  assert.deepEqual(validateRockyPhrase(DISCLOSURE), []);
+test("bashrc write-protected disclosure follows the output rules and names the file", () => {
+  assert.deepEqual(validateOutputLine(DISCLOSURE), []);
+  assert.match(DISCLOSURE, /^\.bashrc is write-protected\./);
 });
 
 test("hookInstall discloses a write-protected bashrc, replaces it anyway, keeps mode and user lines", (t) => {
@@ -160,15 +161,16 @@ test("hookInstall never prints the write-protected disclosure for an ordinary mo
 // --- a bashrc made out of nothing -------------------------------------------
 //
 // On a machine whose people live in PowerShell, `hook install` still creates
-// ~/.bashrc, and the bash success line says "I hear everything there". Only
-// Git Bash reads that file on Windows, so the creation is said out loud --
+// ~/.bashrc, and the bash success line says "Open a new shell to activate it".
+// Only Git Bash reads that file on Windows, so the creation is said out loud --
 // once, only when the file really was made, and only on win32.
 
-const BASHRC_CREATED_DISCLOSURE = "bashrc missing. I make new one. only Git Bash hears it here.";
+const BASHRC_CREATED_DISCLOSURE = phrase("bashrc-created");
 
-test("the bashrc-created disclosure follows Rocky voice rules", () => {
-  assert.equal(phrase("bashrc-created"), BASHRC_CREATED_DISCLOSURE);
-  assert.deepEqual(validateRockyPhrase(BASHRC_CREATED_DISCLOSURE), []);
+test("the bashrc-created disclosure follows the output rules and names Git Bash", () => {
+  assert.deepEqual(validateOutputLine(BASHRC_CREATED_DISCLOSURE), []);
+  assert.match(BASHRC_CREATED_DISCLOSURE, /^\.bashrc was missing, so a new one was created\./);
+  assert.match(BASHRC_CREATED_DISCLOSURE, /Only Git Bash reads it here\.$/);
 });
 
 test(
@@ -224,12 +226,12 @@ test(
 test("hook install discloses that it changes the shell history setting", (t) => {
   // bash-preexec strips ignorespace/ignoreboth from HISTCONTROL so it can read
   // commands via `history 1`. A command typed with a leading space — the usual
-  // way to keep a token out of shell history — starts being recorded. Rocky
-  // changes it, so Rocky has to say it.
+  // way to keep a token out of shell history — starts being recorded. rocky
+  // changes it, so rocky has to say it.
   const sandbox = bashrcSandbox(t);
   writeFileSync(sandbox.bashrc, "export MY_VAR=1\n");
 
   assert.equal(hookInstall(), 0, sandbox.stderr());
   assert.ok(sandbox.stderr().includes(phrase("hook-histcontrol")), sandbox.stderr());
-  assert.deepEqual(validateRockyPhrase(phrase("hook-histcontrol")), []);
+  assert.deepEqual(validateOutputLine(phrase("hook-histcontrol")), []);
 });

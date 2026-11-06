@@ -1,4 +1,4 @@
-# rocky-hook.bash — Rocky's ears. Sourced from ~/.bashrc via the managed block.
+# rocky-hook.bash — the rocky shell hook. Sourced from ~/.bashrc via the managed block.
 #
 # Contract: this file must NEVER break the shell. Every path fails silent and
 # returns 0, except an explicit guard cancel (return 1 under extdebug).
@@ -8,7 +8,7 @@
 # interactive shells only — scripts and CI never touched
 [[ $- == *i* ]] || return 0
 
-ROCKY_HOOK_VERSION="0.4.0"
+ROCKY_HOOK_VERSION="0.5.0"
 __rocky_home="${ROCKY_HOME:-$HOME/.rocky}"
 __rocky_bin="${ROCKY_BIN:-rocky}"
 __rocky_disabled=""
@@ -59,15 +59,15 @@ __rocky_guard() {
   while IFS=$'\t' read -r regex msg; do
     [[ -z "$regex" || "${regex:0:1}" == "#" ]] && continue
     if [[ "$cmd" =~ $regex ]]; then
-      printf '[Rocky] %s\n' "${msg:-dangerous command}" >&2
+      printf 'rocky: %s\n' "${msg:-This command matches a guard rule.}" >&2
       ans=""
-      printf '[Rocky] you sure, question (y/n) ' >&2
+      printf 'rocky: Run it anyway? [y/N] ' >&2
       if read -r ans </dev/tty 2>/dev/null; then
         if [[ "$ans" == "y" || "$ans" == "Y" ]]; then
           __rocky_guard_note proceeded "$regex" "$cmd" || :
           return 0
         fi
-        printf '[Rocky] good. command not run.\n' >&2
+        printf 'rocky: Command not run.\n' >&2
         __rocky_guard_note cancelled "$regex" "$cmd" || :
         return 1
       fi
@@ -177,8 +177,8 @@ __rocky_label_ttl=600
 
 # Rewrites __rocky_safe_label in place: strips the "@<seconds> " queue stamp
 # and empties the label when that stamp proves it stale. A line with no stamp,
-# or a shell with no readable clock, has unknown age and still speaks -- Rocky
-# never hides what he cannot judge.
+# or a shell with no readable clock, has unknown age and still speaks -- rocky
+# never hides what it cannot judge.
 __rocky_label_fresh() {
   local __rocky_stamp=""
   local __rocky_now=""
@@ -456,7 +456,7 @@ __rocky_drain_label() (
       exec 9>&-
       # Keep source until display succeeds; an interrupted print may retry the
       # same head, but it cannot lose it.
-      if [[ -n "$__rocky_safe_label" ]] && ! printf '[Rocky] %s\n' "$__rocky_safe_label" >&2; then
+      if [[ -n "$__rocky_safe_label" ]] && ! printf 'rocky: %s\n' "$__rocky_safe_label" >&2; then
         return 0
       fi
       command rm -f "$__rocky_source" >/dev/null 2>&1
@@ -503,7 +503,7 @@ __rocky_drain_label() (
     # Print before removing the owned source. If output or the shell fails
     # here, the original queue remains and is retried before persisted
     # remainder; duplicates are preferable to losing a label.
-    if [[ -n "$__rocky_safe_label" ]] && ! printf '[Rocky] %s\n' "$__rocky_safe_label" >&2; then
+    if [[ -n "$__rocky_safe_label" ]] && ! printf 'rocky: %s\n' "$__rocky_safe_label" >&2; then
       return 0
     fi
     command rm -f "$__rocky_source" >/dev/null 2>&1
@@ -608,7 +608,7 @@ __rocky_precmd() {
 
   if ! command -v "$__rocky_bin" >/dev/null 2>&1; then
     if [[ -z "$__rocky_warned" ]]; then
-      printf '[Rocky] rocky binary gone. my ears sleep now.\n' >&2
+      printf 'rocky: rocky binary not found; the hook is now inactive.\n' >&2
       __rocky_warned=1
       __rocky_disabled=1
     fi

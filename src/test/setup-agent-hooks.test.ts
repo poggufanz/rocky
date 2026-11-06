@@ -488,7 +488,7 @@ test("agent-hook capability notice precedes consent and remains visible in statu
     output = "";
     assert.equal(await setup(["--status"], dependencies), 0);
     assert.match(output, /Claude Code capture requires hook payload field `prompt_id`/);
-    assert.match(output, /setup status scope: host\/MCP registration via rocky setup --check and agent-hook state\/capability; spool and Ollama\/model health are not checked\./);
+    assert.match(output, /Setup status scope: host\/MCP registration via rocky setup --check and agent-hook state\/capability; spool and Ollama\/model health are not checked\./);
     assert.match(output, /claude-code agent hooks: installed/);
     assert.match(output, /codex agent hooks: manual/);
   } finally {
@@ -651,7 +651,7 @@ test("setup agent-hooks prints Codex manual TOML and never touches Codex config"
   assert.match(output.stderr, /notify = \[\"/);
   assert.match(output.stderr, /\[\[hooks\.UserPromptSubmit\]\]/);
   assert.match(output.stderr, /matcher = \"\^apply_patch\$\"/);
-  assert.match(output.stderr, /codex config is toml/i);
+  assert.match(output.stderr, /Codex config is TOML, and rocky does not edit it\. Paste the snippet above into your Codex config yourself\./);
   assert.match(output.stderr, /\/hooks/);
   assert.equal(readFileSync(configPath, "utf8"), before);
   assert.equal(existsSync(join(root, ".claude", "settings.json")), true);
@@ -663,7 +663,7 @@ test("setup agent-hooks prints Codex guidance but preserves Claude error exit", 
   const output = await captureStderr(() => setup(["--agent-hooks"], setupDependenciesFor(root, false)));
   assert.equal(output.code, 1);
   assert.match(output.stderr, /notify = \[\"/);
-  assert.match(output.stderr, /codex config is toml/i);
+  assert.match(output.stderr, /Codex config is TOML, and rocky does not edit it\. Paste the snippet above into your Codex config yourself\./);
   assert.equal(existsSync(join(root, ".codex", "config.toml")), false);
 });
 

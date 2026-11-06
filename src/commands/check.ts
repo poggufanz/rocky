@@ -252,7 +252,7 @@ function requireGitScope(result: GitResult): void {
   }
 }
 
-/** A plain fact, not persona: the widest scope a manual run can have. */
+/** A plain fact: the widest scope a manual run can have. */
 const WHOLE_HEAD_NOTE = "no upstream and no remote branch shares history: checking all of HEAD";
 
 /**
@@ -690,9 +690,9 @@ async function runPromptMode(request: PromptRequest): Promise<number> {
   }
   for (const line of renderClarityCard(result)) detail(line);
   if (!flags.has("--quiet")) {
-    if (result.band === "clear") say("prompt clear. good good good.");
-    else if (result.band === "needs-detail") say("prompt needs detail. say file and steps, question");
-    else say("prompt vague. name file and change, question");
+    if (result.band === "clear") say("Prompt is clear.");
+    else if (result.band === "needs-detail") say("Prompt needs detail. Name the file and the steps.");
+    else say("Prompt is vague. Name the file and the change.");
   }
   return 0;
 }
@@ -745,7 +745,7 @@ function usage(): number {
   detail("  (no flag)        check what you are about to push");
   detail("  --install-hook   run the check from a git pre-push hook");
   detail("  --offline        skip the registry lookup for this run");
-  detail("  --quiet          plain facts only, no persona, no question");
+  detail("  --quiet          plain facts only, no commentary, no comprehension question");
   detail("  --pre-push       read ref updates from git on stdin (hook mode)");
   detail('  --prompt "<text>" score prompt clarity locally, no model, always exits 0');
   detail("  --stdin          read prompt text from stdin (2 MB cap), alone or after --prompt");
@@ -776,7 +776,7 @@ export function cleanLine(lineCount: number, fileCount: number, packagesNotLooke
 }
 
 async function runCheck(rest: readonly string[], state: CheckState): Promise<number> {
-  // Only arguments Rocky owns are parsed as flags. In hook mode git appends the
+  // Only arguments rocky owns are parsed as flags. In hook mode git appends the
   // remote name and URL, and a remote may legitimately be called anything —
   // reading those as flags would let a repo named `--offline` disable the scan.
   const ownedArgs = state.prePush
@@ -803,14 +803,14 @@ async function runCheck(rest: readonly string[], state: CheckState): Promise<num
   }
   const positional = decomposeRequest.rest.filter((arg) => !arg.startsWith("--"));
   if (positional.length > 0) {
-    say("check accepts flags only. bad bad.");
+    say("Unexpected argument. This command accepts flags only.");
     detail(`unexpected: ${positional.join(", ")}`);
     usage();
     return 2;
   }
   const flags = new Set(decomposeRequest.rest.filter((arg) => arg.startsWith("--")));
   // An unrecognised flag must not silently degrade into a full check: someone
-  // who typed it meant something Rocky did not do.
+  // who typed it meant something rocky did not do.
   const unknown = [...flags].filter((flag) => !KNOWN_FLAGS.has(flag));
   if (unknown.length > 0) {
     say(phrase("check-unknown-flag"));
@@ -853,7 +853,7 @@ async function runCheck(rest: readonly string[], state: CheckState): Promise<num
         if (nudge !== undefined) say(nudge);
       }
     } catch {
-      /* deaf spot stays undisclosed rather than breaking check */
+      /* a lost nudge stays unsaid rather than breaking check */
     }
     try {
       // Decomposition coach: one default line on a clean, complete pre-push
@@ -905,7 +905,7 @@ export async function check(rest: string[]): Promise<number> {
     // A finding already made is never erased by a later failure.
     if (state.finding) return findingExit(state);
     // Fail open only where a push is at stake. In hook mode exit 0 is the whole
-    // point: a broken Rocky must not hold anyone's push. Run by hand there is no
+    // point: a broken rocky must not hold anyone's push. Run by hand there is no
     // push to protect, and exit 0 would tell a script "checked, clean" about a
     // run that inspected nothing — so an infrastructure failure exits 2, which
     // is neither clean nor a finding.

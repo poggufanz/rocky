@@ -100,13 +100,23 @@ test("parseAnnotateOutput strips hostile controls, redacts secrets, dedupes and 
   const out = parseAnnotateOutput({
     summary: `why\n${token}\u001b[31m\u202e`,
     tags: ["a".repeat(40), "a".repeat(40), "css", "css", "spacing", "layout", "color"],
-    label: "say\nno \u001b[31m?\u202e",
+    label: "say\nno \u001b[31m, question\u202e",
   });
   assert.ok(out);
   assert.equal(out.summary, "why [redacted anthropic key]");
   assert.deepEqual(out.tags, ["a".repeat(24), "css", "spacing", "layout", "color"]);
   assert.equal(out.label, undefined);
   assert.doesNotMatch(JSON.stringify(out), /sk-|abcdefghijklmnopqrst123|[\u0000-\u001f\u007f\u001b\u202e]/u);
+});
+
+test("parseAnnotateOutput keeps a plain label and omits one that breaks the output rules", () => {
+  const plain = parseAnnotateOutput({ summary: "ok", tags: [], label: "Why this margin?" });
+  assert.equal(plain?.label, "Why this margin?");
+  for (const retired of ["spacing, question", "command passes now, good good good", "I remember this change"]) {
+    const out = parseAnnotateOutput({ summary: "ok", tags: [], label: retired });
+    assert.ok(out, retired);
+    assert.equal(out.label, undefined, retired);
+  }
 });
 
 test("parseAnnotateOutput bounds hostile input before transformations and persists no hostile payload", () => {
@@ -228,7 +238,7 @@ function fakeClient(response: unknown, capture: GenerateCapture, failure?: Error
 
 test("createOllamaAnnotate sends bounded quoted evidence and the supplied signal/schema", async () => {
   const capture: GenerateCapture = {};
-  const client = fakeClient({ summary: "margin adds space", tags: ["spacing"], label: "spacing, question" }, capture);
+  const client = fakeClient({ summary: "margin adds space", tags: ["spacing"], label: "Adds spacing" }, capture);
   const port = createOllamaAnnotate(client, "model-a");
   const signal = AbortSignal.timeout(1_000);
   const out = await port.run({
@@ -236,7 +246,7 @@ test("createOllamaAnnotate sends bounded quoted evidence and the supplied signal
     rationaleRaw: "agent said margin adds space",
     files: [{ path: "src/app.css", excerpt: "margin-top: 8px" }],
   }, signal);
-  assert.deepEqual(out, { summary: "margin adds space", tags: ["spacing"], label: "spacing, question" });
+  assert.deepEqual(out, { summary: "margin adds space", tags: ["spacing"], label: "Adds spacing" });
   assert.equal(capture.model, "model-a");
   assert.equal(capture.signal, signal);
   assert.equal(capture.schema, ANNOTATE_SCHEMA);

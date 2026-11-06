@@ -7,13 +7,25 @@ import { spawnSync } from "node:child_process";
 import { commandFingerprint } from "../core/fingerprint.js";
 import { cmdExeHint, run, speakFailureMemory } from "../commands/run.js";
 import type { ExecResult } from "../core/exec.js";
-import { phraseKeys, validateRockyPhrase } from "../ui/phrases.js";
+import { phraseKeys, validateOutputLine } from "../ui/phrases.js";
 
 const packageRoot = process.cwd();
 const cli = join(packageRoot, "dist", "index.js");
 
 function fakeExecResult(started: boolean, code: number): ExecResult {
   return { started, code, stderr: "spawn ENOENT", tail: ["spawn ENOENT"], durationMs: 5 };
+}
+
+const STRONG_LINK = /Strong link/;
+const SAME_COMMAND_PASSED = /Last time, the same command passed again afterward\. The change itself was not recorded\./;
+const MAY_OR_MAY_NOT_BE_A_FIX = /It may or may not be a fix\. Check before acting\./;
+const NO_CONFIRMED_FIX = /No confirmed fix\. After that error, you ran:/;
+
+/** Every line rocky itself wrote (the `rocky: ` ones) must follow the output rules; detail lines are data. */
+function assertRockyLinesArePlain(output: string): void {
+  const lines = output.split(/\r?\n/).filter((line) => line.startsWith("rocky: "));
+  assert.ok(lines.length > 0, `expected at least one rocky line in: ${output}`);
+  for (const line of lines) assert.deepEqual(validateOutputLine(line.slice("rocky: ".length)), [], line);
 }
 
 test("run does not record a spawn-not-started result", async (t) => {
@@ -75,10 +87,12 @@ test("run speech discloses cross-directory fix as possible, never strong", () =>
     process.stderr.write = original;
   }
   assert.match(output, /place:/);
-  assert.match(output, /possible only|maybe not fix/);
-  assert.doesNotMatch(output, /strong\./);
+  assert.match(output, /But that fix comes from a different directory\./);
+  assert.match(output, /Possible only\. Check before acting\./);
+  assert.doesNotMatch(output, STRONG_LINK);
   assert.match(output, new RegExp(fixCwd.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   assert.equal(commandFingerprint(cmd, 1).length > 0, true);
+  assertRockyLinesArePlain(output);
 });
 
 test("run speech ignores a future failure at the captured clock", () => {
@@ -95,7 +109,9 @@ test("run speech ignores a future failure at the captured clock", () => {
   } finally {
     process.stderr.write = original;
   }
-  assert.doesNotMatch(output, /last time, you fix with:|future\.js|future-only/);
+  assert.doesNotMatch(output, /Last time, you ran:|Same error as before|future\.js|future-only/);
+  assert.match(output, /New error recorded \(exit code 1\)\./);
+  assertRockyLinesArePlain(output);
 });
 
 test("run speech shows the top weak association candidate instead of the old no-fix text", () => {
@@ -118,13 +134,14 @@ test("run speech shows the top weak association candidate instead of the old no-
   } finally {
     process.stderr.write = original;
   }
-  assert.match(output, /no confirmed fix\. but after error, you run this:/);
+  assert.match(output, NO_CONFIRMED_FIX);
   assert.match(output, /npm run unrelated-beta/);
-  assert.match(output, /maybe fix, maybe not\. check, question/);
-  assert.doesNotMatch(output, /no fix in memory yet/);
+  assert.match(output, MAY_OR_MAY_NOT_BE_A_FIX);
+  assert.doesNotMatch(output, /No fix recorded yet/);
+  assertRockyLinesArePlain(output);
 });
 
-test("run speech keeps the old no-fix text unchanged, byte for byte, when no association exists", () => {
+test("run speech keeps the plain no-fix line, byte for byte, when no association exists", () => {
   const cwd = join(tmpdir(), "rocky-run-no-possible");
   const cmd = "npm run broken-alpha";
   const now = 1_800_000_000_000;
@@ -140,8 +157,9 @@ test("run speech keeps the old no-fix text unchanged, byte for byte, when no ass
   } finally {
     process.stderr.write = original;
   }
-  assert.ok(output.includes("no fix in memory yet. you fix, I remember. this is good trade."));
-  assert.doesNotMatch(output, /no confirmed fix\. but after error, you run this:/);
+  assert.ok(output.includes("No fix recorded yet."));
+  assert.doesNotMatch(output, NO_CONFIRMED_FIX);
+  assertRockyLinesArePlain(output);
 });
 
 test("run speech never overrides or duplicates a confirmed fix with an association", () => {
@@ -169,11 +187,12 @@ test("run speech never overrides or duplicates a confirmed fix with an associati
   } finally {
     process.stderr.write = original;
   }
-  assert.match(output, /last time, same command work again after\. I not hear what change\./);
-  assert.match(output, /same command, under 1 minute later\. strong\./);
+  assert.match(output, SAME_COMMAND_PASSED);
+  assert.match(output, /Same command, under 1 minute later\. Strong link\./);
   assert.doesNotMatch(output, /something between|just now later/);
-  assert.doesNotMatch(output, /no confirmed fix\. but after error, you run this:/);
+  assert.doesNotMatch(output, NO_CONFIRMED_FIX);
   assert.doesNotMatch(output, /should-not-appear/);
+  assertRockyLinesArePlain(output);
 });
 
 test("run speech marks a cross-cwd association candidate with a place line and stays weak", () => {
@@ -197,10 +216,11 @@ test("run speech marks a cross-cwd association candidate with a place line and s
   } finally {
     process.stderr.write = original;
   }
-  assert.match(output, /but this comes from other place\./);
+  assert.match(output, /But that command comes from a different directory\./);
   assert.match(output, new RegExp(associationCwd.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
-  assert.match(output, /maybe fix, maybe not\. check, question/);
-  assert.doesNotMatch(output, /strong\./);
+  assert.match(output, MAY_OR_MAY_NOT_BE_A_FIX);
+  assert.doesNotMatch(output, STRONG_LINK);
+  assertRockyLinesArePlain(output);
 });
 
 test("run speech grades an unrecognized FixRecord link basis as the weakest hedge, never silent", () => {
@@ -225,13 +245,14 @@ test("run speech grades an unrecognized FixRecord link basis as the weakest hedg
   } finally {
     process.stderr.write = original;
   }
-  assert.match(output, /last time, same command work again after\. I not hear what change\./);
-  assert.match(output, /different program, under 1 minute later\. maybe not fix\. check, question/);
-  assert.doesNotMatch(output, /strong\./);
-  assert.doesNotMatch(output, /same program,/);
+  assert.match(output, SAME_COMMAND_PASSED);
+  assert.match(output, /Different program, under 1 minute later\. May not be the fix\. Check before acting\./);
+  assert.doesNotMatch(output, STRONG_LINK);
+  assert.doesNotMatch(output, /Same program,/);
+  assertRockyLinesArePlain(output);
 });
 
-test("run speech grades a same-program link with the gap it heard, never 'just now'", () => {
+test("run speech grades a same-program link with the gap it recorded, never 'just now'", () => {
   const cwd = join(tmpdir(), "rocky-run-same-program-gap");
   const cmd = "node stable-command.js";
   const now = 1_800_000_000_000;
@@ -257,9 +278,10 @@ test("run speech grades a same-program link with the gap it heard, never 'just n
   };
 
   const underAMinute = speak(40_000);
-  assert.match(underAMinute, /same program, under 1 minute later\. maybe not fix\. check, question/);
-  assert.doesNotMatch(underAMinute, /just now later|strong\./);
-  assert.match(speak(2 * 60_000), /same program, 2 minutes later\. maybe not fix\. check, question/);
+  assert.match(underAMinute, /Same program, under 1 minute later\. May not be the fix\. Check before acting\./);
+  assert.doesNotMatch(underAMinute, /just now later|Strong link/);
+  assert.match(speak(2 * 60_000), /Same program, 2 minutes later\. May not be the fix\. Check before acting\./);
+  assertRockyLinesArePlain(underAMinute);
 });
 
 /**
@@ -295,10 +317,11 @@ test("run speech admits a stderr-matched fix may be a different command, not the
     process.stderr.write = original;
   }
   assert.doesNotMatch(output, /you fix with/);
-  assert.match(output, /last time, you run:/);
+  assert.match(output, /Last time, you ran:/);
   assert.match(output, new RegExp(seededCmd.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
-  assert.match(output, /possible fix only, question/);
-  assert.match(output, /try, question/);
+  assert.match(output, /Possible fix only\./);
+  assert.match(output, /Try that command\?/);
+  assertRockyLinesArePlain(output);
 });
 
 test("unrelated successful npm task is not suggested as confirmed fix", (t) => {
@@ -322,21 +345,21 @@ test("unrelated successful npm task is not suggested as confirmed fix", (t) => {
   assert.equal(success.status, 0);
   // A same-program association is only possible, never resolution: the link
   // line is gated on a confirmed resolution, so a possible-only success stays silent.
-  assert.equal(success.stderr.includes("[Rocky]"), false, success.stderr);
+  assert.doesNotMatch(success.stderr, /^rocky: /m, success.stderr);
   const second = spawnSync(process.execPath, [cli, "run", "npm run broken-alpha"], { cwd: project, env, encoding: "utf8" });
   assert.equal(second.status, 67);
-  assert.doesNotMatch(second.stderr, /last time, you fix with:/);
+  assert.doesNotMatch(second.stderr, /Last time, you ran:|last time, you fix with:/);
   // v0.5.2 Fix 1: this same-cwd, same-base association is exactly the
-  // legitimate weak candidate spec T1 describes ("user sees `no fix in
-  // memory yet` although memory holds a candidate"). The original assertion
+  // legitimate weak candidate spec T1 describes ("user sees `No fix recorded
+  // yet` although memory holds a candidate"). The original assertion
   // here (`doesNotMatch(second.stderr, /unrelated-beta/)`) encoded that
   // pre-fix bug — hiding a candidate memory actually holds — rather than a
   // real requirement, so it is replaced with the intended weak-candidate
   // display instead of being preserved unchanged.
-  assert.match(second.stderr, /no confirmed fix\. but after error, you run this:/);
+  assert.match(second.stderr, NO_CONFIRMED_FIX);
   assert.match(second.stderr, /unrelated-beta/);
-  assert.match(second.stderr, /maybe fix, maybe not\. check, question/);
-  assert.doesNotMatch(second.stderr, /no fix in memory yet/);
+  assert.match(second.stderr, MAY_OR_MAY_NOT_BE_A_FIX);
+  assert.doesNotMatch(second.stderr, /No fix recorded yet/);
 
   const lines = readFileSync(join(home, "memory.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
   assert.equal(lines.some((record) => record.kind === "fix"), false);
@@ -349,7 +372,7 @@ test("unrelated successful npm task is not suggested as confirmed fix", (t) => {
   assert.match(stats.stderr, /0 fix events/);
 });
 
-test("a confirmed link run says what Rocky heard and never claims a fix", (t) => {
+test("a confirmed link run says what rocky recorded and never claims a fix", (t) => {
   const home = mkdtempSync(join(tmpdir(), "rocky-link-voice-"));
   t.after(() => rmSync(home, { recursive: true, force: true }));
   const env = { ...process.env, ROCKY_HOME: home };
@@ -360,26 +383,27 @@ test("a confirmed link run says what Rocky heard and never claims a fix", (t) =>
   // missing file appears, the same command runs again in the same directory.
   const first = spawnSync(process.execPath, [cli, "run", "node hello.js"], { cwd: project, env, encoding: "utf8" });
   assert.notEqual(first.status, 0);
-  assert.equal(first.stderr.includes("link them"), false, "a failing run links nothing");
+  assert.equal(first.stderr.includes("linked to the earlier failure"), false, "a failing run links nothing");
   writeFileSync(join(project, "hello.js"), "console.log(1)\n", "utf8");
   const second = spawnSync(process.execPath, [cli, "run", "node hello.js"], { cwd: project, env, encoding: "utf8" });
   assert.equal(second.status, 0);
 
-  assert.match(second.stderr, /command works now\. same command fail before\. I link them\./);
-  assert.match(second.stderr, /I not hear what change\. good good good\./);
-  assert.doesNotMatch(second.stderr, /\bfixed\b|you fix it|I remember (the )?fix/i);
+  assert.match(second.stderr, /Command passes now; linked to the earlier failure\./);
+  assert.match(second.stderr, /The change itself was not recorded\./);
+  assert.doesNotMatch(second.stderr, /\bfix(?:ed|es)?\b/i);
   assert.doesNotMatch(second.stderr, /something between/);
+  assertRockyLinesArePlain(second.stderr);
 });
 
 // `shell: true` is cmd.exe on win32. It rejects a word it cannot run in two lines on
-// stderr, and the first one carries the pattern Rocky matches.
+// stderr, and the first one carries the pattern rocky matches.
 const CMD_EXE_REJECTION = "'FOO' is not recognized as an internal or external command,\r\noperable program or batch file.";
-const CMD_EXE_HINT = "cmd.exe parsed this command. bash or powershell words not heard there.";
+const CMD_EXE_HINT = "cmd.exe parsed this command; bash or PowerShell syntax does not apply there.";
 
 test("cmdExeHint names cmd.exe when it rejected a command on the default Windows shell", () => {
   const hint = cmdExeHint("'FOO' is not recognized as an internal or external command,", "win32", true);
   assert.equal(hint, CMD_EXE_HINT);
-  assert.deepEqual(validateRockyPhrase(hint!), []);
+  assert.deepEqual(validateOutputLine(hint!), []);
   assert.ok(phraseKeys.includes("cmd-exe-parsed"), "registered, so the catalog lint covers it");
   assert.equal(cmdExeHint(CMD_EXE_REJECTION, "win32", true), CMD_EXE_HINT, "the full two-line message matches too");
 });
@@ -389,8 +413,8 @@ test("cmdExeHint stays silent off Windows, off the default shell, in another loc
   assert.equal(cmdExeHint(rejection, "linux", true), undefined);
   assert.equal(cmdExeHint(rejection, "darwin", true), undefined);
   assert.equal(cmdExeHint(rejection, "win32", false), undefined);
-  // A localized cmd.exe says something else. Rocky matches the English text only, so he is
-  // silent rather than guessing, and he never claims what he did not hear.
+  // A localized cmd.exe says something else. rocky matches the English text only, so it stays
+  // silent rather than guessing, and never claims what it did not record.
   assert.equal(cmdExeHint("'FOO' n'est pas reconnu en tant que commande interne", "win32", true), undefined);
   assert.equal(cmdExeHint("", "win32", true), undefined);
   assert.equal(cmdExeHint("Error: Cannot find module 'foo'", "win32", true), undefined);
@@ -426,7 +450,7 @@ test("run names cmd.exe once after what memory knows, on Windows only, and recor
   const onWindows = process.platform === "win32";
   assert.equal(stderr.split(CMD_EXE_HINT).length - 1, onWindows ? 1 : 0, stderr);
   if (onWindows) {
-    assert.ok(stderr.indexOf("new error. bad.") < stderr.indexOf(CMD_EXE_HINT), "memory speaks first, then the shell is named");
+    assert.ok(stderr.indexOf("New error recorded") < stderr.indexOf(CMD_EXE_HINT), "memory speaks first, then the shell is named");
   }
   // Disclosure only: the failure is recorded as it always was, never skipped or tagged.
   const records = readFileSync(join(home, "memory.jsonl"), "utf8")

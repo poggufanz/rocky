@@ -4,6 +4,7 @@ import { Readable } from "node:stream";
 import { mkdtempSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { validateOutputLine } from "../ui/phrases.js";
 
 /** Isolate ROCKY_HOME for one test, restoring the prior value (or absence) after. */
 function withRockyHome(t: import("node:test").TestContext): void {
@@ -16,7 +17,7 @@ function withRockyHome(t: import("node:test").TestContext): void {
   });
 }
 
-/** Everything Rocky says to stderr while `run` runs. */
+/** Everything rocky writes to stderr while `run` runs. */
 async function captureStderr(run: () => Promise<unknown>): Promise<string> {
   const original = process.stderr.write;
   let stderr = "";
@@ -102,7 +103,7 @@ test("runReplCommand survives a thrown-async command instead of rejecting", asyn
   assert.equal(code, 1);
 });
 
-test("runReplCommand reports a usage error as the CLI does, and says stumbled only for other throws", async (t) => {
+test("runReplCommand reports a usage error as the CLI does, and reports an unexpected failure only for other throws", async (t) => {
   withRockyHome(t);
   const { runReplCommand } = await import("../commands/repl.js");
 
@@ -112,16 +113,30 @@ test("runReplCommand reports a usage error as the CLI does, and says stumbled on
     code = await runReplCommand("why", ["--add", "keep the cap at three", "--files"], false);
   });
   assert.equal(code, 2);
-  assert.match(usage, /--files needs path\. run rocky --help, question/u);
+  assert.match(usage, /--files needs a path\. Run rocky --help for the command list\./u);
   assert.match(usage, /usage: rocky why --add "<text>" \[--files a\.ts,b\.ts\]/u);
-  assert.doesNotMatch(usage, /stumbled/u);
+  assert.doesNotMatch(usage, /failed unexpectedly/u);
 
-  const stumble = await captureStderr(async () => {
+  const unexpected = await captureStderr(async () => {
     code = await runReplCommand("boom", [], false, { boom: () => { throw new Error("kaboom"); } });
   });
   assert.equal(code, 1);
-  assert.match(stumble, /command stumbled\. rocky still here\./u);
-  assert.doesNotMatch(stumble, /run rocky --help/u);
+  assert.match(unexpected, /The command failed unexpectedly\. The repl is still running\./u);
+  assert.doesNotMatch(unexpected, /Run rocky --help/u);
+});
+
+test("runReplCommand names the available commands for an unknown one, and help lists them in plain sentences", async () => {
+  const { runReplCommand } = await import("../commands/repl.js");
+  const unknown = await captureStderr(async () => {
+    assert.equal(await runReplCommand("nonsense-command", [], false, {}), 0);
+  });
+  assert.match(unknown, /rocky: Unknown command\. Available: recall, what, why, how, concepts, sessions, help, quit\./u);
+  const help = await captureStderr(async () => {
+    assert.equal(await runReplCommand("help", [], false, {}), 0);
+  });
+  assert.match(help, /^recall <query> {3}Search memory for matching failures and their linked fixes\.$/mu);
+  assert.match(help, /^quit, exit {7}Leave the repl\.$/mu);
+  assert.deepEqual(validateOutputLine(`${unknown}${help}`), []);
 });
 
 test("runReplCommand refuses unknown command without throwing", async () => {

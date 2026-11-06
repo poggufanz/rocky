@@ -121,7 +121,7 @@ export interface AnswerOptions {
 }
 
 export interface ChatResponsePayload {
-  /** The answer, as Rocky says it. Record ids and decision lines are not in it: see `trace`. */
+  /** The answer text. Record ids and decision lines are not in it: see `trace`. */
   text: string;
   /** The top record's id, the decision, its detail, the coverage line and the renderer line, for the drawer. */
   trace: readonly string[];
@@ -169,7 +169,7 @@ const TEACH_RULES = [
   "  BISNIS  why this behaviour exists for the product",
   "",
   "Every claim must point at something in the text you were given: a line, a quoted comment,",
-  "or a record Rocky recorded. No support means the claim does not exist: do not write it.",
+  "or a record rocky recorded. No support means the claim does not exist: do not write it.",
   "NEVER say `best practice`, `lebih rapi`, or `idiomatic` without naming the alternative it",
   "was chosen over. NEVER paraphrase a comment that is already quoted: quote it.",
   "NEVER present your reconstruction as something an agent stated when the code was written.",
@@ -188,7 +188,7 @@ const TEACH_RULES = [
 
 export const TEACH_ENV = [
   "Environment note for this run: you have no shell, no git, no database and no filesystem.",
-  "Rocky walks the hops for you and quotes what it found after the rules, selection first:",
+  "After the rules, rocky quotes what it found by walking the hops for you, selection first:",
   "the enclosing function, the definitions of the symbols the selection uses, the comment",
   "above it, the tests that name those symbols, and the git commit that first touched the",
   "lines. Cite only what is quoted; never claim you ran anything.",
@@ -208,7 +208,7 @@ export function loadTeachSpec(lang: "id" | "en"): string {
 }
 
 export function boundedPrompt(text: string): string {
-  const bounded = text.length > MAX_PROMPT_CHARS ? `${text.slice(0, MAX_PROMPT_CHARS)}\n… cut, prompt long` : text;
+  const bounded = text.length > MAX_PROMPT_CHARS ? `${text.slice(0, MAX_PROMPT_CHARS)}\n… (prompt truncated)` : text;
   return redactSecretsAtBoundary(bounded);
 }
 
@@ -228,9 +228,9 @@ export function readDecisionSelection(): { engine: "heuristic" | "local" | "jev"
  * Memory as one chat answer sees it. Disclosing and holding are two decisions.
  * A read that was not whole is always disclosed, in plain words. Only a read
  * that stopped early holds the answer, because silence in it proves nothing.
- * Lines Rocky cannot use (a repeated id, a kind this build does not know)
- * leave every other record parsed, so Rocky answers from those and says what
- * he could not use.
+ * Lines rocky cannot use (a repeated id, a kind this build does not know)
+ * leave every other record parsed, so the answer comes from those records and
+ * says what could not be used.
  */
 export interface MemorySnapshot {
   list: MemoryRecord[];
@@ -267,8 +267,8 @@ export function confine(root: string, candidate: string): string | undefined {
 
 export function witnessed(candidate: string): string | undefined {
   const norm = candidate.replace(/\\/g, "/");
-  const heard = fileIndex(records().list).some((file) => file.path === norm);
-  return heard ? norm : undefined;
+  const recorded = fileIndex(records().list).some((file) => file.path === norm);
+  return recorded ? norm : undefined;
 }
 
 export function witnessedRepoPaths(list: MemoryRecord[], root: string): string[] {
@@ -292,7 +292,7 @@ export function toChatCards(
       ref: String(hit.id),
       kind: String(hit.kind),
       snippet: snippet.length > CHAT_MAX_SNIPPET_CHARS
-        ? `${snippet.slice(0, CHAT_MAX_SNIPPET_CHARS)}… cut, snippet long`
+        ? `${snippet.slice(0, CHAT_MAX_SNIPPET_CHARS)}… (snippet truncated)`
         : snippet,
     };
   });
@@ -400,7 +400,7 @@ export async function requestProvider(
 
   if (!selection.active) {
     if (selection.reason === "missing-key" || selection.reason === "no-model") {
-      return { kind: "refused", status: 400, error: "rocky need endpoint, key, model in settings first" };
+      return { kind: "refused", status: 400, error: "Set an endpoint, key, and model in settings first." };
     }
     if (selection.reason === "invalid_model") {
       return { kind: "refused", status: 400, error: "invalid model" };
@@ -409,7 +409,7 @@ export async function requestProvider(
   }
 
   if (askInFlight >= MAX_ASK_IN_FLIGHT) {
-    return { kind: "refused", status: 429, error: "rocky already asking. wait, question" };
+    return { kind: "refused", status: 429, error: "Too many requests are in progress. Wait for one to finish, then try again." };
   }
 
   const endpoint = selection.endpoint;
@@ -419,7 +419,7 @@ export async function requestProvider(
   const key = (isUnified && fromEnv.length > 0) ? fromEnv : stored.key;
 
   if (!endpoint || !key || !model) {
-    return { kind: "refused", status: 400, error: "rocky need endpoint, key, model in settings first" };
+    return { kind: "refused", status: 400, error: "Set an endpoint, key, and model in settings first." };
   }
 
   const anthropic = endpoint.includes("/v1/messages");
@@ -597,7 +597,9 @@ async function executeMemoryOnlyAnswer(args: {
       asked: args.asked,
       model,
       status: "unavailable",
-      text: lang === "id" ? "ingatan terbaca tidak lengkap. Rocky menahan jawaban." : "memory read incomplete. Rocky holds answer.",
+      text: lang === "id"
+        ? "Pembacaan memori tidak lengkap, jadi jawaban ditahan."
+        : "The memory read was incomplete, so the answer is held back.",
       disclosure,
     });
   }
@@ -610,8 +612,8 @@ async function executeMemoryOnlyAnswer(args: {
       model,
       status: "unavailable",
       text: lang === "id"
-        ? "bukti memori utuh melewati batas konteks. Rocky menahan jawaban. record tetap utuh."
-        : "whole memory evidence exceeds context. Rocky holds answer. Records stay whole.",
+        ? "Bukti memori utuh melebihi batas konteks, jadi jawaban ditahan. Record tidak dipotong agar muat."
+        : "The whole memory evidence does not fit the context limit, so the answer is held back. Records are never cut to fit.",
       disclosure,
     });
   }
@@ -621,8 +623,8 @@ async function executeMemoryOnlyAnswer(args: {
       model,
       status: "low_confidence",
       text: lang === "id"
-        ? "tidak ada ingatan yang cukup cocok. Rocky belum tahu jawaban ini."
-        : "Rocky heard no memory that answers this question.",
+        ? "Tidak ada catatan memori yang cukup cocok untuk menjawab pertanyaan ini."
+        : "No memory record matched this question well enough to answer it.",
       disclosure,
     });
   }
@@ -704,15 +706,15 @@ export async function executeAnswer(options: AnswerOptions): Promise<AnswerOutco
 
   if (options.mode === "chat") {
     if (chatInFlight >= CHAT_MAX_IN_FLIGHT) {
-      return { status: 429, payload: { error: "rocky already chatting. wait, question" } };
+      return { status: 429, payload: { error: "Too many chats are in progress. Wait for one to finish, then ask again." } };
     }
     const raw = typeof options.message === "string" ? options.message : "";
     const message = raw.trim();
     if (message.length === 0) {
-      return { status: 400, payload: { error: "rocky needs a message, question" } };
+      return { status: 400, payload: { error: "A message is required." } };
     }
     const bounded = message.length > CHAT_MAX_MESSAGE_CHARS
-      ? `${message.slice(0, CHAT_MAX_MESSAGE_CHARS)}\n… cut, message long`
+      ? `${message.slice(0, CHAT_MAX_MESSAGE_CHARS)}\n… (message truncated)`
       : message;
     const asked = redactSecretsAtBoundary(bounded);
     const split = splitCodePrefix(asked);
@@ -772,10 +774,10 @@ export async function executeAnswer(options: AnswerOptions): Promise<AnswerOutco
           storedKey: activeStoredKey,
         })
         : createHeuristicPort();
-      const questions = buildRelevanceQuestions(jevState.candidates);
+      const relevanceQuestions = buildRelevanceQuestions(jevState.candidates);
       let result: DecisionResult;
       try {
-        result = await port.evaluate({ query: jevState.query, candidates: [...jevState.candidates] }, questions);
+        result = await port.evaluate({ query: jevState.query, candidates: [...jevState.candidates] }, relevanceQuestions);
       } catch {
         result = {
           answers: [],
@@ -880,7 +882,7 @@ export async function executeAnswer(options: AnswerOptions): Promise<AnswerOutco
   const rawPrompt = String(options.prompt ?? options.message ?? "");
 
   if (!rawPrompt && !rel) {
-    return { status: 400, payload: { error: "rocky need endpoint, key, model in settings first" } };
+    return { status: 400, payload: { error: "Set an endpoint, key, and model in settings first." } };
   }
 
   const llmSelection = resolveChatLlmSelection({
@@ -905,7 +907,7 @@ export async function executeAnswer(options: AnswerOptions): Promise<AnswerOutco
         commit: codeCtx?.commit,
       });
       if (refTraceResult.evidenceText) {
-        packText = `\n\nEVIDENCE ROCKY GATHERED (quote only from this):\n${refTraceResult.evidenceText}`;
+        packText = `\n\nGATHERED EVIDENCE (quote only from this):\n${refTraceResult.evidenceText}`;
       }
     }
   }

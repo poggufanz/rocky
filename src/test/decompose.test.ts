@@ -16,7 +16,7 @@ import {
 } from "../core/decompose.js";
 import { check, parseDecomposeRequest } from "../commands/check.js";
 import { briefCommand, parseBriefArgs } from "../commands/brief.js";
-import { validateRockyPhrase } from "../ui/phrases.js";
+import { validateOutputLine } from "../ui/phrases.js";
 
 /**
  * briefCommand runs captureRationales() on every successful call. Left
@@ -92,14 +92,14 @@ test("decompose card names staged files in 3 numbered lines", () => {
   assert.doesNotMatch(text, /\?/);
 });
 
-test("empty file list renders the blank template with a question-style prompt", () => {
+test("empty file list renders the blank template with a fill-in line", () => {
   for (const card of [renderDecomposeCard([]), renderDecomposeCard(["  ", "/dev/null"])]) {
     const text = card.join("\n");
     assert.match(text, /^1\. behavior:/m);
     assert.match(text, /^2\. state:/m);
     assert.match(text, /^3\. verify:/m);
     assert.match(text, /<one line what changes>/);
-    assert.match(text, /, question$/m);
+    assert.match(text, /^Fill in the 3 lines\.$/m);
     assert.doesNotMatch(text, /\?/);
   }
 });
@@ -134,12 +134,13 @@ test("diff parsing extracts header names, never a dev-null entry, never throws",
   assert.deepEqual(decomposeFilesFromDiff(undefined), []);
 });
 
-test("nudge and voice lines follow Rocky voice rules, never a question mark", () => {
+test("nudge and output lines follow the output rules", () => {
   assert.equal(typeof decomposeNudgeLine(), "string");
   for (const line of [DECOMPOSE_NUDGE, DECOMPOSE_BLANK_PROMPT, DECOMPOSE_SAY_BLANK, DECOMPOSE_SAY_FILLED]) {
-    assert.deepEqual(validateRockyPhrase(line), [], line);
+    assert.deepEqual(validateOutputLine(line), [], line);
   }
-  assert.match(DECOMPOSE_NUDGE, /, question$/);
+  assert.equal(DECOMPOSE_NUDGE, "Describe this change in 3 lines: behavior, fields, verify.");
+  assert.equal(decomposeNudgeLine(), DECOMPOSE_NUDGE);
 });
 
 test("parseDecomposeRequest splits the flag from the rest", () => {
@@ -185,7 +186,11 @@ test("brief --decompose appends a checklist naming window files", async () => {
     assert.match(stdout, /^2\. state:/m);
     assert.match(stdout, /^3\. verify:/m);
     assert.match(stdout, /src-payment-retry\.ts/);
-    assert.doesNotMatch(stdout, /\?/);
+    // The brief's explain-ready lines are real questions; the appended card is statements only.
+    assert.match(stdout, /^ {2}Why did .+ change\?$/m);
+    const cardAt = stdout.indexOf("Decompose the change in 3 lines.");
+    assert.ok(cardAt >= 0, stdout);
+    assert.doesNotMatch(stdout.slice(cardAt), /\?/);
   } finally {
     agentLogs.restore();
     if (previous === undefined) delete process.env.ROCKY_HOME;

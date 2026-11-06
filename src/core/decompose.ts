@@ -18,14 +18,14 @@
 
 import { redactSecretsAtBoundary } from "./redact.js";
 
-/** One-line pre-push reminder. A question ends with `, question`, never `?`. */
-export const DECOMPOSE_NUDGE = "say change in 3 lines: behavior, fields, verify, question" as const;
-/** Blank-card prompt. Same voice rule: ends with `, question`, never `?`. */
-export const DECOMPOSE_BLANK_PROMPT = "say 3 lines, question" as const;
-/** Voice line for `check --decompose` when no diff names a file. */
-export const DECOMPOSE_SAY_BLANK = "state 3 lines: behavior, fields, verify, question" as const;
-/** Voice line for `check --decompose` when the diff names files. */
-export const DECOMPOSE_SAY_FILLED = "change split in 3 lines. good good." as const;
+/** One-line pre-push reminder. */
+export const DECOMPOSE_NUDGE = "Describe this change in 3 lines: behavior, fields, verify." as const;
+/** Blank-card closing line. */
+export const DECOMPOSE_BLANK_PROMPT = "Fill in the 3 lines." as const;
+/** Output line for `check --decompose` when no diff names a file. */
+export const DECOMPOSE_SAY_BLANK = "Describe the change in 3 lines: behavior, fields, verify." as const;
+/** Output line for `check --decompose` when the diff names files. */
+export const DECOMPOSE_SAY_FILLED = "Change split into 3 lines." as const;
 /** How many file names one card names before counting the rest. */
 export const DECOMPOSE_MAX_FILES = 5 as const;
 /** Safety cap on extracted file names; a bounded diff cannot hold more real headers anyway. */
@@ -33,7 +33,7 @@ const DECOMPOSE_MAX_EXTRACTED = 100;
 /** Longest single path kept; longer names truncate with an ellipsis. */
 const DECOMPOSE_MAX_PATH_CHARS = 128;
 
-/** One non-blocking nudge line in Rocky voice, or undefined on any failure. Never throws. */
+/** One non-blocking nudge line, or undefined on any failure. Never throws. */
 export function decomposeNudgeLine(): string | undefined {
   try {
     return DECOMPOSE_NUDGE;
@@ -105,13 +105,12 @@ export function decomposeFilesFromDiff(diff: unknown): string[] {
 /**
  * The 3-step card: header plus three numbered lines, filled from the file
  * list when one exists, blank otherwise. The blank card closes with a
- * question-style prompt (ends with `, question`, never `?`). At most
- * DECOMPOSE_MAX_FILES names print; the rest count as "and N more".
- * Never throws, never emits `?`.
+ * fill-in line. At most DECOMPOSE_MAX_FILES names print; the rest count as
+ * "and N more". Never throws.
  */
 export function renderDecomposeCard(files: readonly string[]): string[] {
   const blank = (): string[] => [
-    "decompose change in 3 lines.",
+    "Decompose the change in 3 lines.",
     "1. behavior: <one line what changes>",
     "2. state: <fields that change>",
     "3. verify: <command plus observed behavior>",
@@ -133,7 +132,7 @@ export function renderDecomposeCard(files: readonly string[]): string[] {
     const extra = cleaned.length - shown.length;
     const named = extra > 0 ? `${shown.join(", ")} and ${extra} more` : shown.join(", ");
     return [
-      "decompose change in 3 lines.",
+      "Decompose the change in 3 lines.",
       `1. behavior: <one line what ${named} does>`,
       `2. state: <fields that change in ${named}>`,
       `3. verify: <command plus observed behavior for ${named}>`,

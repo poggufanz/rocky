@@ -80,7 +80,7 @@ test("digest outputs cs pattern line when CS concepts are present", () => {
 
   const code = digest([], deps);
   assert.equal(code, 0);
-  assert.ok(outLines.some((l) => l === "cs pattern: control-flow x1 this week. full explain in dash, question"));
+  assert.ok(outLines.some((l) => l === "cs pattern: control-flow x1 this week. Full explanation in rocky dash."));
   assert.ok(![...sayLines, ...outLines].join("\n").includes("?"));
 });
 
@@ -165,5 +165,5 @@ test("digest sorts multiple CS concepts by count descending, then alphabetical",
 
   const code = digest([], deps);
   assert.equal(code, 0);
-  assert.ok(outLines.some((l) => l === "cs pattern: program-state x2 this week. full explain in dash, question"));
+  assert.ok(outLines.some((l) => l === "cs pattern: program-state x2 this week. Full explanation in rocky dash."));
 });

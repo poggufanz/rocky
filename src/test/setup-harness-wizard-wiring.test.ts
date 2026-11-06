@@ -38,7 +38,7 @@ test("picker cannot mix with explicit selectors or other actions", () => {
     ["--harness", "--check"],
     ["--harness", "--remove"],
     ["--harness", "--agent-hooks"],
-    ["--harness", "--voice-skill"],
+    ["--harness", "--no-rationale-gate"],
     ["--harness", "--repo", "/r", "--allow-capture"],
   ]) {
     assert.match(usageError(argv), /picker/, argv.join(" "));
@@ -101,7 +101,7 @@ test("cancelled picker changes nothing and exits 1", async () => {
     pickHarnesses: async () => ({ cancelled: true, selections: [] }),
   })));
   assert.equal(out.code, 1);
-  assert.match(out.stderr, /nothing changed/);
+  assert.match(out.stderr, /No harness chosen\. Nothing changed\./);
 });
 
 test("listening-only pick stops without touching any host", async () => {

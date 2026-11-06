@@ -1,10 +1,10 @@
 /**
  * Error fingerprinting.
  *
- * Rocky "hears" errors, he doesn't read them. Two stack traces from the same
- * bug are never byte-identical (paths, line numbers, timestamps, memory
- * addresses all shift), so we normalize stderr down to the lines and tokens
- * that carry meaning, then hash that into a stable fingerprint.
+ * Two stack traces from the same bug are never byte-identical (paths, line
+ * numbers, timestamps, memory addresses all shift), so stderr is normalized
+ * down to the lines and tokens that carry meaning, then hashed into a stable
+ * fingerprint.
  */
 
 import { createHash } from "node:crypto";
@@ -293,8 +293,9 @@ export function firstSignalLine(stderr: string): string | undefined {
  * signal at all, hashing "" would collapse every silent failure — any
  * command, any project — onto one constant fingerprint and fabricate
  * cross-command matches (observed live in dogfood data). Fall back to the
- * command fingerprint instead: same information content as a hook-heard
- * failure, and the `cmd:` prefix keeps the hash space disjoint by design.
+ * command fingerprint instead: same information content as a failure
+ * recorded through the hook, and the `cmd:` prefix keeps the hash space
+ * disjoint by design.
  */
 export function fingerprint(stderr: string, cmd: string, exitCode: number): string {
   const sig = signatureLines(stderr).join("\n");
@@ -435,7 +436,7 @@ export function similarity(a: ReadonlySet<string>, b: ReadonlySet<string>): numb
 }
 
 /**
- * Shallow fingerprint for failures heard through the shell hook, where no
+ * Shallow fingerprint for failures recorded through the shell hook, where no
  * stderr is available: normalized command line + exit code. The "cmd:" prefix
  * keeps this hash space disjoint from stderr fingerprints.
  */

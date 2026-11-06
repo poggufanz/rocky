@@ -1,11 +1,12 @@
 /**
- * Default rules for Rocky's dangerous-command guard.
+ * Default rules for rocky's dangerous-command guard.
  *
  * Patterns are bash EREs, matched by `[[ "$cmd" =~ $regex ]]` inside
  * rocky-hook.bash — NOT JavaScript RegExp. Keep them POSIX-ERE-safe:
  * [[:space:]] classes, no lookarounds, no \b, no literal tabs.
- * Deliberately few and narrow: guard is coarse net against catastrophe,
- * not linter. Messages follow Rocky's voice rules.
+ * Deliberately few and narrow: the guard is a coarse net against catastrophe,
+ * not a linter. Messages follow docs/output-principles.md: one plain
+ * sentence each, stating what the command does.
  */
 
 import { createHash } from "node:crypto";
@@ -20,31 +21,31 @@ export const DEFAULT_RULES: GuardRule[] = [
     // rm -rf (any flag order/bundling) aimed at /, ~, ., .., or bare *
     pattern:
       "rm[[:space:]]+(-[a-zA-Z]*r[a-zA-Z]*f[a-zA-Z]*|-[a-zA-Z]*f[a-zA-Z]*r[a-zA-Z]*)[[:space:]]+(\\.\\.?|/|~/?|\\*)([[:space:]]|$)",
-    message: "this rm eat everything under target. bad bad.",
+    message: "This rm deletes everything under its target.",
   },
   {
     // --force / -f but not --force-with-lease; flag may be first arg after
     // push or later, so the space before it is alternated, not required twice
     pattern:
       "git[[:space:]]+push([[:space:]]+.*[[:space:]]|[[:space:]]+)(--force|-f)([[:space:]]|$)",
-    message: "force push rewrite shared history. others lose work.",
+    message: "A force push rewrites shared history. Other people can lose work.",
   },
   {
     pattern:
       "(curl|wget)[[:space:]][^|]*\\|[[:space:]]*(sudo[[:space:]]+)?(ba|z|da)?sh([[:space:]]|$)",
-    message: "unknown script straight into shell. I not hear this script before.",
+    message: "This pipes an unknown script straight into a shell.",
   },
   {
     pattern: "chmod[[:space:]]+-R[[:space:]]+777[[:space:]]+/([[:space:]]|$)",
-    message: "all permission for all. hull breach.",
+    message: "This gives every user full permissions on everything under /.",
   },
   {
     pattern: "dd[[:space:]]+.*of=/dev/(sd|nvme|hd)",
-    message: "this write raw disk. very permanent.",
+    message: "This writes directly to a disk device. The change is permanent.",
   },
   {
     pattern: "git[[:space:]]+(checkout[[:space:]]+\\.|reset[[:space:]]+--hard)([[:space:]]|$)",
-    message: "uncommitted work vanish. no memory bring it back.",
+    message: "Uncommitted work is discarded, and rocky's memory cannot bring it back.",
   },
 ];
 
@@ -59,8 +60,8 @@ function hashBody(b: string): string {
 export function renderGuardRules(rules: GuardRule[] = DEFAULT_RULES): string {
   const b = body(rules);
   return [
-    "# rocky guard rules. one rule per line: ERE<TAB>message.",
-    "# edit freely — rocky never overwrites edited file. delete file to disable guard.",
+    "# Guard rules for rocky. One rule per line: ERE<TAB>message.",
+    "# Edit freely; an edited file is never overwritten. Delete the file to disable the guard.",
     `# sha256:${hashBody(b)}`,
     b,
   ].join("\n");

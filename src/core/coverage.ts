@@ -3,7 +3,7 @@
  *
  * A vibe-coding gap from the CHI'26 plan: a session touches files and the
  * intent behind some of them stays unsaid. This module splits one session's
- * file set into tried (rationale evidence or diff hunks heard) versus
+ * file set into tried (rationale evidence or diff hunks recorded) versus
  * untried (neither), for the `brief` Untried section and the GUI dash
  * `coverage` payload.
  *
@@ -15,7 +15,7 @@
  * themselves (dash), the window is the caller's, and a triple file only
  * counts as tried with rationale evidence behind it or real diff hunks (a
  * plusMinus sum above zero) — a bare [0, 0] observation is touched, not
- * tried. No causal claims: untried names where Rocky heard no why, never
+ * tried. No causal claims: untried names where rocky recorded no why, never
  * why the change exists or whether it works.
  *
  * No export here does I/O (`now` comes from the caller) and none throws, so
@@ -39,9 +39,8 @@ export const COVERAGE_MAX_SESSION_FILES = 200 as const;
 const COVERAGE_MAX_TRIED_IDENTITIES = 4096;
 /** Longest single path kept; longer names truncate with an ellipsis. */
 const COVERAGE_MAX_PATH_CHARS = 512;
-/** Voice line for an empty session: honest, never gap-hiding. */
-export const COVERAGE_EMPTY_LINE =
-  "no files heard this window. nothing untried, nothing tried." as const;
+/** Line for an empty session: honest, never gap-hiding. */
+export const COVERAGE_EMPTY_LINE = "No files recorded in this window." as const;
 
 /**
  * Totals count named files only; when `truncated` is true they are a lower
@@ -70,7 +69,7 @@ export interface CoverageInput {
 }
 
 /**
- * A heard-file entry must be a path, not a shell fragment. Same rule as
+ * A recorded-file entry must be a path, not a shell fragment. Same rule as
  * `fileIndex` in compare-data.ts: agents sometimes pass
  * `--files "$(echo src/a.ts | tr / '/')"` through a shell that never
  * expands it, and the dash must never list a file that cannot exist.
@@ -257,7 +256,7 @@ export function coverageFromRecords(records: unknown, options: CoverageInput = {
       }
     }
 
-    // Session set: the caller's window files win; otherwise the heard files.
+    // Session set: the caller's window files win; otherwise the recorded files.
     let session: SessionEntry[];
     let sessionTruncated = false;
     if (options.sessionFiles !== undefined && Array.isArray(options.sessionFiles)) {
@@ -277,7 +276,7 @@ export function coverageFromRecords(records: unknown, options: CoverageInput = {
       sessionTruncated = distinct > session.length;
     } else {
       session = derived;
-      // Derived collection stops naming at the cap; more distinct heard
+      // Derived collection stops naming at the cap; more distinct recorded
       // files may exist past it, so hitting the cap discloses truncation.
       // (Exact over-cap counts are not tracked; the flag is a lower bound.)
       sessionTruncated = derived.length >= COVERAGE_MAX_SESSION_FILES;
@@ -310,9 +309,9 @@ export function coverageFromRecords(records: unknown, options: CoverageInput = {
 }
 
 /**
- * Detail-ready Untried lines: a count line in Rocky voice plus plain paths,
- * never shaming, never a question mark. An empty session stays honest —
- * "nothing untried, nothing tried", never "all covered". Never throws.
+ * Detail-ready Untried lines: a count line plus plain paths, never shaming.
+ * An empty session stays honest — it says no files were recorded, never
+ * "all covered". Never throws.
  */
 export function renderUntriedCard(result: unknown): string[] {
   try {
@@ -331,22 +330,30 @@ export function renderUntriedCard(result: unknown): string[] {
         ? triedTotal
         : 0;
       return triedCount === 1
-        ? ["1 file heard with why. good good."]
-        : [`all ${triedCount} heard with why. good good.`];
+        ? ["1 file has a recorded reason."]
+        : [`All ${triedCount} files have a recorded reason.`];
     }
     const paths = Array.isArray(untried)
       ? untried.filter((entry): entry is string => typeof entry === "string" && entry.length > 0)
       : [];
-    const lines = [`${untriedCount} file${untriedCount === 1 ? "" : "s"} touched but not heard why yet.`, ...paths];
+    const lines = [`${untriedCount} file${untriedCount === 1 ? "" : "s"} touched with no recorded reason yet.`, ...paths];
     const extra = untriedCount - paths.length;
-    if (extra > 0) lines.push(`and ${extra} more unheard.`);
+    if (extra > 0) lines.push(`And ${extra} more with no recorded reason.`);
     return lines;
   } catch {
     return [COVERAGE_EMPTY_LINE];
   }
 }
 
+// The chat and GUI surfaces recognize this prefix, so it stays byte-stable.
 const COVERAGE_WORDS_PREFIX = "memory coverage incomplete: ";
+
+/** "Only the first 40 records were read", singular-safe for the count of kept records. */
+function onlyFirstRecordsRead(recordCount: number): string {
+  return recordCount === 1
+    ? "Only the first record was read"
+    : `Only the first ${recordCount} records were read`;
+}
 
 /**
  * One plain-words line for a memory read that was not whole, or `undefined`
@@ -364,20 +371,20 @@ export function describeMemoryCoverage(
 ): string | undefined {
   if (isCompleteMemoryCoverage(coverage)) return undefined;
   const facts: string[] = [];
-  if (coverage.skipped > 0) facts.push(`${coverage.skipped} line${coverage.skipped === 1 ? "" : "s"} I cannot use.`);
+  if (coverage.skipped > 0) facts.push(`${coverage.skipped} line${coverage.skipped === 1 ? "" : "s"} could not be used.`);
   switch (coverage.reason) {
     case "record-cap":
-      facts.push(`first ${recordCount} records heard, later lines not heard.`);
+      facts.push(`${onlyFirstRecordsRead(recordCount)}; later lines were not read.`);
       break;
     case "file-size-cap":
-      facts.push(`memory file too big. first ${recordCount} records heard, later lines not heard.`);
+      facts.push(`The memory file is too large. ${onlyFirstRecordsRead(recordCount)}; later lines were not read.`);
       break;
     case "read-race":
-      facts.push("file did not hold still or open right. nothing heard this time.");
+      facts.push("The memory file changed or did not open cleanly during the read. Nothing was read this time.");
       break;
   }
-  if (facts.length === 0) facts.push("some lines not heard.");
-  if (options.counts) facts.push("counts here not all.");
+  if (facts.length === 0) facts.push("Some lines were not read.");
+  if (options.counts) facts.push("These counts do not cover all of memory.");
   return `${COVERAGE_WORDS_PREFIX}${facts.join(" ")}`;
 }
 
@@ -387,7 +394,7 @@ export function describeMemoryCoverage(
  * list-cap line when the split itself capped. Both show when both hold —
  * neither shadows the other. Totals name listed files only (a lower bound
  * under caps), so the cap line says "named", never "total". The memory-read
- * line is plain words naming `recordCount` records heard; ROCKY_VERBOSE=1
+ * line is plain words naming the `recordCount` records read; ROCKY_VERBOSE=1
  * prints its raw counters instead. Never throws.
  */
 export function coverageDisclosureLines(
@@ -417,7 +424,7 @@ export function coverageDisclosureLines(
         const named = typeof untriedTotal === "number" && Number.isSafeInteger(untriedTotal) && untriedTotal >= 0
           ? untriedTotal
           : 0;
-        lines.push(`coverage partial: names ${COVERAGE_MAX_LISTED} at most, ${named} untried named.`);
+        lines.push(`coverage partial: at most ${COVERAGE_MAX_LISTED} names listed, ${named} untried files counted.`);
       }
     }
     return lines;

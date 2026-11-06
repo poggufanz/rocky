@@ -65,7 +65,7 @@ export interface JevEngineOptions {
 }
 
 export function buildJevState(query: string, candidates: readonly DecisionCandidate[]): JevRequestBody["state"] {
-  const boundedQuery = query.length > MAX_QUERY_CHARS ? `${query.slice(0, MAX_QUERY_CHARS)}… cut, query long` : query;
+  const boundedQuery = query.length > MAX_QUERY_CHARS ? `${query.slice(0, MAX_QUERY_CHARS)}… (query truncated)` : query;
   return {
     query: redactSecretsAtBoundary(boundedQuery),
     candidates: candidates.slice(0, MAX_CANDIDATES).map((candidate) => {
@@ -73,7 +73,7 @@ export function buildJevState(query: string, candidates: readonly DecisionCandid
       return {
         ref: String(candidate.ref).slice(0, 128),
         kind: String(candidate.kind).slice(0, 32),
-        snippet: snippet.length > MAX_SNIPPET_CHARS ? `${snippet.slice(0, MAX_SNIPPET_CHARS)}… cut, snippet long` : snippet,
+        snippet: snippet.length > MAX_SNIPPET_CHARS ? `${snippet.slice(0, MAX_SNIPPET_CHARS)}… (snippet truncated)` : snippet,
       };
     }),
   };
@@ -92,7 +92,11 @@ export function buildJevBody(
       ...(question.criteria === undefined ? {} : { criteria: { ...question.criteria } }),
     };
   }
-  return { state, model, questions: wire };
+  return {
+    state,
+    model,
+    questions: wire,
+  };
 }
 
 /**
@@ -124,7 +128,11 @@ export function buildJevOpenRouterBody(
       },
     };
   }
-  return { state, model, questions: wire };
+  return {
+    state,
+    model,
+    questions: wire,
+  };
 }
 
 /** Context guard before any byte leaves the machine; breach = no call at all. */
@@ -294,10 +302,14 @@ export function createJevPort(options: JevEngineOptions = {}): DecisionPort {
   const fetchImpl = options.fetchImpl ?? fetch;
   const storedKey = options.storedKey ?? "";
   return {
-    async evaluate(state: DecisionState, questions, signal?: AbortSignal): Promise<DecisionResult> {
+    async evaluate(
+      state: DecisionState,
+      questions,
+      signal?: AbortSignal,
+    ): Promise<DecisionResult> {
       const started = Date.now();
       const elapsed = (): number => Math.max(0, Date.now() - started);
-      const byId = new Map(questions.map((question) => [question.id, question] as const));
+      const byId = new Map(questions.map((entry) => [entry.id, entry] as const));
       const extras = (): readonly DecisionAnswer[] =>
         uniformExtras(questions, (id) => {
           const found = byId.get(id);

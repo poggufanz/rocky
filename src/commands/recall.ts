@@ -1,8 +1,8 @@
 /**
  * `rocky recall "<query>"`
  *
- * Ask Rocky's memory directly. Fuzzy-matches the query against every
- * remembered failure (command + error signature) and shows the best hits
+ * Ask rocky's memory directly. Fuzzy-matches the query against every
+ * recorded failure (command + error signature) and shows the best hits
  * with their fixes, newest context first.
  */
 
@@ -165,6 +165,10 @@ function sayAiOutcome(outcome: ValidRecallAiOutcome): void {
   }
 }
 
+const MEMORY_EMPTY_LINE = "Memory is empty. No errors recorded yet.";
+const NO_MATCH_LINE = "No match in memory. The error may be new, or the words may differ.";
+const NO_MATCH_PARTIAL_LINE = "Memory coverage is incomplete. No match was found, but that does not prove there is none.";
+
 /** Supporting line for a memory read that was not whole: plain words, or the raw counters under ROCKY_VERBOSE=1. */
 function coverageDetail(coverage: MemoryCoverage, recordCount: number): string {
   const words = describeMemoryCoverage(coverage, recordCount, { counts: false });
@@ -177,14 +181,14 @@ export async function recall(argv: readonly string[], dependencies?: RecallDepen
   try {
     parsed = parseRecallArgs(argv);
   } catch (error) {
-    say("recall option is wrong. bad bad.");
+    say("Invalid option for recall.");
     detail(error instanceof Error ? error.message : "unknown option");
     return 2;
   }
 
   const { query } = parsed;
   if (!query || query.trim().length === 0) {
-    say("recall what, question. give words from error.");
+    say("No query given. Pass words from the error.");
     return 2;
   }
 
@@ -206,14 +210,14 @@ export async function recall(argv: readonly string[], dependencies?: RecallDepen
       }
       if (hits.length === 0) {
         if (coverage !== undefined && !isCompleteMemoryCoverage(coverage)) {
-          say("memory coverage incomplete. I cannot say no match, question");
+          say(NO_MATCH_PARTIAL_LINE);
           return 1;
         }
         if (queryRecentFailures(snapshot.records, { limit: 1, now }).length === 0) {
-          say("memory is empty. no errors yet. this is good... or you not use me yet, question");
+          say(MEMORY_EMPTY_LINE);
           return 0;
         }
-        say("I listen to memory. nothing match. maybe error is new, maybe words are different.");
+        say(NO_MATCH_LINE);
         return 1;
       }
     } else {
@@ -228,19 +232,19 @@ export async function recall(argv: readonly string[], dependencies?: RecallDepen
       }
       if (hits.length === 0) {
         if (coverage !== undefined && !isCompleteMemoryCoverage(coverage)) {
-          say("memory coverage incomplete. I cannot say no match, question");
+          say(NO_MATCH_PARTIAL_LINE);
           return 1;
         }
         if (deps.memory.recentFailures({ limit: 1 }).length === 0) {
-          say("memory is empty. no errors yet. this is good... or you not use me yet, question");
+          say(MEMORY_EMPTY_LINE);
           return 0;
         }
-        say("I listen to memory. nothing match. maybe error is new, maybe words are different.");
+        say(NO_MATCH_LINE);
         return 1;
       }
     }
   } catch {
-    say("memory file does not open for me. I answer from nothing.");
+    say("Memory file could not be opened. No records were read.");
     detail(`    memory: ${resolveRockyPaths().memory}`);
     return 1;
   }
@@ -259,48 +263,48 @@ export async function recall(argv: readonly string[], dependencies?: RecallDepen
     if (outcome.aiStatus === "used") displayed = deterministicOrder(hits, outcome.rankedCandidateIds);
   }
 
-  say(`I remember ${hits.length} thing${hits.length === 1 ? "" : "s"}.`);
+  say(`Found ${hits.length} match${hits.length === 1 ? "" : "es"} in memory.`);
   if (outcome !== undefined) sayAiOutcome(outcome);
   for (const [i, hit] of displayed.entries()) {
     heading(`${i + 1}. ${safeTerminalLine(hit.failure.cmd)}   (${ago(hit.failure.ts)}, exit ${hit.failure.exitCode})`);
     detail(indent(safeTerminalBlock(hit.failure.excerpt)));
     if (hit.fix) {
-      say(`resolved. works again after: ${safeTerminalLine(hit.fix.cmd)}`);
+      say(`Resolved. The command passed again: ${safeTerminalLine(hit.fix.cmd)}`);
       const elsewhere = fixFromElsewhere(hit.fix, hit.failure.cwd);
       if (elsewhere !== undefined) {
-        say("but fix comes from other place.");
+        say("But that fix comes from a different directory.");
         detail(`place: ${safeTerminalLine(elsewhere)}`);
-        say("possible only. check, question");
+        say("Possible only. Check before acting.");
       } else {
         const link = hit.fix.links?.find((candidate) => candidate.id === hit.failure.id);
         if (link) {
           const span = gapSpan(hit.fix.ts - hit.failure.ts);
           if (link.basis === "identity" || link.basis === "signature") {
-            say(`same command, ${span} later. strong.`);
+            say(`Same command, ${span} later. Strong link.`);
           } else if (link.basis === "program") {
-            say(`same program, ${span} later. maybe not fix. check, question`);
+            say(`Same program, ${span} later. May not be the fix. Check before acting.`);
           } else {
             // A recognized-but-weaker basis ("sequence") or a string this
             // reader does not recognize yet (spec §2.5) must never grade as
             // "same program" — that overstates evidence it doesn't have.
-            say(`different program, ${span} later. maybe not fix. check, question`);
+            say(`Different program, ${span} later. May not be the fix. Check before acting.`);
           }
         }
       }
     } else if (hit.possible) {
       // Weak candidate shown as a separate line below the hit; it never
       // reorders results and never appears beside a confirmed fix.
-      say("no confirmed fix. but after error, you run this:");
+      say("No confirmed fix. After that error, you ran:");
       detail(`    ${safeTerminalLine(hit.possible.cmd)}`);
       if (hit.possible.fromElsewhere) {
-        say("but this comes from other place.");
+        say("But that command comes from a different directory.");
         detail(`    place: ${safeTerminalLine(hit.possible.cwd)}`);
       }
       say(linkBasisRank(hit.possible.basis) > linkBasisRank("program")
-        ? "different program. maybe fix, maybe not. check, question"
-        : "maybe fix, maybe not. check, question");
+        ? "Different program. It may or may not be a fix. Check before acting."
+        : "It may or may not be a fix. Check before acting.");
     } else {
-      say("no fix recorded for this one. bad bad.");
+      say("No fix recorded for this failure.");
     }
   }
   return 0;

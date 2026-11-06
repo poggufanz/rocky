@@ -50,7 +50,7 @@ export function parseBriefArgs(argv: readonly string[]): BriefArgs {
     }
     if (arg === "--since") {
       const value = argv[index + 1];
-      if (value === undefined) throw new CliUsageError("--since needs value", USAGE);
+      if (value === undefined) throw new CliUsageError("--since needs a value", USAGE);
       since = value;
       index += 1;
       continue;
@@ -85,16 +85,16 @@ function resolveWindow(since: string | undefined, now: number): ResolvedWindow {
 const CONCEPT_LABELS = new Map(CONCEPTS.map((concept) => [concept.id, concept.label]));
 
 /**
- * Concepts heard at least twice in the window, most-repeated first — the
- * "you have hit this same fundamental N times" signal. Pure and read-only
- * (no I/O, no clock) so it is directly testable against a hand-built
- * `ConceptIndex`; see brief-concepts.test.ts.
+ * Concepts matched by at least two records in the window, most-repeated first,
+ * so a recurring fundamental stands out. Pure and read-only (no I/O, no clock)
+ * so it is directly testable against a hand-built `ConceptIndex`; see
+ * brief-concepts.test.ts.
  */
 export function repeatedConceptLines(index: ConceptIndex): string[] {
   return [...index.counts.entries()]
     .filter(([, count]) => count >= 2)
     .sort((a, b) => b[1] - a[1])
-    .map(([conceptId, count]) => `${CONCEPT_LABELS.get(conceptId) ?? conceptId} heard ${count} times. same fundamental, same.`);
+    .map(([conceptId, count]) => `${CONCEPT_LABELS.get(conceptId) ?? conceptId} matched ${count} records in this window.`);
 }
 
 function firstLine(text: string): string {
@@ -164,7 +164,7 @@ export async function briefCommand(argv: readonly string[] = [], cwd = process.c
 
   const top = await runGit(["-C", cwd, "rev-parse", "--show-toplevel"], undefined, { timeoutMs: GIT_TIMEOUT_MS });
   if (top.code !== 0) {
-    say("no git repo here. brief listens to git history. bad bad.");
+    say("No git repository here. rocky brief reads git history.");
     return 1;
   }
   const root = top.stdout.trim();
@@ -188,7 +188,8 @@ export async function briefCommand(argv: readonly string[] = [], cwd = process.c
     : ["-C", cwd, "log", window.gitRange, "--date-order", "--pretty=format:%H%x09%s", "--numstat"];
   const log = await runGit(logArgs, undefined, { timeoutMs: GIT_TIMEOUT_MS, maxOutputBytes: GIT_MAX_OUTPUT_BYTES });
   if (log.code !== 0) {
-    say(`git does not answer me. bad bad. ${log.stderr.split("\n")[0] ?? ""}`);
+    const gitMessage = (log.stderr.split("\n")[0] ?? "").trim();
+    say(gitMessage === "" ? "git log failed." : `git log failed: ${gitMessage}`);
     return 1;
   }
   const commits = parseGitLog(log.stdout);
@@ -224,7 +225,7 @@ export async function briefCommand(argv: readonly string[] = [], cwd = process.c
       ...(record.kind === "failure" ? { excerpt: record.excerpt.split("\n")[0] } : {}),
     }));
   } catch {
-    speak("memory file does not open for me. brief continues from git only.");
+    speak("Memory file could not be opened. Continuing from git history only.");
   }
 
   // Invariant intersections.
@@ -254,9 +255,9 @@ export async function briefCommand(argv: readonly string[] = [], cwd = process.c
     const config = loadConfig();
     if (config.status === "valid" && config.config.ai.enabled) {
       output = await polishBriefLines(lines, createOllamaClient(), config.config.ai.model);
-      if (output === lines) speak("model does not answer clean. I speak plain facts instead.");
+      if (output === lines) speak("Model output was not usable. Showing the deterministic brief.");
     } else {
-      speak("local AI not enabled. run rocky model use first, question");
+      speak("Local AI is not enabled. Run rocky model use <installed-model> first.");
     }
   }
   for (const line of output) console.log(line);
@@ -289,8 +290,8 @@ export async function briefCommand(argv: readonly string[] = [], cwd = process.c
     }
   }
 
-  // Untried section (Task 4): the window's changed paths split into tried
-  // (rationale evidence or diff hunks heard in-window) versus untried. It
+  // Untried section: the window's changed paths split into tried
+  // (rationale evidence or diff hunks recorded in-window) versus untried. It
   // appends after the blocks above and never touches the --decompose
   // template below. Advisory and fail-open — a capture, reload, or render
   // failure skips the section, never the brief. Counts only, no cause named.
@@ -344,6 +345,6 @@ export async function briefCommand(argv: readonly string[] = [], cwd = process.c
   }
   recordBriefRun({ sinceTs: window.sinceTs, commits: commits.length, files: changedPaths.length, cwd: root });
   writeState({ ...readState(), v: 1, lastBriefTs: now });
-  speak("brief done. you explain, I remember. good good.");
+  speak("Brief complete.");
   return 0;
 }

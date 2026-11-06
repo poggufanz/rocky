@@ -12,11 +12,12 @@ import { loadMemory } from "../core/memory-read.js";
 import { createMemoryQueries } from "../core/memory-query.js";
 import { disabledRecallWithAi } from "../ai/port.js";
 import { createToolRegistry } from "../mcp/tools.js";
-import { validateRockyPhrase } from "../ui/phrases.js";
+import { validateOutputLine } from "../ui/phrases.js";
 import { skipIfSymlinkUnavailable } from "./symlink-capability.js";
 import { setVerbose } from "./verbose-switch.js";
 
-const DISCLOSURE = "memory file does not open for me. I answer from nothing.";
+const READ_RACE_LINE = "memory coverage incomplete: The memory file changed or did not open cleanly during the read. Nothing was read this time.";
+const DISCLOSURE = "Memory file could not be opened. No records were read.";
 
 async function captureStderr<T>(fn: () => Promise<T> | T): Promise<{ result: T; stderr: string }> {
   const original = process.stderr.write;
@@ -66,9 +67,9 @@ test("recall() fails closed for a non-regular memory path without raw Node error
   const { result, stderr } = await captureStderr(() => recall(["anything"]));
 
   assert.equal(result, 1);
-  assert.match(stderr, /memory coverage incomplete: file did not hold still or open right\. nothing heard this time\./u);
+  assert.ok(stderr.includes(READ_RACE_LINE), stderr);
   assert.doesNotMatch(stderr, /scanned|truncated|version 1/u);
-  assert.doesNotMatch(stderr, /memory file does not open for me\. I answer from nothing\./);
+  assert.doesNotMatch(stderr, /Memory file could not be opened\. No records were read\./);
   assert.doesNotMatch(stderr, /EISDIR/);
   assert.doesNotMatch(stderr, /Error:/);
 });
@@ -90,7 +91,7 @@ test("stats() treats a non-regular memory path as empty", async () => {
   const { result, stderr } = await captureStderr(() => stats());
 
   assert.equal(result, 0);
-  assert.doesNotMatch(stderr, /memory file does not open for me\. I answer from nothing\./);
+  assert.doesNotMatch(stderr, /Memory file could not be opened\. No records were read\./);
   assert.doesNotMatch(stderr, /EISDIR/);
   assert.doesNotMatch(stderr, /Error:/);
 });
@@ -156,8 +157,8 @@ test("run() of a succeeding command keeps the wrapped exit code when memory is n
   const { result, stderr } = await captureStderr(() => run("exit 0"));
 
   assert.equal(result, 0);
-  assert.doesNotMatch(stderr, /memory file does not open for me\. I answer from nothing\./);
-  assert.doesNotMatch(stderr, /I cannot write memory/);
+  assert.doesNotMatch(stderr, /Memory file could not be opened\. No records were read\./);
+  assert.doesNotMatch(stderr, /Could not write to memory/);
   assert.doesNotMatch(stderr, /EISDIR/);
   assert.doesNotMatch(stderr, /Error:/);
 });
@@ -178,6 +179,7 @@ test("MCP tool path treats the same non-regular memory as empty", async () => {
   assert.doesNotMatch(JSON.stringify(result), /EISDIR/);
 });
 
-test("the disclosure line itself follows Rocky's voice rules", () => {
-  assert.deepEqual(validateRockyPhrase(DISCLOSURE), []);
+test("the disclosure line itself follows the output rules", () => {
+  assert.deepEqual(validateOutputLine(READ_RACE_LINE), []);
+  assert.deepEqual(validateOutputLine(DISCLOSURE), []);
 });

@@ -41,7 +41,7 @@
 
   <p class="beta">
     Beta
-    (This is completely optional if you want Rocky Teach to be more intelligent. However, it may not be 100% accurate and will need to be cross-checked)
+    (Optional. Lets Teach use a model you choose for fuller answers. Model answers may not be 100% accurate and need to be cross-checked.)
   </p>
 
   <div class="field">
@@ -99,7 +99,7 @@
       <option value="id">Indonesia</option>
       <option value="en">English</option>
     </select>
-    <span class="field-note">The language Rocky Teach answers in.</span>
+    <span class="field-note">The language Teach answers in.</span>
   </label>
 
   <div class="modal-foot">
@@ -137,7 +137,7 @@
        from POST /api/chat, one question at a time. Static skeleton reads with
        JS disabled or every /api/* failed. -->
   <section class="view" id="view-main" role="tabpanel" aria-labelledby="tab-main">
-    <noscript><p class="empty">rocky needs JavaScript for live memory. Start rocky and open its terminal link.</p></noscript>
+    <noscript><p class="empty">JavaScript is required to show live memory. Start rocky and open the link it prints in the terminal.</p></noscript>
     <div class="cx" id="cx" data-side="open" data-sources="closed" data-empty="true">
 
       <aside class="cx-side" id="cx-side" aria-label="chats">
@@ -159,14 +159,14 @@
         </label>
 
         <nav id="cx-sessions" class="cx-sessions" aria-label="past chats">
-          <p class="cx-sessions-empty">No chats yet. Your questions and Rocky's answers land here.</p>
+          <p class="cx-sessions-empty">No chats yet. Your questions and rocky's answers land here.</p>
         </nav>
 
         <section class="cx-mem" aria-labelledby="cx-mem-title">
-          <h2 id="cx-mem-title">Rocky's memory</h2>
-          <div id="cx-mem" class="cx-mem-body" aria-live="polite"><p class="cx-mem-wait">listening…</p></div>
+          <h2 id="cx-mem-title">Memory</h2>
+          <div id="cx-mem" class="cx-mem-body" aria-live="polite"><p class="cx-mem-wait">loading…</p></div>
         </section>
-        <p class="cx-side-note">Chats stay in this browser. Asking never changes what Rocky remembers.</p>
+        <p class="cx-side-note">Chats stay in this browser. Asking never changes what rocky has recorded.</p>
       </aside>
 
       <section class="cx-main" aria-label="ask rocky">
@@ -184,9 +184,8 @@
 
         <div id="chat-log" class="cx-log" role="log" aria-live="polite" aria-label="conversation">
           <div id="cx-welcome" class="cx-welcome">
-            <pre id="cx-face" class="cx-face" aria-hidden="true"></pre>
-            <h2 class="cx-hello">Ask Rocky what he heard</h2>
-            <p class="cx-sub" id="cx-sub">Rocky remember failures, fixes, and reasons from your terminal and your agents. Ask, question.</p>
+            <h2 class="cx-hello">Ask what rocky recorded</h2>
+            <p class="cx-sub" id="cx-sub">rocky records failures, fixes, and reasons from your terminal and your agents. Ask a question below.</p>
           </div>
           <div id="chat-thread" class="cx-thread"></div>
         </div>
@@ -197,7 +196,7 @@
             <textarea id="chat-input" rows="1" maxlength="4000" placeholder="Ask about a failure, a fix, or why code looks the way it does" spellcheck="false" autocomplete="off"></textarea>
             <div class="cx-tools">
               <div class="cx-route" role="radiogroup" aria-label="answer from" id="cx-route">
-                <button type="button" role="radio" data-route="auto" aria-checked="true" title="Rocky picks memory or code from your words">Auto</button>
+                <button type="button" role="radio" data-route="auto" aria-checked="true" title="Picks memory or code from your words">Auto</button>
                 <button type="button" role="radio" data-route="memory" aria-checked="false" tabindex="-1" title="Local memory only. Nothing leaves this machine">Memory</button>
                 <button type="button" role="radio" data-route="code" aria-checked="false" tabindex="-1" title="Memory plus repo files, answered by your model">Code</button>
               </div>
@@ -223,8 +222,8 @@
           <div class="cx-start" id="cx-start">
             <div id="cx-suggest" class="cx-suggest" aria-label="try asking"></div>
             <ul class="cx-how" aria-label="how answers work">
-              <li><b>Memory</b> Rocky searches whole local records and holds when the evidence is weak. Nothing leaves this machine.</li>
-              <li><b>Code</b> Rocky also reads matching repo files and sends your question, quoted excerpts, and memory evidence to the model you picked. Redacted and size capped.</li>
+              <li><b>Memory</b> rocky searches whole local records and holds back the answer when the evidence is weak. Nothing leaves this machine.</li>
+              <li><b>Code</b> rocky also reads matching repo files and sends your question, quoted excerpts, and memory evidence to the model you picked. Redacted and size capped.</li>
               <li><b>Jev</b> Optional second opinion on code questions. Needs a key in Settings.</li>
             </ul>
           </div>
@@ -249,7 +248,7 @@
   <section class="view" id="view-dash" role="tabpanel" aria-labelledby="tab-dash" hidden>
     <div class="dash">
 
-      <aside class="left" aria-label="files rocky heard">
+      <aside class="left" aria-label="files in memory">
         <label class="filter">
           <span class="vh">filter files</span>
           <input id="filter" type="search" placeholder="Find a file by part of its path"
@@ -268,7 +267,7 @@
                   aria-haspopup="dialog" aria-controls="repo-filter">All repos</button>
         </div>
         <p class="col-count" id="files-head" aria-live="polite"></p>
-        <div id="files" class="files" role="listbox" aria-label="files rocky heard"></div>
+        <div id="files" class="files" role="listbox" aria-label="files in memory"></div>
       </aside>
 
       <section class="pane">
@@ -279,7 +278,7 @@
             <button class="mode-btn" role="tab" data-mode="lines" aria-selected="true"
                     title="Why each line is written this way">Lines</button>
             <button class="mode-btn" role="tab" data-mode="history" aria-selected="false" tabindex="-1"
-                    title="Every change heard for this file, with its notes">History</button>
+                    title="Every change recorded for this file, with its notes">History</button>
             <button class="mode-btn" role="tab" data-mode="compare" aria-selected="false" tabindex="-1"
                     title="Two moments side by side">Compare</button>
           </div>
@@ -307,7 +306,7 @@
       <div class="listen-main">
         <header class="listen-hero">
           <div class="listen-top">
-            <h2 id="listen-header">Rocky Listen <span class="listen-spin" id="listen-spin" aria-hidden="true"></span></h2>
+            <h2 id="listen-header">Listening <span class="listen-spin" id="listen-spin" aria-hidden="true"></span></h2>
             <p class="listen-status" id="listen-status" aria-live="polite">Getting rationale <span class="listen-spin" aria-hidden="true"></span></p>
             <div class="listen-pick">
               <label for="listen-repo-pick">Repo</label>
@@ -317,7 +316,7 @@
           </div>
           <p class="listen-hint" id="listen-hint">Picking a repo never grants capture. Only the Listen button does.</p>
           <div class="listen-ident">
-            <span class="listen-ear" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span>
+            <span class="listen-bars" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span>
             <p class="listen-repo" id="listen-repo">Listen To Repo Main</p>
           </div>
           <div class="listen-consent" id="listen-consent" aria-live="polite"></div>
@@ -355,7 +354,7 @@
           <button class="listen-clear" id="listen-clear" type="button" hidden>Clear filters</button>
           <p class="listen-coverage" id="listen-coverage"></p>
         </div>
-        <ol class="listen-chain" id="listen-chain" aria-label="changes rocky heard, newest first"></ol>
+        <ol class="listen-chain" id="listen-chain" aria-label="recorded changes, newest first"></ol>
       </div>
 
       <!-- The guide is static on purpose: it explains the feature even when
@@ -366,18 +365,18 @@
           <ol class="listen-steps">
             <li><b>Pick a repo.</b> Picking only opens its record. Nothing starts.</li>
             <li><b>Press Listen.</b> One click grants capture for that repo alone.</li>
-            <li><b>Rocky checks every 10 seconds.</b> He reads the text files Git tracks, only while rocky dash stays open. No daemon.</li>
-            <li><b>Each change lands here</b> as a redacted snapshot, with how Rocky knows it.</li>
+            <li><b>rocky checks every 10 seconds.</b> It reads the text files Git tracks, only while rocky dash stays open. No daemon.</li>
+            <li><b>Each change lands here</b> as a redacted snapshot, labelled with how it is known.</li>
           </ol>
         </section>
         <section>
-          <h3>How Rocky knows</h3>
+          <h3>How each change is known</h3>
           <ul class="listen-legend">
-            <li class="tone-heard"><span class="lg-mark" aria-hidden="true"></span><b>Heard on disk</b> The file changed on disk. Proves the change, not who made it.</li>
-            <li class="tone-heard"><span class="lg-mark" aria-hidden="true"></span><b>Matches commit</b> Snapshot text equals a Git commit exactly.</li>
-            <li class="tone-heard"><span class="lg-mark" aria-hidden="true"></span><b>Reported by tool</b> An agent hook reported the event itself.</li>
+            <li class="tone-solid"><span class="lg-mark" aria-hidden="true"></span><b>Observed on disk</b> The file changed on disk. Proves the change, not who made it.</li>
+            <li class="tone-solid"><span class="lg-mark" aria-hidden="true"></span><b>Matches commit</b> Snapshot text equals a Git commit exactly.</li>
+            <li class="tone-solid"><span class="lg-mark" aria-hidden="true"></span><b>Reported by tool</b> An agent hook reported the event itself.</li>
             <li class="tone-weak"><span class="lg-mark" aria-hidden="true"></span><b>Near in time, possible link</b> Close in time or content. Context only, never cause.</li>
-            <li class="tone-none"><span class="lg-mark" aria-hidden="true"></span><b>Snapshot only</b> Rocky holds the event with no link yet. Unknown is not nothing.</li>
+            <li class="tone-none"><span class="lg-mark" aria-hidden="true"></span><b>Snapshot only</b> rocky has the event but no link for it yet. Unknown is not nothing.</li>
           </ul>
         </section>
         <section id="listen-top-wrap" hidden>
@@ -387,7 +386,7 @@
         <section>
           <h3>What stays where</h3>
           <ul class="listen-facts">
-            <li>Snapshots stay in Rocky's store on this machine. Rocky sends them nowhere.</li>
+            <li>Snapshots stay in rocky's store on this machine. rocky sends them nowhere.</li>
             <li>Text is redacted and size capped before it is stored. Secret may remain despite redaction.</li>
             <li>An MCP host you connect may forward event metadata under its own policy.</li>
             <li>Stop listening ends capture. History stays.</li>
@@ -401,7 +400,7 @@
 
 <footer class="foot"><span class="foot-main">Local analysis. Code questions send your question, carved excerpts, and memory evidence to the model you configured.</span><span class="foot-dash">Local Only | No Egress</span></footer>
 
-<button id="ask" class="ask" hidden>Why, question</button>
+<button id="ask" class="ask" hidden>Why?</button>
 <div id="pop" class="pop" role="dialog" aria-label="why" aria-live="polite" hidden>
   <section id="cs-card" hidden>
     <h3 id="cs-title">cs concept</h3>

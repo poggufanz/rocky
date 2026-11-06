@@ -13,12 +13,12 @@ import { watch } from "../commands/watch.js";
 import { describeMemoryCoverage } from "../core/coverage.js";
 import type { ExecResult } from "../core/exec.js";
 import { MAX_SUPPORTED_MEMORY_RECORDS, type MemoryCoverage } from "../core/memory-read.js";
-import { validateRockyPhrase } from "../ui/phrases.js";
+import { validateOutputLine } from "../ui/phrases.js";
 import { flushHookSpeech } from "../ui/rocky.js";
 import { setVerbose } from "./verbose-switch.js";
 
 const PREFIX = "memory coverage incomplete: ";
-const COUNTS_WARNING = "counts here not all.";
+const COUNTS_WARNING = "These counts do not cover all of memory.";
 
 function coverage(overrides: Partial<MemoryCoverage> = {}): MemoryCoverage {
   return { version: 1, scanned: 3, skipped: 0, truncated: 0, bytesScanned: 120, bytesTotal: 120, complete: true, ...overrides };
@@ -28,7 +28,7 @@ interface Shape {
   readonly name: string;
   readonly coverage: MemoryCoverage;
   readonly recordCount: number;
-  /** What follows the persona prefix, or undefined when the read was whole. */
+  /** What follows the prefix, or undefined when the read was whole. */
   readonly facts: string | undefined;
 }
 
@@ -38,42 +38,48 @@ const SHAPES: readonly Shape[] = [
     name: "whitespace-only lines, where scanned exceeds records yet the read is whole",
     coverage: coverage({ scanned: 5 }), recordCount: 3, facts: undefined,
   },
-  { name: "one skipped line", coverage: coverage({ skipped: 1, complete: false }), recordCount: 2, facts: "1 line I cannot use." },
-  { name: "several skipped lines", coverage: coverage({ skipped: 4, complete: false }), recordCount: 2, facts: "4 lines I cannot use." },
+  { name: "one skipped line", coverage: coverage({ skipped: 1, complete: false }), recordCount: 2, facts: "1 line could not be used." },
+  { name: "several skipped lines", coverage: coverage({ skipped: 4, complete: false }), recordCount: 2, facts: "4 lines could not be used." },
   {
     name: "the record cap",
     coverage: coverage({ truncated: 1, complete: false, reason: "record-cap" }),
     recordCount: MAX_SUPPORTED_MEMORY_RECORDS,
-    facts: `first ${MAX_SUPPORTED_MEMORY_RECORDS} records heard, later lines not heard.`,
+    facts: `Only the first ${MAX_SUPPORTED_MEMORY_RECORDS} records were read; later lines were not read.`,
+  },
+  {
+    name: "the record cap with a single record kept",
+    coverage: coverage({ truncated: 1, complete: false, reason: "record-cap" }),
+    recordCount: 1,
+    facts: "Only the first record was read; later lines were not read.",
   },
   {
     name: "the file size cap",
     coverage: coverage({ truncated: 1, complete: false, reason: "file-size-cap" }),
     recordCount: 812,
-    facts: "memory file too big. first 812 records heard, later lines not heard.",
+    facts: "The memory file is too large. Only the first 812 records were read; later lines were not read.",
   },
   {
     name: "a read race",
     coverage: coverage({ scanned: 0, truncated: 1, complete: false, reason: "read-race" }),
     recordCount: 0,
-    facts: "file did not hold still or open right. nothing heard this time.",
+    facts: "The memory file changed or did not open cleanly during the read. Nothing was read this time.",
   },
   {
     name: "skipped lines plus the record cap",
     coverage: coverage({ skipped: 2, truncated: 1, complete: false, reason: "record-cap" }),
     recordCount: 40,
-    facts: "2 lines I cannot use. first 40 records heard, later lines not heard.",
+    facts: "2 lines could not be used. Only the first 40 records were read; later lines were not read.",
   },
   {
     name: "skipped lines plus the file size cap",
     coverage: coverage({ skipped: 1, truncated: 1, complete: false, reason: "file-size-cap" }),
     recordCount: 7,
-    facts: "1 line I cannot use. memory file too big. first 7 records heard, later lines not heard.",
+    facts: "1 line could not be used. The memory file is too large. Only the first 7 records were read; later lines were not read.",
   },
-  { name: "incomplete with no reason and nothing skipped", coverage: coverage({ complete: false }), recordCount: 3, facts: "some lines not heard." },
+  { name: "incomplete with no reason and nothing skipped", coverage: coverage({ complete: false }), recordCount: 3, facts: "Some lines were not read." },
   {
     name: "truncated with no reason and nothing skipped",
-    coverage: coverage({ truncated: 2, complete: false }), recordCount: 3, facts: "some lines not heard.",
+    coverage: coverage({ truncated: 2, complete: false }), recordCount: 3, facts: "Some lines were not read.",
   },
 ];
 
@@ -88,8 +94,8 @@ for (const shape of SHAPES) {
     }
     assert.equal(plain, `${PREFIX}${shape.facts}`);
     assert.equal(counted, `${PREFIX}${shape.facts} ${COUNTS_WARNING}`);
-    assert.deepEqual(validateRockyPhrase(plain), []);
-    assert.deepEqual(validateRockyPhrase(counted as string), []);
+    assert.deepEqual(validateOutputLine(plain), []);
+    assert.deepEqual(validateOutputLine(counted as string), []);
   });
 }
 
@@ -150,7 +156,7 @@ test("rocky stats over the record cap says coverage once, in plain words, and wa
   const said = result.stderr.split(/\r?\n/u).filter((line) => line.includes("memory coverage incomplete:"));
   assert.equal(said.length, 1, result.stderr);
   assert.ok(said[0]?.endsWith(COUNTS_WARNING), said[0]);
-  assert.ok(said[0]?.includes(`first ${MAX_SUPPORTED_MEMORY_RECORDS} records heard, later lines not heard.`), said[0]);
+  assert.ok(said[0]?.includes(`Only the first ${MAX_SUPPORTED_MEMORY_RECORDS} records were read; later lines were not read.`), said[0]);
   assert.doesNotMatch(result.stderr, /scanned|truncated|version 1/u);
 });
 
@@ -220,7 +226,7 @@ function captureHookSpeech(fn: () => unknown): string {
 }
 
 const FAILED: ExecResult = { started: true, code: 1, stderr: "boom", tail: ["boom"], durationMs: 5 };
-const WORDS = `${PREFIX}1 line I cannot use.`;
+const WORDS = `${PREFIX}1 line could not be used.`;
 
 interface Site {
   readonly name: string;
@@ -262,7 +268,7 @@ const SITES: readonly Site[] = [
   },
 ];
 
-function heardLines(text: string): string[] {
+function spokenLines(text: string): string[] {
   return text.split(/\r?\n/u);
 }
 
@@ -270,16 +276,16 @@ for (const site of SITES) {
   test(`${site.name} says memory coverage in plain words by default`, async (t) => {
     setVerbose(t, undefined);
     incompleteMemory(t);
-    const heard = await site.speak();
-    assert.ok(heardLines(heard).includes(site.plainLine), heard);
-    assert.doesNotMatch(heard, /scanned|truncated|version 1/u);
+    const spoken = await site.speak();
+    assert.ok(spokenLines(spoken).includes(site.plainLine), spoken);
+    assert.doesNotMatch(spoken, /scanned|truncated|version 1/u);
   });
 
   test(`${site.name} keeps its own counter text under ROCKY_VERBOSE`, async (t) => {
     setVerbose(t, "1");
     const memory = incompleteMemory(t);
-    const heard = await site.speak();
-    assert.ok(heardLines(heard).includes(site.legacyLine(memory)), heard);
-    assert.ok(!heardLines(heard).includes(site.plainLine), heard);
+    const spoken = await site.speak();
+    assert.ok(spokenLines(spoken).includes(site.legacyLine(memory)), spoken);
+    assert.ok(!spokenLines(spoken).includes(site.plainLine), spoken);
   });
 }

@@ -67,30 +67,30 @@ test("inline markdown shows a best match label exactly as the server wrote it", 
 
   for (const label of BEST_MATCH_LABELS) {
     const text = renderChatText({ topRef: "failure-aaa", topKind: "failure", topLabel: label, engine: "heuristic", status: "used", evidenceCount: 1 });
-    const line = text.split("\n").find((candidate) => candidate.startsWith("best match:"));
+    const line = text.split("\n").find((candidate) => candidate.startsWith("Best match:"));
     assert.ok(line !== undefined, text);
     assert.deepEqual(
       plain(shape(line)),
-      [["#text", "best match: "], ["code", label], ["#text", " (failure). remembered, not proven."]],
+      [["#text", "Best match: "], ["code", label], ["#text", " (failure). Remembered, not proven."]],
       `${label} reaches the page unchanged`,
     );
   }
 
   // Why the server writes a code span: this parser has no escapes, so a bare label is eaten.
-  const bare = shape("best match: pytest tests/test_a_b.py (failure). remembered, not proven.");
+  const bare = shape("Best match: pytest tests/test_a_b.py (failure). Remembered, not proven.");
   assert.ok(bare.some(([tag]) => tag === "em"), "a bare label would be italicised");
 });
 
 test("a turn saved with a trace keeps its answer text whole, and one saved without it is split", () => {
   const { answerParts } = load<AnswerParts>(["str", "INLINE_TRACE_LINE", "answerParts"]);
 
-  const fresh = plain(answerParts({ text: "detail: this is the answer\nrocky heard 1 thing.", trace: ["top: x (failure). remembered, not proven.", 7, "renderer: used (m)."] }));
-  assert.equal(fresh.text, "detail: this is the answer\nrocky heard 1 thing.");
+  const fresh = plain(answerParts({ text: "detail: this is the answer\nFound 1 record.", trace: ["top: x (failure). remembered, not proven.", 7, "renderer: used (m)."] }));
+  assert.equal(fresh.text, "detail: this is the answer\nFound 1 record.");
   assert.deepEqual(fresh.trace, ["top: x (failure). remembered, not proven.", "renderer: used (m)."]);
 
   const legacy = plain(answerParts({
     text: [
-      "rocky heard 2 things.",
+      "Found 2 records.",
       "top: 3f2b8c1e-9d4a-4b7e-8a1c-5e6f7a8b9c0d (failure). remembered, not proven.",
       "decision: heuristic used, baseline kept, 0ms.",
       "detail: no key",
@@ -98,7 +98,7 @@ test("a turn saved with a trace keeps its answer text whole, and one saved witho
       "renderer: template (no model text).",
     ].join("\n"),
   }));
-  assert.equal(legacy.text, "rocky heard 2 things.\nmemory coverage incomplete: record-cap.");
+  assert.equal(legacy.text, "Found 2 records.\nmemory coverage incomplete: record-cap.");
   assert.equal(legacy.trace.length, 4);
   assert.ok(legacy.trace[0]?.startsWith("top: "));
 
@@ -112,7 +112,7 @@ test("a turn saved with a trace keeps its answer text whole, and one saved witho
 
 test("coverage words pass through, and a saved bare reason keeps its old label", () => {
   const { coverageWords } = load<{ coverageWords(reason: string): string }>(["coverageWords"]);
-  assert.equal(coverageWords("memory coverage incomplete: 1 line I cannot use."), "memory coverage incomplete: 1 line I cannot use.");
+  assert.equal(coverageWords("memory coverage incomplete: 1 line could not be used."), "memory coverage incomplete: 1 line could not be used.");
   assert.equal(coverageWords("record-cap"), "Coverage: record-cap");
 });
 
@@ -120,9 +120,9 @@ test("the drawer says an answer was held only when the server held it", () => {
   const { noEvidenceNote } = load<{ noEvidenceNote(args: { memoryOnly: boolean; covered: boolean; status?: string }): string }>(["noEvidenceNote"]);
   const note = (memoryOnly: boolean, covered: boolean, status?: string): string => noEvidenceNote({ memoryOnly, covered, status });
 
-  // held: the read stopped early, so Rocky gave no answer
+  // held: the read stopped early, so no answer was given
   assert.equal(note(true, true, "unavailable"), "Memory coverage incomplete; answer held.");
-  // answered: lines Rocky could not use, and no record matched well enough
+  // answered: lines that could not be used, and no record matched well enough
   assert.equal(note(true, true, "low_confidence"), "No whole memory record matched well enough. Some memory lines could not be used.");
   assert.equal(note(true, false, "low_confidence"), "No whole memory record matched well enough.");
   assert.equal(note(false, true, "used"), "Memory coverage incomplete; code answer may miss memory evidence.");

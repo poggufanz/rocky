@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { DEFAULT_RULES, renderGuardRules, rulesFileIsPristine } from "../core/guard-rules.js";
+import { validateOutputLine } from "../ui/phrases.js";
 
 const bashVersionProbe = spawnSync("bash", ["--version"], { stdio: "ignore" });
 const hasBash = !bashVersionProbe.error && bashVersionProbe.status === 0;
@@ -41,6 +42,17 @@ test("renderGuardRules emits tab-separated rules with hash header", () => {
   assert.equal(ruleLines.length, DEFAULT_RULES.length);
   for (const l of ruleLines) assert.equal(l.split("\t").length, 2);
   assert.ok(lines.some((l) => /^# sha256:[0-9a-f]{64}$/.test(l)));
+});
+
+test("rendered guard rules file speaks plain sentences in its header and every message", () => {
+  const out = renderGuardRules();
+  const header = out.split("\n").filter((l) => l.startsWith("# ") && !l.startsWith("# sha256:"));
+  assert.equal(header.length, 2);
+  for (const line of header) assert.deepEqual(validateOutputLine(line.slice(2)), [], line);
+  assert.match(header.join("\n"), /Delete the file to disable the guard\./);
+  const messages = out.split("\n").filter((l) => l.length > 0 && !l.startsWith("#")).map((l) => l.split("\t")[1]);
+  assert.equal(messages.length, DEFAULT_RULES.length);
+  for (const message of messages) assert.deepEqual(validateOutputLine(message), [], message);
 });
 
 test("pristine detection", () => {

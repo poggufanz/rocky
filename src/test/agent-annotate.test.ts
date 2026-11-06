@@ -32,6 +32,7 @@ import {
   SYNTHETIC_SECRET_CLOSURE_VECTORS,
 } from "./secret-vectors.js";
 import { skipIfSymlinkUnavailable } from "./symlink-capability.js";
+import { validateOutputLine } from "../ui/phrases.js";
 
 const INVISIBLE_FORMAT_CONTROLS: ReadonlyArray<readonly [string, string]> = [
   ["U+061C", "\u061C"],
@@ -200,7 +201,7 @@ test("late appends stay in a fresh live spool while annotation awaits AI", async
     async run() {
       begin?.();
       await blocked;
-      return { summary: "compact", tags: ["spacing"], label: "spacing, question" };
+      return { summary: "compact", tags: ["spacing"], label: "Spacing changed." };
     },
   };
 
@@ -773,7 +774,7 @@ test("durable annotation redacts modern keys and credential assignments from eve
         return {
           summary: `${modernKey} secret=rT8$wX3!nM6`,
           tags: [modernKey, 'api_key="api-aB3dE5fG7hI9jK2mN4pQ6"'],
-          label: `${modernKey}, question`,
+          label: `Check ${modernKey}.`,
         };
       },
     },
@@ -1140,7 +1141,7 @@ test("degradedLabel speaks the path for non-style files even when props exist", 
     degradedLabel("ingat ya database readonly", [
       { path: "app/Http/Controllers/InventoryTransferController.php", plusMinus: [3, 1], props: ["width"] },
     ]),
-    'you say "ingat ya database readonly". it is app/Http/Controllers/InventoryTransferController.php. I think. check, question',
+    'You said "ingat ya database readonly". The first change is app/Http/Controllers/InventoryTransferController.php. Does that match?',
   );
 });
 
@@ -1168,10 +1169,14 @@ test("machine envelope intent persists but never speaks a label", async (t) => {
   assert.deepEqual(labels, []);
 });
 
-test("degradedLabel uses exact rocky voice and strips terminal injection", () => {
+test("degradedLabel uses the exact plain wording and strips terminal injection", () => {
   assert.equal(
     degradedLabel("naikin dikit", [{ path: "src/app.css", plusMinus: [3, 1], props: ["margin-top"] }]),
-    'you say "naikin dikit". it is margin-top. I think. check, question',
+    'You said "naikin dikit". The first change is margin-top. Does that match?',
+  );
+  assert.deepEqual(
+    validateOutputLine('You said "naikin dikit". The first change is margin-top. Does that match?'),
+    [],
   );
   const unsafe = degradedLabel("bad\n\u001b[31mthing\u202e", [{ path: "src/app.css", plusMinus: [0, 0], props: [] }]);
   assert.ok(unsafe);
@@ -1274,7 +1279,8 @@ test("maybeQueueDigestHint queues once per week when recent intent exists", (t) 
   maybeQueueDigestHint(paths, now + 1_000);
   const first = readFileSync(paths.labels, "utf8").trim().split("\n").filter(Boolean);
   assert.equal(first.length, 1);
-  assert.ok(first[0]?.includes("rocky digest, question"));
+  assert.ok(first[0]?.includes("Run rocky digest to see this week's intent pattern."));
+  assert.deepEqual(validateOutputLine(first[0]?.replace(/^@\d+ /u, "") ?? ""), []);
   assert.equal(readFileSync(paths.digestHint, "utf8"), String(now));
 
   const next = now + 8 * 24 * 60 * 60 * 1_000;
@@ -1335,7 +1341,7 @@ test("digest hint uses exact file identity when numeric inode is unsafe", { time
 
   assert.equal(result.error, undefined, result.error?.message);
   assert.equal(result.status, 0, result.stderr);
-  assert.deepEqual(labelLines(paths), ["week of work in memory. rocky digest, question"]);
+  assert.deepEqual(labelLines(paths), ["A week of work is recorded. Run rocky digest to see this week's intent pattern."]);
   assert.equal(readFileSync(paths.digestHint, "utf8"), String(now));
 });
 
@@ -1489,7 +1495,7 @@ test("digest hint exact seven-day boundary is eligible once", (t) => {
   utimesSync(paths.digestHint, old, old);
   maybeQueueDigestHint(paths, now);
   maybeQueueDigestHint(paths, now);
-  assert.deepEqual(labelLines(paths), ["week of work in memory. rocky digest, question"]);
+  assert.deepEqual(labelLines(paths), ["A week of work is recorded. Run rocky digest to see this week's intent pattern."]);
   assert.equal(readFileSync(paths.digestHint, "utf8"), String(now));
 });
 
@@ -1546,7 +1552,7 @@ test("digest hint ignores sub-millisecond rounding at seven-day boundary", { tim
 
   assert.equal(result.error, undefined, result.error?.message);
   assert.equal(result.status, 0, result.stderr);
-  assert.deepEqual(labelLines(paths), ["week of work in memory. rocky digest, question"]);
+  assert.deepEqual(labelLines(paths), ["A week of work is recorded. Run rocky digest to see this week's intent pattern."]);
   assert.equal(readFileSync(paths.digestHint, "utf8"), String(now));
 });
 
@@ -1588,7 +1594,7 @@ test("digest hint lease allows exactly one label across racing processes", { tim
     child.once("close", (code) => resolve({ code, stderr: Buffer.concat(stderr).toString("utf8") }));
   })));
   assert.deepEqual(results.map((result) => result.code), [0, 0], results.map((result) => result.stderr).join("\n"));
-  assert.deepEqual(labelLines(paths), ["week of work in memory. rocky digest, question"]);
+  assert.deepEqual(labelLines(paths), ["A week of work is recorded. Run rocky digest to see this week's intent pattern."]);
   assert.equal(readFileSync(paths.digestHint, "utf8"), String(now));
 });
 
@@ -1643,7 +1649,7 @@ test("AI success changes only compacted rationale, tags, and valid queued label"
       assert.equal(input.rationaleRaw, "agent rationale");
       assert.deepEqual(input.files, [{ path: "src/app.css", excerpt: "margin-top: 8px" }]);
       assert.equal(signal.aborted, false);
-      return { summary: "compact rationale", tags: ["spacing"], label: "spacing, question" };
+      return { summary: "compact rationale", tags: ["spacing"], label: "Spacing changed." };
     },
   };
   const degraded = await annotateBatch("degraded", {
@@ -1663,7 +1669,7 @@ test("AI success changes only compacted rationale, tags, and valid queued label"
   assert.ok(ai);
   assert.deepEqual(deterministicFields(ai), deterministicFields(degraded));
   assert.deepEqual(ai.rationale, { text: "compact rationale", tags: ["spacing"], source: "transcript" });
-  assert.deepEqual(aiLabels, ["spacing, question"]);
+  assert.deepEqual(aiLabels, ["Spacing changed."]);
   assert.equal(degradedLabels.length, 1);
 });
 
@@ -1696,7 +1702,7 @@ test("throwing and undefined AI ports produce exact degraded rationale, tags, an
   assert.equal(undefinedResult.rationale?.text, "agent rationale");
   assert.deepEqual(undefinedResult.rationale?.tags, []);
   assert.equal(expectedLabels.length, 2);
-  assert.match(expectedLabels[0] ?? "", /you say/);
+  assert.match(expectedLabels[0] ?? "", /^You said /);
   assert.equal(expectedLabels[0], expectedLabels[1]);
 });
 
@@ -1705,7 +1711,7 @@ test("invalid or voice-breaking AI label falls back while valid summary and tags
   aiSeed(paths, "invalid-label");
   const labels: string[] = [];
   const fake: AnnotatePort = {
-    async run() { return { summary: "compact", tags: ["spacing"], label: "the thing?" }; },
+    async run() { return { summary: "compact", tags: ["spacing"], label: "check the thing, question" }; },
   };
   const result = await annotateBatch("invalid-label", {
     paths,
@@ -1717,8 +1723,8 @@ test("invalid or voice-breaking AI label falls back while valid summary and tags
   assert.equal(result.rationale?.text, "compact");
   assert.deepEqual(result.rationale?.tags, ["spacing"]);
   assert.equal(labels.length, 1);
-  assert.match(labels[0] ?? "", /^you say /);
-  assert.doesNotMatch(labels[0] ?? "", /the thing\?/u);
+  assert.match(labels[0] ?? "", /^You said /);
+  assert.doesNotMatch(labels[0] ?? "", /the thing/u);
 });
 
 test("AI may queue a valid label but never invent a rationale event", async (t) => {
@@ -1731,13 +1737,13 @@ test("AI may queue a valid label but never invent a rationale event", async (t) 
   const fake: AnnotatePort = {
     async run(input) {
       assert.equal(input.rationaleRaw, undefined);
-      return { summary: "invented summary must not store", tags: ["spacing"], label: "spacing, question" };
+      return { summary: "invented summary must not store", tags: ["spacing"], label: "Spacing changed." };
     },
   };
   const result = await annotateBatch("no-rationale-ai", { paths, ai: fake, git: () => undefined, queueLabel: (line) => labels.push(line) });
   assert.ok(result);
   assert.equal(result.rationale, undefined);
-  assert.deepEqual(labels, ["spacing, question"]);
+  assert.deepEqual(labels, ["Spacing changed."]);
 });
 
 test("default AI config lookup uses injected paths.config and never an unrelated home", async (t) => {

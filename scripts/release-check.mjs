@@ -752,9 +752,7 @@ export function allowedPackPath(path) {
     || path.startsWith("dist/listening/")
     || path.startsWith("assets/gui/")
     || path === "assets/teach-agent.md"
-    || path === "assets/teach-agent.en.md"
-    || path === "skills/rocky-voice/SKILL.md"
-    || path === "skills/rocky-voice/agents/openai.yaml";
+    || path === "assets/teach-agent.en.md";
 }
 
 /**
@@ -801,7 +799,6 @@ function parseManifest(stdout) {
   }
   for (const required of [
     "LICENSE", "README.md", "CHANGELOG.md", "package.json", "dist/index.js", "dist/agent/schema.js",
-    "skills/rocky-voice/SKILL.md", "skills/rocky-voice/agents/openai.yaml",
   ]) {
     if (!paths.includes(required)) throw new StepError(`required packed path is missing: ${required}`);
   }

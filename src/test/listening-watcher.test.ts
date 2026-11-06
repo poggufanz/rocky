@@ -75,7 +75,7 @@ test("binary, oversized, and symlink files become gaps, never versions", () => {
 // Git can no longer read (consent kept from before, a stub left behind) is
 // never walked wholesale: a workspace like that used to snapshot a nested
 // clone's ignored test build and git internals on every tick.
-test("a consented root Git cannot list is heard as nothing, never walked", () => {
+test("a consented root Git cannot list is captured as nothing, never walked", () => {
   const home = freshHome();
   const root = consentedRepo(home);
   writeFileSync(join(root, "kept.txt"), "kept\n");
@@ -92,8 +92,8 @@ test("a consented root Git cannot list is heard as nothing, never walked", () =>
   assert.equal(ensureBaseline(root, home).reason, "git-unreadable");
 });
 
-// Git's own ignore rules decide what is heard in a readable repo.
-test("gitignored build output is never heard", () => {
+// Git's own ignore rules decide what is captured in a readable repo.
+test("gitignored build output is never captured", () => {
   const home = freshHome();
   const root = consentedRepo(home);
   writeFileSync(join(root, ".gitignore"), ".test-dist/\n");

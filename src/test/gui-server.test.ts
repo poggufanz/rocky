@@ -131,7 +131,7 @@ test("a path outside the launch repo is refused, not read", async () => {
 
 test("a file memory names outside the launch repo still reads", async () => {
   const { home, root } = hermetic();
-  // memory hears files from every cwd, so a file can live outside the tree
+  // memory records files from every cwd, so a file can live outside the tree
   // rocky was launched in; the dash lists it either way and must read it too
   const outside = mkdtempSync(join(tmpdir(), "rocky-gui-outside-"));
   const target = join(outside, "heard.ts");
@@ -146,7 +146,7 @@ test("a file memory names outside the launch repo still reads", async () => {
     path: named,
     source: "agent:test",
     code: "const heard = true;",
-    business: "a heard file reads wherever it lives",
+    business: "a recorded file reads wherever it lives",
     snippet: "const heard = true;",
   }]);
 
@@ -189,7 +189,7 @@ test("a windows path in the wrong case still reaches its file", { skip: process.
   });
 });
 
-test("teach answers with the witness card when rocky heard a why", async () => {
+test("teach answers with the witness card when a why was recorded", async () => {
   const { home, root } = hermetic();
   // the recorded code line and the selected snippet must share enough tokens
   // to clear the teach similarity threshold, the same as in real use
@@ -215,7 +215,7 @@ test("teach answers with the witness card when rocky heard a why", async () => {
     });
     assert.equal(card.status, 200);
     assert.ok(
-      String(card.body?.header ?? "").startsWith("rocky heard this"),
+      String(card.body?.header ?? "").startsWith("Witnessed:"),
       `expected a witness header, got ${JSON.stringify(card.body)}`,
     );
   });
@@ -231,7 +231,7 @@ test("teach never claims a witness it does not have", async () => {
     });
     assert.equal(card.status, 200);
     const header = String(card.body?.header ?? "");
-    assert.ok(header === "" || !header.startsWith("rocky heard this"));
+    assert.ok(header === "" || !header.startsWith("Witnessed:"));
   });
 });
 
@@ -339,7 +339,7 @@ test("teach with expand: 1 on witness hit includes expanded without altering wit
     });
     assert.equal(card.status, 200);
     assert.ok(card.body);
-    assert.ok(String(card.body.header ?? "").startsWith("rocky heard this"));
+    assert.ok(String(card.body.header ?? "").startsWith("Witnessed:"));
     assert.ok(card.body.expanded, "witness card must contain expanded");
     assert.equal(card.body.expanded.why, "function");
     assert.equal(card.body.expanded.start, 1);
@@ -666,12 +666,12 @@ test("bundles groups one commit across files and bundle shows its diff", async (
     // 4. GET /api/bundle?commit=--help (invalid sha)
     const bad = await json(h, "/api/bundle?commit=--help");
     assert.equal(bad.status, 400);
-    assert.equal(bad.body?.error, "rocky needs a commit sha, question");
+    assert.equal(bad.body?.error, "A commit sha is required.");
 
     // 5. GET /api/bundle (missing commit)
     const missing = await json(h, "/api/bundle");
     assert.equal(missing.status, 400);
-    assert.equal(missing.body?.error, "rocky needs a commit sha, question");
+    assert.equal(missing.body?.error, "A commit sha is required.");
 
     // 6. GET /api/bundle?commit=<nonexistent-sha>
     const nonExistent = await json(h, "/api/bundle?commit=0123456789abcdef");
@@ -777,7 +777,7 @@ test("refer resolves symbol definition and references with redacted text", async
   });
 });
 
-test("home says what Rocky could not use instead of coverage full", async () => {
+test("home says what could not be used instead of coverage full", async () => {
   const { home, root } = hermetic();
   const record = JSON.stringify({
     kind: "failure", id: "home-failure-one", ts: Date.now() - 1000, cwd: "/private/one", cmd: "npm run build",
@@ -795,7 +795,7 @@ test("home says what Rocky could not use instead of coverage full", async () => 
     const partial = await json(h, "/api/home");
     assert.equal(partial.status, 200);
     assert.equal(partial.body.total, 1);
-    assert.equal(partial.body.coverageLine, "memory coverage incomplete: 1 line I cannot use.");
+    assert.equal(partial.body.coverageLine, "memory coverage incomplete: 1 line could not be used.");
     assert.equal(partial.body.coverage.truncated, true);
   });
 });

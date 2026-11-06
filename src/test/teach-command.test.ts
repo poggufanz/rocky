@@ -10,11 +10,12 @@ import { teach, type TeachDeps } from "../commands/teach.js";
 import { recordExplain } from "../core/memory.js";
 import { loadMemoryChecked, MAX_SUPPORTED_MEMORY_RECORDS } from "../core/memory-read.js";
 import { resolveRockyPaths } from "../core/state-paths.js";
+import { validateOutputLine } from "../ui/phrases.js";
 import { failureLines, failureLinesPastByteCap } from "./memory-cap-fixture.js";
 
-const EMPTY_STATE = "not heard why yet. agent explains when it writes. ask agent, rocky remembers, question";
-const WITNESS_HEADER = "rocky heard this. agent say why, rocky remember";
-const LADDER_HEADER = "rocky not hear this. assembled from evidence, not witnessed";
+const EMPTY_STATE = "No reason recorded yet. The authoring agent records one when it writes the code; ask the agent to explain it.";
+const WITNESS_HEADER = "Witnessed: an agent stated why, and rocky recorded it.";
+const LADDER_HEADER = "Assembled from evidence, not witnessed.";
 
 function freshHome(): string {
   const dir = mkdtempSync(join(tmpdir(), "rocky-teach-"));
@@ -121,6 +122,7 @@ test("teach missing file speaks the empty state and exits 0", async () => {
   const { sayLines, headingLines, blockLines, detailLines, deps } = sinks();
   assert.equal(await teach([`${join(home, "ghost.ts")}:5`], deps), 0);
   assert.deepEqual(sayLines, [EMPTY_STATE]);
+  assert.deepEqual(validateOutputLine(EMPTY_STATE), []);
   assert.deepEqual(headingLines, []);
   assert.deepEqual(blockLines, []);
   assert.deepEqual(detailLines, []);
@@ -202,7 +204,7 @@ test("teach --ladder with exhausted provenance keeps the disclosure voice, exit 
   const { sayLines, headingLines, blockLines, detailLines, deps } = sinks();
   assert.equal(await teach([`${path}:2`, "--ladder"], deps), 0);
   assert.deepEqual(headingLines, [LADDER_HEADER]);
-  assert.ok(blockLines.includes("no git history found for these lines. other evidence stays above."));
+  assert.ok(blockLines.includes("No git history found for these lines. Other evidence stays above."));
   assert.match(detailLines.join("\n"), /evidence-exhausted/);
   const userFacing = [...sayLines, ...headingLines, ...blockLines, ...detailLines].join("\n");
   assert.doesNotMatch(userFacing, /\?/);
@@ -211,7 +213,7 @@ test("teach --ladder with exhausted provenance keeps the disclosure voice, exit 
 });
 
 const COVERAGE_PREFIX = "memory coverage incomplete";
-const CAP_LINE = `${COVERAGE_PREFIX}: first ${MAX_SUPPORTED_MEMORY_RECORDS} records heard, later lines not heard. counts here not all.`;
+const CAP_LINE = `${COVERAGE_PREFIX}: Only the first ${MAX_SUPPORTED_MEMORY_RECORDS} records were read; later lines were not read. These counts do not cover all of memory.`;
 const ASYNC_FIXTURE = [
   "export async function loadFeed() {",
   "  const rows = await fetchRows();",
@@ -274,7 +276,7 @@ test("teach over the record cap says so before a witness card from the lines it 
   assert.equal(events.filter((event) => event.includes(COVERAGE_PREFIX)).length, 1, events.join("\n"));
 });
 
-test("teach over the file size cap says the memory file is too big and how many records it heard", async (t) => {
+test("teach over the file size cap says the memory file is too large and how many records it read", async (t) => {
   const home = freshHome();
   t.after(() => rmSync(home, { recursive: true, force: true }));
   const memoryPath = join(home, "memory.jsonl");
@@ -286,7 +288,7 @@ test("teach over the file size cap says the memory file is too big and how many 
   assert.equal(await teach([`${path}:2`], deps), 0);
   assert.equal(
     events[0],
-    `say ${COVERAGE_PREFIX}: memory file too big. first ${heard.records.length} records heard, later lines not heard. counts here not all.`,
+    `say ${COVERAGE_PREFIX}: The memory file is too large. Only the first ${heard.records.length} records were read; later lines were not read. These counts do not cover all of memory.`,
   );
   assert.equal(events[1], `heading ${LADDER_HEADER}`);
 });

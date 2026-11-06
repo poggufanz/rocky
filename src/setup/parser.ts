@@ -18,7 +18,6 @@ export function parseSetupArgs(argv: readonly string[]): SetupOptions {
   let exposureProvided = false;
   let replace = false;
   let yes = false;
-  let voiceSkill = false;
   let agentHooksAction: AgentHooksAction | undefined;
   let rationaleGate = true;
   let rationaleGateProvided = false;
@@ -46,10 +45,6 @@ export function parseSetupArgs(argv: readonly string[]): SetupOptions {
     }
     if (argument === "--yes") {
       yes = true;
-      continue;
-    }
-    if (argument === "--voice-skill") {
-      voiceSkill = true;
       continue;
     }
     if (argument === "--no-rationale-gate") {
@@ -138,13 +133,13 @@ export function parseSetupArgs(argv: readonly string[]): SetupOptions {
 
   if (wizard) {
     if (
-      harnesses.length > 0 || mcp || listening || rawTrace || voiceSkill
+      harnesses.length > 0 || mcp || listening || rawTrace
       || modeOption !== undefined || agentHooksAction !== undefined || rationaleGateProvided
       || repo !== undefined || repoAction !== undefined
     ) {
       throw new SetupUsageError("--harness without a value opens the picker and cannot combine with other selectors or actions");
     }
-    return { mode, exposure, replace, yes, voiceSkill, harnesses, mcp: true, listening: false, rawTrace: false, wizard: true };
+    return { mode, exposure, replace, yes, harnesses, mcp: true, listening: false, rawTrace: false, wizard: true };
   }
 
   if (repo !== undefined || repoAction !== undefined) {
@@ -152,13 +147,13 @@ export function parseSetupArgs(argv: readonly string[]): SetupOptions {
       throw new SetupUsageError("--repo requires exactly one of --allow-capture, --revoke-capture, --check-capture");
     }
     if (
-      harnesses.length > 0 || mcp || listening || rawTrace || voiceSkill
+      harnesses.length > 0 || mcp || listening || rawTrace
       || modeOption !== undefined || replace || exposureProvided
       || agentHooksAction !== undefined || rationaleGateProvided
     ) {
       throw new SetupUsageError("--repo actions are standalone and cannot combine with host or feature flags");
     }
-    return { mode, exposure, replace, yes, voiceSkill, harnesses, ...(harnesses.length > 0 ? { harness: [...harnesses] } : {}), mcp: true, listening: false, repo, repoAction, rawTrace: false };
+    return { mode, exposure, replace, yes, harnesses, ...(harnesses.length > 0 ? { harness: [...harnesses] } : {}), mcp: true, listening: false, repo, repoAction, rawTrace: false };
   }
 
   if (rawTrace) {
@@ -171,8 +166,8 @@ export function parseSetupArgs(argv: readonly string[]): SetupOptions {
   if (agentHooksAction === "status" && (mcp || listening)) {
     throw new SetupUsageError("--status accepts --harness but not --mcp or --listening");
   }
-  if ((mcp || listening) && (voiceSkill || agentHooksAction !== undefined || rationaleGateProvided)) {
-    throw new SetupUsageError("--mcp and --listening only scope setup, --check, and --remove; they cannot combine with voice-skill or agent hook actions");
+  if ((mcp || listening) && (agentHooksAction !== undefined || rationaleGateProvided)) {
+    throw new SetupUsageError("--mcp and --listening only scope setup, --check, and --remove; they cannot combine with agent hook actions");
   }
   if (replace && listening && !mcp) {
     throw new SetupUsageError("--replace only replaces MCP state; --replace with --listening requires --mcp");
@@ -186,18 +181,18 @@ export function parseSetupArgs(argv: readonly string[]): SetupOptions {
   }
 
   if (agentHooksAction !== undefined) {
-    if (modeOption !== undefined || replace || exposureProvided || voiceSkill) {
-      throw new SetupUsageError("agent hook actions cannot combine with MCP or voice-skill options");
+    if (modeOption !== undefined || replace || exposureProvided) {
+      throw new SetupUsageError("agent hook actions cannot combine with MCP options");
     }
     if (rationaleGateProvided && agentHooksAction !== "install") {
       throw new SetupUsageError("--no-rationale-gate is valid only with --agent-hooks");
     }
-    return { mode, exposure, replace, yes, voiceSkill, agentHooksAction, rationaleGate, harnesses, ...(harnesses.length > 0 ? { harness: [...harnesses] } : {}), mcp: false, listening: false, rawTrace: false };
+    return { mode, exposure, replace, yes, agentHooksAction, rationaleGate, harnesses, ...(harnesses.length > 0 ? { harness: [...harnesses] } : {}), mcp: false, listening: false, rawTrace: false };
   }
 
   if (rationaleGateProvided) {
     throw new SetupUsageError("--no-rationale-gate is valid only with --agent-hooks");
   }
 
-  return { mode, exposure, replace, yes, voiceSkill, harnesses, ...(harnesses.length > 0 ? { harness: [...harnesses] } : {}), mcp: mcp || !listening, listening, rawTrace };
+  return { mode, exposure, replace, yes, harnesses, ...(harnesses.length > 0 ? { harness: [...harnesses] } : {}), mcp: mcp || !listening, listening, rawTrace };
 }

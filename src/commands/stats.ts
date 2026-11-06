@@ -6,13 +6,13 @@ import { isOperationalMemoryRecord, loadMemoryChecked, type MemoryCoverage } fro
 import { queryStats } from "../core/memory-query.js";
 import { CYCLES_TOP, FAILURE_CYCLE_COUNT } from "../core/failure-cycle.js";
 import { CliUsageError, reportCliUsage } from "./cli-args.js";
-import { detail, face, isVerbose, say } from "../ui/rocky.js";
+import { detail, isVerbose, say } from "../ui/rocky.js";
 
 const STATS_USAGE = "rocky stats [--cycles]";
 
 /**
  * Disclosure for the counts printed above it. Whenever the read was not whole,
- * one persona line says so in plain words and warns that these counts are not
+ * one line says so in plain words and warns that these counts are not
  * all. ROCKY_VERBOSE=1 also prints the raw counters, whole read or not, ending
  * with the reason a cap or race stopped the read when there is one.
  */
@@ -45,7 +45,7 @@ function statsCycles(): number {
     records = loaded.records;
     coverage = loaded.coverage;
   } catch {
-    say("memory file does not open for me. I answer from nothing.");
+    say("Memory file could not be opened. No records were read.");
     detail(`    memory: ${memoryPath()}`);
     return 1;
   }
@@ -58,15 +58,14 @@ function statsCycles(): number {
   const ranked = [...counts.entries()]
     .sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
   const shown = ranked.slice(0, CYCLES_TOP);
-  console.log(face());
   if (ranked.length === 0) {
-    say("no failure heard yet. nothing cycles.");
+    say("No failures recorded yet. Nothing repeats.");
   } else {
-    say(`I hear ${ranked.length} trouble shape${ranked.length === 1 ? "" : "s"}. top ${shown.length} listed.`);
+    say(`${ranked.length} distinct error${ranked.length === 1 ? "" : "s"} recorded. Top ${shown.length} listed.`);
     for (const [fp, count] of shown) detail(`${fp} x${count}`);
     const clustered = ranked.filter(([, count]) => count >= FAILURE_CYCLE_COUNT).length;
     if (clustered > 0) {
-      detail(`${clustered} shape${clustered === 1 ? "" : "s"} heard ${FAILURE_CYCLE_COUNT} or more times. count only, no cause named.`);
+      detail(`${clustered} distinct error${clustered === 1 ? "" : "s"} seen ${FAILURE_CYCLE_COUNT} or more times. Counts only; no cause is named.`);
     }
   }
   speakCoverage(coverage, records.length);
@@ -102,7 +101,7 @@ export function stats(argv: readonly string[] = []): number {
     records = loaded.records;
     coverage = loaded.coverage;
   } catch {
-    say("memory file does not open for me. I answer from nothing.");
+    say("Memory file could not be opened. No records were read.");
     detail(`    memory: ${memoryPath()}`);
     return 1;
   }
@@ -112,11 +111,10 @@ export function stats(argv: readonly string[] = []): number {
   const triples = result.triples ?? 0;
   const notes = result.notes ?? 0;
   const total = result.total ?? records.length;
-  console.log(face());
   // Memory stores an intent as a "triple". The plain word is the default; ROCKY_VERBOSE=1 keeps the stored one.
   const intentWord = isVerbose() ? "triple" : "intent";
-  say(`I remember ${result.failures} error${result.failures === 1 ? "" : "s"}. ${result.resolved} have fix. ${result.fixEvents} fix event${result.fixEvents === 1 ? "" : "s"} total.`);
-  say(`memory holds ${total} remembered item${total === 1 ? "" : "s"}. ${confirmedFixes} confirmed fix${confirmedFixes === 1 ? "" : "es"}. ${possibleFixes} possible fix${possibleFixes === 1 ? "" : "es"}. ${triples} ${intentWord}${triples === 1 ? "" : "s"}. ${notes} note${notes === 1 ? "" : "s"}.`);
+  say(`${result.failures} error${result.failures === 1 ? "" : "s"} recorded. ${result.resolved} ${result.resolved === 1 ? "has" : "have"} a fix. ${result.fixEvents} fix event${result.fixEvents === 1 ? "" : "s"} total.`);
+  say(`Memory holds ${total} recorded item${total === 1 ? "" : "s"}. ${confirmedFixes} confirmed fix${confirmedFixes === 1 ? "" : "es"}. ${possibleFixes} possible fix${possibleFixes === 1 ? "" : "es"}. ${triples} ${intentWord}${triples === 1 ? "" : "s"}. ${notes} note${notes === 1 ? "" : "s"}.`);
   say(`memory file: ${memoryPath()}`);
   const byKind = result.byKind ?? {};
   if (isVerbose()) {
@@ -129,23 +127,23 @@ export function stats(argv: readonly string[] = []): number {
   const ageDays = memoryAgeDays(records.map((record) => record.ts), Date.now());
   const journalCount = readJournal().records.length;
   const briefRuns = byKind["brief_run"] ?? 0;
-  say(`memory age ${ageDays} day${ageDays === 1 ? "" : "s"}. ${briefRuns} brief run${briefRuns === 1 ? "" : "s"}. ${journalCount} journal note${journalCount === 1 ? "" : "s"}.`);
+  say(`Memory is ${ageDays} day${ageDays === 1 ? "" : "s"} old. ${briefRuns} brief run${briefRuns === 1 ? "" : "s"}. ${journalCount} journal note${journalCount === 1 ? "" : "s"}.`);
   // Gate denials are never counted here: that state is ephemeral (never
-  // written to memory), and counting it would imply a durability Rocky
+  // written to memory), and counting it would imply a durability rocky
   // does not have.
   if (isVerbose()) {
     const rationaleByFidelity = result.rationaleByFidelity ?? { raw: 0, summary: 0, none: 0 };
     const rationaleTotal = byKind["rationale"] ?? 0;
     const aliasTotal = byKind["alias"] ?? 0;
-    say(`rationale heard ${rationaleTotal} time${rationaleTotal === 1 ? "" : "s"}. raw ${rationaleByFidelity.raw}, summary ${rationaleByFidelity.summary}, none ${rationaleByFidelity.none}. alias ${aliasTotal} remembered.`);
+    say(`Rationale recorded ${rationaleTotal} time${rationaleTotal === 1 ? "" : "s"}: raw ${rationaleByFidelity.raw}, summary ${rationaleByFidelity.summary}, none ${rationaleByFidelity.none}. Aliases recorded: ${aliasTotal}.`);
   }
   const guardTotal = result.guardTotal ?? 0;
   const guardCancelled = result.guardCancelled ?? 0;
   const guardProceeded = result.guardProceeded ?? 0;
   if (guardTotal === 0) {
-    say("guard never stop bad command yet. good.");
+    say("Guard has not stopped any command yet.");
   } else {
-    say(`guard stop ${guardTotal} bad command${guardTotal === 1 ? "" : "s"}. ${guardCancelled} cancelled. ${guardProceeded} proceeded.`);
+    say(`Guard stopped ${guardTotal} command${guardTotal === 1 ? "" : "s"}. ${guardCancelled} cancelled. ${guardProceeded} proceeded.`);
     const guardByRule = result.guardByRule ?? {};
     const topRule = Object.entries(guardByRule).sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))[0];
     if (topRule !== undefined) detail(`top guard rule: ${topRule[0]} (${topRule[1]})`);
@@ -156,6 +154,6 @@ export function stats(argv: readonly string[] = []): number {
     const tombstones = countReclaimTombstones(dirname(memoryPath()));
     if (tombstones > 0) detail(`tombstones waiting sweep: ${tombstones}`);
   }
-  if (result.unresolved > 0) say(`${result.unresolved} error${result.unresolved === 1 ? "" : "s"} still without fix. you fix, I remember. good trade.`);
+  if (result.unresolved > 0) say(`${result.unresolved} error${result.unresolved === 1 ? "" : "s"} still without a fix.`);
   return 0;
 }

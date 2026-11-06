@@ -6,7 +6,7 @@ import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import test, { type TestContext } from "node:test";
 import { fileURLToPath } from "node:url";
 import { cleanLine } from "../commands/check.js";
-import { validateRockyPhrase } from "../ui/phrases.js";
+import { validateOutputLine } from "../ui/phrases.js";
 
 const packageRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const entry = join(packageRoot, "dist", "index.js");
@@ -327,7 +327,7 @@ test("pre-push check finds a planted secret when the last diff section is a bina
 
   assertCompleted(result, 3);
   assert.match(result.stderr, /a-key\.ts:1/);
-  assert.match(result.stderr, /secret sits in outgoing code/);
+  assert.match(result.stderr, /A secret is in the outgoing code\./);
 });
 
 test("manual check finds committed content without an upstream and exits 1", async (t) => {
@@ -455,7 +455,7 @@ test("secret finding latches before its announcement can fail", async (t) => {
   const commits = initRepo(box, { "README.md": "clean\n" }, {
     "src/key.ts": `export const key = "${secret}";\n`,
   });
-  const preload = throwingStderrPreload(box, "secret sits in outgoing code");
+  const preload = throwingStderrPreload(box, "A secret is in the outgoing code");
 
   const result = await runCheck(box, ["--pre-push"], prePushLine(commits.second!, commits.first), preload);
 
@@ -469,7 +469,7 @@ test("missing-package finding latches before its announcement can fail", async (
     "package.json": JSON.stringify({ dependencies: { [NEVER_PACKAGE]: "1.0.0" } }),
   });
   enableRegistry(box);
-  const preload = throwingStderrPreload(box, "package does not exist", true);
+  const preload = throwingStderrPreload(box, "Package does not exist", true);
 
   const result = await runCheck(box, ["--pre-push"], prePushLine(commits.second!, commits.first), preload);
 
@@ -1193,7 +1193,7 @@ test("the same unreadable diff still lets a push through in hook mode", async (t
 
   const result = await runCheck(box, ["--pre-push", "--offline"], line);
 
-  // Exit 0: a Rocky that cannot inspect must never be the reason a push is held.
+  // Exit 0: a rocky that cannot inspect must never be the reason a push is held.
   assertCompleted(result, 0);
 });
 
@@ -1211,7 +1211,7 @@ test("cleanLine states only the net change it checked, with exact plurals", () =
   ] as const;
   for (const [actual, expected] of lines) {
     assert.equal(actual, expected);
-    assert.deepEqual(validateRockyPhrase(actual), [], actual);
+    assert.deepEqual(validateOutputLine(actual), [], actual);
   }
 });
 
@@ -1225,7 +1225,7 @@ test("a clean pre-push check states its scope in one line", async (t) => {
   const result = await runCheck(box, ["--offline", "--pre-push"], prePushLine(commits.second!, commits.first));
 
   assertCompleted(result, 0);
-  assert.match(result.stderr, /\[Rocky\] checked net change: 3 new text lines, 2 files\. no secret hit\.\r?\n/);
+  assert.match(result.stderr, /rocky: checked net change: 3 new text lines, 2 files\. no secret hit\.\r?\n/);
   assert.equal(cleanLineCount(result.stderr), 1, result.stderr);
 });
 
@@ -1285,7 +1285,7 @@ test("a push whose net change cancels out says it has no new text lines", async 
   const result = await runCheck(box, ["--offline", "--pre-push"], prePushLine(head, commits.first));
 
   assertCompleted(result, 0);
-  assert.match(result.stderr, /\[Rocky\] net change has no new text lines\.\r?\n/);
+  assert.match(result.stderr, /rocky: net change has no new text lines\.\r?\n/);
   assert.doesNotMatch(result.stderr, /no secret hit|nothing to check/i);
   assert.equal(cleanLineCount(result.stderr), 1, result.stderr);
 });
@@ -1395,9 +1395,9 @@ test("a risky line with no terminal says the comprehension question was skipped"
   // A skipped question is not an incomplete scan.
   assert.doesNotMatch(result.stderr, /INCOMPLETE/i);
   assert.match(result.stderr, /checked net change: 1 new text line, 1 file\. no secret hit\./);
-  // The skip line is a plain fact through detail(), so it carries no persona
-  // prefix and sits outside the persona lint ("question" is a noun there).
-  assert.doesNotMatch(result.stderr, /\[Rocky\] comprehension question skipped/);
+  // The skip line is a plain fact through detail(), so it carries no rocky:
+  // prefix and sits outside the output-rule lint ("question" is a noun there).
+  assert.doesNotMatch(result.stderr, /rocky: comprehension question skipped/);
 });
 
 test("the skipped-question line stays silent under ROCKY_NO_QUIZ, --quiet, and a calm diff", async (t) => {
@@ -1600,7 +1600,7 @@ test("a branch already on a remote has no new text lines and no scope note", asy
   const result = await runCheck(box, ["--offline"]);
 
   assertCompleted(result, 0);
-  assert.match(result.stderr, /\[Rocky\] net change has no new text lines\.\r?\n/);
+  assert.match(result.stderr, /rocky: net change has no new text lines\.\r?\n/);
   assert.doesNotMatch(result.stderr, NO_SHARED_HISTORY);
 });
 

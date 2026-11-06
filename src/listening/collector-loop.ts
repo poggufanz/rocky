@@ -95,7 +95,7 @@ export function startCollectorLoop(opts: { proc: CollectorOwner["proc"]; home?: 
   };
   worker.on("message", (root: string) => pending.delete(root));
   worker.once("error", (error: Error) => {
-    say("capture stops. bad. memory stays.");
+    say("Capture stopped because the collector worker failed. Existing memory is kept.");
     detail(error.message);
     void stop();
   });

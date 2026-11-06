@@ -94,16 +94,16 @@ export function composeBrief(input: BriefInput): string[] {
 
   // Block 4: invariant intersections.
   for (const touch of input.invariantTouches) {
-    lines.push(`${touch.path} changed. this path guards: "${touch.invariant}". worth checking, question`);
+    lines.push(`${touch.path} changed. This path guards: "${touch.invariant}". Worth checking?`);
   }
 
   // Block 5: explain-ready questions from deterministic templates.
   lines.push("explain-ready:");
   if (areas.length === 0) {
-    lines.push("  nothing to explain. quiet window.");
+    lines.push("  Nothing to explain. No changes in this window.");
   } else {
     for (const area of areas) {
-      lines.push(`  why ${area} change, question`);
+      lines.push(`  Why did ${area} change?`);
     }
     const churnByPath = new Map<string, number>();
     for (const file of allFiles) {
@@ -111,7 +111,7 @@ export function composeBrief(input: BriefInput): string[] {
     }
     const biggest = [...churnByPath.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0];
     if (biggest !== undefined && biggest[1] > 0) {
-      lines.push(`  what impact of ${biggest[0]} change, question`);
+      lines.push(`  What is the impact of the change to ${biggest[0]}?`);
     }
   }
   return lines;

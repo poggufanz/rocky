@@ -8,7 +8,6 @@ test("setup parser applies safe defaults", () => {
     exposure: "sanitized",
     replace: false,
     yes: false,
-    voiceSkill: false,
     harnesses: [],
     mcp: true,
     listening: false,
@@ -22,7 +21,6 @@ test("setup parser selects check mode without changing safe defaults", () => {
     exposure: "sanitized",
     replace: false,
     yes: false,
-    voiceSkill: false,
     harnesses: [],
     mcp: true,
     listening: false,
@@ -35,7 +33,6 @@ test("setup parser selects remove mode and accepts ordinary confirmation bypass"
     exposure: "sanitized",
     replace: false,
     yes: true,
-    voiceSkill: false,
     harnesses: [],
     mcp: true,
     listening: false,
@@ -48,7 +45,6 @@ test("setup parser accepts configure-only options in any order", () => {
     exposure: "raw",
     replace: true,
     yes: true,
-    voiceSkill: false,
     harnesses: [],
     mcp: true,
     listening: false,
@@ -56,40 +52,23 @@ test("setup parser accepts configure-only options in any order", () => {
   });
 });
 
-test("setup parser selects voice skill work explicitly in every mode", () => {
-  assert.deepEqual(parseSetupArgs(["--voice-skill", "--yes"]), {
-    mode: "configure",
-    exposure: "sanitized",
-    replace: false,
-    yes: true,
-    voiceSkill: true,
-    harnesses: [],
-    mcp: true,
-    listening: false,
-    rawTrace: false,
-  });
-  assert.deepEqual(parseSetupArgs(["--check", "--voice-skill"]), {
-    mode: "check",
-    exposure: "sanitized",
-    replace: false,
-    yes: false,
-    voiceSkill: true,
-    harnesses: [],
-    mcp: true,
-    listening: false,
-    rawTrace: false,
-  });
-  assert.deepEqual(parseSetupArgs(["--voice-skill", "--remove", "--yes"]), {
-    mode: "remove",
-    exposure: "sanitized",
-    replace: false,
-    yes: true,
-    voiceSkill: true,
-    harnesses: [],
-    mcp: true,
-    listening: false,
-    rawTrace: false,
-  });
+test("setup parser rejects --voice-skill as an unknown option in every mode", () => {
+  for (const argv of [
+    ["--voice-skill"],
+    ["--voice-skill", "--yes"],
+    ["--check", "--voice-skill"],
+    ["--voice-skill", "--remove", "--yes"],
+    ["--agent-hooks", "--voice-skill"],
+    ["--harness", "codex", "--voice-skill"],
+  ]) {
+    assert.throws(
+      () => parseSetupArgs(argv),
+      (error: unknown) => error instanceof SetupUsageError
+        && error.exitCode === 2
+        && error.message === "unknown setup option: --voice-skill",
+      argv.join(" "),
+    );
+  }
 });
 
 test("setup parser selects dedicated Claude agent-hook actions", () => {
@@ -98,7 +77,6 @@ test("setup parser selects dedicated Claude agent-hook actions", () => {
     exposure: "sanitized",
     replace: false,
     yes: false,
-    voiceSkill: false,
     agentHooksAction: "install",
     rationaleGate: true,
     harnesses: [],
@@ -118,7 +96,7 @@ test("dedicated agent-hook actions reject ordinary setup flags and each other", 
     ["--agent-hooks", "--remove"],
     ["--agent-hooks", "--replace"],
     ["--agent-hooks", "--mcp-exposure", "raw"],
-    ["--agent-hooks", "--voice-skill"],
+    ["--agent-hooks", "--mcp"],
     ["--status", "--check"],
   ]) {
     assert.throws(() => parseSetupArgs(argv), (error: unknown) =>

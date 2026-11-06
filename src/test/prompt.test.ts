@@ -52,7 +52,7 @@ test("prompt port supports boolean consent", async () => {
   const output = new PassThrough();
   const port = createPromptPort(input, output);
 
-  const answer = port.confirm("send names, question", 1_000);
+  const answer = port.confirm("Send package names?", 1_000);
   input.write("yes\n");
 
   assert.equal(await answer, true);
@@ -75,7 +75,7 @@ test("prompt port silently declines non-TTY input without reading", async () => 
   const port = createPromptPort(input, new PassThrough());
 
   assert.equal(await port.ask("answer: ", 10), undefined);
-  assert.equal(await port.confirm("send names, question", 10), false);
+  assert.equal(await port.confirm("Send package names?", 10), false);
   assert.equal(reads, 0);
 });
 
@@ -85,7 +85,7 @@ test("TTY prompt falls back to process-style stdin when the controlling terminal
   const port = createWithControllingAsk(input, output, async () => ({ available: false }));
   assert.ok(port);
 
-  const answer = port.ask("answer, question ", 1_000);
+  const answer = port.ask("Your answer? ", 1_000);
   input.write("fallback works\n");
 
   assert.equal(await answer, "fallback works");
@@ -111,7 +111,7 @@ test("on win32 a terminal stdin still prompts through the fallback", async (t) =
       const port = createWithControllingAsk(input, new PassThrough(), async () => ({ available: false }));
       assert.ok(port, `stderr TTY ${stderrIsTTY}: stdin is the terminal, so the prompt stays available`);
 
-      const answer = port.ask("answer, question ", 1_000);
+      const answer = port.ask("Your answer? ", 1_000);
       input.write("typed on win32\n");
 
       assert.equal(await answer, "typed on win32");
@@ -131,7 +131,7 @@ test("off win32 a terminal stderr keeps the controlling-terminal prompt while st
   }));
 
   assert.ok(port, "POSIX behavior is unchanged: a TTY stderr is enough to reach /dev/tty");
-  assert.equal(await port.ask("answer, question ", 1_000), "from the controlling terminal");
+  assert.equal(await port.ask("Your answer? ", 1_000), "from the controlling terminal");
 });
 
 test("off win32 without any terminal the TTY prompt still declines", (t) => {

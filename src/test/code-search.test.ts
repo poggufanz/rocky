@@ -101,7 +101,7 @@ const explainRecord = (id: string, root: string, path: string, snippet: string):
   path,
   source: "agent:test",
   code: snippet,
-  business: "a heard file",
+  business: "a recorded file",
   snippet,
 });
 
@@ -162,8 +162,8 @@ test("the heuristic fires on code tokens and never on a memory question", () => 
   ]) {
     assert.equal(isCodeQuery(message), false, `expected no code trigger: ${message}`);
   }
-  // a basename Rocky already heard is enough, even when nothing else about
-  // the message looks like code: he is being asked for that file
+  // a basename memory already names is enough, even when nothing else about
+  // the message looks like code: the question is about that file
   assert.equal(isCodeQuery("what happened in the Makefile", ["Makefile"]), true);
   assert.equal(isCodeQuery("what happened in the Makefile", []), false);
 });
@@ -286,7 +286,7 @@ test("oversize files are a miss with a disclosure, and a spent round discloses i
   assert.ok(stalled.trace.rounds >= 1 && stalled.trace.rounds <= 3);
   assert.equal(stalled.trace.roundsExhausted, true);
   assert.equal(stalled.trace.truncated, true);
-  assert.ok(stalled.disclosures.some((line) => line.startsWith("code read timed out in round ")));
+  assert.ok(stalled.disclosures.some((line) => line.startsWith("Code read timed out in round ")));
 });
 
 test("a citation the excerpts do not hold is stripped and counted", () => {
@@ -361,7 +361,7 @@ test("a code question quotes the file with file:line and, with no model, says so
     assert.ok(disclosure.includes(CODE_NO_MODEL));
     assert.ok(!disclosure.includes("budget spent"), "nothing was cut short by the round cap");
     assert.equal(answer.payload.codeAnswer?.stripped, 0);
-    assert.ok(String(answer.payload.codeAnswer?.text ?? "").startsWith("code: quoted "));
+    assert.ok(String(answer.payload.codeAnswer?.text ?? "").startsWith("Code search: quoted "));
   });
 });
 
@@ -422,7 +422,7 @@ test("a configured model gets one code call, and its unbacked citations are stri
         assert.equal(codePrompts.length, 1, "exactly one code provider call per code question");
         const prompt = codePrompts[0] ?? "";
         assert.ok(prompt.includes("MEMORY EVIDENCE"));
-        assert.ok(prompt.includes("npm run build loadMemory"), "the memory block carries the heard record");
+        assert.ok(prompt.includes("npm run build loadMemory"), "the memory block carries the failure record");
         assert.ok(prompt.includes("JEV DECISION TRACE"));
         assert.ok(prompt.includes("HARD STOP"));
         assert.ok(prompt.includes("=== src/memory.ts:"));

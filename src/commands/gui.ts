@@ -13,7 +13,7 @@ export function openerFor(platform: NodeJS.Platform, url: string): { command: st
 /** Opening a browser is a convenience, never a requirement: the URL is printed
  *  first, so a failed spawn costs the user nothing. A missing opener is reported
  *  as an async "error" event, not a throw, so it needs a listener or it kills
- *  the foreground GUI. `onFail` hears both ways; the opener's exit code is
+ *  the foreground GUI. `onFail` is called both ways; the opener's exit code is
  *  never observed. */
 export function openBrowser(
   url: string,
@@ -46,7 +46,7 @@ export async function guiCommand(rest: string[], segment: GuiSegment): Promise<n
     // the foreground CLI owns the collector for every consented repo (spec §3)
     handle = await startGui({ port: Number.isFinite(port) ? port : DEFAULT_GUI_PORT, collect: true });
   } catch {
-    say("rocky cannot open door here. port busy, question");
+    say("Could not start the GUI server. The port may be busy.");
     return 1;
   }
 
@@ -56,9 +56,9 @@ export async function guiCommand(rest: string[], segment: GuiSegment): Promise<n
       ? `http://127.0.0.1:${handle.port}/?v=listening#${handle.token}`
       : handle.url;
 
-  heading("rocky listening");
-  detail(`heard at ${url}`);
-  detail("ctrl-c stops rocky");
+  heading("rocky GUI");
+  detail(`Serving at ${url}`);
+  detail("Press Ctrl-C to stop.");
   if (!noOpen) openBrowser(url, () => say(phrase("gui-opener-failed")));
 
   // foreground until interrupted: no daemon, no port file, nothing left behind

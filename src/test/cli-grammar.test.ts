@@ -7,7 +7,8 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { quoteShellPath } from "../core/shell-quote.js";
 import { PACKAGE_VERSION } from "../core/package-info.js";
-import { parseExactCommand } from "../commands/cli-args.js";
+import { CliUsageError, parseExactCommand, reportCliUsage } from "../commands/cli-args.js";
+import { validateOutputLine } from "../ui/phrases.js";
 
 const packageRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const cli = join(packageRoot, "dist", "index.js");
@@ -147,7 +148,7 @@ test("why --add reports a --files value it cannot use as usage with exit 2", () 
     assert.equal(result.signal, null, label);
     assert.equal(result.status, 2, `${label}: ${result.stderr}`);
     assert.equal(result.stdout, "", label);
-    assert.match(result.stderr, /--files needs path/, label);
+    assert.match(result.stderr, /--files needs a path/, label);
     assert.ok(result.stderr.includes('usage: rocky why --add "<text>" [--files a.ts,b.ts]'), `${label}: ${result.stderr}`);
   }
 });
@@ -249,7 +250,30 @@ test("help --all blames the first token after a leading --all, never the --all i
     assert.equal(result.signal, null, label);
     assert.equal(result.status, 2, `${label}: ${result.stderr}`);
     assert.equal(result.stdout, "", label);
-    assert.ok(result.stderr.includes(`unexpected argument: ${stray}. run rocky --help, question`), `${label}: ${result.stderr}`);
+    assert.ok(result.stderr.includes(`Unexpected argument: ${stray}. Run rocky --help for the command list.`), `${label}: ${result.stderr}`);
     assert.ok(result.stderr.includes("usage: rocky --help [--all]"), `${label}: ${result.stderr}`);
   }
+});
+
+test("reportCliUsage prints one sentence with the help hint, then the usage line", () => {
+  const cases: ReadonlyArray<readonly [string, string]> = [
+    ["unexpected argument: junk", "Unexpected argument: junk. Run rocky --help for the command list."],
+    ["--files needs a path", "--files needs a path. Run rocky --help for the command list."],
+    ["line must be at least 1.", "Line must be at least 1. Run rocky --help for the command list."],
+  ];
+  for (const [message, expected] of cases) {
+    const spoken: string[] = [];
+    const support: string[] = [];
+    const code = reportCliUsage(
+      new CliUsageError(message, "rocky teach <file>"),
+      (line) => spoken.push(line),
+      (line) => support.push(line),
+    );
+    assert.equal(code, 2, message);
+    assert.deepEqual(spoken, [expected], message);
+    assert.deepEqual(support, ["usage: rocky teach <file>"], message);
+    assert.deepEqual(validateOutputLine(expected), [], message);
+  }
+  const untouched = reportCliUsage(new Error("not a usage error"), () => assert.fail("must not speak"), () => assert.fail("must not print"));
+  assert.equal(untouched, undefined);
 });

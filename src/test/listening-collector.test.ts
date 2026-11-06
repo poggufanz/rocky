@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { heartbeatCollector, releaseCollector, tryAcquireCollector } from "../listening/collector.js";
+import { renewCollector, releaseCollector, tryAcquireCollector } from "../listening/collector.js";
 
 function freshHome(): string {
   const home = realpathSync(mkdtempSync(join(tmpdir(), "rocky-listen-col-")));
@@ -24,13 +24,13 @@ test("one owner per repo; release hands off", () => {
   assert.equal(tryAcquireCollector(root, { proc: "mcp", pid: process.pid, token: "b" }, home).owner, true);
 });
 
-test("same token re-acquires and heartbeat renews", () => {
+test("same token re-acquires and renew extends the lease", () => {
   const home = freshHome();
   const root = "/repo/collector-b";
   assert.equal(tryAcquireCollector(root, { proc: "gui", pid: process.pid, token: "a" }, home).owner, true);
   assert.equal(tryAcquireCollector(root, { proc: "gui", pid: process.pid, token: "a" }, home).owner, true);
-  assert.equal(heartbeatCollector(root, "a", home), true);
-  assert.equal(heartbeatCollector(root, "other", home), false);
+  assert.equal(renewCollector(root, "a", home), true);
+  assert.equal(renewCollector(root, "other", home), false);
 });
 
 test("dead-pid lease is stealable before expiry", () => {

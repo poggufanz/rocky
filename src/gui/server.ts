@@ -1,5 +1,5 @@
 /**
- * Rocky's localhost GUI server.
+ * rocky's localhost GUI server.
  *
  * Binds loopback only. Every launch mints a fresh token that the page carries
  * in its URL fragment and sends back on each API call, so another tab on this
@@ -150,7 +150,7 @@ function hostAllowed(host: string | undefined, port: number): boolean {
  *
  * The comparison is case-insensitive on Windows because the filesystem is:
  * memory canonicalises paths to lower case, so a case-sensitive prefix test
- * refused the repo's own files and the page reported hearing nothing.
+ * refused the repo's own files and the page showed no records.
  */
 function confine(root: string, candidate: string): string | undefined {
   const full = resolve(root, candidate);
@@ -162,8 +162,8 @@ function confine(root: string, candidate: string): string | undefined {
 /** Memory already discloses these paths to the page, so reading one leaks nothing new. */
 function witnessed(candidate: string): string | undefined {
   const norm = candidate.replace(/\\/g, "/");
-  const heard = fileIndex(records().list).some((file) => file.path === norm);
-  return heard ? norm : undefined;
+  const recorded = fileIndex(records().list).some((file) => file.path === norm);
+  return recorded ? norm : undefined;
 }
 
 async function readBody(request: IncomingMessage): Promise<unknown> {
@@ -181,7 +181,7 @@ async function readBody(request: IncomingMessage): Promise<unknown> {
 function records(): { list: ReturnType<typeof loadMemoryChecked>["records"]; disclosure: string | undefined } {
   const loaded = loadMemoryChecked();
   // A read that was not whole is disclosed in plain words, whatever made it so:
-  // a cap, a race, or lines Rocky cannot use. Skipped lines carry no reason code,
+  // a cap, a race, or lines rocky cannot use. Skipped lines carry no reason code,
   // so the words come from the coverage counters, never from a reason alone.
   const disclosure = describeMemoryCoverage(loaded.coverage, loaded.records.length, { counts: false });
   return { list: loaded.records, disclosure };
@@ -229,15 +229,15 @@ function flatMoments(grouped: ReturnType<typeof momentsFor>) {
  * it. Callers own the prompt's content; this owns what may cross.
  */
 function boundedPrompt(text: string): string {
-  const bounded = text.length > MAX_PROMPT_CHARS ? `${text.slice(0, MAX_PROMPT_CHARS)}\n… cut, prompt long` : text;
+  const bounded = text.length > MAX_PROMPT_CHARS ? `${text.slice(0, MAX_PROMPT_CHARS)}\n… (prompt truncated)` : text;
   return redactSecretsAtBoundary(bounded);
 }
 
 
 
 /** Forwards one prompt to the provider the page names. When the page names
- *  the file its question is about, rocky digs first and quotes what it found:
- *  the model explains evidence, it does not have to imagine code. */
+ *  the file its question is about, rocky gathers evidence first and quotes what
+ *  it found: the model explains evidence, it does not have to imagine code. */
 async function ask(body: Record<string, unknown>, root: string): Promise<{ status: number; payload: unknown }> {
   const rel = typeof body.path === "string" ? body.path : undefined;
   const start = typeof body.start === "number" ? body.start : (typeof body.start === "string" ? Number(body.start) : 1);
@@ -384,7 +384,7 @@ async function handleApi(
     // one cache per answer: the dash's files share the same few repo walks
     const repos: RepoCache = new Map();
     return sendJson(response, 200, await Promise.all(shown.map(async (f) => {
-      // the newest record names what this file was last heard doing, so the
+      // the newest record names what this file was last recorded doing, so the
       // repo filter can card each group with its latest intent and age
       let newest: (typeof f.recs)[number] | undefined;
       for (const rec of f.recs) {
@@ -460,7 +460,7 @@ async function handleApi(
   if (pathname === "/api/bundle") {
     const commit = url.searchParams.get("commit");
     if (!commit || !/^[0-9a-fA-F]{4,128}$/.test(commit)) {
-      return sendJson(response, 400, { error: "rocky needs a commit sha, question" });
+      return sendJson(response, 400, { error: "A commit sha is required." });
     }
     const resolved = resolveCommitDiff({ sha: commit, cwd: root });
     if (resolved === undefined) {
@@ -483,7 +483,7 @@ async function handleApi(
   if (pathname === "/api/refer") {
     const rel = url.searchParams.get("path");
     if (!rel) {
-      return sendJson(response, 400, { error: "rocky needs a file path, question" });
+      return sendJson(response, 400, { error: "A file path is required." });
     }
     const full = confine(root, rel) ?? witnessed(rel);
     if (full === undefined) return forbid(response);
@@ -794,7 +794,7 @@ async function handleApi(
     const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(1, Math.floor(limitRaw)), 200) : 50;
     const cursor = url.searchParams.get("cursor") ?? undefined;
     const newest = url.searchParams.get("newest") === "1";
-    if (!repo) return sendJson(response, 400, { error: "rocky needs repo root, question" });
+    if (!repo) return sendJson(response, 400, { error: "A repo root is required." });
     try {
       if (!isRepoCaptureAllowed(repo)) {
         return sendJson(response, 200, { events: [], nextCursor: cursor ?? "", coverage: "unknown", consent: false });
@@ -810,7 +810,7 @@ async function handleApi(
     const repo = listenRepoParam(url);
     const limitRaw = Number(url.searchParams.get("limit") ?? "200");
     const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(1, Math.floor(limitRaw)), 500) : 200;
-    if (!repo) return sendJson(response, 400, { error: "rocky needs repo root, question" });
+    if (!repo) return sendJson(response, 400, { error: "A repo root is required." });
     try {
       if (!isRepoCaptureAllowed(repo)) {
         return sendJson(response, 200, { nodes: [], edges: [], coverage: { status: "unknown", reasons: ["no-repo-consent"] }, truncated: false, consent: false });
@@ -856,7 +856,7 @@ async function handleApi(
     // not turn back into an absolute path on the wire.
     if (request.method === "GET") {
       const repo = listenRepoParam(url);
-      if (!repo) return sendJson(response, 400, { error: "rocky needs repo root, question" });
+      if (!repo) return sendJson(response, 400, { error: "A repo root is required." });
       try {
         const detail = getRepoConsentDetail(repo);
         const usage = { ...listeningStoreUsage(repo), budgetBytes: LISTENING_DISK_BUDGET_BYTES_PER_REPO };
@@ -869,9 +869,9 @@ async function handleApi(
       const body = (await readBody(request)) as Record<string, unknown>;
       const target = resolveListenRepo(typeof body.repo === "string" ? body.repo : url.searchParams.get("repo"));
       const action = body.action;
-      if (!target) return sendJson(response, 400, { error: "rocky needs repo root, question" });
+      if (!target) return sendJson(response, 400, { error: "A repo root is required." });
       if (action !== "allow" && action !== "revoke" && action !== "purge") {
-        return sendJson(response, 400, { error: "rocky needs action allow, revoke, or purge, question" });
+        return sendJson(response, 400, { error: "Action must be allow, revoke, or purge." });
       }
       if (body.yes !== true) {
         return sendJson(response, 403, { ok: false, reason: "requires-confirmation" });
@@ -884,7 +884,7 @@ async function handleApi(
           if (!purged.ok) return sendJson(response, 400, { ok: false, reason: purged.reason });
           return sendJson(response, 200, { ok: true, id: repoSlug(target), label: basename(target), freedBytes: purged.freedBytes });
         } catch {
-          return sendJson(response, 500, { error: "rocky cannot reach listening store, question" });
+          return sendJson(response, 500, { error: "Cannot reach the listening store." });
         }
       }
       try {
@@ -894,10 +894,10 @@ async function handleApi(
         collectors?.kick();
         return sendJson(response, 200, { ok: true, id: repoSlug(target), label: basename(target) });
       } catch {
-        return sendJson(response, 500, { error: "rocky cannot reach consent store, question" });
+        return sendJson(response, 500, { error: "Cannot reach the consent store." });
       }
     }
-    return sendJson(response, 405, { error: "rocky hears GET or POST here, question" });
+    return sendJson(response, 405, { error: "This route accepts GET or POST." });
   }
   response.writeHead(404, baseHeaders("text/plain; charset=utf-8")).end("no");
 }
@@ -939,7 +939,7 @@ export function startGui(options: { port?: number; root?: string; collect?: bool
         response.writeHead(404, baseHeaders("text/plain; charset=utf-8")).end("no");
       } catch {
         // one bad request never takes the server down with it
-        if (!response.headersSent) sendJson(response, 500, { error: "rocky not hear that, question" });
+        if (!response.headersSent) sendJson(response, 500, { error: "The request could not be handled." });
         else response.end();
       }
     })();

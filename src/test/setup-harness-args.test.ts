@@ -66,7 +66,7 @@ test("exclusive combos fail before any mutation", () => {
   );
   assert.match(
     usageError(["--voice-skill", "--mcp"]),
-    /voice-skill/,
+    /unknown setup option: --voice-skill/,
   );
   assert.match(
     usageError(["--agent-hooks", "--listening"]),

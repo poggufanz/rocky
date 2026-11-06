@@ -2,10 +2,10 @@
  * rocky gui
  *
  * One rule holds the whole sheet together: the page is grey, and the only
- * colour on it is --voice. Voice means rocky heard it. A witness card is
- * clay; an assembled card is grey. The selection tint is the same clay, so
+ * colour on it is --voice. The accent means rocky recorded it. A witness card
+ * is clay; an assembled card is grey. The selection tint is the same clay, so
  * the colour travels from the drag into the answer. Nothing decorative is
- * ever coloured -- if it has hue, rocky is claiming knowledge.
+ * ever coloured -- if it has hue, rocky is claiming a record.
  *
  * Radius: interactive controls 6px, containers 0 (hairlines instead of cards).
  * Dark only, per spec -- no theme system in v1.
@@ -27,7 +27,7 @@
 
   /* Syntax lives on the cool side on purpose. Warm belongs to rocky alone,
      so no token may ever borrow --voice: if code could go orange, orange
-     would stop meaning "rocky heard this". */
+     would stop meaning "rocky recorded this". */
   --tk-key: #9ed0f7;
   --tk-lit: #aae5bb;
 
@@ -120,7 +120,7 @@ body::after {
 
 /* ---- bar ------------------------------------------------------------- */
 
-/* xenonite: raised surfaces catch one hairline of light on their top edge.
+/* raised surfaces catch one hairline of light on their top edge.
    Depth without a glow -- nothing here emits, it only reflects. */
 .bar,
 .seg,
@@ -699,7 +699,7 @@ kbd {
 }
 
 /* count leads the row, as it does in the TUI. It is a claim about how often
-   rocky heard this file, so on the chosen row it takes the voice colour. */
+   rocky recorded this file, so on the chosen row it takes the voice colour. */
 .file-count {
   text-align: right;
   font: 12px/1.35 var(--mono);
@@ -709,7 +709,7 @@ kbd {
 .file[aria-selected="true"] .file-count { color: var(--voice); }
 
 /* the count drawn: a hairline under the row, as long as this file's share of
-   the busiest one. It is a claim about what rocky holds, so it is clay. */
+   the busiest one. It is a claim about what rocky has recorded, so it is clay. */
 .file::after {
   content: "";
   position: absolute;
@@ -902,8 +902,8 @@ kbd {
   color: var(--dim);
   font-size: 11.5px;
 }
-/* The gutter is measured in characters, not pixels: a sign lane, then room
-   for a five-digit line number. A pixel gutter let 4-digit numbers run left
+/* The gutter is measured in characters, not px: a sign lane, then room
+   for a five-digit line number. A px gutter let 4-digit numbers run left
    into the +/- sign. */
 .dl {
   position: relative;
@@ -966,7 +966,7 @@ kbd {
 
 /* A guide, not a dashboard: one title, the three questions Dash answers as
    choosable columns, then the files worth opening first. Hairlines divide;
-   the only clay is the chosen mode and the note counts rocky holds. */
+   the only clay is the chosen mode and the note counts rocky has recorded. */
 .guide {
   max-width: 920px;
   padding: 40px 40px 56px;
@@ -1342,18 +1342,13 @@ kbd {
   .pop:not([hidden]) { animation: settle .18s cubic-bezier(.16, 1, .3, 1); }
 }
 
-/* the header is rocky speaking, so it carries the voice */
+/* the header is a recorded reason, so it carries the accent colour */
 .card-head {
   margin: 0 0 14px;
   font: 400 14px/1.45 var(--mono);
   color: var(--voice);
 }
-/* his speech is written as chords in the book, so a witnessed line is sung */
-.card-head:not(.assembled)::before {
-  content: "♪ ";
-  opacity: .8;
-}
-/* assembled from evidence is not rocky speaking, so it stays grey and silent */
+/* assembled from evidence is not a recorded reason, so it stays grey */
 .card-head.assembled { color: var(--dim); }
 
 .card-line {
@@ -1395,9 +1390,9 @@ kbd {
 
 /* ---- why card ---------------------------------------------------------
  *
- * Read top to bottom: how Rocky knows (badge), what he knows (facts or a
- * chain of steps), then where to dig. Only a witness badge is clay: a
- * witness is the one thing on this card Rocky actually heard. */
+ * Read top to bottom: how the reason is known (badge), what it says (facts
+ * or a chain of steps), then where to dig. Only a witness badge is clay: a
+ * witness is the one thing on this card that was actually recorded. */
 .why-top {
   display: flex;
   align-items: center;
@@ -1412,8 +1407,7 @@ kbd {
   color: var(--dim);
   font: 600 11px/1.5 var(--sans);
 }
-.why-heard { border-color: var(--voice-dim); color: var(--voice); }
-.why-heard::before { content: "♪ "; opacity: .8; }
+.why-witnessed { border-color: var(--voice-dim); color: var(--voice); }
 .why-where {
   flex: 1 1 auto;
   min-width: 0;
@@ -1563,7 +1557,7 @@ kbd {
 /* the card already pads, so its empty state must not pad twice */
 .pop > .empty { padding: 0; }
 
-/* An answer sits apart from what rocky heard, and never borrows the voice
+/* An answer sits apart from what rocky recorded, and never borrows the voice
    colour. Grey is the whole point: a guess or an analysis is not evidence.
    The dashed rule and the left rail say the same thing spatially. */
 .answer {
@@ -1624,7 +1618,7 @@ kbd {
   font-size: 11.5px;
   line-height: 1.5;
 }
-/* a citation is a place in the code: a link when Rocky knows the file */
+/* a citation is a place in the code: a link when the file is known */
 .answer-cite {
   color: var(--dim);
   font: 11px/1.6 var(--mono);
@@ -1761,40 +1755,12 @@ kbd {
   @keyframes pulse { 50% { opacity: .45; } }
 }
 
-/* Waiting is rocky himself arriving, drawn a line at a time from the top
-   down. Small on purpose: it is a wait, not a splash screen. */
-.listen {
-  display: grid;
-  place-items: center;
+/* Waiting for a view whose shape is not known yet: a few shimmer rows.
+   Small on purpose: it is a wait, not a splash screen. */
+.skel-block {
+  max-width: 420px;
+  margin: 0 auto;
   padding: 44px 0;
-}
-
-.rocky-load {
-  margin: 0;
-  font: 11px/1.15 var(--mono);
-  color: var(--voice);
-  white-space: pre;
-  user-select: none;
-}
-.rl-line { display: block; }
-
-@media (prefers-reduced-motion: no-preference) {
-  .rl-line {
-    opacity: 0;
-    /* each line waits its turn, so the shape builds downward */
-    animation: rocky-in 2.2s ease-in-out infinite;
-    animation-delay: calc(var(--i) * 130ms);
-  }
-  @keyframes rocky-in {
-    0%        { opacity: 0; transform: translateY(-2px); }
-    18%, 62%  { opacity: 1; transform: none; }
-    88%, 100% { opacity: .12; transform: none; }
-  }
-}
-
-/* still, the whole face is simply there */
-@media (prefers-reduced-motion: reduce) {
-  .rl-line { opacity: 1; }
 }
 
 /* ---- ask ------------------------------------------------------------- */
@@ -2196,7 +2162,7 @@ kbd {
  * A chat surface in the shape people already know: chats on the left, the
  * thread in one centred column, the composer docked under it, sources in a
  * drawer on the right. The sheet's rule still holds: grey everywhere, and
- * the voice only where Rocky claims something -- his ear, a held answer, a
+ * the voice only where rocky claims something -- a held answer, a
  * why kind, a cited ref. The armed Jev toggle glows because the glow is the
  * state, not a claim. Speech rounds off; panels elsewhere stay square.
  */
@@ -2309,7 +2275,7 @@ kbd {
   font: 500 11px/1.4 var(--sans);
   white-space: nowrap;
 }
-/* holding back is Rocky's claim about his own evidence, so it carries the voice */
+/* holding back is a claim about the evidence, so it carries the voice */
 .cx-badge.is-held { border-color: var(--voice-dim); color: var(--voice); }
 
 .cx-ref {
@@ -2323,8 +2289,8 @@ kbd {
   font: 11.5px/1.6 var(--mono);
 }
 
-/* Rocky's mark: five bars of an ear. Still while idle, moving while he listens. */
-.cx-ear {
+/* Five bars: still while idle, moving while an answer is pending. */
+.cx-activity {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -2336,15 +2302,15 @@ kbd {
   border-radius: 50%;
   background: var(--surface);
 }
-.cx-ear i {
+.cx-activity i {
   width: 2px;
   height: 28%;
   border-radius: 1px;
   background: var(--voice-dim);
 }
-.cx-ear i:nth-child(2), .cx-ear i:nth-child(4) { height: 50%; }
-.cx-ear i:nth-child(3) { height: 70%; }
-.cx-ear.is-listening i { background: var(--voice); }
+.cx-activity i:nth-child(2), .cx-activity i:nth-child(4) { height: 50%; }
+.cx-activity i:nth-child(3) { height: 70%; }
+.cx-activity.is-working i { background: var(--voice); }
 
 /* ---- side: chat list and memory ---- */
 .cx-side {
@@ -2448,7 +2414,7 @@ kbd {
 }
 .cx-item.is-active .cx-item-open { color: var(--bright) !important; }
 .cx-item-open span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.cx-item-open .cx-ear { width: 18px; height: 18px; border: 0; background: none; }
+.cx-item-open .cx-activity { width: 18px; height: 18px; border: 0; background: none; }
 /* tools surface on hover, focus, or a pending delete; touch keeps them shown */
 .cx-item-tools {
   position: absolute;
@@ -2599,7 +2565,7 @@ kbd {
    the way a fresh chat opens elsewhere. Both halves grow equally. */
 .cx-welcome { display: none; }
 /* margin-top auto, not justify-content: flex-end, so a short window scrolls
-   to the face instead of cutting it off above the scroll origin */
+   to the welcome block instead of cutting it off above the scroll origin */
 .cx[data-empty="true"] .cx-main { overflow-y: auto; }
 .cx[data-empty="true"] .cx-log { display: flex; flex: 1 1 0; flex-direction: column; min-height: auto; overflow: visible; }
 .cx[data-empty="true"] .cx-dock { flex: 1 1 0; }
@@ -2612,16 +2578,7 @@ kbd {
   text-align: center;
 }
 @media (max-height: 860px) {
-  .cx-face { margin-bottom: 2px; font-size: 5.5px; }
   .cx-hello { font-size: 24px; }
-}
-.cx-face {
-  margin: 0 0 10px;
-  color: var(--voice-dim);
-  font: 7.5px/1.12 var(--mono);
-  white-space: pre;
-  user-select: none;
-  opacity: .85;
 }
 .cx-hello {
   margin: 0;
@@ -2805,13 +2762,13 @@ kbd {
 /* inside the drawer the refs are an index, not a claim: they stay grey */
 .cx-step-refs .cx-ref { border-color: var(--line); background: var(--surface); color: var(--dim); font-size: 11px; }
 
-/* waiting: the ear moves and the line shimmers, nothing else does */
+/* waiting: the bars move and the line shimmers, nothing else does */
 .cx-wait-text {
   margin: 4px 0 0;
   color: var(--dim);
   font-size: 13.5px;
 }
-.cx-rocky.is-failed .cx-ear i { background: var(--line); }
+.cx-rocky.is-failed .cx-activity i { background: var(--line); }
 .cx-fail-text { margin: 4px 0 0; color: var(--body); font-size: 14px; line-height: 1.6; }
 
 /* ---- dock: composer ---- */
@@ -3162,15 +3119,14 @@ kbd {
 .cx-trace { margin: 0; color: var(--dim); font: 11px/1.6 var(--mono); overflow-wrap: anywhere; }
 .cx-trace.is-held { color: var(--voice); }
 
-/* ---- motion: one arrival, one listening ear, one shimmer ---- */
+/* ---- motion: one arrival, one working mark, one shimmer ---- */
 @media (prefers-reduced-motion: no-preference) {
   .cx-msg.is-new { animation: cx-in 240ms var(--ease) both; }
-  .cx[data-empty="true"] .cx-face { animation: cx-doze 5s ease-in-out infinite; }
-  .cx-ear.is-listening i { animation: cx-ear 900ms ease-in-out infinite; }
-  .cx-ear.is-listening i:nth-child(2) { animation-delay: 90ms; }
-  .cx-ear.is-listening i:nth-child(3) { animation-delay: 180ms; }
-  .cx-ear.is-listening i:nth-child(4) { animation-delay: 270ms; }
-  .cx-ear.is-listening i:nth-child(5) { animation-delay: 360ms; }
+  .cx-activity.is-working i { animation: cx-activity 900ms ease-in-out infinite; }
+  .cx-activity.is-working i:nth-child(2) { animation-delay: 90ms; }
+  .cx-activity.is-working i:nth-child(3) { animation-delay: 180ms; }
+  .cx-activity.is-working i:nth-child(4) { animation-delay: 270ms; }
+  .cx-activity.is-working i:nth-child(5) { animation-delay: 360ms; }
   .cx-wait-text {
     background: linear-gradient(90deg, var(--dim) 0%, var(--bright) 45%, var(--dim) 70%) 0 0 / 220% 100%;
     -webkit-background-clip: text;
@@ -3179,9 +3135,8 @@ kbd {
     animation: cx-shimmer 2.2s linear infinite;
   }
   @keyframes cx-in { from { opacity: 0; transform: translateY(6px); } }
-  @keyframes cx-ear { 0%, 100% { transform: scaleY(.6); } 50% { transform: scaleY(1.25); } }
+  @keyframes cx-activity { 0%, 100% { transform: scaleY(.6); } 50% { transform: scaleY(1.25); } }
   @keyframes cx-shimmer { from { background-position: 120% 0; } to { background-position: -100% 0; } }
-  @keyframes cx-doze { 50% { opacity: .5; } }
 }
 @media (prefers-reduced-motion: reduce) {
   .cx, .cx * { transition: none !important; }
@@ -3235,18 +3190,17 @@ kbd {
   .cx-jev span { display: none; }
   .cx-jev { padding: 0 8px; }
   .cx-hello { font-size: 22px; }
-  .cx-face { font-size: 6px; }
   .cx-meta { display: none; }
 }
 
 .jev-trace { margin: 10px 0 0; color: var(--dim); font: 11px/1.5 var(--mono); }
 .jev-trace-flag { color: var(--body); }
 
-/* ---- listening tab panel (suffix -tab: .listen alone is the boot loader) ---
- * One column is the record: who is heard, a waveform of what was heard, then
+/* ---- listening tab panel --------------------------------------------------
+ * One column is the record: the repo, a waveform of recorded changes, then
  * the timeline. The rail explains the feature and never scrolls away. The
- * sheet rule holds: clay only where Rocky heard something, hairlines not
- * cards, and a weak link never wears the solid look of heard evidence. */
+ * sheet rule holds: clay only where rocky recorded something, hairlines not
+ * cards, and a weak link never wears the solid look of recorded evidence. */
 .listen-tab {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 300px;
@@ -3269,7 +3223,7 @@ kbd {
 .listen-tab button:focus-visible,
 .listen-more > summary:focus-visible { outline: 2px solid var(--voice-dim); outline-offset: 2px; }
 
-/* hero: the repo and whether Rocky hears it. Full bleed, so its warmth has
+/* hero: the repo and whether capture is on. Full bleed, so its warmth has
    no seam where the column padding starts. */
 .listen-hero {
   margin: calc(var(--pad-t) * -1) calc(var(--pad-r) * -1) 0 calc(var(--pad-l) * -1);
@@ -3291,20 +3245,20 @@ kbd {
   color: var(--bright);
   overflow-wrap: anywhere;
 }
-/* the ear: five bars, grey while off, clay and slowly breathing while on */
-.listen-ear { display: inline-flex; align-items: center; gap: 3px; height: 26px; flex: none; }
-.listen-ear i { width: 3px; height: 34%; border-radius: 2px; background: var(--line); transform-origin: center; }
-.listen-ear i:nth-child(2), .listen-ear i:nth-child(4) { height: 66%; }
-.listen-ear i:nth-child(3) { height: 100%; }
-.listen-tab[data-state="on"] .listen-ear i { background: var(--voice); }
+/* the bars: five bars, grey while capture is off, clay and slowly breathing while on */
+.listen-bars { display: inline-flex; align-items: center; gap: 3px; height: 26px; flex: none; }
+.listen-bars i { width: 3px; height: 34%; border-radius: 2px; background: var(--line); transform-origin: center; }
+.listen-bars i:nth-child(2), .listen-bars i:nth-child(4) { height: 66%; }
+.listen-bars i:nth-child(3) { height: 100%; }
+.listen-tab[data-state="on"] .listen-bars i { background: var(--voice); }
 @media (prefers-reduced-motion: no-preference) {
-  .listen-tab[data-state="on"] .listen-ear i { animation: listen-ear 2.4s ease-in-out infinite; }
-  .listen-tab[data-state="on"] .listen-ear i:nth-child(2) { animation-delay: -0.4s; }
-  .listen-tab[data-state="on"] .listen-ear i:nth-child(3) { animation-delay: -0.8s; }
-  .listen-tab[data-state="on"] .listen-ear i:nth-child(4) { animation-delay: -1.2s; }
-  .listen-tab[data-state="on"] .listen-ear i:nth-child(5) { animation-delay: -1.6s; }
+  .listen-tab[data-state="on"] .listen-bars i { animation: listen-bars 2.4s ease-in-out infinite; }
+  .listen-tab[data-state="on"] .listen-bars i:nth-child(2) { animation-delay: -0.4s; }
+  .listen-tab[data-state="on"] .listen-bars i:nth-child(3) { animation-delay: -0.8s; }
+  .listen-tab[data-state="on"] .listen-bars i:nth-child(4) { animation-delay: -1.2s; }
+  .listen-tab[data-state="on"] .listen-bars i:nth-child(5) { animation-delay: -1.6s; }
 }
-@keyframes listen-ear { 0%, 100% { transform: scaleY(.55); } 50% { transform: scaleY(1); } }
+@keyframes listen-bars { 0%, 100% { transform: scaleY(.55); } 50% { transform: scaleY(1); } }
 
 .listen-spin { display: inline-block; width: 11px; height: 11px; border: 2px solid var(--line); border-top-color: var(--body); border-radius: 50%; vertical-align: -1px; animation: listen-spin 0.9s linear infinite; }
 @keyframes listen-spin { to { transform: rotate(360deg); } }
@@ -3338,7 +3292,7 @@ kbd {
 .listen-go:disabled, .listen-consent-btn:disabled { opacity: 0.55; cursor: progress; }
 .listen-refused { flex-basis: 100%; margin: 0; color: var(--del-mark); font-size: 12px; }
 
-/* waveform: what Rocky heard over time, one bar per slice */
+/* waveform: recorded changes over time, one bar per slice */
 /* the track runs edge to edge; only its labels keep the column padding */
 .listen-wave { margin: 24px calc(var(--pad-r) * -1) 0 calc(var(--pad-l) * -1); }
 .listen-wave-bars { display: flex; align-items: flex-end; gap: 3px; height: 56px; border-bottom: 1px solid var(--line); }
@@ -3367,12 +3321,12 @@ kbd {
 .listen-clear { grid-column: 2; grid-row: 1; padding: 5px 10px; border: 1px solid transparent; border-radius: 6px; background: none; color: var(--dim); font: 12px var(--sans); cursor: pointer; }
 .listen-clear:hover { color: var(--bright); }
 .listen-coverage { grid-column: 1 / -1; margin: 0; font-size: 11.5px; color: var(--dim); overflow-wrap: anywhere; }
-/* nothing to filter until Rocky hears the repo */
+/* nothing to filter until capture is on for the repo */
 .listen-tab:not([data-state="on"]) .listen-more,
 .listen-tab:not([data-state="on"]) .listen-clear { display: none; }
 .listen-coverage[data-status="partial"] { color: var(--body); }
 
-/* timeline: one row per change, a rail dot whose fill says how Rocky knows */
+/* timeline: one row per change, a rail dot whose fill says how it is known */
 .listen-chain { list-style: none; margin: 0; padding: 0; min-width: 0; }
 .listen-day { padding: 18px 0 6px 8px; font: 600 12px/1 var(--sans); color: var(--body); }
 .listen-row { min-width: 0; }
@@ -3401,7 +3355,7 @@ kbd {
 .listen-dot { grid-area: dot; position: relative; align-self: stretch; }
 .listen-dot::before { content: ""; position: absolute; top: -10px; bottom: -10px; left: 50%; width: 1px; background: var(--line); }
 .listen-dot::after { content: ""; position: absolute; top: 5px; left: 50%; width: 9px; height: 9px; margin-left: -4.5px; border-radius: 50%; box-sizing: border-box; box-shadow: 0 0 0 3px var(--ground); }
-.tone-heard .listen-dot::after, .tone-heard > .lg-mark { background: var(--voice); }
+.tone-solid .listen-dot::after, .tone-solid > .lg-mark { background: var(--voice); }
 .tone-weak .listen-dot::after, .tone-weak > .lg-mark { background: var(--ground); border: 1.5px dashed var(--dim); }
 .tone-none .listen-dot::after, .tone-none > .lg-mark { background: var(--ground); border: 1.5px solid var(--dim); }
 .listen-what { grid-area: what; min-width: 0; }
@@ -3413,7 +3367,7 @@ kbd {
 .listen-base { color: var(--bright); }
 .listen-meta { display: flex; flex-wrap: wrap; gap: 2px 14px; margin-top: 3px; font-size: 11.5px; color: var(--dim); }
 .listen-basis { grid-area: basis; padding: 2px 8px; border: 1px solid transparent; border-radius: 6px; font-size: 11.5px; color: var(--dim); white-space: nowrap; }
-.tone-heard .listen-basis { color: var(--voice); }
+.tone-solid .listen-basis { color: var(--voice); }
 /* weak non-causal context: visibly candidate, never causal styling */
 .listen-row.weak-candidate .listen-basis { border: 1px dashed var(--dim); color: var(--body); }
 .listen-row.weak-candidate .listen-base { color: var(--body); }

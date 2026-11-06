@@ -51,7 +51,7 @@ The recovery path has two rules worth stating outright. Every user-facing messag
 
 `src/mcp/server.ts` keeps a JSON-RPC request ID reserved from the moment a request is accepted until its response send settles, including a rejected write. Dropping that reservation early lets a duplicate ID run a tool twice.
 
-`src/commands/setup.ts` gates every voice-skill mutation behind consent. Consent means an explicit `--yes` or a prompt the user actually answered. "No adapter needed a prompt" and "the user declined" are different states and the code keeps them separate on purpose.
+`src/commands/setup.ts` gates every host mutation, including removal of a legacy voice skill on `--remove`, behind consent. Consent means an explicit `--yes` or a prompt the user actually answered. "No adapter needed a prompt" and "the user declined" are different states and the code keeps them separate on purpose.
 
 ## Tests
 
@@ -75,7 +75,7 @@ On Windows there are no POSIX mode bits and no stable inode, so scenarios built 
 
 No runtime dependencies. Node 18 built-ins only. TypeScript stays strict, and ESM relative imports end in `.js`.
 
-Everything Rocky says to a user follows his voice, and these rules are structural rather than decorative. Questions end with `, question` instead of a question mark. Emphasis comes from repetition, as in `good good good`. Sentences are short and present tense and drop articles. He is blind, so he never sees anything: he hears, remembers, and checks. His output goes to stderr so it never pollutes the stdout of a command he wraps. No emoji, ever, since he can't see them.
+Everything rocky prints follows [docs/output-principles.md](docs/output-principles.md): plain sentences behind one `rocky:` prefix, questions with a question mark, no first person, no emphasis by repetition, no emoji. rocky-owned output goes to stderr so it never pollutes the stdout of a command it wraps. Findings stay observations with evidence: never print a cause or a fix rocky did not record. `validateOutputLine` in `src/ui/phrases.ts` checks the mechanical part in tests.
 
 README, CLI output, and package documentation under `docs/` are written in English. Internal design documents in the outer workspace are in Indonesian and stay that way.
 
@@ -85,7 +85,7 @@ The shell hook ships for Bash. Ports for zsh and fish would widen it a lot.
 
 Fingerprinting is deliberately simple, and toolchain-specific improvements for pytest, cargo, or gradle would make recall much better at matching failures that look different but mean the same thing.
 
-More of Rocky's dialogue is welcome, in character.
+Clearer wording for any output line is welcome, as long as it keeps the evidence and the hedges.
 
 ## Pull requests
 

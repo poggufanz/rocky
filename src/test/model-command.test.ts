@@ -62,16 +62,18 @@ async function captureStderr(run: () => Promise<number>): Promise<{ code: number
 }
 
 test("model status reports missing, disabled, and enabled config without loading a model", async (t) => {
-  const cases: Array<{ name: string; config: ConfigLoadResult; expected: RegExp }> = [
+  const cases: Array<{ name: string; config: ConfigLoadResult; expected: RegExp; says: string }> = [
     {
       name: "missing",
       config: { status: "missing", path: "/tmp/missing-config.json", config: { version: 1, ai: { enabled: false } } },
       expected: /AI: disabled .*missing-config\.json/,
+      says: "Local model is off. Memory still works.",
     },
     {
       name: "disabled",
       config: { status: "valid", path: "/tmp/disabled-config.json", config: { version: 1, ai: { enabled: false } } },
       expected: /AI: disabled .*disabled-config\.json/,
+      says: "Local model is off. Memory still works.",
     },
     {
       name: "enabled",
@@ -81,6 +83,7 @@ test("model status reports missing, disabled, and enabled config without loading
         config: { version: 1, ai: { enabled: true, provider: "ollama", model: "installed-model", exposure: "raw" } },
       },
       expected: /AI: enabled .*installed-model.*raw/,
+      says: "Local model configured. Memory still works.",
     },
   ];
 
@@ -95,6 +98,7 @@ test("model status reports missing, disabled, and enabled config without loading
 
       assert.equal(output.code, 0);
       assert.match(output.stderr, entry.expected);
+      assert.ok(output.stderr.includes(`rocky: ${entry.says}\n`), output.stderr);
       assert.equal(ollama.tags, 0);
       assert.deepEqual(ollama.probes, []);
       assert.equal(ollama.generations, 0);
@@ -131,6 +135,7 @@ test("model use with no installed models offers tiny and balanced manual pulls w
   }));
 
   assert.equal(output.code, 1);
+  assert.ok(output.stderr.includes("rocky: No installed model. Pull one yourself, then run rocky model use.\n"), output.stderr);
   assert.match(output.stderr, /^tiny.*qwen3:0\.6b-q4_K_M.*523 MB/m);
   assert.match(output.stderr, /^balanced.*qwen3\.5:2b-q4_K_M.*1\.9 GB/m);
   assert.match(output.stderr, /download size is not peak RAM/i);
@@ -150,6 +155,7 @@ test("model use offers only the requested exact missing model pull when other mo
   }));
 
   assert.equal(output.code, 1);
+  assert.ok(output.stderr.includes("rocky: The requested model is not installed. Pull it yourself, then run rocky model use.\n"), output.stderr);
   assert.match(output.stderr, /ollama pull qwen3\.5:2b-q4_K_M/);
   assert.doesNotMatch(output.stderr, /ollama pull qwen3:0\.6b-q4_K_M/);
   assert.deepEqual(ollama.probes, []);
@@ -298,6 +304,7 @@ test("failed model probe leaves existing config bytes unchanged", async () => {
   assert.equal(output.code, 1);
   assert.deepEqual(ollama.probes, ["installed-model"]);
   assert.equal(readFileSync(configPath, "utf8"), original);
+  assert.ok(output.stderr.includes("rocky: The model probe failed. Configuration is unchanged.\n"), output.stderr);
   assert.doesNotMatch(output.stderr, /structured output unavailable/);
 });
 
@@ -333,6 +340,7 @@ test("model off writes only disabled config and refuses malformed config without
     saveConfigAtomic: saveAt(invalidPath),
   }));
   assert.equal(refused.code, 1);
+  assert.ok(refused.stderr.includes("rocky: Configuration is invalid. It was left unchanged.\n"), refused.stderr);
   assert.match(refused.stderr, new RegExp(invalidPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   assert.equal(readFileSync(invalidPath, "utf8"), invalid);
   assert.equal(ollama.tags, 0);

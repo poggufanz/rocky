@@ -9,6 +9,7 @@ import { executeAnswer, snapshotOf } from "../ai/answer.js";
 import { describeMemoryCoverage } from "../core/coverage.js";
 import { MAX_SUPPORTED_MEMORY_RECORDS, type MemoryCoverage } from "../core/memory-read.js";
 import { writeSettings } from "../gui/settings.js";
+import { validateOutputLine } from "../ui/phrases.js";
 
 function hermetic(): { home: string; root: string } {
   const home = mkdtempSync(join(tmpdir(), "rocky-ans-home-"));
@@ -159,7 +160,7 @@ function coverage(overrides: Partial<MemoryCoverage> = {}): MemoryCoverage {
   return { version: 1, scanned: 3, skipped: 0, truncated: 0, bytesScanned: 120, bytesTotal: 120, complete: true, ...overrides };
 }
 
-/** `disclosed`: Rocky says the read was not whole. `hold`: the read stopped early, so Rocky gives no answer. */
+/** `disclosed`: the answer says the read was not whole. `hold`: the read stopped early, so no answer is given. */
 const READS: readonly { name: string; coverage: MemoryCoverage; disclosed: boolean; hold: boolean }[] = [
   { name: "a whole read", coverage: coverage(), disclosed: false, hold: false },
   { name: "whitespace-only lines, scanned exceeds records, still whole", coverage: coverage({ scanned: 5 }), disclosed: false, hold: false },
@@ -196,11 +197,69 @@ test("executeAnswer holds the answer when the read stopped at the record cap, an
 
   assert.equal(outcome.status, 200);
   assert.ok("text" in outcome.payload);
-  const line = `memory coverage incomplete: first ${MAX_SUPPORTED_MEMORY_RECORDS} records heard, later lines not heard.`;
+  const line = `memory coverage incomplete: Only the first ${MAX_SUPPORTED_MEMORY_RECORDS} records were read; later lines were not read.`;
   assert.equal(outcome.payload.decisionTrace.status, "unavailable");
   assert.deepEqual(outcome.payload.evidenceCards, []);
   assert.equal(outcome.payload.coverage?.reason, line);
   assert.deepEqual(outcome.payload.trace, [line]);
+  assert.equal(outcome.payload.text, "The memory read was incomplete, so the answer is held back.");
+  assert.deepEqual(validateOutputLine(outcome.payload.text), []);
+});
+
+test("executeAnswer says in plain words when no memory record matches, in English and Indonesian", async () => {
+  const { home, root } = hermetic();
+  const asked = async (): Promise<string> => {
+    const outcome = await executeAnswer({ mode: "chat", message: "something never recorded", root });
+    assert.equal(outcome.status, 200);
+    assert.ok("text" in outcome.payload);
+    assert.equal(outcome.payload.decisionTrace.status, "low_confidence");
+    return outcome.payload.text;
+  };
+
+  const english = await asked();
+  assert.equal(english, "No memory record matched this question well enough to answer it.");
+  assert.deepEqual(validateOutputLine(english), []);
+
+  writeFileSync(join(home, "gui.json"), JSON.stringify({ lang: "id" }));
+  const indonesian = await asked();
+  assert.equal(indonesian, "Tidak ada catatan memori yang cukup cocok untuk menjawab pertanyaan ini.");
+  assert.deepEqual(validateOutputLine(indonesian), []);
+});
+
+test("executeAnswer holds the answer in plain words when whole memory evidence does not fit the context", async () => {
+  const { home, root } = hermetic();
+  const lines = Array.from({ length: 80 }, (_, index) => JSON.stringify({
+    kind: "failure", id: `big${index}`, ts: 1 + index, cwd: "/words", cmd: "npm run build", exitCode: 1,
+    fingerprint: `b${index}`.padStart(16, "0"), signature: ["npm run build"], excerpt: "build failed ".repeat(40),
+  }));
+  writeFileSync(join(home, "memory.jsonl"), lines.map((line) => `${line}\n`).join(""));
+
+  const outcome = await executeAnswer({ mode: "chat", message: "npm run build", root });
+
+  assert.equal(outcome.status, 200);
+  assert.ok("text" in outcome.payload);
+  assert.equal(outcome.payload.decisionTrace.status, "unavailable");
+  assert.equal(
+    outcome.payload.text,
+    "The whole memory evidence does not fit the context limit, so the answer is held back. Records are never cut to fit.",
+  );
+  assert.deepEqual(validateOutputLine(outcome.payload.text), []);
+});
+
+test("executeAnswer refuses an empty chat message with a plain sentence", async () => {
+  const { root } = hermetic();
+  const outcome = await executeAnswer({ mode: "chat", message: "   ", root });
+  assert.equal(outcome.status, 400);
+  assert.deepEqual(outcome.payload, { error: "A message is required." });
+  assert.deepEqual(validateOutputLine("A message is required."), []);
+});
+
+test("executeAnswer in mode explain asks for model settings in a plain sentence when none are set", async () => {
+  const { root } = hermetic();
+  const outcome = await executeAnswer({ mode: "explain", prompt: "why does this exist", root });
+  assert.equal(outcome.status, 400);
+  assert.deepEqual(outcome.payload, { error: "Set an endpoint, key, and model in settings first." });
+  assert.deepEqual(validateOutputLine("Set an endpoint, key, and model in settings first."), []);
 });
 
 test("executeAnswer respects unified OpenRouter key from environment", async () => {

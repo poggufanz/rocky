@@ -97,7 +97,7 @@ function seedMemory(records: readonly object[]): { home: string; path: string } 
   return { home, path };
 }
 
-test("a success heard under another spelling of the directory links, confirmed, only where spellings may widen", () => {
+test("a success recorded under another spelling of the directory links, confirmed, only where spellings may widen", () => {
   const links = recentUnresolvedFailures([failureAt(GIT_BASH)], "node fail.js", { cwd: NATIVE, now: NOW });
   assert.equal(links.length, WIDENS ? 1 : 0);
   if (WIDENS) {
@@ -117,7 +117,7 @@ test("the loader resolves across spellings, every record keeps its own spelling,
   const failure = loaded.find((record): record is FailureRecord => record.kind === "failure")!;
   const fix = loaded.find((record): record is FixRecord => record.kind === "fix")!;
   assert.equal(failure.resolvedBy, WIDENS ? "x1" : undefined);
-  assert.equal(failure.cwd, GIT_BASH, "records keep the spelling they were heard under");
+  assert.equal(failure.cwd, GIT_BASH, "records keep the spelling they were recorded under");
   assert.equal(fix.cwd, NATIVE);
   assert.equal(queryStats(loaded, { now: NOW }).resolved, WIDENS ? 1 : 0);
   assert.equal(fixFromElsewhere(fix, failure.cwd), WIDENS ? undefined : NATIVE);
@@ -137,7 +137,7 @@ test("an unconfirmed fix from the same directory is never served as a fix from e
   assert.equal(getFix([unconfirmed, fixAt(OTHER, ["f1"])], unconfirmed, NOW)?.id, "x1", "a different directory is still elsewhere");
 });
 
-test("crash recovery clears pending for a resolution heard under other spellings of this directory", async () => {
+test("crash recovery clears pending for a resolution recorded under other spellings of this directory", async () => {
   await withHome([failureAt(GIT_BASH), fixAt(NATIVE, ["f1"])], () => {
     writeFileSync(pendingPath(), "", "utf8");
     const result = resolveFixOnSuccess("node fail.js", "c:/USERS/x/p/");
@@ -192,7 +192,7 @@ test("sessions: two spellings of one directory form one session, a different dir
   assert.equal(groups.length, WIDENS ? 2 : 3);
   const withFix = groups.find((group) => group.counts.fixes === 1)!;
   assert.equal(withFix.counts.failures, WIDENS ? 1 : 0);
-  assert.ok([GIT_BASH, NATIVE].includes(withFix.cwd), "a group shows a spelling that was heard, never a normalized one");
+  assert.ok([GIT_BASH, NATIVE].includes(withFix.cwd), "a group shows a spelling that was recorded, never a normalized one");
   assert.equal(groups.find((group) => group.cwd === OTHER)?.counts.failures, 1);
 });
 
@@ -210,7 +210,7 @@ function captureStderr(run: () => number): { code: number; stderr: string } {
   }
 }
 
-test("sessions detail lists every member of a merged session, whichever spelling it was heard under", () => {
+test("sessions detail lists every member of a merged session, whichever spelling it was recorded under", () => {
   const { home } = seedMemory([failureAt(GIT_BASH), fixAt(NATIVE, ["f1"])]);
   const saved = process.env.ROCKY_HOME;
   process.env.ROCKY_HOME = home;
@@ -227,7 +227,7 @@ test("sessions detail lists every member of a merged session, whichever spelling
 
 // --- rationale lanes ---------------------------------------------------------
 
-test("weakLinkFor links evidence heard under another spelling of the directory, never a different directory", () => {
+test("weakLinkFor links evidence recorded under another spelling of the directory, never a different directory", () => {
   const records: MemoryRecord[] = [failureAt(GIT_BASH)];
   assert.deepEqual(weakLinkFor(records, NOW - 9 * MINUTE, NATIVE, NOW), WIDENS ? { failureId: "f1" } : undefined);
   assert.equal(weakLinkFor(records, NOW - 9 * MINUTE, OTHER, NOW), undefined);
@@ -268,7 +268,7 @@ async function withHome<T>(records: readonly object[], run: () => Promise<T> | T
   }
 }
 
-test("captureRationales weak-links to a failure heard under another spelling of the repo directory", async () => {
+test("captureRationales weak-links to a failure recorded under another spelling of the repo directory", async () => {
   await withHome([failureAt(GIT_BASH, "f1", NOW - 5 * MINUTE)], () => {
     const result = captureRationales(NATIVE, NOW, { adapters: [scriptedAdapter(eventAt(NOW - 4 * MINUTE))] });
     assert.equal(result.written, 1);
@@ -278,7 +278,7 @@ test("captureRationales weak-links to a failure heard under another spelling of 
   });
 });
 
-test("captureRationales structurally links a touched file to a triple heard under another spelling of the repo directory", async () => {
+test("captureRationales structurally links a touched file to a triple recorded under another spelling of the repo directory", async () => {
   const touched = "/work/repo/src/q.ts";
   await withHome([], () => {
     const triple = recordTriple({
@@ -294,7 +294,7 @@ test("captureRationales structurally links a touched file to a triple heard unde
   });
 });
 
-test("why --add links to the newest failure heard under another spelling of this directory", async () => {
+test("why --add links to the newest failure recorded under another spelling of this directory", async () => {
   const here = process.cwd();
   const respelled = WIDENS ? here.replaceAll("\\", "/") : `${here}/`;
   await withHome([failureAt(respelled, "f1", NOW - 5 * MINUTE)], () => {
