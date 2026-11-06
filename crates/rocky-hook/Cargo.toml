@@ -7,3 +7,7 @@ publish.workspace = true
 
 [dependencies]
 rocky-proto = { path = "../rocky-proto" }
+serde_json = "1"
+
+[dev-dependencies]
+tempfile = "3"
