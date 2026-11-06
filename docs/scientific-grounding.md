@@ -85,4 +85,4 @@ Three limits are stated here, not footnoted away. First, these results are corre
 
 ---
 
-*rocky's character, voice, and illustration are original work created for this project. No third-party assets are used.*
+*rocky's name and logo are original work created for this project. No third-party assets are used.*

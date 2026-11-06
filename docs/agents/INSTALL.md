@@ -206,7 +206,7 @@ Then hang `node <home>/.rocky/agent-note.cjs <label>` on whatever event your har
 | --- | --- |
 | Cursor (hooks) | `~/.cursor/hooks.json` — `preToolUse` gates with `permission: allow/deny` (see deny adapter below); `afterFileEdit` / `beforeSubmitPrompt` / `stop` are notify-only, point them at `node <home>/.rocky/agent-note.cjs cursor`. |
 | OpenCode | A TypeScript plugin in `.opencode/plugin/`: `tool.execute.before` + `throw` gates (see deny adapter below); the same hook can call `node <home>/.rocky/agent-note.cjs opencode "<tool summary>"` for capture. |
-| TS-extension harnesses | Adapter module on the pre-tool event plus the result event — see deny adapter below; prefer explicit registration over ambient discovery (one install's discovery proved blind while explicit registration gated). |
+| TS-extension harnesses | Adapter module on the pre-tool event plus the result event — see deny adapter below; prefer explicit registration over ambient discovery (one install's discovery missed the adapter while explicit registration gated). |
 | Aider | No lifecycle hooks; nearest lever is `lint-cmd` in `.aider.conf.yml`, which runs per edited file: `lint-cmd: node <home>/.rocky/agent-note.cjs aider edited` (Aider appends the file path as the last argument). Aider's descriptive auto-commits already feed Rocky's git-diff correlation with zero wiring. |
 | Gemini CLI | `BeforeTool` in `settings.json` with a `matcher` gates with `decision: deny`/`block` (see deny adapter below); `AfterTool` is notify-only. |
 | Cline | `.clinerules/hooks/PreToolUse` executable gates with `cancel: true` (see deny adapter below). |
@@ -216,7 +216,7 @@ Then hang `node <home>/.rocky/agent-note.cjs <label>` on whatever event your har
 | Zed, Roo Code | No scriptable pre-tool hook (Zed: static `always_deny` patterns only; Roo: rules + checkpoints). Floor: Step 1 catches every shell command they run; the agent itself sends Step 2 events; Step 5 where MCP is supported. |
 | DSH (DeepSeek Harness) | Nothing to install — Rocky's adapter reads DSH session logs directly (needs Node 22.15+ at Rocky's runtime for zstd). |
 
-Whatever the harness, the floor never changes: Step 1 hears every shell command, and an agent that can run shell commands can always speak Step 2 itself — the bridge script only automates what the agent would otherwise say by hand.
+Whatever the harness, the floor never changes: Step 1 records every shell command, and an agent that can run shell commands can always speak Step 2 itself — the bridge script only automates what the agent would otherwise say by hand.
 
 ### Pre-tool deny adapter — if your harness supports it, add this
 
@@ -332,7 +332,7 @@ Rocky is this machine's local failure/why memory. These rules are mandatory, eve
 
 - **MUST** — run every shell command through Rocky, whatever tool executes it:
   `rocky run "<the command>"`
-  Output, streams, and exit code pass through untouched; on failure Rocky fingerprints it, on success he confirms fixes. Agent tool shells are usually non-interactive and skip the profile hook — `rocky run` is Rocky's only ear there. Double-hearing where the hook does load is harmless (same fingerprint).
+  Output, streams, and exit code pass through untouched; on failure rocky fingerprints it, on success it confirms fixes. Agent tool shells are usually non-interactive and skip the profile hook — `rocky run` is the only capture path there. Double capture where the hook does load is harmless (same fingerprint).
 - **MUST** — after any turn where you edited files, record why:
   `rocky hook agent-event <vendor> --rationale "<one short sentence: the real reason>" --files path/a.ts,path/b.ts`
 - **MUST** — after every Write/Edit/MultiEdit, record the explain witness:

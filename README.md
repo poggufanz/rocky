@@ -1,6 +1,6 @@
 # Rocky
 <p align="center"><img src="https://raw.githubusercontent.com/poggufanz/rocky/main/assets/rocky-logo.svg" alt="rocky" width="320"></p>
-<p align="center"><img src="https://raw.githubusercontent.com/poggufanz/rocky/main/assets/rocky.webp" alt="rocky dash: every change Rocky heard for one file, the diff beside the notes that explain it"></p>
+<p align="center"><img src="https://raw.githubusercontent.com/poggufanz/rocky/main/assets/rocky.webp" alt="rocky dash: every change Rocky recorded for one file, the diff beside the notes that explain it"></p>
 
 [![CI](https://github.com/poggufanz/rocky/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/poggufanz/rocky/actions/workflows/ci.yml)
 [![npm](https://img.shields.io/npm/v/@poggufanz/rocky-cli?style=flat-square)](https://www.npmjs.com/package/@poggufanz/rocky-cli)
@@ -18,7 +18,7 @@ The useful part is local and deterministic. Rocky has no daemon, no telemetry, a
 
 | | |
 | --- | --- |
-| **Failure memory** a failed build becomes a fingerprint; when the same error returns, Rocky says it has heard it before and that it went green again after — never a fix he did not hear. Evidence, not a guess. | ![Rocky remembers a failed build and its fix](https://raw.githubusercontent.com/poggufanz/rocky/main/assets/demo-loop.gif) |
+| **Failure memory** a failed build becomes a fingerprint; when the same error returns, Rocky says it has recorded it before and that it went green again after — never a fix it did not record. Evidence, not a guess. | ![Rocky remembers a failed build and its fix](https://raw.githubusercontent.com/poggufanz/rocky/main/assets/demo-loop.gif) |
 | **`rocky dash`** opens a local page in your browser: every remembered change to one file, side by side, the agent's stated reason next to the diff that landed. | ![rocky dash compare view](https://raw.githubusercontent.com/poggufanz/rocky/main/assets/demo-dash.gif) |
 | **Rationale gate** an editing agent must state why before it touches a file. No stated reason, no edit; deny-once, fail-open. | ![PreToolUse rationale gate denying an unexplained edit](https://raw.githubusercontent.com/poggufanz/rocky/main/assets/demo-gate.gif) |
 
@@ -93,7 +93,7 @@ The first run fails and Rocky remembers it; the second run works, and Rocky know
 | Dictionary | `rocky what`, `rocky how`, `rocky why`, `rocky digest`, `rocky quiz`, and `rocky export` turn remembered changes back into plain explanations. |
 | `rocky mcp` | Exposes bounded memory and knowledge tools over local stdio, with sanitized output by default. |
 | Rationale gate | A concept lexicon (`rocky concepts`) plus a PreToolUse gate that nudges an editing agent to state why before touching a file; deny-once, fail-open. |
-| Host setup | `rocky setup` registers supported hosts after consent and can install the optional managed voice skill. |
+| Host setup | `rocky setup` registers supported hosts after consent; `rocky setup --remove` also removes a voice skill left by an older release. |
 | `rocky hook` | Manage the optional Bash, WSL, and PowerShell shell hooks. |
 | `rocky model` | Configure optional loopback Ollama (`status\|use\|off`). |
 | `rocky hook gate-event`, `rocky hook agent-event generic` | PreToolUse rationale-gate enforcement and the universal agent notify endpoint. |
@@ -103,7 +103,6 @@ Setup stays explicit:
 ```bash
 rocky setup
 rocky setup --harness
-rocky setup --voice-skill
 rocky setup --agent-hooks
 rocky setup --uninstall-agent-hooks
 rocky setup --status
@@ -169,4 +168,4 @@ Read the [contributing guide](https://github.com/poggufanz/rocky/blob/main/CONTR
 
 Rocky CLI code, original project documentation, and the repository illustration are available under the [MIT License](LICENSE).
 
-Rocky's character, voice, and illustration are original work created for this repository. No third-party logos, film assets, or other copyrighted material are distributed here.
+Rocky's name and logo are original work created for this repository. No third-party logos, film assets, or other copyrighted material are distributed here.

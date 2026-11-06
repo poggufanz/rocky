@@ -2,11 +2,9 @@
 
 This is the detailed contract behind the shorter [project README](../README.md). It records command boundaries, evidence rules, setup transactions, recovery behavior, and platform limits.
 
-Rocky is a terminal companion who keeps track of what you and your AI have already been through, so the second time an error appears, the answer comes from your own history — not from twenty minutes of googling.
+Rocky is a local CLI that keeps track of what you and your AI have already been through, so the second time an error appears, the answer comes from your own history — not from twenty minutes of googling.
 
 **Teaching modes exist inside individual agents. Rocky is the layer that remembers what you learned — passive, cross-tool, and permanent.** Plan 01 of the v0.5 Nervous System and the Plan 02 dictionary/teaching surfaces ship in v0.5.0. The longer-term mission is simple: make users not forget the fundamentals.
-
-He is also, unapologetically, a pet.
 
 ## Why
 
@@ -37,7 +35,7 @@ The arrow that usually breaks is *AI output → you learn from it*. Each arrow m
 | AI output → your understanding | Intent→mechanism dictionary | Shows the concrete mechanism behind your intent and the agent's change | Plan 02 implemented |
 | Your understanding → next intent | Reverse lookup (mechanism→intent) | Returns the intent you actually stored, with its change ID and time | Plan 02 implemented |
 | Your intent → AI output | Ambiguity surfacing | Shows the several mechanisms one of your own words has already produced, and lets you pick | Plan 02 implemented |
-| Your articulation → memory | The curious question | One curious question turns a one-line answer into a journal entry and a dictionary entry | Plan 02 implemented |
+| Your articulation → memory | The ambiguity question | One question turns a one-line answer into a journal entry and a dictionary entry | Plan 02 implemented |
 | Memory → next decision | Recall | Carries a cross-session lesson into a new decision | Plan 01 implemented/current |
 | Memory → next decision | Digest | Carries a cross-session lesson into a seven-day summary | Plan 02 implemented |
 | Memory → next decision | Memory circuit breaker | Flags repeated approaches as planned negative knowledge | Plan 02 deferred |
@@ -60,19 +58,18 @@ Repository layout: a fresh clone of the canonical upstream repository (`https://
 
 Requires Node 18+.
 
-Set an absolute `ROCKY_HOME` to move Rocky's own state directory. Paths below shown under `~/.rocky` follow that override; `.bashrc`, host configuration, voice-skill backups, and setup recovery artifacts do not.
+Set an absolute `ROCKY_HOME` to move Rocky's own state directory. Paths below shown under `~/.rocky` follow that override; `.bashrc`, host configuration, legacy voice skill backups, and setup recovery artifacts do not.
 
 Register Rocky with detected MCP hosts after installation:
 
 ```bash
 rocky setup
-rocky setup --voice-skill   # also install the managed Rocky voice skill
 rocky setup --agent-hooks
 rocky setup --uninstall-agent-hooks
 rocky setup --status
 ```
 
-`rocky setup` configures detected hosts with sanitized MCP exposure after consent. By itself it never edits `.bashrc`, installs a voice skill, installs or pulls an Ollama model, or enables local AI. Voice-skill work requires the explicit `--voice-skill` flag. Shell integration is a separate `rocky hook install` step.
+`rocky setup` configures detected hosts with sanitized MCP exposure after consent. By itself it never edits `.bashrc`, installs or pulls an Ollama model, or enables local AI. Shell integration is a separate `rocky hook install` step.
 
 Codex registration is capability-gated, not a name-only mutation: Rocky proves the existing Rocky entry originates from the base user config layer through Codex's official app-server config protocol, then writes with a version-checked compare-and-swap. Whenever provenance, capability, or version cannot be proven, Rocky falls back to manual instructions.
 
@@ -82,7 +79,7 @@ Claude Code registration goes through a private stage. Rocky clones the effectiv
 
 That staged path does not activate in this release. Rocky ships no complete Claude Code policy manifest, so any `rocky setup` run that still has to write reports `claude-code: failed` with `Claude Code policy-equivalent automation is unavailable; use manual registration` and exits 1. Rocky prints the exact CLI argv to paste; run it yourself. Once the entry exists, later runs report `claude-code: already-configured`.
 
-`--voice-skill` only targets detected Codex and Claude Code hosts. Claude Desktop never receives the voice skill, and its own MCP result stays independent. When zero hosts are eligible, Rocky prints `voice-skill: unavailable` and exits 1 instead of inventing a result.
+Older releases could install a managed voice skill for Codex and Claude Code. That option is gone. `rocky setup --check` and `rocky setup --status` report a leftover copy, for example `legacy voice skill codex: installed; rocky setup --remove removes it.`, and `rocky setup --remove` moves a managed copy into that host's backup folder after the same consent as the rest of the removal. A copy whose files changed after install, or that carries no Rocky ownership marker, is reported and left in place for you to delete. These results never change the exit code; an unexpected failure to move a managed copy makes `--remove` exit 1.
 
 ## Nervous System (v0.5.0)
 
@@ -109,9 +106,9 @@ rocky quiz
 
 `what` is intent→mechanism lookup. `what --ai` can rank deterministic hits through configured loopback Ollama, then falls back to the same evidence when the model sleeps. `how` is a mechanism reminder. `why` quotes the agent's stated rationale for one file. `--diff` can be passed to `why` or `how` to correlate and display the relevant git diff for the touched file using a three-tier strategy (head commit SHA, $\pm 60$s time window, or uncommitted changes), with secret scrubbing and bounded 5s execution. `digest` reports the last-seven-day intent pattern. `quiz` is explicit opt-in retrieval practice. Rocky never rewrites, injects, or submits the user prompt.
 
-Quiz uses newest eligible triples and comprehension notes, deterministic newest-first with stable id tie-breaks. Unchanged memory repeats same candidates; Rocky asks, reveals, and never grades. Useful deterministic lines sound like `you say "move button down". it is margin-top. I think. check, question` and `last time you say "move button down", it become margin-top. maybe you mean margin-top, question`. Rocky hears remembered evidence; he does not turn a guess into a fact.
+Quiz uses newest eligible triples and comprehension notes, deterministic newest-first with stable id tie-breaks. Unchanged memory repeats same candidates; Rocky asks, reveals, and never grades. Useful deterministic lines sound like `Possible match for "move button down": a recorded intent became margin-top. Check the evidence.` and `Last time you said "move button down", it became margin-top. You may mean margin-top.` Rocky reports remembered evidence; it does not turn a guess into a fact.
 
-The curious question is Ollama-gated. After an intent append, Rocky may start one detached, non-blocking ambiguity check, and asks at most one question for that turn. It consults the intent plus remembered evidence only; it never reads project files. A question is curious, not a test. If Ollama is absent, fails, or is disabled, this advisory path disappears without blocking or changing the captured turn. Ignored questions are dropped and never repeated.
+The ambiguity question is Ollama-gated. After an intent append, Rocky may start one detached, non-blocking ambiguity check, and asks at most one question for that turn. It consults the intent plus remembered evidence only; it never reads project files. A question is curious, not a test. If Ollama is absent, fails, or is disabled, this advisory path disappears without blocking or changing the captured turn. Ignored questions are dropped and never repeated.
 
 Export keeps ownership plain:
 
@@ -120,7 +117,7 @@ rocky export --kind triple > triples.jsonl
 rocky export --since 7d
 ```
 
-Export writes filtered raw JSONL on stdout; its count/persona line goes to stderr. `~/.rocky/memory.jsonl` is user-owned, append-only data: readable, back-up-able, and deletable by you. Triples can contain the verbatim user intent, capped paths/excerpts, and the agent's stated rationale. Rocky does not keylog or read screens. Sanitized MCP projection remains the default; raw exposure is explicit.
+Export writes filtered raw JSONL on stdout; its count line goes to stderr. `~/.rocky/memory.jsonl` is user-owned, append-only data: readable, back-up-able, and deletable by you. Triples can contain the verbatim user intent, capped paths/excerpts, and the agent's stated rationale. Rocky does not keylog or read screens. Sanitized MCP projection remains the default; raw exposure is explicit.
 
 ## Rationale capture and the gate (v0.7.0)
 
@@ -133,7 +130,7 @@ v0.7 adds a fourth evidence kind, `rationale`, alongside the triples above: Rock
 | `notify` | Any agent calling `rocky hook agent-event <adapter> --rationale "<text>"` | summary |
 | `human` | You, via `rocky why --add "<text>" [--files a.ts,b.ts]` | summary |
 
-`rocky concepts` lists concepts a deterministic lexicon and matcher have heard across memory, with counts and any aliases you have taught it; `rocky concept <id>` shows newest-first evidence for one concept, and `rocky concept alias ["--retract"] "<phrase>" <id>` teaches or retracts one phrase. `rocky sessions [n]` lists work derived from memory at read time, grouped by directory and split on a 30-minute gap; `rocky sessions <index>` shows one session's evidence chronologically. `rocky repl [--ai]` keeps that lookup family — recall/what/why/how/concepts/sessions — in one loop instead of paying a fresh process start per call.
+`rocky concepts` lists concepts a deterministic lexicon and matcher have matched across memory, with counts and any aliases you have taught it; `rocky concept <id>` shows newest-first evidence for one concept, and `rocky concept alias ["--retract"] "<phrase>" <id>` teaches or retracts one phrase. `rocky sessions [n]` lists work derived from memory at read time, grouped by directory and split on a 30-minute gap; `rocky sessions <index>` shows one session's evidence chronologically. `rocky repl [--ai]` keeps that lookup family — recall/what/why/how/concepts/sessions — in one loop instead of paying a fresh process start per call.
 
 The Claude Code and DSH adapters read session logs Rocky did not write, at a bounded per-file offset, and never execute or trust their contents. The DSH adapter needs Node 22.15 or newer at runtime for built-in zstd support; on an older Node, Rocky feature-detects the gap and skips DSH logs rather than guessing. Codex and Gemini log adapters remain deferred: Codex's local session format has drifted to a SQLite hybrid, and Gemini persists no thoughts to read, so neither has a `log-thinking` lane yet — both still reach Rocky through the universal `notify` lane.
 
@@ -151,13 +148,13 @@ rocky run "python manage.py migrate"
 
 What happens:
 
-- **The command runs exactly as normal.** Output streams through untouched; the exit code is preserved. Rocky only speaks after your tool is done.
+- **The command runs exactly as normal.** Output streams through untouched; the exit code is preserved. Rocky prints only after your tool is done.
 
 On native Windows, `rocky run` and `rocky watch` use `shell: true`, so `cmd.exe`'s practical command-line ceiling is around 8,191 characters (quoting and expansion can change the exact boundary). Rocky's audited boundary is a 7,111-character command that reaches the child successfully; a 9,111-character command may fail before normal child execution. A shell that starts and then reports an error is still a started child result, so its exit code 127 remains a real failure. Use a response file, configuration file, or script when a command is near this boundary. Rocky does not silently rewrite the command, change quoting, or switch its shell.
-- **On failure**, Rocky fingerprints the error and files it. If he has heard this exact error before, he says so. If the same command worked again after that earlier failure, he says that and adds that he did not hear what changed; if a different command was what worked, he names it as a possibility only.
+- **On failure**, Rocky fingerprints the error and files it. If it has recorded this exact error before, it says so. If the same command worked again after that earlier failure, it says that and adds that the change itself was not recorded; if a different command was what worked, it names it as a possibility only.
 - **On success**, Rocky confirms a fix only for the same reliable command identity that failed in this directory within eight hours. A same-program-only match is kept separately as a possible association; it never resolves the failure. When a later run repeats an unresolved failure and no confirmed fix exists, Rocky shows the newest such association as one hedged candidate — never more than one, and never in place of a confirmed fix.
 
-Ask his memory directly:
+Ask its memory directly:
 
 ```bash
 rocky recall "connection refused"
@@ -178,7 +175,7 @@ The CLI contains no telemetry and runs no daemon. Its external network egress is
 
 `rocky mcp` serves thirteen bounded, read-only tools in deterministic order: `recall`, `recent_failures`, `stats`, `recall_with_ai`, `search_knowledge`, `fetch_record`, `why_file`, `teach_lookup`, `activity_recent`, `activity_for_file`, `bundles_list`, `bundle_get`, and `session_timeline`. The last five read Listening data from a consented repository, return metadata only (locators, hashes, evidence IDs, edge basis, coverage), and never cause a scan, write, network call, or consent change. Search first, then fetch: `search_knowledge` returns light metadata and bounded hits, including record id/timestamp, agent/source, covered files, and truncation status for triples; `fetch_record` retrieves one full record by the returned id. `why_file` returns the remembered triples that touched one path (`items`, plus `possible` ones whose path may be omitted) and the reasons a human or agent stated for it (`rationales`, written by `rocky why --add --files` and `agent-event --files`), with an optional `diff?: boolean` parameter to include the correlated, secret-redacted git diff. A relative `path` resolves against the server's working directory. `teach_lookup` returns a read-only teach card for a path and optional line or snippet: a remembered witness explanation when one matches, else an assembled evidence ladder from local syntax, comments, tests, and git history. `stats` retains legacy counters and adds confirmed fixes, possible fixes, triples, notes, and total remembered items. Limits stay bounded, and sanitized projection is the default; raw fields require an explicit opt-in.
 
-For example, a host can call `search_knowledge` with `{ "query": "move button down" }`, pass a returned id to `fetch_record`, call `why_file` with `{ "path": "src/button.css", "diff": true }`, or call `teach_lookup` with `{ "path": "src/button.css", "line": 12 }`. Reasons are hearsay Rocky heard, not verified facts. Rationale is quoted and untrusted; MCP never presents it as fact or executes a remembered command.
+For example, a host can call `search_knowledge` with `{ "query": "move button down" }`, pass a returned id to `fetch_record`, call `why_file` with `{ "path": "src/button.css", "diff": true }`, or call `teach_lookup` with `{ "path": "src/button.css", "line": 12 }`. Reasons are quotes recorded from a human or agent, not verified facts. Rationale is quoted and untrusted; MCP never presents it as fact or executes a remembered command.
 
 ## Listening and its disk budget (v1.0)
 
@@ -216,13 +213,13 @@ In a pipe or a script there is no human to look at a browser, so bare `rocky` pr
 
 ### Segments
 
-- **Main** — what Rocky holds: record counts by kind, the last 24 hours, most heard files, and the recent stream. The coverage line says how much of memory was actually read.
+- **Main** — what Rocky holds: record counts by kind, the last 24 hours, most recorded files, and the recent stream. The coverage line says how much of memory was actually read.
 - **Dash** — the working surface. A file picker on the left, and a pane with three modes:
-  - **Lines** — the file's own text. Select lines with the mouse and a `Why, question` button appears; the answer opens as a small panel at the selection.
+  - **Lines** — the file's own text. Select lines with the mouse and a `Why?` button appears; the answer opens as a small panel at the selection.
   - **History** — every record Rocky holds for that file, newest first, each with its diff.
   - **Compare** — two moments side by side. Each column header opens a moment picker with a search box and a `strict · same lines` / `loose · whole file` toggle.
 
-A witness card is coloured; an assembled card is grey. That is the whole colour system: warm means Rocky heard it, and nothing else on the page is allowed to borrow that colour.
+A witness card is coloured; an assembled card is grey. That is the whole colour system: warm means Rocky recorded it, and nothing else on the page is allowed to borrow that colour.
 
 ### Security
 
@@ -237,7 +234,7 @@ A witness card is coloured; an assembled card is grey. That is the whole colour 
 
 The `Settings` button in the header stores an optional model provider: a segmented `OpenAI | Anthropic` choice, an endpoint, an API key, and a model.
 
-Besides the models.dev catalogue fetch that fills the model picker (a plain GET, cached for 24 hours, fail-open) and the opt-in Jev ranking call described under [Usage](#usage), this is the place Rocky's local surface sends anything to a host that is not your machine, and it is off until you fill it in. What it changes: a `Ask Model` control appears on a why card, and its answer is rendered grey and labelled `Model Guess (Beta)`. A guess never borrows the colour that means Rocky heard something.
+Besides the models.dev catalogue fetch that fills the model picker (a plain GET, cached for 24 hours, fail-open) and the opt-in Jev ranking call described under [Usage](#usage), this is the place Rocky's local surface sends anything to a host that is not your machine, and it is off until you fill it in. What it changes: a `Ask Model` control appears on a why card, and its answer is rendered grey and labelled `Model Guess (Beta)`. A guess never borrows the colour that means Rocky recorded something.
 
 - The key is stored in `~/.rocky/gui.json` at mode `0600`, never in the browser. The page is told only whether a key exists.
 - Saving the endpoint or model without retyping the key leaves the stored key alone. An empty key is an explicit erase (`Forget Key`).
@@ -257,7 +254,7 @@ printf 'const rows = await loadRows();' | rocky teach --stdin src/core/memory.ts
 rocky teach src/core/memory.ts:307 --ladder   # also print every hop, expanded
 ```
 
-`rocky teach <file>:<line>` reads the file once, slices the selection (the line plus three lines on each side, clamped to the file), and asks memory for an `explain` record whose written hunk matches the selection — exact content hash first, token similarity second. A match renders the witness card: the writing agent's own `code` paragraph (why this code shape) and `business` paragraph (what concern it serves), quoted as hearsay with source and age. When the witness `code` paragraph shares no token with the selection's hop-1 construct finding, the card appends one labeled `form` rung (catalog or ast) so witness text and assembly never blend. On a miss, Rocky assembles a deterministic why-ladder from the file itself — construct catalog, enclosing function, callee definition, nearest comment, tests and first `git log -L` commit — and renders the summary card with one compact evidence line naming the sources used; `--ladder` also prints the full hop-by-hop view. `rocky teach <file>` is witness-only (newest explain for the file, no ladder), and `rocky teach --stdin <file>` matches the piped snippet (bounded read, same 2 MB cap as the gate-event stdin reader) against the file. No witness and no ladder rungs is a first-class honest state: Rocky has not heard why yet. Ladder output is rendered, never written to memory, and assembled answers never masquerade as witness testimony. Every flow outcome exits 0.
+`rocky teach <file>:<line>` reads the file once, slices the selection (the line plus three lines on each side, clamped to the file), and asks memory for an `explain` record whose written hunk matches the selection — exact content hash first, token similarity second. A match renders the witness card: the writing agent's own `code` paragraph (why this code shape) and `business` paragraph (what concern it serves), quoted as hearsay with source and age. When the witness `code` paragraph shares no token with the selection's hop-1 construct finding, the card appends one labeled `form` rung (catalog or ast) so witness text and assembly never blend. On a miss, Rocky assembles a deterministic why-ladder from the file itself — construct catalog, enclosing function, callee definition, nearest comment, tests and first `git log -L` commit — and renders the summary card with one compact evidence line naming the sources used; `--ladder` also prints the full hop-by-hop view. `rocky teach <file>` is witness-only (newest explain for the file, no ladder), and `rocky teach --stdin <file>` matches the piped snippet (bounded read, same 2 MB cap as the gate-event stdin reader) against the file. No witness and no ladder rungs is a first-class honest state: no reason has been recorded yet. Ladder output is rendered, never written to memory, and assembled answers never masquerade as witness testimony. Every flow outcome exits 0.
 
 ## `rocky watch` (v0.3, implemented)
 
@@ -270,14 +267,14 @@ rocky watch "docker compose up" --quiet
 
 `rocky watch` runs `cmd` exactly like `rocky run` does — same streaming, same fingerprinting, same fix-linking, same cross-directory fix admission — plus:
 
-- **An idle line** every 10 minutes of stderr silence, so a quiet terminal still tells you Rocky's still there.
+- **An idle line** every 10 minutes of stderr silence, so a quiet terminal still shows the command is running.
 - **A notification** when it finishes: a desktop notification (`notify-send` on Linux, `osascript` on macOS) or a terminal bell where neither exists. Best-effort only, never a source of truth, and never blocks the wrapped command's exit code.
 - **A saved stderr tail** on failure, under `~/.rocky/watch/`, alongside the same kind of memory record `rocky run` writes (`origin: "watch"`).
-- **`--quiet`**, which keeps the recording but drops every persona line, every idle line, and the notification — stderr gets plain facts only: duration, exit code, and the log path.
-- **Passive dictionary labels**, queued locally after annotation. The next shell prompt shows at most one label, and non-quiet `rocky watch` also shows it while the command runs. Watch reads labels without dequeuing them and shows each line at most once per watch session. Labels never enter agent context. `watch --quiet` stays plain-facts mode and does not poll persona labels. The deterministic fallback is typically:
+- **`--quiet`**, which keeps the recording but drops every narration line, every idle line, and the notification — stderr gets plain facts only: duration, exit code, and the log path.
+- **Passive dictionary labels**, queued locally after annotation. The next shell prompt shows at most one label, and non-quiet `rocky watch` also shows it while the command runs. Watch reads labels without dequeuing them and shows each line at most once per watch session. Labels never enter agent context. `watch --quiet` stays plain-facts mode and does not poll dictionary labels. The deterministic fallback is typically:
 
   ```text
-  you say "move button down". it is margin-top. I think. check, question
+  You said "move button down". The first change is margin-top. Does that match?
   ```
 
 Ctrl-C (or an external `SIGTERM`) passes its exit code straight through — no memory record, no log, no notification. Notifications can be turned off in `~/.rocky/config.json` with `"watch": { "notify": false }`; a missing, invalid, or unreadable config always defaults to notifications on and never blocks the run.
@@ -290,16 +287,16 @@ The hull check, for the moment right before code leaves your machine:
 rocky check                  # check what you are about to push
 rocky check --install-hook   # run it automatically as a git pre-push hook
 rocky check --offline        # skip the registry lookup for this run
-rocky check --quiet          # plain facts, no persona, no question
+rocky check --quiet          # plain facts, no narration, no question
 ```
 
 Rocky looks only at the commits you are about to push, and runs three checks. The secret scan and the risk question read the **added** lines of that range; the package check reads whole committed files — each changed `package.json` at both ends of the range, plus your `.npmrc` and the committed `package-lock.json` — because deciding whether a dependency is new, and whether it is even checkable, is not something a diff line can answer.
 
 - **Secrets, offline.** AWS keys, private-key headers, GitHub/Slack/OpenAI/Anthropic/npm tokens, and literal `password=`/`secret=` assignments. A hit names `file:line` and blocks the push.
-- **Hallucinated packages.** Dependencies newly added to a `package.json` are checked for existence against registry.npmjs.org. A package the registry has never heard of blocks the push — `this package not exist. AI dream it, question`. Dependencies using `workspace:`/`file:`/`link:`/`portal:`, scopes your `.npmrc` points elsewhere, and names already resolved in the committed lockfile are skipped, because those are where false accusations come from.
-- **One comprehension question.** Rocky scores the added lines for risk (eval/exec, destructive fs, network, auth handling), picks the riskiest one, and asks what it does. He asks because he is curious, not to test you. **It never blocks a push** — ignore it, answer `busy`, run without a terminal, or set `ROCKY_NO_QUIZ=1`, and the push proceeds. A real answer is kept in your memory file as your own note. When a risky line would draw the question but there is no terminal to answer on, Rocky says so in one plain line, `comprehension question skipped: no terminal`, and carries on. That skip changes neither the exit code nor the completeness of the scan. `ROCKY_NO_QUIZ=1` and `--quiet` stay silent. Windows has no `/dev/tty`, so there Rocky asks only when stdin itself is a terminal; a terminal on stderr alone does not count.
+- **Hallucinated packages.** Dependencies newly added to a `package.json` are checked for existence against registry.npmjs.org. A package the registry does not know blocks the push — `Package does not exist on the registry.` Dependencies using `workspace:`/`file:`/`link:`/`portal:`, scopes your `.npmrc` points elsewhere, and names already resolved in the committed lockfile are skipped, because those are where false accusations come from.
+- **One comprehension question.** Rocky scores the added lines for risk (eval/exec, destructive fs, network, auth handling), picks the riskiest one, and asks what it does. The question is for your own understanding, not a test. **It never blocks a push** — ignore it, answer `busy`, run without a terminal, or set `ROCKY_NO_QUIZ=1`, and the push proceeds. A real answer is kept in your memory file as your own note. When a risky line would draw the question but there is no terminal to answer on, Rocky says so in one plain line, `comprehension question skipped: no terminal`, and carries on. That skip changes neither the exit code nor the completeness of the scan. `ROCKY_NO_QUIZ=1` and `--quiet` stay silent. Windows has no `/dev/tty`, so there Rocky asks only when stdin itself is a terminal; a terminal on stderr alone does not count.
 
-The registry lookup is consent-gated: the first time it would run, Rocky states exactly what leaves the machine — package names, to registry.npmjs.org, no telemetry — and asks once. Answer no and he never asks again. With no answer stored and no terminal to ask on (CI, a non-interactive hook), the lookup is skipped rather than hanging, and a clean run says how many new packages it did not look up.
+The registry lookup is consent-gated: the first time it would run, Rocky states exactly what leaves the machine — package names, to registry.npmjs.org, no telemetry — and asks once. Answer no and it never asks again. With no answer stored and no terminal to ask on (CI, a non-interactive hook), the lookup is skipped rather than hanging, and a clean run says how many new packages it did not look up.
 
 Only a secret or a missing package ever holds a push. Registry unreachable, a git command that fails, a Rocky bug — during a push all of it fails open with one plain line, because a broken Rocky must never be the reason you cannot ship. `git push --no-verify` remains git's own escape hatch.
 
@@ -338,7 +335,7 @@ When `.bashrc` already exists, a write transaction keeps a recovery copy of the 
 Claude Desktop uses the same conditional-transaction mechanism and also creates a full timestamped sibling backup before changing an existing valid config. Those timestamped backups are not automatically pruned. Claude Code MCP automation is inactive in this release, so it normally makes no config write or backup.
 
 From the next shell on: every failing command is remembered (no stderr — the
-hook hears command and exit code only; `rocky run` remains the deep-memory
+hook records command and exit code only; `rocky run` remains the deep-memory
 path). Deep-memory suggestion stays quiet when shell reports command not found —
 misspelling, not error worth wrapping. When a command succeeds
 where the same command recently failed, the fix
@@ -353,7 +350,7 @@ strange target, a force push, `curl | bash` — Rocky holds it:
 
 Answer anything but `y` and the command never runs. Rules live in
 `~/.rocky/guard.rules` — plain text, edit freely, Rocky never overwrites an
-edited file. `ROCKY_OFF=1` makes him deaf for a session;
+edited file. `ROCKY_OFF=1` turns the hook off for a session;
 `rocky hook uninstall` removes the block and keeps the memory.
 
 ## How the memory works
@@ -362,19 +359,19 @@ edited file. `ROCKY_OFF=1` makes him deaf for a session;
 2. **The failure log** (`src/core/memory.ts`) — append-only JSONL. Failures store the fingerprint, the command, the directory, and a short excerpt for display. Fixes store which failures they resolved.
 3. **Fix linking** — within one per-memory transaction, Rocky reloads current state and confirms a success only for unresolved failures with the same reliable command identity (same directory, within 8h). Same-program-only candidates are stored as possible associations and never resolve failures or clear pending state. Concurrent writers share the transaction lock, so one unresolved-to-resolved transition creates one fix event. `run`, `watch`, and `recall` read those associations back through `possibleFixesForFailure` and surface the newest one as a hedged candidate whenever no confirmed fix exists for the repeated failure (v0.5.2).
 4. **Recall** — token-overlap search across commands and error signatures, deduplicated per distinct error, fix shown when known.
-5. **Long-running envelope** — the reader has a 32 MiB file cap, a 1 MiB line cap, and a record cap: 50,000 records on the exact Linux Node 22 runtime, where that envelope was measured, and an explicit 10,000-record supported cap on Windows and other runtimes until their own scorecard meets the 150 MiB post-GC RSS budget. Past any cap (including a 250,000-record stress fixture) the reader keeps the **first** records and stops at the boundary. Writers only append, so the lines Rocky does not hear are the **later** lines of the file: they stay on disk, unheard. Skipped corrupt or oversized lines are counted, never silently treated as complete. A single immutable snapshot is reused only after a full bounded content witness confirms every byte that can affect the bounded answer plus file identity, size, and metadata.
+5. **Long-running envelope** — the reader has a 32 MiB file cap, a 1 MiB line cap, and a record cap: 50,000 records on the exact Linux Node 22 runtime, where that envelope was measured, and an explicit 10,000-record supported cap on Windows and other runtimes until their own scorecard meets the 150 MiB post-GC RSS budget. Past any cap (including a 250,000-record stress fixture) the reader keeps the **first** records and stops at the boundary. Writers only append, so the lines Rocky does not read are the **later** lines of the file: they stay on disk, unread. Skipped corrupt or oversized lines are counted, never silently treated as complete. A single immutable snapshot is reused only after a full bounded content witness confirms every byte that can affect the bounded answer plus file identity, size, and metadata.
 
-   Past the cap, the later lines are not heard, and that has consequences:
+   Past the cap, the later lines are not read, and that has consequences:
 
    - `recall` and `stats` answer from the first records only: a failure on a later line is not found, and the `stats` counts are not the whole memory.
-   - Fix linking stops: a new success writes no link and the pending failure stays pending, because Rocky cannot tell whether a line he did not hear already linked it.
+   - Fix linking stops: a new success writes no link and the pending failure stays pending, because Rocky cannot tell whether a line it did not read already linked it.
    - `teach` finds only witnesses among the first records.
    - The rationale and explain gate cannot see evidence on later lines, so it fails open: it allows the edit instead of denying on a snapshot that cannot hold what it looks for.
    - `rocky export` refuses, because a file cut at the cap would pass for the whole memory.
 
-   Rocky says so rather than answer as if memory were whole: `memory coverage incomplete: first N records heard, later lines not heard.` (N is how many records the reader kept) appears in `stats`, `teach`, `sessions`, `recall`, `what`, `how`, `why`, `digest`, `quiz`, `export`, `concepts`, and `brief`, and in `run`, `watch`, and the shell hook when they hear a failure. `ROCKY_VERBOSE=1` brings the raw counters back: `stats` prints them under the plain line, and `recall`, `run`, `watch`, the shell hook, `what`, `how`, `why`, `digest`, `quiz`, `export`, `concepts`, and `brief` print them in its place; `teach` and `sessions` always print the plain line. The MCP tools that read memory (`recall`, `recent_failures`, `stats`, `recall_with_ai`, `search_knowledge`, `fetch_record`, `why_file`) attach `memoryCoverage` (`version`, `scanned`, `skipped`, `truncated`, `bytesScanned`, `bytesTotal`, `complete`, and `reason` — `record-cap`, `file-size-cap`, or `read-race` — when one stopped the read) and `memoryCoverageIncomplete`. In successful answers, `teach_lookup` and the Listening tools carry no `memoryCoverage`.
+   Rocky says so rather than answer as if memory were whole: `memory coverage incomplete: Only the first N records were read; later lines were not read.` (N is how many records the reader kept) appears in `stats`, `teach`, `sessions`, `recall`, `what`, `how`, `why`, `digest`, `quiz`, `export`, `concepts`, and `brief`, and in `run`, `watch`, and the shell hook when they hear a failure. `ROCKY_VERBOSE=1` brings the raw counters back: `stats` prints them under the plain line, and `recall`, `run`, `watch`, the shell hook, `what`, `how`, `why`, `digest`, `quiz`, `export`, `concepts`, and `brief` print them in its place; `teach` and `sessions` always print the plain line. The MCP tools that read memory (`recall`, `recent_failures`, `stats`, `recall_with_ai`, `search_knowledge`, `fetch_record`, `why_file`) attach `memoryCoverage` (`version`, `scanned`, `skipped`, `truncated`, `bytesScanned`, `bytesTotal`, `complete`, and `reason` — `record-cap`, `file-size-cap`, or `read-race` — when one stopped the read) and `memoryCoverageIncomplete`. In successful answers, `teach_lookup` and the Listening tools carry no `memoryCoverage`.
 
-   To get back under the cap, copy `memory.jsonl` somewhere safe yourself, then move it aside; the next write starts a fresh file, and Rocky hears only the file that stays. Do not use `rocky export` for the copy: it refuses past the cap.
+   To get back under the cap, copy `memory.jsonl` somewhere safe yourself, then move it aside; the next write starts a fresh file, and Rocky reads only the file that stays. Do not use `rocky export` for the copy: it refuses past the cap.
 
 **Fix-link `basis` values.** Every fix or association link records how it was matched, ranked strongest to weakest:
 
@@ -418,7 +415,7 @@ rocky/
 │   │   ├── hook.ts         # Bash/WSL/PowerShell hook and guard lifecycle
 │   │   ├── mcp.ts          # local read-only MCP stdio server
 │   │   ├── model.ts        # opt-in Ollama configuration
-│   │   ├── setup.ts        # detected-host and optional voice-skill setup
+│   │   ├── setup.ts        # host setup, agent hooks, Listening consent
 │   │   ├── dictionary.ts   # what/how/why/digest/quiz/export surfaces
 │   │   ├── teach.ts        # witness card and deterministic why-ladder
 │   │   ├── gui.ts          # local browser dashboard launcher
@@ -435,37 +432,36 @@ rocky/
 │   │   └── memory-query.ts # fingerprint lookup and fuzzy search
 │   ├── gui/                # loopback HTTP server, BYOK settings, model catalog
 │   ├── mcp/                # bounded read-only tools and privacy projection
-│   ├── setup/              # host adapters, consent, health, voice skill
+│   ├── setup/              # host adapters, consent, health, legacy voice skill cleanup
 │   ├── ai/                 # loopback-only Ollama adapter and grounded schema
 │   ├── agent/              # capture, annotation, explain extract, and gate
 │   ├── shell/              # Bash hook assets
 │   └── ui/
-│       └── rocky.ts        # his face, his voice, relative time
+│       └── rocky.ts        # output prefix, stderr helpers, relative time
 ├── assets/
 │   ├── gui/                # local web dashboard HTML, CSS, JS
 │   ├── teach-agent.md      # Indonesian teach model prompt template
 │   └── teach-agent.en.md   # English teach model prompt template
-├── skills/rocky-voice/     # optional managed voice skill asset
 ├── docs/
 │   └── scientific-grounding.md
 ├── package.json            # zero runtime deps
 └── tsconfig.json
 ```
 
-## Rocky's voice
+## Output
 
-Rocky speaks the way he does in the book, and the rules are enforced in code, not vibes:
+Rocky's output follows [docs/output-principles.md](output-principles.md), and the mechanical part is enforced in tests:
 
-- Questions end with `, question` — never a question mark.
-- Emphasis is repetition: `good good good`, `bad bad`.
-- Short sentences, present tense, no articles.
-- He is blind. He never "sees" anything — he hears, he remembers, he checks.
+- Every Rocky-owned line on stderr starts with `rocky:`; detail lines below it carry no prefix.
+- Plain sentences in sentence case. Questions end with a question mark; prompts show their choices, such as `[y/N]`.
+- No first person, no emphasis by repetition, no emoji, no mascot art.
+- Findings are observations with evidence. Rocky never prints a cause or a fix it did not record, and it says when a read was partial or a reason was never recorded.
 
-When things are serious, Rocky is serious. Diagnoses and fixes are printed plainly; the personality lives around the information, never inside it. `rocky watch --quiet` is plain-facts mode for people debugging production at 2 a.m.
+`rocky watch --quiet` and `rocky check --quiet` are plain-facts mode: duration, exit code, findings, and paths, nothing else.
 
-Rocky asks because he is curious, not because he is testing you; you are always the one who knows, never the one being graded. Ignore him and he goes quiet — an ignored question is never repeated — and answering `busy` makes him wait without complaint (he once waited 46 years). Ambiguity questions are optional, Ollama-gated, and never block the captured turn.
+Questions from Rocky are for your own understanding; you are never graded. Ignore one and it is dropped and never repeated, and answering `busy` skips it. Ambiguity questions are optional, Ollama-gated, and never block the captured turn.
 
-The fence never moves: Rocky hears your terminal and the explicit Plan 01 agent hooks. That's it. No keylogging, no screen reading, no capture of screen content of any kind. "Rocky can't see your screen" is a literal description of the architecture, not just lore. The local GUI serves a page to your own browser over loopback and reads nothing the page does not ask for; no global input is hooked.
+The fence never moves: Rocky records your terminal and the explicit Plan 01 agent hooks. That's it. No keylogging, no screen reading, no capture of screen content of any kind. The local GUI serves a page to your own browser over loopback and reads nothing the page does not ask for; no global input is hooked.
 
 The holes in the no-egress rule are named, and there are four: `rocky check`'s consent-gated registry lookup, the GUI model picker's models.dev catalogue fetch (no prompt, key, memory, or code goes with it), the optional BYOK proxy described under `rocky` and `rocky dash`, and the opt-in Jev ranking call to `api.typesafe.ai` or `openrouter.ai`, which runs only when `decision.engine` is `jev` and a key is present, and sends the query plus at most ten redacted evidence snippets. The proxy stays shut until you enter a key, it sends only the prompt you triggered — and, on a code question in Main, the carved excerpts and memory evidence that ground it — and all of it is redacted before it leaves. Memory, hooks, recall, and MCP still reach no external host.
 
