@@ -218,7 +218,7 @@ test("compare is not a CLI command: dash owns the surface, no aliases", (t) => {
   assertCompleted(result, 2);
   assert.equal(
     result.stderr,
-    `[Rocky] "compare" is not command I know. run --help, question
+    `rocky: Unknown command "compare". Run rocky --help to list commands.
 `,
   );
   assert.equal(result.stdout, "");

@@ -552,7 +552,7 @@ test("non-TTY confirmation port returns false without reading input", async () =
     read() { reads += 1; throw new Error("non-TTY stdin must not be read"); },
   });
 
-  assert.equal(await port.confirm("configure hosts, question"), false);
+  assert.equal(await port.confirm("Configure hosts now?"), false);
   assert.equal(reads, 0);
 });
 
@@ -857,7 +857,7 @@ test("detected host with no matching resolved target reports unavailable and per
 test("sanitized and raw configure print required projected-memory disclosures", async () => {
   const sanitized = new FakeAdapter("codex", {});
   const safeOutput = await captureStderr(() => setup(["--yes"], dependencies([sanitized])));
-  assert.match(safeOutput.stderr, /configured MCP host may forward selected projected memory/i);
+  assert.match(safeOutput.stderr, /A configured MCP host may forward selected projected memory\./);
   assert.doesNotMatch(safeOutput.stderr, /working director|stderr excerpt/i);
 
   const raw = new FakeAdapter("codex", {});
@@ -865,10 +865,9 @@ test("sanitized and raw configure print required projected-memory disclosures", 
     ["--yes", "--mcp-exposure", "raw"],
     dependencies([raw]),
   ));
-  assert.match(rawOutput.stderr, /configured MCP host may forward selected projected memory/i);
-  assert.match(rawOutput.stderr, /raw exposure/i);
-  assert.match(rawOutput.stderr, /working directories/i);
-  assert.match(rawOutput.stderr, /stderr excerpts/i);
+  assert.match(rawOutput.stderr, /A configured MCP host may forward selected projected memory\./);
+  assert.match(rawOutput.stderr, /Raw exposure includes working directories and stored stderr excerpts\./);
+  assert.match(rawOutput.stderr, /A host that shares them exposes that data\./);
   assert.equal(raw.calls[0]?.registration.env.ROCKY_MCP_EXPOSURE, "raw");
 });
 
@@ -1056,7 +1055,7 @@ test("usage remains two and ephemeral installs stop before adapters", async () =
   const adapter = new FakeAdapter("codex", {});
   const usage = await captureStderr(() => setup(["--mcp-exposure", "RAW"], dependencies([adapter])));
   assert.equal(usage.code, 2);
-  assert.match(usage.stderr, /run rocky --help --all, question/);
+  assert.match(usage.stderr, /^rocky: --mcp-exposure must be sanitized or raw\. Run rocky --help --all to list every option\.\n$/);
   assert.doesNotMatch(usage.stderr, /rocky setup --help/);
   assert.deepEqual(adapter.calls, []);
 

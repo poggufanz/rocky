@@ -57,7 +57,7 @@ import {
   type VoiceSkillOperationResult,
   type VoiceSkillTarget,
 } from "../setup/voice-skill.js";
-import { detail, say } from "../ui/rocky.js";
+import { detail, prompt, say } from "../ui/rocky.js";
 import { safeTerminalBlock, safeTerminalLine } from "../ui/sanitize.js";
 
 export interface ConfirmationPort {
@@ -90,10 +90,11 @@ export interface VoiceSkillServices {
 export function createConfirmationPort(
   input: PromptInput = process.stdin,
 ): ConfirmationPort {
-  const prompt = createPromptPort(input, process.stderr);
+  const port = createPromptPort(input, process.stderr);
   return {
     async confirm(message) {
-      return prompt.confirm(`[Rocky] ${message}`);
+      // prompt() ends with a space and confirm() appends its own " [y/N] ".
+      return port.confirm(prompt(message).trimEnd());
     },
   };
 }
@@ -265,7 +266,7 @@ function skippedFromInspection(
     const result: SetupResult = {
       client,
       status: "failed",
-      detail: inspection.detail ?? "host registration cannot be read",
+      detail: inspection.detail ?? "Host registration cannot be read",
     };
     if (mode === "configure" && client === "codex") {
       result.manualRegistration = registration;
@@ -275,7 +276,7 @@ function skippedFromInspection(
   return { client, status: "requires-confirmation" };
 }
 
-function failedHostOperation(client: SetupClientId, detailMessage = "host operation failed"): SetupResult {
+function failedHostOperation(client: SetupClientId, detailMessage = "Host operation failed"): SetupResult {
   return { client, status: "failed", detail: detailMessage };
 }
 
@@ -325,7 +326,7 @@ async function consentResults(
     try {
       inspections.set(adapter, await adapter.inspect(registration));
     } catch {
-      inspectionFailures.set(adapter, failedHostOperation(adapter.id, "host inspection failed"));
+      inspectionFailures.set(adapter, failedHostOperation(adapter.id, "Host inspection failed"));
     }
   }
   const orderedResults = (): SetupResult[] => adapters.map((adapter) => {
@@ -333,7 +334,7 @@ async function consentResults(
     if (failure !== undefined) return failure;
     const inspection = inspections.get(adapter);
     return inspection === undefined
-      ? failedHostOperation(adapter.id, "host inspection failed")
+      ? failedHostOperation(adapter.id, "Host inspection failed")
       : skippedFromInspection(adapter.id, inspection, mode, registration);
   });
   // Consent must cover every mutation setup() is actually about to attempt,
@@ -346,14 +347,14 @@ async function consentResults(
     && inspection.state !== "unreadable")
     || (includeVoiceSkill && voiceSkillHostDetected);
   if (!requiresConsent) return { results: orderedResults(), inspectionFailures, declined: false };
-  const prompt = mode === "configure"
+  const question = mode === "configure"
     ? includeVoiceSkill
-      ? "configure MCP hosts and managed voice skill now, question"
-      : "configure MCP hosts now, question"
+      ? "Configure MCP hosts and the managed voice skill now?"
+      : "Configure MCP hosts now?"
     : includeVoiceSkill
-      ? "remove Rocky from MCP hosts and remove managed voice skill now, question"
-      : "remove Rocky from MCP hosts now, question";
-  const allowed = await confirmation.confirm(prompt);
+      ? "Remove rocky from MCP hosts and the managed voice skill now?"
+      : "Remove rocky from MCP hosts now?";
+  const allowed = await confirmation.confirm(question);
   if (allowed) return { inspectionFailures, declined: false };
   const instruction = mode === "configure" ? "rocky setup --yes" : "rocky setup --remove --yes";
   const results = orderedResults();
@@ -395,7 +396,7 @@ async function invokeAdapters(
         continue;
       }
       if (inspected.healthRegistration === undefined) {
-        results.push({ client: inspected.client, status: "failed", detail: "owned health registration is unavailable" });
+        results.push({ client: inspected.client, status: "failed", detail: "Owned health registration is unavailable" });
         continue;
       }
       const health = await checkMcpRegistration(inspected.healthRegistration, runner);
@@ -429,7 +430,7 @@ function reportStoreUsage(root: string, allowed: boolean, home: string | undefin
   const held = usage.eventsBytes + usage.objectsBytes;
   detail(`disk ${mib(held)} of ${mib(LISTENING_DISK_BUDGET_BYTES_PER_REPO)} budget`);
   detail(`events ${mib(usage.eventsBytes)}, snapshots ${mib(usage.objectsBytes)} in ${usage.objects} file${usage.objects === 1 ? "" : "s"}`);
-  if (!allowed && held > 0) detail(`history still held. delete it: rocky setup --repo ${root} --purge-capture`);
+  if (!allowed && held > 0) detail(`History is still held. Delete it with: rocky setup --repo ${root} --purge-capture`);
 }
 
 async function runPurgeCapture(
@@ -440,14 +441,14 @@ async function runPurgeCapture(
   home: string | undefined,
 ): Promise<number> {
   const held = listeningStoreUsage(probe.root, home);
-  say(`purge deletes listening history for this repo, ${mib(held.eventsBytes + held.objectsBytes)}. no undo. bad bad.`);
-  if (!yes && !(await confirmation.confirm("purge listening history for this repo now, question"))) {
-    say("consent withheld. setup stops. no change.");
+  say(`Purge deletes the listening history for this repo (${mib(held.eventsBytes + held.objectsBytes)}). There is no undo.`);
+  if (!yes && !(await confirmation.confirm("Purge the listening history for this repo now?"))) {
+    say("Consent withheld. Setup stopped and nothing changed.");
     return 1;
   }
   const purged = purgeRepoCapture(repo, { yes: true, actor: "cli" }, home);
   if (!purged.ok) {
-    detail(purged.reason ?? "purge failed");
+    detail(purged.reason ?? "Purge failed.");
     return 1;
   }
   if (probe.allowed) detail(`capture revoked: ${purged.root ?? probe.root}`);
@@ -466,48 +467,48 @@ async function runRepoCaptureAction(
   // path that is gone, so a stale consent stays removable.
   const target = resolve(repo);
   if (!existsSync(target) && (action === "allow-capture" || action === "check-capture")) {
-    say("repo path does not exist. setup stops. bad.");
-    detail(`heard ${target}`);
+    say("Setup stopped: the repo path does not exist.");
+    detail(`Path: ${target}`);
     return 2;
   }
   const probe = getRepoConsentDetail(target, home);
   if (probe.root.length === 0) {
-    say("repo path does not resolve. setup stops. bad.");
+    say("Setup stopped: the repo path does not resolve.");
     return 2;
   }
-  detail(`canon root ${probe.root}`);
+  detail(`Canonical repo root: ${probe.root}`);
   if (action === "check-capture") {
     detail(probe.allowed ? "capture allowed" : "capture off");
     reportStoreUsage(probe.root, probe.allowed, home);
     return 0;
   }
   if (action === "purge-capture") return runPurgeCapture(target, probe, yes, confirmation, home);
-  say("snapshot text stays bounded and redacted. secret may remain. bad bad if host shares it.");
-  say("sanitized MCP metadata may list repo and file names. rocky sends nothing itself.");
+  say("Snapshot text is bounded and redacted, but a secret may remain in it. If a host shares that text, the secret is shared too.");
+  say("Sanitized MCP metadata may list repo and file names. Nothing is sent by rocky itself.");
   if (action === "allow-capture") {
     say(
-      `disk budget per repo ${mib(LISTENING_DISK_BUDGET_BYTES_PER_REPO)}: events ${mib(PROPOSAL_MAX_EVENT_STORE_BYTES_PER_REPO)}, `
-        + `snapshots ${mib(PROPOSAL_MAX_OBJECT_STORE_BYTES_PER_REPO)}. oldest goes first when full.`,
+      `Disk budget per repo is ${mib(LISTENING_DISK_BUDGET_BYTES_PER_REPO)}: events ${mib(PROPOSAL_MAX_EVENT_STORE_BYTES_PER_REPO)}, `
+        + `snapshots ${mib(PROPOSAL_MAX_OBJECT_STORE_BYTES_PER_REPO)}. When the budget is full, the oldest data is pruned first.`,
     );
   }
   if (!yes) {
     const allowed = await confirmation.confirm(
-      action === "allow-capture" ? "allow capture for this repo now, question" : "revoke capture for this repo now, question",
+      action === "allow-capture" ? "Allow capture for this repo now?" : "Revoke capture for this repo now?",
     );
     if (!allowed) {
-      say("consent withheld. setup stops. no change.");
+      say("Consent withheld. Setup stopped and nothing changed.");
       return 1;
     }
   }
   const result = setRepoCapture(target, action === "allow-capture", { yes: true, actor: "cli" }, home);
   if (!result.ok) {
-    detail(result.reason ?? "capture action failed");
+    detail(result.reason ?? "Capture action failed.");
     return result.reason === "requires-confirmation" ? 2 : 1;
   }
   detail(action === "allow-capture" ? `capture allowed: ${result.root ?? probe.root}` : `capture revoked: ${result.root ?? probe.root}`);
   if (action === "revoke-capture") {
-    detail("history stays. revoke stops new capture only");
-    detail(`delete it: rocky setup --repo ${result.root ?? probe.root} --purge-capture`);
+    detail("History is kept. Revoking stops new capture only.");
+    detail(`Delete it with: rocky setup --repo ${result.root ?? probe.root} --purge-capture`);
   }
   return 0;
 }
@@ -572,12 +573,12 @@ async function runAgentHooksAction(
       return result.status === "written" || result.status === "unchanged" ? 0 : 1;
     }
     const result = agentHooksStatus(target, options);
-    detail("setup status scope: host/MCP registration via rocky setup --check and agent-hook state/capability; spool and Ollama/model health are not checked.");
+    detail("Setup status scope: host/MCP registration via rocky setup --check and agent-hook state/capability; spool and Ollama/model health are not checked.");
     detail(`claude-code agent hooks: ${result.claudeCode}`);
     detail("codex agent hooks: manual");
     return result.claudeCode === "unreadable" ? 1 : 0;
   } catch {
-    say("Claude Code agent hook paths are not usable. setup stops. bad.");
+    say("Setup stopped: the Claude Code agent hook paths are not usable.");
     return 1;
   }
 }
@@ -628,7 +629,7 @@ async function invokeVoiceSkills(
       results.push({
         host: target.host,
         status: "failed",
-        detail: "voice skill host operation failed",
+        detail: "Voice skill host operation failed",
       });
     }
   }
@@ -658,13 +659,19 @@ function voiceSkillSucceeded(
   return results.every(({ status }) => status === "removed" || status === "skipped");
 }
 
+/** Parser messages are lowercase error text; the printed line is a sentence with a next step. */
+function usageMessage(message: string): string {
+  const sentence = message.charAt(0).toUpperCase() + message.slice(1);
+  return `${sentence.replace(/\.$/u, "")}. Run rocky --help --all to list every option.`;
+}
+
 export async function setup(argv: readonly string[], deps?: SetupDependencies): Promise<number> {
   let options;
   try {
     options = parseSetupArgs(argv);
   } catch (error) {
     if (error instanceof SetupUsageError) {
-      say(`${error.message}. run rocky --help --all, question`);
+      say(usageMessage(error.message));
       return 2;
     }
     throw error;
@@ -681,36 +688,36 @@ export async function setup(argv: readonly string[], deps?: SetupDependencies): 
     return runRepoCaptureAction(options.repo, options.repoAction, options.yes, dependencies.confirmation, dependencies.rockyHome);
   }
   if (options.rawTrace) {
-    say("raw trace grants are not wired yet. setup stops. bad.");
-    detail("P0 parses --raw-trace only; grant storage lands with the raw-trace milestone.");
+    say("Setup stopped: raw trace grants are not wired yet.");
+    detail("Setup only parses --raw-trace for now; grant storage lands with the raw-trace milestone.");
     return 1;
   }
   if (options.wizard === true) {
     if (!stdinTTY) {
-      say("harness picker needs interactive terminal. setup stops. bad.");
-      detail("example: rocky setup --harness codex --yes (MCP only)");
+      say("Setup stopped: the harness picker needs an interactive terminal.");
+      detail("Example: rocky setup --harness codex --yes (MCP only)");
       return 2;
     }
     const picked = await (dependencies.pickHarnesses ?? (() => runHarnessWizard(createPromptPort(), undefined, MCP_HARNESS_IDS)))();
     if (picked.cancelled) {
-      say("no harness chosen. nothing changed.");
+      say("No harness chosen. Nothing changed.");
       return 1;
     }
     options = selectionsToSetupOptions(options, picked.selections);
     if (options.listening) {
-      detail("listening per harness not wired into setup yet. use rocky setup --repo <path> --allow-capture.");
+      detail("Per-harness listening is not wired into setup yet. Use rocky setup --repo <path> --allow-capture.");
     }
     if (options.harnesses.length === 0) {
-      say("no MCP host chosen. setup stops. bad.");
+      say("Setup stopped: no MCP host chosen.");
       return 1;
     }
   }
   // Voice-skill-only invocations keep the legacy path: zero-eligible-host contract (exit 1 + voice-skill: unavailable) is pinned by documentation.test.ts; per-host voice scoping is P1+ work.
   if (!stdinTTY && options.harnesses.length === 0 && options.agentHooksAction === undefined && !options.voiceSkill) {
-    say("explicit harness targets are now required. setup stops. bad.");
-    detail("example: rocky setup --harness codex --yes (MCP only)");
-    detail("example: rocky setup --harness codex --listening --yes (Listening)");
-    detail("previous broad setup without --harness no longer configures hosts.");
+    say("Setup stopped: explicit harness targets are now required.");
+    detail("Example: rocky setup --harness codex --yes (MCP only)");
+    detail("Example: rocky setup --harness codex --listening --yes (Listening)");
+    detail("A broad setup without --harness no longer configures hosts.");
     return 2;
   }
 
@@ -729,20 +736,20 @@ export async function setup(argv: readonly string[], deps?: SetupDependencies): 
       fileExists: dependencies.platform.fileExists,
     });
   } catch {
-    say("MCP registration paths are not usable. setup stops. bad.");
+    say("Setup stopped: the MCP registration paths are not usable.");
     return 1;
   }
 
   const entry = registration.args[0];
   if (entry === undefined || isEphemeralInstall(entry)) {
-    say("ephemeral install cannot own durable host setup. install Rocky first.");
+    say("An ephemeral install cannot own durable host setup. Install rocky first.");
     return 1;
   }
 
   if (options.mode === "configure") {
-    say("configured MCP host may forward selected projected memory.");
+    say("A configured MCP host may forward selected projected memory.");
     if (options.exposure === "raw") {
-      say("raw exposure includes working directories and stored stderr excerpts. bad bad if host shares them.");
+      say("Raw exposure includes working directories and stored stderr excerpts. A host that shares them exposes that data.");
     }
   }
 
@@ -803,7 +810,7 @@ export async function setup(argv: readonly string[], deps?: SetupDependencies): 
     inspectionFailures,
   );
 
-  say("host setup results follow.");
+  say("Host setup results follow.");
   for (const result of results) printResult(options.mode, result, registration);
 
   let voiceResults: VoiceSkillOperationResult[] = [];
@@ -833,7 +840,7 @@ export async function setup(argv: readonly string[], deps?: SetupDependencies): 
     && dependencies.platform.shell !== undefined
     && basename(dependencies.platform.shell) === "bash"
     && !dependencies.platform.hasBashHook()) {
-    detail("next step: rocky hook install");
+    detail("Next step: rocky hook install");
   }
 
   const setupExit = exitCode(options.mode, results);

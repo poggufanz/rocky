@@ -124,8 +124,7 @@ test("allow-capture states the per-repo disk budget before consent", async () =>
   const root = gitRepo();
   const out = await captureStderr(() => setup(["--repo", root, "--allow-capture", "--yes"], deps(home, true)));
   assert.equal(out.code, 0);
-  assert.match(out.stderr, /disk budget per repo 160 MiB/);
-  assert.match(out.stderr, /events 32 MiB, snapshots 128 MiB/);
+  assert.match(out.stderr, /Disk budget per repo is 160 MiB: events 32 MiB, snapshots 128 MiB\. When the budget is full, the oldest data is pruned first\./);
   assert.equal(isRepoCaptureAllowed(root, home), true);
 });
 
@@ -148,7 +147,7 @@ test("revoke keeps history and names the purge command", async () => {
   storeListeningObject(root, Buffer.from("alpha"), home);
   const out = await captureStderr(() => setup(["--repo", root, "--revoke-capture", "--yes"], deps(home, true)));
   assert.equal(out.code, 0);
-  assert.match(out.stderr, /--purge-capture/);
+  assert.match(out.stderr, /Delete it with: rocky setup --repo .+ --purge-capture/);
   assert.equal(existsSync(repoDir(root, home)), true);
 });
 
@@ -158,7 +157,7 @@ test("purge-capture revokes consent and deletes history", async () => {
   storeListeningObject(root, Buffer.from("alpha"), home);
   const out = await captureStderr(() => setup(["--repo", root, "--purge-capture", "--yes"], deps(home, true)));
   assert.equal(out.code, 0);
-  assert.match(out.stderr, /no undo/);
+  assert.match(out.stderr, /There is no undo./);
   assert.equal(isRepoCaptureAllowed(root, home), false);
   assert.equal(existsSync(repoDir(root, home)), false);
 });

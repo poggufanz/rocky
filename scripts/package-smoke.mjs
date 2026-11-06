@@ -809,7 +809,7 @@ async function main() {
   );
   assertStatus(agentSetup, 0, "installed agent-hook setup with explicit consent");
   assert.equal(agentSetup.stdout, "", "agent-hook setup keeps stdout clean");
-  assert.match(agentSetup.stderr, /install ears for claude code, question/);
+  assert.match(agentSetup.stderr, /Install agent hooks for Claude Code now\?/);
   assert.match(agentSetup.stderr, /claude-code agent hooks: written/);
   assert.match(agentSetup.stderr, /notify = \[/);
   assert.match(agentSetup.stderr, /\/\/hooks|\/hooks/);

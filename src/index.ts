@@ -3,8 +3,8 @@
  * rocky — a local CLI that remembers failed commands and what fixed them.
  *
  * Public surface:
- *   rocky run "<command>"     run a command; Rocky remembers failures & fixes
- *   rocky recall [--ai] <query> search Rocky's memory of past errors
+ *   rocky run "<command>"     run a command; rocky remembers its failures and what followed
+ *   rocky recall [--ai] <query> search the memory of past errors
  *   rocky | rocky dash        open the local GUI on 127.0.0.1
  *   rocky hook|mcp|model|setup distribution bridge commands
  *   rocky watch|check|what|how|why|digest|quiz|export v0.3–v0.5 surfaces
@@ -27,130 +27,143 @@ import { detail, flushHookSpeech, say } from "./ui/rocky.js";
  * machine. `HELP` below is the full reference, behind `rocky --help --all`.
  * documentation.test.ts holds the line and column budget of this text.
  */
-const HELP_SHORT = `rocky — he remembers, so you don't have to.
+const HELP_SHORT = `rocky — a local CLI that remembers failed commands and what fixed them.
 version: ${PACKAGE_NAME}@${PACKAGE_VERSION}
 usage: rocky <verb> [args]
   core    run | watch | recall | stats | dash
   review  check | brief | what | how | why | teach
   memory  digest | quiz | export | concepts | sessions | invariants |
           journal | repl
-  setup   setup | hook install|uninstall|status | mcp | model
-no telemetry. check asks registry.npmjs.org, package names only, with consent.
-GUI asks models.dev for model list. chat code questions go to your BYOK model.
+  setup   hook install|uninstall|status | setup | mcp | model
+There is no telemetry. A registry lookup (rocky check) sends package names
+only, to registry.npmjs.org, and only with your consent. The GUI fetches its
+model list from models.dev. GUI chat code questions go to your BYOK model.
 every flag, every endpoint: rocky --help --all`;
 
 const HELP = `
-rocky — he remembers, so you don't have to.
+rocky — a local CLI that remembers failed commands and what fixed them.
 
 install:
   npm install -g ${PACKAGE_NAME}
   version: ${PACKAGE_NAME}@${PACKAGE_VERSION}
 
 usage:
-  rocky run "<command>"     run command through Rocky. failures are remembered;
-                            when the same error returns, Rocky says what worked
-                            after it last time. he does not claim what changed.
-                            on Windows, cmd.exe runs the command.
+  rocky run "<command>"     run a command through rocky. Failures are remembered;
+                            when the same error returns, rocky shows what worked
+                            after it last time. It does not claim what changed.
+                            On Windows, cmd.exe runs the command.
   rocky watch "<command>" [--quiet]
-                            run a long command; Rocky waits, remembers failures
-                            the same way run does, saves the stderr tail on
-                            failure, and knocks (desktop notification, or a
-                            bell) when it finishes. --quiet: plain facts on
-                            stderr only, no persona lines, no notification.
+                            run a long command and wait for it. Failures are
+                            remembered the same way as with run, the stderr tail
+                            is saved on failure, and a desktop notification (or a
+                            terminal bell) signals that it finished. --quiet
+                            prints plain facts on stderr only and sends no
+                            notification.
   rocky brief [--since <ref|24h>] [--quiet] [--ai] [--decompose]
-                            hear what changed since last brief: commits by
-                            area, remembered failures and fixes, touched
-                            invariant guards, questions reviewer may ask.
-                            --ai polishes wording via loopback Ollama only.
-                            --decompose appends behavior, fields, verify checklist.
+                            summarize what changed since the last brief: commits
+                            by area, remembered failures and fixes, touched
+                            invariant guards, and questions a reviewer may ask.
+                            --ai polishes the wording via loopback Ollama only.
+                            --decompose appends a behavior, fields, and verify
+                            checklist.
   rocky recall [--] <query...>
-                            ask Rocky's memory. matches words from error or command.
+                            search remembered failures. Matches words from the
+                            error or the command.
   rocky recall --ai [--] <query...>
-                            --ai asks configured local Ollama after deterministic recall.
+                            --ai asks the configured local Ollama after the
+                            deterministic recall.
   rocky what [--ai] [--] <query...>
-                            look up what remembered intent became.
+                            look up what a remembered intent became.
   rocky how [--diff] [--] <query...>
-                            remember how intent became code.
+                            show how a remembered intent became code.
   rocky why [--diff] [--] <file>
-                            hear why remembered change touched file.
+                            show why a remembered change touched the file.
   rocky why --add "<text>" [--files a.ts,b.ts]
-                            remember your own reason. --files names the files it
-                            explains. without --files, it attaches to newest
-                            failure or fix heard in this directory.
-  rocky teach <file>[:<line>] [--ladder]   why this code, from witness or evidence
-  rocky digest              hear this week's remembered intent pattern.
+                            record your own reason. --files names the files it
+                            explains. Without --files, it attaches to the newest
+                            failure or fix recorded in this directory.
+  rocky teach <file>[:<line>] [--ladder]
+                            explain why this code exists, from a witness record
+                            or local evidence.
+  rocky digest              show this week's pattern of remembered intent.
   rocky quiz                practice newest remembered intent or note; asks, then reveals,
                             deterministic newest-first, repeats unchanged candidates, and
                             never grades.
   rocky export [--kind failure|fix|note|triple] [--since ISO|Nd]
                             dump raw memory as JSONL on stdout. triple = intent.
-  rocky concepts            list concepts heard in memory, with counts and aliases.
-  rocky concept <id>        hear newest-first evidence for one concept.
+  rocky concepts            list the concepts in memory, with counts and aliases.
+  rocky concept <id>        show the newest-first evidence for one concept.
   rocky concept alias [--retract] "<phrase>" <id>
-                            teach or retract one phrase -> concept alias.
-  rocky model status         report local-AI configuration without loading a model.
+                            add or retract one phrase -> concept alias.
+  rocky model status        report the local-AI configuration without loading a model.
   rocky model use [--exposure sanitized|raw] <installed-model>
                             probe an installed Ollama model, then enable local AI.
-  rocky model off            disable Rocky local AI. Ollama stays untouched.
-  rocky | rocky dash        open local GUI in browser. one link, one route;
-                            dash just starts on the Dash segment. loopback only,
-                            fresh token each launch. --no-open prints URL instead,
-                            --port=<n> picks port. ctrl-c stops rocky.
-  rocky stats [--cycles]      what Rocky holds in memory. --cycles lists
-                             top failure fingerprints with counts, local only.
-  rocky journal "<note>"    write one line dogfood note. local file only.
+  rocky model off           disable local AI in rocky. Ollama stays untouched.
+  rocky | rocky dash        open the local GUI in a browser. One link, one route;
+                            dash just starts on the Dash segment. Loopback only,
+                            with a fresh token each launch. --no-open prints the
+                            URL instead, --port=<n> picks the port, and ctrl-c
+                            stops the server.
+  rocky stats [--cycles]    show what rocky holds in memory. --cycles lists the
+                            top failure fingerprints with counts, local only.
+  rocky journal "<note>"    write one dogfood note as a single line. Local file only.
   rocky invariants          list remembered invariant notes from .rocky/invariants.md
-                            and hear globs that guard nothing.
+                            and report globs that guard nothing.
   rocky sessions [--limit <n>]
                             list work sessions derived from memory: grouped by cwd,
-                            split on a 30-minute gap. derived at read time only,
+                            split on a 30-minute gap. Derived at read time only,
                             newest-first.
-  rocky sessions <index>    hear one session's evidence, chronologically.
+  rocky sessions <index>    show one session's evidence in chronological order.
   rocky repl [--ai]         stay in one loop over recall/what/why/how/concepts/
                             sessions instead of paying startup per call.
-                            --ai passes through to recall and what. type help
-                            inside for command list, quit or exit to leave.
-  rocky mcp                 serve read-only memory tools over stdio.
+                            --ai passes through to recall and what. Type help
+                            inside for the command list, quit or exit to leave.
+  rocky mcp                 serve the read-only memory tools over stdio.
   rocky setup               configure detected MCP hosts with sanitized exposure.
-  rocky setup --check       verify owned host registrations and Rocky MCP tools.
-  rocky setup --remove      remove owned Rocky registrations from detected hosts.
+  rocky setup --check       verify owned host registrations and the rocky MCP tools.
+  rocky setup --remove      remove owned rocky registrations from detected hosts.
   rocky setup --replace     replace conflicting registrations after confirmation.
-  rocky setup --harness     open checkbox picker (Up/Down, Space, Enter) for hosts.
+  rocky setup --harness     open a checkbox picker (Up/Down, Space, Enter) for hosts.
   rocky setup --harness <id> [--harness <id>] [--yes]
-                            configure only named hosts: claude-code, codex, opencode,
-                            gemini-cli, copilot-cli have MCP adapters.
+                            configure only the named hosts: claude-code, codex,
+                            opencode, gemini-cli, and copilot-cli have MCP adapters.
   rocky setup --mcp-exposure sanitized|raw
-                            choose projected-memory exposure during configure.
-  rocky setup --voice-skill configure hosts and install managed voice skill explicitly.
+                            choose the projected-memory exposure during configure.
+  rocky setup --voice-skill configure hosts and install the managed voice skill explicitly.
   rocky setup --agent-hooks
-                            install Claude Code hooks after explicit consent; print Codex TOML.
-                            installs the PreToolUse rationale gate too, unless you pass
-                            --no-rationale-gate. Codex has no deny hook; notify lane only.
+                            install Claude Code hooks after explicit consent and
+                            print the Codex TOML. This installs the PreToolUse
+                            rationale gate too, unless you pass --no-rationale-gate.
+                            Codex has no deny hook; it uses the notify lane only.
   rocky setup --uninstall-agent-hooks
-                            remove Rocky Claude Code hooks; Codex config stays untouched.
-  rocky setup --status       report host/MCP registration via rocky setup --check and
+                            remove rocky's Claude Code hooks; Codex config stays untouched.
+  rocky setup --status      report host/MCP registration via rocky setup --check and
                             agent-hook state/capability; spool and Ollama/model health
                             are not checked.
   rocky setup --repo <path> --allow-capture|--revoke-capture|--check-capture|--purge-capture
-                            listening consent for one git repo. disk budget 160 MiB per
-                            repo, oldest pruned first. check shows disk held. purge
-                            revokes and deletes history, no undo.
+                            listening consent for one git repo. The disk budget is
+                            160 MiB per repo, with the oldest data pruned first.
+                            check shows the disk held. purge revokes capture and
+                            deletes history, with no undo.
   rocky check [--pre-push|--install-hook|--offline|--quiet]
-                            hull check before push.
+                            run the hull check before a push.
   rocky check --prompt "<text>" [--stdin] [--quiet]
-                            score prompt clarity locally, no model, always exits 0.
+                            score prompt clarity locally, with no model. Always
+                            exits 0.
   rocky check --decompose [--quiet]
-                            split staged change into behavior, fields, verify.
-                            local only, always exits 0.
-  rocky hook install        put Rocky's ears in your bash and powershell.
-                            every command heard, failures remembered. bash
-                            questions dangerous commands first.
-  rocky hook uninstall      remove the ears. memory stays.
-  rocky hook status         are the ears in, question
+                            split the staged change into behavior, fields, and
+                            verify. Local only; always exits 0.
+  rocky hook install        install the rocky shell hook for bash and PowerShell.
+                            Every command's result is checked and failures are
+                            remembered. The bash hook asks before dangerous
+                            commands.
+  rocky hook uninstall      remove the shell hook. Memory stays.
+  rocky hook status         report whether the shell hook is installed.
   rocky hook agent-event claude-code|codex
                             private fail-open agent hook endpoint; stdout is always {}.
   rocky hook agent-event generic --rationale "<text>" [--files a.ts,b.ts]
-                            any agent says why here, one line. no vendor log needed.
+                            any agent can record why here, in one line. No vendor
+                            log needed.
   rocky hook listen-event <harnessId> --surface <cli|ide|local>
                             one-shot native event ingress; static argv, stdin
                             JSON only, fail-open, stdout stays empty.
@@ -158,13 +171,14 @@ usage:
                             PreToolUse enforcement endpoint; reads one hook payload from
                             stdin, prints an allow/deny decision, always exits 0.
 
-memory lives in ~/.rocky/memory.jsonl. no telemetry. outside calls: rocky check
-asking registry.npmjs.org whether package exists — package name only, you say yes
-first, offline never blocks; GUI model picker asking models.dev for model list.
-GUI Main chat code questions send question, carved excerpts, memory evidence to
-model you configure — only when you set one; memory-only question sends nothing.
-configured hosts control what they forward; optional AI uses loopback Ollama only.
-ROCKY_VERBOSE=1 shows internal counters and record ids. default output hides them.
+Memory lives in ~/.rocky/memory.jsonl. There is no telemetry. Outside calls:
+rocky check asks registry.npmjs.org whether a package exists (package name only,
+after you say yes first; offline never blocks), and the GUI model picker asks
+models.dev for the model list. GUI Main chat code questions send the question,
+carved excerpts, and memory evidence to the model you configure, only when you
+set one; a memory-only question sends nothing. Configured hosts control what they
+forward; optional AI uses loopback Ollama only.
+ROCKY_VERBOSE=1 shows internal counters and record ids; default output hides them.
 `;
 
 type HelpView = "short" | "full";
@@ -551,7 +565,7 @@ async function main(): Promise<number> {
       case undefined:
         return printHelp(parseHelpArgs(rest));
       default:
-        say(`"${command}" is not command I know. run --help, question`);
+        say(`Unknown command "${command}". Run rocky --help to list commands.`);
         return 2;
     }
   } catch (error) {
@@ -564,7 +578,7 @@ async function main(): Promise<number> {
 main().then(
   (code) => { process.exitCode = code; },
   (error) => {
-    say(`something break inside me. bad bad bad. ${String(error)}`);
+    say(`Unexpected internal error: ${String(error)}`);
     process.exitCode = 1;
   },
 );
