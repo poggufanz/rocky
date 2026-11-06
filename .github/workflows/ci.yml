@@ -47,3 +47,15 @@ jobs:
         run: npm run package:smoke
       - if: matrix.os == 'ubuntu-latest' && matrix.node == 'node'
         run: npm run release:check -- --truth-only --report "${{ runner.temp }}/rocky-release-check.md"
+
+  rust:
+    name: rust / windows
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
