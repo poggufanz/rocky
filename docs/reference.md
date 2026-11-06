@@ -469,7 +469,7 @@ The holes in the no-egress rule are named, and there are four: `rocky check`'s c
 
 `rocky brief` shipped in v0.6 and is no longer deferred. BYOK annotation and `attest` remain deferred. The memory circuit breaker ships as an advisory, not an enforcer: a failure-cycle gate note plus `rocky stats --cycles`, fail-open, never blocking. Codex and Gemini agent-log adapters are deferred too — Codex's local session format drifted to a SQLite hybrid, and Gemini persists no thoughts to read. The earlier `rocky explain` idea is superseded; teach mode uses `rocky teach` and `explain` records.
 
-The package version is v1.1.0; the Nervous System, rationale-capture, teach mode, local GUI, and MCP sections above describe the surfaces it ships.
+The package version is v2.0.0; the Nervous System, rationale-capture, teach mode, local GUI, and MCP sections above describe the surfaces it ships.
 
 ## Contributing
 

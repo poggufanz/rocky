@@ -2,9 +2,9 @@
 
 Notable changes per release. Dates are the release date.
 
-## Unreleased
+## 2.0.0 — 6 November 2026
 
-Rocky retires its mascot persona. CLI, hook, GUI, and MCP output is plain, neutral English, following [docs/output-principles.md](docs/output-principles.md). Evidence rules, hedges, coverage disclosures, `--quiet`, exit codes, and JSON shapes are unchanged.
+Major release: Rocky retires its mascot persona. CLI, hook, GUI, and MCP output is plain, neutral English, following [docs/output-principles.md](docs/output-principles.md). Evidence rules, hedges, coverage disclosures, `--quiet`, exit codes, and JSON shapes are unchanged.
 
 Output that changes shape (scripts that parse the old lines will break):
 

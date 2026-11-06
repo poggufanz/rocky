@@ -16,7 +16,8 @@ This is a one-person side project, not a funded product. Expect a first reply wi
 
 | Version | Supported |
 | --- | --- |
-| 1.1.0 | Yes |
+| 2.0.0 | Yes |
+| 1.1.0 | No |
 | 1.0.1 | No |
 | 1.0.0 | No |
 | 0.8.0 | No |
