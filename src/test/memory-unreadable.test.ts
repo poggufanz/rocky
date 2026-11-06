@@ -16,7 +16,7 @@ import { validateOutputLine } from "../ui/phrases.js";
 import { skipIfSymlinkUnavailable } from "./symlink-capability.js";
 import { setVerbose } from "./verbose-switch.js";
 
-const DISCLOSURE = "memory file does not open for me. I answer from nothing.";
+const READ_RACE_LINE = "memory coverage incomplete: The memory file changed or did not open cleanly during the read. Nothing was read this time.";
 
 async function captureStderr<T>(fn: () => Promise<T> | T): Promise<{ result: T; stderr: string }> {
   const original = process.stderr.write;
@@ -66,7 +66,7 @@ test("recall() fails closed for a non-regular memory path without raw Node error
   const { result, stderr } = await captureStderr(() => recall(["anything"]));
 
   assert.equal(result, 1);
-  assert.match(stderr, /memory coverage incomplete: file did not hold still or open right\. nothing heard this time\./u);
+  assert.ok(stderr.includes(READ_RACE_LINE), stderr);
   assert.doesNotMatch(stderr, /scanned|truncated|version 1/u);
   assert.doesNotMatch(stderr, /memory file does not open for me\. I answer from nothing\./);
   assert.doesNotMatch(stderr, /EISDIR/);
@@ -178,6 +178,6 @@ test("MCP tool path treats the same non-regular memory as empty", async () => {
   assert.doesNotMatch(JSON.stringify(result), /EISDIR/);
 });
 
-test("the disclosure line itself follows Rocky's voice rules", () => {
-  assert.deepEqual(validateOutputLine(DISCLOSURE), []);
+test("the disclosure line itself follows the output rules", () => {
+  assert.deepEqual(validateOutputLine(READ_RACE_LINE), []);
 });

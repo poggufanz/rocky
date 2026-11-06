@@ -15,6 +15,7 @@ import type { OllamaClient } from "../ai/ollama.js";
 import type { ConfigLoadResult } from "../core/config-read.js";
 import type { MemoryRecord, TripleRecord } from "../core/memory-read.js";
 import { resolveRockyPaths, type RockyPaths } from "../core/state-paths.js";
+import { validateOutputLine } from "../ui/phrases.js";
 
 function fakePaths(): RockyPaths {
   return resolveRockyPaths({ ROCKY_HOME: "/tmp/rocky-ambiguity-test" });
@@ -99,7 +100,7 @@ function fakeClientCounting(response: unknown, calls: { n: number }): OllamaClie
   };
 }
 
-test("ambiguous verdict with >=2 heard places queues spec-voiced question", async () => {
+test("ambiguous verdict with >=2 recorded places queues a plain question", async () => {
   const records = twoButtonTriples();
   const queued: string[] = [];
   const question = await checkAmbiguity("make the button bigger", {
@@ -109,9 +110,11 @@ test("ambiguous verdict with >=2 heard places queues spec-voiced question", asyn
     queueLabel: (line: string) => { queued.push(line); },
     paths: fakePaths(),
   });
-  assert.equal(question, 'you say "button". I hear 2 button before. which one, question');
+  assert.equal(question, 'You said "button". It matches 2 places in memory. Which one?');
   assert.deepEqual(queued, [question]);
-  assert.ok(!question.includes("?"));
+  // The only question mark is the terminal one.
+  assert.equal(question.indexOf("?"), question.length - 1);
+  assert.deepEqual(validateOutputLine(question), []);
 });
 
 test("not ambiguous, single place, client failure, disabled config: all silent", async () => {
@@ -209,16 +212,16 @@ test("ambiguity prompt forwards model/schema/ten-second signal and excludes forb
     queueLabel: () => {},
     paths: fakePaths(),
   });
-  assert.equal(question, 'you say "button". I hear 2 button before. which one, question');
+  assert.equal(question, 'You said "button". It matches 2 places in memory. Which one?');
   assert.equal(capture.model, "ambiguity-test");
   assert.equal(capture.schema, AMBIGUITY_SCHEMA);
   assert.ok(capture.signal);
   assert.equal(capture.signal?.aborted, false);
   assert.match(capture.prompt ?? "", /make the button bigger/u);
-  assert.match(capture.prompt ?? "", /known things I hear before:/u);
-  assert.match(capture.prompt ?? "", /mark ambiguous ONLY when one short referent/u);
-  assert.match(capture.prompt ?? "", /never guess what user means/u);
-  assert.match(capture.prompt ?? "", /referent = the ambiguous words only/u);
+  assert.match(capture.prompt ?? "", /known things recorded in memory:/u);
+  assert.match(capture.prompt ?? "", /Mark ambiguous ONLY when one short referent/u);
+  assert.match(capture.prompt ?? "", /Never guess what the user means/u);
+  assert.match(capture.prompt ?? "", /The referent is the ambiguous words only/u);
   assert.match(capture.prompt ?? "", /a\/button\.tsx/u);
   assert.match(capture.prompt ?? "", /b\/button\.tsx/u);
   assert.doesNotMatch(capture.prompt ?? "", /hidden-from-prompt|must-never-be-prompt-evidence|spacing|rationale/u);
@@ -247,7 +250,21 @@ test("candidate selection is token-intersected, deduplicated, and capped at twen
   assert.doesNotMatch(prompt, /src\/button-20\.tsx/u);
 });
 
-test("hostile referent is bounded to one safe Rocky line and queue is called once", async () => {
+test("a referent carrying its own question mark is rejected, so the terminal one stays the only one", async () => {
+  const queued: string[] = [];
+  const question = await checkAmbiguity("button", {
+    load: () => twoButtonTriples(),
+    config: enabledConfig(),
+    client: fakeClient({ ambiguous: true, referent: "but?ton" }),
+    queueLabel: (line: string) => queued.push(line),
+    paths: fakePaths(),
+  });
+  assert.equal(question, undefined);
+  assert.deepEqual(queued, []);
+  assert.equal(parseAmbiguityOutput({ ambiguous: true, referent: "but?ton" }), undefined);
+});
+
+test("hostile referent is bounded to one safe line and queue is called once", async () => {
   const queued: string[] = [];
   const hostile = "  button\u001b[31m\n?\u0000";
   const question = await checkAmbiguity("button", {

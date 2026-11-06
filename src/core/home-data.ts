@@ -8,10 +8,11 @@ export interface HomeData {
   /** The plain-words line when memory was read incomplete, `coverage full` otherwise (the page hides that one). */
   coverageLine: string;
   byKind: Array<{ kind: string; count: number }>;
+  /** Counts for the last 24 hours. The first key is a stable name the page reads; do not rename it. */
   day: { heard: number; failures: number; fixes: number; whys: number };
   topFiles: Array<{ name: string; count: number }>;
   recent: Array<{ label: string; agoText: string; kind: string; machine: boolean }>;
-  /** Tried versus untried heard files; lists name at most COVERAGE_MAX_LISTED each, totals are lower bounds under caps. No new route. */
+  /** Tried versus untried recorded files; lists name at most COVERAGE_MAX_LISTED each, totals are lower bounds under caps. No new route. */
   coverage: { tried: string[]; untried: string[]; triedTotal: number; untriedTotal: number; truncated: boolean };
 }
 
@@ -95,7 +96,7 @@ export function deriveHome(
     return typeof ts === "number" && now - ts < dayWindowMs && now - ts >= 0;
   });
 
-  const heard = dayRecords.length;
+  const recordCount = dayRecords.length;
   const failures = dayRecords.filter((r) => r.kind === "failure").length;
   const fixes = dayRecords.filter((r) => r.kind === "fix" || r.kind === "association").length;
   const whys = dayRecords.filter((r) => {
@@ -103,7 +104,7 @@ export function deriveHome(
     if (typeof (r as any).rationale === "object" && (r as any).rationale !== null && (r as any).rationale.text) return true;
     return false;
   }).length;
-  const day = { heard, failures, fixes, whys };
+  const day = { heard: recordCount, failures, fixes, whys };
 
   // Top files from mechanism.files
   const fileCounts = new Map<string, number>();
@@ -131,7 +132,7 @@ export function deriveHome(
   const recent = sorted.slice(0, 14).map((r) => adaptHit(r, now));
 
   // Feature coverage from the same bounded read: touched files split into
-  // tried (rationale evidence or diff hunks heard) versus untried. The
+  // tried (rationale evidence or diff hunks recorded) versus untried. The
   // truncated flag and totals travel with the lists so the GUI never
   // silently caps — same disclosure the brief prints. Pure and fail-open —
   // a hostile record set yields an honest empty split, never a blocked dash

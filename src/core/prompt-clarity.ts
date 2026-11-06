@@ -194,6 +194,8 @@ export interface ScorePromptOptions {
 }
 
 const NEUTRAL_SCORE = 50;
+const SUGGEST_IMPERATIVE_START = "Start with an imperative verb such as fix, add, update, or test.";
+const SUGGEST_FALLBACK = "Name the file and the change.";
 
 function emptyMetrics(): ClarityMetrics {
   return {
@@ -214,7 +216,7 @@ export function scorePrompt(text: string, options: ScorePromptOptions = {}): Cla
     return {
       score: NEUTRAL_SCORE,
       band: "needs-detail",
-      suggestions: ["start with an imperative verb such as fix, add, update, or test"],
+      suggestions: [SUGGEST_IMPERATIVE_START],
       metrics: emptyMetrics(),
     };
   }
@@ -249,11 +251,11 @@ export function scorePrompt(text: string, options: ScorePromptOptions = {}): Cla
   const band: ClarityBand = score >= 70 ? "clear" : score >= 40 ? "needs-detail" : "vague";
 
   const suggestions: string[] = [];
-  if (!hasVerb) suggestions.push("start with an imperative verb such as fix, add, update, or test");
-  if (vagueCount > 2) suggestions.push("name the file and behavior instead of it, this, that");
-  if (steps === 0 && words > 25) suggestions.push("split into numbered steps, one action each");
+  if (!hasVerb) suggestions.push(SUGGEST_IMPERATIVE_START);
+  if (vagueCount > 2) suggestions.push("Name the file and behavior instead of it, this, that.");
+  if (steps === 0 && words > 25) suggestions.push("Split into numbered steps, one action each.");
   if (options.repeatedFailure === true && diversity < 40) {
-    suggestions.push("add new info from the failure, not a paraphrase");
+    suggestions.push("Add new information from the failure, not a paraphrase.");
   }
 
   return {
@@ -277,16 +279,16 @@ export function renderClarityCard(result: ClarityResult): string[] {
 
 /**
  * One-line gate/CLI nudge, or undefined when there is nothing to say
- * (clear prompts and empty input stay silent). Never throws, never
- * returns a question mark — questions end with `, question`.
+ * (clear prompts and empty input stay silent). Never throws.
  */
 export function clarityNudgeLine(text: unknown, options: ScorePromptOptions = {}): string | undefined {
   try {
     if (typeof text !== "string" || text.trim().length === 0) return undefined;
     const result = scorePrompt(text, options);
     if (result.band === "clear") return undefined;
-    const first = result.suggestions[0] ?? "say the file and the change";
-    return `prompt ${result.band} ${result.score}/100. ${first}, question`;
+    const first = result.suggestions[0] ?? SUGGEST_FALLBACK;
+    const verdict = result.band === "vague" ? "Prompt is vague" : "Prompt needs detail";
+    return `${verdict} (${result.score}/100). ${first}`;
   } catch {
     return undefined;
   }

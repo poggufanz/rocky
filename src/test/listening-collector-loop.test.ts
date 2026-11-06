@@ -38,7 +38,7 @@ function cleanup(...dirs: string[]): void {
   for (const dir of dirs) rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
 }
 
-function heardFiles(repo: string, home?: string): string[] {
+function capturedFiles(repo: string, home?: string): string[] {
   return readListeningTail(repo, { limit: 200, newest: true }, home).events
     .map((event) => event.refs.fileRel ?? "")
     .filter((rel) => rel.length > 0);
@@ -72,10 +72,10 @@ test("collector loop captures a consented repo with no manual step and skips git
   assert.equal(setRepoCapture(repo, true, { yes: true, actor: "cli" }, home).ok, true);
   // a long tick proves the first capture comes from the start-up tick alone
   loop = startCollectorLoop({ proc: "gui", home, tickMs: 60_000 });
-  assert.ok(await until(() => heardFiles(repo, home).includes("kept.txt")), "consented file must be captured automatically");
-  const heard = heardFiles(repo, home);
-  assert.ok(heard.includes(".gitignore"), "untracked, not-ignored files count too");
-  assert.ok(!heard.some((rel) => rel.startsWith("ignored/")), "gitignored files must never snapshot");
+  assert.ok(await until(() => capturedFiles(repo, home).includes("kept.txt")), "consented file must be captured automatically");
+  const captured = capturedFiles(repo, home);
+  assert.ok(captured.includes(".gitignore"), "untracked, not-ignored files count too");
+  assert.ok(!captured.some((rel) => rel.startsWith("ignored/")), "gitignored files must never snapshot");
   await loop.stop();
   assert.equal(leaseExpires(repo, home), 0, "stop releases the lease for the next owner");
 });
@@ -90,12 +90,12 @@ test("collector loop releases a revoked repo and keeps its history", { skip: noG
   });
   setRepoCapture(repo, true, { yes: true, actor: "cli" }, home);
   loop = startCollectorLoop({ proc: "gui", home, tickMs: 60_000 });
-  assert.ok(await until(() => heardFiles(repo, home).includes("kept.txt")));
+  assert.ok(await until(() => capturedFiles(repo, home).includes("kept.txt")));
   assert.ok((leaseExpires(repo, home) ?? 0) > Date.now(), "owner holds a live lease while listening");
   assert.equal(setRepoCapture(repo, false, { yes: true, actor: "cli" }, home).ok, true);
   loop.kick();
   assert.ok(await until(() => leaseExpires(repo, home) === 0), "revoke releases the lease on the next tick");
-  assert.ok(heardFiles(repo, home).includes("kept.txt"), "revoke keeps history");
+  assert.ok(capturedFiles(repo, home).includes("kept.txt"), "revoke keeps history");
 });
 
 test("GUI responds while a consented collector waits for Git, then captures its files", { skip: noGit }, async (t) => {
@@ -151,7 +151,7 @@ wait();
   assert.equal(result[1].body.allowed, true);
   assert.ok(elapsedMs < 5000, "snapshot collection must not hold up HTML or Listening API responses");
   writeFileSync(released, "");
-  assert.ok(await until(() => heardFiles(repo).includes("kept.txt")), "keeping GUI responsive must not disable capture");
+  assert.ok(await until(() => capturedFiles(repo).includes("kept.txt")), "keeping GUI responsive must not disable capture");
 });
 
 test("gui picker lists consented repos as id and label and resolves picks without granting", { skip: noGit }, async (t) => {

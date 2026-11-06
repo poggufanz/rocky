@@ -1,5 +1,5 @@
 /**
- * Filtering the heard-file list, and the cap on how much of a file is read.
+ * Filtering the recorded-file list, and the cap on how much of a file is read.
  *
  * Lifted out of the terminal surface when the GUI replaced it: neither of
  * these was ever rendering, and the query grammar (`!md` hides `.md`) is part

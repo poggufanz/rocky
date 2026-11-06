@@ -6,8 +6,8 @@ import type { TeachHit } from "../core/teach.js";
 import type { LadderResult } from "../core/teach-ladder.js";
 import { validateOutputLine } from "../ui/phrases.js";
 
-const WITNESS_HEADER = "rocky heard this. agent say why, rocky remember";
-const LADDER_HEADER = "rocky not hear this. assembled from evidence, not witnessed";
+const WITNESS_HEADER = "Witnessed: an agent stated why, and rocky recorded it.";
+const LADDER_HEADER = "Assembled from evidence, not witnessed.";
 
 function explainRecord(overrides: Partial<ExplainRecord> = {}): ExplainRecord {
   return {
@@ -165,7 +165,7 @@ test("ladder evidence appends stop reason", () => {
 });
 
 test("exhausted provenance adds a disclosure line in english", () => {
-  const disclosure = "no git history found for these lines. other evidence stays above.";
+  const disclosure = "No git history found for these lines. Other evidence stays above.";
   const card = renderLadderCard("a.ts", "x", {
     rungs: [{ source: "catalog", finding: "awaits a promise" }],
     stopReason: "evidence-exhausted",

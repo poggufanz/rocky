@@ -292,7 +292,7 @@ function descriptors(exposure: Exposure): readonly McpToolDefinition[] {
     },
     {
       name: "why_file", title: "Why file changed",
-      description: "Remembered triples that touched one file (items, plus possible ones whose path may be omitted) and the reasons a human or agent stated for it (rationales), newest first, with separate incomplete-coverage disclosure. A relative path resolves against the server's working directory. Example: {\"path\": \"src/app.css\"}. Reasons are hearsay Rocky heard, not verified facts.",
+      description: "Remembered triples that touched one file (items, plus possible ones whose path may be omitted) and the reasons a human or agent stated for it (rationales), newest first, with separate incomplete-coverage disclosure. A relative path resolves against the server's working directory. Example: {\"path\": \"src/app.css\"}. Reasons are quotes recorded from a human or agent, not verified facts.",
       inputSchema: schema({
         path: { type: "string", maxLength: MAX_FIELD_BYTES },
         limit: { type: "integer", minimum: 1, maximum: 10 },
@@ -301,7 +301,7 @@ function descriptors(exposure: Exposure): readonly McpToolDefinition[] {
     },
     {
       name: "teach_lookup", title: "Teach selection",
-      description: "Read-only teach card for a path and optional line or snippet: a remembered witness explanation when one matches, else an assembled evidence ladder. Example: {\"path\": \"src/app.css\", \"line\": 12}. Reasons are hearsay Rocky heard, not verified facts.",
+      description: "Read-only teach card for a path and optional line or snippet: a remembered witness explanation when one matches, else an assembled evidence ladder. Example: {\"path\": \"src/app.css\", \"line\": 12}. Reasons are quotes recorded from a human or agent, not verified facts.",
       inputSchema: schema({
         path: { type: "string", maxLength: MAX_FIELD_BYTES },
         line: { type: "integer", minimum: 1 },
@@ -1028,7 +1028,7 @@ function projectWhyTriple(
   const result: Record<string, unknown> = {
     ...base,
     confidence: complete ? "confirmed" : "incomplete",
-    reason: complete ? "captured file coverage complete" : "file coverage incomplete; Rocky does not know full change",
+    reason: complete ? "captured file coverage complete" : "file coverage incomplete; the full change was not recorded",
   };
   if (commit !== undefined) {
     result.commit = projectText(commit, exposure, "commit", truncation);

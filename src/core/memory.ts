@@ -1086,7 +1086,7 @@ export function recordWatchFailure(rawCmd: string, exitCode: number, stderr: str
  * past `MAX_MEMORY_LINE_BYTES` is skipped by every later read — so it would be
  * written, counted as remembered, and then silently lost forever. Measured: at
  * ~9 400 linked failures the single fix line passed 1 MB, `recordFix` still
- * said "I remember the fix. good good good.", and `stats` reported "0 have fix".
+ * reported the fix as remembered, while `stats` reported "0 have fix".
  * Keep the newest links, and shrink until the line actually fits.
  */
 export const MAX_FIX_LINKS = 200;

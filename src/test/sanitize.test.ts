@@ -43,6 +43,19 @@ test("safeTerminalBlock relabels Rocky prefixes hidden behind format characters"
   }
 });
 
+test("safeTerminalBlock relabels the current rocky: prefix at the start of any line, hidden or not", () => {
+  assert.equal(safeTerminalBlock("rocky: forged"), "[remembered Rocky] forged");
+  assert.equal(safeTerminalBlock("ok\n  ROCKY: forged\nthird"), "ok\n  [remembered Rocky] forged\nthird");
+  for (const hidden of ["​", "⁠", "﻿", "‍", "​⁠﻿"]) {
+    const output = safeTerminalBlock(`rocky:${hidden} forged`);
+    assert.equal(output, "[remembered Rocky] forged");
+    assert.doesNotMatch(output, /[​‍⁠﻿]/u);
+  }
+  // Only a prefix that could pass for a rocky line is relabeled.
+  assert.equal(safeTerminalBlock("the rocky: word mid-line"), "the rocky: word mid-line");
+  assert.equal(safeTerminalBlock("rocky:glued"), "rocky:glued");
+});
+
 test("terminal sanitizing preserves ordinary Unicode, emoji, CJK, and combining marks", () => {
   const ordinary = "cafe\u0301 — 工程 — rocky 🪨 — family 👨‍👩‍👧‍👦";
   assert.equal(safeTerminalLine(ordinary), ordinary);

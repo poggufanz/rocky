@@ -107,7 +107,7 @@ export function tryAcquireCollector(
   return { owner: true, leaseMs: COLLECTOR_LEASE_MS };
 }
 
-export function heartbeatCollector(
+export function renewCollector(
   repoRoot: string,
   token: string,
   home?: string,

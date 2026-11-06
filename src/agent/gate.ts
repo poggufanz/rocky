@@ -21,10 +21,10 @@ import { canonicalPath, loadMemoryChecked } from "../core/memory-read.js";
 import { clarityNudgeLine } from "../core/prompt-clarity.js";
 import {
   countCycleClusters,
+  cycleClusterLine,
   cycleNudgeLine,
   loadCycleState,
   observeFailureCycle,
-  renderCycleCard,
   saveCycleState,
 } from "../core/failure-cycle.js";
 import { fingerprint } from "../core/fingerprint.js";
@@ -157,7 +157,7 @@ function loadGateState(stateFile: string, now: number): Set<string> {
       if (isStateEntry(parsed)) seen.add(parsed.key);
     } catch {
       // Corrupt line: skip it, keep folding the rest. Fail-open per-line,
-      // not per-file — one bad line must not blind the whole session.
+      // not per-file — one bad line must not disable the whole session.
     }
   }
   return seen;
@@ -186,7 +186,7 @@ function createGateState(stateFile: string): GateState {
 
 /**
  * The one v0.7 check: the first time a session touches a file, deny once
- * and tell the agent how to record why, in Rocky voice. Marking happens on
+ * and tell the agent how to record why. Marking happens on
  * first sight (before the deny is returned), so the retry passes whether or
  * not the agent actually reported — enforcement here is social and
  * evidence-shaped, not a hard block, matching gateguard's deny-once model.
@@ -379,12 +379,9 @@ export const failureCycleCheck: GateCheck = {
       let suffix = line === undefined ? "" : ` ${line}`;
       const clusters = countCycleClusters(state);
       if (suffix.length > 0 && clusters >= 2) {
-        // Single-sourced from renderCycleCard so the card and this suffix
-        // cannot drift; the emitted string is unchanged.
-        const clusterLine = renderCycleCard(observation.count, clusters).find((entry) =>
-          entry.includes("count only, no cause named"),
-        );
-        if (clusterLine !== undefined) suffix += ` ${clusterLine}`;
+        // Single-sourced from cycleClusterLine so the card and this suffix
+        // cannot drift.
+        suffix += ` ${cycleClusterLine(clusters)}`;
       }
       rememberCycleSuffix(paths.home, input.sessionKey, suffix);
       return { deny: false };
@@ -394,12 +391,32 @@ export const failureCycleCheck: GateCheck = {
   },
 };
 
+/**
+ * Deny reason for a file edited without a stated why. The command is the last
+ * thing in the string and stays literal, so the agent can run it as written;
+ * the advisory suffixes are plain text placed before it.
+ */
+function rationaleDenyReason(input: GateInput, filePath: string): string {
+  return `Record why before editing ${filePath}, then retry the edit. Recorded reasons are kept in local memory.`
+    + `${claritySuffix(input)}${cycleSuffix(input)}`
+    + ` Run: rocky hook agent-event ${input.vendor} --rationale "<one line why>" --files ${filePath}`;
+}
+
+/** Deny reason for a file edited without an explain record; same layout as the rationale reason. */
+function explainDenyReason(input: GateInput, filePath: string): string {
+  return `Explain this code before editing ${filePath}: why it has this shape and what concern it serves. `
+    + `Then retry the edit. Recorded explanations are kept in local memory.${cycleSuffix(input)}`
+    + ` Run: rocky hook agent-event ${input.vendor} --explain-code "<why this code shape>" `
+    + `--explain-business "<what concern this serves>" --files ${filePath}`;
+}
+
 export const rationaleCheck: GateCheck = {
   id: "rationale",
   enabled(env: NodeJS.ProcessEnv): boolean {
     return env.ROCKY_RATIONALE_GATE !== "off";
   },
-  evaluate(input: GateInput, state: GateState): GateDecision {    const filePath = input.filePath;
+  evaluate(input: GateInput, state: GateState): GateDecision {
+    const filePath = input.filePath;
     if (filePath === undefined) return { deny: false };
     const identity = canonicalPath(filePath, { cwd: input.cwd });
     if (identity.length === 0) return { deny: false }; // no stable identity to gate on: fail open
@@ -413,17 +430,9 @@ export const rationaleCheck: GateCheck = {
       state.mark(key); // remember, so later touches skip the memory read
       return { deny: false };
     }
-    if (gateMode(process.env) === "strict") return {
-      deny: true,
-      reason: `state why first. run: rocky hook agent-event ${input.vendor} --rationale "<one line why>" `
-        + `--files ${filePath}. then retry. rocky remembers why, you keep why, question${claritySuffix(input)}${cycleSuffix(input)}`,
-    };
+    if (gateMode(process.env) === "strict") return { deny: true, reason: rationaleDenyReason(input, filePath) };
     if (!state.mark(key)) return { deny: false }; // could not persist the marker: never deny unrecorded state
-    return {
-      deny: true,
-      reason: `state why first. run: rocky hook agent-event ${input.vendor} --rationale "<one line why>" `
-        + `--files ${filePath}. then retry. rocky remembers why, you keep why, question${claritySuffix(input)}${cycleSuffix(input)}`,
-    };
+    return { deny: true, reason: rationaleDenyReason(input, filePath) };
   },
 };
 
@@ -454,17 +463,9 @@ export const explainCheck: GateCheck = {
       state.mark(key);
       return { deny: false };
     }
-    if (gateMode(process.env) === "strict") return {
-      deny: true,
-      reason: `state why first. run: rocky hook agent-event ${input.vendor} --explain-code "<why this code shape>" `
-        + `--explain-business "<what concern this serves>" --files ${filePath}. then retry. rocky remembers why, you keep why, question${cycleSuffix(input)}`,
-    };
+    if (gateMode(process.env) === "strict") return { deny: true, reason: explainDenyReason(input, filePath) };
     if (!state.mark(key)) return { deny: false };
-    return {
-      deny: true,
-      reason: `state why first. run: rocky hook agent-event ${input.vendor} --explain-code "<why this code shape>" `
-        + `--explain-business "<what concern this serves>" --files ${filePath}. then retry. rocky remembers why, you keep why, question${cycleSuffix(input)}`,
-    };
+    return { deny: true, reason: explainDenyReason(input, filePath) };
   },
 };
 

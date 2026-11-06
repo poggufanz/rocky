@@ -605,7 +605,7 @@ test("help advertises MCP as a stream-only command", () => {
 test("child completion waits for inherited stdout and stderr pipes before trailing-output audit", { timeout: PROCESS_HANG_GUARD_MS + 10_000 }, async () => {
   const grandchildScript = [
     "setTimeout(() => {",
-    "  process.stdout.write('trailing persona\\n');",
+    "  process.stdout.write('trailing text\\n');",
     "  process.stderr.write('trailing diagnostic\\n');",
     "}, 100);",
   ].join("\n");
@@ -632,6 +632,6 @@ test("child completion waits for inherited stdout and stderr pipes before traili
   assert.deepEqual(completed, { code: 0, signal: null });
   assert.equal(stdoutEnded, true, "completion preceded stdout EOF");
   assert.equal(stderrEnded, true, "completion preceded stderr EOF");
-  assert.match(stdout, /trailing persona\n$/);
+  assert.match(stdout, /trailing text\n$/);
   assert.match(stderr, /trailing diagnostic\n$/);
 });

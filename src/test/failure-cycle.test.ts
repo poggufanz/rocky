@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   countCycleClusters,
+  cycleClusterLine,
   cycleNudgeLine,
   CYCLE_NUDGE,
   FAILURE_CYCLE_COUNT,
@@ -23,6 +24,7 @@ import {
 import { fingerprint, similarity, tokens } from "../core/fingerprint.js";
 import { parseStatsArgs, stats } from "../commands/stats.js";
 import { resolveRockyPaths } from "../core/state-paths.js";
+import { validateOutputLine } from "../ui/phrases.js";
 
 const FP_A = "aaaaaaaaaaaaaaaa";
 const FP_B = "bbbbbbbbbbbbbbbb";
@@ -163,18 +165,25 @@ test("reuses fingerprint() tokens() similarity() from the core", () => {
   assert.deepEqual(rationaleTokens(R1), tokens(R1.slice(0, 8 * 1024)));
 });
 
-test("rendered card and nudge line never contain a question mark", () => {
+test("rendered card and nudge line are plain statements that pass the output rules", () => {
   const line = cycleNudgeLine(true);
   assert.ok(line !== undefined);
   assert.doesNotMatch(line, /\?/);
-  assert.match(line, /, question/);
-  assert.match(line, /rocky recall/);
-  assert.match(line, /rocky teach <file>/);
-  assert.match(line, /rocky why --diff/);
-  for (const cardLine of renderCycleCard(3, 2)) assert.doesNotMatch(cardLine, /\?/);
+  assert.equal(
+    line,
+    "Same failure with the same wording again. Add new information before retrying. "
+      + "Try rocky recall, rocky teach <file>, or rocky why --diff.",
+  );
+  assert.deepEqual(validateOutputLine(line), [], line);
   const card = renderCycleCard(3, 2);
-  assert.ok(card.some((entry) => entry.includes("count only, no cause named")));
-  assert.ok(!renderCycleCard(3, 1).some((entry) => entry.includes("count only")));
+  for (const cardLine of card) {
+    assert.doesNotMatch(cardLine, /\?/);
+    assert.deepEqual(validateOutputLine(cardLine), [], cardLine);
+  }
+  assert.ok(card.includes("Recorded 3 times this session."));
+  assert.ok(card.includes(cycleClusterLine(2)));
+  assert.equal(cycleClusterLine(2), "2 failures repeated this session. Count only, no cause named.");
+  assert.ok(!renderCycleCard(3, 1).some((entry) => entry.includes("Count only")));
 });
 
 function gatePayload(session: string, extra: Record<string, unknown> = {}): string {
@@ -213,7 +222,7 @@ test("gate cycle check is advisory: third loop appends the nudge, never denies a
   const third = gateEvent("claude-code", gatePayloadForFile("loop", "/work/repo/src/c.ts", payload));
   assert.equal(third.exitCode, 0);
   const reason = JSON.parse(third.stdout).hookSpecificOutput.permissionDecisionReason as string;
-  assert.match(reason, /same trouble, same words\. add new info, question/);
+  assert.match(reason, /Same failure with the same wording again\. Add new information before retrying\./);
   assert.match(reason, /rocky recall/);
   assert.doesNotMatch(reason, /\?/);
 });
@@ -228,7 +237,7 @@ test("gate cycle check derives the fingerprint from stderr via fingerprint()", a
   const third = gateEvent("claude-code", gatePayloadForFile("derived", "/work/repo/src/c.ts", payload));
   assert.match(
     JSON.parse(third.stdout).hookSpecificOutput.permissionDecisionReason as string,
-    /same trouble, same words/,
+    /Same failure with the same wording again/,
   );
 });
 
@@ -249,7 +258,7 @@ test("gate cycle advisory never denies and honors opt-out plus corrupt state", a
   assert.equal(JSON.parse(silent.stdout).hookSpecificOutput.permissionDecision, "deny");
   assert.doesNotMatch(
     JSON.parse(silent.stdout).hookSpecificOutput.permissionDecisionReason as string,
-    /same trouble/,
+    /Same failure with the same wording/,
   );
 
   withEnv(t, "ROCKY_CYCLE_ADVISORY", undefined);
@@ -260,7 +269,7 @@ test("gate cycle advisory never denies and honors opt-out plus corrupt state", a
   assert.equal(corrupt.exitCode, 0);
   assert.doesNotMatch(
     JSON.parse(corrupt.stdout).hookSpecificOutput.permissionDecisionReason as string,
-    /same trouble/,
+    /Same failure with the same wording/,
   );
 });
 

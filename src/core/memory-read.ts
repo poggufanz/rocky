@@ -330,7 +330,7 @@ export function canonicalPath(value: string, options: CanonicalPathOptions = {})
 
 /**
  * Directory identity for a stored `cwd`, on the platform that will compare it.
- * Windows hears one directory under several spellings: the Git Bash hook
+ * Windows records one directory under several spellings: the Git Bash hook
  * records the MSYS-converted `C:/p`, `rocky run` and the PowerShell hook
  * record `C:\p`, and a hand-typed `c:\P\` is the same place. So win32 ignores
  * slash direction, case, and trailing separators; a root keeps its separator,
@@ -339,7 +339,7 @@ export function canonicalPath(value: string, options: CanonicalPathOptions = {})
  * platform compares exactly, so the key is the string itself.
  *
  * For comparing and grouping only. Never store it and never print it: a
- * record keeps the spelling it was heard under. This is not `canonicalPath()`,
+ * record keeps the spelling it was recorded under. This is not `canonicalPath()`,
  * which is file identity (it also drops `.` segments and doubled separators).
  */
 export function cwdIdentityKey(cwd: string, platform: NodeJS.Platform | "unknown"): string {

@@ -9,17 +9,17 @@ export interface CsExplain {
 }
 
 const DEFINITIONS: Record<CsConceptId, string> = {
-  "control-flow": "control flow decides which lines run and how many times loop and branch guard that choice",
-  "program-state": "program state is current variable values, mutation changes future behavior",
-  "decomposition": "decomposition splits big behavior into small steps with one job each",
-  "data-aggregation": "aggregation combines rows into sum and average then compares against threshold",
+  "control-flow": "Control flow decides which lines run and how many times. Loops and branches guard that choice.",
+  "program-state": "Program state is the current variable values. Mutation changes future behavior.",
+  "decomposition": "Decomposition splits big behavior into small steps with one job each.",
+  "data-aggregation": "Aggregation combines rows into a sum and an average, then compares them against a threshold.",
 };
 
 const CHECKS: Record<CsConceptId, string> = {
-  "control-flow": "trace i values on paper then tell what total becomes, question",
-  "program-state": "name which assign changes next iteration, question",
-  "decomposition": "name first smallest step you would test alone, question",
-  "data-aggregation": "name which filter threshold decides the total, question",
+  "control-flow": "Trace the values of i on paper. What does total become?",
+  "program-state": "Which assignment changes the next iteration?",
+  "decomposition": "What is the first, smallest step you would test alone?",
+  "data-aggregation": "Which filter threshold decides the total?",
 };
 
 function isCsId(value: string): value is CsConceptId {
@@ -30,7 +30,7 @@ function buildTrace(snippet: string): string[] {
   const lines = snippet.split(/\r?\n/).map((l) => l.trim()).filter((l) => l.length > 0).slice(0, 5);
   const capped = lines.map((l) => l.slice(0, 120));
   if (capped.length > 0) return capped;
-  return ["start from first line", "track each assign once", "compare final values"];
+  return ["Start from the first line.", "Track each assignment once.", "Compare the final values."];
 }
 
 export function explainFor(conceptId: string, snippet: string): CsExplain | undefined {

@@ -74,7 +74,7 @@ async function captureStderr(run: () => Promise<number>): Promise<{ code: number
   }
 }
 
-test("store usage is zero for a repo Rocky never heard", () => {
+test("store usage is zero for a repo rocky never captured", () => {
   const home = freshHome();
   assert.deepEqual(listeningStoreUsage(gitRepo(), home), { eventsBytes: 0, objectsBytes: 0, objects: 0 });
 });

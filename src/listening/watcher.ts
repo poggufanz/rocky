@@ -144,7 +144,7 @@ function knownVersions(root: string, home?: string): Map<string, KnownVersion> {
 /**
  * Tracked plus untracked-not-ignored paths, so gitignored bulk
  * (node_modules, dist) never snapshots. Undefined when Git cannot list
- * this root; the caller then hears nothing.
+ * this root; the caller then captures nothing.
  */
 function gitListedFiles(root: string): string[] | undefined {
   try {
@@ -186,8 +186,8 @@ function listedFiles(root: string, listed: string[], cap: number): { rels: strin
 }
 
 /**
- * The files Listening may hear are the ones Git lists, nothing else.
- * Undefined when Git cannot list the root: capture then hears nothing for
+ * The files Listening may capture are the ones Git lists, nothing else.
+ * Undefined when Git cannot list the root: capture then captures nothing for
  * that tick. A plain-walk fallback used to read the folder wholesale,
  * ignored bulk and git internals included.
  */

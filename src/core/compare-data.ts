@@ -30,7 +30,7 @@ export interface FileEntry {
 }
 
 /**
- * A heard-file entry must be a path, not a shell fragment. Agents sometimes
+ * A recorded-file entry must be a path, not a shell fragment. Agents sometimes
  * pass `--files "$(echo src/a.ts | tr / '/')"` through a shell that never
  * expands it; stored as-is, the dash lists a file that can never exist on
  * disk. Reject the characters that mark that kind of fragment -- `$` backtick
@@ -314,7 +314,7 @@ export function diffFor(
     if (rec.excerpt) {
       rows.push(
         { k: "m", t: "" },
-        { k: "m", t: "excerpt rocky kept:" },
+        { k: "m", t: "Excerpt recorded by rocky:" },
         ...String(rec.excerpt)
           .split(/\r?\n/)
           .slice(0, 20)
@@ -532,8 +532,8 @@ export function getCachedDiff(
 
 /**
  * Strict-compare rule: same file is not enough, both moments must touch
- * overlapping lines. Fails open when rocky holds no diff for a side — he never
- * hides a record he cannot judge.
+ * overlapping lines. Fails open when rocky holds no diff for a side — it never
+ * hides a record it cannot judge.
  */
 export function lineOverlapPredicate(
   filePath: string,

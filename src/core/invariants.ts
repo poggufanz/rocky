@@ -58,7 +58,7 @@ export function parseInvariants(text: string): InvariantParseResult {
         ...(current.why === undefined ? {} : { why: current.why }),
       });
     } else {
-      errors.push(`block "${current.invariant.length === 0 ? "(empty)" : current.invariant}" misses ${current.guardedBy.length === 0 ? "Guarded by" : "Invariant"}`);
+      errors.push(`block "${current.invariant.length === 0 ? "(empty)" : current.invariant}" is missing ${current.guardedBy.length === 0 ? 'a "Guarded by" line' : 'an "Invariant" line'}`);
     }
     current = undefined;
   };

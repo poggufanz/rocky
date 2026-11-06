@@ -146,7 +146,7 @@ test("out-of-window and out-of-repo evidence does not mark tried", () => {
   assert.deepEqual(result.untried, ["src/a.ts", "src/b.ts"]);
 });
 
-test("records-only session derives heard files; untried lists at most COVERAGE_MAX_LISTED", () => {
+test("records-only session derives recorded files; untried lists at most COVERAGE_MAX_LISTED", () => {
   const files = Array.from({ length: 14 }, (_, index) => `src/file-${index}.ts`);
   const records = [triple(files, { hunks: false })];
   const result = coverageFromRecords(records);
@@ -177,20 +177,20 @@ test("empty session returns the honest empty state, never all-covered", () => {
   assert.deepEqual(result.untried, []);
   const card = renderUntriedCard(result);
   assert.deepEqual(card, [COVERAGE_EMPTY_LINE]);
-  assert.match(card.join("\n"), /nothing untried, nothing tried/);
-  assert.doesNotMatch(card.join("\n"), /all covered|all heard/);
+  assert.equal(COVERAGE_EMPTY_LINE, "No files recorded in this window.");
+  assert.doesNotMatch(card.join("\n"), /all covered|all \d+ files|have a recorded reason/i);
 });
 
 test("rendered cards name counts and paths without shaming or question marks", () => {
   const split = coverageFromRecords([rationale(["src/a.ts"])], { sessionFiles: ["src/a.ts", "src/b.ts"], cwd: CWD });
   const card = renderUntriedCard(split);
-  assert.match(card[0], /1 file touched but not heard why yet\./);
+  assert.match(card[0], /^1 file touched with no recorded reason yet\.$/);
   assert.ok(card.includes("src/b.ts"));
   assert.doesNotMatch(card.join("\n"), /\?/);
   assert.doesNotMatch(card.join("\n"), /you ignored|you missed|shame|blame/);
 
   const allTried = renderUntriedCard(coverageFromRecords([rationale(["src/a.ts"])], { sessionFiles: ["src/a.ts"], cwd: CWD }));
-  assert.match(allTried.join("\n"), /heard with why\. good good\./);
+  assert.deepEqual(allTried, ["1 file has a recorded reason."]);
   assert.doesNotMatch(allTried.join("\n"), /\?/);
 
   for (const line of [...card, ...allTried, COVERAGE_EMPTY_LINE]) {
@@ -217,7 +217,7 @@ test("dash home payload carries truncated flag and totals alongside the bounded 
 });
 
 test("dash home payload marks truncation from an incomplete memory read, even when empty", () => {
-  const partial = deriveHome([], "memory coverage incomplete: first 3 records heard, later lines not heard.", NOW);
+  const partial = deriveHome([], "memory coverage incomplete: Only the first 3 records were read; later lines were not read.", NOW);
   assert.equal(partial.coverage.truncated, true);
   assert.deepEqual(partial.coverage.tried, []);
   assert.deepEqual(partial.coverage.untried, []);
@@ -226,7 +226,7 @@ test("dash home payload marks truncation from an incomplete memory read, even wh
 });
 
 test("dash home coverage line is the plain-words line when memory was incomplete, and coverage full otherwise", () => {
-  const words = "memory coverage incomplete: 2 lines I cannot use.";
+  const words = "memory coverage incomplete: 2 lines could not be used.";
   assert.equal(deriveHome([], words, NOW).coverageLine, words);
   assert.equal(deriveHome([], undefined, NOW).coverageLine, "coverage full");
   assert.deepEqual(validateOutputLine(words), []);
@@ -241,8 +241,8 @@ test("disclosure lines show both memory and list-cap lines when both hold, never
   assert.equal(capped.truncated, true);
   const both = coverageDisclosureLines(capped, memory, true, 10);
   assert.equal(both.length, 2);
-  assert.equal(both[0], "memory coverage incomplete: some lines not heard.");
-  assert.match(both[1], /coverage partial: names 10 at most, 12 untried named\./);
+  assert.equal(both[0], "memory coverage incomplete: Some lines were not read.");
+  assert.match(both[1], /^coverage partial: at most 10 names listed, 12 untried files counted\.$/);
   assert.doesNotMatch(both.join("\n"), /\?/);
 
   const memoryOnly = coverageDisclosureLines(
@@ -269,12 +269,12 @@ test("disclosure lines show both memory and list-cap lines when both hold, never
   assert.deepEqual(coverageDisclosureLines("garbage", "garbage" as unknown as typeof memory, true, 0), []);
 });
 
-test("disclosure lines name a record cap with the records heard, in plain words", (t) => {
+test("disclosure lines name a record cap with the records read, in plain words", (t) => {
   setVerbose(t, undefined);
   const capped = { version: 1 as const, scanned: 40, skipped: 0, truncated: 1, bytesScanned: 900, bytesTotal: 2000, complete: false as boolean, reason: "record-cap" as const };
   assert.deepEqual(
     coverageDisclosureLines(undefined, capped, true, 40),
-    ["memory coverage incomplete: first 40 records heard, later lines not heard."],
+    ["memory coverage incomplete: Only the first 40 records were read; later lines were not read."],
   );
 });
 
@@ -319,7 +319,7 @@ test("brief appends an untried section without altering the decompose template",
     // Untried section names the window file with no why evidence.
     assert.match(stderr, /untried/);
     assert.match(stderr, /untried\.ts/);
-    assert.match(stderr, /not heard why yet/);
+    assert.match(stderr, /no recorded reason yet/);
     assert.doesNotMatch(stderr, /\?/);
     // The hunk-backed window file is tried, so it stays out of the section.
     // (stdout still names it under changes by area; stderr must not.)
@@ -348,9 +348,9 @@ test("brief with an empty window stays honest about coverage", async () => {
     assert.equal(code, 0);
     assert.match(stderr, /untried/);
     // Window files exist here, so the honest line is the count line, and it
-    // must never claim full coverage when nothing was heard.
-    assert.match(stderr, /touched but not heard why yet/);
-    assert.doesNotMatch(stderr, /all heard with why/);
+    // must never claim full coverage when nothing was recorded.
+    assert.match(stderr, /touched with no recorded reason yet/);
+    assert.doesNotMatch(stderr, /All \d+ files have a recorded reason/);
   } finally {
     agentLogs.restore();
     if (previous === undefined) delete process.env.ROCKY_HOME;

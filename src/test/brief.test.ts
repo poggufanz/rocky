@@ -49,11 +49,11 @@ test("composeBrief emits five blocks in fixed order", () => {
   const summaryAt = text.indexOf("1 commit, 2 files");
   const areasAt = text.indexOf("changes by area:");
   const memoryAt = text.indexOf("failures and fixes in window:");
-  const invariantAt = text.indexOf('src/payment/retry.ts changed. this path guards: "payment may commit at most once". worth checking, question');
+  const invariantAt = text.indexOf('src/payment/retry.ts changed. This path guards: "payment may commit at most once". Worth checking?');
   const explainAt = text.indexOf("explain-ready:");
   assert.ok(summaryAt >= 0 && areasAt > summaryAt && memoryAt > areasAt && invariantAt > memoryAt && explainAt > invariantAt);
-  assert.ok(text.includes("why src change, question"));
-  assert.ok(text.includes("what impact of src/payment/worker.ts change, question"));
+  assert.ok(text.includes("  Why did src change?"));
+  assert.ok(text.includes("  What is the impact of the change to src/payment/worker.ts?"));
 });
 
 test("composeBrief picks the impact file by total churn across commits, not a single commit's peak", () => {
@@ -77,8 +77,8 @@ test("composeBrief picks the impact file by total churn across commits, not a si
   };
   const lines = composeBrief(input);
   const text = lines.join("\n");
-  assert.ok(text.includes("what impact of src/payment/retry.ts change, question"));
-  assert.ok(!text.includes("what impact of src/payment/onceoff.ts change, question"));
+  assert.ok(text.includes("What is the impact of the change to src/payment/retry.ts?"));
+  assert.ok(!text.includes("What is the impact of the change to src/payment/onceoff.ts?"));
 });
 
 test("composeBrief with empty window says so and stays quiet on invariants", () => {
@@ -89,11 +89,17 @@ test("composeBrief with empty window says so and stays quiet on invariants", () 
   assert.ok(!text.includes("guards"));
 });
 
-test("composeBrief question lines pass rocky voice validation", () => {
+test("composeBrief question lines end with a question mark and pass the output rules", () => {
   const lines = composeBrief(sampleInput());
-  for (const line of lines) {
-    if (line.includes("question")) {
-      assert.deepEqual(validateOutputLine(line.trim()), []);
-    }
-  }
+  const questions = lines.filter((line) => line.endsWith("?"));
+  // invariant check, one per area, and the biggest-churn impact question
+  assert.equal(questions.length, 3);
+  for (const line of questions) assert.deepEqual(validateOutputLine(line.trim()), [], line);
+  assert.ok(lines.every((line) => !line.includes(", question")));
+});
+
+test("composeBrief empty window explains nothing without a question", () => {
+  const lines = composeBrief({ windowLabel: "24h", commits: [], memoryHits: [], invariantTouches: [] });
+  assert.ok(lines.includes("  Nothing to explain. No changes in this window."));
+  assert.ok(lines.every((line) => !line.endsWith("?")));
 });

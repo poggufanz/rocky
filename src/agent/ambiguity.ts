@@ -107,7 +107,7 @@ function boundedText(value: string, maximum: number): string {
 function valueTokens(value: string, path = false): Set<string> {
   // fingerprint tokenization intentionally masks slash-prefixed paths. For
   // ambiguity evidence, split path separators first so a basename such as
-  // "button.tsx" remains hearable without reading the file itself.
+  // "button.tsx" remains matchable without reading the file itself.
   return tokens(path ? value.replace(/[\\/]+/gu, " ") : value);
 }
 
@@ -163,12 +163,12 @@ function ambiguityPrompt(intentText: string, candidates: readonly string[]): str
   return [
     "intent text:",
     JSON.stringify(intentText),
-    "known things I hear before:",
+    "known things recorded in memory:",
     ...quotedCandidates.map((candidate) => `- ${candidate}`),
     "instructions:",
-    "mark ambiguous ONLY when one short referent in the text matches several known things;",
-    "never guess what user means; referent = the ambiguous words only.",
-    "return only JSON matching supplied schema.",
+    "Mark ambiguous ONLY when one short referent in the text matches several known things.",
+    "Never guess what the user means. The referent is the ambiguous words only.",
+    "Return only JSON matching the supplied schema.",
   ].join("\n");
 }
 
@@ -236,8 +236,11 @@ export async function checkAmbiguity(intentText: string, deps: AmbiguityDeps = {
     if (!parsed?.ambiguous || parsed.referent.length === 0) return undefined;
     const places = referentPlaces(records, parsed.referent);
     if (places < 2) return undefined;
-    const question = `you say "${parsed.referent}". I hear ${places} ${parsed.referent} before. which one, question`;
-    if (hasUnsafeLineContent(question)) return undefined;
+    // The model's referent may not carry a `?` of its own; the one question
+    // mark on the line is the terminal one added below.
+    const questionBody = `You said "${parsed.referent}". It matches ${places} places in memory. Which one`;
+    if (hasUnsafeLineContent(questionBody)) return undefined;
+    const question = `${questionBody}?`;
     if (question.includes("\n") || question.includes("\r") || Buffer.byteLength(question, "utf8") > 512) return undefined;
     const queue = deps.queueLabel ?? defaultQueueLabel;
     queue(question, paths);

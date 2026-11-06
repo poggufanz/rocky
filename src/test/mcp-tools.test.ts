@@ -116,7 +116,7 @@ test("new tool descriptions are concrete and schemas expose their bounds", () =>
   assert.match(why.description, /rationales/);
   assert.match(why.description, /relative path resolves against the server's working directory/);
   assert.match(teach.description, /Example/);
-  assert.match(teach.description, /Reasons are hearsay Rocky heard, not verified facts\./);
+  assert.match(teach.description, /Reasons are quotes recorded from a human or agent, not verified facts\./);
   assert.deepEqual(teach.inputSchema, {
     type: "object", additionalProperties: false, required: ["path"], properties: {
       path: { type: "string", maxLength: MAX_FIELD_BYTES },
@@ -182,7 +182,7 @@ test("teach_lookup renders a sanitized witness card and keeps cwd and id opaque"
   const sanitized = await createToolRegistry({ exposure: "sanitized", memory, recallWithAi: disabledRecallWithAi })
     .call("teach_lookup", { path: "src/app.ts" }, signal);
   assert.equal(sanitized.isError, undefined);
-  assert.equal(sanitized.structuredContent.header, "rocky heard this. agent say why, rocky remember");
+  assert.equal(sanitized.structuredContent.header, "Witnessed: an agent stated why, and rocky recorded it.");
   assert.equal(sanitized.structuredContent.match, "similarity");
   const sanitizedLines = sanitized.structuredContent.lines as string[];
   assert.equal(sanitizedLines[0]?.startsWith("code: Bearer [redacted]"), true);
@@ -209,7 +209,7 @@ test("teach_lookup assembles a ladder card when no witness matches", async () =>
   ].join("\n"), "utf8");
   const result = await registry().call("teach_lookup", { path: file, line: 2 }, new AbortController().signal);
   assert.equal(result.isError, undefined);
-  assert.equal(result.structuredContent.header, "rocky not hear this. assembled from evidence, not witnessed");
+  assert.equal(result.structuredContent.header, "Assembled from evidence, not witnessed.");
   assert.equal(result.structuredContent.match, "ladder");
   assert.ok((result.structuredContent.lines as string[])[0]?.includes("· line 2"));
   assert.ok((result.structuredContent.lines as string[])[1]?.startsWith("reason:"));
@@ -629,10 +629,14 @@ test("why_file keeps a bounded witness from an over-cap valid file array and dis
     },
     recallWithAi: disabledRecallWithAi,
   }).call("why_file", { path: "src/target.ts" }, new AbortController().signal);
-  const item = (result.structuredContent.items as Array<{ files: Array<{ path: string }>; truncatedFiles: number; complete: boolean }>)[0];
+  const item = (result.structuredContent.items as Array<{
+    files: Array<{ path: string }>; truncatedFiles: number; complete: boolean; confidence: string; reason: string;
+  }>)[0];
   assert.ok(item?.files.some((file) => file.path === "src/target.ts"));
   assert.ok((item?.truncatedFiles ?? 0) > 0);
   assert.equal(item?.complete, false);
+  assert.equal(item?.confidence, "incomplete");
+  assert.equal(item?.reason, "file coverage incomplete; the full change was not recorded");
   assert.equal(result.structuredContent.coverageIncomplete, true);
   assert.notEqual(result.structuredContent.coverageStatus, "complete");
   assert.equal(beyondCapReads, 0);
@@ -1848,7 +1852,7 @@ test("why_file keeps only human and notify reasons that name the file, newest fi
   const lines = [
     statedReason("older-notify", now - 3_000, "agent says parsing moved out of the hook", ["src/a.ts"], { source: "notify", agent: "claude-code" }),
     statedReason("newest-human", now - 1_000, "human says parsing stays out of the hook", ["src/b.ts", "src/a.ts"]),
-    statedReason("agent-log", now - 500, "log heard a change to a.ts", ["src/a.ts"], { source: "log-thinking", agent: "claude-code", rationale_fidelity: "raw" }),
+    statedReason("agent-log", now - 500, "log recorded a change to a.ts", ["src/a.ts"], { source: "log-thinking", agent: "claude-code", rationale_fidelity: "raw" }),
     statedReason("other-file", now - 400, "this reason is about b only", ["src/b.ts"]),
     statedReason("unscoped", now - 300, "this reason names no file"),
   ].map((record) => JSON.stringify(record));

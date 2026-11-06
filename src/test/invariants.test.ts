@@ -32,7 +32,7 @@ test("parseInvariants tolerates unknown lines and keeps later blocks after a bro
   const { notes, errors } = parseInvariants(text);
   assert.equal(notes.length, 1);
   assert.equal(notes[0].invariant, "good block");
-  assert.equal(errors.length, 1);
+  assert.deepEqual(errors, ['block "block without guard" is missing a "Guarded by" line']);
 });
 
 test("matchesGlob covers **, *, ? and path separator normalization", () => {
@@ -61,7 +61,7 @@ test("parseInvariants handles CRLF, empty input, and bare headers without losing
   ].join("\n"));
   assert.equal(bare.notes.length, 1);
   assert.deepEqual(bare.notes[0].guardedBy, ["a.ts"]);
-  assert.equal(bare.errors.length, 1);
+  assert.deepEqual(bare.errors, ['block "(empty)" is missing an "Invariant" line']);
 });
 
 test("parseInvariants accumulates duplicate Guarded by lines", () => {

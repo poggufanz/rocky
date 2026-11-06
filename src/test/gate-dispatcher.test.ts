@@ -25,7 +25,12 @@ test("first edit denied with instruction, retry after rationale allowed", async 
   const parsed = JSON.parse(first.stdout);
   assert.equal(parsed.hookSpecificOutput.permissionDecision, "deny");
   assert.match(parsed.hookSpecificOutput.permissionDecisionReason, /rocky hook agent-event/);
-  assert.match(parsed.hookSpecificOutput.permissionDecisionReason, /, question/);
+  // The reason is the instruction the agent follows next: plain sentences first, the literal command last.
+  assert.equal(
+    parsed.hookSpecificOutput.permissionDecisionReason,
+    "Record why before editing /work/repo/src/q.ts, then retry the edit. Recorded reasons are kept in local memory. "
+      + 'Run: rocky hook agent-event claude-code --rationale "<one line why>" --files /work/repo/src/q.ts',
+  );
   const second = gateEvent("claude-code", preToolUse("/work/repo/src/q.ts"));
   assert.equal(JSON.parse(second.stdout).hookSpecificOutput.permissionDecision, "deny");
   const third = gateEvent("claude-code", preToolUse("/work/repo/src/q.ts"));

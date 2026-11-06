@@ -1,5 +1,5 @@
 /**
- * Which repo a heard file belongs to. Memory hears files from every cwd, so
+ * Which repo a recorded file belongs to. Memory holds files from every cwd, so
  * the answer cannot come from the launch root: it walks up from the file
  * until a directory carries a `.git` (a directory, or the file a worktree
  * points through), and the nearest one wins. A file with no `.git` ancestor
