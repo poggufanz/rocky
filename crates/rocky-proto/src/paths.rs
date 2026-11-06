@@ -12,7 +12,14 @@ pub fn rocky_home_from(env_value: Option<&OsStr>, home: &Path) -> PathBuf {
 
 pub fn rocky_home() -> PathBuf {
     let home = std::env::home_dir().unwrap_or_else(|| PathBuf::from("."));
-    rocky_home_from(std::env::var_os("ROCKY_HOME").as_deref(), &home)
+    absolutize(rocky_home_from(
+        std::env::var_os("ROCKY_HOME").as_deref(),
+        &home,
+    ))
+}
+
+fn absolutize(path: PathBuf) -> PathBuf {
+    std::path::absolute(&path).unwrap_or(path)
 }
 
 pub fn desk_dir(rocky_home: &Path) -> PathBuf {
@@ -58,7 +65,8 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::{
-        bad_dir, desk_mutex_name, home_hash, log_path, pipe_name, rocky_home_from, spool_dir,
+        absolutize, bad_dir, desk_mutex_name, home_hash, log_path, pipe_name, rocky_home_from,
+        spool_dir,
     };
 
     #[test]
@@ -67,6 +75,14 @@ mod tests {
             rocky_home_from(Some(OsStr::new(r"D:\rh")), Path::new(r"C:\Users\a")),
             PathBuf::from(r"D:\rh")
         );
+    }
+    #[test]
+    fn rocky_home_absolutizes_relative_input() {
+        let rel = rocky_home_from(Some(OsStr::new("rel-home")), Path::new(r"C:\Users\a"));
+        let abs = absolutize(rel);
+        assert!(abs.is_absolute());
+        assert_eq!(abs.file_name(), Some(OsStr::new("rel-home")));
+        assert_eq!(abs, std::path::absolute("rel-home").unwrap());
     }
     #[test]
     fn empty_env_falls_back_to_home() {
