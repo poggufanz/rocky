@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use interprocess::os::windows::named_pipe::pipe_mode::Bytes;
 use interprocess::os::windows::named_pipe::{PipeStream, RecvPipeStream, SendPipeStream};
-use rocky_proto::paths::{pipe_name, spool_dir};
+use rocky_proto::paths::{log_path, pipe_name, spool_dir};
 use rocky_proto::pipe::{ClientMsg, CmdName, ServerMsg, Status, StatusOp, decode, encode};
 use tempfile::TempDir;
 
@@ -298,8 +298,29 @@ fn second_daemon_exits_nonzero() {
         .stderr(Stdio::null())
         .spawn()
         .unwrap();
-    let status = second.wait().unwrap();
+    let status = wait_exit(&mut second, "second daemon");
     assert_eq!(status.code(), Some(3), "status: {status}");
+    let log = fs::read_to_string(log_path(first.home())).unwrap();
+    assert!(
+        log.lines()
+            .any(|l| l == "pipe taken (another rockyd, or squatted)"),
+        "log missing pipe-taken line: {log:?}"
+    );
+}
+
+/// Wait for a child with the anti-hang guard; kill it rather than hang forever.
+fn wait_exit(child: &mut Child, what: &str) -> std::process::ExitStatus {
+    let start = Instant::now();
+    loop {
+        if let Some(s) = child.try_wait().unwrap() {
+            return s;
+        }
+        if start.elapsed() >= GUARD {
+            let _ = child.kill();
+            panic!("{what} never exited");
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
 }
 
 #[test]

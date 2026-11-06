@@ -150,16 +150,22 @@ fn main() {
     loop {
         // Drain stop requests first so shutdown stays prompt.
         if let Ok(Control::Stop { id, reply, flushed }) = control_rx.try_recv() {
-            let _ = reply.send(ServerMsg::Ack {
-                id,
-                ok: true,
-                error: None,
-            });
             // Wait for the client thread to flush the ack before exiting:
             // without this, `process::exit` can race the writer thread and
-            // the client never sees the ack. Bounded so a dead client can't
-            // wedge shutdown; the pipe dies with the process either way.
-            let _ = flushed.recv_timeout(Duration::from_secs(5));
+            // the client never sees the ack. Only when the ack was accepted —
+            // otherwise the client is already gone, so exit immediately.
+            // Bounded so a dead client can't wedge shutdown; the pipe dies
+            // with the process either way.
+            if reply
+                .send(ServerMsg::Ack {
+                    id,
+                    ok: true,
+                    error: None,
+                })
+                .is_ok()
+            {
+                let _ = flushed.recv_timeout(Duration::from_secs(5));
+            }
             log.line("stop requested, exiting");
             std::process::exit(0);
         }

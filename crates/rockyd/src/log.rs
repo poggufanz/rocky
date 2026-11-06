@@ -14,7 +14,14 @@ const ROTATE_AT: u64 = 1024 * 1024;
 pub struct RotatingLog {
     path: PathBuf,
     // The panic hook also writes through here; a poisoned mutex still logs.
-    file: Mutex<fs::File>,
+    // `None` when the file could not be opened: lines are dropped and the
+    // open is retried on the next `line()`, so an unwritable log never
+    // panics the daemon.
+    file: Mutex<Option<fs::File>>,
+}
+
+fn open_append(path: &Path) -> Option<fs::File> {
+    OpenOptions::new().create(true).append(true).open(path).ok()
 }
 
 impl RotatingLog {
@@ -22,11 +29,7 @@ impl RotatingLog {
         if let Some(parent) = path.parent() {
             let _ = fs::create_dir_all(parent);
         }
-        let file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-            .expect("open log file");
+        let file = open_append(path);
         RotatingLog {
             path: path.to_path_buf(),
             file: Mutex::new(file),
@@ -34,27 +37,30 @@ impl RotatingLog {
     }
 
     pub fn line(&self, msg: &str) {
-        let mut file = self.file.lock().unwrap_or_else(|e| e.into_inner());
-        if file.metadata().is_ok_and(|m| m.len() >= ROTATE_AT) {
-            drop(file);
+        if self
+            .file
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_mut()
+            .is_some_and(|f| f.metadata().is_ok_and(|m| m.len() >= ROTATE_AT))
+        {
             self.rotate();
-            file = self.file.lock().unwrap_or_else(|e| e.into_inner());
         }
-        let _ = writeln!(file, "{msg}");
-        let _ = file.flush();
+        let mut guard = self.file.lock().unwrap_or_else(|e| e.into_inner());
+        if guard.is_none() {
+            *guard = open_append(&self.path);
+        }
+        if let Some(file) = guard.as_mut() {
+            let _ = writeln!(file, "{msg}");
+            let _ = file.flush();
+        }
     }
 
     fn rotate(&self) {
         let backup = self.path.with_extension("log.1");
         let _ = fs::remove_file(&backup);
         let _ = fs::rename(&self.path, &backup);
-        if let Ok(fresh) = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.path)
-        {
-            *self.file.lock().unwrap_or_else(|e| e.into_inner()) = fresh;
-        }
+        *self.file.lock().unwrap_or_else(|e| e.into_inner()) = open_append(&self.path);
     }
 }
 
@@ -90,5 +96,18 @@ mod tests {
         log.line("one");
         log.line("two");
         assert_eq!(fs::read_to_string(&path).unwrap(), "one\ntwo\n");
+    }
+    #[test]
+    fn unwritable_path_never_panics_and_recovers() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rockyd.log");
+        // Block the log path with a directory: open fails, lines drop silently.
+        fs::create_dir(&path).unwrap();
+        let log = RotatingLog::new(&path);
+        log.line("dropped");
+        // Once the path clears, the next line reopens and writes.
+        fs::remove_dir(&path).unwrap();
+        log.line("recovered");
+        assert_eq!(fs::read_to_string(&path).unwrap(), "recovered\n");
     }
 }
