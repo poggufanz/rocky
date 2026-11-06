@@ -308,6 +308,54 @@ fn second_daemon_exits_nonzero() {
     );
 }
 
+#[test]
+fn second_daemon_touches_no_spool() {
+    // Bind-first (R17): a duplicate daemon must exit 3 without ingesting or
+    // deleting spool files. Write the file only AFTER A is serving and B has
+    // had no chance to run before it exists... instead assert from A's side:
+    // create the spool file, start B, wait for B's exit 3, then require that
+    // A (not B) delivers the agent. If B had ingested the file into its own
+    // memory, A would never see the agent and no snapshot text would match.
+    let home = home();
+    let first = Daemon::spawn(home);
+    let mut client = connect(&pipe_name(first.home()));
+    let snapshot = client.hello_subscribe();
+    assert!(
+        matches!(snapshot, ServerMsg::Snapshot { .. }),
+        "{snapshot:?}"
+    );
+
+    run_hook(
+        first.home(),
+        r#"{"hook_event_name":"SessionStart","session_id":"kept1","cwd":"C:\\r"}"#,
+    );
+
+    let mut second = Command::new(env!("CARGO_BIN_EXE_rockyd"))
+        .env("ROCKY_HOME", first.home())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let status = wait_exit(&mut second, "second daemon");
+    assert_eq!(status.code(), Some(3), "status: {status}");
+
+    // A applies the file: its status upsert must arrive here. Guarded reads
+    // only, no timing asserts.
+    let start = Instant::now();
+    let seen = loop {
+        let msg: ServerMsg = decode(&client.read_line().unwrap()).unwrap();
+        match msg {
+            ServerMsg::Status {
+                op: StatusOp::Upsert,
+                agent,
+            } if agent.key.session_id == "kept1" => break agent,
+            _ => assert!(start.elapsed() < GUARD, "upsert never arrived"),
+        }
+    };
+    assert_eq!(seen.status, Status::Idle);
+}
+
 /// Wait for a child with the anti-hang guard; kill it rather than hang forever.
 fn wait_exit(child: &mut Child, what: &str) -> std::process::ExitStatus {
     let start = Instant::now();

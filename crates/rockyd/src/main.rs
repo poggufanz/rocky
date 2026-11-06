@@ -64,40 +64,14 @@ fn main() {
         std::process::exit(1);
     }
 
-    let mut ingest = Ingestor::new();
-    match prune(&spool, MAX_FILES, MAX_BYTES) {
-        Ok(dropped) => {
-            ingest.health.spool_dropped += dropped;
-            if dropped > 0 {
-                log.line(&format!("pruned {dropped} spool files at start"));
-            }
-        }
-        Err(e) => log.line(&format!("start prune failed: {e}")),
-    }
-
-    // Shared under a mutex for the snapshot closure; the daemon loop never
-    // holds this lock while calling `broadcast` (see Hub lock order).
+    // Bind BEFORE touching the spool: a second daemon must fail here (exit 3)
+    // without ingesting or deleting pending spool files. Shared starts empty;
+    // prune + the initial ingest run only after a successful bind.
     let shared = Arc::new(Mutex::new(Shared {
         state: StatusState::new(),
         last_known: HashMap::new(),
-        health: ingest.health.clone(),
+        health: Health::default(),
     }));
-
-    {
-        let mut repo_of = resolve_repo;
-        let mut s = shared.lock().unwrap();
-        let changes = ingest.ingest_once(&spool, &mut s.state, &mut repo_of);
-        refresh_last_known(&mut s);
-        s.health = ingest.health.clone();
-        let pending = s.health.spool_pending;
-        let agents = changes.upserted.len();
-        drop(s);
-        if agents > 0 {
-            log.line(&format!(
-                "start ingest: {agents} agents, {pending} files pending"
-            ));
-        }
-    }
 
     let hub = Arc::new(Hub::new());
     let snapshot_shared = Arc::clone(&shared);
@@ -123,6 +97,50 @@ fn main() {
         }
     };
     log.line("serving");
+
+    // Shared under a mutex for the snapshot closure; the daemon loop never
+    // holds this lock while calling `broadcast` (see Hub lock order).
+    let mut ingest = Ingestor::new();
+    match prune(&spool, MAX_FILES, MAX_BYTES) {
+        Ok(dropped) => {
+            ingest.health.spool_dropped += dropped;
+            if dropped > 0 {
+                log.line(&format!("pruned {dropped} spool files at start"));
+            }
+        }
+        Err(e) => log.line(&format!("start prune failed: {e}")),
+    }
+
+    {
+        let mut repo_of = resolve_repo;
+        let (msgs, agents, pending) = {
+            let mut s = shared.lock().unwrap();
+            let changes = ingest.ingest_once(&spool, &mut s.state, &mut repo_of);
+            refresh_last_known(&mut s);
+            s.health = ingest.health.clone();
+            let mut msgs = Vec::with_capacity(changes.upserted.len() + 1);
+            for key in &changes.upserted {
+                if let Some(agent) = s.state.get(key) {
+                    msgs.push(ServerMsg::Status {
+                        op: StatusOp::Upsert,
+                        agent,
+                    });
+                }
+            }
+            let pending = s.health.spool_pending;
+            let agents = changes.upserted.len();
+            // Lock released before broadcasting (see Hub lock order).
+            (msgs, agents, pending)
+        };
+        if agents > 0 {
+            log.line(&format!(
+                "start ingest: {agents} agents, {pending} files pending"
+            ));
+        }
+        for m in &msgs {
+            hub.broadcast(m);
+        }
+    }
 
     // Watcher events (and errors) only trigger a rescan; paths untrusted.
     let (watch_tx, watch_rx) = mpsc::channel::<()>();
