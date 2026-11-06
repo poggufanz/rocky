@@ -14,6 +14,7 @@ import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import {
   DESK_EVENTS,
+  DESK_HOOK_ASYNC,
   buildDeskHookEntries,
   deskHookCommand,
   installDeskHooks,
@@ -69,21 +70,23 @@ function settingsFixture(t: test.TestContext): { root: string; settings: string 
 
 test("desk install writes 12 events with matcher * on tool events and timeout 5", () => {
   assert.deepEqual(DESK_EVENTS, EXPECTED_EVENTS);
-  const entries = buildDeskHookEntries(DESK_COMMAND);
+  const entries = buildDeskHookEntries(DESK_COMMAND, DESK_HOOK_ASYNC);
   assert.deepEqual(Object.keys(entries).sort(), [...EXPECTED_EVENTS].sort());
   for (const [event, groups] of Object.entries(entries)) {
     assert.ok(Array.isArray(groups), `${event} must be an array`);
     assert.equal(groups.length, 1, `${event} must carry exactly one group`);
-    const group = groups[0] as { matcher?: unknown; hooks: Array<{ type: string; command: string; timeout: number }> };
+    const group = groups[0] as { matcher?: unknown; hooks: unknown[] };
     if (event === "PreToolUse" || event === "PostToolUse") {
       assert.equal(group.matcher, "*");
     } else {
       assert.equal(group.matcher, undefined);
     }
-    assert.equal(group.hooks.length, 1);
-    assert.equal(group.hooks[0].type, "command");
-    assert.equal(group.hooks[0].command, DESK_COMMAND);
-    assert.equal(group.hooks[0].timeout, 5);
+    assert.deepEqual(group.hooks, [{ type: "command", command: DESK_COMMAND, timeout: 5 }]);
+  }
+  const asyncEntries = buildDeskHookEntries(DESK_COMMAND, true);
+  for (const [event, groups] of Object.entries(asyncEntries)) {
+    const group = (groups as Array<{ hooks: unknown[] }>)[0];
+    assert.deepEqual(group.hooks, [{ type: "command", command: DESK_COMMAND, timeout: 5, async: true }], event);
   }
 });
 
@@ -103,7 +106,7 @@ test("desk install keeps foreign hooks and mixed groups in order", () => {
       UserPromptSubmit: [{ hooks: [{ type: "command", command: "other-tool" }] }],
     },
   };
-  const merged = mergeDeskHooks(structuredClone(foreign), DESK_COMMAND);
+  const merged = mergeDeskHooks(structuredClone(foreign), DESK_COMMAND, DESK_HOOK_ASYNC);
   const hooks = merged.hooks as Record<string, unknown[]>;
   assert.equal(hooks.Stop?.length, 3);
   assert.deepEqual(hooks.Stop?.[0], foreign.hooks.Stop[0]);
@@ -112,15 +115,15 @@ test("desk install keeps foreign hooks and mixed groups in order", () => {
     hooks: [{ type: "command", command: "foreign-tool" }],
   });
   assert.deepEqual((hooks.UserPromptSubmit as unknown[])?.[0], foreign.hooks.UserPromptSubmit[0]);
-  const twice = mergeDeskHooks(structuredClone(merged), DESK_COMMAND);
+  const twice = mergeDeskHooks(structuredClone(merged), DESK_COMMAND, DESK_HOOK_ASYNC);
   assert.deepEqual(twice, merged);
 });
 
 test("agent uninstall leaves desk hooks; desk uninstall leaves agent and gate hooks", () => {
   const command = rockyHookCommand("claude-code", process.execPath, process.execPath);
   const gateCommand = rockyGateHookCommand(process.execPath, process.execPath);
-  const both = mergeDeskHooks(mergeClaudeHooks({}, command, gateCommand), DESK_COMMAND);
-  assert.deepEqual(removeClaudeHooks(structuredClone(both)), mergeDeskHooks({}, DESK_COMMAND));
+  const both = mergeDeskHooks(mergeClaudeHooks({}, command, gateCommand), DESK_COMMAND, DESK_HOOK_ASYNC);
+  assert.deepEqual(removeClaudeHooks(structuredClone(both)), mergeDeskHooks({}, DESK_COMMAND, DESK_HOOK_ASYNC));
   assert.deepEqual(removeDeskHooks(structuredClone(both)), mergeClaudeHooks({}, command, gateCommand));
 });
 
@@ -219,7 +222,7 @@ test("agent hook status stays installed when desk hooks are also present", async
   mkdirSync(dirname(value.settings), { recursive: true, mode: 0o700 });
   writeFileSync(
     value.settings,
-    `${JSON.stringify(mergeDeskHooks(mergeClaudeHooks({}, command), DESK_COMMAND))}\n`,
+    `${JSON.stringify(mergeDeskHooks(mergeClaudeHooks({}, command), DESK_COMMAND, DESK_HOOK_ASYNC))}\n`,
   );
   const options = { command, confirmation: { async confirm(): Promise<boolean> { return true; } } };
   assert.deepEqual(agentHooksStatus({ settingsPath: value.settings }, options), { claudeCode: "installed" });
@@ -227,7 +230,7 @@ test("agent hook status stays installed when desk hooks are also present", async
   assert.equal(removed.status, "written");
   assert.deepEqual(
     JSON.parse(readFileSync(value.settings, "utf8")) as Record<string, unknown>,
-    mergeDeskHooks({}, DESK_COMMAND),
+    mergeDeskHooks({}, DESK_COMMAND, DESK_HOOK_ASYNC),
   );
   const deskRemoved = await uninstallDeskHooks({ settingsPath: value.settings }, options);
   assert.equal(deskRemoved.status, "written");

@@ -84,13 +84,14 @@ function isRockyDeskHook(value: JsonObject): boolean {
 }
 
 /** Build the exact Claude Code event entries owned by the desk hook. */
-export function buildDeskHookEntries(command: string): Record<string, unknown> {
+export function buildDeskHookEntries(command: string, asyncHooks: boolean): Record<string, unknown> {
   if (typeof command !== "string" || command.length === 0 || !isRockyDeskHookCommand(command)) {
     throw new Error("desk hook command is invalid");
   }
   const entries: Record<string, unknown> = {};
   for (const event of DESK_EVENTS) {
     const hook: Record<string, unknown> = { type: "command", command, timeout: 5 };
+    if (asyncHooks) hook.async = true;
     const scoped = event === "PreToolUse" || event === "PostToolUse";
     entries[event] = scoped
       ? [{ matcher: "*", hooks: [hook] }]
@@ -103,11 +104,11 @@ export function buildDeskHookEntries(command: string): Record<string, unknown> {
  * Remove old desk groups and append exactly one current group per event.
  * Foreign root keys, events, groups, and nested hooks retain their order.
  */
-export function mergeDeskHooks(existing: Record<string, unknown>, command: string): Record<string, unknown> {
+export function mergeDeskHooks(existing: Record<string, unknown>, command: string, asyncHooks: boolean): Record<string, unknown> {
   if (typeof existing !== "object" || existing === null || Array.isArray(existing)) {
     throw new Error("Claude settings root must be an object");
   }
-  const entries = buildDeskHookEntries(command);
+  const entries = buildDeskHookEntries(command, asyncHooks);
   return withHookArrays(existing, (hooks) => {
     for (const event of DESK_EVENTS) {
       const current = hooks[event];
@@ -153,7 +154,7 @@ export async function installDeskHooks(
     command = commandFor(options);
     inspectCurrent(resolved.settingsPath, true);
     (options.detail ?? ((message: string) => process.stderr.write(`${message}\n`)))
-      (JSON.stringify(buildDeskHookEntries(command), null, 2));
+      (JSON.stringify(buildDeskHookEntries(command, DESK_HOOK_ASYNC), null, 2));
   } catch (error) {
     return { status: "error", detail: describeFailure(error) };
   }
@@ -169,7 +170,7 @@ export async function installDeskHooks(
 
   try {
     const current = prepareMutation(resolved.settingsPath);
-    const merged = mergeDeskHooks(current.read.value, command);
+    const merged = mergeDeskHooks(current.read.value, command, DESK_HOOK_ASYNC);
     return writeMutation(resolved.settingsPath, current, merged, options, "desk hooks");
   } catch (error) {
     return { status: "error", detail: describeFailure(error) };
