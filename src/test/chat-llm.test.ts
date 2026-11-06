@@ -91,7 +91,7 @@ test("structurer allowlist rejects invented refs (no-new-claims gate)", () => {
 
 test("renderer strips uncited extras and counts them", () => {
   const check = validateRenderedClaims(
-    "rocky heard 1 thing.\nThe cache bug is definitely stale DNS.",
+    "Found 1 record.\nThe cache bug is definitely stale DNS.",
     ["failure-aaa"],
   );
   assert.ok(check.dropped > 0);
@@ -444,7 +444,7 @@ test("trace lines a model echoes never reach the served text", async () => {
       const echoed = await postChat(handle, { message: "npm run build", model: "stub-chat-model" });
       const echoedPayload = echoed.parsed as { text: string; trace: string[] };
       assert.equal(readLlmWire(echoed.parsed).renderer, "template", "a reply of only echoed lines is no answer");
-      assert.ok(echoedPayload.text.startsWith("rocky heard 1 thing."), echoedPayload.text);
+      assert.ok(echoedPayload.text.startsWith("Found 1 record."), echoedPayload.text);
       assert.ok(echoedPayload.trace.includes("renderer: template (no model text)."));
     } finally {
       await handle.close();
@@ -574,7 +574,7 @@ test("memory-only filters weak hits and never sends memory to remote models", as
       };
       assert.deepEqual(payload.evidenceCards, []);
       assert.equal(payload.decisionTrace.status, "low_confidence");
-      assert.match(payload.text, /tidak ada ingatan yang cukup cocok/i);
+      assert.match(payload.text, /tidak ada catatan memori yang cukup cocok/i);
       const matchedAnswer = await postChat(handle, {
         message: "vibingfarmer multi chain support",
         model: "remote-chat-model",

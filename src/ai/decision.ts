@@ -1,7 +1,7 @@
 /**
- * DecisionPort — the typed analysis layer between Rocky's evidence and rendering.
+ * DecisionPort — the typed analysis layer between rocky's evidence and rendering.
  *
- * Rocky supplies bounded, redacted evidence; a DecisionPort implementation
+ * rocky supplies bounded, redacted evidence; a DecisionPort implementation
  * judges it and returns typed answers. Code owns the workflow; the answers
  * only reorder or gate what evidence already says. No implementation here
  * invents claims: a failure always downgrades trust (status) and keeps the
@@ -191,10 +191,10 @@ function heuristicAnswer(question: DecisionQuestion): DecisionAnswer | undefined
  */
 export function createHeuristicPort(): DecisionPort {
   return {
-    async evaluate(state, questions) {
+    async evaluate(state, asked) {
       const started = Date.now();
       const answers: DecisionAnswer[] = [];
-      for (const question of questions) {
+      for (const question of asked) {
         const answer = heuristicAnswer(question);
         if (answer !== undefined) answers.push(answer);
       }

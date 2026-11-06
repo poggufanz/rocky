@@ -23,17 +23,31 @@ const LINES = [
   "failures and fixes in window:",
   "  none remembered",
   "explain-ready:",
-  "  why src change, question",
+  "  why did src change?",
 ];
 
 test("polishBriefLines swaps only polishable lines on valid model output", async () => {
   const polished = await polishBriefLines(LINES, clientReturning({
     lines: ["  src:", "    src/payment/retry.ts — retry now happens once, not twice"],
-    questions: ["  why src change, question"],
+    questions: ["  why did src change?"],
   }), "test-model");
   assert.equal(polished[0], "brief window: 24h");
   assert.equal(polished[1], "1 commit, 2 files. areas: src");
   assert.ok(polished.includes("    src/payment/retry.ts — retry now happens once, not twice"));
+});
+
+test("polishBriefLines asks the model to keep each question ending with a question mark", async () => {
+  let seen = "";
+  const client: OllamaClient = {
+    ...clientReturning({}),
+    generateStructured: async (_model: string, prompt: string) => {
+      seen = prompt;
+      return {};
+    },
+  };
+  await polishBriefLines(LINES, client, "test-model");
+  assert.match(seen, /ending with a question mark/);
+  assert.doesNotMatch(seen, /, question/);
 });
 
 test("polishBriefLines falls back to input on error", async () => {
@@ -59,14 +73,14 @@ test("polishBriefLines falls back to input when questions is empty but the expla
 test("polishBriefLines falls back to input on area line count mismatch", async () => {
   const tooFew = await polishBriefLines(LINES, clientReturning({
     lines: ["    src/payment/retry.ts — retry now happens once, not twice"],
-    questions: ["  why src change, question"],
+    questions: ["  why did src change?"],
   }), "test-model");
   assert.deepEqual(tooFew, LINES);
   assert.equal(tooFew, LINES);
 
   const tooMany = await polishBriefLines(LINES, clientReturning({
     lines: ["  src:", "    src/payment/retry.ts — retry now happens once, not twice", "  extra line"],
-    questions: ["  why src change, question"],
+    questions: ["  why did src change?"],
   }), "test-model");
   assert.deepEqual(tooMany, LINES);
   assert.equal(tooMany, LINES);

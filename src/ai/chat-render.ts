@@ -5,9 +5,9 @@
  * local status text; `chat-llm.ts` supplies model prose. Factual lines,
  * including bullet and numbered items, must cite an allowed record or Jev ref.
  *
- * Answer text says what Rocky heard. The record id, the decision, its detail
- * and the memory coverage line are trace: `renderChatTrace` returns them as
- * separate lines for the drawer that shows how Rocky answered.
+ * Answer text says what was found in memory. The record id, the decision, its
+ * detail and the memory coverage line are trace: `renderChatTrace` returns them
+ * as separate lines for the drawer that shows how the answer was produced.
  */
 
 export type ChatRenderEngine = "heuristic" | "jev";
@@ -24,7 +24,7 @@ export interface ChatRenderFact {
   readonly query?: string;
   /** The record id: it goes to the trace, never to the answer text. */
   readonly topRef?: string;
-  /** What Rocky heard for the top record, as the home list labels it. */
+  /** What the top record says, as the home list labels it. */
   readonly topLabel?: string;
   readonly topKind?: string;
   /** Top-1 Noul score when a Jev ranking was used, otherwise null/undefined. */
@@ -46,25 +46,32 @@ export interface ChatRenderFact {
 export const CHAT_RENDER_ORDER = ["evidenceCards", "text", "decisionTrace"] as const;
 
 /** Raw template: what a renderer failure degrades to, never a retry-guess. */
-export const RAW_CHAT_TEXT = "rocky heard nothing. no witness, no ranking.";
+export const RAW_CHAT_TEXT = "No records were found. Nothing was ranked.";
 export const RAW_CHAT_TRACE: readonly string[] = Object.freeze([
   "decision: heuristic unavailable, baseline kept, 0ms.",
 ]);
 
 /** Deterministic trace lines are metadata; model claims must cite evidence. */
 const TEMPLATE_PREFIXES = [
-  "rocky heard ",
   "decision: ",
   "detail: ",
   "memory coverage incomplete: ",
   "renderer: ",
 ] as const;
 
+/**
+ * The count line `renderChatText` writes. It is the one template line that is
+ * not a `label: ` line, so it is matched whole: a model line that merely starts
+ * with "Found" still has to cite evidence.
+ */
+const COUNT_LINE = /^found \S+ records?\.$/iu;
+
 function isTemplateLine(line: string): boolean {
   const trimmed = line.trim();
   if (trimmed.length === 0) return true;
   if (/^[-*+]\s/u.test(trimmed) || /^\d+[\.)]\s+/u.test(trimmed)) return false;
   if (/^#{1,6}\s/u.test(trimmed) || /^```/u.test(trimmed) || /^(?:---+|\*\*\*+)$/u.test(trimmed)) return true;
+  if (COUNT_LINE.test(trimmed)) return true;
   return TEMPLATE_PREFIXES.some((prefix) => trimmed.toLowerCase().startsWith(prefix));
 }
 
@@ -75,7 +82,7 @@ function hasTopRecord(fact: ChatRenderFact, count: number): fact is ChatRenderFa
 /**
  * The page reads answer lines as small Markdown, and that parser has no
  * escapes: a bare `test_a_b.py` or `*.log *.tmp` would turn into italics, and
- * Rocky would show a command other than the one he heard. A code span shows
+ * the page would show a command other than the one recorded. A code span shows
  * the label as it is. A backtick inside it would end the span, so it becomes an
  * apostrophe, and a line break would split the span, so whitespace collapses.
  */
@@ -84,7 +91,7 @@ function labelSpan(label: string): string {
 }
 
 /**
- * The top record as the answer says it: the label Rocky heard, then its kind.
+ * The top record as the answer says it: its label as recorded, then its kind.
  * The id is not here; it is the first trace line. A record that says nothing
  * else is labelled by its kind, and a label that only repeats the kind names
  * nothing, so it is not printed twice.
@@ -92,15 +99,15 @@ function labelSpan(label: string): string {
 function bestMatchLine(fact: ChatRenderFact): string | undefined {
   const label = fact.topLabel?.trim() ?? "";
   const kind = fact.topKind?.trim() ?? "";
-  if (label.length > 0 && label !== kind) return `best match: ${labelSpan(label)}${kind.length > 0 ? ` (${kind})` : ""}. remembered, not proven.`;
-  if (kind.length > 0) return `best match: ${kind} record. remembered, not proven.`;
+  if (label.length > 0 && label !== kind) return `Best match: ${labelSpan(label)}${kind.length > 0 ? ` (${kind})` : ""}. Remembered, not proven.`;
+  if (kind.length > 0) return `Best match: ${kind} record. Remembered, not proven.`;
   return undefined;
 }
 
 /**
- * Template-first answer text: how many records Rocky heard and which one
- * matches best, by label. Everything else Rocky knows about the answer is
- * trace: see `renderChatTrace`.
+ * Template-first answer text: how many records were found and which one
+ * matches best, by label. Everything else known about the answer is trace:
+ * see `renderChatTrace`.
  */
 export function renderChatText(fact: ChatRenderFact): string {
   const lines: string[] = [];
@@ -108,7 +115,7 @@ export function renderChatText(fact: ChatRenderFact): string {
   if (count === 0) {
     lines.push(RAW_CHAT_TEXT);
   } else {
-    lines.push(`rocky heard ${count} thing${count === 1 ? "" : "s"}.`);
+    lines.push(`Found ${count} record${count === 1 ? "" : "s"}.`);
     const best = hasTopRecord(fact, count) ? bestMatchLine(fact) : undefined;
     if (best !== undefined) lines.push(best);
   }

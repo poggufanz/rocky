@@ -50,7 +50,7 @@ export async function polishBriefLines(lines: string[], client: OllamaClient, mo
   const prompt = [
     "Rewrite these change-list lines and reviewer questions to read naturally.",
     "Keep every file path, commit subject fact, and count unchanged.",
-    "Keep each question ending with ', question'. Do not add new items.",
+    "Keep each question ending with a question mark. Do not add new items.",
     "Return JSON with keys lines and questions.",
     "LINES:",
     ...areaLines,

@@ -245,7 +245,7 @@ const CHAT_RENDER_SCHEMA: Record<string, unknown> = {
 
 function structurerSystemPrompt(): string {
   const lines: string[] = [];
-  lines.push("You are a strict TypeSafe AI query structurer for Rocky CLI.");
+  lines.push("You are a strict TypeSafe AI query structurer for the rocky CLI.");
   lines.push("Your task: structure the user's question and select relevant candidate memory records into typed JSON.");
   lines.push("Output format: ONLY valid JSON matching { \"query\": string, \"candidates\": [ { \"ref\": string, \"kind\": string, \"snippet\": string } ] }.");
   lines.push("Rules:");
@@ -271,18 +271,18 @@ function structurerUserPrompt(query: string, evidence: readonly ChatEvidenceRef[
 
 function rendererSystemPrompt(): string {
   const lines: string[] = [];
-  lines.push("You are Rocky's expert reasoning and comprehension assistant in Rocky CLI Dash.");
-  lines.push("You help developers understand their project's execution history, errors, successful fixes, and reasoning recorded by Rocky.");
+  lines.push("You are an expert reasoning and comprehension assistant in the rocky CLI dash.");
+  lines.push("You help developers understand their project's execution history, errors, successful fixes, and reasoning recorded by rocky.");
   lines.push("");
   lines.push("Rules for your response:");
   lines.push("1. Direct Answer: Answer only what the user's question asks. Do not turn weakly related history into a summary.");
   lines.push("2. Language Matching: Reply in Bahasa Indonesia if the user asks in Indonesian, or in English if the user asks in English.");
-  lines.push("3. Grounded in Evidence: Use ONLY the provided Rocky Memory records and Jev decision facts; do not add outside facts.");
+  lines.push("3. Grounded in Evidence: Use ONLY the provided rocky memory records and Jev decision facts; do not add outside facts.");
   lines.push("4. Evidence Citations: Cite every factual sentence and each list item with an allowed evidence reference such as [1] or [2].");
-  lines.push("5. Relevance: If no supplied record directly answers the question, say Rocky has no matching memory and stop. Do not summarize merely related records.");
-  lines.push("6. Clean Human Tone: Avoid raw hash IDs; use numbered citations. The UI displays raw record IDs and snippets in the Thought Process drawer.");
+  lines.push("5. Relevance: If no supplied record directly answers the question, say that rocky has no matching memory and stop. Do not summarize merely related records.");
+  lines.push("6. Plain Tone: Avoid raw hash IDs; use numbered citations. The UI displays raw record IDs and snippets in the trace drawer.");
   lines.push("7. Format: Use concise markdown with natural paragraphs, bold terms, and bullets only when useful.");
-  lines.push("8. IMPORTANT: Do NOT output raw template tags or debug lines like 'top: ...' or 'detail: ...' or 'renderer: ...'. Speak naturally.");
+  lines.push("8. IMPORTANT: Do NOT output raw template tags or debug lines like 'top: ...' or 'detail: ...' or 'renderer: ...'. Write plain prose.");
   return lines.join("\n");
 }
 
@@ -294,12 +294,12 @@ function rendererUserPrompt(fact: ChatRenderFact, allowed: readonly string[]): s
   }
 
   if (fact.evidence && fact.evidence.length > 0) {
-    lines.push(`Rocky Memory Evidence Records (${fact.evidence.length} items):`);
+    lines.push(`Memory Evidence Records (${fact.evidence.length} items):`);
     fact.evidence.forEach((item, i) => {
       lines.push(`[${i + 1}] Type: ${item.kind}\nContext & Details: ${item.snippet}`);
     });
   } else {
-    lines.push("Rocky Memory Evidence: (No matching records found in memory)");
+    lines.push("Memory Evidence: (No matching records found in memory)");
   }
   lines.push("");
   lines.push(`Jev Decision Assessment: Engine: ${fact.engine}, Status: ${fact.status}${typeof fact.topScore === "number" ? `, Top Score: ${fact.topScore.toFixed(2)}` : ""}${fact.detail ? `, Detail: ${fact.detail}` : ""}`);

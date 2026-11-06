@@ -163,7 +163,7 @@ test("chat validates its input and keeps the token gate", async () => {
 test("chat on empty memory holds with a visible trace", async () => {
   const { root } = hermetic();
   await withGui(root, async (handle) => {
-    const answer = await post(handle, { message: "something never heard" });
+    const answer = await post(handle, { message: "something never recorded" });
     assert.equal(answer.status, 200);
     assert.deepEqual(answer.wire?.evidenceCards, []);
     assert.deepEqual(answer.wire?.decisionTrace.evidenceRefs, []);
@@ -175,7 +175,7 @@ const UUID_SHAPE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-/u;
 const RECORD_UUID = "3f2b8c1e-9d4a-4b7e-8a1c-5e6f7a8b9c0d";
 const TRACE_PREFIXES = ["top: ", "decision: ", "detail: ", "renderer: ", "memory coverage incomplete: "];
 
-test("chat text names the top record by what Rocky heard and keeps its id in the trace", async () => {
+test("chat text names the top record by its label and keeps its id in the trace", async () => {
   const { home, root } = hermetic();
   seedMemory(home, [failureRecord(RECORD_UUID, "npm run build")]);
   await withGui(root, async (handle) => {
@@ -185,7 +185,7 @@ test("chat text names the top record by what Rocky heard and keeps its id in the
     assert.ok(wire !== null);
     assert.doesNotMatch(wire.text, UUID_SHAPE);
     for (const prefix of TRACE_PREFIXES) assert.ok(!wire.text.includes(prefix), `${prefix}stays out of the answer text`);
-    assert.ok(wire.text.includes("best match: `npm run build` (failure). remembered, not proven."), wire.text);
+    assert.ok(wire.text.includes("Best match: `npm run build` (failure). Remembered, not proven."), wire.text);
     assert.deepEqual(validateOutputLine(wire.text), []);
     assert.ok(wire.trace.includes(`top: ${RECORD_UUID} (failure). remembered, not proven.`), wire.trace.join("\n"));
     assert.ok(wire.trace.some((line) => line.startsWith("decision: heuristic used")));
@@ -195,7 +195,7 @@ test("chat text names the top record by what Rocky heard and keeps its id in the
   });
 });
 
-test("chat text shows a command with underscores and asterisks as Rocky heard it", async () => {
+test("chat text shows a command with underscores and asterisks as it was recorded", async () => {
   for (const cmd of ["pytest tests/test_a_b.py", "rm -rf *.log *.tmp"]) {
     const { home, root } = hermetic();
     seedMemory(home, [failureRecord("persisted-failure-one-9d3f", cmd)]);
@@ -203,12 +203,12 @@ test("chat text shows a command with underscores and asterisks as Rocky heard it
       const answer = await post(handle, { message: `memory: ${cmd}` });
       assert.equal(answer.status, 200, cmd);
       assert.equal(answer.wire?.decisionTrace.status, "used", cmd);
-      assert.ok(answer.wire?.text.includes(`best match: \`${cmd}\` (failure).`), answer.wire?.text);
+      assert.ok(answer.wire?.text.includes(`Best match: \`${cmd}\` (failure).`), answer.wire?.text);
     });
   }
 });
 
-test("chat answers over a read with a line Rocky cannot use, and says so in words", async () => {
+test("chat answers over a read with a line that cannot be used, and says so in words", async () => {
   const { home, root } = hermetic();
   writeFileSync(
     join(home, "memory.jsonl"),
@@ -221,10 +221,10 @@ test("chat answers over a read with a line Rocky cannot use, and says so in word
       assert.equal(answer.status, 200, message);
       const wire = answer.wire;
       assert.ok(wire !== null, message);
-      // Answered: one unusable line does not hold back the records Rocky can use.
+      // Answered: one unusable line does not hold back the records that can be used.
       assert.equal(wire.decisionTrace.status, "used", message);
       assert.deepEqual(wire.evidenceCards.map((card) => card.ref), ["persisted-failure-one-9d3f"], message);
-      assert.ok(wire.text.includes("best match: `npm run build` (failure)."), wire.text);
+      assert.ok(wire.text.includes("Best match: `npm run build` (failure)."), wire.text);
       // Disclosed: the flag is set, in plain words, and the trace carries the same line.
       assert.equal(wire.coverage?.reason, line, message);
       assert.ok(wire.trace.includes(line), wire.trace.join("\n"));
@@ -235,14 +235,14 @@ test("chat answers over a read with a line Rocky cannot use, and says so in word
   });
 });
 
-test("chat that finds no record still discloses a line Rocky cannot use", async () => {
+test("chat that finds no record still discloses a line that cannot be used", async () => {
   const { home, root } = hermetic();
   writeFileSync(
     join(home, "memory.jsonl"),
     `${JSON.stringify(failureRecord("persisted-failure-one-9d3f", "npm run build"))}\nthis line is not json\n`,
   );
   await withGui(root, async (handle) => {
-    const answer = await post(handle, { message: "something never heard" });
+    const answer = await post(handle, { message: "something never recorded" });
     assert.equal(answer.status, 200);
     assert.equal(answer.wire?.decisionTrace.status, "low_confidence");
     assert.deepEqual(answer.wire?.evidenceCards, []);

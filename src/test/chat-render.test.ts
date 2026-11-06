@@ -34,7 +34,7 @@ const JEV_FACT: ChatRenderFact = {
 
 test("template text names the top record by label, and its id stays in the trace", () => {
   const text = renderChatText(JEV_FACT);
-  assert.equal(text, "rocky heard 2 things.\nbest match: `npm run build` (failure). remembered, not proven.");
+  assert.equal(text, "Found 2 records.\nBest match: `npm run build` (failure). Remembered, not proven.");
   assert.deepEqual(validateOutputLine(text), []);
   assert.deepEqual(renderChatTrace(JEV_FACT), [
     "top: failure-aaa (failure). remembered, not proven.",
@@ -55,17 +55,17 @@ test("best match shows the label as a code span, so inline markdown cannot chang
   const labels = ["pytest tests/test_a_b.py", "rm -rf *.log *.tmp", "echo __init__ and **bold**", "ls [failure-aaa] _x_"];
   for (const label of labels) {
     const text = renderChatText({ ...JEV_FACT, topLabel: label });
-    assert.ok(text.includes(`best match: \`${label}\` (failure). remembered, not proven.`), text);
+    assert.ok(text.includes(`Best match: \`${label}\` (failure). Remembered, not proven.`), text);
   }
 });
 
 test("a backtick in the label cannot end the code span, and a line break cannot split it", () => {
   const text = renderChatText({ ...JEV_FACT, topLabel: "echo `date`\n  now" });
-  assert.equal(text, "rocky heard 2 things.\nbest match: `echo 'date' now` (failure). remembered, not proven.");
+  assert.equal(text, "Found 2 records.\nBest match: `echo 'date' now` (failure). Remembered, not proven.");
 });
 
 test("a model cannot pass an uncited best match line through the claims gate", () => {
-  const check = validateRenderedClaims("best match: `rm -rf /` (failure). remembered, not proven.", ["failure-aaa"]);
+  const check = validateRenderedClaims("Best match: `rm -rf /` (failure). Remembered, not proven.", ["failure-aaa"]);
   assert.equal(check.dropped, 1);
   assert.equal(check.stripped, "");
 });
@@ -73,20 +73,20 @@ test("a model cannot pass an uncited best match line through the claims gate", (
 test("a top record without a label is named by kind, never by id", () => {
   const fact: ChatRenderFact = { topRef: RECORD_UUID, topKind: "failure", engine: "heuristic", status: "used", evidenceCount: 1, latencyMs: 0 };
   const text = renderChatText(fact);
-  assert.equal(text, "rocky heard 1 thing.\nbest match: failure record. remembered, not proven.");
+  assert.equal(text, "Found 1 record.\nBest match: failure record. Remembered, not proven.");
   assert.deepEqual(validateOutputLine(text), []);
   const bare = renderChatText({ engine: "heuristic", status: "used", evidenceCount: 1, latencyMs: 0 });
-  assert.equal(bare, "rocky heard 1 thing.");
+  assert.equal(bare, "Found 1 record.");
 });
 
-test("nothing heard says so in the text and keeps the decision in the trace", () => {
+test("no records found says so in the text and keeps the decision in the trace", () => {
   const fact: ChatRenderFact = { engine: "heuristic", status: "low_confidence", evidenceCount: 0, latencyMs: 4 };
-  assert.equal(renderChatText(fact), "rocky heard nothing. no witness, no ranking.");
+  assert.equal(renderChatText(fact), "No records were found. Nothing was ranked.");
   assert.deepEqual(renderChatTrace(fact), ["decision: heuristic low_confidence, baseline kept, 4ms."]);
 });
 
 test("trace keeps top, decision, detail, then the coverage line, and none reach the text", () => {
-  const coverageLine = "memory coverage incomplete: 1 line I cannot use.";
+  const coverageLine = "memory coverage incomplete: 1 line could not be used.";
   const fact: ChatRenderFact = {
     topRef: "failure-aaa",
     topKind: "failure",
@@ -120,7 +120,16 @@ test("claim without a cited ref is stripped and counted", () => {
   const check = validateRenderedClaims(tainted, ["failure-aaa"]);
   assert.ok(check.dropped > 0);
   assert.ok(!check.stripped.includes("stale DNS"));
-  assert.ok(check.stripped.includes("rocky heard 1 thing"));
+  assert.ok(check.stripped.includes("Found 1 record."));
+});
+
+test("only the exact count line passes the claims gate without a citation", () => {
+  const kept = validateRenderedClaims("Found 3 records.", ["failure-aaa"]);
+  assert.equal(kept.dropped, 0);
+  assert.equal(kept.stripped, "Found 3 records.");
+  const claim = validateRenderedClaims("Found the cause in a stale cache.", ["failure-aaa"]);
+  assert.equal(claim.dropped, 1);
+  assert.equal(claim.stripped, "");
 });
 
 test("cited answer id survives the claims gate", () => {
