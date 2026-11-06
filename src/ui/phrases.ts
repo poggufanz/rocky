@@ -42,7 +42,7 @@ const PHRASES: Readonly<Record<PhraseKey, string>> = Object.freeze({
   "watch-fail": "Command failed.",
   "watch-log-unwritable": "Watch log folder cannot be opened. No log this time; memory still records.",
   "check-secret": "A secret is in the outgoing code.",
-  "check-package-missing": "Package does not exist on the registry. Was it invented by an AI?",
+  "check-package-missing": "Package does not exist on the registry.",
   "check-registry-consent": "Only package names go to registry.npmjs.org. No telemetry. Offline failures stay open. Allow registry lookup? [y/N]",
   "check-answer": "Your answer:",
   "check-comprehension": "Risky new line. What does it do?",
@@ -109,10 +109,11 @@ export function phraseForAct(act: AiAct): string {
  */
 const OLD_PREFIX = /\[rocky\]/i;
 const QUESTION_SUFFIX = /,\s*question\b/i;
-// Emphasis by repetition: "good good", "bad bad". Any doubled word is suspect.
+// Emphasis by repetition, such as a word said twice in a row. Any doubled word is suspect.
 const REPEATED_WORD = /(?:^|[^\p{L}\p{N}_])(\p{L}+)(?:\s+\1)+(?=$|[^\p{L}\p{N}_])/iu;
-const FIRST_PERSON = /(?:^|[^\p{L}\p{N}_'-])(?:I|I'm|I've|I'll|[Mm]e|[Mm]y|[Mm]ine|[Mm]yself)(?=$|[^\p{L}\p{N}_'-])/u;
-const LORE = /\b(?:blind|eridian|alien|ears?|hears?|heard|hearing)\b/i;
+// "/" stays a word character here so "I/O" is not read as first person.
+const FIRST_PERSON = /(?:^|[^\p{L}\p{N}_'/-])(?:I|I'm|I've|I'll|[Mm]e|[Mm]y|[Mm]ine|[Mm]yself)(?=$|[^\p{L}\p{N}_'/-])/u;
+const LORE = /\b(?:ears?|hears?|heard|hearing)\b/i;
 // A bare trailing verdict: "command dies. bad." / "... good."
 const VERDICT_TAG = /(?:^|[.!;]\s+)(?:good|bad)[.!]?\s*$/i;
 const EMOJI = /[\u{00A9}\u{00AE}\u{203C}\u{2049}\u{2122}\u{2139}\u{2300}-\u{23FF}\u{2600}-\u{27BF}\u{2B00}-\u{2BFF}\u{3030}\u{303D}\u{3297}\u{3299}\u{1F000}-\u{1FAFF}\u{200D}\u{FE0F}]/u;
