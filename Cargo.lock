@@ -15,6 +15,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4e7648175b45a9a48536d676f68d918270699102aa8dab5496df06904c914600"
 
 [[package]]
+name = "doctest-file"
+version = "1.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c2db04e74f0a9a93103b50e90b96024c9b2bdca8bce6a632ec71b88736d3d359"
+
+[[package]]
 name = "errno"
 version = "0.3.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -39,6 +45,19 @@ dependencies = [
  "cfg-if",
  "libc",
  "r-efi",
+]
+
+[[package]]
+name = "interprocess"
+version = "2.4.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a4a4fff6c51dece332bdbf3af5fe376c49cfc8dced782725e95be0bb489e35d7"
+dependencies = [
+ "doctest-file",
+ "libc",
+ "recvmsg",
+ "widestring",
+ "windows-sys",
 ]
 
 [[package]]
@@ -96,6 +115,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
+name = "recvmsg"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d3edd4d5d42c92f0a659926464d4cce56b562761267ecf0f469d85b7de384175"
+
+[[package]]
 name = "rocky-desk"
 version = "0.1.0"
 dependencies = [
@@ -123,9 +148,11 @@ dependencies = [
 name = "rockyd"
 version = "0.1.0"
 dependencies = [
+ "interprocess",
  "rocky-proto",
  "serde_json",
  "tempfile",
+ "widestring",
  "windows-sys",
 ]
 
@@ -214,6 +241,12 @@ name = "unicode-ident"
 version = "1.0.27"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a2c754d6c33795a1c324727428e5a7dedb5b06195f9890bdbcba760d3e246563"
+
+[[package]]
+name = "widestring"
+version = "1.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "72069c3113ab32ab29e5584db3c6ec55d416895e60715417b5b883a357c3e471"
 
 [[package]]
 name = "windows-link"
