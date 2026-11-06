@@ -16,7 +16,7 @@ test("listening tab and tabpanel exist with filters and screenshot states", () =
   for (const id of ["listen-repo-pick", "listen-session", "listen-agent", "listen-surface", "listen-file", "listen-since"]) {
     assert.ok(html.includes(`id="${id}"`), `missing filter ${id}`);
   }
-  assert.ok(html.includes("Rocky Listen"), "missing header state");
+  assert.match(html, /<h2 id="listen-header">Listening/, "missing header state");
   assert.ok(html.includes("Listen To Repo"), "missing repo line");
   assert.ok(html.includes("Getting rationale"), "missing status state");
   assert.ok(html.includes("Secret may remain") || html.includes("secret may remain"), "missing secret warning");
@@ -64,7 +64,7 @@ test("listening needs one pick and one Listen click, nothing typed", () => {
   assert.match(html, /<details class="listen-more"/, "filters stay collapsed by default");
   assert.ok(app.includes("loadListenRepos"), "missing picker loader");
   assert.ok(app.includes("/api/listening/context"), "picker must read the read-only context endpoint");
-  assert.ok(app.includes("fillListenFilter"), "filter choices must come from heard events");
+  assert.ok(app.includes("fillListenFilter"), "filter choices must come from recorded events");
   // Grant stays one explicit click; choosing a repo only refreshes.
   assert.match(app, /function postListenConsent[\s\S]*?yes: true/, "consent POST must send the explicit yes");
   assert.match(app, /function listenConsentButton[\s\S]*?postListenConsent\(/, "Listen button must post through the explicit-yes helper");

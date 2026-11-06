@@ -50,29 +50,29 @@ const CODE_MAX_GREP_FILES = 20;
 const CODE_WINDOWS_PER_FILE = 2;
 
 /**
- * Disclosures (spec §2.9). Statements, no `?`, no emoji; never blank. A code
+ * Disclosures (spec §2.9). Plain statements, no emoji; never blank. A code
  * answer is either the model's grounded paragraph or a server-built line
  * naming the quotes, and a disclosure always says what was not checked.
  */
-export const CODE_NO_MATCH = "code: no file in this root matched. memory answer stands alone.";
-export const CODE_UNRANKED = "code scan unranked: file list unavailable, excerpts come from memory-named files only.";
-export const CODE_ROUNDS_SPENT = "code budget spent after 3 rounds. files not read are not checked.";
-export const CODE_PREFIX_EMPTY = "code: no query after the prefix. memory only, this answer.";
-export const CODE_NO_MODEL = "no model configured: code quoting stays on this machine. excerpts shown, nothing sent.";
-export const CODE_MODEL_LOCAL = "code: the picked model runs on this machine. excerpts shown, no model paragraph.";
-export const CODE_EXCERPTS_ONLY = "code: quoted excerpts only, no model text on this pass.";
-export const CODE_NOTHING_QUOTED = "code: nothing quoted this pass. memory answer stands alone.";
+export const CODE_NO_MATCH = "Code search: no file in this root matched. The memory answer stands alone.";
+export const CODE_UNRANKED = "Code scan is unranked: the file list was unavailable, so excerpts come only from files that memory names.";
+export const CODE_ROUNDS_SPENT = "Code budget spent after 3 rounds. Files not read were not checked.";
+export const CODE_PREFIX_EMPTY = "Code search: no query after the prefix. This answer uses memory only.";
+export const CODE_NO_MODEL = "No model is configured: code quoting stays on this machine. Excerpts are shown and nothing is sent.";
+export const CODE_MODEL_LOCAL = "Code search: the selected model runs on this machine. Excerpts are shown, with no model paragraph.";
+export const CODE_EXCERPTS_ONLY = "Code search: quoted excerpts only, with no model text on this pass.";
+export const CODE_NOTHING_QUOTED = "Code search: nothing was quoted this pass. The memory answer stands alone.";
 export const CODE_WAITING_LABEL = "Searching memory, reading code, evaluating with Jev";
 export const CODE_TRUNCATED = (read: number, total: number): string =>
-  `code scan truncated: read ${read} of ${total} files. not all checked.`;
+  `Code scan truncated: read ${read} of ${total} files. Not all files were checked.`;
 export const CODE_ROUND_TIMEOUT = (round: number): string =>
-  `code read timed out in round ${round}. answer uses what was read.`;
+  `Code read timed out in round ${round}. The answer uses what was read.`;
 export const CODE_FILE_TOO_BIG = (path: string): string =>
-  `code: ${path} too big to quote. not read.`;
+  `${path} is too big to quote and was not read.`;
 export const CODE_FILE_LINES_CAPPED = (path: string): string =>
-  `code: ${path} cut at ${CODE_MAX_FILE_LINES} lines. later lines not checked.`;
+  `${path} was cut at ${CODE_MAX_FILE_LINES} lines. Later lines were not checked.`;
 export const CODE_UNGROUNDED = (stripped: number): string =>
-  `model claims not backed by quoted lines: ${stripped} stripped.`;
+  `Model claims not backed by quoted lines: ${stripped} stripped.`;
 
 /**
  * The rules that ride every code prompt. The model has no tools, so the
@@ -80,10 +80,10 @@ export const CODE_UNGROUNDED = (stripped: number): string =>
  * not given does not exist.
  */
 export const CODE_GROUNDING_RULES = [
-  "You answer one code question about this repository. Rocky read the excerpts below at request time, and they are the only code you have.",
+  "You answer one code question about this repository. The excerpts below were read from the repository at request time, and they are the only code you have.",
   "HARD STOP: you have no shell, no git, no database and no filesystem. NEVER claim you ran a command, opened another file, listed a directory, or inspected live data.",
-  "Quote only lines that appear inside an excerpt. Cite them as path:line, using the label Rocky printed, and only for lines inside that excerpt's range. Never invent a file, a line number, a commit, or a teammate name.",
-  "Keep the two tracks apart and do not merge them into one essay: CODE (what the quoted lines do) and MEMORY (what Rocky heard about them). Memory is a record of what happened, not proof of what the code means.",
+  "Quote only lines that appear inside an excerpt. Cite them as path:line, using the label printed above the excerpt, and only for lines inside that excerpt's range. Never invent a file, a line number, a commit, or a teammate name.",
+  "Keep the two tracks apart and do not merge them into one essay: CODE (what the quoted lines do) and MEMORY (what rocky recorded about them). Memory is a record of what happened, not proof of what the code means.",
   "If the excerpts do not answer the question, say which part you cannot support and stop there. A short honest answer beats a reconstruction.",
   "Answer in the language of the question, in at most four plain sentences. No markdown headings, no code fences, no bullet lists.",
 ].join("\n");
@@ -179,7 +179,7 @@ export interface CollectCodeEvidenceInput {
   query: string;
   /** The server's `confine(root, candidate)`: the only way a path is opened. */
   confine: (candidate: string) => string | undefined;
-  /** Launch-root-relative paths Rocky's memory already names. */
+  /** Launch-root-relative paths rocky's memory already names. */
   witnessed?: readonly string[];
   /** Tokens from this chat's memory hits: files memory names outrank raw matches. */
   priorTokens?: ReadonlySet<string>;
@@ -259,8 +259,8 @@ export function splitCodePrefix(message: string): CodeQuerySplit {
  * `schema`, …) fire only together with a path, position, or symbol token, so
  * `where is the config` stays memory-only while `where is loadConfig defined`
  * scans. A bare question word, a bare error string, and a bare command fire
- * nothing. A basename Rocky's memory already names counts as a code signal:
- * the user is asking for the code behind a file he was told about.
+ * nothing. A basename rocky's memory already names counts as a code signal:
+ * the user is asking for the code behind a file memory already mentions.
  */
 export function isCodeQuery(message: string, witnessed: readonly string[] = []): boolean {
   const text = message.trim();
@@ -343,8 +343,8 @@ function overlapCount(tokens: ReadonlySet<string>, bag: ReadonlySet<string>): nu
 
 /**
  * Path score: the basename outranks directory segments, and the memory prior
- * (Q11) decides ties — a file Rocky heard about, or whose name matches the
- * tokens of what he heard, outranks a file that only matches the raw question.
+ * (Q11) decides ties — a file memory records, or whose name matches the
+ * tokens of what memory recorded, outranks a file that only matches the raw question.
  */
 function scorePath(
   rel: string,
@@ -757,7 +757,7 @@ export function buildCodePrompt(input: CodePromptInput): string {
   return [
     input.preamble,
     CODE_GROUNDING_RULES,
-    "MEMORY EVIDENCE (what Rocky heard; cite it as a record, never as proof of code):",
+    "MEMORY EVIDENCE (what rocky recorded; cite it as a record, never as proof of code):",
     memory,
     "JEV DECISION TRACE (the ranker's own reading of the memory; context, not code evidence):",
     jev,
@@ -814,7 +814,7 @@ export function validateCodeCitations(
 /**
  * The token bag the memory hits contribute to ranking: the commands a failure
  * or fix carried, a triple's intent text and rationale tags, and the files a
- * triple covered. Candidates are ordered against what Rocky heard (Q11), not
+ * triple covered. Candidates are ordered against what rocky recorded (Q11), not
  * against the raw question alone.
  */
 export function memoryPriorTokens(
@@ -844,5 +844,5 @@ export function codeFallbackText(evidence: readonly CodeExcerpt[]): string {
   const files = new Set(evidence.map((excerpt) => excerpt.path)).size;
   const excerpts = evidence.length === 1 ? "excerpt" : "excerpts";
   const fileWord = files === 1 ? "file" : "files";
-  return `code: quoted ${evidence.length} ${excerpts} from ${files} ${fileWord}. memory answer stands above.`;
+  return `Code search: quoted ${evidence.length} ${excerpts} from ${files} ${fileWord}. The memory answer stands above.`;
 }

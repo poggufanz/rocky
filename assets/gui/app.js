@@ -48,40 +48,9 @@ function box(className, ...children) {
   return node;
 }
 
-/**
- * Rocky himself, converted from the former assets/rocky-pixel.webp by masking the warm
- * lit stone off the cold room and mapping what survived onto a density ramp.
- * Drawn by hand it would only have been a guess at his shape.
- */
-const FACE = [
-  "                                :-:",
-  "        %%%%#**+*#**+-         =- .-:",
-  "   *%%****+**+++*+=-..:==:     -=  --",
-  "=*#@%@#***+***+*+=-::.=+*+=:    ==.-:",
-  " :=*+==+++**++++:.:... :=--==: -*:.",
-  "   :=--===+++*+:.::...    -=#*+*++:.",
-  "    ..:==+==+-:.=  .       :==-==:",
-  " =#*- .:-----. -  .      :",
-  "++=-:  .: -:-  :.       =+*-",
-  "=.        ... -+:        -:-+:",
-  "-            ++--         .+*+:",
-  "             +**:          .==:.",
-  "            :+**:            :-:",
-  "             -::             - ::",
-  "            .*:-*",
-  ".  ::.      .-  +",
-];
-
-/** Waiting: rocky arrives a line at a time, from the top down. */
+/** Waiting for a view whose shape is not known yet: a few shimmer rows. */
 function skeleton() {
-  const art = el("pre", "rocky-load");
-  art.setAttribute("aria-label", "rocky listening");
-  FACE.forEach((line, index) => {
-    const row = el("span", "rl-line", line);
-    row.style.setProperty("--i", String(index));
-    art.append(row);
-  });
-  return box("listen", art);
+  return box("skel-block", listSkeleton(4));
 }
 
 function empty(...lines) {
@@ -92,9 +61,9 @@ function empty(...lines) {
 
 /** An error that promises a retry has to offer one. */
 function failed(retry) {
-  const wrap = box("fail", el("p", null, "rocky not hear answer."));
+  const wrap = box("fail", el("p", null, "No answer arrived."));
   if (retry) {
-    const again = el("button", "fail-retry", "listen again");
+    const again = el("button", "fail-retry", "Try again");
     again.type = "button";
     again.addEventListener("click", retry);
     wrap.append(again);
@@ -258,7 +227,7 @@ for (const tab of tabs) {
 
 /* ---- main ------------------------------------------------------------- */
 
-/** Kinds that are rocky explaining himself. These carry the voice colour. */
+/** Kinds that are recorded reasons. These carry the voice colour. */
 const WHY_KINDS = new Set(["rationale", "explain", "triple"]);
 
 /**
@@ -291,7 +260,7 @@ async function loadMain() {
     && Array.isArray(data.topFiles) && Array.isArray(data.recent);
   if (!sane) {
     state.mainLoaded = false;
-    announceHome({ error: "bad reply", retry: loadMain });
+    announceHome({ error: "unexpected reply", retry: loadMain });
     return;
   }
 
@@ -299,10 +268,6 @@ async function loadMain() {
   setTally();
   announceHome({ data });
 }
-
-// Rocky himself greets an empty chat; the face lives here with its source note.
-const cxFace = $("#cx-face");
-if (cxFace) cxFace.textContent = FACE.join("\n");
 
 /* ---- dash: picker ----------------------------------------------------- */
 
@@ -336,24 +301,24 @@ const MODE_GUIDE = {
   lines: {
     name: "Lines",
     ask: "Why a line exists",
-    how: "Click a line to ask why it exists, or drag across several and press Why. Rocky answers from the notes left when that code was written.",
+    how: "Click a line to ask why it exists, or drag across several and press Why. Answers come from the notes left when that code was written.",
   },
   history: {
     name: "History",
     ask: "What changed, and why",
-    how: "Every change Rocky heard for this file, newest first. Each change carries the notes that explain it.",
+    how: "Every change recorded for this file, newest first. Each change carries the notes that explain it.",
   },
   compare: {
     name: "Compare",
     ask: "Then against now",
-    how: "Pick two moments, A and B. Rocky holds them side by side with their diffs, so drift in intent shows.",
+    how: "Pick two moments, A and B. They sit side by side with their diffs, so drift in intent shows.",
   },
 };
 
 /** By change, the pane holds one change and every file it touched. */
 const BUNDLE_GUIDE = {
   lines: "Every file this change touched, with its diff. Open a file row to read it.",
-  history: "Every file this change touched, with the notes Rocky heard for each.",
+  history: "Every file this change touched, with the notes recorded for each.",
   compare: MODE_GUIDE.compare.how,
 };
 
@@ -387,13 +352,13 @@ function paintPaneGuide() {
 /**
  * What the pane says before a file is picked. An empty screen is an
  * invitation to act: it names the three questions Dash answers, lets a mode
- * be chosen up front, and offers the files Rocky holds the most notes on.
+ * be chosen up front, and offers the files with the most notes.
  */
 function paneWelcome() {
   const guide = el("div", "guide");
   guide.append(
-    el("h2", "guide-title", "Hear why your code is the way it is"),
-    el("p", "guide-lede", "Rocky keeps the notes agents and you leave while files change. Pick a file from the list, then pick what to ask of it."),
+    el("h2", "guide-title", "See why your code is the way it is"),
+    el("p", "guide-lede", "rocky keeps the notes agents and you leave while files change. Pick a file from the list, then pick what to ask of it."),
   );
 
   const modesRow = el("div", "guide-modes");
@@ -418,9 +383,9 @@ function paneWelcome() {
 
   const shown = (state.files ?? []).filter((file) => !state.repoHidden.has(fileGroup(file)));
   const section = el("section", "guide-block");
-  section.append(el("h3", "guide-head", "Start with the files Rocky knows best"));
+  section.append(el("h3", "guide-head", "Start with the files that have the most notes"));
   if (shown.length === 0) {
-    section.append(el("p", "guide-note", "No file notes heard yet. Run work through rocky, or connect an agent hook, and files land here."));
+    section.append(el("p", "guide-note", "No file notes recorded yet. Run work through rocky, or connect an agent hook, and files land here."));
   } else {
     const top = el("div", "guide-files");
     const most = Math.max(1, ...shown.map((file) => file.count));
@@ -448,7 +413,7 @@ function paneWelcome() {
   legend.append(el("h3", "guide-head", "Reading the list"));
   const terms = el("dl", "guide-legend");
   for (const [term, meaning] of [
-    ["63", "Notes Rocky holds for that file. More notes, fuller answers."],
+    ["63", "Notes recorded for that file. More notes, fuller answers."],
     ["By change", "Groups files that changed together, one row per commit or uncommitted batch."],
     ["!md", "Typed in the search box, hides .md files. Works for any word."],
     ["All repos", "Hides whole repos from the list when one project is noise."],
@@ -504,8 +469,8 @@ function renderFiles() {
 
   if (shown.length === 0) {
     fill($("#files"), files.length === 0
-      ? empty(state.filter ? "no heard file matches that search." : "no file notes heard yet.")
-      : empty("every repo is hidden. All repos opens them again."));
+      ? empty(state.filter ? "No file matches that search." : "No file notes recorded yet.")
+      : empty("Every repo is hidden. All repos opens them again."));
     return;
   }
 
@@ -540,8 +505,8 @@ function renderFiles() {
 
 /* ---- dash: repo filter -------------------------------------------------- */
 
-/** One card per heard group, busiest first; non-repo comes last. Each card
- *  carries the group's newest intent and when it was heard, so the picker
+/** One card per recorded group, busiest first; non-repo comes last. Each card
+ *  carries the group's newest intent and when it was recorded, so the picker
  *  reads as a list of live places rather than bare names. */
 function paintRepoFilter() {
   const groups = new Map();
@@ -574,12 +539,12 @@ function paintRepoFilter() {
       const top = el("span", "repo-card-top");
       top.append(el("span", "repo-name", group.label), el("span", "repo-count", `${group.count} files`));
       text.append(top);
-      text.append(el("span", "repo-intent", group.last?.label || "nothing heard yet"));
+      text.append(el("span", "repo-intent", group.last?.label || "Nothing recorded yet."));
       text.append(el("span", "repo-updated", group.last ? `Updated ${group.last.agoText}` : ""));
       row.append(check, text);
       return row;
     });
-  fill($("#repo-filter-list"), ...(rows.length > 0 ? rows : [empty("no repo matches that search.")]));
+  fill($("#repo-filter-list"), ...(rows.length > 0 ? rows : [empty("No repo matches that search.")]));
 }
 
 function openRepoFilter() {
@@ -628,9 +593,9 @@ async function loadBundles() {
   if (state.bundles && state.bundles.length > 0) {
     renderBundles();
   } else {
-    // grouping asks git about every heard file, which can take a while;
+    // grouping asks git about every recorded file, which can take a while;
     // the wait says what it is doing instead of reading as a hang
-    $("#files-head").textContent = "Grouping files by change. Rocky asks git about each file, this can take a minute.";
+    $("#files-head").textContent = "Grouping files by change. rocky asks git about each file, so this can take a minute.";
     fill($("#files"), listSkeleton(7));
   }
   try {
@@ -655,8 +620,8 @@ async function loadBundles() {
 function epistemicLabel(epistemic) {
   if (epistemic === "uncommitted") return "Not committed yet";
   if (epistemic === "recorded") return "Saved snapshot";
-  if (epistemic === "after") return "First change after heard";
-  if (epistemic === "prior") return "Last change before heard";
+  if (epistemic === "after") return "First change after the note";
+  if (epistemic === "prior") return "Last change before the note";
   return "Committed change";
 }
 
@@ -676,8 +641,8 @@ function renderBundles() {
 
   if (shown.length === 0) {
     fill($("#files"), bundles.length === 0
-      ? empty("no bundles heard yet.")
-      : empty("every group is hidden. filter repo opens them again."));
+      ? empty("No bundles recorded yet.")
+      : empty("Every group is hidden. Filter Repo opens them again."));
     return;
   }
 
@@ -893,7 +858,7 @@ async function renderLines(body) {
     nodes.push(summaryWrap);
 
     if (allBundleFiles.length === 0) {
-      nodes.push(empty("no files recorded in this bundle."));
+      nodes.push(empty("No files recorded in this bundle."));
     } else {
       const bundleFilesWrap = el("div", "bundle-files");
       bundleFilesWrap.setAttribute("role", "list");
@@ -944,7 +909,7 @@ async function renderLines(body) {
         if (hasDiff) {
           bodyWrap.append(diffBlock({ commit: bundle.commit, rows: fileItem.rows }, true));
         } else {
-          const notice = el("div", "bundle-diff-empty", "diff not available for this file.");
+          const notice = el("div", "bundle-diff-empty", "Diff not available for this file.");
           bodyWrap.append(notice);
         }
 
@@ -981,7 +946,7 @@ async function renderLines(body) {
 
   const data = await api(`/api/file?path=${encodeURIComponent(state.file)}`);
   if (data.missing) {
-    nodes.push(empty("file not on disk. rocky cannot read it, question"));
+    nodes.push(empty("File not on disk, so rocky cannot read it."));
     fill(body, ...nodes);
     return;
   }
@@ -1015,7 +980,7 @@ async function renderLines(body) {
     row.append(ln, painted.cell);
     return row;
   });
-  if (data.truncated) rows.push(el("div", "trunc", "… file long, lines cut"));
+  if (data.truncated) rows.push(el("div", "trunc", "… (long file, later lines cut)"));
   $("#sub-note").textContent = `${data.lines.length}${data.truncated ? "+" : ""} lines`;
   nodes.push(...rows);
   fill(body, ...nodes);
@@ -1238,7 +1203,7 @@ async function renderHistory(pane) {
     nodes.push(summaryWrap);
 
     if (fileHistoryList.length === 0) {
-      nodes.push(empty("no files recorded in this bundle."));
+      nodes.push(empty("No files recorded in this bundle."));
     } else {
       const bundleFilesWrap = el("div", "bundle-files");
       bundleFilesWrap.setAttribute("role", "list");
@@ -1285,12 +1250,12 @@ async function renderHistory(pane) {
         bodyWrap.hidden = !isOpen;
 
         if (error) {
-          bodyWrap.append(el("div", "bundle-diff-empty", "rocky could not hear history for this file."));
+          bodyWrap.append(el("div", "bundle-diff-empty", "History could not be read for this file."));
         } else if (changes.length === 0 && unattributed.length === 0) {
           if (fileItem.rows && fileItem.rows.length > 0) {
             bodyWrap.append(diffBlock({ commit: bundle.commit, rows: fileItem.rows }, true));
           } else {
-            bodyWrap.append(el("div", "bundle-diff-empty", "no witnesses in this bundle for this file."));
+            bodyWrap.append(el("div", "bundle-diff-empty", "No notes in this bundle for this file."));
           }
         } else {
           for (const change of changes) {
@@ -1342,7 +1307,7 @@ async function renderHistory(pane) {
   $("#sub-note").textContent = `${changes.length} changes · ${witnessCount} moments`;
 
   if (changes.length === 0 && unattributed.length === 0) {
-    fill(pane, empty("nothing heard for this file yet."));
+    fill(pane, empty("Nothing recorded for this file yet."));
     return;
   }
   const cards = changes.map((change) => changeCard({ ...change, diff: diffForFile(change.diff, state.file) }));
@@ -1418,7 +1383,7 @@ function sideColumn(side, record, diff) {
   column.append(head);
 
   if (record === null) {
-    column.append(empty("compare what he knew then against now"));
+    column.append(empty("Pick a moment to compare what was known then against now."));
     return column;
   }
 
@@ -1482,7 +1447,7 @@ async function openMoments(side, anchor) {
       ? moments.filter((record) => `${labelText(record)} ${bodyText(record)}`.toLowerCase().includes(needle))
       : moments;
     if (shown.length === 0) {
-      fill(list, empty("no moment touches those same lines"));
+      fill(list, empty("No moment touches those same lines."));
       return;
     }
     fill(
@@ -1739,7 +1704,7 @@ function paintModels() {
   if (provider === null) {
     fill(select);
     select.disabled = true;
-    note.textContent = "Endpoint not known, no models to pick.";
+    note.textContent = "Endpoint not known, so there are no models to pick.";
     return;
   }
 
@@ -1896,14 +1861,14 @@ function byokReady() {
 }
 
 /**
- * A model answer is a guess over evidence rocky already holds, so it is grey
- * and says so. Clay is reserved for what rocky actually heard, and a guess
+ * A model answer is a guess over evidence rocky has already recorded, so it is
+ * grey and says so. Clay is reserved for what rocky actually recorded, and a guess
  * that borrowed that colour would be the one lie this whole surface avoids.
  */
 async function askModel(anchor, prompt, keep, ctx, after = []) {
   const name = modelLabel();
   const shell = () => answerBox("guess", "Model guess", `${name} · not evidence`);
-  showAnswer(anchor, keep, answerWait(shell(), `Asking ${name}. It reads what Rocky holds and the lines you picked.`), after);
+  showAnswer(anchor, keep, answerWait(shell(), `Asking ${name}. It reads what rocky has recorded and the lines you picked.`), after);
 
   let answer;
   try {
@@ -1911,7 +1876,7 @@ async function askModel(anchor, prompt, keep, ctx, after = []) {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       // only the prompt travels: endpoint, model and key are read server side.
-      // the file context lets rocky dig the evidence pack before forwarding.
+      // the file context lets rocky gather the evidence pack before forwarding.
       body: JSON.stringify({ prompt, ...askBody(ctx) }),
     });
   } catch {
@@ -1938,7 +1903,7 @@ async function askModel(anchor, prompt, keep, ctx, after = []) {
     guess.append(drawer);
   }
 
-  guess.append(el("p", "answer-foot", `Guessed by ${name} from what Rocky holds. Not evidence itself: cross-check before you trust it.`));
+  guess.append(el("p", "answer-foot", `Guessed by ${name} from what rocky has recorded. Not evidence itself: cross-check before you trust it.`));
   showAnswer(anchor, keep, guess, after);
 }
 
@@ -1996,7 +1961,7 @@ function showAnswer(anchor, keep, answer, after) {
   answer.scrollIntoView({ block: "nearest" });
 }
 
-/** "memory.ts:334" or "src/x.ts:12-20" -> a heard file and line, when the
+/** "memory.ts:334" or "src/x.ts:12-20" -> a recorded file and line, when the
  *  name matches one; otherwise the cite stays plain text. */
 function citeTarget(cite) {
   const m = /^(.+?):(\d+)(?:-\d+)?$/.exec(cite.trim());
@@ -2017,14 +1982,14 @@ function citeNode(cite) {
   return link;
 }
 /**
- * Jev analysis over what rocky heard: local, no key, read-only display.
+ * Jev analysis over what rocky recorded: local, no key, read-only display.
  * Grey like a guess, never clay: only the engine mark and hold/hedge
  * states borrow emphasis. No claims invented client-side -- every row
  * quotes the answer, its refs, and its trace, or says what is unknown.
  */
 async function askJev(anchor, prompt, keep, ctx, after = []) {
   const shell = (note) => answerBox("jev", "Jev analysis", note);
-  showAnswer(anchor, keep, answerWait(shell("reading what Rocky holds"), "Jev is weighing the evidence Rocky holds for these lines."), after);
+  showAnswer(anchor, keep, answerWait(shell("Reading recorded evidence"), "Jev is weighing the evidence recorded for these lines."), after);
   let answer;
   try {
     answer = await api("/api/ask", {
@@ -2033,7 +1998,7 @@ async function askJev(anchor, prompt, keep, ctx, after = []) {
       body: JSON.stringify({ prompt, ...askBody(ctx), analysis: "jev" }),
     });
   } catch {
-    const miss = shell("no answer");
+    const miss = shell("No answer");
     miss.append(el("p", "answer-fail", "Jev did not answer. The card above still stands; try again in a moment."));
     showAnswer(anchor, keep, miss, after);
     return;
@@ -2173,7 +2138,7 @@ function withAsk(anchor, parts, prompt, held, ctx) {
     actions.append(button);
   };
   dig("refs-btn", "Find usages", "Where this name is defined and used", () => showReferences(anchor, ctx, parts, after));
-  dig("jev-btn", "Explain with Jev", "Analysis over what Rocky holds", () => askJev(anchor, prompt, parts, ctx, after));
+  dig("jev-btn", "Explain with Jev", "Analysis over what rocky has recorded", () => askJev(anchor, prompt, parts, ctx, after));
   if (byokReady()) {
     dig("ai-btn", held ? "Explain with AI" : "Ask AI to explain",
       `${modelLabel()} guesses from this evidence`, () => askModel(anchor, prompt, parts, ctx, after));
@@ -2184,7 +2149,7 @@ function withAsk(anchor, parts, prompt, held, ctx) {
 
 async function showReferences(anchor, ctx, keep = [], after = []) {
   const shell = (note) => answerBox("refs", "Usages", note);
-  showAnswer(anchor, keep, answerWait(shell("searching this repo"), "Looking for where this name is defined and used."), after);
+  showAnswer(anchor, keep, answerWait(shell("Searching this repo"), "Looking for where this name is defined and used."), after);
 
   const filePath = ctx?.path ?? state.file;
   // the clicked line names the symbol; the widened context window may start on a comment
@@ -2208,15 +2173,15 @@ async function showReferences(anchor, ctx, keep = [], after = []) {
   try {
     data = await api(url);
   } catch {
-    const miss = shell("no answer");
+    const miss = shell("No answer");
     miss.append(failed(() => showReferences(anchor, ctx, keep, after)));
     showAnswer(anchor, keep, miss, after);
     return;
   }
 
   if (!data || (!data.definition && (!data.references || data.references.length === 0))) {
-    const none = shell(selectedSymbol || "nothing found");
-    none.append(el("p", "answer-fail", "Rocky found no definition or use of this name. Select one word, a function or variable name, then try again."));
+    const none = shell(selectedSymbol || "Nothing found");
+    none.append(el("p", "answer-fail", "rocky found no definition or use of this name. Select one word, a function or variable name, then try again."));
     showAnswer(anchor, keep, none, after);
     return;
   }
@@ -2450,7 +2415,7 @@ function renderContextBadge(tiers, currentIdx, originLine, anchor) {
  * The core hands the same teach card to the CLI, MCP and this page: a
  * header, "label: text" lines, an evidence string and "why N" rungs. The
  * page reads that shape back into parts instead of printing it raw, so the
- * first thing seen is how Rocky knows, then the reason, then where to dig.
+ * first thing seen is how the reason is known, then the reason, then where to dig.
  */
 
 /** Plain names for where a reasoning step came from. */
@@ -2465,16 +2430,16 @@ const RUNG_SOURCE = {
 
 /** Why the trail ended, in words a reader can weigh. */
 const STOP_REASON = {
-  "evidence-exhausted": "Rocky ran out of evidence after this step.",
-  "max-hops": "Rocky stops after five steps, even when more evidence exists.",
+  "evidence-exhausted": "rocky ran out of evidence after this step.",
+  "max-hops": "rocky stops after five steps, even when more evidence exists.",
   "library-boundary": "The trail leaves this repo into a library.",
-  cycle: "The trail loops back on itself, so Rocky stopped.",
+  cycle: "The trail loops back on itself, so rocky stopped.",
 };
 
 const WHY_KIND = {
-  heard: { badge: "Witnessed", title: "rocky heard this. agent say why, rocky remember" },
-  assembled: { badge: "Assembled", title: "rocky not hear this. assembled from evidence, not witnessed" },
-  none: { badge: "Nothing held", title: "no witness, no ladder" },
+  witnessed: { badge: "Witnessed", title: "An agent recorded the reason for these lines and rocky kept it." },
+  assembled: { badge: "Assembled", title: "No agent recorded this reason. rocky assembled it from evidence." },
+  none: { badge: "Nothing recorded", title: "No recorded reason and no evidence trail." },
 };
 
 /** Badge, the lines asked about, and a close control that says it exists. */
@@ -2502,7 +2467,7 @@ function splitLabel(line) {
 /** A witness is the author's own words, so they lead, labelled by concern. */
 function witnessCard(data, start, end) {
   const parts = [
-    whyTop("heard", start, end),
+    whyTop("witnessed", start, end),
     el("p", "why-lede", "The agent that wrote these lines recorded why, at the time."),
   ];
   const facts = el("dl", "why-facts");
@@ -2513,7 +2478,7 @@ function witnessCard(data, start, end) {
   }
   parts.push(facts);
   // "source: agent:claude-code · 3d ago" reads as who said it and when
-  parts.push(el("div", "card-ev", String(data.evidence ?? "").replace(/^source:\s*/, "Heard from ")));
+  parts.push(el("div", "card-ev", String(data.evidence ?? "").replace(/^source:\s*/, "Recorded by ")));
   return parts;
 }
 
@@ -2522,7 +2487,7 @@ function witnessCard(data, start, end) {
 function assembledCard(data, start, end) {
   const parts = [
     whyTop("assembled", start, end),
-    el("p", "why-lede", "No note was recorded for these lines. Rocky pieced a reason together from the code and git. Check each step before trusting it."),
+    el("p", "why-lede", "No note was recorded for these lines. The reason below was pieced together from the code and git. Check each step before trusting it."),
   ];
   const rungs = (data.rungs ?? [])
     .map((rung) => /^why \d+\s+([\s\S]*) · (\w+)$/.exec(rung))
@@ -2591,28 +2556,29 @@ async function askWhy(start, end, at, expand = (start === end)) {
 
   if (data === null || data.header === undefined) {
     const bare = [whyTop("none", effectiveStart, effectiveEnd),
-      el("p", "why-lede", "Rocky holds no note for these lines and found no evidence trail in the code or git. Dig deeper below, or ask the agent that wrote it.")];
+      el("p", "why-lede", "No note is recorded for these lines, and no evidence trail turned up in the code or git. Dig deeper below, or ask the agent that wrote it.")];
     openPop(anchor, ...withAsk(
       anchor,
       bare,
-      `Why is this code written this way? Rocky has no recorded reason for it.\n\n${askedAbout}\n\nFollow the rules and shape you were given. Ground every claim in the code quoted above, and say plainly if you cannot tell from the code alone.`,
+      `Why is this code written this way? rocky has no recorded reason for it.\n\n${askedAbout}\n\nFollow the rules and shape you were given. Ground every claim in the code quoted above, and say plainly if you cannot tell from the code alone.`,
       undefined,
       { path: state.file, start: effectiveStart, end: effectiveEnd, symbol: selectedSymbol, origin: start },
     ));
     return;
   }
 
-  const assembled = data.header.startsWith("rocky not hear");
+  // only the evidence ladder carries rungs; a witness card never does
+  const assembled = Array.isArray(data.rungs);
   const parts = assembled
     ? assembledCard(data, effectiveStart, effectiveEnd)
     : witnessCard(data, effectiveStart, effectiveEnd);
 
-  // the model is given what rocky holds, so it interprets rather than invents
+  // the model is given what rocky recorded, so it interprets rather than invents
   const held = [data.header, ...data.lines, data.evidence].join("\n");
   openPop(anchor, ...withAsk(
     anchor,
     parts,
-    `Rocky recorded this about the code below:\n\n${held}\n\n${askedAbout}\n\n` +
+    `rocky recorded this about the code below:\n\n${held}\n\n${askedAbout}\n\n` +
       "Explain what that recorded reason means for this code, following the rules and shape you were given. " +
       "Do not invent history rocky did not record; the record's labels (KODE, BISNIS, why 1, stop) are yours to use, not to quote as prose.",
     true,
@@ -2730,11 +2696,11 @@ function paintSettings() {
   const key = $("#set-key");
   if (!key) return;
   key.value = "";
-  key.placeholder = settings.hasKey ? "key saved. type to replace" : "";
+  key.placeholder = settings.hasKey ? "Key saved. Type to replace." : "";
   const jev = $("#set-jevkey");
   if (jev) {
     jev.value = "";
-    jev.placeholder = settings.hasJevKey ? "jev key saved. type to replace" : "";
+    jev.placeholder = settings.hasJevKey ? "Jev key saved. Type to replace." : "";
   }
   const note = $("#jevkey-note");
   if (note) note.textContent = settings.hasJevKey ? "Jev key saved server-side. Lightning toggle armed." : "Server-side only. Never shown back. Enables the lightning toggle.";
@@ -2743,7 +2709,7 @@ function paintSettings() {
   const orKey = $("#set-openrouterkey");
   if (orKey) {
     orKey.value = "";
-    orKey.placeholder = settings.hasOpenRouterKey ? "openrouter key saved. type to replace" : "";
+    orKey.placeholder = settings.hasOpenRouterKey ? "OpenRouter key saved. Type to replace." : "";
   }
   const orNote = $("#openrouterkey-note");
   if (orNote) orNote.textContent = settings.hasOpenRouterKey ? "OpenRouter key saved server-side. Lightning toggle armed." : "Server-side only. Never shown back. Enables the lightning toggle on the OpenRouter path.";
@@ -2899,12 +2865,12 @@ function setListenState(value) {
 const LISTEN_TICK_S = 10;
 // Plain words for every v1 link basis. Weak bases read as context, never cause.
 const LISTEN_BASIS = {
-  direct: { label: "Reported by tool", tone: "heard", means: "The tool reported this event itself." },
-  filesystem_observed: { label: "Heard on disk", tone: "heard", means: "Rocky heard this file change on disk. That proves the change, not who made it." },
-  content_mapped: { label: "Matches commit", tone: "heard", means: "Snapshot text equals a Git commit exactly." },
+  direct: { label: "Reported by tool", tone: "solid", means: "The tool reported this event itself." },
+  filesystem_observed: { label: "Observed on disk", tone: "solid", means: "This file changed on disk. That proves the change, not who made it." },
+  content_mapped: { label: "Matches commit", tone: "solid", means: "Snapshot text equals a Git commit exactly." },
   candidate_link: { label: "Possible link", tone: "weak", means: "Lines up with a commit, but not exactly. Context only, never cause." },
   temporal_candidate: { label: "Near in time", tone: "weak", means: "Happened close in time to other evidence. Context only, never cause." },
-  unknown: { label: "Snapshot only", tone: "none", means: "Rocky holds this event with no link for it. Unknown is not nothing." },
+  unknown: { label: "Snapshot only", tone: "none", means: "rocky has this event but no link for it. Unknown is not nothing." },
 };
 const LISTEN_SOURCE = { watcher: "File watcher", git: "Git", hook: "hook", adapter: "log" };
 const LISTEN_NODE = {
@@ -2914,7 +2880,7 @@ const LISTEN_NODE = {
 const LISTEN_COVERAGE = {
   complete: "Complete. Every event in this record read cleanly.",
   partial: "Partial. Some events went missing or failed to read.",
-  unknown: "Unknown. Rocky cannot tell what is missing.",
+  unknown: "Unknown. rocky cannot tell what is missing.",
 };
 const LISTEN_FILTER_IDS = ["listen-session", "listen-agent", "listen-surface", "listen-file", "listen-since"];
 const LISTEN_WAVE_BARS = 48;
@@ -3037,7 +3003,7 @@ function listenRow(entry, now) {
   const basis = listenBasis(entry);
   const li = el("li", `listen-row tone-${basis.tone}`);
   li.dataset.key = entry.key;
-  // weak links never borrow the solid look of heard evidence
+  // weak links never borrow the solid look of recorded evidence
   if (basis.tone === "weak") li.classList.add("weak-candidate");
   if (entry.coverage === "partial") li.classList.add("is-partial");
   const open = state.listenOpen.has(entry.key);
@@ -3073,7 +3039,7 @@ function listenRow(entry, now) {
   li.append(head, evidence);
   return li;
 }
-// Repaint only when the heard set changes: a full repaint every poll would
+// Repaint only when the recorded set changes: a full repaint every poll would
 // throw keyboard focus out of the list. Otherwise only the ages move.
 function paintListenChain(chain, sig, rows, now) {
   if (chain.dataset.sig === sig) {
@@ -3089,8 +3055,8 @@ function paintListenChain(chain, sig, rows, now) {
   }
 }
 
-// The waveform is what Rocky heard over time: one bar per slice, height by
-// change count. Quiet slices stay a flat mark, like silence on a track.
+// The waveform shows recorded changes over time: one bar per slice, height by
+// change count. Quiet slices stay a flat mark.
 function renderListenWave(entries, now, rise) {
   const figure = $("#listen-wave");
   const bars = $("#listen-wave-bars");
@@ -3120,19 +3086,19 @@ function renderListenWave(entries, now, rise) {
   if (from) from.textContent = fromText;
   const busiest = counts.indexOf(peak);
   bars.setAttribute("aria-label", entries.length > 0
-    ? `${entries.length} changes heard from ${fromText} to now, busiest near ${listenClock(start + busiest * slice).slice(0, 5)}`
-    : `No changes heard from ${fromText} to now`);
+    ? `${entries.length} changes recorded from ${fromText} to now, busiest near ${listenClock(start + busiest * slice).slice(0, 5)}`
+    : `No changes recorded from ${fromText} to now`);
 }
-function renderListenStats(entries, heard, now) {
+function renderListenStats(entries, recorded, now) {
   const stats = $("#listen-stats");
   if (!stats) return;
   stats.hidden = false;
   const files = new Set(entries.map((entry) => entry.file).filter(Boolean)).size;
-  const newest = heard.reduce((high, item) => Math.max(high, item.ts || 0), 0);
+  const newest = recorded.reduce((high, item) => Math.max(high, item.ts || 0), 0);
   const cells = [
     ["changes", String(entries.length)],
     ["files", String(files)],
-    ["last heard", newest ? listenAgo(newest, now) : "nothing yet"],
+    ["last recorded", newest ? listenAgo(newest, now) : "nothing yet"],
   ];
   stats.replaceChildren(...cells.map(([term, value]) => {
     const cell = el("div", "listen-stat");
@@ -3207,7 +3173,7 @@ const LISTEN_REASONS = {
   "path-must-be-absolute": "Paste a full folder path, not a relative one.",
   "path-unresolvable": "That folder does not exist here.",
   "symlink-rejected": "Symlinked repo roots stay off.",
-  "store-unavailable": "Rocky could not write the consent store.",
+  "store-unavailable": "The consent store could not be written.",
 };
 // Posts one consent action; a refusal shows its reason and returns null.
 async function postListenConsent(repo, action) {
@@ -3224,7 +3190,7 @@ async function postListenConsent(repo, action) {
   if (result && result.ok) return result;
   const host = $("#listen-consent");
   const reason = result && typeof result.reason === "string" ? result.reason : "";
-  if (host) host.append(el("p", "listen-refused", LISTEN_REASONS[reason] || "Rocky could not change capture. Try again."));
+  if (host) host.append(el("p", "listen-refused", LISTEN_REASONS[reason] || "Capture could not be changed. Try again."));
   return null;
 }
 // No undo, so the first click only arms; a second click inside the window deletes.
@@ -3302,13 +3268,13 @@ function buildListenConsent(host, consent, repo, label) {
   if (consent.allowed) {
     const line = el("p", "listen-consent-state");
     line.append(el("b", null, "Listening."),
-      ` Rocky checks the text files Git tracks here every ${LISTEN_TICK_S} seconds, while rocky dash stays open.`);
+      ` rocky checks the text files Git tracks here every ${LISTEN_TICK_S} seconds, while rocky dash stays open.`);
     host.append(line, el("p", "listen-disk"), listenConsentButton("revoke", "Stop listening", repo), listenPurgeButton(repo));
     return;
   }
   const card = el("div", "listen-offer");
   card.append(
-    el("p", "listen-offer-title", `Rocky is not listening to ${label} yet.`),
+    el("p", "listen-offer-title", `Listening is not on for ${label} yet.`),
     el("p", null, "Listen keeps redacted, bounded snapshots of the text files Git tracks here, while rocky dash stays open. Secret may remain despite redaction. Stop anytime; history stays."),
     // Budget number is pinned to LISTENING_DISK_BUDGET_BYTES_PER_REPO by listening-disk-budget.test.ts.
     el("p", null, "Disk budget: up to 160 MiB for this repo on this machine. Oldest snapshots go first when full. Delete history with rocky setup --repo <path> --purge-capture."),
@@ -3318,7 +3284,7 @@ function buildListenConsent(host, consent, repo, label) {
   );
   host.append(card);
 }
-// Filter choices come from events already heard, so nothing is typed.
+// Filter choices come from events already recorded, so nothing is typed.
 function fillListenFilter(id, values) {
   const select = $(`#${id}`);
   if (!select) return;
@@ -3362,7 +3328,7 @@ async function refreshListening(first) {
   if (!consent.allowed) {
     setListenState("off");
     hideListenLive();
-    if (coverageHost) coverageHost.textContent = "Coverage unknown: capture is off, so Rocky cannot hear this repo.";
+    if (coverageHost) coverageHost.textContent = "Coverage unknown: capture is off, so rocky has no record of changes in this repo.";
     if (chain) paintListenChain(chain, "off", [listenEmpty("Capture is off for this repo.", "Unknown activity is not no activity. Press Listen above to start the evidence chain.")], Date.now());
     listenStatus("Waiting for consent", true);
     return;
@@ -3383,12 +3349,12 @@ async function refreshListening(first) {
     graph = await api(`/api/listening/graph?${new URLSearchParams({ repo }).toString()}`);
   } catch { failed = true; }
   if (repo !== listenRepo()) return;
-  const heard = (tail.events || []).slice().reverse();
-  fillListenFilter("listen-session", heard.map((item) => item.refs && item.refs.session));
-  fillListenFilter("listen-agent", heard.map((item) => item.harnessId));
-  fillListenFilter("listen-file", heard.map((item) => item.refs && item.refs.fileRel));
+  const recorded = (tail.events || []).slice().reverse();
+  fillListenFilter("listen-session", recorded.map((item) => item.refs && item.refs.session));
+  fillListenFilter("listen-agent", recorded.map((item) => item.harnessId));
+  fillListenFilter("listen-file", recorded.map((item) => item.refs && item.refs.fileRel));
   const floor = since > 0 ? Date.now() - since : 0;
-  const shown = heard.filter((item) => {
+  const shown = recorded.filter((item) => {
     if (session && ((item.refs && item.refs.session) || "") !== session) return false;
     if (agent && (item.harnessId || "") !== agent) return false;
     if (surface && (item.surface || "") !== surface) return false;
@@ -3404,13 +3370,13 @@ async function refreshListening(first) {
   const filtersOn = listenFiltersOn();
   syncListenFilterBar();
   // a full page that lost the last top event skipped events in between
-  const gap = Boolean(state.listenCursor) && !first && heard.length >= LISTEN_TAIL_LIMIT
-    && !heard.some((item) => item.eventId === state.listenCursor);
+  const gap = Boolean(state.listenCursor) && !first && recorded.length >= LISTEN_TAIL_LIMIT
+    && !recorded.some((item) => item.eventId === state.listenCursor);
   const settled = now >= listenDeadline;
   if (chain) {
     const rows = [];
     if (failed) {
-      rows.push(listenEmpty("Listening read failed.", "The request did not finish. Rocky retries on the next poll, or check the server log."));
+      rows.push(listenEmpty("Listening read failed.", "The request did not finish. rocky retries on the next poll, or check the server log."));
     } else {
       if (gap) rows.push(el("li", "listen-gap is-partial", `Missing intermediates: partial. More than ${LISTEN_TAIL_LIMIT} events arrived between two checks. The older ones stay stored.`));
       let day = "";
@@ -3423,17 +3389,17 @@ async function refreshListening(first) {
         rows.push(listenRow(entry, now));
       }
       if (entries.length === 0 && firsts.length > 0 && filtersOn === 0) {
-        rows.push(listenEmpty("Quiet so far.", `Rocky holds the starting state. Change a tracked file and it lands here within about ${LISTEN_TICK_S} seconds.`));
+        rows.push(listenEmpty("Quiet so far.", `rocky has the starting state. Change a tracked file and it lands here within about ${LISTEN_TICK_S} seconds.`));
       }
       if (firsts.length > 0) {
         // a full page may hold only part of them: say so with a plus
-        const count = `${firsts.length}${heard.length >= LISTEN_TAIL_LIMIT ? "+" : ""}`;
+        const count = `${firsts.length}${recorded.length >= LISTEN_TAIL_LIMIT ? "+" : ""}`;
         rows.push(el("li", "listen-firsts", `${count} first snapshot${firsts.length === 1 ? "" : "s"}: state when listening began, not edits`));
       }
       if (shown.length === 0 && settled) {
         rows.push(filtersOn > 0
-          ? listenEmpty("No events match these filters.", "Loosen a filter, or clear them all. Rocky checks the repo every few seconds while rocky dash stays open.")
-          : listenEmpty("Nothing heard yet.", `Rocky takes the starting snapshot on the next check, within about ${LISTEN_TICK_S} seconds.`));
+          ? listenEmpty("No events match these filters.", "Loosen a filter, or clear them all. rocky checks the repo every few seconds while rocky dash stays open.")
+          : listenEmpty("Nothing recorded yet.", `rocky takes the starting snapshot on the next check, within about ${LISTEN_TICK_S} seconds.`));
       }
     }
     const sig = [failed, gap, firsts.length, filtersOn, shown.length === 0 && settled, new Date(now).toDateString(),
@@ -3442,14 +3408,14 @@ async function refreshListening(first) {
   }
   if (!failed) {
     renderListenWave(entries, now, first);
-    renderListenStats(entries, heard, now);
-    renderListenTop(listenEntries(heard.filter((item) => !isBaseline(item))));
+    renderListenStats(entries, recorded, now);
+    renderListenTop(listenEntries(recorded.filter((item) => !isBaseline(item))));
   }
   if (coverageHost) {
     const reasons = (graph.coverage && graph.coverage.reasons) || [];
-    renderListenCoverage(coverageHost, tail.coverage || graph.coverage.status, reasons, heard.length >= LISTEN_TAIL_LIMIT);
+    renderListenCoverage(coverageHost, tail.coverage || graph.coverage.status, reasons, recorded.length >= LISTEN_TAIL_LIMIT);
   }
-  if (heard.length > 0) state.listenCursor = heard[0].eventId || state.listenCursor;
+  if (recorded.length > 0) state.listenCursor = recorded[0].eventId || state.listenCursor;
   state.listenResolved = shown.length > 0 || failed || settled;
   if (failed) listenStatus("Listening read failed", true);
   else listenStatus(state.listenResolved ? (shown.length > 0 ? "Up to date" : "No events match") : "Getting rationale", state.listenResolved);

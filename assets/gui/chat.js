@@ -7,7 +7,7 @@
  *
  * Chats live in this browser's localStorage (this origin, this machine). They
  * are a convenience copy of answers already shown, never evidence: deleting
- * one changes nothing Rocky remembers.
+ * one changes nothing rocky has recorded.
  *
  * Memory-only turns scan locally, require relevant records, and hold instead
  * of summarizing weak matches. BYOK and remote Jev are for code questions.
@@ -37,7 +37,7 @@ const ROUTES = {
   auto: {
     tag: "",
     prefix: "",
-    note: "Auto: Rocky answers from memory, and also reads code when you name a file, a line, or a symbol.",
+    note: "Auto: rocky answers from memory, and also reads code when you name a file, a line, or a symbol.",
   },
   memory: {
     tag: "Memory only",
@@ -47,7 +47,7 @@ const ROUTES = {
   code: {
     tag: "Code",
     prefix: "code: ",
-    note: "Code: Rocky also reads repo files. Your question, quoted excerpts, and memory evidence go to the model you picked.",
+    note: "Code: rocky also reads repo files. Your question, quoted excerpts, and memory evidence go to the model you picked.",
   },
 };
 
@@ -173,9 +173,9 @@ function svgIcon(name, size = 14) {
   return svg;
 }
 
-/** Rocky hears; his mark is five bars of an ear, moving only while he listens. */
-function ear(listening) {
-  const node = el("span", listening ? "cx-ear is-listening" : "cx-ear");
+/** Five bars: still while idle, moving only while an answer is pending. */
+function activityMark(working) {
+  const node = el("span", working ? "cx-activity is-working" : "cx-activity");
   node.setAttribute("aria-hidden", "true");
   for (let i = 0; i < 5; i += 1) node.append(el("i"));
   return node;
@@ -379,22 +379,22 @@ function isHeld(body) {
   return HELD.has(status);
 }
 
-/** Badges say where the answer came from and whether Rocky held back. */
+/** Badges say where the answer came from and whether the answer was held back. */
 function badges(body) {
   const out = [];
   const llm = body?.decisionTrace?.llm ?? {};
   if (codeRan(body)) {
     const tag = el("span", "cx-badge", "Memory + code");
-    tag.title = "Rocky searched memory and read repo files for this answer";
+    tag.title = "Searched memory and read repo files for this answer";
     out.push(tag);
   } else {
     const tag = el("span", "cx-badge", llm.structurerStatus === "memory-only" ? "Local memory" : "Memory");
-    tag.title = "Answered from Rocky's local records";
+    tag.title = "Answered from rocky's local records";
     out.push(tag);
   }
   if (isHeld(body)) {
     const tag = el("span", "cx-badge is-held", "Held");
-    tag.title = "Rocky held back: evidence weak, incomplete, or too big";
+    tag.title = "Answer held back: evidence weak, incomplete, or too big";
     out.push(tag);
   }
   if (str(body?.coverage?.reason)) {
@@ -420,14 +420,14 @@ function codeDisclosure(body) {
   const candidates = [];
   if (answer && str(answer.disclosure).trim().length > 0) candidates.push({ text: answer.disclosure.trim(), markers: [] });
   if (trace && trace.mode === "unranked") {
-    candidates.push({ text: "scan unranked: file list unavailable, excerpts come from memory-named files only.", markers: ["unranked"] });
+    candidates.push({ text: "Code scan is unranked: the file list was unavailable, so excerpts come only from files that memory names.", markers: ["unranked"] });
   }
-  if (trace && trace.truncated === true) candidates.push({ text: "scan truncated: not every file read.", markers: ["truncated"] });
+  if (trace && trace.truncated === true) candidates.push({ text: "Code scan truncated: not every file was read.", markers: ["truncated"] });
   if (trace && trace.roundsExhausted === true) {
-    candidates.push({ text: "budget spent after 3 rounds. files not read are not checked.", markers: ["budget spent", "round budget", "rounds exhausted", "not checked"] });
+    candidates.push({ text: "Code budget spent after 3 rounds. Files not read were not checked.", markers: ["budget spent", "round budget", "rounds exhausted", "not checked"] });
   }
   if (answer && typeof answer.stripped === "number" && answer.stripped > 0) {
-    candidates.push({ text: `model claims not backed by quoted lines: ${answer.stripped} stripped.`, markers: ["stripped"] });
+    candidates.push({ text: `Model claims not backed by quoted lines: ${answer.stripped} stripped.`, markers: ["stripped"] });
   }
   const kept = [];
   for (const candidate of candidates) {
@@ -472,7 +472,7 @@ function step(title, ...rows) {
 
 /**
  * Why a search came back with no record, in the drawer's words. Only an
- * "unavailable" memory answer was held; a read with lines Rocky could not use
+ * "unavailable" memory answer was held; a read with lines that could not be used
  * that matched nothing was answered, and says so.
  */
 function noEvidenceNote({ memoryOnly, covered, status }) {
@@ -482,7 +482,7 @@ function noEvidenceNote({ memoryOnly, covered, status }) {
   return "No whole memory record matched well enough. Some memory lines could not be used.";
 }
 
-/** The route Rocky took, step by step. Evidence itself lives in Sources. */
+/** The route the answer took, step by step. Evidence itself lives in Sources. */
 function decisionDrawer(turn) {
   const body = turn.body ?? {};
   const t = body.decisionTrace ?? {};
@@ -499,12 +499,12 @@ function decisionDrawer(turn) {
   if (latency !== null) meta.append(el("span", null, `${latency}ms`));
   const chevron = el("span", "cx-think-chevron");
   chevron.append(svgIcon("chevron", 12));
-  head.append(svgIcon("steps", 14), el("span", "cx-think-title", "How Rocky answered"), meta, chevron);
+  head.append(svgIcon("steps", 14), el("span", "cx-think-title", "How this was answered"), meta, chevron);
 
   const steps = el("ol", "cx-steps");
 
-  const heard = memoryOnly ? `${cards.length} whole record${cards.length === 1 ? "" : "s"} accepted` : `${cards.length} evidence card${cards.length === 1 ? "" : "s"}`;
-  const searched = step("Searched memory", stepRow("Found", heard));
+  const found = memoryOnly ? `${cards.length} whole record${cards.length === 1 ? "" : "s"} accepted` : `${cards.length} evidence card${cards.length === 1 ? "" : "s"}`;
+  const searched = step("Searched memory", stepRow("Found", found));
   if (cards.length === 0) {
     searched.append(el("p", "cx-step-note", noEvidenceNote({ memoryOnly, covered: coverageReason !== "", status: t.status })));
   } else {
@@ -543,7 +543,7 @@ function decisionDrawer(turn) {
       stepRow("Rounds", `${known(trace.rounds)} of 3`),
       stepRow("Coverage", coverage),
     );
-    if (trace.roundsExhausted === true) read.append(el("p", "cx-step-note", "Round budget spent; files not read are not checked."));
+    if (trace.roundsExhausted === true) read.append(el("p", "cx-step-note", "Round budget spent; files not read were not checked."));
     steps.append(read);
   }
 
@@ -591,10 +591,10 @@ function youNode(turn, isNew) {
   return wrap;
 }
 
-function rockyShell(isNew, listening) {
+function rockyShell(isNew, working) {
   const node = el("article", `cx-msg cx-rocky${isNew ? " is-new" : ""}`);
   const col = el("div", "cx-rocky-col");
-  node.append(ear(listening), col);
+  node.append(activityMark(working), col);
   return { node, col };
 }
 
@@ -605,10 +605,10 @@ function rockyNode(turn, isNew, isLast) {
   if (isHeld(body)) node.classList.add("is-held");
 
   const head = el("div", "cx-rocky-head");
-  head.append(el("span", "cx-name", "Rocky"), ...badges(body));
+  head.append(el("span", "cx-name", "rocky"), ...badges(body));
   col.append(head, decisionDrawer(turn));
 
-  const text = answerParts(body).text || "rocky heard nothing matching that yet.";
+  const text = answerParts(body).text || "No matching records were found.";
   col.append(markdownNode(text, "cx-answer"));
   if (str(body.coverage?.reason)) col.append(el("p", "cx-aside", coverageWords(body.coverage.reason)));
 
@@ -650,10 +650,10 @@ function failNode(turn, isNew, isLast) {
   node.dataset.turn = turn.id;
   node.classList.add("is-failed");
   const text = turn.error === "stopped"
-    ? "Stopped. Rocky kept no answer for this question."
+    ? "Stopped. No answer was kept for this question."
     : turn.error === "failed"
-      ? "Rocky not hear answer. Check rocky dash still runs, then ask again."
-      : "No answer kept. Tab closed before Rocky replied.";
+      ? "No answer arrived. Check that rocky dash is still running, then ask again."
+      : "No answer was kept. The tab closed before the answer arrived.";
   col.append(el("p", "cx-fail-text", text));
   if (isLast) col.append(button("cx-pill", "Ask again", () => retry(turn), "retry"));
   return node;
@@ -663,8 +663,8 @@ function waitingNode(turn) {
   const { node, col } = rockyShell(true, true);
   node.id = "cx-waiting";
   node.setAttribute("role", "status");
-  node.setAttribute("aria-label", "rocky listening");
-  const label = turn.route === "code" ? "Rocky search memory, read code, check evidence" : "Rocky search memory, check relevance";
+  node.setAttribute("aria-label", "Answer in progress");
+  const label = turn.route === "code" ? "Searching memory, reading code, checking evidence" : "Searching memory, checking relevance";
   col.append(el("p", "cx-wait-text", label));
   return node;
 }
@@ -700,7 +700,7 @@ function renderThread() {
   const title = $("#cx-title");
   if (title) title.textContent = chat ? chat.title : "New chat";
   fill($("#chat-thread"), ...turns.flatMap((turn, index) => turnNodes(turn, false, index === turns.length - 1)));
-  // an empty chat reads from the top, where Rocky's face is
+  // an empty chat reads from the top, where the welcome block is
   if (turns.length > 0) scrollToLatest(false);
   else $("#chat-log")?.scrollTo({ top: 0 });
 }
@@ -1236,7 +1236,7 @@ function sessionItem(chat) {
   const open = button("cx-item-open", chat.title, () => openChat(chat.id));
   open.title = chat.title;
   if (chat.id === activeId) open.setAttribute("aria-current", "page");
-  if (chatState.pending?.chatId === chat.id) open.prepend(ear(true));
+  if (chatState.pending?.chatId === chat.id) open.prepend(activityMark(true));
   li.append(open);
 
   const tools = el("span", "cx-item-tools");
@@ -1273,7 +1273,7 @@ function renderSessions() {
   const shown = chats.filter((chat) => matches(chat, needle));
   const nodes = [];
   if (chats.length === 0) {
-    nodes.push(el("p", "cx-sessions-empty", "No chats yet. Your questions and Rocky's answers land here."));
+    nodes.push(el("p", "cx-sessions-empty", "No chats yet. Your questions and rocky's answers land here."));
   } else if (shown.length === 0) {
     nodes.push(el("p", "cx-sessions-empty", "No chat matches that search."));
   } else {
@@ -1364,11 +1364,11 @@ function paintMemory(detail) {
   const sub = $("#cx-sub");
   if (!mem) return;
   if (!detail || detail.error || !detail.data) {
-    const again = button("cx-link", "Listen again", () => {
-      fill(mem, el("p", "cx-mem-wait", "listening…"));
+    const again = button("cx-link", "Try again", () => {
+      fill(mem, el("p", "cx-mem-wait", "loading…"));
       void detail?.retry?.();
     });
-    fill(mem, el("p", "cx-mem-fail", `Rocky not hear memory (${detail?.error ?? "offline"}).`), again);
+    fill(mem, el("p", "cx-mem-fail", `Memory could not be read (${detail?.error ?? "offline"}).`), again);
     return;
   }
   const data = detail.data;
@@ -1385,7 +1385,7 @@ function paintMemory(detail) {
   const stats = el("div", "cx-stats");
   stats.setAttribute("aria-label", "last 24 hours");
   stats.append(
-    statCell(num(day.heard), "heard 24h"),
+    statCell(num(day.heard), "total 24h"),
     statCell(num(day.failures), "failures"),
     statCell(num(day.fixes), "fixes"),
     statCell(num(day.whys), "reasons", true),
@@ -1409,7 +1409,7 @@ function paintMemory(detail) {
   const newest = arr(data.recent)[0];
   if (newest) {
     const last = el("p", "cx-mem-last");
-    last.append(el("span", "cx-mem-key", "Last heard"), Object.assign(el("span", "cx-mem-label", String(newest.label ?? "")), { title: String(newest.label ?? "") }), el("span", "cx-mem-ago", String(newest.agoText ?? "")));
+    last.append(el("span", "cx-mem-key", "Last recorded"), Object.assign(el("span", "cx-mem-label", String(newest.label ?? "")), { title: String(newest.label ?? "") }), el("span", "cx-mem-ago", String(newest.agoText ?? "")));
     nodes.push(last);
   }
   if (data.coverageLine && !/coverage full/i.test(String(data.coverageLine))) {
@@ -1419,8 +1419,8 @@ function paintMemory(detail) {
 
   if (sub && total !== null) {
     sub.textContent = newest
-      ? `Rocky remember ${total.toLocaleString()} records. Last heard ${newest.agoText}. Ask, question.`
-      : `Rocky remember ${total.toLocaleString()} records. Ask, question.`;
+      ? `${total.toLocaleString()} records in memory. Last recorded ${newest.agoText}. Ask a question below.`
+      : `${total.toLocaleString()} records in memory. Ask a question below.`;
   }
 }
 
@@ -1431,7 +1431,7 @@ const FALLBACK_SUGGESTIONS = [
   { route: "code", text: "Where is the chat route handled?", hint: "Reads repo files" },
 ];
 
-/** Suggestions come from what Rocky actually heard, then fall back to plain ones. */
+/** Suggestions come from what rocky actually recorded, then fall back to plain ones. */
 function suggestionsFrom(data) {
   const out = [];
   const recent = arr(data?.recent);
@@ -1441,7 +1441,7 @@ function suggestionsFrom(data) {
     ?? recent.find((hit) => WHY.has(hit?.kind) && str(hit.label) && hit.label !== hit.kind);
   if (reason) out.push({ route: "memory", text: `Why: ${clip(reason.label, 56)}`, hint: `Reason recorded ${reason.agoText}` });
   const file = arr(data?.topFiles)[0]?.name;
-  if (file) out.push({ route: "code", text: `Why does ${baseName(file)} look the way it does?`, hint: "Most heard file, reads code" });
+  if (file) out.push({ route: "code", text: `Why does ${baseName(file)} look the way it does?`, hint: "Most recorded file, reads code" });
   for (const fallback of FALLBACK_SUGGESTIONS) {
     if (out.length >= 4) break;
     if (!out.some((item) => item.route === fallback.route && item.text === fallback.text)) out.push(fallback);

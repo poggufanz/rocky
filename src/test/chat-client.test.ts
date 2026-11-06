@@ -112,7 +112,7 @@ test("a turn saved with a trace keeps its answer text whole, and one saved witho
 
 test("coverage words pass through, and a saved bare reason keeps its old label", () => {
   const { coverageWords } = load<{ coverageWords(reason: string): string }>(["coverageWords"]);
-  assert.equal(coverageWords("memory coverage incomplete: 1 line I cannot use."), "memory coverage incomplete: 1 line I cannot use.");
+  assert.equal(coverageWords("memory coverage incomplete: 1 line could not be used."), "memory coverage incomplete: 1 line could not be used.");
   assert.equal(coverageWords("record-cap"), "Coverage: record-cap");
 });
 
@@ -120,9 +120,9 @@ test("the drawer says an answer was held only when the server held it", () => {
   const { noEvidenceNote } = load<{ noEvidenceNote(args: { memoryOnly: boolean; covered: boolean; status?: string }): string }>(["noEvidenceNote"]);
   const note = (memoryOnly: boolean, covered: boolean, status?: string): string => noEvidenceNote({ memoryOnly, covered, status });
 
-  // held: the read stopped early, so Rocky gave no answer
+  // held: the read stopped early, so no answer was given
   assert.equal(note(true, true, "unavailable"), "Memory coverage incomplete; answer held.");
-  // answered: lines Rocky could not use, and no record matched well enough
+  // answered: lines that could not be used, and no record matched well enough
   assert.equal(note(true, true, "low_confidence"), "No whole memory record matched well enough. Some memory lines could not be used.");
   assert.equal(note(true, false, "low_confidence"), "No whole memory record matched well enough.");
   assert.equal(note(false, true, "used"), "Memory coverage incomplete; code answer may miss memory evidence.");

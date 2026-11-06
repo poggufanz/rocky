@@ -1,15 +1,15 @@
 /**
  * Which provider an endpoint belongs to, and which models it serves.
  *
- * The catalogue is models.dev. Rocky would rather show `GPT-4o` and a real
- * list of models than make the owner type an id and hope, and the only place
- * that knows is the catalogue. So this is the second host Rocky ever talks to,
- * after the BYOK proxy: cached on disk for a day, and failing open in every
- * direction. An unreachable catalogue means no model list, never an error.
+ * The catalogue is models.dev. Showing `GPT-4o` and a real list of models
+ * beats making the owner type an id and hope, and the only place that knows
+ * is the catalogue. So this is the second host rocky ever talks to, after the
+ * BYOK proxy: cached on disk for a day, and failing open in every direction.
+ * An unreachable catalogue means no model list, never an error.
  *
  * A logo never reaches the page as markup. Only the viewBox and each path's
  * `d` cross the boundary, and the page rebuilds the shape itself, so a third
- * party cannot put an element into Rocky's DOM.
+ * party cannot put an element into rocky's DOM.
  */
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -129,7 +129,7 @@ export function chatEndpoint(id: string, base: string): string {
   return trimmed.endsWith("/v1") ? `${trimmed}/chat/completions` : `${trimmed}/v1/chat/completions`;
 }
 
-/** Every provider Rocky can offer as a ready-made endpoint, by name. */
+/** Every provider rocky can offer as a ready-made endpoint, by name. */
 export async function providerList(
   env: NodeJS.ProcessEnv = process.env,
   now = Date.now(),

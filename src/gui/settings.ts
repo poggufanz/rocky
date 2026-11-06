@@ -1,5 +1,5 @@
 /**
- * BYOK configuration, kept beside Rocky's memory rather than in the browser.
+ * BYOK configuration, kept beside rocky's memory rather than in the browser.
  *
  * The page never receives the key back. It learns only whether one is stored,
  * which is all it needs to decide whether to offer the ask control.
