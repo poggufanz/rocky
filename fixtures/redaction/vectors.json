@@ -1,0 +1,818 @@
+[
+  {
+    "name": "anchored key overlapping the openai prefix",
+    "input": "sk-ant-api03-abcdefghijklmnopqrst",
+    "may_be_truncated": false,
+    "expected": "[redacted anthropic key]"
+  },
+  {
+    "name": "ansi sequence between a letter and an aws key",
+    "input": "x\u001b[31mAKIAABCDEFGHIJKLMNOP",
+    "may_be_truncated": false,
+    "expected": "x[redacted aws access key]"
+  },
+  {
+    "name": "anthropic key inside prose",
+    "input": "deploy with sk-ant-abcdefghijklmnopqrst123 done",
+    "may_be_truncated": false,
+    "expected": "deploy with [redacted anthropic key] done"
+  },
+  {
+    "name": "anthropic key standalone",
+    "input": "sk-ant-abcdefghijklmnopqrst123456",
+    "may_be_truncated": false,
+    "expected": "[redacted anthropic key]"
+  },
+  {
+    "name": "anthropic near miss with short body",
+    "input": "sk-ant-abcdefgh",
+    "may_be_truncated": false,
+    "expected": "sk-ant-abcdefgh"
+  },
+  {
+    "name": "aws access key bare",
+    "input": "AKIAABCDEFGHIJKLMNOP",
+    "may_be_truncated": false,
+    "expected": "[redacted aws access key]"
+  },
+  {
+    "name": "aws access key inside prose",
+    "input": "deploy with AKIAABCDEFGHIJKLMNOP now",
+    "may_be_truncated": false,
+    "expected": "deploy with [redacted aws access key] now"
+  },
+  {
+    "name": "aws access key repeated",
+    "input": "AKIAABCDEFGHIJKLMNOP then AKIAABCDEFGHIJKLMNOP",
+    "may_be_truncated": false,
+    "expected": "[redacted aws access key] then [redacted aws access key]"
+  },
+  {
+    "name": "aws key followed by a removed boundary",
+    "input": "AKIAABCDEFGHIJKLMNOP؜suffix",
+    "may_be_truncated": false,
+    "expected": "[redacted aws access key]suffix"
+  },
+  {
+    "name": "aws near miss with lowercase body",
+    "input": "AKIAabcdefghijklmnop",
+    "may_be_truncated": false,
+    "expected": "AKIAabcdefghijklmnop"
+  },
+  {
+    "name": "aws near miss with short body",
+    "input": "AKIAABCDEFGHIJKLM",
+    "may_be_truncated": false,
+    "expected": "AKIAABCDEFGHIJKLM"
+  },
+  {
+    "name": "boundary restored by a removed ansi sequence",
+    "input": "\u001b[31mAKIAABCDEFGHIJKLMNOP",
+    "may_be_truncated": false,
+    "expected": "[redacted aws access key]"
+  },
+  {
+    "name": "boundary restored by a removed zero-width character",
+    "input": "​AKIAABCDEFGHIJKLMNOP",
+    "may_be_truncated": false,
+    "expected": "[redacted aws access key]"
+  },
+  {
+    "name": "carriage return after a complete-looking secret value",
+    "input": "before secret=abcd1234\rafter words",
+    "may_be_truncated": false,
+    "expected": "before [redacted password assignment]\r[redacted ambiguous continuation] words"
+  },
+  {
+    "name": "carriage return after four value characters with a visible tail",
+    "input": "secret=pA7!\rcV2@kL9 after",
+    "may_be_truncated": false,
+    "expected": "[redacted password assignment]\r[redacted ambiguous continuation] after"
+  },
+  {
+    "name": "carriage return inside a quoted value with a visible tail",
+    "input": "password=\"pA\r7!cV2@kL9\" after",
+    "may_be_truncated": false,
+    "expected": "[redacted password assignment]\r after"
+  },
+  {
+    "name": "carriage return inside a secret value",
+    "input": "secret=pA7!cV2\r@kL9",
+    "may_be_truncated": false,
+    "expected": "[redacted password assignment]\r[redacted ambiguous continuation]"
+  },
+  {
+    "name": "carriage return inside an unquoted value with a visible tail",
+    "input": "secret=pA\r7!cV2@kL9 after",
+    "may_be_truncated": false,
+    "expected": "[redacted password assignment]\r[redacted ambiguous continuation] after"
+  },
+  {
+    "name": "cjk prose around a github token",
+    "input": "固定 ghp_abcdefghijklmnopqrstuvwxyz1234567890 を確認",
+    "may_be_truncated": false,
+    "expected": "固定 [redacted github token] を確認"
+  },
+  {
+    "name": "cjk prose around a password assignment",
+    "input": "密码 password=pA7!cV2@kL9 は秘密です",
+    "may_be_truncated": false,
+    "expected": "密码 [redacted password assignment] は秘密です"
+  },
+  {
+    "name": "cjk prose around an anthropic key",
+    "input": "トークン：sk-ant-abcdefghijklmnopqrst です",
+    "may_be_truncated": false,
+    "expected": "トークン：[redacted anthropic key] です"
+  },
+  {
+    "name": "comment quoting a rotated slack token",
+    "input": "deploy key xoxp-123456789012-abcdefghij rotated",
+    "may_be_truncated": false,
+    "expected": "deploy key [redacted slack token] rotated"
+  },
+  {
+    "name": "comment quoting an oauth token",
+    "input": "fix auth with gho_abcdefghijklmnopqrstuvwxyz1234567890 merged",
+    "may_be_truncated": false,
+    "expected": "fix auth with [redacted github token] merged"
+  },
+  {
+    "name": "commit subject carrying a test key",
+    "input": "ship feature sk-test-00000000000000000000 done",
+    "may_be_truncated": false,
+    "expected": "ship feature [redacted openai key] done"
+  },
+  {
+    "name": "commit subject carrying a test key inside prose",
+    "input": "fix login with sk-test-00000000000000000000 deployed",
+    "may_be_truncated": false,
+    "expected": "fix login with [redacted openai key] deployed"
+  },
+  {
+    "name": "credential assignment with basic prefix",
+    "input": "authorization: Basic dXNlcjpwYXNzd29yZA==",
+    "may_be_truncated": false,
+    "expected": "[redacted credential assignment]"
+  },
+  {
+    "name": "credential assignment with bearer prefix",
+    "input": "authorization: Bearer syn_aB3dE5fG7hI9jK2mN4pQ6",
+    "may_be_truncated": false,
+    "expected": "[redacted credential assignment]"
+  },
+  {
+    "name": "credential assignment with double-quoted value",
+    "input": "api_key=\"api-aB3dE5fG7hI9jK2mN4pQ6\"",
+    "may_be_truncated": false,
+    "expected": "[redacted credential assignment]"
+  },
+  {
+    "name": "credential assignment with opaque token",
+    "input": "token=tok_aB3d-E5fG7hI9jK2mN4pQ6",
+    "may_be_truncated": false,
+    "expected": "[redacted credential assignment]"
+  },
+  {
+    "name": "credential assignment with realistic bearer value",
+    "input": "authorization: Bearer live-example-9Zx!4Q",
+    "may_be_truncated": false,
+    "expected": "[redacted credential assignment]"
+  },
+  {
+    "name": "credential assignment with single-quoted value",
+    "input": "'api_key': 'api-aB3dE5fG7hI9jK2mN4pQ6'",
+    "may_be_truncated": false,
+    "expected": "[redacted credential assignment]"
+  },
+  {
+    "name": "credential assignment with token prefix",
+    "input": "authorization: Token abc12345",
+    "may_be_truncated": false,
+    "expected": "[redacted credential assignment]"
+  },
+  {
+    "name": "credential near miss with short value",
+    "input": "token=abc",
+    "may_be_truncated": false,
+    "expected": "token=abc"
+  },
+  {
+    "name": "credential near miss without boundary",
+    "input": "tokens=abcd1234",
+    "may_be_truncated": false,
+    "expected": "tokens=abcd1234"
+  },
+  {
+    "name": "embedded aws key keeps its neighbors",
+    "input": "prefix؜AKIAABCDEFGHIJKLMNOPsuffix",
+    "may_be_truncated": false,
+    "expected": "prefixAKIAABCDEFGHIJKLMNOPsuffix"
+  },
+  {
+    "name": "emoji before an anthropic key",
+    "input": "😀sk-ant-abcdefghijklmnopqrst123 done",
+    "may_be_truncated": false,
+    "expected": "😀[redacted anthropic key] done"
+  },
+  {
+    "name": "empty input",
+    "input": "",
+    "may_be_truncated": false,
+    "expected": ""
+  },
+  {
+    "name": "github fine-grained near miss with short body",
+    "input": "token github_pat_abcdefgh here",
+    "may_be_truncated": false,
+    "expected": "token github_pat_abcdefgh here"
+  },
+  {
+    "name": "github fine-grained token valid",
+    "input": "github_pat_abcdefghijklmnopqrstuvwxyz123456",
+    "may_be_truncated": false,
+    "expected": "[redacted github token]"
+  },
+  {
+    "name": "github fine-grained token with an extended body",
+    "input": "github_pat_abcdefghijklmnopqrstuvwxyz1234567890ABCD",
+    "may_be_truncated": false,
+    "expected": "[redacted github token]"
+  },
+  {
+    "name": "github near miss with unknown prefix",
+    "input": "ghx_abcdefghijklmnopqrstuvwxyz1234567890",
+    "may_be_truncated": false,
+    "expected": "ghx_abcdefghijklmnopqrstuvwxyz1234567890"
+  },
+  {
+    "name": "github oauth token valid",
+    "input": "gho_abcdefghijklmnopqrstuvwxyz1234567890",
+    "may_be_truncated": false,
+    "expected": "[redacted github token]"
+  },
+  {
+    "name": "github personal near miss with short body",
+    "input": "token ghp_abcdefgh here",
+    "may_be_truncated": false,
+    "expected": "token ghp_abcdefgh here"
+  },
+  {
+    "name": "github personal token bare",
+    "input": "ghp_abcdefghijklmnopqrstuvwxyz1234567890",
+    "may_be_truncated": false,
+    "expected": "[redacted github token]"
+  },
+  {
+    "name": "github personal token valid",
+    "input": "token ghp_abcdefghijklmnopqrstuvwxyz1234567890 here",
+    "may_be_truncated": false,
+    "expected": "token [redacted github token] here"
+  },
+  {
+    "name": "github token keeps its whole body after a removed boundary",
+    "input": "😀ghp_abcdefghijklmnopqrstuvwxyz1234567890؜uvw",
+    "may_be_truncated": false,
+    "expected": "😀[redacted github token]"
+  },
+  {
+    "name": "indirect password from a command substitution",
+    "input": "password=$(cat /run/secrets/db)",
+    "may_be_truncated": false,
+    "expected": "[redacted password assignment] /run/secrets/db)"
+  },
+  {
+    "name": "indirect password from an environment variable",
+    "input": "password=${DB_PASSWORD}",
+    "may_be_truncated": false,
+    "expected": "[redacted password assignment]"
+  },
+  {
+    "name": "indirect secret from a runtime environment",
+    "input": "secret=process.env.DB_SECRET",
+    "may_be_truncated": false,
+    "expected": "[redacted password assignment]"
+  },
+  {
+    "name": "indirect token from a shell variable",
+    "input": "token=$GITHUB_TOKEN",
+    "may_be_truncated": false,
+    "expected": "[redacted credential assignment]"
+  },
+  {
+    "name": "indonesian prose around a password assignment",
+    "input": "simpan password=pA7!cV2@kL9 dengan aman",
+    "may_be_truncated": false,
+    "expected": "simpan [redacted password assignment] dengan aman"
+  },
+  {
+    "name": "indonesian prose around an aws key",
+    "input": "kunci AKIAABCDEFGHIJKLMNOP jangan disebar",
+    "may_be_truncated": false,
+    "expected": "kunci [redacted aws access key] jangan disebar"
+  },
+  {
+    "name": "internal split stays inside a longer token",
+    "input": "😀sk-ant-abcdefghijklmnopqrst؜uvw!",
+    "may_be_truncated": false,
+    "expected": "😀[redacted anthropic key]!"
+  },
+  {
+    "name": "letter directly after a fine-grained token",
+    "input": "github_pat_abcdefghijklmnopqrstuvwxyz123456x",
+    "may_be_truncated": false,
+    "expected": "[redacted github token]"
+  },
+  {
+    "name": "letter directly after a github token",
+    "input": "ghp_abcdefghijklmnopqrstuvwxyz1234567890x",
+    "may_be_truncated": false,
+    "expected": "[redacted github token]"
+  },
+  {
+    "name": "letter directly before a fine-grained token",
+    "input": "xgithub_pat_abcdefghijklmnopqrstuvwxyz123456",
+    "may_be_truncated": false,
+    "expected": "xgithub_pat_abcdefghijklmnopqrstuvwxyz123456"
+  },
+  {
+    "name": "letter directly before a github token",
+    "input": "xghp_abcdefghijklmnopqrstuvwxyz1234567890",
+    "may_be_truncated": false,
+    "expected": "xghp_abcdefghijklmnopqrstuvwxyz1234567890"
+  },
+  {
+    "name": "line feed after a complete-looking password value",
+    "input": "before password=abcd\nafter words",
+    "may_be_truncated": false,
+    "expected": "before [redacted password assignment]\n[redacted ambiguous continuation] words"
+  },
+  {
+    "name": "line feed before a provable next record",
+    "input": "before password=abcd\n\"event\": \"ok\"",
+    "may_be_truncated": false,
+    "expected": "before [redacted password assignment]\n\"event\": \"ok\""
+  },
+  {
+    "name": "line feed before punctuation-led text",
+    "input": "before password=abcd\n@after mention",
+    "may_be_truncated": false,
+    "expected": "before [redacted password assignment]\n[redacted ambiguous continuation] mention"
+  },
+  {
+    "name": "line feed inside a quoted key name",
+    "input": "\"api_\nkey\": \"api-aB3dE5fG7hI9jK2mN4pQ6\"",
+    "may_be_truncated": false,
+    "expected": "[redacted credential assignment]\n"
+  },
+  {
+    "name": "mixed continuation at end of input",
+    "input": "before password=ab12\raB1!shape",
+    "may_be_truncated": false,
+    "expected": "before [redacted password assignment]\r[redacted ambiguous continuation]"
+  },
+  {
+    "name": "npm near miss with short body",
+    "input": "npm_abcdefgh",
+    "may_be_truncated": false,
+    "expected": "npm_abcdefgh"
+  },
+  {
+    "name": "npm token among other tokens",
+    "input": "a AKIAABCDEFGHIJKLMNOP b npm_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx c",
+    "may_be_truncated": false,
+    "expected": "a [redacted aws access key] b [redacted npm token] c"
+  },
+  {
+    "name": "npm token built from random characters",
+    "input": "npm_abcdefghijklmnopqrstuvwxyz1234567890",
+    "may_be_truncated": false,
+    "expected": "[redacted npm token]"
+  },
+  {
+    "name": "npm token followed by a removed boundary",
+    "input": "npm_abcdefghijklmnopqrstuvwxyz1234567890؜suffix",
+    "may_be_truncated": false,
+    "expected": "[redacted npm token]suffix"
+  },
+  {
+    "name": "npm token valid",
+    "input": "npm_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    "may_be_truncated": false,
+    "expected": "[redacted npm token]"
+  },
+  {
+    "name": "openai key standalone",
+    "input": "sk-abcdefghijklmnopqrst",
+    "may_be_truncated": false,
+    "expected": "[redacted openai key]"
+  },
+  {
+    "name": "openai near miss with short body",
+    "input": "sk-abcdefgh",
+    "may_be_truncated": false,
+    "expected": "sk-abcdefgh"
+  },
+  {
+    "name": "openai project key",
+    "input": "sk-proj-aB3dE5fG7hI9-jK2mN4pQ6rS8tU0vW1xY2zA4",
+    "may_be_truncated": false,
+    "expected": "[redacted openai key]"
+  },
+  {
+    "name": "openai project key behind a credential assignment",
+    "input": "token=sk-proj-aB3dE5fG7hI9-jK2mN4pQ6rS8tU0vW1xY2zA4",
+    "may_be_truncated": false,
+    "expected": "[redacted credential assignment]"
+  },
+  {
+    "name": "openai token keeps its whole body after a removed boundary",
+    "input": "😀sk-abcdefghijklmnopqrst؜uvw",
+    "may_be_truncated": false,
+    "expected": "😀[redacted openai key]"
+  },
+  {
+    "name": "password assignment after prose",
+    "input": "credentials: password = \"pA7!cV2@kL9\"",
+    "may_be_truncated": false,
+    "expected": "credentials: [redacted password assignment]"
+  },
+  {
+    "name": "password assignment unquoted",
+    "input": "password=pA7!cV2@kL9",
+    "may_be_truncated": false,
+    "expected": "[redacted password assignment]"
+  },
+  {
+    "name": "password assignment with a quote inside the value",
+    "input": "password=\"ab'cd1234\"",
+    "may_be_truncated": false,
+    "expected": "password=\"ab'cd1234\""
+  },
+  {
+    "name": "password assignment with a realistic value containing a keyword",
+    "input": "password=pA7!test!cV2@kL9",
+    "may_be_truncated": false,
+    "expected": "[redacted password assignment]"
+  },
+  {
+    "name": "password assignment with an apostrophe in an unquoted value",
+    "input": "secret=pA7'cV2@kL9",
+    "may_be_truncated": false,
+    "expected": "secret=pA7'cV2@kL9"
+  },
+  {
+    "name": "password assignment with double-quoted key",
+    "input": "\"password\": \"pA7!cV2@kL9\"",
+    "may_be_truncated": false,
+    "expected": "[redacted password assignment]"
+  },
+  {
+    "name": "password assignment with mismatched quotes",
+    "input": "password=\"abcd'",
+    "may_be_truncated": false,
+    "expected": "password=\"abcd'"
+  },
+  {
+    "name": "password assignment with mismatched quotes at the boundary",
+    "input": "password=\"abcd'",
+    "may_be_truncated": true,
+    "expected": "password=\"abcd'"
+  },
+  {
+    "name": "password assignment with single-quoted value",
+    "input": "secret='rT8$wX3!nM6'",
+    "may_be_truncated": false,
+    "expected": "[redacted password assignment]"
+  },
+  {
+    "name": "password assignment with unquoted value after padding",
+    "input": "password =    pA7!cV2@kL9   ",
+    "may_be_truncated": false,
+    "expected": "[redacted password assignment]   "
+  },
+  {
+    "name": "password near miss with short value",
+    "input": "password=abc",
+    "may_be_truncated": false,
+    "expected": "password=abc"
+  },
+  {
+    "name": "password near miss without boundary",
+    "input": "passwordless=pA7!cV2@kL9",
+    "may_be_truncated": false,
+    "expected": "passwordless=pA7!cV2@kL9"
+  },
+  {
+    "name": "placeholder api key variable",
+    "input": "api_key=$API_KEY",
+    "may_be_truncated": false,
+    "expected": "[redacted credential assignment]"
+  },
+  {
+    "name": "placeholder password in angle brackets",
+    "input": "password=<your-password>",
+    "may_be_truncated": false,
+    "expected": "[redacted password assignment]"
+  },
+  {
+    "name": "placeholder repeated characters",
+    "input": "password=xxxx",
+    "may_be_truncated": false,
+    "expected": "[redacted password assignment]"
+  },
+  {
+    "name": "placeholder token template",
+    "input": "token=${TOKEN}",
+    "may_be_truncated": false,
+    "expected": "[redacted credential assignment]"
+  },
+  {
+    "name": "placeholder word value",
+    "input": "password=changeme",
+    "may_be_truncated": false,
+    "expected": "[redacted password assignment]"
+  },
+  {
+    "name": "plain prose that resembles a dash-separated word",
+    "input": "mask-value",
+    "may_be_truncated": false,
+    "expected": "mask-value"
+  },
+  {
+    "name": "plain prose that resembles a dash-separated word with the truncation flag",
+    "input": "mask-value",
+    "may_be_truncated": true,
+    "expected": "mask-value"
+  },
+  {
+    "name": "plain prose that resembles a github token",
+    "input": "github_pattern",
+    "may_be_truncated": false,
+    "expected": "github_pattern"
+  },
+  {
+    "name": "plain prose that resembles a github token with the truncation flag",
+    "input": "github_pattern",
+    "may_be_truncated": true,
+    "expected": "github_pattern"
+  },
+  {
+    "name": "plain prose that resembles a key family",
+    "input": "task-ant-abcdefghijklmnopqrst123",
+    "may_be_truncated": false,
+    "expected": "task-ant-abcdefghijklmnopqrst123"
+  },
+  {
+    "name": "plain prose that resembles a key family with the truncation flag",
+    "input": "task-ant-abcdefghijklmnopqrst123",
+    "may_be_truncated": true,
+    "expected": "task-ant-abcdefghijklmnopqrst123"
+  },
+  {
+    "name": "plain prose that resembles a password key",
+    "input": "passwordless",
+    "may_be_truncated": false,
+    "expected": "passwordless"
+  },
+  {
+    "name": "plain prose that resembles a password key with the truncation flag",
+    "input": "passwordless",
+    "may_be_truncated": true,
+    "expected": "passwordless"
+  },
+  {
+    "name": "plain prose that resembles a token name",
+    "input": "flask-app",
+    "may_be_truncated": false,
+    "expected": "flask-app"
+  },
+  {
+    "name": "plain prose that resembles a token name with the truncation flag",
+    "input": "flask-app",
+    "may_be_truncated": true,
+    "expected": "flask-app"
+  },
+  {
+    "name": "plain prose that resembles an npm token",
+    "input": "npm_install",
+    "may_be_truncated": false,
+    "expected": "npm_install"
+  },
+  {
+    "name": "plain prose that resembles an npm token with the truncation flag",
+    "input": "npm_install",
+    "may_be_truncated": true,
+    "expected": "npm_install"
+  },
+  {
+    "name": "plain text without secrets",
+    "input": "margin-top: 8px",
+    "may_be_truncated": false,
+    "expected": "margin-top: 8px"
+  },
+  {
+    "name": "private key header",
+    "input": "-----BEGIN RSA PRIVATE KEY-----",
+    "may_be_truncated": false,
+    "expected": "[redacted private key]"
+  },
+  {
+    "name": "private key near miss with public header",
+    "input": "-----BEGIN PUBLIC KEY-----",
+    "may_be_truncated": false,
+    "expected": "-----BEGIN PUBLIC KEY-----"
+  },
+  {
+    "name": "punctuation-led continuation at end of input",
+    "input": "before password=ab12\n@after",
+    "may_be_truncated": false,
+    "expected": "before [redacted password assignment]\n[redacted ambiguous continuation]"
+  },
+  {
+    "name": "removed boundary inside prose keeps the word",
+    "input": "task-؜ant-abcdefghijklmnopqrst123",
+    "may_be_truncated": false,
+    "expected": "task-ant-abcdefghijklmnopqrst123"
+  },
+  {
+    "name": "removed boundary inside prose with the truncation flag",
+    "input": "task-؜ant-abcdefghijklmnopqrst123",
+    "may_be_truncated": true,
+    "expected": "task-ant-abcdefghijklmnopqrst123"
+  },
+  {
+    "name": "secret assignment with realistic value",
+    "input": "secret=8f3kL9!qZ2#xM7@nB4",
+    "may_be_truncated": false,
+    "expected": "[redacted password assignment]"
+  },
+  {
+    "name": "slack near miss with short body",
+    "input": "xoxb-abcdefgh",
+    "may_be_truncated": false,
+    "expected": "xoxb-abcdefgh"
+  },
+  {
+    "name": "slack near miss with unknown prefix",
+    "input": "xoxz-1234567890abcdefghijklmnop",
+    "may_be_truncated": false,
+    "expected": "xoxz-1234567890abcdefghijklmnop"
+  },
+  {
+    "name": "slack rotated token valid",
+    "input": "xoxp-123456789012-abcdefghij",
+    "may_be_truncated": false,
+    "expected": "[redacted slack token]"
+  },
+  {
+    "name": "slack token inside a sentence",
+    "input": "xoxb-123456789012-123456789012-AbCdEfGhIjKlMnOpQrSt",
+    "may_be_truncated": false,
+    "expected": "[redacted slack token]"
+  },
+  {
+    "name": "slack token keeps its whole body after a removed boundary",
+    "input": "😀xoxb-1234567890abcdefghijklmnop؜uvw",
+    "may_be_truncated": false,
+    "expected": "😀[redacted slack token]"
+  },
+  {
+    "name": "slack token valid",
+    "input": "xoxb-1234567890abcdefghijklmnop",
+    "may_be_truncated": false,
+    "expected": "[redacted slack token]"
+  },
+  {
+    "name": "tab after a complete-looking credential value",
+    "input": "before token=abcd1234\tafter words",
+    "may_be_truncated": false,
+    "expected": "before [redacted credential assignment]\t[redacted ambiguous continuation] words"
+  },
+  {
+    "name": "tab inside a password key name",
+    "input": "pass\tword=pA7!cV2@kL9",
+    "may_be_truncated": false,
+    "expected": "[redacted password assignment]\t"
+  },
+  {
+    "name": "test key bare",
+    "input": "sk-test-00000000000000000000",
+    "may_be_truncated": false,
+    "expected": "[redacted openai key]"
+  },
+  {
+    "name": "token after a removed arabic letter mark",
+    "input": "prefix؜sk-ant-abcdefghijklmnopqrst123",
+    "may_be_truncated": false,
+    "expected": "prefix[redacted anthropic key]"
+  },
+  {
+    "name": "token split by a removed arabic letter mark",
+    "input": "prefix؜sk-؜ant-abcdefghijklmnopqrst123",
+    "may_be_truncated": false,
+    "expected": "prefix[redacted anthropic key]"
+  },
+  {
+    "name": "truncated anthropic fragment at end of input",
+    "input": "prefix؜sk-ant-abcdefgh",
+    "may_be_truncated": true,
+    "expected": "prefix"
+  },
+  {
+    "name": "truncated anthropic fragment with visible tail",
+    "input": "prefix؜sk-ant-abc tail",
+    "may_be_truncated": true,
+    "expected": "prefixsk-ant-abc tail"
+  },
+  {
+    "name": "truncated anthropic fragment without the truncation flag",
+    "input": "prefix؜sk-ant-abc",
+    "may_be_truncated": false,
+    "expected": "prefixsk-ant-abc"
+  },
+  {
+    "name": "truncated aws fragment at end of input",
+    "input": "prefix؜AKIAABCDEFGH",
+    "may_be_truncated": true,
+    "expected": "prefix"
+  },
+  {
+    "name": "truncated fine-grained fragment at end of input",
+    "input": "prefix؜github_pat_abcdefgh",
+    "may_be_truncated": true,
+    "expected": "prefix"
+  },
+  {
+    "name": "truncated github personal fragment at end of input",
+    "input": "prefix؜ghp_abcdefgh",
+    "may_be_truncated": true,
+    "expected": "prefix"
+  },
+  {
+    "name": "truncated npm fragment at end of input",
+    "input": "prefix؜npm_abcdefgh",
+    "may_be_truncated": true,
+    "expected": "prefix"
+  },
+  {
+    "name": "truncated openai fragment at end of input",
+    "input": "prefix؜sk-abcdefgh",
+    "may_be_truncated": true,
+    "expected": "prefix"
+  },
+  {
+    "name": "truncated password fragment at end of input",
+    "input": "prefix؜password = \"secret",
+    "may_be_truncated": true,
+    "expected": "prefix"
+  },
+  {
+    "name": "truncated private key fragment at end of input",
+    "input": "prefix؜-----BEGIN RSA PR",
+    "may_be_truncated": true,
+    "expected": "prefix"
+  },
+  {
+    "name": "truncated slack fragment at end of input",
+    "input": "prefix؜xoxb-abcdefgh",
+    "may_be_truncated": true,
+    "expected": "prefix"
+  },
+  {
+    "name": "two controls inside a quoted value",
+    "input": "token=\"tK8!\ncV2\r@kL9\" after",
+    "may_be_truncated": false,
+    "expected": "[redacted credential assignment]\n\r after"
+  },
+  {
+    "name": "two controls inside an unquoted value",
+    "input": "secret=pA\r7!\tcV2@kL9 after",
+    "may_be_truncated": false,
+    "expected": "[redacted password assignment]\r[redacted ambiguous continuation]\t[redacted ambiguous continuation] after"
+  },
+  {
+    "name": "underscore directly after an aws key",
+    "input": "AKIAABCDEFGHIJKLMNOP_suffix",
+    "may_be_truncated": false,
+    "expected": "AKIAABCDEFGHIJKLMNOP_suffix"
+  },
+  {
+    "name": "underscore directly before an aws key",
+    "input": "_AKIAABCDEFGHIJKLMNOP",
+    "may_be_truncated": false,
+    "expected": "_AKIAABCDEFGHIJKLMNOP"
+  },
+  {
+    "name": "variable-length token keeps its whole body after a removed boundary",
+    "input": "😀sk-ant-abcdefghijklmnopqrst؜uvw",
+    "may_be_truncated": false,
+    "expected": "😀[redacted anthropic key]"
+  },
+  {
+    "name": "zero-width space between a letter and an anthropic key",
+    "input": "prefix​sk-ant-abcdefghijklmnopqrst123",
+    "may_be_truncated": false,
+    "expected": "prefix[redacted anthropic key]"
+  }
+]
