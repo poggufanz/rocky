@@ -13,8 +13,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use gpui::prelude::*;
 use gpui::{
-    App, Application, Context, Div, Entity, IntoElement, MenuItem, Render, SharedString,
-    TitlebarOptions, Window, WindowHandle, WindowOptions, div, rgb,
+    App, Application, Bounds, Context, Div, Entity, IntoElement, MenuItem, Render, SharedString,
+    TitlebarOptions, Window, WindowBounds, WindowHandle, WindowOptions, div, px, rgb, size,
 };
 use gpui_tray::Tray;
 use rocky_proto::pipe::{ClientMsg, CmdName, ServerMsg, Status};
@@ -191,14 +191,6 @@ impl DeskView {
         }
     }
 
-    fn show_window(&mut self, cx: &mut App) {
-        if let Some(handle) = self.window.as_ref() {
-            let _ = handle.update(cx, |_, window, _| {
-                window.activate_window();
-            });
-        }
-    }
-
     fn on_inbox(&mut self, cx: &mut Context<Self>) {
         let mut changed = self.ctl.on_worker();
         let Some(inbox) = self.ctl.inbox.as_ref() else {
@@ -241,7 +233,15 @@ impl Render for DeskView {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         let groups = self.ctl.model.groups(now_ms());
         let warnings = self.ctl.model.warnings();
-        let mut root = div().flex_col().gap_2().p_3().size_full();
+        // Opaque background: without one, gpui on Windows shows the desktop through.
+        let mut root = div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .p_3()
+            .size_full()
+            .bg(rgb(0xF5F5F4))
+            .text_color(rgb(0x1C1C1C));
         if !warnings.is_empty() {
             let mut strip = div().flex_col().gap_1();
             for w in &warnings {
@@ -292,6 +292,15 @@ fn status_text(s: Status) -> &'static str {
         Status::Done => "done",
         Status::Failed => "failed",
         Status::Ended => "ended",
+    }
+}
+
+/// Restore and focus the desk window. Call it outside any `view.update`: the
+/// window's root view is `view`, so updating the window inside that lease
+/// double-borrows the entity and panics, which aborts inside the tray callback.
+fn show_window(view: &Entity<DeskView>, cx: &mut App) {
+    if let Some(handle) = view.read(cx).window {
+        let _ = handle.update(cx, |_, window, _| window.activate_window());
     }
 }
 
@@ -358,6 +367,11 @@ pub fn run(rocky_home: PathBuf) {
                         appears_transparent: false,
                         traffic_light_position: None,
                     }),
+                    window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
+                        None,
+                        size(px(440.), px(560.)),
+                        cx,
+                    ))),
                     ..Default::default()
                 },
                 |_, _| view.clone(),
@@ -383,9 +397,7 @@ pub fn run(rocky_home: PathBuf) {
             .tooltip(tip.clone())
             .on_activate_with({
                 let view = view.clone();
-                move |_, cx| {
-                    view.update(cx, |v, cx| v.show_window(cx));
-                }
+                move |_, cx| show_window(&view, cx)
             })
             .menu(|_| {
                 vec![
@@ -413,8 +425,8 @@ pub fn run(rocky_home: PathBuf) {
                         v.ctl.act(action);
                         cx.notify();
                     }
-                    v.show_window(cx);
                 });
+                show_window(&view, cx);
             }
         });
         cx.on_action({
