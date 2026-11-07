@@ -64,7 +64,8 @@ fn real_session_main_agent_flow() {
     assert!(s1.contains(&Status::Done), "{s1:?}");
     // A PermissionRequest flips to NeedsYou; the answered tool's PostToolUse flips back.
     assert!(
-        s1.windows(2).any(|w| w == [Status::NeedsYou, Status::Working]),
+        s1.windows(2)
+            .any(|w| w == [Status::NeedsYou, Status::Working]),
         "{s1:?}"
     );
 }
