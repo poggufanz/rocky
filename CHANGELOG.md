@@ -8,6 +8,8 @@ Hidden `rocky setup --desk-hooks <path>` / `--uninstall-desk-hooks` for the expe
 
 `rocky setup` writes Claude Code agent and desk hooks to `$CLAUDE_CONFIG_DIR/settings.json` when that variable is set, prints the settings path it used, and refuses an empty, relative, or trailing-separator value.
 
+Hook setup no longer reports a retained previous config when the retained copy matches the file it replaced. The copy is still kept for recovery.
+
 ## 2.0.0 — 6 November 2026
 
 Major release: Rocky retires its mascot persona. CLI, hook, GUI, and MCP output is plain, neutral English, following [docs/output-principles.md](docs/output-principles.md). Evidence rules, hedges, coverage disclosures, `--quiet`, exit codes, and JSON shapes are unchanged.

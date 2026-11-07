@@ -7,6 +7,7 @@ import {
   lstatSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   realpathSync,
   renameSync,
@@ -25,6 +26,7 @@ import {
   installClaudeAgentHooks,
   mergeClaudeHooks,
   removeClaudeHooks,
+  retainedCopyMatches,
   rockyHookCommand,
   uninstallClaudeAgentHooks,
 } from "../setup/agent-hooks.js";
@@ -304,6 +306,53 @@ test("uninstall removes only owned groups, is idempotent, and leaves foreign roo
   const second = await uninstallClaudeAgentHooks({ settingsPath: value.settings }, { command: value.command });
   assert.equal(second.status, "unchanged");
   assert.deepEqual(readFileSync(value.settings), bytes);
+});
+
+test("retainedCopyMatches: identical bytes true, different bytes false, missing file false", (t) => {
+  const { root } = fixture(t);
+  const copy = join(root, "copy.json");
+  const bytes = Buffer.from('{"foreign":true}\n', "utf8");
+  writeFileSync(copy, bytes);
+
+  assert.equal(retainedCopyMatches(copy, bytes), true);
+  assert.equal(retainedCopyMatches(copy, Buffer.from('{"foreign":false}\n', "utf8")), false);
+  assert.equal(retainedCopyMatches(copy, Buffer.concat([bytes, Buffer.from("\n")])), false);
+  assert.equal(retainedCopyMatches(join(root, "absent.json"), bytes), false);
+  // A path that cannot be read as a file is a read error, so it also reports false.
+  assert.equal(retainedCopyMatches(root, bytes), false);
+});
+
+function retainedTransactions(settingsPath: string): string[] {
+  return readdirSync(dirname(settingsPath))
+    .filter((name) => name.startsWith(`.${basename(settingsPath)}.transaction-`));
+}
+
+test("agent hooks: reinstall over existing settings reports no retained copy", async (t) => {
+  const value = fixture(t);
+  const settings = join(dirname(value.settings), "settings.json");
+  const existing = { custom: { keep: true } };
+  mkdirSync(dirname(settings), { recursive: true, mode: 0o700 });
+  writeFileSync(settings, `${JSON.stringify(existing)}\n`);
+  const options = {
+    command: value.command,
+    confirmation: { async confirm(): Promise<boolean> { return true; } },
+    detail: () => undefined,
+  };
+
+  const installed = await installClaudeAgentHooks({ settingsPath: settings }, options);
+  assert.equal(installed.status, "written");
+  assert.equal(installed.detail, undefined);
+  assert.deepEqual((JSON.parse(readFileSync(settings, "utf8")) as Record<string, unknown>).custom, existing.custom);
+  const installedBytes = readFileSync(settings);
+
+  // The copy is not reported, but it is still kept: one transaction directory
+  // stays beside the file after a second write, older ones pruned, and it holds
+  // the bytes the second write replaced.
+  const removed = await uninstallClaudeAgentHooks({ settingsPath: settings }, options);
+  assert.equal(removed.status, "written");
+  const kept = retainedTransactions(settings);
+  assert.equal(kept.length, 1);
+  assert.deepEqual(readFileSync(join(dirname(settings), kept[0], "displaced")), installedBytes);
 });
 
 test("malformed settings are unreadable before consent and never overwritten", async (t) => {

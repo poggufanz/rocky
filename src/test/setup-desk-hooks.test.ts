@@ -11,7 +11,7 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { dirname, join, sep } from "node:path";
+import { basename, dirname, join, sep } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import {
@@ -149,6 +149,41 @@ test("desk reinstall is idempotent (status unchanged)", async (t) => {
   const second = await installDeskHooks({ settingsPath: value.settings }, options);
   assert.equal(second.status, "unchanged");
   assert.deepEqual(readFileSync(value.settings), bytes);
+});
+
+function retainedTransactions(settingsPath: string): string[] {
+  return readdirSync(dirname(settingsPath))
+    .filter((name) => name.startsWith(`.${basename(settingsPath)}.transaction-`));
+}
+
+test("desk hooks: reinstall over existing settings reports no retained copy", async (t) => {
+  const { root } = settingsFixture(t);
+  const hookBin = hookBinFixture(t);
+  const settings = join(root, "nested", "settings.json");
+  const existing = { custom: { keep: true } };
+  mkdirSync(dirname(settings), { recursive: true, mode: 0o700 });
+  writeFileSync(settings, `${JSON.stringify(existing)}\n`);
+  const options = {
+    hookBin,
+    confirmation: { async confirm(): Promise<boolean> { return true; } },
+    detail: () => undefined,
+    fileExists: (path: string) => path === hookBin,
+  };
+
+  const installed = await installDeskHooks({ settingsPath: settings }, options);
+  assert.equal(installed.status, "written");
+  assert.equal(installed.detail, undefined);
+  assert.deepEqual((JSON.parse(readFileSync(settings, "utf8")) as Record<string, unknown>).custom, existing.custom);
+  const installedBytes = readFileSync(settings);
+
+  // The copy is not reported, but it is still kept: one transaction directory
+  // stays beside the file after a second write, older ones pruned, and it holds
+  // the bytes the second write replaced.
+  const removed = await uninstallDeskHooks({ settingsPath: settings }, options);
+  assert.equal(removed.status, "written");
+  const kept = retainedTransactions(settings);
+  assert.equal(kept.length, 1);
+  assert.deepEqual(readFileSync(join(dirname(settings), kept[0], "displaced")), installedBytes);
 });
 
 test("desk hook path with spaces is quoted; path with % or ! is rejected", (t) => {

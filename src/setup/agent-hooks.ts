@@ -1,4 +1,4 @@
-import { lstatSync } from "node:fs";
+import { lstatSync, readFileSync } from "node:fs";
 import hostPath, { dirname, join, posix, win32 } from "node:path";
 import { fileURLToPath } from "node:url";
 import { resolveClaudeCodeUserConfig } from "./claude-code.js";
@@ -671,6 +671,19 @@ function printEntries(command: string, gateCommand: string | undefined, options:
     (JSON.stringify(entries, null, 2));
 }
 
+/**
+ * True only when the file at `recoveryPath` reads back byte-for-byte equal to
+ * `priorBytes`. Any read error is false, so a caller that skips its report on
+ * `true` errs toward showing it.
+ */
+export function retainedCopyMatches(recoveryPath: string, priorBytes: Buffer): boolean {
+  try {
+    return readFileSync(recoveryPath).equals(priorBytes);
+  } catch {
+    return false;
+  }
+}
+
 export function writeMutation(
   path: string,
   current: CurrentConfig,
@@ -683,12 +696,12 @@ export function writeMutation(
     options.beforeWrite?.();
     const result = atomicWriteJsonIfUnchanged(path, value, current.read, topologyGuard(current.topology));
     if (result.status === "written") {
-      return result.recoveryPath === undefined
-        ? { status: "written" }
-        : {
-          status: "written",
-          detail: retainedConfigDetail(noun, result.recoveryPath),
-        };
+      // The transaction engine still keeps the displaced copy on disk; only the report is conditional.
+      if (result.recoveryPath === undefined
+        || (current.read.status === "valid" && retainedCopyMatches(result.recoveryPath, current.read.bytes))) {
+        return { status: "written" };
+      }
+      return { status: "written", detail: retainedConfigDetail(noun, result.recoveryPath) };
     }
     return {
       status: "error",
