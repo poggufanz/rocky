@@ -30,6 +30,8 @@ fn event(name: &str, sid: &str) -> HookEvent {
         agent_transcript_path: None,
         notification_type: None,
         target_path: None,
+        command: None,
+        description: None,
         truncated: false,
     }
 }

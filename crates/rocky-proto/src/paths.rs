@@ -38,6 +38,10 @@ pub fn log_path(rocky_home: &Path) -> PathBuf {
     desk_dir(rocky_home).join("rockyd.log")
 }
 
+pub fn tool_text_off_marker(rocky_home: &Path) -> PathBuf {
+    desk_dir(rocky_home).join("tool-text-off")
+}
+
 pub fn home_hash(rocky_home: &Path) -> String {
     let normalized = rocky_home
         .to_string_lossy()
@@ -66,7 +70,7 @@ mod tests {
 
     use super::{
         absolutize, bad_dir, desk_mutex_name, home_hash, log_path, pipe_name, rocky_home_from,
-        spool_dir,
+        spool_dir, tool_text_off_marker,
     };
 
     #[test]
@@ -126,5 +130,9 @@ mod tests {
         assert_eq!(spool_dir(p), PathBuf::from(r"C:\h\desk\spool"));
         assert_eq!(bad_dir(p), PathBuf::from(r"C:\h\desk\spool\bad"));
         assert_eq!(log_path(p), PathBuf::from(r"C:\h\desk\rockyd.log"));
+        assert_eq!(
+            tool_text_off_marker(p),
+            PathBuf::from(r"C:\h\desk\tool-text-off")
+        );
     }
 }

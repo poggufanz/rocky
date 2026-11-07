@@ -56,10 +56,34 @@ function makeWritePayloadBytes() {
   );
 }
 
+// Valid PreToolUse Bash hook payload whose command is exactly 4096 bytes and
+// carries two tokens, one password assignment, and terminal escape sequences.
+function makeBash4KiBPayloadBytes() {
+  const head = [
+    "set -euo pipefail",
+    `export GH_TOKEN="ghp_${"a".repeat(36)}"`,
+    "db --password=hunter2hunter2 -e 'select 1'",
+    `\u001b[31mwarning: ghp_${"b".repeat(36)}\u001b[0m`,
+    "echo ok",
+  ].join("\n");
+  const command = `${head}\n${"#".repeat(4096 - head.length - 1)}`;
+  return Buffer.from(
+    JSON.stringify({
+      session_id: "bench-session",
+      hook_event_name: "PreToolUse",
+      cwd: "C:\\bench",
+      tool_name: "Bash",
+      tool_use_id: "bench-tool-use-2",
+      tool_input: { command, description: "Bench bash command" },
+    }),
+    "utf8",
+  );
+}
+
 function usage() {
   return [
     "usage:",
-    "  bench-desk-hook.mjs --hook <exe> --noop <exe> --payload <file|write-1mib> --n <n> [--via-bash]",
+    "  bench-desk-hook.mjs --hook <exe> --noop <exe> --payload <file|write-1mib|bash-4kib> --n <n> [--via-bash]",
     "  bench-desk-hook.mjs --make-write-payload <file>",
     "  bench-desk-hook.mjs --self-test",
   ].join("\n");
@@ -105,7 +129,15 @@ function selfTest() {
   assert.equal(p.hook_event_name, "PreToolUse");
   assert.equal(p.tool_name, "Write");
   assert.equal(p.tool_input.content.length, 1024 * 1024);
-  console.log("self-test: OK (percentile=nearest-rank, payload=Write/1MiB)");
+  // payload shape: valid JSON, Bash tool, 4096-byte command with secrets and ANSI
+  const b = JSON.parse(makeBash4KiBPayloadBytes().toString("utf8"));
+  assert.equal(b.hook_event_name, "PreToolUse");
+  assert.equal(b.tool_name, "Bash");
+  assert.equal(Buffer.byteLength(b.tool_input.command, "utf8"), 4096);
+  assert.equal((b.tool_input.command.match(/ghp_/g) ?? []).length, 2);
+  assert.ok(b.tool_input.command.includes("password="));
+  assert.ok(b.tool_input.command.includes("\u001b["));
+  console.log("self-test: OK (percentile=nearest-rank, payloads=Write/1MiB,Bash/4KiB)");
 }
 
 // Locate Git for Windows bash.exe. NEVER WSL's C:\Windows\System32\bash.exe:
@@ -183,6 +215,9 @@ function main() {
   if (args.payload === "write-1mib") {
     payload = makeWritePayloadBytes();
     payloadLabel = "write-1mib (generated)";
+  } else if (args.payload === "bash-4kib") {
+    payload = makeBash4KiBPayloadBytes();
+    payloadLabel = "bash-4kib (generated)";
   } else {
     payload = readFileSync(resolve(args.payload));
     payloadLabel = args.payload;

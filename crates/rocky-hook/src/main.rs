@@ -10,7 +10,7 @@ use std::panic::{self, AssertUnwindSafe};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use rocky_proto::hook::{DropReason, ID_CAP, STDIN_CAP, parse_hook_payload};
-use rocky_proto::paths::{rocky_home, spool_dir};
+use rocky_proto::paths::{rocky_home, spool_dir, tool_text_off_marker};
 use rocky_proto::spool::{SPOOL_VERSION, SpoolBody, SpoolRecord};
 
 fn main() {
@@ -25,12 +25,14 @@ fn run() {
         return;
     };
     let (data, oversize) = read_stdin();
+    let home = rocky_home();
+    let capture = !tool_text_off_marker(&home).exists();
     let body = match oversize {
         Some(total) => SpoolBody::Dropped {
             reason: DropReason::Oversize,
             bytes: total,
         },
-        None => match parse_hook_payload(&data) {
+        None => match parse_hook_payload(&data, capture) {
             Ok(event) => SpoolBody::Event { event },
             Err(reason) => SpoolBody::Dropped {
                 reason,
@@ -44,7 +46,7 @@ fn run() {
         recv_ms: now_ms(),
         body,
     };
-    let _ = write::write_record(&spool_dir(&rocky_home()), &rec);
+    let _ = write::write_record(&spool_dir(&home), &rec);
 }
 
 /// Exactly `desk-hook <harness>`; anything else means "write nothing".

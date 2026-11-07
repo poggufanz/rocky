@@ -131,3 +131,93 @@ fn home_with_spaces_and_non_ascii() {
     assert_eq!((code, out.len(), err.len()), (0, 0, 0));
     assert_eq!(spool_files(&home).len(), 1);
 }
+
+fn bash_payload(command: &str, description: &str) -> Vec<u8> {
+    serde_json::to_vec(&serde_json::json!({
+        "session_id": "s1",
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Bash",
+        "tool_use_id": "t1",
+        "tool_input": {"command": command, "description": description},
+    }))
+    .unwrap()
+}
+
+fn event(rec: SpoolRecord) -> rocky_proto::hook::HookEvent {
+    match rec.body {
+        SpoolBody::Event { event } => event,
+        other => panic!("expected an event record, got {other:?}"),
+    }
+}
+
+#[test]
+fn secret_in_bash_command_never_reaches_spool_bytes() {
+    let home = tempfile::tempdir().unwrap();
+    let payload = bash_payload(
+        r#"curl -H "Authorization: Bearer abcdefghijklmnop" https://example.test"#,
+        "Call the endpoint",
+    );
+    let (code, out, err) = run(&["desk-hook", "claude-code"], &payload, home.path());
+    assert_eq!((code, out.len(), err.len()), (0, 0, 0));
+    let files = spool_files(home.path());
+    assert_eq!(files.len(), 1);
+    let text = String::from_utf8(fs::read(&files[0]).unwrap()).unwrap();
+    assert!(!text.contains("abcdefghijklmnop"), "{text}");
+    let event = event(read_record(&files[0]));
+    assert!(
+        event
+            .command
+            .as_deref()
+            .unwrap()
+            .contains("[redacted credential assignment]")
+    );
+    assert_eq!(event.description.as_deref(), Some("Call the endpoint"));
+}
+
+#[test]
+fn marker_disables_tool_text_capture() {
+    let home = tempfile::tempdir().unwrap();
+    fs::create_dir_all(home.path().join("desk")).unwrap();
+    fs::write(home.path().join("desk").join("tool-text-off"), b"").unwrap();
+    let payload = bash_payload("echo hello", "Say hello");
+    let (code, out, err) = run(&["desk-hook", "claude-code"], &payload, home.path());
+    assert_eq!((code, out.len(), err.len()), (0, 0, 0));
+    let files = spool_files(home.path());
+    assert_eq!(files.len(), 1);
+    let event = event(read_record(&files[0]));
+    assert!(event.command.is_none() && event.description.is_none());
+    let text = String::from_utf8(fs::read(&files[0]).unwrap()).unwrap();
+    assert!(
+        !text.contains("echo hello") && !text.contains("Say hello"),
+        "{text}"
+    );
+}
+
+#[test]
+fn long_command_is_cut_and_flagged() {
+    let home = tempfile::tempdir().unwrap();
+    let payload = bash_payload(&"x".repeat(500), "A long command");
+    let (code, out, err) = run(&["desk-hook", "claude-code"], &payload, home.path());
+    assert_eq!((code, out.len(), err.len()), (0, 0, 0));
+    let files = spool_files(home.path());
+    assert_eq!(files.len(), 1);
+    let event = event(read_record(&files[0]));
+    assert!(event.command.as_deref().unwrap().chars().count() <= 200);
+    assert!(event.truncated);
+    let text = String::from_utf8(fs::read(&files[0]).unwrap()).unwrap();
+    assert!(text.contains("\"truncated\":true"), "{text}");
+}
+
+#[test]
+fn multibyte_command_crossing_the_scan_cut_stays_well_formed() {
+    let home = tempfile::tempdir().unwrap();
+    let command = format!("a{}", "😀".repeat(1100));
+    let payload = bash_payload(&command, "Emoji punctuation");
+    let (code, out, err) = run(&["desk-hook", "claude-code"], &payload, home.path());
+    assert_eq!((code, out.len(), err.len()), (0, 0, 0));
+    let files = spool_files(home.path());
+    assert_eq!(files.len(), 1);
+    let event = event(read_record(&files[0]));
+    assert!(event.command.as_deref().unwrap().chars().count() <= 200);
+    assert!(event.truncated);
+}
