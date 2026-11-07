@@ -72,6 +72,11 @@ export interface AgentHooksRuntimeOptions {
   detail?: (message: string) => void;
   /** Test seam for proving the transactional writer refuses a late race. */
   beforeWrite?: () => void;
+  /**
+   * Test seam: runs right after a write lands and before the retained-copy
+   * report is decided. Receives the retained copy's path, when one exists.
+   */
+  afterWrite?: (recoveryPath: string | undefined) => void;
 }
 
 export interface AgentHooksOperationResult {
@@ -696,6 +701,7 @@ export function writeMutation(
     options.beforeWrite?.();
     const result = atomicWriteJsonIfUnchanged(path, value, current.read, topologyGuard(current.topology));
     if (result.status === "written") {
+      options.afterWrite?.(result.recoveryPath);
       // The transaction engine still keeps the displaced copy on disk; only the report is conditional.
       if (result.recoveryPath === undefined
         || (current.read.status === "valid" && retainedCopyMatches(result.recoveryPath, current.read.bytes))) {

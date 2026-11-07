@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import {
+  appendFileSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -181,9 +182,39 @@ test("desk hooks: reinstall over existing settings reports no retained copy", as
   // the bytes the second write replaced.
   const removed = await uninstallDeskHooks({ settingsPath: settings }, options);
   assert.equal(removed.status, "written");
+  assert.equal(removed.detail, undefined);
   const kept = retainedTransactions(settings);
   assert.equal(kept.length, 1);
   assert.deepEqual(readFileSync(join(dirname(settings), kept[0], "displaced")), installedBytes);
+});
+
+test("desk hooks: writeMutation reports the retained copy when it changed after the write", async (t) => {
+  const { root } = settingsFixture(t);
+  const hookBin = hookBinFixture(t);
+  const settings = join(root, "nested", "settings.json");
+  mkdirSync(dirname(settings), { recursive: true, mode: 0o700 });
+  writeFileSync(settings, `${JSON.stringify({ custom: { keep: true } })}\n`);
+  const retained: string[] = [];
+
+  const result = await installDeskHooks({ settingsPath: settings }, {
+    hookBin,
+    confirmation: { async confirm(): Promise<boolean> { return true; } },
+    detail: () => undefined,
+    fileExists: (path: string) => path === hookBin,
+    // Alter the retained copy once the write has landed. Its bytes then differ
+    // from what setup read, so the report must appear.
+    afterWrite: (recoveryPath) => {
+      if (recoveryPath === undefined) return;
+      retained.push(recoveryPath);
+      appendFileSync(recoveryPath, "\n");
+    },
+  });
+
+  assert.equal(retained.length, 1, "the write must leave a retained copy for the seam to alter");
+  assert.equal(result.status, "written");
+  assert.match(result.detail ?? "", /previous config retained; manual recovery: /);
+  assert.ok(result.detail?.startsWith("Claude Code desk hooks "), result.detail);
+  assert.ok(result.detail?.endsWith(retained[0]), result.detail);
 });
 
 test("desk hook path with spaces is quoted; path with % or ! is rejected", (t) => {
@@ -395,6 +426,7 @@ test("desk hooks: CLAUDE_CONFIG_DIR naming a missing directory fails closed", as
     setup(["--desk-hooks", hookBin], commandDependencies(home, { CLAUDE_CONFIG_DIR: cfg }, hookBin)));
 
   assert.equal(output.code, 1, output.stderr);
+  assert.match(output.stderr, /Claude Code settings parent missing; create private directory for Claude settings with /);
   assert.equal(existsSync(cfg), false);
   assert.equal(existsSync(fallback), false);
 });

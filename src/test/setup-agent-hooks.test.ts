@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import {
+  appendFileSync,
   chmodSync,
   existsSync,
   lstatSync,
@@ -350,9 +351,37 @@ test("agent hooks: reinstall over existing settings reports no retained copy", a
   // the bytes the second write replaced.
   const removed = await uninstallClaudeAgentHooks({ settingsPath: settings }, options);
   assert.equal(removed.status, "written");
+  assert.equal(removed.detail, undefined);
   const kept = retainedTransactions(settings);
   assert.equal(kept.length, 1);
   assert.deepEqual(readFileSync(join(dirname(settings), kept[0], "displaced")), installedBytes);
+});
+
+test("writeMutation reports the retained copy when it changed after the write", async (t) => {
+  const value = fixture(t);
+  const settings = join(dirname(value.settings), "settings.json");
+  mkdirSync(dirname(settings), { recursive: true, mode: 0o700 });
+  writeFileSync(settings, `${JSON.stringify({ custom: { keep: true } })}\n`);
+  const retained: string[] = [];
+
+  const result = await installClaudeAgentHooks({ settingsPath: settings }, {
+    command: value.command,
+    confirmation: { async confirm(): Promise<boolean> { return true; } },
+    detail: () => undefined,
+    // Alter the retained copy once the write has landed. Its bytes then differ
+    // from what setup read, so the report must appear.
+    afterWrite: (recoveryPath) => {
+      if (recoveryPath === undefined) return;
+      retained.push(recoveryPath);
+      appendFileSync(recoveryPath, "\n");
+    },
+  });
+
+  assert.equal(retained.length, 1, "the write must leave a retained copy for the seam to alter");
+  assert.equal(result.status, "written");
+  assert.match(result.detail ?? "", /previous config retained; manual recovery: /);
+  assert.ok(result.detail?.startsWith("Claude Code agent hooks "), result.detail);
+  assert.ok(result.detail?.endsWith(retained[0]), result.detail);
 });
 
 test("malformed settings are unreadable before consent and never overwritten", async (t) => {
