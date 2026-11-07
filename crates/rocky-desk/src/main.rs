@@ -5,6 +5,7 @@ use rocky_proto::paths::{desk_mutex_name, rocky_home};
 #[cfg(windows)]
 fn main() {
     let home = rocky_home();
+    install_panic_log(&home);
     // Single instance: if the mutex already exists, another desk owns it.
     let _mutex = match single_instance(&desk_mutex_name(&home)) {
         Ok(m) => m,
@@ -13,6 +14,24 @@ fn main() {
     };
     rocky_desk::app::run(home);
     // `_mutex` drops here, releasing the instance lock.
+}
+
+/// The desk has no console, and a panic inside a Win32 callback aborts with
+/// 0xc0000409 and no message. Append each panic to `desk/rocky-desk.log`.
+#[cfg(windows)]
+fn install_panic_log(home: &std::path::Path) {
+    let path = rocky_proto::paths::desk_dir(home).join("rocky-desk.log");
+    std::panic::set_hook(Box::new(move |info| {
+        use std::io::Write;
+        let bt = std::backtrace::Backtrace::force_capture();
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+        {
+            let _ = writeln!(f, "panic: {info}\n{bt}");
+        }
+    }));
 }
 
 #[cfg(not(windows))]
