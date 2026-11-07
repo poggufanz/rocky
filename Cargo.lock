@@ -4494,6 +4494,7 @@ dependencies = [
  "gpui",
  "gpui-tray",
  "interprocess",
+ "raw-window-handle",
  "rocky-proto",
  "rockyd",
  "tempfile",

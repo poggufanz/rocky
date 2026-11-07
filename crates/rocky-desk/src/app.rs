@@ -300,7 +300,35 @@ fn status_text(s: Status) -> &'static str {
 /// double-borrows the entity and panics, which aborts inside the tray callback.
 fn show_window(view: &Entity<DeskView>, cx: &mut App) {
     if let Some(handle) = view.read(cx).window {
-        let _ = handle.update(cx, |_, window, _| window.activate_window());
+        let _ = handle.update(cx, |_, window, _| {
+            set_visible(window, true);
+            window.activate_window();
+        });
+    }
+}
+
+/// Hide or show the desk window. gpui 0.2.2 has no hide on Windows, so close
+/// (vetoed) hides the HWND directly; the tray brings it back.
+#[cfg(windows)]
+fn set_visible(window: &Window, visible: bool) {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{SW_HIDE, SW_SHOW, ShowWindow};
+    // Fully qualified: gpui's inherent `Window::window_handle` returns its own handle type.
+    let Ok(handle) = HasWindowHandle::window_handle(window) else {
+        return;
+    };
+    if let RawWindowHandle::Win32(w) = handle.as_raw() {
+        let cmd = if visible { SW_SHOW } else { SW_HIDE };
+        // SAFETY: the HWND belongs to this live gpui window on this (UI) thread;
+        // ShowWindow only changes its visibility.
+        unsafe { ShowWindow(w.hwnd.get() as _, cmd) };
+    }
+}
+
+#[cfg(not(windows))]
+fn set_visible(window: &Window, visible: bool) {
+    if !visible {
+        window.minimize_window();
     }
 }
 
@@ -384,7 +412,7 @@ pub fn run(rocky_home: PathBuf) {
         window
             .update(cx, |_, window, cx| {
                 window.on_window_should_close(&*cx, |window, _| {
-                    window.minimize_window();
+                    set_visible(window, false);
                     false
                 });
             })
