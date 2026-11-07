@@ -158,16 +158,23 @@ allowlisted shape the spool stores:
 {"v":1,"kind":"event","harness":"claude-code","recv_ms":1794000000123,"event":{"hook_event_name":"PreToolUse","session_id":"s1","cwd":"C:\\work\\app","tool_name":"Bash","tool_use_id":"toolu_1","command":"npm test"},"src":"1794000000123-4242.json"}
 ```
 
-Gap line, written for a `dropped` spool record or a quarantined bad file.
-Its `reason` is `hook_dropped` or `bad_file`, and the time range comes from
-the record or, for a bad file, the spool file name:
+Gap line, written whenever consumed coverage is lost. Its `reason` is one of:
+
+- `hook_dropped` — a `dropped` spool record; the time range comes from the
+  record and `src` is the spool file name.
+- `bad_file` — a quarantined bad spool file; the time comes from the spool
+  file name and `src` is that name.
+- `spool_full` — startup spool pruning deleted files; the time range covers
+  the deleted file names (or the startup time when none parse) and there is
+  no `src`.
+- `history_full` — the history cap deleted segments; the time range covers
+  the deleted segment hours and there is no `src`.
+
+A `hook_dropped` line:
 
 ```json
 {"v":1,"kind":"gap","from_ms":1794000000456,"to_ms":1794000000456,"count":1,"reason":"hook_dropped","src":"1794000000456-4242.json"}
 ```
-
-A `history_full` gap line, written when a segment is deleted for the cap,
-has no `src`.
 
 Rules:
 
