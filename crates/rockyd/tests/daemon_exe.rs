@@ -741,6 +741,62 @@ fn set_persists_broadcasts_and_syncs_marker() {
     );
 }
 
+/// Start-time marker sync both ways: a stale marker with no settings file is
+/// removed (defaults leave tool text on), and a missing marker with tool text
+/// off is recreated before the start snapshot reports the setting.
+#[test]
+fn start_syncs_tool_text_marker_both_ways() {
+    let stale = home();
+    let marker = tool_text_off_marker(stale.path());
+    fs::create_dir_all(desk_dir(stale.path())).unwrap();
+    fs::write(&marker, "").unwrap();
+
+    let mut daemon = spawn_daemon(stale.path());
+    wait_pipe(stale.path(), &mut daemon);
+    let mut client = connect(&pipe_name(stale.path()));
+    let snapshot = client.hello_subscribe();
+    assert!(
+        matches!(&snapshot, ServerMsg::Snapshot { settings, .. } if settings.tool_text),
+        "{snapshot:?}"
+    );
+    let start = Instant::now();
+    while marker.exists() {
+        assert!(
+            start.elapsed() < GUARD,
+            "stale marker never removed at start"
+        );
+        thread::sleep(Duration::from_millis(25));
+    }
+    let _ = daemon.0.kill();
+    let _ = daemon.0.wait();
+    drop(client);
+
+    let unmarked = home();
+    let marker = tool_text_off_marker(unmarked.path());
+    fs::create_dir_all(desk_dir(unmarked.path())).unwrap();
+    fs::write(
+        settings_path(unmarked.path()),
+        r#"{"v":1,"tool_text":false}"#,
+    )
+    .unwrap();
+    assert!(!marker.exists());
+
+    let mut daemon = spawn_daemon(unmarked.path());
+    wait_pipe(unmarked.path(), &mut daemon);
+    let mut client = connect(&pipe_name(unmarked.path()));
+    let first_snapshot = client.hello_subscribe();
+    snapshot_until(
+        &mut client,
+        first_snapshot,
+        "tool_text off at start",
+        |m| matches!(m, ServerMsg::Snapshot { settings, .. } if !settings.tool_text),
+    );
+    assert!(marker.is_file(), "marker not recreated at start");
+    let _ = daemon.0.kill();
+    let _ = daemon.0.wait();
+    drop(client);
+}
+
 #[test]
 fn bad_set_acks_false_and_changes_nothing() {
     let home = home();
