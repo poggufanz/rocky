@@ -1,7 +1,7 @@
 import { lstatSync } from "node:fs";
-import { homedir } from "node:os";
-import { dirname, join, posix, win32 } from "node:path";
+import hostPath, { dirname, join, posix, win32 } from "node:path";
 import { fileURLToPath } from "node:url";
+import { resolveClaudeCodeUserConfig } from "./claude-code.js";
 import {
   atomicWriteJsonIfUnchanged,
   inspectJsonTransaction,
@@ -42,6 +42,11 @@ export const CLAUDE_CAPTURE_CAPABILITY_NOTICE =
 export interface AgentHooksTarget {
   settingsPath: string;
 }
+
+/** The settings file setup may write, or the reason it must not guess one. */
+export type AgentHooksTargetResolution =
+  | { status: "resolved"; target: AgentHooksTarget }
+  | { status: "refused"; reason: "empty" | "unusable" };
 
 export type AgentHooksAction = "install" | "uninstall" | "status";
 
@@ -526,14 +531,9 @@ export function removeClaudeHooks(existing: Record<string, unknown>): Record<str
   return removeOwnedHooks(existing, isRockyHook);
 }
 
-function targetFor(home = homedir()): AgentHooksTarget {
-  return { settingsPath: join(home, ".claude", "settings.json") };
-}
-
-export function resolveTarget(target: AgentHooksTarget | undefined, options: AgentHooksRuntimeOptions): AgentHooksTarget {
-  const resolved = target ?? targetFor(options.home);
-  requireSafeAbsolutePath(resolved.settingsPath, "Claude settings");
-  return resolved;
+export function resolveTarget(target: AgentHooksTarget, options: AgentHooksRuntimeOptions): AgentHooksTarget {
+  requireSafeAbsolutePath(target.settingsPath, "Claude settings");
+  return target;
 }
 
 function errorCode(error: unknown): string | undefined {
@@ -710,7 +710,7 @@ export function defaultConfirmation(): AgentHooksConfirmation {
 
 /** Consent-gated Claude Code settings update. */
 export async function installClaudeAgentHooks(
-  target?: AgentHooksTarget,
+  target: AgentHooksTarget,
   options: AgentHooksRuntimeOptions = {},
 ): Promise<AgentHooksOperationResult> {
   let resolved: AgentHooksTarget;
@@ -752,7 +752,7 @@ export async function installClaudeAgentHooks(
 
 /** Remove only Rocky-owned Claude Code groups. */
 export async function uninstallClaudeAgentHooks(
-  target?: AgentHooksTarget,
+  target: AgentHooksTarget,
   options: AgentHooksRuntimeOptions = {},
 ): Promise<Exclude<AgentHooksOperationResult, { status: "declined" }>> {
   try {
@@ -821,7 +821,7 @@ function hasCurrentHooks(value: Record<string, unknown>, command: string, gateCo
 
 /** Read-only status; missing/partial/stale/malformed settings are absent/unreadable. */
 export function agentHooksStatus(
-  target?: AgentHooksTarget,
+  target: AgentHooksTarget,
   options: AgentHooksRuntimeOptions = {},
 ): AgentHooksStatusResult {
   try {
@@ -842,8 +842,26 @@ export function agentHooksStatus(
   }
 }
 
-export function defaultAgentHooksTarget(home = homedir()): AgentHooksTarget {
-  return targetFor(home);
+/**
+ * The settings file Claude Code loads: `$CLAUDE_CONFIG_DIR/settings.json` when
+ * that variable names a canonical absolute directory, `<home>/.claude/settings.json`
+ * when it is unset. Anything else is refused instead of guessed, because hooks
+ * written to a file no session loads fail silently. `env` and `cwd` change the
+ * answer, so neither has a default.
+ */
+export function defaultAgentHooksTarget(
+  home: string,
+  env: NodeJS.ProcessEnv,
+  cwd: string,
+): AgentHooksTargetResolution {
+  const config = resolveClaudeCodeUserConfig({ home, cwd, env, path: hostPath });
+  if (config.status === "resolved" && config.mutationSafe) {
+    return { status: "resolved", target: { settingsPath: join(config.policyRoot, "settings.json") } };
+  }
+  if (config.status === "resolved" && config.override === "empty") {
+    return { status: "refused", reason: "empty" };
+  }
+  return { status: "refused", reason: "unusable" };
 }
 
 export function defaultAgentHooksEntryPath(): string {

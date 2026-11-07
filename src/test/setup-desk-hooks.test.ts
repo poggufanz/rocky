@@ -2,14 +2,16 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import {
+  existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   realpathSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, sep } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import {
@@ -32,6 +34,8 @@ import {
   uninstallClaudeAgentHooks,
 } from "../setup/agent-hooks.js";
 import { SetupUsageError, parseSetupArgs } from "../setup/parser.js";
+import { createPlatformServices } from "../setup/platform.js";
+import { setup, type SetupDependencies } from "../commands/setup.js";
 
 const packageRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
@@ -238,4 +242,133 @@ test("agent hook status stays installed when desk hooks are also present", async
   const agentReinstalled = await installClaudeAgentHooks({ settingsPath: value.settings }, options);
   assert.equal(agentReinstalled.status, "written");
   assert.deepEqual(agentHooksStatus({ settingsPath: value.settings }, options), { claudeCode: "installed" });
+});
+
+// --- CLI level: which settings file `rocky setup` writes ------------------
+//
+// Each run builds its own env from scratch, so the owner's real
+// CLAUDE_CONFIG_DIR can never reach these tests. `home` always carries an
+// existing `.claude` directory, so a run that ignores the variable would
+// succeed against the fallback and fail the assertions below.
+
+function captureStderr(run: () => Promise<number>): Promise<{ code: number; stderr: string }> {
+  let stderr = "";
+  const original = process.stderr.write;
+  process.stderr.write = ((chunk: string | Uint8Array) => {
+    stderr += String(chunk);
+    return true;
+  }) as typeof process.stderr.write;
+  return run().then((code) => ({ code, stderr })).finally(() => {
+    process.stderr.write = original;
+  });
+}
+
+function commandFixture(t: test.TestContext): { root: string; home: string; fallback: string } {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "rocky-desk-command-")));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const home = join(root, "home");
+  mkdirSync(join(home, ".claude"), { recursive: true, mode: 0o700 });
+  return { root, home, fallback: join(home, ".claude", "settings.json") };
+}
+
+function commandDependencies(home: string, env: NodeJS.ProcessEnv, hookBin?: string): SetupDependencies {
+  return {
+    runner: {
+      async run() { throw new Error("MCP runner must not run"); },
+      async openSession() { throw new Error("MCP session must not open"); },
+    },
+    platform: createPlatformServices({
+      platform: "linux",
+      home,
+      env: { PATH: "/tools" },
+      isWsl: false,
+      fileExists: (path) => path === process.execPath || path === hookBin,
+    }),
+    adapters: [],
+    confirmation: { async confirm() { return true; } },
+    nodePath: process.execPath,
+    entryPath: process.execPath,
+    env,
+  };
+}
+
+function filesUnder(directory: string): string[] {
+  return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
+    const path = join(directory, entry.name);
+    return entry.isDirectory() ? filesUnder(path) : [path];
+  });
+}
+
+test("desk hooks: install writes under CLAUDE_CONFIG_DIR and prints that settings path", async (t) => {
+  const { home, root, fallback } = commandFixture(t);
+  const cfg = join(root, "profile");
+  mkdirSync(cfg, { mode: 0o700 });
+  const hookBin = hookBinFixture(t);
+  const settingsPath = join(cfg, "settings.json");
+
+  const output = await captureStderr(() =>
+    setup(["--desk-hooks", hookBin], commandDependencies(home, { CLAUDE_CONFIG_DIR: cfg }, hookBin)));
+
+  assert.equal(output.code, 0, output.stderr);
+  assert.ok(output.stderr.includes(`claude-code settings: ${settingsPath}`), output.stderr);
+  assert.deepEqual(
+    JSON.parse(readFileSync(settingsPath, "utf8")) as Record<string, unknown>,
+    mergeDeskHooks({}, deskHookCommand(realpathSync(hookBin), () => true), DESK_HOOK_ASYNC),
+  );
+  assert.equal(existsSync(fallback), false);
+});
+
+test("desk hooks: empty CLAUDE_CONFIG_DIR refuses and writes nothing", async (t) => {
+  const { home, root, fallback } = commandFixture(t);
+  const hookBin = hookBinFixture(t);
+
+  const output = await captureStderr(() =>
+    setup(["--desk-hooks", hookBin], commandDependencies(home, { CLAUDE_CONFIG_DIR: "" }, hookBin)));
+
+  assert.equal(output.code, 1, output.stderr);
+  assert.ok(output.stderr.includes("CLAUDE_CONFIG_DIR is set but empty"), output.stderr);
+  assert.equal(existsSync(fallback), false);
+  assert.deepEqual(filesUnder(root), []);
+});
+
+test("desk hooks: trailing-separator CLAUDE_CONFIG_DIR refuses with the variable named", async (t) => {
+  const { home, root } = commandFixture(t);
+  const cfg = join(root, "profile");
+  mkdirSync(cfg, { mode: 0o700 });
+  const hookBin = hookBinFixture(t);
+
+  const output = await captureStderr(() =>
+    setup(["--desk-hooks", hookBin], commandDependencies(home, { CLAUDE_CONFIG_DIR: `${cfg}${sep}` }, hookBin)));
+
+  assert.equal(output.code, 1, output.stderr);
+  assert.ok(output.stderr.includes("CLAUDE_CONFIG_DIR must be an absolute directory path"), output.stderr);
+  assert.deepEqual(filesUnder(root), []);
+});
+
+test("desk hooks: CLAUDE_CONFIG_DIR naming a missing directory fails closed", async (t) => {
+  const { home, root, fallback } = commandFixture(t);
+  const cfg = join(root, "absent");
+  const hookBin = hookBinFixture(t);
+
+  const output = await captureStderr(() =>
+    setup(["--desk-hooks", hookBin], commandDependencies(home, { CLAUDE_CONFIG_DIR: cfg }, hookBin)));
+
+  assert.equal(output.code, 1, output.stderr);
+  assert.equal(existsSync(cfg), false);
+  assert.equal(existsSync(fallback), false);
+});
+
+test("agent hooks: install, status, uninstall each print the resolved settings path", async (t) => {
+  const { home, root, fallback } = commandFixture(t);
+  const cfg = join(root, "profile");
+  mkdirSync(cfg, { mode: 0o700 });
+  const dependencies = commandDependencies(home, { CLAUDE_CONFIG_DIR: cfg });
+  const line = `claude-code settings: ${join(cfg, "settings.json")}`;
+
+  for (const argv of [["--agent-hooks"], ["--status"], ["--uninstall-agent-hooks"]]) {
+    const output = await captureStderr(() => setup(argv, dependencies));
+    assert.equal(output.code, 0, `${argv.join(" ")}\n${output.stderr}`);
+    assert.ok(output.stderr.includes(line), `${argv.join(" ")}\n${output.stderr}`);
+  }
+  assert.equal(existsSync(fallback), false);
 });

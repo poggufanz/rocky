@@ -6,6 +6,8 @@ Notable changes per release. Dates are the release date.
 
 Hidden `rocky setup --desk-hooks <path>` / `--uninstall-desk-hooks` for the experimental desk.
 
+`rocky setup` writes Claude Code agent and desk hooks to `$CLAUDE_CONFIG_DIR/settings.json` when that variable is set, prints the settings path it used, and refuses an empty, relative, or trailing-separator value.
+
 ## 2.0.0 — 6 November 2026
 
 Major release: Rocky retires its mascot persona. CLI, hook, GUI, and MCP output is plain, neutral English, following [docs/output-principles.md](docs/output-principles.md). Evidence rules, hedges, coverage disclosures, `--quiet`, exit codes, and JSON shapes are unchanged.

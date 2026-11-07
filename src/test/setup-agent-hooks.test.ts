@@ -15,12 +15,13 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, join, sep } from "node:path";
 import { tmpdir } from "node:os";
 import {
   buildClaudeHookEntries,
   agentHooksStatus,
   codexConfigSnippet,
+  defaultAgentHooksTarget,
   installClaudeAgentHooks,
   mergeClaudeHooks,
   removeClaudeHooks,
@@ -180,6 +181,45 @@ function fixture(t: test.TestContext): { root: string; settings: string; command
     command: rockyHookCommand("claude-code", process.execPath, process.execPath),
   };
 }
+
+// The env objects below are built from scratch on purpose: spreading
+// process.env would let the owner's real CLAUDE_CONFIG_DIR decide the answer.
+
+test("defaultAgentHooksTarget: unset CLAUDE_CONFIG_DIR keeps home .claude settings", (t) => {
+  const home = fixture(t).root;
+  assert.deepEqual(defaultAgentHooksTarget(home, {}, home), {
+    status: "resolved",
+    target: { settingsPath: join(home, ".claude", "settings.json") },
+  });
+});
+
+test("defaultAgentHooksTarget: absolute CLAUDE_CONFIG_DIR wins", (t) => {
+  const home = fixture(t).root;
+  const cfg = fixture(t).root;
+  assert.deepEqual(defaultAgentHooksTarget(home, { CLAUDE_CONFIG_DIR: cfg }, home), {
+    status: "resolved",
+    target: { settingsPath: join(cfg, "settings.json") },
+  });
+});
+
+test("defaultAgentHooksTarget: empty CLAUDE_CONFIG_DIR is refused", (t) => {
+  const home = fixture(t).root;
+  assert.deepEqual(defaultAgentHooksTarget(home, { CLAUDE_CONFIG_DIR: "" }, home), {
+    status: "refused",
+    reason: "empty",
+  });
+});
+
+test("defaultAgentHooksTarget: relative or trailing-separator CLAUDE_CONFIG_DIR is refused", (t) => {
+  const home = fixture(t).root;
+  const cfg = fixture(t).root;
+  for (const configured of ["cfg", `${cfg}${sep}`]) {
+    assert.deepEqual(defaultAgentHooksTarget(home, { CLAUDE_CONFIG_DIR: configured }, home), {
+      status: "refused",
+      reason: "unusable",
+    }, configured);
+  }
+});
 
 test("missing parent fails before consent or proposed JSON and never mutates filesystem", async (t) => {
   const value = fixture(t);

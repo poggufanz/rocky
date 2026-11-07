@@ -145,7 +145,7 @@ function describeFailure(error: unknown): string {
 
 /** Consent-gated Claude Code desk hooks update. */
 export async function installDeskHooks(
-  target?: AgentHooksTarget,
+  target: AgentHooksTarget,
   options: DeskHooksRuntimeOptions = {},
 ): Promise<AgentHooksOperationResult> {
   let resolved: AgentHooksTarget;
@@ -180,7 +180,7 @@ export async function installDeskHooks(
 
 /** Remove only desk-owned Claude Code groups. */
 export async function uninstallDeskHooks(
-  target?: AgentHooksTarget,
+  target: AgentHooksTarget,
   options: DeskHooksRuntimeOptions = {},
 ): Promise<Exclude<AgentHooksOperationResult, { status: "declined" }>> {
   try {
