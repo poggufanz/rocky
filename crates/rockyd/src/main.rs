@@ -186,11 +186,6 @@ fn main() {
         }
     }
 
-    // Settle the replayed state and drop day-old gaps before recording what
-    // this startup produces: a gap made now must not be aged out by the same
-    // pass that finds it.
-    tick_once(&shared, &hub, &log);
-
     // 4. The startup prune gap: in health, on every live timeline, and in
     // history so a later restart still reports it.
     if let Some(gap) = pruned.and_then(|p| p.gap) {
@@ -215,7 +210,11 @@ fn main() {
     // 5. Initial ingest through the same path as rescans.
     rescan(&spool, &shared, &hub, &log, &mut ingest);
 
-    // 6. One full snapshot for desks that connected during startup.
+    // 6. Settle what replay and ingest produced, and drop day-old history and
+    // gaps. Runs after ingest so pending spool events are never idled away.
+    tick_once(&shared, &hub, &log);
+
+    // 7. One full snapshot for desks that connected during startup.
     {
         let msg = snapshot_of(&shared.lock().unwrap());
         hub.broadcast(&msg);

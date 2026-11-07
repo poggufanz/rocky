@@ -716,7 +716,13 @@ fn unreadable_settings_show_in_health_until_a_set() {
 #[test]
 fn start_reports_bad_spool_file_as_gap() {
     let home = home();
-    write_spool(home.path(), "0000000000042-1.json", "{bad");
+    // Real clock in the spool name, so the reported gap is not legitimately
+    // older than the 24-hour gap window.
+    let t = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    write_spool(home.path(), &format!("{t:013}-1.json"), "{bad");
 
     let mut daemon = spawn_daemon(home.path());
     wait_pipe(home.path(), &mut daemon);
@@ -733,8 +739,8 @@ fn start_reports_bad_spool_file_as_gap() {
             assert_eq!(health.bad_files, 1, "{health:?}");
             assert!(
                 health.gaps.contains(&Gap {
-                    from_ms: 42,
-                    to_ms: 42,
+                    from_ms: t,
+                    to_ms: t,
                     count: 1,
                     reason: GapReason::BadFile,
                 }),
