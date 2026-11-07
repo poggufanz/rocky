@@ -24,11 +24,12 @@
 //! pin that parity. The scoped case-insensitive flag is ASCII-only in the
 //! lighter engine, which matches the ASCII keywords used here.
 //!
-//! Patterns are compiled lazily and only when text is actually redacted. No
-//! function in this module may panic on arbitrary input.
+//! Patterns are compiled lazily, one family at a time, and only when text is
+//! actually redacted and the family's mandatory literal occurs in that text.
+//! No function in this module may panic on arbitrary input.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::LazyLock;
+use std::sync::OnceLock;
 
 use regex_lite::Regex;
 
@@ -62,16 +63,48 @@ struct SecretDefinition {
     trailing_boundary: bool,
     fragment_source: &'static str,
     assignment: bool,
+    /// Literal every full and fragment match must contain, matched as written.
+    /// A family without its literal in the text cannot match.
+    anchors: &'static [&'static str],
+    /// Same, for keywords the patterns match with ASCII case folding; checked
+    /// against one lowercased copy of the matching view.
+    lowercase_anchors: &'static [&'static str],
+    full: OnceLock<Regex>,
+    fragment: OnceLock<Regex>,
+}
+
+impl SecretDefinition {
+    /// Whether the family's mandatory literal occurs, so compiling its pattern
+    /// is worth doing. This is a necessary condition, not a match test.
+    fn may_match(&self, text: &str, lowered: &str) -> bool {
+        self.anchors.iter().any(|anchor| text.contains(anchor))
+            || self
+                .lowercase_anchors
+                .iter()
+                .any(|anchor| lowered.contains(anchor))
+    }
+
+    fn full_pattern(&self) -> &Regex {
+        self.full
+            .get_or_init(|| Regex::new(self.source).expect("secret definition patterns are valid"))
+    }
+
+    fn fragment_pattern(&self) -> &Regex {
+        self.fragment.get_or_init(|| {
+            Regex::new(self.fragment_source).expect("secret fragment patterns are valid")
+        })
+    }
 }
 
 /// Canonical secret families, in replacement order.
 ///
 /// Patterns match the normalized view only, where C0/C1 controls (including
-/// U+0085) and the invisible set (including U+FEFF) are already absent. That is
-/// the whole difference between the reference `\s` and Unicode `\s`, so the two
-/// cover the same characters here. Case-insensitive keywords use a scoped
-/// ASCII-only flag; there is no global `(?i)`.
-const SECRET_DEFINITIONS: &[SecretDefinition] = &[
+/// U+0085) and the invisible set (including U+FEFF) are already absent. The
+/// whitespace class is the reference `\s` set spelled out, so it covers the
+/// same characters whether or not the engine's own `\s` is Unicode-aware.
+/// Case-insensitive keywords use a scoped ASCII-only flag; there is no global
+/// `(?i)`.
+static SECRET_DEFINITIONS: [SecretDefinition; 9] = [
     SecretDefinition {
         label: "aws access key",
         source: r"AKIA[0-9A-Z]{16}",
@@ -79,6 +112,10 @@ const SECRET_DEFINITIONS: &[SecretDefinition] = &[
         trailing_boundary: true,
         fragment_source: r"AKIA[0-9A-Z]{8,}",
         assignment: false,
+        anchors: &["AKIA"],
+        lowercase_anchors: &[],
+        full: OnceLock::new(),
+        fragment: OnceLock::new(),
     },
     SecretDefinition {
         label: "private key",
@@ -87,6 +124,10 @@ const SECRET_DEFINITIONS: &[SecretDefinition] = &[
         trailing_boundary: false,
         fragment_source: r"-----BEGIN[ A-Za-z0-9_-]*",
         assignment: false,
+        anchors: &["-----BEGIN"],
+        lowercase_anchors: &[],
+        full: OnceLock::new(),
+        fragment: OnceLock::new(),
     },
     SecretDefinition {
         label: "github token",
@@ -95,6 +136,10 @@ const SECRET_DEFINITIONS: &[SecretDefinition] = &[
         trailing_boundary: true,
         fragment_source: r"(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_]{4,}|github_pat_[A-Za-z0-9_]{4,}",
         assignment: false,
+        anchors: &["gh"],
+        lowercase_anchors: &[],
+        full: OnceLock::new(),
+        fragment: OnceLock::new(),
     },
     SecretDefinition {
         label: "slack token",
@@ -103,6 +148,10 @@ const SECRET_DEFINITIONS: &[SecretDefinition] = &[
         trailing_boundary: true,
         fragment_source: r"xox[baprs]-[A-Za-z0-9-]{4,}",
         assignment: false,
+        anchors: &["xox"],
+        lowercase_anchors: &[],
+        full: OnceLock::new(),
+        fragment: OnceLock::new(),
     },
     SecretDefinition {
         label: "anthropic key",
@@ -111,6 +160,10 @@ const SECRET_DEFINITIONS: &[SecretDefinition] = &[
         trailing_boundary: true,
         fragment_source: r"sk-ant-[A-Za-z0-9_-]{3,}",
         assignment: false,
+        anchors: &["sk-ant-"],
+        lowercase_anchors: &[],
+        full: OnceLock::new(),
+        fragment: OnceLock::new(),
     },
     SecretDefinition {
         label: "openai key",
@@ -119,6 +172,10 @@ const SECRET_DEFINITIONS: &[SecretDefinition] = &[
         trailing_boundary: true,
         fragment_source: r"sk-[A-Za-z0-9_-]{3,}",
         assignment: false,
+        anchors: &["sk-"],
+        lowercase_anchors: &[],
+        full: OnceLock::new(),
+        fragment: OnceLock::new(),
     },
     SecretDefinition {
         label: "npm token",
@@ -127,6 +184,10 @@ const SECRET_DEFINITIONS: &[SecretDefinition] = &[
         trailing_boundary: true,
         fragment_source: r"npm_[A-Za-z0-9_]{8,}",
         assignment: false,
+        anchors: &["npm_"],
+        lowercase_anchors: &[],
+        full: OnceLock::new(),
+        fragment: OnceLock::new(),
     },
     SecretDefinition {
         label: "password assignment",
@@ -151,6 +212,10 @@ const SECRET_DEFINITIONS: &[SecretDefinition] = &[
             r#"]*)"#,
         ),
         assignment: true,
+        anchors: &[],
+        lowercase_anchors: &["password", "secret"],
+        full: OnceLock::new(),
+        fragment: OnceLock::new(),
     },
     SecretDefinition {
         label: "credential assignment",
@@ -179,32 +244,12 @@ const SECRET_DEFINITIONS: &[SecretDefinition] = &[
             r#"]*)"#,
         ),
         assignment: true,
+        anchors: &[],
+        lowercase_anchors: &["token", "api", "authorization"],
+        full: OnceLock::new(),
+        fragment: OnceLock::new(),
     },
 ];
-
-static FULL_PATTERNS: LazyLock<Vec<(&'static str, Regex)>> = LazyLock::new(|| {
-    SECRET_DEFINITIONS
-        .iter()
-        .map(|definition| {
-            (
-                definition.label,
-                Regex::new(definition.source).expect("secret definition patterns are valid"),
-            )
-        })
-        .collect()
-});
-
-static FRAGMENT_PATTERNS: LazyLock<Vec<(&'static str, Regex)>> = LazyLock::new(|| {
-    SECRET_DEFINITIONS
-        .iter()
-        .map(|definition| {
-            (
-                definition.label,
-                Regex::new(definition.fragment_source).expect("secret fragment patterns are valid"),
-            )
-        })
-        .collect()
-});
 
 const ESC: u32 = 0x1b;
 const BEL: u32 = 0x07;
@@ -479,11 +524,14 @@ fn passes_full_boundaries(
 fn collect_replacements(normalized: &NormalizedInput, may_be_truncated: bool) -> Vec<Replacement> {
     let text = &normalized.text;
     let removed_offsets = &normalized.removed_offsets;
+    let lowered = text.to_ascii_lowercase();
     let mut replacements = Vec::new();
 
-    for (order, (label, pattern)) in FULL_PATTERNS.iter().enumerate() {
-        let definition = &SECRET_DEFINITIONS[order];
-        for captures in pattern.captures_iter(text) {
+    for (order, definition) in SECRET_DEFINITIONS.iter().enumerate() {
+        if !definition.may_match(text, &lowered) {
+            continue;
+        }
+        for captures in definition.full_pattern().captures_iter(text) {
             let matched = captures.get(0).expect("a match always has group zero");
             let start = matched.start();
             let end = matched.end();
@@ -493,7 +541,7 @@ fn collect_replacements(normalized: &NormalizedInput, may_be_truncated: bool) ->
             replacements.push(Replacement {
                 start,
                 end,
-                value: format!("[redacted {label}]"),
+                value: format!("[redacted {}]", definition.label),
                 order,
                 shape: assignment_shape(definition, &captures),
             });
@@ -504,9 +552,11 @@ fn collect_replacements(normalized: &NormalizedInput, may_be_truncated: bool) ->
         return replacements;
     }
 
-    for (order, (_, pattern)) in FRAGMENT_PATTERNS.iter().enumerate() {
-        let definition = &SECRET_DEFINITIONS[order];
-        for matched in pattern.find_iter(text) {
+    for (order, definition) in SECRET_DEFINITIONS.iter().enumerate() {
+        if !definition.may_match(text, &lowered) {
+            continue;
+        }
+        for matched in definition.fragment_pattern().find_iter(text) {
             // Only a fragment touching the end of the input can be the tail of
             // a value that was cut at the caller's cap.
             if matched.end() != text.len() {
@@ -522,7 +572,7 @@ fn collect_replacements(normalized: &NormalizedInput, may_be_truncated: bool) ->
                 start,
                 end: matched.end(),
                 value: String::new(),
-                order: FULL_PATTERNS.len() + order,
+                order: SECRET_DEFINITIONS.len() + order,
                 shape: MatchShape::Standalone,
             });
         }
@@ -729,5 +779,13 @@ mod tests {
     #[test]
     fn short_text_is_not_cut() {
         assert_eq!(bound_tool_text("npm test"), ("npm test".to_string(), false));
+    }
+
+    #[test]
+    fn text_without_family_anchors_is_unchanged() {
+        let input = "margin-top: 8px; color: red;";
+        for may_be_truncated in [false, true] {
+            assert_eq!(redact_secrets_at_boundary(input, may_be_truncated), input);
+        }
     }
 }
