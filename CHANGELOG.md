@@ -12,6 +12,8 @@ The experimental desk hook records the Bash command and tool description as reda
 
 Hook setup no longer reports a retained previous config when the retained copy matches the file it replaced. The copy is still kept for recovery.
 
+Remembered commands and rationale excerpts are now redacted before control characters are flattened. Before, a token right after a terminal escape sequence (for example `ESC[31m` followed by a GitHub token) went unrecognized and was stored in full. Records written before this fix are not rewritten.
+
 ## 2.0.0 — 6 November 2026
 
 Major release: Rocky retires its mascot persona. CLI, hook, GUI, and MCP output is plain, neutral English, following [docs/output-principles.md](docs/output-principles.md). Evidence rules, hedges, coverage disclosures, `--quiet`, exit codes, and JSON shapes are unchanged.

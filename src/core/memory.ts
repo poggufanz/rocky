@@ -1537,9 +1537,18 @@ function boundHeadTail(text: string, capBytes: number): string {
   return `${head} … ${tail}`;
 }
 
+/**
+ * Replace C0, DEL, and C1 controls with spaces. Runs after redaction: the
+ * redactor recognizes escape sequences, so flattening first leaves "[31m"
+ * glued to a following token and the token goes unrecognized.
+ */
+function flattenControls(text: string): string {
+  return text.replace(/[\u0000-\u001f\u007f-\u009f]/g, " ");
+}
+
 /** Redact secrets, flatten control characters, and cap head+tail by bytes. */
 export function boundRationaleExcerpt(text: string): string {
-  const clean = redactSecretsAtBoundary(text.replace(/[ --]/g, " "));
+  const clean = flattenControls(redactSecretsAtBoundary(text));
   return boundHeadTail(clean, MAX_RATIONALE_EXCERPT_BYTES);
 }
 
@@ -1547,7 +1556,7 @@ export const MAX_COMMAND_BYTES = 1200;
 
 /** Bound a remembered command exactly like an excerpt: redact, flatten, cap head+tail. */
 export function boundCommand(cmd: string): string {
-  const clean = redactSecretsAtBoundary(cmd.replace(/[ --]/g, " "));
+  const clean = flattenControls(redactSecretsAtBoundary(cmd));
   return boundHeadTail(clean, MAX_COMMAND_BYTES);
 }
 

@@ -3,7 +3,14 @@ import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { MAX_GUARD_DRAIN_LINES, drainGuardPending, guardPendingPath, recordGuard } from "../core/memory.js";
+import {
+  MAX_GUARD_DRAIN_LINES,
+  boundCommand,
+  boundRationaleExcerpt,
+  drainGuardPending,
+  guardPendingPath,
+  recordGuard,
+} from "../core/memory.js";
 import { loadMemoryChecked, parseMemoryRecord } from "../core/memory-read.js";
 import { queryStats } from "../core/memory-query.js";
 
@@ -41,6 +48,23 @@ test("parseMemoryRecord rejects guard records with bad outcome or missing v", ()
   assert.equal(parseMemoryRecord({
     v: 1, kind: "guard", id: "g", ts: 1, cwd: "/", cmd: "x", rule: "", outcome: "cancelled",
   }), undefined);
+});
+
+test("boundCommand and boundRationaleExcerpt redact a token glued to an escape sequence", () => {
+  const github = "ghp_" + "A".repeat(36);
+  const anthropic = "sk-ant-api03-" + "abcdefghijklmnopqrst";
+  const inputs = [
+    `echo \x1b[31m${github}\x1b[0m`,
+    `\x1b[0m${anthropic}`,
+    `\x9b31m${anthropic}`,
+  ];
+  for (const input of inputs) {
+    for (const bound of [boundCommand, boundRationaleExcerpt]) {
+      const out = bound(input);
+      assert.ok(!out.includes(github) && !out.includes(anthropic), `${bound.name} leaked: ${JSON.stringify(out)}`);
+      assert.ok(!/[\u0000-\u001f\u007f-\u009f]/.test(out), `${bound.name} kept a control character`);
+    }
+  }
 });
 
 test("recordGuard redacts secrets in cmd through boundCommand", () => {
