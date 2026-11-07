@@ -70,7 +70,8 @@ function settingsFixture(t: test.TestContext): { root: string; settings: string 
 
 test("desk install writes 12 events with matcher * on tool events and timeout 5", () => {
   assert.deepEqual(DESK_EVENTS, EXPECTED_EVENTS);
-  const entries = buildDeskHookEntries(DESK_COMMAND, DESK_HOOK_ASYNC);
+  assert.equal(DESK_HOOK_ASYNC, true, "claude-code 2.1.319 capture proved async hooks");
+  const entries = buildDeskHookEntries(DESK_COMMAND, false);
   assert.deepEqual(Object.keys(entries).sort(), [...EXPECTED_EVENTS].sort());
   for (const [event, groups] of Object.entries(entries)) {
     assert.ok(Array.isArray(groups), `${event} must be an array`);

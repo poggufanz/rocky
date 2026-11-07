@@ -39,10 +39,11 @@ export const DESK_EVENTS = [
 ] as const;
 
 /**
- * Whether the desk hook entries carry `"async": true`. False until the §4.5
- * fixture proves Claude Code supports async hooks.
+ * Whether the desk hook entries carry `"async": true`. The Claude Code 2.1.319
+ * capture proved async hooks: a PostToolUse hook sleeping 3 s landed after the
+ * turn's Stop. rocky-hook never blocks, so async only removes spawn latency.
  */
-export const DESK_HOOK_ASYNC = false;
+export const DESK_HOOK_ASYNC = true;
 
 const DESK_HOOK_CONFIRMATION = "Install desk hooks for Claude Code now?";
 const GENERIC_ERROR = operationDetail(new Error("desk hooks"), "desk hooks");
