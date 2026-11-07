@@ -425,6 +425,7 @@ fn drain_lines(buf: &mut Vec<u8>, tx: &Sender<Option<ServerMsg>>) -> bool {
 mod tests {
     use super::*;
     use rocky_proto::pipe::{AgentKey, AgentStatus, Health, RepoInfo, Status, encode};
+    use rocky_proto::settings::Settings;
 
     fn big_agent(name_len: usize) -> AgentStatus {
         AgentStatus {
@@ -436,6 +437,7 @@ mod tests {
             status: Status::Working,
             action: None,
             summary: None,
+            description: None,
             failures: 0,
             last_event_ms: 1,
             quiet_10m: false,
@@ -455,6 +457,7 @@ mod tests {
             agents: vec![big_agent(LINE_CAP)],
             aggregate: Status::Working,
             health: Health::default(),
+            settings: Settings::default(),
         };
         let line = encode(&msg);
         assert!(line.len() > LINE_CAP, "fixture must exceed 64 KiB");

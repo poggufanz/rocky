@@ -11,6 +11,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use rocky_proto::paths::{desk_dir, log_path, rocky_home, spool_dir};
 use rocky_proto::pipe::{AgentKey, AgentStatus, Health, ServerMsg, StatusOp};
+use rocky_proto::settings::Settings;
 use rockyd::log::RotatingLog;
 use rockyd::repo::resolve_repo;
 use rockyd::server::{BindError, Control, Hub, serve};
@@ -81,6 +82,7 @@ fn main() {
             agents: s.state.agents(),
             aggregate: s.state.aggregate(),
             health: s.health.clone(),
+            settings: Settings::default(),
         }
     });
 

@@ -123,6 +123,7 @@ impl StatusState {
                 status: Status::Idle,
                 action: None,
                 summary: None,
+                description: None,
                 failures: 0,
                 last_event_ms: recv_ms,
                 quiet_10m: false,
@@ -151,6 +152,7 @@ impl StatusState {
                         tool_name: tool,
                         target_path: ev.target_path.clone(),
                         tool_use_id: ev.tool_use_id.clone(),
+                        command: None,
                     });
                 }
                 agent.status.action = agent.in_flight.last().cloned();

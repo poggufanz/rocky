@@ -15,6 +15,7 @@ use rocky_proto::paths::pipe_name;
 use rocky_proto::pipe::{
     CLIENT_QUEUE_CAP, ClientMsg, CmdName, Health, LINE_CAP, ServerMsg, Status, decode, encode,
 };
+use rocky_proto::settings::Settings;
 use rockyd::server::{BindError, Control, DAEMON_VERSION, Hub, serve};
 use tempfile::TempDir;
 
@@ -138,6 +139,7 @@ fn snapshot_msg() -> ServerMsg {
         agents: vec![],
         aggregate: Status::Idle,
         health: Health::default(),
+        settings: Settings::default(),
     }
 }
 
@@ -194,7 +196,7 @@ fn version_mismatch_gets_error_and_close() {
 
     let pipe = pipe_name(home.path());
     let mut client = connect(&pipe);
-    client.send("{\"v\":2,\"type\":\"hello\",\"client\":\"x\",\"version\":\"y\"}\n");
+    client.send("{\"v\":1,\"type\":\"hello\",\"client\":\"x\",\"version\":\"y\"}\n");
     let err: ServerMsg = decode(&client.read_line().unwrap()).unwrap();
     assert_eq!(
         err,
@@ -244,7 +246,7 @@ fn long_line_disconnects_client() {
     // No hello: one over-long line must be dropped without reading it all.
     let big = "x".repeat(LINE_CAP + 100);
     client.send(&format!(
-        "{{\"v\":1,\"type\":\"hello\",\"client\":\"{big}\"}}\n"
+        "{{\"v\":2,\"type\":\"hello\",\"client\":\"{big}\"}}\n"
     ));
     assert!(client.read_line().is_none(), "expected EOF");
 }

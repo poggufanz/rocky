@@ -282,6 +282,7 @@ pub fn action_text(a: &rocky_proto::pipe::Action, repo_root: Option<&str>) -> St
 mod tests {
     use super::*;
     use rocky_proto::pipe::{Action, AgentKey, AgentStatus, Health, RepoInfo, ServerMsg, Status};
+    use rocky_proto::settings::Settings;
 
     fn agent(session: &str, agent_id: &str, status: Status) -> AgentStatus {
         AgentStatus {
@@ -297,6 +298,7 @@ mod tests {
             status,
             action: None,
             summary: None,
+            description: None,
             failures: 0,
             last_event_ms: 1_000,
             quiet_10m: false,
@@ -313,6 +315,7 @@ mod tests {
             agents,
             aggregate: Status::Idle,
             health: Health::default(),
+            settings: Settings::default(),
         }
     }
 
@@ -386,6 +389,7 @@ mod tests {
             tool_name: "Edit".into(),
             target_path: Some("C:/r/src/core/memory.ts".into()),
             tool_use_id: None,
+            command: None,
         };
         assert_eq!(action_text(&a, Some("C:/r")), "Edit src/core/memory.ts");
         // path panjang → len chars == 80 dan diakhiri '…'
@@ -393,6 +397,7 @@ mod tests {
             tool_name: "Edit".into(),
             target_path: Some(format!("C:/r/{}", "x".repeat(200))),
             tool_use_id: None,
+            command: None,
         };
         let t = action_text(&long, Some("C:/r"));
         assert_eq!(t.chars().count(), 80);
@@ -402,6 +407,7 @@ mod tests {
             tool_name: "Read".into(),
             target_path: Some("C:\\r\\src\\a.ts".into()),
             tool_use_id: None,
+            command: None,
         };
         assert_eq!(action_text(&win, Some("c:/R")), "Read src/a.ts");
         // tanpa target → nama tool saja
@@ -409,6 +415,7 @@ mod tests {
             tool_name: "Bash".into(),
             target_path: None,
             tool_use_id: None,
+            command: None,
         };
         assert_eq!(action_text(&bare, Some("C:/r")), "Bash");
     }
