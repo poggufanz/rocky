@@ -67,7 +67,6 @@ export interface AgentHooksRuntimeOptions {
   gateCommand?: string;
   nodePath?: string;
   entryPath?: string;
-  home?: string;
   confirmation?: AgentHooksConfirmation;
   detail?: (message: string) => void;
   /** Test seam for proving the transactional writer refuses a late race. */
