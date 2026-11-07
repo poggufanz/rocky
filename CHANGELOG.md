@@ -6,6 +6,8 @@ Notable changes per release. Dates are the release date.
 
 Hidden `rocky setup --desk-hooks <path>` / `--uninstall-desk-hooks` for the experimental desk.
 
+The experimental desk hook records the Bash command and tool description as redacted text of at most 200 characters, unless `desk/tool-text-off` exists in the Rocky home.
+
 `rocky setup` writes Claude Code agent and desk hooks to `$CLAUDE_CONFIG_DIR/settings.json` when that variable is set, prints the settings path it used, and refuses an empty or non-canonical value. Hooks installed earlier into `~/.claude/settings.json` while `CLAUDE_CONFIG_DIR` was set stay there, because status and uninstall now look at `$CLAUDE_CONFIG_DIR/settings.json`. To remove them, unset `CLAUDE_CONFIG_DIR` and run `rocky setup --uninstall-agent-hooks` or `rocky setup --uninstall-desk-hooks`.
 
 Hook setup no longer reports a retained previous config when the retained copy matches the file it replaced. The copy is still kept for recovery.

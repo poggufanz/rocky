@@ -93,10 +93,17 @@ changes. Readers must tolerate unknown fields and unknown `kind` values.
 
 Only these fields are kept from a hook payload: `session_id`, `cwd`,
 `hook_event_name`, `agent_id`, `agent_type`, `tool_name`, `tool_use_id`,
-`transcript_path`, `agent_transcript_path`, `notification_type`, and
+`transcript_path`, `agent_transcript_path`, `notification_type`,
 `tool_input.file_path` / `tool_input.notebook_path` (merged into
-`target_path`). Ids and names cap at 256 bytes, paths at 4 KiB; truncation
-cuts at a char boundary and sets `truncated: true`.
+`target_path`), and `tool_input.command` / `tool_input.description` (kept as
+`command` and `description`: redacted, then controls mapped to spaces, ≤200
+chars, absent when `desk/tool-text-off` exists). Ids and names cap at 256
+bytes, paths at 4 KiB; truncation cuts at a char boundary and sets
+`truncated: true`.
+
+Redaction counts Unicode scalar values where the reference counts UTF-16 code
+units, so a secret value built from characters outside the Basic Multilingual
+Plane can stay unredacted here.
 
 ## Pipe v1
 

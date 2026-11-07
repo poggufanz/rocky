@@ -2,4 +2,5 @@
 pub mod hook;
 pub mod paths;
 pub mod pipe;
+pub mod redact;
 pub mod spool;
