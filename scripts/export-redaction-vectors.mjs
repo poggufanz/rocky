@@ -149,6 +149,7 @@ const CASES = [
   { name: "truncated npm fragment at end of input", input: "prefix\u061Cnpm_abcdefgh", may_be_truncated: true },
   { name: "truncated password fragment at end of input", input: 'prefix\u061Cpassword = "secret', may_be_truncated: true },
   { name: "truncated anthropic fragment with visible tail", input: "prefix\u061Csk-ant-abc tail", may_be_truncated: true },
+  { name: "truncated anthropic fragment with the truncation flag", input: "prefix\u061Csk-ant-abc", may_be_truncated: true },
   { name: "truncated anthropic fragment without the truncation flag", input: "prefix\u061Csk-ant-abc" },
 
   // Logical controls inside a matched secret.

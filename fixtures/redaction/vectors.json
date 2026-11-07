@@ -720,6 +720,12 @@
     "expected": "prefix"
   },
   {
+    "name": "truncated anthropic fragment with the truncation flag",
+    "input": "prefix؜sk-ant-abc",
+    "may_be_truncated": true,
+    "expected": "prefix"
+  },
+  {
     "name": "truncated anthropic fragment with visible tail",
     "input": "prefix؜sk-ant-abc tail",
     "may_be_truncated": true,
