@@ -1,0 +1,651 @@
+//! Secret redaction for text that crosses a log or tool-capture boundary.
+//!
+//! Terminal escape sequences and invisible format controls are removed before
+//! matching. CR, LF, and TAB are removed from the matching view as well and
+//! recorded, so a replacement can disclose that a logical record boundary was
+//! swallowed instead of hiding it. Complete secret families are replaced; when
+//! the caller knows its input may be a bounded prefix, a family fragment that
+//! ends at the end of the input is scrubbed too.
+//!
+//! Two known differences from the reference implementation are accepted:
+//!
+//! - Counted quantifiers such as `{4,}` count Unicode scalar values, while the
+//!   reference counts UTF-16 code units. A secret value built from characters
+//!   outside the Basic Multilingual Plane (emoji, for example) can therefore
+//!   stay untouched here while the reference redacts it. The shared vectors
+//!   exclude that case.
+//! - The reference also exposes secret-kind detection and its placeholder
+//!   filtering for other callers. Neither participates in boundary redaction,
+//!   so neither is ported here.
+//!
+//! Patterns are compiled lazily and only when text is actually redacted. No
+//! function in this module may panic on arbitrary input.
+
+use std::collections::{HashMap, HashSet};
+use std::sync::LazyLock;
+
+use regex::Regex;
+
+/// Bytes of raw text inspected by [`bound_tool_text`].
+pub const TOOL_TEXT_SCAN_BYTES: usize = 4096;
+/// Characters kept by [`bound_tool_text`].
+pub const TOOL_TEXT_MAX_CHARS: usize = 200;
+
+const AMBIGUOUS_SECRET_CONTINUATION: &str = "[redacted ambiguous continuation]";
+
+struct SecretDefinition {
+    label: &'static str,
+    source: &'static str,
+    leading_boundary: bool,
+    trailing_boundary: bool,
+    fragment_source: &'static str,
+    assignment: bool,
+}
+
+/// Canonical secret families, in replacement order.
+///
+/// Patterns match the normalized view only, where C0/C1 controls (including
+/// U+0085) and the invisible set (including U+FEFF) are already absent. That is
+/// the whole difference between the reference `\s` and Unicode `\s`, so the two
+/// cover the same characters here. Case-insensitive keywords use a scoped
+/// ASCII-only flag; there is no global `(?i)`.
+const SECRET_DEFINITIONS: &[SecretDefinition] = &[
+    SecretDefinition {
+        label: "aws access key",
+        source: r"AKIA[0-9A-Z]{16}",
+        leading_boundary: true,
+        trailing_boundary: true,
+        fragment_source: r"AKIA[0-9A-Z]{8,}",
+        assignment: false,
+    },
+    SecretDefinition {
+        label: "private key",
+        source: r"-----BEGIN [A-Z ]*PRIVATE KEY-----",
+        leading_boundary: false,
+        trailing_boundary: false,
+        fragment_source: r"-----BEGIN[ A-Za-z0-9_-]*",
+        assignment: false,
+    },
+    SecretDefinition {
+        label: "github token",
+        source: r"(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{22,}",
+        leading_boundary: true,
+        trailing_boundary: true,
+        fragment_source: r"(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_]{4,}|github_pat_[A-Za-z0-9_]{4,}",
+        assignment: false,
+    },
+    SecretDefinition {
+        label: "slack token",
+        source: r"xox[baprs]-[A-Za-z0-9-]{10,}",
+        leading_boundary: true,
+        trailing_boundary: true,
+        fragment_source: r"xox[baprs]-[A-Za-z0-9-]{4,}",
+        assignment: false,
+    },
+    SecretDefinition {
+        label: "anthropic key",
+        source: r"sk-ant-[A-Za-z0-9_-]{20,}",
+        leading_boundary: true,
+        trailing_boundary: true,
+        fragment_source: r"sk-ant-[A-Za-z0-9_-]{3,}",
+        assignment: false,
+    },
+    SecretDefinition {
+        label: "openai key",
+        source: r"sk-[A-Za-z0-9_-]{20,}",
+        leading_boundary: true,
+        trailing_boundary: true,
+        fragment_source: r"sk-[A-Za-z0-9_-]{3,}",
+        assignment: false,
+    },
+    SecretDefinition {
+        label: "npm token",
+        source: r"npm_[A-Za-z0-9]{36}",
+        leading_boundary: true,
+        trailing_boundary: true,
+        fragment_source: r"npm_[A-Za-z0-9_]{8,}",
+        assignment: false,
+    },
+    SecretDefinition {
+        label: "password assignment",
+        source: r#"(?:(?:"(?i-u:password|secret)"|'(?i-u:password|secret)'|(?i-u:password|secret)))\s*[:=]\s*(?:"(?P<dq>[^'"\r\n]{4,})"|'(?P<sq>[^'"\r\n]{4,})'|(?P<uq>[^\s'"`,;]{4,}))"#,
+        leading_boundary: true,
+        trailing_boundary: false,
+        fragment_source: r#"(?:(?:"(?i-u:password|secret)"|'(?i-u:password|secret)'|(?i-u:password|secret)))\s*[:=]\s*(?:["'][^"']*|[^\s]*)"#,
+        assignment: true,
+    },
+    SecretDefinition {
+        label: "credential assignment",
+        source: r#"(?:(?:"(?i-u:token|api[_-]?key|authorization)"|'(?i-u:token|api[_-]?key|authorization)'|(?i-u:token|api[_-]?key|authorization)))\s*[:=]\s*(?:"(?P<dq>[^'"\r\n]{4,})"|'(?P<sq>[^'"\r\n]{4,})'|(?P<uq>(?:(?i-u:Bearer|Basic|Token)\s+)?[^\s'"`,;]{4,}))"#,
+        leading_boundary: true,
+        trailing_boundary: false,
+        fragment_source: r#"(?:(?:"(?i-u:token|api[_-]?key|authorization)"|'(?i-u:token|api[_-]?key|authorization)'|(?i-u:token|api[_-]?key|authorization)))\s*[:=]\s*(?:["'][^"']*|(?:(?i-u:Bearer|Basic|Token)\s+)?[^\s]*)"#,
+        assignment: true,
+    },
+];
+
+static FULL_PATTERNS: LazyLock<Vec<(&'static str, Regex)>> = LazyLock::new(|| {
+    SECRET_DEFINITIONS
+        .iter()
+        .map(|definition| {
+            (
+                definition.label,
+                Regex::new(definition.source).expect("secret definition patterns are valid"),
+            )
+        })
+        .collect()
+});
+
+static FRAGMENT_PATTERNS: LazyLock<Vec<(&'static str, Regex)>> = LazyLock::new(|| {
+    SECRET_DEFINITIONS
+        .iter()
+        .map(|definition| {
+            (
+                definition.label,
+                Regex::new(definition.fragment_source).expect("secret fragment patterns are valid"),
+            )
+        })
+        .collect()
+});
+
+const ESC: u32 = 0x1b;
+const BEL: u32 = 0x07;
+const ST: u32 = 0x9c;
+const CSI_8BIT: u32 = 0x9b;
+const SS2_8BIT: u32 = 0x8e;
+const SS3_8BIT: u32 = 0x8f;
+const OSC_8BIT: u32 = 0x9d;
+const DCS_8BIT: u32 = 0x90;
+const SOS_8BIT: u32 = 0x98;
+const PM_8BIT: u32 = 0x9e;
+const APC_8BIT: u32 = 0x9f;
+
+/// The character starting at `offset`, or `None` at or past the end.
+fn next_char(text: &str, offset: usize) -> Option<char> {
+    text.get(offset..).and_then(|rest| rest.chars().next())
+}
+
+fn is_control_string_start(code: u32) -> bool {
+    matches!(code, OSC_8BIT | DCS_8BIT | SOS_8BIT | PM_8BIT | APC_8BIT)
+}
+
+fn is_c0_or_c1(code: u32) -> bool {
+    code <= 0x1f || code == 0x7f || (0x80..=0x9f).contains(&code)
+}
+
+fn is_invisible_control(character: char) -> bool {
+    matches!(
+        character,
+        '\u{061C}'
+            | '\u{200B}'..='\u{200F}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{2060}'..='\u{206F}'
+            | '\u{FEFF}'
+    )
+}
+
+fn consume_csi(text: &str, start: usize) -> usize {
+    let mut offset = start;
+    while let Some(character) = next_char(text, offset) {
+        if (0x30..=0x3f).contains(&(character as u32)) {
+            offset += character.len_utf8();
+        } else {
+            break;
+        }
+    }
+    while let Some(character) = next_char(text, offset) {
+        if (0x20..=0x2f).contains(&(character as u32)) {
+            offset += character.len_utf8();
+        } else {
+            break;
+        }
+    }
+    match next_char(text, offset) {
+        Some(character) if (0x40..=0x7e).contains(&(character as u32)) => {
+            offset + character.len_utf8()
+        }
+        // An unterminated sequence is still untrusted payload: consume the tail.
+        _ => text.len(),
+    }
+}
+
+fn consume_control_string(text: &str, start: usize, terminates_at_bel: bool) -> usize {
+    let mut offset = start;
+    while let Some(character) = next_char(text, offset) {
+        let code = character as u32;
+        if (terminates_at_bel && code == BEL) || code == ST {
+            return offset + character.len_utf8();
+        }
+        if code == ESC && next_char(text, offset + 1) == Some('\\') {
+            return offset + 2;
+        }
+        offset += character.len_utf8();
+    }
+    // A missing terminator must not expose its payload to later matching.
+    text.len()
+}
+
+fn consume_escape(text: &str, start: usize) -> usize {
+    let Some(next) = next_char(text, start + 1) else {
+        return start + 1;
+    };
+    let code = next as u32;
+    if code == 0x5b {
+        return consume_csi(text, start + 2);
+    }
+    if code == 0x4e || code == 0x4f {
+        return consume_shifted_graphic(text, start + 1);
+    }
+    if matches!(code, 0x5d | 0x50 | 0x58 | 0x5e | 0x5f) {
+        return consume_control_string(text, start + 2, code == 0x5d);
+    }
+    if (0x20..=0x2f).contains(&code) {
+        let mut offset = start + 2;
+        while let Some(character) = next_char(text, offset) {
+            if (0x20..=0x2f).contains(&(character as u32)) {
+                offset += character.len_utf8();
+            } else {
+                break;
+            }
+        }
+        return match next_char(text, offset) {
+            Some(character) if (0x30..=0x7e).contains(&(character as u32)) => {
+                offset + character.len_utf8()
+            }
+            _ => offset,
+        };
+    }
+    // Standard two-byte ESC Fe sequences (and unknown ESC payload) go as a unit.
+    if (0x40..=0x7e).contains(&code) {
+        start + 2
+    } else {
+        start + 1
+    }
+}
+
+fn consume_shifted_graphic(text: &str, introducer: usize) -> usize {
+    let introducer_len = next_char(text, introducer).map_or(0, char::len_utf8);
+    let next_start = introducer + introducer_len;
+    match next_char(text, next_start) {
+        Some(character) => next_start + character.len_utf8(),
+        None => text.len(),
+    }
+}
+
+struct NormalizedInput {
+    /// Matching view: controls, escape sequences, and invisible characters gone.
+    text: String,
+    /// Display view: logical controls preserved, single C0/C1 replaced by spaces.
+    display_text: String,
+    /// Matching-view byte offsets where something was removed.
+    removed_offsets: HashSet<usize>,
+    /// Matching-view byte offset to display-view byte offset, per kept start.
+    display_starts: HashMap<usize, usize>,
+    /// Matching-view byte offset to display-view byte offset, per kept end.
+    display_ends: HashMap<usize, usize>,
+    /// Removed CR/LF/TAB characters and their matching-view byte offsets.
+    logical_controls: Vec<(usize, char)>,
+}
+
+fn normalize_secret_boundary_input(text: &str) -> NormalizedInput {
+    let mut normalized = NormalizedInput {
+        text: String::new(),
+        display_text: String::new(),
+        removed_offsets: HashSet::new(),
+        display_starts: HashMap::new(),
+        display_ends: HashMap::new(),
+        logical_controls: Vec::new(),
+    };
+    let mut source = 0;
+    let mut matching = 0;
+    let mut display = 0;
+
+    while let Some(character) = next_char(text, source) {
+        let code = character as u32;
+        let mut end = source;
+        let mut is_sequence = false;
+        if code == ESC {
+            end = consume_escape(text, source);
+            is_sequence = true;
+        } else if code == CSI_8BIT {
+            end = consume_csi(text, source + character.len_utf8());
+            is_sequence = true;
+        } else if code == SS2_8BIT || code == SS3_8BIT {
+            end = consume_shifted_graphic(text, source);
+            is_sequence = true;
+        } else if is_control_string_start(code) {
+            end = consume_control_string(text, source + character.len_utf8(), code == OSC_8BIT);
+            is_sequence = true;
+        } else if is_c0_or_c1(code) {
+            end = source + character.len_utf8();
+        }
+
+        if end != source {
+            let is_logical_control = matches!(code, 0x09 | 0x0a | 0x0d);
+            normalized.removed_offsets.insert(matching);
+            if is_logical_control {
+                normalized.logical_controls.push((matching, character));
+                normalized.display_text.push(character);
+                display += character.len_utf8();
+            } else if !is_sequence {
+                normalized.display_text.push(' ');
+                display += 1;
+            }
+            source = end;
+            continue;
+        }
+
+        if is_invisible_control(character) {
+            normalized.removed_offsets.insert(matching);
+            source += character.len_utf8();
+            continue;
+        }
+
+        normalized.display_starts.insert(matching, display);
+        normalized.text.push(character);
+        normalized.display_text.push(character);
+        matching += character.len_utf8();
+        display += character.len_utf8();
+        normalized.display_ends.insert(matching, display);
+        source += character.len_utf8();
+    }
+
+    normalized
+}
+
+enum MatchShape {
+    Standalone,
+    Assignment { quoted: bool, value_start: usize },
+}
+
+struct Replacement {
+    start: usize,
+    end: usize,
+    value: String,
+    order: usize,
+    shape: MatchShape,
+}
+
+fn is_ascii_word(character: Option<char>) -> bool {
+    matches!(character, Some(character) if character.is_ascii_alphanumeric() || character == '_')
+}
+
+fn has_leading_boundary(text: &str, start: usize) -> bool {
+    !is_ascii_word(
+        text.get(..start)
+            .and_then(|prefix| prefix.chars().next_back()),
+    )
+}
+
+fn has_trailing_boundary(text: &str, end: usize) -> bool {
+    !is_ascii_word(text.get(end..).and_then(|suffix| suffix.chars().next()))
+}
+
+fn assignment_shape(definition: &SecretDefinition, captures: &regex::Captures<'_>) -> MatchShape {
+    if !definition.assignment {
+        return MatchShape::Standalone;
+    }
+    if let Some(value) = captures.name("dq").or_else(|| captures.name("sq")) {
+        return MatchShape::Assignment {
+            quoted: true,
+            value_start: value.start(),
+        };
+    }
+    match captures.name("uq") {
+        Some(value) => MatchShape::Assignment {
+            quoted: false,
+            value_start: value.start(),
+        },
+        // Full assignment patterns always select one registered value group.
+        None => MatchShape::Standalone,
+    }
+}
+
+fn passes_full_boundaries(
+    definition: &SecretDefinition,
+    text: &str,
+    removed_offsets: &HashSet<usize>,
+    start: usize,
+    end: usize,
+) -> bool {
+    let normal_leading = !definition.leading_boundary || has_leading_boundary(text, start);
+    let normal_trailing = !definition.trailing_boundary || has_trailing_boundary(text, end);
+    let recorded_leading = !definition.leading_boundary || removed_offsets.contains(&start);
+    let recorded_trailing = !definition.trailing_boundary || removed_offsets.contains(&end);
+    (normal_leading || recorded_leading) && (normal_trailing || recorded_trailing)
+}
+
+fn collect_replacements(normalized: &NormalizedInput, may_be_truncated: bool) -> Vec<Replacement> {
+    let text = &normalized.text;
+    let removed_offsets = &normalized.removed_offsets;
+    let mut replacements = Vec::new();
+
+    for (order, (label, pattern)) in FULL_PATTERNS.iter().enumerate() {
+        let definition = &SECRET_DEFINITIONS[order];
+        for captures in pattern.captures_iter(text) {
+            let matched = captures.get(0).expect("a match always has group zero");
+            let start = matched.start();
+            let end = matched.end();
+            if !passes_full_boundaries(definition, text, removed_offsets, start, end) {
+                continue;
+            }
+            replacements.push(Replacement {
+                start,
+                end,
+                value: format!("[redacted {label}]"),
+                order,
+                shape: assignment_shape(definition, &captures),
+            });
+        }
+    }
+
+    if !may_be_truncated {
+        return replacements;
+    }
+
+    for (order, (_, pattern)) in FRAGMENT_PATTERNS.iter().enumerate() {
+        let definition = &SECRET_DEFINITIONS[order];
+        for matched in pattern.find_iter(text) {
+            // Only a fragment touching the end of the input can be the tail of
+            // a value that was cut at the caller's cap.
+            if matched.end() != text.len() {
+                continue;
+            }
+            let start = matched.start();
+            let normal_leading = !definition.leading_boundary || has_leading_boundary(text, start);
+            let recorded_leading = !definition.leading_boundary || removed_offsets.contains(&start);
+            if !normal_leading && !recorded_leading {
+                continue;
+            }
+            replacements.push(Replacement {
+                start,
+                end: matched.end(),
+                value: String::new(),
+                order: FULL_PATTERNS.len() + order,
+                shape: MatchShape::Standalone,
+            });
+        }
+    }
+
+    replacements
+}
+
+fn preserve_logical_controls(replacement: &Replacement, normalized: &NormalizedInput) -> String {
+    let mut value = replacement.value.clone();
+    for (offset, character) in &normalized.logical_controls {
+        if *offset <= replacement.start || *offset >= replacement.end {
+            continue;
+        }
+        let ambiguous = match replacement.shape {
+            MatchShape::Standalone => true,
+            MatchShape::Assignment {
+                quoted,
+                value_start,
+            } => !quoted && *offset >= value_start,
+        };
+        value.push(*character);
+        if ambiguous {
+            value.push_str(AMBIGUOUS_SECRET_CONTINUATION);
+        }
+    }
+    value
+}
+
+/// Replace complete secrets, optionally including a fragment cut at end of input.
+pub fn redact_secrets_at_boundary(text: &str, may_be_truncated: bool) -> String {
+    if text.is_empty() {
+        return String::new();
+    }
+    let normalized = normalize_secret_boundary_input(text);
+    let mut replacements = collect_replacements(&normalized, may_be_truncated);
+    replacements.sort_by(|left, right| {
+        left.start
+            .cmp(&right.start)
+            .then(right.end.cmp(&left.end))
+            .then(left.order.cmp(&right.order))
+    });
+
+    let mut selected: Vec<&Replacement> = Vec::new();
+    for replacement in &replacements {
+        if selected
+            .iter()
+            .any(|chosen| replacement.end > chosen.start && replacement.start < chosen.end)
+        {
+            continue;
+        }
+        selected.push(replacement);
+    }
+
+    let structured: Vec<(usize, usize, String)> = selected
+        .iter()
+        .map(|replacement| {
+            (
+                replacement.start,
+                replacement.end,
+                preserve_logical_controls(replacement, &normalized),
+            )
+        })
+        .collect();
+
+    let NormalizedInput {
+        display_text: mut out,
+        display_starts,
+        display_ends,
+        ..
+    } = normalized;
+
+    for (start, end, value) in structured.into_iter().rev() {
+        let display_start = display_starts.get(&start).copied().unwrap_or(start);
+        let display_end = display_ends.get(&end).copied().unwrap_or(end);
+        // A match always maps to kept characters. Guard the splice anyway: this
+        // runs inside a latency-bounded hook and must never panic.
+        if display_start <= display_end
+            && out.is_char_boundary(display_start)
+            && out.is_char_boundary(display_end)
+        {
+            out.replace_range(display_start..display_end, &value);
+        }
+    }
+    out
+}
+
+fn is_mapped_control(character: char) -> bool {
+    let code = character as u32;
+    code <= 0x1f || (0x7f..=0x9f).contains(&code)
+}
+
+/// Cut to the scan cap, map controls to spaces, and redact as a cut prefix.
+fn bound_tool_text_step(raw: &str) -> (String, bool) {
+    let mut end = raw.len().min(TOOL_TEXT_SCAN_BYTES);
+    while !raw.is_char_boundary(end) {
+        end -= 1;
+    }
+    let prefix = &raw[..end];
+    let mapped: String = prefix
+        .chars()
+        .map(|character| {
+            if is_mapped_control(character) {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect();
+    (redact_secrets_at_boundary(&mapped, true), end < raw.len())
+}
+
+/// Bound a tool-text field for capture: scan cap, control mapping, redaction,
+/// then character cap.
+///
+/// Returns the bounded text and whether either cut removed anything.
+pub fn bound_tool_text(raw: &str) -> (String, bool) {
+    let (redacted, mut was_cut) = bound_tool_text_step(raw);
+    let mut text = redacted;
+    if let Some((index, _)) = text.char_indices().nth(TOOL_TEXT_MAX_CHARS) {
+        text.truncate(index);
+        was_cut = true;
+    }
+    (text, was_cut)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bound_tool_text_redacts_before_the_char_cut() {
+        let raw = format!(
+            "{} ghp_{}{}",
+            "x".repeat(189),
+            "a".repeat(36),
+            "y".repeat(20)
+        );
+        assert_eq!(raw.len(), 250);
+        let (text, was_cut) = bound_tool_text(&raw);
+        assert!(!text.contains("ghp_"));
+        assert!(text.chars().count() <= TOOL_TEXT_MAX_CHARS);
+        assert!(text.contains("[redacted "));
+        assert!(was_cut);
+    }
+
+    #[test]
+    fn bound_tool_text_drops_a_secret_split_by_the_byte_cut() {
+        assert_eq!(redact_secrets_at_boundary("ghp_abcdef", true), "");
+        let raw = format!(
+            "{}ghp_abcdefghijklmnopqrstuvwxyz",
+            " ".repeat(TOOL_TEXT_SCAN_BYTES - 10)
+        );
+        let (text, was_cut) = bound_tool_text_step(&raw);
+        assert!(was_cut);
+        assert!(!text.contains("ghp_"));
+        assert!(!text.contains("abcdef"));
+        assert!(text.trim_end().is_empty(), "unexpected tail: {text:?}");
+    }
+
+    #[test]
+    fn bound_tool_text_maps_controls_to_spaces() {
+        assert_eq!(
+            bound_tool_text("a\u{1b}[31mb\tc"),
+            ("a [31mb c".to_string(), false)
+        );
+    }
+
+    #[test]
+    fn bound_tool_text_cuts_on_char_boundaries() {
+        let raw = format!("{}éb", "a".repeat(TOOL_TEXT_SCAN_BYTES - 1));
+        let (text, was_cut) = bound_tool_text(&raw);
+        assert_eq!(text, "a".repeat(TOOL_TEXT_MAX_CHARS));
+        assert!(was_cut);
+
+        let raw = "😀".repeat(300);
+        let (text, was_cut) = bound_tool_text(&raw);
+        assert_eq!(text.chars().count(), TOOL_TEXT_MAX_CHARS);
+        assert!(text.chars().all(|character| character == '😀'));
+        assert!(was_cut);
+    }
+
+    #[test]
+    fn short_text_is_not_cut() {
+        assert_eq!(bound_tool_text("npm test"), ("npm test".to_string(), false));
+    }
+}
