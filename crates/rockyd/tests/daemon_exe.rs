@@ -186,9 +186,8 @@ impl Client {
     }
 }
 
-/// Swap to `session.jsonl`/S1 in one line when the fixture lands (R5).
-const SEED_FIXTURE: &str = "stop-failure.jsonl";
-const SEED_SESSION: &str = "S9";
+const SEED_FIXTURE: &str = "session.jsonl";
+const SEED_SESSION: &str = "S1";
 
 /// Copy every line of a hook fixture into its own spool file, oldest first.
 fn seed_spool(spool: &Path, fixture: &str) -> usize {
