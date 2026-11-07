@@ -63,8 +63,8 @@ struct SecretDefinition {
     trailing_boundary: bool,
     fragment_source: &'static str,
     assignment: bool,
-    /// Literal every full and fragment match must contain, matched as written.
-    /// A family without its literal in the text cannot match.
+    /// Literals every full and fragment match contains at least one of, matched
+    /// as written. A family without any of them in the text cannot match.
     anchors: &'static [&'static str],
     /// Same, for keywords the patterns match with ASCII case folding; checked
     /// against one lowercased copy of the matching view.
@@ -136,7 +136,7 @@ static SECRET_DEFINITIONS: [SecretDefinition; 9] = [
         trailing_boundary: true,
         fragment_source: r"(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_]{4,}|github_pat_[A-Za-z0-9_]{4,}",
         assignment: false,
-        anchors: &["gh"],
+        anchors: &["ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_"],
         lowercase_anchors: &[],
         full: OnceLock::new(),
         fragment: OnceLock::new(),
@@ -650,11 +650,16 @@ pub fn redact_secrets_at_boundary(text: &str, may_be_truncated: bool) -> String 
         let display_end = display_ends.get(&end).copied().unwrap_or(end);
         // A match always maps to kept characters. Guard the splice anyway: this
         // runs inside a latency-bounded hook and must never panic.
-        if display_start <= display_end
+        let mapped = display_start <= display_end
             && out.is_char_boundary(display_start)
-            && out.is_char_boundary(display_end)
-        {
+            && out.is_char_boundary(display_end);
+        debug_assert!(mapped, "redaction offsets must map to kept boundaries");
+        if mapped {
             out.replace_range(display_start..display_end, &value);
+        } else {
+            // Fail closed: never emit text that may still hold the secret.
+            out.clear();
+            out.push_str(&value);
         }
     }
     out
@@ -787,5 +792,47 @@ mod tests {
         for may_be_truncated in [false, true] {
             assert_eq!(redact_secrets_at_boundary(input, may_be_truncated), input);
         }
+    }
+
+    #[derive(serde::Deserialize)]
+    struct VectorInput {
+        input: String,
+    }
+
+    #[test]
+    fn every_family_anchor_is_necessary_for_its_patterns() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../fixtures/redaction/vectors.json"
+        );
+        let raw = std::fs::read_to_string(path).expect("read the shared redaction vectors");
+        let vectors: Vec<VectorInput> =
+            serde_json::from_str(&raw).expect("parse the shared redaction vectors");
+        for vector in &vectors {
+            let normalized = normalize_secret_boundary_input(&vector.input);
+            let lowered = normalized.text.to_ascii_lowercase();
+            for definition in SECRET_DEFINITIONS.iter() {
+                let matches = definition.full_pattern().is_match(&normalized.text)
+                    || definition.fragment_pattern().is_match(&normalized.text);
+                assert!(
+                    !matches || definition.may_match(&normalized.text, &lowered),
+                    "input {:?}: {} patterns match but anchors {:?}/{:?} are absent",
+                    vector.input,
+                    definition.label,
+                    definition.anchors,
+                    definition.lowercase_anchors,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn anchor_poor_fine_grained_token_is_redacted() {
+        let input = "git clone https://github_pat_11ABCDEFG0abcdefijklmnop@github.com/org/rocky";
+        let redacted = redact_secrets_at_boundary(input, false);
+        assert!(!redacted.contains("github_pat_"), "{redacted:?}");
+        assert!(redacted.contains("[redacted github token]"), "{redacted:?}");
+        let (bounded, _) = bound_tool_text(input);
+        assert!(!bounded.contains("github_pat_"), "{bounded:?}");
     }
 }

@@ -24,6 +24,12 @@
     "expected": "[redacted anthropic key]"
   },
   {
+    "name": "anthropic key whose body has no other family prefix",
+    "input": "sk-ant-01XY2Z3wV4uT5sR6qP7nM8",
+    "may_be_truncated": false,
+    "expected": "[redacted anthropic key]"
+  },
+  {
     "name": "anthropic near miss with short body",
     "input": "sk-ant-abcdefgh",
     "may_be_truncated": false,
@@ -46,6 +52,12 @@
     "input": "AKIAABCDEFGHIJKLMNOP then AKIAABCDEFGHIJKLMNOP",
     "may_be_truncated": false,
     "expected": "[redacted aws access key] then [redacted aws access key]"
+  },
+  {
+    "name": "aws access key with a numeric body",
+    "input": "AKIA0123456789ABCDEF",
+    "may_be_truncated": false,
+    "expected": "[redacted aws access key]"
   },
   {
     "name": "aws key followed by a removed boundary",
@@ -150,6 +162,12 @@
     "expected": "fix login with [redacted openai key] deployed"
   },
   {
+    "name": "credential assignment with an uppercase keyword",
+    "input": "API-KEY: abc12345",
+    "may_be_truncated": false,
+    "expected": "[redacted credential assignment]"
+  },
+  {
     "name": "credential assignment with basic prefix",
     "input": "authorization: Basic dXNlcjpwYXNzd29yZA==",
     "may_be_truncated": false,
@@ -220,6 +238,12 @@
     "input": "",
     "may_be_truncated": false,
     "expected": ""
+  },
+  {
+    "name": "fine-grained token whose body has no other github prefix",
+    "input": "token github_pat_11ABCDEFG0abcdefijklmnop here",
+    "may_be_truncated": false,
+    "expected": "token [redacted github token] here"
   },
   {
     "name": "github fine-grained near miss with short body",
@@ -426,8 +450,20 @@
     "expected": "[redacted npm token]"
   },
   {
+    "name": "npm token whose body has no other family prefix",
+    "input": "npm_0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+    "may_be_truncated": false,
+    "expected": "[redacted npm token]"
+  },
+  {
     "name": "openai key standalone",
     "input": "sk-abcdefghijklmnopqrst",
+    "may_be_truncated": false,
+    "expected": "[redacted openai key]"
+  },
+  {
+    "name": "openai key whose body has no other family prefix",
+    "input": "sk-01XY2Z3wV4uT5sR6qPnM",
     "may_be_truncated": false,
     "expected": "[redacted openai key]"
   },
@@ -464,6 +500,12 @@
   {
     "name": "password assignment unquoted",
     "input": "password=pA7!cV2@kL9",
+    "may_be_truncated": false,
+    "expected": "[redacted password assignment]"
+  },
+  {
+    "name": "password assignment with a mixed-case keyword",
+    "input": "PassWord=pA7!cV2@kL9",
     "may_be_truncated": false,
     "expected": "[redacted password assignment]"
   },
@@ -642,6 +684,12 @@
     "expected": "[redacted private key]"
   },
   {
+    "name": "private key header without the common shape",
+    "input": "-----BEGIN X PRIVATE KEY-----",
+    "may_be_truncated": false,
+    "expected": "[redacted private key]"
+  },
+  {
     "name": "private key near miss with public header",
     "input": "-----BEGIN PUBLIC KEY-----",
     "may_be_truncated": false,
@@ -704,6 +752,12 @@
   {
     "name": "slack token valid",
     "input": "xoxb-1234567890abcdefghijklmnop",
+    "may_be_truncated": false,
+    "expected": "[redacted slack token]"
+  },
+  {
+    "name": "slack token whose body has no other family prefix",
+    "input": "xoxb-1234567890abcdefijklmnop",
     "may_be_truncated": false,
     "expected": "[redacted slack token]"
   },
@@ -774,8 +828,26 @@
     "expected": "prefix"
   },
   {
+    "name": "truncated bearer value at end of input",
+    "input": "Authorization: Bearer abc",
+    "may_be_truncated": true,
+    "expected": ""
+  },
+  {
+    "name": "truncated credential fragment after a no-break space",
+    "input": "prefix؜token: \"tK8",
+    "may_be_truncated": true,
+    "expected": "prefix"
+  },
+  {
     "name": "truncated fine-grained fragment at end of input",
     "input": "prefix؜github_pat_abcdefgh",
+    "may_be_truncated": true,
+    "expected": "prefix"
+  },
+  {
+    "name": "truncated fine-grained token whose body has no other github prefix",
+    "input": "prefix؜github_pat_aaaa",
     "may_be_truncated": true,
     "expected": "prefix"
   },

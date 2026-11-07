@@ -189,6 +189,23 @@ const CASES = [
   { name: "line separator inside an unquoted password value", input: "password=hunter2\u2028tail" },
   { name: "no-break space in a truncated password fragment", input: "prefix\u061Cpassword\u00A0=\u00A0\"tK8", may_be_truncated: true },
 
+  // One valid case per family whose body avoids the other families' anchor
+  // literals, so each family's gate is exercised on its own.
+  { name: "aws access key with a numeric body", input: "AKIA0123456789ABCDEF" },
+  { name: "private key header without the common shape", input: "-----BEGIN X PRIVATE KEY-----" },
+  { name: "fine-grained token whose body has no other github prefix", input: "token github_pat_11ABCDEFG0abcdefijklmnop here" },
+  { name: "truncated fine-grained token whose body has no other github prefix", input: "prefix\u061Cgithub_pat_aaaa", may_be_truncated: true },
+  { name: "slack token whose body has no other family prefix", input: "xoxb-1234567890abcdefijklmnop" },
+  { name: "anthropic key whose body has no other family prefix", input: "sk-ant-01XY2Z3wV4uT5sR6qP7nM8" },
+  { name: "openai key whose body has no other family prefix", input: "sk-01XY2Z3wV4uT5sR6qPnM" },
+  { name: "npm token whose body has no other family prefix", input: "npm_0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ" },
+  { name: "password assignment with a mixed-case keyword", input: "PassWord=pA7!cV2@kL9" },
+  { name: "credential assignment with an uppercase keyword", input: "API-KEY: abc12345" },
+
+  // Truncated credential fragments.
+  { name: "truncated credential fragment after a no-break space", input: "prefix\u061Ctoken:\u00A0\"tK8", may_be_truncated: true },
+  { name: "truncated bearer value at end of input", input: "Authorization: Bearer abc", may_be_truncated: true },
+
   // Non-ASCII text around a token.
   { name: "indonesian prose around a password assignment", input: "simpan password=pA7!cV2@kL9 dengan aman" },
   { name: "indonesian prose around an aws key", input: "kunci AKIAABCDEFGHIJKLMNOP jangan disebar" },

@@ -1,7 +1,11 @@
 //! Allowlisted hook payload parsing.
 //!
 //! Only the fields in [`HookEvent`] survive; everything else from the hook
-//! payload (prompts, commands, diffs) is dropped before serialization.
+//! payload (prompts, diffs, and any tool input that is not captured below) is
+//! dropped before serialization. Bash `command` and the tool `description` are
+//! captured through [`bound_tool_text`]: redacted, controls mapped to spaces,
+//! at most [`TOOL_TEXT_MAX_CHARS`](crate::redact::TOOL_TEXT_MAX_CHARS)
+//! characters, and absent when the `desk/tool-text-off` marker exists.
 
 use serde::{Deserialize, Serialize};
 
