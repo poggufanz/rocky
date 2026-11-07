@@ -1053,16 +1053,18 @@ const DEFAULT_SMOKE_LINES = (rockyHome: string): string[] => [
  * hung. Anti-hang only: no assertion reads this value as a timing claim; it
  * exists so a stuck session fails the test instead of stalling the suite.
  *
- * Sized from measured contention, not guessed. The denylist session on
- * Windows PowerShell 5.1 took at most 2086 ms idle (N=30) and 2782 ms with 12
- * CPU burners spread over all 12 logical CPUs (N=30). With the same 12
- * burners and the session confined to a single CPU it took up to 19423 ms
- * (N=13, 9.3x idle), and every one of those runs exited with correct results;
- * PowerShell 7.x peaked at 21106 ms under that load, so the old 20 s bound
- * failed sessions that were merely slow. 3 x 19423 ms is 58.3 s, so the guard
- * is max(60 s, 3 x that) = 60 s.
+ * Shared by the Windows PowerShell 5.1 and PowerShell 7.x tests, so it is
+ * sized from the slower host under measured contention, not guessed. The
+ * denylist session took at most 2086 ms (5.1) and 2143 ms (7.x) idle, and
+ * 2782 ms and 6326 ms with 12 CPU burners spread over all 12 logical CPUs
+ * (N=30 each). With the same 12 burners and the session confined to a single
+ * CPU it took up to 19423 ms (5.1) and 21106 ms (7.x) (N=13 each, 9.3x and
+ * 9.8x idle), and every one of those runs exited with correct results, so
+ * the old 20 s bound failed sessions that were merely slow. E is the larger,
+ * 21106 ms; 3 x E is 63.3 s, so the guard is max(60 s, 3 x E) rounded up to a
+ * whole second = 64 s.
  */
-const SESSION_HANG_GUARD_MS = 60_000;
+const SESSION_HANG_GUARD_MS = 64_000;
 
 function spawnAndFeed(exe: string, rockyHome: string, shim: string, lines?: string[], intervalMs = 400): Promise<FeedResult> {
   return new Promise((resolve) => {
@@ -1784,10 +1786,11 @@ async function realHostSpeechRoundTripSmoke(t: TestContext, exe: string): Promis
     // Integration exception: bounds a real interactive host process that
     // fake timers cannot drive; the kill below is the hang guard, not a
     // guessed settle delay.
+    // Shared hang bound: on one loaded CPU, shutdown after `exit` alone took 12 to 18 s across both hosts.
     const guard = setTimeout(() => {
       timedOut = true;
       try { child.kill("SIGKILL"); } catch { /* best effort */ }
-    }, 15_000);
+    }, SESSION_HANG_GUARD_MS);
     try {
       await exited;
     } finally {
