@@ -648,9 +648,12 @@ fn removed_replayed_child_reaches_the_desk() {
     wait_pipe(home.path(), &mut second);
     let mut client = connect(&pipe_name(home.path()));
     let first_snapshot = client.hello_subscribe();
-    let snapshot = snapshot_until(&mut client, first_snapshot, "replayed child", |m| {
-        matches!(m, ServerMsg::Snapshot { agents, .. } if agents.iter().any(|a| a.key == child))
-    });
+    let snapshot = snapshot_until(
+        &mut client,
+        first_snapshot,
+        "replayed child",
+        |m| matches!(m, ServerMsg::Snapshot { agents, .. } if agents.iter().any(|a| a.key == child)),
+    );
     match snapshot {
         ServerMsg::Snapshot { agents, .. } => {
             assert_eq!(
