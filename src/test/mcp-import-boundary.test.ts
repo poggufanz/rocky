@@ -171,7 +171,7 @@ test("MCP source graph reaches only explicitly allowlisted read-only modules; wr
     "mcp/server.ts",
     "mcp/stdio.ts",
     "mcp/tools.ts",
-    // Listening v1 read-only projection side (spec §9): tools import only
+    // Listening v1 read-only projection side: tools import only
     // these. graph-store and event-log-read project durable state,
     // repo-consent-read gates on explicit consent. Writer modules
     // (event-log, consent, collector, watcher, hook-ingress) stay out.

@@ -8,7 +8,7 @@
  *    Windows, see `ui/rocky.ts`)
  *  - `rocky hook install|uninstall|status` for both Bash (`.bashrc`) and
  *    PowerShell (`$PROFILE`, both Windows PowerShell and PowerShell 7 when
- *    detected — Task 4)
+ *    detected)
  *
  * `.bashrc`/`$PROFILE` are user startup state: every mutation goes through
  * the strict byte parser in `core/hook-block.ts` and the recoverable

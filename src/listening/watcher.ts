@@ -1,5 +1,5 @@
 /**
- * Consented project watcher: baseline + bounded reconciliation (spec §6).
+ * Consented project watcher: baseline + bounded reconciliation.
  * Proves a file changed inside an allowed root; never identifies the
  * author or process. Every snapshot is redacted before persistence.
  * Fail-open: every doubt becomes a gap entry, never a throw.

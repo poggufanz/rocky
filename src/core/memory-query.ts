@@ -27,7 +27,7 @@ import type { FailureRecord, FixRecord, GuardRecord, LinkBasis, LinkConfidence, 
 
 export interface RecallQuery { query: string; limit?: number; cwd?: string; now?: number }
 /**
- * `possible` is a CLI-display-only hint (§3 Fix 1): the top weak
+ * `possible` is a CLI-display-only hint: the top weak
  * `AssociationRecord` candidate for `failure` when no `FixRecord` exists.
  * It is intentionally excluded from `src/mcp/privacy.ts` projection —
  * `SourceHit`/`snapshotSourceHit` there copy only `failure`/`fix` through an
@@ -1397,13 +1397,13 @@ export interface PossibleFix {
 }
 
 /**
- * Weak-evidence companion to `getFix` (spec §3 Fix 1): surfaces
+ * Weak-evidence companion to `getFix`: surfaces
  * `AssociationRecord` candidates linked to `failure` when no `FixRecord`
  * exists yet. Pure read — writes nothing, touches no pending marker,
  * changes no `stats` number. Newest first, tie-broken by `linkBasisRank`
  * (lower/stronger wins), capped at 3.
  *
- * NOTE for `rocky brief` (roadmap §8b): the "failure/fix linked from
+ * NOTE for `rocky brief`: the "failure/fix linked from
  * memory within window" section of `brief` must read through this function
  * rather than `FixRecord` alone, so association-only evidence is not
  * silently dropped there either.
@@ -1417,7 +1417,7 @@ export function possibleFixesForFailure(
   for (const record of uniqueRecords(records)) {
     if (record.kind !== "association" || !isOperationalMemoryRecord(record, now)) continue;
     const link = record.links.find((entry) => entry.id === failure.id);
-    // §3 allows a match through either field; `links` carries the basis, so a
+    // A match through either field counts; `links` carries the basis, so a
     // candidate found only via `candidateFailureIds` falls to the weakest
     // (unrecognized) rank rather than inventing a stronger one.
     if (link === undefined && !record.candidateFailureIds.includes(failure.id)) continue;

@@ -697,10 +697,9 @@ else
 fi
 
 # --- hook speech: a failing command's speech file is printed and removed ----
-# Spec §6 (Ruling 2): a failing command produces a speech file, the next
-# prompt prints it and removes it, and a name absent from the session array
-# is left untouched. Fixtures use a separate real home, mirroring the label
-# fixtures above.
+# A failing command produces a speech file, the next prompt prints it and
+# removes it, and a name absent from the session array is left untouched.
+# Fixtures use a separate real home, mirroring the label fixtures above.
 SPEECH_HOME="$TMP/speech-home"
 SPEECH_DIR="$SPEECH_HOME/hook-speech"
 mkdir -p "$SPEECH_DIR"

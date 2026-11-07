@@ -1585,8 +1585,8 @@ export function createClaudeCodeAdapter(
         operation === "configure" ? registration : undefined);
     }
     // Contract: this selector deliberately does not call `audited.guard.unchanged()`.
-    // For the pathname it can actually claim (the Task 1 recovery artifact, or
-    // else the stage), the bracketing `authoritativeStagePath`/
+    // For the pathname it can actually claim (the transaction's recovery
+    // artifact, or else the stage), the bracketing `authoritativeStagePath`/
     // `authoritativeRecoveryPath` pathname->inode proofs are the stronger check;
     // `audited.guard` proves stage *contents*, which this string never asserts,
     // and it is undefined on most of the branches that report a stage. Every

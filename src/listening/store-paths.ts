@@ -4,7 +4,7 @@ import { resolveRockyPaths } from "../core/state-paths.js";
 import { canonicalPath } from "../core/memory-read.js";
 
 /**
- * Pure listening store-path derivation (spec §7). Zero node:fs imports:
+ * Pure listening store-path derivation. Zero node:fs imports:
  * computing a path never touches the disk. eviction/compaction lives in
  * event-log.ts; reads live in event-log-read.ts.
  */

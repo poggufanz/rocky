@@ -315,9 +315,9 @@ function captureGitAnchor(
  * Notify-lane rationale write, shared by `generic` and (additively) by
  * `claude-code`/`codex`. Argv-only: no stdin, no payload parsing. A missing
  * or blank `--rationale` is logged and skipped, never thrown — the caller's
- * fail-open contract stays intact either way. Links via the Task 10
- * weak-link rule (nearest same-cwd failure/fix in window); no match writes
- * an honest unlinked record rather than guessing.
+ * fail-open contract stays intact either way. Links via the weak-link
+ * rule (`weakLinkFor`: nearest same-cwd failure/fix in window); no match
+ * writes an honest unlinked record rather than guessing.
  */
 function writeNotifyRationale(agent: "claude-code" | "codex" | "generic", deps: AgentHookDeps, paths: RockyPaths): void {
   try {

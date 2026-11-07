@@ -9,7 +9,7 @@ import { recordRationale } from "../../core/memory.js";
 export interface CaptureResult { written: number; unlinked: number; skipped: string[] }
 
 /**
- * Listening cutover (spec §4): the legacy passive pull must freeze for
+ * Listening cutover: the legacy passive pull must freeze for
  * Listening-seeded hosts so raw reasoning never copies into the graph.
  * `recordRationale` stays the memory.jsonl writer; Listening reads only
  * verified hook ingress, never this lane. `hook_policy_reason` (a hook
@@ -22,7 +22,7 @@ export const LEGACY_RATIONALE_PULL_FROZEN_FOR_LISTENING = false;
  * Weak-link window: an event weak-links to the nearest failure/fix in the
  * same cwd within this many ms of the event's timestamp. Exported so other
  * lanes (e.g. the notify capture path) reuse this exact rule instead of
- * re-deriving it — see the Task 12 brief.
+ * re-deriving it.
  */
 export const WEAK_LINK_WINDOW_MS = 10 * 60 * 1000;
 
@@ -87,7 +87,7 @@ function structuralLinkFor(
 
 /**
  * Nearest failure/fix in `cwd`, within `WEAK_LINK_WINDOW_MS` of `ts`, using
- * only evidence at or before `now`. Exported so Task 12's notify lane
+ * only evidence at or before `now`. Exported so the notify lane
  * reuses this exact window rule instead of re-deriving it.
  */
 export function weakLinkFor(

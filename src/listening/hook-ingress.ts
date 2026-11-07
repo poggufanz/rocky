@@ -1,5 +1,5 @@
 /**
- * One-shot native hook ingress (spec §7). Installed as a static
+ * One-shot native hook ingress. Installed as a static
  * command/argv the host validates; payload arrives only on stdin with a
  * size/deadline cap through an allowlist parser. No shell interpolation,
  * no PATH launcher lookup, fail-open with empty stdout, never throws.

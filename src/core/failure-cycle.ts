@@ -245,8 +245,8 @@ export function saveCycleState(stateFile: string, state: ReadonlyMap<string, Cyc
 
 /**
  * One-line gate/CLI nudge, or undefined when there is no loop to name.
- * Never throws. Mirrors the
- * `clarityNudgeLine` advisory rendering pattern from Task 1.
+ * Never throws. Mirrors the `clarityNudgeLine` advisory rendering pattern
+ * in `prompt-clarity.ts`.
  */
 export function cycleNudgeLine(detected: unknown): string | undefined {
   try {
@@ -267,9 +267,9 @@ export function cycleClusterLine(clusters: number): string {
 }
 
 /**
- * Detail lines for CLI output; the advisory rendering pattern Task 1's
- * `renderClarityCard` established. The cluster line is a count only — it
- * names no cause for the repeats. Never throws.
+ * Detail lines for CLI output; follows the advisory rendering pattern of
+ * `renderClarityCard` in `prompt-clarity.ts`. The cluster line is a count
+ * only — it names no cause for the repeats. Never throws.
  */
 export function renderCycleCard(count: number, clusters: number): string[] {
   try {

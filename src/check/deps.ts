@@ -74,7 +74,7 @@ export function newDependencyNames(oldJson: string | null, newJson: string | nul
 
 /**
  * Parses committed package-lock content into exact package keys. Callers must
- * obtain the text themselves (Task 12 uses `git show <head>:package-lock.json`).
+ * obtain the text themselves (`rocky check` uses `git show <head>:package-lock.json`).
  */
 export function parseLockfilePackageKeys(lockfileJson: string | null): LockfilePackageKeys {
   const parsed = parseJsonRecord(lockfileJson);

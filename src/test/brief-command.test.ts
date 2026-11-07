@@ -314,7 +314,7 @@ test("briefCommand's why annotation prefers the highest-fidelity linked rational
     // Older but raw fidelity: must still win display over a newer,
     // lower-fidelity capture of the same failure. Fidelity has no
     // correlation with recency — the four capture lanes fire independently
-    // and asynchronously (design spec section 4).
+    // and asynchronously.
     const rawOlder = {
       kind: "rationale", id: "fidelity-r-raw", ts: now - 1500, v: 1, cwd: dir,
       agent: "human", rationale_fidelity: "raw", source: "log-thinking",

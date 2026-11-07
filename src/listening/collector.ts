@@ -1,5 +1,5 @@
 /**
- * Single-owner collector lease (spec §3). GUI-foreground and MCP-stdio
+ * Single-owner collector lease. GUI-foreground and MCP-stdio
  * race for one owner per repo; the loser reads durable state only.
  * Ownership hands off after stop/crash without a daemon: the next
  * process checks the durable lease, steals when expired or owner-dead,

@@ -1014,7 +1014,7 @@ test("recovery resolves an orphaned published transaction directory without touc
   assert.deepEqual(readFileSync(path), original, "unrelated target bytes are never touched");
 });
 
-test("the complete-but-unrecorded branch refuses when displaced is not a plain regular file (M3)", (t) => {
+test("the complete-but-unrecorded branch refuses when displaced is not a plain regular file", (t) => {
   if (skipIfSymlinkUnavailable(t)) return;
   const directory = temporaryDirectory(t);
   const path = join(directory, "displaced-symlink.bin");
@@ -1037,7 +1037,7 @@ test("the complete-but-unrecorded branch refuses when displaced is not a plain r
 
   const recovery = recoverFileTransaction(path);
 
-  assert.equal(recovery.status, "manual", "a symlinked displaced is not a proven backup; must not commit (M3)");
+  assert.equal(recovery.status, "manual", "a symlinked displaced is not a proven backup; must not commit");
   assert.equal(lstatSync(path).nlink, 2, "nothing was mutated");
 });
 

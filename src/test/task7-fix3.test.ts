@@ -39,7 +39,7 @@ function memoryWith(overrides: Partial<MemoryQueries>): MemoryQueries {
 }
 
 function freshPaths(): RockyPaths {
-  const home = mkdtempSync(join(tmpdir(), "rocky-task7-fix3-"));
+  const home = mkdtempSync(join(tmpdir(), "rocky-coverage-fix3-"));
   return resolveRockyPaths({ ROCKY_HOME: home });
 }
 

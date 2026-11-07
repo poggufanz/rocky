@@ -22,7 +22,7 @@ import { tmpdir } from "node:os";
 import { test } from "node:test";
 
 function freshPaths(): RockyPaths {
-  const home = mkdtempSync(join(tmpdir(), "rocky-task7-fix7-"));
+  const home = mkdtempSync(join(tmpdir(), "rocky-coverage-fix7-"));
   return resolveRockyPaths({ ROCKY_HOME: home });
 }
 

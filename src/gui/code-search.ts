@@ -31,7 +31,7 @@ import {
 } from "../core/teach-ladder.js";
 import type { MemoryRecord } from "../core/memory-read.js";
 
-/** Caps (spec §2.7): named, bounded, disclosed — never an unbounded loop. */
+/** Caps: named, bounded, disclosed — never an unbounded loop. */
 export const CODE_MAX_ROUNDS = 3;
 export const CODE_MAX_CANDIDATE_FILES = 40;
 export const CODE_MAX_EXCERPTS = 3;
@@ -50,7 +50,7 @@ const CODE_MAX_GREP_FILES = 20;
 const CODE_WINDOWS_PER_FILE = 2;
 
 /**
- * Disclosures (spec §2.9). Plain statements, no emoji; never blank. A code
+ * Disclosures: plain statements, no emoji; never blank. A code
  * answer is either the model's grounded paragraph or a server-built line
  * naming the quotes, and a disclosure always says what was not checked.
  */
@@ -255,7 +255,7 @@ export function splitCodePrefix(message: string): CodeQuerySplit {
 }
 
 /**
- * Spec §2.3's signal table. The intent words (`where is`, `defined`, `config`,
+ * The signal table for code queries. The intent words (`where is`, `defined`, `config`,
  * `schema`, …) fire only together with a path, position, or symbol token, so
  * `where is the config` stays memory-only while `where is loadConfig defined`
  * scans. A bare question word, a bare error string, and a bare command fire

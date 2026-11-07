@@ -3241,7 +3241,7 @@ function listenConsentButton(action, text, repo) {
   });
   return btn;
 }
-// One explicit click grants; picking a repo never does (spec §3, §8).
+// One explicit click grants; picking a repo never does.
 function listenDiskText(usage) {
   if (!usage || typeof usage.budgetBytes !== "number") return "";
   const mib = (bytes) => `${Number((bytes / 1048576).toFixed(1))} MiB`;

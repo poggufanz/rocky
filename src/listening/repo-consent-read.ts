@@ -1,5 +1,5 @@
 /**
- * Read-only repo-consent checks (spec §3). This module is MCP-safe: it
+ * Read-only repo-consent checks. This module is MCP-safe: it
  * imports only node:fs READ functions plus pure helpers. The write path
  * lives in consent.ts, which MCP must never import. See also
  * src/test/mcp-import-boundary.test.ts.

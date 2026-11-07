@@ -1,5 +1,5 @@
 /**
- * Write-only repo-consent grants (spec §3 + setup §7). The read side lives
+ * Write-only repo-consent grants. The read side lives
  * in repo-consent-read.ts, which MCP may import. This module MCP must
  * never import: it mutates the consent store. GUI Add/Revoke and the setup
  * CLI share this backend; opening or selecting a repo never grants.

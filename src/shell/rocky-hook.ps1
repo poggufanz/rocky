@@ -8,12 +8,10 @@
 # the user's own real error.
 #
 # Mechanism: overriding `prompt`, paired with `Get-History -Count 1`. Proven
-# in the Task 3 spike to fire exactly once per completed interactive
-# statement on both Windows PowerShell 5.1 and PowerShell 7.x, with `$?`
-# reliable only when captured as prompt's first statement. See
-# docs/superpowers/validation/2026-08-17-powershell-hook-spike.md and this
-# release's task-4-report.md for the empirical basis of every ordering
-# decision below.
+# empirically to fire exactly once per completed interactive statement on
+# both Windows PowerShell 5.1 and PowerShell 7.x, with `$?` reliable only
+# when captured as prompt's first statement. Every ordering decision below
+# rests on that same empirical testing.
 #
 # v1 scope (Ruling 4): passive observation only. `prompt` only sees a command after
 # it has already run, so there is no PowerShell equivalent of the Bash
@@ -488,10 +486,9 @@ function global:prompt {
                         }
                     } else {
                         # $? is the sole failure gate -- confirmed empirically
-                        # (task-4-report.md, real interactive PowerShell 5.1
-                        # and 7.x) to be correct for both cmdlet and native
-                        # failure/success alike (matches the spike's own §7.1
-                        # data table). $LASTEXITCODE is used only AFTER a
+                        # (real interactive PowerShell 5.1 and 7.x) to be
+                        # correct for both cmdlet and native failure/success
+                        # alike. $LASTEXITCODE is used only AFTER a
                         # failure is already established, to recover a real
                         # numeric exit code when this failure was plausibly a
                         # native one -- never to independently decide
@@ -501,10 +498,10 @@ function global:prompt {
                         # stays stale from an earlier native command long
                         # after a later, wholly successful cmdlet, and that
                         # draft wrongly called _hookfail on every such
-                        # success. $LASTEXITCODE -ne $null guards the same
-                        # fresh-session gotcha the spike found (§8): it starts
-                        # $null before any native command has ever run, and
-                        # `$null -ne 0` is $true in PowerShell.
+                        # success. $LASTEXITCODE -ne $null guards the
+                        # fresh-session gotcha where it starts $null before
+                        # any native command has ever run, and `$null -ne 0`
+                        # is $true in PowerShell.
                         $__rockyFailed = -not $__rockyQ
                         if ($__rockyFailed) {
                             $__rockyNativeFailed = ($__rockyExit -ne $null) -and ($__rockyExit -ne 0)
@@ -533,24 +530,23 @@ function global:prompt {
     $global:LASTEXITCODE = $__rockyExit
 
     # 4. Restore $? as the ABSOLUTE LAST statement before the return value.
-    #    Direct assignment to $? is impossible on either host (spike §7.3:
-    #    a parse-time failure on Windows PowerShell 5.1, a recoverable
-    #    non-terminating error on PowerShell 7.x -- neither usable). The
-    #    only way left to force it back to False is a real, suppressed
-    #    non-terminating error, which pushes one synthetic entry onto
-    #    $Error ahead of the user's own. Disclosed, accepted trade-off
-    #    (Ruling 2) -- `rocky hook status` and README name it. The message
-    #    below names Rocky so a user who inspects $Error[0] is not left
-    #    chasing a phantom failure.
+    #    Direct assignment to $? is impossible on either host (a parse-time
+    #    failure on Windows PowerShell 5.1, a recoverable non-terminating
+    #    error on PowerShell 7.x -- neither usable). The only way left to
+    #    force it back to False is a real, suppressed non-terminating
+    #    error, which pushes one synthetic entry onto $Error ahead of the
+    #    user's own. Disclosed, accepted trade-off -- `rocky hook status`
+    #    and README name it. The message below names Rocky so a user who
+    #    inspects $Error[0] is not left chasing a phantom failure.
     if (-not $__rockyQ) {
         Write-Error 'rocky-hook internal $? restore (harmless) -- see: rocky hook status' -ErrorAction SilentlyContinue 2>$null
     }
 
     # 5. Return the captured variable, not a literal -- verified empirically
-    #    (task-4-report.md) not to disturb $? on either host: evaluating a
-    #    bare variable/literal expression is not a command invocation, so it
-    #    does not touch $?. The spike only proved this shape with a string
-    #    literal; this file needed its own evidence for a variable, since it
-    #    must hold the wrapped prompt's own output.
+    #    not to disturb $? on either host: evaluating a bare variable/literal
+    #    expression is not a command invocation, so it does not touch $?.
+    #    Earlier testing only proved this shape with a string literal; this
+    #    file needed its own evidence for a variable, since it must hold the
+    #    wrapped prompt's own output.
     $__rockyResult
 }

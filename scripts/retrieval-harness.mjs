@@ -1,5 +1,5 @@
 /**
- * Dev measurement harness for the retrieval-quality spec (§3 / §10).
+ * Dev measurement harness for knowledge-search retrieval quality.
  * Not part of `npm test`. Reads the live memory file (read-only, honoring
  * ROCKY_HOME) and prints the top knowledge-search hits for the five
  * reference queries, so any retrieval change can show its ranking delta

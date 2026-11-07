@@ -15,7 +15,7 @@ import { logHookError } from "../commands/agent-hook.js";
 import { skipIfSymlinkUnavailable } from "./symlink-capability.js";
 
 function freshPaths(): RockyPaths {
-  const home = mkdtempSync(join(tmpdir(), "rocky-task7-fix6-"));
+  const home = mkdtempSync(join(tmpdir(), "rocky-coverage-fix6-"));
   return resolveRockyPaths({ ROCKY_HOME: home });
 }
 

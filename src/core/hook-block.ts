@@ -154,9 +154,7 @@ export function removeHookBlockBytes(content: Buffer): Buffer {
  * The PowerShell hook line, one physical line so the byte-parser story above
  * stays as simple as the Bash one. Same default-with-override for
  * `ROCKY_HOME`, same "only source if the file exists" safety as the Bash
- * line — verified against a scratch PowerShell profile file in the Task 3
- * spike (`docs/superpowers/validation/2026-08-17-powershell-hook-spike.md`
- * §3/§7.8).
+ * line — verified against a scratch PowerShell profile file.
  */
 export const POWERSHELL_HOOK_LINE =
   "$__rockyHome = $(if ($env:ROCKY_HOME) { $env:ROCKY_HOME } else { Join-Path $HOME '.rocky' }); "

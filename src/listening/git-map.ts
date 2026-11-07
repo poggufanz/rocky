@@ -1,5 +1,5 @@
 /**
- * Exact Git mapping lane (spec §6). Maps file_version / diff_hunk to a
+ * Exact Git mapping lane. Maps file_version / diff_hunk to a
  * commit only when path + content + revision match exactly. Anything else
  * — rebase, rename, squash, missing baseline, redaction mismatch — is
  * unknown, with a bounded temporal candidate offered separately.

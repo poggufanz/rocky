@@ -1735,7 +1735,7 @@ test("finalAuthority closing sweep rejects a same-bytes displaced file substitut
           if (committedManifestObservations === 2) finalGuardArmed = true;
         }
       } catch {
-        // Only exact committed Task 1 manifest observations arm the race.
+        // Only exact committed transaction manifest observations arm the race.
       }
     }
     return value;
@@ -1845,7 +1845,7 @@ test("target guard refuses to bind publication identity from a cold already-comm
   const setup = fixture(t, { mcpServers: {} });
   const originalMode = statSync(setup.configPath).mode & 0o777;
 
-  // A fake Task 1 writer that completes the publish entirely on disk
+  // A fake file-transaction writer that completes the publish entirely on disk
   // (including a genuine "committed" transaction directory) without ever
   // calling the supplied guard. This makes the adapter's own post-write
   // `guard.unchanged()` check the first-ever observer of the transaction,
@@ -2100,7 +2100,7 @@ test("post-exact stage observation revalidates publication and recovery authorit
                 committedObserved = true;
               }
             } catch {
-              // Only the exact committed Task 1 manifest arms the race.
+              // Only the exact committed transaction manifest arms the race.
             }
           }
           return value;
@@ -2263,7 +2263,7 @@ test("final target observation stays paired with the exact displaced recovery in
               if (committedManifestObservations === 2) finalGuardArmed = true;
             }
           } catch {
-            // Only exact committed Task 1 manifest observations arm the race.
+            // Only exact committed transaction manifest observations arm the race.
           }
         }
         return value;
@@ -2428,7 +2428,7 @@ test("successful final authority reports only its paired recovery after a closin
               if (committedManifestObservations === 2) finalCapabilityArmed = true;
             }
           } catch {
-            // Only the exact committed Task 1 manifest arms the closing sweep.
+            // Only the exact committed transaction manifest arms the closing sweep.
           }
         }
         return value;
@@ -2528,7 +2528,7 @@ test("successful final authority reports only its paired recovery after a closin
   }
 });
 
-test("post-publication recovery-required reports no rebound raw Task 1 path", async (t) => {
+test("post-publication recovery-required reports no rebound raw recovery path", async (t) => {
   for (const operation of ["configure", "remove"] as const) {
     await t.test(operation, async (st) => {
       if (skipUnverifiedRealTransactionFlowOnWin32(st)) return;

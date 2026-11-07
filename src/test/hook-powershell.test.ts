@@ -1,9 +1,8 @@
 /**
- * PowerShell hook install/uninstall/status (spec §5 "Test wajib" 1-6,
- * task-4-brief). Fast tests (1-3, plus a light status/corrupt/idempotency
- * pass) exercise `hookInstall`/`hookUninstall`/`hookStatus`'s PowerShell
- * branch directly against an injectable profile path via
- * `ROCKY_TEST_POWERSHELL_HOSTS` — the PowerShell analogue of
+ * PowerShell hook install/uninstall/status. Fast tests (plus a light
+ * status/corrupt/idempotency pass) exercise `hookInstall`/`hookUninstall`/
+ * `hookStatus`'s PowerShell branch directly against an injectable profile
+ * path via `ROCKY_TEST_POWERSHELL_HOSTS` — the PowerShell analogue of
  * `hook-install.test.ts`'s `HOME`/`USERPROFILE` override for `.bashrc` — so
  * none of them ever reach a real `$PROFILE`. The underlying transaction
  * safety (settle/topology-refusal/publish) is the exact same audited
@@ -12,11 +11,10 @@
  * (codec selection, per-host labels, asset name).
  *
  * Real-host tests (skip cleanly, with a stated reason, when the host binary
- * is absent) cover spec test 6 and stand as the regression guard for three
- * bugs this release's implementer found and fixed by running the actual
- * shipped `rocky-hook.ps1` against real `powershell.exe`/`pwsh.exe`, not a
- * script-mode approximation — see task-4-report.md for the full empirical
- * record:
+ * is absent) drive the shipped hook through a real PowerShell session and
+ * stand as the regression guard for three bugs found and fixed by running
+ * the actual shipped `rocky-hook.ps1` against real `powershell.exe`/
+ * `pwsh.exe`, not a script-mode approximation:
  *   1. Invoking the captured inner-`prompt` FunctionInfo's own `.ScriptBlock`
  *      directly (`&`/`.Invoke()`) hangs the shell dead, or crashes it with
  *      StackOverflowException — fixed by rebuilding a fresh, unbound
@@ -1007,19 +1005,17 @@ test(
 );
 
 /**
- * The regression guard for the three bugs task-4-report.md records finding
- * by running the real, built rocky-hook.ps1 against a real interactive host:
- * the inner-prompt recursion/hang, the $LASTEXITCODE-overrides-$? false
- * positive, and Windows PowerShell 5.1's embedded-quote argument-splitting
- * bug. Drives a real interactive session (RedirectStandardInput over a plain
- * pipe -- the same technique the Task 3 spike used, disclosed as harness-only
- * for the five items still UNVERIFIED, not for this) through a failing
- * cmdlet, a failing native command, and a successful cmdlet, then asserts on
- * the *effects* a real user would see: $?/$LASTEXITCODE unchanged from what
- * the unhooked shell would show, and memory.jsonl holding exactly the right
- * records with no false positive for the successful command. Hard-timeout
- * bounded so a reintroduced hang fails this test in seconds instead of
- * hanging the suite.
+ * The regression guard for the three bugs found by running the real, built
+ * rocky-hook.ps1 against a real interactive host: the inner-prompt
+ * recursion/hang, the $LASTEXITCODE-overrides-$? false positive, and Windows
+ * PowerShell 5.1's embedded-quote argument-splitting bug. Drives a real
+ * interactive session (RedirectStandardInput over a plain pipe) through a
+ * failing cmdlet, a failing native command, and a successful cmdlet, then
+ * asserts on the *effects* a real user would see: $?/$LASTEXITCODE unchanged
+ * from what the unhooked shell would show, and memory.jsonl holding exactly
+ * the right records with no false positive for the successful command.
+ * Hard-timeout bounded so a reintroduced hang fails this test in seconds
+ * instead of hanging the suite.
  */
 interface FeedResult {
   stdout: string;
@@ -1438,10 +1434,10 @@ test(
 );
 
 /**
- * Finding 4 (fix round 1) / spec §5 test 4: "a hook that fails midway does
- * not change the exit code of the user's command." Held by construction
- * (the outer try/catch), but never adversarially tested — this genuinely
- * injects a fault, rather than relying on construction. After dot-sourcing
+ * "A hook that fails midway does not change the exit code of the user's
+ * command." Held by construction (the outer try/catch), but never
+ * adversarially tested — this genuinely injects a fault, rather than
+ * relying on construction. After dot-sourcing
  * the real hook, `__rockySpawnDetached` (the one function that actually
  * touches `_hookfail`/`_hooksuccess`) is redefined to unconditionally
  * `throw`, with no inner catch of its own left to absorb it, so the
@@ -1484,7 +1480,7 @@ async function realHostFaultInjectionSmoke(t: TestContext, exe: string): Promise
 }
 
 test(
-  "an injected internal hook-body fault never changes the user's own exit code, Windows PowerShell 5.1 (Finding 4, spec §5 test 4)",
+  "an injected internal hook-body fault never changes the user's own exit code, Windows PowerShell 5.1",
   { skip: windowsPowerShellAvailable ? false : "Windows PowerShell is unavailable on this machine/platform" },
   async (t) => {
     await realHostFaultInjectionSmoke(t, "powershell.exe");
@@ -1492,7 +1488,7 @@ test(
 );
 
 test(
-  "an injected internal hook-body fault never changes the user's own exit code, PowerShell 7.x (Finding 4, spec §5 test 4)",
+  "an injected internal hook-body fault never changes the user's own exit code, PowerShell 7.x",
   { skip: realPwsh ? false : pwshSkipReason },
   async (t) => {
     await realHostFaultInjectionSmoke(t, realPwsh!);

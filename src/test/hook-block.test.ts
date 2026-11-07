@@ -1314,7 +1314,7 @@ test("hook status never says bashrc is gone or names a remedy while a live symli
   const output = sandbox.stderr();
   assert.ok(
     !output.includes(".bashrc is gone") && !output.includes(".bashrc was gone"),
-    "bashrc is not gone — the symlink still resolves to real content (R1)",
+    "bashrc is not gone — the symlink still resolves to real content",
   );
   assert.ok(!output.includes("restore by copying"), "no remedy verb is ever spoken from this stop (round 9 primary direction)");
   assert.ok(!/\byourself\b/.test(output), "no instruction telling the user what to type");

@@ -16,7 +16,7 @@ import { createToolRegistry } from "../mcp/tools.js";
 import { projectKnowledgeHits, projectTriple } from "../mcp/privacy.js";
 
 function freshPaths(t: TestContext): RockyPaths {
-  const home = mkdtempSync(join(tmpdir(), "rocky-task7-fix2-"));
+  const home = mkdtempSync(join(tmpdir(), "rocky-coverage-fix2-"));
   t.after(() => rmSync(home, { recursive: true, force: true }));
   return resolveRockyPaths({ ROCKY_HOME: home });
 }

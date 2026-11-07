@@ -1,5 +1,5 @@
 /**
- * Rebuildable graph projection (spec §5). Reads the durable log and emits
+ * Rebuildable graph projection. Reads the durable log and emits
  * nodes/edges with their source and link basis. Never writes truth.
  * MCP-safe: imports only types, store-paths, event-codec-side reads,
  * and the consent read side. No writer imports.

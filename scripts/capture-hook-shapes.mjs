@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// capture-hook-shapes.mjs — Claude Code hook fixture capture (Task 6).
+// capture-hook-shapes.mjs — Claude Code hook fixture capture.
 //
 // Modes:
 //   init <outDir> <hookExe>       write sandbox settings (plain + async)
