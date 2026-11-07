@@ -204,17 +204,25 @@ async function cmdRecord(outDir, hookExe) {
 // ---------------------------------------------------------------------------
 // finalize
 
-function homePrefixes(home = os.homedir()) {
-  const forms = [home, home.replace(/\\/g, '/')];
+// [prefix, placeholder] pairs, longest first. CLAUDE_CONFIG_DIR wins over the
+// home dir so a relocated Claude profile (e.g. a per-profile UUID path) never
+// lands in a committed fixture.
+function homePrefixes(home = os.homedir(), claudeConfig = process.env.CLAUDE_CONFIG_DIR) {
   const seen = new Set();
   const out = [];
-  for (const f of forms) {
-    if (f && !seen.has(f.toLowerCase())) {
-      seen.add(f.toLowerCase());
-      out.push(f);
+  for (const [base, ph] of [
+    [claudeConfig, '<CLAUDE_CONFIG>'],
+    [home, '<HOME>'],
+  ]) {
+    if (!base) continue;
+    for (const f of [base, base.replace(/\\/g, '/')]) {
+      if (!seen.has(f.toLowerCase())) {
+        seen.add(f.toLowerCase());
+        out.push([f, ph]);
+      }
     }
   }
-  return out.sort((a, b) => b.length - a.length);
+  return out.sort((a, b) => b[0].length - a[0].length);
 }
 
 function collectIds(records) {
@@ -249,9 +257,9 @@ function replaceInString(s, idPairs, homes) {
     if (raw.length >= MIN_SUBSTRING_ID_LEN && s.includes(raw)) s = s.split(raw).join(ph);
   }
   const low = s.toLowerCase();
-  for (const h of homes) {
+  for (const [h, ph] of homes) {
     if (low.startsWith(h.toLowerCase())) {
-      s = '<HOME>' + s.slice(h.length);
+      s = ph + s.slice(h.length);
       break;
     }
   }
@@ -430,6 +438,14 @@ function cmdSelfTest() {
   assert.equal(l3.recv_ms, 20);
   assert.equal(l3.reason, 'oversize');
   assert.deepStrictEqual(finalizeRecords([]), []);
+
+  // A Claude config dir under home maps to <CLAUDE_CONFIG>, not <HOME>.
+  const cfg = `${home}\\AppData\\profiles\\0000-uuid\\home`;
+  const [cfgLine] = finalizeRecords(
+    [{ v: 1, recv_ms: 1, kind: 'event', event: { transcript_path: `${cfg}\\projects\\x.jsonl` } }],
+    homePrefixes(home, cfg),
+  ).map((l) => JSON.parse(l));
+  assert.equal(cfgLine.event.transcript_path, '<CLAUDE_CONFIG>\\projects\\x.jsonl');
 }
 
 // ---------------------------------------------------------------------------

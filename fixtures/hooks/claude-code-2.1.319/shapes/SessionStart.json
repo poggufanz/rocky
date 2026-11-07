@@ -1,0 +1,9 @@
+{
+  "session_id": "string",
+  "transcript_path": "string",
+  "cwd": "string",
+  "scratchpad_dir": "string",
+  "hook_event_name": "string",
+  "source": "string",
+  "model": "string"
+}

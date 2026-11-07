@@ -1,0 +1,43 @@
+{
+  "agent_id": "string",
+  "agent_type": "string",
+  "cwd": "string",
+  "effort": {
+    "level": "string"
+  },
+  "hook_event_name": "string",
+  "permission_mode": "string",
+  "prompt_id": "string",
+  "scratchpad_dir": "string",
+  "session_id": "string",
+  "tool_input": {
+    "command": "string",
+    "content": "string",
+    "description": "string",
+    "file_path": "string",
+    "message": "string",
+    "new_string": "string",
+    "old_string": "string",
+    "path": "string",
+    "pattern": "string",
+    "prompt": "string",
+    "questions": [
+      {
+        "question": "string",
+        "header": "string",
+        "options": [
+          {
+            "label": "string",
+            "description": "string"
+          }
+        ],
+        "multiSelect": "boolean"
+      }
+    ],
+    "replace_all": "boolean",
+    "subagent_type": "string"
+  },
+  "tool_name": "string",
+  "tool_use_id": "string",
+  "transcript_path": "string"
+}

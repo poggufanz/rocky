@@ -1,0 +1,24 @@
+{
+  "background_tasks": [
+    {
+      "id": "string",
+      "type": "string",
+      "status": "string",
+      "description": "string",
+      "agent_type": "string"
+    }
+  ],
+  "cwd": "string",
+  "effort": {
+    "level": "string"
+  },
+  "hook_event_name": "string",
+  "last_assistant_message": "string",
+  "permission_mode": "string",
+  "prompt_id": "string",
+  "scratchpad_dir": "string",
+  "session_crons": [],
+  "session_id": "string",
+  "stop_hook_active": "boolean",
+  "transcript_path": "string"
+}
