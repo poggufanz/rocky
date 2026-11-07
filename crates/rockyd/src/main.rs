@@ -67,6 +67,15 @@ impl Shared {
         let mut repo_of = resolve_repo;
         replay(&self.history, &mut self.state, &mut self.gaps, &mut repo_of)
     }
+
+    /// Records every agent the desk can have been told about, so a later
+    /// removal can name it. Replay writes agents without an upsert broadcast;
+    /// call this after it.
+    fn remember_agents(&mut self) {
+        for agent in self.state.agents() {
+            self.last_known.insert(agent.key.clone(), agent);
+        }
+    }
 }
 
 /// One full snapshot, used by the subscriber closure and the startup broadcast.
@@ -181,6 +190,7 @@ fn main() {
             }
             let srcs = s.replay_history();
             ingest.seed_applied(&spool, &srcs);
+            s.remember_agents();
         } else if let Err(e) = s.history.set_enabled(false) {
             log.line(&format!("history disable failed: {e}"));
         }

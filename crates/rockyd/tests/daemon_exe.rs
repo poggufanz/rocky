@@ -593,6 +593,100 @@ fn restart_replays_history() {
 }
 
 #[test]
+fn removed_replayed_child_reaches_the_desk() {
+    let home = home();
+    let mut first = spawn_daemon(home.path());
+    wait_pipe(home.path(), &mut first);
+    let mut client = connect(&pipe_name(home.path()));
+    let _ = client.hello_subscribe();
+
+    run_hook(
+        home.path(),
+        r#"{"hook_event_name":"SessionStart","session_id":"r3","cwd":"C:\\r"}"#,
+    );
+    run_hook(
+        home.path(),
+        r#"{"hook_event_name":"UserPromptSubmit","session_id":"r3","cwd":"C:\\r"}"#,
+    );
+    run_hook(
+        home.path(),
+        r#"{"hook_event_name":"SubagentStart","session_id":"r3","cwd":"C:\\r","agent_id":"c1","agent_type":"Explore"}"#,
+    );
+    run_hook(
+        home.path(),
+        r#"{"hook_event_name":"SubagentStop","session_id":"r3","cwd":"C:\\r","agent_id":"c1","agent_type":"Explore"}"#,
+    );
+
+    // The child's Done upsert proves every earlier file was ingested into
+    // history before the kill.
+    let child = AgentKey {
+        session_id: "r3".into(),
+        agent_id: "c1".into(),
+    };
+    let start = Instant::now();
+    loop {
+        let msg: ServerMsg = decode(&client.read_line().unwrap()).unwrap();
+        if let ServerMsg::Status {
+            op: StatusOp::Upsert,
+            agent,
+        } = &msg
+            && agent.key == child
+            && agent.status == Status::Done
+        {
+            break;
+        }
+        assert!(start.elapsed() < GUARD, "SubagentStop upsert never arrived");
+    }
+
+    let _ = first.0.kill();
+    let _ = first.0.wait();
+    drop(client);
+
+    // Replay restores the finished child, and the startup snapshot tells the
+    // desk about it.
+    let mut second = spawn_daemon(home.path());
+    wait_pipe(home.path(), &mut second);
+    let mut client = connect(&pipe_name(home.path()));
+    let first_snapshot = client.hello_subscribe();
+    let snapshot = snapshot_until(&mut client, first_snapshot, "replayed child", |m| {
+        matches!(m, ServerMsg::Snapshot { agents, .. } if agents.iter().any(|a| a.key == child))
+    });
+    match snapshot {
+        ServerMsg::Snapshot { agents, .. } => {
+            assert_eq!(
+                agents.iter().find(|a| a.key == child).unwrap().status,
+                Status::Done
+            );
+        }
+        other => panic!("expected snapshot, got {other:?}"),
+    }
+
+    // A main prompt drops the finished child; the desk must be told to remove
+    // the row it learned from the snapshot.
+    run_hook(
+        home.path(),
+        r#"{"hook_event_name":"UserPromptSubmit","session_id":"r3","cwd":"C:\\r"}"#,
+    );
+    let start = Instant::now();
+    loop {
+        let msg: ServerMsg = decode(&client.read_line().unwrap()).unwrap();
+        if let ServerMsg::Status {
+            op: StatusOp::Remove,
+            agent,
+        } = &msg
+            && agent.key == child
+        {
+            assert_eq!(agent.status, Status::Done);
+            break;
+        }
+        assert!(
+            start.elapsed() < GUARD,
+            "Remove for the replayed child never arrived"
+        );
+    }
+}
+
+#[test]
 fn set_persists_broadcasts_and_syncs_marker() {
     let home = home();
     let mut first = spawn_daemon(home.path());
