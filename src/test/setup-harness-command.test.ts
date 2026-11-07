@@ -28,6 +28,8 @@ function deps(adapter: FakeAdapter, isTTY: boolean): SetupDependencies {
     nodePath: process.execPath,
     entryPath: process.execPath,
     rockyHome: "/tmp/rocky-harness-test",
+    // Explicit and empty: the settings target must never follow an ambient CLAUDE_CONFIG_DIR.
+    env: {},
     isTTY,
   };
 }

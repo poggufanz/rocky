@@ -54,6 +54,8 @@ function setupDependenciesFor(root: string, confirmation = true): SetupDependenc
     confirmation: { async confirm() { return confirmation; } },
     nodePath: process.execPath,
     entryPath: process.execPath,
+    // Explicit and empty: the settings target must never follow an ambient CLAUDE_CONFIG_DIR.
+    env: {},
   };
 }
 

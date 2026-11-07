@@ -478,6 +478,8 @@ test("dedicated setup branch installs only Claude hooks and never invokes MCP ad
     confirmation: { async confirm() { return true; } },
     nodePath: process.execPath,
     entryPath: process.execPath,
+    // Explicit and empty: the settings target must never follow an ambient CLAUDE_CONFIG_DIR.
+    env: {},
   };
   assert.equal(await setup(["--agent-hooks"], dependencies), 0);
   assert.deepEqual(calls, []);
@@ -518,6 +520,8 @@ test("agent-hook capability notice precedes consent and remains visible in statu
     },
     nodePath: process.execPath,
     entryPath: process.execPath,
+    // Explicit and empty: the settings target must never follow an ambient CLAUDE_CONFIG_DIR.
+    env: {},
   };
   try {
     assert.equal(await setup(["--agent-hooks"], dependencies), 0);
@@ -563,6 +567,8 @@ test("dedicated --yes agent-hook install still requires explicit consent", async
     },
     nodePath: process.execPath,
     entryPath: process.execPath,
+    // Explicit and empty: the settings target must never follow an ambient CLAUDE_CONFIG_DIR.
+    env: {},
   };
   let code: number;
   try {
@@ -673,6 +679,8 @@ function setupDependenciesFor(root: string, confirmation = true): SetupDependenc
     confirmation: { async confirm() { return confirmation; } },
     nodePath: process.execPath,
     entryPath: process.execPath,
+    // Explicit and empty: the settings target must never follow an ambient CLAUDE_CONFIG_DIR.
+    env: {},
   };
 }
 
