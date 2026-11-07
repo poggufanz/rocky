@@ -1048,6 +1048,22 @@ const DEFAULT_SMOKE_LINES = (rockyHome: string): string[] => [
   "exit",
 ];
 
+/**
+ * How long one scripted session may run before it is killed and reported as
+ * hung. Anti-hang only: no assertion reads this value as a timing claim; it
+ * exists so a stuck session fails the test instead of stalling the suite.
+ *
+ * Sized from measured contention, not guessed. The denylist session on
+ * Windows PowerShell 5.1 took at most 2086 ms idle (N=30) and 2782 ms with 12
+ * CPU burners spread over all 12 logical CPUs (N=30). With the same 12
+ * burners and the session confined to a single CPU it took up to 19423 ms
+ * (N=13, 9.3x idle), and every one of those runs exited with correct results;
+ * PowerShell 7.x peaked at 21106 ms under that load, so the old 20 s bound
+ * failed sessions that were merely slow. 3 x 19423 ms is 58.3 s, so the guard
+ * is max(60 s, 3 x that) = 60 s.
+ */
+const SESSION_HANG_GUARD_MS = 60_000;
+
 function spawnAndFeed(exe: string, rockyHome: string, shim: string, lines?: string[], intervalMs = 400): Promise<FeedResult> {
   return new Promise((resolve) => {
     const startedAt = Date.now();
@@ -1080,7 +1096,7 @@ function spawnAndFeed(exe: string, rockyHome: string, shim: string, lines?: stri
 
     // Hard-bounded: a reintroduced hang (the exact bug this test guards
     // against) must fail this test in seconds, not hang the whole suite.
-    const watchdog = setTimeout(() => finish(true), 20_000);
+    const watchdog = setTimeout(() => finish(true), SESSION_HANG_GUARD_MS);
     child.on("exit", () => finish(false));
     child.on("error", () => finish(false));
   });
@@ -1133,7 +1149,7 @@ function spawnAndFeedCapturingStderr(exe: string, rockyHome: string, shim: strin
       resolve({ stdout, stderr, timedOut, elapsedMs: Date.now() - startedAt, linesFed: index, linesTotal: lines.length });
     };
 
-    const watchdog = setTimeout(() => finish(true), 20_000);
+    const watchdog = setTimeout(() => finish(true), SESSION_HANG_GUARD_MS);
     child.on("exit", () => finish(false));
     child.on("error", () => finish(false));
   });
