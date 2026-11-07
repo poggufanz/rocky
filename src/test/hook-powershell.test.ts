@@ -1014,8 +1014,8 @@ test(
  * asserts on the *effects* a real user would see: $?/$LASTEXITCODE unchanged
  * from what the unhooked shell would show, and memory.jsonl holding exactly
  * the right records with no false positive for the successful command.
- * Hard-timeout bounded so a reintroduced hang fails this test in seconds
- * instead of hanging the suite.
+ * Hard-timeout bounded so a reintroduced hang fails this test within the
+ * guard bound instead of hanging the suite.
  */
 interface FeedResult {
   stdout: string;
@@ -1028,10 +1028,11 @@ interface FeedResult {
 }
 
 /**
- * Suffix for every hang-guard assertion: says how long the session ran, how
- * many scripted lines it had been given, and what it last printed, so a
- * tripped guard names where the session was sitting instead of only that it
- * tripped.
+ * Suffix for every hang-guard assertion. The feed timer writes each scripted
+ * line on its own schedule whether or not the session has read the previous
+ * one, so when the guard fires `fed` is always total/total and `elapsed` is
+ * about the guard bound. Neither tells a slow session from a stuck one. Only
+ * `stdout_tail`, the last 2000 characters the session printed, does.
  */
 function describeFeed(r: FeedResult): string {
   return `elapsed=${r.elapsedMs} fed=${r.linesFed}/${r.linesTotal} stdout_tail=${r.stdout.slice(-2000)}`;
@@ -1097,7 +1098,8 @@ function spawnAndFeed(exe: string, rockyHome: string, shim: string, lines?: stri
     };
 
     // Hard-bounded: a reintroduced hang (the exact bug this test guards
-    // against) must fail this test in seconds, not hang the whole suite.
+    // against) must fail this test within the guard bound, not hang the
+    // whole suite.
     const watchdog = setTimeout(() => finish(true), SESSION_HANG_GUARD_MS);
     child.on("exit", () => finish(false));
     child.on("error", () => finish(false));
