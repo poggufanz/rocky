@@ -24,7 +24,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;
 
-use regex::Regex;
+use regex_lite::Regex;
 
 /// Bytes of raw text inspected by [`bound_tool_text`].
 pub const TOOL_TEXT_SCAN_BYTES: usize = 4096;
@@ -108,18 +108,18 @@ const SECRET_DEFINITIONS: &[SecretDefinition] = &[
     },
     SecretDefinition {
         label: "password assignment",
-        source: r#"(?:(?:"(?i-u:password|secret)"|'(?i-u:password|secret)'|(?i-u:password|secret)))\s*[:=]\s*(?:"(?P<dq>[^'"\r\n]{4,})"|'(?P<sq>[^'"\r\n]{4,})'|(?P<uq>[^\s'"`,;]{4,}))"#,
+        source: r#"(?:(?:"(?i:password|secret)"|'(?i:password|secret)'|(?i:password|secret)))\s*[:=]\s*(?:"(?P<dq>[^'"\r\n]{4,})"|'(?P<sq>[^'"\r\n]{4,})'|(?P<uq>[^\s'"`,;]{4,}))"#,
         leading_boundary: true,
         trailing_boundary: false,
-        fragment_source: r#"(?:(?:"(?i-u:password|secret)"|'(?i-u:password|secret)'|(?i-u:password|secret)))\s*[:=]\s*(?:["'][^"']*|[^\s]*)"#,
+        fragment_source: r#"(?:(?:"(?i:password|secret)"|'(?i:password|secret)'|(?i:password|secret)))\s*[:=]\s*(?:["'][^"']*|[^\s]*)"#,
         assignment: true,
     },
     SecretDefinition {
         label: "credential assignment",
-        source: r#"(?:(?:"(?i-u:token|api[_-]?key|authorization)"|'(?i-u:token|api[_-]?key|authorization)'|(?i-u:token|api[_-]?key|authorization)))\s*[:=]\s*(?:"(?P<dq>[^'"\r\n]{4,})"|'(?P<sq>[^'"\r\n]{4,})'|(?P<uq>(?:(?i-u:Bearer|Basic|Token)\s+)?[^\s'"`,;]{4,}))"#,
+        source: r#"(?:(?:"(?i:token|api[_-]?key|authorization)"|'(?i:token|api[_-]?key|authorization)'|(?i:token|api[_-]?key|authorization)))\s*[:=]\s*(?:"(?P<dq>[^'"\r\n]{4,})"|'(?P<sq>[^'"\r\n]{4,})'|(?P<uq>(?:(?i:Bearer|Basic|Token)\s+)?[^\s'"`,;]{4,}))"#,
         leading_boundary: true,
         trailing_boundary: false,
-        fragment_source: r#"(?:(?:"(?i-u:token|api[_-]?key|authorization)"|'(?i-u:token|api[_-]?key|authorization)'|(?i-u:token|api[_-]?key|authorization)))\s*[:=]\s*(?:["'][^"']*|(?:(?i-u:Bearer|Basic|Token)\s+)?[^\s]*)"#,
+        fragment_source: r#"(?:(?:"(?i:token|api[_-]?key|authorization)"|'(?i:token|api[_-]?key|authorization)'|(?i:token|api[_-]?key|authorization)))\s*[:=]\s*(?:["'][^"']*|(?:(?i:Bearer|Basic|Token)\s+)?[^\s]*)"#,
         assignment: true,
     },
 ];
@@ -381,7 +381,10 @@ fn has_trailing_boundary(text: &str, end: usize) -> bool {
     !is_ascii_word(text.get(end..).and_then(|suffix| suffix.chars().next()))
 }
 
-fn assignment_shape(definition: &SecretDefinition, captures: &regex::Captures<'_>) -> MatchShape {
+fn assignment_shape(
+    definition: &SecretDefinition,
+    captures: &regex_lite::Captures<'_>,
+) -> MatchShape {
     if !definition.assignment {
         return MatchShape::Standalone;
     }

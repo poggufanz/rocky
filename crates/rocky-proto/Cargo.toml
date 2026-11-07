@@ -6,6 +6,8 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
-regex = "1"
+# regex-lite: the hook compiles these patterns once per event process, and the
+# full engine's compile cost dominated per-event latency.
+regex-lite = "0.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
