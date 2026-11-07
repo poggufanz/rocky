@@ -9,9 +9,10 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
-use rocky_proto::paths::{desk_dir, log_path, rocky_home, spool_dir};
+use rocky_proto::paths::{desk_dir, history_dir, log_path, rocky_home, spool_dir};
 use rocky_proto::pipe::{AgentKey, AgentStatus, Health, ServerMsg, StatusOp};
 use rocky_proto::settings::Settings;
+use rockyd::history::{HISTORY_CAP_BYTES, History};
 use rockyd::log::RotatingLog;
 use rockyd::repo::resolve_repo;
 use rockyd::server::{BindError, Control, Hub, serve};
@@ -103,11 +104,12 @@ fn main() {
     // Shared under a mutex for the snapshot closure; the daemon loop never
     // holds this lock while calling `broadcast` (see Hub lock order).
     let mut ingest = Ingestor::new();
-    match prune(&spool, MAX_FILES, MAX_BYTES) {
-        Ok(dropped) => {
-            ingest.health.spool_dropped += dropped;
-            if dropped > 0 {
-                log.line(&format!("pruned {dropped} spool files at start"));
+    let mut history = History::open(&history_dir(&home), HISTORY_CAP_BYTES, true);
+    match prune(&spool, MAX_FILES, MAX_BYTES, now_ms()) {
+        Ok(pruned) => {
+            ingest.health.spool_dropped += pruned.deleted;
+            if pruned.deleted > 0 {
+                log.line(&format!("pruned {} spool files at start", pruned.deleted));
             }
         }
         Err(e) => log.line(&format!("start prune failed: {e}")),
@@ -117,9 +119,11 @@ fn main() {
         let mut repo_of = resolve_repo;
         let (msgs, agents, pending) = {
             let mut s = shared.lock().unwrap();
-            let changes = ingest.ingest_once(&spool, &mut s.state, &mut repo_of);
+            let out =
+                ingest.ingest_once(&spool, &mut s.state, &mut repo_of, &mut history, now_ms());
             refresh_last_known(&mut s);
             s.health = ingest.health.clone();
+            let changes = out.changes;
             let mut msgs = Vec::with_capacity(changes.upserted.len() + 1);
             for key in &changes.upserted {
                 if let Some(agent) = s.state.get(key) {
@@ -201,7 +205,7 @@ fn main() {
             last_rescan = now;
         }
         if triggered {
-            rescan(&spool, &shared, &hub, &log, &mut ingest);
+            rescan(&spool, &shared, &hub, &log, &mut ingest, &mut history);
         }
 
         let now = Instant::now();
@@ -223,11 +227,13 @@ fn rescan(
     hub: &Hub,
     log: &RotatingLog,
     ingest: &mut Ingestor,
+    history: &mut History,
 ) {
     let mut repo_of = resolve_repo;
     let (msgs, health, upserts, health_changed) = {
         let mut s = shared.lock().unwrap();
-        let changes = ingest.ingest_once(spool, &mut s.state, &mut repo_of);
+        let out = ingest.ingest_once(spool, &mut s.state, &mut repo_of, history, now_ms());
+        let changes = out.changes;
         let mut msgs = Vec::with_capacity(changes.upserted.len() + 1);
         for key in &changes.upserted {
             if let Some(agent) = s.state.get(key) {
