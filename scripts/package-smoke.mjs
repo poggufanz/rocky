@@ -836,9 +836,16 @@ async function main() {
   assert.doesNotMatch(labelsAfterCodex[0] ?? "", /ghp_/u, "Codex label must not contain raw token");
 
   // Setup dogfood uses explicit consent in an isolated HOME. The Claude
-  // settings parent exists and remains private; Codex TOML is only printed.
-  const claudeSettingsDirectory = join(isolatedHome, ".claude");
-  mkdirSync(claudeSettingsDirectory, { recursive: true, mode: 0o700 });
+  // settings file lives under CLAUDE_CONFIG_DIR, which the smoke env points at
+  // claudeConfig, so the hooks must land in claudeConfig/settings.json and
+  // never under HOME/.claude. That settings parent exists and remains private;
+  // Codex TOML is only printed.
+  const claudeSettingsPath = join(claudeConfig, "settings.json");
+  const homeClaudeSettingsPath = join(isolatedHome, ".claude", "settings.json");
+  mkdirSync(claudeConfig, { recursive: true, mode: 0o700 });
+  // mkdir keeps the mode of a directory that already exists, and the env setup
+  // above created this one with the default mode, so tighten it explicitly.
+  if (process.platform !== "win32") chmodSync(claudeConfig, 0o700);
   const codexConfigPaths = [
     join(isolatedHome, ".codex", "config.toml"),
     join(codexHome, "config.toml"),
@@ -853,10 +860,24 @@ async function main() {
   assert.equal(agentSetup.stdout, "", "agent-hook setup keeps stdout clean");
   assert.match(agentSetup.stderr, /Install agent hooks for Claude Code now\?/);
   assert.match(agentSetup.stderr, /claude-code agent hooks: written/);
+  assert.match(agentSetup.stderr, /claude-code settings: /);
+  // The printed path is the file setup reports writing; it must be the one
+  // under CLAUDE_CONFIG_DIR. Stop at ESC so a colored line still parses.
+  const printedSettingsPath = /claude-code settings: ([^\r\n\u001b]+)/u.exec(agentSetup.stderr)?.[1];
+  assert.match(
+    printedSettingsPath ?? "",
+    /[\\/]claude-config[\\/]settings\.json$/u,
+    `agent-hook setup must print the settings file under CLAUDE_CONFIG_DIR: ${agentSetup.stderr}`,
+  );
   assert.match(agentSetup.stderr, /notify = \[/);
   assert.match(agentSetup.stderr, /\/\/hooks|\/hooks/);
-  const claudeSettings = JSON.parse(readFileSync(join(claudeSettingsDirectory, "settings.json"), "utf8"));
+  const claudeSettings = JSON.parse(readFileSync(claudeSettingsPath, "utf8"));
   assert.ok(claudeSettings.hooks?.UserPromptSubmit);
+  assert.equal(
+    existsSync(homeClaudeSettingsPath),
+    false,
+    `agent hooks must not be written under HOME/.claude: ${homeClaudeSettingsPath}`,
+  );
   for (const [index, path] of codexConfigPaths.entries()) {
     assert.equal(existsSync(path), codexBefore[index] !== undefined, `Codex config path ${path} changed existence`);
     if (codexBefore[index] !== undefined) assert.deepEqual(readFileSync(path), codexBefore[index]);

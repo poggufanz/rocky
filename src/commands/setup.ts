@@ -42,6 +42,7 @@ import {
   rockyGateHookCommand,
   rockyHookCommand,
   uninstallClaudeAgentHooks,
+  type AgentHooksTarget,
 } from "../setup/agent-hooks.js";
 import type { AgentHooksAction, HarnessId, RepoCaptureAction } from "../setup/clients.js";
 import { installDeskHooks, uninstallDeskHooks } from "../setup/desk-hooks.js";
@@ -514,6 +515,30 @@ async function runRepoCaptureAction(
   return 0;
 }
 
+const CLAUDE_CONFIG_DIR_EMPTY =
+  "Setup stopped: CLAUDE_CONFIG_DIR is set but empty. Unset it or set an absolute directory path.";
+const CLAUDE_CONFIG_DIR_UNUSABLE =
+  "Setup stopped: CLAUDE_CONFIG_DIR must be a normalized absolute directory path (no trailing separator, no . or .. segments, native path separators).";
+
+/**
+ * Resolve the Claude settings file once per action. A refused value is
+ * reported here, before any prompt, and the caller exits 1 on `undefined`. The
+ * resolved path is printed so the owner sees which profile receives the hooks.
+ */
+function resolveClaudeSettingsTarget(dependencies: SetupDependencies): AgentHooksTarget | undefined {
+  const resolution = defaultAgentHooksTarget(
+    dependencies.platform.home,
+    dependencies.env ?? process.env,
+    process.cwd(),
+  );
+  if (resolution.status === "refused") {
+    say(resolution.reason === "empty" ? CLAUDE_CONFIG_DIR_EMPTY : CLAUDE_CONFIG_DIR_UNUSABLE);
+    return undefined;
+  }
+  detail(safeTerminalBlock(`claude-code settings: ${resolution.target.settingsPath}`));
+  return resolution.target;
+}
+
 async function runAgentHooksAction(
   action: AgentHooksAction,
   dependencies: SetupDependencies,
@@ -546,7 +571,8 @@ async function runAgentHooksAction(
     const command = rockyHookCommand("claude-code", nodePath, entryPath);
     const codexCommand = rockyHookCommand("codex", nodePath, entryPath);
     const gateCommand = rockyGateHookCommand(nodePath, entryPath);
-    const target = defaultAgentHooksTarget(dependencies.platform.home);
+    const target = resolveClaudeSettingsTarget(dependencies);
+    if (target === undefined) return 1;
     const options = {
       command,
       // Install treats this as an explicit on/off switch (--no-rationale-gate
@@ -615,7 +641,9 @@ async function runDeskHooksAction(
         say("Setup stopped: the desk hook path must be the rocky-hook binary.");
         return 1;
       }
-      const result = await installDeskHooks(defaultAgentHooksTarget(dependencies.platform.home), {
+      const target = resolveClaudeSettingsTarget(dependencies);
+      if (target === undefined) return 1;
+      const result = await installDeskHooks(target, {
         hookBin: resolved,
         fileExists: (path) => dependencies.platform.fileExists(path) || path === resolved,
         confirmation: dependencies.confirmation,
@@ -625,7 +653,9 @@ async function runDeskHooksAction(
       if (result.detail !== undefined) detail(safeTerminalBlock(result.detail));
       return result.status === "written" || result.status === "unchanged" ? 0 : 1;
     }
-    const result = await uninstallDeskHooks(defaultAgentHooksTarget(dependencies.platform.home), {
+    const target = resolveClaudeSettingsTarget(dependencies);
+    if (target === undefined) return 1;
+    const result = await uninstallDeskHooks(target, {
       confirmation: dependencies.confirmation,
       detail,
     });

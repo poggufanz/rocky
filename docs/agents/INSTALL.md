@@ -69,7 +69,7 @@ rocky hook agent-event <vendor> --explain-code "<why this code shape>" --explain
 
 ## Step 3 — Claude Code, manual hooks *(human approval)*
 
-Merge these into `~/.claude/settings.json` under `"hooks"` (create the key if absent; append to arrays that already exist). Capture needs the hook payload field `prompt_id` — current Claude Code versions send it; without it Rocky records nothing and never merges turns.
+Merge these into `~/.claude/settings.json` under `"hooks"` (create the key if absent; append to arrays that already exist). When `CLAUDE_CONFIG_DIR` is set, merge into `$CLAUDE_CONFIG_DIR/settings.json` instead; `rocky setup --agent-hooks` does the same, prints the path it used, and refuses an empty or non-canonical value. Capture needs the hook payload field `prompt_id` — current Claude Code versions send it; without it Rocky records nothing and never merges turns.
 
 ```json
 {
@@ -255,7 +255,7 @@ Per-harness wiring — **confirm event names and field paths against your harnes
 
 | Harness | Gate hook (config) | File field in payload |
 | --- | --- | --- |
-| Claude Code | `PreToolUse` in `~/.claude/settings.json` | `tool_input.file_path` |
+| Claude Code | `PreToolUse` in `~/.claude/settings.json`, or `$CLAUDE_CONFIG_DIR/settings.json` when that variable is set | `tool_input.file_path` |
 | Codex | `PreToolUse` in `~/.codex/hooks.json` or `[[hooks.PreToolUse]]` in `config.toml` (trust via `/hooks`) | patch-shaped for `apply_patch` (no path — gate allows); file fields where the tool names one |
 | OpenCode | `tool.execute.before` in `.opencode/plugin/*.ts` (throw to deny) | `output.args` (`filePath`, `command`, …) |
 | Crush | `PreToolUse` in `crush.json` (Claude-compatible) | `tool_input` fields |

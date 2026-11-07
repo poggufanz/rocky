@@ -1014,12 +1014,28 @@ test(
  * asserts on the *effects* a real user would see: $?/$LASTEXITCODE unchanged
  * from what the unhooked shell would show, and memory.jsonl holding exactly
  * the right records with no false positive for the successful command.
- * Hard-timeout bounded so a reintroduced hang fails this test in seconds
- * instead of hanging the suite.
+ * Hard-timeout bounded so a reintroduced hang fails this test within the
+ * guard bound instead of hanging the suite.
  */
 interface FeedResult {
   stdout: string;
   timedOut: boolean;
+  /** Wall-clock milliseconds from spawn until the process exited or the guard fired. */
+  elapsedMs: number;
+  /** Scripted lines already written to the session's stdin when it ended. */
+  linesFed: number;
+  linesTotal: number;
+}
+
+/**
+ * Suffix for every hang-guard assertion. The feed timer writes each scripted
+ * line on its own schedule whether or not the session has read the previous
+ * one, so when the guard fires `fed` is always total/total and `elapsed` is
+ * about the guard bound. Neither tells a slow session from a stuck one. Only
+ * `stdout_tail`, the last 2000 characters the session printed, does.
+ */
+function describeFeed(r: FeedResult): string {
+  return `elapsed=${r.elapsedMs} fed=${r.linesFed}/${r.linesTotal} stdout_tail=${r.stdout.slice(-2000)}`;
 }
 
 const DEFAULT_SMOKE_LINES = (rockyHome: string): string[] => [
@@ -1033,8 +1049,27 @@ const DEFAULT_SMOKE_LINES = (rockyHome: string): string[] => [
   "exit",
 ];
 
+/**
+ * How long one scripted session may run before it is killed and reported as
+ * hung. Anti-hang only: no assertion reads this value as a timing claim; it
+ * exists so a stuck session fails the test instead of stalling the suite.
+ *
+ * Shared by the Windows PowerShell 5.1 and PowerShell 7.x tests, so it is
+ * sized from the slower host under measured contention, not guessed. The
+ * denylist session took at most 2086 ms (5.1) and 2143 ms (7.x) idle, and
+ * 2782 ms and 6326 ms with 12 CPU burners spread over all 12 logical CPUs
+ * (N=30 each). With the same 12 burners and the session confined to a single
+ * CPU it took up to 19423 ms (5.1) and 21106 ms (7.x) (N=13 each, 9.3x and
+ * 9.8x idle), and every one of those runs exited with correct results, so
+ * the old 20 s bound failed sessions that were merely slow. E is the larger,
+ * 21106 ms; 3 x E is 63.3 s, so the guard is max(60 s, 3 x E) rounded up to a
+ * whole second = 64 s.
+ */
+const SESSION_HANG_GUARD_MS = 64_000;
+
 function spawnAndFeed(exe: string, rockyHome: string, shim: string, lines?: string[], intervalMs = 400): Promise<FeedResult> {
   return new Promise((resolve) => {
+    const startedAt = Date.now();
     const child = spawn(exe, ["-NoProfile", "-NoLogo"], {
       env: { ...process.env, ROCKY_HOME: rockyHome, ROCKY_BIN: shim },
       stdio: ["pipe", "pipe", "pipe"],
@@ -1059,12 +1094,13 @@ function spawnAndFeed(exe: string, rockyHome: string, shim: string, lines?: stri
       clearInterval(feed);
       clearTimeout(watchdog);
       if (timedOut) { try { child.kill("SIGKILL"); } catch { /* best effort */ } }
-      resolve({ stdout, timedOut });
+      resolve({ stdout, timedOut, elapsedMs: Date.now() - startedAt, linesFed: index, linesTotal: feedLines.length });
     };
 
     // Hard-bounded: a reintroduced hang (the exact bug this test guards
-    // against) must fail this test in seconds, not hang the whole suite.
-    const watchdog = setTimeout(() => finish(true), 20_000);
+    // against) must fail this test within the guard bound, not hang the
+    // whole suite.
+    const watchdog = setTimeout(() => finish(true), SESSION_HANG_GUARD_MS);
     child.on("exit", () => finish(false));
     child.on("error", () => finish(false));
   });
@@ -1089,6 +1125,7 @@ interface FeedResultWithStderr extends FeedResult {
  */
 function spawnAndFeedCapturingStderr(exe: string, rockyHome: string, shim: string, lines: string[], intervalMs = 400): Promise<FeedResultWithStderr> {
   return new Promise((resolve) => {
+    const startedAt = Date.now();
     const child = spawn(exe, ["-NoProfile", "-NoLogo"], {
       env: { ...process.env, ROCKY_HOME: rockyHome, ROCKY_BIN: shim },
       stdio: ["pipe", "pipe", "pipe"],
@@ -1113,10 +1150,10 @@ function spawnAndFeedCapturingStderr(exe: string, rockyHome: string, shim: strin
       clearInterval(feed);
       clearTimeout(watchdog);
       if (timedOut) { try { child.kill("SIGKILL"); } catch { /* best effort */ } }
-      resolve({ stdout, stderr, timedOut });
+      resolve({ stdout, stderr, timedOut, elapsedMs: Date.now() - startedAt, linesFed: index, linesTotal: lines.length });
     };
 
-    const watchdog = setTimeout(() => finish(true), 20_000);
+    const watchdog = setTimeout(() => finish(true), SESSION_HANG_GUARD_MS);
     child.on("exit", () => finish(false));
     child.on("error", () => finish(false));
   });
@@ -1208,7 +1245,7 @@ async function realHostSmoke(t: TestContext, exe: string): Promise<void> {
   writeFileSync(shim, `& node '${entry}' @args\nexit $LASTEXITCODE\n`);
 
   const result = await spawnAndFeed(exe, rockyHome, shim);
-  assert.equal(result.timedOut, false, "the session must not hang (recursion/hang regression guard)");
+  assert.equal(result.timedOut, false, `the session must not hang (recursion/hang regression guard) (${describeFeed(result)})`);
   // `echo a b` prints each argument on its own line, so DOLLARQ/EXIT land on
   // consecutive lines rather than sharing one -- matches what the real
   // interactive session actually prints (confirmed empirically, both hosts).
@@ -1325,7 +1362,7 @@ async function realHostNonBlockingSmoke(t: TestContext, exe: string): Promise<vo
   ]);
   const elapsedMs = Date.now() - before;
 
-  assert.equal(result.timedOut, false, "the session must not hang");
+  assert.equal(result.timedOut, false, `the session must not hang (${describeFeed(result)})`);
   assert.match(result.stdout, /NEXT_PROMPT_REACHED/, `the next command must run without waiting on the slow spawn; got: ${result.stdout}`);
   assert.ok(
     elapsedMs < NON_BLOCKING_CEILING_MS,
@@ -1395,7 +1432,7 @@ async function realHostDenylistSmoke(t: TestContext, exe: string): Promise<void>
     "Get-Item ./__rocky_denylist_should_record__ -ErrorAction SilentlyContinue 2>$null",
     "exit",
   ]);
-  assert.equal(result.timedOut, false, "the session must not hang");
+  assert.equal(result.timedOut, false, `the session must not hang (${describeFeed(result)})`);
 
   const memoryPath = join(rockyHome, "memory.jsonl");
   // Exactly one detached write is ever expected here: the two denylisted
@@ -1468,7 +1505,7 @@ async function realHostFaultInjectionSmoke(t: TestContext, exe: string): Promise
     "exit",
   ]);
 
-  assert.equal(result.timedOut, false, "an injected internal fault must never hang the shell");
+  assert.equal(result.timedOut, false, `an injected internal fault must never hang the shell (${describeFeed(result)})`);
   assert.match(
     result.stdout,
     /AFTER_FAULT_DOLLARQ=False\r?\nAFTER_FAULT_EXIT=7\r?\n/,
@@ -1548,7 +1585,7 @@ async function realHostConcurrentSpawnSmoke(t: TestContext, exe: string): Promis
     30, // far tighter than the shim's own 2000ms lifetime -- forces real overlap
   );
 
-  assert.equal(result.timedOut, false, "two overlapping detached spawns must never hang the shell");
+  assert.equal(result.timedOut, false, `two overlapping detached spawns must never hang the shell (${describeFeed(result)})`);
 
   const memoryPath = join(rockyHome, "memory.jsonl");
   // Both overlapping spawns must land their own write -- the shim's own
@@ -1623,7 +1660,7 @@ async function realHostCustomPromptSmoke(t: TestContext, exe: string): Promise<v
     "echo after-hook-2",
     "exit",
   ]);
-  assert.equal(result.timedOut, false, "the session must not hang (recursion/hang regression guard)");
+  assert.equal(result.timedOut, false, `the session must not hang (recursion/hang regression guard) (${describeFeed(result)})`);
   assert.match(result.stdout, /CUSTOM-PROMPT\[\d+\]> echo after-hook-1/, `the custom prompt must keep rendering, live, after being wrapped; got: ${result.stdout}`);
   assert.match(result.stdout, /CUSTOM-PROMPT\[\d+\]> echo after-hook-2/, `and keep rendering for more than one call after the wrap; got: ${result.stdout}`);
 }
@@ -1751,10 +1788,11 @@ async function realHostSpeechRoundTripSmoke(t: TestContext, exe: string): Promis
     // Integration exception: bounds a real interactive host process that
     // fake timers cannot drive; the kill below is the hang guard, not a
     // guessed settle delay.
+    // Shared hang bound: on one loaded CPU, shutdown after `exit` alone took 12 to 18 s across both hosts.
     const guard = setTimeout(() => {
       timedOut = true;
       try { child.kill("SIGKILL"); } catch { /* best effort */ }
-    }, 15_000);
+    }, SESSION_HANG_GUARD_MS);
     try {
       await exited;
     } finally {

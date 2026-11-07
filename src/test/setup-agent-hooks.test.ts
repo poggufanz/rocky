@@ -2,11 +2,13 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import {
+  appendFileSync,
   chmodSync,
   existsSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   realpathSync,
   renameSync,
@@ -15,15 +17,17 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, join, sep } from "node:path";
 import { tmpdir } from "node:os";
 import {
   buildClaudeHookEntries,
   agentHooksStatus,
   codexConfigSnippet,
+  defaultAgentHooksTarget,
   installClaudeAgentHooks,
   mergeClaudeHooks,
   removeClaudeHooks,
+  retainedCopyMatches,
   rockyHookCommand,
   uninstallClaudeAgentHooks,
 } from "../setup/agent-hooks.js";
@@ -181,6 +185,63 @@ function fixture(t: test.TestContext): { root: string; settings: string; command
   };
 }
 
+// The env objects below are built from scratch on purpose: spreading
+// process.env would let the owner's real CLAUDE_CONFIG_DIR decide the answer.
+
+test("defaultAgentHooksTarget: unset CLAUDE_CONFIG_DIR keeps home .claude settings", (t) => {
+  const home = fixture(t).root;
+  assert.deepEqual(defaultAgentHooksTarget(home, {}, home), {
+    status: "resolved",
+    target: { settingsPath: join(home, ".claude", "settings.json") },
+  });
+});
+
+test("defaultAgentHooksTarget: absolute CLAUDE_CONFIG_DIR wins", (t) => {
+  const home = fixture(t).root;
+  const cfg = fixture(t).root;
+  assert.deepEqual(defaultAgentHooksTarget(home, { CLAUDE_CONFIG_DIR: cfg }, home), {
+    status: "resolved",
+    target: { settingsPath: join(cfg, "settings.json") },
+  });
+});
+
+test("defaultAgentHooksTarget: empty CLAUDE_CONFIG_DIR is refused", (t) => {
+  const home = fixture(t).root;
+  assert.deepEqual(defaultAgentHooksTarget(home, { CLAUDE_CONFIG_DIR: "" }, home), {
+    status: "refused",
+    reason: "empty",
+  });
+});
+
+test("defaultAgentHooksTarget: relative or trailing-separator CLAUDE_CONFIG_DIR is refused", (t) => {
+  const home = fixture(t).root;
+  const cfg = fixture(t).root;
+  for (const configured of ["cfg", `${cfg}${sep}`]) {
+    assert.deepEqual(defaultAgentHooksTarget(home, { CLAUDE_CONFIG_DIR: configured }, home), {
+      status: "refused",
+      reason: "unusable",
+    }, configured);
+  }
+});
+
+test("defaultAgentHooksTarget: every shape the refusal message names is refused as unusable", (t) => {
+  const home = fixture(t).root;
+  const cfg = fixture(t).root;
+  const shapes: ReadonlyArray<readonly [string, string]> = [
+    ["dot segment", `${cfg}${sep}.${sep}profile`],
+    ["dot-dot segment", `${cfg}${sep}..${sep}profile`],
+    ["doubled separator", `${cfg}${sep}${sep}profile`],
+    ["decomposed unicode", `${cfg}${sep}é`],
+    ["non-native separator", sep === "\\" ? cfg.replaceAll("\\", "/") : `${cfg}\\profile`],
+  ];
+  for (const [name, configured] of shapes) {
+    assert.deepEqual(defaultAgentHooksTarget(home, { CLAUDE_CONFIG_DIR: configured }, home), {
+      status: "refused",
+      reason: "unusable",
+    }, name);
+  }
+});
+
 test("missing parent fails before consent or proposed JSON and never mutates filesystem", async (t) => {
   const value = fixture(t);
   const details: string[] = [];
@@ -246,6 +307,81 @@ test("uninstall removes only owned groups, is idempotent, and leaves foreign roo
   const second = await uninstallClaudeAgentHooks({ settingsPath: value.settings }, { command: value.command });
   assert.equal(second.status, "unchanged");
   assert.deepEqual(readFileSync(value.settings), bytes);
+});
+
+test("retainedCopyMatches: identical bytes true, different bytes false, missing file false", (t) => {
+  const { root } = fixture(t);
+  const copy = join(root, "copy.json");
+  const bytes = Buffer.from('{"foreign":true}\n', "utf8");
+  writeFileSync(copy, bytes);
+
+  assert.equal(retainedCopyMatches(copy, bytes), true);
+  assert.equal(retainedCopyMatches(copy, Buffer.from('{"foreign":false}\n', "utf8")), false);
+  assert.equal(retainedCopyMatches(copy, Buffer.concat([bytes, Buffer.from("\n")])), false);
+  assert.equal(retainedCopyMatches(join(root, "absent.json"), bytes), false);
+  // A path that cannot be read as a file is a read error, so it also reports false.
+  assert.equal(retainedCopyMatches(root, bytes), false);
+});
+
+function retainedTransactions(settingsPath: string): string[] {
+  return readdirSync(dirname(settingsPath))
+    .filter((name) => name.startsWith(`.${basename(settingsPath)}.transaction-`));
+}
+
+test("agent hooks: reinstall over existing settings reports no retained copy", async (t) => {
+  const value = fixture(t);
+  const settings = join(dirname(value.settings), "settings.json");
+  const existing = { custom: { keep: true } };
+  mkdirSync(dirname(settings), { recursive: true, mode: 0o700 });
+  writeFileSync(settings, `${JSON.stringify(existing)}\n`);
+  const options = {
+    command: value.command,
+    confirmation: { async confirm(): Promise<boolean> { return true; } },
+    detail: () => undefined,
+  };
+
+  const installed = await installClaudeAgentHooks({ settingsPath: settings }, options);
+  assert.equal(installed.status, "written");
+  assert.equal(installed.detail, undefined);
+  assert.deepEqual((JSON.parse(readFileSync(settings, "utf8")) as Record<string, unknown>).custom, existing.custom);
+  const installedBytes = readFileSync(settings);
+
+  // The copy is not reported, but it is still kept: one transaction directory
+  // stays beside the file after a second write, older ones pruned, and it holds
+  // the bytes the second write replaced.
+  const removed = await uninstallClaudeAgentHooks({ settingsPath: settings }, options);
+  assert.equal(removed.status, "written");
+  assert.equal(removed.detail, undefined);
+  const kept = retainedTransactions(settings);
+  assert.equal(kept.length, 1);
+  assert.deepEqual(readFileSync(join(dirname(settings), kept[0], "displaced")), installedBytes);
+});
+
+test("writeMutation reports the retained copy when it changed after the write", async (t) => {
+  const value = fixture(t);
+  const settings = join(dirname(value.settings), "settings.json");
+  mkdirSync(dirname(settings), { recursive: true, mode: 0o700 });
+  writeFileSync(settings, `${JSON.stringify({ custom: { keep: true } })}\n`);
+  const retained: string[] = [];
+
+  const result = await installClaudeAgentHooks({ settingsPath: settings }, {
+    command: value.command,
+    confirmation: { async confirm(): Promise<boolean> { return true; } },
+    detail: () => undefined,
+    // Alter the retained copy once the write has landed. Its bytes then differ
+    // from what setup read, so the report must appear.
+    afterWrite: (recoveryPath) => {
+      if (recoveryPath === undefined) return;
+      retained.push(recoveryPath);
+      appendFileSync(recoveryPath, "\n");
+    },
+  });
+
+  assert.equal(retained.length, 1, "the write must leave a retained copy for the seam to alter");
+  assert.equal(result.status, "written");
+  assert.match(result.detail ?? "", /previous config retained; manual recovery: /);
+  assert.ok(result.detail?.startsWith("Claude Code agent hooks "), result.detail);
+  assert.ok(result.detail?.endsWith(retained[0]), result.detail);
 });
 
 test("malformed settings are unreadable before consent and never overwritten", async (t) => {
@@ -438,6 +574,8 @@ test("dedicated setup branch installs only Claude hooks and never invokes MCP ad
     confirmation: { async confirm() { return true; } },
     nodePath: process.execPath,
     entryPath: process.execPath,
+    // Explicit and empty: the settings target must never follow an ambient CLAUDE_CONFIG_DIR.
+    env: {},
   };
   assert.equal(await setup(["--agent-hooks"], dependencies), 0);
   assert.deepEqual(calls, []);
@@ -478,6 +616,8 @@ test("agent-hook capability notice precedes consent and remains visible in statu
     },
     nodePath: process.execPath,
     entryPath: process.execPath,
+    // Explicit and empty: the settings target must never follow an ambient CLAUDE_CONFIG_DIR.
+    env: {},
   };
   try {
     assert.equal(await setup(["--agent-hooks"], dependencies), 0);
@@ -523,6 +663,8 @@ test("dedicated --yes agent-hook install still requires explicit consent", async
     },
     nodePath: process.execPath,
     entryPath: process.execPath,
+    // Explicit and empty: the settings target must never follow an ambient CLAUDE_CONFIG_DIR.
+    env: {},
   };
   let code: number;
   try {
@@ -633,6 +775,8 @@ function setupDependenciesFor(root: string, confirmation = true): SetupDependenc
     confirmation: { async confirm() { return confirmation; } },
     nodePath: process.execPath,
     entryPath: process.execPath,
+    // Explicit and empty: the settings target must never follow an ambient CLAUDE_CONFIG_DIR.
+    env: {},
   };
 }
 

@@ -1,7 +1,7 @@
-import { lstatSync } from "node:fs";
-import { homedir } from "node:os";
-import { dirname, join, posix, win32 } from "node:path";
+import { lstatSync, readFileSync } from "node:fs";
+import hostPath, { dirname, join, posix, win32 } from "node:path";
 import { fileURLToPath } from "node:url";
+import { resolveClaudeCodeUserConfig } from "./claude-code.js";
 import {
   atomicWriteJsonIfUnchanged,
   inspectJsonTransaction,
@@ -43,6 +43,11 @@ export interface AgentHooksTarget {
   settingsPath: string;
 }
 
+/** The settings file setup may write, or the reason it must not guess one. */
+export type AgentHooksTargetResolution =
+  | { status: "resolved"; target: AgentHooksTarget }
+  | { status: "refused"; reason: "empty" | "unusable" };
+
 export type AgentHooksAction = "install" | "uninstall" | "status";
 
 export interface AgentHooksConfirmation {
@@ -62,11 +67,15 @@ export interface AgentHooksRuntimeOptions {
   gateCommand?: string;
   nodePath?: string;
   entryPath?: string;
-  home?: string;
   confirmation?: AgentHooksConfirmation;
   detail?: (message: string) => void;
   /** Test seam for proving the transactional writer refuses a late race. */
   beforeWrite?: () => void;
+  /**
+   * Test seam: runs right after a write lands and before the retained-copy
+   * report is decided. Receives the retained copy's path, when one exists.
+   */
+  afterWrite?: (recoveryPath: string | undefined) => void;
 }
 
 export interface AgentHooksOperationResult {
@@ -526,14 +535,9 @@ export function removeClaudeHooks(existing: Record<string, unknown>): Record<str
   return removeOwnedHooks(existing, isRockyHook);
 }
 
-function targetFor(home = homedir()): AgentHooksTarget {
-  return { settingsPath: join(home, ".claude", "settings.json") };
-}
-
-export function resolveTarget(target: AgentHooksTarget | undefined, options: AgentHooksRuntimeOptions): AgentHooksTarget {
-  const resolved = target ?? targetFor(options.home);
-  requireSafeAbsolutePath(resolved.settingsPath, "Claude settings");
-  return resolved;
+export function resolveTarget(target: AgentHooksTarget, options: AgentHooksRuntimeOptions): AgentHooksTarget {
+  requireSafeAbsolutePath(target.settingsPath, "Claude settings");
+  return target;
 }
 
 function errorCode(error: unknown): string | undefined {
@@ -671,6 +675,19 @@ function printEntries(command: string, gateCommand: string | undefined, options:
     (JSON.stringify(entries, null, 2));
 }
 
+/**
+ * True only when the file at `recoveryPath` reads back byte-for-byte equal to
+ * `priorBytes`. Any read error is false, so a caller that skips its report on
+ * `true` errs toward showing it.
+ */
+export function retainedCopyMatches(recoveryPath: string, priorBytes: Buffer): boolean {
+  try {
+    return readFileSync(recoveryPath).equals(priorBytes);
+  } catch {
+    return false;
+  }
+}
+
 export function writeMutation(
   path: string,
   current: CurrentConfig,
@@ -683,12 +700,13 @@ export function writeMutation(
     options.beforeWrite?.();
     const result = atomicWriteJsonIfUnchanged(path, value, current.read, topologyGuard(current.topology));
     if (result.status === "written") {
-      return result.recoveryPath === undefined
-        ? { status: "written" }
-        : {
-          status: "written",
-          detail: retainedConfigDetail(noun, result.recoveryPath),
-        };
+      options.afterWrite?.(result.recoveryPath);
+      // The transaction engine still keeps the displaced copy on disk; only the report is conditional.
+      if (result.recoveryPath === undefined
+        || (current.read.status === "valid" && retainedCopyMatches(result.recoveryPath, current.read.bytes))) {
+        return { status: "written" };
+      }
+      return { status: "written", detail: retainedConfigDetail(noun, result.recoveryPath) };
     }
     return {
       status: "error",
@@ -710,7 +728,7 @@ export function defaultConfirmation(): AgentHooksConfirmation {
 
 /** Consent-gated Claude Code settings update. */
 export async function installClaudeAgentHooks(
-  target?: AgentHooksTarget,
+  target: AgentHooksTarget,
   options: AgentHooksRuntimeOptions = {},
 ): Promise<AgentHooksOperationResult> {
   let resolved: AgentHooksTarget;
@@ -752,7 +770,7 @@ export async function installClaudeAgentHooks(
 
 /** Remove only Rocky-owned Claude Code groups. */
 export async function uninstallClaudeAgentHooks(
-  target?: AgentHooksTarget,
+  target: AgentHooksTarget,
   options: AgentHooksRuntimeOptions = {},
 ): Promise<Exclude<AgentHooksOperationResult, { status: "declined" }>> {
   try {
@@ -821,7 +839,7 @@ function hasCurrentHooks(value: Record<string, unknown>, command: string, gateCo
 
 /** Read-only status; missing/partial/stale/malformed settings are absent/unreadable. */
 export function agentHooksStatus(
-  target?: AgentHooksTarget,
+  target: AgentHooksTarget,
   options: AgentHooksRuntimeOptions = {},
 ): AgentHooksStatusResult {
   try {
@@ -842,8 +860,26 @@ export function agentHooksStatus(
   }
 }
 
-export function defaultAgentHooksTarget(home = homedir()): AgentHooksTarget {
-  return targetFor(home);
+/**
+ * The settings file Claude Code loads: `$CLAUDE_CONFIG_DIR/settings.json` when
+ * that variable names a canonical absolute directory, `<home>/.claude/settings.json`
+ * when it is unset. Anything else is refused instead of guessed, because hooks
+ * written to a file no session loads fail silently. `env` and `cwd` change the
+ * answer, so neither has a default.
+ */
+export function defaultAgentHooksTarget(
+  home: string,
+  env: NodeJS.ProcessEnv,
+  cwd: string,
+): AgentHooksTargetResolution {
+  const config = resolveClaudeCodeUserConfig({ home, cwd, env, path: hostPath });
+  if (config.status === "resolved" && config.mutationSafe) {
+    return { status: "resolved", target: { settingsPath: join(config.policyRoot, "settings.json") } };
+  }
+  if (config.status === "resolved" && config.override === "empty") {
+    return { status: "refused", reason: "empty" };
+  }
+  return { status: "refused", reason: "unusable" };
 }
 
 export function defaultAgentHooksEntryPath(): string {
