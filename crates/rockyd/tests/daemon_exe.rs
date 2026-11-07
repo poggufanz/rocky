@@ -14,8 +14,14 @@ use std::time::{Duration, Instant};
 
 use interprocess::os::windows::named_pipe::pipe_mode::Bytes;
 use interprocess::os::windows::named_pipe::{PipeStream, RecvPipeStream, SendPipeStream};
-use rocky_proto::paths::{log_path, pipe_name, spool_dir};
-use rocky_proto::pipe::{ClientMsg, CmdName, ServerMsg, Status, StatusOp, decode, encode};
+use rocky_proto::paths::{
+    desk_dir, log_path, pipe_name, settings_path, spool_dir, tool_text_off_marker,
+};
+use rocky_proto::pipe::{
+    AgentKey, ClientMsg, CmdName, Gap, GapReason, Outcome, ServerMsg, Status, StatusOp,
+    TimelineKind, decode, encode,
+};
+use rocky_proto::settings::Settings;
 use tempfile::TempDir;
 
 const GUARD: Duration = Duration::from_secs(20);
@@ -43,33 +49,14 @@ fn hook_exe() -> &'static Path {
 
 /// Spawn the daemon; the guard kills it on drop so failing tests leak nothing.
 struct Daemon {
-    child: Child,
+    child: KillOnDrop,
     _home: TempDir,
 }
 
 impl Daemon {
     fn spawn(home: TempDir) -> Self {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_rockyd"))
-            .env("ROCKY_HOME", home.path())
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
-        // Fail fast if the daemon exits immediately: wait for the pipe but
-        // also surface an early exit instead of hanging until the guard.
-        let pipe = pipe_name(home.path());
-        let start = Instant::now();
-        loop {
-            if PipeStream::<Bytes, Bytes>::connect_by_path(pipe.as_str()).is_ok() {
-                break;
-            }
-            if let Ok(Some(status)) = child.try_wait() {
-                panic!("rockyd exited early: {status}");
-            }
-            assert!(start.elapsed() < GUARD, "pipe never appeared");
-            thread::sleep(Duration::from_millis(25));
-        }
+        let mut child = spawn_daemon(home.path());
+        wait_pipe(home.path(), &mut child);
         Daemon { child, _home: home }
     }
 
@@ -78,18 +65,50 @@ impl Daemon {
     }
 
     fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
-        self.child.try_wait()
+        self.child.0.try_wait()
     }
 
     fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
-        self.child.wait()
+        self.child.0.wait()
     }
 }
 
-impl Drop for Daemon {
+/// Kills its child and waits on drop, so a panicking assert never leaves a
+/// process behind.
+struct KillOnDrop(Child);
+
+impl Drop for KillOnDrop {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+fn spawn_daemon(home: &Path) -> KillOnDrop {
+    KillOnDrop(
+        Command::new(env!("CARGO_BIN_EXE_rockyd"))
+            .env("ROCKY_HOME", home)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    )
+}
+
+/// Wait for the pipe, surfacing an early daemon exit instead of hanging.
+fn wait_pipe(home: &Path, child: &mut KillOnDrop) {
+    let pipe = pipe_name(home);
+    let start = Instant::now();
+    loop {
+        if PipeStream::<Bytes, Bytes>::connect_by_path(pipe.as_str()).is_ok() {
+            break;
+        }
+        if let Ok(Some(status)) = child.0.try_wait() {
+            panic!("rockyd exited early: {status}");
+        }
+        assert!(start.elapsed() < GUARD, "pipe never appeared");
+        thread::sleep(Duration::from_millis(25));
     }
 }
 
@@ -207,21 +226,24 @@ fn seed_spool(spool: &Path, fixture: &str) -> usize {
 }
 
 fn run_hook(home: &Path, payload: &str) {
-    let mut child = Command::new(hook_exe())
-        .args(["desk-hook", "claude-code"])
-        .env("ROCKY_HOME", home)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
+    let mut child = KillOnDrop(
+        Command::new(hook_exe())
+            .args(["desk-hook", "claude-code"])
+            .env("ROCKY_HOME", home)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
     child
+        .0
         .stdin
         .take()
         .unwrap()
         .write_all(payload.as_bytes())
         .unwrap();
-    let status = child.wait().unwrap();
+    let status = child.0.wait().unwrap();
     assert!(status.success(), "hook failed: {status}");
 }
 
@@ -290,13 +312,15 @@ fn live_spool_file_reaches_subscriber() {
 fn second_daemon_exits_nonzero() {
     let home = home();
     let first = Daemon::spawn(home);
-    let mut second = Command::new(env!("CARGO_BIN_EXE_rockyd"))
-        .env("ROCKY_HOME", first.home())
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
+    let mut second = KillOnDrop(
+        Command::new(env!("CARGO_BIN_EXE_rockyd"))
+            .env("ROCKY_HOME", first.home())
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
     let status = wait_exit(&mut second, "second daemon");
     assert_eq!(status.code(), Some(3), "status: {status}");
     let log = fs::read_to_string(log_path(first.home())).unwrap();
@@ -329,13 +353,15 @@ fn second_daemon_touches_no_spool() {
         r#"{"hook_event_name":"SessionStart","session_id":"kept1","cwd":"C:\\r"}"#,
     );
 
-    let mut second = Command::new(env!("CARGO_BIN_EXE_rockyd"))
-        .env("ROCKY_HOME", first.home())
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
+    let mut second = KillOnDrop(
+        Command::new(env!("CARGO_BIN_EXE_rockyd"))
+            .env("ROCKY_HOME", first.home())
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
     let status = wait_exit(&mut second, "second daemon");
     assert_eq!(status.code(), Some(3), "status: {status}");
 
@@ -355,15 +381,17 @@ fn second_daemon_touches_no_spool() {
     assert_eq!(seen.status, Status::Idle);
 }
 
-/// Wait for a child with the anti-hang guard; kill it rather than hang forever.
-fn wait_exit(child: &mut Child, what: &str) -> std::process::ExitStatus {
+/// Wait for a child with the anti-hang guard; kill and reap it rather than
+/// hang forever on guard expiry.
+fn wait_exit(child: &mut KillOnDrop, what: &str) -> std::process::ExitStatus {
     let start = Instant::now();
     loop {
-        if let Some(s) = child.try_wait().unwrap() {
+        if let Some(s) = child.0.try_wait().unwrap() {
             return s;
         }
         if start.elapsed() >= GUARD {
-            let _ = child.kill();
+            let _ = child.0.kill();
+            let _ = child.0.wait();
             panic!("{what} never exited");
         }
         thread::sleep(Duration::from_millis(25));
@@ -411,4 +439,353 @@ fn stop_cmd_exits_zero_and_hook_keeps_spooling() {
     );
     assert_eq!(spool_files(daemon.home()).len(), 1);
     let _ = daemon.wait();
+}
+
+fn main_key(session: &str) -> AgentKey {
+    AgentKey {
+        session_id: session.into(),
+        agent_id: String::new(),
+    }
+}
+
+/// Adds a spool file with the given name and content.
+fn write_spool(home: &Path, name: &str, body: &str) {
+    let spool = spool_dir(home);
+    fs::create_dir_all(&spool).unwrap();
+    fs::write(spool.join(name), body).unwrap();
+}
+
+/// Read past non-matching messages until a snapshot satisfies `want`; the
+/// snapshot `hello_subscribe` already returned is checked first.
+fn snapshot_until(
+    client: &mut Client,
+    first: ServerMsg,
+    what: &str,
+    want: impl Fn(&ServerMsg) -> bool,
+) -> ServerMsg {
+    let mut next = Some(first);
+    let start = Instant::now();
+    loop {
+        let msg = match next.take() {
+            Some(m) => m,
+            None => decode(&client.read_line().unwrap()).unwrap(),
+        };
+        if want(&msg) {
+            return msg;
+        }
+        assert!(start.elapsed() < GUARD, "{what} never arrived");
+    }
+}
+
+/// Read past non-matching messages until the ack with `id` arrives.
+fn ack_for(client: &mut Client, id: u64) -> ServerMsg {
+    let start = Instant::now();
+    loop {
+        let msg: ServerMsg = decode(&client.read_line().unwrap()).unwrap();
+        let matches_id = matches!(&msg, ServerMsg::Ack { id: got, .. } if *got == id);
+        if matches_id {
+            return msg;
+        }
+        assert!(start.elapsed() < GUARD, "ack {id} never arrived");
+    }
+}
+
+#[test]
+fn restart_replays_history() {
+    let home = home();
+    let mut first = spawn_daemon(home.path());
+    wait_pipe(home.path(), &mut first);
+
+    let mut client = connect(&pipe_name(home.path()));
+    let _ = client.hello_subscribe();
+
+    run_hook(
+        home.path(),
+        r#"{"hook_event_name":"SessionStart","session_id":"r1","cwd":"C:\\r"}"#,
+    );
+    run_hook(
+        home.path(),
+        r#"{"hook_event_name":"UserPromptSubmit","session_id":"r1","cwd":"C:\\r"}"#,
+    );
+    run_hook(
+        home.path(),
+        r#"{"hook_event_name":"PreToolUse","session_id":"r1","cwd":"C:\\r","tool_name":"Bash","tool_use_id":"t1","tool_input":{"command":"npm test"}}"#,
+    );
+
+    let key = main_key("r1");
+    let start = Instant::now();
+    loop {
+        let msg: ServerMsg = decode(&client.read_line().unwrap()).unwrap();
+        if let ServerMsg::Status {
+            op: StatusOp::Upsert,
+            agent,
+        } = &msg
+            && agent.key == key
+            && agent.action.as_ref().and_then(|a| a.tool_use_id.as_deref()) == Some("t1")
+        {
+            break;
+        }
+        assert!(start.elapsed() < GUARD, "PreToolUse upsert never arrived");
+    }
+
+    // Hard kill: history must survive without a graceful exit.
+    let _ = first.0.kill();
+    let _ = first.0.wait();
+    drop(client);
+
+    let mut second = spawn_daemon(home.path());
+    wait_pipe(home.path(), &mut second);
+    let mut client = connect(&pipe_name(home.path()));
+    let first_snapshot = client.hello_subscribe();
+    let snapshot = snapshot_until(
+        &mut client,
+        first_snapshot,
+        "replayed agent",
+        |m| matches!(m, ServerMsg::Snapshot { agents, .. } if agents.iter().any(|a| a.key == main_key("r1"))),
+    );
+    match snapshot {
+        ServerMsg::Snapshot { agents, .. } => {
+            let main = agents.iter().find(|a| a.key == key).expect("agent missing");
+            assert_eq!(main.status, Status::Working, "{main:?}");
+            assert_eq!(
+                main.action.as_ref().and_then(|a| a.command.as_deref()),
+                Some("npm test"),
+                "{main:?}"
+            );
+        }
+        other => panic!("expected snapshot, got {other:?}"),
+    }
+
+    client.send(&encode(&ClientMsg::Timeline {
+        id: 1,
+        key: key.clone(),
+    }));
+    let start = Instant::now();
+    let reply = loop {
+        let msg: ServerMsg = decode(&client.read_line().unwrap()).unwrap();
+        if matches!(&msg, ServerMsg::Timeline { .. }) {
+            break msg;
+        }
+        assert!(start.elapsed() < GUARD, "timeline reply never arrived");
+    };
+    match reply {
+        ServerMsg::Timeline {
+            id,
+            key: got_key,
+            entries,
+        } => {
+            assert_eq!(id, 1);
+            assert_eq!(got_key, key);
+            let kinds: Vec<TimelineKind> = entries.iter().map(|e| e.kind).collect();
+            assert_eq!(
+                kinds,
+                [
+                    TimelineKind::SessionStart,
+                    TimelineKind::TurnStart,
+                    TimelineKind::Tool
+                ],
+                "{entries:?}"
+            );
+            assert_eq!(entries.last().unwrap().outcome, Some(Outcome::Pending));
+        }
+        other => panic!("expected timeline, got {other:?}"),
+    }
+}
+
+#[test]
+fn set_persists_broadcasts_and_syncs_marker() {
+    let home = home();
+    let mut first = spawn_daemon(home.path());
+    wait_pipe(home.path(), &mut first);
+    let mut client = connect(&pipe_name(home.path()));
+    let _ = client.hello_subscribe();
+
+    client.send(&encode(&ClientMsg::Set {
+        id: 2,
+        name: "tool_text".into(),
+        value: serde_json::json!(false),
+    }));
+
+    let start = Instant::now();
+    let (mut settings_seen, mut ack_seen) = (false, false);
+    while !(settings_seen && ack_seen) {
+        let msg: ServerMsg = decode(&client.read_line().unwrap()).unwrap();
+        match msg {
+            ServerMsg::Settings { settings } => {
+                assert!(!settings.tool_text, "{settings:?}");
+                settings_seen = true;
+            }
+            ServerMsg::Ack { id: 2, ok, error } => {
+                assert!(ok, "{error:?}");
+                ack_seen = true;
+            }
+            _ => {}
+        }
+        assert!(start.elapsed() < GUARD, "set reply never arrived");
+    }
+    assert!(tool_text_off_marker(home.path()).is_file());
+    let saved: Settings =
+        serde_json::from_str(&fs::read_to_string(settings_path(home.path())).unwrap()).unwrap();
+    assert!(!saved.tool_text, "{saved:?}");
+
+    let _ = first.0.kill();
+    let _ = first.0.wait();
+    drop(client);
+
+    let mut second = spawn_daemon(home.path());
+    wait_pipe(home.path(), &mut second);
+    let mut client = connect(&pipe_name(home.path()));
+    let first_snapshot = client.hello_subscribe();
+    snapshot_until(
+        &mut client,
+        first_snapshot,
+        "persisted setting",
+        |m| matches!(m, ServerMsg::Snapshot { settings, .. } if !settings.tool_text),
+    );
+}
+
+#[test]
+fn bad_set_acks_false_and_changes_nothing() {
+    let home = home();
+    let mut daemon = spawn_daemon(home.path());
+    wait_pipe(home.path(), &mut daemon);
+    let mut client = connect(&pipe_name(home.path()));
+    let _ = client.hello_subscribe();
+
+    client.send(&encode(&ClientMsg::Set {
+        id: 3,
+        name: "nope".into(),
+        value: serde_json::json!(true),
+    }));
+    match ack_for(&mut client, 3) {
+        ServerMsg::Ack { ok, error, .. } => {
+            assert!(!ok);
+            assert_eq!(error.as_deref(), Some("unknown setting"));
+        }
+        other => panic!("expected ack, got {other:?}"),
+    }
+    assert!(!settings_path(home.path()).exists());
+}
+
+#[test]
+fn unreadable_settings_show_in_health_until_a_set() {
+    let home = home();
+    fs::create_dir_all(desk_dir(home.path())).unwrap();
+    fs::write(settings_path(home.path()), "{bad").unwrap();
+
+    let mut daemon = spawn_daemon(home.path());
+    wait_pipe(home.path(), &mut daemon);
+    let mut client = connect(&pipe_name(home.path()));
+    let first_snapshot = client.hello_subscribe();
+    let snapshot = snapshot_until(
+        &mut client,
+        first_snapshot,
+        "unreadable health",
+        |m| matches!(m, ServerMsg::Snapshot { health, .. } if health.settings_unreadable),
+    );
+    match snapshot {
+        ServerMsg::Snapshot { settings, .. } => assert_eq!(settings, Settings::default()),
+        other => panic!("expected snapshot, got {other:?}"),
+    }
+    assert_eq!(fs::read(settings_path(home.path())).unwrap(), b"{bad");
+
+    client.send(&encode(&ClientMsg::Set {
+        id: 4,
+        name: "history".into(),
+        value: serde_json::json!(false),
+    }));
+    let start = Instant::now();
+    let (mut ack_seen, mut fixed_seen) = (false, false);
+    while !(ack_seen && fixed_seen) {
+        let msg: ServerMsg = decode(&client.read_line().unwrap()).unwrap();
+        match msg {
+            ServerMsg::Ack { id: 4, ok, .. } => {
+                assert!(ok);
+                ack_seen = true;
+            }
+            ServerMsg::Health { health } if !health.settings_unreadable => fixed_seen = true,
+            _ => {}
+        }
+        assert!(start.elapsed() < GUARD, "set reply never arrived");
+    }
+    let saved: Settings =
+        serde_json::from_str(&fs::read_to_string(settings_path(home.path())).unwrap()).unwrap();
+    assert!(!saved.history, "{saved:?}");
+}
+
+#[test]
+fn start_reports_bad_spool_file_as_gap() {
+    let home = home();
+    write_spool(home.path(), "0000000000042-1.json", "{bad");
+
+    let mut daemon = spawn_daemon(home.path());
+    wait_pipe(home.path(), &mut daemon);
+    let mut client = connect(&pipe_name(home.path()));
+    let first_snapshot = client.hello_subscribe();
+    let snapshot = snapshot_until(
+        &mut client,
+        first_snapshot,
+        "bad file gap",
+        |m| matches!(m, ServerMsg::Snapshot { health, .. } if health.bad_files == 1),
+    );
+    match snapshot {
+        ServerMsg::Snapshot { health, .. } => {
+            assert_eq!(health.bad_files, 1, "{health:?}");
+            assert!(
+                health.gaps.contains(&Gap {
+                    from_ms: 42,
+                    to_ms: 42,
+                    count: 1,
+                    reason: GapReason::BadFile,
+                }),
+                "{health:?}"
+            );
+        }
+        other => panic!("expected snapshot, got {other:?}"),
+    }
+}
+
+#[test]
+fn timeline_for_unknown_agent_is_empty() {
+    let home = home();
+    let mut daemon = spawn_daemon(home.path());
+    wait_pipe(home.path(), &mut daemon);
+    let mut client = connect(&pipe_name(home.path()));
+    let _ = client.hello_subscribe();
+
+    let nobody = AgentKey {
+        session_id: "nobody".into(),
+        agent_id: "gone".into(),
+    };
+    client.send(&encode(&ClientMsg::Timeline {
+        id: 3,
+        key: nobody.clone(),
+    }));
+    let start = Instant::now();
+    let reply = loop {
+        let msg: ServerMsg = decode(&client.read_line().unwrap()).unwrap();
+        if matches!(&msg, ServerMsg::Timeline { .. }) {
+            break msg;
+        }
+        assert!(start.elapsed() < GUARD, "timeline reply never arrived");
+    };
+    match reply {
+        ServerMsg::Timeline { id, key, entries } => {
+            assert_eq!(id, 3);
+            assert_eq!(key, nobody);
+            assert!(entries.is_empty(), "{entries:?}");
+        }
+        other => panic!("expected timeline, got {other:?}"),
+    }
+
+    // The connection stays open: a following set still acks.
+    client.send(&encode(&ClientMsg::Set {
+        id: 4,
+        name: "tool_text".into(),
+        value: serde_json::json!(true),
+    }));
+    match ack_for(&mut client, 4) {
+        ServerMsg::Ack { ok, .. } => assert!(ok),
+        other => panic!("expected ack, got {other:?}"),
+    }
 }

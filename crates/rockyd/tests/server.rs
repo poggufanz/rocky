@@ -13,7 +13,8 @@ use interprocess::os::windows::named_pipe::pipe_mode::Bytes;
 use interprocess::os::windows::named_pipe::{PipeStream, RecvPipeStream, SendPipeStream};
 use rocky_proto::paths::pipe_name;
 use rocky_proto::pipe::{
-    CLIENT_QUEUE_CAP, ClientMsg, CmdName, Health, LINE_CAP, ServerMsg, Status, decode, encode,
+    AgentKey, CLIENT_QUEUE_CAP, ClientMsg, CmdName, Health, LINE_CAP, ServerMsg, Status, decode,
+    encode,
 };
 use rocky_proto::settings::Settings;
 use rockyd::server::{BindError, Control, DAEMON_VERSION, Hub, serve};
@@ -140,6 +141,33 @@ fn snapshot_msg() -> ServerMsg {
         aggregate: Status::Idle,
         health: Health::default(),
         settings: Settings::default(),
+    }
+}
+
+/// hello + subscribe, leaving the client positioned after the snapshot.
+fn hello_subscribe(client: &mut Client) {
+    client.send(&encode(&ClientMsg::Hello {
+        client: "desk".into(),
+        version: "0.1.0".into(),
+    }));
+    let hello: ServerMsg = decode(&client.read_line().unwrap()).unwrap();
+    assert!(matches!(hello, ServerMsg::Hello { .. }), "{hello:?}");
+    client.send(&encode(&ClientMsg::Subscribe));
+    let snap: ServerMsg = decode(&client.read_line().unwrap()).unwrap();
+    assert!(matches!(snap, ServerMsg::Snapshot { .. }), "{snap:?}");
+}
+
+/// Next control message, guarded.
+fn next_control(rx: &mpsc::Receiver<Control>) -> Control {
+    let start = Instant::now();
+    loop {
+        match rx.recv_timeout(Duration::from_millis(50)) {
+            Ok(c) => return c,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                assert!(start.elapsed() < GUARD, "control never arrived");
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => panic!("control gone"),
+        }
     }
 }
 
@@ -331,7 +359,9 @@ fn stop_cmd_reaches_control_and_acks() {
             Err(mpsc::RecvTimeoutError::Disconnected) => panic!("control gone"),
         }
     };
-    let Control::Stop { id, reply, flushed } = ctrl;
+    let Control::Stop { id, reply, flushed } = ctrl else {
+        panic!("expected stop, got {ctrl:?}");
+    };
     assert_eq!(id, 7);
     reply
         .send(ServerMsg::Ack {
@@ -397,4 +427,144 @@ fn snapshot_always_precedes_broadcast_deltas() {
     }
     stop.store(true, std::sync::atomic::Ordering::Relaxed);
     hammer.join().unwrap();
+}
+
+#[test]
+fn cmd_show_reaches_other_clients_and_acks_sender() {
+    let home = home();
+    let hub = Arc::new(Hub::new());
+    let (control_tx, _control_rx) = mpsc::channel();
+    let _handle = serve(
+        home.path(),
+        Arc::clone(&hub),
+        Arc::new(snapshot_msg),
+        control_tx,
+    )
+    .unwrap();
+
+    let pipe = pipe_name(home.path());
+    let mut a = connect(&pipe);
+    let mut b = connect(&pipe);
+    hello_subscribe(&mut a);
+    hello_subscribe(&mut b);
+
+    b.send(&encode(&ClientMsg::Cmd {
+        name: CmdName::Show,
+        id: 5,
+    }));
+
+    // A sees the broadcast.
+    let shown: ServerMsg = decode(&a.read_line().unwrap()).unwrap();
+    assert_eq!(shown, ServerMsg::Show);
+
+    // B sees its own broadcast first, then the ack queued on its hub queue.
+    let shown_b: ServerMsg = decode(&b.read_line().unwrap()).unwrap();
+    assert_eq!(shown_b, ServerMsg::Show);
+    let ack: ServerMsg = decode(&b.read_line().unwrap()).unwrap();
+    assert_eq!(
+        ack,
+        ServerMsg::Ack {
+            id: 5,
+            ok: true,
+            error: None
+        }
+    );
+}
+
+#[test]
+fn set_and_timeline_route_through_control_to_sender_only() {
+    let home = home();
+    let hub = Arc::new(Hub::new());
+    let (control_tx, control_rx) = mpsc::channel();
+    let _handle = serve(
+        home.path(),
+        Arc::clone(&hub),
+        Arc::new(snapshot_msg),
+        control_tx,
+    )
+    .unwrap();
+
+    let pipe = pipe_name(home.path());
+    let mut sender = connect(&pipe);
+    let mut bystander = connect(&pipe);
+    hello_subscribe(&mut sender);
+    hello_subscribe(&mut bystander);
+
+    let key = AgentKey {
+        session_id: "s1".into(),
+        agent_id: String::new(),
+    };
+
+    sender.send(&encode(&ClientMsg::Set {
+        id: 1,
+        name: "tool_text".into(),
+        value: serde_json::json!(false),
+    }));
+    let Control::Set {
+        id,
+        name,
+        value,
+        reply,
+    } = next_control(&control_rx)
+    else {
+        panic!("expected set");
+    };
+    assert_eq!(id, 1);
+    assert_eq!(name, "tool_text");
+    assert_eq!(value, serde_json::json!(false));
+    reply
+        .send(ServerMsg::Ack {
+            id: 1,
+            ok: true,
+            error: None,
+        })
+        .unwrap();
+    let ack: ServerMsg = decode(&sender.read_line().unwrap()).unwrap();
+    assert_eq!(
+        ack,
+        ServerMsg::Ack {
+            id: 1,
+            ok: true,
+            error: None
+        }
+    );
+
+    sender.send(&encode(&ClientMsg::Timeline {
+        id: 2,
+        key: key.clone(),
+    }));
+    let Control::Timeline {
+        id,
+        key: got_key,
+        reply,
+    } = next_control(&control_rx)
+    else {
+        panic!("expected timeline");
+    };
+    assert_eq!(id, 2);
+    assert_eq!(got_key, key);
+    reply
+        .send(ServerMsg::Timeline {
+            id: 2,
+            key: key.clone(),
+            entries: vec![],
+        })
+        .unwrap();
+    let reply: ServerMsg = decode(&sender.read_line().unwrap()).unwrap();
+    assert_eq!(
+        reply,
+        ServerMsg::Timeline {
+            id: 2,
+            key,
+            entries: vec![]
+        }
+    );
+
+    // Neither reply reached the bystander: a marker broadcast is its next line.
+    let marker = ServerMsg::Health {
+        health: Health::default(),
+    };
+    hub.broadcast(&marker);
+    let got: ServerMsg = decode(&bystander.read_line().unwrap()).unwrap();
+    assert_eq!(got, marker);
 }
