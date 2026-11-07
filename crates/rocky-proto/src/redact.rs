@@ -554,14 +554,14 @@ fn is_mapped_control(character: char) -> bool {
     code <= 0x1f || (0x7f..=0x9f).contains(&code)
 }
 
-/// Cut to the scan cap, map controls to spaces, and redact as a cut prefix.
+/// Cut to the scan cap, redact the raw prefix, and map controls to spaces.
 fn bound_tool_text_step(raw: &str) -> (String, bool) {
     let mut end = raw.len().min(TOOL_TEXT_SCAN_BYTES);
     while !raw.is_char_boundary(end) {
         end -= 1;
     }
-    let prefix = &raw[..end];
-    let mapped: String = prefix
+    let redacted = redact_secrets_at_boundary(&raw[..end], true);
+    let mapped: String = redacted
         .chars()
         .map(|character| {
             if is_mapped_control(character) {
@@ -571,11 +571,14 @@ fn bound_tool_text_step(raw: &str) -> (String, bool) {
             }
         })
         .collect();
-    (redact_secrets_at_boundary(&mapped, true), end < raw.len())
+    (mapped, end < raw.len())
 }
 
-/// Bound a tool-text field for capture: scan cap, control mapping, redaction,
+/// Bound a tool-text field for capture: scan cap, redaction, control mapping,
 /// then character cap.
+///
+/// Redaction runs before control mapping so terminal escape sequences cannot
+/// break a secret's word boundary and leave the token readable.
 ///
 /// Returns the bounded text and whether either cut removed anything.
 pub fn bound_tool_text(raw: &str) -> (String, bool) {
@@ -626,8 +629,26 @@ mod tests {
     fn bound_tool_text_maps_controls_to_spaces() {
         assert_eq!(
             bound_tool_text("a\u{1b}[31mb\tc"),
-            ("a [31mb c".to_string(), false)
+            ("ab c".to_string(), false)
         );
+        assert_eq!(bound_tool_text("a\u{7}b"), ("a b".to_string(), false));
+    }
+
+    #[test]
+    fn bound_tool_text_redacts_tokens_glued_to_terminal_sequences() {
+        let token = "a".repeat(36);
+        for raw in [
+            format!("\u{1b}[31mghp_{token} done"),
+            format!("\u{1b}]0;t\u{7}ghp_{token}"),
+            format!("\u{9b}31mghp_{token}"),
+        ] {
+            let (text, _) = bound_tool_text(&raw);
+            assert!(!text.contains("ghp_"), "{raw:?} -> {text:?}");
+            assert!(
+                text.contains("[redacted github token]"),
+                "{raw:?} -> {text:?}"
+            );
+        }
     }
 
     #[test]
