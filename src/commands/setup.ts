@@ -518,7 +518,7 @@ async function runRepoCaptureAction(
 const CLAUDE_CONFIG_DIR_EMPTY =
   "Setup stopped: CLAUDE_CONFIG_DIR is set but empty. Unset it or set an absolute directory path.";
 const CLAUDE_CONFIG_DIR_UNUSABLE =
-  "Setup stopped: CLAUDE_CONFIG_DIR must be an absolute directory path without a trailing separator.";
+  "Setup stopped: CLAUDE_CONFIG_DIR must be a normalized absolute directory path (no trailing separator, no . or .. segments, native path separators).";
 
 /**
  * Resolve the Claude settings file once per action. A refused value is

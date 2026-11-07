@@ -341,7 +341,13 @@ test("desk hooks: trailing-separator CLAUDE_CONFIG_DIR refuses with the variable
     setup(["--desk-hooks", hookBin], commandDependencies(home, { CLAUDE_CONFIG_DIR: `${cfg}${sep}` }, hookBin)));
 
   assert.equal(output.code, 1, output.stderr);
-  assert.ok(output.stderr.includes("CLAUDE_CONFIG_DIR must be an absolute directory path"), output.stderr);
+  assert.ok(
+    output.stderr.includes(
+      "Setup stopped: CLAUDE_CONFIG_DIR must be a normalized absolute directory path "
+        + "(no trailing separator, no . or .. segments, native path separators).",
+    ),
+    output.stderr,
+  );
   assert.deepEqual(filesUnder(root), []);
 });
 

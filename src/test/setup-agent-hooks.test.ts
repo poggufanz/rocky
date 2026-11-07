@@ -221,6 +221,24 @@ test("defaultAgentHooksTarget: relative or trailing-separator CLAUDE_CONFIG_DIR 
   }
 });
 
+test("defaultAgentHooksTarget: every shape the refusal message names is refused as unusable", (t) => {
+  const home = fixture(t).root;
+  const cfg = fixture(t).root;
+  const shapes: ReadonlyArray<readonly [string, string]> = [
+    ["dot segment", `${cfg}${sep}.${sep}profile`],
+    ["dot-dot segment", `${cfg}${sep}..${sep}profile`],
+    ["doubled separator", `${cfg}${sep}${sep}profile`],
+    ["decomposed unicode", `${cfg}${sep}é`],
+    ["non-native separator", sep === "\\" ? cfg.replaceAll("\\", "/") : `${cfg}\\profile`],
+  ];
+  for (const [name, configured] of shapes) {
+    assert.deepEqual(defaultAgentHooksTarget(home, { CLAUDE_CONFIG_DIR: configured }, home), {
+      status: "refused",
+      reason: "unusable",
+    }, name);
+  }
+});
+
 test("missing parent fails before consent or proposed JSON and never mutates filesystem", async (t) => {
   const value = fixture(t);
   const details: string[] = [];
