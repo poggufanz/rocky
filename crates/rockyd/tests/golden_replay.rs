@@ -48,6 +48,50 @@ fn stop_failure_session_ends_failed() {
     );
 }
 
+fn key(sid: &str, aid: &str) -> AgentKey {
+    AgentKey {
+        session_id: sid.into(),
+        agent_id: aid.into(),
+    }
+}
+
+#[test]
+fn real_session_main_agent_flow() {
+    let seen = replay_fixture("session.jsonl");
+    let s1 = main_agent(&seen, "S1");
+    assert_eq!(s1.first(), Some(&Status::Idle), "{s1:?}");
+    assert_eq!(s1.last(), Some(&Status::Ended), "{s1:?}");
+    assert!(s1.contains(&Status::Done), "{s1:?}");
+    // A PermissionRequest flips to NeedsYou; the answered tool's PostToolUse flips back.
+    assert!(
+        s1.windows(2).any(|w| w == [Status::NeedsYou, Status::Working]),
+        "{s1:?}"
+    );
+}
+
+#[test]
+fn real_subagent_tracked_and_helper_stops_ignored() {
+    let seen = replay_fixture("session.jsonl");
+    // A4 is the only subagent with a SubagentStart. A1-A3 and A5-A9 arrive as a
+    // bare SubagentStop (agent_type "") after turns: internal helpers, not rows.
+    let keys: Vec<AgentKey> = seen.keys().cloned().collect();
+    assert_eq!(keys, [key("S1", ""), key("S1", "A4"), key("S2", "")]);
+    assert_eq!(
+        seen[&key("S1", "A4")],
+        [Status::Working, Status::Done, Status::Ended]
+    );
+}
+
+#[test]
+fn async_post_tool_use_after_stop_keeps_done() {
+    // S2 ran PostToolUse as an async hook that slept 3 s, so it lands after Stop.
+    let seen = replay_fixture("session.jsonl");
+    assert_eq!(
+        main_agent(&seen, "S2"),
+        &[Status::Idle, Status::Working, Status::Done]
+    );
+}
+
 #[test]
 fn replay_helper_tracks_all_agents() {
     let seen = replay_fixture("stop-failure.jsonl");

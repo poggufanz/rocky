@@ -57,6 +57,15 @@ impl StatusState {
         {
             return ApplyOutcome::Late;
         }
+        // Claude Code 2.1.319 fires a bare SubagentStop (agent_type "", no
+        // SubagentStart) for internal helper agents after most turns. A row for
+        // an agent never seen before would be a phantom "done" child per turn.
+        if ev.hook_event_name == "SubagentStop"
+            && !key.agent_id.is_empty()
+            && !self.agents.contains_key(&key)
+        {
+            return ApplyOutcome::Changed(Changes::default());
+        }
         if matches!(
             ev.hook_event_name.as_str(),
             "SessionStart" | "UserPromptSubmit"
