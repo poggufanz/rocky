@@ -36,7 +36,7 @@ fn install_panic_log(home: &std::path::Path) {
 
 #[cfg(not(windows))]
 fn main() {
-    eprintln!("rocky-desk is Windows-only in M0.");
+    eprintln!("rocky-desk is Windows-only for now.");
     std::process::exit(1);
 }
 

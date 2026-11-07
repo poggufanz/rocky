@@ -1,5 +1,5 @@
 /**
- * Listening v1 canonical types (spec 2026-09-26-rocky-v100-listening-design.md, §§5,7,11).
+ * Listening v1 canonical types.
  *
  * V1 emits ONLY: direct | filesystem_observed | content_mapped |
  * candidate_link | temporal_candidate | unknown.
@@ -69,7 +69,7 @@ export interface ListeningEdge {
   basis: V1LinkBasis;
 }
 
-/** Verified test-run claim (§5): all three fields required before test_run/validated_by. */
+/** Verified test-run claim: all three fields required before test_run/validated_by. */
 export interface TestRunClaim {
   commandIdentity: string;
   outcome: "pass" | "fail";
@@ -128,7 +128,7 @@ export interface FileVersionObject {
 
 /** candidate_link / temporal_candidate: weak non-causal context. NEVER promoted to direct, content_mapped, validated_by, episode membership, hunk attribution, or bundle grouping. Promotion is simply never performed anywhere in this codebase. */
 
-// --- Bounds (spec §11): owner-approved as the v1 defaults. The PROPOSAL_
+// --- Bounds: owner-approved as the v1 defaults. The PROPOSAL_
 // prefix stays so callers and listening-types.test.ts keep one stable name.
 // Event + object caps form the per-repo disk budget told to users at consent;
 // the file-version and path caps are internal safety bounds, not budget. ---

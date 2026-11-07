@@ -414,7 +414,10 @@ export function parsePrePushStdin(text: string): PushRef[] {
   return refs;
 }
 
-/** Returns null for a branch deletion. New refs are resolved by Task 12. */
+/**
+ * Returns null for a branch deletion. New refs are resolved by the caller
+ * (`resolveNewRef` in `commands/check.ts`).
+ */
 export function rangeForPush(ref: PushRef): PushRange {
   if (ZERO_SHA.test(ref.localSha)) return null;
   if (ZERO_SHA.test(ref.remoteSha)) return { kind: "new-ref", head: ref.localSha };

@@ -521,7 +521,7 @@ test("unknown leading recall options return usage before reading memory", async 
   assertRockyLinesArePlain(output.stderr);
 });
 
-test("a memory read failure on the second (recentFailures) call cannot leak a raw Node error (Minor 3)", async () => {
+test("a memory read failure on the second (recentFailures) call cannot leak a raw Node error", async () => {
   const memory: MemoryQueries = {
     recall() { return []; },
     recentFailures() { throw new Error("EISDIR: illegal operation on a directory"); },

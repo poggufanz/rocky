@@ -941,7 +941,7 @@ test("only explicit benign effective defaults may be absent from the raw base la
     { name: "disabled", effective: { ...base, enabled: false }, expected: "conflict" },
     { name: "required", effective: { ...base, required: true }, expected: "conflict" },
     // Pinned from a real codex-cli 0.146.1 app-server post-write config/read
-    // (gate 12 host acceptance, disposable CODEX_HOME): the effective view for
+    // (disposable CODEX_HOME): the effective view for
     // any mcp_servers.<name> entry always carries a synthesized, origin-less
     // `environment_id` leaf defaulting to "local" for a command/args (stdio)
     // server, exactly like the already-recognized `enabled`/`tool_timeout_sec`
@@ -1003,7 +1003,7 @@ test("official config paths and versions must be absolute, exact, and nonempty",
   //     (see codexHome above) asks win32 to fill in the current drive for a
   //     driveless root, so configPath is actually drive-lettered ("D:\\..."),
   //     and a leading-separator strip leaves the drive letter in place -
-  //     verified empirically (round 2 of this file's Windows fixes: this same
+  //     verified empirically (this same
   //     mistake left relativePath === configPath on windows-latest CI).
   // path.parse(...).root strips whatever the real root is - "/", "\\", or a
   // drive - on every platform, which is what actually makes this relative.
@@ -1063,10 +1063,8 @@ test("absent registration is added with expectedVersion CAS and exact post-state
 });
 
 // Regression pinned from an actual real codex-cli 0.146.1 app-server session
-// (gate 12 host acceptance finding, disposable CODEX_HOME under /tmp; see
-// docs/superpowers/sdd/2026-08-06-v021-final-hardening-handover/
-// codex-provenance-investigation.md for the full raw transcript). Against the
-// real binary, Rocky's post-write verification `config/read` came back with
+// (disposable CODEX_HOME under /tmp). Against the real binary, Rocky's
+// post-write verification `config/read` came back with
 // this exact shape: the effective `mcp_servers.rocky` entry carried three
 // keys beyond command/args/env - `environment_id: "local"`, `enabled: true`,
 // `tool_timeout_sec: null` - and `origins` had no leaf for `environment_id`
@@ -1137,7 +1135,7 @@ test("session shutdown failure after a verified absent-add still reports configu
   assert.equal(session.closeCount, 1);
 });
 
-// Negative twin of the test above (Minor 2, whole-branch re-review B):
+// Negative twin of the test above:
 // `verifiedAbsentAdd` must stay false when the CAS add itself never advanced
 // the version - a mutant that hoists the flag above that check would report
 // "configured" here too, exactly the "a failed or unverified write is
@@ -1203,7 +1201,7 @@ test("absent-add post-state verification requires the exact desired entry bytes,
   assert.equal(configured.status, "failed");
   assert.match(configured.detail ?? "", /could not be verified/i);
   assert.deepEqual(configured.manualRegistration, registration);
-  // Gate 12 host acceptance found Rocky's CAS write landing on disk while the
+  // Host acceptance against a real codex-cli found Rocky's CAS write landing on disk while the
   // reported failure told the user to register manually, without ever
   // disclosing the file had already changed. This point is reached only
   // after writeVersion() has confirmed the write advanced the on-disk
@@ -1770,9 +1768,7 @@ test("remove post-state mismatch is failure with retained recovery authority", a
   // Same disclosure requirement: reached only after writeVersion() confirms
   // the null/replace removal write advanced the on-disk version (a real
   // codex-cli 0.146.1 host was observed hitting exactly this branch on a
-  // genuinely successful removal - see
-  // docs/superpowers/sdd/2026-08-06-v021-final-hardening-handover/
-  // codex-provenance-investigation.md). The message must say the entry was
+  // genuinely successful removal). The message must say the entry was
   // removed and name the file, not just point at the backup as though
   // nothing had changed yet.
   assert.match(removed.detail ?? "", /removal|remains|verif/i);

@@ -3,7 +3,7 @@ import { performance } from "node:perf_hooks";
 import { fingerprint, fingerprintSignature, legacyFingerprint, legacyFingerprintSignature, queryTokens, similarity, signatureLines } from "../dist/core/fingerprint.js";
 import { queryRecall, retrievalEvidenceTokens } from "../dist/core/memory-query.js";
 
-// Deterministic Task-6 workload: 25k v1 records and 25k v2 records with the
+// Deterministic workload: 25k v1 records and 25k v2 records with the
 // same mixed HTTP/port families, including trusted v1/v2 witness families.
 // Generation is outside the timed sections.
 const RECORD_COUNT = 50_000;

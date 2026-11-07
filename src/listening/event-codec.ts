@@ -1,5 +1,5 @@
 /**
- * Listening event-line codec (spec §7). Pure: zero node:fs imports.
+ * Listening event-line codec. Pure: zero node:fs imports.
  * Shared by the write side (event-log.ts) and the MCP-safe read side
  * (event-log-read.ts) so readers never transitively import a writer.
  */

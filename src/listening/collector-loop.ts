@@ -1,5 +1,5 @@
 /**
- * GUI-owned collector loop (spec §3, §6). While the foreground GUI lives,
+ * GUI-owned collector loop. While the foreground GUI lives,
  * every consented repo gets one lease-guarded owner that reconciles on a
  * bounded interval. A process that loses the lease skips that repo; a
  * revoked repo is released and stops capturing, its history stays. MCP

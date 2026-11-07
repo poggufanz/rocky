@@ -1,5 +1,5 @@
 /**
- * Read-only listening log access (spec §7). MCP-safe: imports only
+ * Read-only listening log access. MCP-safe: imports only
  * node:fs READ functions plus pure helpers. No writer-named imports.
  */
 import { lstatSync, readdirSync, readFileSync } from "node:fs";

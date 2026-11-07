@@ -1,9 +1,8 @@
 /**
- * PowerShell hook install/uninstall/status (spec §5 "Test wajib" 1-6,
- * task-4-brief). Fast tests (1-3, plus a light status/corrupt/idempotency
- * pass) exercise `hookInstall`/`hookUninstall`/`hookStatus`'s PowerShell
- * branch directly against an injectable profile path via
- * `ROCKY_TEST_POWERSHELL_HOSTS` — the PowerShell analogue of
+ * PowerShell hook install/uninstall/status. Fast tests (plus a light
+ * status/corrupt/idempotency pass) exercise `hookInstall`/`hookUninstall`/
+ * `hookStatus`'s PowerShell branch directly against an injectable profile
+ * path via `ROCKY_TEST_POWERSHELL_HOSTS` — the PowerShell analogue of
  * `hook-install.test.ts`'s `HOME`/`USERPROFILE` override for `.bashrc` — so
  * none of them ever reach a real `$PROFILE`. The underlying transaction
  * safety (settle/topology-refusal/publish) is the exact same audited
@@ -12,11 +11,10 @@
  * (codec selection, per-host labels, asset name).
  *
  * Real-host tests (skip cleanly, with a stated reason, when the host binary
- * is absent) cover spec test 6 and stand as the regression guard for three
- * bugs this release's implementer found and fixed by running the actual
- * shipped `rocky-hook.ps1` against real `powershell.exe`/`pwsh.exe`, not a
- * script-mode approximation — see task-4-report.md for the full empirical
- * record:
+ * is absent) drive the shipped hook through a real PowerShell session and
+ * stand as the regression guard for three bugs found and fixed by running
+ * the actual shipped `rocky-hook.ps1` against real `powershell.exe`/
+ * `pwsh.exe`, not a script-mode approximation:
  *   1. Invoking the captured inner-`prompt` FunctionInfo's own `.ScriptBlock`
  *      directly (`&`/`.Invoke()`) hangs the shell dead, or crashes it with
  *      StackOverflowException — fixed by rebuilding a fresh, unbound
@@ -81,10 +79,10 @@ const packageRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 verifyShellAssetsStaged();
 
 /**
- * Fix round 3: every real-host test below can leave a genuinely detached
+ * Every real-host test below can leave a genuinely detached
  * `rocky`/host-exe child process still holding its scratch sandbox open when
- * the test function returns and `t.after` fires -- fire-and-forget (Findings
- * 1 and 5) means nothing in this file's own control flow ever waits for that
+ * the test function returns and `t.after` fires -- fire-and-forget
+ * means nothing in this file's own control flow ever waits for that
  * child, so a plain `rmSync` races it. Windows refuses to remove a directory
  * a live process holds (EPERM), and that race is real, not theoretical: it
  * was reproduced on this exact suite. The two tests with a KNOWN, deliberate
@@ -170,7 +168,7 @@ function captureStderr(t: TestContext): () => string {
   return () => chunks.join("");
 }
 
-// --- spec test 1: install then uninstall returns the profile byte-for-byte ---
+// --- install then uninstall returns the profile byte-for-byte ---
 
 test("PowerShell hook install then uninstall restores the profile, leaving only the one separator line the shared codec always leaves (matches bash's own pinned behavior)", (t) => {
   const sandbox = powerShellSandbox(t);
@@ -214,7 +212,7 @@ test("PowerShell hook install creates a missing profile with exactly the managed
   assert.match(sandbox.stderr(), /Hook installed in Windows PowerShell\. Open a new shell to activate it\./);
 });
 
-// --- spec test 2: installing twice does not duplicate the block -----------
+// --- installing twice does not duplicate the block -----------
 
 test("PowerShell hook install twice does not duplicate the block", (t) => {
   const sandbox = powerShellSandbox(t);
@@ -228,7 +226,7 @@ test("PowerShell hook install twice does not duplicate the block", (t) => {
   assert.equal(readFileSync(sandbox.profile, "utf8").match(/rocky hook >>>/g)?.length, 1);
 });
 
-// --- spec test 3: a profile with existing user content is not damaged -----
+// --- a profile with existing user content is not damaged -----
 
 test("PowerShell hook install preserves existing profile content around the block", (t) => {
   const sandbox = powerShellSandbox(t);
@@ -253,7 +251,7 @@ test("PowerShell hook status reports absent, then installed, per host", (t) => {
   assert.equal(hookInstall(), 0, sandbox.stderr());
   assert.equal(hookStatus(), 0, sandbox.stderr());
   assert.match(sandbox.stderr(), /Windows PowerShell: installed, hook version 0\.5\.0, PowerShell 5\.1\.26100\.9168\./);
-  // Ruling 2: the $Error[0] shift must be disclosed where a user actually
+  // The $Error[0] shift must be disclosed where a user actually
   // meets it -- rocky hook status for the PowerShell hosts.
   assert.match(sandbox.stderr(), /\$Error/, "status must disclose the $Error shift for a PowerShell host");
 });
@@ -512,7 +510,7 @@ test("a profile outside home is refused with the variable that allows it, and in
   assert.equal(existsSync(outsideProfile), false, "nothing was written outside home");
 });
 
-// Finding 3, final whole-branch review: every other new string in this
+// Every other new string in this
 // release has a dedicated validateOutputLine test and/or a behavioral test;
 // this one (hook.ts's publishTarget, the non-bashrc branch) shipped with
 // neither. The string itself already passes the voice rules -- this closes
@@ -608,7 +606,7 @@ test("hookInstall installs bash and the PowerShell host independently, aggregati
   assert.equal(powershellHookBlockCodec.classify(readFileSync(join(root, "profile7.ps1"))), "absent");
 });
 
-// --- F1 (task-a-brief): profile's parent directory does not exist ---------
+// --- profile's parent directory does not exist ---------
 //
 // Real machine, real bug: `Documents\WindowsPowerShell\` is not created by a
 // default Windows install -- only `Documents\PowerShell\` (PowerShell 7)
@@ -715,7 +713,7 @@ test("hookInstall reports a distinct message when the profile's folder genuinely
   // proven above. Only this one path is intercepted so every other
   // mkdirSync this same install makes (~/.rocky and its assets) is
   // untouched, following this file's existing lstatSync-injection pattern
-  // (hook-block.test.ts's round 7 F6 test).
+  // (as in hook-block.test.ts's settle-disclosure test).
   const originalMkdirSync = fs.mkdirSync;
   (fs as unknown as { mkdirSync: typeof fs.mkdirSync }).mkdirSync = ((
     ...args: Parameters<typeof fs.mkdirSync>
@@ -746,7 +744,7 @@ test("hookInstall reports a distinct message when the profile's folder genuinely
   assert.equal(existsSync(missingParent), false, "the blocked directory was genuinely never created");
 });
 
-// --- real-host tests: spec test 6, skip cleanly when the host is absent ---
+// --- real-host tests: skip cleanly when the host is absent ---
 
 function findRealPwsh(): string | undefined {
   const candidates = ["pwsh"];
@@ -833,7 +831,7 @@ test(
 
 // --- profileWithinHome: the home-containment guard (pure function) -------
 //
-// P1 fix (2026-08-18 stress-test findings, #2): `detectPowerShellHosts` used
+// `detectPowerShellHosts` used
 // to trust `$PROFILE` from a real, unsandboxed `powershell.exe`/`pwsh.exe`
 // probe unconditionally -- that probe never passes through
 // `homedir()`/`USERPROFILE`, so a sandboxed USERPROFILE/HOME (CI, tests,
@@ -1007,19 +1005,17 @@ test(
 );
 
 /**
- * The regression guard for the three bugs task-4-report.md records finding
- * by running the real, built rocky-hook.ps1 against a real interactive host:
- * the inner-prompt recursion/hang, the $LASTEXITCODE-overrides-$? false
- * positive, and Windows PowerShell 5.1's embedded-quote argument-splitting
- * bug. Drives a real interactive session (RedirectStandardInput over a plain
- * pipe -- the same technique the Task 3 spike used, disclosed as harness-only
- * for the five items still UNVERIFIED, not for this) through a failing
- * cmdlet, a failing native command, and a successful cmdlet, then asserts on
- * the *effects* a real user would see: $?/$LASTEXITCODE unchanged from what
- * the unhooked shell would show, and memory.jsonl holding exactly the right
- * records with no false positive for the successful command. Hard-timeout
- * bounded so a reintroduced hang fails this test in seconds instead of
- * hanging the suite.
+ * The regression guard for the three bugs found by running the real, built
+ * rocky-hook.ps1 against a real interactive host: the inner-prompt
+ * recursion/hang, the $LASTEXITCODE-overrides-$? false positive, and Windows
+ * PowerShell 5.1's embedded-quote argument-splitting bug. Drives a real
+ * interactive session (RedirectStandardInput over a plain pipe) through a
+ * failing cmdlet, a failing native command, and a successful cmdlet, then
+ * asserts on the *effects* a real user would see: $?/$LASTEXITCODE unchanged
+ * from what the unhooked shell would show, and memory.jsonl holding exactly
+ * the right records with no false positive for the successful command.
+ * Hard-timeout bounded so a reintroduced hang fails this test in seconds
+ * instead of hanging the suite.
  */
 interface FeedResult {
   stdout: string;
@@ -1079,11 +1075,11 @@ interface FeedResultWithStderr extends FeedResult {
 }
 
 /**
- * F2 (task-a-brief): identical to `spawnAndFeed`, except stderr is captured
+ * Identical to `spawnAndFeed`, except stderr is captured
  * instead of discarded. Every other real-host test in this file discards it
- * deliberately (Item 4's `Start-Transcript` finding notes hook-origin speech
- * reaches the console through `\\.\CON`, not through this process's own
- * redirected streams) -- but the F2 fix moves the actual print into
+ * deliberately (hook-origin speech reaches the console through `\\.\CON`,
+ * not through this process's own redirected streams) -- but the speech
+ * buffer moves the actual print into
  * `prompt`, which runs inside THIS interactive session, not a detached
  * child, so unlike a detached child's `\\.\CON` write, its
  * `[Console]::Error` write goes through this session's own stderr handle,
@@ -1127,14 +1123,14 @@ function spawnAndFeedCapturingStderr(exe: string, rockyHome: string, shim: strin
 }
 
 /**
- * Fix round 1 (Finding 1) made the spawn genuinely non-blocking, which means
+ * The spawn is genuinely non-blocking, which means
  * the detached `rocky` process can still be running after the interactive
  * PowerShell session itself has already exited (proven correct by the
  * non-blocking test above — it does not wait for the spawn either). Every
  * real-host test that inspects `memory.jsonl` right after the session ends
  * needs to poll for it settling rather than assume it is already there.
  *
- * Fix round 4 (flake class 4): the original "stable across one poll" check
+ * The original "stable across one poll" check
  * had no notion of how many records a caller actually expects, so a
  * coincidental quiet gap -- one still-in-flight detached write simply not
  * yet scheduled, genuinely common under CI load -- could read as "settled"
@@ -1173,7 +1169,7 @@ async function readMemoryRecordsSettled(memoryPath: string, minRecords: number, 
 /**
  * Polls for a file a detached shim writes as its own last statement, i.e. a
  * reliable proxy for "this process's meaningful work is done and it is about
- * to exit" -- the precise fix (fix round 3, option 1) for the two tests
+ * to exit" -- the precise fix for the two tests
  * whose shims have a known, deliberate delay: wait for the process to
  * actually finish rather than assume a fixed sleep duration is over, or
  * sleep past it without checking.
@@ -1256,7 +1252,7 @@ test(
 );
 
 /**
- * Finding 1 (fix round 1), regression guard: the whole point of
+ * Regression guard: the whole point of
  * `__rockySpawnDetached` (`Start-Process -NoNewWindow`, replacing the
  * original synchronous `& $__rockyBin ...` call) is that the shell must
  * never wait on Rocky's own bookkeeping. Proven directly with a
@@ -1265,7 +1261,7 @@ test(
  * session's wall-clock time would be dominated by that sleep; non-blocking,
  * it is not, regardless of how slow the spawned process itself is.
  *
- * Task-a review round 3, Item 2: the shim's sleep and the pass/fail
+ * The shim's sleep and the pass/fail
  * threshold below are deliberately far apart, not close together. A prior
  * version used a 4000ms sleep with an `elapsedMs < 4000` ceiling -- the
  * SAME number for both, leaving zero margin between "this session's own
@@ -1275,7 +1271,7 @@ test(
  * suite's own many concurrent real-host test files already do to each
  * other under `node --test`'s default per-file concurrency, on a machine
  * with active real-time AV scanning of every freshly-spawned process -- the
- * same interference this file's own fix-round-1 history already names)
+ * same interference that made the spawn non-blocking in the first place)
  * pushed this exact test's own elapsed time as high as 6268ms measured, and
  * to a median of 4952ms at the higher end tested -- comfortably past a
  * 4000ms ceiling despite the session genuinely never blocking (`timedOut`
@@ -1337,7 +1333,7 @@ async function realHostNonBlockingSmoke(t: TestContext, exe: string): Promise<vo
   );
   assert.equal(existsSync(slowMarker), false, "the slow shim must still be running in the background when this assertion runs");
 
-  // Fix round 3: the whole property this test proves is that nothing waited
+  // The whole property this test proves is that nothing waited
   // for the slow spawn above -- so this function's own `t.after` must not
   // become the thing that races it either. Wait for the shim's own marker
   // (its last statement, written only after its full sleep) so the
@@ -1346,7 +1342,7 @@ async function realHostNonBlockingSmoke(t: TestContext, exe: string): Promise<vo
   // proven above; it only sequences cleanup after a process this test itself
   // spawned, the same ordering discipline any of these tests would need
   // regardless of the specific race that surfaced it. Bounded generously
-  // past SLOW_SHIM_SLEEP_MS itself (task-a review round 3): this wait must
+  // past SLOW_SHIM_SLEEP_MS itself: this wait must
   // not become a second flake of its own once the sleep grew past this
   // constant's old, now-too-tight 8000ms bound.
   const markerAppeared = await waitForMarker(slowMarker, SLOW_SHIM_SLEEP_MS + 10_000);
@@ -1354,7 +1350,7 @@ async function realHostNonBlockingSmoke(t: TestContext, exe: string): Promise<vo
 }
 
 test(
-  "the hook body never blocks the next prompt on a deliberately slow spawn, Windows PowerShell 5.1 (Finding 1)",
+  "the hook body never blocks the next prompt on a deliberately slow spawn, Windows PowerShell 5.1",
   { skip: windowsPowerShellAvailable ? false : "Windows PowerShell is unavailable on this machine/platform" },
   async (t) => {
     await realHostNonBlockingSmoke(t, "powershell.exe");
@@ -1362,7 +1358,7 @@ test(
 );
 
 test(
-  "the hook body never blocks the next prompt on a deliberately slow spawn, PowerShell 7.x (Finding 1)",
+  "the hook body never blocks the next prompt on a deliberately slow spawn, PowerShell 7.x",
   { skip: realPwsh ? false : pwshSkipReason },
   async (t) => {
     await realHostNonBlockingSmoke(t, realPwsh!);
@@ -1370,12 +1366,12 @@ test(
 );
 
 /**
- * Finding 3 (fix round 1): denylist parity with rocky-hook.bash's
+ * Denylist parity with rocky-hook.bash's
  * cd|pushd|popd|export|alias|source|.|rocky, translated to PowerShell
  * equivalents rather than copied literally. Drives a real interactive
  * session through a failing `Push-Location` and a failing dot-source (the
- * two entries the review specifically named as missing and "idiomatic and
- * heavily used"), then a genuine non-denylisted failure, so the test proves
+ * two entries that were once missing, both idiomatic and heavily used),
+ * then a genuine non-denylisted failure, so the test proves
  * the denylist actually suppresses the first two rather than the whole
  * mechanism being silent for unrelated reasons.
  */
@@ -1422,7 +1418,7 @@ async function realHostDenylistSmoke(t: TestContext, exe: string): Promise<void>
 }
 
 test(
-  "Push-Location and dot-sourcing are denylisted like bash's pushd/popd/source, Windows PowerShell 5.1 (Finding 3)",
+  "Push-Location and dot-sourcing are denylisted like bash's pushd/popd/source, Windows PowerShell 5.1",
   { skip: windowsPowerShellAvailable ? false : "Windows PowerShell is unavailable on this machine/platform" },
   async (t) => {
     await realHostDenylistSmoke(t, "powershell.exe");
@@ -1430,7 +1426,7 @@ test(
 );
 
 test(
-  "Push-Location and dot-sourcing are denylisted like bash's pushd/popd/source, PowerShell 7.x (Finding 3)",
+  "Push-Location and dot-sourcing are denylisted like bash's pushd/popd/source, PowerShell 7.x",
   { skip: realPwsh ? false : pwshSkipReason },
   async (t) => {
     await realHostDenylistSmoke(t, realPwsh!);
@@ -1438,10 +1434,10 @@ test(
 );
 
 /**
- * Finding 4 (fix round 1) / spec §5 test 4: "a hook that fails midway does
- * not change the exit code of the user's command." Held by construction
- * (the outer try/catch), but never adversarially tested — this genuinely
- * injects a fault, rather than relying on construction. After dot-sourcing
+ * "A hook that fails midway does not change the exit code of the user's
+ * command." Held by construction (the outer try/catch), but never
+ * adversarially tested — this genuinely injects a fault, rather than
+ * relying on construction. After dot-sourcing
  * the real hook, `__rockySpawnDetached` (the one function that actually
  * touches `_hookfail`/`_hooksuccess`) is redefined to unconditionally
  * `throw`, with no inner catch of its own left to absorb it, so the
@@ -1484,7 +1480,7 @@ async function realHostFaultInjectionSmoke(t: TestContext, exe: string): Promise
 }
 
 test(
-  "an injected internal hook-body fault never changes the user's own exit code, Windows PowerShell 5.1 (Finding 4, spec §5 test 4)",
+  "an injected internal hook-body fault never changes the user's own exit code, Windows PowerShell 5.1",
   { skip: windowsPowerShellAvailable ? false : "Windows PowerShell is unavailable on this machine/platform" },
   async (t) => {
     await realHostFaultInjectionSmoke(t, "powershell.exe");
@@ -1492,7 +1488,7 @@ test(
 );
 
 test(
-  "an injected internal hook-body fault never changes the user's own exit code, PowerShell 7.x (Finding 4, spec §5 test 4)",
+  "an injected internal hook-body fault never changes the user's own exit code, PowerShell 7.x",
   { skip: realPwsh ? false : pwshSkipReason },
   async (t) => {
     await realHostFaultInjectionSmoke(t, realPwsh!);
@@ -1500,10 +1496,10 @@ test(
 );
 
 /**
- * Finding 5 (fix round 2): the fix-round-1 diff introduced a new race —
- * `__rockySpawnDetached`'s discard-file paths were static (not unique per
- * invocation), so two near-concurrent spawns could collide on the redirect-
- * file handle and silently drop a memory write. Fixed by discarding to the
+ * Overlap race: `__rockySpawnDetached`'s discard-file paths used to be static
+ * (not unique per invocation), so two near-concurrent spawns could collide on
+ * the redirect-file handle and silently drop a memory write. Fixed by
+ * discarding to the
  * null device (`\\.\NUL` / `NUL`) instead of a file at all — no file, no
  * collision, nothing to make unique. This test proves the fix on real
  * overlap, not merely on two commands that happen to run close in time: the
@@ -1567,10 +1563,10 @@ async function realHostConcurrentSpawnSmoke(t: TestContext, exe: string): Promis
   );
   assert.ok(
     failureCmds.some((cmd) => cmd.includes("__rocky_concurrent_second__")),
-    `the second overlapping spawn's memory write must land, not silently dropped by a redirect-handle collision (Finding 5); got: ${JSON.stringify(failureCmds)}`,
+    `the second overlapping spawn's memory write must land, not silently dropped by a redirect-handle collision; got: ${JSON.stringify(failureCmds)}`,
   );
 
-  // Fix round 3: both proofs above already stand on their own; this only
+  // Both proofs above already stand on their own; this only
   // sequences teardown after the two detached processes this test spawned
   // have genuinely finished (each writes its own $PID-named marker as its
   // last statement, after its 2000ms tail), so `t.after`'s cleanup of `root`
@@ -1580,7 +1576,7 @@ async function realHostConcurrentSpawnSmoke(t: TestContext, exe: string): Promis
 }
 
 test(
-  "two genuinely overlapping detached spawns both land their memory write, Windows PowerShell 5.1 (Finding 5)",
+  "two genuinely overlapping detached spawns both land their memory write, Windows PowerShell 5.1",
   { skip: windowsPowerShellAvailable ? false : "Windows PowerShell is unavailable on this machine/platform" },
   async (t) => {
     await realHostConcurrentSpawnSmoke(t, "powershell.exe");
@@ -1588,7 +1584,7 @@ test(
 );
 
 test(
-  "two genuinely overlapping detached spawns both land their memory write, PowerShell 7.x (Finding 5)",
+  "two genuinely overlapping detached spawns both land their memory write, PowerShell 7.x",
   { skip: realPwsh ? false : pwshSkipReason },
   async (t) => {
     await realHostConcurrentSpawnSmoke(t, realPwsh!);
@@ -1596,7 +1592,7 @@ test(
 );
 
 /**
- * Ruling 1's central claim, checked directly rather than only via the
+ * The wrap-don't-replace claim, checked directly rather than only via the
  * default-prompt case above: a real, already-installed custom prompt
  * (oh-my-posh/starship-shaped — a function whose output changes on every
  * call, here keyed off `$MyInvocation.HistoryId`) must keep rendering, live,
@@ -1633,7 +1629,7 @@ async function realHostCustomPromptSmoke(t: TestContext, exe: string): Promise<v
 }
 
 test(
-  "a real custom prompt keeps rendering after rocky-hook.ps1 wraps it on Windows PowerShell 5.1 (Ruling 1)",
+  "a real custom prompt keeps rendering after rocky-hook.ps1 wraps it on Windows PowerShell 5.1",
   { skip: windowsPowerShellAvailable ? false : "Windows PowerShell is unavailable on this machine/platform" },
   async (t) => {
     await realHostCustomPromptSmoke(t, "powershell.exe");
@@ -1641,7 +1637,7 @@ test(
 );
 
 test(
-  "a real custom prompt keeps rendering after rocky-hook.ps1 wraps it on PowerShell 7.x (Ruling 1)",
+  "a real custom prompt keeps rendering after rocky-hook.ps1 wraps it on PowerShell 7.x",
   { skip: realPwsh ? false : pwshSkipReason },
   async (t) => {
     await realHostCustomPromptSmoke(t, realPwsh!);
@@ -1649,11 +1645,11 @@ test(
 );
 
 /**
- * F2 (task-a-brief), the strongest proof this harness can offer: before this
- * fix, a repeat-occurrence message was written by a detached child straight
- * to `\\.\CON`, invisible to any pipe (confirmed by the findings doc's own
- * `Start-Transcript` item and by every other real-host test in this file
- * discarding stderr on purpose). The fix moves the actual print into
+ * The strongest proof this harness can offer: before the speech buffer, a
+ * repeat-occurrence message was written by a detached child straight
+ * to `\\.\CON`, invisible to any pipe (confirmed by `Start-Transcript` and
+ * by every other real-host test in this file discarding stderr on
+ * purpose). The buffer moves the actual print into
  * `prompt`, which runs inside THIS interactive session rather than a
  * detached child, so its `[Console]::Error` write goes through the session's
  * own redirected stderr handle -- which this smoke captures, unlike every
@@ -1669,7 +1665,7 @@ test(
  * (nothing would ever reach this session's own stderr at all), not just
  * produce a shorter match.
  *
- * F2 round 5: condition-driven rendezvous for the speech round-trip,
+ * Condition-driven rendezvous for the speech round-trip,
  * replacing the old fixed settle echoes. A detached `_hookfail` child
  * publishes its `.txt` file asynchronously, and `prompt` only speaks a file
  * present at a prompt draw -- so feeding `exit` on a fixed schedule races
@@ -1778,7 +1774,7 @@ async function realHostSpeechRoundTripSmoke(t: TestContext, exe: string): Promis
     const second = await readMemoryRecordsSettled(memoryPath, 2, 15_000);
     assert.ok(
       second.length >= 2,
-      `the repeat command must have recorded at least 2 failures (Ruling 4's first-occurrence silence must not have suppressed the second too); got: ${JSON.stringify(second)}`,
+      `the repeat command must have recorded at least 2 failures (the first-occurrence silence must not have suppressed the second too); got: ${JSON.stringify(second)}`,
     );
     const published = await waitForSpeechFiles(speechDir, "published", 15_000);
     assert.ok(
@@ -1803,7 +1799,7 @@ async function realHostSpeechRoundTripSmoke(t: TestContext, exe: string): Promis
   const failures = records.filter((r) => r.kind === "failure");
   assert.ok(
     failures.length >= 2,
-    `the repeat command must have recorded at least 2 failures (Ruling 4's first-occurrence silence must not have suppressed the second too); got: ${JSON.stringify(records)}`,
+    `the repeat command must have recorded at least 2 failures (the first-occurrence silence must not have suppressed the second too); got: ${JSON.stringify(records)}`,
   );
 
   assert.ok(
@@ -1821,7 +1817,7 @@ async function realHostSpeechRoundTripSmoke(t: TestContext, exe: string): Promis
 }
 
 test(
-  "a repeat-occurrence message arrives complete through this session's own stderr, Windows PowerShell 5.1 (F2, task-a-brief)",
+  "a repeat-occurrence message arrives complete through this session's own stderr, Windows PowerShell 5.1",
   { skip: windowsPowerShellAvailable ? false : "Windows PowerShell is unavailable on this machine/platform" },
   async (t) => {
     await realHostSpeechRoundTripSmoke(t, "powershell.exe");
@@ -1829,7 +1825,7 @@ test(
 );
 
 test(
-  "a repeat-occurrence message arrives complete through this session's own stderr, PowerShell 7.x (F2, task-a-brief)",
+  "a repeat-occurrence message arrives complete through this session's own stderr, PowerShell 7.x",
   { skip: realPwsh ? false : pwshSkipReason },
   async (t) => {
     await realHostSpeechRoundTripSmoke(t, realPwsh!);

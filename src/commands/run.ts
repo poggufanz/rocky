@@ -75,9 +75,9 @@ function readMemory(): MemoryRecord[] | undefined {
 /**
  * Reports what memory holds for this fingerprint: a prior sighting and its
  * fix (naming the fix's own directory when it differs from linked failure cwd), or that
- * this is new. Shared by `run`'s onFailure and `watch`'s failure path — spec
- * §7 names `run`, `watch`, and `_hookfail` as the three paths that must carry
- * the cross-directory admission, and this is the one place `run` and `watch`
+ * this is new. Shared by `run`'s onFailure and `watch`'s failure path — `run`,
+ * `watch`, and `_hookfail` are the three paths that must carry the
+ * cross-directory admission, and this is the one place `run` and `watch`
  * can't drift on it.
  */
 export function speakFailureMemory(
@@ -135,7 +135,7 @@ export function speakFailureMemory(
         say(`Same program, ${gapSpan(fix.ts - withFix.ts)} later. May not be the fix. Check before acting.`);
       } else if (basis !== undefined) {
         // A recognized-but-weaker basis ("sequence") or a string a newer
-        // writer emits that this reader does not recognize yet (spec §2.5):
+        // writer emits that this reader does not recognize yet:
         // either way it must fall to the weakest hedge, never silently print
         // no grade line at all.
         say(`Different program, ${gapSpan(fix.ts - withFix.ts)} later. May not be the fix. Check before acting.`);
@@ -164,7 +164,7 @@ export function speakFailureMemory(
 
 /**
  * Search prior sightings of this same recurring failure, most recent first,
- * for the top weak `AssociationRecord` candidate (spec §3 Fix 1). Mirrors
+ * for the top weak `AssociationRecord` candidate. Mirrors
  * the `withFix` search above it so the two evidence classes cannot drift.
  */
 function speakablePossibleFix(
@@ -200,7 +200,7 @@ function onFailure(cmd: string, result: ExecResult): void {
   if (memory !== undefined) {
     // result.stderr is the bounded tail (last TAIL_LINES lines, each capped
     // at MAX_LINE_BYTES), not the full stderr stream — fingerprinting now
-    // sees the last 200 lines, not everything the command wrote (spec §3.6).
+    // sees the last 200 lines, not everything the command wrote.
     speakFailureMemory(memory, fingerprintCandidates(result.stderr, cmd, result.code), cmd, result.code, process.cwd());
   }
 

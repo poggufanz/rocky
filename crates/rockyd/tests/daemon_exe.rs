@@ -309,7 +309,7 @@ fn second_daemon_exits_nonzero() {
 
 #[test]
 fn second_daemon_touches_no_spool() {
-    // Bind-first (R17): a duplicate daemon must exit 3 without ingesting or
+    // Bind-first: a duplicate daemon must exit 3 without ingesting or
     // deleting spool files. Write the file only AFTER A is serving and B has
     // had no chance to run before it exists... instead assert from A's side:
     // create the spool file, start B, wait for B's exit 3, then require that

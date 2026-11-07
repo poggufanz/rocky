@@ -1,21 +1,20 @@
 /**
- * `~/.rocky/hook-speech/` — the F2 buffer/publish mechanism's own state on
+ * `~/.rocky/hook-speech/` — the buffer/publish mechanism's own state on
  * disk (`src/ui/rocky.ts`'s `flushHookSpeech`, `src/shell/rocky-hook.ps1`'s
- * `__rockySpawnDetached`/`prompt`). This file covers the four findings from
- * task-a's round-2 review of that mechanism, which `hook-powershell.test.ts`
- * (F2 round 1) does not exercise:
+ * `__rockySpawnDetached`/`prompt`). This file covers four properties of
+ * that mechanism, which `hook-powershell.test.ts` does not exercise:
  *
- *   Finding 1 — session affinity. A file this exact PowerShell session did
+ *   Session affinity. A file this exact PowerShell session did
  *     not itself spawn must never be spoken, even when it is sitting right
  *     there in the shared directory — it may belong to a different, still
  *     open session (Windows PowerShell and PS7 share `$env:ROCKY_HOME` by
  *     default), and speaking it would assert something false about the
  *     present session's own command/cwd/moment.
- *   Finding 2 — re-sanitization on read. A file's content is not trusted
+ *   Re-sanitization on read. A file's content is not trusted
  *     merely because it matches the glob; ANSI/control-sequence injection
  *     must be neutralized independent of source.
- *   Finding 3 — Windows PowerShell 5.1 encoding. Verified on a real 5.1
- *     host (task-a-report.md round 2) that `Get-Content -Raw` with no
+ *   Windows PowerShell 5.1 encoding. Verified on a real 5.1
+ *     host that `Get-Content -Raw` with no
  *     `-Encoding` corrupts non-ASCII content written by `ui/rocky.ts`'s
  *     BOM-less UTF-8 write. A second, independent corruption was found
  *     verifying the first fix on a real host rather than trusting it alone:
@@ -24,7 +23,7 @@
  *     whenever stderr is redirected/piped, because `[Console]::OutputEncoding`
  *     defaults to the system codepage there, not UTF-8. Both are fixed and
  *     both are tested here.
- *   Finding 4 — unbounded growth. Nothing pruned this directory before; a
+ *   Unbounded growth. Nothing pruned this directory before; a
  *     stale, unclaimed file (another session's, or an orphaned .tmp write
  *     fragment) now gets removed once it is old enough that no session
  *     could realistically still be waiting to claim it.
@@ -37,7 +36,7 @@
  * fixtures' surviving filesystem state. This is faster and far more
  * precise than driving a live interactive session for these particular
  * properties (no ordering-relative-to-a-drawn-prompt claim is being made
- * here, unlike hook-powershell.test.ts's own round-1 regression guard) —
+ * here, unlike hook-powershell.test.ts's own regression guard) —
  * `prompt`'s drain loop runs unconditionally near the top of its body,
  * before any interactive history even needs to exist.
  */
@@ -121,7 +120,7 @@ interface PromptRunResult {
   stdout: string;
   stderr: string;
   status: number | null;
-  /** [Console]::OutputEncoding.CodePage immediately before/after the `prompt` call, per the sentinel lines every driver script prints (task-a review round 3, Item 1: proves the restore is symmetric, not just that output looked fine). */
+  /** [Console]::OutputEncoding.CodePage immediately before/after the `prompt` call, per the sentinel lines every driver script prints (proves the restore is symmetric, not just that output looked fine). */
   outputEncodingCodePageBefore: number | undefined;
   outputEncodingCodePageAfter: number | undefined;
 }
@@ -141,7 +140,7 @@ function parseSentinel(stdout: string, name: string): number | undefined {
  * needed: nothing here ever reads input.
  *
  * Always sentinels `[Console]::OutputEncoding.CodePage` to stdout before and
- * after the `prompt` call (task-a review round 3): cheap, and no existing
+ * after the `prompt` call: cheap, and no existing
  * test reads `stdout`, so this is free coverage for whichever test does
  * care whether `__rockyWriteSpeechToConsole`'s restore actually happened.
  */
@@ -176,7 +175,7 @@ function claimLines(names: string[]): string[] {
   return names.map((name) => `$global:__rockySpeechIds += '${name.replace(/'/g, "''")}'`);
 }
 
-// --- Findings 1, 2, 4: session affinity, sanitization, stale pruning ------
+// --- session affinity, sanitization, stale pruning ------
 
 function sessionAffinitySanitizeAndPruneSmoke(t: TestContext, exe: string): void {
   const sandbox = speechSandbox(t, "rocky-hook-speech-affinity-");
@@ -197,20 +196,20 @@ function sessionAffinitySanitizeAndPruneSmoke(t: TestContext, exe: string): void
 
   assert.equal(result.status, 0, `driver script must exit cleanly; stderr: ${result.stderr}`);
 
-  // Finding 1: only this session's own claimed files are ever spoken.
+  // Only this session's own claimed files are ever spoken.
   assert.match(result.stderr, /rocky: Owned message\./, `owned file must be spoken; got: ${result.stderr}`);
   assert.ok(
     !result.stderr.includes("Foreign recent message") && !result.stderr.includes("Foreign stale message"),
     `unclaimed files must never be spoken, regardless of age; got: ${result.stderr}`,
   );
 
-  // Finding 2: sanitized on read, even for a file this session does own --
+  // Sanitized on read, even for a file this session does own --
   // the raw ESC byte must never reach the console, but the surrounding
   // printable text survives.
   assert.ok(result.stderr.includes("safe-before") && result.stderr.includes("safe-after"), `printable text must survive sanitization; got: ${result.stderr}`);
   assert.ok(!result.stderr.includes("\x1b"), `raw ESC byte must never reach stderr; got: ${JSON.stringify(result.stderr)}`);
 
-  // Finding 1 + 4: claimed files are drained (spoken + deleted); an
+  // Claimed files are drained (spoken + deleted); an
   // unclaimed-but-recent file is left alone untouched (still might belong
   // to another live session); an unclaimed-and-stale file is pruned
   // silently; a stale orphaned .tmp fragment is pruned too; a recent .tmp
@@ -219,12 +218,12 @@ function sessionAffinitySanitizeAndPruneSmoke(t: TestContext, exe: string): void
   assert.equal(existsSync(join(sandbox.speechDir, "owned-malicious.txt")), false, "spoken file must be deleted");
   assert.equal(existsSync(foreignRecent), true, "recent unclaimed file must be left alone, not deleted");
   assert.equal(existsSync(foreignStale), false, "stale unclaimed file must be pruned");
-  assert.equal(existsSync(staleTmp), false, "stale orphaned .tmp fragment must be pruned (Finding 4)");
+  assert.equal(existsSync(staleTmp), false, "stale orphaned .tmp fragment must be pruned");
   assert.equal(existsSync(recentTmp), true, "recent .tmp fragment (simulating an in-progress write) must be left alone");
 }
 
 test(
-  "session affinity, read-time sanitization, and stale pruning all hold together, Windows PowerShell 5.1 (task-a review round 2, Findings 1/2/4)",
+  "session affinity, read-time sanitization, and stale pruning all hold together, Windows PowerShell 5.1",
   { skip: windowsPowerShellAvailable ? false : "Windows PowerShell is unavailable on this machine/platform" },
   (t) => {
     sessionAffinitySanitizeAndPruneSmoke(t, "powershell.exe");
@@ -232,14 +231,14 @@ test(
 );
 
 test(
-  "session affinity, read-time sanitization, and stale pruning all hold together, PowerShell 7.x (task-a review round 2, Findings 1/2/4)",
+  "session affinity, read-time sanitization, and stale pruning all hold together, PowerShell 7.x",
   { skip: realPwsh ? false : pwshSkipReason },
   (t) => {
     sessionAffinitySanitizeAndPruneSmoke(t, realPwsh!);
   },
 );
 
-// --- Finding 3: Windows PowerShell 5.1 UTF-8-no-BOM read/write ------------
+// --- Windows PowerShell 5.1 UTF-8-no-BOM read/write ------------
 
 function nonAsciiRoundTripSmoke(t: TestContext, exe: string): void {
   const sandbox = speechSandbox(t, "rocky-hook-speech-encoding-");
@@ -251,11 +250,11 @@ function nonAsciiRoundTripSmoke(t: TestContext, exe: string): void {
   assert.equal(result.status, 0, `driver script must exit cleanly; stderr: ${result.stderr}`);
   assert.ok(
     result.stderr.includes("café-müller-日本語") && result.stderr.includes("café-dir"),
-    `non-ASCII content must round-trip intact, not as mojibake (Finding 3, verified corrupt on a real 5.1 host without -Encoding UTF8); got: ${JSON.stringify(result.stderr)}`,
+    `non-ASCII content must round-trip intact, not as mojibake (verified corrupt on a real 5.1 host without -Encoding UTF8); got: ${JSON.stringify(result.stderr)}`,
   );
   assert.equal(existsSync(join(sandbox.speechDir, "nonascii.txt")), false, "claimed file must still be drained normally");
 
-  // Item 1 (task-a review round 3): __rockyWriteSpeechToConsole must restore
+  // __rockyWriteSpeechToConsole must restore
   // [Console]::OutputEncoding symmetrically, the same discipline
   // ROCKY_HOOK_SPEECH_FILE already gets around every Start-Process call --
   // this is the proof, not just an assumption, that the restore (a) happens
@@ -271,7 +270,7 @@ function nonAsciiRoundTripSmoke(t: TestContext, exe: string): void {
 }
 
 test(
-  "non-ASCII hook speech round-trips intact through both the read (-Encoding UTF8) and write (Console.OutputEncoding) fixes, Windows PowerShell 5.1 (task-a review round 2, Finding 3)",
+  "non-ASCII hook speech round-trips intact through both the read (-Encoding UTF8) and write (Console.OutputEncoding) fixes, Windows PowerShell 5.1",
   { skip: windowsPowerShellAvailable ? false : "Windows PowerShell is unavailable on this machine/platform" },
   (t) => {
     nonAsciiRoundTripSmoke(t, "powershell.exe");
@@ -279,23 +278,23 @@ test(
 );
 
 test(
-  "non-ASCII hook speech round-trips intact through both the read (-Encoding UTF8) and write (Console.OutputEncoding) fixes, PowerShell 7.x (task-a review round 2, Finding 3 regression guard)",
+  "non-ASCII hook speech round-trips intact through both the read (-Encoding UTF8) and write (Console.OutputEncoding) fixes, PowerShell 7.x",
   { skip: realPwsh ? false : pwshSkipReason },
   (t) => {
     nonAsciiRoundTripSmoke(t, realPwsh!);
   },
 );
 
-// --- Sanity: the exact corruption Finding 3 describes really did exist ----
+// --- Sanity: the exact corruption the encoding fix addresses really did exist ----
 //
 // Not a regression guard for shipped code (no -Encoding path exists in the
 // fixed file to compare against) -- this is the empirical evidence for the
-// report: proof, kept executable rather than asserted only in prose, that
+// fix: proof, kept executable rather than asserted only in prose, that
 // plain `Get-Content -Raw` (no `-Encoding`) really does corrupt this exact
 // content on a real Windows PowerShell 5.1 host. If Windows PowerShell 5.1's
 // own default ever changes upstream, this is the test that will say so.
 test(
-  "Get-Content -Raw with no -Encoding corrupts non-ASCII content on real Windows PowerShell 5.1 (Finding 3 evidence)",
+  "Get-Content -Raw with no -Encoding corrupts non-ASCII content on real Windows PowerShell 5.1",
   { skip: windowsPowerShellAvailable ? false : "Windows PowerShell is unavailable on this machine/platform" },
   (t) => {
     const sandbox = speechSandbox(t, "rocky-hook-speech-encoding-evidence-");
@@ -311,7 +310,7 @@ test(
       { encoding: "utf8", windowsHide: true, timeout: 20_000 },
     );
 
-    assert.notEqual(probe.stdout, text, "documents the real defect: no -Encoding must NOT round-trip non-ASCII content on Windows PowerShell 5.1 -- if this now passes, the platform default changed and Finding 3's fix may no longer be necessary");
+    assert.notEqual(probe.stdout, text, "documents the real defect: no -Encoding must NOT round-trip non-ASCII content on Windows PowerShell 5.1 -- if this now passes, the platform default changed and the encoding fix may no longer be necessary");
   },
 );
 

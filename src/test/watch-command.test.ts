@@ -491,7 +491,7 @@ test("an unwritable watch log speaks watch-log-unwritable but still records the 
   assert.equal((JSON.parse(lines[0]!) as { origin?: string }).origin, "watch");
 });
 
-test("a memory-write failure on the watch failure path still writes the watch log (Minor 5)", async (t) => {
+test("a memory-write failure on the watch failure path still writes the watch log", async (t) => {
   const home = sandboxHome(t);
   mkdirSync(home, { recursive: true });
   // memory.jsonl as a directory makes recordWatchFailure's appendFileSync throw,

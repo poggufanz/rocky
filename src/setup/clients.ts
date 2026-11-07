@@ -34,7 +34,7 @@ export interface SetupOptions {
   /** Absolute path for standalone repo-consent actions. */
   repo?: string;
   repoAction?: RepoCaptureAction;
-  /** P0 parses + validates only; grant storage is out of scope. */
+  /** Parsed and validated only; grant storage is not wired yet. */
   rawTrace: boolean;
   /** Bare `--harness`: setup opens the checkbox picker to fill harnesses/mcp. */
   wizard?: boolean;

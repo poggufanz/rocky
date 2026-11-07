@@ -1,5 +1,5 @@
 /**
- * Shared P1-A helpers: canonical executable resolution (never basename-only),
+ * Shared MCP adapter helpers: canonical executable resolution (never basename-only),
  * Rocky-owned JSON MCP merge preserving foreign keys/order, atomic write with
  * backup, and verify-with-honesty. No host-specific paths in this module.
  */

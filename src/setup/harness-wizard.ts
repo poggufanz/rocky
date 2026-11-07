@@ -1,5 +1,5 @@
 /**
- * P0 wizard selection shell (spec sections 3 and 8 gate 3).
+ * Harness wizard selection shell.
  * Selection UI only: returns structured selections, no adapter wiring.
  * All I/O on the injected output stream (production: process.stderr).
  */

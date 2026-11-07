@@ -299,7 +299,7 @@ export function recoverJsonTransaction(
  * Hard-link failure never falls back to an overwriting rename.
  *
  * A successful or refused-but-displaced write also prunes this target's own
- * superseded committed transaction directories (round 9, r5). `hook.ts`'s
+ * superseded committed transaction directories. `hook.ts`'s
  * bashrc route has always done this at both its settle and publish call
  * sites; this JSON engine's only production consumers (Claude Desktop/Code
  * adapters, via `claude-desktop.ts`/`claude-code.ts`) call straight into

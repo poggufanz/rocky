@@ -534,7 +534,7 @@ async function main(): Promise<number> {
         throw new Error("unreachable hook request");
       }
       case "_hookfail":
-        // F2 (task-a-brief): flush whatever sayTty/detailTty buffered
+        // Flush whatever sayTty/detailTty buffered
         // (ui/rocky.ts) exactly once, regardless of which internal branch
         // hookFail took or whether it threw — a dropped message is
         // acceptable, a message that never gets published because a return

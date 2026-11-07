@@ -8,7 +8,7 @@
  *    Windows, see `ui/rocky.ts`)
  *  - `rocky hook install|uninstall|status` for both Bash (`.bashrc`) and
  *    PowerShell (`$PROFILE`, both Windows PowerShell and PowerShell 7 when
- *    detected — Task 4)
+ *    detected)
  *
  * `.bashrc`/`$PROFILE` are user startup state: every mutation goes through
  * the strict byte parser in `core/hook-block.ts` and the recoverable
@@ -300,7 +300,7 @@ function mergeOutcome(base: RecoveryOutcome | undefined, next: RecoveryOutcome):
  * Every engine call this module makes populates `outcome`. This only guards
  * against a future engine regression silently dropping it — the point of
  * the record is that no message function ever falls back to re-deriving
- * facts from the filesystem itself, the exact pattern this round replaces.
+ * facts from the filesystem itself, the exact pattern the outcome record replaces.
  */
 function requireOutcome(outcome: RecoveryOutcome | undefined): RecoveryOutcome {
   if (outcome === undefined) {
@@ -313,27 +313,25 @@ function requireOutcome(outcome: RecoveryOutcome | undefined): RecoveryOutcome {
  * Speaks only what `outcome` proves — established once, by the code that
  * acted, at the moment it acted (`file-transaction.ts`'s `RecoveryOutcome`).
  * This function makes no filesystem check of its own; every clause below
- * reads a field already on the record (final audit: "a name exists" is not
- * "the data is safe", and no message may re-derive that distinction later
- * from a bare path).
+ * reads a field already on the record ("a name exists" is not "the data is
+ * safe", and no message may re-derive that distinction later from a bare
+ * path).
  *
- * No branch here ever instructs the user to do anything (round 9, R1 — the
- * primary finding of the sixth generation of this defect class). Earlier
- * rounds named a proven copy and then added an imperative telling the user
- * what to type: "restore by copying that file to the bashrc path yourself".
- * That instruction's correctness depended on a fact this function cannot
- * prove — what `cp` (or the user's own hand) does when it reaches the
- * bashrc path — and it is false exactly when bashrc is a live symlink to
- * real content: the copy follows the link and overwrites the user's actual
- * file, the precise failure R1 reproduced. A message may state what Rocky
- * proved (an artifact exists at this path and holds content, bashrc was or
- * was not written by this call, a transaction is unfinished) and nothing
- * more; every remedy verb is gone from every branch below, not only the one
- * R1 named, because the same call site cannot tell which remaining
- * imperative is safe for a path it does not control. `fromSettle` selects
- * between two histories that must not share a sentence: a transaction left
- * behind by an earlier, already-finished invocation ("from before") versus
- * this very call's own write turning ambiguous (final audit, F5).
+ * No branch here ever instructs the user to do anything. Earlier versions
+ * named a proven copy and then added an imperative telling the user what to
+ * type: "restore by copying that file to the bashrc path yourself". That
+ * instruction's correctness depended on a fact this function cannot prove —
+ * what `cp` (or the user's own hand) does when it reaches the bashrc path —
+ * and it is false exactly when bashrc is a live symlink to real content: the
+ * copy follows the link and overwrites the user's actual file. A message may
+ * state what Rocky proved (an artifact exists at this path and holds
+ * content, bashrc was or was not written by this call, a transaction is
+ * unfinished) and nothing more; every remedy verb is gone from every branch
+ * below, not only that one, because the same call site cannot tell which
+ * remaining imperative is safe for a path it does not control. `fromSettle`
+ * selects between two histories that must not share a sentence: a
+ * transaction left behind by an earlier, already-finished invocation ("from
+ * before") versus this very call's own write turning ambiguous.
  *
  * `label` names the target in every sentence below ("bashrc" for the Bash
  * hook, "Windows PowerShell profile" / "PowerShell 7 profile" for the
@@ -355,21 +353,21 @@ function reportRecoveryStop(rc: string, label: string, outcome: RecoveryOutcome,
     detail(`inspect: ${outcome.provenCopy}`);
   } else if (outcome.provenCopy !== undefined) {
     // outcome.targetExists here is `pathExists`, not `isLiveRegularFile`
-    // (round 9, R1 — see the RecoveryOutcome.targetExists doc comment): this
+    // (see the RecoveryOutcome.targetExists doc comment): this
     // branch fires only when the target truly does not exist at all, so
     // "gone" is a fact rocky proved, not a guess from a check that ignores topology.
     say(`${origin} ${name} is gone. Only a copy of the old bytes is kept. ${closing}`);
     detail(`safe copy: ${outcome.provenCopy}`);
   } else {
     say(`${origin} There is no safe copy to name. ${closing}`);
-    // m2: every outcome that can reach this branch (provenCopy undefined)
+    // Every outcome that can reach this branch (provenCopy undefined)
     // sets `transactionDirectory` and `artifactRetainedUnproven` from the
     // same boolean — the three outcomes that could disagree always set
     // provenCopy instead, routing to a branch above. The `transaction
     // directory:` arm this ternary used to have for artifactRetainedUnproven
-    // === false was therefore unreachable dead code (round 8, m2/B18).
+    // === false was therefore unreachable dead code.
     if (outcome.transactionDirectory !== undefined) {
-      // r9: states only that the directory exists and is unclear — no verb
+      // States only that the directory exists and is unclear — no verb
       // about removing it, matching README's categorical "never invites you
       // to destroy" even in this leftover-artifact case.
       detail(`unclear leftover: ${outcome.transactionDirectory}`);
@@ -389,7 +387,7 @@ type SettleResult =
  * stale assumptions. A transaction actually recovered here belonged to some
  * earlier, already-finished invocation — not this call's own write — so its
  * outcome (when one exists) is carried back for the caller to disclose
- * rather than silently absorbed (whole-branch re-review, Minor 1).
+ * rather than silently absorbed.
  */
 function settleTransactions(rc: string, label: string): SettleResult {
   let outcome: RecoveryOutcome | undefined;
@@ -423,17 +421,17 @@ type TargetPreparation =
 /**
  * Discloses a stale, already-finished transaction that settling recovered —
  * not this call's own write. Two genuinely different things can have
- * happened, and the message must match which one actually did (final audit,
- * Important 1): settling can finish the bookkeeping for a transaction whose
+ * happened, and the message must match which one actually did: settling can
+ * finish the bookkeeping for a transaction whose
  * publish had already reached bashrc before this call ever started (bashrc
  * unchanged, a copy is simply retained), or it can restore bashrc itself
  * from that copy because bashrc did not exist a moment ago and does now.
  * Both facts are read directly off `outcome.targetWritten` — proven by the
  * engine at the moment it acted, not inferred here from a before/after
- * snapshot (closes final audit F7's unpinned conjunct structurally, not
- * just narrowly). The finalize branch never promises the copy is "yours to
+ * snapshot (which closes an unpinned conjunct structurally, not just
+ * narrowly). The finalize branch never promises the copy is "yours to
  * remove, any time": a publish later in this same invocation can still
- * supersede it (final audit, F4) — only a write's own, genuinely final
+ * supersede it — only a write's own, genuinely final
  * disclosure (`reportRetainedCopy`) makes that promise.
  */
 function reportSettledRecovery(label: string, outcome: RecoveryOutcome): void {
@@ -454,11 +452,10 @@ function reportSettledRecovery(label: string, outcome: RecoveryOutcome): void {
  * Settling is shared by install/uninstall/status, so this is the one place
  * a stale recovery's disclosure and pruning happen — every caller gets the
  * same accurate report of what settling just did, not only whichever
- * command the reviewer's own reproduction happened to name (final audit:
- * apply the fix to the class of message, not the one instance reproduced).
- * The disclosure happens before any later stop in this function returns
- * (final audit, F6): a stop that follows a mutating settle must never claim
- * nothing was touched.
+ * command happened to be the one reproduced (the fix applies to the class of
+ * message, not the one instance). The disclosure happens before any later
+ * stop in this function returns: a stop that follows a mutating settle must
+ * never claim nothing was touched.
  */
 function prepareTarget(rc: string, label: string): TargetPreparation {
   const settled = settleTransactions(rc, label);
@@ -528,9 +525,9 @@ interface PublishResult {
  * A successful publish, and a refusal that had to displace the target before
  * discovering a concurrent edit, both retain one recovery copy of the
  * previous bytes (`result.recoveryPath`). Callers must report that path
- * instead of claiming nothing was touched — see Important 2 of the
- * whole-branch review. Once a fresh copy commits, any older superseded
- * copies for this same target are pruned so at most one survives.
+ * instead of claiming nothing was touched. Once a fresh copy commits, any
+ * older superseded copies for this same target are pruned so at most one
+ * survives.
  *
  * `label === BASHRC_LABEL` reuses the catalog `phrase()` entry for the
  * write-protected disclosure; every other label builds the same sentence
@@ -545,7 +542,7 @@ function publishTarget(rc: string, label: string, staged: Buffer, prior: BytesRe
   if (prior.status === "valid" && prior.mode !== undefined && (prior.mode & 0o200) === 0) {
     say(label === BASHRC_LABEL ? phrase("bashrc-write-protected") : `${label} is write-protected. Replacing it anyway; your lines are kept.`);
   }
-  // F1: the target's parent directory is bashrc's inherited assumption --
+  // The target's parent directory is bashrc's inherited assumption --
   // $HOME always exists, so bashrc never needed this. `$PROFILE` breaks that
   // assumption: `Documents\WindowsPowerShell\` is not created by a default
   // Windows install, only by a user who has already customized their profile
@@ -607,9 +604,9 @@ function reportRetainedCopy(label: string, recoveryPath: string): void {
 }
 
 /**
- * I3: by the time `hookInstall` writes `~/.rocky` assets, a mkdir/copy/write
+ * By the time `hookInstall` writes `~/.rocky` assets, a mkdir/copy/write
  * failure here (a stray `~/.rocky` file, ENOSPC, a permissions problem) must
- * never be allowed to escape as a raw, uncaught error. Before that fix it
+ * never be allowed to escape as a raw, uncaught error. Previously it
  * did: the process died in `index.ts`'s top-level catch with an untranslated
  * Node error string instead of a rocky message, and — if a write had just
  * displaced the previous `.bashrc` — leaving that retained copy's path
@@ -617,7 +614,7 @@ function reportRetainedCopy(label: string, recoveryPath: string): void {
  * it whenever one survives.
  *
  * `targetPublished` states which of `hookInstall`'s two paths reached this
- * call (round 9, R2): a fresh install (`classification === "absent"`)
+ * call: a fresh install (`classification === "absent"`)
  * publishes the target before ever reaching this code, but a re-install onto
  * an already-managed block never publishes anything and skips straight to
  * these same `~/.rocky` writes. The two paths need two different sentences —
@@ -645,7 +642,7 @@ function reportRockyHomeWriteFailure(
 function runBashHookInstall(): number {
   // Check installability before writing anything: a missing hook asset must
   // fail before any write, exactly like the bashrc topology/corrupt refusals
-  // below it (Minor: hookInstall must not write ~/.rocky assets ahead of a
+  // below it (hookInstall must not write ~/.rocky assets ahead of a
   // refusal whose message claims nothing was touched).
   const assets = ["rocky-hook.bash", "bash-preexec.sh"];
   for (const f of assets) {
@@ -752,14 +749,13 @@ function runBashHookUninstall(): number {
  * `status` never edits the hook block itself; the README says exactly that,
  * not that it "never writes bashrc" (that claim was checked here and found
  * false: settling a `displaced`-holding transaction over an absent bashrc
- * recreates it, silently, unless disclosed — final audit, Important 1).
+ * recreates it, silently, unless disclosed).
  *
  * A read-only status that never settled anything was considered and
  * rejected: `hook status settles a pending transaction instead of reporting
- * stale state` already pins settling as status's behavior (an earlier
- * round, not this one), and reverting that would both weaken an existing
- * assertion (forbidden except for the two pinned false claims this round
- * corrects, and this is not one of them) and leave the exact stale,
+ * stale state` already pins settling as status's behavior, and reverting
+ * that would both weaken an existing assertion (forbidden except to correct
+ * a pinned false claim, and this is not one of them) and leave the exact stale,
  * secret-holding transaction directory this paragraph exists to disclose
  * sitting unrecovered instead. Accurate disclosure — via `prepareTarget`,
  * shared by every caller so none of them can silently do this and stay quiet
@@ -779,11 +775,10 @@ function runBashHookStatus(): number {
     say("Bash: not installed. Run rocky hook install to enable it.");
     return 0;
   }
-  // r3: these reads used to sit outside any try/catch, so a non-ENOENT
-  // failure (rocky-hook.bash replaced by a directory, EACCES, ...) reached
-  // index.ts's top-level catch as a raw Node error string — the same class
-  // I3 already closed for hookInstall's writes, left open here for status's
-  // reads.
+  // These reads must sit inside a try/catch: a non-ENOENT failure
+  // (rocky-hook.bash replaced by a directory, EACCES, ...) would otherwise
+  // reach index.ts's top-level catch as a raw Node error string — the same
+  // class already closed for hookInstall's writes.
   const hookFile = join(rockyHome(), "rocky-hook.bash");
   const rulesPath = join(rockyHome(), "guard.rules");
   let version: string;
@@ -807,7 +802,7 @@ function runBashHookStatus(): number {
 }
 
 /**
- * PowerShell hosts (Ruling 3, task-4-brief). `rocky-hook.ps1` is a
+ * PowerShell hosts. `rocky-hook.ps1` is a
  * Windows-only surface — the managed-block install story, `$PROFILE`
  * semantics, and console codepage handling it depends on do not apply
  * off Windows. `powershell.exe` (Windows PowerShell) only ever exists on
@@ -1079,7 +1074,7 @@ export function admitHostWithinHome(host: PowerShellHost | undefined, home: stri
 
 /**
  * Every host actually present on this machine — install/uninstall/status all
- * loop over this same list (Ruling 3). The one choke point for the
+ * loop over this same list. The one choke point for the
  * home-containment guard too (see `PowerShellHost` above): every host is
  * passed through `admitHostWithinHome` before it ever reaches this list, so
  * install/uninstall/status all inherit the guard uniformly rather than each
@@ -1121,7 +1116,7 @@ function reportBlockedPolicy(host: PowerShellHost): void {
 }
 
 /**
- * v1 is passive observation only (Ruling 4): `prompt` only sees a command after it
+ * v1 is passive observation only: `prompt` only sees a command after it
  * already ran, so there is no PowerShell equivalent of the Bash hook's
  * pre-execution guard confirmation, and this install path writes no
  * `guard.rules` and prints no HISTCONTROL-style warning — there is nothing
@@ -1237,7 +1232,7 @@ function statusPowerShellHost(host: PowerShellHost): number {
   }
   const stale = hookStaleLine(version);
   if (stale) say(stale);
-  // Ruling 2's disclosed trade-off, named where a user actually meets it: the
+  // The disclosed trade-off, named where a user actually meets it: the
   // only way PowerShell allows forcing $? back to False after Rocky's own
   // bookkeeping runs is a real, suppressed non-terminating error, which
   // pushes one synthetic entry onto $Error ahead of your last real error.

@@ -285,7 +285,7 @@ export async function recall(argv: readonly string[], dependencies?: RecallDepen
             say(`Same program, ${span} later. May not be the fix. Check before acting.`);
           } else {
             // A recognized-but-weaker basis ("sequence") or a string this
-            // reader does not recognize yet (spec §2.5) must never grade as
+            // reader does not recognize yet must never grade as
             // "same program" — that overstates evidence it doesn't have.
             say(`Different program, ${span} later. May not be the fix. Check before acting.`);
           }

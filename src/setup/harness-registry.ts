@@ -1,5 +1,5 @@
 /**
- * Closed v1 harness identity + evidence contract (spec section 2).
+ * Closed v1 harness identity + evidence contract.
  * Data only: no filesystem, process, or network access from this module.
  */
 

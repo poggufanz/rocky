@@ -2934,7 +2934,7 @@ test("next invocation safely aborts a prepared transaction before inspecting con
   assert.match(configured.detail ?? "", /recovered|retry/i);
   assert.doesNotMatch(configured.detail ?? "", /fake-prepared-secret/);
   assert.deepEqual(readFileSync(path), originalBytes);
-  // Round 8, I1: this shared engine path (`resolveUndisplacedTransaction`)
+  // This shared engine path (`resolveUndisplacedTransaction`)
   // no longer `rm -r`s the whole transaction directory — it discards only
   // the staged `prepared` artifact and marks the directory committed, the
   // same narrow action the sibling "recovered" branches already took, so a
@@ -2973,11 +2973,11 @@ test("next invocation recognizes a prepared crash with both names on the same in
   assert.equal(fs.existsSync(join(transaction, "prepared")), false);
 });
 
-// Round 10, S1: this fixture is exactly the shape `recoverFileTransaction`'s
+// This fixture is exactly the shape `recoverFileTransaction`'s
 // `published` fallback now proves safe to commit — `displaced` is a proven,
 // singly-owned copy and `path` is itself a live regular file, the same
 // evidence `resolveUndisplacedTransaction` already accepted elsewhere in the
-// engine, plus a proven `displaced` on top. Before round 10 this state was a
+// engine, plus a proven `displaced` on top. Previously this state was a
 // permanent, unrecoverable "manual" stop, on both the hook route and (via
 // this same shared engine function) this adapter route — this test's old
 // name and its `/manual recovery/i` assertion pinned exactly that permanent
@@ -2986,7 +2986,7 @@ test("next invocation recognizes a prepared crash with both names on the same in
 // label advances, so the settle step now resolves it and reports `failed`
 // (this call still performed no configuration write) with a truthful detail
 // naming the live recovery, instead of stopping the surface dead forever.
-test("next invocation recovers a published crash target whose displaced backup and live target both prove safe (round 10, S1)", async (t) => {
+test("next invocation recovers a published crash target whose displaced backup and live target both prove safe", async (t) => {
   const current = { theme: "light", secret: "fake-ambiguous-current" };
   const displaced = { theme: "dark", secret: "fake-ambiguous-displaced" };
   const path = configPath(t, current);
@@ -3009,28 +3009,27 @@ test("next invocation recovers a published crash target whose displaced backup a
   assert.match(
     configured.detail ?? "",
     /live recovery: .*displaced/,
-    "the detail names the exact proven artifact, not a bare claim (round 10, S1)",
+    "the detail names the exact proven artifact, not a bare claim",
   );
   assert.doesNotMatch(configured.detail ?? "", /fake-ambiguous-current|fake-ambiguous-displaced/);
   assert.deepEqual(readFileSync(path), currentBytes, "the target's own bytes are never touched by settling");
   assert.deepEqual(readFileSync(join(transaction, "displaced")), displacedBytes, "the retained copy survives untouched");
   assert.deepEqual(backupPaths(path), []);
-  // Round 11, t4: the sibling test three lines up ("...both names on the
-  // same inode") asserts the manifest actually advanced; this test never
-  // did, even though the manifest label is the entire mechanism S1 adds.
+  // The sibling test three lines up ("...both names on the same inode")
+  // asserts the manifest actually advanced; this test must too, since the
+  // manifest label is the entire mechanism this recovery adds.
   assert.equal(
     JSON.parse(readFileSync(join(transaction, "manifest.json"), "utf8")).state,
     "committed",
-    "the commit is what un-bricks this surface — the manifest must actually advance (round 11, t4)",
+    "the commit is what un-bricks this surface — the manifest must actually advance",
   );
 
-  // Round 11, t4: S1's whole point on this route is that the surface is no
-  // longer permanently stuck. Nothing here previously called `configure()`
-  // a second time to prove it — the hook-route twin already does (asserting
-  // `hookInstall()` returns 0 on the second call); this is that same proof
-  // on the adapter route.
+  // The whole point of this recovery on this route is that the surface is no
+  // longer permanently stuck, so call `configure()` a second time to prove
+  // it — the hook-route twin does the same (asserting `hookInstall()` returns
+  // 0 on the second call); this is that same proof on the adapter route.
   const retried = await adapter.configure(registration, false);
-  assert.equal(retried.status, "configured", "the surface is no longer permanently stuck (round 11, t4)");
+  assert.equal(retried.status, "configured", "the surface is no longer permanently stuck");
   assert.equal(
     (JSON.parse(readFileSync(path, "utf8")).mcpServers as Record<string, unknown>).rocky !== undefined,
     true,

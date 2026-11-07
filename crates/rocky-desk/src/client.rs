@@ -385,7 +385,7 @@ fn client_loop(
 /// Decode complete lines in `buf`, forwarding to `tx`. Returns false when the
 /// connection must drop (over-long line, bad UTF-8, decode error).
 ///
-/// The 64 KiB spec cap applies to client→daemon lines only. Server→desk
+/// The 64 KiB `LINE_CAP` applies to client→daemon lines only. Server→desk
 /// snapshots grow with agent count, so the desk allows much larger lines
 /// here — still bounded so a rogue server cannot grow memory without limit.
 const SERVER_LINE_CAP: usize = 16 * 1024 * 1024;

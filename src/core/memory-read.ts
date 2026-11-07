@@ -750,7 +750,7 @@ function fingerprintFields(record: Record<string, unknown>): Pick<FailureRecord,
 
 // A record's origin is defined but not one of the three known values — including when it
 // isn't a string at all (a number, an object, null) — is read as "run" rather than
-// discarding the whole record. Compatibility cost the spec accepts: an already-released
+// discarding the whole record. Compatibility cost this design accepts: an already-released
 // v0.2.1 binary's parser only knows "run"/"hook" and still discards a "watch" record
 // outright, so a v0.3 -> v0.2.1 downgrade loses those records. Accepted because the
 // package is still beta; after v1, this kind of loosening must ship before any new

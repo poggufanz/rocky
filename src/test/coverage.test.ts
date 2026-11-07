@@ -324,7 +324,7 @@ test("brief appends an untried section without altering the decompose template",
     // The hunk-backed window file is tried, so it stays out of the section.
     // (stdout still names it under changes by area; stderr must not.)
     assert.doesNotMatch(stderr, /touched\.ts/);
-    // Task 3 template intact: the appended section changes nothing about it.
+    // Decompose template intact: the appended section changes nothing about it.
     assert.match(stdout, /^1\. behavior:/m);
     assert.match(stdout, /^2\. state:/m);
     assert.match(stdout, /^3\. verify:/m);

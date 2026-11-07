@@ -527,14 +527,12 @@ test("README discloses the retained .bashrc recovery copy left by write attempts
 });
 
 test("README discloses that hook status also settles and discloses a retained copy, not just install/uninstall", () => {
-  // Round 5 pinned the claim "status never writes bashrc itself" here — the
-  // whole-branch final audit found it false: with bashrc absent and a
-  // restorable retained copy, settling recreates bashrc from that copy
-  // (file-transaction.ts's restore-from-`displaced` path), and status
-  // printed nothing about having done so. Corrected per the audit's
-  // Important 1: status never edits the hook block itself, but settling can
-  // create or restore bashrc from a retained copy, and both the README and
-  // the command's own output must say so.
+  // The README must not claim "status never writes bashrc itself": with
+  // bashrc absent and a restorable retained copy, settling recreates bashrc
+  // from that copy (file-transaction.ts's restore-from-`displaced` path),
+  // and status must say so. Status never edits the hook block itself, but
+  // settling can create or restore bashrc from a retained copy, and both
+  // the README and the command's own output must say so.
   assert.match(
     readme,
     /status[^\n]*never edits the hook block itself[^\n]*settl(?:e|ing)/i,
@@ -557,13 +555,12 @@ test("README discloses that hook status also settles and discloses a retained co
   );
 });
 
-test("README discloses that a retained copy is never named for removal (round 7, F8)", () => {
-  // Round 6's claim gated the no-removal guarantee on "(bashrc itself
-  // missing)" — the exact defeated predicate the final audit's F1 broke: a
-  // 0-byte bashrc Rocky itself left behind satisfies "bashrc exists" while
-  // holding none of the user's content. The guarantee holds regardless of
-  // whether bashrc happens to exist, so the README must not gate it on that
-  // condition.
+test("README discloses that a retained copy is never named for removal", () => {
+  // The README must not gate the no-removal guarantee on "(bashrc itself
+  // missing)": a 0-byte bashrc Rocky itself left behind satisfies "bashrc
+  // exists" while holding none of the user's content. The guarantee holds
+  // regardless of whether bashrc happens to exist, so the README must not
+  // gate it on that condition.
   assert.match(
     readme,
     /never (?:tells|instructs) you to remove a retained copy/i,

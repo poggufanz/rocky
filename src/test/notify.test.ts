@@ -50,7 +50,7 @@ function activeTimeoutCount(): number {
   return activeResourcesProcess.getActiveResourcesInfo().filter((r) => r === "Timeout").length;
 }
 
-// Regression guard for Important 1: spawn's `timeout` option installs a ref'd
+// Regression guard: spawn's `timeout` option installs a ref'd
 // setTimeout cleared only on the child's 'exit' event, which an ENOENT spawn
 // never emits (it emits 'error' instead) — that held the event loop open for
 // 2s on any machine with no notifier binary. notify() no longer passes

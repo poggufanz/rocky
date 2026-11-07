@@ -16,7 +16,7 @@ import { projectKnowledgeHits } from "../mcp/privacy.js";
 import { resolveRockyPaths, type RockyPaths } from "../core/state-paths.js";
 
 function freshPaths(): RockyPaths {
-  const home = mkdtempSync(join(tmpdir(), "rocky-task7-fix4-"));
+  const home = mkdtempSync(join(tmpdir(), "rocky-triple-coverage-mcp-"));
   return resolveRockyPaths({ ROCKY_HOME: home });
 }
 
@@ -262,7 +262,7 @@ test("custom MCP query boundaries fail open to bounded safe schemas", async () =
  * durable loader (`hasDurableMemoryQueries` true) and goes through
  * `statsFromDurableSnapshot` instead, which projects `queryStats` through the
  * same allowlist. Nothing pinned that projection before, which is exactly
- * what let `rationaleByFidelity` (Task 17) leak onto the wire unfiltered
+ * what let `rationaleByFidelity` leak onto the wire unfiltered
  * until this test was added. Supported evidence (a rationale + an alias
  * record) keeps this fixture independent of future record writers. The
  * field allowlist also excludes future CLI-only guard counters, even when

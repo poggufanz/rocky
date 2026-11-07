@@ -270,7 +270,7 @@ export function scorePrompt(text: string, options: ScorePromptOptions = {}): Cla
   };
 }
 
-/** Detail lines for CLI output; the advisory rendering pattern Task 2 reuses. */
+/** Detail lines for CLI output; also the advisory rendering pattern `renderCycleCard` reuses. */
 export function renderClarityCard(result: ClarityResult): string[] {
   const lines = [`clarity ${result.score}/100 ${result.band}`];
   for (const suggestion of result.suggestions) lines.push(`suggest: ${suggestion}`);

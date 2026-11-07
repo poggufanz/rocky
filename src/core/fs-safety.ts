@@ -7,7 +7,7 @@ import { constants, type BigIntStats, type Stats } from "node:fs";
  * after a read or mutation; a zero Windows flag is never treated as proof of
  * reparse safety.
  *
- * Documented platform boundary (Task 10/16 follow-up): native Windows offers
+ * Documented platform boundary: native Windows offers
  * no path-only Node API that atomically excludes ancestor-directory reparse
  * or replacement races.  The implemented policy is bounded before/after
  * identity checking — capture parent and target BigInt identities, mutate,

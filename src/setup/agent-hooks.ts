@@ -14,7 +14,7 @@ import { detail, heading, say } from "../ui/rocky.js";
 const CLAUDE_MARKER = "hook agent-event claude-code";
 const GATE_MARKER = "hook gate-event claude-code";
 const POST_TOOL_MATCHER = "Edit|Write|MultiEdit|NotebookEdit";
-/** Tools Task 13's gate dispatcher actually enforces on; see agent/gate.ts GATED_TOOLS. */
+/** Tools the gate dispatcher actually enforces on; see agent/gate.ts GATED_TOOLS. */
 const GATE_MATCHER = "Edit|Write|MultiEdit";
 const AGENT_HOOK_CONFIRMATION = "Install agent hooks for Claude Code now?";
 const GENERIC_ERROR = "Claude Code agent hooks update cannot complete";

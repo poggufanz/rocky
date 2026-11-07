@@ -33,7 +33,7 @@ function coverage(result: ReturnType<typeof loadMemoryChecked>): MemoryCoverage 
 }
 
 test("memory reader reports corrupt and oversized lines instead of hiding them", (t) => {
-  const root = mkdtempSync(join(tmpdir(), "rocky-task13-lines-"));
+  const root = mkdtempSync(join(tmpdir(), "rocky-memory-budget-lines-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const path = join(root, "memory.jsonl");
   writeFileSync(path, [failure("valid"), "{not-json}", `${failure("oversize")}${"x".repeat(1_048_576)}`].join("\n") + "\n");
@@ -48,7 +48,7 @@ test("memory reader reports corrupt and oversized lines instead of hiding them",
 });
 
 test("cache invalidates after append, replace, and truncate", (t) => {
-  const root = mkdtempSync(join(tmpdir(), "rocky-task13-cache-"));
+  const root = mkdtempSync(join(tmpdir(), "rocky-memory-budget-cache-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const path = join(root, "memory.jsonl");
   writeFileSync(path, `${failure("one")}\n`);
@@ -78,7 +78,7 @@ test("cache invalidates after append, replace, and truncate", (t) => {
 });
 
 test("over-cap memory returns a bounded incomplete snapshot", (t) => {
-  const root = mkdtempSync(join(tmpdir(), "rocky-task13-cap-"));
+  const root = mkdtempSync(join(tmpdir(), "rocky-memory-budget-cap-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const path = join(root, "memory.jsonl");
   const line = `${failure("cap")}\n`;
@@ -97,7 +97,7 @@ test("over-cap memory returns a bounded incomplete snapshot", (t) => {
 });
 
 test("record-cap diagnostics are explicit", (t) => {
-  const root = mkdtempSync(join(tmpdir(), "rocky-task13-record-cap-"));
+  const root = mkdtempSync(join(tmpdir(), "rocky-memory-budget-record-cap-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const path = join(root, "memory.jsonl");
   const records = Array.from({ length: MAX_SUPPORTED_MEMORY_RECORDS + 1 }, (_, index) => failure(`r${index}`));
@@ -113,7 +113,7 @@ test("record-cap diagnostics are explicit", (t) => {
 });
 
 test("once-only triple refuses an exactly full complete record snapshot", (t) => {
-  const root = mkdtempSync(join(tmpdir(), "rocky-task13-triple-full-"));
+  const root = mkdtempSync(join(tmpdir(), "rocky-memory-budget-triple-full-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const path = join(root, "memory.jsonl");
   writeFileSync(path, Array.from({ length: MAX_SUPPORTED_MEMORY_RECORDS }, (_, index) => `${failure(`full-${index}`)}\n`).join(""));
@@ -130,7 +130,7 @@ test("once-only triple refuses an exactly full complete record snapshot", (t) =>
 });
 
 test("incomplete snapshots fail closed for fix, reconciliation, and once-only claims", (t) => {
-  const root = mkdtempSync(join(tmpdir(), "rocky-task13-transaction-cap-"));
+  const root = mkdtempSync(join(tmpdir(), "rocky-memory-budget-transaction-cap-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const previous = process.env.ROCKY_HOME;
   process.env.ROCKY_HOME = root;
@@ -160,7 +160,7 @@ test("incomplete snapshots fail closed for fix, reconciliation, and once-only cl
 });
 
 test("skipped corrupt evidence is incomplete for transactions and keeps pending", (t) => {
-  const root = mkdtempSync(join(tmpdir(), "rocky-task13-transaction-corrupt-"));
+  const root = mkdtempSync(join(tmpdir(), "rocky-memory-budget-transaction-corrupt-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const previous = process.env.ROCKY_HOME;
   process.env.ROCKY_HOME = root;
@@ -184,7 +184,7 @@ test("skipped corrupt evidence is incomplete for transactions and keeps pending"
 });
 
 test("cached triple witnesses retain identity and deep immutability", (t) => {
-  const root = mkdtempSync(join(tmpdir(), "rocky-task13-freeze-"));
+  const root = mkdtempSync(join(tmpdir(), "rocky-memory-budget-freeze-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const path = join(root, "memory.jsonl");
   writeFileSync(path, `${JSON.stringify({
@@ -253,7 +253,7 @@ test("run, hook, and watch incomplete diagnostics disclose memory version", () =
 });
 
 test("canonical fetch not-found carries skipped-line coverage", async (t) => {
-  const root = mkdtempSync(join(tmpdir(), "rocky-task13-fetch-coverage-"));
+  const root = mkdtempSync(join(tmpdir(), "rocky-memory-budget-fetch-coverage-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   writeFileSync(join(root, "memory.jsonl"), `${failure("known")}\n{not-json}\n`);
   const previous = process.env.ROCKY_HOME;
@@ -445,7 +445,7 @@ test("legitimate skipped-only coverage is preserved", async () => {
 });
 
 test("unexpected short read is incomplete once and is not cached", (t) => {
-  const root = mkdtempSync(join(tmpdir(), "rocky-task13-short-read-"));
+  const root = mkdtempSync(join(tmpdir(), "rocky-memory-budget-short-read-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const path = join(root, "memory.jsonl");
   const marker = join(root, "short-read-fired");
@@ -497,7 +497,7 @@ test("unexpected short read is incomplete once and is not cached", (t) => {
 });
 
 test("bounded reader rejects same-metadata rewrites before fix linking", (t) => {
-  const root = mkdtempSync(join(tmpdir(), "rocky-task13-witness-"));
+  const root = mkdtempSync(join(tmpdir(), "rocky-memory-budget-witness-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const path = join(root, "memory.jsonl");
   const first = failure("a29");
@@ -558,7 +558,7 @@ test("bounded reader rejects same-metadata rewrites before fix linking", (t) => 
 });
 
 test("durable query cache re-resolves fixes across time travel", (t) => {
-  const root = mkdtempSync(join(tmpdir(), "rocky-task13-time-"));
+  const root = mkdtempSync(join(tmpdir(), "rocky-memory-budget-time-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   writeFileSync(join(root, "memory.jsonl"), [
     failure("time-failure"),
@@ -578,7 +578,7 @@ test("durable query cache re-resolves fixes across time travel", (t) => {
 });
 
 test("production stats single-flight shares one witness batch and revalidates near and over cap", async (t) => {
-  const root = mkdtempSync(join(tmpdir(), "rocky-task13-concurrent-"));
+  const root = mkdtempSync(join(tmpdir(), "rocky-memory-budget-concurrent-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const path = join(root, "memory.jsonl");
   const line = `${failure("concurrent")}`;
@@ -635,7 +635,7 @@ test("production stats single-flight shares one witness batch and revalidates ne
 });
 
 test("canonical stats single-flight shares witness scans across distinct cwd answers", async (t) => {
-  const root = mkdtempSync(join(tmpdir(), "rocky-task13-distinct-cwd-"));
+  const root = mkdtempSync(join(tmpdir(), "rocky-memory-budget-distinct-cwd-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const path = join(root, "memory.jsonl");
   const expectedTotals = Array.from({ length: 200 }, (_, index) => (index % 5) + 1);

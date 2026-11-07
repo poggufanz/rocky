@@ -24,7 +24,7 @@ import { disabledRecallWithAi } from "../ai/port.js";
 import { resolveRockyPaths, type RockyPaths } from "../core/state-paths.js";
 
 function freshPaths(): RockyPaths {
-  const home = mkdtempSync(join(tmpdir(), "rocky-task7-fix5-"));
+  const home = mkdtempSync(join(tmpdir(), "rocky-coverage-fix5-"));
   return resolveRockyPaths({ ROCKY_HOME: home });
 }
 

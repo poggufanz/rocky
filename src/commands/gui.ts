@@ -43,7 +43,7 @@ export async function guiCommand(rest: string[], segment: GuiSegment): Promise<n
 
   let handle;
   try {
-    // the foreground CLI owns the collector for every consented repo (spec §3)
+    // the foreground CLI owns the collector for every consented repo
     handle = await startGui({ port: Number.isFinite(port) ? port : DEFAULT_GUI_PORT, collect: true });
   } catch {
     say("Could not start the GUI server. The port may be busy.");

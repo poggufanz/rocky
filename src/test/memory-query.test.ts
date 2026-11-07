@@ -119,7 +119,7 @@ test("queryRecall deduplicates a fingerprint family before applying limit orderi
   );
 });
 
-// F3: recall must also match tokens from the raw, unmasked command text, so
+// Recall must also match tokens from the raw, unmasked command text, so
 // a hook-origin record (no stderr, so signature/excerpt are nearly empty)
 // stays findable by the distinctive word a user actually typed, even though
 // the persisted signature masks the path exactly like the fingerprint does.
@@ -194,14 +194,14 @@ test("fingerprint-based recurrence matching stays untouched by the raw-command r
   assert.deepEqual(findByFingerprint([recordA, recordB], fp).map((record) => record.id), ["recur-a", "recur-b"]);
 });
 
-// F3 round-1 review, finding 2: the 0.06 rare-token floor only protects a
+// The 0.06 rare-token floor only protects a
 // query token whose document frequency is <= rareFrequency (as low as 2 once
 // there are >=10 candidates). A common program name ("git", "npm", a hook
 // origin's own program) recorded across many distinct hook-origin failures
 // loses that protection, so a record whose raw command contributes a lot of
 // net-new tokens (a deep/long path) can fall below the hard 0.05 visibility
 // cutoff for that common-name query -- the same "Rocky remembers it but you
-// cannot find it" failure mode F3 was meant to cure, just triggered from the
+// cannot find it" failure mode the raw-command match was meant to cure, just triggered from the
 // other side (a shallow/common query against a token-heavy record instead of
 // a distinctive query against a masked one).
 test("a common program-name query still finds a hook record with a long path among many candidates", () => {
@@ -1289,7 +1289,7 @@ test("queryRecall attaches the top possible fix only when the hit has no confirm
   assert.equal(resolvedHit?.possible, undefined, "a confirmed fix must never be paired with a possible candidate");
 });
 
-// Finding 1, final whole-branch review: recall's possible-fix search used to
+// Recall's possible-fix search used to
 // look only at the single representative (deduplicated) failure recall's
 // scoring happened to pick, while run/watch walk every prior same-fingerprint
 // occurrence newest-first. This test pins a real scenario where recall's own
@@ -1340,8 +1340,7 @@ test("rare exact token boost remains active when token appears twice among many 
   assert.ok(hits.every((hit) => hit.score >= 0.06));
 });
 
-// Finding 1 (2026-08-17/18 stress-test docs, `queryRecall` around what was
-// lines 407-510): `documentFrequency` used to count once per *record*
+// `documentFrequency` in `queryRecall` used to count once per *record*
 // instead of once per *canonical fingerprint*. Two identical failures --
 // the same error recurring, Rocky's core use case -- doubled a distinctive
 // signature token's frequency past the 1-candidate rare-token floor
@@ -1418,7 +1417,7 @@ test("a genuinely common token across many distinct fingerprints does not trigge
   );
 });
 
-// Finding 3 (2026-08-17/18 stress-test docs): `retrievalEvidenceTokens` /
+// `retrievalEvidenceTokens` /
 // `fillRetrievalEvidenceTokens` used to stop indexing at `cmd + signature`
 // for every v2 record, so a distinctive word that only made it into the
 // excerpt -- not into the bounded `SIGNAL`-matched `signature` lines -- was
@@ -1461,7 +1460,7 @@ test("recall finds a v2 record's distinctive excerpt word that never made it int
   );
 });
 
-// Finding 3 must not widen a hook-origin record's evidence: hook failures
+// Indexing the excerpt must not widen a hook-origin record's evidence: hook failures
 // carry no stderr, so their excerpt (always a synthetic `exit N`) must never
 // become searchable text, regardless of fingerprint version.
 test("a hook-origin record's excerpt never becomes retrieval evidence, even for a v2 fingerprint", () => {
@@ -1474,7 +1473,7 @@ test("a hook-origin record's excerpt never becomes retrieval evidence, even for 
   assert.deepEqual(queryRecall([record], { query: "distinctive-excerpt-only-word" }), []);
 });
 
-// Finding 3's new v2 branch must not loosen the pre-existing v1/absent path:
+// The v2 excerpt-indexing branch must not loosen the pre-existing v1/absent path:
 // an *unproven* legacy excerpt (its signature/excerpt do not independently
 // hash to the persisted fingerprint) stays excluded from evidence exactly as
 // before.

@@ -103,7 +103,7 @@ function maskUrls(text: string): string {
  * retrieval representations both rely on path masking for stability). The
  * raw-command retrieval layer is the one caller that opts out -- see
  * `fillRawCommandTokens` -- because path masking is specifically the rule
- * the F3 fix needs to bypass; every other volatile-value rule here (URL,
+ * the raw-command retrieval layer needs to bypass; every other volatile-value rule here (URL,
  * UUID, digest, hex address, timestamp) is a deliberate, pre-existing design
  * choice for matching stability that stays in force even for raw commands.
  */
@@ -342,7 +342,7 @@ export function fillRetrievalTokens(text: string, target: Set<string>): void {
  * them can dilute a plain, common-word query -- a frequently-recorded
  * program name like `git`, appearing across many hook-origin failures --
  * below the 0.05 visibility floor for the one record with an unusually deep
- * path. That is the same "remembered but not findable" failure mode F3
+ * path. That is the same "remembered but not findable" failure mode the raw-command layer
  * fixes, just triggered from the query side (a common query, an uncapped
  * record) instead of the record side (a distinctive query, a masked
  * record). Twelve keeps every realistic path fully unmasked -- most real
@@ -359,7 +359,7 @@ const MAX_NEW_RAW_COMMAND_TOKENS = 12;
  * containing a path collapses to `<path>` there too whenever it is combined
  * with already-masked signature text -- the same mask that keeps a
  * recurring fingerprint stable also erases the one distinctive word a user
- * would search for. Path masking is the *only* rule F3 needs to bypass:
+ * would search for. Path masking is the *only* rule the raw-command layer needs to bypass:
  * URL/UUID/digest/hex-address/timestamp masking stay in force here exactly
  * as `retrievalTokens` already applies them, since those are a deliberate,
  * pre-existing design choice for matching stability, not part of the bug.

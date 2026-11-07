@@ -210,7 +210,7 @@ test("recovery restores displaced bytes from a byte-for-byte v1 transaction fixt
 });
 
 test("recovery resolves a prepared transaction that never displaced the target, without rm -r'ing the directory", (t) => {
-  // Round 8, I1: resolving this shape used to `rmSync(dir, { recursive: true
+  // Resolving this shape used to `rmSync(dir, { recursive: true
   // })` the whole transaction directory in one step whose own outcome record
   // nothing ever read. It now takes the same narrow, already-audited action
   // the sibling "recovered" branches below take — discard just the staged
@@ -258,7 +258,7 @@ test("recovery completes a displaced transaction whose publish never happened", 
   assert.equal(inspectFileTransaction(path).status, "clear");
 });
 
-test("recovery commits a published transaction whose displaced backup and live target both prove safe, and skips committed ones (round 10, S1)", (t) => {
+test("recovery commits a published transaction whose displaced backup and live target both prove safe, and skips committed ones", (t) => {
   const directory = temporaryDirectory(t);
   const path = join(directory, "states.bin");
   const original = Buffer.from("original\n", "utf8");
@@ -271,9 +271,9 @@ test("recovery commits a published transaction whose displaced backup and live t
   // `displaced` is a proven, singly-owned copy and `path` is itself a live
   // regular file — the exact evidence `resolveUndisplacedTransaction`
   // already accepts, plus a proven `displaced` on top. Committing here
-  // destroys nothing (`displaced` is retained either way); before round 10,
-  // S1, this exact shape returned "manual" unconditionally, forever, with
-  // no re-examination of the evidence — reported before this fix as "a
+  // destroys nothing (`displaced` is retained either way); previously this
+  // exact shape returned "manual" unconditionally, forever, with
+  // no re-examination of the evidence — reported as "a
   // published transaction as manual" (this test's own former name).
   const recovered = recoverFileTransaction(path);
   assert.equal(recovered.status, "recovered");
@@ -291,16 +291,16 @@ test("recovery commits a published transaction whose displaced backup and live t
   assert.deepEqual(recoverFileTransaction(path), { status: "clear" });
 });
 
-test("recovery still reports a published transaction as manual when the target is not itself a live regular file (negative control for S1)", (t) => {
+test("recovery still reports a published transaction as manual when the target is not itself a live regular file (negative control)", (t) => {
   const directory = temporaryDirectory(t);
   const path = join(directory, "vanished-target-with-displaced.bin");
   const original = Buffer.from("original\n", "utf8");
   // `displaced` is present and provable, but `path` itself does not exist —
-  // S1's new commit path requires both, and a target-absent shape stays
-  // exactly as ambiguous as it was before this round (final audit's own
-  // reasoning: a proven copy is not proof that discarding is not throwing
-  // away the last surviving evidence of the target ever having existed at
-  // all, when nothing currently occupies that name to compare against).
+  // the published-commit path requires both, and a target-absent shape stays
+  // exactly as ambiguous as it was before (a proven copy is not proof that
+  // discarding is not throwing away the last surviving evidence of the
+  // target ever having existed at all, when nothing currently occupies that
+  // name to compare against).
   const publishedDirectory = writeLegacyV1TransactionFixture(directory, path, "published", {
     displaced: original,
   });
@@ -311,16 +311,14 @@ test("recovery still reports a published transaction as manual when the target i
   assert.equal(existsSync(join(publishedDirectory, "displaced")), true, "the only surviving copy is retained");
 });
 
-// --- Round 11, T1: round 10 wrote the published-commit branch above but
-// wrote zero mutants against it. These five pin the nine survivors the
-// final audit found (branch-final-audit-commit-path.md); E1 is a genuine
-// equivalent (isManagedRegularFile implies pathExists on its whole domain)
-// and E11 is a genuine equivalent re-derived in the round 11 report
-// (targetExists from a "recovered" outcome is provably never read by any
+// --- mutation guards for the published-commit branch above. These pin the
+// survivors found by mutating that branch; two further mutants are genuine
+// equivalents (isManagedRegularFile implies pathExists on its whole domain,
+// and targetExists from a "recovered" outcome is provably never read by any
 // consumer — hook.ts's mergeOutcome always overwrites it with the next
 // iteration's own value before a message can ever see it).
 
-test("the published-commit branch's own final write still honors a guard change (round 11, T1/E7)", (t) => {
+test("the published-commit branch's own final write still honors a guard change", (t) => {
   const directory = temporaryDirectory(t);
   const path = join(directory, "commit-guard-published.bin");
   writeFileSync(path, "live\n", "utf8");
@@ -329,17 +327,17 @@ test("the published-commit branch's own final write still honors a guard change 
   });
 
   // Nothing above this branch's own commit calls the guard at all (unlike
-  // `resolveUndisplacedTransaction`'s C10 test, where two of this
+  // `resolveUndisplacedTransaction`'s own guard test, where two of this
   // function's own checks precede its commit) — this branch's proof is
   // purely topological, so the very first `unchanged()` call happens inside
   // this call's own `writeManifest`. A guard reporting change on that first
-  // call must still abort the commit — exactly the property C10 pins at the
+  // call must still abort the commit — exactly the property that test pins at the
   // sibling site, which this branch duplicated without duplicating the test.
   const guard = { unchanged: () => false };
 
   const recovery = recoverFileTransaction(path, guard);
 
-  assert.equal(recovery.status, "manual", "a guard change reported during the commit's own write must abort it (E7)");
+  assert.equal(recovery.status, "manual", "a guard change reported during the commit's own write must abort it");
   assert.equal(
     JSON.parse(readFileSync(join(transactionDirectory, "manifest.json"), "utf8")).state,
     "published",
@@ -347,7 +345,7 @@ test("the published-commit branch's own final write still honors a guard change 
   );
 });
 
-test("the published-commit branch stays manual, not silently recovered, when its own manifest write fails (round 11, T1/E9)", (t) => {
+test("the published-commit branch stays manual, not silently recovered, when its own manifest write fails", (t) => {
   const directory = temporaryDirectory(t);
   const path = join(directory, "commit-fault-published.bin");
   writeFileSync(path, "live\n", "utf8");
@@ -366,16 +364,16 @@ test("the published-commit branch stays manual, not silently recovered, when its
   assert.equal(
     recovery.status,
     "manual",
-    "a failed commit write must never be reported as recovered — nothing on disk actually advanced (E9)",
+    "a failed commit write must never be reported as recovered — nothing on disk actually advanced",
   );
   assert.equal(
     JSON.parse(readFileSync(join(transactionDirectory, "manifest.json"), "utf8")).state,
     "published",
-    "the manifest stays published; a fail-open here would leave settleBashrcTransactions spinning forever on this same directory (E9, consequence class: E6)",
+    "the manifest stays published; a fail-open here would leave settleBashrcTransactions spinning forever on this same directory",
   );
 });
 
-test("the published-commit branch's own recovered outcome proves the retained copy before the commit and never claims an unfinished write (round 11, T1/E10,E8)", (t) => {
+test("the published-commit branch's own recovered outcome proves the retained copy before the commit and never claims an unfinished write", (t) => {
   const directory = temporaryDirectory(t);
   const path = join(directory, "commit-outcome-published.bin");
   writeFileSync(path, "live\n", "utf8");
@@ -389,15 +387,15 @@ test("the published-commit branch's own recovered outcome proves the retained co
 
   assert.equal(recovery.status, "recovered");
   assert.ok(recovery.outcome !== undefined);
-  // E10: flipping this to `true` makes `hook.ts:259` say "bashrc gone. I
+  // Flipping this to `true` makes `hook.ts:259` say "bashrc gone. I
   // already put old bytes back from safe copy." over a `.bashrc` this call
   // never touched and that never went missing.
   assert.equal(
     recovery.outcome!.targetWritten,
     false,
-    "this branch never writes path — settling on a manifest label alone must never claim a restore (E10)",
+    "this branch never writes path — settling on a manifest label alone must never claim a restore",
   );
-  // E8: capturing `provenCopy` AFTER the commit re-derives the proof
+  // Capturing `provenCopy` AFTER the commit re-derives the proof
   // against this transaction's own now-"committed" manifest, which counts
   // the directory against itself and reports the one surviving copy as
   // unproven — the exact self-reference trap the branch's own comment
@@ -405,11 +403,11 @@ test("the published-commit branch's own recovered outcome proves the retained co
   assert.equal(
     recovery.outcome!.provenCopy,
     displacedPath,
-    "the retained copy must stay disclosed after the commit, not swallowed by the self-reference trap (E8)",
+    "the retained copy must stay disclosed after the commit, not swallowed by the self-reference trap",
   );
 });
 
-test("recovery still reports a published transaction as manual when the target is a dangling symlink (round 11, T1/E4)", (t) => {
+test("recovery still reports a published transaction as manual when the target is a dangling symlink", (t) => {
   if (skipIfSymlinkUnavailable(t)) return;
   const directory = temporaryDirectory(t);
   const path = join(directory, "dangling-target-published.bin");
@@ -421,19 +419,19 @@ test("recovery still reports a published transaction as manual when the target i
 
   // `pathExists` and `isLiveRegularFile` disagree here: a dangling symlink
   // resolves to *something* (`lstatSync` succeeds) but is not itself a
-  // regular file. S2 eliminated this exact conflation at the sibling
-  // `resolveUndisplacedTransaction` site by construction (round 10); this
+  // regular file. The sibling `resolveUndisplacedTransaction` site
+  // eliminated this exact conflation by construction; this
   // branch performs the identical check inline and can re-merge the same
   // way with no compile error to catch it.
   const recovery = recoverFileTransaction(path);
 
-  assert.equal(recovery.status, "manual", "a dangling symlink target must never be treated as live (E4)");
+  assert.equal(recovery.status, "manual", "a dangling symlink target must never be treated as live");
   assert.equal(recovery.recoveryPath, transactionDirectory);
   assert.equal(lstatSync(path).isSymbolicLink(), true, "the symlink itself is untouched");
   assert.equal(existsSync(join(transactionDirectory, "displaced")), true, "the only surviving copy is retained");
 });
 
-test("the published-commit branch retains a leftover prepared artifact instead of discarding it (round 11, T1/E13)", (t) => {
+test("the published-commit branch retains a leftover prepared artifact instead of discarding it", (t) => {
   const directory = temporaryDirectory(t);
   const path = join(directory, "leftover-artifact-published.bin");
   writeFileSync(path, "live\n", "utf8");
@@ -452,11 +450,11 @@ test("the published-commit branch retains a leftover prepared artifact instead o
   assert.equal(
     existsSync(join(transactionDirectory, "prepared")),
     true,
-    "this branch commits on topology alone and must not silently discard an artifact it never proved safe to discard (E13)",
+    "this branch commits on topology alone and must not silently discard an artifact it never proved safe to discard",
   );
 });
 
-test("the published-commit branch's displaced proof accounts for a committed sibling sharing displaced's inode (round 11, T1/E5)", (t) => {
+test("the published-commit branch's displaced proof accounts for a committed sibling sharing displaced's inode", (t) => {
   const directory = temporaryDirectory(t);
   const path = join(directory, "sibling-link-published.bin");
   writeFileSync(path, "live\n", "utf8");
@@ -478,7 +476,7 @@ test("the published-commit branch's displaced proof accounts for a committed sib
   assert.equal(
     recovery.status,
     "recovered",
-    "a displaced backup shared with a committed sibling is still a proven, singly-owned copy of path (E5)",
+    "a displaced backup shared with a committed sibling is still a proven, singly-owned copy of path",
   );
   assert.equal(
     JSON.parse(readFileSync(join(publishedDirectory, "manifest.json"), "utf8")).state,
@@ -612,7 +610,7 @@ test("a parent fsync failure after publish reports recovery-required with intact
 
   // The publish itself already completed (nlink 2, proven pairing with the
   // transaction's `prepared` artifact) — a later recovery must finish
-  // committing it, not report `manual` forever (whole-branch review, Important 1).
+  // committing it, not report `manual` forever.
   assert.equal(lstatSync(path).nlink, 2);
   const recovery = recoverFileTransaction(path);
   assert.equal(recovery.status, "recovered");
@@ -705,7 +703,7 @@ test("a concurrent mode change between snapshot and publish refuses to overwrite
  * path ends in `manifest.tmp`) exactly once, then behaves normally. Manifests
  * are written in order prepared -> displaced -> published, so N=3 fails the
  * "published" manifest specifically, deterministically reproducing the
- * reviewer's SIGKILL window: the destination is already hard-linked to the
+ * real SIGKILL window: the destination is already hard-linked to the
  * transaction's `prepared` artifact (nlink 2) and `displaced` already holds
  * the pre-write bytes, but the manifest never advances past "displaced".
  */
@@ -841,7 +839,7 @@ test("pruneSupersededTransactions removes only committed siblings other than the
 });
 
 test("pruneSupersededTransactions protects the kept directory by filesystem identity, not string equality", (t) => {
-  // Reviewer's P3-7: a differently-spelled-but-identical `keep` path (a
+  // A differently-spelled-but-identical `keep` path (a
   // trailing slash) must still protect that directory. A raw string compare
   // would fail to recognize it and delete the copy that was just created.
   const directory = temporaryDirectory(t);
@@ -861,7 +859,7 @@ test("pruneSupersededTransactions protects the kept directory by filesystem iden
   assert.equal(existsSync(other), false, "the other committed sibling is still pruned");
 });
 
-// --- Important 2: the recovery boundary must be complete, not arbitrary ----
+// --- the recovery boundary must be complete, not arbitrary ----
 
 /**
  * Fails the single-argument `rmSync(temporaryPath)` unlink of the
@@ -890,7 +888,7 @@ function injectFailureOnPreparedUnlink(t: test.TestContext): void {
   });
 }
 
-test("recovery finishes a transaction whose manifest already recorded the publish (Important 2, W2)", (t) => {
+test("recovery finishes a transaction whose manifest already recorded the publish", (t) => {
   const directory = temporaryDirectory(t);
   const path = join(directory, "published-window.bin");
   const original = Buffer.from("original fake-secret-original\n", "utf8");
@@ -908,7 +906,7 @@ test("recovery finishes a transaction whose manifest already recorded the publis
   const transactionDirectory = join(directory, transactionName);
   const manifestPath = join(transactionDirectory, "manifest.json");
   // The manifest DID advance to "published" here — strictly more evidence
-  // than the "displaced" window round 1 already resolved, per the reviewer.
+  // than the "displaced" window an earlier fix already resolved.
   assert.equal(
     readFileSync(manifestPath, "utf8"),
     `${JSON.stringify({ version: 1, state: "published", target: path })}\n`,
@@ -922,7 +920,7 @@ test("recovery finishes a transaction whose manifest already recorded the publis
   assert.equal(
     recovery.status,
     "recovered",
-    "W2: a 'published' manifest with intact displaced and a proven prepared pairing must finish, not stay manual forever",
+    "a 'published' manifest with intact displaced and a proven prepared pairing must finish, not stay manual forever",
   );
   assert.deepEqual(readFileSync(path), replacement, "already-published bytes stay live");
   assert.equal(lstatSync(path).nlink, 1, "the redundant prepared link is discarded");
@@ -959,7 +957,7 @@ function injectFailureOnTransactionRemoval(t: test.TestContext): void {
   });
 }
 
-test("recovery finishes a missing-prior transaction whose manifest already recorded the publish (Important 2, W4)", (t) => {
+test("recovery finishes a missing-prior transaction whose manifest already recorded the publish", (t) => {
   const directory = temporaryDirectory(t);
   const path = join(directory, "missing-prior-published.bin");
   const prior: BytesReadResult = { status: "missing" };
@@ -986,7 +984,7 @@ test("recovery finishes a missing-prior transaction whose manifest already recor
   assert.equal(
     recovery.status,
     "recovered",
-    "W4: a 'published' manifest with nothing to protect (no prior file) must finish, not stay manual forever",
+    "a 'published' manifest with nothing to protect (no prior file) must finish, not stay manual forever",
   );
   assert.deepEqual(readFileSync(path), bytes, "already-published bytes stay live");
   assert.equal(lstatSync(path).nlink, 1, "the redundant prepared link is discarded");
@@ -994,7 +992,7 @@ test("recovery finishes a missing-prior transaction whose manifest already recor
   assert.deepEqual(recoverFileTransaction(path), { status: "clear" }, "idempotent on a second run");
 });
 
-test("recovery resolves an orphaned published transaction directory without touching an unrelated target (W4 negative control)", (t) => {
+test("recovery resolves an orphaned published transaction directory without touching an unrelated target (negative control)", (t) => {
   const directory = temporaryDirectory(t);
   const path = join(directory, "orphaned.bin");
   const original = Buffer.from("original\n", "utf8");
@@ -1009,12 +1007,12 @@ test("recovery resolves an orphaned published transaction directory without touc
   assert.equal(
     existsSync(join(transactionDirectory, "prepared")),
     false,
-    "the unrelated staged artifact is discarded (round 8: no rm -r of the directory itself)",
+    "the unrelated staged artifact is discarded",
   );
   assert.deepEqual(readFileSync(path), original, "unrelated target bytes are never touched");
 });
 
-test("the complete-but-unrecorded branch refuses when displaced is not a plain regular file (M3)", (t) => {
+test("the complete-but-unrecorded branch refuses when displaced is not a plain regular file", (t) => {
   if (skipIfSymlinkUnavailable(t)) return;
   const directory = temporaryDirectory(t);
   const path = join(directory, "displaced-symlink.bin");
@@ -1037,11 +1035,11 @@ test("the complete-but-unrecorded branch refuses when displaced is not a plain r
 
   const recovery = recoverFileTransaction(path);
 
-  assert.equal(recovery.status, "manual", "a symlinked displaced is not a proven backup; must not commit (M3)");
+  assert.equal(recovery.status, "manual", "a symlinked displaced is not a proven backup; must not commit");
   assert.equal(lstatSync(path).nlink, 2, "nothing was mutated");
 });
 
-test("recovery retains and names a transaction directory instead of guessing when discarding its resolved artifact fails partway (Important 1 / round 8, I1)", (t) => {
+test("recovery retains and names a transaction directory instead of guessing when discarding its resolved artifact fails partway", (t) => {
   const directory = temporaryDirectory(t);
   const path = join(directory, "degraded-recovery.bin");
   const original = Buffer.from("original fake-secret-original\n", "utf8");
@@ -1052,8 +1050,8 @@ test("recovery retains and names a transaction directory instead of guessing whe
 
   // Real fault injection, no sleep: the staged artifact's own unlink
   // succeeds, but the follow-up directory fsync (a real EIO on $HOME)
-  // throws. Round 8 no longer `rmSync`s the whole transaction directory
-  // here (I1) — resolving discards only the staged artifact and marks the
+  // throws. Recovery no longer `rmSync`s the whole transaction directory
+  // here — resolving discards only the staged artifact and marks the
   // directory committed — so a durability failure at that step must retain
   // and name the directory rather than proceed on an unproven assumption
   // that the discard actually completed.
@@ -1079,7 +1077,7 @@ test("recovery retains and names a transaction directory instead of guessing whe
   assert.deepEqual(readFileSync(path), original, "the untouched target keeps its own bytes");
 });
 
-// --- Minor 4 (final audit): the unconditional-discard branch never checked `path` ---
+// --- the unconditional-discard branch never checked `path` ---
 
 test("recovery does not silently discard a published transaction's staged bytes when both the target and displaced are gone", (t) => {
   // published + no displaced is normally safe to discard unconditionally
@@ -1109,7 +1107,7 @@ test("recovery does not silently discard a published transaction's staged bytes 
 });
 
 test("recovery still resolves a published transaction with no displaced when the target is present (unaffected by the path check)", (t) => {
-  // Negative control: the missing-prior crash window (W4) legitimately
+  // Negative control: the missing-prior crash window legitimately
   // reaches this exact shape with `path` present (just linked). The added
   // `path` proof must not regress that case.
   const directory = temporaryDirectory(t);
@@ -1130,11 +1128,11 @@ test("recovery still resolves a published transaction with no displaced when the
   assert.deepEqual(readFileSync(path), Buffer.from("brand new file\n", "utf8"));
 });
 
-// --- Round 8 coverage: B3 (restoreDisplaced's own in-process copy-failure
-// outcome, the publish route's twin of the already-pinned recovery-route
-// fix) and B11 (the "nothing staged" arm of resolveUndisplacedTransaction) --
+// --- restoreDisplaced's own in-process copy-failure outcome (the publish
+// route's twin of the already-pinned recovery-route fix) and the "nothing
+// staged" arm of resolveUndisplacedTransaction --
 
-test("a fresh write's own in-process restore reports an interrupted restore honestly instead of defaulting targetWritten to false (round 8, B3)", (t) => {
+test("a fresh write's own in-process restore reports an interrupted restore honestly instead of defaulting targetWritten to false", (t) => {
   const directory = temporaryDirectory(t);
   const path = join(directory, "publish-restore-fault.bin");
   const original = Buffer.from("original fake-secret-original\n", "utf8");
@@ -1144,8 +1142,8 @@ test("a fresh write's own in-process restore reports an interrupted restore hone
   // Corrupt the freshly-displaced backup the instant atomicWriteBytesIfUnchanged
   // creates it (its own renameSync(path, displaced)), so its own in-process
   // fileMatches check fails and it must restore from the very artifact it
-  // just displaced — all inside this one call, unlike PROBE A / mutant B4,
-  // which pin the same shape reached a call later, via recoverFileTransaction.
+  // just displaced — all inside this one call, unlike the recovery-route restore test,
+  // which pins the same shape reached a call later, via recoverFileTransaction.
   const originalRename = fs.renameSync;
   fs.renameSync = ((from: fs.PathLike, to: fs.PathLike) => {
     originalRename(from, to);
@@ -1194,13 +1192,13 @@ test("a fresh write's own in-process restore reports an interrupted restore hone
   // The failed O_CREAT|O_EXCL restore leaves a broken file at `path` behind
   // (never cleaned up — see copyRegularFileExclusiveNoFollow's own doc
   // comment on why not). `targetWritten` must reflect that fresh proof, not
-  // a stale default of false — the exact thing mutant B3 (hardcode `false`
-  // at restoreDisplaced's own ambiguousOutcome call) would get away with.
+  // a stale default of false — the exact thing a mutant that hardcodes `false`
+  // at restoreDisplaced's own ambiguousOutcome call would get away with.
   assert.equal(existsSync(path), true, "the failed restore left a broken file behind");
   assert.equal(result.outcome!.targetWritten, true, "targetWritten must be proven fresh, not defaulted");
 });
 
-test("recovery resolves a transaction with nothing staged when the target is also absent (round 8, B11)", (t) => {
+test("recovery resolves a transaction with nothing staged when the target is also absent", (t) => {
   // No target, no prepared, no displaced: purely empty bookkeeping, exactly
   // what a crash between mkdirSync and the very first openSync("prepared",
   // "wx") leaves behind. Safe to resolve regardless of the target's own
@@ -1215,10 +1213,10 @@ test("recovery resolves a transaction with nothing staged when the target is als
   assert.equal(inspectFileTransaction(path).status, "clear");
 });
 
-// --- Round 9, r4: a leftover link-probe hard link must not survive a
+// --- a leftover link-probe hard link must not survive a
 // discard that only accounted for the "prepared" name ----------------------
 
-test("recovery discards a leftover link-probe hard link alongside prepared, not just the prepared name (round 9, r4)", (t) => {
+test("recovery discards a leftover link-probe hard link alongside prepared, not just the prepared name", (t) => {
   const directory = temporaryDirectory(t);
   const path = join(directory, "link-probe-leftover.bin");
   const original = Buffer.from("original\n", "utf8");
@@ -1230,7 +1228,7 @@ test("recovery discards a leftover link-probe hard link alongside prepared, not 
   // link-capability probe leaves: `link-probe` is a second hard link to the
   // same inode as `prepared`, created and normally removed two lines later
   // in that function. A crash between those two lines leaves both names
-  // live; round 8's discard only ever unlinked the name "prepared", so the
+  // live; an earlier discard only ever unlinked the name "prepared", so the
   // same bytes silently survived under "link-probe".
   linkSync(join(transactionDirectory, "prepared"), join(transactionDirectory, "link-probe"));
   assert.equal(lstatSync(join(transactionDirectory, "prepared")).nlink, 2);
@@ -1243,7 +1241,7 @@ test("recovery discards a leftover link-probe hard link alongside prepared, not 
   assert.equal(
     existsSync(join(transactionDirectory, "link-probe")),
     false,
-    "the link-probe name is discarded too — round 8 discarded only the 'prepared' name and left this inode's other name behind (r4)",
+    "the link-probe name is discarded too — discarding only the 'prepared' name would leave this inode's other name behind",
   );
   assert.equal(
     JSON.parse(readFileSync(join(transactionDirectory, "manifest.json"), "utf8")).state,
@@ -1251,7 +1249,7 @@ test("recovery discards a leftover link-probe hard link alongside prepared, not 
   );
 });
 
-test("recovery still discards only prepared when no link-probe leftover exists (negative control for r4)", (t) => {
+test("recovery still discards only prepared when no link-probe leftover exists (negative control)", (t) => {
   const directory = temporaryDirectory(t);
   const path = join(directory, "no-link-probe.bin");
   const original = Buffer.from("original\n", "utf8");
@@ -1267,17 +1265,17 @@ test("recovery still discards only prepared when no link-probe leftover exists (
   assert.equal(existsSync(join(transactionDirectory, "link-probe")), false, "never created, never an error to discard it");
 });
 
-test("recovery retains a link-probe-only leftover instead of discarding it when the target is not proven live (round 10, s5/D10)", (t) => {
+test("recovery retains a link-probe-only leftover instead of discarding it when the target is not proven live", (t) => {
   if (skipIfSymlinkUnavailable(t)) return;
-  // r4's own test above pins only the discard side (target live, both
+  // The link-probe discard test above pins only the discard side (target live, both
   // "prepared" and "link-probe" removed together). This is the missing
   // retain side: `link-probe` is the *only* surviving artifact (no
   // "prepared" name at all) over a target that proves nothing was ever
-  // there. Mutant D10 drops the `link-probe` disjunct from the retain gate
-  // only (leaving it in the discard gate two lines below) — under that
-  // mutant this exact shape is silently discarded and committed, destroying
-  // the only surviving copy of the staged bytes: the I2/PROBE-L data-loss
-  // shape, reintroduced under the "link-probe" name instead of "prepared".
+  // there. A mutant that drops the `link-probe` disjunct from the retain gate
+  // only (leaving it in the discard gate two lines below) silently discards
+  // and commits this exact shape, destroying the only surviving copy of the
+  // staged bytes: the dangling-symlink data-loss shape, reintroduced under
+  // the "link-probe" name instead of "prepared".
   const directory = temporaryDirectory(t);
   const path = join(directory, "link-probe-only-dangling.bin");
   symlinkSync(join(directory, "missing-target"), path);
@@ -1292,16 +1290,16 @@ test("recovery retains a link-probe-only leftover instead of discarding it when 
   assert.equal(
     recovery.status,
     "manual",
-    "a dangling symlink target proves nothing was ever there — link-probe alone must still be retained (s5/D10)",
+    "a dangling symlink target proves nothing was ever there — link-probe alone must still be retained",
   );
   assert.equal(existsSync(join(transactionDirectory, "link-probe")), true, "the only surviving copy is not silently discarded");
   assert.equal(lstatSync(path).isSymbolicLink(), true, "the dangling symlink itself is left untouched");
 });
 
-// --- Round 9, m1: a successful write's own retained-copy disclosure must be
+// --- a successful write's own retained-copy disclosure must be
 // a proven copy, not a bare existence check ----------------------------------
 
-test("a successful write discloses the retained-copy path only when proven, not from a bare existence check (round 9, m1)", (t) => {
+test("a successful write discloses the retained-copy path only when proven, not from a bare existence check", (t) => {
   const directory = temporaryDirectory(t);
   const path = join(directory, "proven-recovery.bin");
   const original = Buffer.from("original fake-secret-original\n", "utf8");
@@ -1339,7 +1337,7 @@ test("a successful write discloses the retained-copy path only when proven, not 
 
   assert.ok(raced, "the injected race actually fired");
   assert.deepEqual(readFileSync(path), replacement, "the write itself still succeeded and is not undone");
-  // Before round 9: the final success return used a bare `firstExistingPath`
+  // Previously, the final success return used a bare `firstExistingPath`
   // (an lstat existence check, true regardless of how many names now point
   // at that inode) — it would have reported this doubly-linked file as
   // though it were still the proven, singly-owned retained copy. After:
@@ -1350,7 +1348,7 @@ test("a successful write discloses the retained-copy path only when proven, not 
   assert.equal(result.status, "recovery-required");
   assert.ok(result.outcome !== undefined);
   assert.equal(result.outcome!.provenCopy, undefined, "the doubly-linked file is never accepted as a proven copy");
-  // Round 10, s3: `path` itself was already proven byte- and mode-correct by
+  // `path` itself was already proven byte- and mode-correct by
   // this same call's own `fileMatches` check, before the race above ever
   // touched `displaced` — only the *retained copy's* provenance is what this
   // branch cannot prove. `targetWritten` must say so: `false`, not `true`,
@@ -1359,11 +1357,11 @@ test("a successful write discloses the retained-copy path only when proven, not 
   assert.equal(
     result.outcome!.targetWritten,
     false,
-    "the target's own write was already verified — this is not an unfinished-write claim (s3)",
+    "the target's own write was already verified — this is not an unfinished-write claim",
   );
 });
 
-test("a successful write discloses the exact proven copy in the ordinary, uncontested case (negative control for m1)", (t) => {
+test("a successful write discloses the exact proven copy in the ordinary, uncontested case (negative control)", (t) => {
   const directory = temporaryDirectory(t);
   const path = join(directory, "ordinary-recovery.bin");
   const original = Buffer.from("original\n", "utf8");
@@ -1377,7 +1375,7 @@ test("a successful write discloses the exact proven copy in the ordinary, uncont
   assert.deepEqual(readFileSync(result.recoveryPath), original, "the disclosed path is the genuine retained copy");
 });
 
-test("restoreDisplaced's own success return discloses the copy proven before its commit, not a fresh check racing it (round 10, s4/D3)", (t) => {
+test("restoreDisplaced's own success return discloses the copy proven before its commit, not a fresh check racing it", (t) => {
   const directory = temporaryDirectory(t);
   const path = join(directory, "restore-disclosure-race.bin");
   const original = Buffer.from("original fake-secret-original\n", "utf8");
@@ -1385,7 +1383,7 @@ test("restoreDisplaced's own success return discloses the copy proven before its
   const prior = snapshotBytes(path);
 
   // Corrupt the freshly-displaced backup the instant it is created (same
-  // technique as the B3 test above), forcing restoreDisplaced's own
+  // technique as the restoreDisplaced copy-failure test above), forcing restoreDisplaced's own
   // in-process restore-from-displaced branch to run.
   const originalRename = fs.renameSync;
   fs.renameSync = ((from: fs.PathLike, to: fs.PathLike) => {
@@ -1398,13 +1396,13 @@ test("restoreDisplaced's own success return discloses the copy proven before its
   // Delete `displaced` as that write lands — after every stability check
   // this function performs on that name has already passed, so the deletion
   // changes nothing about whether the restore itself succeeded; it only
-  // matters to a check re-run *after* this point. Round 9's m1 item 3
-  // (`recoveryPath: provenCopy`) captures that proof once, before this call's
-  // own commit could distort it (the exact self-reference reasoning the
-  // sibling comments in `file-transaction.ts` name repeatedly), and discloses
-  // that frozen value — never a bare existence check re-evaluated fresh at
-  // the return statement, which mutant D3 (revert to
-  // `firstExistingPath(displacedPath)`) reintroduces and this race exposes.
+  // matters to a check re-run *after* this point. `recoveryPath: provenCopy`
+  // captures that proof once, before this call's own commit could distort it
+  // (the exact self-reference reasoning the sibling comments in
+  // `file-transaction.ts` name repeatedly), and discloses that frozen value —
+  // never a bare existence check re-evaluated fresh at the return statement,
+  // which a mutant reverting to `firstExistingPath(displacedPath)`
+  // reintroduces and this race exposes.
   const originalOpen = fs.openSync;
   let manifestWrites = 0;
   let raced = false;
@@ -1434,7 +1432,7 @@ test("restoreDisplaced's own success return discloses the copy proven before its
   assert.equal(result.status, "changed");
   assert.ok(
     result.recoveryPath !== undefined,
-    "the copy proven before this call's own commit is still disclosed, not re-derived from a now-stale existence check (s4/D3)",
+    "the copy proven before this call's own commit is still disclosed, not re-derived from a now-stale existence check",
   );
   assert.ok(
     result.recoveryPath!.endsWith("displaced"),
@@ -1442,13 +1440,13 @@ test("restoreDisplaced's own success return discloses the copy proven before its
   );
 });
 
-// --- Round 9 coverage: C6 (the discard gate must not attempt a needless
-// fsync when nothing was ever staged), C10 (the commit's own writeManifest
-// call must still carry the guard argument), C11 (the standalone recheck
-// between a successful discard and the commit must stay distinct from
-// writeManifest's own internal guard checks) -------------------------------
+// --- the discard gate must not attempt a needless fsync when nothing was
+// ever staged, the commit's own writeManifest call must still carry the
+// guard argument, and the standalone recheck between a successful discard
+// and the commit must stay distinct from writeManifest's own internal guard
+// checks ----------------------------------------------------------------
 
-test("resolving a transaction with nothing staged never attempts a needless discard fsync (round 9, coverage: C6)", (t) => {
+test("resolving a transaction with nothing staged never attempts a needless discard fsync", (t) => {
   const directory = temporaryDirectory(t);
   const path = join(directory, "nothing-staged-gate.bin");
   writeFileSync(path, "live\n", "utf8");
@@ -1476,10 +1474,10 @@ test("resolving a transaction with nothing staged never attempts a needless disc
   const recovery = recoverFileTransaction(path);
 
   assert.equal(recovery.status, "recovered", "nothing staged: only one fsync should ever be attempted");
-  assert.equal(calls, 1, "the discard gate must not perform a needless fsync when nothing was staged (C6)");
+  assert.equal(calls, 1, "the discard gate must not perform a needless fsync when nothing was staged");
 });
 
-test("resolving an undisplaced transaction still honors a guard change during its own final commit (round 9, coverage: C10)", (t) => {
+test("resolving an undisplaced transaction still honors a guard change during its own final commit", (t) => {
   const directory = temporaryDirectory(t);
   const path = join(directory, "commit-guard.bin");
   writeFileSync(path, "live\n", "utf8");
@@ -1497,7 +1495,7 @@ test("resolving an undisplaced transaction still honors a guard change during it
 
   const recovery = recoverFileTransaction(path, guard);
 
-  assert.equal(recovery.status, "manual", "a guard change reported during the commit's own write must still abort it (C10)");
+  assert.equal(recovery.status, "manual", "a guard change reported during the commit's own write must still abort it");
   assert.equal(
     JSON.parse(readFileSync(join(transactionDirectory, "manifest.json"), "utf8")).state,
     "published",
@@ -1505,7 +1503,7 @@ test("resolving an undisplaced transaction still honors a guard change during it
   );
 });
 
-test("resolving an undisplaced transaction stays silent about the directory once its own discard already succeeded before a later guard change (round 9, coverage: C11)", (t) => {
+test("resolving an undisplaced transaction stays silent about the directory once its own discard already succeeded before a later guard change", (t) => {
   const directory = temporaryDirectory(t);
   const path = join(directory, "post-discard-guard.bin");
   writeFileSync(path, "live\n", "utf8");
@@ -1518,7 +1516,7 @@ test("resolving an undisplaced transaction stays silent about the directory once
   // itself — both of which must pass for the discard to actually run), then
   // false starting on the third call: the standalone recheck this function
   // performs between a successful discard and its own commit. Removing that
-  // standalone recheck (C11) does not change the final `status` here (the
+  // standalone recheck does not change the final `status` here (the
   // commit's own internal guard check still aborts it) — it changes what
   // gets disclosed: the standalone check's own return names no directory
   // (nothing is left at risk once the discard already succeeded), while the
@@ -1531,5 +1529,5 @@ test("resolving an undisplaced transaction stays silent about the directory once
 
   assert.equal(recovery.status, "manual");
   assert.equal(existsSync(join(transactionDirectory, "prepared")), false, "the discard itself already completed");
-  assert.equal(recovery.recoveryPath, undefined, "nothing is left at risk, so no directory is offered for inspection (C11)");
+  assert.equal(recovery.recoveryPath, undefined, "nothing is left at risk, so no directory is offered for inspection");
 });

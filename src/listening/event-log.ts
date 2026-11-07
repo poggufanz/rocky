@@ -1,5 +1,5 @@
 /**
- * Append-only listening event log: the durable truth (spec §7).
+ * Append-only listening event log: the durable truth.
  * The graph/index is a rebuildable projection (graph-store.ts).
  * Separate from memory.jsonl/journal.jsonl. Write side only:
  * MCP must never import this module (see mcp-import-boundary.test.ts).

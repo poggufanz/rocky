@@ -230,19 +230,12 @@ test("health rejects duplicate, malformed, and case-variant descriptors in both 
   }
 });
 
-test("setup status contract names host/MCP registration and agent-hook scope, not spool or model health", (t) => {
+test("setup status contract names host/MCP registration and agent-hook scope, not spool or model health", () => {
   const indexSource = readFileSync(join(packageRoot, "src", "index.ts"), "utf8");
   const setupSource = readFileSync(join(packageRoot, "src", "commands", "setup.ts"), "utf8");
   const readme = readFileSync(join(packageRoot, "docs", "reference.md"), "utf8");
   const scope = /host\/MCP registration via rocky setup --check\s+and\s+agent-hook state\/capability/u;
   const sources: Array<readonly [string, string]> = [["help source", indexSource], ["setup output", setupSource], ["behavior reference", readme]];
-  const designPath = join(packageRoot, "..", "docs", "superpowers", "specs", "2026-08-09-v050-nervous-system-dictionary-design.md");
-  try {
-    sources.push(["design", readFileSync(designPath, "utf8")]);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-    t.diagnostic(`outer design not present; skipped optional source: ${designPath}`);
-  }
   for (const [label, value] of sources) {
     assert.match(value, scope, `${label} must state the same setup status scope`);
     assert.match(value, /spool and Ollama\/model health\s+are not\s+checked/iu, `${label} must disclose excluded health`);
@@ -258,7 +251,7 @@ test("setup status contract names host/MCP registration and agent-hook scope, no
 });
 
 test("isolated real rocky MCP child process passes versioned thirteen-tool health", { timeout: 10_000 }, async (t) => {
-  const root = mkdtempSync(join(tmpdir(), "rocky-task8-mcp-health-"));
+  const root = mkdtempSync(join(tmpdir(), "rocky-mcp-health-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const result = await checkMcpRegistration({
     ...registration,

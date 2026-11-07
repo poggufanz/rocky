@@ -14,7 +14,7 @@ import { projectTriple } from "../mcp/privacy.js";
 import { resolveRockyPaths, type RockyPaths } from "../core/state-paths.js";
 
 function freshPaths(t: TestContext): RockyPaths {
-  const home = mkdtempSync(join(tmpdir(), "rocky-task7-fix1-"));
+  const home = mkdtempSync(join(tmpdir(), "rocky-coverage-fix1-"));
   t.after(() => rmSync(home, { recursive: true, force: true }));
   return resolveRockyPaths({ ROCKY_HOME: home });
 }

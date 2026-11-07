@@ -45,7 +45,7 @@ fn main() {
     std::fs::create_dir_all(desk_dir(&home)).ok();
     let log = Arc::new(RotatingLog::new(&log_path(&home)));
 
-    // Panic hook: log, then abort (spec §7.1). Counts/lifecycle only.
+    // Panic hook: log, then abort. Counts/lifecycle only.
     let panic_log = Arc::clone(&log);
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {

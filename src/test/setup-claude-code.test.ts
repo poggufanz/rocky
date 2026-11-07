@@ -110,7 +110,7 @@ class FakeClaudeRunner implements ProcessRunner {
 // injectable path module and always uses the ambient node:path for its own
 // transaction/manifest/artifact naming - win32 on a real Windows host -
 // independent of whatever pathApi claude-code.ts was given. Verified
-// mechanism (see ci-portability-report.md, "Windows residue"): its internal
+// mechanism: its internal
 // join()/dirname() reformat a posix-shaped path to backslashes, which breaks
 // these tests' own posix-style string matching against paths they intercept
 // from production (the "manifest.json"/"prepared"/"displaced" artifact
@@ -126,7 +126,7 @@ function skipUnverifiedRealTransactionFlowOnWin32(t: test.TestContext): boolean 
   if (process.platform !== "win32") return false;
   t.skip(
     "real file-transaction.ts flow under an injected posix pathApi not "
-    + "independently verified on win32 - see ci-portability-report.md, Windows residue",
+    + "independently verified on win32",
   );
   return true;
 }
@@ -143,8 +143,7 @@ function result(status: number | null, stdout = "", stderr = "", error?: Error):
 // quirks break that if left unhandled:
 //  - macOS resolves os.tmpdir() under a symlinked ancestor (/var -> /private/var).
 //    The adapter's topology guard deliberately refuses a config path with a
-//    symlinked ancestor (that refusal is the product working correctly - see
-//    docs/superpowers/specs/2026-08-04-v021-distribution-bridge-design.md), so
+//    symlinked ancestor (that refusal is the product working correctly), so
 //    the fixture must resolve to the real, symlink-free path.
 //  - win32 mkdtemp/cwd paths are backslash-separated and drive-lettered, which
 //    the posix pathApi cannot parse as absolute at all. Building the fixture
@@ -1120,7 +1119,7 @@ test("private stage creation refuses a stage whose realized mode is not exactly 
   assert.deepEqual(readFileSync(setup.configPath), before);
 });
 
-// M26b (whole-branch re-review B, Minor 3): copySnapshotToStage's own
+// copySnapshotToStage's own
 // post-chmod readback (`cloned.read.mode === snapshot.read.mode`,
 // claude-code.ts:1252) is masked in the sibling test below by the chmodSync
 // call that immediately precedes it - on every real filesystem, chmodSync
@@ -1128,7 +1127,7 @@ test("private stage creation refuses a stage whose realized mode is not exactly 
 // disagree. This test isolates the verification itself: chmodSync is faked
 // to return normally without actually changing the mode (a silent-refusal
 // filesystem), leaving only the readback check to catch the mismatch.
-test("stage clone verification catches a mode chmod that silently did not apply (M26b)", async (t) => {
+test("stage clone verification catches a mode chmod that silently did not apply", async (t) => {
   // Windows has no POSIX mode for chmodSync to "silently" fail to apply - the
   // synthetic mode fstatSync reports there is a coarse read-only/writable
   // flag, not the byte this test fakes chmodSync into ignoring, so the
@@ -1450,13 +1449,12 @@ test("real transaction rejects a same-byte inode installed after prepared public
   assert.equal(configured.status, "failed");
 });
 
-// M21 (whole-branch re-review B, "Important 1"): round 2 declared the closing
-// conjunct `sameIdentity(displacedDescriptor, displacedPath)` (both call
-// sites: `authoritativeRecoveryPath` and `finalAuthority`) an equivalent
-// mutant, reasoning that `rereadHeldExactFile`'s own nlink check already
-// rejects any path substitution. That reasoning only holds for a PLAIN
-// rename-over, which drops the held inode's link count to 0. The
-// re-reviewer proved it does not generalise: hard-link the displaced file
+// The closing conjunct `sameIdentity(displacedDescriptor, displacedPath)`
+// (both call sites: `authoritativeRecoveryPath` and `finalAuthority`) can
+// look like an equivalent mutant, because `rereadHeldExactFile`'s own nlink
+// check already rejects any path substitution. That reasoning only holds
+// for a PLAIN rename-over, which drops the held inode's link count to 0.
+// It does not generalise: hard-link the displaced file
 // elsewhere first (nlink 1->2), then rename a same-bytes decoy over its own
 // path (nlink 2->1, back to the original expected count) - every sibling
 // check `rereadHeldExactFile` performs (bytes, mode, size, nlink, and even
@@ -1485,8 +1483,8 @@ test("real transaction rejects a same-byte inode installed after prepared public
 // Node 22 - deliberately NOT anchored on fs.openSync, because Node 18's
 // readFileSync/writeFileSync route internally through the public,
 // patchable fs.openSync while Node 22's do not, which silently changes an
-// openSync-based anchor's timing across Node versions (verified empirically;
-// see round-4 report for the cross-version trace that caught this).
+// openSync-based anchor's timing across Node versions (verified empirically
+// by tracing the same run on both).
 function finalAuthorityTransaction(
   setup: ReturnType<typeof fixture>,
   originalMode: number,
@@ -1583,7 +1581,7 @@ async function runWithFakedDisplacedClosingRead(
   }
 }
 
-test("finalAuthority closing sweep never binds a same-bytes displaced file at a foreign inode (M21)", async (t) => {
+test("finalAuthority closing sweep never binds a same-bytes displaced file at a foreign inode", async (t) => {
   // This test additionally keys its fault injection off an exact count of
   // lstatSync(displacedPath) calls (see runWithFakedDisplacedClosingRead's
   // own comment: "verified stable and identical (7 calls, closing sweep
@@ -1602,7 +1600,7 @@ test("finalAuthority closing sweep never binds a same-bytes displaced file at a 
 
   // The 7th lstatSync(displacedPath) call across the whole configure() is
   // finalAuthority's own standalone closing-sweep read (verified via
-  // instrumented runs on both Node 18 and Node 22 - see round-4 report).
+  // instrumented runs on both Node 18 and Node 22).
   // Everything before it (2 earlier guard polls' worth of exactObservedFile
   // pairs, then openHeldExactFile's own pre-open and post-read pair) must
   // stay genuine or the earlier checks - and the open itself - would never
@@ -1622,7 +1620,7 @@ test("finalAuthority closing sweep never binds a same-bytes displaced file at a 
 });
 
 // Same distinguishing input and same rationale as the finalAuthority test
-// above, for authoritativeRecoveryPath's own copy of the M21 conjunct
+// above, for authoritativeRecoveryPath's own copy of the same conjunct
 // (claude-code.ts:796). authoritativeRecoveryPath is reached from
 // selectAuthoritativeRecovery only when `transactions.write` reports a
 // non-"written" status, so this variant makes the same genuine committed
@@ -1632,7 +1630,7 @@ test("finalAuthority closing sweep never binds a same-bytes displaced file at a 
 // variant runs (the "exact" publication verification step never runs on this
 // path), so the closing-sweep read is the 5th lstatSync(displacedPath) call
 // here, not the 7th (verified via the same instrumented runs).
-test("authoritativeRecoveryPath never binds a same-bytes displaced file at a foreign inode after a genuine commit (M21)", async (t) => {
+test("authoritativeRecoveryPath never binds a same-bytes displaced file at a foreign inode after a genuine commit", async (t) => {
   // Same call-count fragility as the finalAuthority sibling above (this
   // variant's magic number is 5, not 7 - also verified POSIX-only).
   if (skipUnverifiedRealTransactionFlowOnWin32(t)) return;
@@ -1735,7 +1733,7 @@ test("finalAuthority closing sweep rejects a same-bytes displaced file substitut
           if (committedManifestObservations === 2) finalGuardArmed = true;
         }
       } catch {
-        // Only exact committed Task 1 manifest observations arm the race.
+        // Only exact committed transaction manifest observations arm the race.
       }
     }
     return value;
@@ -1845,7 +1843,7 @@ test("target guard refuses to bind publication identity from a cold already-comm
   const setup = fixture(t, { mcpServers: {} });
   const originalMode = statSync(setup.configPath).mode & 0o777;
 
-  // A fake Task 1 writer that completes the publish entirely on disk
+  // A fake file-transaction writer that completes the publish entirely on disk
   // (including a genuine "committed" transaction directory) without ever
   // calling the supplied guard. This makes the adapter's own post-write
   // `guard.unchanged()` check the first-ever observer of the transaction,
@@ -2100,7 +2098,7 @@ test("post-exact stage observation revalidates publication and recovery authorit
                 committedObserved = true;
               }
             } catch {
-              // Only the exact committed Task 1 manifest arms the race.
+              // Only the exact committed transaction manifest arms the race.
             }
           }
           return value;
@@ -2263,7 +2261,7 @@ test("final target observation stays paired with the exact displaced recovery in
               if (committedManifestObservations === 2) finalGuardArmed = true;
             }
           } catch {
-            // Only exact committed Task 1 manifest observations arm the race.
+            // Only exact committed transaction manifest observations arm the race.
           }
         }
         return value;
@@ -2428,7 +2426,7 @@ test("successful final authority reports only its paired recovery after a closin
               if (committedManifestObservations === 2) finalCapabilityArmed = true;
             }
           } catch {
-            // Only the exact committed Task 1 manifest arms the closing sweep.
+            // Only the exact committed transaction manifest arms the closing sweep.
           }
         }
         return value;
@@ -2528,7 +2526,7 @@ test("successful final authority reports only its paired recovery after a closin
   }
 });
 
-test("post-publication recovery-required reports no rebound raw Task 1 path", async (t) => {
+test("post-publication recovery-required reports no rebound raw recovery path", async (t) => {
   for (const operation of ["configure", "remove"] as const) {
     await t.test(operation, async (st) => {
       if (skipUnverifiedRealTransactionFlowOnWin32(st)) return;
@@ -2542,8 +2540,8 @@ test("post-publication recovery-required reports no rebound raw Task 1 path", as
       const originalIdentity = lstatSync(setup.configPath);
       let mutationStage: string | undefined;
       let mutationStageIdentity: ReturnType<typeof lstatSync> | undefined;
-      let task1Returned = false;
-      let task1RecoveryPath: string | undefined;
+      let writerReturned = false;
+      let writerRecoveryPath: string | undefined;
       let publicationLinked = false;
       let durabilityFaulted = false;
       let raced = false;
@@ -2576,12 +2574,12 @@ test("post-publication recovery-required reports no rebound raw Task 1 path", as
       };
 
       const installForeignParent = () => {
-        assert.ok(task1RecoveryPath !== undefined);
-        const transaction = dirname(task1RecoveryPath);
+        assert.ok(writerRecoveryPath !== undefined);
+        const transaction = dirname(writerRecoveryPath);
         const transactionName = posix.basename(transaction);
         const preparedPath = join(transaction, "prepared");
         const manifestPath = join(transaction, "manifest.json");
-        originalRecoveryIdentity = originalLstat(task1RecoveryPath);
+        originalRecoveryIdentity = originalLstat(writerRecoveryPath);
         originalTransactionIdentity = originalLstat(transaction);
         movedPublishedIdentity = originalLstat(setup.configPath);
         publishedBytes = readFileSync(setup.configPath);
@@ -2619,7 +2617,7 @@ test("post-publication recovery-required reports no rebound raw Task 1 path", as
         configurable: true,
         writable: true,
         value: ((path: fs.PathLike, options?: unknown) => {
-          if (task1Returned && !raced && String(path) === mutationStage) {
+          if (writerReturned && !raced && String(path) === mutationStage) {
             raced = true;
             installForeignParent();
           }
@@ -2636,8 +2634,8 @@ test("post-publication recovery-required reports no rebound raw Task 1 path", as
         write: (path, bytes, prior, guard) => {
           const result = atomicWriteBytesIfUnchanged(path, bytes, prior, guard);
           assert.equal(result.status, "recovery-required");
-          task1RecoveryPath = result.recoveryPath;
-          task1Returned = true;
+          writerRecoveryPath = result.recoveryPath;
+          writerReturned = true;
           return result;
         },
       };
@@ -2669,9 +2667,9 @@ test("post-publication recovery-required reports no rebound raw Task 1 path", as
 
       assert.equal(publicationLinked, true);
       assert.equal(durabilityFaulted, true);
-      assert.equal(task1Returned, true);
+      assert.equal(writerReturned, true);
       assert.equal(raced, true);
-      assert.ok(task1RecoveryPath !== undefined);
+      assert.ok(writerRecoveryPath !== undefined);
       assert.ok(movedParent !== undefined && movedRecoveryPath !== undefined);
       assert.ok(foreignRecoveryPath !== undefined);
       assert.ok(originalRecoveryIdentity !== undefined && originalTransactionIdentity !== undefined);
@@ -2725,7 +2723,7 @@ test("post-publication recovery-required reports no rebound raw Task 1 path", as
       assert.equal(foreignPrepared.ino, foreignTarget.ino);
       assert.equal(foreignPrepared.nlink, 2);
 
-      assert.equal((outcome.detail ?? "").includes(task1RecoveryPath), false, outcome.detail);
+      assert.equal((outcome.detail ?? "").includes(writerRecoveryPath), false, outcome.detail);
       const reportedPath = /manual recovery: (.+)$/.exec(outcome.detail ?? "")?.[1];
       assert.ok(mutationStage !== undefined && mutationStageIdentity !== undefined);
       assert.equal(reportedPath, mutationStage);
@@ -2800,7 +2798,7 @@ test("post-audit stage topology change blocks publication and reports only retai
 
 test("post-publication failure reports neither an unproved recovery path nor a rebound stage", async (t) => {
   const setup = fixture(t, { keep: true, mcpServers: {} });
-  const recoveryPath = join(setup.root, "live-task1-recovery");
+  const recoveryPath = join(setup.root, "live-transaction-recovery");
   writeFileSync(recoveryPath, readFileSync(setup.configPath));
   let stage: string | undefined;
   const runner = new FakeClaudeRunner((call) => {

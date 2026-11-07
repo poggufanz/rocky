@@ -395,7 +395,7 @@ test("raw projection caps and detaches every fix field including failure IDs", (
   ]);
 });
 
-// Finding 2, final whole-branch review: cloneFix used to copy fix.links
+// cloneFix used to copy fix.links
 // straight through without applying the same bounded-basis rule and
 // confidence normalization projectFixRecord/parseFixLinks/safeProviderFixRecord
 // already enforce (three of four FixLink readers guarded it explicitly; this
