@@ -13,7 +13,7 @@
 # when captured as prompt's first statement. Every ordering decision below
 # rests on that same empirical testing.
 #
-# v1 scope (Ruling 4): passive observation only. `prompt` only sees a command after
+# v1 scope: passive observation only. `prompt` only sees a command after
 # it has already run, so there is no PowerShell equivalent of the Bash
 # hook's pre-execution guard confirmation -- rocky observes here, it does not
 # stop a command before it runs. No stderr is available either: failures use
@@ -28,7 +28,7 @@
 if (Get-Variable -Name __rockyHookLoaded -Scope Global -ErrorAction SilentlyContinue) { return }
 $global:__rockyHookLoaded = $true
 
-# F2 round 2 (task-a review, Finding 1): every hook-speech file name this
+# Every hook-speech file name this
 # session's own __rockySpawnDetached has ever handed to a child, so
 # `prompt`'s drain loop below only ever SPEAKS a file this exact session
 # spawned -- never a file some other session (a second open Windows
@@ -40,16 +40,16 @@ $global:__rockySpeechIds = @()
 
 # Capture whatever `prompt` was already installed -- the user's own function,
 # oh-my-posh, starship, or PowerShell's own built-in default -- exactly once,
-# at load time, never at call time. Wrapping (Ruling 1) instead of replacing
-# is the single most important correction to the original spike snippet:
+# at load time, never at call time. Wrapping instead of replacing
+# is the single most important correction to a naive prompt override:
 # `function global:prompt` below only ever OVERWRITES the name `prompt`, so
 # capturing the inner prompt now is the only way to still reach the original.
-# `Get-Command prompt` was observed, in this release's spike work, to always
+# `Get-Command prompt` was observed, in testing, to always
 # resolve to something even in a bare `-NoProfile` session (PowerShell ships
 # its own default prompt function) -- this is a defensive guard for that
 # capture failing for any other reason, not the expected common case.
 #
-# CRITICAL, empirically found in this release (task-4-report.md): the
+# CRITICAL, empirically found: the
 # captured `FunctionInfo`'s own `.ScriptBlock` object must never be invoked
 # directly. Re-invoking it via `& $cmd.ScriptBlock` hangs the shell dead on
 # every command after the first -- prompt is called once for the load
@@ -79,8 +79,8 @@ $global:__rockyInnerPromptBlock = if ($__rockyInnerPromptText) {
 # Every embedded double-quote is backslash-escaped, on BOTH editions --
 # `Start-Process`'s own argument-list-to-native-command-line construction
 # uses the C-runtime/CommandLineToArgvW convention on Windows PowerShell 5.1
-# AND PowerShell 7.x alike (verified empirically, fix round 1, task-4-
-# report.md): a captured command string containing an embedded double-quote
+# AND PowerShell 7.x alike (verified empirically): a captured command
+# string containing an embedded double-quote
 # -- e.g. `cmd /c "exit 9" | Out-Null`, an entirely ordinary command -- was
 # reproduced arriving at the spawned `rocky` process split into the wrong
 # number of argv elements on both hosts without this. This is a genuinely
@@ -101,7 +101,7 @@ function global:__rockyQuoteArg([string]$value) {
 # is literally `& "<real executable>" $args` -- one more native-argument
 # hop Rocky's own code does not control the source of. On Windows PowerShell
 # 5.1 that inner hop needs the SAME doubling convention the original
-# synchronous call needed (Desktop-only, verified empirically, fix round 1);
+# synchronous call needed (Desktop-only, verified empirically);
 # on PowerShell 7 the inner hop already passes strings through correctly, so
 # adding doubling there would corrupt it a second time. This pre-compensates
 # ONLY for that inner hop, Desktop-only, BEFORE `__rockyQuoteArg` above
@@ -117,7 +117,7 @@ function global:__rockyPreCompensateForShim([string]$value) {
     return $value
 }
 
-# F2 round 2 (task-a review, Finding 2): re-sanitize on read, independent of
+# Re-sanitize on read, independent of
 # whether a given file actually came from Rocky's own atomic-rename write
 # path. Legitimate content is already sanitized once, at write time
 # (safeTerminalLine/safeTerminalBlock, ui/rocky.ts) -- but nothing before
@@ -142,8 +142,8 @@ function global:__rockySanitizeSpeechText([string]$text) {
     return [regex]::Replace($sanitized, '[\x00-\x08\x0B-\x1F\x7F]', '')
 }
 
-# Finding 3's other half (task-a review round 2), found while verifying the
-# read-side fix on a real host rather than trusting it alone: reading with
+# The other half of the read-side fix, found while verifying it on a real
+# host rather than trusting it alone: reading with
 # -Encoding UTF8 decodes the file correctly, but [Console]::Error.Write still
 # re-encodes that correct string using [Console]::OutputEncoding before any
 # byte reaches wherever stderr actually goes -- verified empirically (same
@@ -156,15 +156,15 @@ function global:__rockySanitizeSpeechText([string]$text) {
 # SetConsoleOutputCP under the hood, a real console-wide effect not worth
 # paying on every idle prompt draw.
 #
-# Save/set/write/restore, not set/leave (task-a review round 3): every other
+# Save/set/write/restore, not set/leave: every other
 # process-global mutation in this file is scrupulously undone --
 # ROCKY_HOOK_SPEECH_FILE is set/restored around every Start-Process call,
 # just above -- and OutputEncoding is no different in kind: SetConsoleOutputCP
 # is console-wide, not per-stream, so leaving it changed would alter every
 # OTHER program's subsequent output to that same console for the rest of the
 # session, directly contradicting install's own promise to change nothing else.
-# Verified empirically (same real Windows PowerShell 5.1 host, task-a-report
-# round 3): restoring immediately after the write does not corrupt the
+# Verified empirically (same real Windows PowerShell 5.1 host): restoring
+# immediately after the write does not corrupt the
 # bytes just written -- [Console]::Error.Write is synchronous, so by the
 # time OutputEncoding changes back, this call's own bytes are already fully
 # encoded and out. The restore itself is best-effort (wrapped separately, in
@@ -194,7 +194,7 @@ function global:__rockyWriteSpeechToConsole([string]$text) {
     }
 }
 
-# Fire-and-forget (Finding 1, fix round 1): the shell must never block on
+# Fire-and-forget: the shell must never block on
 # Rocky's own bookkeeping the way the original synchronous `& $__rockyBin
 # ...` call did -- on a machine with real-time AV scanning of newly-spawned
 # processes, that became a repeated, perceptible stall on every denylist-
@@ -205,14 +205,14 @@ function global:__rockyWriteSpeechToConsole([string]$text) {
 # hookFail/hookSuccess message forever -- verified this failure mode is real
 # by checking what `-NoNewWindow` shares instead: the calling session's own
 # console, the same sharing the synchronous `&` call already relied on.
-# Verified empirically, both hosts (task-4-report.md): a real Node child
+# Verified empirically, both hosts: a real Node child
 # spawned this way still reaches `\\.\CON` exactly like the synchronous path
 # did, is genuinely non-blocking (returns in ~50-140ms regardless of how long
 # the spawned `rocky` process itself takes), and correctly preserves every
 # argument's own embedded spaces and quotes via `__rockyQuoteArg` above.
 #
-# Output is discarded to the null device, not a file (fix round 2, Finding
-# 5): fix round 1 shipped static, non-unique discard *file* paths under the
+# Output is discarded to the null device, not a file: an earlier version
+# used static, non-unique discard *file* paths under the
 # temp directory, which two near-concurrent spawns (rapid consecutive
 # failures, or two PowerShell sessions on the same machine -- an ordinary
 # thing, not a corner case) could collide on, silently dropping one
@@ -235,11 +235,11 @@ function global:__rockyWriteSpeechToConsole([string]$text) {
 # session is already running under, whichever host or install location that
 # turns out to be.
 #
-# F2 (task-a-brief, manual PowerShell checklist): this spawn's own
+# This spawn's own
 # console write can never be ordered correctly against THIS session's next
 # prompt draw -- it lands on `\\.\CON` whenever the child process happens to
 # reach that statement, asynchronously, unrelated to when Start-Process
-# itself returns. Proven on a real console (findings doc): the write arrives
+# itself returns. Proven on a real console: the write arrives
 # after the prompt is already drawn (sometimes mid-message, truncated), or
 # lands on top of whatever the user has already started typing. A detached
 # child writing straight to the shared console device has no way to fix
@@ -259,10 +259,10 @@ function global:__rockyWriteSpeechToConsole([string]$text) {
 # this session's own copy immediately after issuing the spawn cannot
 # un-deliver it to the already-launched child, and it can never leak into
 # an environment variable a command the user types themselves might read.
-# A fresh GUID per call (not a fixed name) is Finding 5's exact lesson
-# applied here too: two overlapping spawns must never collide on one name,
-# or the second rename silently discards the first message before `prompt`
-# ever reads it.
+# A fresh GUID per call (not a fixed name) applies the same lesson as the
+# null-device discard above: two overlapping spawns must never collide on
+# one name, or the second rename silently discards the first message before
+# `prompt` ever reads it.
 function global:__rockySpawnDetached([string]$exe, [string[]]$scriptArgs) {
     try {
         $resolved = Get-Command $exe -ErrorAction SilentlyContinue
@@ -272,7 +272,7 @@ function global:__rockySpawnDetached([string]$exe, [string[]]$scriptArgs) {
         $__rockyHomeForSpeech = if ($env:ROCKY_HOME) { $env:ROCKY_HOME } else { Join-Path $HOME '.rocky' }
         $__rockySpeechName = "$([System.Guid]::NewGuid().ToString('N')).txt"
         $speechFile = Join-Path (Join-Path $__rockyHomeForSpeech 'hook-speech') $__rockySpeechName
-        # Finding 1: this session claims the name now, before the spawn --
+        # This session claims the name now, before the spawn --
         # the drain loop in `prompt` will only ever speak a file whose name
         # is in this list, so this is the one place session ownership is
         # established.
@@ -309,13 +309,13 @@ function global:prompt {
     # 1. Capture $? as the ABSOLUTE FIRST statement. Any statement that runs
     #    before this -- including reading $LASTEXITCODE into a variable --
     #    already resets $? to True as a side effect of merely succeeding
-    #    (verified in the spike and reconfirmed for this file: a bare
+    #    (verified empirically: a bare
     #    assignment is itself a "successful statement").
     $__rockyQ = $?
     $__rockyExit = $LASTEXITCODE
 
     # Captured here, with $LASTEXITCODE, for the same reason: this function
-    # pushes its own suppressed non-terminating error onto $Error (Ruling 2),
+    # pushes its own suppressed non-terminating error onto $Error,
     # so any later read of $Error[0] returns Rocky's entry, not the failure
     # the person actually hit.
     $__rockyNotFound = $false
@@ -328,8 +328,7 @@ function global:prompt {
     #    user's last real command left them as at this point, so a prompt
     #    framework that reads them itself (starship, oh-my-posh, a
     #    hand-written prompt showing the last exit code) sees the truth, not
-    #    Rocky's own mid-flight state. Verified empirically, both hosts, in
-    #    this release's task-4-report.md.
+    #    Rocky's own mid-flight state. Verified empirically, both hosts.
     $__rockyResult = $null
     if ($global:__rockyInnerPromptBlock) {
         try {
@@ -346,7 +345,7 @@ function global:prompt {
 
     try {
         if (-not $global:__rockyDisabled -and -not $env:ROCKY_OFF) {
-            # F2: print whatever a previous detached spawn buffered instead
+            # Print whatever a previous detached spawn buffered instead
             # of writing the console directly (see __rockySpawnDetached and
             # ui/rocky.ts's flushHookSpeech). This is the only place any
             # hook-origin speech is ever printed on PowerShell now, and it is
@@ -358,19 +357,18 @@ function global:prompt {
             # A message is necessarily at least one prompt cycle behind the
             # command it describes -- the child that produced it is still
             # running, somewhere, when THIS prompt call starts; that lag is
-            # not a bug, it is fix round 1's non-blocking spawn (Finding 1)
-            # doing exactly what it was built to do.
+            # not a bug, it is the non-blocking spawn doing exactly what it was
+            # built to do.
             $__rockyHomeForSpeech = if ($env:ROCKY_HOME) { $env:ROCKY_HOME } else { Join-Path $HOME '.rocky' }
             $__rockySpeechDir = Join-Path $__rockyHomeForSpeech 'hook-speech'
             if (Test-Path -LiteralPath $__rockySpeechDir) {
-                # Finding 4 (task-a review round 2): every file in this
-                # directory is listed, not just *.txt -- an orphaned *.tmp
-                # fragment from a write interrupted mid-flight (process
-                # killed) matched nothing before and was never pruned.
-                # Finding 1's staleness cutoff below prunes those too.
+                # Every file in this directory is listed, not just *.txt -- an
+                # orphaned *.tmp fragment from a write interrupted mid-flight
+                # (process killed) would otherwise match nothing and never be
+                # pruned. The staleness cutoff below prunes those too.
                 #
-                # 45 minutes. The cutoff carries no SAFETY weight -- Finding
-                # 1's allowlist check above is what prevents misattribution,
+                # 45 minutes. The cutoff carries no SAFETY weight -- the
+                # allowlist check above is what prevents misattribution,
                 # unconditionally, regardless of any file's age. It does carry
                 # RELIABILITY weight, and an earlier 10-minute value measured
                 # that against the wrong variable: write speed (sub-second)
@@ -388,12 +386,11 @@ function global:prompt {
                 $__rockySpeechEntries = Get-ChildItem -LiteralPath $__rockySpeechDir -File -ErrorAction SilentlyContinue
                 foreach ($__rockySpeechEntry in $__rockySpeechEntries) {
                     if ($__rockySpeechEntry.Name -in $global:__rockySpeechIds) {
-                        # Finding 1: this exact session spawned this file --
+                        # This exact session spawned this file --
                         # the only files this loop ever speaks.
                         try {
-                            # Finding 3 (task-a review round 2, verified on a
-                            # real Windows PowerShell 5.1 host with non-ASCII
-                            # content): Get-Content with no -Encoding defaults
+                            # Verified on a real Windows PowerShell 5.1 host with
+                            # non-ASCII content: Get-Content with no -Encoding defaults
                             # to the system ANSI codepage for a BOM-less file
                             # on Windows PowerShell 5.1, corrupting any
                             # non-ASCII byte ui/rocky.ts's UTF-8-no-BOM write
@@ -401,7 +398,7 @@ function global:prompt {
                             # -Encoding UTF8 forces correct decoding on both
                             # editions regardless of BOM.
                             $__rockySpeechText = Get-Content -LiteralPath $__rockySpeechEntry.FullName -Raw -Encoding UTF8 -ErrorAction Stop
-                            # Finding 2: re-sanitize on read -- see
+                            # Re-sanitize on read -- see
                             # __rockySanitizeSpeechText above. Independent of
                             # whether this file's content is already known
                             # safe; a second, cheap layer, not a replacement
@@ -417,7 +414,7 @@ function global:prompt {
                             $global:__rockySpeechIds = @($global:__rockySpeechIds | Where-Object { $_ -ne $__rockySpeechEntry.Name })
                         }
                     } elseif ($__rockySpeechEntry.LastWriteTimeUtc -lt $__rockyStaleCutoff) {
-                        # Finding 1 + Finding 4: not ours -- possibly another
+                        # Not ours -- possibly another
                         # still-open session's own pending message (Windows
                         # PowerShell and PS7 share the same $env:ROCKY_HOME by
                         # default) -- so it is never spoken here regardless of
@@ -442,16 +439,16 @@ function global:prompt {
                 # Denylist mirrors __rocky_precmd's case "$first_word" in
                 # rocky-hook.bash (cd|pushd|popd|export|alias|source|.|rocky),
                 # each entry translated to its PowerShell equivalent rather
-                # than copied as a literal string (fix round 1, Finding 3 --
-                # the narrower first draft here let a failing interactive
-                # dot-source, or Push-Location/Pop-Location, get recorded as
-                # hook-origin noise where Bash would have silently skipped
+                # than copied as a literal string (a narrower earlier version let
+                # a failing interactive dot-source, or Push-Location/Pop-Location,
+                # get recorded as hook-origin noise where Bash would have
+                # silently skipped
                 # it): cd -> cd/Set-Location; pushd/popd -> the identically-
                 # named PowerShell aliases plus their full cmdlet names
                 # Push-Location/Pop-Location; alias -> Set-Alias/New-Alias;
                 # source/. -> `.` (PowerShell has no separate "source"
                 # keyword -- dot-sourcing is the only spelling, and it is
-                # idiomatic and heavily used, exactly the gap this round
+                # idiomatic and heavily used, exactly the gap this entry
                 # closes). `export` has no PowerShell entry: PowerShell's
                 # nearest equivalent, `$env:X = 1`, is a variable assignment
                 # whose first word is the variable reference itself, not a

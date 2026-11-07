@@ -38,7 +38,7 @@ test("splits on 30min gap and cwd, counts kinds, newest-first", () => {
   assert.equal(first.index, 3);
 });
 
-test("groupSessions breaks a startTs tie by cwd ascending, deterministically (ruling 2)", () => {
+test("groupSessions breaks a startTs tie by cwd ascending, deterministically", () => {
   const H = 3600_000;
   const groups = groupSessions([
     rec("failure", "a1", 5 * H, "/zzz"),

@@ -203,8 +203,8 @@ test("model use shares one bounded deadline across discovery and probe", async (
 
   assert.equal(await model(["use", "installed-model"], {
     ollama,
-    loadConfig: configLoader({ status: "missing", path: "/tmp/task16-model-deadline.json", config: { version: 1, ai: { enabled: false } } }),
-    saveConfigAtomic: (config) => { saved = config; return { path: "/tmp/task16-model-deadline.json" }; },
+    loadConfig: configLoader({ status: "missing", path: "/tmp/model-deadline.json", config: { version: 1, ai: { enabled: false } } }),
+    saveConfigAtomic: (config) => { saved = config; return { path: "/tmp/model-deadline.json" }; },
   }), 0);
   assert.equal(MODEL_USE_DEADLINE_MS, 30_000);
   assert.equal(signals.length, 2);

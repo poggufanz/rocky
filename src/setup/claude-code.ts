@@ -1595,8 +1595,8 @@ export function createClaudeCodeAdapter(
     // an `audited.guard.unchanged()` call.
     const selectAuthoritativeRecovery = (candidate: string | undefined): string | undefined => {
       const stageBeforeCandidate = authoritativeStagePath(stage, pathApi);
-      const taskOneRecovery = targetGuard.authoritativeRecoveryPath(candidate);
-      if (taskOneRecovery !== undefined) return taskOneRecovery;
+      const transactionRecoveryPath = targetGuard.authoritativeRecoveryPath(candidate);
+      if (transactionRecoveryPath !== undefined) return transactionRecoveryPath;
       return stageBeforeCandidate === undefined
         ? undefined
         : authoritativeStagePath(stage, pathApi);

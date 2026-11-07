@@ -472,8 +472,7 @@ async function main() {
     ROCKY_HOME: rockyHome,
     // Never let a smoke run touch this machine's real $PROFILE for Windows
     // PowerShell / PowerShell 7 — `hook install`/`uninstall`/`status` probe
-    // for those hosts unless this override says there are none. See
-    // task-4-report.md for the full injection-seam rationale.
+    // for those hosts unless this override says there are none.
     ROCKY_TEST_POWERSHELL_HOSTS: "[]",
     ROCKY_FAKE_CLIENT_STATE: fakeClientState,
     ROCKY_PACKAGE_SMOKE_FAKE_CLIENT: fakeClientScript,
@@ -916,14 +915,12 @@ async function main() {
 
   assert.equal(shouldRunInstalledSetup(process.platform), true);
 
-  // The fake clients only implement the pre-Task-3/4 name-only `mcp add` /
+  // The fake clients only implement the older name-only `mcp add` /
   // `mcp remove` contract. The reviewed adapters (src/setup/codex.ts,
   // src/setup/claude-code.ts) require Codex app-server CAS provenance and
   // Claude Code's policy-equivalent staged automation respectively, neither
   // of which these fakes can satisfy, so both correctly refuse to mutate
-  // and fall back to manual guidance instead of touching state — exactly
-  // README.md:56-64, and independently reproduced against fresh fake hosts
-  // by evidence-packet-b64587b.md Gate 10 (cases A6/A7/A8/A9/A10).
+  // and fall back to manual guidance instead of touching state.
   //
   // An old `setup --voice-skill` may have left a managed voice skill behind.
   // Seed one for each host so the installed package proves the cleanup:

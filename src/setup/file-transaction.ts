@@ -94,8 +94,8 @@ export interface RecoveryOutcome {
    * (`pathExists`, i.e. `lstatSync` succeeding), read by `hook.ts` solely to
    * choose which sentence to speak about `path`. This is deliberately NOT the
    * same predicate `resolveUndisplacedTransaction` uses to decide whether
-   * discarding a staged artifact is safe (round 9, R1 — round 8's I2 fix
-   * applied `isLiveRegularFile` to both the decision site and this field, and
+   * discarding a staged artifact is safe (an earlier version applied
+   * `isLiveRegularFile` to both the decision site and this field, and
    * their safe directions are opposite: a destroy/keep decision must be
    * conservative about destroying — treat anything short of a proven live
    * regular file as "not there", so a dangling or valid symlink still blocks
@@ -115,8 +115,8 @@ export interface RecoveryOutcome {
    * safe to discard and left it in place rather than guessing.
    *
    * There is deliberately no field recording whether a transaction
-   * directory was *removed*: round 8 found `directoryRemoved` written by
-   * ten call sites and read by none (I1) — an unread fact is not a safety
+   * directory was *removed*: `directoryRemoved` was once written by ten
+   * call sites and read by none — an unread fact is not a safety
    * mechanism, it is the enumeration gap wearing the enumeration's uniform.
    * The fix is not to wire it up; it is that recovery no longer removes a
    * transaction directory at all (see `resolveUndisplacedTransaction`'s doc
@@ -193,7 +193,7 @@ export function pathExists(path: string): boolean {
  * Proves `path` itself holds live, reachable content — a genuine regular
  * file, not merely a name that resolves. `pathExists`/`lstatSync` return
  * true for a dangling symlink, a valid symlink, a directory, a socket, or
- * any other non-regular name (round 8, I2: `resolveUndisplacedTransaction`
+ * any other non-regular name (`resolveUndisplacedTransaction`
  * used to treat any of those as proof that discarding a staged artifact
  * loses nothing — false for a dangling symlink, where the staged artifact
  * can be the only surviving copy of anything).
@@ -610,7 +610,7 @@ function copyRegularFileExclusiveNoFollow(
     // reproduced by `setup-claude-desktop.test.ts`'s rebind- and
     // overwrite-during-publication tests) — an unlink here could destroy
     // data that now belongs to someone else, at a path Rocky merely happened
-    // to create the container for. F1's actual defect is not the absence of
+    // to create the container for. The actual defect is not the absence of
     // cleanup; it is a caller trusting "a path exists" as proof of anything.
     // The fix lives in the outcome record instead: every caller re-observes
     // `path` itself, fresh, right now, and reports exactly what it finds —
@@ -730,7 +730,7 @@ export function inspectFileTransaction(path: string): FileTransactionInspectionR
  * bare existence check — a directory, a symlink, or a file with the wrong
  * link-count shape are all refused), that can honestly be called a
  * surviving copy of content derived from `path`'s prior bytes. Absent when
- * no such proof holds (final audit, F9 mutant A1: the message layer used to
+ * no such proof holds (the message layer used to
  * accept any live file by name; the proof now lives here, once, and is
  * strictly stronger than a bare `.isFile()` check).
  */
@@ -746,8 +746,8 @@ function provenCopyOf(displacedPath: string, path: string): string | undefined {
  * by the caller, which alone knows whether its own attempt to write `path`
  * ran.
  *
- * `targetExists` here is deliberately `pathExists`, not `isLiveRegularFile`
- * (round 9, R1). This value only ever reaches a message (`hook.ts`'s
+ * `targetExists` here is deliberately `pathExists`, not `isLiveRegularFile`.
+ * This value only ever reaches a message (`hook.ts`'s
  * `reportBashrcRecoveryStop`, which picks between "I keep safe copy" and
  * "bashrc gone" purely off this field) — it is never read back into a
  * destroy/keep decision anywhere in this module. `isLiveRegularFile` is
@@ -756,7 +756,7 @@ function provenCopyOf(displacedPath: string, path: string): string | undefined {
  * staged artifact is never discarded on its account. A message must fail the
  * other way: treat that same valid symlink as "still there", because it is —
  * following it reaches the user's real file, and telling them it is "gone"
- * is false. Round 8 computed one boolean (`isLiveRegularFile`) and fed it to
+ * is false. An earlier version computed one boolean (`isLiveRegularFile`) and fed it to
  * both the decision and this field; a `.bashrc` that is a live symlink to
  * real content made the decision correctly retain it, and then this same
  * field told the message layer to say "bashrc gone" and recommend copying a
@@ -789,24 +789,23 @@ function ambiguousOutcome(
  * Decide whether it is safe to resolve a transaction directory that has no
  * proven `displaced` backup. Safe exactly when nothing inside it could be
  * the last surviving copy of anything: either `path` itself genuinely holds
- * live content right now, proven by `isLiveRegularFile` (round 8, I2 —
- * *not* `pathExists`, which is also true for a dangling symlink; a hard
- * link only ever loses one name, but a dangling symlink is not a hard link
- * to anything and proves nothing was ever there), or neither of the
+ * live content right now, proven by `isLiveRegularFile` (*not* `pathExists`,
+ * which is also true for a dangling symlink; a hard link only ever loses
+ * one name, but a dangling symlink is not a hard link to anything and
+ * proves nothing was ever there), or neither of the
  * directory's own staged artifacts exist (nothing to protect regardless of
  * `path`). When neither holds, the directory — and the artifact inside it
  * that cannot be vouched for — is left in place and named, so the caller has
  * something concrete to inspect rather than a dead end with no remedy.
  *
  * This decision's own `isLiveRegularFile(path)` check is inlined into the
- * condition below, not bound to a named local (round 10, S2): a local in
- * function scope stayed readable at every return in this function, so
- * nothing stopped a later edit from writing it into the returned
- * `RecoveryOutcome.targetExists` field too — a field that feeds a message,
- * which must fail closed the opposite way from this decision (see the
- * field's own doc comment; round 9 introduced exactly such a local and
- * claimed no boolean in scope meant both things, which mutants D12/D13
- * disproved by re-merging it with no test failing). Every return here
+ * condition below, not bound to a named local: a local in function scope
+ * stayed readable at every return in this function, so nothing stopped a
+ * later edit from writing it into the returned `RecoveryOutcome.targetExists`
+ * field too — a field that feeds a message, which must fail closed the
+ * opposite way from this decision (see the field's own doc comment; an
+ * earlier version introduced exactly such a local, and re-merging it with
+ * the message-side value failed no test). Every return here
  * computes `pathExists(path)` fresh for the record instead, so the two
  * predicates cannot be conflated even by reusing this file's own name for
  * the check — there is nothing named to reuse.
@@ -817,14 +816,14 @@ function ambiguousOutcome(
  * "displaced" fallback below. A crash can leave any of the three states
  * holding a `prepared` artifact derived from the user's file with `path`
  * externally removed afterward; the label never proved which, only the
- * artifact's own presence does (final audit, F2 + F3: protection
+ * artifact's own presence does (protection
  * proportional to what is actually at stake, decided from evidence
  * available at recovery time, never from an assumption recorded when the
  * manifest state was written).
  *
- * Resolving never `rm -r`s the transaction directory itself (round 8, I1):
+ * Resolving never `rm -r`s the transaction directory itself:
  * it discards only the (possibly absent) staged `prepared` and `link-probe`
- * artifacts. `link-probe` (round 9, r4) is a second hard link to the exact
+ * artifacts. `link-probe` is a second hard link to the exact
  * same inode as `prepared`, created and removed by `atomicWriteBytesIfUnchanged`'s
  * own link-capability probe; a crash inside that narrow window can leave
  * `link-probe` standing after `prepared`'s own name is already gone. The
@@ -836,7 +835,7 @@ function ambiguousOutcome(
  * that is never recursively deleted here cannot be deleted wrongly, cannot
  * be deleted silently, and needs no field to disclose that it happened.
  * `pruneSupersededTransactions` — already silent, already proof-backed, and
- * unchanged by this round — reclaims it the next time a real `.bashrc`
+ * unaffected by this behavior — reclaims it the next time a real `.bashrc`
  * write commits a fresh copy; until then, an inert directory holding at
  * most a "committed" manifest sits in `$HOME` doing nothing.
  */
@@ -1047,7 +1046,7 @@ export function recoverFileTransaction(
     // branch above (e.g. `prepared` is already gone, so `isManagedRecoveryPair`
     // cannot pair it with `path` — the exact shape a crash or a single failed
     // write leaves between `atomicWriteBytesIfUnchanged`'s own `prepared`
-    // unlink and its "committed" manifest write). round 10, S1: that shape is
+    // unlink and its "committed" manifest write). That shape is
     // not ambiguous — `displaced` proven a singly-owned copy of the prior
     // bytes, plus `path` itself proven a live regular file, is exactly
     // `resolveUndisplacedTransaction`'s own accepted proof (see its doc
@@ -1194,8 +1193,8 @@ export function recoverFileTransaction(
       // applies the same artifact-driven proof used above — safe to discard
       // only when `path` is live (it is not, here) or the staged artifact
       // does not exist; otherwise the directory is retained and named
-      // rather than guessed away (final audit, F3's reasoning extended to
-      // this fallback, not just the state-gated fast path above it).
+      // rather than guessed away (the same reasoning extended to this
+      // fallback, not just the state-gated fast path above it).
       return resolveUndisplacedTransaction(transactionDirectory, path, guard);
     }
   }
@@ -1266,8 +1265,8 @@ function restoreDisplaced(
     publication = copyRegularFileExclusiveNoFollow(displacedPath, path);
     syncParentDirectory(path);
   } catch {
-    // A partial write can leave `path` behind holding broken bytes (final
-    // audit, F1) — never assumed either way, established fresh, right now.
+    // A partial write can leave `path` behind holding broken bytes — never
+    // assumed either way, established fresh, right now.
     return {
       status: "recovery-required",
       recoveryPath: firstExistingPath(displacedPath, transactionDirectory, path),
@@ -1304,10 +1303,10 @@ function restoreDisplaced(
   }
   // recoveryPath reuses the same `provenCopy` the outcome record below
   // carries, proven once at the top of this call, before the commit above
-  // could distort the check (round 9, m1: a bare `firstExistingPath` here
-  // would re-derive an unproven existence check for the exact value a proof
-  // already established a few lines up — the same "reuse the decision-unsafe
-  // predicate for a message" shape R1 closes elsewhere in this file, applied
+  // could distort the check (a bare `firstExistingPath` here would re-derive
+  // an unproven existence check for the exact value a proof already
+  // established a few lines up — the same "reuse the decision-unsafe
+  // predicate for a message" shape avoided elsewhere in this file, applied
   // to disclosure instead of a claim).
   return {
     status: "changed",
@@ -1324,7 +1323,7 @@ function restoreDisplaced(
 
 /**
  * Discards one or more individually-named, already-audited artifacts inside
- * `transactionDirectory` (round 9, r4: `resolveUndisplacedTransaction` passes
+ * `transactionDirectory` (`resolveUndisplacedTransaction` passes
  * both `prepared` and `link-probe`, since a crash inside the link-probe
  * window can leave both names pointing at the same staged inode). Each path
  * is unlinked with `force: true`, so passing a name that never existed is a
@@ -1582,7 +1581,7 @@ export function atomicWriteBytesIfUnchanged(
     // authorize it (the mirror image of the "wrongly report it as unproven"
     // failure those sibling comments name — the self-reference cuts either
     // way, so the full proof must never run again after the commit).
-    // Round 9, m1: the final success return used to skip this proof entirely
+    // The final success return used to skip this proof entirely
     // and disclose a bare `firstExistingPath` — an existence check, not a
     // copy proof — as the retained-copy path every caller (`hook.ts`'s
     // `reportRetainedCopy`, reached from both `hookInstall` and
@@ -1591,24 +1590,23 @@ export function atomicWriteBytesIfUnchanged(
     // in the narrow window since `displaced` was last validated), this call
     // does not commit at all — the transaction stays "published".
     //
-    // Round 10, S1 correction: round 9's comment here (and its report's table
-    // row 33) claimed a later invocation "resolves it fresh, exactly like
-    // every other unprovable shape in this module". That was false for the
-    // ordinary case: before this round, `recoverFileTransaction`'s own
-    // "published" fallback returned `manual` unconditionally, with no
+    // A later invocation resolves this fresh, like every other unprovable
+    // shape in this module. That holds only because
+    // `recoverFileTransaction`'s own "published" fallback re-proves
+    // `displaced` and `path` on every later invocation (see its own doc
+    // comment above): it used to return `manual` unconditionally, with no
     // re-examination of the evidence — a real `SIGKILL` right here, or a
     // single failed manifest write one line below, left the transaction
-    // permanently stuck, forever, with no adversary involved. That fallback
-    // now re-proves `displaced` and `path` on every later invocation (see its
-    // own doc comment above) and *does* resolve fresh whenever `prepared`
-    // being gone is the only reason this proof failed. It genuinely cannot
-    // resolve the one case this proof itself also guards against: a
-    // concurrent writer that leaves an unaccounted extra link on `displaced`
-    // stays unprovable for as long as that link exists, on any later
-    // invocation, and correctly stays `manual` rather than guess.
+    // permanently stuck, forever, with no adversary involved. The fallback
+    // now *does* resolve fresh whenever `prepared` being gone is the only
+    // reason this proof failed. It genuinely cannot resolve the one case this
+    // proof itself also guards against: a concurrent writer that leaves an
+    // unaccounted extra link on `displaced` stays unprovable for as long as
+    // that link exists, on any later invocation, and correctly stays
+    // `manual` rather than guess.
     const provenCopy = provenCopyOf(recoveryPath, path);
     if (provenCopy === undefined) {
-      // round 10, s3: `targetWritten: false` here, not `destinationPublished`
+      // `targetWritten: false` here, not `destinationPublished`
       // — this specific call's own write to `path` was already proven
       // byte- and mode-correct by `fileMatches` a few lines above, before
       // this proof of `displaced` even ran. `targetWritten: true` would tell

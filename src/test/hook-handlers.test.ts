@@ -505,11 +505,10 @@ test("hookSuccess says when the fix link cannot be written, plainly, and still e
  * Real (uninstrumented) `sayTty`/`detailTty`, run in a genuinely console-less
  * child process — `stdio: "ignore"` plus `windowsHide: true` reproduces the
  * no-window, no-console shape this codebase already uses for its other
- * detached spawns (see `core/notify.ts`), and is the same shape task-4-report
- * used to empirically settle the `CON` question. This is the test the task-4
- * brief required: proof that no stray file named `CON` appears when no
- * console is attached, using the actual shipped `ttyDevicePath()` value, not
- * a hardcoded guess of it.
+ * detached spawns (see `core/notify.ts`), and is the same shape used to
+ * empirically settle the `CON` question. This test proves that no stray file
+ * named `CON` appears when no console is attached, using the actual shipped
+ * `ttyDevicePath()` value, not a hardcoded guess of it.
  */
 test(
   "sayTty/detailTty never leave a stray CON file behind when no console is attached",
@@ -546,7 +545,7 @@ test(
   },
 );
 
-// --- F2 (task-a-brief): ROCKY_HOOK_SPEECH_FILE buffer/publish path --------
+// --- ROCKY_HOOK_SPEECH_FILE buffer/publish path --------
 //
 // Only rocky-hook.ps1's own spawn ever sets this env var (see the extensive
 // comments in __rockySpawnDetached and prompt) -- these tests drive

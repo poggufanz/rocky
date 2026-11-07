@@ -218,7 +218,7 @@ test("redacted display collisions retain distinct bounded identities after reloa
   assert.equal(reloaded.mechanism.files.length, 2);
   assert.equal(new Set(reloaded.mechanism.files.map((item) => item.identityHash)).size, 2);
   // Individual mechanism events without a turn sidecar/complete marker are
-  // now deliberately conservative after round-6 recovery hardening.
+  // now deliberately conservative.
   assert.equal(reloaded.mechanism.coverageStatus, "unknown");
 });
 

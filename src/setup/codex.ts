@@ -45,10 +45,8 @@ const EFFECTIVE_ONLY_DEFAULTS: Readonly<Record<string, unknown>> = {
   // mcp_servers.<name> effective view with no origin entry, same as the
   // other keys here - "local" is what it defaults to for a command/args
   // (stdio) server, which is the only shape Rocky ever writes. Confirmed
-  // against the live 0.146.1 app-server (gate 12 host acceptance finding);
-  // see docs/superpowers/sdd/2026-08-06-v021-final-hardening-handover/
-  // codex-provenance-investigation.md for the raw transcript. Any other
-  // value still fails closed - it is not this exact recognized default.
+  // against the live 0.146.1 app-server. Any other value still fails
+  // closed - it is not this exact recognized default.
   environment_id: "local",
   required: false,
   startup_timeout_sec: null,
@@ -667,7 +665,7 @@ export function createCodexAdapter(dependencies: CodexAdapterDependencies): Setu
             // write advanced the on-disk version - a write is a fact here,
             // not a possibility. Say so and name the exact file: telling
             // the user to "use manual registration" without disclosing
-            // that is exactly the gate 12 finding this guards against.
+            // that is exactly the failure this guards against.
             return manualFallback(
               `Codex wrote to ${configPath}, but the result could not be verified; check ${configPath} for mcp_servers.rocky`,
               registration,

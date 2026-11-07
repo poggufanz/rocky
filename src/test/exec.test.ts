@@ -38,7 +38,7 @@ test("win32 command construction for a real-child spawn double-quotes, not POSIX
 test("native Windows command boundary distinguishes normal child execution from shell-length failure", {
   skip: process.platform !== "win32" && "requires native Windows cmd.exe command-length behavior",
 }, async () => {
-  const marker = "task16-boundary-child";
+  const marker = "boundary-child";
   const script = `process.stderr.write('${marker}'); process.exit(0)`;
   const exactLengthCommand = (length: number): string => {
     const prefix = `${nodeCommand(script)} "`;

@@ -13,7 +13,10 @@ export interface CaptureResult { written: number; unlinked: number; skipped: str
  * Listening-seeded hosts so raw reasoning never copies into the graph.
  * `recordRationale` stays the memory.jsonl writer; Listening reads only
  * verified hook ingress, never this lane. `hook_policy_reason` (a hook
- * policy/decision note) is never agent-stated why. Default false so
+ * policy/decision note) is never agent-stated why. Default false so the
+ * legacy pull keeps running for every other host; a Listening-seeded host
+ * freezes it by setting `ROCKY_FREEZE_LEGACY_PULL=1`, which
+ * `captureRationales` checks on every call.
  */
 export const LEGACY_RATIONALE_PULL_FROZEN_FOR_LISTENING = false;
 

@@ -18,13 +18,13 @@ function fakeDeps() {
   };
 }
 
-test("dispatch maps each P1-A id to exactly one adapter with the same id", () => {
+test("dispatch maps each MCP-adapter harness id to exactly one adapter with the same id", () => {
   const ids: readonly HarnessId[] = ["claude-code", "codex", "opencode", "gemini-cli", "copilot-cli"];
   const adapters = createHarnessMcpAdapters(ids, fakeDeps() as never);
   assert.deepEqual(adapters.map((a) => a.id), [...ids]);
 });
 
-test("dispatch deduplicates repeated ids and drops batch B/C ids without claiming them", () => {
+test("dispatch deduplicates repeated ids and drops ids that have no MCP adapter without claiming them", () => {
   const adapters = createHarnessMcpAdapters(
     ["codex", "codex", "cursor", "vscode"] as HarnessId[],
     fakeDeps() as never,

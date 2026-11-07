@@ -542,7 +542,7 @@ export function queryRecall(records: readonly MemoryRecord[], input: RecallQuery
   // recall well beyond the supported RSS envelope. Recompute one bounded set
   // while scoring after the compact frequency pass.
   //
-  // Finding 1: count each token's document frequency once per *canonical
+  // Count each token's document frequency once per *canonical
   // fingerprint*, not once per record. Two identical failures (the same
   // error recurring -- Rocky's core use case) used to double-count a
   // distinctive token like `enospc`, pushing it past the rare-token floor
@@ -938,7 +938,7 @@ export function searchKnowledge(
       .filter((entry): entry is { record: FailureRecord; snippet: string } => entry.record.kind === "failure")
       .map((entry) => entry.record),
   );
-  // Finding 1: count each token once per document *identity*, not once per
+  // Count each token once per document *identity*, not once per
   // entry. A failure's identity is its canonical fingerprint, so two records
   // of the same recurring failure no longer inflate a distinctive token's
   // frequency past the rare-token floor (see `queryRecall` for the full
@@ -1441,7 +1441,7 @@ export function possibleFixesForFailure(
  * a candidate attached only to an older occurrence of the same recurring
  * failure still surfaces here instead of being silently dropped because
  * recall's dedup happened to pick a newer occurrence as the representative
- * hit (finding 1, final whole-branch review).
+ * hit.
  */
 function withPossibleFix(hit: RecallHit, occurrences: readonly FailureRecord[], records: readonly MemoryRecord[], now: number): RecallHit {
   if (hit.fix) return hit;

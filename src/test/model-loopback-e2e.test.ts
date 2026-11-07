@@ -22,7 +22,7 @@ import { recall } from "../commands/recall.js";
 import { checkAmbiguity } from "../agent/ambiguity.js";
 import { resolveRockyPaths, type RockyPaths } from "../core/state-paths.js";
 
-const MODEL = "task16-e2e-model";
+const MODEL = "e2e-model";
 const ABORT_OBSERVATION_TIMEOUT_MS = 10_000;
 
 interface RequestRecord {
@@ -177,7 +177,7 @@ function envelope(value: unknown): Record<string, unknown> {
   return { done: true, response: JSON.stringify(value) };
 }
 
-function enabledConfig(path = "/tmp/task16-e2e-config.json"): ConfigLoadResult {
+function enabledConfig(path = "/tmp/e2e-config.json"): ConfigLoadResult {
   return {
     status: "valid",
     path,
@@ -190,7 +190,7 @@ function triple(id: string, path: string): TripleRecord {
     kind: "triple",
     id,
     ts: Date.now() - 1_000,
-    cwd: "/task16/project",
+    cwd: "/e2e/project",
     schemaV: 1,
     agent: "codex",
     origin: "agent-hook",
@@ -206,10 +206,10 @@ function recallHit(id = "failure-1"): RecallHit {
       kind: "failure",
       id,
       ts: Date.now() - 1_000,
-      cwd: "/task16/project",
+      cwd: "/e2e/project",
       cmd: "npm test",
       exitCode: 1,
-      fingerprint: "task16-fingerprint",
+      fingerprint: "e2e-fingerprint",
       signature: ["button", "missing"],
       excerpt: "module missing",
     },
@@ -267,8 +267,8 @@ test("real loopback E2E covers model use, recall, what, annotation, and ambiguit
   let saved: unknown;
   assert.equal(await model(["use", MODEL], {
     ollama: client,
-    loadConfig: () => ({ status: "missing", path: "/tmp/task16-model-use.json", config: { version: 1, ai: { enabled: false } } }),
-    saveConfigAtomic: (config) => { saved = config; return { path: "/tmp/task16-model-use.json" }; },
+    loadConfig: () => ({ status: "missing", path: "/tmp/e2e-model-use.json", config: { version: 1, ai: { enabled: false } } }),
+    saveConfigAtomic: (config) => { saved = config; return { path: "/tmp/e2e-model-use.json" }; },
   }), 0);
   assert.deepEqual(saved, { version: 1, ai: { enabled: true, provider: "ollama", model: MODEL, exposure: "sanitized" } });
 
@@ -303,16 +303,16 @@ test("real loopback E2E covers model use, recall, what, annotation, and ambiguit
   assert.ok(out.length >= 1);
   assert.equal(JSON.stringify(records), recordsBefore, "what model cannot mutate durable evidence");
 
-  const annotationHome = mkdtempSync(join(tmpdir(), "rocky-task16-annotation-"));
+  const annotationHome = mkdtempSync(join(tmpdir(), "rocky-e2e-annotation-"));
   t.after(() => rmSync(annotationHome, { recursive: true, force: true }));
   const annotationPaths: RockyPaths = resolveRockyPaths({ ROCKY_HOME: annotationHome });
   const annotationEvents: AgentEvent[] = [
-    { v: 1, agent: "claude-code", kind: "intent", ts: 1, cwd: "/task16/project", text: "change button" },
+    { v: 1, agent: "claude-code", kind: "intent", ts: 1, cwd: "/e2e/project", text: "change button" },
     { v: 1, agent: "claude-code", kind: "mechanism", ts: 2, tool: "Edit", path: "src/first.css", excerpt: "button margin" },
     { v: 1, agent: "claude-code", kind: "rationale", ts: 3, source: "transcript", text: "increase spacing" },
   ];
-  for (const event of annotationEvents) appendEvent("task16-annotation", event, annotationPaths);
-  const annotation = await annotateBatch("task16-annotation", {
+  for (const event of annotationEvents) appendEvent("e2e-annotation", event, annotationPaths);
+  const annotation = await annotateBatch("e2e-annotation", {
     paths: annotationPaths,
     git: () => undefined,
     ai: createOllamaAnnotate(client, MODEL),

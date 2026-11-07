@@ -1055,7 +1055,7 @@ function cloneFailure(failure: FailureRecord, exposure: Exposure, truncation: Tr
 }
 
 // Exported so the bounded-basis/confidence-normalization invariant can be
-// pinned by a direct unit test (finding 2, final whole-branch review): the
+// pinned by a direct unit test: the
 // function's sole production caller (projectHit, via the untrusted-provider
 // snapshot in snapshotSourceFix) strips `links` before this ever sees one
 // today, so a test that only went through the public projectRecallHits
@@ -1084,7 +1084,7 @@ export function cloneFix(fix: FixRecord, exposure: Exposure, truncation: Truncat
     // (parseFixLinks, safeProviderFixRecord/mcp/tools.ts, projectFixRecord
     // above): the invariant must live in the code, not in caller discipline,
     // so the next data source wired into projectHit inherits it for free
-    // (finding 2, final whole-branch review). `fix` here is already a
+    //. `fix` here is already a
     // parseFixLinks-validated FixRecord from durable memory, so this is
     // belt-and-suspenders today, but it closes the gap for tomorrow.
     const links: NonNullable<FixRecord["links"]> = [];

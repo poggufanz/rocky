@@ -64,7 +64,7 @@ const cases: Array<[string, string]> = [
   ["   ", ""],
 ];
 
-test("commandSignature matches the spec table", () => {
+test("commandSignature maps each command in the input-to-signature table to its expected signature", () => {
   for (const [input, expected] of cases) {
     assert.equal(commandSignature(input), expected, `commandSignature(${JSON.stringify(input)})`);
   }

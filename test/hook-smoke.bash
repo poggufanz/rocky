@@ -722,7 +722,7 @@ export SPEECH_SNAPSHOT="$TMP/speech-seen.txt"
 # a name before the spawn and hands the handler a speech file to write.
 # Prompt 2, the next prompt in the SAME session, drains it -- prints the
 # message and removes the file. Both must share one process: the claim list
-# is per-process state (session affinity, Finding 1), so a fresh bash would
+# is per-process state (session affinity), so a fresh bash would
 # have an empty __rocky_speech_ids and its drain would return immediately.
 # The detached shim writes asynchronously, so a bounded wait sits between
 # the two precmd calls. The claimed name is reported on stdout as the last
