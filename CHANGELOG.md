@@ -4,6 +4,8 @@ Notable changes per release. Dates are the release date.
 
 ## Unreleased
 
+The experimental desk daemon keeps 24 hours of desk history in `desk/history/` and restores agents and timelines from it after a restart. It places subagents under their main agent and shows the task description supplied when they start. Desk settings live in `desk/settings.json`. The desk pipe protocol is now v2, so the desk and the daemon must come from the same build.
+
 Hidden `rocky setup --desk-hooks <path>` / `--uninstall-desk-hooks` for the experimental desk.
 
 The experimental desk hook records the Bash command and tool description as redacted text of at most 200 characters, unless `desk/tool-text-off` exists in the Rocky home.

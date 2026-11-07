@@ -105,14 +105,99 @@ Redaction counts Unicode scalar values where the reference counts UTF-16 code
 units, so a secret value built from characters outside the Basic Multilingual
 Plane can stay unredacted here.
 
-## Pipe v1
+## Desk settings v1
+
+`rockyd` stores desk settings in `<ROCKY_HOME>/desk/settings.json` and is the
+only writer. It writes a sibling `settings.json.tmp` and renames it over the
+file, creating `desk/` on first save. Missing keys take their defaults.
+
+Defaults:
+
+```json
+{"v":1,"subagent_tree":true,"history":true,"tool_text":true,
+ "notify_needs_you":true,"notify_failed":true,"notify_done":true,
+ "lang":"auto","autostart_asked":false}
+```
+
+`lang` is `auto`, `en`, or `id`. `v` is the file version and is not settable.
+
+A missing file means defaults and is not an error. A file that cannot be
+read, does not parse, has a field of the wrong type, or carries a `v` other
+than 1 gives defaults in memory and sets `health.settings_unreadable`; the
+file is left byte-identical until a later `set` succeeds.
+
+`set` accepts the seven boolean names and `lang` (a JSON bool, or one of the
+three strings). It replies with `ack`: `ok: false` plus `error` `unknown
+setting` (a name that is not settable, including `v`), `invalid value`
+(wrong JSON type), or `save failed` (the file write failed). A successful
+`set` saves the file, broadcasts a full `settings` message, syncs the
+`desk/tool-text-off` marker, clears `settings_unreadable`, and pushes fresh
+`status` rows when `tool_text` changed. It also broadcasts `health` when it
+changed, which the first successful `set` after an unreadable file does.
+
+The marker `desk/tool-text-off` is present while `tool_text` is off and
+absent while it is on. The daemon rewrites it at start and on every
+`tool_text` change, so it matches the settings in use. Turning `tool_text`
+off also drops `command` and `description` from agents already in memory.
+
+## Desk history v1
+
+`rockyd` keeps a replay log under `<ROCKY_HOME>/desk/history/`, one JSON
+object per line. Segments are named `<UTC yyyyMMddHH>.jsonl` (for example
+`2026110814.jsonl`) and hold one UTC hour each. Only files with exactly that
+name are replayed, counted toward the cap, or deleted; other files (a
+`.tmp`, `notes.txt`, a subdirectory) are left alone.
+
+Every line carries `v` (currently 1), a `kind`, and an optional `src` (the
+spool file name the line came from).
+
+Event line, written for each consumed spool file. The event is the same
+allowlisted shape the spool stores:
+
+```json
+{"v":1,"kind":"event","harness":"claude-code","recv_ms":1794000000123,"event":{"hook_event_name":"PreToolUse","session_id":"s1","cwd":"C:\\work\\app","tool_name":"Bash","tool_use_id":"toolu_1","command":"npm test"},"src":"1794000000123-4242.json"}
+```
+
+Gap line, written for a `dropped` spool record or a quarantined bad file.
+Its `reason` is `hook_dropped` or `bad_file`, and the time range comes from
+the record or, for a bad file, the spool file name:
+
+```json
+{"v":1,"kind":"gap","from_ms":1794000000456,"to_ms":1794000000456,"count":1,"reason":"hook_dropped","src":"1794000000456-4242.json"}
+```
+
+A `history_full` gap line, written when a segment is deleted for the cap,
+has no `src`.
+
+Rules:
+
+- **Keep.** At start and on each minute tick, a segment whose last hour ended
+  at or before `now - 24 h` is deleted.
+- **Cap.** Accepted segments total at most 64 MiB. When an append pushes the
+  total over, the oldest other segments are deleted, oldest first, and one
+  `history_full` gap line for the lost range and line count is appended to
+  the current segment.
+- **Torn line.** A hard kill can leave a partial last line. The next append
+  writes a newline first, and replay skips lines it cannot parse.
+- **Replay.** At start the daemon rebuilds agents, statuses, and timelines
+  from the segments, then seeds the ingestor with every `src` seen so those
+  spool files are deleted without being applied again.
+- **Tool text.** Segments written while tool text was on keep that text until
+  they age out or history is turned off. Replay drops it when `tool_text` is
+  off, so it never returns to memory, statuses, or timelines.
+- **Off.** When the daemon starts with `history` off, and whenever the
+  setting changes to off, every accepted segment is deleted. While off,
+  nothing is appended.
+
+## Pipe v2
 
 One JSON object per line over the daemon pipe. Every message carries `v`
-(major) first and `type`. Minor additions are additive; readers must ignore
-unknown fields. A client line longer than 64 KiB gets the client
-disconnected. Each client has a bounded outbound queue of 1024 messages;
-when full the client is disconnected, reconnects, and receives a fresh
-snapshot.
+(major) first and `type`. This build speaks v2; a peer that sends another
+major version gets one `error` with `code: "version"` and the connection
+closes. Minor additions are additive; readers must ignore unknown fields. A
+client line longer than 64 KiB gets the client disconnected. Each client has
+a bounded outbound queue of 1024 messages; when full the client is
+disconnected, reconnects, and receives a fresh snapshot.
 
 ### Messages
 
@@ -122,20 +207,54 @@ snapshot.
 | daemon → desk | `hello` | `daemon_version`, `pid` |
 | daemon → desk | `error` | `code: "version"`, then the connection closes when the major differs |
 | desk → daemon | `subscribe` | — |
-| daemon → desk | `snapshot` | `agents[]`, `aggregate`, `health` |
+| daemon → desk | `snapshot` | `agents[]`, `aggregate`, `health`, `settings` |
 | daemon → desk | `status` | `op: "upsert" \| "remove"`, `agent` |
-| daemon → desk | `health` | `spool_pending`, `spool_dropped`, `dropped_events`, `bad_files`, `late_events`, `hook_newer_than_daemon` |
-| desk → daemon | `cmd` | `name: "stop"`, `id` |
+| daemon → desk | `health` | `spool_pending`, `spool_dropped`, `dropped_events`, `bad_files`, `late_events`, `hook_newer_than_daemon`, `gaps[]`, `settings_unreadable` |
+| daemon → desk | `settings` | full settings object, broadcast when it changes |
+| desk → daemon | `set` | `id`, `name`, `value` |
+| desk → daemon | `timeline` | `id`, `key` |
+| daemon → desk | `timeline` | `id`, `key`, `entries[]` |
+| desk → daemon | `cmd` | `name: "stop" \| "show"`, `id` |
+| daemon → desk | `show` | — (broadcast to every desk after a `cmd` `show`) |
 | daemon → desk | `ack` | `id`, `ok`, `error?` |
 
 `agent` carries `key` (`session_id`, `agent_id`; empty `agent_id` means the
 main agent), `agent_type?`, `status` (`idle` | `working` | `needs_you` |
 `done` | `failed` | `ended`), `action?` (`tool_name`, `target_path?`,
-`tool_use_id?`), `summary?`, `failures`, `last_event_ms`, `quiet_10m`, and
-`repo` (`root?`, `name`, `branch?`).
+`tool_use_id?`, `command?`), `summary?`, `description?`, `failures`,
+`last_event_ms`, `quiet_10m`, and `repo` (`root?`, `name`, `branch?`).
+
+`description` is the task text from the main agent's one unpaired `Agent` or
+`Task` tool call, attached to the child that starts next. It stays absent
+when zero or several calls are open, or when tool text is off.
+`action.command` is the redacted command text, absent when tool text is off.
+
+`health.gaps` holds at most 100 gaps whose `to_ms` is within the last 24 h.
+`snapshot.health.gaps` carries the same list; there is no top-level `gaps`
+field. A gap is `{from_ms, to_ms, count, reason}`; `reason` is `spool_full`
+(dropped spool files), `history_full` (dropped history segments),
+`hook_dropped` (a `dropped` spool record), or `bad_file` (a quarantined
+spool file).
+
+`snapshot` is sent once after `subscribe`, and once at daemon startup for
+desks that connected while it was replaying.
+
+`timeline` replies with up to the last 50 entries for `key`, oldest first;
+an unknown key gives an empty `entries`. Entries are `{ms, kind, tool_name?,
+text?, outcome?}`. `kind` is one of `session_start`, `turn_start`, `tool`,
+`needs_you`, `subagent_start`, `subagent_stop`, `turn_done`, `turn_failed`,
+`session_end`, `gap`. `outcome` is `pending`, `ok`, or `failed` and appears
+on `tool` entries. Tool text is a repo-relative path or the redacted command;
+a `gap` entry carries the reason in `text`. Timelines are not part of
+`snapshot`; a desk asks for them per agent.
+
+`set` errors are the strings documented under Desk settings v1. `cmd` with
+`name: "stop"` acks and the daemon exits. `cmd` with `name: "show"` is
+broadcast as `show` to every desk, then the sender gets `ack` with `ok:
+true`.
 
 Example:
 
 ```json
-{"v":1,"type":"subscribe"}
+{"v":2,"type":"subscribe"}
 ```
