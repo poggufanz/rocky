@@ -1020,6 +1020,21 @@ test(
 interface FeedResult {
   stdout: string;
   timedOut: boolean;
+  /** Wall-clock milliseconds from spawn until the process exited or the guard fired. */
+  elapsedMs: number;
+  /** Scripted lines already written to the session's stdin when it ended. */
+  linesFed: number;
+  linesTotal: number;
+}
+
+/**
+ * Suffix for every hang-guard assertion: says how long the session ran, how
+ * many scripted lines it had been given, and what it last printed, so a
+ * tripped guard names where the session was sitting instead of only that it
+ * tripped.
+ */
+function describeFeed(r: FeedResult): string {
+  return `elapsed=${r.elapsedMs} fed=${r.linesFed}/${r.linesTotal} stdout_tail=${r.stdout.slice(-2000)}`;
 }
 
 const DEFAULT_SMOKE_LINES = (rockyHome: string): string[] => [
@@ -1035,6 +1050,7 @@ const DEFAULT_SMOKE_LINES = (rockyHome: string): string[] => [
 
 function spawnAndFeed(exe: string, rockyHome: string, shim: string, lines?: string[], intervalMs = 400): Promise<FeedResult> {
   return new Promise((resolve) => {
+    const startedAt = Date.now();
     const child = spawn(exe, ["-NoProfile", "-NoLogo"], {
       env: { ...process.env, ROCKY_HOME: rockyHome, ROCKY_BIN: shim },
       stdio: ["pipe", "pipe", "pipe"],
@@ -1059,7 +1075,7 @@ function spawnAndFeed(exe: string, rockyHome: string, shim: string, lines?: stri
       clearInterval(feed);
       clearTimeout(watchdog);
       if (timedOut) { try { child.kill("SIGKILL"); } catch { /* best effort */ } }
-      resolve({ stdout, timedOut });
+      resolve({ stdout, timedOut, elapsedMs: Date.now() - startedAt, linesFed: index, linesTotal: feedLines.length });
     };
 
     // Hard-bounded: a reintroduced hang (the exact bug this test guards
@@ -1089,6 +1105,7 @@ interface FeedResultWithStderr extends FeedResult {
  */
 function spawnAndFeedCapturingStderr(exe: string, rockyHome: string, shim: string, lines: string[], intervalMs = 400): Promise<FeedResultWithStderr> {
   return new Promise((resolve) => {
+    const startedAt = Date.now();
     const child = spawn(exe, ["-NoProfile", "-NoLogo"], {
       env: { ...process.env, ROCKY_HOME: rockyHome, ROCKY_BIN: shim },
       stdio: ["pipe", "pipe", "pipe"],
@@ -1113,7 +1130,7 @@ function spawnAndFeedCapturingStderr(exe: string, rockyHome: string, shim: strin
       clearInterval(feed);
       clearTimeout(watchdog);
       if (timedOut) { try { child.kill("SIGKILL"); } catch { /* best effort */ } }
-      resolve({ stdout, stderr, timedOut });
+      resolve({ stdout, stderr, timedOut, elapsedMs: Date.now() - startedAt, linesFed: index, linesTotal: lines.length });
     };
 
     const watchdog = setTimeout(() => finish(true), 20_000);
@@ -1208,7 +1225,7 @@ async function realHostSmoke(t: TestContext, exe: string): Promise<void> {
   writeFileSync(shim, `& node '${entry}' @args\nexit $LASTEXITCODE\n`);
 
   const result = await spawnAndFeed(exe, rockyHome, shim);
-  assert.equal(result.timedOut, false, "the session must not hang (recursion/hang regression guard)");
+  assert.equal(result.timedOut, false, `the session must not hang (recursion/hang regression guard) (${describeFeed(result)})`);
   // `echo a b` prints each argument on its own line, so DOLLARQ/EXIT land on
   // consecutive lines rather than sharing one -- matches what the real
   // interactive session actually prints (confirmed empirically, both hosts).
@@ -1325,7 +1342,7 @@ async function realHostNonBlockingSmoke(t: TestContext, exe: string): Promise<vo
   ]);
   const elapsedMs = Date.now() - before;
 
-  assert.equal(result.timedOut, false, "the session must not hang");
+  assert.equal(result.timedOut, false, `the session must not hang (${describeFeed(result)})`);
   assert.match(result.stdout, /NEXT_PROMPT_REACHED/, `the next command must run without waiting on the slow spawn; got: ${result.stdout}`);
   assert.ok(
     elapsedMs < NON_BLOCKING_CEILING_MS,
@@ -1395,7 +1412,7 @@ async function realHostDenylistSmoke(t: TestContext, exe: string): Promise<void>
     "Get-Item ./__rocky_denylist_should_record__ -ErrorAction SilentlyContinue 2>$null",
     "exit",
   ]);
-  assert.equal(result.timedOut, false, "the session must not hang");
+  assert.equal(result.timedOut, false, `the session must not hang (${describeFeed(result)})`);
 
   const memoryPath = join(rockyHome, "memory.jsonl");
   // Exactly one detached write is ever expected here: the two denylisted
@@ -1468,7 +1485,7 @@ async function realHostFaultInjectionSmoke(t: TestContext, exe: string): Promise
     "exit",
   ]);
 
-  assert.equal(result.timedOut, false, "an injected internal fault must never hang the shell");
+  assert.equal(result.timedOut, false, `an injected internal fault must never hang the shell (${describeFeed(result)})`);
   assert.match(
     result.stdout,
     /AFTER_FAULT_DOLLARQ=False\r?\nAFTER_FAULT_EXIT=7\r?\n/,
@@ -1548,7 +1565,7 @@ async function realHostConcurrentSpawnSmoke(t: TestContext, exe: string): Promis
     30, // far tighter than the shim's own 2000ms lifetime -- forces real overlap
   );
 
-  assert.equal(result.timedOut, false, "two overlapping detached spawns must never hang the shell");
+  assert.equal(result.timedOut, false, `two overlapping detached spawns must never hang the shell (${describeFeed(result)})`);
 
   const memoryPath = join(rockyHome, "memory.jsonl");
   // Both overlapping spawns must land their own write -- the shim's own
@@ -1623,7 +1640,7 @@ async function realHostCustomPromptSmoke(t: TestContext, exe: string): Promise<v
     "echo after-hook-2",
     "exit",
   ]);
-  assert.equal(result.timedOut, false, "the session must not hang (recursion/hang regression guard)");
+  assert.equal(result.timedOut, false, `the session must not hang (recursion/hang regression guard) (${describeFeed(result)})`);
   assert.match(result.stdout, /CUSTOM-PROMPT\[\d+\]> echo after-hook-1/, `the custom prompt must keep rendering, live, after being wrapped; got: ${result.stdout}`);
   assert.match(result.stdout, /CUSTOM-PROMPT\[\d+\]> echo after-hook-2/, `and keep rendering for more than one call after the wrap; got: ${result.stdout}`);
 }
