@@ -22,6 +22,8 @@ export interface SetupOptions {
   replace: boolean;
   yes: boolean;
   agentHooksAction?: AgentHooksAction;
+  deskHooksAction?: "install" | "uninstall";
+  deskHookBin?: string;
   /** Only meaningful alongside agentHooksAction "install"; default true. */
   rationaleGate?: boolean;
   /** Explicit harness targets, deduped in first-seen order; [] = legacy path. */

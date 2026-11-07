@@ -1,0 +1,25 @@
+[package]
+name = "rocky-desk"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+rocky-proto = { path = "../rocky-proto" }
+gpui = "=0.2.2"
+gpui-tray = "=0.3.0"
+interprocess = "=2.4.7"
+# Already in the tree via gpui; used to hide the window by HWND (gpui 0.2.2 has no hide).
+raw-window-handle = "0.6"
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Pipes",
+    "Win32_System_Threading",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[dev-dependencies]
+rockyd = { path = "../rockyd" }
+tempfile = "3"

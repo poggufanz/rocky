@@ -44,6 +44,7 @@ import {
   uninstallClaudeAgentHooks,
 } from "../setup/agent-hooks.js";
 import type { AgentHooksAction, HarnessId, RepoCaptureAction } from "../setup/clients.js";
+import { installDeskHooks, uninstallDeskHooks } from "../setup/desk-hooks.js";
 import {
   checkLegacyVoiceSkill,
   removeLegacyVoiceSkill,
@@ -585,6 +586,58 @@ async function runAgentHooksAction(
   }
 }
 
+async function runDeskHooksAction(
+  action: "install" | "uninstall",
+  hookBin: string | undefined,
+  dependencies: SetupDependencies,
+): Promise<number> {
+  try {
+    if (action === "install") {
+      if (hookBin === undefined) {
+        say("Setup stopped: --desk-hooks needs the rocky-hook path.");
+        return 2;
+      }
+      if (!posix.isAbsolute(hookBin) && !win32.isAbsolute(hookBin)) {
+        say("Setup stopped: the desk hook path must be absolute.");
+        return 1;
+      }
+      if (!dependencies.platform.fileExists(hookBin)) {
+        say("Setup stopped: the desk hook path does not exist.");
+        return 1;
+      }
+      const resolved = realpathSync(hookBin);
+      const actual = basename(resolved);
+      const lowered = actual.toLowerCase();
+      const named = process.platform === "win32"
+        ? lowered === "rocky-hook" || lowered === "rocky-hook.exe"
+        : actual === "rocky-hook" || actual === "rocky-hook.exe";
+      if (!named) {
+        say("Setup stopped: the desk hook path must be the rocky-hook binary.");
+        return 1;
+      }
+      const result = await installDeskHooks(defaultAgentHooksTarget(dependencies.platform.home), {
+        hookBin: resolved,
+        fileExists: (path) => dependencies.platform.fileExists(path) || path === resolved,
+        confirmation: dependencies.confirmation,
+        detail,
+      });
+      detail(`claude-code desk hooks: ${result.status}`);
+      if (result.detail !== undefined) detail(safeTerminalBlock(result.detail));
+      return result.status === "written" || result.status === "unchanged" ? 0 : 1;
+    }
+    const result = await uninstallDeskHooks(defaultAgentHooksTarget(dependencies.platform.home), {
+      confirmation: dependencies.confirmation,
+      detail,
+    });
+    detail(`claude-code desk hooks: ${result.status}`);
+    if (result.detail !== undefined) detail(safeTerminalBlock(result.detail));
+    return result.status === "written" || result.status === "unchanged" ? 0 : 1;
+  } catch {
+    say("Setup stopped: the Claude Code desk hook paths are not usable.");
+    return 1;
+  }
+}
+
 /*
  * Legacy voice skill. Older releases could install a voice skill with
  * the retired voice skill flag. rocky no longer ships it, so setup only cleans up a
@@ -730,7 +783,7 @@ export async function setup(argv: readonly string[], deps?: SetupDependencies): 
       return 1;
     }
   }
-  if (!stdinTTY && options.harnesses.length === 0 && options.agentHooksAction === undefined) {
+  if (!stdinTTY && options.harnesses.length === 0 && options.agentHooksAction === undefined && options.deskHooksAction === undefined) {
     say("Setup stopped: explicit harness targets are now required.");
     detail("Example: rocky setup --harness codex --yes (MCP only)");
     detail("Example: rocky setup --harness codex --listening --yes (Listening)");
@@ -738,6 +791,9 @@ export async function setup(argv: readonly string[], deps?: SetupDependencies): 
     return 2;
   }
 
+  if (options.deskHooksAction !== undefined) {
+    return runDeskHooksAction(options.deskHooksAction, options.deskHookBin, dependencies);
+  }
   if (options.agentHooksAction !== undefined) {
     return runAgentHooksAction(
       options.agentHooksAction,

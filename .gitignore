@@ -4,3 +4,4 @@ dist/
 /gui.json
 /models-dev.json
 .worktrees/
+/target/

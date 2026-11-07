@@ -1,0 +1,21 @@
+{
+  "session_id": "string",
+  "transcript_path": "string",
+  "cwd": "string",
+  "scratchpad_dir": "string",
+  "prompt_id": "string",
+  "permission_mode": "string",
+  "effort": {
+    "level": "string"
+  },
+  "hook_event_name": "string",
+  "tool_name": "string",
+  "tool_input": {
+    "command": "string",
+    "description": "string"
+  },
+  "tool_use_id": "string",
+  "error": "string",
+  "is_interrupt": "boolean",
+  "duration_ms": "number"
+}

@@ -1,0 +1,2 @@
+{"session_id":"s1","hook_event_name":"PreToolUse","cwd":"C:\\r","tool_name":"Edit","tool_use_id":"t1",
+ "tool_input":{"file_path":"C:\\r\\a.ts","old_string":"SECRET_OLD","new_string":"SECRET_NEW"},"prompt":"SECRET_PROMPT"}
