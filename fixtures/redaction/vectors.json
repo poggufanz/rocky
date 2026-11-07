@@ -276,6 +276,12 @@
     "expected": "😀[redacted github token]"
   },
   {
+    "name": "ideographic space after a credential keyword",
+    "input": "token:　abc",
+    "may_be_truncated": false,
+    "expected": "token:　abc"
+  },
+  {
     "name": "indirect password from a command substitution",
     "input": "password=$(cat /run/secrets/db)",
     "may_be_truncated": false,
@@ -366,10 +372,28 @@
     "expected": "[redacted credential assignment]\n"
   },
   {
+    "name": "line separator inside an unquoted password value",
+    "input": "password=hunter2 tail",
+    "may_be_truncated": false,
+    "expected": "[redacted password assignment] tail"
+  },
+  {
     "name": "mixed continuation at end of input",
     "input": "before password=ab12\raB1!shape",
     "may_be_truncated": false,
     "expected": "before [redacted password assignment]\r[redacted ambiguous continuation]"
+  },
+  {
+    "name": "no-break space around a password assignment operator",
+    "input": "password = hunter22",
+    "may_be_truncated": false,
+    "expected": "[redacted password assignment]"
+  },
+  {
+    "name": "no-break space in a truncated password fragment",
+    "input": "prefix؜password = \"tK8",
+    "may_be_truncated": true,
+    "expected": "prefix"
   },
   {
     "name": "npm near miss with short body",
@@ -700,6 +724,12 @@
     "input": "sk-test-00000000000000000000",
     "may_be_truncated": false,
     "expected": "[redacted openai key]"
+  },
+  {
+    "name": "thin space between a bearer prefix and its value",
+    "input": "authorization: Bearer abc",
+    "may_be_truncated": false,
+    "expected": "[redacted credential assignment] abc"
   },
   {
     "name": "token after a removed arabic letter mark",

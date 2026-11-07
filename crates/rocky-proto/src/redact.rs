@@ -18,6 +18,12 @@
 //!   filtering for other callers. Neither participates in boundary redaction,
 //!   so neither is ported here.
 //!
+//! Whitespace in the patterns is spelled out to the reference `\s` set instead
+//! of using the engine's `\s`. The lighter engine matches only ASCII for `\s`,
+//! while the reference set also covers the Unicode spaces; the shared vectors
+//! pin that parity. The scoped case-insensitive flag is ASCII-only in the
+//! lighter engine, which matches the ASCII keywords used here.
+//!
 //! Patterns are compiled lazily and only when text is actually redacted. No
 //! function in this module may panic on arbitrary input.
 
@@ -32,6 +38,22 @@ pub const TOOL_TEXT_SCAN_BYTES: usize = 4096;
 pub const TOOL_TEXT_MAX_CHARS: usize = 200;
 
 const AMBIGUOUS_SECRET_CONTINUATION: &str = "[redacted ambiguous continuation]";
+
+/// The reference `\s` set, spelled out: the lighter engine's `\s` is ASCII
+/// only (`[\t\n\v\f\r ]`), while the reference implementation also covers the
+/// Unicode spaces below. One definition keeps every pattern on one set.
+macro_rules! reference_whitespace {
+    () => {
+        r"\t\n\x0B\x0C\r \x{00A0}\x{1680}\x{2000}-\x{200A}\x{2028}\x{2029}\x{202F}\x{205F}\x{3000}\x{FEFF}"
+    };
+}
+
+/// The same set as a standalone bracketed class.
+macro_rules! whitespace_class {
+    () => {
+        concat!("[", reference_whitespace!(), "]")
+    };
+}
 
 struct SecretDefinition {
     label: &'static str,
@@ -108,18 +130,54 @@ const SECRET_DEFINITIONS: &[SecretDefinition] = &[
     },
     SecretDefinition {
         label: "password assignment",
-        source: r#"(?:(?:"(?i:password|secret)"|'(?i:password|secret)'|(?i:password|secret)))\s*[:=]\s*(?:"(?P<dq>[^'"\r\n]{4,})"|'(?P<sq>[^'"\r\n]{4,})'|(?P<uq>[^\s'"`,;]{4,}))"#,
+        source: concat!(
+            r#"(?:(?:"(?i:password|secret)"|'(?i:password|secret)'|(?i:password|secret)))"#,
+            whitespace_class!(),
+            r#"*[:=]"#,
+            whitespace_class!(),
+            r#"*(?:"(?P<dq>[^'"\r\n]{4,})"|'(?P<sq>[^'"\r\n]{4,})'|(?P<uq>[^"#,
+            reference_whitespace!(),
+            r#"'`",;]{4,}))"#,
+        ),
         leading_boundary: true,
         trailing_boundary: false,
-        fragment_source: r#"(?:(?:"(?i:password|secret)"|'(?i:password|secret)'|(?i:password|secret)))\s*[:=]\s*(?:["'][^"']*|[^\s]*)"#,
+        fragment_source: concat!(
+            r#"(?:(?:"(?i:password|secret)"|'(?i:password|secret)'|(?i:password|secret)))"#,
+            whitespace_class!(),
+            r#"*[:=]"#,
+            whitespace_class!(),
+            r#"*(?:["'][^"']*|[^"#,
+            reference_whitespace!(),
+            r#"]*)"#,
+        ),
         assignment: true,
     },
     SecretDefinition {
         label: "credential assignment",
-        source: r#"(?:(?:"(?i:token|api[_-]?key|authorization)"|'(?i:token|api[_-]?key|authorization)'|(?i:token|api[_-]?key|authorization)))\s*[:=]\s*(?:"(?P<dq>[^'"\r\n]{4,})"|'(?P<sq>[^'"\r\n]{4,})'|(?P<uq>(?:(?i:Bearer|Basic|Token)\s+)?[^\s'"`,;]{4,}))"#,
+        source: concat!(
+            r#"(?:(?:"(?i:token|api[_-]?key|authorization)"|'(?i:token|api[_-]?key|authorization)'|(?i:token|api[_-]?key|authorization)))"#,
+            whitespace_class!(),
+            r#"*[:=]"#,
+            whitespace_class!(),
+            r#"*(?:"(?P<dq>[^'"\r\n]{4,})"|'(?P<sq>[^'"\r\n]{4,})'|(?P<uq>(?:(?i:Bearer|Basic|Token)"#,
+            whitespace_class!(),
+            r#"+)?[^"#,
+            reference_whitespace!(),
+            r#"'`",;]{4,}))"#,
+        ),
         leading_boundary: true,
         trailing_boundary: false,
-        fragment_source: r#"(?:(?:"(?i:token|api[_-]?key|authorization)"|'(?i:token|api[_-]?key|authorization)'|(?i:token|api[_-]?key|authorization)))\s*[:=]\s*(?:["'][^"']*|(?:(?i:Bearer|Basic|Token)\s+)?[^\s]*)"#,
+        fragment_source: concat!(
+            r#"(?:(?:"(?i:token|api[_-]?key|authorization)"|'(?i:token|api[_-]?key|authorization)'|(?i:token|api[_-]?key|authorization)))"#,
+            whitespace_class!(),
+            r#"*[:=]"#,
+            whitespace_class!(),
+            r#"*(?:["'][^"']*|(?:(?i:Bearer|Basic|Token)"#,
+            whitespace_class!(),
+            r#"+)?[^"#,
+            reference_whitespace!(),
+            r#"]*)"#,
+        ),
         assignment: true,
     },
 ];

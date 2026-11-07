@@ -182,6 +182,13 @@ const CASES = [
   { name: "indirect password from a command substitution", input: "password=$(cat /run/secrets/db)" },
   { name: "indirect token from a shell variable", input: "token=$GITHUB_TOKEN" },
 
+  // Unicode whitespace, matched by the reference `\s` and by JS `\s`.
+  { name: "no-break space around a password assignment operator", input: "password\u00A0=\u00A0hunter22" },
+  { name: "ideographic space after a credential keyword", input: "token:\u3000abc" },
+  { name: "thin space between a bearer prefix and its value", input: "authorization: Bearer\u2009abc" },
+  { name: "line separator inside an unquoted password value", input: "password=hunter2\u2028tail" },
+  { name: "no-break space in a truncated password fragment", input: "prefix\u061Cpassword\u00A0=\u00A0\"tK8", may_be_truncated: true },
+
   // Non-ASCII text around a token.
   { name: "indonesian prose around a password assignment", input: "simpan password=pA7!cV2@kL9 dengan aman" },
   { name: "indonesian prose around an aws key", input: "kunci AKIAABCDEFGHIJKLMNOP jangan disebar" },
