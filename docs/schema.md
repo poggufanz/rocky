@@ -237,6 +237,69 @@ under `<ROCKY_HOME>\desk`.
   `set_icon`, `set_tooltip`, `refresh_menu`, `close_veto`, `autostart`,
   `aumid`, and `toast`.
 
+## Desk OS registrations (Linux)
+
+The daemon and the desk share a unix socket and two lock files. They live in
+`$XDG_RUNTIME_DIR` when that variable is a non-empty absolute path, else in
+`<ROCKY_HOME>/desk`. `<hash>` is a 16-hex-digit hash of the normalized Rocky
+home path. The desk asks the desktop to start it at login with this file at
+`$XDG_CONFIG_HOME/autostart/rocky-desk.desktop`, or
+`$HOME/.config/autostart/rocky-desk.desktop` when `XDG_CONFIG_HOME` is unset,
+empty, or relative:
+
+```ini
+[Desktop Entry]
+Type=Application
+Name=rocky
+Exec="<exe path>" --tray
+X-GNOME-Autostart-enabled=true
+```
+
+- **Socket and locks.** The socket is
+  `$XDG_RUNTIME_DIR/rocky-desk-<hash>.sock`, or
+  `<ROCKY_HOME>/desk/rockyd.sock` when the runtime directory cannot be used.
+  `rockyd-<hash>.lock` and `rocky-desk-<hash>.lock` sit beside it. Both locks
+  are created 0600, locked with `flock(LOCK_EX | LOCK_NB)`, and held for the
+  process lifetime. The socket file is born 0600 because the bind runs under
+  `umask(0o177)`, and the previous mask returns right after. The daemon also
+  keeps `<ROCKY_HOME>/desk` at 0700.
+- **Single instance.** A second desk launch asks the running desk to show
+  itself and exits 0. A second daemon exits 3 before it reads the spool,
+  settings, or history.
+- **Socket path limit.** A socket path longer than 107 bytes including the
+  terminator cannot bind; the daemon logs `socket path too long` and exits 1
+  before it opens the lock or touches the socket file. A daemon killed
+  outright can leave its socket file behind; after taking the freed lock, the
+  next daemon unlinks the stale file and binds again.
+- **Peer check.** On Linux the daemon reads the peer uid with `SO_PEERCRED`
+  and drops a connection from another user without a reply. On other unix
+  systems the peer uid is unknown, so the check fails closed. The desk checks
+  the daemon's uid after connecting and refuses a server owned by another
+  user before it sends anything.
+- **Sign-in autostart.** A missing file reads as off, as do `Hidden=true`,
+  `X-GNOME-Autostart-enabled=false`, and an `Exec` value that names another
+  exe or arguments. Enabling rewrites the whole file, which drops a
+  `Hidden=true` left behind, and disabling deletes it. The `Exec` line quotes
+  the exe path and escapes per the Desktop Entry spec: inside the quotes `"`,
+  `` ` ``, and `$` take one backslash, `%` doubles, and a backslash takes
+  four.
+- **Icon file.** `<ROCKY_HOME>/desk/rocky.png` is written from the icon
+  compiled into the exe whenever the file is missing or holds other bytes,
+  and is the icon the notifications carry.
+- **Notifications.** Sent with `org.freedesktop.Notifications.Notify` on the
+  session bus from a worker thread that opens the bus on the first notice and
+  reconnects after a failure. The app name is `rocky`, and each notice
+  replaces the previous notice from the same session through `replaces_id`.
+  Actions and hints are empty, and the expire timeout is -1. The body escapes
+  `&`, `<`, and `>`, so a repo or branch name shows literally; the title is
+  sent as plain text. A click does nothing. One call gives up after 25
+  seconds, so a server that never replies is reported as an error and the
+  desk keeps running.
+- **Error log.** `<ROCKY_HOME>/desk/rocky-desk.log` keeps the same once-only
+  kinds as Windows, plus a `panic:` entry with its backtrace on every panic.
+  On Linux, a notification setup or send error is logged under `toast`; the
+  Windows-only `aumid` kind is not used.
+
 ## Pipe v2
 
 One JSON object per line over the daemon pipe. Every message carries `v`

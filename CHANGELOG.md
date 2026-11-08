@@ -18,6 +18,8 @@ Remembered commands and rationale excerpts are now redacted before control chara
 
 The experimental desk shows subagents under their main agent and opens a timeline for each agent. A settings view switches the subagent tree, desk history, tool text, notifications, and language, and a normal start asks once whether the desk should start at sign-in. The desk sends notifications for needs-you, failed, and done turns, and a click opens the window. It can start at sign-in in the tray, brings the running window forward on a second launch, speaks English and Indonesian, and carries its own icon on the exe, window, taskbar, and toast. A daemon that stops answering no longer holds the desk for about 50 seconds; the connect attempt is now bounded at about 5 seconds.
 
+The experimental desk and its daemon run on Linux: a per-user Unix socket with lock files beside it, autostart at login through an XDG autostart file, and desktop notifications on the session bus. CI builds and tests the Rust workspace on Linux.
+
 ## 2.0.0 — 6 November 2026
 
 Major release: Rocky retires its mascot persona. CLI, hook, GUI, and MCP output is plain, neutral English, following [docs/output-principles.md](docs/output-principles.md). Evidence rules, hedges, coverage disclosures, `--quiet`, exit codes, and JSON shapes are unchanged.
