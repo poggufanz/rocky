@@ -4502,6 +4502,7 @@ dependencies = [
  "gpui-tray",
  "image",
  "interprocess",
+ "libc",
  "raw-window-handle",
  "rocky-proto",
  "rockyd",
