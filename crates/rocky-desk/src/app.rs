@@ -20,6 +20,7 @@ use gpui_tray::Tray;
 use rocky_proto::paths::desk_dir;
 use rocky_proto::pipe::{AgentKey, ClientMsg, CmdName, Outcome, ServerMsg, Status};
 
+use crate::autostart::RunOptions;
 use crate::client::Outbox;
 use crate::clock;
 use crate::conn::{Action, ConnState, ConnectOutcome};
@@ -360,7 +361,7 @@ fn chip(s: Status, lang: UiLang) -> Div {
         .child(tr(lang, &Msg::Status(s)))
 }
 
-pub fn run(rocky_home: PathBuf) {
+pub fn run(rocky_home: PathBuf, opts: RunOptions) {
     Application::new().run(move |cx: &mut App| {
         // Blocking startup attempt (the GPUI loop is not running yet).
         let exe = daemon_exe();
@@ -414,6 +415,7 @@ pub fn run(rocky_home: PathBuf) {
         let window = cx
             .open_window(
                 WindowOptions {
+                    show: !opts.tray,
                     titlebar: Some(TitlebarOptions {
                         title: Some(SharedString::from("rocky")),
                         appears_transparent: false,

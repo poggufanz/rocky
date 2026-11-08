@@ -12,7 +12,8 @@ fn main() {
         Err(InstanceError::AlreadyRunning) => return,
         Err(InstanceError::Failed) => std::process::exit(1),
     };
-    rocky_desk::app::run(home);
+    let opts = rocky_desk::autostart::parse_args(std::env::args());
+    rocky_desk::app::run(home, opts);
     // `_mutex` drops here, releasing the instance lock.
 }
 

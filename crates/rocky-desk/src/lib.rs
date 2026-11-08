@@ -1,3 +1,4 @@
+pub mod autostart;
 pub mod client;
 pub mod clock;
 pub mod conn;
