@@ -187,24 +187,12 @@ pub fn connect_and_subscribe(
     // Bounded: Timeout(ZERO) does one CreateFile and never waits, so a hung
     // daemon (all instances busy) fails fast instead of wedging the caller.
     // Retry/backoff policy belongs to the caller.
-    let mut stream = PipeStream::<Bytes, Bytes>::connect_by_path_with_wait_mode(
+    let stream = PipeStream::<Bytes, Bytes>::connect_by_path_with_wait_mode(
         name.as_str(),
         interprocess::ConnectWaitMode::Timeout(std::time::Duration::ZERO),
     )?;
     verify_server(stream.as_raw_handle())?;
-    write_msg(
-        &mut stream,
-        &ClientMsg::Hello {
-            client: "rocky-desk".to_string(),
-            version: env!("CARGO_PKG_VERSION").to_string(),
-        },
-    )?;
-    // Read the daemon hello BEFORE subscribing: the daemon flushes its
-    // reply (a read barrier on pipes), so sending subscribe first would
-    // deadlock both flushes against each other. Bounded by `hello_timeout` so
-    // a silent server fails this attempt instead of wedging the worker.
-    let mut stream = hello_handshake(stream, hello_timeout)?;
-    write_msg(&mut stream, &ClientMsg::Subscribe)?;
+    let stream = hello_and_subscribe(stream, hello_timeout)?;
 
     let (cmd_tx, cmd_rx) = mpsc::channel::<ClientMsg>();
     let (recv, send) = stream.split();
@@ -230,21 +218,11 @@ pub fn connect_and_subscribe(
     // A missing or stale socket file refuses the connect (ENOENT /
     // ECONNREFUSED) as an `Io` error, which the caller's retry/spawn path
     // treats like a missing pipe.
-    let mut stream = UnixStream::connect(socket_path(rocky_home))?;
+    let stream = UnixStream::connect(socket_path(rocky_home))?;
     if !same_user(peer_uid(&stream)) {
         return Err(ConnectError::Unverified);
     }
-    write_msg(
-        &mut stream,
-        &ClientMsg::Hello {
-            client: "rocky-desk".to_string(),
-            version: env!("CARGO_PKG_VERSION").to_string(),
-        },
-    )?;
-    // Same ordering as the pipe client: the daemon answers hello before it
-    // will read a subscribe line.
-    let mut stream = hello_handshake(stream, hello_timeout)?;
-    write_msg(&mut stream, &ClientMsg::Subscribe)?;
+    let stream = hello_and_subscribe(stream, hello_timeout)?;
 
     // Reading and writing on clones is safe: each fd is its own handle on the
     // same socket, and the reader only reads while the writer only writes.
@@ -252,6 +230,28 @@ pub fn connect_and_subscribe(
     let (cmd_tx, cmd_rx) = mpsc::channel::<ClientMsg>();
     thread::spawn(move || client_loop(recv, stream, tx, cmd_rx));
     Ok(cmd_tx)
+}
+
+/// Write `hello`, read the daemon reply under `hello_timeout`, then send
+/// `subscribe`. Shared by both transports; returns the stream for the reader.
+///
+/// The daemon answers hello before it will read a subscribe line (on pipes the
+/// reply is also a read barrier), so subscribing first would deadlock both
+/// sides — keep this order.
+fn hello_and_subscribe<S: Read + Write + Send + 'static>(
+    mut stream: S,
+    hello_timeout: Duration,
+) -> Result<S, ConnectError> {
+    write_msg(
+        &mut stream,
+        &ClientMsg::Hello {
+            client: "rocky-desk".to_string(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+        },
+    )?;
+    let mut stream = hello_handshake(stream, hello_timeout)?;
+    write_msg(&mut stream, &ClientMsg::Subscribe)?;
+    Ok(stream)
 }
 
 fn write_msg<W: Write>(stream: &mut W, msg: &ClientMsg) -> io::Result<()> {
