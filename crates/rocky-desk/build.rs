@@ -1,4 +1,6 @@
 //! Resource 1 is the window and taskbar icon; gpui loads it from the exe.
+//! `assets/rocky.ico` is generated from `assets/rocky-mark.png` with
+//! `cargo run -p rocky-desk --example make_icon`.
 
 use std::env;
 
