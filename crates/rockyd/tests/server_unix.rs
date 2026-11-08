@@ -8,6 +8,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -18,6 +19,18 @@ use rockyd::server::{BindError, Hub, serve};
 use tempfile::TempDir;
 
 const GUARD: Duration = Duration::from_secs(10);
+
+/// `serve` sets the process umask for the bind, and Rust runs the tests in one
+/// binary on parallel threads: a `TempDir` created inside that window would
+/// lose its owner execute bit. Serialize the tests so nothing creates files
+/// while another test binds.
+static SERVE_LOCK: Mutex<()> = Mutex::new(());
+
+fn serialize() -> std::sync::MutexGuard<'static, ()> {
+    SERVE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 fn home() -> TempDir {
     TempDir::new().unwrap()
@@ -81,6 +94,7 @@ fn hello_line() -> String {
 
 #[test]
 fn hello_subscribe_snapshot_over_unix_socket() {
+    let _serial = serialize();
     let home = home();
     let hub = Arc::new(Hub::new());
     let (control_tx, _control_rx) = mpsc::channel();
@@ -112,6 +126,7 @@ fn hello_subscribe_snapshot_over_unix_socket() {
 
 #[test]
 fn second_serve_on_the_same_home_is_taken() {
+    let _serial = serialize();
     let home = home();
     let hub = Arc::new(Hub::new());
     let (control_tx, _control_rx) = mpsc::channel();
@@ -133,6 +148,7 @@ fn second_serve_on_the_same_home_is_taken() {
 
 #[test]
 fn stale_socket_file_is_replaced() {
+    let _serial = serialize();
     let home = home();
     let sock = socket_path(home.path());
     std::fs::create_dir_all(sock.parent().unwrap()).unwrap();
@@ -156,6 +172,7 @@ fn stale_socket_file_is_replaced() {
 
 #[test]
 fn socket_and_desk_dir_are_owner_only() {
+    let _serial = serialize();
     let home = home();
     let hub = Arc::new(Hub::new());
     let (control_tx, _control_rx) = mpsc::channel();
