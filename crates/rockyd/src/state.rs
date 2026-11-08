@@ -1,13 +1,18 @@
 //! Per-agent status machine: hook events in, agent statuses out.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 
 use rocky_proto::hook::HookEvent;
-use rocky_proto::pipe::{Action, AgentKey, AgentStatus, RepoInfo, Status};
+use rocky_proto::pipe::{
+    Action, AgentKey, AgentStatus, Gap, GapReason, Outcome, RepoInfo, Status, TimelineEntry,
+    TimelineKind,
+};
 
 pub const DONE_TO_IDLE_MS: u64 = 30 * 60_000;
 pub const QUIET_MS: u64 = 10 * 60_000;
 pub const ENDED_REMOVE_MS: u64 = 60 * 60_000;
+pub const CHILD_REMOVE_MS: u64 = 30 * 60_000;
+pub const TIMELINE_CAP: usize = 50;
 
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Changes {
@@ -24,19 +29,104 @@ pub enum ApplyOutcome {
 #[derive(Debug)]
 struct Agent {
     status: AgentStatus,
-    in_flight: Vec<Action>,
+    in_flight: Vec<InFlight>,
+    timeline: VecDeque<TimelineRecord>,
     last_recv_ms: u64,
 }
 
-#[derive(Debug, Default)]
+/// A timeline entry plus the private facts `timeline()` never exposes.
+#[derive(Debug)]
+struct TimelineRecord {
+    entry: TimelineEntry,
+    tool_use_id: Option<String>,
+    text_source: TextSource,
+}
+
+/// Where an entry's text came from; only tool input text follows the setting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TextSource {
+    None,
+    Path,
+    ToolInput,
+    Reason,
+}
+
+/// A tool call the agent has not finished yet. `Action` is the wire type; the
+/// description and the pairing flag never leave this machine.
+#[derive(Debug)]
+struct InFlight {
+    action: Action,
+    description: Option<String>,
+    paired: bool,
+}
+
+#[derive(Debug)]
 pub struct StatusState {
     agents: BTreeMap<AgentKey, Agent>,
     repos: BTreeMap<String, RepoInfo>,
+    tool_text: bool,
+}
+
+impl Default for StatusState {
+    fn default() -> Self {
+        Self {
+            agents: BTreeMap::new(),
+            repos: BTreeMap::new(),
+            tool_text: true,
+        }
+    }
 }
 
 impl StatusState {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Drops tool text from an event while the setting is off.
+    pub fn prepare(&self, mut ev: HookEvent) -> HookEvent {
+        if !self.tool_text {
+            ev.command = None;
+            ev.description = None;
+        }
+        ev
+    }
+
+    /// Turns tool text on or off, clearing remembered text when off.
+    /// Returns the agents whose status changed.
+    pub fn set_tool_text(&mut self, on: bool) -> Vec<AgentKey> {
+        self.tool_text = on;
+        if on {
+            return Vec::new();
+        }
+        let mut changed = Vec::new();
+        for (key, agent) in self.agents.iter_mut() {
+            let mut status_changed = false;
+            if let Some(action) = agent.status.action.as_mut()
+                && action.command.take().is_some()
+            {
+                status_changed = true;
+            }
+            if !key.agent_id.is_empty() && agent.status.description.take().is_some() {
+                status_changed = true;
+            }
+            for in_flight in &mut agent.in_flight {
+                in_flight.description = None;
+                in_flight.action.command = None;
+            }
+            for record in &mut agent.timeline {
+                if record.text_source == TextSource::ToolInput {
+                    record.entry.text = None;
+                }
+            }
+            if status_changed {
+                changed.push(key.clone());
+            }
+        }
+        changed
+    }
+
+    pub fn tool_text(&self) -> bool {
+        self.tool_text
     }
 
     pub fn apply(
@@ -108,6 +198,7 @@ impl StatusState {
                     agent.status.quiet_10m = false;
                     agent.status.last_event_ms = recv_ms;
                     agent.last_recv_ms = recv_ms;
+                    agent.push_entry(TimelineRecord::new(recv_ms, TimelineKind::SessionEnd));
                     upserted.push(k);
                 }
             }
@@ -116,6 +207,12 @@ impl StatusState {
                 removed: Vec::new(),
             });
         }
+        let child_description = if ev.hook_event_name == "SubagentStart" && !key.agent_id.is_empty()
+        {
+            self.take_child_description(&ev.session_id)
+        } else {
+            None
+        };
         let agent = self.agents.entry(key.clone()).or_insert_with(|| Agent {
             status: AgentStatus {
                 key: key.clone(),
@@ -123,52 +220,82 @@ impl StatusState {
                 status: Status::Idle,
                 action: None,
                 summary: None,
+                description: None,
                 failures: 0,
                 last_event_ms: recv_ms,
                 quiet_10m: false,
                 repo: repo.clone(),
             },
             in_flight: Vec::new(),
+            timeline: VecDeque::new(),
             last_recv_ms: recv_ms,
         });
         agent.status.repo = repo;
         agent.status.last_event_ms = recv_ms;
         agent.status.quiet_10m = false;
         agent.last_recv_ms = recv_ms;
+        if let Some(description) = child_description {
+            agent.status.description = Some(description);
+        }
         match ev.hook_event_name.as_str() {
             "SessionStart" => {
                 agent.status.status = Status::Idle;
+                agent.push_entry(TimelineRecord::new(recv_ms, TimelineKind::SessionStart));
             }
             "UserPromptSubmit" => {
                 agent.status.status = Status::Working;
                 agent.status.summary = None;
+                agent.push_entry(TimelineRecord::new(recv_ms, TimelineKind::TurnStart));
             }
             "PreToolUse" => {
                 agent.status.status = Status::Working;
                 agent.status.summary = None;
                 if let Some(tool) = ev.tool_name.clone() {
-                    agent.in_flight.push(Action {
-                        tool_name: tool,
-                        target_path: ev.target_path.clone(),
-                        tool_use_id: ev.tool_use_id.clone(),
+                    agent.in_flight.push(InFlight {
+                        action: Action {
+                            tool_name: tool.clone(),
+                            target_path: ev.target_path.clone(),
+                            tool_use_id: ev.tool_use_id.clone(),
+                            command: ev.command.clone(),
+                        },
+                        description: ev.description.clone(),
+                        paired: false,
                     });
+                    let (text, text_source) =
+                        tool_entry_text(ev, agent.status.repo.root.as_deref());
+                    let mut record = TimelineRecord::new(recv_ms, TimelineKind::Tool);
+                    record.entry.tool_name = Some(tool);
+                    record.entry.text = text;
+                    record.entry.outcome = Some(Outcome::Pending);
+                    record.tool_use_id = ev.tool_use_id.clone();
+                    record.text_source = text_source;
+                    agent.push_entry(record);
                 }
-                agent.status.action = agent.in_flight.last().cloned();
+                agent.status.action = current_action(agent);
             }
             "PostToolUse" | "PostToolUseFailure" => {
                 if ev.hook_event_name == "PostToolUseFailure" {
                     agent.status.failures += 1;
                 }
                 remove_in_flight(&mut agent.in_flight, ev.tool_use_id.as_deref());
-                agent.status.action = agent.in_flight.last().cloned();
+                agent.status.action = current_action(agent);
                 if agent.status.status == Status::NeedsYou {
                     agent.status.status = Status::Working;
                     agent.status.summary = None;
                 }
+                let outcome = if ev.hook_event_name == "PostToolUse" {
+                    Outcome::Ok
+                } else {
+                    Outcome::Failed
+                };
+                resolve_pending(agent, ev.tool_use_id.as_deref(), outcome);
             }
             "PermissionRequest" => {
                 agent.status.status = Status::NeedsYou;
                 agent.status.summary = ev.tool_name.clone().or(ev.notification_type.clone());
+                let mut record = TimelineRecord::new(recv_ms, TimelineKind::NeedsYou);
+                record.entry.tool_name = ev.tool_name.clone();
+                agent.push_entry(record);
             }
             "Notification" => {
                 if matches!(
@@ -177,6 +304,9 @@ impl StatusState {
                 ) {
                     agent.status.status = Status::NeedsYou;
                     agent.status.summary = ev.tool_name.clone().or(ev.notification_type.clone());
+                    let mut record = TimelineRecord::new(recv_ms, TimelineKind::NeedsYou);
+                    record.entry.tool_name = ev.tool_name.clone();
+                    agent.push_entry(record);
                 }
             }
             "SubagentStart" => {
@@ -185,29 +315,43 @@ impl StatusState {
                 if ev.agent_type.is_some() {
                     agent.status.agent_type = ev.agent_type.clone();
                 }
+                let mut record = TimelineRecord::new(recv_ms, TimelineKind::SubagentStart);
+                record.entry.text = agent.status.description.clone();
+                if record.entry.text.is_some() {
+                    record.text_source = TextSource::ToolInput;
+                }
+                agent.push_entry(record);
             }
             "SubagentStop" => {
                 agent.status.status = Status::Done;
                 agent.status.summary = None;
                 agent.status.action = None;
                 agent.in_flight.clear();
+                agent.push_entry(TimelineRecord::new(recv_ms, TimelineKind::SubagentStop));
             }
             "Stop" => {
                 agent.status.status = Status::Done;
                 agent.status.summary = None;
                 agent.status.action = None;
                 agent.in_flight.clear();
+                agent.push_entry(TimelineRecord::new(recv_ms, TimelineKind::TurnDone));
             }
             "StopFailure" => {
                 agent.status.status = Status::Failed;
                 agent.status.action = None;
                 agent.in_flight.clear();
+                agent.push_entry(TimelineRecord::new(recv_ms, TimelineKind::TurnFailed));
             }
             _ => {}
         }
+        let removed = if ev.hook_event_name == "UserPromptSubmit" && key.agent_id.is_empty() {
+            self.remove_finished_children(&ev.session_id)
+        } else {
+            Vec::new()
+        };
         ApplyOutcome::Changed(Changes {
             upserted: vec![key],
-            removed: Vec::new(),
+            removed,
         })
     }
 
@@ -215,6 +359,13 @@ impl StatusState {
         let mut upserted = Vec::new();
         let mut removed = Vec::new();
         for (key, agent) in self.agents.iter_mut() {
+            if !key.agent_id.is_empty()
+                && matches!(agent.status.status, Status::Done | Status::Failed)
+                && now_ms.saturating_sub(agent.status.last_event_ms) >= CHILD_REMOVE_MS
+            {
+                removed.push(key.clone());
+                continue;
+            }
             match agent.status.status {
                 Status::Done => {
                     if now_ms.saturating_sub(agent.status.last_event_ms) >= DONE_TO_IDLE_MS {
@@ -244,12 +395,74 @@ impl StatusState {
         Changes { upserted, removed }
     }
 
+    /// Pairs a fresh child with the main agent's one unpaired Agent/Task call
+    /// and returns that call's description. Zero or several candidates yield
+    /// `None`.
+    fn take_child_description(&mut self, session_id: &str) -> Option<String> {
+        let main = AgentKey {
+            session_id: session_id.to_string(),
+            agent_id: String::new(),
+        };
+        let agent = self.agents.get_mut(&main)?;
+        let mut candidates = agent
+            .in_flight
+            .iter_mut()
+            .filter(|f| !f.paired && matches!(f.action.tool_name.as_str(), "Agent" | "Task"));
+        let only = candidates.next()?;
+        if candidates.next().is_some() {
+            return None;
+        }
+        only.paired = true;
+        only.description.clone()
+    }
+
+    /// Drops every finished child of the session; a new prompt starts a new
+    /// tree.
+    fn remove_finished_children(&mut self, session_id: &str) -> Vec<AgentKey> {
+        let finished: Vec<AgentKey> = self
+            .agents
+            .iter()
+            .filter(|(k, a)| {
+                k.session_id == session_id
+                    && !k.agent_id.is_empty()
+                    && matches!(a.status.status, Status::Done | Status::Failed)
+            })
+            .map(|(k, _)| k.clone())
+            .collect();
+        for key in &finished {
+            self.agents.remove(key);
+        }
+        finished
+    }
+
     pub fn agents(&self) -> Vec<AgentStatus> {
         self.agents.values().map(|a| a.status.clone()).collect()
     }
 
     pub fn get(&self, key: &AgentKey) -> Option<AgentStatus> {
         self.agents.get(key).map(|a| a.status.clone())
+    }
+
+    /// Oldest-first timeline entries for one agent; empty for an unknown key.
+    pub fn timeline(&self, key: &AgentKey) -> Vec<TimelineEntry> {
+        self.agents
+            .get(key)
+            .map(|agent| agent.timeline.iter().map(|r| r.entry.clone()).collect())
+            .unwrap_or_default()
+    }
+
+    /// Puts a coverage gap on every agent that has not ended.
+    pub fn record_gap(&mut self, gap: &Gap) {
+        let text = gap_reason_name(gap.reason);
+        for agent in self.agents.values_mut() {
+            if agent.status.status == Status::Ended {
+                continue;
+            }
+            let mut record = TimelineRecord::new(gap.to_ms, TimelineKind::Gap);
+            record.entry.text = Some(text.clone());
+            record.text_source = TextSource::Reason;
+            agent.push_entry(record);
+        }
     }
 
     pub fn aggregate(&self) -> Status {
@@ -271,12 +484,101 @@ impl StatusState {
     }
 }
 
-fn remove_in_flight(in_flight: &mut Vec<Action>, tool_use_id: Option<&str>) {
+impl TimelineRecord {
+    fn new(ms: u64, kind: TimelineKind) -> Self {
+        Self {
+            entry: TimelineEntry {
+                ms,
+                kind,
+                tool_name: None,
+                text: None,
+                outcome: None,
+            },
+            tool_use_id: None,
+            text_source: TextSource::None,
+        }
+    }
+}
+
+impl Agent {
+    fn push_entry(&mut self, record: TimelineRecord) {
+        self.timeline.push_back(record);
+        while self.timeline.len() > TIMELINE_CAP {
+            self.timeline.pop_front();
+        }
+    }
+}
+
+fn current_action(agent: &Agent) -> Option<Action> {
+    agent.in_flight.last().map(|f| f.action.clone())
+}
+
+/// Resolves the newest pending tool entry, by id when the event has one.
+fn resolve_pending(agent: &mut Agent, tool_use_id: Option<&str>, outcome: Outcome) {
+    let pending = agent.timeline.iter_mut().rev().find(|record| {
+        record.entry.kind == TimelineKind::Tool
+            && record.entry.outcome == Some(Outcome::Pending)
+            && match tool_use_id {
+                Some(id) => record.tool_use_id.as_deref() == Some(id),
+                None => true,
+            }
+    });
+    if let Some(record) = pending {
+        record.entry.outcome = Some(outcome);
+    }
+}
+
+/// Chooses a tool entry's text and records its provenance for the setting.
+fn tool_entry_text(ev: &HookEvent, root: Option<&str>) -> (Option<String>, TextSource) {
+    if let Some(target) = ev.target_path.as_deref() {
+        let text = root
+            .and_then(|root| relative_to(target, root))
+            .unwrap_or_else(|| target.to_owned());
+        return (Some(text), TextSource::Path);
+    }
+    match ev.command.as_deref() {
+        Some(command) => (Some(command.to_owned()), TextSource::ToolInput),
+        None => (None, TextSource::None),
+    }
+}
+
+/// Strips a case-insensitive `root` prefix from `target`, normalizing
+/// separators and leaving no leading separator.
+fn relative_to(target: &str, root: &str) -> Option<String> {
+    let target = target.replace('\\', "/");
+    let mut root = root.replace('\\', "/");
+    while root.ends_with('/') {
+        root.pop();
+    }
+    let bytes = target.as_bytes();
+    if root.is_empty()
+        || bytes.len() <= root.len()
+        || !bytes[..root.len()].eq_ignore_ascii_case(root.as_bytes())
+    {
+        return None;
+    }
+    let rest = target[root.len()..].trim_start_matches('/');
+    if rest.is_empty() {
+        None
+    } else {
+        Some(rest.to_owned())
+    }
+}
+
+/// The wire name of a gap reason, for the entry text.
+fn gap_reason_name(reason: GapReason) -> String {
+    serde_json::to_value(reason)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .unwrap_or_default()
+}
+
+fn remove_in_flight(in_flight: &mut Vec<InFlight>, tool_use_id: Option<&str>) {
     match tool_use_id {
         Some(id) => {
             if let Some(pos) = in_flight
                 .iter()
-                .rposition(|a| a.tool_use_id.as_deref() == Some(id))
+                .rposition(|f| f.action.tool_use_id.as_deref() == Some(id))
             {
                 in_flight.remove(pos);
             }
@@ -578,5 +880,421 @@ mod tests {
         assert_eq!(st.aggregate(), Idle);
         st.apply(&ev("SessionEnd", "S5", None), 14, &mut repo);
         assert_eq!(st.aggregate(), Idle);
+    }
+
+    fn with_description(mut e: HookEvent, description: &str) -> HookEvent {
+        e.description = Some(description.into());
+        e
+    }
+
+    #[test]
+    fn single_in_flight_agent_tool_names_the_child() {
+        let mut st = StatusState::new();
+        st.apply(&ev("UserPromptSubmit", "S1", None), 1, &mut repo);
+        let pre = tool_ev("PreToolUse", "S1", None, "Agent", "t1", None);
+        st.apply(&with_description(pre, "scan repo"), 2, &mut repo);
+        let mut start = ev("SubagentStart", "S1", Some("A1"));
+        start.agent_type = Some("general-purpose".into());
+        st.apply(&start, 3, &mut repo);
+        assert_eq!(
+            st.get(&key("S1", "A1")).unwrap().description.as_deref(),
+            Some("scan repo")
+        );
+        // The second child finds the only Agent call already paired.
+        st.apply(&ev("SubagentStart", "S1", Some("A2")), 4, &mut repo);
+        assert_eq!(st.get(&key("S1", "A2")).unwrap().description, None);
+    }
+
+    #[test]
+    fn zero_or_two_candidates_leave_description_empty() {
+        let mut st = StatusState::new();
+        st.apply(&ev("SubagentStart", "S1", Some("A1")), 1, &mut repo);
+        assert_eq!(st.get(&key("S1", "A1")).unwrap().description, None);
+
+        let mut st = StatusState::new();
+        st.apply(&ev("UserPromptSubmit", "S1", None), 1, &mut repo);
+        for (i, tool) in ["Agent", "Task"].into_iter().enumerate() {
+            let id = format!("t{i}");
+            let pre = tool_ev("PreToolUse", "S1", None, tool, &id, None);
+            st.apply(&with_description(pre, tool), 2, &mut repo);
+        }
+        st.apply(&ev("SubagentStart", "S1", Some("A2")), 3, &mut repo);
+        assert_eq!(st.get(&key("S1", "A2")).unwrap().description, None);
+    }
+
+    #[test]
+    fn main_done_leaves_working_child_working() {
+        let mut st = StatusState::new();
+        st.apply(&ev("UserPromptSubmit", "S1", None), 1, &mut repo);
+        st.apply(&ev("SubagentStart", "S1", Some("A1")), 2, &mut repo);
+        st.apply(&ev("Stop", "S1", None), 3, &mut repo);
+        assert_eq!(st.get(&main_key("S1")).unwrap().status, Done);
+        assert_eq!(st.get(&key("S1", "A1")).unwrap().status, Working);
+    }
+
+    #[test]
+    fn async_post_tool_use_after_stop_keeps_done_from_both_directions() {
+        let mut st = StatusState::new();
+        st.apply(
+            &tool_ev("PreToolUse", "S1", None, "Bash", "t1", None),
+            1,
+            &mut repo,
+        );
+        st.apply(&ev("Stop", "S1", None), 2, &mut repo);
+        st.apply(
+            &tool_ev("PostToolUse", "S1", None, "Bash", "t1", None),
+            3,
+            &mut repo,
+        );
+        let a = st.get(&main_key("S1")).unwrap();
+        assert_eq!(a.status, Done);
+        assert_eq!(a.last_event_ms, 3);
+
+        let mut st = StatusState::new();
+        st.apply(
+            &tool_ev("PreToolUse", "S1", None, "Bash", "t1", None),
+            1,
+            &mut repo,
+        );
+        st.apply(
+            &tool_ev("PostToolUse", "S1", None, "Bash", "t1", None),
+            2,
+            &mut repo,
+        );
+        st.apply(&ev("Stop", "S1", None), 3, &mut repo);
+        assert_eq!(st.get(&main_key("S1")).unwrap().status, Done);
+    }
+
+    #[test]
+    fn new_prompt_removes_finished_children_only() {
+        let mut st = StatusState::new();
+        st.apply(&ev("UserPromptSubmit", "S1", None), 1, &mut repo);
+        st.apply(&ev("SubagentStart", "S1", Some("A1")), 2, &mut repo);
+        st.apply(&ev("SubagentStop", "S1", Some("A1")), 3, &mut repo);
+        st.apply(&ev("SubagentStart", "S1", Some("A2")), 4, &mut repo);
+        let out = st.apply(&ev("UserPromptSubmit", "S1", None), 5, &mut repo);
+        let ApplyOutcome::Changed(changes) = out else {
+            panic!("prompt must be applied, got {out:?}");
+        };
+        assert_eq!(changes.removed, vec![key("S1", "A1")]);
+        assert_eq!(st.get(&key("S1", "A1")), None);
+        assert!(st.timeline(&key("S1", "A1")).is_empty());
+        assert!(st.get(&key("S1", "A2")).is_some());
+    }
+
+    #[test]
+    fn finished_child_removed_after_30m_not_idled() {
+        let mut st = StatusState::new();
+        st.apply(&ev("UserPromptSubmit", "S1", None), 1, &mut repo);
+        st.apply(&ev("SubagentStart", "S1", Some("A1")), 2, &mut repo);
+        st.apply(&ev("SubagentStop", "S1", Some("A1")), 3, &mut repo);
+        st.apply(&ev("Stop", "S1", None), 4, &mut repo);
+        let ch = st.tick(4 + CHILD_REMOVE_MS);
+        assert!(ch.removed.contains(&key("S1", "A1")));
+        assert_eq!(st.get(&key("S1", "A1")), None);
+        assert!(!ch.removed.contains(&main_key("S1")));
+        assert!(ch.upserted.contains(&main_key("S1")));
+        assert_eq!(st.get(&main_key("S1")).unwrap().status, Idle);
+
+        st.apply(&ev("SubagentStart", "S1", Some("A2")), 5, &mut repo);
+        st.apply(&ev("StopFailure", "S1", Some("A2")), 6, &mut repo);
+        let ch = st.tick(6 + CHILD_REMOVE_MS);
+        assert!(ch.removed.contains(&key("S1", "A2")));
+        assert_eq!(st.get(&key("S1", "A2")), None);
+    }
+
+    #[test]
+    fn tool_text_off_strips_and_clears() {
+        let mut st = StatusState::new();
+        let mut pre = tool_ev("PreToolUse", "S1", None, "Bash", "t1", None);
+        pre.command = Some("npm test".into());
+        st.apply(&pre, 1, &mut repo);
+        assert_eq!(
+            st.get(&main_key("S1"))
+                .unwrap()
+                .action
+                .unwrap()
+                .command
+                .as_deref(),
+            Some("npm test")
+        );
+        assert_eq!(st.set_tool_text(false), vec![main_key("S1")]);
+        assert_eq!(
+            st.get(&main_key("S1")).unwrap().action.unwrap().command,
+            None
+        );
+        assert!(!st.tool_text());
+
+        let mut e = ev("PreToolUse", "S1", None);
+        e.command = Some("npm test".into());
+        e.description = Some("run the tests".into());
+        let off = st.prepare(e.clone());
+        assert_eq!(off.command, None);
+        assert_eq!(off.description, None);
+        st.set_tool_text(true);
+        assert!(st.tool_text());
+        assert_eq!(st.prepare(e.clone()), e);
+    }
+
+    #[test]
+    fn tool_text_off_clears_child_description_and_in_flight_text() {
+        let mut st = StatusState::new();
+        let mut pre = tool_ev("PreToolUse", "S1", None, "Agent", "t1", None);
+        pre.command = Some("delegate".into());
+        st.apply(&with_description(pre, "scan repo"), 1, &mut repo);
+        st.apply(&ev("SubagentStart", "S1", Some("A1")), 2, &mut repo);
+        // A second delegation is in flight when the text is turned off.
+        let mut pre = tool_ev("PreToolUse", "S1", None, "Agent", "t2", None);
+        pre.command = Some("delegate again".into());
+        st.apply(&with_description(pre, "scan tests"), 3, &mut repo);
+        assert_eq!(
+            st.set_tool_text(false),
+            vec![main_key("S1"), key("S1", "A1")]
+        );
+        assert_eq!(st.get(&key("S1", "A1")).unwrap().description, None);
+
+        st.set_tool_text(true);
+        st.apply(&ev("SubagentStart", "S1", Some("A2")), 4, &mut repo);
+        assert_eq!(
+            st.get(&key("S1", "A2")).unwrap().description,
+            None,
+            "the in-flight description was cleared"
+        );
+    }
+
+    #[test]
+    fn tool_entry_pending_then_ok_or_failed() {
+        let mut st = StatusState::new();
+        st.apply(
+            &tool_ev(
+                "PreToolUse",
+                "S1",
+                None,
+                "Edit",
+                "t1",
+                Some("C:/r/src/a.ts"),
+            ),
+            1,
+            &mut repo,
+        );
+        let tl = st.timeline(&main_key("S1"));
+        assert_eq!(tl.len(), 1);
+        assert_eq!(tl[0].ms, 1);
+        assert_eq!(tl[0].kind, TimelineKind::Tool);
+        assert_eq!(tl[0].tool_name.as_deref(), Some("Edit"));
+        assert_eq!(tl[0].text.as_deref(), Some("src/a.ts"));
+        assert_eq!(tl[0].outcome, Some(Outcome::Pending));
+        st.apply(
+            &tool_ev("PostToolUse", "S1", None, "Edit", "t1", None),
+            2,
+            &mut repo,
+        );
+        assert_eq!(st.timeline(&main_key("S1"))[0].outcome, Some(Outcome::Ok));
+
+        let mut pre = tool_ev("PreToolUse", "S1", None, "Bash", "t2", None);
+        pre.command = Some("npm test".into());
+        st.apply(&pre, 3, &mut repo);
+        let tl = st.timeline(&main_key("S1"));
+        assert_eq!(tl[1].text.as_deref(), Some("npm test"));
+        assert_eq!(tl[1].outcome, Some(Outcome::Pending));
+        st.apply(
+            &tool_ev("PostToolUseFailure", "S1", None, "Bash", "t2", None),
+            4,
+            &mut repo,
+        );
+        assert_eq!(
+            st.timeline(&main_key("S1"))[1].outcome,
+            Some(Outcome::Failed)
+        );
+
+        // Without an id, the newest pending entry changes.
+        st.apply(
+            &tool_ev("PreToolUse", "S1", None, "Read", "t3", Some("C:/r/b.ts")),
+            5,
+            &mut repo,
+        );
+        let mut post = ev("PostToolUse", "S1", None);
+        post.tool_name = Some("Read".into());
+        st.apply(&post, 6, &mut repo);
+        let tl = st.timeline(&main_key("S1"));
+        assert_eq!(tl[2].outcome, Some(Outcome::Ok));
+        assert_eq!(tl[2].text.as_deref(), Some("b.ts"));
+    }
+
+    #[test]
+    fn timeline_keeps_last_50() {
+        let mut st = StatusState::new();
+        for i in 0..60u64 {
+            let id = format!("t{i}");
+            let target = format!("C:/r/f{i}");
+            st.apply(
+                &tool_ev("PreToolUse", "S1", None, "Read", &id, Some(&target)),
+                1 + i,
+                &mut repo,
+            );
+        }
+        let tl = st.timeline(&main_key("S1"));
+        assert_eq!(tl.len(), 50);
+        assert_eq!(tl[0].text.as_deref(), Some("f10"));
+        assert_eq!(tl[0].ms, 11);
+        assert_eq!(tl[49].text.as_deref(), Some("f59"));
+    }
+
+    #[test]
+    fn kinds_follow_the_event_table() {
+        let mut st = StatusState::new();
+        st.apply(&ev("SessionStart", "S1", None), 1, &mut repo);
+        st.apply(&ev("UserPromptSubmit", "S1", None), 2, &mut repo);
+        let mut perm = ev("PermissionRequest", "S1", None);
+        perm.tool_name = Some("Bash".into());
+        st.apply(&perm, 3, &mut repo);
+        st.apply(&ev("Stop", "S1", None), 4, &mut repo);
+        let tl = st.timeline(&main_key("S1"));
+        let kinds: Vec<_> = tl.iter().map(|e| e.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                TimelineKind::SessionStart,
+                TimelineKind::TurnStart,
+                TimelineKind::NeedsYou,
+                TimelineKind::TurnDone,
+            ]
+        );
+        assert_eq!(tl[2].tool_name.as_deref(), Some("Bash"));
+
+        st.apply(&ev("SubagentStart", "S1", Some("A1")), 5, &mut repo);
+        st.apply(&ev("SubagentStop", "S1", Some("A1")), 6, &mut repo);
+        let kinds: Vec<_> = st
+            .timeline(&key("S1", "A1"))
+            .iter()
+            .map(|e| e.kind)
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![TimelineKind::SubagentStart, TimelineKind::SubagentStop]
+        );
+    }
+
+    #[test]
+    fn session_end_entry_on_every_updated_agent() {
+        let mut st = StatusState::new();
+        st.apply(&ev("SessionStart", "S1", None), 1, &mut repo);
+        st.apply(&ev("SubagentStart", "S1", Some("A1")), 2, &mut repo);
+        st.apply(&ev("SessionStart", "S2", None), 3, &mut repo);
+        st.apply(&ev("SessionEnd", "S1", None), 4, &mut repo);
+        assert_eq!(
+            st.timeline(&main_key("S1")).last().unwrap().kind,
+            TimelineKind::SessionEnd
+        );
+        assert_eq!(
+            st.timeline(&key("S1", "A1")).last().unwrap().kind,
+            TimelineKind::SessionEnd
+        );
+        assert_eq!(
+            st.timeline(&main_key("S2")).last().unwrap().kind,
+            TimelineKind::SessionStart
+        );
+    }
+
+    #[test]
+    fn gap_marks_live_agents_only() {
+        let mut st = StatusState::new();
+        st.apply(&ev("UserPromptSubmit", "S1", None), 1, &mut repo);
+        st.apply(&ev("UserPromptSubmit", "S2", None), 2, &mut repo);
+        st.apply(&ev("SessionEnd", "S2", None), 3, &mut repo);
+        let ended = st.timeline(&main_key("S2"));
+        st.record_gap(&Gap {
+            from_ms: 5,
+            to_ms: 9,
+            count: 2,
+            reason: GapReason::HookDropped,
+        });
+        let tl = st.timeline(&main_key("S1"));
+        let last = tl.last().unwrap();
+        assert_eq!(last.ms, 9);
+        assert_eq!(last.kind, TimelineKind::Gap);
+        assert_eq!(last.text.as_deref(), Some("hook_dropped"));
+        assert_eq!(st.timeline(&main_key("S2")), ended);
+    }
+
+    #[test]
+    fn tool_text_off_clears_command_text_keeps_paths() {
+        let mut st = StatusState::new();
+        let mut pre = tool_ev("PreToolUse", "S1", None, "Bash", "t2", None);
+        pre.command = Some("npm test".into());
+        st.apply(&pre, 1, &mut repo);
+        st.apply(
+            &tool_ev("PostToolUse", "S1", None, "Bash", "t2", None),
+            2,
+            &mut repo,
+        );
+        st.apply(
+            &tool_ev(
+                "PreToolUse",
+                "S1",
+                None,
+                "Edit",
+                "t1",
+                Some("C:/r/src/a.ts"),
+            ),
+            3,
+            &mut repo,
+        );
+        st.apply(
+            &tool_ev("PostToolUse", "S1", None, "Edit", "t1", None),
+            4,
+            &mut repo,
+        );
+        assert!(st.set_tool_text(false).is_empty());
+        let tl = st.timeline(&main_key("S1"));
+        assert_eq!(tl[0].text, None);
+        assert_eq!(tl[1].text.as_deref(), Some("src/a.ts"));
+    }
+
+    #[test]
+    fn subagent_start_entry_text_is_child_description() {
+        let mut st = StatusState::new();
+        st.apply(&ev("UserPromptSubmit", "S1", None), 1, &mut repo);
+        let pre = tool_ev("PreToolUse", "S1", None, "Agent", "t1", None);
+        st.apply(&with_description(pre, "scan repo"), 2, &mut repo);
+        st.apply(&ev("SubagentStart", "S1", Some("A1")), 3, &mut repo);
+        let tl = st.timeline(&key("S1", "A1"));
+        assert_eq!(tl[0].kind, TimelineKind::SubagentStart);
+        assert_eq!(tl[0].text.as_deref(), Some("scan repo"));
+        st.set_tool_text(false);
+        assert_eq!(st.timeline(&key("S1", "A1"))[0].text, None);
+    }
+
+    #[test]
+    fn tool_text_is_repo_relative_across_separators_and_case() {
+        let mut st = StatusState::new();
+        st.apply(
+            &tool_ev(
+                "PreToolUse",
+                "S1",
+                None,
+                "Edit",
+                "t1",
+                Some("c:\\R\\src\\a.ts"),
+            ),
+            1,
+            &mut repo,
+        );
+        let tl = st.timeline(&main_key("S1"));
+        assert_eq!(tl[0].text.as_deref(), Some("src/a.ts"));
+
+        st.apply(
+            &tool_ev("PreToolUse", "S1", None, "Edit", "t2", Some("D:/x/b.ts")),
+            2,
+            &mut repo,
+        );
+        let tl = st.timeline(&main_key("S1"));
+        assert_eq!(tl[1].text.as_deref(), Some("D:/x/b.ts"));
+    }
+
+    #[test]
+    fn unknown_key_has_empty_timeline() {
+        let st = StatusState::new();
+        assert!(st.timeline(&key("x", "")).is_empty());
     }
 }

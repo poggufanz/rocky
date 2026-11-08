@@ -77,10 +77,9 @@ fn real_subagent_tracked_and_helper_stops_ignored() {
     // bare SubagentStop (agent_type "") after turns: internal helpers, not rows.
     let keys: Vec<AgentKey> = seen.keys().cloned().collect();
     assert_eq!(keys, [key("S1", ""), key("S1", "A4"), key("S2", "")]);
-    assert_eq!(
-        seen[&key("S1", "A4")],
-        [Status::Working, Status::Done, Status::Ended]
-    );
+    // A4 finishes at 194438 and the next main prompt cleans it up, so it never
+    // reaches SessionEnd.
+    assert_eq!(seen[&key("S1", "A4")], [Status::Working, Status::Done]);
 }
 
 #[test]
@@ -98,4 +97,32 @@ fn replay_helper_tracks_all_agents() {
     let seen = replay_fixture("stop-failure.jsonl");
     assert_eq!(seen.len(), 1);
     assert!(seen.keys().all(|k| k.session_id == "S9"));
+}
+
+#[test]
+fn real_subagent_gets_task_description() {
+    let path = format!(
+        "{}/../../fixtures/hooks/claude-code-2.1.319/session.jsonl",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let text = std::fs::read_to_string(&path).unwrap();
+    let mut st = StatusState::new();
+    for line in text.lines().filter(|l| !l.trim().is_empty()) {
+        let rec: SpoolRecord = serde_json::from_str(line).unwrap();
+        if let SpoolBody::Event { mut event } = rec.body {
+            // The captured hook omits `description`; put one on the tool call
+            // that launched the subagent.
+            if event.tool_use_id.as_deref() == Some("T7") {
+                event.description = Some("fixture task".into());
+            }
+            let is_start = event.hook_event_name == "SubagentStart";
+            let _ = st.apply(&event, rec.recv_ms, &mut resolve_repo);
+            if is_start {
+                break;
+            }
+        }
+    }
+    let child = st.get(&key("S1", "A4")).unwrap();
+    assert_eq!(child.description.as_deref(), Some("fixture task"));
+    assert_eq!(child.agent_type.as_deref(), Some("general-purpose"));
 }

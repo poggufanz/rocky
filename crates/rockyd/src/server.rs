@@ -1,4 +1,4 @@
-//! Desk client pipe server (protocol v1): single-instance user-only named pipe,
+//! Desk client pipe server (protocol v2): single-instance user-only named pipe,
 //! per-client threads, and a non-blocking broadcast hub.
 
 use std::collections::HashMap;
@@ -10,7 +10,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, SyncSender};
 use std::thread::{self, JoinHandle};
 
-use rocky_proto::pipe::{CLIENT_QUEUE_CAP, ServerMsg, encode};
+use rocky_proto::pipe::{AgentKey, CLIENT_QUEUE_CAP, ServerMsg, encode};
+use serde_json::Value;
 
 pub const DAEMON_VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -34,6 +35,19 @@ pub enum Control {
         /// Signalled by the client thread after the ack line is flushed, so
         /// the daemon can exit without racing the client writer thread.
         flushed: Receiver<()>,
+    },
+    /// A settings change; the daemon replies with the ack to queue.
+    Set {
+        id: u64,
+        name: String,
+        value: Value,
+        reply: SyncSender<ServerMsg>,
+    },
+    /// A timeline read; the daemon replies with the entries to queue.
+    Timeline {
+        id: u64,
+        key: AgentKey,
+        reply: SyncSender<ServerMsg>,
     },
 }
 
@@ -115,6 +129,21 @@ impl Hub {
                 Self::remove_locked(&mut clients, id);
             }
         }
+    }
+
+    /// Queues one message to one client and drops it when its queue is full
+    /// (or gone). Returns whether the message was queued.
+    pub fn send_to(&self, client: u64, msg: &ServerMsg) -> bool {
+        let line = encode(msg);
+        let mut clients = self.clients.lock().unwrap();
+        let queued = match clients.get_mut(&client) {
+            Some(c) => c.tx.try_send(line).is_ok(),
+            None => false,
+        };
+        if !queued {
+            Self::remove_locked(&mut clients, client);
+        }
+        queued
     }
 }
 
@@ -325,7 +354,7 @@ mod imp {
             // Registration + snapshot enqueue are atomic under one hub-lock
             // hold (see `Hub::add`): no broadcast can slip a delta ahead of
             // the snapshot.
-            let (id, queue) = hub.add(close_tx, snapshot);
+            let (client_id, queue) = hub.add(close_tx, snapshot);
 
             let ws = &stream;
             let writer = s.spawn(move || {
@@ -359,6 +388,65 @@ mod imp {
                     break;
                 };
                 match decode::<ClientMsg>(text) {
+                    Ok(ClientMsg::Cmd {
+                        name: CmdName::Show,
+                        id,
+                    }) => {
+                        // Broadcast first so every desk sees it, then ack the
+                        // sender through its own queue (one writer per pipe).
+                        hub.broadcast(&ServerMsg::Show);
+                        if !hub.send_to(
+                            client_id,
+                            &ServerMsg::Ack {
+                                id,
+                                ok: true,
+                                error: None,
+                            },
+                        ) {
+                            break;
+                        }
+                    }
+                    Ok(ClientMsg::Set { id, name, value }) => {
+                        let (reply_tx, reply_rx) = mpsc::sync_channel(1);
+                        if control
+                            .send(Control::Set {
+                                id,
+                                name,
+                                value,
+                                reply: reply_tx,
+                            })
+                            .is_err()
+                        {
+                            if !hub.send_to(client_id, &daemon_stopping(id)) {
+                                break;
+                            }
+                            continue;
+                        }
+                        let replied = reply_rx.recv().unwrap_or_else(|_| daemon_stopping(id));
+                        if !hub.send_to(client_id, &replied) {
+                            break;
+                        }
+                    }
+                    Ok(ClientMsg::Timeline { id, key }) => {
+                        let (reply_tx, reply_rx) = mpsc::sync_channel(1);
+                        if control
+                            .send(Control::Timeline {
+                                id,
+                                key,
+                                reply: reply_tx,
+                            })
+                            .is_err()
+                        {
+                            if !hub.send_to(client_id, &daemon_stopping(id)) {
+                                break;
+                            }
+                            continue;
+                        }
+                        let replied = reply_rx.recv().unwrap_or_else(|_| daemon_stopping(id));
+                        if !hub.send_to(client_id, &replied) {
+                            break;
+                        }
+                    }
                     Ok(ClientMsg::Cmd {
                         name: CmdName::Stop,
                         id,
@@ -415,9 +503,18 @@ mod imp {
                 }
             }
 
-            hub.remove(id);
+            hub.remove(client_id);
             writer.join().unwrap();
         });
+    }
+
+    /// The reply used when the daemon control loop is gone.
+    fn daemon_stopping(id: u64) -> ServerMsg {
+        ServerMsg::Ack {
+            id,
+            ok: false,
+            error: Some("daemon stopping".into()),
+        }
     }
 
     fn write_line(stream: &DuplexPipeStream<Bytes>, buf: &[u8]) -> io::Result<()> {

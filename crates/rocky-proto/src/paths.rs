@@ -38,6 +38,14 @@ pub fn log_path(rocky_home: &Path) -> PathBuf {
     desk_dir(rocky_home).join("rockyd.log")
 }
 
+pub fn settings_path(rocky_home: &Path) -> PathBuf {
+    desk_dir(rocky_home).join("settings.json")
+}
+
+pub fn history_dir(rocky_home: &Path) -> PathBuf {
+    desk_dir(rocky_home).join("history")
+}
+
 pub fn tool_text_off_marker(rocky_home: &Path) -> PathBuf {
     desk_dir(rocky_home).join("tool-text-off")
 }
@@ -69,8 +77,8 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::{
-        absolutize, bad_dir, desk_mutex_name, home_hash, log_path, pipe_name, rocky_home_from,
-        spool_dir, tool_text_off_marker,
+        absolutize, bad_dir, desk_mutex_name, history_dir, home_hash, log_path, pipe_name,
+        rocky_home_from, settings_path, spool_dir, tool_text_off_marker,
     };
 
     #[test]
@@ -134,5 +142,7 @@ mod tests {
             tool_text_off_marker(p),
             PathBuf::from(r"C:\h\desk\tool-text-off")
         );
+        assert_eq!(settings_path(p), PathBuf::from(r"C:\h\desk\settings.json"));
+        assert_eq!(history_dir(p), PathBuf::from(r"C:\h\desk\history"));
     }
 }

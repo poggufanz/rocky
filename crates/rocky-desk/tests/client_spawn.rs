@@ -3,6 +3,7 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use rocky_proto::pipe::{Health, ServerMsg, Status};
+use rocky_proto::settings::Settings;
 use rockyd::server::{Hub, serve};
 use tempfile::TempDir;
 
@@ -16,6 +17,7 @@ fn empty_snapshot() -> ServerMsg {
         agents: Vec::new(),
         aggregate: Status::Idle,
         health: Health::default(),
+        settings: Settings::default(),
     }
 }
 
