@@ -138,6 +138,10 @@ fn main() {
             log.line("pipe taken (another rockyd, or squatted)");
             std::process::exit(3);
         }
+        Err(BindError::PathTooLong) => {
+            log.line("socket path too long");
+            std::process::exit(1);
+        }
         Err(BindError::Io(e)) => {
             log.line(&format!("pipe bind failed, exiting: {e}"));
             std::process::exit(1);

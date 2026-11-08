@@ -4536,6 +4536,7 @@ version = "0.1.0"
 dependencies = [
  "embed-resource",
  "interprocess",
+ "libc",
  "notify",
  "rocky-proto",
  "serde_json",

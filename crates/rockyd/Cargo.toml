@@ -21,6 +21,10 @@ windows-sys = { version = "0.61", features = [
     "Win32_UI_WindowsAndMessaging",
 ] }
 
+[target.'cfg(unix)'.dependencies]
+# libc: flock and umask for the daemon lock and the socket bind.
+libc = "0.2"
+
 [build-dependencies]
 embed-resource = "=3.0.12"
 

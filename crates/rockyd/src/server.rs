@@ -1,5 +1,6 @@
-//! Desk client pipe server (protocol v2): single-instance user-only named pipe,
-//! per-client threads, and a non-blocking broadcast hub.
+//! Desk client server (protocol v2): a single-instance user-only connection
+//! endpoint (a named pipe on Windows, a unix socket elsewhere), per-client
+//! threads, and a non-blocking broadcast hub.
 
 use std::collections::HashMap;
 use std::io;
@@ -24,7 +25,10 @@ pub const DAEMON_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[derive(Debug)]
 pub enum BindError {
+    /// Another instance holds the daemon lock.
     Taken,
+    /// The socket path exceeds the kernel's limit.
+    PathTooLong,
     Io(io::Error),
 }
 
@@ -169,6 +173,15 @@ pub fn serve(
     imp::serve(rocky_home, hub, snapshot, control)
 }
 
+/// Whether `path` fits the kernel's unix socket path limit (107 bytes,
+/// including the terminator).
+#[cfg(unix)]
+pub fn socket_path_fits(path: &Path) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+
+    path.as_os_str().as_bytes().len() <= rocky_proto::paths::SOCKET_PATH_MAX
+}
+
 /// One connected client stream, whatever the transport.
 pub(crate) trait DuplexConn: Send + Sync + 'static {
     /// Force the client to observe EOF: break the connection so a blocked
@@ -267,11 +280,11 @@ fn handle_client<S>(
         _ => return,
     }
 
-    // 3. Writer + reader share the stream by reference (interprocess
-    // streams are Sync for exactly this): the writer drains the hub queue,
-    // this thread reads cmds. Concurrent ReadFile/WriteFile on one pipe
-    // handle is supported by Windows. The scope joins the writer before
-    // the stream is dropped, so the handle outlives both threads.
+    // 3. Writer + reader share the stream by reference: the transport is
+    // Sync so the writer can drain the hub queue while this thread reads
+    // cmds, and both transports support concurrent reads and writes on one
+    // connection. The scope joins the writer before the stream is dropped,
+    // so the connection outlives both threads.
     thread::scope(|s| {
         let (close_tx, close_rx) = mpsc::channel::<()>();
         // Registration + snapshot enqueue are atomic under one hub-lock
@@ -284,7 +297,7 @@ fn handle_client<S>(
             loop {
                 // Slow/full client dropped by the hub: force-disconnect so
                 // the client observes EOF even though the reader may sit
-                // blocked in ReadFileEx.
+                // blocked on a read.
                 if close_rx.try_recv().is_ok() {
                     ws.hang_up();
                     break;
@@ -557,19 +570,124 @@ mod imp {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(unix)]
 mod imp {
     use super::*;
+    use std::fs::OpenOptions;
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    use std::os::unix::net::{UnixListener, UnixStream};
+    use std::time::Duration;
+
+    use rocky_proto::paths::{daemon_lock_path, desk_dir, runtime_dir_from, socket_path};
+    use rocky_proto::peer::{peer_uid, same_user};
 
     pub fn serve(
-        _rocky_home: &Path,
-        _hub: Arc<Hub>,
-        _snapshot: Arc<dyn Fn() -> ServerMsg + Send + Sync>,
-        _control: Sender<Control>,
+        rocky_home: &Path,
+        hub: Arc<Hub>,
+        snapshot: Arc<dyn Fn() -> ServerMsg + Send + Sync>,
+        control: Sender<Control>,
     ) -> Result<JoinHandle<()>, BindError> {
-        Err(BindError::Io(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "named pipe server is Windows-only",
-        )))
+        // 1. The desk dir holds the socket unless XDG_RUNTIME_DIR wins; only
+        // this user may list or enter it either way.
+        let desk = desk_dir(rocky_home);
+        std::fs::create_dir_all(&desk)?;
+        std::fs::set_permissions(&desk, std::fs::Permissions::from_mode(0o700))?;
+
+        // 2. Refuse an oversized path before creating or unlinking anything.
+        let sock = socket_path(rocky_home);
+        if !super::socket_path_fits(&sock) {
+            return Err(BindError::PathTooLong);
+        }
+
+        // 3. The runtime dir (XDG_RUNTIME_DIR, else the desk dir) holds the
+        // socket and the lock.
+        let runtime = runtime_dir_from(rocky_home, std::env::var_os("XDG_RUNTIME_DIR").as_deref());
+        std::fs::create_dir_all(&runtime)?;
+
+        // 4. The lock is owner-only and non-blocking: a second daemon fails
+        // here instead of waiting.
+        let lock = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .open(daemon_lock_path(rocky_home))?;
+        // SAFETY: `lock` owns a live file descriptor; flock only touches that
+        // descriptor and the process lock table.
+        if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+            let err = io::Error::last_os_error();
+            return Err(if err.raw_os_error() == Some(libc::EWOULDBLOCK) {
+                BindError::Taken
+            } else {
+                BindError::Io(err)
+            });
+        }
+
+        // 5. A daemon killed with -9 leaves its socket file behind; the
+        // kernel already freed its lock, so unlink the stale path and rebind.
+        match std::fs::remove_file(&sock) {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
+
+        // 6. Bind under a restrictive umask so the socket is born 0600; the
+        // previous umask is restored before any error return.
+        // SAFETY: umask has no preconditions; it is process-wide, and the
+        // window between set and restore contains only the bind call.
+        let previous = unsafe { libc::umask(0o177) };
+        let bound = UnixListener::bind(&sock);
+        // SAFETY: as above.
+        unsafe { libc::umask(previous) };
+        let listener = bound?;
+
+        // 7. Accept: unknown or foreign uids are dropped without a reply.
+        Ok(thread::spawn(move || {
+            // Held for the process lifetime: the kernel frees the lock when
+            // the daemon dies.
+            let _lock = lock;
+            loop {
+                match listener.accept() {
+                    Ok((stream, _)) => {
+                        if !same_user(peer_uid(&stream)) {
+                            continue;
+                        }
+                        let hub = Arc::clone(&hub);
+                        let snapshot = Arc::clone(&snapshot);
+                        let control = control.clone();
+                        thread::spawn(move || handle_client(stream, &hub, &*snapshot, &control));
+                    }
+                    // Accept only fails if the listener broke; back off briefly
+                    // rather than busy-spinning, then keep serving.
+                    Err(_) => thread::sleep(Duration::from_millis(50)),
+                }
+            }
+        }))
+    }
+
+    impl DuplexConn for UnixStream {
+        /// `shutdown(2)` both ways: the reader observes EOF and the writer
+        /// fails, even while either is blocked.
+        fn hang_up(&self) {
+            let _ = self.shutdown(std::net::Shutdown::Both);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[cfg(unix)]
+    use std::path::Path;
+
+    #[cfg(unix)]
+    use super::socket_path_fits;
+
+    #[cfg(unix)]
+    #[test]
+    fn socket_path_limit_is_107_bytes() {
+        assert!(socket_path_fits(Path::new(&"a".repeat(107))));
+        assert!(!socket_path_fits(Path::new(&"a".repeat(108))));
     }
 }
