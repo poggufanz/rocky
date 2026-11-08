@@ -1,4 +1,5 @@
 pub mod client;
+pub mod clock;
 pub mod conn;
 pub mod connect;
 pub mod desklog;

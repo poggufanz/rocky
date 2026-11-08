@@ -3,7 +3,7 @@
 //! `en` and `id` match exhaustively, so adding a variant fails the build until
 //! both languages carry copy.
 
-use rocky_proto::pipe::Status;
+use rocky_proto::pipe::{GapReason, Status};
 use rocky_proto::settings::Lang;
 
 /// Language the desk renders its own text in.
@@ -44,6 +44,9 @@ pub enum Msg {
     DroppedEvents {
         n: u64,
     },
+    SpoolPending {
+        n: u64,
+    },
     SpoolDropped {
         n: u64,
     },
@@ -51,6 +54,23 @@ pub enum Msg {
         n: u64,
     },
     HookNewer,
+    SettingsUnreadable,
+    Gap {
+        count: u64,
+        from: String,
+        to: String,
+        reason: GapReason,
+    },
+    EarlierGaps {
+        n: u64,
+    },
+    SubagentsStillWorking {
+        n: u64,
+    },
+    SubagentsHidden {
+        n: u64,
+        working: u64,
+    },
     ConnVersionMismatch,
     ConnUnverified,
     ConnDisconnected,
@@ -94,9 +114,26 @@ fn samples() -> Vec<Msg> {
         Msg::MenuQuit,
         Msg::BadFiles { n: 3 },
         Msg::DroppedEvents { n: 3 },
+        Msg::SpoolPending { n: 3 },
         Msg::SpoolDropped { n: 3 },
         Msg::LateEvents { n: 3 },
         Msg::HookNewer,
+        Msg::SettingsUnreadable,
+        Msg::Gap {
+            count: 3,
+            from: "14:02".into(),
+            to: "14:05".into(),
+            reason: GapReason::SpoolFull,
+        },
+        Msg::Gap {
+            count: 1,
+            from: "14:02".into(),
+            to: "14:02".into(),
+            reason: GapReason::BadFile,
+        },
+        Msg::EarlierGaps { n: 2 },
+        Msg::SubagentsStillWorking { n: 2 },
+        Msg::SubagentsHidden { n: 3, working: 1 },
         Msg::ConnVersionMismatch,
         Msg::ConnUnverified,
         Msg::ConnDisconnected,
@@ -139,9 +176,20 @@ pub fn en(m: &Msg) -> String {
         Msg::MenuQuit => "Quit".to_string(),
         Msg::BadFiles { n } => format!("{n} bad spool files."),
         Msg::DroppedEvents { n } => format!("{n} dropped events."),
+        Msg::SpoolPending { n } => format!("{n} spool events pending."),
         Msg::SpoolDropped { n } => format!("{n} spool files dropped."),
         Msg::LateEvents { n } => format!("{n} late events."),
         Msg::HookNewer => "hook is newer than daemon, needs update.".to_string(),
+        Msg::SettingsUnreadable => "settings unreadable, defaults in use".to_string(),
+        Msg::Gap {
+            count,
+            from,
+            to,
+            reason,
+        } => gap_en(*count, from, to, *reason),
+        Msg::EarlierGaps { n } => format!("{n} earlier gaps"),
+        Msg::SubagentsStillWorking { n } => format!("{n} subagents still working"),
+        Msg::SubagentsHidden { n, working } => format!("+{n} subagents ({working} working)"),
         Msg::ConnVersionMismatch => "daemon version mismatch, needs update.".to_string(),
         Msg::ConnUnverified => "daemon could not be verified.".to_string(),
         Msg::ConnDisconnected => "daemon disconnected.".to_string(),
@@ -184,9 +232,20 @@ pub fn id(m: &Msg) -> String {
         Msg::MenuQuit => "Keluar".to_string(),
         Msg::BadFiles { n } => format!("{n} berkas spool rusak."),
         Msg::DroppedEvents { n } => format!("{n} peristiwa dibuang."),
+        Msg::SpoolPending { n } => format!("{n} peristiwa spool tertunda."),
         Msg::SpoolDropped { n } => format!("{n} berkas spool dibuang."),
         Msg::LateEvents { n } => format!("{n} peristiwa terlambat."),
         Msg::HookNewer => "hook lebih baru daripada daemon, perlu pembaruan.".to_string(),
+        Msg::SettingsUnreadable => "pengaturan tidak terbaca, memakai nilai bawaan".to_string(),
+        Msg::Gap {
+            count,
+            from,
+            to,
+            reason,
+        } => gap_id(*count, from, to, *reason),
+        Msg::EarlierGaps { n } => format!("{n} celah sebelumnya"),
+        Msg::SubagentsStillWorking { n } => format!("{n} subagen masih bekerja"),
+        Msg::SubagentsHidden { n, working } => format!("+{n} subagen ({working} bekerja)"),
         Msg::ConnVersionMismatch => "versi daemon tidak cocok, perlu pembaruan.".to_string(),
         Msg::ConnUnverified => "daemon tidak dapat diverifikasi.".to_string(),
         Msg::ConnDisconnected => "daemon terputus.".to_string(),
@@ -305,6 +364,38 @@ fn tooltip(counts: [u64; 5], names: [&str; 5], empty: &str) -> String {
         format!("rocky: {empty}")
     } else {
         format!("rocky: {}", segs.join(", "))
+    }
+}
+
+/// Missed-events line for a gap: one event is singular, and an empty range
+/// reads "at" instead of "between".
+fn gap_en(count: u64, from: &str, to: &str, reason: GapReason) -> String {
+    let events = if count == 1 { "event" } else { "events" };
+    let reason = match reason {
+        GapReason::SpoolFull => "spool full",
+        GapReason::HistoryFull => "history full",
+        GapReason::HookDropped => "hook dropped",
+        GapReason::BadFile => "bad file",
+    };
+    if from == to {
+        format!("Missed {count} {events} at {from} ({reason})")
+    } else {
+        format!("Missed {count} {events} between {from} and {to} ({reason})")
+    }
+}
+
+/// Indonesian mirror of [`gap_en`].
+fn gap_id(count: u64, from: &str, to: &str, reason: GapReason) -> String {
+    let reason = match reason {
+        GapReason::SpoolFull => "spool penuh",
+        GapReason::HistoryFull => "riwayat penuh",
+        GapReason::HookDropped => "hook terlewat",
+        GapReason::BadFile => "berkas rusak",
+    };
+    if from == to {
+        format!("Kehilangan {count} peristiwa di {from} ({reason})")
+    } else {
+        format!("Kehilangan {count} peristiwa antara {from} dan {to} ({reason})")
     }
 }
 

@@ -21,6 +21,7 @@ use rocky_proto::paths::desk_dir;
 use rocky_proto::pipe::{ClientMsg, CmdName, ServerMsg, Status};
 
 use crate::client::Outbox;
+use crate::clock;
 use crate::conn::{Action, ConnState, ConnectOutcome};
 use crate::connect::{CONNECT_BUDGET, ConnectDone, connect_attempt};
 use crate::desklog::LogOnce;
@@ -185,7 +186,7 @@ impl DeskView {
 impl Render for DeskView {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         let groups = self.ctl.model.groups(now_ms());
-        let warnings = self.ctl.model.warnings();
+        let warnings = self.ctl.model.warnings(&clock::local_hhmm);
         let lang = self.ctl.ui_lang;
         // Opaque background: without one, gpui on Windows shows the desktop through.
         let mut root = div()
@@ -217,11 +218,19 @@ impl Render for DeskView {
                         short: s.session_short.clone(),
                     },
                 )));
-                for a in &s.agents {
+                for a in &s.rows {
                     let mut row = div().flex().gap_2().text_sm();
+                    if a.child {
+                        row = row.pl_3();
+                    }
+                    let mut label = div().flex_col();
+                    label = label.child(div().child(a.label.clone()));
+                    if let Some(desc) = &a.description {
+                        label = label.child(div().text_xs().child(desc.clone()));
+                    }
                     row = row
                         .child(chip(a.status, lang))
-                        .child(div().child(a.label.clone()))
+                        .child(label)
                         .child(div().child(tr(lang, &a.age)));
                     if a.failures > 0 {
                         row = row.child(div().child(tr(lang, &Msg::Failures { n: a.failures })));
@@ -229,7 +238,13 @@ impl Render for DeskView {
                     if let Some(act) = &a.action_text {
                         row = row.child(div().text_xs().child(act.clone()));
                     }
+                    if let Some(note) = &a.note {
+                        row = row.child(div().text_xs().child(tr(lang, note)));
+                    }
                     sdiv = sdiv.child(row);
+                }
+                if let Some(hidden) = &s.hidden_children {
+                    sdiv = sdiv.child(div().text_xs().pl_3().child(tr(lang, hidden)));
                 }
                 gdiv = gdiv.child(sdiv);
             }
