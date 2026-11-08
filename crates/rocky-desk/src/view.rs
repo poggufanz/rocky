@@ -59,7 +59,8 @@ pub struct AgentRow {
     pub key: AgentKey,
     /// True for a row under a main agent.
     pub child: bool,
-    pub label: String,
+    /// Catalog label: the main agent is translated, subagent names are not.
+    pub label: Msg,
     pub description: Option<String>,
     pub status: Status,
     pub action_text: Option<String>,
@@ -434,13 +435,15 @@ fn short8(s: &str) -> String {
     s.chars().take(8).collect()
 }
 
-pub(crate) fn agent_label(a: &AgentStatus) -> String {
+pub(crate) fn agent_label(a: &AgentStatus) -> Msg {
     if a.key.agent_id.is_empty() {
-        return "main".to_string();
+        return Msg::MainAgent;
     }
-    match a.agent_type.as_deref() {
-        Some(t) if !t.is_empty() => format!("{} {}", t, short8(&a.key.agent_id)),
-        _ => short8(&a.key.agent_id),
+    Msg::AgentName {
+        label: match a.agent_type.as_deref() {
+            Some(t) if !t.is_empty() => format!("{} {}", t, short8(&a.key.agent_id)),
+            _ => short8(&a.key.agent_id),
+        },
     }
 }
 
@@ -572,9 +575,10 @@ mod tests {
         assert_eq!(groups.len(), 1);
         let rows = &groups[0].sessions[0].rows;
         assert_eq!(rows.len(), 3);
-        assert_eq!(rows[0].label, "main");
-        assert_eq!(rows[1].label, "Explore aaaaaaaa");
-        assert_eq!(rows[2].label, "Explore bbbbbbbb");
+        assert_eq!(tr(UiLang::En, &rows[0].label), "main");
+        assert_eq!(tr(UiLang::Id, &rows[0].label), "utama");
+        assert_eq!(tr(UiLang::En, &rows[1].label), "Explore aaaaaaaa");
+        assert_eq!(tr(UiLang::En, &rows[2].label), "Explore bbbbbbbb");
     }
 
     #[test]
@@ -591,7 +595,7 @@ mod tests {
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].sessions.len(), 1);
         assert_eq!(groups[0].sessions[0].rows.len(), 1);
-        assert_eq!(groups[0].sessions[0].rows[0].label, "main");
+        assert_eq!(tr(UiLang::En, &groups[0].sessions[0].rows[0].label), "main");
     }
 
     #[test]
@@ -782,9 +786,12 @@ mod tests {
         let mut m = Model::new();
         m.apply(snapshot(vec![child, agent("S1", "", Status::Working)]));
         let rows = &m.groups(2_000)[0].sessions[0].rows;
-        assert_eq!((rows[0].child, rows[0].label.as_str()), (false, "main"));
         assert_eq!(
-            (rows[1].child, rows[1].label.as_str()),
+            (rows[0].child, tr(UiLang::En, &rows[0].label).as_str()),
+            (false, "main")
+        );
+        assert_eq!(
+            (rows[1].child, tr(UiLang::En, &rows[1].label).as_str()),
             (true, "Explore aaaaaaaa")
         );
         assert_eq!(rows[1].description.as_deref(), Some("Review the diff"));

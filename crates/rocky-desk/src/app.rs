@@ -627,7 +627,7 @@ impl Render for DeskView {
                         row = row.pl_3();
                     }
                     let mut label = div().flex_col();
-                    label = label.child(div().child(a.label.clone()));
+                    label = label.child(div().child(tr(lang, &a.label)));
                     if let Some(desc) = &a.description {
                         label = label.child(div().text_xs().child(desc.clone()));
                     }

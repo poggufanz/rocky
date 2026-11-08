@@ -226,11 +226,11 @@ under `<ROCKY_HOME>\desk`.
   it.
 - **Icon file.** `<ROCKY_HOME>\desk\rocky.ico` is written from the icon
   compiled into the exe whenever the file is missing or holds other bytes.
-- **Error log.** `<ROCKY_HOME>\desk\rocky-desk.log` gets one `kind: error`
-  line per process for the seven once-only kinds, and a `panic:` entry with
-  its backtrace on every panic. The kinds are `panic`, `set_icon`,
-  `set_tooltip`, `refresh_menu`, `close_veto`, `autostart`, `aumid`, and
-  `toast`.
+- **Error log.** `<ROCKY_HOME>\desk\rocky-desk.log` gets at most one
+  `kind: error` line per process for the seven once-only kinds, and a
+  `panic:` entry with its backtrace on every panic. The kinds are `panic`,
+  `set_icon`, `set_tooltip`, `refresh_menu`, `close_veto`, `autostart`,
+  `aumid`, and `toast`.
 
 ## Pipe v2
 

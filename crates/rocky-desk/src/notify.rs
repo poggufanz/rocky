@@ -12,19 +12,24 @@ use crate::view;
 pub const STALE_MS: u64 = 60_000;
 
 /// Title and body of one toast. The title is the repo name, which is not
-/// translated; the body comes from the copy catalog.
+/// translated; the body comes from the copy catalog, and a missing repo name
+/// falls back to the catalog placeholder.
 pub fn notice_text(lang: UiLang, n: &Notice) -> (String, String) {
+    let agent = tr(lang, &n.agent);
     let msg = match n.kind {
         NoticeKind::NeedsYou => Msg::NoticeNeedsYou {
-            agent: n.agent.clone(),
+            agent,
             summary: n.summary.clone(),
         },
-        NoticeKind::Failed => Msg::NoticeFailed {
-            agent: n.agent.clone(),
-        },
+        NoticeKind::Failed => Msg::NoticeFailed { agent },
         NoticeKind::Done => Msg::NoticeDone,
     };
-    (n.repo.clone(), tr(lang, &msg))
+    let title = if n.repo.is_empty() {
+        tr(lang, &Msg::UnknownRepo)
+    } else {
+        n.repo.clone()
+    };
+    (title, tr(lang, &msg))
 }
 
 /// Toast tag for a session. Windows caps tags at 64 characters, and one tag
@@ -45,7 +50,7 @@ pub struct Notice {
     pub kind: NoticeKind,
     pub session_id: String,
     pub repo: String,
-    pub agent: String,
+    pub agent: Msg,
     pub summary: Option<String>,
 }
 
@@ -138,7 +143,6 @@ impl Notifier {
             agent: view::agent_label(agent),
             summary: agent.summary.clone(),
         };
-
         let mut out = Vec::new();
         match agent.status {
             Status::NeedsYou if ctx.allows(NoticeKind::NeedsYou) => {
@@ -156,7 +160,9 @@ impl Notifier {
         let finished = if is_main {
             agent.status == Status::Done
         } else {
-            prev == Some(Status::Working) && main_done
+            prev == Some(Status::Working)
+                && matches!(agent.status, Status::Done | Status::Idle | Status::Ended)
+                && main_done
         };
         let working_child = agents.values().any(|a| {
             a.key.session_id == *session
@@ -190,7 +196,9 @@ mod tests {
             kind: NoticeKind::NeedsYou,
             session_id: "s".into(),
             repo: "rocky".into(),
-            agent: "Explore aaaaaaaa".into(),
+            agent: Msg::AgentName {
+                label: "Explore aaaaaaaa".into(),
+            },
             summary: Some("Bash".into()),
         };
         assert_eq!(
@@ -206,7 +214,7 @@ mod tests {
             kind: NoticeKind::NeedsYou,
             session_id: "s".into(),
             repo: "rocky".into(),
-            agent: "main".into(),
+            agent: Msg::MainAgent,
             summary: None,
         };
         assert_eq!(
@@ -219,8 +227,18 @@ mod tests {
         };
         assert_eq!(
             notice_text(UiLang::Id, &failed),
-            ("rocky".into(), "main gagal".into())
+            ("rocky".into(), "utama gagal".into())
         );
+        let no_repo = Notice {
+            repo: String::new(),
+            ..base.clone()
+        };
+        assert_eq!(
+            notice_text(UiLang::En, &no_repo).0,
+            "unknown repo",
+            "an empty repo name must not yield a blank title"
+        );
+        assert_eq!(notice_text(UiLang::Id, &no_repo).0, "repo tidak dikenal");
         let done = Notice {
             kind: NoticeKind::Done,
             ..base
@@ -315,7 +333,9 @@ mod tests {
                 kind: NoticeKind::NeedsYou,
                 session_id: "S1".into(),
                 repo: "r".into(),
-                agent: "Explore kid1".into(),
+                agent: Msg::AgentName {
+                    label: "Explore kid1".into(),
+                },
                 summary: Some("Bash".into()),
             }]
         );
@@ -332,7 +352,7 @@ mod tests {
         let out = n.on_message(&up(&a), &table(&[&a]), &ctx(&s));
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].kind, NoticeKind::Failed);
-        assert_eq!(out[0].agent, "main");
+        assert_eq!(out[0].agent, Msg::MainAgent);
         assert!(n.on_message(&up(&a), &table(&[&a]), &ctx(&s)).is_empty());
     }
 
@@ -361,6 +381,34 @@ mod tests {
             n.on_message(&up(&child), &table(&[&main, &child]), &ctx(&s))
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn child_needs_you_while_main_done_is_not_a_finish() {
+        let mut n = Notifier::default();
+        let s = Settings::default();
+        let main = agent("S1", "", Status::Done);
+        let mut child = agent("S1", "c1", Status::Working);
+        n.on_message(&snap(&[&main, &child]), &table(&[&main, &child]), &ctx(&s));
+
+        child.status = Status::NeedsYou;
+        let out = n.on_message(&up(&child), &table(&[&main, &child]), &ctx(&s));
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].kind, NoticeKind::NeedsYou);
+    }
+
+    #[test]
+    fn child_failed_while_main_done_is_not_a_finish() {
+        let mut n = Notifier::default();
+        let s = Settings::default();
+        let main = agent("S1", "", Status::Done);
+        let mut child = agent("S1", "c1", Status::Working);
+        n.on_message(&snap(&[&main, &child]), &table(&[&main, &child]), &ctx(&s));
+
+        child.status = Status::Failed;
+        let out = n.on_message(&up(&child), &table(&[&main, &child]), &ctx(&s));
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].kind, NoticeKind::Failed);
     }
 
     #[test]

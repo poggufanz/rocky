@@ -19,6 +19,12 @@ pub enum Msg {
     Status(Status),
     NoAgents,
     UnknownRepo,
+    /// The main agent's row and notice label.
+    MainAgent,
+    /// A subagent label, which is a system name and never translated.
+    AgentName {
+        label: String,
+    },
     Session {
         short: String,
     },
@@ -125,6 +131,10 @@ fn samples() -> Vec<Msg> {
         Msg::Status(Status::Ended),
         Msg::NoAgents,
         Msg::UnknownRepo,
+        Msg::MainAgent,
+        Msg::AgentName {
+            label: "Explore aaaaaaaa".into(),
+        },
         Msg::Session {
             short: "abc12345".into(),
         },
@@ -243,6 +253,8 @@ pub fn en(m: &Msg) -> String {
         .to_string(),
         Msg::NoAgents => "No agents recorded yet.".to_string(),
         Msg::UnknownRepo => "unknown repo".to_string(),
+        Msg::MainAgent => "main".to_string(),
+        Msg::AgentName { label } => label.clone(),
         Msg::Session { short } => format!("session {short}"),
         Msg::Age { secs } => age_en(*secs),
         Msg::Failures { n } => format!("{n} failures"),
@@ -262,7 +274,7 @@ pub fn en(m: &Msg) -> String {
         Msg::MenuQuit => "Quit".to_string(),
         Msg::BadFiles { n } => format!("{n} bad spool files."),
         Msg::DroppedEvents { n } => format!("{n} dropped events."),
-        Msg::SpoolPending { n } => format!("{n} spool events pending."),
+        Msg::SpoolPending { n } => format!("{n} spool files pending."),
         Msg::SpoolDropped { n } => format!("{n} spool files dropped."),
         Msg::LateEvents { n } => format!("{n} late events."),
         Msg::HookNewer => "hook is newer than daemon, needs update.".to_string(),
@@ -335,6 +347,8 @@ pub fn id(m: &Msg) -> String {
         .to_string(),
         Msg::NoAgents => "Belum ada agen yang tercatat.".to_string(),
         Msg::UnknownRepo => "repo tidak dikenal".to_string(),
+        Msg::MainAgent => "utama".to_string(),
+        Msg::AgentName { label } => label.clone(),
         Msg::Session { short } => format!("sesi {short}"),
         Msg::Age { secs } => age_id(*secs),
         Msg::Failures { n } => format!("{n} kegagalan"),
@@ -354,7 +368,7 @@ pub fn id(m: &Msg) -> String {
         Msg::MenuQuit => "Keluar".to_string(),
         Msg::BadFiles { n } => format!("{n} berkas spool rusak."),
         Msg::DroppedEvents { n } => format!("{n} peristiwa dibuang."),
-        Msg::SpoolPending { n } => format!("{n} peristiwa spool tertunda."),
+        Msg::SpoolPending { n } => format!("{n} berkas spool tertunda."),
         Msg::SpoolDropped { n } => format!("{n} berkas spool dibuang."),
         Msg::LateEvents { n } => format!("{n} peristiwa terlambat."),
         Msg::HookNewer => "hook lebih baru daripada daemon, perlu pembaruan.".to_string(),
@@ -696,6 +710,12 @@ mod tests {
         );
         assert_eq!(en(&Msg::Age { secs: 130 }), "2m");
         assert_eq!(en(&Msg::NoAgents), "No agents recorded yet.");
+    }
+
+    #[test]
+    fn spool_pending_counts_files() {
+        assert_eq!(en(&Msg::SpoolPending { n: 3 }), "3 spool files pending.");
+        assert_eq!(id(&Msg::SpoolPending { n: 3 }), "3 berkas spool tertunda.");
     }
 
     #[test]
