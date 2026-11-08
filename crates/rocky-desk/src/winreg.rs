@@ -1,4 +1,4 @@
-//! HKCU string values, as wide REG_SZ data.
+//! HKCU values: strings as wide REG_SZ data, and raw REG_BINARY reads.
 //!
 //! A missing key or value reads as `Ok(None)` / `Ok(())` so callers can treat
 //! absence as the default. Win32 codes surface as `io::Error`.
@@ -9,9 +9,9 @@ use std::ptr::{null, null_mut};
 
 use windows_sys::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_MORE_DATA, ERROR_SUCCESS};
 use windows_sys::Win32::System::Registry::{
-    HKEY, HKEY_CURRENT_USER, KEY_SET_VALUE, REG_OPTION_NON_VOLATILE, REG_SZ, RRF_RT_REG_SZ,
-    RegCloseKey, RegCreateKeyExW, RegDeleteTreeW, RegDeleteValueW, RegGetValueW, RegOpenKeyExW,
-    RegSetValueExW,
+    HKEY, HKEY_CURRENT_USER, KEY_SET_VALUE, REG_OPTION_NON_VOLATILE, REG_ROUTINE_FLAGS, REG_SZ,
+    REG_VALUE_TYPE, RRF_RT_REG_BINARY, RRF_RT_REG_SZ, RegCloseKey, RegCreateKeyExW, RegDeleteTreeW,
+    RegDeleteValueW, RegGetValueW, RegOpenKeyExW, RegSetValueExW,
 };
 
 /// UTF-16 with the terminating NUL Win32 expects.
@@ -23,7 +23,8 @@ fn error(code: u32) -> io::Error {
     io::Error::from_raw_os_error(code as i32)
 }
 
-pub fn get_string(subkey: &str, name: &str) -> io::Result<Option<String>> {
+/// The value's bytes, restricted to the types in `flags`.
+fn get_raw(subkey: &str, name: &str, flags: REG_ROUTINE_FLAGS) -> io::Result<Option<Vec<u8>>> {
     let subkey = wide(subkey);
     let name = wide(name);
 
@@ -33,7 +34,7 @@ pub fn get_string(subkey: &str, name: &str) -> io::Result<Option<String>> {
             HKEY_CURRENT_USER,
             subkey.as_ptr(),
             name.as_ptr(),
-            RRF_RT_REG_SZ,
+            flags,
             null_mut(),
             null_mut(),
             &mut size,
@@ -46,13 +47,13 @@ pub fn get_string(subkey: &str, name: &str) -> io::Result<Option<String>> {
         return Err(error(status));
     }
 
-    let mut buf = vec![0u16; (size as usize / 2).max(1)];
+    let mut buf = vec![0u8; (size as usize).max(1)];
     let status = unsafe {
         RegGetValueW(
             HKEY_CURRENT_USER,
             subkey.as_ptr(),
             name.as_ptr(),
-            RRF_RT_REG_SZ,
+            flags,
             null_mut(),
             buf.as_mut_ptr().cast::<c_void>(),
             &mut size,
@@ -61,13 +62,43 @@ pub fn get_string(subkey: &str, name: &str) -> io::Result<Option<String>> {
     if status != ERROR_SUCCESS {
         return Err(error(status));
     }
+    buf.truncate(size as usize);
+    Ok(Some(buf))
+}
 
-    let len = (size as usize / 2).min(buf.len());
-    let text = String::from_utf16_lossy(&buf[..len]);
-    Ok(Some(text.trim_end_matches('\0').to_string()))
+pub fn get_string(subkey: &str, name: &str) -> io::Result<Option<String>> {
+    Ok(get_raw(subkey, name, RRF_RT_REG_SZ)?.map(|bytes| {
+        let units: Vec<u16> = bytes
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect();
+        String::from_utf16_lossy(&units)
+            .trim_end_matches('\0')
+            .to_string()
+    }))
+}
+
+pub fn get_binary(subkey: &str, name: &str) -> io::Result<Option<Vec<u8>>> {
+    get_raw(subkey, name, RRF_RT_REG_BINARY)
 }
 
 pub fn set_string(subkey: &str, name: &str, value: &str) -> io::Result<()> {
+    let data: Vec<u8> = wide(value).iter().flat_map(|u| u.to_le_bytes()).collect();
+    set_raw(subkey, name, REG_SZ, &data)
+}
+
+/// Raw REG_BINARY write; only tests need it, to stand in for Task Manager.
+#[cfg(test)]
+pub(crate) fn set_binary(subkey: &str, name: &str, value: &[u8]) -> io::Result<()> {
+    set_raw(
+        subkey,
+        name,
+        windows_sys::Win32::System::Registry::REG_BINARY,
+        value,
+    )
+}
+
+fn set_raw(subkey: &str, name: &str, kind: REG_VALUE_TYPE, data: &[u8]) -> io::Result<()> {
     let subkey = wide(subkey);
     let name = wide(name);
 
@@ -89,15 +120,14 @@ pub fn set_string(subkey: &str, name: &str, value: &str) -> io::Result<()> {
         return Err(error(status));
     }
 
-    let data = wide(value);
     let status = unsafe {
         RegSetValueExW(
             key,
             name.as_ptr(),
             0,
-            REG_SZ,
-            data.as_ptr().cast::<u8>(),
-            (data.len() * 2) as u32,
+            kind,
+            data.as_ptr(),
+            data.len() as u32,
         )
     };
     unsafe { RegCloseKey(key) };
@@ -196,5 +226,17 @@ mod tests {
         delete_value(key.path(), "v").unwrap();
         assert_eq!(get_string(key.path(), "v").unwrap(), None);
         delete_value(key.path(), "v").unwrap();
+    }
+
+    #[test]
+    fn registry_binary_roundtrip_in_scratch_key() {
+        let key = scratch_key();
+        assert_eq!(get_binary(key.path(), "b").unwrap(), None);
+        let v = [3u8, 0, 0, 0, 0xF7, 0xEE, 0x13, 0x42, 0x60, 0x6F, 0xDD, 0x01];
+        set_binary(key.path(), "b", &v).unwrap();
+        assert_eq!(
+            get_binary(key.path(), "b").unwrap().as_deref(),
+            Some(&v[..])
+        );
     }
 }

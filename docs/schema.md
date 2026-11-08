@@ -215,7 +215,12 @@ under `<ROCKY_HOME>\desk`.
   data `"<exe path>" --tray` for the desk's own exe. Only the desk's
   autostart toggle and a Yes answer to the sign-in question write or remove
   it. A value that points elsewhere reads as off, and enabling rewrites it.
-  The desk reads the value when the settings view opens and after each
+  Task Manager's Startup apps page turns the entry off by writing a binary
+  `rocky-desk` value under
+  `HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run`
+  whose first byte is odd. The desk reads that as off too. Turning autostart
+  on or off from the desk deletes that value, so the desk's choice wins.
+  The desk reads both values when the settings view opens and after each
   toggle.
 - **Toast identity.** Key
   `HKCU\Software\Classes\AppUserModelId\Rocky.Desk`, string values

@@ -274,7 +274,7 @@ pub fn en(m: &Msg) -> String {
         Msg::MenuQuit => "Quit".to_string(),
         Msg::BadFiles { n } => format!("{n} bad spool files."),
         Msg::DroppedEvents { n } => format!("{n} dropped events."),
-        Msg::SpoolPending { n } => format!("{n} spool files pending."),
+        Msg::SpoolPending { n } => format!("{n} spool {} pending.", plural(*n, "file", "files")),
         Msg::SpoolDropped { n } => format!("{n} spool files dropped."),
         Msg::LateEvents { n } => format!("{n} late events."),
         Msg::HookNewer => "hook is newer than daemon, needs update.".to_string(),
@@ -285,9 +285,13 @@ pub fn en(m: &Msg) -> String {
             to,
             reason,
         } => gap_en(*count, from, to, *reason),
-        Msg::EarlierGaps { n } => format!("{n} earlier gaps"),
-        Msg::SubagentsStillWorking { n } => format!("{n} subagents still working"),
-        Msg::SubagentsHidden { n, working } => format!("+{n} subagents ({working} working)"),
+        Msg::EarlierGaps { n } => format!("{n} earlier {}", plural(*n, "gap", "gaps")),
+        Msg::SubagentsStillWorking { n } => {
+            format!("{n} {} still working", plural(*n, "subagent", "subagents"))
+        }
+        Msg::SubagentsHidden { n, working } => {
+            format!("+{n} {} ({working} working)", plural(*n, "subagent", "subagents"))
+        }
         Msg::TimelineEntry { kind, tool, text } => {
             timeline_entry_en(*kind, tool.as_deref(), text.as_deref())
         }
@@ -620,6 +624,12 @@ fn outcome_id(o: Outcome) -> &'static str {
     }
 }
 
+/// English noun for a count: singular for exactly one. Indonesian nouns do not
+/// change with the count, so only the English catalog uses this.
+fn plural<'a>(n: u64, one: &'a str, many: &'a str) -> &'a str {
+    if n == 1 { one } else { many }
+}
+
 /// Missed-events line for a gap: one event is singular, and an empty range
 /// reads "at" instead of "between".
 fn gap_en(count: u64, from: &str, to: &str, reason: GapReason) -> String {
@@ -716,6 +726,28 @@ mod tests {
     fn spool_pending_counts_files() {
         assert_eq!(en(&Msg::SpoolPending { n: 3 }), "3 spool files pending.");
         assert_eq!(id(&Msg::SpoolPending { n: 3 }), "3 berkas spool tertunda.");
+    }
+
+    #[test]
+    fn english_counts_of_one_are_singular() {
+        assert_eq!(
+            en(&Msg::SubagentsStillWorking { n: 1 }),
+            "1 subagent still working"
+        );
+        assert_eq!(
+            en(&Msg::SubagentsStillWorking { n: 2 }),
+            "2 subagents still working"
+        );
+        assert_eq!(
+            en(&Msg::SubagentsHidden { n: 1, working: 1 }),
+            "+1 subagent (1 working)"
+        );
+        assert_eq!(en(&Msg::EarlierGaps { n: 1 }), "1 earlier gap");
+        assert_eq!(en(&Msg::SpoolPending { n: 1 }), "1 spool file pending.");
+        assert_eq!(
+            id(&Msg::SubagentsStillWorking { n: 1 }),
+            "1 subagen masih bekerja"
+        );
     }
 
     #[test]

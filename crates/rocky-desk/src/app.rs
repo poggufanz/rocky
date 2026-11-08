@@ -234,7 +234,7 @@ impl DeskView {
         cx.notify();
     }
 
-    /// Read the sign-in registration from the Run key.
+    /// Read the sign-in registration from the Run key and Task Manager's flag.
     fn read_autostart(&mut self) {
         match std::env::current_exe().and_then(|exe| autostart::state(&exe)) {
             Ok(on) => {
