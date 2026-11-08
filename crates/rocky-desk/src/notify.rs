@@ -64,6 +64,14 @@ impl Notifier {
     ) -> Vec<Notice> {
         match msg {
             ServerMsg::Snapshot { agents: snap, .. } => {
+                // A snapshot main in Working means a new turn began while the
+                // desk was away, so a done notice from the previous turn no
+                // longer applies.
+                for a in snap {
+                    if a.key.agent_id.is_empty() && a.status == Status::Working {
+                        self.done_sent.remove(&a.key.session_id);
+                    }
+                }
                 self.prev = snap.iter().map(|a| (a.key.clone(), a.status)).collect();
                 Vec::new()
             }
@@ -333,6 +341,60 @@ mod tests {
             n.on_message(&up(&main), &table(&[&main]), &ctx(&s)).len(),
             1
         );
+    }
+
+    #[test]
+    fn done_sent_blocks_a_second_finish_in_the_same_turn() {
+        let mut n = Notifier::default();
+        let s = Settings::default();
+        let mut main = agent("S1", "", Status::Working);
+        n.on_message(&snap(&[&main]), &table(&[&main]), &ctx(&s));
+
+        main.status = Status::Done;
+        assert_eq!(
+            n.on_message(&up(&main), &table(&[&main]), &ctx(&s)).len(),
+            1
+        );
+
+        // Idle is a transition but starts no turn, so only the done-sent set
+        // can silence the next Done.
+        main.status = Status::Idle;
+        assert!(
+            n.on_message(&up(&main), &table(&[&main]), &ctx(&s))
+                .is_empty()
+        );
+        main.status = Status::Done;
+        assert!(
+            n.on_message(&up(&main), &table(&[&main]), &ctx(&s))
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn reconnect_snapshot_working_resets_done_notice() {
+        let mut n = Notifier::default();
+        let s = Settings::default();
+        let mut main = agent("S1", "", Status::Working);
+        n.on_message(&snap(&[&main]), &table(&[&main]), &ctx(&s));
+
+        main.status = Status::Done;
+        assert_eq!(
+            n.on_message(&up(&main), &table(&[&main]), &ctx(&s)).len(),
+            1
+        );
+
+        // A new turn started while the desk was disconnected.
+        main.status = Status::Working;
+        assert!(
+            n.on_message(&snap(&[&main]), &table(&[&main]), &ctx(&s))
+                .is_empty()
+        );
+
+        main.status = Status::Done;
+        main.last_event_ms = NOW - 1_000;
+        let out = n.on_message(&up(&main), &table(&[&main]), &ctx(&s));
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].kind, NoticeKind::Done);
     }
 
     #[test]
