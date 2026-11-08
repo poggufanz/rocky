@@ -147,13 +147,7 @@ pub fn escape_markup(text: &str) -> String {
 #[cfg(target_os = "linux")]
 pub fn ensure_png_icon(rocky_home: &Path) -> io::Result<PathBuf> {
     const PNG: &[u8] = include_bytes!("../assets/rocky-mark.png");
-    let path = png_icon_path(rocky_home);
-    if std::fs::read(&path).is_ok_and(|found| found == PNG) {
-        return Ok(path);
-    }
-    std::fs::create_dir_all(rocky_proto::paths::desk_dir(rocky_home))?;
-    std::fs::write(&path, PNG)?;
-    Ok(path)
+    crate::toast::write_if_different(png_icon_path(rocky_home), PNG)
 }
 
 #[cfg(target_os = "linux")]
@@ -250,15 +244,18 @@ fn run(
     }
 }
 
+/// One Notify call gives up after this long, so a server that accepts and
+/// never replies reports an error instead of parking the worker forever.
+#[cfg(target_os = "linux")]
+const METHOD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(25);
+
 #[cfg(target_os = "linux")]
 fn connect(address: Option<&str>) -> io::Result<Connection> {
-    let connected = match address {
-        Some(address) => {
-            zbus::block_on(async { zbus::connection::Builder::address(address).build().await })
-        }
-        None => zbus::block_on(Connection::session()),
+    let builder = match address {
+        Some(address) => zbus::connection::Builder::address(address),
+        None => zbus::connection::Builder::session(),
     };
-    connected.map_err(io::Error::other)
+    zbus::block_on(builder.method_timeout(METHOD_TIMEOUT).build()).map_err(io::Error::other)
 }
 
 #[cfg(target_os = "linux")]
