@@ -207,7 +207,8 @@ Rules:
 
 ## Desk OS registrations (Windows)
 
-The desk writes these places outside `<ROCKY_HOME>`.
+The desk writes these registry keys outside `<ROCKY_HOME>`, and two files
+under `<ROCKY_HOME>\desk`.
 
 - **Sign-in autostart.** Key
   `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, value `rocky-desk`,
@@ -219,15 +220,17 @@ The desk writes these places outside `<ROCKY_HOME>`.
 - **Toast identity.** Key
   `HKCU\Software\Classes\AppUserModelId\Rocky.Desk`, string values
   `DisplayName` = `rocky` and `IconUri` = `<ROCKY_HOME>\desk\rocky.ico`. The
-  desk writes it once per process, after the first `settings` message where
-  any notify toggle is on. It also sets the same id as the process's
-  AppUserModelId at start, so toasts and the taskbar group under it.
+  desk writes it once per process, on the first `snapshot` or `settings`
+  message where any notify toggle is on. It also sets the same id as the
+  process's AppUserModelId at start, so toasts and the taskbar group under
+  it.
 - **Icon file.** `<ROCKY_HOME>\desk\rocky.ico` is written from the icon
   compiled into the exe whenever the file is missing or holds other bytes.
-- **Error log.** `<ROCKY_HOME>\desk\rocky-desk.log` takes one line per error
-  kind per process, shaped `kind: error`; the `panic` entry also carries the
-  backtrace below it. The kinds are `panic`, `set_icon`, `set_tooltip`,
-  `refresh_menu`, `close_veto`, `autostart`, `aumid`, and `toast`.
+- **Error log.** `<ROCKY_HOME>\desk\rocky-desk.log` gets one `kind: error`
+  line per process for the seven once-only kinds, and a `panic:` entry with
+  its backtrace on every panic. The kinds are `panic`, `set_icon`,
+  `set_tooltip`, `refresh_menu`, `close_veto`, `autostart`, `aumid`, and
+  `toast`.
 
 ## Pipe v2
 
