@@ -1,5 +1,6 @@
 pub mod client;
 pub mod conn;
+pub mod i18n;
 pub mod respawn;
 pub mod spawn;
 pub mod toast;

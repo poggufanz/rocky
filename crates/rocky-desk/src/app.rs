@@ -21,6 +21,7 @@ use rocky_proto::pipe::{ClientMsg, CmdName, ServerMsg, Status};
 
 use crate::client::{self, Outbox};
 use crate::conn::{Action, ConnState, ConnectOutcome};
+use crate::i18n::{Msg, UiLang, detect_ui_lang, tr};
 use crate::icons::tray_icon;
 use crate::spawn::spawn_daemon;
 use crate::view::{Conn, Model};
@@ -66,7 +67,12 @@ struct Controller {
     cmd_id: u64,
     rocky_home: PathBuf,
     last_aggregate: Status,
-    last_tooltip: String,
+    last_tooltip: Msg,
+    /// Language every desk string renders in.
+    ui_lang: UiLang,
+    /// Detected UI language; the language setting resolves against it.
+    #[allow(dead_code)]
+    detected: UiLang,
 }
 
 impl Controller {
@@ -187,7 +193,7 @@ impl DeskView {
         let tip = self.ctl.model.tooltip();
         if tip != self.ctl.last_tooltip {
             self.ctl.last_tooltip = tip.clone();
-            let _ = tray.set_tooltip(Some(tip), cx);
+            let _ = tray.set_tooltip(Some(tr(self.ctl.ui_lang, &tip)), cx);
         }
     }
 
@@ -233,6 +239,7 @@ impl Render for DeskView {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         let groups = self.ctl.model.groups(now_ms());
         let warnings = self.ctl.model.warnings();
+        let lang = self.ctl.ui_lang;
         // Opaque background: without one, gpui on Windows shows the desktop through.
         let mut root = div()
             .flex()
@@ -245,31 +252,32 @@ impl Render for DeskView {
         if !warnings.is_empty() {
             let mut strip = div().flex_col().gap_1();
             for w in &warnings {
-                strip = strip.child(div().text_sm().child(w.clone()));
+                strip = strip.child(div().text_sm().child(tr(lang, w)));
             }
             root = root.child(strip);
         }
         if groups.is_empty() {
-            root = root.child(div().text_sm().child("No agents recorded yet."));
+            root = root.child(div().text_sm().child(tr(lang, &Msg::NoAgents)));
         }
         for g in &groups {
             let mut gdiv = div().flex_col().gap_1();
             gdiv = gdiv.child(div().text_sm().child(g.label.clone()));
             for s in &g.sessions {
                 let mut sdiv = div().flex_col().pl_2();
-                sdiv = sdiv.child(
-                    div()
-                        .text_xs()
-                        .child(format!("session {}", s.session_short)),
-                );
+                sdiv = sdiv.child(div().text_xs().child(tr(
+                    lang,
+                    &Msg::Session {
+                        short: s.session_short.clone(),
+                    },
+                )));
                 for a in &s.agents {
                     let mut row = div().flex().gap_2().text_sm();
                     row = row
-                        .child(chip(a.status))
+                        .child(chip(a.status, lang))
                         .child(div().child(a.label.clone()))
-                        .child(div().child(a.age_text.clone()));
+                        .child(div().child(tr(lang, &a.age)));
                     if a.failures > 0 {
-                        row = row.child(div().child(format!("{} failures", a.failures)));
+                        row = row.child(div().child(tr(lang, &Msg::Failures { n: a.failures })));
                     }
                     if let Some(act) = &a.action_text {
                         row = row.child(div().text_xs().child(act.clone()));
@@ -281,17 +289,6 @@ impl Render for DeskView {
             root = root.child(gdiv);
         }
         root
-    }
-}
-
-fn status_text(s: Status) -> &'static str {
-    match s {
-        Status::Idle => "idle",
-        Status::Working => "working",
-        Status::NeedsYou => "needs you",
-        Status::Done => "done",
-        Status::Failed => "failed",
-        Status::Ended => "ended",
     }
 }
 
@@ -332,7 +329,7 @@ fn set_visible(window: &Window, visible: bool) {
     }
 }
 
-fn chip(s: Status) -> Div {
+fn chip(s: Status, lang: UiLang) -> Div {
     let bg = match s {
         Status::NeedsYou => rgb(0xE8B800),
         Status::Failed => rgb(0xD92B2B),
@@ -345,7 +342,7 @@ fn chip(s: Status) -> Div {
         .rounded_sm()
         .bg(bg)
         .text_xs()
-        .child(status_text(s).to_string())
+        .child(tr(lang, &Msg::Status(s)))
 }
 
 pub fn run(rocky_home: PathBuf) {
@@ -355,6 +352,7 @@ pub fn run(rocky_home: PathBuf) {
         let (outcome, tied, live) = (done.outcome, done.tied_to_job, done.live);
         let (worker_tx, worker_rx) = mpsc::channel::<ConnectDone>();
         let state = ConnState::new(3, 300_000);
+        let detected = detect_ui_lang();
         let mut ctl = Controller {
             model: Model::new(),
             inbox: None,
@@ -365,7 +363,15 @@ pub fn run(rocky_home: PathBuf) {
             cmd_id: 0,
             rocky_home,
             last_aggregate: Status::Idle,
-            last_tooltip: String::new(),
+            last_tooltip: Msg::Tooltip {
+                working: 0,
+                needs_you: 0,
+                failed: 0,
+                done: 0,
+                idle: 0,
+            },
+            ui_lang: detected,
+            detected,
         };
         let action = ctl.state.on_connect_result(outcome);
         if let Some((outbox, inbox)) = live {
@@ -418,20 +424,21 @@ pub fn run(rocky_home: PathBuf) {
             })
             .ok();
 
+        let lang = view.read(cx).ctl.ui_lang;
         let agg = view.read(cx).ctl.model.aggregate();
         let tip = view.read(cx).ctl.model.tooltip();
         let tray = Tray::builder()
             .icon(tray_icon(agg))
-            .tooltip(tip.clone())
+            .tooltip(tr(lang, &tip))
             .on_activate_with({
                 let view = view.clone();
                 move |_, cx| show_window(&view, cx)
             })
-            .menu(|_| {
+            .menu(move |_| {
                 vec![
-                    MenuItem::action("Open rocky", OpenRocky),
-                    MenuItem::action("Stop recording", StopRecording),
-                    MenuItem::action("Quit", QuitDesk),
+                    MenuItem::action(tr(lang, &Msg::MenuOpen), OpenRocky),
+                    MenuItem::action(tr(lang, &Msg::MenuStop), StopRecording),
+                    MenuItem::action(tr(lang, &Msg::MenuQuit), QuitDesk),
                 ]
             })
             .build(cx)

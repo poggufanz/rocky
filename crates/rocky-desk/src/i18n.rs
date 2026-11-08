@@ -1,0 +1,368 @@
+//! Typed catalog for every user-visible desk string, in English and Indonesian.
+//!
+//! `en` and `id` match exhaustively, so adding a variant fails the build until
+//! both languages carry copy.
+
+use rocky_proto::pipe::Status;
+use rocky_proto::settings::Lang;
+
+/// Language the desk renders its own text in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UiLang {
+    En,
+    Id,
+}
+
+/// One user-visible string, rendered through [`en`], [`id`], or [`tr`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Msg {
+    Status(Status),
+    NoAgents,
+    Session {
+        short: String,
+    },
+    Age {
+        secs: u64,
+    },
+    Failures {
+        n: u32,
+    },
+    Tooltip {
+        working: u64,
+        needs_you: u64,
+        failed: u64,
+        done: u64,
+        idle: u64,
+    },
+    MenuOpen,
+    MenuStop,
+    MenuQuit,
+    BadFiles {
+        n: u64,
+    },
+    DroppedEvents {
+        n: u64,
+    },
+    SpoolDropped {
+        n: u64,
+    },
+    LateEvents {
+        n: u64,
+    },
+    HookNewer,
+    ConnVersionMismatch,
+    ConnUnverified,
+    ConnDisconnected,
+    ConnTiedToJob,
+    ConnKeepsCrashing,
+}
+
+#[cfg(test)]
+fn samples() -> Vec<Msg> {
+    vec![
+        Msg::Status(Status::Idle),
+        Msg::Status(Status::Working),
+        Msg::Status(Status::NeedsYou),
+        Msg::Status(Status::Done),
+        Msg::Status(Status::Failed),
+        Msg::Status(Status::Ended),
+        Msg::NoAgents,
+        Msg::Session {
+            short: "abc12345".into(),
+        },
+        Msg::Age { secs: 130 },
+        Msg::Failures { n: 2 },
+        Msg::Tooltip {
+            working: 2,
+            needs_you: 1,
+            failed: 1,
+            done: 1,
+            idle: 1,
+        },
+        Msg::Tooltip {
+            working: 0,
+            needs_you: 0,
+            failed: 0,
+            done: 0,
+            idle: 0,
+        },
+        Msg::MenuOpen,
+        Msg::MenuStop,
+        Msg::MenuQuit,
+        Msg::BadFiles { n: 3 },
+        Msg::DroppedEvents { n: 3 },
+        Msg::SpoolDropped { n: 3 },
+        Msg::LateEvents { n: 3 },
+        Msg::HookNewer,
+        Msg::ConnVersionMismatch,
+        Msg::ConnUnverified,
+        Msg::ConnDisconnected,
+        Msg::ConnTiedToJob,
+        Msg::ConnKeepsCrashing,
+    ]
+}
+
+/// English copy.
+pub fn en(m: &Msg) -> String {
+    match m {
+        Msg::Status(s) => match s {
+            Status::Idle => "idle",
+            Status::Working => "working",
+            Status::NeedsYou => "needs you",
+            Status::Done => "done",
+            Status::Failed => "failed",
+            Status::Ended => "ended",
+        }
+        .to_string(),
+        Msg::NoAgents => "No agents recorded yet.".to_string(),
+        Msg::Session { short } => format!("session {short}"),
+        Msg::Age { secs } => age_en(*secs),
+        Msg::Failures { n } => format!("{n} failures"),
+        Msg::Tooltip {
+            working,
+            needs_you,
+            failed,
+            done,
+            idle,
+        } => tooltip(
+            [*working, *needs_you, *failed, *done, *idle],
+            ["working", "needs you", "failed", "done", "idle"],
+            "idle",
+        ),
+        Msg::MenuOpen => "Open rocky".to_string(),
+        Msg::MenuStop => "Stop recording".to_string(),
+        Msg::MenuQuit => "Quit".to_string(),
+        Msg::BadFiles { n } => format!("{n} bad spool files."),
+        Msg::DroppedEvents { n } => format!("{n} dropped events."),
+        Msg::SpoolDropped { n } => format!("{n} spool files dropped."),
+        Msg::LateEvents { n } => format!("{n} late events."),
+        Msg::HookNewer => "hook is newer than daemon, needs update.".to_string(),
+        Msg::ConnVersionMismatch => "daemon version mismatch, needs update.".to_string(),
+        Msg::ConnUnverified => "daemon could not be verified.".to_string(),
+        Msg::ConnDisconnected => "daemon disconnected.".to_string(),
+        Msg::ConnTiedToJob => "daemon tied to launcher job.".to_string(),
+        Msg::ConnKeepsCrashing => "daemon keeps crashing.".to_string(),
+    }
+}
+
+/// Indonesian copy.
+pub fn id(m: &Msg) -> String {
+    match m {
+        Msg::Status(s) => match s {
+            Status::Idle => "tidak aktif",
+            Status::Working => "bekerja",
+            Status::NeedsYou => "perlu Anda",
+            Status::Done => "selesai",
+            Status::Failed => "gagal",
+            Status::Ended => "berakhir",
+        }
+        .to_string(),
+        Msg::NoAgents => "Belum ada agen yang tercatat.".to_string(),
+        Msg::Session { short } => format!("sesi {short}"),
+        Msg::Age { secs } => age_id(*secs),
+        Msg::Failures { n } => format!("{n} kegagalan"),
+        Msg::Tooltip {
+            working,
+            needs_you,
+            failed,
+            done,
+            idle,
+        } => tooltip(
+            [*working, *needs_you, *failed, *done, *idle],
+            ["bekerja", "perlu Anda", "gagal", "selesai", "tidak aktif"],
+            "tidak aktif",
+        ),
+        Msg::MenuOpen => "Buka rocky".to_string(),
+        Msg::MenuStop => "Hentikan perekaman".to_string(),
+        Msg::MenuQuit => "Keluar".to_string(),
+        Msg::BadFiles { n } => format!("{n} berkas spool rusak."),
+        Msg::DroppedEvents { n } => format!("{n} peristiwa dibuang."),
+        Msg::SpoolDropped { n } => format!("{n} berkas spool dibuang."),
+        Msg::LateEvents { n } => format!("{n} peristiwa terlambat."),
+        Msg::HookNewer => "hook lebih baru daripada daemon, perlu pembaruan.".to_string(),
+        Msg::ConnVersionMismatch => "versi daemon tidak cocok, perlu pembaruan.".to_string(),
+        Msg::ConnUnverified => "daemon tidak dapat diverifikasi.".to_string(),
+        Msg::ConnDisconnected => "daemon terputus.".to_string(),
+        Msg::ConnTiedToJob => "daemon terikat ke proses peluncur.".to_string(),
+        Msg::ConnKeepsCrashing => "daemon terus crash.".to_string(),
+    }
+}
+
+/// Render `m` in the requested UI language.
+pub fn tr(lang: UiLang, m: &Msg) -> String {
+    match lang {
+        UiLang::En => en(m),
+        UiLang::Id => id(m),
+    }
+}
+
+/// Pick the language the desk should render: an explicit setting wins,
+/// `Auto` follows detection.
+pub fn resolve_lang(setting: Lang, detected: UiLang) -> UiLang {
+    match setting {
+        Lang::En => UiLang::En,
+        Lang::Id => UiLang::Id,
+        Lang::Auto => detected,
+    }
+}
+
+/// True when the Windows LANGID's primary language is Indonesian (0x21).
+pub fn primary_is_indonesian(langid: u16) -> bool {
+    langid & 0x3ff == 0x21
+}
+
+/// Resolve a language from POSIX locale variables, first non-empty wins.
+pub fn lang_from_env(
+    lc_all: Option<&str>,
+    lc_messages: Option<&str>,
+    lang: Option<&str>,
+) -> UiLang {
+    let first = [lc_all, lc_messages, lang]
+        .into_iter()
+        .flatten()
+        .find(|v| !v.is_empty());
+    match first {
+        Some(v)
+            if v.as_bytes()
+                .get(..2)
+                .is_some_and(|p| p.eq_ignore_ascii_case(b"id")) =>
+        {
+            UiLang::Id
+        }
+        _ => UiLang::En,
+    }
+}
+
+/// Detect the language of the current user interface.
+pub fn detect_ui_lang() -> UiLang {
+    #[cfg(windows)]
+    {
+        // SAFETY: no preconditions; returns the current user's UI LANGID.
+        let langid = unsafe { windows_sys::Win32::Globalization::GetUserDefaultUILanguage() };
+        if primary_is_indonesian(langid) {
+            UiLang::Id
+        } else {
+            UiLang::En
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        lang_from_env(
+            std::env::var("LC_ALL").ok().as_deref(),
+            std::env::var("LC_MESSAGES").ok().as_deref(),
+            std::env::var("LANG").ok().as_deref(),
+        )
+    }
+}
+
+/// Age text in English: `now`, `30s`, `2m`, `3h`, `4d`.
+fn age_en(secs: u64) -> String {
+    if secs < 10 {
+        "now".to_string()
+    } else if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3600 {
+        format!("{}m", secs / 60)
+    } else if secs < 86400 {
+        format!("{}h", secs / 3600)
+    } else {
+        format!("{}d", secs / 86400)
+    }
+}
+
+/// Age text in Indonesian: `baru saja`, `30 dtk`, `2 mnt`, `3 j`, `4 hr`.
+fn age_id(secs: u64) -> String {
+    if secs < 10 {
+        "baru saja".to_string()
+    } else if secs < 60 {
+        format!("{secs} dtk")
+    } else if secs < 3600 {
+        format!("{} mnt", secs / 60)
+    } else if secs < 86400 {
+        format!("{} j", secs / 3600)
+    } else {
+        format!("{} hr", secs / 86400)
+    }
+}
+
+/// Tooltip text: non-zero counts joined with commas, `empty` when all are zero.
+fn tooltip(counts: [u64; 5], names: [&str; 5], empty: &str) -> String {
+    let segs: Vec<String> = counts
+        .into_iter()
+        .zip(names)
+        .filter(|(c, _)| *c > 0)
+        .map(|(c, name)| format!("{c} {name}"))
+        .collect();
+    if segs.is_empty() {
+        format!("rocky: {empty}")
+    } else {
+        format!("rocky: {}", segs.join(", "))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_variant_renders_in_both_languages() {
+        for m in samples() {
+            assert!(!en(&m).trim().is_empty(), "{m:?}");
+            assert!(!id(&m).trim().is_empty(), "{m:?}");
+        }
+    }
+
+    #[test]
+    fn setting_overrides_detection() {
+        assert_eq!(resolve_lang(Lang::En, UiLang::Id), UiLang::En);
+        assert_eq!(resolve_lang(Lang::Id, UiLang::En), UiLang::Id);
+        assert_eq!(resolve_lang(Lang::Auto, UiLang::Id), UiLang::Id);
+    }
+
+    #[test]
+    fn indonesian_is_detected_from_langid_and_env() {
+        assert!(primary_is_indonesian(0x0421));
+        assert!(!primary_is_indonesian(0x0409));
+        assert_eq!(
+            lang_from_env(None, Some("id_ID.UTF-8"), Some("en_US")),
+            UiLang::Id
+        );
+        assert_eq!(
+            lang_from_env(Some("en_US"), Some("id_ID"), None),
+            UiLang::En
+        );
+        assert_eq!(lang_from_env(Some(""), None, None), UiLang::En);
+    }
+
+    #[test]
+    fn m0_english_copy_is_unchanged() {
+        assert_eq!(
+            en(&Msg::Tooltip {
+                working: 2,
+                needs_you: 1,
+                failed: 0,
+                done: 0,
+                idle: 0
+            }),
+            "rocky: 2 working, 1 needs you"
+        );
+        assert_eq!(
+            en(&Msg::Tooltip {
+                working: 0,
+                needs_you: 0,
+                failed: 0,
+                done: 0,
+                idle: 0
+            }),
+            "rocky: idle"
+        );
+        assert_eq!(en(&Msg::Age { secs: 130 }), "2m");
+        assert_eq!(en(&Msg::NoAgents), "No agents recorded yet.");
+    }
+
+    #[test]
+    fn translations_follow_the_ui_language() {
+        assert_eq!(tr(UiLang::En, &Msg::MenuQuit), "Quit");
+        assert_eq!(tr(UiLang::Id, &Msg::MenuQuit), "Keluar");
+    }
+}

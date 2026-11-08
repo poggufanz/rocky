@@ -3,6 +3,8 @@
 use rocky_proto::pipe::{AgentKey, AgentStatus, Health, ServerMsg, Status, StatusOp};
 use std::collections::BTreeMap;
 
+use crate::i18n::Msg;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Conn {
     #[default]
@@ -32,7 +34,7 @@ pub struct AgentRow {
     pub label: String,
     pub status: Status,
     pub action_text: Option<String>,
-    pub age_text: String,
+    pub age: Msg,
     pub failures: u32,
 }
 
@@ -111,7 +113,9 @@ impl Model {
                                         .action
                                         .as_ref()
                                         .map(|act| action_text(act, a.repo.root.as_deref())),
-                                    age_text: age_text(now_ms, a.last_event_ms),
+                                    age: Msg::Age {
+                                        secs: age_secs(now_ms, a.last_event_ms),
+                                    },
                                     failures: a.failures,
                                 })
                                 .collect(),
@@ -131,7 +135,7 @@ impl Model {
             .unwrap_or(Status::Idle)
     }
 
-    pub fn tooltip(&self) -> String {
+    pub fn tooltip(&self) -> Msg {
         let mut n = [0u64; 5];
         for a in self.agents.values() {
             if a.status == Status::Ended {
@@ -146,48 +150,41 @@ impl Model {
                 Status::Ended => {}
             }
         }
-        let segs: Vec<String> = [
-            (n[0], "working"),
-            (n[1], "needs you"),
-            (n[2], "failed"),
-            (n[3], "done"),
-            (n[4], "idle"),
-        ]
-        .into_iter()
-        .filter(|(c, _)| *c > 0)
-        .map(|(c, name)| format!("{c} {name}"))
-        .collect();
-        if segs.is_empty() {
-            "rocky: idle".to_string()
-        } else {
-            format!("rocky: {}", segs.join(", "))
+        Msg::Tooltip {
+            working: n[0],
+            needs_you: n[1],
+            failed: n[2],
+            done: n[3],
+            idle: n[4],
         }
     }
 
-    pub fn warnings(&self) -> Vec<String> {
+    pub fn warnings(&self) -> Vec<Msg> {
         let mut w = Vec::new();
         let h = &self.health;
         if h.bad_files > 0 {
-            w.push(format!("{} bad spool files.", h.bad_files));
+            w.push(Msg::BadFiles { n: h.bad_files });
         }
         if h.dropped_events > 0 {
-            w.push(format!("{} dropped events.", h.dropped_events));
+            w.push(Msg::DroppedEvents {
+                n: h.dropped_events,
+            });
         }
         if h.spool_dropped > 0 {
-            w.push(format!("{} spool files dropped.", h.spool_dropped));
+            w.push(Msg::SpoolDropped { n: h.spool_dropped });
         }
         if h.late_events > 0 {
-            w.push(format!("{} late events.", h.late_events));
+            w.push(Msg::LateEvents { n: h.late_events });
         }
         if h.hook_newer_than_daemon {
-            w.push("hook is newer than daemon, needs update.".to_string());
+            w.push(Msg::HookNewer);
         }
         match self.conn {
-            Conn::VersionMismatch => w.push("daemon version mismatch, needs update.".to_string()),
-            Conn::ServerUnverified => w.push("daemon could not be verified.".to_string()),
-            Conn::Disconnected => w.push("daemon disconnected.".to_string()),
-            Conn::TiedToJob => w.push("daemon tied to launcher job.".to_string()),
-            Conn::KeepsCrashing => w.push("daemon keeps crashing.".to_string()),
+            Conn::VersionMismatch => w.push(Msg::ConnVersionMismatch),
+            Conn::ServerUnverified => w.push(Msg::ConnUnverified),
+            Conn::Disconnected => w.push(Msg::ConnDisconnected),
+            Conn::TiedToJob => w.push(Msg::ConnTiedToJob),
+            Conn::KeepsCrashing => w.push(Msg::ConnKeepsCrashing),
             Conn::Connecting | Conn::Connected => {}
         }
         w
@@ -232,19 +229,8 @@ fn agent_label(a: &AgentStatus) -> String {
     }
 }
 
-fn age_text(now_ms: u64, last_ms: u64) -> String {
-    let secs = now_ms.saturating_sub(last_ms) / 1000;
-    if secs < 10 {
-        "now".to_string()
-    } else if secs < 60 {
-        format!("{secs}s")
-    } else if secs < 3600 {
-        format!("{}m", secs / 60)
-    } else if secs < 86400 {
-        format!("{}h", secs / 3600)
-    } else {
-        format!("{}d", secs / 86400)
-    }
+fn age_secs(now_ms: u64, last_ms: u64) -> u64 {
+    now_ms.saturating_sub(last_ms) / 1000
 }
 
 pub fn action_text(a: &rocky_proto::pipe::Action, repo_root: Option<&str>) -> String {
@@ -281,6 +267,7 @@ pub fn action_text(a: &rocky_proto::pipe::Action, repo_root: Option<&str>) -> St
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::i18n::{Msg, en};
     use rocky_proto::pipe::{Action, AgentKey, AgentStatus, Health, RepoInfo, ServerMsg, Status};
     use rocky_proto::settings::Settings;
 
@@ -373,14 +360,34 @@ mod tests {
     #[test]
     fn tooltip_counts() {
         let m = Model::new();
-        assert_eq!(m.tooltip(), "rocky: idle");
+        assert_eq!(
+            m.tooltip(),
+            Msg::Tooltip {
+                working: 0,
+                needs_you: 0,
+                failed: 0,
+                done: 0,
+                idle: 0
+            }
+        );
+        assert_eq!(en(&m.tooltip()), "rocky: idle");
         let mut m = Model::new();
         m.apply(snapshot(vec![
             agent("S1", "", Status::Working),
             agent("S2", "", Status::Working),
             agent("S3", "", Status::NeedsYou),
         ]));
-        assert_eq!(m.tooltip(), "rocky: 2 working, 1 needs you");
+        assert_eq!(
+            m.tooltip(),
+            Msg::Tooltip {
+                working: 2,
+                needs_you: 1,
+                failed: 0,
+                done: 0,
+                idle: 0
+            }
+        );
+        assert_eq!(en(&m.tooltip()), "rocky: 2 working, 1 needs you");
     }
 
     #[test]
@@ -449,27 +456,36 @@ mod tests {
         });
         m.set_conn(Conn::VersionMismatch);
         let w = m.warnings();
-        assert_eq!(w.len(), 6);
-        assert!(w.iter().any(|s| s.contains("bad spool files")));
-        assert!(w.iter().any(|s| s.contains("dropped events")));
-        assert!(w.iter().any(|s| s.contains("needs update")));
+        assert_eq!(
+            w,
+            vec![
+                Msg::BadFiles { n: 2 },
+                Msg::DroppedEvents { n: 1 },
+                Msg::SpoolDropped { n: 1 },
+                Msg::LateEvents { n: 1 },
+                Msg::HookNewer,
+                Msg::ConnVersionMismatch,
+            ]
+        );
+        assert_eq!(en(&w[0]), "2 bad spool files.");
+        assert_eq!(en(&w[1]), "1 dropped events.");
+        assert_eq!(en(&w[2]), "1 spool files dropped.");
+        assert_eq!(en(&w[3]), "1 late events.");
+        assert_eq!(en(&w[4]), "hook is newer than daemon, needs update.");
+        assert_eq!(en(&w[5]), "daemon version mismatch, needs update.");
         let mut m = Model::new();
         m.set_conn(Conn::TiedToJob);
-        assert!(
-            m.warnings()
-                .iter()
-                .any(|s| s.contains("tied to launcher job"))
-        );
+        assert_eq!(m.warnings(), vec![Msg::ConnTiedToJob]);
+        assert_eq!(en(&Msg::ConnTiedToJob), "daemon tied to launcher job.");
         m.set_conn(Conn::KeepsCrashing);
-        assert!(m.warnings().iter().any(|s| s.contains("keeps crashing")));
+        assert_eq!(m.warnings(), vec![Msg::ConnKeepsCrashing]);
+        assert_eq!(en(&Msg::ConnKeepsCrashing), "daemon keeps crashing.");
         m.set_conn(Conn::ServerUnverified);
-        assert!(
-            m.warnings()
-                .iter()
-                .any(|s| s.contains("could not be verified"))
-        );
+        assert_eq!(m.warnings(), vec![Msg::ConnUnverified]);
+        assert_eq!(en(&Msg::ConnUnverified), "daemon could not be verified.");
         m.set_conn(Conn::Disconnected);
-        assert!(m.warnings().iter().any(|s| s.contains("disconnected")));
+        assert_eq!(m.warnings(), vec![Msg::ConnDisconnected]);
+        assert_eq!(en(&Msg::ConnDisconnected), "daemon disconnected.");
         m.set_conn(Conn::Connected);
         assert!(m.warnings().is_empty());
     }
@@ -494,7 +510,7 @@ mod tests {
     }
 
     #[test]
-    fn age_text_boundaries() {
+    fn age_boundaries() {
         let mut live = agent("S1", "", Status::Working);
         live.last_event_ms = 130_000;
         let mut old = agent("S2", "", Status::Idle);
@@ -502,7 +518,11 @@ mod tests {
         let mut m = Model::new();
         m.apply(snapshot(vec![live, old]));
         let groups = m.groups(130_000);
-        assert_eq!(groups[0].sessions[0].agents[0].age_text, "now");
-        assert_eq!(groups[0].sessions[1].agents[0].age_text, "2m");
+        let live_age = &groups[0].sessions[0].agents[0].age;
+        assert_eq!(*live_age, Msg::Age { secs: 0 });
+        assert_eq!(en(live_age), "now");
+        let old_age = &groups[0].sessions[1].agents[0].age;
+        assert_eq!(*old_age, Msg::Age { secs: 120 });
+        assert_eq!(en(old_age), "2m");
     }
 }
