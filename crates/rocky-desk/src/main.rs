@@ -103,15 +103,17 @@ fn single_instance(home: &Path) -> Result<std::fs::File, InstanceError> {
         eprintln!("rocky-desk: {} has no parent directory", path.display());
         return Err(InstanceError::Failed);
     };
-    // The runtime directory may not exist yet. When it is the desk dir, give
-    // it the same owner-only mode the daemon uses.
-    std::fs::create_dir_all(parent).map_err(|e| {
-        eprintln!("rocky-desk: cannot create {}: {e}", parent.display());
-        InstanceError::Failed
-    })?;
-    if parent == desk_dir(home).as_path() {
-        let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
+    // The desk writes its log here before the daemon starts, so make the desk
+    // dir owner-only up front whether or not the lock lives in it. The lock's
+    // parent is the runtime dir, which may not exist yet.
+    let desk = desk_dir(home);
+    for dir in [desk.as_path(), parent] {
+        std::fs::create_dir_all(dir).map_err(|e| {
+            eprintln!("rocky-desk: cannot create {}: {e}", dir.display());
+            InstanceError::Failed
+        })?;
     }
+    let _ = std::fs::set_permissions(&desk, std::fs::Permissions::from_mode(0o700));
     let lock = std::fs::OpenOptions::new()
         .read(true)
         .write(true)

@@ -889,12 +889,25 @@ pub fn run(rocky_home: PathBuf, opts: RunOptions) {
                     ]
                 }
             })
-            .build(cx)
-            .expect("build tray");
+            .build(cx);
+        #[cfg(windows)]
+        let tray = Some(tray.expect("build tray"));
+        #[cfg(not(windows))]
+        let tray = match tray {
+            Ok(tray) => Some(tray),
+            Err(e) => {
+                // A bus-less session has no tray; the rest of the desk works
+                // without one (`self.tray = None` is handled everywhere).
+                view.update(cx, |v, _| {
+                    v.log.once("tray", &e);
+                });
+                None
+            }
+        };
         view.update(cx, |v, _| {
             v.ctl.last_aggregate = agg;
             v.ctl.last_tooltip = tip;
-            v.tray = Some(tray.clone());
+            v.tray = tray;
         });
 
         cx.on_action({

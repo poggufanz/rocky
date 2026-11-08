@@ -14,5 +14,6 @@ serde_json = "1"
 
 [target.'cfg(unix)'.dependencies]
 # libc: peer credentials (SO_PEERCRED) and the effective uid for the desk
-# socket. Locked at 0.2.189; newer releases break the Linux build.
+# socket. The Cargo.lock pin at 0.2.189 is required: libc 0.2.190 removed
+# ENOATTR, which xattr 0.2.3 (through gpui) needs to build on Linux.
 libc = "0.2"

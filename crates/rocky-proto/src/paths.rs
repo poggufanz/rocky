@@ -71,7 +71,8 @@ pub fn desk_mutex_name(rocky_home: &Path) -> String {
     format!(r"Local\rocky-desk-{}", home_hash(rocky_home))
 }
 
-/// Longest unix socket path the kernel accepts, including the terminator.
+/// Longest unix socket path the kernel accepts: `sun_path` is 108 bytes
+/// including the NUL, so a path of up to 107 bytes fits.
 #[cfg(unix)]
 pub const SOCKET_PATH_MAX: usize = 107;
 

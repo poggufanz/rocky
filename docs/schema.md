@@ -261,16 +261,18 @@ X-GNOME-Autostart-enabled=true
   `rockyd-<hash>.lock` and `rocky-desk-<hash>.lock` sit beside it. Both locks
   are created 0600, locked with `flock(LOCK_EX | LOCK_NB)`, and held for the
   process lifetime. The socket file is born 0600 because the bind runs under
-  `umask(0o177)`, and the previous mask returns right after. The daemon also
-  keeps `<ROCKY_HOME>/desk` at 0700.
+  `umask(0o177)`, and the previous mask returns right after. The daemon and
+  the desk both keep `<ROCKY_HOME>/desk` at 0700.
 - **Single instance.** A second desk launch asks the running desk to show
-  itself and exits 0. A second daemon exits 3 before it reads the spool,
-  settings, or history.
-- **Socket path limit.** A socket path longer than 107 bytes including the
-  terminator cannot bind; the daemon logs `socket path too long` and exits 1
-  before it opens the lock or touches the socket file. A daemon killed
-  outright can leave its socket file behind; after taking the freed lock, the
-  next daemon unlinks the stale file and binds again.
+  itself and exits 0. A second daemon exits 3 before it serves or ingests
+  anything; before taking the lock it only creates the desk and spool
+  directories, opens the log, and reads the history directory.
+- **Socket path limit.** The kernel's `sun_path` is 108 bytes including the
+  NUL, so a socket path longer than 107 bytes cannot bind; the daemon logs
+  `socket path too long` and exits 1 before it opens the lock or touches the
+  socket file. A daemon killed outright can leave its socket file behind;
+  after taking the freed lock, the next daemon unlinks the stale file and
+  binds again.
 - **Peer check.** On Linux the daemon reads the peer uid with `SO_PEERCRED`
   and drops a connection from another user without a reply. On other unix
   systems the peer uid is unknown, so the check fails closed. The desk checks
@@ -297,8 +299,9 @@ X-GNOME-Autostart-enabled=true
   desk keeps running.
 - **Error log.** `<ROCKY_HOME>/desk/rocky-desk.log` keeps the same once-only
   kinds as Windows, plus a `panic:` entry with its backtrace on every panic.
-  On Linux, a notification setup or send error is logged under `toast`; the
-  Windows-only `aumid` kind is not used.
+  On Linux, a notification setup or send error is logged under `toast`, and a
+  tray that cannot be built is logged under `tray` while the desk keeps
+  running without one; the Windows-only `aumid` kind is not used.
 
 ## Pipe v2
 

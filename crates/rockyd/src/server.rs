@@ -173,8 +173,8 @@ pub fn serve(
     imp::serve(rocky_home, hub, snapshot, control)
 }
 
-/// Whether `path` fits the kernel's unix socket path limit (107 bytes,
-/// including the terminator).
+/// Whether `path` fits the kernel's unix socket path limit: the 108-byte
+/// `sun_path` includes the NUL, so a path of up to 107 bytes fits.
 #[cfg(unix)]
 pub fn socket_path_fits(path: &Path) -> bool {
     use std::os::unix::ffi::OsStrExt;
@@ -595,8 +595,13 @@ mod imp {
         std::fs::set_permissions(&desk, std::fs::Permissions::from_mode(0o700))?;
 
         // 2. Refuse an oversized path before creating or unlinking anything.
+        // In the fallback layout the lock name is 17 bytes longer than
+        // `rockyd.sock`, so it has to fit too or the open fails with
+        // ENAMETOOLONG instead of the documented message.
         let sock = socket_path(rocky_home);
-        if !super::socket_path_fits(&sock) {
+        if !super::socket_path_fits(&sock)
+            || !super::socket_path_fits(&daemon_lock_path(rocky_home))
+        {
             return Err(BindError::PathTooLong);
         }
 
