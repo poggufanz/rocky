@@ -4497,6 +4497,7 @@ dependencies = [
 name = "rocky-desk"
 version = "0.1.0"
 dependencies = [
+ "embed-resource",
  "gpui",
  "gpui-tray",
  "interprocess",
@@ -4531,6 +4532,7 @@ dependencies = [
 name = "rockyd"
 version = "0.1.0"
 dependencies = [
+ "embed-resource",
  "interprocess",
  "notify",
  "rocky-proto",
