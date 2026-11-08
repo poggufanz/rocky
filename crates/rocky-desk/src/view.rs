@@ -434,7 +434,7 @@ fn short8(s: &str) -> String {
     s.chars().take(8).collect()
 }
 
-fn agent_label(a: &AgentStatus) -> String {
+pub(crate) fn agent_label(a: &AgentStatus) -> String {
     if a.key.agent_id.is_empty() {
         return "main".to_string();
     }
