@@ -11,3 +11,8 @@ publish.workspace = true
 regex-lite = "0.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+[target.'cfg(unix)'.dependencies]
+# libc: peer credentials (SO_PEERCRED) and the effective uid for the desk
+# socket. Locked at 0.2.189; newer releases break the Linux build.
+libc = "0.2"

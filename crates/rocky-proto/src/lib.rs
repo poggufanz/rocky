@@ -2,6 +2,8 @@
 pub mod history;
 pub mod hook;
 pub mod paths;
+#[cfg(unix)]
+pub mod peer;
 pub mod pipe;
 pub mod redact;
 pub mod settings;
