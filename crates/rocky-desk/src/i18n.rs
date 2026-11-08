@@ -83,6 +83,27 @@ pub enum Msg {
     ConnTiedToJob,
     ConnKeepsCrashing,
     ConnUnresponsive,
+    SettingSubagentTree,
+    SettingHistory,
+    SettingToolText,
+    SettingNotifyNeedsYou,
+    SettingNotifyFailed,
+    SettingNotifyDone,
+    LangAuto,
+    LangEn,
+    LangId,
+    Autostart,
+    ViewAgents,
+    ViewSettings,
+    SettingsReadOnly,
+    ToolTextHistoryNote,
+    SetFailed {
+        reason: String,
+    },
+    AutostartFailed,
+    AutostartQuestion,
+    Yes,
+    No,
 }
 
 #[cfg(test)]
@@ -164,6 +185,27 @@ fn samples() -> Vec<Msg> {
         Msg::ConnTiedToJob,
         Msg::ConnKeepsCrashing,
         Msg::ConnUnresponsive,
+        Msg::SettingSubagentTree,
+        Msg::SettingHistory,
+        Msg::SettingToolText,
+        Msg::SettingNotifyNeedsYou,
+        Msg::SettingNotifyFailed,
+        Msg::SettingNotifyDone,
+        Msg::LangAuto,
+        Msg::LangEn,
+        Msg::LangId,
+        Msg::Autostart,
+        Msg::ViewAgents,
+        Msg::ViewSettings,
+        Msg::SettingsReadOnly,
+        Msg::ToolTextHistoryNote,
+        Msg::SetFailed {
+            reason: "invalid value".into(),
+        },
+        Msg::AutostartFailed,
+        Msg::AutostartQuestion,
+        Msg::Yes,
+        Msg::No,
     ]
 }
 
@@ -224,6 +266,28 @@ pub fn en(m: &Msg) -> String {
         Msg::ConnTiedToJob => "daemon tied to launcher job.".to_string(),
         Msg::ConnKeepsCrashing => "daemon keeps crashing.".to_string(),
         Msg::ConnUnresponsive => "rockyd is not responding.".to_string(),
+        Msg::SettingSubagentTree => "Show subagent rows".to_string(),
+        Msg::SettingHistory => "Keep 24-hour history".to_string(),
+        Msg::SettingToolText => "Record tool text".to_string(),
+        Msg::SettingNotifyNeedsYou => "Notify when an agent needs you".to_string(),
+        Msg::SettingNotifyFailed => "Notify when an agent fails".to_string(),
+        Msg::SettingNotifyDone => "Notify when an agent finishes".to_string(),
+        Msg::LangAuto => "Auto".to_string(),
+        Msg::LangEn => "English".to_string(),
+        Msg::LangId => "Indonesia".to_string(),
+        Msg::Autostart => "Start rocky when you sign in".to_string(),
+        Msg::ViewAgents => "Agents".to_string(),
+        Msg::ViewSettings => "Settings".to_string(),
+        Msg::SettingsReadOnly => "Settings are read-only while rockyd is not connected.".to_string(),
+        Msg::ToolTextHistoryNote => {
+            "Old history keeps tool text until it ages out after 24 hours. Turn off history to delete it now."
+                .to_string()
+        }
+        Msg::SetFailed { reason } => format!("Could not save setting: {reason}"),
+        Msg::AutostartFailed => "Could not change the sign-in setting.".to_string(),
+        Msg::AutostartQuestion => "Start rocky when you sign in?".to_string(),
+        Msg::Yes => "Yes".to_string(),
+        Msg::No => "No".to_string(),
     }
 }
 
@@ -284,6 +348,30 @@ pub fn id(m: &Msg) -> String {
         Msg::ConnTiedToJob => "daemon terikat ke proses peluncur.".to_string(),
         Msg::ConnKeepsCrashing => "daemon terus crash.".to_string(),
         Msg::ConnUnresponsive => "rockyd tidak merespons.".to_string(),
+        Msg::SettingSubagentTree => "Tampilkan baris subagen".to_string(),
+        Msg::SettingHistory => "Simpan riwayat 24 jam".to_string(),
+        Msg::SettingToolText => "Catat teks tool".to_string(),
+        Msg::SettingNotifyNeedsYou => "Beri tahu saat agen perlu Anda".to_string(),
+        Msg::SettingNotifyFailed => "Beri tahu saat agen gagal".to_string(),
+        Msg::SettingNotifyDone => "Beri tahu saat agen selesai".to_string(),
+        Msg::LangAuto => "Otomatis".to_string(),
+        Msg::LangEn => "English".to_string(),
+        Msg::LangId => "Indonesia".to_string(),
+        Msg::Autostart => "Jalankan rocky saat Anda masuk".to_string(),
+        Msg::ViewAgents => "Agen".to_string(),
+        Msg::ViewSettings => "Pengaturan".to_string(),
+        Msg::SettingsReadOnly => {
+            "Pengaturan hanya-baca selama rockyd tidak terhubung.".to_string()
+        }
+        Msg::ToolTextHistoryNote => {
+            "Riwayat lama tetap menyimpan teks tool sampai hilang setelah 24 jam. Matikan riwayat untuk menghapusnya sekarang."
+                .to_string()
+        }
+        Msg::SetFailed { reason } => format!("Tidak dapat menyimpan pengaturan: {reason}"),
+        Msg::AutostartFailed => "Tidak dapat mengubah pengaturan masuk otomatis.".to_string(),
+        Msg::AutostartQuestion => "Jalankan rocky saat Anda masuk?".to_string(),
+        Msg::Yes => "Ya".to_string(),
+        Msg::No => "Tidak".to_string(),
     }
 }
 

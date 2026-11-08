@@ -6,6 +6,7 @@ pub mod connect;
 pub mod desklog;
 pub mod i18n;
 pub mod respawn;
+pub mod settings_view;
 pub mod spawn;
 pub mod toast;
 pub mod view;

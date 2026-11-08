@@ -85,6 +85,10 @@ pub struct Model {
     /// Agent rows whose timeline is expanded, and the entries last received.
     open: BTreeSet<AgentKey>,
     timelines: BTreeMap<AgentKey, Vec<TimelineEntry>>,
+    /// Ids of `set` messages awaiting their ack.
+    sent: BTreeSet<u64>,
+    /// Error from the last failed `set`, shown until the next settings broadcast.
+    set_error: Option<String>,
 }
 
 /// Agents bucketed by `(repo name, branch)`, then by session id.
@@ -117,7 +121,14 @@ impl Model {
             }
             ServerMsg::Settings { settings } => {
                 self.settings = Some(settings);
+                self.set_error = None;
                 self.open.iter().cloned().collect()
+            }
+            ServerMsg::Ack { id, ok, error } => {
+                if self.sent.remove(&id) && !ok {
+                    self.set_error = Some(error.unwrap_or_default());
+                }
+                Vec::new()
             }
             ServerMsg::Status { op, agent } => match op {
                 StatusOp::Upsert => {
@@ -205,6 +216,21 @@ impl Model {
 
     pub fn settings(&self) -> Option<&Settings> {
         self.settings.as_ref()
+    }
+
+    /// Record a `set` id so its failed ack can be attributed.
+    pub fn set_sent(&mut self, id: u64) {
+        self.sent.insert(id);
+    }
+
+    /// Error from the last failed `set`, cleared by the next settings broadcast.
+    pub fn set_error(&self) -> Option<&str> {
+        self.set_error.as_deref()
+    }
+
+    /// Settings accept changes only while connected and seeded.
+    pub fn editable(&self) -> bool {
+        self.conn == Conn::Connected && self.settings.is_some()
     }
 
     pub fn agents(&self) -> &BTreeMap<AgentKey, AgentStatus> {

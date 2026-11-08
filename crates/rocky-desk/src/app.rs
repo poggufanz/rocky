@@ -19,15 +19,19 @@ use gpui::{
 use gpui_tray::Tray;
 use rocky_proto::paths::desk_dir;
 use rocky_proto::pipe::{AgentKey, ClientMsg, CmdName, Outcome, ServerMsg, Status};
+use rocky_proto::settings::Lang;
 
-use crate::autostart::RunOptions;
+use crate::autostart::{self, RunOptions};
 use crate::client::Outbox;
 use crate::clock;
 use crate::conn::{Action, ConnState, ConnectOutcome};
 use crate::connect::{CONNECT_BUDGET, ConnectDone, connect_attempt};
 use crate::desklog::LogOnce;
-use crate::i18n::{Msg, UiLang, detect_ui_lang, tr};
+use crate::i18n::{Msg, UiLang, detect_ui_lang, resolve_lang, tr};
 use crate::icons::tray_icon;
+use crate::settings_view::{
+    self, SettingId, View, set_autostart_asked, set_bool, set_lang, show_autostart_banner,
+};
 use crate::view::{Conn, Model};
 
 gpui::actions!(rocky, [OpenRocky, StopRecording, QuitDesk]);
@@ -56,8 +60,15 @@ struct Controller {
     /// Language every desk string renders in.
     ui_lang: UiLang,
     /// Detected UI language; the language setting resolves against it.
-    #[allow(dead_code)]
     detected: UiLang,
+    /// Panel the window shows.
+    view: View,
+    /// Started with `--tray`, so the sign-in question is suppressed.
+    tray_start: bool,
+    /// Sign-in registration as last read; `None` until the settings view reads it.
+    autostart_on: Option<bool>,
+    /// A sign-in read or write failed; cleared by the next successful read.
+    autostart_failed: bool,
 }
 
 impl Controller {
@@ -135,6 +146,9 @@ struct DeskView {
     window: Option<WindowHandle<Self>>,
     tray: Option<Tray>,
     log: LogOnce,
+    /// The tray menu must be rebuilt for the new language. Done by the pump
+    /// outside the view lease, since the builder reads this entity.
+    menu_stale: bool,
 }
 
 impl DeskView {
@@ -158,13 +172,243 @@ impl DeskView {
         }
     }
 
+    fn next_id(&mut self) -> u64 {
+        self.ctl.cmd_id += 1;
+        self.ctl.cmd_id
+    }
+
+    /// Send a `set` and remember its id so a failed ack can be attributed.
+    fn send_set(&mut self, id: u64, msg: ClientMsg) {
+        let Some(outbox) = self.ctl.outbox.as_ref() else {
+            return;
+        };
+        if outbox.send(msg).is_ok() {
+            self.ctl.model.set_sent(id);
+        }
+    }
+
+    /// Toggle one daemon setting; the UI moves only on the next broadcast.
+    fn toggle_setting(&mut self, setting: SettingId) {
+        if !self.ctl.model.editable() {
+            return;
+        }
+        let Some(on) = self.ctl.model.settings().map(|s| setting.get(s)) else {
+            return;
+        };
+        let id = self.next_id();
+        self.send_set(id, set_bool(id, setting, !on));
+    }
+
+    /// Ask for another UI language; the broadcast applies it.
+    fn choose_lang(&mut self, lang: Lang) {
+        if !self.ctl.model.editable() {
+            return;
+        }
+        let id = self.next_id();
+        self.send_set(id, set_lang(id, lang));
+    }
+
+    fn toggle_view(&mut self, cx: &mut Context<Self>) {
+        self.ctl.view = match self.ctl.view {
+            View::Agents => View::Settings,
+            View::Settings => View::Agents,
+        };
+        if self.ctl.view == View::Settings {
+            self.read_autostart();
+        }
+        cx.notify();
+    }
+
+    /// Read the sign-in registration from the Run key.
+    fn read_autostart(&mut self) {
+        match std::env::current_exe().and_then(|exe| autostart::state(&exe)) {
+            Ok(on) => {
+                self.ctl.autostart_on = Some(on);
+                self.ctl.autostart_failed = false;
+            }
+            Err(e) => {
+                self.ctl.autostart_failed = true;
+                self.log.once("autostart", &e);
+            }
+        }
+    }
+
+    fn toggle_autostart(&mut self, cx: &mut Context<Self>) {
+        if !self.ctl.model.editable() {
+            return;
+        }
+        let Some(on) = self.ctl.autostart_on else {
+            return;
+        };
+        let result = if on {
+            autostart::disable()
+        } else {
+            std::env::current_exe().and_then(|exe| autostart::enable(&exe))
+        };
+        match result {
+            Ok(()) => self.read_autostart(),
+            Err(e) => {
+                self.ctl.autostart_failed = true;
+                self.log.once("autostart", &e);
+            }
+        }
+        cx.notify();
+    }
+
+    /// Answer the sign-in question. Both answers mark it asked; only Yes
+    /// writes the Run value.
+    fn answer_autostart(&mut self, yes: bool, cx: &mut Context<Self>) {
+        if yes {
+            match std::env::current_exe().and_then(|exe| autostart::enable(&exe)) {
+                Ok(()) => {
+                    self.ctl.autostart_on = Some(true);
+                    self.ctl.autostart_failed = false;
+                }
+                Err(e) => {
+                    self.ctl.autostart_failed = true;
+                    self.log.once("autostart", &e);
+                }
+            }
+        }
+        let id = self.next_id();
+        self.send_set(id, set_autostart_asked(id));
+        cx.notify();
+    }
+
+    /// Adopt a language broadcast: rebuild the tray menu and re-send the
+    /// tooltip in the new language.
+    fn sync_lang(&mut self, setting: Lang, cx: &mut Context<Self>) {
+        let lang = resolve_lang(setting, self.ctl.detected);
+        if lang == self.ctl.ui_lang {
+            return;
+        }
+        self.ctl.ui_lang = lang;
+        // A value `tooltip` never returns forces the next refresh to re-send it.
+        self.ctl.last_tooltip = Msg::NoAgents;
+        self.menu_stale = true;
+        cx.notify();
+    }
+
+    /// The one-time sign-in question, shown while it is unanswered.
+    fn banner(&mut self, cx: &mut Context<Self>) -> Option<Div> {
+        if !show_autostart_banner(self.ctl.tray_start, self.ctl.model.settings()) {
+            return None;
+        }
+        let lang = self.ctl.ui_lang;
+        let mut banner = div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .p_2()
+            .rounded_sm()
+            .bg(rgb(0xE4E9F7));
+        banner = banner.child(div().text_sm().child(tr(lang, &Msg::AutostartQuestion)));
+        let mut buttons = div().flex().gap_2();
+        for (label, yes) in [(Msg::Yes, true), (Msg::No, false)] {
+            let id = if yes { "autostart-yes" } else { "autostart-no" };
+            buttons = buttons.child(
+                div()
+                    .id(SharedString::from(id))
+                    .px_2()
+                    .rounded_sm()
+                    .bg(rgb(0xFFFFFF))
+                    .text_sm()
+                    .cursor_pointer()
+                    .child(tr(lang, &label))
+                    .on_click(cx.listener(move |this, _, _, cx| this.answer_autostart(yes, cx))),
+            );
+        }
+        banner = banner.child(buttons);
+        if self.ctl.autostart_failed {
+            banner = banner.child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(0xD92B2B))
+                    .child(tr(lang, &Msg::AutostartFailed)),
+            );
+        }
+        Some(banner)
+    }
+
+    /// Toggles reflect the last broadcast settings; sign-in state is read
+    /// locally. Nothing here changes until the daemon confirms a `set`.
+    fn settings_panel(&mut self, cx: &mut Context<Self>) -> Div {
+        let lang = self.ctl.ui_lang;
+        let editable = self.ctl.model.editable();
+        let settings = self.ctl.model.settings().cloned();
+        let mut panel = div().flex().flex_col().gap_2();
+        if !editable {
+            panel = panel.child(div().text_sm().child(tr(lang, &Msg::SettingsReadOnly)));
+        }
+        let Some(settings) = settings else {
+            return panel;
+        };
+        for setting in SettingId::ALL {
+            panel = panel.child(settings_view::toggle_row(
+                SharedString::from(format!("setting:{}", setting.wire_name())),
+                tr(lang, &setting.label()),
+                setting.get(&settings),
+                editable,
+                cx.listener(move |this, _, _, _| this.toggle_setting(setting)),
+            ));
+        }
+        if !settings.tool_text && settings.history {
+            panel = panel.child(div().text_xs().child(tr(lang, &Msg::ToolTextHistoryNote)));
+        }
+        let mut langs = div().flex().gap_2();
+        for (value, label) in [
+            (Lang::Auto, Msg::LangAuto),
+            (Lang::En, Msg::LangEn),
+            (Lang::Id, Msg::LangId),
+        ] {
+            langs = langs.child(settings_view::choice(
+                SharedString::from(format!("lang:{value:?}")),
+                tr(lang, &label),
+                settings.lang == value,
+                editable,
+                cx.listener(move |this, _, _, _| this.choose_lang(value)),
+            ));
+        }
+        panel = panel.child(langs);
+        panel = panel.child(settings_view::toggle_row(
+            SharedString::from("setting:autostart"),
+            tr(lang, &Msg::Autostart),
+            self.ctl.autostart_on.unwrap_or(false),
+            editable,
+            cx.listener(|this, _, _, cx| this.toggle_autostart(cx)),
+        ));
+        if self.ctl.autostart_failed {
+            panel = panel.child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(0xD92B2B))
+                    .child(tr(lang, &Msg::AutostartFailed)),
+            );
+        }
+        if let Some(err) = self.ctl.model.set_error() {
+            panel = panel.child(div().text_sm().text_color(rgb(0xD92B2B)).child(tr(
+                lang,
+                &Msg::SetFailed {
+                    reason: err.to_string(),
+                },
+            )));
+        }
+        panel
+    }
+
     fn on_inbox(&mut self, cx: &mut Context<Self>) {
         let mut changed = self.ctl.on_worker();
         let mut requests = Vec::new();
+        let mut pending_lang = None;
         if let Some(inbox) = self.ctl.inbox.as_ref() {
             loop {
                 match inbox.try_recv() {
                     Ok(Some(msg)) => {
+                        if let ServerMsg::Snapshot { settings, .. }
+                        | ServerMsg::Settings { settings } = &msg
+                        {
+                            pending_lang = Some(settings.lang);
+                        }
                         if let ServerMsg::Ack { id, ok, .. } = &msg
                             && self.ctl.state.on_ack(*id, *ok)
                         {
@@ -187,6 +431,9 @@ impl DeskView {
                 }
             }
         }
+        if let Some(lang) = pending_lang {
+            self.sync_lang(lang, cx);
+        }
         for key in requests {
             self.ctl.request_timeline(key);
         }
@@ -198,7 +445,6 @@ impl DeskView {
 
 impl Render for DeskView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let groups = self.ctl.model.groups(now_ms());
         let warnings = self.ctl.model.warnings(&clock::local_hhmm);
         let lang = self.ctl.ui_lang;
         // Opaque background: without one, gpui on Windows shows the desktop through.
@@ -210,6 +456,21 @@ impl Render for DeskView {
             .size_full()
             .bg(rgb(0xF5F5F4))
             .text_color(rgb(0x1C1C1C));
+        if let Some(banner) = self.banner(cx) {
+            root = root.child(banner);
+        }
+        let other = match self.ctl.view {
+            View::Agents => Msg::ViewSettings,
+            View::Settings => Msg::ViewAgents,
+        };
+        root = root.child(
+            div()
+                .id(SharedString::from("view-toggle"))
+                .text_sm()
+                .cursor_pointer()
+                .child(tr(lang, &other))
+                .on_click(cx.listener(|this, _, _, cx| this.toggle_view(cx))),
+        );
         if !warnings.is_empty() {
             let mut strip = div().flex_col().gap_1();
             for w in &warnings {
@@ -217,6 +478,10 @@ impl Render for DeskView {
             }
             root = root.child(strip);
         }
+        if self.ctl.view == View::Settings {
+            return root.child(self.settings_panel(cx));
+        }
+        let groups = self.ctl.model.groups(now_ms());
         if groups.is_empty() {
             root = root.child(div().text_sm().child(tr(lang, &Msg::NoAgents)));
         }
@@ -390,6 +655,10 @@ pub fn run(rocky_home: PathBuf, opts: RunOptions) {
             },
             ui_lang: detected,
             detected,
+            view: View::default(),
+            tray_start: opts.tray,
+            autostart_on: None,
+            autostart_failed: false,
         };
         let action = ctl.state.on_connect_result(outcome);
         if let Some((outbox, inbox)) = live {
@@ -410,6 +679,7 @@ pub fn run(rocky_home: PathBuf, opts: RunOptions) {
             window: None,
             tray: None,
             log: LogOnce::new(log_path),
+            menu_stale: false,
         });
 
         let window = cx
@@ -456,12 +726,16 @@ pub fn run(rocky_home: PathBuf, opts: RunOptions) {
                 let view = view.clone();
                 move |_, cx| show_window(&view, cx)
             })
-            .menu(move |_| {
-                vec![
-                    MenuItem::action(tr(lang, &Msg::MenuOpen), OpenRocky),
-                    MenuItem::action(tr(lang, &Msg::MenuStop), StopRecording),
-                    MenuItem::action(tr(lang, &Msg::MenuQuit), QuitDesk),
-                ]
+            .menu({
+                let view = view.clone();
+                move |cx| {
+                    let lang = view.read(cx).ctl.ui_lang;
+                    vec![
+                        MenuItem::action(tr(lang, &Msg::MenuOpen), OpenRocky),
+                        MenuItem::action(tr(lang, &Msg::MenuStop), StopRecording),
+                        MenuItem::action(tr(lang, &Msg::MenuQuit), QuitDesk),
+                    ]
+                }
             })
             .build(cx)
             .expect("build tray");
@@ -528,13 +802,25 @@ pub fn run(rocky_home: PathBuf, opts: RunOptions) {
                     let alive = cx
                         .update(|cx| {
                             if let Some(v) = view.upgrade() {
+                                let mut menu_stale = false;
                                 v.update(cx, |v, cx| {
                                     v.on_inbox(cx);
                                     v.refresh_tray(cx);
+                                    menu_stale = std::mem::take(&mut v.menu_stale);
                                     if slow {
                                         cx.notify();
                                     }
                                 });
+                                // The menu builder reads this view, so the
+                                // rebuild must run outside the lease above.
+                                if menu_stale
+                                    && let Some(tray) = v.read(cx).tray.clone()
+                                    && let Err(e) = tray.refresh_menu(cx)
+                                {
+                                    v.update(cx, |v, _| {
+                                        v.log.once("refresh_menu", &e);
+                                    });
+                                }
                                 true
                             } else {
                                 false

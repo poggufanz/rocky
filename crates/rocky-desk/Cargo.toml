@@ -10,6 +10,7 @@ rocky-proto = { path = "../rocky-proto" }
 gpui = "=0.2.2"
 gpui-tray = "=0.3.0"
 interprocess = "=2.4.7"
+serde_json = "1"
 # Already in the tree via gpui; used to hide the window by HWND (gpui 0.2.2 has no hide).
 raw-window-handle = "0.6"
 windows-sys = { version = "0.61", features = [

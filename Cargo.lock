@@ -4503,6 +4503,7 @@ dependencies = [
  "raw-window-handle",
  "rocky-proto",
  "rockyd",
+ "serde_json",
  "tempfile",
  "windows 0.62.2",
  "windows-sys 0.61.2",
