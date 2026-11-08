@@ -174,6 +174,9 @@ fn start_silent_server() -> (TempDir, SilentServer) {
     let server = SilentServer::start(pipe_name(home.path()));
     #[cfg(unix)]
     let server = {
+        // The dir and the socket are created while another thread's `serve`
+        // may hold the process umask at 0o177; keep that window out.
+        let _serial = serialize();
         let sock = rocky_proto::paths::socket_path(home.path());
         std::fs::create_dir_all(sock.parent().unwrap()).unwrap();
         SilentServer::start(sock)
