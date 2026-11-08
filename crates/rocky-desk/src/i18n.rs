@@ -56,6 +56,7 @@ pub enum Msg {
     ConnDisconnected,
     ConnTiedToJob,
     ConnKeepsCrashing,
+    ConnUnresponsive,
 }
 
 #[cfg(test)]
@@ -101,6 +102,7 @@ fn samples() -> Vec<Msg> {
         Msg::ConnDisconnected,
         Msg::ConnTiedToJob,
         Msg::ConnKeepsCrashing,
+        Msg::ConnUnresponsive,
     ]
 }
 
@@ -145,6 +147,7 @@ pub fn en(m: &Msg) -> String {
         Msg::ConnDisconnected => "daemon disconnected.".to_string(),
         Msg::ConnTiedToJob => "daemon tied to launcher job.".to_string(),
         Msg::ConnKeepsCrashing => "daemon keeps crashing.".to_string(),
+        Msg::ConnUnresponsive => "rockyd is not responding.".to_string(),
     }
 }
 
@@ -189,6 +192,7 @@ pub fn id(m: &Msg) -> String {
         Msg::ConnDisconnected => "daemon terputus.".to_string(),
         Msg::ConnTiedToJob => "daemon terikat ke proses peluncur.".to_string(),
         Msg::ConnKeepsCrashing => "daemon terus crash.".to_string(),
+        Msg::ConnUnresponsive => "rockyd tidak merespons.".to_string(),
     }
 }
 

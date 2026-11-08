@@ -15,6 +15,7 @@ pub enum Conn {
     ServerUnverified,
     TiedToJob,
     KeepsCrashing,
+    Unresponsive,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -210,6 +211,7 @@ impl Model {
             Conn::Disconnected => w.push(Msg::ConnDisconnected),
             Conn::TiedToJob => w.push(Msg::ConnTiedToJob),
             Conn::KeepsCrashing => w.push(Msg::ConnKeepsCrashing),
+            Conn::Unresponsive => w.push(Msg::ConnUnresponsive),
             Conn::Connecting | Conn::Connected => {}
         }
         w

@@ -17,6 +17,8 @@ pub enum ConnectOutcome {
     VersionMismatch,
     /// Spawn failed or the daemon never appeared after spawn.
     SpawnFailed,
+    /// The daemon accepted the pipe but never answered hello; never respawn.
+    Unresponsive,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -125,6 +127,10 @@ impl ConnState {
             ConnectOutcome::VersionMismatch => {
                 self.conn = Conn::VersionMismatch;
                 Action::Show(Conn::VersionMismatch)
+            }
+            ConnectOutcome::Unresponsive => {
+                self.conn = Conn::Unresponsive;
+                Action::Show(Conn::Unresponsive)
             }
         }
     }
@@ -236,6 +242,16 @@ mod tests {
         s.stop_sent(7);
         assert!(!s.on_ack(8, true));
         assert_eq!(s.on_disconnect(1_000), Action::Show(Conn::Disconnected));
+    }
+
+    #[test]
+    fn unresponsive_shows_and_user_open_retries() {
+        let mut s = ConnState::new(3, 300_000);
+        assert_eq!(
+            s.on_connect_result(ConnectOutcome::Unresponsive),
+            Action::Show(Conn::Unresponsive)
+        );
+        assert_eq!(s.on_user_open(), Action::Connect);
     }
 
     #[test]

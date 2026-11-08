@@ -1,5 +1,7 @@
 pub mod client;
 pub mod conn;
+pub mod connect;
+pub mod desklog;
 pub mod i18n;
 pub mod respawn;
 pub mod spawn;

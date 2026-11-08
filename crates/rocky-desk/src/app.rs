@@ -17,13 +17,15 @@ use gpui::{
     TitlebarOptions, Window, WindowBounds, WindowHandle, WindowOptions, div, px, rgb, size,
 };
 use gpui_tray::Tray;
+use rocky_proto::paths::desk_dir;
 use rocky_proto::pipe::{ClientMsg, CmdName, ServerMsg, Status};
 
-use crate::client::{self, Outbox};
+use crate::client::Outbox;
 use crate::conn::{Action, ConnState, ConnectOutcome};
+use crate::connect::{CONNECT_BUDGET, ConnectDone, connect_attempt};
+use crate::desklog::LogOnce;
 use crate::i18n::{Msg, UiLang, detect_ui_lang, tr};
 use crate::icons::tray_icon;
-use crate::spawn::spawn_daemon;
 use crate::view::{Conn, Model};
 
 gpui::actions!(rocky, [OpenRocky, StopRecording, QuitDesk]);
@@ -33,25 +35,6 @@ fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis().min(u128::from(u64::MAX)) as u64)
         .unwrap_or(0)
-}
-
-/// Result of one background connect attempt, delivered to the foreground.
-struct ConnectDone {
-    outcome: ConnectOutcome,
-    /// Present on `Connected`: the live outbox + inbox.
-    live: Option<(Outbox, Receiver<Option<ServerMsg>>)>,
-    /// True when the daemon was spawned without breakaway (sticky warning).
-    tied_to_job: bool,
-}
-
-impl ConnectDone {
-    fn failed(outcome: ConnectOutcome) -> Self {
-        ConnectDone {
-            outcome,
-            live: None,
-            tied_to_job: false,
-        }
-    }
 }
 
 struct Controller {
@@ -118,59 +101,18 @@ impl Controller {
     }
 }
 
-/// One connect attempt: probe the pipe; on absence spawn the daemon and retry
-/// with backoff (100 ms doubling, 5 s total). Keeps the live streams of the
-/// winning attempt. Never retries foreign/wrong-version daemons. Blocking is
-/// fine: runs on a worker thread (or pre-loop at startup).
-fn connect_attempt(rocky_home: &std::path::Path) -> ConnectDone {
-    let mut first = true;
-    let mut tied = false;
-    let mut wait = Duration::from_millis(100);
-    let total = Duration::from_secs(5);
-    let mut spent = Duration::ZERO;
-    loop {
-        let (tx, rx) = mpsc::channel();
-        match client::connect_and_subscribe(rocky_home, tx) {
-            Ok(outbox) => {
-                return ConnectDone {
-                    outcome: ConnectOutcome::Connected,
-                    live: Some((outbox, rx)),
-                    tied_to_job: tied,
-                };
-            }
-            Err(client::ConnectError::Unverified) => {
-                return ConnectDone::failed(ConnectOutcome::Unverified);
-            }
-            Err(client::ConnectError::VersionMismatch) => {
-                return ConnectDone::failed(ConnectOutcome::VersionMismatch);
-            }
-            Err(_) => {}
-        }
-        if first {
-            first = false;
-            let exe = std::env::current_exe()
-                .ok()
-                .and_then(|p| p.parent().map(|d| d.join("rockyd.exe")));
-            if let Some(exe) = exe {
-                match spawn_daemon(&exe) {
-                    Ok(info) => tied = info.tied_to_job,
-                    Err(_) => return ConnectDone::failed(ConnectOutcome::SpawnFailed),
-                }
-            }
-        }
-        if spent >= total {
-            return ConnectDone::failed(ConnectOutcome::NoDaemon);
-        }
-        std::thread::sleep(wait);
-        spent += wait;
-        wait = (wait * 2).min(Duration::from_secs(1));
-    }
+/// The daemon beside this exe, when the desk runs from a build or install dir.
+fn daemon_exe() -> Option<PathBuf> {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("rockyd.exe")))
 }
 
 /// Spawn one worker running `connect_attempt` and delivering the result.
 fn spawn_connect_worker(rocky_home: PathBuf, tx: mpsc::Sender<ConnectDone>) {
     std::thread::spawn(move || {
-        let _ = tx.send(connect_attempt(&rocky_home));
+        let exe = daemon_exe();
+        let _ = tx.send(connect_attempt(&rocky_home, exe.as_deref(), CONNECT_BUDGET));
     });
 }
 
@@ -178,6 +120,7 @@ struct DeskView {
     ctl: Controller,
     window: Option<WindowHandle<Self>>,
     tray: Option<Tray>,
+    log: LogOnce,
 }
 
 impl DeskView {
@@ -188,12 +131,16 @@ impl DeskView {
         let agg = self.ctl.model.aggregate();
         if agg != self.ctl.last_aggregate {
             self.ctl.last_aggregate = agg;
-            let _ = tray.set_icon(tray_icon(agg), cx);
+            if let Err(e) = tray.set_icon(tray_icon(agg), cx) {
+                self.log.once("set_icon", &e);
+            }
         }
         let tip = self.ctl.model.tooltip();
         if tip != self.ctl.last_tooltip {
             self.ctl.last_tooltip = tip.clone();
-            let _ = tray.set_tooltip(Some(tr(self.ctl.ui_lang, &tip)), cx);
+            if let Err(e) = tray.set_tooltip(Some(tr(self.ctl.ui_lang, &tip)), cx) {
+                self.log.once("set_tooltip", &e);
+            }
         }
     }
 
@@ -348,8 +295,10 @@ fn chip(s: Status, lang: UiLang) -> Div {
 pub fn run(rocky_home: PathBuf) {
     Application::new().run(move |cx: &mut App| {
         // Blocking startup attempt (the GPUI loop is not running yet).
-        let done = connect_attempt(&rocky_home);
+        let exe = daemon_exe();
+        let done = connect_attempt(&rocky_home, exe.as_deref(), CONNECT_BUDGET);
         let (outcome, tied, live) = (done.outcome, done.tied_to_job, done.live);
+        let log_path = desk_dir(&rocky_home).join("rocky-desk.log");
         let (worker_tx, worker_rx) = mpsc::channel::<ConnectDone>();
         let state = ConnState::new(3, 300_000);
         let detected = detect_ui_lang();
@@ -391,6 +340,7 @@ pub fn run(rocky_home: PathBuf) {
             ctl,
             window: None,
             tray: None,
+            log: LogOnce::new(log_path),
         });
 
         let window = cx
@@ -415,14 +365,16 @@ pub fn run(rocky_home: PathBuf) {
             v.window = Some(window);
         });
         // Closing the window hides it: veto the close and minimize instead.
-        window
-            .update(cx, |_, window, cx| {
-                window.on_window_should_close(&*cx, |window, _| {
-                    set_visible(window, false);
-                    false
-                });
-            })
-            .ok();
+        if let Err(e) = window.update(cx, |_, window, cx| {
+            window.on_window_should_close(&*cx, |window, _| {
+                set_visible(window, false);
+                false
+            });
+        }) {
+            view.update(cx, |v, _| {
+                v.log.once("close_veto", &e);
+            });
+        }
 
         let lang = view.read(cx).ctl.ui_lang;
         let agg = view.read(cx).ctl.model.aggregate();

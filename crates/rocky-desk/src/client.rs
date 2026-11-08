@@ -44,6 +44,9 @@ pub enum ConnectError {
     Io(io::Error),
     Unverified,
     VersionMismatch,
+    /// The pipe server accepted the connection but never answered `hello`
+    /// within the caller's bound.
+    Unresponsive,
 }
 
 impl From<io::Error> for ConnectError {
@@ -67,6 +70,7 @@ impl std::fmt::Display for ConnectError {
             ConnectError::Io(e) => write!(f, "connect: {e}"),
             ConnectError::Unverified => write!(f, "pipe server is not this user"),
             ConnectError::VersionMismatch => write!(f, "daemon version mismatch"),
+            ConnectError::Unresponsive => write!(f, "daemon hello timed out"),
         }
     }
 }
@@ -167,7 +171,8 @@ pub fn verify_server(_pipe: *mut core::ffi::c_void) -> Result<(), VerifyError> {
 
 /// Connect to the daemon pipe, verify the server, shake `hello` (read the
 /// daemon reply before subscribing), then spawn the reader thread. Returns
-/// the outbox.
+/// the outbox. The hello read waits at most `hello_timeout`; a server that
+/// accepts and stays silent yields [`ConnectError::Unresponsive`].
 ///
 /// The reader forwards decoded messages to `tx`, then sends `None` once and
 /// exits when the connection drops for any reason (EOF, line over
@@ -178,6 +183,7 @@ pub fn verify_server(_pipe: *mut core::ffi::c_void) -> Result<(), VerifyError> {
 pub fn connect_and_subscribe(
     rocky_home: &Path,
     tx: Sender<Option<ServerMsg>>,
+    hello_timeout: Duration,
 ) -> Result<Outbox, ConnectError> {
     use interprocess::os::windows::named_pipe::PipeStream;
     use interprocess::os::windows::named_pipe::pipe_mode::Bytes;
@@ -200,9 +206,9 @@ pub fn connect_and_subscribe(
     )?;
     // Read the daemon hello BEFORE subscribing: the daemon flushes its
     // reply (a read barrier on pipes), so sending subscribe first would
-    // deadlock both flushes against each other. Bounded by HELLO_TIMEOUT so
+    // deadlock both flushes against each other. Bounded by `hello_timeout` so
     // a silent server fails this attempt instead of wedging the worker.
-    let mut stream = hello_handshake(stream)?;
+    let mut stream = hello_handshake(stream, hello_timeout)?;
     write_msg(&mut stream, &ClientMsg::Subscribe)?;
 
     let (cmd_tx, cmd_rx) = mpsc::channel::<ClientMsg>();
@@ -214,6 +220,7 @@ pub fn connect_and_subscribe(
 pub fn connect_and_subscribe(
     _rocky_home: &Path,
     _tx: Sender<Option<ServerMsg>>,
+    _hello_timeout: Duration,
 ) -> Result<Outbox, ConnectError> {
     Err(ConnectError::Io(io::Error::new(
         io::ErrorKind::Unsupported,
@@ -230,13 +237,14 @@ fn write_msg<W: Write>(stream: &mut W, msg: &ClientMsg) -> io::Result<()> {
     stream.write_all(line.as_bytes())
 }
 
-/// Read exactly one line for the hello handshake, byte-at-a-time so no
-/// bytes past the newline are consumed (the stream is split afterwards).
-/// Bounded: a silent server must fail this attempt, not wedge it — this runs
-/// on the connect worker thread, never the UI thread.
-const HELLO_TIMEOUT: Duration = Duration::from_secs(5);
+/// Default bound on the hello handshake, for callers with no tighter budget of
+/// their own. Bounded: a silent server must fail this attempt, not wedge it —
+/// this runs on the connect worker thread, never the UI thread.
+pub const HELLO_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Blocking one-line hello read; shared by the live handshake and tests.
+/// Byte-at-a-time so no bytes past the newline are consumed (the stream is
+/// split afterwards).
 #[cfg(windows)]
 fn read_hello_line<R: Read>(r: &mut R) -> Result<String, ConnectError> {
     let mut buf = Vec::new();
@@ -298,6 +306,7 @@ fn hello_handshake(
         interprocess::os::windows::named_pipe::pipe_mode::Bytes,
         interprocess::os::windows::named_pipe::pipe_mode::Bytes,
     >,
+    hello_timeout: Duration,
 ) -> Result<
     interprocess::os::windows::named_pipe::PipeStream<
         interprocess::os::windows::named_pipe::pipe_mode::Bytes,
@@ -312,7 +321,7 @@ fn hello_handshake(
         let _ = done_tx.send(line);
         let _ = back_tx.send(stream);
     });
-    match done_rx.recv_timeout(HELLO_TIMEOUT) {
+    match done_rx.recv_timeout(hello_timeout) {
         Ok(Ok(text)) => {
             check_hello_line(&text)?;
             back_rx.recv().map_err(|_| {
@@ -331,10 +340,7 @@ fn hello_handshake(
             // Timeout: reclaiming the stream would block on the wedged
             // helper, so detach — the helper drops it when its read ends.
             // The handle stays open until then; the attempt fails now.
-            Err(ConnectError::Io(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "daemon hello timed out",
-            )))
+            Err(ConnectError::Unresponsive)
         }
     }
 }
