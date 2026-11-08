@@ -1,5 +1,6 @@
 #![windows_subsystem = "windows"]
 
+#[cfg(windows)]
 use rocky_proto::paths::{desk_mutex_name, rocky_home};
 
 #[cfg(windows)]

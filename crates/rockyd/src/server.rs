@@ -6,11 +6,20 @@ use std::io;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{self, Receiver, Sender, SyncSender};
-use std::thread::{self, JoinHandle};
+#[cfg(windows)]
+use std::sync::atomic::AtomicU64;
+#[cfg(windows)]
+use std::sync::atomic::Ordering;
+#[cfg(windows)]
+use std::sync::mpsc;
+use std::sync::mpsc::{Receiver, Sender, SyncSender};
+#[cfg(windows)]
+use std::thread;
+use std::thread::JoinHandle;
 
-use rocky_proto::pipe::{AgentKey, CLIENT_QUEUE_CAP, ServerMsg, encode};
+#[cfg(windows)]
+use rocky_proto::pipe::CLIENT_QUEUE_CAP;
+use rocky_proto::pipe::{AgentKey, ServerMsg, encode};
 use serde_json::Value;
 
 pub const DAEMON_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -60,6 +69,7 @@ pub enum Control {
 /// the daemon state lock) while calling `broadcast` — hub → state, never the
 /// reverse — or the daemon can deadlock.
 pub struct Hub {
+    #[cfg(windows)]
     next_id: AtomicU64,
     clients: Mutex<HashMap<u64, Client>>,
 }
@@ -74,6 +84,7 @@ struct Client {
 impl Hub {
     pub fn new() -> Self {
         Hub {
+            #[cfg(windows)]
             next_id: AtomicU64::new(1),
             clients: Mutex::new(HashMap::new()),
         }
@@ -87,6 +98,7 @@ impl Hub {
     ///
     /// The `snapshot` closure runs while holding the hub lock; it must not
     /// call back into the hub.
+    #[cfg(windows)]
     fn add(&self, close: Sender<()>, snapshot: &dyn Fn() -> ServerMsg) -> (u64, Receiver<String>) {
         let (tx, rx) = mpsc::sync_channel(CLIENT_QUEUE_CAP);
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
@@ -104,6 +116,7 @@ impl Hub {
         (id, rx)
     }
 
+    #[cfg(windows)]
     fn remove(&self, id: u64) {
         Self::remove_locked(&mut self.clients.lock().unwrap(), id);
     }
