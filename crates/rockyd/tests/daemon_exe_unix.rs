@@ -3,12 +3,13 @@
 
 #![cfg(unix)]
 
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use rocky_proto::paths::socket_path;
+use rocky_proto::paths::{daemon_lock_path_from, log_path, socket_path, socket_path_from};
 use tempfile::TempDir;
 
 const GUARD: Duration = Duration::from_secs(5);
@@ -34,6 +35,36 @@ fn spawn_daemon(home: &Path) -> KillOnDrop {
             .spawn()
             .unwrap(),
     )
+}
+
+/// Spawn with `XDG_RUNTIME_DIR` removed, so the socket falls back under
+/// `<home>/desk` deterministically.
+fn spawn_daemon_without_runtime_dir(home: &Path) -> KillOnDrop {
+    KillOnDrop(
+        Command::new(env!("CARGO_BIN_EXE_rockyd"))
+            .env("ROCKY_HOME", home)
+            .env_remove("XDG_RUNTIME_DIR")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    )
+}
+
+/// A child of `home` padded so the fallback socket path is `socket_len` bytes.
+fn padded_home(home: &TempDir, socket_len: usize) -> std::path::PathBuf {
+    let base = home.path().as_os_str().as_bytes().len() + 1 + "/desk/rockyd.sock".len();
+    let pad = socket_len
+        .checked_sub(base)
+        .expect("temp dir too long for this test");
+    let path = home.path().join("x".repeat(pad));
+    std::fs::create_dir(&path).unwrap();
+    assert_eq!(
+        socket_path_from(&path, None).as_os_str().as_bytes().len(),
+        socket_len
+    );
+    path
 }
 
 /// Wait for the socket, surfacing an early daemon exit instead of hanging.
@@ -77,4 +108,39 @@ fn second_daemon_exits_3() {
     let mut second = spawn_daemon(home.path());
     let status = wait_exit(&mut second, "second daemon");
     assert_eq!(status.code(), Some(3), "status: {status}");
+}
+
+#[test]
+fn socket_path_longer_than_107_bytes_exits_1() {
+    let home = TempDir::new().unwrap();
+    let long_home = padded_home(&home, 108);
+    let mut child = spawn_daemon_without_runtime_dir(&long_home);
+    let status = wait_exit(&mut child, "long-path daemon");
+    assert_eq!(status.code(), Some(1), "status: {status}");
+
+    let log = std::fs::read_to_string(log_path(&long_home)).unwrap();
+    assert!(log.contains("socket path too long"), "log: {log}");
+}
+
+/// In the fallback layout the lock name is 17 bytes longer than the socket
+/// name, so a socket path of 91-107 bytes passes the socket check but its
+/// lock would fail to open with ENAMETOOLONG. It must take the documented
+/// exit instead.
+#[test]
+fn lock_path_past_the_limit_still_exits_1() {
+    let home = TempDir::new().unwrap();
+    let band_home = padded_home(&home, 100);
+    let lock = daemon_lock_path_from(&band_home, None);
+    assert!(
+        lock.as_os_str().as_bytes().len() > 107,
+        "lock: {}",
+        lock.display()
+    );
+
+    let mut child = spawn_daemon_without_runtime_dir(&band_home);
+    let status = wait_exit(&mut child, "band-path daemon");
+    assert_eq!(status.code(), Some(1), "status: {status}");
+
+    let log = std::fs::read_to_string(log_path(&band_home)).unwrap();
+    assert!(log.contains("socket path too long"), "log: {log}");
 }

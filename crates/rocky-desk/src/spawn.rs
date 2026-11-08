@@ -116,9 +116,10 @@ mod tests {
     }
 
     /// The spawned child must be waited on, or it lingers as a zombie owned by
-    /// the test process. The child's `/proc` entry keeps our pid as the parent
-    /// while it runs or waits to be reaped, so that entry disappearing proves
-    /// the reaper thread waited on it.
+    /// the test process. A live or zombie `/proc` entry keeps our pid as its
+    /// parent, so that entry disappearing proves the reaper thread waited on
+    /// it. Only `/bin/true` counts: another unit test in this binary may spawn
+    /// a process of its own.
     #[cfg(target_os = "linux")]
     #[test]
     fn spawned_daemon_is_reaped() {
@@ -126,25 +127,26 @@ mod tests {
 
         let me = std::process::id();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-        let mut saw_zombie = false;
         loop {
-            let Some((comm, state)) = child_of(me) else {
-                return;
-            };
-            saw_zombie |= state == 'Z';
-            assert!(
-                std::time::Instant::now() < deadline,
-                "child {comm} was still present after 2 s (state {state}, zombie seen: {saw_zombie})"
-            );
-            std::thread::sleep(std::time::Duration::from_millis(10));
+            match child_state(me, "true") {
+                None => return,
+                Some(_) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Some(state) => panic!(
+                    "child true was still present after 2 s (state {state}, zombie: {})",
+                    state == 'Z'
+                ),
+            }
         }
     }
 
-    /// The first child of `ppid` in `/proc`, as `(comm, state)`. The command
-    /// name may hold spaces and parentheses, so every field after it is read
-    /// from the last `)`.
+    /// `/proc` state of the child of `ppid` whose field 2 is `comm`, while it
+    /// runs or waits to be reaped. The command name may hold spaces and
+    /// parentheses, so field 2 is read from the first `(` to the last `)`.
     #[cfg(target_os = "linux")]
-    fn child_of(ppid: u32) -> Option<(String, char)> {
+    fn child_state(ppid: u32, comm: &str) -> Option<char> {
+        let field2 = format!("({comm})");
         for entry in std::fs::read_dir("/proc").ok()? {
             let Ok(entry) = entry else { continue };
             let Ok(stat) = std::fs::read_to_string(entry.path().join("stat")) else {
@@ -153,6 +155,9 @@ mod tests {
             let (Some(open), Some(close)) = (stat.find('('), stat.rfind(')')) else {
                 continue;
             };
+            if &stat[open..=close] != field2.as_str() {
+                continue;
+            }
             let mut fields = stat[close + 1..].split_whitespace();
             let (Some(state), Some(parent)) = (fields.next(), fields.next()) else {
                 continue;
@@ -161,7 +166,7 @@ mod tests {
                 continue;
             };
             if parent.parse::<u32>() == Ok(ppid) {
-                return Some((stat[open..=close].to_string(), state));
+                return Some(state);
             }
         }
         None
