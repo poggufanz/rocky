@@ -100,7 +100,7 @@ mod tests {
     fn empty_env_falls_back_to_home() {
         assert_eq!(
             rocky_home_from(Some(OsStr::new("")), Path::new(r"C:\Users\a")),
-            PathBuf::from(r"C:\Users\a\.rocky")
+            Path::new(r"C:\Users\a").join(".rocky")
         );
     }
     #[test]
@@ -135,14 +135,12 @@ mod tests {
     #[test]
     fn desk_layout() {
         let p = Path::new(r"C:\h");
-        assert_eq!(spool_dir(p), PathBuf::from(r"C:\h\desk\spool"));
-        assert_eq!(bad_dir(p), PathBuf::from(r"C:\h\desk\spool\bad"));
-        assert_eq!(log_path(p), PathBuf::from(r"C:\h\desk\rockyd.log"));
-        assert_eq!(
-            tool_text_off_marker(p),
-            PathBuf::from(r"C:\h\desk\tool-text-off")
-        );
-        assert_eq!(settings_path(p), PathBuf::from(r"C:\h\desk\settings.json"));
-        assert_eq!(history_dir(p), PathBuf::from(r"C:\h\desk\history"));
+        let desk = p.join("desk");
+        assert_eq!(spool_dir(p), desk.join("spool"));
+        assert_eq!(bad_dir(p), desk.join("spool").join("bad"));
+        assert_eq!(log_path(p), desk.join("rockyd.log"));
+        assert_eq!(tool_text_off_marker(p), desk.join("tool-text-off"));
+        assert_eq!(settings_path(p), desk.join("settings.json"));
+        assert_eq!(history_dir(p), desk.join("history"));
     }
 }
