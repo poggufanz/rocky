@@ -4,16 +4,22 @@
 //! unverified server. A std reader thread forwards decoded messages to the
 //! caller; over-long lines and decode errors disconnect.
 
-use std::io::{self, Read, Write};
+use std::io;
+#[cfg(windows)]
+use std::io::{Read, Write};
 use std::path::Path;
-use std::sync::mpsc::{self, Sender};
+#[cfg(windows)]
+use std::sync::mpsc;
+use std::sync::mpsc::Sender;
+#[cfg(windows)]
 use std::thread;
 use std::time::Duration;
 
+#[cfg(windows)]
 use rocky_proto::paths::pipe_name;
-use rocky_proto::pipe::{
-    ClientMsg, LINE_CAP, ServerMsg, WireError, decode, decode_unbounded, encode,
-};
+use rocky_proto::pipe::{ClientMsg, ServerMsg};
+#[cfg(windows)]
+use rocky_proto::pipe::{LINE_CAP, WireError, decode, decode_unbounded, encode};
 
 #[cfg(windows)]
 use std::os::windows::io::{AsRawHandle, RawHandle};
@@ -394,6 +400,7 @@ fn client_loop(
 /// The 64 KiB `LINE_CAP` applies to client→daemon lines only. Server→desk
 /// snapshots grow with agent count, so the desk allows much larger lines
 /// here — still bounded so a rogue server cannot grow memory without limit.
+#[cfg(windows)]
 const SERVER_LINE_CAP: usize = 16 * 1024 * 1024;
 
 #[cfg(windows)]

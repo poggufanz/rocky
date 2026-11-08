@@ -1,3 +1,5 @@
+#![cfg(windows)]
+
 //! Second-launch relay: one desk asks the running one to come to the front.
 
 use std::sync::Arc;
