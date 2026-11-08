@@ -129,16 +129,23 @@ file is left byte-identical until a later `set` succeeds.
 `set` accepts the seven boolean names and `lang` (a JSON bool, or one of the
 three strings). It replies with `ack`: `ok: false` plus `error` `unknown
 setting` (a name that is not settable, including `v`), `invalid value`
-(wrong JSON type), or `save failed` (the file write failed). A successful
-`set` saves the file, broadcasts a full `settings` message, syncs the
-`desk/tool-text-off` marker, clears `settings_unreadable`, and pushes fresh
-`status` rows when `tool_text` changed. It also broadcasts `health` when it
-changed, which the first successful `set` after an unreadable file does.
+(a wrong JSON type, or a `lang` string other than the three), or `save
+failed` (the file write failed). A successful `set` saves the file,
+broadcasts a full `settings` message, clears `settings_unreadable`, and
+pushes fresh `status` rows when `tool_text` changed. When the save succeeds
+and `tool_text` changed, it also syncs the `desk/tool-text-off` marker. It
+also broadcasts `health` when it changed, which the first successful `set`
+after an unreadable file does.
 
 The marker `desk/tool-text-off` is present while `tool_text` is off and
-absent while it is on. The daemon rewrites it at start and on every
-`tool_text` change, so it matches the settings in use. Turning `tool_text`
-off also drops `command` and `description` from agents already in memory.
+absent while it is on. At start the daemon syncs it from the settings it
+loaded (defaults when the file is missing or unreadable), and a `set` of
+`tool_text` syncs it again, so it matches the settings in use. Turning
+`tool_text` off also drops the command text and subagent descriptions from
+agents already in memory, and clears the text of timeline entries that came
+from a tool input (a command, or a subagent description). Path text stays.
+Every `settings` broadcast makes the desk re-request its open timelines, so
+cleared text disappears there too.
 
 ## Desk history v1
 
@@ -183,18 +190,44 @@ Rules:
 - **Cap.** Accepted segments total at most 64 MiB. When an append pushes the
   total over, the oldest other segments are deleted, oldest first, and one
   `history_full` gap line for the lost range and line count is appended to
-  the current segment.
+  the current segment. The cap is not strict: the gap line is written after
+  the prune, and the current segment is never trimmed, so the total can stay
+  above 64 MiB.
 - **Torn line.** A hard kill can leave a partial last line. The next append
   writes a newline first, and replay skips lines it cannot parse.
-- **Replay.** At start the daemon rebuilds agents, statuses, and timelines
-  from the segments, then seeds the ingestor with every `src` seen so those
-  spool files are deleted without being applied again.
+- **Replay.** At start the daemon rebuilds agents, statuses, timelines, and
+  `health.gaps` from the segments, then seeds the ingestor with every `src`
+  seen so those spool files are deleted without being applied again.
 - **Tool text.** Segments written while tool text was on keep that text until
   they age out or history is turned off. Replay drops it when `tool_text` is
   off, so it never returns to memory, statuses, or timelines.
 - **Off.** When the daemon starts with `history` off, and whenever the
   setting changes to off, every accepted segment is deleted. While off,
   nothing is appended.
+
+## Desk OS registrations (Windows)
+
+The desk writes these places outside `<ROCKY_HOME>`.
+
+- **Sign-in autostart.** Key
+  `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, value `rocky-desk`,
+  data `"<exe path>" --tray` for the desk's own exe. Only the desk's
+  autostart toggle and a Yes answer to the sign-in question write or remove
+  it. A value that points elsewhere reads as off, and enabling rewrites it.
+  The desk reads the value when the settings view opens and after each
+  toggle.
+- **Toast identity.** Key
+  `HKCU\Software\Classes\AppUserModelId\Rocky.Desk`, string values
+  `DisplayName` = `rocky` and `IconUri` = `<ROCKY_HOME>\desk\rocky.ico`. The
+  desk writes it once per process, after the first `settings` message where
+  any notify toggle is on. It also sets the same id as the process's
+  AppUserModelId at start, so toasts and the taskbar group under it.
+- **Icon file.** `<ROCKY_HOME>\desk\rocky.ico` is written from the icon
+  compiled into the exe whenever the file is missing or holds other bytes.
+- **Error log.** `<ROCKY_HOME>\desk\rocky-desk.log` takes one line per error
+  kind per process, shaped `kind: error`; the `panic` entry also carries the
+  backtrace below it. The kinds are `panic`, `set_icon`, `set_tooltip`,
+  `refresh_menu`, `close_veto`, `autostart`, `aumid`, and `toast`.
 
 ## Pipe v2
 
@@ -217,7 +250,7 @@ disconnected, reconnects, and receives a fresh snapshot.
 | daemon → desk | `snapshot` | `agents[]`, `aggregate`, `health`, `settings` |
 | daemon → desk | `status` | `op: "upsert" \| "remove"`, `agent` |
 | daemon → desk | `health` | `spool_pending`, `spool_dropped`, `dropped_events`, `bad_files`, `late_events`, `hook_newer_than_daemon`, `gaps[]`, `settings_unreadable` |
-| daemon → desk | `settings` | full settings object, broadcast when it changes |
+| daemon → desk | `settings` | full settings object, broadcast after every successful `set` |
 | desk → daemon | `set` | `id`, `name`, `value` |
 | desk → daemon | `timeline` | `id`, `key` |
 | daemon → desk | `timeline` | `id`, `key`, `entries[]` |
@@ -251,8 +284,9 @@ an unknown key gives an empty `entries`. Entries are `{ms, kind, tool_name?,
 text?, outcome?}`. `kind` is one of `session_start`, `turn_start`, `tool`,
 `needs_you`, `subagent_start`, `subagent_stop`, `turn_done`, `turn_failed`,
 `session_end`, `gap`. `outcome` is `pending`, `ok`, or `failed` and appears
-on `tool` entries. Tool text is a repo-relative path or the redacted command;
-a `gap` entry carries the reason in `text`. Timelines are not part of
+on `tool` entries. Tool text is a path made relative to the repo root, the
+full path when it does not sit under that root, or the redacted command; a
+`gap` entry carries the reason in `text`. Timelines are not part of
 `snapshot`; a desk asks for them per agent.
 
 `set` errors are the strings documented under Desk settings v1. `cmd` with
