@@ -6,6 +6,7 @@ pub mod connect;
 pub mod desklog;
 pub mod i18n;
 pub mod notify;
+pub mod os_notice;
 pub mod relay;
 pub mod respawn;
 pub mod settings_view;
