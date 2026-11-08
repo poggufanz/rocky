@@ -123,11 +123,11 @@ fn socket_path_longer_than_107_bytes_exits_1() {
 }
 
 /// In the fallback layout the lock name is 17 bytes longer than the socket
-/// name, so a socket path of 91-107 bytes passes the socket check but its
-/// lock would fail to open with ENAMETOOLONG. It must take the documented
-/// exit instead.
+/// name, so a socket path of 91-107 bytes puts the lock past 107 bytes. Only
+/// the socket has that limit; the lock is a regular file, so the daemon must
+/// still start.
 #[test]
-fn lock_path_past_the_limit_still_exits_1() {
+fn lock_path_past_the_socket_limit_still_starts() {
     let home = TempDir::new().unwrap();
     let band_home = padded_home(&home, 100);
     let lock = daemon_lock_path_from(&band_home, None);
@@ -138,9 +138,5 @@ fn lock_path_past_the_limit_still_exits_1() {
     );
 
     let mut child = spawn_daemon_without_runtime_dir(&band_home);
-    let status = wait_exit(&mut child, "band-path daemon");
-    assert_eq!(status.code(), Some(1), "status: {status}");
-
-    let log = std::fs::read_to_string(log_path(&band_home)).unwrap();
-    assert!(log.contains("socket path too long"), "log: {log}");
+    wait_socket(&socket_path_from(&band_home, None), &mut child);
 }

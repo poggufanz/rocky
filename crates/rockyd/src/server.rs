@@ -594,14 +594,11 @@ mod imp {
         std::fs::create_dir_all(&desk)?;
         std::fs::set_permissions(&desk, std::fs::Permissions::from_mode(0o700))?;
 
-        // 2. Refuse an oversized path before creating or unlinking anything.
-        // In the fallback layout the lock name is 17 bytes longer than
-        // `rockyd.sock`, so it has to fit too or the open fails with
-        // ENAMETOOLONG instead of the documented message.
+        // 2. Refuse an oversized socket path before creating or unlinking
+        // anything. Only the socket has the 107-byte `sun_path` limit; the
+        // lock is a regular file, so a longer lock path is fine.
         let sock = socket_path(rocky_home);
-        if !super::socket_path_fits(&sock)
-            || !super::socket_path_fits(&daemon_lock_path(rocky_home))
-        {
+        if !super::socket_path_fits(&sock) {
             return Err(BindError::PathTooLong);
         }
 
