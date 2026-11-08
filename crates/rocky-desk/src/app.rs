@@ -7,6 +7,7 @@
 //! connect/spawn/retry work runs on a background worker thread so the UI never
 //! blocks, and its result comes back through a second channel the pump drains.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -29,9 +30,11 @@ use crate::connect::{CONNECT_BUDGET, ConnectDone, connect_attempt};
 use crate::desklog::LogOnce;
 use crate::i18n::{Msg, UiLang, detect_ui_lang, resolve_lang, tr};
 use crate::icons::tray_icon;
+use crate::notify::{Notifier, NotifyCtx, notice_text, toast_tag};
 use crate::settings_view::{
     self, SettingId, View, set_autostart_asked, set_bool, set_lang, show_autostart_banner,
 };
+use crate::toast::{ToastHandle, ensure_icon_file, register_aumid, set_process_aumid, show_toast};
 use crate::view::{Conn, Model};
 
 gpui::actions!(rocky, [OpenRocky, StopRecording, QuitDesk]);
@@ -45,6 +48,8 @@ fn now_ms() -> u64 {
 
 struct Controller {
     model: Model,
+    /// Notification rules; remembers statuses across messages.
+    notifier: Notifier,
     /// Live inbox, or `None` once its disconnect has been handled. The
     /// `None` flip is what makes disconnect handling run exactly once.
     inbox: Option<Receiver<Option<ServerMsg>>>,
@@ -146,6 +151,15 @@ struct DeskView {
     window: Option<WindowHandle<Self>>,
     tray: Option<Tray>,
     log: LogOnce,
+    /// Latest toast per tag, so a late click still reaches its handler.
+    toasts: BTreeMap<String, ToastHandle>,
+    /// Toast clicks cross from a WinRT thread on this channel.
+    click_tx: mpsc::Sender<()>,
+    clicks: Receiver<()>,
+    /// Set by a click; the pump reveals the window outside the view lease.
+    show_requested: bool,
+    /// The toast identity is registered at most once per process.
+    aumid_ready: bool,
     /// The tray menu must be rebuilt for the new language. Done by the pump
     /// outside the view lease, since the builder reads this entity.
     menu_stale: bool,
@@ -396,14 +410,94 @@ impl DeskView {
         panel
     }
 
-    fn on_inbox(&mut self, cx: &mut Context<Self>) {
+    /// Register the toast identity once, after the first settings with a
+    /// notice toggle on. A failed icon write or registry write is logged and
+    /// not retried, so a broken key cannot make every broadcast write.
+    fn register_toasts(&mut self) {
+        if self.aumid_ready {
+            return;
+        }
+        let Some(settings) = self.ctl.model.settings() else {
+            return;
+        };
+        if !(settings.notify_needs_you || settings.notify_failed || settings.notify_done) {
+            return;
+        }
+        self.aumid_ready = true;
+        let icon = match ensure_icon_file(&self.ctl.rocky_home) {
+            Ok(icon) => icon,
+            Err(e) => {
+                self.log.once("aumid", &e);
+                return;
+            }
+        };
+        if let Err(e) = register_aumid("rocky", Some(&icon)) {
+            self.log.once("aumid", &e);
+        }
+    }
+
+    /// Turn one message's notices into toasts. Each toast is held by its tag,
+    /// which also makes a newer toast replace the one it supersedes.
+    fn notify(&mut self, msg: &ServerMsg, window_active: bool) {
+        let Some(settings) = self.ctl.model.settings() else {
+            return;
+        };
+        let ctx = NotifyCtx {
+            now_ms: now_ms(),
+            window_active,
+            settings,
+        };
+        let notices = self
+            .ctl
+            .notifier
+            .on_message(msg, self.ctl.model.agents(), &ctx);
+        let lang = self.ctl.ui_lang;
+        for n in &notices {
+            let (title, body) = notice_text(lang, n);
+            let tag = toast_tag(&n.session_id);
+            let click_tx = self.click_tx.clone();
+            let shown = show_toast(
+                &title,
+                &body,
+                &tag,
+                Box::new(move || {
+                    let _ = click_tx.send(());
+                }),
+            );
+            match shown {
+                Ok(toast) => {
+                    self.toasts.insert(tag, toast);
+                }
+                Err(e) => {
+                    self.log.once("toast", &e);
+                }
+            }
+        }
+    }
+
+    /// Toast clicks arrive from a WinRT thread; drain them and let the pump
+    /// reveal the window outside the view lease.
+    fn on_clicks(&mut self) {
+        let mut clicked = false;
+        while self.clicks.try_recv().is_ok() {
+            clicked = true;
+        }
+        if clicked {
+            self.show_requested = true;
+        }
+    }
+
+    fn on_inbox(&mut self, cx: &mut Context<Self>, window_active: bool) {
         let mut changed = self.ctl.on_worker();
         let mut requests = Vec::new();
         let mut pending_lang = None;
-        if let Some(inbox) = self.ctl.inbox.as_ref() {
+        if let Some(inbox) = self.ctl.inbox.take() {
+            let mut alive = true;
             loop {
                 match inbox.try_recv() {
                     Ok(Some(msg)) => {
+                        let settings_msg =
+                            matches!(msg, ServerMsg::Snapshot { .. } | ServerMsg::Settings { .. });
                         if let ServerMsg::Snapshot { settings, .. }
                         | ServerMsg::Settings { settings } = &msg
                         {
@@ -414,21 +508,30 @@ impl DeskView {
                         {
                             // Ack state changed (stop acked or id cleared).
                         }
+                        let for_notify = msg.clone();
                         requests.extend(self.ctl.model.apply(msg));
+                        if settings_msg {
+                            self.register_toasts();
+                        }
+                        self.notify(&for_notify, window_active);
                         changed = true;
                     }
                     Ok(None) | Err(mpsc::TryRecvError::Disconnected) => {
-                        // Transition exactly once: drop the dead inbox first so
-                        // the next tick has nothing to re-handle.
-                        self.ctl.inbox = None;
-                        self.ctl.outbox = None;
-                        let action = self.ctl.state.on_disconnect(now_ms());
-                        self.ctl.act(action);
-                        changed = true;
+                        // Transition exactly once: the taken inbox stays
+                        // dropped so the next tick has nothing to re-handle.
+                        alive = false;
                         break;
                     }
                     Err(mpsc::TryRecvError::Empty) => break,
                 }
+            }
+            if alive {
+                self.ctl.inbox = Some(inbox);
+            } else {
+                self.ctl.outbox = None;
+                let action = self.ctl.state.on_disconnect(now_ms());
+                self.ctl.act(action);
+                changed = true;
             }
         }
         if let Some(lang) = pending_lang {
@@ -633,11 +736,17 @@ pub fn run(rocky_home: PathBuf, opts: RunOptions) {
         let done = connect_attempt(&rocky_home, exe.as_deref(), CONNECT_BUDGET);
         let (outcome, tied, live) = (done.outcome, done.tied_to_job, done.live);
         let log_path = desk_dir(&rocky_home).join("rocky-desk.log");
+        let mut log = LogOnce::new(log_path);
+        if let Err(e) = set_process_aumid() {
+            log.once("aumid", &e);
+        }
+        let (click_tx, clicks) = mpsc::channel::<()>();
         let (worker_tx, worker_rx) = mpsc::channel::<ConnectDone>();
         let state = ConnState::new(3, 300_000);
         let detected = detect_ui_lang();
         let mut ctl = Controller {
             model: Model::new(),
+            notifier: Notifier::default(),
             inbox: None,
             outbox: None,
             worker_rx,
@@ -678,7 +787,12 @@ pub fn run(rocky_home: PathBuf, opts: RunOptions) {
             ctl,
             window: None,
             tray: None,
-            log: LogOnce::new(log_path),
+            log,
+            toasts: BTreeMap::new(),
+            click_tx,
+            clicks,
+            show_requested: false,
+            aumid_ready: false,
             menu_stale: false,
         });
 
@@ -801,30 +915,40 @@ pub fn run(rocky_home: PathBuf, opts: RunOptions) {
                     let slow = tick.is_multiple_of(50);
                     let alive = cx
                         .update(|cx| {
-                            if let Some(v) = view.upgrade() {
-                                let mut menu_stale = false;
-                                v.update(cx, |v, cx| {
-                                    v.on_inbox(cx);
-                                    v.refresh_tray(cx);
-                                    menu_stale = std::mem::take(&mut v.menu_stale);
-                                    if slow {
-                                        cx.notify();
-                                    }
-                                });
-                                // The menu builder reads this view, so the
-                                // rebuild must run outside the lease above.
-                                if menu_stale
-                                    && let Some(tray) = v.read(cx).tray.clone()
-                                    && let Err(e) = tray.refresh_menu(cx)
-                                {
-                                    v.update(cx, |v, _| {
-                                        v.log.once("refresh_menu", &e);
-                                    });
+                            let Some(v) = view.upgrade() else {
+                                return false;
+                            };
+                            // Read outside the view lease: the window's root
+                            // view is this entity, so updating it inside
+                            // `v.update` would double-borrow.
+                            let handle = v.read(cx).window;
+                            let active = handle.and_then(|h| h.is_active(cx)).unwrap_or(false);
+                            let mut menu_stale = false;
+                            let mut show = false;
+                            v.update(cx, |v, cx| {
+                                v.on_inbox(cx, active);
+                                v.on_clicks();
+                                v.refresh_tray(cx);
+                                menu_stale = std::mem::take(&mut v.menu_stale);
+                                show = std::mem::take(&mut v.show_requested);
+                                if slow {
+                                    cx.notify();
                                 }
-                                true
-                            } else {
-                                false
+                            });
+                            // The menu builder reads this view, so the
+                            // rebuild must run outside the lease above.
+                            if menu_stale
+                                && let Some(tray) = v.read(cx).tray.clone()
+                                && let Err(e) = tray.refresh_menu(cx)
+                            {
+                                v.update(cx, |v, _| {
+                                    v.log.once("refresh_menu", &e);
+                                });
                             }
+                            if show {
+                                show_window(&v, cx);
+                            }
+                            true
                         })
                         .unwrap_or(false);
                     if !alive {

@@ -104,6 +104,14 @@ pub enum Msg {
     AutostartQuestion,
     Yes,
     No,
+    NoticeNeedsYou {
+        agent: String,
+        summary: Option<String>,
+    },
+    NoticeFailed {
+        agent: String,
+    },
+    NoticeDone,
 }
 
 #[cfg(test)]
@@ -206,6 +214,18 @@ fn samples() -> Vec<Msg> {
         Msg::AutostartQuestion,
         Msg::Yes,
         Msg::No,
+        Msg::NoticeNeedsYou {
+            agent: "Explore aaaaaaaa".into(),
+            summary: Some("Bash".into()),
+        },
+        Msg::NoticeNeedsYou {
+            agent: "main".into(),
+            summary: None,
+        },
+        Msg::NoticeFailed {
+            agent: "main".into(),
+        },
+        Msg::NoticeDone,
     ]
 }
 
@@ -288,6 +308,16 @@ pub fn en(m: &Msg) -> String {
         Msg::AutostartQuestion => "Start rocky when you sign in?".to_string(),
         Msg::Yes => "Yes".to_string(),
         Msg::No => "No".to_string(),
+        Msg::NoticeNeedsYou { agent, summary } => needs_you_en(agent, summary.as_deref()),
+        Msg::NoticeFailed { agent } => format!("{agent} failed"),
+        Msg::NoticeDone => "Finished".to_string(),
+    }
+}
+
+fn needs_you_en(agent: &str, summary: Option<&str>) -> String {
+    match summary {
+        Some(summary) => format!("{agent} needs you: {summary}"),
+        None => format!("{agent} needs you"),
     }
 }
 
@@ -372,6 +402,16 @@ pub fn id(m: &Msg) -> String {
         Msg::AutostartQuestion => "Jalankan rocky saat Anda masuk?".to_string(),
         Msg::Yes => "Ya".to_string(),
         Msg::No => "Tidak".to_string(),
+        Msg::NoticeNeedsYou { agent, summary } => needs_you_id(agent, summary.as_deref()),
+        Msg::NoticeFailed { agent } => format!("{agent} gagal"),
+        Msg::NoticeDone => "Selesai".to_string(),
+    }
+}
+
+fn needs_you_id(agent: &str, summary: Option<&str>) -> String {
+    match summary {
+        Some(summary) => format!("{agent} perlu Anda: {summary}"),
+        None => format!("{agent} perlu Anda"),
     }
 }
 

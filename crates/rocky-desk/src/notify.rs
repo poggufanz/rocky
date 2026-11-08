@@ -5,10 +5,33 @@ use std::collections::{BTreeMap, BTreeSet};
 use rocky_proto::pipe::{AgentKey, AgentStatus, ServerMsg, Status, StatusOp};
 use rocky_proto::settings::Settings;
 
+use crate::i18n::{Msg, UiLang, tr};
 use crate::view;
 
 /// Events older than this are not worth a notice.
 pub const STALE_MS: u64 = 60_000;
+
+/// Title and body of one toast. The title is the repo name, which is not
+/// translated; the body comes from the copy catalog.
+pub fn notice_text(lang: UiLang, n: &Notice) -> (String, String) {
+    let msg = match n.kind {
+        NoticeKind::NeedsYou => Msg::NoticeNeedsYou {
+            agent: n.agent.clone(),
+            summary: n.summary.clone(),
+        },
+        NoticeKind::Failed => Msg::NoticeFailed {
+            agent: n.agent.clone(),
+        },
+        NoticeKind::Done => Msg::NoticeDone,
+    };
+    (n.repo.clone(), tr(lang, &msg))
+}
+
+/// Toast tag for a session. Windows caps tags at 64 characters, and one tag
+/// per session makes a newer toast replace the older.
+pub fn toast_tag(session_id: &str) -> String {
+    session_id.chars().take(64).collect()
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NoticeKind {
@@ -155,10 +178,56 @@ impl Notifier {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::i18n::UiLang;
     use rocky_proto::pipe::{Health, RepoInfo, StatusOp};
     use rocky_proto::settings::Settings;
 
     const NOW: u64 = 1_000_000;
+
+    #[test]
+    fn notice_text_names_repo_agent_and_tool() {
+        let n = Notice {
+            kind: NoticeKind::NeedsYou,
+            session_id: "s".into(),
+            repo: "rocky".into(),
+            agent: "Explore aaaaaaaa".into(),
+            summary: Some("Bash".into()),
+        };
+        assert_eq!(
+            notice_text(UiLang::En, &n),
+            ("rocky".into(), "Explore aaaaaaaa needs you: Bash".into())
+        );
+        assert_eq!(toast_tag(&"x".repeat(80)).chars().count(), 64);
+    }
+
+    #[test]
+    fn notice_text_covers_missing_summary_failed_and_done() {
+        let base = Notice {
+            kind: NoticeKind::NeedsYou,
+            session_id: "s".into(),
+            repo: "rocky".into(),
+            agent: "main".into(),
+            summary: None,
+        };
+        assert_eq!(
+            notice_text(UiLang::En, &base),
+            ("rocky".into(), "main needs you".into())
+        );
+        let failed = Notice {
+            kind: NoticeKind::Failed,
+            ..base.clone()
+        };
+        assert_eq!(
+            notice_text(UiLang::Id, &failed),
+            ("rocky".into(), "main gagal".into())
+        );
+        let done = Notice {
+            kind: NoticeKind::Done,
+            ..base
+        };
+        assert_eq!(notice_text(UiLang::En, &done).1, "Finished");
+        assert_eq!(notice_text(UiLang::Id, &done).1, "Selesai");
+    }
 
     fn agent(session: &str, agent_id: &str, status: Status) -> AgentStatus {
         AgentStatus {

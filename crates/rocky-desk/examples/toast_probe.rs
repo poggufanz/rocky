@@ -22,10 +22,17 @@ fn main() {
         "probe",
         Box::new(move || flag.store(true, Ordering::SeqCst)),
     );
-    match shown {
-        Ok(()) => println!("shown: ok"),
-        Err(err) => println!("shown: {err:?}"),
-    }
+    // The handle stays alive so activation can still reach the process.
+    let _held = match shown {
+        Ok(handle) => {
+            println!("shown: ok");
+            Some(handle)
+        }
+        Err(err) => {
+            println!("shown: {err:?}");
+            None
+        }
+    };
 
     let deadline = Instant::now() + Duration::from_secs(20);
     while !clicked.load(Ordering::SeqCst) && Instant::now() < deadline {
