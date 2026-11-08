@@ -1,4 +1,4 @@
-//! Typed catalog for every user-visible desk string, in English and Indonesian.
+//! Typed catalog for the desk's user-visible copy, in English and Indonesian.
 //!
 //! `en` and `id` match exhaustively, so adding a variant fails the build until
 //! both languages carry copy.
@@ -18,6 +18,7 @@ pub enum UiLang {
 pub enum Msg {
     Status(Status),
     NoAgents,
+    UnknownRepo,
     Session {
         short: String,
     },
@@ -67,6 +68,7 @@ fn samples() -> Vec<Msg> {
         Msg::Status(Status::Failed),
         Msg::Status(Status::Ended),
         Msg::NoAgents,
+        Msg::UnknownRepo,
         Msg::Session {
             short: "abc12345".into(),
         },
@@ -115,6 +117,7 @@ pub fn en(m: &Msg) -> String {
         }
         .to_string(),
         Msg::NoAgents => "No agents recorded yet.".to_string(),
+        Msg::UnknownRepo => "unknown repo".to_string(),
         Msg::Session { short } => format!("session {short}"),
         Msg::Age { secs } => age_en(*secs),
         Msg::Failures { n } => format!("{n} failures"),
@@ -158,6 +161,7 @@ pub fn id(m: &Msg) -> String {
         }
         .to_string(),
         Msg::NoAgents => "Belum ada agen yang tercatat.".to_string(),
+        Msg::UnknownRepo => "repo tidak dikenal".to_string(),
         Msg::Session { short } => format!("sesi {short}"),
         Msg::Age { secs } => age_id(*secs),
         Msg::Failures { n } => format!("{n} kegagalan"),

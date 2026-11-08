@@ -3,7 +3,7 @@
 use rocky_proto::pipe::{AgentKey, AgentStatus, Health, ServerMsg, Status, StatusOp};
 use std::collections::BTreeMap;
 
-use crate::i18n::Msg;
+use crate::i18n::{Msg, UiLang, tr};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Conn {
@@ -19,8 +19,26 @@ pub enum Conn {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RepoGroup {
-    pub label: String,
+    /// Repo name as recorded; empty when the daemon reported none.
+    pub name: String,
+    pub branch: Option<String>,
     pub sessions: Vec<SessionRow>,
+}
+
+impl RepoGroup {
+    /// Header text: the repo name is never translated; only the missing-name
+    /// placeholder and the branch suffix are composed here.
+    pub fn label(&self, lang: UiLang) -> String {
+        let name = if self.name.is_empty() {
+            tr(lang, &Msg::UnknownRepo)
+        } else {
+            self.name.clone()
+        };
+        match &self.branch {
+            Some(b) if !b.is_empty() => format!("{name} @ {b}"),
+            _ => name,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,6 +62,9 @@ pub struct Model {
     health: Health,
     conn: Conn,
 }
+
+/// Agents bucketed by `(repo name, branch)`, then by session id.
+type GroupMap<'a> = BTreeMap<(String, Option<String>), BTreeMap<String, Vec<&'a AgentStatus>>>;
 
 impl Model {
     pub fn new() -> Self {
@@ -79,13 +100,16 @@ impl Model {
     }
 
     pub fn groups(&self, now_ms: u64) -> Vec<RepoGroup> {
-        let mut by_group: BTreeMap<String, BTreeMap<String, Vec<&AgentStatus>>> = BTreeMap::new();
+        let mut by_group: GroupMap<'_> = BTreeMap::new();
         for a in self.agents.values() {
             if a.status == Status::Ended {
                 continue;
             }
             by_group
-                .entry(group_label(&a.repo.name, a.repo.branch.as_deref()))
+                .entry((
+                    a.repo.name.clone(),
+                    a.repo.branch.clone().filter(|b| !b.is_empty()),
+                ))
                 .or_default()
                 .entry(a.key.session_id.clone())
                 .or_default()
@@ -93,8 +117,9 @@ impl Model {
         }
         by_group
             .into_iter()
-            .map(|(label, sessions)| RepoGroup {
-                label,
+            .map(|((name, branch), sessions)| RepoGroup {
+                name,
+                branch,
                 sessions: sessions
                     .into_iter()
                     .map(|(session_id, mut agents)| {
@@ -202,18 +227,6 @@ fn priority(s: Status) -> u8 {
     }
 }
 
-fn group_label(name: &str, branch: Option<&str>) -> String {
-    let name = if name.is_empty() {
-        "unknown repo"
-    } else {
-        name
-    };
-    match branch {
-        Some(b) if !b.is_empty() => format!("{name} @ {b}"),
-        _ => name.to_string(),
-    }
-}
-
 /// First 8 chars, char-safe.
 fn short8(s: &str) -> String {
     s.chars().take(8).collect()
@@ -267,7 +280,7 @@ pub fn action_text(a: &rocky_proto::pipe::Action, repo_root: Option<&str>) -> St
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::i18n::{Msg, en};
+    use crate::i18n::{Msg, UiLang, en};
     use rocky_proto::pipe::{Action, AgentKey, AgentStatus, Health, RepoInfo, ServerMsg, Status};
     use rocky_proto::settings::Settings;
 
@@ -307,6 +320,20 @@ mod tests {
     }
 
     #[test]
+    fn unknown_repo_label_is_translated() {
+        assert_eq!(en(&Msg::UnknownRepo), "unknown repo");
+        let mut a = agent("S1", "", Status::Idle);
+        a.repo.name = String::new();
+        a.repo.branch = Some("main".into());
+        let mut m = Model::new();
+        m.apply(snapshot(vec![a]));
+        let groups = m.groups(2_000);
+        assert_eq!(groups[0].name, "");
+        assert_eq!(groups[0].label(UiLang::En), "unknown repo @ main");
+        assert_eq!(groups[0].label(UiLang::Id), "repo tidak dikenal @ main");
+    }
+
+    #[test]
     fn two_sessions_same_repo_are_separate_rows() {
         let mut m = Model::new();
         m.apply(snapshot(vec![
@@ -315,7 +342,9 @@ mod tests {
         ]));
         let groups = m.groups(2_000);
         assert_eq!(groups.len(), 1);
-        assert_eq!(groups[0].label, "r @ main");
+        assert_eq!(groups[0].name, "r");
+        assert_eq!(groups[0].branch.as_deref(), Some("main"));
+        assert_eq!(groups[0].label(UiLang::En), "r @ main");
         assert_eq!(groups[0].sessions.len(), 2);
         assert_ne!(
             groups[0].sessions[0].session_short,

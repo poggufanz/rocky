@@ -261,7 +261,7 @@ impl Render for DeskView {
         }
         for g in &groups {
             let mut gdiv = div().flex_col().gap_1();
-            gdiv = gdiv.child(div().text_sm().child(g.label.clone()));
+            gdiv = gdiv.child(div().text_sm().child(g.label(lang)));
             for s in &g.sessions {
                 let mut sdiv = div().flex_col().pl_2();
                 sdiv = sdiv.child(div().text_xs().child(tr(
