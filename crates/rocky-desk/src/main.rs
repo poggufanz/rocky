@@ -9,12 +9,28 @@ fn main() {
     // Single instance: if the mutex already exists, another desk owns it.
     let _mutex = match single_instance(&desk_mutex_name(&home)) {
         Ok(m) => m,
-        Err(InstanceError::AlreadyRunning) => return,
+        Err(InstanceError::AlreadyRunning) => {
+            focus_running_desk(&home);
+            return;
+        }
         Err(InstanceError::Failed) => std::process::exit(1),
     };
     let opts = rocky_desk::autostart::parse_args(std::env::args());
     rocky_desk::app::run(home, opts);
     // `_mutex` drops here, releasing the instance lock.
+}
+
+/// A second launch owns the foreground right; hand it to the running desk
+/// before asking it to come forward. Every failure stays silent: the desk may
+/// be starting up or already exiting, and this launch still exits 0.
+#[cfg(windows)]
+fn focus_running_desk(home: &std::path::Path) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{ASFW_ANY, AllowSetForegroundWindow};
+
+    // SAFETY: no pointers cross the boundary; ASFW_ANY grants the right to any
+    // process, which is exactly the running desk.
+    unsafe { AllowSetForegroundWindow(ASFW_ANY) };
+    let _ = rocky_desk::relay::send_show(home, rocky_desk::relay::RELAY_TIMEOUT);
 }
 
 /// The desk has no console, and a panic inside a Win32 callback aborts with

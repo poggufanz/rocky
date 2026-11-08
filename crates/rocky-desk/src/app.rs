@@ -156,7 +156,8 @@ struct DeskView {
     /// Toast clicks cross from a WinRT thread on this channel.
     click_tx: mpsc::Sender<()>,
     clicks: Receiver<()>,
-    /// Set by a click; the pump reveals the window outside the view lease.
+    /// Set by a toast click or the `show` relay; the pump reveals the window
+    /// outside the view lease.
     show_requested: bool,
     /// The toast identity is registered at most once per process.
     aumid_ready: bool,
@@ -496,6 +497,7 @@ impl DeskView {
             loop {
                 match inbox.try_recv() {
                     Ok(Some(msg)) => {
+                        let show = matches!(msg, ServerMsg::Show);
                         let settings_msg =
                             matches!(msg, ServerMsg::Snapshot { .. } | ServerMsg::Settings { .. });
                         if let ServerMsg::Snapshot { settings, .. }
@@ -514,6 +516,9 @@ impl DeskView {
                             self.register_toasts();
                         }
                         self.notify(&for_notify, window_active);
+                        if show {
+                            self.show_requested = true;
+                        }
                         changed = true;
                     }
                     Ok(None) | Err(mpsc::TryRecvError::Disconnected) => {
@@ -689,20 +694,35 @@ fn show_window(view: &Entity<DeskView>, cx: &mut App) {
 }
 
 /// Hide or show the desk window. gpui 0.2.2 has no hide on Windows, so close
-/// (vetoed) hides the HWND directly; the tray brings it back.
+/// (vetoed) hides the HWND directly; the tray and the show relay bring it back.
 #[cfg(windows)]
 fn set_visible(window: &Window, visible: bool) {
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-    use windows_sys::Win32::UI::WindowsAndMessaging::{SW_HIDE, SW_SHOW, ShowWindow};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        IsIconic, SW_HIDE, SW_RESTORE, SW_SHOW, ShowWindow,
+    };
     // Fully qualified: gpui's inherent `Window::window_handle` returns its own handle type.
     let Ok(handle) = HasWindowHandle::window_handle(window) else {
         return;
     };
     if let RawWindowHandle::Win32(w) = handle.as_raw() {
-        let cmd = if visible { SW_SHOW } else { SW_HIDE };
+        let hwnd = w.hwnd.get() as _;
         // SAFETY: the HWND belongs to this live gpui window on this (UI) thread;
-        // ShowWindow only changes its visibility.
-        unsafe { ShowWindow(w.hwnd.get() as _, cmd) };
+        // these calls only change its visibility or restore state.
+        let cmd = unsafe {
+            if visible {
+                // SW_SHOW leaves a minimized window minimized; restore it
+                // instead so a second launch brings the window forward.
+                if IsIconic(hwnd) != 0 {
+                    SW_RESTORE
+                } else {
+                    SW_SHOW
+                }
+            } else {
+                SW_HIDE
+            }
+        };
+        unsafe { ShowWindow(hwnd, cmd) };
     }
 }
 
