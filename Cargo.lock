@@ -4497,13 +4497,17 @@ dependencies = [
 name = "rocky-desk"
 version = "0.1.0"
 dependencies = [
+ "embed-resource",
  "gpui",
  "gpui-tray",
+ "image",
  "interprocess",
  "raw-window-handle",
  "rocky-proto",
  "rockyd",
+ "serde_json",
  "tempfile",
+ "windows 0.62.2",
  "windows-sys 0.61.2",
 ]
 
@@ -4529,6 +4533,7 @@ dependencies = [
 name = "rockyd"
 version = "0.1.0"
 dependencies = [
+ "embed-resource",
  "interprocess",
  "notify",
  "rocky-proto",

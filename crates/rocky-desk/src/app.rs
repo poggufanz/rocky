@@ -7,6 +7,7 @@
 //! connect/spawn/retry work runs on a background worker thread so the UI never
 //! blocks, and its result comes back through a second channel the pump drains.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -17,12 +18,23 @@ use gpui::{
     TitlebarOptions, Window, WindowBounds, WindowHandle, WindowOptions, div, px, rgb, size,
 };
 use gpui_tray::Tray;
-use rocky_proto::pipe::{ClientMsg, CmdName, ServerMsg, Status};
+use rocky_proto::paths::desk_dir;
+use rocky_proto::pipe::{AgentKey, ClientMsg, CmdName, Outcome, ServerMsg, Status};
+use rocky_proto::settings::Lang;
 
-use crate::client::{self, Outbox};
+use crate::autostart::{self, RunOptions};
+use crate::client::Outbox;
+use crate::clock;
 use crate::conn::{Action, ConnState, ConnectOutcome};
+use crate::connect::{CONNECT_BUDGET, ConnectDone, connect_attempt};
+use crate::desklog::LogOnce;
+use crate::i18n::{Msg, UiLang, detect_ui_lang, resolve_lang, tr};
 use crate::icons::tray_icon;
-use crate::spawn::spawn_daemon;
+use crate::notify::{Notifier, NotifyCtx, notice_text, toast_tag};
+use crate::settings_view::{
+    self, SettingId, View, set_autostart_asked, set_bool, set_lang, show_autostart_banner,
+};
+use crate::toast::{ToastHandle, ensure_icon_file, register_aumid, set_process_aumid, show_toast};
 use crate::view::{Conn, Model};
 
 gpui::actions!(rocky, [OpenRocky, StopRecording, QuitDesk]);
@@ -34,27 +46,10 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-/// Result of one background connect attempt, delivered to the foreground.
-struct ConnectDone {
-    outcome: ConnectOutcome,
-    /// Present on `Connected`: the live outbox + inbox.
-    live: Option<(Outbox, Receiver<Option<ServerMsg>>)>,
-    /// True when the daemon was spawned without breakaway (sticky warning).
-    tied_to_job: bool,
-}
-
-impl ConnectDone {
-    fn failed(outcome: ConnectOutcome) -> Self {
-        ConnectDone {
-            outcome,
-            live: None,
-            tied_to_job: false,
-        }
-    }
-}
-
 struct Controller {
     model: Model,
+    /// Notification rules; remembers statuses across messages.
+    notifier: Notifier,
     /// Live inbox, or `None` once its disconnect has been handled. The
     /// `None` flip is what makes disconnect handling run exactly once.
     inbox: Option<Receiver<Option<ServerMsg>>>,
@@ -66,12 +61,36 @@ struct Controller {
     cmd_id: u64,
     rocky_home: PathBuf,
     last_aggregate: Status,
-    last_tooltip: String,
+    last_tooltip: Msg,
+    /// Language every desk string renders in.
+    ui_lang: UiLang,
+    /// Detected UI language; the language setting resolves against it.
+    detected: UiLang,
+    /// Panel the window shows.
+    view: View,
+    /// Started with `--tray`, so the sign-in question is suppressed.
+    tray_start: bool,
+    /// Sign-in registration as last read; `None` until the settings view reads it.
+    autostart_on: Option<bool>,
+    /// A sign-in read or write failed; cleared by the next successful read.
+    autostart_failed: bool,
 }
 
 impl Controller {
     fn set_conn(&mut self, c: Conn) {
         self.model.set_conn(c);
+    }
+
+    /// Ask the daemon for one agent's timeline; a no-op while disconnected.
+    fn request_timeline(&mut self, key: AgentKey) {
+        let Some(outbox) = self.outbox.as_ref() else {
+            return;
+        };
+        self.cmd_id += 1;
+        let _ = outbox.send(ClientMsg::Timeline {
+            id: self.cmd_id,
+            key,
+        });
     }
 
     /// Handle one decision from `ConnState` (foreground, non-blocking).
@@ -112,59 +131,18 @@ impl Controller {
     }
 }
 
-/// One connect attempt: probe the pipe; on absence spawn the daemon and retry
-/// with backoff (100 ms doubling, 5 s total). Keeps the live streams of the
-/// winning attempt. Never retries foreign/wrong-version daemons. Blocking is
-/// fine: runs on a worker thread (or pre-loop at startup).
-fn connect_attempt(rocky_home: &std::path::Path) -> ConnectDone {
-    let mut first = true;
-    let mut tied = false;
-    let mut wait = Duration::from_millis(100);
-    let total = Duration::from_secs(5);
-    let mut spent = Duration::ZERO;
-    loop {
-        let (tx, rx) = mpsc::channel();
-        match client::connect_and_subscribe(rocky_home, tx) {
-            Ok(outbox) => {
-                return ConnectDone {
-                    outcome: ConnectOutcome::Connected,
-                    live: Some((outbox, rx)),
-                    tied_to_job: tied,
-                };
-            }
-            Err(client::ConnectError::Unverified) => {
-                return ConnectDone::failed(ConnectOutcome::Unverified);
-            }
-            Err(client::ConnectError::VersionMismatch) => {
-                return ConnectDone::failed(ConnectOutcome::VersionMismatch);
-            }
-            Err(_) => {}
-        }
-        if first {
-            first = false;
-            let exe = std::env::current_exe()
-                .ok()
-                .and_then(|p| p.parent().map(|d| d.join("rockyd.exe")));
-            if let Some(exe) = exe {
-                match spawn_daemon(&exe) {
-                    Ok(info) => tied = info.tied_to_job,
-                    Err(_) => return ConnectDone::failed(ConnectOutcome::SpawnFailed),
-                }
-            }
-        }
-        if spent >= total {
-            return ConnectDone::failed(ConnectOutcome::NoDaemon);
-        }
-        std::thread::sleep(wait);
-        spent += wait;
-        wait = (wait * 2).min(Duration::from_secs(1));
-    }
+/// The daemon beside this exe, when the desk runs from a build or install dir.
+fn daemon_exe() -> Option<PathBuf> {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("rockyd.exe")))
 }
 
 /// Spawn one worker running `connect_attempt` and delivering the result.
 fn spawn_connect_worker(rocky_home: PathBuf, tx: mpsc::Sender<ConnectDone>) {
     std::thread::spawn(move || {
-        let _ = tx.send(connect_attempt(&rocky_home));
+        let exe = daemon_exe();
+        let _ = tx.send(connect_attempt(&rocky_home, exe.as_deref(), CONNECT_BUDGET));
     });
 }
 
@@ -172,6 +150,20 @@ struct DeskView {
     ctl: Controller,
     window: Option<WindowHandle<Self>>,
     tray: Option<Tray>,
+    log: LogOnce,
+    /// Latest toast per tag, so a late click still reaches its handler.
+    toasts: BTreeMap<String, ToastHandle>,
+    /// Toast clicks cross from a WinRT thread on this channel.
+    click_tx: mpsc::Sender<()>,
+    clicks: Receiver<()>,
+    /// Set by a toast click or the `show` relay; the pump reveals the window
+    /// outside the view lease.
+    show_requested: bool,
+    /// The toast identity is registered at most once per process.
+    aumid_ready: bool,
+    /// The tray menu must be rebuilt for the new language. Done by the pump
+    /// outside the view lease, since the builder reads this entity.
+    menu_stale: bool,
 }
 
 impl DeskView {
@@ -182,46 +174,376 @@ impl DeskView {
         let agg = self.ctl.model.aggregate();
         if agg != self.ctl.last_aggregate {
             self.ctl.last_aggregate = agg;
-            let _ = tray.set_icon(tray_icon(agg), cx);
+            if let Err(e) = tray.set_icon(tray_icon(agg), cx) {
+                self.log.once("set_icon", &e);
+            }
         }
         let tip = self.ctl.model.tooltip();
         if tip != self.ctl.last_tooltip {
             self.ctl.last_tooltip = tip.clone();
-            let _ = tray.set_tooltip(Some(tip), cx);
+            if let Err(e) = tray.set_tooltip(Some(tr(self.ctl.ui_lang, &tip)), cx) {
+                self.log.once("set_tooltip", &e);
+            }
         }
     }
 
-    fn on_inbox(&mut self, cx: &mut Context<Self>) {
-        let mut changed = self.ctl.on_worker();
-        let Some(inbox) = self.ctl.inbox.as_ref() else {
-            if changed {
-                cx.notify();
-            }
+    fn next_id(&mut self) -> u64 {
+        self.ctl.cmd_id += 1;
+        self.ctl.cmd_id
+    }
+
+    /// Send a `set` and remember its id so a failed ack can be attributed.
+    fn send_set(&mut self, id: u64, msg: ClientMsg) {
+        let Some(outbox) = self.ctl.outbox.as_ref() else {
             return;
         };
-        loop {
-            match inbox.try_recv() {
-                Ok(Some(msg)) => {
-                    if let ServerMsg::Ack { id, ok, .. } = &msg
-                        && self.ctl.state.on_ack(*id, *ok)
-                    {
-                        // Ack state changed (stop acked or id cleared).
-                    }
-                    self.ctl.model.apply(msg);
-                    changed = true;
-                }
-                Ok(None) | Err(mpsc::TryRecvError::Disconnected) => {
-                    // Transition exactly once: drop the dead inbox first so
-                    // the next tick has nothing to re-handle.
-                    self.ctl.inbox = None;
-                    self.ctl.outbox = None;
-                    let action = self.ctl.state.on_disconnect(now_ms());
-                    self.ctl.act(action);
-                    changed = true;
-                    break;
-                }
-                Err(mpsc::TryRecvError::Empty) => break,
+        if outbox.send(msg).is_ok() {
+            self.ctl.model.set_sent(id);
+        }
+    }
+
+    /// Toggle one daemon setting; the UI moves only on the next broadcast.
+    fn toggle_setting(&mut self, setting: SettingId) {
+        if !self.ctl.model.editable() {
+            return;
+        }
+        let Some(on) = self.ctl.model.settings().map(|s| setting.get(s)) else {
+            return;
+        };
+        let id = self.next_id();
+        self.send_set(id, set_bool(id, setting, !on));
+    }
+
+    /// Ask for another UI language; the broadcast applies it.
+    fn choose_lang(&mut self, lang: Lang) {
+        if !self.ctl.model.editable() {
+            return;
+        }
+        let id = self.next_id();
+        self.send_set(id, set_lang(id, lang));
+    }
+
+    fn toggle_view(&mut self, cx: &mut Context<Self>) {
+        self.ctl.view = match self.ctl.view {
+            View::Agents => View::Settings,
+            View::Settings => View::Agents,
+        };
+        if self.ctl.view == View::Settings {
+            self.read_autostart();
+        }
+        cx.notify();
+    }
+
+    /// Read the sign-in registration from the Run key and Task Manager's flag.
+    fn read_autostart(&mut self) {
+        match std::env::current_exe().and_then(|exe| autostart::state(&exe)) {
+            Ok(on) => {
+                self.ctl.autostart_on = Some(on);
+                self.ctl.autostart_failed = false;
             }
+            Err(e) => {
+                self.ctl.autostart_failed = true;
+                self.log.once("autostart", &e);
+            }
+        }
+    }
+
+    fn toggle_autostart(&mut self, cx: &mut Context<Self>) {
+        if !self.ctl.model.editable() {
+            return;
+        }
+        let Some(on) = self.ctl.autostart_on else {
+            return;
+        };
+        let result = if on {
+            autostart::disable()
+        } else {
+            std::env::current_exe().and_then(|exe| autostart::enable(&exe))
+        };
+        match result {
+            Ok(()) => self.read_autostart(),
+            Err(e) => {
+                self.ctl.autostart_failed = true;
+                self.log.once("autostart", &e);
+            }
+        }
+        cx.notify();
+    }
+
+    /// Answer the sign-in question. Both answers mark it asked; only Yes
+    /// writes the Run value.
+    fn answer_autostart(&mut self, yes: bool, cx: &mut Context<Self>) {
+        if yes {
+            match std::env::current_exe().and_then(|exe| autostart::enable(&exe)) {
+                Ok(()) => {
+                    self.ctl.autostart_on = Some(true);
+                    self.ctl.autostart_failed = false;
+                }
+                Err(e) => {
+                    self.ctl.autostart_failed = true;
+                    self.log.once("autostart", &e);
+                }
+            }
+        }
+        let id = self.next_id();
+        self.send_set(id, set_autostart_asked(id));
+        cx.notify();
+    }
+
+    /// Adopt a language broadcast: rebuild the tray menu and re-send the
+    /// tooltip in the new language.
+    fn sync_lang(&mut self, setting: Lang, cx: &mut Context<Self>) {
+        let lang = resolve_lang(setting, self.ctl.detected);
+        if lang == self.ctl.ui_lang {
+            return;
+        }
+        self.ctl.ui_lang = lang;
+        // A value `tooltip` never returns forces the next refresh to re-send it.
+        self.ctl.last_tooltip = Msg::NoAgents;
+        self.menu_stale = true;
+        cx.notify();
+    }
+
+    /// The one-time sign-in question, shown while it is unanswered.
+    fn banner(&mut self, cx: &mut Context<Self>) -> Option<Div> {
+        if !show_autostart_banner(self.ctl.tray_start, self.ctl.model.settings()) {
+            return None;
+        }
+        let lang = self.ctl.ui_lang;
+        let mut banner = div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .p_2()
+            .rounded_sm()
+            .bg(rgb(0xE4E9F7));
+        banner = banner.child(div().text_sm().child(tr(lang, &Msg::AutostartQuestion)));
+        let mut buttons = div().flex().gap_2();
+        for (label, yes) in [(Msg::Yes, true), (Msg::No, false)] {
+            let id = if yes { "autostart-yes" } else { "autostart-no" };
+            buttons = buttons.child(
+                div()
+                    .id(SharedString::from(id))
+                    .px_2()
+                    .rounded_sm()
+                    .bg(rgb(0xFFFFFF))
+                    .text_sm()
+                    .cursor_pointer()
+                    .child(tr(lang, &label))
+                    .on_click(cx.listener(move |this, _, _, cx| this.answer_autostart(yes, cx))),
+            );
+        }
+        banner = banner.child(buttons);
+        if self.ctl.autostart_failed {
+            banner = banner.child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(0xD92B2B))
+                    .child(tr(lang, &Msg::AutostartFailed)),
+            );
+        }
+        Some(banner)
+    }
+
+    /// Toggles reflect the last broadcast settings; sign-in state is read
+    /// locally. Nothing here changes until the daemon confirms a `set`.
+    fn settings_panel(&mut self, cx: &mut Context<Self>) -> Div {
+        let lang = self.ctl.ui_lang;
+        let editable = self.ctl.model.editable();
+        let settings = self.ctl.model.settings().cloned();
+        let mut panel = div().flex().flex_col().gap_2();
+        if !editable {
+            panel = panel.child(div().text_sm().child(tr(lang, &Msg::SettingsReadOnly)));
+        }
+        let Some(settings) = settings else {
+            return panel;
+        };
+        for setting in SettingId::ALL {
+            panel = panel.child(settings_view::toggle_row(
+                SharedString::from(format!("setting:{}", setting.wire_name())),
+                tr(lang, &setting.label()),
+                setting.get(&settings),
+                editable,
+                cx.listener(move |this, _, _, _| this.toggle_setting(setting)),
+            ));
+        }
+        if !settings.tool_text && settings.history {
+            panel = panel.child(div().text_xs().child(tr(lang, &Msg::ToolTextHistoryNote)));
+        }
+        let mut langs = div().flex().gap_2();
+        for (value, label) in [
+            (Lang::Auto, Msg::LangAuto),
+            (Lang::En, Msg::LangEn),
+            (Lang::Id, Msg::LangId),
+        ] {
+            langs = langs.child(settings_view::choice(
+                SharedString::from(format!("lang:{value:?}")),
+                tr(lang, &label),
+                settings.lang == value,
+                editable,
+                cx.listener(move |this, _, _, _| this.choose_lang(value)),
+            ));
+        }
+        panel = panel.child(langs);
+        panel = panel.child(settings_view::toggle_row(
+            SharedString::from("setting:autostart"),
+            tr(lang, &Msg::Autostart),
+            self.ctl.autostart_on.unwrap_or(false),
+            editable,
+            cx.listener(|this, _, _, cx| this.toggle_autostart(cx)),
+        ));
+        if self.ctl.autostart_failed {
+            panel = panel.child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(0xD92B2B))
+                    .child(tr(lang, &Msg::AutostartFailed)),
+            );
+        }
+        if let Some(err) = self.ctl.model.set_error() {
+            panel = panel.child(div().text_sm().text_color(rgb(0xD92B2B)).child(tr(
+                lang,
+                &Msg::SetFailed {
+                    reason: err.to_string(),
+                },
+            )));
+        }
+        panel
+    }
+
+    /// Register the toast identity once, after the first settings with a
+    /// notice toggle on. A failed icon write or registry write is logged and
+    /// not retried, so a broken key cannot make every broadcast write.
+    fn register_toasts(&mut self) {
+        if self.aumid_ready {
+            return;
+        }
+        let Some(settings) = self.ctl.model.settings() else {
+            return;
+        };
+        if !(settings.notify_needs_you || settings.notify_failed || settings.notify_done) {
+            return;
+        }
+        self.aumid_ready = true;
+        let icon = match ensure_icon_file(&self.ctl.rocky_home) {
+            Ok(icon) => icon,
+            Err(e) => {
+                self.log.once("aumid", &e);
+                return;
+            }
+        };
+        if let Err(e) = register_aumid("rocky", Some(&icon)) {
+            self.log.once("aumid", &e);
+        }
+    }
+
+    /// Turn one message's notices into toasts. Each toast is held by its tag,
+    /// which also makes a newer toast replace the one it supersedes.
+    fn notify(&mut self, msg: &ServerMsg, window_active: bool) {
+        let Some(settings) = self.ctl.model.settings() else {
+            return;
+        };
+        let ctx = NotifyCtx {
+            now_ms: now_ms(),
+            window_active,
+            settings,
+        };
+        let notices = self
+            .ctl
+            .notifier
+            .on_message(msg, self.ctl.model.agents(), &ctx);
+        let lang = self.ctl.ui_lang;
+        for n in &notices {
+            let (title, body) = notice_text(lang, n);
+            let tag = toast_tag(&n.session_id);
+            let click_tx = self.click_tx.clone();
+            let shown = show_toast(
+                &title,
+                &body,
+                &tag,
+                Box::new(move || {
+                    let _ = click_tx.send(());
+                }),
+            );
+            match shown {
+                Ok(toast) => {
+                    self.toasts.insert(tag, toast);
+                }
+                Err(e) => {
+                    self.log.once("toast", &e);
+                }
+            }
+        }
+    }
+
+    /// Toast clicks arrive from a WinRT thread; drain them and let the pump
+    /// reveal the window outside the view lease.
+    fn on_clicks(&mut self) {
+        let mut clicked = false;
+        while self.clicks.try_recv().is_ok() {
+            clicked = true;
+        }
+        if clicked {
+            self.show_requested = true;
+        }
+    }
+
+    fn on_inbox(&mut self, cx: &mut Context<Self>, window_active: bool) {
+        let mut changed = self.ctl.on_worker();
+        let mut requests = Vec::new();
+        let mut pending_lang = None;
+        if let Some(inbox) = self.ctl.inbox.take() {
+            let mut alive = true;
+            loop {
+                match inbox.try_recv() {
+                    Ok(Some(msg)) => {
+                        let show = matches!(msg, ServerMsg::Show);
+                        let settings_msg =
+                            matches!(msg, ServerMsg::Snapshot { .. } | ServerMsg::Settings { .. });
+                        if let ServerMsg::Snapshot { settings, .. }
+                        | ServerMsg::Settings { settings } = &msg
+                        {
+                            pending_lang = Some(settings.lang);
+                        }
+                        if let ServerMsg::Ack { id, ok, .. } = &msg
+                            && self.ctl.state.on_ack(*id, *ok)
+                        {
+                            // Ack state changed (stop acked or id cleared).
+                        }
+                        let for_notify = msg.clone();
+                        requests.extend(self.ctl.model.apply(msg));
+                        if settings_msg {
+                            self.register_toasts();
+                        }
+                        self.notify(&for_notify, window_active);
+                        if show {
+                            self.show_requested = true;
+                        }
+                        changed = true;
+                    }
+                    Ok(None) | Err(mpsc::TryRecvError::Disconnected) => {
+                        // Transition exactly once: the taken inbox stays
+                        // dropped so the next tick has nothing to re-handle.
+                        alive = false;
+                        break;
+                    }
+                    Err(mpsc::TryRecvError::Empty) => break,
+                }
+            }
+            if alive {
+                self.ctl.inbox = Some(inbox);
+            } else {
+                self.ctl.outbox = None;
+                let action = self.ctl.state.on_disconnect(now_ms());
+                self.ctl.act(action);
+                changed = true;
+            }
+        }
+        if let Some(lang) = pending_lang {
+            self.sync_lang(lang, cx);
+        }
+        for key in requests {
+            self.ctl.request_timeline(key);
         }
         if changed {
             cx.notify();
@@ -230,9 +552,9 @@ impl DeskView {
 }
 
 impl Render for DeskView {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        let groups = self.ctl.model.groups(now_ms());
-        let warnings = self.ctl.model.warnings();
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let warnings = self.ctl.model.warnings(&clock::local_hhmm);
+        let lang = self.ctl.ui_lang;
         // Opaque background: without one, gpui on Windows shows the desktop through.
         let mut root = div()
             .flex()
@@ -242,56 +564,120 @@ impl Render for DeskView {
             .size_full()
             .bg(rgb(0xF5F5F4))
             .text_color(rgb(0x1C1C1C));
+        if let Some(banner) = self.banner(cx) {
+            root = root.child(banner);
+        }
+        let other = match self.ctl.view {
+            View::Agents => Msg::ViewSettings,
+            View::Settings => Msg::ViewAgents,
+        };
+        root = root.child(
+            div()
+                .id(SharedString::from("view-toggle"))
+                .text_sm()
+                .cursor_pointer()
+                .child(tr(lang, &other))
+                .on_click(cx.listener(|this, _, _, cx| this.toggle_view(cx))),
+        );
         if !warnings.is_empty() {
             let mut strip = div().flex_col().gap_1();
             for w in &warnings {
-                strip = strip.child(div().text_sm().child(w.clone()));
+                strip = strip.child(div().text_sm().child(tr(lang, w)));
             }
             root = root.child(strip);
         }
+        if self.ctl.view == View::Settings {
+            return root.child(self.settings_panel(cx));
+        }
+        let groups = self.ctl.model.groups(now_ms());
         if groups.is_empty() {
-            root = root.child(div().text_sm().child("No agents recorded yet."));
+            root = root.child(div().text_sm().child(tr(lang, &Msg::NoAgents)));
         }
         for g in &groups {
             let mut gdiv = div().flex_col().gap_1();
-            gdiv = gdiv.child(div().text_sm().child(g.label.clone()));
+            gdiv = gdiv.child(div().text_sm().child(g.label(lang)));
             for s in &g.sessions {
                 let mut sdiv = div().flex_col().pl_2();
-                sdiv = sdiv.child(
-                    div()
-                        .text_xs()
-                        .child(format!("session {}", s.session_short)),
-                );
-                for a in &s.agents {
-                    let mut row = div().flex().gap_2().text_sm();
+                sdiv = sdiv.child(div().text_xs().child(tr(
+                    lang,
+                    &Msg::Session {
+                        short: s.session_short.clone(),
+                    },
+                )));
+                for a in &s.rows {
+                    let mut row = div()
+                        .id(SharedString::from(format!(
+                            "agent:{}:{}",
+                            a.key.session_id, a.key.agent_id
+                        )))
+                        .flex()
+                        .gap_2()
+                        .text_sm()
+                        .cursor_pointer()
+                        .on_click(cx.listener({
+                            let key = a.key.clone();
+                            move |this, _event, _window, cx| {
+                                if let Some(key) = this.ctl.model.toggle_open(&key) {
+                                    this.ctl.request_timeline(key);
+                                }
+                                cx.notify();
+                            }
+                        }));
+                    if a.child {
+                        row = row.pl_3();
+                    }
+                    let mut label = div().flex_col();
+                    label = label.child(div().child(tr(lang, &a.label)));
+                    if let Some(desc) = &a.description {
+                        label = label.child(div().text_xs().child(desc.clone()));
+                    }
                     row = row
-                        .child(chip(a.status))
-                        .child(div().child(a.label.clone()))
-                        .child(div().child(a.age_text.clone()));
+                        .child(chip(a.status, lang))
+                        .child(label)
+                        .child(div().child(tr(lang, &a.age)));
                     if a.failures > 0 {
-                        row = row.child(div().child(format!("{} failures", a.failures)));
+                        row = row.child(div().child(tr(lang, &Msg::Failures { n: a.failures })));
                     }
                     if let Some(act) = &a.action_text {
                         row = row.child(div().text_xs().child(act.clone()));
                     }
+                    if let Some(note) = &a.note {
+                        row = row.child(div().text_xs().child(tr(lang, note)));
+                    }
                     sdiv = sdiv.child(row);
+                    if self.ctl.model.is_open(&a.key) {
+                        let mut entries = div().flex_col().pl_6().text_xs();
+                        for e in self.ctl.model.timeline_rows(&a.key, &clock::local_hhmm) {
+                            let mut line = div()
+                                .flex()
+                                .gap_2()
+                                .child(div().text_color(rgb(0x8A8A8A)).child(e.time))
+                                .child(div().child(tr(lang, &e.text)));
+                            if let Some(outcome) = e.outcome {
+                                let color = match outcome {
+                                    Outcome::Failed => rgb(0xD92B2B),
+                                    Outcome::Ok => rgb(0x2BA044),
+                                    Outcome::Pending => rgb(0x8A8A8A),
+                                };
+                                line = line.child(
+                                    div()
+                                        .text_color(color)
+                                        .child(tr(lang, &Msg::Outcome(outcome))),
+                                );
+                            }
+                            entries = entries.child(line);
+                        }
+                        sdiv = sdiv.child(entries);
+                    }
+                }
+                if let Some(hidden) = &s.hidden_children {
+                    sdiv = sdiv.child(div().text_xs().pl_3().child(tr(lang, hidden)));
                 }
                 gdiv = gdiv.child(sdiv);
             }
             root = root.child(gdiv);
         }
         root
-    }
-}
-
-fn status_text(s: Status) -> &'static str {
-    match s {
-        Status::Idle => "idle",
-        Status::Working => "working",
-        Status::NeedsYou => "needs you",
-        Status::Done => "done",
-        Status::Failed => "failed",
-        Status::Ended => "ended",
     }
 }
 
@@ -308,20 +694,35 @@ fn show_window(view: &Entity<DeskView>, cx: &mut App) {
 }
 
 /// Hide or show the desk window. gpui 0.2.2 has no hide on Windows, so close
-/// (vetoed) hides the HWND directly; the tray brings it back.
+/// (vetoed) hides the HWND directly; the tray and the show relay bring it back.
 #[cfg(windows)]
 fn set_visible(window: &Window, visible: bool) {
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-    use windows_sys::Win32::UI::WindowsAndMessaging::{SW_HIDE, SW_SHOW, ShowWindow};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        IsIconic, SW_HIDE, SW_RESTORE, SW_SHOW, ShowWindow,
+    };
     // Fully qualified: gpui's inherent `Window::window_handle` returns its own handle type.
     let Ok(handle) = HasWindowHandle::window_handle(window) else {
         return;
     };
     if let RawWindowHandle::Win32(w) = handle.as_raw() {
-        let cmd = if visible { SW_SHOW } else { SW_HIDE };
+        let hwnd = w.hwnd.get() as _;
         // SAFETY: the HWND belongs to this live gpui window on this (UI) thread;
-        // ShowWindow only changes its visibility.
-        unsafe { ShowWindow(w.hwnd.get() as _, cmd) };
+        // these calls only change its visibility or restore state.
+        let cmd = unsafe {
+            if visible {
+                // SW_SHOW leaves a minimized window minimized; restore it
+                // instead so a second launch brings the window forward.
+                if IsIconic(hwnd) != 0 {
+                    SW_RESTORE
+                } else {
+                    SW_SHOW
+                }
+            } else {
+                SW_HIDE
+            }
+        };
+        unsafe { ShowWindow(hwnd, cmd) };
     }
 }
 
@@ -332,7 +733,7 @@ fn set_visible(window: &Window, visible: bool) {
     }
 }
 
-fn chip(s: Status) -> Div {
+fn chip(s: Status, lang: UiLang) -> Div {
     let bg = match s {
         Status::NeedsYou => rgb(0xE8B800),
         Status::Failed => rgb(0xD92B2B),
@@ -345,18 +746,27 @@ fn chip(s: Status) -> Div {
         .rounded_sm()
         .bg(bg)
         .text_xs()
-        .child(status_text(s).to_string())
+        .child(tr(lang, &Msg::Status(s)))
 }
 
-pub fn run(rocky_home: PathBuf) {
+pub fn run(rocky_home: PathBuf, opts: RunOptions) {
     Application::new().run(move |cx: &mut App| {
         // Blocking startup attempt (the GPUI loop is not running yet).
-        let done = connect_attempt(&rocky_home);
+        let exe = daemon_exe();
+        let done = connect_attempt(&rocky_home, exe.as_deref(), CONNECT_BUDGET);
         let (outcome, tied, live) = (done.outcome, done.tied_to_job, done.live);
+        let log_path = desk_dir(&rocky_home).join("rocky-desk.log");
+        let mut log = LogOnce::new(log_path);
+        if let Err(e) = set_process_aumid() {
+            log.once("aumid", &e);
+        }
+        let (click_tx, clicks) = mpsc::channel::<()>();
         let (worker_tx, worker_rx) = mpsc::channel::<ConnectDone>();
         let state = ConnState::new(3, 300_000);
+        let detected = detect_ui_lang();
         let mut ctl = Controller {
             model: Model::new(),
+            notifier: Notifier::default(),
             inbox: None,
             outbox: None,
             worker_rx,
@@ -365,7 +775,19 @@ pub fn run(rocky_home: PathBuf) {
             cmd_id: 0,
             rocky_home,
             last_aggregate: Status::Idle,
-            last_tooltip: String::new(),
+            last_tooltip: Msg::Tooltip {
+                working: 0,
+                needs_you: 0,
+                failed: 0,
+                done: 0,
+                idle: 0,
+            },
+            ui_lang: detected,
+            detected,
+            view: View::default(),
+            tray_start: opts.tray,
+            autostart_on: None,
+            autostart_failed: false,
         };
         let action = ctl.state.on_connect_result(outcome);
         if let Some((outbox, inbox)) = live {
@@ -385,11 +807,19 @@ pub fn run(rocky_home: PathBuf) {
             ctl,
             window: None,
             tray: None,
+            log,
+            toasts: BTreeMap::new(),
+            click_tx,
+            clicks,
+            show_requested: false,
+            aumid_ready: false,
+            menu_stale: false,
         });
 
         let window = cx
             .open_window(
                 WindowOptions {
+                    show: !opts.tray,
                     titlebar: Some(TitlebarOptions {
                         title: Some(SharedString::from("rocky")),
                         appears_transparent: false,
@@ -409,30 +839,37 @@ pub fn run(rocky_home: PathBuf) {
             v.window = Some(window);
         });
         // Closing the window hides it: veto the close and minimize instead.
-        window
-            .update(cx, |_, window, cx| {
-                window.on_window_should_close(&*cx, |window, _| {
-                    set_visible(window, false);
-                    false
-                });
-            })
-            .ok();
+        if let Err(e) = window.update(cx, |_, window, cx| {
+            window.on_window_should_close(&*cx, |window, _| {
+                set_visible(window, false);
+                false
+            });
+        }) {
+            view.update(cx, |v, _| {
+                v.log.once("close_veto", &e);
+            });
+        }
 
+        let lang = view.read(cx).ctl.ui_lang;
         let agg = view.read(cx).ctl.model.aggregate();
         let tip = view.read(cx).ctl.model.tooltip();
         let tray = Tray::builder()
             .icon(tray_icon(agg))
-            .tooltip(tip.clone())
+            .tooltip(tr(lang, &tip))
             .on_activate_with({
                 let view = view.clone();
                 move |_, cx| show_window(&view, cx)
             })
-            .menu(|_| {
-                vec![
-                    MenuItem::action("Open rocky", OpenRocky),
-                    MenuItem::action("Stop recording", StopRecording),
-                    MenuItem::action("Quit", QuitDesk),
-                ]
+            .menu({
+                let view = view.clone();
+                move |cx| {
+                    let lang = view.read(cx).ctl.ui_lang;
+                    vec![
+                        MenuItem::action(tr(lang, &Msg::MenuOpen), OpenRocky),
+                        MenuItem::action(tr(lang, &Msg::MenuStop), StopRecording),
+                        MenuItem::action(tr(lang, &Msg::MenuQuit), QuitDesk),
+                    ]
+                }
             })
             .build(cx)
             .expect("build tray");
@@ -498,18 +935,40 @@ pub fn run(rocky_home: PathBuf) {
                     let slow = tick.is_multiple_of(50);
                     let alive = cx
                         .update(|cx| {
-                            if let Some(v) = view.upgrade() {
-                                v.update(cx, |v, cx| {
-                                    v.on_inbox(cx);
-                                    v.refresh_tray(cx);
-                                    if slow {
-                                        cx.notify();
-                                    }
+                            let Some(v) = view.upgrade() else {
+                                return false;
+                            };
+                            // Read outside the view lease: the window's root
+                            // view is this entity, so updating it inside
+                            // `v.update` would double-borrow.
+                            let handle = v.read(cx).window;
+                            let active = handle.and_then(|h| h.is_active(cx)).unwrap_or(false);
+                            let mut menu_stale = false;
+                            let mut show = false;
+                            v.update(cx, |v, cx| {
+                                v.on_inbox(cx, active);
+                                v.on_clicks();
+                                v.refresh_tray(cx);
+                                menu_stale = std::mem::take(&mut v.menu_stale);
+                                show = std::mem::take(&mut v.show_requested);
+                                if slow {
+                                    cx.notify();
+                                }
+                            });
+                            // The menu builder reads this view, so the
+                            // rebuild must run outside the lease above.
+                            if menu_stale
+                                && let Some(tray) = v.read(cx).tray.clone()
+                                && let Err(e) = tray.refresh_menu(cx)
+                            {
+                                v.update(cx, |v, _| {
+                                    v.log.once("refresh_menu", &e);
                                 });
-                                true
-                            } else {
-                                false
                             }
+                            if show {
+                                show_window(&v, cx);
+                            }
+                            true
                         })
                         .unwrap_or(false);
                     if !alive {

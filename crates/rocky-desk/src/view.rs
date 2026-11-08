@@ -1,7 +1,12 @@
 //! Pure view-model for rocky-desk: grouping, aggregate, tooltip, warnings.
 
-use rocky_proto::pipe::{AgentKey, AgentStatus, Health, ServerMsg, Status, StatusOp};
-use std::collections::BTreeMap;
+use rocky_proto::pipe::{
+    AgentKey, AgentStatus, Health, Outcome, ServerMsg, Status, StatusOp, TimelineEntry,
+};
+use rocky_proto::settings::Settings;
+use std::collections::{BTreeMap, BTreeSet};
+
+use crate::i18n::{Msg, UiLang, tr};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Conn {
@@ -13,27 +18,63 @@ pub enum Conn {
     ServerUnverified,
     TiedToJob,
     KeepsCrashing,
+    Unresponsive,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RepoGroup {
-    pub label: String,
+    /// Repo name as recorded; empty when the daemon reported none.
+    pub name: String,
+    pub branch: Option<String>,
     pub sessions: Vec<SessionRow>,
+}
+
+impl RepoGroup {
+    /// Header text: the repo name is never translated; only the missing-name
+    /// placeholder and the branch suffix are composed here.
+    pub fn label(&self, lang: UiLang) -> String {
+        let name = if self.name.is_empty() {
+            tr(lang, &Msg::UnknownRepo)
+        } else {
+            self.name.clone()
+        };
+        match &self.branch {
+            Some(b) if !b.is_empty() => format!("{name} @ {b}"),
+            _ => name,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionRow {
     pub session_short: String,
-    pub agents: Vec<AgentRow>,
+    /// Main row first, then children by `agent_id` when the tree is on.
+    pub rows: Vec<AgentRow>,
+    /// Children the tree setting hides, with a count of the working ones.
+    pub hidden_children: Option<Msg>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentRow {
-    pub label: String,
+    pub key: AgentKey,
+    /// True for a row under a main agent.
+    pub child: bool,
+    /// Catalog label: the main agent is translated, subagent names are not.
+    pub label: Msg,
+    pub description: Option<String>,
     pub status: Status,
     pub action_text: Option<String>,
-    pub age_text: String,
+    pub age: Msg,
     pub failures: u32,
+    /// Main-row detail for the session's remaining activity.
+    pub note: Option<Msg>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TimelineRow {
+    pub time: String,
+    pub text: Msg,
+    pub outcome: Option<Outcome>,
 }
 
 #[derive(Debug, Default)]
@@ -41,58 +82,184 @@ pub struct Model {
     agents: BTreeMap<AgentKey, AgentStatus>,
     health: Health,
     conn: Conn,
+    settings: Option<Settings>,
+    /// Agent rows whose timeline is expanded, and the entries last received.
+    open: BTreeSet<AgentKey>,
+    timelines: BTreeMap<AgentKey, Vec<TimelineEntry>>,
+    /// Ids of `set` messages awaiting their ack.
+    sent: BTreeSet<u64>,
+    /// Error from the last failed `set`, shown until the next settings broadcast.
+    set_error: Option<String>,
 }
+
+/// Agents bucketed by `(repo name, branch)`, then by session id.
+type GroupMap<'a> = BTreeMap<(String, Option<String>), BTreeMap<String, Vec<&'a AgentStatus>>>;
 
 impl Model {
     pub fn new() -> Self {
         Self::default()
     }
 
-    pub fn apply(&mut self, msg: ServerMsg) {
+    /// Applies one daemon message and returns the timeline keys to (re)request.
+    ///
+    /// Keys come back for an upsert of an open row, for every open row on a
+    /// settings broadcast, and for every open row a snapshot still carries.
+    /// Rows that disappear close on the spot and are not requested again.
+    pub fn apply(&mut self, msg: ServerMsg) -> Vec<AgentKey> {
         match msg {
-            ServerMsg::Snapshot { agents, health, .. } => {
+            ServerMsg::Snapshot {
+                agents,
+                health,
+                settings,
+                ..
+            } => {
                 self.agents = agents.into_iter().map(|a| (a.key.clone(), a)).collect();
                 self.health = health;
+                self.settings = Some(settings);
+                self.open.retain(|k| self.agents.contains_key(k));
+                self.timelines.retain(|k, _| self.open.contains(k));
+                self.open.iter().cloned().collect()
+            }
+            ServerMsg::Settings { settings } => {
+                self.settings = Some(settings);
+                self.set_error = None;
+                self.open.iter().cloned().collect()
+            }
+            ServerMsg::Ack { id, ok, error } => {
+                if self.sent.remove(&id) && !ok {
+                    self.set_error = Some(error.unwrap_or_default());
+                }
+                Vec::new()
             }
             ServerMsg::Status { op, agent } => match op {
                 StatusOp::Upsert => {
-                    self.agents.insert(agent.key.clone(), agent);
+                    let key = agent.key.clone();
+                    self.agents.insert(key.clone(), agent);
+                    if self.open.contains(&key) {
+                        vec![key]
+                    } else {
+                        Vec::new()
+                    }
                 }
                 StatusOp::Remove => {
                     self.agents.remove(&agent.key);
+                    self.close(&agent.key);
+                    Vec::new()
                 }
             },
+            ServerMsg::Timeline { key, entries, .. } => {
+                if self.open.contains(&key) {
+                    self.timelines.insert(key, entries);
+                }
+                Vec::new()
+            }
             ServerMsg::Health { health } => {
                 self.health = health;
+                Vec::new()
             }
             ServerMsg::Error { code } if code == "version" => {
                 self.conn = Conn::VersionMismatch;
+                Vec::new()
             }
-            _ => {}
+            _ => Vec::new(),
         }
+    }
+
+    /// Expands an agent row and returns the key when it opened; collapsing
+    /// drops the stored entries and returns `None`.
+    pub fn toggle_open(&mut self, key: &AgentKey) -> Option<AgentKey> {
+        if self.open.remove(key) {
+            self.timelines.remove(key);
+            None
+        } else {
+            self.open.insert(key.clone());
+            Some(key.clone())
+        }
+    }
+
+    pub fn is_open(&self, key: &AgentKey) -> bool {
+        self.open.contains(key)
+    }
+
+    /// Entries of an open timeline in daemon order; empty while closed.
+    pub fn timeline_rows(
+        &self,
+        key: &AgentKey,
+        fmt_time: &dyn Fn(u64) -> String,
+    ) -> Vec<TimelineRow> {
+        self.timelines
+            .get(key)
+            .map(|entries| {
+                entries
+                    .iter()
+                    .map(|e| TimelineRow {
+                        time: fmt_time(e.ms),
+                        text: Msg::TimelineEntry {
+                            kind: e.kind,
+                            tool: e.tool_name.clone(),
+                            text: e.text.clone(),
+                        },
+                        outcome: e.outcome,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn close(&mut self, key: &AgentKey) {
+        self.open.remove(key);
+        self.timelines.remove(key);
     }
 
     pub fn set_conn(&mut self, c: Conn) {
         self.conn = c;
     }
 
+    pub fn settings(&self) -> Option<&Settings> {
+        self.settings.as_ref()
+    }
+
+    /// Record a `set` id so its failed ack can be attributed.
+    pub fn set_sent(&mut self, id: u64) {
+        self.sent.insert(id);
+    }
+
+    /// Error from the last failed `set`, cleared by the next settings broadcast.
+    pub fn set_error(&self) -> Option<&str> {
+        self.set_error.as_deref()
+    }
+
+    /// Settings accept changes only while connected and seeded.
+    pub fn editable(&self) -> bool {
+        self.conn == Conn::Connected && self.settings.is_some()
+    }
+
+    pub fn agents(&self) -> &BTreeMap<AgentKey, AgentStatus> {
+        &self.agents
+    }
+
     pub fn groups(&self, now_ms: u64) -> Vec<RepoGroup> {
-        let mut by_group: BTreeMap<String, BTreeMap<String, Vec<&AgentStatus>>> = BTreeMap::new();
+        let mut by_group: GroupMap<'_> = BTreeMap::new();
         for a in self.agents.values() {
             if a.status == Status::Ended {
                 continue;
             }
             by_group
-                .entry(group_label(&a.repo.name, a.repo.branch.as_deref()))
+                .entry((
+                    a.repo.name.clone(),
+                    a.repo.branch.clone().filter(|b| !b.is_empty()),
+                ))
                 .or_default()
                 .entry(a.key.session_id.clone())
                 .or_default()
                 .push(a);
         }
+        let tree = self.settings.as_ref().is_none_or(|s| s.subagent_tree);
         by_group
             .into_iter()
-            .map(|(label, sessions)| RepoGroup {
-                label,
+            .map(|((name, branch), sessions)| RepoGroup {
+                name,
+                branch,
                 sessions: sessions
                     .into_iter()
                     .map(|(session_id, mut agents)| {
@@ -100,21 +267,59 @@ impl Model {
                             (!a.key.agent_id.is_empty(), &a.key.agent_id)
                                 .cmp(&(!b.key.agent_id.is_empty(), &b.key.agent_id))
                         });
+                        let children: Vec<&AgentStatus> = agents
+                            .iter()
+                            .copied()
+                            .filter(|a| !a.key.agent_id.is_empty())
+                            .collect();
+                        let working_children = children
+                            .iter()
+                            .filter(|a| a.status == Status::Working)
+                            .count() as u64;
+                        let note = agents
+                            .iter()
+                            .find(|a| a.key.agent_id.is_empty())
+                            .filter(|a| a.status == Status::Done)
+                            .and_then(|_| {
+                                (working_children > 0).then_some(Msg::SubagentsStillWorking {
+                                    n: working_children,
+                                })
+                            });
+                        let hidden_children = if tree || children.is_empty() {
+                            None
+                        } else {
+                            Some(Msg::SubagentsHidden {
+                                n: children.len() as u64,
+                                working: working_children,
+                            })
+                        };
                         SessionRow {
                             session_short: short8(&session_id),
-                            agents: agents
-                                .into_iter()
+                            rows: agents
+                                .iter()
+                                .filter(|a| tree || a.key.agent_id.is_empty())
                                 .map(|a| AgentRow {
+                                    key: a.key.clone(),
+                                    child: !a.key.agent_id.is_empty(),
                                     label: agent_label(a),
+                                    description: a.description.clone(),
                                     status: a.status,
                                     action_text: a
                                         .action
                                         .as_ref()
                                         .map(|act| action_text(act, a.repo.root.as_deref())),
-                                    age_text: age_text(now_ms, a.last_event_ms),
+                                    age: Msg::Age {
+                                        secs: age_secs(now_ms, a.last_event_ms),
+                                    },
                                     failures: a.failures,
+                                    note: if a.key.agent_id.is_empty() {
+                                        note.clone()
+                                    } else {
+                                        None
+                                    },
                                 })
                                 .collect(),
+                            hidden_children,
                         }
                     })
                     .collect(),
@@ -131,7 +336,7 @@ impl Model {
             .unwrap_or(Status::Idle)
     }
 
-    pub fn tooltip(&self) -> String {
+    pub fn tooltip(&self) -> Msg {
         let mut n = [0u64; 5];
         for a in self.agents.values() {
             if a.status == Status::Ended {
@@ -146,53 +351,73 @@ impl Model {
                 Status::Ended => {}
             }
         }
-        let segs: Vec<String> = [
-            (n[0], "working"),
-            (n[1], "needs you"),
-            (n[2], "failed"),
-            (n[3], "done"),
-            (n[4], "idle"),
-        ]
-        .into_iter()
-        .filter(|(c, _)| *c > 0)
-        .map(|(c, name)| format!("{c} {name}"))
-        .collect();
-        if segs.is_empty() {
-            "rocky: idle".to_string()
-        } else {
-            format!("rocky: {}", segs.join(", "))
+        Msg::Tooltip {
+            working: n[0],
+            needs_you: n[1],
+            failed: n[2],
+            done: n[3],
+            idle: n[4],
         }
     }
 
-    pub fn warnings(&self) -> Vec<String> {
+    /// Health and connection lines in display order. Gap timestamps go through
+    /// `fmt_time` so tests can inject UTC and the desk can show local time.
+    pub fn warnings(&self, fmt_time: &dyn Fn(u64) -> String) -> Vec<Msg> {
         let mut w = Vec::new();
         let h = &self.health;
-        if h.bad_files > 0 {
-            w.push(format!("{} bad spool files.", h.bad_files));
-        }
-        if h.dropped_events > 0 {
-            w.push(format!("{} dropped events.", h.dropped_events));
+        if h.spool_pending > 0 {
+            w.push(Msg::SpoolPending { n: h.spool_pending });
         }
         if h.spool_dropped > 0 {
-            w.push(format!("{} spool files dropped.", h.spool_dropped));
+            w.push(Msg::SpoolDropped { n: h.spool_dropped });
+        }
+        if h.dropped_events > 0 {
+            w.push(Msg::DroppedEvents {
+                n: h.dropped_events,
+            });
+        }
+        if h.bad_files > 0 {
+            w.push(Msg::BadFiles { n: h.bad_files });
         }
         if h.late_events > 0 {
-            w.push(format!("{} late events.", h.late_events));
+            w.push(Msg::LateEvents { n: h.late_events });
         }
         if h.hook_newer_than_daemon {
-            w.push("hook is newer than daemon, needs update.".to_string());
+            w.push(Msg::HookNewer);
+        }
+        if h.settings_unreadable {
+            w.push(Msg::SettingsUnreadable);
+        }
+        let mut gaps: Vec<_> = h.gaps.iter().collect();
+        gaps.sort_by_key(|g| std::cmp::Reverse(g.to_ms));
+        for gap in gaps.iter().take(GAP_LINES) {
+            w.push(Msg::Gap {
+                count: gap.count,
+                from: fmt_time(gap.from_ms),
+                to: fmt_time(gap.to_ms),
+                reason: gap.reason,
+            });
+        }
+        if gaps.len() > GAP_LINES {
+            w.push(Msg::EarlierGaps {
+                n: (gaps.len() - GAP_LINES) as u64,
+            });
         }
         match self.conn {
-            Conn::VersionMismatch => w.push("daemon version mismatch, needs update.".to_string()),
-            Conn::ServerUnverified => w.push("daemon could not be verified.".to_string()),
-            Conn::Disconnected => w.push("daemon disconnected.".to_string()),
-            Conn::TiedToJob => w.push("daemon tied to launcher job.".to_string()),
-            Conn::KeepsCrashing => w.push("daemon keeps crashing.".to_string()),
+            Conn::VersionMismatch => w.push(Msg::ConnVersionMismatch),
+            Conn::ServerUnverified => w.push(Msg::ConnUnverified),
+            Conn::Disconnected => w.push(Msg::ConnDisconnected),
+            Conn::TiedToJob => w.push(Msg::ConnTiedToJob),
+            Conn::KeepsCrashing => w.push(Msg::ConnKeepsCrashing),
+            Conn::Unresponsive => w.push(Msg::ConnUnresponsive),
             Conn::Connecting | Conn::Connected => {}
         }
         w
     }
 }
+
+/// Gap lines the strip shows before the "earlier gaps" summary.
+const GAP_LINES: usize = 5;
 
 fn priority(s: Status) -> u8 {
     match s {
@@ -205,71 +430,53 @@ fn priority(s: Status) -> u8 {
     }
 }
 
-fn group_label(name: &str, branch: Option<&str>) -> String {
-    let name = if name.is_empty() {
-        "unknown repo"
-    } else {
-        name
-    };
-    match branch {
-        Some(b) if !b.is_empty() => format!("{name} @ {b}"),
-        _ => name.to_string(),
-    }
-}
-
 /// First 8 chars, char-safe.
 fn short8(s: &str) -> String {
     s.chars().take(8).collect()
 }
 
-fn agent_label(a: &AgentStatus) -> String {
+pub(crate) fn agent_label(a: &AgentStatus) -> Msg {
     if a.key.agent_id.is_empty() {
-        return "main".to_string();
+        return Msg::MainAgent;
     }
-    match a.agent_type.as_deref() {
-        Some(t) if !t.is_empty() => format!("{} {}", t, short8(&a.key.agent_id)),
-        _ => short8(&a.key.agent_id),
+    Msg::AgentName {
+        label: match a.agent_type.as_deref() {
+            Some(t) if !t.is_empty() => format!("{} {}", t, short8(&a.key.agent_id)),
+            _ => short8(&a.key.agent_id),
+        },
     }
 }
 
-fn age_text(now_ms: u64, last_ms: u64) -> String {
-    let secs = now_ms.saturating_sub(last_ms) / 1000;
-    if secs < 10 {
-        "now".to_string()
-    } else if secs < 60 {
-        format!("{secs}s")
-    } else if secs < 3600 {
-        format!("{}m", secs / 60)
-    } else if secs < 86400 {
-        format!("{}h", secs / 3600)
-    } else {
-        format!("{}d", secs / 86400)
-    }
+fn age_secs(now_ms: u64, last_ms: u64) -> u64 {
+    now_ms.saturating_sub(last_ms) / 1000
 }
 
 pub fn action_text(a: &rocky_proto::pipe::Action, repo_root: Option<&str>) -> String {
-    let Some(path) = a.target_path.as_deref() else {
-        return a.tool_name.clone();
-    };
-    let path = path.replace('\\', "/");
-    let rel = match repo_root {
-        Some(root) => {
-            let root = root.replace('\\', "/");
-            let root = root.trim_end_matches('/');
-            // ponytail: empty root can't prefix-match; fall through to full path
-            if !root.is_empty()
-                && path.len() > root.len()
-                && path.as_bytes()[..root.len()].eq_ignore_ascii_case(root.as_bytes())
-                && path.as_bytes()[root.len()] == b'/'
-            {
-                &path[root.len() + 1..]
-            } else {
-                &path
+    let text = if let Some(command) = a.command.as_deref() {
+        format!("{} {command}", a.tool_name)
+    } else if let Some(path) = a.target_path.as_deref() {
+        let path = path.replace('\\', "/");
+        let rel = match repo_root {
+            Some(root) => {
+                let root = root.replace('\\', "/");
+                let root = root.trim_end_matches('/');
+                // ponytail: empty root can't prefix-match; fall through to full path
+                if !root.is_empty()
+                    && path.len() > root.len()
+                    && path.as_bytes()[..root.len()].eq_ignore_ascii_case(root.as_bytes())
+                    && path.as_bytes()[root.len()] == b'/'
+                {
+                    &path[root.len() + 1..]
+                } else {
+                    &path
+                }
             }
-        }
-        None => &path,
+            None => &path,
+        };
+        format!("{} {rel}", a.tool_name)
+    } else {
+        a.tool_name.clone()
     };
-    let text = format!("{} {rel}", a.tool_name);
     if text.chars().count() <= 80 {
         text
     } else {
@@ -281,7 +488,11 @@ pub fn action_text(a: &rocky_proto::pipe::Action, repo_root: Option<&str>) -> St
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rocky_proto::pipe::{Action, AgentKey, AgentStatus, Health, RepoInfo, ServerMsg, Status};
+    use crate::i18n::{Msg, UiLang, en, id};
+    use rocky_proto::pipe::{
+        Action, AgentKey, AgentStatus, Gap, GapReason, Health, Outcome, RepoInfo, ServerMsg,
+        Status, TimelineEntry, TimelineKind,
+    };
     use rocky_proto::settings::Settings;
 
     fn agent(session: &str, agent_id: &str, status: Status) -> AgentStatus {
@@ -320,6 +531,20 @@ mod tests {
     }
 
     #[test]
+    fn unknown_repo_label_is_translated() {
+        assert_eq!(en(&Msg::UnknownRepo), "unknown repo");
+        let mut a = agent("S1", "", Status::Idle);
+        a.repo.name = String::new();
+        a.repo.branch = Some("main".into());
+        let mut m = Model::new();
+        m.apply(snapshot(vec![a]));
+        let groups = m.groups(2_000);
+        assert_eq!(groups[0].name, "");
+        assert_eq!(groups[0].label(UiLang::En), "unknown repo @ main");
+        assert_eq!(groups[0].label(UiLang::Id), "repo tidak dikenal @ main");
+    }
+
+    #[test]
     fn two_sessions_same_repo_are_separate_rows() {
         let mut m = Model::new();
         m.apply(snapshot(vec![
@@ -328,7 +553,9 @@ mod tests {
         ]));
         let groups = m.groups(2_000);
         assert_eq!(groups.len(), 1);
-        assert_eq!(groups[0].label, "r @ main");
+        assert_eq!(groups[0].name, "r");
+        assert_eq!(groups[0].branch.as_deref(), Some("main"));
+        assert_eq!(groups[0].label(UiLang::En), "r @ main");
         assert_eq!(groups[0].sessions.len(), 2);
         assert_ne!(
             groups[0].sessions[0].session_short,
@@ -346,11 +573,12 @@ mod tests {
         ]));
         let groups = m.groups(2_000);
         assert_eq!(groups.len(), 1);
-        let agents = &groups[0].sessions[0].agents;
-        assert_eq!(agents.len(), 3);
-        assert_eq!(agents[0].label, "main");
-        assert_eq!(agents[1].label, "Explore aaaaaaaa");
-        assert_eq!(agents[2].label, "Explore bbbbbbbb");
+        let rows = &groups[0].sessions[0].rows;
+        assert_eq!(rows.len(), 3);
+        assert_eq!(tr(UiLang::En, &rows[0].label), "main");
+        assert_eq!(tr(UiLang::Id, &rows[0].label), "utama");
+        assert_eq!(tr(UiLang::En, &rows[1].label), "Explore aaaaaaaa");
+        assert_eq!(tr(UiLang::En, &rows[2].label), "Explore bbbbbbbb");
     }
 
     #[test]
@@ -366,21 +594,41 @@ mod tests {
         let groups = m.groups(2_000);
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].sessions.len(), 1);
-        assert_eq!(groups[0].sessions[0].agents.len(), 1);
-        assert_eq!(groups[0].sessions[0].agents[0].label, "main");
+        assert_eq!(groups[0].sessions[0].rows.len(), 1);
+        assert_eq!(tr(UiLang::En, &groups[0].sessions[0].rows[0].label), "main");
     }
 
     #[test]
     fn tooltip_counts() {
         let m = Model::new();
-        assert_eq!(m.tooltip(), "rocky: idle");
+        assert_eq!(
+            m.tooltip(),
+            Msg::Tooltip {
+                working: 0,
+                needs_you: 0,
+                failed: 0,
+                done: 0,
+                idle: 0
+            }
+        );
+        assert_eq!(en(&m.tooltip()), "rocky: idle");
         let mut m = Model::new();
         m.apply(snapshot(vec![
             agent("S1", "", Status::Working),
             agent("S2", "", Status::Working),
             agent("S3", "", Status::NeedsYou),
         ]));
-        assert_eq!(m.tooltip(), "rocky: 2 working, 1 needs you");
+        assert_eq!(
+            m.tooltip(),
+            Msg::Tooltip {
+                working: 2,
+                needs_you: 1,
+                failed: 0,
+                done: 0,
+                idle: 0
+            }
+        );
+        assert_eq!(en(&m.tooltip()), "rocky: 2 working, 1 needs you");
     }
 
     #[test]
@@ -435,7 +683,7 @@ mod tests {
     #[test]
     fn warnings_cover_health_and_conn() {
         let m = Model::new();
-        assert!(m.warnings().is_empty());
+        assert!(m.warnings(&crate::clock::utc_hhmm).is_empty());
         let mut m = Model::new();
         m.apply(ServerMsg::Health {
             health: Health {
@@ -448,30 +696,51 @@ mod tests {
             },
         });
         m.set_conn(Conn::VersionMismatch);
-        let w = m.warnings();
-        assert_eq!(w.len(), 6);
-        assert!(w.iter().any(|s| s.contains("bad spool files")));
-        assert!(w.iter().any(|s| s.contains("dropped events")));
-        assert!(w.iter().any(|s| s.contains("needs update")));
+        let w = m.warnings(&crate::clock::utc_hhmm);
+        assert_eq!(
+            w,
+            vec![
+                Msg::SpoolDropped { n: 1 },
+                Msg::DroppedEvents { n: 1 },
+                Msg::BadFiles { n: 2 },
+                Msg::LateEvents { n: 1 },
+                Msg::HookNewer,
+                Msg::ConnVersionMismatch,
+            ]
+        );
+        assert_eq!(en(&w[0]), "1 spool files dropped.");
+        assert_eq!(en(&w[1]), "1 dropped events.");
+        assert_eq!(en(&w[2]), "2 bad spool files.");
+        assert_eq!(en(&w[3]), "1 late events.");
+        assert_eq!(en(&w[4]), "hook is newer than daemon, needs update.");
+        assert_eq!(en(&w[5]), "daemon version mismatch, needs update.");
         let mut m = Model::new();
         m.set_conn(Conn::TiedToJob);
-        assert!(
-            m.warnings()
-                .iter()
-                .any(|s| s.contains("tied to launcher job"))
+        assert_eq!(
+            m.warnings(&crate::clock::utc_hhmm),
+            vec![Msg::ConnTiedToJob]
         );
+        assert_eq!(en(&Msg::ConnTiedToJob), "daemon tied to launcher job.");
         m.set_conn(Conn::KeepsCrashing);
-        assert!(m.warnings().iter().any(|s| s.contains("keeps crashing")));
-        m.set_conn(Conn::ServerUnverified);
-        assert!(
-            m.warnings()
-                .iter()
-                .any(|s| s.contains("could not be verified"))
+        assert_eq!(
+            m.warnings(&crate::clock::utc_hhmm),
+            vec![Msg::ConnKeepsCrashing]
         );
+        assert_eq!(en(&Msg::ConnKeepsCrashing), "daemon keeps crashing.");
+        m.set_conn(Conn::ServerUnverified);
+        assert_eq!(
+            m.warnings(&crate::clock::utc_hhmm),
+            vec![Msg::ConnUnverified]
+        );
+        assert_eq!(en(&Msg::ConnUnverified), "daemon could not be verified.");
         m.set_conn(Conn::Disconnected);
-        assert!(m.warnings().iter().any(|s| s.contains("disconnected")));
+        assert_eq!(
+            m.warnings(&crate::clock::utc_hhmm),
+            vec![Msg::ConnDisconnected]
+        );
+        assert_eq!(en(&Msg::ConnDisconnected), "daemon disconnected.");
         m.set_conn(Conn::Connected);
-        assert!(m.warnings().is_empty());
+        assert!(m.warnings(&crate::clock::utc_hhmm).is_empty());
     }
 
     #[test]
@@ -494,7 +763,7 @@ mod tests {
     }
 
     #[test]
-    fn age_text_boundaries() {
+    fn age_boundaries() {
         let mut live = agent("S1", "", Status::Working);
         live.last_event_ms = 130_000;
         let mut old = agent("S2", "", Status::Idle);
@@ -502,7 +771,418 @@ mod tests {
         let mut m = Model::new();
         m.apply(snapshot(vec![live, old]));
         let groups = m.groups(130_000);
-        assert_eq!(groups[0].sessions[0].agents[0].age_text, "now");
-        assert_eq!(groups[0].sessions[1].agents[0].age_text, "2m");
+        let live_age = &groups[0].sessions[0].rows[0].age;
+        assert_eq!(*live_age, Msg::Age { secs: 0 });
+        assert_eq!(en(live_age), "now");
+        let old_age = &groups[0].sessions[1].rows[0].age;
+        assert_eq!(*old_age, Msg::Age { secs: 120 });
+        assert_eq!(en(old_age), "2m");
+    }
+
+    #[test]
+    fn child_rows_follow_main_with_description() {
+        let mut child = agent("S1", "aaaaaaaa-1", Status::Working);
+        child.description = Some("Review the diff".into());
+        let mut m = Model::new();
+        m.apply(snapshot(vec![child, agent("S1", "", Status::Working)]));
+        let rows = &m.groups(2_000)[0].sessions[0].rows;
+        assert_eq!(
+            (rows[0].child, tr(UiLang::En, &rows[0].label).as_str()),
+            (false, "main")
+        );
+        assert_eq!(
+            (rows[1].child, tr(UiLang::En, &rows[1].label).as_str()),
+            (true, "Explore aaaaaaaa")
+        );
+        assert_eq!(rows[1].description.as_deref(), Some("Review the diff"));
+    }
+
+    #[test]
+    fn main_done_with_working_children_says_still_working() {
+        let mut m = Model::new();
+        m.apply(snapshot(vec![
+            agent("S1", "", Status::Done),
+            agent("S1", "aaaaaaaa-1", Status::Working),
+            agent("S1", "bbbbbbbb-2", Status::Working),
+            agent("S1", "cccccccc-3", Status::Done),
+        ]));
+        let rows = &m.groups(2_000)[0].sessions[0].rows;
+        assert_eq!(
+            rows[0].note.as_ref(),
+            Some(&Msg::SubagentsStillWorking { n: 2 })
+        );
+        assert_eq!(
+            en(&Msg::SubagentsStillWorking { n: 2 }),
+            "2 subagents still working"
+        );
+        for row in &rows[1..] {
+            assert_eq!(row.note, None);
+        }
+    }
+
+    #[test]
+    fn tree_off_hides_children_and_counts_them() {
+        let mut m = Model::new();
+        m.apply(ServerMsg::Snapshot {
+            agents: vec![
+                agent("S1", "", Status::Working),
+                agent("S1", "aaaaaaaa-1", Status::NeedsYou),
+                agent("S1", "bbbbbbbb-2", Status::Working),
+                agent("S1", "cccccccc-3", Status::Done),
+            ],
+            aggregate: Status::Idle,
+            health: Health::default(),
+            settings: Settings {
+                subagent_tree: false,
+                ..Settings::default()
+            },
+        });
+        let session = &m.groups(2_000)[0].sessions[0];
+        assert_eq!(session.rows.len(), 1);
+        assert_eq!(
+            session.hidden_children.as_ref(),
+            Some(&Msg::SubagentsHidden { n: 3, working: 1 })
+        );
+        assert_eq!(
+            en(&Msg::SubagentsHidden { n: 3, working: 1 }),
+            "+3 subagents (1 working)"
+        );
+        assert_eq!(m.aggregate(), Status::NeedsYou);
+    }
+
+    #[test]
+    fn bash_command_wins_over_path_and_is_capped() {
+        let bash = Action {
+            tool_name: "Bash".into(),
+            command: Some("npm test".into()),
+            target_path: Some("C:/r/x".into()),
+            tool_use_id: None,
+        };
+        assert_eq!(action_text(&bash, Some("C:/r")), "Bash npm test");
+        let long = Action {
+            tool_name: "Bash".into(),
+            command: Some("x".repeat(200)),
+            target_path: None,
+            tool_use_id: None,
+        };
+        let t = action_text(&long, Some("C:/r"));
+        assert_eq!(t.chars().count(), 80);
+        assert!(t.ends_with('…'));
+    }
+
+    #[test]
+    fn gap_lines_use_formatter_and_are_bounded() {
+        let mut gaps = Vec::new();
+        for i in 0..6 {
+            gaps.push(Gap {
+                from_ms: 1_000_000 + i * 60_000,
+                to_ms: 1_060_000 + i * 60_000,
+                count: 1,
+                reason: GapReason::HistoryFull,
+            });
+        }
+        gaps.push(Gap {
+            from_ms: 50_520_000,
+            to_ms: 50_700_000,
+            count: 3,
+            reason: GapReason::SpoolFull,
+        });
+        let mut m = Model::new();
+        m.apply(ServerMsg::Health {
+            health: Health {
+                gaps,
+                ..Health::default()
+            },
+        });
+        let w = m.warnings(&crate::clock::utc_hhmm);
+        assert_eq!(w.len(), 6);
+        assert_eq!(
+            w[0],
+            Msg::Gap {
+                count: 3,
+                from: "14:02".into(),
+                to: "14:05".into(),
+                reason: GapReason::SpoolFull,
+            }
+        );
+        assert_eq!(
+            w[..5]
+                .iter()
+                .filter(|m| matches!(m, Msg::Gap { .. }))
+                .count(),
+            5
+        );
+        assert_eq!(w[5], Msg::EarlierGaps { n: 2 });
+        assert_eq!(
+            en(&w[0]),
+            "Missed 3 events between 14:02 and 14:05 (spool full)"
+        );
+        assert_eq!(
+            en(&Msg::Gap {
+                count: 1,
+                from: "14:02".into(),
+                to: "14:02".into(),
+                reason: GapReason::BadFile,
+            }),
+            "Missed 1 event at 14:02 (bad file)"
+        );
+    }
+
+    #[test]
+    fn every_nonzero_counter_has_a_sentence() {
+        let mut m = Model::new();
+        m.apply(ServerMsg::Health {
+            health: Health {
+                spool_pending: 1,
+                spool_dropped: 1,
+                dropped_events: 1,
+                bad_files: 1,
+                late_events: 1,
+                hook_newer_than_daemon: true,
+                settings_unreadable: true,
+                ..Health::default()
+            },
+        });
+        assert_eq!(
+            m.warnings(&crate::clock::utc_hhmm),
+            vec![
+                Msg::SpoolPending { n: 1 },
+                Msg::SpoolDropped { n: 1 },
+                Msg::DroppedEvents { n: 1 },
+                Msg::BadFiles { n: 1 },
+                Msg::LateEvents { n: 1 },
+                Msg::HookNewer,
+                Msg::SettingsUnreadable,
+            ]
+        );
+    }
+
+    fn key(session: &str, agent_id: &str) -> AgentKey {
+        AgentKey {
+            session_id: session.into(),
+            agent_id: agent_id.into(),
+        }
+    }
+
+    fn timeline_msg(key: AgentKey, entries: Vec<TimelineEntry>) -> ServerMsg {
+        ServerMsg::Timeline {
+            id: 7,
+            key,
+            entries,
+        }
+    }
+
+    fn entry(
+        ms: u64,
+        kind: TimelineKind,
+        tool: Option<&str>,
+        text: Option<&str>,
+        outcome: Option<Outcome>,
+    ) -> TimelineEntry {
+        TimelineEntry {
+            ms,
+            kind,
+            tool_name: tool.map(str::to_string),
+            text: text.map(str::to_string),
+            outcome,
+        }
+    }
+
+    #[test]
+    fn opening_a_row_requests_its_timeline() {
+        let mut m = Model::new();
+        let a = key("S1", "");
+        assert_eq!(m.toggle_open(&a), Some(a.clone()));
+        assert!(m.is_open(&a));
+        assert_eq!(m.toggle_open(&a), None);
+        assert!(!m.is_open(&a));
+    }
+
+    #[test]
+    fn upsert_for_open_key_rerequests() {
+        let a = key("S1", "");
+        let b = key("S2", "");
+        let mut m = Model::new();
+        m.toggle_open(&a);
+        assert_eq!(
+            m.apply(ServerMsg::Status {
+                op: StatusOp::Upsert,
+                agent: agent("S1", "", Status::Working),
+            }),
+            vec![a.clone()]
+        );
+        assert_eq!(
+            m.apply(ServerMsg::Status {
+                op: StatusOp::Upsert,
+                agent: agent("S2", "", Status::Working),
+            }),
+            Vec::<AgentKey>::new()
+        );
+        assert!(m.agents().contains_key(&b));
+    }
+
+    #[test]
+    fn settings_rerequests_every_open_timeline() {
+        let a = key("S1", "");
+        let b = key("S2", "");
+        let mut m = Model::new();
+        m.toggle_open(&a);
+        m.toggle_open(&b);
+        assert_eq!(
+            m.apply(ServerMsg::Settings {
+                settings: Settings::default(),
+            }),
+            vec![a, b]
+        );
+    }
+
+    #[test]
+    fn snapshot_rerequests_present_keys_and_closes_missing() {
+        let a = key("S1", "");
+        let b = key("S2", "");
+        let mut m = Model::new();
+        m.toggle_open(&a);
+        m.toggle_open(&b);
+        m.apply(timeline_msg(
+            b.clone(),
+            vec![entry(1_000, TimelineKind::TurnStart, None, None, None)],
+        ));
+        assert_eq!(
+            m.apply(snapshot(vec![agent("S1", "", Status::Working)])),
+            vec![a.clone()]
+        );
+        assert!(m.is_open(&a));
+        assert!(!m.is_open(&b));
+        assert!(m.timeline_rows(&b, &crate::clock::utc_hhmm).is_empty());
+    }
+
+    #[test]
+    fn removed_agent_closes_its_timeline() {
+        let a = key("S1", "");
+        let mut m = Model::new();
+        m.apply(snapshot(vec![agent("S1", "", Status::Working)]));
+        m.toggle_open(&a);
+        m.apply(timeline_msg(
+            a.clone(),
+            vec![entry(
+                1_000,
+                TimelineKind::Tool,
+                Some("Bash"),
+                Some("npm test"),
+                Some(Outcome::Ok),
+            )],
+        ));
+        assert_eq!(m.timeline_rows(&a, &crate::clock::utc_hhmm).len(), 1);
+        assert_eq!(
+            m.apply(ServerMsg::Status {
+                op: StatusOp::Remove,
+                agent: agent("S1", "", Status::Working),
+            }),
+            Vec::<AgentKey>::new()
+        );
+        assert!(!m.is_open(&a));
+        assert!(m.timeline_rows(&a, &crate::clock::utc_hhmm).is_empty());
+        assert_eq!(
+            m.apply(ServerMsg::Status {
+                op: StatusOp::Upsert,
+                agent: agent("S1", "", Status::Working),
+            }),
+            Vec::<AgentKey>::new()
+        );
+    }
+
+    #[test]
+    fn timeline_reply_for_closed_key_is_dropped() {
+        let a = key("S1", "");
+        let mut m = Model::new();
+        m.apply(timeline_msg(
+            a.clone(),
+            vec![entry(1_000, TimelineKind::TurnStart, None, None, None)],
+        ));
+        assert!(m.timeline_rows(&a, &crate::clock::utc_hhmm).is_empty());
+    }
+
+    #[test]
+    fn timeline_rows_map_kinds_and_outcomes() {
+        let a = key("S1", "");
+        let mut m = Model::new();
+        m.toggle_open(&a);
+        m.apply(timeline_msg(
+            a.clone(),
+            vec![entry(
+                50_520_000,
+                TimelineKind::Tool,
+                Some("Bash"),
+                Some("npm test"),
+                Some(Outcome::Pending),
+            )],
+        ));
+        let rows = m.timeline_rows(&a, &crate::clock::utc_hhmm);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].time, "14:02");
+        assert_eq!(en(&rows[0].text), "Bash npm test");
+        assert_eq!(rows[0].outcome, Some(Outcome::Pending));
+    }
+
+    #[test]
+    fn timeline_entry_copy_reads_for_each_kind() {
+        let a = key("S1", "");
+        let mut m = Model::new();
+        m.toggle_open(&a);
+        m.apply(timeline_msg(
+            a.clone(),
+            vec![
+                entry(1_000, TimelineKind::SessionStart, None, None, None),
+                entry(2_000, TimelineKind::TurnStart, None, None, None),
+                entry(
+                    3_000,
+                    TimelineKind::Tool,
+                    Some("Bash"),
+                    None,
+                    Some(Outcome::Ok),
+                ),
+                entry(4_000, TimelineKind::NeedsYou, Some("Bash"), None, None),
+                entry(
+                    5_000,
+                    TimelineKind::SubagentStart,
+                    None,
+                    Some("Review the diff"),
+                    None,
+                ),
+                entry(6_000, TimelineKind::SubagentStop, None, None, None),
+                entry(7_000, TimelineKind::TurnDone, None, None, Some(Outcome::Ok)),
+                entry(
+                    8_000,
+                    TimelineKind::TurnFailed,
+                    None,
+                    None,
+                    Some(Outcome::Failed),
+                ),
+                entry(9_000, TimelineKind::Gap, None, Some("history full"), None),
+                entry(10_000, TimelineKind::SessionEnd, None, None, None),
+            ],
+        ));
+        let rows = m.timeline_rows(&a, &crate::clock::utc_hhmm);
+        let text: Vec<String> = rows.iter().map(|r| en(&r.text)).collect();
+        assert_eq!(
+            text,
+            vec![
+                "session started",
+                "turn started",
+                "Bash",
+                "needs you: Bash",
+                "subagent started: Review the diff",
+                "subagent stopped",
+                "turn done",
+                "turn failed",
+                "events missed: history full",
+                "session ended",
+            ]
+        );
+        assert_eq!(tr(UiLang::Id, &rows[0].text), "sesi dimulai");
+        assert_eq!(tr(UiLang::Id, &rows[2].text), "Bash");
+        assert_eq!(en(&Msg::Outcome(Outcome::Ok)), "ok");
+        assert_eq!(id(&Msg::Outcome(Outcome::Failed)), "gagal");
+        assert_eq!(id(&Msg::Outcome(Outcome::Pending)), "tertunda");
     }
 }
