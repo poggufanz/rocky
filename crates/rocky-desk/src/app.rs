@@ -18,7 +18,7 @@ use gpui::{
 };
 use gpui_tray::Tray;
 use rocky_proto::paths::desk_dir;
-use rocky_proto::pipe::{ClientMsg, CmdName, ServerMsg, Status};
+use rocky_proto::pipe::{AgentKey, ClientMsg, CmdName, Outcome, ServerMsg, Status};
 
 use crate::client::Outbox;
 use crate::clock;
@@ -62,6 +62,18 @@ struct Controller {
 impl Controller {
     fn set_conn(&mut self, c: Conn) {
         self.model.set_conn(c);
+    }
+
+    /// Ask the daemon for one agent's timeline; a no-op while disconnected.
+    fn request_timeline(&mut self, key: AgentKey) {
+        let Some(outbox) = self.outbox.as_ref() else {
+            return;
+        };
+        self.cmd_id += 1;
+        let _ = outbox.send(ClientMsg::Timeline {
+            id: self.cmd_id,
+            key,
+        });
     }
 
     /// Handle one decision from `ConnState` (foreground, non-blocking).
@@ -147,35 +159,35 @@ impl DeskView {
 
     fn on_inbox(&mut self, cx: &mut Context<Self>) {
         let mut changed = self.ctl.on_worker();
-        let Some(inbox) = self.ctl.inbox.as_ref() else {
-            if changed {
-                cx.notify();
-            }
-            return;
-        };
-        loop {
-            match inbox.try_recv() {
-                Ok(Some(msg)) => {
-                    if let ServerMsg::Ack { id, ok, .. } = &msg
-                        && self.ctl.state.on_ack(*id, *ok)
-                    {
-                        // Ack state changed (stop acked or id cleared).
+        let mut requests = Vec::new();
+        if let Some(inbox) = self.ctl.inbox.as_ref() {
+            loop {
+                match inbox.try_recv() {
+                    Ok(Some(msg)) => {
+                        if let ServerMsg::Ack { id, ok, .. } = &msg
+                            && self.ctl.state.on_ack(*id, *ok)
+                        {
+                            // Ack state changed (stop acked or id cleared).
+                        }
+                        requests.extend(self.ctl.model.apply(msg));
+                        changed = true;
                     }
-                    self.ctl.model.apply(msg);
-                    changed = true;
+                    Ok(None) | Err(mpsc::TryRecvError::Disconnected) => {
+                        // Transition exactly once: drop the dead inbox first so
+                        // the next tick has nothing to re-handle.
+                        self.ctl.inbox = None;
+                        self.ctl.outbox = None;
+                        let action = self.ctl.state.on_disconnect(now_ms());
+                        self.ctl.act(action);
+                        changed = true;
+                        break;
+                    }
+                    Err(mpsc::TryRecvError::Empty) => break,
                 }
-                Ok(None) | Err(mpsc::TryRecvError::Disconnected) => {
-                    // Transition exactly once: drop the dead inbox first so
-                    // the next tick has nothing to re-handle.
-                    self.ctl.inbox = None;
-                    self.ctl.outbox = None;
-                    let action = self.ctl.state.on_disconnect(now_ms());
-                    self.ctl.act(action);
-                    changed = true;
-                    break;
-                }
-                Err(mpsc::TryRecvError::Empty) => break,
             }
+        }
+        for key in requests {
+            self.ctl.request_timeline(key);
         }
         if changed {
             cx.notify();
@@ -184,7 +196,7 @@ impl DeskView {
 }
 
 impl Render for DeskView {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let groups = self.ctl.model.groups(now_ms());
         let warnings = self.ctl.model.warnings(&clock::local_hhmm);
         let lang = self.ctl.ui_lang;
@@ -219,7 +231,24 @@ impl Render for DeskView {
                     },
                 )));
                 for a in &s.rows {
-                    let mut row = div().flex().gap_2().text_sm();
+                    let mut row = div()
+                        .id(SharedString::from(format!(
+                            "agent:{}:{}",
+                            a.key.session_id, a.key.agent_id
+                        )))
+                        .flex()
+                        .gap_2()
+                        .text_sm()
+                        .cursor_pointer()
+                        .on_click(cx.listener({
+                            let key = a.key.clone();
+                            move |this, _event, _window, cx| {
+                                if let Some(key) = this.ctl.model.toggle_open(&key) {
+                                    this.ctl.request_timeline(key);
+                                }
+                                cx.notify();
+                            }
+                        }));
                     if a.child {
                         row = row.pl_3();
                     }
@@ -242,6 +271,30 @@ impl Render for DeskView {
                         row = row.child(div().text_xs().child(tr(lang, note)));
                     }
                     sdiv = sdiv.child(row);
+                    if self.ctl.model.is_open(&a.key) {
+                        let mut entries = div().flex_col().pl_6().text_xs();
+                        for e in self.ctl.model.timeline_rows(&a.key, &clock::local_hhmm) {
+                            let mut line = div()
+                                .flex()
+                                .gap_2()
+                                .child(div().text_color(rgb(0x8A8A8A)).child(e.time))
+                                .child(div().child(tr(lang, &e.text)));
+                            if let Some(outcome) = e.outcome {
+                                let color = match outcome {
+                                    Outcome::Failed => rgb(0xD92B2B),
+                                    Outcome::Ok => rgb(0x2BA044),
+                                    Outcome::Pending => rgb(0x8A8A8A),
+                                };
+                                line = line.child(
+                                    div()
+                                        .text_color(color)
+                                        .child(tr(lang, &Msg::Outcome(outcome))),
+                                );
+                            }
+                            entries = entries.child(line);
+                        }
+                        sdiv = sdiv.child(entries);
+                    }
                 }
                 if let Some(hidden) = &s.hidden_children {
                     sdiv = sdiv.child(div().text_xs().pl_3().child(tr(lang, hidden)));

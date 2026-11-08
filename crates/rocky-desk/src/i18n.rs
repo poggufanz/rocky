@@ -3,7 +3,7 @@
 //! `en` and `id` match exhaustively, so adding a variant fails the build until
 //! both languages carry copy.
 
-use rocky_proto::pipe::{GapReason, Status};
+use rocky_proto::pipe::{GapReason, Outcome, Status, TimelineKind};
 use rocky_proto::settings::Lang;
 
 /// Language the desk renders its own text in.
@@ -71,6 +71,12 @@ pub enum Msg {
         n: u64,
         working: u64,
     },
+    TimelineEntry {
+        kind: TimelineKind,
+        tool: Option<String>,
+        text: Option<String>,
+    },
+    Outcome(Outcome),
     ConnVersionMismatch,
     ConnUnverified,
     ConnDisconnected,
@@ -134,6 +140,24 @@ fn samples() -> Vec<Msg> {
         Msg::EarlierGaps { n: 2 },
         Msg::SubagentsStillWorking { n: 2 },
         Msg::SubagentsHidden { n: 3, working: 1 },
+        Msg::TimelineEntry {
+            kind: TimelineKind::Tool,
+            tool: Some("Bash".into()),
+            text: Some("npm test".into()),
+        },
+        Msg::TimelineEntry {
+            kind: TimelineKind::SubagentStart,
+            tool: None,
+            text: Some("Review the diff".into()),
+        },
+        Msg::TimelineEntry {
+            kind: TimelineKind::SessionStart,
+            tool: None,
+            text: None,
+        },
+        Msg::Outcome(Outcome::Pending),
+        Msg::Outcome(Outcome::Ok),
+        Msg::Outcome(Outcome::Failed),
         Msg::ConnVersionMismatch,
         Msg::ConnUnverified,
         Msg::ConnDisconnected,
@@ -190,6 +214,10 @@ pub fn en(m: &Msg) -> String {
         Msg::EarlierGaps { n } => format!("{n} earlier gaps"),
         Msg::SubagentsStillWorking { n } => format!("{n} subagents still working"),
         Msg::SubagentsHidden { n, working } => format!("+{n} subagents ({working} working)"),
+        Msg::TimelineEntry { kind, tool, text } => {
+            timeline_entry_en(*kind, tool.as_deref(), text.as_deref())
+        }
+        Msg::Outcome(o) => outcome_en(*o).to_string(),
         Msg::ConnVersionMismatch => "daemon version mismatch, needs update.".to_string(),
         Msg::ConnUnverified => "daemon could not be verified.".to_string(),
         Msg::ConnDisconnected => "daemon disconnected.".to_string(),
@@ -246,6 +274,10 @@ pub fn id(m: &Msg) -> String {
         Msg::EarlierGaps { n } => format!("{n} celah sebelumnya"),
         Msg::SubagentsStillWorking { n } => format!("{n} subagen masih bekerja"),
         Msg::SubagentsHidden { n, working } => format!("+{n} subagen ({working} bekerja)"),
+        Msg::TimelineEntry { kind, tool, text } => {
+            timeline_entry_id(*kind, tool.as_deref(), text.as_deref())
+        }
+        Msg::Outcome(o) => outcome_id(*o).to_string(),
         Msg::ConnVersionMismatch => "versi daemon tidak cocok, perlu pembaruan.".to_string(),
         Msg::ConnUnverified => "daemon tidak dapat diverifikasi.".to_string(),
         Msg::ConnDisconnected => "daemon terputus.".to_string(),
@@ -364,6 +396,85 @@ fn tooltip(counts: [u64; 5], names: [&str; 5], empty: &str) -> String {
         format!("rocky: {empty}")
     } else {
         format!("rocky: {}", segs.join(", "))
+    }
+}
+
+/// Timeline line: a tool entry composes from the tool name and its text;
+/// other kinds read as a sentence with any recorded detail appended.
+fn timeline_entry_en(kind: TimelineKind, tool: Option<&str>, text: Option<&str>) -> String {
+    match kind_en(kind) {
+        Some(base) => append_detail(base, text.or(tool)),
+        None => tool_line(tool, text, "tool use"),
+    }
+}
+
+/// Indonesian mirror of [`timeline_entry_en`].
+fn timeline_entry_id(kind: TimelineKind, tool: Option<&str>, text: Option<&str>) -> String {
+    match kind_id(kind) {
+        Some(base) => append_detail(base, text.or(tool)),
+        None => tool_line(tool, text, "pemakaian tool"),
+    }
+}
+
+fn kind_en(kind: TimelineKind) -> Option<&'static str> {
+    Some(match kind {
+        TimelineKind::SessionStart => "session started",
+        TimelineKind::TurnStart => "turn started",
+        TimelineKind::NeedsYou => "needs you",
+        TimelineKind::SubagentStart => "subagent started",
+        TimelineKind::SubagentStop => "subagent stopped",
+        TimelineKind::TurnDone => "turn done",
+        TimelineKind::TurnFailed => "turn failed",
+        TimelineKind::SessionEnd => "session ended",
+        TimelineKind::Gap => "events missed",
+        TimelineKind::Tool => return None,
+    })
+}
+
+fn kind_id(kind: TimelineKind) -> Option<&'static str> {
+    Some(match kind {
+        TimelineKind::SessionStart => "sesi dimulai",
+        TimelineKind::TurnStart => "giliran dimulai",
+        TimelineKind::NeedsYou => "perlu Anda",
+        TimelineKind::SubagentStart => "subagen dimulai",
+        TimelineKind::SubagentStop => "subagen berhenti",
+        TimelineKind::TurnDone => "giliran selesai",
+        TimelineKind::TurnFailed => "giliran gagal",
+        TimelineKind::SessionEnd => "sesi berakhir",
+        TimelineKind::Gap => "peristiwa terlewat",
+        TimelineKind::Tool => return None,
+    })
+}
+
+fn tool_line(tool: Option<&str>, text: Option<&str>, bare: &str) -> String {
+    match (tool, text) {
+        (Some(tool), Some(text)) => format!("{tool} {text}"),
+        (Some(tool), None) => tool.to_string(),
+        (None, Some(text)) => text.to_string(),
+        (None, None) => bare.to_string(),
+    }
+}
+
+fn append_detail(base: &str, detail: Option<&str>) -> String {
+    match detail {
+        Some(detail) => format!("{base}: {detail}"),
+        None => base.to_string(),
+    }
+}
+
+fn outcome_en(o: Outcome) -> &'static str {
+    match o {
+        Outcome::Pending => "pending",
+        Outcome::Ok => "ok",
+        Outcome::Failed => "failed",
+    }
+}
+
+fn outcome_id(o: Outcome) -> &'static str {
+    match o {
+        Outcome::Pending => "tertunda",
+        Outcome::Ok => "ok",
+        Outcome::Failed => "gagal",
     }
 }
 

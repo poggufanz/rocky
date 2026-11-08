@@ -1,8 +1,10 @@
 //! Pure view-model for rocky-desk: grouping, aggregate, tooltip, warnings.
 
-use rocky_proto::pipe::{AgentKey, AgentStatus, Health, ServerMsg, Status, StatusOp};
+use rocky_proto::pipe::{
+    AgentKey, AgentStatus, Health, Outcome, ServerMsg, Status, StatusOp, TimelineEntry,
+};
 use rocky_proto::settings::Settings;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::i18n::{Msg, UiLang, tr};
 
@@ -67,12 +69,22 @@ pub struct AgentRow {
     pub note: Option<Msg>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TimelineRow {
+    pub time: String,
+    pub text: Msg,
+    pub outcome: Option<Outcome>,
+}
+
 #[derive(Debug, Default)]
 pub struct Model {
     agents: BTreeMap<AgentKey, AgentStatus>,
     health: Health,
     conn: Conn,
     settings: Option<Settings>,
+    /// Agent rows whose timeline is expanded, and the entries last received.
+    open: BTreeSet<AgentKey>,
+    timelines: BTreeMap<AgentKey, Vec<TimelineEntry>>,
 }
 
 /// Agents bucketed by `(repo name, branch)`, then by session id.
@@ -83,7 +95,12 @@ impl Model {
         Self::default()
     }
 
-    pub fn apply(&mut self, msg: ServerMsg) {
+    /// Applies one daemon message and returns the timeline keys to (re)request.
+    ///
+    /// Keys come back for an upsert of an open row, for every open row on a
+    /// settings broadcast, and for every open row a snapshot still carries.
+    /// Rows that disappear close on the spot and are not requested again.
+    pub fn apply(&mut self, msg: ServerMsg) -> Vec<AgentKey> {
         match msg {
             ServerMsg::Snapshot {
                 agents,
@@ -94,26 +111,92 @@ impl Model {
                 self.agents = agents.into_iter().map(|a| (a.key.clone(), a)).collect();
                 self.health = health;
                 self.settings = Some(settings);
+                self.open.retain(|k| self.agents.contains_key(k));
+                self.timelines.retain(|k, _| self.open.contains(k));
+                self.open.iter().cloned().collect()
             }
             ServerMsg::Settings { settings } => {
                 self.settings = Some(settings);
+                self.open.iter().cloned().collect()
             }
             ServerMsg::Status { op, agent } => match op {
                 StatusOp::Upsert => {
-                    self.agents.insert(agent.key.clone(), agent);
+                    let key = agent.key.clone();
+                    self.agents.insert(key.clone(), agent);
+                    if self.open.contains(&key) {
+                        vec![key]
+                    } else {
+                        Vec::new()
+                    }
                 }
                 StatusOp::Remove => {
                     self.agents.remove(&agent.key);
+                    self.close(&agent.key);
+                    Vec::new()
                 }
             },
+            ServerMsg::Timeline { key, entries, .. } => {
+                if self.open.contains(&key) {
+                    self.timelines.insert(key, entries);
+                }
+                Vec::new()
+            }
             ServerMsg::Health { health } => {
                 self.health = health;
+                Vec::new()
             }
             ServerMsg::Error { code } if code == "version" => {
                 self.conn = Conn::VersionMismatch;
+                Vec::new()
             }
-            _ => {}
+            _ => Vec::new(),
         }
+    }
+
+    /// Expands an agent row and returns the key when it opened; collapsing
+    /// drops the stored entries and returns `None`.
+    pub fn toggle_open(&mut self, key: &AgentKey) -> Option<AgentKey> {
+        if self.open.remove(key) {
+            self.timelines.remove(key);
+            None
+        } else {
+            self.open.insert(key.clone());
+            Some(key.clone())
+        }
+    }
+
+    pub fn is_open(&self, key: &AgentKey) -> bool {
+        self.open.contains(key)
+    }
+
+    /// Entries of an open timeline in daemon order; empty while closed.
+    pub fn timeline_rows(
+        &self,
+        key: &AgentKey,
+        fmt_time: &dyn Fn(u64) -> String,
+    ) -> Vec<TimelineRow> {
+        self.timelines
+            .get(key)
+            .map(|entries| {
+                entries
+                    .iter()
+                    .map(|e| TimelineRow {
+                        time: fmt_time(e.ms),
+                        text: Msg::TimelineEntry {
+                            kind: e.kind,
+                            tool: e.tool_name.clone(),
+                            text: e.text.clone(),
+                        },
+                        outcome: e.outcome,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn close(&mut self, key: &AgentKey) {
+        self.open.remove(key);
+        self.timelines.remove(key);
     }
 
     pub fn set_conn(&mut self, c: Conn) {
@@ -376,9 +459,10 @@ pub fn action_text(a: &rocky_proto::pipe::Action, repo_root: Option<&str>) -> St
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::i18n::{Msg, UiLang, en};
+    use crate::i18n::{Msg, UiLang, en, id};
     use rocky_proto::pipe::{
-        Action, AgentKey, AgentStatus, Gap, GapReason, Health, RepoInfo, ServerMsg, Status,
+        Action, AgentKey, AgentStatus, Gap, GapReason, Health, Outcome, RepoInfo, ServerMsg,
+        Status, TimelineEntry, TimelineKind,
     };
     use rocky_proto::settings::Settings;
 
@@ -838,5 +922,234 @@ mod tests {
                 Msg::SettingsUnreadable,
             ]
         );
+    }
+
+    fn key(session: &str, agent_id: &str) -> AgentKey {
+        AgentKey {
+            session_id: session.into(),
+            agent_id: agent_id.into(),
+        }
+    }
+
+    fn timeline_msg(key: AgentKey, entries: Vec<TimelineEntry>) -> ServerMsg {
+        ServerMsg::Timeline {
+            id: 7,
+            key,
+            entries,
+        }
+    }
+
+    fn entry(
+        ms: u64,
+        kind: TimelineKind,
+        tool: Option<&str>,
+        text: Option<&str>,
+        outcome: Option<Outcome>,
+    ) -> TimelineEntry {
+        TimelineEntry {
+            ms,
+            kind,
+            tool_name: tool.map(str::to_string),
+            text: text.map(str::to_string),
+            outcome,
+        }
+    }
+
+    #[test]
+    fn opening_a_row_requests_its_timeline() {
+        let mut m = Model::new();
+        let a = key("S1", "");
+        assert_eq!(m.toggle_open(&a), Some(a.clone()));
+        assert!(m.is_open(&a));
+        assert_eq!(m.toggle_open(&a), None);
+        assert!(!m.is_open(&a));
+    }
+
+    #[test]
+    fn upsert_for_open_key_rerequests() {
+        let a = key("S1", "");
+        let b = key("S2", "");
+        let mut m = Model::new();
+        m.toggle_open(&a);
+        assert_eq!(
+            m.apply(ServerMsg::Status {
+                op: StatusOp::Upsert,
+                agent: agent("S1", "", Status::Working),
+            }),
+            vec![a.clone()]
+        );
+        assert_eq!(
+            m.apply(ServerMsg::Status {
+                op: StatusOp::Upsert,
+                agent: agent("S2", "", Status::Working),
+            }),
+            Vec::<AgentKey>::new()
+        );
+        assert!(m.agents().contains_key(&b));
+    }
+
+    #[test]
+    fn settings_rerequests_every_open_timeline() {
+        let a = key("S1", "");
+        let b = key("S2", "");
+        let mut m = Model::new();
+        m.toggle_open(&a);
+        m.toggle_open(&b);
+        assert_eq!(
+            m.apply(ServerMsg::Settings {
+                settings: Settings::default(),
+            }),
+            vec![a, b]
+        );
+    }
+
+    #[test]
+    fn snapshot_rerequests_present_keys_and_closes_missing() {
+        let a = key("S1", "");
+        let b = key("S2", "");
+        let mut m = Model::new();
+        m.toggle_open(&a);
+        m.toggle_open(&b);
+        m.apply(timeline_msg(
+            b.clone(),
+            vec![entry(1_000, TimelineKind::TurnStart, None, None, None)],
+        ));
+        assert_eq!(
+            m.apply(snapshot(vec![agent("S1", "", Status::Working)])),
+            vec![a.clone()]
+        );
+        assert!(m.is_open(&a));
+        assert!(!m.is_open(&b));
+        assert!(m.timeline_rows(&b, &crate::clock::utc_hhmm).is_empty());
+    }
+
+    #[test]
+    fn removed_agent_closes_its_timeline() {
+        let a = key("S1", "");
+        let mut m = Model::new();
+        m.apply(snapshot(vec![agent("S1", "", Status::Working)]));
+        m.toggle_open(&a);
+        m.apply(timeline_msg(
+            a.clone(),
+            vec![entry(
+                1_000,
+                TimelineKind::Tool,
+                Some("Bash"),
+                Some("npm test"),
+                Some(Outcome::Ok),
+            )],
+        ));
+        assert_eq!(m.timeline_rows(&a, &crate::clock::utc_hhmm).len(), 1);
+        assert_eq!(
+            m.apply(ServerMsg::Status {
+                op: StatusOp::Remove,
+                agent: agent("S1", "", Status::Working),
+            }),
+            Vec::<AgentKey>::new()
+        );
+        assert!(!m.is_open(&a));
+        assert!(m.timeline_rows(&a, &crate::clock::utc_hhmm).is_empty());
+        assert_eq!(
+            m.apply(ServerMsg::Status {
+                op: StatusOp::Upsert,
+                agent: agent("S1", "", Status::Working),
+            }),
+            Vec::<AgentKey>::new()
+        );
+    }
+
+    #[test]
+    fn timeline_reply_for_closed_key_is_dropped() {
+        let a = key("S1", "");
+        let mut m = Model::new();
+        m.apply(timeline_msg(
+            a.clone(),
+            vec![entry(1_000, TimelineKind::TurnStart, None, None, None)],
+        ));
+        assert!(m.timeline_rows(&a, &crate::clock::utc_hhmm).is_empty());
+    }
+
+    #[test]
+    fn timeline_rows_map_kinds_and_outcomes() {
+        let a = key("S1", "");
+        let mut m = Model::new();
+        m.toggle_open(&a);
+        m.apply(timeline_msg(
+            a.clone(),
+            vec![entry(
+                50_520_000,
+                TimelineKind::Tool,
+                Some("Bash"),
+                Some("npm test"),
+                Some(Outcome::Pending),
+            )],
+        ));
+        let rows = m.timeline_rows(&a, &crate::clock::utc_hhmm);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].time, "14:02");
+        assert_eq!(en(&rows[0].text), "Bash npm test");
+        assert_eq!(rows[0].outcome, Some(Outcome::Pending));
+    }
+
+    #[test]
+    fn timeline_entry_copy_reads_for_each_kind() {
+        let a = key("S1", "");
+        let mut m = Model::new();
+        m.toggle_open(&a);
+        m.apply(timeline_msg(
+            a.clone(),
+            vec![
+                entry(1_000, TimelineKind::SessionStart, None, None, None),
+                entry(2_000, TimelineKind::TurnStart, None, None, None),
+                entry(
+                    3_000,
+                    TimelineKind::Tool,
+                    Some("Bash"),
+                    None,
+                    Some(Outcome::Ok),
+                ),
+                entry(4_000, TimelineKind::NeedsYou, Some("Bash"), None, None),
+                entry(
+                    5_000,
+                    TimelineKind::SubagentStart,
+                    None,
+                    Some("Review the diff"),
+                    None,
+                ),
+                entry(6_000, TimelineKind::SubagentStop, None, None, None),
+                entry(7_000, TimelineKind::TurnDone, None, None, Some(Outcome::Ok)),
+                entry(
+                    8_000,
+                    TimelineKind::TurnFailed,
+                    None,
+                    None,
+                    Some(Outcome::Failed),
+                ),
+                entry(9_000, TimelineKind::Gap, None, Some("history full"), None),
+                entry(10_000, TimelineKind::SessionEnd, None, None, None),
+            ],
+        ));
+        let rows = m.timeline_rows(&a, &crate::clock::utc_hhmm);
+        let text: Vec<String> = rows.iter().map(|r| en(&r.text)).collect();
+        assert_eq!(
+            text,
+            vec![
+                "session started",
+                "turn started",
+                "Bash",
+                "needs you: Bash",
+                "subagent started: Review the diff",
+                "subagent stopped",
+                "turn done",
+                "turn failed",
+                "events missed: history full",
+                "session ended",
+            ]
+        );
+        assert_eq!(tr(UiLang::Id, &rows[0].text), "sesi dimulai");
+        assert_eq!(tr(UiLang::Id, &rows[2].text), "Bash");
+        assert_eq!(en(&Msg::Outcome(Outcome::Ok)), "ok");
+        assert_eq!(id(&Msg::Outcome(Outcome::Failed)), "gagal");
+        assert_eq!(id(&Msg::Outcome(Outcome::Pending)), "tertunda");
     }
 }
