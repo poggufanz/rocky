@@ -190,6 +190,19 @@ impl DeskView {
         }
     }
 
+    /// Close the tray icon and end the process. The daemon keeps running.
+    /// Taking the tray first means nothing refreshes it after the close. Safe
+    /// inside the view lease: closing a tray unregisters it and never runs
+    /// the menu builder that reads this view.
+    fn quit(&mut self, cx: &mut Context<Self>) {
+        if let Some(tray) = self.tray.take()
+            && let Err(e) = tray.close(cx)
+        {
+            self.log.once("tray_close", &e);
+        }
+        cx.quit();
+    }
+
     fn next_id(&mut self) -> u64 {
         self.ctl.cmd_id += 1;
         self.ctl.cmd_id
@@ -587,7 +600,16 @@ impl Render for DeskView {
             root = root.child(strip);
         }
         if self.ctl.view == View::Settings {
-            return root.child(self.settings_panel(cx));
+            // Outside the panel, which returns early while settings are
+            // unknown: Quit must stay reachable when the daemon is down.
+            return root.child(self.settings_panel(cx)).child(
+                div()
+                    .id(SharedString::from("quit"))
+                    .text_sm()
+                    .cursor_pointer()
+                    .child(tr(lang, &Msg::MenuQuit))
+                    .on_click(cx.listener(|this, _, _, cx| this.quit(cx))),
+            );
         }
         let groups = self.ctl.model.groups(now_ms());
         if groups.is_empty() {
@@ -945,10 +967,7 @@ pub fn run(rocky_home: PathBuf, opts: RunOptions) {
         cx.on_action({
             let view = view.clone();
             move |_: &QuitDesk, cx: &mut App| {
-                if let Some(tray) = view.read(cx).tray.clone() {
-                    let _ = tray.close(cx);
-                }
-                cx.quit();
+                view.update(cx, |v, cx| v.quit(cx));
             }
         });
 
