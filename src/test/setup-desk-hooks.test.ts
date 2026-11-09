@@ -521,3 +521,26 @@ test("agent hooks: --yes prints the install note and still asks", async (t) => {
   assert.equal(asked(), 1);
   assert.equal(existsSync(fallback), false);
 });
+
+test("agent hooks: install without --yes prints no install note", async (t) => {
+  const { home } = commandFixture(t);
+  const { dependencies, asked } = decliningDependencies(home);
+
+  const output = await captureStderr(() => setup(["--agent-hooks"], dependencies));
+
+  assert.equal(output.code, 1, output.stderr);
+  assert.ok(!output.stderr.includes(HOOK_INSTALL_YES_NOTE), output.stderr);
+  assert.equal(asked(), 1);
+});
+
+test("agent hooks: --yes with uninstall prints no install note", async (t) => {
+  const { home } = commandFixture(t);
+  const { dependencies, asked } = decliningDependencies(home);
+
+  const output = await captureStderr(() => setup(["--uninstall-agent-hooks", "--yes"], dependencies));
+
+  assert.equal(output.code, 0, output.stderr);
+  assert.ok(output.stderr.includes("claude-code agent hooks: unchanged"), output.stderr);
+  assert.ok(!output.stderr.includes(HOOK_INSTALL_YES_NOTE), output.stderr);
+  assert.equal(asked(), 0);
+});
