@@ -300,7 +300,7 @@ X-GNOME-Autostart-enabled=true
 - **Tray start.** `--tray` opens the window minimized. A window manager
   that starts after the desk, as at login, can drop that request, so the
   desk sends it again 1, 3, and 8 seconds after start unless the window was
-  opened in the meantime.
+  opened from the tray or by a second launch in the meantime.
 - **Error log.** `<ROCKY_HOME>/desk/rocky-desk.log` keeps the same once-only
   kinds as Windows, plus a `panic:` entry with its backtrace on every panic.
   On Linux, a notification setup or send error is logged under `toast`, and a
