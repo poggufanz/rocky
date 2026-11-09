@@ -7,7 +7,6 @@
 //! connect/spawn/retry work runs on a background worker thread so the UI never
 //! blocks, and its result comes back through a second channel the pump drains.
 
-use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -30,11 +29,14 @@ use crate::connect::{CONNECT_BUDGET, ConnectDone, connect_attempt};
 use crate::desklog::LogOnce;
 use crate::i18n::{Msg, UiLang, detect_ui_lang, resolve_lang, tr};
 use crate::icons::tray_icon;
-use crate::notify::{Notifier, NotifyCtx, notice_text, toast_tag};
+use crate::notify::{Notifier, NotifyCtx, notice_text};
+use crate::os_notice::OsNotices;
 use crate::settings_view::{
     self, SettingId, View, set_autostart_asked, set_bool, set_lang, show_autostart_banner,
 };
-use crate::toast::{ToastHandle, ensure_icon_file, register_aumid, set_process_aumid, show_toast};
+use crate::spawn::daemon_exe_name;
+#[cfg(windows)]
+use crate::toast::set_process_aumid;
 use crate::view::{Conn, Model};
 
 gpui::actions!(rocky, [OpenRocky, StopRecording, QuitDesk]);
@@ -135,7 +137,7 @@ impl Controller {
 fn daemon_exe() -> Option<PathBuf> {
     std::env::current_exe()
         .ok()
-        .and_then(|p| p.parent().map(|d| d.join("rockyd.exe")))
+        .and_then(|p| p.parent().map(|d| d.join(daemon_exe_name())))
 }
 
 /// Spawn one worker running `connect_attempt` and delivering the result.
@@ -151,16 +153,17 @@ struct DeskView {
     window: Option<WindowHandle<Self>>,
     tray: Option<Tray>,
     log: LogOnce,
-    /// Latest toast per tag, so a late click still reaches its handler.
-    toasts: BTreeMap<String, ToastHandle>,
+    /// Platform notifications; Windows keeps the latest toast per session, so
+    /// a late click still reaches its handler.
+    notices: OsNotices,
     /// Toast clicks cross from a WinRT thread on this channel.
     click_tx: mpsc::Sender<()>,
     clicks: Receiver<()>,
     /// Set by a toast click or the `show` relay; the pump reveals the window
     /// outside the view lease.
     show_requested: bool,
-    /// The toast identity is registered at most once per process.
-    aumid_ready: bool,
+    /// The notification identity is prepared at most once per process.
+    notices_ready: bool,
     /// The tray menu must be rebuilt for the new language. Done by the pump
     /// outside the view lease, since the builder reads this entity.
     menu_stale: bool,
@@ -411,11 +414,11 @@ impl DeskView {
         panel
     }
 
-    /// Register the toast identity once, after the first settings with a
-    /// notice toggle on. A failed icon write or registry write is logged and
-    /// not retried, so a broken key cannot make every broadcast write.
-    fn register_toasts(&mut self) {
-        if self.aumid_ready {
+    /// Prepare the notification identity once, after the first settings with a
+    /// notice toggle on. A failed icon or registration write is logged and not
+    /// retried, so a broken identity cannot make every broadcast write.
+    fn register_notices(&mut self) {
+        if self.notices_ready {
             return;
         }
         let Some(settings) = self.ctl.model.settings() else {
@@ -424,21 +427,23 @@ impl DeskView {
         if !(settings.notify_needs_you || settings.notify_failed || settings.notify_done) {
             return;
         }
-        self.aumid_ready = true;
-        let icon = match ensure_icon_file(&self.ctl.rocky_home) {
-            Ok(icon) => icon,
-            Err(e) => {
-                self.log.once("aumid", &e);
-                return;
-            }
-        };
-        if let Err(e) = register_aumid("rocky", Some(&icon)) {
-            self.log.once("aumid", &e);
+        self.notices_ready = true;
+        if let Err(e) = self.notices.prepare() {
+            // Windows registers an app identity for its toasts; elsewhere the
+            // failure belongs to the notification backend.
+            let kind = if cfg!(windows) { "aumid" } else { "toast" };
+            self.log.once(kind, &e);
         }
     }
 
-    /// Turn one message's notices into toasts. Each toast is held by its tag,
-    /// which also makes a newer toast replace the one it supersedes.
+    /// Log the notification backend's asynchronous failures.
+    fn drain_notice_errors(&mut self) {
+        for e in self.notices.drain_errors() {
+            self.log.once("toast", &e);
+        }
+    }
+
+    /// Turn one message's notices into desktop notifications.
     fn notify(&mut self, msg: &ServerMsg, window_active: bool) {
         let Some(settings) = self.ctl.model.settings() else {
             return;
@@ -455,23 +460,17 @@ impl DeskView {
         let lang = self.ctl.ui_lang;
         for n in &notices {
             let (title, body) = notice_text(lang, n);
-            let tag = toast_tag(&n.session_id);
             let click_tx = self.click_tx.clone();
-            let shown = show_toast(
+            let shown = self.notices.show(
+                &n.session_id,
                 &title,
                 &body,
-                &tag,
                 Box::new(move || {
                     let _ = click_tx.send(());
                 }),
             );
-            match shown {
-                Ok(toast) => {
-                    self.toasts.insert(tag, toast);
-                }
-                Err(e) => {
-                    self.log.once("toast", &e);
-                }
+            if let Err(e) = shown {
+                self.log.once("toast", &e);
             }
         }
     }
@@ -489,6 +488,7 @@ impl DeskView {
     }
 
     fn on_inbox(&mut self, cx: &mut Context<Self>, window_active: bool) {
+        self.drain_notice_errors();
         let mut changed = self.ctl.on_worker();
         let mut requests = Vec::new();
         let mut pending_lang = None;
@@ -513,7 +513,7 @@ impl DeskView {
                         let for_notify = msg.clone();
                         requests.extend(self.ctl.model.apply(msg));
                         if settings_msg {
-                            self.register_toasts();
+                            self.register_notices();
                         }
                         self.notify(&for_notify, window_active);
                         if show {
@@ -756,10 +756,17 @@ pub fn run(rocky_home: PathBuf, opts: RunOptions) {
         let done = connect_attempt(&rocky_home, exe.as_deref(), CONNECT_BUDGET);
         let (outcome, tied, live) = (done.outcome, done.tied_to_job, done.live);
         let log_path = desk_dir(&rocky_home).join("rocky-desk.log");
-        let mut log = LogOnce::new(log_path);
-        if let Err(e) = set_process_aumid() {
-            log.once("aumid", &e);
-        }
+        #[cfg(windows)]
+        let log = {
+            let mut log = LogOnce::new(log_path);
+            if let Err(e) = set_process_aumid() {
+                log.once("aumid", &e);
+            }
+            log
+        };
+        #[cfg(not(windows))]
+        let log = LogOnce::new(log_path);
+        let notices = OsNotices::new(&rocky_home);
         let (click_tx, clicks) = mpsc::channel::<()>();
         let (worker_tx, worker_rx) = mpsc::channel::<ConnectDone>();
         let state = ConnState::new(3, 300_000);
@@ -808,18 +815,21 @@ pub fn run(rocky_home: PathBuf, opts: RunOptions) {
             window: None,
             tray: None,
             log,
-            toasts: BTreeMap::new(),
+            notices,
             click_tx,
             clicks,
             show_requested: false,
-            aumid_ready: false,
+            notices_ready: false,
             menu_stale: false,
         });
 
         let window = cx
             .open_window(
                 WindowOptions {
-                    show: !opts.tray,
+                    // Windows can open straight into the tray; elsewhere the
+                    // window is opened and then minimized, since a window that
+                    // was never shown has no surface to minimize.
+                    show: !opts.tray || cfg!(not(windows)),
                     titlebar: Some(TitlebarOptions {
                         title: Some(SharedString::from("rocky")),
                         appears_transparent: false,
@@ -838,6 +848,14 @@ pub fn run(rocky_home: PathBuf, opts: RunOptions) {
         view.update(cx, |v, _| {
             v.window = Some(window);
         });
+        // A `--tray` launch stays out of the way: Windows opened it hidden
+        // above; elsewhere the window had to be opened first, so minimize it.
+        #[cfg(not(windows))]
+        {
+            if opts.tray {
+                let _ = window.update(cx, |_, window, _| window.minimize_window());
+            }
+        }
         // Closing the window hides it: veto the close and minimize instead.
         if let Err(e) = window.update(cx, |_, window, cx| {
             window.on_window_should_close(&*cx, |window, _| {
@@ -871,12 +889,25 @@ pub fn run(rocky_home: PathBuf, opts: RunOptions) {
                     ]
                 }
             })
-            .build(cx)
-            .expect("build tray");
+            .build(cx);
+        #[cfg(windows)]
+        let tray = Some(tray.expect("build tray"));
+        #[cfg(not(windows))]
+        let tray = match tray {
+            Ok(tray) => Some(tray),
+            Err(e) => {
+                // A bus-less session has no tray; the rest of the desk works
+                // without one (`self.tray = None` is handled everywhere).
+                view.update(cx, |v, _| {
+                    v.log.once("tray", &e);
+                });
+                None
+            }
+        };
         view.update(cx, |v, _| {
             v.ctl.last_aggregate = agg;
             v.ctl.last_tooltip = tip;
-            v.tray = Some(tray.clone());
+            v.tray = tray;
         });
 
         cx.on_action({

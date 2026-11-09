@@ -187,14 +187,19 @@ pub(crate) struct ScratchKey(String);
 
 #[cfg(test)]
 pub(crate) fn scratch_key() -> ScratchKey {
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
+    // Parallel test threads can read the same clock tick; the counter keeps
+    // every scratch key unique even when the clock is coarse.
+    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     ScratchKey(format!(
-        r"Software\RockyDeskTest\{}-{}",
+        r"Software\RockyDeskTest\{}-{}-{}",
         std::process::id(),
-        nanos
+        nanos,
+        seq
     ))
 }
 

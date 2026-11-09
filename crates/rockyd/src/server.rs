@@ -1,23 +1,34 @@
-//! Desk client pipe server (protocol v2): single-instance user-only named pipe,
-//! per-client threads, and a non-blocking broadcast hub.
+//! Desk client server (protocol v2): a single-instance user-only connection
+//! endpoint (a named pipe on Windows, a unix socket elsewhere), per-client
+//! threads, and a non-blocking broadcast hub.
 
 use std::collections::HashMap;
 use std::io;
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{self, Receiver, Sender, SyncSender};
-use std::thread::{self, JoinHandle};
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
+use std::sync::mpsc;
+use std::sync::mpsc::{Receiver, Sender, SyncSender};
+use std::thread;
+use std::thread::JoinHandle;
 
-use rocky_proto::pipe::{AgentKey, CLIENT_QUEUE_CAP, ServerMsg, encode};
+use rocky_proto::pipe::CLIENT_QUEUE_CAP;
+use rocky_proto::pipe::{
+    AgentKey, ClientMsg, CmdName, LINE_CAP, ServerMsg, WireError, decode, encode,
+};
 use serde_json::Value;
 
 pub const DAEMON_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[derive(Debug)]
 pub enum BindError {
+    /// Another instance holds the daemon lock.
     Taken,
+    /// The socket path exceeds the kernel's limit.
+    PathTooLong,
     Io(io::Error),
 }
 
@@ -162,17 +173,304 @@ pub fn serve(
     imp::serve(rocky_home, hub, snapshot, control)
 }
 
+/// Whether `path` fits the kernel's unix socket path limit: the 108-byte
+/// `sun_path` includes the NUL, so a path of up to 107 bytes fits.
+#[cfg(unix)]
+pub fn socket_path_fits(path: &Path) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+
+    path.as_os_str().as_bytes().len() <= rocky_proto::paths::SOCKET_PATH_MAX
+}
+
+/// One connected client stream, whatever the transport.
+pub(crate) trait DuplexConn: Send + Sync + 'static {
+    /// Force the client to observe EOF: break the connection so a blocked
+    /// read fails and the next read returns EOF. Safe to call while another
+    /// thread is reading.
+    fn hang_up(&self);
+}
+
+/// Read one line, capped at `LINE_CAP + 1` bytes so an over-long line is
+/// detected without reading the rest into memory. Returns `None` on EOF.
+/// The returned vec holds at most `LINE_CAP + 1` bytes; callers treat
+/// `len() > LINE_CAP` as "too long" and disconnect.
+fn read_line_capped<R: Read>(reader: &mut BufReader<R>) -> io::Result<Option<Vec<u8>>> {
+    let mut line = Vec::new();
+    loop {
+        let avail = reader.fill_buf()?;
+        if avail.is_empty() {
+            return Ok(if line.is_empty() { None } else { Some(line) });
+        }
+        let take = avail.len().min(LINE_CAP + 1 - line.len());
+        let end = avail[..take].iter().position(|&b| b == b'\n');
+        let n = match end {
+            Some(i) => i + 1,
+            None => take,
+        };
+        line.extend_from_slice(&avail[..n]);
+        reader.consume(n);
+        if end.is_some() || line.len() > LINE_CAP {
+            return Ok(Some(line));
+        }
+    }
+}
+
+fn handle_client<S>(
+    stream: S,
+    hub: &Hub,
+    snapshot: &(dyn Fn() -> ServerMsg + Send + Sync),
+    control: &Sender<Control>,
+) where
+    S: DuplexConn,
+    for<'a> &'a S: Read + Write,
+{
+    // 1. hello must come first.
+    let mut reader = BufReader::new(&stream);
+    let hello = match read_line_capped(&mut reader) {
+        Ok(Some(l)) if l.len() <= LINE_CAP => l,
+        _ => return,
+    };
+    let Ok(text) = std::str::from_utf8(&hello) else {
+        return;
+    };
+    match decode::<ClientMsg>(text) {
+        Ok(ClientMsg::Hello { .. }) => {
+            let hello = encode(&ServerMsg::Hello {
+                daemon_version: DAEMON_VERSION.to_string(),
+                pid: std::process::id(),
+            });
+            if write_line(&stream, hello.as_bytes()).is_err() {
+                return;
+            }
+        }
+        Ok(_) => return, // subscribe/cmd before hello: out of order.
+        Err(WireError::Version(_)) => {
+            let _ = write_line(
+                &stream,
+                encode(&ServerMsg::Error {
+                    code: "version".into(),
+                })
+                .as_bytes(),
+            );
+            return;
+        }
+        Err(_) => return, // TooLong or Malformed.
+    }
+
+    // 2. subscribe must come next; snapshot is queued under the hub lock.
+    let sub = match read_line_capped(&mut reader) {
+        Ok(Some(l)) if l.len() <= LINE_CAP => l,
+        _ => return,
+    };
+    let Ok(text) = std::str::from_utf8(&sub) else {
+        return;
+    };
+    match decode::<ClientMsg>(text) {
+        Ok(ClientMsg::Subscribe) => {}
+        Err(WireError::Version(_)) => {
+            let _ = write_line(
+                &stream,
+                encode(&ServerMsg::Error {
+                    code: "version".into(),
+                })
+                .as_bytes(),
+            );
+            return;
+        }
+        _ => return,
+    }
+
+    // 3. Writer + reader share the stream by reference: the transport is
+    // Sync so the writer can drain the hub queue while this thread reads
+    // cmds, and both transports support concurrent reads and writes on one
+    // connection. The scope joins the writer before the stream is dropped,
+    // so the connection outlives both threads.
+    thread::scope(|s| {
+        let (close_tx, close_rx) = mpsc::channel::<()>();
+        // Registration + snapshot enqueue are atomic under one hub-lock
+        // hold (see `Hub::add`): no broadcast can slip a delta ahead of
+        // the snapshot.
+        let (client_id, queue) = hub.add(close_tx, snapshot);
+
+        let ws = &stream;
+        let writer = s.spawn(move || {
+            loop {
+                // Slow/full client dropped by the hub: force-disconnect so
+                // the client observes EOF even though the reader may sit
+                // blocked on a read.
+                if close_rx.try_recv().is_ok() {
+                    ws.hang_up();
+                    break;
+                }
+                match queue.recv_timeout(std::time::Duration::from_millis(10)) {
+                    Ok(line) => {
+                        if write_line(ws, line.as_bytes()).is_err() {
+                            break;
+                        }
+                    }
+                    Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                }
+            }
+        });
+
+        // 4. Reader loop (this thread): cmds until EOF/error/disconnect.
+        loop {
+            let line = match read_line_capped(&mut reader) {
+                Ok(Some(l)) if l.len() <= LINE_CAP => l,
+                _ => break,
+            };
+            let Ok(text) = std::str::from_utf8(&line) else {
+                break;
+            };
+            match decode::<ClientMsg>(text) {
+                Ok(ClientMsg::Cmd {
+                    name: CmdName::Show,
+                    id,
+                }) => {
+                    // Broadcast first so every desk sees it, then ack the
+                    // sender through its own queue (one writer per pipe).
+                    hub.broadcast(&ServerMsg::Show);
+                    if !hub.send_to(
+                        client_id,
+                        &ServerMsg::Ack {
+                            id,
+                            ok: true,
+                            error: None,
+                        },
+                    ) {
+                        break;
+                    }
+                }
+                Ok(ClientMsg::Set { id, name, value }) => {
+                    let (reply_tx, reply_rx) = mpsc::sync_channel(1);
+                    if control
+                        .send(Control::Set {
+                            id,
+                            name,
+                            value,
+                            reply: reply_tx,
+                        })
+                        .is_err()
+                    {
+                        if !hub.send_to(client_id, &daemon_stopping(id)) {
+                            break;
+                        }
+                        continue;
+                    }
+                    let replied = reply_rx.recv().unwrap_or_else(|_| daemon_stopping(id));
+                    if !hub.send_to(client_id, &replied) {
+                        break;
+                    }
+                }
+                Ok(ClientMsg::Timeline { id, key }) => {
+                    let (reply_tx, reply_rx) = mpsc::sync_channel(1);
+                    if control
+                        .send(Control::Timeline {
+                            id,
+                            key,
+                            reply: reply_tx,
+                        })
+                        .is_err()
+                    {
+                        if !hub.send_to(client_id, &daemon_stopping(id)) {
+                            break;
+                        }
+                        continue;
+                    }
+                    let replied = reply_rx.recv().unwrap_or_else(|_| daemon_stopping(id));
+                    if !hub.send_to(client_id, &replied) {
+                        break;
+                    }
+                }
+                Ok(ClientMsg::Cmd {
+                    name: CmdName::Stop,
+                    id,
+                }) => {
+                    let (reply_tx, reply_rx) = mpsc::sync_channel(1);
+                    let (flushed_tx, flushed_rx) = mpsc::channel();
+                    if control
+                        .send(Control::Stop {
+                            id,
+                            reply: reply_tx,
+                            flushed: flushed_rx,
+                        })
+                        .is_err()
+                    {
+                        let ack = encode(&ServerMsg::Ack {
+                            id,
+                            ok: false,
+                            error: Some("daemon stopping".into()),
+                        });
+                        if write_line(&stream, ack.as_bytes()).is_err() {
+                            break;
+                        }
+                        continue;
+                    }
+                    match reply_rx.recv() {
+                        Ok(ack) => {
+                            let _ = write_line(&stream, encode(&ack).as_bytes());
+                            let _ = flushed_tx.send(());
+                            break;
+                        }
+                        Err(_) => {
+                            let ack = encode(&ServerMsg::Ack {
+                                id,
+                                ok: false,
+                                error: Some("daemon stopping".into()),
+                            });
+                            if write_line(&stream, ack.as_bytes()).is_err() {
+                                break;
+                            }
+                        }
+                    }
+                }
+                Err(WireError::Version(_)) => {
+                    let _ = write_line(
+                        &stream,
+                        encode(&ServerMsg::Error {
+                            code: "version".into(),
+                        })
+                        .as_bytes(),
+                    );
+                    break;
+                }
+                _ => break, // Malformed, TooLong, or hello/subscribe out of order.
+            }
+        }
+
+        hub.remove(client_id);
+        writer.join().unwrap();
+    });
+}
+
+/// The reply used when the daemon control loop is gone.
+fn daemon_stopping(id: u64) -> ServerMsg {
+    ServerMsg::Ack {
+        id,
+        ok: false,
+        error: Some("daemon stopping".into()),
+    }
+}
+
+fn write_line<S>(stream: &S, buf: &[u8]) -> io::Result<()>
+where
+    for<'a> &'a S: Write,
+{
+    let mut s = stream;
+    s.write_all(buf)?;
+    s.flush()
+}
+
 #[cfg(windows)]
 mod imp {
     use super::*;
-    use std::io::{BufRead, BufReader, Read, Write};
     use std::os::windows::io::AsRawHandle;
 
     use interprocess::os::windows::named_pipe::pipe_mode::Bytes;
     use interprocess::os::windows::named_pipe::{DuplexPipeStream, PipeListenerOptions};
     use interprocess::os::windows::security_descriptor::SecurityDescriptor;
     use rocky_proto::paths::pipe_name;
-    use rocky_proto::pipe::{ClientMsg, CmdName, LINE_CAP, WireError, decode};
     use widestring::U16CString;
 
     pub fn serve(
@@ -257,298 +555,141 @@ mod imp {
         }
     }
 
-    /// Read one line, capped at `LINE_CAP + 1` bytes so an over-long line is
-    /// detected without reading the rest into memory. Returns `None` on EOF.
-    /// The returned vec holds at most `LINE_CAP + 1` bytes; callers treat
-    /// `len() > LINE_CAP` as "too long" and disconnect.
-    fn read_line_capped<R: Read>(reader: &mut BufReader<R>) -> io::Result<Option<Vec<u8>>> {
-        let mut line = Vec::new();
-        loop {
-            let avail = reader.fill_buf()?;
-            if avail.is_empty() {
-                return Ok(if line.is_empty() { None } else { Some(line) });
+    /// `DisconnectNamedPipe` breaks the connection on this instance, failing
+    /// the reader's blocked `ReadFileEx` and making the client's next read
+    /// return EOF. Safe to call while the reader thread is blocked; the handle
+    /// itself closes later when the stream drops after the scope joins both
+    /// threads.
+    impl DuplexConn for DuplexPipeStream<Bytes> {
+        fn hang_up(&self) {
+            use windows_sys::Win32::System::Pipes::DisconnectNamedPipe;
+            unsafe {
+                DisconnectNamedPipe(self.as_raw_handle());
             }
-            let take = avail.len().min(LINE_CAP + 1 - line.len());
-            let end = avail[..take].iter().position(|&b| b == b'\n');
-            let n = match end {
-                Some(i) => i + 1,
-                None => take,
-            };
-            line.extend_from_slice(&avail[..n]);
-            reader.consume(n);
-            if end.is_some() || line.len() > LINE_CAP {
-                return Ok(Some(line));
-            }
-        }
-    }
-
-    fn handle_client(
-        stream: DuplexPipeStream<Bytes>,
-        hub: &Hub,
-        snapshot: &(dyn Fn() -> ServerMsg + Send + Sync),
-        control: &Sender<Control>,
-    ) {
-        // 1. hello must come first.
-        let mut reader = BufReader::new(&stream);
-        let hello = match read_line_capped(&mut reader) {
-            Ok(Some(l)) if l.len() <= LINE_CAP => l,
-            _ => return,
-        };
-        let Ok(text) = std::str::from_utf8(&hello) else {
-            return;
-        };
-        match decode::<ClientMsg>(text) {
-            Ok(ClientMsg::Hello { .. }) => {
-                let hello = encode(&ServerMsg::Hello {
-                    daemon_version: DAEMON_VERSION.to_string(),
-                    pid: std::process::id(),
-                });
-                if write_line(&stream, hello.as_bytes()).is_err() {
-                    return;
-                }
-            }
-            Ok(_) => return, // subscribe/cmd before hello: out of order.
-            Err(WireError::Version(_)) => {
-                let _ = write_line(
-                    &stream,
-                    encode(&ServerMsg::Error {
-                        code: "version".into(),
-                    })
-                    .as_bytes(),
-                );
-                return;
-            }
-            Err(_) => return, // TooLong or Malformed.
-        }
-
-        // 2. subscribe must come next; snapshot is queued under the hub lock.
-        let sub = match read_line_capped(&mut reader) {
-            Ok(Some(l)) if l.len() <= LINE_CAP => l,
-            _ => return,
-        };
-        let Ok(text) = std::str::from_utf8(&sub) else {
-            return;
-        };
-        match decode::<ClientMsg>(text) {
-            Ok(ClientMsg::Subscribe) => {}
-            Err(WireError::Version(_)) => {
-                let _ = write_line(
-                    &stream,
-                    encode(&ServerMsg::Error {
-                        code: "version".into(),
-                    })
-                    .as_bytes(),
-                );
-                return;
-            }
-            _ => return,
-        }
-
-        // 3. Writer + reader share the stream by reference (interprocess
-        // streams are Sync for exactly this): the writer drains the hub queue,
-        // this thread reads cmds. Concurrent ReadFile/WriteFile on one pipe
-        // handle is supported by Windows. The scope joins the writer before
-        // the stream is dropped, so the handle outlives both threads.
-        thread::scope(|s| {
-            let (close_tx, close_rx) = mpsc::channel::<()>();
-            // Registration + snapshot enqueue are atomic under one hub-lock
-            // hold (see `Hub::add`): no broadcast can slip a delta ahead of
-            // the snapshot.
-            let (client_id, queue) = hub.add(close_tx, snapshot);
-
-            let ws = &stream;
-            let writer = s.spawn(move || {
-                loop {
-                    // Slow/full client dropped by the hub: force-disconnect so
-                    // the client observes EOF even though the reader may sit
-                    // blocked in ReadFileEx.
-                    if close_rx.try_recv().is_ok() {
-                        disconnect(ws);
-                        break;
-                    }
-                    match queue.recv_timeout(std::time::Duration::from_millis(10)) {
-                        Ok(line) => {
-                            if write_line(ws, line.as_bytes()).is_err() {
-                                break;
-                            }
-                        }
-                        Err(mpsc::RecvTimeoutError::Timeout) => continue,
-                        Err(mpsc::RecvTimeoutError::Disconnected) => break,
-                    }
-                }
-            });
-
-            // 4. Reader loop (this thread): cmds until EOF/error/disconnect.
-            loop {
-                let line = match read_line_capped(&mut reader) {
-                    Ok(Some(l)) if l.len() <= LINE_CAP => l,
-                    _ => break,
-                };
-                let Ok(text) = std::str::from_utf8(&line) else {
-                    break;
-                };
-                match decode::<ClientMsg>(text) {
-                    Ok(ClientMsg::Cmd {
-                        name: CmdName::Show,
-                        id,
-                    }) => {
-                        // Broadcast first so every desk sees it, then ack the
-                        // sender through its own queue (one writer per pipe).
-                        hub.broadcast(&ServerMsg::Show);
-                        if !hub.send_to(
-                            client_id,
-                            &ServerMsg::Ack {
-                                id,
-                                ok: true,
-                                error: None,
-                            },
-                        ) {
-                            break;
-                        }
-                    }
-                    Ok(ClientMsg::Set { id, name, value }) => {
-                        let (reply_tx, reply_rx) = mpsc::sync_channel(1);
-                        if control
-                            .send(Control::Set {
-                                id,
-                                name,
-                                value,
-                                reply: reply_tx,
-                            })
-                            .is_err()
-                        {
-                            if !hub.send_to(client_id, &daemon_stopping(id)) {
-                                break;
-                            }
-                            continue;
-                        }
-                        let replied = reply_rx.recv().unwrap_or_else(|_| daemon_stopping(id));
-                        if !hub.send_to(client_id, &replied) {
-                            break;
-                        }
-                    }
-                    Ok(ClientMsg::Timeline { id, key }) => {
-                        let (reply_tx, reply_rx) = mpsc::sync_channel(1);
-                        if control
-                            .send(Control::Timeline {
-                                id,
-                                key,
-                                reply: reply_tx,
-                            })
-                            .is_err()
-                        {
-                            if !hub.send_to(client_id, &daemon_stopping(id)) {
-                                break;
-                            }
-                            continue;
-                        }
-                        let replied = reply_rx.recv().unwrap_or_else(|_| daemon_stopping(id));
-                        if !hub.send_to(client_id, &replied) {
-                            break;
-                        }
-                    }
-                    Ok(ClientMsg::Cmd {
-                        name: CmdName::Stop,
-                        id,
-                    }) => {
-                        let (reply_tx, reply_rx) = mpsc::sync_channel(1);
-                        let (flushed_tx, flushed_rx) = mpsc::channel();
-                        if control
-                            .send(Control::Stop {
-                                id,
-                                reply: reply_tx,
-                                flushed: flushed_rx,
-                            })
-                            .is_err()
-                        {
-                            let ack = encode(&ServerMsg::Ack {
-                                id,
-                                ok: false,
-                                error: Some("daemon stopping".into()),
-                            });
-                            if write_line(&stream, ack.as_bytes()).is_err() {
-                                break;
-                            }
-                            continue;
-                        }
-                        match reply_rx.recv() {
-                            Ok(ack) => {
-                                let _ = write_line(&stream, encode(&ack).as_bytes());
-                                let _ = flushed_tx.send(());
-                                break;
-                            }
-                            Err(_) => {
-                                let ack = encode(&ServerMsg::Ack {
-                                    id,
-                                    ok: false,
-                                    error: Some("daemon stopping".into()),
-                                });
-                                if write_line(&stream, ack.as_bytes()).is_err() {
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                    Err(WireError::Version(_)) => {
-                        let _ = write_line(
-                            &stream,
-                            encode(&ServerMsg::Error {
-                                code: "version".into(),
-                            })
-                            .as_bytes(),
-                        );
-                        break;
-                    }
-                    _ => break, // Malformed, TooLong, or hello/subscribe out of order.
-                }
-            }
-
-            hub.remove(client_id);
-            writer.join().unwrap();
-        });
-    }
-
-    /// The reply used when the daemon control loop is gone.
-    fn daemon_stopping(id: u64) -> ServerMsg {
-        ServerMsg::Ack {
-            id,
-            ok: false,
-            error: Some("daemon stopping".into()),
-        }
-    }
-
-    fn write_line(stream: &DuplexPipeStream<Bytes>, buf: &[u8]) -> io::Result<()> {
-        let mut s = stream;
-        s.write_all(buf)?;
-        s.flush()
-    }
-
-    /// Force the client to observe EOF: `DisconnectNamedPipe` breaks the
-    /// connection on this instance, failing the reader's blocked `ReadFileEx`
-    /// and making the client's next read return EOF. Safe to call while the
-    /// reader thread is blocked; the handle itself closes later when the
-    /// stream drops after the scope joins both threads.
-    fn disconnect(stream: &DuplexPipeStream<Bytes>) {
-        use windows_sys::Win32::System::Pipes::DisconnectNamedPipe;
-        unsafe {
-            DisconnectNamedPipe(stream.as_raw_handle());
         }
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(unix)]
 mod imp {
     use super::*;
+    use std::fs::OpenOptions;
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    use std::os::unix::net::{UnixListener, UnixStream};
+    use std::time::Duration;
+
+    use rocky_proto::paths::{daemon_lock_path, desk_dir, runtime_dir_from, socket_path};
+    use rocky_proto::peer::{peer_uid, same_user};
 
     pub fn serve(
-        _rocky_home: &Path,
-        _hub: Arc<Hub>,
-        _snapshot: Arc<dyn Fn() -> ServerMsg + Send + Sync>,
-        _control: Sender<Control>,
+        rocky_home: &Path,
+        hub: Arc<Hub>,
+        snapshot: Arc<dyn Fn() -> ServerMsg + Send + Sync>,
+        control: Sender<Control>,
     ) -> Result<JoinHandle<()>, BindError> {
-        Err(BindError::Io(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "named pipe server is Windows-only",
-        )))
+        // 1. The desk dir holds the socket unless XDG_RUNTIME_DIR wins; only
+        // this user may list or enter it either way.
+        let desk = desk_dir(rocky_home);
+        std::fs::create_dir_all(&desk)?;
+        std::fs::set_permissions(&desk, std::fs::Permissions::from_mode(0o700))?;
+
+        // 2. Refuse an oversized socket path before creating or unlinking
+        // anything. Only the socket has the 107-byte `sun_path` limit; the
+        // lock is a regular file, so a longer lock path is fine.
+        let sock = socket_path(rocky_home);
+        if !super::socket_path_fits(&sock) {
+            return Err(BindError::PathTooLong);
+        }
+
+        // 3. The runtime dir (XDG_RUNTIME_DIR, else the desk dir) holds the
+        // socket and the lock.
+        let runtime = runtime_dir_from(rocky_home, std::env::var_os("XDG_RUNTIME_DIR").as_deref());
+        std::fs::create_dir_all(&runtime)?;
+
+        // 4. The lock is owner-only and non-blocking: a second daemon fails
+        // here instead of waiting.
+        let lock = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .open(daemon_lock_path(rocky_home))?;
+        // SAFETY: `lock` owns a live file descriptor; flock only touches that
+        // descriptor and the process lock table.
+        if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+            let err = io::Error::last_os_error();
+            return Err(if err.raw_os_error() == Some(libc::EWOULDBLOCK) {
+                BindError::Taken
+            } else {
+                BindError::Io(err)
+            });
+        }
+
+        // 5. A daemon killed with -9 leaves its socket file behind; the
+        // kernel already freed its lock, so unlink the stale path and rebind.
+        match std::fs::remove_file(&sock) {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
+
+        // 6. Bind under a restrictive umask so the socket is born 0600; the
+        // previous umask is restored before any error return.
+        // SAFETY: umask has no preconditions; it is process-wide, and the
+        // window between set and restore contains only the bind call.
+        let previous = unsafe { libc::umask(0o177) };
+        let bound = UnixListener::bind(&sock);
+        // SAFETY: as above.
+        unsafe { libc::umask(previous) };
+        let listener = bound?;
+
+        // 7. Accept: unknown or foreign uids are dropped without a reply.
+        Ok(thread::spawn(move || {
+            // Held for the process lifetime: the kernel frees the lock when
+            // the daemon dies.
+            let _lock = lock;
+            loop {
+                match listener.accept() {
+                    Ok((stream, _)) => {
+                        if !same_user(peer_uid(&stream)) {
+                            continue;
+                        }
+                        let hub = Arc::clone(&hub);
+                        let snapshot = Arc::clone(&snapshot);
+                        let control = control.clone();
+                        thread::spawn(move || handle_client(stream, &hub, &*snapshot, &control));
+                    }
+                    // Accept only fails if the listener broke; back off briefly
+                    // rather than busy-spinning, then keep serving.
+                    Err(_) => thread::sleep(Duration::from_millis(50)),
+                }
+            }
+        }))
+    }
+
+    impl DuplexConn for UnixStream {
+        /// `shutdown(2)` both ways: the reader observes EOF and the writer
+        /// fails, even while either is blocked.
+        fn hang_up(&self) {
+            let _ = self.shutdown(std::net::Shutdown::Both);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[cfg(unix)]
+    use std::path::Path;
+
+    #[cfg(unix)]
+    use super::socket_path_fits;
+
+    #[cfg(unix)]
+    #[test]
+    fn socket_path_limit_is_107_bytes() {
+        assert!(socket_path_fits(Path::new(&"a".repeat(107))));
+        assert!(!socket_path_fits(Path::new(&"a".repeat(108))));
     }
 }

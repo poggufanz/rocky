@@ -14,6 +14,26 @@ use tempfile::TempDir;
 const GUARD: Duration = Duration::from_secs(10);
 const HELLO: Duration = Duration::from_secs(5);
 
+/// `serve` sets the process umask for the bind, and Rust runs the tests in one
+/// binary on parallel threads: a `TempDir` created inside that window would
+/// lose its owner execute bit. Serialize the tests so nothing creates files
+/// while another test binds.
+#[cfg(unix)]
+static SERVE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(unix)]
+fn serialize() -> std::sync::MutexGuard<'static, ()> {
+    SERVE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn temp_home() -> TempDir {
+    #[cfg(unix)]
+    let _serial = serialize();
+    TempDir::new().unwrap()
+}
+
 fn empty_snapshot() -> ServerMsg {
     ServerMsg::Snapshot {
         agents: Vec::new(),
@@ -24,6 +44,8 @@ fn empty_snapshot() -> ServerMsg {
 }
 
 fn start_server() -> (TempDir, std::thread::JoinHandle<()>) {
+    #[cfg(unix)]
+    let _serial = serialize();
     let home = TempDir::new().unwrap();
     let hub = Arc::new(Hub::new());
     let (control_tx, _control_rx) = mpsc::channel();
@@ -58,7 +80,7 @@ fn show_relay_reaches_other_subscribers() {
 
 #[test]
 fn show_relay_without_daemon_returns_quickly() {
-    let home = TempDir::new().unwrap();
+    let home = temp_home();
     let start = Instant::now();
     let err = send_show(home.path(), RELAY_TIMEOUT).expect_err("no daemon to relay to");
     let elapsed = start.elapsed();

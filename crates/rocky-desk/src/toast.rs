@@ -16,17 +16,31 @@ const GROUP: &str = "rocky";
 /// Icon the AUMID points at, compiled into the exe.
 const ICON: &[u8] = include_bytes!("../assets/rocky.ico");
 
+/// Write `bytes` to `path` unless the file already holds exactly those bytes,
+/// creating the parent directory when a write is needed. Returns the path
+/// either way; the bytes are the same whenever it returns `Ok`.
+pub(crate) fn write_if_different(
+    path: std::path::PathBuf,
+    bytes: &[u8],
+) -> io::Result<std::path::PathBuf> {
+    if std::fs::read(&path).is_ok_and(|found| found == bytes) {
+        return Ok(path);
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&path, bytes)?;
+    Ok(path)
+}
+
 /// Write `<rocky_home>/desk/rocky.ico` from the embedded asset unless the
 /// file on disk already holds exactly those bytes. Returns the path either
 /// way; the bytes are the same whenever it returns `Ok`.
 pub fn ensure_icon_file(rocky_home: &Path) -> io::Result<std::path::PathBuf> {
-    let path = rocky_proto::paths::desk_dir(rocky_home).join("rocky.ico");
-    if std::fs::read(&path).is_ok_and(|found| found == ICON) {
-        return Ok(path);
-    }
-    std::fs::create_dir_all(rocky_proto::paths::desk_dir(rocky_home))?;
-    std::fs::write(&path, ICON)?;
-    Ok(path)
+    write_if_different(
+        rocky_proto::paths::desk_dir(rocky_home).join("rocky.ico"),
+        ICON,
+    )
 }
 
 /// Keeps a shown toast and its `Activated` registration alive. Windows stops

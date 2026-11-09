@@ -3,17 +3,23 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
+#[cfg(windows)]
 use interprocess::os::windows::named_pipe::pipe_mode::Bytes;
+#[cfg(windows)]
 use interprocess::os::windows::named_pipe::{PipeListenerOptions, PipeStream};
+#[cfg(windows)]
 use rocky_proto::paths::pipe_name;
 use rocky_proto::pipe::{Health, ServerMsg, Status};
 use rocky_proto::settings::Settings;
 use rockyd::server::{Hub, serve};
 use tempfile::TempDir;
 
-use rocky_desk::client::{ConnectError, connect_and_subscribe, verify_server};
+#[cfg(windows)]
+use rocky_desk::client::verify_server;
+use rocky_desk::client::{ConnectError, connect_and_subscribe};
 use rocky_desk::conn::ConnectOutcome;
 use rocky_desk::connect::{CONNECT_BUDGET, connect_attempt};
+#[cfg(windows)]
 use rocky_desk::spawn::spawn_daemon;
 
 const GUARD: Duration = Duration::from_secs(10);
@@ -28,7 +34,29 @@ fn empty_snapshot() -> ServerMsg {
     }
 }
 
+/// `serve` sets the process umask for the bind, and Rust runs the tests in one
+/// binary on parallel threads: a `TempDir` created inside that window would
+/// lose its owner execute bit. Serialize the tests so nothing creates files
+/// while another test binds.
+#[cfg(unix)]
+static SERVE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(unix)]
+fn serialize() -> std::sync::MutexGuard<'static, ()> {
+    SERVE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn temp_home() -> TempDir {
+    #[cfg(unix)]
+    let _serial = serialize();
+    TempDir::new().unwrap()
+}
+
 fn start_server() -> (TempDir, std::thread::JoinHandle<()>) {
+    #[cfg(unix)]
+    let _serial = serialize();
     let home = TempDir::new().unwrap();
     let hub = Arc::new(Hub::new());
     let (control_tx, _control_rx) = mpsc::channel();
@@ -38,12 +66,14 @@ fn start_server() -> (TempDir, std::thread::JoinHandle<()>) {
 
 /// A same-user pipe server that accepts every connection and never writes.
 /// Held streams stay open, so a client read blocks instead of seeing EOF.
+#[cfg(windows)]
 struct SilentServer {
     name: String,
     stop: Arc<AtomicBool>,
     handle: Option<std::thread::JoinHandle<()>>,
 }
 
+#[cfg(windows)]
 impl SilentServer {
     fn start(name: String) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
@@ -77,6 +107,7 @@ impl SilentServer {
     }
 }
 
+#[cfg(windows)]
 impl Drop for SilentServer {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
@@ -91,9 +122,65 @@ impl Drop for SilentServer {
     }
 }
 
+/// A same-user socket server that accepts every connection and never writes.
+/// Held streams stay open, so a client read blocks instead of seeing EOF.
+#[cfg(unix)]
+struct SilentServer {
+    stop: Arc<AtomicBool>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+#[cfg(unix)]
+impl SilentServer {
+    fn start(path: std::path::PathBuf) -> Self {
+        use std::os::unix::net::UnixListener;
+
+        let listener = UnixListener::bind(&path).expect("silent listener binds");
+        listener.set_nonblocking(true).unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread_stop = Arc::clone(&stop);
+        let handle = std::thread::spawn(move || {
+            let mut held = Vec::new();
+            while !thread_stop.load(Ordering::SeqCst) {
+                match listener.accept() {
+                    Ok((stream, _)) => held.push(stream),
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        Self {
+            stop,
+            handle: Some(handle),
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for SilentServer {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
 fn start_silent_server() -> (TempDir, SilentServer) {
-    let home = TempDir::new().unwrap();
+    let home = temp_home();
+    #[cfg(windows)]
     let server = SilentServer::start(pipe_name(home.path()));
+    #[cfg(unix)]
+    let server = {
+        // The dir and the socket are created while another thread's `serve`
+        // may hold the process umask at 0o177; keep that window out.
+        let _serial = serialize();
+        let sock = rocky_proto::paths::socket_path(home.path());
+        std::fs::create_dir_all(sock.parent().unwrap()).unwrap();
+        SilentServer::start(sock)
+    };
     (home, server)
 }
 
@@ -114,7 +201,7 @@ fn silent_server_is_unresponsive_within_six_seconds() {
 
 #[test]
 fn absent_daemon_gives_up_within_six_seconds() {
-    let home = TempDir::new().unwrap();
+    let home = temp_home();
     let t = Instant::now();
     let done = connect_attempt(home.path(), None, CONNECT_BUDGET);
     assert_eq!(done.outcome, ConnectOutcome::NoDaemon);
@@ -149,6 +236,7 @@ fn verify_server_accepts_own_daemon() {
     );
 }
 
+#[cfg(windows)]
 #[test]
 fn spawn_daemon_runs_exe_that_exits_zero() {
     // Test binary lives in target/debug/deps/; examples in target/debug/examples/.
@@ -166,6 +254,7 @@ fn spawn_daemon_runs_exe_that_exits_zero() {
 
 // Direct verify_server check: a raw client handle against the in-process
 // server must verify Ok.
+#[cfg(windows)]
 #[test]
 fn verify_server_raw_handle_ok() {
     use std::os::windows::io::AsRawHandle;

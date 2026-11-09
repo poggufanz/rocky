@@ -71,6 +71,63 @@ pub fn desk_mutex_name(rocky_home: &Path) -> String {
     format!(r"Local\rocky-desk-{}", home_hash(rocky_home))
 }
 
+/// Longest unix socket path the kernel accepts: `sun_path` is 108 bytes
+/// including the NUL, so a path of up to 107 bytes fits.
+#[cfg(unix)]
+pub const SOCKET_PATH_MAX: usize = 107;
+
+/// A usable `XDG_RUNTIME_DIR`: present, non-empty, and absolute.
+#[cfg(unix)]
+fn usable_runtime_dir(xdg_runtime_dir: Option<&OsStr>) -> Option<&Path> {
+    xdg_runtime_dir
+        .map(Path::new)
+        .filter(|dir| dir.is_absolute())
+}
+
+/// Directory holding the socket and locks: the runtime dir, or the desk dir.
+#[cfg(unix)]
+pub fn runtime_dir_from(rocky_home: &Path, xdg_runtime_dir: Option<&OsStr>) -> PathBuf {
+    match usable_runtime_dir(xdg_runtime_dir) {
+        Some(dir) => dir.to_path_buf(),
+        None => desk_dir(rocky_home),
+    }
+}
+
+#[cfg(unix)]
+pub fn socket_path_from(rocky_home: &Path, xdg_runtime_dir: Option<&OsStr>) -> PathBuf {
+    match usable_runtime_dir(xdg_runtime_dir) {
+        Some(dir) => dir.join(format!("rocky-desk-{}.sock", home_hash(rocky_home))),
+        None => desk_dir(rocky_home).join("rockyd.sock"),
+    }
+}
+
+#[cfg(unix)]
+pub fn daemon_lock_path_from(rocky_home: &Path, xdg_runtime_dir: Option<&OsStr>) -> PathBuf {
+    runtime_dir_from(rocky_home, xdg_runtime_dir)
+        .join(format!("rockyd-{}.lock", home_hash(rocky_home)))
+}
+
+#[cfg(unix)]
+pub fn desk_lock_path_from(rocky_home: &Path, xdg_runtime_dir: Option<&OsStr>) -> PathBuf {
+    runtime_dir_from(rocky_home, xdg_runtime_dir)
+        .join(format!("rocky-desk-{}.lock", home_hash(rocky_home)))
+}
+
+#[cfg(unix)]
+pub fn socket_path(rocky_home: &Path) -> PathBuf {
+    socket_path_from(rocky_home, std::env::var_os("XDG_RUNTIME_DIR").as_deref())
+}
+
+#[cfg(unix)]
+pub fn daemon_lock_path(rocky_home: &Path) -> PathBuf {
+    daemon_lock_path_from(rocky_home, std::env::var_os("XDG_RUNTIME_DIR").as_deref())
+}
+
+#[cfg(unix)]
+pub fn desk_lock_path(rocky_home: &Path) -> PathBuf {
+    desk_lock_path_from(rocky_home, std::env::var_os("XDG_RUNTIME_DIR").as_deref())
+}
+
 #[cfg(test)]
 mod tests {
     use std::ffi::OsStr;
@@ -100,7 +157,7 @@ mod tests {
     fn empty_env_falls_back_to_home() {
         assert_eq!(
             rocky_home_from(Some(OsStr::new("")), Path::new(r"C:\Users\a")),
-            PathBuf::from(r"C:\Users\a\.rocky")
+            Path::new(r"C:\Users\a").join(".rocky")
         );
     }
     #[test]
@@ -135,14 +192,55 @@ mod tests {
     #[test]
     fn desk_layout() {
         let p = Path::new(r"C:\h");
-        assert_eq!(spool_dir(p), PathBuf::from(r"C:\h\desk\spool"));
-        assert_eq!(bad_dir(p), PathBuf::from(r"C:\h\desk\spool\bad"));
-        assert_eq!(log_path(p), PathBuf::from(r"C:\h\desk\rockyd.log"));
+        let desk = p.join("desk");
+        assert_eq!(spool_dir(p), desk.join("spool"));
+        assert_eq!(bad_dir(p), desk.join("spool").join("bad"));
+        assert_eq!(log_path(p), desk.join("rockyd.log"));
+        assert_eq!(tool_text_off_marker(p), desk.join("tool-text-off"));
+        assert_eq!(settings_path(p), desk.join("settings.json"));
+        assert_eq!(history_dir(p), desk.join("history"));
+    }
+}
+
+#[cfg(all(test, unix))]
+mod unix_tests {
+    use std::ffi::OsStr;
+    use std::path::Path;
+
+    use super::{daemon_lock_path_from, desk_lock_path_from, home_hash, socket_path_from};
+
+    #[test]
+    fn socket_uses_xdg_runtime_dir_with_home_hash() {
+        let home = Path::new("/home/u/.rocky");
+        let xdg = OsStr::new("/run/user/1000");
+        let name = format!("rocky-desk-{}.sock", home_hash(home));
         assert_eq!(
-            tool_text_off_marker(p),
-            PathBuf::from(r"C:\h\desk\tool-text-off")
+            socket_path_from(home, Some(xdg)),
+            Path::new("/run/user/1000").join(name)
         );
-        assert_eq!(settings_path(p), PathBuf::from(r"C:\h\desk\settings.json"));
-        assert_eq!(history_dir(p), PathBuf::from(r"C:\h\desk\history"));
+    }
+
+    #[test]
+    fn socket_falls_back_to_desk_dir_for_missing_empty_or_relative_xdg() {
+        let home = Path::new("/home/u/.rocky");
+        let want = home.join("desk").join("rockyd.sock");
+        assert_eq!(socket_path_from(home, None), want);
+        assert_eq!(socket_path_from(home, Some(OsStr::new(""))), want);
+        assert_eq!(socket_path_from(home, Some(OsStr::new("run/user"))), want);
+    }
+
+    #[test]
+    fn locks_sit_beside_the_socket_with_the_hash() {
+        let home = Path::new("/home/u/.rocky");
+        let xdg = Some(OsStr::new("/run/user/1000"));
+        let h = home_hash(home);
+        assert_eq!(
+            daemon_lock_path_from(home, xdg),
+            Path::new("/run/user/1000").join(format!("rockyd-{h}.lock"))
+        );
+        assert_eq!(
+            desk_lock_path_from(home, None),
+            home.join("desk").join(format!("rocky-desk-{h}.lock"))
+        );
     }
 }
