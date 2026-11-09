@@ -539,8 +539,17 @@ function resolveClaudeSettingsTarget(dependencies: SetupDependencies): AgentHook
   return resolution.target;
 }
 
+/**
+ * Printed when --yes accompanies a hook install. Those installs always ask in
+ * a terminal and --yes is not the answer, so a run without a terminal installs
+ * nothing. The note says so instead of leaving a silent decline.
+ */
+export const HOOK_INSTALL_YES_NOTE =
+  "--yes does not answer the hook install question. Run this command in a terminal to confirm.";
+
 async function runAgentHooksAction(
   action: AgentHooksAction,
+  yes: boolean,
   dependencies: SetupDependencies,
   rationaleGate: boolean,
   harnesses: readonly HarnessId[],
@@ -587,6 +596,7 @@ async function runAgentHooksAction(
       detail(CLAUDE_CAPTURE_CAPABILITY_NOTICE);
     }
     if (action === "install") {
+      if (yes) detail(HOOK_INSTALL_YES_NOTE);
       const result = await installClaudeAgentHooks(target, options);
       detail(`claude-code agent hooks: ${result.status}`);
       if (result.detail !== undefined) detail(safeTerminalBlock(result.detail));
@@ -615,6 +625,7 @@ async function runAgentHooksAction(
 async function runDeskHooksAction(
   action: "install" | "uninstall",
   hookBin: string | undefined,
+  yes: boolean,
   dependencies: SetupDependencies,
 ): Promise<number> {
   try {
@@ -643,6 +654,7 @@ async function runDeskHooksAction(
       }
       const target = resolveClaudeSettingsTarget(dependencies);
       if (target === undefined) return 1;
+      if (yes) detail(HOOK_INSTALL_YES_NOTE);
       const result = await installDeskHooks(target, {
         hookBin: resolved,
         fileExists: (path) => dependencies.platform.fileExists(path) || path === resolved,
@@ -822,11 +834,12 @@ export async function setup(argv: readonly string[], deps?: SetupDependencies): 
   }
 
   if (options.deskHooksAction !== undefined) {
-    return runDeskHooksAction(options.deskHooksAction, options.deskHookBin, dependencies);
+    return runDeskHooksAction(options.deskHooksAction, options.deskHookBin, options.yes, dependencies);
   }
   if (options.agentHooksAction !== undefined) {
     return runAgentHooksAction(
       options.agentHooksAction,
+      options.yes,
       dependencies,
       options.rationaleGate ?? true,
       options.harnesses,

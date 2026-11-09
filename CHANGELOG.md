@@ -12,6 +12,8 @@ The experimental desk hook records the Bash command and tool description as reda
 
 `rocky setup` writes Claude Code agent and desk hooks to `$CLAUDE_CONFIG_DIR/settings.json` when that variable is set, prints the settings path it used, and refuses an empty or non-canonical value. Hooks installed earlier into `~/.claude/settings.json` while `CLAUDE_CONFIG_DIR` was set stay there, because status and uninstall now look at `$CLAUDE_CONFIG_DIR/settings.json`. To remove them, unset `CLAUDE_CONFIG_DIR` and run `rocky setup --uninstall-agent-hooks` or `rocky setup --uninstall-desk-hooks`.
 
+`rocky setup --agent-hooks` and `--desk-hooks` print a note when `--yes` is given: hook installs still ask in a terminal, and a run without one installs nothing.
+
 Hook setup no longer reports a retained previous config when the retained copy matches the file it replaced. The copy is still kept for recovery.
 
 Remembered commands and rationale excerpts are now redacted before control characters are flattened. Before, a token right after a terminal escape sequence (for example `ESC[31m` followed by a GitHub token) went unrecognized and was stored in full. Records written before this fix are not rewritten.
