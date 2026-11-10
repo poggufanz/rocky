@@ -1449,7 +1449,7 @@ test("digest hint symlink target remains byte-identical and queues nothing", (t)
   assert.deepEqual(labelLines(paths), []);
 });
 
-test("digest hint FIFO returns bounded and queues nothing on POSIX", { timeout: 5_000 }, (t) => {
+test("digest hint FIFO returns bounded and queues nothing on POSIX", { timeout: 15_000 }, (t) => {
   if (process.platform === "win32") {
     t.skip("FIFO is POSIX-only");
     return;
@@ -1463,18 +1463,26 @@ test("digest hint FIFO returns bounded and queues nothing on POSIX", { timeout: 
   seedDigestTriple(paths, Date.now());
   const modulePath = join(dirname(fileURLToPath(import.meta.url)), "..", "agent", "annotate.js");
   const statePath = join(dirname(modulePath), "..", "core", "state-paths.js");
+  // The worker times the hint alone. Node start and the imports slow down with
+  // CPU load, so the spawn timeout is only a hang guard; a blocking open of
+  // the FIFO still fails, at the guard.
   const worker = [
     "import { pathToFileURL } from 'node:url';",
     "const [annotatePath, statePath, home, now] = process.argv.slice(1);",
     "const { maybeQueueDigestHint } = await import(pathToFileURL(annotatePath).href);",
     "const { resolveRockyPaths } = await import(pathToFileURL(statePath).href);",
-    "maybeQueueDigestHint(resolveRockyPaths({ ROCKY_HOME: home }), Number(now));",
+    "const rockyPaths = resolveRockyPaths({ ROCKY_HOME: home });",
+    "const started = performance.now();",
+    "maybeQueueDigestHint(rockyPaths, Number(now));",
+    "process.stdout.write(JSON.stringify({ elapsed: performance.now() - started }));",
   ].join("\n");
   const result = spawnSync(process.execPath, [
     "--input-type=module", "--eval", worker, modulePath, statePath, paths.home, String(Date.now()),
-  ], { encoding: "utf8", timeout: 1_000, windowsHide: true });
+  ], { encoding: "utf8", timeout: 10_000, windowsHide: true });
   assert.equal(result.error, undefined, result.error?.message);
   assert.equal(result.status, 0, result.stderr);
+  const observed = JSON.parse(result.stdout) as { elapsed: number };
+  assert.ok(observed.elapsed < 1_000, `maybeQueueDigestHint took ${observed.elapsed} ms`);
   assert.deepEqual(labelLines(paths), []);
 });
 
