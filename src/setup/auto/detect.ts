@@ -1,8 +1,7 @@
 import { realpathSync } from "node:fs";
 import { dirname, join, posix, win32 } from "node:path";
-import type { PlatformPath } from "node:path";
 import { canonicalPath } from "../../core/memory-read.js";
-import { isCanonicalAbsoluteDirectory } from "../claude-code.js";
+import { isCanonicalAbsoluteDirectory, isCanonicalAbsoluteFile } from "../claude-code.js";
 import { resolveCodexHome } from "../harness-codex.js";
 import { resolveCopilotConfigPath } from "../harness-copilot-cli.js";
 import { resolveGeminiSettingsPath } from "../harness-gemini-cli.js";
@@ -104,12 +103,6 @@ const DIRECTORY_MARKERS: Partial<Record<McpHarnessId, readonly string[]>> = {
   codex: ["config.toml"],
   "copilot-cli": ["config.json"],
 };
-
-function isCanonicalAbsoluteFile(value: string, api: PlatformPath): boolean {
-  if (!api.isAbsolute(value) || api.normalize(value) !== value || /[\\/]$/.test(value)) return false;
-  const parent = api.dirname(value);
-  return isCanonicalAbsoluteDirectory(parent, api) && api.join(parent, api.basename(value)) === value;
-}
 
 function realpath(value: string): string | undefined {
   try {

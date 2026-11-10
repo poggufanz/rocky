@@ -1014,7 +1014,7 @@ export function isCanonicalAbsoluteDirectory(path: string, pathApi: PlatformPath
   return !path.includes("\\");
 }
 
-function isCanonicalAbsoluteFile(path: string, pathApi: PlatformPath): boolean {
+export function isCanonicalAbsoluteFile(path: string, pathApi: PlatformPath): boolean {
   if (!pathApi.isAbsolute(path) || pathApi.normalize(path) !== path || /[\\/]$/.test(path)) return false;
   const parent = pathApi.dirname(path);
   return isCanonicalAbsoluteDirectory(parent, pathApi)
