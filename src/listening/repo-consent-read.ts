@@ -86,7 +86,12 @@ export function readRepoDecision(
   const main = mainRepoRootOf(root) ?? root;
   const key = normalizeRepoRoot(main);
   if (key.length === 0) return { key, main, decision: "undecided" };
-  const value = readRawConsents(home)[key];
+  const raw = readRawConsents(home);
+  // The collector allows capture through the root's own grant or the main
+  // repo's, so status reports the same answer.
+  const own = normalizeRepoRoot(root);
+  if (own.length > 0 && raw[own] === true) return { key, main, decision: "allowed" };
+  const value = raw[key];
   return { key, main, decision: value === true ? "allowed" : value === false ? "declined" : "undecided" };
 }
 

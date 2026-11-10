@@ -147,6 +147,15 @@ test("repo consent: a worktree inherits its main repo decision", () => {
   assert.equal(readRepoDecision(wt, home).main, main);
 });
 
+test("repo consent: a worktree's own grant reads as allowed", () => {
+  const home = freshHome();
+  const { main, wt } = worktree();
+  writeFileSync(consentsPath(home), JSON.stringify({ [normalizeRepoRoot(wt)]: true }));
+  assert.equal(isRepoCaptureAllowed(wt, home), true);
+  assert.equal(readRepoDecision(wt, home).decision, "allowed");
+  assert.equal(readRepoDecision(wt, home).main, main);
+});
+
 test("repo consent: revoke at a worktree clears the main repo decision", () => {
   const home = freshHome();
   const { main, wt } = worktree();

@@ -29,7 +29,7 @@ import {
   PROPOSAL_MAX_OBJECT_STORE_BYTES_PER_REPO,
 } from "../listening/types.js";
 import { SetupUsageError, parseSetupArgs } from "../setup/parser.js";
-import { defaultAutoContext, runAutoCommand } from "../setup/auto/command.js";
+import { defaultAutoContext, runAutoSetup } from "../setup/auto/command.js";
 import { createPlatformServices, type PlatformServices } from "../setup/platform.js";
 import { processRunner, type ProcessRunner } from "../setup/process.js";
 import { createPromptPort, type PromptInput } from "../setup/prompt.js";
@@ -512,7 +512,9 @@ async function runRepoCaptureAction(
   detail(action === "allow-capture" ? `capture allowed: ${result.root ?? probe.root}` : `capture revoked: ${result.root ?? probe.root}`);
   if (action === "revoke-capture") {
     detail("History is kept. Revoking stops new capture only.");
-    detail(`Delete it with: rocky setup --repo ${result.root ?? probe.root} --purge-capture`);
+    // The listening store is per worktree, so purge must name the path given
+    // here; the decision root may be the main repository instead.
+    detail(`Delete it with: rocky setup --repo ${target} --purge-capture`);
   }
   return 0;
 }
@@ -784,7 +786,7 @@ export async function setup(argv: readonly string[], deps?: SetupDependencies): 
   if (argv[0] === "--auto") {
     // Hidden, prompt-free entry for the desktop app: one JSON object on
     // stdout, no parser, no prompt, and no harness executable.
-    return runAutoCommand(argv.slice(1), defaultAutoContext(), (json) => process.stdout.write(`${json}\n`));
+    return runAutoSetup(argv.slice(1), defaultAutoContext, (json) => process.stdout.write(`${json}\n`));
   }
   let options;
   try {

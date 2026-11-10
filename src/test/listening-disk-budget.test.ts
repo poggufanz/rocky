@@ -151,6 +151,27 @@ test("revoke keeps history and names the purge command", async () => {
   assert.equal(existsSync(repoDir(root, home)), true);
 });
 
+test("revoke at a worktree names the worktree for the purge hint", async (t) => {
+  const home = freshHome();
+  const main = gitRepo();
+  execFileSync(
+    "git",
+    ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "--allow-empty", "-m", "x"],
+    { cwd: main, stdio: "pipe" },
+  );
+  const wt = join(realpathSync(mkdtempSync(join(tmpdir(), "rocky-budget-wt-"))), "wt");
+  try {
+    execFileSync("git", ["worktree", "add", wt], { cwd: main, stdio: "pipe" });
+  } catch {
+    t.skip("git worktree is unavailable here");
+    return;
+  }
+  assert.equal(setRepoCapture(wt, true, { yes: true, actor: "cli", onRevoke: "delete" }, home).ok, true);
+  const out = await captureStderr(() => setup(["--repo", wt, "--revoke-capture", "--yes"], deps(home, true)));
+  assert.equal(out.code, 0);
+  assert.ok(out.stderr.includes(`Delete it with: rocky setup --repo ${wt} --purge-capture`), out.stderr);
+});
+
 test("purge-capture revokes consent and deletes history", async () => {
   const home = freshHome();
   const root = grantedRepo(home);

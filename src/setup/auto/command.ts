@@ -219,8 +219,10 @@ function executeAction(
         );
         if (!purged.ok) result.notes.push(purged.reason ?? "purge failed");
       } else if (parsed.action !== "status") {
+        // Revoke and decline act on the path the desk named, so a worktree
+        // store is cleared even when its own key, not the main key, is set.
         const changed = setRepoCapture(
-          before.main,
+          parsed.action === "allow" ? before.main : parsed.root,
           parsed.action === "allow",
           { yes: true, actor: "desk", onRevoke: "decline" },
           ctx.rockyHome,
