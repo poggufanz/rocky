@@ -1,5 +1,6 @@
 import { existsSync, lstatSync, realpathSync } from "node:fs";
 import { basename, join, posix, resolve, win32 } from "node:path";
+import { configuredRockyHome } from "../core/state-paths.js";
 import type {
   InspectionResult,
   McpRegistration,
@@ -852,7 +853,7 @@ export async function setup(argv: readonly string[], deps?: SetupDependencies): 
       exposure: options.exposure,
       nodePath: dependencies.nodePath,
       entryPath: dependencies.entryPath,
-      rockyHome: dependencies.rockyHome ?? process.env.ROCKY_HOME,
+      rockyHome: dependencies.rockyHome ?? configuredRockyHome(process.env),
       home: dependencies.platform.home,
       fileExists: dependencies.platform.fileExists,
     });

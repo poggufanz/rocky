@@ -15,12 +15,18 @@ export interface RockyPaths {
   state: string;
 }
 
+/** An empty ROCKY_HOME is a shell artefact, not a request to use the cwd. */
+export function configuredRockyHome(env: NodeJS.ProcessEnv): string | undefined {
+  const value = env.ROCKY_HOME;
+  return value === undefined || value === "" ? undefined : value;
+}
+
 export function resolveRockyPaths(
   env: NodeJS.ProcessEnv = process.env,
   fallbackHome = homedir(),
   cwd = process.cwd(),
 ): RockyPaths {
-  const configured = env.ROCKY_HOME ?? join(fallbackHome, ".rocky");
+  const configured = configuredRockyHome(env) ?? join(fallbackHome, ".rocky");
   const home = isAbsolute(configured) ? configured : resolve(cwd, configured);
   return {
     home,

@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import { dirname, isAbsolute, join, normalize, posix, resolve, win32 } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Exposure } from "../core/config-read.js";
+import { configuredRockyHome } from "../core/state-paths.js";
 import type { McpRegistration } from "./clients.js";
 
 export interface ResolveMcpRegistrationOptions {
@@ -55,7 +56,7 @@ export function resolveMcpRegistration(options: ResolveMcpRegistrationOptions): 
   const entry = requireExistingAbsolutePath(options.entryPath ?? defaultEntryPath(), "entry", fileExists);
   const cwd = options.cwd ?? process.cwd();
   const configuredHome = options.rockyHome
-    ?? options.env?.ROCKY_HOME
+    ?? configuredRockyHome(options.env ?? {})
     ?? join(options.home ?? homedir(), ".rocky");
   const rockyHome = resolveHome(configuredHome, cwd);
   const args = Object.freeze([entry, "mcp"]);
