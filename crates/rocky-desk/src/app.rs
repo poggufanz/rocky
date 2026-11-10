@@ -167,6 +167,10 @@ struct DeskView {
     /// The tray menu must be rebuilt for the new language. Done by the pump
     /// outside the view lease, since the builder reads this entity.
     menu_stale: bool,
+    /// The user has opened the window since start, which ends the `--tray`
+    /// start's minimize retries. Only that retry reads it.
+    #[cfg(not(windows))]
+    user_shown: bool,
 }
 
 impl DeskView {
@@ -188,6 +192,19 @@ impl DeskView {
                 self.log.once("set_tooltip", &e);
             }
         }
+    }
+
+    /// Close the tray icon and end the process. The daemon keeps running.
+    /// Taking the tray first means nothing refreshes it after the close. Safe
+    /// inside the view lease: closing a tray unregisters it and never runs
+    /// the menu builder that reads this view.
+    fn quit(&mut self, cx: &mut Context<Self>) {
+        if let Some(tray) = self.tray.take()
+            && let Err(e) = tray.close(cx)
+        {
+            self.log.once("tray_close", &e);
+        }
+        cx.quit();
     }
 
     fn next_id(&mut self) -> u64 {
@@ -587,7 +604,16 @@ impl Render for DeskView {
             root = root.child(strip);
         }
         if self.ctl.view == View::Settings {
-            return root.child(self.settings_panel(cx));
+            // Outside the panel, which returns early while settings are
+            // unknown: Quit must stay reachable when the daemon is down.
+            return root.child(self.settings_panel(cx)).child(
+                div()
+                    .id(SharedString::from("quit"))
+                    .text_sm()
+                    .cursor_pointer()
+                    .child(tr(lang, &Msg::MenuQuit))
+                    .on_click(cx.listener(|this, _, _, cx| this.quit(cx))),
+            );
         }
         let groups = self.ctl.model.groups(now_ms());
         if groups.is_empty() {
@@ -684,7 +710,11 @@ impl Render for DeskView {
 /// Restore and focus the desk window. Call it outside any `view.update`: the
 /// window's root view is `view`, so updating the window inside that lease
 /// double-borrows the entity and panics, which aborts inside the tray callback.
+/// Every user path that opens the window comes through here.
 fn show_window(view: &Entity<DeskView>, cx: &mut App) {
+    // Before the window shows, so a pending `--tray` retry cannot undo it.
+    #[cfg(not(windows))]
+    view.update(cx, |v, _| v.user_shown = true);
     if let Some(handle) = view.read(cx).window {
         let _ = handle.update(cx, |_, window, _| {
             set_visible(window, true);
@@ -747,6 +777,52 @@ fn chip(s: Status, lang: UiLang) -> Div {
         .bg(bg)
         .text_xs()
         .child(tr(lang, &Msg::Status(s)))
+}
+
+/// Offsets from start, in milliseconds, at which a `--tray` start minimizes
+/// the window again. A window manager that starts after the desk, as at
+/// login, can drop the first request and leave the window showing.
+#[cfg(not(windows))]
+const TRAY_MINIMIZE_RETRY_MS: [u64; 3] = [1_000, 3_000, 8_000];
+
+/// Minimize the window again at each `TRAY_MINIMIZE_RETRY_MS` offset. Stops at
+/// the first offset where the user has opened the window, the view is gone, or
+/// the window update fails.
+#[cfg(not(windows))]
+fn retry_tray_minimize(view: &Entity<DeskView>, window: WindowHandle<DeskView>, cx: &mut App) {
+    // ponytail: fixed schedule; a taskbar restore in the first 8 s is minimized once more. Upgrade: wait for _NET_SUPPORTING_WM_CHECK on the root window.
+    cx.spawn({
+        let view = view.downgrade();
+        async move |cx| {
+            // Offsets count from start, so each wait is the gap since the previous one.
+            let mut waited = 0;
+            for at in TRAY_MINIMIZE_RETRY_MS {
+                cx.background_executor()
+                    .timer(Duration::from_millis(at.saturating_sub(waited)))
+                    .await;
+                waited = at;
+                let again = cx
+                    .update(|cx| {
+                        let Some(v) = view.upgrade() else {
+                            return false;
+                        };
+                        // Read the flag and drop the borrow first: updating
+                        // the window leases this entity, its root view.
+                        if v.read(cx).user_shown {
+                            return false;
+                        }
+                        window
+                            .update(cx, |_, window, _| window.minimize_window())
+                            .is_ok()
+                    })
+                    .unwrap_or(false);
+                if !again {
+                    break;
+                }
+            }
+        }
+    })
+    .detach();
 }
 
 pub fn run(rocky_home: PathBuf, opts: RunOptions) {
@@ -821,6 +897,8 @@ pub fn run(rocky_home: PathBuf, opts: RunOptions) {
             show_requested: false,
             notices_ready: false,
             menu_stale: false,
+            #[cfg(not(windows))]
+            user_shown: false,
         });
 
         let window = cx
@@ -854,6 +932,7 @@ pub fn run(rocky_home: PathBuf, opts: RunOptions) {
         {
             if opts.tray {
                 let _ = window.update(cx, |_, window, _| window.minimize_window());
+                retry_tray_minimize(&view, window, cx);
             }
         }
         // Closing the window hides it: veto the close and minimize instead.
@@ -945,10 +1024,7 @@ pub fn run(rocky_home: PathBuf, opts: RunOptions) {
         cx.on_action({
             let view = view.clone();
             move |_: &QuitDesk, cx: &mut App| {
-                if let Some(tray) = view.read(cx).tray.clone() {
-                    let _ = tray.close(cx);
-                }
-                cx.quit();
+                view.update(cx, |v, cx| v.quit(cx));
             }
         });
 

@@ -36,7 +36,7 @@ import {
 } from "../setup/agent-hooks.js";
 import { SetupUsageError, parseSetupArgs } from "../setup/parser.js";
 import { createPlatformServices } from "../setup/platform.js";
-import { setup, type SetupDependencies } from "../commands/setup.js";
+import { HOOK_INSTALL_YES_NOTE, setup, type SetupDependencies } from "../commands/setup.js";
 
 const packageRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
@@ -444,4 +444,103 @@ test("agent hooks: install, status, uninstall each print the resolved settings p
     assert.ok(output.stderr.includes(line), `${argv.join(" ")}\n${output.stderr}`);
   }
   assert.equal(existsSync(fallback), false);
+});
+
+// --- CLI level: --yes does not answer the hook install question -----------
+//
+// A hook install asks in a terminal and takes no other answer. From a script
+// there is no terminal, so --yes would look accepted while the install is
+// declined without a word. The note says so, and the question is still asked.
+
+function decliningDependencies(
+  home: string,
+  hookBin?: string,
+): { dependencies: SetupDependencies; asked: () => number } {
+  let asked = 0;
+  return {
+    dependencies: {
+      ...commandDependencies(home, {}, hookBin),
+      confirmation: {
+        async confirm() {
+          asked += 1;
+          return false;
+        },
+      },
+    },
+    asked: () => asked,
+  };
+}
+
+test("desk hooks: --yes prints the install note and still asks", async (t) => {
+  const { home, fallback } = commandFixture(t);
+  const hookBin = hookBinFixture(t);
+  const { dependencies, asked } = decliningDependencies(home, hookBin);
+
+  const output = await captureStderr(() => setup(["--desk-hooks", hookBin, "--yes"], dependencies));
+
+  assert.equal(output.code, 1, output.stderr);
+  assert.ok(output.stderr.includes(HOOK_INSTALL_YES_NOTE), output.stderr);
+  assert.ok(output.stderr.includes("claude-code desk hooks: declined"), output.stderr);
+  assert.equal(asked(), 1);
+  assert.equal(existsSync(fallback), false);
+});
+
+test("desk hooks: install without --yes prints no install note", async (t) => {
+  const { home } = commandFixture(t);
+  const hookBin = hookBinFixture(t);
+  const { dependencies, asked } = decliningDependencies(home, hookBin);
+
+  const output = await captureStderr(() => setup(["--desk-hooks", hookBin], dependencies));
+
+  assert.equal(output.code, 1, output.stderr);
+  assert.ok(!output.stderr.includes(HOOK_INSTALL_YES_NOTE), output.stderr);
+  assert.equal(asked(), 1);
+});
+
+test("desk hooks: --yes with uninstall prints no install note", async (t) => {
+  const { home } = commandFixture(t);
+  const { dependencies, asked } = decliningDependencies(home);
+
+  const output = await captureStderr(() => setup(["--uninstall-desk-hooks", "--yes"], dependencies));
+
+  assert.equal(output.code, 0, output.stderr);
+  assert.ok(output.stderr.includes("claude-code desk hooks: unchanged"), output.stderr);
+  assert.ok(!output.stderr.includes(HOOK_INSTALL_YES_NOTE), output.stderr);
+  assert.equal(asked(), 0);
+});
+
+test("agent hooks: --yes prints the install note and still asks", async (t) => {
+  const { home, fallback } = commandFixture(t);
+  const { dependencies, asked } = decliningDependencies(home);
+
+  const output = await captureStderr(() => setup(["--agent-hooks", "--yes"], dependencies));
+
+  assert.equal(output.code, 1, output.stderr);
+  assert.ok(output.stderr.includes(HOOK_INSTALL_YES_NOTE), output.stderr);
+  assert.ok(output.stderr.includes("claude-code agent hooks: declined"), output.stderr);
+  assert.equal(asked(), 1);
+  assert.equal(existsSync(fallback), false);
+});
+
+test("agent hooks: install without --yes prints no install note", async (t) => {
+  const { home } = commandFixture(t);
+  const { dependencies, asked } = decliningDependencies(home);
+
+  const output = await captureStderr(() => setup(["--agent-hooks"], dependencies));
+
+  assert.equal(output.code, 1, output.stderr);
+  assert.ok(!output.stderr.includes(HOOK_INSTALL_YES_NOTE), output.stderr);
+  assert.equal(asked(), 1);
+});
+
+test("agent hooks: --yes with uninstall prints no install note", async (t) => {
+  const { home } = commandFixture(t);
+  const { dependencies, asked } = decliningDependencies(home);
+
+  const output = await captureStderr(() => setup(["--uninstall-agent-hooks", "--yes"], dependencies));
+
+  assert.equal(output.code, 0, output.stderr);
+  assert.ok(output.stderr.includes("claude-code agent hooks: unchanged"), output.stderr);
+  assert.ok(!output.stderr.includes(HOOK_INSTALL_YES_NOTE), output.stderr);
+  assert.equal(asked(), 0);
 });
