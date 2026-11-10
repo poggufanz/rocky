@@ -35,7 +35,7 @@ export function toOpencodeEntry(registration: McpRegistration): Record<string, u
   };
 }
 
-function storedRegistration(entry: unknown): McpRegistration | undefined {
+export function fromOpencodeEntry(entry: unknown): McpRegistration | undefined {
   if (typeof entry !== "object" || entry === null) return undefined;
   const record = entry as Record<string, unknown>;
   if (!Array.isArray(record.command) || !record.command.every((a) => typeof a === "string")) return undefined;
@@ -105,7 +105,7 @@ export function createHarnessOpencodeAdapter(deps: HarnessOpencodeDeps): SetupCl
     }
     const entry = (container as Record<string, unknown> | undefined)?.rocky;
     if (entry === undefined) return { state: "absent" };
-    const stored = storedRegistration(entry);
+    const stored = fromOpencodeEntry(entry);
     if (stored !== undefined && sameRegistration(stored, registration)) {
       return { state: "identical" };
     }
@@ -154,7 +154,7 @@ export function createHarnessOpencodeAdapter(deps: HarnessOpencodeDeps): SetupCl
       }
       const base = prior.status === "missing" ? {} : prior.value;
       if (inspection.state === "conflict" && replace) {
-        const stored = storedRegistration((base.mcp as Record<string, unknown> | undefined)?.rocky);
+        const stored = fromOpencodeEntry((base.mcp as Record<string, unknown> | undefined)?.rocky);
         if (stored === undefined || stored.command !== registration.command) {
           return { client: "opencode" as SetupResult["client"], status: "failed", detail: "refusing to replace a rocky entry not owned by Rocky; resolve manually" };
         }
@@ -180,7 +180,7 @@ export function createHarnessOpencodeAdapter(deps: HarnessOpencodeDeps): SetupCl
       if (prior.status === "invalid") {
         return { client: "opencode" as SetupResult["client"], status: "failed", detail: `OpenCode config is unreadable: ${configPath}` };
       }
-      const stored = storedRegistration((prior.value.mcp as Record<string, unknown> | undefined)?.rocky);
+      const stored = fromOpencodeEntry((prior.value.mcp as Record<string, unknown> | undefined)?.rocky);
       if (stored === undefined) {
         return (prior.value.mcp as Record<string, unknown> | undefined)?.rocky !== undefined
           ? { client: "opencode" as SetupResult["client"], status: "failed", detail: "refusing to remove a rocky entry not owned by Rocky" }
