@@ -3,14 +3,14 @@
  * or daemon calls. It never reads stdin, prints exactly one JSON object to
  * stdout, and writes only under an approved consent record (except `remove`).
  */
-import { existsSync } from "node:fs";
+import { existsSync, lstatSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { resolveRockyPaths } from "../../core/state-paths.js";
 import { purgeRepoCapture, setRepoCapture } from "../../listening/consent.js";
 import { readRepoDecision } from "../../listening/repo-consent-read.js";
 import { defaultAgentHooksEntryPath } from "../agent-hooks.js";
 import { resolveMcpRegistration } from "../registration.js";
-import { validateConfigLocation, type DetectEnv } from "./detect.js";
+import { detectHarnesses, validateConfigLocation, type DetectEnv } from "./detect.js";
 import {
   applyAll,
   AUTO_MCP_HARNESSES,
@@ -129,6 +129,31 @@ export async function runAutoCommand(
   return 0;
 }
 
+/**
+ * Build the context before the command runs. A failure here is still owed to
+ * the caller as one result object, because a daemon parses stdout, not stderr.
+ */
+export async function runAutoSetup(
+  argv: readonly string[],
+  buildContext: () => AutoContext,
+  out: (json: string) => void,
+): Promise<number> {
+  let ctx: AutoContext;
+  try {
+    ctx = buildContext();
+  } catch (error) {
+    out(JSON.stringify({
+      v: 1,
+      action: parseAutoArgs(argv)?.label ?? argv.filter((arg) => arg !== JSON_FLAG).join(" "),
+      consent: "none",
+      targets: [],
+      notes: [`internal error: ${error instanceof Error ? error.message : String(error)}`],
+    }));
+    return 1;
+  }
+  return runAutoCommand(argv, ctx, out);
+}
+
 function executeAction(
   parsed: Parsed,
   ctx: AutoContext,
@@ -205,6 +230,11 @@ function executeAction(
         },
       };
       writeConsentRecord(ctx.rockyHome, next);
+      if (!detectHarnesses(ctx.detect).some((harness) => harness.id === parsed.harness)) {
+        // The location is valid and kept for later, but this run cannot write
+        // anything for a harness detection does not report.
+        result.notes.push(`harness not detected: ${parsed.harness}`);
+      }
       result.targets = applyAll(ctx, next);
       break;
     }
@@ -235,6 +265,16 @@ function executeAction(
   }
 }
 
+/** The desk hook binary is usable only as a regular file; a symlink is not one. */
+export function deskHookBinFor(rockyHome: string, platform: NodeJS.Platform): string | undefined {
+  const bin = hookBinPath(rockyHome, platform);
+  try {
+    return lstatSync(bin).isFile() ? bin : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export function defaultAutoContext(): AutoContext {
   const rockyHome = resolveRockyPaths().home;
   const home = homedir();
@@ -245,14 +285,21 @@ export function defaultAutoContext(): AutoContext {
     platform: process.platform,
     appData: process.env.APPDATA,
     fileExists: existsSync,
+    isFile: (path) => {
+      try {
+        return statSync(path).isFile();
+      } catch {
+        return false;
+      }
+    },
   };
-  const deskHookBin = hookBinPath(rockyHome, process.platform);
+  const deskHookBin = deskHookBinFor(rockyHome, process.platform);
   return {
     rockyHome,
     detect,
-    paths: existsSync(deskHookBin)
-      ? { nodePath: process.execPath, entryPath, deskHookBin }
-      : { nodePath: process.execPath, entryPath },
+    paths: deskHookBin === undefined
+      ? { nodePath: process.execPath, entryPath }
+      : { nodePath: process.execPath, entryPath, deskHookBin },
     registration: resolveMcpRegistration({
       exposure: "sanitized",
       nodePath: process.execPath,

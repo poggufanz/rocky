@@ -10,6 +10,8 @@ import {
   readFileSync,
   realpathSync,
   rmSync,
+  statSync,
+  symlinkSync,
   writeFileSync,
   type Dirent,
 } from "node:fs";
@@ -19,11 +21,14 @@ import { fileURLToPath } from "node:url";
 import { ROCKY_HOOK_PROTOCOL_VERSION } from "../commands/hook.js";
 import { addHookBlockBytes, removeHookBlockBytes } from "../core/hook-block.js";
 import { hasOwnedAgentHooks, installClaudeAgentHooks, rockyHookCommand } from "../setup/agent-hooks.js";
-import { runAutoCommand } from "../setup/auto/command.js";
+import { deskHookBinFor, runAutoCommand, runAutoSetup } from "../setup/auto/command.js";
 import type { AutoContext } from "../setup/auto/engine.js";
+import { mcpTargets } from "../setup/auto/mcp.js";
 import type { ShellHookPort } from "../setup/auto/shell.js";
-import { consentFile, readConsentRecord, readExpected, writeConsentRecord } from "../setup/auto/state.js";
-import { readRepoDecision } from "../listening/repo-consent-read.js";
+import { consentFile, hookBinPath, readConsentRecord, readExpected, writeConsentRecord } from "../setup/auto/state.js";
+import { claudeCodeMcpConfigPath } from "../setup/harness-claude-code.js";
+import { isRepoCaptureAllowed, normalizeRepoRoot, readRepoDecision } from "../listening/repo-consent-read.js";
+import { consentsPath } from "../listening/store-paths.js";
 
 interface Fixture {
   root: string;
@@ -86,6 +91,14 @@ function fakeShellPort(home: string, rockyHome: string): ShellHookPort {
   };
 }
 
+function isFile(path: string): boolean {
+  try {
+    return statSync(path).isFile();
+  } catch {
+    return false;
+  }
+}
+
 function fixture(t: test.TestContext): Fixture {
   const root = realpathSync.native(mkdtempSync(join(tmpdir(), "rocky-auto-command-")));
   t.after(() => rmSync(root, { recursive: true, force: true }));
@@ -99,7 +112,7 @@ function fixture(t: test.TestContext): Fixture {
     rh,
     ctx: {
       rockyHome: rh,
-      detect: { home, env: {}, platform: process.platform, fileExists: existsSync },
+      detect: { home, env: {}, platform: process.platform, fileExists: existsSync, isFile },
       paths: { nodePath: process.execPath, entryPath: join(root, "entry.js") },
       registration: {
         name: "rocky",
@@ -144,6 +157,22 @@ async function run(f: Fixture, argv: string[]): Promise<RunResult> {
 
 function states(value: AutoJson): string[] {
   return (value.targets ?? []).map((target) => target.state);
+}
+
+/** A worktree whose `.git` file names a gitdir under a fake main repo. */
+function fakeWorktree(f: Fixture): { main: string; worktree: string } {
+  const main = join(f.root, "main");
+  const worktree = join(f.root, "worktree");
+  mkdirSync(main);
+  mkdirSync(join(main, ".git"));
+  mkdirSync(worktree);
+  writeFileSync(join(worktree, ".git"), `gitdir: ${join(main, ".git", "worktrees", "wt")}\n`);
+  return { main, worktree };
+}
+
+function seedConsents(f: Fixture, values: Record<string, boolean>): void {
+  mkdirSync(join(f.rh, "listening"), { recursive: true });
+  writeFileSync(consentsPath(f.rh), JSON.stringify(values));
 }
 
 function claudeSettings(f: Fixture): string {
@@ -302,6 +331,99 @@ test("auto command: repo decline on a worktree stores false on the main repo", a
   assert.equal(res.json.repo?.main, mainDecision.main);
 });
 
+test("auto command: repo status honors a worktree's own grant and revoke clears it", async (t) => {
+  const f = fixture(t);
+  const { main, worktree } = fakeWorktree(f);
+  seedConsents(f, { [normalizeRepoRoot(worktree)]: true });
+  const status = await run(f, ["repo", "status", worktree, "--json"]);
+  assert.equal(status.code, 0);
+  assert.equal(status.json.repo?.decision, "allowed");
+  assert.equal(status.json.repo?.key, normalizeRepoRoot(main));
+  assert.equal(isRepoCaptureAllowed(worktree, f.rh), true);
+
+  const revoked = await run(f, ["repo", "revoke", worktree, "--json"]);
+  assert.equal(revoked.code, 0);
+  assert.notEqual(revoked.json.repo?.decision, "allowed");
+  assert.equal(isRepoCaptureAllowed(worktree, f.rh), false);
+});
+
+test("auto command: repo decline at a worktree stores false on the main key", async (t) => {
+  const f = fixture(t);
+  const { main, worktree } = fakeWorktree(f);
+  seedConsents(f, { [normalizeRepoRoot(worktree)]: true });
+  const declined = await run(f, ["repo", "decline", worktree, "--json"]);
+  assert.equal(declined.code, 0);
+  assert.equal(declined.json.repo?.decision, "declined");
+  assert.equal(readRepoDecision(main, f.rh).decision, "declined");
+  assert.equal(isRepoCaptureAllowed(worktree, f.rh), false);
+});
+
+test("auto command: config-dir claude-code registers the profile MCP config", async (t) => {
+  const f = fixture(t);
+  mkdirSync(join(f.home, ".claude"));
+  const profile = join(f.home, "profile");
+  mkdirSync(profile);
+  writeFileSync(join(profile, "settings.json"), "{}");
+  await run(f, ["consent", "approve", "--json"]);
+  const recorded = await run(f, ["config-dir", "claude-code", profile, "--json"]);
+  assert.equal(recorded.code, 0);
+  assert.deepEqual(recorded.json.notes, []);
+
+  const mcpPath = join(profile, ".claude.json");
+  const mcpValue = JSON.parse(readFileSync(mcpPath, "utf8")) as { mcpServers?: Record<string, unknown> };
+  assert.ok(mcpValue.mcpServers?.rocky);
+  const plan = await run(f, ["plan", "--json"]);
+  assert.ok((plan.json.targets ?? []).some((target) => target.path === mcpPath && target.kind === "mcp"));
+
+  const [defaultTarget] = mcpTargets("claude-code", f.ctx.detect, []);
+  assert.equal(defaultTarget?.path, claudeCodeMcpConfigPath(f.ctx.detect.env, f.home));
+
+  const removed = await run(f, ["remove", "--json"]);
+  assert.equal(removed.code, 0);
+  const after = JSON.parse(readFileSync(mcpPath, "utf8")) as { mcpServers?: Record<string, unknown> };
+  assert.equal(after.mcpServers?.rocky, undefined);
+});
+
+test("auto command: config-dir for an undetected harness adds a note", async (t) => {
+  const f = fixture(t);
+  mkdirSync(join(f.home, ".claude"));
+  await run(f, ["consent", "approve", "--json"]);
+  const codexHome = join(f.home, "codex-home");
+  mkdirSync(codexHome);
+  writeFileSync(join(codexHome, "config.toml"), "");
+  const res = await run(f, ["config-dir", "codex", codexHome, "--json"]);
+  assert.equal(res.code, 0);
+  assert.ok((res.json.notes ?? []).includes("harness not detected: codex"), JSON.stringify(res.json.notes));
+});
+
+test("auto command: a recorded location replaced by a symlink is refused on apply", async (t) => {
+  const f = fixture(t);
+  mkdirSync(join(f.home, ".claude"));
+  const profile = join(f.home, "profile");
+  mkdirSync(profile);
+  writeFileSync(join(profile, "settings.json"), "{}");
+  await run(f, ["consent", "approve", "--json"]);
+  await run(f, ["config-dir", "claude-code", profile, "--json"]);
+
+  const outside = join(f.root, "outside");
+  mkdirSync(outside);
+  writeFileSync(join(outside, "settings.json"), "{}");
+  rmSync(profile, { recursive: true, force: true });
+  try {
+    symlinkSync(outside, profile, "junction");
+  } catch {
+    t.skip("the platform cannot create a directory symlink");
+    return;
+  }
+
+  const res = await run(f, ["apply", "--json"]);
+  const recorded = (res.json.targets ?? []).filter((target) => target.path.startsWith(profile));
+  assert.ok(recorded.length >= 2, JSON.stringify(recorded));
+  assert.ok(recorded.every((target) => target.state === "refused"), JSON.stringify(recorded));
+  assert.equal(readFileSync(join(outside, "settings.json"), "utf8"), "{}");
+  assert.equal(existsSync(join(outside, ".claude.json")), false);
+});
+
 test("auto command: consent approve keeps a valid record's scope fields", async (t) => {
   const f = fixture(t);
   writeConsentRecord(f.rh, {
@@ -336,6 +458,72 @@ test("auto command: remove over an invalid record writes removed with the defaul
   assert.deepEqual(record.record.harness_off, []);
   assert.equal(record.record.shell_hook, true);
   assert.deepEqual(record.record.config_dirs, {});
+});
+
+test("auto command: an unusable default Claude settings path is reported as refused", async (t) => {
+  const f = fixture(t);
+  mkdirSync(join(f.home, ".claude"));
+  f.ctx.detect = { ...f.ctx.detect, env: { CLAUDE_CONFIG_DIR: "" } };
+  const res = await run(f, ["plan", "--json"]);
+  assert.equal(res.code, 0);
+  const hooks = (res.json.targets ?? []).filter(
+    (target) => target.harness === "claude-code" && target.kind === "agent-hooks",
+  );
+  assert.ok(hooks.length >= 1, JSON.stringify(res.json.targets));
+  assert.ok(hooks.every((target) => target.state === "refused" && target.detail === "empty"));
+});
+
+test("auto command: remove reports ok for absent targets instead of refusals", async (t) => {
+  const f = fixture(t);
+  const res = await run(f, ["remove", "--json"]);
+  assert.equal(res.code, 0);
+  const mcp = (res.json.targets ?? []).filter((target) => target.kind === "mcp");
+  assert.ok(mcp.length >= 5, JSON.stringify(mcp));
+  assert.ok(mcp.every((target) => target.state === "ok"), JSON.stringify(mcp));
+  const settings = (res.json.targets ?? []).filter(
+    (target) => target.harness === "claude-code" && target.kind !== "mcp",
+  );
+  assert.deepEqual(settings.map((target) => target.state), ["ok", "ok"]);
+  assert.equal(existsSync(join(f.home, ".claude")), false);
+  assert.equal(existsSync(join(f.home, ".codex")), false);
+});
+
+test("auto setup: a context-build failure still emits one result object", async () => {
+  const chunks: string[] = [];
+  const code = await runAutoSetup(
+    ["apply", "--json"],
+    () => {
+      throw new Error("boom");
+    },
+    (value) => chunks.push(value),
+  );
+  assert.equal(code, 1);
+  assert.equal(chunks.length, 1);
+  const json = JSON.parse(chunks[0] ?? "") as AutoJson;
+  assert.equal(json.v, 1);
+  assert.equal(json.action, "apply");
+  assert.equal(json.consent, "none");
+  assert.deepEqual(json.targets, []);
+  assert.deepEqual(json.notes, ["internal error: boom"]);
+});
+
+test("auto command: the desk hook binary is used only when it is a regular file", (t) => {
+  const f = fixture(t);
+  const bin = hookBinPath(f.rh, process.platform);
+  mkdirSync(bin, { recursive: true });
+  assert.equal(deskHookBinFor(f.rh, process.platform), undefined);
+  rmSync(bin, { recursive: true, force: true });
+  writeFileSync(bin, "");
+  assert.equal(deskHookBinFor(f.rh, process.platform), bin);
+  const real = join(f.rh, "bin", "rocky-hook-real");
+  writeFileSync(real, "");
+  try {
+    symlinkSync(real, bin);
+  } catch {
+    t.skip("the platform cannot create a file symlink");
+    return;
+  }
+  assert.equal(deskHookBinFor(f.rh, process.platform), undefined);
 });
 
 test("auto command: malformed argv exits 2 with a usage error object", async (t) => {
